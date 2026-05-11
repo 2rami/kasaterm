@@ -1,0 +1,10 @@
+[package]
+name = "tmux-bridge"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+vt100.workspace = true
+crossbeam-channel.workspace = true
+anyhow.workspace = true
