@@ -72,7 +72,17 @@ impl TmuxSession {
             .unwrap_or(false);
 
         let mut cmd = Command::new("tmux");
-        cmd.args(["-C", "new-session", "-A", "-s", &session_name]);
+        cmd.args([
+            "-C",
+            "new-session",
+            "-A",
+            "-s",
+            &session_name,
+            "-x",
+            "200",
+            "-y",
+            "60",
+        ]);
         if let Some(p) = opts.cwd.filter(|s| !s.is_empty()) {
             cmd.arg("-c").arg(p);
         }
