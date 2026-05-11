@@ -396,10 +396,10 @@ impl App {
                             FloatingPane {
                                 pane_id: pid.clone(),
                                 title: pid.clone(),
-                                x: render::SIDEBAR_W + 180.0 + step * 30.0,
+                                x: render::SIDEBAR_W + 130.0 + step * 30.0,
                                 y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
-                                w: 100.0 * render::CELL_W,
-                                h: 30.0 * render::CELL_H,
+                                w: 92.0 * render::CELL_W,
+                                h: 28.0 * render::CELL_H,
                             },
                         );
                     }
