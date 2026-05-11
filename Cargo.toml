@@ -6,6 +6,7 @@ members = [
     "spikes/egui-term",
     "spikes/gpui-term",
     "spikes/warpui-term",
+    "spikes/winit-ime-test",
 ]
 
 [workspace.package]

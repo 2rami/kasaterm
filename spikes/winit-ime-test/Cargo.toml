@@ -1,0 +1,10 @@
+[package]
+name = "winit-ime-test"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+tmux-bridge.workspace = true
