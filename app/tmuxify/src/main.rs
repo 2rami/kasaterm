@@ -398,8 +398,8 @@ impl App {
                                 title: pid.clone(),
                                 x: render::SIDEBAR_W + 60.0 + step * 30.0,
                                 y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
-                                w: 80.0 * render::CELL_W,
-                                h: 24.0 * render::CELL_H,
+                                w: 100.0 * render::CELL_W,
+                                h: 30.0 * render::CELL_H,
                             },
                         );
                     }
@@ -1321,14 +1321,14 @@ fn default_icons() -> Vec<DesktopIcon> {
     v.push(DesktopIcon {
         label: "Home".into(),
         cwd: home.clone(),
-        x: render::SIDEBAR_W + 40.0,
+        x: render::SIDEBAR_W + 80.0,
         y: render::SESSION_BAR_HEIGHT + 40.0,
     });
     if std::path::Path::new(&projects).exists() {
         v.push(DesktopIcon {
             label: "projects".into(),
             cwd: projects,
-            x: render::SIDEBAR_W + 40.0,
+            x: render::SIDEBAR_W + 80.0,
             y: render::SESSION_BAR_HEIGHT + 130.0,
         });
     }
