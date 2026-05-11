@@ -20,6 +20,7 @@ use wgpu::{
 };
 use winit::window::Window;
 
+use crate::quad::{QuadInstance, QuadRenderer};
 use crate::{FloatingWindow, PaneGrid};
 
 const FONT_SIZE: f32 = 14.0;
@@ -52,6 +53,7 @@ pub struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     viewport: Viewport,
+    quads: QuadRenderer,
     width: u32,
     height: u32,
 }
@@ -127,6 +129,7 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
         let font_system = FontSystem::new();
         let swash = SwashCache::new();
+        let quads = QuadRenderer::new(&device, format, width as f32, height as f32)?;
 
         Ok(Self {
             surface,
@@ -138,6 +141,7 @@ impl Renderer {
             atlas,
             text_renderer,
             viewport,
+            quads,
             width,
             height,
         })
@@ -149,6 +153,7 @@ impl Renderer {
         self.width = w.get();
         self.height = h.get();
         self.surface.configure(&self.device, &self.config);
+        self.quads.resize(&self.queue, w.get() as f32, h.get() as f32);
     }
 
     pub fn render(
@@ -167,6 +172,7 @@ impl Renderer {
             color: GColor,
         }
         let mut built: Vec<Built> = Vec::new();
+        let mut quads: Vec<QuadInstance> = Vec::new();
 
         // Iterate windows so the active one renders last (on top, in text-
         // overlap terms). BTreeMap order is stable by id.
@@ -175,6 +181,57 @@ impl Renderer {
 
         for fw in order {
             let is_active = active_window == Some(&fw.window_id);
+
+            // Window chrome: body bg, title bg, 1px border, resize handle.
+            let border_color = if is_active {
+                [0.45, 0.55, 0.75, 1.0]
+            } else {
+                [0.20, 0.22, 0.27, 1.0]
+            };
+            let title_bg = if is_active {
+                [0.18, 0.22, 0.30, 1.0]
+            } else {
+                [0.14, 0.16, 0.20, 1.0]
+            };
+            let body_bg = [0.12, 0.13, 0.16, 1.0];
+            // Body fill.
+            quads.push(QuadInstance {
+                rect: [fw.x, fw.y, fw.w, fw.h],
+                color: body_bg,
+            });
+            // Title bar fill (overlay top strip).
+            quads.push(QuadInstance {
+                rect: [fw.x, fw.y, fw.w, TITLE_HEIGHT],
+                color: title_bg,
+            });
+            // 1px border (top, bottom, left, right).
+            let b = 1.0;
+            quads.push(QuadInstance {
+                rect: [fw.x, fw.y, fw.w, b],
+                color: border_color,
+            });
+            quads.push(QuadInstance {
+                rect: [fw.x, fw.y + fw.h - b, fw.w, b],
+                color: border_color,
+            });
+            quads.push(QuadInstance {
+                rect: [fw.x, fw.y, b, fw.h],
+                color: border_color,
+            });
+            quads.push(QuadInstance {
+                rect: [fw.x + fw.w - b, fw.y, b, fw.h],
+                color: border_color,
+            });
+            // Resize handle (bottom-right 14x14).
+            quads.push(QuadInstance {
+                rect: [fw.x + fw.w - 14.0, fw.y + fw.h - 14.0, 14.0, 14.0],
+                color: if is_active {
+                    [0.45, 0.55, 0.75, 0.5]
+                } else {
+                    [0.30, 0.32, 0.38, 0.5]
+                },
+            });
+
             // Title.
             let title_text = if is_active {
                 format!("● {}", fw.title)
@@ -324,7 +381,7 @@ impl Renderer {
             .create_command_encoder(&CommandEncoderDescriptor { label: None });
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("text-pass"),
+                label: Some("scene-pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -343,6 +400,9 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            // Solid window chrome first, text on top.
+            self.quads
+                .draw(&self.device, &self.queue, &mut pass, &quads);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .map_err(|e| anyhow!("render: {e:?}"))?;

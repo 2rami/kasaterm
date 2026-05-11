@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -23,6 +24,10 @@ pub struct TmuxSession {
     pub session_name: String,
     pub events: Receiver<TmuxEvent>,
     pub screens: Receiver<ScreenUpdate>,
+    /// Lines collected between %begin..%end of commands sent via `send_query`.
+    /// One Vec<String> per query, in send order.
+    pub queries: Receiver<Vec<String>>,
+    pending_queries: Arc<AtomicU32>,
 }
 
 pub struct StartOptions<'a> {
@@ -75,8 +80,16 @@ impl TmuxSession {
 
         let (event_tx, event_rx) = unbounded::<TmuxEvent>();
         let (screen_tx, screen_rx) = unbounded::<ScreenUpdate>();
+        let (query_tx, query_rx) = unbounded::<Vec<String>>();
+        let pending_queries = Arc::new(AtomicU32::new(0));
 
-        spawn_reader(stdout, parsers.clone(), event_tx);
+        spawn_reader(
+            stdout,
+            parsers.clone(),
+            event_tx,
+            query_tx,
+            pending_queries.clone(),
+        );
         spawn_flusher(parsers.clone(), prev_rows, screen_tx, opts.flush_interval);
 
         if !session_exists {
@@ -96,7 +109,16 @@ impl TmuxSession {
             session_name,
             events: event_rx,
             screens: screen_rx,
+            queries: query_rx,
+            pending_queries,
         })
+    }
+
+    /// Send a tmux command whose stdout response we want collected. The
+    /// response (lines between %begin..%end) arrives on `queries`.
+    pub fn send_query(&self, cmd: &str) -> Result<()> {
+        self.pending_queries.fetch_add(1, Ordering::SeqCst);
+        self.send_cmd(cmd)
     }
 
     pub fn send_cmd(&self, cmd: &str) -> Result<()> {
@@ -134,9 +156,15 @@ fn spawn_reader(
     stdout: std::process::ChildStdout,
     parsers: ParserMap,
     events: Sender<TmuxEvent>,
+    queries: Sender<Vec<String>>,
+    pending_queries: Arc<AtomicU32>,
 ) {
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        // While a %begin..%end pair is open and a query is pending, we
+        // capture NonProtocolLine entries here instead of forwarding them
+        // through the normal events channel.
+        let mut capture: Option<Vec<String>> = None;
         for line in reader.lines() {
             let Ok(line) = line else { break };
             let event = parse_line(&line);
@@ -147,6 +175,28 @@ fn spawn_reader(
                         .entry(pane_id.clone())
                         .or_insert_with(|| vt100::Parser::new(24, 80, 5000));
                     p.process(data.as_bytes());
+                }
+                TmuxEvent::Begin { .. } => {
+                    if pending_queries.load(Ordering::SeqCst) > 0 && capture.is_none() {
+                        capture = Some(Vec::new());
+                    } else if events.send(event).is_err() {
+                        break;
+                    }
+                }
+                TmuxEvent::End { .. } | TmuxEvent::Error { .. } => {
+                    if let Some(buf) = capture.take() {
+                        pending_queries.fetch_sub(1, Ordering::SeqCst);
+                        let _ = queries.send(buf);
+                    } else if events.send(event).is_err() {
+                        break;
+                    }
+                }
+                TmuxEvent::NonProtocolLine { raw } => {
+                    if let Some(buf) = capture.as_mut() {
+                        buf.push(raw.clone());
+                    } else if events.send(event).is_err() {
+                        break;
+                    }
                 }
                 _ => {
                     if events.send(event).is_err() {
@@ -206,6 +256,7 @@ fn spawn_flusher(
                 cursor_col: snap.cursor_col,
                 cursor_visible: snap.cursor_visible,
                 alt_screen: snap.alt_screen,
+                title: snap.title,
             };
             if out.send(update).is_err() {
                 return;
@@ -222,6 +273,7 @@ struct Snapshot {
     cursor_col: u16,
     cursor_visible: bool,
     alt_screen: bool,
+    title: Option<String>,
 }
 
 fn snapshot_screen(_pane_id: &str, parser: &vt100::Parser) -> Snapshot {
@@ -240,6 +292,14 @@ fn snapshot_screen(_pane_id: &str, parser: &vt100::Parser) -> Snapshot {
         rows_data.push(row);
     }
     let (cr, cc) = s.cursor_position();
+    let title = {
+        let t = s.title();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    };
     Snapshot {
         rows: h,
         cols: w,
@@ -248,6 +308,7 @@ fn snapshot_screen(_pane_id: &str, parser: &vt100::Parser) -> Snapshot {
         cursor_col: cc,
         cursor_visible: !s.hide_cursor(),
         alt_screen: s.alternate_screen(),
+        title,
     }
 }
 
