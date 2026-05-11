@@ -20,14 +20,14 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 use hangul_ime::{dubeolsik, Composer};
 use tmux_bridge::{
     parse_layout, Cell, Layout, ScreenUpdate, StartOptions, TmuxEvent, TmuxSession,
 };
 
-use render::{cells_for_size, Renderer};
+use render::Renderer;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const RESIZE_HANDLE: f32 = 14.0;
@@ -37,7 +37,8 @@ const TITLE_BAR: f32 = 22.0;
 pub struct PaneGrid {
     pub rows: u16,
     pub cols: u16,
-    pub grid: Vec<String>,
+    /// Per-row cells; preserves fg/bg/attrs for the renderer.
+    pub cells: Vec<Vec<Cell>>,
     pub cursor_row: u16,
     pub cursor_col: u16,
 }
@@ -64,6 +65,7 @@ pub struct WindowTab {
     pub next_cascade: u32,
 }
 
+#[derive(Debug)]
 enum HitTarget {
     Title(String),
     Resize(String),
@@ -77,6 +79,19 @@ enum HitTarget {
     ToggleSidebar,
     Session(u8),
     NewSession,
+    Icon(usize),
+    PaneClose(String),
+    SessionClose(u8),
+    SidebarResize,
+    WindowEdgeResize(ResizeDirection),
+}
+
+#[derive(Debug, Clone)]
+pub struct DesktopIcon {
+    pub label: String,
+    pub cwd: String,
+    pub x: f32,
+    pub y: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +107,7 @@ enum DragState {
         start_h: f32,
         start_mouse: (f32, f32),
     },
+    SidebarResize,
 }
 
 /// One sidebar entry = one tmux session = its own tmux -C subprocess.
@@ -106,12 +122,16 @@ pub struct SessionState {
 
 impl SessionState {
     fn new(number: u8) -> Result<Self> {
-        let cwd = std::env::var("HOME").ok();
         let name = format!("tmuxify-{}-{}", std::process::id(), number);
+        Self::new_with_name(number, &name)
+    }
+
+    fn new_with_name(number: u8, name: &str) -> Result<Self> {
+        let cwd = std::env::var("HOME").ok();
         let tmux = TmuxSession::start(StartOptions {
             cwd: cwd.as_deref(),
             auto_run: None,
-            session_name: Some(&name),
+            session_name: Some(name),
             flush_interval: Duration::from_millis(33),
         })?;
         Ok(Self {
@@ -122,6 +142,20 @@ impl SessionState {
             active_window: None,
             last_cwd_query: Instant::now() - Duration::from_secs(60),
         })
+    }
+}
+
+fn list_tmux_sessions() -> Vec<String> {
+    let output = std::process::Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -139,6 +173,17 @@ struct App {
     alt: bool,
     last_poll: Instant,
     sidebar_open: bool,
+    icons: Vec<DesktopIcon>,
+    last_click: Option<(Instant, f32, f32)>,
+    /// Blinking-cursor state — toggled every 500ms by about_to_wait.
+    cursor_visible: bool,
+    last_blink: Instant,
+    /// User-resizable sidebar width (overrides self.sidebar_w default).
+    sidebar_w: f32,
+    auto_capture_at: Option<Instant>,
+    capture_path: std::path::PathBuf,
+    auto_send_at: Option<Instant>,
+    auto_send_text: Option<String>,
 }
 
 impl App {
@@ -157,6 +202,23 @@ impl App {
             alt: false,
             last_poll: Instant::now(),
             sidebar_open: true,
+            icons: default_icons(),
+            last_click: None,
+            cursor_visible: true,
+            last_blink: Instant::now(),
+            sidebar_w: render::SIDEBAR_W,
+            auto_capture_at: std::env::var("TMUXIFY_AUTOCAPTURE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + Duration::from_millis(ms)),
+            capture_path: std::env::var("TMUXIFY_CAPTURE_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/tmuxify-screenshot.png")),
+            auto_send_at: std::env::var("TMUXIFY_AUTOSEND_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + Duration::from_millis(ms)),
+            auto_send_text: std::env::var("TMUXIFY_AUTOSEND").ok(),
         }
     }
 
@@ -167,6 +229,38 @@ impl App {
                     self.sessions.insert(n, s);
                 }
                 Err(e) => println!("[session {n} create err] {e}"),
+            }
+        }
+    }
+
+    /// Discover and attach to every tmux session that already exists on
+    /// this user's server but isn't tracked yet.
+    fn discover_external_sessions(&mut self) {
+        let mut next_n: u8 = (1..=99)
+            .find(|n| !self.sessions.contains_key(n))
+            .unwrap_or(99);
+        for name in list_tmux_sessions() {
+            // Skip names we already attached to.
+            let already = self
+                .sessions
+                .values()
+                .any(|s| s.tmux.session_name == name);
+            if already {
+                continue;
+            }
+            while self.sessions.contains_key(&next_n) && next_n < 99 {
+                next_n += 1;
+            }
+            if next_n >= 99 {
+                break;
+            }
+            match SessionState::new_with_name(next_n, &name) {
+                Ok(s) => {
+                    println!("[discover] attached external session {name} → slot {next_n}");
+                    self.sessions.insert(next_n, s);
+                    next_n += 1;
+                }
+                Err(e) => println!("[discover {name} err] {e}"),
             }
         }
     }
@@ -245,14 +339,14 @@ impl App {
 
     fn apply_screen(s: &mut SessionState, u: ScreenUpdate) {
         let entry = s.panes.entry(u.pane_id.clone()).or_default();
-        if entry.grid.len() != u.rows as usize || entry.cols != u.cols {
-            entry.grid = vec![" ".repeat(u.cols as usize); u.rows as usize];
+        if entry.cells.len() != u.rows as usize || entry.cols != u.cols {
+            entry.cells = vec![vec![Cell::blank(); u.cols as usize]; u.rows as usize];
             entry.rows = u.rows;
             entry.cols = u.cols;
         }
         for (i, row) in u.dirty {
-            if (i as usize) < entry.grid.len() {
-                entry.grid[i as usize] = render_row(&row);
+            if (i as usize) < entry.cells.len() {
+                entry.cells[i as usize] = row;
             }
         }
         entry.cursor_row = u.cursor_row;
@@ -294,13 +388,16 @@ impl App {
                         let n = tab.next_cascade;
                         tab.next_cascade += 1;
                         let cascade = (n % 8) as f32;
+                        // Cap cascade at 4 steps so newly-spawned panes
+                        // stay on-screen even after many opens.
+                        let step = (n % 4) as f32;
                         tab.floating.insert(
                             pid.clone(),
                             FloatingPane {
                                 pane_id: pid.clone(),
                                 title: pid.clone(),
-                                x: render::SIDEBAR_W + 60.0 + cascade * 30.0,
-                                y: render::SESSION_BAR_HEIGHT + 30.0 + cascade * 30.0,
+                                x: render::SIDEBAR_W + 60.0 + step * 30.0,
+                                y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
                                 w: 80.0 * render::CELL_W,
                                 h: 24.0 * render::CELL_H,
                             },
@@ -345,6 +442,15 @@ impl App {
                     t.title = name;
                 }
             }
+            TmuxEvent::Error { ts, id, flags } => {
+                println!("[tmux err evt] ts={ts} id={id} flags={flags}");
+            }
+            TmuxEvent::Unknown { raw } => {
+                println!("[tmux unknown evt] {raw}");
+            }
+            TmuxEvent::NonProtocolLine { raw } => {
+                println!("[tmux line] {raw}");
+            }
             _ => {}
         }
     }
@@ -384,9 +490,27 @@ impl App {
         let _ = s.tmux.send_keys_hex(target.as_deref(), &hex);
     }
 
-    fn tmux_cmd(&self, cmd: &str) {
-        if let Some(s) = self.active() {
-            let _ = s.tmux.send_cmd(cmd);
+    fn tmux_cmd(&mut self, cmd: &str) {
+        let dead = match self.active() {
+            Some(s) => match s.tmux.send_cmd(cmd) {
+                Ok(_) => false,
+                Err(_) => true,
+            },
+            None => false,
+        };
+        if dead {
+            // tmux for this session is gone (e.g. last pane killed → session
+            // ended). Drop it and ensure at least one live session exists.
+            let n = self.active_session;
+            println!("[session {n} dead] cleaning up");
+            self.sessions.remove(&n);
+            let next = self.sessions.keys().next().copied();
+            self.active_session = next.unwrap_or(1);
+            self.ensure_session(self.active_session);
+            // Re-issue the command on the new active session.
+            if let Some(s) = self.active() {
+                let _ = s.tmux.send_cmd(cmd);
+            }
         }
     }
 
@@ -433,6 +557,17 @@ impl App {
             return;
         }
 
+        // F12 → screenshot for self-verification.
+        if matches!(&ev.logical_key, Key::Named(NamedKey::F12)) {
+            let path = self.capture_path.clone();
+            if let Some(r) = self.renderer.as_mut() {
+                r.request_capture(path);
+            }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         if matches!(&ev.logical_key, Key::Named(NamedKey::Backspace)) {
             if self.hangul_mode && self.composer.backspace() {
                 if let Some(w) = &self.window {
@@ -573,25 +708,63 @@ impl App {
     }
 
     fn hit_test(&self, x: f32, y: f32) -> Option<HitTarget> {
-        let sidebar_w = if self.sidebar_open {
-            render::SIDEBAR_W
-        } else {
-            0.0
-        };
+        let sidebar_w = if self.sidebar_open { self.sidebar_w } else { 0.0 };
+        // OS-window edge resize zones (6px). Skipped near corner of title bar.
+        let win_w = self
+            .window
+            .as_ref()
+            .map(|w| w.inner_size().width as f32)
+            .unwrap_or(0.0);
+        let win_h = self
+            .window
+            .as_ref()
+            .map(|w| w.inner_size().height as f32)
+            .unwrap_or(0.0);
+        let edge = 6.0;
+        // Bottom edge / corners.
+        if y >= win_h - edge {
+            if x <= edge {
+                return Some(HitTarget::WindowEdgeResize(ResizeDirection::SouthWest));
+            }
+            if x >= win_w - edge {
+                return Some(HitTarget::WindowEdgeResize(ResizeDirection::SouthEast));
+            }
+            return Some(HitTarget::WindowEdgeResize(ResizeDirection::South));
+        }
+        // Left edge (below the title bar).
+        if x <= edge && y >= render::SESSION_BAR_HEIGHT {
+            return Some(HitTarget::WindowEdgeResize(ResizeDirection::West));
+        }
+        // Right edge (below the title bar).
+        if x >= win_w - edge && y >= render::SESSION_BAR_HEIGHT {
+            return Some(HitTarget::WindowEdgeResize(ResizeDirection::East));
+        }
+        // Sidebar resize handle — 4px right edge of the sidebar.
+        if self.sidebar_open
+            && y >= render::SESSION_BAR_HEIGHT
+            && (x - sidebar_w).abs() <= 3.0
+        {
+            return Some(HitTarget::SidebarResize);
+        }
         // Sidebar zone (below title bar, left column).
         if self.sidebar_open && x < sidebar_w && y >= render::SESSION_BAR_HEIGHT {
-            // Each session row is 56px starting after the search bar.
-            let row_h = 56.0;
-            let row_gap = 6.0;
-            let first_row_y = render::SESSION_BAR_HEIGHT + 12.0 + 28.0 + 12.0;
+            let row_h = 60.0;
+            let row_gap = 4.0;
+            let first_row_y = render::SESSION_BAR_HEIGHT + 14.0 + 30.0 + 14.0;
             let mut row_y = first_row_y;
+            // Each row's right side has a 24px "×" hit area.
+            let close_w = 24.0;
+            let close_left = sidebar_w - 14.0 - close_w;
             for n in self.sessions.keys() {
                 if y >= row_y && y < row_y + row_h {
+                    if x >= close_left && x <= close_left + close_w {
+                        return Some(HitTarget::SessionClose(*n));
+                    }
                     return Some(HitTarget::Session(*n));
                 }
                 row_y += row_h + row_gap;
             }
-            // "+ New session" button row right after the list.
+            row_y += 6.0;
             let new_h = 36.0;
             if y >= row_y && y < row_y + new_h {
                 return Some(HitTarget::NewSession);
@@ -650,12 +823,53 @@ impl App {
         if x < sidebar_w {
             return None;
         }
-        // Floating panes of the active session/window only.
-        let Some(s) = self.active() else { return None };
-        let Some(wid) = s.active_window.as_ref() else { return None };
-        let Some(tab) = s.windows.get(wid) else { return None };
-        let mut order: Vec<&FloatingPane> = tab.floating.values().collect();
-        order.sort_by_key(|f| (tab.active_pane.as_deref() == Some(&f.pane_id)) as u8);
+        // Floating panes of the active session/window — only if any.
+        let floating_hit = self.active().and_then(|s| {
+            let wid = s.active_window.as_ref()?;
+            let tab = s.windows.get(wid)?;
+            let mut order: Vec<&FloatingPane> = tab.floating.values().collect();
+            order.sort_by_key(|f| (tab.active_pane.as_deref() == Some(&f.pane_id)) as u8);
+            for fp in order.iter().rev() {
+                if x >= fp.x + fp.w - RESIZE_HANDLE
+                    && x <= fp.x + fp.w
+                    && y >= fp.y + fp.h - RESIZE_HANDLE
+                    && y <= fp.y + fp.h
+                {
+                    return Some(HitTarget::Resize(fp.pane_id.clone()));
+                }
+                let cx = fp.x + fp.w - 22.0;
+                if x >= cx
+                    && x <= fp.x + fp.w - 4.0
+                    && y >= fp.y + 4.0
+                    && y <= fp.y + TITLE_BAR - 2.0
+                {
+                    return Some(HitTarget::PaneClose(fp.pane_id.clone()));
+                }
+                if x >= fp.x && x <= fp.x + fp.w && y >= fp.y && y <= fp.y + TITLE_BAR {
+                    return Some(HitTarget::Title(fp.pane_id.clone()));
+                }
+                if x >= fp.x && x <= fp.x + fp.w && y >= fp.y && y <= fp.y + fp.h {
+                    return Some(HitTarget::Body(fp.pane_id.clone()));
+                }
+            }
+            None
+        });
+        if floating_hit.is_some() {
+            return floating_hit;
+        }
+        // Icons last (always checked, even when no session is up).
+        for (i, ic) in self.icons.iter().enumerate() {
+            let icon_w = render::ICON_W;
+            let icon_h = render::ICON_H;
+            if x >= ic.x && x <= ic.x + icon_w && y >= ic.y && y <= ic.y + icon_h {
+                return Some(HitTarget::Icon(i));
+            }
+        }
+        return None;
+        #[allow(unreachable_code)]
+        let _placeholder_for_old_loop = false;
+        let mut order: Vec<&FloatingPane> = Vec::new();
+        order.sort_by_key(|f: &&FloatingPane| (false) as u8);
         for fp in order.iter().rev() {
             if x >= fp.x + fp.w - RESIZE_HANDLE
                 && x <= fp.x + fp.w
@@ -664,6 +878,12 @@ impl App {
             {
                 return Some(HitTarget::Resize(fp.pane_id.clone()));
             }
+            // X close button — top-right of title bar.
+            let cx = fp.x + fp.w - 22.0;
+            if x >= cx && x <= fp.x + fp.w - 4.0 && y >= fp.y + 4.0 && y <= fp.y + TITLE_BAR - 2.0
+            {
+                return Some(HitTarget::PaneClose(fp.pane_id.clone()));
+            }
             if x >= fp.x && x <= fp.x + fp.w && y >= fp.y && y <= fp.y + TITLE_BAR {
                 return Some(HitTarget::Title(fp.pane_id.clone()));
             }
@@ -671,12 +891,43 @@ impl App {
                 return Some(HitTarget::Body(fp.pane_id.clone()));
             }
         }
+        // Icons last (only hit if not on top of any pane).
+        for (i, ic) in self.icons.iter().enumerate() {
+            let icon_w = render::ICON_W;
+            let icon_h = render::ICON_H;
+            if x >= ic.x && x <= ic.x + icon_w && y >= ic.y && y <= ic.y + icon_h {
+                return Some(HitTarget::Icon(i));
+            }
+        }
         None
     }
 
     fn handle_mouse_press(&mut self) {
         let (x, y) = self.mouse;
-        let Some(hit) = self.hit_test(x, y) else { return };
+        let now = Instant::now();
+        let is_double = self
+            .last_click
+            .map(|(t, lx, ly)| {
+                now.duration_since(t) < Duration::from_millis(400)
+                    && (lx - x).abs() < 5.0
+                    && (ly - y).abs() < 5.0
+            })
+            .unwrap_or(false);
+        self.last_click = Some((now, x, y));
+        let hit = self.hit_test(x, y);
+        println!("[click] xy=({x:.0},{y:.0}) double={is_double} hit={hit:?}");
+        let Some(hit) = hit else { return };
+        if let HitTarget::Icon(idx) = &hit {
+            if is_double {
+                if let Some(ic) = self.icons.get(*idx) {
+                    // New "창" = new pane in the active window.
+                    let cmd = format!("split-window -c {}", shell_quote(&ic.cwd));
+                    self.tmux_cmd(&cmd);
+                }
+                return;
+            }
+            return;
+        }
         match hit {
             HitTarget::Tab(wid) => {
                 self.tmux_cmd(&format!("select-window -t {wid}"));
@@ -752,6 +1003,36 @@ impl App {
             HitTarget::Body(pid) => {
                 self.activate_pane(&pid);
             }
+            HitTarget::Icon(_) => {
+                // Single click handled (early-return) above; double opens.
+            }
+            HitTarget::PaneClose(pid) => {
+                self.tmux_cmd(&format!("kill-pane -t {pid}"));
+            }
+            HitTarget::WindowEdgeResize(dir) => {
+                if let Some(w) = &self.window {
+                    let _ = w.drag_resize_window(dir);
+                }
+            }
+            HitTarget::SidebarResize => {
+                self.drag = Some(DragState::SidebarResize);
+            }
+            HitTarget::SessionClose(n) => {
+                let name = self.sessions.get(&n).map(|s| s.tmux.session_name.clone());
+                if let Some(name) = name {
+                    let _ = std::process::Command::new("tmux")
+                        .args(["kill-session", "-t", &name])
+                        .status();
+                    self.sessions.remove(&n);
+                    if self.active_session == n {
+                        self.active_session = self.sessions.keys().next().copied().unwrap_or(1);
+                        self.ensure_session(self.active_session);
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
         }
     }
 
@@ -778,9 +1059,18 @@ impl App {
 
     fn handle_mouse_move(&mut self) {
         let Some(drag) = self.drag.clone() else { return };
+        let (x, _y) = self.mouse;
+        if let DragState::SidebarResize = &drag {
+            self.sidebar_w = x.clamp(160.0, 480.0);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         let (x, y) = self.mouse;
         let Some(tab) = self.active_tab_mut() else { return };
         match drag {
+            DragState::SidebarResize => {}
             DragState::Move { pane_id, offset_x, offset_y } => {
                 if let Some(fp) = tab.floating.get_mut(&pane_id) {
                     fp.x = (x - offset_x).max(0.0);
@@ -799,6 +1089,36 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    fn update_cursor(&self) {
+        let Some(win) = &self.window else { return };
+        let (x, y) = self.mouse;
+        let icon = match self.hit_test(x, y) {
+            Some(HitTarget::WindowEdgeResize(dir)) => match dir {
+                ResizeDirection::East | ResizeDirection::West => CursorIcon::EwResize,
+                ResizeDirection::North | ResizeDirection::South => CursorIcon::NsResize,
+                ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::NeswResize,
+                ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::NwseResize,
+            },
+            Some(HitTarget::Resize(_)) => CursorIcon::NwseResize,
+            Some(HitTarget::SidebarResize) => CursorIcon::EwResize,
+            Some(HitTarget::Title(_)) | Some(HitTarget::Drag) => CursorIcon::Move,
+            Some(HitTarget::Body(_)) => CursorIcon::Text,
+            Some(HitTarget::Tab(_))
+            | Some(HitTarget::NewTab)
+            | Some(HitTarget::Session(_))
+            | Some(HitTarget::NewSession)
+            | Some(HitTarget::SessionClose(_))
+            | Some(HitTarget::PaneClose(_))
+            | Some(HitTarget::Min)
+            | Some(HitTarget::MaxToggle)
+            | Some(HitTarget::Close)
+            | Some(HitTarget::ToggleSidebar)
+            | Some(HitTarget::Icon(_)) => CursorIcon::Pointer,
+            None => CursorIcon::Default,
+        };
+        win.set_cursor(icon);
     }
 
     fn handle_mouse_release(&mut self) {
@@ -835,7 +1155,8 @@ impl ApplicationHandler for App {
         // First session always exists.
         self.ensure_session(1);
         self.active_session = 1;
-        let (cols, rows) = cells_for_size(window.inner_size().width, window.inner_size().height);
+        self.discover_external_sessions();
+        let (cols, rows) = renderer.cells_for_size(window.inner_size().width, window.inner_size().height);
         for s in self.sessions.values() {
             let _ = s.tmux.resize_client(cols, rows);
         }
@@ -861,7 +1182,11 @@ impl ApplicationHandler for App {
                         r.resize(w, h);
                     }
                 }
-                let (cols, rows) = cells_for_size(size.width, size.height);
+                let (cols, rows) = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| r.cells_for_size(size.width, size.height))
+                    .unwrap_or((80, 24));
                 for s in self.sessions.values() {
                     let _ = s.tmux.resize_client(cols, rows);
                 }
@@ -875,6 +1200,7 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let PhysicalPosition { x, y } = position;
                 self.mouse = (x as f32, y as f32);
+                self.update_cursor();
                 self.handle_mouse_move();
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -889,12 +1215,15 @@ impl ApplicationHandler for App {
                 let preedit = self.composer.preedit();
                 let hangul_mode = self.hangul_mode;
                 let sidebar_open = self.sidebar_open;
+                let sidebar_w_for_render = self.sidebar_w;
                 let active_session_n = self.active_session;
                 let session_rows: Vec<(u8, String, usize)> = self
                     .sessions
                     .iter()
-                    .map(|(k, s)| (*k, format!("session {k}"), s.windows.len()))
+                    .map(|(k, s)| (*k, s.tmux.session_name.clone(), s.windows.len()))
                     .collect();
+                let icons_clone = self.icons.clone();
+                let cursor_visible = self.cursor_visible;
                 let (active_window, active_pane, panes_clone, tabs_for_render, active_floating) =
                     match self.sessions.get(&active_session_n) {
                         Some(s) => {
@@ -930,6 +1259,9 @@ impl ApplicationHandler for App {
                         sidebar_open,
                         &session_rows,
                         active_session_n,
+                        &icons_clone,
+                        cursor_visible,
+                        sidebar_w_for_render,
                     );
                 }
             }
@@ -942,21 +1274,67 @@ impl ApplicationHandler for App {
             self.last_poll = Instant::now();
             self.poll_tmux();
         }
+        // Auto-send (env-driven) — fire once after the elapsed delay.
+        if let Some(at) = self.auto_send_at {
+            if Instant::now() >= at {
+                self.auto_send_at = None;
+                if let Some(text) = self.auto_send_text.clone() {
+                    let mut bytes = text.into_bytes();
+                    bytes.push(b'\r');
+                    self.send_bytes(&bytes);
+                }
+            }
+        }
+        // Auto-capture (env-driven) — fire once after the elapsed delay.
+        if let Some(at) = self.auto_capture_at {
+            if Instant::now() >= at {
+                self.auto_capture_at = None;
+                let path = self.capture_path.clone();
+                if let Some(r) = self.renderer.as_mut() {
+                    r.request_capture(path);
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+        }
+        if self.last_blink.elapsed() >= Duration::from_millis(500) {
+            self.last_blink = Instant::now();
+            self.cursor_visible = !self.cursor_visible;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + POLL_INTERVAL));
     }
 }
 
-fn render_row(cells: &[Cell]) -> String {
-    let mut s = String::with_capacity(cells.len());
-    for c in cells {
-        if c.ch.is_empty() {
-            s.push(' ');
-        } else {
-            s.push_str(&c.ch);
-        }
-    }
-    s
+fn shell_quote(s: &str) -> String {
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
+
+fn default_icons() -> Vec<DesktopIcon> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    let projects = format!("{}/projects", home);
+    let mut v = Vec::new();
+    v.push(DesktopIcon {
+        label: "Home".into(),
+        cwd: home.clone(),
+        x: render::SIDEBAR_W + 40.0,
+        y: render::SESSION_BAR_HEIGHT + 40.0,
+    });
+    if std::path::Path::new(&projects).exists() {
+        v.push(DesktopIcon {
+            label: "projects".into(),
+            cwd: projects,
+            x: render::SIDEBAR_W + 40.0,
+            y: render::SESSION_BAR_HEIGHT + 130.0,
+        });
+    }
+    v
+}
+
 
 fn main() -> Result<()> {
     let event_loop = EventLoop::new().context("event loop")?;
