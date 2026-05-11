@@ -90,15 +90,49 @@ fn parse_begin_end(rest: &str) -> Option<(String, String, String)> {
 }
 
 fn parse_output(rest: &str) -> Option<TmuxEvent> {
-    // `%<pane-id> <data>`
+    // `%<pane-id> <data>` — data 는 tmux 가 비-printable 을 \ooo (3자리 octal) 로,
+    // backslash 자체를 \\ 로 이스케이프해서 보낸다. 디코드 후 lossy UTF-8 로 환원.
     let (pane, data) = match rest.find(' ') {
         Some(i) => (&rest[..i], &rest[i + 1..]),
         None => return None,
     };
     Some(TmuxEvent::Output {
         pane_id: pane.to_string(),
-        data: data.to_string(),
+        data: decode_output(data),
     })
+}
+
+fn decode_output(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\\' && i + 1 < bytes.len() {
+            let n = bytes[i + 1];
+            if n == b'\\' {
+                out.push(b'\\');
+                i += 2;
+                continue;
+            }
+            // 3자리 octal escape
+            if i + 3 < bytes.len()
+                && (b'0'..=b'7').contains(&bytes[i + 1])
+                && (b'0'..=b'7').contains(&bytes[i + 2])
+                && (b'0'..=b'7').contains(&bytes[i + 3])
+            {
+                let v = ((bytes[i + 1] - b'0') as u16) * 64
+                    + ((bytes[i + 2] - b'0') as u16) * 8
+                    + ((bytes[i + 3] - b'0') as u16);
+                out.push(v as u8);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(b);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn split_two(s: &str) -> Option<(String, String)> {
@@ -131,6 +165,27 @@ mod tests {
                 assert_eq!(pane_id, "%3");
                 assert_eq!(data, "hello world");
             }
+            _ => panic!("expected Output"),
+        }
+    }
+
+    #[test]
+    fn decodes_octal_escape() {
+        // \033 (ESC) + [ + 3 + 1 + m  →  ANSI red
+        let e = parse_line("%output %1 \\033[31mhi\\033[0m");
+        match e {
+            TmuxEvent::Output { data, .. } => {
+                assert_eq!(data, "\u{1b}[31mhi\u{1b}[0m");
+            }
+            _ => panic!("expected Output"),
+        }
+    }
+
+    #[test]
+    fn decodes_backslash_escape() {
+        let e = parse_line("%output %1 path\\\\with\\\\backslash");
+        match e {
+            TmuxEvent::Output { data, .. } => assert_eq!(data, "path\\with\\backslash"),
             _ => panic!("expected Output"),
         }
     }

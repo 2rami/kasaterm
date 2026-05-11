@@ -1,0 +1,82 @@
+/* ============================================================
+   미니 터미널 스타일 — vanilla DOM 렌더러용
+   tmuxify App.css 의 --bg-1, --fg, --font-mono 변수 사용.
+   ============================================================ */
+
+.tm-host-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-1);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  /* 폰트 자체의 자연 line-height 사용 — 너무 작으면 CJK 위아래 클리핑됨 */
+  line-height: 1.2;
+  user-select: text;
+}
+
+.tm-host {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.tm-grid {
+  position: relative;
+  z-index: 1;
+  white-space: pre;
+  color: var(--fg);
+}
+
+.tm-row {
+  display: block;
+  white-space: pre;
+  font-family: inherit;
+}
+
+.tm-cell {
+  white-space: pre;
+  letter-spacing: 0;
+}
+
+.tm-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  pointer-events: none;
+  background: var(--cyan, #7dcfff);
+  /* mix-blend mode 로 텍스트 위에서 색 반전 */
+  mix-blend-mode: difference;
+  animation: tm-blink 1s steps(2, end) infinite;
+}
+
+@keyframes tm-blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0.35; }
+}
+
+/* IME 와 키보드 이벤트 받는 숨겨진 textarea.
+   완전히 안 보이면 macOS IMK 가 좌표를 못 잡아서 IME 후보창 위치가 깨짐.
+   1x1px, opacity 0 로 화면 좌측 상단 어딘가에 박아둠. */
+.tm-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 2ch;
+  height: 1em;
+  opacity: 0;
+  z-index: 10;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  font: inherit;
+  padding: 0;
+  overflow: hidden;
+  /* pointer-events: none 제거 — macOS IMK 가 정상 input target 으로 인식하려면
+     실제 mouse target 이어야 IME 컨텍스트가 붙음. opacity 0 로 시각만 가림. */
+}
