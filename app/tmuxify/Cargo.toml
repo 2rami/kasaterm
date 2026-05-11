@@ -13,3 +13,5 @@ wgpu = { version = "22", features = ["wgsl"] }
 glyphon = "0.6"
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
+unicode-width = "0.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
