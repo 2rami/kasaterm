@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tmux-bridge",
+    "spikes/iced-term",
+    "spikes/egui-term",
+    "spikes/gpui-term",
+    "spikes/warpui-term",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+vt100 = "0.15"
+crossbeam-channel = "0.5"
+anyhow = "1"
+tmux-bridge = { path = "crates/tmux-bridge" }

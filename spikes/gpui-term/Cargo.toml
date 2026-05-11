@@ -1,0 +1,8 @@
+[package]
+name = "gpui-term"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+tmux-bridge.workspace = true
