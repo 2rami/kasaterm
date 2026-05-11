@@ -396,7 +396,7 @@ impl App {
                             FloatingPane {
                                 pane_id: pid.clone(),
                                 title: pid.clone(),
-                                x: render::SIDEBAR_W + 60.0 + step * 30.0,
+                                x: render::SIDEBAR_W + 180.0 + step * 30.0,
                                 y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
                                 w: 100.0 * render::CELL_W,
                                 h: 30.0 * render::CELL_H,

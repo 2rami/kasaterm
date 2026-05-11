@@ -1022,6 +1022,7 @@ impl Renderer {
         status_buf.set_text(&mut self.font_system, &status, attrs, Shaping::Advanced);
         status_buf.shape_until_scroll(&mut self.font_system, false);
         let status_top = self.height as f32 - PADDING - STATUS_HEIGHT;
+        let status_left = sidebar_w + PADDING;
 
         self.viewport.update(
             &self.queue,
@@ -1042,11 +1043,11 @@ impl Renderer {
         });
         let status_area = TextArea {
             buffer: &status_buf,
-            left: PADDING,
+            left: status_left,
             top: status_top,
             scale: 1.0,
             bounds: TextBounds {
-                left: 0,
+                left: status_left as i32,
                 top: status_top as i32,
                 right: self.width as i32,
                 bottom: self.height as i32,
