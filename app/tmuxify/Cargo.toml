@@ -1,0 +1,14 @@
+[package]
+name = "tmuxify"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+tmux-bridge.workspace = true
+hangul-ime = { path = "../../crates/hangul-ime" }
+anyhow.workspace = true
+winit = "0.30"
+wgpu = "22"
+glyphon = "0.6"
+pollster = "0.3"
