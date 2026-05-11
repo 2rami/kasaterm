@@ -973,10 +973,12 @@ impl Renderer {
             };
             let body_w = (fp.w - BOX_PAD * 2.0).max(1.0);
             let body_h = (fp.h - TITLE_HEIGHT - BOX_PAD).max(1.0);
-            // Block cursor on the active pane (only when blink-on).
+            // Block cursor on the active pane (only when blink-on). Use
+            // the renderer's measured cell metrics so the block lines up
+            // with the cell-by-cell glyphs.
             if is_active && cursor_visible && pg.cols > 0 && pg.rows > 0 {
-                let cw = body_w / pg.cols as f32;
-                let ch = body_h / pg.rows as f32;
+                let cw = self.cell_w;
+                let ch = self.cell_h;
                 let cx = fp.x + BOX_PAD + pg.cursor_col as f32 * cw;
                 let cy = fp.y + TITLE_HEIGHT + pg.cursor_row as f32 * ch;
                 quads.push(QuadInstance {
