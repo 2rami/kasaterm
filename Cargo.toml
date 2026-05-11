@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "app/tmuxify",
+    "crates/hangul-ime",
     "crates/tmux-bridge",
     "spikes/iced-term",
     "spikes/egui-term",

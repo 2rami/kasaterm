@@ -1,0 +1,6 @@
+[package]
+name = "hangul-ime"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "In-app dubeolsik Hangul input automaton, OS-IME-independent"
