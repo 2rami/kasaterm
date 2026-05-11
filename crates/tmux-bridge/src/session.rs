@@ -33,6 +33,9 @@ pub struct TmuxSession {
 pub struct StartOptions<'a> {
     pub cwd: Option<&'a str>,
     pub auto_run: Option<&'a str>,
+    /// Override the auto-derived session name. Used by tmuxify to keep
+    /// one tmux session per desktop.
+    pub session_name: Option<&'a str>,
     /// Flusher tick — defaults to 16 ms (~60 Hz).
     pub flush_interval: Duration,
 }
@@ -42,6 +45,7 @@ impl Default for StartOptions<'_> {
         Self {
             cwd: None,
             auto_run: None,
+            session_name: None,
             flush_interval: Duration::from_millis(16),
         }
     }
@@ -50,9 +54,13 @@ impl Default for StartOptions<'_> {
 impl TmuxSession {
     pub fn start(opts: StartOptions<'_>) -> Result<Self> {
         let session_name = opts
-            .cwd
-            .filter(|p| !p.is_empty())
-            .map(session_name_for_path)
+            .session_name
+            .map(|s| s.to_string())
+            .or_else(|| {
+                opts.cwd
+                    .filter(|p| !p.is_empty())
+                    .map(session_name_for_path)
+            })
             .unwrap_or_else(|| "tmuxify-main".into());
 
         let session_exists = Command::new("tmux")
