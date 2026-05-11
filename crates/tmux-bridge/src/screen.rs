@@ -46,6 +46,8 @@ pub struct ScreenUpdate {
     pub cursor_col: u16,
     pub cursor_visible: bool,
     pub alt_screen: bool,
+    /// Window title set by shell OSC 0/2 (vt100 parser exposes it).
+    pub title: Option<String>,
 }
 
 pub(crate) fn vt_color(c: vt100::Color) -> Color {

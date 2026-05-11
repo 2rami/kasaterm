@@ -2,6 +2,7 @@
 //! winit + wgpu + glyphon for rendering, tmux-bridge for the shell,
 //! hangul-ime for Korean input independent of OS IME.
 
+mod quad;
 mod render;
 
 use std::collections::{BTreeMap, HashMap};
@@ -12,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
+use winit::dpi::PhysicalPosition;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
@@ -34,6 +36,32 @@ pub struct PaneGrid {
     pub grid: Vec<String>,
     pub cursor_row: u16,
     pub cursor_col: u16,
+}
+
+/// Bottom-right resize handle hit area (square, in pixels).
+const RESIZE_HANDLE: f32 = 14.0;
+/// Title-bar height in pixels (kept in sync with renderer constant).
+const TITLE_BAR: f32 = 22.0;
+
+enum HitTarget {
+    Title(String),
+    Resize(String),
+    Body(String),
+}
+
+#[derive(Debug, Clone)]
+enum DragState {
+    Move {
+        window_id: String,
+        offset_x: f32,
+        offset_y: f32,
+    },
+    Resize {
+        window_id: String,
+        start_w: f32,
+        start_h: f32,
+        start_mouse: (f32, f32),
+    },
 }
 
 /// Desktop-mode floating window. One per tmux window (single pane each).
@@ -61,6 +89,8 @@ struct App {
     active_pane: Option<String>,
     /// Counter for cascading initial positions.
     next_cascade: u32,
+    mouse: (f32, f32),
+    drag: Option<DragState>,
     hangul_mode: bool,
     composer: Composer,
     shift: bool,
@@ -71,6 +101,7 @@ struct App {
     /// isn't wired yet — for now we just open a fresh window.
     closed_windows: Vec<String>,
     last_poll: Instant,
+    last_cwd_query: Instant,
 }
 
 impl App {
@@ -90,24 +121,54 @@ impl App {
             ctrl: false,
             alt: false,
             closed_windows: Vec::new(),
+            mouse: (0.0, 0.0),
+            drag: None,
             last_poll: Instant::now(),
+            last_cwd_query: Instant::now() - Duration::from_secs(60),
         }
     }
 
     fn poll_tmux(&mut self) {
-        let Some(t) = &self.tmux else { return };
-        let screens: Vec<ScreenUpdate> = t.screens.try_iter().collect();
-        let events: Vec<TmuxEvent> = t.events.try_iter().collect();
-        let any = !screens.is_empty() || !events.is_empty();
+        let (screens, events, queries, due_for_query) = match &self.tmux {
+            Some(t) => (
+                t.screens.try_iter().collect::<Vec<_>>(),
+                t.events.try_iter().collect::<Vec<_>>(),
+                t.queries.try_iter().collect::<Vec<_>>(),
+                self.last_cwd_query.elapsed() >= Duration::from_secs(2),
+            ),
+            None => return,
+        };
+        let any = !screens.is_empty() || !events.is_empty() || !queries.is_empty();
         for u in screens {
             self.apply_screen(u);
         }
         for e in events {
             self.apply_event(e);
         }
+        for resp in queries {
+            self.apply_cwd_query(resp);
+        }
+        if due_for_query {
+            self.last_cwd_query = Instant::now();
+            if let Some(t) = &self.tmux {
+                let _ = t.send_query("list-windows -a -F '#{window_id} #{pane_current_path}'");
+            }
+        }
         if any {
             if let Some(w) = &self.window {
                 w.request_redraw();
+            }
+        }
+    }
+
+    fn apply_cwd_query(&mut self, lines: Vec<String>) {
+        for line in lines {
+            let mut it = line.splitn(2, ' ');
+            let Some(wid) = it.next() else { continue };
+            let Some(path) = it.next() else { continue };
+            if let Some(fw) = self.floating.get_mut(wid) {
+                let basename = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path);
+                fw.title = format!("{basename}  ·  {path}");
             }
         }
     }
@@ -126,6 +187,15 @@ impl App {
         }
         entry.cursor_row = u.cursor_row;
         entry.cursor_col = u.cursor_col;
+        // If we know which window owns this pane, push the OSC title.
+        if let Some(new_title) = u.title.as_ref() {
+            for fw in self.floating.values_mut() {
+                if fw.pane_id.as_deref() == Some(&u.pane_id) {
+                    fw.title = new_title.clone();
+                    break;
+                }
+            }
+        }
         if self.active_pane.is_none() {
             self.active_pane = Some(u.pane_id);
         }
@@ -213,6 +283,117 @@ impl App {
     fn tmux_cmd(&self, cmd: &str) {
         if let Some(t) = &self.tmux {
             let _ = t.send_cmd(cmd);
+        }
+    }
+
+    /// Window in front-to-back z-order: active last (topmost), so we
+    /// reverse for hit-testing.
+    fn hit_test(&self, x: f32, y: f32) -> Option<HitTarget> {
+        // Iterate in render order (active last) then reverse for topmost-first.
+        let mut order: Vec<&FloatingWindow> = self.floating.values().collect();
+        order.sort_by_key(|w| (self.active_window.as_deref() == Some(&w.window_id)) as u8);
+        for fw in order.iter().rev() {
+            // Resize handle.
+            if x >= fw.x + fw.w - RESIZE_HANDLE
+                && x <= fw.x + fw.w
+                && y >= fw.y + fw.h - RESIZE_HANDLE
+                && y <= fw.y + fw.h
+            {
+                return Some(HitTarget::Resize(fw.window_id.clone()));
+            }
+            // Title bar.
+            if x >= fw.x && x <= fw.x + fw.w && y >= fw.y && y <= fw.y + TITLE_BAR {
+                return Some(HitTarget::Title(fw.window_id.clone()));
+            }
+            // Body.
+            if x >= fw.x && x <= fw.x + fw.w && y >= fw.y && y <= fw.y + fw.h {
+                return Some(HitTarget::Body(fw.window_id.clone()));
+            }
+        }
+        None
+    }
+
+    fn handle_mouse_press(&mut self) {
+        let (x, y) = self.mouse;
+        let Some(hit) = self.hit_test(x, y) else { return };
+        match hit {
+            HitTarget::Title(id) => {
+                let fw = self.floating.get(&id).cloned();
+                if let Some(fw) = fw {
+                    self.drag = Some(DragState::Move {
+                        window_id: id.clone(),
+                        offset_x: x - fw.x,
+                        offset_y: y - fw.y,
+                    });
+                    self.activate(&id);
+                }
+            }
+            HitTarget::Resize(id) => {
+                let fw = self.floating.get(&id).cloned();
+                if let Some(fw) = fw {
+                    self.drag = Some(DragState::Resize {
+                        window_id: id.clone(),
+                        start_w: fw.w,
+                        start_h: fw.h,
+                        start_mouse: (x, y),
+                    });
+                    self.activate(&id);
+                }
+            }
+            HitTarget::Body(id) => {
+                self.activate(&id);
+            }
+        }
+    }
+
+    fn activate(&mut self, window_id: &str) {
+        self.active_window = Some(window_id.to_string());
+        if let Some(fw) = self.floating.get(window_id) {
+            self.active_pane = fw.pane_id.clone();
+        }
+        // Tell tmux too so future commands target the right window.
+        self.tmux_cmd(&format!("select-window -t {window_id}"));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn handle_mouse_move(&mut self) {
+        let Some(drag) = self.drag.clone() else { return };
+        let (x, y) = self.mouse;
+        match drag {
+            DragState::Move { window_id, offset_x, offset_y } => {
+                if let Some(fw) = self.floating.get_mut(&window_id) {
+                    fw.x = (x - offset_x).max(0.0);
+                    fw.y = (y - offset_y).max(0.0);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            DragState::Resize { window_id, start_w, start_h, start_mouse } => {
+                if let Some(fw) = self.floating.get_mut(&window_id) {
+                    let dx = x - start_mouse.0;
+                    let dy = y - start_mouse.1;
+                    fw.w = (start_w + dx).max(120.0);
+                    fw.h = (start_h + dy).max(80.0);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_mouse_release(&mut self) {
+        let Some(drag) = self.drag.take() else { return };
+        if let DragState::Resize { window_id, .. } = drag {
+            // Commit the new tmux size for that window (cells).
+            if let Some(fw) = self.floating.get(&window_id) {
+                let cols = ((fw.w - 12.0) / render::CELL_W).floor().max(20.0) as u16;
+                let rows = ((fw.h - TITLE_BAR - 6.0) / render::CELL_H).floor().max(5.0) as u16;
+                self.tmux_cmd(&format!("resize-window -t {window_id} -x {cols} -y {rows}"));
+            }
         }
     }
 
@@ -453,6 +634,19 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_key(event);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let PhysicalPosition { x, y } = position;
+                self.mouse = (x as f32, y as f32);
+                self.handle_mouse_move();
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == MouseButton::Left {
+                    match state {
+                        ElementState::Pressed => self.handle_mouse_press(),
+                        ElementState::Released => self.handle_mouse_release(),
+                    }
+                }
             }
             WindowEvent::RedrawRequested => {
                 let preedit = self.composer.preedit();
