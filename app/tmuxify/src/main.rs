@@ -75,6 +75,8 @@ enum HitTarget {
     Close,
     Drag,
     ToggleSidebar,
+    Session(u8),
+    NewSession,
 }
 
 #[derive(Debug, Clone)]
@@ -92,15 +94,42 @@ enum DragState {
     },
 }
 
+/// One sidebar entry = one tmux session = its own tmux -C subprocess.
+pub struct SessionState {
+    pub number: u8,
+    pub tmux: TmuxSession,
+    pub panes: HashMap<String, PaneGrid>,
+    pub windows: BTreeMap<String, WindowTab>,
+    pub active_window: Option<String>,
+    pub last_cwd_query: Instant,
+}
+
+impl SessionState {
+    fn new(number: u8) -> Result<Self> {
+        let cwd = std::env::var("HOME").ok();
+        let name = format!("tmuxify-{}-{}", std::process::id(), number);
+        let tmux = TmuxSession::start(StartOptions {
+            cwd: cwd.as_deref(),
+            auto_run: None,
+            session_name: Some(&name),
+            flush_interval: Duration::from_millis(33),
+        })?;
+        Ok(Self {
+            number,
+            tmux,
+            panes: HashMap::new(),
+            windows: BTreeMap::new(),
+            active_window: None,
+            last_cwd_query: Instant::now() - Duration::from_secs(60),
+        })
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    tmux: Option<TmuxSession>,
-    /// pane_id ("%N") → grid + cursor. All panes across all tabs.
-    panes: HashMap<String, PaneGrid>,
-    /// window_id ("@N") → tab state.
-    windows: BTreeMap<String, WindowTab>,
-    active_window: Option<String>,
+    sessions: BTreeMap<u8, SessionState>,
+    active_session: u8,
     mouse: (f32, f32),
     drag: Option<DragState>,
     hangul_mode: bool,
@@ -109,7 +138,6 @@ struct App {
     ctrl: bool,
     alt: bool,
     last_poll: Instant,
-    last_cwd_query: Instant,
     sidebar_open: bool,
 }
 
@@ -118,10 +146,8 @@ impl App {
         Self {
             window: None,
             renderer: None,
-            tmux: None,
-            panes: HashMap::new(),
-            windows: BTreeMap::new(),
-            active_window: None,
+            sessions: BTreeMap::new(),
+            active_session: 1,
             mouse: (0.0, 0.0),
             drag: None,
             hangul_mode: false,
@@ -130,31 +156,84 @@ impl App {
             ctrl: false,
             alt: false,
             last_poll: Instant::now(),
-            last_cwd_query: Instant::now() - Duration::from_secs(60),
             sidebar_open: true,
         }
     }
 
+    fn ensure_session(&mut self, n: u8) {
+        if !self.sessions.contains_key(&n) {
+            match SessionState::new(n) {
+                Ok(s) => {
+                    self.sessions.insert(n, s);
+                }
+                Err(e) => println!("[session {n} create err] {e}"),
+            }
+        }
+    }
+
+    fn switch_session(&mut self, n: u8) {
+        if n == 0 {
+            return;
+        }
+        self.ensure_session(n);
+        if self.sessions.contains_key(&n) {
+            self.active_session = n;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    fn new_session(&mut self) {
+        let next = (1u8..=99).find(|n| !self.sessions.contains_key(n));
+        if let Some(n) = next {
+            self.switch_session(n);
+        }
+    }
+
+    fn active(&self) -> Option<&SessionState> {
+        self.sessions.get(&self.active_session)
+    }
+
+    fn active_mut(&mut self) -> Option<&mut SessionState> {
+        self.sessions.get_mut(&self.active_session)
+    }
+
     fn poll_tmux(&mut self) {
-        let Some(t) = &self.tmux else { return };
-        let screens: Vec<ScreenUpdate> = t.screens.try_iter().collect();
-        let events: Vec<TmuxEvent> = t.events.try_iter().collect();
-        let queries: Vec<Vec<String>> = t.queries.try_iter().collect();
-        let due_for_query = self.last_cwd_query.elapsed() >= Duration::from_secs(2);
-        let any = !screens.is_empty() || !events.is_empty() || !queries.is_empty();
-        for u in screens {
-            self.apply_screen(u);
-        }
-        for e in events {
-            self.apply_event(e);
-        }
-        for resp in queries {
-            self.apply_cwd_query(resp);
-        }
-        if due_for_query {
-            self.last_cwd_query = Instant::now();
-            if let Some(t) = &self.tmux {
-                let _ = t.send_query("list-panes -s -F '#{window_id} #{pane_id} #{pane_current_path}'");
+        let keys: Vec<u8> = self.sessions.keys().copied().collect();
+        let mut any = false;
+        for k in keys {
+            let due = self
+                .sessions
+                .get(&k)
+                .map(|s| s.last_cwd_query.elapsed() >= Duration::from_secs(2))
+                .unwrap_or(false);
+            let (screens, events, queries) = {
+                let s = self.sessions.get(&k).unwrap();
+                (
+                    s.tmux.screens.try_iter().collect::<Vec<_>>(),
+                    s.tmux.events.try_iter().collect::<Vec<_>>(),
+                    s.tmux.queries.try_iter().collect::<Vec<_>>(),
+                )
+            };
+            if !screens.is_empty() || !events.is_empty() || !queries.is_empty() {
+                any = true;
+            }
+            for u in screens {
+                Self::apply_screen(self.sessions.get_mut(&k).unwrap(), u);
+            }
+            for e in events {
+                Self::apply_event(self.sessions.get_mut(&k).unwrap(), e);
+            }
+            for resp in queries {
+                Self::apply_cwd_query(self.sessions.get_mut(&k).unwrap(), resp);
+            }
+            if due {
+                let s = self.sessions.get_mut(&k).unwrap();
+                s.last_cwd_query = Instant::now();
+                let _ = s.tmux.send_query(
+                    "list-panes -s -F '#{window_id} #{pane_id} #{pane_current_path}'",
+                );
             }
         }
         if any {
@@ -164,8 +243,8 @@ impl App {
         }
     }
 
-    fn apply_screen(&mut self, u: ScreenUpdate) {
-        let entry = self.panes.entry(u.pane_id.clone()).or_default();
+    fn apply_screen(s: &mut SessionState, u: ScreenUpdate) {
+        let entry = s.panes.entry(u.pane_id.clone()).or_default();
         if entry.grid.len() != u.rows as usize || entry.cols != u.cols {
             entry.grid = vec![" ".repeat(u.cols as usize); u.rows as usize];
             entry.rows = u.rows;
@@ -178,9 +257,8 @@ impl App {
         }
         entry.cursor_row = u.cursor_row;
         entry.cursor_col = u.cursor_col;
-        // Push OSC title to the matching floating pane.
         if let Some(t) = u.title.as_ref() {
-            for tab in self.windows.values_mut() {
+            for tab in s.windows.values_mut() {
                 if let Some(fp) = tab.floating.get_mut(&u.pane_id) {
                     fp.title = t.clone();
                     break;
@@ -189,7 +267,7 @@ impl App {
         }
     }
 
-    fn apply_event(&mut self, e: TmuxEvent) {
+    fn apply_event(s: &mut SessionState, e: TmuxEvent) {
         match e {
             TmuxEvent::LayoutChange { window_id, layout } => {
                 let first = layout.split_whitespace().next().unwrap_or("");
@@ -204,7 +282,7 @@ impl App {
                         _ => None,
                     })
                     .collect();
-                let tab = self.windows.entry(window_id.clone()).or_insert_with(|| {
+                let tab = s.windows.entry(window_id.clone()).or_insert_with(|| {
                     WindowTab {
                         title: window_id.clone(),
                         ..Default::default()
@@ -244,12 +322,12 @@ impl App {
                     tab.active_pane = leaves.first().cloned();
                 }
                 tab.layout = Some(l);
-                if self.active_window.is_none() {
-                    self.active_window = Some(window_id);
+                if s.active_window.is_none() {
+                    s.active_window = Some(window_id);
                 }
             }
             TmuxEvent::WindowAdd { window_id } => {
-                self.windows
+                s.windows
                     .entry(window_id.clone())
                     .or_insert_with(|| WindowTab {
                         title: window_id.clone(),
@@ -257,13 +335,13 @@ impl App {
                     });
             }
             TmuxEvent::WindowClose { window_id } => {
-                self.windows.remove(&window_id);
-                if self.active_window.as_deref() == Some(&window_id) {
-                    self.active_window = self.windows.keys().next().cloned();
+                s.windows.remove(&window_id);
+                if s.active_window.as_deref() == Some(&window_id) {
+                    s.active_window = s.windows.keys().next().cloned();
                 }
             }
             TmuxEvent::WindowRenamed { window_id, name } => {
-                if let Some(t) = self.windows.get_mut(&window_id) {
+                if let Some(t) = s.windows.get_mut(&window_id) {
                     t.title = name;
                 }
             }
@@ -271,14 +349,14 @@ impl App {
         }
     }
 
-    fn apply_cwd_query(&mut self, lines: Vec<String>) {
+    fn apply_cwd_query(s: &mut SessionState, lines: Vec<String>) {
         for line in lines {
             let mut it = line.splitn(3, ' ');
             let Some(wid) = it.next() else { continue };
             let Some(pid) = it.next() else { continue };
             let Some(path) = it.next() else { continue };
-            let basename = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path);
-            if let Some(tab) = self.windows.get_mut(wid) {
+            let basename = path.rsplit('/').find(|st| !st.is_empty()).unwrap_or(path);
+            if let Some(tab) = s.windows.get_mut(wid) {
                 if let Some(fp) = tab.floating.get_mut(pid) {
                     fp.title = format!("{basename}  ·  {path}");
                 }
@@ -290,11 +368,11 @@ impl App {
     }
 
     fn send_bytes(&self, bytes: &[u8]) {
-        let Some(t) = &self.tmux else { return };
-        let target = self
+        let Some(s) = self.active() else { return };
+        let target = s
             .active_window
             .as_ref()
-            .and_then(|w| self.windows.get(w))
+            .and_then(|w| s.windows.get(w))
             .and_then(|tab| tab.active_pane.clone());
         let mut hex = String::with_capacity(bytes.len() * 3);
         for (i, b) in bytes.iter().enumerate() {
@@ -303,12 +381,12 @@ impl App {
             }
             let _ = write!(hex, "{:02x}", b);
         }
-        let _ = t.send_keys_hex(target.as_deref(), &hex);
+        let _ = s.tmux.send_keys_hex(target.as_deref(), &hex);
     }
 
     fn tmux_cmd(&self, cmd: &str) {
-        if let Some(t) = &self.tmux {
-            let _ = t.send_cmd(cmd);
+        if let Some(s) = self.active() {
+            let _ = s.tmux.send_cmd(cmd);
         }
     }
 
@@ -388,7 +466,11 @@ impl App {
             }
             if self.shift {
                 match ev.physical_key {
-                    PC(KeyCode::KeyT) | PC(KeyCode::KeyN) => {
+                    PC(KeyCode::KeyT) => {
+                        self.new_session();
+                        return;
+                    }
+                    PC(KeyCode::KeyN) => {
                         self.spawn_new_window();
                         return;
                     }
@@ -496,6 +578,26 @@ impl App {
         } else {
             0.0
         };
+        // Sidebar zone (below title bar, left column).
+        if self.sidebar_open && x < sidebar_w && y >= render::SESSION_BAR_HEIGHT {
+            // Each session row is 56px starting after the search bar.
+            let row_h = 56.0;
+            let row_gap = 6.0;
+            let first_row_y = render::SESSION_BAR_HEIGHT + 12.0 + 28.0 + 12.0;
+            let mut row_y = first_row_y;
+            for n in self.sessions.keys() {
+                if y >= row_y && y < row_y + row_h {
+                    return Some(HitTarget::Session(*n));
+                }
+                row_y += row_h + row_gap;
+            }
+            // "+ New session" button row right after the list.
+            let new_h = 36.0;
+            if y >= row_y && y < row_y + new_h {
+                return Some(HitTarget::NewSession);
+            }
+            return None;
+        }
         // Title-bar zone (decorationless OS chrome).
         if y < render::SESSION_BAR_HEIGHT {
             // Sidebar toggle = leftmost square in the title bar.
@@ -525,7 +627,11 @@ impl App {
             // Tabs (offset by sidebar + toggle button).
             let tabs_origin = sidebar_w.max(toggle_x_end + 4.0);
             let mut tab_x = tabs_origin;
-            for wid in self.windows.keys() {
+            let win_keys: Vec<String> = self
+                .active()
+                .map(|s| s.windows.keys().cloned().collect())
+                .unwrap_or_default();
+            for wid in &win_keys {
                 if x >= tab_x && x <= tab_x + render::SESSION_TAB_W {
                     return Some(HitTarget::Tab(wid.clone()));
                 }
@@ -544,9 +650,10 @@ impl App {
         if x < sidebar_w {
             return None;
         }
-        // Floating panes (active window only) — topmost (active) first.
-        let Some(wid) = self.active_window.as_ref() else { return None };
-        let Some(tab) = self.windows.get(wid) else { return None };
+        // Floating panes of the active session/window only.
+        let Some(s) = self.active() else { return None };
+        let Some(wid) = s.active_window.as_ref() else { return None };
+        let Some(tab) = s.windows.get(wid) else { return None };
         let mut order: Vec<&FloatingPane> = tab.floating.values().collect();
         order.sort_by_key(|f| (tab.active_pane.as_deref() == Some(&f.pane_id)) as u8);
         for fp in order.iter().rev() {
@@ -573,10 +680,18 @@ impl App {
         match hit {
             HitTarget::Tab(wid) => {
                 self.tmux_cmd(&format!("select-window -t {wid}"));
-                self.active_window = Some(wid);
+                if let Some(s) = self.active_mut() {
+                    s.active_window = Some(wid);
+                }
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
+            }
+            HitTarget::Session(n) => {
+                self.switch_session(n);
+            }
+            HitTarget::NewSession => {
+                self.new_session();
             }
             HitTarget::NewTab => {
                 self.tmux_cmd("new-window");
@@ -641,14 +756,14 @@ impl App {
     }
 
     fn active_tab(&self) -> Option<&WindowTab> {
-        self.active_window
-            .as_ref()
-            .and_then(|w| self.windows.get(w))
+        let s = self.active()?;
+        s.active_window.as_ref().and_then(|w| s.windows.get(w))
     }
 
     fn active_tab_mut(&mut self) -> Option<&mut WindowTab> {
-        let wid = self.active_window.clone()?;
-        self.windows.get_mut(&wid)
+        let wid = self.active()?.active_window.clone()?;
+        let s = self.active_mut()?;
+        s.windows.get_mut(&wid)
     }
 
     fn activate_pane(&mut self, pane_id: &str) {
@@ -717,24 +832,12 @@ impl ApplicationHandler for App {
         let renderer =
             pollster::block_on(Renderer::new(window.clone())).expect("renderer init");
 
-        // Each OS window owns its own tmux session; name uniquely per pid.
-        let cwd = std::env::var("HOME").ok();
-        let name = format!("tmuxify-{}", std::process::id());
-        match TmuxSession::start(StartOptions {
-            cwd: cwd.as_deref(),
-            auto_run: None,
-            session_name: Some(&name),
-            flush_interval: Duration::from_millis(33),
-        }) {
-            Ok(s) => {
-                println!("[tmux] {}", s.session_name);
-                self.tmux = Some(s);
-            }
-            Err(e) => println!("[tmux] start failed: {e}"),
-        }
+        // First session always exists.
+        self.ensure_session(1);
+        self.active_session = 1;
         let (cols, rows) = cells_for_size(window.inner_size().width, window.inner_size().height);
-        if let Some(t) = &self.tmux {
-            let _ = t.resize_client(cols, rows);
+        for s in self.sessions.values() {
+            let _ = s.tmux.resize_client(cols, rows);
         }
 
         self.window = Some(window.clone());
@@ -759,8 +862,8 @@ impl ApplicationHandler for App {
                     }
                 }
                 let (cols, rows) = cells_for_size(size.width, size.height);
-                if let Some(t) = &self.tmux {
-                    let _ = t.resize_client(cols, rows);
+                for s in self.sessions.values() {
+                    let _ = s.tmux.resize_client(cols, rows);
                 }
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -784,25 +887,37 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let preedit = self.composer.preedit();
-                let active_window = self.active_window.clone();
-                let active_pane = self
-                    .active_window
-                    .as_ref()
-                    .and_then(|w| self.windows.get(w))
-                    .and_then(|t| t.active_pane.clone());
-                let panes_clone = self.panes.clone();
-                let tabs_for_render: Vec<(String, String, BTreeMap<String, FloatingPane>)> = self
-                    .windows
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.title.clone(), v.floating.clone()))
-                    .collect();
-                let active_floating = active_window
-                    .as_ref()
-                    .and_then(|w| self.windows.get(w))
-                    .map(|t| t.floating.clone())
-                    .unwrap_or_default();
                 let hangul_mode = self.hangul_mode;
                 let sidebar_open = self.sidebar_open;
+                let active_session_n = self.active_session;
+                let session_rows: Vec<(u8, String, usize)> = self
+                    .sessions
+                    .iter()
+                    .map(|(k, s)| (*k, format!("session {k}"), s.windows.len()))
+                    .collect();
+                let (active_window, active_pane, panes_clone, tabs_for_render, active_floating) =
+                    match self.sessions.get(&active_session_n) {
+                        Some(s) => {
+                            let aw = s.active_window.clone();
+                            let ap = aw
+                                .as_ref()
+                                .and_then(|w| s.windows.get(w))
+                                .and_then(|t| t.active_pane.clone());
+                            let pc = s.panes.clone();
+                            let tabs: Vec<(String, String, BTreeMap<String, FloatingPane>)> = s
+                                .windows
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.title.clone(), v.floating.clone()))
+                                .collect();
+                            let af = aw
+                                .as_ref()
+                                .and_then(|w| s.windows.get(w))
+                                .map(|t| t.floating.clone())
+                                .unwrap_or_default();
+                            (aw, ap, pc, tabs, af)
+                        }
+                        None => (None, None, HashMap::new(), Vec::new(), BTreeMap::new()),
+                    };
                 if let Some(r) = self.renderer.as_mut() {
                     let _ = r.render(
                         &active_floating,
@@ -813,6 +928,8 @@ impl ApplicationHandler for App {
                         hangul_mode,
                         preedit.as_deref(),
                         sidebar_open,
+                        &session_rows,
+                        active_session_n,
                     );
                 }
             }

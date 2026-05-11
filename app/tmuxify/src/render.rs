@@ -23,16 +23,33 @@ use winit::window::Window;
 use crate::quad::{QuadInstance, QuadRenderer};
 use crate::{FloatingPane, PaneGrid};
 
-const FONT_SIZE: f32 = 14.0;
-const LINE_HEIGHT: f32 = 18.0;
-pub const PADDING: f32 = 8.0;
+const FONT_SIZE: f32 = 13.0;
+const FONT_SIZE_SM: f32 = 11.0;
+const LINE_HEIGHT: f32 = 17.0;
+pub const PADDING: f32 = 10.0;
 const STATUS_HEIGHT: f32 = 22.0;
-const TITLE_HEIGHT: f32 = 22.0;
-const BOX_PAD: f32 = 6.0;
-pub const SESSION_BAR_HEIGHT: f32 = 36.0;
-pub const SESSION_TAB_W: f32 = 160.0;
-pub const SESSION_TAB_GAP: f32 = 4.0;
+const TITLE_HEIGHT: f32 = 26.0;
+const BOX_PAD: f32 = 8.0;
+pub const SESSION_BAR_HEIGHT: f32 = 38.0;
+pub const SESSION_TAB_W: f32 = 170.0;
+pub const SESSION_TAB_GAP: f32 = 2.0;
 pub const SIDEBAR_W: f32 = 240.0;
+
+// === Palette (Warp-ish dark neutrals) ===
+const BG: [f32; 4] = [0.043, 0.051, 0.063, 1.0]; // app bg
+const CHROME_BG: [f32; 4] = [0.063, 0.075, 0.094, 1.0]; // title-bar
+const SIDEBAR_BG: [f32; 4] = [0.051, 0.063, 0.078, 1.0];
+const PANEL_BG: [f32; 4] = [0.094, 0.110, 0.133, 1.0]; // unstyled tile
+const PANEL_HOVER: [f32; 4] = [0.117, 0.137, 0.165, 1.0];
+const PANEL_ACTIVE: [f32; 4] = [0.137, 0.180, 0.247, 1.0];
+const BORDER: [f32; 4] = [0.184, 0.204, 0.235, 1.0];
+const ACCENT: [f32; 4] = [0.353, 0.510, 0.953, 1.0]; // brand blue
+const ACCENT_DIM: [f32; 4] = [0.353, 0.510, 0.953, 0.45];
+const TEXT_PRI: GColor = GColor::rgb(0xea, 0xee, 0xf4);
+const TEXT_SEC: GColor = GColor::rgb(0x9b, 0xa3, 0xb0);
+const TEXT_MUT: GColor = GColor::rgb(0x60, 0x68, 0x76);
+const TEXT_DANGER: GColor = GColor::rgb(0xff, 0x9a, 0x9a);
+const ACCENT_DIM_TEXT: GColor = GColor::rgb(0x6e, 0x8a, 0xc8);
 
 pub const CELL_W: f32 = FONT_SIZE * 0.55;
 pub const CELL_H: f32 = LINE_HEIGHT;
@@ -169,6 +186,8 @@ impl Renderer {
         hangul_mode: bool,
         preedit: Option<&str>,
         sidebar_open: bool,
+        sessions: &[(u8, String, usize)],
+        active_session: u8,
     ) -> Result<()> {
         let sidebar_w = if sidebar_open { SIDEBAR_W } else { 0.0 };
         struct Built {
@@ -182,27 +201,23 @@ impl Renderer {
         let mut quads: Vec<QuadInstance> = Vec::new();
         let attrs = Attrs::new().family(Family::Name("D2Coding"));
 
-        // === Top session/tab bar ===
+        // === Top chrome strip ===
         quads.push(QuadInstance {
             rect: [0.0, 0.0, self.width as f32, SESSION_BAR_HEIGHT],
-            color: [0.04, 0.05, 0.07, 1.0],
+            color: CHROME_BG,
         });
         quads.push(QuadInstance {
             rect: [0.0, SESSION_BAR_HEIGHT - 1.0, self.width as f32, 1.0],
-            color: [0.20, 0.22, 0.27, 1.0],
+            color: BORDER,
         });
         // Sidebar toggle button (leftmost in title bar).
         let toggle_x = PADDING;
         let toggle_w = 28.0;
-        let toggle_y = 4.0;
-        let toggle_h = SESSION_BAR_HEIGHT - 8.0;
+        let toggle_y = 6.0;
+        let toggle_h = SESSION_BAR_HEIGHT - 12.0;
         quads.push(QuadInstance {
             rect: [toggle_x, toggle_y, toggle_w, toggle_h],
-            color: if sidebar_open {
-                [0.18, 0.20, 0.25, 1.0]
-            } else {
-                [0.09, 0.10, 0.13, 1.0]
-            },
+            color: if sidebar_open { PANEL_ACTIVE } else { PANEL_BG },
         });
         let mut tg_buf =
             Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -225,7 +240,7 @@ impl Renderer {
                 right: (toggle_x + toggle_w) as i32,
                 bottom: (toggle_y + toggle_h) as i32,
             },
-            color: GColor::rgb(0xc0, 0xc8, 0xd0),
+            color: TEXT_PRI,
         });
 
         let tabs_origin = sidebar_w.max(toggle_x + toggle_w + 8.0);
@@ -234,21 +249,25 @@ impl Renderer {
             let active = active_window == Some(wid.as_str());
             let tab_x = tabs_origin + i as f32 * (SESSION_TAB_W + SESSION_TAB_GAP);
             last_tab_x = tab_x + SESSION_TAB_W + SESSION_TAB_GAP;
-            let tab_y = 4.0;
-            let tab_h = SESSION_BAR_HEIGHT - 6.0;
-            let tab_color = if active {
-                [0.16, 0.20, 0.28, 1.0]
-            } else {
-                [0.09, 0.10, 0.13, 1.0]
-            };
+            let tab_y = 6.0;
+            let tab_h = SESSION_BAR_HEIGHT - 6.0; // bottom flush with chrome strip
+            let tab_color = if active { BG } else { CHROME_BG };
             quads.push(QuadInstance {
                 rect: [tab_x, tab_y, SESSION_TAB_W, tab_h],
                 color: tab_color,
             });
             if active {
+                // top accent bar + bottom edge merged with body bg.
                 quads.push(QuadInstance {
                     rect: [tab_x, tab_y, SESSION_TAB_W, 2.0],
-                    color: [0.45, 0.65, 0.95, 1.0],
+                    color: ACCENT,
+                });
+            }
+            // tab dividers
+            if i + 1 < tabs.len() && !active {
+                quads.push(QuadInstance {
+                    rect: [tab_x + SESSION_TAB_W, tab_y + 8.0, 1.0, tab_h - 16.0],
+                    color: BORDER,
                 });
             }
             let mut tab_buf =
@@ -270,21 +289,17 @@ impl Renderer {
                     right: (tab_x + SESSION_TAB_W) as i32,
                     bottom: (tab_y + tab_h) as i32,
                 },
-                color: if active {
-                    GColor::rgb(0xff, 0xff, 0xff)
-                } else {
-                    GColor::rgb(0x90, 0x95, 0xa0)
-                },
+                color: if active { TEXT_PRI } else { TEXT_SEC },
             });
         }
 
         // "+" new-tab button.
         let plus_w = 28.0;
-        let plus_x = last_tab_x;
-        let plus_h = SESSION_BAR_HEIGHT - 6.0;
+        let plus_x = last_tab_x + 4.0;
+        let plus_h = SESSION_BAR_HEIGHT - 12.0;
         quads.push(QuadInstance {
-            rect: [plus_x, 4.0, plus_w, plus_h],
-            color: [0.09, 0.10, 0.13, 1.0],
+            rect: [plus_x, 6.0, plus_w, plus_h],
+            color: PANEL_BG,
         });
         let mut plus_buf =
             Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -294,14 +309,14 @@ impl Renderer {
         built.push(Built {
             buffer: plus_buf,
             left: plus_x,
-            top: 4.0 + 5.0,
+            top: 9.0,
             bounds: TextBounds {
                 left: plus_x as i32,
-                top: 4,
+                top: 6,
                 right: (plus_x + plus_w) as i32,
-                bottom: (4.0 + plus_h) as i32,
+                bottom: (6.0 + plus_h) as i32,
             },
-            color: GColor::rgb(0xc0, 0xc0, 0xc0),
+            color: TEXT_SEC,
         });
 
         // OS controls on the far right: minimise, max-toggle, close.
@@ -340,11 +355,7 @@ impl Renderer {
                     right: (bx + btn_w) as i32,
                     bottom: SESSION_BAR_HEIGHT as i32,
                 },
-                color: if i == 2 {
-                    GColor::rgb(0xff, 0xc0, 0xc0)
-                } else {
-                    GColor::rgb(0xc0, 0xc0, 0xc0)
-                },
+                color: if i == 2 { TEXT_DANGER } else { TEXT_SEC },
             });
         }
 
@@ -357,9 +368,8 @@ impl Renderer {
                     sidebar_w,
                     self.height as f32 - SESSION_BAR_HEIGHT,
                 ],
-                color: [0.06, 0.07, 0.09, 1.0],
+                color: SIDEBAR_BG,
             });
-            // 1px right border.
             quads.push(QuadInstance {
                 rect: [
                     sidebar_w - 1.0,
@@ -367,14 +377,14 @@ impl Renderer {
                     1.0,
                     self.height as f32 - SESSION_BAR_HEIGHT,
                 ],
-                color: [0.20, 0.22, 0.27, 1.0],
+                color: BORDER,
             });
             // Search bar placeholder.
-            let search_y = SESSION_BAR_HEIGHT + 12.0;
-            let search_h = 28.0;
+            let search_y = SESSION_BAR_HEIGHT + 14.0;
+            let search_h = 30.0;
             quads.push(QuadInstance {
-                rect: [12.0, search_y, sidebar_w - 24.0, search_h],
-                color: [0.10, 0.11, 0.14, 1.0],
+                rect: [14.0, search_y, sidebar_w - 28.0, search_h],
+                color: PANEL_BG,
             });
             let mut search_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -392,48 +402,115 @@ impl Renderer {
             search_buf.shape_until_scroll(&mut self.font_system, false);
             built.push(Built {
                 buffer: search_buf,
-                left: 12.0,
-                top: search_y + 6.0,
+                left: 14.0,
+                top: search_y + 7.0,
                 bounds: TextBounds {
-                    left: 12,
+                    left: 14,
                     top: search_y as i32,
-                    right: (sidebar_w - 12.0) as i32,
+                    right: (sidebar_w - 14.0) as i32,
                     bottom: (search_y + search_h) as i32,
                 },
-                color: GColor::rgb(0x80, 0x86, 0x90),
+                color: TEXT_MUT,
             });
-            // Single placeholder row for the active session.
-            let row_y = search_y + search_h + 12.0;
-            let row_h = 56.0;
+            // Real session list.
+            let row_h = 60.0;
+            let row_gap = 4.0;
+            let first_row_y = search_y + search_h + 14.0;
+            let mut row_y = first_row_y;
+            for (n, name, win_count) in sessions {
+                let active = *n == active_session;
+                let bg = if active { PANEL_ACTIVE } else { PANEL_BG };
+                quads.push(QuadInstance {
+                    rect: [14.0, row_y, sidebar_w - 28.0, row_h],
+                    color: bg,
+                });
+                if active {
+                    quads.push(QuadInstance {
+                        rect: [14.0, row_y, 3.0, row_h],
+                        color: ACCENT,
+                    });
+                }
+                let mut name_buf =
+                    Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+                name_buf.set_size(
+                    &mut self.font_system,
+                    Some(sidebar_w - 40.0),
+                    Some(20.0),
+                );
+                name_buf.set_text(&mut self.font_system, name, attrs, Shaping::Advanced);
+                name_buf.shape_until_scroll(&mut self.font_system, false);
+                built.push(Built {
+                    buffer: name_buf,
+                    left: 26.0,
+                    top: row_y + 12.0,
+                    bounds: TextBounds {
+                        left: 14,
+                        top: row_y as i32,
+                        right: (sidebar_w - 14.0) as i32,
+                        bottom: (row_y + row_h) as i32,
+                    },
+                    color: if active { TEXT_PRI } else { TEXT_SEC },
+                });
+                let mut sub_buf =
+                    Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 3.0));
+                sub_buf.set_size(
+                    &mut self.font_system,
+                    Some(sidebar_w - 40.0),
+                    Some(16.0),
+                );
+                let sub = format!(
+                    "{} window{}",
+                    win_count,
+                    if *win_count == 1 { "" } else { "s" }
+                );
+                sub_buf.set_text(&mut self.font_system, &sub, attrs, Shaping::Advanced);
+                sub_buf.shape_until_scroll(&mut self.font_system, false);
+                built.push(Built {
+                    buffer: sub_buf,
+                    left: 26.0,
+                    top: row_y + 32.0,
+                    bounds: TextBounds {
+                        left: 14,
+                        top: row_y as i32,
+                        right: (sidebar_w - 14.0) as i32,
+                        bottom: (row_y + row_h) as i32,
+                    },
+                    color: TEXT_MUT,
+                });
+                row_y += row_h + row_gap;
+            }
+            // "+ New session" button.
+            let new_h = 36.0;
+            row_y += 6.0;
             quads.push(QuadInstance {
-                rect: [12.0, row_y, sidebar_w - 24.0, row_h],
-                color: [0.13, 0.15, 0.19, 1.0],
+                rect: [14.0, row_y, sidebar_w - 28.0, new_h],
+                color: PANEL_BG,
             });
-            let mut row_buf =
+            let mut new_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-            row_buf.set_size(
+            new_buf.set_size(
                 &mut self.font_system,
                 Some(sidebar_w - 32.0),
-                Some(row_h),
+                Some(new_h),
             );
-            let row_text = format!(
-                "● tmuxify\n  {} window{}",
-                tabs.len(),
-                if tabs.len() == 1 { "" } else { "s" }
+            new_buf.set_text(
+                &mut self.font_system,
+                "  + New session",
+                attrs,
+                Shaping::Advanced,
             );
-            row_buf.set_text(&mut self.font_system, &row_text, attrs, Shaping::Advanced);
-            row_buf.shape_until_scroll(&mut self.font_system, false);
+            new_buf.shape_until_scroll(&mut self.font_system, false);
             built.push(Built {
-                buffer: row_buf,
-                left: 20.0,
-                top: row_y + 8.0,
+                buffer: new_buf,
+                left: 22.0,
+                top: row_y + 10.0,
                 bounds: TextBounds {
-                    left: 12,
+                    left: 14,
                     top: row_y as i32,
-                    right: (sidebar_w - 12.0) as i32,
-                    bottom: (row_y + row_h) as i32,
+                    right: (sidebar_w - 14.0) as i32,
+                    bottom: (row_y + new_h) as i32,
                 },
-                color: GColor::rgb(0xe6, 0xe6, 0xe6),
+                color: ACCENT_DIM_TEXT,
             });
         }
 
@@ -443,17 +520,9 @@ impl Renderer {
 
         for fp in order {
             let is_active = active_pane == Some(&fp.pane_id);
-            let border_color = if is_active {
-                [0.45, 0.55, 0.75, 1.0]
-            } else {
-                [0.20, 0.22, 0.27, 1.0]
-            };
-            let title_bg = if is_active {
-                [0.18, 0.22, 0.30, 1.0]
-            } else {
-                [0.14, 0.16, 0.20, 1.0]
-            };
-            let body_bg = [0.12, 0.13, 0.16, 1.0];
+            let border_color = if is_active { ACCENT_DIM } else { BORDER };
+            let title_bg = if is_active { PANEL_ACTIVE } else { PANEL_BG };
+            let body_bg = [0.078, 0.090, 0.110, 1.0];
             quads.push(QuadInstance {
                 rect: [fp.x, fp.y, fp.w, fp.h],
                 color: body_bg,
@@ -480,12 +549,8 @@ impl Renderer {
                 color: border_color,
             });
             quads.push(QuadInstance {
-                rect: [fp.x + fp.w - 14.0, fp.y + fp.h - 14.0, 14.0, 14.0],
-                color: if is_active {
-                    [0.45, 0.55, 0.75, 0.5]
-                } else {
-                    [0.30, 0.32, 0.38, 0.5]
-                },
+                rect: [fp.x + fp.w - 12.0, fp.y + fp.h - 12.0, 12.0, 12.0],
+                color: if is_active { ACCENT_DIM } else { [0.30, 0.32, 0.38, 0.5] },
             });
 
             // Title.
@@ -518,11 +583,7 @@ impl Renderer {
                     right: (fp.x + fp.w) as i32,
                     bottom: (fp.y + TITLE_HEIGHT) as i32,
                 },
-                color: if is_active {
-                    GColor::rgb(0xff, 0xff, 0xff)
-                } else {
-                    GColor::rgb(0xb0, 0xb0, 0xb0)
-                },
+                color: if is_active { TEXT_PRI } else { TEXT_SEC },
             });
 
             // Body.
@@ -551,11 +612,7 @@ impl Renderer {
                     right: (fp.x + fp.w - BOX_PAD) as i32,
                     bottom: (fp.y + fp.h - BOX_PAD) as i32,
                 },
-                color: if is_active {
-                    GColor::rgb(0xe6, 0xe6, 0xe6)
-                } else {
-                    GColor::rgb(0x88, 0x88, 0x88)
-                },
+                color: if is_active { TEXT_PRI } else { TEXT_SEC },
             });
         }
 
@@ -601,7 +658,7 @@ impl Renderer {
                 right: self.width as i32,
                 bottom: self.height as i32,
             },
-            default_color: GColor::rgb(0xa0, 0xa0, 0xa0),
+            default_color: TEXT_MUT,
             custom_glyphs: &[],
         };
         let all: Vec<TextArea> = win_areas.chain(std::iter::once(status_area)).collect();
