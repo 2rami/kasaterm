@@ -121,7 +121,11 @@ fn measure_cell(font_system: &mut FontSystem) -> (f32, f32) {
         .next()
         .map(|r| r.line_w)
         .unwrap_or(FONT_SIZE * 0.55 * 20.0);
-    let cw = total / 20.0;
+    let measured = total / 20.0;
+    // Layout-runs sometimes under-counts the trailing side-bearing of
+    // the rightmost glyph; add a small margin so cells don't squeeze
+    // the actual glyph width and clip neighbouring chars.
+    let cw = measured.max(FONT_SIZE * 0.55) + 1.0;
     (cw, LINE_HEIGHT)
 }
 

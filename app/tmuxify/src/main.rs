@@ -147,7 +147,7 @@ impl SessionState {
 
 fn list_tmux_sessions() -> Vec<String> {
     let output = std::process::Command::new("tmux")
-        .args(["list-sessions", "-F", "#{session_name}"])
+        .args(["-L", "tmuxify", "list-sessions", "-F", "#{session_name}"])
         .output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
@@ -398,8 +398,11 @@ impl App {
                                 title: pid.clone(),
                                 x: render::SIDEBAR_W + 130.0 + step * 30.0,
                                 y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
-                                w: 92.0 * render::CELL_W,
-                                h: 28.0 * render::CELL_H,
+                                // 89 cols × 28 rows in real D2Coding metrics
+                                // (~8.5 px advance + chrome padding) so the
+                                // visible body matches what we tell tmux.
+                                w: 89.0 * 8.5 + 16.0,
+                                h: 28.0 * render::CELL_H + 32.0,
                             },
                         );
                     }
@@ -1021,7 +1024,7 @@ impl App {
                 let name = self.sessions.get(&n).map(|s| s.tmux.session_name.clone());
                 if let Some(name) = name {
                     let _ = std::process::Command::new("tmux")
-                        .args(["kill-session", "-t", &name])
+                        .args(["-L", "tmuxify", "kill-session", "-t", &name])
                         .status();
                     self.sessions.remove(&n);
                     if self.active_session == n {
@@ -1156,8 +1159,19 @@ impl ApplicationHandler for App {
         self.ensure_session(1);
         self.active_session = 1;
         self.discover_external_sessions();
-        let (cols, rows) = renderer.cells_for_size(window.inner_size().width, window.inner_size().height);
+        // Tell every tmux client the (cols, rows) we actually show — the
+        // default floating-pane size, NOT the OS-window size — so apps
+        // wrap to the visible area instead of the whole 1100×700 canvas.
+        let cols: u16 = 89;
+        let rows: u16 = 28;
+        let _ = renderer.cells_for_size(window.inner_size().width, window.inner_size().height);
         for s in self.sessions.values() {
+            let _ = s.tmux.send_cmd("set -g window-size manual");
+            let _ = s.tmux.send_cmd("set -g aggressive-resize on");
+            let _ = s.tmux.send_cmd(&format!("set -g default-size {cols}x{rows}"));
+            let _ = s
+                .tmux
+                .send_cmd(&format!("resize-window -A -x {cols} -y {rows}"));
             let _ = s.tmux.resize_client(cols, rows);
         }
 
@@ -1182,14 +1196,9 @@ impl ApplicationHandler for App {
                         r.resize(w, h);
                     }
                 }
-                let (cols, rows) = self
-                    .renderer
-                    .as_ref()
-                    .map(|r| r.cells_for_size(size.width, size.height))
-                    .unwrap_or((80, 24));
-                for s in self.sessions.values() {
-                    let _ = s.tmux.resize_client(cols, rows);
-                }
+                // Keep the existing default cell grid; per-pane resize is
+                // handled when the user drags the floating-window handle.
+                let _ = size;
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
