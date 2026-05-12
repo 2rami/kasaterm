@@ -133,7 +133,7 @@ impl SessionState {
             auto_run: None,
             session_name: Some(name),
             flush_interval: Duration::from_millis(33),
-            cols: 89,
+            cols: 95,
             rows: 28,
         })?;
         Ok(Self {
@@ -400,7 +400,7 @@ impl App {
                                 title: pid.clone(),
                                 x: render::SIDEBAR_W + 130.0 + step * 30.0,
                                 y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
-                                w: 89.0 * render::CELL_W + 16.0,
+                                w: 95.0 * render::CELL_W + 16.0,
                                 h: 28.0 * render::CELL_H + 32.0,
                             },
                         );
@@ -1149,7 +1149,7 @@ impl ApplicationHandler for App {
         let attrs = Window::default_attributes()
             .with_title("tmuxify")
             .with_decorations(false)
-            .with_inner_size(winit::dpi::LogicalSize::new(1100.0, 700.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 760.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
         let renderer =
             pollster::block_on(Renderer::new(window.clone())).expect("renderer init");
@@ -1161,7 +1161,7 @@ impl ApplicationHandler for App {
         // Tell every tmux client the (cols, rows) we actually show — the
         // default floating-pane size, NOT the OS-window size — so apps
         // wrap to the visible area instead of the whole 1100×700 canvas.
-        let cols: u16 = 89;
+        let cols: u16 = 95;
         let rows: u16 = 28;
         let _ = renderer.cells_for_size(window.inner_size().width, window.inner_size().height);
         for s in self.sessions.values() {
