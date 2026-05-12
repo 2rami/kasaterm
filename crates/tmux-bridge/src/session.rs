@@ -21,6 +21,10 @@ pub struct TmuxSession {
     child: Child,
     stdin: Mutex<ChildStdin>,
     parsers: ParserMap,
+    /// (rows, cols) used to size newly-discovered pane parsers. Without
+    /// this, vt100 defaults to 80×24 and writes from a 95-col app wrap
+    /// at the wrong column, smearing characters across rows.
+    pane_size: Arc<Mutex<(u16, u16)>>,
     pub session_name: String,
     pub events: Receiver<TmuxEvent>,
     pub screens: Receiver<ScreenUpdate>,
@@ -102,6 +106,7 @@ impl TmuxSession {
         let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
 
         let parsers: ParserMap = Arc::new(Mutex::new(HashMap::new()));
+        let pane_size = Arc::new(Mutex::new((opts.rows, opts.cols)));
         let prev_rows: Arc<Mutex<HashMap<String, Vec<Row>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -113,6 +118,7 @@ impl TmuxSession {
         spawn_reader(
             stdout,
             parsers.clone(),
+            pane_size.clone(),
             event_tx,
             query_tx,
             pending_queries.clone(),
@@ -133,6 +139,7 @@ impl TmuxSession {
             child,
             stdin: Mutex::new(stdin),
             parsers,
+            pane_size,
             session_name,
             events: event_rx,
             screens: screen_rx,
@@ -165,6 +172,9 @@ impl TmuxSession {
 
     pub fn resize_client(&self, cols: u16, rows: u16) -> Result<()> {
         self.send_cmd(&format!("refresh-client -C {cols}x{rows}"))?;
+        if let Ok(mut sz) = self.pane_size.lock() {
+            *sz = (rows, cols);
+        }
         if let Ok(mut map) = self.parsers.lock() {
             for parser in map.values_mut() {
                 parser.set_size(rows, cols);
@@ -182,6 +192,7 @@ impl TmuxSession {
 fn spawn_reader(
     stdout: std::process::ChildStdout,
     parsers: ParserMap,
+    pane_size: Arc<Mutex<(u16, u16)>>,
     events: Sender<TmuxEvent>,
     queries: Sender<Vec<String>>,
     pending_queries: Arc<AtomicU32>,
@@ -197,10 +208,11 @@ fn spawn_reader(
             let event = parse_line(&line);
             match &event {
                 TmuxEvent::Output { pane_id, data } => {
+                    let (rows, cols) = *pane_size.lock().unwrap();
                     let mut map = parsers.lock().unwrap();
                     let p = map
                         .entry(pane_id.clone())
-                        .or_insert_with(|| vt100::Parser::new(24, 80, 5000));
+                        .or_insert_with(|| vt100::Parser::new(rows, cols, 5000));
                     p.process(data.as_bytes());
                 }
                 TmuxEvent::Begin { .. } => {
