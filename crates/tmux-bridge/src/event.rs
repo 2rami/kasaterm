@@ -38,6 +38,10 @@ pub fn parse_line(line: &str) -> TmuxEvent {
         "error" => parse_begin_end(rest).map(|(ts, id, fl)| TmuxEvent::Error { ts, id, flags: fl }),
         "output" => parse_output(rest),
         "window-add" => Some(TmuxEvent::WindowAdd { window_id: rest.to_string() }),
+        // tmux 3.4 sometimes sends only the unlinked variant for windows
+        // the control-mode client just created. Treat it the same as
+        // window-add so we register a tab for it either way.
+        "unlinked-window-add" => Some(TmuxEvent::WindowAdd { window_id: rest.to_string() }),
         "window-close" => Some(TmuxEvent::WindowClose { window_id: rest.to_string() }),
         "window-renamed" => split_two(rest)
             .map(|(id, name)| TmuxEvent::WindowRenamed { window_id: id, name }),

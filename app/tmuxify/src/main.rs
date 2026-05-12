@@ -65,11 +65,40 @@ pub struct WindowTab {
     pub next_cascade: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneEdge {
+    N,
+    NE,
+    E,
+    SE,
+    S,
+    SW,
+    W,
+    NW,
+}
+
+impl PaneEdge {
+    fn affects_left(self) -> bool {
+        matches!(self, Self::W | Self::NW | Self::SW)
+    }
+    fn affects_right(self) -> bool {
+        matches!(self, Self::E | Self::NE | Self::SE)
+    }
+    fn affects_top(self) -> bool {
+        matches!(self, Self::N | Self::NE | Self::NW)
+    }
+    fn affects_bottom(self) -> bool {
+        matches!(self, Self::S | Self::SE | Self::SW)
+    }
+}
+
 #[derive(Debug)]
 enum HitTarget {
     Title(String),
-    Resize(String),
+    Resize(String, PaneEdge),
     Body(String),
+    TabClose(String),
+    TaskbarPane(String),
     Tab(String),
     NewTab,
     Min,
@@ -103,11 +132,29 @@ enum DragState {
     },
     Resize {
         pane_id: String,
+        edge: PaneEdge,
+        start_x: f32,
+        start_y: f32,
         start_w: f32,
         start_h: f32,
         start_mouse: (f32, f32),
     },
     SidebarResize,
+    WindowMove {
+        /// Cursor position inside the window at drag start (px, py).
+        /// We keep the cursor anchored to this point as we move the
+        /// window — that's how Windows / macOS native drag feels.
+        anchor: (f32, f32),
+    },
+}
+
+/// Aero-Snap target for the outer (OS) window — set during a window
+/// drag when the cursor is within `edge` px of the monitor border.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SnapZone {
+    Left,
+    Right,
+    Top,
 }
 
 /// One sidebar entry = one tmux session = its own tmux -C subprocess.
@@ -132,7 +179,7 @@ impl SessionState {
             cwd: cwd.as_deref(),
             auto_run: None,
             session_name: Some(name),
-            flush_interval: Duration::from_millis(33),
+            flush_interval: Duration::from_millis(8),
             cols: 95,
             rows: 28,
         })?;
@@ -186,7 +233,31 @@ struct App {
     capture_path: std::path::PathBuf,
     auto_send_at: Option<Instant>,
     auto_send_text: Option<String>,
+    /// (pane_id, cols, rows) last sent to tmux during a live drag —
+    /// suppresses redundant resize-pane spam at 60Hz cursor updates.
+    last_live_resize: Option<(String, u16, u16)>,
+    /// Timestamp of last live resize-window — throttle to ~20 Hz so the
+    /// inner app (claude, vim) gets time to reflow without re-issuing
+    /// SIGWINCH every cursor pixel.
+    last_live_resize_at: Option<Instant>,
+    /// Current snap target (for the outer window) shown during a drag.
+    /// Renderer paints a translucent overlay matching the snap rect so
+    /// the user sees where the window will land before release.
+    snap_zone: Option<SnapZone>,
+    /// Pre-snap window outer rect to restore on un-snap, if we ever add
+    /// that. For now just kept so the renderer has the snap rect cached.
+    pre_snap_rect: Option<(i32, i32, u32, u32)>,
+    /// Rolling buffer of plain alphabetic chars the user has typed
+    /// since the last "clearing" event (Enter, Esc, Tab, arrows, any
+    /// Ctrl-combo). Used to recognise case variants of common shell
+    /// commands (e.g. user types "CLAUDE\r" → we rewrite to "claude\r")
+    /// without modifying the user's .zshrc.
+    typed_buffer: String,
 }
+
+/// Shell commands tmuxify rewrites when the user typed them in a
+/// non-lowercase form (and just them — anything else is passed through).
+const CASE_REWRITE_COMMANDS: &[&str] = &["claude"];
 
 impl App {
     fn new() -> Self {
@@ -221,7 +292,43 @@ impl App {
                 .and_then(|s| s.parse::<u64>().ok())
                 .map(|ms| Instant::now() + Duration::from_millis(ms)),
             auto_send_text: std::env::var("TMUXIFY_AUTOSEND").ok(),
+            last_live_resize: None,
+            last_live_resize_at: None,
+            snap_zone: None,
+            pre_snap_rect: None,
+            typed_buffer: String::new(),
         }
+    }
+
+    fn record_typed(&mut self, c: char) {
+        if c.is_ascii_alphabetic() && self.typed_buffer.len() < 32 {
+            self.typed_buffer.push(c);
+        } else {
+            self.typed_buffer.clear();
+        }
+    }
+
+    fn maybe_rewrite_command_on_enter(&mut self) {
+        // Take and clear the buffer either way — Enter resets the line.
+        let typed = std::mem::take(&mut self.typed_buffer);
+        if typed.is_empty() {
+            return;
+        }
+        let lower = typed.to_ascii_lowercase();
+        // Already lowercase: nothing to do, the user's bytes already
+        // ran a valid command.
+        if typed == lower {
+            return;
+        }
+        if !CASE_REWRITE_COMMANDS.iter().any(|c| *c == lower.as_str()) {
+            return;
+        }
+        // Erase the original-cased typing (one backspace per char),
+        // then send the lowercased command. We deliberately do NOT
+        // emit Enter here — the caller is about to send Enter itself.
+        let bs = vec![0x7fu8; typed.len()];
+        self.send_bytes(&bs);
+        self.send_bytes(lower.as_bytes());
     }
 
     fn ensure_session(&mut self, n: u8) {
@@ -353,14 +460,12 @@ impl App {
         }
         entry.cursor_row = u.cursor_row;
         entry.cursor_col = u.cursor_col;
-        if let Some(t) = u.title.as_ref() {
-            for tab in s.windows.values_mut() {
-                if let Some(fp) = tab.floating.get_mut(&u.pane_id) {
-                    fp.title = t.clone();
-                    break;
-                }
-            }
-        }
+        // Deliberately ignore u.title (OSC 0 from the inner app) —
+        // claude code rewrites it every spinner tick (✳ ✻ ✽ ✶ ⏺ ...)
+        // which would re-render the title bar at 10-20Hz and look like
+        // it's flickering. The cwd-derived title from apply_cwd_query
+        // is steady and more useful (basename + full path).
+        let _ = u.title;
     }
 
     fn apply_event(s: &mut SessionState, e: TmuxEvent) {
@@ -401,7 +506,7 @@ impl App {
                                 x: render::SIDEBAR_W + 130.0 + step * 30.0,
                                 y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
                                 w: 95.0 * render::CELL_W + 16.0,
-                                h: 28.0 * render::CELL_H + 32.0,
+                                h: 28.0 * render::CELL_H + 34.0,
                             },
                         );
                     }
@@ -432,6 +537,14 @@ impl App {
                         title: window_id.clone(),
                         ..Default::default()
                     });
+                // Force tmux to ship the new window's layout immediately
+                // — it sometimes elides %layout-change for windows the
+                // client just created. The cwd query path will hydrate
+                // a FloatingPane the moment the response lands.
+                let _ = s.tmux.send_query(&format!(
+                    "list-panes -t '{window_id}' -F '#{{window_id}} #{{pane_id}} #{{pane_current_path}}'"
+                ));
+                s.active_window = Some(window_id);
             }
             TmuxEvent::WindowClose { window_id } => {
                 s.windows.remove(&window_id);
@@ -464,13 +577,53 @@ impl App {
             let Some(pid) = it.next() else { continue };
             let Some(path) = it.next() else { continue };
             let basename = path.rsplit('/').find(|st| !st.is_empty()).unwrap_or(path);
-            if let Some(tab) = s.windows.get_mut(wid) {
-                if let Some(fp) = tab.floating.get_mut(pid) {
-                    fp.title = format!("{basename}  ·  {path}");
+            let tab = s.windows.entry(wid.to_string()).or_insert_with(|| WindowTab {
+                title: wid.to_string(),
+                ..Default::default()
+            });
+            // Late binding — tmux 3.4 sometimes elides %layout-change
+            // for windows we created via new-window from control mode,
+            // so the only signal we get back is the cwd query. Create
+            // the FloatingPane on the fly if missing so the new tab
+            // actually has something to draw.
+            if !tab.floating.contains_key(pid) {
+                let n = tab.next_cascade;
+                tab.next_cascade += 1;
+                let step = (n % 4) as f32;
+                tab.floating.insert(
+                    pid.to_string(),
+                    FloatingPane {
+                        pane_id: pid.to_string(),
+                        title: format!("{basename}  ·  {path}"),
+                        x: render::SIDEBAR_W + 130.0 + step * 30.0,
+                        y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
+                        w: 95.0 * render::CELL_W + 16.0,
+                        h: 28.0 * render::CELL_H + 34.0,
+                    },
+                );
+                if tab.active_pane.is_none() {
+                    tab.active_pane = Some(pid.to_string());
                 }
-                if tab.active_pane.as_deref() == Some(pid) {
-                    tab.title = basename.to_string();
-                }
+            } else if let Some(fp) = tab.floating.get_mut(pid) {
+                fp.title = format!("{basename}  ·  {path}");
+            }
+            if tab.active_pane.as_deref() == Some(pid) {
+                tab.title = basename.to_string();
+            }
+        }
+        // After updating all tabs from this query batch, disambiguate
+        // tabs that ended up with the same basename — append " · #N"
+        // (window-id number) so the user can tell them apart in the
+        // top strip.
+        let mut counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for tab in s.windows.values() {
+            *counts.entry(tab.title.clone()).or_insert(0) += 1;
+        }
+        for (wid, tab) in s.windows.iter_mut() {
+            if counts.get(&tab.title).copied().unwrap_or(0) > 1 {
+                let n = wid.trim_start_matches('@');
+                tab.title = format!("{}  ·  #{}", tab.title, n);
             }
         }
     }
@@ -516,10 +669,112 @@ impl App {
         }
     }
 
+    /// Current cell metrics — renderer's live values when available
+    /// (which reflect any Ctrl+/+ zoom), otherwise the compile-time
+    /// defaults from render::CELL_W/CELL_H.
+    /// Resize every pane in every session so it fills the available
+    /// canvas (everything between sidebar/status/title chrome).
+    /// Invoked on OS-window Resized so the inner content tracks the
+    /// outer frame — the floating "windows" feel like real windows
+    /// instead of cards stranded mid-canvas.
+    fn refit_panes_to_canvas(&mut self, win_w: f32, win_h: f32) {
+        let sidebar_w = if self.sidebar_open { self.sidebar_w } else { 0.0 };
+        let canvas_left = sidebar_w;
+        let canvas_top = render::SESSION_BAR_HEIGHT;
+        let canvas_w = (win_w - canvas_left).max(120.0);
+        let canvas_h = (win_h - canvas_top - render::STATUS_HEIGHT).max(80.0);
+        let (cw, ch) = self.cell_metrics();
+        let mut plans: Vec<(u8, String, u16, u16)> = Vec::new();
+        for (n, s) in self.sessions.iter_mut() {
+            for tab in s.windows.values_mut() {
+                for fp in tab.floating.values_mut() {
+                    fp.x = canvas_left;
+                    fp.y = canvas_top;
+                    fp.w = canvas_w;
+                    fp.h = canvas_h;
+                    let cols = ((fp.w - 16.0) / cw).floor().max(20.0) as u16;
+                    let rows = ((fp.h - 34.0) / ch).floor().max(5.0) as u16;
+                    plans.push((*n, fp.pane_id.clone(), cols, rows));
+                }
+            }
+        }
+        for (n, pid, cols, rows) in plans {
+            if let Some(s) = self.sessions.get(&n) {
+                let _ = s
+                    .tmux
+                    .send_cmd(&format!("resize-window -t {pid} -x {cols} -y {rows}"));
+            }
+        }
+    }
+
+    fn cell_metrics(&self) -> (f32, f32) {
+        match self.renderer.as_ref() {
+            Some(r) => (r.cell_w, r.cell_h),
+            None => (render::CELL_W, render::CELL_H),
+        }
+    }
+
     fn spawn_new_window(&self) {
         // New OS-level tmuxify window = new process, fresh tmux session.
         if let Ok(exe) = std::env::current_exe() {
             let _ = std::process::Command::new(exe).spawn();
+        }
+    }
+
+    /// Bump (delta>0) or shrink (delta<0) the body font size by 1 pt and
+    /// re-issue resize-window for every visible pane so the inner app
+    /// sees the new grid dimensions immediately.
+    fn apply_zoom_delta(&mut self, delta: f32) {
+        let Some(r) = self.renderer.as_mut() else { return };
+        let new_size = r.body_font_size() + delta;
+        let (cw, ch) = r.set_body_font_size(new_size);
+        println!("[zoom] font_size={:.1} cell={:.2}x{:.2}", new_size, cw, ch);
+        self.refresh_all_pane_sizes();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    fn reset_zoom(&mut self) {
+        let Some(r) = self.renderer.as_mut() else { return };
+        let (cw, ch) = r.set_body_font_size(13.0);
+        println!("[zoom] reset → cell={:.2}x{:.2}", cw, ch);
+        self.refresh_all_pane_sizes();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// For every pane on every session, compute the cell grid from the
+    /// pane's current pixel geometry and the renderer's *current*
+    /// cell_w/cell_h, then send resize-window so the inner app reflows.
+    fn refresh_all_pane_sizes(&mut self) {
+        let (cw, ch) = match self.renderer.as_ref() {
+            Some(r) => (r.cell_w, r.cell_h),
+            None => return,
+        };
+        let title_bar = TITLE_BAR;
+        // Walk every session/window/pane and build resize commands.
+        let plans: Vec<(u8, String, u16, u16)> = self
+            .sessions
+            .iter()
+            .flat_map(|(n, s)| {
+                s.windows.values().flat_map(move |tab| {
+                    tab.floating.values().map(move |fp| {
+                        let cols = ((fp.w - 16.0) / cw).floor().max(20.0) as u16;
+                        let rows =
+                            ((fp.h - 34.0) / ch).floor().max(5.0) as u16;
+                        (*n, fp.pane_id.clone(), cols, rows)
+                    })
+                })
+            })
+            .collect();
+        for (n, pid, cols, rows) in plans {
+            if let Some(s) = self.sessions.get(&n) {
+                let _ = s
+                    .tmux
+                    .send_cmd(&format!("resize-window -t {pid} -x {cols} -y {rows}"));
+            }
         }
     }
 
@@ -534,19 +789,30 @@ impl App {
             return;
         }
         if let Key::Named(NamedKey::Alt) = &ev.logical_key {
-            if !matches!(ev.physical_key, PhysicalKey::Code(KeyCode::AltRight)) {
+            if matches!(ev.physical_key, PhysicalKey::Code(KeyCode::AltRight)) {
+                // Right Alt doubles as the Korean 한/영 key on KR keyboards.
+                // Fall through to the hangul-toggle handler below.
+            } else {
                 self.alt = pressed;
+                return;
             }
-            return;
         }
         if !pressed {
             return;
         }
 
-        // Hangul toggle.
+        // Hangul toggle. Log every keydown so we can diagnose what
+        // WSLg / macOS sends for the 한/영 key when toggle still fails.
+        if std::env::var("TMUXIFY_KEY_DEBUG").is_ok() {
+            println!("[key] phys={:?} logical={:?}", ev.physical_key, ev.logical_key);
+        }
         let is_right_alt = matches!(ev.physical_key, PhysicalKey::Code(KeyCode::AltRight));
+        let is_lang2 = matches!(ev.physical_key, PhysicalKey::Code(KeyCode::Lang2))
+            || matches!(ev.physical_key, PhysicalKey::Code(KeyCode::Lang1));
         let is_hangul_toggle = is_right_alt
+            || is_lang2
             || matches!(&ev.logical_key, Key::Named(NamedKey::HangulMode))
+            || matches!(&ev.logical_key, Key::Named(NamedKey::NonConvert))
             || (matches!(&ev.logical_key, Key::Named(NamedKey::Space)) && self.shift);
         if is_hangul_toggle {
             if let Some(s) = self.composer.flush() {
@@ -577,12 +843,18 @@ impl App {
                 }
                 return;
             }
+            // Keep typed_buffer in sync so CLAUDE→claude rewrite still
+            // fires after the user backspaced and retyped a letter.
+            self.typed_buffer.pop();
             self.send_bytes(&[0x7f]);
             return;
         }
 
         // Window/tab/pane shortcuts.
         if self.ctrl {
+            // Any ctrl-combo means the user is issuing a command, not
+            // typing a shell word — drop whatever was buffered.
+            self.typed_buffer.clear();
             use PhysicalKey::Code as PC;
             // Ctrl+1..9 → select tab N.
             let tab_n: Option<u8> = match ev.physical_key {
@@ -600,6 +872,36 @@ impl App {
             if let Some(n) = tab_n {
                 self.tmux_cmd(&format!("select-window -t :{n}"));
                 return;
+            }
+            // Ctrl + '+' / '=' → zoom in, Ctrl + '-' → zoom out,
+            // Ctrl + '0' → reset. Use physical keys so layout doesn't matter.
+            let zoom_delta: Option<f32> = match ev.physical_key {
+                PC(KeyCode::Equal) | PC(KeyCode::NumpadAdd) => Some(1.0),
+                PC(KeyCode::Minus) | PC(KeyCode::NumpadSubtract) => Some(-1.0),
+                _ => None,
+            };
+            if let Some(d) = zoom_delta {
+                self.apply_zoom_delta(d);
+                return;
+            }
+            if matches!(ev.physical_key, PC(KeyCode::Digit0) | PC(KeyCode::Numpad0)) {
+                self.reset_zoom();
+                return;
+            }
+            // Ctrl + Alt + ← / → / ↑  →  Aero-Snap shortcuts. Win+arrow
+            // is owned by Windows itself (WSLg doesn't forward it for
+            // Linux surfaces), so we ride Ctrl+Alt instead.
+            if self.alt {
+                let zone = match ev.physical_key {
+                    PC(KeyCode::ArrowLeft) => Some(SnapZone::Left),
+                    PC(KeyCode::ArrowRight) => Some(SnapZone::Right),
+                    PC(KeyCode::ArrowUp) => Some(SnapZone::Top),
+                    _ => None,
+                };
+                if let Some(z) = zone {
+                    self.apply_window_snap(z);
+                    return;
+                }
             }
             if self.shift {
                 match ev.physical_key {
@@ -648,6 +950,7 @@ impl App {
             }
         }
         if self.alt {
+            self.typed_buffer.clear();
             use PhysicalKey::Code as PC;
             if matches!(ev.physical_key, PC(KeyCode::Tab)) {
                 let cmd = if self.shift {
@@ -660,25 +963,67 @@ impl App {
             }
         }
 
-        // Named keys → ANSI bytes.
+        // Named keys → ANSI bytes (for keys that don't depend on
+        // app-mode) OR tmux symbolic names (for arrows/Home/End/Delete
+        // where DECCKM/keypad mode flips the sequence). Letting tmux
+        // pick the right bytes is the only reliable way to make shell
+        // history (Up/Down) AND claude-code's in-app navigation both
+        // work without us tracking each pane's parser state.
         if let Key::Named(named) = &ev.logical_key {
+            // Mode-sensitive keys: hand off to tmux send-keys <name>.
+            let tmux_key: Option<&'static str> = match named {
+                NamedKey::ArrowUp => Some("Up"),
+                NamedKey::ArrowDown => Some("Down"),
+                NamedKey::ArrowRight => Some("Right"),
+                NamedKey::ArrowLeft => Some("Left"),
+                NamedKey::Home => Some("Home"),
+                NamedKey::End => Some("End"),
+                NamedKey::Delete => Some("DC"),
+                NamedKey::PageUp => Some("PPage"),
+                NamedKey::PageDown => Some("NPage"),
+                _ => None,
+            };
+            if let Some(name) = tmux_key {
+                // Arrows / Home / End / PageUp etc. mean the user is
+                // navigating, not typing a new command — clear buffer.
+                self.typed_buffer.clear();
+                if let Some(s) = self.composer.flush() {
+                    self.send_bytes(s.as_bytes());
+                }
+                if let Some(sess) = self.active() {
+                    let target = sess
+                        .active_window
+                        .as_ref()
+                        .and_then(|w| sess.windows.get(w))
+                        .and_then(|t| t.active_pane.clone());
+                    let t = target
+                        .as_deref()
+                        .map(|p| format!("-t {p} "))
+                        .unwrap_or_default();
+                    let _ = sess.tmux.send_cmd(&format!("send-keys {t}{name}"));
+                }
+                return;
+            }
+            // Mode-independent keys: raw bytes are fine.
             let key_bytes: &[u8] = match named {
                 NamedKey::Enter => &[0x0d],
                 NamedKey::Space => &[b' '],
                 NamedKey::Tab => &[0x09],
                 NamedKey::Escape => &[0x1b],
-                NamedKey::ArrowUp => &[0x1b, b'[', b'A'],
-                NamedKey::ArrowDown => &[0x1b, b'[', b'B'],
-                NamedKey::ArrowRight => &[0x1b, b'[', b'C'],
-                NamedKey::ArrowLeft => &[0x1b, b'[', b'D'],
-                NamedKey::Home => &[0x1b, b'[', b'H'],
-                NamedKey::End => &[0x1b, b'[', b'F'],
-                NamedKey::Delete => &[0x1b, b'[', b'3', b'~'],
                 _ => &[],
             };
             if !key_bytes.is_empty() {
                 if let Some(s) = self.composer.flush() {
                     self.send_bytes(s.as_bytes());
+                }
+                // Right before Enter goes out, see if the user just
+                // typed a case variant of a known command (e.g.
+                // CLAUDE) and rewrite to lowercase. Tab/Esc/Space all
+                // reset the buffer so we don't fire on partial input.
+                if matches!(named, NamedKey::Enter) {
+                    self.maybe_rewrite_command_on_enter();
+                } else {
+                    self.typed_buffer.clear();
                 }
                 self.send_bytes(key_bytes);
                 return;
@@ -691,6 +1036,7 @@ impl App {
         let Some(c) = text.chars().next() else { return };
 
         if !self.hangul_mode {
+            self.record_typed(c);
             self.send_bytes(text.as_bytes());
             return;
         }
@@ -722,6 +1068,26 @@ impl App {
             .as_ref()
             .map(|w| w.inner_size().height as f32)
             .unwrap_or(0.0);
+        // Taskbar pane buttons (checked before edge-resize so the bottom
+        // hairline doesn't steal clicks meant for the buttons).
+        if let Some(r) = &self.renderer {
+            for hit in &r.taskbar_buttons {
+                if x >= hit.x && x < hit.x + hit.w && y >= hit.y && y < hit.y + hit.h {
+                    // × close glyph zone on the right of each button.
+                    if x >= hit.close_x && x < hit.close_x + hit.close_w {
+                        return Some(HitTarget::PaneClose(hit.pane_id.clone()));
+                    }
+                    return Some(HitTarget::TaskbarPane(hit.pane_id.clone()));
+                }
+            }
+            // Top tab × close zones — checked before the Tab hit so the
+            // close glyph doesn't get swallowed by tab-select.
+            for hit in &r.tab_close_hits {
+                if x >= hit.x && x < hit.x + hit.w && y >= hit.y && y < hit.y + hit.h {
+                    return Some(HitTarget::TabClose(hit.window_id.clone()));
+                }
+            }
+        }
         let edge = 6.0;
         // Bottom edge / corners.
         if y >= win_h - edge {
@@ -786,7 +1152,7 @@ impl App {
                 .as_ref()
                 .map(|w| w.inner_size().width as f32)
                 .unwrap_or(0.0);
-            let btn_w = 32.0;
+            let btn_w = 46.0; // must match render.rs chrome button width
             let close_x = width - btn_w;
             let max_x = close_x - btn_w;
             let min_x = max_x - btn_w;
@@ -831,19 +1197,55 @@ impl App {
             let tab = s.windows.get(wid)?;
             let mut order: Vec<&FloatingPane> = tab.floating.values().collect();
             order.sort_by_key(|f| (tab.active_pane.as_deref() == Some(&f.pane_id)) as u8);
+            // Outer "edge band" — the few pixels around each side of
+            // the pane (both inside and outside its rect) act as resize
+            // grips. Outside band lets the user grab right at the
+            // border without having to be pixel-perfect on the inside.
+            let band: f32 = RESIZE_HANDLE; // 14 px
+            let corner: f32 = 18.0;
             for fp in order.iter().rev() {
-                if x >= fp.x + fp.w - RESIZE_HANDLE
-                    && x <= fp.x + fp.w
-                    && y >= fp.y + fp.h - RESIZE_HANDLE
-                    && y <= fp.y + fp.h
-                {
-                    return Some(HitTarget::Resize(fp.pane_id.clone()));
+                // First the corners — they take precedence over edges.
+                let near_l = x >= fp.x - band && x <= fp.x + corner;
+                let near_r = x >= fp.x + fp.w - corner && x <= fp.x + fp.w + band;
+                let near_t = y >= fp.y - band && y <= fp.y + corner;
+                let near_b = y >= fp.y + fp.h - corner && y <= fp.y + fp.h + band;
+                if near_l && near_t {
+                    return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::NW));
                 }
-                let cx = fp.x + fp.w - 22.0;
+                if near_r && near_t {
+                    return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::NE));
+                }
+                if near_l && near_b {
+                    return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::SW));
+                }
+                if near_r && near_b {
+                    return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::SE));
+                }
+                // Then the 4 edges. Only when the OTHER axis is inside
+                // the pane (so the grip is a thin strip, not the whole
+                // plane).
+                let inside_x = x >= fp.x - band && x <= fp.x + fp.w + band;
+                let inside_y = y >= fp.y - band && y <= fp.y + fp.h + band;
+                if inside_y && x >= fp.x - band && x <= fp.x + band {
+                    return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::W));
+                }
+                if inside_y && x >= fp.x + fp.w - band && x <= fp.x + fp.w + band {
+                    return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::E));
+                }
+                if inside_x && y >= fp.y - band && y <= fp.y + band {
+                    return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::N));
+                }
+                if inside_x && y >= fp.y + fp.h - band && y <= fp.y + fp.h + band {
+                    return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::S));
+                }
+                // X close button — wider red zone on top-right of
+                // title bar. Must stay in sync with the render.rs close
+                // rect (close_w = 26, 2 px right margin).
+                let cx = fp.x + fp.w - 28.0;
                 if x >= cx
-                    && x <= fp.x + fp.w - 4.0
-                    && y >= fp.y + 4.0
-                    && y <= fp.y + TITLE_BAR - 2.0
+                    && x <= fp.x + fp.w - 2.0
+                    && y >= fp.y + 3.0
+                    && y <= fp.y + TITLE_BAR
                 {
                     return Some(HitTarget::PaneClose(fp.pane_id.clone()));
                 }
@@ -878,7 +1280,7 @@ impl App {
                 && y >= fp.y + fp.h - RESIZE_HANDLE
                 && y <= fp.y + fp.h
             {
-                return Some(HitTarget::Resize(fp.pane_id.clone()));
+                return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::SE));
             }
             // X close button — top-right of title bar.
             let cx = fp.x + fp.w - 22.0;
@@ -923,7 +1325,12 @@ impl App {
             if is_double {
                 if let Some(ic) = self.icons.get(*idx) {
                     // New "창" = new pane in the active window.
-                    let cmd = format!("split-window -c {}", shell_quote(&ic.cwd));
+                    // New tab in the current OS window — matches the
+                    // user's mental model ("desktop icon = open a new
+                    // shell in that folder"). Previously we split-
+                    // window'd, which left the original pane alongside
+                    // the new one and was confusing.
+                    let cmd = format!("new-window -c {}", shell_quote(&ic.cwd));
                     self.tmux_cmd(&cmd);
                 }
                 return;
@@ -967,6 +1374,10 @@ impl App {
                 }
             }
             HitTarget::Drag => {
+                // Hand off to winit / OS — on Wayland (WSLg) clients
+                // CANNOT programmatically reposition themselves, so our
+                // own anchor-tracked drag was a no-op. drag_window() is
+                // the only path that actually moves the surface.
                 if let Some(w) = &self.window {
                     let _ = w.drag_window();
                 }
@@ -989,11 +1400,14 @@ impl App {
                 }
                 self.activate_pane(&pid);
             }
-            HitTarget::Resize(pid) => {
+            HitTarget::Resize(pid, edge) => {
                 if let Some(tab) = self.active_tab() {
                     if let Some(fp) = tab.floating.get(&pid).cloned() {
                         self.drag = Some(DragState::Resize {
                             pane_id: pid.clone(),
+                            edge,
+                            start_x: fp.x,
+                            start_y: fp.y,
                             start_w: fp.w,
                             start_h: fp.h,
                             start_mouse: (x, y),
@@ -1005,11 +1419,19 @@ impl App {
             HitTarget::Body(pid) => {
                 self.activate_pane(&pid);
             }
+            HitTarget::TaskbarPane(pid) => {
+                // activate_pane sets active_pane, and the render order
+                // sorts active=last → naturally raises the pane.
+                self.activate_pane(&pid);
+            }
             HitTarget::Icon(_) => {
                 // Single click handled (early-return) above; double opens.
             }
             HitTarget::PaneClose(pid) => {
                 self.tmux_cmd(&format!("kill-pane -t {pid}"));
+            }
+            HitTarget::TabClose(wid) => {
+                self.tmux_cmd(&format!("kill-window -t {wid}"));
             }
             HitTarget::WindowEdgeResize(dir) => {
                 if let Some(w) = &self.window {
@@ -1054,6 +1476,12 @@ impl App {
             tab.active_pane = Some(pane_id.to_string());
         }
         self.tmux_cmd(&format!("select-pane -t {pane_id}"));
+        // Kick the running app (claude code, vim, etc.) with a fake
+        // resize so it does a full clear+redraw. -y -1 shrinks one row,
+        // -y +1 grows it back. SIGWINCH fires on both, which is what
+        // forces TUI apps to repaint — `refresh-client` alone wouldn't.
+        self.tmux_cmd(&format!("resize-pane -t {pane_id} -y -1"));
+        self.tmux_cmd(&format!("resize-pane -t {pane_id} -y +1"));
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1069,7 +1497,17 @@ impl App {
             }
             return;
         }
+        if let DragState::WindowMove { anchor } = &drag {
+            self.handle_window_drag_move(*anchor);
+            return;
+        }
         let (x, y) = self.mouse;
+        // Live resize-pane command for the inner app — recompute cell
+        // grid from the new pane geometry and only push to tmux when
+        // (cols, rows) actually changed since last send. Otherwise tmux
+        // sees a flood of identical commands.
+        let (cw, ch) = self.cell_metrics();
+        let mut live_resize: Option<(String, u16, u16)> = None;
         let Some(tab) = self.active_tab_mut() else { return };
         match drag {
             DragState::SidebarResize => {}
@@ -1079,17 +1517,116 @@ impl App {
                     fp.y = (y - offset_y).max(render::SESSION_BAR_HEIGHT);
                 }
             }
-            DragState::Resize { pane_id, start_w, start_h, start_mouse } => {
+            DragState::Resize {
+                pane_id,
+                edge,
+                start_x,
+                start_y,
+                start_w,
+                start_h,
+                start_mouse,
+            } => {
                 if let Some(fp) = tab.floating.get_mut(&pane_id) {
                     let dx = x - start_mouse.0;
                     let dy = y - start_mouse.1;
-                    fp.w = (start_w + dx).max(120.0);
-                    fp.h = (start_h + dy).max(80.0);
+                    let min_w: f32 = 120.0;
+                    let min_h: f32 = 80.0;
+                    let max_y_for_top = start_y + start_h - min_h;
+                    let max_x_for_left = start_x + start_w - min_w;
+                    if edge.affects_left() {
+                        let new_x = (start_x + dx).min(max_x_for_left).max(0.0);
+                        let new_w = (start_x + start_w - new_x).max(min_w);
+                        fp.x = new_x;
+                        fp.w = new_w;
+                    } else if edge.affects_right() {
+                        fp.w = (start_w + dx).max(min_w);
+                    }
+                    if edge.affects_top() {
+                        let new_y = (start_y + dy)
+                            .min(max_y_for_top)
+                            .max(render::SESSION_BAR_HEIGHT);
+                        let new_h = (start_y + start_h - new_y).max(min_h);
+                        fp.y = new_y;
+                        fp.h = new_h;
+                    } else if edge.affects_bottom() {
+                        fp.h = (start_h + dy).max(min_h);
+                    }
+                    // Live tmux grid update: recompute cols/rows and
+                    // queue a resize-window for the throttle gate below.
+                    let cols = ((fp.w - 16.0) / cw).floor().max(20.0) as u16;
+                    let rows = ((fp.h - 34.0) / ch).floor().max(5.0) as u16;
+                    if self.last_live_resize != Some((pane_id.clone(), cols, rows)) {
+                        live_resize = Some((pane_id.clone(), cols, rows));
+                    }
                 }
+            }
+            DragState::WindowMove { .. } => {
+                // Handled by the early-return at the top of this fn.
+                unreachable!();
+            }
+        }
+        if let Some((pid, cols, rows)) = live_resize {
+            // Throttle to ~30 Hz — the cell grid doesn't change every
+            // pixel anyway (cell_w == 8), and tmux + claude can't keep
+            // up with 60-Hz SIGWINCH storms. Skipped commands are fine
+            // because the final size is reissued on mouse-release.
+            let now = Instant::now();
+            let ready = self
+                .last_live_resize_at
+                .map(|t| now.duration_since(t) >= Duration::from_millis(33))
+                .unwrap_or(true);
+            if ready {
+                self.last_live_resize = Some((pid.clone(), cols, rows));
+                self.last_live_resize_at = Some(now);
+                self.tmux_cmd(&format!("resize-window -t {pid} -x {cols} -y {rows}"));
             }
         }
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    /// Forward the vertical wheel delta to the inner app via SGR mouse
+    /// wheel events at the hovered cell. Each "line" of delta emits one
+    /// button-64 (up) or 65 (down) press. tmux passes these through to
+    /// the focused TUI when its mouse-mode is on; for plain shells they
+    /// just get swallowed, which matches XTerm/Alacritty behaviour.
+    fn handle_scroll(&mut self, lines: f32) {
+        if lines == 0.0 {
+            return;
+        }
+        let steps = lines.abs().max(1.0) as u32;
+        let button = if lines > 0.0 { 64 } else { 65 };
+        let (mx, my) = self.mouse;
+        let (cw, ch) = self.cell_metrics();
+        // Find the floating pane under the cursor and compute (col, row)
+        // inside its body. SGR mouse coords are 1-based.
+        let Some(s) = self.active() else { return };
+        let Some(wid) = s.active_window.clone() else { return };
+        let Some(tab) = s.windows.get(&wid) else { return };
+        let mut hovered: Option<(String, u16, u16)> = None;
+        for fp in tab.floating.values() {
+            if mx >= fp.x && mx <= fp.x + fp.w && my >= fp.y && my <= fp.y + fp.h {
+                let body_x = mx - fp.x - 8.0;
+                let body_y = my - fp.y - 26.0;
+                if body_x >= 0.0 && body_y >= 0.0 {
+                    let col = (body_x / cw).floor().max(0.0) as u16 + 1;
+                    let row = (body_y / ch).floor().max(0.0) as u16 + 1;
+                    hovered = Some((fp.pane_id.clone(), col, row));
+                    break;
+                }
+            }
+        }
+        let Some((pid, col, row)) = hovered else { return };
+        // Activate the pane so tmux routes the mouse event to it.
+        let active = tab.active_pane.clone();
+        if active.as_deref() != Some(pid.as_str()) {
+            self.activate_pane(&pid);
+        }
+        // SGR mouse press sequence: ESC [ < button ; col ; row M
+        for _ in 0..steps {
+            let seq = format!("\x1b[<{button};{col};{row}M");
+            self.send_bytes(seq.as_bytes());
         }
     }
 
@@ -1103,7 +1640,12 @@ impl App {
                 ResizeDirection::NorthEast | ResizeDirection::SouthWest => CursorIcon::NeswResize,
                 ResizeDirection::NorthWest | ResizeDirection::SouthEast => CursorIcon::NwseResize,
             },
-            Some(HitTarget::Resize(_)) => CursorIcon::NwseResize,
+            Some(HitTarget::Resize(_, edge)) => match edge {
+                PaneEdge::N | PaneEdge::S => CursorIcon::NsResize,
+                PaneEdge::E | PaneEdge::W => CursorIcon::EwResize,
+                PaneEdge::NE | PaneEdge::SW => CursorIcon::NeswResize,
+                PaneEdge::NW | PaneEdge::SE => CursorIcon::NwseResize,
+            },
             Some(HitTarget::SidebarResize) => CursorIcon::EwResize,
             Some(HitTarget::Title(_)) | Some(HitTarget::Drag) => CursorIcon::Move,
             Some(HitTarget::Body(_)) => CursorIcon::Text,
@@ -1113,11 +1655,13 @@ impl App {
             | Some(HitTarget::NewSession)
             | Some(HitTarget::SessionClose(_))
             | Some(HitTarget::PaneClose(_))
+            | Some(HitTarget::TabClose(_))
             | Some(HitTarget::Min)
             | Some(HitTarget::MaxToggle)
             | Some(HitTarget::Close)
             | Some(HitTarget::ToggleSidebar)
-            | Some(HitTarget::Icon(_)) => CursorIcon::Pointer,
+            | Some(HitTarget::Icon(_))
+            | Some(HitTarget::TaskbarPane(_)) => CursorIcon::Pointer,
             None => CursorIcon::Default,
         };
         win.set_cursor(icon);
@@ -1125,18 +1669,176 @@ impl App {
 
     fn handle_mouse_release(&mut self) {
         let Some(drag) = self.drag.take() else { return };
-        if let DragState::Resize { pane_id, .. } = drag {
-            let cmd = self
-                .active_tab()
-                .and_then(|t| t.floating.get(&pane_id))
-                .map(|fp| {
-                    let cols = ((fp.w - 12.0) / render::CELL_W).floor().max(20.0) as u16;
-                    let rows = ((fp.h - TITLE_BAR - 6.0) / render::CELL_H).floor().max(5.0) as u16;
-                    format!("resize-pane -t {pane_id} -x {cols} -y {rows}")
-                });
-            if let Some(c) = cmd {
-                self.tmux_cmd(&c);
+        self.last_live_resize = None;
+        self.last_live_resize_at = None;
+        match drag {
+            DragState::Resize { pane_id, .. } => {
+                let (cw, ch) = self.cell_metrics();
+                let cmd = self
+                    .active_tab()
+                    .and_then(|t| t.floating.get(&pane_id))
+                    .map(|fp| {
+                        let cols = ((fp.w - 16.0) / cw).floor().max(20.0) as u16;
+                        let rows = ((fp.h - 34.0) / ch).floor().max(5.0) as u16;
+                        format!("resize-window -t {pane_id} -x {cols} -y {rows}")
+                    });
+                if let Some(c) = cmd {
+                    self.tmux_cmd(&c);
+                    // Force the inner app to redraw from scratch —
+                    // mid-drag SIGWINCH storms can leave partial cells
+                    // from earlier grid sizes, refresh-client wipes them.
+                    self.tmux_cmd("refresh-client");
+                }
             }
+            DragState::Move { pane_id, .. } => {
+                self.maybe_snap_pane(&pane_id);
+            }
+            DragState::WindowMove { .. } => {
+                // Apply whatever snap zone was previewed during the
+                // drag, and clear the overlay.
+                if let Some(zone) = self.snap_zone.take() {
+                    self.apply_window_snap(zone);
+                }
+                self.pre_snap_rect = None;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// During a WindowMove drag — move the OS window so the cursor stays
+    /// anchored to its press point, AND detect monitor-edge proximity
+    /// for Aero-Snap-style preview.
+    fn handle_window_drag_move(&mut self, anchor: (f32, f32)) {
+        let Some(win) = self.window.clone() else { return };
+        let (cx, cy) = self.mouse;
+        let dx = cx - anchor.0;
+        let dy = cy - anchor.1;
+        if dx.abs() > 0.5 || dy.abs() > 0.5 {
+            let pos = win.outer_position().ok();
+            if let Some(p) = pos {
+                let new_x = p.x + dx as i32;
+                let new_y = p.y + dy as i32;
+                let _ = win.set_outer_position(winit::dpi::PhysicalPosition::new(new_x, new_y));
+            }
+        }
+        // Monitor-relative cursor for snap detection.
+        let monitor = win
+            .current_monitor()
+            .or_else(|| win.primary_monitor());
+        let new_zone = if let Some(m) = monitor {
+            let mp = m.position();
+            let ms = m.size();
+            let scale = win.scale_factor() as f32;
+            let outer = win
+                .outer_position()
+                .unwrap_or(winit::dpi::PhysicalPosition::new(0, 0));
+            // Screen-space cursor (physical px).
+            let screen_x = outer.x as f32 + cx * scale;
+            let screen_y = outer.y as f32 + cy * scale;
+            let edge: f32 = 24.0 * scale;
+            let mx0 = mp.x as f32;
+            let my0 = mp.y as f32;
+            let mx1 = mx0 + ms.width as f32;
+            let my1 = my0 + ms.height as f32;
+            if screen_y <= my0 + edge {
+                Some(SnapZone::Top)
+            } else if screen_x <= mx0 + edge {
+                Some(SnapZone::Left)
+            } else if screen_x >= mx1 - edge {
+                Some(SnapZone::Right)
+            } else {
+                let _ = my1;
+                None
+            }
+        } else {
+            None
+        };
+        if new_zone != self.snap_zone {
+            self.snap_zone = new_zone;
+            win.request_redraw();
+        } else {
+            win.request_redraw();
+        }
+    }
+
+    fn apply_window_snap(&mut self, zone: SnapZone) {
+        let Some(win) = self.window.clone() else { return };
+        let monitor = win.current_monitor().or_else(|| win.primary_monitor());
+        let Some(m) = monitor else { return };
+        let mp = m.position();
+        let ms = m.size();
+        let (nx, ny, nw, nh) = match zone {
+            SnapZone::Left => (mp.x, mp.y, ms.width / 2, ms.height),
+            SnapZone::Right => (
+                mp.x + (ms.width / 2) as i32,
+                mp.y,
+                ms.width / 2,
+                ms.height,
+            ),
+            SnapZone::Top => (mp.x, mp.y, ms.width, ms.height),
+        };
+        let _ = win.set_outer_position(winit::dpi::PhysicalPosition::new(nx, ny));
+        let _ = win.request_inner_size(winit::dpi::PhysicalSize::new(nw, nh));
+    }
+
+    /// Aero-Snap style edge tiling for inner panes. After a Move drag,
+    /// if the cursor is within `edge` px of the canvas border, resize +
+    /// reposition the pane to half-canvas (left/right) or full-canvas
+    /// (top). Mouse release outside the snap zone leaves the pane alone.
+    fn maybe_snap_pane(&mut self, pane_id: &str) {
+        let (mx, my) = self.mouse;
+        let edge: f32 = 20.0;
+        let sidebar_w = if self.sidebar_open { self.sidebar_w } else { 0.0 };
+        let (win_w, win_h) = match self.window.as_ref() {
+            Some(w) => {
+                let sz = w.inner_size();
+                (sz.width as f32, sz.height as f32)
+            }
+            None => return,
+        };
+        let canvas_left = sidebar_w;
+        let canvas_right = win_w;
+        let canvas_top = render::SESSION_BAR_HEIGHT;
+        let canvas_bottom = win_h - render::STATUS_HEIGHT;
+        let canvas_w = (canvas_right - canvas_left).max(1.0);
+        let canvas_h = (canvas_bottom - canvas_top).max(1.0);
+
+        let new_rect: Option<(f32, f32, f32, f32)> = if my <= canvas_top + edge {
+            // Top → maximize within canvas.
+            Some((canvas_left, canvas_top, canvas_w, canvas_h))
+        } else if mx <= canvas_left + edge {
+            // Left → left half.
+            Some((canvas_left, canvas_top, canvas_w * 0.5, canvas_h))
+        } else if mx >= canvas_right - edge {
+            // Right → right half.
+            Some((
+                canvas_left + canvas_w * 0.5,
+                canvas_top,
+                canvas_w * 0.5,
+                canvas_h,
+            ))
+        } else {
+            None
+        };
+
+        let Some((nx, ny, nw, nh)) = new_rect else { return };
+        let (cw, ch) = self.cell_metrics();
+        let cols = ((nw - 16.0) / cw).floor().max(20.0) as u16;
+        let rows = ((nh - 34.0) / ch).floor().max(5.0) as u16;
+        if let Some(tab) = self.active_tab_mut() {
+            if let Some(fp) = tab.floating.get_mut(pane_id) {
+                fp.x = nx;
+                fp.y = ny;
+                fp.w = nw;
+                fp.h = nh;
+            }
+        }
+        self.tmux_cmd(&format!("resize-window -t {pane_id} -x {cols} -y {rows}"));
+        if let Some(w) = &self.window {
+            w.request_redraw();
         }
     }
 }
@@ -1148,6 +1850,9 @@ impl ApplicationHandler for App {
         }
         let attrs = Window::default_attributes()
             .with_title("tmuxify")
+            // Custom chrome. WSLg doesn't forward Windows Aero-Snap
+            // preview to forwarded Linux surfaces, so we implement the
+            // snap ourselves (see App::handle_window_drag_move).
             .with_decorations(false)
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 760.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create_window"));
@@ -1167,6 +1872,9 @@ impl ApplicationHandler for App {
         for s in self.sessions.values() {
             let _ = s.tmux.send_cmd("set -g window-size manual");
             let _ = s.tmux.send_cmd("set -g aggressive-resize on");
+            // Pass mouse events (wheel, drag, click) through to the
+            // inner app so our handle_scroll's SGR sequences are honored.
+            let _ = s.tmux.send_cmd("set -g mouse on");
             let _ = s.tmux.send_cmd(&format!("set -g default-size {cols}x{rows}"));
             let _ = s
                 .tmux
@@ -1195,9 +1903,14 @@ impl ApplicationHandler for App {
                         r.resize(w, h);
                     }
                 }
-                // Keep the existing default cell grid; per-pane resize is
-                // handled when the user drags the floating-window handle.
-                let _ = size;
+                // Auto-fit panes to the new canvas. The model is
+                // "single visible pane = full canvas". When the user
+                // grows the OS window expecting the inner pane to
+                // follow, this hands it the room. If there are
+                // multiple panes in the active window they still each
+                // refit to the canvas size (they overlap; the user can
+                // rearrange manually).
+                self.refit_panes_to_canvas(size.width as f32, size.height as f32);
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -1218,6 +1931,13 @@ impl ApplicationHandler for App {
                         ElementState::Released => self.handle_mouse_release(),
                     }
                 }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.y as f32) / 20.0,
+                };
+                self.handle_scroll(lines);
             }
             WindowEvent::RedrawRequested => {
                 let preedit = self.composer.preedit();
@@ -1255,6 +1975,23 @@ impl ApplicationHandler for App {
                         }
                         None => (None, None, HashMap::new(), Vec::new(), BTreeMap::new()),
                     };
+                let snap_overlay: Option<[f32; 4]> = self.snap_zone.map(|z| {
+                    let w = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().width as f32)
+                        .unwrap_or(0.0);
+                    let h = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().height as f32)
+                        .unwrap_or(0.0);
+                    match z {
+                        SnapZone::Left => [0.0, 0.0, w * 0.5, h],
+                        SnapZone::Right => [w * 0.5, 0.0, w * 0.5, h],
+                        SnapZone::Top => [0.0, 0.0, w, h],
+                    }
+                });
                 if let Some(r) = self.renderer.as_mut() {
                     let _ = r.render(
                         &active_floating,
@@ -1270,6 +2007,7 @@ impl ApplicationHandler for App {
                         &icons_clone,
                         cursor_visible,
                         sidebar_w_for_render,
+                        snap_overlay,
                     );
                 }
             }

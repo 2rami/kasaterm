@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context as _, Result};
 use glyphon::{
-    Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    cosmic_text::Align, Attrs, Buffer, Cache, Color as GColor, Family, FontSystem, Metrics,
+    Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use wgpu::{
     Backends, CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance,
@@ -44,7 +44,7 @@ const ANSI16: [(u8, u8, u8); 16] = [
     (0xff, 0xff, 0xff),
 ];
 
-fn term_to_glyphon(c: &TermColor, default: GColor) -> GColor {
+fn term_to_glyphon_inner(c: &TermColor, default: GColor, lift_floor: bool) -> GColor {
     match c {
         TermColor::Default => default,
         TermColor::Idx(i) => {
@@ -66,8 +66,19 @@ fn term_to_glyphon(c: &TermColor, default: GColor) -> GColor {
                 };
                 GColor::rgb(scale(r), scale(g), scale(b))
             } else {
-                // 232..255 grayscale
-                let v = 8 + 10 * (i - 232);
+                // 232..255 grayscale. The default tmux ramp starts at
+                // value 8 (near-black), which on our #22272e body bg
+                // produces unreadable placeholder/dim text. When this
+                // colour is going to a FOREGROUND glyph, lift the floor
+                // so anything claude writes in "dim grey" is still
+                // legible. Background fills (lift_floor = false) stay
+                // accurate.
+                let raw = 8u16 + 10 * (*i as u16 - 232);
+                let v = if lift_floor {
+                    raw.max(110).min(255) as u8
+                } else {
+                    raw.min(255) as u8
+                };
                 GColor::rgb(v, v, v)
             }
         }
@@ -75,11 +86,28 @@ fn term_to_glyphon(c: &TermColor, default: GColor) -> GColor {
     }
 }
 
-const FONT_SIZE: f32 = 13.0;
-const FONT_SIZE_SM: f32 = 11.0;
-const LINE_HEIGHT: f32 = 17.0;
+fn term_to_glyphon(c: &TermColor, default: GColor) -> GColor {
+    term_to_glyphon_inner(c, default, true)
+}
+
+fn term_to_glyphon_bg(c: &TermColor, default: GColor) -> GColor {
+    term_to_glyphon_inner(c, default, false)
+}
+
+// 16pt with a 22px leading — matches native Windows Terminal /
+// Warp default and gives glyphon enough vertical bitmap to render
+// D2Coding crisply (small sizes were getting smeared by the AA).
+const FONT_SIZE: f32 = 16.0;
+const FONT_SIZE_SM: f32 = 13.0;
+const LINE_HEIGHT: f32 = 22.0;
 pub const PADDING: f32 = 10.0;
-const STATUS_HEIGHT: f32 = 22.0;
+// Used to be a 22px text line; now a Windows-style taskbar with a
+// start button, pane buttons, and a right tray (IME + clock).
+pub const STATUS_HEIGHT: f32 = 36.0;
+pub const TASKBAR_BTN_H: f32 = 28.0;
+pub const TASKBAR_START_W: f32 = 36.0;
+pub const TASKBAR_PANE_W: f32 = 180.0;
+pub const TASKBAR_GAP: f32 = 4.0;
 const TITLE_HEIGHT: f32 = 26.0;
 const BOX_PAD: f32 = 8.0;
 pub const SESSION_BAR_HEIGHT: f32 = 38.0;
@@ -89,14 +117,14 @@ pub const SIDEBAR_W: f32 = 240.0;
 pub const ICON_W: f32 = 76.0;
 pub const ICON_H: f32 = 78.0;
 
-// === Palette (Warp-ish dark neutrals) ===
-const BG: [f32; 4] = [0.043, 0.051, 0.063, 1.0]; // app bg
-const CHROME_BG: [f32; 4] = [0.063, 0.075, 0.094, 1.0]; // title-bar
-const SIDEBAR_BG: [f32; 4] = [0.051, 0.063, 0.078, 1.0];
-const PANEL_BG: [f32; 4] = [0.094, 0.110, 0.133, 1.0]; // unstyled tile
-const PANEL_HOVER: [f32; 4] = [0.117, 0.137, 0.165, 1.0];
-const PANEL_ACTIVE: [f32; 4] = [0.137, 0.180, 0.247, 1.0];
-const BORDER: [f32; 4] = [0.184, 0.204, 0.235, 1.0];
+// === Palette (One Dark — matches the user's terminal #22272e) ===
+const BG: [f32; 4] = [0.094, 0.110, 0.133, 1.0]; // app bg — #181c22
+const CHROME_BG: [f32; 4] = [0.110, 0.125, 0.149, 1.0]; // title-bar #1c2026
+const SIDEBAR_BG: [f32; 4] = [0.110, 0.125, 0.149, 1.0]; // #1c2026
+const PANEL_BG: [f32; 4] = [0.133, 0.153, 0.180, 1.0]; // unstyled tile — #22272e
+const PANEL_HOVER: [f32; 4] = [0.157, 0.180, 0.212, 1.0];
+const PANEL_ACTIVE: [f32; 4] = [0.180, 0.220, 0.290, 1.0];
+const BORDER: [f32; 4] = [0.220, 0.250, 0.290, 1.0]; // #38404a
 const ACCENT: [f32; 4] = [0.353, 0.510, 0.953, 1.0]; // brand blue
 const ACCENT_DIM: [f32; 4] = [0.353, 0.510, 0.953, 0.45];
 const TEXT_PRI: GColor = GColor::rgb(0xea, 0xee, 0xf4);
@@ -109,10 +137,85 @@ fn color_eq(a: GColor, b: GColor) -> bool {
     a.0 == b.0
 }
 
-/// Measure D2Coding cell metrics by laying out 20 'M' chars and dividing.
-fn measure_cell(font_system: &mut FontSystem) -> (f32, f32) {
-    let mut buf = Buffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-    buf.set_size(font_system, Some(2000.0), Some(LINE_HEIGHT * 2.0));
+/// Glyphon GColor → [r,g,b,a] for QuadInstance. cosmic-text packs
+/// channels ARGB into u32 (A=bits24-31, R=16-23, G=8-15, B=0-7), so
+/// the byte at bits 16 is RED, not BLUE — swapping these turns #d78787
+/// pink into #8787d7 light purple.
+fn gcolor_to_rgba(c: GColor) -> [f32; 4] {
+    let r = ((c.0 >> 16) & 0xff) as f32 / 255.0;
+    let g = ((c.0 >> 8) & 0xff) as f32 / 255.0;
+    let b = ((c.0 >> 0) & 0xff) as f32 / 255.0;
+    let a = ((c.0 >> 24) & 0xff) as f32 / 255.0;
+    [r, g, b, a]
+}
+
+/// Cell-relative fill rects for a Unicode block-drawing char. Returns
+/// rectangles in (x, y, w, h) normalized 0..1 to the cell. Empty means
+/// the char isn't a block we draw directly (let the font glyph handle).
+/// We draw upper-half (▀), lower-half (▄), full (█), left-half (▌),
+/// right-half (▐), eighth blocks (▁..▇, ▉..▏), the eighth top/right
+/// strips (▔ ▕), and all 16 quadrant combinations (▖ ▗ ▘ ▙ ▚ ▛ ▜ ▝ ▞ ▟).
+fn block_rects(ch: char) -> &'static [[f32; 4]] {
+    // Each constant is a list of (x, y, w, h) tuples normalized to the cell.
+    match ch {
+        // Top eighth, then 1/4, 3/8, 1/2 (▀ ▄ is half), 5/8, 3/4, 7/8, full
+        '\u{2580}' => &[[0.0, 0.0, 1.0, 0.5]],        // ▀ upper half
+        '\u{2581}' => &[[0.0, 0.875, 1.0, 0.125]],   // ▁ lower 1/8
+        '\u{2582}' => &[[0.0, 0.75, 1.0, 0.25]],     // ▂ lower 1/4
+        '\u{2583}' => &[[0.0, 0.625, 1.0, 0.375]],   // ▃ lower 3/8
+        '\u{2584}' => &[[0.0, 0.5, 1.0, 0.5]],        // ▄ lower half
+        '\u{2585}' => &[[0.0, 0.375, 1.0, 0.625]],   // ▅
+        '\u{2586}' => &[[0.0, 0.25, 1.0, 0.75]],     // ▆
+        '\u{2587}' => &[[0.0, 0.125, 1.0, 0.875]],   // ▇
+        '\u{2588}' => &[[0.0, 0.0, 1.0, 1.0]],        // █ full
+        '\u{2589}' => &[[0.0, 0.0, 0.875, 1.0]],     // ▉ left 7/8
+        '\u{258A}' => &[[0.0, 0.0, 0.75, 1.0]],      // ▊
+        '\u{258B}' => &[[0.0, 0.0, 0.625, 1.0]],     // ▋
+        '\u{258C}' => &[[0.0, 0.0, 0.5, 1.0]],        // ▌ left half
+        '\u{258D}' => &[[0.0, 0.0, 0.375, 1.0]],     // ▍
+        '\u{258E}' => &[[0.0, 0.0, 0.25, 1.0]],      // ▎
+        '\u{258F}' => &[[0.0, 0.0, 0.125, 1.0]],     // ▏
+        '\u{2590}' => &[[0.5, 0.0, 0.5, 1.0]],        // ▐ right half
+        '\u{2594}' => &[[0.0, 0.0, 1.0, 0.125]],     // ▔ upper 1/8
+        '\u{2595}' => &[[0.875, 0.0, 0.125, 1.0]],   // ▕ right 1/8
+        '\u{2596}' => &[[0.0, 0.5, 0.5, 0.5]],        // ▖ lower-left quadrant
+        '\u{2597}' => &[[0.5, 0.5, 0.5, 0.5]],        // ▗ lower-right
+        '\u{2598}' => &[[0.0, 0.0, 0.5, 0.5]],        // ▘ upper-left
+        '\u{2599}' => &[                              // ▙ ul + ll + lr
+            [0.0, 0.0, 0.5, 0.5],
+            [0.0, 0.5, 1.0, 0.5],
+        ],
+        '\u{259A}' => &[                              // ▚ ul + lr
+            [0.0, 0.0, 0.5, 0.5],
+            [0.5, 0.5, 0.5, 0.5],
+        ],
+        '\u{259B}' => &[                              // ▛ ul + ur + ll
+            [0.0, 0.0, 1.0, 0.5],
+            [0.0, 0.5, 0.5, 0.5],
+        ],
+        '\u{259C}' => &[                              // ▜ ul + ur + lr
+            [0.0, 0.0, 1.0, 0.5],
+            [0.5, 0.5, 0.5, 0.5],
+        ],
+        '\u{259D}' => &[[0.5, 0.0, 0.5, 0.5]],        // ▝ upper-right
+        '\u{259E}' => &[                              // ▞ ur + ll
+            [0.5, 0.0, 0.5, 0.5],
+            [0.0, 0.5, 0.5, 0.5],
+        ],
+        '\u{259F}' => &[                              // ▟ ur + ll + lr
+            [0.5, 0.0, 0.5, 0.5],
+            [0.0, 0.5, 1.0, 0.5],
+        ],
+        _ => &[],
+    }
+}
+
+/// Measure D2Coding cell metrics by laying out 20 'M' chars at the
+/// requested font size and dividing. Same routine as before, but
+/// parameterised so the zoom hotkeys can recompute at runtime.
+fn measure_cell_at(font_system: &mut FontSystem, font_size: f32, line_height: f32) -> (f32, f32) {
+    let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    buf.set_size(font_system, Some(2000.0), Some(line_height * 2.0));
     let attrs = Attrs::new().family(Family::Name("D2Coding"));
     buf.set_text(font_system, "MMMMMMMMMMMMMMMMMMMM", attrs, Shaping::Advanced);
     buf.shape_until_scroll(font_system, false);
@@ -120,19 +223,29 @@ fn measure_cell(font_system: &mut FontSystem) -> (f32, f32) {
         .layout_runs()
         .next()
         .map(|r| r.line_w)
-        .unwrap_or(FONT_SIZE * 0.55 * 20.0);
+        .unwrap_or(font_size * 0.55 * 20.0);
     let measured = total / 20.0;
-    // Layout-runs sometimes under-counts the trailing side-bearing of
-    // the rightmost glyph; add a small margin so cells don't squeeze
-    // the actual glyph width and clip neighbouring chars.
-    let cw = measured.max(FONT_SIZE * 0.55) + 1.0;
-    (cw, LINE_HEIGHT)
+    // Round to whole pixels — anything fractional smears glyphs across
+    // sub-pixel positions and tanks legibility. ceil() over the glyph
+    // advance is enough breathing room for the side-bearing without
+    // wasting a full pixel.
+    let cw = (measured.max(font_size * 0.55)).ceil();
+    let ch = line_height.round().max(1.0);
+    (cw, ch)
+}
+
+fn measure_cell(font_system: &mut FontSystem) -> (f32, f32) {
+    measure_cell_at(font_system, FONT_SIZE, LINE_HEIGHT)
 }
 
 /// Heuristic fallback before the renderer measures the real D2Coding advance.
 // Matches measure_cell(D2Coding @ FONT_SIZE) on Linux/macOS — keep these in
 // sync with the runtime probe so layout math (cols ↔ pixels) doesn't drift.
-pub const CELL_W: f32 = 8.15;
+// These match measure_cell() at the default FONT_SIZE/LINE_HEIGHT.
+// They're constants because main.rs needs them to size newly-spawned
+// panes before a Renderer instance exists. Keep them in sync with the
+// FONT_SIZE / LINE_HEIGHT constants above.
+pub const CELL_W: f32 = 9.0;
 pub const CELL_H: f32 = LINE_HEIGHT;
 
 pub struct Renderer {
@@ -150,14 +263,72 @@ pub struct Renderer {
     height: u32,
     pub cell_w: f32,
     pub cell_h: f32,
+    /// Active body font size — bumped/shrunk by Ctrl+/Ctrl-/Ctrl+0.
+    /// Affects only terminal cell glyphs, not chrome (titles, tabs).
+    pub body_font_size: f32,
+    pub body_line_height: f32,
+    /// Taskbar pane-button hit rects, refreshed every frame. Used by the
+    /// click handler in main.rs to map a (x, y) hit to a pane id.
+    pub taskbar_buttons: Vec<TaskbarHit>,
+    /// Top-strip tab × close hit rects, one per tab, refreshed every
+    /// frame. main.rs hit_test consults these so the user can close a
+    /// tmux window straight from the tab strip.
+    pub tab_close_hits: Vec<TabCloseHit>,
     /// When set, the next frame is also drawn to an offscreen texture
     /// and saved as PNG. Cleared after.
     pending_capture: Option<std::path::PathBuf>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TabCloseHit {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub window_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskbarHit {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub pane_id: String,
+    /// Inset on the right side that hosts the × close glyph. main.rs
+    /// hit_test routes clicks inside this rect to `PaneClose` instead
+    /// of `TaskbarPane` so the user can dismiss the pane from the bar.
+    pub close_x: f32,
+    pub close_w: f32,
+}
+
 impl Renderer {
     pub fn request_capture(&mut self, path: std::path::PathBuf) {
         self.pending_capture = Some(path);
+    }
+
+    /// Set the terminal body font/line size and re-measure cell metrics.
+    /// Returns the new (cell_w, cell_h) so the caller can re-issue
+    /// resize-window for every pane.
+    pub fn set_body_font_size(&mut self, size: f32) -> (f32, f32) {
+        let size = size.clamp(7.0, 64.0);
+        // Keep the leading proportional to the type body — same ratio
+        // we use for the default (13:17 → ~1.31).
+        let leading_ratio = LINE_HEIGHT / FONT_SIZE;
+        self.body_font_size = size;
+        self.body_line_height = size * leading_ratio;
+        let (cw, ch) = measure_cell_at(
+            &mut self.font_system,
+            self.body_font_size,
+            self.body_line_height,
+        );
+        self.cell_w = cw;
+        self.cell_h = ch;
+        (cw, ch)
+    }
+
+    pub fn body_font_size(&self) -> f32 {
+        self.body_font_size
     }
 }
 
@@ -207,12 +378,25 @@ impl Renderer {
             .context("request_device")?;
 
         let caps = surface.get_capabilities(&adapter);
+        // Prefer non-sRGB surface — our color constants are sRGB hex
+        // values stored as 0..1, and we want the GPU to pass them through
+        // verbatim. With an sRGB surface, wgpu auto-encodes shader output
+        // (treated as linear) into sRGB on store, which would brighten
+        // every dark color (e.g. #22272e → #65737f) and make panes look
+        // foggy. Falling back to sRGB only if no Unorm surface is exposed.
         let format = caps
             .formats
             .iter()
             .copied()
-            .find(|f| matches!(f, TextureFormat::Bgra8UnormSrgb | TextureFormat::Rgba8UnormSrgb))
+            .find(|f| matches!(f, TextureFormat::Bgra8Unorm | TextureFormat::Rgba8Unorm))
+            .or_else(|| {
+                caps.formats
+                    .iter()
+                    .copied()
+                    .find(|f| matches!(f, TextureFormat::Bgra8UnormSrgb | TextureFormat::Rgba8UnormSrgb))
+            })
             .unwrap_or(caps.formats[0]);
+        println!("[surface] format={format:?}");
         let present_mode = if caps.present_modes.contains(&PresentMode::Mailbox) {
             PresentMode::Mailbox
         } else {
@@ -263,6 +447,10 @@ impl Renderer {
             height,
             cell_w,
             cell_h,
+            body_font_size: FONT_SIZE,
+            body_line_height: LINE_HEIGHT,
+            taskbar_buttons: Vec::new(),
+            tab_close_hits: Vec::new(),
             pending_capture: None,
         })
     }
@@ -275,15 +463,33 @@ impl Renderer {
         pg: &PaneGrid,
         body_left: f32,
         body_top: f32,
+        body_w: f32,
+        body_h: f32,
         default_color: GColor,
         occluders: &[(f32, f32, f32, f32)],
+        quads: &mut Vec<QuadInstance>,
     ) -> Vec<(Buffer, f32, f32, GColor, f32)> {
         let attrs = Attrs::new().family(Family::Name("D2Coding"));
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
+        let body_fs = self.body_font_size;
+        let body_lh = self.body_line_height;
         let mut out: Vec<(Buffer, f32, f32, GColor, f32)> = Vec::new();
+        // Anchor the body origin on integer pixels. fp.x/fp.y comes from
+        // drag math and is often fractional; without this, every cell
+        // would inherit a sub-pixel offset and glyphs would smear.
+        let body_left = body_left.round();
+        let body_top = body_top.round();
+        let body_right = body_left + body_w;
+        let body_bottom = body_top + body_h;
         for (row_i, row) in pg.cells.iter().enumerate() {
             let row_top = body_top + row_i as f32 * cell_h;
+            // Cells whose top edge is at/past the body bottom would
+            // spill out of the pane (e.g. while the user is shrinking
+            // the pane and tmux hasn't re-flowed the inner app yet).
+            if row_top >= body_bottom {
+                break;
+            }
             let mut col_i = 0usize;
             while col_i < row.len() {
                 let cell = &row[col_i];
@@ -291,13 +497,18 @@ impl Renderer {
                 let first = raw.chars().next().unwrap_or(' ');
                 let width_cells = UnicodeWidthChar::width(first).unwrap_or(1).max(1) as f32;
                 let color = term_to_glyphon(&cell.fg, default_color);
-                if first == ' ' {
-                    col_i += 1;
-                    continue;
-                }
                 let pixel_w = cell_w * width_cells;
-                let glyph_left = body_left + col_i as f32 * cell_w;
-                let glyph_top = row_top;
+                // Snap cell origin to integer pixels — anything else
+                // makes glyphon antialias the glyph across a half-pixel
+                // boundary, blurring every character and shaving
+                // perceived contrast. Terminal cells should always be
+                // pixel-aligned.
+                let glyph_left = (body_left + col_i as f32 * cell_w).round();
+                let glyph_top = row_top.round();
+                // Same idea horizontally — drop cells past the right edge.
+                if glyph_left >= body_right {
+                    break;
+                }
                 // Skip cells whose center sits under a pane stacked above
                 // us — otherwise glyphon's single text pass would render
                 // them right through the upper pane's body quad.
@@ -310,7 +521,41 @@ impl Renderer {
                     col_i += width_cells as usize;
                     continue;
                 }
-                let mut b = Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+                // Background fill — when claude (or any TUI) explicitly
+                // sets a bg color, draw it before glyphs. The Anthropic
+                // logo's black backdrop comes from this.
+                if !matches!(cell.bg, TermColor::Default) {
+                    let bg = term_to_glyphon_bg(&cell.bg, default_color);
+                    quads.push(QuadInstance {
+                        rect: [glyph_left, glyph_top, pixel_w, cell_h],
+                        color: gcolor_to_rgba(bg),
+                    });
+                }
+                // Unicode block-drawing chars — paint as cell-precise
+                // rectangles instead of font glyphs. Eliminates hairline
+                // gaps between cells in big logo blocks.
+                let rects = block_rects(first);
+                if !rects.is_empty() {
+                    let rgba = gcolor_to_rgba(color);
+                    for r in rects {
+                        quads.push(QuadInstance {
+                            rect: [
+                                glyph_left + r[0] * pixel_w,
+                                glyph_top + r[1] * cell_h,
+                                r[2] * pixel_w,
+                                r[3] * cell_h,
+                            ],
+                            color: rgba,
+                        });
+                    }
+                    col_i += width_cells as usize;
+                    continue;
+                }
+                if first == ' ' {
+                    col_i += 1;
+                    continue;
+                }
+                let mut b = Buffer::new(&mut self.font_system, Metrics::new(body_fs, body_lh));
                 b.set_size(&mut self.font_system, Some(pixel_w + 4.0), Some(cell_h * 1.5));
                 b.set_text(&mut self.font_system, raw, attrs.color(color), Shaping::Advanced);
                 b.shape_until_scroll(&mut self.font_system, false);
@@ -495,6 +740,7 @@ impl Renderer {
         icons: &[DesktopIcon],
         cursor_visible: bool,
         sidebar_w_user: f32,
+        snap_overlay: Option<[f32; 4]>,
     ) -> Result<()> {
         let sidebar_w = if sidebar_open { sidebar_w_user } else { 0.0 };
         struct Built {
@@ -550,6 +796,7 @@ impl Renderer {
             color: TEXT_PRI,
         });
 
+        self.tab_close_hits.clear();
         let tabs_origin = sidebar_w.max(toggle_x + toggle_w + 8.0);
         let mut last_tab_x = tabs_origin;
         for (i, (wid, title, _)) in tabs.iter().enumerate() {
@@ -577,11 +824,15 @@ impl Renderer {
                     color: BORDER,
                 });
             }
+            // Reserve right-side close-glyph zone.
+            let close_w = 22.0;
+            let close_x = tab_x + SESSION_TAB_W - close_w - 4.0;
+            let label_w = (SESSION_TAB_W - 12.0 - close_w).max(20.0);
             let mut tab_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
             tab_buf.set_size(
                 &mut self.font_system,
-                Some(SESSION_TAB_W - 12.0),
+                Some(label_w),
                 Some(tab_h),
             );
             tab_buf.set_text(&mut self.font_system, title, attrs, Shaping::Advanced);
@@ -593,10 +844,46 @@ impl Renderer {
                 bounds: TextBounds {
                     left: tab_x as i32,
                     top: tab_y as i32,
-                    right: (tab_x + SESSION_TAB_W) as i32,
+                    right: (tab_x + 8.0 + label_w) as i32,
                     bottom: (tab_y + tab_h) as i32,
                 },
-                color: if active { TEXT_PRI } else { TEXT_SEC },
+                // Brighter idle-tab text — TEXT_SEC was too washed for
+                // the user to tell two tabs apart at a glance.
+                color: if active { TEXT_PRI } else { GColor::rgb(0xc8, 0xcf, 0xd8) },
+            });
+            // × close glyph + hit zone — red so it reads as "destroy".
+            quads.push(QuadInstance {
+                rect: [close_x, tab_y + 4.0, close_w, tab_h - 8.0],
+                color: [0.78, 0.22, 0.22, 1.0],
+            });
+            let mut x_buf =
+                Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+            x_buf.set_size(&mut self.font_system, Some(close_w), Some(tab_h));
+            x_buf.set_text(
+                &mut self.font_system,
+                "×",
+                attrs.color(GColor::rgb(0xff, 0xee, 0xee)),
+                Shaping::Advanced,
+            );
+            x_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: x_buf,
+                left: close_x + 6.0,
+                top: tab_y + 3.0,
+                bounds: TextBounds {
+                    left: close_x as i32,
+                    top: tab_y as i32,
+                    right: (close_x + close_w) as i32,
+                    bottom: (tab_y + tab_h) as i32,
+                },
+                color: GColor::rgb(0xff, 0xee, 0xee),
+            });
+            self.tab_close_hits.push(TabCloseHit {
+                x: close_x,
+                y: tab_y,
+                w: close_w,
+                h: tab_h,
+                window_id: wid.clone(),
             });
         }
 
@@ -627,22 +914,28 @@ impl Renderer {
         });
 
         // OS controls on the far right: minimise, max-toggle, close.
-        let btn_w = 32.0;
+        // Drawn with persistent button rects + a brighter glyph so
+        // they're clearly clickable (previously the glyphs sat alone
+        // on the title bar with no affordance).
+        let btn_w = 46.0;
         let close_x = self.width as f32 - btn_w;
         let max_x = close_x - btn_w;
         let min_x = max_x - btn_w;
-        for (i, (label, hover)) in [
-            (" ─ ", [0.18, 0.20, 0.25, 1.0]),
-            (" ▢ ", [0.18, 0.20, 0.25, 1.0]),
-            (" × ", [0.85, 0.30, 0.30, 1.0]),
+        for (i, (label, btn_bg, glyph_color)) in [
+            (" ─ ", PANEL_BG, TEXT_PRI),
+            (" ▢ ", PANEL_BG, TEXT_PRI),
+            (" × ", [0.78, 0.22, 0.22, 1.0], GColor::rgb(0xff, 0xee, 0xee)),
         ]
         .iter()
         .enumerate()
         {
             let bx = [min_x, max_x, close_x][i];
-            // Tiny bg accent on the close button area only on the lower row;
-            // a tooltip/hover treatment is a follow-up.
-            let _ = hover;
+            // Full-height button background — gives the user a target
+            // and signals "click here".
+            quads.push(QuadInstance {
+                rect: [bx, 0.0, btn_w, SESSION_BAR_HEIGHT],
+                color: *btn_bg,
+            });
             let mut buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
             buf.set_size(
@@ -650,19 +943,24 @@ impl Renderer {
                 Some(btn_w),
                 Some(SESSION_BAR_HEIGHT),
             );
-            buf.set_text(&mut self.font_system, label, attrs, Shaping::Advanced);
+            buf.set_text(
+                &mut self.font_system,
+                label,
+                attrs.color(*glyph_color),
+                Shaping::Advanced,
+            );
             buf.shape_until_scroll(&mut self.font_system, false);
             built.push(Built {
                 buffer: buf,
-                left: bx,
-                top: 5.0,
+                left: bx + 12.0,
+                top: 9.0,
                 bounds: TextBounds {
                     left: bx as i32,
                     top: 0,
                     right: (bx + btn_w) as i32,
                     bottom: SESSION_BAR_HEIGHT as i32,
                 },
-                color: if i == 2 { TEXT_DANGER } else { TEXT_SEC },
+                color: *glyph_color,
             });
         }
 
@@ -877,6 +1175,9 @@ impl Renderer {
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 3.0));
             l_buf.set_size(&mut self.font_system, Some(ICON_W), Some(20.0));
             l_buf.set_text(&mut self.font_system, &icon.label, attrs, Shaping::Advanced);
+            for line in l_buf.lines.iter_mut() {
+                line.set_align(Some(Align::Center));
+            }
             l_buf.shape_until_scroll(&mut self.font_system, false);
             built.push(Built {
                 buffer: l_buf,
@@ -909,7 +1210,7 @@ impl Renderer {
             let is_active = active_pane == Some(&fp.pane_id);
             let border_color = if is_active { ACCENT_DIM } else { BORDER };
             let title_bg = if is_active { PANEL_ACTIVE } else { PANEL_BG };
-            let body_bg = [0.078, 0.090, 0.110, 1.0];
+            let body_bg = [0.133, 0.153, 0.180, 1.0]; // #22272e — matches reference terminal
             quads.push(QuadInstance {
                 rect: [fp.x, fp.y, fp.w, fp.h],
                 color: body_bg,
@@ -940,7 +1241,20 @@ impl Renderer {
                 color: if is_active { ACCENT_DIM } else { [0.30, 0.32, 0.38, 0.5] },
             });
 
-            // Title.
+            // Title — but only if no pane above covers our title bar.
+            // Quick rect test against each occluder; skip pushing the
+            // title glyphs if any upper pane fully spans the title row.
+            let title_l = fp.x;
+            let title_r = fp.x + fp.w;
+            let title_t = fp.y;
+            let title_b = fp.y + TITLE_HEIGHT;
+            // Any overlap with a pane above hides the whole title bar.
+            // Title is one glyphon Buffer so we can't selectively clip
+            // half of it — drop the lot rather than letting it leak.
+            let title_hidden = occluders.iter().any(|&(l, t, r, b)| {
+                l < title_r && r > title_l && t < title_b && b > title_t
+            });
+            if !title_hidden {
             let title_text = if is_active {
                 format!("● {}", fp.title)
             } else {
@@ -972,30 +1286,39 @@ impl Renderer {
                 },
                 color: if is_active { TEXT_PRI } else { TEXT_SEC },
             });
-            // X close button.
-            let cx = fp.x + fp.w - 22.0;
-            let cy = fp.y + 4.0;
+            // X close button — bigger hit-area, persistent red bg so
+            // the user can spot it immediately.
+            let close_w = 26.0;
+            let cx = fp.x + fp.w - close_w - 2.0;
+            let cy = fp.y + 3.0;
+            let close_h = TITLE_HEIGHT - 6.0;
             quads.push(QuadInstance {
-                rect: [cx, cy, 18.0, TITLE_HEIGHT - 8.0],
-                color: if is_active { PANEL_BG } else { CHROME_BG },
+                rect: [cx, cy, close_w, close_h],
+                color: [0.78, 0.22, 0.22, 1.0],
             });
             let mut x_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-            x_buf.set_size(&mut self.font_system, Some(18.0), Some(TITLE_HEIGHT));
-            x_buf.set_text(&mut self.font_system, " ×", attrs, Shaping::Advanced);
+            x_buf.set_size(&mut self.font_system, Some(close_w), Some(TITLE_HEIGHT));
+            x_buf.set_text(
+                &mut self.font_system,
+                "×",
+                attrs.color(GColor::rgb(0xff, 0xee, 0xee)),
+                Shaping::Advanced,
+            );
             x_buf.shape_until_scroll(&mut self.font_system, false);
             built.push(Built {
                 buffer: x_buf,
-                left: cx,
-                top: cy + 1.0,
+                left: cx + 8.0,
+                top: cy,
                 bounds: TextBounds {
                     left: cx as i32,
                     top: cy as i32,
-                    right: (cx + 18.0) as i32,
-                    bottom: (cy + TITLE_HEIGHT) as i32,
+                    right: (cx + close_w) as i32,
+                    bottom: (cy + close_h) as i32,
                 },
-                color: if is_active { TEXT_DANGER } else { TEXT_MUT },
+                color: GColor::rgb(0xff, 0xee, 0xee),
             });
+            } // !title_hidden
 
             // Body.
             let Some(pg) = panes.get(&fp.pane_id) else {
@@ -1017,14 +1340,15 @@ impl Renderer {
                 });
             }
             let default_text_color = if is_active { TEXT_PRI } else { TEXT_SEC };
-            let _ = body_w;
-            let _ = body_h;
             let segs = self.build_body_cells(
                 pg,
                 fp.x + BOX_PAD,
                 fp.y + TITLE_HEIGHT,
+                body_w,
+                body_h,
                 default_text_color,
                 occluders,
+                &mut quads,
             );
             for (buf, left, top, color, width) in segs {
                 built.push(Built {
@@ -1035,27 +1359,206 @@ impl Renderer {
                         left: left as i32,
                         top: top as i32,
                         right: (left + width) as i32,
-                        bottom: (top + LINE_HEIGHT * 1.5) as i32,
+                        bottom: (top + self.body_line_height * 1.5) as i32,
                     },
                     color,
                 });
             }
         }
 
-        // === Status line ===
-        let mode = if hangul_mode { "한글" } else { "EN" };
-        let mut status = format!("[{mode}]  windows={}", tabs.len());
-        if let Some(p) = preedit {
-            let _ = std::fmt::Write::write_fmt(&mut status, format_args!("  {p}"));
-        }
-        let canvas_w = (self.width as f32 - PADDING * 2.0).max(1.0);
-        let mut status_buf =
+        // === Taskbar (windows-style: start | pane buttons | tray) ===
+        self.taskbar_buttons.clear();
+        let bar_top = self.height as f32 - STATUS_HEIGHT;
+        let bar_h = STATUS_HEIGHT;
+        let bar_left = sidebar_w;
+        let bar_w = (self.width as f32 - bar_left).max(1.0);
+        // Bar background — only covers the right side of the sidebar so
+        // it doesn't paint over the session list.
+        quads.push(QuadInstance {
+            rect: [bar_left, bar_top, bar_w, bar_h],
+            color: CHROME_BG,
+        });
+        // Top hairline
+        quads.push(QuadInstance {
+            rect: [bar_left, bar_top, bar_w, 1.0],
+            color: BORDER,
+        });
+
+        let btn_y = bar_top + (bar_h - TASKBAR_BTN_H) * 0.5;
+        // Start button removed — felt purely decorative, the user
+        // navigates via the tab strip / desktop icons instead.
+        let _ = TASKBAR_START_W;
+
+        // --- Right tray: clock + IME ---
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let kst = now + 9 * 3600;
+        let h = (kst / 3600) % 24;
+        let m = (kst / 60) % 60;
+        let clock = format!("{:02}:{:02}", h, m);
+        let mode = if hangul_mode { "한" } else { "EN" };
+
+        let clock_w = 56.0_f32;
+        let ime_w = 36.0_f32;
+        let tray_right = self.width as f32 - TASKBAR_GAP;
+        let clock_x = tray_right - clock_w;
+        let ime_x = clock_x - TASKBAR_GAP - ime_w;
+
+        let mut clock_buf =
             Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        status_buf.set_size(&mut self.font_system, Some(canvas_w), Some(STATUS_HEIGHT));
-        status_buf.set_text(&mut self.font_system, &status, attrs, Shaping::Advanced);
-        status_buf.shape_until_scroll(&mut self.font_system, false);
-        let status_top = self.height as f32 - PADDING - STATUS_HEIGHT;
-        let status_left = sidebar_w + PADDING;
+        clock_buf.set_size(&mut self.font_system, Some(clock_w), Some(TASKBAR_BTN_H));
+        clock_buf.set_text(&mut self.font_system, &clock, attrs.color(TEXT_PRI), Shaping::Advanced);
+        clock_buf.shape_until_scroll(&mut self.font_system, false);
+        built.push(Built {
+            buffer: clock_buf,
+            left: clock_x + 4.0,
+            top: btn_y + 5.0,
+            bounds: TextBounds {
+                left: clock_x as i32,
+                top: btn_y as i32,
+                right: (clock_x + clock_w) as i32,
+                bottom: (btn_y + TASKBAR_BTN_H) as i32,
+            },
+            color: TEXT_PRI,
+        });
+
+        let ime_color = if hangul_mode { ACCENT_DIM_TEXT } else { TEXT_MUT };
+        let mut ime_buf =
+            Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        ime_buf.set_size(&mut self.font_system, Some(ime_w), Some(TASKBAR_BTN_H));
+        ime_buf.set_text(&mut self.font_system, mode, attrs.color(ime_color), Shaping::Advanced);
+        ime_buf.shape_until_scroll(&mut self.font_system, false);
+        built.push(Built {
+            buffer: ime_buf,
+            left: ime_x + 6.0,
+            top: btn_y + 5.0,
+            bounds: TextBounds {
+                left: ime_x as i32,
+                top: btn_y as i32,
+                right: (ime_x + ime_w) as i32,
+                bottom: (btn_y + TASKBAR_BTN_H) as i32,
+            },
+            color: ime_color,
+        });
+
+        // --- Pane buttons (middle, between start and tray) ---
+        let panes_left = bar_left + TASKBAR_GAP;
+        let panes_right = ime_x - TASKBAR_GAP * 2.0;
+        let max_btn = TASKBAR_PANE_W;
+        let count = floating.len() as f32;
+        let avail = (panes_right - panes_left).max(0.0);
+        let btn_w = if count > 0.0 {
+            ((avail - TASKBAR_GAP * (count - 1.0).max(0.0)) / count).min(max_btn).max(60.0)
+        } else {
+            0.0
+        };
+        let mut bx = panes_left;
+        for fp in floating.values() {
+            if bx + btn_w > panes_right {
+                break;
+            }
+            let is_active = active_pane == Some(&fp.pane_id);
+            let bg = if is_active { PANEL_ACTIVE } else { PANEL_BG };
+            quads.push(QuadInstance {
+                rect: [bx, btn_y, btn_w, TASKBAR_BTN_H],
+                color: bg,
+            });
+            // Active indicator bar at the bottom
+            if is_active {
+                quads.push(QuadInstance {
+                    rect: [bx, btn_y + TASKBAR_BTN_H - 2.0, btn_w, 2.0],
+                    color: ACCENT_DIM,
+                });
+            }
+            // Reserve space for the × close glyph on the right.
+            let close_w = 22.0;
+            let label_w = (btn_w - 12.0 - close_w).max(20.0);
+            let mut label_buf =
+                Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+            label_buf.set_size(&mut self.font_system, Some(label_w), Some(TASKBAR_BTN_H));
+            let label_color = if is_active { TEXT_PRI } else { TEXT_SEC };
+            label_buf.set_text(
+                &mut self.font_system,
+                &fp.title,
+                attrs.color(label_color),
+                Shaping::Advanced,
+            );
+            label_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: label_buf,
+                left: bx + 8.0,
+                top: btn_y + 5.0,
+                bounds: TextBounds {
+                    left: bx as i32,
+                    top: btn_y as i32,
+                    right: (bx + 8.0 + label_w) as i32,
+                    bottom: (btn_y + TASKBAR_BTN_H) as i32,
+                },
+                color: label_color,
+            });
+            // × close glyph on the right edge of the button — red bg
+            // for consistency with the pane / OS-window close buttons.
+            let close_x = bx + btn_w - close_w - 2.0;
+            quads.push(QuadInstance {
+                rect: [close_x, btn_y + 3.0, close_w, TASKBAR_BTN_H - 6.0],
+                color: [0.78, 0.22, 0.22, 1.0],
+            });
+            let mut x_buf =
+                Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+            x_buf.set_size(&mut self.font_system, Some(close_w), Some(TASKBAR_BTN_H));
+            x_buf.set_text(
+                &mut self.font_system,
+                "×",
+                attrs.color(GColor::rgb(0xff, 0xee, 0xee)),
+                Shaping::Advanced,
+            );
+            x_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: x_buf,
+                left: close_x + 6.0,
+                top: btn_y + 3.0,
+                bounds: TextBounds {
+                    left: close_x as i32,
+                    top: btn_y as i32,
+                    right: (close_x + close_w) as i32,
+                    bottom: (btn_y + TASKBAR_BTN_H) as i32,
+                },
+                color: GColor::rgb(0xff, 0xee, 0xee),
+            });
+            self.taskbar_buttons.push(TaskbarHit {
+                x: bx,
+                y: btn_y,
+                w: btn_w,
+                h: TASKBAR_BTN_H,
+                pane_id: fp.pane_id.clone(),
+                close_x,
+                close_w,
+            });
+            bx += btn_w + TASKBAR_GAP;
+        }
+
+        // Preedit floats above the bar when typing Hangul.
+        if let Some(p) = preedit {
+            let mut pre_buf =
+                Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+            pre_buf.set_size(&mut self.font_system, Some(200.0), Some(TASKBAR_BTN_H));
+            pre_buf.set_text(&mut self.font_system, p, attrs.color(ACCENT_DIM_TEXT), Shaping::Advanced);
+            pre_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: pre_buf,
+                left: ime_x - 200.0 - TASKBAR_GAP,
+                top: btn_y + 5.0,
+                bounds: TextBounds {
+                    left: (ime_x - 200.0 - TASKBAR_GAP) as i32,
+                    top: btn_y as i32,
+                    right: ime_x as i32,
+                    bottom: (btn_y + TASKBAR_BTN_H) as i32,
+                },
+                color: ACCENT_DIM_TEXT,
+            });
+        }
 
         self.viewport.update(
             &self.queue,
@@ -1074,21 +1577,35 @@ impl Renderer {
             default_color: b.color,
             custom_glyphs: &[],
         });
-        let status_area = TextArea {
-            buffer: &status_buf,
-            left: status_left,
-            top: status_top,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: status_left as i32,
-                top: status_top as i32,
-                right: self.width as i32,
-                bottom: self.height as i32,
-            },
-            default_color: TEXT_MUT,
-            custom_glyphs: &[],
-        };
-        let all: Vec<TextArea> = win_areas.chain(std::iter::once(status_area)).collect();
+        let all: Vec<TextArea> = win_areas.collect();
+
+        // Aero-Snap preview overlay — translucent accent rect that
+        // hints where the OS window will land if the user releases the
+        // drag now. Drawn last so it sits on top of all panes/chrome.
+        if let Some(rect) = snap_overlay {
+            quads.push(QuadInstance {
+                rect,
+                color: [0.353, 0.510, 0.953, 0.28],
+            });
+            // Inner border to make it read as a "preview" frame.
+            let stroke = 2.0;
+            quads.push(QuadInstance {
+                rect: [rect[0], rect[1], rect[2], stroke],
+                color: [0.353, 0.510, 0.953, 0.85],
+            });
+            quads.push(QuadInstance {
+                rect: [rect[0], rect[1] + rect[3] - stroke, rect[2], stroke],
+                color: [0.353, 0.510, 0.953, 0.85],
+            });
+            quads.push(QuadInstance {
+                rect: [rect[0], rect[1], stroke, rect[3]],
+                color: [0.353, 0.510, 0.953, 0.85],
+            });
+            quads.push(QuadInstance {
+                rect: [rect[0] + rect[2] - stroke, rect[1], stroke, rect[3]],
+                color: [0.353, 0.510, 0.953, 0.85],
+            });
+        }
 
         self.text_renderer
             .prepare(
