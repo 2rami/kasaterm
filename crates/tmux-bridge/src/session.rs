@@ -38,6 +38,11 @@ pub struct StartOptions<'a> {
     pub session_name: Option<&'a str>,
     /// Flusher tick — defaults to 16 ms (~60 Hz).
     pub flush_interval: Duration,
+    /// Initial window size. Apps inherit COLUMNS/LINES from this — picking
+    /// the visible cell grid here is the only reliable way to make claude /
+    /// vim / less wrap to the right width.
+    pub cols: u16,
+    pub rows: u16,
 }
 
 impl Default for StartOptions<'_> {
@@ -47,6 +52,8 @@ impl Default for StartOptions<'_> {
             auto_run: None,
             session_name: None,
             flush_interval: Duration::from_millis(16),
+            cols: 89,
+            rows: 28,
         }
     }
 }
@@ -71,6 +78,8 @@ impl TmuxSession {
             .map(|s| s.success())
             .unwrap_or(false);
 
+        let cols_s = opts.cols.to_string();
+        let rows_s = opts.rows.to_string();
         let mut cmd = Command::new("tmux");
         cmd.args([
             "-C",
@@ -79,9 +88,9 @@ impl TmuxSession {
             "-s",
             &session_name,
             "-x",
-            "200",
+            &cols_s,
             "-y",
-            "60",
+            &rows_s,
         ]);
         if let Some(p) = opts.cwd.filter(|s| !s.is_empty()) {
             cmd.arg("-c").arg(p);

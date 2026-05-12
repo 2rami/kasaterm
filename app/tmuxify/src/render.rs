@@ -130,7 +130,9 @@ fn measure_cell(font_system: &mut FontSystem) -> (f32, f32) {
 }
 
 /// Heuristic fallback before the renderer measures the real D2Coding advance.
-pub const CELL_W: f32 = FONT_SIZE * 0.55;
+// Matches measure_cell(D2Coding @ FONT_SIZE) on Linux/macOS — keep these in
+// sync with the runtime probe so layout math (cols ↔ pixels) doesn't drift.
+pub const CELL_W: f32 = 8.15;
 pub const CELL_H: f32 = LINE_HEIGHT;
 
 pub struct Renderer {

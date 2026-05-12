@@ -133,6 +133,8 @@ impl SessionState {
             auto_run: None,
             session_name: Some(name),
             flush_interval: Duration::from_millis(33),
+            cols: 89,
+            rows: 28,
         })?;
         Ok(Self {
             number,
@@ -398,10 +400,7 @@ impl App {
                                 title: pid.clone(),
                                 x: render::SIDEBAR_W + 130.0 + step * 30.0,
                                 y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
-                                // 89 cols × 28 rows in real D2Coding metrics
-                                // (~8.5 px advance + chrome padding) so the
-                                // visible body matches what we tell tmux.
-                                w: 89.0 * 8.5 + 16.0,
+                                w: 89.0 * render::CELL_W + 16.0,
                                 h: 28.0 * render::CELL_H + 32.0,
                             },
                         );
