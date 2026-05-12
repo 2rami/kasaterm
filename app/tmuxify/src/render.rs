@@ -276,6 +276,7 @@ impl Renderer {
         body_left: f32,
         body_top: f32,
         default_color: GColor,
+        occluders: &[(f32, f32, f32, f32)],
     ) -> Vec<(Buffer, f32, f32, GColor, f32)> {
         let attrs = Attrs::new().family(Family::Name("D2Coding"));
         let cell_w = self.cell_w;
@@ -295,14 +296,28 @@ impl Renderer {
                     continue;
                 }
                 let pixel_w = cell_w * width_cells;
+                let glyph_left = body_left + col_i as f32 * cell_w;
+                let glyph_top = row_top;
+                // Skip cells whose center sits under a pane stacked above
+                // us — otherwise glyphon's single text pass would render
+                // them right through the upper pane's body quad.
+                let cx = glyph_left + pixel_w * 0.5;
+                let cy = glyph_top + cell_h * 0.5;
+                if occluders
+                    .iter()
+                    .any(|&(l, t, r, b)| cx >= l && cx < r && cy >= t && cy < b)
+                {
+                    col_i += width_cells as usize;
+                    continue;
+                }
                 let mut b = Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
                 b.set_size(&mut self.font_system, Some(pixel_w + 4.0), Some(cell_h * 1.5));
                 b.set_text(&mut self.font_system, raw, attrs.color(color), Shaping::Advanced);
                 b.shape_until_scroll(&mut self.font_system, false);
                 out.push((
                     b,
-                    body_left + col_i as f32 * cell_w,
-                    row_top,
+                    glyph_left,
+                    glyph_top,
                     color,
                     pixel_w,
                 ));
@@ -880,8 +895,17 @@ impl Renderer {
         // === Floating panes (active window only) ===
         let mut order: Vec<&FloatingPane> = floating.values().collect();
         order.sort_by_key(|f| (active_pane == Some(&f.pane_id)) as u8);
+        // Per-pane rect so each pane can skip cells covered by any pane
+        // stacked above it. order is back-to-front so indices > i are
+        // the panes drawn on top of pane i.
+        let pane_rects: Vec<(f32, f32, f32, f32)> = order
+            .iter()
+            .map(|f| (f.x, f.y, f.x + f.w, f.y + f.h))
+            .collect();
 
-        for fp in order {
+        for (idx, fp) in order.iter().enumerate() {
+            let fp = *fp;
+            let occluders: &[(f32, f32, f32, f32)] = &pane_rects[idx + 1..];
             let is_active = active_pane == Some(&fp.pane_id);
             let border_color = if is_active { ACCENT_DIM } else { BORDER };
             let title_bg = if is_active { PANEL_ACTIVE } else { PANEL_BG };
@@ -1000,6 +1024,7 @@ impl Renderer {
                 fp.x + BOX_PAD,
                 fp.y + TITLE_HEIGHT,
                 default_text_color,
+                occluders,
             );
             for (buf, left, top, color, width) in segs {
                 built.push(Built {
