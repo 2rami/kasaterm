@@ -759,6 +759,21 @@ impl App {
                     let _ = s.tmux.send_cmd(&format!(
                         "resize-window -x {total_cols} -y {total_rows}"
                     ));
+                    // Force a pyramid-style "orchestrator on top, team on
+                    // the bottom row" arrangement whenever 3+ panes exist.
+                    // tmux's main-horizontal does exactly that — one big
+                    // pane stacked over an even row of the rest. Apply
+                    // after `resize-window` (the layout depends on the
+                    // window's current size) and after a brief synchronous
+                    // send so claude's own select-layout call (if any)
+                    // doesn't immediately overwrite ours.
+                    if pane_rects.len() >= 3 {
+                        let target = format!("-t {window_id}");
+                        eprintln!("[layout] forcing main-horizontal {target}");
+                        let _ = s
+                            .tmux
+                            .send_cmd(&format!("select-layout {target} main-horizontal"));
+                    }
                     let _ = s.tmux.resize_client(total_cols, total_rows);
                 }
                 // Drop panes that disappeared, then re-tile if any went
