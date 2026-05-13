@@ -31,7 +31,11 @@ use render::Renderer;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(16);
 const RESIZE_HANDLE: f32 = 14.0;
-const TITLE_BAR: f32 = 22.0;
+// Mirror of render::TITLE_HEIGHT — hit_test uses these for the pane's
+// title-bar strip (drag handle + × close button). If render bumps the
+// title height, this must move with it or the close button drops out
+// of the hit zone.
+const TITLE_BAR: f32 = 52.0;
 
 #[derive(Debug, Default, Clone)]
 pub struct PaneGrid {
@@ -118,9 +122,18 @@ enum HitTarget {
 #[derive(Debug, Clone)]
 pub struct DesktopIcon {
     pub label: String,
-    pub cwd: String,
+    pub kind: IconKind,
     pub x: f32,
     pub y: f32,
+}
+
+#[derive(Debug, Clone)]
+pub enum IconKind {
+    /// Folder shortcut. Double-click opens a new window with this cwd.
+    Folder { cwd: String },
+    /// Claude shortcut. Double-click opens a new window and auto-runs
+    /// `claude` so it streams claude code directly into a fresh pane.
+    Claude { cwd: String },
 }
 
 #[derive(Debug, Clone)]
@@ -598,24 +611,20 @@ impl App {
                         ..Default::default()
                     }
                 });
-                // Add new panes, preserve existing positions.
-                // The first pane fills the canvas; subsequent ones cascade
-                // from default size so multiple new panes don't stack.
+                // Add new panes at a cascaded default size so the desktop
+                // icons stay visible underneath. The user can drag the
+                // pane's edges or maximise it manually; we no longer fill
+                // the canvas on the first pane because that hid every
+                // desktop icon and broke the launcher flow.
+                let _ = (canvas_left, canvas_top, canvas_w, canvas_h);
                 for pid in &leaves {
                     if !tab.floating.contains_key(pid) {
-                        let is_first = tab.floating.is_empty();
-                        let (fx, fy, fw, fh) = if is_first {
-                            (canvas_left, canvas_top, canvas_w, canvas_h)
-                        } else {
-                            let n = tab.next_cascade;
-                            let step = (n % 4) as f32;
-                            (
-                                render::SIDEBAR_W + 130.0 + step * 30.0,
-                                render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
-                                95.0 * render::CELL_W + 16.0,
-                                28.0 * render::CELL_H + 34.0,
-                            )
-                        };
+                        let n = tab.next_cascade;
+                        let step = (n % 4) as f32;
+                        let fx = render::SIDEBAR_W + 220.0 + step * 30.0;
+                        let fy = render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0;
+                        let fw = 95.0 * render::CELL_W + 16.0;
+                        let fh = 28.0 * render::CELL_H + 34.0;
                         tab.next_cascade += 1;
                         tab.floating.insert(
                             pid.clone(),
@@ -628,18 +637,12 @@ impl App {
                                 h: fh,
                             },
                         );
-                        if is_first {
-                            let cols = ((fw - 16.0) / cell_w).floor().max(20.0) as u16;
-                            let rows = ((fh - 34.0) / cell_h).floor().max(5.0) as u16;
-                            let _ = s
-                                .tmux
-                                .send_cmd(&format!("resize-window -t {pid} -x {cols} -y {rows}"));
-                            // Resize the vt100 parser to match — otherwise
-                            // the inner app's cursor positioning (CUP) hits
-                            // out-of-bounds rows/cols and the screen renders
-                            // empty even though tmux holds the real output.
-                            let _ = s.tmux.resize_client(cols, rows);
-                        }
+                        let cols = ((fw - 16.0) / cell_w).floor().max(20.0) as u16;
+                        let rows = ((fh - 34.0) / cell_h).floor().max(5.0) as u16;
+                        let _ = s
+                            .tmux
+                            .send_cmd(&format!("resize-window -t {pid} -x {cols} -y {rows}"));
+                        let _ = s.tmux.resize_client(cols, rows);
                     }
                 }
                 // Drop panes that disappeared.
@@ -1489,8 +1492,10 @@ impl App {
                 }
                 // X close button — wider red zone on top-right of
                 // title bar. Must stay in sync with the render.rs close
-                // rect (close_w = 26, 2 px right margin).
-                let cx = fp.x + fp.w - 28.0;
+                // rect (close_w = 26, 2 px right margin) → bump 28 here
+                // when render moves.
+                let close_hit_w = 28.0;
+                let cx = fp.x + fp.w - close_hit_w;
                 if x >= cx
                     && x <= fp.x + fp.w - 2.0
                     && y >= fp.y + 3.0
@@ -1566,21 +1571,41 @@ impl App {
                     && (ly - y).abs() < 5.0
             })
             .unwrap_or(false);
-        self.last_click = Some((now, x, y));
+        // When the second click fires, clear the anchor so a third click
+        // does not piggy-back into another "double-click" — otherwise a
+        // user who clicks 3× in a row spawns two new windows from one
+        // icon. New anchor only when this click was the FIRST in a pair.
+        if is_double {
+            self.last_click = None;
+        } else {
+            self.last_click = Some((now, x, y));
+        }
         let hit = self.hit_test(x, y);
         println!("[click] xy=({x:.0},{y:.0}) double={is_double} hit={hit:?}");
         let Some(hit) = hit else { return };
         if let HitTarget::Icon(idx) = &hit {
             if is_double {
-                if let Some(ic) = self.icons.get(*idx) {
-                    // New "창" = new pane in the active window.
-                    // New tab in the current OS window — matches the
-                    // user's mental model ("desktop icon = open a new
-                    // shell in that folder"). Previously we split-
-                    // window'd, which left the original pane alongside
-                    // the new one and was confusing.
-                    let cmd = format!("new-window -c {}", shell_quote(&ic.cwd));
-                    self.tmux_cmd(&cmd);
+                if let Some(ic) = self.icons.get(*idx).cloned() {
+                    match ic.kind {
+                        IconKind::Folder { cwd } => {
+                            let cmd = format!("new-window -c {}", shell_quote(&cwd));
+                            self.tmux_cmd(&cmd);
+                        }
+                        IconKind::Claude { cwd } => {
+                            // Spawn a fresh pane in `cwd`, then send-keys
+                            // "claude\r" to the just-created (and now-
+                            // active) pane. We rely on the global
+                            // interactive-login shell so the `claude`
+                            // function in ~/.zshrc resolves correctly.
+                            let cmd = format!("new-window -c {}", shell_quote(&cwd));
+                            self.tmux_cmd(&cmd);
+                            // tmux serialises commands per control client;
+                            // the send-keys runs after new-window's begin/
+                            // end pair completes, by which time the new
+                            // pane is selected.
+                            self.tmux_cmd("send-keys 'claude' Enter");
+                        }
+                    }
                 }
                 return;
             }
@@ -2376,20 +2401,30 @@ fn default_icons() -> Vec<DesktopIcon> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
     let projects = format!("{}/projects", home);
     let mut v = Vec::new();
+    let row_x = render::SIDEBAR_W + 24.0;
     v.push(DesktopIcon {
         label: "Home".into(),
-        cwd: home.clone(),
-        x: render::SIDEBAR_W + 24.0,
+        kind: IconKind::Folder { cwd: home.clone() },
+        x: row_x,
         y: render::SESSION_BAR_HEIGHT + 40.0,
     });
     if std::path::Path::new(&projects).exists() {
         v.push(DesktopIcon {
             label: "projects".into(),
-            cwd: projects,
-            x: render::SIDEBAR_W + 24.0,
-            y: render::SESSION_BAR_HEIGHT + 130.0,
+            kind: IconKind::Folder { cwd: projects },
+            x: row_x,
+            y: render::SESSION_BAR_HEIGHT + 220.0,
         });
     }
+    // Claude launcher — double-click spawns a new window and runs the
+    // `claude` shell function (defined in the user's ~/.zshrc) inside
+    // a fresh interactive login shell, so it Just Works™.
+    v.push(DesktopIcon {
+        label: "Claude".into(),
+        kind: IconKind::Claude { cwd: home },
+        x: row_x,
+        y: render::SESSION_BAR_HEIGHT + 400.0,
+    });
     v
 }
 

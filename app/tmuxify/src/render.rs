@@ -22,7 +22,7 @@ use unicode_width::UnicodeWidthChar;
 use winit::window::Window;
 
 use crate::quad::{QuadInstance, QuadRenderer};
-use crate::{DesktopIcon, FloatingPane, PaneGrid};
+use crate::{DesktopIcon, FloatingPane, IconKind, PaneGrid};
 use tmux_bridge::Color as TermColor;
 
 const ANSI16: [(u8, u8, u8); 16] = [
@@ -1215,37 +1215,81 @@ impl Renderer {
             });
         }
 
-        // === Desktop icons (folder shape drawn directly, no emoji font) ===
+        // === Desktop icons (shape drawn as quads, no emoji font) ===
+        // Icons live "on the desktop". Skip any icon whose rect is covered
+        // by an existing floating pane — otherwise the icon label leaks
+        // through the pane background in the text pass, since glyphon
+        // doesn't z-order against quads.
+        let icon_covered = |icon: &DesktopIcon| -> bool {
+            let l = icon.x;
+            let t = icon.y;
+            let r = icon.x + ICON_W;
+            let b = icon.y + ICON_H;
+            floating.values().any(|fp| {
+                fp.x <= l && fp.y <= t && fp.x + fp.w >= r && fp.y + fp.h >= b
+            })
+        };
         for icon in icons {
-            let tile = 48.0;
+            if icon_covered(icon) { continue }
+            let tile = 96.0;
             let tx = icon.x + (ICON_W - tile) * 0.5;
             let ty = icon.y;
-            // Folder body with a tab on the upper-left.
-            let body_top = ty + 12.0;
-            let body_h = tile - 14.0;
-            let tab_w = 18.0;
-            let tab_h = 6.0;
-            let folder_face = [0.27, 0.42, 0.62, 1.0];
-            let folder_edge = [0.45, 0.65, 0.95, 1.0];
-            // Tab.
-            quads.push(QuadInstance {
-                rect: [tx + 4.0, ty + 6.0, tab_w, tab_h + 4.0],
-                color: folder_edge,
-            });
-            // Body.
-            quads.push(QuadInstance {
-                rect: [tx, body_top, tile, body_h],
-                color: folder_face,
-            });
-            // Top edge highlight.
-            quads.push(QuadInstance {
-                rect: [tx, body_top, tile, 2.0],
-                color: folder_edge,
-            });
+            match &icon.kind {
+                IconKind::Folder { .. } => {
+                    let body_top = ty + 24.0;
+                    let body_h = tile - 28.0;
+                    let tab_w = 36.0;
+                    let tab_h = 12.0;
+                    let folder_face = [0.27, 0.42, 0.62, 1.0];
+                    let folder_edge = [0.45, 0.65, 0.95, 1.0];
+                    quads.push(QuadInstance {
+                        rect: [tx + 8.0, ty + 12.0, tab_w, tab_h + 8.0],
+                        color: folder_edge,
+                    });
+                    quads.push(QuadInstance {
+                        rect: [tx, body_top, tile, body_h],
+                        color: folder_face,
+                    });
+                    quads.push(QuadInstance {
+                        rect: [tx, body_top, tile, 4.0],
+                        color: folder_edge,
+                    });
+                }
+                IconKind::Claude { .. } => {
+                    // Anthropic-orange filled tile with a soft inner halo
+                    // and a small "C" mark — visually distinguishes the
+                    // launcher from generic folder shortcuts.
+                    let body = [0.96, 0.45, 0.20, 1.0]; // Anthropic-ish orange
+                    let body_dim = [0.75, 0.34, 0.14, 1.0];
+                    let highlight = [1.0, 0.62, 0.32, 1.0];
+                    quads.push(QuadInstance {
+                        rect: [tx, ty + 6.0, tile, tile - 6.0],
+                        color: body,
+                    });
+                    quads.push(QuadInstance {
+                        rect: [tx, ty + 6.0, tile, 6.0],
+                        color: highlight,
+                    });
+                    quads.push(QuadInstance {
+                        rect: [tx, ty + tile - 8.0, tile, 8.0],
+                        color: body_dim,
+                    });
+                    // Two stylised "eye" pixels so it reads as a character.
+                    let eye = [0.18, 0.10, 0.06, 1.0];
+                    quads.push(QuadInstance {
+                        rect: [tx + tile * 0.30 - 8.0, ty + tile * 0.42, 14.0, 14.0],
+                        color: eye,
+                    });
+                    quads.push(QuadInstance {
+                        rect: [tx + tile * 0.70 - 6.0, ty + tile * 0.42, 14.0, 14.0],
+                        color: eye,
+                    });
+                }
+            }
             // Label below.
             let mut l_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 3.0));
-            l_buf.set_size(&mut self.font_system, Some(ICON_W), Some(20.0));
+            l_buf.set_size(&mut self.font_system, Some(ICON_W), Some(40.0));
             l_buf.set_text(&mut self.font_system, &icon.label, attrs, Shaping::Advanced);
             for line in l_buf.lines.iter_mut() {
                 line.set_align(Some(Align::Center));
