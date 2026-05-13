@@ -1364,9 +1364,19 @@ impl Renderer {
             .map(|f| (f.x, f.y, f.x + f.w, f.y + f.h))
             .collect();
 
+        // Explorer overlay counts as an occluder for every pane below
+        // it — without this, pane body cells leak through the explorer
+        // body in the unified text pass.
+        let explorer_occluder: Option<(f32, f32, f32, f32)> = explorer
+            .map(|e| (e.x, e.y, e.x + e.w, e.y + e.h));
         for (idx, fp) in order.iter().enumerate() {
             let fp = *fp;
-            let occluders: &[(f32, f32, f32, f32)] = &pane_rects[idx + 1..];
+            let mut occ_vec: Vec<(f32, f32, f32, f32)> =
+                pane_rects[idx + 1..].to_vec();
+            if let Some(eo) = explorer_occluder {
+                occ_vec.push(eo);
+            }
+            let occluders: &[(f32, f32, f32, f32)] = &occ_vec;
             let is_active = active_pane == Some(&fp.pane_id);
             let title_bg = if is_active {
                 [0.21, 0.24, 0.31, 1.0] // brighter for active
@@ -1789,12 +1799,17 @@ impl Renderer {
                 },
                 color: CLOSE_FG_IDLE,
             });
+            // Explorer UI text uses a proportional / sans-serif fallback
+            // rather than the cell-grid monospace — CJK / wide glyphs
+            // were rendering with monospace's full advance, leaving
+            // huge visual gaps between every letter.
+            let ui_attrs = Attrs::new().family(Family::SansSerif);
             // Title text — show the open path.
             let title = exp.path.to_string_lossy().into_owned();
             let mut t_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 4.0));
             t_buf.set_size(&mut self.font_system, Some(exp.w - close_w - 32.0), Some(title_h));
-            t_buf.set_text(&mut self.font_system, &title, attrs, Shaping::Advanced);
+            t_buf.set_text(&mut self.font_system, &title, ui_attrs, Shaping::Advanced);
             t_buf.shape_until_scroll(&mut self.font_system, false);
             built.push(Built {
                 buffer: t_buf,
@@ -1829,7 +1844,7 @@ impl Renderer {
                 let mut n_buf =
                     Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 4.0));
                 n_buf.set_size(&mut self.font_system, Some(exp.w - 60.0), Some(row_h));
-                n_buf.set_text(&mut self.font_system, &ent.name, attrs, Shaping::Advanced);
+                n_buf.set_text(&mut self.font_system, &ent.name, ui_attrs, Shaping::Advanced);
                 n_buf.shape_until_scroll(&mut self.font_system, false);
                 let row_color = if ent.is_dir { TEXT_PRI } else { TEXT_SEC };
                 built.push(Built {
