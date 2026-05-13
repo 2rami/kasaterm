@@ -604,6 +604,7 @@ impl Renderer {
                     quads.push(QuadInstance {
                         rect: [glyph_left, glyph_top, pixel_w, cell_h],
                         color: gcolor_to_rgba(bg),
+                        ..Default::default()
                     });
                 }
                 // Unicode block-drawing chars — paint as cell-precise
@@ -621,6 +622,7 @@ impl Renderer {
                                 r[3] * cell_h,
                             ],
                             color: rgba,
+                            ..Default::default()
                         });
                     }
                     col_i += width_cells as usize;
@@ -841,10 +843,12 @@ impl Renderer {
         quads.push(QuadInstance {
             rect: [0.0, 0.0, self.width as f32, SESSION_BAR_HEIGHT],
             color: CHROME_BG,
+            ..Default::default()
         });
         quads.push(QuadInstance {
             rect: [0.0, SESSION_BAR_HEIGHT - 1.0, self.width as f32, 1.0],
             color: BORDER,
+            ..Default::default()
         });
         // Sidebar toggle button (leftmost in title bar).
         let toggle_x = PADDING;
@@ -854,6 +858,7 @@ impl Renderer {
         quads.push(QuadInstance {
             rect: [toggle_x, toggle_y, toggle_w, toggle_h],
             color: if sidebar_open { PANEL_ACTIVE } else { PANEL_BG },
+            ..Default::default()
         });
         let mut tg_buf =
             Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -886,18 +891,25 @@ impl Renderer {
             let active = active_window == Some(wid.as_str());
             let tab_x = tabs_origin + i as f32 * (SESSION_TAB_W + SESSION_TAB_GAP);
             last_tab_x = tab_x + SESSION_TAB_W + SESSION_TAB_GAP;
-            let tab_y = 6.0;
-            let tab_h = SESSION_BAR_HEIGHT - 6.0; // bottom flush with chrome strip
-            let tab_color = if active { BG } else { CHROME_BG };
+            let tab_y = 10.0;
+            let tab_h = SESSION_BAR_HEIGHT - 16.0; // pill floats inside the chrome strip
+            // Pill — active tab gets the same body bg so it reads as
+            // "attached to the canvas below"; inactive tabs sit on a
+            // slightly raised muted base.
+            let tab_color = if active { BG } else { PANEL_BG };
             quads.push(QuadInstance {
                 rect: [tab_x, tab_y, SESSION_TAB_W, tab_h],
                 color: tab_color,
+                radius: 8.0,
+                ..Default::default()
             });
             if active {
-                // top accent bar + bottom edge merged with body bg.
+                // 2-px accent underline tucked inside the pill.
                 quads.push(QuadInstance {
-                    rect: [tab_x, tab_y, SESSION_TAB_W, 2.0],
+                    rect: [tab_x + 14.0, tab_y + tab_h - 4.0, SESSION_TAB_W - 28.0, 2.0],
                     color: ACCENT,
+                    radius: 1.0,
+                    ..Default::default()
                 });
             }
             // tab dividers
@@ -905,6 +917,7 @@ impl Renderer {
                 quads.push(QuadInstance {
                     rect: [tab_x + SESSION_TAB_W, tab_y + 8.0, 1.0, tab_h - 16.0],
                     color: BORDER,
+                    ..Default::default()
                 });
             }
             // Reserve right-side close-glyph zone.
@@ -940,6 +953,7 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect: [close_x, tab_y + 4.0, close_w, tab_h - 8.0],
                 color: CLOSE_BG_IDLE,
+                ..Default::default()
             });
             let mut x_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -974,6 +988,7 @@ impl Renderer {
         quads.push(QuadInstance {
             rect: [plus_x, 6.0, plus_w, plus_h],
             color: PANEL_BG,
+            ..Default::default()
         });
         let mut plus_buf =
             Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -1015,6 +1030,7 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect: [bx, 0.0, btn_w, SESSION_BAR_HEIGHT],
                 color: *btn_bg,
+                ..Default::default()
             });
             let mut buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -1054,6 +1070,7 @@ impl Renderer {
                     self.height as f32 - SESSION_BAR_HEIGHT,
                 ],
                 color: SIDEBAR_BG,
+                ..Default::default()
             });
             quads.push(QuadInstance {
                 rect: [
@@ -1063,6 +1080,7 @@ impl Renderer {
                     self.height as f32 - SESSION_BAR_HEIGHT,
                 ],
                 color: BORDER,
+                ..Default::default()
             });
             // Search bar placeholder.
             let search_y = SESSION_BAR_HEIGHT + 14.0;
@@ -1070,6 +1088,8 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect: [14.0, search_y, sidebar_w - 28.0, search_h],
                 color: PANEL_BG,
+                radius: 10.0,
+                ..Default::default()
             });
             let mut search_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -1108,11 +1128,16 @@ impl Renderer {
                 quads.push(QuadInstance {
                     rect: [14.0, row_y, sidebar_w - 28.0, row_h],
                     color: bg,
+                    radius: 10.0,
+                    ..Default::default()
                 });
                 if active {
+                    // Accent strip becomes a small pill on the left edge.
                     quads.push(QuadInstance {
-                        rect: [14.0, row_y, 3.0, row_h],
+                        rect: [18.0, row_y + 16.0, 4.0, row_h - 32.0],
                         color: ACCENT,
+                        radius: 2.0,
+                        ..Default::default()
                     });
                 }
                 // Always-visible × close button.
@@ -1121,6 +1146,7 @@ impl Renderer {
                 quads.push(QuadInstance {
                     rect: [close_left + 2.0, row_y + 28.0, close_w - 4.0, 44.0],
                     color: [0.04, 0.05, 0.07, 1.0],
+                    ..Default::default()
                 });
                 let mut x_buf =
                     Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -1194,6 +1220,8 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect: [14.0, row_y, sidebar_w - 28.0, new_h],
                 color: PANEL_BG,
+                radius: 10.0,
+                ..Default::default()
             });
             let mut new_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -1253,14 +1281,17 @@ impl Renderer {
                     quads.push(QuadInstance {
                         rect: [tx + 8.0, ty + 12.0, tab_w, tab_h + 8.0],
                         color: folder_edge,
+                        ..Default::default()
                     });
                     quads.push(QuadInstance {
                         rect: [tx, body_top, tile, body_h],
                         color: folder_face,
+                        ..Default::default()
                     });
                     quads.push(QuadInstance {
                         rect: [tx, body_top, tile, 4.0],
                         color: folder_edge,
+                        ..Default::default()
                     });
                 }
                 IconKind::Claude { .. } => {
@@ -1273,24 +1304,29 @@ impl Renderer {
                     quads.push(QuadInstance {
                         rect: [tx, ty + 6.0, tile, tile - 6.0],
                         color: body,
+                        ..Default::default()
                     });
                     quads.push(QuadInstance {
                         rect: [tx, ty + 6.0, tile, 6.0],
                         color: highlight,
+                        ..Default::default()
                     });
                     quads.push(QuadInstance {
                         rect: [tx, ty + tile - 8.0, tile, 8.0],
                         color: body_dim,
+                        ..Default::default()
                     });
                     // Two stylised "eye" pixels so it reads as a character.
                     let eye = [0.18, 0.10, 0.06, 1.0];
                     quads.push(QuadInstance {
                         rect: [tx + tile * 0.30 - 8.0, ty + tile * 0.42, 14.0, 14.0],
                         color: eye,
+                        ..Default::default()
                     });
                     quads.push(QuadInstance {
                         rect: [tx + tile * 0.70 - 6.0, ty + tile * 0.42, 14.0, 14.0],
                         color: eye,
+                        ..Default::default()
                     });
                 }
             }
@@ -1332,38 +1368,40 @@ impl Renderer {
             let fp = *fp;
             let occluders: &[(f32, f32, f32, f32)] = &pane_rects[idx + 1..];
             let is_active = active_pane == Some(&fp.pane_id);
-            let border_color = if is_active { ACCENT_DIM } else { BORDER };
-            let title_bg = if is_active { PANEL_ACTIVE } else { PANEL_BG };
-            let body_bg = [0.133, 0.153, 0.180, 1.0]; // #22272e — matches reference terminal
+            let title_bg = if is_active {
+                [0.21, 0.24, 0.31, 1.0] // brighter for active
+            } else {
+                [0.16, 0.18, 0.23, 1.0]
+            };
+            let body_bg = if is_active {
+                [0.155, 0.175, 0.215, 1.0] // pops against the canvas
+            } else {
+                [0.128, 0.145, 0.180, 1.0]
+            };
+            // Single rounded body — title bar overlays on top so the
+            // corner radius applies to the whole pane outline. Skip the
+            // separate 1px borders; the SDF edge fade reads as a soft
+            // border for free at radius > 0.
             quads.push(QuadInstance {
                 rect: [fp.x, fp.y, fp.w, fp.h],
                 color: body_bg,
+                radius: 18.0,
+                ..Default::default()
             });
             quads.push(QuadInstance {
                 rect: [fp.x, fp.y, fp.w, TITLE_HEIGHT],
                 color: title_bg,
+                radius: 18.0,
+                ..Default::default()
             });
-            let b = 1.0;
-            quads.push(QuadInstance {
-                rect: [fp.x, fp.y, fp.w, b],
-                color: border_color,
-            });
-            quads.push(QuadInstance {
-                rect: [fp.x, fp.y + fp.h - b, fp.w, b],
-                color: border_color,
-            });
-            quads.push(QuadInstance {
-                rect: [fp.x, fp.y, b, fp.h],
-                color: border_color,
-            });
-            quads.push(QuadInstance {
-                rect: [fp.x + fp.w - b, fp.y, b, fp.h],
-                color: border_color,
-            });
-            quads.push(QuadInstance {
-                rect: [fp.x + fp.w - 12.0, fp.y + fp.h - 12.0, 12.0, 12.0],
-                color: if is_active { ACCENT_DIM } else { [0.30, 0.32, 0.38, 0.5] },
-            });
+            // Active-pane accent glow: a 2-px line under the title bar.
+            if is_active {
+                quads.push(QuadInstance {
+                    rect: [fp.x + 12.0, fp.y + TITLE_HEIGHT, fp.w - 24.0, 2.0],
+                    color: ACCENT,
+                    ..Default::default()
+                });
+            }
 
             // Title — but only if no pane above covers our title bar.
             // Quick rect test against each occluder; skip pushing the
@@ -1419,6 +1457,7 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect: [cx, cy, close_w, close_h],
                 color: CLOSE_BG_IDLE,
+                ..Default::default()
             });
             let mut x_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -1456,6 +1495,7 @@ impl Renderer {
                 quads.push(QuadInstance {
                     rect: [cx, cy, cw, ch],
                     color: [0.45, 0.65, 0.95, 0.55],
+                    ..Default::default()
                 });
             }
             // Text-selection highlight. Paint one quad per fully-selected
@@ -1483,6 +1523,7 @@ impl Renderer {
                                 ch,
                             ],
                             color: [0.30, 0.50, 0.85, 0.40],
+                            ..Default::default()
                         });
                     }
                 }
@@ -1525,11 +1566,13 @@ impl Renderer {
         quads.push(QuadInstance {
             rect: [bar_left, bar_top, bar_w, bar_h],
             color: CHROME_BG,
+            ..Default::default()
         });
         // Top hairline
         quads.push(QuadInstance {
             rect: [bar_left, bar_top, bar_w, 1.0],
             color: BORDER,
+            ..Default::default()
         });
 
         let btn_y = bar_top + (bar_h - TASKBAR_BTN_H) * 0.5;
@@ -1612,12 +1655,14 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect: [bx, btn_y, btn_w, TASKBAR_BTN_H],
                 color: bg,
+                ..Default::default()
             });
             // Active indicator bar at the bottom
             if is_active {
                 quads.push(QuadInstance {
                     rect: [bx, btn_y + TASKBAR_BTN_H - 2.0, btn_w, 2.0],
                     color: ACCENT_DIM,
+                    ..Default::default()
                 });
             }
             // Reserve space for the × close glyph on the right.
@@ -1652,6 +1697,7 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect: [close_x, btn_y + 3.0, close_w, TASKBAR_BTN_H - 6.0],
                 color: CLOSE_BG_IDLE,
+                ..Default::default()
             });
             let mut x_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -1709,12 +1755,14 @@ impl Renderer {
             let panel_bg = [0.10, 0.12, 0.15, 1.0];
             let title_bg = [0.16, 0.18, 0.22, 1.0];
             let border = [0.3, 0.35, 0.42, 1.0];
+            let r = 14.0;
             // Body.
-            quads.push(QuadInstance { rect: [exp.x, exp.y, exp.w, exp.h], color: panel_bg });
-            // Title bar.
-            quads.push(QuadInstance { rect: [exp.x, exp.y, exp.w, title_h], color: title_bg });
-            // Border.
-            quads.push(QuadInstance { rect: [exp.x, exp.y + exp.h - 1.0, exp.w, 1.0], color: border });
+            quads.push(QuadInstance { rect: [exp.x, exp.y, exp.w, exp.h], color: panel_bg, radius: r, ..Default::default() });
+            // Title bar (overlays the top portion of the body).
+            quads.push(QuadInstance { rect: [exp.x, exp.y, exp.w, title_h], color: title_bg, radius: r, ..Default::default() });
+            // Single-pixel divider underneath the title — SDF would
+            // round this away on tiny rects, keep it sharp.
+            quads.push(QuadInstance { rect: [exp.x + r, exp.y + title_h, exp.w - r * 2.0, 1.0], color: border, ..Default::default() });
             // × close button.
             let close_w = 40.0;
             let cx = exp.x + exp.w - close_w - 4.0;
@@ -1722,6 +1770,7 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect: [cx, cy, close_w, title_h - 12.0],
                 color: CLOSE_BG_IDLE,
+                ..Default::default()
             });
             let mut x_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -1774,6 +1823,7 @@ impl Renderer {
                 quads.push(QuadInstance {
                     rect: [exp.x + 16.0, row_y + (row_h - tile_h) * 0.5, tile_w, tile_h],
                     color: tile_color,
+                    ..Default::default()
                 });
                 // Row label.
                 let mut n_buf =
@@ -1807,6 +1857,7 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect: [gx, gy, ghost_w, ghost_h],
                 color: [0.96, 0.45, 0.20, 0.85],
+                ..Default::default()
             });
             let mut g_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 4.0));
@@ -1853,24 +1904,29 @@ impl Renderer {
             quads.push(QuadInstance {
                 rect,
                 color: [0.353, 0.510, 0.953, 0.28],
+                ..Default::default()
             });
             // Inner border to make it read as a "preview" frame.
             let stroke = 2.0;
             quads.push(QuadInstance {
                 rect: [rect[0], rect[1], rect[2], stroke],
                 color: [0.353, 0.510, 0.953, 0.85],
+                ..Default::default()
             });
             quads.push(QuadInstance {
                 rect: [rect[0], rect[1] + rect[3] - stroke, rect[2], stroke],
                 color: [0.353, 0.510, 0.953, 0.85],
+                ..Default::default()
             });
             quads.push(QuadInstance {
                 rect: [rect[0], rect[1], stroke, rect[3]],
                 color: [0.353, 0.510, 0.953, 0.85],
+                ..Default::default()
             });
             quads.push(QuadInstance {
                 rect: [rect[0] + rect[2] - stroke, rect[1], stroke, rect[3]],
                 color: [0.353, 0.510, 0.953, 0.85],
+                ..Default::default()
             });
         }
 
@@ -1904,9 +1960,9 @@ impl Renderer {
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(wgpu::Color {
-                            r: 0.07,
-                            g: 0.08,
-                            b: 0.10,
+                            r: 0.035,
+                            g: 0.045,
+                            b: 0.060,
                             a: 1.0,
                         }),
                         store: StoreOp::Store,
@@ -1987,9 +2043,9 @@ impl Renderer {
                     resolve_target: None,
                     ops: Operations {
                         load: LoadOp::Clear(wgpu::Color {
-                            r: 0.07,
-                            g: 0.08,
-                            b: 0.10,
+                            r: 0.035,
+                            g: 0.045,
+                            b: 0.060,
                             a: 1.0,
                         }),
                         store: StoreOp::Store,

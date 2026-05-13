@@ -6,11 +6,16 @@ use anyhow::Result;
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
 pub struct QuadInstance {
     /// (x, y, w, h) in physical pixels, top-left origin.
     pub rect: [f32; 4],
     pub color: [f32; 4],
+    /// Corner radius in physical pixels. 0 = sharp rectangle (default).
+    /// Fragment shader uses an SDF rounded box so antialiased edges
+    /// come for free at any positive radius.
+    pub radius: f32,
+    pub _pad: [f32; 3],
 }
 
 const SHADER: &str = r#"
@@ -18,10 +23,14 @@ struct VsIn {
     @builtin(vertex_index) vid: u32,
     @location(0) rect: vec4<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) radius_pad: vec4<f32>,
 };
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) local_px: vec2<f32>,
+    @location(2) half_size: vec2<f32>,
+    @location(3) radius: f32,
 };
 
 struct Screen { size: vec2<f32>, };
@@ -29,23 +38,40 @@ struct Screen { size: vec2<f32>, };
 
 @vertex
 fn vs(in: VsIn) -> VsOut {
-    // Corner offsets for two triangles (TL, BL, BR, TL, BR, TR).
     var ox = array<f32, 6>(0.0, 0.0, 1.0, 0.0, 1.0, 1.0);
     var oy = array<f32, 6>(0.0, 1.0, 1.0, 0.0, 1.0, 0.0);
     let px = in.rect.x + ox[in.vid] * in.rect.z;
     let py = in.rect.y + oy[in.vid] * in.rect.w;
-    // Convert pixel coords (top-left origin) to NDC (-1..1, y up).
     let ndc_x = (px / screen.size.x) * 2.0 - 1.0;
     let ndc_y = 1.0 - (py / screen.size.y) * 2.0;
     var out: VsOut;
     out.clip_pos = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
     out.color = in.color;
+    // Local pixel within the quad (top-left origin, 0..w x 0..h).
+    out.local_px = vec2<f32>(ox[in.vid] * in.rect.z, oy[in.vid] * in.rect.w);
+    out.half_size = vec2<f32>(in.rect.z * 0.5, in.rect.w * 0.5);
+    out.radius = in.radius_pad.x;
     return out;
+}
+
+// SDF for a rounded box centred at the origin with half-extents `b`
+// and corner radius `r`. d < 0 inside, > 0 outside.
+fn sd_rounded_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    let q = abs(p) - b + vec2<f32>(r, r);
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0, 0.0))) - r;
 }
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
+    if (in.radius <= 0.0) {
+        // Sharp rect, no SDF cost — keeps hairlines and 1-px borders crisp.
+        return in.color;
+    }
+    let p = in.local_px - in.half_size;
+    let d = sd_rounded_box(p, in.half_size, in.radius);
+    // 1-pixel antialiased edge.
+    let alpha = clamp(0.5 - d, 0.0, 1.0);
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
 "#;
 
@@ -103,6 +129,12 @@ impl QuadRenderer {
                     format: wgpu::VertexFormat::Float32x4,
                     offset: 16,
                     shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    // radius (f32) + _pad ([f32;3]) packed as vec4.
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 32,
+                    shader_location: 2,
                 },
             ],
         };

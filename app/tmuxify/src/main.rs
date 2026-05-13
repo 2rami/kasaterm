@@ -719,19 +719,20 @@ impl App {
                     })
                     .collect();
                 let mut any_new = false;
-                // Window-total dimensions from the layout root (chars).
-                let (_, _, win_cols_u, win_rows_u) = l.rect();
-                let win_cols = (win_cols_u as f32).max(1.0);
-                let win_rows = (win_rows_u as f32).max(1.0);
+                // Convert tmux char coords directly to canvas pixels via
+                // the cell metrics. A single pane gets nudged to the
+                // right by ICON_COL_W so the Home/Claude launcher icons
+                // stay visible on the left strip of the desktop. Multi-
+                // pane layouts (team mode) use the full canvas — at that
+                // point the launcher is irrelevant.
+                let icon_col_w: f32 = if pane_rects.len() == 1 { 200.0 } else { 0.0 };
+                let chrome_w = 0.0;
+                let chrome_h = render::TITLE_HEIGHT + render::BOX_PAD;
                 for (pid, x, y, w, h) in &pane_rects {
-                    let frac_x = *x as f32 / win_cols;
-                    let frac_y = *y as f32 / win_rows;
-                    let frac_w = *w as f32 / win_cols;
-                    let frac_h = *h as f32 / win_rows;
-                    let fx = canvas_left + frac_x * canvas_w;
-                    let fy = canvas_top + frac_y * canvas_h;
-                    let fw = (frac_w * canvas_w).max(80.0);
-                    let fh = (frac_h * canvas_h).max(60.0);
+                    let fx = canvas_left + icon_col_w + (*x as f32 * cell_w);
+                    let fy = canvas_top + (*y as f32 * cell_h);
+                    let fw = (*w as f32 * cell_w + chrome_w).max(120.0);
+                    let fh = (*h as f32 * cell_h + chrome_h).max(80.0);
                     if !tab.floating.contains_key(pid) {
                         any_new = true;
                     }
