@@ -56,6 +56,9 @@ pub struct FloatingPane {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    /// Pre-maximize rect saved by `toggle_pane_maximize`. Some =
+    /// currently maximised, double-click restores it.
+    pub pre_max: Option<(f32, f32, f32, f32)>,
 }
 
 /// One top-bar tab = one tmux window. Holds its own pane positions so
@@ -369,6 +372,11 @@ struct App {
     last_body_click: Option<(Instant, f32, f32, u32)>,
     /// System clipboard handle, lazily created.
     clipboard: Option<arboard::Clipboard>,
+    /// False until the user explicitly opens something (Claude icon,
+    /// folder→Claude drop, session click). While false the renderer
+    /// hides the auto-spawned background shell pane so the user sees
+    /// a clean desktop on launch instead of an empty terminal box.
+    panes_visible: bool,
     /// Open file-explorer window, if any. Opening another folder icon
     /// replaces this; clicking its × closes it.
     explorer: Option<ExplorerWindow>,
@@ -456,6 +464,7 @@ impl App {
             selection: None,
             last_body_click: None,
             clipboard: arboard::Clipboard::new().ok(),
+            panes_visible: false,
             explorer: None,
             drag_ghost: (0.0, 0.0),
         }
@@ -548,6 +557,49 @@ impl App {
         }
     }
 
+    /// Double-click-on-title-bar toggle. First call saves the current
+    /// rect on `FloatingPane::pre_max` and grows the pane to the full
+    /// canvas; second call restores the saved rect. Also issues a
+    /// `resize-window` so tmux follows along.
+    fn toggle_pane_maximize(&mut self, pane_id: &str) {
+        let (canvas_left, canvas_top, canvas_w, canvas_h) = {
+            let (win_w, win_h) = self
+                .window
+                .as_ref()
+                .map(|w| {
+                    let s = w.inner_size();
+                    (s.width as f32, s.height as f32)
+                })
+                .unwrap_or((1280.0, 760.0));
+            let sidebar_w = if self.sidebar_open { self.sidebar_w } else { 0.0 };
+            (sidebar_w, render::SESSION_BAR_HEIGHT,
+             (win_w - sidebar_w).max(120.0),
+             (win_h - render::SESSION_BAR_HEIGHT - render::STATUS_HEIGHT).max(80.0))
+        };
+        let (cw, ch) = self.cell_metrics();
+        let Some(tab) = self.active_tab_mut() else { return };
+        let Some(fp) = tab.floating.get_mut(pane_id) else { return };
+        if let Some((px, py, pw, ph)) = fp.pre_max.take() {
+            fp.x = px; fp.y = py; fp.w = pw; fp.h = ph;
+        } else {
+            fp.pre_max = Some((fp.x, fp.y, fp.w, fp.h));
+            fp.x = canvas_left;
+            fp.y = canvas_top;
+            fp.w = canvas_w;
+            fp.h = canvas_h;
+        }
+        let cols = ((fp.w - 16.0) / cw).floor().max(20.0) as u16;
+        let rows = ((fp.h - 34.0) / ch).floor().max(5.0) as u16;
+        let pid = pane_id.to_string();
+        self.tmux_cmd(&format!("resize-window -t {pid} -x {cols} -y {rows}"));
+        if let Some(s) = self.active() {
+            let _ = s.tmux.resize_client(cols, rows);
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     /// Spawn a fresh pane in the CURRENT tab with `cwd` as the working
     /// dir, then send-keys "claude" + Enter so the user's zsh function
     /// fires the real `~/.local/bin/claude` binary. We use
@@ -558,6 +610,7 @@ impl App {
         let cmd = format!("split-window -h -c {}", shell_quote(cwd));
         self.tmux_cmd(&cmd);
         self.tmux_cmd("send-keys 'claude' Enter");
+        self.panes_visible = true;
     }
 
     fn new_session(&mut self) {
@@ -741,6 +794,7 @@ impl App {
                             pane_id: pid.clone(),
                             title: pid.clone(),
                             x: fx, y: fy, w: fw, h: fh,
+                            pre_max: None,
                         }
                     });
                     entry.x = fx;
@@ -903,6 +957,7 @@ impl App {
                         y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
                         w: 95.0 * render::CELL_W + 16.0,
                         h: 28.0 * render::CELL_H + 34.0,
+                        pre_max: None,
                     },
                 );
                 if tab.active_pane.is_none() {
@@ -1855,18 +1910,22 @@ impl App {
                 if let Some(s) = self.active_mut() {
                     s.active_window = Some(wid);
                 }
+                self.panes_visible = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
             }
             HitTarget::Session(n) => {
                 self.switch_session(n);
+                self.panes_visible = true;
             }
             HitTarget::NewSession => {
                 self.new_session();
+                self.panes_visible = true;
             }
             HitTarget::NewTab => {
                 self.tmux_cmd("new-window");
+                self.panes_visible = true;
             }
             HitTarget::Min => {
                 if let Some(w) = &self.window {
@@ -1886,10 +1945,12 @@ impl App {
                 }
             }
             HitTarget::Drag => {
-                // Hand off to winit / OS — on Wayland (WSLg) clients
-                // CANNOT programmatically reposition themselves, so our
-                // own anchor-tracked drag was a no-op. drag_window() is
-                // the only path that actually moves the surface.
+                if is_double {
+                    if let Some(w) = &self.window {
+                        w.set_maximized(!w.is_maximized());
+                    }
+                    return;
+                }
                 if let Some(w) = &self.window {
                     let _ = w.drag_window();
                 }
@@ -1901,6 +1962,11 @@ impl App {
                 }
             }
             HitTarget::Title(pid) => {
+                if is_double {
+                    self.toggle_pane_maximize(&pid);
+                    self.activate_pane(&pid);
+                    return;
+                }
                 if let Some(tab) = self.active_tab() {
                     if let Some(fp) = tab.floating.get(&pid).cloned() {
                         self.drag = Some(DragState::Move {
@@ -1973,6 +2039,7 @@ impl App {
                 // activate_pane sets active_pane, and the render order
                 // sorts active=last → naturally raises the pane.
                 self.activate_pane(&pid);
+                self.panes_visible = true;
             }
             HitTarget::Icon(_) => {
                 // Single click handled (early-return) above; double opens.
@@ -2236,7 +2303,11 @@ impl App {
                 PaneEdge::NW | PaneEdge::SE => CursorIcon::NwseResize,
             },
             Some(HitTarget::SidebarResize) => CursorIcon::EwResize,
-            Some(HitTarget::Title(_)) | Some(HitTarget::Drag) => CursorIcon::Move,
+            // Title and OS chrome drag zones use the default arrow —
+            // the cross-arrows "move" cursor is noisy when the user is
+            // just hovering. winit will switch to a grab cursor
+            // automatically while a drag is in flight.
+            Some(HitTarget::Title(_)) | Some(HitTarget::Drag) => CursorIcon::Default,
             Some(HitTarget::Body(_)) => CursorIcon::Text,
             Some(HitTarget::Tab(_))
             | Some(HitTarget::NewTab)
@@ -2275,22 +2346,24 @@ impl App {
                 let w = render::ICON_W;
                 let h = render::ICON_H;
                 if mx >= ic.x && mx <= ic.x + w && my >= ic.y && my <= ic.y + h {
-                    // Cwd: if the dragged path is a file, use its
-                    // parent; otherwise the path itself.
                     let cwd: std::path::PathBuf = if path.is_dir() {
                         path.clone()
                     } else {
                         path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone())
                     };
                     let cwd_str = cwd.to_string_lossy().into_owned();
-                    self.spawn_claude_pane_in(&cwd_str);
+                    // Just open a fresh pane at that cwd. The user can
+                    // run `claude` themselves; auto-spawning surprised
+                    // people who only wanted a terminal there.
+                    let cmd = format!("split-window -h -c {}", shell_quote(&cwd_str));
+                    self.tmux_cmd(&cmd);
+                    self.panes_visible = true;
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
                     return;
                 }
             }
-            // Dropped somewhere else — just cancel.
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -2621,6 +2694,14 @@ impl ApplicationHandler for App {
                     let (start, end) = s.ordered();
                     (s.pane_id.as_str(), start, end)
                 });
+                // Until the user opens something explicitly, hide the
+                // auto-spawned background shell — show the desktop
+                // (icons + sidebar) alone, like a clean OS login.
+                let active_floating = if self.panes_visible {
+                    active_floating
+                } else {
+                    std::collections::BTreeMap::new()
+                };
                 let explorer_for_render = self.explorer.clone();
                 let drag_ghost_label = match &self.drag {
                     Some(DragState::ExplorerEntry { path }) => Some((
