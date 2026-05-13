@@ -97,25 +97,30 @@ fn term_to_glyphon_bg(c: &TermColor, default: GColor) -> GColor {
 // 16pt with a 22px leading — matches native Windows Terminal /
 // Warp default and gives glyphon enough vertical bitmap to render
 // D2Coding crisply (small sizes were getting smeared by the AA).
-const FONT_SIZE: f32 = 16.0;
-const FONT_SIZE_SM: f32 = 13.0;
-const LINE_HEIGHT: f32 = 22.0;
-pub const PADDING: f32 = 10.0;
-// Used to be a 22px text line; now a Windows-style taskbar with a
-// start button, pane buttons, and a right tray (IME + clock).
-pub const STATUS_HEIGHT: f32 = 36.0;
-pub const TASKBAR_BTN_H: f32 = 28.0;
-pub const TASKBAR_START_W: f32 = 36.0;
-pub const TASKBAR_PANE_W: f32 = 180.0;
-pub const TASKBAR_GAP: f32 = 4.0;
-const TITLE_HEIGHT: f32 = 26.0;
-const BOX_PAD: f32 = 8.0;
-pub const SESSION_BAR_HEIGHT: f32 = 38.0;
-pub const SESSION_TAB_W: f32 = 170.0;
-pub const SESSION_TAB_GAP: f32 = 2.0;
-pub const SIDEBAR_W: f32 = 240.0;
-pub const ICON_W: f32 = 76.0;
-pub const ICON_H: f32 = 78.0;
+// All sizes below are PHYSICAL pixels, not logical. The window is
+// configured at LogicalSize 1280×760 which becomes 2560×1520 physical
+// on a 2× Retina display, and the wgpu surface is the physical size.
+// Constants are therefore doubled (≈ 2× their natural "logical" value)
+// so the UI lands at a normal screen size on Retina rather than half-
+// scale. A future scale-factor refactor would replace this with a
+// runtime multiplier.
+const FONT_SIZE: f32 = 32.0;
+const FONT_SIZE_SM: f32 = 26.0;
+const LINE_HEIGHT: f32 = 44.0;
+pub const PADDING: f32 = 20.0;
+pub const STATUS_HEIGHT: f32 = 72.0;
+pub const TASKBAR_BTN_H: f32 = 56.0;
+pub const TASKBAR_START_W: f32 = 72.0;
+pub const TASKBAR_PANE_W: f32 = 360.0;
+pub const TASKBAR_GAP: f32 = 8.0;
+pub const TITLE_HEIGHT: f32 = 52.0;
+pub const BOX_PAD: f32 = 16.0;
+pub const SESSION_BAR_HEIGHT: f32 = 56.0;
+pub const SESSION_TAB_W: f32 = 260.0;
+pub const SESSION_TAB_GAP: f32 = 4.0;
+pub const SIDEBAR_W: f32 = 320.0;
+pub const ICON_W: f32 = 152.0;
+pub const ICON_H: f32 = 156.0;
 
 // === Palette (One Dark — matches the user's terminal #22272e) ===
 const BG: [f32; 4] = [0.094, 0.110, 0.133, 1.0]; // app bg — #181c22
@@ -206,6 +211,70 @@ fn block_rects(ch: char) -> &'static [[f32; 4]] {
             [0.5, 0.0, 0.5, 0.5],
             [0.0, 0.5, 1.0, 0.5],
         ],
+        // Light box-drawing — claude's welcome banner uses ─ heavily, and
+        // every font on the user's system maps U+2500 to a different (often
+        // wrong) glyph through cosmic-text's fallback. Paint them as quads
+        // so the border looks like a real line, not a chevron mosaic.
+        '\u{2500}' => &[[0.0, 0.46, 1.0, 0.08]],       // ─ horizontal
+        '\u{2502}' => &[[0.46, 0.0, 0.08, 1.0]],       // │ vertical
+        '\u{250C}' => &[                                // ┌ down-right
+            [0.46, 0.46, 0.54, 0.08],
+            [0.46, 0.46, 0.08, 0.54],
+        ],
+        '\u{2510}' => &[                                // ┐ down-left
+            [0.0, 0.46, 0.54, 0.08],
+            [0.46, 0.46, 0.08, 0.54],
+        ],
+        '\u{2514}' => &[                                // └ up-right
+            [0.46, 0.46, 0.54, 0.08],
+            [0.46, 0.0, 0.08, 0.54],
+        ],
+        '\u{2518}' => &[                                // ┘ up-left
+            [0.0, 0.46, 0.54, 0.08],
+            [0.46, 0.0, 0.08, 0.54],
+        ],
+        '\u{251C}' => &[                                // ├
+            [0.46, 0.0, 0.08, 1.0],
+            [0.46, 0.46, 0.54, 0.08],
+        ],
+        '\u{2524}' => &[                                // ┤
+            [0.46, 0.0, 0.08, 1.0],
+            [0.0, 0.46, 0.54, 0.08],
+        ],
+        '\u{252C}' => &[                                // ┬
+            [0.0, 0.46, 1.0, 0.08],
+            [0.46, 0.46, 0.08, 0.54],
+        ],
+        '\u{2534}' => &[                                // ┴
+            [0.0, 0.46, 1.0, 0.08],
+            [0.46, 0.0, 0.08, 0.54],
+        ],
+        '\u{253C}' => &[                                // ┼
+            [0.0, 0.46, 1.0, 0.08],
+            [0.46, 0.0, 0.08, 1.0],
+        ],
+        // Arc corners — claude uses these for its welcome banner edges
+        // instead of the sharp ┌┐└┘ set. Approximated as two short
+        // perpendicular strokes meeting at the cell centre.
+        '\u{256D}' => &[                                // ╭ arc down-right
+            [0.46, 0.46, 0.54, 0.08],
+            [0.46, 0.46, 0.08, 0.54],
+        ],
+        '\u{256E}' => &[                                // ╮ arc down-left
+            [0.0, 0.46, 0.54, 0.08],
+            [0.46, 0.46, 0.08, 0.54],
+        ],
+        '\u{256F}' => &[                                // ╯ arc up-left
+            [0.0, 0.46, 0.54, 0.08],
+            [0.46, 0.0, 0.08, 0.54],
+        ],
+        '\u{2570}' => &[                                // ╰ arc up-right
+            [0.46, 0.46, 0.54, 0.08],
+            [0.46, 0.0, 0.08, 0.54],
+        ],
+        // Heavy box-drawing variants — claude occasionally mixes them in.
+        '\u{2501}' => &[[0.0, 0.42, 1.0, 0.16]],        // ━ heavy horizontal
+        '\u{2503}' => &[[0.42, 0.0, 0.16, 1.0]],        // ┃ heavy vertical
         _ => &[],
     }
 }
@@ -216,7 +285,7 @@ fn block_rects(ch: char) -> &'static [[f32; 4]] {
 fn measure_cell_at(font_system: &mut FontSystem, font_size: f32, line_height: f32) -> (f32, f32) {
     let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_height));
     buf.set_size(font_system, Some(2000.0), Some(line_height * 2.0));
-    let attrs = Attrs::new().family(Family::Name("D2Coding"));
+    let attrs = Attrs::new().family(Family::Name("D2CodingLigature Nerd Font Mono"));
     buf.set_text(font_system, "MMMMMMMMMMMMMMMMMMMM", attrs, Shaping::Advanced);
     buf.shape_until_scroll(font_system, false);
     let total = buf
@@ -245,7 +314,7 @@ fn measure_cell(font_system: &mut FontSystem) -> (f32, f32) {
 // They're constants because main.rs needs them to size newly-spawned
 // panes before a Renderer instance exists. Keep them in sync with the
 // FONT_SIZE / LINE_HEIGHT constants above.
-pub const CELL_W: f32 = 9.0;
+pub const CELL_W: f32 = 18.0;
 pub const CELL_H: f32 = LINE_HEIGHT;
 
 pub struct Renderer {
@@ -368,7 +437,7 @@ impl Renderer {
             .request_device(
                 &DeviceDescriptor {
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    required_limits: adapter.limits(),
                     label: Some("tmuxify-device"),
                     memory_hints: wgpu::MemoryHints::Performance,
                 },
@@ -469,7 +538,7 @@ impl Renderer {
         occluders: &[(f32, f32, f32, f32)],
         quads: &mut Vec<QuadInstance>,
     ) -> Vec<(Buffer, f32, f32, GColor, f32)> {
-        let attrs = Attrs::new().family(Family::Name("D2Coding"));
+        let attrs = Attrs::new().family(Family::Name("D2CodingLigature Nerd Font Mono"));
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
         let body_fs = self.body_font_size;
@@ -579,7 +648,7 @@ impl Renderer {
         body_top: f32,
         default_color: GColor,
     ) -> Vec<(Buffer, f32, f32, GColor, f32)> {
-        let attrs = Attrs::new().family(Family::Name("D2Coding"));
+        let attrs = Attrs::new().family(Family::Name("D2CodingLigature Nerd Font Mono"));
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
         let mut out: Vec<(Buffer, f32, f32, GColor, f32)> = Vec::new();
@@ -698,7 +767,7 @@ impl Renderer {
             }
             text.push('\n');
         }
-        let attrs = Attrs::new().family(Family::Name("D2Coding"));
+        let attrs = Attrs::new().family(Family::Name("D2CodingLigature Nerd Font Mono"));
         let mut buf = Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         buf.set_size(&mut self.font_system, Some(w), Some(h));
         let span_iter = spans
@@ -741,6 +810,9 @@ impl Renderer {
         cursor_visible: bool,
         sidebar_w_user: f32,
         snap_overlay: Option<[f32; 4]>,
+        // (pane_id, start_cell, end_cell) ordered start ≤ end. Paints
+        // translucent quads behind the glyphs to show what Cmd+C copies.
+        selection: Option<(&str, (u16, u16), (u16, u16))>,
     ) -> Result<()> {
         let sidebar_w = if sidebar_open { sidebar_w_user } else { 0.0 };
         struct Built {
@@ -752,7 +824,7 @@ impl Renderer {
         }
         let mut built: Vec<Built> = Vec::new();
         let mut quads: Vec<QuadInstance> = Vec::new();
-        let attrs = Attrs::new().family(Family::Name("D2Coding"));
+        let attrs = Attrs::new().family(Family::Name("D2CodingLigature Nerd Font Mono"));
 
         // === Top chrome strip ===
         quads.push(QuadInstance {
@@ -986,7 +1058,7 @@ impl Renderer {
             });
             // Search bar placeholder.
             let search_y = SESSION_BAR_HEIGHT + 14.0;
-            let search_h = 30.0;
+            let search_h = 56.0;
             quads.push(QuadInstance {
                 rect: [14.0, search_y, sidebar_w - 28.0, search_h],
                 color: PANEL_BG,
@@ -1018,8 +1090,8 @@ impl Renderer {
                 color: TEXT_MUT,
             });
             // Real session list.
-            let row_h = 60.0;
-            let row_gap = 4.0;
+            let row_h = 100.0;
+            let row_gap = 8.0;
             let first_row_y = search_y + search_h + 14.0;
             let mut row_y = first_row_y;
             for (n, name, win_count) in sessions {
@@ -1036,15 +1108,15 @@ impl Renderer {
                     });
                 }
                 // Always-visible × close button.
-                let close_w = 24.0;
+                let close_w = 40.0;
                 let close_left = sidebar_w - 14.0 - close_w;
                 quads.push(QuadInstance {
-                    rect: [close_left + 2.0, row_y + 18.0, close_w - 4.0, 24.0],
+                    rect: [close_left + 2.0, row_y + 28.0, close_w - 4.0, 44.0],
                     color: [0.04, 0.05, 0.07, 1.0],
                 });
                 let mut x_buf =
                     Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-                x_buf.set_size(&mut self.font_system, Some(close_w), Some(24.0));
+                x_buf.set_size(&mut self.font_system, Some(close_w), Some(48.0));
                 x_buf.set_text(&mut self.font_system, " ×", attrs, Shaping::Advanced);
                 x_buf.shape_until_scroll(&mut self.font_system, false);
                 built.push(Built {
@@ -1064,7 +1136,7 @@ impl Renderer {
                 name_buf.set_size(
                     &mut self.font_system,
                     Some(sidebar_w - 40.0 - close_w),
-                    Some(20.0),
+                    Some(48.0),
                 );
                 name_buf.set_text(&mut self.font_system, name, attrs, Shaping::Advanced);
                 name_buf.shape_until_scroll(&mut self.font_system, false);
@@ -1085,7 +1157,7 @@ impl Renderer {
                 sub_buf.set_size(
                     &mut self.font_system,
                     Some(sidebar_w - 40.0),
-                    Some(16.0),
+                    Some(36.0),
                 );
                 let sub = format!(
                     "{} window{}",
@@ -1097,7 +1169,7 @@ impl Renderer {
                 built.push(Built {
                     buffer: sub_buf,
                     left: 26.0,
-                    top: row_y + 32.0,
+                    top: row_y + 56.0,
                     bounds: TextBounds {
                         left: 14,
                         top: row_y as i32,
@@ -1109,7 +1181,7 @@ impl Renderer {
                 row_y += row_h + row_gap;
             }
             // "+ New session" button.
-            let new_h = 36.0;
+            let new_h = 60.0;
             row_y += 6.0;
             quads.push(QuadInstance {
                 rect: [14.0, row_y, sidebar_w - 28.0, new_h],
@@ -1338,6 +1410,35 @@ impl Renderer {
                     rect: [cx, cy, cw, ch],
                     color: [0.45, 0.65, 0.95, 0.55],
                 });
+            }
+            // Text-selection highlight. Paint one quad per fully-selected
+            // row + a partial-row quad for the start/end rows. Anchored
+            // behind the glyphs so antialiased text still reads cleanly.
+            if let Some((sel_pid, (sr, sc), (er, ec))) = selection {
+                if sel_pid == fp.pane_id.as_str() && pg.cols > 0 {
+                    let cw = self.cell_w;
+                    let ch = self.cell_h;
+                    let max_cols = pg.cols.saturating_sub(1);
+                    let body_left = fp.x + BOX_PAD;
+                    let body_top = fp.y + TITLE_HEIGHT;
+                    for r in sr..=er {
+                        if r >= pg.rows { break }
+                        let c0 = if r == sr { sc } else { 0 };
+                        let c1 = if r == er { ec } else { max_cols };
+                        let c1 = c1.min(max_cols);
+                        if c1 < c0 { continue }
+                        let count = (c1 - c0 + 1) as f32;
+                        quads.push(QuadInstance {
+                            rect: [
+                                body_left + c0 as f32 * cw,
+                                body_top + r as f32 * ch,
+                                count * cw,
+                                ch,
+                            ],
+                            color: [0.30, 0.50, 0.85, 0.40],
+                        });
+                    }
+                }
             }
             let default_text_color = if is_active { TEXT_PRI } else { TEXT_SEC };
             let segs = self.build_body_cells(

@@ -8,7 +8,7 @@ pub enum TmuxEvent {
     Begin { ts: String, id: String, flags: String },
     End { ts: String, id: String, flags: String },
     Error { ts: String, id: String, flags: String },
-    Output { pane_id: String, data: String },
+    Output { pane_id: String, data: Vec<u8> },
     WindowAdd { window_id: String },
     WindowClose { window_id: String },
     WindowRenamed { window_id: String, name: String },
@@ -77,8 +77,15 @@ fn parse_output(rest: &str) -> Option<TmuxEvent> {
 }
 
 // tmux escapes non-printables as `\ooo` (3-digit octal) and `\` as `\\`.
-fn decode_output(s: &str) -> String {
-    let bytes = s.as_bytes();
+// Return raw bytes — the vt100 parser handles UTF-8 reassembly across
+// %output chunks. Decoding to String here would lossy-replace partial
+// multi-byte codepoints with U+FFFD and corrupt CJK / box-drawing output
+// whenever tmux splits a 3-byte char across two %output events.
+fn decode_output(s: &str) -> Vec<u8> {
+    decode_output_bytes(s.as_bytes())
+}
+
+pub(crate) fn decode_output_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -106,7 +113,7 @@ fn decode_output(s: &str) -> String {
         out.push(b);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 fn split_two(s: &str) -> Option<(String, String)> {
@@ -135,7 +142,7 @@ mod tests {
         match parse_line("%output %3 hello world") {
             TmuxEvent::Output { pane_id, data } => {
                 assert_eq!(pane_id, "%3");
-                assert_eq!(data, "hello world");
+                assert_eq!(data, b"hello world");
             }
             _ => panic!("expected Output"),
         }
@@ -144,7 +151,7 @@ mod tests {
     #[test]
     fn decodes_octal_escape() {
         match parse_line("%output %1 \\033[31mhi\\033[0m") {
-            TmuxEvent::Output { data, .. } => assert_eq!(data, "\u{1b}[31mhi\u{1b}[0m"),
+            TmuxEvent::Output { data, .. } => assert_eq!(data, b"\x1b[31mhi\x1b[0m"),
             _ => panic!("expected Output"),
         }
     }
@@ -152,7 +159,7 @@ mod tests {
     #[test]
     fn decodes_backslash_escape() {
         match parse_line("%output %1 path\\\\with\\\\backslash") {
-            TmuxEvent::Output { data, .. } => assert_eq!(data, "path\\with\\backslash"),
+            TmuxEvent::Output { data, .. } => assert_eq!(data, b"path\\with\\backslash"),
             _ => panic!("expected Output"),
         }
     }
