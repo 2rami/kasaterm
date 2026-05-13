@@ -127,6 +127,9 @@ enum HitTarget {
     ExplorerClose,
     /// Click on a row inside the explorer body. usize = entry index.
     ExplorerEntry(usize),
+    /// Click on the central "Open folder" launcher card that shows
+    /// when no project (visible pane) is open yet.
+    OpenFolder,
 }
 
 /// A simple file-explorer "window" floating on the desktop. One at a
@@ -595,6 +598,27 @@ impl App {
         if let Some(s) = self.active() {
             let _ = s.tmux.resize_client(cols, rows);
         }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Show a native folder picker (NSOpenPanel on macOS via rfd) and,
+    /// if the user chooses one, spawn a fresh pane at that directory.
+    /// The first pane the user opens is what flips `panes_visible` on
+    /// and hides the onboarding card.
+    fn pick_folder_and_open(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Open a folder")
+            .set_directory(
+                std::env::var("HOME").unwrap_or_else(|_| "/".into()),
+            )
+            .pick_folder();
+        let Some(path) = picked else { return };
+        let cwd = path.to_string_lossy().into_owned();
+        let cmd = format!("split-window -h -c {}", shell_quote(&cwd));
+        self.tmux_cmd(&cmd);
+        self.panes_visible = true;
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1740,6 +1764,24 @@ impl App {
         if floating_hit.is_some() {
             return floating_hit;
         }
+        // Onboarding launcher card (only when desktop is bare).
+        if !self.panes_visible {
+            let win_w = self
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().width as f32)
+                .unwrap_or(0.0);
+            let win_h = self
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().height as f32)
+                .unwrap_or(0.0);
+            let (ox, oy, ow, oh) =
+                render::onboarding_rect(sidebar_w, win_w, win_h);
+            if x >= ox && x <= ox + ow && y >= oy && y <= oy + oh {
+                return Some(HitTarget::OpenFolder);
+            }
+        }
         // Explorer window — checked before icons so clicks inside its
         // body never reach the desktop layer.
         if let Some(exp) = &self.explorer {
@@ -1926,6 +1968,9 @@ impl App {
             HitTarget::NewTab => {
                 self.tmux_cmd("new-window");
                 self.panes_visible = true;
+            }
+            HitTarget::OpenFolder => {
+                self.pick_folder_and_open();
             }
             HitTarget::Min => {
                 if let Some(w) = &self.window {
@@ -2324,7 +2369,8 @@ impl App {
             | Some(HitTarget::TaskbarPane(_))
             | Some(HitTarget::ExplorerTitle)
             | Some(HitTarget::ExplorerClose)
-            | Some(HitTarget::ExplorerEntry(_)) => CursorIcon::Pointer,
+            | Some(HitTarget::ExplorerEntry(_))
+            | Some(HitTarget::OpenFolder) => CursorIcon::Pointer,
             None => CursorIcon::Default,
         };
         win.set_cursor(icon);
@@ -2713,6 +2759,7 @@ impl ApplicationHandler for App {
                     )),
                     _ => None,
                 };
+                let show_onboarding = !self.panes_visible;
                 if let Some(r) = self.renderer.as_mut() {
                     let _ = r.render(
                         &active_floating,
@@ -2732,6 +2779,7 @@ impl ApplicationHandler for App {
                         sel_for_render,
                         explorer_for_render.as_ref(),
                         drag_ghost_label.as_ref().map(|(s, x, y)| (s.as_str(), *x, *y)),
+                        show_onboarding,
                     );
                 }
             }
@@ -2784,35 +2832,11 @@ fn shell_quote(s: &str) -> String {
     format!("'{escaped}'")
 }
 
+/// Empty by default. The "desktop with shortcuts" metaphor was
+/// dropped in favour of a project-launcher onboarding card — we no
+/// longer hardcode Home / Claude tiles.
 fn default_icons() -> Vec<DesktopIcon> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-    let projects = format!("{}/projects", home);
-    let mut v = Vec::new();
-    let row_x = render::SIDEBAR_W + 24.0;
-    v.push(DesktopIcon {
-        label: "Home".into(),
-        kind: IconKind::Folder { cwd: home.clone() },
-        x: row_x,
-        y: render::SESSION_BAR_HEIGHT + 40.0,
-    });
-    if std::path::Path::new(&projects).exists() {
-        v.push(DesktopIcon {
-            label: "projects".into(),
-            kind: IconKind::Folder { cwd: projects },
-            x: row_x,
-            y: render::SESSION_BAR_HEIGHT + 220.0,
-        });
-    }
-    // Claude launcher — double-click spawns a new window and runs the
-    // `claude` shell function (defined in the user's ~/.zshrc) inside
-    // a fresh interactive login shell, so it Just Works™.
-    v.push(DesktopIcon {
-        label: "Claude".into(),
-        kind: IconKind::Claude { cwd: home },
-        x: row_x,
-        y: render::SESSION_BAR_HEIGHT + 400.0,
-    });
-    v
+    Vec::new()
 }
 
 

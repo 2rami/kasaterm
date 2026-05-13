@@ -122,6 +122,26 @@ pub const SIDEBAR_W: f32 = 320.0;
 pub const ICON_W: f32 = 152.0;
 pub const ICON_H: f32 = 156.0;
 
+/// Launcher / onboarding card geometry. Shared between the renderer
+/// and main.rs's hit_test so the click target matches the painted
+/// rect exactly.
+pub const ONBOARD_W: f32 = 720.0;
+pub const ONBOARD_H: f32 = 320.0;
+
+pub fn onboarding_rect(
+    sidebar_w: f32,
+    win_w: f32,
+    win_h: f32,
+) -> (f32, f32, f32, f32) {
+    let canvas_left = sidebar_w;
+    let canvas_top = SESSION_BAR_HEIGHT;
+    let canvas_w = (win_w - canvas_left).max(120.0);
+    let canvas_h = (win_h - canvas_top - STATUS_HEIGHT).max(80.0);
+    let x = canvas_left + (canvas_w - ONBOARD_W) * 0.5;
+    let y = canvas_top + (canvas_h - ONBOARD_H) * 0.5;
+    (x, y, ONBOARD_W, ONBOARD_H)
+}
+
 // === Palette (One Dark — matches the user's terminal #22272e) ===
 const BG: [f32; 4] = [0.094, 0.110, 0.133, 1.0]; // app bg — #181c22
 const CHROME_BG: [f32; 4] = [0.110, 0.125, 0.149, 1.0]; // title-bar #1c2026
@@ -826,6 +846,9 @@ impl Renderer {
         // Drag ghost (label, x, y) — painted last, follows the cursor
         // while the user is dragging an explorer entry onto Claude.
         drag_ghost: Option<(&str, f32, f32)>,
+        // Show the launcher / "Open folder" onboarding card centred
+        // on the canvas. Drawn last so it sits above any background.
+        show_onboarding: bool,
     ) -> Result<()> {
         let sidebar_w = if sidebar_open { sidebar_w_user } else { 0.0 };
         struct Built {
@@ -1860,6 +1883,105 @@ impl Renderer {
                     color: row_color,
                 });
             }
+        }
+
+        // === Onboarding / launcher card ===
+        if show_onboarding {
+            let ui_attrs = Attrs::new().family(Family::SansSerif);
+            let (ox, oy, ow, oh) =
+                onboarding_rect(sidebar_w, self.width as f32, self.height as f32);
+            // Soft card body with a hint of accent on the border.
+            quads.push(QuadInstance {
+                rect: [ox, oy, ow, oh],
+                color: [0.155, 0.175, 0.215, 1.0],
+                radius: 20.0,
+                ..Default::default()
+            });
+            // Big "Open a folder" title.
+            let mut t_buf = Buffer::new(
+                &mut self.font_system,
+                Metrics::new(FONT_SIZE + 8.0, FONT_SIZE + 12.0),
+            );
+            t_buf.set_size(&mut self.font_system, Some(ow - 80.0), Some(60.0));
+            t_buf.set_text(
+                &mut self.font_system,
+                "Open a folder",
+                ui_attrs,
+                Shaping::Advanced,
+            );
+            t_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: t_buf,
+                left: ox + 40.0,
+                top: oy + 56.0,
+                bounds: TextBounds {
+                    left: ox as i32,
+                    top: oy as i32,
+                    right: (ox + ow) as i32,
+                    bottom: (oy + 120.0) as i32,
+                },
+                color: TEXT_PRI,
+            });
+            // Helper line.
+            let mut h_buf = Buffer::new(
+                &mut self.font_system,
+                Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 6.0),
+            );
+            h_buf.set_size(&mut self.font_system, Some(ow - 80.0), Some(48.0));
+            h_buf.set_text(
+                &mut self.font_system,
+                "Pick a project directory to start a session in.",
+                ui_attrs,
+                Shaping::Advanced,
+            );
+            h_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: h_buf,
+                left: ox + 40.0,
+                top: oy + 132.0,
+                bounds: TextBounds {
+                    left: ox as i32,
+                    top: oy as i32,
+                    right: (ox + ow) as i32,
+                    bottom: (oy + 188.0) as i32,
+                },
+                color: TEXT_SEC,
+            });
+            // Pill-shaped Open button at the bottom.
+            let btn_w = 240.0;
+            let btn_h = 64.0;
+            let bx = ox + (ow - btn_w) * 0.5;
+            let by = oy + oh - btn_h - 40.0;
+            quads.push(QuadInstance {
+                rect: [bx, by, btn_w, btn_h],
+                color: ACCENT,
+                radius: 14.0,
+                ..Default::default()
+            });
+            let mut b_buf = Buffer::new(
+                &mut self.font_system,
+                Metrics::new(FONT_SIZE, FONT_SIZE + 6.0),
+            );
+            b_buf.set_size(&mut self.font_system, Some(btn_w), Some(btn_h));
+            b_buf.set_text(
+                &mut self.font_system,
+                "  Choose folder…",
+                ui_attrs,
+                Shaping::Advanced,
+            );
+            b_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: b_buf,
+                left: bx + 28.0,
+                top: by + 14.0,
+                bounds: TextBounds {
+                    left: bx as i32,
+                    top: by as i32,
+                    right: (bx + btn_w) as i32,
+                    bottom: (by + btn_h) as i32,
+                },
+                color: TEXT_PRI,
+            });
         }
 
         // === Drag ghost (last so it stays on top) ===
