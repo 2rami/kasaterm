@@ -697,41 +697,73 @@ impl App {
                         ..Default::default()
                     }
                 });
-                // Add new panes at a cascaded default size so the desktop
-                // icons stay visible underneath. The user can drag the
-                // pane's edges or maximise it manually; we no longer fill
-                // the canvas on the first pane because that hid every
-                // desktop icon and broke the launcher flow.
-                let _ = (canvas_left, canvas_top, canvas_w, canvas_h);
-                for pid in &leaves {
+                // Sync every FloatingPane's geometry to tmux's own layout
+                // coordinates. tmux decides the split shape (TeamCreate
+                // typically uses main-vertical: orchestrator big on left,
+                // workers stacked on the right). We respect that and just
+                // scale char coords to canvas pixels — fighting tmux's
+                // layout means our floating boxes drift out of sync with
+                // the inner apps' actual grid every time the layout shifts.
+                let pane_rects: Vec<(String, u16, u16, u16, u16)> = l
+                    .leaves()
+                    .iter()
+                    .filter_map(|n| match n {
+                        Layout::Pane { id, w, h, x, y } => Some((
+                            format!("%{id}"),
+                            *x as u16,
+                            *y as u16,
+                            *w as u16,
+                            *h as u16,
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                let mut any_new = false;
+                // Window-total dimensions from the layout root (chars).
+                let (_, _, win_cols_u, win_rows_u) = l.rect();
+                let win_cols = (win_cols_u as f32).max(1.0);
+                let win_rows = (win_rows_u as f32).max(1.0);
+                for (pid, x, y, w, h) in &pane_rects {
+                    let frac_x = *x as f32 / win_cols;
+                    let frac_y = *y as f32 / win_rows;
+                    let frac_w = *w as f32 / win_cols;
+                    let frac_h = *h as f32 / win_rows;
+                    let fx = canvas_left + frac_x * canvas_w;
+                    let fy = canvas_top + frac_y * canvas_h;
+                    let fw = (frac_w * canvas_w).max(80.0);
+                    let fh = (frac_h * canvas_h).max(60.0);
                     if !tab.floating.contains_key(pid) {
-                        let n = tab.next_cascade;
-                        let step = (n % 4) as f32;
-                        let fx = render::SIDEBAR_W + 220.0 + step * 30.0;
-                        let fy = render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0;
-                        let fw = 95.0 * render::CELL_W + 16.0;
-                        let fh = 28.0 * render::CELL_H + 34.0;
-                        tab.next_cascade += 1;
-                        tab.floating.insert(
-                            pid.clone(),
-                            FloatingPane {
-                                pane_id: pid.clone(),
-                                title: pid.clone(),
-                                x: fx,
-                                y: fy,
-                                w: fw,
-                                h: fh,
-                            },
-                        );
-                        let cols = ((fw - 16.0) / cell_w).floor().max(20.0) as u16;
-                        let rows = ((fh - 34.0) / cell_h).floor().max(5.0) as u16;
-                        let _ = s
-                            .tmux
-                            .send_cmd(&format!("resize-window -t {pid} -x {cols} -y {rows}"));
-                        let _ = s.tmux.resize_client(cols, rows);
+                        any_new = true;
                     }
+                    let entry = tab.floating.entry(pid.clone()).or_insert_with(|| {
+                        FloatingPane {
+                            pane_id: pid.clone(),
+                            title: pid.clone(),
+                            x: fx, y: fy, w: fw, h: fh,
+                        }
+                    });
+                    entry.x = fx;
+                    entry.y = fy;
+                    entry.w = fw;
+                    entry.h = fh;
                 }
-                // Drop panes that disappeared.
+                if any_new {
+                    // Ask tmux to grow the window so each tile gets the
+                    // pixel area we just gave it. Without this every new
+                    // pane shrinks the others to ~42×4 and claude renders
+                    // a couple of garbled lines.
+                    let total_cols =
+                        (canvas_w / cell_w).floor().max(20.0) as u16;
+                    let total_rows =
+                        (canvas_h / cell_h).floor().max(5.0) as u16;
+                    let _ = s.tmux.send_cmd(&format!(
+                        "resize-window -x {total_cols} -y {total_rows}"
+                    ));
+                    let _ = s.tmux.resize_client(total_cols, total_rows);
+                }
+                // Drop panes that disappeared, then re-tile if any went
+                // away — closing one pane in a 4-pane grid should reflow
+                // the remaining three back to 2×2 (or split, or fill).
                 let live: std::collections::HashSet<&String> = leaves.iter().collect();
                 let to_drop: Vec<String> = tab
                     .floating
@@ -739,8 +771,44 @@ impl App {
                     .filter(|k| !live.contains(k))
                     .cloned()
                     .collect();
+                let any_drop = !to_drop.is_empty();
                 for k in to_drop {
                     tab.floating.remove(&k);
+                }
+                if any_drop && !tab.floating.is_empty() {
+                    let n = tab.floating.len();
+                    let (gcols, grows) = match n {
+                        0 | 1 => (1, 1),
+                        2 => (2, 1),
+                        3 | 4 => (2, 2),
+                        5 | 6 => (3, 2),
+                        7..=9 => (3, 3),
+                        10..=12 => (4, 3),
+                        _ => (4, ((n + 3) / 4)),
+                    };
+                    let pane_w = canvas_w / gcols as f32;
+                    let pane_h = canvas_h / grows as f32;
+                    let mut pids: Vec<String> = tab.floating.keys().cloned().collect();
+                    pids.sort();
+                    for (i, pid) in pids.iter().enumerate() {
+                        let r = (i / gcols) as f32;
+                        let c = (i % gcols) as f32;
+                        if let Some(fp) = tab.floating.get_mut(pid) {
+                            fp.x = canvas_left + c * pane_w;
+                            fp.y = canvas_top + r * pane_h;
+                            fp.w = pane_w;
+                            fp.h = pane_h;
+                        }
+                    }
+                    let cols = ((pane_w - 16.0) / cell_w).floor().max(20.0) as u16;
+                    let rows = ((pane_h - 34.0) / cell_h).floor().max(5.0) as u16;
+                    let total_cols = cols * gcols as u16;
+                    let total_rows = rows * grows as u16;
+                    let _ = s.tmux.send_cmd(&format!(
+                        "resize-window -A -x {total_cols} -y {total_rows}"
+                    ));
+                    let _ = s.tmux.send_cmd("select-layout tiled");
+                    let _ = s.tmux.resize_client(cols, rows);
                 }
                 if tab.active_pane.is_none() {
                     tab.active_pane = leaves.first().cloned();
