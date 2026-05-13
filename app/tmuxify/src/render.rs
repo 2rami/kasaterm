@@ -22,7 +22,7 @@ use unicode_width::UnicodeWidthChar;
 use winit::window::Window;
 
 use crate::quad::{QuadInstance, QuadRenderer};
-use crate::{DesktopIcon, FloatingPane, IconKind, PaneGrid};
+use crate::{DesktopIcon, ExplorerWindow, FloatingPane, IconKind, PaneGrid};
 use tmux_bridge::Color as TermColor;
 
 const ANSI16: [(u8, u8, u8); 16] = [
@@ -136,6 +136,12 @@ const TEXT_PRI: GColor = GColor::rgb(0xea, 0xee, 0xf4);
 const TEXT_SEC: GColor = GColor::rgb(0x9b, 0xa3, 0xb0);
 const TEXT_MUT: GColor = GColor::rgb(0x60, 0x68, 0x76);
 const TEXT_DANGER: GColor = GColor::rgb(0xff, 0x9a, 0x9a);
+// Per-element close (×) chrome — subtle by default, the destructive
+// red is reserved for the OS-window close so users don't read every
+// `×` as "destroy the app". Quad alpha 0 = invisible square that
+// still gets drawn for layout symmetry; the GColor sets the glyph.
+const CLOSE_BG_IDLE: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+const CLOSE_FG_IDLE: GColor = GColor::rgb(0x9b, 0xa3, 0xb0);
 const ACCENT_DIM_TEXT: GColor = GColor::rgb(0x6e, 0x8a, 0xc8);
 
 fn color_eq(a: GColor, b: GColor) -> bool {
@@ -813,6 +819,11 @@ impl Renderer {
         // (pane_id, start_cell, end_cell) ordered start ≤ end. Paints
         // translucent quads behind the glyphs to show what Cmd+C copies.
         selection: Option<(&str, (u16, u16), (u16, u16))>,
+        // Open file-explorer window, if any.
+        explorer: Option<&ExplorerWindow>,
+        // Drag ghost (label, x, y) — painted last, follows the cursor
+        // while the user is dragging an explorer entry onto Claude.
+        drag_ghost: Option<(&str, f32, f32)>,
     ) -> Result<()> {
         let sidebar_w = if sidebar_open { sidebar_w_user } else { 0.0 };
         struct Built {
@@ -923,20 +934,17 @@ impl Renderer {
                 // the user to tell two tabs apart at a glance.
                 color: if active { TEXT_PRI } else { GColor::rgb(0xc8, 0xcf, 0xd8) },
             });
-            // × close glyph + hit zone — red so it reads as "destroy".
+            // × close — subtle glyph; the click handler still routes to
+            // kill-window. Keeping the bg transparent removes the
+            // candy-red dot that made every tab look like a notification.
             quads.push(QuadInstance {
                 rect: [close_x, tab_y + 4.0, close_w, tab_h - 8.0],
-                color: [0.78, 0.22, 0.22, 1.0],
+                color: CLOSE_BG_IDLE,
             });
             let mut x_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
             x_buf.set_size(&mut self.font_system, Some(close_w), Some(tab_h));
-            x_buf.set_text(
-                &mut self.font_system,
-                "×",
-                attrs.color(GColor::rgb(0xff, 0xee, 0xee)),
-                Shaping::Advanced,
-            );
+            x_buf.set_text(&mut self.font_system, "✕", attrs.color(CLOSE_FG_IDLE), Shaping::Advanced);
             x_buf.shape_until_scroll(&mut self.font_system, false);
             built.push(Built {
                 buffer: x_buf,
@@ -948,7 +956,7 @@ impl Renderer {
                     right: (close_x + close_w) as i32,
                     bottom: (tab_y + tab_h) as i32,
                 },
-                color: GColor::rgb(0xff, 0xee, 0xee),
+                color: CLOSE_FG_IDLE,
             });
             self.tab_close_hits.push(TabCloseHit {
                 x: close_x,
@@ -1402,29 +1410,24 @@ impl Renderer {
                 },
                 color: if is_active { TEXT_PRI } else { TEXT_SEC },
             });
-            // X close button — bigger hit-area, persistent red bg so
-            // the user can spot it immediately.
-            let close_w = 26.0;
-            let cx = fp.x + fp.w - close_w - 2.0;
-            let cy = fp.y + 3.0;
-            let close_h = TITLE_HEIGHT - 6.0;
+            // X close — subtle glyph, no candy-red square. Sized to
+            // match the title bar height so the hit zone stays large.
+            let close_w = 36.0;
+            let cx = fp.x + fp.w - close_w - 4.0;
+            let cy = fp.y + 6.0;
+            let close_h = TITLE_HEIGHT - 12.0;
             quads.push(QuadInstance {
                 rect: [cx, cy, close_w, close_h],
-                color: [0.78, 0.22, 0.22, 1.0],
+                color: CLOSE_BG_IDLE,
             });
             let mut x_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
             x_buf.set_size(&mut self.font_system, Some(close_w), Some(TITLE_HEIGHT));
-            x_buf.set_text(
-                &mut self.font_system,
-                "×",
-                attrs.color(GColor::rgb(0xff, 0xee, 0xee)),
-                Shaping::Advanced,
-            );
+            x_buf.set_text(&mut self.font_system, "✕", attrs.color(CLOSE_FG_IDLE), Shaping::Advanced);
             x_buf.shape_until_scroll(&mut self.font_system, false);
             built.push(Built {
                 buffer: x_buf,
-                left: cx + 8.0,
+                left: cx + 10.0,
                 top: cy,
                 bounds: TextBounds {
                     left: cx as i32,
@@ -1432,7 +1435,7 @@ impl Renderer {
                     right: (cx + close_w) as i32,
                     bottom: (cy + close_h) as i32,
                 },
-                color: GColor::rgb(0xff, 0xee, 0xee),
+                color: CLOSE_FG_IDLE,
             });
             } // !title_hidden
 
@@ -1648,17 +1651,12 @@ impl Renderer {
             let close_x = bx + btn_w - close_w - 2.0;
             quads.push(QuadInstance {
                 rect: [close_x, btn_y + 3.0, close_w, TASKBAR_BTN_H - 6.0],
-                color: [0.78, 0.22, 0.22, 1.0],
+                color: CLOSE_BG_IDLE,
             });
             let mut x_buf =
                 Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
             x_buf.set_size(&mut self.font_system, Some(close_w), Some(TASKBAR_BTN_H));
-            x_buf.set_text(
-                &mut self.font_system,
-                "×",
-                attrs.color(GColor::rgb(0xff, 0xee, 0xee)),
-                Shaping::Advanced,
-            );
+            x_buf.set_text(&mut self.font_system, "✕", attrs.color(CLOSE_FG_IDLE), Shaping::Advanced);
             x_buf.shape_until_scroll(&mut self.font_system, false);
             built.push(Built {
                 buffer: x_buf,
@@ -1670,7 +1668,7 @@ impl Renderer {
                     right: (close_x + close_w) as i32,
                     bottom: (btn_y + TASKBAR_BTN_H) as i32,
                 },
-                color: GColor::rgb(0xff, 0xee, 0xee),
+                color: CLOSE_FG_IDLE,
             });
             self.taskbar_buttons.push(TaskbarHit {
                 x: bx,
@@ -1702,6 +1700,130 @@ impl Renderer {
                     bottom: (btn_y + TASKBAR_BTN_H) as i32,
                 },
                 color: ACCENT_DIM_TEXT,
+            });
+        }
+
+        // === File-explorer window (single, optional) ===
+        if let Some(exp) = explorer {
+            let title_h = 52.0;
+            let panel_bg = [0.10, 0.12, 0.15, 1.0];
+            let title_bg = [0.16, 0.18, 0.22, 1.0];
+            let border = [0.3, 0.35, 0.42, 1.0];
+            // Body.
+            quads.push(QuadInstance { rect: [exp.x, exp.y, exp.w, exp.h], color: panel_bg });
+            // Title bar.
+            quads.push(QuadInstance { rect: [exp.x, exp.y, exp.w, title_h], color: title_bg });
+            // Border.
+            quads.push(QuadInstance { rect: [exp.x, exp.y + exp.h - 1.0, exp.w, 1.0], color: border });
+            // × close button.
+            let close_w = 40.0;
+            let cx = exp.x + exp.w - close_w - 4.0;
+            let cy = exp.y + 6.0;
+            quads.push(QuadInstance {
+                rect: [cx, cy, close_w, title_h - 12.0],
+                color: CLOSE_BG_IDLE,
+            });
+            let mut x_buf =
+                Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+            x_buf.set_size(&mut self.font_system, Some(close_w), Some(title_h));
+            x_buf.set_text(&mut self.font_system, "✕", attrs.color(CLOSE_FG_IDLE), Shaping::Advanced);
+            x_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: x_buf,
+                left: cx + 10.0,
+                top: cy - 2.0,
+                bounds: TextBounds {
+                    left: cx as i32,
+                    top: exp.y as i32,
+                    right: (cx + close_w) as i32,
+                    bottom: (exp.y + title_h) as i32,
+                },
+                color: CLOSE_FG_IDLE,
+            });
+            // Title text — show the open path.
+            let title = exp.path.to_string_lossy().into_owned();
+            let mut t_buf =
+                Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 4.0));
+            t_buf.set_size(&mut self.font_system, Some(exp.w - close_w - 32.0), Some(title_h));
+            t_buf.set_text(&mut self.font_system, &title, attrs, Shaping::Advanced);
+            t_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: t_buf,
+                left: exp.x + 16.0,
+                top: exp.y + 12.0,
+                bounds: TextBounds {
+                    left: exp.x as i32,
+                    top: exp.y as i32,
+                    right: cx as i32,
+                    bottom: (exp.y + title_h) as i32,
+                },
+                color: TEXT_PRI,
+            });
+            // Body rows.
+            let row_h = 48.0;
+            let body_y = exp.y + title_h;
+            let body_bottom = exp.y + exp.h;
+            for (i, ent) in exp.entries.iter().enumerate() {
+                let row_y = body_y + i as f32 * row_h - exp.scroll;
+                if row_y + row_h <= body_y { continue }
+                if row_y >= body_bottom { break }
+                // Small folder/file glyph tile.
+                let tile_w = 24.0;
+                let tile_h = 18.0;
+                let tile_color = if ent.is_dir { [0.45, 0.65, 0.95, 1.0] } else { [0.45, 0.50, 0.58, 1.0] };
+                quads.push(QuadInstance {
+                    rect: [exp.x + 16.0, row_y + (row_h - tile_h) * 0.5, tile_w, tile_h],
+                    color: tile_color,
+                });
+                // Row label.
+                let mut n_buf =
+                    Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 4.0));
+                n_buf.set_size(&mut self.font_system, Some(exp.w - 60.0), Some(row_h));
+                n_buf.set_text(&mut self.font_system, &ent.name, attrs, Shaping::Advanced);
+                n_buf.shape_until_scroll(&mut self.font_system, false);
+                let row_color = if ent.is_dir { TEXT_PRI } else { TEXT_SEC };
+                built.push(Built {
+                    buffer: n_buf,
+                    left: exp.x + 52.0,
+                    top: row_y + 12.0,
+                    bounds: TextBounds {
+                        left: exp.x as i32,
+                        top: row_y as i32,
+                        right: (exp.x + exp.w - 8.0) as i32,
+                        bottom: (row_y + row_h) as i32,
+                    },
+                    color: row_color,
+                });
+            }
+        }
+
+        // === Drag ghost (last so it stays on top) ===
+        if let Some((label, gx, gy)) = drag_ghost {
+            let pad = 12.0;
+            let ghost_w = (label.len() as f32 * (FONT_SIZE_SM * 0.6)).max(120.0).min(400.0) + pad * 2.0;
+            let ghost_h = 40.0;
+            let gx = gx + 12.0; // offset from cursor
+            let gy = gy + 12.0;
+            quads.push(QuadInstance {
+                rect: [gx, gy, ghost_w, ghost_h],
+                color: [0.96, 0.45, 0.20, 0.85],
+            });
+            let mut g_buf =
+                Buffer::new(&mut self.font_system, Metrics::new(FONT_SIZE_SM, FONT_SIZE_SM + 4.0));
+            g_buf.set_size(&mut self.font_system, Some(ghost_w - pad * 2.0), Some(ghost_h));
+            g_buf.set_text(&mut self.font_system, label, attrs, Shaping::Advanced);
+            g_buf.shape_until_scroll(&mut self.font_system, false);
+            built.push(Built {
+                buffer: g_buf,
+                left: gx + pad,
+                top: gy + 8.0,
+                bounds: TextBounds {
+                    left: gx as i32,
+                    top: gy as i32,
+                    right: (gx + ghost_w) as i32,
+                    bottom: (gy + ghost_h) as i32,
+                },
+                color: TEXT_PRI,
             });
         }
 

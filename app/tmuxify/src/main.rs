@@ -117,6 +117,69 @@ enum HitTarget {
     SessionClose(u8),
     SidebarResize,
     WindowEdgeResize(ResizeDirection),
+    /// Click in the explorer window title bar (drag to move the
+    /// explorer like a pane).
+    ExplorerTitle,
+    /// Click on the explorer window's × close button.
+    ExplorerClose,
+    /// Click on a row inside the explorer body. usize = entry index.
+    ExplorerEntry(usize),
+}
+
+/// A simple file-explorer "window" floating on the desktop. One at a
+/// time — opening another from a folder icon replaces the current one.
+#[derive(Debug, Clone)]
+pub struct ExplorerWindow {
+    pub path: std::path::PathBuf,
+    pub entries: Vec<ExplorerEntry>,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub scroll: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExplorerEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+impl ExplorerWindow {
+    pub fn open(path: std::path::PathBuf, x: f32, y: f32) -> Self {
+        let mut entries = Vec::new();
+        if let Ok(read) = std::fs::read_dir(&path) {
+            for ent in read.flatten() {
+                let name = ent.file_name().to_string_lossy().into_owned();
+                // Skip dotfiles to match Finder/Explorer defaults.
+                if name.starts_with('.') {
+                    continue;
+                }
+                let is_dir = ent.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                entries.push(ExplorerEntry { name, is_dir });
+            }
+        }
+        // Folders first, then alphabetical within group.
+        entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
+        Self { path, entries, x, y, w: 640.0, h: 800.0, scroll: 0.0 }
+    }
+
+    pub fn navigate(&mut self, sub: &str) {
+        if sub == ".." {
+            if let Some(parent) = self.path.parent() {
+                *self = ExplorerWindow::open(parent.to_path_buf(), self.x, self.y);
+            }
+        } else {
+            let next = self.path.join(sub);
+            if next.is_dir() {
+                *self = ExplorerWindow::open(next, self.x, self.y);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +218,10 @@ enum DragState {
     SidebarResize,
     /// User is mouse-dragging to extend a text selection in a pane body.
     Select { pane_id: String },
+    /// User is dragging an entry out of the file-explorer window.
+    /// Dropping it onto the Claude icon opens a new pane with that
+    /// path as cwd and auto-runs `claude`.
+    ExplorerEntry { path: std::path::PathBuf },
     WindowMove {
         /// Cursor position inside the window at drag start (px, py).
         /// We keep the cursor anchored to this point as we move the
@@ -302,6 +369,11 @@ struct App {
     last_body_click: Option<(Instant, f32, f32, u32)>,
     /// System clipboard handle, lazily created.
     clipboard: Option<arboard::Clipboard>,
+    /// Open file-explorer window, if any. Opening another folder icon
+    /// replaces this; clicking its × closes it.
+    explorer: Option<ExplorerWindow>,
+    /// Drag ghost position for the `ExplorerEntry` drag state.
+    drag_ghost: (f32, f32),
 }
 
 /// Shell commands tmuxify rewrites when the user typed them in a
@@ -384,6 +456,8 @@ impl App {
             selection: None,
             last_body_click: None,
             clipboard: arboard::Clipboard::new().ok(),
+            explorer: None,
+            drag_ghost: (0.0, 0.0),
         }
     }
 
@@ -472,6 +546,18 @@ impl App {
                 w.request_redraw();
             }
         }
+    }
+
+    /// Spawn a fresh pane in the CURRENT tab with `cwd` as the working
+    /// dir, then send-keys "claude" + Enter so the user's zsh function
+    /// fires the real `~/.local/bin/claude` binary. We use
+    /// `split-window` (not `new-window`) so the launcher doesn't pile
+    /// up a fresh tab every click; the new pane just appears alongside
+    /// the existing ones in the active tab.
+    fn spawn_claude_pane_in(&mut self, cwd: &str) {
+        let cmd = format!("split-window -h -c {}", shell_quote(cwd));
+        self.tmux_cmd(&cmd);
+        self.tmux_cmd("send-keys 'claude' Enter");
     }
 
     fn new_session(&mut self) {
@@ -1515,6 +1601,35 @@ impl App {
         if floating_hit.is_some() {
             return floating_hit;
         }
+        // Explorer window — checked before icons so clicks inside its
+        // body never reach the desktop layer.
+        if let Some(exp) = &self.explorer {
+            let title_h = 52.0;
+            if x >= exp.x && x <= exp.x + exp.w && y >= exp.y && y <= exp.y + exp.h {
+                // × close button on top-right of title bar.
+                let close_w = 40.0;
+                let cx = exp.x + exp.w - close_w - 4.0;
+                if x >= cx && x <= cx + close_w && y >= exp.y + 4.0 && y <= exp.y + title_h - 4.0 {
+                    return Some(HitTarget::ExplorerClose);
+                }
+                if y <= exp.y + title_h {
+                    return Some(HitTarget::ExplorerTitle);
+                }
+                // Body — figure out which entry row was clicked.
+                let row_h = 48.0;
+                let body_y = exp.y + title_h;
+                let local_y = y - body_y + exp.scroll;
+                if local_y >= 0.0 {
+                    let idx = (local_y / row_h).floor() as usize;
+                    if idx < exp.entries.len() {
+                        return Some(HitTarget::ExplorerEntry(idx));
+                    }
+                }
+                // Empty area inside the explorer body — swallow the click
+                // so it doesn't fall through to a desktop icon below.
+                return Some(HitTarget::ExplorerTitle);
+            }
+        }
         // Icons last (always checked, even when no session is up).
         for (i, ic) in self.icons.iter().enumerate() {
             let icon_w = render::ICON_W;
@@ -1588,26 +1703,65 @@ impl App {
                 if let Some(ic) = self.icons.get(*idx).cloned() {
                     match ic.kind {
                         IconKind::Folder { cwd } => {
-                            let cmd = format!("new-window -c {}", shell_quote(&cwd));
-                            self.tmux_cmd(&cmd);
+                            // Open a file-explorer window at the folder's
+                            // path. The user can navigate, and drag any
+                            // entry onto the Claude icon to spawn a pane.
+                            let exp_x = ic.x + render::ICON_W + 32.0;
+                            let exp_y = ic.y;
+                            self.explorer = Some(ExplorerWindow::open(
+                                std::path::PathBuf::from(cwd),
+                                exp_x,
+                                exp_y,
+                            ));
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
                         }
                         IconKind::Claude { cwd } => {
-                            // Spawn a fresh pane in `cwd`, then send-keys
-                            // "claude\r" to the just-created (and now-
-                            // active) pane. We rely on the global
-                            // interactive-login shell so the `claude`
-                            // function in ~/.zshrc resolves correctly.
-                            let cmd = format!("new-window -c {}", shell_quote(&cwd));
-                            self.tmux_cmd(&cmd);
-                            // tmux serialises commands per control client;
-                            // the send-keys runs after new-window's begin/
-                            // end pair completes, by which time the new
-                            // pane is selected.
-                            self.tmux_cmd("send-keys 'claude' Enter");
+                            self.spawn_claude_pane_in(&cwd);
                         }
                     }
                 }
                 return;
+            }
+            return;
+        }
+        if let HitTarget::ExplorerEntry(idx) = &hit {
+            if is_double {
+                // Double-click navigates into the folder (or no-op for a
+                // file). For files we'd open with the OS default app
+                // later — for now just ignore.
+                if let Some(exp) = self.explorer.as_mut() {
+                    if let Some(entry) = exp.entries.get(*idx).cloned() {
+                        if entry.is_dir {
+                            exp.navigate(&entry.name);
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            // Single click starts a "potential drag". The actual drag
+            // only kicks in once the mouse leaves the row by a few
+            // pixels (mouse_move). Until then, treat it as a hover.
+            if let Some(exp) = self.explorer.as_ref() {
+                if let Some(entry) = exp.entries.get(*idx) {
+                    let entry_path = exp.path.join(&entry.name);
+                    self.drag = Some(DragState::ExplorerEntry { path: entry_path });
+                    self.drag_ghost = (x, y);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            return;
+        }
+        if let HitTarget::ExplorerClose = &hit {
+            self.explorer = None;
+            if let Some(w) = &self.window {
+                w.request_redraw();
             }
             return;
         }
@@ -1753,6 +1907,14 @@ impl App {
             HitTarget::SidebarResize => {
                 self.drag = Some(DragState::SidebarResize);
             }
+            HitTarget::ExplorerTitle
+            | HitTarget::ExplorerClose
+            | HitTarget::ExplorerEntry(_) => {
+                // These three are fully handled in the earlier
+                // explorer-specific branches (open / close / drag
+                // start). Nothing more to do here, but exhaustiveness
+                // requires an arm.
+            }
             HitTarget::SessionClose(n) => {
                 let name = self.sessions.get(&n).map(|s| s.tmux.session_name.clone());
                 if let Some(name) = name {
@@ -1829,6 +1991,13 @@ impl App {
             }
             return;
         }
+        if let DragState::ExplorerEntry { .. } = &drag {
+            self.drag_ghost = self.mouse;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         let (x, y) = self.mouse;
         // Live resize-pane command for the inner app — recompute cell
         // grid from the new pane geometry and only push to tmux when
@@ -1893,6 +2062,10 @@ impl App {
                 unreachable!();
             }
             DragState::Select { .. } => {
+                // Handled by the early-return at the top of this fn.
+                unreachable!();
+            }
+            DragState::ExplorerEntry { .. } => {
                 // Handled by the early-return at the top of this fn.
                 unreachable!();
             }
@@ -1993,7 +2166,10 @@ impl App {
             | Some(HitTarget::Close)
             | Some(HitTarget::ToggleSidebar)
             | Some(HitTarget::Icon(_))
-            | Some(HitTarget::TaskbarPane(_)) => CursorIcon::Pointer,
+            | Some(HitTarget::TaskbarPane(_))
+            | Some(HitTarget::ExplorerTitle)
+            | Some(HitTarget::ExplorerClose)
+            | Some(HitTarget::ExplorerEntry(_)) => CursorIcon::Pointer,
             None => CursorIcon::Default,
         };
         win.set_cursor(icon);
@@ -2003,6 +2179,39 @@ impl App {
         let Some(drag) = self.drag.take() else { return };
         self.last_live_resize = None;
         self.last_live_resize_at = None;
+        // Explorer drag-and-drop onto the Claude icon. Resolved here so
+        // the inner match below stays focused on pane-resize / window-
+        // move bookkeeping.
+        if let DragState::ExplorerEntry { path } = &drag {
+            let (mx, my) = self.mouse;
+            for ic in &self.icons {
+                if !matches!(ic.kind, IconKind::Claude { .. }) {
+                    continue;
+                }
+                let w = render::ICON_W;
+                let h = render::ICON_H;
+                if mx >= ic.x && mx <= ic.x + w && my >= ic.y && my <= ic.y + h {
+                    // Cwd: if the dragged path is a file, use its
+                    // parent; otherwise the path itself.
+                    let cwd: std::path::PathBuf = if path.is_dir() {
+                        path.clone()
+                    } else {
+                        path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone())
+                    };
+                    let cwd_str = cwd.to_string_lossy().into_owned();
+                    self.spawn_claude_pane_in(&cwd_str);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+            }
+            // Dropped somewhere else — just cancel.
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         match drag {
             DragState::Resize { pane_id, .. } => {
                 let (cw, ch) = self.cell_metrics();
@@ -2328,6 +2537,17 @@ impl ApplicationHandler for App {
                     let (start, end) = s.ordered();
                     (s.pane_id.as_str(), start, end)
                 });
+                let explorer_for_render = self.explorer.clone();
+                let drag_ghost_label = match &self.drag {
+                    Some(DragState::ExplorerEntry { path }) => Some((
+                        path.file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+                        self.drag_ghost.0,
+                        self.drag_ghost.1,
+                    )),
+                    _ => None,
+                };
                 if let Some(r) = self.renderer.as_mut() {
                     let _ = r.render(
                         &active_floating,
@@ -2345,6 +2565,8 @@ impl ApplicationHandler for App {
                         sidebar_w_for_render,
                         snap_overlay,
                         sel_for_render,
+                        explorer_for_render.as_ref(),
+                        drag_ghost_label.as_ref().map(|(s, x, y)| (s.as_str(), *x, *y)),
                     );
                 }
             }
