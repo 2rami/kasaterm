@@ -15,3 +15,4 @@ pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 unicode-width = "0.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+arboard = "3"

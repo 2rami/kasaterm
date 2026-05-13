@@ -140,6 +140,8 @@ enum DragState {
         start_mouse: (f32, f32),
     },
     SidebarResize,
+    /// User is mouse-dragging to extend a text selection in a pane body.
+    Select { pane_id: String },
     WindowMove {
         /// Cursor position inside the window at drag start (px, py).
         /// We keep the cursor anchored to this point as we move the
@@ -208,6 +210,33 @@ fn list_tmux_sessions() -> Vec<String> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Selection {
+    pub pane_id: String,
+    /// Anchor — where the drag started. `(row, col)` in pane cell coords.
+    pub anchor: (u16, u16),
+    /// Current end of the selection. Anchor may be after end (drag up/left).
+    pub end: (u16, u16),
+    /// Selection unit: char (drag), word (double-click), line (triple).
+    pub mode: SelectionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMode {
+    Char,
+    Word,
+    Line,
+}
+
+impl Selection {
+    /// Normalised (start, end) where start ≤ end in row-major order.
+    pub fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        let a = self.anchor;
+        let b = self.end;
+        if (a.0, a.1) <= (b.0, b.1) { (a, b) } else { (b, a) }
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -220,6 +249,7 @@ struct App {
     shift: bool,
     ctrl: bool,
     alt: bool,
+    cmd: bool,
     last_poll: Instant,
     sidebar_open: bool,
     icons: Vec<DesktopIcon>,
@@ -253,11 +283,51 @@ struct App {
     /// commands (e.g. user types "CLAUDE\r" → we rewrite to "claude\r")
     /// without modifying the user's .zshrc.
     typed_buffer: String,
+    /// Active mouse-drag text selection inside a pane body.
+    selection: Option<Selection>,
+    /// Last body-click time + position for double/triple-click detection.
+    last_body_click: Option<(Instant, f32, f32, u32)>,
+    /// System clipboard handle, lazily created.
+    clipboard: Option<arboard::Clipboard>,
 }
 
 /// Shell commands tmuxify rewrites when the user typed them in a
 /// non-lowercase form (and just them — anything else is passed through).
 const CASE_REWRITE_COMMANDS: &[&str] = &["claude"];
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/' || c == ':'
+}
+
+fn cell_first_char(cell: &Cell) -> char {
+    cell.ch.chars().next().unwrap_or(' ')
+}
+
+/// Expand a (row, col) into the word that surrounds it. Word = run of
+/// alphanumeric / underscore / dash / dot / slash / colon characters.
+fn expand_word(pg: &PaneGrid, pos: (u16, u16)) -> ((u16, u16), (u16, u16)) {
+    let (row, col) = pos;
+    let Some(line) = pg.cells.get(row as usize) else {
+        return ((row, col), (row, col));
+    };
+    let start_char = line.get(col as usize).map(cell_first_char).unwrap_or(' ');
+    if !is_word_char(start_char) {
+        return ((row, col), (row, col));
+    }
+    let mut s = col;
+    while s > 0 {
+        let prev = line.get((s - 1) as usize).map(cell_first_char).unwrap_or(' ');
+        if !is_word_char(prev) { break }
+        s -= 1;
+    }
+    let mut e = col;
+    while (e as usize + 1) < line.len() {
+        let next = line.get((e + 1) as usize).map(cell_first_char).unwrap_or(' ');
+        if !is_word_char(next) { break }
+        e += 1;
+    }
+    ((row, s), (row, e))
+}
 
 impl App {
     fn new() -> Self {
@@ -273,6 +343,7 @@ impl App {
             shift: false,
             ctrl: false,
             alt: false,
+            cmd: false,
             last_poll: Instant::now(),
             sidebar_open: true,
             icons: default_icons(),
@@ -297,6 +368,9 @@ impl App {
             snap_zone: None,
             pre_snap_rect: None,
             typed_buffer: String::new(),
+            selection: None,
+            last_body_click: None,
+            clipboard: arboard::Clipboard::new().ok(),
         }
     }
 
@@ -425,8 +499,34 @@ impl App {
             for u in screens {
                 Self::apply_screen(self.sessions.get_mut(&k).unwrap(), u);
             }
+            let (cell_w_live, cell_h_live) = self.cell_metrics();
+            let (canvas_left, canvas_top, canvas_w, canvas_h) = {
+                let (win_w, win_h) = self
+                    .window
+                    .as_ref()
+                    .map(|w| {
+                        let s = w.inner_size();
+                        (s.width as f32, s.height as f32)
+                    })
+                    .unwrap_or((1280.0, 760.0));
+                let sidebar_w = if self.sidebar_open { self.sidebar_w } else { 0.0 };
+                let cl = sidebar_w;
+                let ct = render::SESSION_BAR_HEIGHT;
+                let cw_ = (win_w - cl).max(120.0);
+                let ch_ = (win_h - ct - render::STATUS_HEIGHT).max(80.0);
+                (cl, ct, cw_, ch_)
+            };
             for e in events {
-                Self::apply_event(self.sessions.get_mut(&k).unwrap(), e);
+                Self::apply_event(
+                    self.sessions.get_mut(&k).unwrap(),
+                    e,
+                    canvas_left,
+                    canvas_top,
+                    canvas_w,
+                    canvas_h,
+                    cell_w_live,
+                    cell_h_live,
+                );
             }
             for resp in queries {
                 Self::apply_cwd_query(self.sessions.get_mut(&k).unwrap(), resp);
@@ -468,7 +568,16 @@ impl App {
         let _ = u.title;
     }
 
-    fn apply_event(s: &mut SessionState, e: TmuxEvent) {
+    fn apply_event(
+        s: &mut SessionState,
+        e: TmuxEvent,
+        canvas_left: f32,
+        canvas_top: f32,
+        canvas_w: f32,
+        canvas_h: f32,
+        cell_w: f32,
+        cell_h: f32,
+    ) {
         match e {
             TmuxEvent::LayoutChange { window_id, layout } => {
                 let first = layout.split_whitespace().next().unwrap_or("");
@@ -490,25 +599,47 @@ impl App {
                     }
                 });
                 // Add new panes, preserve existing positions.
+                // The first pane fills the canvas; subsequent ones cascade
+                // from default size so multiple new panes don't stack.
                 for pid in &leaves {
                     if !tab.floating.contains_key(pid) {
-                        let n = tab.next_cascade;
+                        let is_first = tab.floating.is_empty();
+                        let (fx, fy, fw, fh) = if is_first {
+                            (canvas_left, canvas_top, canvas_w, canvas_h)
+                        } else {
+                            let n = tab.next_cascade;
+                            let step = (n % 4) as f32;
+                            (
+                                render::SIDEBAR_W + 130.0 + step * 30.0,
+                                render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
+                                95.0 * render::CELL_W + 16.0,
+                                28.0 * render::CELL_H + 34.0,
+                            )
+                        };
                         tab.next_cascade += 1;
-                        let cascade = (n % 8) as f32;
-                        // Cap cascade at 4 steps so newly-spawned panes
-                        // stay on-screen even after many opens.
-                        let step = (n % 4) as f32;
                         tab.floating.insert(
                             pid.clone(),
                             FloatingPane {
                                 pane_id: pid.clone(),
                                 title: pid.clone(),
-                                x: render::SIDEBAR_W + 130.0 + step * 30.0,
-                                y: render::SESSION_BAR_HEIGHT + 30.0 + step * 30.0,
-                                w: 95.0 * render::CELL_W + 16.0,
-                                h: 28.0 * render::CELL_H + 34.0,
+                                x: fx,
+                                y: fy,
+                                w: fw,
+                                h: fh,
                             },
                         );
+                        if is_first {
+                            let cols = ((fw - 16.0) / cell_w).floor().max(20.0) as u16;
+                            let rows = ((fh - 34.0) / cell_h).floor().max(5.0) as u16;
+                            let _ = s
+                                .tmux
+                                .send_cmd(&format!("resize-window -t {pid} -x {cols} -y {rows}"));
+                            // Resize the vt100 parser to match — otherwise
+                            // the inner app's cursor positioning (CUP) hits
+                            // out-of-bounds rows/cols and the screen renders
+                            // empty even though tmux holds the real output.
+                            let _ = s.tmux.resize_client(cols, rows);
+                        }
                     }
                 }
                 // Drop panes that disappeared.
@@ -778,6 +909,96 @@ impl App {
         }
     }
 
+    /// Find the pane at `pane_id` and return the (row, col) cell that
+    /// the screen-space pixel (mx, my) falls on. Returns None if the
+    /// pixel is outside the pane body.
+    fn body_pixel_to_cell(&self, pane_id: &str, mx: f32, my: f32) -> Option<(u16, u16)> {
+        let (cw, ch) = self.cell_metrics();
+        let tab = self.active_tab()?;
+        let fp = tab.floating.get(pane_id)?;
+        let body_left = fp.x + render::BOX_PAD;
+        let body_top = fp.y + render::TITLE_HEIGHT;
+        if mx < body_left || my < body_top {
+            return None;
+        }
+        let pg = self.active().and_then(|s| s.panes.get(pane_id))?;
+        let col = ((mx - body_left) / cw).floor() as i32;
+        let row = ((my - body_top) / ch).floor() as i32;
+        if col < 0 || row < 0 {
+            return None;
+        }
+        let col = (col as u16).min(pg.cols.saturating_sub(1));
+        let row = (row as u16).min(pg.rows.saturating_sub(1));
+        Some((row, col))
+    }
+
+    /// Given the current `selection` and its mode, expand `anchor` and
+    /// `end` to cover the surrounding word or line. No-op for Char mode.
+    fn expand_selection_mode(&mut self) {
+        let Some(sel) = self.selection.clone() else { return };
+        let Some(pg) = self.active().and_then(|s| s.panes.get(&sel.pane_id)) else { return };
+        let (s, e) = sel.ordered();
+        let (anchor, end) = match sel.mode {
+            SelectionMode::Char => return,
+            SelectionMode::Word => {
+                let s = expand_word(pg, s);
+                let e = expand_word(pg, e);
+                (s.0, e.1)
+            }
+            SelectionMode::Line => {
+                let s_col = 0u16;
+                let e_col = pg.cols.saturating_sub(1);
+                ((s.0, s_col), (e.0, e_col))
+            }
+        };
+        if let Some(sel) = self.selection.as_mut() {
+            sel.anchor = anchor;
+            sel.end = end;
+        }
+    }
+
+    /// Walk the selection grid in row-major order and gather the visible
+    /// text. Trailing whitespace on each row is trimmed (matches what
+    /// every other terminal does when copying).
+    fn selection_text(&self) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        let pg = self.active().and_then(|s| s.panes.get(&sel.pane_id))?;
+        let (start, end) = sel.ordered();
+        let mut out = String::new();
+        for r in start.0..=end.0 {
+            let row = pg.cells.get(r as usize)?;
+            let c0 = if r == start.0 { start.1 as usize } else { 0 };
+            let c1 = if r == end.0 { end.1 as usize } else { pg.cols as usize - 1 };
+            let mut line = String::new();
+            for c in c0..=c1 {
+                if let Some(cell) = row.get(c) {
+                    if cell.ch.is_empty() { line.push(' '); } else { line.push_str(&cell.ch); }
+                }
+            }
+            if c1 + 1 == pg.cols as usize {
+                while line.ends_with(' ') { line.pop(); }
+            }
+            if r != end.0 { line.push('\n'); }
+            out.push_str(&line);
+        }
+        Some(out)
+    }
+
+    fn copy_selection_to_clipboard(&mut self) {
+        let Some(text) = self.selection_text() else { return };
+        if text.is_empty() { return }
+        if let Some(cb) = self.clipboard.as_mut() {
+            let _ = cb.set_text(text);
+        }
+    }
+
+    fn paste_from_clipboard(&mut self) {
+        let Some(cb) = self.clipboard.as_mut() else { return };
+        let Ok(text) = cb.get_text() else { return };
+        if text.is_empty() { return }
+        self.send_bytes(text.as_bytes());
+    }
+
     fn handle_key(&mut self, ev: KeyEvent) {
         let pressed = ev.state == ElementState::Pressed;
         if let Key::Named(NamedKey::Shift) = &ev.logical_key {
@@ -797,8 +1018,30 @@ impl App {
                 return;
             }
         }
+        if let Key::Named(NamedKey::Super) = &ev.logical_key {
+            self.cmd = pressed;
+            return;
+        }
         if !pressed {
             return;
+        }
+        // Cmd+C / Cmd+V — clipboard. Match the character text (case-
+        // insensitive) so Caps Lock or shift don't break it.
+        if self.cmd {
+            let key_str = match &ev.logical_key {
+                Key::Character(s) => Some(s.as_str().to_ascii_lowercase()),
+                _ => None,
+            };
+            if let Some(k) = key_str.as_deref() {
+                if k == "c" {
+                    self.copy_selection_to_clipboard();
+                    return;
+                }
+                if k == "v" {
+                    self.paste_from_clipboard();
+                    return;
+                }
+            }
         }
 
         // Hangul toggle. Log every keydown so we can diagnose what
@@ -1088,7 +1331,11 @@ impl App {
                 }
             }
         }
-        let edge = 6.0;
+        // Window-edge resize zone is 12px (≈ 6 logical on 2× Retina). The
+        // pane body never extends into this strip — even when the pane
+        // fills the canvas, the renderer leaves PADDING around it — so
+        // there's no ambiguity between "resize window" and "resize pane".
+        let edge = 12.0;
         // Bottom edge / corners.
         if y >= win_h - edge {
             if x <= edge {
@@ -1114,14 +1361,16 @@ impl App {
         {
             return Some(HitTarget::SidebarResize);
         }
-        // Sidebar zone (below title bar, left column).
+        // Sidebar zone (below title bar, left column). The constants here
+        // mirror the renderer — bump together with render.rs's row_h /
+        // close_w / search_h or clicks land on the wrong row.
         if self.sidebar_open && x < sidebar_w && y >= render::SESSION_BAR_HEIGHT {
-            let row_h = 60.0;
-            let row_gap = 4.0;
-            let first_row_y = render::SESSION_BAR_HEIGHT + 14.0 + 30.0 + 14.0;
+            let row_h = 100.0;
+            let row_gap = 8.0;
+            let search_h = 56.0;
+            let first_row_y = render::SESSION_BAR_HEIGHT + 14.0 + search_h + 14.0;
             let mut row_y = first_row_y;
-            // Each row's right side has a 24px "×" hit area.
-            let close_w = 24.0;
+            let close_w = 40.0;
             let close_left = sidebar_w - 14.0 - close_w;
             for n in self.sessions.keys() {
                 if y >= row_y && y < row_y + row_h {
@@ -1133,7 +1382,7 @@ impl App {
                 row_y += row_h + row_gap;
             }
             row_y += 6.0;
-            let new_h = 36.0;
+            let new_h = 60.0;
             if y >= row_y && y < row_y + new_h {
                 return Some(HitTarget::NewSession);
             }
@@ -1197,18 +1446,20 @@ impl App {
             let tab = s.windows.get(wid)?;
             let mut order: Vec<&FloatingPane> = tab.floating.values().collect();
             order.sort_by_key(|f| (tab.active_pane.as_deref() == Some(&f.pane_id)) as u8);
-            // Outer "edge band" — the few pixels around each side of
-            // the pane (both inside and outside its rect) act as resize
-            // grips. Outside band lets the user grab right at the
-            // border without having to be pixel-perfect on the inside.
+            // Resize grip band — INSIDE the pane only. Originally extended
+            // outside too for easier grabbing, but that collided with the
+            // OS-window edge resize zone whenever the pane filled the
+            // canvas (its outer border = window border). Keeping the band
+            // inside the pane leaves the outer ~12 px clear for window
+            // edge resize and disambiguates the two gestures.
             let band: f32 = RESIZE_HANDLE; // 14 px
-            let corner: f32 = 18.0;
+            let corner: f32 = 22.0;
             for fp in order.iter().rev() {
                 // First the corners — they take precedence over edges.
-                let near_l = x >= fp.x - band && x <= fp.x + corner;
-                let near_r = x >= fp.x + fp.w - corner && x <= fp.x + fp.w + band;
-                let near_t = y >= fp.y - band && y <= fp.y + corner;
-                let near_b = y >= fp.y + fp.h - corner && y <= fp.y + fp.h + band;
+                let near_l = x >= fp.x && x <= fp.x + corner;
+                let near_r = x >= fp.x + fp.w - corner && x <= fp.x + fp.w;
+                let near_t = y >= fp.y && y <= fp.y + corner;
+                let near_b = y >= fp.y + fp.h - corner && y <= fp.y + fp.h;
                 if near_l && near_t {
                     return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::NW));
                 }
@@ -1221,21 +1472,19 @@ impl App {
                 if near_r && near_b {
                     return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::SE));
                 }
-                // Then the 4 edges. Only when the OTHER axis is inside
-                // the pane (so the grip is a thin strip, not the whole
-                // plane).
-                let inside_x = x >= fp.x - band && x <= fp.x + fp.w + band;
-                let inside_y = y >= fp.y - band && y <= fp.y + fp.h + band;
-                if inside_y && x >= fp.x - band && x <= fp.x + band {
+                // Then the 4 edges, again INSIDE-only.
+                let inside_x = x >= fp.x && x <= fp.x + fp.w;
+                let inside_y = y >= fp.y && y <= fp.y + fp.h;
+                if inside_y && x >= fp.x && x <= fp.x + band {
                     return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::W));
                 }
-                if inside_y && x >= fp.x + fp.w - band && x <= fp.x + fp.w + band {
+                if inside_y && x >= fp.x + fp.w - band && x <= fp.x + fp.w {
                     return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::E));
                 }
-                if inside_x && y >= fp.y - band && y <= fp.y + band {
+                if inside_x && y >= fp.y && y <= fp.y + band {
                     return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::N));
                 }
-                if inside_x && y >= fp.y + fp.h - band && y <= fp.y + fp.h + band {
+                if inside_x && y >= fp.y + fp.h - band && y <= fp.y + fp.h {
                     return Some(HitTarget::Resize(fp.pane_id.clone(), PaneEdge::S));
                 }
                 // X close button — wider red zone on top-right of
@@ -1418,6 +1667,44 @@ impl App {
             }
             HitTarget::Body(pid) => {
                 self.activate_pane(&pid);
+                // Begin text selection. Multi-click (within 400ms and close
+                // pixels) escalates: 1=char, 2=word, 3=line. Shift+click
+                // extends the existing selection's end instead of resetting.
+                let (mx, my) = self.mouse;
+                let now = Instant::now();
+                let click_count = match self.last_body_click {
+                    Some((t, lx, ly, n)) if now.duration_since(t) < Duration::from_millis(400)
+                        && (lx - mx).abs() < 6.0 && (ly - my).abs() < 6.0 => (n + 1).min(3),
+                    _ => 1,
+                };
+                self.last_body_click = Some((now, mx, my, click_count));
+                let mode = match click_count {
+                    1 => SelectionMode::Char,
+                    2 => SelectionMode::Word,
+                    _ => SelectionMode::Line,
+                };
+                if let Some(cell) = self.body_pixel_to_cell(&pid, mx, my) {
+                    if self.shift {
+                        if let Some(sel) = self.selection.as_mut() {
+                            if sel.pane_id == pid {
+                                sel.end = cell;
+                            }
+                        }
+                    } else {
+                        self.selection = Some(Selection {
+                            pane_id: pid.clone(),
+                            anchor: cell,
+                            end: cell,
+                            mode,
+                        });
+                        if mode != SelectionMode::Char {
+                            // Expand to whole word/line immediately so even a
+                            // bare double/triple-click (no drag) highlights.
+                            self.expand_selection_mode();
+                        }
+                    }
+                    self.drag = Some(DragState::Select { pane_id: pid.clone() });
+                }
             }
             HitTarget::TaskbarPane(pid) => {
                 // activate_pane sets active_pane, and the render order
@@ -1501,6 +1788,22 @@ impl App {
             self.handle_window_drag_move(*anchor);
             return;
         }
+        if let DragState::Select { pane_id } = &drag {
+            let (mx, my) = self.mouse;
+            if let Some(cell) = self.body_pixel_to_cell(pane_id, mx, my) {
+                if let Some(sel) = self.selection.as_mut() {
+                    sel.end = cell;
+                }
+                // Re-expand to word/line boundaries if the original click
+                // was a double/triple — so dragging extends one word at a
+                // time rather than one char at a time.
+                self.expand_selection_mode();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
         let (x, y) = self.mouse;
         // Live resize-pane command for the inner app — recompute cell
         // grid from the new pane geometry and only push to tmux when
@@ -1561,6 +1864,10 @@ impl App {
                 }
             }
             DragState::WindowMove { .. } => {
+                // Handled by the early-return at the top of this fn.
+                unreachable!();
+            }
+            DragState::Select { .. } => {
                 // Handled by the early-return at the top of this fn.
                 unreachable!();
             }
@@ -1992,6 +2299,10 @@ impl ApplicationHandler for App {
                         SnapZone::Top => [0.0, 0.0, w, h],
                     }
                 });
+                let sel_for_render = self.selection.as_ref().map(|s| {
+                    let (start, end) = s.ordered();
+                    (s.pane_id.as_str(), start, end)
+                });
                 if let Some(r) = self.renderer.as_mut() {
                     let _ = r.render(
                         &active_floating,
@@ -2008,6 +2319,7 @@ impl ApplicationHandler for App {
                         cursor_visible,
                         sidebar_w_for_render,
                         snap_overlay,
+                        sel_for_render,
                     );
                 }
             }

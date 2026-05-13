@@ -85,7 +85,13 @@ impl TmuxSession {
         let cols_s = opts.cols.to_string();
         let rows_s = opts.rows.to_string();
         let mut cmd = Command::new("tmux");
+        // -f /dev/null: skip the user's ~/.tmux.conf — heavy configs
+        // (TPM plugins, custom status-line, terminal-overrides) can
+        // interfere with control-mode %output forwarding and leave the
+        // inner pane stuck after the first few bytes.
         cmd.args([
+            "-f",
+            "/dev/null",
             "-C",
             "new-session",
             "-A",
@@ -99,6 +105,11 @@ impl TmuxSession {
         if let Some(p) = opts.cwd.filter(|s| !s.is_empty()) {
             cmd.arg("-c").arg(p);
         }
+        // Spawn an interactive login shell so the user's ~/.zshrc / ~/.bashrc
+        // loads — otherwise functions/aliases defined there (e.g. a `claude`
+        // shell function) aren't available inside the pane.
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        cmd.arg(format!("exec {} -il", shell));
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().context("tmux spawn failed")?;
@@ -198,14 +209,51 @@ fn spawn_reader(
     pending_queries: Arc<AtomicU32>,
 ) {
     thread::spawn(move || {
-        let reader = BufReader::new(stdout);
+        let mut reader = BufReader::new(stdout);
         // While a %begin..%end pair is open and a query is pending, we
         // capture NonProtocolLine entries here instead of forwarding them
         // through the normal events channel.
         let mut capture: Option<Vec<String>> = None;
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            let event = parse_line(&line);
+        let mut buf: Vec<u8> = Vec::with_capacity(8192);
+        loop {
+            buf.clear();
+            // Read raw bytes up to '\n'. Don't use BufRead::lines(),
+            // which forces UTF-8 decoding and silently kills the reader
+            // thread the first time a line contains an invalid byte —
+            // claude's box-drawing paints stream split across many %output
+            // lines and occasionally chop UTF-8 codepoints, so even valid
+            // output appears invalid at the line boundary.
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            // Strip trailing \r?\n. Decode lossy so invalid bytes become
+            // U+FFFD; downstream %output decoder works on the raw escape
+            // notation anyway, not on the substituted glyphs.
+            while matches!(buf.last(), Some(&b'\n') | Some(&b'\r')) {
+                buf.pop();
+            }
+            // Fast path for %output — its payload is the inner app's raw
+            // byte stream (claude paints UTF-8 box drawing chars, CJK,
+            // Nerd Font glyphs). Going through String::from_utf8_lossy on
+            // the whole line would replace any %output line that ends in
+            // a partial multi-byte codepoint with U+FFFD, corrupting the
+            // vt100 input. Parse %output ourselves and forward raw bytes.
+            let event = if buf.starts_with(b"%output ") {
+                let rest = &buf[b"%output ".len()..];
+                if let Some(sp) = rest.iter().position(|&b| b == b' ') {
+                    let pane = String::from_utf8_lossy(&rest[..sp]).into_owned();
+                    let data = crate::event::decode_output_bytes(&rest[sp + 1..]);
+                    TmuxEvent::Output { pane_id: pane, data }
+                } else {
+                    parse_line(&String::from_utf8_lossy(&buf))
+                }
+            } else {
+                // All other tmux control-mode lines are ASCII (`%begin`,
+                // `%end`, `%layout-change`, etc) so lossy decode is safe.
+                parse_line(&String::from_utf8_lossy(&buf))
+            };
             match &event {
                 TmuxEvent::Output { pane_id, data } => {
                     let (rows, cols) = *pane_size.lock().unwrap();
@@ -213,7 +261,7 @@ fn spawn_reader(
                     let p = map
                         .entry(pane_id.clone())
                         .or_insert_with(|| vt100::Parser::new(rows, cols, 5000));
-                    p.process(data.as_bytes());
+                    p.process(&data);
                 }
                 TmuxEvent::Begin { .. } => {
                     if pending_queries.load(Ordering::SeqCst) > 0 && capture.is_none() {
