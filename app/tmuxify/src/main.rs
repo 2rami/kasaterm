@@ -53,6 +53,13 @@ const TERM_FG: [f32; 4] = [0xea as f32 / 255.0, 0xee as f32 / 255.0, 0xf4 as f32
 const DEFAULT_COLS: u16 = 89;
 const DEFAULT_ROWS: u16 = 28;
 
+// Cell metrics in logical pixels. Tracks `cell_shader::FONT_SIZE`/
+// `LINE_HEIGHT`. Used by resize logic to translate iced window pixels
+// into a (cols, rows) target. Inside the shader widget the actual cell
+// size is derived from bounds/cols for clean pixel alignment.
+const CELL_W_PX: f32 = 8.4;
+const CELL_H_PX: f32 = 18.0;
+
 // === Entry ================================================================
 
 fn main() -> iced::Result {
@@ -70,16 +77,76 @@ fn theme(_: &App) -> Theme {
 }
 
 fn startup_task() -> Task<Message> {
+    let mut tasks: Vec<Task<Message>> = Vec::new();
+
     match std::env::var("TMUXIFY_AUTOOPEN") {
         Ok(path) => {
             eprintln!("[tmuxify] autoopen: {path}");
-            Task::done(Message::OpenPath(PathBuf::from(path)))
+            tasks.push(Task::done(Message::OpenPath(PathBuf::from(path))));
         }
         Err(e) => {
             eprintln!("[tmuxify] no autoopen ({e:?})");
-            Task::none()
         }
     }
+
+    // AUTOSEND — push a Send message after N ms. Used by the verify loop
+    // to drive a scripted scenario (e.g. type `claude` and watch). The
+    // text travels through `Message::AutoSend` → write_active, so it
+    // honours the active pane's tmux session like real typing would.
+    if let (Ok(text), Ok(ms)) = (
+        std::env::var("TMUXIFY_AUTOSEND"),
+        std::env::var("TMUXIFY_AUTOSEND_MS"),
+    ) {
+        if let Ok(ms) = ms.parse::<u64>() {
+            eprintln!("[tmuxify] autosend in {ms}ms: {text:?}");
+            tasks.push(Task::perform(
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    text
+                },
+                Message::AutoSend,
+            ));
+        }
+    }
+
+    // AUTOCAPTURE — `screencapture -x` of the whole screen after N ms.
+    // macOS gates programmatic window-only capture behind TCC, so we
+    // accept that and shoot the full screen; the iced window's normal
+    // dock position is enough for visual diffing.
+    if let Ok(ms) = std::env::var("TMUXIFY_AUTOCAPTURE_MS").and_then(|s| {
+        s.parse::<u64>().map_err(|_| std::env::VarError::NotPresent)
+    }) {
+        let path = std::env::var("TMUXIFY_AUTOCAPTURE_PATH")
+            .unwrap_or_else(|_| "/tmp/tmuxify-iced-r2.png".into());
+        eprintln!("[tmuxify] autocapture in {ms}ms → {path}");
+        tasks.push(Task::perform(
+            async move {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                // Raise our own window so the screencapture grabs the
+                // iced surface rather than whatever editor was on top.
+                // The PID lookup happens via `pgrep -lf tmuxify` because
+                // osascript wants either bundle id or a known process
+                // name — and our binary is just `tmuxify`.
+                let pid = std::process::id();
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        &format!(
+                            "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
+                        ),
+                    ])
+                    .status();
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let _ = std::process::Command::new("screencapture")
+                    .args(["-x", "-t", "png", &path])
+                    .status();
+                eprintln!("[tmuxify] captured {path}");
+            },
+            |_| Message::AutoCaptured,
+        ));
+    }
+
+    Task::batch(tasks)
 }
 
 // === State ================================================================
@@ -153,6 +220,12 @@ enum Message {
     ScreenUpdate(SessionId, Arc<ScreenUpdate>),
     SessionGone(SessionId),
     Event(Event),
+    /// Window resized — recompute (cols, rows) and resize every session's
+    /// tmux client. Sent from the global `event::listen_with` and from
+    /// the very first frame to size newly-opened sessions to fit.
+    WindowResized(u32, u32),
+    AutoSend(String),
+    AutoCaptured,
 }
 
 // === Update ===============================================================
@@ -227,6 +300,30 @@ impl App {
             Message::Event(Event::Window(window::Event::FileDropped(path))) => {
                 self.open_session(path)
             }
+            Message::Event(Event::Window(window::Event::Resized(size))) => {
+                Task::done(Message::WindowResized(
+                    size.width as u32,
+                    size.height as u32,
+                ))
+            }
+            Message::WindowResized(w, h) => {
+                // Strip chrome before mapping to cells: sidebar on the
+                // left, the window-tabs bar above the terminal body.
+                let term_w = (w as f32 - SIDEBAR_W).max(0.0);
+                let term_h = (h as f32 - WINDOW_TAB_H).max(0.0);
+                let cols = (term_w / CELL_W_PX).floor().max(20.0) as u16;
+                let rows = (term_h / CELL_H_PX).floor().max(5.0) as u16;
+                for s in &self.sessions {
+                    let _ = s.tmux.resize_client(cols, rows);
+                }
+                Task::none()
+            }
+            Message::AutoSend(text) => {
+                self.write_active(text.into_bytes());
+                self.write_active(vec![b'\r']);
+                Task::none()
+            }
+            Message::AutoCaptured => Task::none(),
             Message::Event(Event::InputMethod(input_method::Event::Commit(text))) => {
                 self.write_active(text.into_bytes());
                 Task::none()
@@ -582,6 +679,7 @@ impl App {
     fn subscription(&self) -> Subscription<Message> {
         let events = event::listen_with(|ev, _status, _wid| match ev {
             Event::Window(window::Event::FileDropped(_))
+            | Event::Window(window::Event::Resized(_))
             | Event::InputMethod(_)
             | Event::Keyboard(keyboard::Event::KeyPressed { .. }) => Some(Message::Event(ev)),
             _ => None,
@@ -814,9 +912,16 @@ fn tmux_session_name(path: &PathBuf) -> String {
     out
 }
 
+/// `tmux send-keys -H` expects one hex byte per argument-token, separated
+/// by whitespace. Concatenated `\x636c61756465` reads as a single oversize
+/// hex literal and tmux silently drops the input — caught the first time
+/// AUTOSEND fired and "claude" never showed up at the prompt.
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
+    let mut s = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            s.push(' ');
+        }
         s.push_str(&format!("{:02x}", b));
     }
     s

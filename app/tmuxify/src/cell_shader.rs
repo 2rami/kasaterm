@@ -223,6 +223,13 @@ pub struct TerminalPipeline {
 
     font_system: FontSystem,
     swash: SwashCache,
+
+    /// Memo key. We rebuild instance buffers only when something
+    /// observable changed — cell grid pointer, cursor pos, or
+    /// widget bounds.
+    last_cells_ptr: usize,
+    last_cursor: (u16, u16, bool),
+    last_bounds: [f32; 2],
 }
 
 impl std::fmt::Debug for TerminalPipeline {
@@ -395,6 +402,9 @@ impl shader::Pipeline for TerminalPipeline {
             sampler,
             font_system: FontSystem::new(),
             swash: SwashCache::new(),
+            last_cells_ptr: 0,
+            last_cursor: (u16::MAX, u16::MAX, false),
+            last_bounds: [0.0, 0.0],
         }
     }
 }
@@ -407,6 +417,24 @@ impl TerminalPipeline {
         bounds: &Rectangle,
         prim: &TerminalPrimitive,
     ) {
+        // Memoise — if nothing observable changed since the last frame,
+        // the instance buffer is still valid and we can reuse it. iced
+        // re-issues a fresh Primitive every frame even when nothing
+        // dirty, so this is the cheapest place to gate work.
+        let cells_ptr = Arc::as_ptr(&prim.cells) as usize;
+        let cursor = (prim.cursor_row, prim.cursor_col, prim.cursor_visible);
+        let new_bounds = [bounds.width, bounds.height];
+        if cells_ptr == self.last_cells_ptr
+            && cursor == self.last_cursor
+            && new_bounds == self.last_bounds
+            && self.instance_count > 0
+        {
+            return;
+        }
+        self.last_cells_ptr = cells_ptr;
+        self.last_cursor = cursor;
+        self.last_bounds = new_bounds;
+
         // Uniform: viewport size (= widget bounds).
         let uniforms = Uniforms {
             viewport: [bounds.width.max(1.0), bounds.height.max(1.0)],
@@ -591,7 +619,15 @@ fn shape_one_glyph(
 ) -> Vec<(CacheKey, f32, f32)> {
     let mut buf = Buffer::new(fs, Metrics::new(font_size, font_size * 1.25));
     buf.set_size(fs, Some(font_size * 4.0), Some(font_size * 2.0));
-    let mut attrs = Attrs::new().family(Family::Monospace);
+    // Match the native build's preferred family. cosmic-text walks
+    // installed fonts via fontdb; on macOS the Nerd Font is found by name
+    // when it's been `brew install`'d into ~/Library/Fonts. If it's not
+    // present, cosmic falls back through Family::Monospace which is what
+    // the previous Family::Monospace request did anyway.
+    let mut attrs = Attrs::new()
+        .family(Family::Name("D2CodingLigature Nerd Font Mono"))
+        .stretch(cosmic_text::Stretch::Normal);
+    let _ = Family::Monospace;
     if bold {
         attrs = attrs.weight(cosmic_text::Weight::BOLD);
     }
