@@ -216,6 +216,11 @@ struct App {
     /// jamo). Painted at the cursor cell with an accent underline so the
     /// user sees what's composing. Cleared on Commit/Closed.
     preedit: String,
+    /// True while OS IME is actively composing. The Key::Character
+    /// guard drops same-codepoint events only during this window — the
+    /// first jamo of a fresh context arrives as raw Character before
+    /// IME wakes up, so dropping it unconditionally was eating that key.
+    in_preedit: bool,
 }
 
 impl App {
@@ -226,6 +231,7 @@ impl App {
             recents: Vec::new(),
             next_session_id: 1,
             preedit: String::new(),
+            in_preedit: false,
         };
         (app, startup_task())
     }
@@ -512,20 +518,22 @@ impl App {
                 Task::none()
             }
             Message::Event(Event::InputMethod(input_method::Event::Commit(text))) => {
-                // Final composed text — clear the live preedit overlay
-                // and push the bytes to the active pane.
+                // Final composed text — clear preedit and push bytes.
+                self.in_preedit = false;
                 self.preedit.clear();
                 self.write_active(text.into_bytes());
                 Task::none()
             }
             Message::Event(Event::InputMethod(input_method::Event::Preedit(text, _))) => {
-                // Mid-composition (e.g. Korean jamo before final 음절).
-                // Empty text is the OS's "I'm done composing" signal —
-                // Commit will follow.
+                // Mid-composition: `in_preedit` lets the Key::Character
+                // path know to drop the same jamo arriving as a raw event.
+                // Empty text = "I'm done composing", Commit follows.
+                self.in_preedit = !text.is_empty();
                 self.preedit = text;
                 Task::none()
             }
             Message::Event(Event::InputMethod(input_method::Event::Closed)) => {
+                self.in_preedit = false;
                 self.preedit.clear();
                 Task::none()
             }
@@ -557,7 +565,8 @@ impl App {
                 modifiers,
                 ..
             })) if (modifiers.is_empty() || modifiers == Modifiers::SHIFT)
-                && s.chars().all(|c| c.is_ascii() && !c.is_control()) =>
+                && !s.chars().any(|c| c.is_control())
+                && (!self.in_preedit || s.chars().all(|c| c.is_ascii())) =>
             {
                 self.write_active(s.as_bytes().to_vec());
                 Task::none()
