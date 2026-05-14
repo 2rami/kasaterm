@@ -1,26 +1,33 @@
-//! tmuxify — iced 0.14 chrome over the `iced_term` terminal widget.
+//! tmuxify — iced 0.14 chrome over a native wgpu cell renderer.
 //!
-//! Architecture ([[tmuxify-iced-pivot]] Phase 3):
+//! R2 architecture:
 //! - Chrome (sidebar / window tabs / onboarding / recents) stays iced widgets.
-//! - Each session owns an `iced_term::Terminal`, which spawns its own pty
-//!   (via alacritty's backend) and routes input/output through iced's runtime.
-//! - tmux-bridge is retired — multi-session is just multiple terminals, and
-//!   the user runs `tmux` inside whichever one they want session persistence
-//!   for. Claude Code's pane-split / team-mode flow still works because tmux
-//!   itself runs inside that pty.
+//! - The terminal body is `iced::widget::Shader` driving `cell_shader::TerminalPipeline`,
+//!   which rasterises glyphs through cosmic-text + a hand-rolled wgpu atlas
+//!   (glyphon is unusable: wgpu 27 vs 29 mismatch with iced 0.14).
+//! - Each session owns a `tmux-bridge` -CC subprocess. Output flows from
+//!   crossbeam channels through a tokio mpsc into the iced subscription.
+
+mod cell_shader;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use iced::advanced::input_method::{self, InputMethod, Purpose};
 use iced::advanced::widget::{tree, Tree, Widget};
 use iced::advanced::{layout, mouse, overlay, renderer, Clipboard, Layout, Shell};
 use iced::keyboard::{self, Key, Modifiers};
+use iced::widget::shader::{self, Shader};
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{
-    color, event, window, Background, Border, Color, Element, Event, Font, Length, Padding,
-    Rectangle, Size, Subscription, Task, Theme, Vector,
+    color, event, stream, window, Background, Border, Color, Element, Event, Font, Length,
+    Padding, Rectangle, Size, Subscription, Task, Theme, Vector,
 };
-use iced_term::{BackendCommand, Command as TermCommand, Terminal, TerminalView};
+use tmux_bridge::{
+    screen::{Cell as TbCell, Row as TbRow},
+    ScreenUpdate, StartOptions, TmuxEvent, TmuxSession,
+};
+use tokio::sync::mpsc;
 
 // === Palette ==============================================================
 
@@ -37,6 +44,14 @@ const TRAFFIC_LIGHTS_W: f32 = 80.0;
 
 const FONT_SIZE: f32 = 13.0;
 const MONO: Font = Font::with_name("Menlo");
+
+const TERM_BG: [f32; 4] = [0x1c as f32 / 255.0, 0x20 as f32 / 255.0, 0x26 as f32 / 255.0, 1.0];
+const TERM_FG: [f32; 4] = [0xea as f32 / 255.0, 0xee as f32 / 255.0, 0xf4 as f32 / 255.0, 1.0];
+
+// Initial pane grid — re-sized once the Shader widget reports back its
+// actual bounds. Picking 89×28 matches native's StartOptions default.
+const DEFAULT_COLS: u16 = 89;
+const DEFAULT_ROWS: u16 = 28;
 
 // === Entry ================================================================
 
@@ -72,19 +87,30 @@ fn startup_task() -> Task<Message> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SessionId(u64);
 
+/// Per-session live data. The `tmux` field is wrapped in an `Arc<Mutex>`
+/// only because Iced wants `&self` in `view`/`subscription` — the actual
+/// writer is the subscription thread plus the update handler, both holding
+/// `&mut App`.
 struct Session {
     id: SessionId,
     name: String,
     cwd: PathBuf,
-    term: Terminal,
+    tmux: Arc<TmuxSession>,
+    /// Currently displayed pane id. Filled in once the first %output
+    /// names a pane; before that we render an empty grid.
+    active_pane: Option<String>,
+    cells: Arc<Vec<Vec<TbCell>>>,
+    cols: u16,
+    rows: u16,
+    cursor_row: u16,
+    cursor_col: u16,
+    cursor_visible: bool,
 }
 
 struct App {
     sessions: Vec<Session>,
     active_idx: Option<usize>,
     recents: Vec<PathBuf>,
-    /// Source of stable session ids — never reused so subscriptions don't
-    /// confuse a closed tab's stream with a freshly opened one.
     next_session_id: u64,
 }
 
@@ -124,7 +150,8 @@ enum Message {
     OpenPath(PathBuf),
     SelectTab(usize),
     CloseTab(usize),
-    Terminal(SessionId, iced_term::Event),
+    ScreenUpdate(SessionId, Arc<ScreenUpdate>),
+    SessionGone(SessionId),
     Event(Event),
 }
 
@@ -157,26 +184,42 @@ impl App {
                 Task::none()
             }
 
-            Message::Terminal(sid, iced_term::Event::BackendCall(_, cmd)) => {
+            Message::ScreenUpdate(sid, update) => {
                 if let Some(s) = self.sessions.iter_mut().find(|s| s.id == sid) {
-                    use iced_term::actions::Action;
-                    match s.term.handle(iced_term::Command::ProxyToBackend(cmd)) {
-                        Action::Shutdown => {
-                            // Backend exited — drop the tab.
-                            if let Some(idx) = self.sessions.iter().position(|s| s.id == sid) {
-                                self.sessions.remove(idx);
-                                self.active_idx = if self.sessions.is_empty() {
-                                    None
-                                } else {
-                                    Some(idx.min(self.sessions.len() - 1))
-                                };
+                    if s.active_pane.is_none() {
+                        s.active_pane = Some(update.pane_id.clone());
+                    }
+                    // Only let the currently-focused pane drive the
+                    // visible grid. Backgrounded panes still get their
+                    // vt100 state advanced inside tmux-bridge — we just
+                    // don't paint them.
+                    if s.active_pane.as_deref() == Some(update.pane_id.as_str()) {
+                        ensure_grid_size(&mut s.cells, &mut s.cols, &mut s.rows, update.cols, update.rows);
+                        let cells = Arc::make_mut(&mut s.cells);
+                        for (r, row) in &update.dirty {
+                            if let Some(dst) = cells.get_mut(*r as usize) {
+                                *dst = row.clone();
                             }
                         }
-                        Action::ChangeTitle(t) => {
-                            s.name = t;
+                        s.cursor_row = update.cursor_row;
+                        s.cursor_col = update.cursor_col;
+                        s.cursor_visible = update.cursor_visible;
+                        if let Some(t) = update.title.as_ref() {
+                            s.name = t.clone();
                         }
-                        _ => {}
                     }
+                }
+                Task::none()
+            }
+
+            Message::SessionGone(sid) => {
+                if let Some(idx) = self.sessions.iter().position(|s| s.id == sid) {
+                    self.sessions.remove(idx);
+                    self.active_idx = if self.sessions.is_empty() {
+                        None
+                    } else {
+                        Some(idx.min(self.sessions.len() - 1))
+                    };
                 }
                 Task::none()
             }
@@ -184,42 +227,49 @@ impl App {
             Message::Event(Event::Window(window::Event::FileDropped(path))) => {
                 self.open_session(path)
             }
-            // OS-level IME committed text (Hangul, etc). iced_term's own
-            // KeyPressed handler only forwards `Key::Character` payloads, so
-            // composed CJK characters never reach it — we intercept the
-            // commit here and write the bytes straight to the active pty.
             Message::Event(Event::InputMethod(input_method::Event::Commit(text))) => {
                 self.write_active(text.into_bytes());
                 Task::none()
             }
-            // Cmd+D → split the active session's current tmux window. Only
-            // works if the user has tmux running inside that pty (so claude
-            // team-mode is one `tmux` invocation away from working).
+            // Cmd+D → tmux vertical split. Sent as Ctrl-b + '%' to the
+            // active session's stdin (the inner shell runs tmux itself).
             Message::Event(Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Character(ref s),
                 modifiers,
                 ..
             })) if modifiers == Modifiers::COMMAND && s.eq_ignore_ascii_case("d") => {
-                // tmux prefix is C-b by default. Sequence: C-b, then "%" for
-                // a vertical split.
                 self.write_active(vec![0x02, b'%']);
+                Task::none()
+            }
+            // Plain typing — translate to a `send-keys -H` request. Only
+            // covers ASCII for now; IME handles CJK above.
+            Message::Event(Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(ref s),
+                modifiers,
+                ..
+            })) if modifiers.is_empty() || modifiers == Modifiers::SHIFT => {
+                self.write_active(s.as_bytes().to_vec());
+                Task::none()
+            }
+            Message::Event(Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Named(n),
+                ..
+            })) => {
+                if let Some(bytes) = named_key_bytes(n) {
+                    self.write_active(bytes);
+                }
                 Task::none()
             }
             Message::Event(_) => Task::none(),
         }
     }
 
-    /// Pump raw bytes into the active session's pty. Used for IME commits
-    /// and our app-level shortcuts (Cmd+D etc.). Returns silently when there
-    /// is no active session.
     fn write_active(&mut self, bytes: Vec<u8>) {
-        if let Some(idx) = self.active_idx {
-            if let Some(s) = self.sessions.get_mut(idx) {
-                let _ = s
-                    .term
-                    .handle(TermCommand::ProxyToBackend(BackendCommand::Write(bytes)));
-            }
-        }
+        let Some(s) = self.active_idx.and_then(|i| self.sessions.get(i)) else {
+            return;
+        };
+        let hex = hex_encode(&bytes);
+        let _ = s.tmux.send_keys_hex(s.active_pane.as_deref(), &hex);
     }
 
     fn open_session(&mut self, path: PathBuf) -> Task<Message> {
@@ -227,49 +277,69 @@ impl App {
         self.next_session_id += 1;
         eprintln!("[tmuxify] open_session id={} path={:?}", id.0, path);
 
-        // Boot straight into `tmux` so multi-pane / team-mode just works. We
-        // use `new-session -A` to attach to an existing session with the same
-        // name when present, otherwise create one. The session name is a
-        // stable slug derived from the folder path so re-opening the same
-        // folder reattaches rather than spawning a duplicate session.
+        let cwd_s = path.to_string_lossy().to_string();
         let session_name = tmux_session_name(&path);
-        let settings = iced_term::settings::Settings {
-            font: iced_term::settings::FontSettings {
-                size: FONT_SIZE,
-                font_type: MONO,
-                ..Default::default()
-            },
-            theme: iced_term::settings::ThemeSettings::default(),
-            backend: iced_term::settings::BackendSettings {
-                program: "tmux".into(),
-                args: vec![
-                    "new-session".into(),
-                    "-A".into(),
-                    "-s".into(),
-                    session_name,
-                ],
-                working_directory: Some(path.clone()),
-                ..Default::default()
-            },
+        let opts = StartOptions {
+            cwd: Some(&cwd_s),
+            session_name: Some(&session_name),
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
+            ..Default::default()
         };
-
-        match Terminal::new(id.0 as u64, settings) {
-            Ok(term) => {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("session")
-                    .to_string();
-                self.sessions.push(Session { id, name, cwd: path.clone(), term });
-                self.active_idx = Some(self.sessions.len() - 1);
-                self.push_recent(path);
-            }
+        let tmux = match TmuxSession::start(opts) {
+            Ok(t) => Arc::new(t),
             Err(e) => {
-                eprintln!("failed to spawn terminal: {e}");
+                eprintln!("[tmuxify] tmux spawn failed: {e}");
+                return Task::none();
             }
-        }
+        };
+        spawn_bridge_threads(id, tmux.clone());
+
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("session")
+            .to_string();
+        let cells = Arc::new(blank_grid(DEFAULT_COLS, DEFAULT_ROWS));
+
+        self.sessions.push(Session {
+            id,
+            name,
+            cwd: path.clone(),
+            tmux,
+            active_pane: None,
+            cells,
+            cols: DEFAULT_COLS,
+            rows: DEFAULT_ROWS,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: true,
+        });
+        self.active_idx = Some(self.sessions.len() - 1);
+        self.push_recent(path);
         Task::none()
     }
+}
+
+fn blank_grid(cols: u16, rows: u16) -> Vec<Vec<TbCell>> {
+    (0..rows)
+        .map(|_| (0..cols).map(|_| TbCell::blank()).collect())
+        .collect()
+}
+
+fn ensure_grid_size(
+    cells: &mut Arc<Vec<Vec<TbCell>>>,
+    cur_cols: &mut u16,
+    cur_rows: &mut u16,
+    new_cols: u16,
+    new_rows: u16,
+) {
+    if *cur_cols == new_cols && *cur_rows == new_rows && cells.len() == new_rows as usize {
+        return;
+    }
+    *cur_cols = new_cols;
+    *cur_rows = new_rows;
+    *cells = Arc::new(blank_grid(new_cols, new_rows));
 }
 
 // === View =================================================================
@@ -397,16 +467,19 @@ impl App {
     }
 
     fn terminal_view<'a>(&'a self, s: &'a Session) -> Element<'a, Message> {
-        let sid = s.id;
-        let inner: Element<'a, Message> = TerminalView::show(&s.term)
-            .map(move |e| Message::Terminal(sid, e))
+        let program = TerminalProgram {
+            cells: s.cells.clone(),
+            cols: s.cols,
+            rows: s.rows,
+            cursor_row: s.cursor_row,
+            cursor_col: s.cursor_col,
+            cursor_visible: s.cursor_visible,
+        };
+        let shader_widget: Element<'a, Message> = Shader::new(program)
+            .width(Length::Fill)
+            .height(Length::Fill)
             .into();
-        // Wrap the terminal widget so we can opt into the OS IME. iced_term
-        // never calls `Shell::request_input_method`, so winit's
-        // `set_ime_allowed(true)` never fires and CJK input arrives as raw
-        // jamo. The wrapper just delegates everything and adds an
-        // `InputMethod::Enabled` request on every redraw.
-        Element::new(ImeHost { inner })
+        Element::new(ImeHost { inner: shader_widget })
     }
 
     fn onboarding(&self) -> Element<'_, Message> {
@@ -507,10 +580,6 @@ impl App {
 
 impl App {
     fn subscription(&self) -> Subscription<Message> {
-        // `listen_with` is the only way to see Captured events — and our app
-        // shortcuts (Cmd+D) plus IME commits arrive *after* iced_term already
-        // captured the keystroke. Filter to the two cases we care about so we
-        // don't double-dispatch every keystroke.
         let events = event::listen_with(|ev, _status, _wid| match ev {
             Event::Window(window::Event::FileDropped(_))
             | Event::InputMethod(_)
@@ -518,23 +587,131 @@ impl App {
             _ => None,
         });
 
-        // Each terminal exposes its own subscription. Map them so we know
-        // which session originated the event when handling.
-        // `Subscription::map` requires a non-capturing closure in 0.14, so we
-        // smuggle `sid` through `Subscription::with` — it becomes the first
-        // element of the stream tuple and the map is plain `(sid, ev) → Msg`.
-        let term_subs: Vec<_> = self
-            .sessions
-            .iter()
-            .map(|s| {
-                s.term
-                    .subscription()
-                    .with(s.id)
-                    .map(|(sid, e)| Message::Terminal(sid, e))
-            })
-            .collect();
+        Subscription::batch([events, bus_subscription()])
+    }
+}
 
-        Subscription::batch(std::iter::once(events).chain(term_subs))
+/// Global pipe out of every session's background threads. iced 0.14's
+/// `Subscription::run_with` wants a `fn` (not `Fn`) — it cannot capture
+/// per-session state by closure — so we ship every session through a
+/// single static mpsc and let one subscription drain it.
+///
+/// `open_session` pushes the receiver end of a oneshot bootstrap into
+/// `BOOTSTRAP_TX` after spawning its bridge threads; those threads
+/// forward each `ScreenUpdate` into `BUS_TX` directly. The single
+/// subscription below pulls from `BUS_RX` forever.
+use std::sync::OnceLock;
+use tokio::sync::Mutex as AsyncMutex;
+
+static BUS_TX: OnceLock<mpsc::UnboundedSender<Message>> = OnceLock::new();
+static BUS_RX: OnceLock<AsyncMutex<mpsc::UnboundedReceiver<Message>>> = OnceLock::new();
+
+fn bus_init() -> mpsc::UnboundedSender<Message> {
+    BUS_TX
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::unbounded_channel::<Message>();
+            let _ = BUS_RX.set(AsyncMutex::new(rx));
+            tx
+        })
+        .clone()
+}
+
+/// Spawn the two blocking forwarder threads for a freshly opened session.
+fn spawn_bridge_threads(sid: SessionId, tmux: Arc<TmuxSession>) {
+    let bus = bus_init();
+    let screens = tmux.screens.clone();
+    let bus_screens = bus.clone();
+    std::thread::spawn(move || {
+        while let Ok(update) = screens.recv() {
+            if bus_screens
+                .send(Message::ScreenUpdate(sid, Arc::new(update)))
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = bus_screens.send(Message::SessionGone(sid));
+    });
+    let events = tmux.events.clone();
+    let bus_events = bus.clone();
+    std::thread::spawn(move || {
+        while let Ok(ev) = events.recv() {
+            if matches!(ev, TmuxEvent::Exit) {
+                let _ = bus_events.send(Message::SessionGone(sid));
+                return;
+            }
+        }
+        let _ = bus_events.send(Message::SessionGone(sid));
+    });
+}
+
+fn bus_subscription() -> Subscription<Message> {
+    Subscription::run(|| {
+        // Initialise on first run. Subsequent restarts (after panic /
+        // hot-reload) re-take the same receiver and pick up where we
+        // left off.
+        let _ = bus_init();
+        stream::channel::<Message>(64, |mut output: futures::channel::mpsc::Sender<Message>| async move {
+            let rx = BUS_RX.get().expect("bus initialised above");
+            let mut guard = rx.lock().await;
+            while let Some(msg) = guard.recv().await {
+                if output.try_send(msg).is_err() {
+                    return;
+                }
+            }
+        })
+    })
+}
+
+// === Shader program ======================================================
+
+struct TerminalProgram {
+    cells: Arc<Vec<Vec<TbCell>>>,
+    cols: u16,
+    rows: u16,
+    cursor_row: u16,
+    cursor_col: u16,
+    cursor_visible: bool,
+}
+
+impl<Message> shader::Program<Message> for TerminalProgram {
+    type State = ();
+    type Primitive = cell_shader::TerminalPrimitive;
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        _cursor: mouse::Cursor,
+        bounds: Rectangle,
+    ) -> Self::Primitive {
+        // Pick a font size that fills the widget at the current grid
+        // size. Cell width = bounds.w / cols; cell height = bounds.h /
+        // rows. Font size tracks cell height directly.
+        let cell_w = if self.cols > 0 {
+            bounds.width / self.cols as f32
+        } else {
+            cell_shader::FONT_SIZE * 0.6
+        };
+        let cell_h = if self.rows > 0 {
+            bounds.height / self.rows as f32
+        } else {
+            cell_shader::LINE_HEIGHT
+        };
+        let font_size = (cell_h * 0.78).max(8.0);
+
+        cell_shader::TerminalPrimitive {
+            cells: self.cells.clone(),
+            cols: self.cols,
+            rows: self.rows,
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            cursor_visible: self.cursor_visible,
+            bg_color: TERM_BG,
+            fg_color: TERM_FG,
+            cell_w,
+            cell_h,
+            font_size,
+        }
     }
 }
 
@@ -623,13 +800,8 @@ fn collapse_home(path: &PathBuf) -> String {
     s
 }
 
-/// Slugify a cwd into a stable tmux session name. tmux rejects `.` and `:`
-/// in names, so we replace any non-alphanumeric byte with `_`.
 fn tmux_session_name(path: &PathBuf) -> String {
-    let leaf = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("tmuxify");
+    let leaf = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmuxify");
     let mut out = String::with_capacity(leaf.len() + 8);
     out.push_str("tmuxify-");
     for ch in leaf.chars() {
@@ -642,37 +814,62 @@ fn tmux_session_name(path: &PathBuf) -> String {
     out
 }
 
-// === ImeHost — wraps the terminal view so winit turns IME on ==============
-
-struct ImeHost<'a, Message> {
-    inner: Element<'a, Message>,
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
-impl<'a, Message> Widget<Message, Theme, iced::Renderer> for ImeHost<'a, Message> {
+/// Map iced named keys to terminal control sequences. Covers Enter / Tab
+/// / arrows / Esc / Backspace — enough to drive claude + a shell prompt.
+/// Add more as gaps show up.
+fn named_key_bytes(named: keyboard::key::Named) -> Option<Vec<u8>> {
+    use keyboard::key::Named;
+    match named {
+        Named::Enter => Some(b"\r".to_vec()),
+        Named::Tab => Some(b"\t".to_vec()),
+        Named::Backspace => Some(b"\x7f".to_vec()),
+        Named::Escape => Some(b"\x1b".to_vec()),
+        Named::ArrowUp => Some(b"\x1b[A".to_vec()),
+        Named::ArrowDown => Some(b"\x1b[B".to_vec()),
+        Named::ArrowRight => Some(b"\x1b[C".to_vec()),
+        Named::ArrowLeft => Some(b"\x1b[D".to_vec()),
+        Named::Home => Some(b"\x1b[H".to_vec()),
+        Named::End => Some(b"\x1b[F".to_vec()),
+        Named::PageUp => Some(b"\x1b[5~".to_vec()),
+        Named::PageDown => Some(b"\x1b[6~".to_vec()),
+        Named::Delete => Some(b"\x1b[3~".to_vec()),
+        _ => None,
+    }
+}
+
+// === ImeHost — wraps the Shader widget so winit turns IME on =============
+
+struct ImeHost<'a, Msg> {
+    inner: Element<'a, Msg>,
+}
+
+impl<'a, Msg> Widget<Msg, Theme, iced::Renderer> for ImeHost<'a, Msg> {
     fn size(&self) -> Size<Length> {
         self.inner.as_widget().size()
     }
-
     fn size_hint(&self) -> Size<Length> {
         self.inner.as_widget().size_hint()
     }
-
     fn tag(&self) -> tree::Tag {
         self.inner.as_widget().tag()
     }
-
     fn state(&self) -> tree::State {
         self.inner.as_widget().state()
     }
-
     fn children(&self) -> Vec<Tree> {
         self.inner.as_widget().children()
     }
-
     fn diff(&self, tree: &mut Tree) {
         self.inner.as_widget().diff(tree);
     }
-
     fn layout(
         &mut self,
         tree: &mut Tree,
@@ -681,7 +878,6 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for ImeHost<'a, Message
     ) -> layout::Node {
         self.inner.as_widget_mut().layout(tree, renderer, limits)
     }
-
     fn draw(
         &self,
         tree: &Tree,
@@ -696,7 +892,6 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for ImeHost<'a, Message
             .as_widget()
             .draw(tree, renderer, theme, style, layout, cursor, viewport);
     }
-
     fn operate(
         &mut self,
         tree: &mut Tree,
@@ -708,7 +903,6 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for ImeHost<'a, Message
             .as_widget_mut()
             .operate(tree, layout, renderer, operation);
     }
-
     fn update(
         &mut self,
         tree: &mut Tree,
@@ -717,15 +911,13 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for ImeHost<'a, Message
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Message>,
+        shell: &mut Shell<'_, Msg>,
         viewport: &Rectangle,
     ) {
         self.inner
             .as_widget_mut()
             .update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
 
-        // request_input_method is only honored during a RedrawRequested event —
-        // we ask every frame so the IME stays armed for the active terminal.
         if matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
             let bounds = layout.bounds();
             let cursor_rect = Rectangle {
@@ -741,7 +933,6 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for ImeHost<'a, Message
             });
         }
     }
-
     fn mouse_interaction(
         &self,
         tree: &Tree,
@@ -754,7 +945,6 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for ImeHost<'a, Message
             .as_widget()
             .mouse_interaction(tree, layout, cursor, viewport, renderer)
     }
-
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
@@ -762,7 +952,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for ImeHost<'a, Message
         renderer: &iced::Renderer,
         viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
+    ) -> Option<overlay::Element<'b, Msg, Theme, iced::Renderer>> {
         self.inner
             .as_widget_mut()
             .overlay(tree, layout, renderer, viewport, translation)
@@ -777,3 +967,6 @@ async fn pick_folder() -> Option<PathBuf> {
         .map(|h| h.path().to_path_buf())
 }
 
+// Suppress unused-import warning until we wire row-level coalescing.
+#[allow(dead_code)]
+fn _kept_for_future(_row: &TbRow) {}
