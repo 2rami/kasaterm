@@ -465,6 +465,38 @@ impl ApplicationHandler for App {
                             self.copy_selection();
                             return;
                         }
+                        if s.eq_ignore_ascii_case("v") {
+                            // Cmd+V — pull clipboard, send to PTY wrapped
+                            // in bracketed-paste markers so modern shells
+                            // can treat the whole blob as one paste rather
+                            // than typed input (no inadvertent ⏎ from a
+                            // multi-line copy, autocomplete suppressed).
+                            // If the app hasn't enabled paste-bracketing
+                            // it just sees the markers as escape garbage,
+                            // a fair tradeoff vs. the safer common case.
+                            let text = match arboard::Clipboard::new()
+                                .and_then(|mut cb| cb.get_text())
+                            {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    eprintln!("[kasaterm-cli] clipboard read failed: {e}");
+                                    return;
+                                }
+                            };
+                            if let Some(tmux) = self.tmux.as_ref() {
+                                let mut payload = Vec::with_capacity(text.len() + 12);
+                                payload.extend_from_slice(b"\x1b[200~");
+                                payload.extend_from_slice(text.as_bytes());
+                                payload.extend_from_slice(b"\x1b[201~");
+                                let hex: String = payload
+                                    .iter()
+                                    .map(|b| format!("{b:02x}"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                let _ = tmux.send_keys_hex(None, &hex);
+                            }
+                            return;
+                        }
                     }
                 }
                 let Some(tmux) = self.tmux.as_ref() else { return };
