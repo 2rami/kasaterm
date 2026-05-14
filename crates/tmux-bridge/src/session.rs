@@ -40,6 +40,11 @@ pub struct StartOptions<'a> {
     /// Override the auto-derived session name. Used by tmuxify to keep
     /// one tmux session per desktop.
     pub session_name: Option<&'a str>,
+    /// `tmux -L <socket_name>` — isolates the tmux server from any other
+    /// tmux instances the user is running. None falls through to tmux's
+    /// default socket. The iced spike uses "iced-poc" so its server
+    /// can't collide with a native build or the user's day-to-day tmux.
+    pub socket_name: Option<&'a str>,
     /// Flusher tick — defaults to 16 ms (~60 Hz).
     pub flush_interval: Duration,
     /// Initial window size. Apps inherit COLUMNS/LINES from this — picking
@@ -55,6 +60,7 @@ impl Default for StartOptions<'_> {
             cwd: None,
             auto_run: None,
             session_name: None,
+            socket_name: None,
             flush_interval: Duration::from_millis(16),
             cols: 89,
             rows: 28,
@@ -74,7 +80,13 @@ impl TmuxSession {
             })
             .unwrap_or_else(|| "tmuxify-main".into());
 
-        let session_exists = Command::new("tmux")
+        // has-session must use the same socket as the spawn below or
+        // tmux will lie about session existence.
+        let mut has_cmd = Command::new("tmux");
+        if let Some(sock) = opts.socket_name {
+            has_cmd.args(["-L", sock]);
+        }
+        let session_exists = has_cmd
             .args(["has-session", "-t", &session_name])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -85,6 +97,13 @@ impl TmuxSession {
         let cols_s = opts.cols.to_string();
         let rows_s = opts.rows.to_string();
         let mut cmd = Command::new("tmux");
+        if let Some(sock) = opts.socket_name {
+            cmd.args(["-L", sock]);
+        }
+        // Drop $TMUX so a tmux-inside-tmux situation can't reach back to
+        // the outer session — without this the inner control-mode tmux
+        // exits with "sessions should be nested with care, unset $TMUX".
+        cmd.env_remove("TMUX");
         // -f /dev/null: skip the user's ~/.tmux.conf — heavy configs
         // (TPM plugins, custom status-line, terminal-overrides) can
         // interfere with control-mode %output forwarding and leave the
