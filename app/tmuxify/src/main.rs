@@ -172,6 +172,10 @@ struct Session {
     cursor_row: u16,
     cursor_col: u16,
     cursor_visible: bool,
+    /// Latest parsed pane tree from `%layout-change`. None = haven't
+    /// received one yet (single-pane). Currently logged + reflected via
+    /// pane count in `display_name`; full multi-pane rendering pending.
+    layout: Option<tmux_bridge::Layout>,
 }
 
 struct App {
@@ -224,6 +228,15 @@ enum Message {
     /// tmux client. Sent from the global `event::listen_with` and from
     /// the very first frame to size newly-opened sessions to fit.
     WindowResized(u32, u32),
+    /// Pane layout changed in tmux's outer window. Carries the raw layout
+    /// string and the parsed pane tree so view code can decide what to
+    /// draw. The split tree currently only logs — actual multi-pane
+    /// rendering is queued for the next round.
+    LayoutChanged(SessionId, String, Arc<tmux_bridge::Layout>),
+    /// Catch-all from the tmux event channel. We forward non-Exit events
+    /// through the bus so LayoutChange / NewWindow / etc. can be acted
+    /// on; unknown variants are logged and dropped.
+    TmuxEvent(SessionId, Arc<TmuxEvent>),
     AutoSend(String),
     AutoCaptured,
 }
@@ -324,18 +337,73 @@ impl App {
                 Task::none()
             }
             Message::AutoCaptured => Task::none(),
+
+            Message::TmuxEvent(sid, ev) => {
+                match ev.as_ref() {
+                    TmuxEvent::LayoutChange { window_id, layout } => {
+                        // tmux 3.x sends `%layout-change <window> <main>
+                        // <visible> <flags>`. The bridge captures the
+                        // whole tail as `layout`; only the first token
+                        // is the active layout the user is currently
+                        // looking at — the rest is the saved layout and
+                        // a `*` / flag word.
+                        let first = layout.split_whitespace().next().unwrap_or(layout);
+                        eprintln!(
+                            "[tmuxify] layout-change sid={} window={} layout={}",
+                            sid.0, window_id, first
+                        );
+                        match tmux_bridge::parse_layout(first) {
+                            Ok(parsed) => {
+                                let parsed = Arc::new(parsed);
+                                return Task::done(Message::LayoutChanged(
+                                    sid,
+                                    layout.clone(),
+                                    parsed,
+                                ));
+                            }
+                            Err(e) => {
+                                eprintln!("[tmuxify] layout parse failed: {e}");
+                            }
+                        }
+                    }
+                    other => {
+                        eprintln!("[tmuxify] tmux event sid={}: {:?}", sid.0, other);
+                    }
+                }
+                Task::none()
+            }
+            Message::LayoutChanged(sid, _raw, parsed) => {
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id == sid) {
+                    let pane_count = count_panes(&parsed);
+                    eprintln!(
+                        "[tmuxify] session {} now has {} pane(s)",
+                        sid.0, pane_count
+                    );
+                    // We can only own one `Layout` per session; clone out
+                    // of the Arc so subsequent mutations (when we start
+                    // tracking visible-pane focus) stay private.
+                    s.layout = Some((*parsed).clone());
+                }
+                Task::none()
+            }
             Message::Event(Event::InputMethod(input_method::Event::Commit(text))) => {
                 self.write_active(text.into_bytes());
                 Task::none()
             }
-            // Cmd+D → tmux vertical split. Sent as Ctrl-b + '%' to the
-            // active session's stdin (the inner shell runs tmux itself).
+            // Cmd+D → ask tmux's control-mode server to split the active
+            // window. The earlier implementation wrote `[0x02, '%']` into
+            // the pane's pty — that's the Ctrl-B prefix sequence, which
+            // only does anything if the user is running a *nested* tmux
+            // inside the pane. Going through `send_cmd` talks to the
+            // outer tmux server directly so a plain shell pane splits.
             Message::Event(Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Character(ref s),
                 modifiers,
                 ..
             })) if modifiers == Modifiers::COMMAND && s.eq_ignore_ascii_case("d") => {
-                self.write_active(vec![0x02, b'%']);
+                if let Some(sess) = self.active_idx.and_then(|i| self.sessions.get(i)) {
+                    let _ = sess.tmux.send_cmd("split-window -h");
+                }
                 Task::none()
             }
             // Plain typing — translate to a `send-keys -H` request. Only
@@ -412,6 +480,7 @@ impl App {
             cursor_row: 0,
             cursor_col: 0,
             cursor_visible: true,
+            layout: None,
         });
         self.active_idx = Some(self.sessions.len() - 1);
         self.push_recent(path);
@@ -539,6 +608,14 @@ impl App {
     }
 
     fn window_tabs(&self, s: &Session) -> Element<'_, Message> {
+        // Show a "▌ N panes" hint when the user has split. Once the
+        // shader widget grows multi-pane rendering this will become a
+        // proper pane picker; for now it's the visible proof that
+        // %layout-change is being consumed.
+        let pane_hint = match s.layout.as_ref().map(count_panes).unwrap_or(1) {
+            n if n > 1 => format!("· {n} panes"),
+            _ => String::new(),
+        };
         let tab = container(
             row![
                 text("main").size(12).color(TEXT_PRI),
@@ -546,6 +623,8 @@ impl App {
                 text("·").size(11).color(TEXT_MUT),
                 Space::new().width(8),
                 text(s.name.clone()).size(11).color(TEXT_MUT),
+                Space::new().width(8),
+                text(pane_hint).size(11).color(ACCENT),
             ]
             .align_y(iced::Alignment::Center),
         )
@@ -739,6 +818,11 @@ fn spawn_bridge_threads(sid: SessionId, tmux: Arc<TmuxSession>) {
                 let _ = bus_events.send(Message::SessionGone(sid));
                 return;
             }
+            // Forward everything else (LayoutChange, WindowAdd, etc.) so
+            // the iced update loop can decide what to do with it.
+            if bus_events.send(Message::TmuxEvent(sid, Arc::new(ev))).is_err() {
+                return;
+            }
         }
         let _ = bus_events.send(Message::SessionGone(sid));
     });
@@ -917,6 +1001,10 @@ fn tmux_session_name(path: &PathBuf) -> String {
 /// by whitespace. Concatenated `\x636c61756465` reads as a single oversize
 /// hex literal and tmux silently drops the input — caught the first time
 /// AUTOSEND fired and "claude" never showed up at the prompt.
+fn count_panes(layout: &tmux_bridge::Layout) -> usize {
+    layout.leaves().len()
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 3);
     for (i, b) in bytes.iter().enumerate() {
