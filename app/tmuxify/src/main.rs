@@ -209,6 +209,10 @@ struct App {
     active_idx: Option<usize>,
     recents: Vec<PathBuf>,
     next_session_id: u64,
+    /// Live IME composition string (e.g. mid-Korean "ㅇ" → "아" → "안"
+    /// jamo). Painted at the cursor cell with an accent underline so the
+    /// user sees what's composing. Cleared on Commit/Closed.
+    preedit: String,
 }
 
 impl App {
@@ -218,6 +222,7 @@ impl App {
             active_idx: None,
             recents: Vec::new(),
             next_session_id: 1,
+            preedit: String::new(),
         };
         (app, startup_task())
     }
@@ -504,7 +509,21 @@ impl App {
                 Task::none()
             }
             Message::Event(Event::InputMethod(input_method::Event::Commit(text))) => {
+                // Final composed text — clear the live preedit overlay
+                // and push the bytes to the active pane.
+                self.preedit.clear();
                 self.write_active(text.into_bytes());
+                Task::none()
+            }
+            Message::Event(Event::InputMethod(input_method::Event::Preedit(text, _))) => {
+                // Mid-composition (e.g. Korean jamo before final 음절).
+                // Empty text is the OS's "I'm done composing" signal —
+                // Commit will follow.
+                self.preedit = text;
+                Task::none()
+            }
+            Message::Event(Event::InputMethod(input_method::Event::Closed)) => {
+                self.preedit.clear();
                 Task::none()
             }
             // Cmd+D → ask tmux's control-mode server to split the active
@@ -823,6 +842,7 @@ impl App {
             panes,
             layout: s.layout.clone(),
             active_pane: s.active_pane.clone(),
+            preedit: self.preedit.clone(),
         };
         let shader_widget: Element<'a, Message> = Shader::new(program)
             .width(Length::Fill)
@@ -1024,6 +1044,9 @@ struct TerminalProgram {
     panes: HashMap<String, cell_shader::PaneSnapshot>,
     layout: Option<tmux_bridge::Layout>,
     active_pane: Option<String>,
+    /// Live IME composition string. The shader draws it inside the
+    /// active pane's cursor cell so the user sees what's composing.
+    preedit: String,
 }
 
 impl<Message> shader::Program<Message> for TerminalProgram {
@@ -1127,6 +1150,7 @@ impl<Message> shader::Program<Message> for TerminalProgram {
             cell_h,
             font_size,
             widget_bounds: [bounds.width, bounds.height],
+            preedit: self.preedit.clone(),
         }
     }
 }
