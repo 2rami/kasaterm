@@ -46,7 +46,12 @@ use tmux_bridge::{Cell as GridCell, Color as GridColor};
 
 pub const FONT_SIZE: f32 = 14.0;
 pub const LINE_HEIGHT: f32 = 18.0;
-const ATLAS_DIM: u32 = 1024;
+/// 2048² gives ~4M pixels — enough to hold every distinct (glyph, size,
+/// scale) tuple a long-running Claude session has thrown at it so far.
+/// 1024² ran out within minutes once Retina baking doubled each glyph's
+/// pixel footprint; statusline emoji then started flickering between
+/// sizes as the alloc cursor wrapped onto smaller tiles.
+const ATLAS_DIM: u32 = 2048;
 
 /// Pane border colour for inactive panes — slightly brighter than the
 /// terminal bg so the seam reads as chrome rather than glitch.
@@ -142,13 +147,13 @@ impl shader::Primitive for TerminalPrimitive {
         bounds: &Rectangle,
         viewport: &shader::Viewport,
     ) {
-        // Retina / hi-DPI: iced's logical bounds are 1x, but the render
-        // pass writes to a physical surface at scale_factor pixels per
-        // logical px. If we bake glyphs at the logical font size the
-        // quad samples a half-resolution atlas — visible as soft, fuzzy
-        // text on Retina. Pass scale through so glyph baking happens at
-        // physical resolution while the quad geometry stays in logical
-        // coords for iced's projection.
+        // Retina / hi-DPI plumbing. iced hands us logical bounds (1x),
+        // but the render pass writes to a physical surface at
+        // scale_factor px per logical px. Baking glyphs at logical
+        // size leaves the atlas half-resolution on Retina; the quad
+        // sampler then visibly softens the text. Pass scale through
+        // so the atlas bakes at `font_size * scale` and the pipeline
+        // divides placement back to logical for iced's projection.
         let scale = viewport.scale_factor() as f32;
         pipeline.prepare(device, queue, bounds, self, scale);
     }
@@ -274,6 +279,9 @@ pub struct TerminalPipeline {
     /// widget bounds.
     last_cells_ptr: usize,
     last_cursor: (u16, u16, bool),
+    /// [width, height, scale_factor] — scale flips on monitor changes
+    /// (Retina ↔ external) so it has to be part of the cache key, or
+    /// the atlas keeps serving the wrong-resolution glyphs.
     last_bounds: [f32; 3],
 }
 
@@ -681,8 +689,9 @@ impl TerminalPipeline {
                         cache_key,
                     );
                     let Some(entry) = entry else { continue };
-                    // Atlas baked at physical resolution (font_size * scale);
-                    // divide placement back to logical for iced projection.
+                    // Atlas glyph baked at physical resolution
+                    // (font_size * scale). Divide placement back to
+                    // logical for iced's logical→physical projection.
                     let baseline = y + cell_h * 0.78;
                     let gx = x + x_off + (entry.placement.left as f32) / scale;
                     let gy = baseline - (entry.placement.top as f32) / scale + y_off;
@@ -862,10 +871,10 @@ fn shape_one_glyph(
     let mut out = Vec::new();
     if let Some(run) = buf.layout_runs().next() {
         for g in run.glyphs {
-            // Bake at physical resolution so the atlas glyph has 2× the
-            // pixels on Retina; the pipeline divides placement back to
-            // logical for iced's projection. cache_key encodes the scale
-            // so different DPI sessions don't clash.
+            // Bake at physical resolution so the atlas holds 2× detail
+            // on Retina; pipeline divides placement back to logical for
+            // iced's projection. CacheKey already folds the physical
+            // font size, so two monitors with different scales coexist.
             let physical = g.physical((0.0, 0.0), scale);
             out.push((physical.cache_key, g.x, g.y));
         }
@@ -899,7 +908,26 @@ fn ensure_glyph<'a>(
         );
         return atlas.entries.get(&key);
     }
-    let (x, y, uv) = atlas.alloc(w, h)?;
+    let Some((x, y, uv)) = atlas.alloc(w, h) else {
+        // Atlas full. Cache a sentinel entry so we don't re-rasterise
+        // this glyph (via SwashCache) on every frame — that's the real
+        // CPU killer on overflow, not the missing draw itself. A future
+        // round can swap in an LRU shelf-bin packer; for the spike, a
+        // bigger atlas + this sentinel are enough.
+        eprintln!(
+            "[tmuxify] glyph atlas full (key={:?} size={}x{}) — skipping",
+            key, w, h
+        );
+        atlas.entries.insert(
+            key,
+            AtlasEntry {
+                uv: [0.0, 0.0, 0.0, 0.0],
+                placement: img.placement,
+                is_color: false,
+            },
+        );
+        return atlas.entries.get(&key);
+    };
 
     // Expand to RGBA8. Cosmic's `Content::Mask` is 8-bit alpha — we store
     // (255,255,255,a) so the fragment shader can tint by colour. Colour
