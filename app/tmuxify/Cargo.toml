@@ -5,15 +5,11 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-tmux-bridge.workspace = true
-hangul-ime = { path = "../../crates/hangul-ime" }
 anyhow.workspace = true
-winit = "0.30"
-wgpu = { version = "22", features = ["wgsl"] }
-glyphon = "0.6"
-pollster = "0.3"
-bytemuck = { version = "1", features = ["derive"] }
-unicode-width = "0.1"
-image = { version = "0.25", default-features = false, features = ["png"] }
-arboard = "3"
+# iced 0.14 + iced_term — the chrome stays iced; the terminal cell rendering
+# moves to iced_term's proven alacritty-backed widget. Our own wgpu cell
+# renderer (terminal_view.rs / Phase 2b) is now retired.
+iced = { version = "0.14", features = ["tokio", "advanced", "image", "wgpu"] }
+iced_term = "0.8"
+tokio = { version = "1", features = ["time", "sync", "rt"] }
 rfd = "0.15"
