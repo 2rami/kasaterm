@@ -171,6 +171,20 @@ pub struct Selection {
     pub end: (u16, u16),
 }
 
+/// Lookup key for the shaping cache. `font_size` and `scale` are folded
+/// into their bit patterns because f32 doesn't implement `Hash`/`Eq`
+/// directly; the bit-level comparison is exactly what we want anyway
+/// (same numeric value → same key).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ShapeKey {
+    ch: String,
+    size_bits: u32,
+    scale_bits: u32,
+    bold: bool,
+    italic: bool,
+    needs_nerd: bool,
+}
+
 // iced glue lives in the host crate (see tmuxify::cell_shader). kasaterm
 // itself is framework-agnostic — callers invoke TerminalPipeline::prepare
 // and TerminalPipeline::draw directly with their own wgpu state.
@@ -280,6 +294,15 @@ pub struct TerminalPipeline {
 
     font_system: FontSystem,
     swash: SwashCache,
+
+    /// Per-(char, size, style, scale) shape cache. cosmic-text's Buffer
+    /// creation is the dominant cost when emit_pane shapes every cell
+    /// every frame (claude UI: ~6000 cells × 60fps = 360k Buffer / s).
+    /// Once a glyph is shaped, the result list — cosmic CacheKey + (x,y)
+    /// offsets — stays valid as long as the font_system contents do.
+    /// ASCII + common Hangul + claude statusline icons converge to a
+    /// few thousand entries; HashMap is plenty.
+    shape_cache: HashMap<ShapeKey, Vec<(CacheKey, f32, f32)>>,
 
     /// Memo key. We rebuild instance buffers only when something
     /// observable changed — cell grid pointer, cursor pos, or
@@ -481,6 +504,7 @@ impl TerminalPipeline {
                 fs
             },
             swash: SwashCache::new(),
+            shape_cache: HashMap::new(),
             last_cells_ptr: 0,
             last_cursor: (u16::MAX, u16::MAX, false),
             last_bounds: [0.0, 0.0, 0.0],
@@ -738,8 +762,9 @@ impl TerminalPipeline {
                     continue;
                 }
 
-                let glyph_data = shape_one_glyph(
+                let glyph_data = shape_cached_in(
                     &mut self.font_system,
+                    &mut self.shape_cache,
                     &cell.ch,
                     font_size,
                     cell.bold,
@@ -802,8 +827,9 @@ impl TerminalPipeline {
                 _pad: [0; 3],
             });
             // Shape the preedit text as one run and emit each glyph.
-            let glyphs = shape_one_glyph(
+            let glyphs = shape_cached_in(
                 &mut self.font_system,
+                &mut self.shape_cache,
                 &prim.preedit,
                 font_size,
                 false,
@@ -911,6 +937,37 @@ fn push_pane_border(instances: &mut Vec<Instance>, rect: [f32; 4], color: [f32; 
 
 /// Shape a single terminal cell's text. Returns (cache_key, x_offset, y_offset).
 /// For ascii/CJK that's exactly one glyph; ligatures or emoji may emit several.
+/// Cache-fronted shaping. Saves cosmic-text Buffer creation on every
+/// repeat character — the dominant cost in claude-style UIs where the
+/// same ASCII glyphs render across thousands of cells per frame.
+fn shape_cached_in(
+    fs: &mut FontSystem,
+    cache: &mut HashMap<ShapeKey, Vec<(CacheKey, f32, f32)>>,
+    text: &str,
+    font_size: f32,
+    bold: bool,
+    italic: bool,
+    scale: f32,
+) -> Vec<(CacheKey, f32, f32)> {
+    let needs_nerd = text
+        .chars()
+        .any(|c| matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD));
+    let key = ShapeKey {
+        ch: text.to_string(),
+        size_bits: font_size.to_bits(),
+        scale_bits: scale.to_bits(),
+        bold,
+        italic,
+        needs_nerd,
+    };
+    if let Some(cached) = cache.get(&key) {
+        return cached.clone();
+    }
+    let result = shape_one_glyph(fs, text, font_size, bold, italic, scale);
+    cache.insert(key, result.clone());
+    result
+}
+
 fn shape_one_glyph(
     fs: &mut FontSystem,
     text: &str,
