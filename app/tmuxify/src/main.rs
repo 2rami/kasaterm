@@ -379,6 +379,7 @@ impl App {
         let opts = StartOptions {
             cwd: Some(&cwd_s),
             session_name: Some(&session_name),
+            socket_name: Some("iced-poc"),
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
             ..Default::default()
