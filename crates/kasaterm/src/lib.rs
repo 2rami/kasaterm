@@ -866,13 +866,22 @@ fn shape_one_glyph(
 ) -> Vec<(CacheKey, f32, f32)> {
     let mut buf = Buffer::new(fs, Metrics::new(font_size, font_size * 1.25));
     buf.set_size(fs, Some(font_size * 4.0), Some(font_size * 2.0));
-    // Match the native build's preferred family. cosmic-text walks
-    // installed fonts via fontdb; on macOS the Nerd Font is found by name
-    // when it's been `brew install`'d into ~/Library/Fonts. If it's not
-    // present, cosmic falls back through Family::Monospace which is what
-    // the previous Family::Monospace request did anyway.
+    // Font fallback like alacritty / iTerm: D2Coding is the everyday face
+    // but doesn't carry Nerd Font's Private Use Area icons (powerline /
+    // git / file-type glyphs that claude / starship / lsd / etc. emit).
+    // Pick the bundled Nerd Font for PUA codepoints, D2Coding otherwise.
+    // Single-cell granularity is enough — terminal cells are atomic so we
+    // never need per-char fallback mid-string.
+    let needs_nerd = text
+        .chars()
+        .any(|c| matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD));
+    let family = if needs_nerd {
+        Family::Name("D2CodingLigature Nerd Font Mono")
+    } else {
+        Family::Name("D2Coding")
+    };
     let mut attrs = Attrs::new()
-        .family(Family::Name("D2Coding"))
+        .family(family)
         .stretch(cosmic_text::Stretch::Normal);
     let _ = Family::Monospace;
     if bold {

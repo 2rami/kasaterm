@@ -108,11 +108,27 @@ impl App {
         let cwd = std::env::var("KASATERM_CWD")
             .ok()
             .or_else(|| std::env::current_dir().ok().and_then(|p| p.to_str().map(|s| s.to_string())));
+        // Derive (cols, rows) from the window's logical size so cells
+        // match the glyph advance from the start. Defaults if the
+        // window hasn't been sized yet.
+        let (cols, rows) = self
+            .window
+            .as_ref()
+            .map(|w| {
+                let size = w.inner_size();
+                let scale = w.scale_factor() as f32;
+                let lw = size.width as f32 / scale;
+                let lh = size.height as f32 / scale;
+                let cols = (lw / 7.6).floor().max(40.0) as u16;
+                let rows = (lh / 18.0).floor().max(10.0) as u16;
+                (cols, rows)
+            })
+            .unwrap_or((100, 32));
         let tmux = TmuxSession::start(StartOptions {
             cwd: cwd.as_deref(),
             socket_name: Some("kasaterm-cli"),
-            cols: 100,
-            rows: 32,
+            cols,
+            rows,
             ..Default::default()
         })?;
         let screens = tmux.screens.clone();
@@ -268,7 +284,19 @@ impl ApplicationHandler for App {
                     gpu.config.height = size.height.max(1);
                     gpu.surface.configure(&gpu.device, &gpu.config);
                 }
-                if let Some(w) = &self.window {
+                // Renegotiate the grid with tmux so apps inside (claude,
+                // vim, less) rewrap to the visible cell pitch. Without
+                // this every paint rebuilds the instance buffer against
+                // a stale grid size, which both looks wrong and forces
+                // a hot rebuild every frame.
+                if let (Some(w), Some(tmux)) = (&self.window, &self.tmux) {
+                    let size = w.inner_size();
+                    let scale = w.scale_factor() as f32;
+                    let lw = size.width as f32 / scale;
+                    let lh = size.height as f32 / scale;
+                    let cols = (lw / 7.6).floor().max(40.0) as u16;
+                    let rows = (lh / 18.0).floor().max(10.0) as u16;
+                    let _ = tmux.resize_client(cols, rows);
                     w.request_redraw();
                 }
             }
