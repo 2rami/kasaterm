@@ -15,6 +15,11 @@ license.workspace = true
 #   so the atlas/pipeline is rolled by hand in `cell_shader.rs`.
 [dependencies]
 tmux-bridge.workspace = true
+# kasaterm — our own embeddable terminal cell renderer. Same architectural
+# role as libghostty in cmux: caller gives it Device/Queue/RenderPass,
+# kasaterm draws cells/box-rects/glyphs into them. The local
+# `cell_shader.rs` is now a thin iced glue layer over kasaterm.
+kasaterm = { workspace = true, features = ["iced"] }
 anyhow.workspace = true
 iced = { version = "0.14", features = ["tokio", "advanced", "image", "wgpu"] }
 tokio = { version = "1", features = ["time", "sync", "rt"] }

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "app/tmuxify",
     "crates/hangul-ime",
+    "crates/kasaterm",
     "crates/tmux-bridge",
     "spikes/iced-term",
     "spikes/egui-term",
@@ -21,3 +22,5 @@ vt100 = "0.15"
 crossbeam-channel = "0.5"
 anyhow = "1"
 tmux-bridge = { path = "crates/tmux-bridge" }
+kasaterm = { path = "crates/kasaterm" }
+
