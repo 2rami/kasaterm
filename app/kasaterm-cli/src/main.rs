@@ -3,7 +3,9 @@
 //! tmux-bridge feeds cells. This binary exists to prove that kasaterm is
 //! genuinely framework-agnostic (no iced anywhere in the dep tree).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::Result;
 use kasaterm::{PaneRender, Rect, Selection, TerminalPipeline, TerminalPrimitive};
@@ -60,6 +62,23 @@ struct App {
     /// Current modifier state — winit 0.30 doesn't include modifiers in
     /// individual KeyEvent, so we track ModifiersChanged separately.
     modifiers: ModifiersState,
+    /// Diagnostic timer — boot baseline so each interesting event can
+    /// print "+Xms" to console. Lets us reason about which side
+    /// (winit focus / IME init / shell .zshrc) is swallowing the first
+    /// keystroke.
+    boot: Instant,
+    saw_first_key: bool,
+    saw_screen_flag: Option<Arc<AtomicBool>>,
+    /// True while the OS IME is actively composing (Preedit has non-empty
+    /// text). Outside that window every keystroke — ASCII or not — arrives
+    /// as a plain Character event and should reach the PTY. The previous
+    /// "filter every non-ASCII Character" heuristic was over-cautious: it
+    /// also dropped the first jamo of a fresh IME context (the OS activates
+    /// the input context in response to that very key, so the key itself
+    /// never goes through Preedit/Commit). Tracking preedit state instead
+    /// keeps the first-key path live without double-injecting during
+    /// composition.
+    in_preedit: bool,
 }
 
 impl App {
@@ -74,6 +93,10 @@ impl App {
             drag_anchor: None,
             cursor_px: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
+            boot: Instant::now(),
+            saw_first_key: false,
+            saw_screen_flag: None,
+            in_preedit: false,
         }
     }
 
@@ -155,6 +178,10 @@ impl App {
         let screens = tmux.screens.clone();
         let screen = self.screen.clone();
         let window = self.window.clone();
+        let boot = self.boot;
+        let saw_screen = Arc::new(AtomicBool::new(false));
+        let saw_screen_thread = saw_screen.clone();
+        self.saw_screen_flag = Some(saw_screen);
         std::thread::spawn(move || {
             while let Ok(ScreenUpdate {
                 rows,
@@ -166,6 +193,13 @@ impl App {
                 ..
             }) = screens.recv()
             {
+                if !saw_screen_thread.swap(true, Ordering::SeqCst) {
+                    eprintln!(
+                        "[trace] +{}ms first ScreenUpdate (rows={rows} cols={cols} dirty={})",
+                        boot.elapsed().as_millis(),
+                        dirty.len()
+                    );
+                }
                 let mut s = screen.lock().unwrap();
                 if s.cols != cols || s.rows != rows || s.cells.len() != rows as usize {
                     s.cols = cols;
@@ -350,6 +384,30 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // First-key root-cause trace. Each branch logs once via the
+        // first_*_seen flags; remove this block when the timing is
+        // understood.
+        match &event {
+            WindowEvent::Focused(f) => {
+                eprintln!(
+                    "[trace] +{}ms Focused({f}) — winit just delivered focus",
+                    self.boot.elapsed().as_millis()
+                );
+            }
+            WindowEvent::Ime(ime) => {
+                let detail = match ime {
+                    Ime::Enabled => "Enabled".to_string(),
+                    Ime::Preedit(t, r) => format!("Preedit text={t:?} range={r:?}"),
+                    Ime::Commit(t) => format!("Commit text={t:?}"),
+                    Ime::Disabled => "Disabled".to_string(),
+                };
+                eprintln!(
+                    "[trace] +{}ms Ime({detail})",
+                    self.boot.elapsed().as_millis()
+                );
+            }
+            _ => {}
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -453,9 +511,11 @@ impl ApplicationHandler for App {
             WindowEvent::Ime(ime) => {
                 match ime {
                     Ime::Preedit(text, _range) => {
+                        self.in_preedit = !text.is_empty();
                         self.preedit = text;
                     }
                     Ime::Commit(text) => {
+                        self.in_preedit = false;
                         self.preedit.clear();
                         if let Some(tmux) = self.tmux.as_ref() {
                             let bytes = text.as_bytes();
@@ -468,6 +528,7 @@ impl ApplicationHandler for App {
                         }
                     }
                     Ime::Disabled | Ime::Enabled => {
+                        self.in_preedit = false;
                         self.preedit.clear();
                     }
                 }
@@ -479,12 +540,26 @@ impl ApplicationHandler for App {
                 event:
                     KeyEvent {
                         state: ElementState::Pressed,
-                        logical_key,
-                        text,
+                        ref logical_key,
+                        ref text,
                         ..
                     },
                 ..
             } => {
+                if !self.saw_first_key {
+                    self.saw_first_key = true;
+                    let screen_seen = self
+                        .saw_screen_flag
+                        .as_ref()
+                        .map(|f| f.load(Ordering::SeqCst))
+                        .unwrap_or(false);
+                    eprintln!(
+                        "[trace] +{}ms first KeyboardInput (key={logical_key:?} text={text:?}) screen_ready={screen_seen}",
+                        self.boot.elapsed().as_millis()
+                    );
+                }
+                let logical_key = logical_key.clone();
+                let text = text.clone();
                 // Cmd+C copies the current selection to the clipboard
                 // and short-circuits the PTY write — otherwise the shell
                 // would receive a literal 'c' or ETX.
@@ -541,10 +616,16 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::ArrowLeft) => b"\x1b[D".to_vec(),
                     _ => match text {
                         Some(t) => {
-                            // Skip non-ASCII keystrokes — they're CJK
-                            // jamo before IME composition. Commit fires
-                            // separately with the composed result.
-                            if !t.chars().all(|c| c.is_ascii() && !c.is_control()) {
+                            // Drop non-ASCII Character events ONLY while
+                            // the IME is actively composing — those are
+                            // the jamo that Preedit/Commit will deliver
+                            // again. Outside an active preedit (e.g. the
+                            // very first key after focus, before macOS
+                            // wakes the input context), the Character
+                            // event is the only channel, so let it pass.
+                            let non_ascii_during_preedit = self.in_preedit
+                                && !t.chars().all(|c| c.is_ascii() && !c.is_control());
+                            if non_ascii_during_preedit {
                                 return;
                             }
                             t.as_bytes().to_vec()
