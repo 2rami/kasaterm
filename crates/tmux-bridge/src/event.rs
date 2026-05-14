@@ -15,6 +15,10 @@ pub enum TmuxEvent {
     SessionChanged { session_id: String, name: String },
     LayoutChange { window_id: String, layout: String },
     PaneModeChanged { pane_id: String },
+    /// tmux 3.x emits `%window-pane-changed <window_id> <pane_id>`
+    /// whenever the focused pane within a window changes. UIs use this
+    /// to keep their "active pane" highlight in sync.
+    WindowPaneChanged { window_id: String, pane_id: String },
     ClientDetached,
     Exit,
     Unknown { raw: String },
@@ -50,6 +54,8 @@ pub fn parse_line(line: &str) -> TmuxEvent {
         "layout-change" => split_two(rest)
             .map(|(id, layout)| TmuxEvent::LayoutChange { window_id: id, layout }),
         "pane-mode-changed" => Some(TmuxEvent::PaneModeChanged { pane_id: rest.to_string() }),
+        "window-pane-changed" => split_two(rest)
+            .map(|(window_id, pane_id)| TmuxEvent::WindowPaneChanged { window_id, pane_id }),
         "client-detached" => Some(TmuxEvent::ClientDetached),
         "exit" => Some(TmuxEvent::Exit),
         _ => None,
