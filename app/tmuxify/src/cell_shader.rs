@@ -103,9 +103,17 @@ impl shader::Primitive for TerminalPrimitive {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         bounds: &Rectangle,
-        _viewport: &shader::Viewport,
+        viewport: &shader::Viewport,
     ) {
-        pipeline.prepare(device, queue, bounds, self);
+        // Retina / hi-DPI: iced's logical bounds are 1x, but the render
+        // pass writes to a physical surface at scale_factor pixels per
+        // logical px. If we bake glyphs at the logical font size the
+        // quad samples a half-resolution atlas — visible as soft, fuzzy
+        // text on Retina. Pass scale through so glyph baking happens at
+        // physical resolution while the quad geometry stays in logical
+        // coords for iced's projection.
+        let scale = viewport.scale_factor() as f32;
+        pipeline.prepare(device, queue, bounds, self, scale);
     }
 
     fn draw(
@@ -229,7 +237,7 @@ pub struct TerminalPipeline {
     /// widget bounds.
     last_cells_ptr: usize,
     last_cursor: (u16, u16, bool),
-    last_bounds: [f32; 2],
+    last_bounds: [f32; 3],
 }
 
 impl std::fmt::Debug for TerminalPipeline {
@@ -412,7 +420,7 @@ impl shader::Pipeline for TerminalPipeline {
             swash: SwashCache::new(),
             last_cells_ptr: 0,
             last_cursor: (u16::MAX, u16::MAX, false),
-            last_bounds: [0.0, 0.0],
+            last_bounds: [0.0, 0.0, 0.0],
         }
     }
 }
@@ -424,6 +432,7 @@ impl TerminalPipeline {
         queue: &wgpu::Queue,
         bounds: &Rectangle,
         prim: &TerminalPrimitive,
+        scale: f32,
     ) {
         // Memoise — if nothing observable changed since the last frame,
         // the instance buffer is still valid and we can reuse it. iced
@@ -431,7 +440,7 @@ impl TerminalPipeline {
         // dirty, so this is the cheapest place to gate work.
         let cells_ptr = Arc::as_ptr(&prim.cells) as usize;
         let cursor = (prim.cursor_row, prim.cursor_col, prim.cursor_visible);
-        let new_bounds = [bounds.width, bounds.height];
+        let new_bounds = [bounds.width, bounds.height, scale];
         if cells_ptr == self.last_cells_ptr
             && cursor == self.last_cursor
             && new_bounds == self.last_bounds
@@ -541,6 +550,7 @@ impl TerminalPipeline {
                     prim.font_size,
                     cell.bold,
                     cell.italic,
+                    scale,
                 );
 
                 for (cache_key, x_off, y_off) in glyph_data {
@@ -555,12 +565,15 @@ impl TerminalPipeline {
                     // Place the glyph: baseline is at line_height * 0.78
                     // below the row top (matches the native renderer's
                     // measurement, roughly the ascent fraction for the
-                    // D2Coding family at this size).
+                    // D2Coding family at this size). The atlas entry is
+                    // baked at physical resolution (font_size * scale),
+                    // so divide pixel placement back to logical for
+                    // iced's projection.
                     let baseline = y + cell_h * 0.78;
-                    let gx = x + x_off + entry.placement.left as f32;
-                    let gy = baseline - entry.placement.top as f32 + y_off;
-                    let gw = entry.placement.width as f32;
-                    let gh = entry.placement.height as f32;
+                    let gx = x + x_off + (entry.placement.left as f32) / scale;
+                    let gy = baseline - (entry.placement.top as f32) / scale + y_off;
+                    let gw = entry.placement.width as f32 / scale;
+                    let gh = entry.placement.height as f32 / scale;
                     if gw <= 0.0 || gh <= 0.0 {
                         continue;
                     }
@@ -624,6 +637,7 @@ fn shape_one_glyph(
     font_size: f32,
     bold: bool,
     italic: bool,
+    scale: f32,
 ) -> Vec<(CacheKey, f32, f32)> {
     let mut buf = Buffer::new(fs, Metrics::new(font_size, font_size * 1.25));
     buf.set_size(fs, Some(font_size * 4.0), Some(font_size * 2.0));
@@ -648,7 +662,11 @@ fn shape_one_glyph(
     let mut out = Vec::new();
     if let Some(run) = buf.layout_runs().next() {
         for g in run.glyphs {
-            let physical = g.physical((0.0, 0.0), 1.0);
+            // Bake at physical resolution so the atlas glyph has 2× the
+            // pixels on Retina; the pipeline divides placement back to
+            // logical for iced's projection. cache_key encodes the scale
+            // so different DPI sessions don't clash.
+            let physical = g.physical((0.0, 0.0), scale);
             out.push((physical.cache_key, g.x, g.y));
         }
     }
