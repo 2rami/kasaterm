@@ -545,10 +545,10 @@ impl App {
             // Plain typing — translate to a `send-keys -H` request.
             // Skip non-ASCII Key::Character events: those are Korean /
             // CJK jamo that the OS hasn't composed yet (e.g. ㅇ + ㅏ +
-            // ㄴ before becoming 안). The IME pipeline fires the final
-            // composed text through `InputMethod::Commit` above, so
-            // forwarding the raw jamo here would double-input and break
-            // composition.
+            // ㄴ before becoming 안). The IME pipeline above fires the
+            // final composed text through `InputMethod::Commit`, so
+            // forwarding raw jamo here would double-input and break
+            // composition entirely.
             Message::Event(Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Character(ref s),
                 modifiers,
