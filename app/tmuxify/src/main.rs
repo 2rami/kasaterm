@@ -1154,6 +1154,7 @@ impl<Message> shader::Program<Message> for TerminalProgram {
             font_size,
             widget_bounds: [bounds.width, bounds.height],
             preedit: self.preedit.clone(),
+            selection: None,
         }
     }
 }

@@ -6,13 +6,13 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use kasaterm::{PaneRender, Rect, TerminalPipeline, TerminalPrimitive};
+use kasaterm::{PaneRender, Rect, Selection, TerminalPipeline, TerminalPrimitive};
 use tmux_bridge::{ScreenUpdate, StartOptions, TmuxSession, Cell as GridCell};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Ime, KeyEvent, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, Modifiers, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 const TERM_BG: [f32; 4] = [0x1c as f32 / 255.0, 0x20 as f32 / 255.0, 0x26 as f32 / 255.0, 1.0];
@@ -48,6 +48,18 @@ struct App {
     /// underline so Hangul / kana composition is visible while the user
     /// is still typing.
     preedit: String,
+    /// Drag-selection state. Set on mouse-down, updated on mouse-move,
+    /// committed on mouse-up. None = no selection (kasaterm paints nothing).
+    selection: Option<Selection>,
+    /// Mouse-down anchor cell — kept so mid-drag updates can rebuild the
+    /// Selection without re-deriving from pixel state. Cleared on release.
+    drag_anchor: Option<(u16, u16)>,
+    /// Last-known cursor position in logical pixels. Used both for
+    /// drag-end computation and Cmd+modifier shortcuts.
+    cursor_px: (f32, f32),
+    /// Current modifier state — winit 0.30 doesn't include modifiers in
+    /// individual KeyEvent, so we track ModifiersChanged separately.
+    modifiers: ModifiersState,
 }
 
 impl App {
@@ -58,6 +70,10 @@ impl App {
             screen: Arc::new(Mutex::new(Screen::default())),
             tmux: None,
             preedit: String::new(),
+            selection: None,
+            drag_anchor: None,
+            cursor_px: (0.0, 0.0),
+            modifiers: ModifiersState::empty(),
         }
     }
 
@@ -175,6 +191,54 @@ impl App {
         Ok(())
     }
 
+    /// Convert a logical-pixel position into a (col, row) cell. Used by
+    /// the mouse-drag selection path. Returns None when no screen has
+    /// landed yet (still booting).
+    fn px_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
+        let window = self.window.as_ref()?;
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let lw = size.width as f32 / scale;
+        let lh = size.height as f32 / scale;
+        let screen = self.screen.lock().unwrap();
+        if screen.cols == 0 || screen.rows == 0 {
+            return None;
+        }
+        let cell_w = lw / screen.cols as f32;
+        let cell_h = lh / screen.rows as f32;
+        let col = (px / cell_w).floor().max(0.0) as u16;
+        let row = (py / cell_h).floor().max(0.0) as u16;
+        Some((col.min(screen.cols - 1), row.min(screen.rows - 1)))
+    }
+
+    fn copy_selection(&self) {
+        let Some(sel) = self.selection else { return };
+        let screen = self.screen.lock().unwrap();
+        let pane = PaneRender {
+            rect: [0.0, 0.0, 0.0, 0.0],
+            cells: screen.cells.clone(),
+            cols: screen.cols,
+            rows: screen.rows,
+            cursor_row: screen.cursor_row,
+            cursor_col: screen.cursor_col,
+            cursor_visible: screen.cursor_visible,
+            is_active: true,
+        };
+        drop(screen);
+        let text = kasaterm::extract_selection(&[pane], &sel);
+        if text.is_empty() {
+            return;
+        }
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => {
+                if let Err(e) = cb.set_text(text) {
+                    eprintln!("[kasaterm-cli] clipboard write failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("[kasaterm-cli] clipboard open failed: {e}"),
+        }
+    }
+
     fn render(&mut self) -> Result<()> {
         let Some(gpu) = self.gpu.as_mut() else { return Ok(()) };
         let Some(window) = self.window.as_ref() else { return Ok(()) };
@@ -208,6 +272,7 @@ impl App {
             font_size: (cell_h * 0.78).max(8.0),
             widget_bounds: [logical_w, logical_h],
             preedit: self.preedit.clone(),
+            selection: self.selection,
         };
         drop(screen);
 
@@ -314,6 +379,47 @@ impl ApplicationHandler for App {
                     eprintln!("[kasaterm-cli] render error: {e}");
                 }
             }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = self.window.as_ref().map(|w| w.scale_factor() as f32).unwrap_or(1.0);
+                self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                // Mid-drag: update selection.end to follow the pointer.
+                if let (Some(anchor), Some(cell)) = (
+                    self.drag_anchor,
+                    self.px_to_cell(self.cursor_px.0, self.cursor_px.1),
+                ) {
+                    self.selection = Some(Selection { anchor, end: cell });
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                match state {
+                    ElementState::Pressed => {
+                        if let Some(cell) = self.px_to_cell(self.cursor_px.0, self.cursor_px.1) {
+                            self.drag_anchor = Some(cell);
+                            self.selection = Some(Selection { anchor: cell, end: cell });
+                        }
+                    }
+                    ElementState::Released => {
+                        self.drag_anchor = None;
+                        // Selection stays set so Cmd+C still works after
+                        // the drag ends. Click without drag = empty 1-cell
+                        // selection; treat that as 'clear'.
+                        if let Some(sel) = self.selection {
+                            if sel.anchor == sel.end {
+                                self.selection = None;
+                            }
+                        }
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::Ime(ime) => {
                 match ime {
                     Ime::Preedit(text, _range) => {
@@ -349,6 +455,18 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
+                // Cmd+C copies the current selection to the clipboard
+                // and short-circuits the PTY write — otherwise the shell
+                // would receive a literal 'c' or ETX.
+                let is_cmd = self.modifiers.super_key() || self.modifiers.control_key();
+                if is_cmd {
+                    if let Key::Character(s) = &logical_key {
+                        if s.eq_ignore_ascii_case("c") && self.selection.is_some() {
+                            self.copy_selection();
+                            return;
+                        }
+                    }
+                }
                 let Some(tmux) = self.tmux.as_ref() else { return };
                 let bytes: Vec<u8> = match logical_key {
                     Key::Named(NamedKey::Enter) => b"\r".to_vec(),
