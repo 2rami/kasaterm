@@ -125,6 +125,10 @@ pub struct TerminalPrimitive {
     /// Widget bounds (used as the shader viewport, since the iced render
     /// pass is already scoped to this rect).
     pub widget_bounds: [f32; 2],
+    /// Live IME composition string. Painted in the active pane's cursor
+    /// cell with an accent underline so the user sees what's being
+    /// composed (e.g. "ㅇ → 아 → 안" for Korean Hangul).
+    pub preedit: String,
 }
 
 impl shader::Primitive for TerminalPrimitive {
@@ -489,6 +493,12 @@ impl TerminalPipeline {
         }
         hash ^= scale.to_bits() as u64;
         hash = hash.wrapping_mul(0x100000001b3);
+        // Mix preedit so live IME composition triggers a redraw on
+        // every jamo change.
+        for b in prim.preedit.as_bytes() {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
         let new_bounds = [bounds.width, bounds.height, scale];
         if hash == self.last_cells_ptr as u64
             && new_bounds == self.last_bounds
@@ -690,6 +700,78 @@ impl TerminalPipeline {
                     });
                 }
             }
+        }
+
+        // Live IME preedit overlay — only on the active pane. Painted
+        // on top of cells starting at the cursor cell, with an accent
+        // underline so the user sees mid-composition (Korean jamo).
+        if pane.is_active && !prim.preedit.is_empty() {
+            let cur_x = px + (pane.cursor_col as f32) * cell_w;
+            let cur_y = py + (pane.cursor_row as f32) * cell_h;
+            // Solid bg under preedit so we don't mix with terminal text.
+            let preedit_bg = [
+                prim.bg_color[0] * 1.4 + 0.05,
+                prim.bg_color[1] * 1.4 + 0.05,
+                prim.bg_color[2] * 1.4 + 0.05,
+                1.0,
+            ];
+            let preedit_w = cell_w
+                * (prim.preedit.chars().count().max(1)) as f32
+                * 1.6; // CJK is wide — give it room
+            instances.push(Instance {
+                rect: [cur_x, cur_y, preedit_w, cell_h],
+                color: preedit_bg,
+                uv: [0.0, 0.0, 0.0, 0.0],
+                mode: 0,
+                _pad: [0; 3],
+            });
+            // Shape the preedit text as one run and emit each glyph.
+            let glyphs = shape_one_glyph(
+                &mut self.font_system,
+                &prim.preedit,
+                font_size,
+                false,
+                false,
+                scale,
+            );
+            let mut pen_x = cur_x;
+            for (cache_key, x_off, y_off) in glyphs {
+                let entry = ensure_glyph(
+                    &mut self.atlas,
+                    &mut self.font_system,
+                    &mut self.swash,
+                    queue,
+                    cache_key,
+                );
+                let Some(entry) = entry else { continue };
+                let baseline = cur_y + cell_h * 0.78;
+                let gx = pen_x + x_off + (entry.placement.left as f32) / scale;
+                let gy = baseline - (entry.placement.top as f32) / scale + y_off;
+                let gw = entry.placement.width as f32 / scale;
+                let gh = entry.placement.height as f32 / scale;
+                if gw > 0.0 && gh > 0.0 {
+                    instances.push(Instance {
+                        rect: [gx, gy, gw, gh],
+                        color: if entry.is_color {
+                            [1.0, 1.0, 1.0, 1.0]
+                        } else {
+                            prim.fg_color
+                        },
+                        uv: entry.uv,
+                        mode: 1,
+                        _pad: [0; 3],
+                    });
+                }
+                pen_x += gw.max(cell_w * 0.6);
+            }
+            // 2px accent underline below the preedit run.
+            instances.push(Instance {
+                rect: [cur_x, cur_y + cell_h - 2.0, preedit_w, 2.0],
+                color: PANE_BORDER_ACTIVE,
+                uv: [0.0, 0.0, 0.0, 0.0],
+                mode: 0,
+                _pad: [0; 3],
+            });
         }
     }
 
