@@ -156,6 +156,14 @@ impl TmuxSession {
         let (event_tx, event_rx) = unbounded::<TmuxEvent>();
         let (screen_tx, screen_rx) = unbounded::<ScreenUpdate>();
         let (query_tx, query_rx) = unbounded::<Vec<String>>();
+        // Dirty-pane signal: the reader posts a pane id every time it
+        // pipes a `%output` payload into vt100. The flusher blocks on
+        // this channel instead of polling on a fixed interval, so a
+        // shell echo round-trips in microseconds instead of waiting up
+        // to one tick. Bounded so a runaway pane can't accumulate signals
+        // without backpressure; full-channel try_send silently drops
+        // because there's already a pending flush for that pane anyway.
+        let (dirty_tx, dirty_rx) = crossbeam_channel::bounded::<String>(1024);
         let pending_queries = Arc::new(AtomicU32::new(0));
 
         spawn_reader(
@@ -165,8 +173,9 @@ impl TmuxSession {
             event_tx,
             query_tx,
             pending_queries.clone(),
+            dirty_tx,
         );
-        spawn_flusher(parsers.clone(), prev_rows, screen_tx, opts.flush_interval);
+        spawn_flusher(parsers.clone(), prev_rows, screen_tx, dirty_rx, opts.flush_interval);
 
         if !session_exists {
             if let Some(text) = opts.auto_run.filter(|s| !s.is_empty()) {
@@ -239,6 +248,7 @@ fn spawn_reader(
     events: Sender<TmuxEvent>,
     queries: Sender<Vec<String>>,
     pending_queries: Arc<AtomicU32>,
+    dirty_tx: Sender<String>,
 ) {
     thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -294,6 +304,13 @@ fn spawn_reader(
                         .entry(pane_id.clone())
                         .or_insert_with(|| vt100::Parser::new(rows, cols, 5000));
                     p.process(&data);
+                    drop(map);
+                    // Wake the flusher *right after* the parser absorbs
+                    // the new bytes. try_send is fine — the bounded
+                    // channel just drops duplicate notifications, which
+                    // is exactly the coalescing behaviour we want when
+                    // an app bursts thousands of small %output frames.
+                    let _ = dirty_tx.try_send(pane_id.clone());
                 }
                 TmuxEvent::Begin { .. } => {
                     if pending_queries.load(Ordering::SeqCst) > 0 && capture.is_none() {
@@ -332,14 +349,45 @@ fn spawn_flusher(
     parsers: ParserMap,
     prev_rows: Arc<Mutex<HashMap<String, Vec<Row>>>>,
     out: Sender<ScreenUpdate>,
-    interval: Duration,
+    dirty_rx: Receiver<String>,
+    safety_interval: Duration,
 ) {
     thread::spawn(move || loop {
-        thread::sleep(interval);
-        let pane_ids: Vec<String> = {
-            let map = parsers.lock().unwrap();
-            map.keys().cloned().collect()
+        // Block until the reader marks a pane dirty (or until the safety
+        // interval, in case a notification was dropped). Coalesce a 2ms
+        // burst window — claude / vim can emit hundreds of %output frames
+        // in a single tick, batching them into one snapshot per pane keeps
+        // the consumer's ScreenUpdate rate bounded without sacrificing
+        // latency in the steady state.
+        let first_dirty = match dirty_rx.recv_timeout(safety_interval) {
+            Ok(pid) => Some(pid),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
         };
+        let mut dirty_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Some(pid) = first_dirty {
+            dirty_set.insert(pid);
+        }
+        let coalesce_until = std::time::Instant::now() + Duration::from_millis(2);
+        loop {
+            let remaining = coalesce_until.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match dirty_rx.recv_timeout(remaining) {
+                Ok(pid) => {
+                    dirty_set.insert(pid);
+                }
+                Err(_) => break,
+            }
+        }
+        if dirty_set.is_empty() {
+            // Safety-tick path — re-scan every parser in case a signal
+            // was dropped (bounded channel + try_send is best-effort).
+            let map = parsers.lock().unwrap();
+            dirty_set.extend(map.keys().cloned());
+        }
+        let pane_ids: Vec<String> = dirty_set.into_iter().collect();
         for pid in pane_ids {
             let snap = {
                 let map = parsers.lock().unwrap();
