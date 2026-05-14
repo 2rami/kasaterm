@@ -58,7 +58,10 @@ const DEFAULT_ROWS: u16 = 28;
 // `LINE_HEIGHT`. Used by resize logic to translate iced window pixels
 // into a (cols, rows) target. Inside the shader widget the actual cell
 // size is derived from bounds/cols for clean pixel alignment.
-const CELL_W_PX: f32 = 8.4;
+// Tightened from 8.4 → 7.6 so cell pitch matches D2Coding's natural
+// glyph advance more closely. Wider values left visible gaps between
+// columns; narrower would crowd box-drawing chars.
+const CELL_W_PX: f32 = 7.6;
 const CELL_H_PX: f32 = 18.0;
 
 // === Entry ================================================================

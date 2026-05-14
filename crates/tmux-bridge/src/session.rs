@@ -104,6 +104,14 @@ impl TmuxSession {
         // the outer session — without this the inner control-mode tmux
         // exits with "sessions should be nested with care, unset $TMUX".
         cmd.env_remove("TMUX");
+        // True-colour pipe: without these tmux negotiates the screen-* TERM
+        // family by default, which clamps to 8/16 colours and visibly fades
+        // claude's UI palette. Tell tmux's *client* (us) supports RGB, set
+        // a 256-colour TERM for the inner shell, and advertise
+        // COLORTERM=truecolor so apps (claude / vim / bat / …) emit 24-bit
+        // SGR escapes instead of stepping down.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         // -f /dev/null: skip the user's ~/.tmux.conf — heavy configs
         // (TPM plugins, custom status-line, terminal-overrides) can
         // interfere with control-mode %output forwarding and leave the
@@ -111,6 +119,11 @@ impl TmuxSession {
         cmd.args([
             "-f",
             "/dev/null",
+            // -T 256,RGB: tell tmux this control-mode client supports 256
+            // colours and 24-bit RGB, so apps inside the panes don't get
+            // clamped to a smaller palette.
+            "-T",
+            "256,RGB",
             "-C",
             "new-session",
             "-A",
