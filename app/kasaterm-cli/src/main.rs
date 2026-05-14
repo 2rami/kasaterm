@@ -10,7 +10,7 @@ use kasaterm::{PaneRender, Rect, TerminalPipeline, TerminalPrimitive};
 use tmux_bridge::{ScreenUpdate, StartOptions, TmuxSession, Cell as GridCell};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -44,6 +44,10 @@ struct App {
     gpu: Option<Gpu>,
     screen: Arc<Mutex<Screen>>,
     tmux: Option<Arc<TmuxSession>>,
+    /// Live IME preedit text, painted in the cursor cell with an accent
+    /// underline so Hangul / kana composition is visible while the user
+    /// is still typing.
+    preedit: String,
 }
 
 impl App {
@@ -53,6 +57,7 @@ impl App {
             gpu: None,
             screen: Arc::new(Mutex::new(Screen::default())),
             tmux: None,
+            preedit: String::new(),
         }
     }
 
@@ -202,7 +207,7 @@ impl App {
             cell_h,
             font_size: (cell_h * 0.78).max(8.0),
             widget_bounds: [logical_w, logical_h],
-            preedit: String::new(),
+            preedit: self.preedit.clone(),
         };
         drop(screen);
 
@@ -263,6 +268,10 @@ impl ApplicationHandler for App {
             .with_title("kasaterm-cli")
             .with_inner_size(LogicalSize::new(900.0, 600.0));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
+        // Turn on IME so winit emits Preedit/Commit events for Hangul,
+        // kana, pinyin etc. Without this, raw key events for jamo would
+        // be sent and never compose into 안 / 한 / 글.
+        window.set_ime_allowed(true);
         self.window = Some(window.clone());
         if let Err(e) = self.ensure_gpu(window) {
             eprintln!("[kasaterm-cli] gpu init failed: {e}");
@@ -305,6 +314,31 @@ impl ApplicationHandler for App {
                     eprintln!("[kasaterm-cli] render error: {e}");
                 }
             }
+            WindowEvent::Ime(ime) => {
+                match ime {
+                    Ime::Preedit(text, _range) => {
+                        self.preedit = text;
+                    }
+                    Ime::Commit(text) => {
+                        self.preedit.clear();
+                        if let Some(tmux) = self.tmux.as_ref() {
+                            let bytes = text.as_bytes();
+                            let hex: String = bytes
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            let _ = tmux.send_keys_hex(None, &hex);
+                        }
+                    }
+                    Ime::Disabled | Ime::Enabled => {
+                        self.preedit.clear();
+                    }
+                }
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
@@ -326,7 +360,15 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::ArrowRight) => b"\x1b[C".to_vec(),
                     Key::Named(NamedKey::ArrowLeft) => b"\x1b[D".to_vec(),
                     _ => match text {
-                        Some(t) => t.as_bytes().to_vec(),
+                        Some(t) => {
+                            // Skip non-ASCII keystrokes — they're CJK
+                            // jamo before IME composition. Commit fires
+                            // separately with the composed result.
+                            if !t.chars().all(|c| c.is_ascii() && !c.is_control()) {
+                                return;
+                            }
+                            t.as_bytes().to_vec()
+                        }
                         None => return,
                     },
                 };
