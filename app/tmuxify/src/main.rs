@@ -259,12 +259,19 @@ enum Message {
     /// draw. The split tree currently only logs — actual multi-pane
     /// rendering is queued for the next round.
     LayoutChanged(SessionId, String, Arc<tmux_bridge::Layout>),
+    /// User clicked inside a pane — focus it locally and tell tmux.
+    FocusPane(SessionId, String),
     /// Catch-all from the tmux event channel. We forward non-Exit events
     /// through the bus so LayoutChange / NewWindow / etc. can be acted
     /// on; unknown variants are logged and dropped.
     TmuxEvent(SessionId, Arc<TmuxEvent>),
     AutoSend(String),
     AutoCaptured,
+    /// User clicked inside the terminal Shader widget. Carries the
+    /// click pixel relative to the widget top-left and the widget's
+    /// current bounds, so the handler can map (rx, ry) into a cell
+    /// position without keeping shared state across frames.
+    PaneClick { rel_x: f32, rel_y: f32, bounds_w: f32, bounds_h: f32 },
 }
 
 // === Update ===============================================================
@@ -310,13 +317,35 @@ impl App {
                         .panes
                         .entry(update.pane_id.clone())
                         .or_insert_with(|| PaneGrid::empty(update.cols, update.rows));
-                    if pane.cols != update.cols
+                    let size_changed = pane.cols != update.cols
                         || pane.rows != update.rows
-                        || pane.cells.len() != update.rows as usize
-                    {
+                        || pane.cells.len() != update.rows as usize;
+                    if size_changed {
                         pane.cols = update.cols;
                         pane.rows = update.rows;
                         pane.cells = Arc::new(blank_grid(update.cols, update.rows));
+                    }
+                    // Early-out when truly nothing changed — the bridge
+                    // flusher emits a ScreenUpdate every 16ms per pane
+                    // regardless. Without this guard a fresh `Arc` would
+                    // be allocated each tick (Arc::make_mut clones on
+                    // refcount > 1), invalidating the shader memoisation
+                    // and burning frames even when the terminal is
+                    // genuinely idle.
+                    let cursor_changed = pane.cursor_row != update.cursor_row
+                        || pane.cursor_col != update.cursor_col
+                        || pane.cursor_visible != update.cursor_visible;
+                    let title_changed = update
+                        .title
+                        .as_ref()
+                        .map(|t| t != &s.name)
+                        .unwrap_or(false);
+                    if !size_changed
+                        && update.dirty.is_empty()
+                        && !cursor_changed
+                        && !title_changed
+                    {
+                        return Task::none();
                     }
                     let cells = Arc::make_mut(&mut pane.cells);
                     for (r, row) in &update.dirty {
@@ -376,8 +405,58 @@ impl App {
             }
             Message::AutoCaptured => Task::none(),
 
+            Message::PaneClick { rel_x: rx, rel_y: ry, bounds_w, bounds_h } => {
+                // Look up the active session and walk its layout tree.
+                let Some(idx) = self.active_idx else {
+                    return Task::none();
+                };
+                let layout_opt = self.sessions.get(idx).and_then(|s| s.layout.clone());
+                let pane_id = match layout_opt.as_ref() {
+                    Some(layout) => {
+                        let (_, _, root_w, root_h) = layout.rect();
+                        if root_w == 0 || root_h == 0 || bounds_w <= 0.0 || bounds_h <= 0.0 {
+                            return Task::none();
+                        }
+                        let cw = bounds_w / root_w as f32;
+                        let ch = bounds_h / root_h as f32;
+                        let cell_x = (rx / cw) as u16;
+                        let cell_y = (ry / ch) as u16;
+                        pane_at(layout, cell_x, cell_y).map(|id| format!("%{id}"))
+                    }
+                    None => {
+                        // Single pane — first known pane.
+                        self.sessions
+                            .get(idx)
+                            .and_then(|s| s.panes.keys().next().cloned())
+                    }
+                };
+                let sid = self.sessions.get(idx).map(|s| s.id);
+                match (sid, pane_id) {
+                    (Some(sid), Some(pid)) => Task::done(Message::FocusPane(sid, pid)),
+                    _ => Task::none(),
+                }
+            }
+
+            Message::FocusPane(sid, pane_id) => {
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id == sid) {
+                    s.active_pane = Some(pane_id.clone());
+                    let _ = s.tmux.send_cmd(&format!("select-pane -t '{}'", pane_id));
+                }
+                Task::none()
+            }
             Message::TmuxEvent(sid, ev) => {
                 match ev.as_ref() {
+                    TmuxEvent::WindowPaneChanged { pane_id, .. } => {
+                        // tmux moved focus — mirror it so the active
+                        // accent border and keyboard target stay in
+                        // sync. We deliberately don't echo a
+                        // `select-pane` back to tmux here; that would
+                        // race with whatever just caused the change.
+                        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == sid) {
+                            s.active_pane = Some(pane_id.clone());
+                        }
+                        return Task::none();
+                    }
                     TmuxEvent::LayoutChange { window_id, layout } => {
                         // tmux 3.x sends `%layout-change <window> <main>
                         // <visible> <flags>`. The bridge captures the
@@ -1097,6 +1176,29 @@ fn count_panes(layout: &tmux_bridge::Layout) -> usize {
     layout.leaves().len()
 }
 
+/// Find the pane id whose cell-rect contains (`cell_x`, `cell_y`).
+/// Coordinates are in tmux cells, same units as `Layout::rect()`. Returns
+/// the `Pane::id` (the `%n` index minus the `%`). None when the point
+/// falls outside every leaf — possible at sub-cell margins after rounding.
+fn pane_at(layout: &tmux_bridge::Layout, cell_x: u16, cell_y: u16) -> Option<u32> {
+    use tmux_bridge::Layout::*;
+    let (x, y, w, h) = layout.rect();
+    if cell_x < x || cell_y < y || cell_x >= x + w || cell_y >= y + h {
+        return None;
+    }
+    match layout {
+        Pane { id, .. } => Some(*id),
+        HSplit { children, .. } | VSplit { children, .. } => {
+            for c in children {
+                if let Some(id) = pane_at(c, cell_x, cell_y) {
+                    return Some(id);
+                }
+            }
+            None
+        }
+    }
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 3);
     for (i, b) in bytes.iter().enumerate() {
@@ -1133,11 +1235,22 @@ fn named_key_bytes(named: keyboard::key::Named) -> Option<Vec<u8>> {
 
 // === ImeHost — wraps the Shader widget so winit turns IME on =============
 
-struct ImeHost<'a, Msg> {
-    inner: Element<'a, Msg>,
+/// Wraps the terminal `Shader` widget so we can:
+///   - arm IME (`request_input_method`) on every redraw — `Shader::Program`
+///     has no `Shell`, so the request must live on the host widget,
+///   - emit `Message::PaneClick` on pointer-down — `Program::update` does
+///     receive events but only fires when the cursor's inside the
+///     primitive's reported clip rect, which is fragile during the first
+///     paint when bounds haven't propagated yet.
+///
+/// Hard-coded to `Message` rather than generic on `Msg` so we can publish
+/// PaneClick without a callback parameter (a `Box<dyn Fn>` would force a
+/// boxed widget; the cost isn't worth it for a single-purpose host).
+struct ImeHost<'a> {
+    inner: Element<'a, Message>,
 }
 
-impl<'a, Msg> Widget<Msg, Theme, iced::Renderer> for ImeHost<'a, Msg> {
+impl<'a> Widget<Message, Theme, iced::Renderer> for ImeHost<'a> {
     fn size(&self) -> Size<Length> {
         self.inner.as_widget().size()
     }
@@ -1197,7 +1310,7 @@ impl<'a, Msg> Widget<Msg, Theme, iced::Renderer> for ImeHost<'a, Msg> {
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Msg>,
+        shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
         self.inner
@@ -1217,6 +1330,21 @@ impl<'a, Msg> Widget<Msg, Theme, iced::Renderer> for ImeHost<'a, Msg> {
                 purpose: Purpose::Terminal,
                 preedit: None,
             });
+        }
+
+        // Click-to-focus. Fires once per primary-button press inside
+        // our bounds — converts the widget-local pixel into a tmux
+        // cell coordinate in the update handler.
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+            let bounds = layout.bounds();
+            if let Some(pos) = cursor.position_in(bounds) {
+                shell.publish(Message::PaneClick {
+                    rel_x: pos.x,
+                    rel_y: pos.y,
+                    bounds_w: bounds.width,
+                    bounds_h: bounds.height,
+                });
+            }
         }
     }
     fn mouse_interaction(
@@ -1238,7 +1366,7 @@ impl<'a, Msg> Widget<Msg, Theme, iced::Renderer> for ImeHost<'a, Msg> {
         renderer: &iced::Renderer,
         viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'b, Msg, Theme, iced::Renderer>> {
+    ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
         self.inner
             .as_widget_mut()
             .overlay(tree, layout, renderer, viewport, translation)
