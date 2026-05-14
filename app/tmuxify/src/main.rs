@@ -523,13 +523,20 @@ impl App {
                 }
                 Task::none()
             }
-            // Plain typing — translate to a `send-keys -H` request. Only
-            // covers ASCII for now; IME handles CJK above.
+            // Plain typing — translate to a `send-keys -H` request.
+            // Skip non-ASCII Key::Character events: those are Korean /
+            // CJK jamo that the OS hasn't composed yet (e.g. ㅇ + ㅏ +
+            // ㄴ before becoming 안). The IME pipeline above fires the
+            // final composed text through `InputMethod::Commit`, so
+            // forwarding raw jamo here would double-input and break
+            // composition entirely.
             Message::Event(Event::Keyboard(keyboard::Event::KeyPressed {
                 key: Key::Character(ref s),
                 modifiers,
                 ..
-            })) if modifiers.is_empty() || modifiers == Modifiers::SHIFT => {
+            })) if (modifiers.is_empty() || modifiers == Modifiers::SHIFT)
+                && s.chars().all(|c| c.is_ascii() && !c.is_control()) =>
+            {
                 self.write_active(s.as_bytes().to_vec());
                 Task::none()
             }
