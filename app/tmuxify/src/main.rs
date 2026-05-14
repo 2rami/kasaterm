@@ -521,9 +521,14 @@ impl App {
                 .into(),
         };
 
-        let root = row![self.sidebar(), body]
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let root = column![
+            row![self.sidebar(), body]
+                .width(Length::Fill)
+                .height(Length::Fill),
+            self.status_bar(),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         container(root)
             .width(Length::Fill)
@@ -536,11 +541,61 @@ impl App {
             .into()
     }
 
+    // Bottom strip — identity badge + tmux health dot.
+    // Mirrors native worktree's `● native-poc` + ACCENT health dot pattern
+    // so the app reads as one product across both tracks.
+    fn status_bar(&self) -> Element<'_, Message> {
+        let identity = row![
+            container(Space::new().width(8).height(8)).style(|_| container::Style {
+                background: Some(Background::Color(ACCENT)),
+                border: Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            Space::new().width(8),
+            text("iced").size(10).color(TEXT_SEC),
+        ]
+        .align_y(iced::Alignment::Center);
+
+        let health = container(Space::new().width(7).height(7)).style(|_| container::Style {
+            background: Some(Background::Color(ACCENT)),
+            border: Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let bar = row![
+            identity,
+            Space::new().width(Length::Fill),
+            health,
+            Space::new().width(10),
+        ]
+        .align_y(iced::Alignment::Center)
+        .padding(Padding::from([6, 12]));
+
+        container(bar)
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(SIDEBAR_BG)),
+                border: Border {
+                    color: color!(0x1a1d22),
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
     fn sidebar(&self) -> Element<'_, Message> {
         let mut list = column![
             Space::new().height(TRAFFIC_LIGHTS_W * 0.45),
             row![
-                text("sessions").size(11).color(TEXT_MUT),
+                text("S E S S I O N S").size(10).color(TEXT_MUT),
                 Space::new().width(Length::Fill),
                 self.new_session_button(),
             ]
