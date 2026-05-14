@@ -10,7 +10,7 @@ use kasaterm::{PaneRender, Rect, Selection, TerminalPipeline, TerminalPrimitive}
 use tmux_bridge::{ScreenUpdate, StartOptions, TmuxSession, Cell as GridCell};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Ime, KeyEvent, Modifiers, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -377,6 +377,36 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.render() {
                     eprintln!("[kasaterm-cli] render error: {e}");
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Forward wheel as repeated arrow-key escapes. TUIs like
+                // claude / less / vim already consume these; the shell
+                // prompt ignores them (no real scrollback yet — that needs
+                // a separate history ring buffer).
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y as i32,
+                    MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
+                };
+                if lines == 0 {
+                    return;
+                }
+                let (esc, count) = if lines > 0 {
+                    (b"\x1b[A", lines.min(8))
+                } else {
+                    (b"\x1b[B", (-lines).min(8))
+                };
+                let mut payload = Vec::with_capacity(count as usize * 3);
+                for _ in 0..count {
+                    payload.extend_from_slice(esc);
+                }
+                if let Some(tmux) = self.tmux.as_ref() {
+                    let hex: String = payload
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let _ = tmux.send_keys_hex(None, &hex);
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
