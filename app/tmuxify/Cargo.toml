@@ -4,12 +4,28 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+# Round 2 (iced):
+# - iced_term is GONE. The terminal body renders through iced's
+#   `iced::widget::shader::Shader` widget, which exposes a `wgpu::Device`,
+#   `wgpu::Queue`, and a scoped `RenderPass` via the `Primitive` trait.
+# - tmux-bridge drives tmux-CC; the shader widget reads the vt100 grid and
+#   builds instance buffers per cell.
+# - cosmic-text 0.18 handles font shaping + SwashCache glyph rasterisation.
+#   glyphon is unusable here: glyphon 0.11 = wgpu 29, but iced 0.14 = wgpu 27,
+#   so the atlas/pipeline is rolled by hand in `cell_shader.rs`.
 [dependencies]
+tmux-bridge.workspace = true
 anyhow.workspace = true
-# iced 0.14 + iced_term — the chrome stays iced; the terminal cell rendering
-# moves to iced_term's proven alacritty-backed widget. Our own wgpu cell
-# renderer (terminal_view.rs / Phase 2b) is now retired.
 iced = { version = "0.14", features = ["tokio", "advanced", "image", "wgpu"] }
-iced_term = "0.8"
 tokio = { version = "1", features = ["time", "sync", "rt"] }
 rfd = "0.15"
+# `wgpu` must resolve to the same crate iced_wgpu pins (27 today). If iced
+# bumps the pin, move this in lockstep.
+wgpu = "27"
+bytemuck = { version = "1", features = ["derive"] }
+cosmic-text = "0.18"
+unicode-width = "0.1"
+# iced 0.14 re-exports streams from `iced_futures`, which uses the `futures`
+# crate's mpsc. We only touch the Sender type to satisfy iced's
+# `stream::channel` closure inference.
+futures = "0.3"
