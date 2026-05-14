@@ -447,6 +447,16 @@ impl TerminalPipeline {
             sampler,
             font_system: {
                 let mut fs = FontSystem::new();
+                // D2Coding (NAVER, OFL) — base monospace face that
+                // matches the user's preferred terminal font. Bundled
+                // so Windows / Linux builds don't need the user to
+                // install it. The Nerd Font variant comes after as a
+                // fallback for icon ranges D2Coding doesn't cover.
+                fs.db_mut().load_font_source(cosmic_text::fontdb::Source::Binary(
+                    std::sync::Arc::new(include_bytes!(
+                        "../assets/D2Coding.ttc"
+                    )),
+                ));
                 fs.db_mut().load_font_source(cosmic_text::fontdb::Source::Binary(
                     std::sync::Arc::new(include_bytes!(
                         "../assets/D2CodingLigatureNerdFontMono-Regular.ttf"
@@ -862,7 +872,7 @@ fn shape_one_glyph(
     // present, cosmic falls back through Family::Monospace which is what
     // the previous Family::Monospace request did anyway.
     let mut attrs = Attrs::new()
-        .family(Family::Name("D2CodingLigature Nerd Font Mono"))
+        .family(Family::Name("D2Coding"))
         .stretch(cosmic_text::Stretch::Normal);
     let _ = Family::Monospace;
     if bold {
