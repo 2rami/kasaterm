@@ -47,6 +47,12 @@ use tmux_bridge::{Cell as GridCell, Color as GridColor};
 pub const FONT_SIZE: f32 = 14.0;
 pub const LINE_HEIGHT: f32 = 18.0;
 const ATLAS_DIM: u32 = 1024;
+
+/// Pane border colour for inactive panes — slightly brighter than the
+/// terminal bg so the seam reads as chrome rather than glitch.
+const PANE_BORDER_DIM: [f32; 4] = [0.235, 0.255, 0.290, 1.0];
+/// Active pane gets the app accent (matches `main::ACCENT`).
+const PANE_BORDER_ACTIVE: [f32; 4] = [0x5a as f32 / 255.0, 0x82 as f32 / 255.0, 0xf3 as f32 / 255.0, 1.0];
 /// Some safety margin between glyphs in the atlas so bilinear bleed never
 /// pulls in a neighbour. Cosmic returns tight bitmaps already, but a row of
 /// transparent pixels is cheap.
@@ -76,22 +82,49 @@ unsafe impl Sync for Instance {}
 
 // === Primitive (per-frame snapshot) ====================================
 
-/// The data shape iced hands to its renderer once per frame. Owns enough
-/// to rebuild instance buffers; the heavy state (atlas texture, swash
-/// cache, etc.) lives in `TerminalPipeline`.
+/// One pane's data inside a `TerminalPrimitive`. `rect` is widget-local
+/// pixel space (origin = widget top-left). `is_active` raises an accent
+/// 1px border so the user can see which pane has keyboard focus.
 #[derive(Debug, Clone)]
-pub struct TerminalPrimitive {
+pub struct PaneRender {
+    pub rect: [f32; 4],
     pub cells: Arc<Vec<Vec<GridCell>>>,
     pub cols: u16,
     pub rows: u16,
     pub cursor_row: u16,
     pub cursor_col: u16,
     pub cursor_visible: bool,
+    pub is_active: bool,
+}
+
+/// Pane snapshot passed from app state into the shader program; used to
+/// build `PaneRender`s after the layout walk picks rects.
+#[derive(Debug, Clone)]
+pub struct PaneSnapshot {
+    pub cells: Arc<Vec<Vec<GridCell>>>,
+    pub cols: u16,
+    pub rows: u16,
+    pub cursor_row: u16,
+    pub cursor_col: u16,
+    pub cursor_visible: bool,
+}
+
+/// The data shape iced hands to its renderer once per frame. Owns enough
+/// to rebuild instance buffers; the heavy state (atlas texture, swash
+/// cache, etc.) lives in `TerminalPipeline`.
+#[derive(Debug, Clone)]
+pub struct TerminalPrimitive {
+    pub panes: Vec<PaneRender>,
     pub bg_color: [f32; 4],
     pub fg_color: [f32; 4],
+    /// Cell dimensions of the single layout-grid unit (one tmux "cell").
+    /// Each pane scales its own cols/rows to match these.
     pub cell_w: f32,
     pub cell_h: f32,
     pub font_size: f32,
+    /// Widget bounds (used as the shader viewport, since the iced render
+    /// pass is already scoped to this rect).
+    pub widget_bounds: [f32; 2],
 }
 
 impl shader::Primitive for TerminalPrimitive {
@@ -417,22 +450,36 @@ impl TerminalPipeline {
         bounds: &Rectangle,
         prim: &TerminalPrimitive,
     ) {
-        // Memoise — if nothing observable changed since the last frame,
-        // the instance buffer is still valid and we can reuse it. iced
-        // re-issues a fresh Primitive every frame even when nothing
-        // dirty, so this is the cheapest place to gate work.
-        let cells_ptr = Arc::as_ptr(&prim.cells) as usize;
-        let cursor = (prim.cursor_row, prim.cursor_col, prim.cursor_visible);
+        // Memoise — sum every pane's Arc identity into a single hash so a
+        // single-pane resize, a cursor blink, or any pane's cells getting
+        // a fresh Arc all invalidate the buffer. Frame-rate idle still
+        // skips the rebuild entirely.
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for p in &prim.panes {
+            for w in [
+                Arc::as_ptr(&p.cells) as u64,
+                ((p.cursor_row as u64) << 32) | (p.cursor_col as u64),
+                p.cursor_visible as u64,
+                p.is_active as u64,
+                // Mix the rect so a layout-only change (no cell delta)
+                // still invalidates.
+                p.rect[0].to_bits() as u64
+                    ^ (p.rect[1].to_bits() as u64).rotate_left(16)
+                    ^ (p.rect[2].to_bits() as u64).rotate_left(32)
+                    ^ (p.rect[3].to_bits() as u64).rotate_left(48),
+            ] {
+                hash ^= w;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
         let new_bounds = [bounds.width, bounds.height];
-        if cells_ptr == self.last_cells_ptr
-            && cursor == self.last_cursor
+        if hash == self.last_cells_ptr as u64
             && new_bounds == self.last_bounds
             && self.instance_count > 0
         {
             return;
         }
-        self.last_cells_ptr = cells_ptr;
-        self.last_cursor = cursor;
+        self.last_cells_ptr = hash as usize;
         self.last_bounds = new_bounds;
 
         // Uniform: viewport size (= widget bounds).
@@ -442,14 +489,11 @@ impl TerminalPipeline {
         };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
-        // Build instances.
-        let mut instances: Vec<Instance> = Vec::with_capacity(
-            (prim.rows as usize) * (prim.cols as usize) * 2,
-        );
+        let mut instances: Vec<Instance> = Vec::new();
 
-        // 1. Full background fill so any pixel the grid doesn't cover gets
-        //    the terminal bg colour (the iced pass viewport is scoped to
-        //    our bounds, so this is a single quad).
+        // 1. Full-widget background fill. Each pane paints its own bg
+        //    on top, so this is just so any gutter pixel (between panes
+        //    or off the layout grid) stays the terminal bg colour.
         instances.push(Instance {
             rect: [0.0, 0.0, bounds.width, bounds.height],
             color: prim.bg_color,
@@ -458,118 +502,32 @@ impl TerminalPipeline {
             _pad: [0; 3],
         });
 
-        let cell_w = prim.cell_w;
-        let cell_h = prim.cell_h;
-
-        // 2. Walk every cell. Bg quads first, then box-rects or glyph.
-        for (row_idx, row) in prim.cells.iter().enumerate() {
-            for (col_idx, cell) in row.iter().enumerate() {
-                let x = col_idx as f32 * cell_w;
-                let y = row_idx as f32 * cell_h;
-
-                // Resolve fg/bg from cell attrs, honouring `inverse`.
-                let mut fg = palette(&cell.fg, prim.fg_color);
-                let mut bg = palette(&cell.bg, prim.bg_color);
-                if cell.inverse {
-                    std::mem::swap(&mut fg, &mut bg);
-                }
-
-                // Cursor: paint cursor cell as inverted block underneath.
-                let is_cursor = prim.cursor_visible
-                    && row_idx as u16 == prim.cursor_row
-                    && col_idx as u16 == prim.cursor_col;
-                if is_cursor {
-                    std::mem::swap(&mut fg, &mut bg);
-                }
-
-                // Background quad (skip if it would draw the default bg —
-                // already covered by the full-bounds fill).
-                if bg != prim.bg_color {
-                    instances.push(Instance {
-                        rect: [x, y, cell_w, cell_h],
-                        color: bg,
-                        uv: [0.0, 0.0, 0.0, 0.0],
-                        mode: 0,
-                        _pad: [0; 3],
-                    });
-                }
-
-                // Now the glyph. Two paths:
-                //   a. Char is in `block_rects` → draw quads directly.
-                //   b. Otherwise rasterise via cosmic-text + swash.
-                let first_char = cell.ch.chars().next();
-                let rects = first_char
-                    .map(block_rects)
-                    .unwrap_or(&[]);
-                if !rects.is_empty() {
-                    for r in rects {
-                        instances.push(Instance {
-                            rect: [
-                                x + r[0] * cell_w,
-                                y + r[1] * cell_h,
-                                r[2] * cell_w,
-                                r[3] * cell_h,
-                            ],
-                            color: fg,
-                            uv: [0.0, 0.0, 0.0, 0.0],
-                            mode: 0,
-                            _pad: [0; 3],
-                        });
-                    }
-                    continue;
-                }
-
-                if cell.ch == " " || cell.ch.is_empty() {
-                    continue;
-                }
-
-                // Shape this single cell glyph. Cosmic shapes whole lines
-                // normally — for a terminal each cell is one column, so
-                // shaping the single character is the right granularity
-                // (and matches the cell grid exactly).
-                let glyph_data = shape_one_glyph(
-                    &mut self.font_system,
-                    &cell.ch,
-                    prim.font_size,
-                    cell.bold,
-                    cell.italic,
-                );
-
-                for (cache_key, x_off, y_off) in glyph_data {
-                    let entry = ensure_glyph(
-                        &mut self.atlas,
-                        &mut self.font_system,
-                        &mut self.swash,
-                        queue,
-                        cache_key,
-                    );
-                    let Some(entry) = entry else { continue };
-                    // Place the glyph: baseline is at line_height * 0.78
-                    // below the row top (matches the native renderer's
-                    // measurement, roughly the ascent fraction for the
-                    // D2Coding family at this size).
-                    let baseline = y + cell_h * 0.78;
-                    let gx = x + x_off + entry.placement.left as f32;
-                    let gy = baseline - entry.placement.top as f32 + y_off;
-                    let gw = entry.placement.width as f32;
-                    let gh = entry.placement.height as f32;
-                    if gw <= 0.0 || gh <= 0.0 {
-                        continue;
-                    }
-                    instances.push(Instance {
-                        rect: [gx, gy, gw, gh],
-                        color: if entry.is_color { [1.0, 1.0, 1.0, 1.0] } else { fg },
-                        uv: entry.uv,
-                        mode: 1,
-                        _pad: [0; 3],
-                    });
-                }
-            }
+        // 2. Per-pane rendering.
+        for pane in &prim.panes {
+            self.emit_pane(&mut instances, queue, prim, pane);
         }
 
-        // Cursor outline (when cell under cursor is empty — we already
-        // inverted bg above, so just ensure visibility on blanks).
-        // Skipped for now; the bg invert is enough.
+        // 3. Pane borders + active highlight. Drawn after cells so they
+        //    sit on top of any cell content at the seam.
+        if prim.panes.len() > 1 {
+            for pane in &prim.panes {
+                let border = if pane.is_active {
+                    PANE_BORDER_ACTIVE
+                } else {
+                    PANE_BORDER_DIM
+                };
+                let width = if pane.is_active { 1.5 } else { 1.0 };
+                push_pane_border(&mut instances, pane.rect, border, width);
+            }
+        } else if let Some(pane) = prim.panes.first() {
+            // Single pane: draw the active highlight only when there's
+            // a real layout (i.e. user has interacted). Without one,
+            // skip the border to keep the chrome clean.
+            if pane.is_active && self.last_bounds[0] > 0.0 {
+                // intentionally skipped — single pane needs no chrome
+                let _ = PANE_BORDER_ACTIVE;
+            }
+        }
 
         self.instance_count = instances.len() as u32;
         if instances.is_empty() {
@@ -594,6 +552,125 @@ impl TerminalPipeline {
         }
     }
 
+    /// Emit instances for one pane. The pane's `rect` is widget-local
+    /// pixel coordinates; cells are scaled to fit, so an individual
+    /// pane's cell_w/h is `rect.w / pane.cols`. Box-drawing chars and
+    /// glyph quads use those local metrics — pane sizes can be smaller
+    /// than the global cell_w (a vertical split halves the column
+    /// pitch) without distorting glyphs.
+    fn emit_pane(
+        &mut self,
+        instances: &mut Vec<Instance>,
+        queue: &wgpu::Queue,
+        prim: &TerminalPrimitive,
+        pane: &PaneRender,
+    ) {
+        let [px, py, pw, ph] = pane.rect;
+        if pw <= 0.0 || ph <= 0.0 {
+            return;
+        }
+        // Pane bg fill — keeps the gutter bg from bleeding through
+        // when a pane has its own theme colour.
+        instances.push(Instance {
+            rect: [px, py, pw, ph],
+            color: prim.bg_color,
+            uv: [0.0, 0.0, 0.0, 0.0],
+            mode: 0,
+            _pad: [0; 3],
+        });
+
+        let cell_w = if pane.cols > 0 { pw / pane.cols as f32 } else { prim.cell_w };
+        let cell_h = if pane.rows > 0 { ph / pane.rows as f32 } else { prim.cell_h };
+        let font_size = (cell_h * 0.78).max(8.0);
+
+        for (row_idx, row) in pane.cells.iter().enumerate() {
+            for (col_idx, cell) in row.iter().enumerate() {
+                let x = px + col_idx as f32 * cell_w;
+                let y = py + row_idx as f32 * cell_h;
+
+                let mut fg = palette(&cell.fg, prim.fg_color);
+                let mut bg = palette(&cell.bg, prim.bg_color);
+                if cell.inverse {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let is_cursor = pane.cursor_visible
+                    && row_idx as u16 == pane.cursor_row
+                    && col_idx as u16 == pane.cursor_col;
+                if is_cursor {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+
+                if bg != prim.bg_color {
+                    instances.push(Instance {
+                        rect: [x, y, cell_w, cell_h],
+                        color: bg,
+                        uv: [0.0, 0.0, 0.0, 0.0],
+                        mode: 0,
+                        _pad: [0; 3],
+                    });
+                }
+
+                let first_char = cell.ch.chars().next();
+                let rects = first_char.map(block_rects).unwrap_or(&[]);
+                if !rects.is_empty() {
+                    for r in rects {
+                        instances.push(Instance {
+                            rect: [
+                                x + r[0] * cell_w,
+                                y + r[1] * cell_h,
+                                r[2] * cell_w,
+                                r[3] * cell_h,
+                            ],
+                            color: fg,
+                            uv: [0.0, 0.0, 0.0, 0.0],
+                            mode: 0,
+                            _pad: [0; 3],
+                        });
+                    }
+                    continue;
+                }
+
+                if cell.ch == " " || cell.ch.is_empty() {
+                    continue;
+                }
+
+                let glyph_data = shape_one_glyph(
+                    &mut self.font_system,
+                    &cell.ch,
+                    font_size,
+                    cell.bold,
+                    cell.italic,
+                );
+
+                for (cache_key, x_off, y_off) in glyph_data {
+                    let entry = ensure_glyph(
+                        &mut self.atlas,
+                        &mut self.font_system,
+                        &mut self.swash,
+                        queue,
+                        cache_key,
+                    );
+                    let Some(entry) = entry else { continue };
+                    let baseline = y + cell_h * 0.78;
+                    let gx = x + x_off + entry.placement.left as f32;
+                    let gy = baseline - entry.placement.top as f32 + y_off;
+                    let gw = entry.placement.width as f32;
+                    let gh = entry.placement.height as f32;
+                    if gw <= 0.0 || gh <= 0.0 {
+                        continue;
+                    }
+                    instances.push(Instance {
+                        rect: [gx, gy, gw, gh],
+                        color: if entry.is_color { [1.0, 1.0, 1.0, 1.0] } else { fg },
+                        uv: entry.uv,
+                        mode: 1,
+                        _pad: [0; 3],
+                    });
+                }
+            }
+        }
+    }
+
     fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>) {
         if self.instance_count == 0 {
             return;
@@ -604,6 +681,46 @@ impl TerminalPipeline {
         render_pass.set_vertex_buffer(0, self.instance_buf.slice(..));
         render_pass.draw(0..6, 0..self.instance_count);
     }
+}
+
+// === Pane chrome =========================================================
+
+/// Push four 1-instance border strips around `rect`. Used by both the
+/// inactive-pane gutter (dim grey) and the active-pane highlight (accent).
+fn push_pane_border(instances: &mut Vec<Instance>, rect: [f32; 4], color: [f32; 4], w: f32) {
+    let [x, y, pw, ph] = rect;
+    // top
+    instances.push(Instance {
+        rect: [x, y, pw, w],
+        color,
+        uv: [0.0; 4],
+        mode: 0,
+        _pad: [0; 3],
+    });
+    // bottom
+    instances.push(Instance {
+        rect: [x, y + ph - w, pw, w],
+        color,
+        uv: [0.0; 4],
+        mode: 0,
+        _pad: [0; 3],
+    });
+    // left
+    instances.push(Instance {
+        rect: [x, y, w, ph],
+        color,
+        uv: [0.0; 4],
+        mode: 0,
+        _pad: [0; 3],
+    });
+    // right
+    instances.push(Instance {
+        rect: [x + pw - w, y, w, ph],
+        color,
+        uv: [0.0; 4],
+        mode: 0,
+        _pad: [0; 3],
+    });
 }
 
 // === Glyph rasterisation ================================================

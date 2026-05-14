@@ -10,6 +10,7 @@
 
 mod cell_shader;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -163,19 +164,44 @@ struct Session {
     name: String,
     cwd: PathBuf,
     tmux: Arc<TmuxSession>,
-    /// Currently displayed pane id. Filled in once the first %output
-    /// names a pane; before that we render an empty grid.
+    /// Currently focused pane (used for cursor placement and as the
+    /// keyboard input target). tmux gossips this via
+    /// `%window-pane-changed` — we listen but also default to the
+    /// first pane we ever heard from.
     active_pane: Option<String>,
+    /// One `PaneGrid` per pane id. We keep them all so the shader can
+    /// tile every leaf of the layout tree; previously we only stored
+    /// the single visible pane and threw away the rest.
+    panes: HashMap<String, PaneGrid>,
+    /// Latest parsed pane tree from `%layout-change`. None = single
+    /// pane (no split yet); the layout rect for that case is faked
+    /// from the first pane's grid size.
+    layout: Option<tmux_bridge::Layout>,
+}
+
+#[derive(Clone)]
+struct PaneGrid {
+    /// Cells indexed [row][col]. `Arc` lets the shader memo cheaply
+    /// detect "no changes this frame".
     cells: Arc<Vec<Vec<TbCell>>>,
     cols: u16,
     rows: u16,
     cursor_row: u16,
     cursor_col: u16,
     cursor_visible: bool,
-    /// Latest parsed pane tree from `%layout-change`. None = haven't
-    /// received one yet (single-pane). Currently logged + reflected via
-    /// pane count in `display_name`; full multi-pane rendering pending.
-    layout: Option<tmux_bridge::Layout>,
+}
+
+impl PaneGrid {
+    fn empty(cols: u16, rows: u16) -> Self {
+        Self {
+            cells: Arc::new(blank_grid(cols, rows)),
+            cols,
+            rows,
+            cursor_row: 0,
+            cursor_col: 0,
+            cursor_visible: false,
+        }
+    }
 }
 
 struct App {
@@ -275,21 +301,33 @@ impl App {
                     if s.active_pane.is_none() {
                         s.active_pane = Some(update.pane_id.clone());
                     }
-                    // Only let the currently-focused pane drive the
-                    // visible grid. Backgrounded panes still get their
-                    // vt100 state advanced inside tmux-bridge — we just
-                    // don't paint them.
-                    if s.active_pane.as_deref() == Some(update.pane_id.as_str()) {
-                        ensure_grid_size(&mut s.cells, &mut s.cols, &mut s.rows, update.cols, update.rows);
-                        let cells = Arc::make_mut(&mut s.cells);
-                        for (r, row) in &update.dirty {
-                            if let Some(dst) = cells.get_mut(*r as usize) {
-                                *dst = row.clone();
-                            }
+                    // Update the per-pane grid. Every pane gets its own
+                    // PaneGrid so the shader can tile leaves of the
+                    // layout tree (multi-pane rendering); the active
+                    // pane is only special for cursor placement and
+                    // keyboard input target.
+                    let pane = s
+                        .panes
+                        .entry(update.pane_id.clone())
+                        .or_insert_with(|| PaneGrid::empty(update.cols, update.rows));
+                    if pane.cols != update.cols
+                        || pane.rows != update.rows
+                        || pane.cells.len() != update.rows as usize
+                    {
+                        pane.cols = update.cols;
+                        pane.rows = update.rows;
+                        pane.cells = Arc::new(blank_grid(update.cols, update.rows));
+                    }
+                    let cells = Arc::make_mut(&mut pane.cells);
+                    for (r, row) in &update.dirty {
+                        if let Some(dst) = cells.get_mut(*r as usize) {
+                            *dst = row.clone();
                         }
-                        s.cursor_row = update.cursor_row;
-                        s.cursor_col = update.cursor_col;
-                        s.cursor_visible = update.cursor_visible;
+                    }
+                    pane.cursor_row = update.cursor_row;
+                    pane.cursor_col = update.cursor_col;
+                    pane.cursor_visible = update.cursor_visible;
+                    if s.active_pane.as_deref() == Some(update.pane_id.as_str()) {
                         if let Some(t) = update.title.as_ref() {
                             s.name = t.clone();
                         }
@@ -466,20 +504,13 @@ impl App {
             .and_then(|n| n.to_str())
             .unwrap_or("session")
             .to_string();
-        let cells = Arc::new(blank_grid(DEFAULT_COLS, DEFAULT_ROWS));
-
         self.sessions.push(Session {
             id,
             name,
             cwd: path.clone(),
             tmux,
             active_pane: None,
-            cells,
-            cols: DEFAULT_COLS,
-            rows: DEFAULT_ROWS,
-            cursor_row: 0,
-            cursor_col: 0,
-            cursor_visible: true,
+            panes: HashMap::new(),
             layout: None,
         });
         self.active_idx = Some(self.sessions.len() - 1);
@@ -492,21 +523,6 @@ fn blank_grid(cols: u16, rows: u16) -> Vec<Vec<TbCell>> {
     (0..rows)
         .map(|_| (0..cols).map(|_| TbCell::blank()).collect())
         .collect()
-}
-
-fn ensure_grid_size(
-    cells: &mut Arc<Vec<Vec<TbCell>>>,
-    cur_cols: &mut u16,
-    cur_rows: &mut u16,
-    new_cols: u16,
-    new_rows: u16,
-) {
-    if *cur_cols == new_cols && *cur_rows == new_rows && cells.len() == new_rows as usize {
-        return;
-    }
-    *cur_cols = new_cols;
-    *cur_rows = new_rows;
-    *cells = Arc::new(blank_grid(new_cols, new_rows));
 }
 
 // === View =================================================================
@@ -644,13 +660,28 @@ impl App {
     }
 
     fn terminal_view<'a>(&'a self, s: &'a Session) -> Element<'a, Message> {
+        // Snapshot every pane so the shader can tile leaves of the
+        // layout tree. We Arc::clone the cell vectors so the snapshot
+        // is cheap; the shader's memoisation already keys on pointer
+        // identity for skip-when-idle.
+        let mut panes: HashMap<String, cell_shader::PaneSnapshot> = HashMap::new();
+        for (pid, pg) in &s.panes {
+            panes.insert(
+                pid.clone(),
+                cell_shader::PaneSnapshot {
+                    cells: pg.cells.clone(),
+                    cols: pg.cols,
+                    rows: pg.rows,
+                    cursor_row: pg.cursor_row,
+                    cursor_col: pg.cursor_col,
+                    cursor_visible: pg.cursor_visible,
+                },
+            );
+        }
         let program = TerminalProgram {
-            cells: s.cells.clone(),
-            cols: s.cols,
-            rows: s.rows,
-            cursor_row: s.cursor_row,
-            cursor_col: s.cursor_col,
-            cursor_visible: s.cursor_visible,
+            panes,
+            layout: s.layout.clone(),
+            active_pane: s.active_pane.clone(),
         };
         let shader_widget: Element<'a, Message> = Shader::new(program)
             .width(Length::Fill)
@@ -849,12 +880,9 @@ fn bus_subscription() -> Subscription<Message> {
 // === Shader program ======================================================
 
 struct TerminalProgram {
-    cells: Arc<Vec<Vec<TbCell>>>,
-    cols: u16,
-    rows: u16,
-    cursor_row: u16,
-    cursor_col: u16,
-    cursor_visible: bool,
+    panes: HashMap<String, cell_shader::PaneSnapshot>,
+    layout: Option<tmux_bridge::Layout>,
+    active_pane: Option<String>,
 }
 
 impl<Message> shader::Program<Message> for TerminalProgram {
@@ -867,33 +895,97 @@ impl<Message> shader::Program<Message> for TerminalProgram {
         _cursor: mouse::Cursor,
         bounds: Rectangle,
     ) -> Self::Primitive {
-        // Pick a font size that fills the widget at the current grid
-        // size. Cell width = bounds.w / cols; cell height = bounds.h /
-        // rows. Font size tracks cell height directly.
-        let cell_w = if self.cols > 0 {
-            bounds.width / self.cols as f32
-        } else {
-            cell_shader::FONT_SIZE * 0.6
+        // Walk the layout tree (when we have one) and turn every leaf
+        // pane into a PaneRender keyed off `pane_id`. If there's no
+        // layout yet, fake one from the panes map so the first pane
+        // still renders at full size.
+        let mut renders: Vec<cell_shader::PaneRender> = Vec::new();
+
+        // Compute the total grid in cells so we can map each pane's
+        // (x, y, w, h) into pixel space.
+        let (total_cols, total_rows) = match &self.layout {
+            Some(layout) => {
+                let (_, _, w, h) = layout.rect();
+                (w.max(1) as f32, h.max(1) as f32)
+            }
+            None => {
+                // Without a layout, the single visible pane occupies the
+                // whole widget. Grab its grid size for cell metrics.
+                let first = self.panes.values().next();
+                let cols = first.map(|p| p.cols).unwrap_or(80) as f32;
+                let rows = first.map(|p| p.rows).unwrap_or(24) as f32;
+                (cols, rows)
+            }
         };
-        let cell_h = if self.rows > 0 {
-            bounds.height / self.rows as f32
-        } else {
-            cell_shader::LINE_HEIGHT
-        };
+        let cell_w = (bounds.width / total_cols).max(1.0);
+        let cell_h = (bounds.height / total_rows).max(1.0);
         let font_size = (cell_h * 0.78).max(8.0);
 
+        let mut push_pane =
+            |renders: &mut Vec<cell_shader::PaneRender>, pid: &str, rx, ry, rw, rh| {
+                let Some(snap) = self.panes.get(pid) else {
+                    return;
+                };
+                let is_active = self.active_pane.as_deref() == Some(pid);
+                renders.push(cell_shader::PaneRender {
+                    rect: [
+                        rx as f32 * cell_w,
+                        ry as f32 * cell_h,
+                        rw as f32 * cell_w,
+                        rh as f32 * cell_h,
+                    ],
+                    cells: snap.cells.clone(),
+                    cols: snap.cols,
+                    rows: snap.rows,
+                    cursor_row: snap.cursor_row,
+                    cursor_col: snap.cursor_col,
+                    cursor_visible: snap.cursor_visible,
+                    is_active,
+                });
+            };
+
+        match &self.layout {
+            Some(layout) => {
+                // The leaves carry their tmux pane index in
+                // `Layout::Pane::id`. tmux's `%output` reports panes as
+                // "%<n>" — we match by stringified id.
+                fn walk(
+                    node: &tmux_bridge::Layout,
+                    out: &mut Vec<(String, u16, u16, u16, u16)>,
+                ) {
+                    use tmux_bridge::Layout::*;
+                    match node {
+                        Pane { id, x, y, w, h } => {
+                            out.push((format!("%{id}"), *x, *y, *w, *h))
+                        }
+                        HSplit { children, .. } | VSplit { children, .. } => {
+                            for c in children {
+                                walk(c, out);
+                            }
+                        }
+                    }
+                }
+                let mut leaves: Vec<(String, u16, u16, u16, u16)> = Vec::new();
+                walk(layout, &mut leaves);
+                for (pid, x, y, w, h) in leaves {
+                    push_pane(&mut renders, &pid, x, y, w, h);
+                }
+            }
+            None => {
+                if let Some((pid, snap)) = self.panes.iter().next() {
+                    push_pane(&mut renders, pid, 0u16, 0u16, snap.cols, snap.rows);
+                }
+            }
+        }
+
         cell_shader::TerminalPrimitive {
-            cells: self.cells.clone(),
-            cols: self.cols,
-            rows: self.rows,
-            cursor_row: self.cursor_row,
-            cursor_col: self.cursor_col,
-            cursor_visible: self.cursor_visible,
+            panes: renders,
             bg_color: TERM_BG,
             fg_color: TERM_FG,
             cell_w,
             cell_h,
             font_size,
+            widget_bounds: [bounds.width, bounds.height],
         }
     }
 }
