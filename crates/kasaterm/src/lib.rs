@@ -153,6 +153,22 @@ pub struct TerminalPrimitive {
     /// cell with an accent underline so the user sees what's being
     /// composed (e.g. "ㅇ → 아 → 안" for Korean Hangul).
     pub preedit: String,
+    /// Mouse-drag selection. Coordinates are *cell* indices in the
+    /// global layout grid (matches `PaneRender::rect` units). `None` =
+    /// no selection. Highlight renders as a translucent accent quad
+    /// behind every cell inside `[anchor..end]` (inclusive).
+    pub selection: Option<Selection>,
+}
+
+/// Inclusive cell-range selection. `anchor` is where the user pressed,
+/// `end` is the current cursor cell. Either may come before the other;
+/// rendering normalises before drawing.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    /// (col, row) of the drag origin in cell units.
+    pub anchor: (u16, u16),
+    /// (col, row) of the drag head in cell units.
+    pub end: (u16, u16),
 }
 
 // iced glue lives in the host crate (see tmuxify::cell_shader). kasaterm
@@ -519,6 +535,13 @@ impl TerminalPipeline {
             hash ^= *b as u64;
             hash = hash.wrapping_mul(0x100000001b3);
         }
+        // Mix selection so mouse-drag repaints the highlight.
+        if let Some(sel) = prim.selection {
+            for v in [sel.anchor.0 as u64, sel.anchor.1 as u64, sel.end.0 as u64, sel.end.1 as u64] {
+                hash ^= v;
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
         let new_bounds = [bounds.width, bounds.height, scale];
         if hash == self.last_cells_ptr as u64
             && new_bounds == self.last_bounds
@@ -631,6 +654,38 @@ impl TerminalPipeline {
         let cell_w = if pane.cols > 0 { pw / pane.cols as f32 } else { prim.cell_w };
         let cell_h = if pane.rows > 0 { ph / pane.rows as f32 } else { prim.cell_h };
         let font_size = (cell_h * 0.78).max(8.0);
+
+        // Selection highlight — emit translucent accent quads behind
+        // the cells inside the normalised range. We paint these before
+        // glyphs so the text colour stays untouched (still fg). Empty
+        // selection skips the whole pass.
+        if let Some(sel) = prim.selection {
+            let (start, end) = normalise_selection(sel);
+            for r in start.1..=end.1 {
+                let (cs, ce) = if start.1 == end.1 {
+                    (start.0, end.0)
+                } else if r == start.1 {
+                    (start.0, pane.cols.saturating_sub(1))
+                } else if r == end.1 {
+                    (0, end.0)
+                } else {
+                    (0, pane.cols.saturating_sub(1))
+                };
+                if cs > ce {
+                    continue;
+                }
+                let x = px + cs as f32 * cell_w;
+                let y = py + r as f32 * cell_h;
+                let w = (ce - cs + 1) as f32 * cell_w;
+                instances.push(Instance {
+                    rect: [x, y, w, cell_h],
+                    color: [0.35, 0.51, 0.95, 0.35], // ACCENT @ 35% alpha
+                    uv: [0.0, 0.0, 0.0, 0.0],
+                    mode: 0,
+                    _pad: [0; 3],
+                });
+            }
+        }
 
         for (row_idx, row) in pane.cells.iter().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
@@ -1124,6 +1179,63 @@ fn block_rects(ch: char) -> &'static [[f32; 4]] {
         '\u{2503}' => &[[0.42, 0.0, 0.16, 1.0]],
         _ => &[],
     }
+}
+
+// === Selection helpers ==================================================
+
+/// Normalise a selection so `(start, end)` reads in scan order. Used by
+/// the highlight emitter and the public text-extract API.
+fn normalise_selection(sel: Selection) -> ((u16, u16), (u16, u16)) {
+    let a = sel.anchor;
+    let b = sel.end;
+    if (a.1, a.0) <= (b.1, b.0) {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Extract the selected text from a slice of panes. Callers hand this to
+/// the system clipboard on Cmd+C. Rows are joined with `\n`; cells inside
+/// the range are concatenated with no separator (matches what apps see
+/// over a tmux copy buffer).
+pub fn extract_selection(panes: &[PaneRender], sel: &Selection) -> String {
+    let (start, end) = normalise_selection(*sel);
+    let mut out = String::new();
+    for pane in panes {
+        for (r, row) in pane.cells.iter().enumerate() {
+            let r = r as u16;
+            if r < start.1 || r > end.1 {
+                continue;
+            }
+            let (cs, ce) = if start.1 == end.1 {
+                (start.0 as usize, end.0 as usize)
+            } else if r == start.1 {
+                (start.0 as usize, row.len().saturating_sub(1))
+            } else if r == end.1 {
+                (0, end.0 as usize)
+            } else {
+                (0, row.len().saturating_sub(1))
+            };
+            for cell in row.iter().take(ce + 1).skip(cs) {
+                if cell.ch.is_empty() {
+                    out.push(' ');
+                } else {
+                    out.push_str(&cell.ch);
+                }
+            }
+            // Trim trailing spaces on a row so "<text>          " comes out clean.
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            out.push('\n');
+        }
+    }
+    // Drop the final newline so single-line drags don't end with \n.
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 // === WGSL ===============================================================
