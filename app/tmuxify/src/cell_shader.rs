@@ -400,7 +400,15 @@ impl shader::Pipeline for TerminalPipeline {
             atlas,
             atlas_bind_layout,
             sampler,
-            font_system: FontSystem::new(),
+            font_system: {
+                let mut fs = FontSystem::new();
+                fs.db_mut().load_font_source(cosmic_text::fontdb::Source::Binary(
+                    std::sync::Arc::new(include_bytes!(
+                        "../assets/D2CodingLigatureNerdFontMono-Regular.ttf"
+                    )),
+                ));
+                fs
+            },
             swash: SwashCache::new(),
             last_cells_ptr: 0,
             last_cursor: (u16::MAX, u16::MAX, false),
