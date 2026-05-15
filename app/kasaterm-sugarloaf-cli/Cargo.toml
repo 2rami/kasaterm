@@ -1,0 +1,14 @@
+[package]
+name = "kasaterm-sugarloaf-cli"
+description = "PoC sibling of kasaterm-cli that renders the same tmux-bridge output through Rio's sugarloaf engine for visual A/B comparison."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+tmux-bridge.workspace = true
+sugarloaf = { version = "0.4", features = ["wgpu"] }
+winit = "0.30"
+raw-window-handle = "0.6"
+anyhow.workspace = true
+pollster = "0.4"
