@@ -575,6 +575,7 @@ impl TerminalPipeline {
         }
         self.last_cells_ptr = hash as usize;
         self.last_bounds = new_bounds;
+        let _t0 = std::time::Instant::now();
 
         // Uniform: viewport size (= widget bounds).
         let uniforms = Uniforms {
@@ -650,6 +651,15 @@ impl TerminalPipeline {
             });
         }
         queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&instances));
+        if std::env::var_os("KASATERM_PERF").is_some() {
+            let elapsed_us = _t0.elapsed().as_micros();
+            eprintln!(
+                "[kasaterm perf] prepare {}us  instances={} panes={}",
+                elapsed_us,
+                instances.len(),
+                prim.panes.len()
+            );
+        }
     }
 
     /// Emit instances for one pane. The pane's `rect` is widget-local
