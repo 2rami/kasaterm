@@ -631,20 +631,25 @@ impl TerminalPipeline {
 
         let needed = instances.len() as u64;
         if needed > self.instance_capacity {
-            // Double until it fits — amortised constant growth.
+            // Grow buffer. Bug fix 2026-05-15: `create_buffer_init` with
+            // `contents: cast_slice(&instances)` sized the GPU buffer to
+            // the *current* instance count, not the new capacity. The
+            // next frame's write_buffer then over-ran the buffer when a
+            // larger draw came in. Allocate at full capacity bytes and
+            // upload via write_buffer.
             let mut cap = self.instance_capacity.max(1);
             while cap < needed {
                 cap *= 2;
             }
             self.instance_capacity = cap;
-            self.instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            self.instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("tmuxify instance buffer (grown)"),
-                contents: bytemuck::cast_slice(&instances),
+                size: cap * std::mem::size_of::<Instance>() as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
-        } else {
-            queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&instances));
         }
+        queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&instances));
     }
 
     /// Emit instances for one pane. The pane's `rect` is widget-local
