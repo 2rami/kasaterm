@@ -78,6 +78,13 @@ struct App {
     /// from live we're showing. Bounded by history.len() at render time.
     /// Resets to 0 on any keystroke (typing always snaps to live).
     scroll_offset: usize,
+    /// Vertical wheel accumulator in *cells*. macOS trackpads fire many
+    /// small PixelDelta events per gesture (sub-line granularity); we
+    /// accumulate the cell-fraction so a slow flick emits one line at a
+    /// time instead of nothing (when each event rounds to 0) or a page
+    /// per event (when we eagerly forward LineDelta). Drained one
+    /// integer line at a time per emit cycle.
+    wheel_accum_y: f32,
     /// Diagnostic timer — boot baseline so each interesting event can
     /// print "+Xms" to console. Lets us reason about which side
     /// (winit focus / IME init / shell .zshrc) is swallowing the first
@@ -114,6 +121,7 @@ impl App {
             saw_screen_flag: None,
             in_preedit: false,
             scroll_offset: 0,
+            wheel_accum_y: 0.0,
         }
     }
 
@@ -531,6 +539,14 @@ impl ApplicationHandler for App {
                     "[trace] +{}ms Focused({f}) — winit just delivered focus",
                     self.boot.elapsed().as_millis()
                 );
+                // Request an immediate redraw on focus regain. Without
+                // this, macOS sometimes leaves the surface stale for a
+                // beat after switching back, which user reads as "느려".
+                if *f {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
             }
             WindowEvent::Ime(ime) => {
                 let detail = match ime {
@@ -576,13 +592,32 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y as i32,
-                    MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
+                // Convert wheel delta into a cell-fraction and accumulate.
+                // Drain one integer line at a time so a slow trackpad
+                // flick scrolls one row per tick instead of either
+                // nothing (rounded) or a page (forwarded raw).
+                let cell_h = {
+                    let s = self.screen.lock().unwrap();
+                    if s.rows == 0 { 18.0 } else {
+                        let window = match self.window.as_ref() {
+                            Some(w) => w,
+                            None => return,
+                        };
+                        let size = window.inner_size();
+                        let scale = window.scale_factor() as f32;
+                        (size.height as f32 / scale) / s.rows as f32
+                    }
                 };
+                let dy_cells = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y as f32,
+                    MouseScrollDelta::PixelDelta(p) => (p.y as f32) / cell_h.max(1.0),
+                };
+                self.wheel_accum_y += dy_cells;
+                let lines = self.wheel_accum_y.trunc() as i32;
                 if lines == 0 {
                     return;
                 }
+                self.wheel_accum_y -= lines as f32;
                 // alt-screen apps (claude TUI, vim, less, lazygit, htop)
                 // own their scroll. Forward wheel as up/down arrow keys
                 // so the inner app sees the intent. On the shell prompt
@@ -597,13 +632,16 @@ impl ApplicationHandler for App {
                 );
                 if alt {
                     // alt-screen apps (claude TUI / vim / less / lazygit
-                    // / htop) all expect PageUp / PageDown for vertical
-                    // scroll — not arrow keys. Send VT220 \\x1b[5~ /
-                    // \\x1b[6~. Single escape per wheel event so a flick
-                    // gestures over a few rows instead of jumping a full
-                    // page; PixelDelta accumulation gives smoother feel.
+                    // / htop) bind scroll to PgUp/PgDn. Emit one escape
+                    // per accumulated cell — accumulator already collapses
+                    // sub-line trackpad events so a flick produces a
+                    // small integer count, not a 30-page jump.
                     let esc: &[u8] = if lines > 0 { b"\x1b[5~" } else { b"\x1b[6~" };
-                    let payload: Vec<u8> = esc.to_vec();
+                    let count = lines.unsigned_abs().min(8) as usize;
+                    let mut payload = Vec::with_capacity(count * 4);
+                    for _ in 0..count {
+                        payload.extend_from_slice(esc);
+                    }
                     if let Some(tmux) = self.tmux.as_ref() {
                         let hex: String = payload
                             .iter()
