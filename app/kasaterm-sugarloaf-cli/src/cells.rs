@@ -270,3 +270,98 @@ pub fn render_screen(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell_with(fg: Color, bg: Color, inverse: bool) -> Cell {
+        Cell {
+            ch: "a".into(),
+            fg,
+            bg,
+            bold: false,
+            italic: false,
+            underline: false,
+            inverse,
+        }
+    }
+
+    #[test]
+    fn ansi_base_palette_matches_iterm2_default_dark() {
+        let p = ansi_palette();
+        assert_eq!(p[0], [0x1c, 0x1c, 0x1c], "black");
+        assert_eq!(p[1], [0xc9, 0x1b, 0x00], "red");
+        assert_eq!(p[7], [0xc7, 0xc7, 0xc7], "white");
+        assert_eq!(p[15], [0xfe, 0xfe, 0xfe], "bright white");
+    }
+
+    #[test]
+    fn ansi_color_cube_indices_are_well_formed() {
+        let p = ansi_palette();
+        // 6×6×6 cube starts at 16. Index 16 = darkest (all 0), 231 = brightest.
+        assert_eq!(p[16], [0, 0, 0]);
+        assert_eq!(p[231], [255, 255, 255]);
+        // A mid-cube color: r=2, g=3, b=4 → 16 + 2*36 + 3*6 + 4 = 110
+        // step values: [0, 95, 135, 175, 215, 255]
+        assert_eq!(p[110], [135, 175, 215]);
+    }
+
+    #[test]
+    fn ansi_grayscale_ramp_is_monotonic() {
+        let p = ansi_palette();
+        // 232..255 = 24-step ramp, value = 8 + i*10
+        assert_eq!(p[232], [8, 8, 8]);
+        assert_eq!(p[233], [18, 18, 18]);
+        for i in 232..255 {
+            assert!(p[i][0] < p[i + 1][0], "ramp should increase at i={i}");
+        }
+    }
+
+    #[test]
+    fn color_default_resolves_to_caller_default() {
+        assert_eq!(color_to_rgba(&Color::Default, DEFAULT_FG), DEFAULT_FG);
+        assert_eq!(color_to_rgba(&Color::Default, DEFAULT_BG), DEFAULT_BG);
+    }
+
+    #[test]
+    fn color_rgb_passes_through_unchanged() {
+        assert_eq!(
+            color_to_rgba(&Color::Rgb(0xff, 0x5c, 0x57), DEFAULT_FG),
+            [0xff, 0x5c, 0x57, 0xff],
+        );
+    }
+
+    #[test]
+    fn color_idx_picks_palette_entry() {
+        // ANSI 9 = bright red in iTerm2 Default Dark
+        assert_eq!(
+            color_to_rgba(&Color::Idx(9), DEFAULT_FG),
+            [0xff, 0x6d, 0x67, 0xff],
+        );
+    }
+
+    #[test]
+    fn inverse_swaps_fg_and_bg() {
+        let c = cell_with(Color::Rgb(0xff, 0, 0), Color::Rgb(0, 0xff, 0), true);
+        assert_eq!(cell_fg(&c), [0, 0xff, 0, 0xff], "fg = original bg under inverse");
+        assert_eq!(cell_bg(&c), [0xff, 0, 0, 0xff], "bg = original fg under inverse");
+    }
+
+    #[test]
+    fn non_inverse_keeps_fg_and_bg() {
+        let c = cell_with(Color::Rgb(0xff, 0, 0), Color::Rgb(0, 0xff, 0), false);
+        assert_eq!(cell_fg(&c), [0xff, 0, 0, 0xff]);
+        assert_eq!(cell_bg(&c), [0, 0xff, 0, 0xff]);
+    }
+
+    #[test]
+    fn inverse_default_pair_swaps_to_terminal_defaults() {
+        // Both fg and bg are Default — under inverse, fg should pull
+        // the cell's bg lookup (which resolves to terminal default BG),
+        // and vice versa. That's the standard SGR 7 behavior.
+        let c = cell_with(Color::Default, Color::Default, true);
+        assert_eq!(cell_fg(&c), DEFAULT_BG);
+        assert_eq!(cell_bg(&c), DEFAULT_FG);
+    }
+}
