@@ -687,17 +687,15 @@ impl ApplicationHandler for App {
                     "[trace] wheel lines={lines} alt={alt} mouse={mouse_on} sgr={mouse_sgr} hist={hist_len} offset={}",
                     self.scroll_offset
                 );
-                // Coalesce: drop wheel events arriving < 30ms after the
-                // last one. claude/vim chunk their redraws — bursting
-                // scroll faster than they can repaint shows partial
-                // frames as flicker.
+                // Lighter throttle (8ms) — still coalesces a burst but
+                // doesn't add direction-change lag the user reads as
+                // "올리고 내릴때 업데이트가 바로 안 됨". Empirically
+                // claude repaints fast enough that 120Hz emit rate
+                // doesn't smear frames.
                 let now = Instant::now();
                 if now.duration_since(self.last_wheel_emit)
-                    < std::time::Duration::from_millis(30)
+                    < std::time::Duration::from_millis(8)
                 {
-                    // Keep the accumulator credit so we don't lose the
-                    // delta; just defer the emit to the next event past
-                    // the throttle window.
                     self.wheel_accum_y += lines as f32;
                     return;
                 }
