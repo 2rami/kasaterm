@@ -12,3 +12,4 @@ winit = "0.30"
 raw-window-handle = "0.6"
 anyhow.workspace = true
 pollster = "0.4"
+arboard = "3"
