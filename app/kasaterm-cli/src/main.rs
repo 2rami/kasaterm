@@ -3,7 +3,8 @@
 //! tmux-bridge feeds cells. This binary exists to prove that kasaterm is
 //! genuinely framework-agnostic (no iced anywhere in the dep tree).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -29,7 +30,18 @@ struct Screen {
     cursor_row: u16,
     cursor_col: u16,
     cursor_visible: bool,
+    /// True when the inner app entered alt-screen mode (claude / vim /
+    /// less / lazygit / htop). The wheel forwards arrow keys in that
+    /// state instead of scrolling our own history.
+    alt_screen: bool,
+    /// Cell-row ring buffer of lines that fell off the top of the visible
+    /// region. Newest line at the back. Capped at SCROLLBACK_MAX so a
+    /// long-running session can't OOM. Wheel-up scroll renders these
+    /// instead of (or above) the live cells.
+    history: VecDeque<Vec<GridCell>>,
 }
+
+const SCROLLBACK_MAX: usize = 5000;
 
 struct Gpu {
     instance: wgpu::Instance,
@@ -62,6 +74,10 @@ struct App {
     /// Current modifier state — winit 0.30 doesn't include modifiers in
     /// individual KeyEvent, so we track ModifiersChanged separately.
     modifiers: ModifiersState,
+    /// Scrollback offset — 0 = live tail, larger = how many rows back
+    /// from live we're showing. Bounded by history.len() at render time.
+    /// Resets to 0 on any keystroke (typing always snaps to live).
+    scroll_offset: usize,
     /// Diagnostic timer — boot baseline so each interesting event can
     /// print "+Xms" to console. Lets us reason about which side
     /// (winit focus / IME init / shell .zshrc) is swallowing the first
@@ -97,6 +113,7 @@ impl App {
             saw_first_key: false,
             saw_screen_flag: None,
             in_preedit: false,
+            scroll_offset: 0,
         }
     }
 
@@ -183,6 +200,9 @@ impl App {
         let saw_screen_thread = saw_screen.clone();
         self.saw_screen_flag = Some(saw_screen);
         std::thread::spawn(move || {
+            // Last-applied snapshot — used to detect rows that scrolled
+            // off the top so we can preserve them in history.
+            let mut prev_cells: Vec<Vec<GridCell>> = Vec::new();
             while let Ok(ScreenUpdate {
                 rows,
                 cols,
@@ -190,6 +210,7 @@ impl App {
                 cursor_row,
                 cursor_col,
                 cursor_visible,
+                alt_screen,
                 ..
             }) = screens.recv()
             {
@@ -201,20 +222,53 @@ impl App {
                     );
                 }
                 let mut s = screen.lock().unwrap();
-                if s.cols != cols || s.rows != rows || s.cells.len() != rows as usize {
+                let resized = s.cols != cols || s.rows != rows || s.cells.len() != rows as usize;
+                if resized {
                     s.cols = cols;
                     s.rows = rows;
                     s.cells = Arc::new(vec![vec![GridCell::blank(); cols as usize]; rows as usize]);
+                    prev_cells.clear();
                 }
-                let cells = Arc::make_mut(&mut s.cells);
-                for (r, row) in dirty {
-                    if let Some(dst) = cells.get_mut(r as usize) {
-                        *dst = row;
+                {
+                    let cells = Arc::make_mut(&mut s.cells);
+                    for (r, row) in dirty {
+                        if let Some(dst) = cells.get_mut(r as usize) {
+                            *dst = row;
+                        }
                     }
                 }
+                // Snapshot the just-applied cells and release the
+                // borrow before touching s.history.
+                let applied: Vec<Vec<GridCell>> = s.cells.as_ref().clone();
+                // Shift detection: if any prefix of prev appears as a
+                // suffix of new shifted up by k rows, that means k rows
+                // fell off the top. Push them into the history ring so
+                // wheel-up can render them. Skipped in alt-screen mode
+                // (claude / vim manage their own scrollback). Skipped
+                // right after a resize because prev is empty.
+                if !alt_screen && !prev_cells.is_empty() && prev_cells.len() == applied.len() {
+                    let n = prev_cells.len();
+                    let mut shifted = 0usize;
+                    for k in 1..n {
+                        if prev_cells[k..] == applied[..n - k] {
+                            shifted = k;
+                            break;
+                        }
+                    }
+                    if shifted > 0 {
+                        for row in &prev_cells[..shifted] {
+                            s.history.push_back(row.clone());
+                        }
+                        while s.history.len() > SCROLLBACK_MAX {
+                            s.history.pop_front();
+                        }
+                    }
+                }
+                prev_cells = applied;
                 s.cursor_row = cursor_row;
                 s.cursor_col = cursor_col;
                 s.cursor_visible = cursor_visible;
+                s.alt_screen = alt_screen;
                 drop(s);
                 if let Some(w) = &window {
                     w.request_redraw();
@@ -285,14 +339,38 @@ impl App {
         let logical_h = size.height as f32 / scale;
 
         let screen = self.screen.lock().unwrap();
+        // Compose the visible rows from (history slice + live cells)
+        // shifted up by `scroll_offset`. offset = 0 means "live tail";
+        // offset = N means "N rows back from the live tail".
+        let total_rows = screen.rows.max(1) as usize;
+        let offset = self.scroll_offset.min(screen.history.len());
+        let cells_arc: Arc<Vec<Vec<GridCell>>> = if offset == 0 {
+            screen.cells.clone()
+        } else {
+            let mut composed: Vec<Vec<GridCell>> = Vec::with_capacity(total_rows);
+            // Pull `offset` rows from the tail of history (newest at back).
+            let hist_start = screen.history.len() - offset;
+            for row in screen.history.iter().skip(hist_start) {
+                composed.push(row.clone());
+                if composed.len() >= total_rows {
+                    break;
+                }
+            }
+            // Fill the rest from the live cells, dropped from the bottom.
+            let need = total_rows.saturating_sub(composed.len());
+            for row in screen.cells.iter().take(need) {
+                composed.push(row.clone());
+            }
+            Arc::new(composed)
+        };
         let pane = PaneRender {
             rect: [0.0, 0.0, logical_w, logical_h],
-            cells: screen.cells.clone(),
+            cells: cells_arc,
             cols: screen.cols.max(1),
             rows: screen.rows.max(1),
-            cursor_row: screen.cursor_row,
-            cursor_col: screen.cursor_col,
-            cursor_visible: screen.cursor_visible,
+            cursor_row: if offset == 0 { screen.cursor_row } else { u16::MAX },
+            cursor_col: if offset == 0 { screen.cursor_col } else { 0 },
+            cursor_visible: offset == 0 && screen.cursor_visible,
             is_active: true,
         };
         let cell_w = logical_w / screen.cols.max(1) as f32;
@@ -438,10 +516,6 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                // Forward wheel as repeated arrow-key escapes. TUIs like
-                // claude / less / vim already consume these; the shell
-                // prompt ignores them (no real scrollback yet — that needs
-                // a separate history ring buffer).
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y as i32,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
@@ -449,22 +523,40 @@ impl ApplicationHandler for App {
                 if lines == 0 {
                     return;
                 }
-                let (esc, count) = if lines > 0 {
-                    (b"\x1b[A", lines.min(8))
+                // alt-screen apps (claude TUI, vim, less, lazygit, htop)
+                // own their scroll. Forward wheel as up/down arrow keys
+                // so the inner app sees the intent. On the shell prompt
+                // (no alt-screen), scroll our own history instead.
+                let alt = self.screen.lock().unwrap().alt_screen;
+                if alt {
+                    let (esc, count) = if lines > 0 {
+                        (b"\x1b[A", lines.min(8))
+                    } else {
+                        (b"\x1b[B", (-lines).min(8))
+                    };
+                    let mut payload = Vec::with_capacity(count as usize * 3);
+                    for _ in 0..count {
+                        payload.extend_from_slice(esc);
+                    }
+                    if let Some(tmux) = self.tmux.as_ref() {
+                        let hex: String = payload
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let _ = tmux.send_keys_hex(None, &hex);
+                    }
                 } else {
-                    (b"\x1b[B", (-lines).min(8))
-                };
-                let mut payload = Vec::with_capacity(count as usize * 3);
-                for _ in 0..count {
-                    payload.extend_from_slice(esc);
-                }
-                if let Some(tmux) = self.tmux.as_ref() {
-                    let hex: String = payload
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let _ = tmux.send_keys_hex(None, &hex);
+                    let step = lines.abs().min(8) as usize;
+                    let hist_len = self.screen.lock().unwrap().history.len();
+                    if lines > 0 {
+                        self.scroll_offset = (self.scroll_offset + step).min(hist_len);
+                    } else {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(step);
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -557,6 +649,16 @@ impl ApplicationHandler for App {
                         "[trace] +{}ms first KeyboardInput (key={logical_key:?} text={text:?}) screen_ready={screen_seen}",
                         self.boot.elapsed().as_millis()
                     );
+                }
+                // Typing always snaps back to the live tail. Without
+                // this the user could be looking at history rows and
+                // their keystrokes would disappear into the live screen
+                // they can't see — confusing.
+                if self.scroll_offset != 0 {
+                    self.scroll_offset = 0;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
                 let logical_key = logical_key.clone();
                 let text = text.clone();
