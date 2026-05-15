@@ -527,14 +527,27 @@ impl ApplicationHandler for App {
                 // own their scroll. Forward wheel as up/down arrow keys
                 // so the inner app sees the intent. On the shell prompt
                 // (no alt-screen), scroll our own history instead.
-                let alt = self.screen.lock().unwrap().alt_screen;
+                let (alt, hist_len) = {
+                    let s = self.screen.lock().unwrap();
+                    (s.alt_screen, s.history.len())
+                };
+                eprintln!(
+                    "[trace] wheel lines={lines} alt={alt} hist={hist_len} offset={}",
+                    self.scroll_offset
+                );
                 if alt {
+                    // alt-screen apps (claude TUI / vim / less / lazygit
+                    // / htop) all expect PageUp / PageDown for vertical
+                    // scroll — not arrow keys. claude even prints a
+                    // hint if it sees up/down arrows on wheel. Send the
+                    // VT220 PgUp/PgDn escapes so every common TUI sees
+                    // wheel as scroll, not cursor nav.
                     let (esc, count) = if lines > 0 {
-                        (b"\x1b[A", lines.min(8))
+                        (b"\x1b[5~", lines.min(4))
                     } else {
-                        (b"\x1b[B", (-lines).min(8))
+                        (b"\x1b[6~", (-lines).min(4))
                     };
-                    let mut payload = Vec::with_capacity(count as usize * 3);
+                    let mut payload = Vec::with_capacity(count as usize * 4);
                     for _ in 0..count {
                         payload.extend_from_slice(esc);
                     }
