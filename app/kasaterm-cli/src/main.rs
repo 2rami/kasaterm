@@ -97,6 +97,12 @@ struct App {
     /// per event (when we eagerly forward LineDelta). Drained one
     /// integer line at a time per emit cycle.
     wheel_accum_y: f32,
+    /// Last wheel emit timestamp — used to coalesce a flurry of wheel
+    /// events into one PTY write per ~30ms. claude / vim repaint in
+    /// chunks and a 60Hz burst of SGR escapes leaves partial frames
+    /// visible (the "flicker on scroll down" the user sees). 30ms keeps
+    /// scroll responsive but lets the TUI finish its draw cycle.
+    last_wheel_emit: Instant,
     /// Diagnostic timer — boot baseline so each interesting event can
     /// print "+Xms" to console. Lets us reason about which side
     /// (winit focus / IME init / shell .zshrc) is swallowing the first
@@ -134,6 +140,7 @@ impl App {
             in_preedit: false,
             scroll_offset: 0,
             wheel_accum_y: 0.0,
+            last_wheel_emit: Instant::now() - std::time::Duration::from_secs(1),
         }
     }
 
@@ -660,6 +667,21 @@ impl ApplicationHandler for App {
                     "[trace] wheel lines={lines} alt={alt} mouse={mouse_on} sgr={mouse_sgr} hist={hist_len} offset={}",
                     self.scroll_offset
                 );
+                // Coalesce: drop wheel events arriving < 30ms after the
+                // last one. claude/vim chunk their redraws — bursting
+                // scroll faster than they can repaint shows partial
+                // frames as flicker.
+                let now = Instant::now();
+                if now.duration_since(self.last_wheel_emit)
+                    < std::time::Duration::from_millis(30)
+                {
+                    // Keep the accumulator credit so we don't lose the
+                    // delta; just defer the emit to the next event past
+                    // the throttle window.
+                    self.wheel_accum_y += lines as f32;
+                    return;
+                }
+                self.last_wheel_emit = now;
                 // Best path: SGR mouse-mode wheel events. Apps that
                 // enabled mouse reporting (claude, vim, lazygit, htop)
                 // treat \\x1b[<64;col;rowM as wheel-up-at-cell, scrolling
