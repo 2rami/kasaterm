@@ -144,12 +144,29 @@ impl App {
         }
     }
 
+    fn step_log(&self, label: &str) {
+        eprintln!("[startup] +{}ms {label}", self.boot.elapsed().as_millis());
+    }
+
     fn ensure_gpu(&mut self, window: Arc<Window>) -> Result<()> {
         if self.gpu.is_some() {
             return Ok(());
         }
         let size = window.inner_size();
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        // Restrict the backend probe to the platform's native API. The
+        // wgpu default scans Metal *and* Vulkan/DX12 on every adapter
+        // request, costing tens of milliseconds on macOS where the
+        // probe always lands on Metal anyway.
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: if cfg!(target_os = "macos") {
+                wgpu::Backends::METAL
+            } else if cfg!(target_os = "windows") {
+                wgpu::Backends::DX12
+            } else {
+                wgpu::Backends::VULKAN
+            },
+            ..Default::default()
+        });
         let surface = instance.create_surface(window.clone())?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
@@ -553,10 +570,12 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
+        self.step_log("resumed begin");
         let attrs = Window::default_attributes()
             .with_title("kasaterm-cli")
             .with_inner_size(LogicalSize::new(900.0, 600.0));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
+        self.step_log("window created");
         // Turn on IME so winit emits Preedit/Commit events for Hangul,
         // kana, pinyin etc. Without this, raw key events for jamo would
         // be sent and never compose into 안 / 한 / 글.
@@ -567,11 +586,13 @@ impl ApplicationHandler for App {
             event_loop.exit();
             return;
         }
+        self.step_log("gpu ready");
         if let Err(e) = self.start_tmux() {
             eprintln!("[kasaterm-cli] tmux start failed: {e}");
             event_loop.exit();
             return;
         }
+        self.step_log("tmux started");
         self.schedule_env_hooks();
     }
 
@@ -639,8 +660,18 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let render_t = self.boot.elapsed().as_millis();
                 if let Err(e) = self.render() {
                     eprintln!("[kasaterm-cli] render error: {e}");
+                }
+                let render_done = self.boot.elapsed().as_millis();
+                if std::env::var_os("KASATERM_PERF").is_some() {
+                    eprintln!(
+                        "[trace] +{}ms RedrawRequested → render done +{}ms (took {}ms)",
+                        render_t,
+                        render_done,
+                        render_done - render_t
+                    );
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
