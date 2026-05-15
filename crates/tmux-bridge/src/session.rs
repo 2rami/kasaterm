@@ -423,6 +423,8 @@ fn spawn_flusher(
                 cursor_col: snap.cursor_col,
                 cursor_visible: snap.cursor_visible,
                 alt_screen: snap.alt_screen,
+                mouse_enabled: snap.mouse_enabled,
+                mouse_sgr: snap.mouse_sgr,
                 title: snap.title,
             };
             if out.send(update).is_err() {
@@ -440,6 +442,8 @@ struct Snapshot {
     cursor_col: u16,
     cursor_visible: bool,
     alt_screen: bool,
+    mouse_enabled: bool,
+    mouse_sgr: bool,
     title: Option<String>,
 }
 
@@ -467,6 +471,14 @@ fn snapshot_screen(_pane_id: &str, parser: &vt100::Parser) -> Snapshot {
             Some(t.to_string())
         }
     };
+    // Mouse mode plumbing: any non-None MouseProtocolMode means the
+    // inner app is interested in mouse events. SGR (1006) encoding is
+    // the modern format claude / vim / lazygit speak; legacy X10 / UTF
+    // encodings are still readable but rare.
+    use vt100::MouseProtocolEncoding;
+    use vt100::MouseProtocolMode;
+    let mouse_enabled = !matches!(s.mouse_protocol_mode(), MouseProtocolMode::None);
+    let mouse_sgr = matches!(s.mouse_protocol_encoding(), MouseProtocolEncoding::Sgr);
     Snapshot {
         rows: h,
         cols: w,
@@ -475,6 +487,8 @@ fn snapshot_screen(_pane_id: &str, parser: &vt100::Parser) -> Snapshot {
         cursor_col: cc,
         cursor_visible: !s.hide_cursor(),
         alt_screen: s.alternate_screen(),
+        mouse_enabled,
+        mouse_sgr,
         title,
     }
 }

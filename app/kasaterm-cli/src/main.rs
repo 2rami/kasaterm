@@ -34,6 +34,12 @@ struct Screen {
     /// less / lazygit / htop). The wheel forwards arrow keys in that
     /// state instead of scrolling our own history.
     alt_screen: bool,
+    /// True when the inner app enabled an xterm mouse-reporting mode.
+    /// Lets the host emit SGR mouse wheel escapes (\\x1b[<64..M /
+    /// \\x1b[<65..M) so claude / vim / lazygit see proper wheel events
+    /// instead of PgUp/PgDn page-jumps.
+    mouse_enabled: bool,
+    mouse_sgr: bool,
     /// Cell-row ring buffer of lines that fell off the top of the visible
     /// region. Newest line at the back. Capped at SCROLLBACK_MAX so a
     /// long-running session can't OOM. Wheel-up scroll renders these
@@ -277,6 +283,8 @@ impl App {
                 cursor_col,
                 cursor_visible,
                 alt_screen,
+                mouse_enabled,
+                mouse_sgr,
                 ..
             }) = screens.recv()
             {
@@ -335,6 +343,8 @@ impl App {
                 s.cursor_col = cursor_col;
                 s.cursor_visible = cursor_visible;
                 s.alt_screen = alt_screen;
+                s.mouse_enabled = mouse_enabled;
+                s.mouse_sgr = mouse_sgr;
                 drop(s);
                 if let Some(w) = &window {
                     w.request_redraw();
@@ -627,14 +637,36 @@ impl ApplicationHandler for App {
                 // own their scroll. Forward wheel as up/down arrow keys
                 // so the inner app sees the intent. On the shell prompt
                 // (no alt-screen), scroll our own history instead.
-                let (alt, hist_len) = {
+                let (alt, hist_len, mouse_on, mouse_sgr) = {
                     let s = self.screen.lock().unwrap();
-                    (s.alt_screen, s.history.len())
+                    (s.alt_screen, s.history.len(), s.mouse_enabled, s.mouse_sgr)
                 };
                 eprintln!(
-                    "[trace] wheel lines={lines} alt={alt} hist={hist_len} offset={}",
+                    "[trace] wheel lines={lines} alt={alt} mouse={mouse_on} sgr={mouse_sgr} hist={hist_len} offset={}",
                     self.scroll_offset
                 );
+                // Best path: SGR mouse-mode wheel events. Apps that
+                // enabled mouse reporting (claude, vim, lazygit, htop)
+                // treat \\x1b[<64;col;rowM as wheel-up-at-cell, scrolling
+                // one line per event — exactly the smooth iTerm2-feel
+                // the user is asking for.
+                if mouse_on && mouse_sgr {
+                    let (col, row) = self
+                        .px_to_cell(self.cursor_px.0, self.cursor_px.1)
+                        .unwrap_or((1, 1));
+                    let button = if lines > 0 { 64 } else { 65 }; // 64=wheel up, 65=wheel down
+                    let esc = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
+                    let hex: String = esc
+                        .as_bytes()
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if let Some(tmux) = self.tmux.as_ref() {
+                        let _ = tmux.send_keys_hex(None, &hex);
+                    }
+                    return;
+                }
                 if alt {
                     // alt-screen apps (claude TUI / vim / less / lazygit
                     // / htop) treat PgUp/PgDn as a *page* scroll. Cap at

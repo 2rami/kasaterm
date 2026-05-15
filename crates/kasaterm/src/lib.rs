@@ -959,11 +959,16 @@ fn shape_cached_in(
         .any(|c| matches!(c as u32,
             // Private Use Area — nerd font icons.
             0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
-            // Geometric shapes / misc symbols / dingbats — letting
-            // cosmic-text's fallback chain pick these meant Apple Color
-            // Emoji took over and rendered them as colour glyphs (claude
-            // statusline ● became an orange dot). Forcing the Nerd Font
-            // mono variant keeps every shape monochrome.
+            // Misc Technical (⏺ U+23FA et al), Box Drawing wraparound,
+            // Block Elements, Geometric Shapes (● U+25CF), Misc Symbols
+            // (★ ☑ ⚙), Dingbats (✓ ✗ ✦). Apple Color Emoji wins the
+            // cosmic-text fallback for these and renders them as full
+            // colour glyphs — claude markers like ⏺ became puffy
+            // emoji-sized dots. Forcing the Nerd Font mono variant
+            // keeps every shape monochrome and on the cell grid.
+            | 0x2300..=0x23FF
+            | 0x2500..=0x257F
+            | 0x2580..=0x259F
             | 0x25A0..=0x25FF
             | 0x2600..=0x26FF
             | 0x2700..=0x27BF));
@@ -1004,11 +1009,16 @@ fn shape_one_glyph(
         .any(|c| matches!(c as u32,
             // Private Use Area — nerd font icons.
             0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
-            // Geometric shapes / misc symbols / dingbats — letting
-            // cosmic-text's fallback chain pick these meant Apple Color
-            // Emoji took over and rendered them as colour glyphs (claude
-            // statusline ● became an orange dot). Forcing the Nerd Font
-            // mono variant keeps every shape monochrome.
+            // Misc Technical (⏺ U+23FA et al), Box Drawing wraparound,
+            // Block Elements, Geometric Shapes (● U+25CF), Misc Symbols
+            // (★ ☑ ⚙), Dingbats (✓ ✗ ✦). Apple Color Emoji wins the
+            // cosmic-text fallback for these and renders them as full
+            // colour glyphs — claude markers like ⏺ became puffy
+            // emoji-sized dots. Forcing the Nerd Font mono variant
+            // keeps every shape monochrome and on the cell grid.
+            | 0x2300..=0x23FF
+            | 0x2500..=0x257F
+            | 0x2580..=0x259F
             | 0x25A0..=0x25FF
             | 0x2600..=0x26FF
             | 0x2700..=0x27BF));

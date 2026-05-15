@@ -46,6 +46,15 @@ pub struct ScreenUpdate {
     pub cursor_col: u16,
     pub cursor_visible: bool,
     pub alt_screen: bool,
+    /// True when the inner app enabled any xterm mouse-reporting mode
+    /// (DECSET 1000/1002/1003/1006). Lets the host translate wheel
+    /// events into proper mouse escapes instead of bouncing them off
+    /// arrow keys or PgUp/PgDn, which page-jumps in claude TUI.
+    pub mouse_enabled: bool,
+    /// True when the app requested SGR encoding (DECSET 1006). Without
+    /// this we'd have to fall back to the legacy X10 encoding which
+    /// claude doesn't parse reliably.
+    pub mouse_sgr: bool,
     /// Window title set by shell OSC 0/2 (vt100 parser exposes it).
     pub title: Option<String>,
 }
