@@ -22,9 +22,15 @@ const TERM_BG: [f32; 4] = [0x1c as f32 / 255.0, 0x20 as f32 / 255.0, 0x26 as f32
 const TERM_FG: [f32; 4] = [0xea as f32 / 255.0, 0xee as f32 / 255.0, 0xf4 as f32 / 255.0, 1.0];
 
 /// Mutable cell snapshot the redraw loop reads from.
+///
+/// `cells` stores each row in its own Arc so a ScreenUpdate that
+/// rewrites one row leaves the others' Arc identity intact — kasaterm's
+/// per-row cache then hits for the unchanged rows. The outer Vec itself
+/// is owned (not Arc'd) because the renderer reads it under a Mutex
+/// lock; only the inner rows are shared across threads via Arc.
 #[derive(Default)]
 struct Screen {
-    cells: Arc<Vec<Vec<GridCell>>>,
+    cells: Vec<Arc<Vec<GridCell>>>,
     cols: u16,
     rows: u16,
     cursor_row: u16,
@@ -300,20 +306,25 @@ impl App {
                 if resized {
                     s.cols = cols;
                     s.rows = rows;
-                    s.cells = Arc::new(vec![vec![GridCell::blank(); cols as usize]; rows as usize]);
+                    s.cells = (0..rows as usize)
+                        .map(|_| Arc::new(vec![GridCell::blank(); cols as usize]))
+                        .collect();
                     prev_cells.clear();
                 }
-                {
-                    let cells = Arc::make_mut(&mut s.cells);
-                    for (r, row) in dirty {
-                        if let Some(dst) = cells.get_mut(r as usize) {
-                            *dst = row;
-                        }
+                for (r, row) in dirty {
+                    if let Some(dst) = s.cells.get_mut(r as usize) {
+                        // Swap in a fresh Arc — kasaterm's row cache
+                        // sees the new pointer identity and invalidates
+                        // just this row. Other rows keep their Arc and
+                        // hit the cache untouched.
+                        *dst = Arc::new(row);
                     }
                 }
-                // Snapshot the just-applied cells and release the
-                // borrow before touching s.history.
-                let applied: Vec<Vec<GridCell>> = s.cells.as_ref().clone();
+                // Snapshot just the row contents (clone the inner Vecs)
+                // so shift detection can compare row equality without
+                // holding any locks.
+                let applied: Vec<Vec<GridCell>> =
+                    s.cells.iter().map(|r| (**r).clone()).collect();
                 // Shift detection: if any prefix of prev appears as a
                 // suffix of new shifted up by k rows, that means k rows
                 // fell off the top. Push them into the history ring so
@@ -420,24 +431,28 @@ impl App {
         // offset = N means "N rows back from the live tail".
         let total_rows = screen.rows.max(1) as usize;
         let offset = self.scroll_offset.min(screen.history.len());
-        let cells_arc: Arc<Vec<Vec<GridCell>>> = if offset == 0 {
+        let cells_arc: Vec<Arc<Vec<GridCell>>> = if offset == 0 {
             screen.cells.clone()
         } else {
-            let mut composed: Vec<Vec<GridCell>> = Vec::with_capacity(total_rows);
+            let mut composed: Vec<Arc<Vec<GridCell>>> = Vec::with_capacity(total_rows);
             // Pull `offset` rows from the tail of history (newest at back).
+            // History rows are stored as plain Vec — wrap in fresh Arcs
+            // so kasaterm sees consistent typing across the slice; cache
+            // hits only fire on identical Arc identity, which is fine
+            // because scrolled views are visited briefly.
             let hist_start = screen.history.len() - offset;
             for row in screen.history.iter().skip(hist_start) {
-                composed.push(row.clone());
+                composed.push(Arc::new(row.clone()));
                 if composed.len() >= total_rows {
                     break;
                 }
             }
-            // Fill the rest from the live cells, dropped from the bottom.
+            // Fill the rest from the live cells (already Arc'd).
             let need = total_rows.saturating_sub(composed.len());
             for row in screen.cells.iter().take(need) {
                 composed.push(row.clone());
             }
-            Arc::new(composed)
+            composed
         };
         let pane = PaneRender {
             rect: [0.0, 0.0, logical_w, logical_h],
