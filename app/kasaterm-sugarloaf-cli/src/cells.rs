@@ -152,6 +152,95 @@ pub fn render_row(
     }
 }
 
+/// Translucent selection overlay covering cells from `anchor` to `end`
+/// in reading order. Drawn after the per-cell glyphs so the text shows
+/// through. One quad per row (or one for single-row selections) — cheap.
+pub fn render_selection_overlay(
+    sugarloaf: &mut Sugarloaf<'_>,
+    anchor: (u16, u16),
+    end: (u16, u16),
+    origin_x: f32,
+    origin_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+) {
+    let (start, stop) = if (anchor.1, anchor.0) <= (end.1, end.0) {
+        (anchor, end)
+    } else {
+        (end, anchor)
+    };
+    // iTerm2-ish selection color: muted blue at 35% alpha.
+    let color = [0.20, 0.40, 0.85, 0.35];
+    if start.1 == stop.1 {
+        let x = origin_x + start.0 as f32 * cell_w;
+        let y = origin_y + start.1 as f32 * cell_h;
+        let w = (stop.0 - start.0 + 1) as f32 * cell_w;
+        sugarloaf.rect(None, x, y, w, cell_h, color, 0.0, 0);
+        return;
+    }
+    // Multi-row: head fragment, full middle rows, tail fragment. We don't
+    // know col count from the cell grid here, so caller passes anchor/end
+    // already clamped. Middle rows extend to a generous width — set large
+    // enough that any realistic terminal column fits.
+    let max_w = 4000.0;
+    // First row: from start.col to end-of-line.
+    {
+        let x = origin_x + start.0 as f32 * cell_w;
+        let y = origin_y + start.1 as f32 * cell_h;
+        sugarloaf.rect(None, x, y, max_w - x, cell_h, color, 0.0, 0);
+    }
+    // Middle rows: full width.
+    for r in (start.1 + 1)..stop.1 {
+        let y = origin_y + r as f32 * cell_h;
+        sugarloaf.rect(None, origin_x, y, max_w, cell_h, color, 0.0, 0);
+    }
+    // Last row: from col 0 to stop.col inclusive.
+    {
+        let y = origin_y + stop.1 as f32 * cell_h;
+        let w = (stop.0 + 1) as f32 * cell_w;
+        sugarloaf.rect(None, origin_x, y, w, cell_h, color, 0.0, 0);
+    }
+}
+
+/// Paint a Hangul/kana preedit string at the cursor cell. Background is
+/// a lightly tinted rect so the in-progress jamo is distinguishable from
+/// committed text; glyphs use the default foreground at the same font
+/// size as the body.
+pub fn render_preedit(
+    sugarloaf: &mut Sugarloaf<'_>,
+    text: &str,
+    px: f32,
+    py: f32,
+    cell_w: f32,
+    cell_h: f32,
+    font_size: f32,
+) {
+    let w = (text.chars().count().max(1) as f32) * cell_w * 1.2;
+    sugarloaf.rect(
+        None,
+        px,
+        py,
+        w,
+        cell_h,
+        [
+            DEFAULT_FG[0] as f32 / 255.0,
+            DEFAULT_FG[1] as f32 / 255.0,
+            DEFAULT_FG[2] as f32 / 255.0,
+            0.18,
+        ],
+        0.0,
+        0,
+    );
+    let opts = DrawOpts {
+        font_size,
+        color: DEFAULT_FG,
+        bold: false,
+        italic: false,
+        font_id: None,
+    };
+    sugarloaf.text_mut().draw(px, py + cell_h * 0.78, text, &opts);
+}
+
 /// Draw the full screen. Rows are addressed top-down starting from
 /// `origin_y`. Caller is responsible for emitting the background fill
 /// before calling this — cells with default bg do not paint a rect.
