@@ -1168,27 +1168,28 @@ fn palette(c: &GridColor, default: [f32; 4]) -> [f32; 4] {
     }
 }
 
-/// Standard xterm 256-colour table. ANSI 0..15 are the base palette
-/// (Solarized-leaning to match the native build), 16..231 are the 6×6×6
-/// colour cube, 232..255 are the grayscale ramp.
+/// Standard xterm 256-colour table. ANSI 0..15 are the iTerm2 "Default"
+/// dark profile (matches what most users see in iTerm2 out of the box,
+/// the comparison reference the user kept calling out). 16..231 are the
+/// 6×6×6 colour cube, 232..255 are the grayscale ramp.
 fn xterm_palette(i: u8) -> [f32; 4] {
     const BASE: [[u8; 3]; 16] = [
-        [0x1c, 0x20, 0x26], // 0 black (matches BG)
-        [0xe0, 0x6c, 0x75], // 1 red
-        [0x98, 0xc3, 0x79], // 2 green
-        [0xe5, 0xc0, 0x7b], // 3 yellow
-        [0x61, 0xaf, 0xef], // 4 blue
-        [0xc6, 0x78, 0xdd], // 5 magenta
-        [0x56, 0xb6, 0xc2], // 6 cyan
-        [0xab, 0xb2, 0xbf], // 7 white
-        [0x5c, 0x63, 0x70], // 8 bright black
-        [0xff, 0x8c, 0x95], // 9 bright red
-        [0xb8, 0xd3, 0x99], // 10
-        [0xff, 0xd0, 0x8b], // 11
-        [0x81, 0xcf, 0xff], // 12
-        [0xe6, 0x98, 0xfd], // 13
-        [0x76, 0xd6, 0xe2], // 14
-        [0xea, 0xee, 0xf4], // 15
+        [0x00, 0x00, 0x00], // 0 black
+        [0xc9, 0x1b, 0x00], // 1 red
+        [0x00, 0xc2, 0x00], // 2 green
+        [0xc7, 0xc4, 0x00], // 3 yellow
+        [0x22, 0x25, 0xc7], // 4 blue
+        [0xc9, 0x30, 0xc7], // 5 magenta
+        [0x00, 0xc5, 0xc7], // 6 cyan
+        [0xc7, 0xc7, 0xc7], // 7 white
+        [0x67, 0x67, 0x67], // 8 bright black
+        [0xff, 0x6d, 0x67], // 9 bright red
+        [0x5f, 0xf9, 0x67], // 10 bright green
+        [0xfe, 0xfb, 0x67], // 11 bright yellow
+        [0x68, 0x71, 0xff], // 12 bright blue
+        [0xff, 0x76, 0xff], // 13 bright magenta
+        [0x5f, 0xfd, 0xff], // 14 bright cyan
+        [0xfe, 0xfe, 0xfe], // 15 bright white
     ];
     let rgb = if i < 16 {
         BASE[i as usize]
