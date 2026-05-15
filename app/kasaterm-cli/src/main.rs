@@ -168,12 +168,26 @@ impl App {
             .copied()
             .find(|f| f.is_srgb() == false)
             .unwrap_or(caps.formats[0]);
+        // Pick the lowest-latency present mode the surface supports.
+        // AutoVsync stalls every frame on the 60Hz display refresh —
+        // ~16ms of presentation latency per ScreenUpdate, which the user
+        // reads as "스크롤이 바로 업데이트 안 됨". Mailbox triple-buffers
+        // (no wait), Immediate skips vsync entirely. Fall back to Fifo
+        // when neither is supported.
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
+        } else {
+            wgpu::PresentMode::AutoVsync
+        };
+        eprintln!("[gpu] present_mode={present_mode:?} available={:?}", caps.present_modes);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
+            present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
