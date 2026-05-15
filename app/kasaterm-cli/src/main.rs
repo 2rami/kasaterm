@@ -608,9 +608,14 @@ impl ApplicationHandler for App {
                         (size.height as f32 / scale) / s.rows as f32
                     }
                 };
+                // Sensitivity dampening: macOS trackpad delivers
+                // ~40px = ~4 cells per tick. Forwarding that raw produces
+                // 4-page jumps in alt-screen apps. Multiply by 0.3 so a
+                // notch translates to ~1 line of effective scroll, then
+                // accumulate fractions across events for smooth feel.
                 let dy_cells = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y as f32,
-                    MouseScrollDelta::PixelDelta(p) => (p.y as f32) / cell_h.max(1.0),
+                    MouseScrollDelta::LineDelta(_, y) => y as f32 * 0.3,
+                    MouseScrollDelta::PixelDelta(p) => (p.y as f32) / cell_h.max(1.0) * 0.3,
                 };
                 self.wheel_accum_y += dy_cells;
                 let lines = self.wheel_accum_y.trunc() as i32;
@@ -632,16 +637,13 @@ impl ApplicationHandler for App {
                 );
                 if alt {
                     // alt-screen apps (claude TUI / vim / less / lazygit
-                    // / htop) bind scroll to PgUp/PgDn. Emit one escape
-                    // per accumulated cell — accumulator already collapses
-                    // sub-line trackpad events so a flick produces a
-                    // small integer count, not a 30-page jump.
+                    // / htop) treat PgUp/PgDn as a *page* scroll. Cap at
+                    // one escape per wheel event so a single notch moves
+                    // ~half a screen at most. The accumulator already
+                    // collapses sub-line trackpad events, so even a fast
+                    // flick produces one per cycle rather than a stack.
                     let esc: &[u8] = if lines > 0 { b"\x1b[5~" } else { b"\x1b[6~" };
-                    let count = lines.unsigned_abs().min(8) as usize;
-                    let mut payload = Vec::with_capacity(count * 4);
-                    for _ in 0..count {
-                        payload.extend_from_slice(esc);
-                    }
+                    let payload: Vec<u8> = esc.to_vec();
                     if let Some(tmux) = self.tmux.as_ref() {
                         let hex: String = payload
                             .iter()
