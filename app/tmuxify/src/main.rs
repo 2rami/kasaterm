@@ -184,9 +184,10 @@ struct Session {
 
 #[derive(Clone)]
 struct PaneGrid {
-    /// Cells indexed [row][col]. `Arc` lets the shader memo cheaply
-    /// detect "no changes this frame".
-    cells: Arc<Vec<Vec<TbCell>>>,
+    /// One Arc per row. ScreenUpdate dirty rewrites only the affected
+    /// row Arcs — kasaterm's per-row instance cache then hits for every
+    /// other row and skips shaping entirely.
+    cells: Vec<Arc<Vec<TbCell>>>,
     cols: u16,
     rows: u16,
     cursor_row: u16,
@@ -197,7 +198,10 @@ struct PaneGrid {
 impl PaneGrid {
     fn empty(cols: u16, rows: u16) -> Self {
         Self {
-            cells: Arc::new(blank_grid(cols, rows)),
+            cells: blank_grid(cols, rows)
+                .into_iter()
+                .map(Arc::new)
+                .collect(),
             cols,
             rows,
             cursor_row: 0,
@@ -337,7 +341,10 @@ impl App {
                     if size_changed {
                         pane.cols = update.cols;
                         pane.rows = update.rows;
-                        pane.cells = Arc::new(blank_grid(update.cols, update.rows));
+                        pane.cells = blank_grid(update.cols, update.rows)
+                            .into_iter()
+                            .map(Arc::new)
+                            .collect();
                     }
                     // Early-out when truly nothing changed — the bridge
                     // flusher emits a ScreenUpdate every 16ms per pane
@@ -361,10 +368,12 @@ impl App {
                     {
                         return Task::none();
                     }
-                    let cells = Arc::make_mut(&mut pane.cells);
                     for (r, row) in &update.dirty {
-                        if let Some(dst) = cells.get_mut(*r as usize) {
-                            *dst = row.clone();
+                        if let Some(dst) = pane.cells.get_mut(*r as usize) {
+                            // Replace the row Arc — kasaterm's row cache
+                            // sees a new identity and rebuilds only this
+                            // row; siblings keep their Arc and stay cached.
+                            *dst = Arc::new(row.clone());
                         }
                     }
                     pane.cursor_row = update.cursor_row;

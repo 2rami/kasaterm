@@ -109,10 +109,15 @@ unsafe impl Sync for Instance {}
 /// One pane's data inside a `TerminalPrimitive`. `rect` is widget-local
 /// pixel space (origin = widget top-left). `is_active` raises an accent
 /// 1px border so the user can see which pane has keyboard focus.
+///
+/// `cells` is keyed per-row by Arc so the pipeline can cache instance
+/// vectors per-row identity: a typing echo that mutates one row leaves
+/// the other ~30 row Arcs unchanged, and their cached glyph quads are
+/// re-used as-is.
 #[derive(Debug, Clone)]
 pub struct PaneRender {
     pub rect: [f32; 4],
-    pub cells: Arc<Vec<Vec<GridCell>>>,
+    pub cells: Vec<Arc<Vec<GridCell>>>,
     pub cols: u16,
     pub rows: u16,
     pub cursor_row: u16,
@@ -125,7 +130,7 @@ pub struct PaneRender {
 /// build `PaneRender`s after the layout walk picks rects.
 #[derive(Debug, Clone)]
 pub struct PaneSnapshot {
-    pub cells: Arc<Vec<Vec<GridCell>>>,
+    pub cells: Vec<Arc<Vec<GridCell>>>,
     pub cols: u16,
     pub rows: u16,
     pub cursor_row: u16,
@@ -169,6 +174,19 @@ pub struct Selection {
     pub anchor: (u16, u16),
     /// (col, row) of the drag head in cell units.
     pub end: (u16, u16),
+}
+
+/// Cached instance list for a single row, stored in pane-local coords
+/// (relative to the row's top-left). The pipeline translates these to
+/// absolute widget coords on emit by adding (px, py + row_idx*cell_h).
+/// Bound to the cell metrics they were built for — rebuilt on any
+/// resize.
+#[derive(Clone, Debug)]
+struct CachedRow {
+    cell_w: f32,
+    cell_h: f32,
+    font_size_bits: u32,
+    instances: Vec<Instance>,
 }
 
 /// Lookup key for the shaping cache. `font_size` and `scale` are folded
@@ -303,6 +321,15 @@ pub struct TerminalPipeline {
     /// ASCII + common Hangul + claude statusline icons converge to a
     /// few thousand entries; HashMap is plenty.
     shape_cache: HashMap<ShapeKey, Vec<(CacheKey, f32, f32)>>,
+
+    /// Per-row instance cache keyed by the row's Arc identity. claude
+    /// streams one or two dirty rows per ScreenUpdate but the other 30
+    /// rows keep the same Arc — caching their instance vectors in
+    /// pane-local coords lets the prepare loop translate-and-append
+    /// instead of re-shaping every cell. Stale entries are pruned on
+    /// every frame via `row_cache_seen`.
+    row_cache: HashMap<usize, CachedRow>,
+    row_cache_seen: std::collections::HashSet<usize>,
 
     /// Memo key. We rebuild instance buffers only when something
     /// observable changed — cell grid pointer, cursor pos, or
@@ -505,6 +532,8 @@ impl TerminalPipeline {
             },
             swash: SwashCache::new(),
             shape_cache: HashMap::new(),
+            row_cache: HashMap::new(),
+            row_cache_seen: std::collections::HashSet::new(),
             last_cells_ptr: 0,
             last_cursor: (u16::MAX, u16::MAX, false),
             last_bounds: [0.0, 0.0, 0.0],
@@ -537,8 +566,16 @@ impl TerminalPipeline {
         // (window dragged to / from external monitor) invalidate too.
         let mut hash: u64 = 0xcbf29ce484222325;
         for p in &prim.panes {
+            // Fold every row's Arc identity into the hash so a one-row
+            // dirty mutates the cache key but leaves the rest of the
+            // pane visually stable (still hits the row cache).
+            let mut rows_hash: u64 = 0;
+            for row in &p.cells {
+                rows_hash ^= Arc::as_ptr(row) as u64;
+                rows_hash = rows_hash.wrapping_mul(0x100000001b3);
+            }
             for w in [
-                Arc::as_ptr(&p.cells) as u64,
+                rows_hash,
                 ((p.cursor_row as u64) << 32) | (p.cursor_col as u64),
                 p.cursor_visible as u64,
                 p.is_active as u64,
@@ -651,6 +688,11 @@ impl TerminalPipeline {
             });
         }
         queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&instances));
+        // Evict cached rows that didn't appear this frame — keeps the
+        // map bounded as the user scrolls or panes shrink. Re-using the
+        // seen set across frames avoids allocation churn.
+        self.row_cache.retain(|k, _| self.row_cache_seen.contains(k));
+        self.row_cache_seen.clear();
         if std::env::var_os("KASATERM_PERF").is_some() {
             let elapsed_us = _t0.elapsed().as_micros();
             eprintln!(
@@ -726,10 +768,60 @@ impl TerminalPipeline {
             }
         }
 
-        for (row_idx, row) in pane.cells.iter().enumerate() {
-            for (col_idx, cell) in row.iter().enumerate() {
-                let x = px + col_idx as f32 * cell_w;
-                let y = py + row_idx as f32 * cell_h;
+        let sel_rows: Option<(u16, u16)> = prim.selection.map(|s| {
+            let (a, b) = normalise_selection(s);
+            (a.1, b.1)
+        });
+        let font_size_bits = font_size.to_bits();
+
+        for (row_idx, row_arc) in pane.cells.iter().enumerate() {
+            let row_arc_ptr = Arc::as_ptr(row_arc) as usize;
+            let y_abs = py + row_idx as f32 * cell_h;
+
+            // Rows that need per-frame work: cursor row (inversion), rows
+            // touched by selection (highlight). Everything else is stable
+            // for the lifetime of this row's Arc and goes through the
+            // cache.
+            let cursor_here = pane.cursor_visible && row_idx as u16 == pane.cursor_row;
+            let sel_here = match sel_rows {
+                Some((s, e)) => (row_idx as u16) >= s && (row_idx as u16) <= e,
+                None => false,
+            };
+            let cacheable = !cursor_here && !sel_here;
+
+            if cacheable {
+                if let Some(cached) = self.row_cache.get(&row_arc_ptr) {
+                    if cached.cell_w == cell_w
+                        && cached.cell_h == cell_h
+                        && cached.font_size_bits == font_size_bits
+                    {
+                        // Translate cached local-coord instances to
+                        // absolute (px, y_abs). Fast path — no shaping,
+                        // no atlas lookups, no palette resolution.
+                        for inst in &cached.instances {
+                            let mut t = *inst;
+                            t.rect[0] += px;
+                            t.rect[1] += y_abs;
+                            instances.push(t);
+                        }
+                        self.row_cache_seen.insert(row_arc_ptr);
+                        continue;
+                    }
+                }
+            }
+
+            // Cache miss — build instances in pane-local coords (x =
+            // col*cell_w, y = 0). On the way out, translate to absolute
+            // and optionally cache the local copy.
+            let local_start = if cacheable { Some(Vec::<Instance>::new()) } else { None };
+            let mut local = local_start.unwrap_or_default();
+            let sink: &mut Vec<Instance> = if cacheable { &mut local } else { instances };
+
+            for (col_idx, cell) in row_arc.iter().enumerate() {
+                let x_loc = col_idx as f32 * cell_w;
+                let y_loc = 0.0_f32;
+                let x_use = if cacheable { x_loc } else { px + x_loc };
+                let y_use = if cacheable { y_loc } else { y_abs };
 
                 let mut fg = palette(&cell.fg, prim.fg_color);
                 let mut bg = palette(&cell.bg, prim.bg_color);
@@ -744,8 +836,8 @@ impl TerminalPipeline {
                 }
 
                 if bg != prim.bg_color {
-                    instances.push(Instance {
-                        rect: [x, y, cell_w, cell_h],
+                    sink.push(Instance {
+                        rect: [x_use, y_use, cell_w, cell_h],
                         color: bg,
                         uv: [0.0, 0.0, 0.0, 0.0],
                         mode: 0,
@@ -757,10 +849,10 @@ impl TerminalPipeline {
                 let rects = first_char.map(block_rects).unwrap_or(&[]);
                 if !rects.is_empty() {
                     for r in rects {
-                        instances.push(Instance {
+                        sink.push(Instance {
                             rect: [
-                                x + r[0] * cell_w,
-                                y + r[1] * cell_h,
+                                x_use + r[0] * cell_w,
+                                y_use + r[1] * cell_h,
                                 r[2] * cell_w,
                                 r[3] * cell_h,
                             ],
@@ -796,18 +888,15 @@ impl TerminalPipeline {
                         cache_key,
                     );
                     let Some(entry) = entry else { continue };
-                    // Atlas glyph baked at physical resolution
-                    // (font_size * scale). Divide placement back to
-                    // logical for iced's logical→physical projection.
-                    let baseline = y + cell_h * 0.78;
-                    let gx = x + x_off + (entry.placement.left as f32) / scale;
+                    let baseline = y_use + cell_h * 0.78;
+                    let gx = x_use + x_off + (entry.placement.left as f32) / scale;
                     let gy = baseline - (entry.placement.top as f32) / scale + y_off;
                     let gw = entry.placement.width as f32 / scale;
                     let gh = entry.placement.height as f32 / scale;
                     if gw <= 0.0 || gh <= 0.0 {
                         continue;
                     }
-                    instances.push(Instance {
+                    sink.push(Instance {
                         rect: [gx, gy, gw, gh],
                         color: if entry.is_color { [1.0, 1.0, 1.0, 1.0] } else { fg },
                         uv: entry.uv,
@@ -815,6 +904,22 @@ impl TerminalPipeline {
                         _pad: [0; 3],
                     });
                 }
+            }
+
+            if cacheable {
+                // Translate-and-append the cached row to the final batch,
+                // then store the local copy keyed by Arc identity.
+                for inst in &local {
+                    let mut t = *inst;
+                    t.rect[0] += px;
+                    t.rect[1] += y_abs;
+                    instances.push(t);
+                }
+                self.row_cache.insert(
+                    row_arc_ptr,
+                    CachedRow { cell_w, cell_h, font_size_bits, instances: local },
+                );
+                self.row_cache_seen.insert(row_arc_ptr);
             }
         }
 
