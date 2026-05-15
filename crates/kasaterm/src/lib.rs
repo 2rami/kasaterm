@@ -956,7 +956,17 @@ fn shape_cached_in(
 ) -> Vec<(CacheKey, f32, f32)> {
     let needs_nerd = text
         .chars()
-        .any(|c| matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD));
+        .any(|c| matches!(c as u32,
+            // Private Use Area — nerd font icons.
+            0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
+            // Geometric shapes / misc symbols / dingbats — letting
+            // cosmic-text's fallback chain pick these meant Apple Color
+            // Emoji took over and rendered them as colour glyphs (claude
+            // statusline ● became an orange dot). Forcing the Nerd Font
+            // mono variant keeps every shape monochrome.
+            | 0x25A0..=0x25FF
+            | 0x2600..=0x26FF
+            | 0x2700..=0x27BF));
     let key = ShapeKey {
         ch: text.to_string(),
         size_bits: font_size.to_bits(),
@@ -991,7 +1001,17 @@ fn shape_one_glyph(
     // never need per-char fallback mid-string.
     let needs_nerd = text
         .chars()
-        .any(|c| matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD));
+        .any(|c| matches!(c as u32,
+            // Private Use Area — nerd font icons.
+            0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
+            // Geometric shapes / misc symbols / dingbats — letting
+            // cosmic-text's fallback chain pick these meant Apple Color
+            // Emoji took over and rendered them as colour glyphs (claude
+            // statusline ● became an orange dot). Forcing the Nerd Font
+            // mono variant keeps every shape monochrome.
+            | 0x25A0..=0x25FF
+            | 0x2600..=0x26FF
+            | 0x2700..=0x27BF));
     let family = if needs_nerd {
         Family::Name("D2CodingLigature Nerd Font Mono")
     } else {
