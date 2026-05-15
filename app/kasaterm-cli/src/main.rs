@@ -165,6 +165,64 @@ impl App {
         Ok(())
     }
 
+    /// Kick off any TMUXIFY_AUTOSEND / TMUXIFY_AUTOCAPTURE env hooks.
+    /// Used by the autonomous verify loop to drive claude --continue
+    /// inside the cli and capture the result without a human in the
+    /// loop. Mirrors the tmuxify iced app's startup_task pattern.
+    fn schedule_env_hooks(&self) {
+        let tmux = self.tmux.clone();
+        let window = self.window.clone();
+        if let (Ok(text), Ok(ms)) = (
+            std::env::var("TMUXIFY_AUTOSEND"),
+            std::env::var("TMUXIFY_AUTOSEND_MS").and_then(|s| {
+                s.parse::<u64>().map_err(|_| std::env::VarError::NotPresent)
+            }),
+        ) {
+            eprintln!("[autosend] in {ms}ms: {text:?}");
+            let tmux2 = tmux.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                if let Some(t) = tmux2 {
+                    let mut bytes = text.as_bytes().to_vec();
+                    bytes.push(b'\r');
+                    let hex: String = bytes
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let _ = t.send_keys_hex(None, &hex);
+                }
+            });
+        }
+        if let Ok(ms) = std::env::var("TMUXIFY_AUTOCAPTURE_MS").and_then(|s| {
+            s.parse::<u64>().map_err(|_| std::env::VarError::NotPresent)
+        }) {
+            let path = std::env::var("TMUXIFY_AUTOCAPTURE_PATH")
+                .unwrap_or_else(|_| "/tmp/kasaterm-cli.png".into());
+            eprintln!("[autocapture] in {ms}ms → {path}");
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+                let pid = std::process::id();
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        &format!(
+                            "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
+                        ),
+                    ])
+                    .status();
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let _ = std::process::Command::new("screencapture")
+                    .args(["-x", "-t", "png", &path])
+                    .status();
+                eprintln!("[autocapture] captured {path}");
+                if let Some(w) = &window {
+                    w.request_redraw();
+                }
+            });
+        }
+    }
+
     fn start_tmux(&mut self) -> Result<()> {
         let cwd = std::env::var("KASATERM_CWD")
             .ok()
@@ -458,7 +516,9 @@ impl ApplicationHandler for App {
         if let Err(e) = self.start_tmux() {
             eprintln!("[kasaterm-cli] tmux start failed: {e}");
             event_loop.exit();
+            return;
         }
+        self.schedule_env_hooks();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -538,19 +598,12 @@ impl ApplicationHandler for App {
                 if alt {
                     // alt-screen apps (claude TUI / vim / less / lazygit
                     // / htop) all expect PageUp / PageDown for vertical
-                    // scroll — not arrow keys. claude even prints a
-                    // hint if it sees up/down arrows on wheel. Send the
-                    // VT220 PgUp/PgDn escapes so every common TUI sees
-                    // wheel as scroll, not cursor nav.
-                    let (esc, count) = if lines > 0 {
-                        (b"\x1b[5~", lines.min(4))
-                    } else {
-                        (b"\x1b[6~", (-lines).min(4))
-                    };
-                    let mut payload = Vec::with_capacity(count as usize * 4);
-                    for _ in 0..count {
-                        payload.extend_from_slice(esc);
-                    }
+                    // scroll — not arrow keys. Send VT220 \\x1b[5~ /
+                    // \\x1b[6~. Single escape per wheel event so a flick
+                    // gestures over a few rows instead of jumping a full
+                    // page; PixelDelta accumulation gives smoother feel.
+                    let esc: &[u8] = if lines > 0 { b"\x1b[5~" } else { b"\x1b[6~" };
+                    let payload: Vec<u8> = esc.to_vec();
                     if let Some(tmux) = self.tmux.as_ref() {
                         let hex: String = payload
                             .iter()
