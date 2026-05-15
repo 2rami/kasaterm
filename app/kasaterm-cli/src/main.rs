@@ -571,10 +571,16 @@ impl ApplicationHandler for App {
                     "[trace] +{}ms Focused({f}) — winit just delivered focus",
                     self.boot.elapsed().as_millis()
                 );
-                // Request an immediate redraw on focus regain. Without
-                // this, macOS sometimes leaves the surface stale for a
-                // beat after switching back, which user reads as "느려".
+                // On focus regain, force the wgpu surface to re-acquire
+                // a fresh swapchain texture in addition to firing a
+                // redraw. macOS' window-server occasionally hands back
+                // a stale surface after a context switch — the next
+                // present then waits on a frame that's already gone,
+                // which the user reads as "포커스가 늦게 잡혀".
                 if *f {
+                    if let Some(gpu) = self.gpu.as_mut() {
+                        gpu.surface.configure(&gpu.device, &gpu.config);
+                    }
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -692,9 +698,16 @@ impl ApplicationHandler for App {
                         .px_to_cell(self.cursor_px.0, self.cursor_px.1)
                         .unwrap_or((1, 1));
                     let button = if lines > 0 { 64 } else { 65 }; // 64=wheel up, 65=wheel down
-                    let esc = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
-                    let hex: String = esc
-                        .as_bytes()
+                    // Drain every accumulated line into separate SGR
+                    // escapes, capped so a single trackpad flick can't
+                    // overwhelm claude. Previously emitted exactly one
+                    // escape regardless of `lines`, which lost the rest
+                    // of the gesture and felt like scroll wobble on
+                    // release ("올라가다 때면 다시 내려가는 느낌").
+                    let count = lines.unsigned_abs().min(4) as usize;
+                    let single = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
+                    let payload: Vec<u8> = single.as_bytes().repeat(count.max(1));
+                    let hex: String = payload
                         .iter()
                         .map(|b| format!("{b:02x}"))
                         .collect::<Vec<_>>()
