@@ -244,6 +244,9 @@ pub fn render_preedit(
 /// Draw the full screen. Rows are addressed top-down starting from
 /// `origin_y`. Caller is responsible for emitting the background fill
 /// before calling this — cells with default bg do not paint a rect.
+/// `baseline_offset` is logical pixels from the row top to the glyph
+/// baseline — caller should pass the sugarloaf-measured value rather
+/// than a guess so descenders don't clip and adjacent rows don't kiss.
 pub fn render_screen(
     sugarloaf: &mut Sugarloaf<'_>,
     rows: &[Vec<Cell>],
@@ -252,11 +255,8 @@ pub fn render_screen(
     cell_w: f32,
     cell_h: f32,
     font_size: f32,
+    baseline_offset: f32,
 ) {
-    // Empirical: text baseline sits ~0.78 * cell_h below row top with
-    // Cascadia at 14pt. Tune later from real font metrics; for the MVP
-    // this gets the glyphs inside the right grid cell.
-    let baseline = cell_h * 0.78;
     for (r, row) in rows.iter().enumerate() {
         render_row(
             sugarloaf,
@@ -266,7 +266,7 @@ pub fn render_screen(
             cell_w,
             cell_h,
             font_size,
-            baseline,
+            baseline_offset,
         );
     }
 }

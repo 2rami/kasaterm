@@ -25,10 +25,26 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 const FONT_SIZE: f32 = 14.0;
-const CELL_W: f32 = 8.6;
-const CELL_H: f32 = 18.0;
+const LINE_HEIGHT_MULT: f32 = 1.3;
 const SCROLLBACK_MAX: usize = 5000;
 const WHEEL_THROTTLE_MS: u64 = 8;
+
+/// Cell width / height / baseline in logical pixels. Filled at startup
+/// from `Sugarloaf::compute_cell_metrics` so columns align with the
+/// actual font advance instead of a hardcoded guess. Falls back to a
+/// reasonable default before the first measurement lands.
+#[derive(Copy, Clone, Debug)]
+struct CellGeom {
+    w: f32,
+    h: f32,
+    baseline: f32,
+}
+
+impl Default for CellGeom {
+    fn default() -> Self {
+        Self { w: 8.6, h: 18.0, baseline: 14.0 }
+    }
+}
 
 /// (col, row) anchor + end for drag selection. Both ends in cell units.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -130,6 +146,8 @@ struct App {
     sugarloaf: Option<Sugarloaf<'static>>,
     tmux: Option<Arc<TmuxSession>>,
     screen: Arc<Mutex<Screen>>,
+    /// Measured cell geometry from sugarloaf — see `measure_cell_geom`.
+    cell: CellGeom,
     preedit: String,
     in_preedit: bool,
     selection: Option<Selection>,
@@ -148,6 +166,7 @@ impl App {
             sugarloaf: None,
             tmux: None,
             screen: Arc::new(Mutex::new(Screen::default())),
+            cell: CellGeom::default(),
             preedit: String::new(),
             in_preedit: false,
             selection: None,
@@ -244,8 +263,8 @@ impl App {
         let scale = window.scale_factor() as f32;
         let lw = size.width as f32 / scale;
         let lh = size.height as f32 / scale;
-        let cols = (lw / CELL_W).floor().max(40.0) as u16;
-        let rows = (lh / CELL_H).floor().max(10.0) as u16;
+        let cols = (lw / self.cell.w).floor().max(40.0) as u16;
+        let rows = (lh / self.cell.h).floor().max(10.0) as u16;
         let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
         let tmux = TmuxSession::start(StartOptions {
             cwd: cwd.as_deref(),
@@ -338,8 +357,8 @@ impl App {
         if s.cols == 0 || s.rows == 0 {
             return None;
         }
-        let col = ((px - 8.0).max(0.0) / CELL_W).floor() as u16;
-        let row = ((py - 8.0).max(0.0) / CELL_H).floor() as u16;
+        let col = ((px - 8.0).max(0.0) / self.cell.w).floor() as u16;
+        let row = ((py - 8.0).max(0.0) / self.cell.h).floor() as u16;
         Some((col.min(s.cols - 1), row.min(s.rows - 1)))
     }
 
@@ -391,7 +410,7 @@ impl App {
     fn handle_wheel(&mut self, delta: MouseScrollDelta) {
         let dy_cells = match delta {
             MouseScrollDelta::LineDelta(_, y) => y * 0.3,
-            MouseScrollDelta::PixelDelta(p) => (p.y as f32) / CELL_H.max(1.0) * 0.3,
+            MouseScrollDelta::PixelDelta(p) => (p.y as f32) / self.cell.h.max(1.0) * 0.3,
         };
         let lines = match wheel_step(
             &mut self.wheel_accum_y,
@@ -542,23 +561,32 @@ impl App {
             return;
         }
 
-        cells::render_screen(sugarloaf, &rows, 8.0, 8.0, CELL_W, CELL_H, FONT_SIZE);
+        cells::render_screen(
+            sugarloaf,
+            &rows,
+            8.0,
+            8.0,
+            self.cell.w,
+            self.cell.h,
+            FONT_SIZE,
+            self.cell.baseline,
+        );
 
         // Selection highlight — translucent overlay on top of cells.
         if let Some(sel) = self.selection {
-            cells::render_selection_overlay(sugarloaf, sel.anchor, sel.end, 8.0, 8.0, CELL_W, CELL_H);
+            cells::render_selection_overlay(sugarloaf, sel.anchor, sel.end, 8.0, 8.0, self.cell.w, self.cell.h);
         }
 
         // Cursor block (only when at live tail).
         if cur_vis {
-            let cursor_x = 8.0 + cur_c as f32 * CELL_W;
-            let cursor_y = 8.0 + cur_r as f32 * CELL_H;
+            let cursor_x = 8.0 + cur_c as f32 * self.cell.w;
+            let cursor_y = 8.0 + cur_r as f32 * self.cell.h;
             sugarloaf.rect(
                 None,
                 cursor_x,
                 cursor_y,
-                CELL_W,
-                CELL_H,
+                self.cell.w,
+                self.cell.h,
                 [
                     cells::DEFAULT_FG[0] as f32 / 255.0,
                     cells::DEFAULT_FG[1] as f32 / 255.0,
@@ -573,9 +601,9 @@ impl App {
         // Preedit overlay — paint over the cursor cell so Hangul
         // composition is visible while still typing.
         if cur_vis && !self.preedit.is_empty() {
-            let px = 8.0 + cur_c as f32 * CELL_W;
-            let py = 8.0 + cur_r as f32 * CELL_H;
-            cells::render_preedit(sugarloaf, &self.preedit, px, py, CELL_W, CELL_H, FONT_SIZE);
+            let px = 8.0 + cur_c as f32 * self.cell.w;
+            let py = 8.0 + cur_r as f32 * self.cell.h;
+            cells::render_preedit(sugarloaf, &self.preedit, px, py, self.cell.w, self.cell.h, FONT_SIZE);
         }
 
         sugarloaf.render();
@@ -616,6 +644,27 @@ impl ApplicationHandler for App {
             RootStyle::default(),
         )
         .expect("Sugarloaf instance");
+        // Replace the CellGeom default with the actual font advance /
+        // ascent so columns align right of col ~80, where the 8.6
+        // estimate started drifting visibly.
+        let scale = window.scale_factor() as f32;
+        // line_height here is a multiplier (1.0 = font ascent+descent only),
+        // *not* a pixel value — rio's default is 1.0. Pass the multiplier
+        // directly; passing pixels produces absurd cell sizes.
+        let (_dim, metrics) =
+            sugarloaf.compute_cell_metrics(FONT_SIZE, LINE_HEIGHT_MULT, scale);
+        // compute_cell_metrics returns u32 physical pixels — divide by
+        // scale to land back in logical units the rest of the renderer
+        // works with.
+        self.cell = CellGeom {
+            w: (metrics.cell_width as f32) / scale,
+            h: (metrics.cell_height as f32) / scale,
+            baseline: (metrics.cell_baseline as f32) / scale,
+        };
+        eprintln!(
+            "[startup] cell_geom w={:.2} h={:.2} baseline={:.2} (scale={scale})",
+            self.cell.w, self.cell.h, self.cell.baseline
+        );
         self.sugarloaf = Some(sugarloaf);
         self.window = Some(window);
         if let Err(e) = self.start_tmux() {
@@ -647,8 +696,8 @@ impl ApplicationHandler for App {
                     let scale = window.scale_factor() as f32;
                     let lw = size.width as f32 / scale;
                     let lh = size.height as f32 / scale;
-                    let cols = (lw / CELL_W).floor().max(40.0) as u16;
-                    let rows = (lh / CELL_H).floor().max(10.0) as u16;
+                    let cols = (lw / self.cell.w).floor().max(40.0) as u16;
+                    let rows = (lh / self.cell.h).floor().max(10.0) as u16;
                     let _ = tmux.resize_client(cols, rows);
                 }
                 window.request_redraw();
