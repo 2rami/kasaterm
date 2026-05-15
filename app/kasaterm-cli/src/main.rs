@@ -21,6 +21,40 @@ use winit::window::{Window, WindowId};
 const TERM_BG: [f32; 4] = [0x1c as f32 / 255.0, 0x20 as f32 / 255.0, 0x26 as f32 / 255.0, 1.0];
 const TERM_FG: [f32; 4] = [0xea as f32 / 255.0, 0xee as f32 / 255.0, 0xf4 as f32 / 255.0, 1.0];
 
+const WHEEL_THROTTLE_MS: u64 = 8;
+
+/// Wheel accumulator state machine. Returns `Some(lines)` when an emit
+/// should fire (caller forwards to tmux), `None` when the event is
+/// absorbed into pending state — either because no whole line accumulated
+/// yet, or because the throttle window is still open.
+///
+/// Mutates `accum` and `last_emit` only on emit. During the throttle
+/// window `accum` keeps building, so a flurry of sub-cell ticks doesn't
+/// get silently dropped.
+fn wheel_step(
+    accum: &mut f32,
+    dy_cells: f32,
+    last_emit: &mut Instant,
+    now: Instant,
+) -> Option<i32> {
+    // Direction flip: drop opposite-sign leftover so a reversal isn't
+    // partially eaten by previous momentum.
+    if accum.signum() != dy_cells.signum() && *accum != 0.0 && dy_cells != 0.0 {
+        *accum = 0.0;
+    }
+    *accum += dy_cells;
+    let lines = accum.trunc() as i32;
+    if lines == 0 {
+        return None;
+    }
+    if now.duration_since(*last_emit) < std::time::Duration::from_millis(WHEEL_THROTTLE_MS) {
+        return None;
+    }
+    *accum -= lines as f32;
+    *last_emit = now;
+    Some(lines)
+}
+
 /// Mutable cell snapshot the redraw loop reads from.
 ///
 /// `cells` stores each row in its own Arc so a ScreenUpdate that
@@ -602,36 +636,42 @@ impl ApplicationHandler for App {
         // understood.
         match &event {
             WindowEvent::Focused(f) => {
-                eprintln!(
-                    "[trace] +{}ms Focused({f}) — winit just delivered focus",
-                    self.boot.elapsed().as_millis()
-                );
-                // On focus regain, force the wgpu surface to re-acquire
-                // a fresh swapchain texture in addition to firing a
-                // redraw. macOS' window-server occasionally hands back
-                // a stale surface after a context switch — the next
-                // present then waits on a frame that's already gone,
-                // which the user reads as "포커스가 늦게 잡혀".
+                if std::env::var_os("KASATERM_PERF").is_some() {
+                    eprintln!(
+                        "[trace] +{}ms Focused({f}) — winit just delivered focus",
+                        self.boot.elapsed().as_millis()
+                    );
+                }
+                // On focus regain, force the wgpu surface to re-acquire a
+                // fresh swapchain texture AND render synchronously in the
+                // same event. request_redraw queues for next event-loop
+                // turn, which on macOS lands one full vsync (~16ms) later
+                // even with Immediate present mode — the user reads that
+                // as "포커스 잡힌 후 첫 렌더가 늦음". Rendering inline
+                // presents to the just-reconfigured swapchain before the
+                // OS can hand back a stale frame.
                 if *f {
                     if let Some(gpu) = self.gpu.as_mut() {
                         gpu.surface.configure(&gpu.device, &gpu.config);
                     }
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
+                    if let Err(e) = self.render() {
+                        eprintln!("[kasaterm-cli] focus render error: {e}");
                     }
                 }
             }
             WindowEvent::Ime(ime) => {
-                let detail = match ime {
-                    Ime::Enabled => "Enabled".to_string(),
-                    Ime::Preedit(t, r) => format!("Preedit text={t:?} range={r:?}"),
-                    Ime::Commit(t) => format!("Commit text={t:?}"),
-                    Ime::Disabled => "Disabled".to_string(),
-                };
-                eprintln!(
-                    "[trace] +{}ms Ime({detail})",
-                    self.boot.elapsed().as_millis()
-                );
+                if std::env::var_os("KASATERM_PERF").is_some() {
+                    let detail = match ime {
+                        Ime::Enabled => "Enabled".to_string(),
+                        Ime::Preedit(t, r) => format!("Preedit text={t:?} range={r:?}"),
+                        Ime::Commit(t) => format!("Commit text={t:?}"),
+                        Ime::Disabled => "Disabled".to_string(),
+                    };
+                    eprintln!(
+                        "[trace] +{}ms Ime({detail})",
+                        self.boot.elapsed().as_millis()
+                    );
+                }
             }
             _ => {}
         }
@@ -700,37 +740,25 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y as f32 * 0.3,
                     MouseScrollDelta::PixelDelta(p) => (p.y as f32) / cell_h.max(1.0) * 0.3,
                 };
-                self.wheel_accum_y += dy_cells;
-                let lines = self.wheel_accum_y.trunc() as i32;
-                if lines == 0 {
-                    return;
-                }
-                self.wheel_accum_y -= lines as f32;
-                // alt-screen apps (claude TUI, vim, less, lazygit, htop)
-                // own their scroll. Forward wheel as up/down arrow keys
-                // so the inner app sees the intent. On the shell prompt
-                // (no alt-screen), scroll our own history instead.
+                let lines = match wheel_step(
+                    &mut self.wheel_accum_y,
+                    dy_cells,
+                    &mut self.last_wheel_emit,
+                    Instant::now(),
+                ) {
+                    Some(l) => l,
+                    None => return,
+                };
                 let (alt, hist_len, mouse_on, mouse_sgr) = {
                     let s = self.screen.lock().unwrap();
                     (s.alt_screen, s.history.len(), s.mouse_enabled, s.mouse_sgr)
                 };
-                eprintln!(
-                    "[trace] wheel lines={lines} alt={alt} mouse={mouse_on} sgr={mouse_sgr} hist={hist_len} offset={}",
-                    self.scroll_offset
-                );
-                // Lighter throttle (8ms) — still coalesces a burst but
-                // doesn't add direction-change lag the user reads as
-                // "올리고 내릴때 업데이트가 바로 안 됨". Empirically
-                // claude repaints fast enough that 120Hz emit rate
-                // doesn't smear frames.
-                let now = Instant::now();
-                if now.duration_since(self.last_wheel_emit)
-                    < std::time::Duration::from_millis(8)
-                {
-                    self.wheel_accum_y += lines as f32;
-                    return;
+                if std::env::var_os("KASATERM_PERF").is_some() {
+                    eprintln!(
+                        "[trace] wheel lines={lines} alt={alt} mouse={mouse_on} sgr={mouse_sgr} hist={hist_len} offset={}",
+                        self.scroll_offset
+                    );
                 }
-                self.last_wheel_emit = now;
                 // Best path: SGR mouse-mode wheel events. Apps that
                 // enabled mouse reporting (claude, vim, lazygit, htop)
                 // treat \\x1b[<64;col;rowM as wheel-up-at-cell, scrolling
@@ -741,13 +769,12 @@ impl ApplicationHandler for App {
                         .px_to_cell(self.cursor_px.0, self.cursor_px.1)
                         .unwrap_or((1, 1));
                     let button = if lines > 0 { 64 } else { 65 }; // 64=wheel up, 65=wheel down
-                    // Drain every accumulated line into separate SGR
-                    // escapes, capped so a single trackpad flick can't
-                    // overwhelm claude. Previously emitted exactly one
-                    // escape regardless of `lines`, which lost the rest
-                    // of the gesture and felt like scroll wobble on
-                    // release ("올라가다 때면 다시 내려가는 느낌").
-                    let count = lines.unsigned_abs().min(4) as usize;
+                    // Emit one SGR per accumulated line, capped at 8 so a
+                    // single throttle window can't fire a runaway burst
+                    // while still passing typical trackpad flicks through
+                    // intact (previous cap of 4 silently dropped half of a
+                    // hard flick).
+                    let count = lines.unsigned_abs().min(8) as usize;
                     let single = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
                     let payload: Vec<u8> = single.as_bytes().repeat(count.max(1));
                     let hex: String = payload
@@ -979,4 +1006,94 @@ fn main() -> Result<()> {
     let mut app = App::new();
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::{wheel_step, WHEEL_THROTTLE_MS};
+    use std::time::{Duration, Instant};
+
+    fn ms(t: Instant, n: u64) -> Instant {
+        t + Duration::from_millis(n)
+    }
+
+    #[test]
+    fn sub_cell_ticks_accumulate_before_emitting() {
+        let mut accum = 0.0;
+        let mut last = Instant::now();
+        let t0 = ms(last, 100);
+        // Each tick worth 0.3 cells. First three should absorb silently
+        // (accum 0.3, 0.6, 0.9 → trunc 0), fourth crosses 1.0.
+        assert_eq!(wheel_step(&mut accum, 0.3, &mut last, ms(t0, 0)), None);
+        assert_eq!(wheel_step(&mut accum, 0.3, &mut last, ms(t0, 20)), None);
+        assert_eq!(wheel_step(&mut accum, 0.3, &mut last, ms(t0, 40)), None);
+        assert_eq!(wheel_step(&mut accum, 0.3, &mut last, ms(t0, 60)), Some(1));
+        assert!(accum < 1.0 && accum >= 0.0, "accum drained: {accum}");
+    }
+
+    #[test]
+    fn direction_flip_drops_residual_momentum() {
+        let mut accum = 0.0;
+        let mut last = Instant::now();
+        let t0 = ms(last, 100);
+        // Build +0.6 of upward momentum.
+        wheel_step(&mut accum, 0.6, &mut last, ms(t0, 0));
+        assert!((accum - 0.6).abs() < 1e-5);
+        // Reverse with -1.0. Without the flip reset, accum would land at
+        // -0.4 (trunc 0, no emit). With the reset, accum becomes -1.0,
+        // trunc -1, emit one downward line on the very first reverse tick.
+        let out = wheel_step(&mut accum, -1.0, &mut last, ms(t0, 50));
+        assert_eq!(out, Some(-1), "first reverse tick must emit");
+    }
+
+    #[test]
+    fn throttle_window_absorbs_without_losing_accum() {
+        let mut accum = 0.0;
+        let mut last = Instant::now();
+        let t0 = ms(last, 100);
+        // First tick: 1.5 cells, emits 1 line at t0. accum left at 0.5.
+        let first = wheel_step(&mut accum, 1.5, &mut last, t0).unwrap();
+        assert_eq!(first, 1);
+        // Within the throttle window another 1.0 arrives — should NOT
+        // emit, but accum must keep accruing so we don't drop scroll.
+        let throttled = wheel_step(&mut accum, 1.0, &mut last, ms(t0, WHEEL_THROTTLE_MS - 2));
+        assert_eq!(throttled, None);
+        assert!((accum - 1.5).abs() < 1e-5, "accum must build during throttle: {accum}");
+        // After throttle window opens, the built-up accum drains as one
+        // emit of the full count, not just one line.
+        let post = wheel_step(&mut accum, 0.0, &mut last, ms(t0, WHEEL_THROTTLE_MS + 1));
+        assert_eq!(post, Some(1));
+    }
+
+    #[test]
+    fn zero_dy_during_throttle_does_not_drain() {
+        let mut accum = 0.0;
+        let mut last = Instant::now();
+        let t0 = ms(last, 100);
+        // Emit once.
+        wheel_step(&mut accum, 1.0, &mut last, t0);
+        // Zero-delta event arrives quickly — trunc(0) = 0 path returns
+        // None *before* the throttle check, so accum is untouched.
+        let r = wheel_step(&mut accum, 0.0, &mut last, ms(t0, 1));
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn rapid_same_direction_flick_drains_full_count_after_throttle() {
+        let mut accum = 0.0;
+        let mut last = Instant::now() - Duration::from_secs(1);
+        let t0 = Instant::now();
+        // A hard trackpad flick: 5 events of 1.2 cells each within 4ms.
+        // Old behavior dropped most of these on throttle; new behavior
+        // keeps building accum so the next non-throttled event drains all.
+        let r0 = wheel_step(&mut accum, 1.2, &mut last, t0);
+        assert_eq!(r0, Some(1));
+        for i in 1..5 {
+            let r = wheel_step(&mut accum, 1.2, &mut last, ms(t0, i));
+            assert_eq!(r, None, "tick {i} should be throttled");
+        }
+        // Window opens. accum has grown from leftover 0.2 + 4 * 1.2 = 5.0.
+        let drain = wheel_step(&mut accum, 0.0, &mut last, ms(t0, WHEEL_THROTTLE_MS + 1)).unwrap();
+        assert_eq!(drain, 5, "post-throttle emit must drain all built lines");
+    }
 }
