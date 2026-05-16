@@ -1135,6 +1135,7 @@ impl App {
                     self.cell.h,
                     FONT_SIZE,
                     cells::ITERM_CURSOR,
+                    self.cell.baseline,
                 );
             }
         }

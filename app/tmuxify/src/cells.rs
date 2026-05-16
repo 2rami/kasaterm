@@ -410,6 +410,7 @@ pub fn render_preedit(
     cell_h: f32,
     font_size: f32,
     accent: [u8; 4],
+    baseline_offset: f32,
 ) {
     let chars = text.chars().count().max(1) as f32;
     // Korean / Japanese / Chinese cells generally render double-wide;
@@ -448,8 +449,12 @@ pub fn render_preedit(
         0.0,
         0,
     );
-    // (3) Glyphs in the accent color so the composing jamo reads
-    // against the BG without competing with committed body text.
+    // (3) Glyphs at the same baseline offset that body cells use.
+    // Earlier we hardcoded `cell_h * 0.78` which landed text well
+    // below the body baseline — the preedit glyph then visually
+    // straddled into the row below, which the user reported as
+    // "조합될 때 언더바 밑으로 떨어진다". Use the caller-measured
+    // baseline so preedit lines up with the committed text grid.
     let opts = DrawOpts {
         font_size,
         color: accent,
@@ -457,7 +462,7 @@ pub fn render_preedit(
         italic: false,
         font_id: None,
     };
-    sugarloaf.text_mut().draw(px, py + cell_h * 0.78, text, &opts);
+    sugarloaf.text_mut().draw(px, py + baseline_offset, text, &opts);
 }
 
 /// Draw the full screen. Rows are addressed top-down starting from
