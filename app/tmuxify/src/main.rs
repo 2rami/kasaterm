@@ -1,4 +1,4 @@
-//! kasaterm-sugarloaf-cli — sugarloaf-rendered terminal driven by
+//! tmuxify — sugarloaf-rendered terminal driven by
 //! tmux-bridge. Multi-pane: tmux's split-window creates additional
 //! panes, layout-change events tell us how to lay them out, and we
 //! render each pane inside its rect from the parsed Layout tree.
@@ -254,7 +254,7 @@ impl App {
         let Ok(ms_str) = std::env::var("TMUXIFY_AUTOCAPTURE_MS") else { return; };
         let Ok(ms) = ms_str.parse::<u64>() else { return; };
         let path = std::env::var("TMUXIFY_AUTOCAPTURE_PATH")
-            .unwrap_or_else(|_| "/tmp/kasaterm-sugarloaf-cli.png".into());
+            .unwrap_or_else(|_| "/tmp/tmuxify.png".into());
         eprintln!("[autocapture] in {ms}ms → {path}");
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -339,7 +339,7 @@ impl App {
         let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
         let tmux = TmuxSession::start(StartOptions {
             cwd: cwd.as_deref(),
-            socket_name: Some("kasaterm-sugarloaf-cli"),
+            socket_name: Some("tmuxify"),
             cols,
             rows,
             ..Default::default()
@@ -431,7 +431,7 @@ impl App {
                     // chrome — background panes change silently.
                     if title_changed && is_active {
                         let display =
-                            new_title.unwrap_or_else(|| "kasaterm-sugarloaf-cli".into());
+                            new_title.unwrap_or_else(|| "tmuxify".into());
                         w.set_title(&display);
                     }
                     w.request_redraw();
@@ -613,10 +613,10 @@ impl App {
         match arboard::Clipboard::new() {
             Ok(mut cb) => {
                 if let Err(e) = cb.set_text(text) {
-                    eprintln!("[kasaterm-sugarloaf-cli] clipboard write failed: {e}");
+                    eprintln!("[tmuxify] clipboard write failed: {e}");
                 }
             }
-            Err(e) => eprintln!("[kasaterm-sugarloaf-cli] clipboard open failed: {e}"),
+            Err(e) => eprintln!("[tmuxify] clipboard open failed: {e}"),
         }
     }
 
@@ -624,7 +624,7 @@ impl App {
         let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("[kasaterm-sugarloaf-cli] clipboard read failed: {e}");
+                eprintln!("[tmuxify] clipboard read failed: {e}");
                 return;
             }
         };
@@ -1015,7 +1015,7 @@ impl ApplicationHandler for App {
             Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
         ));
         let attrs = WindowAttributes::default()
-            .with_title("kasaterm-sugarloaf-cli")
+            .with_title("tmuxify")
             .with_inner_size(LogicalSize::new(960.0, 600.0));
         let window = Arc::new(
             event_loop
@@ -1066,7 +1066,7 @@ impl ApplicationHandler for App {
         self.sugarloaf = Some(sugarloaf);
         self.window = Some(window);
         if let Err(e) = self.start_tmux() {
-            eprintln!("[kasaterm-sugarloaf-cli] tmux start failed: {e}");
+            eprintln!("[tmuxify] tmux start failed: {e}");
         }
         self.schedule_autosend();
         self.schedule_autocapture();

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "app/kasaterm-sugarloaf-cli",
+    "app/tmuxify",
     "crates/agent-socket",
     "crates/hangul-ime",
     "crates/tmux-bridge",

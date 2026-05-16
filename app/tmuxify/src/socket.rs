@@ -2,7 +2,7 @@
 //!
 //! The single-pane PoC reports a fixed workspace + surface id ("local-0"
 //! / "pane-0") because we only own one tmux pane in this binary. Once
-//! kasaterm-sugarloaf-cli grows multi-pane support the surface ids
+//! tmuxify grows multi-pane support the surface ids
 //! become real tmux `@N` strings and `list_surfaces` returns one entry
 //! per actually-open pane.
 
@@ -28,14 +28,14 @@ impl Backend for TmuxBackend {
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         Ok(vec![WorkspaceInfo {
             id: FIXED_WORKSPACE_ID.into(),
-            name: "kasaterm-sugarloaf-cli".into(),
+            name: "tmuxify".into(),
         }])
     }
 
     fn current_workspace(&self) -> Result<Option<WorkspaceInfo>> {
         Ok(Some(WorkspaceInfo {
             id: FIXED_WORKSPACE_ID.into(),
-            name: "kasaterm-sugarloaf-cli".into(),
+            name: "tmuxify".into(),
         }))
     }
 
