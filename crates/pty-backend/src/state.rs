@@ -97,6 +97,56 @@ impl PtySession {
         if let Some(cwd) = opts.cwd.as_deref() {
             cmd.cwd(cwd);
         }
+        // Terminal-identity env. portable-pty's CommandBuilder inherits
+        // the parent process env, so if we were launched from iTerm /
+        // Ghostty / Terminal.app, child TUIs (Claude Code, vim, etc)
+        // see `TERM_PROGRAM=iTerm.app` and treat us as that host —
+        // sending iTerm-only escapes that our alacritty parser would
+        // either ignore or render as garbage. Force a consistent
+        // identity and scrub the iTerm-specific leftovers so the
+        // detection settles on kasaterm regardless of who launched us.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("TERM_PROGRAM", "kasaterm");
+        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        cmd.env("COLORTERM", "truecolor");
+        for k in [
+            "ITERM_SESSION_ID",
+            "ITERM_PROFILE",
+            "LC_TERMINAL",
+            "LC_TERMINAL_VERSION",
+            // Ghostty / WezTerm / Alacritty leave their own crumbs too —
+            // strip them so a TUI can't mis-attribute us to whichever
+            // emulator happened to spawn the parent shell.
+            "GHOSTTY_RESOURCES_DIR",
+            "WEZTERM_PANE",
+            "WEZTERM_EXECUTABLE",
+            "ALACRITTY_LOG",
+            "ALACRITTY_WINDOW_ID",
+        ] {
+            cmd.env_remove(k);
+        }
+        // tmux-shim hook. When kasaterm has set up a shim directory
+        // and exported KASATERM_TMUX_SHIM_DIR + KASATERM_TMUX_SHIM_TMUX
+        // before spawning us, prepend it to PATH and fake $TMUX so any
+        // tmux call inside this PTY hits our shim instead of the real
+        // binary. That gives the next phase a chance to translate
+        // `tmux split-window` etc into BSP RPC calls.
+        if let Ok(shim_dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
+            let parent_path = std::env::var("PATH").unwrap_or_default();
+            cmd.env("PATH", format!("{shim_dir}:{parent_path}"));
+        }
+        if let Ok(fake_tmux) = std::env::var("KASATERM_TMUX_SHIM_TMUX") {
+            cmd.env("TMUX", fake_tmux);
+        }
+        // Real tmux sets TMUX_PANE on every child so an `if [ -n
+        // "$TMUX_PANE" ]` test passes inside a pane. Claude Code's
+        // teammateMode reads this to know which pane it's currently
+        // running in — without it, the `display-message -p` subprocess
+        // never gets called and we get "Could not determine current
+        // tmux pane/window" before our shim sees anything.
+        cmd.env("TMUX_PANE", &opts.pane_id);
+        // Caller-supplied env overrides everything above so tests /
+        // callers can still inject a synthetic TERM if they need to.
         for (k, v) in &opts.env {
             cmd.env(k, v);
         }
