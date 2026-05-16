@@ -4,6 +4,7 @@
 //! framework-agnostic — no iced or kasaterm in the dep tree.
 
 mod cells;
+mod socket;
 
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -386,8 +387,45 @@ impl App {
                 }
             }
         });
-        self.tmux = Some(Arc::new(tmux));
+        let tmux_arc = Arc::new(tmux);
+        self.tmux = Some(tmux_arc.clone());
+        self.start_socket(tmux_arc);
         Ok(())
+    }
+
+    /// Bring up the cmux-compatible JSON-RPC server so external agents
+    /// (Claude Code teammateMode, ad-hoc CLI scripts) can drive this
+    /// pane. The server is best-effort — a bind failure logs and the
+    /// rest of the binary keeps working without it. Two env names are
+    /// exported on the spawned shell:
+    ///   - TMUXIFY_SOCKET_PATH (our brand)
+    ///   - CMUX_SOCKET_PATH (so cmux-aware clients auto-detect us)
+    /// Both point at the same socket; the second is the cmux-protocol
+    /// convention from issue anthropics/claude-code#36926.
+    fn start_socket(&self, tmux: Arc<tmux_bridge::TmuxSession>) {
+        let path = std::env::var("TMUXIFY_SOCKET_PATH")
+            .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))
+            .unwrap_or_else(|_| {
+                format!(
+                    "{}/tmuxify-{}.sock",
+                    std::env::temp_dir().to_string_lossy(),
+                    std::process::id()
+                )
+            });
+        let server = match agent_socket::Server::bind(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[agent-socket] bind {path:?} failed: {e:#}");
+                return;
+            }
+        };
+        let resolved = server.socket_path().to_string_lossy().to_string();
+        eprintln!("[agent-socket] listening on {resolved}");
+        std::env::set_var("TMUXIFY_SOCKET_PATH", &resolved);
+        std::env::set_var("CMUX_SOCKET_PATH", &resolved);
+        let backend: Arc<dyn agent_socket::Backend> =
+            Arc::new(socket::TmuxBackend::new(tmux));
+        let _join = server.spawn(backend);
     }
 
     /// Convert logical-pixel cursor position into a (col, row) cell.

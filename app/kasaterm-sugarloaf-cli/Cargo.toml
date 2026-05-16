@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 tmux-bridge.workspace = true
+agent-socket = { path = "../../crates/agent-socket" }
 sugarloaf = { version = "0.4", features = ["wgpu"] }
 winit = "0.30"
 raw-window-handle = "0.6"
