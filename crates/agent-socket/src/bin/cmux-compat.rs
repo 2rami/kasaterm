@@ -15,17 +15,21 @@
 //!   cmux-compat key    <enter|tab|...>
 //!
 //! Socket path resolution mirrors what the host exports:
-//!   $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock
+//!   $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default
+//! Platform default is `/tmp/cmux.sock` on Unix and `\\.\pipe\cmux` on
+//! Windows — same name choice the host uses when no env override is
+//! present.
 //!
 //! The CLI prints the raw JSON response to stdout — scripts pipe it
 //! through `jq`. Exit code is 0 on `ok: true`, 1 on `ok: false`, 2 on
 //! a transport / framing error.
 
 use agent_socket::protocol::{Request, Response};
+use agent_socket::transport::LocalStream;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::path::Path;
 
 fn main() {
     match run() {
@@ -68,7 +72,9 @@ fn print_help() {
     eprintln!("  cmux-compat send  --surface <id> <text>");
     eprintln!("  cmux-compat key   <enter|tab|escape|backspace|delete|up|down|left|right>");
     eprintln!();
-    eprintln!("Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock");
+    eprintln!(
+        "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
+    );
 }
 
 fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
@@ -145,13 +151,20 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
 }
 
 fn resolve_socket_path() -> Result<String> {
-    std::env::var("KASATERM_SOCKET_PATH")
+    // Per-platform default avoids carrying a Unix-only `/tmp/...` path
+    // into Windows builds, where pipe names live in their own
+    // namespace.
+    #[cfg(unix)]
+    let default = "/tmp/cmux.sock".to_string();
+    #[cfg(windows)]
+    let default = r"\\.\pipe\cmux".to_string();
+    Ok(std::env::var("KASATERM_SOCKET_PATH")
         .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))
-        .or_else(|_| Ok("/tmp/cmux.sock".to_string()))
+        .unwrap_or(default))
 }
 
 fn roundtrip(socket_path: &str, request: &Request) -> Result<Response> {
-    let stream = UnixStream::connect(socket_path)
+    let stream = LocalStream::connect(Path::new(socket_path))
         .with_context(|| format!("connect to {socket_path:?}"))?;
     let mut writer = stream.try_clone().context("clone stream")?;
     let mut payload = serde_json::to_string(request).context("serialize request")?;
