@@ -113,6 +113,22 @@ fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
     out
 }
 
+/// True for any codepoint the Hangul IME composes. Covers the four
+/// Unicode blocks that hold Korean syllables and jamo. Used to drop
+/// keyboard-side Character events when the IME is the authoritative
+/// channel — winit emits both `KeyboardInput.text` and `Ime::Preedit`
+/// for the first keystroke after a script switch, and forwarding both
+/// would echo the jamo twice (or, more often, leak the first 자모 to
+/// the shell as raw `ㅎ` / `ㅇ` before the Commit lands).
+fn is_hangul_codepoint(c: char) -> bool {
+    let cp = c as u32;
+    (0x1100..=0x11FF).contains(&cp) // Hangul Jamo
+        || (0x3130..=0x318F).contains(&cp) // Hangul Compat Jamo
+        || (0xA960..=0xA97F).contains(&cp) // Hangul Jamo Extended-A
+        || (0xAC00..=0xD7A3).contains(&cp) // Hangul Syllables
+        || (0xD7B0..=0xD7FF).contains(&cp) // Hangul Jamo Extended-B
+}
+
 /// Wheel accumulator. Returns Some(lines) when an emit fires, None while
 /// accumulating sub-cell ticks or while the throttle window is open.
 /// Mirrors kasaterm-cli's wheel_step semantics exactly.
@@ -887,11 +903,20 @@ impl App {
             Key::Named(NamedKey::ArrowLeft) => b"\x1b[D".to_vec(),
             _ => match event.text.as_ref() {
                 Some(t) => {
-                    // Drop non-ASCII Character events ONLY while the IME
-                    // is actively composing — those are the jamo that
-                    // Preedit/Commit will deliver again. Outside an active
-                    // preedit (e.g. very first key), the Character event
-                    // is the only channel, so let it pass.
+                    // Drop the keyboard-side Character event for any
+                    // codepoint the Hangul IME owns. winit + macOS
+                    // deliver the *first* keystroke after an English →
+                    // Korean switch through `event.text` as well as
+                    // through Ime::Preedit. If we forward both, the
+                    // shell sees a stray `ㅎ` before the Commit lands.
+                    // Treat any Hangul-related range as IME-owned;
+                    // other non-ASCII (Latin extended, emoji typed
+                    // directly without IME) still passes through.
+                    if t.chars().any(is_hangul_codepoint) {
+                        return;
+                    }
+                    // Outside an active preedit on non-Hangul scripts,
+                    // the Character event is the only channel.
                     let non_ascii_during_preedit = self.in_preedit
                         && !t.chars().all(|c| c.is_ascii() && !c.is_control());
                     if non_ascii_during_preedit {
