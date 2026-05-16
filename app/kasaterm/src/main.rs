@@ -251,6 +251,10 @@ struct App {
     /// so the tree mutation runs without holding the workspace lock
     /// across a session drop.
     dead_panes: Arc<Mutex<Vec<String>>>,
+    /// Bridge to the cmux-compatible socket worker. The socket thread
+    /// pushes commands here; the main thread drains them in
+    /// `about_to_wait`. None until `start_socket_pty` wires it up.
+    socket_handle: Option<socket::PtyBackendHandle>,
     ws: Arc<Mutex<Workspace>>,
     /// Measured cell geometry from sugarloaf — see `compute_cell_metrics`.
     cell: CellGeom,
@@ -295,6 +299,7 @@ impl App {
             autosplit_plan: Vec::new(),
             autosplit_at: None,
             dead_panes: Arc::new(Mutex::new(Vec::new())),
+            socket_handle: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
             cell: CellGeom::default(),
             preedit: String::new(),
@@ -517,6 +522,9 @@ impl App {
         // before the first ScreenUpdate lands. pump_pty_screens won't
         // overwrite a non-None active_pane.
         self.ws.lock().unwrap().active_pane = Some("%0".to_string());
+        // Bring up the cmux-compat socket *after* the initial pane is
+        // wired so the very first surface.list call sees %0.
+        self.start_socket_pty();
         // No ws.layout update here — a single pane uses the
         // single-pane fallback in the render path, same as tmux mode
         // does before its first %layout-change arrives.
@@ -734,7 +742,7 @@ impl App {
         });
         let tmux_arc = Arc::new(tmux);
         self.tmux = Some(tmux_arc.clone());
-        self.start_socket(tmux_arc);
+        self.start_socket_tmux(tmux_arc);
         Ok(())
     }
 
@@ -747,12 +755,15 @@ impl App {
     ///   - CMUX_SOCKET_PATH (so cmux-aware clients auto-detect us)
     /// Both point at the same socket; the second is the cmux-protocol
     /// convention from issue anthropics/claude-code#36926.
-    fn start_socket(&self, tmux: Arc<tmux_bridge::TmuxSession>) {
+    /// Bind the unix socket + export env vars. Common to both backend
+    /// modes — the caller decides which concrete `Backend` impl to plug
+    /// in (TmuxBackend in tmux mode, PtyBackend in PTY mode).
+    fn start_socket_with(&self, backend: Arc<dyn agent_socket::Backend>) {
         let path = std::env::var("KASATERM_SOCKET_PATH")
             .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))
             .unwrap_or_else(|_| {
                 format!(
-                    "{}/tmuxify-{}.sock",
+                    "{}/kasaterm-{}.sock",
                     std::env::temp_dir().to_string_lossy(),
                     std::process::id()
                 )
@@ -768,9 +779,119 @@ impl App {
         eprintln!("[agent-socket] listening on {resolved}");
         std::env::set_var("KASATERM_SOCKET_PATH", &resolved);
         std::env::set_var("CMUX_SOCKET_PATH", &resolved);
-        let backend: Arc<dyn agent_socket::Backend> =
-            Arc::new(socket::TmuxBackend::new(tmux));
         let _join = server.spawn(backend);
+    }
+
+    fn start_socket_tmux(&self, tmux: Arc<tmux_bridge::TmuxSession>) {
+        self.start_socket_with(Arc::new(socket::TmuxBackend::new(tmux)));
+    }
+
+    /// PTY-mode socket wiring. Builds the shared inbox + snapshot,
+    /// stores the handle on self so the main loop can drain commands,
+    /// then spawns the server with a PtyBackend that routes through
+    /// that same handle.
+    fn start_socket_pty(&mut self) {
+        let window = self.window.clone();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(w) = window.as_ref() {
+                w.request_redraw();
+            }
+        });
+        let handle = socket::PtyBackendHandle {
+            inbox: Arc::new(Mutex::new(Vec::new())),
+            snapshot: Arc::new(Mutex::new(socket::PtySnapshot::default())),
+            wake,
+        };
+        self.socket_handle = Some(handle.clone());
+        self.refresh_socket_snapshot();
+        self.start_socket_with(Arc::new(socket::PtyBackend::new(handle)));
+    }
+
+    /// Publish the current pane state to the shared snapshot the
+    /// PtyBackend reads from. Call after every mutation that adds /
+    /// removes a pane or shifts focus, so external agents see fresh
+    /// `surface.list` results on the very next poll.
+    fn refresh_socket_snapshot(&self) {
+        let Some(handle) = self.socket_handle.as_ref() else { return; };
+        let ws = self.ws.lock().unwrap();
+        let leaves: Vec<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
+            .unwrap_or_else(|| self.pty.keys().cloned().collect());
+        let surfaces = leaves
+            .iter()
+            .map(|id| agent_socket::backend::SurfaceInfo {
+                id: id.clone(),
+                workspace_id: "local-0".to_string(),
+                title: ws
+                    .panes
+                    .get(id)
+                    .and_then(|p| p.title.clone()),
+            })
+            .collect();
+        let mut snap = handle.snapshot.lock().unwrap();
+        snap.surfaces = surfaces;
+        snap.active_pane = ws.active_pane.clone();
+    }
+
+    /// Drain pending socket commands and run them on the main thread.
+    /// Called once per loop turn from `about_to_wait`.
+    fn drain_socket_inbox(&mut self) {
+        let cmds: Vec<socket::PtyCommand> = match self.socket_handle.as_ref() {
+            Some(h) => std::mem::take(&mut *h.inbox.lock().unwrap()),
+            None => return,
+        };
+        if cmds.is_empty() {
+            return;
+        }
+        for cmd in cmds {
+            match cmd {
+                socket::PtyCommand::Focus { pane_id, reply } => {
+                    let known = self.pty.contains_key(&pane_id);
+                    if known {
+                        self.ws.lock().unwrap().active_pane = Some(pane_id);
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err(anyhow::anyhow!(
+                            "no such surface: {pane_id}"
+                        )));
+                    }
+                }
+                socket::PtyCommand::Split { axis, reply } => {
+                    let dir = match axis {
+                        socket::PtySplitAxis::Horizontal => pty_backend::SplitDir::Horizontal,
+                        socket::PtySplitAxis::Vertical => pty_backend::SplitDir::Vertical,
+                    };
+                    let split_res = self.split_active_pane(dir);
+                    let answer = split_res.map(|_| {
+                        // split_active_pane sets active_pane to the new
+                        // leaf; that's the id the client wants back.
+                        self.ws
+                            .lock()
+                            .unwrap()
+                            .active_pane
+                            .clone()
+                            .unwrap_or_default()
+                    });
+                    let _ = reply.send(answer);
+                }
+                socket::PtyCommand::SendBytes { pane_id, bytes, reply } => {
+                    let target = pane_id.or_else(|| {
+                        self.ws.lock().unwrap().active_pane.clone()
+                    });
+                    let res = match target.and_then(|id| self.pty.get(&id).cloned()) {
+                        Some(pty) => pty.send_bytes(&bytes).map_err(anyhow::Error::from),
+                        None => Err(anyhow::anyhow!("no surface to send to")),
+                    };
+                    let _ = reply.send(res);
+                }
+            }
+        }
+        self.refresh_socket_snapshot();
     }
 
     /// Convert logical-pixel position into a (pane_id, col, row) cell
@@ -860,14 +981,20 @@ impl App {
     /// A single-leaf tree leaves `ws.layout` empty — the render path's
     /// single-pane fallback handles that case.
     fn publish_pty_layout(&self) {
-        let Some(tree) = self.pty_layout.as_ref() else { return; };
-        let (cols, rows) = self.window_cells();
-        let mut ws = self.ws.lock().unwrap();
-        if tree.leaves().len() <= 1 {
-            ws.layout = None;
-        } else {
-            ws.layout = Some(tree.to_tmux_layout(cols, rows));
+        if let Some(tree) = self.pty_layout.as_ref() {
+            let (cols, rows) = self.window_cells();
+            let mut ws = self.ws.lock().unwrap();
+            if tree.leaves().len() <= 1 {
+                ws.layout = None;
+            } else {
+                ws.layout = Some(tree.to_tmux_layout(cols, rows));
+            }
         }
+        // Keep the socket snapshot in lockstep with the renderer view —
+        // every code path that adds/removes panes or moves focus goes
+        // through publish_pty_layout, so this is the one spot we have
+        // to wire the cmux mirror.
+        self.refresh_socket_snapshot();
     }
 
     /// Resize every backend session so its grid matches the new window
@@ -1057,6 +1184,7 @@ impl App {
         let new_idx = ((cur_idx as i32 + delta).rem_euclid(n)) as usize;
         ws.active_pane = Some(leaves[new_idx].clone());
         drop(ws);
+        self.refresh_socket_snapshot();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1959,6 +2087,11 @@ impl ApplicationHandler for App {
         // should disappear from the layout on the very next loop turn
         // so the user sees the gap collapse immediately.
         self.reap_dead_panes(event_loop);
+        // Drain socket commands from external cmux clients. These run
+        // through the same split/focus/send paths Cmd+D etc use, so
+        // visible behavior is identical regardless of whether the
+        // trigger came from a keystroke or a JSON-RPC call.
+        self.drain_socket_inbox();
         // Fire any due KASATERM_AUTOSPLIT step before parking. No-op
         // when no plan is queued.
         self.run_pending_autosplits();
@@ -1992,10 +2125,87 @@ impl ApplicationHandler for App {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Wire up the tmux shim before anything spawns a shell — every
+    // PtySession reads the env vars we set here. install_tmux_shim is
+    // best-effort: a missing shim binary just logs and skips, the rest
+    // of the binary still works (tmux calls inside the PTY fall back to
+    // the real tmux on the user's PATH).
+    install_tmux_shim();
     let event_loop = EventLoop::new()?;
     let mut app = App::new();
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Find the bundled tmux shim binary and stage it in a private dir we
+/// prepend to child shells' PATH. Also fakes `$TMUX` so a TUI that
+/// checks "am I inside tmux?" answers yes, which makes Claude Code's
+/// teammateMode route through `tmux split-window` etc — landing every
+/// call on our shim instead of going down its own path-finding logic.
+fn install_tmux_shim() {
+    let shim_src = locate_shim_binary();
+    let Some(shim_src) = shim_src else {
+        eprintln!("[shim] tmux shim binary not found near {:?}; skipping", std::env::current_exe().ok());
+        return;
+    };
+    let shim_dir = std::env::temp_dir().join(format!("kasaterm-shim-{}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&shim_dir) {
+        eprintln!("[shim] mkdir {shim_dir:?} failed: {e}");
+        return;
+    }
+    let target = shim_dir.join("tmux");
+    let _ = std::fs::remove_file(&target);
+    // Symlink so we don't pay for a copy each launch and so updates
+    // to the shim binary propagate without a reinstall.
+    if let Err(e) = std::os::unix::fs::symlink(&shim_src, &target) {
+        eprintln!("[shim] symlink {shim_src:?} -> {target:?} failed: {e}");
+        return;
+    }
+    let trace = std::env::var("KASATERM_TMUX_TRACE")
+        .unwrap_or_else(|_| "/tmp/kasaterm-tmux-calls.log".into());
+    let real = std::env::var("KASATERM_REAL_TMUX").unwrap_or_else(|_| {
+        ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).is_file())
+            .unwrap_or("")
+            .to_string()
+    });
+    let fake_tmux = format!(
+        "/tmp/kasaterm-tmux-{}.sock,{},0",
+        std::process::id(),
+        std::process::id()
+    );
+    std::env::set_var("KASATERM_TMUX_SHIM_DIR", &shim_dir);
+    std::env::set_var("KASATERM_TMUX_SHIM_TMUX", &fake_tmux);
+    std::env::set_var("KASATERM_TMUX_TRACE", &trace);
+    if !real.is_empty() {
+        std::env::set_var("KASATERM_REAL_TMUX", &real);
+    }
+    eprintln!(
+        "[shim] dir={shim_dir:?} trace={trace} real_tmux={real:?} fake_tmux={fake_tmux}"
+    );
+}
+
+/// Look for the `tmux` shim binary next to our own executable. Covers
+/// both the dev case (target/debug/tmux sibling to target/debug/kasaterm)
+/// and the .app bundle case (Contents/MacOS/tmux sibling to kasaterm).
+fn locate_shim_binary() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_TMUX_SHIM_BIN") {
+        let p = std::path::PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidate = dir.join("tmux");
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    // dev fallback: target/debug/tmux when running via `cargo run`
+    // from somewhere odd. current_exe usually already points there
+    // but be defensive.
+    None
 }
 
 #[cfg(test)]
