@@ -446,28 +446,47 @@ impl App {
         let win_events = self.window.clone();
         std::thread::spawn(move || {
             while let Ok(evt) = events.recv() {
-                if let TmuxEvent::LayoutChange { layout, .. } = evt {
-                    // tmux's %layout-change emits both the visible and
-                    // default layouts in one message, space-separated,
-                    // plus a trailing flag. parse_layout wants exactly
-                    // one layout string, so take the first token.
-                    let first = layout
-                        .split_whitespace()
-                        .next()
-                        .unwrap_or(&layout);
-                    match parse_layout(first) {
-                        Ok(parsed) => {
-                            let mut ws = ws_events.lock().unwrap();
-                            ws.layout = Some(parsed);
+                match evt {
+                    TmuxEvent::LayoutChange { layout, .. } => {
+                        // tmux's %layout-change emits both the visible
+                        // and default layouts in one message,
+                        // space-separated, plus a trailing flag.
+                        // parse_layout wants exactly one layout
+                        // string, so take the first token.
+                        let first = layout
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or(&layout);
+                        match parse_layout(first) {
+                            Ok(parsed) => {
+                                let mut ws = ws_events.lock().unwrap();
+                                ws.layout = Some(parsed);
+                                drop(ws);
+                                if let Some(w) = win_events.as_ref() {
+                                    w.request_redraw();
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[layout] parse failed: {e} ({first:?})");
+                            }
+                        }
+                    }
+                    TmuxEvent::WindowPaneChanged { pane_id, .. } => {
+                        // tmux flipped the active pane (most commonly:
+                        // a split-window just landed and the new pane
+                        // grabbed focus). Mirror that into our state
+                        // so the cursor + active border + outgoing key
+                        // target all move together.
+                        let mut ws = ws_events.lock().unwrap();
+                        if ws.active_pane.as_deref() != Some(pane_id.as_str()) {
+                            ws.active_pane = Some(pane_id);
                             drop(ws);
                             if let Some(w) = win_events.as_ref() {
                                 w.request_redraw();
                             }
                         }
-                        Err(e) => {
-                            eprintln!("[layout] parse failed: {e} ({first:?})");
-                        }
                     }
+                    _ => {}
                 }
             }
         });
