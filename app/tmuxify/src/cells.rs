@@ -259,10 +259,23 @@ pub fn render_selection_overlay(
     }
 }
 
-/// Paint a Hangul/kana preedit string at the cursor cell. Background is
-/// a lightly tinted rect so the in-progress jamo is distinguishable from
-/// committed text; glyphs use the default foreground at the same font
-/// size as the body.
+/// Paint a Hangul / kana preedit string at the cursor cell.
+///
+/// Two layered rects + the glyphs:
+/// 1. Solid background fill in `DEFAULT_BG` so the in-progress jamo
+///    isn't visually composited with whatever cell content was
+///    underneath (committed text, cursor block, selection — any of
+///    which would muddy the composition).
+/// 2. Thin underline accent at the bottom of the rect so the user
+///    can tell preedit is active even when the jamo glyph happens
+///    to match the body color.
+/// 3. Glyphs in the cursor accent color (`accent`) — a clearly
+///    different hue from `DEFAULT_FG`, so an unfinished "ㅎ" doesn't
+///    blend with a finished "한" on the same line.
+///
+/// CJK glyphs typically take 2 cells per character (wide), so the
+/// rect width scales by the visual width estimate rather than the
+/// raw code-point count.
 pub fn render_preedit(
     sugarloaf: &mut Sugarloaf<'_>,
     text: &str,
@@ -271,8 +284,14 @@ pub fn render_preedit(
     cell_w: f32,
     cell_h: f32,
     font_size: f32,
+    accent: [u8; 4],
 ) {
-    let w = (text.chars().count().max(1) as f32) * cell_w * 1.2;
+    let chars = text.chars().count().max(1) as f32;
+    // Korean / Japanese / Chinese cells generally render double-wide;
+    // estimate that here so the background rect actually covers all
+    // the glyphs sugarloaf will lay down.
+    let w = chars * cell_w * 2.0;
+    // (1) Opaque BG so underlying text doesn't bleed through.
     sugarloaf.rect(
         None,
         px,
@@ -280,17 +299,35 @@ pub fn render_preedit(
         w,
         cell_h,
         [
-            DEFAULT_FG[0] as f32 / 255.0,
-            DEFAULT_FG[1] as f32 / 255.0,
-            DEFAULT_FG[2] as f32 / 255.0,
-            0.18,
+            DEFAULT_BG[0] as f32 / 255.0,
+            DEFAULT_BG[1] as f32 / 255.0,
+            DEFAULT_BG[2] as f32 / 255.0,
+            1.0,
         ],
         0.0,
         0,
     );
+    // (2) Accent underline — 2px bar at bottom edge.
+    sugarloaf.rect(
+        None,
+        px,
+        py + cell_h - 2.0,
+        w,
+        2.0,
+        [
+            accent[0] as f32 / 255.0,
+            accent[1] as f32 / 255.0,
+            accent[2] as f32 / 255.0,
+            1.0,
+        ],
+        0.0,
+        0,
+    );
+    // (3) Glyphs in the accent color so the composing jamo reads
+    // against the BG without competing with committed body text.
     let opts = DrawOpts {
         font_size,
-        color: DEFAULT_FG,
+        color: accent,
         bold: false,
         italic: false,
         font_id: None,

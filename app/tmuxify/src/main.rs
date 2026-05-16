@@ -1092,13 +1092,14 @@ impl App {
                     self.cell.h,
                 );
             }
-            if frame.cursor_visible && (blink_on || !self.preedit.is_empty()) {
+            // Skip the cursor rect while preedit is active — the
+            // preedit overlay below paints its own opaque background +
+            // accent underline, which would be hidden underneath the
+            // translucent cursor and produce the "한글 합치는 중에
+            // 안 보이는" symptom the user reported.
+            if frame.cursor_visible && blink_on && self.preedit.is_empty() {
                 let cursor_x = pane_px_x + frame.cursor_col as f32 * self.cell.w;
                 let cursor_y = pane_px_y + frame.cursor_row as f32 * self.cell.h;
-                // Cursor color from the user's iTerm2 profile
-                // (`Cursor Color` = pure black). 55% alpha matches
-                // iTerm2's "block cursor on light bg" feel — full
-                // opacity would hide the glyph underneath.
                 sugarloaf.rect(
                     None,
                     cursor_x,
@@ -1126,6 +1127,7 @@ impl App {
                     self.cell.w,
                     self.cell.h,
                     FONT_SIZE,
+                    cells::ITERM_CURSOR,
                 );
             }
         }
