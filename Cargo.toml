@@ -4,6 +4,7 @@ members = [
     "app/tmuxify",
     "crates/agent-socket",
     "crates/hangul-ime",
+    "crates/pty-backend",
     "crates/tmux-bridge",
     "spikes/iced-term",
     "spikes/egui-term",
