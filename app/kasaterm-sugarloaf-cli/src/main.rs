@@ -28,6 +28,13 @@ const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT_MULT: f32 = 1.3;
 const SCROLLBACK_MAX: usize = 5000;
 const WHEEL_THROTTLE_MS: u64 = 8;
+/// Half-period of the cursor blink in milliseconds. macOS uses 530 by
+/// default; iTerm2 uses 500. 530 matches the platform feel.
+const BLINK_HALF_PERIOD_MS: u64 = 530;
+/// While the user is actively typing we keep the cursor solid for this
+/// long after the last keystroke so it's easy to follow the caret. Same
+/// idea as iTerm2's "smart cursor" pause.
+const BLINK_PAUSE_AFTER_INPUT_MS: u64 = 700;
 
 /// Cell width / height / baseline in logical pixels. Filled at startup
 /// from `Sugarloaf::compute_cell_metrics` so columns align with the
@@ -139,6 +146,9 @@ struct Screen {
     mouse_enabled: bool,
     mouse_sgr: bool,
     history: VecDeque<Vec<GridCell>>,
+    /// OSC 0/2 title — `printf '\e]0;hello\a'` lands here. Applied to
+    /// the winit window's chrome whenever it changes.
+    title: Option<String>,
 }
 
 struct App {
@@ -157,6 +167,10 @@ struct App {
     scroll_offset: usize,
     wheel_accum_y: f32,
     last_wheel_emit: Instant,
+    /// Last keystroke / IME / mouse press timestamp. Resets the blink
+    /// phase so the cursor stays solid while the user is actively
+    /// interacting and only fades back to blinking on idle.
+    last_input_at: Instant,
 }
 
 impl App {
@@ -176,7 +190,20 @@ impl App {
             scroll_offset: 0,
             wheel_accum_y: 0.0,
             last_wheel_emit: Instant::now() - std::time::Duration::from_secs(1),
+            last_input_at: Instant::now(),
         }
+    }
+
+    /// True when the cursor block should be visible this frame.
+    /// Solid for `BLINK_PAUSE_AFTER_INPUT_MS` after any input event, then
+    /// toggles every `BLINK_HALF_PERIOD_MS`.
+    fn cursor_blink_on(&self, now: Instant) -> bool {
+        let since_input = now.saturating_duration_since(self.last_input_at);
+        if since_input.as_millis() < BLINK_PAUSE_AFTER_INPUT_MS as u128 {
+            return true;
+        }
+        let elapsed = since_input.as_millis() - BLINK_PAUSE_AFTER_INPUT_MS as u128;
+        (elapsed / BLINK_HALF_PERIOD_MS as u128) % 2 == 0
     }
 
     fn schedule_autocapture(&self) {
@@ -290,6 +317,7 @@ impl App {
                 alt_screen,
                 mouse_enabled,
                 mouse_sgr,
+                title,
                 ..
             }) = screens.recv()
             {
@@ -340,8 +368,20 @@ impl App {
                 s.alt_screen = alt_screen;
                 s.mouse_enabled = mouse_enabled;
                 s.mouse_sgr = mouse_sgr;
+                // Title comparison so we only call set_title when it
+                // actually changes — otherwise the window-server fights
+                // us on every ScreenUpdate.
+                let new_title = title.filter(|t| !t.is_empty());
+                let title_changed = s.title != new_title;
+                if title_changed {
+                    s.title = new_title.clone();
+                }
                 drop(s);
                 if let Some(w) = win.as_ref() {
+                    if title_changed {
+                        let display = new_title.unwrap_or_else(|| "kasaterm-sugarloaf-cli".into());
+                        w.set_title(&display);
+                    }
                     w.request_redraw();
                 }
             }
@@ -460,6 +500,9 @@ impl App {
         if event.state != ElementState::Pressed {
             return;
         }
+        // Touch the input timer so the cursor stays solid for a beat and
+        // the blink phase re-starts from "on" once it kicks in.
+        self.last_input_at = Instant::now();
         // Typing always snaps to live tail.
         if self.scroll_offset != 0 {
             self.scroll_offset = 0;
@@ -510,6 +553,11 @@ impl App {
     }
 
     fn render_frame(&mut self) {
+        // Snapshot anything that needs `&self` access before grabbing the
+        // sugarloaf `&mut` — the borrow checker won't let us re-enter
+        // immutable self methods while sugarloaf is mutably borrowed.
+        let now = Instant::now();
+        let blink_on = self.cursor_blink_on(now);
         let Some(window) = self.window.as_ref() else { return; };
         let Some(sugarloaf) = self.sugarloaf.as_mut() else { return; };
         let size = window.inner_size();
@@ -577,8 +625,11 @@ impl App {
             cells::render_selection_overlay(sugarloaf, sel.anchor, sel.end, 8.0, 8.0, self.cell.w, self.cell.h);
         }
 
-        // Cursor block (only when at live tail).
-        if cur_vis {
+        // Cursor block (only when at live tail and blink-on phase).
+        // Preedit always forces solid so users can see what they're
+        // composing — the conditional below skips the rect, but the
+        // preedit overlay below still draws.
+        if cur_vis && (blink_on || !self.preedit.is_empty()) {
             let cursor_x = 8.0 + cur_c as f32 * self.cell.w;
             let cursor_y = 8.0 + cur_r as f32 * self.cell.h;
             sugarloaf.rect(
@@ -615,7 +666,13 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        event_loop.set_control_flow(ControlFlow::Wait);
+        // WaitUntil so the cursor blink ticks even when no terminal output
+        // is arriving — the redraw inside RedrawRequested re-arms the
+        // schedule. Pure Wait would freeze the blink mid-phase, Poll would
+        // burn CPU on idle.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
+        ));
         let attrs = WindowAttributes::default()
             .with_title("kasaterm-sugarloaf-cli")
             .with_inner_size(LogicalSize::new(960.0, 600.0));
@@ -763,6 +820,35 @@ impl ApplicationHandler for App {
                 self.render_frame();
             }
             _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Re-arm the blink deadline every loop turn so the cursor toggles
+        // even on an idle terminal. WaitUntil(deadline) keeps the runtime
+        // asleep — no CPU until either the deadline lands or fresh input
+        // arrives. The actual redraw happens in new_events on the
+        // ResumeTimeReached branch — about_to_wait should NOT request a
+        // redraw here, since that would queue work and turn the wait
+        // into a busy loop.
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
+        ));
+    }
+
+    fn new_events(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        cause: winit::event::StartCause,
+    ) {
+        // The blink-timer fire path. When winit wakes us because the
+        // WaitUntil deadline elapsed (no other events arrived), repaint
+        // so the cursor block toggles its phase. Other wake causes
+        // (input, redraw, init) drive their own redraws.
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 }
