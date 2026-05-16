@@ -1,0 +1,11 @@
+[package]
+name = "agent-socket"
+description = "cmux-compatible Unix-socket JSON-RPC server. Speaks the same wire format as cmux's CLI so Claude Code's teammateMode (when it lands) drives tmuxify with no protocol shim."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
