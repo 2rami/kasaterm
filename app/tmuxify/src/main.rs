@@ -219,13 +219,30 @@ struct App {
     tmux: Option<Arc<TmuxSession>>,
     /// Phase C backend. Mutually exclusive with `tmux` — exactly one
     /// is `Some` after `start_backend`. Selection driven by the
-    /// TMUXIFY_BACKEND env var; defaults to tmux.
+    /// TMUXIFY_BACKEND env var; defaults to PTY now that the Phase C
+    /// path is the recommended one (no tmux daemon, no focus-events
+    /// warnings from Claude Code).
     pty: Option<Arc<pty_backend::PtySession>>,
     ws: Arc<Mutex<Workspace>>,
     /// Measured cell geometry from sugarloaf — see `compute_cell_metrics`.
     cell: CellGeom,
     preedit: String,
     in_preedit: bool,
+    /// True between `Ime::Enabled` and `Ime::Disabled`. Tracks whether
+    /// the OS IME owns this keyboard at all — when active, Hangul (and
+    /// other CJK) keystrokes are double-delivered (KeyboardInput.text
+    /// + Ime::Preedit/Commit) and we have to drop the keyboard side
+    /// even before the first Preedit lands.
+    ime_active: bool,
+    /// In-process Hangul jamo → syllable composer. We drive this from
+    /// the KeyboardInput path whenever the OS keyboard layout hands us
+    /// a Hangul jamo — macOS's NSTextInputContext doesn't fire
+    /// Ime::Preedit for the *first* keystroke after a script switch
+    /// (the jamo arrives only via KeyboardInput.text), so to compose
+    /// "ㄱ + ㅏ → 가" reliably from the very first key we route every
+    /// jamo through our own Composer instead of trusting macOS to
+    /// queue it for us.
+    hangul: hangul_ime::Composer,
     selection: Option<Selection>,
     drag_anchor: Option<(u16, u16)>,
     cursor_px: (f32, f32),
@@ -249,6 +266,8 @@ impl App {
             cell: CellGeom::default(),
             preedit: String::new(),
             in_preedit: false,
+            ime_active: false,
+            hangul: hangul_ime::Composer::new(),
             selection: None,
             drag_anchor: None,
             cursor_px: (0.0, 0.0),
@@ -879,17 +898,130 @@ impl App {
                 }
             }
         }
-        let is_cmd = self.modifiers.super_key() || self.modifiers.control_key();
-        if is_cmd {
-            if let Key::Character(s) = &event.logical_key {
-                if s.eq_ignore_ascii_case("c") && self.selection.is_some() {
-                    self.copy_selection();
-                    return;
+        // Modifier-bearing keys must NEVER reach the Hangul composer.
+        // In Korean keyboard layout the C key still produces 'ㅊ' as
+        // text, but Ctrl+C is meant for SIGINT / "copy" and Cmd+V for
+        // paste — we look at the *physical* key for these, not the
+        // IME-resolved logical key. While we're here, also forward the
+        // standard control-letter byte for any Ctrl+<letter> combo
+        // (Ctrl+L clears, Ctrl+D = EOF, etc), so shells and TUI apps
+        // behave as users expect regardless of which keyboard layout
+        // happens to be active.
+        let cmd = self.modifiers.super_key();
+        let ctrl = self.modifiers.control_key();
+        if cmd || ctrl {
+            use winit::keyboard::{KeyCode, PhysicalKey};
+            if let PhysicalKey::Code(code) = event.physical_key {
+                // Cmd shortcuts first — Cmd is the macOS host modifier.
+                if cmd {
+                    if code == KeyCode::KeyC && self.selection.is_some() {
+                        self.copy_selection();
+                        return;
+                    }
+                    if code == KeyCode::KeyV {
+                        self.paste_clipboard();
+                        return;
+                    }
                 }
-                if s.eq_ignore_ascii_case("v") {
-                    self.paste_clipboard();
-                    return;
+                // Ctrl+letter → the corresponding ASCII control byte.
+                // This covers Ctrl+C → 0x03 (SIGINT), Ctrl+D → 0x04 (EOF),
+                // Ctrl+L → 0x0c (clear), Ctrl+R → 0x12 (reverse search), etc.
+                if ctrl && !cmd {
+                    let letter = match code {
+                        KeyCode::KeyA => Some(b'\x01'),
+                        KeyCode::KeyB => Some(b'\x02'),
+                        KeyCode::KeyC => Some(b'\x03'),
+                        KeyCode::KeyD => Some(b'\x04'),
+                        KeyCode::KeyE => Some(b'\x05'),
+                        KeyCode::KeyF => Some(b'\x06'),
+                        KeyCode::KeyG => Some(b'\x07'),
+                        KeyCode::KeyH => Some(b'\x08'),
+                        KeyCode::KeyI => Some(b'\x09'),
+                        KeyCode::KeyJ => Some(b'\x0a'),
+                        KeyCode::KeyK => Some(b'\x0b'),
+                        KeyCode::KeyL => Some(b'\x0c'),
+                        KeyCode::KeyM => Some(b'\x0d'),
+                        KeyCode::KeyN => Some(b'\x0e'),
+                        KeyCode::KeyO => Some(b'\x0f'),
+                        KeyCode::KeyP => Some(b'\x10'),
+                        KeyCode::KeyQ => Some(b'\x11'),
+                        KeyCode::KeyR => Some(b'\x12'),
+                        KeyCode::KeyS => Some(b'\x13'),
+                        KeyCode::KeyT => Some(b'\x14'),
+                        KeyCode::KeyU => Some(b'\x15'),
+                        KeyCode::KeyV => Some(b'\x16'),
+                        KeyCode::KeyW => Some(b'\x17'),
+                        KeyCode::KeyX => Some(b'\x18'),
+                        KeyCode::KeyY => Some(b'\x19'),
+                        KeyCode::KeyZ => Some(b'\x1a'),
+                        _ => None,
+                    };
+                    if let Some(b) = letter {
+                        // Flush any pending Hangul syllable before
+                        // sending the control byte — typing Enter
+                        // mid-syllable already does this; control
+                        // letters should too.
+                        if let Some(flushed) = self.hangul.flush() {
+                            self.send_bytes(flushed.as_bytes());
+                            self.preedit.clear();
+                            self.in_preedit = false;
+                        }
+                        self.send_bytes(&[b]);
+                        return;
+                    }
                 }
+            }
+        }
+        // Backspace special: when the in-process Hangul composer is
+        // mid-syllable, eat the backspace to chip a jamo off the
+        // preedit rather than forwarding `\x7f` to the shell (which
+        // would erase already-committed text instead).
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) {
+            if self.hangul.backspace() {
+                self.preedit = self.hangul.preedit().unwrap_or_default();
+                self.in_preedit = !self.preedit.is_empty();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+        }
+        // Any non-character control flushes the composer first so a
+        // pending 자모 doesn't get stranded when the user hits Enter /
+        // arrow / escape mid-syllable.
+        let is_control_key = matches!(
+            event.logical_key,
+            Key::Named(NamedKey::Enter)
+                | Key::Named(NamedKey::Tab)
+                | Key::Named(NamedKey::Escape)
+                | Key::Named(NamedKey::ArrowUp)
+                | Key::Named(NamedKey::ArrowDown)
+                | Key::Named(NamedKey::ArrowLeft)
+                | Key::Named(NamedKey::ArrowRight)
+        );
+        if is_control_key {
+            if let Some(flushed) = self.hangul.flush() {
+                self.send_bytes(flushed.as_bytes());
+            }
+            self.preedit.clear();
+            self.in_preedit = false;
+        }
+        // macOS-style delete shortcuts. iTerm2 / Terminal.app default
+        // these to the readline escape codes:
+        //   Option+Backspace → `\e\x7f`  (backward-kill-word)
+        //   Cmd+Backspace    → `\x15`    (unix-line-discard, Ctrl+U)
+        // We match physical key so the Korean layout's mapped char
+        // ('ㅣ' etc.) doesn't interfere.
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) {
+            let alt = self.modifiers.alt_key();
+            let cmd = self.modifiers.super_key();
+            if cmd {
+                self.send_bytes(b"\x15");
+                return;
+            }
+            if alt {
+                self.send_bytes(b"\x1b\x7f");
+                return;
             }
         }
         let bytes: Vec<u8> = match &event.logical_key {
@@ -903,24 +1035,48 @@ impl App {
             Key::Named(NamedKey::ArrowLeft) => b"\x1b[D".to_vec(),
             _ => match event.text.as_ref() {
                 Some(t) => {
-                    // Drop the keyboard-side Character event for any
-                    // codepoint the Hangul IME owns. winit + macOS
-                    // deliver the *first* keystroke after an English →
-                    // Korean switch through `event.text` as well as
-                    // through Ime::Preedit. If we forward both, the
-                    // shell sees a stray `ㅎ` before the Commit lands.
-                    // Treat any Hangul-related range as IME-owned;
-                    // other non-ASCII (Latin extended, emoji typed
-                    // directly without IME) still passes through.
-                    if t.chars().any(is_hangul_codepoint) {
-                        return;
+                    if std::env::var_os("TMUXIFY_IME_DEBUG").is_some() {
+                        eprintln!(
+                            "[key] text={t:?} logical_key={:?} ime_active={} in_preedit={}",
+                            event.logical_key, self.ime_active, self.in_preedit
+                        );
                     }
-                    // Outside an active preedit on non-Hangul scripts,
-                    // the Character event is the only channel.
-                    let non_ascii_during_preedit = self.in_preedit
-                        && !t.chars().all(|c| c.is_ascii() && !c.is_control());
-                    if non_ascii_during_preedit {
-                        return;
+                    // Hangul branch: route each jamo through our own
+                    // Composer. We get the jamo here because the
+                    // selected macOS keyboard layout (e.g. Korean
+                    // 두벌식) maps physical keys to Hangul compat
+                    // codepoints; with set_ime_allowed(false) the OS
+                    // IME doesn't intercept, so we see them all the
+                    // way from the first keystroke.
+                    if t.chars().count() == 1 {
+                        if let Some(c) = t.chars().next() {
+                            if (0x3130..=0x318F).contains(&(c as u32)) {
+                                if let Some(commit) = self.hangul.feed(c) {
+                                    self.send_bytes(commit.as_bytes());
+                                }
+                                self.preedit = self.hangul.preedit().unwrap_or_default();
+                                self.in_preedit = !self.preedit.is_empty();
+                                if let Some(w) = &self.window {
+                                    w.request_redraw();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    // Non-Hangul ASCII / control characters: flush any
+                    // pending Hangul syllable to the shell first, then
+                    // forward the new character verbatim.
+                    if !t.chars().all(|c| c.is_ascii() && !c.is_control()) {
+                        if (self.ime_active || self.in_preedit)
+                            && t.chars().any(is_hangul_codepoint)
+                        {
+                            return;
+                        }
+                    }
+                    if let Some(flushed) = self.hangul.flush() {
+                        self.send_bytes(flushed.as_bytes());
+                        self.preedit.clear();
+                        self.in_preedit = false;
                     }
                     t.as_bytes().to_vec()
                 }
@@ -1191,7 +1347,16 @@ impl ApplicationHandler for App {
         );
         // Without IME enabled, Hangul / kana would arrive as raw key
         // events instead of composing into 안 / 한 / 글.
-        window.set_ime_allowed(true);
+        // We compose Hangul ourselves via the in-process hangul-ime
+        // Composer, so the OS IME stays out of the way. Leaving the
+        // platform IME on means macOS fires its own Preedit one key
+        // late (the very first jamo after a script switch comes only
+        // through KeyboardInput), which produced the "조합이 첫 글자만
+        // 안 돼" symptom. With the platform IME disabled we still
+        // receive the Hangul jamo on KeyboardInput.text because the
+        // selected keyboard layout produces them — we just take the
+        // composition into our own hands from there.
+        window.set_ime_allowed(false);
         let sg_window = SugarloafWindow {
             handle: window.window_handle().unwrap().as_raw(),
             display: window.display_handle().unwrap().as_raw(),
@@ -1250,17 +1415,19 @@ impl ApplicationHandler for App {
         );
         self.sugarloaf = Some(sugarloaf);
         self.window = Some(window);
-        // Backend selection. TMUXIFY_BACKEND=pty opts into the
-        // Phase C direct-PTY path (single pane, no tmux daemon). Any
-        // other value (or unset) keeps the tmux-bridge path, which is
-        // currently the only one with multi-pane support.
-        let want_pty = std::env::var("TMUXIFY_BACKEND")
-            .map(|v| v.eq_ignore_ascii_case("pty"))
+        // Backend selection. Defaults to the Phase C direct-PTY path —
+        // no tmux daemon, no `set -g focus-events` warnings inside
+        // Claude Code, no kasaterm-cli's tmux quirks. TMUXIFY_BACKEND=tmux
+        // opts back into the tmux-bridge multiplexer when the user wants
+        // the multi-pane layout features that the in-process pty
+        // multiplexer doesn't have yet.
+        let want_tmux = std::env::var("TMUXIFY_BACKEND")
+            .map(|v| v.eq_ignore_ascii_case("tmux"))
             .unwrap_or(false);
-        let backend_result = if want_pty {
-            self.start_pty()
-        } else {
+        let backend_result = if want_tmux {
             self.start_tmux()
+        } else {
+            self.start_pty()
         };
         if let Err(e) = backend_result {
             eprintln!("[tmuxify] backend start failed: {e}");
@@ -1366,8 +1533,29 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
             WindowEvent::Ime(ime) => {
+                if std::env::var_os("TMUXIFY_IME_DEBUG").is_some() {
+                    eprintln!("[ime] event={ime:?}");
+                }
                 match ime {
+                    Ime::Enabled => {
+                        // OS IME just took ownership of the keyboard
+                        // (script switch / app focus). Mark active so
+                        // the KeyboardInput branch drops any echo of
+                        // text the IME will deliver via Preedit/Commit.
+                        self.ime_active = true;
+                        self.in_preedit = false;
+                        self.preedit.clear();
+                    }
+                    Ime::Disabled => {
+                        self.ime_active = false;
+                        self.in_preedit = false;
+                        self.preedit.clear();
+                    }
                     Ime::Preedit(text, _range) => {
+                        // Receiving a Preedit implies the IME is
+                        // active — winit doesn't always emit Enabled
+                        // first on macOS, so we set both flags here.
+                        self.ime_active = true;
                         self.in_preedit = !text.is_empty();
                         self.preedit = text;
                     }
@@ -1375,10 +1563,6 @@ impl ApplicationHandler for App {
                         self.in_preedit = false;
                         self.preedit.clear();
                         self.send_bytes(text.as_bytes());
-                    }
-                    Ime::Disabled | Ime::Enabled => {
-                        self.in_preedit = false;
-                        self.preedit.clear();
                     }
                 }
                 window.request_redraw();

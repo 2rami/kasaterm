@@ -9,6 +9,7 @@ license.workspace = true
 tmux-bridge.workspace = true
 pty-backend = { path = "../../crates/pty-backend" }
 agent-socket = { path = "../../crates/agent-socket" }
+hangul-ime = { path = "../../crates/hangul-ime" }
 sugarloaf = { version = "0.4", features = ["wgpu"] }
 winit = "0.30"
 raw-window-handle = "0.6"
