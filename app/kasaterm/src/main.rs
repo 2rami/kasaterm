@@ -546,7 +546,7 @@ impl App {
         std::env::set_var("KASATERM_SOCKET_PATH", &socket_path);
         std::env::set_var("CMUX_SOCKET_PATH", &socket_path);
         let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
-            shell: std::env::var("SHELL").ok(),
+            shell: resolve_default_shell(),
             cwd,
             cols,
             rows,
@@ -1069,7 +1069,7 @@ impl App {
         let (win_cols, win_rows) = self.window_cells();
         let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
         let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
-            shell: std::env::var("SHELL").ok(),
+            shell: resolve_default_shell(),
             cwd,
             cols: win_cols,
             rows: win_rows,
@@ -2379,6 +2379,39 @@ fn find_prompt_anchor(rows: &[Vec<GridCell>]) -> Option<(u16, u16)> {
             .unwrap_or(0);
         let col = last_advance.max((i as u16) + 2);
         return Some((r as u16, col));
+    }
+    None
+}
+
+/// Pick the shell to spawn inside a PTY. claude code's teammate mode
+/// emits Unix-quoted commands (`cd 'path' && env VAR=val cmd`), so a
+/// cmd.exe default leaves teammate spawns dead on arrival. Honor
+/// KASATERM_SHELL / SHELL when set, otherwise auto-discover Git for
+/// Windows' bash so users with a stock setup get a working unix-style
+/// shell without configuration. Returns None to let portable-pty's
+/// `new_default_prog` pick (cmd.exe on Windows, $SHELL on Unix).
+fn resolve_default_shell() -> Option<String> {
+    if let Ok(s) = std::env::var("KASATERM_SHELL") {
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    if let Ok(s) = std::env::var("SHELL") {
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    #[cfg(windows)]
+    {
+        for candidate in &[
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ] {
+            if std::path::Path::new(candidate).is_file() {
+                return Some((*candidate).to_string());
+            }
+        }
     }
     None
 }
