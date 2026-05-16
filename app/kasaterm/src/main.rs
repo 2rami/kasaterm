@@ -328,6 +328,31 @@ impl App {
         (elapsed / BLINK_HALF_PERIOD_MS as u128) % 2 == 0
     }
 
+    /// "Host modifier" chord that opens the kasaterm shortcut layer
+    /// (split / close / focus / copy-paste). macOS conventions reserve
+    /// Cmd for this; Windows and Linux terminals overwhelmingly use
+    /// Ctrl+Shift instead so Ctrl+letter stays free to deliver control
+    /// bytes to the shell.
+    fn host_mod(&self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.modifiers.super_key()
+        } else {
+            self.modifiers.control_key() && self.modifiers.shift_key()
+        }
+    }
+
+    /// Secondary modifier that flips a host shortcut into its alternate
+    /// behavior (e.g. `Cmd+Shift+D` = stacked split on macOS). The host
+    /// chord on Windows/Linux already owns Shift, so Alt fills the same
+    /// role there.
+    fn host_mod_alt(&self) -> bool {
+        if cfg!(target_os = "macos") {
+            self.modifiers.shift_key()
+        } else {
+            self.modifiers.alt_key()
+        }
+    }
+
     fn schedule_autocapture(&self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOCAPTURE_MS") else { return; };
         let Ok(ms) = ms_str.parse::<u64>() else { return; };
@@ -1376,13 +1401,14 @@ impl App {
         // (Ctrl+L clears, Ctrl+D = EOF, etc), so shells and TUI apps
         // behave as users expect regardless of which keyboard layout
         // happens to be active.
-        let cmd = self.modifiers.super_key();
+        let host = self.host_mod();
         let ctrl = self.modifiers.control_key();
-        if cmd || ctrl {
+        if host || ctrl {
             use winit::keyboard::{KeyCode, PhysicalKey};
             if let PhysicalKey::Code(code) = event.physical_key {
-                // Cmd shortcuts first — Cmd is the macOS host modifier.
-                if cmd {
+                // Host-modifier shortcuts. macOS uses Cmd, Windows/Linux
+                // use Ctrl+Shift — see `host_mod()`.
+                if host {
                     if code == KeyCode::KeyC && self.selection.is_some() {
                         self.copy_selection();
                         return;
@@ -1393,11 +1419,13 @@ impl App {
                     }
                     // Terminal.app split shortcuts. PTY mode only —
                     // tmux mode lets the daemon handle its own keys.
-                    // Cmd+D = side-by-side (vertical divider),
-                    // Cmd+Shift+D = stacked (horizontal divider).
-                    let shift = self.modifiers.shift_key();
+                    // Default split is side-by-side; the secondary host
+                    // modifier flips it to stacked. macOS host_mod_alt
+                    // resolves to Shift (Cmd+Shift+D), Windows/Linux
+                    // resolves to Alt (Ctrl+Shift+Alt+D) since Shift is
+                    // already consumed by host_mod.
                     if code == KeyCode::KeyD {
-                        let dir = if shift {
+                        let dir = if self.host_mod_alt() {
                             pty_backend::SplitDir::Vertical
                         } else {
                             pty_backend::SplitDir::Horizontal
@@ -1407,15 +1435,14 @@ impl App {
                         }
                         return;
                     }
-                    // Cmd+W closes the focused pane. Last-pane close
-                    // is left to Task #6 — for now bail out and let
-                    // the user use the OS close button.
+                    // Close the focused pane. Last-pane close is left
+                    // to the OS close button.
                     if code == KeyCode::KeyW {
                         self.close_active_pane();
                         return;
                     }
-                    // Cmd+[ / Cmd+] cycle focus through panes in
-                    // document order.
+                    // `[` / `]` cycle focus through panes in document
+                    // order.
                     if code == KeyCode::BracketLeft {
                         self.cycle_focus(-1);
                         return;
@@ -1428,7 +1455,10 @@ impl App {
                 // Ctrl+letter → the corresponding ASCII control byte.
                 // This covers Ctrl+C → 0x03 (SIGINT), Ctrl+D → 0x04 (EOF),
                 // Ctrl+L → 0x0c (clear), Ctrl+R → 0x12 (reverse search), etc.
-                if ctrl && !cmd {
+                // Suppressed when host is engaged so Ctrl+Shift+letter
+                // shortcuts on Windows/Linux don't double-fire as both a
+                // shortcut and a control byte.
+                if ctrl && !host {
                     let letter = match code {
                         KeyCode::KeyA => Some(b'\x01'),
                         KeyCode::KeyB => Some(b'\x02'),
@@ -1508,20 +1538,19 @@ impl App {
             self.preedit.clear();
             self.in_preedit = false;
         }
-        // macOS-style delete shortcuts. iTerm2 / Terminal.app default
-        // these to the readline escape codes:
-        //   Option+Backspace → `\e\x7f`  (backward-kill-word)
-        //   Cmd+Backspace    → `\x15`    (unix-line-discard, Ctrl+U)
+        // Readline-style delete shortcuts. Defaults match iTerm2 /
+        // Terminal.app on macOS and Windows Terminal on Windows:
+        //   Option/Alt+Backspace → `\e\x7f`  (backward-kill-word)
+        //   host_mod+Backspace   → `\x15`    (unix-line-discard, Ctrl+U)
+        // host_mod resolves to Cmd on macOS, Ctrl+Shift on Windows/Linux.
         // We match physical key so the Korean layout's mapped char
         // ('ㅣ' etc.) doesn't interfere.
         if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) {
-            let alt = self.modifiers.alt_key();
-            let cmd = self.modifiers.super_key();
-            if cmd {
+            if self.host_mod() {
                 self.send_bytes(b"\x15");
                 return;
             }
-            if alt {
+            if self.modifiers.alt_key() {
                 self.send_bytes(b"\x1b\x7f");
                 return;
             }
