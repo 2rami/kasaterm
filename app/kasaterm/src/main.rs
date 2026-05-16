@@ -331,8 +331,12 @@ impl App {
     fn schedule_autocapture(&self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOCAPTURE_MS") else { return; };
         let Ok(ms) = ms_str.parse::<u64>() else { return; };
-        let path = std::env::var("KASATERM_AUTOCAPTURE_PATH")
-            .unwrap_or_else(|_| "/tmp/tmuxify.png".into());
+        let path = std::env::var("KASATERM_AUTOCAPTURE_PATH").unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("tmuxify.png")
+                .to_string_lossy()
+                .into_owned()
+        });
         eprintln!("[autocapture] in {ms}ms → {path}");
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -2153,26 +2157,36 @@ fn install_tmux_shim() {
         eprintln!("[shim] mkdir {shim_dir:?} failed: {e}");
         return;
     }
-    let target = shim_dir.join("tmux");
+    let shim_target_name = if cfg!(windows) { "tmux.exe" } else { "tmux" };
+    let target = shim_dir.join(shim_target_name);
     let _ = std::fs::remove_file(&target);
-    // Symlink so we don't pay for a copy each launch and so updates
-    // to the shim binary propagate without a reinstall.
-    if let Err(e) = std::os::unix::fs::symlink(&shim_src, &target) {
-        eprintln!("[shim] symlink {shim_src:?} -> {target:?} failed: {e}");
+    // Symlink first so we don't pay for a copy each launch and so
+    // updates to the shim binary propagate without a reinstall. On
+    // Windows symlinks need Developer Mode or admin — fall back to a
+    // plain copy so we always end up with a usable shim binary.
+    if let Err(e) = stage_shim(&shim_src, &target) {
+        eprintln!("[shim] stage {shim_src:?} -> {target:?} failed: {e}");
         return;
     }
-    let trace = std::env::var("KASATERM_TMUX_TRACE")
-        .unwrap_or_else(|_| "/tmp/kasaterm-tmux-calls.log".into());
+    let trace = std::env::var("KASATERM_TMUX_TRACE").unwrap_or_else(|_| {
+        std::env::temp_dir()
+            .join("kasaterm-tmux-calls.log")
+            .to_string_lossy()
+            .into_owned()
+    });
     let real = std::env::var("KASATERM_REAL_TMUX").unwrap_or_else(|_| {
-        ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
-            .into_iter()
+        real_tmux_candidates()
+            .iter()
+            .copied()
             .find(|p| std::path::Path::new(p).is_file())
             .unwrap_or("")
             .to_string()
     });
     let fake_tmux = format!(
-        "/tmp/kasaterm-tmux-{}.sock,{},0",
-        std::process::id(),
+        "{},{},0",
+        std::env::temp_dir()
+            .join(format!("kasaterm-tmux-{}.sock", std::process::id()))
+            .display(),
         std::process::id()
     );
     std::env::set_var("KASATERM_TMUX_SHIM_DIR", &shim_dir);
@@ -2198,14 +2212,59 @@ fn locate_shim_binary() -> Option<std::path::PathBuf> {
     }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    let candidate = dir.join("tmux");
-    if candidate.is_file() {
-        return Some(candidate);
+    // Match the bare binary on Unix and the .exe-suffixed binary that
+    // cargo produces on Windows.
+    let candidates = if cfg!(windows) {
+        ["tmux.exe", "tmux"]
+    } else {
+        ["tmux", "tmux"]
+    };
+    for name in candidates {
+        let c = dir.join(name);
+        if c.is_file() {
+            return Some(c);
+        }
     }
     // dev fallback: target/debug/tmux when running via `cargo run`
     // from somewhere odd. current_exe usually already points there
     // but be defensive.
     None
+}
+
+/// Place the shim binary at `target` so child shells can find it.
+/// Symlink first, fall back to a plain copy when the platform refuses
+/// (Windows without Developer Mode or admin will reject CreateSymbolicLink).
+fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(src, target)
+    }
+    #[cfg(windows)]
+    {
+        match std::os::windows::fs::symlink_file(src, target) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // Symlink path failed (likely a non-admin, non-dev-mode
+                // user). Copy the bytes so we still end up with a
+                // working tmux.exe in the shim dir.
+                std::fs::copy(src, target).map(|_| ())
+            }
+        }
+    }
+}
+
+/// Common install locations for the real tmux binary. Used when no
+/// `KASATERM_REAL_TMUX` env override is provided.
+#[cfg(unix)]
+fn real_tmux_candidates() -> &'static [&'static str] {
+    &["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
+}
+
+#[cfg(windows)]
+fn real_tmux_candidates() -> &'static [&'static str] {
+    // Windows has no canonical tmux install path; rely on the env
+    // override when the user has wired up WSL-tmux or a custom build.
+    &[]
 }
 
 #[cfg(test)]
