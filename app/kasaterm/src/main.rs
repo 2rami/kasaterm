@@ -29,7 +29,18 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 const FONT_SIZE: f32 = 14.0;
-const LINE_HEIGHT_MULT: f32 = 1.3;
+/// Line spacing multiplier passed to `compute_cell_metrics`. 1.0 keeps
+/// rows at font ascent+descent so the cell aspect ratio stays close to
+/// 1:2 — that's what makes half-block sprite art (Claude Code's mascot,
+/// `▀▄▌▐` characters) read as squares instead of tall rectangles. The
+/// earlier 1.3 stretched cells to 1:3 and made the sprite look
+/// elongated next to Ghostty / iTerm2.
+const LINE_HEIGHT_MULT: f32 = 1.0;
+/// Logical-pixel padding between the window edge and the cell grid on
+/// every side. Mirrors what Terminal.app / Ghostty give the content so
+/// text doesn't jam against the chrome. Must match `render_frame`'s
+/// origin and `px_to_pane_cell`'s offset.
+const WINDOW_PADDING: f32 = 10.0;
 const SCROLLBACK_MAX: usize = 5000;
 const WHEEL_THROTTLE_MS: u64 = 8;
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
@@ -219,10 +230,27 @@ struct App {
     tmux: Option<Arc<TmuxSession>>,
     /// Phase C backend. Mutually exclusive with `tmux` — exactly one
     /// is `Some` after `start_backend`. Selection driven by the
-    /// TMUXIFY_BACKEND env var; defaults to PTY now that the Phase C
+    /// KASATERM_BACKEND env var; defaults to PTY now that the Phase C
     /// path is the recommended one (no tmux daemon, no focus-events
     /// warnings from Claude Code).
-    pty: Option<Arc<pty_backend::PtySession>>,
+    /// All live PTY sessions, keyed by pane id. Empty when running in
+    /// tmux mode. Multi-pane PTY mode inserts one entry per split.
+    pty: HashMap<String, Arc<pty_backend::PtySession>>,
+    /// BSP layout tree for multi-pane PTY mode. `None` in tmux mode —
+    /// the tmux daemon owns the layout there and ships it via
+    /// `%layout-change` instead.
+    pty_layout: Option<pty_backend::PtyLayout>,
+    /// Monotonic counter for the next "%N" pane id when splitting.
+    next_pane_id: u32,
+    /// Queued split directions driven by KASATERM_AUTOSPLIT — headless
+    /// repro for the multi-pane render path. Empty in normal use.
+    autosplit_plan: Vec<pty_backend::SplitDir>,
+    autosplit_at: Option<Instant>,
+    /// Pane ids whose PTY reader thread has disconnected (shell exited
+    /// or PTY closed). Drained on the main thread in `about_to_wait`
+    /// so the tree mutation runs without holding the workspace lock
+    /// across a session drop.
+    dead_panes: Arc<Mutex<Vec<String>>>,
     ws: Arc<Mutex<Workspace>>,
     /// Measured cell geometry from sugarloaf — see `compute_cell_metrics`.
     cell: CellGeom,
@@ -261,7 +289,12 @@ impl App {
             window: None,
             sugarloaf: None,
             tmux: None,
-            pty: None,
+            pty: HashMap::new(),
+            pty_layout: None,
+            next_pane_id: 1, // %0 is the initial pane created in start_pty
+            autosplit_plan: Vec::new(),
+            autosplit_at: None,
+            dead_panes: Arc::new(Mutex::new(Vec::new())),
             ws: Arc::new(Mutex::new(Workspace::default())),
             cell: CellGeom::default(),
             preedit: String::new(),
@@ -291,9 +324,9 @@ impl App {
     }
 
     fn schedule_autocapture(&self) {
-        let Ok(ms_str) = std::env::var("TMUXIFY_AUTOCAPTURE_MS") else { return; };
+        let Ok(ms_str) = std::env::var("KASATERM_AUTOCAPTURE_MS") else { return; };
         let Ok(ms) = ms_str.parse::<u64>() else { return; };
-        let path = std::env::var("TMUXIFY_AUTOCAPTURE_PATH")
+        let path = std::env::var("KASATERM_AUTOCAPTURE_PATH")
             .unwrap_or_else(|_| "/tmp/tmuxify.png".into());
         eprintln!("[autocapture] in {ms}ms → {path}");
         std::thread::spawn(move || {
@@ -344,8 +377,8 @@ impl App {
     }
 
     fn schedule_autosend(&self) {
-        let Ok(text) = std::env::var("TMUXIFY_AUTOSEND") else { return; };
-        let ms: u64 = std::env::var("TMUXIFY_AUTOSEND_MS")
+        let Ok(text) = std::env::var("KASATERM_AUTOSEND") else { return; };
+        let ms: u64 = std::env::var("KASATERM_AUTOSEND_MS")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(2000);
@@ -353,7 +386,11 @@ impl App {
         // Capture whichever backend is wired so we don't need access
         // to self inside the timer thread.
         let tmux = self.tmux.clone();
-        let pty = self.pty.clone();
+        // Autosend always targets the currently-focused pane. In tmux
+        // mode we leave pane targeting to the daemon; in pty mode we
+        // grab the active session here so the closure doesn't need
+        // self access.
+        let pty = self.active_pty().cloned();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(ms));
             let mut payload = text.clone();
@@ -373,30 +410,19 @@ impl App {
         });
     }
 
-    /// Phase C path. Spawns the shell into a direct PTY (no tmux),
-    /// hooks the screens channel into the same per-pane state the
-    /// renderer expects. Single-pane MVP — the workspace holds one
-    /// PaneState keyed "%0" and the layout is `None` (the render path
-    /// falls back to single-pane when no layout has arrived).
-    fn start_pty(&mut self) -> Result<()> {
-        let window = self.window.as_ref().expect("window before pty");
-        let size = window.inner_size();
-        let scale = window.scale_factor() as f32;
-        let lw = size.width as f32 / scale;
-        let lh = size.height as f32 / scale;
-        let cols = (lw / self.cell.w).floor().max(40.0) as u16;
-        let rows = (lh / self.cell.h).floor().max(10.0) as u16;
-        let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
-        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
-            shell: std::env::var("SHELL").ok(),
-            cwd,
-            cols,
-            rows,
-            env: Vec::new(),
-        })?;
-        let screens = session.screens.clone();
+    /// Drain a PtySession's screen-update channel into shared workspace
+    /// state. Used both by `start_pty` (initial pane) and by
+    /// `split_active_pane` (every additional pane), so the per-pane
+    /// state arrives through the same path no matter when the session
+    /// was spawned.
+    fn pump_pty_screens(
+        &self,
+        screens: pty_backend::ScreenReceiver<tmux_bridge::screen::ScreenUpdate>,
+        pane_id: String,
+    ) {
         let ws_screens = self.ws.clone();
         let win_screens = self.window.clone();
+        let dead = self.dead_panes.clone();
         std::thread::spawn(move || {
             while let Ok(update) = screens.recv() {
                 let mut ws = ws_screens.lock().unwrap();
@@ -457,23 +483,105 @@ impl App {
                     w.request_redraw();
                 }
             }
+            // Channel disconnected — the reader thread exited because
+            // the PTY hit EOF (shell quit) or errored. Flag this pane
+            // for the main thread to remove on its next tick.
+            dead.lock().unwrap().push(pane_id);
+            if let Some(w) = win_screens.as_ref() {
+                w.request_redraw();
+            }
         });
-        self.pty = Some(Arc::new(session));
+    }
+
+    /// Phase C path. Spawns the shell into a direct PTY (no tmux),
+    /// hooks the screens channel into the same per-pane state the
+    /// renderer expects. Single-pane MVP — the workspace holds one
+    /// PaneState keyed "%0" and the layout is `None` (the render path
+    /// falls back to single-pane when no layout has arrived).
+    fn start_pty(&mut self) -> Result<()> {
+        let _window = self.window.as_ref().expect("window before pty");
+        let (cols, rows) = self.window_cells();
+        let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
+        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+            shell: std::env::var("SHELL").ok(),
+            cwd,
+            cols,
+            rows,
+            env: Vec::new(),
+            pane_id: "%0".to_string(),
+        })?;
+        self.pump_pty_screens(session.screens.clone(), "%0".to_string());
+        self.pty.insert("%0".to_string(), Arc::new(session));
+        self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
+        // Seed active_pane immediately so split / focus shortcuts work
+        // before the first ScreenUpdate lands. pump_pty_screens won't
+        // overwrite a non-None active_pane.
+        self.ws.lock().unwrap().active_pane = Some("%0".to_string());
+        // No ws.layout update here — a single pane uses the
+        // single-pane fallback in the render path, same as tmux mode
+        // does before its first %layout-change arrives.
         Ok(())
     }
 
+    /// Headless verification helper. Reads `KASATERM_AUTOSPLIT` ("h" / "v"
+    /// / "hv" / "vh" ...) and fires the matching splits from
+    /// `about_to_wait` after `KASATERM_AUTOSPLIT_MS` (default 2500ms),
+    /// so a background `cargo run` can prove multi-pane rendering
+    /// without a human pressing Cmd+D.
+    fn run_pending_autosplits(&mut self) {
+        if self.autosplit_plan.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let due = match self.autosplit_at {
+            Some(t) => t,
+            None => return,
+        };
+        if now < due {
+            return;
+        }
+        let dir = self.autosplit_plan.remove(0);
+        if let Err(e) = self.split_active_pane(dir) {
+            eprintln!("[autosplit] split failed: {e}");
+        }
+        // Chain the next split 500ms later so the renderer has time to
+        // settle and a screenshot can capture intermediate states.
+        self.autosplit_at = if self.autosplit_plan.is_empty() {
+            None
+        } else {
+            Some(now + std::time::Duration::from_millis(500))
+        };
+    }
+
+    fn arm_autosplit(&mut self) {
+        let Ok(plan) = std::env::var("KASATERM_AUTOSPLIT") else { return; };
+        let ms: u64 = std::env::var("KASATERM_AUTOSPLIT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2500);
+        let dirs: Vec<pty_backend::SplitDir> = plan
+            .chars()
+            .filter_map(|c| match c {
+                'h' | 'H' => Some(pty_backend::SplitDir::Horizontal),
+                'v' | 'V' => Some(pty_backend::SplitDir::Vertical),
+                _ => None,
+            })
+            .collect();
+        if dirs.is_empty() {
+            return;
+        }
+        eprintln!("[autosplit] armed: {plan:?} in {ms}ms");
+        self.autosplit_plan = dirs;
+        self.autosplit_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+    }
+
     fn start_tmux(&mut self) -> Result<()> {
-        let window = self.window.as_ref().expect("window before tmux");
-        let size = window.inner_size();
-        let scale = window.scale_factor() as f32;
-        let lw = size.width as f32 / scale;
-        let lh = size.height as f32 / scale;
-        let cols = (lw / self.cell.w).floor().max(40.0) as u16;
-        let rows = (lh / self.cell.h).floor().max(10.0) as u16;
+        let _window = self.window.as_ref().expect("window before tmux");
+        let (cols, rows) = self.window_cells();
         let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
         let tmux = TmuxSession::start(StartOptions {
             cwd: cwd.as_deref(),
-            socket_name: Some("tmuxify"),
+            socket_name: Some("kasaterm"),
             cols,
             rows,
             ..Default::default()
@@ -565,7 +673,7 @@ impl App {
                     // chrome — background panes change silently.
                     if title_changed && is_active {
                         let display =
-                            new_title.unwrap_or_else(|| "tmuxify".into());
+                            new_title.unwrap_or_else(|| "kasaterm".into());
                         w.set_title(&display);
                     }
                     w.request_redraw();
@@ -635,12 +743,12 @@ impl App {
     /// pane. The server is best-effort — a bind failure logs and the
     /// rest of the binary keeps working without it. Two env names are
     /// exported on the spawned shell:
-    ///   - TMUXIFY_SOCKET_PATH (our brand)
+    ///   - KASATERM_SOCKET_PATH (our brand)
     ///   - CMUX_SOCKET_PATH (so cmux-aware clients auto-detect us)
     /// Both point at the same socket; the second is the cmux-protocol
     /// convention from issue anthropics/claude-code#36926.
     fn start_socket(&self, tmux: Arc<tmux_bridge::TmuxSession>) {
-        let path = std::env::var("TMUXIFY_SOCKET_PATH")
+        let path = std::env::var("KASATERM_SOCKET_PATH")
             .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))
             .unwrap_or_else(|_| {
                 format!(
@@ -658,7 +766,7 @@ impl App {
         };
         let resolved = server.socket_path().to_string_lossy().to_string();
         eprintln!("[agent-socket] listening on {resolved}");
-        std::env::set_var("TMUXIFY_SOCKET_PATH", &resolved);
+        std::env::set_var("KASATERM_SOCKET_PATH", &resolved);
         std::env::set_var("CMUX_SOCKET_PATH", &resolved);
         let backend: Arc<dyn agent_socket::Backend> =
             Arc::new(socket::TmuxBackend::new(tmux));
@@ -673,11 +781,11 @@ impl App {
     /// every pane (gutter between split borders, padding, etc).
     fn px_to_pane_cell(&self, px: f32, py: f32) -> Option<(String, u16, u16)> {
         let ws = self.ws.lock().unwrap();
-        // The 8.0 padding lines up with render_frame's origin offset —
+        // The WINDOW_PADDING offset must match render_frame's origin —
         // both the grid and the click reuse it so the math stays
         // consistent on the boundary cells.
-        let col = ((px - 8.0).max(0.0) / self.cell.w).floor() as u16;
-        let row = ((py - 8.0).max(0.0) / self.cell.h).floor() as u16;
+        let col = ((px - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as u16;
+        let row = ((py - WINDOW_PADDING).max(0.0) / self.cell.h).floor() as u16;
         if let Some(layout) = ws.layout.as_ref() {
             for leaf in layout.leaves() {
                 if let Layout::Pane { id, x, y, w, h } = leaf {
@@ -717,15 +825,240 @@ impl App {
         self.ws.lock().unwrap().active_pane.clone()
     }
 
-    /// Resize whichever backend is wired up. Tmux gets its
-    /// `resize-client`, the direct PTY gets `TIOCSWINSZ` via
-    /// `portable-pty::resize`. Renderer code calls this uniformly
-    /// from the WindowEvent::Resized handler.
+    /// The PtySession that currently has keyboard focus, if any. Used
+    /// by every routing-by-active-pane code path in PTY mode.
+    fn active_pty(&self) -> Option<&Arc<pty_backend::PtySession>> {
+        let id = self.ws.lock().unwrap().active_pane.clone()?;
+        self.pty.get(&id)
+    }
+
+    /// Window size in cell coordinates. Source of truth for resize
+    /// distribution + new-pane sizing. The grid lives inside
+    /// `WINDOW_PADDING` on every side, so subtract 2× padding from the
+    /// logical viewport before dividing — otherwise we tell the PTY it
+    /// has N rows but only N-1 fit before clipping, and the last row
+    /// (where most TUIs paint their statusline) gets cut in half.
+    /// Falls back to (80, 24) when the window isn't ready yet.
+    fn window_cells(&self) -> (u16, u16) {
+        let Some(window) = self.window.as_ref() else {
+            return (80, 24);
+        };
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let raw_lw = size.width as f32 / scale;
+        let raw_lh = size.height as f32 / scale;
+        let lw = (raw_lw - 2.0 * WINDOW_PADDING).max(0.0);
+        let lh = (raw_lh - 2.0 * WINDOW_PADDING).max(0.0);
+        let cols = (lw / self.cell.w).floor().max(40.0) as u16;
+        let rows = (lh / self.cell.h).floor().max(10.0) as u16;
+        let _ = (raw_lw, raw_lh);
+        (cols, rows)
+    }
+
+    /// Push the current PtyLayout into `ws.layout` so the renderer
+    /// (which only knows the tmux Layout shape) picks up the splits.
+    /// A single-leaf tree leaves `ws.layout` empty — the render path's
+    /// single-pane fallback handles that case.
+    fn publish_pty_layout(&self) {
+        let Some(tree) = self.pty_layout.as_ref() else { return; };
+        let (cols, rows) = self.window_cells();
+        let mut ws = self.ws.lock().unwrap();
+        if tree.leaves().len() <= 1 {
+            ws.layout = None;
+        } else {
+            ws.layout = Some(tree.to_tmux_layout(cols, rows));
+        }
+    }
+
+    /// Resize every backend session so its grid matches the new window
+    /// size. In tmux mode the daemon redistributes for us. In PTY mode
+    /// we walk the BSP tree and SIGWINCH each leaf to its own rect.
     fn resize_backend(&self, cols: u16, rows: u16) {
         if let Some(tmux) = self.tmux.as_ref() {
             let _ = tmux.resize_client(cols, rows);
-        } else if let Some(pty) = self.pty.as_ref() {
-            let _ = pty.resize(cols, rows);
+            return;
+        }
+        let Some(tree) = self.pty_layout.as_ref() else { return; };
+        for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
+            if let Some(sess) = self.pty.get(&id) {
+                let _ = sess.resize(w, h);
+            }
+        }
+        // Re-publish the layout because rect proportions may have
+        // shifted (rounding) and the renderer caches the previous tree.
+        self.publish_pty_layout();
+    }
+
+    /// Split the focused pane in PTY mode. Spawns a new shell into a
+    /// fresh PTY, inserts it into the BSP tree on the right (Horizontal)
+    /// or bottom (Vertical) of the focused leaf, then resizes every
+    /// session so each one matches its new rect. Becomes a no-op in
+    /// tmux mode — splits there go through the cmux socket / tmux
+    /// `split-window` instead.
+    fn split_active_pane(&mut self, dir: pty_backend::SplitDir) -> Result<()> {
+        if self.tmux.is_some() {
+            return Ok(());
+        }
+        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
+            return Ok(());
+        };
+        let new_id = format!("%{}", self.next_pane_id);
+        self.next_pane_id += 1;
+
+        // Spawn the new session at a placeholder size — the resize
+        // pass right after `split_leaf` puts every leaf at its real
+        // rect, so the initial cols/rows here only matters for the
+        // first bytes the shell prints before SIGWINCH lands.
+        let (win_cols, win_rows) = self.window_cells();
+        let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
+        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+            shell: std::env::var("SHELL").ok(),
+            cwd,
+            cols: win_cols,
+            rows: win_rows,
+            env: Vec::new(),
+            pane_id: new_id.clone(),
+        })?;
+        self.pump_pty_screens(session.screens.clone(), new_id.clone());
+        self.pty.insert(new_id.clone(), Arc::new(session));
+
+        let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
+        if !layout.split_leaf(&active, dir, new_id.clone()) {
+            // Active pane isn't in the tree — shouldn't happen, but
+            // bail without leaking the spawned session entry.
+            self.pty.remove(&new_id);
+            self.next_pane_id -= 1;
+            return Ok(());
+        }
+        self.ws.lock().unwrap().active_pane = Some(new_id);
+        self.resize_backend(win_cols, win_rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+
+    /// Drain `dead_panes` and remove each from the BSP tree + pty map.
+    /// Called on the main thread from `about_to_wait` so the mutation
+    /// runs without competing with the per-session reader threads.
+    /// If removing all panes empties the tree, exit the event loop.
+    fn reap_dead_panes(&mut self, event_loop: &ActiveEventLoop) {
+        let ids: Vec<String> = std::mem::take(&mut *self.dead_panes.lock().unwrap());
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            if !self.pty.contains_key(&id) {
+                continue;
+            }
+            self.remove_pane(&id);
+        }
+        // Last pane closed (e.g. user typed `exit` in the only shell):
+        // shut the window so tmuxify exits cleanly the way users
+        // expect from a regular terminal.
+        if self.tmux.is_none() && self.pty.is_empty() {
+            event_loop.exit();
+        }
+    }
+
+    /// Internal: drop a pane regardless of whether it's the active one.
+    /// Used by both `close_active_pane` (Cmd+W) and `reap_dead_panes`
+    /// (shell exit). Picks a survivor focus when removing the focused
+    /// pane.
+    fn remove_pane(&mut self, target: &str) {
+        let was_active = self
+            .ws
+            .lock()
+            .unwrap()
+            .active_pane
+            .as_deref()
+            .map(|a| a == target)
+            .unwrap_or(false);
+        let leaves: Vec<String> = match self.pty_layout.as_ref() {
+            Some(t) => t.leaves().iter().map(|s| s.to_string()).collect(),
+            None => return,
+        };
+        let next_focus: Option<String> = if was_active && leaves.len() > 1 {
+            let cur_idx = leaves.iter().position(|l| l == target).unwrap_or(0);
+            if cur_idx + 1 < leaves.len() {
+                Some(leaves[cur_idx + 1].clone())
+            } else {
+                Some(leaves[cur_idx - 1].clone())
+            }
+        } else {
+            None
+        };
+        if leaves.len() > 1 {
+            if let Some(tree) = self.pty_layout.as_mut() {
+                tree.remove_leaf(target);
+            }
+        } else {
+            // Last leaf — drop the tree entirely so single-pane
+            // fallback re-engages if a future split repopulates it.
+            self.pty_layout = None;
+        }
+        self.pty.remove(target);
+        {
+            let mut ws = self.ws.lock().unwrap();
+            ws.panes.remove(target);
+            if was_active {
+                ws.active_pane = next_focus;
+            }
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Remove the focused pane from the BSP tree and drop its PTY
+    /// session. Focus moves to the next pane in document order
+    /// (wrapping to the previous when we just closed the last one).
+    /// Last-pane close is a no-op — quitting the window is the
+    /// user's exit there.
+    fn close_active_pane(&mut self) {
+        if self.tmux.is_some() {
+            return;
+        }
+        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
+            return;
+        };
+        // Last-pane Cmd+W is a no-op — the OS close button is how
+        // users quit a single-pane window. The shell-exit path takes
+        // care of the cascade close when the last shell `exit`s.
+        let leaves = match self.pty_layout.as_ref() {
+            Some(t) => t.leaves().len(),
+            None => 0,
+        };
+        if leaves <= 1 {
+            return;
+        }
+        self.remove_pane(&active);
+    }
+
+    /// Cycle focus to the previous (delta=-1) or next (delta=+1) pane
+    /// in document order. No-op when there's only one pane.
+    fn cycle_focus(&self, delta: i32) {
+        let Some(tree) = self.pty_layout.as_ref() else { return; };
+        let leaves: Vec<String> = tree.leaves().iter().map(|s| s.to_string()).collect();
+        if leaves.len() < 2 {
+            return;
+        }
+        let mut ws = self.ws.lock().unwrap();
+        let cur_idx = ws
+            .active_pane
+            .as_deref()
+            .and_then(|id| leaves.iter().position(|l| l == id))
+            .unwrap_or(0);
+        let n = leaves.len() as i32;
+        let new_idx = ((cur_idx as i32 + delta).rem_euclid(n)) as usize;
+        ws.active_pane = Some(leaves[new_idx].clone());
+        drop(ws);
+        if let Some(w) = &self.window {
+            w.request_redraw();
         }
     }
 
@@ -745,7 +1078,7 @@ impl App {
                 .join(" ");
             let target = self.target_pane();
             let _ = tmux.send_keys_hex(target.as_deref(), &hex);
-        } else if let Some(pty) = self.pty.as_ref() {
+        } else if let Some(pty) = self.active_pty() {
             let _ = pty.send_bytes(bytes);
         }
     }
@@ -841,8 +1174,10 @@ impl App {
                         .join(" ");
                     let _ = tmux.send_keys_hex(Some(target), &hex);
                 }
-            } else if let Some(pty) = self.pty.as_ref() {
-                let _ = pty.send_bytes(&payload);
+            } else if let Some(id) = target_pane_id.as_deref() {
+                if let Some(pty) = self.pty.get(id) {
+                    let _ = pty.send_bytes(&payload);
+                }
             }
             return;
         }
@@ -857,8 +1192,10 @@ impl App {
                         .join(" ");
                     let _ = tmux.send_keys_hex(Some(target), &hex);
                 }
-            } else if let Some(pty) = self.pty.as_ref() {
-                let _ = pty.send_bytes(esc);
+            } else if let Some(id) = target_pane_id.as_deref() {
+                if let Some(pty) = self.pty.get(id) {
+                    let _ = pty.send_bytes(esc);
+                }
             }
             return;
         }
@@ -920,6 +1257,39 @@ impl App {
                     }
                     if code == KeyCode::KeyV {
                         self.paste_clipboard();
+                        return;
+                    }
+                    // Terminal.app split shortcuts. PTY mode only —
+                    // tmux mode lets the daemon handle its own keys.
+                    // Cmd+D = side-by-side (vertical divider),
+                    // Cmd+Shift+D = stacked (horizontal divider).
+                    let shift = self.modifiers.shift_key();
+                    if code == KeyCode::KeyD {
+                        let dir = if shift {
+                            pty_backend::SplitDir::Vertical
+                        } else {
+                            pty_backend::SplitDir::Horizontal
+                        };
+                        if let Err(e) = self.split_active_pane(dir) {
+                            eprintln!("[tmuxify] split failed: {e}");
+                        }
+                        return;
+                    }
+                    // Cmd+W closes the focused pane. Last-pane close
+                    // is left to Task #6 — for now bail out and let
+                    // the user use the OS close button.
+                    if code == KeyCode::KeyW {
+                        self.close_active_pane();
+                        return;
+                    }
+                    // Cmd+[ / Cmd+] cycle focus through panes in
+                    // document order.
+                    if code == KeyCode::BracketLeft {
+                        self.cycle_focus(-1);
+                        return;
+                    }
+                    if code == KeyCode::BracketRight {
+                        self.cycle_focus(1);
                         return;
                     }
                 }
@@ -1035,7 +1405,7 @@ impl App {
             Key::Named(NamedKey::ArrowLeft) => b"\x1b[D".to_vec(),
             _ => match event.text.as_ref() {
                 Some(t) => {
-                    if std::env::var_os("TMUXIFY_IME_DEBUG").is_some() {
+                    if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
                         eprintln!(
                             "[key] text={t:?} logical_key={:?} ime_active={} in_preedit={}",
                             event.logical_key, self.ime_active, self.in_preedit
@@ -1192,8 +1562,8 @@ impl App {
 
         // Origin offset matches kasaterm-cli — 8px padding around the
         // outer grid so chrome doesn't crowd the cells.
-        let origin_x = 8.0;
-        let origin_y = 8.0;
+        let origin_x = WINDOW_PADDING;
+        let origin_y = WINDOW_PADDING;
 
         // Pass 1: walk each pane and render its cell grid at its rect.
         for frame in &pane_frames {
@@ -1338,8 +1708,13 @@ impl ApplicationHandler for App {
             Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
         ));
         let attrs = WindowAttributes::default()
-            .with_title("tmuxify")
-            .with_inner_size(LogicalSize::new(960.0, 600.0));
+            .with_title("kasaterm")
+            // Claude Code's footer eats ~4 rows (statusline x2, input,
+            // tokens), so 600px high left only 32 rows after padding
+            // and the bottom `bypass permissions…` line clipped. 760px
+            // gives 40+ rows at the current font/line-height and lines
+            // up with Ghostty / Terminal.app default heights.
+            .with_inner_size(LogicalSize::new(1024.0, 720.0));
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -1417,11 +1792,11 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         // Backend selection. Defaults to the Phase C direct-PTY path —
         // no tmux daemon, no `set -g focus-events` warnings inside
-        // Claude Code, no kasaterm-cli's tmux quirks. TMUXIFY_BACKEND=tmux
+        // Claude Code, no kasaterm-cli's tmux quirks. KASATERM_BACKEND=tmux
         // opts back into the tmux-bridge multiplexer when the user wants
         // the multi-pane layout features that the in-process pty
         // multiplexer doesn't have yet.
-        let want_tmux = std::env::var("TMUXIFY_BACKEND")
+        let want_tmux = std::env::var("KASATERM_BACKEND")
             .map(|v| v.eq_ignore_ascii_case("tmux"))
             .unwrap_or(false);
         let backend_result = if want_tmux {
@@ -1434,6 +1809,7 @@ impl ApplicationHandler for App {
         }
         self.schedule_autosend();
         self.schedule_autocapture();
+        self.arm_autosplit();
     }
 
     fn window_event(
@@ -1454,11 +1830,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) => {
                 sugarloaf.resize(size.width, size.height);
-                let scale = window.scale_factor() as f32;
-                let lw = size.width as f32 / scale;
-                let lh = size.height as f32 / scale;
-                let cols = (lw / self.cell.w).floor().max(40.0) as u16;
-                let rows = (lh / self.cell.h).floor().max(10.0) as u16;
+                // window_cells() already subtracts WINDOW_PADDING on
+                // both sides — using inline raw math here told the PTY
+                // there were 2 more rows than we actually paint, and
+                // the last two lines (Claude Code's `bypass…` row)
+                // landed past our grid bottom.
+                let (cols, rows) = self.window_cells();
                 self.resize_backend(cols, rows);
                 window.request_redraw();
             }
@@ -1533,7 +1910,7 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
             WindowEvent::Ime(ime) => {
-                if std::env::var_os("TMUXIFY_IME_DEBUG").is_some() {
+                if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
                     eprintln!("[ime] event={ime:?}");
                 }
                 match ime {
@@ -1578,6 +1955,13 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Reap dead pty sessions before anything else — a closed shell
+        // should disappear from the layout on the very next loop turn
+        // so the user sees the gap collapse immediately.
+        self.reap_dead_panes(event_loop);
+        // Fire any due KASATERM_AUTOSPLIT step before parking. No-op
+        // when no plan is queued.
+        self.run_pending_autosplits();
         // Re-arm the blink deadline every loop turn so the cursor toggles
         // even on an idle terminal. WaitUntil(deadline) keeps the runtime
         // asleep — no CPU until either the deadline lands or fresh input
