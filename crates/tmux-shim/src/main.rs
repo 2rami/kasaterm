@@ -11,7 +11,9 @@
 //!      into RPC against KASATERM_SOCKET_PATH instead of delegating.
 //!
 //! Env contract:
-//!   KASATERM_TMUX_TRACE   — log file path. Default `/tmp/kasaterm-tmux-calls.log`.
+//!   KASATERM_TMUX_TRACE   — log file path. Default
+//!                           `${TMPDIR}/kasaterm-tmux-calls.log`
+//!                           (Windows: `%TEMP%\kasaterm-tmux-calls.log`).
 //!   KASATERM_REAL_TMUX    — explicit path to the real tmux binary. If
 //!                           unset we scan a small list of common
 //!                           install locations and skip ourselves.
@@ -20,11 +22,12 @@
 //! is on disk).
 
 use std::io::Write;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
-const DEFAULT_TRACE: &str = "/tmp/kasaterm-tmux-calls.log";
+fn default_trace_path() -> PathBuf {
+    std::env::temp_dir().join("kasaterm-tmux-calls.log")
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,7 +36,8 @@ fn main() {
         .unwrap_or_else(|_| "?".into());
 
     let trace_path = std::env::var("KASATERM_TMUX_TRACE")
-        .unwrap_or_else(|_| DEFAULT_TRACE.to_string());
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| default_trace_path());
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -45,10 +49,7 @@ fn main() {
             .unwrap_or(0.0);
         // Quote argv elements so the log is unambiguous when commands
         // carry spaces / newlines / shell metacharacters.
-        let quoted: Vec<String> = args
-            .iter()
-            .map(|a| format!("{a:?}"))
-            .collect();
+        let quoted: Vec<String> = args.iter().map(|a| format!("{a:?}")).collect();
         let _ = writeln!(
             f,
             "{ts:.3}\tpid={}\tcwd={cwd}\ttmux {}",
@@ -68,16 +69,38 @@ fn main() {
 
     let real = find_real_tmux();
     match real {
-        Some(path) => {
-            let err = Command::new(&path).args(&args).exec();
-            eprintln!("kasaterm tmux-shim: exec {path:?} failed: {err}");
-            std::process::exit(127);
-        }
+        Some(path) => run_real_tmux(&path, &args),
         None => {
             eprintln!(
                 "kasaterm tmux-shim: no real tmux on disk. Set \
                  KASATERM_REAL_TMUX to override, or install tmux."
             );
+            std::process::exit(127);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn run_real_tmux(path: &PathBuf, args: &[String]) -> ! {
+    // Unix: replace ourselves with the real tmux so the parent process
+    // tree sees the real binary, not a shim wrapper.
+    use std::os::unix::process::CommandExt;
+    let err = Command::new(path).args(args).exec();
+    eprintln!("kasaterm tmux-shim: exec {path:?} failed: {err}");
+    std::process::exit(127);
+}
+
+#[cfg(windows)]
+fn run_real_tmux(path: &PathBuf, args: &[String]) -> ! {
+    // Windows has no exec replacement: the closest equivalent is to
+    // spawn-and-wait, then forward the child's exit code. The shim
+    // process stays alive while tmux runs, which is one extra wait()
+    // in the parent — caller can't distinguish.
+    let status = Command::new(path).args(args).status();
+    match status {
+        Ok(s) => std::process::exit(s.code().unwrap_or(127)),
+        Err(e) => {
+            eprintln!("kasaterm tmux-shim: spawn {path:?} failed: {e}");
             std::process::exit(127);
         }
     }
@@ -102,8 +125,7 @@ fn handle_known(args: &[String]) -> Option<i32> {
                 .and_then(|i| args.get(i + 1))
                 .map(String::as_str)
                 .unwrap_or("");
-            let pane = std::env::var("TMUX_PANE")
-                .unwrap_or_else(|_| "%0".to_string());
+            let pane = std::env::var("TMUX_PANE").unwrap_or_else(|_| "%0".to_string());
             let out = match fmt {
                 "#{pane_id}" => pane.clone(),
                 "#{session_name}" => "kasaterm".to_string(),
@@ -131,8 +153,7 @@ fn handle_known(args: &[String]) -> Option<i32> {
             Some(0)
         }
         "list-panes" | "lsp" => {
-            let pane = std::env::var("TMUX_PANE")
-                .unwrap_or_else(|_| "%0".to_string());
+            let pane = std::env::var("TMUX_PANE").unwrap_or_else(|_| "%0".to_string());
             println!("0: [80x24] [history 0/2000, 0 bytes] {pane} (active)");
             Some(0)
         }
@@ -142,15 +163,12 @@ fn handle_known(args: &[String]) -> Option<i32> {
         // kasaterm RPC to actually take effect — Phase 1 is just
         // "don't fail loudly so the caller can proceed". We log via
         // the same trace path so we know they were requested.
-        "split-window" | "send-keys" | "kill-pane" | "select-pane"
-        | "new-window" | "new-session" | "rename-window"
-        | "set-environment" | "setenv" | "set-option" | "set"
-        | "set-hook" | "show-environment" | "showenv" => {
+        "split-window" | "send-keys" | "kill-pane" | "select-pane" | "new-window"
+        | "new-session" | "rename-window" | "set-environment" | "setenv" | "set-option"
+        | "set" | "set-hook" | "show-environment" | "showenv" => {
             // For now, pretend success. Phase 2 wires these to the
             // kasaterm socket so they actually move panes.
-            eprintln!(
-                "[tmux-shim] {head} accepted (stub, no kasaterm RPC yet)"
-            );
+            eprintln!("[tmux-shim] {head} accepted (stub, no kasaterm RPC yet)");
             Some(0)
         }
         _ => None,
@@ -172,13 +190,7 @@ fn find_real_tmux() -> Option<PathBuf> {
     // skip our own binary when scanning. argv[0] gives the shim path
     // when invoked via PATH.
     let self_path = std::env::current_exe().ok();
-    let candidates = [
-        "/opt/homebrew/bin/tmux",
-        "/usr/local/bin/tmux",
-        "/usr/bin/tmux",
-        "/opt/local/bin/tmux",
-    ];
-    for c in candidates {
+    for c in real_tmux_candidates() {
         let p = PathBuf::from(c);
         if !p.is_file() {
             continue;
@@ -189,4 +201,22 @@ fn find_real_tmux() -> Option<PathBuf> {
         return Some(p);
     }
     None
+}
+
+#[cfg(unix)]
+fn real_tmux_candidates() -> &'static [&'static str] {
+    &[
+        "/opt/homebrew/bin/tmux",
+        "/usr/local/bin/tmux",
+        "/usr/bin/tmux",
+        "/opt/local/bin/tmux",
+    ]
+}
+
+#[cfg(windows)]
+fn real_tmux_candidates() -> &'static [&'static str] {
+    // Windows has no canonical tmux install location and Windows-native
+    // tmux does not exist. Caller can still point us at a WSL bridge or
+    // a custom build via KASATERM_REAL_TMUX.
+    &[]
 }
