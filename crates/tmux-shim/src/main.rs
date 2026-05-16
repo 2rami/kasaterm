@@ -114,6 +114,11 @@ fn run_real_tmux(path: &PathBuf, args: &[String]) -> ! {
 /// is something we observed Claude Code asking for. Add cases as the
 /// trace log grows; do not pre-emptively cover the whole tmux surface.
 fn handle_known(args: &[String]) -> Option<i32> {
+    // tmux supports several global options before the command itself,
+    // e.g. `tmux -S <socket> display-message ...` or `tmux -L <name>
+    // -2 has-session`. Strip them so the match below sees the command
+    // verb regardless of how the caller framed it.
+    let args = strip_global_options(args);
     let head = args.first().map(String::as_str)?;
     match head {
         // `tmux display-message -p <fmt>` — synchronous getter. Claude
@@ -153,9 +158,36 @@ fn handle_known(args: &[String]) -> Option<i32> {
             Some(0)
         }
         "list-panes" | "lsp" => {
-            let pane = std::env::var("TMUX_PANE").unwrap_or_else(|_| "%0".to_string());
-            println!("0: [80x24] [history 0/2000, 0 bytes] {pane} (active)");
-            Some(0)
+            // claude code calls `list-panes -t @0 -F #{pane_id}` to
+            // enumerate live panes. Query the real workspace via
+            // cmux-compat and print one surface id per line; fall back
+            // to the canned mock output for any other format string.
+            let format = args
+                .iter()
+                .position(|a| a == "-F")
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str);
+            if matches!(format, Some("#{pane_id}")) {
+                if let Some(path) = cmux_compat_path() {
+                    if let Ok(out) = Command::new(&path).args(["list", "surfaces"]).output() {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        for id in extract_all_surface_ids(&stdout) {
+                            println!("{id}");
+                        }
+                        return Some(0);
+                    }
+                }
+                // cmux-compat unreachable — still emit the focused pane
+                // so a single-pane caller doesn't get an empty list.
+                let pane =
+                    std::env::var("TMUX_PANE").unwrap_or_else(|_| "%0".to_string());
+                println!("{pane}");
+                Some(0)
+            } else {
+                let pane = std::env::var("TMUX_PANE").unwrap_or_else(|_| "%0".to_string());
+                println!("0: [80x24] [history 0/2000, 0 bytes] {pane} (active)");
+                Some(0)
+            }
         }
         // `tmux has-session [-t name]` — exit 0 means "yes it exists".
         "has-session" => Some(0),
@@ -165,9 +197,9 @@ fn handle_known(args: &[String]) -> Option<i32> {
         // minimum Claude Code's teammate-mode needs to spawn panes,
         // pump keystrokes, and bring a teammate to focus. Anything we
         // don't map yet logs and exits 0 so the caller keeps moving.
-        "split-window" => Some(route_split_window(args)),
-        "send-keys" => Some(route_send_keys(args)),
-        "select-pane" => Some(route_select_pane(args)),
+        "split-window" => Some(route_split_window(&args)),
+        "send-keys" => Some(route_send_keys(&args)),
+        "select-pane" => Some(route_select_pane(&args)),
         "kill-pane" | "new-window" | "new-session" | "rename-window"
         | "set-environment" | "setenv" | "set-option" | "set" | "set-hook"
         | "show-environment" | "showenv" => {
@@ -183,23 +215,42 @@ fn handle_known(args: &[String]) -> Option<i32> {
 /// same dir that holds the tmux shim symlink and exports
 /// KASATERM_TMUX_SHIM_DIR.
 fn cmux_compat_path() -> Option<PathBuf> {
-    let dir = std::env::var("KASATERM_TMUX_SHIM_DIR").ok()?;
     let exe = if cfg!(windows) { "cmux-compat.exe" } else { "cmux-compat" };
-    let p = PathBuf::from(dir).join(exe);
-    if p.is_file() {
-        Some(p)
-    } else {
-        None
+    // Primary lookup: env exported by install_tmux_shim.
+    if let Ok(dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
+        let p = PathBuf::from(dir).join(exe);
+        if p.is_file() {
+            return Some(p);
+        }
     }
+    // Fallback: cmux-compat staged next to us in the same dir. Covers
+    // standalone invocations where the env var isn't set.
+    if let Ok(self_exe) = std::env::current_exe() {
+        if let Some(parent) = self_exe.parent() {
+            let p = parent.join(exe);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 fn run_cmux_compat(args: &[&str]) -> Result<i32, String> {
     let path = cmux_compat_path()
         .ok_or_else(|| "cmux-compat binary not found in KASATERM_TMUX_SHIM_DIR".to_string())?;
-    let status = Command::new(&path)
-        .args(args)
-        .status()
-        .map_err(|e| format!("spawn cmux-compat: {e}"))?;
+    let mut cmd = Command::new(&path);
+    cmd.args(args);
+    // Explicitly forward the socket env so cmux-compat doesn't fall
+    // back to the platform default (`\\.\pipe\cmux` on Windows) when
+    // a parent shell forgets — or refuses — to leak it on its own.
+    if let Ok(sock) = std::env::var("KASATERM_SOCKET_PATH") {
+        cmd.env("KASATERM_SOCKET_PATH", sock);
+    }
+    if let Ok(sock) = std::env::var("CMUX_SOCKET_PATH") {
+        cmd.env("CMUX_SOCKET_PATH", sock);
+    }
+    let status = cmd.status().map_err(|e| format!("spawn cmux-compat: {e}"))?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -221,13 +272,76 @@ fn route_split_window(args: &[String]) -> i32 {
     } else {
         "down"
     };
-    match run_cmux_compat(&["split", direction]) {
-        Ok(code) => code,
+    // tmux `-P` flag asks for the new pane's info to be printed; the
+    // `-F #{pane_id}` format claude code's teammate-mode uses wants the
+    // pane id alone. cmux-compat speaks JSON, so capture stdout, fish
+    // out `"id":"%N"` from the response, and emit just that. Without
+    // this the JSON object ends up substituted into every follow-up
+    // `-t ...` target.
+    let print_pane_id = args.iter().any(|a| a == "-P");
+    let path = match cmux_compat_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("[tmux-shim] split-window: cmux-compat binary not found");
+            return 1;
+        }
+    };
+    let output = match Command::new(&path).args(["split", direction]).output() {
+        Ok(o) => o,
         Err(e) => {
-            eprintln!("[tmux-shim] split-window route failed: {e}");
-            1
+            eprintln!("[tmux-shim] split-window spawn failed: {e}");
+            return 1;
+        }
+    };
+    if print_pane_id {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(id) = extract_surface_id(&stdout) {
+            println!("{id}");
+        } else {
+            // Fall back to echoing raw stdout when we can't find an id —
+            // worst case the caller fails the same way it did before.
+            print!("{stdout}");
+        }
+    } else {
+        // No -P: tmux is silent on success; mirror that.
+    }
+    output.status.code().unwrap_or(1)
+}
+
+/// Pull a `"id":"%N"` value out of a cmux-compat JSON response.
+/// Lightweight by design — we only need this one shape so a real
+/// serde_json dependency isn't worth the build-time hit on the shim.
+fn extract_surface_id(s: &str) -> Option<String> {
+    // Look for `"surface":{...,"id":"%N",...}` first to avoid matching
+    // the outer `"id":"cli-…"` request id.
+    let surface_pos = s.find(r#""surface""#)?;
+    let after = &s[surface_pos..];
+    let id_pos = after.find(r#""id":""#)?;
+    let rest = &after[id_pos + r#""id":""#.len()..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Pull every `%N`-shaped id out of a cmux-compat `list surfaces`
+/// response. Mirrors `extract_surface_id`'s pragmatic string-search
+/// instead of pulling in serde_json.
+fn extract_all_surface_ids(s: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut rest = s;
+    while let Some(pos) = rest.find(r#""id":""#) {
+        let after = &rest[pos + r#""id":""#.len()..];
+        match after.find('"') {
+            Some(end) => {
+                let id = &after[..end];
+                if id.starts_with('%') {
+                    ids.push(id.to_string());
+                }
+                rest = &after[end..];
+            }
+            None => break,
         }
     }
+    ids
 }
 
 /// Map `tmux send-keys [-t target] <key-or-text>...` to a sequence of
@@ -270,30 +384,74 @@ fn route_send_keys(args: &[String]) -> i32 {
             }
         }
     }
+    // cmd.exe doesn't unwrap single-quote pairs, so a tmux caller's
+    // `send-keys -t %1 'claude --print "..."' Enter` shows up here as
+    // a bunch of pre-split text fragments interleaved with the Enter
+    // key. Rejoin consecutive text tokens into a single payload, then
+    // strip a matching outer pair of single quotes — that recovers
+    // the caller's original keystroke string when the original quoting
+    // got chewed up by cmd.exe.
+    let mut groups: Vec<SendGroup> = Vec::new();
+    let mut current_text: Vec<String> = Vec::new();
     for payload in &payloads {
-        let mapped_key = map_tmux_key(payload);
-        let result = if let Some(k) = mapped_key {
-            let mut cmd: Vec<&str> = Vec::new();
-            cmd.push("key");
-            cmd.push(k);
-            run_cmux_compat(&cmd)
-        } else {
-            let mut cmd: Vec<String> =
-                vec!["send".to_string()];
-            if let Some(t) = &target {
-                cmd.push("--surface".to_string());
-                cmd.push(t.clone());
+        if let Some(k) = map_tmux_key(payload) {
+            if !current_text.is_empty() {
+                groups.push(SendGroup::Text(unwrap_outer_single_quotes(
+                    &current_text.join(" "),
+                )));
+                current_text.clear();
             }
-            cmd.push(payload.clone());
-            let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
-            run_cmux_compat(&cmd_ref)
+            groups.push(SendGroup::Key(k));
+        } else {
+            current_text.push(payload.clone());
+        }
+    }
+    if !current_text.is_empty() {
+        groups.push(SendGroup::Text(unwrap_outer_single_quotes(
+            &current_text.join(" "),
+        )));
+    }
+    for group in groups {
+        let result = match group {
+            SendGroup::Key(k) => run_cmux_compat(&["key", k]),
+            SendGroup::Text(text) => {
+                let mut cmd: Vec<String> = vec!["send".to_string()];
+                if let Some(t) = &target {
+                    cmd.push("--surface".to_string());
+                    cmd.push(t.clone());
+                }
+                cmd.push(text);
+                let cmd_ref: Vec<&str> =
+                    cmd.iter().map(String::as_str).collect();
+                run_cmux_compat(&cmd_ref)
+            }
         };
         if let Err(e) = result {
-            eprintln!("[tmux-shim] send-keys forward {payload:?} failed: {e}");
+            eprintln!("[tmux-shim] send-keys forward failed: {e}");
             return 1;
         }
     }
     0
+}
+
+enum SendGroup {
+    Text(String),
+    Key(&'static str),
+}
+
+/// Strip a single matching pair of outer single quotes — and the
+/// resulting `'\''` shell-escape glue between them — so a Unix-quoted
+/// blob from `cd 'C:\path' && cmd` survives a round trip through
+/// cmd.exe's quote-blind arg parser.
+fn unwrap_outer_single_quotes(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('\'') && trimmed.ends_with('\'') {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        // tmux callers use `'\''` to embed a single quote inside a
+        // single-quoted string. Recover that to a bare `'`.
+        return inner.replace("'\\''", "'");
+    }
+    s.to_string()
 }
 
 /// Translate tmux's key names into the cmux-compat `key` vocabulary.
@@ -342,6 +500,47 @@ fn route_select_pane(args: &[String]) -> i32 {
 
 fn strip_pct(s: &str) -> &str {
     s.strip_prefix('%').unwrap_or(s)
+}
+
+/// Drop tmux's pre-command global options so `handle_known` can match
+/// on the actual command verb. Mirrors `tmux(1) OPTIONS`:
+///   -S socket-path / -L socket-name / -f config-file / -T features
+///     all take a separate argument.
+///   -2 -C -CC -D -l -N -q -u -v -V are flag-only.
+///   `--` ends option processing.
+fn strip_global_options(args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut i = 0;
+    let mut stripping = true;
+    while i < args.len() {
+        let a = &args[i];
+        if stripping {
+            if a == "--" {
+                stripping = false;
+                i += 1;
+                continue;
+            }
+            if matches!(a.as_str(), "-S" | "-L" | "-f" | "-T") {
+                // consume option + its value
+                i += 2;
+                continue;
+            }
+            if matches!(
+                a.as_str(),
+                "-2" | "-C" | "-CC" | "-D" | "-l" | "-N" | "-q" | "-u" | "-v" | "-V"
+            ) {
+                i += 1;
+                continue;
+            }
+            // First non-flag token is the command verb; stop stripping
+            // from here so per-command flags (e.g. `display-message -t
+            // %0`) stay intact.
+            stripping = false;
+        }
+        out.push(a.clone());
+        i += 1;
+    }
+    out
 }
 
 fn find_real_tmux() -> Option<PathBuf> {
