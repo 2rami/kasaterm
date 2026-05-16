@@ -36,6 +36,10 @@ pub struct PtyOptions {
     pub cols: u16,
     pub rows: u16,
     pub env: Vec<(String, String)>,
+    /// Identifier this session stamps on every ScreenUpdate it emits.
+    /// The renderer keys panes by this id, so a multi-pane workspace
+    /// gives each PtySession a unique value ("%0", "%1", ...).
+    pub pane_id: String,
 }
 
 impl Default for PtyOptions {
@@ -46,6 +50,7 @@ impl Default for PtyOptions {
             cols: 80,
             rows: 24,
             env: Vec::new(),
+            pane_id: "%0".to_string(),
         }
     }
 }
@@ -119,7 +124,7 @@ impl PtySession {
         // channel + drop-on-full keeps us from buffering frames the
         // renderer is too slow to consume.
         let reader_thread =
-            spawn_reader_thread(reader, tx, opts.cols, opts.rows, size.clone());
+            spawn_reader_thread(reader, tx, opts.cols, opts.rows, size.clone(), opts.pane_id.clone());
 
         Ok(Self {
             screens: rx,
@@ -179,6 +184,7 @@ fn spawn_reader_thread(
     cols: u16,
     rows: u16,
     size: Arc<Mutex<(u16, u16)>>,
+    pane_id: String,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut processor: Processor<StdSyncHandler> = Processor::new();
@@ -210,7 +216,7 @@ fn spawn_reader_thread(
             // adaptation; pushing the full grid keeps the renderer
             // happy and the per-row Arc-identity cache in cells.rs
             // still catches no-op rows.
-            let update = snapshot(&term, current_size.0, current_size.1);
+            let update = snapshot(&term, current_size.0, current_size.1, &pane_id);
             if tx.send(update).is_err() {
                 return;
             }
@@ -218,7 +224,7 @@ fn spawn_reader_thread(
     })
 }
 
-fn snapshot(term: &Term<NoopListener>, cols: u16, rows: u16) -> ScreenUpdate {
+fn snapshot(term: &Term<NoopListener>, cols: u16, rows: u16, pane_id: &str) -> ScreenUpdate {
     let grid = term.grid();
     let mut dirty: Vec<(u16, Row)> = Vec::with_capacity(rows as usize);
     for r in 0..rows {
@@ -249,7 +255,7 @@ fn snapshot(term: &Term<NoopListener>, cols: u16, rows: u16) -> ScreenUpdate {
     // None here just means "no change this frame".
     let title: Option<String> = None;
     ScreenUpdate {
-        pane_id: "%0".to_string(),
+        pane_id: pane_id.to_string(),
         rows,
         cols,
         dirty,

@@ -10,6 +10,9 @@
 //! the tmux backend is running; once Phase C is past MVP we add an
 //! in-process multiplexer (`Workspace` of `PtySession`s).
 
+pub mod layout;
 mod state;
 
+pub use crossbeam_channel::Receiver as ScreenReceiver;
+pub use layout::{PtyLayout, SplitDir};
 pub use state::{PtyOptions, PtySession};
