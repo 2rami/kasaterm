@@ -1849,8 +1849,29 @@ impl App {
             // reported cursor row/col still points at the active
             // input position, so use it unconditionally.
             if !self.preedit.is_empty() {
-                let px = pane_px_x + frame.cursor_col as f32 * self.cell.w;
-                let py = pane_px_y + frame.cursor_row as f32 * self.cell.h;
+                // First-keystroke quirk: a TUI like Claude Code parks
+                // its cursor on a statusline row (\effort, etc.) while
+                // it waits for input, so the cursor_row/col we snapshot
+                // points at that statusline instead of the prompt row.
+                // The first OS IME Preedit then lands beside `/effort`
+                // off in the right margin.
+                //
+                // Scan bottom-up for a row that starts with one of the
+                // common prompt sigils (`>`, `›`, `$`, `#`) and rebind
+                // the preedit anchor to the end of *that* row. Falls
+                // back to the reported cursor when no prompt-shaped
+                // row is found so non-TUI shells (cmd.exe, plain
+                // bash) keep their existing behavior.
+                let (anchor_row, anchor_col) = find_prompt_anchor(&frame.rows)
+                    .unwrap_or((frame.cursor_row, frame.cursor_col));
+                let px = pane_px_x + anchor_col as f32 * self.cell.w;
+                let py = pane_px_y + anchor_row as f32 * self.cell.h;
+                if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
+                    eprintln!(
+                        "[preedit] text={:?} cursor=(row={}, col={}) anchor=(row={anchor_row}, col={anchor_col}) px=({px:.1},{py:.1}) cell=({:.1}x{:.1})",
+                        self.preedit, frame.cursor_row, frame.cursor_col, self.cell.w, self.cell.h
+                    );
+                }
                 cells::render_preedit(
                     sugarloaf,
                     &self.preedit,
@@ -2313,6 +2334,52 @@ fn locate_shim_binary() -> Option<std::path::PathBuf> {
     // dev fallback: target/debug/tmux when running via `cargo run`
     // from somewhere odd. current_exe usually already points there
     // but be defensive.
+    None
+}
+
+/// Find a prompt-shaped row in the visible grid and return
+/// `(row, col_just_past_last_text)` for it. Used as the preedit anchor
+/// when the snapshot cursor is parked on an unrelated statusline (a
+/// Claude Code / alt-screen TUI quirk on first-keystroke IME activation
+/// — the IME fires Preedit before any output moves the cursor back to
+/// the prompt row, so we can't trust cursor_row/col yet).
+fn find_prompt_anchor(rows: &[Vec<GridCell>]) -> Option<(u16, u16)> {
+    // Bottom-up: claude code, helix, and most REPLs put the prompt
+    // on the last few visible rows. We stop at the first match so a
+    // history line that happens to start with `>` doesn't outrank the
+    // live prompt.
+    for (r, row) in rows.iter().enumerate().rev() {
+        let first_non_blank = row.iter().position(|c| !c.ch.is_empty() && c.ch != " ");
+        let Some(i) = first_non_blank else { continue };
+        let ch = row[i].ch.as_str();
+        let is_prompt = matches!(ch, ">" | "›" | "❯" | "$" | "#" | "λ");
+        if !is_prompt {
+            continue;
+        }
+        // Width-aware last-filled tracker. alacritty marks wide-char
+        // right halves with an empty `ch`, so a naive `rposition`
+        // returns the wide LEFT cell and the preedit anchor lands one
+        // cell short — the box visually clips into the syllable next
+        // to it. Bump by 2 for any CJK-range first codepoint, by 1
+        // otherwise. Falls back to the column right after the prompt
+        // sigil when the prompt is empty.
+        let last_advance = row
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.ch.is_empty() && c.ch != " ")
+            .last()
+            .map(|(idx, c)| {
+                let wide = c
+                    .ch
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| (ch as u32) >= 0x1100);
+                (idx + if wide { 2 } else { 1 }) as u16
+            })
+            .unwrap_or(0);
+        let col = last_advance.max((i as u16) + 2);
+        return Some((r as u16, col));
+    }
     None
 }
 
