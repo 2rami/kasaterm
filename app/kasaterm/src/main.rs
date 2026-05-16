@@ -1963,10 +1963,19 @@ impl ApplicationHandler for App {
         // compute_cell_metrics returns u32 physical pixels — divide by
         // scale to land back in logical units the rest of the renderer
         // works with.
+        // sugarloaf's `text.draw(x, y, ...)` treats `y` as the
+        // **text bounding box top-left**, not the baseline (see
+        // sugarloaf::components::text::TextInstance docs: bearings
+        // shift down to the bitmap top from `pos`). Passing row_top
+        // directly is enough — the per-glyph bearings already place
+        // the bitmap at the right vertical offset inside the cell.
+        // Stored as 0 so cells::render_screen / render_preedit's
+        // `y = origin_y + baseline_offset` formula collapses to
+        // `y = origin_y`.
         self.cell = CellGeom {
             w: (metrics.cell_width as f32) / scale,
             h: (metrics.cell_height as f32) / scale,
-            baseline: (metrics.cell_baseline as f32) / scale,
+            baseline: 0.0,
         };
         eprintln!(
             "[startup] cell_geom w={:.2} h={:.2} baseline={:.2} (scale={scale})",
