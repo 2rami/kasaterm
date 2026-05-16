@@ -159,19 +159,184 @@ fn handle_known(args: &[String]) -> Option<i32> {
         }
         // `tmux has-session [-t name]` — exit 0 means "yes it exists".
         "has-session" => Some(0),
-        // Mutating commands. These would have to translate to the
-        // kasaterm RPC to actually take effect — Phase 1 is just
-        // "don't fail loudly so the caller can proceed". We log via
-        // the same trace path so we know they were requested.
-        "split-window" | "send-keys" | "kill-pane" | "select-pane" | "new-window"
-        | "new-session" | "rename-window" | "set-environment" | "setenv" | "set-option"
-        | "set" | "set-hook" | "show-environment" | "showenv" => {
-            // For now, pretend success. Phase 2 wires these to the
-            // kasaterm socket so they actually move panes.
+        // Phase 2: route mutating commands to the kasaterm
+        // agent-socket via the cmux-compat binary staged next to us.
+        // `split-window`, `send-keys`, `select-pane` are the bare
+        // minimum Claude Code's teammate-mode needs to spawn panes,
+        // pump keystrokes, and bring a teammate to focus. Anything we
+        // don't map yet logs and exits 0 so the caller keeps moving.
+        "split-window" => Some(route_split_window(args)),
+        "send-keys" => Some(route_send_keys(args)),
+        "select-pane" => Some(route_select_pane(args)),
+        "kill-pane" | "new-window" | "new-session" | "rename-window"
+        | "set-environment" | "setenv" | "set-option" | "set" | "set-hook"
+        | "show-environment" | "showenv" => {
             eprintln!("[tmux-shim] {head} accepted (stub, no kasaterm RPC yet)");
             Some(0)
         }
         _ => None,
+    }
+}
+
+/// Find the cmux-compat binary alongside us so the shim can spawn it
+/// without depending on PATH luck. install_tmux_shim drops it into the
+/// same dir that holds the tmux shim symlink and exports
+/// KASATERM_TMUX_SHIM_DIR.
+fn cmux_compat_path() -> Option<PathBuf> {
+    let dir = std::env::var("KASATERM_TMUX_SHIM_DIR").ok()?;
+    let exe = if cfg!(windows) { "cmux-compat.exe" } else { "cmux-compat" };
+    let p = PathBuf::from(dir).join(exe);
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+fn run_cmux_compat(args: &[&str]) -> Result<i32, String> {
+    let path = cmux_compat_path()
+        .ok_or_else(|| "cmux-compat binary not found in KASATERM_TMUX_SHIM_DIR".to_string())?;
+    let status = Command::new(&path)
+        .args(args)
+        .status()
+        .map_err(|e| format!("spawn cmux-compat: {e}"))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Map `tmux split-window [-h|-v] [-t target] ...` to
+/// `cmux-compat split <direction>`. tmux's -h means "horizontal split"
+/// = side-by-side (cmux `right`); -v means stacked (cmux `down`).
+/// Defaults to `down` to mirror tmux's own default for a flag-less
+/// `split-window`.
+fn route_split_window(args: &[String]) -> i32 {
+    let args = if args.first().map(String::as_str) == Some("split-window") {
+        &args[1..]
+    } else {
+        args
+    };
+    let direction = if args.iter().any(|a| a == "-h") {
+        "right"
+    } else if args.iter().any(|a| a == "-v") {
+        "down"
+    } else {
+        "down"
+    };
+    match run_cmux_compat(&["split", direction]) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("[tmux-shim] split-window route failed: {e}");
+            1
+        }
+    }
+}
+
+/// Map `tmux send-keys [-t target] <key-or-text>...` to a sequence of
+/// `cmux-compat send` / `key` calls. tmux send-keys is variadic: each
+/// non-flag arg is either a literal string or a key name (Enter,
+/// C-c, etc.). We forward each accordingly so a typical
+/// `send-keys -t %1 "ls -al" C-m` becomes `send --surface %1 "ls -al"`
+/// followed by `key enter`.
+fn route_send_keys(args: &[String]) -> i32 {
+    // args still includes the leading "send-keys" command name —
+    // skip it so it isn't forwarded as a literal text payload.
+    let args = if args.first().map(String::as_str) == Some("send-keys") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut target: Option<String> = None;
+    let mut payloads: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        match a.as_str() {
+            "-t" => {
+                if let Some(next) = args.get(i + 1) {
+                    target = Some(next.clone());
+                    i += 2;
+                    continue;
+                }
+                i += 1;
+            }
+            // -l literal flag: tmux uses it to disable key-name parsing.
+            // We always treat unrecognised tokens as text so the flag is
+            // a no-op for us.
+            "-l" | "-R" | "-X" | "-M" => {
+                i += 1;
+            }
+            other => {
+                payloads.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    for payload in &payloads {
+        let mapped_key = map_tmux_key(payload);
+        let result = if let Some(k) = mapped_key {
+            let mut cmd: Vec<&str> = Vec::new();
+            cmd.push("key");
+            cmd.push(k);
+            run_cmux_compat(&cmd)
+        } else {
+            let mut cmd: Vec<String> =
+                vec!["send".to_string()];
+            if let Some(t) = &target {
+                cmd.push("--surface".to_string());
+                cmd.push(t.clone());
+            }
+            cmd.push(payload.clone());
+            let cmd_ref: Vec<&str> = cmd.iter().map(String::as_str).collect();
+            run_cmux_compat(&cmd_ref)
+        };
+        if let Err(e) = result {
+            eprintln!("[tmux-shim] send-keys forward {payload:?} failed: {e}");
+            return 1;
+        }
+    }
+    0
+}
+
+/// Translate tmux's key names into the cmux-compat `key` vocabulary.
+/// Returns None when the argument is a literal text fragment (no
+/// translation needed — caller forwards it as `send`).
+fn map_tmux_key(s: &str) -> Option<&'static str> {
+    match s {
+        "Enter" | "C-m" | "C-M" => Some("enter"),
+        "Tab" | "C-i" | "C-I" => Some("tab"),
+        "Escape" | "C-[" => Some("escape"),
+        "BSpace" | "Backspace" | "C-h" | "C-H" => Some("backspace"),
+        "Delete" => Some("delete"),
+        "Up" | "C-Up" => Some("up"),
+        "Down" | "C-Down" => Some("down"),
+        "Left" | "C-Left" => Some("left"),
+        "Right" | "C-Right" => Some("right"),
+        _ => None,
+    }
+}
+
+/// `tmux select-pane -t <id>` → `cmux-compat focus <id>`. Tmux also
+/// accepts -L/-R/-U/-D for directional focus; we don't have a
+/// directional focus RPC yet, so log+0 those.
+fn route_select_pane(args: &[String]) -> i32 {
+    let args = if args.first().map(String::as_str) == Some("select-pane") {
+        &args[1..]
+    } else {
+        args
+    };
+    let target = args
+        .iter()
+        .position(|a| a == "-t")
+        .and_then(|i| args.get(i + 1));
+    let Some(t) = target else {
+        eprintln!("[tmux-shim] select-pane without -t: ignored");
+        return 0;
+    };
+    match run_cmux_compat(&["focus", t]) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("[tmux-shim] select-pane route failed: {e}");
+            1
+        }
     }
 }
 
