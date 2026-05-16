@@ -1755,10 +1755,12 @@ impl App {
             );
         }
 
-        // Pass 2: inactive pane border (dim grey, 1px) — gives the user a
-        // visual cue that a split exists and which side they're typing
-        // into. Active pane gets a slightly brighter accent border.
+        // Pass 2: thick visual gap between panes. We paint a 6px-wide
+        // border *outside* each pane's cell grid, so two adjacent
+        // panes share a 12px tinted strip and stop touching at the
+        // edge. Active pane gets a brighter accent.
         if pane_frames.len() > 1 {
+            const PANE_BORDER: f32 = 6.0;
             for frame in &pane_frames {
                 let is_active = active_id.as_deref() == Some(frame.id.as_str());
                 let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
@@ -1766,28 +1768,48 @@ impl App {
                 let pane_px_w = frame.w_cells as f32 * self.cell.w;
                 let pane_px_h = frame.h_cells as f32 * self.cell.h;
                 let color = if is_active {
-                    [0.36, 0.51, 0.95, 0.55]
+                    [0.36, 0.51, 0.95, 0.65]
                 } else {
-                    [0.24, 0.26, 0.30, 0.45]
+                    [0.18, 0.20, 0.24, 0.85]
                 };
-                // Top + bottom + left + right strokes — each a 1px rect.
-                sugarloaf.rect(None, pane_px_x, pane_px_y, pane_px_w, 1.0, color, 0.0, 0);
+                // Top, bottom, left, right strokes — each PANE_BORDER
+                // wide. Top/bottom strokes extend past the pane on
+                // each side by PANE_BORDER so the corners square up.
                 sugarloaf.rect(
                     None,
-                    pane_px_x,
-                    pane_px_y + pane_px_h - 1.0,
-                    pane_px_w,
-                    1.0,
+                    pane_px_x - PANE_BORDER,
+                    pane_px_y - PANE_BORDER,
+                    pane_px_w + PANE_BORDER * 2.0,
+                    PANE_BORDER,
                     color,
                     0.0,
                     0,
                 );
-                sugarloaf.rect(None, pane_px_x, pane_px_y, 1.0, pane_px_h, color, 0.0, 0);
                 sugarloaf.rect(
                     None,
-                    pane_px_x + pane_px_w - 1.0,
+                    pane_px_x - PANE_BORDER,
+                    pane_px_y + pane_px_h,
+                    pane_px_w + PANE_BORDER * 2.0,
+                    PANE_BORDER,
+                    color,
+                    0.0,
+                    0,
+                );
+                sugarloaf.rect(
+                    None,
+                    pane_px_x - PANE_BORDER,
                     pane_px_y,
-                    1.0,
+                    PANE_BORDER,
+                    pane_px_h,
+                    color,
+                    0.0,
+                    0,
+                );
+                sugarloaf.rect(
+                    None,
+                    pane_px_x + pane_px_w,
+                    pane_px_y,
+                    PANE_BORDER,
                     pane_px_h,
                     color,
                     0.0,
