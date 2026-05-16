@@ -4,6 +4,7 @@ members = [
     "app/kasaterm-cli",
     "app/kasaterm-sugarloaf-cli",
     "app/tmuxify",
+    "crates/agent-socket",
     "crates/hangul-ime",
     "crates/kasaterm",
     "crates/tmux-bridge",
