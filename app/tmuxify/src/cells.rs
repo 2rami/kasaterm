@@ -112,6 +112,105 @@ pub fn cell_bg(cell: &Cell) -> [u8; 4] {
 /// `text_baseline_offset` shifts where the glyph baseline lands relative
 /// to the row top — sugarloaf's `text.draw` uses the baseline as the
 /// reference y, so we add roughly the cell ascent.
+/// Sub-rect fills (in cell-fraction coords 0..1) for the unicode
+/// Block Elements range (U+2580..U+259F) plus shade variants. Each
+/// entry is `(x0, y0, x1, y1, alpha_multiplier)` so a single block
+/// glyph can decompose into 1–2 rects without any font involvement.
+///
+/// Why this is here instead of in the font: D2Coding's block glyphs
+/// (and most monospace fonts) don't extend to the full cell advance
+/// width — they leave a 1–2px gap on the right side of each glyph.
+/// A run like `██████` becomes a striped bar instead of a solid
+/// rectangle. Drawing the cell as a GPU quad sized to the actual
+/// `cell_w` × `cell_h` fixes this without depending on font choice.
+fn block_rects(ch: char) -> Option<&'static [(f32, f32, f32, f32, f32)]> {
+    // Macro-ish: each constant is a slice of (x0, y0, x1, y1, alpha)
+    // rectangles. Multi-quadrant blocks use two entries.
+    const HALF_TOP: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 1.0, 0.5, 1.0)];
+    const HALF_BOTTOM: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.5, 1.0, 1.0, 1.0)];
+    const HALF_LEFT: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 0.5, 1.0, 1.0)];
+    const HALF_RIGHT: &[(f32, f32, f32, f32, f32)] = &[(0.5, 0.0, 1.0, 1.0, 1.0)];
+    const FULL: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 1.0, 1.0, 1.0)];
+    const SHADE_25: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 1.0, 1.0, 0.25)];
+    const SHADE_50: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 1.0, 1.0, 0.5)];
+    const SHADE_75: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 1.0, 1.0, 0.75)];
+    Some(match ch {
+        // Lower N/8 blocks (U+2581..U+2587) — bottom anchored.
+        '\u{2581}' => &[(0.0, 7.0 / 8.0, 1.0, 1.0, 1.0)],
+        '\u{2582}' => &[(0.0, 3.0 / 4.0, 1.0, 1.0, 1.0)],
+        '\u{2583}' => &[(0.0, 5.0 / 8.0, 1.0, 1.0, 1.0)],
+        '\u{2584}' => HALF_BOTTOM,
+        '\u{2585}' => &[(0.0, 3.0 / 8.0, 1.0, 1.0, 1.0)],
+        '\u{2586}' => &[(0.0, 1.0 / 4.0, 1.0, 1.0, 1.0)],
+        '\u{2587}' => &[(0.0, 1.0 / 8.0, 1.0, 1.0, 1.0)],
+        // Full / left N/8 / right blocks.
+        '\u{2588}' => FULL,
+        '\u{2589}' => &[(0.0, 0.0, 7.0 / 8.0, 1.0, 1.0)],
+        '\u{258A}' => &[(0.0, 0.0, 3.0 / 4.0, 1.0, 1.0)],
+        '\u{258B}' => &[(0.0, 0.0, 5.0 / 8.0, 1.0, 1.0)],
+        '\u{258C}' => HALF_LEFT,
+        '\u{258D}' => &[(0.0, 0.0, 3.0 / 8.0, 1.0, 1.0)],
+        '\u{258E}' => &[(0.0, 0.0, 1.0 / 4.0, 1.0, 1.0)],
+        '\u{258F}' => &[(0.0, 0.0, 1.0 / 8.0, 1.0, 1.0)],
+        '\u{2590}' => HALF_RIGHT,
+        // Shades — full block at reduced alpha.
+        '\u{2591}' => SHADE_25,
+        '\u{2592}' => SHADE_50,
+        '\u{2593}' => SHADE_75,
+        // Upper 1/8, right 1/8.
+        '\u{2580}' => HALF_TOP,
+        '\u{2594}' => &[(0.0, 0.0, 1.0, 1.0 / 8.0, 1.0)],
+        '\u{2595}' => &[(7.0 / 8.0, 0.0, 1.0, 1.0, 1.0)],
+        // Quadrants — corners + multi-corner combinations.
+        '\u{2596}' => &[(0.0, 0.5, 0.5, 1.0, 1.0)],
+        '\u{2597}' => &[(0.5, 0.5, 1.0, 1.0, 1.0)],
+        '\u{2598}' => &[(0.0, 0.0, 0.5, 0.5, 1.0)],
+        '\u{2599}' => &[(0.0, 0.0, 0.5, 1.0, 1.0), (0.5, 0.5, 1.0, 1.0, 1.0)],
+        '\u{259A}' => &[(0.0, 0.0, 0.5, 0.5, 1.0), (0.5, 0.5, 1.0, 1.0, 1.0)],
+        '\u{259B}' => &[(0.0, 0.0, 1.0, 0.5, 1.0), (0.0, 0.5, 0.5, 1.0, 1.0)],
+        '\u{259C}' => &[(0.0, 0.0, 1.0, 0.5, 1.0), (0.5, 0.5, 1.0, 1.0, 1.0)],
+        '\u{259D}' => &[(0.5, 0.0, 1.0, 0.5, 1.0)],
+        '\u{259E}' => &[(0.5, 0.0, 1.0, 0.5, 1.0), (0.0, 0.5, 0.5, 1.0, 1.0)],
+        '\u{259F}' => &[(0.5, 0.0, 1.0, 0.5, 1.0), (0.0, 0.5, 1.0, 1.0, 1.0)],
+        _ => return None,
+    })
+}
+
+/// Try to draw a cell as one or more GPU rects covering the block
+/// glyph's sub-regions. Returns true if the character was a known
+/// block element and got painted via rect — caller skips the
+/// font-glyph path. Returns false otherwise.
+fn try_render_block(
+    sugarloaf: &mut Sugarloaf<'_>,
+    ch: char,
+    cell_x: f32,
+    cell_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+    fg: [u8; 4],
+) -> bool {
+    let Some(rects) = block_rects(ch) else { return false };
+    for (x0, y0, x1, y1, alpha) in rects {
+        let color = [
+            fg[0] as f32 / 255.0,
+            fg[1] as f32 / 255.0,
+            fg[2] as f32 / 255.0,
+            (fg[3] as f32 / 255.0) * alpha,
+        ];
+        sugarloaf.rect(
+            None,
+            cell_x + x0 * cell_w,
+            cell_y + y0 * cell_h,
+            (x1 - x0) * cell_w,
+            (y1 - y0) * cell_h,
+            color,
+            0.0,
+            0,
+        );
+    }
+    true
+}
+
 pub fn render_row(
     sugarloaf: &mut Sugarloaf<'_>,
     row: &[Cell],
@@ -160,6 +259,24 @@ pub fn render_row(
             col += 1;
             continue;
         }
+        // Block Element shortcut. Block glyphs from D2Coding (and
+        // most monospace fonts) don't fill the cell advance fully,
+        // so consecutive █ characters render with visible gaps. Drop
+        // out to GPU-rect drawing for the U+2580..U+259F range; the
+        // result is a contiguous bar regardless of font choice. This
+        // also breaks the text-batching run so the previous cell's
+        // run doesn't accidentally swallow the block as a glyph.
+        let first = cell.ch.chars().next();
+        if let Some(c) = first {
+            if (0x2580..=0x259F).contains(&(c as u32)) && cell.ch.chars().count() == 1 {
+                let fg = cell_fg(cell);
+                let x = origin_x + col as f32 * cell_w;
+                if try_render_block(sugarloaf, c, x, origin_y, cell_w, cell_h, fg) {
+                    col += 1;
+                    continue;
+                }
+            }
+        }
         let is_wide = cell.ch.chars().count() != 1
             || cell.ch.chars().next().is_some_and(|c| (c as u32) > 0xFFFF);
         let fg = cell_fg(cell);
@@ -170,8 +287,10 @@ pub fn render_row(
         text.push_str(&cell.ch);
         col += 1;
         if !is_wide {
-            // Extend the run while neighbour cells share the same attrs and
-            // also fit on the monospace grid (single-code-unit chars).
+            // Extend the run while neighbour cells share the same attrs,
+            // fit on the monospace grid (single-code-unit chars), and
+            // aren't block elements (those took the GPU-rect branch
+            // above and need to stay out of the text-shape batch).
             while col < row.len() {
                 let n = &row[col];
                 if n.ch.is_empty() || n.ch == " " {
@@ -179,7 +298,13 @@ pub fn render_row(
                 }
                 let n_wide = n.ch.chars().count() != 1
                     || n.ch.chars().next().is_some_and(|c| (c as u32) > 0xFFFF);
+                let n_block = n.ch.chars().count() == 1
+                    && n.ch
+                        .chars()
+                        .next()
+                        .is_some_and(|c| (0x2580..=0x259F).contains(&(c as u32)));
                 if n_wide
+                    || n_block
                     || cell_fg(n) != fg
                     || n.bold != bold
                     || n.italic != italic
