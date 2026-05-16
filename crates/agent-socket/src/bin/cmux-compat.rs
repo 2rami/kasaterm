@@ -15,7 +15,7 @@
 //!   cmux-compat key    <enter|tab|...>
 //!
 //! Socket path resolution mirrors what the host exports:
-//!   $TMUXIFY_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock
+//!   $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock
 //!
 //! The CLI prints the raw JSON response to stdout — scripts pipe it
 //! through `jq`. Exit code is 0 on `ok: true`, 1 on `ok: false`, 2 on
@@ -68,7 +68,7 @@ fn print_help() {
     eprintln!("  cmux-compat send  --surface <id> <text>");
     eprintln!("  cmux-compat key   <enter|tab|escape|backspace|delete|up|down|left|right>");
     eprintln!();
-    eprintln!("Socket: $TMUXIFY_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock");
+    eprintln!("Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > /tmp/cmux.sock");
 }
 
 fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
@@ -145,7 +145,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
 }
 
 fn resolve_socket_path() -> Result<String> {
-    std::env::var("TMUXIFY_SOCKET_PATH")
+    std::env::var("KASATERM_SOCKET_PATH")
         .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))
         .or_else(|_| Ok("/tmp/cmux.sock".to_string()))
 }
