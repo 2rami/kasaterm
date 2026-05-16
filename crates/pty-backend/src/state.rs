@@ -13,11 +13,11 @@
 //! ScreenUpdate format matches tmux-bridge's so the renderer is happy
 //! with either backend.
 
-use alacritty_terminal::event::{Event as AlacEvent, EventListener};
+use alacritty_terminal::event::{Event as AlacEvent, EventListener, WindowSize};
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::Config as TermConfig;
-use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb, StdSyncHandler};
 use alacritty_terminal::Term;
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -133,7 +133,11 @@ impl PtySession {
         // `tmux split-window` etc into BSP RPC calls.
         if let Ok(shim_dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
             let parent_path = std::env::var("PATH").unwrap_or_default();
-            cmd.env("PATH", format!("{shim_dir}:{parent_path}"));
+            // PATH separator is platform-specific: `:` on Unix,
+            // `;` on Windows. Using `:` on Windows folds the whole
+            // chain into one literal entry and breaks every lookup.
+            let sep = if cfg!(windows) { ';' } else { ':' };
+            cmd.env("PATH", format!("{shim_dir}{sep}{parent_path}"));
         }
         if let Ok(fake_tmux) = std::env::var("KASATERM_TMUX_SHIM_TMUX") {
             cmd.env("TMUX", fake_tmux);
@@ -168,18 +172,30 @@ impl PtySession {
 
         let (tx, rx) = bounded::<ScreenUpdate>(256);
         let size = Arc::new(Mutex::new((opts.cols, opts.rows)));
+        let writer_arc: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
 
         // Spin up the VT processor loop. Owns the Term, drains the
         // reader, and emits a ScreenUpdate after each batch. Bounded
         // channel + drop-on-full keeps us from buffering frames the
         // renderer is too slow to consume.
-        let reader_thread =
-            spawn_reader_thread(reader, tx, opts.cols, opts.rows, size.clone(), opts.pane_id.clone());
+        let listener = PtyEventForwarder {
+            writer: Arc::clone(&writer_arc),
+            size: Arc::clone(&size),
+        };
+        let reader_thread = spawn_reader_thread(
+            reader,
+            tx,
+            opts.cols,
+            opts.rows,
+            size.clone(),
+            opts.pane_id.clone(),
+            listener,
+        );
 
         Ok(Self {
             screens: rx,
             master,
-            writer: Arc::new(Mutex::new(writer)),
+            writer: writer_arc,
             _child: Arc::new(Mutex::new(child)),
             size,
             _reader_thread: reader_thread,
@@ -210,22 +226,94 @@ impl PtySession {
     }
 }
 
-/// Alacritty Term's `EventListener` slot is mostly bell / title /
-/// resize callbacks. We don't need most of them — title arrives via
-/// the existing OSC channel that we already pull out of the cell
-/// snapshot, bells we ignore for now. Empty impl is fine.
-#[derive(Clone, Default)]
-struct NoopListener;
-impl EventListener for NoopListener {
-    fn send_event(&self, _ev: AlacEvent) {}
+/// Bridges alacritty_terminal's `EventListener` callbacks back into
+/// the PTY's input side. This is non-optional: terminals expect the
+/// host to *reply* to a handful of control sequences, not just
+/// passively render them. Without this, `\e[6n` (DSR-CPR) issued by
+/// the shell on startup blocks waiting for a cursor-position report
+/// and ConPTY-attached cmd.exe never reaches its first prompt.
+///
+/// We translate the events that carry a wire-format payload into
+/// writes against the PTY master:
+///   - PtyWrite — raw bytes alacritty already formatted
+///   - ColorRequest — RGB query; reply with a fixed default
+///   - TextAreaSizeRequest — geometry query; reply with current grid
+///   - ClipboardLoad — paste request; reply with empty until we wire
+///     real OS clipboard access through arboard
+///
+/// MouseCursorDirty / Title / Bell / etc are pure UI signals; the
+/// renderer reads title/cursor state from the snapshot, so we drop
+/// them here.
+struct PtyEventForwarder {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    size: Arc<Mutex<(u16, u16)>>,
+}
+
+impl Clone for PtyEventForwarder {
+    fn clone(&self) -> Self {
+        Self {
+            writer: Arc::clone(&self.writer),
+            size: Arc::clone(&self.size),
+        }
+    }
+}
+
+impl PtyEventForwarder {
+    fn write_to_pty(&self, bytes: &[u8]) {
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = w.write_all(bytes);
+        }
+    }
+}
+
+impl EventListener for PtyEventForwarder {
+    fn send_event(&self, event: AlacEvent) {
+        match event {
+            AlacEvent::PtyWrite(s) => self.write_to_pty(s.as_bytes()),
+            AlacEvent::ColorRequest(_, formatter) => {
+                // Until we propagate a real palette, claim pure black
+                // for any indexed-color query so the shell stops
+                // blocking. Foreground/background detection that
+                // depends on this will be wrong, but cmd / bash never
+                // gate startup on the answer.
+                let reply = formatter(Rgb { r: 0, g: 0, b: 0 });
+                self.write_to_pty(reply.as_bytes());
+            }
+            AlacEvent::TextAreaSizeRequest(formatter) => {
+                let (cols, rows) = *self.size.lock().unwrap();
+                let reply = formatter(WindowSize {
+                    num_lines: rows,
+                    num_cols: cols,
+                    cell_width: 7,
+                    cell_height: 16,
+                });
+                self.write_to_pty(reply.as_bytes());
+            }
+            AlacEvent::ClipboardLoad(_, formatter) => {
+                let reply = formatter("");
+                self.write_to_pty(reply.as_bytes());
+            }
+            // Title is exposed through the snapshot; the rest of the
+            // events are UI hints with no PTY-side reply.
+            AlacEvent::Title(_)
+            | AlacEvent::ResetTitle
+            | AlacEvent::ClipboardStore(..)
+            | AlacEvent::MouseCursorDirty
+            | AlacEvent::CursorBlinkingChange
+            | AlacEvent::Wakeup
+            | AlacEvent::Bell
+            | AlacEvent::Exit
+            | AlacEvent::ChildExit(_) => {}
+        }
+    }
 }
 
 /// Local Dimensions impl. alacritty_terminal exposes the trait but
 /// the concrete TermSize we want to pass lives behind a "test"
 /// feature gate in some versions; this keeps us decoupled.
-fn make_term(cols: u16, rows: u16) -> Term<NoopListener> {
+fn make_term(cols: u16, rows: u16, listener: PtyEventForwarder) -> Term<PtyEventForwarder> {
     let size = TermSize::new(cols as usize, rows as usize);
-    Term::new(TermConfig::default(), &size, NoopListener)
+    Term::new(TermConfig::default(), &size, listener)
 }
 
 fn spawn_reader_thread(
@@ -235,10 +323,11 @@ fn spawn_reader_thread(
     rows: u16,
     size: Arc<Mutex<(u16, u16)>>,
     pane_id: String,
+    listener: PtyEventForwarder,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut processor: Processor<StdSyncHandler> = Processor::new();
-        let mut term = make_term(cols, rows);
+        let mut term = make_term(cols, rows, listener);
         let mut buf = [0u8; 8192];
         let mut current_size = (cols, rows);
         loop {
@@ -252,13 +341,30 @@ fn spawn_reader_thread(
                 current_size = want;
             }
             let n = match reader.read(&mut buf) {
-                Ok(0) => return, // EOF — shell exited
+                Ok(0) => {
+                    eprintln!("[pty-backend] EOF on PTY reader — shell exited");
+                    return;
+                }
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("[pty-backend] read error: {e}");
                     return;
                 }
             };
+            if std::env::var("KASATERM_LOG_PTY").is_ok() {
+                let preview: String = buf[..n.min(160)]
+                    .iter()
+                    .map(|b| match b {
+                        0x20..=0x7e => (*b as char).to_string(),
+                        b'\n' => "\\n".to_string(),
+                        b'\r' => "\\r".to_string(),
+                        b'\t' => "\\t".to_string(),
+                        0x1b => "\\e".to_string(),
+                        _ => format!("\\x{b:02x}"),
+                    })
+                    .collect();
+                eprintln!("[pty-backend] read {n} bytes: {preview}");
+            }
             processor.advance(&mut term, &buf[..n]);
             // Snapshot Term → ScreenUpdate. We emit every visible row
             // as dirty for now — alacritty_terminal tracks per-line
@@ -274,7 +380,7 @@ fn spawn_reader_thread(
     })
 }
 
-fn snapshot(term: &Term<NoopListener>, cols: u16, rows: u16, pane_id: &str) -> ScreenUpdate {
+fn snapshot(term: &Term<PtyEventForwarder>, cols: u16, rows: u16, pane_id: &str) -> ScreenUpdate {
     let grid = term.grid();
     let mut dirty: Vec<(u16, Row)> = Vec::with_capacity(rows as usize);
     for r in 0..rows {
