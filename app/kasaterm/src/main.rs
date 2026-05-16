@@ -536,6 +536,15 @@ impl App {
         let _window = self.window.as_ref().expect("window before pty");
         let (cols, rows) = self.window_cells();
         let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
+        // Export the agent-socket path BEFORE the first PtySession
+        // spawn so the initial shell inherits a working
+        // KASATERM_SOCKET_PATH. start_socket_pty (called below) binds
+        // the actual server at this same path — set_var here just
+        // wins the race against PtyBackend's env::var lookup at spawn
+        // time.
+        let socket_path = resolve_kasaterm_socket_path();
+        std::env::set_var("KASATERM_SOCKET_PATH", &socket_path);
+        std::env::set_var("CMUX_SOCKET_PATH", &socket_path);
         let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
             shell: std::env::var("SHELL").ok(),
             cwd,
@@ -788,15 +797,7 @@ impl App {
     /// modes — the caller decides which concrete `Backend` impl to plug
     /// in (TmuxBackend in tmux mode, PtyBackend in PTY mode).
     fn start_socket_with(&self, backend: Arc<dyn agent_socket::Backend>) {
-        let path = std::env::var("KASATERM_SOCKET_PATH")
-            .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))
-            .unwrap_or_else(|_| {
-                format!(
-                    "{}/kasaterm-{}.sock",
-                    std::env::temp_dir().to_string_lossy(),
-                    std::process::id()
-                )
-            });
+        let path = resolve_kasaterm_socket_path();
         let server = match agent_socket::Server::bind(&path) {
             Ok(s) => s,
             Err(e) => {
@@ -1417,13 +1418,16 @@ impl App {
                         self.paste_clipboard();
                         return;
                     }
-                    // Terminal.app split shortcuts. PTY mode only —
-                    // tmux mode lets the daemon handle its own keys.
-                    // Default split is side-by-side; the secondary host
-                    // modifier flips it to stacked. macOS host_mod_alt
-                    // resolves to Shift (Cmd+Shift+D), Windows/Linux
-                    // resolves to Alt (Ctrl+Shift+Alt+D) since Shift is
-                    // already consumed by host_mod.
+                    // Terminal.app-style split shortcuts. PTY mode only
+                    // — tmux mode lets the daemon handle its own keys.
+                    //   D       → horizontal (stacked, default)
+                    //   Shift+D → vertical (side-by-side, macOS chord)
+                    //   E       → vertical (Windows-friendly chord that
+                    //              avoids the Shift-on-Shift conflict)
+                    // On macOS host_mod_alt resolves to Shift so
+                    // Cmd+Shift+D still flips to vertical. On
+                    // Windows/Linux host_mod already owns Shift, so the
+                    // dedicated KeyE binding is the practical one.
                     if code == KeyCode::KeyD {
                         let dir = if self.host_mod_alt() {
                             pty_backend::SplitDir::Vertical
@@ -1431,6 +1435,12 @@ impl App {
                             pty_backend::SplitDir::Horizontal
                         };
                         if let Err(e) = self.split_active_pane(dir) {
+                            eprintln!("[tmuxify] split failed: {e}");
+                        }
+                        return;
+                    }
+                    if code == KeyCode::KeyE {
+                        if let Err(e) = self.split_active_pane(pty_backend::SplitDir::Vertical) {
                             eprintln!("[tmuxify] split failed: {e}");
                         }
                         return;
@@ -1572,13 +1582,16 @@ impl App {
                             event.logical_key, self.ime_active, self.in_preedit
                         );
                     }
-                    // Hangul branch: route each jamo through our own
-                    // Composer. We get the jamo here because the
-                    // selected macOS keyboard layout (e.g. Korean
-                    // 두벌식) maps physical keys to Hangul compat
-                    // codepoints; with set_ime_allowed(false) the OS
-                    // IME doesn't intercept, so we see them all the
-                    // way from the first keystroke.
+                    // Hangul branch (macOS only). On macOS our
+                    // set_ime_allowed(false) means the Korean keyboard
+                    // layout hands jamo codepoints straight through on
+                    // KeyboardInput.text; we feed them into the local
+                    // Composer to dodge the NSTextInputContext first-
+                    // key drop. Windows / Linux let the OS IME handle
+                    // the whole composition (Ime::Preedit/Commit), so
+                    // we skip this branch and forward whatever text the
+                    // keyboard layer produced as-is.
+                    #[cfg(target_os = "macos")]
                     if t.chars().count() == 1 {
                         if let Some(c) = t.chars().next() {
                             if (0x3130..=0x318F).contains(&(c as u32)) {
@@ -1892,7 +1905,17 @@ impl ApplicationHandler for App {
         // receive the Hangul jamo on KeyboardInput.text because the
         // selected keyboard layout produces them — we just take the
         // composition into our own hands from there.
+        // IME ownership splits per-platform:
+        //   macOS: NSTextInputContext drops the first jamo after a
+        //     script switch (only KeyboardInput.text fires), so we
+        //     refuse OS IME and run hangul-ime/Composer ourselves.
+        //   Windows / Linux: the OS IME is the only path that gets us
+        //     completed Hangul syllables — set_ime_allowed(true) so
+        //     Ime::Preedit / Ime::Commit drive composition.
+        #[cfg(target_os = "macos")]
         window.set_ime_allowed(false);
+        #[cfg(not(target_os = "macos"))]
+        window.set_ime_allowed(true);
         let sg_window = SugarloafWindow {
             handle: window.window_handle().unwrap().as_raw(),
             display: window.display_handle().unwrap().as_raw(),
@@ -2064,6 +2087,13 @@ impl ApplicationHandler for App {
                         if let Some(sel) = self.selection {
                             if sel.anchor == sel.end {
                                 self.selection = None;
+                            } else {
+                                // Copy-on-select. Mirrors the iTerm2
+                                // default and lets a fresh drag in any
+                                // TUI (Claude Code, less, etc.) land in
+                                // the clipboard without the user having
+                                // to also press Cmd/Ctrl+Shift+C.
+                                self.copy_selection();
                             }
                         }
                     }
@@ -2197,6 +2227,23 @@ fn install_tmux_shim() {
         eprintln!("[shim] stage {shim_src:?} -> {target:?} failed: {e}");
         return;
     }
+    // Cross-pane RPC: stage cmux-compat next to the tmux shim so it is
+    // discoverable on the child shell's PATH. A pane can then run
+    // `cmux-compat send --surface %1 "..."` to drive a sibling pane
+    // without needing to know the absolute target/debug path. Failure
+    // is non-fatal — the shim already works without it.
+    if let Some(cmux_src) = locate_cmux_compat_binary() {
+        let cmux_name = if cfg!(windows) {
+            "cmux-compat.exe"
+        } else {
+            "cmux-compat"
+        };
+        let cmux_target = shim_dir.join(cmux_name);
+        let _ = std::fs::remove_file(&cmux_target);
+        if let Err(e) = stage_shim(&cmux_src, &cmux_target) {
+            eprintln!("[shim] stage cmux-compat {cmux_src:?} -> {cmux_target:?} failed: {e}");
+        }
+    }
     let trace = std::env::var("KASATERM_TMUX_TRACE").unwrap_or_else(|_| {
         std::env::temp_dir()
             .join("kasaterm-tmux-calls.log")
@@ -2257,6 +2304,45 @@ fn locate_shim_binary() -> Option<std::path::PathBuf> {
     // dev fallback: target/debug/tmux when running via `cargo run`
     // from somewhere odd. current_exe usually already points there
     // but be defensive.
+    None
+}
+
+/// Decide where the agent-socket should live. Honors caller-supplied
+/// overrides first (`KASATERM_SOCKET_PATH`, then the cmux convention),
+/// and falls back to a per-pid socket under the system temp dir. Used
+/// in two places — the early env-var seed in `start_pty` so the very
+/// first shell sees a stable value, and the actual server bind in
+/// `start_socket_with` — and must return the same path in both.
+fn resolve_kasaterm_socket_path() -> String {
+    std::env::var("KASATERM_SOCKET_PATH")
+        .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))
+        .unwrap_or_else(|_| {
+            format!(
+                "{}/kasaterm-{}.sock",
+                std::env::temp_dir().to_string_lossy(),
+                std::process::id()
+            )
+        })
+}
+
+/// Locate the cmux-compat binary so we can stage it alongside the
+/// tmux shim. Same lookup pattern as `locate_shim_binary` — env
+/// override first, then sibling of the current exe.
+fn locate_cmux_compat_binary() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_CMUX_COMPAT_BIN") {
+        let p = std::path::PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    for name in ["cmux-compat.exe", "cmux-compat"] {
+        let c = dir.join(name);
+        if c.is_file() {
+            return Some(c);
+        }
+    }
     None
 }
 

@@ -17,3 +17,4 @@ alacritty_terminal = "0.26"
 # tmux-bridge can be retired); the type re-use here is just the
 # shared vocabulary the renderer speaks.
 tmux-bridge.workspace = true
+arboard = "3"

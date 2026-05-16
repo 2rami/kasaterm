@@ -149,6 +149,16 @@ impl PtySession {
         // never gets called and we get "Could not determine current
         // tmux pane/window" before our shim sees anything.
         cmd.env("TMUX_PANE", &opts.pane_id);
+        // Cross-pane RPC: each pane needs to know (a) which surface it
+        // is and (b) where to reach the host so a script inside one
+        // pane can drive another via cmux-compat. CommandBuilder
+        // inherits the parent env by default, but make these two
+        // explicit so removing the inherit later doesn't silently
+        // break the integration.
+        cmd.env("KASATERM_PANE_ID", &opts.pane_id);
+        if let Ok(sock) = std::env::var("KASATERM_SOCKET_PATH") {
+            cmd.env("KASATERM_SOCKET_PATH", sock);
+        }
         // Caller-supplied env overrides everything above so tests /
         // callers can still inject a synthetic TERM if they need to.
         for (k, v) in &opts.env {
@@ -290,14 +300,39 @@ impl EventListener for PtyEventForwarder {
                 self.write_to_pty(reply.as_bytes());
             }
             AlacEvent::ClipboardLoad(_, formatter) => {
-                let reply = formatter("");
+                // Read the OS clipboard and feed it back. Falls back
+                // to empty so a clipboard-open failure doesn't strand
+                // the shell waiting on a paste response.
+                let text = arboard::Clipboard::new()
+                    .ok()
+                    .and_then(|mut cb| cb.get_text().ok())
+                    .unwrap_or_default();
+                let reply = formatter(&text);
                 self.write_to_pty(reply.as_bytes());
+            }
+            AlacEvent::ClipboardStore(_, text) => {
+                // OSC 52 set — Claude Code, helix, etc. push selected
+                // text into the host clipboard through this. Best-
+                // effort: a clipboard open failure is logged but does
+                // not break the PTY.
+                let preview: String = text.chars().take(40).collect();
+                eprintln!(
+                    "[pty-backend] OSC 52 set ({} chars): {preview:?}",
+                    text.len()
+                );
+                match arboard::Clipboard::new() {
+                    Ok(mut cb) => {
+                        if let Err(e) = cb.set_text(text) {
+                            eprintln!("[pty-backend] clipboard set failed: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("[pty-backend] clipboard open failed: {e}"),
+                }
             }
             // Title is exposed through the snapshot; the rest of the
             // events are UI hints with no PTY-side reply.
             AlacEvent::Title(_)
             | AlacEvent::ResetTitle
-            | AlacEvent::ClipboardStore(..)
             | AlacEvent::MouseCursorDirty
             | AlacEvent::CursorBlinkingChange
             | AlacEvent::Wakeup
