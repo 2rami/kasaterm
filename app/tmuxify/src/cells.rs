@@ -15,29 +15,29 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 use tmux_bridge::screen::{Cell, Color};
 
-/// iTerm2 Default Dark + xterm 256-color extension. RGB triples in
-/// 0..255, alpha implicit 255. Index 0..15 are the 16 base ANSI
-/// colors; 16..231 are the 6×6×6 cube; 232..255 are the grayscale ramp.
+/// iTerm2 "Default" profile color scheme — the values a freshly
+/// installed iTerm2 uses on first launch. RGB triples decoded from
+/// the bundled `Default.itermcolors` plist. The 6×6×6 cube + 24-step
+/// grayscale ramp below follow xterm's standard 256-color extension.
 fn ansi_palette() -> [[u8; 3]; 256] {
     let mut p = [[0u8; 3]; 256];
-    // 16 base ANSI — iTerm2 Default Dark style
     let base: [[u8; 3]; 16] = [
-        [0x1c, 0x1c, 0x1c], // 0 black
-        [0xc9, 0x1b, 0x00], // 1 red
-        [0x00, 0xc2, 0x00], // 2 green
-        [0xc7, 0xc4, 0x00], // 3 yellow
-        [0x00, 0x37, 0xda], // 4 blue
-        [0xc9, 0x30, 0xc7], // 5 magenta
-        [0x00, 0xc5, 0xc7], // 6 cyan
-        [0xc7, 0xc7, 0xc7], // 7 white
-        [0x67, 0x67, 0x67], // 8 bright black
-        [0xff, 0x6d, 0x67], // 9 bright red
-        [0x5f, 0xf9, 0x67], // 10 bright green
-        [0xfe, 0xfb, 0x67], // 11 bright yellow
+        [0x00, 0x00, 0x00], // 0  black
+        [0xc9, 0x1b, 0x00], // 1  red
+        [0x00, 0xc2, 0x00], // 2  green
+        [0xc7, 0xc4, 0x00], // 3  yellow
+        [0x22, 0x25, 0xc4], // 4  blue
+        [0xc9, 0x30, 0xc7], // 5  magenta
+        [0x00, 0xc5, 0xc7], // 6  cyan
+        [0xc7, 0xc7, 0xc7], // 7  white
+        [0x68, 0x68, 0x68], // 8  bright black
+        [0xff, 0x6e, 0x67], // 9  bright red
+        [0x5f, 0xfa, 0x68], // 10 bright green
+        [0xff, 0xfa, 0x72], // 11 bright yellow
         [0x68, 0x71, 0xff], // 12 bright blue
-        [0xff, 0x76, 0xff], // 13 bright magenta
+        [0xff, 0x77, 0xff], // 13 bright magenta
         [0x5f, 0xfd, 0xff], // 14 bright cyan
-        [0xfe, 0xfe, 0xfe], // 15 bright white
+        [0xff, 0xff, 0xff], // 15 bright white
     ];
     p[..16].copy_from_slice(&base);
     // 216-color cube: 16..231
@@ -58,10 +58,9 @@ fn ansi_palette() -> [[u8; 3]; 256] {
 }
 
 /// Default foreground / background when a cell has `Color::Default`.
-/// Matches kasaterm-cli's `TERM_BG` / `TERM_FG` so the comparison stays
-/// honest.
-pub const DEFAULT_FG: [u8; 4] = [0xea, 0xee, 0xf4, 0xff];
-pub const DEFAULT_BG: [u8; 4] = [0x1c, 0x20, 0x26, 0xff];
+/// Mirrors iTerm2's Default profile: fg `#c7c7c7`, bg `#000000`.
+pub const DEFAULT_FG: [u8; 4] = [0xc7, 0xc7, 0xc7, 0xff];
+pub const DEFAULT_BG: [u8; 4] = [0x00, 0x00, 0x00, 0xff];
 
 fn color_to_rgba(c: &Color, default: [u8; 4]) -> [u8; 4] {
     match c {
@@ -329,12 +328,16 @@ mod tests {
     }
 
     #[test]
-    fn ansi_base_palette_matches_iterm2_default_dark() {
+    fn ansi_base_palette_matches_iterm2_default() {
+        // Probe a handful of indices against the values shipped with
+        // iTerm2's bundled Default profile. Drifting from these breaks
+        // the "looks like iTerm2" promise the renderer makes.
         let p = ansi_palette();
-        assert_eq!(p[0], [0x1c, 0x1c, 0x1c], "black");
+        assert_eq!(p[0], [0x00, 0x00, 0x00], "black");
         assert_eq!(p[1], [0xc9, 0x1b, 0x00], "red");
+        assert_eq!(p[4], [0x22, 0x25, 0xc4], "blue");
         assert_eq!(p[7], [0xc7, 0xc7, 0xc7], "white");
-        assert_eq!(p[15], [0xfe, 0xfe, 0xfe], "bright white");
+        assert_eq!(p[15], [0xff, 0xff, 0xff], "bright white");
     }
 
     #[test]
@@ -375,10 +378,10 @@ mod tests {
 
     #[test]
     fn color_idx_picks_palette_entry() {
-        // ANSI 9 = bright red in iTerm2 Default Dark
+        // ANSI 9 = bright red in iTerm2 Default.
         assert_eq!(
             color_to_rgba(&Color::Idx(9), DEFAULT_FG),
-            [0xff, 0x6d, 0x67, 0xff],
+            [0xff, 0x6e, 0x67, 0xff],
         );
     }
 

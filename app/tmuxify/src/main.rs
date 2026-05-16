@@ -1162,7 +1162,21 @@ impl ApplicationHandler for App {
                 height: window.inner_size().height as f32,
             },
         };
-        let font_library = sugarloaf::font::FontLibrary::default();
+        // Match iTerm2's default profile font choice. Monaco is the
+        // built-in macOS monospace face iTerm2 ships pointing at; falls
+        // back gracefully to Cascadia (bundled in sugarloaf) when the
+        // platform doesn't have it.
+        let mut fonts = sugarloaf::font::fonts::SugarloafFonts::default();
+        fonts.family = Some("Monaco".to_string());
+        let (font_library, font_err) = sugarloaf::font::FontLibrary::new(fonts);
+        if let Some(err) = font_err {
+            if !err.fonts_not_found.is_empty() {
+                eprintln!(
+                    "[font] requested fonts not found, sugarloaf will fall back: {:?}",
+                    err.fonts_not_found
+                );
+            }
+        }
         let sugarloaf = Sugarloaf::new(
             sg_window,
             SugarloafRenderer::default(),
