@@ -1,6 +1,6 @@
 [package]
-name = "kasaterm-sugarloaf-cli"
-description = "PoC sibling of kasaterm-cli that renders the same tmux-bridge output through Rio's sugarloaf engine for visual A/B comparison."
+name = "tmuxify"
+description = "Cross-platform cmux-style terminal. winit + sugarloaf renderer, tmux-bridge backend (Phase A/B), agent-socket JSON-RPC server (cmux-compatible). Phase C will swap tmux-bridge for portable-pty + alacritty_terminal so the binary runs natively on Windows."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
