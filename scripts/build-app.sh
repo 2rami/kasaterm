@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Build a macOS .app bundle around the kasaterm binary.
+#
+# Output: dist/kasaterm.app/Contents/{Info.plist, MacOS/kasaterm,
+#                                     Resources/AppIcon.icns}
+#
+# Usage:
+#   scripts/build-app.sh            # release build, dist/kasaterm.app
+#   scripts/build-app.sh --debug    # debug build (faster, larger)
+#   scripts/build-app.sh --install  # also copy into ~/Applications
+
+set -euo pipefail
+
+PROFILE="release"
+INSTALL=0
+for arg in "$@"; do
+  case "$arg" in
+    --debug)   PROFILE="debug" ;;
+    --install) INSTALL=1 ;;
+    *) echo "unknown arg: $arg" >&2; exit 2 ;;
+  esac
+done
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+if [[ ! -f assets/AppIcon.icns ]]; then
+  echo "error: assets/AppIcon.icns missing — run the iconset builder first" >&2
+  exit 1
+fi
+
+# Build the binary.
+if [[ "$PROFILE" == "release" ]]; then
+  cargo build -p kasaterm --release
+  BIN="target/release/kasaterm"
+else
+  cargo build -p kasaterm
+  BIN="target/debug/kasaterm"
+fi
+
+APP="dist/kasaterm.app"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+cp "$BIN" "$APP/Contents/MacOS/kasaterm"
+cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+
+# Minimal Info.plist. Bundle id namespaced under the project root so
+# Launchpad / Spotlight key the icon to this binary specifically.
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>kasaterm</string>
+    <key>CFBundleDisplayName</key>
+    <string>kasaterm</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.kasa.kasaterm</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>kasaterm</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+</dict>
+</plist>
+PLIST
+
+# Re-sign ad-hoc so macOS Gatekeeper accepts launch from Finder. Without
+# this the first run errors with "damaged or incomplete" on some setups.
+codesign --force --sign - --deep "$APP" 2>/dev/null || true
+
+# Bust the icon cache so the new .icns shows immediately in Finder /
+# Dock instead of waiting for macOS to notice on its own.
+touch "$APP"
+
+echo "built $APP ($PROFILE)"
+
+if [[ "$INSTALL" -eq 1 ]]; then
+  mkdir -p "$HOME/Applications"
+  rm -rf "$HOME/Applications/kasaterm.app"
+  cp -R "$APP" "$HOME/Applications/kasaterm.app"
+  touch "$HOME/Applications/kasaterm.app"
+  echo "installed to ~/Applications/kasaterm.app"
+fi
