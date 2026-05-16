@@ -1166,13 +1166,14 @@ impl ApplicationHandler for App {
                 height: window.inner_size().height as f32,
             },
         };
-        // Pull the font choice straight out of the user's iTerm2
-        // profile. Their plist has Normal Font = "D2CodingLigatureNFM 14"
-        // (PostScript name) — Korean-coding-friendly D2Coding with Nerd
-        // Font glyphs. CoreText takes family names, not PostScript
-        // names; the family is "D2CodingLigature Nerd Font Mono".
-        // Fall through to sugarloaf's bundled Cascadia if the face
-        // isn't installed on this machine.
+        // Match the user's active macOS Terminal.app profile
+        // (Default Window Settings = "GitHub Dark Dimmed"). The plist
+        // stores the font as the NSKeyedArchiver bytes of an NSFont
+        // whose fontName() is "D2CodingLigatureNFM" — the PostScript
+        // name of D2CodingLigature Nerd Font Mono. CoreText / swash
+        // resolve through family names, so we point at the family the
+        // system registry lists for that .ttf and fall through to
+        // sugarloaf's bundled Cascadia when the face isn't installed.
         let mut fonts = sugarloaf::font::fonts::SugarloafFonts::default();
         fonts.family = Some("D2CodingLigature Nerd Font Mono".to_string());
         let (font_library, font_err) = sugarloaf::font::FontLibrary::new(fonts);

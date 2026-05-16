@@ -15,29 +15,31 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 use tmux_bridge::screen::{Cell, Color};
 
-/// User's iTerm2 Default profile (decoded from
-/// `~/Library/Preferences/com.googlecode.iterm2.plist` →
-/// `New Bookmarks[0]`). The 6×6×6 cube + 24-step grayscale ramp
-/// below follow xterm's standard 256-color extension.
+/// macOS Terminal.app "GitHub Dark Dimmed" — the user's active
+/// Default Window Settings. Decoded from
+/// `~/Library/Preferences/com.apple.Terminal.plist` (the colors are
+/// `NSKeyedArchiver` bytes there; the values below are the sRGB
+/// 8-bit triples after unarchiving). The 6×6×6 cube + 24-step
+/// grayscale ramp follow xterm's standard 256-color extension.
 fn ansi_palette() -> [[u8; 3]; 256] {
     let mut p = [[0u8; 3]; 256];
     let base: [[u8; 3]; 16] = [
-        [19, 24, 29],     // 0  black     (#13181d)
-        [180, 60, 41],    // 1  red       (#b43c29)
-        [0, 193, 0],      // 2  green     (#00c100)
-        [199, 196, 0],    // 3  yellow    (#c7c400)
-        [39, 67, 199],    // 4  blue      (#2743c7)
-        [191, 63, 189],   // 5  magenta   (#bf3fbd)
-        [0, 197, 199],    // 6  cyan      (#00c5c7)
-        [199, 199, 199],  // 7  white     (#c7c7c7)
-        [103, 103, 103],  // 8  br black  (#676767)
-        [220, 121, 116],  // 9  br red    (#dc7974)
-        [87, 230, 144],   // 10 br green  (#57e690)
-        [236, 225, 0],    // 11 br yellow (#ece100)
-        [166, 170, 241],  // 12 br blue   (#a6aaf1)
-        [224, 125, 224],  // 13 br magenta(#e07de0)
-        [95, 253, 255],   // 14 br cyan   (#5ffdff)
-        [254, 255, 255],  // 15 br white  (#feffff)
+        [99, 110, 123],   // 0  black     (#636e7b)
+        [244, 112, 103],  // 1  red       (#f47067)
+        [87, 171, 90],    // 2  green     (#57ab5a)
+        [198, 144, 38],   // 3  yellow    (#c69026)
+        [83, 155, 245],   // 4  blue      (#539bf5)
+        [176, 131, 240],  // 5  magenta   (#b083f0)
+        [57, 197, 207],   // 6  cyan      (#39c5cf)
+        [144, 157, 171],  // 7  white     (#909dab)
+        [99, 110, 123],   // 8  br black  (#636e7b)
+        [255, 147, 138],  // 9  br red    (#ff938a)
+        [107, 196, 109],  // 10 br green  (#6bc46d)
+        [218, 170, 63],   // 11 br yellow (#daaa3f)
+        [108, 182, 255],  // 12 br blue   (#6cb6ff)
+        [220, 189, 251],  // 13 br magenta(#dcbdfb)
+        [86, 212, 221],   // 14 br cyan   (#56d4dd)
+        [205, 217, 229],  // 15 br white  (#cdd9e5)
     ];
     p[..16].copy_from_slice(&base);
     // 216-color cube: 16..231
@@ -58,18 +60,17 @@ fn ansi_palette() -> [[u8; 3]; 256] {
 }
 
 /// Default foreground / background when a cell has `Color::Default`.
-/// Decoded from the user's iTerm2 Default profile —
-/// `Foreground Color` = #0f0f0f, `Background Color` = #f9f9f9. A
-/// light-on-dark profile would flip these; we follow the user's
-/// actual config so the comparison stays honest.
-pub const DEFAULT_FG: [u8; 4] = [15, 15, 15, 0xff];
-pub const DEFAULT_BG: [u8; 4] = [249, 249, 249, 0xff];
+/// Decoded from the user's Terminal.app `GitHub Dark Dimmed` profile
+/// (the active Default Window Settings): bg `#252c35`, fg `#bbc6d1`.
+pub const DEFAULT_FG: [u8; 4] = [187, 198, 209, 0xff];
+pub const DEFAULT_BG: [u8; 4] = [37, 44, 53, 0xff];
 
-/// Cursor + selection accents from the same profile so the on-screen
-/// chrome matches iTerm2's behavior — cursor is `Cursor Color`,
-/// selection is `Selection Color`.
-pub const ITERM_CURSOR: [u8; 4] = [0, 0, 0, 0xff];
-pub const ITERM_SELECTION: [u8; 4] = [179, 214, 255, 0x66];
+/// Cursor + selection accents from the same profile. Cursor is
+/// `CursorColor` (a bright "GitHub link blue") and selection is
+/// `SelectionColor` (a muted blue). Alpha tuned so selected text
+/// stays readable underneath.
+pub const ITERM_CURSOR: [u8; 4] = [100, 173, 247, 0xff];
+pub const ITERM_SELECTION: [u8; 4] = [49, 99, 139, 0x99];
 
 fn color_to_rgba(c: &Color, default: [u8; 4]) -> [u8; 4] {
     match c {
@@ -344,17 +345,17 @@ mod tests {
     }
 
     #[test]
-    fn ansi_base_palette_matches_user_iterm2_profile() {
-        // Values come from the user's iTerm2 plist
-        // (`New Bookmarks[0]`). Re-decode and update here if the
-        // profile changes — palette drift produces silent visual
-        // regressions otherwise.
+    fn ansi_base_palette_matches_user_terminal_profile() {
+        // Values come from the user's macOS Terminal.app profile
+        // `GitHub Dark Dimmed` (active Default Window Settings).
+        // Decoded via NSKeyedUnarchiver on the bytes in
+        // ~/Library/Preferences/com.apple.Terminal.plist.
         let p = ansi_palette();
-        assert_eq!(p[0], [19, 24, 29], "black");
-        assert_eq!(p[1], [180, 60, 41], "red (rust orange in user profile)");
-        assert_eq!(p[4], [39, 67, 199], "blue");
-        assert_eq!(p[7], [199, 199, 199], "white");
-        assert_eq!(p[15], [254, 255, 255], "bright white");
+        assert_eq!(p[0], [99, 110, 123], "black");
+        assert_eq!(p[1], [244, 112, 103], "red");
+        assert_eq!(p[4], [83, 155, 245], "blue (GitHub link blue)");
+        assert_eq!(p[7], [144, 157, 171], "white");
+        assert_eq!(p[15], [205, 217, 229], "bright white");
     }
 
     #[test]
@@ -395,11 +396,11 @@ mod tests {
 
     #[test]
     fn color_idx_picks_palette_entry() {
-        // ANSI 9 = bright red. User's profile has this slot at
-        // #dc7974 (a softer salmon than xterm's pure bright red).
+        // ANSI 9 = bright red. Terminal.app GitHub Dark Dimmed
+        // has this slot at #ff938a (warm salmon).
         assert_eq!(
             color_to_rgba(&Color::Idx(9), DEFAULT_FG),
-            [220, 121, 116, 0xff],
+            [255, 147, 138, 0xff],
         );
     }
 
