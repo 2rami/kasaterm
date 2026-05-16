@@ -1,21 +1,24 @@
 //! kasaterm-sugarloaf-cli — sugarloaf-rendered terminal driven by
-//! tmux-bridge. Phase A Task #13: wheel scroll + scrollback, mouse drag
-//! selection + clipboard, Korean IME preedit, Cmd+C / Cmd+V. Stays
-//! framework-agnostic — no iced or kasaterm in the dep tree.
+//! tmux-bridge. Multi-pane: tmux's split-window creates additional
+//! panes, layout-change events tell us how to lay them out, and we
+//! render each pane inside its rect from the parsed Layout tree.
+//! Phase A Task #13/14: wheel + scrollback, IME, selection + clipboard,
+//! cursor blink, OSC titles, multi-pane render + focus routing.
 
 mod cells;
 mod socket;
 
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use sugarloaf::layout::RootStyle;
 use sugarloaf::{Sugarloaf, SugarloafRenderer, SugarloafWindow, SugarloafWindowSize};
+use tmux_bridge::layout::{parse_layout, Layout};
 use tmux_bridge::screen::Cell as GridCell;
-use tmux_bridge::{ScreenUpdate, StartOptions, TmuxSession};
+use tmux_bridge::{ScreenUpdate, StartOptions, TmuxEvent, TmuxSession};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{
@@ -135,8 +138,13 @@ fn wheel_step(
     Some(lines)
 }
 
+/// Per-pane render state. One of these per tmux pane (`%N`). Holds the
+/// cell grid, scrollback ring, cursor, and the flags we need to route
+/// wheel events correctly (alt-screen / SGR mouse mode are per-pane in
+/// real terminals — claude in pane 0 can be in alt-screen while a
+/// shell prompt sits in pane 1).
 #[derive(Default)]
-struct Screen {
+struct PaneState {
     rows: u16,
     cols: u16,
     cells: Vec<Vec<GridCell>>,
@@ -147,17 +155,54 @@ struct Screen {
     mouse_enabled: bool,
     mouse_sgr: bool,
     history: VecDeque<Vec<GridCell>>,
-    /// OSC 0/2 title — `printf '\e]0;hello\a'` lands here. Applied to
-    /// the winit window's chrome whenever it changes.
+    /// Scrollback offset in rows. `0` = live tail; positive = N rows
+    /// back into history visible at the top.
+    scroll_offset: usize,
+    /// Cached previous cells used by the shift-detection heuristic that
+    /// promotes scrolled-off rows into `history`. Per-pane because the
+    /// shifts are pane-local.
+    prev_cells: Vec<Vec<GridCell>>,
+    /// OSC 0/2 title — `printf '\e]0;hello\a'` from a shell inside this
+    /// pane lands here. The active pane's title is applied to the
+    /// window chrome.
     title: Option<String>,
+}
+
+/// Whole-window state: HashMap of panes keyed by tmux pane id, the
+/// most recently parsed Layout tree, and which pane is active for
+/// keyboard / selection / cursor display.
+#[derive(Default)]
+struct Workspace {
+    panes: HashMap<String, PaneState>,
+    layout: Option<Layout>,
+    active_pane: Option<String>,
+}
+
+impl Workspace {
+    fn pane_mut(&mut self, id: &str) -> &mut PaneState {
+        self.panes
+            .entry(id.to_string())
+            .or_insert_with(PaneState::default)
+    }
+
+    fn active(&self) -> Option<&PaneState> {
+        self.active_pane
+            .as_deref()
+            .and_then(|id| self.panes.get(id))
+    }
+
+    fn active_mut(&mut self) -> Option<&mut PaneState> {
+        let id = self.active_pane.clone()?;
+        self.panes.get_mut(&id)
+    }
 }
 
 struct App {
     window: Option<Arc<Window>>,
     sugarloaf: Option<Sugarloaf<'static>>,
     tmux: Option<Arc<TmuxSession>>,
-    screen: Arc<Mutex<Screen>>,
-    /// Measured cell geometry from sugarloaf — see `measure_cell_geom`.
+    ws: Arc<Mutex<Workspace>>,
+    /// Measured cell geometry from sugarloaf — see `compute_cell_metrics`.
     cell: CellGeom,
     preedit: String,
     in_preedit: bool,
@@ -165,7 +210,6 @@ struct App {
     drag_anchor: Option<(u16, u16)>,
     cursor_px: (f32, f32),
     modifiers: ModifiersState,
-    scroll_offset: usize,
     wheel_accum_y: f32,
     last_wheel_emit: Instant,
     /// Last keystroke / IME / mouse press timestamp. Resets the blink
@@ -180,7 +224,7 @@ impl App {
             window: None,
             sugarloaf: None,
             tmux: None,
-            screen: Arc::new(Mutex::new(Screen::default())),
+            ws: Arc::new(Mutex::new(Workspace::default())),
             cell: CellGeom::default(),
             preedit: String::new(),
             in_preedit: false,
@@ -188,7 +232,6 @@ impl App {
             drag_anchor: None,
             cursor_px: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
-            scroll_offset: 0,
             wheel_accum_y: 0.0,
             last_wheel_emit: Instant::now() - std::time::Duration::from_secs(1),
             last_input_at: Instant::now(),
@@ -301,14 +344,15 @@ impl App {
             rows,
             ..Default::default()
         })?;
+        // Screens thread: each ScreenUpdate carries a pane_id; routes to
+        // the matching PaneState in the workspace. New pane ids appear
+        // automatically when tmux split-window creates them.
         let screens = tmux.screens.clone();
-        let screen = self.screen.clone();
-        let win = self.window.clone();
+        let ws_screens = self.ws.clone();
+        let win_screens = self.window.clone();
         std::thread::spawn(move || {
-            // Last-applied snapshot — used to detect rows that scrolled
-            // off the top so we can preserve them in history.
-            let mut prev_cells: Vec<Vec<GridCell>> = Vec::new();
             while let Ok(ScreenUpdate {
+                pane_id,
                 rows,
                 cols,
                 dirty,
@@ -322,68 +366,108 @@ impl App {
                 ..
             }) = screens.recv()
             {
-                let mut s = screen.lock().unwrap();
-                let resized = s.cols != cols
-                    || s.rows != rows
-                    || s.cells.len() != rows as usize;
+                let mut ws = ws_screens.lock().unwrap();
+                // First-seen pane becomes the active one so the user
+                // doesn't open into a workspace with no focus.
+                if ws.active_pane.is_none() {
+                    ws.active_pane = Some(pane_id.clone());
+                }
+                let is_active = ws.active_pane.as_deref() == Some(pane_id.as_str());
+                let pane = ws.pane_mut(&pane_id);
+                let resized = pane.cols != cols
+                    || pane.rows != rows
+                    || pane.cells.len() != rows as usize;
                 if resized {
-                    s.cols = cols;
-                    s.rows = rows;
-                    s.cells = (0..rows as usize)
+                    pane.cols = cols;
+                    pane.rows = rows;
+                    pane.cells = (0..rows as usize)
                         .map(|_| vec![GridCell::blank(); cols as usize])
                         .collect();
-                    prev_cells.clear();
+                    pane.prev_cells.clear();
                 }
                 for (r, row) in dirty {
-                    if let Some(dst) = s.cells.get_mut(r as usize) {
+                    if let Some(dst) = pane.cells.get_mut(r as usize) {
                         *dst = row;
                     }
                 }
-                // Shift detection: a prefix of prev appearing as a suffix
-                // of new (offset by k rows) means k rows scrolled off the
-                // top. Push them into the history ring. Skipped in
-                // alt-screen (claude / vim manage own scrollback) and
-                // right after resize.
-                if !alt_screen && !prev_cells.is_empty() && prev_cells.len() == s.cells.len() {
-                    let n = prev_cells.len();
+                // Shift detection per pane — alt-screen apps manage their
+                // own scrollback so we skip there.
+                if !alt_screen
+                    && !pane.prev_cells.is_empty()
+                    && pane.prev_cells.len() == pane.cells.len()
+                {
+                    let n = pane.prev_cells.len();
                     let mut shifted = 0usize;
                     for k in 1..n {
-                        if prev_cells[k..] == s.cells[..n - k] {
+                        if pane.prev_cells[k..] == pane.cells[..n - k] {
                             shifted = k;
                             break;
                         }
                     }
                     if shifted > 0 {
-                        for row in &prev_cells[..shifted] {
-                            s.history.push_back(row.clone());
+                        for row in &pane.prev_cells[..shifted] {
+                            pane.history.push_back(row.clone());
                         }
-                        while s.history.len() > SCROLLBACK_MAX {
-                            s.history.pop_front();
+                        while pane.history.len() > SCROLLBACK_MAX {
+                            pane.history.pop_front();
                         }
                     }
                 }
-                prev_cells = s.cells.clone();
-                s.cursor_row = cursor_row;
-                s.cursor_col = cursor_col;
-                s.cursor_visible = cursor_visible;
-                s.alt_screen = alt_screen;
-                s.mouse_enabled = mouse_enabled;
-                s.mouse_sgr = mouse_sgr;
-                // Title comparison so we only call set_title when it
-                // actually changes — otherwise the window-server fights
-                // us on every ScreenUpdate.
+                pane.prev_cells = pane.cells.clone();
+                pane.cursor_row = cursor_row;
+                pane.cursor_col = cursor_col;
+                pane.cursor_visible = cursor_visible;
+                pane.alt_screen = alt_screen;
+                pane.mouse_enabled = mouse_enabled;
+                pane.mouse_sgr = mouse_sgr;
                 let new_title = title.filter(|t| !t.is_empty());
-                let title_changed = s.title != new_title;
+                let title_changed = pane.title != new_title;
                 if title_changed {
-                    s.title = new_title.clone();
+                    pane.title = new_title.clone();
                 }
-                drop(s);
-                if let Some(w) = win.as_ref() {
-                    if title_changed {
-                        let display = new_title.unwrap_or_else(|| "kasaterm-sugarloaf-cli".into());
+                drop(ws);
+                if let Some(w) = win_screens.as_ref() {
+                    // Only the active pane's title shows in the window
+                    // chrome — background panes change silently.
+                    if title_changed && is_active {
+                        let display =
+                            new_title.unwrap_or_else(|| "kasaterm-sugarloaf-cli".into());
                         w.set_title(&display);
                     }
                     w.request_redraw();
+                }
+            }
+        });
+        // Events thread: parses %layout-change messages so render_frame
+        // can lay panes out. Without this, splits would create panes
+        // we have screen state for but no rect to draw them at.
+        let events = tmux.events.clone();
+        let ws_events = self.ws.clone();
+        let win_events = self.window.clone();
+        std::thread::spawn(move || {
+            while let Ok(evt) = events.recv() {
+                if let TmuxEvent::LayoutChange { layout, .. } = evt {
+                    // tmux's %layout-change emits both the visible and
+                    // default layouts in one message, space-separated,
+                    // plus a trailing flag. parse_layout wants exactly
+                    // one layout string, so take the first token.
+                    let first = layout
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or(&layout);
+                    match parse_layout(first) {
+                        Ok(parsed) => {
+                            let mut ws = ws_events.lock().unwrap();
+                            ws.layout = Some(parsed);
+                            drop(ws);
+                            if let Some(w) = win_events.as_ref() {
+                                w.request_redraw();
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[layout] parse failed: {e} ({first:?})");
+                        }
+                    }
                 }
             }
         });
@@ -428,16 +512,56 @@ impl App {
         let _join = server.spawn(backend);
     }
 
-    /// Convert logical-pixel cursor position into a (col, row) cell.
-    /// Origin of grid is offset by 8px on both axes (see render path).
-    fn px_to_cell(&self, px: f32, py: f32) -> Option<(u16, u16)> {
-        let s = self.screen.lock().unwrap();
-        if s.cols == 0 || s.rows == 0 {
-            return None;
-        }
+    /// Convert logical-pixel position into a (pane_id, col, row) cell
+    /// inside the pane the click landed in. Multi-pane aware: walks the
+    /// parsed Layout to find the pane whose rect contains the click,
+    /// then translates the pixel into that pane's cell-local coords.
+    /// Returns None when the workspace has no panes or the click missed
+    /// every pane (gutter between split borders, padding, etc).
+    fn px_to_pane_cell(&self, px: f32, py: f32) -> Option<(String, u16, u16)> {
+        let ws = self.ws.lock().unwrap();
+        // The 8.0 padding lines up with render_frame's origin offset —
+        // both the grid and the click reuse it so the math stays
+        // consistent on the boundary cells.
         let col = ((px - 8.0).max(0.0) / self.cell.w).floor() as u16;
         let row = ((py - 8.0).max(0.0) / self.cell.h).floor() as u16;
-        Some((col.min(s.cols - 1), row.min(s.rows - 1)))
+        if let Some(layout) = ws.layout.as_ref() {
+            for leaf in layout.leaves() {
+                if let Layout::Pane { id, x, y, w, h } = leaf {
+                    if col >= *x && col < x + w && row >= *y && row < y + h {
+                        let local_col = col - x;
+                        let local_row = row - y;
+                        return Some((format!("%{id}"), local_col, local_row));
+                    }
+                }
+            }
+            return None;
+        }
+        // No layout yet — treat the whole window as the active pane.
+        // First-pane lookup matches what the render path falls back to.
+        let id = ws.active_pane.clone().or_else(|| ws.panes.keys().next().cloned())?;
+        let pane = ws.panes.get(&id)?;
+        if pane.cols == 0 || pane.rows == 0 {
+            return None;
+        }
+        Some((id, col.min(pane.cols - 1), row.min(pane.rows - 1)))
+    }
+
+    /// Convenience wrapper that returns only the active pane's local
+    /// cell coords. Most callers (wheel, selection drag) only care
+    /// about the active pane.
+    fn px_to_cell_active(&self, px: f32, py: f32) -> Option<(u16, u16)> {
+        let (pane_id, col, row) = self.px_to_pane_cell(px, py)?;
+        let ws = self.ws.lock().unwrap();
+        let active_match = ws.active_pane.as_deref() == Some(pane_id.as_str());
+        active_match.then_some((col, row))
+    }
+
+    /// Target pane for outgoing key/text. When the workspace has an
+    /// active pane, we name it explicitly so tmux doesn't fall back to
+    /// "last-active" semantics that disagree with our UI.
+    fn target_pane(&self) -> Option<String> {
+        self.ws.lock().unwrap().active_pane.clone()
     }
 
     fn send_bytes(&self, bytes: &[u8]) {
@@ -450,12 +574,19 @@ impl App {
             .map(|b| format!("{b:02x}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let _ = tmux.send_keys_hex(None, &hex);
+        let target = self.target_pane();
+        let _ = tmux.send_keys_hex(target.as_deref(), &hex);
     }
 
     fn copy_selection(&self) {
         let Some(sel) = self.selection else { return; };
-        let rows = self.screen.lock().unwrap().cells.clone();
+        let rows = {
+            let ws = self.ws.lock().unwrap();
+            match ws.active() {
+                Some(p) => p.cells.clone(),
+                None => return,
+            }
+        };
         let text = extract_selection(&rows, sel);
         if text.is_empty() {
             return;
@@ -499,35 +630,66 @@ impl App {
             Some(l) => l,
             None => return,
         };
+        // Decide which pane handles this wheel: the pane the pointer is
+        // hovering over. Falls back to the active pane if the pointer
+        // is in a gutter. Multi-pane lets the user scroll inside any
+        // pane regardless of which one currently has keyboard focus.
+        let target_pane_id = self
+            .px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
+            .map(|(id, _, _)| id)
+            .or_else(|| self.target_pane());
         let (alt, hist_len, mouse_on, mouse_sgr) = {
-            let s = self.screen.lock().unwrap();
-            (s.alt_screen, s.history.len(), s.mouse_enabled, s.mouse_sgr)
+            let ws = self.ws.lock().unwrap();
+            let pane = target_pane_id
+                .as_deref()
+                .and_then(|id| ws.panes.get(id));
+            match pane {
+                Some(p) => (p.alt_screen, p.history.len(), p.mouse_enabled, p.mouse_sgr),
+                None => return,
+            }
         };
-        // Best path: SGR mouse-mode wheel events. Apps that opt in
-        // (claude, vim, lazygit, htop) get smooth per-line scroll.
         if mouse_on && mouse_sgr {
             let (col, row) = self
-                .px_to_cell(self.cursor_px.0, self.cursor_px.1)
+                .px_to_cell_active(self.cursor_px.0, self.cursor_px.1)
                 .unwrap_or((1, 1));
             let button = if lines > 0 { 64 } else { 65 };
             let count = lines.unsigned_abs().min(8) as usize;
             let single = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
             let payload: Vec<u8> = single.as_bytes().repeat(count.max(1));
-            self.send_bytes(&payload);
+            if let (Some(tmux), Some(target)) = (self.tmux.as_ref(), target_pane_id.as_deref())
+            {
+                let hex: String = payload
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let _ = tmux.send_keys_hex(Some(target), &hex);
+            }
             return;
         }
         if alt {
-            // alt-screen apps without mouse mode: send PgUp/PgDn.
             let esc: &[u8] = if lines > 0 { b"\x1b[5~" } else { b"\x1b[6~" };
-            self.send_bytes(esc);
+            if let (Some(tmux), Some(target)) = (self.tmux.as_ref(), target_pane_id.as_deref())
+            {
+                let hex: String = esc
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let _ = tmux.send_keys_hex(Some(target), &hex);
+            }
             return;
         }
-        // Normal screen: walk our own history ring.
+        // Normal screen: scroll the targeted pane's history.
         let step = lines.unsigned_abs().min(8) as usize;
-        if lines > 0 {
-            self.scroll_offset = (self.scroll_offset + step).min(hist_len);
-        } else {
-            self.scroll_offset = self.scroll_offset.saturating_sub(step);
+        if let (Some(id), Ok(mut ws)) = (target_pane_id, self.ws.lock()) {
+            if let Some(pane) = ws.panes.get_mut(&id) {
+                if lines > 0 {
+                    pane.scroll_offset = (pane.scroll_offset + step).min(hist_len);
+                } else {
+                    pane.scroll_offset = pane.scroll_offset.saturating_sub(step);
+                }
+            }
         }
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -541,11 +703,17 @@ impl App {
         // Touch the input timer so the cursor stays solid for a beat and
         // the blink phase re-starts from "on" once it kicks in.
         self.last_input_at = Instant::now();
-        // Typing always snaps to live tail.
-        if self.scroll_offset != 0 {
-            self.scroll_offset = 0;
-            if let Some(w) = &self.window {
-                w.request_redraw();
+        // Typing snaps the active pane back to live tail. Other panes'
+        // scroll offsets are left alone — switching focus by clicking
+        // doesn't disturb where the user was reading.
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(pane) = ws.active_mut() {
+                if pane.scroll_offset != 0 {
+                    pane.scroll_offset = 0;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
             }
         }
         let is_cmd = self.modifiers.super_key() || self.modifiers.control_key();
@@ -591,9 +759,6 @@ impl App {
     }
 
     fn render_frame(&mut self) {
-        // Snapshot anything that needs `&self` access before grabbing the
-        // sugarloaf `&mut` — the borrow checker won't let us re-enter
-        // immutable self methods while sugarloaf is mutably borrowed.
         let now = Instant::now();
         let blink_on = self.cursor_blink_on(now);
         let Some(window) = self.window.as_ref() else { return; };
@@ -615,84 +780,203 @@ impl App {
             0,
         );
 
-        // Compose visible rows from (history slice + live cells) using
-        // scroll_offset. Snapshot under lock, render outside.
-        let (rows, cur_r, cur_c, cur_vis) = {
-            let s = self.screen.lock().unwrap();
-            let total = s.rows.max(1) as usize;
-            let offset = self.scroll_offset.min(s.history.len());
-            let composed: Vec<Vec<GridCell>> = if offset == 0 {
-                s.cells.clone()
-            } else {
-                let mut out: Vec<Vec<GridCell>> = Vec::with_capacity(total);
-                let hist_start = s.history.len() - offset;
-                for row in s.history.iter().skip(hist_start) {
-                    out.push(row.clone());
-                    if out.len() >= total {
-                        break;
+        // Snapshot the per-pane render data under one lock so the
+        // sugarloaf draw calls below can run without re-locking. Each
+        // entry carries the pane's resolved rect (in cells), the cell
+        // grid we'll actually paint (history + live composed), and the
+        // cursor / title info the renderer reads.
+        struct PaneFrame {
+            id: String,
+            x_cells: u16,
+            y_cells: u16,
+            w_cells: u16,
+            h_cells: u16,
+            rows: Vec<Vec<GridCell>>,
+            cursor_row: u16,
+            cursor_col: u16,
+            cursor_visible: bool,
+        }
+        let (pane_frames, active_id) = {
+            let ws = self.ws.lock().unwrap();
+            let active_id = ws.active_pane.clone();
+            let leaves: Vec<(String, u16, u16, u16, u16)> =
+                if let Some(layout) = ws.layout.as_ref() {
+                    layout
+                        .leaves()
+                        .into_iter()
+                        .filter_map(|n| match n {
+                            Layout::Pane { id, x, y, w, h } => {
+                                Some((format!("%{id}"), *x, *y, *w, *h))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    // No layout yet: fall back to one full-window pane.
+                    // First key in the map keeps things deterministic so
+                    // the active-pane lookup below points at the same one.
+                    match ws.panes.iter().next() {
+                        Some((id, p)) => vec![(id.clone(), 0, 0, p.cols, p.rows)],
+                        None => Vec::new(),
                     }
-                }
-                let need = total.saturating_sub(out.len());
-                for row in s.cells.iter().take(need) {
-                    out.push(row.clone());
-                }
-                out
-            };
-            let cur_vis = offset == 0 && s.cursor_visible;
-            (composed, s.cursor_row, s.cursor_col, cur_vis)
+                };
+            let mut frames = Vec::with_capacity(leaves.len());
+            for (id, x, y, w, h) in leaves {
+                let Some(pane) = ws.panes.get(&id) else { continue };
+                let total = pane.rows.max(1) as usize;
+                let offset = pane.scroll_offset.min(pane.history.len());
+                let composed: Vec<Vec<GridCell>> = if offset == 0 {
+                    pane.cells.clone()
+                } else {
+                    let mut out: Vec<Vec<GridCell>> = Vec::with_capacity(total);
+                    let hist_start = pane.history.len() - offset;
+                    for row in pane.history.iter().skip(hist_start) {
+                        out.push(row.clone());
+                        if out.len() >= total {
+                            break;
+                        }
+                    }
+                    let need = total.saturating_sub(out.len());
+                    for row in pane.cells.iter().take(need) {
+                        out.push(row.clone());
+                    }
+                    out
+                };
+                frames.push(PaneFrame {
+                    id,
+                    x_cells: x,
+                    y_cells: y,
+                    w_cells: w,
+                    h_cells: h,
+                    rows: composed,
+                    cursor_row: pane.cursor_row,
+                    cursor_col: pane.cursor_col,
+                    cursor_visible: offset == 0 && pane.cursor_visible,
+                });
+            }
+            (frames, active_id)
         };
 
-        if rows.is_empty() {
+        if pane_frames.is_empty() {
             sugarloaf.render();
             return;
         }
 
-        cells::render_screen(
-            sugarloaf,
-            &rows,
-            8.0,
-            8.0,
-            self.cell.w,
-            self.cell.h,
-            FONT_SIZE,
-            self.cell.baseline,
-        );
+        // Origin offset matches kasaterm-cli — 8px padding around the
+        // outer grid so chrome doesn't crowd the cells.
+        let origin_x = 8.0;
+        let origin_y = 8.0;
 
-        // Selection highlight — translucent overlay on top of cells.
-        if let Some(sel) = self.selection {
-            cells::render_selection_overlay(sugarloaf, sel.anchor, sel.end, 8.0, 8.0, self.cell.w, self.cell.h);
-        }
-
-        // Cursor block (only when at live tail and blink-on phase).
-        // Preedit always forces solid so users can see what they're
-        // composing — the conditional below skips the rect, but the
-        // preedit overlay below still draws.
-        if cur_vis && (blink_on || !self.preedit.is_empty()) {
-            let cursor_x = 8.0 + cur_c as f32 * self.cell.w;
-            let cursor_y = 8.0 + cur_r as f32 * self.cell.h;
-            sugarloaf.rect(
-                None,
-                cursor_x,
-                cursor_y,
+        // Pass 1: walk each pane and render its cell grid at its rect.
+        for frame in &pane_frames {
+            let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
+            let pane_px_y = origin_y + frame.y_cells as f32 * self.cell.h;
+            cells::render_screen(
+                sugarloaf,
+                &frame.rows,
+                pane_px_x,
+                pane_px_y,
                 self.cell.w,
                 self.cell.h,
-                [
-                    cells::DEFAULT_FG[0] as f32 / 255.0,
-                    cells::DEFAULT_FG[1] as f32 / 255.0,
-                    cells::DEFAULT_FG[2] as f32 / 255.0,
-                    0.55,
-                ],
-                0.0,
-                0,
+                FONT_SIZE,
+                self.cell.baseline,
             );
         }
 
-        // Preedit overlay — paint over the cursor cell so Hangul
-        // composition is visible while still typing.
-        if cur_vis && !self.preedit.is_empty() {
-            let px = 8.0 + cur_c as f32 * self.cell.w;
-            let py = 8.0 + cur_r as f32 * self.cell.h;
-            cells::render_preedit(sugarloaf, &self.preedit, px, py, self.cell.w, self.cell.h, FONT_SIZE);
+        // Pass 2: inactive pane border (dim grey, 1px) — gives the user a
+        // visual cue that a split exists and which side they're typing
+        // into. Active pane gets a slightly brighter accent border.
+        if pane_frames.len() > 1 {
+            for frame in &pane_frames {
+                let is_active = active_id.as_deref() == Some(frame.id.as_str());
+                let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
+                let pane_px_y = origin_y + frame.y_cells as f32 * self.cell.h;
+                let pane_px_w = frame.w_cells as f32 * self.cell.w;
+                let pane_px_h = frame.h_cells as f32 * self.cell.h;
+                let color = if is_active {
+                    [0.36, 0.51, 0.95, 0.55]
+                } else {
+                    [0.24, 0.26, 0.30, 0.45]
+                };
+                // Top + bottom + left + right strokes — each a 1px rect.
+                sugarloaf.rect(None, pane_px_x, pane_px_y, pane_px_w, 1.0, color, 0.0, 0);
+                sugarloaf.rect(
+                    None,
+                    pane_px_x,
+                    pane_px_y + pane_px_h - 1.0,
+                    pane_px_w,
+                    1.0,
+                    color,
+                    0.0,
+                    0,
+                );
+                sugarloaf.rect(None, pane_px_x, pane_px_y, 1.0, pane_px_h, color, 0.0, 0);
+                sugarloaf.rect(
+                    None,
+                    pane_px_x + pane_px_w - 1.0,
+                    pane_px_y,
+                    1.0,
+                    pane_px_h,
+                    color,
+                    0.0,
+                    0,
+                );
+            }
+        }
+
+        // Pass 3: selection overlay + cursor block + preedit on the
+        // active pane only. Inactive panes show no cursor — matches the
+        // tmux / iTerm2 convention where the unfocused split fades its
+        // caret.
+        let active_frame = active_id
+            .as_deref()
+            .and_then(|id| pane_frames.iter().find(|f| f.id == id));
+        if let Some(frame) = active_frame {
+            let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
+            let pane_px_y = origin_y + frame.y_cells as f32 * self.cell.h;
+            if let Some(sel) = self.selection {
+                cells::render_selection_overlay(
+                    sugarloaf,
+                    sel.anchor,
+                    sel.end,
+                    pane_px_x,
+                    pane_px_y,
+                    self.cell.w,
+                    self.cell.h,
+                );
+            }
+            if frame.cursor_visible && (blink_on || !self.preedit.is_empty()) {
+                let cursor_x = pane_px_x + frame.cursor_col as f32 * self.cell.w;
+                let cursor_y = pane_px_y + frame.cursor_row as f32 * self.cell.h;
+                sugarloaf.rect(
+                    None,
+                    cursor_x,
+                    cursor_y,
+                    self.cell.w,
+                    self.cell.h,
+                    [
+                        cells::DEFAULT_FG[0] as f32 / 255.0,
+                        cells::DEFAULT_FG[1] as f32 / 255.0,
+                        cells::DEFAULT_FG[2] as f32 / 255.0,
+                        0.55,
+                    ],
+                    0.0,
+                    0,
+                );
+            }
+            if frame.cursor_visible && !self.preedit.is_empty() {
+                let px = pane_px_x + frame.cursor_col as f32 * self.cell.w;
+                let py = pane_px_y + frame.cursor_row as f32 * self.cell.h;
+                cells::render_preedit(
+                    sugarloaf,
+                    &self.preedit,
+                    px,
+                    py,
+                    self.cell.w,
+                    self.cell.h,
+                    FONT_SIZE,
+                );
+            }
         }
 
         sugarloaf.render();
@@ -808,7 +1092,7 @@ impl ApplicationHandler for App {
                 self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
                 if let (Some(anchor), Some(cell)) = (
                     self.drag_anchor,
-                    self.px_to_cell(self.cursor_px.0, self.cursor_px.1),
+                    self.px_to_cell_active(self.cursor_px.0, self.cursor_px.1),
                 ) {
                     self.selection = Some(Selection { anchor, end: cell });
                     window.request_redraw();
@@ -817,9 +1101,43 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 match state {
                     ElementState::Pressed => {
-                        if let Some(cell) = self.px_to_cell(self.cursor_px.0, self.cursor_px.1) {
-                            self.drag_anchor = Some(cell);
-                            self.selection = Some(Selection { anchor: cell, end: cell });
+                        // Switch active pane to wherever the click
+                        // landed, then start a drag selection inside
+                        // that pane. Clicking the inactive pane focuses
+                        // it without yet selecting (anchor == end so
+                        // the release handler clears the empty range).
+                        if let Some((pane_id, col, row)) =
+                            self.px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
+                        {
+                            let switched = {
+                                let mut ws = self.ws.lock().unwrap();
+                                let switched =
+                                    ws.active_pane.as_deref() != Some(pane_id.as_str());
+                                ws.active_pane = Some(pane_id.clone());
+                                switched
+                            };
+                            if switched {
+                                // New focus: drop any selection that
+                                // was held in the previously-focused
+                                // pane, otherwise the highlight rect
+                                // would float on the wrong pane.
+                                self.selection = None;
+                                self.drag_anchor = None;
+                            } else {
+                                self.drag_anchor = Some((col, row));
+                                self.selection = Some(Selection {
+                                    anchor: (col, row),
+                                    end: (col, row),
+                                });
+                            }
+                            self.last_input_at = Instant::now();
+                            // Tmux side: tell the daemon we're now on
+                            // this pane so any future split-window /
+                            // send-keys without a target lands here.
+                            if let Some(tmux) = self.tmux.as_ref() {
+                                let _ =
+                                    tmux.send_cmd(&format!("select-pane -t '{pane_id}'"));
+                            }
                         }
                     }
                     ElementState::Released => {
