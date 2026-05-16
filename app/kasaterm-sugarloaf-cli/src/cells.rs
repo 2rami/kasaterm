@@ -131,24 +131,65 @@ pub fn render_row(
         let x = origin_x + start as f32 * cell_w;
         sugarloaf.rect(None, x, origin_y, width, cell_h, rgba_to_float(bg), 0.0, 0);
     }
-    // Foreground pass: one text.draw per cell. Wasteful (re-shapes
-    // per-cell) but functionally correct for the MVP. Optimisation to
-    // grouped text runs or Grid::write_row comes after the conversion
-    // logic is validated end-to-end.
+    // Foreground pass: batch consecutive cells with identical attrs into
+    // a single text.draw call. A 100-col line of git output spent 100 calls
+    // per row × 33 rows × 60fps = ~200K calls/sec under the per-cell path;
+    // most rows have long runs of identical (fg, bold, italic), so the
+    // batched walk collapses that to a handful of calls per row. Sugarloaf
+    // shapes each draw() argument independently, so combining same-attr
+    // strings means swash sees one shaping job instead of N.
+    //
+    // We can't blindly merge across cells whose width != cell_w (CJK /
+    // emoji) — those would land at the wrong x if a single run laid out
+    // proportionally. Treat any cell whose `ch` is more than one code unit
+    // wide as a run-breaker and emit it standalone.
     let y = origin_y + text_baseline_offset;
-    for (i, cell) in row.iter().enumerate() {
-        if cell.ch == " " {
+    let mut col: usize = 0;
+    while col < row.len() {
+        let cell = &row[col];
+        if cell.ch.is_empty() || cell.ch == " " {
+            col += 1;
             continue;
+        }
+        let is_wide = cell.ch.chars().count() != 1
+            || cell.ch.chars().next().is_some_and(|c| (c as u32) > 0xFFFF);
+        let fg = cell_fg(cell);
+        let bold = cell.bold;
+        let italic = cell.italic;
+        let start = col;
+        let mut text = String::new();
+        text.push_str(&cell.ch);
+        col += 1;
+        if !is_wide {
+            // Extend the run while neighbour cells share the same attrs and
+            // also fit on the monospace grid (single-code-unit chars).
+            while col < row.len() {
+                let n = &row[col];
+                if n.ch.is_empty() || n.ch == " " {
+                    break;
+                }
+                let n_wide = n.ch.chars().count() != 1
+                    || n.ch.chars().next().is_some_and(|c| (c as u32) > 0xFFFF);
+                if n_wide
+                    || cell_fg(n) != fg
+                    || n.bold != bold
+                    || n.italic != italic
+                {
+                    break;
+                }
+                text.push_str(&n.ch);
+                col += 1;
+            }
         }
         let opts = DrawOpts {
             font_size,
-            color: cell_fg(cell),
-            bold: cell.bold,
-            italic: cell.italic,
+            color: fg,
+            bold,
+            italic,
             font_id: None,
         };
-        let x = origin_x + i as f32 * cell_w;
-        sugarloaf.text_mut().draw(x, y, &cell.ch, &opts);
+        let x = origin_x + start as f32 * cell_w;
+        sugarloaf.text_mut().draw(x, y, &text, &opts);
     }
 }
 
