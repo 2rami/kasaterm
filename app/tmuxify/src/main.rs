@@ -1116,7 +1116,14 @@ impl App {
                     0,
                 );
             }
-            if frame.cursor_visible && !self.preedit.is_empty() {
+            // Preedit must render regardless of `cursor_visible` —
+            // alt-screen TUIs (Claude Code, vim, lazygit, htop) hide
+            // the terminal cursor with `\e[?25l` while they draw their
+            // own input chrome. Gating on cursor_visible there caused
+            // the in-progress Hangul to disappear entirely. The
+            // reported cursor row/col still points at the active
+            // input position, so use it unconditionally.
+            if !self.preedit.is_empty() {
                 let px = pane_px_x + frame.cursor_col as f32 * self.cell.w;
                 let py = pane_px_y + frame.cursor_row as f32 * self.cell.h;
                 cells::render_preedit(
