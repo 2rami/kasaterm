@@ -1095,6 +1095,10 @@ impl App {
             if frame.cursor_visible && (blink_on || !self.preedit.is_empty()) {
                 let cursor_x = pane_px_x + frame.cursor_col as f32 * self.cell.w;
                 let cursor_y = pane_px_y + frame.cursor_row as f32 * self.cell.h;
+                // Cursor color from the user's iTerm2 profile
+                // (`Cursor Color` = pure black). 55% alpha matches
+                // iTerm2's "block cursor on light bg" feel — full
+                // opacity would hide the glyph underneath.
                 sugarloaf.rect(
                     None,
                     cursor_x,
@@ -1102,9 +1106,9 @@ impl App {
                     self.cell.w,
                     self.cell.h,
                     [
-                        cells::DEFAULT_FG[0] as f32 / 255.0,
-                        cells::DEFAULT_FG[1] as f32 / 255.0,
-                        cells::DEFAULT_FG[2] as f32 / 255.0,
+                        cells::ITERM_CURSOR[0] as f32 / 255.0,
+                        cells::ITERM_CURSOR[1] as f32 / 255.0,
+                        cells::ITERM_CURSOR[2] as f32 / 255.0,
                         0.55,
                     ],
                     0.0,
@@ -1162,12 +1166,15 @@ impl ApplicationHandler for App {
                 height: window.inner_size().height as f32,
             },
         };
-        // Match iTerm2's default profile font choice. Monaco is the
-        // built-in macOS monospace face iTerm2 ships pointing at; falls
-        // back gracefully to Cascadia (bundled in sugarloaf) when the
-        // platform doesn't have it.
+        // Pull the font choice straight out of the user's iTerm2
+        // profile. Their plist has Normal Font = "D2CodingLigatureNFM 14"
+        // (PostScript name) — Korean-coding-friendly D2Coding with Nerd
+        // Font glyphs. CoreText takes family names, not PostScript
+        // names; the family is "D2CodingLigature Nerd Font Mono".
+        // Fall through to sugarloaf's bundled Cascadia if the face
+        // isn't installed on this machine.
         let mut fonts = sugarloaf::font::fonts::SugarloafFonts::default();
-        fonts.family = Some("Monaco".to_string());
+        fonts.family = Some("D2CodingLigature Nerd Font Mono".to_string());
         let (font_library, font_err) = sugarloaf::font::FontLibrary::new(fonts);
         if let Some(err) = font_err {
             if !err.fonts_not_found.is_empty() {
