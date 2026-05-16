@@ -449,20 +449,36 @@ pub fn render_preedit(
         0.0,
         0,
     );
-    // (3) Glyphs at the same baseline offset that body cells use.
-    // Earlier we hardcoded `cell_h * 0.78` which landed text well
-    // below the body baseline — the preedit glyph then visually
-    // straddled into the row below, which the user reported as
-    // "조합될 때 언더바 밑으로 떨어진다". Use the caller-measured
-    // baseline so preedit lines up with the committed text grid.
-    let opts = DrawOpts {
+    // (3) Glyphs go through the exact same render_row path the body
+    // uses. Calling sugarloaf.text.draw directly here landed on a
+    // slightly different shaping route (no per-cell wide handling,
+    // primary-only font lookup), so the in-progress Hangul glyph
+    // visually floated above the committed `한` next to it. Building a
+    // throwaway Cell row and reusing render_row keeps the per-glyph
+    // path identical to the rest of the grid — same fallback chain,
+    // same vertical metric, same row top reference.
+    let synthetic: Vec<Cell> = text
+        .chars()
+        .map(|c| Cell {
+            ch: c.to_string(),
+            fg: Color::Rgb(accent[0], accent[1], accent[2]),
+            bg: Color::Default,
+            bold: false,
+            italic: false,
+            underline: false,
+            inverse: false,
+        })
+        .collect();
+    render_row(
+        sugarloaf,
+        &synthetic,
+        px,
+        py,
+        cell_w,
+        cell_h,
         font_size,
-        color: accent,
-        bold: false,
-        italic: false,
-        font_id: None,
-    };
-    sugarloaf.text_mut().draw(px, py + baseline_offset, text, &opts);
+        baseline_offset,
+    );
 }
 
 /// Draw the full screen. Rows are addressed top-down starting from
