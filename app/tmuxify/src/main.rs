@@ -201,6 +201,10 @@ struct App {
     window: Option<Arc<Window>>,
     sugarloaf: Option<Sugarloaf<'static>>,
     tmux: Option<Arc<TmuxSession>>,
+    /// Phase C backend. Mutually exclusive with `tmux` — exactly one
+    /// is `Some` after `start_backend`. Selection driven by the
+    /// TMUXIFY_BACKEND env var; defaults to tmux.
+    pty: Option<Arc<pty_backend::PtySession>>,
     ws: Arc<Mutex<Workspace>>,
     /// Measured cell geometry from sugarloaf — see `compute_cell_metrics`.
     cell: CellGeom,
@@ -224,6 +228,7 @@ impl App {
             window: None,
             sugarloaf: None,
             tmux: None,
+            pty: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
             cell: CellGeom::default(),
             preedit: String::new(),
@@ -310,22 +315,116 @@ impl App {
             .and_then(|s| s.parse().ok())
             .unwrap_or(2000);
         eprintln!("[autosend] in {ms}ms: {text:?}");
+        // Capture whichever backend is wired so we don't need access
+        // to self inside the timer thread.
         let tmux = self.tmux.clone();
+        let pty = self.pty.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(ms));
+            let mut payload = text.clone();
+            if !payload.ends_with('\n') {
+                payload.push('\n');
+            }
             if let Some(t) = tmux.as_ref() {
-                let mut payload = text.clone();
-                if !payload.ends_with('\n') {
-                    payload.push('\n');
-                }
                 let hex: String = payload
                     .bytes()
                     .map(|b| format!("{b:02x}"))
                     .collect::<Vec<_>>()
                     .join(" ");
                 let _ = t.send_keys_hex(None, &hex);
+            } else if let Some(p) = pty.as_ref() {
+                let _ = p.send_bytes(payload.as_bytes());
             }
         });
+    }
+
+    /// Phase C path. Spawns the shell into a direct PTY (no tmux),
+    /// hooks the screens channel into the same per-pane state the
+    /// renderer expects. Single-pane MVP — the workspace holds one
+    /// PaneState keyed "%0" and the layout is `None` (the render path
+    /// falls back to single-pane when no layout has arrived).
+    fn start_pty(&mut self) -> Result<()> {
+        let window = self.window.as_ref().expect("window before pty");
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        let lw = size.width as f32 / scale;
+        let lh = size.height as f32 / scale;
+        let cols = (lw / self.cell.w).floor().max(40.0) as u16;
+        let rows = (lh / self.cell.h).floor().max(10.0) as u16;
+        let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
+        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+            shell: std::env::var("SHELL").ok(),
+            cwd,
+            cols,
+            rows,
+            env: Vec::new(),
+        })?;
+        let screens = session.screens.clone();
+        let ws_screens = self.ws.clone();
+        let win_screens = self.window.clone();
+        std::thread::spawn(move || {
+            while let Ok(update) = screens.recv() {
+                let mut ws = ws_screens.lock().unwrap();
+                if ws.active_pane.is_none() {
+                    ws.active_pane = Some(update.pane_id.clone());
+                }
+                let pane = ws.pane_mut(&update.pane_id);
+                let resized = pane.cols != update.cols
+                    || pane.rows != update.rows
+                    || pane.cells.len() != update.rows as usize;
+                if resized {
+                    pane.cols = update.cols;
+                    pane.rows = update.rows;
+                    pane.cells = (0..update.rows as usize)
+                        .map(|_| vec![GridCell::blank(); update.cols as usize])
+                        .collect();
+                    pane.prev_cells.clear();
+                }
+                for (r, row) in update.dirty {
+                    if let Some(dst) = pane.cells.get_mut(r as usize) {
+                        *dst = row;
+                    }
+                }
+                // Shift detection on the pty side too — alacritty emits
+                // the full grid each frame, so this catches scroll runs
+                // (matches how the tmux branch promotes scrolled-off
+                // rows into the history ring).
+                if !update.alt_screen
+                    && !pane.prev_cells.is_empty()
+                    && pane.prev_cells.len() == pane.cells.len()
+                {
+                    let n = pane.prev_cells.len();
+                    let mut shifted = 0usize;
+                    for k in 1..n {
+                        if pane.prev_cells[k..] == pane.cells[..n - k] {
+                            shifted = k;
+                            break;
+                        }
+                    }
+                    if shifted > 0 {
+                        for row in &pane.prev_cells[..shifted] {
+                            pane.history.push_back(row.clone());
+                        }
+                        while pane.history.len() > SCROLLBACK_MAX {
+                            pane.history.pop_front();
+                        }
+                    }
+                }
+                pane.prev_cells = pane.cells.clone();
+                pane.cursor_row = update.cursor_row;
+                pane.cursor_col = update.cursor_col;
+                pane.cursor_visible = update.cursor_visible;
+                pane.alt_screen = update.alt_screen;
+                pane.mouse_enabled = update.mouse_enabled;
+                pane.mouse_sgr = update.mouse_sgr;
+                drop(ws);
+                if let Some(w) = win_screens.as_ref() {
+                    w.request_redraw();
+                }
+            }
+        });
+        self.pty = Some(Arc::new(session));
+        Ok(())
     }
 
     fn start_tmux(&mut self) -> Result<()> {
@@ -583,18 +682,37 @@ impl App {
         self.ws.lock().unwrap().active_pane.clone()
     }
 
+    /// Resize whichever backend is wired up. Tmux gets its
+    /// `resize-client`, the direct PTY gets `TIOCSWINSZ` via
+    /// `portable-pty::resize`. Renderer code calls this uniformly
+    /// from the WindowEvent::Resized handler.
+    fn resize_backend(&self, cols: u16, rows: u16) {
+        if let Some(tmux) = self.tmux.as_ref() {
+            let _ = tmux.resize_client(cols, rows);
+        } else if let Some(pty) = self.pty.as_ref() {
+            let _ = pty.resize(cols, rows);
+        }
+    }
+
     fn send_bytes(&self, bytes: &[u8]) {
-        let Some(tmux) = self.tmux.as_ref() else { return; };
         if bytes.is_empty() {
             return;
         }
-        let hex: String = bytes
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let target = self.target_pane();
-        let _ = tmux.send_keys_hex(target.as_deref(), &hex);
+        // Dispatch by which backend is wired up. The hex encoding is
+        // a tmux send-keys quirk (the daemon decodes hex pairs back
+        // to bytes itself); for the pty backend we hand the raw bytes
+        // straight to the PTY writer.
+        if let Some(tmux) = self.tmux.as_ref() {
+            let hex: String = bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let target = self.target_pane();
+            let _ = tmux.send_keys_hex(target.as_deref(), &hex);
+        } else if let Some(pty) = self.pty.as_ref() {
+            let _ = pty.send_bytes(bytes);
+        }
     }
 
     fn copy_selection(&self) {
@@ -675,27 +793,37 @@ impl App {
             let count = lines.unsigned_abs().min(8) as usize;
             let single = format!("\x1b[<{button};{};{}M", col + 1, row + 1);
             let payload: Vec<u8> = single.as_bytes().repeat(count.max(1));
-            if let (Some(tmux), Some(target)) = (self.tmux.as_ref(), target_pane_id.as_deref())
-            {
-                let hex: String = payload
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let _ = tmux.send_keys_hex(Some(target), &hex);
+            // For the tmux backend we name the pane explicitly so an
+            // inactive-but-hovered pane scrolls instead of the focused
+            // one. The pty backend is single-pane: the pane id is
+            // already implicit.
+            if let Some(tmux) = self.tmux.as_ref() {
+                if let Some(target) = target_pane_id.as_deref() {
+                    let hex: String = payload
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let _ = tmux.send_keys_hex(Some(target), &hex);
+                }
+            } else if let Some(pty) = self.pty.as_ref() {
+                let _ = pty.send_bytes(&payload);
             }
             return;
         }
         if alt {
             let esc: &[u8] = if lines > 0 { b"\x1b[5~" } else { b"\x1b[6~" };
-            if let (Some(tmux), Some(target)) = (self.tmux.as_ref(), target_pane_id.as_deref())
-            {
-                let hex: String = esc
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let _ = tmux.send_keys_hex(Some(target), &hex);
+            if let Some(tmux) = self.tmux.as_ref() {
+                if let Some(target) = target_pane_id.as_deref() {
+                    let hex: String = esc
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let _ = tmux.send_keys_hex(Some(target), &hex);
+                }
+            } else if let Some(pty) = self.pty.as_ref() {
+                let _ = pty.send_bytes(esc);
             }
             return;
         }
@@ -1065,8 +1193,20 @@ impl ApplicationHandler for App {
         );
         self.sugarloaf = Some(sugarloaf);
         self.window = Some(window);
-        if let Err(e) = self.start_tmux() {
-            eprintln!("[tmuxify] tmux start failed: {e}");
+        // Backend selection. TMUXIFY_BACKEND=pty opts into the
+        // Phase C direct-PTY path (single pane, no tmux daemon). Any
+        // other value (or unset) keeps the tmux-bridge path, which is
+        // currently the only one with multi-pane support.
+        let want_pty = std::env::var("TMUXIFY_BACKEND")
+            .map(|v| v.eq_ignore_ascii_case("pty"))
+            .unwrap_or(false);
+        let backend_result = if want_pty {
+            self.start_pty()
+        } else {
+            self.start_tmux()
+        };
+        if let Err(e) = backend_result {
+            eprintln!("[tmuxify] backend start failed: {e}");
         }
         self.schedule_autosend();
         self.schedule_autocapture();
@@ -1090,14 +1230,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) => {
                 sugarloaf.resize(size.width, size.height);
-                if let Some(tmux) = self.tmux.as_ref() {
-                    let scale = window.scale_factor() as f32;
-                    let lw = size.width as f32 / scale;
-                    let lh = size.height as f32 / scale;
-                    let cols = (lw / self.cell.w).floor().max(40.0) as u16;
-                    let rows = (lh / self.cell.h).floor().max(10.0) as u16;
-                    let _ = tmux.resize_client(cols, rows);
-                }
+                let scale = window.scale_factor() as f32;
+                let lw = size.width as f32 / scale;
+                let lh = size.height as f32 / scale;
+                let cols = (lw / self.cell.w).floor().max(40.0) as u16;
+                let rows = (lh / self.cell.h).floor().max(10.0) as u16;
+                self.resize_backend(cols, rows);
                 window.request_redraw();
             }
             WindowEvent::ModifiersChanged(mods) => {
