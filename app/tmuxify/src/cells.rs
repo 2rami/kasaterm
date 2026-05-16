@@ -15,29 +15,29 @@ use sugarloaf::text::DrawOpts;
 use sugarloaf::Sugarloaf;
 use tmux_bridge::screen::{Cell, Color};
 
-/// iTerm2 "Default" profile color scheme — the values a freshly
-/// installed iTerm2 uses on first launch. RGB triples decoded from
-/// the bundled `Default.itermcolors` plist. The 6×6×6 cube + 24-step
-/// grayscale ramp below follow xterm's standard 256-color extension.
+/// User's iTerm2 Default profile (decoded from
+/// `~/Library/Preferences/com.googlecode.iterm2.plist` →
+/// `New Bookmarks[0]`). The 6×6×6 cube + 24-step grayscale ramp
+/// below follow xterm's standard 256-color extension.
 fn ansi_palette() -> [[u8; 3]; 256] {
     let mut p = [[0u8; 3]; 256];
     let base: [[u8; 3]; 16] = [
-        [0x00, 0x00, 0x00], // 0  black
-        [0xc9, 0x1b, 0x00], // 1  red
-        [0x00, 0xc2, 0x00], // 2  green
-        [0xc7, 0xc4, 0x00], // 3  yellow
-        [0x22, 0x25, 0xc4], // 4  blue
-        [0xc9, 0x30, 0xc7], // 5  magenta
-        [0x00, 0xc5, 0xc7], // 6  cyan
-        [0xc7, 0xc7, 0xc7], // 7  white
-        [0x68, 0x68, 0x68], // 8  bright black
-        [0xff, 0x6e, 0x67], // 9  bright red
-        [0x5f, 0xfa, 0x68], // 10 bright green
-        [0xff, 0xfa, 0x72], // 11 bright yellow
-        [0x68, 0x71, 0xff], // 12 bright blue
-        [0xff, 0x77, 0xff], // 13 bright magenta
-        [0x5f, 0xfd, 0xff], // 14 bright cyan
-        [0xff, 0xff, 0xff], // 15 bright white
+        [19, 24, 29],     // 0  black     (#13181d)
+        [180, 60, 41],    // 1  red       (#b43c29)
+        [0, 193, 0],      // 2  green     (#00c100)
+        [199, 196, 0],    // 3  yellow    (#c7c400)
+        [39, 67, 199],    // 4  blue      (#2743c7)
+        [191, 63, 189],   // 5  magenta   (#bf3fbd)
+        [0, 197, 199],    // 6  cyan      (#00c5c7)
+        [199, 199, 199],  // 7  white     (#c7c7c7)
+        [103, 103, 103],  // 8  br black  (#676767)
+        [220, 121, 116],  // 9  br red    (#dc7974)
+        [87, 230, 144],   // 10 br green  (#57e690)
+        [236, 225, 0],    // 11 br yellow (#ece100)
+        [166, 170, 241],  // 12 br blue   (#a6aaf1)
+        [224, 125, 224],  // 13 br magenta(#e07de0)
+        [95, 253, 255],   // 14 br cyan   (#5ffdff)
+        [254, 255, 255],  // 15 br white  (#feffff)
     ];
     p[..16].copy_from_slice(&base);
     // 216-color cube: 16..231
@@ -58,9 +58,18 @@ fn ansi_palette() -> [[u8; 3]; 256] {
 }
 
 /// Default foreground / background when a cell has `Color::Default`.
-/// Mirrors iTerm2's Default profile: fg `#c7c7c7`, bg `#000000`.
-pub const DEFAULT_FG: [u8; 4] = [0xc7, 0xc7, 0xc7, 0xff];
-pub const DEFAULT_BG: [u8; 4] = [0x00, 0x00, 0x00, 0xff];
+/// Decoded from the user's iTerm2 Default profile —
+/// `Foreground Color` = #0f0f0f, `Background Color` = #f9f9f9. A
+/// light-on-dark profile would flip these; we follow the user's
+/// actual config so the comparison stays honest.
+pub const DEFAULT_FG: [u8; 4] = [15, 15, 15, 0xff];
+pub const DEFAULT_BG: [u8; 4] = [249, 249, 249, 0xff];
+
+/// Cursor + selection accents from the same profile so the on-screen
+/// chrome matches iTerm2's behavior — cursor is `Cursor Color`,
+/// selection is `Selection Color`.
+pub const ITERM_CURSOR: [u8; 4] = [0, 0, 0, 0xff];
+pub const ITERM_SELECTION: [u8; 4] = [179, 214, 255, 0x66];
 
 fn color_to_rgba(c: &Color, default: [u8; 4]) -> [u8; 4] {
     match c {
@@ -210,7 +219,14 @@ pub fn render_selection_overlay(
         (end, anchor)
     };
     // iTerm2-ish selection color: muted blue at 35% alpha.
-    let color = [0.20, 0.40, 0.85, 0.35];
+    // Selection color = user's iTerm2 `Selection Color`
+    // (#b3d6ff at ~40% alpha so text underneath stays readable).
+    let color = [
+        ITERM_SELECTION[0] as f32 / 255.0,
+        ITERM_SELECTION[1] as f32 / 255.0,
+        ITERM_SELECTION[2] as f32 / 255.0,
+        ITERM_SELECTION[3] as f32 / 255.0,
+    ];
     if start.1 == stop.1 {
         let x = origin_x + start.0 as f32 * cell_w;
         let y = origin_y + start.1 as f32 * cell_h;
@@ -328,16 +344,17 @@ mod tests {
     }
 
     #[test]
-    fn ansi_base_palette_matches_iterm2_default() {
-        // Probe a handful of indices against the values shipped with
-        // iTerm2's bundled Default profile. Drifting from these breaks
-        // the "looks like iTerm2" promise the renderer makes.
+    fn ansi_base_palette_matches_user_iterm2_profile() {
+        // Values come from the user's iTerm2 plist
+        // (`New Bookmarks[0]`). Re-decode and update here if the
+        // profile changes — palette drift produces silent visual
+        // regressions otherwise.
         let p = ansi_palette();
-        assert_eq!(p[0], [0x00, 0x00, 0x00], "black");
-        assert_eq!(p[1], [0xc9, 0x1b, 0x00], "red");
-        assert_eq!(p[4], [0x22, 0x25, 0xc4], "blue");
-        assert_eq!(p[7], [0xc7, 0xc7, 0xc7], "white");
-        assert_eq!(p[15], [0xff, 0xff, 0xff], "bright white");
+        assert_eq!(p[0], [19, 24, 29], "black");
+        assert_eq!(p[1], [180, 60, 41], "red (rust orange in user profile)");
+        assert_eq!(p[4], [39, 67, 199], "blue");
+        assert_eq!(p[7], [199, 199, 199], "white");
+        assert_eq!(p[15], [254, 255, 255], "bright white");
     }
 
     #[test]
@@ -378,10 +395,11 @@ mod tests {
 
     #[test]
     fn color_idx_picks_palette_entry() {
-        // ANSI 9 = bright red in iTerm2 Default.
+        // ANSI 9 = bright red. User's profile has this slot at
+        // #dc7974 (a softer salmon than xterm's pure bright red).
         assert_eq!(
             color_to_rgba(&Color::Idx(9), DEFAULT_FG),
-            [0xff, 0x6e, 0x67, 0xff],
+            [220, 121, 116, 0xff],
         );
     }
 
