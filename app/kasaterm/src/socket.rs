@@ -28,14 +28,14 @@ impl Backend for TmuxBackend {
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
         Ok(vec![WorkspaceInfo {
             id: FIXED_WORKSPACE_ID.into(),
-            name: "tmuxify".into(),
+            name: "kasaterm".into(),
         }])
     }
 
     fn current_workspace(&self) -> Result<Option<WorkspaceInfo>> {
         Ok(Some(WorkspaceInfo {
             id: FIXED_WORKSPACE_ID.into(),
-            name: "tmuxify".into(),
+            name: "kasaterm".into(),
         }))
     }
 
