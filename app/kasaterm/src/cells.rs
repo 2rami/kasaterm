@@ -277,8 +277,18 @@ pub fn render_row(
                 }
             }
         }
+        // Treat code points that are likely to be serviced by a
+        // proportional fallback font (Symbols, dingbats, geometric
+        // shapes, Miscellaneous Technical) as wide so they get their
+        // own standalone draw call. That keeps the per-glyph advance
+        // pinned to a single cell instead of leaking into the next
+        // one — symptom that caused `⏵` from the bypass-permissions
+        // row to overlap the leading `b`.
         let is_wide = cell.ch.chars().count() != 1
-            || cell.ch.chars().next().is_some_and(|c| (c as u32) > 0xFFFF);
+            || cell.ch.chars().next().is_some_and(|c| {
+                let cp = c as u32;
+                cp > 0xFFFF || (0x2300..=0x27BF).contains(&cp)
+            });
         let fg = cell_fg(cell);
         let bold = cell.bold;
         let italic = cell.italic;
@@ -297,7 +307,10 @@ pub fn render_row(
                     break;
                 }
                 let n_wide = n.ch.chars().count() != 1
-                    || n.ch.chars().next().is_some_and(|c| (c as u32) > 0xFFFF);
+                    || n.ch.chars().next().is_some_and(|c| {
+                        let cp = c as u32;
+                        cp > 0xFFFF || (0x2300..=0x27BF).contains(&cp)
+                    });
                 let n_block = n.ch.chars().count() == 1
                     && n.ch
                         .chars()
