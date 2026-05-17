@@ -285,6 +285,11 @@ struct App {
     /// phase so the cursor stays solid while the user is actively
     /// interacting and only fades back to blinking on idle.
     last_input_at: Instant,
+    /// Currently-applied logical font size. Mutated by the host_mod+=
+    /// / Ctrl+- shortcuts (see `change_font_size`). Starts at the
+    /// `FONT_SIZE` constant so first-frame layout matches the original
+    /// behavior before any zoom.
+    font_size: f32,
 }
 
 impl App {
@@ -313,6 +318,32 @@ impl App {
             wheel_accum_y: 0.0,
             last_wheel_emit: Instant::now() - std::time::Duration::from_secs(1),
             last_input_at: Instant::now(),
+            font_size: FONT_SIZE,
+        }
+    }
+
+    /// Adjust the live font size by `delta` (in logical points) and
+    /// reflow the cell grid + PTY size accordingly. Clamped to a sane
+    /// terminal range so the user can't shrink past readability or
+    /// blow the window contents out by accident.
+    fn change_font_size(&mut self, delta: f32) {
+        let new = (self.font_size + delta).clamp(8.0, 40.0);
+        if (new - self.font_size).abs() < 0.05 {
+            return;
+        }
+        self.font_size = new;
+        if let (Some(window), Some(sugarloaf)) = (self.window.as_ref(), self.sugarloaf.as_ref()) {
+            let scale = window.scale_factor() as f32;
+            let (_dim, metrics) =
+                sugarloaf.compute_cell_metrics(new, LINE_HEIGHT_MULT, scale);
+            self.cell = CellGeom {
+                w: (metrics.cell_width as f32) / scale,
+                h: (metrics.cell_height as f32) / scale,
+                baseline: 0.0,
+            };
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+            window.request_redraw();
         }
     }
 
@@ -1466,6 +1497,22 @@ impl App {
                         self.cycle_focus(1);
                         return;
                     }
+                    // Font zoom: host_mod + = (or Shift = +) increases,
+                    // host_mod + - (or Shift = _) decreases. `0` resets
+                    // to the default. Layout the same as VS Code,
+                    // Windows Terminal, and most browsers.
+                    if code == KeyCode::Equal || code == KeyCode::NumpadAdd {
+                        self.change_font_size(1.0);
+                        return;
+                    }
+                    if code == KeyCode::Minus || code == KeyCode::NumpadSubtract {
+                        self.change_font_size(-1.0);
+                        return;
+                    }
+                    if code == KeyCode::Digit0 || code == KeyCode::Numpad0 {
+                        self.change_font_size(FONT_SIZE - self.font_size);
+                        return;
+                    }
                 }
                 // Ctrl+letter → the corresponding ASCII control byte.
                 // This covers Ctrl+C → 0x03 (SIGINT), Ctrl+D → 0x04 (EOF),
@@ -1779,7 +1826,7 @@ impl App {
                 pane_px_y,
                 self.cell.w,
                 self.cell.h,
-                FONT_SIZE,
+                self.font_size,
                 self.cell.baseline,
             );
         }
@@ -1930,7 +1977,7 @@ impl App {
                     py,
                     self.cell.w,
                     self.cell.h,
-                    FONT_SIZE,
+                    self.font_size,
                     cells::ITERM_CURSOR,
                     self.cell.baseline,
                 );
