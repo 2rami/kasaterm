@@ -2053,24 +2053,18 @@ impl ApplicationHandler for App {
         // system registry lists for that .ttf and fall through to
         // sugarloaf's bundled Cascadia when the face isn't installed.
         let mut fonts = sugarloaf::font::fonts::SugarloafFonts::default();
-        fonts.family = Some("D2CodingLigature Nerd Font Mono".to_string());
-        // Route the Private Use Area to Symbols Nerd Font when the
-        // primary family doesn't ship those glyphs. claude code's
-        // statusline / status indicators rely on the Nerd Font icon
-        // ranges; without this fallback they render as blanks.
-        // Covers the main PUA block and the supplementary PUA-A block
-        // that Material Design icons live in.
+        // JetBrainsMono Nerd Font Mono carries the full ASCII range +
+        // Nerd Font icons + Miscellaneous Technical (U+23F5 ⏵ that
+        // claude code paints in front of bypass-permissions), all on
+        // a monospace advance. Falls back to sugarloaf's bundled
+        // Cascadia when the face isn't installed.
+        fonts.family = Some("JetBrainsMono Nerd Font Mono".to_string());
+        // Symbols-Only Nerd Font as an extra fallback so users who
+        // ship only the small Symbols variant still get the PUA
+        // icons claude code's statusline expects. The primary
+        // JetBrainsMono Nerd Font Mono already has these, so this is
+        // a safety net rather than the main path.
         fonts.symbol_map = Some(vec![
-            // Miscellaneous Technical — covers U+23F5 ⏵ which claude
-            // code paints in front of the bypass-permissions hint,
-            // plus playback / power / clock glyphs that the Nerd
-            // Symbols-Only face doesn't carry. Segoe UI Symbol is
-            // bundled with Windows since Vista and reliably has these.
-            sugarloaf::font::fonts::SymbolMap {
-                start: "2300".to_string(),
-                end: "23FF".to_string(),
-                font_family: "Segoe UI Symbol".to_string(),
-            },
             sugarloaf::font::fonts::SymbolMap {
                 start: "E000".to_string(),
                 end: "F8FF".to_string(),
