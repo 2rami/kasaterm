@@ -2053,12 +2053,14 @@ impl ApplicationHandler for App {
         // system registry lists for that .ttf and fall through to
         // sugarloaf's bundled Cascadia when the face isn't installed.
         let mut fonts = sugarloaf::font::fonts::SugarloafFonts::default();
-        // JetBrainsMono Nerd Font Mono carries the full ASCII range +
-        // Nerd Font icons + Miscellaneous Technical (U+23F5 ⏵ that
-        // claude code paints in front of bypass-permissions), all on
-        // a monospace advance. Falls back to sugarloaf's bundled
+        // D2CodingLigature Nerd Font Mono — the macOS profile font,
+        // ships with the full Hangul / Latin / Nerd-icon glyph
+        // coverage we want on Windows too. dhnam/d2coding-nerd-font
+        // hosts the patched TTFs; install them into
+        // %LOCALAPPDATA%\Microsoft\Windows\Fonts and sugarloaf picks
+        // up the face by name. Falls back to sugarloaf's bundled
         // Cascadia when the face isn't installed.
-        fonts.family = Some("JetBrainsMono Nerd Font Mono".to_string());
+        fonts.family = Some("D2CodingLigature Nerd Font Mono".to_string());
         // Symbols-Only Nerd Font as an extra fallback so users who
         // ship only the small Symbols variant still get the PUA
         // icons claude code's statusline expects. The primary
