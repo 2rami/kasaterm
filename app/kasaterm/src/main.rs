@@ -2062,13 +2062,14 @@ impl ApplicationHandler for App {
         // that Material Design icons live in.
         fonts.symbol_map = Some(vec![
             // Miscellaneous Technical — covers U+23F5 ⏵ which claude
-            // code paints in front of the bypass-permissions hint, plus
-            // playback / power / clock glyphs that Cascadia tends to
-            // miss.
+            // code paints in front of the bypass-permissions hint,
+            // plus playback / power / clock glyphs that the Nerd
+            // Symbols-Only face doesn't carry. Segoe UI Symbol is
+            // bundled with Windows since Vista and reliably has these.
             sugarloaf::font::fonts::SymbolMap {
                 start: "2300".to_string(),
                 end: "23FF".to_string(),
-                font_family: "Symbols Nerd Font Mono".to_string(),
+                font_family: "Segoe UI Symbol".to_string(),
             },
             sugarloaf::font::fonts::SymbolMap {
                 start: "E000".to_string(),
