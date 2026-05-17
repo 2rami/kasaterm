@@ -2061,6 +2061,15 @@ impl ApplicationHandler for App {
         // Covers the main PUA block and the supplementary PUA-A block
         // that Material Design icons live in.
         fonts.symbol_map = Some(vec![
+            // Miscellaneous Technical — covers U+23F5 ⏵ which claude
+            // code paints in front of the bypass-permissions hint, plus
+            // playback / power / clock glyphs that Cascadia tends to
+            // miss.
+            sugarloaf::font::fonts::SymbolMap {
+                start: "2300".to_string(),
+                end: "23FF".to_string(),
+                font_family: "Symbols Nerd Font Mono".to_string(),
+            },
             sugarloaf::font::fonts::SymbolMap {
                 start: "E000".to_string(),
                 end: "F8FF".to_string(),

@@ -387,7 +387,7 @@ fn spawn_reader_thread(
                 }
             };
             if std::env::var("KASATERM_LOG_PTY").is_ok() {
-                let preview: String = buf[..n.min(160)]
+                let preview: String = buf[..n.min(2048)]
                     .iter()
                     .map(|b| match b {
                         0x20..=0x7e => (*b as char).to_string(),
