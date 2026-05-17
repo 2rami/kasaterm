@@ -2007,6 +2007,24 @@ impl ApplicationHandler for App {
         // sugarloaf's bundled Cascadia when the face isn't installed.
         let mut fonts = sugarloaf::font::fonts::SugarloafFonts::default();
         fonts.family = Some("D2CodingLigature Nerd Font Mono".to_string());
+        // Route the Private Use Area to Symbols Nerd Font when the
+        // primary family doesn't ship those glyphs. claude code's
+        // statusline / status indicators rely on the Nerd Font icon
+        // ranges; without this fallback they render as blanks.
+        // Covers the main PUA block and the supplementary PUA-A block
+        // that Material Design icons live in.
+        fonts.symbol_map = Some(vec![
+            sugarloaf::font::fonts::SymbolMap {
+                start: "E000".to_string(),
+                end: "F8FF".to_string(),
+                font_family: "Symbols Nerd Font Mono".to_string(),
+            },
+            sugarloaf::font::fonts::SymbolMap {
+                start: "F0000".to_string(),
+                end: "1FFFD".to_string(),
+                font_family: "Symbols Nerd Font Mono".to_string(),
+            },
+        ]);
         let (font_library, font_err) = sugarloaf::font::FontLibrary::new(fonts);
         if let Some(err) = font_err {
             if !err.fonts_not_found.is_empty() {
