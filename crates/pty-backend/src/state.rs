@@ -461,7 +461,18 @@ fn snapshot(term: &Term<PtyEventForwarder>, cols: u16, rows: u16, pane_id: &str)
 }
 
 fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
-    let ch = if cell.c == '\0' { ' ' } else { cell.c };
+    // Substitute ANSI-symbol glyphs that no monospace face on this
+    // machine carries with a visually-equivalent ASCII chevron. claude
+    // code paints U+23F5 (⏵) in front of its bypass-permissions row;
+    // Cascadia / Consolas / Symbols Nerd Font Mono all draw it as a
+    // `.notdef` box, while Segoe UI Symbol has the glyph but bleeds
+    // outside one cell and overlaps the next character. `>` is the
+    // closest ASCII match and avoids both failure modes.
+    let raw = if cell.c == '\0' { ' ' } else { cell.c };
+    let ch = match raw {
+        '\u{23F5}' => '>',
+        _ => raw,
+    };
     Cell {
         ch: ch.to_string(),
         fg: convert_color(cell.fg),
