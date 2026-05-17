@@ -1960,7 +1960,7 @@ impl ApplicationHandler for App {
             // and the bottom `bypass permissions…` line clipped. 760px
             // gives 40+ rows at the current font/line-height and lines
             // up with Ghostty / Terminal.app default heights.
-            .with_inner_size(LogicalSize::new(1024.0, 720.0));
+            .with_inner_size(LogicalSize::new(1100.0, 860.0));
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
