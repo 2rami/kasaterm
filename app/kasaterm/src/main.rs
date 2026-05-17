@@ -1002,7 +1002,12 @@ impl App {
         let lh = (raw_lh - 2.0 * WINDOW_PADDING).max(0.0);
         let cols = (lw / self.cell.w).floor().max(40.0) as u16;
         let rows = (lh / self.cell.h).floor().max(10.0) as u16;
-        let _ = (raw_lw, raw_lh);
+        if std::env::var_os("KASATERM_LOG_LAYOUT").is_some() {
+            eprintln!(
+                "[layout] win=({raw_lw:.0}x{raw_lh:.0}) usable=({lw:.0}x{lh:.0}) cell=({:.1}x{:.1}) cells=({cols}x{rows})",
+                self.cell.w, self.cell.h
+            );
+        }
         (cols, rows)
     }
 
@@ -1740,9 +1745,33 @@ impl App {
         let origin_y = WINDOW_PADDING;
 
         // Pass 1: walk each pane and render its cell grid at its rect.
+        let log_layout = std::env::var_os("KASATERM_LOG_LAYOUT").is_some();
         for frame in &pane_frames {
             let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
             let pane_px_y = origin_y + frame.y_cells as f32 * self.cell.h;
+            if log_layout {
+                let total = frame.rows.len();
+                eprintln!(
+                    "[render] pane={} rows={total} cols={} px=({pane_px_x:.0},{pane_px_y:.0})",
+                    frame.id,
+                    frame.rows.first().map(|r| r.len()).unwrap_or(0),
+                );
+                for (i, row) in frame.rows.iter().enumerate().rev().take(8) {
+                    let preview: String = row
+                        .iter()
+                        .take(80)
+                        .map(|c| match c.ch.chars().next() {
+                            Some(ch) if !ch.is_whitespace() => ch,
+                            _ => '.',
+                        })
+                        .collect();
+                    let nonblank = row
+                        .iter()
+                        .filter(|c| !c.ch.is_empty() && c.ch != " ")
+                        .count();
+                    eprintln!("[render]   row[{i:>2}] non={nonblank:>3} {preview}");
+                }
+            }
             cells::render_screen(
                 sugarloaf,
                 &frame.rows,
