@@ -2064,9 +2064,20 @@ impl ApplicationHandler for App {
         // Symbols-Only Nerd Font as an extra fallback so users who
         // ship only the small Symbols variant still get the PUA
         // icons claude code's statusline expects. The primary
-        // JetBrainsMono Nerd Font Mono already has these, so this is
-        // a safety net rather than the main path.
+        // D2CodingLigature Nerd Font Mono already has these, so this
+        // is a safety net rather than the main path.
+        //
+        // Segoe UI Symbol carries U+23F5 ⏵ (the chevron in front of
+        // bypass-permissions) — no Nerd Font ships that glyph. cells.rs
+        // already breaks the run-batch on the U+2300–U+27BF range so
+        // the proportional glyph gets its own draw call instead of
+        // dragging neighbour ASCII through propo advances.
         fonts.symbol_map = Some(vec![
+            sugarloaf::font::fonts::SymbolMap {
+                start: "2300".to_string(),
+                end: "23FF".to_string(),
+                font_family: "Segoe UI Symbol".to_string(),
+            },
             sugarloaf::font::fonts::SymbolMap {
                 start: "E000".to_string(),
                 end: "F8FF".to_string(),
