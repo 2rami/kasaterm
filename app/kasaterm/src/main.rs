@@ -121,7 +121,22 @@ fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
     if out.ends_with('\n') {
         out.pop();
     }
-    out
+    // Trim blank lines at both ends. A drag across an alt-screen TUI
+    // (Claude Code, less, etc.) usually picks up empty padding rows
+    // above/below the visible text — strip those so what lands in the
+    // clipboard matches what the user actually highlighted.
+    let trimmed: Vec<&str> = out
+        .lines()
+        .skip_while(|l| l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .skip_while(|l| l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    trimmed.join("\n")
 }
 
 /// True for any codepoint the Hangul IME composes. Covers the four
@@ -277,6 +292,12 @@ struct App {
     hangul: hangul_ime::Composer,
     selection: Option<Selection>,
     drag_anchor: Option<(u16, u16)>,
+    /// Pane that owns the in-flight mouse reporting drag. `Some(pane_id)`
+    /// when we forwarded a button-press into a mouse-reporting TUI and
+    /// are now relaying motion + release into the same pane. None means
+    /// no mouse-reporting drag is active; selection logic owns the
+    /// pointer.
+    mouse_forward_pane: Option<String>,
     cursor_px: (f32, f32),
     modifiers: ModifiersState,
     wheel_accum_y: f32,
@@ -313,6 +334,7 @@ impl App {
             hangul: hangul_ime::Composer::new(),
             selection: None,
             drag_anchor: None,
+            mouse_forward_pane: None,
             cursor_px: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             wheel_accum_y: 0.0,
@@ -1277,6 +1299,41 @@ impl App {
         }
     }
 
+    /// True when the pane has mouse reporting + SGR encoding enabled
+    /// (claude code / vim / less in alt-screen). Shift-held overrides
+    /// to false so the user has an iTerm-style escape hatch back to
+    /// our own selection logic.
+    fn pane_takes_mouse(&self, pane_id: &str) -> bool {
+        if self.modifiers.shift_key() {
+            return false;
+        }
+        let ws = self.ws.lock().unwrap();
+        ws.panes
+            .get(pane_id)
+            .map(|p| p.mouse_enabled && p.mouse_sgr)
+            .unwrap_or(false)
+    }
+
+    /// Encode an SGR mouse event and ship it to the pane. `button` is
+    /// the SGR button code (0 = left press/motion/release, +32 for
+    /// motion-with-button-held). `press` toggles the final byte
+    /// between `M` (press / motion) and `m` (release).
+    fn send_mouse_sgr(&self, pane_id: &str, button: u8, col: u16, row: u16, press: bool) {
+        let final_byte = if press { 'M' } else { 'm' };
+        let payload = format!("\x1b[<{button};{};{}{final_byte}", col + 1, row + 1);
+        if let Some(tmux) = self.tmux.as_ref() {
+            let hex: String = payload
+                .as_bytes()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = tmux.send_keys_hex(Some(pane_id), &hex);
+        } else if let Some(pty) = self.pty.get(pane_id) {
+            let _ = pty.send_bytes(payload.as_bytes());
+        }
+    }
+
     fn copy_selection(&self) {
         let Some(sel) = self.selection else { return; };
         let rows = {
@@ -2195,7 +2252,17 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = window.scale_factor() as f32;
                 self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
-                if let (Some(anchor), Some(cell)) = (
+                // Drag inside a mouse-reporting TUI: relay motion as
+                // SGR button-32 (left button held) into the same pane
+                // we sent the press to, so Claude Code / vim / less
+                // sees a continuous drag.
+                if let Some(pane_id) = self.mouse_forward_pane.clone() {
+                    if let Some((col, row)) =
+                        self.px_to_cell_active(self.cursor_px.0, self.cursor_px.1)
+                    {
+                        self.send_mouse_sgr(&pane_id, 32, col, row, true);
+                    }
+                } else if let (Some(anchor), Some(cell)) = (
                     self.drag_anchor,
                     self.px_to_cell_active(self.cursor_px.0, self.cursor_px.1),
                 ) {
@@ -2207,10 +2274,12 @@ impl ApplicationHandler for App {
                 match state {
                     ElementState::Pressed => {
                         // Switch active pane to wherever the click
-                        // landed, then start a drag selection inside
-                        // that pane. Clicking the inactive pane focuses
-                        // it without yet selecting (anchor == end so
-                        // the release handler clears the empty range).
+                        // landed, then either forward the press into
+                        // the pane (mouse-reporting TUI like Claude
+                        // Code) or start a drag selection. Clicking
+                        // the inactive pane focuses it without yet
+                        // selecting (anchor == end so the release
+                        // handler clears the empty range).
                         if let Some((pane_id, col, row)) =
                             self.px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
                         {
@@ -2222,12 +2291,17 @@ impl ApplicationHandler for App {
                                 switched
                             };
                             if switched {
-                                // New focus: drop any selection that
-                                // was held in the previously-focused
-                                // pane, otherwise the highlight rect
-                                // would float on the wrong pane.
                                 self.selection = None;
                                 self.drag_anchor = None;
+                                self.mouse_forward_pane = None;
+                            } else if self.pane_takes_mouse(&pane_id) {
+                                // Hand the press to the TUI. Its own
+                                // selection / copy-on-select kicks in
+                                // (Claude Code spawns `pbcopy`).
+                                self.selection = None;
+                                self.drag_anchor = None;
+                                self.send_mouse_sgr(&pane_id, 0, col, row, true);
+                                self.mouse_forward_pane = Some(pane_id.clone());
                             } else {
                                 self.drag_anchor = Some((col, row));
                                 self.selection = Some(Selection {
@@ -2236,9 +2310,6 @@ impl ApplicationHandler for App {
                                 });
                             }
                             self.last_input_at = Instant::now();
-                            // Tmux side: tell the daemon we're now on
-                            // this pane so any future split-window /
-                            // send-keys without a target lands here.
                             if let Some(tmux) = self.tmux.as_ref() {
                                 let _ =
                                     tmux.send_cmd(&format!("select-pane -t '{pane_id}'"));
@@ -2246,17 +2317,23 @@ impl ApplicationHandler for App {
                         }
                     }
                     ElementState::Released => {
-                        self.drag_anchor = None;
-                        if let Some(sel) = self.selection {
-                            if sel.anchor == sel.end {
-                                self.selection = None;
-                            } else {
-                                // Copy-on-select. Mirrors the iTerm2
-                                // default and lets a fresh drag in any
-                                // TUI (Claude Code, less, etc.) land in
-                                // the clipboard without the user having
-                                // to also press Cmd/Ctrl+Shift+C.
-                                self.copy_selection();
+                        // Mouse-reporting drag end: forward the release
+                        // so the TUI can finalize its selection /
+                        // copy-on-select.
+                        if let Some(pane_id) = self.mouse_forward_pane.take() {
+                            if let Some((col, row)) =
+                                self.px_to_cell_active(self.cursor_px.0, self.cursor_px.1)
+                            {
+                                self.send_mouse_sgr(&pane_id, 0, col, row, false);
+                            }
+                        } else {
+                            self.drag_anchor = None;
+                            if let Some(sel) = self.selection {
+                                if sel.anchor == sel.end {
+                                    self.selection = None;
+                                } else {
+                                    self.copy_selection();
+                                }
                             }
                         }
                     }
