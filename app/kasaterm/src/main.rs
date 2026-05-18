@@ -540,50 +540,77 @@ impl App {
                 .into_owned()
         });
         eprintln!("[autocapture] in {ms}ms → {path}");
+
+        // Windows: pull HWND on the main thread (raw-window-handle isn't
+        // Send), pass the address into the timer thread as isize.
+        #[cfg(windows)]
+        let hwnd_isize: Option<isize> = self.window.as_ref().and_then(|w| {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            w.window_handle().ok().and_then(|h| match h.as_raw() {
+                RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+                _ => None,
+            })
+        });
+
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(ms));
-            let pid = std::process::id();
-            // Force our window to the front, then capture just its region.
-            // Full-desktop screencapture grabs whatever app is on top —
-            // useless in headless verify runs where another app may have
-            // focus. Window-bounded capture sidesteps that.
-            let _ = std::process::Command::new("osascript")
-                .args([
-                    "-e",
-                    &format!(
-                        "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
-                    ),
-                ])
-                .status();
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            // Query window bounds {x, y, w, h} via System Events.
-            let bounds_script = format!(
-                "tell application \"System Events\" to tell (first process whose unix id is {pid}) to get {{position, size}} of window 1"
-            );
-            let bounds_out = std::process::Command::new("osascript")
-                .args(["-e", &bounds_script])
-                .output();
-            let region = bounds_out.ok().and_then(|o| {
-                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                // Format: "x, y, w, h" (System Events returns flattened list).
-                let parts: Vec<i32> = s
-                    .split(',')
-                    .filter_map(|p| p.trim().parse::<i32>().ok())
-                    .collect();
-                if parts.len() == 4 {
-                    Some(format!("{},{},{},{}", parts[0], parts[1], parts[2], parts[3]))
-                } else {
-                    None
+
+            #[cfg(target_os = "macos")]
+            {
+                let pid = std::process::id();
+                // Force our window to the front, then capture just its
+                // region. Full-desktop screencapture grabs whatever app
+                // is on top — useless in headless verify runs where
+                // another app may have focus. Window-bounded capture
+                // sidesteps that.
+                let _ = std::process::Command::new("osascript")
+                    .args([
+                        "-e",
+                        &format!(
+                            "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
+                        ),
+                    ])
+                    .status();
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                let bounds_script = format!(
+                    "tell application \"System Events\" to tell (first process whose unix id is {pid}) to get {{position, size}} of window 1"
+                );
+                let bounds_out = std::process::Command::new("osascript")
+                    .args(["-e", &bounds_script])
+                    .output();
+                let region = bounds_out.ok().and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    let parts: Vec<i32> = s
+                        .split(',')
+                        .filter_map(|p| p.trim().parse::<i32>().ok())
+                        .collect();
+                    if parts.len() == 4 {
+                        Some(format!("{},{},{},{}", parts[0], parts[1], parts[2], parts[3]))
+                    } else {
+                        None
+                    }
+                });
+                let mut cmd = std::process::Command::new("screencapture");
+                cmd.args(["-x", "-t", "png"]);
+                if let Some(r) = region.as_deref() {
+                    cmd.args(["-R", r]);
                 }
-            });
-            let mut cmd = std::process::Command::new("screencapture");
-            cmd.args(["-x", "-t", "png"]);
-            if let Some(r) = region.as_deref() {
-                cmd.args(["-R", r]);
+                cmd.arg(&path);
+                let _ = cmd.status();
+                eprintln!("[autocapture] captured {path} region={:?}", region);
             }
-            cmd.arg(&path);
-            let _ = cmd.status();
-            eprintln!("[autocapture] captured {path} region={:?}", region);
+
+            #[cfg(windows)]
+            {
+                let Some(hwnd) = hwnd_isize else {
+                    eprintln!("[autocapture] no HWND available");
+                    return;
+                };
+                match capture_window_to_png_windows(hwnd, &path) {
+                    Ok((w, h)) => eprintln!("[autocapture] captured {path} ({w}x{h})"),
+                    Err(e) => eprintln!("[autocapture] failed: {e}"),
+                }
+            }
         });
     }
 
@@ -3405,6 +3432,106 @@ fn real_tmux_candidates() -> &'static [&'static str] {
     // Windows has no canonical tmux install path; rely on the env
     // override when the user has wired up WSL-tmux or a custom build.
     &[]
+}
+
+/// PrintWindow + GDI capture of our own HWND, encoded as PNG.
+/// PW_RENDERFULLCONTENT pulls the wgpu/DXGI swap-chain contents that
+/// plain BitBlt would miss; we fall back to a BitBlt from the window
+/// DC if PrintWindow returns 0 (rare, but seen on some legacy GPUs).
+#[cfg(windows)]
+fn capture_window_to_png_windows(
+    hwnd_val: isize,
+    path: &str,
+) -> std::io::Result<(i32, i32)> {
+    use std::io::Error;
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
+        GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, SRCCOPY,
+    };
+    use windows_sys::Win32::Storage::Xps::PrintWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetClientRect, SetForegroundWindow, PW_RENDERFULLCONTENT,
+    };
+
+    let hwnd: HWND = hwnd_val as *mut std::ffi::c_void;
+    unsafe { SetForegroundWindow(hwnd) };
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    if unsafe { GetClientRect(hwnd, &mut rect) } == 0 {
+        return Err(Error::other("GetClientRect failed"));
+    }
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    if w <= 0 || h <= 0 {
+        return Err(Error::other(format!("client rect zero: {w}x{h}")));
+    }
+
+    let pixels = unsafe {
+        let hdc_window = GetDC(hwnd);
+        if hdc_window.is_null() {
+            return Err(Error::other("GetDC returned null"));
+        }
+        let hdc_mem = CreateCompatibleDC(hdc_window);
+        let hbm = CreateCompatibleBitmap(hdc_window, w, h);
+        let old = SelectObject(hdc_mem, hbm as _);
+
+        let ok = PrintWindow(hwnd, hdc_mem, PW_RENDERFULLCONTENT);
+        if ok == 0 {
+            // Fallback path. Only useful if the window is actually on
+            // screen and not occluded — PrintWindow usually wins.
+            BitBlt(hdc_mem, 0, 0, w, h, hdc_window, 0, 0, SRCCOPY);
+        }
+
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bmi.bmiHeader.biWidth = w;
+        // Negative height = top-down DIB so row 0 sits at the top, which
+        // is what PNG expects.
+        bmi.bmiHeader.biHeight = -h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB as u32;
+
+        let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+        GetDIBits(
+            hdc_mem,
+            hbm,
+            0,
+            h as u32,
+            buf.as_mut_ptr() as *mut _,
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+
+        SelectObject(hdc_mem, old);
+        DeleteObject(hbm as _);
+        DeleteDC(hdc_mem);
+        ReleaseDC(hwnd, hdc_window);
+
+        // GDI hands us BGRA with alpha frequently zeroed. Swap to RGBA
+        // and stamp alpha = 0xFF so PNG viewers don't render us as fully
+        // transparent.
+        for px in buf.chunks_exact_mut(4) {
+            px.swap(0, 2);
+            px[3] = 0xFF;
+        }
+        buf
+    };
+
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| Error::other(format!("png header: {e}")))?;
+    writer
+        .write_image_data(&pixels)
+        .map_err(|e| Error::other(format!("png data: {e}")))?;
+    Ok((w, h))
 }
 
 #[cfg(test)]
