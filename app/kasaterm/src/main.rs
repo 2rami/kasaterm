@@ -27,6 +27,8 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS;
 
 const FONT_SIZE: f32 = 14.0;
 /// Line spacing multiplier passed to `compute_cell_metrics`. 1.0 keeps
@@ -41,6 +43,30 @@ const LINE_HEIGHT_MULT: f32 = 1.0;
 /// text doesn't jam against the chrome. Must match `render_frame`'s
 /// origin and `px_to_pane_cell`'s offset.
 const WINDOW_PADDING: f32 = 10.0;
+/// Logical-pixel height of the custom chrome strip that sits above the
+/// cell grid (traffic light row + future tab bar). macOS's traffic
+/// light buttons end around y ≈ 28 in logical units, so 38 leaves a
+/// few pixels of breathing room. Cells start at y = TITLE_HEIGHT (not
+/// at WINDOW_PADDING) so the title strip is fully clear of glyph
+/// drawing.
+const TITLE_HEIGHT: f32 = 36.0;
+/// Width of the macOS traffic-light cluster (close/min/zoom) measured
+/// from the window's left edge. Mouse events inside this rectangle are
+/// reserved for the native buttons; our drag handler ignores them so a
+/// click on the red dot still closes the window.
+const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
+/// iTerm-style per-pane header height in logical pixels. Each split
+/// pane gets one of these strips above its cell grid; a single
+/// un-split window renders no header at all (matches the iTerm
+/// behavior the user pointed at).
+const PANE_HEADER_HEIGHT: f32 = 28.0;
+/// One tab's slot width in the title strip. Tabs flow left-to-right
+/// starting just past the traffic lights.
+const TAB_WIDTH: f32 = 180.0;
+/// "+" new-tab button width on the right of the tab list.
+const TAB_PLUS_WIDTH: f32 = 44.0;
+/// Vertical inset for tab rects inside the title strip (top + bottom).
+const TAB_VERTICAL_INSET: f32 = 4.0;
 const SCROLLBACK_MAX: usize = 5000;
 const WHEEL_THROTTLE_MS: u64 = 8;
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
@@ -66,6 +92,30 @@ impl Default for CellGeom {
     fn default() -> Self {
         Self { w: 8.6, h: 18.0, baseline: 14.0 }
     }
+}
+
+/// One tab in the title strip. Visual data only — the heavy state
+/// (PTY map, workspace, layout) lives in `TabBackend` and gets
+/// swapped in/out of the App when the user switches tabs.
+struct TabState {
+    title: String,
+}
+
+/// All per-tab backend state that has to swap in/out when the user
+/// changes tabs. The active tab's TabBackend is "live" — its fields
+/// are inlined directly on `App` so the existing hot paths
+/// (key/mouse handlers, render_frame) keep their cheap field access.
+/// Inactive tabs sit in `App::stashed_tabs[idx]`, and the swap is a
+/// few `std::mem::replace` calls in `switch_tab`.
+struct TabBackend {
+    pty: HashMap<String, Arc<pty_backend::PtySession>>,
+    pty_layout: Option<pty_backend::PtyLayout>,
+    next_pane_id: u32,
+    autosplit_plan: Vec<pty_backend::SplitDir>,
+    autosplit_at: Option<Instant>,
+    dead_panes: Arc<Mutex<Vec<String>>>,
+    socket_handle: Option<socket::PtyBackendHandle>,
+    ws: Arc<Mutex<Workspace>>,
 }
 
 /// (col, row) anchor + end for drag selection. Both ends in cell units.
@@ -290,6 +340,25 @@ struct App {
     /// jamo through our own Composer instead of trusting macOS to
     /// queue it for us.
     hangul: hangul_ime::Composer,
+    /// Title-strip tabs. Always has at least one entry — the initial
+    /// session lives in `tabs[0]`. `active_tab` indexes into this.
+    tabs: Vec<TabState>,
+    active_tab: usize,
+    /// Backend state for every tab except the currently active one.
+    /// The active tab's backend lives directly on `App`. `Some` for
+    /// inactive tabs, `None` at the active index. Length matches
+    /// `tabs`.
+    stashed_tabs: Vec<Option<TabBackend>>,
+    /// Cached hit rects for the tab strip from the last render pass.
+    /// Mouse press uses these to decide between "click on tab N",
+    /// "click on the + button", or "title-strip drag". Stored as
+    /// (x, y, w, h) tuples in logical pixels.
+    tab_rects: Vec<(f32, f32, f32, f32)>,
+    plus_rect: Option<(f32, f32, f32, f32)>,
+    /// (pane_id, close_rect) for every visible pane header. Populated
+    /// by `render_frame` and consumed by the MouseInput handler so a
+    /// click on the × button closes that pane.
+    pane_header_rects: Vec<(String, (f32, f32, f32, f32))>,
     selection: Option<Selection>,
     drag_anchor: Option<(u16, u16)>,
     /// Pane that owns the in-flight mouse reporting drag. `Some(pane_id)`
@@ -298,6 +367,11 @@ struct App {
     /// no mouse-reporting drag is active; selection logic owns the
     /// pointer.
     mouse_forward_pane: Option<String>,
+    /// Last left-click timestamp + position. Used only for the
+    /// title-strip double-click → window-zoom shortcut. macOS handles
+    /// this for us when the OS owns the titlebar, but our
+    /// fullsize_content_view setup means we intercept those clicks.
+    last_left_click: Option<(Instant, (f32, f32))>,
     cursor_px: (f32, f32),
     modifiers: ModifiersState,
     wheel_accum_y: f32,
@@ -332,9 +406,16 @@ impl App {
             in_preedit: false,
             ime_active: false,
             hangul: hangul_ime::Composer::new(),
+            tabs: vec![TabState { title: "shell".into() }],
+            active_tab: 0,
+            stashed_tabs: vec![None],
+            tab_rects: Vec::new(),
+            plus_rect: None,
+            pane_header_rects: Vec::new(),
             selection: None,
             drag_anchor: None,
             mouse_forward_pane: None,
+            last_left_click: None,
             cursor_px: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             wheel_accum_y: 0.0,
@@ -989,7 +1070,7 @@ impl App {
         // both the grid and the click reuse it so the math stays
         // consistent on the boundary cells.
         let col = ((px - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as u16;
-        let row = ((py - WINDOW_PADDING).max(0.0) / self.cell.h).floor() as u16;
+        let row = ((py - TITLE_HEIGHT).max(0.0) / self.cell.h).floor() as u16;
         if let Some(layout) = ws.layout.as_ref() {
             for leaf in layout.leaves() {
                 if let Layout::Pane { id, x, y, w, h } = leaf {
@@ -1052,7 +1133,9 @@ impl App {
         let raw_lw = size.width as f32 / scale;
         let raw_lh = size.height as f32 / scale;
         let lw = (raw_lw - 2.0 * WINDOW_PADDING).max(0.0);
-        let lh = (raw_lh - 2.0 * WINDOW_PADDING).max(0.0);
+        // Top: TITLE_HEIGHT (chrome strip). Bottom: WINDOW_PADDING. The
+        // asymmetry is intentional — the strip replaces the top padding.
+        let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING).max(0.0);
         let cols = (lw / self.cell.w).floor().max(40.0) as u16;
         let rows = (lh / self.cell.h).floor().max(10.0) as u16;
         if std::env::var_os("KASATERM_LOG_LAYOUT").is_some() {
@@ -1296,6 +1379,91 @@ impl App {
             let _ = tmux.send_keys_hex(target.as_deref(), &hex);
         } else if let Some(pty) = self.active_pty() {
             let _ = pty.send_bytes(bytes);
+        }
+    }
+
+    /// Snapshot the active tab's backend out of `App` into a
+    /// `TabBackend`. Used by `switch_tab` and `add_tab` to stash the
+    /// current state before swapping in another.
+    fn take_active_backend(&mut self) -> TabBackend {
+        TabBackend {
+            pty: std::mem::take(&mut self.pty),
+            pty_layout: self.pty_layout.take(),
+            next_pane_id: std::mem::replace(&mut self.next_pane_id, 1),
+            autosplit_plan: std::mem::take(&mut self.autosplit_plan),
+            autosplit_at: self.autosplit_at.take(),
+            dead_panes: std::mem::replace(
+                &mut self.dead_panes,
+                Arc::new(Mutex::new(Vec::new())),
+            ),
+            socket_handle: self.socket_handle.take(),
+            ws: std::mem::replace(
+                &mut self.ws,
+                Arc::new(Mutex::new(Workspace::default())),
+            ),
+        }
+    }
+
+    /// Restore a stashed `TabBackend` into the active App fields.
+    fn install_backend(&mut self, b: TabBackend) {
+        self.pty = b.pty;
+        self.pty_layout = b.pty_layout;
+        self.next_pane_id = b.next_pane_id;
+        self.autosplit_plan = b.autosplit_plan;
+        self.autosplit_at = b.autosplit_at;
+        self.dead_panes = b.dead_panes;
+        self.socket_handle = b.socket_handle;
+        self.ws = b.ws;
+    }
+
+    /// Switch to a different tab by index. No-op when `idx` is already
+    /// active or out of range. The PTYs of the stashed tab keep
+    /// running in the background; their %output just doesn't paint
+    /// until the user switches back.
+    fn switch_tab(&mut self, idx: usize) {
+        if idx == self.active_tab || idx >= self.tabs.len() {
+            return;
+        }
+        let current = self.take_active_backend();
+        self.stashed_tabs[self.active_tab] = Some(current);
+        let next = self
+            .stashed_tabs[idx]
+            .take()
+            .expect("inactive tab must have a stashed backend");
+        self.install_backend(next);
+        self.active_tab = idx;
+        self.selection = None;
+        self.drag_anchor = None;
+        self.mouse_forward_pane = None;
+        // The new tab's PTY size is whatever it was last; resize it to
+        // the current window so reads pick up the right COLUMNS/LINES.
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Push a brand-new tab and switch to it. The new tab spawns a
+    /// fresh PTY immediately so the user sees a shell prompt without
+    /// having to do anything else.
+    fn add_tab(&mut self) {
+        let stash = self.take_active_backend();
+        self.stashed_tabs[self.active_tab] = Some(stash);
+        let n = self.tabs.len() + 1;
+        self.tabs.push(TabState { title: format!("tab {n}") });
+        self.stashed_tabs.push(None);
+        self.active_tab = self.tabs.len() - 1;
+        self.selection = None;
+        self.drag_anchor = None;
+        self.mouse_forward_pane = None;
+        // start_pty fills self.pty / self.ws / self.pty_layout from
+        // the empty active state we just installed.
+        if let Err(e) = self.start_pty() {
+            eprintln!("[kasaterm] new tab pty failed: {e}");
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 
@@ -1743,14 +1911,17 @@ impl App {
         let now = Instant::now();
         let blink_on = self.cursor_blink_on(now);
         let Some(window) = self.window.as_ref() else { return; };
+        let scale = window.scale_factor() as f32;
         let Some(sugarloaf) = self.sugarloaf.as_mut() else { return; };
         let size = window.inner_size();
+        let win_w = size.width as f32 / scale;
+        let win_h = size.height as f32 / scale;
         sugarloaf.rect(
             None,
             0.0,
             0.0,
-            size.width as f32,
-            size.height as f32,
+            win_w,
+            win_h,
             [
                 cells::DEFAULT_BG[0] as f32 / 255.0,
                 cells::DEFAULT_BG[1] as f32 / 255.0,
@@ -1760,6 +1931,87 @@ impl App {
             0.0,
             0,
         );
+        // Tab strip rendering. iTerm-style: single-tab session shows
+        // *no* strip — only the traffic-light cluster sits in the
+        // unified-titlebar area, and the cell grid uses the full
+        // height. The strip appears only when there are 2+ tabs (or
+        // when the user has explicitly added a second). Drag /
+        // double-click / drag-resize keep working in the traffic-light
+        // band height regardless.
+        let show_strip = self.tabs.len() > 1;
+        self.tab_rects.clear();
+        self.plus_rect = None;
+        if show_strip {
+            // Sugarloaf takes logical pixels — match cells.rs which
+            // already passes logical origins. Earlier code multiplied
+            // by `scale` and produced double-sized chrome that
+            // overlapped the cell grid.
+            sugarloaf.rect(
+                None,
+                0.0,
+                0.0,
+                win_w,
+                TITLE_HEIGHT,
+                [0.09, 0.10, 0.13, 1.0],
+                0.0,
+                0,
+            );
+            sugarloaf.rect(
+                None,
+                0.0,
+                TITLE_HEIGHT - 1.0,
+                win_w,
+                1.0,
+                [0.04, 0.05, 0.07, 1.0],
+                0.0,
+                0,
+            );
+            let inset_y = TAB_VERTICAL_INSET;
+            let tab_h = TITLE_HEIGHT - inset_y * 2.0;
+            for (i, tab) in self.tabs.iter().enumerate() {
+                let x = TRAFFIC_LIGHT_WIDTH + i as f32 * TAB_WIDTH;
+                let rect = (x, inset_y, TAB_WIDTH - 4.0, tab_h);
+                let color = if i == self.active_tab {
+                    [0.20, 0.45, 0.70, 1.0]
+                } else {
+                    [0.14, 0.16, 0.20, 1.0]
+                };
+                sugarloaf.rect(None, rect.0, rect.1, rect.2, rect.3, color, 6.0, 0);
+                sugarloaf.text_mut().draw(
+                    rect.0 + 12.0,
+                    rect.1 + tab_h - 4.0,
+                    &tab.title,
+                    &sugarloaf::text::DrawOpts {
+                        font_size: self.font_size * 0.5,
+                        color: if i == self.active_tab {
+                            [245, 247, 250, 255]
+                        } else {
+                            [180, 185, 192, 255]
+                        },
+                        bold: i == self.active_tab,
+                        italic: false,
+                        font_id: None,
+                    },
+                );
+                self.tab_rects.push(rect);
+            }
+            let plus_x = TRAFFIC_LIGHT_WIDTH + self.tabs.len() as f32 * TAB_WIDTH;
+            let pr = (plus_x, inset_y, TAB_PLUS_WIDTH, tab_h);
+            sugarloaf.rect(None, pr.0, pr.1, pr.2, pr.3, [0.14, 0.16, 0.20, 1.0], 6.0, 0);
+            sugarloaf.text_mut().draw(
+                pr.0 + 12.0,
+                pr.1 + tab_h - 4.0,
+                "+",
+                &sugarloaf::text::DrawOpts {
+                    font_size: self.font_size * 0.6,
+                    color: [220, 225, 230, 255],
+                    bold: true,
+                    italic: false,
+                    font_id: None,
+                },
+            );
+            self.plus_rect = Some(pr);
+        }
 
         // Snapshot the per-pane render data under one lock so the
         // sugarloaf draw calls below can run without re-locking. Each
@@ -1776,6 +2028,7 @@ impl App {
             cursor_row: u16,
             cursor_col: u16,
             cursor_visible: bool,
+            title: Option<String>,
         }
         let (pane_frames, active_id) = {
             let ws = self.ws.lock().unwrap();
@@ -1833,6 +2086,7 @@ impl App {
                     cursor_row: pane.cursor_row,
                     cursor_col: pane.cursor_col,
                     cursor_visible: offset == 0 && pane.cursor_visible,
+                    title: pane.title.clone(),
                 });
             }
             (frames, active_id)
@@ -1843,16 +2097,22 @@ impl App {
             return;
         }
 
-        // Origin offset matches kasaterm-cli — 8px padding around the
-        // outer grid so chrome doesn't crowd the cells.
+        // Origin offset: TITLE_HEIGHT replaces the top padding so the
+        // cell grid starts immediately below the custom chrome strip.
+        // Add a small breathing margin so the first text row never
+        // bleeds into the strip rect on systems where sugarloaf
+        // interprets these coordinates slightly differently.
         let origin_x = WINDOW_PADDING;
-        let origin_y = WINDOW_PADDING;
+        let origin_y = TITLE_HEIGHT + 6.0;
 
         // Pass 1: walk each pane and render its cell grid at its rect.
         let log_layout = std::env::var_os("KASATERM_LOG_LAYOUT").is_some();
+        let show_headers = pane_frames.len() > 1;
+        let header_shift = if show_headers { PANE_HEADER_HEIGHT } else { 0.0 };
         for frame in &pane_frames {
             let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
-            let pane_px_y = origin_y + frame.y_cells as f32 * self.cell.h;
+            let pane_px_y =
+                origin_y + frame.y_cells as f32 * self.cell.h + header_shift;
             if log_layout {
                 let total = frame.rows.len();
                 eprintln!(
@@ -1888,67 +2148,124 @@ impl App {
             );
         }
 
-        // Pass 2: thick visual gap between panes. We paint a 6px-wide
-        // border *outside* each pane's cell grid, so two adjacent
-        // panes share a 12px tinted strip and stop touching at the
-        // edge. Active pane gets a brighter accent.
-        if pane_frames.len() > 1 {
-            const PANE_BORDER: f32 = 6.0;
+        // Pass 2: per-pane iTerm-style header bar. Only when the
+        // workspace is actually split — a single pane stays
+        // header-less so the first session reads as a plain terminal.
+        // The header sits *above* the cell grid (cell origin already
+        // shifted by `header_shift` in Pass 1), so painting here
+        // covers the gap between the pane top and the first text row.
+        if show_headers {
+            self.pane_header_rects = Vec::with_capacity(pane_frames.len());
             for frame in &pane_frames {
                 let is_active = active_id.as_deref() == Some(frame.id.as_str());
                 let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
-                let pane_px_y = origin_y + frame.y_cells as f32 * self.cell.h;
+                let pane_top = origin_y + frame.y_cells as f32 * self.cell.h;
                 let pane_px_w = frame.w_cells as f32 * self.cell.w;
-                let pane_px_h = frame.h_cells as f32 * self.cell.h;
-                let color = if is_active {
-                    [0.36, 0.51, 0.95, 0.65]
+                let bg = if is_active {
+                    [0.16, 0.20, 0.28, 1.0]
                 } else {
-                    [0.18, 0.20, 0.24, 0.85]
+                    [0.10, 0.12, 0.15, 1.0]
                 };
-                // Top, bottom, left, right strokes — each PANE_BORDER
-                // wide. Top/bottom strokes extend past the pane on
-                // each side by PANE_BORDER so the corners square up.
                 sugarloaf.rect(
                     None,
-                    pane_px_x - PANE_BORDER,
-                    pane_px_y - PANE_BORDER,
-                    pane_px_w + PANE_BORDER * 2.0,
-                    PANE_BORDER,
-                    color,
+                    pane_px_x,
+                    pane_top,
+                    pane_px_w,
+                    PANE_HEADER_HEIGHT,
+                    bg,
                     0.0,
                     0,
                 );
+                // Hairline at the bottom of the header so it reads as
+                // a separate band from the cell grid.
                 sugarloaf.rect(
                     None,
-                    pane_px_x - PANE_BORDER,
-                    pane_px_y + pane_px_h,
-                    pane_px_w + PANE_BORDER * 2.0,
-                    PANE_BORDER,
-                    color,
+                    pane_px_x,
+                    pane_top + PANE_HEADER_HEIGHT - 1.0,
+                    pane_px_w,
+                    1.0,
+                    [0.04, 0.05, 0.07, 1.0],
                     0.0,
                     0,
                 );
-                sugarloaf.rect(
-                    None,
-                    pane_px_x - PANE_BORDER,
-                    pane_px_y,
-                    PANE_BORDER,
-                    pane_px_h,
-                    color,
-                    0.0,
-                    0,
+                // Close button + title share the same font size and
+                // y baseline so they read as one row of chrome
+                // controls. Sugarloaf draws text from the bitmap
+                // top-left; we anchor it 8px below the header top so
+                // a ~0.85× cell-height glyph sits visually centered
+                // in the 28px strip.
+                // Match font size between close glyph and title so
+                // their bitmap tops sit on the same y. Centering math:
+                // a `chrome_font` glyph is ~chrome_font * 1.0 logical
+                // tall in this font, so the vertical inset that
+                // visually centers it in PANE_HEADER_HEIGHT is
+                // (PANE_HEADER_HEIGHT - chrome_font) / 2.
+                let chrome_font = 14.0;
+                let text_y = pane_top + (PANE_HEADER_HEIGHT - chrome_font) / 2.0;
+                let close_size = chrome_font + 4.0;
+                let close_rect = (
+                    pane_px_x + 6.0,
+                    pane_top + (PANE_HEADER_HEIGHT - close_size) / 2.0,
+                    close_size,
+                    close_size,
                 );
-                sugarloaf.rect(
-                    None,
-                    pane_px_x + pane_px_w,
-                    pane_px_y,
-                    PANE_BORDER,
-                    pane_px_h,
-                    color,
-                    0.0,
-                    0,
+                let chrome_color: [u8; 4] = if is_active {
+                    [230, 232, 238, 255]
+                } else {
+                    [160, 165, 172, 255]
+                };
+                sugarloaf.text_mut().draw(
+                    close_rect.0,
+                    text_y,
+                    "x",
+                    &sugarloaf::text::DrawOpts {
+                        font_size: chrome_font,
+                        color: chrome_color,
+                        bold: false,
+                        italic: false,
+                        font_id: None,
+                    },
                 );
+                // OSC 0/2 title from the shell (Claude Code session
+                // name, vim filename, etc.) takes priority. Vanilla
+                // zsh that doesn't push a title via precmd falls back
+                // to the current working directory with $HOME
+                // collapsed to "~" — matches macOS Terminal.app's
+                // default behavior.
+                let title = frame
+                    .title
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        std::env::current_dir()
+                            .ok()
+                            .map(|p| {
+                                let s = p.to_string_lossy().into_owned();
+                                match std::env::var("HOME").ok() {
+                                    Some(home) if s.starts_with(&home) => {
+                                        s.replacen(&home, "~", 1)
+                                    }
+                                    _ => s,
+                                }
+                            })
+                            .unwrap_or_else(|| "shell".to_string())
+                    });
+                sugarloaf.text_mut().draw(
+                    close_rect.0 + close_rect.2 + 8.0,
+                    text_y,
+                    &title,
+                    &sugarloaf::text::DrawOpts {
+                        font_size: chrome_font,
+                        color: chrome_color,
+                        bold: is_active,
+                        italic: false,
+                        font_id: None,
+                    },
+                );
+                self.pane_header_rects.push((frame.id.clone(), close_rect));
             }
+        } else {
+            self.pane_header_rects.clear();
         }
 
         // Pass 3: selection overlay + cursor block + preedit on the
@@ -1960,7 +2277,8 @@ impl App {
             .and_then(|id| pane_frames.iter().find(|f| f.id == id));
         if let Some(frame) = active_frame {
             let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
-            let pane_px_y = origin_y + frame.y_cells as f32 * self.cell.h;
+            let pane_px_y =
+                origin_y + frame.y_cells as f32 * self.cell.h + header_shift;
             if let Some(sel) = self.selection {
                 cells::render_selection_overlay(
                     sugarloaf,
@@ -2041,6 +2359,11 @@ impl App {
             }
         }
 
+        // Overlay re-pass dropped: with the coordinate-unit fix above
+        // (logical pixels everywhere), the strip already paints in the
+        // right place on the first pass and doesn't need an overdraw
+        // to mask cell-grid bleed.
+
         sugarloaf.render();
     }
 }
@@ -2059,12 +2382,17 @@ impl ApplicationHandler for App {
         ));
         let attrs = WindowAttributes::default()
             .with_title("kasaterm")
-            // Claude Code's footer eats ~4 rows (statusline x2, input,
-            // tokens), so 600px high left only 32 rows after padding
-            // and the bottom `bypass permissions…` line clipped. 760px
-            // gives 40+ rows at the current font/line-height and lines
-            // up with Ghostty / Terminal.app default heights.
             .with_inner_size(LogicalSize::new(1100.0, 860.0));
+        // Custom chrome: traffic-light row sits inside the content view
+        // so we can paint tabs and drag handles right next to the
+        // native buttons. OS still owns the traffic lights themselves
+        // and the resize edges — we only paint and route drag from the
+        // strip above the cell grid.
+        #[cfg(target_os = "macos")]
+        let attrs = attrs
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+            .with_fullsize_content_view(true);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -2271,15 +2599,77 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                // Pane header × close button. Catches clicks anywhere
+                // in the multi-pane workspace before we drop into the
+                // cell-grid click path.
+                if matches!(state, ElementState::Pressed) {
+                    let cx = self.cursor_px.0;
+                    let cy = self.cursor_px.1;
+                    let hit = self
+                        .pane_header_rects
+                        .iter()
+                        .find(|(_, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
+                        .map(|(id, _)| id.clone());
+                    if let Some(id) = hit {
+                        if let Some(pty) = self.pty.get(&id) {
+                            let _ = pty.send_bytes(b"exit\n");
+                        }
+                        return;
+                    }
+                }
+                // Custom chrome: tab clicks → switch active tab;
+                // "+" click → spawn a new tab (UI only for now);
+                // otherwise title-strip clicks past the traffic
+                // lights start a window drag. macOS owns the
+                // close/min/zoom buttons so clicks in their reserved
+                // x range fall through to the native handlers.
+                if matches!(state, ElementState::Pressed)
+                    && self.cursor_px.1 < TITLE_HEIGHT
+                    && self.cursor_px.0 >= TRAFFIC_LIGHT_WIDTH
+                {
+                    let (cx, cy) = self.cursor_px;
+                    let in_rect = |r: &(f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    if let Some(idx) =
+                        self.tab_rects.iter().position(in_rect)
+                    {
+                        self.switch_tab(idx);
+                        return;
+                    }
+                    if let Some(pr) = self.plus_rect {
+                        if in_rect(&pr) {
+                            self.add_tab();
+                            return;
+                        }
+                    }
+                    // Double-click on the title strip → toggle window
+                    // zoom (macOS native behavior we lost when we
+                    // turned on fullsize_content_view).
+                    let now = Instant::now();
+                    let is_double = match self.last_left_click {
+                        Some((t, (x, y)))
+                            if now.duration_since(t).as_millis() < 400
+                                && (x - cx).abs() < 5.0
+                                && (y - cy).abs() < 5.0 =>
+                        {
+                            true
+                        }
+                        _ => false,
+                    };
+                    self.last_left_click = Some((now, (cx, cy)));
+                    if is_double {
+                        window.set_maximized(!window.is_maximized());
+                        self.last_left_click = None;
+                        return;
+                    }
+                    let _ = window.drag_window();
+                    return;
+                }
                 match state {
                     ElementState::Pressed => {
-                        // Switch active pane to wherever the click
-                        // landed, then either forward the press into
-                        // the pane (mouse-reporting TUI like Claude
-                        // Code) or start a drag selection. Clicking
-                        // the inactive pane focuses it without yet
-                        // selecting (anchor == end so the release
-                        // handler clears the empty range).
                         if let Some((pane_id, col, row)) =
                             self.px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
                         {
