@@ -221,18 +221,21 @@ pub fn render_row(
     font_size: f32,
     text_baseline_offset: f32,
 ) {
-    // Background pass: emit a rect for every non-default bg run. We
-    // collapse adjacent same-color cells into one rect so a long
-    // selection highlight is one quad, not 80.
+    // Background pass: precompute the row's bg colors once, then walk
+    // runs over the cached slice. The previous version called cell_bg()
+    // twice per cell (once for the entry test, once for the run-extend
+    // test), which on a 164-col grid burned ~10k extra palette lookups
+    // per frame; the rest of the math is cheap so the cache wins.
+    let bg_row: Vec<[u8; 4]> = row.iter().map(cell_bg).collect();
     let mut col: usize = 0;
     while col < row.len() {
-        let bg = cell_bg(&row[col]);
+        let bg = bg_row[col];
         if bg == DEFAULT_BG {
             col += 1;
             continue;
         }
         let start = col;
-        while col < row.len() && cell_bg(&row[col]) == bg {
+        while col < row.len() && bg_row[col] == bg {
             col += 1;
         }
         let width = (col - start) as f32 * cell_w;

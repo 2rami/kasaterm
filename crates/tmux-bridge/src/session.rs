@@ -25,6 +25,10 @@ pub struct TmuxSession {
     /// this, vt100 defaults to 80×24 and writes from a 95-col app wrap
     /// at the wrong column, smearing characters across rows.
     pane_size: Arc<Mutex<(u16, u16)>>,
+    /// Stored so Drop can run `tmux -L <socket> kill-server` against the
+    /// same isolated socket we spawned on, without risking the user's
+    /// default-socket sessions.
+    socket_name: Option<String>,
     pub session_name: String,
     pub events: Receiver<TmuxEvent>,
     pub screens: Receiver<ScreenUpdate>,
@@ -192,6 +196,7 @@ impl TmuxSession {
             stdin: Mutex::new(stdin),
             parsers,
             pane_size,
+            socket_name: opts.socket_name.map(|s| s.to_string()),
             session_name,
             events: event_rx,
             screens: screen_rx,
@@ -238,6 +243,30 @@ impl TmuxSession {
     pub fn detach(&mut self) {
         let _ = self.send_cmd("detach-client");
         let _ = self.child.wait();
+    }
+}
+
+impl Drop for TmuxSession {
+    /// Tear down our tmux client + the server we spawned. Without this,
+    /// `tmux -L kasaterm ...` clients linger across app restarts and
+    /// the user accumulates dozens of stale processes. We only run
+    /// `kill-server` when `socket_name` is set — otherwise we'd be
+    /// shooting the user's day-to-day tmux server.
+    fn drop(&mut self) {
+        // Best effort: detach our control-mode client first so tmux
+        // closes its pipes cleanly, then kill the child if it's still
+        // alive, then nuke the isolated socket's server so the shell
+        // PIDs underneath it don't outlive the GUI.
+        let _ = self.send_cmd("detach-client");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(sock) = self.socket_name.as_deref() {
+            let _ = Command::new("tmux")
+                .args(["-L", sock, "kill-server"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 }
 
