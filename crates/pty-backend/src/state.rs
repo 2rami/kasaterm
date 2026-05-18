@@ -106,8 +106,14 @@ impl PtySession {
         // identity and scrub the iTerm-specific leftovers so the
         // detection settles on kasaterm regardless of who launched us.
         cmd.env("TERM", "xterm-256color");
-        cmd.env("TERM_PROGRAM", "kasaterm");
-        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        // Masquerade as iTerm.app so child TUIs (Claude Code, helix,
+        // etc.) treat us as a capability-rich terminal and emit OSC 52
+        // for copy-on-select. Our alacritty parser handles OSC 52
+        // correctly; iTerm-specific escapes that we don't support are
+        // either silently dropped or render as small visual noise — the
+        // tradeoff favors working clipboard integration.
+        cmd.env("TERM_PROGRAM", "iTerm.app");
+        cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
         cmd.env("COLORTERM", "truecolor");
         for k in [
             "ITERM_SESSION_ID",
