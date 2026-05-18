@@ -13,6 +13,8 @@
 //! ScreenUpdate format matches tmux-bridge's so the renderer is happy
 //! with either backend.
 
+use std::time::Instant;
+
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, WindowSize};
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::test::TermSize;
@@ -68,6 +70,14 @@ pub struct PtySession {
     /// Held so the renderer thread doesn't get GC'd; never read from
     /// after start().
     _reader_thread: std::thread::JoinHandle<()>,
+    /// PID of the shell we spawned. We walk the process tree from
+    /// here to find the active foreground command (vim, claude, etc.)
+    /// so the pane header can label itself the way iTerm does — by
+    /// running process rather than by OSC title.
+    shell_pid: Option<u32>,
+    /// (last_query_at, cached_name). Throttle the ps(1) shellout to
+    /// ~500ms so a 60Hz render loop doesn't fork-exec on every frame.
+    proc_cache: Arc<Mutex<(Instant, Option<String>)>>,
 }
 
 impl PtySession {
@@ -174,6 +184,7 @@ impl PtySession {
             .slave
             .spawn_command(cmd)
             .context("spawn shell into PTY")?;
+        let shell_pid = child.process_id();
         // We drop the slave half — the spawned child holds the only
         // fd we care about. Keeping it open in our process makes
         // close-detection unreliable.
@@ -197,6 +208,7 @@ impl PtySession {
         let listener = PtyEventForwarder {
             writer: Arc::clone(&writer_arc),
             size: Arc::clone(&size),
+            last_title: Arc::new(Mutex::new(None)),
         };
         let reader_thread = spawn_reader_thread(
             reader,
@@ -215,7 +227,61 @@ impl PtySession {
             _child: Arc::new(Mutex::new(child)),
             size,
             _reader_thread: reader_thread,
+            shell_pid,
+            proc_cache: Arc::new(Mutex::new((
+                Instant::now() - std::time::Duration::from_secs(1),
+                None,
+            ))),
         })
+    }
+
+    /// Best-effort label for what's running in this PTY *right now*.
+    /// Returns the comm name of the most recently spawned child of
+    /// our shell (typically the foreground command — vim, claude,
+    /// less, …) or falls back to the shell's own comm. ps(1) is
+    /// throttled to ~500ms so this is cheap to call from the render
+    /// loop.
+    pub fn active_process_name(&self) -> Option<String> {
+        let pid = self.shell_pid?;
+        let now = Instant::now();
+        let mut cache = self.proc_cache.lock().ok()?;
+        if now.duration_since(cache.0).as_millis() < 500 {
+            return cache.1.clone();
+        }
+        cache.0 = now;
+        let output = std::process::Command::new("ps")
+            .args(["-A", "-o", "pid=,ppid=,comm="])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&output.stdout);
+        let mut best_child: Option<(u32, String)> = None;
+        let mut shell_comm: Option<String> = None;
+        for line in s.lines() {
+            let mut parts = line.split_whitespace();
+            let row_pid = parts.next().and_then(|s| s.parse::<u32>().ok())?;
+            let row_ppid = parts.next().and_then(|s| s.parse::<u32>().ok())?;
+            let comm = parts.collect::<Vec<_>>().join(" ");
+            if row_pid == pid {
+                let name = std::path::Path::new(&comm)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&comm)
+                    .to_string();
+                shell_comm = Some(name);
+            } else if row_ppid == pid {
+                let name = std::path::Path::new(&comm)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&comm)
+                    .to_string();
+                if best_child.as_ref().is_none_or(|(p, _)| *p < row_pid) {
+                    best_child = Some((row_pid, name));
+                }
+            }
+        }
+        let resolved = best_child.map(|(_, n)| n).or(shell_comm);
+        cache.1 = resolved.clone();
+        resolved
     }
 
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
@@ -263,6 +329,13 @@ impl PtySession {
 struct PtyEventForwarder {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     size: Arc<Mutex<(u16, u16)>>,
+    /// Latest OSC 0 / OSC 2 title pushed by the shell or any TUI
+    /// running inside it. `None` after `ResetTitle` or until the
+    /// first set. The reader thread reads this on each snapshot so
+    /// the renderer's pane-header strip can reflect "✱ Claude Code",
+    /// "vim filename", current cwd, etc. — anything the inner
+    /// program decides to advertise.
+    last_title: Arc<Mutex<Option<String>>>,
 }
 
 impl Clone for PtyEventForwarder {
@@ -270,6 +343,7 @@ impl Clone for PtyEventForwarder {
         Self {
             writer: Arc::clone(&self.writer),
             size: Arc::clone(&self.size),
+            last_title: Arc::clone(&self.last_title),
         }
     }
 }
@@ -335,11 +409,19 @@ impl EventListener for PtyEventForwarder {
                     Err(e) => eprintln!("[pty-backend] clipboard open failed: {e}"),
                 }
             }
-            // Title is exposed through the snapshot; the rest of the
-            // events are UI hints with no PTY-side reply.
-            AlacEvent::Title(_)
-            | AlacEvent::ResetTitle
-            | AlacEvent::MouseCursorDirty
+            AlacEvent::Title(name) => {
+                eprintln!("[pty-backend] OSC title set: {name:?}");
+                if let Ok(mut t) = self.last_title.lock() {
+                    *t = Some(name);
+                }
+            }
+            AlacEvent::ResetTitle => {
+                if let Ok(mut t) = self.last_title.lock() {
+                    *t = None;
+                }
+            }
+            // UI hints with no PTY-side reply.
+            AlacEvent::MouseCursorDirty
             | AlacEvent::CursorBlinkingChange
             | AlacEvent::Wakeup
             | AlacEvent::Bell
@@ -368,6 +450,7 @@ fn spawn_reader_thread(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut processor: Processor<StdSyncHandler> = Processor::new();
+        let title_handle = Arc::clone(&listener.last_title);
         let mut term = make_term(cols, rows, listener);
         let mut buf = [0u8; 8192];
         let mut current_size = (cols, rows);
@@ -413,7 +496,8 @@ fn spawn_reader_thread(
             // adaptation; pushing the full grid keeps the renderer
             // happy and the per-row Arc-identity cache in cells.rs
             // still catches no-op rows.
-            let update = snapshot(&term, current_size.0, current_size.1, &pane_id);
+            let update =
+                snapshot(&term, current_size.0, current_size.1, &pane_id, &title_handle);
             if tx.send(update).is_err() {
                 return;
             }
@@ -421,7 +505,13 @@ fn spawn_reader_thread(
     })
 }
 
-fn snapshot(term: &Term<PtyEventForwarder>, cols: u16, rows: u16, pane_id: &str) -> ScreenUpdate {
+fn snapshot(
+    term: &Term<PtyEventForwarder>,
+    cols: u16,
+    rows: u16,
+    pane_id: &str,
+    last_title: &Arc<Mutex<Option<String>>>,
+) -> ScreenUpdate {
     let grid = term.grid();
     let mut dirty: Vec<(u16, Row)> = Vec::with_capacity(rows as usize);
     for r in 0..rows {
@@ -446,11 +536,11 @@ fn snapshot(term: &Term<PtyEventForwarder>, cols: u16, rows: u16, pane_id: &str)
         || mode.contains(alacritty_terminal::term::TermMode::MOUSE_DRAG)
         || mode.contains(alacritty_terminal::term::TermMode::MOUSE_MOTION);
     let mouse_sgr = mode.contains(alacritty_terminal::term::TermMode::SGR_MOUSE);
-    // Title arrives via `pop_title` which drains the pending OSC 0/2
-    // queue. We don't pop — we'd lose the title on the next snapshot.
-    // The renderer caches the last-applied title itself, so leaving
-    // None here just means "no change this frame".
-    let title: Option<String> = None;
+    // OSC 0 / OSC 2 title pushed by the inner program. Cached in the
+    // forwarder so we can return the latest value on every snapshot
+    // rather than draining alacritty's pending-title queue once and
+    // losing it.
+    let title: Option<String> = last_title.lock().ok().and_then(|t| t.clone());
     ScreenUpdate {
         pane_id: pane_id.to_string(),
         rows,

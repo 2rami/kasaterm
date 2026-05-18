@@ -26,7 +26,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{Theme, Window, WindowAttributes, WindowId};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::WindowAttributesExtMacOS;
 
@@ -258,6 +258,12 @@ struct PaneState {
     /// pane lands here. The active pane's title is applied to the
     /// window chrome.
     title: Option<String>,
+    /// Frame-dirty flag. Set whenever a PTY update lands new bytes,
+    /// the user scrolls, or focus switches; cleared after the next
+    /// render. When *every* pane is clean and no chrome-level anim
+    /// is pending, the render loop skips the GPU pass entirely —
+    /// matches Rio's `TerminalDamage::Noop` short-circuit.
+    dirty: bool,
 }
 
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
@@ -372,6 +378,37 @@ struct App {
     /// this for us when the OS owns the titlebar, but our
     /// fullsize_content_view setup means we intercept those clicks.
     last_left_click: Option<(Instant, (f32, f32))>,
+    /// Cached value of the OS window title — `window.set_title` is
+    /// cheap but not free, so we only call it when the resolved
+    /// label actually changes.
+    last_window_title: Option<String>,
+    /// Deadline keeping the Claude "busy" anim alive after the
+    /// spinner row briefly disappears from the grid. Without this,
+    /// fast redraws toggle between "✱ claude" and the live status
+    /// every frame because Claude Code repaints the spinner phase
+    /// across separate cells. 800ms of stickiness smooths it out.
+    claude_busy_until: Option<Instant>,
+    /// Most recent claude status line we lifted from the grid. Kept
+    /// so the titlebar stays on the last "✻ Brewed for Ns" frame
+    /// while Claude Code is mid-repaint and the marker row briefly
+    /// vanishes. Cleared when the busy window expires.
+    last_claude_status: Option<String>,
+    /// When we last recomputed the macOS window title. Rate-limits
+    /// `maybe_update_window_title` to ~200ms because it locks the
+    /// workspace + calls `ps -A` (process-tree lookup) on every hit,
+    /// and a wheel burst fires `RedrawRequested` 60+ times per
+    /// second.
+    last_window_title_check: Option<Instant>,
+    /// Cursor-blink phase captured at the last successful render.
+    /// Used by `render_frame`'s early-return: a blink toggle counts
+    /// as "something changed" and forces the GPU pass even when
+    /// every pane is clean.
+    last_blink_on: bool,
+    /// Chrome-level dirty flag. Set on any non-PTY state change that
+    /// needs the next frame to repaint (selection, preedit, focus
+    /// shifts, resize, mouse hover, etc.). PTY changes set the
+    /// per-pane `PaneState::dirty` instead.
+    chrome_dirty: bool,
     cursor_px: (f32, f32),
     modifiers: ModifiersState,
     wheel_accum_y: f32,
@@ -416,6 +453,12 @@ impl App {
             drag_anchor: None,
             mouse_forward_pane: None,
             last_left_click: None,
+            last_window_title: None,
+            claude_busy_until: None,
+            last_claude_status: None,
+            last_window_title_check: None,
+            last_blink_on: false,
+            chrome_dirty: true,
             cursor_px: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             wheel_accum_y: 0.0,
@@ -592,6 +635,14 @@ impl App {
         let win_screens = self.window.clone();
         let dead = self.dead_panes.clone();
         std::thread::spawn(move || {
+            // Coalesce request_redraw calls to ~60 Hz. Claude Code
+            // streaming responses can fire hundreds of ScreenUpdates
+            // per second, each triggering a redraw — winit can keep
+            // up, but the GPU + cell-render path can't, and a wheel
+            // event landing mid-burst gets stalled behind queued
+            // frames. One redraw per 16ms is plenty for a terminal.
+            let mut last_redraw = std::time::Instant::now()
+                - std::time::Duration::from_millis(100);
             while let Ok(update) = screens.recv() {
                 let mut ws = ws_screens.lock().unwrap();
                 if ws.active_pane.is_none() {
@@ -646,9 +697,27 @@ impl App {
                 pane.alt_screen = update.alt_screen;
                 pane.mouse_enabled = update.mouse_enabled;
                 pane.mouse_sgr = update.mouse_sgr;
+                // OSC 0/2 title from the inner program (Claude Code's
+                // conversation summary, vim filename, etc.). Carry it
+                // through to PaneState so the chrome header + the
+                // macOS window title see the freshest value.
+                if let Some(t) = update.title.clone() {
+                    pane.title = Some(t);
+                }
+                // Mark this pane dirty so the next render frame
+                // actually emits cells. render_frame short-circuits
+                // when every pane is clean, which is what makes
+                // wheel-scroll feel smooth during Claude Code
+                // streaming bursts: the PTY thread keeps pushing
+                // updates but the GPU only redraws once per 16ms.
+                pane.dirty = true;
                 drop(ws);
-                if let Some(w) = win_screens.as_ref() {
-                    w.request_redraw();
+                let now = std::time::Instant::now();
+                if now.duration_since(last_redraw).as_millis() >= 16 {
+                    if let Some(w) = win_screens.as_ref() {
+                        w.request_redraw();
+                    }
+                    last_redraw = now;
                 }
             }
             // Channel disconnected — the reader thread exited because
@@ -1177,9 +1246,20 @@ impl App {
             return;
         }
         let Some(tree) = self.pty_layout.as_ref() else { return; };
+        // When the workspace is split, every pane wears a per-pane
+        // header strip. That strip eats a few cell rows at the top of
+        // each pane's bounding box, so the PTY's usable grid shrinks
+        // by the same amount — otherwise claude code paints its
+        // statusline / `bypass…` row off the bottom edge.
+        let leaves = tree.leaves().len();
+        let header_cells: u16 = if leaves > 1 {
+            ((PANE_HEADER_HEIGHT / self.cell.h.max(1.0)).ceil() as u16).max(1)
+        } else {
+            0
+        };
         for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
             if let Some(sess) = self.pty.get(&id) {
-                let _ = sess.resize(w, h);
+                let _ = sess.resize(w, h.saturating_sub(header_cells).max(1));
             }
         }
         // Re-publish the layout because rect proportions may have
@@ -1502,6 +1582,160 @@ impl App {
         }
     }
 
+    /// Resolve the user-visible label for a pane: OSC 0/2 title set
+    /// by the shell or a TUI → foreground process comm → cwd. Used by
+    /// both the per-pane header strip and the single-pane native
+    /// window title so the two stay consistent.
+    /// Scan the bottom of the active pane's grid for a Braille
+    /// spinner glyph (U+2800..U+28FF). Tools like Claude Code, oh-my-
+    /// zsh's pure-prompt, npm, etc. paint these one cell at a time
+    /// to animate progress — picking the glyph straight from the
+    /// grid lets us mirror their phase in the window title without
+    /// any extra timing math. Returns None when no spinner is
+    /// currently visible.
+    /// Pull Claude Code's progress line ("✻ Brewed for 5s",
+    /// "✶ Thinking…", etc.) straight out of the cell grid. We scan
+    /// the bottom of the active pane for a row that starts with a
+    /// star/asterisk glyph and trim that row to its text. The
+    /// rendered grid is the only signal Claude Code gives us — it
+    /// doesn't push these as OSC titles — so this is how we mirror
+    /// the live status into the macOS titlebar.
+    fn active_claude_status(&self) -> Option<String> {
+        let ws = self.ws.lock().unwrap();
+        let id = ws.active_pane.as_deref()?;
+        let pane = ws.panes.get(id)?;
+        let rows = pane.cells.len();
+        let start = rows.saturating_sub(10);
+        for row in pane.cells[start..].iter() {
+            let mut text = String::new();
+            let mut has_marker = false;
+            for cell in row {
+                if cell.ch.is_empty() {
+                    text.push(' ');
+                } else {
+                    text.push_str(&cell.ch);
+                    if let Some(c) = cell.ch.chars().next() {
+                        let cp = c as u32;
+                        if (0x2731..=0x274F).contains(&cp) {
+                            has_marker = true;
+                        }
+                    }
+                }
+            }
+            if has_marker {
+                let trimmed = text.trim();
+                if trimmed.len() > 4 && trimmed.len() < 80 {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    fn active_spinner_glyph(&self) -> Option<char> {
+        let ws = self.ws.lock().unwrap();
+        let id = ws.active_pane.as_deref()?;
+        let pane = ws.panes.get(id)?;
+        let rows = pane.cells.len();
+        let start = rows.saturating_sub(8);
+        for row in &pane.cells[start..] {
+            for cell in row {
+                if let Some(c) = cell.ch.chars().next() {
+                    let cp = c as u32;
+                    // Braille spinners (npm, pure-prompt, etc.) +
+                    // Dingbats asterisks/stars (Claude Code uses
+                    // ✻/✶/✷/✸/✹/✺ as its "thinking" indicator).
+                    if (0x2800..=0x28FF).contains(&cp)
+                        || (0x2731..=0x274F).contains(&cp)
+                    {
+                        return Some(c);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Sync the macOS window title (Dock label, ⌘-Tab switcher) with
+    /// the active pane's resolved label when only one pane is open.
+    /// Skipped for multi-pane workspaces — there the per-pane header
+    /// strip carries the same information and the OS title gets
+    /// noisy as the user shuffles focus between splits.
+    fn maybe_update_window_title(&mut self) {
+        // Throttle: scroll bursts can fire RedrawRequested 60+ times
+        // per second, and every call here takes a workspace lock and
+        // may shell out to `ps` for the process name. 200ms is fast
+        // enough for "title follows focus" but cheap enough that a
+        // wheel sweep stays smooth.
+        let now = Instant::now();
+        if let Some(t) = self.last_window_title_check {
+            if now.duration_since(t).as_millis() < 200 {
+                return;
+            }
+        }
+        self.last_window_title_check = Some(now);
+        // Native window title always tracks the focused pane. In a
+        // split workspace this means macOS's Dock / ⌘-Tab label
+        // updates when the user clicks a different split — matching
+        // iTerm / Terminal.app.
+        let active = {
+            let ws = self.ws.lock().unwrap();
+            let id = ws
+                .active_pane
+                .clone()
+                .or_else(|| ws.panes.keys().next().cloned());
+            let osc = id.as_ref().and_then(|i| ws.panes.get(i)).and_then(|p| p.title.clone());
+            id.map(|i| (i, osc))
+        };
+        let Some((id, osc)) = active else { return };
+        let mut label = Self::resolve_pane_label(&self.pty, &id, osc.as_deref());
+        // Claude Code response indicator. Priority:
+        //   1. Lift Claude Code's own status line straight from the
+        //      cell grid ("✻ Brewed for 5s") so the user sees the
+        //      same words they would on the prompt — including the
+        //      live elapsed time.
+        //   2. Fallback when only a spinner glyph is detected but no
+        //      status text: cycle our own asterisk sequence
+        //      ✶ ✳ ✶ · ✽ next to the "claude" label.
+        // Note: we intentionally do NOT scrape the grid for the
+        // "✻ Brewed for Ns" status line here. iTerm-style behavior is
+        // to let the inner program drive the title via OSC 0/2 only
+        // — Claude Code sends the conversation summary that way, and
+        // the per-question status is meant to stay inside the pane.
+        // Scraping the grid would clobber the conversation title
+        // every few hundred ms with whatever Claude was rendering.
+        if self.last_window_title.as_deref() == Some(&label) {
+            return;
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.set_title(&label);
+        }
+        self.last_window_title = Some(label);
+    }
+
+    fn resolve_pane_label(
+        pty: &HashMap<String, Arc<pty_backend::PtySession>>,
+        pane_id: &str,
+        osc_title: Option<&str>,
+    ) -> String {
+        if let Some(t) = osc_title.filter(|s| !s.is_empty()) {
+            return t.to_string();
+        }
+        if let Some(name) = pty.get(pane_id).and_then(|p| p.active_process_name()) {
+            return decorate_process_name(&name);
+        }
+        std::env::current_dir()
+            .ok()
+            .map(|p| {
+                let s = p.to_string_lossy().into_owned();
+                match std::env::var("HOME").ok() {
+                    Some(home) if s.starts_with(&home) => s.replacen(&home, "~", 1),
+                    _ => s,
+                }
+            })
+            .unwrap_or_else(|| "shell".to_string())
+    }
+
     fn copy_selection(&self) {
         let Some(sel) = self.selection else { return; };
         let rows = {
@@ -1627,6 +1861,7 @@ impl App {
                 } else {
                     pane.scroll_offset = pane.scroll_offset.saturating_sub(step);
                 }
+                pane.dirty = true;
             }
         }
         if let Some(w) = &self.window {
@@ -1908,8 +2143,22 @@ impl App {
     }
 
     fn render_frame(&mut self) {
+        let t0 = Instant::now();
+        let trace = std::env::var_os("KASATERM_PROFILE").is_some();
         let now = Instant::now();
         let blink_on = self.cursor_blink_on(now);
+        // Damage gate: skip the GPU pass when nothing changed since
+        // the last frame. winit keeps showing the previous swapchain
+        // image, so the user sees the same picture without us
+        // emitting 10k+ sugarloaf calls. PTY updates flag the per-
+        // pane dirty bit; chrome events flag `self.chrome_dirty`;
+        // cursor blink phase toggles count separately.
+        let blink_changed = blink_on != self.last_blink_on;
+        let pty_dirty = self.ws.lock().unwrap().panes.values().any(|p| p.dirty);
+        if !pty_dirty && !self.chrome_dirty && !blink_changed {
+            return;
+        }
+        self.last_blink_on = blink_on;
         let Some(window) = self.window.as_ref() else { return; };
         let scale = window.scale_factor() as f32;
         let Some(sugarloaf) = self.sugarloaf.as_mut() else { return; };
@@ -2030,8 +2279,16 @@ impl App {
             cursor_visible: bool,
             title: Option<String>,
         }
+        // Hold the workspace lock across the entire render so we can
+        // `mem::take` each pane's cell grid into the PaneFrame
+        // without the PTY thread observing an empty Vec. The lock
+        // is released at the end of the function, after we restore
+        // the grids — sugarloaf.render() inside the held region
+        // pauses the PTY pump for one frame, well below the 16 ms
+        // budget.
+        let mut ws_guard = self.ws.lock().unwrap();
         let (pane_frames, active_id) = {
-            let ws = self.ws.lock().unwrap();
+            let ws = &mut *ws_guard;
             let active_id = ws.active_pane.clone();
             let leaves: Vec<(String, u16, u16, u16, u16)> =
                 if let Some(layout) = ws.layout.as_ref() {
@@ -2056,12 +2313,31 @@ impl App {
                 };
             let mut frames = Vec::with_capacity(leaves.len());
             for (id, x, y, w, h) in leaves {
-                let Some(pane) = ws.panes.get(&id) else { continue };
-                let total = pane.rows.max(1) as usize;
-                let offset = pane.scroll_offset.min(pane.history.len());
+                // Pre-fetch pane metadata under an immutable borrow,
+                // then drop it so we can take a mutable borrow to
+                // move the cell grid out without cloning. The pump
+                // thread can't observe the gap because it would need
+                // the same ws lock we already hold.
+                let (total, offset, cursor_row, cursor_col, cursor_visible, title) = {
+                    let Some(pane) = ws.panes.get(&id) else { continue };
+                    (
+                        pane.rows.max(1) as usize,
+                        pane.scroll_offset.min(pane.history.len()),
+                        pane.cursor_row,
+                        pane.cursor_col,
+                        pane.cursor_visible,
+                        pane.title.clone(),
+                    )
+                };
                 let composed: Vec<Vec<GridCell>> = if offset == 0 {
-                    pane.cells.clone()
+                    // Hot path: move (not clone) the live grid out
+                    // for rendering. ~10 000 GridCells used to be
+                    // cloned every frame; now it's a Vec pointer
+                    // swap. The grid goes back into the PaneState
+                    // after the for-loop (`mem::swap` below).
+                    std::mem::take(&mut ws.panes.get_mut(&id).unwrap().cells)
                 } else {
+                    let pane = ws.panes.get(&id).unwrap();
                     let mut out: Vec<Vec<GridCell>> = Vec::with_capacity(total);
                     let hist_start = pane.history.len() - offset;
                     for row in pane.history.iter().skip(hist_start) {
@@ -2083,10 +2359,10 @@ impl App {
                     w_cells: w,
                     h_cells: h,
                     rows: composed,
-                    cursor_row: pane.cursor_row,
-                    cursor_col: pane.cursor_col,
-                    cursor_visible: offset == 0 && pane.cursor_visible,
-                    title: pane.title.clone(),
+                    cursor_row,
+                    cursor_col,
+                    cursor_visible: offset == 0 && cursor_visible,
+                    title,
                 });
             }
             (frames, active_id)
@@ -2096,6 +2372,15 @@ impl App {
             sugarloaf.render();
             return;
         }
+
+        // Resolve every pane's display label up front so the header
+        // rendering loop doesn't need to call back into `self`
+        // (resolve_pane_label borrows self.pty, which conflicts with
+        // the long-lived sugarloaf mutable borrow).
+        let pane_labels: Vec<String> = pane_frames
+            .iter()
+            .map(|f| Self::resolve_pane_label(&self.pty, &f.id, f.title.as_deref()))
+            .collect();
 
         // Origin offset: TITLE_HEIGHT replaces the top padding so the
         // cell grid starts immediately below the custom chrome strip.
@@ -2156,7 +2441,7 @@ impl App {
         // covers the gap between the pane top and the first text row.
         if show_headers {
             self.pane_header_rects = Vec::with_capacity(pane_frames.len());
-            for frame in &pane_frames {
+            for (idx, frame) in pane_frames.iter().enumerate() {
                 let is_active = active_id.as_deref() == Some(frame.id.as_str());
                 let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
                 let pane_top = origin_y + frame.y_cells as f32 * self.cell.h;
@@ -2226,30 +2511,7 @@ impl App {
                         font_id: None,
                     },
                 );
-                // OSC 0/2 title from the shell (Claude Code session
-                // name, vim filename, etc.) takes priority. Vanilla
-                // zsh that doesn't push a title via precmd falls back
-                // to the current working directory with $HOME
-                // collapsed to "~" — matches macOS Terminal.app's
-                // default behavior.
-                let title = frame
-                    .title
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| {
-                        std::env::current_dir()
-                            .ok()
-                            .map(|p| {
-                                let s = p.to_string_lossy().into_owned();
-                                match std::env::var("HOME").ok() {
-                                    Some(home) if s.starts_with(&home) => {
-                                        s.replacen(&home, "~", 1)
-                                    }
-                                    _ => s,
-                                }
-                            })
-                            .unwrap_or_else(|| "shell".to_string())
-                    });
+                let title = pane_labels[idx].clone();
                 sugarloaf.text_mut().draw(
                     close_rect.0 + close_rect.2 + 8.0,
                     text_y,
@@ -2364,7 +2626,31 @@ impl App {
         // right place on the first pass and doesn't need an overdraw
         // to mask cell-grid bleed.
 
+        let t_emit = t0.elapsed().as_micros();
+        let t_emit = t0.elapsed().as_micros();
         sugarloaf.render();
+        if trace {
+            let t_total = t0.elapsed().as_micros();
+            eprintln!(
+                "[render] emit={t_emit}us render={t_present}us total={t_total}us frames={n}",
+                t_present = t_total - t_emit,
+                n = pane_frames.len(),
+            );
+        }
+        // Move the cell grids back and clear damage flags under the
+        // same lock we held throughout the render.
+        for frame in pane_frames {
+            if let Some(pane) = ws_guard.panes.get_mut(&frame.id) {
+                if pane.cells.is_empty() {
+                    pane.cells = frame.rows;
+                }
+            }
+        }
+        for pane in ws_guard.panes.values_mut() {
+            pane.dirty = false;
+        }
+        drop(ws_guard);
+        self.chrome_dirty = false;
     }
 }
 
@@ -2382,6 +2668,11 @@ impl ApplicationHandler for App {
         ));
         let attrs = WindowAttributes::default()
             .with_title("kasaterm")
+            // Force dark appearance so the system titlebar paints its
+            // text in light gray. Default is "follow OS", which would
+            // give black text on our dark content view and make the
+            // process-name label nearly invisible in light mode.
+            .with_theme(Some(Theme::Dark))
             .with_inner_size(LogicalSize::new(1100.0, 860.0));
         // Custom chrome: traffic-light row sits inside the content view
         // so we can paint tabs and drag handles right next to the
@@ -2391,7 +2682,7 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "macos")]
         let attrs = attrs
             .with_titlebar_transparent(true)
-            .with_title_hidden(true)
+            .with_title_hidden(false)
             .with_fullsize_content_view(true);
         let window = Arc::new(
             event_loop
@@ -2552,6 +2843,14 @@ impl ApplicationHandler for App {
     ) {
         let Some(window) = self.window.clone() else { return; };
         let Some(sugarloaf) = self.sugarloaf.as_mut() else { return; };
+        // Any winit event that *isn't* RedrawRequested counts as a
+        // chrome change for the damage gate. RedrawRequested itself
+        // never sets the flag — otherwise the early-return at the
+        // top of render_frame could never short-circuit a pure-PTY
+        // burst.
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            self.chrome_dirty = true;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -2770,6 +3069,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
+                self.maybe_update_window_title();
             }
             _ => {}
         }
@@ -2990,6 +3290,22 @@ fn find_prompt_anchor(rows: &[Vec<GridCell>]) -> Option<(u16, u16)> {
 /// Windows' bash so users with a stock setup get a working unix-style
 /// shell without configuration. Returns None to let portable-pty's
 /// `new_default_prog` pick (cmd.exe on Windows, $SHELL on Unix).
+/// Prefix well-known interactive programs with a small sigil so the
+/// pane header reads at a glance. Mirrors how the programs themselves
+/// brand their own OSC titles in other terminals (Claude Code ships
+/// "✱ Claude Code", vim/less label themselves with their name). For
+/// anything we don't have an opinion on, just return the comm as-is.
+fn decorate_process_name(comm: &str) -> String {
+    match comm {
+        "claude" => "✱ claude".to_string(),
+        "node" | "deno" | "bun" => format!("⬢ {comm}"),
+        "vim" | "nvim" => format!("⌨ {comm}"),
+        "less" | "more" => format!("☰ {comm}"),
+        "git" => format!("⎇ {comm}"),
+        _ => comm.to_string(),
+    }
+}
+
 fn resolve_default_shell() -> Option<String> {
     if let Ok(s) = std::env::var("KASATERM_SHELL") {
         if !s.is_empty() {
