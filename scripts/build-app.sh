@@ -80,9 +80,25 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Re-sign ad-hoc so macOS Gatekeeper accepts launch from Finder. Without
-# this the first run errors with "damaged or incomplete" on some setups.
-codesign --force --sign - --deep "$APP" 2>/dev/null || true
+# Sign with a stable self-signed identity when one exists, so macOS keeps
+# TCC permissions (screen recording / automation) across rebuilds instead
+# of re-prompting every time. Ad-hoc (`-`) changes the code hash on every
+# build, which macOS treats as a brand-new app. Create the identity once:
+#   Keychain Access → Certificate Assistant → Create a Certificate
+#   Name: kasaterm-dev, Type: Self-Signed Root, Certificate Type: Code Signing
+SIGN_ID="kasaterm-dev"
+# No -v: a self-signed cert is valid-but-untrusted (CSSMERR_TP_NOT_TRUSTED),
+# which -v filters out. codesign still signs with it, and TCC keys
+# permissions off the signing identity, so untrusted is fine for local use.
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
+  codesign --force --sign "$SIGN_ID" --deep "$APP" 2>/dev/null \
+    && echo "signed with '$SIGN_ID' — TCC permissions persist across rebuilds" \
+    || echo "warning: signing with '$SIGN_ID' failed; app left unsigned"
+else
+  # Fall back to ad-hoc so Gatekeeper still accepts a Finder launch.
+  codesign --force --sign - --deep "$APP" 2>/dev/null || true
+  echo "signed ad-hoc — create a '$SIGN_ID' code-signing cert to stop the permission re-prompts"
+fi
 
 # Bust the icon cache so the new .icns shows immediately in Finder /
 # Dock instead of waiting for macOS to notice on its own.

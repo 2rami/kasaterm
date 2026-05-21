@@ -71,10 +71,6 @@ const PANE_HEADER_HEIGHT: f32 = 28.0;
 // constant at 0 means every place that computed `col`/`origin_x`
 // from `WINDOW_PADDING + SIDEBAR_W` still works, no math changes.
 const SIDEBAR_W: f32 = 0.0;
-/// Height of one tab row in the sidebar.
-const SIDEBAR_TAB_H: f32 = 44.0;
-/// Padding between the sidebar's left edge and the tab rect.
-const SIDEBAR_INSET_X: f32 = 8.0;
 const SCROLLBACK_MAX: usize = 5000;
 const WHEEL_THROTTLE_MS: u64 = 8;
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
@@ -100,30 +96,6 @@ impl Default for CellGeom {
     fn default() -> Self {
         Self { w: 8.6, h: 18.0, baseline: 14.0 }
     }
-}
-
-/// One tab in the title strip. Visual data only — the heavy state
-/// (PTY map, workspace, layout) lives in `TabBackend` and gets
-/// swapped in/out of the App when the user switches tabs.
-struct TabState {
-    title: String,
-}
-
-/// All per-tab backend state that has to swap in/out when the user
-/// changes tabs. The active tab's TabBackend is "live" — its fields
-/// are inlined directly on `App` so the existing hot paths
-/// (key/mouse handlers, render_frame) keep their cheap field access.
-/// Inactive tabs sit in `App::stashed_tabs[idx]`, and the swap is a
-/// few `std::mem::replace` calls in `switch_tab`.
-struct TabBackend {
-    pty: HashMap<String, Arc<pty_backend::PtySession>>,
-    pty_layout: Option<pty_backend::PtyLayout>,
-    next_pane_id: u32,
-    autosplit_plan: Vec<pty_backend::SplitDir>,
-    autosplit_at: Option<Instant>,
-    dead_panes: Arc<Mutex<Vec<String>>>,
-    socket_handle: Option<socket::PtyBackendHandle>,
-    ws: Arc<Mutex<Workspace>>,
 }
 
 /// (col, row) anchor + end for drag selection. Both ends in cell units.
@@ -344,8 +316,6 @@ struct App {
     /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
     /// `sugarloaf` — both own a wgpu Surface, only one can present.
     gpu: Option<gpu::GpuRenderer>,
-    /// Debug one-shot guard for KASATERM_DEBUG_SCROLL.
-    dbg_scrolled: bool,
     tmux: Option<Arc<TmuxSession>>,
     /// Phase C backend. Mutually exclusive with `tmux` — exactly one
     /// is `Some` after `start_backend`. Selection driven by the
@@ -402,21 +372,6 @@ struct App {
     /// jamo through our own Composer instead of trusting macOS to
     /// queue it for us.
     hangul: hangul_ime::Composer,
-    /// Title-strip tabs. Always has at least one entry — the initial
-    /// session lives in `tabs[0]`. `active_tab` indexes into this.
-    tabs: Vec<TabState>,
-    active_tab: usize,
-    /// Backend state for every tab except the currently active one.
-    /// The active tab's backend lives directly on `App`. `Some` for
-    /// inactive tabs, `None` at the active index. Length matches
-    /// `tabs`.
-    stashed_tabs: Vec<Option<TabBackend>>,
-    /// Cached hit rects for the tab strip from the last render pass.
-    /// Mouse press uses these to decide between "click on tab N",
-    /// "click on the + button", or "title-strip drag". Stored as
-    /// (x, y, w, h) tuples in logical pixels.
-    tab_rects: Vec<(f32, f32, f32, f32)>,
-    plus_rect: Option<(f32, f32, f32, f32)>,
     /// (pane_id, close_rect) for every visible pane header. Populated
     /// by `render_frame` and consumed by the MouseInput handler so a
     /// click on the × button closes that pane.
@@ -489,7 +444,6 @@ impl App {
             window: None,
             sugarloaf: None,
             gpu: None,
-            dbg_scrolled: false,
             tmux: None,
             pty: HashMap::new(),
             pty_layout: None,
@@ -505,11 +459,6 @@ impl App {
             commit_overlay: None,
             ime_active: false,
             hangul: hangul_ime::Composer::new(),
-            tabs: vec![TabState { title: "shell".into() }],
-            active_tab: 0,
-            stashed_tabs: vec![None],
-            tab_rects: Vec::new(),
-            plus_rect: None,
             pane_header_rects: Vec::new(),
             selection: None,
             drag_anchor: None,
@@ -1540,91 +1489,6 @@ impl App {
         }
     }
 
-    /// Snapshot the active tab's backend out of `App` into a
-    /// `TabBackend`. Used by `switch_tab` and `add_tab` to stash the
-    /// current state before swapping in another.
-    fn take_active_backend(&mut self) -> TabBackend {
-        TabBackend {
-            pty: std::mem::take(&mut self.pty),
-            pty_layout: self.pty_layout.take(),
-            next_pane_id: std::mem::replace(&mut self.next_pane_id, 1),
-            autosplit_plan: std::mem::take(&mut self.autosplit_plan),
-            autosplit_at: self.autosplit_at.take(),
-            dead_panes: std::mem::replace(
-                &mut self.dead_panes,
-                Arc::new(Mutex::new(Vec::new())),
-            ),
-            socket_handle: self.socket_handle.take(),
-            ws: std::mem::replace(
-                &mut self.ws,
-                Arc::new(Mutex::new(Workspace::default())),
-            ),
-        }
-    }
-
-    /// Restore a stashed `TabBackend` into the active App fields.
-    fn install_backend(&mut self, b: TabBackend) {
-        self.pty = b.pty;
-        self.pty_layout = b.pty_layout;
-        self.next_pane_id = b.next_pane_id;
-        self.autosplit_plan = b.autosplit_plan;
-        self.autosplit_at = b.autosplit_at;
-        self.dead_panes = b.dead_panes;
-        self.socket_handle = b.socket_handle;
-        self.ws = b.ws;
-    }
-
-    /// Switch to a different tab by index. No-op when `idx` is already
-    /// active or out of range. The PTYs of the stashed tab keep
-    /// running in the background; their %output just doesn't paint
-    /// until the user switches back.
-    fn switch_tab(&mut self, idx: usize) {
-        if idx == self.active_tab || idx >= self.tabs.len() {
-            return;
-        }
-        let current = self.take_active_backend();
-        self.stashed_tabs[self.active_tab] = Some(current);
-        let next = self
-            .stashed_tabs[idx]
-            .take()
-            .expect("inactive tab must have a stashed backend");
-        self.install_backend(next);
-        self.active_tab = idx;
-        self.selection = None;
-        self.drag_anchor = None;
-        self.mouse_forward_pane = None;
-        // The new tab's PTY size is whatever it was last; resize it to
-        // the current window so reads pick up the right COLUMNS/LINES.
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-
-    /// Push a brand-new tab and switch to it. The new tab spawns a
-    /// fresh PTY immediately so the user sees a shell prompt without
-    /// having to do anything else.
-    fn add_tab(&mut self) {
-        let stash = self.take_active_backend();
-        self.stashed_tabs[self.active_tab] = Some(stash);
-        let n = self.tabs.len() + 1;
-        self.tabs.push(TabState { title: format!("tab {n}") });
-        self.stashed_tabs.push(None);
-        self.active_tab = self.tabs.len() - 1;
-        self.selection = None;
-        self.drag_anchor = None;
-        self.mouse_forward_pane = None;
-        // start_pty fills self.pty / self.ws / self.pty_layout from
-        // the empty active state we just installed.
-        if let Err(e) = self.start_pty() {
-            eprintln!("[kasaterm] new tab pty failed: {e}");
-        }
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-
     /// True when the pane has mouse reporting + SGR encoding enabled
     /// (claude code / vim / less in alt-screen). Shift-held overrides
     /// to false so the user has an iTerm-style escape hatch back to
@@ -2145,9 +2009,16 @@ impl App {
                 | Key::Named(NamedKey::ArrowLeft)
                 | Key::Named(NamedKey::ArrowRight)
         );
+        // Stash the committed syllable instead of writing it now, so it
+        // ships in the SAME write as the key's own bytes below. Two
+        // separate writes let an async TUI (claude code / Ink) submit
+        // on the trailing \r before it has applied the multibyte
+        // syllable — the last char gets dropped. One atomic write keeps
+        // "녕" and "\r" in the same stdin chunk.
+        let mut commit_prefix: Vec<u8> = Vec::new();
         if is_control_key {
             if let Some(flushed) = self.hangul.flush() {
-                self.send_bytes(flushed.as_bytes());
+                commit_prefix.extend_from_slice(flushed.as_bytes());
             }
             self.preedit.clear();
             self.in_preedit = false;
@@ -2170,7 +2041,17 @@ impl App {
             }
         }
         let bytes: Vec<u8> = match &event.logical_key {
-            Key::Named(NamedKey::Enter) => b"\r".to_vec(),
+            // Shift+Enter → ESC+CR, which claude code / Ink reads as a
+            // newline instead of submitting. Plain Enter stays \r.
+            // Terminals can't distinguish the two by default (both send
+            // \r), so we encode the modifier ourselves.
+            Key::Named(NamedKey::Enter) => {
+                if self.modifiers.shift_key() {
+                    b"\x1b\r".to_vec()
+                } else {
+                    b"\r".to_vec()
+                }
+            }
             Key::Named(NamedKey::Backspace) => b"\x7f".to_vec(),
             Key::Named(NamedKey::Tab) => b"\t".to_vec(),
             Key::Named(NamedKey::Escape) => b"\x1b".to_vec(),
@@ -2239,7 +2120,7 @@ impl App {
                         }
                     }
                     if let Some(flushed) = self.hangul.flush() {
-                        self.send_bytes(flushed.as_bytes());
+                        commit_prefix.extend_from_slice(flushed.as_bytes());
                         self.preedit.clear();
                         self.in_preedit = false;
                     }
@@ -2248,7 +2129,34 @@ impl App {
                 None => return,
             },
         };
-        self.send_bytes(&bytes);
+        if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
+            eprintln!(
+                "[send] prefix={:?} bytes={:?} preedit={:?} in_preedit={} ime_active={}",
+                String::from_utf8_lossy(&commit_prefix),
+                String::from_utf8_lossy(&bytes),
+                self.preedit,
+                self.in_preedit,
+                self.ime_active
+            );
+        }
+        if commit_prefix.is_empty() {
+            self.send_bytes(&bytes);
+        } else if is_control_key {
+            // claude code (Ink) reads stdin asynchronously and can act on
+            // a trailing control byte (\r submit, arrow nav) before it has
+            // applied the multibyte syllable in front of it — even when
+            // both arrive in one write. Send the committed syllable, let
+            // it land, then the control byte. The gap is below human
+            // perception and only happens on the (rare) control keypress.
+            self.send_bytes(&commit_prefix);
+            std::thread::sleep(std::time::Duration::from_millis(12));
+            self.send_bytes(&bytes);
+        } else {
+            // Plain text after a flush has no submit race — ship it in one
+            // write so the syllable and the next char stay together.
+            commit_prefix.extend_from_slice(&bytes);
+            self.send_bytes(&commit_prefix);
+        }
     }
 
     /// Phase 2a path. Collects every pane's live cell grid and hands
@@ -2268,21 +2176,15 @@ impl App {
             let ws = self.ws.lock().unwrap();
             ws.active_pane.clone().and_then(|id| {
                 ws.panes.get(&id).map(|pane| {
-                    // Preedit anchor: find_prompt_anchor saves us when a
-                    // TUI parks the cursor on a statusline row (Claude
-                    // Code's `/effort`), falling back to the reported
-                    // cursor for plain shells. When the cursor already
-                    // sits on the prompt row we trust cursor_col so a
-                    // trailing space the user typed isn't overwritten.
-                    // Same two-step resolve as the sugarloaf path.
-                    let prompt = find_prompt_anchor(&pane.cells);
-                    let (base_row, base_col) = match prompt {
-                        Some((pr, pc)) if pr == pane.cursor_row => {
-                            (pr, pane.cursor_col.max(pc))
-                        }
-                        Some(p) => p,
-                        None => (pane.cursor_row, pane.cursor_col),
-                    };
+                    // Preedit sits exactly on the reported PTY cursor —
+                    // that's where the next char lands. We used to bump
+                    // the column to the row's last filled cell to dodge
+                    // tail padding, but a TUI's grey placeholder ("Type
+                    // something") counts as filled, so that dragged the
+                    // composing syllable past it to the line's end. The
+                    // cursor column is already correct (incl. trailing
+                    // spaces the PTY echoes), so trust it directly.
+                    let (base_row, base_col) = (pane.cursor_row, pane.cursor_col);
                     // Until the committed syllable's echo lands (cursor
                     // still where it was at commit time), draw the
                     // committed text in front of the preedit at that
@@ -2374,24 +2276,7 @@ impl App {
     }
 
     fn render_frame_gpu(&mut self, scale: f32) {
-        // Debug one-shot: KASATERM_DEBUG_SCROLL=N scrolls the active
-        // pane up N lines on the first frame so a headless capture can
-        // reproduce the "scroll up + look at top" path.
-        if !self.dbg_scrolled {
-            if let Ok(n) = std::env::var("KASATERM_DEBUG_SCROLL") {
-                if let Ok(n) = n.parse::<i32>() {
-                    let id = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
-                    if let Some(id) = id {
-                        if let Some(pty) = self.pty.get(&id) {
-                            pty.scroll(n);
-                            self.dbg_scrolled = true;
-                        }
-                    }
-                }
-            }
-        }
-        let Some(window) = self.window.as_ref() else { return };
-        let win_size = window.inner_size();
+        let Some(_window) = self.window.as_ref() else { return };
         let cell_w_px = self.cell.w * scale;
         let cell_h_px = self.cell.h * scale;
         // Snapshot per-pane cell grids while we hold the workspace
@@ -2459,14 +2344,6 @@ impl App {
                 origin_px: s.origin_px,
             })
             .collect();
-        let win_w = win_size.width as f32 / scale;
-        let win_h = win_size.height as f32 / scale;
-        // UI work (sidebar / tab list / "+" button) intentionally
-        // dropped here — goal is terminal-only. tab_rects stay empty
-        // so hit_test never matches a tab and falls through to the
-        // terminal selection / mouse routing.
-        self.tab_rects.clear();
-        self.plus_rect = None;
         let overlay = self.gpu_overlay_snapshot();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
@@ -2476,7 +2353,6 @@ impl App {
                 eprintln!("[gpu] render error: {e:?}");
             }
         }
-        let _ = win_h;
         // Damage flags get cleared here (parity with sugarloaf path
         // below) so successive frames short-circuit on idle.
         if let Ok(mut ws) = self.ws.lock() {
@@ -2552,13 +2428,6 @@ impl App {
             0.0,
             0,
         );
-        // Sidebar / tab strip / "+" button intentionally removed —
-        // goal is terminal-only. Hit-test arrays stay empty so click
-        // routing falls straight through to the terminal selection
-        // / mouse pipeline.
-        self.tab_rects.clear();
-        self.plus_rect = None;
-
         // Snapshot the per-pane render data under one lock so the
         // sugarloaf draw calls below can run without re-locking. Each
         // entry carries the pane's resolved rect (in cells), the cell
@@ -2881,36 +2750,14 @@ impl App {
             // reported cursor row/col still points at the active
             // input position, so use it unconditionally.
             if !self.preedit.is_empty() {
-                // First-keystroke quirk: a TUI like Claude Code parks
-                // its cursor on a statusline row (\effort, etc.) while
-                // it waits for input, so the cursor_row/col we snapshot
-                // points at that statusline instead of the prompt row.
-                // The first OS IME Preedit then lands beside `/effort`
-                // off in the right margin.
-                //
-                // Scan bottom-up for a row that starts with one of the
-                // common prompt sigils (`>`, `›`, `$`, `#`) and rebind
-                // the preedit anchor to the end of *that* row. Falls
-                // back to the reported cursor when no prompt-shaped
-                // row is found so non-TUI shells (cmd.exe, plain
-                // bash) keep their existing behavior.
-                // Resolve preedit anchor in two steps. (1) find_prompt_anchor
-                // saves us when the cursor is parked on a TUI statusline
-                // (Claude Code's `/effort` row). (2) but once the user is
-                // mid-line with trailing spaces (`> 아 `), the prompt
-                // anchor sits *before* the spaces — that filter drops
-                // `" "` cells on purpose to avoid PTY tail padding. So
-                // when the cursor row matches the prompt row we trust
-                // cursor_col instead: the PTY echoes the space, so its
-                // column already accounts for it, and the next jamo
-                // lands one cell to the right of the space the user
-                // typed rather than on top of it.
-                let prompt = find_prompt_anchor(&frame.rows);
-                let (anchor_row, anchor_col) = match prompt {
-                    Some((pr, pc)) if pr == frame.cursor_row => (pr, frame.cursor_col.max(pc)),
-                    Some(p) => p,
-                    None => (frame.cursor_row, frame.cursor_col),
-                };
+                // Preedit sits exactly on the reported PTY cursor. We
+                // used to scan for a prompt sigil and snap to the row's
+                // last filled cell, but a TUI's grey placeholder ("Type
+                // something") counts as filled and dragged the composing
+                // syllable past it to the line's end. The cursor row/col
+                // already points at the active input position (incl.
+                // trailing spaces the PTY echoes), so trust it directly.
+                let (anchor_row, anchor_col) = (frame.cursor_row, frame.cursor_col);
                 let px = pane_px_x + anchor_col as f32 * self.cell.w;
                 let py = pane_px_y + anchor_row as f32 * self.cell.h;
                 if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
@@ -3314,40 +3161,17 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 }
-                // Custom chrome: tab clicks → switch active tab;
-                // "+" click → spawn a new tab (UI only for now);
-                // otherwise title-strip clicks past the traffic
-                // lights start a window drag. macOS owns the
-                // close/min/zoom buttons so clicks in their reserved
-                // x range fall through to the native handlers.
-                // Sidebar (left strip) owns tab clicks. We still let
-                // the traffic-light row through to native handling, so
-                // sidebar hit-test only applies below TITLE_HEIGHT. The
-                // remaining title-strip area past the traffic lights
-                // still starts a window drag on double-click below.
+                // Title bar (above the cell grid, right of the traffic
+                // lights) → double-click toggles maximize, a single
+                // drag moves the window — the macOS native chrome we
+                // lost when we turned on fullsize_content_view. macOS
+                // owns the traffic-light cluster, so we only act past
+                // its width.
                 if matches!(state, ElementState::Pressed)
-                    && self.cursor_px.0 < SIDEBAR_W
-                    && self.cursor_px.1 >= TITLE_HEIGHT
+                    && self.cursor_px.1 < TITLE_HEIGHT
+                    && self.cursor_px.0 > TRAFFIC_LIGHT_WIDTH
                 {
                     let (cx, cy) = self.cursor_px;
-                    let in_rect = |r: &(f32, f32, f32, f32)| {
-                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                    };
-                    if let Some(idx) =
-                        self.tab_rects.iter().position(in_rect)
-                    {
-                        self.switch_tab(idx);
-                        return;
-                    }
-                    if let Some(pr) = self.plus_rect {
-                        if in_rect(&pr) {
-                            self.add_tab();
-                            return;
-                        }
-                    }
-                    // Double-click on the title strip → toggle window
-                    // zoom (macOS native behavior we lost when we
-                    // turned on fullsize_content_view).
                     let now = Instant::now();
                     let is_double = match self.last_left_click {
                         Some((t, (x, y)))
@@ -3470,6 +3294,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.forward_key(&event);
+            }
+            WindowEvent::DroppedFile(path) => {
+                // Drag-and-drop → type the file's shell-quoted path into
+                // the active pane (iTerm behavior). claude code reads an
+                // image path dropped this way and attaches it. The
+                // trailing space separates it from whatever the user
+                // types next. Single-quote so spaces in the path stay
+                // one token; embedded quotes get the '\'' escape.
+                let p = path.to_string_lossy();
+                let quoted = format!("'{}' ", p.replace('\'', "'\\''"));
+                self.send_bytes(quoted.as_bytes());
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
@@ -3640,52 +3475,6 @@ fn locate_shim_binary() -> Option<std::path::PathBuf> {
     // dev fallback: target/debug/tmux when running via `cargo run`
     // from somewhere odd. current_exe usually already points there
     // but be defensive.
-    None
-}
-
-/// Find a prompt-shaped row in the visible grid and return
-/// `(row, col_just_past_last_text)` for it. Used as the preedit anchor
-/// when the snapshot cursor is parked on an unrelated statusline (a
-/// Claude Code / alt-screen TUI quirk on first-keystroke IME activation
-/// — the IME fires Preedit before any output moves the cursor back to
-/// the prompt row, so we can't trust cursor_row/col yet).
-fn find_prompt_anchor(rows: &[Vec<GridCell>]) -> Option<(u16, u16)> {
-    // Bottom-up: claude code, helix, and most REPLs put the prompt
-    // on the last few visible rows. We stop at the first match so a
-    // history line that happens to start with `>` doesn't outrank the
-    // live prompt.
-    for (r, row) in rows.iter().enumerate().rev() {
-        let first_non_blank = row.iter().position(|c| !c.ch.is_empty() && c.ch != " ");
-        let Some(i) = first_non_blank else { continue };
-        let ch = row[i].ch.as_str();
-        let is_prompt = matches!(ch, ">" | "›" | "❯" | "$" | "#" | "λ");
-        if !is_prompt {
-            continue;
-        }
-        // Width-aware last-filled tracker. alacritty marks wide-char
-        // right halves with an empty `ch`, so a naive `rposition`
-        // returns the wide LEFT cell and the preedit anchor lands one
-        // cell short — the box visually clips into the syllable next
-        // to it. Bump by 2 for any CJK-range first codepoint, by 1
-        // otherwise. Falls back to the column right after the prompt
-        // sigil when the prompt is empty.
-        let last_advance = row
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| !c.ch.is_empty() && c.ch != " ")
-            .last()
-            .map(|(idx, c)| {
-                let wide = c
-                    .ch
-                    .chars()
-                    .next()
-                    .is_some_and(|ch| (ch as u32) >= 0x1100);
-                (idx + if wide { 2 } else { 1 }) as u16
-            })
-            .unwrap_or(0);
-        let col = last_advance.max((i as u16) + 2);
-        return Some((r as u16, col));
-    }
     None
 }
 
