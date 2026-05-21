@@ -165,6 +165,13 @@ impl PtySession {
             // chain into one literal entry and breaks every lookup.
             let sep = if cfg!(windows) { ';' } else { ':' };
             cmd.env("PATH", format!("{shim_dir}{sep}{parent_path}"));
+            // Point zsh at the shim dir's rc files (written by
+            // install_tmux_shim). They source the user's real rc first,
+            // then re-prepend the shim dir to PATH — so it survives
+            // brew's zprofile prepend and `tmux` resolves to our shim.
+            // zsh-only; other shells ignore ZDOTDIR and use the PATH
+            // prepend above.
+            cmd.env("ZDOTDIR", &shim_dir);
         }
         if let Ok(fake_tmux) = std::env::var("KASATERM_TMUX_SHIM_TMUX") {
             cmd.env("TMUX", fake_tmux);
