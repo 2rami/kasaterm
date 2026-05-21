@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "app/kasaterm",
     "crates/agent-socket",
+    "crates/cell-renderer",
     "crates/hangul-ime",
     "crates/pty-backend",
     "crates/tmux-bridge",

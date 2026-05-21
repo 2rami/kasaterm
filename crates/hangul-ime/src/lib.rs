@@ -1,7 +1,7 @@
-//! Minimal in-app Hangul input automaton (두벌식, no consonant/vowel
-//! cluster combining yet). Bypasses ibus/winit IME entirely — we read
-//! raw key chars and compose syllables ourselves. Sufficient for the
-//! WSLg + IME blocker; real product will extend with cluster jamo.
+//! Minimal in-app Hangul input automaton (두벌식). Bypasses ibus/winit
+//! IME entirely — we read raw key chars and compose syllables ourselves.
+//! Supports compound jongseong (ㄺ ㄻ ㄼ ㄳ ㄵ ㄶ ㅀ ㅄ ㄽ ㄾ ㄿ) and the
+//! seven standard compound vowels (ㅘ ㅙ ㅚ ㅝ ㅞ ㅟ ㅢ).
 
 const CHO: [char; 19] = [
     'ㄱ', 'ㄲ', 'ㄴ', 'ㄷ', 'ㄸ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅃ', 'ㅅ',
@@ -32,6 +32,50 @@ fn jung_idx(c: char) -> Option<usize> {
 }
 fn jong_idx(c: char) -> Option<usize> {
     JONG.iter().position(|&x| x == Some(c))
+}
+
+/// Standard 두벌식 jongseong cluster combinations. Given the current
+/// jongseong index and a newly typed consonant's *jong* index, return
+/// the composed cluster's jong index. Mirrors the KS X 5002 table the
+/// platform IMEs use, so "맑" / "뷁" / "값" / "않" compose the way the
+/// user expects from macOS / IBus.
+fn compose_jong(head: usize, tail: usize) -> Option<usize> {
+    Some(match (head, tail) {
+        (1, 19) => 3,    // ㄱ + ㅅ → ㄳ
+        (4, 22) => 5,    // ㄴ + ㅈ → ㄵ
+        (4, 27) => 6,    // ㄴ + ㅎ → ㄶ
+        (8, 1) => 9,     // ㄹ + ㄱ → ㄺ
+        (8, 16) => 10,   // ㄹ + ㅁ → ㄻ
+        (8, 17) => 11,   // ㄹ + ㅂ → ㄼ
+        (8, 19) => 12,   // ㄹ + ㅅ → ㄽ
+        (8, 25) => 13,   // ㄹ + ㅌ → ㄾ
+        (8, 26) => 14,   // ㄹ + ㅍ → ㄿ
+        (8, 27) => 15,   // ㄹ + ㅎ → ㅀ
+        (17, 19) => 18,  // ㅂ + ㅅ → ㅄ
+        _ => return None,
+    })
+}
+
+/// Inverse of `compose_jong`. When a vowel arrives after a cluster
+/// jongseong, the *tail* consonant peels off to become the next
+/// syllable's choseong, while the *head* stays as the previous
+/// syllable's jongseong ("맑" + ㅏ → "말" + "가"). Returns
+/// (kept_jong_idx, peeled_cho_idx).
+fn decompose_jong(j: usize) -> Option<(usize, usize)> {
+    Some(match j {
+        3 => (1, 9),    // ㄳ → ㄱ + ㅅ(cho 9)
+        5 => (4, 12),   // ㄵ → ㄴ + ㅈ
+        6 => (4, 18),   // ㄶ → ㄴ + ㅎ
+        9 => (8, 0),    // ㄺ → ㄹ + ㄱ
+        10 => (8, 6),   // ㄻ → ㄹ + ㅁ
+        11 => (8, 7),   // ㄼ → ㄹ + ㅂ
+        12 => (8, 9),   // ㄽ → ㄹ + ㅅ
+        13 => (8, 16),  // ㄾ → ㄹ + ㅌ
+        14 => (8, 17),  // ㄿ → ㄹ + ㅍ
+        15 => (8, 18),  // ㅀ → ㄹ + ㅎ
+        18 => (17, 9),  // ㅄ → ㅂ + ㅅ
+        _ => return None,
+    })
 }
 
 fn syllable(cho: usize, jung: usize, jong: usize) -> char {
@@ -165,11 +209,18 @@ impl Composer {
     fn feed_vowel(&mut self, v: usize) -> Option<String> {
         match (self.buf.cho, self.buf.jung, self.buf.jong) {
             (Some(c), Some(j), Some(jong)) => {
-                // LVT + V → split: commit (c,j,0), start (jong-as-cho, v).
-                let new_cho = JONG[jong]
-                    .and_then(cho_idx)
-                    .unwrap_or(11); // ㅇ fallback
-                let prev = syllable(c, j, 0).to_string();
+                // LVT + V split. If the jongseong is a cluster ("맑" +
+                // ㅏ), keep the head consonant as the jong of the
+                // committed syllable and peel the *tail* off as the
+                // next cho ("말" + "가"). Otherwise the entire jong
+                // moves to the next syllable's cho (existing path).
+                let (prev_jong, new_cho) = if let Some((kept, peeled)) = decompose_jong(jong) {
+                    (kept, peeled)
+                } else {
+                    let cho = JONG[jong].and_then(cho_idx).unwrap_or(11);
+                    (0, cho)
+                };
+                let prev = syllable(c, j, prev_jong).to_string();
                 self.buf = Buffer {
                     cho: Some(new_cho),
                     jung: Some(v),
@@ -260,8 +311,18 @@ impl Composer {
                     prev
                 }
             }
-            (Some(_), Some(_), Some(_)) => {
-                // already complete syllable, new consonant — commit, start new
+            (Some(_), Some(_), Some(head)) => {
+                // LVT + cons. Try to extend the jongseong into a
+                // cluster first ("말" + ㄱ → "맑"). The platform IME
+                // keeps composing until the user types a vowel or a
+                // cluster that doesn't exist, so we mirror that.
+                if let Some(tail) = jong {
+                    if let Some(combined) = compose_jong(head, tail) {
+                        self.buf.jong = Some(combined);
+                        return None;
+                    }
+                }
+                // No cluster — commit current syllable, start new.
                 let prev = self.buf.flush();
                 if let Some(c) = cho {
                     self.buf.cho = Some(c);
@@ -357,6 +418,53 @@ mod tests {
                 "preedit should be non-empty after {keys:?}"
             );
         }
+    }
+
+    #[test]
+    fn akfr_makes_맑() {
+        // ㅁ + ㅏ + ㄹ + ㄱ → 맑 (cluster jongseong ㄺ).
+        let mut c = Composer::new();
+        for ch in "akfr".chars() {
+            c.feed(dubeolsik(ch).unwrap());
+        }
+        assert_eq!(c.preedit().as_deref(), Some("맑"));
+        assert_eq!(c.flush().as_deref(), Some("맑"));
+    }
+
+    #[test]
+    fn akfrk_splits_to_말가() {
+        // 맑 + ㅏ → 말 + 가 (cluster peels: ㄹ stays, ㄱ → next cho).
+        let mut c = Composer::new();
+        let mut out = String::new();
+        for ch in "akfrk".chars() {
+            if let Some(s) = c.feed(dubeolsik(ch).unwrap()) {
+                out.push_str(&s);
+            }
+        }
+        if let Some(s) = c.flush() {
+            out.push_str(&s);
+        }
+        assert_eq!(out, "말가");
+    }
+
+    #[test]
+    fn rkqt_makes_값() {
+        // ㄱ + ㅏ + ㅂ + ㅅ → 값 (cluster ㅄ).
+        let mut c = Composer::new();
+        for ch in "rkqt".chars() {
+            c.feed(dubeolsik(ch).unwrap());
+        }
+        assert_eq!(c.preedit().as_deref(), Some("값"));
+    }
+
+    #[test]
+    fn qnpfr_makes_뷁() {
+        // ㅂ + ㅜㅔ(ㅞ) + ㄹㄱ(ㄺ) → 뷁
+        let mut c = Composer::new();
+        for ch in "qnpfr".chars() {
+            c.feed(dubeolsik(ch).unwrap());
+        }
+        assert_eq!(c.preedit().as_deref(), Some("뷁"));
     }
 
     #[test]

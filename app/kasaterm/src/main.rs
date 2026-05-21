@@ -6,6 +6,7 @@
 //! cursor blink, OSC titles, multi-pane render + focus routing.
 
 mod cells;
+mod gpu;
 mod socket;
 
 use anyhow::Result;
@@ -60,13 +61,20 @@ const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
 /// un-split window renders no header at all (matches the iTerm
 /// behavior the user pointed at).
 const PANE_HEADER_HEIGHT: f32 = 28.0;
-/// One tab's slot width in the title strip. Tabs flow left-to-right
-/// starting just past the traffic lights.
-const TAB_WIDTH: f32 = 180.0;
-/// "+" new-tab button width on the right of the tab list.
-const TAB_PLUS_WIDTH: f32 = 44.0;
-/// Vertical inset for tab rects inside the title strip (top + bottom).
-const TAB_VERTICAL_INSET: f32 = 4.0;
+/// Left sidebar width in logical pixels. Hosts the vertical tab list
+/// (one row per tab) plus the new-tab "+" button. The cell grid origin
+/// shifts right by this amount so pane contents never overlap the
+/// sidebar. Sidebar is always shown — including single-tab sessions —
+/// so the layout doesn't reflow when a second tab appears.
+// UI sidebar/tab work was peeled off — terminal fills the full
+// window minus the macOS titlebar / WINDOW_PADDING. Keeping the
+// constant at 0 means every place that computed `col`/`origin_x`
+// from `WINDOW_PADDING + SIDEBAR_W` still works, no math changes.
+const SIDEBAR_W: f32 = 0.0;
+/// Height of one tab row in the sidebar.
+const SIDEBAR_TAB_H: f32 = 44.0;
+/// Padding between the sidebar's left edge and the tab rect.
+const SIDEBAR_INSET_X: f32 = 8.0;
 const SCROLLBACK_MAX: usize = 5000;
 const WHEEL_THROTTLE_MS: u64 = 8;
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
@@ -123,6 +131,24 @@ struct TabBackend {
 struct Selection {
     anchor: (u16, u16),
     end: (u16, u16),
+}
+
+/// Snapshot of every field `paint_gpu_overlays` reads. Built before
+/// we hand a `&mut gpu::GpuRenderer` to the painter so the borrow
+/// checker sees the snapshot and the mutable borrow as independent.
+struct GpuOverlay {
+    cell_w: f32,
+    cell_h: f32,
+    pad_x: f32,
+    pad_y: f32,
+    cursor_row: u16,
+    cursor_col: u16,
+    cursor_visible: bool,
+    cols: u16,
+    blink_on: bool,
+    preedit: String,
+    font_size: f32,
+    selection: Option<Selection>,
 }
 
 /// Normalise so (start.row, start.col) <= (end.row, end.col) in reading
@@ -298,6 +324,11 @@ impl Workspace {
 struct App {
     window: Option<Arc<Window>>,
     sugarloaf: Option<Sugarloaf<'static>>,
+    /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
+    /// `sugarloaf` — both own a wgpu Surface, only one can present.
+    gpu: Option<gpu::GpuRenderer>,
+    /// Debug one-shot guard for KASATERM_DEBUG_SCROLL.
+    dbg_scrolled: bool,
     tmux: Option<Arc<TmuxSession>>,
     /// Phase C backend. Mutually exclusive with `tmux` — exactly one
     /// is `Some` after `start_backend`. Selection driven by the
@@ -429,6 +460,8 @@ impl App {
         Self {
             window: None,
             sugarloaf: None,
+            gpu: None,
+            dbg_scrolled: false,
             tmux: None,
             pty: HashMap::new(),
             pty_layout: None,
@@ -497,6 +530,12 @@ impl App {
     /// Solid for `BLINK_PAUSE_AFTER_INPUT_MS` after any input event, then
     /// toggles every `BLINK_HALF_PERIOD_MS`.
     fn cursor_blink_on(&self, now: Instant) -> bool {
+        // Debug: KASATERM_NOBLINK=1 keeps the cursor solid so a
+        // screenshot can verify cursor position/visibility without
+        // racing the blink phase.
+        if std::env::var_os("KASATERM_NOBLINK").is_some() {
+            return true;
+        }
         let since_input = now.saturating_duration_since(self.last_input_at);
         if since_input.as_millis() < BLINK_PAUSE_AFTER_INPUT_MS as u128 {
             return true;
@@ -662,14 +701,18 @@ impl App {
         let win_screens = self.window.clone();
         let dead = self.dead_panes.clone();
         std::thread::spawn(move || {
-            // Coalesce request_redraw calls to ~60 Hz. Claude Code
-            // streaming responses can fire hundreds of ScreenUpdates
-            // per second, each triggering a redraw — winit can keep
-            // up, but the GPU + cell-render path can't, and a wheel
-            // event landing mid-burst gets stalled behind queued
-            // frames. One redraw per 16ms is plenty for a terminal.
-            let mut last_redraw = std::time::Instant::now()
-                - std::time::Duration::from_millis(100);
+            // winit's `request_redraw` is itself idempotent — repeated
+            // calls within one frame coalesce into a single
+            // RedrawRequested. The previous code added a 16ms throttle
+            // on top of that, which had a sharp edge: a *single*
+            // ScreenUpdate (the user hitting space, echoed once by the
+            // PTY) that landed inside the 16ms window would be
+            // dropped, and nothing would fire the next redraw until
+            // the *next* update arrived — which for a space character
+            // could be ~never. Result was a ~1s perceived cursor lag
+            // after spacebar. Letting winit own the coalescing keeps
+            // streaming-burst CPU bounded while making every dirty
+            // frame visible.
             while let Ok(update) = screens.recv() {
                 let mut ws = ws_screens.lock().unwrap();
                 if ws.active_pane.is_none() {
@@ -692,32 +735,9 @@ impl App {
                         *dst = row;
                     }
                 }
-                // Shift detection on the pty side too — alacritty emits
-                // the full grid each frame, so this catches scroll runs
-                // (matches how the tmux branch promotes scrolled-off
-                // rows into the history ring).
-                if !update.alt_screen
-                    && !pane.prev_cells.is_empty()
-                    && pane.prev_cells.len() == pane.cells.len()
-                {
-                    let n = pane.prev_cells.len();
-                    let mut shifted = 0usize;
-                    for k in 1..n {
-                        if pane.prev_cells[k..] == pane.cells[..n - k] {
-                            shifted = k;
-                            break;
-                        }
-                    }
-                    if shifted > 0 {
-                        for row in &pane.prev_cells[..shifted] {
-                            pane.history.push_back(row.clone());
-                        }
-                        while pane.history.len() > SCROLLBACK_MAX {
-                            pane.history.pop_front();
-                        }
-                    }
-                }
-                pane.prev_cells = pane.cells.clone();
+                // Shift detection on the pty side is retired — alacritty handles
+                // scrollback natively via display_offset. Hand-rolled detection
+                // breaks scroll-region TUIs (like Claude Code) when they write to sync.
                 pane.cursor_row = update.cursor_row;
                 pane.cursor_col = update.cursor_col;
                 pane.cursor_visible = update.cursor_visible;
@@ -739,12 +759,8 @@ impl App {
                 // updates but the GPU only redraws once per 16ms.
                 pane.dirty = true;
                 drop(ws);
-                let now = std::time::Instant::now();
-                if now.duration_since(last_redraw).as_millis() >= 16 {
-                    if let Some(w) = win_screens.as_ref() {
-                        w.request_redraw();
-                    }
-                    last_redraw = now;
+                if let Some(w) = win_screens.as_ref() {
+                    w.request_redraw();
                 }
             }
             // Channel disconnected — the reader thread exited because
@@ -765,7 +781,7 @@ impl App {
     fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
         let (cols, rows) = self.window_cells();
-        let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
+        let cwd = resolve_initial_cwd();
         // Export the agent-socket path BEFORE the first PtySession
         // spawn so the initial shell inherits a working
         // KASATERM_SOCKET_PATH. start_socket_pty (called below) binds
@@ -854,7 +870,7 @@ impl App {
     fn start_tmux(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before tmux");
         let (cols, rows) = self.window_cells();
-        let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
+        let cwd = resolve_initial_cwd();
         let tmux = TmuxSession::start(StartOptions {
             cwd: cwd.as_deref(),
             socket_name: Some("kasaterm"),
@@ -1165,7 +1181,7 @@ impl App {
         // The WINDOW_PADDING offset must match render_frame's origin —
         // both the grid and the click reuse it so the math stays
         // consistent on the boundary cells.
-        let col = ((px - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as u16;
+        let col = ((px - SIDEBAR_W - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as u16;
         let row = ((py - TITLE_HEIGHT).max(0.0) / self.cell.h).floor() as u16;
         if let Some(layout) = ws.layout.as_ref() {
             for leaf in layout.leaves() {
@@ -1228,7 +1244,7 @@ impl App {
         let scale = window.scale_factor() as f32;
         let raw_lw = size.width as f32 / scale;
         let raw_lh = size.height as f32 / scale;
-        let lw = (raw_lw - 2.0 * WINDOW_PADDING).max(0.0);
+        let lw = (raw_lw - SIDEBAR_W - 2.0 * WINDOW_PADDING).max(0.0);
         // Top: TITLE_HEIGHT (chrome strip). Bottom: WINDOW_PADDING. The
         // asymmetry is intentional — the strip replaces the top padding.
         let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING).max(0.0);
@@ -1315,7 +1331,7 @@ impl App {
         // rect, so the initial cols/rows here only matters for the
         // first bytes the shell prints before SIGWINCH lands.
         let (win_cols, win_rows) = self.window_cells();
-        let cwd = std::env::current_dir().ok().and_then(|p| p.to_str().map(String::from));
+        let cwd = resolve_initial_cwd();
         let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
@@ -1879,16 +1895,29 @@ impl App {
             }
             return;
         }
-        // Normal screen: scroll the targeted pane's history.
-        let step = lines.unsigned_abs().min(8) as usize;
-        if let (Some(id), Ok(mut ws)) = (target_pane_id, self.ws.lock()) {
-            if let Some(pane) = ws.panes.get_mut(&id) {
-                if lines > 0 {
-                    pane.scroll_offset = (pane.scroll_offset + step).min(hist_len);
-                } else {
-                    pane.scroll_offset = pane.scroll_offset.saturating_sub(step);
+        // Normal screen scrollback. PTY backend delegates to
+        // alacritty's own scrollback (display_offset) — it tracks
+        // scroll-region TUIs (claude code's pinned input) correctly,
+        // unlike the old frame-diff shift heuristic. tmux backend
+        // keeps the local history composition.
+        let step = lines.unsigned_abs().min(8) as i32;
+        let _ = hist_len;
+        if let Some(id) = target_pane_id.as_deref() {
+            if self.tmux.is_some() {
+                if let Ok(mut ws) = self.ws.lock() {
+                    if let Some(pane) = ws.panes.get_mut(id) {
+                        let s = step as usize;
+                        if lines > 0 {
+                            pane.scroll_offset = (pane.scroll_offset + s).min(hist_len);
+                        } else {
+                            pane.scroll_offset = pane.scroll_offset.saturating_sub(s);
+                        }
+                        pane.dirty = true;
+                    }
                 }
-                pane.dirty = true;
+            } else if let Some(pty) = self.pty.get(id) {
+                // Positive `lines` = scroll up = toward older history.
+                pty.scroll(if lines > 0 { step } else { -step });
             }
         }
         if let Some(w) = &self.window {
@@ -2169,6 +2198,219 @@ impl App {
         self.send_bytes(&bytes);
     }
 
+    /// Phase 2a path. Collects every pane's live cell grid and hands
+    /// it to the cell-renderer pipeline. Chrome (sidebar, tabs,
+    /// headers, cursor block, selection, preedit) is intentionally
+    /// not drawn yet — Phase 2b+ will reattach those via the same
+    /// pipeline / atlas.
+    /// Self-only snapshot used by `paint_gpu_overlays`. Built before
+    /// we borrow `self.gpu` mutably so the renderer pass can run
+    /// without a re-entrant `&self` read. All coordinates here are
+    /// already cell-space — the renderer-side helper applies cell
+    /// metric multiplication.
+    fn gpu_overlay_snapshot(&self) -> GpuOverlay {
+        let snap = {
+            let ws = self.ws.lock().unwrap();
+            ws.active_pane.clone().and_then(|id| {
+                ws.panes.get(&id).map(|pane| {
+                    (
+                        pane.cursor_row,
+                        pane.cursor_col,
+                        pane.cursor_visible,
+                        pane.cells.first().map(|r| r.len()).unwrap_or(80) as u16,
+                    )
+                })
+            })
+        };
+        let (cursor_row, cursor_col, cursor_visible, cols) =
+            snap.unwrap_or((0, 0, false, 80));
+        GpuOverlay {
+            cell_w: self.cell.w,
+            cell_h: self.cell.h,
+            pad_x: WINDOW_PADDING + SIDEBAR_W,
+            pad_y: TITLE_HEIGHT,
+            cursor_row,
+            cursor_col,
+            cursor_visible,
+            cols,
+            blink_on: self.cursor_blink_on(Instant::now()),
+            preedit: self.preedit.clone(),
+            font_size: self.font_size,
+            selection: self.selection,
+        }
+    }
+
+    /// Phase 2d overlays — pure free function on the snapshot so it
+    /// doesn't fight a mutable borrow on `self.gpu`.
+    fn paint_gpu_overlays(g: &mut gpu::GpuRenderer, ov: &GpuOverlay) {
+        if ov.cursor_visible && ov.blink_on && ov.preedit.is_empty() {
+            let cx = ov.pad_x + ov.cursor_col as f32 * ov.cell_w;
+            let cy = ov.pad_y + ov.cursor_row as f32 * ov.cell_h;
+            let mut c = cells::ITERM_CURSOR;
+            c[3] = 140; // ~0.55 alpha
+            g.rect(cx, cy, ov.cell_w, ov.cell_h, c);
+        }
+        if !ov.preedit.is_empty() {
+            let chars = ov.preedit.chars().count().max(1) as f32;
+            let w = chars * ov.cell_w * 2.0;
+            let px = ov.pad_x + ov.cursor_col as f32 * ov.cell_w;
+            let py = ov.pad_y + ov.cursor_row as f32 * ov.cell_h;
+            g.rect(px, py, w, ov.cell_h, cells::DEFAULT_BG);
+            g.rect(px, py + ov.cell_h - 2.0, w, 2.0, cells::ITERM_CURSOR);
+            g.draw_text(
+                px,
+                py,
+                &ov.preedit,
+                gpu::DrawOpts {
+                    font_size: ov.font_size,
+                    color: cells::ITERM_CURSOR,
+                    bold: false,
+                    italic: false,
+                },
+            );
+        }
+        if let Some(sel) = ov.selection {
+            let (start, stop) = if (sel.anchor.1, sel.anchor.0) <= (sel.end.1, sel.end.0) {
+                (sel.anchor, sel.end)
+            } else {
+                (sel.end, sel.anchor)
+            };
+            let color = cells::ITERM_SELECTION;
+            if start.1 == stop.1 {
+                let x = ov.pad_x + start.0 as f32 * ov.cell_w;
+                let y = ov.pad_y + start.1 as f32 * ov.cell_h;
+                let w = (stop.0 - start.0 + 1) as f32 * ov.cell_w;
+                g.rect(x, y, w, ov.cell_h, color);
+            } else {
+                let x = ov.pad_x + start.0 as f32 * ov.cell_w;
+                let y = ov.pad_y + start.1 as f32 * ov.cell_h;
+                let row_w = (ov.cols - start.0) as f32 * ov.cell_w;
+                g.rect(x, y, row_w, ov.cell_h, color);
+                for r in (start.1 + 1)..stop.1 {
+                    let yy = ov.pad_y + r as f32 * ov.cell_h;
+                    g.rect(ov.pad_x, yy, ov.cols as f32 * ov.cell_w, ov.cell_h, color);
+                }
+                let yy = ov.pad_y + stop.1 as f32 * ov.cell_h;
+                let last_w = (stop.0 + 1) as f32 * ov.cell_w;
+                g.rect(ov.pad_x, yy, last_w, ov.cell_h, color);
+            }
+        }
+    }
+
+    fn render_frame_gpu(&mut self, scale: f32) {
+        // Debug one-shot: KASATERM_DEBUG_SCROLL=N scrolls the active
+        // pane up N lines on the first frame so a headless capture can
+        // reproduce the "scroll up + look at top" path.
+        if !self.dbg_scrolled {
+            if let Ok(n) = std::env::var("KASATERM_DEBUG_SCROLL") {
+                if let Ok(n) = n.parse::<i32>() {
+                    let id = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
+                    if let Some(id) = id {
+                        if let Some(pty) = self.pty.get(&id) {
+                            pty.scroll(n);
+                            self.dbg_scrolled = true;
+                        }
+                    }
+                }
+            }
+        }
+        let Some(window) = self.window.as_ref() else { return };
+        let win_size = window.inner_size();
+        let cell_w_px = self.cell.w * scale;
+        let cell_h_px = self.cell.h * scale;
+        // Snapshot per-pane cell grids while we hold the workspace
+        // lock so the render call below can run without re-locking
+        // (matches the sugarloaf path's design).
+        struct PaneSlot {
+            rows: Vec<Vec<GridCell>>,
+            origin_px: (f32, f32),
+        }
+        let pad_px = (WINDOW_PADDING + SIDEBAR_W) * scale;
+        let title_px = TITLE_HEIGHT * scale;
+        let slots: Vec<PaneSlot> = {
+            let ws = self.ws.lock().unwrap();
+            let leaves: Vec<(String, u16, u16)> = if let Some(layout) = ws.layout.as_ref() {
+                layout
+                    .leaves()
+                    .into_iter()
+                    .filter_map(|n| match n {
+                        Layout::Pane { id, x, y, .. } => Some((format!("%{id}"), *x, *y)),
+                        _ => None,
+                    })
+                    .collect()
+            } else {
+                match ws.panes.iter().next() {
+                    Some((id, _)) => vec![(id.clone(), 0, 0)],
+                    None => Vec::new(),
+                }
+            };
+            let mut out = Vec::new();
+            for (id, x_cells, y_cells) in leaves {
+                let Some(pane) = ws.panes.get(&id) else { continue };
+                // pane.cells already holds the correct view: the PTY
+                // backend snapshots through alacritty's display_offset,
+                // so a scrolled-up frame arrives here pre-composed with
+                // real scrollback (scroll-region TUIs included). Just
+                // normalise each row to the current width so the GPU
+                // pipeline emits exactly `cols` cells per row.
+                let cols_now = pane.cols.max(1) as usize;
+                let normalise = |row: &Vec<GridCell>| -> Vec<GridCell> {
+                    let mut r = row.clone();
+                    if r.len() < cols_now {
+                        r.resize(cols_now, GridCell::blank());
+                    } else if r.len() > cols_now {
+                        r.truncate(cols_now);
+                    }
+                    r
+                };
+                let composed: Vec<Vec<GridCell>> =
+                    pane.cells.iter().map(normalise).collect();
+                let origin_px = (
+                    pad_px + x_cells as f32 * cell_w_px,
+                    title_px + y_cells as f32 * cell_h_px,
+                );
+                out.push(PaneSlot {
+                    rows: composed,
+                    origin_px,
+                });
+            }
+            out
+        };
+        let slot_views: Vec<gpu::PaneSlot<'_>> = slots
+            .iter()
+            .map(|s| gpu::PaneSlot {
+                rows: &s.rows,
+                origin_px: s.origin_px,
+            })
+            .collect();
+        let win_w = win_size.width as f32 / scale;
+        let win_h = win_size.height as f32 / scale;
+        // UI work (sidebar / tab list / "+" button) intentionally
+        // dropped here — goal is terminal-only. tab_rects stay empty
+        // so hit_test never matches a tab and falls through to the
+        // terminal selection / mouse routing.
+        self.tab_rects.clear();
+        self.plus_rect = None;
+        let overlay = self.gpu_overlay_snapshot();
+        if let Some(g) = self.gpu.as_mut() {
+            g.clear_chrome();
+            g.draw_cells(&slot_views);
+            Self::paint_gpu_overlays(g, &overlay);
+            if let Err(e) = g.render(&slot_views, scale) {
+                eprintln!("[gpu] render error: {e:?}");
+            }
+        }
+        let _ = win_h;
+        // Damage flags get cleared here (parity with sugarloaf path
+        // below) so successive frames short-circuit on idle.
+        if let Ok(mut ws) = self.ws.lock() {
+            for pane in ws.panes.values_mut() {
+                pane.dirty = false;
+            }
+        }
+        self.chrome_dirty = false;
+    }
+
     fn render_frame(&mut self) {
         let t0 = Instant::now();
         let trace = std::env::var_os("KASATERM_PROFILE").is_some();
@@ -2188,6 +2430,12 @@ impl App {
         self.last_blink_on = blink_on;
         let Some(window) = self.window.as_ref() else { return; };
         let scale = window.scale_factor() as f32;
+        // gpu path takes over the whole frame — no chrome yet, just
+        // the cell grid through the cell-renderer pipeline.
+        if self.gpu.is_some() {
+            self.render_frame_gpu(scale);
+            return;
+        }
         let Some(sugarloaf) = self.sugarloaf.as_mut() else { return; };
         let size = window.inner_size();
         let win_w = size.width as f32 / scale;
@@ -2207,87 +2455,12 @@ impl App {
             0.0,
             0,
         );
-        // Tab strip rendering. iTerm-style: single-tab session shows
-        // *no* strip — only the traffic-light cluster sits in the
-        // unified-titlebar area, and the cell grid uses the full
-        // height. The strip appears only when there are 2+ tabs (or
-        // when the user has explicitly added a second). Drag /
-        // double-click / drag-resize keep working in the traffic-light
-        // band height regardless.
-        let show_strip = self.tabs.len() > 1;
+        // Sidebar / tab strip / "+" button intentionally removed —
+        // goal is terminal-only. Hit-test arrays stay empty so click
+        // routing falls straight through to the terminal selection
+        // / mouse pipeline.
         self.tab_rects.clear();
         self.plus_rect = None;
-        if show_strip {
-            // Sugarloaf takes logical pixels — match cells.rs which
-            // already passes logical origins. Earlier code multiplied
-            // by `scale` and produced double-sized chrome that
-            // overlapped the cell grid.
-            sugarloaf.rect(
-                None,
-                0.0,
-                0.0,
-                win_w,
-                TITLE_HEIGHT,
-                [0.09, 0.10, 0.13, 1.0],
-                0.0,
-                0,
-            );
-            sugarloaf.rect(
-                None,
-                0.0,
-                TITLE_HEIGHT - 1.0,
-                win_w,
-                1.0,
-                [0.04, 0.05, 0.07, 1.0],
-                0.0,
-                0,
-            );
-            let inset_y = TAB_VERTICAL_INSET;
-            let tab_h = TITLE_HEIGHT - inset_y * 2.0;
-            for (i, tab) in self.tabs.iter().enumerate() {
-                let x = TRAFFIC_LIGHT_WIDTH + i as f32 * TAB_WIDTH;
-                let rect = (x, inset_y, TAB_WIDTH - 4.0, tab_h);
-                let color = if i == self.active_tab {
-                    [0.20, 0.45, 0.70, 1.0]
-                } else {
-                    [0.14, 0.16, 0.20, 1.0]
-                };
-                sugarloaf.rect(None, rect.0, rect.1, rect.2, rect.3, color, 6.0, 0);
-                sugarloaf.text_mut().draw(
-                    rect.0 + 12.0,
-                    rect.1 + tab_h - 4.0,
-                    &tab.title,
-                    &sugarloaf::text::DrawOpts {
-                        font_size: self.font_size * 0.5,
-                        color: if i == self.active_tab {
-                            [245, 247, 250, 255]
-                        } else {
-                            [180, 185, 192, 255]
-                        },
-                        bold: i == self.active_tab,
-                        italic: false,
-                        font_id: None,
-                    },
-                );
-                self.tab_rects.push(rect);
-            }
-            let plus_x = TRAFFIC_LIGHT_WIDTH + self.tabs.len() as f32 * TAB_WIDTH;
-            let pr = (plus_x, inset_y, TAB_PLUS_WIDTH, tab_h);
-            sugarloaf.rect(None, pr.0, pr.1, pr.2, pr.3, [0.14, 0.16, 0.20, 1.0], 6.0, 0);
-            sugarloaf.text_mut().draw(
-                pr.0 + 12.0,
-                pr.1 + tab_h - 4.0,
-                "+",
-                &sugarloaf::text::DrawOpts {
-                    font_size: self.font_size * 0.6,
-                    color: [220, 225, 230, 255],
-                    bold: true,
-                    italic: false,
-                    font_id: None,
-                },
-            );
-            self.plus_rect = Some(pr);
-        }
 
         // Snapshot the per-pane render data under one lock so the
         // sugarloaf draw calls below can run without re-locking. Each
@@ -2414,7 +2587,7 @@ impl App {
         // Add a small breathing margin so the first text row never
         // bleeds into the strip rect on systems where sugarloaf
         // interprets these coordinates slightly differently.
-        let origin_x = WINDOW_PADDING;
+        let origin_x = SIDEBAR_W + WINDOW_PADDING;
         let origin_y = TITLE_HEIGHT + 6.0;
 
         // Pass 1: walk each pane and render its cell grid at its rect.
@@ -2624,8 +2797,23 @@ impl App {
                 // back to the reported cursor when no prompt-shaped
                 // row is found so non-TUI shells (cmd.exe, plain
                 // bash) keep their existing behavior.
-                let (anchor_row, anchor_col) = find_prompt_anchor(&frame.rows)
-                    .unwrap_or((frame.cursor_row, frame.cursor_col));
+                // Resolve preedit anchor in two steps. (1) find_prompt_anchor
+                // saves us when the cursor is parked on a TUI statusline
+                // (Claude Code's `/effort` row). (2) but once the user is
+                // mid-line with trailing spaces (`> 아 `), the prompt
+                // anchor sits *before* the spaces — that filter drops
+                // `" "` cells on purpose to avoid PTY tail padding. So
+                // when the cursor row matches the prompt row we trust
+                // cursor_col instead: the PTY echoes the space, so its
+                // column already accounts for it, and the next jamo
+                // lands one cell to the right of the space the user
+                // typed rather than on top of it.
+                let prompt = find_prompt_anchor(&frame.rows);
+                let (anchor_row, anchor_col) = match prompt {
+                    Some((pr, pc)) if pr == frame.cursor_row => (pr, frame.cursor_col.max(pc)),
+                    Some(p) => p,
+                    None => (frame.cursor_row, frame.cursor_col),
+                };
                 let px = pane_px_x + anchor_col as f32 * self.cell.w;
                 let py = pane_px_y + anchor_row as f32 * self.cell.h;
                 if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
@@ -2738,6 +2926,12 @@ impl ApplicationHandler for App {
         window.set_ime_allowed(false);
         #[cfg(not(target_os = "macos"))]
         window.set_ime_allowed(true);
+        // Default = the cell-renderer GPU path (fast, fit-to-cell
+        // icons, sRGB-correct). `KASATERM_RENDERER=sugarloaf` opts
+        // back into the legacy sugarloaf path for A/B comparison.
+        let use_gpu = std::env::var("KASATERM_RENDERER")
+            .map(|v| !v.eq_ignore_ascii_case("sugarloaf"))
+            .unwrap_or(true);
         let sg_window = SugarloafWindow {
             handle: window.window_handle().unwrap().as_raw(),
             display: window.display_handle().unwrap().as_raw(),
@@ -2792,6 +2986,42 @@ impl ApplicationHandler for App {
                 font_family: "Symbols Nerd Font Mono".to_string(),
             },
         ]);
+        // gpu path: skip sugarloaf init entirely, build the cell
+        // renderer and reuse the tail of this function (backend
+        // selection, sockets, autosend/autocapture/autosplit) for the
+        // sugarloaf path's bookkeeping. cell_geom uses our shaper.
+        if use_gpu {
+            let _ = sg_window; // not used on this path
+            let renderer = gpu::GpuRenderer::new(window.clone(), FONT_SIZE)
+                .expect("GpuRenderer init");
+            self.cell = CellGeom {
+                w: renderer.cell_w,
+                h: renderer.cell_h,
+                baseline: 0.0,
+            };
+            let scale = window.scale_factor() as f32;
+            eprintln!(
+                "[startup] gpu renderer; cell_geom w={:.2} h={:.2} (scale={scale})",
+                self.cell.w, self.cell.h,
+            );
+            self.gpu = Some(renderer);
+            self.window = Some(window);
+            let want_tmux = std::env::var("KASATERM_BACKEND")
+                .map(|v| v.eq_ignore_ascii_case("tmux"))
+                .unwrap_or(false);
+            let backend_result = if want_tmux {
+                self.start_tmux()
+            } else {
+                self.start_pty()
+            };
+            if let Err(e) = backend_result {
+                eprintln!("[tmuxify] backend start failed: {e}");
+            }
+            self.schedule_autosend();
+            self.schedule_autocapture();
+            self.arm_autosplit();
+            return;
+        }
         let (font_library, font_err) = sugarloaf::font::FontLibrary::new(fonts);
         if let Some(err) = font_err {
             if !err.fonts_not_found.is_empty() {
@@ -2869,7 +3099,11 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         let Some(window) = self.window.clone() else { return; };
-        let Some(sugarloaf) = self.sugarloaf.as_mut() else { return; };
+        // gpu path uses our own wgpu surface, sugarloaf path keeps
+        // its renderer. Only resize / rescale touch the surface
+        // owner — everything else (keyboard, mouse, IME, wheel,
+        // redraw) is renderer-agnostic.
+        let gpu_mode = self.gpu.is_some();
         // Any winit event that *isn't* RedrawRequested counts as a
         // chrome change for the damage gate. RedrawRequested itself
         // never sets the flag — otherwise the early-return at the
@@ -2881,13 +3115,25 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                sugarloaf.rescale(scale_factor as f32);
                 let size = window.inner_size();
-                sugarloaf.resize(size.width, size.height);
+                if gpu_mode {
+                    if let Some(g) = self.gpu.as_mut() {
+                        g.resize(size.width, size.height);
+                    }
+                } else if let Some(sg) = self.sugarloaf.as_mut() {
+                    sg.rescale(scale_factor as f32);
+                    sg.resize(size.width, size.height);
+                }
                 window.request_redraw();
             }
             WindowEvent::Resized(size) => {
-                sugarloaf.resize(size.width, size.height);
+                if gpu_mode {
+                    if let Some(g) = self.gpu.as_mut() {
+                        g.resize(size.width, size.height);
+                    }
+                } else if let Some(sg) = self.sugarloaf.as_mut() {
+                    sg.resize(size.width, size.height);
+                }
                 // window_cells() already subtracts WINDOW_PADDING on
                 // both sides — using inline raw math here told the PTY
                 // there were 2 more rows than we actually paint, and
@@ -2951,9 +3197,14 @@ impl ApplicationHandler for App {
                 // lights start a window drag. macOS owns the
                 // close/min/zoom buttons so clicks in their reserved
                 // x range fall through to the native handlers.
+                // Sidebar (left strip) owns tab clicks. We still let
+                // the traffic-light row through to native handling, so
+                // sidebar hit-test only applies below TITLE_HEIGHT. The
+                // remaining title-strip area past the traffic lights
+                // still starts a window drag on double-click below.
                 if matches!(state, ElementState::Pressed)
-                    && self.cursor_px.1 < TITLE_HEIGHT
-                    && self.cursor_px.0 >= TRAFFIC_LIGHT_WIDTH
+                    && self.cursor_px.0 < SIDEBAR_W
+                    && self.cursor_px.1 >= TITLE_HEIGHT
                 {
                     let (cx, cy) = self.cursor_px;
                     let in_rect = |r: &(f32, f32, f32, f32)| {
@@ -3331,6 +3582,22 @@ fn decorate_process_name(comm: &str) -> String {
         "git" => format!("⎇ {comm}"),
         _ => comm.to_string(),
     }
+}
+
+/// Working directory for a freshly spawned shell. Terminals open new
+/// sessions in the user's HOME by default (Terminal.app, iTerm), so a
+/// double-clicked kasaterm.app — whose process cwd is `/` — would
+/// otherwise leave the shell at root, where `cd Desktop` fails. Prefer
+/// HOME; fall back to the process cwd only when HOME is unset.
+fn resolve_initial_cwd() -> Option<String> {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(home);
+        }
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
 }
 
 fn resolve_default_shell() -> Option<String> {

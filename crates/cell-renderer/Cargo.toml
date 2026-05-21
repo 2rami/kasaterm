@@ -1,0 +1,16 @@
+[package]
+name = "cell-renderer"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu = "28"
+swash = "0.2"
+bytemuck = { version = "1", features = ["derive"] }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+winit = "0.30"
+pollster = "0.4"
+raw-window-handle = "0.6"

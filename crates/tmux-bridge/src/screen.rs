@@ -16,6 +16,7 @@ pub struct Cell {
     pub italic: bool,
     pub underline: bool,
     pub inverse: bool,
+    pub dim: bool,
 }
 
 impl Cell {
@@ -28,6 +29,7 @@ impl Cell {
             italic: false,
             underline: false,
             inverse: false,
+            dim: false,
         }
     }
 }
@@ -78,5 +80,6 @@ pub(crate) fn vt_cell(c: &vt100::Cell) -> Cell {
         italic: c.italic(),
         underline: c.underline(),
         inverse: c.inverse(),
+        dim: false,
     }
 }
