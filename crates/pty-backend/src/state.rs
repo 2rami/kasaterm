@@ -18,7 +18,7 @@ use std::time::Instant;
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, WindowSize};
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::Config as TermConfig;
+use alacritty_terminal::term::{Config as TermConfig, TermDamage};
 use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb, StdSyncHandler};
 use alacritty_terminal::Term;
 use anyhow::{Context, Result};
@@ -327,7 +327,7 @@ impl PtySession {
         let mut t = self.term.lock().unwrap();
         t.scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
         let offset = t.grid().display_offset();
-        let update = snapshot(&t, cols, rows, &self.pane_id, &self.title_handle);
+        let update = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
         let _ = self.screens_tx.try_send(update);
         offset
     }
@@ -337,7 +337,7 @@ impl PtySession {
         let (cols, rows) = *self.size.lock().unwrap();
         let mut t = self.term.lock().unwrap();
         t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
-        let update = snapshot(&t, cols, rows, &self.pane_id, &self.title_handle);
+        let update = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
         let _ = self.screens_tx.try_send(update);
     }
 
@@ -502,9 +502,14 @@ fn spawn_reader_thread(
     term: Arc<Mutex<Term<PtyEventForwarder>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        use unicode_normalization::UnicodeNormalization;
         let mut processor: Processor<StdSyncHandler> = Processor::new();
         let mut buf = [0u8; 8192];
         let mut current_size = (cols, rows);
+        // Reassembles UTF-8 across read boundaries so NFC normalization
+        // never sees a half codepoint (a multibyte char split between
+        // two reads).
+        let mut utf8_buf = Utf8Buffer::new();
 
         loop {
             // Check for a pending resize before we read more bytes —
@@ -542,7 +547,14 @@ fn spawn_reader_thread(
                 eprintln!("[pty-backend] read {n} bytes: {preview}");
             }
 
-            let processed_bytes = &buf[..n];
+            // NFC-normalize so decomposed Hangul (NFD jamo) collapses to
+            // precomposed syllables before alacritty stores them — the
+            // GPU cell-renderer draws one glyph per codepoint, so NFD
+            // would otherwise show as split jamo (cosmic_text used to
+            // reshape them on the sugarloaf path).
+            let raw_str = utf8_buf.process(&buf[..n]);
+            let nfc_str: String = raw_str.nfc().collect();
+            let processed_bytes = nfc_str.as_bytes();
 
             let update = {
                 let mut t = term.lock().unwrap();
@@ -559,7 +571,25 @@ fn spawn_reader_thread(
                     // "jump to bottom on output" behaviour and keeps the
                     // cursor row valid.
                     t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
-                    Some(snapshot(&t, current_size.0, current_size.1, &pane_id, &title_handle))
+                    let t_snap = std::time::Instant::now();
+                    let snap = snapshot(
+                        &mut t,
+                        current_size.0,
+                        current_size.1,
+                        &pane_id,
+                        &title_handle,
+                        false,
+                    );
+                    if std::env::var_os("KASATERM_PROFILE").is_some() {
+                        eprintln!(
+                            "[snapshot] {}us {}x{} ({}b in)",
+                            t_snap.elapsed().as_micros(),
+                            current_size.0,
+                            current_size.1,
+                            n
+                        );
+                    }
+                    Some(snap)
                 }
             };
             if let Some(upd) = update {
@@ -573,22 +603,94 @@ fn spawn_reader_thread(
 
 
 
+/// Reassembles UTF-8 across PTY read boundaries. A read can split a
+/// multibyte codepoint; buffering the tail until the next read keeps NFC
+/// normalization from ever seeing a partial char.
+struct Utf8Buffer {
+    leftover: Vec<u8>,
+}
+
+impl Utf8Buffer {
+    fn new() -> Self {
+        Self { leftover: Vec::new() }
+    }
+
+    fn process(&mut self, data: &[u8]) -> String {
+        self.leftover.extend_from_slice(data);
+        let mut valid_up_to = 0;
+        let mut i = 0;
+        while i < self.leftover.len() {
+            let b = self.leftover[i];
+            let width = if b & 0x80 == 0 {
+                1
+            } else if b & 0xe0 == 0xc0 {
+                2
+            } else if b & 0xf0 == 0xe0 {
+                3
+            } else if b & 0xf8 == 0xf0 {
+                4
+            } else {
+                1
+            };
+            if i + width <= self.leftover.len() {
+                if std::str::from_utf8(&self.leftover[i..i + width]).is_ok() {
+                    valid_up_to = i + width;
+                }
+                i += width;
+            } else {
+                break;
+            }
+        }
+        if valid_up_to > 0 {
+            let s = std::str::from_utf8(&self.leftover[..valid_up_to])
+                .unwrap_or("")
+                .to_string();
+            self.leftover.drain(..valid_up_to);
+            s
+        } else {
+            String::new()
+        }
+    }
+}
+
 fn snapshot(
-    term: &Term<PtyEventForwarder>,
+    term: &mut Term<PtyEventForwarder>,
     cols: u16,
     rows: u16,
     pane_id: &str,
     last_title: &Arc<Mutex<Option<String>>>,
+    // When false, only the lines alacritty marked damaged since the last
+    // reset are rebuilt — a 1-char echo touches ~1 line instead of the
+    // whole grid (180us → ~10us). The renderer keys ScreenUpdate.dirty by
+    // row and leaves untouched rows alone, so a partial list is correct.
+    // Callers that change the *whole* view (scroll, resize) pass true.
+    force_full: bool,
 ) -> ScreenUpdate {
+    // display_offset counts lines scrolled toward older history; visual
+    // row r maps to grid line `r - display_offset`. Read it before the
+    // &mut borrow from `damage()`.
+    let display_offset = term.grid().display_offset() as i32;
+    // Which visual rows to rebuild. damage() yields viewport-relative
+    // line numbers (already display_offset-adjusted), and returns Full
+    // on first frame / resize / scroll, which we expand to every row.
+    let damaged: Vec<u16> = if force_full {
+        (0..rows).collect()
+    } else {
+        match term.damage() {
+            TermDamage::Full => (0..rows).collect(),
+            TermDamage::Partial(iter) => {
+                let mut v: Vec<u16> =
+                    iter.map(|b| b.line as u16).filter(|&r| r < rows).collect();
+                v.sort_unstable();
+                v.dedup();
+                v
+            }
+        }
+    };
+    term.reset_damage();
     let grid = term.grid();
-    // Offset every visual row by the current scrollback position so a
-    // scrolled-up view reads history rows. display_offset counts lines
-    // scrolled toward older history; visual row r maps to grid line
-    // `r - display_offset` (negative = scrollback). At offset 0 this
-    // is the plain live view.
-    let display_offset = grid.display_offset() as i32;
-    let mut dirty: Vec<(u16, Row)> = Vec::with_capacity(rows as usize);
-    for r in 0..rows {
+    let mut dirty: Vec<(u16, Row)> = Vec::with_capacity(damaged.len());
+    for &r in &damaged {
         let mut row: Row = Vec::with_capacity(cols as usize);
         for c in 0..cols {
             let point = Point::new(

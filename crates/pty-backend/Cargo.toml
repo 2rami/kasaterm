@@ -18,3 +18,8 @@ alacritty_terminal = "0.26"
 # shared vocabulary the renderer speaks.
 tmux-bridge.workspace = true
 arboard = "3"
+# NFC-normalize PTY output so decomposed (NFD) Hangul jamo collapse into
+# precomposed syllables. cosmic_text (sugarloaf path) shaped jamo back
+# together automatically; the swash/cell-renderer GPU path draws one
+# glyph per codepoint, so NFD shows as split jamo without this.
+unicode-normalization = "0.1"
