@@ -305,6 +305,14 @@ impl PtySession {
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
         let mut w = self.writer.lock().unwrap();
         w.write_all(bytes).context("pty write")?;
+        // Flush immediately. Without this, a one-shot write that isn't
+        // followed by another (a committed Hangul syllable — the next
+        // keystroke only updates the preedit overlay, not the PTY) sits
+        // in the writer buffer until something else flushes it, so the
+        // shell echoes "안" ~0.2s late and the user sees only the preedit
+        // "ㄴ" until then. ASCII typing hid this because each keystroke's
+        // write flushed the previous one.
+        w.flush().context("pty flush")?;
         Ok(())
     }
 
