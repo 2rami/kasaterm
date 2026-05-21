@@ -2174,6 +2174,23 @@ impl App {
         let commit_overlay = self.commit_overlay.clone();
         let snap = {
             let ws = self.ws.lock().unwrap();
+            // Active pane's top-left in cell units. When the workspace is
+            // split the cursor/preedit overlay must anchor to THIS pane,
+            // not the global origin (which is the left/top pane).
+            let pane_origin = ws
+                .active_pane
+                .as_ref()
+                .and_then(|aid| {
+                    ws.layout.as_ref().and_then(|l| {
+                        l.leaves().into_iter().find_map(|n| match n {
+                            Layout::Pane { id, x, y, .. } if format!("%{id}") == *aid => {
+                                Some((*x, *y))
+                            }
+                            _ => None,
+                        })
+                    })
+                })
+                .unwrap_or((0u16, 0u16));
             ws.active_pane.clone().and_then(|id| {
                 ws.panes.get(&id).map(|pane| {
                     // Preedit sits exactly on the reported PTY cursor —
@@ -2205,17 +2222,28 @@ impl App {
                         prow,
                         pcol,
                         display,
+                        pane_origin.0,
+                        pane_origin.1,
                     )
                 })
             })
         };
-        let (cursor_row, cursor_col, cursor_visible, cols, preedit_row, preedit_col, preedit) =
-            snap.unwrap_or((0, 0, false, 80, 0, 0, preedit_text.clone()));
+        let (
+            cursor_row,
+            cursor_col,
+            cursor_visible,
+            cols,
+            preedit_row,
+            preedit_col,
+            preedit,
+            pane_x,
+            pane_y,
+        ) = snap.unwrap_or((0, 0, false, 80, 0, 0, preedit_text.clone(), 0, 0));
         GpuOverlay {
             cell_w: self.cell.w,
             cell_h: self.cell.h,
-            pad_x: WINDOW_PADDING + SIDEBAR_W,
-            pad_y: TITLE_HEIGHT,
+            pad_x: WINDOW_PADDING + SIDEBAR_W + pane_x as f32 * self.cell.w,
+            pad_y: TITLE_HEIGHT + pane_y as f32 * self.cell.h,
             cursor_row,
             cursor_col,
             cursor_visible,
@@ -3358,6 +3386,13 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // `open`(1) doesn't forward shell env to the launched .app, but the
+    // .app's screen-recording TCC permission only applies when launched
+    // via `open` (not when the binary runs directly). So a capture/test
+    // config file is how we still drive autocapture/autosplit through an
+    // `open`-launched instance. Loaded (and deleted) before anything
+    // reads KASATERM_* vars.
+    load_capture_config();
     // Wire up the tmux shim before anything spawns a shell — every
     // PtySession reads the env vars we set here. install_tmux_shim is
     // best-effort: a missing shim binary just logs and skips, the rest
@@ -3369,6 +3404,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut app = App::new(proxy);
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Load `$TMPDIR/kasaterm-capture.env` (KEY=VALUE lines) into the
+/// process environment, then delete it. This is the bridge for capture:
+/// `open` strips shell env, so a capture script drops KASATERM_* here
+/// and the `open`-launched .app picks them up on startup. One-shot
+/// (deleted on read) so a normal launch is never affected, and a real
+/// env var still wins — we only fill in keys that aren't already set.
+fn load_capture_config() {
+    let path = std::env::temp_dir().join("kasaterm-capture.env");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let _ = std::fs::remove_file(&path);
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        if std::env::var_os(k).is_none() {
+            std::env::set_var(k, v);
+        }
+    }
 }
 
 /// Find the bundled tmux shim binary and stage it in a private dir we
@@ -3415,6 +3477,39 @@ fn install_tmux_shim() {
             eprintln!("[shim] stage cmux-compat {cmux_src:?} -> {cmux_target:?} failed: {e}");
         }
     }
+    // Force our shim dir to the FRONT of PATH even after the user's rc
+    // files run. A login+interactive zsh sources brew's zprofile, which
+    // prepends /opt/homebrew/bin (the real tmux) ahead of the PATH we
+    // hand the shell — so `tmux` resolves to brew's, not ours, and
+    // claude teammate's `split-window` misses the shim. We point ZDOTDIR
+    // (set in pty-backend) at this dir and drop thin rc files that source
+    // the real ones first, then re-prepend our dir LAST in .zshrc — so
+    // it wins over brew. Non-zsh shells ignore ZDOTDIR and rely on the
+    // plain PATH prepend pty-backend still does.
+    let write_rc = |name: &str, body: String| {
+        if let Err(e) = std::fs::write(shim_dir.join(name), body) {
+            eprintln!("[shim] write rc {name} failed: {e}");
+        }
+    };
+    write_rc(
+        ".zshenv",
+        "[ -f \"${HOME}/.zshenv\" ] && source \"${HOME}/.zshenv\"\n".to_string(),
+    );
+    write_rc(
+        ".zprofile",
+        "[ -f \"${HOME}/.zprofile\" ] && source \"${HOME}/.zprofile\"\n".to_string(),
+    );
+    write_rc(
+        ".zshrc",
+        format!(
+            "[ -f \"${{HOME}}/.zshrc\" ] && source \"${{HOME}}/.zshrc\"\nexport PATH=\"{}:${{PATH}}\"\n",
+            shim_dir.display()
+        ),
+    );
+    write_rc(
+        ".zlogin",
+        "[ -f \"${HOME}/.zlogin\" ] && source \"${HOME}/.zlogin\"\n".to_string(),
+    );
     let trace = std::env::var("KASATERM_TMUX_TRACE").unwrap_or_else(|_| {
         std::env::temp_dir()
             .join("kasaterm-tmux-calls.log")
