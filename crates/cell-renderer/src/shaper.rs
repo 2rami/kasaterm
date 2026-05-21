@@ -38,6 +38,28 @@ pub struct Rasterized {
     pub advance: f32,
 }
 
+/// East Asian Wide / Fullwidth — full-width by design, so a fallback
+/// face serving these must NOT get the symbol/icon size boost. Boosting
+/// makes the raster wider than its (un-boosted) advance, so the syllable
+/// overruns its cell and bleeds into the neighbour. cosmic-text (the
+/// sugarloaf path) never boosts, which is why it rendered Hangul right.
+fn is_cjk_wide(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(cp,
+        0x1100..=0x115F        // Hangul Jamo
+        | 0x2E80..=0x303E      // CJK Radicals, Kangxi, CJK Symbols
+        | 0x3041..=0x33FF      // Kana, CJK enclosed/compat
+        | 0x3400..=0x4DBF      // CJK Ext A
+        | 0x4E00..=0x9FFF      // CJK Unified
+        | 0xA000..=0xA4CF      // Yi
+        | 0xAC00..=0xD7A3      // Hangul Syllables
+        | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
+        | 0xFE30..=0xFE4F      // CJK Compatibility Forms
+        | 0xFF00..=0xFF60      // Fullwidth Forms
+        | 0xFFE0..=0xFFE6      // Fullwidth signs
+    ) || cp >= 0x20000          // CJK Ext B and beyond
+}
+
 impl Shaper {
     pub fn from_bytes(font_data: Vec<u8>, font_index: u32) -> Result<Self> {
         FontRef::from_index(&font_data, font_index as usize)
@@ -161,7 +183,11 @@ impl Shaper {
         // fallback raster sizes up a bit so visible glyph areas
         // come out comparable.
         for (face_idx, glyph_id, advance) in candidates {
-            let face_size = if face_idx == 0 {
+            // Fallback faces get a size boost so small symbol/icon
+            // glyphs read at a comparable size — but CJK/Hangul are
+            // full-width and must stay at size_px, otherwise the raster
+            // grows past its advance and bleeds into the next cell.
+            let face_size = if face_idx == 0 || is_cjk_wide(ch) {
                 size_px
             } else {
                 size_px * 1.25

@@ -120,11 +120,27 @@ impl GpuRenderer {
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
+            // Fifo (vsync) queues 2-3 frames, adding 33-50ms of
+            // input-to-screen latency — typing felt laggy vs Ghostty /
+            // iTerm. AutoNoVsync picks the lowest-latency mode the
+            // surface supports (Immediate or Mailbox), falling back to
+            // Fifo only if neither exists. Tearing is irrelevant for a
+            // text grid, and the damage gate already bounds how often we
+            // actually present.
+            present_mode: wgpu::PresentMode::AutoNoVsync,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            // 1, not the wgpu default of 2: a 2-deep frame queue holds a
+            // freshly-rendered frame for an extra vblank before it's
+            // scanned out, so a keystroke that paints "now" only appears
+            // ~1 frame later. The terminal renders tiny diffs, so a depth
+            // of 1 is plenty and shaves that frame of input latency.
+            desired_maximum_frame_latency: 1,
         };
+        eprintln!(
+            "[gpu] present_modes={:?} chosen={:?} frame_latency={}",
+            caps.present_modes, config.present_mode, config.desired_maximum_frame_latency
+        );
         surface.configure(&device, &config);
 
         // Phase 2a font path: macOS Menlo for now, mirrors the
@@ -247,6 +263,91 @@ impl GpuRenderer {
             pen += entry.advance;
         }
         pen / s
+    }
+
+    /// Draw the IME preedit (composing Hangul) the SAME way the cell
+    /// grid draws committed text. `draw_text` used a `size_px * 0.78`
+    /// baseline, but the grid uses `cell_h_px * 0.78`; since the line
+    /// height is taller than the font size the composing syllable
+    /// floated above the row ("조합 중 글자가 올라간다"). It also walked
+    /// the pen by glyph advance, which drifts wide chars. Here we pin to
+    /// the cell grid: cell-grid baseline + per-glyph 2-cell fit, exactly
+    /// like draw_cells, mirroring the sugarloaf fix that routes preedit
+    /// through render_row. `origin` is logical px (top-left of the
+    /// anchor cell); colors are the accent (text + underline).
+    pub fn draw_preedit(&mut self, origin_x: f32, origin_y: f32, text: &str, accent: [u8; 4]) {
+        let cell_w_px = self.cell_w * self.scale;
+        let cell_h_px = self.cell_h * self.scale;
+        let ox = origin_x * self.scale;
+        let oy = origin_y * self.scale;
+        // Cell span: wide (CJK/Hangul) chars take two columns.
+        let span_cells: u32 = text
+            .chars()
+            .map(|c| if is_wide_char(c) { 2 } else { 1 })
+            .sum();
+        let span_px = span_cells.max(1) as f32 * cell_w_px;
+        // Opaque background so the composing glyph isn't muddied by the
+        // grid cells underneath, plus an accent underline.
+        self.chrome.push(CellInstance {
+            cell_px: [ox, oy, span_px, cell_h_px],
+            uv_min: Atlas::SOLID_UV,
+            uv_max: Atlas::SOLID_UV,
+            fg_rgba: srgb_rgba_to_linear(crate::cells::DEFAULT_BG),
+        });
+        let acc = srgb_rgba_to_linear(accent);
+        self.chrome.push(CellInstance {
+            cell_px: [ox, oy + cell_h_px - 2.0 * self.scale, span_px, 2.0 * self.scale],
+            uv_min: Atlas::SOLID_UV,
+            uv_max: Atlas::SOLID_UV,
+            fg_rgba: acc,
+        });
+        // Glyphs — identical placement math to draw_cells.
+        let baseline_y = oy + cell_h_px * 0.78;
+        let mut col = 0u32;
+        for ch in text.chars() {
+            let wide = is_wide_char(ch);
+            if ch != ' ' {
+                let key = GlyphKey {
+                    ch,
+                    bold: false,
+                    italic: false,
+                    size_px: self.font_size_px,
+                };
+                if let Some(entry) = self.atlas.get_or_bake(
+                    &self.device,
+                    &self.queue,
+                    &mut self.shaper,
+                    key,
+                ) {
+                    let cell_x = ox + col as f32 * cell_w_px;
+                    if wide {
+                        let span_w = cell_w_px * 2.0;
+                        let gw0 = entry.px_w as f32;
+                        let scale_fit = if gw0 > span_w { span_w / gw0 } else { 1.0 };
+                        let gw = gw0 * scale_fit;
+                        let gh = entry.px_h as f32 * scale_fit;
+                        let x = cell_x + (span_w - gw) * 0.5;
+                        let y = baseline_y - entry.bearing_y as f32 * scale_fit;
+                        self.chrome.push(CellInstance {
+                            cell_px: [x, y, gw, gh],
+                            uv_min: entry.uv_min,
+                            uv_max: entry.uv_max,
+                            fg_rgba: acc,
+                        });
+                    } else {
+                        let x = cell_x + entry.bearing_x as f32;
+                        let y = baseline_y - entry.bearing_y as f32;
+                        self.chrome.push(CellInstance {
+                            cell_px: [x, y, entry.px_w as f32, entry.px_h as f32],
+                            uv_min: entry.uv_min,
+                            uv_max: entry.uv_max,
+                            fg_rgba: acc,
+                        });
+                    }
+                }
+            }
+            col += if wide { 2 } else { 1 };
+        }
     }
 
     /// Drop all pending chrome instances. main.rs calls this at the
@@ -407,14 +508,34 @@ impl GpuRenderer {
                         continue;
                     };
                     let baseline_y = cell_y + cell_h_px * 0.78;
-                    let x = cell_x + entry.bearing_x as f32;
-                    let y = baseline_y - entry.bearing_y as f32;
-                    self.chrome.push(CellInstance {
-                        cell_px: [x, y, entry.px_w as f32, entry.px_h as f32],
-                        uv_min: entry.uv_min,
-                        uv_max: entry.uv_max,
-                        fg_rgba: srgb_rgba_to_linear(fg),
-                    });
+                    if is_wide_char(ch) {
+                        // Fit the glyph into its 2-cell box. Scale down
+                        // (keeping aspect) only if it overflows, then
+                        // center horizontally so syllables sit on the
+                        // grid instead of bleeding into the next cell.
+                        let span_w = cell_w_px * 2.0;
+                        let gw0 = entry.px_w as f32;
+                        let scale_fit = if gw0 > span_w { span_w / gw0 } else { 1.0 };
+                        let gw = gw0 * scale_fit;
+                        let gh = entry.px_h as f32 * scale_fit;
+                        let x = cell_x + (span_w - gw) * 0.5;
+                        let y = baseline_y - entry.bearing_y as f32 * scale_fit;
+                        self.chrome.push(CellInstance {
+                            cell_px: [x, y, gw, gh],
+                            uv_min: entry.uv_min,
+                            uv_max: entry.uv_max,
+                            fg_rgba: srgb_rgba_to_linear(fg),
+                        });
+                    } else {
+                        let x = cell_x + entry.bearing_x as f32;
+                        let y = baseline_y - entry.bearing_y as f32;
+                        self.chrome.push(CellInstance {
+                            cell_px: [x, y, entry.px_w as f32, entry.px_h as f32],
+                            uv_min: entry.uv_min,
+                            uv_max: entry.uv_max,
+                            fg_rgba: srgb_rgba_to_linear(fg),
+                        });
+                    }
                 }
             }
         }
@@ -472,6 +593,31 @@ impl GpuRenderer {
 /// the ranges Ghostty constrains: BMP Private Use Area (where most
 /// Nerd Font icons live), both supplementary PUA planes, and the
 /// Misc-Technical block that carries powerline-adjacent symbols.
+/// East Asian Wide / Fullwidth — these occupy two terminal cells.
+/// alacritty fills the right half with an empty cell (skipped in the
+/// glyph pass), so the glyph itself has to be fit into a 2-cell box.
+/// The bundled Hangul fallback font rasters at its own natural advance,
+/// which does not match the primary monospace font's `cell_w`; without
+/// this the syllable drifts into / overlaps its neighbour ("출력 한글
+/// 깨짐"). sugarloaf gets this for free because cosmic_text shapes onto
+/// the monospace grid.
+fn is_wide_char(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(cp,
+        0x1100..=0x115F        // Hangul Jamo
+        | 0x2E80..=0x303E      // CJK Radicals, Kangxi, CJK Symbols
+        | 0x3041..=0x33FF      // Kana, CJK enclosed/compat
+        | 0x3400..=0x4DBF      // CJK Ext A
+        | 0x4E00..=0x9FFF      // CJK Unified
+        | 0xA000..=0xA4CF      // Yi
+        | 0xAC00..=0xD7A3      // Hangul Syllables
+        | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
+        | 0xFE30..=0xFE4F      // CJK Compatibility Forms
+        | 0xFF00..=0xFF60      // Fullwidth Forms
+        | 0xFFE0..=0xFFE6      // Fullwidth signs
+    ) || cp >= 0x20000          // CJK Ext B and beyond
+}
+
 fn is_icon_codepoint(cp: u32) -> bool {
     // Only Private-Use-Area Nerd Font icons get the fit-to-cell
     // enlargement — these are the statusline glyphs (server, git

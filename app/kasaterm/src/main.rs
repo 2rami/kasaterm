@@ -25,7 +25,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{
     ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
 };
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Theme, Window, WindowAttributes, WindowId};
 #[cfg(target_os = "macos")]
@@ -147,6 +147,12 @@ struct GpuOverlay {
     cols: u16,
     blink_on: bool,
     preedit: String,
+    /// Where the preedit box anchors. Resolved via find_prompt_anchor so
+    /// a TUI (Claude Code) that parks its cursor on a statusline still
+    /// gets the composing Hangul drawn on the prompt row. Mirrors the
+    /// sugarloaf render_frame path.
+    preedit_row: u16,
+    preedit_col: u16,
     font_size: f32,
     selection: Option<Selection>,
 }
@@ -321,6 +327,17 @@ impl Workspace {
     }
 }
 
+/// Cross-thread wakeup. The PTY ScreenUpdate thread can't reliably wake
+/// a parked `WaitUntil` via `request_redraw` on macOS (winit defers the
+/// paint to the deadline), so it sends this through the EventLoopProxy
+/// instead — winit delivers it as a `user_event` that wakes the loop
+/// immediately, so a committed Hangul echo / backspace / space paints
+/// without the ~0.5s blink-cadence lag.
+#[derive(Debug, Clone, Copy)]
+enum UserEvent {
+    Redraw,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     sugarloaf: Option<Sugarloaf<'static>>,
@@ -362,6 +379,14 @@ struct App {
     cell: CellGeom,
     preedit: String,
     in_preedit: bool,
+    /// (committed text, cursor-at-commit). gpu paints frames so fast it
+    /// draws the moment AFTER a syllable commits but BEFORE the shell's
+    /// echo arrives, so the preedit ("ㄴ") briefly shows where the
+    /// committed glyph ("안") will land. We overlay the committed text
+    /// in front of the preedit until the echo lands (cursor advances ⇒
+    /// `cursor != stored`), which is what sugarloaf got for free by
+    /// being slow enough to wait for the echo.
+    commit_overlay: Option<(String, (u16, u16))>,
     /// True between `Ime::Enabled` and `Ime::Disabled`. Tracks whether
     /// the OS IME owns this keyboard at all — when active, Hangul (and
     /// other CJK) keystrokes are double-delivered (KeyboardInput.text
@@ -453,10 +478,13 @@ struct App {
     /// `FONT_SIZE` constant so first-frame layout matches the original
     /// behavior before any zoom.
     font_size: f32,
+    /// Wakes the event loop from background threads (PTY snapshots,
+    /// socket commands) so a parked WaitUntil repaints immediately.
+    proxy: EventLoopProxy<UserEvent>,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
         Self {
             window: None,
             sugarloaf: None,
@@ -474,6 +502,7 @@ impl App {
             cell: CellGeom::default(),
             preedit: String::new(),
             in_preedit: false,
+            commit_overlay: None,
             ime_active: false,
             hangul: hangul_ime::Composer::new(),
             tabs: vec![TabState { title: "shell".into() }],
@@ -498,6 +527,7 @@ impl App {
             last_wheel_emit: Instant::now() - std::time::Duration::from_secs(1),
             last_input_at: Instant::now(),
             font_size: FONT_SIZE,
+            proxy,
         }
     }
 
@@ -700,6 +730,7 @@ impl App {
         let ws_screens = self.ws.clone();
         let win_screens = self.window.clone();
         let dead = self.dead_panes.clone();
+        let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             // winit's `request_redraw` is itself idempotent — repeated
             // calls within one frame coalesce into a single
@@ -762,6 +793,9 @@ impl App {
                 if let Some(w) = win_screens.as_ref() {
                     w.request_redraw();
                 }
+                // Wake the loop even if it's parked on a WaitUntil —
+                // request_redraw alone doesn't do that reliably on macOS.
+                let _ = proxy.send_event(UserEvent::Redraw);
             }
             // Channel disconnected — the reader thread exited because
             // the PTY hit EOF (shell quit) or errored. Flag this pane
@@ -770,6 +804,7 @@ impl App {
             if let Some(w) = win_screens.as_ref() {
                 w.request_redraw();
             }
+            let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
 
@@ -2165,6 +2200,18 @@ impl App {
                         if let Some(c) = t.chars().next() {
                             if (0x3130..=0x318F).contains(&(c as u32)) {
                                 if let Some(commit) = self.hangul.feed(c) {
+                                    // Remember the committed text + cursor
+                                    // so the overlay can show it until the
+                                    // shell echo catches up (cursor moves).
+                                    let before = self.ws.lock().ok().and_then(|ws| {
+                                        ws.active_pane.clone().and_then(|id| {
+                                            ws.panes
+                                                .get(&id)
+                                                .map(|p| (p.cursor_row, p.cursor_col))
+                                        })
+                                    });
+                                    self.commit_overlay =
+                                        before.map(|b| (commit.clone(), b));
                                     self.send_bytes(commit.as_bytes());
                                 }
                                 self.preedit = self.hangul.preedit().unwrap_or_default();
@@ -2215,21 +2262,53 @@ impl App {
     /// already cell-space — the renderer-side helper applies cell
     /// metric multiplication.
     fn gpu_overlay_snapshot(&self) -> GpuOverlay {
+        let preedit_text = self.preedit.clone();
+        let commit_overlay = self.commit_overlay.clone();
         let snap = {
             let ws = self.ws.lock().unwrap();
             ws.active_pane.clone().and_then(|id| {
                 ws.panes.get(&id).map(|pane| {
+                    // Preedit anchor: find_prompt_anchor saves us when a
+                    // TUI parks the cursor on a statusline row (Claude
+                    // Code's `/effort`), falling back to the reported
+                    // cursor for plain shells. When the cursor already
+                    // sits on the prompt row we trust cursor_col so a
+                    // trailing space the user typed isn't overwritten.
+                    // Same two-step resolve as the sugarloaf path.
+                    let prompt = find_prompt_anchor(&pane.cells);
+                    let (base_row, base_col) = match prompt {
+                        Some((pr, pc)) if pr == pane.cursor_row => {
+                            (pr, pane.cursor_col.max(pc))
+                        }
+                        Some(p) => p,
+                        None => (pane.cursor_row, pane.cursor_col),
+                    };
+                    // Until the committed syllable's echo lands (cursor
+                    // still where it was at commit time), draw the
+                    // committed text in front of the preedit at that
+                    // spot so "ㄴ" never shows alone on the "안" cell.
+                    let (display, prow, pcol) = match &commit_overlay {
+                        Some((ctext, before))
+                            if *before == (pane.cursor_row, pane.cursor_col) =>
+                        {
+                            (format!("{ctext}{preedit_text}"), before.0, before.1)
+                        }
+                        _ => (preedit_text.clone(), base_row, base_col),
+                    };
                     (
                         pane.cursor_row,
                         pane.cursor_col,
                         pane.cursor_visible,
                         pane.cells.first().map(|r| r.len()).unwrap_or(80) as u16,
+                        prow,
+                        pcol,
+                        display,
                     )
                 })
             })
         };
-        let (cursor_row, cursor_col, cursor_visible, cols) =
-            snap.unwrap_or((0, 0, false, 80));
+        let (cursor_row, cursor_col, cursor_visible, cols, preedit_row, preedit_col, preedit) =
+            snap.unwrap_or((0, 0, false, 80, 0, 0, preedit_text.clone()));
         GpuOverlay {
             cell_w: self.cell.w,
             cell_h: self.cell.h,
@@ -2240,7 +2319,9 @@ impl App {
             cursor_visible,
             cols,
             blink_on: self.cursor_blink_on(Instant::now()),
-            preedit: self.preedit.clone(),
+            preedit,
+            preedit_row,
+            preedit_col,
             font_size: self.font_size,
             selection: self.selection,
         }
@@ -2257,23 +2338,12 @@ impl App {
             g.rect(cx, cy, ov.cell_w, ov.cell_h, c);
         }
         if !ov.preedit.is_empty() {
-            let chars = ov.preedit.chars().count().max(1) as f32;
-            let w = chars * ov.cell_w * 2.0;
-            let px = ov.pad_x + ov.cursor_col as f32 * ov.cell_w;
-            let py = ov.pad_y + ov.cursor_row as f32 * ov.cell_h;
-            g.rect(px, py, w, ov.cell_h, cells::DEFAULT_BG);
-            g.rect(px, py + ov.cell_h - 2.0, w, 2.0, cells::ITERM_CURSOR);
-            g.draw_text(
-                px,
-                py,
-                &ov.preedit,
-                gpu::DrawOpts {
-                    font_size: ov.font_size,
-                    color: cells::ITERM_CURSOR,
-                    bold: false,
-                    italic: false,
-                },
-            );
+            let px = ov.pad_x + ov.preedit_col as f32 * ov.cell_w;
+            let py = ov.pad_y + ov.preedit_row as f32 * ov.cell_h;
+            // Route preedit through the cell-grid path so the composing
+            // syllable sits on the same baseline as committed text
+            // instead of floating above the row.
+            g.draw_preedit(px, py, &ov.preedit, cells::ITERM_CURSOR);
         }
         if let Some(sel) = ov.selection {
             let (start, stop) = if (sel.anchor.1, sel.anchor.0) <= (sel.end.1, sel.end.0) {
@@ -2418,6 +2488,20 @@ impl App {
     }
 
     fn render_frame(&mut self) {
+        // commit_overlay's job ends the moment the echo lands and moves
+        // the cursor. Retire it permanently then — otherwise erasing
+        // back to the commit position re-satisfies `cursor == stored`
+        // and the stale "안" reappears.
+        if let Some(before) = self.commit_overlay.as_ref().map(|(_, b)| *b) {
+            let cur = self.ws.lock().ok().and_then(|ws| {
+                ws.active_pane.clone().and_then(|id| {
+                    ws.panes.get(&id).map(|p| (p.cursor_row, p.cursor_col))
+                })
+            });
+            if cur != Some(before) {
+                self.commit_overlay = None;
+            }
+        }
         let t0 = Instant::now();
         let trace = std::env::var_os("KASATERM_PROFILE").is_some();
         let now = Instant::now();
@@ -2440,6 +2524,13 @@ impl App {
         // the cell grid through the cell-renderer pipeline.
         if self.gpu.is_some() {
             self.render_frame_gpu(scale);
+            if trace {
+                eprintln!(
+                    "[render-gpu] {}us since_input={}ms",
+                    t0.elapsed().as_micros(),
+                    now.saturating_duration_since(self.last_input_at).as_millis()
+                );
+            }
             return;
         }
         let Some(sugarloaf) = self.sugarloaf.as_mut() else { return; };
@@ -2848,14 +2939,14 @@ impl App {
         // to mask cell-grid bleed.
 
         let t_emit = t0.elapsed().as_micros();
-        let t_emit = t0.elapsed().as_micros();
         sugarloaf.render();
         if trace {
             let t_total = t0.elapsed().as_micros();
             eprintln!(
-                "[render] emit={t_emit}us render={t_present}us total={t_total}us frames={n}",
+                "[render] emit={t_emit}us render={t_present}us total={t_total}us frames={n} since_input={si}ms",
                 t_present = t_total - t_emit,
                 n = pane_frames.len(),
+                si = now.saturating_duration_since(self.last_input_at).as_millis(),
             );
         }
         // Move the cell grids back and clear damage flags under the
@@ -2875,7 +2966,19 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<UserEvent> for App {
+    /// A background thread (PTY snapshot, socket) asked us to repaint.
+    /// Delivered even while a WaitUntil is parked, so this is what makes
+    /// committed-Hangul echo / backspace / space show up without lag.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: UserEvent) {
+        // Render directly here instead of request_redraw → (next loop)
+        // RedrawRequested. The PTY echo already paid a thread hop +
+        // channel to reach us; bouncing through request_redraw adds
+        // another winit cycle of latency. Painting inline gets the echo
+        // on screen this turn.
+        self.render_frame();
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -2932,6 +3035,20 @@ impl ApplicationHandler for App {
         window.set_ime_allowed(false);
         #[cfg(not(target_os = "macos"))]
         window.set_ime_allowed(true);
+        // Cursor-blink timer thread. Ticks every blink half-period and
+        // wakes the loop through the proxy, so about_to_wait can sit on
+        // ControlFlow::Wait — no WaitUntil timer in the hot path for
+        // macOS to coalesce. sleep() drift is irrelevant; the actual
+        // phase is computed from last_input_at in cursor_blink_on.
+        {
+            let blink_proxy = self.proxy.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS));
+                if blink_proxy.send_event(UserEvent::Redraw).is_err() {
+                    break;
+                }
+            });
+        }
         // Default = the cell-renderer GPU path (fast, fit-to-cell
         // icons, sRGB-correct). `KASATERM_RENDERER=sugarloaf` opts
         // back into the legacy sugarloaf path for A/B comparison.
@@ -3375,32 +3492,17 @@ impl ApplicationHandler for App {
         // Fire any due KASATERM_AUTOSPLIT step before parking. No-op
         // when no plan is queued.
         self.run_pending_autosplits();
-        // Re-arm the blink deadline every loop turn so the cursor toggles
-        // even on an idle terminal. WaitUntil(deadline) keeps the runtime
-        // asleep — no CPU until either the deadline lands or fresh input
-        // arrives. The actual redraw happens in new_events on the
-        // ResumeTimeReached branch.
-        //
-        // But when a frame is already pending (Hangul preedit changed, a
-        // PTY snapshot landed, any chrome event), parking until the blink
-        // deadline makes winit defer the requested redraw by up to
-        // BLINK_HALF_PERIOD_MS — that's the "조합 중 글자 / 커서가 0.5초
-        // 늦게" lag. Collapse the deadline to *now* so ResumeTimeReached
-        // fires on the next turn and paints immediately. render_frame
-        // clears the dirty flags, so the next turn parks normally — no
-        // busy loop.
-        let pending = self.chrome_dirty
-            || self
-                .ws
-                .lock()
-                .map(|ws| ws.panes.values().any(|p| p.dirty))
-                .unwrap_or(false);
-        let deadline = if pending {
-            Instant::now()
-        } else {
-            Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS)
-        };
-        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
+        // gets coalesced by macOS, so a cross-thread wake (PTY echo via
+        // the proxy) landed anywhere from 6ms to ~290ms late — that was
+        // the inconsistent input lag. With `Wait` the loop sleeps with
+        // zero latency until a real event arrives:
+        //   - keystrokes  → window_event
+        //   - PTY echo     → proxy UserEvent (ScreenUpdate thread)
+        //   - cursor blink → proxy UserEvent (dedicated blink thread)
+        // Each of those drives a redraw directly, so there's no timer in
+        // the hot path to be coalesced.
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 
     fn new_events(
@@ -3427,8 +3529,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // of the binary still works (tmux calls inside the PTY fall back to
     // the real tmux on the user's PATH).
     install_tmux_shim();
-    let event_loop = EventLoop::new()?;
-    let mut app = App::new();
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+    let mut app = App::new(proxy);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
