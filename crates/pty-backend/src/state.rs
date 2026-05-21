@@ -494,15 +494,9 @@ fn spawn_reader_thread(
     term: Arc<Mutex<Term<PtyEventForwarder>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        use unicode_normalization::UnicodeNormalization;
-
         let mut processor: Processor<StdSyncHandler> = Processor::new();
         let mut buf = [0u8; 8192];
         let mut current_size = (cols, rows);
-        let mut in_synchronized_update = false;
-        let mut match_count = 0;
-        let prefix = [0x1b, b'[', b'?', b'2', b'0', b'2', b'6'];
-        let mut utf8_buf = Utf8Buffer::new();
 
         loop {
             // Check for a pending resize before we read more bytes —
@@ -540,37 +534,16 @@ fn spawn_reader_thread(
                 eprintln!("[pty-backend] read {n} bytes: {preview}");
             }
 
-            // PTY 바이트 스트림에서 안전하게 UTF-8 문자열을 추출하고 NFC 한글 결합 정규화 수행
-            let raw_str = utf8_buf.process(&buf[..n]);
-            let nfc_str: String = raw_str.nfc().collect();
-            let processed_bytes = nfc_str.as_bytes();
-
-            // PTY 바이트 스트림(정규화된 바이트 배열)에서 DECSET 2026 / DECRST 2026 감지하기 (방식 A 상태 머신)
-            for &b in processed_bytes {
-                if b == prefix[match_count] {
-                    match_count += 1;
-                } else if match_count == prefix.len() {
-                    if b == b'h' {
-                        in_synchronized_update = true;
-                    } else if b == b'l' {
-                        in_synchronized_update = false;
-                    }
-                    match_count = 0;
-                    if b == prefix[0] {
-                        match_count = 1;
-                    }
-                } else {
-                    match_count = 0;
-                    if b == prefix[0] {
-                        match_count = 1;
-                    }
-                }
-            }
+            let processed_bytes = &buf[..n];
 
             let update = {
                 let mut t = term.lock().unwrap();
                 processor.advance(&mut *t, processed_bytes);
-                if in_synchronized_update {
+                // alacritty buffers DECSET 2026 synchronized output internally:
+                // while its sync buffer is non-empty the Term grid still holds
+                // the pre-sync frame, so skip the snapshot until it flushes on
+                // ?2026l or the sync timeout — no torn frame ever reaches us.
+                if processor.sync_bytes_count() > 0 {
                     None
                 } else {
                     // New PTY output snaps the view back to the live tail
@@ -590,53 +563,7 @@ fn spawn_reader_thread(
     })
 }
 
-struct Utf8Buffer {
-    leftover: Vec<u8>,
-}
 
-impl Utf8Buffer {
-    fn new() -> Self {
-        Self { leftover: Vec::new() }
-    }
-
-    fn process(&mut self, data: &[u8]) -> String {
-        self.leftover.extend_from_slice(data);
-        
-        let mut valid_up_to = 0;
-        let mut i = 0;
-        while i < self.leftover.len() {
-            let b = self.leftover[i];
-            let width = if b & 0x80 == 0 {
-                1
-            } else if b & 0xe0 == 0xc0 {
-                2
-            } else if b & 0xf0 == 0xe0 {
-                3
-            } else if b & 0xf8 == 0xf0 {
-                4
-            } else {
-                1
-            };
-
-            if i + width <= self.leftover.len() {
-                if std::str::from_utf8(&self.leftover[i..i+width]).is_ok() {
-                    valid_up_to = i + width;
-                }
-                i += width;
-            } else {
-                break;
-            }
-        }
-
-        if valid_up_to > 0 {
-            let s = std::str::from_utf8(&self.leftover[..valid_up_to]).unwrap_or("").to_string();
-            self.leftover.drain(..valid_up_to);
-            s
-        } else {
-            String::new()
-        }
-    }
-}
 
 fn snapshot(
     term: &Term<PtyEventForwarder>,
