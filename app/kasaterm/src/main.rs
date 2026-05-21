@@ -2090,6 +2090,7 @@ impl App {
             if self.hangul.backspace() {
                 self.preedit = self.hangul.preedit().unwrap_or_default();
                 self.in_preedit = !self.preedit.is_empty();
+                self.chrome_dirty = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -2168,6 +2169,11 @@ impl App {
                                 }
                                 self.preedit = self.hangul.preedit().unwrap_or_default();
                                 self.in_preedit = !self.preedit.is_empty();
+                                // Preedit lives in the chrome overlay, not the
+                                // PTY grid — without flagging chrome_dirty the
+                                // damage gate skips the frame and the composing
+                                // syllable only flickers in on blink ticks.
+                                self.chrome_dirty = true;
                                 if let Some(w) = &self.window {
                                     w.request_redraw();
                                 }
@@ -3340,6 +3346,9 @@ impl ApplicationHandler for App {
                         self.send_bytes(text.as_bytes());
                     }
                 }
+                // Preedit is chrome, not PTY grid — flag it so the damage
+                // gate actually paints the composing text this frame.
+                self.chrome_dirty = true;
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -3370,12 +3379,28 @@ impl ApplicationHandler for App {
         // even on an idle terminal. WaitUntil(deadline) keeps the runtime
         // asleep — no CPU until either the deadline lands or fresh input
         // arrives. The actual redraw happens in new_events on the
-        // ResumeTimeReached branch — about_to_wait should NOT request a
-        // redraw here, since that would queue work and turn the wait
-        // into a busy loop.
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
-        ));
+        // ResumeTimeReached branch.
+        //
+        // But when a frame is already pending (Hangul preedit changed, a
+        // PTY snapshot landed, any chrome event), parking until the blink
+        // deadline makes winit defer the requested redraw by up to
+        // BLINK_HALF_PERIOD_MS — that's the "조합 중 글자 / 커서가 0.5초
+        // 늦게" lag. Collapse the deadline to *now* so ResumeTimeReached
+        // fires on the next turn and paints immediately. render_frame
+        // clears the dirty flags, so the next turn parks normally — no
+        // busy loop.
+        let pending = self.chrome_dirty
+            || self
+                .ws
+                .lock()
+                .map(|ws| ws.panes.values().any(|p| p.dirty))
+                .unwrap_or(false);
+        let deadline = if pending {
+            Instant::now()
+        } else {
+            Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS)
+        };
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
 
     fn new_events(
