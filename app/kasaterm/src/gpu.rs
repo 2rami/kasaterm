@@ -379,14 +379,17 @@ impl GpuRenderer {
     pub fn draw_cells(&mut self, panes: &[PaneSlot<'_>]) {
         let cell_w_px = self.cell_w * self.scale;
         let cell_h_px = self.cell_h * self.scale;
+        // Pass 1: backgrounds only. A tall CJK glyph bleeds a little
+        // into the row below; emitting EVERY background first stops the
+        // next row's bg fill from painting over the previous glyph's
+        // bottom half. That over-paint was clipping Hangul in claude's
+        // input-echo row (a run of reverse/bg cells); claude's normal
+        // output rows have no bg below them, so they rendered fine.
+        // (Reverse-video spaces still fill here — claude's cursor is an
+        // inverse space, "띄어쓰기 커서".)
         for pane in panes {
             for (r, row) in pane.rows.iter().enumerate() {
                 for (col, cell) in row.iter().enumerate() {
-                    // Background fill FIRST — must run even for space
-                    // cells. claude code's input cursor is a
-                    // reverse-video space (inverse=true, ch=' '); if
-                    // we skipped spaces before the bg pass the cursor
-                    // block never painted ("띄어쓰기 커서 안보임").
                     let want_bg = !matches!(cell.bg, tmux_bridge::screen::Color::Default)
                         || cell.inverse;
                     let bg = cell_bg_rgba(cell);
@@ -400,8 +403,14 @@ impl GpuRenderer {
                             fg_rgba: srgb_rgba_to_linear(bg),
                         });
                     }
-                    // Glyph pass — blanks contribute no glyph, so the
-                    // space-skip lives here, after the bg fill.
+                }
+            }
+        }
+        // Pass 2: glyphs, drawn over every background.
+        for pane in panes {
+            for (r, row) in pane.rows.iter().enumerate() {
+                for (col, cell) in row.iter().enumerate() {
+                    // Blanks contribute no glyph.
                     let Some(ch) = cell.ch.chars().next() else { continue };
                     if ch == ' ' || ch == '\0' || cell.ch.is_empty() {
                         continue;
