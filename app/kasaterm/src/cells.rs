@@ -62,7 +62,11 @@ fn ansi_palette() -> [[u8; 3]; 256] {
 /// Default foreground / background when a cell has `Color::Default`.
 /// Decoded from the user's Terminal.app `GitHub Dark Dimmed` profile
 /// (the active Default Window Settings): bg `#252c35`, fg `#bbc6d1`.
-pub const DEFAULT_FG: [u8; 4] = [187, 198, 209, 0xff];
+// Default foreground = pure white, matching Ghostty's default
+// (#FFFFFF). The old [187,198,209] came from the user's Terminal.app
+// "GitHub Dark Dimmed" profile and read noticeably greyer than
+// Ghostty's body text.
+pub const DEFAULT_FG: [u8; 4] = [255, 255, 255, 0xff];
 pub const DEFAULT_BG: [u8; 4] = [37, 44, 53, 0xff];
 
 /// Cursor + selection accents from the same profile. Cursor is
@@ -97,6 +101,20 @@ pub fn cell_fg(cell: &Cell) -> [u8; 4] {
     if cell.inverse {
         fg = color_to_rgba(&cell.bg, DEFAULT_BG);
     }
+    // SGR 2 (faint). Claude Code uses this for ghost-text autosuggestions;
+    // without it the suggestion reads as committed input. Mix toward bg by
+    // ~55% so the glyph stays legible but visibly secondary.
+    if cell.dim {
+        let bg = if cell.inverse {
+            color_to_rgba(&cell.fg, DEFAULT_FG)
+        } else {
+            color_to_rgba(&cell.bg, DEFAULT_BG)
+        };
+        let t = 0.55_f32;
+        for i in 0..3 {
+            fg[i] = (fg[i] as f32 * (1.0 - t) + bg[i] as f32 * t).round() as u8;
+        }
+    }
     fg
 }
 
@@ -123,7 +141,7 @@ pub fn cell_bg(cell: &Cell) -> [u8; 4] {
 /// A run like `██████` becomes a striped bar instead of a solid
 /// rectangle. Drawing the cell as a GPU quad sized to the actual
 /// `cell_w` × `cell_h` fixes this without depending on font choice.
-fn block_rects(ch: char) -> Option<&'static [(f32, f32, f32, f32, f32)]> {
+pub fn block_rects(ch: char) -> Option<&'static [(f32, f32, f32, f32, f32)]> {
     // Macro-ish: each constant is a slice of (x0, y0, x1, y1, alpha)
     // rectangles. Multi-quadrant blocks use two entries.
     const HALF_TOP: &[(f32, f32, f32, f32, f32)] = &[(0.0, 0.0, 1.0, 0.5, 1.0)];
@@ -483,6 +501,7 @@ pub fn render_preedit(
             italic: false,
             underline: false,
             inverse: false,
+            dim: false,
         })
         .collect();
     render_row(
@@ -540,6 +559,7 @@ mod tests {
             italic: false,
             underline: false,
             inverse,
+            dim: false,
         }
     }
 

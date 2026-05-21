@@ -78,6 +78,17 @@ pub struct PtySession {
     /// (last_query_at, cached_name). Throttle the ps(1) shellout to
     /// ~500ms so a 60Hz render loop doesn't fork-exec on every frame.
     proc_cache: Arc<Mutex<(Instant, Option<String>)>>,
+    /// Shared Term so `scroll()` can drive alacritty's own scrollback
+    /// (display_offset) from the main thread and re-snapshot. Using
+    /// alacritty's scrollback — instead of a hand-rolled shift
+    /// detection — is what makes scroll-region TUIs (claude code's
+    /// pinned input) scroll back correctly.
+    term: Arc<Mutex<Term<PtyEventForwarder>>>,
+    /// tx clone so `scroll()` can push the re-snapshot to the same
+    /// channel the reader thread feeds.
+    screens_tx: Sender<ScreenUpdate>,
+    title_handle: Arc<Mutex<Option<String>>>,
+    pane_id: String,
 }
 
 impl PtySession {
@@ -205,19 +216,22 @@ impl PtySession {
         // reader, and emits a ScreenUpdate after each batch. Bounded
         // channel + drop-on-full keeps us from buffering frames the
         // renderer is too slow to consume.
+        let title_handle = Arc::new(Mutex::new(None));
         let listener = PtyEventForwarder {
             writer: Arc::clone(&writer_arc),
             size: Arc::clone(&size),
-            last_title: Arc::new(Mutex::new(None)),
+            last_title: Arc::clone(&title_handle),
         };
+        let term = Arc::new(Mutex::new(make_term(opts.cols, opts.rows, listener)));
         let reader_thread = spawn_reader_thread(
             reader,
-            tx,
+            tx.clone(),
             opts.cols,
             opts.rows,
             size.clone(),
             opts.pane_id.clone(),
-            listener,
+            Arc::clone(&title_handle),
+            Arc::clone(&term),
         );
 
         Ok(Self {
@@ -232,6 +246,10 @@ impl PtySession {
                 Instant::now() - std::time::Duration::from_secs(1),
                 None,
             ))),
+            term,
+            screens_tx: tx,
+            title_handle,
+            pane_id: opts.pane_id.clone(),
         })
     }
 
@@ -288,6 +306,31 @@ impl PtySession {
         let mut w = self.writer.lock().unwrap();
         w.write_all(bytes).context("pty write")?;
         Ok(())
+    }
+
+    /// Scroll the view through alacritty's scrollback by `lines`
+    /// (positive = toward older history / up, negative = toward the
+    /// live tail / down). Re-snapshots immediately and pushes the
+    /// frame so the renderer reflects the new position without waiting
+    /// for PTY output — important for an idle TUI like claude. Returns
+    /// the resulting display offset (0 = at the live bottom).
+    pub fn scroll(&self, lines: i32) -> usize {
+        let (cols, rows) = *self.size.lock().unwrap();
+        let mut t = self.term.lock().unwrap();
+        t.scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
+        let offset = t.grid().display_offset();
+        let update = snapshot(&t, cols, rows, &self.pane_id, &self.title_handle);
+        let _ = self.screens_tx.try_send(update);
+        offset
+    }
+
+    /// Jump straight to the live tail (display offset 0).
+    pub fn scroll_to_bottom(&self) {
+        let (cols, rows) = *self.size.lock().unwrap();
+        let mut t = self.term.lock().unwrap();
+        t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+        let update = snapshot(&t, cols, rows, &self.pane_id, &self.title_handle);
+        let _ = self.screens_tx.try_send(update);
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -439,6 +482,7 @@ fn make_term(cols: u16, rows: u16, listener: PtyEventForwarder) -> Term<PtyEvent
     Term::new(TermConfig::default(), &size, listener)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
     tx: Sender<ScreenUpdate>,
@@ -446,14 +490,20 @@ fn spawn_reader_thread(
     rows: u16,
     size: Arc<Mutex<(u16, u16)>>,
     pane_id: String,
-    listener: PtyEventForwarder,
+    title_handle: Arc<Mutex<Option<String>>>,
+    term: Arc<Mutex<Term<PtyEventForwarder>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        use unicode_normalization::UnicodeNormalization;
+
         let mut processor: Processor<StdSyncHandler> = Processor::new();
-        let title_handle = Arc::clone(&listener.last_title);
-        let mut term = make_term(cols, rows, listener);
         let mut buf = [0u8; 8192];
         let mut current_size = (cols, rows);
+        let mut in_synchronized_update = false;
+        let mut match_count = 0;
+        let prefix = [0x1b, b'[', b'?', b'2', b'0', b'2', b'6'];
+        let mut utf8_buf = Utf8Buffer::new();
+
         loop {
             // Check for a pending resize before we read more bytes —
             // a half-processed frame at the old size would land cells
@@ -461,7 +511,7 @@ fn spawn_reader_thread(
             let want = *size.lock().unwrap();
             if want != current_size {
                 let s = TermSize::new(want.0 as usize, want.1 as usize);
-                term.resize(s);
+                term.lock().unwrap().resize(s);
                 current_size = want;
             }
             let n = match reader.read(&mut buf) {
@@ -489,20 +539,103 @@ fn spawn_reader_thread(
                     .collect();
                 eprintln!("[pty-backend] read {n} bytes: {preview}");
             }
-            processor.advance(&mut term, &buf[..n]);
-            // Snapshot Term → ScreenUpdate. We emit every visible row
-            // as dirty for now — alacritty_terminal tracks per-line
-            // dirty flags internally but exposing them needs a deeper
-            // adaptation; pushing the full grid keeps the renderer
-            // happy and the per-row Arc-identity cache in cells.rs
-            // still catches no-op rows.
-            let update =
-                snapshot(&term, current_size.0, current_size.1, &pane_id, &title_handle);
-            if tx.send(update).is_err() {
-                return;
+
+            // PTY 바이트 스트림에서 안전하게 UTF-8 문자열을 추출하고 NFC 한글 결합 정규화 수행
+            let raw_str = utf8_buf.process(&buf[..n]);
+            let nfc_str: String = raw_str.nfc().collect();
+            let processed_bytes = nfc_str.as_bytes();
+
+            // PTY 바이트 스트림(정규화된 바이트 배열)에서 DECSET 2026 / DECRST 2026 감지하기 (방식 A 상태 머신)
+            for &b in processed_bytes {
+                if b == prefix[match_count] {
+                    match_count += 1;
+                } else if match_count == prefix.len() {
+                    if b == b'h' {
+                        in_synchronized_update = true;
+                    } else if b == b'l' {
+                        in_synchronized_update = false;
+                    }
+                    match_count = 0;
+                    if b == prefix[0] {
+                        match_count = 1;
+                    }
+                } else {
+                    match_count = 0;
+                    if b == prefix[0] {
+                        match_count = 1;
+                    }
+                }
+            }
+
+            let update = {
+                let mut t = term.lock().unwrap();
+                processor.advance(&mut *t, processed_bytes);
+                if in_synchronized_update {
+                    None
+                } else {
+                    // New PTY output snaps the view back to the live tail
+                    // (display_offset = 0) — matches every terminal's
+                    // "jump to bottom on output" behaviour and keeps the
+                    // cursor row valid.
+                    t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                    Some(snapshot(&t, current_size.0, current_size.1, &pane_id, &title_handle))
+                }
+            };
+            if let Some(upd) = update {
+                if tx.send(upd).is_err() {
+                    return;
+                }
             }
         }
     })
+}
+
+struct Utf8Buffer {
+    leftover: Vec<u8>,
+}
+
+impl Utf8Buffer {
+    fn new() -> Self {
+        Self { leftover: Vec::new() }
+    }
+
+    fn process(&mut self, data: &[u8]) -> String {
+        self.leftover.extend_from_slice(data);
+        
+        let mut valid_up_to = 0;
+        let mut i = 0;
+        while i < self.leftover.len() {
+            let b = self.leftover[i];
+            let width = if b & 0x80 == 0 {
+                1
+            } else if b & 0xe0 == 0xc0 {
+                2
+            } else if b & 0xf0 == 0xe0 {
+                3
+            } else if b & 0xf8 == 0xf0 {
+                4
+            } else {
+                1
+            };
+
+            if i + width <= self.leftover.len() {
+                if std::str::from_utf8(&self.leftover[i..i+width]).is_ok() {
+                    valid_up_to = i + width;
+                }
+                i += width;
+            } else {
+                break;
+            }
+        }
+
+        if valid_up_to > 0 {
+            let s = std::str::from_utf8(&self.leftover[..valid_up_to]).unwrap_or("").to_string();
+            self.leftover.drain(..valid_up_to);
+            s
+        } else {
+            String::new()
+        }
+    }
 }
 
 fn snapshot(
@@ -513,12 +646,18 @@ fn snapshot(
     last_title: &Arc<Mutex<Option<String>>>,
 ) -> ScreenUpdate {
     let grid = term.grid();
+    // Offset every visual row by the current scrollback position so a
+    // scrolled-up view reads history rows. display_offset counts lines
+    // scrolled toward older history; visual row r maps to grid line
+    // `r - display_offset` (negative = scrollback). At offset 0 this
+    // is the plain live view.
+    let display_offset = grid.display_offset() as i32;
     let mut dirty: Vec<(u16, Row)> = Vec::with_capacity(rows as usize);
     for r in 0..rows {
         let mut row: Row = Vec::with_capacity(cols as usize);
         for c in 0..cols {
             let point = Point::new(
-                alacritty_terminal::index::Line(r as i32),
+                alacritty_terminal::index::Line(r as i32 - display_offset),
                 alacritty_terminal::index::Column(c as usize),
             );
             let cell = &grid[point];
@@ -530,7 +669,11 @@ fn snapshot(
     let cursor_row = cursor.line.0.max(0) as u16;
     let cursor_col = cursor.column.0 as u16;
     let mode = term.mode();
-    let cursor_visible = mode.contains(alacritty_terminal::term::TermMode::SHOW_CURSOR);
+    // Hide the cursor while scrolled into history — the live cursor
+    // sits at the bottom of the active area, which isn't where the
+    // user is looking, so drawing it over scrollback is misleading.
+    let cursor_visible = display_offset == 0
+        && mode.contains(alacritty_terminal::term::TermMode::SHOW_CURSOR);
     let alt_screen = mode.contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
     let mouse_enabled = mode.contains(alacritty_terminal::term::TermMode::MOUSE_REPORT_CLICK)
         || mode.contains(alacritty_terminal::term::TermMode::MOUSE_DRAG)
@@ -574,6 +717,9 @@ fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
         inverse: cell
             .flags
             .contains(alacritty_terminal::term::cell::Flags::INVERSE),
+        dim: cell
+            .flags
+            .contains(alacritty_terminal::term::cell::Flags::DIM),
     }
 }
 
