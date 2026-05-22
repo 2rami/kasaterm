@@ -27,7 +27,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Theme, Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Theme, Window, WindowAttributes, WindowId};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::WindowAttributesExtMacOS;
 
@@ -43,7 +43,7 @@ const LINE_HEIGHT_MULT: f32 = 1.0;
 /// every side. Mirrors what Terminal.app / Ghostty give the content so
 /// text doesn't jam against the chrome. Must match `render_frame`'s
 /// origin and `px_to_pane_cell`'s offset.
-const WINDOW_PADDING: f32 = 10.0;
+const WINDOW_PADDING: f32 = 12.0;
 /// Logical-pixel height of the custom chrome strip that sits above the
 /// cell grid (traffic light row + future tab bar). macOS's traffic
 /// light buttons end around y ≈ 28 in logical units, so 38 leaves a
@@ -61,6 +61,13 @@ const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
 /// un-split window renders no header at all (matches the iTerm
 /// behavior the user pointed at).
 const PANE_HEADER_HEIGHT: f32 = 28.0;
+/// Inner padding between a pane's box edges and its cell grid, in logical
+/// pixels. Keeps text off the divider / window edge and gives abutting
+/// panes visible breathing room. The PTY's usable cols/rows shrink by the
+/// equivalent cell count so the grid still fits inside the inset box, and
+/// every render origin + click-to-cell map applies the same offset.
+const PANE_INNER_X: f32 = 7.0;
+const PANE_INNER_Y: f32 = 5.0;
 /// Left sidebar width in logical pixels. Hosts the vertical tab list
 /// (one row per tab) plus the new-tab "+" button. The cell grid origin
 /// shifts right by this amount so pane contents never overlap the
@@ -239,6 +246,37 @@ fn wheel_step(
 /// wheel events correctly (alt-screen / SGR mouse mode are per-pane in
 /// real terminals — claude in pane 0 can be in alt-screen while a
 /// shell prompt sits in pane 1).
+/// Direction for spatial pane focus / swap (Cmd+Option+Arrow).
+#[derive(Clone, Copy)]
+enum FocusDir {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Which edge of the drop-target pane the cursor is over during a header
+/// drag. Determines where the dragged pane lands: a Left/Right drop
+/// splits horizontally, Up/Down splits vertically.
+#[derive(Clone, Copy, PartialEq)]
+enum DropZone {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// State for an in-flight header drag-and-drop relocation.
+struct HeaderDrag {
+    /// Pane being dragged (its tree leaf id).
+    pane: String,
+    /// Press position in logical px, to measure the click→drag threshold.
+    start: (f32, f32),
+    /// True once the cursor moved far enough to count as a drag rather
+    /// than a click.
+    active: bool,
+}
+
 #[derive(Default)]
 struct PaneState {
     rows: u16,
@@ -381,6 +419,15 @@ struct App {
     pane_header_rects: Vec<(String, (f32, f32, f32, f32))>,
     selection: Option<Selection>,
     drag_anchor: Option<(u16, u16)>,
+    /// In-flight pane-divider drag: the BSP tree path of the split being
+    /// resized plus its axis. `Some` while the user holds the mouse on a
+    /// seam; each motion event re-derives the ratio from the cursor.
+    resize_drag: Option<(Vec<u8>, pty_backend::SplitDir)>,
+    /// In-flight header drag-and-drop: which pane the user grabbed by its
+    /// header, the press position, and whether the cursor has moved past
+    /// the threshold (only then does releasing relocate, so a plain click
+    /// still just focuses the pane).
+    header_drag: Option<HeaderDrag>,
     /// Pane that owns the in-flight mouse reporting drag. `Some(pane_id)`
     /// when we forwarded a button-press into a mouse-reporting TUI and
     /// are now relaying motion + release into the same pane. None means
@@ -465,6 +512,8 @@ impl App {
             pane_header_rects: Vec::new(),
             selection: None,
             drag_anchor: None,
+            resize_drag: None,
+            header_drag: None,
             mouse_forward_pane: None,
             last_left_click: None,
             last_window_title: None,
@@ -1235,31 +1284,49 @@ impl App {
     /// every pane (gutter between split borders, padding, etc).
     fn px_to_pane_cell(&self, px: f32, py: f32) -> Option<(String, u16, u16)> {
         let ws = self.ws.lock().unwrap();
-        // The WINDOW_PADDING offset must match render_frame's origin —
-        // both the grid and the click reuse it so the math stays
-        // consistent on the boundary cells.
-        let col = ((px - SIDEBAR_W - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as u16;
-        let row = ((py - TITLE_HEIGHT).max(0.0) / self.cell.h).floor() as u16;
         if let Some(layout) = ws.layout.as_ref() {
+            let split = layout.leaves().len() > 1;
+            let header_h = if split { PANE_HEADER_HEIGHT } else { 0.0 };
+            // Box hit-test runs in whole-grid cells (header included, no
+            // inset) so a click anywhere in the pane box selects it.
+            let gcol = ((px - SIDEBAR_W - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as i32;
+            let grow = ((py - TITLE_HEIGHT).max(0.0) / self.cell.h).floor() as i32;
             for leaf in layout.leaves() {
                 if let Layout::Pane { id, x, y, w, h } = leaf {
-                    if col >= *x && col < x + w && row >= *y && row < y + h {
-                        let local_col = col - x;
-                        let local_row = row - y;
-                        return Some((format!("%{id}"), local_col, local_row));
+                    let (bx, by, bw, bh) = (*x as i32, *y as i32, *w as i32, *h as i32);
+                    if gcol >= bx && gcol < bx + bw && grow >= by && grow < by + bh {
+                        // Local cell uses the body origin: box edge + header
+                        // band + inner inset, matching the render origin.
+                        let box_left = SIDEBAR_W + WINDOW_PADDING + bx as f32 * self.cell.w;
+                        let box_top = TITLE_HEIGHT + by as f32 * self.cell.h;
+                        let lc = ((px - box_left - PANE_INNER_X).max(0.0) / self.cell.w).floor()
+                            as u16;
+                        let lr = ((py - box_top - header_h - PANE_INNER_Y).max(0.0)
+                            / self.cell.h)
+                            .floor() as u16;
+                        let pid = format!("%{id}");
+                        let (mc, mr) = ws.panes.get(&pid).map_or((lc, lr), |p| {
+                            (
+                                lc.min(p.cols.saturating_sub(1)),
+                                lr.min(p.rows.saturating_sub(1)),
+                            )
+                        });
+                        return Some((pid, mc, mr));
                     }
                 }
             }
             return None;
         }
-        // No layout yet — treat the whole window as the active pane.
-        // First-pane lookup matches what the render path falls back to.
+        // No layout yet — single pane fills the window (inset only).
         let id = ws.active_pane.clone().or_else(|| ws.panes.keys().next().cloned())?;
         let pane = ws.panes.get(&id)?;
         if pane.cols == 0 || pane.rows == 0 {
             return None;
         }
-        Some((id, col.min(pane.cols - 1), row.min(pane.rows - 1)))
+        let lc =
+            ((px - SIDEBAR_W - WINDOW_PADDING - PANE_INNER_X).max(0.0) / self.cell.w).floor() as u16;
+        let lr = ((py - TITLE_HEIGHT - PANE_INNER_Y).max(0.0) / self.cell.h).floor() as u16;
+        Some((id, lc.min(pane.cols - 1), lr.min(pane.rows - 1)))
     }
 
     /// Convenience wrapper that returns only the active pane's local
@@ -1357,14 +1424,56 @@ impl App {
         } else {
             0
         };
+        // Inset eats a couple of cells per axis so the grid fits inside
+        // the padded box. Done in cells (ceil) here to match the px inset
+        // the render origin applies — a hair of slack is fine, it just
+        // lands as extra trailing margin.
+        let inset_x_cells = (2.0 * PANE_INNER_X / self.cell.w.max(1.0)).ceil() as u16;
+        let inset_y_cells = (2.0 * PANE_INNER_Y / self.cell.h.max(1.0)).ceil() as u16;
         for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
             if let Some(sess) = self.pty.get(&id) {
-                let _ = sess.resize(w, h.saturating_sub(header_cells).max(1));
+                let pcols = w.saturating_sub(inset_x_cells).max(1);
+                let prows = h.saturating_sub(header_cells + inset_y_cells).max(1);
+                let _ = sess.resize(pcols, prows);
             }
         }
         // Re-publish the layout because rect proportions may have
         // shifted (rounding) and the renderer caches the previous tree.
         self.publish_pty_layout();
+    }
+
+    /// If the cursor (logical px) rests on a split seam, return the BSP
+    /// tree path of that split plus its axis. A few px of tolerance makes
+    /// the thin seam easy to grab. None when not over any divider.
+    fn divider_at_px(&self, x: f32, y: f32) -> Option<(Vec<u8>, pty_backend::SplitDir)> {
+        let tree = self.pty_layout.as_ref()?;
+        if tree.leaves().len() <= 1 {
+            return None;
+        }
+        let (cols, rows) = self.window_cells();
+        let pad = WINDOW_PADDING + SIDEBAR_W;
+        let tol = 6.0_f32;
+        for d in tree.dividers(cols, rows) {
+            match d.dir {
+                pty_backend::SplitDir::Horizontal => {
+                    let seam_x = pad + d.edge as f32 * self.cell.w;
+                    let y0 = TITLE_HEIGHT + d.span_start as f32 * self.cell.h;
+                    let y1 = y0 + d.span_len as f32 * self.cell.h;
+                    if (x - seam_x).abs() <= tol && y >= y0 && y <= y1 {
+                        return Some((d.path, d.dir));
+                    }
+                }
+                pty_backend::SplitDir::Vertical => {
+                    let seam_y = TITLE_HEIGHT + d.edge as f32 * self.cell.h;
+                    let x0 = pad + d.span_start as f32 * self.cell.w;
+                    let x1 = x0 + d.span_len as f32 * self.cell.w;
+                    if (y - seam_y).abs() <= tol && x >= x0 && x <= x1 {
+                        return Some((d.path, d.dir));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Split the focused pane in PTY mode. Spawns a new shell into a
@@ -1536,6 +1645,163 @@ impl App {
         ws.active_pane = Some(leaves[new_idx].clone());
         drop(ws);
         self.refresh_socket_snapshot();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Pane whose rectangle lies immediately in `dir` of the active pane
+    /// and overlaps it on the perpendicular axis. Picks the nearest by
+    /// centre distance so a tall neighbour split into several panes still
+    /// resolves to the one the user is pointing at. None when there is no
+    /// pane on that side.
+    fn adjacent_pane(&self, dir: FocusDir) -> Option<String> {
+        let tree = self.pty_layout.as_ref()?;
+        let (cols, rows) = self.window_cells();
+        let rects = tree.leaf_rects(cols, rows);
+        if rects.len() < 2 {
+            return None;
+        }
+        let active = self.ws.lock().unwrap().active_pane.clone()?;
+        let cur = rects.iter().find(|(id, ..)| id == &active)?;
+        let (cx, cy, cw, ch) = (cur.1 as f32, cur.2 as f32, cur.3 as f32, cur.4 as f32);
+        let (acx, acy) = (cx + cw / 2.0, cy + ch / 2.0);
+        let mut best: Option<(String, f32)> = None;
+        for (id, x, y, w, h) in &rects {
+            if id == &active {
+                continue;
+            }
+            let (x, y, w, h) = (*x as f32, *y as f32, *w as f32, *h as f32);
+            let overlap_y = y < cy + ch && y + h > cy;
+            let overlap_x = x < cx + cw && x + w > cx;
+            let ok = match dir {
+                FocusDir::Left => x + w <= cx + 1.0 && overlap_y,
+                FocusDir::Right => x >= cx + cw - 1.0 && overlap_y,
+                FocusDir::Up => y + h <= cy + 1.0 && overlap_x,
+                FocusDir::Down => y >= cy + ch - 1.0 && overlap_x,
+            };
+            if !ok {
+                continue;
+            }
+            let dist = (x + w / 2.0 - acx).abs() + (y + h / 2.0 - acy).abs();
+            if best.as_ref().is_none_or(|(_, d)| dist < *d) {
+                best = Some((id.clone(), dist));
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// Move keyboard focus to the adjacent pane in `dir`.
+    fn focus_dir(&self, dir: FocusDir) {
+        if let Some(id) = self.adjacent_pane(dir) {
+            self.ws.lock().unwrap().active_pane = Some(id);
+            self.refresh_socket_snapshot();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Swap the active pane with its neighbour in `dir`. The BSP tree
+    /// exchanges the two leaves' ids, so each pane's content moves into
+    /// the other's slot while the PTYs stay put; focus rides along with
+    /// the active id into its new position.
+    fn swap_dir(&mut self, dir: FocusDir) {
+        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
+            return;
+        };
+        let Some(target) = self.adjacent_pane(dir) else {
+            return;
+        };
+        if let Some(tree) = self.pty_layout.as_mut() {
+            tree.swap_leaves(&active, &target);
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Pane whose header band contains the cursor (logical px), or None.
+    /// Headers only exist when the workspace is split.
+    fn header_at_px(&self, x: f32, y: f32) -> Option<String> {
+        let tree = self.pty_layout.as_ref()?;
+        let (cols, rows) = self.window_cells();
+        let rects = tree.leaf_rects(cols, rows);
+        if rects.len() <= 1 {
+            return None;
+        }
+        let pad = WINDOW_PADDING + SIDEBAR_W;
+        for (id, cx, cy, cw, _ch) in rects {
+            let bx = pad + cx as f32 * self.cell.w;
+            let by = TITLE_HEIGHT + cy as f32 * self.cell.h;
+            let bw = cw as f32 * self.cell.w;
+            if x >= bx && x <= bx + bw && y >= by && y <= by + PANE_HEADER_HEIGHT {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// Pane + edge the cursor is over, for header drag-and-drop. The zone
+    /// is the dominant axis from the pane box centre, so the cursor always
+    /// resolves to one of the four edges. None when off every pane.
+    fn drop_target_at(&self, x: f32, y: f32) -> Option<(String, DropZone)> {
+        let tree = self.pty_layout.as_ref()?;
+        let (cols, rows) = self.window_cells();
+        let rects = tree.leaf_rects(cols, rows);
+        let pad = WINDOW_PADDING + SIDEBAR_W;
+        for (id, cx, cy, cw, ch) in rects {
+            let bx = pad + cx as f32 * self.cell.w;
+            let by = TITLE_HEIGHT + cy as f32 * self.cell.h;
+            let bw = (cw as f32 * self.cell.w).max(1.0);
+            let bh = (ch as f32 * self.cell.h).max(1.0);
+            if x >= bx && x <= bx + bw && y >= by && y <= by + bh {
+                let dx = (x - bx) / bw - 0.5;
+                let dy = (y - by) / bh - 0.5;
+                let zone = if dx.abs() > dy.abs() {
+                    if dx < 0.0 { DropZone::Left } else { DropZone::Right }
+                } else if dy < 0.0 {
+                    DropZone::Up
+                } else {
+                    DropZone::Down
+                };
+                return Some((id, zone));
+            }
+        }
+        None
+    }
+
+    /// Relocate `moving` next to `target` along the edge given by `zone`.
+    /// Detaches the moving leaf (its PTY stays alive) and re-attaches it
+    /// beside the target, then resizes every pane to its new rect. No-op
+    /// when source and target are the same pane.
+    fn move_pane(&mut self, moving: &str, target: &str, zone: DropZone) {
+        if moving == target {
+            return;
+        }
+        let (dir, before) = match zone {
+            DropZone::Left => (pty_backend::SplitDir::Horizontal, true),
+            DropZone::Right => (pty_backend::SplitDir::Horizontal, false),
+            DropZone::Up => (pty_backend::SplitDir::Vertical, true),
+            DropZone::Down => (pty_backend::SplitDir::Vertical, false),
+        };
+        if let Some(tree) = self.pty_layout.as_mut() {
+            if !tree.remove_leaf(moving) {
+                return;
+            }
+            if !tree.insert_beside(target, dir, before, moving.to_string()) {
+                // Target vanished (shouldn't happen) — re-attach beside
+                // the first surviving leaf so the pane isn't orphaned.
+                if let Some(anchor) = tree.leaves().first().map(|s| s.to_string()) {
+                    tree.insert_beside(&anchor, dir, before, moving.to_string());
+                }
+            }
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.ws.lock().unwrap().active_pane = Some(moving.to_string());
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -1985,6 +2251,27 @@ impl App {
                         self.cycle_focus(1);
                         return;
                     }
+                    // Cmd+Option+Arrow → move focus to the spatially
+                    // adjacent pane; add Shift to swap the two panes.
+                    // iTerm uses the same chord. Gated on Option so plain
+                    // Cmd+Arrow still reaches the shell (line start/end).
+                    if self.modifiers.alt_key() {
+                        let fdir = match code {
+                            KeyCode::ArrowLeft => Some(FocusDir::Left),
+                            KeyCode::ArrowRight => Some(FocusDir::Right),
+                            KeyCode::ArrowUp => Some(FocusDir::Up),
+                            KeyCode::ArrowDown => Some(FocusDir::Down),
+                            _ => None,
+                        };
+                        if let Some(d) = fdir {
+                            if self.modifiers.shift_key() {
+                                self.swap_dir(d);
+                            } else {
+                                self.focus_dir(d);
+                            }
+                            return;
+                        }
+                    }
                     // Font zoom: host_mod + = (or Shift = +) increases,
                     // host_mod + - (or Shift = _) decreases. `0` resets
                     // to the default. Layout the same as VS Code,
@@ -2312,11 +2599,24 @@ impl App {
             pane_x,
             pane_y,
         ) = snap.unwrap_or((0, 0, false, 80, 0, 0, preedit_text.clone(), 0, 0));
+        // When split, every pane body is pushed down by its header band.
+        // The cursor / preedit / selection overlays anchor off the same
+        // origin as the cells, so they must apply the identical shift —
+        // otherwise the cursor floats up into the header row.
+        let header_shift = if self
+            .pty_layout
+            .as_ref()
+            .is_some_and(|t| t.leaves().len() > 1)
+        {
+            PANE_HEADER_HEIGHT
+        } else {
+            0.0
+        };
         GpuOverlay {
             cell_w: self.cell.w,
             cell_h: self.cell.h,
-            pad_x: WINDOW_PADDING + SIDEBAR_W + pane_x as f32 * self.cell.w,
-            pad_y: TITLE_HEIGHT + pane_y as f32 * self.cell.h,
+            pad_x: WINDOW_PADDING + SIDEBAR_W + pane_x as f32 * self.cell.w + PANE_INNER_X,
+            pad_y: TITLE_HEIGHT + pane_y as f32 * self.cell.h + header_shift + PANE_INNER_Y,
             cursor_row,
             cursor_col,
             cursor_visible,
@@ -2394,6 +2694,9 @@ impl App {
             x: f32,
             y: f32,
             w: f32,
+            /// Full pane box height (header + body) in logical px, used
+            /// to draw the divider / active-focus ring around the pane.
+            box_h: f32,
             label: String,
             is_active: bool,
             color: Option<[u8; 4]>,
@@ -2403,20 +2706,20 @@ impl App {
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
-            let leaves: Vec<(String, u16, u16, u16)> = if let Some(layout) = ws.layout.as_ref() {
+            let leaves: Vec<(String, u16, u16, u16, u16)> = if let Some(layout) = ws.layout.as_ref() {
                 layout
                     .leaves()
                     .into_iter()
                     .filter_map(|n| match n {
-                        Layout::Pane { id, x, y, w, .. } => {
-                            Some((format!("%{id}"), *x, *y, *w))
+                        Layout::Pane { id, x, y, w, h } => {
+                            Some((format!("%{id}"), *x, *y, *w, *h))
                         }
                         _ => None,
                     })
                     .collect()
             } else {
                 match ws.panes.iter().next() {
-                    Some((id, _)) => vec![(id.clone(), 0, 0, 0)],
+                    Some((id, _)) => vec![(id.clone(), 0, 0, 0, 0)],
                     None => Vec::new(),
                 }
             };
@@ -2430,7 +2733,7 @@ impl App {
             };
             let mut slots = Vec::new();
             let mut headers = Vec::new();
-            for (id, x_cells, y_cells, w_cells) in leaves {
+            for (id, x_cells, y_cells, w_cells, h_cells) in leaves {
                 let Some(pane) = ws.panes.get(&id) else { continue };
                 // pane.cells already holds the correct view: the PTY
                 // backend snapshots through alacritty's display_offset,
@@ -2450,27 +2753,41 @@ impl App {
                 };
                 let composed: Vec<Vec<GridCell>> =
                     pane.cells.iter().map(normalise).collect();
-                // Cells start below the header band when split.
+                // Cells start below the header band when split, and are
+                // inset inside the pane box so text never jams the divider
+                // or window edge.
                 let origin_px = (
-                    pad_px + x_cells as f32 * cell_w_px,
-                    title_px + y_cells as f32 * cell_h_px + header_shift_px,
+                    pad_px + x_cells as f32 * cell_w_px + PANE_INNER_X * scale,
+                    title_px
+                        + y_cells as f32 * cell_h_px
+                        + header_shift_px
+                        + PANE_INNER_Y * scale,
                 );
                 slots.push(PaneSlot {
                     rows: composed,
                     origin_px,
                 });
                 if show_headers {
-                    // Custom title (rename) wins; fall back to pane id.
+                    // Custom title (rename / OSC) wins; otherwise show the
+                    // live foreground process (vim, claude, zsh …); only
+                    // fall back to the raw "%N" pane id if both are empty.
+                    let proc_name = self
+                        .pty
+                        .get(&id)
+                        .and_then(|p| p.active_process_name())
+                        .filter(|t| !t.is_empty());
                     let label = pane
                         .title
                         .clone()
                         .filter(|t| !t.is_empty())
+                        .or(proc_name)
                         .unwrap_or_else(|| id.clone());
                     headers.push(HeaderInfo {
                         id: id.clone(),
                         x: WINDOW_PADDING + SIDEBAR_W + x_cells as f32 * self.cell.w,
                         y: TITLE_HEIGHT + y_cells as f32 * self.cell.h,
                         w: w_cells as f32 * self.cell.w,
+                        box_h: h_cells as f32 * self.cell.h,
                         label,
                         is_active: active_id.as_deref() == Some(id.as_str()),
                         color: pane.color,
@@ -2503,6 +2820,34 @@ impl App {
                 (h.id.clone(), close)
             })
             .collect();
+        // Drop-zone overlay: while a header drag is active, highlight the
+        // half of the target pane the dragged pane would land in. Computed
+        // here (immutable self borrow) so the gpu block below only touches
+        // the cached rect.
+        let drop_zone_rect: Option<(f32, f32, f32, f32)> = self
+            .header_drag
+            .as_ref()
+            .filter(|hd| hd.active)
+            .and_then(|_| self.drop_target_at(self.cursor_px.0, self.cursor_px.1))
+            .and_then(|(target, zone)| {
+                let tree = self.pty_layout.as_ref()?;
+                let (cols, rows) = self.window_cells();
+                let pad = WINDOW_PADDING + SIDEBAR_W;
+                let (_, cx, cy, cw, ch) = tree
+                    .leaf_rects(cols, rows)
+                    .into_iter()
+                    .find(|(id, ..)| *id == target)?;
+                let bx = pad + cx as f32 * self.cell.w;
+                let by = TITLE_HEIGHT + cy as f32 * self.cell.h;
+                let bw = cw as f32 * self.cell.w;
+                let bh = ch as f32 * self.cell.h;
+                Some(match zone {
+                    DropZone::Left => (bx, by, bw / 2.0, bh),
+                    DropZone::Right => (bx + bw / 2.0, by, bw / 2.0, bh),
+                    DropZone::Up => (bx, by, bw, bh / 2.0),
+                    DropZone::Down => (bx, by + bh / 2.0, bw, bh / 2.0),
+                })
+            });
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             g.draw_cells(&slot_views);
@@ -2552,7 +2897,28 @@ impl App {
                     },
                 );
             }
+            // Pane focus ring + dividers. Each pane box (header + body)
+            // gets a thin border; abutting panes show the dark seam as a
+            // divider, and the active pane wears a brighter, thicker ring
+            // so the focused target is unmistakable. Inactive first so
+            // the active ring paints on top at shared edges.
+            let draw_ring = |g: &mut gpu::GpuRenderer, h: &HeaderInfo, col: [u8; 4], t: f32| {
+                g.rect(h.x, h.y, h.w, t, col);
+                g.rect(h.x, h.y + h.box_h - t, h.w, t, col);
+                g.rect(h.x, h.y, t, h.box_h, col);
+                g.rect(h.x + h.w - t, h.y, t, h.box_h, col);
+            };
+            for h in headers.iter().filter(|h| !h.is_active) {
+                draw_ring(g, h, [10, 13, 18, 255], 1.0);
+            }
+            for h in headers.iter().filter(|h| h.is_active) {
+                draw_ring(g, h, [90, 140, 230, 255], 2.0);
+            }
             Self::paint_gpu_overlays(g, &overlay);
+            // Drop-zone highlight sits on top of everything during a drag.
+            if let Some((zx, zy, zw, zh)) = drop_zone_rect {
+                g.rect(zx, zy, zw, zh, [90, 140, 230, 90]);
+            }
             if let Err(e) = g.render(&slot_views, scale) {
                 eprintln!("[gpu] render error: {e:?}");
             }
@@ -3326,6 +3692,44 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = window.scale_factor() as f32;
                 self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                // Divider drag in progress: re-derive the split ratio from
+                // the cursor and resize every affected PTY. Takes priority
+                // over selection / mouse-forwarding so the grab stays sticky.
+                if let Some((path, dir)) = self.resize_drag.clone() {
+                    let (cols, rows) = self.window_cells();
+                    let pad = WINDOW_PADDING + SIDEBAR_W;
+                    let pos = match dir {
+                        pty_backend::SplitDir::Horizontal => (((self.cursor_px.0 - pad)
+                            / self.cell.w.max(1.0))
+                        .round() as i32)
+                            .clamp(0, cols as i32) as u16,
+                        pty_backend::SplitDir::Vertical => (((self.cursor_px.1 - TITLE_HEIGHT)
+                            / self.cell.h.max(1.0))
+                        .round() as i32)
+                            .clamp(0, rows as i32) as u16,
+                    };
+                    if let Some(tree) = self.pty_layout.as_mut() {
+                        tree.resize_divider(&path, pos, cols, rows);
+                    }
+                    self.resize_backend(cols, rows);
+                    window.request_redraw();
+                    return;
+                }
+                // Header drag in progress: flip to active once past the
+                // threshold, then keep redrawing so the drop-zone overlay
+                // tracks the cursor.
+                if let Some(hd) = self.header_drag.as_mut() {
+                    let dx = self.cursor_px.0 - hd.start.0;
+                    let dy = self.cursor_px.1 - hd.start.1;
+                    if !hd.active && dx * dx + dy * dy > 25.0 {
+                        hd.active = true;
+                    }
+                    if hd.active {
+                        window.set_cursor(CursorIcon::Grabbing);
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // Drag inside a mouse-reporting TUI: relay motion as
                 // SGR button-32 (left button held) into the same pane
                 // we sent the press to, so Claude Code / vim / less
@@ -3342,6 +3746,18 @@ impl ApplicationHandler<UserEvent> for App {
                 ) {
                     self.selection = Some(Selection { anchor, end: cell });
                     window.request_redraw();
+                } else {
+                    // Hover feedback: show a resize cursor over a seam so
+                    // the divider reads as draggable.
+                    let icon = match self
+                        .divider_at_px(self.cursor_px.0, self.cursor_px.1)
+                        .map(|(_, d)| d)
+                    {
+                        Some(pty_backend::SplitDir::Horizontal) => CursorIcon::ColResize,
+                        Some(pty_backend::SplitDir::Vertical) => CursorIcon::RowResize,
+                        None => CursorIcon::Default,
+                    };
+                    window.set_cursor(icon);
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
@@ -3364,6 +3780,33 @@ impl ApplicationHandler<UserEvent> for App {
                         // as Cmd+W and socket close. Beats sending the
                         // shell `exit` and waiting for the reap pass.
                         self.remove_pane(&id);
+                        return;
+                    }
+                    // Grab a split seam → start a divider drag. Checked
+                    // before the cell-grid click so dragging the boundary
+                    // never doubles as a text selection in the pane under
+                    // it.
+                    if let Some((path, dir)) =
+                        self.divider_at_px(self.cursor_px.0, self.cursor_px.1)
+                    {
+                        self.resize_drag = Some((path, dir));
+                        return;
+                    }
+                    // Press on a pane header (not the × button) → focus it
+                    // and arm a drag-and-drop relocation. It only becomes
+                    // a real drag once the cursor passes the threshold, so
+                    // a plain header click just focuses.
+                    if let Some(pane) =
+                        self.header_at_px(self.cursor_px.0, self.cursor_px.1)
+                    {
+                        self.ws.lock().unwrap().active_pane = Some(pane.clone());
+                        self.header_drag = Some(HeaderDrag {
+                            pane,
+                            start: self.cursor_px,
+                            active: false,
+                        });
+                        self.refresh_socket_snapshot();
+                        window.request_redraw();
                         return;
                     }
                 }
@@ -3437,6 +3880,26 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     ElementState::Released => {
+                        // End a divider drag without falling through to the
+                        // selection-release path under it.
+                        if self.resize_drag.take().is_some() {
+                            return;
+                        }
+                        // Drop a header drag: relocate onto the target
+                        // pane's edge. A non-active drag was just a click
+                        // (focus already happened on press), so we only
+                        // reset the cursor.
+                        if let Some(hd) = self.header_drag.take() {
+                            window.set_cursor(CursorIcon::Default);
+                            if hd.active {
+                                if let Some((target, zone)) =
+                                    self.drop_target_at(self.cursor_px.0, self.cursor_px.1)
+                                {
+                                    self.move_pane(&hd.pane, &target, zone);
+                                }
+                            }
+                            return;
+                        }
                         // Mouse-reporting drag end: forward the release
                         // so the TUI can finalize its selection /
                         // copy-on-select.
