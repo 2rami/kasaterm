@@ -3359,9 +3359,11 @@ impl ApplicationHandler<UserEvent> for App {
                         })
                         .map(|(id, _)| id.clone());
                     if let Some(id) = hit {
-                        if let Some(pty) = self.pty.get(&id) {
-                            let _ = pty.send_bytes(b"exit\n");
-                        }
+                        // × button → close that pane directly (drop the
+                        // leaf + kill the PTY via remove_pane), same path
+                        // as Cmd+W and socket close. Beats sending the
+                        // shell `exit` and waiting for the reap pass.
+                        self.remove_pane(&id);
                         return;
                     }
                 }
