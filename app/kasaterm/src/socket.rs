@@ -102,6 +102,22 @@ impl Backend for TmuxBackend {
             .join(" ");
         self.tmux.send_keys_hex(None, &hex)
     }
+
+    fn close_surface(&self, _surface_id: &str) -> Result<()> {
+        anyhow::bail!("close_surface not supported on the tmux backend")
+    }
+
+    fn rename_surface(&self, _surface_id: &str, _title: &str) -> Result<()> {
+        anyhow::bail!("rename_surface not supported on the tmux backend")
+    }
+
+    fn set_color(&self, _surface_id: &str, _color: [u8; 4]) -> Result<()> {
+        anyhow::bail!("set_color not supported on the tmux backend")
+    }
+
+    fn swap_surfaces(&self, _a: &str, _b: &str) -> Result<()> {
+        anyhow::bail!("swap_surfaces not supported on the tmux backend")
+    }
 }
 
 /// Shared key-to-bytes table used by both TmuxBackend and PtyBackend so
@@ -176,6 +192,25 @@ pub enum PtyCommand {
     SendBytes {
         pane_id: Option<String>,
         bytes: Vec<u8>,
+        reply: SyncSender<Result<()>>,
+    },
+    Close {
+        pane_id: String,
+        reply: SyncSender<Result<()>>,
+    },
+    Rename {
+        pane_id: String,
+        title: String,
+        reply: SyncSender<Result<()>>,
+    },
+    SetColor {
+        pane_id: String,
+        color: [u8; 4],
+        reply: SyncSender<Result<()>>,
+    },
+    Swap {
+        a: String,
+        b: String,
         reply: SyncSender<Result<()>>,
     },
 }
@@ -267,5 +302,27 @@ impl Backend for PtyBackend {
         let pane_id = surface_id.map(|s| s.to_string());
         let bytes = key_to_bytes(key);
         self.submit(|reply| PtyCommand::SendBytes { pane_id, bytes, reply })
+    }
+
+    fn close_surface(&self, surface_id: &str) -> Result<()> {
+        let id = surface_id.to_string();
+        self.submit(|reply| PtyCommand::Close { pane_id: id, reply })
+    }
+
+    fn rename_surface(&self, surface_id: &str, title: &str) -> Result<()> {
+        let id = surface_id.to_string();
+        let title = title.to_string();
+        self.submit(|reply| PtyCommand::Rename { pane_id: id, title, reply })
+    }
+
+    fn set_color(&self, surface_id: &str, color: [u8; 4]) -> Result<()> {
+        let id = surface_id.to_string();
+        self.submit(|reply| PtyCommand::SetColor { pane_id: id, color, reply })
+    }
+
+    fn swap_surfaces(&self, a: &str, b: &str) -> Result<()> {
+        let a = a.to_string();
+        let b = b.to_string();
+        self.submit(|reply| PtyCommand::Swap { a, b, reply })
     }
 }

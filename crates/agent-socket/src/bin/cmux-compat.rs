@@ -67,7 +67,11 @@ fn print_help() {
     eprintln!("  cmux-compat identify");
     eprintln!("  cmux-compat list <workspaces|surfaces>");
     eprintln!("  cmux-compat focus <surface_id>");
+    eprintln!("  cmux-compat close <surface_id>");
+    eprintln!("  cmux-compat rename <surface_id> <title>");
+    eprintln!("  cmux-compat color <surface_id> <#rrggbb>");
     eprintln!("  cmux-compat split <left|right|up|down>");
+    eprintln!("  cmux-compat swap  <surface_a> <surface_b>");
     eprintln!("  cmux-compat send  <text>");
     eprintln!("  cmux-compat send  --surface <id> <text>");
     eprintln!("  cmux-compat key   <enter|tab|escape|backspace|delete|up|down|left|right>");
@@ -101,11 +105,50 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .ok_or_else(|| anyhow!("focus needs a surface_id"))?;
             ("surface.focus", json!({ "surface_id": surface }))
         }
+        "close" => {
+            let surface = args
+                .first()
+                .ok_or_else(|| anyhow!("close needs a surface_id"))?;
+            ("surface.close", json!({ "surface_id": surface }))
+        }
+        "rename" => {
+            let surface = args
+                .first()
+                .ok_or_else(|| anyhow!("rename needs <surface_id> <title>"))?;
+            let title = args
+                .get(1)
+                .ok_or_else(|| anyhow!("rename needs a title"))?;
+            (
+                "surface.rename",
+                json!({ "surface_id": surface, "title": title }),
+            )
+        }
+        "color" => {
+            let surface = args
+                .first()
+                .ok_or_else(|| anyhow!("color needs <surface_id> <#rrggbb>"))?;
+            let color = args
+                .get(1)
+                .ok_or_else(|| anyhow!("color needs a #rrggbb value"))?;
+            (
+                "surface.set_color",
+                json!({ "surface_id": surface, "color": color }),
+            )
+        }
         "split" => {
             let dir = args
                 .first()
                 .ok_or_else(|| anyhow!("split needs a direction"))?;
             ("surface.split", json!({ "direction": dir }))
+        }
+        "swap" => {
+            let a = args
+                .first()
+                .ok_or_else(|| anyhow!("swap needs <surface_a> <surface_b>"))?;
+            let b = args
+                .get(1)
+                .ok_or_else(|| anyhow!("swap needs a second surface_id"))?;
+            ("surface.swap", json!({ "a": a, "b": b }))
         }
         "send" => {
             // Two argument shapes:

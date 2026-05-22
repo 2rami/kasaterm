@@ -54,4 +54,12 @@ pub trait Backend: Send + Sync {
     fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo>;
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()>;
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()>;
+    /// Close (kill) a surface by id. Removes its leaf from the layout.
+    fn close_surface(&self, surface_id: &str) -> Result<()>;
+    /// Set a surface's header title (rename).
+    fn rename_surface(&self, surface_id: &str, title: &str) -> Result<()>;
+    /// Set a surface's accent color (header band), RGBA 0..255.
+    fn set_color(&self, surface_id: &str, color: [u8; 4]) -> Result<()>;
+    /// Swap two surfaces' positions in the layout.
+    fn swap_surfaces(&self, a: &str, b: &str) -> Result<()>;
 }

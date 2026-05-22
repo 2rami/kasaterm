@@ -123,6 +123,38 @@ impl PtyLayout {
         }
     }
 
+    /// Swap the tree positions of two leaves by exchanging their pane
+    /// ids in place. The renderer and PTY maps key off the id, so this
+    /// moves pane A into B's slot and vice versa without touching the
+    /// PTYs themselves. Returns false if either id is missing or equal.
+    pub fn swap_leaves(&mut self, a: &str, b: &str) -> bool {
+        if a == b {
+            return false;
+        }
+        let leaves = self.leaves();
+        if !leaves.iter().any(|&l| l == a) || !leaves.iter().any(|&l| l == b) {
+            return false;
+        }
+        self.swap_ids(a, b);
+        true
+    }
+
+    fn swap_ids(&mut self, a: &str, b: &str) {
+        match self {
+            PtyLayout::Leaf { pane_id } => {
+                if pane_id == a {
+                    *pane_id = b.to_string();
+                } else if pane_id == b {
+                    *pane_id = a.to_string();
+                }
+            }
+            PtyLayout::Split { a: ca, b: cb, .. } => {
+                ca.swap_ids(a, b);
+                cb.swap_ids(a, b);
+            }
+        }
+    }
+
     /// Walks the tree and produces a list of leaf rectangles. Each entry
     /// is `(pane_id, x, y, w, h)` in cell coordinates. Used by the
     /// resize path to SIGWINCH each PTY to its share.
