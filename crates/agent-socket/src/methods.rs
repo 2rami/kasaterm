@@ -50,6 +50,10 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.split" => surface_split(backend, id, &req.params),
         "surface.send_text" => surface_send_text(backend, id, &req.params),
         "surface.send_key" => surface_send_key(backend, id, &req.params),
+        "surface.close" => surface_close(backend, id, &req.params),
+        "surface.rename" => surface_rename(backend, id, &req.params),
+        "surface.set_color" => surface_set_color(backend, id, &req.params),
+        "surface.swap" => surface_swap(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -124,6 +128,74 @@ fn surface_focus(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
+}
+
+fn surface_close(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.close requires `surface_id` (string)"),
+    };
+    match backend.close_surface(surface_id) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_rename(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.rename requires `surface_id` (string)"),
+    };
+    let title = match params.get("title").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.rename requires `title` (string)"),
+    };
+    match backend.rename_surface(surface_id, title) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_set_color(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.set_color requires `surface_id` (string)"),
+    };
+    let color = match params.get("color").and_then(|v| v.as_str()).and_then(parse_hex_color) {
+        Some(c) => c,
+        None => return param_err(id, "surface.set_color requires `color` as #rrggbb"),
+    };
+    match backend.set_color(surface_id, color) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_swap(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let a = match params.get("a").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.swap requires `a` (surface_id)"),
+    };
+    let b = match params.get("b").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.swap requires `b` (surface_id)"),
+    };
+    match backend.swap_surfaces(a, b) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// Parse `#rrggbb` (or bare `rrggbb`) into RGBA with full alpha.
+fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
+    let s = s.strip_prefix('#').unwrap_or(s);
+    if s.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some([r, g, b, 255])
 }
 
 fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {

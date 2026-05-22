@@ -262,6 +262,9 @@ struct PaneState {
     /// pane lands here. The active pane's title is applied to the
     /// window chrome.
     title: Option<String>,
+    /// Accent color for this pane's header band (RGBA), set via
+    /// `surface.set_color`. None = default theme band color.
+    color: Option<[u8; 4]>,
     /// Frame-dirty flag. Set whenever a PTY update lands new bytes,
     /// the user scrolls, or focus switches; cleared after the next
     /// render. When *every* pane is clean and no chrome-level anim
@@ -1148,6 +1151,76 @@ impl App {
                         None => Err(anyhow::anyhow!("no surface to send to")),
                     };
                     let _ = reply.send(res);
+                }
+                socket::PtyCommand::Close { pane_id, reply } => {
+                    if self.pty.contains_key(&pane_id) {
+                        // remove_pane kills the PTY, drops the leaf from
+                        // the BSP layout, reassigns focus, and redraws —
+                        // same path Cmd+W uses.
+                        self.remove_pane(&pane_id);
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err(anyhow::anyhow!(
+                            "no such surface: {pane_id}"
+                        )));
+                    }
+                }
+                socket::PtyCommand::Rename { pane_id, title, reply } => {
+                    // Existence via self.pty (layout/pty truth) — ws.panes
+                    // may not have the leaf yet right after a split (no
+                    // shell output landed). pane_mut creates it so the
+                    // title sticks until the first ScreenUpdate fills it.
+                    if self.pty.contains_key(&pane_id) {
+                        self.ws.lock().unwrap().pane_mut(&pane_id).title = Some(title);
+                        self.chrome_dirty = true;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err(anyhow::anyhow!(
+                            "no such surface: {pane_id}"
+                        )));
+                    }
+                }
+                socket::PtyCommand::SetColor { pane_id, color, reply } => {
+                    if self.pty.contains_key(&pane_id) {
+                        self.ws.lock().unwrap().pane_mut(&pane_id).color = Some(color);
+                        self.chrome_dirty = true;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err(anyhow::anyhow!(
+                            "no such surface: {pane_id}"
+                        )));
+                    }
+                }
+                socket::PtyCommand::Swap { a, b, reply } => {
+                    let both = self.pty.contains_key(&a) && self.pty.contains_key(&b);
+                    let swapped = both
+                        && self
+                            .pty_layout
+                            .as_mut()
+                            .map(|l| l.swap_leaves(&a, &b))
+                            .unwrap_or(false);
+                    if swapped {
+                        // Re-SIGWINCH each pane to its new rect and
+                        // republish the layout so the renderer + socket
+                        // snapshot reflect the swapped positions.
+                        let (cols, rows) = self.window_cells();
+                        self.resize_backend(cols, rows);
+                        self.publish_pty_layout();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                        let _ = reply.send(Ok(()));
+                    } else {
+                        let _ = reply.send(Err(anyhow::anyhow!(
+                            "swap: surface {a} or {b} not found"
+                        )));
+                    }
                 }
             }
         }
@@ -2314,27 +2387,50 @@ impl App {
             rows: Vec<Vec<GridCell>>,
             origin_px: (f32, f32),
         }
+        // Header chrome carried in LOGICAL px — gpu.rect/draw_text
+        // promote to physical internally, matching the cell pass.
+        struct HeaderInfo {
+            id: String,
+            x: f32,
+            y: f32,
+            w: f32,
+            label: String,
+            is_active: bool,
+            color: Option<[u8; 4]>,
+        }
         let pad_px = (WINDOW_PADDING + SIDEBAR_W) * scale;
         let title_px = TITLE_HEIGHT * scale;
-        let slots: Vec<PaneSlot> = {
+        let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
-            let leaves: Vec<(String, u16, u16)> = if let Some(layout) = ws.layout.as_ref() {
+            let active_id = ws.active_pane.clone();
+            let leaves: Vec<(String, u16, u16, u16)> = if let Some(layout) = ws.layout.as_ref() {
                 layout
                     .leaves()
                     .into_iter()
                     .filter_map(|n| match n {
-                        Layout::Pane { id, x, y, .. } => Some((format!("%{id}"), *x, *y)),
+                        Layout::Pane { id, x, y, w, .. } => {
+                            Some((format!("%{id}"), *x, *y, *w))
+                        }
                         _ => None,
                     })
                     .collect()
             } else {
                 match ws.panes.iter().next() {
-                    Some((id, _)) => vec![(id.clone(), 0, 0)],
+                    Some((id, _)) => vec![(id.clone(), 0, 0, 0)],
                     None => Vec::new(),
                 }
             };
-            let mut out = Vec::new();
-            for (id, x_cells, y_cells) in leaves {
+            // Header bar only when split — a lone pane stays header-less
+            // so the first session reads as a plain terminal.
+            let show_headers = leaves.len() > 1;
+            let header_shift_px = if show_headers {
+                PANE_HEADER_HEIGHT * scale
+            } else {
+                0.0
+            };
+            let mut slots = Vec::new();
+            let mut headers = Vec::new();
+            for (id, x_cells, y_cells, w_cells) in leaves {
                 let Some(pane) = ws.panes.get(&id) else { continue };
                 // pane.cells already holds the correct view: the PTY
                 // backend snapshots through alacritty's display_offset,
@@ -2354,16 +2450,34 @@ impl App {
                 };
                 let composed: Vec<Vec<GridCell>> =
                     pane.cells.iter().map(normalise).collect();
+                // Cells start below the header band when split.
                 let origin_px = (
                     pad_px + x_cells as f32 * cell_w_px,
-                    title_px + y_cells as f32 * cell_h_px,
+                    title_px + y_cells as f32 * cell_h_px + header_shift_px,
                 );
-                out.push(PaneSlot {
+                slots.push(PaneSlot {
                     rows: composed,
                     origin_px,
                 });
+                if show_headers {
+                    // Custom title (rename) wins; fall back to pane id.
+                    let label = pane
+                        .title
+                        .clone()
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| id.clone());
+                    headers.push(HeaderInfo {
+                        id: id.clone(),
+                        x: WINDOW_PADDING + SIDEBAR_W + x_cells as f32 * self.cell.w,
+                        y: TITLE_HEIGHT + y_cells as f32 * self.cell.h,
+                        w: w_cells as f32 * self.cell.w,
+                        label,
+                        is_active: active_id.as_deref() == Some(id.as_str()),
+                        color: pane.color,
+                    });
+                }
             }
-            out
+            (slots, headers)
         };
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
@@ -2373,9 +2487,71 @@ impl App {
             })
             .collect();
         let overlay = self.gpu_overlay_snapshot();
+        // Cache the × close-button hit rects (logical) for the mouse
+        // handler, even before the GPU borrow below.
+        let chrome_font = 14.0_f32;
+        let close_size = chrome_font + 4.0;
+        self.pane_header_rects = headers
+            .iter()
+            .map(|h| {
+                let close = (
+                    h.x + 6.0,
+                    h.y + (PANE_HEADER_HEIGHT - close_size) / 2.0,
+                    close_size,
+                    close_size,
+                );
+                (h.id.clone(), close)
+            })
+            .collect();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             g.draw_cells(&slot_views);
+            // Per-pane header bar: band + bottom hairline + × close
+            // glyph + title. Active pane gets a brighter band and bold
+            // title, matching the sugarloaf path's iTerm-style chrome.
+            for h in &headers {
+                let bg = match h.color {
+                    Some(c) => c,
+                    None if h.is_active => [41, 51, 71, 255],
+                    None => [26, 31, 38, 255],
+                };
+                g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, bg);
+                g.rect(
+                    h.x,
+                    h.y + PANE_HEADER_HEIGHT - 1.0,
+                    h.w,
+                    1.0,
+                    [10, 13, 18, 255],
+                );
+                let fg: [u8; 4] = if h.is_active {
+                    [230, 232, 238, 255]
+                } else {
+                    [160, 165, 172, 255]
+                };
+                let text_y = h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0;
+                g.draw_text(
+                    h.x + 6.0,
+                    text_y,
+                    "x",
+                    gpu::DrawOpts {
+                        font_size: close_size,
+                        color: fg,
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                g.draw_text(
+                    h.x + 6.0 + close_size + 8.0,
+                    text_y,
+                    &h.label,
+                    gpu::DrawOpts {
+                        font_size: chrome_font,
+                        color: fg,
+                        bold: h.is_active,
+                        italic: false,
+                    },
+                );
+            }
             Self::paint_gpu_overlays(g, &overlay);
             if let Err(e) = g.render(&slot_views, scale) {
                 eprintln!("[gpu] render error: {e:?}");

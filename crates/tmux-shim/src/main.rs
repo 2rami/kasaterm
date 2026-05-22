@@ -200,7 +200,9 @@ fn handle_known(args: &[String]) -> Option<i32> {
         "split-window" => Some(route_split_window(&args)),
         "send-keys" => Some(route_send_keys(&args)),
         "select-pane" => Some(route_select_pane(&args)),
-        "kill-pane" | "new-window" | "new-session" | "rename-window"
+        "kill-pane" => Some(route_kill_pane(&args)),
+        "swap-pane" => Some(route_swap_pane(&args)),
+        "new-window" | "new-session" | "rename-window"
         | "set-environment" | "setenv" | "set-option" | "set" | "set-hook"
         | "show-environment" | "showenv" => {
             eprintln!("[tmux-shim] {head} accepted (stub, no kasaterm RPC yet)");
@@ -485,6 +487,23 @@ fn route_select_pane(args: &[String]) -> i32 {
         .iter()
         .position(|a| a == "-t")
         .and_then(|i| args.get(i + 1));
+    // `select-pane -T <title>` renames the targeted pane (claude
+    // teammate sets the agent name this way). Route it to rename.
+    if let Some(title) = args
+        .iter()
+        .position(|a| a == "-T")
+        .and_then(|i| args.get(i + 1))
+    {
+        if let Some(t) = target {
+            return match run_cmux_compat(&["rename", t, title]) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("[tmux-shim] select-pane -T route failed: {e}");
+                    1
+                }
+            };
+        }
+    }
     let Some(t) = target else {
         eprintln!("[tmux-shim] select-pane without -t: ignored");
         return 0;
@@ -493,6 +512,62 @@ fn route_select_pane(args: &[String]) -> i32 {
         Ok(code) => code,
         Err(e) => {
             eprintln!("[tmux-shim] select-pane route failed: {e}");
+            1
+        }
+    }
+}
+
+/// Map `tmux swap-pane -s <src> -t <dst>` to `cmux-compat swap <src>
+/// <dst>` so panes can trade places through the socket.
+fn route_swap_pane(args: &[String]) -> i32 {
+    let args = if args.first().map(String::as_str) == Some("swap-pane") {
+        &args[1..]
+    } else {
+        args
+    };
+    let src = args
+        .iter()
+        .position(|a| a == "-s")
+        .and_then(|i| args.get(i + 1));
+    let dst = args
+        .iter()
+        .position(|a| a == "-t")
+        .and_then(|i| args.get(i + 1));
+    match (src, dst) {
+        (Some(s), Some(d)) => match run_cmux_compat(&["swap", s, d]) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("[tmux-shim] swap-pane route failed: {e}");
+                1
+            }
+        },
+        _ => {
+            eprintln!("[tmux-shim] swap-pane needs -s and -t: ignored");
+            0
+        }
+    }
+}
+
+/// Map `tmux kill-pane -t <target>` to `cmux-compat close <target>` so
+/// a teammate (or any shell) can tear down a pane through the socket.
+fn route_kill_pane(args: &[String]) -> i32 {
+    let args = if args.first().map(String::as_str) == Some("kill-pane") {
+        &args[1..]
+    } else {
+        args
+    };
+    let target = args
+        .iter()
+        .position(|a| a == "-t")
+        .and_then(|i| args.get(i + 1));
+    let Some(t) = target else {
+        eprintln!("[tmux-shim] kill-pane without -t: ignored");
+        return 0;
+    };
+    match run_cmux_compat(&["close", t]) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("[tmux-shim] kill-pane route failed: {e}");
             1
         }
     }
