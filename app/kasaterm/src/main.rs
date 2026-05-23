@@ -2428,10 +2428,36 @@ impl App {
             Key::Named(NamedKey::Backspace) => b"\x7f".to_vec(),
             Key::Named(NamedKey::Tab) => b"\t".to_vec(),
             Key::Named(NamedKey::Escape) => b"\x1b".to_vec(),
-            Key::Named(NamedKey::ArrowUp) => b"\x1b[A".to_vec(),
-            Key::Named(NamedKey::ArrowDown) => b"\x1b[B".to_vec(),
-            Key::Named(NamedKey::ArrowRight) => b"\x1b[C".to_vec(),
-            Key::Named(NamedKey::ArrowLeft) => b"\x1b[D".to_vec(),
+            Key::Named(
+                nk @ (NamedKey::ArrowUp
+                | NamedKey::ArrowDown
+                | NamedKey::ArrowRight
+                | NamedKey::ArrowLeft),
+            ) => {
+                let letter = match nk {
+                    NamedKey::ArrowUp => 'A',
+                    NamedKey::ArrowDown => 'B',
+                    NamedKey::ArrowRight => 'C',
+                    _ => 'D', // ArrowLeft
+                };
+                // Carry modifiers so claude code (Ink) / zsh see word-wise
+                // and line-wise motion instead of a bare one-cell arrow.
+                //   Option(Alt)+←/→ → CSI modifier 3 = backward/forward-word
+                //   Cmd(super)+←/→  → Home / End  = line start/end
+                // Cmd+Option+arrow never reaches here — it's consumed above
+                // as the pane-focus shortcut.
+                if self.modifiers.super_key() {
+                    match letter {
+                        'D' => b"\x1b[H".to_vec(),
+                        'C' => b"\x1b[F".to_vec(),
+                        _ => format!("\x1b[{letter}").into_bytes(),
+                    }
+                } else if self.modifiers.alt_key() {
+                    format!("\x1b[1;3{letter}").into_bytes()
+                } else {
+                    format!("\x1b[{letter}").into_bytes()
+                }
+            }
             _ => match event.text.as_ref() {
                 Some(t) => {
                     if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
