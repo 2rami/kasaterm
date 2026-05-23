@@ -23,12 +23,14 @@ struct VsIn {
     @location(1) uv_min: vec2<f32>,
     @location(2) uv_max: vec2<f32>,
     @location(3) fg: vec4<f32>,
+    @location(4) flags: u32,
 };
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) fg: vec4<f32>,
+    @location(2) @interpolate(flat) flags: u32,
 };
 
 @vertex
@@ -57,11 +59,18 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
     out.pos = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = uv;
     out.fg = in.fg;
+    out.flags = in.flags;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let a = textureSample(atlas_tex, atlas_sampler, in.uv).r;
-    return vec4<f32>(in.fg.rgb, in.fg.a * a);
+    let texel = textureSample(atlas_tex, atlas_sampler, in.uv);
+    // Color glyphs (emoji) are baked as full RGBA — draw them verbatim,
+    // letting fg.a act as a global opacity. Coverage masks are baked as
+    // white×alpha, so fg.rgb × tex.a reproduces the monochrome path.
+    if ((in.flags & 1u) != 0u) {
+        return vec4<f32>(texel.rgb, texel.a * in.fg.a);
+    }
+    return vec4<f32>(in.fg.rgb, in.fg.a * texel.a);
 }

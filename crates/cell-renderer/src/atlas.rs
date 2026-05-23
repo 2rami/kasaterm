@@ -1,4 +1,4 @@
-//! Glyph atlas: one wgpu `R8Unorm` texture, shelf packer, glyph
+//! Glyph atlas: one wgpu `Rgba8Unorm` texture, shelf packer, glyph
 //! cache. Each unique (codepoint, weight, style, size) gets baked
 //! once into a free spot and reused for every subsequent frame —
 //! that's the cache miss vs. hit split that sugarloaf's
@@ -39,6 +39,11 @@ pub struct AtlasEntry {
     pub bearing_x: i32,
     pub bearing_y: i32,
     pub advance: f32,
+    /// True when the baked texels are a full-color RGBA bitmap (Apple
+    /// Color Emoji / COLR / sbix) rather than a coverage mask. The
+    /// pipeline samples color entries verbatim instead of multiplying
+    /// the cell's foreground colour through them.
+    pub is_color: bool,
 }
 
 pub struct Atlas {
@@ -73,7 +78,12 @@ impl Atlas {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            // Rgba8Unorm (linear-storage, NOT srgb): coverage masks are
+            // baked as white×alpha so fg-multiply in the shader matches
+            // the old R8 path byte-for-byte, while color glyphs (Apple
+            // Color Emoji etc.) keep their own RGBA. Non-srgb because the
+            // surface is non-srgb and we want bytes shown verbatim.
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -107,7 +117,7 @@ impl Atlas {
         // wgpu::FilterMode::Linear instead of Nearest — Nearest is
         // our default but we want the SOLID_UV constant to keep
         // working without a footgun.
-        let white = [255u8; 4];
+        let white = [255u8; 16]; // 2×2 RGBA texels, all opaque white.
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &me.texture,
@@ -118,7 +128,7 @@ impl Atlas {
             &white,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(2),
+                bytes_per_row: Some(2 * 4),
                 rows_per_image: Some(2),
             },
             wgpu::Extent3d {
@@ -195,6 +205,20 @@ impl Atlas {
     ) -> Option<AtlasEntry> {
         let (x, y) = self.try_place(r.width, r.height)?;
         if r.width > 0 && r.height > 0 {
+            // The atlas is always RGBA8. A color glyph already carries
+            // RGBA texels; a coverage mask arrives as 1 byte/texel and
+            // is expanded here to opaque white with the coverage in the
+            // alpha channel, so the shader's `fg.rgb × tex.a` reproduces
+            // the old R8 result exactly.
+            let rgba: std::borrow::Cow<[u8]> = if r.is_color {
+                std::borrow::Cow::Borrowed(&r.data)
+            } else {
+                let mut buf = Vec::with_capacity(r.data.len() * 4);
+                for &a in &r.data {
+                    buf.extend_from_slice(&[255, 255, 255, a]);
+                }
+                std::borrow::Cow::Owned(buf)
+            };
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &self.texture,
@@ -202,11 +226,11 @@ impl Atlas {
                     origin: wgpu::Origin3d { x, y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
-                &r.data,
+                &rgba,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    // R8Unorm = 1 byte per texel, so stride = width.
-                    bytes_per_row: Some(r.width),
+                    // Rgba8Unorm = 4 bytes per texel.
+                    bytes_per_row: Some(r.width * 4),
                     rows_per_image: Some(r.height),
                 },
                 wgpu::Extent3d {
@@ -225,6 +249,7 @@ impl Atlas {
             bearing_x: r.bearing_x,
             bearing_y: r.bearing_y,
             advance: r.advance,
+            is_color: r.is_color,
         })
     }
 }

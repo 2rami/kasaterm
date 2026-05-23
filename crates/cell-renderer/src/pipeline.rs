@@ -11,13 +11,24 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
 pub struct CellInstance {
     /// Cell quad in physical pixels: x, y, w, h. Top-left origin.
     pub cell_px: [f32; 4],
     pub uv_min: [f32; 2],
     pub uv_max: [f32; 2],
     pub fg_rgba: [f32; 4],
+    /// Bit 0 set = sample the atlas as a verbatim color bitmap (emoji)
+    /// instead of multiplying the fg colour through a coverage mask.
+    /// `u32` (not bool) so the type is GPU-uploadable and 4-byte aligned.
+    pub flags: u32,
+    /// Pad the instance back to a 16-byte multiple. bytemuck::Pod forbids
+    /// implicit tail padding, so the gap is named.
+    pub _pad: [u32; 3],
+}
+
+impl CellInstance {
+    pub const FLAG_COLOR: u32 = 1;
 }
 
 #[repr(C)]
@@ -112,6 +123,11 @@ impl Pipeline {
                 offset: 32,
                 shader_location: 3,
                 format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 48,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Uint32,
             },
         ];
         let instance_layout = wgpu::VertexBufferLayout {
