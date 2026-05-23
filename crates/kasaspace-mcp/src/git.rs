@@ -25,7 +25,14 @@ pub fn git_status(repo: &Path) -> Value {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return json!({ "error": format!("git failed: {}", stderr.trim()) });
+        let msg = stderr.trim();
+        // "여긴 git 폴더 아님"은 실패가 아니라 정상 상태(홈·임의 폴더 등).
+        // 빨간 에러 대신 패널이 부드러운 안내를 그리도록 별도 신호로 분리하고,
+        // 안내에 띄울 축약 경로(홈은 ~)를 함께 넘긴다.
+        if msg.contains("not a git repository") {
+            return json!({ "no_repo": true, "path": display_path(repo) });
+        }
+        return json!({ "error": format!("git failed: {msg}") });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -101,6 +108,21 @@ fn parse_porcelain_v2(text: &str) -> Value {
     })
 }
 
+/// Render a cwd for the "not a repo" notice: collapse the home prefix to
+/// `~` so the panel shows `~` or `~/Desktop` instead of a long absolute path.
+fn display_path(p: &Path) -> String {
+    let full = p.display().to_string();
+    if let Ok(home) = std::env::var("HOME") {
+        if full == home {
+            return "~".to_string();
+        }
+        if let Some(rest) = full.strip_prefix(&format!("{home}/")) {
+            return format!("~/{rest}");
+        }
+    }
+    full
+}
+
 /// Extract the path from a `1`/`2` entry line. Paths can contain spaces, so
 /// we skip the fixed leading fields rather than split blindly. A `2` entry
 /// appends `<tab><origPath>` after a rename score field — we keep only the
@@ -113,6 +135,71 @@ fn entry_path(line: &str, renamed: bool) -> String {
     let path = line.splitn(skip + 1, ' ').nth(skip).unwrap_or("");
     // Rename entries put the original path after a tab; drop it.
     path.split('\t').next().unwrap_or(path).to_string()
+}
+
+/// `git -C <repo> <args>` 실행 → (성공여부, stdout(+실패 시 stderr)).
+/// status 계열과 달리 diff/commit/push는 출력 텍스트를 그대로 패널에
+/// 돌려줘야 하므로 별도 헬퍼로 묶는다.
+fn run_git(repo: &Path, args: &[&str]) -> (bool, String) {
+    match Command::new("git").arg("-C").arg(repo).args(args).output() {
+        Ok(o) => {
+            let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+            if !o.status.success() {
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.trim().is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(err.trim());
+                }
+            }
+            (o.status.success(), text)
+        }
+        Err(e) => (false, format!("git spawn failed: {e}")),
+    }
+}
+
+/// 한 파일의 diff. HEAD 대비(staged+unstaged 통합)를 우선 보고, 비어 있으면
+/// untracked 새 파일로 보고 `/dev/null` 대비 전체를 added로 표시한다.
+pub fn git_diff(repo: &Path, path: &str) -> Value {
+    let (_ok, text) = run_git(repo, &["diff", "HEAD", "--", path]);
+    let diff = if text.trim().is_empty() {
+        // untracked: --no-index는 차이가 있으면 exit 1이라 성공여부는 무시.
+        let (_o, t) = run_git(repo, &["diff", "--no-index", "--", "/dev/null", path]);
+        t
+    } else {
+        text
+    };
+    json!({ "path": path, "diff": diff })
+}
+
+/// 체크된 파일만 정확히 커밋. 기존 staging을 비운 뒤(mixed reset — 작업 내용은
+/// 유지) 지정 파일만 add하고 commit. 빈 목록/메시지는 거부한다.
+pub fn git_commit(repo: &Path, files: &[String], message: &str) -> Value {
+    if files.is_empty() {
+        return json!({ "ok": false, "output": "커밋할 파일이 선택되지 않았습니다" });
+    }
+    if message.trim().is_empty() {
+        return json!({ "ok": false, "output": "커밋 메시지가 비어 있습니다" });
+    }
+    // 체크된 파일만 정확히 들어가도록 staging을 한 번 비운다.
+    let _ = run_git(repo, &["reset", "-q"]);
+    let mut add_args: Vec<&str> = vec!["add", "--"];
+    for f in files {
+        add_args.push(f.as_str());
+    }
+    let (add_ok, add_out) = run_git(repo, &add_args);
+    if !add_ok {
+        return json!({ "ok": false, "output": format!("add 실패: {add_out}") });
+    }
+    let (ok, out) = run_git(repo, &["commit", "-m", message]);
+    json!({ "ok": ok, "output": out.trim() })
+}
+
+/// `git push`. 결과 텍스트를 그대로 패널에 돌려준다.
+pub fn git_push(repo: &Path) -> Value {
+    let (ok, out) = run_git(repo, &["push"]);
+    json!({ "ok": ok, "output": out.trim() })
 }
 
 #[cfg(test)]
@@ -146,5 +233,41 @@ mod tests {
         let v = parse_porcelain_v2("# branch.head main\n# branch.ab +0 -0\n");
         assert_eq!(v["clean"], true);
         assert_eq!(v["ahead"], 0);
+    }
+
+    #[test]
+    fn commit_stages_only_checked_files() {
+        use std::process::Command as C;
+        let dir = std::env::temp_dir().join(format!("kasa-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| C::new("git").arg("-C").arg(&dir).args(args).output().unwrap();
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "tester"]);
+        std::fs::write(dir.join("a.txt"), "v1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        // a.txt 수정 + b.txt 신규(untracked)
+        std::fs::write(dir.join("a.txt"), "v2\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "new\n").unwrap();
+
+        // a.txt만 체크해서 커밋 → b.txt는 빠져야 한다.
+        let r = git_commit(&dir, &["a.txt".to_string()], "only a");
+        assert_eq!(r["ok"], true, "commit should succeed: {r:?}");
+
+        let st = String::from_utf8(git(&["status", "--porcelain"]).stdout).unwrap();
+        assert!(st.contains("?? b.txt"), "b.txt must remain untracked: {st:?}");
+        assert!(!st.contains("a.txt"), "a.txt must be committed (gone from status): {st:?}");
+
+        // diff: 커밋된 a.txt는 HEAD 대비 변경 없음, 미커밋 b.txt는 내용 노출
+        let d = git_diff(&dir, "b.txt");
+        assert!(d["diff"].as_str().unwrap().contains("new"), "untracked diff should show content: {d:?}");
+
+        // 빈 메시지 / 빈 목록 거부
+        assert_eq!(git_commit(&dir, &[], "x")["ok"], false);
+        assert_eq!(git_commit(&dir, &["a.txt".to_string()], "  ")["ok"], false);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
