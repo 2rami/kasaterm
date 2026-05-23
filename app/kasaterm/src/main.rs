@@ -303,6 +303,13 @@ struct PaneState {
     /// Accent color for this pane's header band (RGBA), set via
     /// `surface.set_color`. None = default theme band color.
     color: Option<[u8; 4]>,
+    /// Sticky-title flag. Set true only when `surface.rename` is called
+    /// (run_job / explicit rename). While pinned, OSC 0/2 titles from the
+    /// inner program are ignored so an agent-driven label can't be
+    /// clobbered by the shell/TUI re-emitting its own title. Panes that
+    /// were never renamed (e.g. the main Claude pane) leave this false so
+    /// their dynamic OSC summary keeps flowing through.
+    title_pinned: bool,
     /// Frame-dirty flag. Set whenever a PTY update lands new bytes,
     /// the user scrolls, or focus switches; cleared after the next
     /// render. When *every* pane is clean and no chrome-level anim
@@ -793,8 +800,12 @@ impl App {
                 // conversation summary, vim filename, etc.). Carry it
                 // through to PaneState so the chrome header + the
                 // macOS window title see the freshest value.
+                // Pinned panes (renamed via surface.rename / run_job) keep
+                // their agent-set label; only unpinned panes track OSC.
                 if let Some(t) = update.title.clone() {
-                    pane.title = Some(t);
+                    if !pane.title_pinned {
+                        pane.title = Some(t);
+                    }
                 }
                 // Mark this pane dirty so the next render frame
                 // actually emits cells. render_frame short-circuits
@@ -1004,7 +1015,9 @@ impl App {
                 pane.mouse_enabled = mouse_enabled;
                 pane.mouse_sgr = mouse_sgr;
                 let new_title = title.filter(|t| !t.is_empty());
-                let title_changed = pane.title != new_title;
+                // Pinned panes (renamed via surface.rename / run_job) ignore
+                // OSC titles so the agent-set label stays put.
+                let title_changed = !pane.title_pinned && pane.title != new_title;
                 if title_changed {
                     pane.title = new_title.clone();
                 }
@@ -1233,7 +1246,14 @@ impl App {
                     // shell output landed). pane_mut creates it so the
                     // title sticks until the first ScreenUpdate fills it.
                     if self.pty.contains_key(&pane_id) {
-                        self.ws.lock().unwrap().pane_mut(&pane_id).title = Some(title);
+                        {
+                            let mut ws = self.ws.lock().unwrap();
+                            let pane = ws.pane_mut(&pane_id);
+                            pane.title = Some(title);
+                            // Explicit rename pins the label so later OSC
+                            // titles from the inner program don't overwrite it.
+                            pane.title_pinned = true;
+                        }
                         self.chrome_dirty = true;
                         if let Some(w) = &self.window {
                             w.request_redraw();
