@@ -295,6 +295,7 @@ impl RenderState {
                     uv_min: entry.uv_min,
                     uv_max: entry.uv_max,
                     fg_rgba: [0.92, 0.93, 0.95, 1.0],
+                    ..Default::default()
                 });
             }
         }

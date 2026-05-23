@@ -8,6 +8,7 @@
 //! to keep around.
 
 use anyhow::{Context, Result};
+use swash::scale::image::Content;
 use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
 use swash::FontRef;
@@ -36,6 +37,11 @@ pub struct Rasterized {
     pub bearing_x: i32,
     pub bearing_y: i32,
     pub advance: f32,
+    /// `true` when `data` is a 4-byte/texel RGBA color bitmap (Apple
+    /// Color Emoji sbix, CBDT, COLR/CPAL). `false` = 1-byte/texel
+    /// coverage mask. The atlas uses this to choose how to upload, and
+    /// the shader to choose mask-multiply vs. verbatim color.
+    pub is_color: bool,
 }
 
 /// East Asian Wide / Fullwidth — full-width by design, so a fallback
@@ -203,7 +209,13 @@ impl Shaper {
                 .size(face_size)
                 .hint(true)
                 .build();
+            // Color sources first so Apple Color Emoji (sbix), CBDT, and
+            // COLR/CPAL faces render as full-color RGBA. swash falls
+            // through to the scalable outline / alpha bitmap for ordinary
+            // monochrome faces, so this is a no-op for the primary font.
             let mut render = Render::new(&[
+                Source::ColorOutline(0),
+                Source::ColorBitmap(StrikeWith::BestFit),
                 Source::Outline,
                 Source::Bitmap(StrikeWith::BestFit),
             ]);
@@ -214,14 +226,16 @@ impl Shaper {
                 // Empty outline — try next face.
                 continue;
             }
+            let is_color = image.content == Content::Color;
             if std::env::var_os("KASATERM_FONT_DEBUG").is_some() {
                 eprintln!(
-                    "[font] U+{:04X} → face[{}] gid={} {}×{}",
+                    "[font] U+{:04X} → face[{}] gid={} {}×{} color={}",
                     ch as u32,
                     face_idx,
                     glyph_id,
                     image.placement.width,
-                    image.placement.height
+                    image.placement.height,
+                    is_color,
                 );
             }
             return Some(Rasterized {
@@ -231,6 +245,7 @@ impl Shaper {
                 bearing_x: image.placement.left,
                 bearing_y: image.placement.top,
                 advance,
+                is_color,
             });
         }
         None

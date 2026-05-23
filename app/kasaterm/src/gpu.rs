@@ -217,6 +217,7 @@ impl GpuRenderer {
             uv_min: Atlas::SOLID_UV,
             uv_max: Atlas::SOLID_UV,
             fg_rgba: srgb_rgba_to_linear(rgba_u8),
+            ..Default::default()
         });
     }
 
@@ -259,6 +260,7 @@ impl GpuRenderer {
                 uv_min: entry.uv_min,
                 uv_max: entry.uv_max,
                 fg_rgba: fg,
+                ..Default::default()
             });
             pen += entry.advance;
         }
@@ -293,6 +295,7 @@ impl GpuRenderer {
             uv_min: Atlas::SOLID_UV,
             uv_max: Atlas::SOLID_UV,
             fg_rgba: srgb_rgba_to_linear(crate::cells::DEFAULT_BG),
+            ..Default::default()
         });
         let acc = srgb_rgba_to_linear(accent);
         self.chrome.push(CellInstance {
@@ -300,6 +303,7 @@ impl GpuRenderer {
             uv_min: Atlas::SOLID_UV,
             uv_max: Atlas::SOLID_UV,
             fg_rgba: acc,
+            ..Default::default()
         });
         // Glyphs — identical placement math to draw_cells.
         let baseline_y = oy + cell_h_px * 0.78;
@@ -333,6 +337,7 @@ impl GpuRenderer {
                             uv_min: entry.uv_min,
                             uv_max: entry.uv_max,
                             fg_rgba: acc,
+                            ..Default::default()
                         });
                     } else {
                         let x = cell_x + entry.bearing_x as f32;
@@ -342,6 +347,7 @@ impl GpuRenderer {
                             uv_min: entry.uv_min,
                             uv_max: entry.uv_max,
                             fg_rgba: acc,
+                            ..Default::default()
                         });
                     }
                 }
@@ -401,6 +407,7 @@ impl GpuRenderer {
                             uv_min: Atlas::SOLID_UV,
                             uv_max: Atlas::SOLID_UV,
                             fg_rgba: srgb_rgba_to_linear(bg),
+                            ..Default::default()
                         });
                     }
                 }
@@ -441,6 +448,7 @@ impl GpuRenderer {
                                     uv_min: Atlas::SOLID_UV,
                                     uv_max: Atlas::SOLID_UV,
                                     fg_rgba: c,
+                                    ..Default::default()
                                 });
                             }
                             continue;
@@ -496,6 +504,7 @@ impl GpuRenderer {
                                         uv_min: e.uv_min,
                                         uv_max: e.uv_max,
                                         fg_rgba: srgb_rgba_to_linear(fg),
+                                        ..Default::default()
                                     });
                                 }
                             }
@@ -517,6 +526,31 @@ impl GpuRenderer {
                         continue;
                     };
                     let baseline_y = cell_y + cell_h_px * 0.78;
+                    if entry.is_color {
+                        // Color emoji: the atlas holds a verbatim RGBA
+                        // bitmap. Fit it into a 2-cell box (emoji read as
+                        // full-width) keeping aspect, never upscaling past
+                        // native, and center it in the row. FLAG_COLOR
+                        // tells the shader to sample the texture directly
+                        // instead of fg × coverage.
+                        let span_w = cell_w_px * 2.0;
+                        let gw0 = entry.px_w as f32;
+                        let gh0 = entry.px_h as f32;
+                        let fit = (span_w / gw0).min(cell_h_px / gh0).min(1.0);
+                        let gw = gw0 * fit;
+                        let gh = gh0 * fit;
+                        let x = cell_x + (span_w - gw) * 0.5;
+                        let y = cell_y + (cell_h_px - gh) * 0.5;
+                        self.chrome.push(CellInstance {
+                            cell_px: [x, y, gw, gh],
+                            uv_min: entry.uv_min,
+                            uv_max: entry.uv_max,
+                            fg_rgba: srgb_rgba_to_linear(fg),
+                            flags: CellInstance::FLAG_COLOR,
+                            ..Default::default()
+                        });
+                        continue;
+                    }
                     if is_wide_char(ch) {
                         // Fit the glyph into its 2-cell box. Scale down
                         // (keeping aspect) only if it overflows, then
@@ -534,6 +568,7 @@ impl GpuRenderer {
                             uv_min: entry.uv_min,
                             uv_max: entry.uv_max,
                             fg_rgba: srgb_rgba_to_linear(fg),
+                            ..Default::default()
                         });
                     } else {
                         let x = cell_x + entry.bearing_x as f32;
@@ -543,6 +578,7 @@ impl GpuRenderer {
                             uv_min: entry.uv_min,
                             uv_max: entry.uv_max,
                             fg_rgba: srgb_rgba_to_linear(fg),
+                            ..Default::default()
                         });
                     }
                 }
