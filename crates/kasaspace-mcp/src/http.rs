@@ -18,8 +18,12 @@ use crate::{git, KasaspaceTools};
 /// the webview panel to poll. The wildcard CORS header lets the webview
 /// (a different origin) fetch it; the server only binds to 127.0.0.1 so the
 /// open origin stays local-only.
-async fn git_status_handler() -> impl IntoResponse {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+async fn git_status_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    // Follow the active pane's shell cwd so the panel tracks the user's
+    // terminal directory; fall back to the host process cwd.
+    let cwd = backend
+        .active_cwd()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
     let body = git::git_status(&cwd);
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
@@ -60,13 +64,17 @@ pub fn spawn_http_server(
                         return;
                     }
                 };
+                let git_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
                     Default::default(),
                 );
                 let app = axum::Router::new()
-                    .route("/git-status", get(git_status_handler))
+                    .route(
+                        "/git-status",
+                        get(move || git_status_handler(git_backend.clone())),
+                    )
                     .nest_service("/mcp", service);
                 if let Err(e) = axum::serve(tokio_listener, app).await {
                     eprintln!("[kasaspace-mcp] serve error: {e}");

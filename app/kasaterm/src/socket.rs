@@ -222,6 +222,9 @@ pub enum PtyCommand {
 pub struct PtySnapshot {
     pub surfaces: Vec<SurfaceInfo>,
     pub active_pane: Option<String>,
+    /// PID of the active pane's shell, refreshed alongside surfaces. The git
+    /// panel resolves the terminal's current directory from this.
+    pub active_shell_pid: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -325,4 +328,22 @@ impl Backend for PtyBackend {
         let b = b.to_string();
         self.submit(|reply| PtyCommand::Swap { a, b, reply })
     }
+
+    fn active_cwd(&self) -> Option<std::path::PathBuf> {
+        let pid = self.handle.snapshot.lock().unwrap().active_shell_pid?;
+        pid_cwd(pid)
+    }
+}
+
+/// Resolve a process's current working directory via lsof. macOS has no
+/// `/proc`; `lsof -d cwd` prints the cwd path. Called ~once/sec by the git
+/// panel poll, so the subprocess cost is acceptable.
+fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix('n').map(std::path::PathBuf::from))
 }
