@@ -1,0 +1,19 @@
+[package]
+name = "kasaspace-mcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Streamable-HTTP MCP server that exposes kasaterm pane control as
+# model-invoked tools, driven directly by the host's agent_socket::Backend.
+# Replaces the external python bridge (mcp/kasaspace_mcp.py).
+
+[dependencies]
+agent-socket = { path = "../agent-socket" }
+anyhow.workspace = true
+axum = "0.8.9"
+rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }

@@ -1105,6 +1105,19 @@ impl App {
     /// modes — the caller decides which concrete `Backend` impl to plug
     /// in (TmuxBackend in tmux mode, PtyBackend in PTY mode).
     fn start_socket_with(&self, backend: Arc<dyn agent_socket::Backend>) {
+        // Model-invoked tools for the claude running inside a pane: the
+        // same Backend, exposed over MCP-on-HTTP. Replaces the external
+        // python bridge (mcp/kasaspace_mcp.py).
+        match kasaspace_mcp::spawn_http_server(backend.clone(), 8765) {
+            Ok(port) => {
+                eprintln!("[kasaspace-mcp] HTTP MCP on 127.0.0.1:{port}/mcp");
+                std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
+                // No MCP auto-discovery: write our address into each AI
+                // client's config so any agent on this machine finds us.
+                kasaspace_mcp::register_clients(port);
+            }
+            Err(e) => eprintln!("[kasaspace-mcp] HTTP MCP start failed: {e}"),
+        }
         let path = resolve_kasaterm_socket_path();
         let server = match agent_socket::Server::bind(&path) {
             Ok(s) => s,
