@@ -3,3 +3,6 @@
 Cargo.lock
 .DS_Store
 /dist
+.antigravitycli/
+mcp/__pycache__/
+.memory
