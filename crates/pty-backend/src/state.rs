@@ -266,6 +266,12 @@ impl PtySession {
     /// less, …) or falls back to the shell's own comm. ps(1) is
     /// throttled to ~500ms so this is cheap to call from the render
     /// loop.
+    /// The shell's process id (None if it failed to launch). Used to look up
+    /// the active pane's cwd for the git panel.
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
+    }
+
     pub fn active_process_name(&self) -> Option<String> {
         let pid = self.shell_pid?;
         let now = Instant::now();

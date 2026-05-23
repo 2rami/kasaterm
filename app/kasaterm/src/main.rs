@@ -1428,6 +1428,13 @@ impl App {
         let mut snap = handle.snapshot.lock().unwrap();
         snap.surfaces = surfaces;
         snap.active_pane = ws.active_pane.clone();
+        // Active pane's shell pid → the git panel resolves its cwd from this
+        // so it follows whatever directory the focused terminal is in.
+        snap.active_shell_pid = ws
+            .active_pane
+            .as_ref()
+            .and_then(|id| self.pty.get(id))
+            .and_then(|s| s.shell_pid());
     }
 
     /// Drain pending socket commands and run them on the main thread.
@@ -4012,7 +4019,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.schedule_autosend();
         self.schedule_autocapture();
         self.arm_autosplit();
-        self.open_git_panel(event_loop);
+        self.open_git_panel(event_loop, false);
     }
 
     fn window_event(

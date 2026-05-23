@@ -62,4 +62,10 @@ pub trait Backend: Send + Sync {
     fn set_color(&self, surface_id: &str, color: [u8; 4]) -> Result<()>;
     /// Swap two surfaces' positions in the layout.
     fn swap_surfaces(&self, a: &str, b: &str) -> Result<()>;
+    /// Current working directory of the active pane's shell, if the backend
+    /// tracks it. Lets the git panel follow the user's terminal directory.
+    /// Default `None` (e.g. the tmux backend doesn't track per-pane cwd).
+    fn active_cwd(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
