@@ -189,42 +189,52 @@ impl Shaper {
         // fallback raster sizes up a bit so visible glyph areas
         // come out comparable.
         for (face_idx, glyph_id, advance) in candidates {
-            // Fallback faces get a size boost so small symbol/icon
-            // glyphs read at a comparable size — but CJK/Hangul are
-            // full-width and must stay at size_px, otherwise the raster
-            // grows past its advance and bleeds into the next cell.
-            let face_size = if face_idx == 0 || is_cjk_wide(ch) {
-                size_px
-            } else {
-                size_px * 1.25
-            };
+            // Fallback faces get a 1.25× boost so small symbol/icon glyphs
+            // read at a comparable size. The primary face and CJK/Hangul stay
+            // at size_px. Caveat: a non-CJK glyph that's already cell-sized in
+            // a fallback (e.g. ① Enclosed Alphanumerics) would overrun its
+            // cell when boosted, so we re-render it un-boosted if the boosted
+            // raster is wider than the advance — no bleed into the next cell.
+            let boost = face_idx != 0 && !is_cjk_wide(ch);
             let (font_data, font_index) = {
                 let (bytes, fi) = &self.faces[face_idx];
                 (bytes.clone(), *fi as usize)
             };
-            let scale_ctx = &mut self.scale_ctx;
-            let font = FontRef::from_index(&font_data, font_index).unwrap();
-            let mut scaler = scale_ctx
-                .builder(font)
-                .size(face_size)
-                .hint(true)
-                .build();
-            // Color sources first so Apple Color Emoji (sbix), CBDT, and
-            // COLR/CPAL faces render as full-color RGBA. swash falls
-            // through to the scalable outline / alpha bitmap for ordinary
-            // monochrome faces, so this is a no-op for the primary font.
-            let mut render = Render::new(&[
-                Source::ColorOutline(0),
-                Source::ColorBitmap(StrikeWith::BestFit),
-                Source::Outline,
-                Source::Bitmap(StrikeWith::BestFit),
-            ]);
-            let Some(image) = render.format(Format::Alpha).render(&mut scaler, glyph_id) else {
+            let mut render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
+                let font = FontRef::from_index(&font_data, font_index).unwrap();
+                let mut scaler = scale_ctx.builder(font).size(face_size).hint(true).build();
+                // Color sources first so Apple Color Emoji (sbix), CBDT, and
+                // COLR/CPAL faces render as full-color RGBA; swash falls
+                // through to the outline / alpha bitmap for monochrome faces.
+                Render::new(&[
+                    Source::ColorOutline(0),
+                    Source::ColorBitmap(StrikeWith::BestFit),
+                    Source::Outline,
+                    Source::Bitmap(StrikeWith::BestFit),
+                ])
+                .format(Format::Alpha)
+                .render(&mut scaler, glyph_id)
+            };
+            let first_size = if boost { size_px * 1.25 } else { size_px };
+            let Some(mut image) = render_at(&mut self.scale_ctx, first_size) else {
                 continue;
             };
             if image.placement.width == 0 || image.placement.height == 0 {
                 // Empty outline — try next face.
                 continue;
+            }
+            // Raster overruns its cell (advance) → shrink to fit. Covers a
+            // fallback boost overshoot *and* a primary glyph that's simply
+            // wider than a narrow cell — e.g. ① (Enclosed Alphanumerics),
+            // which CascadiaCode NF draws cell-and-a-half wide while the
+            // terminal lays it out as a single column.
+            if !is_cjk_wide(ch) && advance > 0.0 && image.placement.width as f32 > advance {
+                let fit = first_size * (advance / image.placement.width as f32);
+                if let Some(img) = render_at(&mut self.scale_ctx, fit) {
+                    if img.placement.width > 0 && img.placement.height > 0 {
+                        image = img;
+                    }
+                }
             }
             let is_color = image.content == Content::Color;
             if std::env::var_os("KASATERM_FONT_DEBUG").is_some() {
