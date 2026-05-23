@@ -455,6 +455,7 @@ fn spawn_flusher(
                 mouse_enabled: snap.mouse_enabled,
                 mouse_sgr: snap.mouse_sgr,
                 title: snap.title,
+                eof: false,
             };
             if out.send(update).is_err() {
                 return;
