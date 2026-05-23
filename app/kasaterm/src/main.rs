@@ -118,9 +118,14 @@ const GIT_PANEL_HTML: &str = r#"<!DOCTYPE html>
   .dot.clean { background: #3fb950; box-shadow: 0 0 6px #3fb95066; }
   .dot.dirty { background: #d29922; box-shadow: 0 0 6px #d2992266; }
   .dot.error { background: #f85149; }
+  .dot.none { background: #6e7681; box-shadow: none; }
+  .hint { margin-top: 8px; font-size: 11px; color: #6e7681; }
   .ab { margin-left: auto; display: flex; gap: 10px; font-size: 12px; color: #8b949e; }
   .ab b { color: #c8cdd6; font-weight: 600; }
   .summary { margin-top: 4px; font-size: 12px; color: #6e7681; }
+  .all-wrap { display: none; margin-top: 10px; font-size: 12px; color: #8b949e;
+    align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  .all-wrap input { margin: 0; cursor: pointer; }
   .groups { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
   .group { display: none; }
   .group.show { display: block; }
@@ -133,10 +138,38 @@ const GIT_PANEL_HTML: &str = r#"<!DOCTYPE html>
   .modified h4 { color: #d29922; }
   .untracked h4 { color: #58a6ff; }
   ul { margin: 0; padding: 0; list-style: none; }
-  li {
-    font: 12px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
-    color: #adbac7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
+  .file { margin-bottom: 1px; }
+  .file-row { display: flex; align-items: center; gap: 6px;
+    font: 12px/1.7 ui-monospace, "SF Mono", Menlo, monospace; }
+  .file-row input { margin: 0; flex: 0 0 auto; cursor: pointer; }
+  .toggle { color: #6e7681; cursor: pointer; flex: 0 0 auto; width: 10px; text-align: center; }
+  .fname { color: #adbac7; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .diff { margin: 3px 0 6px 22px; padding: 6px 8px; background: #0d1014; border-radius: 6px;
+    font: 11px/1.5 ui-monospace, Menlo, monospace; white-space: pre; overflow-x: auto; max-height: 220px; }
+  .diff .add { color: #3fb950; }
+  .diff .del { color: #f85149; }
+  .diff .hunk { color: #58a6ff; }
+  .diff .ctx { color: #6e7681; }
+  .commit { margin-top: 14px; border-top: 1px solid #21262d; padding-top: 12px; }
+  .commit textarea { width: 100%; background: #0d1014; color: #c8cdd6; border: 1px solid #21262d;
+    border-radius: 6px; padding: 6px 8px; resize: vertical;
+    font: 12px/1.4 -apple-system, system-ui, sans-serif; }
+  .msg-wrap { position: relative; }
+  .msg-wrap textarea { padding-right: 30px; }
+  .ai-btn { position: absolute; top: 7px; right: 7px; display: flex; padding: 2px; line-height: 0;
+    background: none; border: none; color: #8b949e; cursor: pointer; }
+  .ai-btn:hover:not(:disabled) { color: #c8a6ff; }
+  .ai-btn:disabled { opacity: .5; cursor: default; }
+  .actions { display: flex; gap: 8px; margin-top: 8px; }
+  .actions button { flex: 1; background: #21262d; color: #c8cdd6; border: 1px solid #30363d;
+    border-radius: 6px; padding: 6px 0; font-size: 12px; cursor: pointer; }
+  .actions button:hover { background: #30363d; }
+  .actions button:disabled { opacity: .5; cursor: default; }
+  #btn-commit { background: #238636; border-color: #2ea043; color: #fff; }
+  #btn-commit:hover:not(:disabled) { background: #2ea043; }
+  .result { margin-top: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+  .result.ok { color: #3fb950; }
+  .result.bad { color: #f85149; }
   .err { color: #f85149; font-size: 12px; margin-top: 10px; }
 </style>
 </head>
@@ -150,15 +183,90 @@ const GIT_PANEL_HTML: &str = r#"<!DOCTYPE html>
     </span>
   </div>
   <div id="summary" class="summary">connecting…</div>
+  <label id="all-wrap" class="all-wrap"><input type="checkbox" id="check-all"> 전체 선택</label>
   <div class="groups">
     <div class="group staged" id="g-staged"><h4>staged <span class="n" id="n-staged"></span></h4><ul id="l-staged"></ul></div>
     <div class="group modified" id="g-modified"><h4>modified <span class="n" id="n-modified"></span></h4><ul id="l-modified"></ul></div>
     <div class="group untracked" id="g-untracked"><h4>untracked <span class="n" id="n-untracked"></span></h4><ul id="l-untracked"></ul></div>
   </div>
+  <div id="hint" class="hint" style="display:none">폴더로 이동하면 상태가 떠요</div>
   <div id="err" class="err" style="display:none"></div>
+  <div id="commit" class="commit" style="display:none">
+    <div class="msg-wrap">
+      <textarea id="msg" placeholder="커밋 메시지" rows="2"></textarea>
+      <button id="btn-ai" class="ai-btn" title="AI가 변경사항 보고 커밋">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.3 3.9a2 2 0 0 0 1.3 1.3L14.5 7.5a.3.3 0 0 1 0 .6l-3.9 1.3a2 2 0 0 0-1.3 1.3L8 14.5a.3.3 0 0 1-.6 0l-1.3-3.9a2 2 0 0 0-1.3-1.3L1.5 8.1a.3.3 0 0 1 0-.6l3.9-1.3a2 2 0 0 0 1.3-1.3z"/><path d="M13 1l.4 1.1 1.1.4-1.1.4L13 4l-.4-1.1-1.1-.4 1.1-.4z"/></svg>
+      </button>
+    </div>
+    <div class="actions">
+      <button id="btn-commit">commit</button>
+      <button id="btn-push">push</button>
+    </div>
+    <div id="result" class="result" style="display:none"></div>
+  </div>
 <script>
 const PORT = "__PORT__";
 const $ = (id) => document.getElementById(id);
+const base = "http://127.0.0.1:" + PORT;
+// 사용자 선택/펼침 상태. 1초 폴링이 DOM을 다시 그려도 여기서 복원한다.
+const checked = new Set();
+const expanded = new Set();
+const diffCache = new Map();
+
+function colorize(text) {
+  const frag = document.createDocumentFragment();
+  for (const line of text.split("\n")) {
+    const div = document.createElement("div");
+    if (line.startsWith("+") && !line.startsWith("+++")) div.className = "add";
+    else if (line.startsWith("-") && !line.startsWith("---")) div.className = "del";
+    else if (line.startsWith("@@")) div.className = "hunk";
+    else div.className = "ctx";
+    div.textContent = line || " ";
+    frag.appendChild(div);
+  }
+  return frag;
+}
+
+async function loadDiff(path, box) {
+  let text = diffCache.get(path);
+  if (text === undefined) {
+    box.textContent = "로딩…";
+    try {
+      const r = await fetch(base + "/git-diff?path=" + encodeURIComponent(path), { cache: "no-store" });
+      text = (await r.json()).diff || "(변경 없음)";
+    } catch (e) { text = "diff 로드 실패"; }
+    diffCache.set(path, text);
+  }
+  box.textContent = "";
+  box.appendChild(colorize(text));
+}
+
+function fileRow(path) {
+  const row = document.createElement("div"); row.className = "file";
+  const head = document.createElement("div"); head.className = "file-row";
+  const cb = document.createElement("input"); cb.type = "checkbox";
+  cb.checked = checked.has(path);
+  cb.dataset.path = path;
+  cb.onchange = () => { cb.checked ? checked.add(path) : checked.delete(path); };
+  const tog = document.createElement("span"); tog.className = "toggle";
+  tog.textContent = expanded.has(path) ? "▾" : "▸";
+  const name = document.createElement("span"); name.className = "fname";
+  name.textContent = path; name.title = path;
+  const box = document.createElement("pre"); box.className = "diff";
+  box.style.display = expanded.has(path) ? "block" : "none";
+  const toggle = () => {
+    if (expanded.has(path)) {
+      expanded.delete(path); box.style.display = "none"; tog.textContent = "▸";
+    } else {
+      expanded.add(path); box.style.display = "block"; tog.textContent = "▾"; loadDiff(path, box);
+    }
+  };
+  tog.onclick = toggle; name.onclick = toggle;
+  if (expanded.has(path)) loadDiff(path, box);
+  head.appendChild(cb); head.appendChild(tog); head.appendChild(name);
+  row.appendChild(head); row.appendChild(box);
+  return row;
+}
 
 function fill(group, files) {
   const n = files.length;
@@ -166,16 +274,23 @@ function fill(group, files) {
   $("n-" + group).textContent = n ? n : "";
   const ul = $("l-" + group);
   ul.innerHTML = "";
-  for (const f of files) {
-    const li = document.createElement("li");
-    li.textContent = f;
-    li.title = f;
-    ul.appendChild(li);
-  }
+  for (const f of files) ul.appendChild(fileRow(f));
 }
 
 function render(d) {
   $("err").style.display = "none";
+  $("hint").style.display = "none";
+  $("commit").style.display = "none";
+  $("all-wrap").style.display = "none";
+  if (d.no_repo) {
+    $("dot").className = "dot none";
+    $("branch").textContent = d.path || "—";
+    $("ahead").textContent = ""; $("behind").textContent = "";
+    $("summary").textContent = "git 저장소 아님";
+    $("hint").style.display = "block";
+    fill("staged", []); fill("modified", []); fill("untracked", []);
+    return;
+  }
   if (d.error) {
     $("dot").className = "dot error";
     $("branch").textContent = "git";
@@ -185,8 +300,9 @@ function render(d) {
     return;
   }
   $("branch").textContent = d.branch || "(detached)";
-  $("ahead").textContent = "↑" + (d.ahead || 0);
-  $("behind").textContent = "↓" + (d.behind || 0);
+  const ahead = d.ahead || 0, behind = d.behind || 0;
+  $("ahead").textContent = "↑" + ahead;
+  $("behind").textContent = "↓" + behind;
   const staged = d.staged || [], modified = d.modified || [], untracked = d.untracked || [];
   const total = staged.length + modified.length + untracked.length;
   $("dot").className = "dot " + (d.clean ? "clean" : "dirty");
@@ -196,19 +312,89 @@ function render(d) {
   fill("staged", staged);
   fill("modified", modified);
   fill("untracked", untracked);
+  // 변경이 있거나 보낼 커밋이 있으면 커밋/푸시 영역 노출.
+  $("commit").style.display = (total > 0 || ahead > 0) ? "block" : "none";
+  $("all-wrap").style.display = total > 0 ? "flex" : "none";
+  $("btn-push").textContent = ahead > 0 ? ("push ↑" + ahead) : "push";
+  $("btn-commit").disabled = total === 0;
+}
+
+function showResult(msg, ok) {
+  const el = $("result");
+  el.textContent = msg;
+  el.className = "result " + (ok ? "ok" : "bad");
+  el.style.display = "block";
+}
+
+async function doCommit() {
+  const files = [...checked];
+  const message = $("msg").value;
+  if (!files.length) { showResult("커밋할 파일을 체크하세요", false); return; }
+  if (!message.trim()) { showResult("커밋 메시지를 입력하세요", false); return; }
+  $("btn-commit").disabled = true;
+  try {
+    const r = await fetch(base + "/git-commit", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: files, message: message })
+    });
+    const d = await r.json();
+    showResult(d.output || (d.ok ? "커밋됨" : "실패"), d.ok);
+    if (d.ok) { $("msg").value = ""; checked.clear(); expanded.clear(); diffCache.clear(); }
+  } catch (e) { showResult("커밋 요청 실패", false); }
+  poll();
+}
+
+async function doPush() {
+  $("btn-push").disabled = true;
+  showResult("푸시 중…", true);
+  try {
+    const r = await fetch(base + "/git-push", { method: "POST" });
+    const d = await r.json();
+    showResult(d.output || (d.ok ? "푸시됨" : "실패"), d.ok);
+  } catch (e) { showResult("푸시 요청 실패", false); }
+  $("btn-push").disabled = false;
+  poll();
+}
+
+async function doAiCommit() {
+  const files = [...checked];
+  $("btn-ai").disabled = true;
+  showResult("AI에게 커밋 요청 중…", true);
+  try {
+    const r = await fetch(base + "/git-ai-commit", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: files })
+    });
+    const d = await r.json();
+    showResult(d.output || (d.ok ? "요청됨" : "실패"), d.ok);
+  } catch (e) { showResult("AI 커밋 요청 실패", false); }
+  $("btn-ai").disabled = false;
 }
 
 async function poll() {
   try {
-    const r = await fetch("http://127.0.0.1:" + PORT + "/git-status", { cache: "no-store" });
+    const r = await fetch(base + "/git-status", { cache: "no-store" });
     render(await r.json());
   } catch (e) {
     $("dot").className = "dot error";
     $("summary").textContent = "";
+    $("commit").style.display = "none";
     $("err").style.display = "block";
     $("err").textContent = "server unreachable :" + PORT;
   }
 }
+
+$("btn-commit").onclick = doCommit;
+$("btn-push").onclick = doPush;
+$("btn-ai").onclick = doAiCommit;
+$("check-all").onchange = () => {
+  const on = $("check-all").checked;
+  document.querySelectorAll(".file-row input[type=checkbox]").forEach((cb) => {
+    cb.checked = on;
+    const p = cb.dataset.path;
+    if (p) { on ? checked.add(p) : checked.delete(p); }
+  });
+};
 poll();
 setInterval(poll, 1000);
 </script>
@@ -506,6 +692,9 @@ struct App {
     pty_layout: Option<pty_backend::PtyLayout>,
     /// Monotonic counter for the next "%N" pane id when splitting.
     next_pane_id: u32,
+    /// Queued `claude --resume …\n` to inject into %0 once its shell is ready
+    /// (restored session). (command, time-to-send).
+    pending_restore: Option<(String, std::time::Instant)>,
     /// Queued split directions driven by KASATERM_AUTOSPLIT — headless
     /// repro for the multi-pane render path. Empty in normal use.
     autosplit_plan: Vec<pty_backend::SplitDir>,
@@ -648,6 +837,7 @@ impl App {
             pty: HashMap::new(),
             pty_layout: None,
             next_pane_id: 1, // %0 is the initial pane created in start_pty
+            pending_restore: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,
             dead_panes: Arc::new(Mutex::new(Vec::new())),
@@ -1085,7 +1275,26 @@ impl App {
     fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
         let (cols, rows) = self.window_cells();
-        let cwd = resolve_initial_cwd();
+        // Restore the last session's first pane cwd if we have one, so the
+        // shell opens in the directory the user left off in.
+        let restored = socket::load_session();
+        let cwd = restored
+            .as_ref()
+            .and_then(|panes| panes.first())
+            .map(|p| p.cwd.to_string_lossy().into_owned())
+            .or_else(resolve_initial_cwd);
+        // If that pane was on claude, queue a resume to fire once the shell
+        // prompt is up (send too early and the shell eats it).
+        if let Some(first) = restored.as_ref().and_then(|panes| panes.first()) {
+            if first.was_claude {
+                let cmd = match &first.session_id {
+                    Some(id) => format!("claude --resume {id}\n"),
+                    None => "claude --continue\n".to_string(),
+                };
+                self.pending_restore =
+                    Some((cmd, std::time::Instant::now() + std::time::Duration::from_millis(900)));
+            }
+        }
         // Export the agent-socket path BEFORE the first PtySession
         // spawn so the initial shell inherits a working
         // KASATERM_SOCKET_PATH. start_socket_pty (called below) binds
@@ -3758,6 +3967,11 @@ impl ApplicationHandler<UserEvent> for App {
         self.render_frame();
     }
 
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Persist pane cwds + claude sessions so the next launch restores them.
+        socket::save_session(&self.pty);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -4390,6 +4604,15 @@ impl ApplicationHandler<UserEvent> for App {
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
             if self.git_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_git_panel(event_loop);
+            }
+        }
+        // Fire a queued session-restore command once its delay has elapsed.
+        if let Some((cmd, at)) = self.pending_restore.clone() {
+            if std::time::Instant::now() >= at {
+                if let Some(sess) = self.pty.get("%0") {
+                    let _ = sess.send_bytes(cmd.as_bytes());
+                }
+                self.pending_restore = None;
             }
         }
         // Reap dead pty sessions before anything else — a closed shell

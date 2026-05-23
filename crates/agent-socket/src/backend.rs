@@ -68,4 +68,10 @@ pub trait Backend: Send + Sync {
     fn active_cwd(&self) -> Option<std::path::PathBuf> {
         None
     }
+    /// Foreground process name of the active pane (e.g. "claude", "zsh").
+    /// Lets the AI-commit button decide whether to delegate the commit to a
+    /// running claude or fall back. Default `None`.
+    fn active_process_name(&self) -> Option<String> {
+        None
+    }
 }

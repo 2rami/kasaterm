@@ -223,7 +223,8 @@ pub struct PtySnapshot {
     pub surfaces: Vec<SurfaceInfo>,
     pub active_pane: Option<String>,
     /// PID of the active pane's shell, refreshed alongside surfaces. The git
-    /// panel resolves the terminal's current directory from this.
+    /// panel resolves the terminal's current directory and foreground program
+    /// (for the AI-commit button) from this pid, live.
     pub active_shell_pid: Option<u32>,
 }
 
@@ -333,6 +334,14 @@ impl Backend for PtyBackend {
         let pid = self.handle.snapshot.lock().unwrap().active_shell_pid?;
         pid_cwd(pid)
     }
+
+    fn active_process_name(&self) -> Option<String> {
+        // Resolve live like active_cwd. Baking it into the snapshot only
+        // refreshes on focus/split/etc., so "claude launched in an already-
+        // focused pane" would be missed and read as the shell.
+        let pid = self.handle.snapshot.lock().unwrap().active_shell_pid?;
+        pid_process_name(pid)
+    }
 }
 
 /// Resolve a process's current working directory via lsof. macOS has no
@@ -346,4 +355,132 @@ fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .find_map(|l| l.strip_prefix('n').map(std::path::PathBuf::from))
+}
+
+/// Foreground program of a shell pid: the comm of its most-recently-spawned
+/// child (e.g. "claude"). Resolved live from `ps` so the AI-commit button
+/// sees a claude started after the last snapshot, mirroring pid_cwd.
+fn pid_process_name(shell_pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,comm="])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut best: Option<(u32, String)> = None;
+    for line in s.lines() {
+        let mut parts = line.split_whitespace();
+        let (row_pid, row_ppid) = match (
+            parts.next().and_then(|x| x.parse::<u32>().ok()),
+            parts.next().and_then(|x| x.parse::<u32>().ok()),
+        ) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+        if row_ppid != shell_pid {
+            continue;
+        }
+        let comm = parts.collect::<Vec<_>>().join(" ");
+        let name = std::path::Path::new(&comm)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or(&comm)
+            .to_string();
+        if best.as_ref().map_or(true, |(p, _)| row_pid > *p) {
+            best = Some((row_pid, name));
+        }
+    }
+    best.map(|(_, n)| n)
+}
+
+/// Persist each pane's cwd + claude session id so the next launch can restore
+/// them. Written on exit, read by start_pty. Best-effort; failures are silent.
+pub fn save_session(
+    pty: &std::collections::HashMap<String, std::sync::Arc<pty_backend::PtySession>>,
+) {
+    use std::io::Write;
+    let mut ids: Vec<&String> = pty.keys().collect();
+    ids.sort(); // %0, %1, … — stable restore order
+    let mut panes = Vec::new();
+    for pane_id in ids {
+        let sess = &pty[pane_id];
+        let Some(pid) = sess.shell_pid() else { continue };
+        let Some(cwd) = pid_cwd(pid) else { continue };
+        let was_claude = sess
+            .active_process_name()
+            .map_or(false, |p| p.contains("claude"));
+        panes.push(serde_json::json!({
+            "cwd": cwd.to_string_lossy(),
+            "was_claude": was_claude,
+            "session_id": latest_claude_session_id(&cwd),
+        }));
+    }
+    if panes.is_empty() {
+        return;
+    }
+    let Some(path) = session_file_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = serde_json::json!({ "panes": panes }).to_string();
+    if let Ok(mut f) = std::fs::File::create(&path) {
+        let _ = f.write_all(body.as_bytes());
+    }
+}
+
+pub fn session_file_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/session.json"))
+}
+
+/// One pane's restore record, as written by save_session.
+pub struct PaneRestore {
+    pub cwd: std::path::PathBuf,
+    pub was_claude: bool,
+    pub session_id: Option<String>,
+}
+
+/// Read the saved session for restore on launch. None if no file / empty.
+pub fn load_session() -> Option<Vec<PaneRestore>> {
+    let path = session_file_path()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let arr = v.get("panes")?.as_array()?;
+    let mut out = Vec::new();
+    for p in arr {
+        let Some(cwd) = p.get("cwd").and_then(|x| x.as_str()) else { continue };
+        out.push(PaneRestore {
+            cwd: std::path::PathBuf::from(cwd),
+            was_claude: p.get("was_claude").and_then(|x| x.as_bool()).unwrap_or(false),
+            session_id: p.get("session_id").and_then(|x| x.as_str()).map(String::from),
+        });
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// claude stores sessions under ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl,
+/// where the abs cwd is encoded by replacing `/` and `.` with `-`. The newest
+/// .jsonl there is the session the pane was last on.
+fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
+    let dir = std::path::PathBuf::from(home)
+        .join(".claude/projects")
+        .join(encoded);
+    let mut newest: Option<(std::time::SystemTime, String)> = None;
+    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else { continue };
+        let Some(id) = p.file_stem().and_then(|x| x.to_str()) else { continue };
+        if newest.as_ref().map_or(true, |(t, _)| mtime > *t) {
+            newest = Some((mtime, id.to_string()));
+        }
+    }
+    newest.map(|(_, id)| id)
 }
