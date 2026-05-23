@@ -14,6 +14,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 
+mod git;
 mod http;
 mod register;
 pub use http::spawn_http_server;

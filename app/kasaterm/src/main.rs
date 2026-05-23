@@ -83,10 +83,137 @@ const WHEEL_THROTTLE_MS: u64 = 8;
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
 /// default; iTerm2 uses 500. 530 matches the platform feel.
 const BLINK_HALF_PERIOD_MS: u64 = 530;
+/// Launch build banner: hold the `v…·<rev>` corner label fully visible
+/// for HOLD ms, then fade it out over FADE ms so you can tell builds
+/// apart at startup without it nagging afterwards.
+const VERSION_HOLD_MS: u128 = 4000;
+const VERSION_FADE_MS: u128 = 1200;
 /// While the user is actively typing we keep the cursor solid for this
 /// long after the last keystroke so it's easy to follow the caret. Same
 /// idea as iTerm2's "smart cursor" pause.
 const BLINK_PAUSE_AFTER_INPUT_MS: u64 = 700;
+
+/// Git-status panel page. `__PORT__` is substituted at window-open time
+/// with the live MCP port. Polls `/git-status` every second and renders
+/// progressive disclosure: a small green dot when clean, an expanded file
+/// list when there are changes. Self-contained (inline CSS/JS) so it can
+/// load via `with_html` without a served asset path; the cross-origin
+/// fetch relies on the endpoint's `Access-Control-Allow-Origin: *`.
+const GIT_PANEL_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px;
+    font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    background: #16181d; color: #c8cdd6;
+    -webkit-user-select: none; user-select: none;
+  }
+  .branch { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; color: #e6e9ef; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
+  .dot.clean { background: #3fb950; box-shadow: 0 0 6px #3fb95066; }
+  .dot.dirty { background: #d29922; box-shadow: 0 0 6px #d2992266; }
+  .dot.error { background: #f85149; }
+  .ab { margin-left: auto; display: flex; gap: 10px; font-size: 12px; color: #8b949e; }
+  .ab b { color: #c8cdd6; font-weight: 600; }
+  .summary { margin-top: 4px; font-size: 12px; color: #6e7681; }
+  .groups { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+  .group { display: none; }
+  .group.show { display: block; }
+  .group h4 {
+    margin: 0 0 6px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .04em; display: flex; align-items: center; gap: 6px;
+  }
+  .group h4 .n { color: #6e7681; font-weight: 500; }
+  .staged h4 { color: #3fb950; }
+  .modified h4 { color: #d29922; }
+  .untracked h4 { color: #58a6ff; }
+  ul { margin: 0; padding: 0; list-style: none; }
+  li {
+    font: 12px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
+    color: #adbac7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .err { color: #f85149; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <div class="branch">
+    <span id="dot" class="dot clean"></span>
+    <span id="branch">…</span>
+    <span class="ab">
+      <span id="ahead" title="unpushed commits">↑0</span>
+      <span id="behind" title="commits behind">↓0</span>
+    </span>
+  </div>
+  <div id="summary" class="summary">connecting…</div>
+  <div class="groups">
+    <div class="group staged" id="g-staged"><h4>staged <span class="n" id="n-staged"></span></h4><ul id="l-staged"></ul></div>
+    <div class="group modified" id="g-modified"><h4>modified <span class="n" id="n-modified"></span></h4><ul id="l-modified"></ul></div>
+    <div class="group untracked" id="g-untracked"><h4>untracked <span class="n" id="n-untracked"></span></h4><ul id="l-untracked"></ul></div>
+  </div>
+  <div id="err" class="err" style="display:none"></div>
+<script>
+const PORT = "__PORT__";
+const $ = (id) => document.getElementById(id);
+
+function fill(group, files) {
+  const n = files.length;
+  $("g-" + group).classList.toggle("show", n > 0);
+  $("n-" + group).textContent = n ? n : "";
+  const ul = $("l-" + group);
+  ul.innerHTML = "";
+  for (const f of files) {
+    const li = document.createElement("li");
+    li.textContent = f;
+    li.title = f;
+    ul.appendChild(li);
+  }
+}
+
+function render(d) {
+  $("err").style.display = "none";
+  if (d.error) {
+    $("dot").className = "dot error";
+    $("branch").textContent = "git";
+    $("summary").textContent = "";
+    $("err").style.display = "block";
+    $("err").textContent = d.error;
+    return;
+  }
+  $("branch").textContent = d.branch || "(detached)";
+  $("ahead").textContent = "↑" + (d.ahead || 0);
+  $("behind").textContent = "↓" + (d.behind || 0);
+  const staged = d.staged || [], modified = d.modified || [], untracked = d.untracked || [];
+  const total = staged.length + modified.length + untracked.length;
+  $("dot").className = "dot " + (d.clean ? "clean" : "dirty");
+  $("summary").textContent = d.clean
+    ? "working tree clean"
+    : total + (total === 1 ? " change" : " changes");
+  fill("staged", staged);
+  fill("modified", modified);
+  fill("untracked", untracked);
+}
+
+async function poll() {
+  try {
+    const r = await fetch("http://127.0.0.1:" + PORT + "/git-status", { cache: "no-store" });
+    render(await r.json());
+  } catch (e) {
+    $("dot").className = "dot error";
+    $("summary").textContent = "";
+    $("err").style.display = "block";
+    $("err").textContent = "server unreachable :" + PORT;
+  }
+}
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>"#;
 
 /// Cell width / height / baseline in logical pixels. Filled at startup
 /// from `Sugarloaf::compute_cell_metrics` so columns align with the
@@ -493,6 +620,22 @@ struct App {
     /// Wakes the event loop from background threads (PTY snapshots,
     /// socket commands) so a parked WaitUntil repaints immediately.
     proxy: EventLoopProxy<UserEvent>,
+    /// Git-status panel: a second OS window driving a wry webview, kept
+    /// fully separate from the terminal's wgpu window so it can never
+    /// disturb the render/damage path. `None` unless KASASPACE_GIT_PANEL
+    /// opted in at startup. The webview must outlive its window, so both
+    /// are owned here.
+    git_panel_window: Option<Arc<Window>>,
+    git_panel_webview: Option<wry::WebView>,
+    /// When the launch build banner began animating. Drives the
+    /// hold-then-fade alpha and keeps the frame loop awake (WaitUntil)
+    /// only while the banner is still visible.
+    version_anim_start: Instant,
+    /// macOS menu bar (muda). Held here because the menu must outlive the
+    /// app; `git_menu_item` is matched against incoming MenuEvent ids to
+    /// toggle the git panel from the menu.
+    menu: Option<muda::Menu>,
+    git_menu_item: Option<muda::MenuItem>,
 }
 
 impl App {
@@ -536,6 +679,107 @@ impl App {
             last_input_at: Instant::now(),
             font_size: FONT_SIZE,
             proxy,
+            git_panel_window: None,
+            git_panel_webview: None,
+            version_anim_start: Instant::now(),
+            menu: None,
+            git_menu_item: None,
+        }
+    }
+
+    /// Build banner shown bottom-right on launch: `v<pkg>·<git rev>`
+    /// (rev carries a trailing '+' when built dirty). Stamped at compile
+    /// time by build.rs.
+    fn version_label() -> String {
+        format!(
+            "v{}·{}",
+            env!("CARGO_PKG_VERSION"),
+            env!("KASATERM_GIT_REV")
+        )
+    }
+
+    /// 0.0..1.0 opacity for the launch banner: solid through
+    /// VERSION_HOLD_MS, then a linear fade across VERSION_FADE_MS, then
+    /// gone. Also the single source of truth for "is the banner still
+    /// animating" (alpha > 0).
+    fn version_alpha(&self) -> f32 {
+        let e = self.version_anim_start.elapsed().as_millis();
+        if e < VERSION_HOLD_MS {
+            1.0
+        } else if e < VERSION_HOLD_MS + VERSION_FADE_MS {
+            1.0 - (e - VERSION_HOLD_MS) as f32 / VERSION_FADE_MS as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// Open the git-status panel in its own OS window when
+    /// KASASPACE_GIT_PANEL is set (=1/true). Best-effort: any failure
+    /// (window or webview) just logs and leaves the terminal untouched —
+    /// the panel is auxiliary and must never block startup. The page polls
+    /// `/git-status` on the MCP server (KASASPACE_MCP_PORT, default 8765).
+    fn open_git_panel(&mut self, event_loop: &ActiveEventLoop, force: bool) {
+        if self.git_panel_window.is_some() {
+            return;
+        }
+        // The menu toggle passes force=true (explicit user action); startup
+        // otherwise gates on the KASASPACE_GIT_PANEL env opt-in.
+        if !force {
+            let on = std::env::var("KASASPACE_GIT_PANEL")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !on {
+                return;
+            }
+        }
+        let port =
+            std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".to_string());
+        let attrs = WindowAttributes::default()
+            .with_title("git status")
+            .with_theme(Some(Theme::Dark))
+            .with_inner_size(LogicalSize::new(300.0, 460.0));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("[git-panel] window create failed: {e}");
+                return;
+            }
+        };
+        let html = GIT_PANEL_HTML.replace("__PORT__", &port);
+        // build_as_child (not build): keep winit's own content view. build()
+        // replaces it with the webview, so winit's macOS delegate touches a
+        // freed view on focus changes (window_did_resign_key) → use-after-
+        // free crash. As a child, the webview fills the panel window while
+        // winit keeps its view. This is a separate window from the terminal,
+        // so there's no wgpu surface to overlap.
+        let webview = match wry::WebViewBuilder::new()
+            .with_html(html)
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(300.0, 460.0).into(),
+            })
+            .build_as_child(window.as_ref())
+        {
+            Ok(wv) => wv,
+            Err(e) => {
+                eprintln!("[git-panel] webview build failed: {e}");
+                return;
+            }
+        };
+        eprintln!("[git-panel] open; polling 127.0.0.1:{port}/git-status");
+        self.git_panel_window = Some(window);
+        self.git_panel_webview = Some(webview);
+    }
+
+    /// Toggle the git panel from the menu: close if open, force-open if not.
+    /// Bypasses the env gate since the menu click is an explicit user action.
+    fn toggle_git_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if self.git_panel_window.is_some() {
+            // Drop the webview before the window it borrows from.
+            self.git_panel_webview = None;
+            self.git_panel_window = None;
+        } else {
+            self.open_git_panel(event_loop, true);
         }
     }
 
@@ -2749,7 +2993,12 @@ impl App {
     }
 
     fn render_frame_gpu(&mut self, scale: f32) {
-        let Some(_window) = self.window.as_ref() else { return };
+        let Some(window) = self.window.as_ref() else { return };
+        // Snapshot for the launch banner before the &mut self.gpu borrow
+        // below (which rules out re-borrowing &self inside that block).
+        let win_size = window.inner_size();
+        let win_px = (win_size.width as f32, win_size.height as f32);
+        let version_alpha = self.version_alpha();
         let cell_w_px = self.cell.w * scale;
         let cell_h_px = self.cell.h * scale;
         // Snapshot per-pane cell grids while we hold the workspace
@@ -2991,6 +3240,35 @@ impl App {
             if let Some((zx, zy, zw, zh)) = drop_zone_rect {
                 g.rect(zx, zy, zw, zh, [90, 140, 230, 90]);
             }
+            // Launch build banner, bottom-right, painted last so it sits
+            // on top. Faint and short-lived — fades out after a few
+            // seconds. Coords are logical px (gpu promotes to physical).
+            let v_alpha = version_alpha;
+            if v_alpha > 0.0 {
+                let label = Self::version_label();
+                let v_font = 11.0_f32;
+                let win_w = win_px.0 / scale;
+                let win_h = win_px.1 / scale;
+                // Proportional glyphs, so estimate the run width to right-
+                // align: ~0.5em per char is a safe over-estimate for this
+                // mono-ish label, padded so it never clips the edge.
+                let text_w = label.chars().count() as f32 * v_font * 0.52;
+                let margin = 8.0;
+                let x = (win_w - text_w - margin).max(margin);
+                let y = win_h - v_font - margin;
+                let a = (170.0 * v_alpha).round() as u8;
+                g.draw_text(
+                    x,
+                    y,
+                    &label,
+                    gpu::DrawOpts {
+                        font_size: v_font,
+                        color: [150, 158, 170, a],
+                        bold: false,
+                        italic: false,
+                    },
+                );
+            }
             if let Err(e) = g.render(&slot_views, scale) {
                 eprintln!("[gpu] render error: {e:?}");
             }
@@ -3032,7 +3310,12 @@ impl App {
         // cursor blink phase toggles count separately.
         let blink_changed = blink_on != self.last_blink_on;
         let pty_dirty = self.ws.lock().unwrap().panes.values().any(|p| p.dirty);
-        if !pty_dirty && !self.chrome_dirty && !blink_changed {
+        // The launch banner fade is its own animation source: while it's
+        // still visible the picture changes every frame, so force the GPU
+        // pass even when panes are clean (about_to_wait re-arms WaitUntil
+        // to keep waking us through the fade).
+        let version_animating = self.version_alpha() > 0.0;
+        if !pty_dirty && !self.chrome_dirty && !blink_changed && !version_animating {
             return;
         }
         self.last_blink_on = blink_on;
@@ -3472,6 +3755,29 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
+        // macOS menu bar: app submenu (About/Quit) + a "보기" submenu with
+        // the "Git 패널" toggle. Built once (NSApp exists by resumed). Clicks
+        // arrive on muda's global channel, drained in about_to_wait. Stored
+        // on self so the menu outlives this function.
+        #[cfg(target_os = "macos")]
+        if self.menu.is_none() {
+            use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+            let menu = Menu::new();
+            let app_m = Submenu::new("kasaterm", true);
+            let _ = app_m.append_items(&[
+                &PredefinedMenuItem::about(None, None),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::quit(None),
+            ]);
+            let view_m = Submenu::new("보기", true);
+            let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
+            let _ = view_m.append(&git_item);
+            let _ = menu.append(&app_m);
+            let _ = menu.append(&view_m);
+            menu.init_for_nsapp();
+            self.git_menu_item = Some(git_item);
+            self.menu = Some(menu);
+        }
         // WaitUntil so the cursor blink ticks even when no terminal output
         // is arriving — the redraw inside RedrawRequested re-arms the
         // schedule. Pure Wait would freeze the blink mid-phase, Poll would
@@ -3502,6 +3808,9 @@ impl ApplicationHandler<UserEvent> for App {
                 .create_window(attrs)
                 .expect("create window"),
         );
+        // Start the launch banner clock when the window actually appears,
+        // not at struct construction (which can precede the first frame).
+        self.version_anim_start = Instant::now();
         // Without IME enabled, Hangul / kana would arrive as raw key
         // events instead of composing into 안 / 한 / 글.
         // We compose Hangul ourselves via the in-process hangul-ime
@@ -3632,6 +3941,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.schedule_autosend();
             self.schedule_autocapture();
             self.arm_autosplit();
+            self.open_git_panel(event_loop, false);
             return;
         }
         let (font_library, font_err) = sugarloaf::font::FontLibrary::new(fonts);
@@ -3702,14 +4012,26 @@ impl ApplicationHandler<UserEvent> for App {
         self.schedule_autosend();
         self.schedule_autocapture();
         self.arm_autosplit();
+        self.open_git_panel(event_loop);
     }
 
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _id: WindowId,
+        id: WindowId,
         event: WindowEvent,
     ) {
+        // The git panel is a second window with its own webview. Its events
+        // must never reach the terminal logic below — in particular a panel
+        // CloseRequested only drops the panel, it doesn't exit the app. The
+        // webview paints itself, so we ignore everything else for it.
+        if self.git_panel_window.as_ref().map(|w| w.id()) == Some(id) {
+            if matches!(event, WindowEvent::CloseRequested) {
+                self.git_panel_webview = None;
+                self.git_panel_window = None;
+            }
+            return;
+        }
         let Some(window) = self.window.clone() else { return; };
         // gpu path uses our own wgpu surface, sugarloaf path keeps
         // its renderer. Only resize / rescale touch the surface
@@ -4056,6 +4378,13 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Drain menu clicks from muda's global channel. The "Git 패널" item
+        // toggles the panel (open/close), bypassing the env gate.
+        while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
+            if self.git_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+                self.toggle_git_panel(event_loop);
+            }
+        }
         // Reap dead pty sessions before anything else — a closed shell
         // should disappear from the layout on the very next loop turn
         // so the user sees the gap collapse immediately.
@@ -4078,7 +4407,21 @@ impl ApplicationHandler<UserEvent> for App {
         //   - cursor blink → proxy UserEvent (dedicated blink thread)
         // Each of those drives a redraw directly, so there's no timer in
         // the hot path to be coalesced.
-        event_loop.set_control_flow(ControlFlow::Wait);
+        //
+        // Exception: while the launch build banner is still fading we DO
+        // need a timer, since nothing else is producing frames. Re-arm a
+        // ~30fps WaitUntil until the fade finishes, then fall back to the
+        // idle Wait. (new_events → request_redraw on the timer fire.)
+        if self.version_alpha() > 0.0 {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + std::time::Duration::from_millis(33),
+            ));
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
     }
 
     fn new_events(

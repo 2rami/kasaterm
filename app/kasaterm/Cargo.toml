@@ -19,6 +19,11 @@ anyhow.workspace = true
 pollster = "0.4"
 arboard = "3"
 kasaspace-mcp = { version = "0.1.0", path = "../../crates/kasaspace-mcp" }
+# Git-status panel webview. Separate OS window so it can't touch the wgpu
+# surface the terminal renders into — wry runs WKWebView/WebView2/WebKitGTK
+# in its own layer. raw-window-handle 0.6 matches the workspace's winit 0.30.
+wry = "0.55"
+muda = "0.19.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
