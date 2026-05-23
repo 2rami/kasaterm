@@ -37,7 +37,7 @@ impl Cell {
 pub type Row = Vec<Cell>;
 
 /// Screen diff sent from the flusher thread to consumers.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScreenUpdate {
     pub pane_id: String,
     pub rows: u16,
@@ -59,6 +59,10 @@ pub struct ScreenUpdate {
     pub mouse_sgr: bool,
     /// Window title set by shell OSC 0/2 (vt100 parser exposes it).
     pub title: Option<String>,
+    /// Sentinel: the PTY reader hit EOF / error (shell or claude exited).
+    /// Carries no screen data — it tells the host pump to reap this pane.
+    /// Normal frames leave this false.
+    pub eof: bool,
 }
 
 pub(crate) fn vt_color(c: vt100::Color) -> Color {

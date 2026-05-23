@@ -746,6 +746,19 @@ impl App {
             // streaming-burst CPU bounded while making every dirty
             // frame visible.
             while let Ok(update) = screens.recv() {
+                // EOF sentinel: the PTY reader died (shell/claude exited).
+                // The PtySession keeps a Sender alive for scroll/resize, so
+                // the channel never closes on its own — without this signal
+                // the pane would linger as a zombie. Flag it dead and wake
+                // the loop so reap_dead_panes drops it on the next turn.
+                if update.eof {
+                    dead.lock().unwrap().push(update.pane_id.clone());
+                    if let Some(w) = win_screens.as_ref() {
+                        w.request_redraw();
+                    }
+                    let _ = proxy.send_event(UserEvent::Redraw);
+                    return;
+                }
                 let mut ws = ws_screens.lock().unwrap();
                 if ws.active_pane.is_none() {
                     ws.active_pane = Some(update.pane_id.clone());

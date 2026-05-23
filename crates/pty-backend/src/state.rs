@@ -531,11 +531,26 @@ fn spawn_reader_thread(
             let n = match reader.read(&mut buf) {
                 Ok(0) => {
                     eprintln!("[pty-backend] EOF on PTY reader — shell exited");
+                    // Tell the host pump the pane died. The PtySession also
+                    // holds a Sender (for scroll/resize), so dropping our
+                    // clone alone never closes the channel — the recv loop
+                    // would block forever and the pane would linger as a
+                    // zombie. An explicit eof sentinel reaps it instead.
+                    let _ = tx.send(ScreenUpdate {
+                        pane_id: pane_id.clone(),
+                        eof: true,
+                        ..Default::default()
+                    });
                     return;
                 }
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("[pty-backend] read error: {e}");
+                    let _ = tx.send(ScreenUpdate {
+                        pane_id: pane_id.clone(),
+                        eof: true,
+                        ..Default::default()
+                    });
                     return;
                 }
             };
@@ -740,6 +755,7 @@ fn snapshot(
         mouse_enabled,
         mouse_sgr,
         title,
+        eof: false,
     }
 }
 
