@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kasaspace": {
+      "command": "python3",
+      "args": ["mcp/kasaspace_mcp.py"]
+    }
+  }
+}
