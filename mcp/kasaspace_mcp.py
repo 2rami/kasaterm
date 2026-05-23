@@ -195,6 +195,10 @@ TOOLS = [
                     "type": "string",
                     "description": "Optional #rrggbb accent for the header. Defaults to a blue-gray that marks background jobs.",
                 },
+                "auto_close": {
+                    "type": "boolean",
+                    "description": "If true, the pane closes itself when the command finishes (appends '; exit' so the shell quits and the pane is reaped). Use for teammates/sub-agents that should disappear when done; leave false for jobs whose output the user wants to keep reading.",
+                },
             },
             "required": ["command"],
         },
@@ -255,6 +259,7 @@ def call_tool(name, args):
             raise RuntimeError("direction must be one of left/right/up/down")
         title = args.get("title") or command.strip().splitlines()[0][:40]
         color = args.get("color") or JOB_COLOR
+        auto_close = bool(args.get("auto_close", False))
         # Option-1 composition: split a pane, then label it, then type the
         # command into it. The split reply carries the new surface id; we
         # target everything explicitly so a focus race can't mislabel or
@@ -277,9 +282,17 @@ def call_tool(name, args):
             labels.append(f"color={color}")
         except RuntimeError as e:
             labels.append(f"color skipped ({e})")
+        # auto_close: append '; exit' so the shell quits when the command
+        # finishes → PTY EOF → kasaterm reaps the pane. Without it the shell
+        # lingers and the pane stays (good for jobs whose output you re-read,
+        # bad for teammates that should vanish when done).
+        run_cmd = command.rstrip("\n")
+        if auto_close:
+            run_cmd += "; exit"
+            labels.append("auto_close")
         agent_rpc("surface.send_text", {
             "surface_id": surface_id,
-            "text": command.rstrip("\n") + "\n",
+            "text": run_cmd + "\n",
         })
         return f"Started job in pane {surface_id} ({direction}; {', '.join(labels)}): {command}"
 
