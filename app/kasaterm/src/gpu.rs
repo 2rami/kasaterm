@@ -262,7 +262,16 @@ impl GpuRenderer {
                 fg_rgba: fg,
                 ..Default::default()
             });
-            pen += entry.advance;
+            // Header text is proportional, not a mono grid. A wide (CJK)
+            // glyph carries a ~2-cell mono advance, which leaves big gaps
+            // between Hangul in a small label ("탭이름 테스트" reads spaced
+            // out). Tighten wide glyphs to their ink width + a little
+            // tracking so the label reads evenly.
+            pen += if is_wide_char(ch) {
+                entry.px_w as f32 + size_px as f32 * 0.18
+            } else {
+                entry.advance
+            };
         }
         pen / s
     }
