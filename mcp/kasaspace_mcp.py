@@ -167,12 +167,13 @@ TOOLS = [
     {
         "name": "kasaspace_run_job",
         "description": (
-            "Run a long-running command in a NEW pane so the user watches its "
-            "progress live. Splits a fresh pane, then types the command into "
-            "it. Use this for background jobs (builds, deploys, dev servers, "
-            "sub-agents) instead of blocking your own pane. Returns the new "
-            "surface id. Note: output stays visual in the pane — it is not "
-            "streamed back to you."
+            "Run a long-running command in a NEW labelled pane so the user "
+            "watches its progress live. Splits a fresh pane, labels its header "
+            "with the job title and an accent color, then types the command "
+            "into it. Use this for background jobs (builds, deploys, dev "
+            "servers, sub-agents) instead of blocking your own pane. Returns "
+            "the new surface id. Note: output stays visual in the pane — it is "
+            "not streamed back to you."
         ),
         "inputSchema": {
             "type": "object",
@@ -181,16 +182,29 @@ TOOLS = [
                     "type": "string",
                     "description": "Shell command to run in the new pane (no trailing newline needed).",
                 },
+                "title": {
+                    "type": "string",
+                    "description": "Short human label for the pane header (e.g. 'build', 'deploy api', 'tests'). Defaults to the command.",
+                },
                 "direction": {
                     "type": "string",
                     "enum": ["left", "right", "up", "down"],
                     "description": "Where the job pane opens. Defaults to 'down'.",
+                },
+                "color": {
+                    "type": "string",
+                    "description": "Optional #rrggbb accent for the header. Defaults to a blue-gray that marks background jobs.",
                 },
             },
             "required": ["command"],
         },
     },
 ]
+
+# Default header accent for background jobs — a calm blue-gray so job panes
+# read as "machine-driven, watch me" without competing with the user's
+# foreground pane.
+JOB_COLOR = "#5b7fa6"
 
 
 def call_tool(name, args):
@@ -239,16 +253,35 @@ def call_tool(name, args):
         direction = args.get("direction", "down")
         if direction not in ("left", "right", "up", "down"):
             raise RuntimeError("direction must be one of left/right/up/down")
-        # Option-1 composition: split a pane, then type the command into it.
-        # The split reply carries the new surface id; we target it explicitly
-        # so a race on focus can't send the command to the wrong pane.
+        title = args.get("title") or command.strip().splitlines()[0][:40]
+        color = args.get("color") or JOB_COLOR
+        # Option-1 composition: split a pane, then label it, then type the
+        # command into it. The split reply carries the new surface id; we
+        # target everything explicitly so a focus race can't mislabel or
+        # misfire into the wrong pane.
         surf = agent_rpc("surface.split", {"direction": direction}).get("surface", {})
         surface_id = surf.get("id")
-        send_params = {"text": command.rstrip("\n") + "\n"}
-        if surface_id:
-            send_params["surface_id"] = surface_id
-        agent_rpc("surface.send_text", send_params)
-        return f"Started job in new pane {surface_id} ({direction}): {command}"
+        if not surface_id:
+            raise RuntimeError("split did not return a surface id; cannot label/target job pane")
+        # Label + color are best-effort: a backend that doesn't support them
+        # (e.g. the tmux backend) shouldn't sink the whole job. The pane and
+        # its command still run.
+        labels = []
+        try:
+            agent_rpc("surface.rename", {"surface_id": surface_id, "title": title})
+            labels.append(f"title={title!r}")
+        except RuntimeError as e:
+            labels.append(f"rename skipped ({e})")
+        try:
+            agent_rpc("surface.set_color", {"surface_id": surface_id, "color": color})
+            labels.append(f"color={color}")
+        except RuntimeError as e:
+            labels.append(f"color skipped ({e})")
+        agent_rpc("surface.send_text", {
+            "surface_id": surface_id,
+            "text": command.rstrip("\n") + "\n",
+        })
+        return f"Started job in pane {surface_id} ({direction}; {', '.join(labels)}): {command}"
 
     raise RuntimeError(f"unknown tool: {name}")
 
