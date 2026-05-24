@@ -671,6 +671,18 @@ enum UserEvent {
     Redraw,
 }
 
+/// One terminal session: its own pane set, layout, and workspace. The visible
+/// session lives in App.{pty,pty_layout,ws}; the rest sit in
+/// App.stashed_sessions. Each session's `ws` is its own Arc so its
+/// pump_pty_screens threads keep updating it in the background even while
+/// another session is on screen (tmux-style detached sessions).
+#[allow(dead_code)]
+struct Session {
+    pty: HashMap<String, Arc<pty_backend::PtySession>>,
+    pty_layout: Option<pty_backend::PtyLayout>,
+    ws: Arc<Mutex<Workspace>>,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     sugarloaf: Option<Sugarloaf<'static>>,
@@ -709,6 +721,16 @@ struct App {
     /// `about_to_wait`. None until `start_socket_pty` wires it up.
     socket_handle: Option<socket::PtyBackendHandle>,
     ws: Arc<Mutex<Workspace>>,
+    /// All sessions (tmux-style tabs) by tab index. The visible session's slot
+    /// holds `None` — its live state is the fields above (pty/pty_layout/ws).
+    /// Switching swaps a slot in/out; background sessions keep running via
+    /// their own ws Arc, captured by their pump_pty_screens threads.
+    /// wry 세션 패널 구현 전까지 dead_code — 백엔드는 완성됨.
+    #[allow(dead_code)]
+    sessions: Vec<Option<Session>>,
+    /// Index into `sessions` of the visible session (its slot is None).
+    #[allow(dead_code)]
+    active_session: usize,
     /// Measured cell geometry from sugarloaf — see `compute_cell_metrics`.
     cell: CellGeom,
     preedit: String,
@@ -843,6 +865,8 @@ impl App {
             dead_panes: Arc::new(Mutex::new(Vec::new())),
             socket_handle: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
+            sessions: vec![None],
+            active_session: 0,
             cell: CellGeom::default(),
             preedit: String::new(),
             in_preedit: false,
@@ -1272,6 +1296,85 @@ impl App {
     /// renderer expects. Single-pane MVP — the workspace holds one
     /// PaneState keyed "%0" and the layout is `None` (the render path
     /// falls back to single-pane when no layout has arrived).
+    /// Spawn the first shell pane for the *current* (already-cleared) session.
+    /// Mirrors start_pty's pane bring-up with a fresh pane id and no socket
+    /// (re)init — used by new_session.
+    #[allow(dead_code)]
+    fn spawn_session_pane(&mut self) -> Result<()> {
+        let (cols, rows) = self.window_cells();
+        let cwd = resolve_initial_cwd();
+        let id = format!("%{}", self.next_pane_id);
+        self.next_pane_id += 1;
+        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+            shell: resolve_default_shell(),
+            cwd,
+            cols,
+            rows,
+            env: Vec::new(),
+            pane_id: id.clone(),
+        })?;
+        self.pump_pty_screens(session.screens.clone(), id.clone());
+        self.pty.insert(id.clone(), Arc::new(session));
+        self.pty_layout = Some(pty_backend::PtyLayout::single(&id));
+        self.ws.lock().unwrap().active_pane = Some(id);
+        Ok(())
+    }
+
+    /// Create a new tmux-style session: stash the visible one into its slot,
+    /// start a fresh empty session with its own ws/pty/layout, bring up its
+    /// first pane.
+    #[allow(dead_code)]
+    fn new_session(&mut self) {
+        self.sessions[self.active_session] = Some(Session {
+            pty: std::mem::take(&mut self.pty),
+            pty_layout: self.pty_layout.take(),
+            ws: self.ws.clone(),
+        });
+        self.ws = Arc::new(Mutex::new(Workspace::default()));
+        self.pty = HashMap::new();
+        self.pty_layout = None;
+        self.sessions.push(None);
+        self.active_session = self.sessions.len() - 1;
+        if let Err(e) = self.spawn_session_pane() {
+            eprintln!("[session] new session pane spawn failed: {e:#}");
+        }
+        self.refresh_socket_snapshot();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Switch the visible session to tab `idx`: swap the current out to its
+    /// slot, swap the target in. Background sessions stay alive (their ws Arc
+    /// is still updated by their pump threads).
+    #[allow(dead_code)]
+    fn switch_session(&mut self, idx: usize) {
+        if idx == self.active_session || idx >= self.sessions.len() {
+            return;
+        }
+        if self.sessions[idx].is_none() {
+            return;
+        }
+        self.sessions[self.active_session] = Some(Session {
+            pty: std::mem::take(&mut self.pty),
+            pty_layout: self.pty_layout.take(),
+            ws: self.ws.clone(),
+        });
+        let next = self.sessions[idx].take().unwrap();
+        self.pty = next.pty;
+        self.pty_layout = next.pty_layout;
+        self.ws = next.ws;
+        self.active_session = idx;
+        // Reflow PTYs to the current window and repaint.
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.refresh_socket_snapshot();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
         let (cols, rows) = self.window_cells();
@@ -3357,6 +3460,8 @@ impl App {
                 (h.id.clone(), close)
             })
             .collect();
+        // Session tabs live in a wry webview panel (like the git panel), not
+        // the native title bar — drawing them here collided with the OSC title.
         // Drop-zone overlay: while a header drag is active, highlight the
         // half of the target pane the dragged pane would land in. Computed
         // here (immutable self borrow) so the gpu block below only touches
