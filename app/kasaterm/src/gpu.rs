@@ -365,6 +365,70 @@ impl GpuRenderer {
         }
     }
 
+    /// Draw inline-autosuggestion ghost text. Same cell-grid placement
+    /// math as `draw_preedit` / `draw_cells`, but with NO background fill
+    /// or underline and a dim foreground, so it reads as a hint sitting
+    /// behind where the user would type. `max_cells` clips it to the
+    /// remaining columns on the row (no wrapping). `origin` is logical px
+    /// at the top-left of the first ghost cell.
+    pub fn draw_ghost(&mut self, origin_x: f32, origin_y: f32, text: &str, max_cells: u32) {
+        let cell_w_px = self.cell_w * self.scale;
+        let cell_h_px = self.cell_h * self.scale;
+        let ox = origin_x * self.scale;
+        let oy = origin_y * self.scale;
+        let fg = srgb_rgba_to_linear(crate::cells::GHOST_FG);
+        let baseline_y = oy + cell_h_px * 0.78;
+        let mut col = 0u32;
+        for ch in text.chars() {
+            let wide = is_wide_char(ch);
+            let span = if wide { 2 } else { 1 };
+            if col + span > max_cells {
+                break;
+            }
+            if ch != ' ' {
+                let key = GlyphKey {
+                    ch,
+                    bold: false,
+                    italic: false,
+                    size_px: self.font_size_px,
+                };
+                if let Some(entry) =
+                    self.atlas
+                        .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
+                {
+                    let cell_x = ox + col as f32 * cell_w_px;
+                    if wide {
+                        let span_w = cell_w_px * 2.0;
+                        let gw0 = entry.px_w as f32;
+                        let scale_fit = if gw0 > span_w { span_w / gw0 } else { 1.0 };
+                        let gw = gw0 * scale_fit;
+                        let gh = entry.px_h as f32 * scale_fit;
+                        let x = cell_x + (span_w - gw) * 0.5;
+                        let y = baseline_y - entry.bearing_y as f32 * scale_fit;
+                        self.chrome.push(CellInstance {
+                            cell_px: [x, y, gw, gh],
+                            uv_min: entry.uv_min,
+                            uv_max: entry.uv_max,
+                            fg_rgba: fg,
+                            ..Default::default()
+                        });
+                    } else {
+                        let x = cell_x + entry.bearing_x as f32;
+                        let y = baseline_y - entry.bearing_y as f32;
+                        self.chrome.push(CellInstance {
+                            cell_px: [x, y, entry.px_w as f32, entry.px_h as f32],
+                            uv_min: entry.uv_min,
+                            uv_max: entry.uv_max,
+                            fg_rgba: fg,
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            col += span;
+        }
+    }
+
     /// Drop all pending chrome instances. main.rs calls this at the
     /// top of each frame so stale rects/labels from the previous
     /// frame don't pile up.

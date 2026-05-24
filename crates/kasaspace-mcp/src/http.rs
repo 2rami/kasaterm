@@ -51,12 +51,19 @@ async fn git_diff_handler(
 }
 
 /// `POST /git-commit` — stage exactly the checked files and commit.
-async fn git_commit_handler(
-    backend: Arc<dyn Backend>,
-    Json(req): Json<CommitReq>,
-) -> impl IntoResponse {
-    let body = git::git_commit(&resolve_cwd(&backend), &req.files, &req.message);
-    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+///
+/// Body is a raw JSON *string* (Content-Type text/plain), not an
+/// `application/json` body. The webview panel loads from `with_html` (null
+/// origin); a json content-type would trip a CORS preflight (OPTIONS) that
+/// axum's `post()` route answers with 405, silently killing the request.
+/// text/plain is a CORS "simple" content-type, so no preflight — and unlike a
+/// query string it carries the file list + multi-line message cleanly.
+async fn git_commit_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
+    let resp = match serde_json::from_str::<CommitReq>(&body) {
+        Ok(req) => git::git_commit(&resolve_cwd(&backend), &req.files, &req.message),
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("bad request body: {e}") }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(resp))
 }
 
 /// `POST /git-push` — push the current branch.
@@ -77,10 +84,10 @@ struct AiCommitReq {
 /// runs claude, inject a commit instruction (with the checked files) so the
 /// working agent does the commit; otherwise ask the user to focus a claude
 /// pane (agent spawn is phase 2).
-async fn git_ai_commit_handler(
-    backend: Arc<dyn Backend>,
-    Json(req): Json<AiCommitReq>,
-) -> impl IntoResponse {
+async fn git_ai_commit_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
+    // Raw JSON string body (text/plain) to avoid the CORS preflight — see
+    // git_commit_handler. Empty/garbage body falls back to "no files".
+    let req: AiCommitReq = serde_json::from_str(&body).unwrap_or(AiCommitReq { files: Vec::new() });
     let proc = backend.active_process_name().unwrap_or_default();
     let body = if proc.contains("claude") {
         let msg = if req.files.is_empty() {
@@ -96,6 +103,59 @@ async fn git_ai_commit_handler(
     } else {
         let who = if proc.is_empty() { "셸".to_string() } else { proc };
         serde_json::json!({ "ok": false, "output": format!("claude가 켜진 pane에서 눌러주세요 (활성: {who})") })
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `GET /sessions` — JSON snapshot of the tmux-style session tabs for the
+/// session panel to poll: `{ count, active }`.
+async fn sessions_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let s = backend.sessions();
+    let body = serde_json::json!({ "count": s.count, "active": s.active });
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// Read a required `usize` query param, defaulting to 0 when absent/garbage.
+fn query_idx(params: &std::collections::HashMap<String, String>) -> usize {
+    params.get("idx").and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+/// `POST /session-switch?idx=<n>` — switch the visible session to `idx`.
+///
+/// The index rides in the query string (not a JSON body) on purpose: the
+/// webview panel loads from `with_html` (a null origin), so a JSON body would
+/// add a `Content-Type: application/json` header and trip a CORS *preflight*
+/// (OPTIONS) that axum's `post()` route answers with 405 — silently killing
+/// the request. A bodyless POST is a CORS "simple request": no preflight.
+async fn session_switch_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match backend.switch_session(query_idx(&params)) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /session-new` — create a fresh session and switch to it.
+async fn session_new_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let body = match backend.new_session() {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /session-close?idx=<n>` — close the session at `idx`. Query param for
+/// the same no-preflight reason as session-switch.
+async fn session_close_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match backend.close_session(query_idx(&params)) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
@@ -141,6 +201,10 @@ pub fn spawn_http_server(
                 let commit_backend = backend.clone();
                 let push_backend = backend.clone();
                 let ai_backend = backend.clone();
+                let sessions_backend = backend.clone();
+                let session_switch_backend = backend.clone();
+                let session_new_backend = backend.clone();
+                let session_close_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -159,7 +223,7 @@ pub fn spawn_http_server(
                     )
                     .route(
                         "/git-commit",
-                        post(move |body: Json<CommitReq>| {
+                        post(move |body: String| {
                             git_commit_handler(commit_backend.clone(), body)
                         }),
                     )
@@ -169,8 +233,28 @@ pub fn spawn_http_server(
                     )
                     .route(
                         "/git-ai-commit",
-                        post(move |body: Json<AiCommitReq>| {
+                        post(move |body: String| {
                             git_ai_commit_handler(ai_backend.clone(), body)
+                        }),
+                    )
+                    .route(
+                        "/sessions",
+                        get(move || sessions_handler(sessions_backend.clone())),
+                    )
+                    .route(
+                        "/session-switch",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            session_switch_handler(session_switch_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/session-new",
+                        post(move || session_new_handler(session_new_backend.clone())),
+                    )
+                    .route(
+                        "/session-close",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            session_close_handler(session_close_backend.clone(), q)
                         }),
                     )
                     .nest_service("/mcp", service);

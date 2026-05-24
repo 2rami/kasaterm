@@ -63,6 +63,12 @@ pub struct ScreenUpdate {
     /// Carries no screen data — it tells the host pump to reap this pane.
     /// Normal frames leave this false.
     pub eof: bool,
+    /// Cursor (row, col) at the moment the shell emitted an OSC 133 `B`
+    /// mark (prompt end / command-input start), if this frame contained
+    /// one. The host uses it as the authoritative start of the editable
+    /// command line for inline autosuggestion. `None` on frames without a
+    /// fresh mark — the host keeps the last known one until it goes stale.
+    pub prompt_end: Option<(u16, u16)>,
 }
 
 pub(crate) fn vt_color(c: vt100::Color) -> Color {

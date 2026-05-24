@@ -6,7 +6,7 @@
 //! become real tmux `@N` strings and `list_surfaces` returns one entry
 //! per actually-open pane.
 
-use agent_socket::backend::{Backend, SplitDirection, SurfaceInfo, WorkspaceInfo};
+use agent_socket::backend::{Backend, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo};
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -213,6 +213,20 @@ pub enum PtyCommand {
         b: String,
         reply: SyncSender<Result<()>>,
     },
+    /// Switch the visible tmux-style session to index `idx`.
+    SwitchSession {
+        idx: usize,
+        reply: SyncSender<Result<()>>,
+    },
+    /// Create a new session and switch to it.
+    NewSession {
+        reply: SyncSender<Result<()>>,
+    },
+    /// Close the tmux-style session at index `idx`.
+    CloseSession {
+        idx: usize,
+        reply: SyncSender<Result<()>>,
+    },
 }
 
 /// Read-only view the main thread publishes after every state change.
@@ -226,6 +240,11 @@ pub struct PtySnapshot {
     /// panel resolves the terminal's current directory and foreground program
     /// (for the AI-commit button) from this pid, live.
     pub active_shell_pid: Option<u32>,
+    /// Total number of tmux-style sessions. The session panel polls this to
+    /// draw one tab per session. 0 until the first snapshot refresh.
+    pub session_count: usize,
+    /// Index of the visible session within the session list.
+    pub active_session: usize,
 }
 
 #[derive(Clone)]
@@ -342,6 +361,28 @@ impl Backend for PtyBackend {
         let pid = self.handle.snapshot.lock().unwrap().active_shell_pid?;
         pid_process_name(pid)
     }
+
+    fn sessions(&self) -> SessionsInfo {
+        let snap = self.handle.snapshot.lock().unwrap();
+        // Before the first snapshot refresh the count is 0; report a single
+        // session so the panel never renders an empty list.
+        SessionsInfo {
+            count: snap.session_count.max(1),
+            active: snap.active_session,
+        }
+    }
+
+    fn switch_session(&self, idx: usize) -> Result<()> {
+        self.submit(|reply| PtyCommand::SwitchSession { idx, reply })
+    }
+
+    fn new_session(&self) -> Result<()> {
+        self.submit(|reply| PtyCommand::NewSession { reply })
+    }
+
+    fn close_session(&self, idx: usize) -> Result<()> {
+        self.submit(|reply| PtyCommand::CloseSession { idx, reply })
+    }
 }
 
 /// Resolve a process's current working directory via lsof. macOS has no
@@ -392,72 +433,130 @@ fn pid_process_name(shell_pid: u32) -> Option<String> {
     best.map(|(_, n)| n)
 }
 
-/// Persist each pane's cwd + claude session id so the next launch can restore
-/// them. Written on exit, read by start_pty. Best-effort; failures are silent.
-pub fn save_session(
-    pty: &std::collections::HashMap<String, std::sync::Arc<pty_backend::PtySession>>,
-) {
+/// Build one layout-tree leaf's restore record from a live PtySession: its
+/// cwd, whether it was running claude, and the newest claude session id under
+/// that cwd (for `claude --resume`). `cwd` is null when the shell pid/cwd
+/// can't be resolved — restore then falls back to the default cwd.
+pub fn pane_record(sess: &pty_backend::PtySession) -> serde_json::Value {
+    let cwd = sess.shell_pid().and_then(pid_cwd);
+    let was_claude = sess
+        .active_process_name()
+        .map_or(false, |p| p.contains("claude"));
+    let session_id = cwd.as_ref().and_then(|c| latest_claude_session_id(c));
+    serde_json::json!({
+        "cwd": cwd.as_ref().map(|c| c.to_string_lossy().into_owned()),
+        "was_claude": was_claude,
+        "session_id": session_id,
+    })
+}
+
+/// Write the full multi-session restore state (built by the caller from each
+/// session's layout tree). Written on exit, read by start_pty. Best-effort;
+/// failures are silent.
+pub fn write_session_state(state: &serde_json::Value) {
     use std::io::Write;
-    let mut ids: Vec<&String> = pty.keys().collect();
-    ids.sort(); // %0, %1, … — stable restore order
-    let mut panes = Vec::new();
-    for pane_id in ids {
-        let sess = &pty[pane_id];
-        let Some(pid) = sess.shell_pid() else { continue };
-        let Some(cwd) = pid_cwd(pid) else { continue };
-        let was_claude = sess
-            .active_process_name()
-            .map_or(false, |p| p.contains("claude"));
-        panes.push(serde_json::json!({
-            "cwd": cwd.to_string_lossy(),
-            "was_claude": was_claude,
-            "session_id": latest_claude_session_id(&cwd),
-        }));
-    }
-    if panes.is_empty() {
-        return;
-    }
     let Some(path) = session_file_path() else { return };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let body = serde_json::json!({ "panes": panes }).to_string();
     if let Ok(mut f) = std::fs::File::create(&path) {
-        let _ = f.write_all(body.as_bytes());
+        let _ = f.write_all(state.to_string().as_bytes());
     }
 }
 
 pub fn session_file_path() -> Option<std::path::PathBuf> {
+    // Override lets a debug instance keep its restore state out of the daily
+    // app's shared file (and lets users relocate it).
+    if let Ok(p) = std::env::var("KASATERM_SESSION_FILE") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
     let home = std::env::var("HOME").ok()?;
     Some(std::path::PathBuf::from(home).join(".config/kasaterm/session.json"))
 }
 
-/// One pane's restore record, as written by save_session.
+/// One pane's restore record — the payload carried by a layout-tree leaf.
 pub struct PaneRestore {
-    pub cwd: std::path::PathBuf,
+    /// None when the saved cwd couldn't be resolved; restore uses the default.
+    pub cwd: Option<std::path::PathBuf>,
     pub was_claude: bool,
     pub session_id: Option<String>,
 }
 
-/// Read the saved session for restore on launch. None if no file / empty.
-pub fn load_session() -> Option<Vec<PaneRestore>> {
+/// A node in a session's restore layout tree — mirrors `pty_backend::PtyLayout`
+/// but carries per-pane restore data at the leaves instead of live pane ids.
+pub enum RestoreNode {
+    Leaf(PaneRestore),
+    Split {
+        /// true = side-by-side (PtyLayout Horizontal), false = stacked.
+        horizontal: bool,
+        ratio: f32,
+        a: Box<RestoreNode>,
+        b: Box<RestoreNode>,
+    },
+}
+
+/// Full restore state: every session's layout tree + which one was active.
+pub struct RestoreState {
+    pub active_session: usize,
+    pub sessions: Vec<RestoreNode>,
+}
+
+/// Read the saved session for restore on launch. Handles both the new nested
+/// `{active_session, sessions:[<node>]}` format and the legacy flat
+/// `{panes:[...]}` (restored as one single-pane session). None if no file.
+pub fn load_session_state() -> Option<RestoreState> {
     let path = session_file_path()?;
     let text = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let arr = v.get("panes")?.as_array()?;
-    let mut out = Vec::new();
-    for p in arr {
-        let Some(cwd) = p.get("cwd").and_then(|x| x.as_str()) else { continue };
-        out.push(PaneRestore {
-            cwd: std::path::PathBuf::from(cwd),
-            was_claude: p.get("was_claude").and_then(|x| x.as_bool()).unwrap_or(false),
-            session_id: p.get("session_id").and_then(|x| x.as_str()).map(String::from),
+    if let Some(arr) = v.get("sessions").and_then(|x| x.as_array()) {
+        let sessions: Vec<RestoreNode> = arr.iter().filter_map(parse_node).collect();
+        if sessions.is_empty() {
+            return None;
+        }
+        let active = v
+            .get("active_session")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as usize;
+        return Some(RestoreState {
+            active_session: active.min(sessions.len() - 1),
+            sessions,
         });
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
+    // Legacy flat format: one session, first pane only.
+    if let Some(arr) = v.get("panes").and_then(|x| x.as_array()) {
+        let leaf = parse_leaf(arr.first()?);
+        return Some(RestoreState {
+            active_session: 0,
+            sessions: vec![RestoreNode::Leaf(leaf)],
+        });
+    }
+    None
+}
+
+fn parse_node(v: &serde_json::Value) -> Option<RestoreNode> {
+    if let Some(leaf) = v.get("leaf") {
+        return Some(RestoreNode::Leaf(parse_leaf(leaf)));
+    }
+    if let Some(split) = v.get("split") {
+        let horizontal = split.get("dir").and_then(|x| x.as_str()) == Some("h");
+        let ratio = split.get("ratio").and_then(|x| x.as_f64()).unwrap_or(0.5) as f32;
+        let a = Box::new(parse_node(split.get("a")?)?);
+        let b = Box::new(parse_node(split.get("b")?)?);
+        return Some(RestoreNode::Split { horizontal, ratio, a, b });
+    }
+    None
+}
+
+fn parse_leaf(v: &serde_json::Value) -> PaneRestore {
+    PaneRestore {
+        cwd: v
+            .get("cwd")
+            .and_then(|x| x.as_str())
+            .map(std::path::PathBuf::from),
+        was_claude: v.get("was_claude").and_then(|x| x.as_bool()).unwrap_or(false),
+        session_id: v.get("session_id").and_then(|x| x.as_str()).map(String::from),
     }
 }
 

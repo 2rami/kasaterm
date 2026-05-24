@@ -75,6 +75,9 @@ pub const DEFAULT_BG: [u8; 4] = [37, 44, 53, 0xff];
 /// stays readable underneath.
 pub const ITERM_CURSOR: [u8; 4] = [100, 173, 247, 0xff];
 pub const ITERM_SELECTION: [u8; 4] = [49, 99, 139, 0x99];
+/// Inline-autosuggestion ghost text. A dim, low-contrast grey-blue that
+/// sits clearly behind committed foreground text — fish/zsh style.
+pub const GHOST_FG: [u8; 4] = [120, 132, 148, 0xff];
 
 fn color_to_rgba(c: &Color, default: [u8; 4]) -> [u8; 4] {
     match c {
