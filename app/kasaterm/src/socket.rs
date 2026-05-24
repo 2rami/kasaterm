@@ -388,7 +388,7 @@ impl Backend for PtyBackend {
 /// Resolve a process's current working directory via lsof. macOS has no
 /// `/proc`; `lsof -d cwd` prints the cwd path. Called ~once/sec by the git
 /// panel poll, so the subprocess cost is acceptable.
-fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
+pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
     let out = std::process::Command::new("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
@@ -497,10 +497,18 @@ pub enum RestoreNode {
     },
 }
 
-/// Full restore state: every session's layout tree + which one was active.
+/// One restored session: its windows (each a layout tree) + which window was
+/// active. A session can hold several windows; each window shares the
+/// session's panes/ws once rebuilt.
+pub struct SessionRestore {
+    pub windows: Vec<RestoreNode>,
+    pub active_window: usize,
+}
+
+/// Full restore state: every session (with its windows) + which one was active.
 pub struct RestoreState {
     pub active_session: usize,
-    pub sessions: Vec<RestoreNode>,
+    pub sessions: Vec<SessionRestore>,
 }
 
 /// Read the saved session for restore on launch. Handles both the new nested
@@ -511,7 +519,7 @@ pub fn load_session_state() -> Option<RestoreState> {
     let text = std::fs::read_to_string(&path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     if let Some(arr) = v.get("sessions").and_then(|x| x.as_array()) {
-        let sessions: Vec<RestoreNode> = arr.iter().filter_map(parse_node).collect();
+        let sessions: Vec<SessionRestore> = arr.iter().filter_map(parse_session).collect();
         if sessions.is_empty() {
             return None;
         }
@@ -524,15 +532,45 @@ pub fn load_session_state() -> Option<RestoreState> {
             sessions,
         });
     }
-    // Legacy flat format: one session, first pane only.
+    // Legacy flat format: one session, one window, first pane only.
     if let Some(arr) = v.get("panes").and_then(|x| x.as_array()) {
         let leaf = parse_leaf(arr.first()?);
         return Some(RestoreState {
             active_session: 0,
-            sessions: vec![RestoreNode::Leaf(leaf)],
+            sessions: vec![SessionRestore {
+                windows: vec![RestoreNode::Leaf(leaf)],
+                active_window: 0,
+            }],
         });
     }
     None
+}
+
+/// Parse one session entry. New format carries `{windows:[<node>...],
+/// active_window:N}`. Older saves stored each session as a single layout node
+/// (one window) — we wrap that as a one-window session so old session files
+/// still restore.
+fn parse_session(v: &serde_json::Value) -> Option<SessionRestore> {
+    if let Some(arr) = v.get("windows").and_then(|x| x.as_array()) {
+        let windows: Vec<RestoreNode> = arr.iter().filter_map(parse_node).collect();
+        if windows.is_empty() {
+            return None;
+        }
+        let active_window = v
+            .get("active_window")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(0) as usize;
+        return Some(SessionRestore {
+            active_window: active_window.min(windows.len() - 1),
+            windows,
+        });
+    }
+    // Legacy: the session entry *is* a single layout node (one window).
+    let node = parse_node(v)?;
+    Some(SessionRestore {
+        windows: vec![node],
+        active_window: 0,
+    })
 }
 
 fn parse_node(v: &serde_json::Value) -> Option<RestoreNode> {
