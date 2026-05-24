@@ -37,8 +37,19 @@ INSTALLED="$HOME/Applications/kasaterm.app"
 # contain this substring; a target/ build does not.
 PATTERN="Applications/kasaterm.app/Contents/MacOS/kasaterm"
 
+# macOS `pgrep -f` fails to match this full bundle path. Detect via ps + a bash
+# builtin substring test — no external grep, so a user's grep->ugrep alias or
+# any PATH shadowing can't break it, and there's no grep-self-match to filter.
+app_running() {
+  local line
+  while IFS= read -r line; do
+    [[ "$line" == *"$PATTERN"* ]] && return 0
+  done < <(ps -Axww -o command=)
+  return 1
+}
+
 # 1. Graceful quit → kasaterm `exiting()` → save_session_state() (A3 data).
-if pgrep -f "$PATTERN" >/dev/null 2>&1; then
+if app_running; then
   echo "[relaunch] quitting running $APP_NAME (graceful, so session saves)…"
   osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || true
 
@@ -46,7 +57,7 @@ if pgrep -f "$PATTERN" >/dev/null 2>&1; then
   #    exiting() (the session save) completes before the process disappears,
   #    so once pgrep is empty the saved state is on disk.
   deadline=$(( $(date +%s) + 20 ))
-  while pgrep -f "$PATTERN" >/dev/null 2>&1; do
+  while app_running; do
     if [[ $(date +%s) -ge $deadline ]]; then
       echo "[relaunch] ERROR: $APP_NAME did not quit within 20s." >&2
       echo "[relaunch] Quit it manually (Cmd+Q) and re-run — not force-killing," >&2
@@ -79,6 +90,6 @@ else
 fi
 
 # 4. Relaunch. A3 restore brings panes/sessions (and claude --resume) back.
-echo "[relaunch] launching $INSTALLED…"
+echo "[relaunch] launching ${INSTALLED}..."
 open "$INSTALLED"
 echo "[relaunch] done."
