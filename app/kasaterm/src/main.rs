@@ -9,6 +9,7 @@ mod autosuggest;
 mod cells;
 mod gpu;
 mod socket;
+mod theme;
 
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -33,6 +34,63 @@ use winit::window::{CursorIcon, Theme, Window, WindowAttributes, WindowId};
 use winit::platform::macos::WindowAttributesExtMacOS;
 
 const FONT_SIZE: f32 = 14.0;
+
+/// Display columns a char occupies in a proportional-ish label: CJK /
+/// Hangul / fullwidth glyphs are double-width, everything else single.
+/// Used to budget sidebar tab text so a Hangul title doesn't overflow the
+/// strip into the cell grid.
+fn cjk_display_w(c: char) -> usize {
+    let u = c as u32;
+    let wide = matches!(u,
+        0x1100..=0x115F   // Hangul Jamo
+        | 0x2E80..=0x303E // CJK radicals, Kangxi, CJK symbols
+        | 0x3041..=0x33FF // Hiragana, Katakana, CJK compat
+        | 0x3400..=0x4DBF // CJK ext A
+        | 0x4E00..=0x9FFF // CJK unified
+        | 0xA000..=0xA4CF // Yi
+        | 0xAC00..=0xD7A3 // Hangul syllables
+        | 0xF900..=0xFAFF // CJK compat ideographs
+        | 0xFE30..=0xFE4F // CJK compat forms
+        | 0xFF00..=0xFF60 // Fullwidth forms
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD // CJK ext B+ / supplementary ideographs
+    );
+    if wide { 2 } else { 1 }
+}
+
+/// Draw a rounded-corner rect with the sharp-quad renderer: a full-width
+/// middle block plus per-row caps whose horizontal inset follows a circle of
+/// radius `r`, giving genuine rounded corners. `r` is small (≤~10px) so this
+/// is only a handful of extra quads; rendering is throttled anyway.
+fn round_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    // Middle block (no rounding needed between the two caps).
+    g.rect(x, y + r, w, (h - 2.0 * r).max(0.0), col);
+    if r <= 0.0 {
+        return;
+    }
+    let steps = r.ceil() as i32;
+    for k in 0..steps {
+        let yy = k as f32; // distance inward from the cap's outer edge
+        // x-inset so the corner traces a circle of radius r.
+        let dx = r - (r * r - (r - yy) * (r - yy)).max(0.0).sqrt();
+        let rw = (w - 2.0 * dx).max(0.0);
+        g.rect(x + dx, y + yy, rw, 1.0, col); // top cap row
+        g.rect(x + dx, y + h - 1.0 - yy, rw, 1.0, col); // bottom cap row
+    }
+}
+
+/// Glyph shown in a sidebar tab's icon chip, chosen from the window label.
+fn tab_icon_glyph(name: &str) -> &'static str {
+    let l = name.to_ascii_lowercase();
+    if name.contains('✳') || l.contains("claude") {
+        "✳"
+    } else if l.ends_with(".md") {
+        "M"
+    } else {
+        ">"
+    }
+}
 /// Line spacing multiplier passed to `compute_cell_metrics`. 1.0 keeps
 /// rows at font ascent+descent so the cell aspect ratio stays close to
 /// 1:2 — that's what makes half-block sprite art (Claude Code's mascot,
@@ -74,11 +132,17 @@ const PANE_INNER_Y: f32 = 5.0;
 /// shifts right by this amount so pane contents never overlap the
 /// sidebar. Sidebar is always shown — including single-tab sessions —
 /// so the layout doesn't reflow when a second tab appears.
-// UI sidebar/tab work was peeled off — terminal fills the full
-// window minus the macOS titlebar / WINDOW_PADDING. Keeping the
-// constant at 0 means every place that computed `col`/`origin_x`
-// from `WINDOW_PADDING + SIDEBAR_W` still works, no math changes.
-const SIDEBAR_W: f32 = 0.0;
+// Warp-style narrow vertical tab strip on the left, one tab per window
+// in the current session. Logical px (the renderer multiplies by scale).
+// Every `col`/`origin_x` calc already adds `WINDOW_PADDING + SIDEBAR_W`,
+// so bumping this off 0 shifts the whole cell grid right automatically.
+const SIDEBAR_W: f32 = 200.0;
+/// Sidebar layout (logical px), Warp-style. Non-selected tabs are flat
+/// (icon + two text lines, no box); the selected tab gets a subtle rounded
+/// highlight inset from the strip edges. Tabs sit close together.
+const SIDEBAR_TAB_H: f32 = 54.0;
+const SIDEBAR_TAB_GAP: f32 = 3.0;
+const SIDEBAR_TAB_INSET: f32 = 8.0;
 const SCROLLBACK_MAX: usize = 5000;
 const WHEEL_THROTTLE_MS: u64 = 8;
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
@@ -111,20 +175,20 @@ const GIT_PANEL_HTML: &str = r#"<!DOCTYPE html>
   body {
     margin: 0; padding: 14px;
     font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
-    background: #16181d; color: #c8cdd6;
+    background: #1a1d23; color: #ecedf3;
     -webkit-user-select: none; user-select: none;
   }
-  .branch { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; color: #e6e9ef; }
+  .branch { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; color: #ecedf3; }
   .dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
   .dot.clean { background: #3fb950; box-shadow: 0 0 6px #3fb95066; }
   .dot.dirty { background: #d29922; box-shadow: 0 0 6px #d2992266; }
   .dot.error { background: #f85149; }
-  .dot.none { background: #6e7681; box-shadow: none; }
-  .hint { margin-top: 8px; font-size: 11px; color: #6e7681; }
-  .ab { margin-left: auto; display: flex; gap: 10px; font-size: 12px; color: #8b949e; }
-  .ab b { color: #c8cdd6; font-weight: 600; }
-  .summary { margin-top: 4px; font-size: 12px; color: #6e7681; }
-  .all-wrap { display: none; margin-top: 10px; font-size: 12px; color: #8b949e;
+  .dot.none { background: #787e8a; box-shadow: none; }
+  .hint { margin-top: 8px; font-size: 11px; color: #787e8a; }
+  .ab { margin-left: auto; display: flex; gap: 10px; font-size: 12px; color: #a0a6b0; }
+  .ab b { color: #ecedf3; font-weight: 600; }
+  .summary { margin-top: 4px; font-size: 12px; color: #787e8a; }
+  .all-wrap { display: none; margin-top: 10px; font-size: 12px; color: #a0a6b0;
     align-items: center; gap: 6px; cursor: pointer; user-select: none; }
   .all-wrap input { margin: 0; cursor: pointer; }
   .groups { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
@@ -134,37 +198,37 @@ const GIT_PANEL_HTML: &str = r#"<!DOCTYPE html>
     margin: 0 0 6px; font-size: 11px; text-transform: uppercase;
     letter-spacing: .04em; display: flex; align-items: center; gap: 6px;
   }
-  .group h4 .n { color: #6e7681; font-weight: 500; }
+  .group h4 .n { color: #787e8a; font-weight: 500; }
   .staged h4 { color: #3fb950; }
   .modified h4 { color: #d29922; }
-  .untracked h4 { color: #58a6ff; }
+  .untracked h4 { color: #5a8ce6; }
   ul { margin: 0; padding: 0; list-style: none; }
   .file { margin-bottom: 1px; }
   .file-row { display: flex; align-items: center; gap: 6px;
     font: 12px/1.7 ui-monospace, "SF Mono", Menlo, monospace; }
   .file-row input { margin: 0; flex: 0 0 auto; cursor: pointer; }
-  .toggle { color: #6e7681; cursor: pointer; flex: 0 0 auto; width: 10px; text-align: center; }
-  .fname { color: #adbac7; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .diff { margin: 3px 0 6px 22px; padding: 6px 8px; background: #0d1014; border-radius: 6px;
+  .toggle { color: #787e8a; cursor: pointer; flex: 0 0 auto; width: 10px; text-align: center; }
+  .fname { color: #a0a6b0; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .diff { margin: 3px 0 6px 22px; padding: 6px 8px; background: #101217; border-radius: 9px;
     font: 11px/1.5 ui-monospace, Menlo, monospace; white-space: pre; overflow-x: auto; max-height: 220px; }
   .diff .add { color: #3fb950; }
   .diff .del { color: #f85149; }
-  .diff .hunk { color: #58a6ff; }
-  .diff .ctx { color: #6e7681; }
-  .commit { margin-top: 14px; border-top: 1px solid #21262d; padding-top: 12px; }
-  .commit textarea { width: 100%; background: #0d1014; color: #c8cdd6; border: 1px solid #21262d;
-    border-radius: 6px; padding: 6px 8px; resize: vertical;
+  .diff .hunk { color: #5a8ce6; }
+  .diff .ctx { color: #787e8a; }
+  .commit { margin-top: 14px; border-top: 1px solid #22262e; padding-top: 12px; }
+  .commit textarea { width: 100%; background: #101217; color: #ecedf3; border: 1px solid #22262e;
+    border-radius: 9px; padding: 6px 8px; resize: vertical;
     font: 12px/1.4 -apple-system, system-ui, sans-serif; }
   .msg-wrap { position: relative; }
   .msg-wrap textarea { padding-right: 30px; }
   .ai-btn { position: absolute; top: 7px; right: 7px; display: flex; padding: 2px; line-height: 0;
-    background: none; border: none; color: #8b949e; cursor: pointer; }
+    background: none; border: none; color: #a0a6b0; cursor: pointer; }
   .ai-btn:hover:not(:disabled) { color: #c8a6ff; }
   .ai-btn:disabled { opacity: .5; cursor: default; }
   .actions { display: flex; gap: 8px; margin-top: 8px; }
-  .actions button { flex: 1; background: #21262d; color: #c8cdd6; border: 1px solid #30363d;
-    border-radius: 6px; padding: 6px 0; font-size: 12px; cursor: pointer; }
-  .actions button:hover { background: #30363d; }
+  .actions button { flex: 1; background: #22262e; color: #ecedf3; border: 1px solid #2e323b;
+    border-radius: 9px; padding: 6px 0; font-size: 12px; cursor: pointer; }
+  .actions button:hover { background: #2e323b; }
   .actions button:disabled { opacity: .5; cursor: default; }
   #btn-commit { background: #238636; border-color: #2ea043; color: #fff; }
   #btn-commit:hover:not(:disabled) { background: #2ea043; }
@@ -420,29 +484,29 @@ const SESSION_PANEL_HTML: &str = r#"<!DOCTYPE html>
   body {
     margin: 0; padding: 14px;
     font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
-    background: #16181d; color: #c8cdd6;
+    background: #1a1d23; color: #ecedf3;
     -webkit-user-select: none; user-select: none;
   }
-  .title { font-weight: 600; font-size: 14px; color: #e6e9ef; margin-bottom: 10px; }
+  .title { font-weight: 600; font-size: 14px; color: #ecedf3; margin-bottom: 10px; }
   ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
   .sess {
     display: flex; align-items: center; gap: 10px;
-    padding: 9px 11px; border-radius: 8px; cursor: pointer;
-    background: #1c1f26; border: 1px solid #21262d; color: #adbac7;
+    padding: 9px 11px; border-radius: 9px; cursor: pointer;
+    background: #22262e; border: 1px solid #22262e; color: #a0a6b0;
   }
-  .sess:hover { background: #21262d; }
-  .sess.active { background: #1f2a3d; border-color: #2f5a9e; color: #e6e9ef; }
-  .sess .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: #6e7681; }
-  .sess.active .dot { background: #58a6ff; box-shadow: 0 0 6px #58a6ff66; }
+  .sess:hover { background: #22262e; }
+  .sess.active { background: #2e323b; border-color: #5a8ce6; color: #ecedf3; }
+  .sess .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: #787e8a; }
+  .sess.active .dot { background: #5a8ce6; box-shadow: 0 0 6px #5a8ce666; }
   .sess .label { font-weight: 600; }
-  .sess .badge { margin-left: auto; font-size: 11px; color: #6e7681; }
-  .sess.active .badge { color: #58a6ff; }
-  .sess .close { background: none; border: none; color: #6e7681; font-size: 16px;
+  .sess .badge { margin-left: auto; font-size: 11px; color: #787e8a; }
+  .sess.active .badge { color: #5a8ce6; }
+  .sess .close { background: none; border: none; color: #787e8a; font-size: 16px;
     line-height: 1; padding: 0 2px; margin-left: 8px; cursor: pointer; flex: 0 0 auto; }
   .sess .close:hover { color: #f85149; }
   .new {
-    margin-top: 12px; width: 100%; padding: 9px 0; border-radius: 8px;
-    background: #21262d; color: #c8cdd6; border: 1px dashed #3a414c;
+    margin-top: 12px; width: 100%; padding: 9px 0; border-radius: 9px;
+    background: #22262e; color: #ecedf3; border: 1px dashed #2e323b;
     font-size: 13px; cursor: pointer;
   }
   .new:hover:not(:disabled) { background: #2a313b; border-color: #4a525e; }
@@ -826,7 +890,17 @@ enum UserEvent {
 #[allow(dead_code)]
 struct Session {
     pty: HashMap<String, Arc<pty_backend::PtySession>>,
+    /// Layout of this session's *active* window. The other windows' layouts
+    /// sit in `windows` (active slot `None`) — same stash-swap shape the
+    /// session list uses one level up.
     pty_layout: Option<pty_backend::PtyLayout>,
+    /// All windows in this session by index. The active window's slot is
+    /// `None` (its layout lives in `pty_layout`). Switching windows swaps a
+    /// slot in/out; every window shares this session's `pty`/`ws`, so window
+    /// switches never tear down panes.
+    windows: Vec<Option<pty_backend::PtyLayout>>,
+    /// Index into `windows` of this session's active window.
+    active_window: usize,
     ws: Arc<Mutex<Workspace>>,
 }
 
@@ -863,6 +937,10 @@ struct App {
     /// repro for the multi-pane render path. Empty in normal use.
     autosplit_plan: Vec<pty_backend::SplitDir>,
     autosplit_at: Option<Instant>,
+    /// Headless repro for the window sidebar: number of extra windows left to
+    /// spawn (KASATERM_AUTOWINDOWS) and when the next one fires. 0 disables.
+    autowindow_left: usize,
+    autowindow_at: Option<Instant>,
     /// Pane ids whose PTY reader thread has disconnected (shell exited
     /// or PTY closed). Drained on the main thread in `about_to_wait`
     /// so the tree mutation runs without holding the workspace lock
@@ -880,6 +958,15 @@ struct App {
     sessions: Vec<Option<Session>>,
     /// Index into `sessions` of the visible session (its slot is None).
     active_session: usize,
+    /// Windows of the *visible* session, by index. The active window's slot
+    /// holds `None` — its live layout is `pty_layout` above. A window is a
+    /// pane grouping (one BSP tree); a session can hold several. Switching
+    /// windows swaps `pty_layout` ↔ `windows[idx]` while `pty`/`ws` stay put,
+    /// so the panes' shells keep running across the switch (same session).
+    /// When the visible session is stashed, these move into its `Session`.
+    windows: Vec<Option<pty_backend::PtyLayout>>,
+    /// Index into `windows` of the visible window.
+    active_window: usize,
     /// Measured cell geometry from sugarloaf — see `compute_cell_metrics`.
     cell: CellGeom,
     preedit: String,
@@ -911,6 +998,19 @@ struct App {
     /// by `render_frame` and consumed by the MouseInput handler so a
     /// click on the × button closes that pane.
     pane_header_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// (window index, rect) for every window tab in the left sidebar.
+    /// Populated by the render path, consumed by the MouseInput handler so
+    /// a click switches windows. Logical px.
+    window_tab_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// (window index, close-× rect) for each window tab. Only present when
+    /// there's more than one window (the last window can't be closed).
+    window_tab_close_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// Sidebar "+" new-window button rect, logical px. None before first paint.
+    new_window_btn_rect: Option<(f32, f32, f32, f32)>,
+    /// Per-window (name, cwd) tab labels, by window index. Refreshed on a
+    /// throttle (cwd resolution shells out to lsof, so never per-frame).
+    window_labels: Vec<(String, String)>,
+    window_labels_at: Option<Instant>,
     selection: Option<Selection>,
     drag_anchor: Option<(u16, u16)>,
     /// In-flight pane-divider drag: the BSP tree path of the split being
@@ -1032,11 +1132,15 @@ impl App {
             autoquit_at: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,
+            autowindow_left: 0,
+            autowindow_at: None,
             dead_panes: Arc::new(Mutex::new(Vec::new())),
             socket_handle: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
             sessions: vec![None],
             active_session: 0,
+            windows: vec![None],
+            active_window: 0,
             cell: CellGeom::default(),
             preedit: String::new(),
             in_preedit: false,
@@ -1044,6 +1148,11 @@ impl App {
             ime_active: false,
             hangul: hangul_ime::Composer::new(),
             pane_header_rects: Vec::new(),
+            window_tab_rects: Vec::new(),
+            window_tab_close_rects: Vec::new(),
+            new_window_btn_rect: None,
+            window_labels: Vec::new(),
+            window_labels_at: None,
             selection: None,
             drag_anchor: None,
             resize_drag: None,
@@ -1654,11 +1763,15 @@ impl App {
         self.sessions[self.active_session] = Some(Session {
             pty: std::mem::take(&mut self.pty),
             pty_layout: self.pty_layout.take(),
+            windows: std::mem::take(&mut self.windows),
+            active_window: self.active_window,
             ws: self.ws.clone(),
         });
         self.ws = Arc::new(Mutex::new(Workspace::default()));
         self.pty = HashMap::new();
         self.pty_layout = None;
+        self.windows = vec![None];
+        self.active_window = 0;
         self.sessions.push(None);
         self.active_session = self.sessions.len() - 1;
         if let Err(e) = self.spawn_session_pane() {
@@ -1683,11 +1796,15 @@ impl App {
         self.sessions[self.active_session] = Some(Session {
             pty: std::mem::take(&mut self.pty),
             pty_layout: self.pty_layout.take(),
+            windows: std::mem::take(&mut self.windows),
+            active_window: self.active_window,
             ws: self.ws.clone(),
         });
         let next = self.sessions[idx].take().unwrap();
         self.pty = next.pty;
         self.pty_layout = next.pty_layout;
+        self.windows = next.windows;
+        self.active_window = next.active_window;
         self.ws = next.ws;
         self.active_session = idx;
         // Reflow PTYs to the current window and repaint.
@@ -1718,11 +1835,17 @@ impl App {
             // Drop the active session's live PTYs (kills their shells).
             self.pty.clear();
             self.pty_layout = None;
+            // Drop the active session's stashed windows too — their layouts
+            // only reference the panes we're killing here.
+            self.windows = vec![None];
+            self.active_window = 0;
             let next = self.sessions[target]
                 .take()
                 .expect("neighbor session slot must be occupied");
             self.pty = next.pty;
             self.pty_layout = next.pty_layout;
+            self.windows = next.windows;
+            self.active_window = next.active_window;
             self.ws = next.ws;
             self.sessions.remove(idx);
             // After removing slot `idx`, every index above it shifts down one.
@@ -1743,6 +1866,228 @@ impl App {
             w.request_redraw();
         }
         Ok(())
+    }
+
+    /// Create a new window inside the *current* session: stash the visible
+    /// window's layout, then bring up a fresh window with a single new pane.
+    /// The new pane's PTY joins the session's shared `pty` map and runs in the
+    /// same `ws`, so it's a sibling of the existing windows — switching between
+    /// them never tears a pane down. Windows are this session's tmux-style
+    /// "windows"; the session list one level up is tmux "sessions".
+    fn new_window(&mut self) {
+        // Active window's slot is None — its layout lives in pty_layout. Park
+        // it back into the slot before opening a new window.
+        self.windows[self.active_window] = self.pty_layout.take();
+        self.windows.push(None);
+        self.active_window = self.windows.len() - 1;
+        // spawn_session_pane sets pty_layout to a fresh single-pane tree,
+        // inserts the PTY into the shared map, and points ws.active_pane at it.
+        if let Err(e) = self.spawn_session_pane() {
+            eprintln!("[window] new window pane spawn failed: {e:#}");
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.refresh_socket_snapshot();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Switch the visible window to `idx` within the current session: park the
+    /// visible window's layout, swap the target's in. `pty`/`ws` are shared
+    /// across the session's windows, so no PTY is touched — only which BSP tree
+    /// the renderer draws. Focus lands on the target window's first pane.
+    fn switch_window(&mut self, idx: usize) {
+        if idx == self.active_window || idx >= self.windows.len() {
+            return;
+        }
+        if self.windows[idx].is_none() {
+            return;
+        }
+        self.windows[self.active_window] = self.pty_layout.take();
+        self.pty_layout = self.windows[idx].take();
+        self.active_window = idx;
+        if let Some(first) = self
+            .pty_layout
+            .as_ref()
+            .and_then(|l| l.leaves().first().map(|s| s.to_string()))
+        {
+            self.ws.lock().unwrap().active_pane = Some(first);
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.refresh_socket_snapshot();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Close the window at `idx`. The last window can't be closed (a session
+    /// always needs one). Every pane in the closed window is torn down — its
+    /// PTY Arc dropped (kills the shell) and its render state removed — same
+    /// teardown remove_pane uses. Closing the visible window swaps a neighbor
+    /// in so the terminal keeps painting.
+    fn close_window(&mut self, idx: usize) -> Result<()> {
+        if self.windows.len() <= 1 {
+            anyhow::bail!("cannot close the last window");
+        }
+        if idx >= self.windows.len() {
+            anyhow::bail!("no such window: {idx}");
+        }
+        // Pull the closing window's layout (active one lives in pty_layout) and
+        // kill every pane it owns.
+        let layout = if idx == self.active_window {
+            self.pty_layout.take()
+        } else {
+            self.windows[idx].take()
+        };
+        if let Some(layout) = layout {
+            let mut ws = self.ws.lock().unwrap();
+            for pane_id in layout.leaves() {
+                self.pty.remove(pane_id);
+                ws.panes.remove(pane_id);
+            }
+        }
+        if idx == self.active_window {
+            let target = if idx == 0 { 1 } else { idx - 1 };
+            self.pty_layout = self.windows[target].take();
+            self.windows.remove(idx);
+            self.active_window = if target > idx { target - 1 } else { target };
+            if let Some(first) = self
+                .pty_layout
+                .as_ref()
+                .and_then(|l| l.leaves().first().map(|s| s.to_string()))
+            {
+                self.ws.lock().unwrap().active_pane = Some(first);
+            }
+        } else {
+            self.windows.remove(idx);
+            if idx < self.active_window {
+                self.active_window -= 1;
+            }
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.refresh_socket_snapshot();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+
+    /// Refresh the per-window tab labels (window name + cwd). cwd resolution
+    /// shells out to `lsof`, so this is throttled to ~1s and also re-runs
+    /// whenever the window count changes (new/switch/close). The render path
+    /// calls this each frame; the throttle keeps it cheap.
+    fn refresh_window_labels(&mut self) {
+        let now = Instant::now();
+        let fresh = self.window_labels.len() == self.windows.len()
+            && self
+                .window_labels_at
+                .is_some_and(|t| now.duration_since(t).as_millis() < 1000);
+        if fresh {
+            return;
+        }
+        let n = self.windows.len();
+        let mut out = Vec::with_capacity(n);
+        let ws = self.ws.lock().unwrap();
+        for i in 0..n {
+            // Representative pane = first leaf of the window's layout. The
+            // active window's tree lives in pty_layout; the rest in windows[i].
+            let repr = {
+                let layout = if i == self.active_window {
+                    self.pty_layout.as_ref()
+                } else {
+                    self.windows.get(i).and_then(|o| o.as_ref())
+                };
+                layout.and_then(|l| l.leaves().first().map(|s| s.to_string()))
+            };
+            let name = repr
+                .as_ref()
+                .and_then(|id| {
+                    ws.panes
+                        .get(id)
+                        .and_then(|p| p.title.clone())
+                        .filter(|t| !t.is_empty())
+                        .or_else(|| {
+                            self.pty
+                                .get(id)
+                                .and_then(|p| p.active_process_name())
+                                .filter(|t| !t.is_empty())
+                        })
+                })
+                .unwrap_or_else(|| format!("win {}", i + 1));
+            let cwd = repr
+                .as_ref()
+                .and_then(|id| self.pty.get(id))
+                .and_then(|p| p.shell_pid())
+                .and_then(socket::pid_cwd)
+                .map(|p| Self::shorten_cwd(&p))
+                .unwrap_or_default();
+            out.push((name, cwd));
+        }
+        drop(ws);
+        self.window_labels = out;
+        self.window_labels_at = Some(now);
+    }
+
+    /// Compress a cwd for the sidebar: home → `~`, then keep the tail if it
+    /// runs past `max` chars so the meaningful (deepest) part stays visible.
+    fn shorten_cwd(p: &std::path::Path) -> String {
+        let raw = p.to_string_lossy().to_string();
+        let s = match std::env::var("HOME") {
+            Ok(h) if !h.is_empty() && raw.starts_with(&h) => format!("~{}", &raw[h.len()..]),
+            _ => raw,
+        };
+        let max = 26usize;
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() > max {
+            let tail: String = chars[chars.len() - (max - 1)..].iter().collect();
+            format!("…{tail}")
+        } else {
+            s
+        }
+    }
+
+    /// Geometry of the left window-tab sidebar, in logical px. Returns
+    /// `(tab_rects, close_rects, plus_rect)`:
+    ///   - one `(window_idx, rect)` tab per window, stacked under the title
+    ///     strip,
+    ///   - one `(window_idx, ×-rect)` per window *only* when more than one
+    ///     window exists (the last window can't be closed),
+    ///   - the "+" new-window button rect under the last tab.
+    /// Pure read of `windows.len()` so the render path and the mouse
+    /// hit-test agree on every rect. `win_h` is the logical window height
+    /// (unused today but kept so a future scroll/overflow clamp has it).
+    fn sidebar_layout(
+        &self,
+        _win_h: f32,
+    ) -> (
+        Vec<(usize, (f32, f32, f32, f32))>,
+        Vec<(usize, (f32, f32, f32, f32))>,
+        (f32, f32, f32, f32),
+    ) {
+        let n = self.windows.len();
+        let tab_x = SIDEBAR_TAB_INSET;
+        let tab_w = SIDEBAR_W - 2.0 * SIDEBAR_TAB_INSET;
+        let top = TITLE_HEIGHT + 8.0;
+        let stride = SIDEBAR_TAB_H + SIDEBAR_TAB_GAP;
+        let mut tabs = Vec::with_capacity(n);
+        let mut closes = Vec::new();
+        for i in 0..n {
+            let y = top + i as f32 * stride;
+            tabs.push((i, (tab_x, y, tab_w, SIDEBAR_TAB_H)));
+            if n > 1 {
+                let cs = 14.0;
+                closes.push((i, (tab_x + tab_w - cs - 3.0, y + 3.0, cs, cs)));
+            }
+        }
+        let plus_y = top + n as f32 * stride;
+        let plus = (tab_x, plus_y, tab_w, 28.0);
+        (tabs, closes, plus)
     }
 
     fn start_pty(&mut self) -> Result<()> {
@@ -1800,22 +2145,45 @@ impl App {
     ) -> Result<()> {
         let mut resume = Vec::new();
         let mut pane_count = 0usize;
+        let mut window_count = 0usize;
         self.sessions.clear();
-        for node in &state.sessions {
+        for sess in &state.sessions {
             // Fresh workspace per session so each pane's pump thread (which
-            // captures self.ws at spawn time) updates the right one.
+            // captures self.ws at spawn time) updates the right one. Every
+            // window in this session shares this ws/pty map.
             let ws = Arc::new(Mutex::new(Workspace::default()));
             self.ws = ws.clone();
             self.pty = HashMap::new();
-            let layout = self.build_restore_node(node, cols, rows, &mut resume)?;
-            pane_count += layout.leaves().len();
-            // Focus the first leaf so split/focus shortcuts work pre-paint.
-            if let Some(first) = layout.leaves().first().map(|s| s.to_string()) {
+            // Rebuild each window's layout tree (spawns its panes).
+            let mut window_layouts = Vec::new();
+            for node in &sess.windows {
+                let layout = self.build_restore_node(node, cols, rows, &mut resume)?;
+                pane_count += layout.leaves().len();
+                window_layouts.push(layout);
+            }
+            if window_layouts.is_empty() {
+                continue;
+            }
+            window_count += window_layouts.len();
+            let active_window = sess.active_window.min(window_layouts.len() - 1);
+            // Active window's layout → pty_layout slot; the rest stay in the
+            // windows vec (active slot taken to None to match the live invariant).
+            let mut windows: Vec<Option<pty_backend::PtyLayout>> =
+                window_layouts.into_iter().map(Some).collect();
+            let active_layout = windows[active_window].take();
+            // Focus the active window's first leaf so split/focus shortcuts
+            // work pre-paint.
+            if let Some(first) = active_layout
+                .as_ref()
+                .and_then(|l| l.leaves().first().map(|s| s.to_string()))
+            {
                 ws.lock().unwrap().active_pane = Some(first);
             }
             self.sessions.push(Some(Session {
                 pty: std::mem::take(&mut self.pty),
-                pty_layout: Some(layout),
+                pty_layout: active_layout,
+                windows,
+                active_window,
                 ws,
             }));
         }
@@ -1826,11 +2194,14 @@ impl App {
             .expect("active session slot occupied");
         self.pty = s.pty;
         self.pty_layout = s.pty_layout;
+        self.windows = s.windows;
+        self.active_window = s.active_window;
         self.ws = s.ws;
         self.active_session = active;
         eprintln!(
-            "[restore] {} session(s), {} pane(s), {} claude resume(s), active={}",
+            "[restore] {} session(s), {} window(s), {} pane(s), {} claude resume(s), active={}",
             self.sessions.len(),
+            window_count,
             pane_count,
             resume.len(),
             active
@@ -1912,16 +2283,45 @@ impl App {
     fn save_session_state(&self) {
         let mut sessions_json = Vec::new();
         for i in 0..self.sessions.len() {
-            let (pty, layout) = if i == self.active_session {
-                (&self.pty, self.pty_layout.as_ref())
+            // Each session contributes all its windows. The active session's
+            // live state is in self.{pty,pty_layout,windows,active_window};
+            // stashed sessions carry the same fields on their Session.
+            let (pty, active_layout, windows, active_window) = if i == self.active_session {
+                (
+                    &self.pty,
+                    self.pty_layout.as_ref(),
+                    &self.windows,
+                    self.active_window,
+                )
             } else {
                 match self.sessions[i].as_ref() {
-                    Some(s) => (&s.pty, s.pty_layout.as_ref()),
+                    Some(s) => (&s.pty, s.pty_layout.as_ref(), &s.windows, s.active_window),
                     None => continue,
                 }
             };
-            let Some(layout) = layout else { continue };
-            sessions_json.push(Self::layout_to_json(layout, pty));
+            // Serialize every window. The active window's tree lives in
+            // active_layout; the rest sit in `windows[j]` (active slot None).
+            let mut windows_json = Vec::new();
+            let mut new_active = 0usize;
+            for (j, slot) in windows.iter().enumerate() {
+                let layout = if j == active_window {
+                    active_layout
+                } else {
+                    slot.as_ref()
+                };
+                let Some(layout) = layout else { continue };
+                if j == active_window {
+                    new_active = windows_json.len();
+                }
+                windows_json.push(Self::layout_to_json(layout, pty));
+            }
+            if windows_json.is_empty() {
+                continue;
+            }
+            sessions_json.push(serde_json::json!({
+                "windows": windows_json,
+                "active_window": new_active,
+            }));
         }
         if sessions_json.is_empty() {
             return;
@@ -1990,6 +2390,42 @@ impl App {
         } else {
             Some(now + std::time::Duration::from_millis(500))
         };
+    }
+
+    /// Headless repro for the window sidebar: spawn KASATERM_AUTOWINDOWS extra
+    /// windows, one every 600ms, so a screenshot can capture the multi-tab
+    /// sidebar without a human pressing Cmd+T.
+    fn run_pending_autowindows(&mut self) {
+        if self.autowindow_left == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let Some(due) = self.autowindow_at else { return };
+        if now < due {
+            return;
+        }
+        self.new_window();
+        self.autowindow_left -= 1;
+        self.autowindow_at = if self.autowindow_left == 0 {
+            None
+        } else {
+            Some(now + std::time::Duration::from_millis(600))
+        };
+    }
+
+    fn arm_autowindows(&mut self) {
+        let Ok(n_str) = std::env::var("KASATERM_AUTOWINDOWS") else { return };
+        let Ok(n) = n_str.parse::<usize>() else { return };
+        if n == 0 {
+            return;
+        }
+        let ms: u64 = std::env::var("KASATERM_AUTOWINDOWS_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2500);
+        eprintln!("[autowindow] armed: {n} window(s) in {ms}ms");
+        self.autowindow_left = n;
+        self.autowindow_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
     }
 
     fn arm_autosplit(&mut self) {
@@ -3447,6 +3883,32 @@ impl App {
                         self.close_active_pane();
                         return;
                     }
+                    // Cmd+T → new window in the current session (PTY backend
+                    // only; tmux owns its own windows). Cmd+1..9 switch to
+                    // that window. Digit0 is font-reset above, so windows
+                    // start at 1.
+                    if code == KeyCode::KeyT && self.tmux.is_none() {
+                        self.new_window();
+                        return;
+                    }
+                    let win_digit = match code {
+                        KeyCode::Digit1 | KeyCode::Numpad1 => Some(0),
+                        KeyCode::Digit2 | KeyCode::Numpad2 => Some(1),
+                        KeyCode::Digit3 | KeyCode::Numpad3 => Some(2),
+                        KeyCode::Digit4 | KeyCode::Numpad4 => Some(3),
+                        KeyCode::Digit5 | KeyCode::Numpad5 => Some(4),
+                        KeyCode::Digit6 | KeyCode::Numpad6 => Some(5),
+                        KeyCode::Digit7 | KeyCode::Numpad7 => Some(6),
+                        KeyCode::Digit8 | KeyCode::Numpad8 => Some(7),
+                        KeyCode::Digit9 | KeyCode::Numpad9 => Some(8),
+                        _ => None,
+                    };
+                    if let Some(idx) = win_digit {
+                        if self.tmux.is_none() {
+                            self.switch_window(idx);
+                            return;
+                        }
+                    }
                     // `[` / `]` cycle focus through panes in document
                     // order.
                     if code == KeyCode::BracketLeft {
@@ -4135,17 +4597,200 @@ impl App {
                     DropZone::Down => (bx, by + bh / 2.0, bw, bh / 2.0),
                 })
             });
+        // Left window-tab sidebar geometry. Cache the hit rects for the
+        // mouse handler; the gpu block below paints from the same numbers so
+        // a click always lands on what the user sees.
+        let sb_win_h = win_px.1 / scale;
+        self.refresh_window_labels();
+        let sb_labels = self.window_labels.clone();
+        let (sb_tabs, sb_closes, sb_plus) = self.sidebar_layout(sb_win_h);
+        self.window_tab_rects = sb_tabs.clone();
+        self.window_tab_close_rects = sb_closes.clone();
+        self.new_window_btn_rect = Some(sb_plus);
+        let sb_active = self.active_window;
+        // Which tab the cursor is over (for hover affordance + showing × only
+        // where the user is pointing, Warp-style).
+        let sb_cursor = self.cursor_px;
+        let sb_hover = sb_tabs
+            .iter()
+            .find(|(_, r)| {
+                sb_cursor.0 >= r.0
+                    && sb_cursor.0 <= r.0 + r.2
+                    && sb_cursor.1 >= r.1
+                    && sb_cursor.1 <= r.1 + r.3
+            })
+            .map(|(i, _)| *i);
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             g.draw_cells(&slot_views);
+            // Title strip fill: chrome surface across the top so the area above
+            // the sidebar / traffic lights matches the sidebar instead of
+            // showing the terminal body color.
+            g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::SURFACE);
+            // Window-tab sidebar, Warp-style. Painted first so per-pane
+            // headers / rings layer on top at the seam.
+            if SIDEBAR_W > 0.0 {
+                // Strip background, below the title strip to the bottom.
+                g.rect(
+                    0.0,
+                    TITLE_HEIGHT,
+                    SIDEBAR_W,
+                    (sb_win_h - TITLE_HEIGHT).max(0.0),
+                    theme::SURFACE,
+                );
+                // Right hairline so the strip reads as a distinct column.
+                g.rect(
+                    SIDEBAR_W - 1.0,
+                    TITLE_HEIGHT,
+                    1.0,
+                    (sb_win_h - TITLE_HEIGHT).max(0.0),
+                    theme::BORDER,
+                );
+                // Truncate a label to a *display-width* budget (CJK glyphs are
+                // double-width) with a trailing ellipsis, so long Hangul/CJK
+                // titles never bleed past the tab into the cell grid.
+                let clip = |s: &str, budget: usize| -> String {
+                    let total: usize = s.chars().map(cjk_display_w).sum();
+                    if total <= budget {
+                        return s.to_string();
+                    }
+                    let mut used = 0usize;
+                    let mut out = String::new();
+                    for c in s.chars() {
+                        let w = cjk_display_w(c);
+                        if used + w > budget.saturating_sub(1) {
+                            break;
+                        }
+                        used += w;
+                        out.push(c);
+                    }
+                    out.push('…');
+                    out
+                };
+                let multi = sb_tabs.len() > 1;
+                for (i, (tx, ty, tw, th)) in &sb_tabs {
+                    let is_active = *i == sb_active;
+                    let is_hover = sb_hover == Some(*i);
+                    // Selected tab: subtle rounded highlight box (no left
+                    // accent bar). Non-selected: flat, only a faint box on
+                    // hover. Warp-style.
+                    if is_active {
+                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_MD, theme::SURFACE_ACTIVE);
+                    } else if is_hover {
+                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_MD, theme::SURFACE_HOVER);
+                    }
+                    // Icon chip: small rounded square with a glyph.
+                    let (name, cwd) = sb_labels
+                        .get(*i)
+                        .cloned()
+                        .unwrap_or_else(|| (format!("win {}", i + 1), String::new()));
+                    let icon = 30.0_f32;
+                    let icon_x = *tx + 9.0;
+                    let icon_y = *ty + (*th - icon) / 2.0;
+                    // Chip contrasts with its backdrop either way: lighter than
+                    // the strip on a flat tab, a hair darker than the active box.
+                    let chip_bg = if is_active {
+                        theme::SURFACE_HOVER
+                    } else {
+                        theme::SURFACE_ACTIVE
+                    };
+                    round_rect(g, icon_x, icon_y, icon, icon, icon / 2.0, chip_bg);
+                    g.draw_text(
+                        icon_x + 9.0,
+                        icon_y + 7.0,
+                        tab_icon_glyph(&name),
+                        gpu::DrawOpts {
+                            font_size: 14.0,
+                            color: theme::TEXT_DIM,
+                            bold: true,
+                            italic: false,
+                        },
+                    );
+                    // Two-line label to the right of the icon.
+                    let text_x = icon_x + icon + 10.0;
+                    let name_fg: [u8; 4] = if is_active {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    let cwd_fg: [u8; 4] = theme::TEXT_MUTE;
+                    let show_close = multi && (is_active || is_hover);
+                    let name_max = if show_close { 15 } else { 18 };
+                    g.draw_text(
+                        text_x,
+                        *ty + 11.0,
+                        &clip(&name, name_max),
+                        gpu::DrawOpts {
+                            font_size: 13.5,
+                            color: name_fg,
+                            bold: is_active,
+                            italic: false,
+                        },
+                    );
+                    if !cwd.is_empty() {
+                        g.draw_text(
+                            text_x,
+                            *ty + 30.0,
+                            &clip(&cwd, 21),
+                            gpu::DrawOpts {
+                                font_size: 11.0,
+                                color: cwd_fg,
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
+                    // × close — only on the active or hovered tab (where the
+                    // cursor is), so the strip stays clean otherwise. Hit
+                    // rects exist for every tab; you hover before you click.
+                    if show_close {
+                        if let Some((_, (cx, cy, cw, ch))) =
+                            sb_closes.iter().find(|(ci, _)| ci == i)
+                        {
+                            g.draw_text(
+                                *cx + (*cw - 11.0) / 2.0,
+                                *cy + (*ch - 11.0) / 2.0,
+                                "x",
+                                gpu::DrawOpts {
+                                    font_size: 11.0,
+                                    color: theme::TEXT_MUTE,
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                        }
+                    }
+                }
+                // "+" new-window button under the last tab: flat, faint box on
+                // hover, centred glyph.
+                let (px, py, pw, ph) = sb_plus;
+                let plus_hover = sb_cursor.0 >= px
+                    && sb_cursor.0 <= px + pw
+                    && sb_cursor.1 >= py
+                    && sb_cursor.1 <= py + ph;
+                if plus_hover {
+                    round_rect(g, px, py, pw, ph, theme::RADIUS_MD, theme::SURFACE_HOVER);
+                }
+                g.draw_text(
+                    px + pw / 2.0 - 5.0,
+                    py + (ph - 17.0) / 2.0,
+                    "+",
+                    gpu::DrawOpts {
+                        font_size: 18.0,
+                        color: theme::TEXT_MUTE,
+                        bold: false,
+                        italic: false,
+                    },
+                );
+            }
             // Per-pane header bar: band + bottom hairline + × close
             // glyph + title. Active pane gets a brighter band and bold
             // title, matching the sugarloaf path's iTerm-style chrome.
             for h in &headers {
                 let bg = match h.color {
                     Some(c) => c,
-                    None if h.is_active => [41, 51, 71, 255],
-                    None => [26, 31, 38, 255],
+                    None if h.is_active => theme::SURFACE_ACTIVE,
+                    None => theme::SURFACE,
                 };
                 g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, bg);
                 g.rect(
@@ -4153,12 +4798,12 @@ impl App {
                     h.y + PANE_HEADER_HEIGHT - 1.0,
                     h.w,
                     1.0,
-                    [10, 13, 18, 255],
+                    theme::BORDER,
                 );
                 let fg: [u8; 4] = if h.is_active {
-                    [230, 232, 238, 255]
+                    theme::TEXT
                 } else {
-                    [160, 165, 172, 255]
+                    theme::TEXT_DIM
                 };
                 let text_y = h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0;
                 g.draw_text(
@@ -4196,15 +4841,15 @@ impl App {
                 g.rect(h.x + h.w - t, h.y, t, h.box_h, col);
             };
             for h in headers.iter().filter(|h| !h.is_active) {
-                draw_ring(g, h, [10, 13, 18, 255], 1.0);
+                draw_ring(g, h, theme::BORDER, 1.0);
             }
             for h in headers.iter().filter(|h| h.is_active) {
-                draw_ring(g, h, [90, 140, 230, 255], 2.0);
+                draw_ring(g, h, theme::ACCENT, 2.0);
             }
             Self::paint_gpu_overlays(g, &overlay);
             // Drop-zone highlight sits on top of everything during a drag.
             if let Some((zx, zy, zw, zh)) = drop_zone_rect {
-                g.rect(zx, zy, zw, zh, [90, 140, 230, 90]);
+                g.rect(zx, zy, zw, zh, theme::with_alpha(theme::ACCENT, 90));
             }
             // Launch build banner, bottom-right, painted last so it sits
             // on top. Faint and short-lived — fades out after a few
@@ -4229,7 +4874,7 @@ impl App {
                     &label,
                     gpu::DrawOpts {
                         font_size: v_font,
-                        color: [150, 158, 170, a],
+                        color: theme::with_alpha(theme::TEXT_DIM, a),
                         bold: false,
                         italic: false,
                     },
@@ -4503,10 +5148,11 @@ impl App {
                 let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
                 let pane_top = origin_y + frame.y_cells as f32 * self.cell.h;
                 let pane_px_w = frame.w_cells as f32 * self.cell.w;
+                // Same tokens as the gpu path (B) — no separate drift.
                 let bg = if is_active {
-                    [0.16, 0.20, 0.28, 1.0]
+                    theme::f32_rgba(theme::SURFACE_ACTIVE)
                 } else {
-                    [0.10, 0.12, 0.15, 1.0]
+                    theme::f32_rgba(theme::SURFACE)
                 };
                 sugarloaf.rect(
                     None,
@@ -4526,7 +5172,7 @@ impl App {
                     pane_top + PANE_HEADER_HEIGHT - 1.0,
                     pane_px_w,
                     1.0,
-                    [0.04, 0.05, 0.07, 1.0],
+                    theme::f32_rgba(theme::BORDER),
                     0.0,
                     0,
                 );
@@ -4552,9 +5198,9 @@ impl App {
                     close_size,
                 );
                 let chrome_color: [u8; 4] = if is_active {
-                    [230, 232, 238, 255]
+                    theme::TEXT
                 } else {
-                    [160, 165, 172, 255]
+                    theme::TEXT_DIM
                 };
                 sugarloaf.text_mut().draw(
                     close_rect.0,
@@ -4916,6 +5562,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.schedule_autosend();
             self.schedule_autocapture();
             self.arm_autosplit();
+            self.arm_autowindows();
             self.schedule_autoquit();
             self.open_git_panel(event_loop, false);
             return;
@@ -4988,6 +5635,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.schedule_autosend();
         self.schedule_autocapture();
         self.arm_autosplit();
+        self.arm_autowindows();
         self.schedule_autoquit();
         self.open_git_panel(event_loop, false);
     }
@@ -5150,6 +5798,40 @@ impl ApplicationHandler<UserEvent> for App {
                 if matches!(state, ElementState::Pressed) {
                     let cx = self.cursor_px.0;
                     let cy = self.cursor_px.1;
+                    // Left window-tab sidebar. Caught first — it owns the whole
+                    // left strip, so a click there never falls through to the
+                    // cell grid. Order: close-× (sits on top of a tab) → tab →
+                    // "+" new-window button.
+                    if SIDEBAR_W > 0.0 && cx < SIDEBAR_W {
+                        let inside =
+                            |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
+                        if let Some(idx) = self
+                            .window_tab_close_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(i, _)| *i)
+                        {
+                            if let Err(e) = self.close_window(idx) {
+                                eprintln!("[window] close failed: {e:#}");
+                            }
+                            return;
+                        }
+                        if let Some(idx) = self
+                            .window_tab_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(i, _)| *i)
+                        {
+                            self.switch_window(idx);
+                            return;
+                        }
+                        if self.new_window_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.new_window();
+                            return;
+                        }
+                        // Empty sidebar space — swallow the click.
+                        return;
+                    }
                     let hit = self
                         .pane_header_rects
                         .iter()
@@ -5410,6 +6092,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Fire any due KASATERM_AUTOSPLIT step before parking. No-op
         // when no plan is queued.
         self.run_pending_autosplits();
+        self.run_pending_autowindows();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was

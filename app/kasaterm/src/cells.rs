@@ -67,13 +67,13 @@ fn ansi_palette() -> [[u8; 3]; 256] {
 // "GitHub Dark Dimmed" profile and read noticeably greyer than
 // Ghostty's body text.
 pub const DEFAULT_FG: [u8; 4] = [255, 255, 255, 0xff];
-pub const DEFAULT_BG: [u8; 4] = [37, 44, 53, 0xff];
+/// Terminal body background — the single source is the theme token so chrome
+/// and body share one palette.
+pub const DEFAULT_BG: [u8; 4] = crate::theme::BG;
 
-/// Cursor + selection accents from the same profile. Cursor is
-/// `CursorColor` (a bright "GitHub link blue") and selection is
-/// `SelectionColor` (a muted blue). Alpha tuned so selected text
-/// stays readable underneath.
-pub const ITERM_CURSOR: [u8; 4] = [100, 173, 247, 0xff];
+/// Cursor + selection accents. Cursor uses the shared accent so it matches the
+/// focus ring / links across the whole UI; selection is a muted blue.
+pub const ITERM_CURSOR: [u8; 4] = crate::theme::ACCENT;
 pub const ITERM_SELECTION: [u8; 4] = [49, 99, 139, 0x99];
 /// Inline-autosuggestion ghost text. A dim, low-contrast grey-blue that
 /// sits clearly behind committed foreground text — fish/zsh style.
