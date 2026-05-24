@@ -600,7 +600,7 @@ fn spawn_reader_thread(
                     // cursor row valid.
                     t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
                     let t_snap = std::time::Instant::now();
-                    let snap = snapshot(
+                    let mut snap = snapshot(
                         &mut t,
                         current_size.0,
                         current_size.1,
@@ -608,6 +608,16 @@ fn spawn_reader_thread(
                         &title_handle,
                         false,
                     );
+                    // OSC 133 `B` = prompt end / command-input start. Our
+                    // VT parser (alacritty 0.26 / vte 0.15) drops OSC 133
+                    // as unhandled, so we sniff the raw batch for it and
+                    // tag the snapshot with the current cursor — that's
+                    // where the editable command line begins. The shell's
+                    // precmd hook (injected via the ZDOTDIR shim .zshrc)
+                    // is what emits it. Terminator-agnostic (BEL or ST).
+                    if find_subslice(processed_bytes, b"\x1b]133;B").is_some() {
+                        snap.prompt_end = Some((snap.cursor_row, snap.cursor_col));
+                    }
                     if std::env::var_os("KASATERM_PROFILE").is_some() {
                         eprintln!(
                             "[snapshot] {}us {}x{} ({}b in)",
@@ -762,7 +772,22 @@ fn snapshot(
         mouse_sgr,
         title,
         eof: false,
+        // Filled in by the reader thread when this batch carried an
+        // OSC 133 `B` mark — snapshot() itself doesn't parse the stream.
+        prompt_end: None,
     }
+}
+
+/// First index where `needle` occurs in `haystack`, or None. Tiny
+/// linear scan — used only to sniff the short OSC 133 prompt marker out
+/// of each PTY read batch.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
 }
 
 fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {

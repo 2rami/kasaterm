@@ -5,6 +5,7 @@
 //! Phase A Task #13/14: wheel + scrollback, IME, selection + clipboard,
 //! cursor blink, OSC titles, multi-pane render + focus routing.
 
+mod autosuggest;
 mod cells;
 mod gpu;
 mod socket;
@@ -333,8 +334,10 @@ async function doCommit() {
   if (!message.trim()) { showResult("커밋 메시지를 입력하세요", false); return; }
   $("btn-commit").disabled = true;
   try {
+    // No Content-Type header → browser sends text/plain (CORS-safe), so no
+    // preflight from this null-origin webview. Server parses the JSON string.
     const r = await fetch(base + "/git-commit", {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST",
       body: JSON.stringify({ files: files, message: message })
     });
     const d = await r.json();
@@ -361,8 +364,9 @@ async function doAiCommit() {
   $("btn-ai").disabled = true;
   showResult("AI에게 커밋 요청 중…", true);
   try {
+    // text/plain (no Content-Type) → no CORS preflight; see doCommit.
     const r = await fetch(base + "/git-ai-commit", {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST",
       body: JSON.stringify({ files: files })
     });
     const d = await r.json();
@@ -395,6 +399,140 @@ $("check-all").onchange = () => {
     if (p) { on ? checked.add(p) : checked.delete(p); }
   });
 };
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>"#;
+
+/// Session panel: a tmux-style list of sessions in its own OS window driving
+/// a wry webview, mirroring the git panel. Polls `/sessions` once a second to
+/// draw one row per session, highlights the active one, click → switch,
+/// "+ 새 세션" → create. Kept fully separate from the wgpu terminal window.
+const SESSION_PANEL_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px;
+    font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    background: #16181d; color: #c8cdd6;
+    -webkit-user-select: none; user-select: none;
+  }
+  .title { font-weight: 600; font-size: 14px; color: #e6e9ef; margin-bottom: 10px; }
+  ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  .sess {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 11px; border-radius: 8px; cursor: pointer;
+    background: #1c1f26; border: 1px solid #21262d; color: #adbac7;
+  }
+  .sess:hover { background: #21262d; }
+  .sess.active { background: #1f2a3d; border-color: #2f5a9e; color: #e6e9ef; }
+  .sess .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: #6e7681; }
+  .sess.active .dot { background: #58a6ff; box-shadow: 0 0 6px #58a6ff66; }
+  .sess .label { font-weight: 600; }
+  .sess .badge { margin-left: auto; font-size: 11px; color: #6e7681; }
+  .sess.active .badge { color: #58a6ff; }
+  .sess .close { background: none; border: none; color: #6e7681; font-size: 16px;
+    line-height: 1; padding: 0 2px; margin-left: 8px; cursor: pointer; flex: 0 0 auto; }
+  .sess .close:hover { color: #f85149; }
+  .new {
+    margin-top: 12px; width: 100%; padding: 9px 0; border-radius: 8px;
+    background: #21262d; color: #c8cdd6; border: 1px dashed #3a414c;
+    font-size: 13px; cursor: pointer;
+  }
+  .new:hover:not(:disabled) { background: #2a313b; border-color: #4a525e; }
+  .new:disabled { opacity: .5; cursor: default; }
+  .err { color: #f85149; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <div class="title">세션</div>
+  <ul id="list"></ul>
+  <button id="btn-new" class="new">+ 새 세션</button>
+  <div id="err" class="err" style="display:none"></div>
+<script>
+const PORT = "__PORT__";
+const $ = (id) => document.getElementById(id);
+const base = "http://127.0.0.1:" + PORT;
+let busy = false;
+
+function render(d) {
+  $("err").style.display = "none";
+  const count = d.count || 1, active = d.active || 0;
+  const ul = $("list");
+  ul.innerHTML = "";
+  for (let i = 0; i < count; i++) {
+    const li = document.createElement("li");
+    li.className = "sess" + (i === active ? " active" : "");
+    const dot = document.createElement("span"); dot.className = "dot";
+    const label = document.createElement("span"); label.className = "label";
+    label.textContent = "세션 " + (i + 1);
+    const badge = document.createElement("span"); badge.className = "badge";
+    if (i === active) badge.textContent = "활성";
+    li.appendChild(dot); li.appendChild(label); li.appendChild(badge);
+    // Only offer close when more than one session exists — the last
+    // session can't be closed (the terminal always needs one).
+    if (count > 1) {
+      const x = document.createElement("button");
+      x.className = "close"; x.textContent = "×"; x.title = "세션 닫기";
+      x.onclick = (e) => { e.stopPropagation(); closeSession(i); };
+      li.appendChild(x);
+    }
+    if (i !== active) li.onclick = () => switchTo(i);
+    ul.appendChild(li);
+  }
+}
+
+async function switchTo(idx) {
+  if (busy) return;
+  busy = true;
+  // idx in the query string, no JSON body → no CORS preflight (the panel's
+  // null origin would otherwise trip an OPTIONS the server 405s).
+  try {
+    await fetch(base + "/session-switch?idx=" + idx, { method: "POST" });
+  } catch (e) {}
+  busy = false;
+  poll();
+}
+
+async function closeSession(idx) {
+  if (busy) return;
+  busy = true;
+  try {
+    await fetch(base + "/session-close?idx=" + idx, { method: "POST" });
+  } catch (e) {}
+  busy = false;
+  poll();
+}
+
+async function doNew() {
+  if (busy) return;
+  busy = true;
+  $("btn-new").disabled = true;
+  try {
+    await fetch(base + "/session-new", { method: "POST" });
+  } catch (e) {}
+  busy = false;
+  $("btn-new").disabled = false;
+  poll();
+}
+
+async function poll() {
+  try {
+    const r = await fetch(base + "/sessions", { cache: "no-store" });
+    render(await r.json());
+  } catch (e) {
+    $("err").style.display = "block";
+    $("err").textContent = "server unreachable :" + PORT;
+  }
+}
+
+$("btn-new").onclick = doNew;
 poll();
 setInterval(poll, 1000);
 </script>
@@ -447,6 +585,9 @@ struct GpuOverlay {
     preedit_col: u16,
     font_size: f32,
     selection: Option<Selection>,
+    /// Inline autosuggestion ghost text (empty = none). Drawn dim,
+    /// starting at the cursor cell, clipped to the row's right edge.
+    suggestion: String,
 }
 
 /// Normalise so (start.row, start.col) <= (end.row, end.col) in reading
@@ -629,6 +770,12 @@ struct PaneState {
     /// is pending, the render loop skips the GPU pass entirely —
     /// matches Rio's `TerminalDamage::Noop` short-circuit.
     dirty: bool,
+    /// Last OSC 133 `B` mark (prompt end / command-input start) seen on
+    /// this pane, as (row, col). Set from the pty backend; the host reads
+    /// the editable command line from here to the cursor for inline
+    /// autosuggestion. Only trusted while it's still on the cursor's row
+    /// (see `update_suggestion`); a new prompt overwrites it.
+    prompt_end: Option<(u16, u16)>,
 }
 
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
@@ -704,9 +851,14 @@ struct App {
     pty_layout: Option<pty_backend::PtyLayout>,
     /// Monotonic counter for the next "%N" pane id when splitting.
     next_pane_id: u32,
-    /// Queued `claude --resume …\n` to inject into %0 once its shell is ready
-    /// (restored session). (command, time-to-send).
-    pending_restore: Option<(String, std::time::Instant)>,
+    /// Queued `claude --resume …\n` injections for restored panes, one per
+    /// claude pane, fired once each pane's shell prompt is up. Holds the
+    /// PtySession Arc directly so it works for panes in any session (active or
+    /// stashed background). (session, command, time-to-send).
+    pending_restores: Vec<(Arc<pty_backend::PtySession>, String, std::time::Instant)>,
+    /// Headless verification: clean-exit (runs `exiting` → save_session_state)
+    /// at this instant when KASATERM_AUTOQUIT_MS is set. None disables it.
+    autoquit_at: Option<std::time::Instant>,
     /// Queued split directions driven by KASATERM_AUTOSPLIT — headless
     /// repro for the multi-pane render path. Empty in normal use.
     autosplit_plan: Vec<pty_backend::SplitDir>,
@@ -725,11 +877,8 @@ struct App {
     /// holds `None` — its live state is the fields above (pty/pty_layout/ws).
     /// Switching swaps a slot in/out; background sessions keep running via
     /// their own ws Arc, captured by their pump_pty_screens threads.
-    /// wry 세션 패널 구현 전까지 dead_code — 백엔드는 완성됨.
-    #[allow(dead_code)]
     sessions: Vec<Option<Session>>,
     /// Index into `sessions` of the visible session (its slot is None).
-    #[allow(dead_code)]
     active_session: usize,
     /// Measured cell geometry from sugarloaf — see `compute_cell_metrics`.
     cell: CellGeom,
@@ -838,6 +987,11 @@ struct App {
     /// are owned here.
     git_panel_window: Option<Arc<Window>>,
     git_panel_webview: Option<wry::WebView>,
+    /// Session panel: a second OS window/webview listing the tmux-style
+    /// sessions. Same lifetime discipline as the git panel — webview must
+    /// outlive its window, so both are owned here.
+    session_panel_window: Option<Arc<Window>>,
+    session_panel_webview: Option<wry::WebView>,
     /// When the launch build banner began animating. Drives the
     /// hold-then-fade alpha and keeps the frame loop awake (WaitUntil)
     /// only while the banner is still visible.
@@ -847,6 +1001,21 @@ struct App {
     /// toggle the git panel from the menu.
     menu: Option<muda::Menu>,
     git_menu_item: Option<muda::MenuItem>,
+    /// "세션 패널" menu item id, matched against MenuEvents to toggle the
+    /// session panel.
+    session_menu_item: Option<muda::MenuItem>,
+    /// History store for inline autosuggestion. See autosuggest.rs.
+    autosuggest: autosuggest::History,
+    /// What the user has typed at the current shell prompt since the last
+    /// Enter / line-reset. The source of truth for the suggestion prefix;
+    /// validated each frame against the grid (see `update_suggestion`) so
+    /// shell-side edits we can't see (Tab-complete, paste) just suppress
+    /// the suggestion instead of showing a wrong one.
+    input_buf: String,
+    /// The remainder currently drawn as ghost text (None = nothing shown).
+    /// Recomputed at render time in `update_suggestion`; read by the key
+    /// handler so → / Ctrl-E can accept exactly what's on screen.
+    current_suggestion: Option<String>,
 }
 
 impl App {
@@ -859,7 +1028,8 @@ impl App {
             pty: HashMap::new(),
             pty_layout: None,
             next_pane_id: 1, // %0 is the initial pane created in start_pty
-            pending_restore: None,
+            pending_restores: Vec::new(),
+            autoquit_at: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,
             dead_panes: Arc::new(Mutex::new(Vec::new())),
@@ -895,10 +1065,100 @@ impl App {
             proxy,
             git_panel_window: None,
             git_panel_webview: None,
+            session_panel_window: None,
+            session_panel_webview: None,
             version_anim_start: Instant::now(),
             menu: None,
             git_menu_item: None,
+            session_menu_item: None,
+            autosuggest: autosuggest::History::new(),
+            input_buf: String::new(),
+            current_suggestion: None,
         }
+    }
+
+    /// Drop a word off the end of the input buffer (for Ctrl-W /
+    /// Alt-Backspace): eat trailing spaces, then non-spaces.
+    fn buf_pop_word(&mut self) {
+        while self.input_buf.ends_with(' ') {
+            self.input_buf.pop();
+        }
+        while let Some(c) = self.input_buf.chars().last() {
+            if c == ' ' {
+                break;
+            }
+            self.input_buf.pop();
+        }
+    }
+
+    /// Recompute the inline suggestion against the live grid. Called once
+    /// per frame from the render path (so the grid reflects the latest
+    /// shell echo). Only runs at a shell prompt (active pane, not
+    /// alt-screen).
+    ///
+    /// Two ways to find the editable command line:
+    ///   1. **OSC 133 mark** (primary) — the shell's precmd hook emits a
+    ///      `B` mark at prompt end; pty-backend tags the cursor there. We
+    ///      read the grid from that column to the cursor, which is the
+    ///      ground truth: it survives Tab-completion, paste, RPROMPT and
+    ///      wide (CJK) chars that the typed-buffer heuristic can't see.
+    ///   2. **typed buffer** (fallback) — when there's no usable mark yet
+    ///      (tmux backend, pre-first-prompt, or a scrolled-away mark), we
+    ///      trust `input_buf` but only if it's still the tail of the
+    ///      cursor row, which auto-suppresses on edits we can't track.
+    fn update_suggestion(&mut self) {
+        if !self.autosuggest.enabled() || !self.preedit.is_empty() {
+            self.current_suggestion = None;
+            return;
+        }
+        let line: Option<String> = {
+            let ws = self.ws.lock().unwrap();
+            match ws.active() {
+                Some(pane) if !pane.alt_screen => {
+                    let crow = pane.cursor_row as usize;
+                    let ccol = pane.cursor_col as usize;
+                    let row_cells = pane.cells.get(crow);
+                    let cell_str = |r: &[GridCell], from: usize, to: usize| -> String {
+                        r.iter()
+                            .take(to)
+                            .skip(from)
+                            .map(|c| if c.ch.is_empty() { " " } else { c.ch.as_str() })
+                            .collect()
+                    };
+                    // Primary: OSC 133 mark still on the cursor's row.
+                    let from_mark = match pane.prompt_end {
+                        Some((pr, pc))
+                            if pr as usize == crow && (pc as usize) <= ccol =>
+                        {
+                            row_cells.map(|r| cell_str(r, pc as usize, ccol))
+                        }
+                        _ => None,
+                    };
+                    if from_mark.is_some() {
+                        from_mark
+                    } else if !self.input_buf.is_empty() {
+                        let synced = row_cells
+                            .map(|r| cell_str(r, 0, ccol).ends_with(&self.input_buf))
+                            .unwrap_or(false);
+                        synced.then(|| self.input_buf.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+        let Some(line) = line else {
+            self.current_suggestion = None;
+            return;
+        };
+        // Nothing to complete from an empty / whitespace-only line.
+        if line.trim().is_empty() {
+            self.current_suggestion = None;
+            return;
+        }
+        self.autosuggest.maybe_refresh();
+        self.current_suggestion = self.autosuggest.suggest(&line);
     }
 
     /// Build banner shown bottom-right on launch: `v<pkg>·<git rev>`
@@ -997,6 +1257,58 @@ impl App {
         }
     }
 
+    /// Open the session panel in its own OS window. Mirrors open_git_panel:
+    /// the page polls `/sessions` on the MCP server. Best-effort — any failure
+    /// just logs and leaves the terminal untouched.
+    fn open_session_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if self.session_panel_window.is_some() {
+            return;
+        }
+        let port =
+            std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".to_string());
+        let attrs = WindowAttributes::default()
+            .with_title("sessions")
+            .with_theme(Some(Theme::Dark))
+            .with_inner_size(LogicalSize::new(260.0, 360.0));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("[session-panel] window create failed: {e}");
+                return;
+            }
+        };
+        let html = SESSION_PANEL_HTML.replace("__PORT__", &port);
+        // build_as_child for the same use-after-free reason as the git panel.
+        let webview = match wry::WebViewBuilder::new()
+            .with_html(html)
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(260.0, 360.0).into(),
+            })
+            .build_as_child(window.as_ref())
+        {
+            Ok(wv) => wv,
+            Err(e) => {
+                eprintln!("[session-panel] webview build failed: {e}");
+                return;
+            }
+        };
+        eprintln!("[session-panel] open; polling 127.0.0.1:{port}/sessions");
+        self.session_panel_window = Some(window);
+        self.session_panel_webview = Some(webview);
+    }
+
+    /// Toggle the session panel from the menu: close if open, open if not.
+    fn toggle_session_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if self.session_panel_window.is_some() {
+            // Drop the webview before the window it borrows from.
+            self.session_panel_webview = None;
+            self.session_panel_window = None;
+        } else {
+            self.open_session_panel(event_loop);
+        }
+    }
+
     /// Adjust the live font size by `delta` (in logical points) and
     /// reflow the cell grid + PTY size accordingly. Clamped to a sane
     /// terminal range so the user can't shrink past readability or
@@ -1063,6 +1375,16 @@ impl App {
         } else {
             self.modifiers.alt_key()
         }
+    }
+
+    /// Headless verification: arm a clean exit after KASATERM_AUTOQUIT_MS so a
+    /// background run exercises the save-on-exit path (and thus the next
+    /// launch's restore). No-op when the env var is unset.
+    fn schedule_autoquit(&mut self) {
+        let Ok(ms_str) = std::env::var("KASATERM_AUTOQUIT_MS") else { return; };
+        let Ok(ms) = ms_str.parse::<u64>() else { return; };
+        eprintln!("[autoquit] clean exit in {ms}ms");
+        self.autoquit_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(ms));
     }
 
     fn schedule_autocapture(&self) {
@@ -1254,6 +1576,12 @@ impl App {
                 pane.alt_screen = update.alt_screen;
                 pane.mouse_enabled = update.mouse_enabled;
                 pane.mouse_sgr = update.mouse_sgr;
+                // Carry the OSC 133 prompt-end mark only on frames that
+                // actually emitted one; keep the last otherwise so a
+                // mid-typing frame doesn't erase it.
+                if let Some(pe) = update.prompt_end {
+                    pane.prompt_end = Some(pe);
+                }
                 // OSC 0/2 title from the inner program (Claude Code's
                 // conversation summary, vim filename, etc.). Carry it
                 // through to PaneState so the chrome header + the
@@ -1299,7 +1627,6 @@ impl App {
     /// Spawn the first shell pane for the *current* (already-cleared) session.
     /// Mirrors start_pty's pane bring-up with a fresh pane id and no socket
     /// (re)init — used by new_session.
-    #[allow(dead_code)]
     fn spawn_session_pane(&mut self) -> Result<()> {
         let (cols, rows) = self.window_cells();
         let cwd = resolve_initial_cwd();
@@ -1323,7 +1650,6 @@ impl App {
     /// Create a new tmux-style session: stash the visible one into its slot,
     /// start a fresh empty session with its own ws/pty/layout, bring up its
     /// first pane.
-    #[allow(dead_code)]
     fn new_session(&mut self) {
         self.sessions[self.active_session] = Some(Session {
             pty: std::mem::take(&mut self.pty),
@@ -1347,7 +1673,6 @@ impl App {
     /// Switch the visible session to tab `idx`: swap the current out to its
     /// slot, swap the target in. Background sessions stay alive (their ws Arc
     /// is still updated by their pump threads).
-    #[allow(dead_code)]
     fn switch_session(&mut self, idx: usize) {
         if idx == self.active_session || idx >= self.sessions.len() {
             return;
@@ -1375,60 +1700,266 @@ impl App {
         }
     }
 
+    /// Close the session at `idx`. The last session can't be closed (the
+    /// terminal always needs one live session). Closing a background session
+    /// just drops it; closing the visible one first swaps a neighbor in so the
+    /// terminal keeps painting. Dropping a `Session` drops its `PtySession`
+    /// Arcs, which kills the child shells — same teardown path as remove_pane.
+    fn close_session(&mut self, idx: usize) -> Result<()> {
+        if self.sessions.len() <= 1 {
+            anyhow::bail!("cannot close the last session");
+        }
+        if idx >= self.sessions.len() {
+            anyhow::bail!("no such session: {idx}");
+        }
+        if idx == self.active_session {
+            // Pick a neighbor to become visible, then drop the active one.
+            let target = if idx == 0 { 1 } else { idx - 1 };
+            // Drop the active session's live PTYs (kills their shells).
+            self.pty.clear();
+            self.pty_layout = None;
+            let next = self.sessions[target]
+                .take()
+                .expect("neighbor session slot must be occupied");
+            self.pty = next.pty;
+            self.pty_layout = next.pty_layout;
+            self.ws = next.ws;
+            self.sessions.remove(idx);
+            // After removing slot `idx`, every index above it shifts down one.
+            self.active_session = if target > idx { target - 1 } else { target };
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+            self.publish_pty_layout();
+        } else {
+            // Background session: drop it (kills its shells) and drop the slot.
+            self.sessions[idx] = None;
+            self.sessions.remove(idx);
+            if idx < self.active_session {
+                self.active_session -= 1;
+            }
+        }
+        self.refresh_socket_snapshot();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+
     fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
         let (cols, rows) = self.window_cells();
-        // Restore the last session's first pane cwd if we have one, so the
-        // shell opens in the directory the user left off in.
-        let restored = socket::load_session();
-        let cwd = restored
-            .as_ref()
-            .and_then(|panes| panes.first())
-            .map(|p| p.cwd.to_string_lossy().into_owned())
-            .or_else(resolve_initial_cwd);
-        // If that pane was on claude, queue a resume to fire once the shell
-        // prompt is up (send too early and the shell eats it).
-        if let Some(first) = restored.as_ref().and_then(|panes| panes.first()) {
-            if first.was_claude {
-                let cmd = match &first.session_id {
-                    Some(id) => format!("claude --resume {id}\n"),
-                    None => "claude --continue\n".to_string(),
-                };
-                self.pending_restore =
-                    Some((cmd, std::time::Instant::now() + std::time::Duration::from_millis(900)));
-            }
-        }
-        // Export the agent-socket path BEFORE the first PtySession
-        // spawn so the initial shell inherits a working
-        // KASATERM_SOCKET_PATH. start_socket_pty (called below) binds
-        // the actual server at this same path — set_var here just
-        // wins the race against PtyBackend's env::var lookup at spawn
-        // time.
+        // Export the agent-socket path BEFORE the first PtySession spawn so the
+        // initial shell inherits a working KASATERM_SOCKET_PATH. start_socket_pty
+        // (called below) binds the actual server at this same path — set_var here
+        // wins the race against PtyBackend's env::var lookup at spawn time.
         let socket_path = resolve_kasaterm_socket_path();
         std::env::set_var("KASATERM_SOCKET_PATH", &socket_path);
         std::env::set_var("CMUX_SOCKET_PATH", &socket_path);
-        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
-            shell: resolve_default_shell(),
-            cwd,
-            cols,
-            rows,
-            env: Vec::new(),
-            pane_id: "%0".to_string(),
-        })?;
-        self.pump_pty_screens(session.screens.clone(), "%0".to_string());
-        self.pty.insert("%0".to_string(), Arc::new(session));
-        self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
-        // Seed active_pane immediately so split / focus shortcuts work
-        // before the first ScreenUpdate lands. pump_pty_screens won't
-        // overwrite a non-None active_pane.
-        self.ws.lock().unwrap().active_pane = Some("%0".to_string());
-        // Bring up the cmux-compat socket *after* the initial pane is
-        // wired so the very first surface.list call sees %0.
+        // A3 restore: rebuild the saved session(s) — full layout tree, each
+        // pane's cwd, and a queued `claude --resume` for panes that were on
+        // claude. Falls back to a fresh single pane when there's nothing saved.
+        match socket::load_session_state() {
+            Some(state) if !state.sessions.is_empty() => {
+                self.restore_sessions(state, cols, rows)?;
+            }
+            _ => {
+                let cwd = resolve_initial_cwd();
+                let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+                    shell: resolve_default_shell(),
+                    cwd,
+                    cols,
+                    rows,
+                    env: Vec::new(),
+                    pane_id: "%0".to_string(),
+                })?;
+                self.pump_pty_screens(session.screens.clone(), "%0".to_string());
+                self.pty.insert("%0".to_string(), Arc::new(session));
+                self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
+                // Seed active_pane immediately so split / focus shortcuts work
+                // before the first ScreenUpdate lands. pump_pty_screens won't
+                // overwrite a non-None active_pane.
+                self.ws.lock().unwrap().active_pane = Some("%0".to_string());
+            }
+        }
+        // Bring up the cmux-compat socket *after* the initial pane(s) are
+        // wired so the very first surface.list call sees them.
         self.start_socket_pty();
-        // No ws.layout update here — a single pane uses the
-        // single-pane fallback in the render path, same as tmux mode
-        // does before its first %layout-change arrives.
         Ok(())
+    }
+
+    /// Rebuild every saved session (A3 restore). Each session's panes are
+    /// spawned into a fresh workspace and laid out per the saved BSP tree;
+    /// claude panes get a queued `--resume`. Sessions are built into stashed
+    /// slots, then the saved active session is swapped into the live fields —
+    /// mirroring the stash-swap invariant new_session/switch_session use.
+    fn restore_sessions(
+        &mut self,
+        state: socket::RestoreState,
+        cols: u16,
+        rows: u16,
+    ) -> Result<()> {
+        let mut resume = Vec::new();
+        let mut pane_count = 0usize;
+        self.sessions.clear();
+        for node in &state.sessions {
+            // Fresh workspace per session so each pane's pump thread (which
+            // captures self.ws at spawn time) updates the right one.
+            let ws = Arc::new(Mutex::new(Workspace::default()));
+            self.ws = ws.clone();
+            self.pty = HashMap::new();
+            let layout = self.build_restore_node(node, cols, rows, &mut resume)?;
+            pane_count += layout.leaves().len();
+            // Focus the first leaf so split/focus shortcuts work pre-paint.
+            if let Some(first) = layout.leaves().first().map(|s| s.to_string()) {
+                ws.lock().unwrap().active_pane = Some(first);
+            }
+            self.sessions.push(Some(Session {
+                pty: std::mem::take(&mut self.pty),
+                pty_layout: Some(layout),
+                ws,
+            }));
+        }
+        // Swap the active session out of its slot into the live fields.
+        let active = state.active_session.min(self.sessions.len() - 1);
+        let s = self.sessions[active]
+            .take()
+            .expect("active session slot occupied");
+        self.pty = s.pty;
+        self.pty_layout = s.pty_layout;
+        self.ws = s.ws;
+        self.active_session = active;
+        eprintln!(
+            "[restore] {} session(s), {} pane(s), {} claude resume(s), active={}",
+            self.sessions.len(),
+            pane_count,
+            resume.len(),
+            active
+        );
+        self.pending_restores = resume;
+        // SIGWINCH every restored pane to its real rect + publish the layout so
+        // the renderer draws the splits (single-pane uses the fallback anyway).
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        Ok(())
+    }
+
+    /// Recursively spawn the panes for one restore node and return the matching
+    /// live PtyLayout. Leaves spawn a PtySession at the saved cwd (queueing a
+    /// claude resume when needed); splits recurse and preserve dir + ratio.
+    fn build_restore_node(
+        &mut self,
+        node: &socket::RestoreNode,
+        cols: u16,
+        rows: u16,
+        resume: &mut Vec<(Arc<pty_backend::PtySession>, String, std::time::Instant)>,
+    ) -> Result<pty_backend::PtyLayout> {
+        match node {
+            socket::RestoreNode::Leaf(p) => {
+                let id = format!("%{}", self.next_pane_id);
+                self.next_pane_id += 1;
+                let cwd = p
+                    .cwd
+                    .as_ref()
+                    .map(|c| c.to_string_lossy().into_owned())
+                    .or_else(resolve_initial_cwd);
+                let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+                    shell: resolve_default_shell(),
+                    cwd,
+                    cols,
+                    rows,
+                    env: Vec::new(),
+                    pane_id: id.clone(),
+                })?;
+                self.pump_pty_screens(session.screens.clone(), id.clone());
+                let arc = Arc::new(session);
+                self.pty.insert(id.clone(), arc.clone());
+                if p.was_claude {
+                    let cmd = match &p.session_id {
+                        Some(sid) => format!("claude --resume {sid}\n"),
+                        None => "claude --continue\n".to_string(),
+                    };
+                    // Stagger slightly past the shell prompt (rc files + OSC133
+                    // hook). Sent too early the shell eats it.
+                    resume.push((
+                        arc,
+                        cmd,
+                        std::time::Instant::now() + std::time::Duration::from_millis(1200),
+                    ));
+                }
+                Ok(pty_backend::PtyLayout::single(id))
+            }
+            socket::RestoreNode::Split { horizontal, ratio, a, b } => {
+                let a_l = self.build_restore_node(a, cols, rows, resume)?;
+                let b_l = self.build_restore_node(b, cols, rows, resume)?;
+                let dir = if *horizontal {
+                    pty_backend::SplitDir::Horizontal
+                } else {
+                    pty_backend::SplitDir::Vertical
+                };
+                Ok(pty_backend::PtyLayout::Split {
+                    dir,
+                    ratio: *ratio,
+                    a: Box::new(a_l),
+                    b: Box::new(b_l),
+                })
+            }
+        }
+    }
+
+    /// Serialize every session (active + stashed) as a layout tree so the next
+    /// launch can restore the full multi-pane, multi-session workspace. Written
+    /// on exit by save_session_state.
+    fn save_session_state(&self) {
+        let mut sessions_json = Vec::new();
+        for i in 0..self.sessions.len() {
+            let (pty, layout) = if i == self.active_session {
+                (&self.pty, self.pty_layout.as_ref())
+            } else {
+                match self.sessions[i].as_ref() {
+                    Some(s) => (&s.pty, s.pty_layout.as_ref()),
+                    None => continue,
+                }
+            };
+            let Some(layout) = layout else { continue };
+            sessions_json.push(Self::layout_to_json(layout, pty));
+        }
+        if sessions_json.is_empty() {
+            return;
+        }
+        let state = serde_json::json!({
+            "active_session": self.active_session,
+            "sessions": sessions_json,
+        });
+        socket::write_session_state(&state);
+    }
+
+    /// Walk a live PtyLayout into the nested JSON the restore loader reads,
+    /// resolving each leaf's pane id to its cwd/claude record.
+    fn layout_to_json(
+        layout: &pty_backend::PtyLayout,
+        pty: &HashMap<String, Arc<pty_backend::PtySession>>,
+    ) -> serde_json::Value {
+        match layout {
+            pty_backend::PtyLayout::Leaf { pane_id } => {
+                let rec = pty
+                    .get(pane_id)
+                    .map(|s| socket::pane_record(s))
+                    .unwrap_or(serde_json::Value::Null);
+                serde_json::json!({ "leaf": rec })
+            }
+            pty_backend::PtyLayout::Split { dir, ratio, a, b } => {
+                let dir = match dir {
+                    pty_backend::SplitDir::Horizontal => "h",
+                    pty_backend::SplitDir::Vertical => "v",
+                };
+                serde_json::json!({ "split": {
+                    "dir": dir,
+                    "ratio": ratio,
+                    "a": Self::layout_to_json(a, pty),
+                    "b": Self::layout_to_json(b, pty),
+                }})
+            }
+        }
     }
 
     /// Headless verification helper. Reads `KASATERM_AUTOSPLIT` ("h" / "v"
@@ -1747,6 +2278,8 @@ impl App {
             .as_ref()
             .and_then(|id| self.pty.get(id))
             .and_then(|s| s.shell_pid());
+        snap.session_count = self.sessions.len();
+        snap.active_session = self.active_session;
     }
 
     /// Drain pending socket commands and run them on the main thread.
@@ -1879,6 +2412,18 @@ impl App {
                             "swap: surface {a} or {b} not found"
                         )));
                     }
+                }
+                socket::PtyCommand::SwitchSession { idx, reply } => {
+                    self.switch_session(idx);
+                    let _ = reply.send(Ok(()));
+                }
+                socket::PtyCommand::NewSession { reply } => {
+                    self.new_session();
+                    let _ = reply.send(Ok(()));
+                }
+                socket::PtyCommand::CloseSession { idx, reply } => {
+                    let res = self.close_session(idx);
+                    let _ = reply.send(res);
                 }
             }
         }
@@ -2792,6 +3337,53 @@ impl App {
                 }
             }
         }
+        // Inline-autosuggestion accept. When a ghost suggestion is on
+        // screen the cursor is necessarily at the end of the typed line
+        // (we clear the suggestion on any left/up/down motion), so it's
+        // safe to repurpose → / End / Ctrl-E to accept it and Alt-F to
+        // accept one word — matching zsh-autosuggestions / fish. Tab is
+        // deliberately left to the shell's own completion. We send the
+        // remainder to the PTY and grow input_buf so the next frame keeps
+        // suggesting from the extended prefix.
+        if let Some(sugg) = self.current_suggestion.clone() {
+            if !sugg.is_empty() {
+                use winit::keyboard::{KeyCode, PhysicalKey};
+                let plain = !self.modifiers.alt_key() && !self.modifiers.super_key();
+                let phys = match event.physical_key {
+                    PhysicalKey::Code(c) => Some(c),
+                    _ => None,
+                };
+                let accept_full = (matches!(event.logical_key, Key::Named(NamedKey::ArrowRight))
+                    && plain)
+                    || (matches!(event.logical_key, Key::Named(NamedKey::End)) && plain)
+                    || (self.modifiers.control_key() && phys == Some(KeyCode::KeyE));
+                let accept_word =
+                    self.modifiers.alt_key() && phys == Some(KeyCode::KeyF) && !sugg.is_empty();
+                if accept_full {
+                    self.send_bytes(sugg.as_bytes());
+                    self.input_buf.push_str(&sugg);
+                    self.current_suggestion = None;
+                    return;
+                }
+                if accept_word {
+                    // One word = leading spaces + the run up to the next
+                    // space boundary, so repeated Alt-F walks the line.
+                    let mut end = 0usize;
+                    let bytes = sugg.as_bytes();
+                    while end < bytes.len() && bytes[end] == b' ' {
+                        end += 1;
+                    }
+                    while end < bytes.len() && bytes[end] != b' ' {
+                        end += 1;
+                    }
+                    let word = &sugg[..end];
+                    self.send_bytes(word.as_bytes());
+                    self.input_buf.push_str(word);
+                    self.current_suggestion = None;
+                    return;
+                }
+            }
+        }
         // Modifier-bearing keys must NEVER reach the Hangul composer.
         // In Korean keyboard layout the C key still produces 'ㅊ' as
         // text, but Ctrl+C is meant for SIGINT / "copy" and Cmd+V for
@@ -2814,6 +3406,11 @@ impl App {
                         return;
                     }
                     if code == KeyCode::KeyV {
+                        // Pasted text bypasses our key path, so we can't
+                        // mirror it into input_buf — drop the suggestion
+                        // prefix so we never suggest off a stale line.
+                        self.input_buf.clear();
+                        self.current_suggestion = None;
                         self.paste_clipboard();
                         return;
                     }
@@ -2944,6 +3541,13 @@ impl App {
                             self.preedit.clear();
                             self.in_preedit = false;
                         }
+                        // Keep the autosuggest line buffer in sync with
+                        // the control byte the shell is about to act on.
+                        match b {
+                            0x15 | 0x03 | 0x01 => self.input_buf.clear(), // Ctrl-U / Ctrl-C / Ctrl-A
+                            0x17 => self.buf_pop_word(),                  // Ctrl-W
+                            _ => {}
+                        }
                         self.send_bytes(&[b]);
                         return;
                     }
@@ -3001,10 +3605,12 @@ impl App {
         // ('ㅣ' etc.) doesn't interfere.
         if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) {
             if self.host_mod() {
+                self.input_buf.clear();
                 self.send_bytes(b"\x15");
                 return;
             }
             if self.modifiers.alt_key() {
+                self.buf_pop_word();
                 self.send_bytes(b"\x1b\x7f");
                 return;
             }
@@ -3018,10 +3624,20 @@ impl App {
                 if self.modifiers.shift_key() {
                     b"\x1b\r".to_vec()
                 } else {
+                    // Plain Enter submits the line: remember it for
+                    // instant suggestions and reset the buffer.
+                    if !self.input_buf.is_empty() {
+                        self.autosuggest.record(&self.input_buf);
+                    }
+                    self.input_buf.clear();
+                    self.current_suggestion = None;
                     b"\r".to_vec()
                 }
             }
-            Key::Named(NamedKey::Backspace) => b"\x7f".to_vec(),
+            Key::Named(NamedKey::Backspace) => {
+                self.input_buf.pop();
+                b"\x7f".to_vec()
+            }
             Key::Named(NamedKey::Tab) => b"\t".to_vec(),
             Key::Named(NamedKey::Escape) => b"\x1b".to_vec(),
             Key::Named(
@@ -3030,6 +3646,12 @@ impl App {
                 | NamedKey::ArrowRight
                 | NamedKey::ArrowLeft),
             ) => {
+                // Any cursor motion ends a suggestion: it only makes
+                // sense while the cursor sits at the end of the typed
+                // line. (→ at end-of-line is intercepted earlier as
+                // accept when a suggestion is showing.)
+                self.input_buf.clear();
+                self.current_suggestion = None;
                 let letter = match nk {
                     NamedKey::ArrowUp => 'A',
                     NamedKey::ArrowDown => 'B',
@@ -3088,6 +3710,7 @@ impl App {
                                     });
                                     self.commit_overlay =
                                         before.map(|b| (commit.clone(), b));
+                                    self.input_buf.push_str(&commit);
                                     self.send_bytes(commit.as_bytes());
                                 }
                                 self.preedit = self.hangul.preedit().unwrap_or_default();
@@ -3116,8 +3739,15 @@ impl App {
                     }
                     if let Some(flushed) = self.hangul.flush() {
                         commit_prefix.extend_from_slice(flushed.as_bytes());
+                        self.input_buf.push_str(&flushed);
                         self.preedit.clear();
                         self.in_preedit = false;
+                    }
+                    // Mirror printable text into the autosuggest buffer.
+                    // Control chars (e.g. a lone ESC sequence) don't grow
+                    // the visible line, so they don't belong in the prefix.
+                    if t.chars().all(|c| !c.is_control()) {
+                        self.input_buf.push_str(t);
                     }
                     t.as_bytes().to_vec()
                 }
@@ -3262,6 +3892,7 @@ impl App {
             preedit_col,
             font_size: self.font_size,
             selection: self.selection,
+            suggestion: self.current_suggestion.clone().unwrap_or_default(),
         }
     }
 
@@ -3274,6 +3905,17 @@ impl App {
             let mut c = cells::ITERM_CURSOR;
             c[3] = 140; // ~0.55 alpha
             g.rect(cx, cy, ov.cell_w, ov.cell_h, c);
+        }
+        // Inline autosuggestion ghost text — dim, on the same baseline as
+        // committed cells, starting at the cursor and clipped to the row's
+        // right edge so it never wraps. Drawn only when not composing.
+        if ov.preedit.is_empty() && !ov.suggestion.is_empty() {
+            let gx = ov.pad_x + ov.cursor_col as f32 * ov.cell_w;
+            let gy = ov.pad_y + ov.cursor_row as f32 * ov.cell_h;
+            let max_cells = ov.cols.saturating_sub(ov.cursor_col) as u32;
+            if max_cells > 0 {
+                g.draw_ghost(gx, gy, &ov.suggestion, max_cells);
+            }
         }
         if !ov.preedit.is_empty() {
             let px = ov.pad_x + ov.preedit_col as f32 * ov.cell_w;
@@ -3443,6 +4085,9 @@ impl App {
                 origin_px: s.origin_px,
             })
             .collect();
+        // Recompute the inline suggestion against the freshly-applied
+        // grid before snapshotting it into the overlay.
+        self.update_suggestion();
         let overlay = self.gpu_overlay_snapshot();
         // Cache the × close-button hit rects (logical) for the mouse
         // handler, even before the GPU borrow below.
@@ -4073,8 +4718,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // Persist pane cwds + claude sessions so the next launch restores them.
-        socket::save_session(&self.pty);
+        // Persist every session's layout + pane cwds + claude sessions so the
+        // next launch restores the full workspace (A3).
+        self.save_session_state();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -4097,11 +4743,14 @@ impl ApplicationHandler<UserEvent> for App {
             ]);
             let view_m = Submenu::new("보기", true);
             let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
+            let session_item = MenuItem::new("세션 패널 켜기/끄기", true, None);
             let _ = view_m.append(&git_item);
+            let _ = view_m.append(&session_item);
             let _ = menu.append(&app_m);
             let _ = menu.append(&view_m);
             menu.init_for_nsapp();
             self.git_menu_item = Some(git_item);
+            self.session_menu_item = Some(session_item);
             self.menu = Some(menu);
         }
         // WaitUntil so the cursor blink ticks even when no terminal output
@@ -4267,6 +4916,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.schedule_autosend();
             self.schedule_autocapture();
             self.arm_autosplit();
+            self.schedule_autoquit();
             self.open_git_panel(event_loop, false);
             return;
         }
@@ -4338,6 +4988,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.schedule_autosend();
         self.schedule_autocapture();
         self.arm_autosplit();
+        self.schedule_autoquit();
         self.open_git_panel(event_loop, false);
     }
 
@@ -4355,6 +5006,18 @@ impl ApplicationHandler<UserEvent> for App {
             if matches!(event, WindowEvent::CloseRequested) {
                 self.git_panel_webview = None;
                 self.git_panel_window = None;
+            }
+            return;
+        }
+        // Same guard for the session panel. Without it the panel window's
+        // Resized/ScaleFactorChanged events fall through to the terminal
+        // handler below and call gpu.resize() with the panel's tiny size,
+        // shrinking the main wgpu viewport uniform → everything renders
+        // ~2x zoomed. (git panel had this guard, session panel did not.)
+        if self.session_panel_window.as_ref().map(|w| w.id()) == Some(id) {
+            if matches!(event, WindowEvent::CloseRequested) {
+                self.session_panel_webview = None;
+                self.session_panel_window = None;
             }
             return;
         }
@@ -4709,16 +5372,31 @@ impl ApplicationHandler<UserEvent> for App {
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
             if self.git_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_git_panel(event_loop);
+            } else if self.session_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+                self.toggle_session_panel(event_loop);
             }
         }
-        // Fire a queued session-restore command once its delay has elapsed.
-        if let Some((cmd, at)) = self.pending_restore.clone() {
+        // Headless verification: clean-exit once the autoquit deadline passes
+        // so save-on-exit (and the next launch's restore) can be tested.
+        if let Some(at) = self.autoquit_at {
             if std::time::Instant::now() >= at {
-                if let Some(sess) = self.pty.get("%0") {
-                    let _ = sess.send_bytes(cmd.as_bytes());
-                }
-                self.pending_restore = None;
+                event_loop.exit();
+                return;
             }
+        }
+        // Fire any queued session-restore commands whose delay has elapsed.
+        // Each carries its own PtySession so a resume reaches the right pane in
+        // any session (active or stashed background).
+        if !self.pending_restores.is_empty() {
+            let now = std::time::Instant::now();
+            self.pending_restores.retain(|(sess, cmd, at)| {
+                if now >= *at {
+                    let _ = sess.send_bytes(cmd.as_bytes());
+                    false
+                } else {
+                    true
+                }
+            });
         }
         // Reap dead pty sessions before anything else — a closed shell
         // should disappear from the layout on the very next loop turn
@@ -4890,10 +5568,24 @@ fn install_tmux_shim() {
         ".zprofile",
         "[ -f \"${HOME}/.zprofile\" ] && source \"${HOME}/.zprofile\"\n".to_string(),
     );
+    // After sourcing the user's real .zshrc we (1) re-prepend our shim
+    // dir to PATH so it wins over brew, and (2) install an OSC 133
+    // prompt-mark hook for inline autosuggestion. The hook wraps PS1 with
+    // zero-width (`%{..%}`) `A` (prompt start) / `B` (input start) marks;
+    // the `B` mark is what pty-backend sniffs to locate the editable
+    // command line. The guard skips re-wrapping a static PS1 (no
+    // accumulation) while still re-wrapping themes that rebuild PS1 each
+    // precmd (powerlevel10k / starship). zsh-only — other shells ignore
+    // ZDOTDIR and just get the PATH prepend.
     write_rc(
         ".zshrc",
         format!(
-            "[ -f \"${{HOME}}/.zshrc\" ] && source \"${{HOME}}/.zshrc\"\nexport PATH=\"{}:${{PATH}}\"\n",
+            "[ -f \"${{HOME}}/.zshrc\" ] && source \"${{HOME}}/.zshrc\"\n\
+             export PATH=\"{}:${{PATH}}\"\n\
+             _kasaterm_osc133(){{ [[ \"$PS1\" == *$'\\e]133;B'* ]] && return; \
+             PS1=$'%{{\\e]133;A\\a%}}'\"$PS1\"$'%{{\\e]133;B\\a%}}'; }}\n\
+             autoload -Uz add-zsh-hook 2>/dev/null && \
+             add-zsh-hook precmd _kasaterm_osc133 2>/dev/null\n",
             shim_dir.display()
         ),
     );

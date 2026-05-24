@@ -43,6 +43,21 @@ pub struct SurfaceInfo {
     pub title: Option<String>,
 }
 
+/// Multi-session (tmux-style tab) state for the session panel. `count`
+/// is the total number of live sessions; `active` is the index of the
+/// currently visible one. Default is a single session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionsInfo {
+    pub count: usize,
+    pub active: usize,
+}
+
+impl Default for SessionsInfo {
+    fn default() -> Self {
+        Self { count: 1, active: 0 }
+    }
+}
+
 /// Plug point for terminal operations. Host apps implement this on a
 /// type that already owns the tmux session / portable-pty handle and
 /// the renderer state.
@@ -73,5 +88,24 @@ pub trait Backend: Send + Sync {
     /// running claude or fall back. Default `None`.
     fn active_process_name(&self) -> Option<String> {
         None
+    }
+    /// Multi-session (tmux-style tab) state for the session panel. Default
+    /// is a single session — backends that don't support sessions just
+    /// report one.
+    fn sessions(&self) -> SessionsInfo {
+        SessionsInfo::default()
+    }
+    /// Switch the visible session to index `idx`. Default unsupported.
+    fn switch_session(&self, _idx: usize) -> Result<()> {
+        anyhow::bail!("switch_session not supported")
+    }
+    /// Create a fresh session and switch to it. Default unsupported.
+    fn new_session(&self) -> Result<()> {
+        anyhow::bail!("new_session not supported")
+    }
+    /// Close the session at index `idx`. Backends must keep at least one
+    /// session alive (closing the last is rejected). Default unsupported.
+    fn close_session(&self, _idx: usize) -> Result<()> {
+        anyhow::bail!("close_session not supported")
     }
 }

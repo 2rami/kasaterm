@@ -456,6 +456,9 @@ fn spawn_flusher(
                 mouse_sgr: snap.mouse_sgr,
                 title: snap.title,
                 eof: false,
+                // tmux backend doesn't track OSC 133 prompt marks; the
+                // host falls back to its typed-buffer heuristic there.
+                prompt_end: None,
             };
             if out.send(update).is_err() {
                 return;
