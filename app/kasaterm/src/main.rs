@@ -4242,9 +4242,68 @@ impl App {
         Ok(())
     }
 
+    /// Insert text at the active markdown editor's cursor (committed Hangul or
+    /// pasted text). Multi-char safe; advances the cursor by char count.
+    fn md_editor_insert(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let mut ws = self.ws.lock().unwrap();
+        let Some(pane) = ws.active_mut() else { return };
+        if pane.md_edit_lines.is_empty() {
+            pane.md_edit_lines.push(String::new());
+        }
+        let line = pane.md_cur_line.min(pane.md_edit_lines.len() - 1);
+        let col = pane.md_cur_col;
+        let s = &mut pane.md_edit_lines[line];
+        let b = char_byte(s, col);
+        s.insert_str(b, text);
+        pane.md_cur_line = line;
+        pane.md_cur_col = col + text.chars().count();
+        pane.dirty = true;
+    }
+
+    /// Raw-editor key entry point with Hangul composition. macOS hands jamo
+    /// (U+3130..318F) through `event.text`; we feed the local composer (same as
+    /// the terminal path), insert committed syllables, and keep the preedit in
+    /// `self.preedit` for the editor overlay. Non-jamo flushes then edits.
+    fn md_editor_input(&mut self, event: &KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        #[cfg(target_os = "macos")]
+        if let Some(t) = &event.text {
+            if t.chars().count() == 1 {
+                if let Some(c) = t.chars().next() {
+                    if (0x3130..=0x318F).contains(&(c as u32)) {
+                        if let Some(commit) = self.hangul.feed(c) {
+                            self.md_editor_insert(&commit);
+                        }
+                        self.preedit = self.hangul.preedit().unwrap_or_default();
+                        self.in_preedit = !self.preedit.is_empty();
+                        self.chrome_dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
+        // Mid-composition backspace chips a jamo off the preedit.
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.chrome_dirty = true;
+            return;
+        }
+        // Any other key: flush the pending syllable into the buffer first.
+        if let Some(flushed) = self.hangul.flush() {
+            self.md_editor_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        self.md_editor_key(event);
+    }
+
     /// Handle a keypress in a Raw-mode markdown editor pane: char insert,
-    /// backspace, enter (line split), arrow navigation. Hangul composition
-    /// arrives separately via the Ime event path. Edits the active pane buffer.
+    /// backspace, enter (line split), arrow navigation. Hangul composition is
+    /// handled by `md_editor_input` before this. Edits the active pane buffer.
     fn md_editor_key(&mut self, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
         let mut ws = self.ws.lock().unwrap();
@@ -5018,7 +5077,7 @@ impl App {
         };
         if is_md {
             if is_raw {
-                self.md_editor_key(event);
+                self.md_editor_input(event);
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -6049,6 +6108,7 @@ impl App {
                     && sb_cursor.1 <= r.1 + r.3
             })
             .map(|(i, _)| *i);
+        let md_preedit = self.preedit.clone();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -6069,7 +6129,7 @@ impl App {
             for (id, doc, (bx, by, bw, bh), scroll, raw_mode, lines, cursor) in &md_slots {
                 let content_h = if *raw_mode {
                     let lines = lines.as_deref().unwrap_or(&[]);
-                    g.draw_raw_editor(lines, *cursor, *bx, *by, *bw, *bh, *scroll)
+                    g.draw_raw_editor(lines, *cursor, *bx, *by, *bw, *bh, *scroll, &md_preedit)
                 } else {
                     // Upload this doc's inline images once (keyed per block).
                     for im in &doc.images {
