@@ -979,23 +979,6 @@ fn scrollback_lines(pane: &PaneState) -> Vec<String> {
     lines
 }
 
-/// Rebuild a grid row from a saved scrollback text line. Color/attrs default
-/// (v1 text-only); wide (CJK) glyphs get their trailing spacer cell re-added so
-/// the renderer advances two columns exactly like the live grid does.
-fn text_to_cells(line: &str) -> Vec<GridCell> {
-    let mut row = Vec::new();
-    for ch in line.chars() {
-        let wide = gpu::is_wide_char(ch);
-        let mut cell = GridCell::blank();
-        cell.ch = ch.to_string();
-        row.push(cell);
-        if wide {
-            row.push(GridCell::blank());
-        }
-    }
-    row
-}
-
 /// Pull the selected text out of the visible row grid. Joined with `\n`,
 /// trailing spaces trimmed per row. Mirrors kasaterm::extract_selection.
 fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
@@ -2394,7 +2377,9 @@ impl App {
             cols,
             rows,
             env: Vec::new(),
-            pane_id: id.clone(),        })?;
+            pane_id: id.clone(),
+            initial_scrollback: Vec::new(),
+        })?;
         self.pump_pty_screens(session.screens.clone(), id.clone());
         self.pty.insert(id.clone(), Arc::new(session));
         self.pty_layout = Some(pty_backend::PtyLayout::single(&id));
@@ -2761,7 +2746,9 @@ impl App {
                     cols,
                     rows,
                     env: Vec::new(),
-                    pane_id: "%0".to_string(),                })?;
+                    pane_id: "%0".to_string(),
+                    initial_scrollback: Vec::new(),
+                })?;
                 self.pump_pty_screens(session.screens.clone(), "%0".to_string());
                 self.pty.insert("%0".to_string(), Arc::new(session));
                 self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
@@ -2884,18 +2871,16 @@ impl App {
                     cols,
                     rows,
                     env: Vec::new(),
-                    pane_id: id.clone(),                })?;
+                    pane_id: id.clone(),
+                    // Restored scrollback → seeded into alacritty so scroll-up
+                    // shows the pre-restart screen. The renderer reads
+                    // alacritty's own scrollback (display_offset), not our
+                    // PaneState.history, so seeding here is what actually shows.
+                    initial_scrollback: p.scrollback.clone(),
+                })?;
                 self.pump_pty_screens(session.screens.clone(), id.clone());
                 let arc = Arc::new(session);
                 self.pty.insert(id.clone(), arc.clone());
-                // Restore saved scrollback into the pane's history so scroll-up
-                // shows what was on screen before the restart. The live shell
-                // starts fresh below; this only seeds the backlog.
-                if !p.scrollback.is_empty() {
-                    let rows: std::collections::VecDeque<Vec<GridCell>> =
-                        p.scrollback.iter().map(|l| text_to_cells(l)).collect();
-                    self.ws.lock().unwrap().pane_mut(&id).history = rows;
-                }
                 if p.was_claude {
                     let cmd = match &p.session_id {
                         Some(sid) => format!("claude --resume {sid}\n"),
@@ -3803,7 +3788,9 @@ impl App {
             cols: win_cols,
             rows: win_rows,
             env: Vec::new(),
-            pane_id: new_id.clone(),        })?;
+            pane_id: new_id.clone(),
+            initial_scrollback: Vec::new(),
+        })?;
         self.pump_pty_screens(session.screens.clone(), new_id.clone());
         self.pty.insert(new_id.clone(), Arc::new(session));
 
