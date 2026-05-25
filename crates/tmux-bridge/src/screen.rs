@@ -36,6 +36,39 @@ impl Cell {
 
 pub type Row = Vec<Cell>;
 
+/// A decoded inline image (iTerm2 OSC 1337) ready for GPU upload.
+/// Held behind an `Arc` so cloning a `ScreenUpdate` — which the host
+/// does once per frame — never copies the pixel buffer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedImage {
+    /// Tightly-packed RGBA8, `width * height * 4` bytes.
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One inline image to overlay on the cell grid this frame. The
+/// backend recomputes this list on every snapshot from the session's
+/// placed-image set against the current scroll position, so `row` is
+/// already viewport-relative and scrollback-correct (an image scrolled
+/// off the top simply isn't included). The renderer just draws each one
+/// at the given cell box.
+#[derive(Debug, Clone)]
+pub struct ImagePlacement {
+    /// Stable per-session id so the renderer caches the uploaded GPU
+    /// texture across frames instead of re-uploading every redraw.
+    pub id: u64,
+    pub image: std::sync::Arc<DecodedImage>,
+    /// Viewport top-left cell. `row` can be negative when the image's
+    /// top has scrolled above the viewport but its lower part is still
+    /// visible; the renderer clips.
+    pub row: i32,
+    pub col: u16,
+    /// Cell span the image box occupies.
+    pub cols: u16,
+    pub rows: u16,
+}
+
 /// Screen diff sent from the flusher thread to consumers.
 #[derive(Debug, Clone, Default)]
 pub struct ScreenUpdate {
@@ -69,6 +102,10 @@ pub struct ScreenUpdate {
     /// command line for inline autosuggestion. `None` on frames without a
     /// fresh mark — the host keeps the last known one until it goes stale.
     pub prompt_end: Option<(u16, u16)>,
+    /// Inline images (iTerm2 OSC 1337) currently visible in this pane,
+    /// already mapped to viewport cell coordinates for the current
+    /// scroll position. Empty on the common no-image frame.
+    pub images: Vec<ImagePlacement>,
 }
 
 pub(crate) fn vt_color(c: vt100::Color) -> Color {

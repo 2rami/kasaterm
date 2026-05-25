@@ -459,6 +459,9 @@ fn spawn_flusher(
                 // tmux backend doesn't track OSC 133 prompt marks; the
                 // host falls back to its typed-buffer heuristic there.
                 prompt_end: None,
+                // Inline images are a pty-backend-only feature; the
+                // legacy tmux path never emits any.
+                images: Vec::new(),
             };
             if out.send(update).is_err() {
                 return;

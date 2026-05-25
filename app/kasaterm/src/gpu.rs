@@ -9,6 +9,7 @@
 //! skip sugarloaf init entirely so the swapchain has a single
 //! owner.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -38,6 +39,38 @@ pub struct GpuRenderer {
     chrome: Vec<CellInstance>,
     /// Scale we cached on init. winit logical→physical conversion.
     scale: f32,
+    /// Bilinear sampler for inline images — linear (not the atlas's
+    /// nearest) so a downscaled photo doesn't alias into jaggies.
+    image_sampler: wgpu::Sampler,
+    /// Uploaded image textures keyed by the backend's stable image id,
+    /// so a still image isn't re-uploaded every frame. Rebuilt each
+    /// `set_images` call; ids absent from the new frame are evicted.
+    images: HashMap<u64, ImageEntry>,
+    /// This frame's image draw order + their quad instances (1:1).
+    image_order: Vec<u64>,
+    image_instances: Vec<CellInstance>,
+}
+
+/// A cached inline-image GPU texture + its bind group. The texture is
+/// held only to keep it alive; draws go through the bind group.
+struct ImageEntry {
+    _texture: wgpu::Texture,
+    bind_group: wgpu::BindGroup,
+}
+
+/// One inline image the host wants drawn this frame. `px` is the visible
+/// target rect in PHYSICAL pixels and `uv_min`/`uv_max` the sub-region of
+/// the image it shows — the caller clips both together so an image partly
+/// scrolled past the pane edge (or wider than the pane) is cropped, not
+/// squashed.
+pub struct ImageQuad<'a> {
+    pub id: u64,
+    pub rgba: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+    pub px: [f32; 4],
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
 }
 
 /// One pane's slot in `render_frame`. Mirrors the data the existing
@@ -183,6 +216,22 @@ impl GpuRenderer {
         let pipeline = Pipeline::new(&device, format, 32_768);
         pipeline.write_uniforms(&queue, [config.width as f32, config.height as f32]);
         let bind_group = pipeline.make_bind_group(&device, atlas.view(), atlas.sampler());
+        // Nearest, not Linear: the shared pipeline bind-group layout
+        // declares a NonFiltering sampler + non-filterable texture (the
+        // atlas wants crisp nearest glyphs), so a filtering sampler would
+        // fail validation. Downscaled photos alias a little; smoothing is
+        // a phase-2 item (separate filtering pipeline) not worth the core
+        // layout churn now.
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("kasaterm image sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
 
         Ok(Self {
             _window: window,
@@ -199,7 +248,85 @@ impl GpuRenderer {
             cell_h: cell_h / scale,
             chrome: Vec::with_capacity(1024),
             scale,
+            image_sampler,
+            images: HashMap::new(),
+            image_order: Vec::new(),
+            image_instances: Vec::new(),
         })
+    }
+
+    /// Stage the inline images to draw this frame. Uploads any newly-seen
+    /// image to a cached GPU texture (keyed by the backend's stable id)
+    /// and drops textures for images no longer present. Call once per
+    /// frame before `render`; an empty slice clears all images.
+    pub fn set_images(&mut self, quads: &[ImageQuad<'_>]) {
+        self.image_order.clear();
+        self.image_instances.clear();
+        let mut old = std::mem::take(&mut self.images);
+        let mut next: HashMap<u64, ImageEntry> = HashMap::with_capacity(quads.len());
+        for q in quads {
+            if q.width == 0 || q.height == 0 {
+                continue;
+            }
+            let entry = match old.remove(&q.id) {
+                Some(e) => e,
+                None => {
+                    let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("kasaterm inline image"),
+                        size: wgpu::Extent3d {
+                            width: q.width,
+                            height: q.height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    self.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        q.rgba,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(q.width * 4),
+                            rows_per_image: Some(q.height),
+                        },
+                        wgpu::Extent3d {
+                            width: q.width,
+                            height: q.height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    let view = texture.create_view(&Default::default());
+                    let bind_group =
+                        self.pipeline
+                            .make_bind_group(&self.device, &view, &self.image_sampler);
+                    ImageEntry { _texture: texture, bind_group }
+                }
+            };
+            self.image_instances.push(CellInstance {
+                cell_px: q.px,
+                uv_min: q.uv_min,
+                uv_max: q.uv_max,
+                // FLAG_COLOR makes the shader sample the texture verbatim
+                // (same path as color emoji) instead of fg × coverage.
+                fg_rgba: [1.0, 1.0, 1.0, 1.0],
+                flags: CellInstance::FLAG_COLOR,
+                ..Default::default()
+            });
+            self.image_order.push(q.id);
+            next.insert(q.id, entry);
+        }
+        // `old` now holds only evicted images; dropping it frees them.
+        self.images = next;
     }
 
     /// Logical-pixel solid rect (sugarloaf.rect drop-in). Caller
@@ -663,6 +790,8 @@ impl GpuRenderer {
         let instance_count = self.chrome.len();
         self.pipeline
             .write_instances(&self.device, &self.queue, &self.chrome);
+        self.pipeline
+            .write_image_instances(&self.device, &self.queue, &self.image_instances);
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self
@@ -699,6 +828,15 @@ impl GpuRenderer {
             });
             self.pipeline
                 .draw(&mut pass, &self.bind_group, instance_count as u32);
+            // Inline images on top of the cell grid. Each binds its own
+            // texture, so they're separate draws after the glyph/chrome
+            // pass (which is bound against the atlas).
+            for (i, id) in self.image_order.iter().enumerate() {
+                if let Some(entry) = self.images.get(id) {
+                    self.pipeline
+                        .draw_image(&mut pass, &entry.bind_group, i as u32);
+                }
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
