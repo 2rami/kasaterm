@@ -89,6 +89,9 @@ pub struct PaneSlot<'a> {
     pub rows: &'a [Vec<Cell>],
     /// Pane top-left in physical pixels.
     pub origin_px: (f32, f32),
+    /// Unfocused pane: glyphs render at reduced alpha (text-only dim) so
+    /// the active pane stands out without darkening the whole box.
+    pub dim: bool,
 }
 
 /// Pending chrome instances accumulated between `clear()` and the
@@ -335,6 +338,39 @@ impl GpuRenderer {
     /// that want it). Coordinates are logical pixels; `y` is the
     /// label's top edge — we approximate baseline via cell_h * 0.78
     /// matching the cell-grid path.
+    /// Logical width `draw_text` would advance for `text` at `font_size`,
+    /// without drawing. Same per-glyph stepping (wide-char tightening
+    /// included) so tab backgrounds size to the exact drawn run.
+    pub fn measure_chrome_text(&mut self, text: &str, font_size: f32, bold: bool) -> f32 {
+        let s = self.scale;
+        let size_px = (font_size * s).round() as u32;
+        let mut pen = 0.0_f32;
+        for ch in text.chars() {
+            if ch == ' ' {
+                pen += self.shaper.cell_advance(size_px as f32);
+                continue;
+            }
+            let key = GlyphKey {
+                ch,
+                bold,
+                italic: false,
+                size_px,
+                font: 0,
+            };
+            if let Some(entry) =
+                self.atlas
+                    .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
+            {
+                pen += if is_wide_char(ch) {
+                    entry.px_w as f32 + size_px as f32 * 0.18
+                } else {
+                    entry.advance
+                };
+            }
+        }
+        pen / s
+    }
+
     pub fn draw_text(&mut self, x: f32, y: f32, text: &str, opts: DrawOpts) -> f32 {
         let s = self.scale;
         let size_px = (opts.font_size * s).round() as u32;
@@ -1240,6 +1276,9 @@ impl GpuRenderer {
     /// pipeline draws everything in insertion order, so painting
     /// layers fall out naturally from the call sequence.
     pub fn draw_cells(&mut self, panes: &[PaneSlot<'_>]) {
+        // Glyph alpha for unfocused panes (PaneSlot.dim). Backgrounds keep
+        // full alpha — only the text fades, so the box doesn't darken.
+        const DIM_TEXT_ALPHA: f32 = 0.42;
         let cell_w_px = self.cell_w * self.scale;
         let cell_h_px = self.cell_h * self.scale;
         // Pass 1: backgrounds only. A tall CJK glyph bleeds a little
@@ -1288,7 +1327,10 @@ impl GpuRenderer {
                     // exact regions seamlessly.
                     if cell.ch.chars().count() == 1 {
                         if let Some(rects) = crate::cells::block_rects(ch) {
-                            let fg = cell_fg_rgba(cell);
+                            let mut fg = cell_fg_rgba(cell);
+                            if pane.dim {
+                                fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
+                            }
                             let lin = srgb_rgba_to_linear(fg);
                             let cx = pane.origin_px.0 + col as f32 * cell_w_px;
                             let cy = pane.origin_px.1 + r as f32 * cell_h_px;
@@ -1313,7 +1355,10 @@ impl GpuRenderer {
                     }
                     let cell_x = pane.origin_px.0 + col as f32 * cell_w_px;
                     let cell_y = pane.origin_px.1 + r as f32 * cell_h_px;
-                    let fg = cell_fg_rgba(cell);
+                    let mut fg = cell_fg_rgba(cell);
+                    if pane.dim {
+                        fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
+                    }
                     let icon = is_icon_codepoint(ch as u32);
                     if icon {
                         // Ghostty-style fit-to-cell, done CRISP: scale

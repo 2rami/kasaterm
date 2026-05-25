@@ -554,6 +554,9 @@ fn spawn_reader_thread(
         // never sees a half codepoint (a multibyte char split between
         // two reads).
         let mut utf8_buf = Utf8Buffer::new();
+        // OSC 1337 inline-image capture state (a payload can span reads).
+        let mut img_buf: Vec<u8> = Vec::new();
+        let mut img_capturing = false;
 
         loop {
             // Check for a pending resize before we read more bytes —
@@ -614,6 +617,10 @@ fn spawn_reader_thread(
             let raw_str = utf8_buf.process(&buf[..n]);
             let nfc_str: String = raw_str.nfc().collect();
             let processed_bytes = nfc_str.as_bytes();
+            // Sniff for iTerm OSC 1337 inline images in parallel with the VT
+            // parser (which drops them unhandled). Decoded payloads open in an
+            // image pane via /open-image.
+            scan_inline_image(processed_bytes, &mut img_buf, &mut img_capturing);
 
             let update = {
                 let mut t = term.lock().unwrap();
@@ -817,6 +824,118 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|w| w == needle)
+}
+
+/// Standard base64 decode (no external crate). Ignores non-alphabet bytes
+/// (whitespace, `=` padding) so it tolerates wrapped iTerm payloads.
+fn b64_decode(s: &[u8]) -> Vec<u8> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for &c in s {
+        let Some(v) = val(c) else { continue };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
+}
+
+/// MVP inline-image: a completed OSC 1337 body is `params:base64`. Decode
+/// the payload, write a temp PNG/JPEG, and hand it to the existing image
+/// pane viewer via the kasaspace `/open-image` endpoint. (True cell-flow
+/// inline rendering is a later stage; this gets `imgcat`-style output
+/// showing in kasaterm now.)
+fn emit_inline_image(body: &[u8]) {
+    let Some(colon) = body.iter().position(|&b| b == b':') else {
+        return;
+    };
+    let bytes = b64_decode(&body[colon + 1..]);
+    if bytes.len() < 16 {
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("kasaterm-inline-{nanos}.png"));
+    if std::fs::write(&tmp, &bytes).is_err() {
+        return;
+    }
+    let port = std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".into());
+    let url = format!("http://127.0.0.1:{port}/open-image");
+    let _ = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "--get",
+            "--data-urlencode",
+            &format!("path={}", tmp.display()),
+            &url,
+        ])
+        .status();
+}
+
+/// Capture an iTerm OSC 1337 inline-image sequence that may span several
+/// PTY reads. `buf`/`capturing` persist across calls. Marker
+/// `ESC ] 1337 ; File=` … terminator BEL or ST. alacritty parses the OSC
+/// and drops it (unhandled), so the base64 never reaches the grid — we
+/// sniff the raw batch in parallel to grab the payload.
+fn scan_inline_image(bytes: &[u8], buf: &mut Vec<u8>, capturing: &mut bool) {
+    const MARKER: &[u8] = b"\x1b]1337;File=";
+    let mut data = bytes;
+    loop {
+        if *capturing {
+            let bel = data.iter().position(|&b| b == 0x07);
+            let st = find_subslice(data, b"\x1b\\");
+            let end = match (bel, st) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            match end {
+                Some(e) => {
+                    buf.extend_from_slice(&data[..e]);
+                    emit_inline_image(buf);
+                    buf.clear();
+                    *capturing = false;
+                    let term_len = if data.get(e) == Some(&0x07) { 1 } else { 2 };
+                    data = &data[(e + term_len).min(data.len())..];
+                }
+                None => {
+                    // Guard against unbounded growth on a malformed stream.
+                    if buf.len() < 8 * 1024 * 1024 {
+                        buf.extend_from_slice(data);
+                    } else {
+                        buf.clear();
+                        *capturing = false;
+                    }
+                    return;
+                }
+            }
+        } else {
+            match find_subslice(data, MARKER) {
+                Some(start) => {
+                    *capturing = true;
+                    data = &data[start + MARKER.len()..];
+                }
+                None => return,
+            }
+        }
+    }
 }
 
 fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
