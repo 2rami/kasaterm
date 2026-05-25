@@ -42,6 +42,11 @@ pub struct PtyOptions {
     /// The renderer keys panes by this id, so a multi-pane workspace
     /// gives each PtySession a unique value ("%0", "%1", ...).
     pub pane_id: String,
+    /// Scrollback to seed on start (oldest→newest text lines). Fed through the
+    /// VT parser before the shell's first output so it lands in alacritty's
+    /// scrollback and shows on scroll-up. Empty = fresh terminal. Restores a
+    /// pane's pre-restart screen content across a relaunch.
+    pub initial_scrollback: Vec<String>,
 }
 
 impl Default for PtyOptions {
@@ -53,6 +58,7 @@ impl Default for PtyOptions {
             rows: 24,
             env: Vec::new(),
             pane_id: "%0".to_string(),
+            initial_scrollback: Vec::new(),
         }
     }
 }
@@ -230,6 +236,17 @@ impl PtySession {
             last_title: Arc::clone(&title_handle),
         };
         let term = Arc::new(Mutex::new(make_term(opts.cols, opts.rows, listener)));
+        // Seed restored scrollback into alacritty before the shell's first
+        // output, so scroll-up shows the pre-restart screen content. Fed as if
+        // it were program output (v1: plain text, no color/attrs).
+        if !opts.initial_scrollback.is_empty() {
+            let mut proc: Processor<StdSyncHandler> = Processor::new();
+            let mut t = term.lock().unwrap();
+            for line in &opts.initial_scrollback {
+                proc.advance(&mut *t, line.as_bytes());
+                proc.advance(&mut *t, b"\r\n");
+            }
+        }
         let reader_thread = spawn_reader_thread(
             reader,
             tx.clone(),
