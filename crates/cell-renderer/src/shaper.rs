@@ -137,6 +137,20 @@ impl Shaper {
             .unwrap_or(size_px * 0.6)
     }
 
+    /// Advance width of `ch` at `size_px` straight from glyph metrics — works
+    /// for blank glyphs (space) that `rasterize` returns None for. Walks the
+    /// fallback chain to the first face that maps the codepoint.
+    pub fn advance(&self, ch: char, size_px: f32) -> f32 {
+        for i in 0..self.faces.len() {
+            let f = self.face(i);
+            let gid = f.charmap().map(ch as u32);
+            if gid != 0 {
+                return f.glyph_metrics(&[]).scale(size_px).advance_width(gid);
+            }
+        }
+        size_px * 0.5
+    }
+
     /// Line height in pixels at `size_px` — primary face's
     /// ascent+descent+line_gap. Caller uses this directly for cell
     /// height so the grid metric matches the font's natural line

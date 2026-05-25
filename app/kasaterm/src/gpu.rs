@@ -563,6 +563,17 @@ impl GpuRenderer {
         }
     }
 
+    /// True space advance for the requested font (metrics, not the 'M' cell
+    /// width) — markdown word spacing.
+    fn font_space_advance(&self, size_px: u32, font: u8) -> f32 {
+        let sz = size_px as f32;
+        match font {
+            2 => self.md_bold_shaper.advance(' ', sz),
+            1 => self.md_shaper.advance(' ', sz),
+            _ => self.shaper.advance(' ', sz),
+        }
+    }
+
     /// Draw a single word (no internal wrapping) at logical (x, y) using the
     /// given font. Mirrors draw_text's glyph placement but lets the markdown
     /// renderer pick the gothic (font=1) for prose and mono (font=0) for code.
@@ -582,33 +593,33 @@ impl GpuRenderer {
         let baseline = y * s + size_px as f32 * 0.78;
         let fg = srgb_rgba_to_linear(color);
         let mut pen = x * s;
+        // Proportional layout: each glyph advances by its own font metric. No
+        // mono-grid wide-char fudge (terminal-only; made Hangul read loose).
+        // Space has no raster, so its advance comes from metrics.
         for ch in text.chars() {
             if ch == ' ' {
-                pen += self.font_cell_advance(size_px, font);
+                pen += self.font_space_advance(size_px, font);
                 continue;
             }
             if let Some(e) = self.bake_glyph(ch, bold, italic, size_px, font) {
-                let gx = pen + e.bearing_x as f32;
-                let gy = baseline - e.bearing_y as f32;
-                let (col, flags) = if e.is_color {
-                    ([1.0, 1.0, 1.0, 1.0], CellInstance::FLAG_COLOR)
-                } else {
-                    (fg, 0)
-                };
-                let inst = CellInstance {
-                    cell_px: [gx, gy, e.px_w as f32, e.px_h as f32],
-                    uv_min: e.uv_min,
-                    uv_max: e.uv_max,
-                    fg_rgba: col,
-                    flags,
-                    ..Default::default()
-                };
-                self.chrome.push(inst);
-                pen += if is_wide_char(ch) {
-                    e.px_w as f32 + size_px as f32 * 0.18
-                } else {
-                    e.advance
-                };
+                {
+                    let gx = pen + e.bearing_x as f32;
+                    let gy = baseline - e.bearing_y as f32;
+                    let (col, flags) = if e.is_color {
+                        ([1.0, 1.0, 1.0, 1.0], CellInstance::FLAG_COLOR)
+                    } else {
+                        (fg, 0)
+                    };
+                    self.chrome.push(CellInstance {
+                        cell_px: [gx, gy, e.px_w as f32, e.px_h as f32],
+                        uv_min: e.uv_min,
+                        uv_max: e.uv_max,
+                        fg_rgba: col,
+                        flags,
+                        ..Default::default()
+                    });
+                }
+                pen += e.advance;
             }
         }
     }
@@ -629,15 +640,11 @@ impl GpuRenderer {
         let mut w = 0.0;
         for ch in text.chars() {
             if ch == ' ' {
-                w += self.font_cell_advance(size_px, font);
+                w += self.font_space_advance(size_px, font);
                 continue;
             }
             if let Some(e) = self.bake_glyph(ch, bold, italic, size_px, font) {
-                w += if is_wide_char(ch) {
-                    e.px_w as f32 + size_px as f32 * 0.18
-                } else {
-                    e.advance
-                };
+                w += e.advance;
             }
         }
         w / s
@@ -662,7 +669,8 @@ impl GpuRenderer {
         // is inline code — keeps the baseline steady across a mixed line.
         // 1.5× the natural line height for Notion-like airy paragraphs.
         let lh = (self.md_shaper.line_height(size * self.scale).ceil() / self.scale) * 1.5;
-        let space_w = self.md_shaper.cell_advance(size * self.scale) / self.scale;
+        // Real space advance, not the 'M' cell width (that over-spaced words).
+        let space_w = self.measure_run(" ", size, false, false, false);
         let mut pen_x = x_start;
         let mut pen_y = y_start;
         for span in spans {
@@ -684,10 +692,12 @@ impl GpuRenderer {
                                 ww + space_w * 0.4,
                                 lh * 0.78,
                                 size * 0.28,
-                                crate::theme::SURFACE_ACTIVE,
+                                crate::theme::BORDER,
                             );
                         }
-                        let col = if span.code { crate::theme::ACCENT } else { color };
+                        // Inline code: regular text color on a dark chip (like
+                        // the webview), not a loud accent.
+                        let col = if span.code { crate::theme::TEXT_DIM } else { color };
                         // 0 = mono (code), 2 = gothic bold, 1 = gothic regular.
                         let font: u8 = if span.code {
                             0
