@@ -1279,6 +1279,15 @@ struct PaneState {
     /// it accepts scroll input (the doc can exceed the pane height) via
     /// `scroll_offset`. Arc so the per-frame snapshot clones a pointer.
     markdown: Option<Arc<MarkdownDoc>>,
+    /// Raw editing mode for a markdown pane. false = Render (laid-out view),
+    /// true = Raw (the wgpu text editor). Toggled by the header Render/Raw pills.
+    md_raw_mode: bool,
+    /// Raw-mode edit buffer, one entry per line. Seeded from `MarkdownDoc.raw`
+    /// when Raw mode is first entered.
+    md_edit_lines: Vec<String>,
+    /// Edit cursor: line index + column in chars.
+    md_cur_line: usize,
+    md_cur_col: usize,
 }
 
 /// A decoded image bound to a pane. `rgba` is tightly-packed RGBA8
@@ -1319,6 +1328,12 @@ fn decode_image_rgba(path: &std::path::Path) -> anyhow::Result<ImagePane> {
     })
 }
 
+/// Byte offset of the `col`-th char in `s` (clamped to `s.len()`). Used by the
+/// Raw markdown editor to translate a char-column cursor into a byte index.
+fn char_byte(s: &str, col: usize) -> usize {
+    s.char_indices().nth(col).map(|(i, _)| i).unwrap_or(s.len())
+}
+
 /// One styled inline run inside a markdown block. The renderer picks the
 /// font weight/slant and (for `code`) a mono face + chip background from
 /// these flags.
@@ -1341,14 +1356,33 @@ enum MdBlock {
     ListItem { depth: u8, marker: String, spans: Vec<MdSpan> },
     Quote { spans: Vec<MdSpan> },
     Rule,
+    /// `![alt](path)` — rendered as a wgpu texture inline (same path as the
+    /// image pane). `key` is the texture cache id, `w`/`h` the decoded pixel
+    /// size for aspect layout; all three are filled in after parse when the
+    /// image is decoded (0/empty until then). `path` is kept for alt fallback.
+    Image { path: String, alt: String, key: String, w: u32, h: u32 },
+}
+
+/// A decoded image referenced by a markdown document, uploaded to the GPU
+/// under `key` and drawn where its `MdBlock::Image` sits.
+struct MdDocImage {
+    key: String,
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
 }
 
 /// A parsed markdown document bound to a pane (same lifetime discipline as
 /// `ImagePane`). The renderer lays the blocks out into the pane box. `path`
-/// is the source file so the `e` shortcut can open it in $EDITOR.
+/// is the source file (for the edit button); `images` are decoded inline
+/// images the renderer uploads + draws.
 struct MarkdownDoc {
     blocks: Vec<MdBlock>,
     path: String,
+    images: Vec<MdDocImage>,
+    /// Original source text — seeds the Raw editor buffer and is rewritten on
+    /// save, then re-parsed into `blocks`.
+    raw: String,
 }
 
 fn heading_level(l: pulldown_cmark::HeadingLevel) -> u8 {
@@ -1381,6 +1415,9 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
     let mut in_item = false;
     let mut item_marker = String::new();
     let mut in_quote = false;
+    let mut in_image = false;
+    let mut img_url = String::new();
+    let mut img_alt = String::new();
 
     let push_span = |spans: &mut Vec<MdSpan>, t: &str, b: bool, i: bool, c: bool| {
         if !t.is_empty() {
@@ -1419,6 +1456,11 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                     in_quote = true;
                     spans.clear();
                 }
+                Tag::Image { dest_url, .. } => {
+                    in_image = true;
+                    img_url = dest_url.to_string();
+                    img_alt.clear();
+                }
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -1427,10 +1469,17 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                     spans: std::mem::take(&mut spans),
                 }),
                 TagEnd::Paragraph => {
+                    // Skip empty paragraphs (e.g. a paragraph that held only an
+                    // image, which was emitted as its own Image block).
                     if in_quote {
-                        blocks.push(MdBlock::Quote { spans: std::mem::take(&mut spans) });
-                    } else if !in_item {
+                        if !spans.is_empty() {
+                            blocks.push(MdBlock::Quote { spans: std::mem::take(&mut spans) });
+                        }
+                    } else if !in_item && !spans.is_empty() {
                         blocks.push(MdBlock::Para { spans: std::mem::take(&mut spans) });
+                    }
+                    if !in_item {
+                        spans.clear();
                     }
                     // in_item: keep spans; flushed at TagEnd::Item.
                 }
@@ -1453,10 +1502,22 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                 TagEnd::Emphasis => italic -= 1,
                 TagEnd::Strong => bold -= 1,
                 TagEnd::BlockQuote(_) => in_quote = false,
+                TagEnd::Image => {
+                    blocks.push(MdBlock::Image {
+                        path: std::mem::take(&mut img_url),
+                        alt: std::mem::take(&mut img_alt),
+                        key: String::new(),
+                        w: 0,
+                        h: 0,
+                    });
+                    in_image = false;
+                }
                 _ => {}
             },
             Event::Text(t) => {
-                if in_code {
+                if in_image {
+                    img_alt.push_str(&t);
+                } else if in_code {
                     code_buf.push_str(&t);
                 } else {
                     push_span(&mut spans, &t, bold > 0, italic > 0, false);
@@ -1475,6 +1536,43 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
         }
     }
     blocks
+}
+
+/// Parse + decode a markdown document: parse blocks, then decode each inline
+/// image (resolving relative paths against the md file's dir, skipping remote
+/// URLs) under `key_prefix`-scoped texture keys. Shared by initial open and
+/// post-edit re-parse.
+fn build_markdown_doc(key_prefix: &str, p: &std::path::Path, text: &str) -> MarkdownDoc {
+    let mut blocks = parse_markdown(text);
+    let md_dir = p.parent().map(|d| d.to_path_buf());
+    let mut images: Vec<MdDocImage> = Vec::new();
+    for (idx, block) in blocks.iter_mut().enumerate() {
+        if let MdBlock::Image { path: ipath, key, w, h, .. } = block {
+            if ipath.starts_with("http://") || ipath.starts_with("https://") {
+                continue;
+            }
+            let resolved = if std::path::Path::new(&ipath).is_absolute() {
+                std::path::PathBuf::from(&*ipath)
+            } else if let Some(dir) = &md_dir {
+                dir.join(&*ipath)
+            } else {
+                std::path::PathBuf::from(&*ipath)
+            };
+            if let Ok(img) = decode_image_rgba(&resolved) {
+                let k = format!("{key_prefix}#img{idx}");
+                *key = k.clone();
+                *w = img.w;
+                *h = img.h;
+                images.push(MdDocImage { key: k, rgba: img.rgba, w: img.w, h: img.h });
+            }
+        }
+    }
+    MarkdownDoc {
+        blocks,
+        path: p.to_string_lossy().into_owned(),
+        images,
+        raw: text.to_string(),
+    }
 }
 
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
@@ -1649,6 +1747,9 @@ struct App {
     /// the renderer each frame. The scroll handler clamps scroll_offset to
     /// (content_h - visible_h) so a markdown pane can't over-scroll.
     md_content_h: HashMap<String, f32>,
+    /// Render/Raw toggle pill hit rects for markdown pane headers:
+    /// (pane id, is_raw, logical rect). A click sets that pane's md_raw_mode.
+    md_toggle_rects: Vec<(String, bool, (f32, f32, f32, f32))>,
     /// When the "복사됨" copy toast started animating. Drives its fade in the
     /// overlay pass; `None` once faded out. Set on a successful block copy.
     copy_toast_at: Option<Instant>,
@@ -1819,6 +1920,7 @@ impl App {
             pane_header_rects: Vec::new(),
             copy_btn_rects: Vec::new(),
             md_content_h: HashMap::new(),
+            md_toggle_rects: Vec::new(),
             copy_toast_at: None,
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
@@ -3762,9 +3864,9 @@ impl App {
                     let _ = reply.send(res);
                 }
                 socket::PtyCommand::OpenPreview { kind, path, reply } => {
-                    // Both images and markdown now open as in-window split
-                    // panes (wgpu-rendered); the separate webview window path
-                    // (open_preview_window) is retired for these.
+                    // Both images and markdown open as in-window split panes
+                    // (wgpu-rendered). Markdown images (![](...)) render as wgpu
+                    // textures inline, same path as the image pane.
                     let _ = event_loop;
                     let res = match kind {
                         socket::PreviewKind::Image => {
@@ -4102,10 +4204,6 @@ impl App {
         }
         let text = std::fs::read_to_string(p)
             .map_err(|e| anyhow::anyhow!("read failed: {e}"))?;
-        let doc = MarkdownDoc {
-            blocks: parse_markdown(&text),
-            path: p.to_string_lossy().into_owned(),
-        };
         let name = p
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -4115,6 +4213,7 @@ impl App {
         };
         let new_id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
+        let doc = build_markdown_doc(&new_id, p, &text);
         {
             let mut ws = self.ws.lock().unwrap();
             let pane = ws.pane_mut(&new_id);
@@ -4143,21 +4242,87 @@ impl App {
         Ok(())
     }
 
-    /// Open a markdown pane's source in $EDITOR, spawned in a fresh split shell
-    /// pane beside it (backs the `e` shortcut). Saving + quitting the editor
-    /// leaves the file updated; re-opening the markdown shows the new content.
-    fn open_md_editor(&mut self, path: &str) {
-        if self
-            .split_active_pane(pty_backend::SplitDir::Horizontal)
-            .is_err()
-        {
-            return;
+    /// Handle a keypress in a Raw-mode markdown editor pane: char insert,
+    /// backspace, enter (line split), arrow navigation. Hangul composition
+    /// arrives separately via the Ime event path. Edits the active pane buffer.
+    fn md_editor_key(&mut self, event: &KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        let mut ws = self.ws.lock().unwrap();
+        let Some(pane) = ws.active_mut() else { return };
+        if pane.md_edit_lines.is_empty() {
+            pane.md_edit_lines.push(String::new());
         }
-        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
-        // Single-quote the path so spaces/parens survive; escape embedded quotes.
-        let safe = path.replace('\'', "'\\''");
-        let cmd = format!("{editor} '{safe}'\r");
-        self.send_bytes(cmd.as_bytes());
+        let mut line = pane.md_cur_line.min(pane.md_edit_lines.len() - 1);
+        let mut col = pane.md_cur_col;
+        match &event.logical_key {
+            Key::Named(NamedKey::Backspace) => {
+                if col > 0 {
+                    let s = &mut pane.md_edit_lines[line];
+                    let b0 = char_byte(s, col - 1);
+                    let b1 = char_byte(s, col);
+                    s.replace_range(b0..b1, "");
+                    col -= 1;
+                } else if line > 0 {
+                    let cur = pane.md_edit_lines.remove(line);
+                    line -= 1;
+                    col = pane.md_edit_lines[line].chars().count();
+                    pane.md_edit_lines[line].push_str(&cur);
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                let s = &mut pane.md_edit_lines[line];
+                let b = char_byte(s, col);
+                let rest = s.split_off(b);
+                pane.md_edit_lines.insert(line + 1, rest);
+                line += 1;
+                col = 0;
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                if col > 0 {
+                    col -= 1;
+                } else if line > 0 {
+                    line -= 1;
+                    col = pane.md_edit_lines[line].chars().count();
+                }
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                let len = pane.md_edit_lines[line].chars().count();
+                if col < len {
+                    col += 1;
+                } else if line + 1 < pane.md_edit_lines.len() {
+                    line += 1;
+                    col = 0;
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if line > 0 {
+                    line -= 1;
+                    col = col.min(pane.md_edit_lines[line].chars().count());
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if line + 1 < pane.md_edit_lines.len() {
+                    line += 1;
+                    col = col.min(pane.md_edit_lines[line].chars().count());
+                }
+            }
+            Key::Named(NamedKey::Space) => {
+                let s = &mut pane.md_edit_lines[line];
+                let b = char_byte(s, col);
+                s.insert(b, ' ');
+                col += 1;
+            }
+            Key::Character(txt) => {
+                let s = &mut pane.md_edit_lines[line];
+                let b = char_byte(s, col);
+                s.insert_str(b, txt);
+                col += txt.chars().count();
+            }
+            _ => {}
+        }
+        pane.md_cur_line = line;
+        pane.md_cur_col = col;
+        pane.dirty = true;
     }
 
     /// Drain `dead_panes` and remove each from the BSP tree + pty map.
@@ -4844,17 +5009,18 @@ impl App {
         // Touch the input timer so the cursor stays solid for a beat and
         // the blink phase re-starts from "on" once it kicks in.
         self.last_input_at = Instant::now();
-        // Markdown panes have no PTY: 'e' opens the source in $EDITOR; every
-        // other key is swallowed (scrolling is wheel-driven).
-        let md_path = {
+        // Markdown panes have no PTY. In Raw mode keys edit the buffer; in
+        // Render mode they're swallowed (scrolling is wheel-driven).
+        let (is_md, is_raw) = {
             let ws = self.ws.lock().unwrap();
             ws.active()
-                .and_then(|p| p.markdown.as_ref().map(|d| d.path.clone()))
+                .map_or((false, false), |p| (p.markdown.is_some(), p.md_raw_mode))
         };
-        if let Some(path) = md_path {
-            if let winit::keyboard::Key::Character(s) = &event.logical_key {
-                if s.as_str() == "e" {
-                    self.open_md_editor(&path);
+        if is_md {
+            if is_raw {
+                self.md_editor_key(event);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
                 }
             }
             return;
@@ -5543,6 +5709,10 @@ impl App {
             label: String,
             is_active: bool,
             color: Option<[u8; 4]>,
+            /// Markdown panes get Render/Raw toggle pills in the header.
+            is_markdown: bool,
+            /// Current markdown mode (true = Raw editor) for pill highlighting.
+            md_raw_mode: bool,
         }
         // Captured once so the &mut self.gpu block below (which can't
         // re-borrow &self) can still see the collapsed/expanded width.
@@ -5555,9 +5725,18 @@ impl App {
         // Image panes collected here (id, pixels, body box in LOGICAL px) so
         // the gpu block below can upload + queue them after the cell pass.
         let mut image_slots: Vec<(String, Arc<ImagePane>, (f32, f32, f32, f32))> = Vec::new();
-        // Markdown panes: (id, doc, body box, scroll px). Drawn in the gpu
-        // block via draw_markdown (pushes glyph/rect chrome directly).
-        let mut md_slots: Vec<(String, Arc<MarkdownDoc>, (f32, f32, f32, f32), f32)> = Vec::new();
+        // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
+        // cursor). Render mode draws blocks; Raw mode draws the editor buffer.
+        #[allow(clippy::type_complexity)]
+        let mut md_slots: Vec<(
+            String,
+            Arc<MarkdownDoc>,
+            (f32, f32, f32, f32),
+            f32,
+            bool,
+            Option<Vec<String>>,
+            (usize, usize),
+        )> = Vec::new();
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
@@ -5694,7 +5873,21 @@ impl App {
                         image_slots.push((id.clone(), image, (bx, by, bw, bh)));
                     }
                     if let Some(doc) = md {
-                        md_slots.push((id.clone(), doc, (bx, by, bw, bh), md_scroll));
+                        let raw_mode = pane.md_raw_mode;
+                        let lines = if raw_mode {
+                            Some(pane.md_edit_lines.clone())
+                        } else {
+                            None
+                        };
+                        md_slots.push((
+                            id.clone(),
+                            doc,
+                            (bx, by, bw, bh),
+                            md_scroll,
+                            raw_mode,
+                            lines,
+                            (pane.md_cur_line, pane.md_cur_col),
+                        ));
                     }
                 }
                 if show_headers {
@@ -5740,6 +5933,8 @@ impl App {
                         label,
                         is_active: active_id.as_deref() == Some(id.as_str()),
                         color: pane.color,
+                        is_markdown: pane.markdown.is_some(),
+                        md_raw_mode: pane.md_raw_mode,
                     });
                 }
             }
@@ -5788,6 +5983,19 @@ impl App {
                 (h.id.clone(), close)
             })
             .collect();
+        // Render/Raw toggle pills for markdown pane headers (right-aligned).
+        // Same geometry the header draw below uses.
+        let pill_w = chrome_font * 3.4;
+        let pill_h = chrome_font + 8.0;
+        let mut toggles: Vec<(String, bool, (f32, f32, f32, f32))> = Vec::new();
+        for h in headers.iter().filter(|h| h.is_markdown) {
+            let raw_x = h.x + h.w - pill_w - 8.0;
+            let render_x = raw_x - pill_w - 4.0;
+            let py = h.y + (PANE_HEADER_HEIGHT - pill_h) / 2.0;
+            toggles.push((h.id.clone(), false, (render_x, py, pill_w, pill_h)));
+            toggles.push((h.id.clone(), true, (raw_x, py, pill_w, pill_h)));
+        }
+        self.md_toggle_rects = toggles;
         // Session tabs live in a wry webview panel (like the git panel), not
         // the native title bar — drawing them here collided with the OSC title.
         // Drop-zone overlay: while a header drag is active, highlight the
@@ -5858,8 +6066,19 @@ impl App {
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
             // top. The returned content height feeds scroll clamping.
-            for (id, doc, (bx, by, bw, bh), scroll) in &md_slots {
-                let content_h = g.draw_markdown(&doc.blocks, *bx, *by, *bw, *bh, *scroll);
+            for (id, doc, (bx, by, bw, bh), scroll, raw_mode, lines, cursor) in &md_slots {
+                let content_h = if *raw_mode {
+                    let lines = lines.as_deref().unwrap_or(&[]);
+                    g.draw_raw_editor(lines, *cursor, *bx, *by, *bw, *bh, *scroll)
+                } else {
+                    // Upload this doc's inline images once (keyed per block).
+                    for im in &doc.images {
+                        if !g.has_image(&im.key) {
+                            g.upload_image(&im.key, &im.rgba, im.w, im.h);
+                        }
+                    }
+                    g.draw_markdown(&doc.blocks, *bx, *by, *bw, *bh, *scroll)
+                };
                 self.md_content_h.insert(id.clone(), content_h);
             }
             // Title strip fill: chrome surface across the top so the area above
@@ -6099,6 +6318,33 @@ impl App {
                         italic: false,
                     },
                 );
+                // Markdown panes: right-aligned Render/Raw toggle pills. The
+                // active mode gets the accent fill. Geometry matches the
+                // md_toggle_rects hit test computed above.
+                if h.is_markdown {
+                    let pw = chrome_font * 3.4;
+                    let ph = chrome_font + 8.0;
+                    let raw_x = h.x + h.w - pw - 8.0;
+                    let render_x = raw_x - pw - 4.0;
+                    let py = h.y + (PANE_HEADER_HEIGHT - ph) / 2.0;
+                    let ty = py + (ph - chrome_font) / 2.0;
+                    let render_bg = if h.md_raw_mode { theme::SURFACE_ACTIVE } else { theme::ACCENT };
+                    let raw_bg = if h.md_raw_mode { theme::ACCENT } else { theme::SURFACE_ACTIVE };
+                    round_rect(g, render_x, py, pw, ph, theme::RADIUS_SM, render_bg);
+                    round_rect(g, raw_x, py, pw, ph, theme::RADIUS_SM, raw_bg);
+                    g.draw_text(
+                        render_x + pw * 0.1,
+                        ty,
+                        "Render",
+                        gpu::DrawOpts { font_size: chrome_font, color: theme::TEXT, bold: false, italic: false },
+                    );
+                    g.draw_text(
+                        raw_x + pw * 0.28,
+                        ty,
+                        "Raw",
+                        gpu::DrawOpts { font_size: chrome_font, color: theme::TEXT, bold: false, italic: false },
+                    );
+                }
             }
             // Focus by contrast (Warp / iTerm style): no accent ring.
             // Every inactive pane gets a dark translucent veil so the
@@ -7222,6 +7468,55 @@ impl ApplicationHandler<UserEvent> for App {
                         .map(|(t, _)| t.clone())
                     {
                         self.copy_block_text(&text);
+                        window.request_redraw();
+                        return;
+                    }
+                    // Markdown header Render/Raw toggle → switch that pane's mode.
+                    // Entering Raw seeds the edit buffer from the doc source.
+                    if let Some((id, is_raw)) = self
+                        .md_toggle_rects
+                        .iter()
+                        .find(|(_, _, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
+                        .map(|(id, raw, _)| (id.clone(), *raw))
+                    {
+                        {
+                            let mut ws = self.ws.lock().unwrap();
+                            if let Some(pane) = ws.panes.get_mut(&id) {
+                                if is_raw && !pane.md_raw_mode {
+                                    // Render → Raw: seed the edit buffer.
+                                    if let Some(doc) = &pane.markdown {
+                                        pane.md_edit_lines =
+                                            doc.raw.split('\n').map(String::from).collect();
+                                    }
+                                    if pane.md_edit_lines.is_empty() {
+                                        pane.md_edit_lines.push(String::new());
+                                    }
+                                    pane.md_cur_line = 0;
+                                    pane.md_cur_col = 0;
+                                    pane.scroll_offset = 0;
+                                } else if !is_raw && pane.md_raw_mode {
+                                    // Raw → Render: write the file + re-parse so
+                                    // the rendered view reflects the edits.
+                                    let text = pane.md_edit_lines.join("\n");
+                                    if let Some(path) =
+                                        pane.markdown.as_ref().map(|d| d.path.clone())
+                                    {
+                                        let _ = std::fs::write(&path, &text);
+                                        let doc = build_markdown_doc(
+                                            &id,
+                                            std::path::Path::new(&path),
+                                            &text,
+                                        );
+                                        pane.markdown = Some(Arc::new(doc));
+                                    }
+                                    pane.scroll_offset = 0;
+                                }
+                                pane.md_raw_mode = is_raw;
+                                pane.dirty = true;
+                            }
+                        }
                         window.request_redraw();
                         return;
                     }

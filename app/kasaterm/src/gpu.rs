@@ -45,6 +45,9 @@ pub struct GpuRenderer {
     /// (Noto Sans KR if installed, else Apple SD Gothic Neo) so documents read
     /// like prose, not code. Glyphs go into the SAME atlas keyed by font=1.
     md_shaper: Shaper,
+    /// Bold weight of the markdown gothic (font=2). A real heavy face reads far
+    /// cleaner than smearing the regular glyph, so headings / **bold** use this.
+    md_bold_shaper: Shaper,
     bind_group: wgpu::BindGroup,
     font_size_px: u32,
     pub cell_w: f32,
@@ -204,6 +207,16 @@ impl GpuRenderer {
         }
         md_shaper.add_fallback_bytes(cell_renderer::CASCADIA_CODE_NF, 0);
         md_shaper.add_fallback_bytes(cell_renderer::SYMBOLS_NERD_FONT_MONO, 0);
+        // Bold weight of the markdown gothic.
+        let (md_bold_font, md_bold_idx) = md_bold_font_path();
+        let mut md_bold_shaper = Shaper::from_path(&md_bold_font, md_bold_idx)
+            .or_else(|_| Shaper::from_path(&md_font, md_idx))
+            .with_context(|| format!("load markdown bold font {md_bold_font}"))?;
+        for (path, idx) in fallback_font_paths() {
+            md_bold_shaper.add_fallback_path(&path, idx);
+        }
+        md_bold_shaper.add_fallback_bytes(cell_renderer::CASCADIA_CODE_NF, 0);
+        md_bold_shaper.add_fallback_bytes(cell_renderer::SYMBOLS_NERD_FONT_MONO, 0);
         let cell_w = shaper.cell_advance(font_size_px as f32).ceil();
         // Use the font's natural line metric (ascent+descent+leading)
         // for cell height instead of an arbitrary multiplier. Lines
@@ -253,6 +266,7 @@ impl GpuRenderer {
             atlas,
             shaper,
             md_shaper,
+            md_bold_shaper,
             bind_group,
             font_size_px,
             cell_w: cell_w / scale,
@@ -283,6 +297,25 @@ impl GpuRenderer {
             fg_rgba: srgb_rgba_to_linear(rgba_u8),
             ..Default::default()
         });
+    }
+
+    /// Filled rounded rectangle (logical px) — circle-traced caps, same as
+    /// main.rs's `round_rect` but a method so the markdown renderer can round
+    /// code blocks / inline-code chips.
+    pub fn round_rect_fill(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
+        let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+        self.rect(x, y + r, w, (h - 2.0 * r).max(0.0), col);
+        if r <= 0.0 {
+            return;
+        }
+        let steps = r.ceil() as i32;
+        for k in 0..steps {
+            let yy = k as f32;
+            let dx = r - (r * r - (r - yy) * (r - yy)).max(0.0).sqrt();
+            let rw = (w - 2.0 * dx).max(0.0);
+            self.rect(x + dx, y + yy, rw, 1.0, col);
+            self.rect(x + dx, y + h - 1.0 - yy, rw, 1.0, col);
+        }
     }
 
     /// Draw a text label using glyphs baked into the atlas at the
@@ -508,21 +541,25 @@ impl GpuRenderer {
         font: u8,
     ) -> Option<AtlasEntry> {
         let key = GlyphKey { ch, bold, italic, size_px, font };
-        if font == 1 {
-            self.atlas
-                .get_or_bake(&self.device, &self.queue, &mut self.md_shaper, key)
-        } else {
-            self.atlas
-                .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
+        match font {
+            2 => self
+                .atlas
+                .get_or_bake(&self.device, &self.queue, &mut self.md_bold_shaper, key),
+            1 => self
+                .atlas
+                .get_or_bake(&self.device, &self.queue, &mut self.md_shaper, key),
+            _ => self
+                .atlas
+                .get_or_bake(&self.device, &self.queue, &mut self.shaper, key),
         }
     }
 
     /// Space/cell advance for the requested font at `size_px`.
     fn font_cell_advance(&mut self, size_px: u32, font: u8) -> f32 {
-        if font == 1 {
-            self.md_shaper.cell_advance(size_px as f32)
-        } else {
-            self.shaper.cell_advance(size_px as f32)
+        match font {
+            2 => self.md_bold_shaper.cell_advance(size_px as f32),
+            1 => self.md_shaper.cell_advance(size_px as f32),
+            _ => self.shaper.cell_advance(size_px as f32),
         }
     }
 
@@ -567,13 +604,6 @@ impl GpuRenderer {
                     ..Default::default()
                 };
                 self.chrome.push(inst);
-                // Faux bold: the rasterizer has no weighted face, so smear the
-                // glyph a fraction of an em to the right for a heavier stroke.
-                if bold && !e.is_color {
-                    let mut b = inst;
-                    b.cell_px[0] += size_px as f32 * 0.04;
-                    self.chrome.push(b);
-                }
                 pen += if is_wide_char(ch) {
                     e.px_w as f32 + size_px as f32 * 0.18
                 } else {
@@ -589,7 +619,13 @@ impl GpuRenderer {
     fn measure_run(&mut self, text: &str, size: f32, bold: bool, italic: bool, code: bool) -> f32 {
         let s = self.scale;
         let size_px = (size * s).round().max(1.0) as u32;
-        let font: u8 = if code { 0 } else { 1 };
+        let font: u8 = if code {
+            0
+        } else if bold {
+            2
+        } else {
+            1
+        };
         let mut w = 0.0;
         for ch in text.chars() {
             if ch == ' ' {
@@ -624,7 +660,8 @@ impl GpuRenderer {
     ) -> f32 {
         // Line metrics from the gothic (markdown body font), even when a run
         // is inline code — keeps the baseline steady across a mixed line.
-        let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
+        // 1.5× the natural line height for Notion-like airy paragraphs.
+        let lh = (self.md_shaper.line_height(size * self.scale).ceil() / self.scale) * 1.5;
         let space_w = self.md_shaper.cell_advance(size * self.scale) / self.scale;
         let mut pen_x = x_start;
         let mut pen_y = y_start;
@@ -641,16 +678,24 @@ impl GpuRenderer {
                     }
                     if pen_y + lh > clip_top && pen_y < clip_bot {
                         if span.code {
-                            self.rect(
-                                pen_x - space_w * 0.15,
-                                pen_y,
-                                ww + space_w * 0.3,
-                                lh,
+                            self.round_rect_fill(
+                                pen_x - space_w * 0.2,
+                                pen_y + lh * 0.12,
+                                ww + space_w * 0.4,
+                                lh * 0.78,
+                                size * 0.28,
                                 crate::theme::SURFACE_ACTIVE,
                             );
                         }
                         let col = if span.code { crate::theme::ACCENT } else { color };
-                        let font: u8 = if span.code { 0 } else { 1 };
+                        // 0 = mono (code), 2 = gothic bold, 1 = gothic regular.
+                        let font: u8 = if span.code {
+                            0
+                        } else if bold {
+                            2
+                        } else {
+                            1
+                        };
                         self.md_draw_word(trimmed, pen_x, pen_y, size, col, bold, span.italic, font);
                     }
                     pen_x += ww;
@@ -678,44 +723,54 @@ impl GpuRenderer {
     ) -> f32 {
         use crate::MdBlock;
         let base = self.font_size_px as f32 / self.scale;
+        // Notion-style reading column: generous side padding, capped content
+        // width, centered in the pane. Shadow x/w so the block code below lays
+        // out into the column without per-line changes. Clipping still uses the
+        // full pane box (y/h).
+        let side_pad = base * 1.7;
+        let avail = (w - side_pad * 2.0).max(1.0);
+        let cw = avail.min(base * 46.0);
+        let x = x + side_pad + (avail - cw) * 0.5;
+        let w = cw;
         let clip_top = y;
         let clip_bot = y + h;
         let top0 = y - scroll;
-        let mut pen_y = top0;
+        let mut pen_y = top0 + base * 1.1;
         for block in blocks {
             match block {
                 MdBlock::Heading { level, spans } => {
                     let scale_f = match level {
-                        1 => 1.7,
-                        2 => 1.45,
+                        1 => 1.9,
+                        2 => 1.5,
                         3 => 1.25,
                         4 => 1.1,
                         _ => 1.0,
                     };
                     let size = base * scale_f;
-                    let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
-                    pen_y += lh * 0.5;
+                    // Notion: big space above a heading, tight below so it binds
+                    // to the text it introduces.
+                    pen_y += if *level <= 1 { base * 1.6 } else { base * 1.2 };
                     pen_y = self.md_runs(
                         spans, x, pen_y, w, size, true, crate::theme::TEXT, clip_top, clip_bot,
                     );
-                    pen_y += lh * 0.25;
+                    pen_y += base * 0.35;
                 }
                 MdBlock::Para { spans } => {
                     let size = base;
-                    let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
                     pen_y = self.md_runs(
                         spans, x, pen_y, w, size, false, crate::theme::TEXT, clip_top, clip_bot,
                     );
-                    pen_y += lh * 0.45;
+                    pen_y += base * 0.85;
                 }
                 MdBlock::Code { code } => {
-                    let size = base * 0.92;
-                    let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
-                    let pad = base * 0.4;
+                    let size = base * 0.9;
+                    let lh =
+                        (self.md_shaper.line_height(size * self.scale).ceil() / self.scale) * 1.35;
+                    let pad = base * 0.85;
                     let lines: Vec<&str> = code.trim_end_matches('\n').split('\n').collect();
                     let block_h = lines.len() as f32 * lh + pad * 2.0;
                     if pen_y + block_h > clip_top && pen_y < clip_bot {
-                        self.rect(x, pen_y, w, block_h, crate::theme::SURFACE);
+                        self.round_rect_fill(x, pen_y, w, block_h, base * 0.5, crate::theme::SURFACE);
                     }
                     let mut ly = pen_y + pad;
                     for line in &lines {
@@ -734,12 +789,12 @@ impl GpuRenderer {
                         }
                         ly += lh;
                     }
-                    pen_y += block_h + lh * 0.4;
+                    pen_y += block_h + base * 0.85;
                 }
                 MdBlock::ListItem { depth, marker, spans } => {
                     let size = base;
                     let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
-                    let indent = (*depth as f32 + 1.0) * base * 1.3;
+                    let indent = (*depth as f32 + 1.0) * base * 1.5;
                     if pen_y + lh > clip_top && pen_y < clip_bot {
                         self.draw_text(
                             x + indent - base * 1.1,
@@ -764,12 +819,11 @@ impl GpuRenderer {
                         clip_top,
                         clip_bot,
                     );
-                    pen_y += lh * 0.25;
+                    pen_y += base * 0.4;
                 }
                 MdBlock::Quote { spans } => {
                     let size = base;
-                    let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
-                    let indent = base * 1.2;
+                    let indent = base * 1.3;
                     let start_y = pen_y;
                     pen_y = self.md_runs(
                         spans,
@@ -784,21 +838,96 @@ impl GpuRenderer {
                     );
                     let bar_h = pen_y - start_y;
                     if start_y + bar_h > clip_top && start_y < clip_bot {
-                        self.rect(x, start_y, base * 0.18, bar_h, crate::theme::ACCENT);
+                        self.rect(x, start_y, base * 0.22, bar_h, crate::theme::ACCENT);
                     }
-                    pen_y += lh * 0.45;
+                    pen_y += base * 0.8;
                 }
                 MdBlock::Rule => {
-                    let lh = self.md_shaper.line_height(base * self.scale).ceil() / self.scale;
-                    pen_y += lh * 0.4;
+                    pen_y += base * 0.9;
                     if pen_y > clip_top && pen_y < clip_bot {
-                        self.rect(x, pen_y, w, 1.5, crate::theme::BORDER);
+                        self.rect(x, pen_y, w, 1.0, crate::theme::BORDER);
                     }
-                    pen_y += lh * 0.5;
+                    pen_y += base * 0.9;
+                }
+                MdBlock::Image { key, alt, w: iw_px, h: ih_px, .. } => {
+                    if *iw_px > 0 && *ih_px > 0 && !key.is_empty() {
+                        let iw = *iw_px as f32;
+                        let ih = *ih_px as f32;
+                        // Fit to the content column width, never upscaling past
+                        // the image's own logical size. Keep aspect.
+                        let disp_w = w.min(iw / self.scale);
+                        let disp_h = disp_w * ih / iw;
+                        if pen_y + disp_h > clip_top && pen_y < clip_bot {
+                            self.queue_image(key, x, pen_y, disp_w, disp_h);
+                        }
+                        pen_y += disp_h + base * 0.7;
+                    } else {
+                        // Decode failed / remote URL — show the alt text dimmed.
+                        let lh = (self.md_shaper.line_height(base * self.scale).ceil()
+                            / self.scale)
+                            * 1.4;
+                        if pen_y + lh > clip_top && pen_y < clip_bot {
+                            self.md_draw_word(
+                                &format!("[이미지: {alt}]"),
+                                x,
+                                pen_y,
+                                base,
+                                crate::theme::TEXT_MUTE,
+                                false,
+                                true,
+                                1,
+                            );
+                        }
+                        pen_y += lh + base * 0.4;
+                    }
                 }
             }
         }
         (pen_y - top0).max(0.0)
+    }
+
+    /// Draw the Raw markdown editor: source lines in the mono font + a cursor
+    /// bar. All logical px; returns total content height for scroll clamping.
+    pub fn draw_raw_editor(
+        &mut self,
+        lines: &[String],
+        cursor: (usize, usize),
+        x: f32,
+        y: f32,
+        _w: f32,
+        h: f32,
+        scroll: f32,
+    ) -> f32 {
+        let base = self.font_size_px as f32 / self.scale;
+        let pad = base * 0.6;
+        let lh = (self.shaper.line_height(base * self.scale).ceil() / self.scale) * 1.25;
+        let cx0 = x + pad;
+        let clip_top = y;
+        let clip_bot = y + h;
+        let top0 = (y - scroll) + pad;
+        let mut pen_y = top0;
+        for (li, line) in lines.iter().enumerate() {
+            if pen_y + lh > clip_top && pen_y < clip_bot {
+                self.draw_text(
+                    cx0,
+                    pen_y,
+                    line,
+                    DrawOpts {
+                        font_size: base,
+                        color: crate::theme::TEXT,
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                if li == cursor.0 {
+                    let prefix: String = line.chars().take(cursor.1).collect();
+                    let cw = self.measure_run(&prefix, base, false, false, true);
+                    self.rect(cx0 + cw, pen_y, 2.0, lh, crate::theme::ACCENT);
+                }
+            }
+            pen_y += lh;
+        }
+        (pen_y - top0 + pad).max(0.0)
     }
 
     /// Drop all pending chrome instances. main.rs calls this at the
@@ -1363,6 +1492,37 @@ fn md_font_path() -> (String, u32) {
     {
         return (
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc".to_string(),
+            0,
+        );
+    }
+}
+
+/// Bold weight of the markdown gothic. Apple SD Gothic Neo packs its Bold face
+/// at TTC index 6; Noto Sans KR Bold ships as a separate file.
+fn md_bold_font_path() -> (String, u32) {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let candidates = [
+            format!("{home}/Library/Fonts/NotoSansKR-Bold.otf"),
+            format!("{home}/Library/Fonts/NotoSansKR-Bold.ttf"),
+            "/Library/Fonts/NotoSansKR-Bold.otf".to_string(),
+        ];
+        for c in candidates {
+            if std::path::Path::new(&c).exists() {
+                return (c, 0);
+            }
+        }
+        return ("/System/Library/Fonts/AppleSDGothicNeo.ttc".to_string(), 6);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return (r"C:\Windows\Fonts\malgunbd.ttf".to_string(), 0);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        return (
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc".to_string(),
             0,
         );
     }
