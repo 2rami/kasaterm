@@ -70,6 +70,15 @@ pub struct GpuRenderer {
     /// Per-frame image quads: (pane id, instance). Drained in `render()`
     /// where each is drawn with that pane's texture bind group.
     image_quads: Vec<(String, CellInstance)>,
+    /// Logical-px rects of link spans drawn in the most recent markdown
+    /// frame: (x, y, w, h, dest). main.rs hit-tests a click against these to
+    /// open a file (Finder) or URL (browser). Cleared at the start of every
+    /// `draw_markdown` so it always reflects the current scroll position.
+    pub md_link_rects: Vec<(f32, f32, f32, f32, String)>,
+    /// Logical-px rects of markdown code-block copy buttons: (x, y, w, h,
+    /// code). main.rs hit-tests a click and copies `code`. Rebuilt each
+    /// `draw_markdown` like `md_link_rects`.
+    pub md_copy_rects: Vec<(f32, f32, f32, f32, String)>,
 }
 
 /// One pane's slot in `render_frame`. Mirrors the data the existing
@@ -277,6 +286,8 @@ impl GpuRenderer {
             image_sampler,
             images: HashMap::new(),
             image_quads: Vec::new(),
+            md_link_rects: Vec::new(),
+            md_copy_rects: Vec::new(),
         })
     }
 
@@ -587,6 +598,10 @@ impl GpuRenderer {
         bold: bool,
         italic: bool,
         font: u8,
+        // Inline code only: route CJK glyphs to the gothic body font. The mono
+        // code face's Hangul advance is narrower than its raster, so a mono
+        // syllable overlaps the next; the gothic face has matching metrics.
+        cjk_gothic: bool,
     ) {
         let s = self.scale;
         let size_px = (size * s).round().max(1.0) as u32;
@@ -597,11 +612,16 @@ impl GpuRenderer {
         // mono-grid wide-char fudge (terminal-only; made Hangul read loose).
         // Space has no raster, so its advance comes from metrics.
         for ch in text.chars() {
+            let gfont = if cjk_gothic && is_wide_char(ch) {
+                if bold { 2 } else { 1 }
+            } else {
+                font
+            };
             if ch == ' ' {
-                pen += self.font_space_advance(size_px, font);
+                pen += self.font_space_advance(size_px, gfont);
                 continue;
             }
-            if let Some(e) = self.bake_glyph(ch, bold, italic, size_px, font) {
+            if let Some(e) = self.bake_glyph(ch, bold, italic, size_px, gfont) {
                 {
                     let gx = pen + e.bearing_x as f32;
                     let gy = baseline - e.bearing_y as f32;
@@ -627,10 +647,18 @@ impl GpuRenderer {
     /// Width (logical px) a styled run occupies, matching `md_draw_word`'s
     /// advance so word-wrap measurement equals what gets drawn. `code` selects
     /// the mono font (0); prose uses the gothic (1).
-    fn measure_run(&mut self, text: &str, size: f32, bold: bool, italic: bool, code: bool) -> f32 {
+    fn measure_run(
+        &mut self,
+        text: &str,
+        size: f32,
+        bold: bool,
+        italic: bool,
+        code: bool,
+        cjk_gothic: bool,
+    ) -> f32 {
         let s = self.scale;
         let size_px = (size * s).round().max(1.0) as u32;
-        let font: u8 = if code {
+        let base_font: u8 = if code {
             0
         } else if bold {
             2
@@ -639,6 +667,12 @@ impl GpuRenderer {
         };
         let mut w = 0.0;
         for ch in text.chars() {
+            // Match md_draw_word: inline-code CJK measures on the gothic face.
+            let font = if cjk_gothic && is_wide_char(ch) {
+                if bold { 2 } else { 1 }
+            } else {
+                base_font
+            };
             if ch == ' ' {
                 w += self.font_space_advance(size_px, font);
                 continue;
@@ -670,7 +704,7 @@ impl GpuRenderer {
         // 1.5× the natural line height for Notion-like airy paragraphs.
         let lh = (self.md_shaper.line_height(size * self.scale).ceil() / self.scale) * 1.5;
         // Real space advance, not the 'M' cell width (that over-spaced words).
-        let space_w = self.measure_run(" ", size, false, false, false);
+        let space_w = self.measure_run(" ", size, false, false, false, false);
         let mut pen_x = x_start;
         let mut pen_y = y_start;
         for span in spans {
@@ -679,34 +713,69 @@ impl GpuRenderer {
                 let trailing_space = word.ends_with(' ');
                 let trimmed = word.trim_end_matches(' ');
                 if !trimmed.is_empty() {
-                    let ww = self.measure_run(trimmed, size, bold, span.italic, span.code);
+                    let ww = self.measure_run(trimmed, size, bold, span.italic, span.code, span.code);
                     if pen_x + ww > x_start + max_w && pen_x > x_start {
                         pen_x = x_start;
                         pen_y += lh;
                     }
                     if pen_y + lh > clip_top && pen_y < clip_bot {
                         if span.code {
+                            // Notion-style chip: a hair *lighter* than the body
+                            // (SURFACE_ACTIVE > BG) so the code reads as a raised
+                            // pill, not a black hole. (BORDER was near-black and
+                            // swallowed the glyphs.) Size off the glyph metrics
+                            // (not the 1.5× line height) so it hugs the text, and
+                            // span the trailing space so a multi-word `inline
+                            // code` is one chip, not one box per word.
+                            let chip_w = ww
+                                + space_w * 0.4
+                                + if trailing_space { space_w } else { 0.0 };
                             self.round_rect_fill(
                                 pen_x - space_w * 0.2,
-                                pen_y + lh * 0.12,
-                                ww + space_w * 0.4,
-                                lh * 0.78,
+                                pen_y + size * 0.06,
+                                chip_w,
+                                size * 1.04,
                                 size * 0.28,
-                                crate::theme::BORDER,
+                                crate::theme::SURFACE_ACTIVE,
                             );
                         }
-                        // Inline code: regular text color on a dark chip (like
-                        // the webview), not a loud accent.
-                        let col = if span.code { crate::theme::TEXT_DIM } else { color };
-                        // 0 = mono (code), 2 = gothic bold, 1 = gothic regular.
-                        let font: u8 = if span.code {
-                            0
-                        } else if bold {
-                            2
+                        if span.code {
+                            // Inline code: syntax-highlight the word token by
+                            // token (same lexer as code blocks; language is
+                            // unknown inline so the generic keyword set applies),
+                            // chaining pen-x with measure_run. Hangul still routes
+                            // to the gothic via cjk_gothic=true so it never
+                            // overlaps inside the chip.
+                            let mut tpx = pen_x;
+                            for (tok, tcol) in highlight_code_line(trimmed, "", crate::theme::TEXT) {
+                                self.md_draw_word(
+                                    &tok, tpx, pen_y, size, tcol, bold, span.italic, 0, true,
+                                );
+                                tpx += self.measure_run(&tok, size, bold, span.italic, true, true);
+                            }
                         } else {
-                            1
-                        };
-                        self.md_draw_word(trimmed, pen_x, pen_y, size, col, bold, span.italic, font);
+                            // Link → tint by destination kind; otherwise the
+                            // block's own color.
+                            let col = match &span.link {
+                                Some(d) => link_color(d),
+                                None => color,
+                            };
+                            let font: u8 = if bold { 2 } else { 1 };
+                            self.md_draw_word(
+                                trimmed, pen_x, pen_y, size, col, bold, span.italic, font, false,
+                            );
+                        }
+                        if let Some(dest) = &span.link {
+                            // Underline just below the glyph baseline (size-based,
+                            // not the inflated line height) so it tracks the text.
+                            // Span the trailing space so a multi-word link reads
+                            // as one continuous underline, not one per word.
+                            let uy = pen_y + size * 0.92;
+                            let uw = ww + if trailing_space { space_w } else { 0.0 };
+                            self.rect(pen_x, uy, uw, (size * 0.06).max(1.0), link_color(dest));
+                            self.md_link_rects
+                                .push((pen_x, pen_y, uw, lh, dest.clone()));
+                        }
                     }
                     pen_x += ww;
                 }
@@ -716,6 +785,33 @@ impl GpuRenderer {
             }
         }
         pen_y + lh
+    }
+
+    /// Copy-button glyph: two overlapping square outlines on a rounded chip.
+    /// Mirrors the terminal code-block copy button so markdown blocks read the
+    /// same. All logical px.
+    fn draw_copy_icon(&mut self, bx: f32, by: f32, bw: f32, bh: f32) {
+        let bg = crate::theme::with_alpha(crate::theme::SURFACE_ACTIVE, 0xE0);
+        self.round_rect_fill(bx, by, bw, bh, crate::theme::RADIUS_SM, bg);
+        let fg = crate::theme::TEXT_DIM;
+        let s = bw * 0.34;
+        let off = s * 0.3;
+        let t = (s * 0.16).max(1.0);
+        let gx = bx + (bw - (s + off)) / 2.0;
+        let gy = by + (bh - (s + off)) / 2.0;
+        // Back square (up-right), outline only.
+        let (r1x, r1y) = (gx + off, gy);
+        self.rect(r1x, r1y, s, t, fg);
+        self.rect(r1x, r1y + s - t, s, t, fg);
+        self.rect(r1x, r1y, t, s, fg);
+        self.rect(r1x + s - t, r1y, t, s, fg);
+        // Front square (down-left): refill the chip bg so it sits on top.
+        let (r2x, r2y) = (gx, gy + off);
+        self.rect(r2x, r2y, s, s, bg);
+        self.rect(r2x, r2y, s, t, fg);
+        self.rect(r2x, r2y + s - t, s, t, fg);
+        self.rect(r2x, r2y, t, s, fg);
+        self.rect(r2x + s - t, r2y, t, s, fg);
     }
 
     /// Lay out + draw a markdown document into the pane box (all logical px).
@@ -732,6 +828,10 @@ impl GpuRenderer {
         scroll: f32,
     ) -> f32 {
         use crate::MdBlock;
+        // Link / copy-button rects are rebuilt from scratch each frame so
+        // they track the current scroll offset; main.rs hit-tests clicks.
+        self.md_link_rects.clear();
+        self.md_copy_rects.clear();
         let base = self.font_size_px as f32 / self.scale;
         // Notion-style reading column: generous side padding, capped content
         // width, centered in the pane. Shadow x/w so the block code below lays
@@ -772,32 +872,62 @@ impl GpuRenderer {
                     );
                     pen_y += base * 0.85;
                 }
-                MdBlock::Code { code } => {
+                MdBlock::Code { code, lang } => {
                     let size = base * 0.9;
                     let lh =
                         (self.md_shaper.line_height(size * self.scale).ceil() / self.scale) * 1.35;
                     let pad = base * 0.85;
                     let lines: Vec<&str> = code.trim_end_matches('\n').split('\n').collect();
                     let block_h = lines.len() as f32 * lh + pad * 2.0;
-                    if pen_y + block_h > clip_top && pen_y < clip_bot {
+                    let block_top = pen_y;
+                    let visible = pen_y + block_h > clip_top && pen_y < clip_bot;
+                    if visible {
                         self.round_rect_fill(x, pen_y, w, block_h, base * 0.5, crate::theme::SURFACE);
                     }
                     let mut ly = pen_y + pad;
                     for line in &lines {
                         if ly + lh > clip_top && ly < clip_bot {
+                            // Syntax-highlight: draw each token in its color,
+                            // chaining pen-x from draw_text's return value.
+                            let mut tx = x + pad;
+                            for (tok, col) in highlight_code_line(line, lang, crate::theme::TEXT_DIM) {
+                                tx = self.draw_text(
+                                    tx,
+                                    ly,
+                                    &tok,
+                                    DrawOpts {
+                                        font_size: size,
+                                        color: col,
+                                        bold: false,
+                                        italic: false,
+                                    },
+                                );
+                            }
+                        }
+                        ly += lh;
+                    }
+                    if visible {
+                        // Copy button, top-right; language label to its left.
+                        let btn = base * 1.5;
+                        let by = block_top + base * 0.35;
+                        let bx = x + w - btn - base * 0.35;
+                        self.draw_copy_icon(bx, by, btn, btn * 0.78);
+                        self.md_copy_rects
+                            .push((bx, by, btn, btn * 0.78, code.clone()));
+                        if !lang.is_empty() {
+                            let lw = self.measure_run(lang, size * 0.82, false, false, false, false);
                             self.draw_text(
-                                x + pad,
-                                ly,
-                                line,
+                                bx - lw - base * 0.5,
+                                by + base * 0.05,
+                                lang,
                                 DrawOpts {
-                                    font_size: size,
-                                    color: crate::theme::TEXT_DIM,
+                                    font_size: size * 0.82,
+                                    color: crate::theme::TEXT_MUTE,
                                     bold: false,
                                     italic: false,
                                 },
                             );
                         }
-                        ly += lh;
                     }
                     pen_y += block_h + base * 0.85;
                 }
@@ -886,6 +1016,7 @@ impl GpuRenderer {
                                 false,
                                 true,
                                 1,
+                                false,
                             );
                         }
                         pen_y += lh + base * 0.4;
@@ -924,7 +1055,7 @@ impl GpuRenderer {
             if pen_y + lh > clip_top && pen_y < clip_bot {
                 // Right-aligned line number in the gutter.
                 let num = format!("{}", li + 1);
-                let num_w = self.measure_run(&num, base, false, false, true);
+                let num_w = self.measure_run(&num, base, false, false, true, false);
                 self.draw_text(
                     x + pad + (gutter_w - base * 0.5 - num_w).max(0.0),
                     pen_y,
@@ -949,12 +1080,12 @@ impl GpuRenderer {
                 );
                 if li == cursor.0 {
                     let prefix: String = line.chars().take(cursor.1).collect();
-                    let cw = self.measure_run(&prefix, base, false, false, true);
+                    let cw = self.measure_run(&prefix, base, false, false, true, false);
                     let mut cur_x = cx0 + cw;
                     // Composing Hangul: draw the preedit at the cursor with an
                     // accent underline, cursor sits after it.
                     if !preedit.is_empty() {
-                        let pw = self.measure_run(preedit, base, false, false, true);
+                        let pw = self.measure_run(preedit, base, false, false, true, false);
                         self.rect(cur_x, pen_y + lh - 2.0, pw, 2.0, crate::theme::ACCENT);
                         self.draw_text(
                             cur_x,
@@ -1405,6 +1536,172 @@ pub(crate) fn is_wide_char(ch: char) -> bool {
         | 0xFF00..=0xFF60      // Fullwidth Forms
         | 0xFFE0..=0xFFE6      // Fullwidth signs
     ) || cp >= 0x20000          // CJK Ext B and beyond
+}
+
+/// Link tint by destination kind, so links read as varied rather than one
+/// flat blue: web=accent blue, local file=green, mailto=purple, anchor=cyan.
+fn link_color(dest: &str) -> [u8; 4] {
+    if dest.starts_with("http://") || dest.starts_with("https://") {
+        crate::theme::ACCENT
+    } else if dest.starts_with("mailto:") {
+        crate::theme::SYN_KEYWORD
+    } else if dest.starts_with('#') {
+        crate::theme::SYN_FUNCTION
+    } else {
+        crate::theme::SYN_STRING
+    }
+}
+
+/// Language keyword set for code-block syntax highlighting. Coarse on purpose
+/// — a lightweight lexer, not a full grammar; the goal is colorful, readable
+/// code, not perfect parsing.
+fn syn_keywords(lang: &str) -> &'static [&'static str] {
+    match lang.to_ascii_lowercase().as_str() {
+        "rust" | "rs" => &[
+            "fn", "let", "mut", "if", "else", "match", "for", "while", "loop", "return",
+            "struct", "enum", "impl", "trait", "pub", "use", "mod", "self", "Self", "as",
+            "const", "static", "ref", "move", "dyn", "where", "async", "await", "break",
+            "continue", "in", "type", "unsafe", "crate", "super", "true", "false",
+        ],
+        "bash" | "sh" | "shell" | "zsh" | "fish" => &[
+            "if", "then", "else", "elif", "fi", "for", "do", "done", "while", "case", "esac",
+            "function", "echo", "export", "local", "return", "in", "set", "unset", "source",
+            "alias", "cd", "exit", "read", "select", "until",
+        ],
+        "js" | "javascript" | "ts" | "typescript" | "jsx" | "tsx" => &[
+            "function", "const", "let", "var", "if", "else", "for", "while", "return",
+            "class", "new", "import", "export", "from", "async", "await", "try", "catch",
+            "finally", "throw", "typeof", "instanceof", "this", "super", "extends", "switch",
+            "case", "break", "continue", "default", "null", "undefined", "true", "false",
+            "void", "yield", "interface", "type", "enum",
+        ],
+        "py" | "python" => &[
+            "def", "class", "if", "elif", "else", "for", "while", "return", "import", "from",
+            "as", "with", "try", "except", "finally", "raise", "lambda", "yield", "pass",
+            "break", "continue", "in", "is", "not", "and", "or", "None", "True", "False",
+            "global", "nonlocal", "async", "await",
+        ],
+        "go" | "golang" => &[
+            "func", "var", "const", "if", "else", "for", "range", "return", "struct",
+            "interface", "type", "package", "import", "go", "defer", "chan", "map", "select",
+            "switch", "case", "break", "continue", "default", "nil", "true", "false",
+        ],
+        "c" | "cpp" | "c++" | "h" | "hpp" => &[
+            "int", "char", "float", "double", "void", "if", "else", "for", "while", "return",
+            "struct", "enum", "union", "typedef", "const", "static", "sizeof", "switch",
+            "case", "break", "continue", "default", "unsigned", "signed", "long", "short",
+            "class", "public", "private", "protected", "new", "delete", "true", "false",
+            "nullptr", "namespace", "template", "auto",
+        ],
+        "json" => &["true", "false", "null"],
+        _ => &[
+            "if", "else", "for", "while", "return", "function", "fn", "def", "class",
+            "import", "const", "let", "var", "true", "false", "null",
+        ],
+    }
+}
+
+/// Line-comment prefix(es) for a language.
+fn syn_line_comment(lang: &str) -> &'static [&'static str] {
+    match lang.to_ascii_lowercase().as_str() {
+        "bash" | "sh" | "shell" | "zsh" | "fish" | "py" | "python" | "yaml" | "yml" | "toml"
+        | "rb" | "ruby" | "r" => &["#"],
+        "lua" | "sql" | "hs" | "haskell" => &["--"],
+        _ => &["//"],
+    }
+}
+
+/// Tokenize one code line into (text, color) runs for syntax highlighting.
+/// A small hand-rolled lexer: comments, strings, numbers, keywords, type-ish
+/// (Capitalized) and call-ish (`name(`) identifiers; everything else uses
+/// `base` — code blocks pass TEXT_DIM (light SURFACE bg), inline code passes
+/// the brighter TEXT (its chip is darker, so dim plain text reads as black).
+pub(crate) fn highlight_code_line(line: &str, lang: &str, base: [u8; 4]) -> Vec<(String, [u8; 4])> {
+    use crate::theme;
+    let kws = syn_keywords(lang);
+    let comments = syn_line_comment(lang);
+    let ch: Vec<char> = line.chars().collect();
+    let n = ch.len();
+    let mut out: Vec<(String, [u8; 4])> = Vec::new();
+    let starts_comment = |i: usize| -> bool {
+        comments
+            .iter()
+            .any(|cm| ch[i..].iter().take(cm.chars().count()).collect::<String>() == **cm)
+    };
+    let mut i = 0;
+    while i < n {
+        let c = ch[i];
+        if starts_comment(i) {
+            out.push((ch[i..].iter().collect(), theme::SYN_COMMENT));
+            break;
+        }
+        if c == '"' || c == '\'' || c == '`' {
+            let q = c;
+            let mut j = i + 1;
+            while j < n {
+                if ch[j] == '\\' {
+                    j += 2;
+                    continue;
+                }
+                if ch[j] == q {
+                    j += 1;
+                    break;
+                }
+                j += 1;
+            }
+            let j = j.min(n);
+            out.push((ch[i..j].iter().collect(), theme::SYN_STRING));
+            i = j;
+            continue;
+        }
+        if c.is_ascii_digit() {
+            let mut j = i;
+            while j < n && (ch[j].is_ascii_alphanumeric() || ch[j] == '.' || ch[j] == '_') {
+                j += 1;
+            }
+            out.push((ch[i..j].iter().collect(), theme::SYN_NUMBER));
+            i = j;
+            continue;
+        }
+        if c.is_alphabetic() || c == '_' {
+            let mut j = i;
+            while j < n && (ch[j].is_alphanumeric() || ch[j] == '_') {
+                j += 1;
+            }
+            let word: String = ch[i..j].iter().collect();
+            let col = if kws.contains(&word.as_str()) {
+                theme::SYN_KEYWORD
+            } else if word.chars().next().is_some_and(|c0| c0.is_uppercase()) {
+                theme::SYN_TYPE
+            } else if j < n && ch[j] == '(' {
+                theme::SYN_FUNCTION
+            } else {
+                base
+            };
+            out.push((word, col));
+            i = j;
+            continue;
+        }
+        // Run of punctuation / whitespace up to the next interesting char.
+        let mut j = i;
+        while j < n {
+            let cj = ch[j];
+            if cj == '"'
+                || cj == '\''
+                || cj == '`'
+                || cj.is_ascii_digit()
+                || cj.is_alphabetic()
+                || cj == '_'
+                || starts_comment(j)
+            {
+                break;
+            }
+            j += 1;
+        }
+        out.push((ch[i..j].iter().collect(), base));
+        i = j;
+    }
+    out
 }
 
 fn is_icon_codepoint(cp: u32) -> bool {

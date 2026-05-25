@@ -28,6 +28,15 @@ pub const SUCCESS: [u8; 4] = [63, 185, 80, 255];
 pub const WARN: [u8; 4] = [210, 153, 34, 255];
 pub const DANGER: [u8; 4] = [248, 81, 73, 255];
 
+/// Syntax-highlight palette for markdown code blocks (One Dark-ish, tuned
+/// to read on the SURFACE code-block background).
+pub const SYN_KEYWORD: [u8; 4] = [198, 120, 221, 255]; // purple — fn/let/if/…
+pub const SYN_STRING: [u8; 4] = [152, 195, 121, 255]; // green — "…" '…'
+pub const SYN_NUMBER: [u8; 4] = [209, 154, 102, 255]; // orange — 42, 0.1
+pub const SYN_COMMENT: [u8; 4] = [106, 115, 130, 255]; // muted gray — // #
+pub const SYN_FUNCTION: [u8; 4] = [97, 175, 239, 255]; // blue — foo(
+pub const SYN_TYPE: [u8; 4] = [229, 192, 123, 255]; // yellow — Capitalized
+
 /// Corner radii (logical px) for the native `round_rect` helper.
 pub const RADIUS_SM: f32 = 6.0;
 pub const RADIUS_MD: f32 = 9.0;

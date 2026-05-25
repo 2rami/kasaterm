@@ -1,6 +1,6 @@
 ---
 name: kasapane
-description: kasaterm/kasaspace 터미널의 pane을 자유자재로 제어한다 — 새 pane 분할, 백그라운드 로그/모니터 pane 띄우기(dev server·build·test watch 등을 별도 화면에서 돌려 사용자와 같이 보기), pane 이름·색상 지정, 위치 교환, 닫기, 팀원 pane 정리. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "dev 서버 옆에 띄워", "pane 쪼개/닫아/이름 바꿔/색 칠해", "팀원 pane 정리해" 같은 요청을 하거나, 긴 백그라운드 작업을 별도 화면에서 돌려야 할 때 사용.
+description: kasaterm/kasaspace 터미널의 pane을 자유자재로 제어한다 — 새 pane 분할, 백그라운드 로그/모니터 pane 띄우기(dev server·build·test watch 등을 별도 화면에서 돌려 사용자와 같이 보기), pane 이름·색상 지정, 위치 교환, 닫기, 팀원 pane 정리, 그리고 작업 결과 이미지·마크다운 문서를 창 안 pane으로 띄우기. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "dev 서버 옆에 띄워", "pane 쪼개/닫아/이름 바꿔/색 칠해", "팀원 pane 정리해", "이미지 띄워줘", "결과 보여줘", "마크다운 열어줘" 같은 요청을 하거나, 긴 백그라운드 작업을 별도 화면에서 돌려야 할 때, **또는 작업 중 만든 스샷·이미지·문서를 사용자 화면(kasaterm)에 보여줄 때** 사용.
 version: 0.1.0
 user-invocable: true
 argument-hint: "[모니터할 명령 또는 pane 작업, 예: npm run dev]"
@@ -44,6 +44,8 @@ env가 비어 있거나 `list`가 실패하면 kasaterm 밖이라는 뜻이니, 
 | `cmux-compat swap <a> <b>` | 두 pane 위치 교환(내용 유지, 자리만 맞바꿈) |
 | `cmux-compat send --surface <id> <텍스트>` | 특정 pane에 텍스트 입력 |
 | `cmux-compat key <id> …` | 특정 pane에 키 전송 |
+| `imgopen <파일.png>` | 이미지를 새 pane으로 띄움(맞춤↔원본 토글) |
+| `mdopen <파일.md>` | 마크다운을 노션풍 렌더 pane으로 띄움(Render/Raw) |
 
 `split`이 반환하는 JSON의 `result.surface.id`가 새 pane id다. 이어지는
 rename/color/send는 그 id를 쓴다.
@@ -105,6 +107,30 @@ cmux-compat color  "%2" "#a371f7"                # 팀원별 색 구분
 
 역할별 색 컨벤션 예: 탐색=보라 `#a371f7`, 구현=파랑 `#58a6ff`, 검증=초록
 `#3fb950`, 리드=노랑 `#d29922`.
+
+## 패턴 D — 작업 결과 이미지·문서를 pane에 띄우기
+
+작업하면서 만든 **스크린샷·다이어그램·생성 이미지나 마크다운 문서**를 별도 OS
+창이 아니라 kasaterm 창 안 pane으로 띄운다. 사용자가 작업 화면에서 결과를
+바로 본다(폰/외부 전송과 분리되지 않음). 본체가 PATH에 깔아둔 셸 헬퍼
+`imgopen`/`mdopen`을 쓴다.
+
+```bash
+imgopen /절대경로/result.png      # 이미지 → 새 pane (맞춤↔원본 토글)
+mdopen  /절대경로/doc.md          # 마크다운 → 노션풍 렌더 pane (Render/Raw 토글)
+```
+
+원칙:
+- **작업 중 사용자에게 보여줄 이미지/문서가 생기면 자동으로 띄운다.** 스샷을
+  찍었거나 결과물을 만들었으면 `imgopen`으로 pane에 올려 사용자가 같은 화면에서
+  본다. "이거 봐주세요" 하고 경로만 알려주지 말 것.
+- 경로는 **절대경로** 권장(상대경로는 그 pane의 현재 cwd 기준으로 풀린다).
+- 헬퍼가 없다(`command not found`)면 본체가 옛 버전이거나 kasaterm 셸 밖이다 —
+  전제 점검(`$KASATERM_SOCKET_PATH`)과 동일하게 처리한다.
+- 셸 밖에서 직접 띄워야 하면 헬퍼가 치는 것과 같은 HTTP 엔드포인트를 쓴다:
+  `curl -s --get --data-urlencode "path=<절대경로>" "http://127.0.0.1:${KASASPACE_MCP_PORT:-8765}/open-image"`
+  (마크다운은 `/open-markdown`). 포트가 막혔으면 `lsof -nP -iTCP:8765 -sTCP:LISTEN`로
+  실제 LISTEN 확인.
 
 ## 주의
 
