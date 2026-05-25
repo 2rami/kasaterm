@@ -1391,6 +1391,10 @@ struct MdSpan {
     bold: bool,
     italic: bool,
     code: bool,
+    /// `Some(dest)` for the text inside a `[text](dest)` link. The renderer
+    /// draws it accented + underlined; a click resolves `dest` to a file
+    /// (Finder) or URL (browser).
+    link: Option<String>,
 }
 
 /// A laid-out-able markdown block. Parsed once on open; the renderer walks
@@ -1399,8 +1403,9 @@ struct MdSpan {
 enum MdBlock {
     Heading { level: u8, spans: Vec<MdSpan> },
     Para { spans: Vec<MdSpan> },
-    /// Fenced/indented code block — raw text with embedded newlines.
-    Code { code: String },
+    /// Fenced/indented code block — raw text with embedded newlines. `lang`
+    /// is the fence info string (e.g. "rust"), empty for indented blocks.
+    Code { code: String, lang: String },
     ListItem { depth: u8, marker: String, spans: Vec<MdSpan> },
     Quote { spans: Vec<MdSpan> },
     Rule,
@@ -1458,6 +1463,7 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
     let mut heading: Option<u8> = None;
     let mut in_code = false;
     let mut code_buf = String::new();
+    let mut code_lang = String::new();
     // Each open list level: Some(next_number) for ordered, None for bullet.
     let mut list_stack: Vec<Option<u64>> = Vec::new();
     let mut in_item = false;
@@ -1466,12 +1472,14 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
     let mut in_image = false;
     let mut img_url = String::new();
     let mut img_alt = String::new();
+    let mut link_url: Option<String> = None;
 
-    let push_span = |spans: &mut Vec<MdSpan>, t: &str, b: bool, i: bool, c: bool| {
-        if !t.is_empty() {
-            spans.push(MdSpan { text: t.to_string(), bold: b, italic: i, code: c });
-        }
-    };
+    let push_span =
+        |spans: &mut Vec<MdSpan>, t: &str, b: bool, i: bool, c: bool, link: Option<String>| {
+            if !t.is_empty() {
+                spans.push(MdSpan { text: t.to_string(), bold: b, italic: i, code: c, link });
+            }
+        };
 
     for ev in Parser::new(text) {
         match ev {
@@ -1481,9 +1489,15 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                     spans.clear();
                 }
                 Tag::Paragraph => spans.clear(),
-                Tag::CodeBlock(_) => {
+                Tag::CodeBlock(kind) => {
                     in_code = true;
                     code_buf.clear();
+                    code_lang = match kind {
+                        pulldown_cmark::CodeBlockKind::Fenced(info) => {
+                            info.split_whitespace().next().unwrap_or("").to_string()
+                        }
+                        pulldown_cmark::CodeBlockKind::Indented => String::new(),
+                    };
                 }
                 Tag::List(start) => list_stack.push(start),
                 Tag::Item => {
@@ -1509,6 +1523,9 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                     img_url = dest_url.to_string();
                     img_alt.clear();
                 }
+                Tag::Link { dest_url, .. } => {
+                    link_url = Some(dest_url.to_string());
+                }
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -1533,7 +1550,10 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                 }
                 TagEnd::CodeBlock => {
                     in_code = false;
-                    blocks.push(MdBlock::Code { code: std::mem::take(&mut code_buf) });
+                    blocks.push(MdBlock::Code {
+                        code: std::mem::take(&mut code_buf),
+                        lang: std::mem::take(&mut code_lang),
+                    });
                 }
                 TagEnd::List(_) => {
                     list_stack.pop();
@@ -1549,6 +1569,7 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                 }
                 TagEnd::Emphasis => italic -= 1,
                 TagEnd::Strong => bold -= 1,
+                TagEnd::Link => link_url = None,
                 TagEnd::BlockQuote(_) => in_quote = false,
                 TagEnd::Image => {
                     blocks.push(MdBlock::Image {
@@ -1568,15 +1589,17 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                 } else if in_code {
                     code_buf.push_str(&t);
                 } else {
-                    push_span(&mut spans, &t, bold > 0, italic > 0, false);
+                    push_span(&mut spans, &t, bold > 0, italic > 0, false, link_url.clone());
                 }
             }
-            Event::Code(t) => push_span(&mut spans, &t, bold > 0, italic > 0, true),
+            Event::Code(t) => {
+                push_span(&mut spans, &t, bold > 0, italic > 0, true, link_url.clone())
+            }
             Event::SoftBreak | Event::HardBreak => {
                 if in_code {
                     code_buf.push('\n');
                 } else {
-                    push_span(&mut spans, " ", bold > 0, italic > 0, false);
+                    push_span(&mut spans, " ", bold > 0, italic > 0, false, link_url.clone());
                 }
             }
             Event::Rule => blocks.push(MdBlock::Rule),
@@ -4781,6 +4804,96 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// True if the pane shows a terminal (vs a markdown / image document
+    /// view). Document panes are scrolled with the wheel, not dragged —
+    /// terminal cell text-selection must not start on them. Unknown pane
+    /// (e.g. a leaf that hasn't produced a ScreenUpdate yet) defaults to
+    /// terminal so the normal split flow is never blocked.
+    fn pane_is_terminal(&self, pane_id: &str) -> bool {
+        let ws = self.ws.lock().unwrap();
+        ws.panes
+            .get(pane_id)
+            .map(|p| matches!(p.content, PaneContent::Terminal(_)))
+            .unwrap_or(true)
+    }
+
+    /// Directory of the active markdown pane's source file, for resolving
+    /// relative link destinations.
+    fn active_markdown_dir(&self) -> Option<std::path::PathBuf> {
+        let ws = self.ws.lock().unwrap();
+        let active = ws.active_pane.as_ref()?;
+        let md = ws.panes.get(active)?.markdown()?;
+        std::path::Path::new(&md.doc.path)
+            .parent()
+            .map(|d| d.to_path_buf())
+    }
+
+    /// Hit-test the cursor against the markdown code-block copy buttons; copy
+    /// the block's text if one is under it. Returns true if a copy happened.
+    fn try_copy_md_block(&mut self) -> bool {
+        let (cx, cy) = self.cursor_px;
+        let code = {
+            let Some(g) = self.gpu.as_ref() else { return false };
+            g.md_copy_rects
+                .iter()
+                .find(|(x, y, w, h, _)| cx >= *x && cx <= *x + *w && cy >= *y && cy <= *y + *h)
+                .map(|(_, _, _, _, c)| c.clone())
+        };
+        match code {
+            Some(c) => {
+                self.copy_block_text(&c);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Hit-test the cursor against the link rects the renderer recorded for
+    /// the last markdown frame; open the destination if one is under it.
+    /// Returns true if a link was opened (so the caller skips other handling).
+    fn try_open_md_link(&self) -> bool {
+        let (cx, cy) = self.cursor_px;
+        let Some(g) = self.gpu.as_ref() else { return false };
+        let dest = g
+            .md_link_rects
+            .iter()
+            .find(|(x, y, w, h, _)| cx >= *x && cx <= *x + *w && cy >= *y && cy <= *y + *h)
+            .map(|(_, _, _, _, d)| d.clone());
+        match dest {
+            Some(d) => {
+                self.open_md_dest(&d);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Open a markdown link destination: http(s)/mailto go to the default
+    /// app (browser/mail); a local path is revealed in Finder (`open -R`),
+    /// resolving relative paths against the markdown file's directory.
+    fn open_md_dest(&self, dest: &str) {
+        if dest.starts_with("http://")
+            || dest.starts_with("https://")
+            || dest.starts_with("mailto:")
+        {
+            let _ = std::process::Command::new("open").arg(dest).spawn();
+            return;
+        }
+        let raw = dest.strip_prefix("file://").unwrap_or(dest);
+        let mut path = std::path::PathBuf::from(raw);
+        if path.is_relative() {
+            if let Some(dir) = self.active_markdown_dir() {
+                path = dir.join(raw);
+            }
+        }
+        if path.exists() {
+            let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+        } else {
+            // Unknown scheme or missing file — let the OS try to interpret it.
+            let _ = std::process::Command::new("open").arg(dest).spawn();
+        }
+    }
+
     /// Encode an SGR mouse event and ship it to the pane. `button` is
     /// the SGR button code (0 = left press/motion/release, +32 for
     /// motion-with-button-held). `press` toggles the final byte
@@ -7799,6 +7912,17 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.drag_anchor = None;
                                 self.send_mouse_sgr(&pane_id, 0, col, row, true);
                                 self.mouse_forward_pane = Some(pane_id.clone());
+                            } else if !self.pane_is_terminal(&pane_id) {
+                                // Markdown / image panes are document views,
+                                // not terminals — a drag here must not start a
+                                // cell text-selection. Focus already switched.
+                                // A click on a code-block copy button copies it;
+                                // otherwise a click on a link opens it.
+                                self.selection = None;
+                                self.drag_anchor = None;
+                                if !self.try_copy_md_block() {
+                                    self.try_open_md_link();
+                                }
                             } else {
                                 self.drag_anchor = Some((col, row));
                                 self.selection = Some(Selection {
