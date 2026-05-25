@@ -29,6 +29,10 @@ muda = "0.19.2"
 # window's <img> (the webview loads via with_html / null origin, so a
 # file:// src is unreliable across the origin boundary).
 base64 = "0.22"
+# Decode image files to raw RGBA8 for the in-pane GPU image viewer
+# (uploaded straight into a wgpu texture). default-features off so we
+# only pull the codecs we actually open from a shell.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

@@ -1268,6 +1268,50 @@ struct PaneState {
     /// autosuggestion. Only trusted while it's still on the cursor's row
     /// (see `update_suggestion`); a new prompt overwrites it.
     prompt_end: Option<(u16, u16)>,
+    /// When `Some`, this pane shows a decoded image instead of a terminal
+    /// grid. It has no PtySession in `App.pty`, so key input is silently
+    /// dropped (active_pty() returns None) and the render loop paints the
+    /// texture into the pane box rather than calling draw_cells. Arc so the
+    /// per-frame slot snapshot clones a pointer, not the pixel buffer.
+    image: Option<Arc<ImagePane>>,
+}
+
+/// A decoded image bound to a pane. `rgba` is tightly-packed RGBA8
+/// (`w * h * 4` bytes), uploaded once into a wgpu texture keyed by pane
+/// id the first frame the pane is drawn.
+struct ImagePane {
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+}
+
+/// Largest texture edge we upload. Comfortably under every backend's
+/// max-texture-dimension and keeps a huge screenshot from eating VRAM;
+/// the pane fits the image anyway so the downscale is invisible.
+const MAX_IMAGE_EDGE: u32 = 4096;
+
+/// Decode an image file to RGBA8, downscaling so neither edge exceeds
+/// `MAX_IMAGE_EDGE`. Returns an error the `imgopen` caller surfaces on a
+/// path that isn't a decodable image.
+fn decode_image_rgba(path: &std::path::Path) -> anyhow::Result<ImagePane> {
+    let img = image::open(path).map_err(|e| anyhow::anyhow!("decode failed: {e}"))?;
+    let (w0, h0) = (img.width(), img.height());
+    let img = if w0 > MAX_IMAGE_EDGE || h0 > MAX_IMAGE_EDGE {
+        img.resize(
+            MAX_IMAGE_EDGE,
+            MAX_IMAGE_EDGE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        img
+    };
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    Ok(ImagePane {
+        rgba: rgba.into_raw(),
+        w,
+        h,
+    })
 }
 
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
@@ -3550,7 +3594,17 @@ impl App {
                     let _ = reply.send(res);
                 }
                 socket::PtyCommand::OpenPreview { kind, path, reply } => {
-                    let res = self.open_preview_window(event_loop, kind, &path);
+                    // Images open as an in-window split pane (wgpu-rendered);
+                    // markdown still spawns a separate webview window until its
+                    // in-pane renderer lands.
+                    let res = match kind {
+                        socket::PreviewKind::Image => {
+                            self.split_image_pane(&path, pty_backend::SplitDir::Horizontal)
+                        }
+                        socket::PreviewKind::Markdown => {
+                            self.open_preview_window(event_loop, kind, &path)
+                        }
+                    };
                     let _ = reply.send(res);
                 }
             }
@@ -3811,6 +3865,60 @@ impl App {
         Ok(())
     }
 
+    /// Split the active pane and fill the new pane with a decoded image
+    /// instead of a shell. Mirrors `split_active_pane` but skips the
+    /// PtySession: the pane has no PTY, so `active_pty()` returns None (key
+    /// input is dropped) and the render loop paints the texture into the
+    /// pane box. Backs the `imgopen` shim (OpenPreview → Image).
+    fn split_image_pane(&mut self, path: &str, dir: pty_backend::SplitDir) -> Result<()> {
+        if self.tmux.is_some() {
+            anyhow::bail!("image pane unsupported on tmux backend");
+        }
+        let p = std::path::Path::new(path);
+        if path.is_empty() || !p.is_file() {
+            anyhow::bail!("no such file: {path}");
+        }
+        let image = decode_image_rgba(p)?;
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string());
+        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
+            anyhow::bail!("no active pane to split");
+        };
+        let new_id = format!("%{}", self.next_pane_id);
+        self.next_pane_id += 1;
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let pane = ws.pane_mut(&new_id);
+            pane.image = Some(Arc::new(image));
+            // Pin the filename as the header label so the OSC-title path
+            // (which only fires for PTY panes anyway) can't clobber it.
+            pane.title = Some(name);
+            pane.title_pinned = true;
+            pane.dirty = true;
+        }
+        let layout = self
+            .pty_layout
+            .as_mut()
+            .expect("pty_layout set in start_pty");
+        if !layout.split_leaf(&active, dir, new_id.clone()) {
+            self.ws.lock().unwrap().panes.remove(&new_id);
+            self.next_pane_id -= 1;
+            anyhow::bail!("active pane not found in layout");
+        }
+        // Keep focus on the shell that opened the image — the image pane takes
+        // no keyboard input, so handing it focus would just force the user to
+        // click back to keep typing.
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+
     /// Drain `dead_panes` and remove each from the BSP tree + pty map.
     /// Called on the main thread from `about_to_wait` so the mutation
     /// runs without competing with the per-session reader threads.
@@ -3871,6 +3979,10 @@ impl App {
             self.pty_layout = None;
         }
         self.pty.remove(target);
+        // Free the GPU texture if this was an image pane (no-op otherwise).
+        if let Some(g) = self.gpu.as_mut() {
+            g.drop_image(target);
+        }
         {
             let mut ws = self.ws.lock().unwrap();
             ws.panes.remove(target);
@@ -5148,6 +5260,9 @@ impl App {
         // Code-block copy buttons (text + logical rect), filled per pane in
         // the loop below and handed to both the mouse handler and overlay.
         let mut copy_btns: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+        // Image panes collected here (id, pixels, body box in LOGICAL px) so
+        // the gpu block below can upload + queue them after the cell pass.
+        let mut image_slots: Vec<(String, Arc<ImagePane>, (f32, f32, f32, f32))> = Vec::new();
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
@@ -5199,8 +5314,15 @@ impl App {
                     }
                     r
                 };
-                let composed: Vec<Vec<GridCell>> =
-                    pane.cells.iter().map(normalise).collect();
+                // Image panes carry no PTY grid; an empty rows vec makes
+                // draw_cells a no-op for this slot and the image texture is
+                // painted into the pane box instead (queued below).
+                let img = pane.image.clone();
+                let composed: Vec<Vec<GridCell>> = if img.is_some() {
+                    Vec::new()
+                } else {
+                    pane.cells.iter().map(normalise).collect()
+                };
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
@@ -5244,6 +5366,34 @@ impl App {
                     rows: composed,
                     origin_px,
                 });
+                if let Some(image) = img {
+                    // Body box (header band excluded, inset by the same
+                    // PANE_INNER margins the cell grid uses) in logical px.
+                    // Bottom-row stretch mirrors the header's box_h so the
+                    // image fills to the window edge with no seam.
+                    let bx = WINDOW_PADDING
+                        + sidebar_w
+                        + x_cells as f32 * self.cell.w
+                        + PANE_INNER_X;
+                    let by = TITLE_HEIGHT
+                        + y_cells as f32 * self.cell.h
+                        + header_shift_logical
+                        + PANE_INNER_Y;
+                    let bw = (w_cells as f32 * self.cell.w - 2.0 * PANE_INNER_X).max(1.0);
+                    let base_h = h_cells as f32 * self.cell.h;
+                    let full_h = if y_cells + h_cells >= grid_rows {
+                        let extra = self.window.as_ref().map_or(0.0, |w| {
+                            let s = w.scale_factor() as f32;
+                            let raw_lh = w.inner_size().height as f32 / s;
+                            (raw_lh - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h)).max(0.0)
+                        });
+                        base_h + extra
+                    } else {
+                        base_h
+                    };
+                    let bh = (full_h - header_shift_logical - 2.0 * PANE_INNER_Y).max(1.0);
+                    image_slots.push((id.clone(), image, (bx, by, bw, bh)));
+                }
                 if show_headers {
                     // Custom title (rename / OSC) wins; otherwise show the
                     // live foreground process (vim, claude, zsh …); only
@@ -5390,7 +5540,18 @@ impl App {
             .map(|(i, _)| *i);
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
+            // Upload any image pane's pixels once, then queue each for this
+            // frame. The image pass (in g.render) paints under the chrome so
+            // pane headers / focus ring / dim overlay land on top.
+            for (id, image, _) in &image_slots {
+                if !g.has_image(id) {
+                    g.upload_image(id, &image.rgba, image.w, image.h);
+                }
+            }
             g.draw_cells(&slot_views);
+            for (id, _, (bx, by, bw, bh)) in &image_slots {
+                g.queue_image(id, *bx, *by, *bw, *bh);
+            }
             // Title strip fill: chrome surface across the top so the area above
             // the sidebar / traffic lights matches the sidebar instead of
             // showing the terminal body color.
