@@ -125,8 +125,8 @@ const PANE_HEADER_HEIGHT: f32 = 28.0;
 /// panes visible breathing room. The PTY's usable cols/rows shrink by the
 /// equivalent cell count so the grid still fits inside the inset box, and
 /// every render origin + click-to-cell map applies the same offset.
-const PANE_INNER_X: f32 = 7.0;
-const PANE_INNER_Y: f32 = 5.0;
+const PANE_INNER_X: f32 = 3.0;
+const PANE_INNER_Y: f32 = 2.0;
 /// Left sidebar width in logical pixels. Hosts the vertical tab list
 /// (one row per tab) plus the new-tab "+" button. The cell grid origin
 /// shifts right by this amount so pane contents never overlap the
@@ -941,6 +941,13 @@ struct App {
     /// spawn (KASATERM_AUTOWINDOWS) and when the next one fires. 0 disables.
     autowindow_left: usize,
     autowindow_at: Option<Instant>,
+    /// Headless repro for the sidebar toggle (KASATERM_AUTOTOGGLE_SIDEBAR_MS):
+    /// flips the sidebar once at this instant so a screenshot can capture the
+    /// collapsed-grid state without a human clicking the title-bar button.
+    autotoggle_sidebar_at: Option<Instant>,
+    /// Extra sidebar flips queued after the first (KASATERM_AUTOTOGGLE_SIDEBAR_N),
+    /// 1.5s apart, to stress hide↔show reflow without a human.
+    autotoggle_left: u32,
     /// Pane ids whose PTY reader thread has disconnected (shell exited
     /// or PTY closed). Drained on the main thread in `about_to_wait`
     /// so the tree mutation runs without holding the workspace lock
@@ -1116,6 +1123,12 @@ struct App {
     /// Recomputed at render time in `update_suggestion`; read by the key
     /// handler so → / Ctrl-E can accept exactly what's on screen.
     current_suggestion: Option<String>,
+    /// Whether the left window-tab sidebar is shown. Toggled by the
+    /// title-bar button (next to the traffic lights). When false the cell
+    /// grid reflows to full width — every origin/layout calc reads
+    /// `effective_sidebar_w()` instead of the `SIDEBAR_W` const directly,
+    /// so flipping this is all it takes to collapse the strip.
+    sidebar_visible: bool,
 }
 
 impl App {
@@ -1134,6 +1147,8 @@ impl App {
             autosplit_at: None,
             autowindow_left: 0,
             autowindow_at: None,
+            autotoggle_sidebar_at: None,
+            autotoggle_left: 0,
             dead_panes: Arc::new(Mutex::new(Vec::new())),
             socket_handle: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
@@ -1183,6 +1198,44 @@ impl App {
             autosuggest: autosuggest::History::new(),
             input_buf: String::new(),
             current_suggestion: None,
+            sidebar_visible: true,
+        }
+    }
+
+    /// Sidebar width that layout math should actually use: the full
+    /// `SIDEBAR_W` when the strip is shown, 0 when collapsed. Every
+    /// origin_x / window_cells / hit-test calc routes through here so a
+    /// single `sidebar_visible` flip reflows the whole grid.
+    fn effective_sidebar_w(&self) -> f32 {
+        if self.sidebar_visible {
+            SIDEBAR_W
+        } else {
+            0.0
+        }
+    }
+
+    /// Title-bar sidebar-toggle button rect (logical px), parked just
+    /// right of the macOS traffic lights. Fixed position (doesn't depend
+    /// on state) so the renderer and the click handler share one source.
+    fn sidebar_toggle_rect() -> (f32, f32, f32, f32) {
+        let w = 26.0;
+        let h = 22.0;
+        let x = TRAFFIC_LIGHT_WIDTH + 6.0;
+        let y = (TITLE_HEIGHT - h) / 2.0;
+        (x, y, w, h)
+    }
+
+    /// Show/hide the left window-tab sidebar. The cell grid reflows to the
+    /// new usable width (every layout calc reads `effective_sidebar_w()`),
+    /// so we just flip the flag, resize the PTYs to the new cols/rows, and
+    /// repaint.
+    fn toggle_sidebar(&mut self) {
+        self.sidebar_visible = !self.sidebar_visible;
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 
@@ -2428,6 +2481,36 @@ impl App {
         self.autowindow_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
     }
 
+    fn run_pending_autotoggle(&mut self) {
+        let Some(due) = self.autotoggle_sidebar_at else { return };
+        if Instant::now() < due {
+            return;
+        }
+        self.toggle_sidebar();
+        eprintln!(
+            "[autotoggle] flipped → visible={} remaining={}",
+            self.sidebar_visible, self.autotoggle_left
+        );
+        if self.autotoggle_left > 0 {
+            self.autotoggle_left -= 1;
+            self.autotoggle_sidebar_at =
+                Some(Instant::now() + std::time::Duration::from_millis(1500));
+        } else {
+            self.autotoggle_sidebar_at = None;
+        }
+    }
+
+    fn arm_autotoggle(&mut self) {
+        let Ok(ms_str) = std::env::var("KASATERM_AUTOTOGGLE_SIDEBAR_MS") else { return };
+        let Ok(ms) = ms_str.parse::<u64>() else { return };
+        self.autotoggle_left = std::env::var("KASATERM_AUTOTOGGLE_SIDEBAR_N")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        eprintln!("[autotoggle] sidebar flip in {ms}ms (repeat={})", self.autotoggle_left);
+        self.autotoggle_sidebar_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+    }
+
     fn arm_autosplit(&mut self) {
         let Ok(plan) = std::env::var("KASATERM_AUTOSPLIT") else { return; };
         let ms: u64 = std::env::var("KASATERM_AUTOSPLIT_MS")
@@ -2873,13 +2956,14 @@ impl App {
     /// Returns None when the workspace has no panes or the click missed
     /// every pane (gutter between split borders, padding, etc).
     fn px_to_pane_cell(&self, px: f32, py: f32) -> Option<(String, u16, u16)> {
+        let sb = self.effective_sidebar_w();
         let ws = self.ws.lock().unwrap();
         if let Some(layout) = ws.layout.as_ref() {
             let split = layout.leaves().len() > 1;
             let header_h = if split { PANE_HEADER_HEIGHT } else { 0.0 };
             // Box hit-test runs in whole-grid cells (header included, no
             // inset) so a click anywhere in the pane box selects it.
-            let gcol = ((px - SIDEBAR_W - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as i32;
+            let gcol = ((px - sb - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as i32;
             let grow = ((py - TITLE_HEIGHT).max(0.0) / self.cell.h).floor() as i32;
             for leaf in layout.leaves() {
                 if let Layout::Pane { id, x, y, w, h } = leaf {
@@ -2887,7 +2971,7 @@ impl App {
                     if gcol >= bx && gcol < bx + bw && grow >= by && grow < by + bh {
                         // Local cell uses the body origin: box edge + header
                         // band + inner inset, matching the render origin.
-                        let box_left = SIDEBAR_W + WINDOW_PADDING + bx as f32 * self.cell.w;
+                        let box_left = sb + WINDOW_PADDING + bx as f32 * self.cell.w;
                         let box_top = TITLE_HEIGHT + by as f32 * self.cell.h;
                         let lc = ((px - box_left - PANE_INNER_X).max(0.0) / self.cell.w).floor()
                             as u16;
@@ -2914,7 +2998,7 @@ impl App {
             return None;
         }
         let lc =
-            ((px - SIDEBAR_W - WINDOW_PADDING - PANE_INNER_X).max(0.0) / self.cell.w).floor() as u16;
+            ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0) / self.cell.w).floor() as u16;
         let lr = ((py - TITLE_HEIGHT - PANE_INNER_Y).max(0.0) / self.cell.h).floor() as u16;
         Some((id, lc.min(pane.cols - 1), lr.min(pane.rows - 1)))
     }
@@ -2958,7 +3042,7 @@ impl App {
         let scale = window.scale_factor() as f32;
         let raw_lw = size.width as f32 / scale;
         let raw_lh = size.height as f32 / scale;
-        let lw = (raw_lw - SIDEBAR_W - 2.0 * WINDOW_PADDING).max(0.0);
+        let lw = (raw_lw - self.effective_sidebar_w() - 2.0 * WINDOW_PADDING).max(0.0);
         // Top: TITLE_HEIGHT (chrome strip). Bottom: WINDOW_PADDING. The
         // asymmetry is intentional — the strip replaces the top padding.
         let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING).max(0.0);
@@ -3041,7 +3125,7 @@ impl App {
             return None;
         }
         let (cols, rows) = self.window_cells();
-        let pad = WINDOW_PADDING + SIDEBAR_W;
+        let pad = WINDOW_PADDING + self.effective_sidebar_w();
         let tol = 6.0_f32;
         for d in tree.dividers(cols, rows) {
             match d.dir {
@@ -3322,7 +3406,7 @@ impl App {
         if rects.len() <= 1 {
             return None;
         }
-        let pad = WINDOW_PADDING + SIDEBAR_W;
+        let pad = WINDOW_PADDING + self.effective_sidebar_w();
         for (id, cx, cy, cw, _ch) in rects {
             let bx = pad + cx as f32 * self.cell.w;
             let by = TITLE_HEIGHT + cy as f32 * self.cell.h;
@@ -3341,7 +3425,7 @@ impl App {
         let tree = self.pty_layout.as_ref()?;
         let (cols, rows) = self.window_cells();
         let rects = tree.leaf_rects(cols, rows);
-        let pad = WINDOW_PADDING + SIDEBAR_W;
+        let pad = WINDOW_PADDING + self.effective_sidebar_w();
         for (id, cx, cy, cw, ch) in rects {
             let bx = pad + cx as f32 * self.cell.w;
             let by = TITLE_HEIGHT + cy as f32 * self.cell.h;
@@ -4342,7 +4426,7 @@ impl App {
         GpuOverlay {
             cell_w: self.cell.w,
             cell_h: self.cell.h,
-            pad_x: WINDOW_PADDING + SIDEBAR_W + pane_x as f32 * self.cell.w + PANE_INNER_X,
+            pad_x: WINDOW_PADDING + self.effective_sidebar_w() + pane_x as f32 * self.cell.w + PANE_INNER_X,
             pad_y: TITLE_HEIGHT + pane_y as f32 * self.cell.h + header_shift + PANE_INNER_Y,
             cursor_row,
             cursor_col,
@@ -4445,7 +4529,10 @@ impl App {
             is_active: bool,
             color: Option<[u8; 4]>,
         }
-        let pad_px = (WINDOW_PADDING + SIDEBAR_W) * scale;
+        // Captured once so the &mut self.gpu block below (which can't
+        // re-borrow &self) can still see the collapsed/expanded width.
+        let sidebar_w = self.effective_sidebar_w();
+        let pad_px = (WINDOW_PADDING + sidebar_w) * scale;
         let title_px = TITLE_HEIGHT * scale;
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
@@ -4528,7 +4615,7 @@ impl App {
                         .unwrap_or_else(|| id.clone());
                     headers.push(HeaderInfo {
                         id: id.clone(),
-                        x: WINDOW_PADDING + SIDEBAR_W + x_cells as f32 * self.cell.w,
+                        x: WINDOW_PADDING + sidebar_w + x_cells as f32 * self.cell.w,
                         y: TITLE_HEIGHT + y_cells as f32 * self.cell.h,
                         w: w_cells as f32 * self.cell.w,
                         box_h: h_cells as f32 * self.cell.h,
@@ -4581,7 +4668,7 @@ impl App {
             .and_then(|(target, zone)| {
                 let tree = self.pty_layout.as_ref()?;
                 let (cols, rows) = self.window_cells();
-                let pad = WINDOW_PADDING + SIDEBAR_W;
+                let pad = WINDOW_PADDING + self.effective_sidebar_w();
                 let (_, cx, cy, cw, ch) = tree
                     .leaf_rects(cols, rows)
                     .into_iter()
@@ -4627,20 +4714,52 @@ impl App {
             // the sidebar / traffic lights matches the sidebar instead of
             // showing the terminal body color.
             g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::SURFACE);
+            // Sidebar-toggle button, just right of the traffic lights.
+            // VSCode / Warp-style glyph: an outlined panel with its left
+            // column filled when the sidebar is shown, hollow when hidden.
+            {
+                let (bx, by, bw, bh) = Self::sidebar_toggle_rect();
+                let hover = sb_cursor.0 >= bx
+                    && sb_cursor.0 <= bx + bw
+                    && sb_cursor.1 >= by
+                    && sb_cursor.1 <= by + bh;
+                if hover {
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                }
+                let fg = if hover { theme::TEXT } else { theme::TEXT_DIM };
+                // Icon box centered in the button.
+                let iw = 16.0;
+                let ih = 12.0;
+                let ix = bx + (bw - iw) / 2.0;
+                let iy = by + (bh - ih) / 2.0;
+                let t = 1.5;
+                // Rounded-ish outline via four hairline edges.
+                g.rect(ix, iy, iw, t, fg);
+                g.rect(ix, iy + ih - t, iw, t, fg);
+                g.rect(ix, iy, t, ih, fg);
+                g.rect(ix + iw - t, iy, t, ih, fg);
+                // Left column divider + fill (the "sidebar"): solid when
+                // shown so the button reads as a state indicator.
+                let split_x = ix + iw * 0.36;
+                g.rect(split_x, iy, t, ih, fg);
+                if sidebar_w > 0.0 {
+                    g.rect(ix + t, iy + t, split_x - ix - t, ih - 2.0 * t, theme::with_alpha(fg, 0x66));
+                }
+            }
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
-            if SIDEBAR_W > 0.0 {
+            if sidebar_w > 0.0 {
                 // Strip background, below the title strip to the bottom.
                 g.rect(
                     0.0,
                     TITLE_HEIGHT,
-                    SIDEBAR_W,
+                    sidebar_w,
                     (sb_win_h - TITLE_HEIGHT).max(0.0),
                     theme::SURFACE,
                 );
                 // Right hairline so the strip reads as a distinct column.
                 g.rect(
-                    SIDEBAR_W - 1.0,
+                    sidebar_w - 1.0,
                     TITLE_HEIGHT,
                     1.0,
                     (sb_win_h - TITLE_HEIGHT).max(0.0),
@@ -4829,22 +4948,21 @@ impl App {
                     },
                 );
             }
-            // Pane focus ring + dividers. Each pane box (header + body)
-            // gets a thin border; abutting panes show the dark seam as a
-            // divider, and the active pane wears a brighter, thicker ring
-            // so the focused target is unmistakable. Inactive first so
-            // the active ring paints on top at shared edges.
-            let draw_ring = |g: &mut gpu::GpuRenderer, h: &HeaderInfo, col: [u8; 4], t: f32| {
-                g.rect(h.x, h.y, h.w, t, col);
-                g.rect(h.x, h.y + h.box_h - t, h.w, t, col);
-                g.rect(h.x, h.y, t, h.box_h, col);
-                g.rect(h.x + h.w - t, h.y, t, h.box_h, col);
-            };
+            // Focus by contrast (Warp / iTerm style): no accent ring.
+            // Every inactive pane gets a dark translucent veil so the
+            // active pane is the only fully-lit one. Single un-split panes
+            // have no headers, so this loop is empty and nothing dims.
             for h in headers.iter().filter(|h| !h.is_active) {
-                draw_ring(g, h, theme::BORDER, 1.0);
+                g.rect(h.x, h.y, h.w, h.box_h, [0, 0, 0, 0x55]);
             }
-            for h in headers.iter().filter(|h| h.is_active) {
-                draw_ring(g, h, theme::ACCENT, 2.0);
+            // 1px hairline divider on every pane box edge so abutting
+            // panes read as separate tiles. Drawn after the veil so the
+            // seam stays crisp on top.
+            for h in &headers {
+                g.rect(h.x, h.y, h.w, 1.0, theme::BORDER);
+                g.rect(h.x, h.y + h.box_h - 1.0, h.w, 1.0, theme::BORDER);
+                g.rect(h.x, h.y, 1.0, h.box_h, theme::BORDER);
+                g.rect(h.x + h.w - 1.0, h.y, 1.0, h.box_h, theme::BORDER);
             }
             Self::paint_gpu_overlays(g, &overlay);
             // Drop-zone highlight sits on top of everything during a drag.
@@ -4945,6 +5063,8 @@ impl App {
             }
             return;
         }
+        // Captured before the long-lived &mut self.sugarloaf borrow below.
+        let sidebar_w = self.effective_sidebar_w();
         let Some(sugarloaf) = self.sugarloaf.as_mut() else { return; };
         let size = window.inner_size();
         let win_w = size.width as f32 / scale;
@@ -5089,7 +5209,7 @@ impl App {
         // Add a small breathing margin so the first text row never
         // bleeds into the strip rect on systems where sugarloaf
         // interprets these coordinates slightly differently.
-        let origin_x = SIDEBAR_W + WINDOW_PADDING;
+        let origin_x = sidebar_w + WINDOW_PADDING;
         let origin_y = TITLE_HEIGHT + 6.0;
 
         // Pass 1: walk each pane and render its cell grid at its rect.
@@ -5422,7 +5542,10 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(target_os = "macos")]
         let attrs = attrs
             .with_titlebar_transparent(true)
-            .with_title_hidden(false)
+            // Hide the OS-drawn window title (the centered OSC/process
+            // label) — the title strip stays clean, just traffic lights +
+            // our sidebar-toggle button.
+            .with_title_hidden(true)
             .with_fullsize_content_view(true);
         let window = Arc::new(
             event_loop
@@ -5563,6 +5686,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.schedule_autocapture();
             self.arm_autosplit();
             self.arm_autowindows();
+            self.arm_autotoggle();
             self.schedule_autoquit();
             self.open_git_panel(event_loop, false);
             return;
@@ -5636,6 +5760,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.schedule_autocapture();
         self.arm_autosplit();
         self.arm_autowindows();
+        self.arm_autotoggle();
         self.schedule_autoquit();
         self.open_git_panel(event_loop, false);
     }
@@ -5728,7 +5853,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // over selection / mouse-forwarding so the grab stays sticky.
                 if let Some((path, dir)) = self.resize_drag.clone() {
                     let (cols, rows) = self.window_cells();
-                    let pad = WINDOW_PADDING + SIDEBAR_W;
+                    let pad = WINDOW_PADDING + self.effective_sidebar_w();
                     let pos = match dir {
                         pty_backend::SplitDir::Horizontal => (((self.cursor_px.0 - pad)
                             / self.cell.w.max(1.0))
@@ -5798,11 +5923,21 @@ impl ApplicationHandler<UserEvent> for App {
                 if matches!(state, ElementState::Pressed) {
                     let cx = self.cursor_px.0;
                     let cy = self.cursor_px.1;
+                    // Sidebar-toggle button in the title strip (right of the
+                    // traffic lights). Caught before the title-bar drag path
+                    // so the click toggles instead of moving the window.
+                    {
+                        let (bx, by, bw, bh) = Self::sidebar_toggle_rect();
+                        if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
+                            self.toggle_sidebar();
+                            return;
+                        }
+                    }
                     // Left window-tab sidebar. Caught first — it owns the whole
                     // left strip, so a click there never falls through to the
                     // cell grid. Order: close-× (sits on top of a tab) → tab →
                     // "+" new-window button.
-                    if SIDEBAR_W > 0.0 && cx < SIDEBAR_W {
+                    if self.sidebar_visible && cx < SIDEBAR_W {
                         let inside =
                             |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
                         if let Some(idx) = self
@@ -6093,6 +6228,7 @@ impl ApplicationHandler<UserEvent> for App {
         // when no plan is queued.
         self.run_pending_autosplits();
         self.run_pending_autowindows();
+        self.run_pending_autotoggle();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was
