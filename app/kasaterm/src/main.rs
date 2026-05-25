@@ -964,8 +964,11 @@ const SCROLLBACK_SAVE_MAX: usize = 500;
 /// empty tail. v1 saves text only (color/attrs dropped) — the content is what
 /// "what I typed/saw is still there" needs.
 fn scrollback_lines(pane: &PaneState) -> Vec<String> {
+    let Some(t) = pane.term() else {
+        return Vec::new();
+    };
     let mut lines: Vec<String> = Vec::new();
-    for row in pane.history.iter().chain(pane.cells.iter()) {
+    for row in t.history.iter().chain(t.cells.iter()) {
         let mut s = String::new();
         append_cells_text(row.iter(), &mut s);
         lines.push(s.trim_end().to_string());
@@ -1223,8 +1226,11 @@ struct HeaderDrag {
     active: bool,
 }
 
+/// A terminal pane's screen state: the PTY-backed cell grid, cursor,
+/// scrollback, and the modes the emulator reports. Lives inside
+/// `PaneContent::Terminal`.
 #[derive(Default)]
-struct PaneState {
+struct TerminalPane {
     rows: u16,
     cols: u16,
     cells: Vec<Vec<GridCell>>,
@@ -1239,55 +1245,97 @@ struct PaneState {
     /// back into history visible at the top.
     scroll_offset: usize,
     /// Cached previous cells used by the shift-detection heuristic that
-    /// promotes scrolled-off rows into `history`. Per-pane because the
-    /// shifts are pane-local.
+    /// promotes scrolled-off rows into `history`.
     prev_cells: Vec<Vec<GridCell>>,
-    /// OSC 0/2 title — `printf '\e]0;hello\a'` from a shell inside this
-    /// pane lands here. The active pane's title is applied to the
-    /// window chrome.
-    title: Option<String>,
-    /// Accent color for this pane's header band (RGBA), set via
-    /// `surface.set_color`. None = default theme band color.
-    color: Option<[u8; 4]>,
-    /// Sticky-title flag. Set true only when `surface.rename` is called
-    /// (run_job / explicit rename). While pinned, OSC 0/2 titles from the
-    /// inner program are ignored so an agent-driven label can't be
-    /// clobbered by the shell/TUI re-emitting its own title. Panes that
-    /// were never renamed (e.g. the main Claude pane) leave this false so
-    /// their dynamic OSC summary keeps flowing through.
-    title_pinned: bool,
-    /// Frame-dirty flag. Set whenever a PTY update lands new bytes,
-    /// the user scrolls, or focus switches; cleared after the next
-    /// render. When *every* pane is clean and no chrome-level anim
-    /// is pending, the render loop skips the GPU pass entirely —
-    /// matches Rio's `TerminalDamage::Noop` short-circuit.
-    dirty: bool,
-    /// Last OSC 133 `B` mark (prompt end / command-input start) seen on
-    /// this pane, as (row, col). Set from the pty backend; the host reads
-    /// the editable command line from here to the cursor for inline
-    /// autosuggestion. Only trusted while it's still on the cursor's row
-    /// (see `update_suggestion`); a new prompt overwrites it.
+    /// Last OSC 133 `B` mark (prompt end / command-input start), (row, col).
     prompt_end: Option<(u16, u16)>,
-    /// When `Some`, this pane shows a decoded image instead of a terminal
-    /// grid. It has no PtySession in `App.pty`, so key input is silently
-    /// dropped (active_pty() returns None) and the render loop paints the
-    /// texture into the pane box rather than calling draw_cells. Arc so the
-    /// per-frame slot snapshot clones a pointer, not the pixel buffer.
-    image: Option<Arc<ImagePane>>,
-    /// When `Some`, this pane shows a rendered markdown document instead of a
-    /// terminal grid. Like an image pane it has no PtySession, but unlike one
-    /// it accepts scroll input (the doc can exceed the pane height) via
-    /// `scroll_offset`. Arc so the per-frame snapshot clones a pointer.
-    markdown: Option<Arc<MarkdownDoc>>,
-    /// Raw editing mode for a markdown pane. false = Render (laid-out view),
-    /// true = Raw (the wgpu text editor). Toggled by the header Render/Raw pills.
-    md_raw_mode: bool,
-    /// Raw-mode edit buffer, one entry per line. Seeded from `MarkdownDoc.raw`
-    /// when Raw mode is first entered.
-    md_edit_lines: Vec<String>,
+}
+
+/// A markdown pane's state: the parsed doc plus the Raw editor buffer/cursor.
+struct MarkdownPane {
+    doc: Arc<MarkdownDoc>,
+    /// false = Render (laid-out view), true = Raw (wgpu text editor).
+    raw_mode: bool,
+    /// Raw-mode edit buffer, one entry per line.
+    edit_lines: Vec<String>,
     /// Edit cursor: line index + column in chars.
-    md_cur_line: usize,
-    md_cur_col: usize,
+    cur_line: usize,
+    cur_col: usize,
+    /// Scroll offset in logical px (both Render and Raw).
+    scroll: usize,
+}
+
+/// What a pane shows. Terminal panes drive a PTY + cell grid; image/markdown
+/// panes are PTY-less and rendered directly with wgpu. Keeping these in an enum
+/// stops terminal-assuming code (cursor, scrollback, PTY resize) from silently
+/// touching non-terminal panes — the compiler forces a match. A future
+/// `Browser(BrowserPane)` (webview overlay) slots in here too.
+enum PaneContent {
+    Terminal(TerminalPane),
+    Image(Arc<ImagePane>),
+    Markdown(MarkdownPane),
+}
+
+impl Default for PaneContent {
+    fn default() -> Self {
+        PaneContent::Terminal(TerminalPane::default())
+    }
+}
+
+#[derive(Default)]
+struct PaneState {
+    /// The pane's content (terminal grid / image / markdown).
+    content: PaneContent,
+    /// OSC 0/2 title — `printf '\e]0;hello\a'` from a shell, or a pinned label.
+    /// The active pane's title is applied to the window chrome.
+    title: Option<String>,
+    /// Accent color for this pane's header band (RGBA). None = default.
+    color: Option<[u8; 4]>,
+    /// Sticky-title flag (set by `surface.rename`): while pinned, OSC titles
+    /// from the inner program are ignored.
+    title_pinned: bool,
+    /// Frame-dirty flag; cleared after the next render. When every pane is
+    /// clean and no chrome anim is pending, the render loop skips the GPU pass.
+    dirty: bool,
+}
+
+impl PaneState {
+    /// Terminal state if this is a terminal pane.
+    fn term(&self) -> Option<&TerminalPane> {
+        if let PaneContent::Terminal(t) = &self.content {
+            Some(t)
+        } else {
+            None
+        }
+    }
+    fn term_mut(&mut self) -> Option<&mut TerminalPane> {
+        if let PaneContent::Terminal(t) = &mut self.content {
+            Some(t)
+        } else {
+            None
+        }
+    }
+    fn markdown(&self) -> Option<&MarkdownPane> {
+        if let PaneContent::Markdown(m) = &self.content {
+            Some(m)
+        } else {
+            None
+        }
+    }
+    fn markdown_mut(&mut self) -> Option<&mut MarkdownPane> {
+        if let PaneContent::Markdown(m) = &mut self.content {
+            Some(m)
+        } else {
+            None
+        }
+    }
+    fn image(&self) -> Option<&Arc<ImagePane>> {
+        if let PaneContent::Image(i) = &self.content {
+            Some(i)
+        } else {
+            None
+        }
+    }
 }
 
 /// A decoded image bound to a pane. `rgba` is tightly-packed RGBA8
@@ -2035,11 +2083,11 @@ impl App {
         }
         let line: Option<String> = {
             let ws = self.ws.lock().unwrap();
-            match ws.active() {
-                Some(pane) if !pane.alt_screen => {
-                    let crow = pane.cursor_row as usize;
-                    let ccol = pane.cursor_col as usize;
-                    let row_cells = pane.cells.get(crow);
+            match ws.active().and_then(|p| p.term()) {
+                Some(t) if !t.alt_screen => {
+                    let crow = t.cursor_row as usize;
+                    let ccol = t.cursor_col as usize;
+                    let row_cells = t.cells.get(crow);
                     let cell_str = |r: &[GridCell], from: usize, to: usize| -> String {
                         r.iter()
                             .take(to)
@@ -2048,7 +2096,7 @@ impl App {
                             .collect()
                     };
                     // Primary: OSC 133 mark still on the cursor's row.
-                    let from_mark = match pane.prompt_end {
+                    let from_mark = match t.prompt_end {
                         Some((pr, pc))
                             if pr as usize == crow && (pc as usize) <= ccol =>
                         {
@@ -2604,36 +2652,37 @@ impl App {
                     ws.active_pane = Some(update.pane_id.clone());
                 }
                 let pane = ws.pane_mut(&update.pane_id);
-                let resized = pane.cols != update.cols
-                    || pane.rows != update.rows
-                    || pane.cells.len() != update.rows as usize;
+                let tp = pane.term_mut().expect("pty pane must be terminal");
+                let resized = tp.cols != update.cols
+                    || tp.rows != update.rows
+                    || tp.cells.len() != update.rows as usize;
                 if resized {
-                    pane.cols = update.cols;
-                    pane.rows = update.rows;
-                    pane.cells = (0..update.rows as usize)
+                    tp.cols = update.cols;
+                    tp.rows = update.rows;
+                    tp.cells = (0..update.rows as usize)
                         .map(|_| vec![GridCell::blank(); update.cols as usize])
                         .collect();
-                    pane.prev_cells.clear();
+                    tp.prev_cells.clear();
                 }
                 for (r, row) in update.dirty {
-                    if let Some(dst) = pane.cells.get_mut(r as usize) {
+                    if let Some(dst) = tp.cells.get_mut(r as usize) {
                         *dst = row;
                     }
                 }
                 // Shift detection on the pty side is retired — alacritty handles
                 // scrollback natively via display_offset. Hand-rolled detection
                 // breaks scroll-region TUIs (like Claude Code) when they write to sync.
-                pane.cursor_row = update.cursor_row;
-                pane.cursor_col = update.cursor_col;
-                pane.cursor_visible = update.cursor_visible;
-                pane.alt_screen = update.alt_screen;
-                pane.mouse_enabled = update.mouse_enabled;
-                pane.mouse_sgr = update.mouse_sgr;
+                tp.cursor_row = update.cursor_row;
+                tp.cursor_col = update.cursor_col;
+                tp.cursor_visible = update.cursor_visible;
+                tp.alt_screen = update.alt_screen;
+                tp.mouse_enabled = update.mouse_enabled;
+                tp.mouse_sgr = update.mouse_sgr;
                 // Carry the OSC 133 prompt-end mark only on frames that
                 // actually emitted one; keep the last otherwise so a
                 // mid-typing frame doesn't erase it.
                 if let Some(pe) = update.prompt_end {
-                    pane.prompt_end = Some(pe);
+                    tp.prompt_end = Some(pe);
                 }
                 // OSC 0/2 title from the inner program (Claude Code's
                 // conversation summary, vim filename, etc.). Carry it
@@ -3493,52 +3542,53 @@ impl App {
                 }
                 let is_active = ws.active_pane.as_deref() == Some(pane_id.as_str());
                 let pane = ws.pane_mut(&pane_id);
-                let resized = pane.cols != cols
-                    || pane.rows != rows
-                    || pane.cells.len() != rows as usize;
+                let tp = pane.term_mut().expect("tmux pane must be terminal");
+                let resized = tp.cols != cols
+                    || tp.rows != rows
+                    || tp.cells.len() != rows as usize;
                 if resized {
-                    pane.cols = cols;
-                    pane.rows = rows;
-                    pane.cells = (0..rows as usize)
+                    tp.cols = cols;
+                    tp.rows = rows;
+                    tp.cells = (0..rows as usize)
                         .map(|_| vec![GridCell::blank(); cols as usize])
                         .collect();
-                    pane.prev_cells.clear();
+                    tp.prev_cells.clear();
                 }
                 for (r, row) in dirty {
-                    if let Some(dst) = pane.cells.get_mut(r as usize) {
+                    if let Some(dst) = tp.cells.get_mut(r as usize) {
                         *dst = row;
                     }
                 }
                 // Shift detection per pane — alt-screen apps manage their
                 // own scrollback so we skip there.
                 if !alt_screen
-                    && !pane.prev_cells.is_empty()
-                    && pane.prev_cells.len() == pane.cells.len()
+                    && !tp.prev_cells.is_empty()
+                    && tp.prev_cells.len() == tp.cells.len()
                 {
-                    let n = pane.prev_cells.len();
+                    let n = tp.prev_cells.len();
                     let mut shifted = 0usize;
                     for k in 1..n {
-                        if pane.prev_cells[k..] == pane.cells[..n - k] {
+                        if tp.prev_cells[k..] == tp.cells[..n - k] {
                             shifted = k;
                             break;
                         }
                     }
                     if shifted > 0 {
-                        for row in &pane.prev_cells[..shifted] {
-                            pane.history.push_back(row.clone());
+                        for row in &tp.prev_cells[..shifted] {
+                            tp.history.push_back(row.clone());
                         }
-                        while pane.history.len() > SCROLLBACK_MAX {
-                            pane.history.pop_front();
+                        while tp.history.len() > SCROLLBACK_MAX {
+                            tp.history.pop_front();
                         }
                     }
                 }
-                pane.prev_cells = pane.cells.clone();
-                pane.cursor_row = cursor_row;
-                pane.cursor_col = cursor_col;
-                pane.cursor_visible = cursor_visible;
-                pane.alt_screen = alt_screen;
-                pane.mouse_enabled = mouse_enabled;
-                pane.mouse_sgr = mouse_sgr;
+                tp.prev_cells = tp.cells.clone();
+                tp.cursor_row = cursor_row;
+                tp.cursor_col = cursor_col;
+                tp.cursor_visible = cursor_visible;
+                tp.alt_screen = alt_screen;
+                tp.mouse_enabled = mouse_enabled;
+                tp.mouse_sgr = mouse_sgr;
                 let new_title = title.filter(|t| !t.is_empty());
                 // Pinned panes (renamed via surface.rename / run_job) ignore
                 // OSC titles so the agent-set label stays put.
@@ -3913,12 +3963,16 @@ impl App {
                             / self.cell.h)
                             .floor() as u16;
                         let pid = format!("%{id}");
-                        let (mc, mr) = ws.panes.get(&pid).map_or((lc, lr), |p| {
-                            (
-                                lc.min(p.cols.saturating_sub(1)),
-                                lr.min(p.rows.saturating_sub(1)),
-                            )
-                        });
+                        let (mc, mr) = ws
+                            .panes
+                            .get(&pid)
+                            .and_then(|p| p.term())
+                            .map_or((lc, lr), |t| {
+                                (
+                                    lc.min(t.cols.saturating_sub(1)),
+                                    lr.min(t.rows.saturating_sub(1)),
+                                )
+                            });
                         return Some((pid, mc, mr));
                     }
                 }
@@ -3928,13 +3982,14 @@ impl App {
         // No layout yet — single pane fills the window (inset only).
         let id = ws.active_pane.clone().or_else(|| ws.panes.keys().next().cloned())?;
         let pane = ws.panes.get(&id)?;
-        if pane.cols == 0 || pane.rows == 0 {
+        let t = pane.term()?;
+        if t.cols == 0 || t.rows == 0 {
             return None;
         }
         let lc =
             ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0) / self.cell.w).floor() as u16;
         let lr = ((py - TITLE_HEIGHT - PANE_INNER_Y).max(0.0) / self.cell.h).floor() as u16;
-        Some((id, lc.min(pane.cols - 1), lr.min(pane.rows - 1)))
+        Some((id, lc.min(t.cols - 1), lr.min(t.rows - 1)))
     }
 
     /// Convenience wrapper that returns only the active pane's local
@@ -4162,7 +4217,7 @@ impl App {
         {
             let mut ws = self.ws.lock().unwrap();
             let pane = ws.pane_mut(&new_id);
-            pane.image = Some(Arc::new(image));
+            pane.content = PaneContent::Image(Arc::new(image));
             // Pin the filename as the header label so the OSC-title path
             // (which only fires for PTY panes anyway) can't clobber it.
             pane.title = Some(name);
@@ -4216,19 +4271,28 @@ impl App {
         let doc = build_markdown_doc(&new_id, p, &text);
         {
             let mut ws = self.ws.lock().unwrap();
+            // Test hook: open straight into Raw mode (for screenshots).
+            let raw_mode = std::env::var_os("KASATERM_MD_RAW").is_some();
+            let mut edit_lines: Vec<String> = if raw_mode {
+                text.split('\n').map(String::from).collect()
+            } else {
+                Vec::new()
+            };
+            if raw_mode && edit_lines.is_empty() {
+                edit_lines.push(String::new());
+            }
             let pane = ws.pane_mut(&new_id);
-            pane.markdown = Some(Arc::new(doc));
+            pane.content = PaneContent::Markdown(MarkdownPane {
+                doc: Arc::new(doc),
+                raw_mode,
+                edit_lines,
+                cur_line: 0,
+                cur_col: 0,
+                scroll: 0,
+            });
             pane.title = Some(name);
             pane.title_pinned = true;
             pane.dirty = true;
-            // Test hook: open straight into Raw mode (for screenshots).
-            if std::env::var_os("KASATERM_MD_RAW").is_some() {
-                pane.md_raw_mode = true;
-                pane.md_edit_lines = text.split('\n').map(String::from).collect();
-                if pane.md_edit_lines.is_empty() {
-                    pane.md_edit_lines.push(String::new());
-                }
-            }
         }
         let layout = self
             .pty_layout
@@ -4258,17 +4322,18 @@ impl App {
         }
         let mut ws = self.ws.lock().unwrap();
         let Some(pane) = ws.active_mut() else { return };
-        if pane.md_edit_lines.is_empty() {
-            pane.md_edit_lines.push(String::new());
+        pane.dirty = true;
+        let Some(m) = pane.markdown_mut() else { return };
+        if m.edit_lines.is_empty() {
+            m.edit_lines.push(String::new());
         }
-        let line = pane.md_cur_line.min(pane.md_edit_lines.len() - 1);
-        let col = pane.md_cur_col;
-        let s = &mut pane.md_edit_lines[line];
+        let line = m.cur_line.min(m.edit_lines.len() - 1);
+        let col = m.cur_col;
+        let s = &mut m.edit_lines[line];
         let b = char_byte(s, col);
         s.insert_str(b, text);
-        pane.md_cur_line = line;
-        pane.md_cur_col = col + text.chars().count();
-        pane.dirty = true;
+        m.cur_line = line;
+        m.cur_col = col + text.chars().count();
     }
 
     /// Raw-editor key entry point with Hangul composition. macOS hands jamo
@@ -4316,31 +4381,33 @@ impl App {
         use winit::keyboard::{Key, NamedKey};
         let mut ws = self.ws.lock().unwrap();
         let Some(pane) = ws.active_mut() else { return };
-        if pane.md_edit_lines.is_empty() {
-            pane.md_edit_lines.push(String::new());
+        pane.dirty = true;
+        let Some(m) = pane.markdown_mut() else { return };
+        if m.edit_lines.is_empty() {
+            m.edit_lines.push(String::new());
         }
-        let mut line = pane.md_cur_line.min(pane.md_edit_lines.len() - 1);
-        let mut col = pane.md_cur_col;
+        let mut line = m.cur_line.min(m.edit_lines.len() - 1);
+        let mut col = m.cur_col;
         match &event.logical_key {
             Key::Named(NamedKey::Backspace) => {
                 if col > 0 {
-                    let s = &mut pane.md_edit_lines[line];
+                    let s = &mut m.edit_lines[line];
                     let b0 = char_byte(s, col - 1);
                     let b1 = char_byte(s, col);
                     s.replace_range(b0..b1, "");
                     col -= 1;
                 } else if line > 0 {
-                    let cur = pane.md_edit_lines.remove(line);
+                    let cur = m.edit_lines.remove(line);
                     line -= 1;
-                    col = pane.md_edit_lines[line].chars().count();
-                    pane.md_edit_lines[line].push_str(&cur);
+                    col = m.edit_lines[line].chars().count();
+                    m.edit_lines[line].push_str(&cur);
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                let s = &mut pane.md_edit_lines[line];
+                let s = &mut m.edit_lines[line];
                 let b = char_byte(s, col);
                 let rest = s.split_off(b);
-                pane.md_edit_lines.insert(line + 1, rest);
+                m.edit_lines.insert(line + 1, rest);
                 line += 1;
                 col = 0;
             }
@@ -4349,14 +4416,14 @@ impl App {
                     col -= 1;
                 } else if line > 0 {
                     line -= 1;
-                    col = pane.md_edit_lines[line].chars().count();
+                    col = m.edit_lines[line].chars().count();
                 }
             }
             Key::Named(NamedKey::ArrowRight) => {
-                let len = pane.md_edit_lines[line].chars().count();
+                let len = m.edit_lines[line].chars().count();
                 if col < len {
                     col += 1;
-                } else if line + 1 < pane.md_edit_lines.len() {
+                } else if line + 1 < m.edit_lines.len() {
                     line += 1;
                     col = 0;
                 }
@@ -4364,32 +4431,31 @@ impl App {
             Key::Named(NamedKey::ArrowUp) => {
                 if line > 0 {
                     line -= 1;
-                    col = col.min(pane.md_edit_lines[line].chars().count());
+                    col = col.min(m.edit_lines[line].chars().count());
                 }
             }
             Key::Named(NamedKey::ArrowDown) => {
-                if line + 1 < pane.md_edit_lines.len() {
+                if line + 1 < m.edit_lines.len() {
                     line += 1;
-                    col = col.min(pane.md_edit_lines[line].chars().count());
+                    col = col.min(m.edit_lines[line].chars().count());
                 }
             }
             Key::Named(NamedKey::Space) => {
-                let s = &mut pane.md_edit_lines[line];
+                let s = &mut m.edit_lines[line];
                 let b = char_byte(s, col);
                 s.insert(b, ' ');
                 col += 1;
             }
             Key::Character(txt) => {
-                let s = &mut pane.md_edit_lines[line];
+                let s = &mut m.edit_lines[line];
                 let b = char_byte(s, col);
                 s.insert_str(b, txt);
                 col += txt.chars().count();
             }
             _ => {}
         }
-        pane.md_cur_line = line;
-        pane.md_cur_col = col;
-        pane.dirty = true;
+        m.cur_line = line;
+        m.cur_col = col;
     }
 
     /// Drain `dead_panes` and remove each from the BSP tree + pty map.
@@ -4710,7 +4776,8 @@ impl App {
         let ws = self.ws.lock().unwrap();
         ws.panes
             .get(pane_id)
-            .map(|p| p.mouse_enabled && p.mouse_sgr)
+            .and_then(|p| p.term())
+            .map(|t| t.mouse_enabled && t.mouse_sgr)
             .unwrap_or(false)
     }
 
@@ -4756,9 +4823,10 @@ impl App {
         let ws = self.ws.lock().unwrap();
         let id = ws.active_pane.as_deref()?;
         let pane = ws.panes.get(id)?;
-        let rows = pane.cells.len();
+        let t = pane.term()?;
+        let rows = t.cells.len();
         let start = rows.saturating_sub(10);
-        for row in pane.cells[start..].iter() {
+        for row in t.cells[start..].iter() {
             let mut text = String::new();
             let mut has_marker = false;
             for cell in row {
@@ -4788,9 +4856,10 @@ impl App {
         let ws = self.ws.lock().unwrap();
         let id = ws.active_pane.as_deref()?;
         let pane = ws.panes.get(id)?;
-        let rows = pane.cells.len();
+        let t = pane.term()?;
+        let rows = t.cells.len();
         let start = rows.saturating_sub(8);
-        for row in &pane.cells[start..] {
+        for row in &t.cells[start..] {
             for cell in row {
                 if let Some(c) = cell.ch.chars().next() {
                     let cp = c as u32;
@@ -4892,8 +4961,8 @@ impl App {
         let Some(sel) = self.selection else { return; };
         let rows = {
             let ws = self.ws.lock().unwrap();
-            match ws.active() {
-                Some(p) => p.cells.clone(),
+            match ws.active().and_then(|p| p.term()) {
+                Some(t) => t.cells.clone(),
                 None => return,
             }
         };
@@ -4956,7 +5025,7 @@ impl App {
             target_pane_id
                 .as_deref()
                 .and_then(|id| ws.panes.get(id))
-                .map_or(false, |p| p.markdown.is_some())
+                .map_or(false, |p| p.markdown().is_some())
         };
         if is_md {
             if let Some(id) = target_pane_id.as_deref() {
@@ -4971,10 +5040,12 @@ impl App {
                 let delta_px = lines as f32 * self.cell.h;
                 if let Ok(mut ws) = self.ws.lock() {
                     if let Some(pane) = ws.panes.get_mut(id) {
-                        let cur = pane.scroll_offset as f32;
-                        let next = (cur - delta_px).clamp(0.0, max_scroll);
-                        pane.scroll_offset = next.round() as usize;
                         pane.dirty = true;
+                        if let Some(m) = pane.markdown_mut() {
+                            let cur = m.scroll as f32;
+                            let next = (cur - delta_px).clamp(0.0, max_scroll);
+                            m.scroll = next.round() as usize;
+                        }
                     }
                 }
             }
@@ -4988,8 +5059,8 @@ impl App {
             let pane = target_pane_id
                 .as_deref()
                 .and_then(|id| ws.panes.get(id));
-            match pane {
-                Some(p) => (p.alt_screen, p.history.len(), p.mouse_enabled, p.mouse_sgr),
+            match pane.and_then(|p| p.term()) {
+                Some(t) => (t.alt_screen, t.history.len(), t.mouse_enabled, t.mouse_sgr),
                 None => return,
             }
         };
@@ -5050,13 +5121,15 @@ impl App {
             if self.tmux.is_some() {
                 if let Ok(mut ws) = self.ws.lock() {
                     if let Some(pane) = ws.panes.get_mut(id) {
-                        let s = step as usize;
-                        if lines > 0 {
-                            pane.scroll_offset = (pane.scroll_offset + s).min(hist_len);
-                        } else {
-                            pane.scroll_offset = pane.scroll_offset.saturating_sub(s);
-                        }
                         pane.dirty = true;
+                        if let Some(t) = pane.term_mut() {
+                            let s = step as usize;
+                            if lines > 0 {
+                                t.scroll_offset = (t.scroll_offset + s).min(hist_len);
+                            } else {
+                                t.scroll_offset = t.scroll_offset.saturating_sub(s);
+                            }
+                        }
                     }
                 }
             } else if let Some(pty) = self.pty.get(id) {
@@ -5080,8 +5153,10 @@ impl App {
         // Render mode they're swallowed (scrolling is wheel-driven).
         let (is_md, is_raw) = {
             let ws = self.ws.lock().unwrap();
-            ws.active()
-                .map_or((false, false), |p| (p.markdown.is_some(), p.md_raw_mode))
+            ws.active().map_or((false, false), |p| match p.markdown() {
+                Some(m) => (true, m.raw_mode),
+                None => (false, false),
+            })
         };
         if is_md {
             if is_raw {
@@ -5096,9 +5171,9 @@ impl App {
         // scroll offsets are left alone — switching focus by clicking
         // doesn't disturb where the user was reading.
         if let Ok(mut ws) = self.ws.lock() {
-            if let Some(pane) = ws.active_mut() {
-                if pane.scroll_offset != 0 {
-                    pane.scroll_offset = 0;
+            if let Some(t) = ws.active_mut().and_then(|p| p.term_mut()) {
+                if t.scroll_offset != 0 {
+                    t.scroll_offset = 0;
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -5499,7 +5574,8 @@ impl App {
                                         ws.active_pane.clone().and_then(|id| {
                                             ws.panes
                                                 .get(&id)
-                                                .map(|p| (p.cursor_row, p.cursor_col))
+                                                .and_then(|p| p.term())
+                                                .map(|t| (t.cursor_row, t.cursor_col))
                                         })
                                     });
                                     self.commit_overlay =
@@ -5620,27 +5696,32 @@ impl App {
                     // composing syllable past it to the line's end. The
                     // cursor column is already correct (incl. trailing
                     // spaces the PTY echoes), so trust it directly.
-                    let (base_row, base_col) = (pane.cursor_row, pane.cursor_col);
+                    // Image/markdown panes have no PTY cursor — their terminal
+                    // block cursor stays hidden (the Raw editor draws its own).
+                    let (cur_row, cur_col, cur_vis, cols) = match pane.term() {
+                        Some(t) => (
+                            t.cursor_row,
+                            t.cursor_col,
+                            t.cursor_visible,
+                            t.cells.first().map(|r| r.len()).unwrap_or(80) as u16,
+                        ),
+                        None => (0, 0, false, 80),
+                    };
+                    let (base_row, base_col) = (cur_row, cur_col);
                     // Until the committed syllable's echo lands (cursor
                     // still where it was at commit time), draw the
-                    // committed text in front of the preedit at that
-                    // spot so "ㄴ" never shows alone on the "안" cell.
+                    // committed text in front of the preedit at that spot.
                     let (display, prow, pcol) = match &commit_overlay {
-                        Some((ctext, before))
-                            if *before == (pane.cursor_row, pane.cursor_col) =>
-                        {
+                        Some((ctext, before)) if *before == (cur_row, cur_col) => {
                             (format!("{ctext}{preedit_text}"), before.0, before.1)
                         }
                         _ => (preedit_text.clone(), base_row, base_col),
                     };
                     (
-                        pane.cursor_row,
-                        pane.cursor_col,
-                        // Image/markdown panes have no PTY, so the terminal
-                        // block cursor must not blink over them (the Raw editor
-                        // draws its own caret separately).
-                        pane.cursor_visible && pane.markdown.is_none() && pane.image.is_none(),
-                        pane.cells.first().map(|r| r.len()).unwrap_or(80) as u16,
+                        cur_row,
+                        cur_col,
+                        cur_vis,
+                        cols,
                         prow,
                         pcol,
                         display,
@@ -5848,7 +5929,7 @@ impl App {
                 // real scrollback (scroll-region TUIs included). Just
                 // normalise each row to the current width so the GPU
                 // pipeline emits exactly `cols` cells per row.
-                let cols_now = pane.cols.max(1) as usize;
+                let cols_now = pane.term().map_or(1, |t| t.cols).max(1) as usize;
                 let normalise = |row: &Vec<GridCell>| -> Vec<GridCell> {
                     let mut r = row.clone();
                     if r.len() < cols_now {
@@ -5859,16 +5940,28 @@ impl App {
                     r
                 };
                 // Image/markdown panes carry no PTY grid; an empty rows vec
-                // makes draw_cells a no-op for this slot and the content
-                // (texture or laid-out document) is painted into the pane box
-                // instead (queued below).
-                let img = pane.image.clone();
-                let md = pane.markdown.clone();
-                let md_scroll = pane.scroll_offset as f32;
-                let composed: Vec<Vec<GridCell>> = if img.is_some() || md.is_some() {
-                    Vec::new()
-                } else {
-                    pane.cells.iter().map(normalise).collect()
+                // makes draw_cells a no-op and the content (texture or laid-out
+                // document) is painted into the pane box instead (queued below).
+                let img = pane.image().cloned();
+                // Snapshot markdown render data: (doc, raw_mode, edit lines if
+                // raw, cursor, scroll px).
+                let md: Option<(Arc<MarkdownDoc>, bool, Option<Vec<String>>, (usize, usize), f32)> =
+                    pane.markdown().map(|m| {
+                        (
+                            m.doc.clone(),
+                            m.raw_mode,
+                            if m.raw_mode {
+                                Some(m.edit_lines.clone())
+                            } else {
+                                None
+                            },
+                            (m.cur_line, m.cur_col),
+                            m.scroll as f32,
+                        )
+                    });
+                let composed: Vec<Vec<GridCell>> = match pane.term() {
+                    Some(t) => t.cells.iter().map(normalise).collect(),
+                    None => Vec::new(),
                 };
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
@@ -5942,21 +6035,15 @@ impl App {
                     if let Some(image) = img {
                         image_slots.push((id.clone(), image, (bx, by, bw, bh)));
                     }
-                    if let Some(doc) = md {
-                        let raw_mode = pane.md_raw_mode;
-                        let lines = if raw_mode {
-                            Some(pane.md_edit_lines.clone())
-                        } else {
-                            None
-                        };
+                    if let Some((doc, raw_mode, lines, cursor, scroll)) = md {
                         md_slots.push((
                             id.clone(),
                             doc,
                             (bx, by, bw, bh),
-                            md_scroll,
+                            scroll,
                             raw_mode,
                             lines,
-                            (pane.md_cur_line, pane.md_cur_col),
+                            cursor,
                         ));
                     }
                 }
@@ -6003,8 +6090,8 @@ impl App {
                         label,
                         is_active: active_id.as_deref() == Some(id.as_str()),
                         color: pane.color,
-                        is_markdown: pane.markdown.is_some(),
-                        md_raw_mode: pane.md_raw_mode,
+                        is_markdown: pane.markdown().is_some(),
+                        md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
                     });
                 }
             }
@@ -6558,7 +6645,10 @@ impl App {
         if let Some(before) = self.commit_overlay.as_ref().map(|(_, b)| *b) {
             let cur = self.ws.lock().ok().and_then(|ws| {
                 ws.active_pane.clone().and_then(|id| {
-                    ws.panes.get(&id).map(|p| (p.cursor_row, p.cursor_col))
+                    ws.panes
+                        .get(&id)
+                        .and_then(|p| p.term())
+                        .map(|t| (t.cursor_row, t.cursor_col))
                 })
             });
             if cur != Some(before) {
@@ -6674,7 +6764,10 @@ impl App {
                     // First key in the map keeps things deterministic so
                     // the active-pane lookup below points at the same one.
                     match ws.panes.iter().next() {
-                        Some((id, p)) => vec![(id.clone(), 0, 0, p.cols, p.rows)],
+                        Some((id, p)) => {
+                            let (c, r) = p.term().map_or((0, 0), |t| (t.cols, t.rows));
+                            vec![(id.clone(), 0, 0, c, r)]
+                        }
                         None => Vec::new(),
                     }
                 };
@@ -6687,34 +6780,39 @@ impl App {
                 // the same ws lock we already hold.
                 let (total, offset, cursor_row, cursor_col, cursor_visible, title) = {
                     let Some(pane) = ws.panes.get(&id) else { continue };
+                    let title = pane.title.clone();
+                    // sugarloaf path only renders terminal panes (legacy A/B);
+                    // image/markdown panes are gpu-only.
+                    let Some(t) = pane.term() else { continue };
                     (
-                        pane.rows.max(1) as usize,
-                        pane.scroll_offset.min(pane.history.len()),
-                        pane.cursor_row,
-                        pane.cursor_col,
-                        pane.cursor_visible,
-                        pane.title.clone(),
+                        t.rows.max(1) as usize,
+                        t.scroll_offset.min(t.history.len()),
+                        t.cursor_row,
+                        t.cursor_col,
+                        t.cursor_visible,
+                        title,
                     )
                 };
                 let composed: Vec<Vec<GridCell>> = if offset == 0 {
-                    // Hot path: move (not clone) the live grid out
-                    // for rendering. ~10 000 GridCells used to be
-                    // cloned every frame; now it's a Vec pointer
-                    // swap. The grid goes back into the PaneState
-                    // after the for-loop (`mem::swap` below).
-                    std::mem::take(&mut ws.panes.get_mut(&id).unwrap().cells)
+                    // Hot path: move (not clone) the live grid out for rendering.
+                    ws.panes
+                        .get_mut(&id)
+                        .and_then(|p| p.term_mut())
+                        .map(|t| std::mem::take(&mut t.cells))
+                        .unwrap_or_default()
                 } else {
                     let pane = ws.panes.get(&id).unwrap();
+                    let Some(t) = pane.term() else { continue };
                     let mut out: Vec<Vec<GridCell>> = Vec::with_capacity(total);
-                    let hist_start = pane.history.len() - offset;
-                    for row in pane.history.iter().skip(hist_start) {
+                    let hist_start = t.history.len() - offset;
+                    for row in t.history.iter().skip(hist_start) {
                         out.push(row.clone());
                         if out.len() >= total {
                             break;
                         }
                     }
                     let need = total.saturating_sub(out.len());
-                    for row in pane.cells.iter().take(need) {
+                    for row in t.cells.iter().take(need) {
                         out.push(row.clone());
                     }
                     out
@@ -7001,9 +7099,13 @@ impl App {
         // Move the cell grids back and clear damage flags under the
         // same lock we held throughout the render.
         for frame in pane_frames {
-            if let Some(pane) = ws_guard.panes.get_mut(&frame.id) {
-                if pane.cells.is_empty() {
-                    pane.cells = frame.rows;
+            if let Some(t) = ws_guard
+                .panes
+                .get_mut(&frame.id)
+                .and_then(|p| p.term_mut())
+            {
+                if t.cells.is_empty() {
+                    t.cells = frame.rows;
                 }
             }
         }
@@ -7555,37 +7657,45 @@ impl ApplicationHandler<UserEvent> for App {
                         {
                             let mut ws = self.ws.lock().unwrap();
                             if let Some(pane) = ws.panes.get_mut(&id) {
-                                if is_raw && !pane.md_raw_mode {
+                                pane.dirty = true;
+                                if is_raw {
                                     // Render → Raw: seed the edit buffer.
-                                    if let Some(doc) = &pane.markdown {
-                                        pane.md_edit_lines =
-                                            doc.raw.split('\n').map(String::from).collect();
+                                    if let Some(m) = pane.markdown_mut() {
+                                        if !m.raw_mode {
+                                            m.edit_lines =
+                                                m.doc.raw.split('\n').map(String::from).collect();
+                                            if m.edit_lines.is_empty() {
+                                                m.edit_lines.push(String::new());
+                                            }
+                                            m.cur_line = 0;
+                                            m.cur_col = 0;
+                                            m.scroll = 0;
+                                        }
+                                        m.raw_mode = true;
                                     }
-                                    if pane.md_edit_lines.is_empty() {
-                                        pane.md_edit_lines.push(String::new());
-                                    }
-                                    pane.md_cur_line = 0;
-                                    pane.md_cur_col = 0;
-                                    pane.scroll_offset = 0;
-                                } else if !is_raw && pane.md_raw_mode {
+                                } else {
                                     // Raw → Render: write the file + re-parse so
                                     // the rendered view reflects the edits.
-                                    let text = pane.md_edit_lines.join("\n");
-                                    if let Some(path) =
-                                        pane.markdown.as_ref().map(|d| d.path.clone())
-                                    {
+                                    let save = pane
+                                        .markdown()
+                                        .filter(|m| m.raw_mode)
+                                        .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()));
+                                    if let Some((text, path)) = save {
                                         let _ = std::fs::write(&path, &text);
                                         let doc = build_markdown_doc(
                                             &id,
                                             std::path::Path::new(&path),
                                             &text,
                                         );
-                                        pane.markdown = Some(Arc::new(doc));
+                                        if let Some(m) = pane.markdown_mut() {
+                                            m.doc = Arc::new(doc);
+                                            m.scroll = 0;
+                                        }
                                     }
-                                    pane.scroll_offset = 0;
+                                    if let Some(m) = pane.markdown_mut() {
+                                        m.raw_mode = false;
+                                    }
                                 }
-                                pane.md_raw_mode = is_raw;
-                                pane.dirty = true;
                             }
                         }
                         window.request_redraw();
