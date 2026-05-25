@@ -4221,6 +4221,14 @@ impl App {
             pane.title = Some(name);
             pane.title_pinned = true;
             pane.dirty = true;
+            // Test hook: open straight into Raw mode (for screenshots).
+            if std::env::var_os("KASATERM_MD_RAW").is_some() {
+                pane.md_raw_mode = true;
+                pane.md_edit_lines = text.split('\n').map(String::from).collect();
+                if pane.md_edit_lines.is_empty() {
+                    pane.md_edit_lines.push(String::new());
+                }
+            }
         }
         let layout = self
             .pty_layout
@@ -5628,7 +5636,10 @@ impl App {
                     (
                         pane.cursor_row,
                         pane.cursor_col,
-                        pane.cursor_visible,
+                        // Image/markdown panes have no PTY, so the terminal
+                        // block cursor must not blink over them (the Raw editor
+                        // draws its own caret separately).
+                        pane.cursor_visible && pane.markdown.is_none() && pane.image.is_none(),
                         pane.cells.first().map(|r| r.len()).unwrap_or(80) as u16,
                         prow,
                         pcol,
