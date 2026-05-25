@@ -23,3 +23,8 @@ arboard = "3"
 # together automatically; the swash/cell-renderer GPU path draws one
 # glyph per codepoint, so NFD shows as split jamo without this.
 unicode-normalization = "0.1"
+# Inline image support (iTerm2 OSC 1337). base64-decode the payload, then
+# decode PNG/JPEG/GIF/etc into RGBA8 for GPU upload. Default features off
+# keeps the codec set lean; we enable just the common web formats.
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }

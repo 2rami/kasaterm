@@ -102,7 +102,7 @@ const LINE_HEIGHT_MULT: f32 = 1.0;
 /// every side. Mirrors what Terminal.app / Ghostty give the content so
 /// text doesn't jam against the chrome. Must match `render_frame`'s
 /// origin and `px_to_pane_cell`'s offset.
-const WINDOW_PADDING: f32 = 12.0;
+const WINDOW_PADDING: f32 = 0.0;
 /// Logical-pixel height of the custom chrome strip that sits above the
 /// cell grid (traffic light row + future tab bar). macOS's traffic
 /// light buttons end around y ≈ 28 in logical units, so 38 leaves a
@@ -127,6 +127,10 @@ const PANE_HEADER_HEIGHT: f32 = 28.0;
 /// every render origin + click-to-cell map applies the same offset.
 const PANE_INNER_X: f32 = 3.0;
 const PANE_INNER_Y: f32 = 2.0;
+/// Code-block copy button (overlay) size in logical px. Small chip that
+/// sits at a detected block's top-right corner.
+const COPY_BTN_W: f32 = 26.0;
+const COPY_BTN_H: f32 = 18.0;
 /// Left sidebar width in logical pixels. Hosts the vertical tab list
 /// (one row per tab) plus the new-tab "+" button. The cell grid origin
 /// shifts right by this amount so pane contents never overlap the
@@ -718,6 +722,133 @@ fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
     trimmed.join("\n")
 }
 
+/// A detected "code block": a run of consecutive rows that share one
+/// non-page background color, the way Claude Code paints fenced code /
+/// command boxes. `(start_row, end_row_inclusive, left_col, right_col)`.
+type CodeBlock = (usize, usize, usize, usize);
+
+/// Scan a pane's composed grid for code blocks. The shell / TUI gives us
+/// no markdown metadata (fences arrive as styled cells), so we lean on the
+/// one signal that survives: Claude Code renders code/command blocks with
+/// a solid background box. We find the pane's dominant ("page") bg, then
+/// any contiguous rows carrying a *different* uniform bg across a wide
+/// enough span are a block. Purely heuristic — when it doesn't match
+/// (no bg box) it just returns nothing, so the caller shows no button.
+fn detect_code_blocks(rows: &[Vec<GridCell>]) -> Vec<CodeBlock> {
+    use tmux_bridge::screen::Color;
+    // Minimum horizontal run of one bg color for a row to count as "inside
+    // a box". Filters single-token inline highlights and 1-2 cell artifacts.
+    const MIN_RUN: usize = 10;
+    // Dominant bg across the grid = the page background. Treated like
+    // Default so a TUI that paints every cell doesn't read as one block.
+    let mut counts: Vec<(Color, usize)> = Vec::new();
+    for row in rows {
+        for cell in row {
+            match counts.iter_mut().find(|(c, _)| *c == cell.bg) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((cell.bg.clone(), 1)),
+            }
+        }
+    }
+    let page_bg = counts
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(c, _)| c)
+        .unwrap_or(Color::Default);
+    // Longest contiguous run of a single bg that is neither Default nor the
+    // page bg. Returns (bg, left, right) when it clears MIN_RUN.
+    let row_box = |row: &[GridCell]| -> Option<(Color, usize, usize)> {
+        let mut best: Option<(Color, usize, usize)> = None;
+        let mut i = 0;
+        while i < row.len() {
+            let bg = row[i].bg.clone();
+            if bg == Color::Default || bg == page_bg {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < row.len() && row[i].bg == bg {
+                i += 1;
+            }
+            let len = i - start;
+            if len >= MIN_RUN
+                && best.as_ref().map(|(_, bs, be)| be - bs + 1 < len).unwrap_or(true)
+            {
+                best = Some((bg, start, i - 1));
+            }
+        }
+        best
+    };
+    let mut blocks = Vec::new();
+    let mut r = 0;
+    while r < rows.len() {
+        let Some((bg, l, rr)) = row_box(&rows[r]) else {
+            r += 1;
+            continue;
+        };
+        let start = r;
+        let (mut left, mut right) = (l, rr);
+        r += 1;
+        while r < rows.len() {
+            match row_box(&rows[r]) {
+                Some((b2, l2, r2)) if b2 == bg => {
+                    left = left.min(l2);
+                    right = right.max(r2);
+                    r += 1;
+                }
+                _ => break,
+            }
+        }
+        blocks.push((start, r - 1, left, right));
+    }
+    blocks
+}
+
+/// Extract the text inside a detected code block: columns `left..=right`
+/// of rows `start..=end`, trailing spaces trimmed per row, joined with
+/// `\n`, blank edge lines stripped. Mirrors `extract_selection`'s trims.
+fn extract_block(rows: &[Vec<GridCell>], block: CodeBlock) -> String {
+    let (start, end, left, right) = block;
+    let mut lines: Vec<String> = Vec::new();
+    for row in rows.iter().take(end + 1).skip(start) {
+        let mut line = String::new();
+        for cell in row.iter().take(right + 1).skip(left) {
+            if cell.ch.is_empty() {
+                line.push(' ');
+            } else {
+                line.push_str(&cell.ch);
+            }
+        }
+        while line.ends_with(' ') {
+            line.pop();
+        }
+        lines.push(line);
+    }
+    while lines.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        lines.remove(0);
+    }
+    while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    // Strip the common leading whitespace the bg box padded each line with,
+    // so a copied command pastes ready-to-run. Leading pad is ASCII spaces,
+    // so byte slicing is safe; blank lines don't constrain the amount.
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    if indent > 0 {
+        for l in &mut lines {
+            if l.len() >= indent {
+                *l = l[indent..].to_string();
+            }
+        }
+    }
+    lines.join("\n")
+}
+
 /// True for any codepoint the Hangul IME composes. Covers the four
 /// Unicode blocks that hold Korean syllables and jamo. Used to drop
 /// keyboard-side Character events when the IME is the authoritative
@@ -840,6 +971,11 @@ struct PaneState {
     /// autosuggestion. Only trusted while it's still on the cursor's row
     /// (see `update_suggestion`); a new prompt overwrites it.
     prompt_end: Option<(u16, u16)>,
+    /// Inline images (iTerm2 OSC 1337) visible in this pane right now,
+    /// already mapped to viewport cells by the backend for the current
+    /// scroll position. Replaced wholesale every frame, so an image that
+    /// scrolls out simply stops being listed.
+    images: Vec<tmux_bridge::screen::ImagePlacement>,
 }
 
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
@@ -1005,6 +1141,14 @@ struct App {
     /// by `render_frame` and consumed by the MouseInput handler so a
     /// click on the × button closes that pane.
     pane_header_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// (block text, copy-button rect) for every code block detected in the
+    /// visible panes this frame. Logical px. Populated by the render path,
+    /// consumed by the MouseInput handler so a click on the button copies
+    /// the block. Cleared+rebuilt every paint.
+    copy_btn_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// When the "복사됨" copy toast started animating. Drives its fade in the
+    /// overlay pass; `None` once faded out. Set on a successful block copy.
+    copy_toast_at: Option<Instant>,
     /// (window index, rect) for every window tab in the left sidebar.
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
@@ -1163,6 +1307,8 @@ impl App {
             ime_active: false,
             hangul: hangul_ime::Composer::new(),
             pane_header_rects: Vec::new(),
+            copy_btn_rects: Vec::new(),
+            copy_toast_at: None,
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
             new_window_btn_rect: None,
@@ -1347,6 +1493,58 @@ impl App {
         } else {
             0.0
         }
+    }
+
+    /// Physical pixels per cell, for `PtyOptions.cell_px` (inline-image
+    /// span math in the pty backend). Derived from the live font metrics ×
+    /// the window scale, with a Retina-ish fallback before the window exists.
+    fn host_cell_px(&self) -> (u16, u16) {
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(2.0);
+        let w = (self.cell.w * scale).round().max(1.0) as u16;
+        let h = (self.cell.h * scale).round().max(1.0) as u16;
+        (w, h)
+    }
+
+    /// 0.0..1.0 opacity for the "복사됨" copy toast: solid for a brief hold
+    /// after a block copy, then a quick fade. Mirrors `version_alpha`.
+    fn copy_toast_alpha(&self) -> f32 {
+        const HOLD: u128 = 900;
+        const FADE: u128 = 500;
+        let Some(at) = self.copy_toast_at else { return 0.0 };
+        let e = at.elapsed().as_millis();
+        if e < HOLD {
+            1.0
+        } else if e < HOLD + FADE {
+            1.0 - (e - HOLD) as f32 / FADE as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// Copy a detected code block's text to the clipboard and arm the
+    /// toast. Reuses arboard like `copy_selection`. Best-effort: a
+    /// clipboard failure just logs (the toast still fires on success).
+    fn copy_block_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => {
+                if let Err(e) = cb.set_text(text.to_string()) {
+                    eprintln!("[tmuxify] clipboard write failed: {e}");
+                    return;
+                }
+            }
+            Err(e) => {
+                eprintln!("[tmuxify] clipboard open failed: {e}");
+                return;
+            }
+        }
+        self.copy_toast_at = Some(Instant::now());
     }
 
     /// Open the git-status panel in its own OS window when
@@ -1744,6 +1942,10 @@ impl App {
                 if let Some(pe) = update.prompt_end {
                     pane.prompt_end = Some(pe);
                 }
+                // Inline images: the backend recomputes the full visible
+                // set every snapshot (already scroll-mapped), so replace
+                // wholesale — an empty list means everything scrolled out.
+                pane.images = update.images;
                 // OSC 0/2 title from the inner program (Claude Code's
                 // conversation summary, vim filename, etc.). Carry it
                 // through to PaneState so the chrome header + the
@@ -1801,6 +2003,7 @@ impl App {
             rows,
             env: Vec::new(),
             pane_id: id.clone(),
+            cell_px: self.host_cell_px(),
         })?;
         self.pump_pty_screens(session.screens.clone(), id.clone());
         self.pty.insert(id.clone(), Arc::new(session));
@@ -2169,6 +2372,7 @@ impl App {
                     rows,
                     env: Vec::new(),
                     pane_id: "%0".to_string(),
+                    cell_px: self.host_cell_px(),
                 })?;
                 self.pump_pty_screens(session.screens.clone(), "%0".to_string());
                 self.pty.insert("%0".to_string(), Arc::new(session));
@@ -2293,6 +2497,7 @@ impl App {
                     rows,
                     env: Vec::new(),
                     pane_id: id.clone(),
+                    cell_px: self.host_cell_px(),
                 })?;
                 self.pump_pty_screens(session.screens.clone(), id.clone());
                 let arc = Arc::new(session);
@@ -3179,6 +3384,7 @@ impl App {
             rows: win_rows,
             env: Vec::new(),
             pane_id: new_id.clone(),
+            cell_px: self.host_cell_px(),
         })?;
         self.pump_pty_screens(session.screens.clone(), new_id.clone());
         self.pty.insert(new_id.clone(), Arc::new(session));
@@ -4534,6 +4740,22 @@ impl App {
         let sidebar_w = self.effective_sidebar_w();
         let pad_px = (WINDOW_PADDING + sidebar_w) * scale;
         let title_px = TITLE_HEIGHT * scale;
+        // Code-block copy buttons (text + logical rect), filled per pane in
+        // the loop below and handed to both the mouse handler and overlay.
+        let mut copy_btns: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+        // Inline images to draw this frame, in PHYSICAL pixels, already
+        // clipped to each pane's body. Filled inside the slot loop below
+        // (which holds the workspace lock) and handed to the GPU after the
+        // cell pass. Each keeps an Arc to the decoded pixels so the quad
+        // can borrow them without copying.
+        struct CollectedImage {
+            id: u64,
+            image: std::sync::Arc<tmux_bridge::screen::DecodedImage>,
+            px: [f32; 4],
+            uv_min: [f32; 2],
+            uv_max: [f32; 2],
+        }
+        let mut collected_images: Vec<CollectedImage> = Vec::new();
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
@@ -4594,10 +4816,74 @@ impl App {
                         + header_shift_px
                         + PANE_INNER_Y * scale,
                 );
+                // Code-block copy buttons: scan this pane's grid for bg
+                // boxes (Claude Code code/command blocks) and stash a copy
+                // button at each block's top-right. Logical px so the mouse
+                // handler and the overlay pass agree on the hit area.
+                let header_shift_logical = if show_headers {
+                    PANE_HEADER_HEIGHT
+                } else {
+                    0.0
+                };
+                let body_left = WINDOW_PADDING
+                    + sidebar_w
+                    + x_cells as f32 * self.cell.w
+                    + PANE_INNER_X;
+                let body_top = TITLE_HEIGHT
+                    + y_cells as f32 * self.cell.h
+                    + header_shift_logical
+                    + PANE_INNER_Y;
+                for block in detect_code_blocks(&composed) {
+                    let text = extract_block(&composed, block);
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    let (start, _end, _left, right) = block;
+                    let block_top = body_top + start as f32 * self.cell.h;
+                    let block_right = body_left + (right as f32 + 1.0) * self.cell.w;
+                    let bx = (block_right - COPY_BTN_W - 4.0).max(body_left);
+                    let by = block_top + 3.0;
+                    copy_btns.push((text, (bx, by, COPY_BTN_W, COPY_BTN_H)));
+                }
                 slots.push(PaneSlot {
                     rows: composed,
                     origin_px,
                 });
+                // Inline images for this pane. The backend already mapped
+                // each to a viewport cell row/col (scroll-aware); here we
+                // turn that into a physical-pixel rect and clip it to the
+                // pane's body so a partly-scrolled or oversized image is
+                // cropped against the cell area instead of bleeding over
+                // the header / window chrome.
+                if !pane.images.is_empty() {
+                    let body_x0 = origin_px.0;
+                    let body_y0 = origin_px.1;
+                    let body_x1 = origin_px.0 + cols_now as f32 * cell_w_px;
+                    let body_y1 = origin_px.1 + pane.rows as f32 * cell_h_px;
+                    for img in &pane.images {
+                        let ix0 = origin_px.0 + img.col as f32 * cell_w_px;
+                        let iy0 = origin_px.1 + img.row as f32 * cell_h_px;
+                        let iw = img.cols as f32 * cell_w_px;
+                        let ih = img.rows as f32 * cell_h_px;
+                        if iw <= 0.0 || ih <= 0.0 {
+                            continue;
+                        }
+                        let cx0 = ix0.max(body_x0);
+                        let cy0 = iy0.max(body_y0);
+                        let cx1 = (ix0 + iw).min(body_x1);
+                        let cy1 = (iy0 + ih).min(body_y1);
+                        if cx1 <= cx0 || cy1 <= cy0 {
+                            continue;
+                        }
+                        collected_images.push(CollectedImage {
+                            id: img.id,
+                            image: img.image.clone(),
+                            px: [cx0, cy0, cx1 - cx0, cy1 - cy0],
+                            uv_min: [(cx0 - ix0) / iw, (cy0 - iy0) / ih],
+                            uv_max: [(cx1 - ix0) / iw, (cy1 - iy0) / ih],
+                        });
+                    }
+                }
                 if show_headers {
                     // Custom title (rename / OSC) wins; otherwise show the
                     // live foreground process (vim, claude, zsh …); only
@@ -4627,6 +4913,22 @@ impl App {
             }
             (slots, headers)
         };
+        // Publish copy-button hit rects for the mouse handler; snapshot the
+        // bare rects (+ hover state) for the overlay draw below. Both read
+        // from the same numbers so a click lands on what the user sees.
+        self.copy_btn_rects = copy_btns;
+        let copy_btns_draw: Vec<(f32, f32, f32, f32, bool)> = self
+            .copy_btn_rects
+            .iter()
+            .map(|(_, r)| {
+                let hover = self.cursor_px.0 >= r.0
+                    && self.cursor_px.0 <= r.0 + r.2
+                    && self.cursor_px.1 >= r.1
+                    && self.cursor_px.1 <= r.1 + r.3;
+                (r.0, r.1, r.2, r.3, hover)
+            })
+            .collect();
+        let toast_alpha = self.copy_toast_alpha();
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
             .map(|s| gpu::PaneSlot {
@@ -4710,6 +5012,22 @@ impl App {
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             g.draw_cells(&slot_views);
+            // Stage inline images (drawn on top of the cell grid in
+            // `render`). Called unconditionally — an empty slice clears
+            // any image that just scrolled out.
+            let image_quads: Vec<gpu::ImageQuad<'_>> = collected_images
+                .iter()
+                .map(|c| gpu::ImageQuad {
+                    id: c.id,
+                    rgba: &c.image.rgba,
+                    width: c.image.width,
+                    height: c.image.height,
+                    px: c.px,
+                    uv_min: c.uv_min,
+                    uv_max: c.uv_max,
+                })
+                .collect();
+            g.set_images(&image_quads);
             // Title strip fill: chrome surface across the top so the area above
             // the sidebar / traffic lights matches the sidebar instead of
             // showing the terminal body color.
@@ -4965,6 +5283,75 @@ impl App {
                 g.rect(h.x + h.w - 1.0, h.y, 1.0, h.box_h, theme::BORDER);
             }
             Self::paint_gpu_overlays(g, &overlay);
+            // Code-block copy buttons, painted on top of the inactive-pane
+            // veil so they stay legible everywhere. The icon is two
+            // overlapping squares drawn from rects (font glyphs map
+            // unreliably in this renderer — see CLAUDE.md box-drawing note).
+            for (bx, by, bw, bh, hover) in &copy_btns_draw {
+                let (bx, by, bw, bh) = (*bx, *by, *bw, *bh);
+                let bg = if *hover {
+                    theme::SURFACE_HOVER
+                } else {
+                    theme::with_alpha(theme::SURFACE_ACTIVE, 0xE0)
+                };
+                round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, bg);
+                let fg = if *hover { theme::TEXT } else { theme::TEXT_DIM };
+                let s = 8.0; // square side
+                let off = 2.5; // overlap offset
+                let t = 1.3; // stroke
+                let gx = bx + (bw - (s + off)) / 2.0;
+                let gy = by + (bh - (s + off)) / 2.0;
+                // Back square (up-right), outline only.
+                let (r1x, r1y) = (gx + off, gy);
+                g.rect(r1x, r1y, s, t, fg);
+                g.rect(r1x, r1y + s - t, s, t, fg);
+                g.rect(r1x, r1y, t, s, fg);
+                g.rect(r1x + s - t, r1y, t, s, fg);
+                // Front square (down-left): refill the chip bg first so it
+                // reads as sitting on top, then outline.
+                let (r2x, r2y) = (gx, gy + off);
+                g.rect(r2x, r2y, s, s, bg);
+                g.rect(r2x, r2y, s, t, fg);
+                g.rect(r2x, r2y + s - t, s, t, fg);
+                g.rect(r2x, r2y, t, s, fg);
+                g.rect(r2x + s - t, r2y, t, s, fg);
+            }
+            // "복사됨" toast, bottom-center, brief fade after a block copy.
+            if toast_alpha > 0.0 {
+                let msg = "복사됨";
+                let t_font = 13.0_f32;
+                let win_w = win_px.0 / scale;
+                let win_h = win_px.1 / scale;
+                // CJK glyphs ~1em wide; pad generously so the pill never clips.
+                let text_w = msg.chars().count() as f32 * t_font;
+                let (px, py) = (14.0_f32, 8.0_f32);
+                let box_w = text_w + px * 2.0;
+                let box_h = t_font + py * 2.0;
+                let bx = (win_w - box_w) / 2.0;
+                let by = win_h - box_h - 24.0;
+                let a = (235.0 * toast_alpha).round() as u8;
+                round_rect(
+                    g,
+                    bx,
+                    by,
+                    box_w,
+                    box_h,
+                    theme::RADIUS_MD,
+                    theme::with_alpha(theme::SURFACE_ACTIVE, a),
+                );
+                let ta = (255.0 * toast_alpha).round() as u8;
+                g.draw_text(
+                    bx + px,
+                    by + py,
+                    msg,
+                    gpu::DrawOpts {
+                        font_size: t_font,
+                        color: theme::with_alpha(theme::SUCCESS, ta),
+                        bold: true,
+                        italic: false,
+                    },
+                );
+            }
             // Drop-zone highlight sits on top of everything during a drag.
             if let Some((zx, zy, zw, zh)) = drop_zone_rect {
                 g.rect(zx, zy, zw, zh, theme::with_alpha(theme::ACCENT, 90));
@@ -5044,7 +5431,14 @@ impl App {
         // pass even when panes are clean (about_to_wait re-arms WaitUntil
         // to keep waking us through the fade).
         let version_animating = self.version_alpha() > 0.0;
-        if !pty_dirty && !self.chrome_dirty && !blink_changed && !version_animating {
+        // Same for the copy toast: its fade changes the picture every frame.
+        let toast_animating = self.copy_toast_alpha() > 0.0;
+        if !pty_dirty
+            && !self.chrome_dirty
+            && !blink_changed
+            && !version_animating
+            && !toast_animating
+        {
             return;
         }
         self.last_blink_on = blink_on;
@@ -5967,6 +6361,22 @@ impl ApplicationHandler<UserEvent> for App {
                         // Empty sidebar space — swallow the click.
                         return;
                     }
+                    // Code-block copy button. Checked before the cell-grid /
+                    // mouse-forward path so a click lands on the button even
+                    // inside a mouse-reporting TUI (Claude Code), the same
+                    // way the Shift escape hatch steals selection.
+                    if let Some(text) = self
+                        .copy_btn_rects
+                        .iter()
+                        .find(|(_, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
+                        .map(|(t, _)| t.clone())
+                    {
+                        self.copy_block_text(&text);
+                        window.request_redraw();
+                        return;
+                    }
                     let hit = self
                         .pane_header_rects
                         .iter()
@@ -6244,7 +6654,8 @@ impl ApplicationHandler<UserEvent> for App {
         // need a timer, since nothing else is producing frames. Re-arm a
         // ~30fps WaitUntil until the fade finishes, then fall back to the
         // idle Wait. (new_events → request_redraw on the timer fire.)
-        if self.version_alpha() > 0.0 {
+        // The copy toast fade needs the same treatment as the launch banner.
+        if self.version_alpha() > 0.0 || self.copy_toast_alpha() > 0.0 {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + std::time::Duration::from_millis(33),
             ));
@@ -6365,6 +6776,11 @@ fn install_tmux_shim() {
             eprintln!("[shim] stage cmux-compat {cmux_src:?} -> {cmux_target:?} failed: {e}");
         }
     }
+    // Drop a self-contained `imgcat` on the pane PATH so the user (or
+    // Claude) can show an image inline with zero install — it just
+    // base64-encodes the file into an iTerm2 OSC 1337 sequence, which the
+    // pty backend intercepts and the renderer draws over the cell grid.
+    install_imgcat(&shim_dir);
     // Force our shim dir to the FRONT of PATH even after the user's rc
     // files run. A login+interactive zsh sources brew's zprofile, which
     // prepends /opt/homebrew/bin (the real tmux) ahead of the PATH we
@@ -6442,6 +6858,39 @@ fn install_tmux_shim() {
     eprintln!(
         "[shim] dir={shim_dir:?} trace={trace} real_tmux={real:?} fake_tmux={fake_tmux}"
     );
+}
+
+/// Write a tiny `imgcat` into the shim dir (which is on the pane PATH).
+/// It encodes a file as an iTerm2 OSC 1337 inline-image sequence; the
+/// pty backend diverts that and the renderer draws it over the grid.
+/// No external dependency beyond `base64`, which ships on macOS/Linux.
+fn install_imgcat(shim_dir: &std::path::Path) {
+    // Windows shells can't run this /bin/sh script and the pane PATH
+    // there isn't a POSIX shell; skip rather than drop a broken file.
+    if cfg!(windows) {
+        return;
+    }
+    let script = "#!/bin/sh\n\
+# kasaterm imgcat — show image(s) inline via iTerm2 OSC 1337.\n\
+if [ \"$#\" -lt 1 ]; then echo \"usage: imgcat FILE [FILE...]\" >&2; exit 1; fi\n\
+for f in \"$@\"; do\n\
+  if [ ! -f \"$f\" ]; then echo \"imgcat: no such file: $f\" >&2; continue; fi\n\
+  b64=$(base64 < \"$f\" | tr -d '\\n')\n\
+  nm=$(printf '%s' \"$(basename \"$f\")\" | base64 | tr -d '\\n')\n\
+  printf '\\033]1337;File=name=%s;inline=1:%s\\a\\n' \"$nm\" \"$b64\"\n\
+done\n";
+    let path = shim_dir.join("imgcat");
+    if let Err(e) = std::fs::write(&path, script) {
+        eprintln!("[shim] write imgcat failed: {e}");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)) {
+            eprintln!("[shim] chmod imgcat failed: {e}");
+        }
+    }
 }
 
 /// Look for the `tmux` shim binary next to our own executable. Covers
@@ -6585,7 +7034,20 @@ fn locate_cmux_compat_binary() -> Option<std::path::PathBuf> {
 fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(src, target)
+        use std::os::unix::fs::PermissionsExt;
+        // Copy the bytes (not a symlink) so the staged helper is a
+        // standalone copy in $TMPDIR, fully decoupled from the app
+        // bundle. That makes a *running* app survive an in-place bundle
+        // replace (rm -rf + cp during `build-app.sh --install`): the
+        // already-spawned panes keep exec'ing this stable copy, and the
+        // next launch re-stages a fresh copy from the new bundle. A
+        // symlink would dangle the instant the bundle's inode changed,
+        // breaking `tmux` split / `imgcat` mid-session. Re-copying every
+        // start (caller removes the old target first) also kills any
+        // stale helper from a previous build.
+        std::fs::copy(src, target)?;
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o755))?;
+        Ok(())
     }
     #[cfg(windows)]
     {

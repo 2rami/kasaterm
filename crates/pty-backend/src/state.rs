@@ -16,6 +16,7 @@
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, WindowSize};
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, TermDamage};
@@ -26,7 +27,9 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
-use tmux_bridge::screen::{Cell, Color, Row, ScreenUpdate};
+use tmux_bridge::screen::{Cell, Color, ImagePlacement, Row, ScreenUpdate};
+
+use crate::image::ImageScanner;
 
 /// What to spawn in the PTY. Sticks close to portable-pty's
 /// CommandBuilder so the user can override env / cwd without us
@@ -42,6 +45,11 @@ pub struct PtyOptions {
     /// The renderer keys panes by this id, so a multi-pane workspace
     /// gives each PtySession a unique value ("%0", "%1", ...).
     pub pane_id: String,
+    /// Physical pixels per cell (width, height). Used only to turn an
+    /// inline image's pixel size into a cell span when the OSC 1337
+    /// sequence doesn't state the size in cells. The host passes its
+    /// real font metrics; the default is a reasonable fallback.
+    pub cell_px: (u16, u16),
 }
 
 impl Default for PtyOptions {
@@ -53,9 +61,39 @@ impl Default for PtyOptions {
             rows: 24,
             env: Vec::new(),
             pane_id: "%0".to_string(),
+            cell_px: (8, 16),
         }
     }
 }
+
+/// One inline image anchored into a session's scrollback. `abs_line` is
+/// the image top's distance from the topmost history line at placement
+/// time (`history_size + viewport_row`); the snapshot maps it back to a
+/// current viewport row using the live `history_size` + `display_offset`,
+/// so the image rides the scrollback correctly and disappears when it
+/// scrolls off — no host-side scroll logic needed.
+struct PlacedImage {
+    id: u64,
+    image: Arc<tmux_bridge::screen::DecodedImage>,
+    abs_line: i64,
+    col: u16,
+    cols: u16,
+    rows: u16,
+}
+
+/// Shared list of a session's placed images. Written by the reader
+/// thread when an OSC 1337 sequence lands; read by every `snapshot`
+/// (reader thread + the main-thread scroll path) to build the per-frame
+/// visible set.
+#[derive(Default)]
+struct PlacedImages {
+    images: Vec<PlacedImage>,
+    next_id: u64,
+}
+
+/// Keep memory bounded: only the most recent N images stay anchored.
+/// Older ones have long scrolled past the scrollback cap anyway.
+const MAX_PLACED_IMAGES: usize = 32;
 
 pub struct PtySession {
     /// Channel the renderer consumes — one ScreenUpdate per dirty
@@ -89,6 +127,11 @@ pub struct PtySession {
     screens_tx: Sender<ScreenUpdate>,
     title_handle: Arc<Mutex<Option<String>>>,
     pane_id: String,
+    /// Inline images anchored in this session's scrollback. Shared with
+    /// the reader thread (which places them) and read by `scroll()` /
+    /// `scroll_to_bottom()` so a wheel-scroll re-snapshot reflects the
+    /// images' new positions immediately.
+    placed_images: Arc<Mutex<PlacedImages>>,
 }
 
 impl PtySession {
@@ -230,6 +273,7 @@ impl PtySession {
             last_title: Arc::clone(&title_handle),
         };
         let term = Arc::new(Mutex::new(make_term(opts.cols, opts.rows, listener)));
+        let placed_images: Arc<Mutex<PlacedImages>> = Arc::new(Mutex::new(PlacedImages::default()));
         let reader_thread = spawn_reader_thread(
             reader,
             tx.clone(),
@@ -239,6 +283,8 @@ impl PtySession {
             opts.pane_id.clone(),
             Arc::clone(&title_handle),
             Arc::clone(&term),
+            Arc::clone(&placed_images),
+            opts.cell_px,
         );
 
         Ok(Self {
@@ -257,6 +303,7 @@ impl PtySession {
             screens_tx: tx,
             title_handle,
             pane_id: opts.pane_id.clone(),
+            placed_images,
         })
     }
 
@@ -340,7 +387,15 @@ impl PtySession {
         let mut t = self.term.lock().unwrap();
         t.scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
         let offset = t.grid().display_offset();
-        let update = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
+        let update = snapshot(
+            &mut t,
+            cols,
+            rows,
+            &self.pane_id,
+            &self.title_handle,
+            true,
+            &self.placed_images,
+        );
         let _ = self.screens_tx.try_send(update);
         offset
     }
@@ -350,7 +405,15 @@ impl PtySession {
         let (cols, rows) = *self.size.lock().unwrap();
         let mut t = self.term.lock().unwrap();
         t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
-        let update = snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true);
+        let update = snapshot(
+            &mut t,
+            cols,
+            rows,
+            &self.pane_id,
+            &self.title_handle,
+            true,
+            &self.placed_images,
+        );
         let _ = self.screens_tx.try_send(update);
     }
 
@@ -513,6 +576,8 @@ fn spawn_reader_thread(
     pane_id: String,
     title_handle: Arc<Mutex<Option<String>>>,
     term: Arc<Mutex<Term<PtyEventForwarder>>>,
+    placed_images: Arc<Mutex<PlacedImages>>,
+    cell_px: (u16, u16),
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use unicode_normalization::UnicodeNormalization;
@@ -523,6 +588,9 @@ fn spawn_reader_thread(
         // never sees a half codepoint (a multibyte char split between
         // two reads).
         let mut utf8_buf = Utf8Buffer::new();
+        // Diverts iTerm2 OSC 1337 inline-image sequences out of the byte
+        // stream before the VT parser sees them (stateful across reads).
+        let mut img_scanner = ImageScanner::new();
 
         loop {
             // Check for a pending resize before we read more bytes —
@@ -575,18 +643,43 @@ fn spawn_reader_thread(
                 eprintln!("[pty-backend] read {n} bytes: {preview}");
             }
 
+            // Divert iTerm2 OSC 1337 inline-image sequences out of the
+            // stream first, so the huge base64 payload never reaches the
+            // VT parser (and can't overflow vte's OSC buffer into visible
+            // garbage). `clean` is everything else, byte-for-byte and in
+            // order — the text / Hangul / OSC 133 / box-drawing paths
+            // below are untouched.
+            let mut clean = Vec::with_capacity(n);
+            let captured = img_scanner.feed(&buf[..n], &mut clean);
+
             // NFC-normalize so decomposed Hangul (NFD jamo) collapses to
             // precomposed syllables before alacritty stores them — the
             // GPU cell-renderer draws one glyph per codepoint, so NFD
             // would otherwise show as split jamo (cosmic_text used to
             // reshape them on the sugarloaf path).
-            let raw_str = utf8_buf.process(&buf[..n]);
+            let raw_str = utf8_buf.process(&clean);
             let nfc_str: String = raw_str.nfc().collect();
             let processed_bytes = nfc_str.as_bytes();
 
             let update = {
                 let mut t = term.lock().unwrap();
                 processor.advance(&mut *t, processed_bytes);
+                // Place any images that completed in this batch. Done
+                // after advancing the batch's text so the anchor lands
+                // where the cursor sits, then reserve blank rows by
+                // feeding newlines so subsequent shell output flows below
+                // the image instead of painting over it.
+                if !captured.is_empty() {
+                    place_captured_images(
+                        &mut t,
+                        &mut processor,
+                        &captured,
+                        current_size.0,
+                        current_size.1,
+                        cell_px,
+                        &placed_images,
+                    );
+                }
                 // alacritty buffers DECSET 2026 synchronized output internally:
                 // while its sync buffer is non-empty the Term grid still holds
                 // the pre-sync frame, so skip the snapshot until it flushes on
@@ -607,6 +700,7 @@ fn spawn_reader_thread(
                         &pane_id,
                         &title_handle,
                         false,
+                        &placed_images,
                     );
                     // OSC 133 `B` = prompt end / command-input start. Our
                     // VT parser (alacritty 0.26 / vte 0.15) drops OSC 133
@@ -640,6 +734,94 @@ fn spawn_reader_thread(
 }
 
 
+
+/// Anchor each freshly-captured image at the cursor, reserve blank rows
+/// for it (so following output flows below), and record it in the shared
+/// placed-image list keyed by a session-unique id.
+fn place_captured_images(
+    t: &mut Term<PtyEventForwarder>,
+    processor: &mut Processor<StdSyncHandler>,
+    captured: &[crate::image::CapturedImage],
+    cols: u16,
+    rows: u16,
+    cell_px: (u16, u16),
+    placed_images: &Arc<Mutex<PlacedImages>>,
+) {
+    for cap in captured {
+        // Anchor at the live tail so display_offset is 0 and the cursor
+        // row is a stable reference.
+        t.scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+        let hist = t.grid().history_size() as i64;
+        let cursor = t.grid().cursor.point;
+        let anchor_row = cursor.line.0.max(0) as i64;
+        let anchor_col = cursor.column.0 as u16;
+
+        let (span_cols, span_rows) = compute_span(cap, cols, rows, cell_px);
+
+        // Reserve span_rows blank lines below the anchor so the next
+        // prompt / output doesn't paint over the image. `\r\n` per row
+        // returns to column 0 and scrolls at the bottom edge.
+        let nl = b"\r\n".repeat(span_rows as usize);
+        processor.advance(t, &nl);
+
+        let mut guard = placed_images.lock().unwrap();
+        let id = guard.next_id;
+        guard.next_id += 1;
+        guard.images.push(PlacedImage {
+            id,
+            image: cap.image.clone(),
+            abs_line: hist + anchor_row,
+            col: anchor_col,
+            cols: span_cols,
+            rows: span_rows,
+        });
+        let overflow = guard.images.len().saturating_sub(MAX_PLACED_IMAGES);
+        if overflow > 0 {
+            guard.images.drain(..overflow);
+        }
+    }
+}
+
+/// Turn an image's pixel size + OSC size hints into a cell span,
+/// preserving aspect when only one dimension is specified. Clamped so a
+/// huge image can't reserve an absurd number of rows.
+fn compute_span(
+    cap: &crate::image::CapturedImage,
+    grid_cols: u16,
+    grid_rows: u16,
+    cell_px: (u16, u16),
+) -> (u16, u16) {
+    let img_w = cap.image.width.max(1) as f32;
+    let img_h = cap.image.height.max(1) as f32;
+    let cw = cell_px.0.max(1) as f32;
+    let ch = cell_px.1.max(1) as f32;
+
+    // Resolve each axis to a target display size in PHYSICAL pixels, or
+    // None if the sender left it implicit.
+    let want_w_px = cap
+        .want_cols
+        .map(|c| c as f32 * cw)
+        .or_else(|| cap.px_cols.map(|p| p as f32))
+        .or_else(|| cap.pct_cols.map(|p| p as f32 / 100.0 * grid_cols as f32 * cw));
+    let want_h_px = cap
+        .want_rows
+        .map(|r| r as f32 * ch)
+        .or_else(|| cap.px_rows.map(|p| p as f32))
+        .or_else(|| cap.pct_rows.map(|p| p as f32 / 100.0 * grid_rows as f32 * ch));
+
+    let (disp_w, disp_h) = match (want_w_px, want_h_px) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, w * img_h / img_w),
+        (None, Some(h)) => (h * img_w / img_h, h),
+        // No hints: native pixel size (crisp 1:1 on the physical grid).
+        (None, None) => (img_w, img_h),
+    };
+
+    let cols = (disp_w / cw).ceil().clamp(1.0, grid_cols.max(1) as f32) as u16;
+    // Allow tall images but cap so a decode glitch can't reserve 100k rows.
+    let rows = (disp_h / ch).ceil().clamp(1.0, (grid_rows as f32 * 4.0).max(1.0)) as u16;
+    (cols, rows)
+}
 
 /// Reassembles UTF-8 across PTY read boundaries. A read can split a
 /// multibyte codepoint; buffering the tail until the next read keeps NFC
@@ -703,11 +885,42 @@ fn snapshot(
     // row and leaves untouched rows alone, so a partial list is correct.
     // Callers that change the *whole* view (scroll, resize) pass true.
     force_full: bool,
+    placed_images: &Arc<Mutex<PlacedImages>>,
 ) -> ScreenUpdate {
     // display_offset counts lines scrolled toward older history; visual
     // row r maps to grid line `r - display_offset`. Read it before the
     // &mut borrow from `damage()`.
     let display_offset = term.grid().display_offset() as i32;
+    // Map each anchored image to its current viewport row. abs_line is
+    // measured from the topmost history line; the viewport top currently
+    // shows history line `history_size - display_offset`, so
+    // `row = abs_line - history_size + display_offset`. Images fully
+    // above the viewport (scrolled off) or fully below are dropped here,
+    // which is exactly the "hide when out of view" behaviour we want.
+    let images: Vec<ImagePlacement> = {
+        let hist = term.grid().history_size() as i64;
+        let off = display_offset as i64;
+        let guard = placed_images.lock().unwrap();
+        guard
+            .images
+            .iter()
+            .filter_map(|p| {
+                let row = p.abs_line - hist + off;
+                if row + p.rows as i64 > 0 && row < rows as i64 {
+                    Some(ImagePlacement {
+                        id: p.id,
+                        image: p.image.clone(),
+                        row: row as i32,
+                        col: p.col,
+                        cols: p.cols,
+                        rows: p.rows,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
     // Which visual rows to rebuild. damage() yields viewport-relative
     // line numbers (already display_offset-adjusted), and returns Full
     // on first frame / resize / scroll, which we expand to every row.
@@ -775,6 +988,7 @@ fn snapshot(
         // Filled in by the reader thread when this batch carried an
         // OSC 133 `B` mark — snapshot() itself doesn't parse the stream.
         prompt_end: None,
+        images,
     }
 }
 
