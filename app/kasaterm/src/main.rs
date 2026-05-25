@@ -1344,9 +1344,11 @@ enum MdBlock {
 }
 
 /// A parsed markdown document bound to a pane (same lifetime discipline as
-/// `ImagePane`). The renderer lays the blocks out into the pane box.
+/// `ImagePane`). The renderer lays the blocks out into the pane box. `path`
+/// is the source file so the `e` shortcut can open it in $EDITOR.
 struct MarkdownDoc {
     blocks: Vec<MdBlock>,
+    path: String,
 }
 
 fn heading_level(l: pulldown_cmark::HeadingLevel) -> u8 {
@@ -1365,7 +1367,7 @@ fn heading_level(l: pulldown_cmark::HeadingLevel) -> u8 {
 /// is flattened (a quote's paragraphs collapse into Quote blocks, list-item
 /// paragraphs into the item) — enough structure for a document-style reader
 /// without a full layout tree.
-fn parse_markdown(text: &str) -> MarkdownDoc {
+fn parse_markdown(text: &str) -> Vec<MdBlock> {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
     let mut blocks: Vec<MdBlock> = Vec::new();
     let mut spans: Vec<MdSpan> = Vec::new();
@@ -1472,7 +1474,7 @@ fn parse_markdown(text: &str) -> MarkdownDoc {
             _ => {}
         }
     }
-    MarkdownDoc { blocks }
+    blocks
 }
 
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
@@ -4100,7 +4102,10 @@ impl App {
         }
         let text = std::fs::read_to_string(p)
             .map_err(|e| anyhow::anyhow!("read failed: {e}"))?;
-        let doc = parse_markdown(&text);
+        let doc = MarkdownDoc {
+            blocks: parse_markdown(&text),
+            path: p.to_string_lossy().into_owned(),
+        };
         let name = p
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -4136,6 +4141,23 @@ impl App {
             w.request_redraw();
         }
         Ok(())
+    }
+
+    /// Open a markdown pane's source in $EDITOR, spawned in a fresh split shell
+    /// pane beside it (backs the `e` shortcut). Saving + quitting the editor
+    /// leaves the file updated; re-opening the markdown shows the new content.
+    fn open_md_editor(&mut self, path: &str) {
+        if self
+            .split_active_pane(pty_backend::SplitDir::Horizontal)
+            .is_err()
+        {
+            return;
+        }
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+        // Single-quote the path so spaces/parens survive; escape embedded quotes.
+        let safe = path.replace('\'', "'\\''");
+        let cmd = format!("{editor} '{safe}'\r");
+        self.send_bytes(cmd.as_bytes());
     }
 
     /// Drain `dead_panes` and remove each from the BSP tree + pty map.
@@ -4822,6 +4844,21 @@ impl App {
         // Touch the input timer so the cursor stays solid for a beat and
         // the blink phase re-starts from "on" once it kicks in.
         self.last_input_at = Instant::now();
+        // Markdown panes have no PTY: 'e' opens the source in $EDITOR; every
+        // other key is swallowed (scrolling is wheel-driven).
+        let md_path = {
+            let ws = self.ws.lock().unwrap();
+            ws.active()
+                .and_then(|p| p.markdown.as_ref().map(|d| d.path.clone()))
+        };
+        if let Some(path) = md_path {
+            if let winit::keyboard::Key::Character(s) = &event.logical_key {
+                if s.as_str() == "e" {
+                    self.open_md_editor(&path);
+                }
+            }
+            return;
+        }
         // Typing snaps the active pane back to live tail. Other panes'
         // scroll offsets are left alone — switching focus by clicking
         // doesn't disturb where the user was reading.

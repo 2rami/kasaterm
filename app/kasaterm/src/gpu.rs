@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use cell_renderer::pipeline::CellInstance;
-use cell_renderer::{Atlas, GlyphKey, Pipeline, Shaper};
+use cell_renderer::{Atlas, AtlasEntry, GlyphKey, Pipeline, Shaper};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tmux_bridge::screen::Cell;
 use winit::window::Window;
@@ -41,6 +41,10 @@ pub struct GpuRenderer {
     pipeline: Pipeline,
     atlas: Atlas,
     shaper: Shaper,
+    /// Secondary shaper for markdown body/heading text — a proportional gothic
+    /// (Noto Sans KR if installed, else Apple SD Gothic Neo) so documents read
+    /// like prose, not code. Glyphs go into the SAME atlas keyed by font=1.
+    md_shaper: Shaper,
     bind_group: wgpu::BindGroup,
     font_size_px: u32,
     pub cell_w: f32,
@@ -186,6 +190,20 @@ impl GpuRenderer {
         // here for a guaranteed glyph.
         shaper.add_fallback_bytes(cell_renderer::CASCADIA_CODE_NF, 0);
         shaper.add_fallback_bytes(cell_renderer::SYMBOLS_NERD_FONT_MONO, 0);
+        // Markdown body font — a proportional gothic. Falls back to the primary
+        // mono if the gothic can't load so the renderer never panics.
+        let (md_font, md_idx) = md_font_path();
+        let mut md_shaper = Shaper::from_path(&md_font, md_idx)
+            .or_else(|_| Shaper::from_path(&font_path, 0))
+            .with_context(|| format!("load markdown font {md_font}"))?;
+        eprintln!("[font] markdown={md_font}");
+        // Same bundled symbol/icon fallbacks so glyphs the gothic lacks still
+        // resolve (and CJK falls through to the gothic's own coverage first).
+        for (path, idx) in fallback_font_paths() {
+            md_shaper.add_fallback_path(&path, idx);
+        }
+        md_shaper.add_fallback_bytes(cell_renderer::CASCADIA_CODE_NF, 0);
+        md_shaper.add_fallback_bytes(cell_renderer::SYMBOLS_NERD_FONT_MONO, 0);
         let cell_w = shaper.cell_advance(font_size_px as f32).ceil();
         // Use the font's natural line metric (ascent+descent+leading)
         // for cell height instead of an arbitrary multiplier. Lines
@@ -201,6 +219,7 @@ impl GpuRenderer {
                     bold: false,
                     italic: false,
                     size_px: font_size_px,
+                    font: 0,
                 };
                 let _ = atlas.get_or_bake(&device, &queue, &mut shaper, key);
             }
@@ -233,6 +252,7 @@ impl GpuRenderer {
             pipeline,
             atlas,
             shaper,
+            md_shaper,
             bind_group,
             font_size_px,
             cell_w: cell_w / scale,
@@ -288,6 +308,7 @@ impl GpuRenderer {
                 bold: opts.bold,
                 italic: opts.italic,
                 size_px,
+                font: 0,
             };
             let Some(entry) = self.atlas.get_or_bake(
                 &self.device,
@@ -369,6 +390,7 @@ impl GpuRenderer {
                     bold: false,
                     italic: false,
                     size_px: self.font_size_px,
+                    font: 0,
                 };
                 if let Some(entry) = self.atlas.get_or_bake(
                     &self.device,
@@ -435,6 +457,7 @@ impl GpuRenderer {
                     bold: false,
                     italic: false,
                     size_px: self.font_size_px,
+                    font: 0,
                 };
                 if let Some(entry) =
                     self.atlas
@@ -473,25 +496,107 @@ impl GpuRenderer {
         }
     }
 
-    /// Width (logical px) a styled run occupies, using the SAME per-glyph
-    /// advance math as `draw_text` so word-wrap measurement matches what gets
-    /// drawn. `code` is accepted for symmetry but doesn't change metrics — the
-    /// primary font is monospace, so inline code lays out on the same advance.
-    fn measure_run(&mut self, text: &str, size: f32, bold: bool, italic: bool, _code: bool) -> f32 {
+    /// Bake (or fetch cached) a glyph from the requested font (0 = primary
+    /// mono, 1 = markdown gothic) into the shared atlas. Centralizes the
+    /// shaper choice so every caller stays consistent.
+    fn bake_glyph(
+        &mut self,
+        ch: char,
+        bold: bool,
+        italic: bool,
+        size_px: u32,
+        font: u8,
+    ) -> Option<AtlasEntry> {
+        let key = GlyphKey { ch, bold, italic, size_px, font };
+        if font == 1 {
+            self.atlas
+                .get_or_bake(&self.device, &self.queue, &mut self.md_shaper, key)
+        } else {
+            self.atlas
+                .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
+        }
+    }
+
+    /// Space/cell advance for the requested font at `size_px`.
+    fn font_cell_advance(&mut self, size_px: u32, font: u8) -> f32 {
+        if font == 1 {
+            self.md_shaper.cell_advance(size_px as f32)
+        } else {
+            self.shaper.cell_advance(size_px as f32)
+        }
+    }
+
+    /// Draw a single word (no internal wrapping) at logical (x, y) using the
+    /// given font. Mirrors draw_text's glyph placement but lets the markdown
+    /// renderer pick the gothic (font=1) for prose and mono (font=0) for code.
+    fn md_draw_word(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: [u8; 4],
+        bold: bool,
+        italic: bool,
+        font: u8,
+    ) {
         let s = self.scale;
         let size_px = (size * s).round().max(1.0) as u32;
+        let baseline = y * s + size_px as f32 * 0.78;
+        let fg = srgb_rgba_to_linear(color);
+        let mut pen = x * s;
+        for ch in text.chars() {
+            if ch == ' ' {
+                pen += self.font_cell_advance(size_px, font);
+                continue;
+            }
+            if let Some(e) = self.bake_glyph(ch, bold, italic, size_px, font) {
+                let gx = pen + e.bearing_x as f32;
+                let gy = baseline - e.bearing_y as f32;
+                let (col, flags) = if e.is_color {
+                    ([1.0, 1.0, 1.0, 1.0], CellInstance::FLAG_COLOR)
+                } else {
+                    (fg, 0)
+                };
+                let inst = CellInstance {
+                    cell_px: [gx, gy, e.px_w as f32, e.px_h as f32],
+                    uv_min: e.uv_min,
+                    uv_max: e.uv_max,
+                    fg_rgba: col,
+                    flags,
+                    ..Default::default()
+                };
+                self.chrome.push(inst);
+                // Faux bold: the rasterizer has no weighted face, so smear the
+                // glyph a fraction of an em to the right for a heavier stroke.
+                if bold && !e.is_color {
+                    let mut b = inst;
+                    b.cell_px[0] += size_px as f32 * 0.04;
+                    self.chrome.push(b);
+                }
+                pen += if is_wide_char(ch) {
+                    e.px_w as f32 + size_px as f32 * 0.18
+                } else {
+                    e.advance
+                };
+            }
+        }
+    }
+
+    /// Width (logical px) a styled run occupies, matching `md_draw_word`'s
+    /// advance so word-wrap measurement equals what gets drawn. `code` selects
+    /// the mono font (0); prose uses the gothic (1).
+    fn measure_run(&mut self, text: &str, size: f32, bold: bool, italic: bool, code: bool) -> f32 {
+        let s = self.scale;
+        let size_px = (size * s).round().max(1.0) as u32;
+        let font: u8 = if code { 0 } else { 1 };
         let mut w = 0.0;
         for ch in text.chars() {
             if ch == ' ' {
-                w += self.shaper.cell_advance(size_px as f32);
+                w += self.font_cell_advance(size_px, font);
                 continue;
             }
-            if let Some(e) = self.atlas.get_or_bake(
-                &self.device,
-                &self.queue,
-                &mut self.shaper,
-                GlyphKey { ch, bold, italic, size_px },
-            ) {
+            if let Some(e) = self.bake_glyph(ch, bold, italic, size_px, font) {
                 w += if is_wide_char(ch) {
                     e.px_w as f32 + size_px as f32 * 0.18
                 } else {
@@ -517,8 +622,10 @@ impl GpuRenderer {
         clip_top: f32,
         clip_bot: f32,
     ) -> f32 {
-        let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
-        let space_w = self.shaper.cell_advance(size * self.scale) / self.scale;
+        // Line metrics from the gothic (markdown body font), even when a run
+        // is inline code — keeps the baseline steady across a mixed line.
+        let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
+        let space_w = self.md_shaper.cell_advance(size * self.scale) / self.scale;
         let mut pen_x = x_start;
         let mut pen_y = y_start;
         for span in spans {
@@ -543,12 +650,8 @@ impl GpuRenderer {
                             );
                         }
                         let col = if span.code { crate::theme::ACCENT } else { color };
-                        self.draw_text(
-                            pen_x,
-                            pen_y,
-                            trimmed,
-                            DrawOpts { font_size: size, color: col, bold, italic: span.italic },
-                        );
+                        let font: u8 = if span.code { 0 } else { 1 };
+                        self.md_draw_word(trimmed, pen_x, pen_y, size, col, bold, span.italic, font);
                     }
                     pen_x += ww;
                 }
@@ -590,7 +693,7 @@ impl GpuRenderer {
                         _ => 1.0,
                     };
                     let size = base * scale_f;
-                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
                     pen_y += lh * 0.5;
                     pen_y = self.md_runs(
                         spans, x, pen_y, w, size, true, crate::theme::TEXT, clip_top, clip_bot,
@@ -599,7 +702,7 @@ impl GpuRenderer {
                 }
                 MdBlock::Para { spans } => {
                     let size = base;
-                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
                     pen_y = self.md_runs(
                         spans, x, pen_y, w, size, false, crate::theme::TEXT, clip_top, clip_bot,
                     );
@@ -607,7 +710,7 @@ impl GpuRenderer {
                 }
                 MdBlock::Code { code } => {
                     let size = base * 0.92;
-                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
                     let pad = base * 0.4;
                     let lines: Vec<&str> = code.trim_end_matches('\n').split('\n').collect();
                     let block_h = lines.len() as f32 * lh + pad * 2.0;
@@ -635,7 +738,7 @@ impl GpuRenderer {
                 }
                 MdBlock::ListItem { depth, marker, spans } => {
                     let size = base;
-                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
                     let indent = (*depth as f32 + 1.0) * base * 1.3;
                     if pen_y + lh > clip_top && pen_y < clip_bot {
                         self.draw_text(
@@ -665,7 +768,7 @@ impl GpuRenderer {
                 }
                 MdBlock::Quote { spans } => {
                     let size = base;
-                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
                     let indent = base * 1.2;
                     let start_y = pen_y;
                     pen_y = self.md_runs(
@@ -686,7 +789,7 @@ impl GpuRenderer {
                     pen_y += lh * 0.45;
                 }
                 MdBlock::Rule => {
-                    let lh = self.shaper.line_height(base * self.scale).ceil() / self.scale;
+                    let lh = self.md_shaper.line_height(base * self.scale).ceil() / self.scale;
                     pen_y += lh * 0.4;
                     if pen_y > clip_top && pen_y < clip_bot {
                         self.rect(x, pen_y, w, 1.5, crate::theme::BORDER);
@@ -922,7 +1025,7 @@ impl GpuRenderer {
                             &self.device,
                             &self.queue,
                             &mut self.shaper,
-                            GlyphKey { ch, bold: cell.bold, italic: cell.italic, size_px: probe_size },
+                            GlyphKey { ch, bold: cell.bold, italic: cell.italic, size_px: probe_size, font: 0 },
                         );
                         if let Some(p) = probe {
                             if p.px_h > 0 {
@@ -941,7 +1044,7 @@ impl GpuRenderer {
                                     &self.device,
                                     &self.queue,
                                     &mut self.shaper,
-                                    GlyphKey { ch, bold: cell.bold, italic: cell.italic, size_px: final_size },
+                                    GlyphKey { ch, bold: cell.bold, italic: cell.italic, size_px: final_size, font: 0 },
                                 );
                                 if let Some(e) = entry {
                                     let x = cell_x + (cell_w_px - e.px_w as f32) * 0.5;
@@ -963,6 +1066,7 @@ impl GpuRenderer {
                         bold: cell.bold,
                         italic: cell.italic,
                         size_px: self.font_size_px,
+                        font: 0,
                     };
                     let Some(entry) = self.atlas.get_or_bake(
                         &self.device,
@@ -1230,6 +1334,38 @@ fn fallback_font_paths() -> Vec<(String, u32)> {
         );
     }
     out
+}
+
+/// Markdown body font: a proportional gothic. Prefer Noto Sans KR if the user
+/// installed it, else fall back to Apple SD Gothic Neo (always present on
+/// macOS). Returns (path, face_index).
+fn md_font_path() -> (String, u32) {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let candidates = [
+            format!("{home}/Library/Fonts/NotoSansKR-Regular.otf"),
+            format!("{home}/Library/Fonts/NotoSansKR-Regular.ttf"),
+            "/Library/Fonts/NotoSansKR-Regular.otf".to_string(),
+        ];
+        for c in candidates {
+            if std::path::Path::new(&c).exists() {
+                return (c, 0);
+            }
+        }
+        return ("/System/Library/Fonts/AppleSDGothicNeo.ttc".to_string(), 0);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return (r"C:\Windows\Fonts\malgun.ttf".to_string(), 0);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        return (
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc".to_string(),
+            0,
+        );
+    }
 }
 
 fn default_font_path() -> String {

@@ -23,6 +23,10 @@ pub struct GlyphKey {
     /// Pixel size, rounded to integer so `1.0 px` jitter doesn't
     /// double-cache the same glyph.
     pub size_px: u32,
+    /// Which font shaper baked this glyph. The renderer keys distinct fonts
+    /// (0 = primary monospace, 1 = markdown gothic) so the same codepoint at
+    /// the same size from two fonts doesn't collide in the shared atlas.
+    pub font: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
