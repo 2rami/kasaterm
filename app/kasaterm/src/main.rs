@@ -119,14 +119,14 @@ const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
 /// pane gets one of these strips above its cell grid; a single
 /// un-split window renders no header at all (matches the iTerm
 /// behavior the user pointed at).
-const PANE_HEADER_HEIGHT: f32 = 28.0;
+const PANE_HEADER_HEIGHT: f32 = 30.0;
 /// Inner padding between a pane's box edges and its cell grid, in logical
 /// pixels. Keeps text off the divider / window edge and gives abutting
 /// panes visible breathing room. The PTY's usable cols/rows shrink by the
 /// equivalent cell count so the grid still fits inside the inset box, and
 /// every render origin + click-to-cell map applies the same offset.
-const PANE_INNER_X: f32 = 3.0;
-const PANE_INNER_Y: f32 = 2.0;
+const PANE_INNER_X: f32 = 6.0;
+const PANE_INNER_Y: f32 = 0.0;
 /// Code-block copy button (overlay) size in logical px. Small chip that
 /// sits at a detected block's top-right corner.
 const COPY_BTN_W: f32 = 26.0;
@@ -1297,6 +1297,12 @@ struct PaneState {
     /// Frame-dirty flag; cleared after the next render. When every pane is
     /// clean and no chrome anim is pending, the render loop skips the GPU pass.
     dirty: bool,
+    /// In-pane tab bar labels (stage 1: visual only). Empty = single-tab,
+    /// the header shows just the pane title. The "+" button appends here and
+    /// the title becomes tabs[0]; real per-tab PTY/content comes in stage 2.
+    tabs: Vec<String>,
+    /// Index into `tabs` of the visually-active tab.
+    active_tab: usize,
 }
 
 impl PaneState {
@@ -1821,6 +1827,13 @@ struct App {
     /// Render/Raw toggle pill hit rects for markdown pane headers:
     /// (pane id, is_raw, logical rect). A click sets that pane's md_raw_mode.
     md_toggle_rects: Vec<(String, bool, (f32, f32, f32, f32))>,
+    /// In-pane tab hit rects: (pane id, tab index, logical rect). Click
+    /// switches that pane's active_tab. Rebuilt each header paint.
+    pane_tab_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
+    /// Per-tab × close hit rects: (pane id, tab index, logical rect).
+    pane_tab_close_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
+    /// "+" new-tab button hit rect per pane: (pane id, logical rect).
+    pane_plus_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// When the "복사됨" copy toast started animating. Drives its fade in the
     /// overlay pass; `None` once faded out. Set on a successful block copy.
     copy_toast_at: Option<Instant>,
@@ -1992,6 +2005,9 @@ impl App {
             copy_btn_rects: Vec::new(),
             md_content_h: HashMap::new(),
             md_toggle_rects: Vec::new(),
+            pane_tab_rects: Vec::new(),
+            pane_tab_close_rects: Vec::new(),
+            pane_plus_rects: Vec::new(),
             copy_toast_at: None,
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
@@ -5959,6 +5975,7 @@ impl App {
         struct PaneSlot {
             rows: Vec<Vec<GridCell>>,
             origin_px: (f32, f32),
+            dim: bool,
         }
         // Header chrome carried in LOGICAL px — gpu.rect/draw_text
         // promote to physical internally, matching the cell pass.
@@ -5977,6 +5994,10 @@ impl App {
             is_markdown: bool,
             /// Current markdown mode (true = Raw editor) for pill highlighting.
             md_raw_mode: bool,
+            /// In-pane tab labels (empty = single-tab; header shows `label`).
+            tabs: Vec<String>,
+            /// Active tab index into `tabs`.
+            active_tab: usize,
         }
         // Captured once so the &mut self.gpu block below (which can't
         // re-borrow &self) can still see the collapsed/expanded width.
@@ -6004,9 +6025,10 @@ impl App {
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
-            // Total grid rows — used to detect the bottom-row pane so it can
-            // stretch to the window's true bottom (window_cells floors rows).
-            let grid_rows = self.window_cells().1;
+            // Total grid rows/cols — used to detect the bottom-row / right-col
+            // pane so it can stretch to the window's true edge (window_cells
+            // floors both, leaving a sub-cell remainder otherwise).
+            let (grid_cols, grid_rows) = self.window_cells();
             let leaves: Vec<(String, u16, u16, u16, u16)> = if let Some(layout) = ws.layout.as_ref() {
                 layout
                     .leaves()
@@ -6118,6 +6140,9 @@ impl App {
                 slots.push(PaneSlot {
                     rows: composed,
                     origin_px,
+                    // Unfocused panes dim their text only (no box veil). Single
+                    // un-split pane is never dimmed.
+                    dim: show_headers && active_id.as_deref() != Some(id.as_str()),
                 });
                 if img.is_some() || md.is_some() {
                     // Body box (header band excluded, inset by the same
@@ -6132,7 +6157,20 @@ impl App {
                         + y_cells as f32 * self.cell.h
                         + header_shift_logical
                         + PANE_INNER_Y;
-                    let bw = (w_cells as f32 * self.cell.w - 2.0 * PANE_INNER_X).max(1.0);
+                    let base_w = w_cells as f32 * self.cell.w;
+                    let full_w = if x_cells + w_cells >= grid_cols {
+                        let extra = self.window.as_ref().map_or(0.0, |w| {
+                            let s = w.scale_factor() as f32;
+                            let raw_lw = w.inner_size().width as f32 / s;
+                            (raw_lw
+                                - (WINDOW_PADDING + sidebar_w + grid_cols as f32 * self.cell.w))
+                                .max(0.0)
+                        });
+                        base_w + extra
+                    } else {
+                        base_w
+                    };
+                    let bw = (full_w - 2.0 * PANE_INNER_X).max(1.0);
                     let base_h = h_cells as f32 * self.cell.h;
                     let full_h = if y_cells + h_cells >= grid_rows {
                         let extra = self.window.as_ref().map_or(0.0, |w| {
@@ -6179,7 +6217,26 @@ impl App {
                         id: id.clone(),
                         x: WINDOW_PADDING + sidebar_w + x_cells as f32 * self.cell.w,
                         y: TITLE_HEIGHT + y_cells as f32 * self.cell.h,
-                        w: w_cells as f32 * self.cell.w,
+                        // Right-col pane stretches to the window's true right
+                        // edge, mirroring box_h's bottom stretch, so the
+                        // floored sub-cell remainder doesn't read as a seam.
+                        w: {
+                            let base = w_cells as f32 * self.cell.w;
+                            if x_cells + w_cells >= grid_cols {
+                                let extra = self.window.as_ref().map_or(0.0, |w| {
+                                    let s = w.scale_factor() as f32;
+                                    let raw_lw = w.inner_size().width as f32 / s;
+                                    (raw_lw
+                                        - (WINDOW_PADDING
+                                            + sidebar_w
+                                            + grid_cols as f32 * self.cell.w))
+                                        .max(0.0)
+                                });
+                                base + extra
+                            } else {
+                                base
+                            }
+                        },
                         // Bottom-row pane stretches to the window's true bottom.
                         // window_cells() floors rows, so the last sub-cell of
                         // window height falls outside the grid; without this the
@@ -6205,8 +6262,16 @@ impl App {
                         color: pane.color,
                         is_markdown: pane.markdown().is_some(),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
+                        tabs: pane.tabs.clone(),
+                        active_tab: pane.active_tab,
                     });
                 }
+            }
+            // Fallback: if nothing is marked active (e.g. active_pane not yet
+            // set right after a split), make the first header active so the
+            // focused-tab box/accent always shows on exactly one pane.
+            if !headers.is_empty() && !headers.iter().any(|h| h.is_active) {
+                headers[0].is_active = true;
             }
             (slots, headers)
         };
@@ -6231,6 +6296,7 @@ impl App {
             .map(|s| gpu::PaneSlot {
                 rows: &s.rows,
                 origin_px: s.origin_px,
+                dim: s.dim,
             })
             .collect();
         // Recompute the inline suggestion against the freshly-applied
@@ -6241,11 +6307,26 @@ impl App {
         // handler, even before the GPU borrow below.
         let chrome_font = 14.0_f32;
         let close_size = chrome_font + 4.0;
+        // × close sits inside the left tab, after [icon + title]. Approximate
+        // the proportional label width (wide glyphs ~1em, ascii ~0.55em) so
+        // the hit rect tracks the drawn glyph.
         self.pane_header_rects = headers
             .iter()
             .map(|h| {
+                let label_w: f32 = h
+                    .label
+                    .chars()
+                    .map(|c| {
+                        if (c as u32) > 0x2000 {
+                            chrome_font
+                        } else {
+                            chrome_font * 0.55
+                        }
+                    })
+                    .sum();
+                let close_x = h.x + 8.0 + (chrome_font + 6.0) + 6.0 + label_w + 8.0;
                 let close = (
-                    h.x + 6.0,
+                    close_x,
                     h.y + (PANE_HEADER_HEIGHT - close_size) / 2.0,
                     close_size,
                     close_size,
@@ -6253,19 +6334,9 @@ impl App {
                 (h.id.clone(), close)
             })
             .collect();
-        // Render/Raw toggle pills for markdown pane headers (right-aligned).
-        // Same geometry the header draw below uses.
-        let pill_w = chrome_font * 3.4;
-        let pill_h = chrome_font + 8.0;
-        let mut toggles: Vec<(String, bool, (f32, f32, f32, f32))> = Vec::new();
-        for h in headers.iter().filter(|h| h.is_markdown) {
-            let raw_x = h.x + h.w - pill_w - 8.0;
-            let render_x = raw_x - pill_w - 4.0;
-            let py = h.y + (PANE_HEADER_HEIGHT - pill_h) / 2.0;
-            toggles.push((h.id.clone(), false, (render_x, py, pill_w, pill_h)));
-            toggles.push((h.id.clone(), true, (raw_x, py, pill_w, pill_h)));
-        }
-        self.md_toggle_rects = toggles;
+        // Markdown Render/Raw toggle now lives in the pane action buttons
+        // (drawn in the header loop); the old right-aligned pills are gone.
+        self.md_toggle_rects = Vec::new();
         // Session tabs live in a wry webview panel (like the git panel), not
         // the native title bar — drawing them here collided with the OSC title.
         // Drop-zone overlay: while a header drag is active, highlight the
@@ -6296,6 +6367,60 @@ impl App {
                     DropZone::Down => (bx, by + bh / 2.0, bw, bh / 2.0),
                 })
             });
+        // Ghostty-style split seams: one 1px hairline per interior split
+        // boundary instead of a 4-side border around every pane (which
+        // doubled up into a thick seam between abutting panes). Coords match
+        // divider_at_px so drag hit-testing lines up with the drawn line.
+        let pane_seams: Vec<(f32, f32, f32, f32)> = self
+            .pty_layout
+            .as_ref()
+            .map(|tree| {
+                let (cols, rows) = self.window_cells();
+                let pad = WINDOW_PADDING + self.effective_sidebar_w();
+                // True window edges (logical). window_cells floors the grid,
+                // so a seam spanning the last row/col must reach past the grid
+                // to the real edge — otherwise it stops short like box_h did.
+                let (win_right, win_bottom) = self.window.as_ref().map_or(
+                    (
+                        pad + cols as f32 * self.cell.w,
+                        TITLE_HEIGHT + rows as f32 * self.cell.h,
+                    ),
+                    |w| {
+                        let s = w.scale_factor() as f32;
+                        (
+                            w.inner_size().width as f32 / s,
+                            w.inner_size().height as f32 / s,
+                        )
+                    },
+                );
+                tree.dividers(cols, rows)
+                    .into_iter()
+                    .map(|d| match d.dir {
+                        pty_backend::SplitDir::Horizontal => {
+                            let x = pad + d.edge as f32 * self.cell.w;
+                            let y0 = TITLE_HEIGHT + d.span_start as f32 * self.cell.h;
+                            let y1 = if d.span_start + d.span_len >= rows {
+                                win_bottom
+                            } else {
+                                TITLE_HEIGHT
+                                    + (d.span_start + d.span_len) as f32 * self.cell.h
+                            };
+                            (x, y0, 1.0, (y1 - y0).max(0.0))
+                        }
+                        pty_backend::SplitDir::Vertical => {
+                            let y = TITLE_HEIGHT + d.edge as f32 * self.cell.h;
+                            let x0 = pad + d.span_start as f32 * self.cell.w;
+                            let x1 = if d.span_start + d.span_len >= cols {
+                                win_right
+                            } else {
+                                pad + (d.span_start + d.span_len) as f32 * self.cell.w
+                            };
+                            (x0, y, (x1 - x0).max(0.0), 1.0)
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // Left window-tab sidebar geometry. Cache the hit rects for the
         // mouse handler; the gpu block below paints from the same numbers so
         // a click always lands on what the user sees.
@@ -6320,6 +6445,11 @@ impl App {
             })
             .map(|(i, _)| *i);
         let md_preedit = self.preedit.clone();
+        // In-pane tab hit rects, collected during the header paint (needs the
+        // measured tab widths) and published to self after the gpu borrow.
+        let mut tab_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
+        let mut tab_close_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
+        let mut plus_hits: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -6387,6 +6517,41 @@ impl App {
                 if sidebar_w > 0.0 {
                     g.rect(ix + t, iy + t, split_x - ix - t, ih - 2.0 * t, theme::with_alpha(fg, 0x66));
                 }
+            }
+            // Top bar: folder icon + current working directory, just right of
+            // the sidebar toggle (Warp-style location chip).
+            {
+                let (tbx, _, tbw, _) = Self::sidebar_toggle_rect();
+                let px0 = tbx + tbw + 12.0;
+                let isz = chrome_font + 4.0;
+                let iy = (TITLE_HEIGHT - isz) / 2.0;
+                let ty = (TITLE_HEIGHT - chrome_font) / 2.0;
+                let after = g.draw_text(
+                    px0,
+                    iy,
+                    "\u{f07b}",
+                    gpu::DrawOpts {
+                        font_size: isz,
+                        color: theme::TEXT_DIM,
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                let cwd_str = std::env::current_dir()
+                    .ok()
+                    .map(|p| Self::shorten_cwd(&p))
+                    .unwrap_or_default();
+                g.draw_text(
+                    after + 6.0,
+                    ty,
+                    &cwd_str,
+                    gpu::DrawOpts {
+                        font_size: chrome_font,
+                        color: theme::TEXT,
+                        bold: false,
+                        italic: false,
+                    },
+                );
             }
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
@@ -6548,90 +6713,156 @@ impl App {
             // glyph + title. Active pane gets a brighter band and bold
             // title, matching the sugarloaf path's iTerm-style chrome.
             for h in &headers {
-                let bg = match h.color {
-                    Some(c) => c,
-                    None if h.is_active => theme::SURFACE_ACTIVE,
-                    None => theme::SURFACE,
-                };
-                g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, bg);
-                g.rect(
-                    h.x,
-                    h.y + PANE_HEADER_HEIGHT - 1.0,
-                    h.w,
-                    1.0,
-                    theme::BORDER,
-                );
-                let fg: [u8; 4] = if h.is_active {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_DIM
-                };
+                // Dark header band so the active tab (filled with the body
+                // BG) stands out and inactive tabs read as "caged" in it.
+                g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, theme::SURFACE);
+                // Larger glyphs (user: icons too small).
+                let icon_size = chrome_font + 10.0;
                 let text_y = h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0;
-                g.draw_text(
-                    h.x + 6.0,
-                    text_y,
-                    "x",
-                    gpu::DrawOpts {
-                        font_size: close_size,
-                        color: fg,
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                g.draw_text(
-                    h.x + 6.0 + close_size + 8.0,
-                    text_y,
-                    &h.label,
-                    gpu::DrawOpts {
-                        font_size: chrome_font,
-                        color: fg,
-                        bold: h.is_active,
-                        italic: false,
-                    },
-                );
-                // Markdown panes: right-aligned Render/Raw toggle pills. The
-                // active mode gets the accent fill. Geometry matches the
-                // md_toggle_rects hit test computed above.
-                if h.is_markdown {
-                    let pw = chrome_font * 3.4;
-                    let ph = chrome_font + 8.0;
-                    let raw_x = h.x + h.w - pw - 8.0;
-                    let render_x = raw_x - pw - 4.0;
-                    let py = h.y + (PANE_HEADER_HEIGHT - ph) / 2.0;
-                    let ty = py + (ph - chrome_font) / 2.0;
-                    let render_bg = if h.md_raw_mode { theme::SURFACE_ACTIVE } else { theme::ACCENT };
-                    let raw_bg = if h.md_raw_mode { theme::ACCENT } else { theme::SURFACE_ACTIVE };
-                    round_rect(g, render_x, py, pw, ph, theme::RADIUS_SM, render_bg);
-                    round_rect(g, raw_x, py, pw, ph, theme::RADIUS_SM, raw_bg);
-                    g.draw_text(
-                        render_x + pw * 0.1,
-                        ty,
-                        "Render",
-                        gpu::DrawOpts { font_size: chrome_font, color: theme::TEXT, bold: false, italic: false },
+                let icon_y = h.y + (PANE_HEADER_HEIGHT - icon_size) / 2.0;
+                let act_fg: [u8; 4] = if h.is_active {
+                    theme::TEXT_DIM
+                } else {
+                    theme::with_alpha(theme::TEXT_DIM, 0x6B)
+                };
+                // Right action button cluster (pane-level: new-term, web,
+                // split-v, split-h). Reserved first so tabs don't overlap it.
+                let abw = icon_size + 2.0;
+                let agap = 2.0;
+                let n_btn = 4.0_f32;
+                let btn_cluster = abw * n_btn + agap * (n_btn - 1.0) + 12.0;
+                // ── In-pane tab bar ── empty tabs = single tab from `label`.
+                let tab_list: Vec<&str> = if h.tabs.is_empty() {
+                    vec![h.label.as_str()]
+                } else {
+                    h.tabs.iter().map(|s| s.as_str()).collect()
+                };
+                let icon_w = g.measure_chrome_text("\u{f489}", icon_size, false);
+                let close_w = g.measure_chrome_text("\u{2715}", icon_size, false);
+                let plus_w = g.measure_chrome_text("\u{ea60}", icon_size, false);
+                // Each tab's title gets an equal share of the leftover width.
+                let tabs_area = (h.w - 8.0 - btn_cluster - plus_w - 16.0).max(0.0);
+                let per_tab = if tab_list.len() == 1 {
+                    tabs_area
+                } else {
+                    (tabs_area / tab_list.len() as f32).clamp(48.0, 320.0)
+                };
+                let mut tx = h.x + 6.0;
+                for (i, tab) in tab_list.iter().enumerate() {
+                    let tab_x0 = tx;
+                    // This pane's main (active) tab — gets the box + focus
+                    // strip regardless of whether the pane itself is focused.
+                    let active = tab_list.len() == 1 || i == h.active_tab;
+                    let t_fg = if active {
+                        theme::TEXT
+                    } else {
+                        theme::with_alpha(theme::TEXT, 0x6B)
+                    };
+                    let t_icon = if active {
+                        theme::TEXT_DIM
+                    } else {
+                        theme::with_alpha(theme::TEXT_DIM, 0x6B)
+                    };
+                    // Truncate this tab's title to its share of the bar.
+                    let budget = (per_tab - icon_w - 6.0 - 8.0 - close_w).max(0.0);
+                    let mut label = tab.to_string();
+                    let mut lw = g.measure_chrome_text(&label, chrome_font, active);
+                    if lw > budget {
+                        while label.chars().count() > 1 {
+                            label.pop();
+                            lw = g.measure_chrome_text(&format!("{label}…"), chrome_font, active);
+                            if lw <= budget {
+                                break;
+                            }
+                        }
+                        label.push('…');
+                    }
+                    let _ = lw;
+                    // Active tab: filled box + accent top line (focus marker,
+                    // matches reference 04.33.53). Drawn before the glyphs so
+                    // it sits underneath. Inactive tabs stay background-free.
+                    // Tab box: active = brighter pane-surface + accent top
+                    // line; inactive = darker "caged" box. First tab starts at
+                    // the header's left edge so no gap is left on the left.
+                    let box_x = if i == 0 { h.x } else { tab_x0 - 4.0 };
+                    let tw = (tab_x0 - box_x) + icon_w + 6.0 + lw + 8.0 + close_w + 8.0;
+                    // Active tab: fill with the pane body color (BG) so it
+                    // reads as continuous with the terminal, plus an accent
+                    // top line. Inactive tabs stay on the darker header band
+                    // (SURFACE) — "caged".
+                    if active {
+                        g.rect(box_x, h.y, tw, PANE_HEADER_HEIGHT, theme::BG);
+                        // Focus strip: blue when this pane is focused, white
+                        // when it's the main tab of an unfocused pane.
+                        let strip = if h.is_active { theme::ACCENT } else { theme::TEXT };
+                        g.rect(box_x, h.y, tw, 2.5, strip);
+                    }
+                    let cx = g.draw_text(
+                        tx,
+                        icon_y,
+                        "\u{f489}",
+                        gpu::DrawOpts { font_size: icon_size, color: t_icon, bold: false, italic: false },
                     );
-                    g.draw_text(
-                        raw_x + pw * 0.28,
-                        ty,
-                        "Raw",
-                        gpu::DrawOpts { font_size: chrome_font, color: theme::TEXT, bold: false, italic: false },
+                    let cx = g.draw_text(
+                        cx + 6.0,
+                        text_y,
+                        &label,
+                        gpu::DrawOpts { font_size: chrome_font, color: t_fg, bold: active, italic: false },
                     );
+                    let close_x = cx + 8.0;
+                    let cx = g.draw_text(
+                        close_x,
+                        icon_y,
+                        "\u{2715}",
+                        gpu::DrawOpts { font_size: icon_size, color: t_icon, bold: false, italic: false },
+                    );
+                    // × close hit (widen a little for an easy target).
+                    let cw = (cx - close_x).max(icon_size * 0.6);
+                    tab_close_hits.push((h.id.clone(), i, (close_x - 2.0, h.y, cw + 4.0, PANE_HEADER_HEIGHT)));
+                    tx = cx + 14.0;
+                    // Whole-tab click hit (switches active_tab); excludes the
+                    // × region above which the handler checks first.
+                    tab_hits.push((h.id.clone(), i, (tab_x0, h.y, (tx - tab_x0).max(0.0), PANE_HEADER_HEIGHT)));
+                }
+                // [+] new-tab button right after the tabs.
+                let plus_x0 = tx;
+                let cxp = g.draw_text(
+                    tx,
+                    icon_y,
+                    "\u{ea60}",
+                    gpu::DrawOpts { font_size: icon_size, color: act_fg, bold: false, italic: false },
+                );
+                plus_hits.push((
+                    h.id.clone(),
+                    (plus_x0 - 2.0, h.y, (cxp - plus_x0).max(icon_size) + 4.0, PANE_HEADER_HEIGHT),
+                ));
+                // ── Right action buttons: new-terminal, web, split-v, split-h ──
+                let action_icons = ["\u{f489}", "\u{f0ac}", "\u{eb57}", "\u{eb56}"];
+                let mut bx = h.x + h.w - 8.0 - (abw * n_btn + agap * (n_btn - 1.0));
+                for ic in action_icons {
+                    let iw = g.measure_chrome_text(ic, icon_size, false);
+                    g.draw_text(
+                        bx + (abw - iw) / 2.0,
+                        icon_y,
+                        ic,
+                        gpu::DrawOpts {
+                            font_size: icon_size,
+                            color: act_fg,
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    bx += abw + agap;
                 }
             }
-            // Focus by contrast (Warp / iTerm style): no accent ring.
-            // Every inactive pane gets a dark translucent veil so the
-            // active pane is the only fully-lit one. Single un-split panes
-            // have no headers, so this loop is empty and nothing dims.
-            for h in headers.iter().filter(|h| !h.is_active) {
-                g.rect(h.x, h.y, h.w, h.box_h, [0, 0, 0, 0x55]);
-            }
-            // 1px hairline divider on every pane box edge so abutting
-            // panes read as separate tiles. Drawn after the veil so the
-            // seam stays crisp on top.
-            for h in &headers {
-                g.rect(h.x, h.y, h.w, 1.0, theme::BORDER);
-                g.rect(h.x, h.y + h.box_h - 1.0, h.w, 1.0, theme::BORDER);
-                g.rect(h.x, h.y, 1.0, h.box_h, theme::BORDER);
-                g.rect(h.x + h.w - 1.0, h.y, 1.0, h.box_h, theme::BORDER);
+            // Focus by contrast: unfocused panes fade their text only (via
+            // PaneSlot.dim in draw_cells), not the whole box — no dark veil.
+            // Ghostty-style: one hairline per interior split boundary, drawn
+            // after the veil so the seam stays crisp on top. No per-pane box
+            // border (that doubled into a thick seam between abutting panes
+            // and read as caged tiles).
+            for (sx, sy, sw, sh) in &pane_seams {
+                g.rect(*sx, *sy, *sw, *sh, theme::BORDER);
             }
             Self::paint_gpu_overlays(g, &overlay);
             // Code-block copy buttons, painted on top of the inactive-pane
@@ -6740,6 +6971,9 @@ impl App {
                 eprintln!("[gpu] render error: {e:?}");
             }
         }
+        self.pane_tab_rects = tab_hits;
+        self.pane_tab_close_rects = tab_close_hits;
+        self.pane_plus_rects = plus_hits;
         // Damage flags get cleared here (parity with sugarloaf path
         // below) so successive frames short-circuit on idle.
         if let Ok(mut ws) = self.ws.lock() {
@@ -7814,19 +8048,68 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    let hit = self
-                        .pane_header_rects
+                    // In-pane tab bar: + new-tab, per-tab × close, tab switch.
+                    // Checked before the cell grid so a header click never
+                    // selects text. (Stage 2: tabs are visual labels; each
+                    // tab's real PTY/content lands in stage 3.)
+                    if let Some(pid) = self
+                        .pane_plus_rects
                         .iter()
-                        .find(|(_, r)| {
-                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                        })
-                        .map(|(id, _)| id.clone());
-                    if let Some(id) = hit {
-                        // × button → close that pane directly (drop the
-                        // leaf + kill the PTY via remove_pane), same path
-                        // as Cmd+W and socket close. Beats sending the
-                        // shell `exit` and waiting for the reap pass.
-                        self.remove_pane(&id);
+                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, _)| id.clone())
+                    {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.panes.get_mut(&pid) {
+                                if pane.tabs.is_empty() {
+                                    let cur = pane.title.clone().unwrap_or_else(|| pid.clone());
+                                    pane.tabs.push(cur);
+                                }
+                                pane.tabs.push("새 탭".to_string());
+                                pane.active_tab = pane.tabs.len() - 1;
+                            }
+                        }
+                        window.request_redraw();
+                        return;
+                    }
+                    if let Some((pid, idx)) = self
+                        .pane_tab_close_rects
+                        .iter()
+                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, i, _)| (id.clone(), *i))
+                    {
+                        let mut close_pane = false;
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.panes.get_mut(&pid) {
+                                if pane.tabs.len() <= 1 {
+                                    // Single tab → closing it closes the pane.
+                                    close_pane = true;
+                                } else {
+                                    pane.tabs.remove(idx);
+                                    if pane.active_tab >= pane.tabs.len() {
+                                        pane.active_tab = pane.tabs.len() - 1;
+                                    }
+                                }
+                            }
+                        }
+                        if close_pane {
+                            self.remove_pane(&pid);
+                        }
+                        window.request_redraw();
+                        return;
+                    }
+                    if let Some((pid, idx)) = self
+                        .pane_tab_rects
+                        .iter()
+                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, i, _)| (id.clone(), *i))
+                    {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.panes.get_mut(&pid) {
+                                pane.active_tab = idx;
+                            }
+                            ws.active_pane = Some(pid);
+                        }
+                        window.request_redraw();
                         return;
                     }
                     // Grab a split seam → start a divider drag. Checked
