@@ -5164,6 +5164,9 @@ impl App {
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
+            // Total grid rows — used to detect the bottom-row pane so it can
+            // stretch to the window's true bottom (window_cells floors rows).
+            let grid_rows = self.window_cells().1;
             let leaves: Vec<(String, u16, u16, u16, u16)> = if let Some(layout) = ws.layout.as_ref() {
                 layout
                     .leaves()
@@ -5274,7 +5277,26 @@ impl App {
                         x: WINDOW_PADDING + sidebar_w + x_cells as f32 * self.cell.w,
                         y: TITLE_HEIGHT + y_cells as f32 * self.cell.h,
                         w: w_cells as f32 * self.cell.w,
-                        box_h: h_cells as f32 * self.cell.h,
+                        // Bottom-row pane stretches to the window's true bottom.
+                        // window_cells() floors rows, so the last sub-cell of
+                        // window height falls outside the grid; without this the
+                        // bottom border floats ~a cell above the edge and that
+                        // gap reads as a seam between the pane and the window.
+                        box_h: {
+                            let base = h_cells as f32 * self.cell.h;
+                            if y_cells + h_cells >= grid_rows {
+                                let extra = self.window.as_ref().map_or(0.0, |w| {
+                                    let s = w.scale_factor() as f32;
+                                    let raw_lh = w.inner_size().height as f32 / s;
+                                    (raw_lh
+                                        - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h))
+                                        .max(0.0)
+                                });
+                                base + extra
+                            } else {
+                                base
+                            }
+                        },
                         label,
                         is_active: active_id.as_deref() == Some(id.as_str()),
                         color: pane.color,
