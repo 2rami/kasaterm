@@ -9,6 +9,7 @@
 //! skip sugarloaf init entirely so the swapchain has a single
 //! owner.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -19,6 +20,17 @@ use tmux_bridge::screen::Cell;
 use winit::window::Window;
 
 const ATLAS_SIZE: u32 = 2048;
+
+/// A decoded image uploaded to its own wgpu texture. Kept alive (texture +
+/// view) for as long as the pane shows it, since the bind group borrows the
+/// view. Keyed by pane id in `GpuRenderer::images`.
+struct ImageEntry {
+    _texture: wgpu::Texture,
+    _view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    w: u32,
+    h: u32,
+}
 
 pub struct GpuRenderer {
     _window: Arc<Window>,
@@ -38,6 +50,19 @@ pub struct GpuRenderer {
     chrome: Vec<CellInstance>,
     /// Scale we cached on init. winit logical→physical conversion.
     scale: f32,
+    /// Separate pipeline for image panes — built with linear filtering so a
+    /// photo scaled to a pane reads smooth, not pixelated. Has its own
+    /// instance buffer so the image quads don't collide with the chrome
+    /// pass's buffer in the same render pass.
+    image_pipeline: Pipeline,
+    /// Linear, clamp-to-edge sampler shared by every image bind group.
+    image_sampler: wgpu::Sampler,
+    /// Uploaded image textures keyed by pane id. Populated lazily on the
+    /// first frame a given image pane is drawn.
+    images: HashMap<String, ImageEntry>,
+    /// Per-frame image quads: (pane id, instance). Drained in `render()`
+    /// where each is drawn with that pane's texture bind group.
+    image_quads: Vec<(String, CellInstance)>,
 }
 
 /// One pane's slot in `render_frame`. Mirrors the data the existing
@@ -184,6 +209,21 @@ impl GpuRenderer {
         pipeline.write_uniforms(&queue, [config.width as f32, config.height as f32]);
         let bind_group = pipeline.make_bind_group(&device, atlas.view(), atlas.sampler());
 
+        // Image pass: own buffer (a few quads), linear filtering for smooth
+        // scaling. Shares the same screen-size uniform projection.
+        let image_pipeline = Pipeline::with_filtering(&device, format, 64, true);
+        image_pipeline.write_uniforms(&queue, [config.width as f32, config.height as f32]);
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("kasaterm image sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
         Ok(Self {
             _window: window,
             surface,
@@ -199,6 +239,10 @@ impl GpuRenderer {
             cell_h: cell_h / scale,
             chrome: Vec::with_capacity(1024),
             scale,
+            image_pipeline,
+            image_sampler,
+            images: HashMap::new(),
+            image_quads: Vec::new(),
         })
     }
 
@@ -434,6 +478,107 @@ impl GpuRenderer {
     /// frame don't pile up.
     pub fn clear_chrome(&mut self) {
         self.chrome.clear();
+        self.image_quads.clear();
+    }
+
+    /// Has this pane's image already been uploaded? Lets the caller skip
+    /// re-handing us the pixel buffer every frame.
+    pub fn has_image(&self, id: &str) -> bool {
+        self.images.contains_key(id)
+    }
+
+    /// Upload an image pane's RGBA8 pixels into a texture + bind group keyed
+    /// by pane id. No-op if already present. `rgba` must be `w * h * 4` bytes.
+    pub fn upload_image(&mut self, id: &str, rgba: &[u8], w: u32, h: u32) {
+        if self.images.contains_key(id) || w == 0 || h == 0 {
+            return;
+        }
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kasaterm image"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // Non-srgb to match the surface: image crate yields sRGB bytes
+            // and our framebuffer shows them verbatim (same reasoning as the
+            // glyph atlas), so colours land correct without a colour-space hop.
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&Default::default());
+        let bind_group =
+            self.image_pipeline
+                .make_bind_group(&self.device, &view, &self.image_sampler);
+        self.images.insert(
+            id.to_string(),
+            ImageEntry {
+                _texture: texture,
+                _view: view,
+                bind_group,
+                w,
+                h,
+            },
+        );
+    }
+
+    /// Free a pane's image texture when the pane closes.
+    pub fn drop_image(&mut self, id: &str) {
+        self.images.remove(id);
+    }
+
+    /// Queue an image pane for this frame. `(x, y, w, h)` is the pane's body
+    /// box in LOGICAL px; the image is contain-fit (aspect preserved,
+    /// centered) inside it. Must have been `upload_image`d first.
+    pub fn queue_image(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32) {
+        let Some(entry) = self.images.get(id) else { return };
+        let s = self.scale;
+        let (bx, by, bw, bh) = (x * s, y * s, w * s, h * s);
+        if bw <= 0.0 || bh <= 0.0 {
+            return;
+        }
+        let (iw, ih) = (entry.w as f32, entry.h as f32);
+        // Contain fit, but never upscale past native — a small icon stays
+        // crisp at 1:1 instead of blowing up blurry to fill the pane.
+        let fit = (bw / iw).min(bh / ih).min(1.0);
+        let dw = iw * fit;
+        let dh = ih * fit;
+        let dx = bx + (bw - dw) * 0.5;
+        let dy = by + (bh - dh) * 0.5;
+        self.image_quads.push((
+            id.to_string(),
+            CellInstance {
+                cell_px: [dx, dy, dw, dh],
+                uv_min: [0.0, 0.0],
+                uv_max: [1.0, 1.0],
+                fg_rgba: [1.0, 1.0, 1.0, 1.0],
+                flags: CellInstance::FLAG_COLOR,
+                ..Default::default()
+            },
+        ));
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -441,6 +586,10 @@ impl GpuRenderer {
         self.config.height = h.max(1);
         self.surface.configure(&self.device, &self.config);
         self.pipeline.write_uniforms(
+            &self.queue,
+            [self.config.width as f32, self.config.height as f32],
+        );
+        self.image_pipeline.write_uniforms(
             &self.queue,
             [self.config.width as f32, self.config.height as f32],
         );
@@ -663,6 +812,14 @@ impl GpuRenderer {
         let instance_count = self.chrome.len();
         self.pipeline
             .write_instances(&self.device, &self.queue, &self.chrome);
+        // Upload this frame's image quads into the image pipeline's own
+        // buffer; each is drawn individually below so it can bind its texture.
+        if !self.image_quads.is_empty() {
+            let img_instances: Vec<CellInstance> =
+                self.image_quads.iter().map(|(_, inst)| *inst).collect();
+            self.image_pipeline
+                .write_instances(&self.device, &self.queue, &img_instances);
+        }
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self
@@ -697,6 +854,15 @@ impl GpuRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // Images first: they sit at the bottom of the pane box so the
+            // chrome pass (pane headers, focus ring, inactive-dim overlay)
+            // paints over them. Each image binds its own texture.
+            for (i, (id, _)) in self.image_quads.iter().enumerate() {
+                if let Some(entry) = self.images.get(id) {
+                    self.image_pipeline
+                        .draw_at(&mut pass, &entry.bind_group, i as u32);
+                }
+            }
             self.pipeline
                 .draw(&mut pass, &self.bind_group, instance_count as u32);
         }

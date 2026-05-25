@@ -52,11 +52,30 @@ impl Pipeline {
         surface_format: wgpu::TextureFormat,
         initial_instance_capacity: u32,
     ) -> Self {
+        Self::with_filtering(device, surface_format, initial_instance_capacity, false)
+    }
+
+    /// Same pipeline, but `filterable=true` builds a bind-group layout that
+    /// accepts a linear-filtering sampler + filterable texture. The glyph
+    /// atlas wants Nearest (crisp bitmaps), but a photographic image scaled
+    /// to fit a pane wants bilinear so it doesn't look pixelated — that pass
+    /// uses its own Pipeline built with this set to true.
+    pub fn with_filtering(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        initial_instance_capacity: u32,
+        filterable: bool,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cell-renderer shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
+        let sampler_ty = if filterable {
+            wgpu::SamplerBindingType::Filtering
+        } else {
+            wgpu::SamplerBindingType::NonFiltering
+        };
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("cell-renderer bgl"),
@@ -75,9 +94,7 @@ impl Pipeline {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float {
-                                filterable: false,
-                            },
+                            sample_type: wgpu::TextureSampleType::Float { filterable },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
@@ -86,7 +103,7 @@ impl Pipeline {
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        ty: wgpu::BindingType::Sampler(sampler_ty),
                         count: None,
                     },
                 ],
@@ -267,5 +284,21 @@ impl Pipeline {
         pass.set_bind_group(0, bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         pass.draw(0..6, 0..instance_count);
+    }
+
+    /// Draw a single instance at `instance_index` with its own bind group.
+    /// The image pass uploads every image quad into one buffer, then issues
+    /// one of these per image so each can bind a different texture (one
+    /// bind group per image) while sharing the instance buffer.
+    pub fn draw_at<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        bind_group: &'a wgpu::BindGroup,
+        instance_index: u32,
+    ) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
+        pass.draw(0..6, instance_index..instance_index + 1);
     }
 }
