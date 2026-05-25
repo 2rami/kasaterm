@@ -171,6 +171,15 @@ pub enum PtySplitAxis {
     Vertical,
 }
 
+/// Which kind of preview window a `PtyCommand::OpenPreview` should spawn.
+/// Decoded from the MCP `/open-image` vs `/open-markdown` endpoints (and
+/// the `imgopen` / `mdopen` shims behind them).
+#[derive(Debug, Clone, Copy)]
+pub enum PreviewKind {
+    Image,
+    Markdown,
+}
+
 impl From<SplitDirection> for PtySplitAxis {
     fn from(d: SplitDirection) -> Self {
         match d {
@@ -225,6 +234,15 @@ pub enum PtyCommand {
     /// Close the tmux-style session at index `idx`.
     CloseSession {
         idx: usize,
+        reply: SyncSender<Result<()>>,
+    },
+    /// Open a separate wry preview window (image viewer / markdown editor)
+    /// for the file at `path`. Window creation needs the winit
+    /// `ActiveEventLoop`, which only the main thread has, so the socket
+    /// worker queues this and the main loop spawns the window in its drain.
+    OpenPreview {
+        kind: PreviewKind,
+        path: String,
         reply: SyncSender<Result<()>>,
     },
 }
@@ -383,6 +401,16 @@ impl Backend for PtyBackend {
     fn close_session(&self, idx: usize) -> Result<()> {
         self.submit(|reply| PtyCommand::CloseSession { idx, reply })
     }
+
+    fn open_preview(&self, kind: &str, path: &str) -> Result<()> {
+        let kind = match kind {
+            "image" => PreviewKind::Image,
+            "markdown" => PreviewKind::Markdown,
+            other => return Err(anyhow!("unknown preview kind: {other}")),
+        };
+        let path = path.to_string();
+        self.submit(|reply| PtyCommand::OpenPreview { kind, path, reply })
+    }
 }
 
 /// Resolve a process's current working directory via lsof. macOS has no
@@ -482,6 +510,11 @@ pub struct PaneRestore {
     pub cwd: Option<std::path::PathBuf>,
     pub was_claude: bool,
     pub session_id: Option<String>,
+    /// Saved scrollback as plain-text lines (oldest→newest), restored into the
+    /// pane's history so scroll-up shows what was on screen before the restart.
+    /// Empty when nothing was captured. Color/attrs are dropped in v1 — the
+    /// content is what matters for "what I typed/saw is still there".
+    pub scrollback: Vec<String>,
 }
 
 /// A node in a session's restore layout tree — mirrors `pty_backend::PtyLayout`
@@ -595,6 +628,15 @@ fn parse_leaf(v: &serde_json::Value) -> PaneRestore {
             .map(std::path::PathBuf::from),
         was_claude: v.get("was_claude").and_then(|x| x.as_bool()).unwrap_or(false),
         session_id: v.get("session_id").and_then(|x| x.as_str()).map(String::from),
+        scrollback: v
+            .get("scrollback")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
