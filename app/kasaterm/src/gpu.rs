@@ -897,17 +897,35 @@ impl GpuRenderer {
         _w: f32,
         h: f32,
         scroll: f32,
+        preedit: &str,
     ) -> f32 {
         let base = self.font_size_px as f32 / self.scale;
         let pad = base * 0.6;
         let lh = (self.shaper.line_height(base * self.scale).ceil() / self.scale) * 1.25;
-        let cx0 = x + pad;
+        // Line-number gutter, sized to the digit count, right-aligned numbers.
+        let digits = ((lines.len().max(1)) as f32).log10().floor() as usize + 1;
+        let gutter_w = base * 0.62 * digits as f32 + base * 1.0;
+        let cx0 = x + pad + gutter_w;
         let clip_top = y;
         let clip_bot = y + h;
         let top0 = (y - scroll) + pad;
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
             if pen_y + lh > clip_top && pen_y < clip_bot {
+                // Right-aligned line number in the gutter.
+                let num = format!("{}", li + 1);
+                let num_w = self.measure_run(&num, base, false, false, true);
+                self.draw_text(
+                    x + pad + (gutter_w - base * 0.5 - num_w).max(0.0),
+                    pen_y,
+                    &num,
+                    DrawOpts {
+                        font_size: base,
+                        color: crate::theme::TEXT_MUTE,
+                        bold: false,
+                        italic: false,
+                    },
+                );
                 self.draw_text(
                     cx0,
                     pen_y,
@@ -922,7 +940,26 @@ impl GpuRenderer {
                 if li == cursor.0 {
                     let prefix: String = line.chars().take(cursor.1).collect();
                     let cw = self.measure_run(&prefix, base, false, false, true);
-                    self.rect(cx0 + cw, pen_y, 2.0, lh, crate::theme::ACCENT);
+                    let mut cur_x = cx0 + cw;
+                    // Composing Hangul: draw the preedit at the cursor with an
+                    // accent underline, cursor sits after it.
+                    if !preedit.is_empty() {
+                        let pw = self.measure_run(preedit, base, false, false, true);
+                        self.rect(cur_x, pen_y + lh - 2.0, pw, 2.0, crate::theme::ACCENT);
+                        self.draw_text(
+                            cur_x,
+                            pen_y,
+                            preedit,
+                            DrawOpts {
+                                font_size: base,
+                                color: crate::theme::ACCENT,
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                        cur_x += pw;
+                    }
+                    self.rect(cur_x, pen_y, 2.0, lh, crate::theme::ACCENT);
                 }
             }
             pen_y += lh;
