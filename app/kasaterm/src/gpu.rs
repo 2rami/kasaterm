@@ -473,6 +473,231 @@ impl GpuRenderer {
         }
     }
 
+    /// Width (logical px) a styled run occupies, using the SAME per-glyph
+    /// advance math as `draw_text` so word-wrap measurement matches what gets
+    /// drawn. `code` is accepted for symmetry but doesn't change metrics — the
+    /// primary font is monospace, so inline code lays out on the same advance.
+    fn measure_run(&mut self, text: &str, size: f32, bold: bool, italic: bool, _code: bool) -> f32 {
+        let s = self.scale;
+        let size_px = (size * s).round().max(1.0) as u32;
+        let mut w = 0.0;
+        for ch in text.chars() {
+            if ch == ' ' {
+                w += self.shaper.cell_advance(size_px as f32);
+                continue;
+            }
+            if let Some(e) = self.atlas.get_or_bake(
+                &self.device,
+                &self.queue,
+                &mut self.shaper,
+                GlyphKey { ch, bold, italic, size_px },
+            ) {
+                w += if is_wide_char(ch) {
+                    e.px_w as f32 + size_px as f32 * 0.18
+                } else {
+                    e.advance
+                };
+            }
+        }
+        w / s
+    }
+
+    /// Lay styled spans into `max_w` at logical (x_start, y_start), wrapping on
+    /// word boundaries. Returns pen_y after the last line. Lines fully outside
+    /// [clip_top, clip_bot) are skipped — that's the scroll clip for markdown.
+    fn md_runs(
+        &mut self,
+        spans: &[crate::MdSpan],
+        x_start: f32,
+        y_start: f32,
+        max_w: f32,
+        size: f32,
+        force_bold: bool,
+        color: [u8; 4],
+        clip_top: f32,
+        clip_bot: f32,
+    ) -> f32 {
+        let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+        let space_w = self.shaper.cell_advance(size * self.scale) / self.scale;
+        let mut pen_x = x_start;
+        let mut pen_y = y_start;
+        for span in spans {
+            let bold = span.bold || force_bold;
+            for word in span.text.split_inclusive(' ') {
+                let trailing_space = word.ends_with(' ');
+                let trimmed = word.trim_end_matches(' ');
+                if !trimmed.is_empty() {
+                    let ww = self.measure_run(trimmed, size, bold, span.italic, span.code);
+                    if pen_x + ww > x_start + max_w && pen_x > x_start {
+                        pen_x = x_start;
+                        pen_y += lh;
+                    }
+                    if pen_y + lh > clip_top && pen_y < clip_bot {
+                        if span.code {
+                            self.rect(
+                                pen_x - space_w * 0.15,
+                                pen_y,
+                                ww + space_w * 0.3,
+                                lh,
+                                crate::theme::SURFACE_ACTIVE,
+                            );
+                        }
+                        let col = if span.code { crate::theme::ACCENT } else { color };
+                        self.draw_text(
+                            pen_x,
+                            pen_y,
+                            trimmed,
+                            DrawOpts { font_size: size, color: col, bold, italic: span.italic },
+                        );
+                    }
+                    pen_x += ww;
+                }
+                if trailing_space {
+                    pen_x += space_w;
+                }
+            }
+        }
+        pen_y + lh
+    }
+
+    /// Lay out + draw a markdown document into the pane box (all logical px).
+    /// Glyphs/rects go into the chrome buffer (drawn over the empty cell pass,
+    /// under pane headers). Returns total content height (logical) so the
+    /// caller can clamp the scroll offset.
+    pub fn draw_markdown(
+        &mut self,
+        blocks: &[crate::MdBlock],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        scroll: f32,
+    ) -> f32 {
+        use crate::MdBlock;
+        let base = self.font_size_px as f32 / self.scale;
+        let clip_top = y;
+        let clip_bot = y + h;
+        let top0 = y - scroll;
+        let mut pen_y = top0;
+        for block in blocks {
+            match block {
+                MdBlock::Heading { level, spans } => {
+                    let scale_f = match level {
+                        1 => 1.7,
+                        2 => 1.45,
+                        3 => 1.25,
+                        4 => 1.1,
+                        _ => 1.0,
+                    };
+                    let size = base * scale_f;
+                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    pen_y += lh * 0.5;
+                    pen_y = self.md_runs(
+                        spans, x, pen_y, w, size, true, crate::theme::TEXT, clip_top, clip_bot,
+                    );
+                    pen_y += lh * 0.25;
+                }
+                MdBlock::Para { spans } => {
+                    let size = base;
+                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    pen_y = self.md_runs(
+                        spans, x, pen_y, w, size, false, crate::theme::TEXT, clip_top, clip_bot,
+                    );
+                    pen_y += lh * 0.45;
+                }
+                MdBlock::Code { code } => {
+                    let size = base * 0.92;
+                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    let pad = base * 0.4;
+                    let lines: Vec<&str> = code.trim_end_matches('\n').split('\n').collect();
+                    let block_h = lines.len() as f32 * lh + pad * 2.0;
+                    if pen_y + block_h > clip_top && pen_y < clip_bot {
+                        self.rect(x, pen_y, w, block_h, crate::theme::SURFACE);
+                    }
+                    let mut ly = pen_y + pad;
+                    for line in &lines {
+                        if ly + lh > clip_top && ly < clip_bot {
+                            self.draw_text(
+                                x + pad,
+                                ly,
+                                line,
+                                DrawOpts {
+                                    font_size: size,
+                                    color: crate::theme::TEXT_DIM,
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                        }
+                        ly += lh;
+                    }
+                    pen_y += block_h + lh * 0.4;
+                }
+                MdBlock::ListItem { depth, marker, spans } => {
+                    let size = base;
+                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    let indent = (*depth as f32 + 1.0) * base * 1.3;
+                    if pen_y + lh > clip_top && pen_y < clip_bot {
+                        self.draw_text(
+                            x + indent - base * 1.1,
+                            pen_y,
+                            marker,
+                            DrawOpts {
+                                font_size: size,
+                                color: crate::theme::ACCENT,
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
+                    pen_y = self.md_runs(
+                        spans,
+                        x + indent,
+                        pen_y,
+                        (w - indent).max(1.0),
+                        size,
+                        false,
+                        crate::theme::TEXT,
+                        clip_top,
+                        clip_bot,
+                    );
+                    pen_y += lh * 0.25;
+                }
+                MdBlock::Quote { spans } => {
+                    let size = base;
+                    let lh = self.shaper.line_height(size * self.scale).ceil() / self.scale;
+                    let indent = base * 1.2;
+                    let start_y = pen_y;
+                    pen_y = self.md_runs(
+                        spans,
+                        x + indent,
+                        pen_y,
+                        (w - indent).max(1.0),
+                        size,
+                        false,
+                        crate::theme::TEXT_DIM,
+                        clip_top,
+                        clip_bot,
+                    );
+                    let bar_h = pen_y - start_y;
+                    if start_y + bar_h > clip_top && start_y < clip_bot {
+                        self.rect(x, start_y, base * 0.18, bar_h, crate::theme::ACCENT);
+                    }
+                    pen_y += lh * 0.45;
+                }
+                MdBlock::Rule => {
+                    let lh = self.shaper.line_height(base * self.scale).ceil() / self.scale;
+                    pen_y += lh * 0.4;
+                    if pen_y > clip_top && pen_y < clip_bot {
+                        self.rect(x, pen_y, w, 1.5, crate::theme::BORDER);
+                    }
+                    pen_y += lh * 0.5;
+                }
+            }
+        }
+        (pen_y - top0).max(0.0)
+    }
+
     /// Drop all pending chrome instances. main.rs calls this at the
     /// top of each frame so stale rects/labels from the previous
     /// frame don't pile up.

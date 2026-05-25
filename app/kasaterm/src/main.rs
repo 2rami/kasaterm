@@ -1274,6 +1274,11 @@ struct PaneState {
     /// texture into the pane box rather than calling draw_cells. Arc so the
     /// per-frame slot snapshot clones a pointer, not the pixel buffer.
     image: Option<Arc<ImagePane>>,
+    /// When `Some`, this pane shows a rendered markdown document instead of a
+    /// terminal grid. Like an image pane it has no PtySession, but unlike one
+    /// it accepts scroll input (the doc can exceed the pane height) via
+    /// `scroll_offset`. Arc so the per-frame snapshot clones a pointer.
+    markdown: Option<Arc<MarkdownDoc>>,
 }
 
 /// A decoded image bound to a pane. `rgba` is tightly-packed RGBA8
@@ -1312,6 +1317,162 @@ fn decode_image_rgba(path: &std::path::Path) -> anyhow::Result<ImagePane> {
         w,
         h,
     })
+}
+
+/// One styled inline run inside a markdown block. The renderer picks the
+/// font weight/slant and (for `code`) a mono face + chip background from
+/// these flags.
+#[derive(Clone)]
+struct MdSpan {
+    text: String,
+    bold: bool,
+    italic: bool,
+    code: bool,
+}
+
+/// A laid-out-able markdown block. Parsed once on open; the renderer walks
+/// this every frame (cheap) rather than re-parsing the source text.
+#[derive(Clone)]
+enum MdBlock {
+    Heading { level: u8, spans: Vec<MdSpan> },
+    Para { spans: Vec<MdSpan> },
+    /// Fenced/indented code block — raw text with embedded newlines.
+    Code { code: String },
+    ListItem { depth: u8, marker: String, spans: Vec<MdSpan> },
+    Quote { spans: Vec<MdSpan> },
+    Rule,
+}
+
+/// A parsed markdown document bound to a pane (same lifetime discipline as
+/// `ImagePane`). The renderer lays the blocks out into the pane box.
+struct MarkdownDoc {
+    blocks: Vec<MdBlock>,
+}
+
+fn heading_level(l: pulldown_cmark::HeadingLevel) -> u8 {
+    use pulldown_cmark::HeadingLevel::*;
+    match l {
+        H1 => 1,
+        H2 => 2,
+        H3 => 3,
+        H4 => 4,
+        H5 => 5,
+        H6 => 6,
+    }
+}
+
+/// Parse markdown source into a flat block list. Nesting beyond list depth
+/// is flattened (a quote's paragraphs collapse into Quote blocks, list-item
+/// paragraphs into the item) — enough structure for a document-style reader
+/// without a full layout tree.
+fn parse_markdown(text: &str) -> MarkdownDoc {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    let mut blocks: Vec<MdBlock> = Vec::new();
+    let mut spans: Vec<MdSpan> = Vec::new();
+    let mut bold = 0i32;
+    let mut italic = 0i32;
+    let mut heading: Option<u8> = None;
+    let mut in_code = false;
+    let mut code_buf = String::new();
+    // Each open list level: Some(next_number) for ordered, None for bullet.
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
+    let mut in_item = false;
+    let mut item_marker = String::new();
+    let mut in_quote = false;
+
+    let push_span = |spans: &mut Vec<MdSpan>, t: &str, b: bool, i: bool, c: bool| {
+        if !t.is_empty() {
+            spans.push(MdSpan { text: t.to_string(), bold: b, italic: i, code: c });
+        }
+    };
+
+    for ev in Parser::new(text) {
+        match ev {
+            Event::Start(tag) => match tag {
+                Tag::Heading { level, .. } => {
+                    heading = Some(heading_level(level));
+                    spans.clear();
+                }
+                Tag::Paragraph => spans.clear(),
+                Tag::CodeBlock(_) => {
+                    in_code = true;
+                    code_buf.clear();
+                }
+                Tag::List(start) => list_stack.push(start),
+                Tag::Item => {
+                    in_item = true;
+                    spans.clear();
+                    item_marker = match list_stack.last_mut() {
+                        Some(Some(n)) => {
+                            let m = format!("{n}.");
+                            *n += 1;
+                            m
+                        }
+                        _ => "•".to_string(),
+                    };
+                }
+                Tag::Emphasis => italic += 1,
+                Tag::Strong => bold += 1,
+                Tag::BlockQuote(_) => {
+                    in_quote = true;
+                    spans.clear();
+                }
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Heading(_) => blocks.push(MdBlock::Heading {
+                    level: heading.take().unwrap_or(1),
+                    spans: std::mem::take(&mut spans),
+                }),
+                TagEnd::Paragraph => {
+                    if in_quote {
+                        blocks.push(MdBlock::Quote { spans: std::mem::take(&mut spans) });
+                    } else if !in_item {
+                        blocks.push(MdBlock::Para { spans: std::mem::take(&mut spans) });
+                    }
+                    // in_item: keep spans; flushed at TagEnd::Item.
+                }
+                TagEnd::CodeBlock => {
+                    in_code = false;
+                    blocks.push(MdBlock::Code { code: std::mem::take(&mut code_buf) });
+                }
+                TagEnd::List(_) => {
+                    list_stack.pop();
+                }
+                TagEnd::Item => {
+                    let depth = list_stack.len().saturating_sub(1) as u8;
+                    blocks.push(MdBlock::ListItem {
+                        depth,
+                        marker: std::mem::take(&mut item_marker),
+                        spans: std::mem::take(&mut spans),
+                    });
+                    in_item = false;
+                }
+                TagEnd::Emphasis => italic -= 1,
+                TagEnd::Strong => bold -= 1,
+                TagEnd::BlockQuote(_) => in_quote = false,
+                _ => {}
+            },
+            Event::Text(t) => {
+                if in_code {
+                    code_buf.push_str(&t);
+                } else {
+                    push_span(&mut spans, &t, bold > 0, italic > 0, false);
+                }
+            }
+            Event::Code(t) => push_span(&mut spans, &t, bold > 0, italic > 0, true),
+            Event::SoftBreak | Event::HardBreak => {
+                if in_code {
+                    code_buf.push('\n');
+                } else {
+                    push_span(&mut spans, " ", bold > 0, italic > 0, false);
+                }
+            }
+            Event::Rule => blocks.push(MdBlock::Rule),
+            _ => {}
+        }
+    }
+    MarkdownDoc { blocks }
 }
 
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
@@ -1482,6 +1643,10 @@ struct App {
     /// consumed by the MouseInput handler so a click on the button copies
     /// the block. Cleared+rebuilt every paint.
     copy_btn_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// Rendered markdown content height (logical px) per pane id, published by
+    /// the renderer each frame. The scroll handler clamps scroll_offset to
+    /// (content_h - visible_h) so a markdown pane can't over-scroll.
+    md_content_h: HashMap<String, f32>,
     /// When the "복사됨" copy toast started animating. Drives its fade in the
     /// overlay pass; `None` once faded out. Set on a successful block copy.
     copy_toast_at: Option<Instant>,
@@ -1651,6 +1816,7 @@ impl App {
             hangul: hangul_ime::Composer::new(),
             pane_header_rects: Vec::new(),
             copy_btn_rects: Vec::new(),
+            md_content_h: HashMap::new(),
             copy_toast_at: None,
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
@@ -3594,15 +3760,16 @@ impl App {
                     let _ = reply.send(res);
                 }
                 socket::PtyCommand::OpenPreview { kind, path, reply } => {
-                    // Images open as an in-window split pane (wgpu-rendered);
-                    // markdown still spawns a separate webview window until its
-                    // in-pane renderer lands.
+                    // Both images and markdown now open as in-window split
+                    // panes (wgpu-rendered); the separate webview window path
+                    // (open_preview_window) is retired for these.
+                    let _ = event_loop;
                     let res = match kind {
                         socket::PreviewKind::Image => {
                             self.split_image_pane(&path, pty_backend::SplitDir::Horizontal)
                         }
                         socket::PreviewKind::Markdown => {
-                            self.open_preview_window(event_loop, kind, &path)
+                            self.split_markdown_pane(&path, pty_backend::SplitDir::Horizontal)
                         }
                     };
                     let _ = reply.send(res);
@@ -3919,6 +4086,58 @@ impl App {
         Ok(())
     }
 
+    /// Split the active pane and fill the new pane with a rendered markdown
+    /// document. Like `split_image_pane` but the new pane *does* become active
+    /// so the user can scroll it (markdown can exceed the pane height); key
+    /// input is still dropped (no PTY) — only wheel/scroll keys act on it.
+    fn split_markdown_pane(&mut self, path: &str, dir: pty_backend::SplitDir) -> Result<()> {
+        if self.tmux.is_some() {
+            anyhow::bail!("markdown pane unsupported on tmux backend");
+        }
+        let p = std::path::Path::new(path);
+        if path.is_empty() || !p.is_file() {
+            anyhow::bail!("no such file: {path}");
+        }
+        let text = std::fs::read_to_string(p)
+            .map_err(|e| anyhow::anyhow!("read failed: {e}"))?;
+        let doc = parse_markdown(&text);
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string());
+        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
+            anyhow::bail!("no active pane to split");
+        };
+        let new_id = format!("%{}", self.next_pane_id);
+        self.next_pane_id += 1;
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let pane = ws.pane_mut(&new_id);
+            pane.markdown = Some(Arc::new(doc));
+            pane.title = Some(name);
+            pane.title_pinned = true;
+            pane.dirty = true;
+        }
+        let layout = self
+            .pty_layout
+            .as_mut()
+            .expect("pty_layout set in start_pty");
+        if !layout.split_leaf(&active, dir, new_id.clone()) {
+            self.ws.lock().unwrap().panes.remove(&new_id);
+            self.next_pane_id -= 1;
+            anyhow::bail!("active pane not found in layout");
+        }
+        // Markdown panes take focus so the wheel/PageDown path scrolls them.
+        self.ws.lock().unwrap().active_pane = Some(new_id);
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+
     /// Drain `dead_panes` and remove each from the BSP tree + pty map.
     /// Called on the main thread from `about_to_wait` so the mutation
     /// runs without competing with the per-session reader threads.
@@ -3983,6 +4202,7 @@ impl App {
         if let Some(g) = self.gpu.as_mut() {
             g.drop_image(target);
         }
+        self.md_content_h.remove(target);
         {
             let mut ws = self.ws.lock().unwrap();
             ws.panes.remove(target);
@@ -4474,6 +4694,41 @@ impl App {
             .px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
             .map(|(id, _, _)| id)
             .or_else(|| self.target_pane());
+        // Markdown pane: scroll the laid-out document by pixels (it has no PTY
+        // history to delegate to). Clamp to the content height the renderer
+        // last published so it can't scroll past the end.
+        let is_md = {
+            let ws = self.ws.lock().unwrap();
+            target_pane_id
+                .as_deref()
+                .and_then(|id| ws.panes.get(id))
+                .map_or(false, |p| p.markdown.is_some())
+        };
+        if is_md {
+            if let Some(id) = target_pane_id.as_deref() {
+                let visible_h = self.window.as_ref().map_or(400.0, |w| {
+                    w.inner_size().height as f32 / w.scale_factor() as f32
+                }) - TITLE_HEIGHT
+                    - PANE_HEADER_HEIGHT
+                    - 2.0 * PANE_INNER_Y;
+                let content_h = self.md_content_h.get(id).copied().unwrap_or(0.0);
+                let max_scroll = (content_h - visible_h).max(0.0);
+                // lines>0 = wheel up = toward the top of the doc = less scroll.
+                let delta_px = lines as f32 * self.cell.h;
+                if let Ok(mut ws) = self.ws.lock() {
+                    if let Some(pane) = ws.panes.get_mut(id) {
+                        let cur = pane.scroll_offset as f32;
+                        let next = (cur - delta_px).clamp(0.0, max_scroll);
+                        pane.scroll_offset = next.round() as usize;
+                        pane.dirty = true;
+                    }
+                }
+            }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         let (alt, hist_len, mouse_on, mouse_sgr) = {
             let ws = self.ws.lock().unwrap();
             let pane = target_pane_id
@@ -5263,6 +5518,9 @@ impl App {
         // Image panes collected here (id, pixels, body box in LOGICAL px) so
         // the gpu block below can upload + queue them after the cell pass.
         let mut image_slots: Vec<(String, Arc<ImagePane>, (f32, f32, f32, f32))> = Vec::new();
+        // Markdown panes: (id, doc, body box, scroll px). Drawn in the gpu
+        // block via draw_markdown (pushes glyph/rect chrome directly).
+        let mut md_slots: Vec<(String, Arc<MarkdownDoc>, (f32, f32, f32, f32), f32)> = Vec::new();
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
@@ -5314,11 +5572,14 @@ impl App {
                     }
                     r
                 };
-                // Image panes carry no PTY grid; an empty rows vec makes
-                // draw_cells a no-op for this slot and the image texture is
-                // painted into the pane box instead (queued below).
+                // Image/markdown panes carry no PTY grid; an empty rows vec
+                // makes draw_cells a no-op for this slot and the content
+                // (texture or laid-out document) is painted into the pane box
+                // instead (queued below).
                 let img = pane.image.clone();
-                let composed: Vec<Vec<GridCell>> = if img.is_some() {
+                let md = pane.markdown.clone();
+                let md_scroll = pane.scroll_offset as f32;
+                let composed: Vec<Vec<GridCell>> = if img.is_some() || md.is_some() {
                     Vec::new()
                 } else {
                     pane.cells.iter().map(normalise).collect()
@@ -5366,11 +5627,11 @@ impl App {
                     rows: composed,
                     origin_px,
                 });
-                if let Some(image) = img {
+                if img.is_some() || md.is_some() {
                     // Body box (header band excluded, inset by the same
                     // PANE_INNER margins the cell grid uses) in logical px.
                     // Bottom-row stretch mirrors the header's box_h so the
-                    // image fills to the window edge with no seam.
+                    // content fills to the window edge with no seam.
                     let bx = WINDOW_PADDING
                         + sidebar_w
                         + x_cells as f32 * self.cell.w
@@ -5392,7 +5653,12 @@ impl App {
                         base_h
                     };
                     let bh = (full_h - header_shift_logical - 2.0 * PANE_INNER_Y).max(1.0);
-                    image_slots.push((id.clone(), image, (bx, by, bw, bh)));
+                    if let Some(image) = img {
+                        image_slots.push((id.clone(), image, (bx, by, bw, bh)));
+                    }
+                    if let Some(doc) = md {
+                        md_slots.push((id.clone(), doc, (bx, by, bw, bh), md_scroll));
+                    }
                 }
                 if show_headers {
                     // Custom title (rename / OSC) wins; otherwise show the
@@ -5551,6 +5817,13 @@ impl App {
             g.draw_cells(&slot_views);
             for (id, _, (bx, by, bw, bh)) in &image_slots {
                 g.queue_image(id, *bx, *by, *bw, *bh);
+            }
+            // Markdown is laid out into chrome glyphs/rects here — after the
+            // (empty) cell pass, before pane headers/borders so those land on
+            // top. The returned content height feeds scroll clamping.
+            for (id, doc, (bx, by, bw, bh), scroll) in &md_slots {
+                let content_h = g.draw_markdown(&doc.blocks, *bx, *by, *bw, *bh, *scroll);
+                self.md_content_h.insert(id.clone(), content_h);
             }
             // Title strip fill: chrome surface across the top so the area above
             // the sidebar / traffic lights matches the sidebar instead of
