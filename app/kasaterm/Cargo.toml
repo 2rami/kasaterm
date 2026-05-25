@@ -25,6 +25,10 @@ kasaspace-mcp = { version = "0.1.0", path = "../../crates/kasaspace-mcp" }
 # in its own layer. raw-window-handle 0.6 matches the workspace's winit 0.30.
 wry = "0.55"
 muda = "0.19.2"
+# Encode image bytes into a self-contained data: URI for the preview
+# window's <img> (the webview loads via with_html / null origin, so a
+# file:// src is unreliable across the origin boundary).
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

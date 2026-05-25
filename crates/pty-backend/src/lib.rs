@@ -10,7 +10,6 @@
 //! the tmux backend is running; once Phase C is past MVP we add an
 //! in-process multiplexer (`Workspace` of `PtySession`s).
 
-mod image;
 pub mod layout;
 mod state;
 

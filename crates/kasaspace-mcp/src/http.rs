@@ -107,6 +107,59 @@ async fn git_ai_commit_handler(backend: Arc<dyn Backend>, body: String) -> impl 
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /open-image?path=<file>` — open a separate image-viewer window.
+/// `GET /open-markdown?path=<file>` — open a separate markdown editor.
+///
+/// GET with a query param (not a JSON body) on purpose: the `imgopen` /
+/// `mdopen` shims behind these are tiny `curl` one-liners, and a bodyless
+/// GET is the simplest no-preflight call. `path` is resolved to an absolute
+/// path by the shim before it gets here.
+async fn open_image_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let path = params.get("path").cloned().unwrap_or_default();
+    let body = match backend.open_preview("image", &path) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+async fn open_markdown_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let path = params.get("path").cloned().unwrap_or_default();
+    let body = match backend.open_preview("markdown", &path) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// Body for `POST /save-markdown`: the file to overwrite and its new text.
+#[derive(serde::Deserialize)]
+struct SaveMarkdownReq {
+    path: String,
+    content: String,
+}
+
+/// `POST /save-markdown` — overwrite a markdown file from the editor window.
+/// Raw JSON *string* body (text/plain) to dodge the CORS preflight, same as
+/// `/git-commit`. The file IO is local and quick, so it runs straight on the
+/// tokio thread — no main-thread hop needed (unlike window creation).
+async fn save_markdown_handler(body: String) -> impl IntoResponse {
+    let resp = match serde_json::from_str::<SaveMarkdownReq>(&body) {
+        Ok(req) => match std::fs::write(&req.path, req.content) {
+            Ok(()) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        },
+        Err(e) => serde_json::json!({ "ok": false, "error": format!("bad request body: {e}") }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(resp))
+}
+
 /// `GET /sessions` — JSON snapshot of the tmux-style session tabs for the
 /// session panel to poll: `{ count, active }`.
 async fn sessions_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
@@ -205,6 +258,8 @@ pub fn spawn_http_server(
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let session_close_backend = backend.clone();
+                let open_image_backend = backend.clone();
+                let open_markdown_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -256,6 +311,22 @@ pub fn spawn_http_server(
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             session_close_handler(session_close_backend.clone(), q)
                         }),
+                    )
+                    .route(
+                        "/open-image",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            open_image_handler(open_image_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/open-markdown",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            open_markdown_handler(open_markdown_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/save-markdown",
+                        post(move |body: String| save_markdown_handler(body)),
                     )
                     .nest_service("/mcp", service);
                 if let Err(e) = axum::serve(tokio_listener, app).await {

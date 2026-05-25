@@ -607,6 +607,263 @@ setInterval(poll, 1000);
 </body>
 </html>"#;
 
+/// Minimal HTML-escape for text dropped into a preview page's markup
+/// (the filename shown in the title strip). Covers the five characters
+/// that would otherwise break out of text content / an attribute.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+/// Image-viewer window page. `__NAME__` is the filename (title strip),
+/// `__SRC__` a self-contained `data:` URI of the image bytes (injected at
+/// open time, so the page is fully offline). Fit-to-window by default;
+/// clicking the image toggles 1:1 actual size with scroll-to-pan.
+const IMAGE_VIEWER_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    background: #1a1d23; color: #ecedf3;
+    font: 12px/1.4 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+  .bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; background: #101217; border-bottom: 1px solid #101217;
+    flex: 0 0 auto;
+  }
+  .name { font-weight: 600; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  .dim { color: #787e8a; margin-left: auto; }
+  .stage {
+    flex: 1 1 auto; overflow: auto; display: flex;
+    align-items: center; justify-content: center; padding: 12px;
+  }
+  /* checkerboard so transparent PNGs read clearly */
+  .stage {
+    background-image:
+      linear-gradient(45deg, #20242c 25%, transparent 25%),
+      linear-gradient(-45deg, #20242c 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #20242c 75%),
+      linear-gradient(-45deg, transparent 75%, #20242c 75%);
+    background-size: 20px 20px;
+    background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+  }
+  img { display: block; }
+  img.fit { max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; }
+  img.actual { max-width: none; max-height: none; cursor: zoom-out; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span class="name">__NAME__</span>
+    <span class="dim" id="hint">클릭: 원본 크기 ↔ 맞춤</span>
+  </div>
+  <div class="stage" id="stage">
+    <img id="img" class="fit" src="__SRC__" alt="__NAME__">
+  </div>
+<script>
+  const img = document.getElementById('img');
+  img.addEventListener('click', () => {
+    if (img.classList.contains('fit')) {
+      img.classList.remove('fit'); img.classList.add('actual');
+    } else {
+      img.classList.remove('actual'); img.classList.add('fit');
+    }
+  });
+</script>
+</body>
+</html>"#;
+
+/// Markdown editor/preview window page. `__NAME__` filename, `__PATH__` the
+/// absolute path (JSON string), `__CONTENT__` the file text (JSON string),
+/// `__PORT__` the MCP server port for the save POST. Split textarea + live
+/// preview rendered by a tiny inline parser (no CDN, works offline). Save
+/// POSTs `{path, content}` as text/plain (a CORS "simple" request — no
+/// preflight, same trick the git-commit panel uses).
+const MARKDOWN_EDITOR_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    background: #1a1d23; color: #ecedf3;
+    font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
+  }
+  .bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; background: #101217; flex: 0 0 auto;
+  }
+  .name { font-weight: 600; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  .actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  #status { font-size: 11px; color: #787e8a; }
+  #status.ok { color: #3fb950; }
+  #status.bad { color: #f85149; }
+  button {
+    background: #238636; border: 1px solid #2ea043; color: #fff;
+    border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #2ea043; }
+  button:disabled { opacity: .5; cursor: default; }
+  .split { flex: 1 1 auto; display: flex; min-height: 0; }
+  .pane { flex: 1 1 50%; min-width: 0; overflow: auto; }
+  .pane.edit { border-right: 1px solid #101217; }
+  textarea {
+    width: 100%; height: 100%; resize: none; border: 0; outline: 0;
+    background: #1a1d23; color: #ecedf3; padding: 14px;
+    font: 13px/1.6 ui-monospace, "SF Mono", Menlo, monospace;
+    -webkit-user-select: text; user-select: text;
+  }
+  .preview { padding: 14px 18px; }
+  .preview h1, .preview h2, .preview h3 { line-height: 1.25; margin: 1em 0 .5em; }
+  .preview h1 { font-size: 1.7em; border-bottom: 1px solid #22262e; padding-bottom: .25em; }
+  .preview h2 { font-size: 1.4em; border-bottom: 1px solid #22262e; padding-bottom: .2em; }
+  .preview h3 { font-size: 1.15em; }
+  .preview p { margin: .6em 0; }
+  .preview a { color: #5a8ce6; }
+  .preview code {
+    background: #101217; border-radius: 5px; padding: .12em .4em;
+    font: .9em ui-monospace, Menlo, monospace;
+  }
+  .preview pre {
+    background: #101217; border-radius: 9px; padding: 10px 12px; overflow-x: auto;
+  }
+  .preview pre code { background: none; padding: 0; }
+  .preview blockquote {
+    margin: .6em 0; padding: .2em .9em; border-left: 3px solid #2e323b; color: #a0a6b0;
+  }
+  .preview ul, .preview ol { padding-left: 1.4em; margin: .5em 0; }
+  .preview img { max-width: 100%; }
+  .preview hr { border: 0; border-top: 1px solid #22262e; margin: 1.2em 0; }
+  .preview table { border-collapse: collapse; }
+  .preview td, .preview th { border: 1px solid #22262e; padding: 4px 8px; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <span class="name">__NAME__</span>
+    <span class="actions">
+      <span id="status"></span>
+      <button id="save">저장</button>
+    </span>
+  </div>
+  <div class="split">
+    <div class="pane edit"><textarea id="src" spellcheck="false"></textarea></div>
+    <div class="pane"><div class="preview" id="preview"></div></div>
+  </div>
+<script>
+  const PORT = "__PORT__";
+  const PATH = __PATH__;
+  const INITIAL = __CONTENT__;
+  const src = document.getElementById('src');
+  const preview = document.getElementById('preview');
+  const status = document.getElementById('status');
+  const saveBtn = document.getElementById('save');
+
+  function esc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  // Inline spans: code, bold, italic, links, images. `code` first so its
+  // contents aren't re-parsed for emphasis.
+  function inline(s) {
+    s = esc(s);
+    s = s.replace(/`([^`]+)`/g, (_, c) => '<code>' + c + '</code>');
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">');
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2">$1</a>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+    s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+    s = s.replace(/_([^_]+)_/g, '<em>$1</em>');
+    return s;
+  }
+  // Block-level: fenced code, headings, hr, blockquote, lists, paragraphs.
+  function render(md) {
+    const lines = md.replace(/\r\n/g, '\n').split('\n');
+    let html = '', i = 0;
+    while (i < lines.length) {
+      let line = lines[i];
+      if (/^```/.test(line)) {
+        let body = []; i++;
+        while (i < lines.length && !/^```/.test(lines[i])) { body.push(lines[i]); i++; }
+        i++;
+        html += '<pre><code>' + esc(body.join('\n')) + '</code></pre>';
+        continue;
+      }
+      let h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { const n = h[1].length; html += '<h' + n + '>' + inline(h[2]) + '</h' + n + '>'; i++; continue; }
+      if (/^\s*([-*_])\s*\1\s*\1[\s\1]*$/.test(line)) { html += '<hr>'; i++; continue; }
+      if (/^\s*>/.test(line)) {
+        let body = [];
+        while (i < lines.length && /^\s*>/.test(lines[i])) { body.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+        html += '<blockquote>' + render(body.join('\n')) + '</blockquote>';
+        continue;
+      }
+      if (/^\s*[-*+]\s+/.test(line)) {
+        let items = [];
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*[-*+]\s+/, '')); i++; }
+        html += '<ul>' + items.map(t => '<li>' + inline(t) + '</li>').join('') + '</ul>';
+        continue;
+      }
+      if (/^\s*\d+\.\s+/.test(line)) {
+        let items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*\d+\.\s+/, '')); i++; }
+        html += '<ol>' + items.map(t => '<li>' + inline(t) + '</li>').join('') + '</ol>';
+        continue;
+      }
+      if (line.trim() === '') { i++; continue; }
+      let para = [];
+      while (i < lines.length && lines[i].trim() !== '' && !/^(#{1,6}\s|```|\s*>|\s*[-*+]\s|\s*\d+\.\s)/.test(lines[i])) {
+        para.push(lines[i]); i++;
+      }
+      html += '<p>' + inline(para.join('\n')).replace(/\n/g, '<br>') + '</p>';
+    }
+    return html;
+  }
+  function refresh() { preview.innerHTML = render(src.value); }
+
+  src.value = INITIAL;
+  refresh();
+  let dirty = false;
+  src.addEventListener('input', () => { refresh(); dirty = true; status.textContent = '편집됨'; status.className = ''; });
+
+  async function save() {
+    saveBtn.disabled = true; status.textContent = '저장 중…'; status.className = '';
+    try {
+      const r = await fetch('http://127.0.0.1:' + PORT + '/save-markdown', {
+        method: 'POST', headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ path: PATH, content: src.value }),
+      });
+      const j = await r.json();
+      if (j.ok) { status.textContent = '저장됨'; status.className = 'ok'; dirty = false; }
+      else { status.textContent = j.error || '저장 실패'; status.className = 'bad'; }
+    } catch (e) {
+      status.textContent = '저장 실패: ' + e; status.className = 'bad';
+    } finally { saveBtn.disabled = false; }
+  }
+  saveBtn.addEventListener('click', save);
+  window.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); save(); }
+  });
+</script>
+</body>
+</html>"#;
+
 /// Cell width / height / baseline in logical pixels. Filled at startup
 /// from `Sugarloaf::compute_cell_metrics` so columns align with the
 /// actual font advance instead of a hardcoded guess. Falls back to a
@@ -670,6 +927,75 @@ fn normalise(sel: Selection) -> ((u16, u16), (u16, u16)) {
     }
 }
 
+/// Append a run of grid cells to `out` as text, dropping the blank
+/// "spacer" cell that trails every full-width (CJK) glyph. The grid
+/// stores a wide character as TWO cells — the glyph in the first, an
+/// empty placeholder in the second — so a naive copy emits a stray space
+/// after each syllable ("한글" → "한 글"). We peek: a cell right after a
+/// wide char is its spacer and gets skipped. Genuine blanks (empty cell
+/// not following a wide char) still render as a single space.
+fn append_cells_text<'a>(cells: impl IntoIterator<Item = &'a GridCell>, out: &mut String) {
+    let mut skip_spacer = false;
+    for cell in cells {
+        if skip_spacer {
+            skip_spacer = false;
+            // The spacer is blank by construction; only swallow it when it
+            // really is empty/space so a glitch never eats real text.
+            if cell.ch.is_empty() || cell.ch == " " {
+                continue;
+            }
+        }
+        if cell.ch.is_empty() {
+            out.push(' ');
+        } else {
+            out.push_str(&cell.ch);
+            skip_spacer = cell.ch.chars().next().map(gpu::is_wide_char).unwrap_or(false);
+        }
+    }
+}
+
+/// Most recent scrollback lines to persist per pane on exit. Caps the saved
+/// session file so a pane with a huge history doesn't bloat session.json.
+const SCROLLBACK_SAVE_MAX: usize = 500;
+
+/// Capture a pane's scrollback (history + current screen) as trimmed text
+/// lines for session restore, newest-biased: keeps the last SCROLLBACK_SAVE_MAX
+/// lines and drops the trailing blank rows so a restored pane doesn't carry an
+/// empty tail. v1 saves text only (color/attrs dropped) — the content is what
+/// "what I typed/saw is still there" needs.
+fn scrollback_lines(pane: &PaneState) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for row in pane.history.iter().chain(pane.cells.iter()) {
+        let mut s = String::new();
+        append_cells_text(row.iter(), &mut s);
+        lines.push(s.trim_end().to_string());
+    }
+    while lines.last().map_or(false, |l| l.is_empty()) {
+        lines.pop();
+    }
+    if lines.len() > SCROLLBACK_SAVE_MAX {
+        lines.drain(0..lines.len() - SCROLLBACK_SAVE_MAX);
+    }
+    lines
+}
+
+/// Rebuild a grid row from a saved scrollback text line. Color/attrs default
+/// (v1 text-only); wide (CJK) glyphs get their trailing spacer cell re-added so
+/// the renderer advances two columns exactly like the live grid does.
+fn text_to_cells(line: &str) -> Vec<GridCell> {
+    let mut row = Vec::new();
+    for ch in line.chars() {
+        let wide = gpu::is_wide_char(ch);
+        let mut cell = GridCell::blank();
+        cell.ch = ch.to_string();
+        row.push(cell);
+        if wide {
+            row.push(GridCell::blank());
+        }
+    }
+    row
+}
+
 /// Pull the selected text out of the visible row grid. Joined with `\n`,
 /// trailing spaces trimmed per row. Mirrors kasaterm::extract_selection.
 fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
@@ -689,13 +1015,7 @@ fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
         } else {
             (0, row.len().saturating_sub(1))
         };
-        for cell in row.iter().take(ce + 1).skip(cs) {
-            if cell.ch.is_empty() {
-                out.push(' ');
-            } else {
-                out.push_str(&cell.ch);
-            }
-        }
+        append_cells_text(row.iter().take(ce + 1).skip(cs), &mut out);
         while out.ends_with(' ') {
             out.pop();
         }
@@ -812,13 +1132,7 @@ fn extract_block(rows: &[Vec<GridCell>], block: CodeBlock) -> String {
     let mut lines: Vec<String> = Vec::new();
     for row in rows.iter().take(end + 1).skip(start) {
         let mut line = String::new();
-        for cell in row.iter().take(right + 1).skip(left) {
-            if cell.ch.is_empty() {
-                line.push(' ');
-            } else {
-                line.push_str(&cell.ch);
-            }
-        }
+        append_cells_text(row.iter().take(right + 1).skip(left), &mut line);
         while line.ends_with(' ') {
             line.pop();
         }
@@ -971,11 +1285,6 @@ struct PaneState {
     /// autosuggestion. Only trusted while it's still on the cursor's row
     /// (see `update_suggestion`); a new prompt overwrites it.
     prompt_end: Option<(u16, u16)>,
-    /// Inline images (iTerm2 OSC 1337) visible in this pane right now,
-    /// already mapped to viewport cells by the backend for the current
-    /// scroll position. Replaced wholesale every frame, so an image that
-    /// scrolls out simply stops being listed.
-    images: Vec<tmux_bridge::screen::ImagePlacement>,
 }
 
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
@@ -1243,6 +1552,13 @@ struct App {
     /// outlive its window, so both are owned here.
     session_panel_window: Option<Arc<Window>>,
     session_panel_webview: Option<wry::WebView>,
+    /// Open preview windows (image viewer / markdown editor), each a
+    /// separate OS window + webview spawned by `imgopen` / `mdopen` (or the
+    /// MCP `/open-image` `/open-markdown` endpoints). A Vec, not a single
+    /// slot, so the user can have several open at once; each entry is
+    /// dropped when its own window is closed. Webview must outlive its
+    /// window, so both are owned together.
+    preview_windows: Vec<(Arc<Window>, wry::WebView)>,
     /// When the launch build banner began animating. Drives the
     /// hold-then-fade alpha and keeps the frame loop awake (WaitUntil)
     /// only while the banner is still visible.
@@ -1337,6 +1653,7 @@ impl App {
             git_panel_webview: None,
             session_panel_window: None,
             session_panel_webview: None,
+            preview_windows: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,
             git_menu_item: None,
@@ -1493,20 +1810,6 @@ impl App {
         } else {
             0.0
         }
-    }
-
-    /// Physical pixels per cell, for `PtyOptions.cell_px` (inline-image
-    /// span math in the pty backend). Derived from the live font metrics ×
-    /// the window scale, with a Retina-ish fallback before the window exists.
-    fn host_cell_px(&self) -> (u16, u16) {
-        let scale = self
-            .window
-            .as_ref()
-            .map(|w| w.scale_factor() as f32)
-            .unwrap_or(2.0);
-        let w = (self.cell.w * scale).round().max(1.0) as u16;
-        let h = (self.cell.h * scale).round().max(1.0) as u16;
-        (w, h)
     }
 
     /// 0.0..1.0 opacity for the "복사됨" copy toast: solid for a brief hold
@@ -1667,6 +1970,99 @@ impl App {
         } else {
             self.open_session_panel(event_loop);
         }
+    }
+
+    /// Open a separate preview window (image viewer / markdown editor) for
+    /// `path`. Reads the file on the main thread (it's tiny relative to a
+    /// frame and only fires on an explicit user action) and injects its
+    /// content into a self-contained HTML page — no served asset path, same
+    /// `with_html` + `build_as_child` pattern as the git/session panels.
+    /// Returns an error (surfaced to the `imgopen`/`mdopen` caller) on a bad
+    /// path or any window/webview build failure; the terminal is untouched.
+    fn open_preview_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        kind: socket::PreviewKind,
+        path: &str,
+    ) -> anyhow::Result<()> {
+        let p = std::path::Path::new(path);
+        if path.is_empty() || !p.is_file() {
+            anyhow::bail!("no such file: {path}");
+        }
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string());
+
+        let (title, html, size) = match kind {
+            socket::PreviewKind::Image => {
+                let bytes = std::fs::read(p)
+                    .map_err(|e| anyhow::anyhow!("read failed: {e}"))?;
+                let mime = match p
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_ascii_lowercase())
+                    .as_deref()
+                {
+                    Some("png") => "image/png",
+                    Some("jpg") | Some("jpeg") => "image/jpeg",
+                    Some("gif") => "image/gif",
+                    Some("webp") => "image/webp",
+                    Some("bmp") => "image/bmp",
+                    Some("svg") => "image/svg+xml",
+                    _ => "image/png",
+                };
+                let b64 = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &bytes,
+                );
+                let src = format!("data:{mime};base64,{b64}");
+                let html = IMAGE_VIEWER_HTML
+                    .replace("__NAME__", &html_escape(&name))
+                    .replace("__SRC__", &src);
+                (format!("{name} — 이미지"), html, (820.0, 620.0))
+            }
+            socket::PreviewKind::Markdown => {
+                let text = std::fs::read_to_string(p)
+                    .map_err(|e| anyhow::anyhow!("read failed: {e}"))?;
+                let port = std::env::var("KASASPACE_MCP_PORT")
+                    .unwrap_or_else(|_| "8765".to_string());
+                // JSON-encode path + content so they drop into the page as
+                // safe JS string literals (handles quotes, newlines, unicode).
+                let path_js = serde_json::to_string(path).unwrap_or_else(|_| "\"\"".into());
+                let content_js =
+                    serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".into());
+                let html = MARKDOWN_EDITOR_HTML
+                    .replace("__NAME__", &html_escape(&name))
+                    .replace("__PORT__", &port)
+                    .replace("__PATH__", &path_js)
+                    .replace("__CONTENT__", &content_js);
+                (format!("{name} — 마크다운"), html, (980.0, 680.0))
+            }
+        };
+
+        let attrs = WindowAttributes::default()
+            .with_title(title)
+            .with_theme(Some(Theme::Dark))
+            .with_inner_size(LogicalSize::new(size.0, size.1));
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .map_err(|e| anyhow::anyhow!("window create failed: {e}"))?,
+        );
+        // build_as_child for the same use-after-free reason as the git panel
+        // (winit keeps its content view; the webview fills the window).
+        let webview = wry::WebViewBuilder::new()
+            .with_html(html)
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(size.0, size.1).into(),
+            })
+            .build_as_child(window.as_ref())
+            .map_err(|e| anyhow::anyhow!("webview build failed: {e}"))?;
+        eprintln!("[preview] open {kind:?} {path}");
+        self.preview_windows.push((window, webview));
+        Ok(())
     }
 
     /// Adjust the live font size by `delta` (in logical points) and
@@ -1942,10 +2338,6 @@ impl App {
                 if let Some(pe) = update.prompt_end {
                     pane.prompt_end = Some(pe);
                 }
-                // Inline images: the backend recomputes the full visible
-                // set every snapshot (already scroll-mapped), so replace
-                // wholesale — an empty list means everything scrolled out.
-                pane.images = update.images;
                 // OSC 0/2 title from the inner program (Claude Code's
                 // conversation summary, vim filename, etc.). Carry it
                 // through to PaneState so the chrome header + the
@@ -2002,9 +2394,7 @@ impl App {
             cols,
             rows,
             env: Vec::new(),
-            pane_id: id.clone(),
-            cell_px: self.host_cell_px(),
-        })?;
+            pane_id: id.clone(),        })?;
         self.pump_pty_screens(session.screens.clone(), id.clone());
         self.pty.insert(id.clone(), Arc::new(session));
         self.pty_layout = Some(pty_backend::PtyLayout::single(&id));
@@ -2371,9 +2761,7 @@ impl App {
                     cols,
                     rows,
                     env: Vec::new(),
-                    pane_id: "%0".to_string(),
-                    cell_px: self.host_cell_px(),
-                })?;
+                    pane_id: "%0".to_string(),                })?;
                 self.pump_pty_screens(session.screens.clone(), "%0".to_string());
                 self.pty.insert("%0".to_string(), Arc::new(session));
                 self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
@@ -2496,12 +2884,18 @@ impl App {
                     cols,
                     rows,
                     env: Vec::new(),
-                    pane_id: id.clone(),
-                    cell_px: self.host_cell_px(),
-                })?;
+                    pane_id: id.clone(),                })?;
                 self.pump_pty_screens(session.screens.clone(), id.clone());
                 let arc = Arc::new(session);
                 self.pty.insert(id.clone(), arc.clone());
+                // Restore saved scrollback into the pane's history so scroll-up
+                // shows what was on screen before the restart. The live shell
+                // starts fresh below; this only seeds the backlog.
+                if !p.scrollback.is_empty() {
+                    let rows: std::collections::VecDeque<Vec<GridCell>> =
+                        p.scrollback.iter().map(|l| text_to_cells(l)).collect();
+                    self.ws.lock().unwrap().pane_mut(&id).history = rows;
+                }
                 if p.was_claude {
                     let cmd = match &p.session_id {
                         Some(sid) => format!("claude --resume {sid}\n"),
@@ -2544,19 +2938,29 @@ impl App {
             // Each session contributes all its windows. The active session's
             // live state is in self.{pty,pty_layout,windows,active_window};
             // stashed sessions carry the same fields on their Session.
-            let (pty, active_layout, windows, active_window) = if i == self.active_session {
+            let (pty, active_layout, windows, active_window, ws_arc) = if i == self.active_session {
                 (
                     &self.pty,
                     self.pty_layout.as_ref(),
                     &self.windows,
                     self.active_window,
+                    &self.ws,
                 )
             } else {
                 match self.sessions[i].as_ref() {
-                    Some(s) => (&s.pty, s.pty_layout.as_ref(), &s.windows, s.active_window),
+                    Some(s) => (
+                        &s.pty,
+                        s.pty_layout.as_ref(),
+                        &s.windows,
+                        s.active_window,
+                        &s.ws,
+                    ),
                     None => continue,
                 }
             };
+            // Lock this session's workspace once so each leaf can read its
+            // pane scrollback while serializing the window trees.
+            let ws_guard = ws_arc.lock().unwrap();
             // Serialize every window. The active window's tree lives in
             // active_layout; the rest sit in `windows[j]` (active slot None).
             let mut windows_json = Vec::new();
@@ -2571,7 +2975,7 @@ impl App {
                 if j == active_window {
                     new_active = windows_json.len();
                 }
-                windows_json.push(Self::layout_to_json(layout, pty));
+                windows_json.push(Self::layout_to_json(layout, pty, &ws_guard));
             }
             if windows_json.is_empty() {
                 continue;
@@ -2596,13 +3000,24 @@ impl App {
     fn layout_to_json(
         layout: &pty_backend::PtyLayout,
         pty: &HashMap<String, Arc<pty_backend::PtySession>>,
+        ws: &Workspace,
     ) -> serde_json::Value {
         match layout {
             pty_backend::PtyLayout::Leaf { pane_id } => {
-                let rec = pty
+                let mut rec = pty
                     .get(pane_id)
                     .map(|s| socket::pane_record(s))
                     .unwrap_or(serde_json::Value::Null);
+                // Attach the pane's scrollback (text lines) so restore can
+                // repaint what was on screen. Only when we have a real record.
+                if let Some(obj) = rec.as_object_mut() {
+                    let sb = ws
+                        .panes
+                        .get(pane_id)
+                        .map(scrollback_lines)
+                        .unwrap_or_default();
+                    obj.insert("scrollback".to_string(), serde_json::json!(sb));
+                }
                 serde_json::json!({ "leaf": rec })
             }
             pty_backend::PtyLayout::Split { dir, ratio, a, b } => {
@@ -2613,8 +3028,8 @@ impl App {
                 serde_json::json!({ "split": {
                     "dir": dir,
                     "ratio": ratio,
-                    "a": Self::layout_to_json(a, pty),
-                    "b": Self::layout_to_json(b, pty),
+                    "a": Self::layout_to_json(a, pty, ws),
+                    "b": Self::layout_to_json(b, pty, ws),
                 }})
             }
         }
@@ -3008,7 +3423,7 @@ impl App {
 
     /// Drain pending socket commands and run them on the main thread.
     /// Called once per loop turn from `about_to_wait`.
-    fn drain_socket_inbox(&mut self) {
+    fn drain_socket_inbox(&mut self, event_loop: &ActiveEventLoop) {
         let cmds: Vec<socket::PtyCommand> = match self.socket_handle.as_ref() {
             Some(h) => std::mem::take(&mut *h.inbox.lock().unwrap()),
             None => return,
@@ -3147,6 +3562,10 @@ impl App {
                 }
                 socket::PtyCommand::CloseSession { idx, reply } => {
                     let res = self.close_session(idx);
+                    let _ = reply.send(res);
+                }
+                socket::PtyCommand::OpenPreview { kind, path, reply } => {
+                    let res = self.open_preview_window(event_loop, kind, &path);
                     let _ = reply.send(res);
                 }
             }
@@ -3298,21 +3717,22 @@ impl App {
         // by the same amount — otherwise claude code paints its
         // statusline / `bypass…` row off the bottom edge.
         let leaves = tree.leaves().len();
-        let header_cells: u16 = if leaves > 1 {
-            ((PANE_HEADER_HEIGHT / self.cell.h.max(1.0)).ceil() as u16).max(1)
-        } else {
-            0
-        };
-        // Inset eats a couple of cells per axis so the grid fits inside
-        // the padded box. Done in cells (ceil) here to match the px inset
-        // the render origin applies — a hair of slack is fine, it just
-        // lands as extra trailing margin.
+        // Vertical reservation = header strip (only when split) + top and
+        // bottom inset, rounded up to whole cells in ONE ceil. Rounding the
+        // header and the inset *separately* each bumped to the next cell, so
+        // a split pane reserved up to a full extra row it never drew — that
+        // unused row showed through as a ~20px gray band (the window clear
+        // color) between the last text row and the pane's bottom border.
+        // One combined ceil keeps the unused tail under a single cell: the
+        // intended breathing margin, not a visible band.
+        let header_px = if leaves > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
+        let reserved_y_cells =
+            ((header_px + 2.0 * PANE_INNER_Y) / self.cell.h.max(1.0)).ceil() as u16;
         let inset_x_cells = (2.0 * PANE_INNER_X / self.cell.w.max(1.0)).ceil() as u16;
-        let inset_y_cells = (2.0 * PANE_INNER_Y / self.cell.h.max(1.0)).ceil() as u16;
         for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
             if let Some(sess) = self.pty.get(&id) {
                 let pcols = w.saturating_sub(inset_x_cells).max(1);
-                let prows = h.saturating_sub(header_cells + inset_y_cells).max(1);
+                let prows = h.saturating_sub(reserved_y_cells).max(1);
                 let _ = sess.resize(pcols, prows);
             }
         }
@@ -3383,9 +3803,7 @@ impl App {
             cols: win_cols,
             rows: win_rows,
             env: Vec::new(),
-            pane_id: new_id.clone(),
-            cell_px: self.host_cell_px(),
-        })?;
+            pane_id: new_id.clone(),        })?;
         self.pump_pty_screens(session.screens.clone(), new_id.clone());
         self.pty.insert(new_id.clone(), Arc::new(session));
 
@@ -4743,19 +5161,6 @@ impl App {
         // Code-block copy buttons (text + logical rect), filled per pane in
         // the loop below and handed to both the mouse handler and overlay.
         let mut copy_btns: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
-        // Inline images to draw this frame, in PHYSICAL pixels, already
-        // clipped to each pane's body. Filled inside the slot loop below
-        // (which holds the workspace lock) and handed to the GPU after the
-        // cell pass. Each keeps an Arc to the decoded pixels so the quad
-        // can borrow them without copying.
-        struct CollectedImage {
-            id: u64,
-            image: std::sync::Arc<tmux_bridge::screen::DecodedImage>,
-            px: [f32; 4],
-            uv_min: [f32; 2],
-            uv_max: [f32; 2],
-        }
-        let mut collected_images: Vec<CollectedImage> = Vec::new();
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
@@ -4849,41 +5254,6 @@ impl App {
                     rows: composed,
                     origin_px,
                 });
-                // Inline images for this pane. The backend already mapped
-                // each to a viewport cell row/col (scroll-aware); here we
-                // turn that into a physical-pixel rect and clip it to the
-                // pane's body so a partly-scrolled or oversized image is
-                // cropped against the cell area instead of bleeding over
-                // the header / window chrome.
-                if !pane.images.is_empty() {
-                    let body_x0 = origin_px.0;
-                    let body_y0 = origin_px.1;
-                    let body_x1 = origin_px.0 + cols_now as f32 * cell_w_px;
-                    let body_y1 = origin_px.1 + pane.rows as f32 * cell_h_px;
-                    for img in &pane.images {
-                        let ix0 = origin_px.0 + img.col as f32 * cell_w_px;
-                        let iy0 = origin_px.1 + img.row as f32 * cell_h_px;
-                        let iw = img.cols as f32 * cell_w_px;
-                        let ih = img.rows as f32 * cell_h_px;
-                        if iw <= 0.0 || ih <= 0.0 {
-                            continue;
-                        }
-                        let cx0 = ix0.max(body_x0);
-                        let cy0 = iy0.max(body_y0);
-                        let cx1 = (ix0 + iw).min(body_x1);
-                        let cy1 = (iy0 + ih).min(body_y1);
-                        if cx1 <= cx0 || cy1 <= cy0 {
-                            continue;
-                        }
-                        collected_images.push(CollectedImage {
-                            id: img.id,
-                            image: img.image.clone(),
-                            px: [cx0, cy0, cx1 - cx0, cy1 - cy0],
-                            uv_min: [(cx0 - ix0) / iw, (cy0 - iy0) / ih],
-                            uv_max: [(cx1 - ix0) / iw, (cy1 - iy0) / ih],
-                        });
-                    }
-                }
                 if show_headers {
                     // Custom title (rename / OSC) wins; otherwise show the
                     // live foreground process (vim, claude, zsh …); only
@@ -5012,22 +5382,6 @@ impl App {
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             g.draw_cells(&slot_views);
-            // Stage inline images (drawn on top of the cell grid in
-            // `render`). Called unconditionally — an empty slice clears
-            // any image that just scrolled out.
-            let image_quads: Vec<gpu::ImageQuad<'_>> = collected_images
-                .iter()
-                .map(|c| gpu::ImageQuad {
-                    id: c.id,
-                    rgba: &c.image.rgba,
-                    width: c.image.width,
-                    height: c.image.height,
-                    px: c.px,
-                    uv_min: c.uv_min,
-                    uv_max: c.uv_max,
-                })
-                .collect();
-            g.set_images(&image_quads);
             // Title strip fill: chrome surface across the top so the area above
             // the sidebar / traffic lights matches the sidebar instead of
             // showing the terminal body color.
@@ -6188,6 +6542,20 @@ impl ApplicationHandler<UserEvent> for App {
             }
             return;
         }
+        // Preview windows (image viewer / markdown editor): same isolation as
+        // the panels above. A CloseRequested drops just that one entry
+        // (window + its webview together); everything else is swallowed so a
+        // preview window's resize never touches the terminal's wgpu surface.
+        if let Some(pos) = self
+            .preview_windows
+            .iter()
+            .position(|(w, _)| w.id() == id)
+        {
+            if matches!(event, WindowEvent::CloseRequested) {
+                self.preview_windows.remove(pos);
+            }
+            return;
+        }
         let Some(window) = self.window.clone() else { return; };
         // gpu path uses our own wgpu surface, sugarloaf path keeps
         // its renderer. Only resize / rescale touch the surface
@@ -6633,7 +7001,7 @@ impl ApplicationHandler<UserEvent> for App {
         // through the same split/focus/send paths Cmd+D etc use, so
         // visible behavior is identical regardless of whether the
         // trigger came from a keystroke or a JSON-RPC call.
-        self.drain_socket_inbox();
+        self.drain_socket_inbox(event_loop);
         // Fire any due KASATERM_AUTOSPLIT step before parking. No-op
         // when no plan is queued.
         self.run_pending_autosplits();
@@ -6776,11 +7144,10 @@ fn install_tmux_shim() {
             eprintln!("[shim] stage cmux-compat {cmux_src:?} -> {cmux_target:?} failed: {e}");
         }
     }
-    // Drop a self-contained `imgcat` on the pane PATH so the user (or
-    // Claude) can show an image inline with zero install — it just
-    // base64-encodes the file into an iTerm2 OSC 1337 sequence, which the
-    // pty backend intercepts and the renderer draws over the cell grid.
-    install_imgcat(&shim_dir);
+    // Drop `imgopen` / `mdopen` on the pane PATH so the user (or Claude) can
+    // pop an image viewer / markdown editor into its own window with zero
+    // install — each just curls the host's MCP open-preview endpoint.
+    install_preview_shims(&shim_dir);
     // Force our shim dir to the FRONT of PATH even after the user's rc
     // files run. A login+interactive zsh sources brew's zprofile, which
     // prepends /opt/homebrew/bin (the real tmux) ahead of the PATH we
@@ -6860,35 +7227,48 @@ fn install_tmux_shim() {
     );
 }
 
-/// Write a tiny `imgcat` into the shim dir (which is on the pane PATH).
-/// It encodes a file as an iTerm2 OSC 1337 inline-image sequence; the
-/// pty backend diverts that and the renderer draws it over the grid.
-/// No external dependency beyond `base64`, which ships on macOS/Linux.
-fn install_imgcat(shim_dir: &std::path::Path) {
-    // Windows shells can't run this /bin/sh script and the pane PATH
-    // there isn't a POSIX shell; skip rather than drop a broken file.
+/// Write `imgopen` and `mdopen` into the shim dir (on the pane PATH). Each
+/// resolves its argument to an absolute path and curls the host's MCP
+/// open-preview endpoint, which spawns a separate wry window. No dependency
+/// beyond `curl` (ships on macOS/Linux); the port comes from
+/// KASASPACE_MCP_PORT (default 8765), inherited from the host process.
+fn install_preview_shims(shim_dir: &std::path::Path) {
+    // Windows shells can't run /bin/sh scripts and the pane PATH there isn't
+    // a POSIX shell; skip rather than drop broken files.
     if cfg!(windows) {
         return;
     }
-    let script = "#!/bin/sh\n\
-# kasaterm imgcat — show image(s) inline via iTerm2 OSC 1337.\n\
-if [ \"$#\" -lt 1 ]; then echo \"usage: imgcat FILE [FILE...]\" >&2; exit 1; fi\n\
-for f in \"$@\"; do\n\
-  if [ ! -f \"$f\" ]; then echo \"imgcat: no such file: $f\" >&2; continue; fi\n\
-  b64=$(base64 < \"$f\" | tr -d '\\n')\n\
-  nm=$(printf '%s' \"$(basename \"$f\")\" | base64 | tr -d '\\n')\n\
-  printf '\\033]1337;File=name=%s;inline=1:%s\\a\\n' \"$nm\" \"$b64\"\n\
-done\n";
-    let path = shim_dir.join("imgcat");
-    if let Err(e) = std::fs::write(&path, script) {
-        eprintln!("[shim] write imgcat failed: {e}");
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)) {
-            eprintln!("[shim] chmod imgcat failed: {e}");
+    // `--get --data-urlencode` lets curl build the query string with the
+    // path properly percent-encoded (spaces, unicode, etc.) — no hand-rolled
+    // URL escaping in sh.
+    let mk = |cmd: &str, endpoint: &str| -> String {
+        format!(
+            "#!/bin/sh\n\
+# kasaterm {cmd} — open a file in a separate preview window.\n\
+if [ \"$#\" -lt 1 ]; then echo \"usage: {cmd} FILE\" >&2; exit 1; fi\n\
+f=$1\n\
+if command -v realpath >/dev/null 2>&1; then abs=$(realpath \"$f\"); \
+else case \"$f\" in /*) abs=\"$f\";; *) abs=\"$PWD/$f\";; esac; fi\n\
+port=${{KASASPACE_MCP_PORT:-8765}}\n\
+curl -s --get --data-urlencode \"path=$abs\" \
+\"http://127.0.0.1:$port/{endpoint}\" >/dev/null \
+|| {{ echo \"{cmd}: failed to reach kasaterm\" >&2; exit 1; }}\n"
+        )
+    };
+    for (name, endpoint) in [("imgopen", "open-image"), ("mdopen", "open-markdown")] {
+        let path = shim_dir.join(name);
+        if let Err(e) = std::fs::write(&path, mk(name, endpoint)) {
+            eprintln!("[shim] write {name} failed: {e}");
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            {
+                eprintln!("[shim] chmod {name} failed: {e}");
+            }
         }
     }
 }
@@ -7227,5 +7607,43 @@ mod tests {
         let (a, b) = normalise(sel);
         assert_eq!(a, (1, 0));
         assert_eq!(b, (5, 2));
+    }
+
+    /// Build a grid row from a string, expanding each full-width (CJK)
+    /// char into a glyph cell + a blank spacer cell — exactly how the PTY
+    /// backend stores them. Pads to `width` with blanks.
+    fn wide_row(s: &str, width: usize) -> Vec<GridCell> {
+        let mut row = Vec::new();
+        for ch in s.chars() {
+            row.push(GridCell { ch: ch.to_string(), ..GridCell::blank() });
+            if gpu::is_wide_char(ch) {
+                row.push(GridCell { ch: " ".into(), ..GridCell::blank() });
+            }
+        }
+        while row.len() < width {
+            row.push(GridCell::blank());
+        }
+        row
+    }
+
+    #[test]
+    fn copy_drops_wide_char_spacer() {
+        // Selection copy: "한글" must not become "한 글".
+        let row = wide_row("한글", 12);
+        let sel = Selection { anchor: (0, 0), end: (3, 0) };
+        assert_eq!(extract_selection(&[row], sel), "한글");
+
+        // Mixed ASCII + CJK keeps real spaces, drops only spacers.
+        let row = wide_row("a한 b", 12);
+        let sel = Selection { anchor: (0, 0), end: (5, 0) };
+        assert_eq!(extract_selection(&[row], sel), "a한 b");
+    }
+
+    #[test]
+    fn block_extract_drops_wide_char_spacer() {
+        let row = wide_row("코드복사", 16);
+        // block = (start, end, left, right) inclusive, full CJK run is cols 0..=7.
+        let out = extract_block(&[row], (0, 0, 0, 7));
+        assert_eq!(out, "코드복사");
     }
 }

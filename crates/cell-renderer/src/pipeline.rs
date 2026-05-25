@@ -44,11 +44,6 @@ pub struct Pipeline {
     instance_buffer: wgpu::Buffer,
     instance_capacity: u32,
     uniform_buffer: wgpu::Buffer,
-    /// Separate instance buffer for inline-image quads. Images each bind
-    /// their own texture (one quad per draw), so they can't share the
-    /// glyph/chrome instance buffer that's bound against the atlas.
-    image_buffer: wgpu::Buffer,
-    image_capacity: u32,
 }
 
 impl Pipeline {
@@ -192,22 +187,12 @@ impl Pipeline {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let image_capacity = 16u32;
-        let image_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cell-renderer image instance buffer"),
-            size: (image_capacity as u64) * std::mem::size_of::<CellInstance>() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         Self {
             pipeline,
             bind_group_layout,
             instance_buffer,
             instance_capacity: initial_instance_capacity,
             uniform_buffer,
-            image_buffer,
-            image_capacity,
         }
     }
 
@@ -282,45 +267,5 @@ impl Pipeline {
         pass.set_bind_group(0, bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         pass.draw(0..6, 0..instance_count);
-    }
-
-    /// Upload the inline-image quad instances (one per visible image).
-    /// Each is drawn separately via `draw_image` because every image
-    /// binds its own texture.
-    pub fn write_image_instances(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        instances: &[CellInstance],
-    ) {
-        let needed = instances.len() as u32;
-        if needed > self.image_capacity {
-            let new_cap = needed.next_power_of_two().max(16);
-            self.image_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("cell-renderer image instance buffer (grown)"),
-                size: (new_cap as u64) * std::mem::size_of::<CellInstance>() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.image_capacity = new_cap;
-        }
-        if !instances.is_empty() {
-            queue.write_buffer(&self.image_buffer, 0, bytemuck::cast_slice(instances));
-        }
-    }
-
-    /// Draw a single inline-image quad: instance `index` of the image
-    /// buffer, sampled through `bind_group` (which carries that image's
-    /// own texture). Caller loops over images, swapping the bind group.
-    pub fn draw_image<'a>(
-        &'a self,
-        pass: &mut wgpu::RenderPass<'a>,
-        bind_group: &'a wgpu::BindGroup,
-        index: u32,
-    ) {
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, bind_group, &[]);
-        pass.set_vertex_buffer(0, self.image_buffer.slice(..));
-        pass.draw(0..6, index..index + 1);
     }
 }
