@@ -33,6 +33,9 @@ base64 = "0.22"
 # (uploaded straight into a wgpu texture). default-features off so we
 # only pull the codecs we actually open from a shell.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# Parse markdown into an event stream for the in-pane document renderer
+# (headings/paragraphs/code/lists laid out directly with the cell renderer).
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
