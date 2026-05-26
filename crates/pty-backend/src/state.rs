@@ -378,8 +378,16 @@ impl PtySession {
     pub fn scroll(&self, lines: i32) -> usize {
         let (cols, rows) = *self.size.lock().unwrap();
         let mut t = self.term.lock().unwrap();
+        let before = t.grid().display_offset();
         t.scroll_display(alacritty_terminal::grid::Scroll::Delta(lines));
-        let offset = t.grid().display_offset();
+        let after = t.grid().display_offset();
+        // Inertia at a scrollback boundary keeps firing scroll(±N) even
+        // though the offset is clamped. Skipping the snapshot+send when
+        // nothing moved lets the render thread answer a direction reverse
+        // immediately instead of working through a queue of no-ops.
+        if before == after {
+            return after;
+        }
         let update = snapshot(
             &mut t,
             cols,
@@ -389,7 +397,7 @@ impl PtySession {
             true,
         );
         let _ = self.screens_tx.try_send(update);
-        offset
+        after
     }
 
     /// Jump straight to the live tail (display offset 0).
@@ -571,7 +579,11 @@ fn spawn_reader_thread(
     std::thread::spawn(move || {
         use unicode_normalization::UnicodeNormalization;
         let mut processor: Processor<StdSyncHandler> = Processor::new();
-        let mut buf = [0u8; 8192];
+        // 64KB matches the macOS PTY kernel buffer — one read drains a full
+        // frame's worth of TUI output (ghostty / iTerm sized buffer). The
+        // old 8KB forced 2-3 reads per claude-code frame, multiplying the
+        // per-read snapshot cost by 2-3× and capping throughput at ~90 fps.
+        let mut buf = [0u8; 65536];
         let mut current_size = (cols, rows);
         // Reassembles UTF-8 across read boundaries so NFC normalization
         // never sees a half codepoint (a multibyte char split between
@@ -640,23 +652,43 @@ fn spawn_reader_thread(
             }
 
             // NFC-normalize so decomposed Hangul (NFD jamo) collapses to
-            // precomposed syllables before alacritty stores them — the
-            // GPU cell-renderer draws one glyph per codepoint, so NFD
-            // would otherwise show as split jamo (cosmic_text used to
-            // reshape them on the sugarloaf path).
+            // precomposed syllables before alacritty stores them. Pure-ASCII
+            // batches (the common case — TUI rendering, ANSI control flow)
+            // skip the normalize entirely; NFC is a no-op there but the
+            // .nfc() iterator + String alloc still cost ~10us per read in
+            // a hot loop. ASCII fast-path keeps the bytes borrowed.
             let raw_str = utf8_buf.process(&buf[..n]);
-            let nfc_str: String = raw_str.nfc().collect();
-            let processed_bytes = nfc_str.as_bytes();
-            // Sniff for iTerm OSC 1337 inline images in parallel with the VT
-            // parser (which drops them unhandled). Decoded payloads open in an
-            // image pane via /open-image.
-            scan_inline_image(processed_bytes, &mut img_buf, &mut img_capturing);
-            scan_kitty_graphics(
-                processed_bytes,
-                &mut kitty_chunk_buf,
-                &mut kitty_payload_buf,
-                &mut kitty_capturing,
-            );
+            let (nfc_holder, processed_bytes): (Option<String>, &[u8]) =
+                if raw_str.is_ascii() {
+                    (None, raw_str.as_bytes())
+                } else {
+                    let s: String = raw_str.nfc().collect();
+                    (Some(s), &[])
+                };
+            let processed_bytes: &[u8] = match &nfc_holder {
+                Some(s) => s.as_bytes(),
+                None => processed_bytes,
+            };
+            // Sniff for iTerm OSC 1337 inline images / kitty graphics. Both
+            // scans walk the byte slice, so we cheaply prefix-check first —
+            // most reads have no `\x1b]1337` / `\x1b_G` and we skip the
+            // walk entirely. Critical for TUI throughput (claude code emits
+            // thousands of small reads per second with neither prefix).
+            if img_capturing
+                || memchr::memmem::find(processed_bytes, b"\x1b]1337").is_some()
+            {
+                scan_inline_image(processed_bytes, &mut img_buf, &mut img_capturing);
+            }
+            if kitty_capturing
+                || memchr::memmem::find(processed_bytes, b"\x1b_G").is_some()
+            {
+                scan_kitty_graphics(
+                    processed_bytes,
+                    &mut kitty_chunk_buf,
+                    &mut kitty_payload_buf,
+                    &mut kitty_capturing,
+                );
+            }
 
             let update = {
                 let mut t = term.lock().unwrap();
@@ -705,8 +737,20 @@ fn spawn_reader_thread(
                 }
             };
             if let Some(upd) = update {
-                if tx.send(upd).is_err() {
-                    return;
+                // try_send (not send) so the reader is NEVER paced by the
+                // pump/render side. If the consumer is behind (slow GPU
+                // pass, ws-lock contention) the bounded channel fills, the
+                // newest snapshot gets dropped, and bash keeps writing at
+                // full PTY rate. Reader produces a fresh snapshot on the
+                // next read anyway, so the only cost is a momentary stale
+                // frame — which the user wouldn't have seen mid-burst.
+                // The blocking `send` previously stalled the reader, which
+                // backpressured bash, which made claude-code-style TUIs
+                // feel ~10× slower than ghostty.
+                match tx.try_send(upd) {
+                    Ok(()) => {}
+                    Err(crossbeam_channel::TrySendError::Full(_)) => {}
+                    Err(crossbeam_channel::TrySendError::Disconnected(_)) => return,
                 }
             }
         }
