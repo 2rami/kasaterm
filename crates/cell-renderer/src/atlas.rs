@@ -172,7 +172,8 @@ impl Atlas {
         if let Some(slot) = self.cache.get(&key) {
             return *slot;
         }
-        let raster = shaper.rasterize(key.ch, key.size_px as f32);
+        let raster =
+            shaper.rasterize_styled(key.ch, key.size_px as f32, key.bold, key.italic);
         let entry = raster.and_then(|r| self.upload(device, queue, &r));
         self.cache.insert(key, entry);
         entry
