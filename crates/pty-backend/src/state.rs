@@ -213,6 +213,16 @@ impl PtySession {
         // fd we care about. Keeping it open in our process makes
         // close-detection unreliable.
         drop(pair.slave);
+        // Master knows the slave's tty path (e.g. /dev/ttys011) — Terminal.app
+        // shows this as the trailing "on ttysNNN" of its Last login line and
+        // we want to mirror that. Only available on unix; None on Windows.
+        #[cfg(unix)]
+        let tty_short = pair
+            .master
+            .tty_name()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()));
+        #[cfg(not(unix))]
+        let tty_short: Option<String> = None;
 
         let reader = pair.master.try_clone_reader().context("clone reader")?;
         let writer = pair
@@ -246,6 +256,19 @@ impl PtySession {
                 proc.advance(&mut *t, line.as_bytes());
                 proc.advance(&mut *t, b"\r\n");
             }
+        }
+        // Mimic Terminal.app's "Last login: …" banner. login(1) writes this
+        // by reading ~/.lastlogin and updating it after spawn; we keep our
+        // own state file (no setuid login wrapper involved) and inject the
+        // line straight into the VT grid before the reader thread starts —
+        // same pattern as initial_scrollback above. We only show it when a
+        // previous timestamp exists, so a brand-new install doesn't get a
+        // bare "Last login: on ttysNNN" line.
+        if let Some(line) = build_last_login_line(tty_short.as_deref()) {
+            let mut proc: Processor<StdSyncHandler> = Processor::new();
+            let mut t = term.lock().unwrap();
+            proc.advance(&mut *t, line.as_bytes());
+            proc.advance(&mut *t, b"\r\n");
         }
         let reader_thread = spawn_reader_thread(
             reader,
@@ -936,6 +959,41 @@ fn scan_inline_image(bytes: &[u8], buf: &mut Vec<u8>, capturing: &mut bool) {
             }
         }
     }
+}
+
+/// Build the "Last login: <time> on <tty>" banner Terminal.app shows.
+/// Returns None on first ever spawn (no stored timestamp) or when we
+/// couldn't resolve a tty name — both cases would render as an
+/// awkward partial line.
+///
+/// State lives at `$HOME/.config/kasaterm/last_login` as one line of
+/// pre-formatted text (e.g. "Tue May 26 13:05:54"). We re-emit the
+/// *previous* contents and overwrite with `date(1)`-formatted "now"
+/// so the next spawn sees this run's timestamp.
+fn build_last_login_line(tty: Option<&str>) -> Option<String> {
+    let tty = tty?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let dir = home.join(".config").join("kasaterm");
+    let path = dir.join("last_login");
+    let previous = std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    // Shell out to date(1) — saves pulling chrono/time into the
+    // workspace just for one strftime call. Format matches what
+    // Terminal.app writes ("%a %b %e %H:%M:%S").
+    let now = std::process::Command::new("date")
+        .args(["+%a %b %e %H:%M:%S"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(now) = &now {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&path, now);
+    }
+    previous.map(|p| format!("Last login: {p} on {tty}"))
 }
 
 fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
