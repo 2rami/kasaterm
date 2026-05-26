@@ -35,7 +35,16 @@ impl CellInstance {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Uniforms {
     pub screen_px: [f32; 2],
-    pub _pad: [f32; 2],
+    /// WezTerm-style alpha curve on the glyph coverage mask. >1 boosts
+    /// mid-tones (crisper text), 1.0 = passthrough. Defaults to 1.3.
+    pub text_gamma: f32,
+    /// Post-gamma alpha multiplier. 1.0 = no extra contrast.
+    pub text_contrast: f32,
+    /// HSL-style saturation multiplier on fg / colored-glyph rgb. 1.0 =
+    /// passthrough; bumping (e.g. 1.4) closes the visual gap with
+    /// ghostty's punchier reds / greens on the same P3 panel.
+    pub color_sat: f32,
+    pub _pad: f32,
 }
 
 pub struct Pipeline {
@@ -199,7 +208,10 @@ impl Pipeline {
             label: Some("cell-renderer uniform buffer"),
             contents: bytemuck::bytes_of(&Uniforms {
                 screen_px: [1.0, 1.0],
-                _pad: [0.0, 0.0],
+                text_gamma: 1.3,
+                text_contrast: 1.0,
+                color_sat: 1.0,
+                _pad: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -240,9 +252,26 @@ impl Pipeline {
     }
 
     pub fn write_uniforms(&self, queue: &wgpu::Queue, screen_px: [f32; 2]) {
+        self.write_uniforms_full(queue, screen_px, 1.3, 1.0, 1.0);
+    }
+
+    /// Same as `write_uniforms` but lets the host plug in custom text gamma
+    /// / contrast / colour saturation. Defaults to WezTerm's 1.3 / 1.0
+    /// baseline + neutral saturation when the 2-arg form is used.
+    pub fn write_uniforms_full(
+        &self,
+        queue: &wgpu::Queue,
+        screen_px: [f32; 2],
+        text_gamma: f32,
+        text_contrast: f32,
+        color_sat: f32,
+    ) {
         let u = Uniforms {
             screen_px,
-            _pad: [0.0, 0.0],
+            text_gamma,
+            text_contrast,
+            color_sat,
+            _pad: 0.0,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&u));
     }
