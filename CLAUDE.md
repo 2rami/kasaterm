@@ -35,5 +35,8 @@ UI 상수는 LOGICAL 값 × 2 = PHYSICAL pixel로 저장. FONT_SIZE=32, TITLE_HE
 ### 새 pane 스폰
 런처에서 spawn은 **`split-window -h`** 사용. `new-window`는 새 탭이 매번 쌓여서 사용자가 짜증. send-keys는 같은 tmux_cmd 호출에서 바로 연쇄.
 
+### PTY reader — try_send 필수 (절대 blocking send 부활 금지)
+PTY reader thread의 snapshot 전송은 무조건 `try_send`. 블로킹 `send` 부활시키면 render-vsync에 묶일 때 PTY backpressure로 bash가 멈추고 claude code가 10x 느려짐 (bounded(256) 채널 가득 → reader block → PTY 버퍼 가득 → bash backpressure). `crates/pty-backend/src/state.rs` `spawn_reader_thread` 참조.
+
 ### 성능 (해결됨, 참고)
 옛 sugarloaf 경로의 `build_body_cells`가 셀마다 `cosmic_text::Buffer` 생성하던 30-50ms/frame 병목은 cell-renderer(swash atlas + wgpu instance, 1542셀 ~80μs)로 교체돼 해결됨(커밋 `1033b56`). 기본 렌더러 = `gpu.rs`. sugarloaf는 `KASATERM_RENDERER=sugarloaf`로 A/B용만 남음.
