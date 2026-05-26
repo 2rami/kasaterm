@@ -21,6 +21,7 @@ use sugarloaf::layout::RootStyle;
 use sugarloaf::{Sugarloaf, SugarloafRenderer, SugarloafWindow, SugarloafWindowSize};
 use tmux_bridge::layout::{parse_layout, Layout};
 use tmux_bridge::screen::Cell as GridCell;
+use tmux_bridge::screen::Row;
 use tmux_bridge::{ScreenUpdate, StartOptions, TmuxEvent, TmuxSession};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -148,7 +149,20 @@ const SIDEBAR_TAB_H: f32 = 54.0;
 const SIDEBAR_TAB_GAP: f32 = 3.0;
 const SIDEBAR_TAB_INSET: f32 = 8.0;
 const SCROLLBACK_MAX: usize = 5000;
-const WHEEL_THROTTLE_MS: u64 = 8;
+/// Min ms between wheel emits. Default 0 = pass every macOS scroll event
+/// straight through to `pty.scroll`; the try_send-based reader pipeline
+/// absorbs the burst without back-pressuring bash, so throttling here just
+/// muddies the inertia feel. Raise via `KASATERM_WHEEL_THROTTLE_MS=<n>` to
+/// dampen if you want a smoother (lenis-style) scroll.
+fn wheel_throttle_ms() -> u64 {
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("KASATERM_WHEEL_THROTTLE_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    })
+}
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
 /// default; iTerm2 uses 500. 530 matches the platform feel.
 const BLINK_HALF_PERIOD_MS: u64 = 530;
@@ -532,6 +546,7 @@ let busy = false;
 function render(d) {
   $("err").style.display = "none";
   const count = d.count || 1, active = d.active || 0;
+  const saved = Array.isArray(d.saved) ? d.saved : [];
   const ul = $("list");
   ul.innerHTML = "";
   for (let i = 0; i < count; i++) {
@@ -543,8 +558,6 @@ function render(d) {
     const badge = document.createElement("span"); badge.className = "badge";
     if (i === active) badge.textContent = "활성";
     li.appendChild(dot); li.appendChild(label); li.appendChild(badge);
-    // Only offer close when more than one session exists — the last
-    // session can't be closed (the terminal always needs one).
     if (count > 1) {
       const x = document.createElement("button");
       x.className = "close"; x.textContent = "×"; x.title = "세션 닫기";
@@ -554,6 +567,39 @@ function render(d) {
     if (i !== active) li.onclick = () => switchTo(i);
     ul.appendChild(li);
   }
+  // Saved sessions from the last shutdown — light-launch keeps them on disk
+  // instead of auto-restoring. Click to restore in-place; we surface them
+  // here so they're never lost behind the always-fresh first pane.
+  if (saved.length) {
+    const hr = document.createElement("li");
+    hr.style.cssText = "margin-top:14px;color:#787e8a;font-size:11px;letter-spacing:.04em;text-transform:uppercase;border-top:1px solid #2e323b;padding-top:10px;list-style:none;";
+    hr.textContent = "저장됨";
+    ul.appendChild(hr);
+    saved.forEach((name, i) => {
+      const li = document.createElement("li");
+      li.className = "sess";
+      li.style.opacity = "0.78";
+      const dot = document.createElement("span"); dot.className = "dot";
+      const label = document.createElement("span"); label.className = "label";
+      label.textContent = name || ("세션 " + (i + 1));
+      const badge = document.createElement("span"); badge.className = "badge";
+      badge.textContent = "저장";
+      li.appendChild(dot); li.appendChild(label); li.appendChild(badge);
+      li.title = "이 세션 복원";
+      li.onclick = () => restoreSaved(i);
+      ul.appendChild(li);
+    });
+  }
+}
+
+async function restoreSaved(idx) {
+  if (busy) return;
+  busy = true;
+  try {
+    await fetch(base + "/session-restore?idx=" + idx, { method: "POST" });
+  } catch (e) {}
+  busy = false;
+  poll();
 }
 
 async function switchTo(idx) {
@@ -1182,7 +1228,7 @@ fn wheel_step(
     if lines == 0 {
         return None;
     }
-    if now.duration_since(*last_emit) < std::time::Duration::from_millis(WHEEL_THROTTLE_MS) {
+    if now.duration_since(*last_emit) < std::time::Duration::from_millis(wheel_throttle_ms()) {
         return None;
     }
     *accum -= lines as f32;
@@ -1927,6 +1973,10 @@ struct App {
     /// Switching swaps a slot in/out; background sessions keep running via
     /// their own ws Arc, captured by their pump_pty_screens threads.
     sessions: Vec<Option<Session>>,
+    /// Labels for sessions persisted on disk at last shutdown. Surfaced in
+    /// the session panel as one-click restore rows. Filled once at startup
+    /// from `session.json`; cleared as the user manually restores each.
+    saved_session_labels: Vec<String>,
     /// Index into `sessions` of the visible session (its slot is None).
     active_session: usize,
     /// Windows of the *visible* session, by index. The active window's slot
@@ -2010,6 +2060,16 @@ struct App {
     /// resized plus its axis. `Some` while the user holds the mouse on a
     /// seam; each motion event re-derives the ratio from the cursor.
     resize_drag: Option<(Vec<u8>, pty_backend::SplitDir)>,
+    /// Last cell-quantised divider position fired through `resize_backend`.
+    /// Lets the divider-drag handler skip the heavy PTY reshape on every
+    /// sub-cell wiggle of the cursor — only crossing a cell boundary
+    /// SIGWINCHes the panes (Claude Code reflows are very expensive).
+    last_divider_pos: Option<u16>,
+    /// Instant of the most recent PTY reshape fired during a divider drag.
+    /// Layout ratio still updates on every cursor move (live seam) but
+    /// SIGWINCH is throttled to ~10 Hz here — Claude Code's full-screen
+    /// repaint on every SIGWINCH otherwise turns into a melted-glass feel.
+    last_divider_pty_resize: Option<std::time::Instant>,
     /// In-flight header drag-and-drop: which pane the user grabbed by its
     /// header, the press position, and whether the cursor has moved past
     /// the threshold (only then does releasing relocate, so a plain click
@@ -2188,6 +2248,7 @@ impl App {
             socket_handle: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
             sessions: vec![None],
+            saved_session_labels: Vec::new(),
             active_session: 0,
             windows: vec![None],
             active_window: 0,
@@ -2213,6 +2274,8 @@ impl App {
             selection: None,
             drag_anchor: None,
             resize_drag: None,
+            last_divider_pos: None,
+            last_divider_pty_resize: None,
             header_drag: None,
             tab_drag: None,
             pane_tab_hover: None,
@@ -2250,7 +2313,10 @@ impl App {
             autosuggest: autosuggest::History::new(),
             input_buf: String::new(),
             current_suggestion: None,
-            sidebar_visible: true,
+            // Default closed — single-pane, no chrome reads as a plain
+            // terminal at first launch. User toggles via the title-bar
+            // button or the "보기 → 세션 패널" menu item.
+            sidebar_visible: false,
         }
     }
 
@@ -2875,7 +2941,7 @@ impl App {
             // after spacebar. Letting winit own the coalescing keeps
             // streaming-burst CPU bounded while making every dirty
             // frame visible.
-            while let Ok(update) = screens.recv() {
+            while let Ok(mut update) = screens.recv() {
                 // EOF sentinel: the PTY reader died (shell/claude exited).
                 // The PtySession keeps a Sender alive for scroll/resize, so
                 // the channel never closes on its own — without this signal
@@ -2888,6 +2954,37 @@ impl App {
                     }
                     let _ = proxy.send_event(UserEvent::Redraw);
                     return;
+                }
+                // Coalesce: drain every other ScreenUpdate currently sitting
+                // in the channel and merge them into one. Scroll inertia /
+                // bursty Claude Code output can stuff hundreds of frames in
+                // the queue between render cycles; processing each
+                // separately means N ws-locks + N redraws + N renders. With
+                // the merge we do ONE lock per burst, so direction reversals
+                // and other late inputs aren't stuck behind a queue.
+                loop {
+                    match screens.try_recv() {
+                        Ok(next) if !next.eof => {
+                            let mut row_map: std::collections::HashMap<u16, Row> =
+                                update.dirty.into_iter().collect();
+                            for (r, row) in next.dirty {
+                                row_map.insert(r, row);
+                            }
+                            let merged_dirty: Vec<(u16, Row)> =
+                                row_map.into_iter().collect();
+                            update = tmux_bridge::screen::ScreenUpdate {
+                                dirty: merged_dirty,
+                                ..next
+                            };
+                        }
+                        Ok(next) => {
+                            // EOF mid-burst: handle the current merge then
+                            // signal death so reap fires next turn.
+                            dead.lock().unwrap().push(next.pane_id.clone());
+                            break;
+                        }
+                        Err(_) => break,
+                    }
                 }
                 let mut ws = ws_screens.lock().unwrap();
                 if ws.active_pane.is_none() {
@@ -2918,11 +3015,27 @@ impl App {
                     || tp.rows != update.rows
                     || tp.cells.len() != update.rows as usize;
                 if resized {
+                    // Preserve existing rows / columns through a resize so
+                    // the user sees their old content during the brief gap
+                    // between SIGWINCH and the shell's reflowed repaint —
+                    // otherwise the grid blanks for one frame and the
+                    // divider drag flickers visibly on every cell crossing.
+                    // Truncate / extend in place; the shell's subsequent
+                    // `update.dirty` overwrites the affected rows.
                     tp.cols = update.cols;
                     tp.rows = update.rows;
-                    tp.cells = (0..update.rows as usize)
-                        .map(|_| vec![GridCell::blank(); update.cols as usize])
-                        .collect();
+                    let nr = update.rows as usize;
+                    let nc = update.cols as usize;
+                    tp.cells.truncate(nr);
+                    while tp.cells.len() < nr {
+                        tp.cells.push(vec![GridCell::blank(); nc]);
+                    }
+                    for row in &mut tp.cells {
+                        row.truncate(nc);
+                        while row.len() < nc {
+                            row.push(GridCell::blank());
+                        }
+                    }
                     tp.prev_cells.clear();
                 }
                 for (r, row) in update.dirty {
@@ -3354,33 +3467,61 @@ impl App {
         let socket_path = resolve_kasaterm_socket_path();
         std::env::set_var("KASATERM_SOCKET_PATH", &socket_path);
         std::env::set_var("CMUX_SOCKET_PATH", &socket_path);
-        // A3 restore: rebuild the saved session(s) — full layout tree, each
-        // pane's cwd, and a queued `claude --resume` for panes that were on
-        // claude. Falls back to a fresh single pane when there's nothing saved.
-        match socket::load_session_state() {
-            Some(state) if !state.sessions.is_empty() => {
-                self.restore_sessions(state, cols, rows)?;
-            }
-            _ => {
-                let cwd = resolve_initial_cwd();
-                let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
-                    shell: resolve_default_shell(),
-                    cwd,
-                    cols,
-                    rows,
-                    env: Vec::new(),
-                    pane_id: "%0".to_string(),
-                    initial_scrollback: Vec::new(),
-                })?;
-                self.pump_pty_screens(session.screens.clone(), "%0".to_string());
-                self.pty.insert("%0".to_string(), Arc::new(session));
-                self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
-                // Seed active_pane immediately so split / focus shortcuts work
-                // before the first ScreenUpdate lands. pump_pty_screens won't
-                // overwrite a non-None active_pane.
-                self.ws.lock().unwrap().active_pane = Some("%0".to_string());
-            }
-        }
+        // Light-launch: always start with one fresh pane. The saved session
+        // (if any) only contributes its last-active leaf's cwd so the user
+        // lands in the same project directory they left from. The full
+        // layout tree / claude-resume queue stays on disk for an explicit
+        // "restore" action from the session menu (not done on launch).
+        let saved_state = socket::load_session_state();
+        let saved_cwd: Option<String> = saved_state.as_ref().and_then(|state| {
+            let active_session = state.sessions.get(state.active_session)?;
+            let win = active_session
+                .windows
+                .get(active_session.active_window)
+                .or_else(|| active_session.windows.first())?;
+            first_leaf_cwd(win)
+        });
+        // Surface the saved sessions in the session panel — each row labelled
+        // by the basename of its first leaf's cwd (or "세션 N" as a fallback).
+        self.saved_session_labels = saved_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        s.windows
+                            .first()
+                            .and_then(first_leaf_cwd)
+                            .map(|p| {
+                                std::path::Path::new(&p)
+                                    .file_name()
+                                    .map(|s| s.to_string_lossy().into_owned())
+                                    .unwrap_or(p)
+                            })
+                            .unwrap_or_else(|| format!("세션 {}", i + 1))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cwd = saved_cwd.or_else(resolve_initial_cwd);
+        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+            shell: resolve_default_shell(),
+            cwd,
+            cols,
+            rows,
+            env: Vec::new(),
+            pane_id: "%0".to_string(),
+            initial_scrollback: Vec::new(),
+        })?;
+        self.pump_pty_screens(session.screens.clone(), "%0".to_string());
+        self.pty.insert("%0".to_string(), Arc::new(session));
+        self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
+        // Seed active_pane immediately so split / focus shortcuts work
+        // before the first ScreenUpdate lands. pump_pty_screens won't
+        // overwrite a non-None active_pane.
+        self.ws.lock().unwrap().active_pane = Some("%0".to_string());
         // Bring up the cmux-compat socket *after* the initial pane(s) are
         // wired so the very first surface.list call sees them.
         self.start_socket_pty();
@@ -3859,11 +4000,22 @@ impl App {
                     || tp.rows != rows
                     || tp.cells.len() != rows as usize;
                 if resized {
+                    // Preserve content across resize — see the PTY-path
+                    // copy of this branch for the rationale.
                     tp.cols = cols;
                     tp.rows = rows;
-                    tp.cells = (0..rows as usize)
-                        .map(|_| vec![GridCell::blank(); cols as usize])
-                        .collect();
+                    let nr = rows as usize;
+                    let nc = cols as usize;
+                    tp.cells.truncate(nr);
+                    while tp.cells.len() < nr {
+                        tp.cells.push(vec![GridCell::blank(); nc]);
+                    }
+                    for row in &mut tp.cells {
+                        row.truncate(nc);
+                        while row.len() < nc {
+                            row.push(GridCell::blank());
+                        }
+                    }
                     tp.prev_cells.clear();
                 }
                 for (r, row) in dirty {
@@ -4080,6 +4232,7 @@ impl App {
             .and_then(|s| s.shell_pid());
         snap.session_count = self.sessions.len();
         snap.active_session = self.active_session;
+        snap.saved_sessions = self.saved_session_labels.clone();
     }
 
     /// Drain pending socket commands and run them on the main thread.
@@ -4323,6 +4476,21 @@ impl App {
 
     /// The PtySession that currently has keyboard focus, if any. Used
     /// by every routing-by-active-pane code path in PTY mode.
+    /// PtySession of a pane's currently-active tab. Use this instead of
+    /// `self.pty.get(outer_id)` — after a cross-pane tab drag the layout
+    /// id and the active tab's pid diverge, and the direct lookup misses.
+    /// Drives wheel scroll / mouse-reporting / pane-targeted send_bytes.
+    fn pty_for_pane(&self, outer_id: &str) -> Option<&Arc<pty_backend::PtySession>> {
+        let ws = self.ws.lock().ok()?;
+        let pid = ws
+            .panes
+            .get(outer_id)
+            .and_then(|p| p.tabs.get(p.active_tab).and_then(|t| t.pid.clone()))
+            .unwrap_or_else(|| outer_id.to_string());
+        drop(ws);
+        self.pty.get(&pid)
+    }
+
     fn active_pty(&self) -> Option<&Arc<pty_backend::PtySession>> {
         // The active *tab*'s pid drives input/scroll/title — falling back
         // to the outer pane id (== first-tab pid) for single-tab panes
@@ -5537,7 +5705,7 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" ");
             let _ = tmux.send_keys_hex(Some(pane_id), &hex);
-        } else if let Some(pty) = self.pty.get(pane_id) {
+        } else if let Some(pty) = self.pty_for_pane(pane_id) {
             let _ = pty.send_bytes(payload.as_bytes());
         }
     }
@@ -5840,7 +6008,7 @@ impl App {
                     let _ = tmux.send_keys_hex(Some(target), &hex);
                 }
             } else if let Some(id) = target_pane_id.as_deref() {
-                if let Some(pty) = self.pty.get(id) {
+                if let Some(pty) = self.pty_for_pane(id) {
                     let _ = pty.send_bytes(&payload);
                 }
             }
@@ -5858,7 +6026,7 @@ impl App {
                     let _ = tmux.send_keys_hex(Some(target), &hex);
                 }
             } else if let Some(id) = target_pane_id.as_deref() {
-                if let Some(pty) = self.pty.get(id) {
+                if let Some(pty) = self.pty_for_pane(id) {
                     let _ = pty.send_bytes(esc);
                 }
             }
@@ -5886,7 +6054,7 @@ impl App {
                         }
                     }
                 }
-            } else if let Some(pty) = self.pty.get(id) {
+            } else if let Some(pty) = self.pty_for_pane(id) {
                 // Positive `lines` = scroll up = toward older history.
                 pty.scroll(if lines > 0 { step } else { -step });
             }
@@ -6764,7 +6932,33 @@ impl App {
                 // real scrollback (scroll-region TUIs included). Just
                 // normalise each row to the current width so the GPU
                 // pipeline emits exactly `cols` cells per row.
-                let cols_now = pane.term().map_or(1, |t| t.cols).max(1) as usize;
+                // During a divider drag we DEFER the PTY reshape (SIGWINCH +
+                // shell repaint is what causes the flicker), so the PTY's
+                // reported cols/rows are stale. Clip the rendered cells to
+                // the layout's CURRENT pane rect — overflow gets dropped at
+                // the new edge instead of bleeding into the neighbouring
+                // pane. After release, the final resize_backend lets the
+                // shell catch up and the clip is a no-op.
+                //
+                // Single-pane fallback path (no layout tree yet) passes
+                // (0,0,0,0) as a placeholder — that would clip everything
+                // to nothing, so skip the layout clip entirely when w_cells
+                // or h_cells is 0 and just trust the PTY dims.
+                let pty_cols = pane.term().map_or(1, |t| t.cols).max(1) as usize;
+                let pty_rows = pane.term().map_or(0, |t| t.cells.len());
+                let (cols_now, rows_now) = if w_cells == 0 || h_cells == 0 {
+                    (pty_cols, pty_rows)
+                } else {
+                    let inset_x_cells_now = (2.0 * PANE_INNER_X / self.cell.w.max(1.0))
+                        .ceil() as usize;
+                    let header_px_now = if show_headers { PANE_HEADER_HEIGHT } else { 0.0 };
+                    let reserved_y_cells_now = ((header_px_now + 2.0 * PANE_INNER_Y)
+                        / self.cell.h.max(1.0))
+                        .ceil() as usize;
+                    let layout_cols = (w_cells as usize).saturating_sub(inset_x_cells_now);
+                    let layout_rows = (h_cells as usize).saturating_sub(reserved_y_cells_now);
+                    (layout_cols.min(pty_cols).max(1), layout_rows.min(pty_rows))
+                };
                 let normalise = |row: &Vec<GridCell>| -> Vec<GridCell> {
                     let mut r = row.clone();
                     if r.len() < cols_now {
@@ -6797,7 +6991,7 @@ impl App {
                         )
                     });
                 let composed: Vec<Vec<GridCell>> = match pane.term() {
-                    Some(t) => t.cells.iter().map(normalise).collect(),
+                    Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
                     None => Vec::new(),
                 };
                 // Cells start below the header band when split, and are
@@ -6827,17 +7021,26 @@ impl App {
                     + y_cells as f32 * self.cell.h
                     + header_shift_logical
                     + PANE_INNER_Y;
-                for block in detect_code_blocks(&composed) {
-                    let text = extract_block(&composed, block);
-                    if text.trim().is_empty() {
-                        continue;
+                // Code-block scan is O(cells × distinct-colours) and walks
+                // the whole grid twice per frame. It only makes sense on the
+                // normal screen — TUIs in alt-screen (claude code TUI mode,
+                // vim, less, full-screen apps) get a copy chip per pseudo-
+                // block which is never useful. Skipping there reclaims most
+                // of render_frame_gpu's time at high update rates.
+                let pane_alt = pane.term().map(|t| t.alt_screen).unwrap_or(false);
+                if !pane_alt {
+                    for block in detect_code_blocks(&composed) {
+                        let text = extract_block(&composed, block);
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+                        let (start, _end, _left, right) = block;
+                        let block_top = body_top + start as f32 * self.cell.h;
+                        let block_right = body_left + (right as f32 + 1.0) * self.cell.w;
+                        let bx = (block_right - COPY_BTN_W - 4.0).max(body_left);
+                        let by = block_top + 3.0;
+                        copy_btns.push((text, (bx, by, COPY_BTN_W, COPY_BTN_H)));
                     }
-                    let (start, _end, _left, right) = block;
-                    let block_top = body_top + start as f32 * self.cell.h;
-                    let block_right = body_left + (right as f32 + 1.0) * self.cell.w;
-                    let bx = (block_right - COPY_BTN_W - 4.0).max(body_left);
-                    let by = block_top + 3.0;
-                    copy_btns.push((text, (bx, by, COPY_BTN_W, COPY_BTN_H)));
                 }
                 slots.push(PaneSlot {
                     rows: composed,
@@ -7313,6 +7516,47 @@ impl App {
                         italic: false,
                     },
                 );
+                // Active pane title (OSC 0/2 or shell process name) drawn
+                // centered in the title strip — Terminal.app / iTerm UX
+                // for single-pane mode. When the workspace is split, each
+                // pane carries its own header, so the centered title is
+                // redundant but still useful as "which pane has focus".
+                let title_text: String = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.active_pane
+                        .as_deref()
+                        .and_then(|id| ws.panes.get(id).map(|p| (id.to_string(), p.title.clone())))
+                        .and_then(|(id, osc)| {
+                            osc.filter(|s| !s.is_empty()).or_else(|| {
+                                self.pty
+                                    .get(&id)
+                                    .and_then(|p| p.active_process_name())
+                                    .filter(|s| !s.is_empty())
+                            })
+                        })
+                        .unwrap_or_default()
+                };
+                if !title_text.is_empty() {
+                    let tw = g.measure_chrome_text(&title_text, chrome_font, true);
+                    let win_w_logical = win_px.0 / scale;
+                    let center_x = (win_w_logical / 2.0) - tw / 2.0;
+                    // Don't collide with the left chip cluster.
+                    let left_edge = after + 6.0
+                        + g.measure_chrome_text(&cwd_str, chrome_font, false)
+                        + 24.0;
+                    let tx = center_x.max(left_edge);
+                    g.draw_text(
+                        tx,
+                        ty,
+                        &title_text,
+                        gpu::DrawOpts {
+                            font_size: chrome_font,
+                            color: theme::TEXT,
+                            bold: true,
+                            italic: false,
+                        },
+                    );
+                }
             }
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
@@ -8767,17 +9011,13 @@ impl ApplicationHandler<UserEvent> for App {
                 });
             }
             WindowEvent::Resized(size) => {
-                // Beats-ghostty live-resize: repaint EVERY Resized event with
-                // a lightweight path — wgpu surface.configure + render_frame.
-                // We skip the heavy PTY reshape (SIGWINCH + alacritty resize +
-                // per-pane row/col reflow) during the drag; CAMetalLayer's
-                // gravity=topLeft anchors the old grid while the chrome
-                // (title strip, sidebar, headers, dividers) reflows live every
-                // frame. On release, about_to_wait runs the heavy reshape +
-                // final render. No throttle: wgpu surface.configure is ~free
-                // relative to AppKit's tracking-loop cadence, and the cells
-                // pass short-circuits when nothing's dirty so per-frame cost
-                // stays tiny (just chrome quads).
+                // Beats-ghostty live-resize: chrome + cells reflow EVERY
+                // Resized event. wgpu surface.configure + render_frame
+                // happen every frame; PTY reshape (SIGWINCH + alacritty +
+                // cell reflow) only fires when the integer cell count
+                // actually shifted past a boundary — typically 5-10 times
+                // per drag, cheap enough that the shell stays current
+                // without spamming itself between cell-edge crossings.
                 if gpu::is_in_live_resize(&window) {
                     self.pending_resize = Some(size);
                     gpu::with_disabled_layer_actions(|| {
@@ -8787,6 +9027,23 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         } else if let Some(sg) = self.sugarloaf.as_mut() {
                             sg.resize(size.width, size.height);
+                        }
+                        let (cols, rows) = self.window_cells();
+                        if (cols, rows) != self.last_resized_cells {
+                            self.last_resized_cells = (cols, rows);
+                            // Throttle PTY reshape to ~10 Hz during a live
+                            // window resize too — same reasoning as the
+                            // divider path (Claude Code SIGWINCH cost).
+                            let now = std::time::Instant::now();
+                            let throttle_ok = self
+                                .last_live_resize_flush
+                                .map(|t| now.duration_since(t)
+                                    >= std::time::Duration::from_millis(100))
+                                .unwrap_or(true);
+                            if throttle_ok {
+                                self.resize_backend(cols, rows);
+                                self.last_live_resize_flush = Some(now);
+                            }
                         }
                         self.chrome_dirty = true;
                         self.render_frame();
@@ -8850,9 +9107,16 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Divider drag in progress: re-derive the split ratio from
-                // the cursor and resize every affected PTY. Takes priority
-                // over selection / mouse-forwarding so the grab stays sticky.
+                // Divider drag in progress: ghostty parity — visually
+                // update on every cursor move (so the seam tracks the
+                // cursor pixel-by-pixel), AND fire `resize_backend` on
+                // every cell-boundary crossing so the shells reflow live.
+                // The flicker that used to come with this is gone because:
+                //   1. pump_pty_screens preserves cell content across a
+                //      resize (no blank-then-fill gap)
+                //   2. the render path clips cells to the layout pane
+                //      rect, so any stale dims that bleed past the seam
+                //      get truncated before the user sees them
                 if let Some((path, dir)) = self.resize_drag.clone() {
                     let (cols, rows) = self.window_cells();
                     let pad = WINDOW_PADDING + self.effective_sidebar_w();
@@ -8866,10 +9130,29 @@ impl ApplicationHandler<UserEvent> for App {
                         .round() as i32)
                             .clamp(0, rows as i32) as u16,
                     };
-                    if let Some(tree) = self.pty_layout.as_mut() {
-                        tree.resize_divider(&path, pos, cols, rows);
+                    if Some(pos) != self.last_divider_pos {
+                        if let Some(tree) = self.pty_layout.as_mut() {
+                            tree.resize_divider(&path, pos, cols, rows);
+                        }
+                        self.last_divider_pos = Some(pos);
+                        self.publish_pty_layout();
+                        // PTY reshape is the expensive bit (Claude Code does
+                        // a full TUI repaint on every SIGWINCH). Layout
+                        // updates every cursor move for the live seam, but
+                        // SIGWINCH only fires at ~10 Hz so the shells don't
+                        // melt down. The render-time clip hides the
+                        // mismatch between layout dims and PTY dims.
+                        let now = std::time::Instant::now();
+                        let pty_throttle = self
+                            .last_divider_pty_resize
+                            .map(|t| now.duration_since(t)
+                                >= std::time::Duration::from_millis(100))
+                            .unwrap_or(true);
+                        if pty_throttle {
+                            self.resize_backend(cols, rows);
+                            self.last_divider_pty_resize = Some(now);
+                        }
                     }
-                    self.resize_backend(cols, rows);
                     window.request_redraw();
                     return;
                 }
@@ -9531,7 +9814,34 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // End a divider drag without falling through to the
                         // selection-release path under it.
-                        if self.resize_drag.take().is_some() {
+                        if let Some((path, dir)) = self.resize_drag.take() {
+                            // Final flush — the throttle may have suppressed
+                            // the cursor's last cell-crossing, leaving the
+                            // divider at a stale pos. Re-derive from the
+                            // current cursor and apply once authoritatively.
+                            let (cols, rows) = self.window_cells();
+                            let pad = WINDOW_PADDING + self.effective_sidebar_w();
+                            let pos = match dir {
+                                pty_backend::SplitDir::Horizontal => (((self.cursor_px.0
+                                    - pad)
+                                    / self.cell.w.max(1.0))
+                                .round() as i32)
+                                    .clamp(0, cols as i32)
+                                    as u16,
+                                pty_backend::SplitDir::Vertical => (((self.cursor_px.1
+                                    - TITLE_HEIGHT)
+                                    / self.cell.h.max(1.0))
+                                .round() as i32)
+                                    .clamp(0, rows as i32)
+                                    as u16,
+                            };
+                            if let Some(tree) = self.pty_layout.as_mut() {
+                                tree.resize_divider(&path, pos, cols, rows);
+                            }
+                            self.resize_backend(cols, rows);
+                            self.last_divider_pos = None;
+                            self.last_divider_pty_resize = None;
+                            window.request_redraw();
                             return;
                         }
                         // Drop a header drag: relocate onto the target
@@ -10034,6 +10344,21 @@ fn decorate_process_name(comm: &str) -> String {
 /// double-clicked kasaterm.app — whose process cwd is `/` — would
 /// otherwise leave the shell at root, where `cd Desktop` fails. Prefer
 /// HOME; fall back to the process cwd only when HOME is unset.
+/// Recursively walk a RestoreNode looking for the first leaf with a cwd.
+/// Used at launch to inherit the previous session's working directory
+/// without spinning up the rest of its layout.
+fn first_leaf_cwd(node: &socket::RestoreNode) -> Option<String> {
+    match node {
+        socket::RestoreNode::Leaf(p) => p
+            .cwd
+            .as_ref()
+            .and_then(|c| c.to_str().map(String::from)),
+        socket::RestoreNode::Split { a, b, .. } => {
+            first_leaf_cwd(a).or_else(|| first_leaf_cwd(b))
+        }
+    }
+}
+
 fn resolve_initial_cwd() -> Option<String> {
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() {
