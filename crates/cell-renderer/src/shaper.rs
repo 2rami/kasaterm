@@ -22,6 +22,16 @@ pub struct Shaper {
     /// sugarloaf: D2Coding → JetBrainsMono → Apple SD → Apple
     /// Color Emoji on macOS.
     faces: Vec<(Vec<u8>, u32)>,
+    /// Optional bold-weight variant for each slot in `faces`. Parallel
+    /// indexing — `bold_faces[i]` mirrors `faces[i]` when present (empty
+    /// Vec means "no bold installed for this slot"). Filled via
+    /// `set_bold_face_path`; consumed by `rasterize` when bold=true.
+    bold_faces: Vec<(Vec<u8>, u32)>,
+    /// Optional italic variant for each slot. When set, `rasterize` uses
+    /// it instead of synthesising italic via a swash skew transform.
+    /// Fonts that ship a designed italic (JetBrains Mono) read much
+    /// cleaner than skew-synth which can clip ascenders at the cell edge.
+    italic_faces: Vec<(Vec<u8>, u32)>,
     scale_ctx: ScaleContext,
 }
 
@@ -66,14 +76,72 @@ fn is_cjk_wide(ch: char) -> bool {
     ) || cp >= 0x20000          // CJK Ext B and beyond
 }
 
+/// Synthesised bold via horizontal alpha dilation. Walks each row twice:
+/// once left→right, once right→left, taking the max against the original
+/// neighbour at each step. The result thickens vertical stems by ~2px
+/// while leaving horizontal strokes intact. Done from an immutable copy
+/// of the row so neither pass cascades — left+right + original give a
+/// symmetric weight gain without smear or "drift" toward one side.
+fn widen_alpha_horizontal(data: &mut [u8], w: usize, h: usize) {
+    if w == 0 || h == 0 || data.len() < w * h {
+        return;
+    }
+    let mut orig = vec![0u8; w];
+    for y in 0..h {
+        let row_start = y * w;
+        orig.copy_from_slice(&data[row_start..row_start + w]);
+        for x in 0..w {
+            let mut v = orig[x];
+            if x > 0 {
+                v = v.max(orig[x - 1]);
+            }
+            if x + 1 < w {
+                v = v.max(orig[x + 1]);
+            }
+            data[row_start + x] = v;
+        }
+    }
+}
+
 impl Shaper {
     pub fn from_bytes(font_data: Vec<u8>, font_index: u32) -> Result<Self> {
         FontRef::from_index(&font_data, font_index as usize)
             .context("font bytes not a TTF/OTF/TTC entry")?;
         Ok(Self {
             faces: vec![(font_data, font_index)],
+            bold_faces: Vec::new(),
+            italic_faces: Vec::new(),
             scale_ctx: ScaleContext::new(),
         })
+    }
+
+    /// Register an OS-installed bold face that mirrors the regular face at
+    /// the same slot. When `rasterize` sees `bold=true` it'll route to
+    /// `bold_faces[i]` if non-empty, else fall back to synthesised
+    /// emboldening (rendering twice with a 1-px x-offset at draw time —
+    /// handled in the renderer caller, not here). Italic synthesises via
+    /// swash's shear transform inside `rasterize`.
+    pub fn set_bold_face_path(&mut self, idx: usize, path: &str, index: u32) {
+        let Ok(bytes) = std::fs::read(path) else { return };
+        if FontRef::from_index(&bytes, index as usize).is_some() {
+            while self.bold_faces.len() <= idx {
+                self.bold_faces.push((Vec::new(), 0));
+            }
+            self.bold_faces[idx] = (bytes, index);
+        }
+    }
+
+    /// Register a real italic face for slot `idx`. Mirrors `set_bold_face_path`.
+    /// When present, italic cells render from this face instead of via swash
+    /// skew — JetBrains Mono / Cascadia Italic look much better than synthesis.
+    pub fn set_italic_face_path(&mut self, idx: usize, path: &str, index: u32) {
+        let Ok(bytes) = std::fs::read(path) else { return };
+        if FontRef::from_index(&bytes, index as usize).is_some() {
+            while self.italic_faces.len() <= idx {
+                self.italic_faces.push((Vec::new(), 0));
+            }
+            self.italic_faces[idx] = (bytes, index);
+        }
     }
 
     pub fn from_path(path: &str, index: u32) -> Result<Self> {
@@ -168,24 +236,91 @@ impl Shaper {
     }
 
     pub fn rasterize(&mut self, ch: char, size_px: f32) -> Option<Rasterized> {
-        // Walk every face whose charmap claims the codepoint. A face
-        // might map the codepoint to a glyph id but ship an empty
-        // outline (D2Coding's Nerd patch does this for a slice of
-        // Material Design icons — gid is non-zero, glyph is blank).
-        // Continuing past blanks lets later faces (Cascadia NF,
-        // Symbols Nerd Font Mono) supply a real glyph.
-        let candidates: Vec<(usize, u16, f32)> = {
+        self.rasterize_styled(ch, size_px, false, false)
+    }
+
+    /// Style-aware variant. `bold=true` routes to the installed bold face
+    /// when one was registered via `set_bold_face_path`; otherwise falls
+    /// back to the regular face (no fake-bold here — the renderer can
+    /// double-draw with an x-offset for a cheap synthesised bold).
+    /// `italic=true` applies a 14° shear via swash's transform — D2Coding
+    /// has no italic variant on disk, so synthesise unconditionally.
+    pub fn rasterize_styled(
+        &mut self,
+        ch: char,
+        size_px: f32,
+        bold: bool,
+        italic: bool,
+    ) -> Option<Rasterized> {
+        self.rasterize_inner(ch, size_px, bold, italic)
+    }
+
+    fn rasterize_inner(
+        &mut self,
+        ch: char,
+        size_px: f32,
+        bold: bool,
+        italic: bool,
+    ) -> Option<Rasterized> {
+        // Pick the most specific face we have for the (bold, italic)
+        // combo: bold_italic > italic > bold > regular. JetBrains Mono
+        // ships all four with matching metrics so they layer cleanly.
+        // `face_source`: 0 = regular, 1 = italic, 2 = bold. Italic is
+        // the only one that influences geometry, so its index gets the
+        // separate slot tracked in `from_italic_face`. Bold from real
+        // bold face → no synthesised dilation needed.
+        #[derive(Clone, Copy)]
+        enum FaceKind {
+            Regular,
+            Italic,
+            Bold,
+        }
+        let pick_face = |i: usize| -> (FaceKind, &[u8], u32) {
+            // bold + italic both flags → prefer italic_face if it carries
+            // its own bold weight (JetBrains BoldItalic landed there via
+            // set_italic_face_path of the BoldItalic file). For the simple
+            // setup we have, italic file is regular-italic — so for bold+
+            // italic we use bold face and skip italic (or skew on top).
+            if bold {
+                if let Some((b, fi)) = self.bold_faces.get(i)
+                    .filter(|(b, _)| !b.is_empty())
+                    .map(|(b, fi)| (b.as_slice(), *fi))
+                {
+                    return (FaceKind::Bold, b, fi);
+                }
+            }
+            if italic {
+                if let Some((b, fi)) = self.italic_faces.get(i)
+                    .filter(|(b, _)| !b.is_empty())
+                    .map(|(b, fi)| (b.as_slice(), *fi))
+                {
+                    return (FaceKind::Italic, b, fi);
+                }
+            }
+            let (b, fi) = &self.faces[i];
+            (FaceKind::Regular, b.as_slice(), *fi)
+        };
+        let candidates: Vec<(usize, u16, f32, FaceKind)> = {
             let mut v = Vec::new();
             for i in 0..self.faces.len() {
+                let (kind, bytes, fi) = pick_face(i);
+                if let Some(f) = FontRef::from_index(bytes, fi as usize) {
+                    let gid = f.charmap().map(ch as u32);
+                    if gid != 0 {
+                        let a = f.glyph_metrics(&[]).scale(size_px).advance_width(gid);
+                        v.push((i, gid, a, kind));
+                        continue;
+                    }
+                }
+                // Selected style face didn't cover this char; fall back to
+                // regular for the same slot before moving on to the next.
                 let f = self.face(i);
                 let gid = f.charmap().map(ch as u32);
-                if gid != 0 {
-                    let advance = f
-                        .glyph_metrics(&[])
-                        .scale(size_px)
-                        .advance_width(gid);
-                    v.push((i, gid, advance));
+                if gid == 0 {
+                    continue;
                 }
+                let advance = f.glyph_metrics(&[]).scale(size_px).advance_width(gid);
+                v.push((i, gid, advance, FaceKind::Regular));
             }
             v
         };
@@ -202,7 +337,7 @@ impl Shaper {
         // chevron reads as "tiny" at the same size_px. Scale
         // fallback raster sizes up a bit so visible glyph areas
         // come out comparable.
-        for (face_idx, glyph_id, advance) in candidates {
+        for (face_idx, glyph_id, advance, kind) in candidates {
             // Fallback faces get a 1.25× boost so small symbol/icon glyphs
             // read at a comparable size. The primary face and CJK/Hangul stay
             // at size_px. Caveat: a non-CJK glyph that's already cell-sized in
@@ -210,24 +345,57 @@ impl Shaper {
             // cell when boosted, so we re-render it un-boosted if the boosted
             // raster is wider than the advance — no bleed into the next cell.
             let boost = face_idx != 0 && !is_cjk_wide(ch);
-            let (font_data, font_index) = {
-                let (bytes, fi) = &self.faces[face_idx];
-                (bytes.clone(), *fi as usize)
+            let (font_data, font_index) = match kind {
+                FaceKind::Bold => {
+                    let (b, fi) = &self.bold_faces[face_idx];
+                    (b.clone(), *fi as usize)
+                }
+                FaceKind::Italic => {
+                    let (b, fi) = &self.italic_faces[face_idx];
+                    (b.clone(), *fi as usize)
+                }
+                FaceKind::Regular => {
+                    let (b, fi) = &self.faces[face_idx];
+                    (b.clone(), *fi as usize)
+                }
             };
+            // Italic synthesis: if we wanted italic but landed on a
+            // non-italic face (Regular or Bold), apply a 10° skew. With
+            // a real Italic file we skip this. For bold+italic with
+            // only Bold registered, the skew composes over Bold so the
+            // glyph slants without losing weight.
+            let want_skew = italic
+                && !matches!(kind, FaceKind::Italic)
+                && !is_cjk_wide(ch);
+            let italic_skew = if want_skew {
+                Some(swash::zeno::Transform::skew(
+                    swash::zeno::Angle::from_degrees(10.0),
+                    swash::zeno::Angle::from_degrees(0.0),
+                ))
+            } else {
+                None
+            };
+            // Synthesised stroke-widen for bold when we DIDN'T land on a
+            // real bold face. Keeps consistent visual weight when JetBrains
+            // Bold is missing on disk (D2Coding-only systems etc).
+            let want_dilate = bold && !matches!(kind, FaceKind::Bold);
             let mut render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
                 let font = FontRef::from_index(&font_data, font_index).unwrap();
                 let mut scaler = scale_ctx.builder(font).size(face_size).hint(true).build();
                 // Color sources first so Apple Color Emoji (sbix), CBDT, and
                 // COLR/CPAL faces render as full-color RGBA; swash falls
                 // through to the outline / alpha bitmap for monochrome faces.
-                Render::new(&[
+                let mut render = Render::new(&[
                     Source::ColorOutline(0),
                     Source::ColorBitmap(StrikeWith::BestFit),
                     Source::Outline,
                     Source::Bitmap(StrikeWith::BestFit),
-                ])
-                .format(Format::Alpha)
-                .render(&mut scaler, glyph_id)
+                ]);
+                render.format(Format::Alpha);
+                if let Some(t) = italic_skew {
+                    render.transform(Some(t));
+                }
+                render.render(&mut scaler, glyph_id)
             };
             let first_size = if boost { size_px * 1.25 } else { size_px };
             let Some(mut image) = render_at(&mut self.scale_ctx, first_size) else {
@@ -253,13 +421,26 @@ impl Shaper {
             let is_color = image.content == Content::Color;
             if std::env::var_os("KASATERM_FONT_DEBUG").is_some() {
                 eprintln!(
-                    "[font] U+{:04X} → face[{}] gid={} {}×{} color={}",
+                    "[font] U+{:04X} → face[{}] gid={} {}×{} color={} bold={} italic={}",
                     ch as u32,
                     face_idx,
                     glyph_id,
                     image.placement.width,
                     image.placement.height,
                     is_color,
+                    bold,
+                    italic,
+                );
+            }
+            // Synthesised dilation only when no designed bold face exists
+            // (`want_dilate`). With a real bold (JetBrains Mono Bold) the
+            // outline is already shaped at the right weight; smearing it
+            // wider produces the "fat blocky" look the user flagged.
+            if want_dilate && !is_color && !is_cjk_wide(ch) {
+                widen_alpha_horizontal(
+                    &mut image.data,
+                    image.placement.width as usize,
+                    image.placement.height as usize,
                 );
             }
             return Some(Rasterized {

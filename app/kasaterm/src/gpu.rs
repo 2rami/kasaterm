@@ -160,6 +160,13 @@ impl GpuRenderer {
         // gamma-incorrect-but-bolder blend sugarloaf / Terminal.app
         // use — so text matches. We hand it sRGB bytes and clear with
         // sRGB bytes, so the stored values are correct on screen too.
+        // Non-sRGB Unorm + raw sRGB bytes + CAMetalLayer P3 tag = the
+        // simplest path to "punchier" colours. The bytes the GPU stores
+        // get reinterpreted as P3-encoded at scan-out → sRGB pure red
+        // (byte 255) displays at P3 pure red chromaticity, which is the
+        // wider-gamut "look". Switching to an sRGB-tagged framebuffer +
+        // shader decode introduced round-trip precision loss that
+        // visibly dimmed Claude Code's saturated bgs.
         let format = caps
             .formats
             .iter()
@@ -204,6 +211,19 @@ impl GpuRenderer {
         eprintln!("[font] primary={font_path}");
         let mut shaper = Shaper::from_path(&font_path, 0)
             .with_context(|| format!("load font {font_path}"))?;
+        // Register a bold variant of the primary face. swash uses this when
+        // a cell's BOLD flag is set; no variant → renderer can fall back to
+        // double-draw synthesised bold (handled in draw_cells).
+        if let Some((bold_path, bold_idx)) = primary_bold_font_path() {
+            shaper.set_bold_face_path(0, &bold_path, bold_idx);
+        }
+        // Real italic file (JetBrains Mono Italic etc). Without one, the
+        // shaper synthesises italic via a 10° skew transform — works but
+        // designed italic reads much cleaner. Same trick for the bold-
+        // italic combo (renderer adds dilation on top of italic glyphs).
+        if let Some((italic_path, italic_idx)) = primary_italic_font_path() {
+            shaper.set_italic_face_path(0, &italic_path, italic_idx);
+        }
         for (path, idx) in fallback_font_paths() {
             shaper.add_fallback_path(&path, idx);
         }
@@ -1796,11 +1816,27 @@ fn cell_bg_rgba(cell: &Cell) -> [u8; 4] {
 }
 
 /// Normalize u8 RGBA to 0..1 with NO colour-space conversion. The
-/// framebuffer is a plain (non-sRGB) Unorm target, so the bytes we
-/// write are displayed verbatim — our source colours are already
-/// authored as sRGB (cells::DEFAULT_*, ITERM_*, ANSI palette), so
-/// passing them straight through is correct, and it gives us
-/// gamma-space alpha blending (bolder text) for free.
+/// Source colours are authored in sRGB. The CAMetalLayer is tagged with
+/// the Display P3 colorspace (`patch_p3_colorspace_safe`), so the bytes
+/// we write are interpreted as P3-encoded by macOS at scan-out. To
+/// actually USE the wider gamut we have to remap sRGB → linear sRGB →
+/// linear P3 → P3-encoded here (chromaticity-preserving primary
+/// transform) — without this remap an sRGB-pure-red byte stays at its
+/// sRGB chromaticity inside the P3 container ("same look as before").
+/// With the remap, sRGB primaries get pushed out toward the P3 gamut
+/// edge for the punchier reds / greens ghostty / Rio default to.
+///
+/// Alpha is left untouched. The framebuffer is non-sRGB Unorm, so the
+/// hardware alpha blend happens in encoded P3 space — slightly bolder
+/// text, matching the previous "gamma-space blending" we shipped.
+/// Source colours are authored in sRGB byte triples (ANSI palette,
+/// truecolor SGR, theme tokens). CAMetalLayer is tagged Display P3, so
+/// the EXACT bytes we write get reinterpreted by macOS as P3-encoded —
+/// which means sRGB pure red (255,0,0) renders at the WIDER P3 pure red
+/// chromaticity. That's the free saturation boost ghostty / Rio rely on:
+/// "no transform, just tag the layer". Doing the matrix sRGB→P3 here
+/// would CANCEL the boost (it would map sRGB pure red to its sRGB-inside-
+/// P3 chromaticity, i.e. same visual as before). Alpha is byte-divided.
 #[inline]
 pub fn srgb_rgba_to_linear(rgba: [u8; 4]) -> [f32; 4] {
     [
@@ -1809,6 +1845,20 @@ pub fn srgb_rgba_to_linear(rgba: [u8; 4]) -> [f32; 4] {
         rgba[2] as f32 / 255.0,
         rgba[3] as f32 / 255.0,
     ]
+}
+
+/// sRGB-encoded byte → linear-light float. Used for wgpu clear values
+/// against an sRGB-tagged framebuffer (the hardware re-encodes on store,
+/// so the clear must be in linear). IEC piecewise — same curve the
+/// fragment shader uses, so clear and per-pixel paths stay in lockstep.
+#[inline]
+pub fn srgb_byte_to_linear(byte: u8) -> f32 {
+    let c = byte as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// Order matches the sugarloaf SugarloafFonts config we previously
@@ -1827,8 +1877,9 @@ fn fallback_font_paths() -> Vec<(String, u32)> {
                 out.push((p, i));
             }
         };
-        // JetBrainsMono Nerd Font Mono — broader nerd icon coverage
-        // when D2Coding skips a PUA codepoint.
+        // JetBrains Mono as the first fallback — covers Latin /
+        // ASCII variants D2Coding's Korean designers left thinner,
+        // plus its full Nerd Font icon table.
         push_if(
             &mut out,
             format!("{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Regular.ttf"),
@@ -1941,13 +1992,63 @@ fn md_bold_font_path() -> (String, u32) {
     }
 }
 
+/// Real italic variant of the primary mono face. JetBrains Mono ships
+/// `JetBrainsMonoNerdFontMono-Italic.ttf` — D2Coding has none, so when
+/// D2Coding is the primary we fall through to None (skew synthesis).
+fn primary_italic_font_path() -> Option<(String, u32)> {
+    if let Ok(p) = std::env::var("KASATERM_GRID_FONT_ITALIC") {
+        if !p.is_empty() && std::path::Path::new(&p).exists() {
+            return Some((p, 0));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let p = format!("{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Italic.ttf");
+        if std::path::Path::new(&p).exists() {
+            return Some((p, 0));
+        }
+    }
+    None
+}
+
+/// Bold variant of the primary mono face. Returns None on platforms where
+/// we can't find one — the renderer falls back to synthesised double-draw
+/// bold in that case. Honours `KASATERM_GRID_FONT_BOLD` for overrides.
+fn primary_bold_font_path() -> Option<(String, u32)> {
+    if let Ok(p) = std::env::var("KASATERM_GRID_FONT_BOLD") {
+        if !p.is_empty() && std::path::Path::new(&p).exists() {
+            return Some((p, 0));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let jb = format!("{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Bold.ttf");
+        if std::path::Path::new(&jb).exists() {
+            return Some((jb, 0));
+        }
+        let p = format!("{home}/Library/Fonts/D2CodingLigatureNerdFontMono-Bold.ttf");
+        if std::path::Path::new(&p).exists() {
+            return Some((p, 0));
+        }
+        let menlo_bold = "/System/Library/Fonts/Menlo.ttc".to_string();
+        if std::path::Path::new(&menlo_bold).exists() {
+            return Some((menlo_bold, 1));
+        }
+    }
+    None
+}
+
 fn default_font_path() -> String {
     #[cfg(target_os = "macos")]
     {
-        // D2CodingLigature Nerd Font Mono — same primary the
-        // sugarloaf path used. Falls back to Menlo when D2Coding
-        // isn't installed (fresh Mac) so the renderer never panics
-        // on a missing-font path.
+        // D2CodingLigature Nerd Font Mono — original primary. Has
+        // designed Hangul that lines up cleanly on the monospace
+        // grid (자간 issues we saw came from JetBrains-as-primary
+        // routing Hangul through a fallback face with different
+        // sidebearings). JetBrains Mono drops to the fallback
+        // chain for ASCII / Latin / icons that D2Coding skips.
         let home = std::env::var("HOME").unwrap_or_default();
         let d2 = format!("{home}/Library/Fonts/D2CodingLigatureNerdFontMono-Regular.ttf");
         if std::path::Path::new(&d2).exists() {
@@ -2010,6 +2111,61 @@ unsafe fn patch_metal_layer_gravity(window: &Window) {
     // NSViewLayerContentsPlacement: 9 = .topLeft — mirrors the layer gravity
     // so AppKit's own resize-time scaling doesn't stretch contents either.
     let _: () = msg_send![ns_view, setLayerContentsPlacement: 9_isize];
+}
+
+/// Walks the layer tree and sets every CAMetalLayer descendant's
+/// colorspace to Display P3 via direct CoreGraphics FFI. Skips any
+/// non-CAMetalLayer (CALayer doesn't respond to `setColorspace:` on
+/// older OS versions and the previous "patch every layer" version
+/// aborted there). Returns silently on any failure — colours stay
+/// sRGB rather than crashing the process.
+#[cfg(target_os = "macos")]
+fn patch_p3_colorspace_safe(root_layer: *mut objc2::runtime::AnyObject) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyClass;
+    unsafe {
+        // CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3)
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGColorSpaceCreateWithName(name: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+            fn CGColorSpaceRelease(cs: *mut std::ffi::c_void);
+            static kCGColorSpaceDisplayP3: *const std::ffi::c_void;
+        }
+        let cs = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+        if cs.is_null() {
+            return;
+        }
+        let Some(metal_class) = AnyClass::get(c"CAMetalLayer") else {
+            CGColorSpaceRelease(cs);
+            return;
+        };
+        fn walk(
+            layer: *mut objc2::runtime::AnyObject,
+            cs: *mut std::ffi::c_void,
+            metal_class: &AnyClass,
+        ) {
+            unsafe {
+                let is_metal: bool = msg_send![layer, isKindOfClass: metal_class];
+                if is_metal {
+                    let _: () = msg_send![layer, setColorspace: cs];
+                }
+                let subs: *mut objc2::runtime::AnyObject = msg_send![layer, sublayers];
+                if subs.is_null() {
+                    return;
+                }
+                let n: usize = msg_send![subs, count];
+                for i in 0..n {
+                    let s: *mut objc2::runtime::AnyObject = msg_send![subs, objectAtIndex: i];
+                    if !s.is_null() {
+                        walk(s, cs, metal_class);
+                    }
+                }
+            }
+        }
+        walk(root_layer, cs, metal_class);
+        CGColorSpaceRelease(cs);
+        eprintln!("[gpu] CAMetalLayer colorspace → Display P3");
+    }
 }
 
 /// True while AppKit's live-resize tracking loop owns the window — the user
