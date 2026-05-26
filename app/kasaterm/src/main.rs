@@ -8375,7 +8375,16 @@ impl App {
 
         // Pass 1: walk each pane and render its cell grid at its rect.
         let log_layout = std::env::var_os("KASATERM_LOG_LAYOUT").is_some();
-        let show_headers = pane_frames.len() > 1;
+        // Header strip is needed when the layout has a split (multiple panes)
+        // OR when any single pane carries >1 in-pane tabs (cross-pane drag,
+        // + button add). Matches the gpu path's condition.
+        let any_multitab = {
+            let ws = self.ws.lock().unwrap();
+            pane_frames
+                .iter()
+                .any(|f| ws.panes.get(&f.id).map_or(false, |p| p.tabs.len() > 1))
+        };
+        let show_headers = pane_frames.len() > 1 || any_multitab;
         let header_shift = if show_headers { PANE_HEADER_HEIGHT } else { 0.0 };
         for frame in &pane_frames {
             let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
@@ -8756,25 +8765,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
-        // Default = sugarloaf path: it owns its CAMetalLayer and installs
-        // it as the NSView's root layer, so the Display P3 colorspace
-        // tag actually takes effect on macOS 26 (verified by auto pixel
-        // probe: pure-red byte 255 measures 234,51,35 = P3 mapping to
-        // sRGB, matching ghostty exactly). The wgpu cell-renderer path
-        // attaches its CAMetalLayer as a SUBLAYER which macOS doesn't
-        // color-manage with the P3 tag — same red comes out at 255,0,0
-        // (plain sRGB) despite NSWindow.colorSpace, EDR, per-frame
-        // promotion, and an HDR Rgba16Float framebuffer. Until wgpu
-        // adopts the "metal layer is the view's root layer" pattern
-        // (gfx-rs/wgpu#issue tracked), sugarloaf is the only path that
-        // gets ghostty-grade colour reproduction.
+        // Default = cell-renderer GPU path. All chrome UI work since
+        // 2026-05-26 (browser-tab header, multitab stage-3, sidebar
+        // drag-resize, image pane controls, hover effects) lives in
+        // `render_frame_gpu` (~850 lines of chrome code that never
+        // got ported to the sugarloaf `render_frame` body). Flipping
+        // the default to sugarloaf (2026-05-27 62a7844) lost all of
+        // that visually — the code is intact, just on the wrong path.
         //
-        // `KASATERM_RENDERER=gpu` opts back into the cell-renderer
-        // pipeline for perf-critical A/B (the gpu path is still faster
-        // for high-frequency redraws, but the colour gap is visible).
+        // `KASATERM_RENDERER=sugarloaf` opts into the sugarloaf path
+        // for P3 colour-reproduction A/B (see reference_kasaterm_color_pipeline).
+        // The colour gap is real but limited to chrome+text byte
+        // values; functionality lives on the gpu path.
         let use_gpu = std::env::var("KASATERM_RENDERER")
-            .map(|v| v.eq_ignore_ascii_case("gpu"))
-            .unwrap_or(false);
+            .map(|v| !v.eq_ignore_ascii_case("sugarloaf"))
+            .unwrap_or(true);
         let sg_window = SugarloafWindow {
             handle: window.window_handle().unwrap().as_raw(),
             display: window.display_handle().unwrap().as_raw(),
@@ -8940,6 +8945,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autosplit();
         self.arm_autowindows();
         self.arm_autotoggle();
+        self.arm_autotabs();
         self.schedule_autoquit();
         self.open_git_panel(event_loop, false);
     }

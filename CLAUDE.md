@@ -16,11 +16,11 @@ tmuxify (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 4. **체감(스크롤·입력 지연) 테스트는 반드시 release** — `cargo run --release -p kasaterm`. 디버그 빌드는 원래 버벅임(A/B 확인: debug=느림, release/.app=빠름). 디버그로 "느리다" 판단 금지
 5. **시각 확인** — 스크린샷 본 후 어색한 부분 직접 짚어내고 수정. "어때보여요?" 묻지 말고 너의 판단으로 다음 액션
 
-### 렌더러 기본값 (2026-05-27 확정)
-기본 렌더러 = **sugarloaf** (P3 색재현 정확). cell-renderer(gpu.rs)는 `KASATERM_RENDERER=gpu` 옵트인. macOS 26 + wgpu 28에서 CAMetalLayer가 sublayer로 붙으면 `setColorspace: DisplayP3`가 compositor에서 무시됨 — sugarloaf만 root layer install로 P3 동작. 색재현 다시 건드리기 전 [[reference_kasaterm_color_pipeline]] 먼저 읽기.
+### 렌더러 기본값 (2026-05-27 후반 확정)
+기본 렌더러 = **cell-renderer(gpu.rs)** — chrome UI(browser-tab·멀티탭·사이드바·이미지 pane 등 ~850줄)가 `render_frame_gpu` 경로에만 있어서 sugarloaf 기본화 시도(62a7844) 즉시 revert. sugarloaf는 `KASATERM_RENDERER=sugarloaf`로 **색재현 A/B용 옵트인 전용**. P3 자체는 sugarloaf root layer install로만 동작(wgpu sublayer는 macOS compositor에서 setColorspace 무시). 렌더러 분기 토글 같은 한 줄 변경도 chrome UI 잔존 grep으로 확인 후 진행. 색재현 다시 건드리기 전 [[reference_kasaterm_color_pipeline]] 먼저 읽기.
 
 ### 알려진 함정 1순위 ([[tmuxify-rendering-pipeline]] 메모리 참조)
-현재 기본 백엔드 = pty-backend(portable-pty + alacritty_terminal) + sugarloaf(`render.rs`). 깨질 때 의심 순서:
+현재 기본 백엔드 = pty-backend(portable-pty + alacritty_terminal) + cell-renderer(`gpu.rs`). sugarloaf는 색재현 옵트인. 깨질 때 의심 순서:
 - **입력/커서가 0.5초 늦음** → `main.rs::about_to_wait`가 `WaitUntil(blink)`로 파킹해 펜딩 redraw를 미룸. `chrome_dirty || pane.dirty`면 즉시 깨워야 함. 렌더 2경로(sugarloaf/gpu) 둘 다 점검.
 - **한글이 깨져 보임** → 입력 Composer 말고 **렌더/damage 경로부터** 의심. macOS 입력 경로(set_ime_allowed(false) + hangul-ime)는 정상이고 셸에선 멀쩡함. preedit는 chrome 오버레이라 변경 시 chrome_dirty 필요.
 - **동기화/화면 멈춤** → DECSET 2026은 alacritty vte `Processor`가 내장 처리 ([[reference_kasaterm_decset_2026]]). 수동 파싱 금지.
@@ -42,4 +42,4 @@ UI 상수는 LOGICAL 값 × 2 = PHYSICAL pixel로 저장. FONT_SIZE=32, TITLE_HE
 PTY reader thread의 snapshot 전송은 무조건 `try_send`. 블로킹 `send` 부활시키면 render-vsync에 묶일 때 PTY backpressure로 bash가 멈추고 claude code가 10x 느려짐 (bounded(256) 채널 가득 → reader block → PTY 버퍼 가득 → bash backpressure). `crates/pty-backend/src/state.rs` `spawn_reader_thread` 참조.
 
 ### 성능 (해결됨, 참고)
-옛 sugarloaf 경로의 `build_body_cells`가 셀마다 `cosmic_text::Buffer` 생성하던 30-50ms/frame 병목은 cell-renderer(swash atlas + wgpu instance, 1542셀 ~80μs)로 교체돼 해결됨(커밋 `1033b56`). 기본 렌더러 = `gpu.rs`. sugarloaf는 `KASATERM_RENDERER=sugarloaf`로 A/B용만 남음.
+옛 sugarloaf 경로의 `build_body_cells`가 셀마다 `cosmic_text::Buffer` 생성하던 30-50ms/frame 병목은 cell-renderer(swash atlas + wgpu instance, 1542셀 ~80μs)로 교체돼 해결됨(커밋 `1033b56`). 기본 렌더러 = `gpu.rs`. sugarloaf는 `KASATERM_RENDERER=sugarloaf`로 색재현 A/B용만 남음(chrome UI 빈약).
