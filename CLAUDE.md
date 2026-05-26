@@ -16,8 +16,11 @@ tmuxify (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 4. **체감(스크롤·입력 지연) 테스트는 반드시 release** — `cargo run --release -p kasaterm`. 디버그 빌드는 원래 버벅임(A/B 확인: debug=느림, release/.app=빠름). 디버그로 "느리다" 판단 금지
 5. **시각 확인** — 스크린샷 본 후 어색한 부분 직접 짚어내고 수정. "어때보여요?" 묻지 말고 너의 판단으로 다음 액션
 
+### 렌더러 기본값 (2026-05-27 확정)
+기본 렌더러 = **sugarloaf** (P3 색재현 정확). cell-renderer(gpu.rs)는 `KASATERM_RENDERER=gpu` 옵트인. macOS 26 + wgpu 28에서 CAMetalLayer가 sublayer로 붙으면 `setColorspace: DisplayP3`가 compositor에서 무시됨 — sugarloaf만 root layer install로 P3 동작. 색재현 다시 건드리기 전 [[reference_kasaterm_color_pipeline]] 먼저 읽기.
+
 ### 알려진 함정 1순위 ([[tmuxify-rendering-pipeline]] 메모리 참조)
-현재 기본 백엔드 = pty-backend(portable-pty + alacritty_terminal) + cell-renderer(`gpu.rs`). 깨질 때 의심 순서:
+현재 기본 백엔드 = pty-backend(portable-pty + alacritty_terminal) + sugarloaf(`render.rs`). 깨질 때 의심 순서:
 - **입력/커서가 0.5초 늦음** → `main.rs::about_to_wait`가 `WaitUntil(blink)`로 파킹해 펜딩 redraw를 미룸. `chrome_dirty || pane.dirty`면 즉시 깨워야 함. 렌더 2경로(sugarloaf/gpu) 둘 다 점검.
 - **한글이 깨져 보임** → 입력 Composer 말고 **렌더/damage 경로부터** 의심. macOS 입력 경로(set_ime_allowed(false) + hangul-ime)는 정상이고 셸에선 멀쩡함. preedit는 chrome 오버레이라 변경 시 chrome_dirty 필요.
 - **동기화/화면 멈춤** → DECSET 2026은 alacritty vte `Processor`가 내장 처리 ([[reference_kasaterm_decset_2026]]). 수동 파싱 금지.
