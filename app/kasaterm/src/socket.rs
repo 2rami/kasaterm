@@ -263,6 +263,10 @@ pub struct PtySnapshot {
     pub session_count: usize,
     /// Index of the visible session within the session list.
     pub active_session: usize,
+    /// Persisted sessions from the previous shutdown — surfaced by the
+    /// session panel so the user can manually restore them (auto-restore at
+    /// launch was retired in favour of light-launch). Each entry is a label.
+    pub saved_sessions: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -387,6 +391,7 @@ impl Backend for PtyBackend {
         SessionsInfo {
             count: snap.session_count.max(1),
             active: snap.active_session,
+            saved: snap.saved_sessions.clone(),
         }
     }
 

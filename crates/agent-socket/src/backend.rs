@@ -50,11 +50,19 @@ pub struct SurfaceInfo {
 pub struct SessionsInfo {
     pub count: usize,
     pub active: usize,
+    /// Saved (persisted) sessions from the last shutdown. Surfaced in the
+    /// session panel so the user can manually restore them — auto-restore
+    /// at launch was retired in favour of "light-launch fresh single pane".
+    /// Each entry is a short label (typically the first leaf's cwd basename)
+    /// the panel renders as a one-click restore row. Empty when no saved
+    /// state is on disk.
+    #[serde(default)]
+    pub saved: Vec<String>,
 }
 
 impl Default for SessionsInfo {
     fn default() -> Self {
-        Self { count: 1, active: 0 }
+        Self { count: 1, active: 0, saved: Vec::new() }
     }
 }
 
