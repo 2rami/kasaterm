@@ -1226,6 +1226,22 @@ struct HeaderDrag {
     active: bool,
 }
 
+/// State for an in-flight in-pane tab reorder drag. A press on a tab arms
+/// this; it only becomes a real drag past the threshold, so a plain press
+/// just switches the active tab on release.
+struct TabDrag {
+    /// Pane whose tab strip owns the drag.
+    pane: String,
+    /// Index of the grabbed tab at press time.
+    from: usize,
+    /// Press position in logical px, for the click→drag threshold.
+    start: (f32, f32),
+    /// True once the cursor moved past the threshold.
+    active: bool,
+    /// Current insertion index (0..=tabs.len()) the tab would drop into.
+    target: usize,
+}
+
 /// A terminal pane's screen state: the PTY-backed cell grid, cursor,
 /// scrollback, and the modes the emulator reports. Lives inside
 /// `PaneContent::Terminal`.
@@ -1758,6 +1774,11 @@ struct App {
     /// Extra sidebar flips queued after the first (KASATERM_AUTOTOGGLE_SIDEBAR_N),
     /// 1.5s apart, to stress hide↔show reflow without a human.
     autotoggle_left: u32,
+    /// Headless repro for the in-pane tab bar (KASATERM_AUTOTABS=N): pushes N
+    /// dummy tabs onto the active pane once so a screenshot can capture the
+    /// multi-tab header without a human clicking the "+". 0 disables.
+    autotabs_n: usize,
+    autotabs_at: Option<Instant>,
     /// Pane ids whose PTY reader thread has disconnected (shell exited
     /// or PTY closed). Drained on the main thread in `about_to_wait`
     /// so the tree mutation runs without holding the workspace lock
@@ -1861,6 +1882,19 @@ struct App {
     /// the threshold (only then does releasing relocate, so a plain click
     /// still just focuses the pane).
     header_drag: Option<HeaderDrag>,
+    /// In-flight in-pane tab reorder. `Some` while the user holds the mouse
+    /// on a tab; releasing either reorders (if it became a drag) or switches
+    /// the active tab (if it stayed a click).
+    tab_drag: Option<TabDrag>,
+    /// Currently hovered in-pane tab `(pane_id, tab_idx)`. Drives the
+    /// hover-only × and brighter text on inactive tabs.
+    pane_tab_hover: Option<(String, usize)>,
+    /// Live width of the left window-tab sidebar (logical px). User-draggable
+    /// via the right edge; defaults to `SIDEBAR_W`. `effective_sidebar_w()`
+    /// reads this when visible.
+    sidebar_w_logical: f32,
+    /// In-flight sidebar resize drag — `(start_cursor_x, start_width)`.
+    sidebar_resize: Option<(f32, f32)>,
     /// Pane that owns the in-flight mouse reporting drag. `Some(pane_id)`
     /// when we forwarded a button-press into a mouse-reporting TUI and
     /// are now relaying motion + release into the same pane. None means
@@ -1988,6 +2022,8 @@ impl App {
             autowindow_at: None,
             autotoggle_sidebar_at: None,
             autotoggle_left: 0,
+            autotabs_n: 0,
+            autotabs_at: None,
             dead_panes: Arc::new(Mutex::new(Vec::new())),
             socket_handle: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
@@ -2018,6 +2054,10 @@ impl App {
             drag_anchor: None,
             resize_drag: None,
             header_drag: None,
+            tab_drag: None,
+            pane_tab_hover: None,
+            sidebar_w_logical: SIDEBAR_W,
+            sidebar_resize: None,
             mouse_forward_pane: None,
             last_left_click: None,
             last_window_title: None,
@@ -2055,7 +2095,7 @@ impl App {
     /// single `sidebar_visible` flip reflows the whole grid.
     fn effective_sidebar_w(&self) -> f32 {
         if self.sidebar_visible {
-            SIDEBAR_W
+            self.sidebar_w_logical
         } else {
             0.0
         }
@@ -2538,6 +2578,23 @@ impl App {
         });
         eprintln!("[autocapture] in {ms}ms → {path}");
 
+        // macOS: derive the capture region from winit's own window geometry
+        // (logical px = screen points) so `screencapture -R` is bounded to the
+        // window even when osascript / System Events permission is denied. The
+        // old AppleScript bounds query returned None in headless runs, which
+        // fell back to grabbing the whole desktop.
+        #[cfg(target_os = "macos")]
+        let region: Option<String> = self.window.as_ref().and_then(|w| {
+            let scale = w.scale_factor();
+            let pos = w.outer_position().ok()?;
+            let size = w.outer_size();
+            let x = (pos.x as f64 / scale).round() as i64;
+            let y = (pos.y as f64 / scale).round() as i64;
+            let ww = (size.width as f64 / scale).round() as i64;
+            let hh = (size.height as f64 / scale).round() as i64;
+            Some(format!("{x},{y},{ww},{hh}"))
+        });
+
         // Windows: pull HWND on the main thread (raw-window-handle isn't
         // Send), pass the address into the timer thread as isize.
         #[cfg(windows)]
@@ -2555,11 +2612,10 @@ impl App {
             #[cfg(target_os = "macos")]
             {
                 let pid = std::process::id();
-                // Force our window to the front, then capture just its
-                // region. Full-desktop screencapture grabs whatever app
-                // is on top — useless in headless verify runs where
-                // another app may have focus. Window-bounded capture
-                // sidesteps that.
+                // Force our window to the front so nothing overlaps the region,
+                // then capture the winit-derived bounds. Frontmost is best-
+                // effort (needs Accessibility permission); the region itself
+                // comes from winit, not osascript, so capture works regardless.
                 let _ = std::process::Command::new("osascript")
                     .args([
                         "-e",
@@ -2569,24 +2625,6 @@ impl App {
                     ])
                     .status();
                 std::thread::sleep(std::time::Duration::from_millis(400));
-                let bounds_script = format!(
-                    "tell application \"System Events\" to tell (first process whose unix id is {pid}) to get {{position, size}} of window 1"
-                );
-                let bounds_out = std::process::Command::new("osascript")
-                    .args(["-e", &bounds_script])
-                    .output();
-                let region = bounds_out.ok().and_then(|o| {
-                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    let parts: Vec<i32> = s
-                        .split(',')
-                        .filter_map(|p| p.trim().parse::<i32>().ok())
-                        .collect();
-                    if parts.len() == 4 {
-                        Some(format!("{},{},{},{}", parts[0], parts[1], parts[2], parts[3]))
-                    } else {
-                        None
-                    }
-                });
                 let mut cmd = std::process::Command::new("screencapture");
                 cmd.args(["-x", "-t", "png"]);
                 if let Some(r) = region.as_deref() {
@@ -3105,7 +3143,7 @@ impl App {
     ) {
         let n = self.windows.len();
         let tab_x = SIDEBAR_TAB_INSET;
-        let tab_w = SIDEBAR_W - 2.0 * SIDEBAR_TAB_INSET;
+        let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
         let top = TITLE_HEIGHT + 8.0;
         let stride = SIDEBAR_TAB_H + SIDEBAR_TAB_GAP;
         let mut tabs = Vec::with_capacity(n);
@@ -3538,6 +3576,53 @@ impl App {
         eprintln!("[autosplit] armed: {plan:?} in {ms}ms");
         self.autosplit_plan = dirs;
         self.autosplit_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+    }
+
+    /// Headless repro for the in-pane tab header: queue N dummy tabs on the
+    /// active pane KASATERM_AUTOTABS_MS (default 3200, after autosplit) later.
+    fn arm_autotabs(&mut self) {
+        let Ok(n_str) = std::env::var("KASATERM_AUTOTABS") else { return };
+        let Ok(n) = n_str.parse::<usize>() else { return };
+        if n == 0 {
+            return;
+        }
+        let ms: u64 = std::env::var("KASATERM_AUTOTABS_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3200);
+        eprintln!("[autotabs] armed: {n} tab(s) in {ms}ms");
+        self.autotabs_n = n;
+        self.autotabs_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+    }
+
+    fn run_pending_autotabs(&mut self) {
+        if self.autotabs_n == 0 {
+            return;
+        }
+        let Some(due) = self.autotabs_at else { return };
+        if Instant::now() < due {
+            return;
+        }
+        let n = self.autotabs_n;
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(pid) = ws.active_pane.clone() {
+                if let Some(pane) = ws.panes.get_mut(&pid) {
+                    if pane.tabs.is_empty() {
+                        let cur = pane.title.clone().unwrap_or_else(|| pid.clone());
+                        pane.tabs.push(cur);
+                    }
+                    for i in 1..=n {
+                        pane.tabs.push(format!("탭 {}", i + 1));
+                    }
+                    pane.active_tab = 0;
+                    pane.dirty = true;
+                }
+            }
+        }
+        eprintln!("[autotabs] added {n} tab(s) to active pane");
+        self.autotabs_n = 0;
+        self.autotabs_at = None;
+        self.chrome_dirty = true;
     }
 
     fn start_tmux(&mut self) -> Result<()> {
@@ -6482,10 +6567,9 @@ impl App {
                 };
                 self.md_content_h.insert(id.clone(), content_h);
             }
-            // Title strip fill: chrome surface across the top so the area above
-            // the sidebar / traffic lights matches the sidebar instead of
-            // showing the terminal body color.
-            g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::SURFACE);
+            // Title strip fill: the unified BG so the top bar reads as one
+            // surface with the sidebar and terminal body (no depth seam).
+            g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::BG);
             // Sidebar-toggle button, just right of the traffic lights.
             // VSCode / Warp-style glyph: an outlined panel with its left
             // column filled when the sidebar is shown, hollow when hidden.
@@ -6556,13 +6640,14 @@ impl App {
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
             if sidebar_w > 0.0 {
-                // Strip background, below the title strip to the bottom.
+                // Strip background: the unified BG, set apart from the cell
+                // grid only by the right hairline below — not a darker fill.
                 g.rect(
                     0.0,
                     TITLE_HEIGHT,
                     sidebar_w,
                     (sb_win_h - TITLE_HEIGHT).max(0.0),
-                    theme::SURFACE,
+                    theme::BG,
                 );
                 // Right hairline so the strip reads as a distinct column.
                 g.rect(
@@ -6641,7 +6726,11 @@ impl App {
                     };
                     let cwd_fg: [u8; 4] = theme::TEXT_MUTE;
                     let show_close = multi && (is_active || is_hover);
-                    let name_max = if show_close { 15 } else { 18 };
+                    // Display-width budget derived from the live sidebar width:
+                    // ~8.4 logical px per CJK glyph, minus icon (~50) and the
+                    // close × slot (~26 when shown). Reflows on drag-resize.
+                    let avail = (self.sidebar_w_logical - 60.0 - if show_close { 26.0 } else { 0.0 }).max(0.0);
+                    let name_max = (avail / 8.4).floor().max(2.0) as usize;
                     g.draw_text(
                         text_x,
                         *ty + 11.0,
@@ -6657,7 +6746,7 @@ impl App {
                         g.draw_text(
                             text_x,
                             *ty + 30.0,
-                            &clip(&cwd, 21),
+                            &clip(&cwd, ((self.sidebar_w_logical - 60.0).max(0.0) / 6.5).floor().max(4.0) as usize),
                             gpu::DrawOpts {
                                 font_size: 11.0,
                                 color: cwd_fg,
@@ -6709,15 +6798,28 @@ impl App {
                     },
                 );
             }
-            // Per-pane header bar: band + bottom hairline + × close
-            // glyph + title. Active pane gets a brighter band and bold
-            // title, matching the sugarloaf path's iTerm-style chrome.
+            // Per-pane header bar. The band is the unified BG (same as the
+            // body) so there's no depth seam; a bottom hairline separates it
+            // from the cell grid. The active tab is marked by a raised pill +
+            // a top accent strip — not a darker "cage" — and only the active
+            // tab carries a × (so clicking any inactive tab just switches).
+            let tab_drag_info: Option<(String, usize)> = self
+                .tab_drag
+                .as_ref()
+                .filter(|d| d.active)
+                .map(|d| (d.pane.clone(), d.target));
+            let hover_info: Option<(String, usize)> = self.pane_tab_hover.clone();
+            // Active-tab top accents we need to repaint after the pane
+            // dividers (BORDER) draw, so a horizontal split's seam doesn't
+            // wipe the accent of the lower pane's active tab.
+            let mut deferred_accents: Vec<(f32, f32, f32, [u8; 4])> = Vec::new();
             for h in &headers {
-                // Dark header band so the active tab (filled with the body
-                // BG) stands out and inactive tabs read as "caged" in it.
-                g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, theme::SURFACE);
-                // Larger glyphs (user: icons too small).
-                let icon_size = chrome_font + 10.0;
+                g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, theme::BG);
+                // No bottom hairline: the band == body, and the active tab
+                // flows straight into the cell grid (browser-tab feel).
+                // Compact glyphs — a touch bigger than the label so icons
+                // read, but no longer the bulky +10 of the old design.
+                let icon_size = chrome_font + 5.0;
                 let text_y = h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0;
                 let icon_y = h.y + (PANE_HEADER_HEIGHT - icon_size) / 2.0;
                 let act_fg: [u8; 4] = if h.is_active {
@@ -6745,26 +6847,45 @@ impl App {
                 let per_tab = if tab_list.len() == 1 {
                     tabs_area
                 } else {
-                    (tabs_area / tab_list.len() as f32).clamp(48.0, 320.0)
+                    (tabs_area / tab_list.len() as f32).clamp(56.0, 320.0)
                 };
-                let mut tx = h.x + 6.0;
+                // Left edge of each tab's pill, for the drag insertion bar.
+                let mut tab_edges: Vec<f32> = Vec::with_capacity(tab_list.len());
+                // Geometry for the post-loop structural border pass.
+                let mut tabs_left: Option<f32> = None;
+                let mut tabs_right_edge: f32 = 0.0;
+                let mut inter_boundaries: Vec<f32> = Vec::new();
+                let mut active_tab_box: Option<(f32, f32)> = None;
+                let gap = 6.0_f32;
+                let mut tx = h.x + 8.0;
                 for (i, tab) in tab_list.iter().enumerate() {
                     let tab_x0 = tx;
-                    // This pane's main (active) tab — gets the box + focus
-                    // strip regardless of whether the pane itself is focused.
+                    // This pane's active tab — gets the pill + focus strip + ×.
                     let active = tab_list.len() == 1 || i == h.active_tab;
-                    let t_fg = if active {
+                    let is_hover = hover_info
+                        .as_ref()
+                        .map(|(p, hi)| p == &h.id && *hi == i)
+                        .unwrap_or(false);
+                    // × on the active tab always; on inactive only while
+                    // hovered. The width is reserved either way so hover
+                    // doesn't shift the surrounding layout.
+                    let show_x = active || is_hover;
+                    let reserve_x = true;
+                    let bright = active || is_hover;
+                    let t_fg = if bright {
                         theme::TEXT
                     } else {
-                        theme::with_alpha(theme::TEXT, 0x6B)
+                        theme::with_alpha(theme::TEXT, 0x82)
                     };
-                    let t_icon = if active {
+                    let t_icon = if bright {
                         theme::TEXT_DIM
                     } else {
-                        theme::with_alpha(theme::TEXT_DIM, 0x6B)
+                        theme::with_alpha(theme::TEXT_DIM, 0x82)
                     };
                     // Truncate this tab's title to its share of the bar.
-                    let budget = (per_tab - icon_w - 6.0 - 8.0 - close_w).max(0.0);
+                    // × space is reserved on every tab — see `reserve_x`.
+                    let x_reserve = if reserve_x { close_w + 8.0 } else { 0.0 };
+                    let budget = (per_tab - icon_w - 6.0 - x_reserve - 14.0).max(0.0);
                     let mut label = tab.to_string();
                     let mut lw = g.measure_chrome_text(&label, chrome_font, active);
                     if lw > budget {
@@ -6777,26 +6898,30 @@ impl App {
                         }
                         label.push('…');
                     }
-                    let _ = lw;
-                    // Active tab: filled box + accent top line (focus marker,
-                    // matches reference 04.33.53). Drawn before the glyphs so
-                    // it sits underneath. Inactive tabs stay background-free.
-                    // Tab box: active = brighter pane-surface + accent top
-                    // line; inactive = darker "caged" box. First tab starts at
-                    // the header's left edge so no gap is left on the left.
-                    let box_x = if i == 0 { h.x } else { tab_x0 - 4.0 };
-                    let tw = (tab_x0 - box_x) + icon_w + 6.0 + lw + 8.0 + close_w + 8.0;
-                    // Active tab: fill with the pane body color (BG) so it
-                    // reads as continuous with the terminal, plus an accent
-                    // top line. Inactive tabs stay on the darker header band
-                    // (SURFACE) — "caged".
-                    if active {
-                        g.rect(box_x, h.y, tw, PANE_HEADER_HEIGHT, theme::BG);
-                        // Focus strip: blue when this pane is focused, white
-                        // when it's the main tab of an unfocused pane.
-                        let strip = if h.is_active { theme::ACCENT } else { theme::TEXT };
-                        g.rect(box_x, h.y, tw, 2.5, strip);
+                    // Pill geometry: spans icon..label + reserved × slot.
+                    let content_w = icon_w + 6.0 + lw + x_reserve;
+                    // First tab sits flush with the pane's left edge so the
+                    // active tab's accent strip joins the pane divider with
+                    // no visible gap.
+                    let box_x = if i == 0 { h.x } else { tab_x0 - 6.0 };
+                    let box_right = tab_x0 + content_w + 6.0;
+                    let tw = (box_right - box_x).max(0.0);
+                    tab_edges.push(box_x);
+                    if tabs_left.is_none() {
+                        tabs_left = Some(box_x);
+                    } else {
+                        inter_boundaries.push(box_x);
                     }
+                    tabs_right_edge = box_x + tw;
+                    if active {
+                        active_tab_box = Some((box_x, tw));
+                    }
+                    // Active tab keeps the band BG (= terminal body) — no
+                    // fill — so the tab reads as continuous with the content
+                    // below it. The accent top + broken bottom are what
+                    // differentiate it. Structural lines drawn post-loop.
+                    let stroke = 1.0_f32;
+                    let _ = stroke;
                     let cx = g.draw_text(
                         tx,
                         icon_y,
@@ -6809,48 +6934,115 @@ impl App {
                         &label,
                         gpu::DrawOpts { font_size: chrome_font, color: t_fg, bold: active, italic: false },
                     );
-                    let close_x = cx + 8.0;
-                    let cx = g.draw_text(
-                        close_x,
-                        icon_y,
-                        "\u{2715}",
-                        gpu::DrawOpts { font_size: icon_size, color: t_icon, bold: false, italic: false },
-                    );
-                    // × close hit (widen a little for an easy target).
-                    let cw = (cx - close_x).max(icon_size * 0.6);
-                    tab_close_hits.push((h.id.clone(), i, (close_x - 2.0, h.y, cw + 4.0, PANE_HEADER_HEIGHT)));
-                    tx = cx + 14.0;
-                    // Whole-tab click hit (switches active_tab); excludes the
-                    // × region above which the handler checks first.
-                    tab_hits.push((h.id.clone(), i, (tab_x0, h.y, (tx - tab_x0).max(0.0), PANE_HEADER_HEIGHT)));
+                    if show_x {
+                        let close_x = cx + 8.0;
+                        let cxe = g.draw_text(
+                            close_x,
+                            icon_y,
+                            "\u{2715}",
+                            gpu::DrawOpts { font_size: icon_size, color: t_icon, bold: false, italic: false },
+                        );
+                        // × close hit (widen a little for an easy target).
+                        let cw = (cxe - close_x).max(icon_size * 0.6);
+                        tab_close_hits.push((h.id.clone(), i, (close_x - 2.0, h.y, cw + 4.0, PANE_HEADER_HEIGHT)));
+                    }
+                    // Whole-pill click/drag hit. Inactive tabs have no × inside,
+                    // so the entire pill switches; the active tab's × is checked
+                    // first by the handler.
+                    tab_hits.push((h.id.clone(), i, (box_x, h.y, tw, PANE_HEADER_HEIGHT)));
+                    tx = box_right + gap;
                 }
-                // [+] new-tab button right after the tabs.
-                let plus_x0 = tx;
-                let cxp = g.draw_text(
+                // Structural borders. Browser-tab pattern:
+                //   - Top BORDER across the strip, with the active tab's
+                //     segment painted in the focus color (same thickness).
+                //   - Bottom BORDER across the strip but BROKEN under the
+                //     active tab so the active opens straight into the body.
+                //   - Vertical BORDER at each inter-tab boundary (single line
+                //     shared between neighbours).
+                // No outer left/right of the strip — the pane dividers fill
+                // those roles, so leftmost-active never gets two stacked lines.
+                if let Some(left) = tabs_left {
+                    let stroke = 1.0_f32;
+                    let band_w = (tabs_right_edge - left).max(0.0);
+                    g.rect(left, h.y, band_w, stroke, theme::BORDER);
+                    // Bottom BORDER across the WHOLE pane header (tabs + plus
+                    // button + action cluster), broken only under the active
+                    // tab so it flows into the body.
+                    let by = h.y + PANE_HEADER_HEIGHT - stroke;
+                    let h_right = h.x + h.w;
+                    if let Some((ax, aw)) = active_tab_box {
+                        let lw = (ax - h.x).max(0.0);
+                        g.rect(h.x, by, lw, stroke, theme::BORDER);
+                        let rx = ax + aw;
+                        let rw = (h_right - rx).max(0.0);
+                        g.rect(rx, by, rw, stroke, theme::BORDER);
+                    } else {
+                        g.rect(h.x, by, h.w, stroke, theme::BORDER);
+                    }
+                    for b in &inter_boundaries {
+                        g.rect(*b, h.y, stroke, PANE_HEADER_HEIGHT, theme::BORDER);
+                    }
+                    // Right edge of the strip — gives the last tab (often the
+                    // active one when only the trailing tab is selected) a
+                    // visible right boundary. Left edge is left to the pane
+                    // divider so it never doubles up.
+                    g.rect(tabs_right_edge - stroke, h.y, stroke, PANE_HEADER_HEIGHT, theme::BORDER);
+                    if let Some((ax, aw)) = active_tab_box {
+                        let accent_col = if h.is_active { theme::ACCENT } else { theme::TEXT };
+                        g.rect(ax, h.y, aw, stroke, accent_col);
+                        deferred_accents.push((ax, h.y, aw, accent_col));
+                    }
+                }
+                // Drag insertion bar: a 2px accent line at the drop boundary.
+                if let Some((ref dpane, target)) = tab_drag_info {
+                    if *dpane == h.id {
+                        let bar_x = tab_edges.get(target).copied().unwrap_or(tx - gap);
+                        g.rect(bar_x - 1.0, h.y + 3.0, 2.0, PANE_HEADER_HEIGHT - 6.0, theme::ACCENT);
+                    }
+                }
+                let (cur_x, cur_y) = self.cursor_px;
+                let inside =
+                    |rx: f32, ry: f32, rw: f32, rh: f32| cur_x >= rx && cur_x <= rx + rw && cur_y >= ry && cur_y <= ry + rh;
+                // [+] new-tab button right after the tabs. Hover chip is a
+                // tight rounded square centered on the glyph so the glow
+                // hugs the icon instead of stretching across a tall band.
+                let plus_iw = g.measure_chrome_text("\u{ea60}", icon_size, false);
+                let chip_size = (icon_size + 6.0).max(plus_iw + 6.0);
+                let chip_x = tx + (plus_iw - chip_size) / 2.0;
+                let chip_y = h.y + (PANE_HEADER_HEIGHT - chip_size) / 2.0;
+                let plus_rect = (chip_x, chip_y, chip_size, chip_size);
+                let plus_hover = inside(plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3);
+                if plus_hover {
+                    round_rect(g, plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3,
+                        theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
+                }
+                let plus_color = if plus_hover { theme::TEXT } else { act_fg };
+                g.draw_text(
                     tx,
                     icon_y,
                     "\u{ea60}",
-                    gpu::DrawOpts { font_size: icon_size, color: act_fg, bold: false, italic: false },
+                    gpu::DrawOpts { font_size: icon_size, color: plus_color, bold: false, italic: false },
                 );
-                plus_hits.push((
-                    h.id.clone(),
-                    (plus_x0 - 2.0, h.y, (cxp - plus_x0).max(icon_size) + 4.0, PANE_HEADER_HEIGHT),
-                ));
+                plus_hits.push((h.id.clone(), plus_rect));
                 // ── Right action buttons: new-terminal, web, split-v, split-h ──
                 let action_icons = ["\u{f489}", "\u{f0ac}", "\u{eb57}", "\u{eb56}"];
                 let mut bx = h.x + h.w - 8.0 - (abw * n_btn + agap * (n_btn - 1.0));
                 for ic in action_icons {
                     let iw = g.measure_chrome_text(ic, icon_size, false);
+                    let chip_size = icon_size + 6.0;
+                    let chip_y = h.y + (PANE_HEADER_HEIGHT - chip_size) / 2.0;
+                    let chip_x = bx + (abw - chip_size) / 2.0;
+                    let hover = inside(chip_x, chip_y, chip_size, chip_size);
+                    if hover {
+                        round_rect(g, chip_x, chip_y, chip_size, chip_size,
+                            theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
+                    }
+                    let color = if hover { theme::TEXT } else { act_fg };
                     g.draw_text(
                         bx + (abw - iw) / 2.0,
                         icon_y,
                         ic,
-                        gpu::DrawOpts {
-                            font_size: icon_size,
-                            color: act_fg,
-                            bold: false,
-                            italic: false,
-                        },
+                        gpu::DrawOpts { font_size: icon_size, color, bold: false, italic: false },
                     );
                     bx += abw + agap;
                 }
@@ -6863,6 +7055,11 @@ impl App {
             // and read as caged tiles).
             for (sx, sy, sw, sh) in &pane_seams {
                 g.rect(*sx, *sy, *sw, *sh, theme::BORDER);
+            }
+            // Re-paint the active-tab accent strips so a horizontal pane
+            // divider just above a pane doesn't wipe its accent color.
+            for (ax, ay, aw, ac) in &deferred_accents {
+                g.rect(*ax, *ay, *aw, 1.0, *ac);
             }
             Self::paint_gpu_overlays(g, &overlay);
             // Code-block copy buttons, painted on top of the inactive-pane
@@ -7681,6 +7878,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.arm_autosplit();
             self.arm_autowindows();
             self.arm_autotoggle();
+            self.arm_autotabs();
             self.schedule_autoquit();
             self.open_git_panel(event_loop, false);
             return;
@@ -7856,6 +8054,35 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = window.scale_factor() as f32;
                 self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                // In-pane tab hover tracking — drives the hover-only × +
+                // brightened text on inactive tabs. Updated on every move but
+                // only redraws when the hovered tab actually changes.
+                {
+                    let (cx, cy) = self.cursor_px;
+                    let new_hover = self
+                        .pane_tab_rects
+                        .iter()
+                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, idx, _)| (id.clone(), *idx));
+                    if new_hover != self.pane_tab_hover {
+                        self.pane_tab_hover = new_hover;
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                }
+                // Sidebar resize drag in progress: update width and reflow.
+                if let Some((start_x, start_w)) = self.sidebar_resize {
+                    let new_w = (start_w + (self.cursor_px.0 - start_x)).clamp(140.0, 520.0);
+                    if (new_w - self.sidebar_w_logical).abs() > 0.5 {
+                        self.sidebar_w_logical = new_w;
+                        let (cols, rows) = self.window_cells();
+                        self.resize_backend(cols, rows);
+                        self.chrome_dirty = true;
+                        window.set_cursor(CursorIcon::ColResize);
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // Divider drag in progress: re-derive the split ratio from
                 // the cursor and resize every affected PTY. Takes priority
                 // over selection / mouse-forwarding so the grab stays sticky.
@@ -7877,6 +8104,38 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.resize_backend(cols, rows);
                     window.request_redraw();
+                    return;
+                }
+                // Tab reorder drag: flip to active past the threshold, then
+                // re-derive the drop index from the cursor's x over this
+                // pane's tab pills. The insertion bar is painted from
+                // `tab_drag.target`.
+                if self.tab_drag.is_some() {
+                    let (px, _) = self.cursor_px;
+                    let (start, pane) = {
+                        let d = self.tab_drag.as_ref().unwrap();
+                        (d.start, d.pane.clone())
+                    };
+                    let dx = self.cursor_px.0 - start.0;
+                    let dy = self.cursor_px.1 - start.1;
+                    // Insertion index = #pills whose midpoint is left of cursor.
+                    let mut target = 0usize;
+                    for (pid, idx, (rx, _, rw, _)) in &self.pane_tab_rects {
+                        if pid == &pane && px > rx + rw / 2.0 {
+                            target = idx + 1;
+                        }
+                    }
+                    if let Some(d) = self.tab_drag.as_mut() {
+                        if !d.active && dx * dx + dy * dy > 25.0 {
+                            d.active = true;
+                        }
+                        d.target = target;
+                    }
+                    if self.tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
+                        window.set_cursor(CursorIcon::Grabbing);
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
                     return;
                 }
                 // Header drag in progress: flip to active once past the
@@ -7911,17 +8170,30 @@ impl ApplicationHandler<UserEvent> for App {
                     self.selection = Some(Selection { anchor, end: cell });
                     window.request_redraw();
                 } else {
-                    // Hover feedback: show a resize cursor over a seam so
-                    // the divider reads as draggable.
-                    let icon = match self
-                        .divider_at_px(self.cursor_px.0, self.cursor_px.1)
-                        .map(|(_, d)| d)
-                    {
-                        Some(pty_backend::SplitDir::Horizontal) => CursorIcon::ColResize,
-                        Some(pty_backend::SplitDir::Vertical) => CursorIcon::RowResize,
-                        None => CursorIcon::Default,
+                    // Hover feedback: show a resize cursor over a seam or the
+                    // sidebar's right edge so they read as draggable.
+                    let (cx, cy) = self.cursor_px;
+                    let on_sidebar_edge = self.sidebar_visible
+                        && cy > TITLE_HEIGHT
+                        && (cx - self.sidebar_w_logical).abs() <= 3.0;
+                    let icon = if on_sidebar_edge {
+                        CursorIcon::ColResize
+                    } else {
+                        match self
+                            .divider_at_px(self.cursor_px.0, self.cursor_px.1)
+                            .map(|(_, d)| d)
+                        {
+                            Some(pty_backend::SplitDir::Horizontal) => CursorIcon::ColResize,
+                            Some(pty_backend::SplitDir::Vertical) => CursorIcon::RowResize,
+                            None => CursorIcon::Default,
+                        }
                     };
                     window.set_cursor(icon);
+                    // Hover glow on chrome buttons (+ / action cluster) needs
+                    // a redraw on every move — paint reads self.cursor_px to
+                    // decide which button is under the cursor.
+                    self.chrome_dirty = true;
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
@@ -7941,11 +8213,22 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    // Sidebar resize grip — a 6px hot zone straddling the
+                    // sidebar's right edge below the title strip. Caught
+                    // before the sidebar click path so dragging the edge
+                    // resizes instead of clicking the last sidebar column.
+                    if self.sidebar_visible && cy > TITLE_HEIGHT {
+                        let edge = self.sidebar_w_logical;
+                        if cx >= edge - 3.0 && cx <= edge + 3.0 {
+                            self.sidebar_resize = Some((cx, self.sidebar_w_logical));
+                            return;
+                        }
+                    }
                     // Left window-tab sidebar. Caught first — it owns the whole
                     // left strip, so a click there never falls through to the
                     // cell grid. Order: close-× (sits on top of a tab) → tab →
                     // "+" new-window button.
-                    if self.sidebar_visible && cx < SIDEBAR_W {
+                    if self.sidebar_visible && cx < self.sidebar_w_logical {
                         let inside =
                             |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
                         if let Some(idx) = self
@@ -8085,6 +8368,12 @@ impl ApplicationHandler<UserEvent> for App {
                                     close_pane = true;
                                 } else {
                                     pane.tabs.remove(idx);
+                                    // Keep pointing at the same tab the user
+                                    // had active: shift left if we removed
+                                    // one before it; clamp if it was the last.
+                                    if idx < pane.active_tab {
+                                        pane.active_tab -= 1;
+                                    }
                                     if pane.active_tab >= pane.tabs.len() {
                                         pane.active_tab = pane.tabs.len() - 1;
                                     }
@@ -8103,12 +8392,19 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
+                        // Focus the pane now; arm a tab drag. A plain press
+                        // (no movement) switches to this tab on release; a
+                        // drag past the threshold reorders instead.
                         if let Ok(mut ws) = self.ws.lock() {
-                            if let Some(pane) = ws.panes.get_mut(&pid) {
-                                pane.active_tab = idx;
-                            }
-                            ws.active_pane = Some(pid);
+                            ws.active_pane = Some(pid.clone());
                         }
+                        self.tab_drag = Some(TabDrag {
+                            pane: pid,
+                            from: idx,
+                            start: self.cursor_px,
+                            active: false,
+                            target: idx,
+                        });
                         window.request_redraw();
                         return;
                     }
@@ -8221,6 +8517,41 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     ElementState::Released => {
+                        // End a tab drag: a real drag reorders the pane's tab
+                        // list; a plain press just switches to that tab.
+                        if let Some(td) = self.tab_drag.take() {
+                            window.set_cursor(CursorIcon::Default);
+                            if let Ok(mut ws) = self.ws.lock() {
+                                if let Some(pane) = ws.panes.get_mut(&td.pane) {
+                                    let n = pane.tabs.len();
+                                    if td.active && n > 1 {
+                                        let from = td.from.min(n - 1);
+                                        let mut to = td.target.min(n);
+                                        if to > from {
+                                            to -= 1;
+                                        }
+                                        let item = pane.tabs.remove(from);
+                                        let to = to.min(pane.tabs.len());
+                                        pane.tabs.insert(to, item);
+                                        // Dragging a tab selects it at its new spot.
+                                        pane.active_tab = to;
+                                    } else {
+                                        // Plain click → switch to the pressed tab.
+                                        pane.active_tab = td.from.min(n.saturating_sub(1));
+                                    }
+                                    pane.dirty = true;
+                                }
+                            }
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
+                        // End a sidebar resize drag (no other commit needed —
+                        // the live width is already in self.sidebar_w_logical).
+                        if self.sidebar_resize.take().is_some() {
+                            window.set_cursor(CursorIcon::Default);
+                            return;
+                        }
                         // End a divider drag without falling through to the
                         // selection-release path under it.
                         if self.resize_drag.take().is_some() {
@@ -8370,6 +8701,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autosplits();
         self.run_pending_autowindows();
         self.run_pending_autotoggle();
+        self.run_pending_autotabs();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was

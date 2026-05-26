@@ -9,15 +9,20 @@
 //! Values are raw sRGB bytes — the gpu path sRGB-decodes on upload and the
 //! sugarloaf path divides by 255 (see `f32_rgba`).
 
-/// Terminal body / window background. Kept at the familiar value.
+/// Terminal body / window background. The single base color — the title
+/// strip, sidebar, and pane-header band all share it so chrome and the
+/// terminal read as one continuous surface (no depth seam).
 pub const BG: [u8; 4] = [37, 44, 53, 255];
-/// Chrome surfaces (sidebar, title strip, panels) — a touch darker than the
-/// body so chrome reads as a distinct depth layer.
+/// Sunken content surface (markdown code blocks) — darker than BG so a code
+/// block reads as recessed into the page. Not used for chrome backgrounds.
 pub const SURFACE: [u8; 4] = [26, 29, 35, 255];
-pub const SURFACE_HOVER: [u8; 4] = [34, 38, 46, 255];
-pub const SURFACE_ACTIVE: [u8; 4] = [46, 50, 59, 255];
-/// Hairlines, dividers, inactive borders.
-pub const BORDER: [u8; 4] = [16, 18, 23, 255];
+/// Interactive states layered on the unified BG: each step *lighter* than BG
+/// so hover/selected reads as raised, not as a darker hole.
+pub const SURFACE_HOVER: [u8; 4] = [48, 56, 67, 255];
+pub const SURFACE_ACTIVE: [u8; 4] = [60, 70, 84, 255];
+/// Hairlines, dividers, inactive borders. A muted gray a clear step above
+/// BG so seams read as soft lines, not black gaps.
+pub const BORDER: [u8; 4] = [80, 92, 110, 255];
 /// Single accent — selection ring, cursor, links, active markers.
 pub const ACCENT: [u8; 4] = [90, 140, 230, 255];
 pub const TEXT: [u8; 4] = [236, 238, 243, 255];
