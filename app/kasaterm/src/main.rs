@@ -8756,12 +8756,25 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
-        // Default = the cell-renderer GPU path (fast, fit-to-cell
-        // icons, sRGB-correct). `KASATERM_RENDERER=sugarloaf` opts
-        // back into the legacy sugarloaf path for A/B comparison.
+        // Default = sugarloaf path: it owns its CAMetalLayer and installs
+        // it as the NSView's root layer, so the Display P3 colorspace
+        // tag actually takes effect on macOS 26 (verified by auto pixel
+        // probe: pure-red byte 255 measures 234,51,35 = P3 mapping to
+        // sRGB, matching ghostty exactly). The wgpu cell-renderer path
+        // attaches its CAMetalLayer as a SUBLAYER which macOS doesn't
+        // color-manage with the P3 tag — same red comes out at 255,0,0
+        // (plain sRGB) despite NSWindow.colorSpace, EDR, per-frame
+        // promotion, and an HDR Rgba16Float framebuffer. Until wgpu
+        // adopts the "metal layer is the view's root layer" pattern
+        // (gfx-rs/wgpu#issue tracked), sugarloaf is the only path that
+        // gets ghostty-grade colour reproduction.
+        //
+        // `KASATERM_RENDERER=gpu` opts back into the cell-renderer
+        // pipeline for perf-critical A/B (the gpu path is still faster
+        // for high-frequency redraws, but the colour gap is visible).
         let use_gpu = std::env::var("KASATERM_RENDERER")
-            .map(|v| !v.eq_ignore_ascii_case("sugarloaf"))
-            .unwrap_or(true);
+            .map(|v| v.eq_ignore_ascii_case("gpu"))
+            .unwrap_or(false);
         let sg_window = SugarloafWindow {
             handle: window.window_handle().unwrap().as_raw(),
             display: window.display_handle().unwrap().as_raw(),

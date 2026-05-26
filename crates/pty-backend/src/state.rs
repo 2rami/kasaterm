@@ -133,15 +133,16 @@ impl PtySession {
         // identity and scrub the iTerm-specific leftovers so the
         // detection settles on kasaterm regardless of who launched us.
         cmd.env("TERM", "xterm-256color");
-        // Masquerade as iTerm.app so child TUIs (Claude Code, helix,
-        // etc.) treat us as a capability-rich terminal and emit OSC 52
-        // for copy-on-select. Our alacritty parser handles OSC 52
-        // correctly; iTerm-specific escapes that we don't support are
-        // either silently dropped or render as small visual noise — the
-        // tradeoff favors working clipboard integration.
-        cmd.env("TERM_PROGRAM", "iTerm.app");
-        cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
+        // Masquerade as Ghostty. Claude Code (and other TUIs) detects
+        // host terminal via `TERM_PROGRAM` and adapts its theme — the
+        // Ghostty profile uses the punchier diff bg / syntax colours
+        // the user wanted. OSC 52 clipboard still works; alacritty's
+        // VT parser handles whatever escapes Ghostty-targeted TUIs
+        // emit (sync output, kitty graphics, etc).
+        cmd.env("TERM_PROGRAM", "ghostty");
+        cmd.env("TERM_PROGRAM_VERSION", "1.1.3");
         cmd.env("COLORTERM", "truecolor");
+        cmd.env("GHOSTTY_RESOURCES_DIR", "/Applications/Ghostty.app/Contents/Resources/ghostty");
         for k in [
             "ITERM_SESSION_ID",
             "ITERM_PROFILE",
