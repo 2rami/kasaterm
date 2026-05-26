@@ -123,6 +123,14 @@ impl GpuRenderer {
             raw_window_handle: window.window_handle()?.as_raw(),
         };
         let surface = unsafe { instance.create_surface_unsafe(surface_target)? };
+        // Live-resize would otherwise show the layer's stale pixels stretched
+        // into the new bounds until our next frame lands. Pinning the layer's
+        // contentsGravity to top-left keeps content anchored — same trick
+        // ghostty uses (see feedback_tmuxify_rendering_pipeline).
+        #[cfg(target_os = "macos")]
+        unsafe {
+            patch_metal_layer_gravity(&window);
+        }
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
@@ -1034,7 +1042,7 @@ impl GpuRenderer {
                         let disp_w = w.min(iw / self.scale);
                         let disp_h = disp_w * ih / iw;
                         if pen_y + disp_h > clip_top && pen_y < clip_bot {
-                            self.queue_image(key, x, pen_y, disp_w, disp_h);
+                            self.queue_image(key, x, pen_y, disp_w, disp_h, 1.0);
                         }
                         pen_y += disp_h + base * 0.7;
                     } else {
@@ -1223,8 +1231,11 @@ impl GpuRenderer {
 
     /// Queue an image pane for this frame. `(x, y, w, h)` is the pane's body
     /// box in LOGICAL px; the image is contain-fit (aspect preserved,
-    /// centered) inside it. Must have been `upload_image`d first.
-    pub fn queue_image(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32) {
+    /// centered) inside it. `zoom >= 1.0` scales past the fit size — when
+    /// it would overflow the pane box we clip the dest rect AND adjust UVs
+    /// so the image stays inside the pane (cropped to its center, never
+    /// leaking into adjacent panes).
+    pub fn queue_image(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32, zoom: f32) {
         let Some(entry) = self.images.get(id) else { return };
         let s = self.scale;
         let (bx, by, bw, bh) = (x * s, y * s, w * s, h * s);
@@ -1235,16 +1246,29 @@ impl GpuRenderer {
         // Contain fit, but never upscale past native — a small icon stays
         // crisp at 1:1 instead of blowing up blurry to fill the pane.
         let fit = (bw / iw).min(bh / ih).min(1.0);
-        let dw = iw * fit;
-        let dh = ih * fit;
-        let dx = bx + (bw - dw) * 0.5;
-        let dy = by + (bh - dh) * 0.5;
+        let z = zoom.max(1.0);
+        let raw_dw = iw * fit * z;
+        let raw_dh = ih * fit * z;
+        // Per-axis: if the zoomed image fits, center it; if it overflows,
+        // clip the dest to the pane edge and crop the UV symmetrically.
+        let (dx, dw, uv_x0, uv_x1) = if raw_dw <= bw {
+            (bx + (bw - raw_dw) * 0.5, raw_dw, 0.0_f32, 1.0_f32)
+        } else {
+            let frac = (raw_dw - bw) / (2.0 * raw_dw);
+            (bx, bw, frac, 1.0 - frac)
+        };
+        let (dy, dh, uv_y0, uv_y1) = if raw_dh <= bh {
+            (by + (bh - raw_dh) * 0.5, raw_dh, 0.0_f32, 1.0_f32)
+        } else {
+            let frac = (raw_dh - bh) / (2.0 * raw_dh);
+            (by, bh, frac, 1.0 - frac)
+        };
         self.image_quads.push((
             id.to_string(),
             CellInstance {
                 cell_px: [dx, dy, dw, dh],
-                uv_min: [0.0, 0.0],
-                uv_max: [1.0, 1.0],
+                uv_min: [uv_x0, uv_y0],
+                uv_max: [uv_x1, uv_y1],
                 fg_rgba: [1.0, 1.0, 1.0, 1.0],
                 flags: CellInstance::FLAG_COLOR,
                 ..Default::default()
@@ -1278,7 +1302,7 @@ impl GpuRenderer {
     pub fn draw_cells(&mut self, panes: &[PaneSlot<'_>]) {
         // Glyph alpha for unfocused panes (PaneSlot.dim). Backgrounds keep
         // full alpha — only the text fades, so the box doesn't darken.
-        const DIM_TEXT_ALPHA: f32 = 0.42;
+        const DIM_TEXT_ALPHA: f32 = 0.70;
         let cell_w_px = self.cell_w * self.scale;
         let cell_h_px = self.cell_h * self.scale;
         // Pass 1: backgrounds only. A tall CJK glyph bleeds a little
@@ -1939,4 +1963,107 @@ fn default_font_path() -> String {
     {
         return "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into();
     }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn patch_metal_layer_gravity(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+    use raw_window_handle::RawWindowHandle;
+
+    let Ok(handle) = window.window_handle() else { return; };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return; };
+    let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+
+    let root_layer: *mut AnyObject = msg_send![ns_view, layer];
+    if root_layer.is_null() { return; }
+
+    // wgpu attaches its drawing layer (WgpuObserverLayer wrapping a
+    // CAMetalLayer) as a sublayer of the NSView's backing layer — so the
+    // contents we need to anchor with gravity live on the SUBLAYER, not on
+    // the NSView's root layer. Walk the tree and pin gravity on every
+    // descendant we find.
+    let gravity = NSString::from_str("topLeft");
+    fn patch_recursive(layer: *mut objc2::runtime::AnyObject, gravity: &objc2_foundation::NSString) {
+        use objc2::msg_send;
+        unsafe {
+            let _: () = msg_send![layer, setContentsGravity: gravity];
+            let subs: *mut objc2::runtime::AnyObject = msg_send![layer, sublayers];
+            if subs.is_null() { return; }
+            let n: usize = msg_send![subs, count];
+            for i in 0..n {
+                let s: *mut objc2::runtime::AnyObject = msg_send![subs, objectAtIndex: i];
+                if !s.is_null() {
+                    patch_recursive(s, gravity);
+                }
+            }
+        }
+    }
+    patch_recursive(root_layer, &gravity);
+    eprintln!("[live-resize-probe] patched gravity recursively from root layer");
+
+    // NSViewLayerContentsRedrawPolicy: 2 = .duringViewResize. Default
+    // (.onSetNeedsDisplay) lets AppKit skip paint during the live-resize
+    // tracking loop, which is what makes the grid lag behind the frame.
+    let _: () = msg_send![ns_view, setLayerContentsRedrawPolicy: 2_isize];
+    // NSViewLayerContentsPlacement: 9 = .topLeft — mirrors the layer gravity
+    // so AppKit's own resize-time scaling doesn't stretch contents either.
+    let _: () = msg_send![ns_view, setLayerContentsPlacement: 9_isize];
+}
+
+/// True while AppKit's live-resize tracking loop owns the window — the user
+/// is dragging an edge. ghostty's resize trick depends on knowing this:
+/// during live resize we leave the CAMetalLayer's drawableSize alone (no
+/// surface.configure, no render) so the layer keeps its last painted
+/// contents, and gravity=topLeft anchors that to the top-left while AppKit
+/// stretches the bounds. The newly revealed area shows the clear colour
+/// instead of stretched stale pixels.
+#[cfg(target_os = "macos")]
+pub fn is_in_live_resize(window: &Window) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::RawWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return false;
+    };
+    let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+    unsafe {
+        let r: bool = msg_send![ns_view, inLiveResize];
+        r
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn is_in_live_resize(_window: &Window) -> bool {
+    false
+}
+
+/// Run `f` inside a CATransaction with implicit animations disabled. AppKit
+/// hangs a layer animation on bounds jumps (zoom / maximize is the worst
+/// case) and lets stale contents interpolate to the new bounds — gravity
+/// alone can't fix that mid-animation. Wrapping the resize + render kills
+/// the animation so the new frame is what AppKit composites.
+#[cfg(target_os = "macos")]
+pub fn with_disabled_layer_actions<F: FnOnce()>(f: F) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyClass;
+    unsafe {
+        let Some(class) = AnyClass::get(c"CATransaction") else {
+            f();
+            return;
+        };
+        let _: () = msg_send![class, begin];
+        let _: () = msg_send![class, setDisableActions: true];
+        f();
+        let _: () = msg_send![class, commit];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn with_disabled_layer_actions<F: FnOnce()>(f: F) {
+    f();
 }

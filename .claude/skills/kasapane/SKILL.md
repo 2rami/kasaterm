@@ -113,6 +113,64 @@ mdopen  /절대경로/doc.md         # 마크다운 → 노션풍 렌더 pane
   # 마크다운은 /open-markdown
   ```
 
+### 패턴 E — `SendUserFile` 자동 imgopen Hook
+
+Claude Code의 `SendUserFile` 툴은 어느 터미널에서든 `[image] /path (size)` 텍스트 플레이스홀더만 출력하지(iTerm/kitty 인라인 escape를 emit 안 함), 실제 이미지를 인라인 렌더하지 않는다. kasaterm 안에서 작업할 땐 **PostToolUse hook**으로 SendUserFile 결과의 이미지 경로를 자동 `imgopen` 호출시켜 image pane으로 띄운다.
+
+**1) Hook 스크립트** — `~/.claude/hooks/auto-imgopen.sh`:
+```bash
+#!/bin/bash
+# PostToolUse hook for SendUserFile — image files은 자동으로 imgopen
+input=$(cat)
+echo "$input" | python3 -c "
+import sys, json, os, subprocess
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+paths = d.get('tool_input', {}).get('files', []) or []
+exts = ('.png','.jpg','.jpeg','.gif','.webp','.bmp','.tiff','.tif')
+for p in paths:
+    if not isinstance(p, str): continue
+    if not p.lower().endswith(exts): continue
+    p_abs = p if os.path.isabs(p) else os.path.join(os.getcwd(), p)
+    if not os.path.isfile(p_abs): continue
+    try:
+        subprocess.run(['imgopen', p_abs], timeout=5, check=False)
+    except Exception:
+        pass
+" >/dev/null 2>&1 || true
+exit 0
+```
+`chmod +x` 잊지 말 것.
+
+**2) `~/.claude/settings.json`의 `hooks.PostToolUse` 배열에 추가**:
+```json
+{
+  "matcher": "SendUserFile",
+  "hooks": [
+    { "type": "command", "command": "~/.claude/hooks/auto-imgopen.sh", "timeout": 10 }
+  ]
+}
+```
+기존 PostToolUse 엔트리는 **반드시 보존하고 새 엔트리를 append**(replace 금지). 다른 hook(예: dotfiles autopush)이 같이 묶여 있으니 배열 추가 방식.
+
+**검증**:
+```bash
+# 스키마 통과 확인 — 명령 문자열이 출력되면 OK
+jq -e '.hooks.PostToolUse[] | select(.matcher=="SendUserFile") | .hooks[].command' \
+  ~/.claude/settings.json
+
+# 파이프 테스트 — 가짜 페이로드로 imgopen이 실제 호출되는지
+echo '{"tool_name":"SendUserFile","tool_input":{"files":["/tmp/foo.png"]}}' \
+  | ~/.claude/hooks/auto-imgopen.sh
+```
+
+**한계**:
+- kasaterm 셸 밖에서 Claude Code가 돌면 `imgopen`이 PATH에 없거나 `KASASPACE_MCP_PORT` env가 없어서 hook이 silently no-op.
+- hook watcher가 세션 시작 시점에 `.claude/` 디렉토리를 안 보고 있었으면 새 hook이 즉시 활성화 안 됨. `/hooks` 한 번 열거나 Claude Code 재시작.
+- SendUserFile 외의 다른 이미지 출력 경로(예: tool result에 image 첨부)는 hook이 못 잡음 — 그건 직접 `imgopen` 호출.
+
 ---
 
 ## 2) 긴 잡 사이클 — kasaterm pane에서 빌드·dev server·배포

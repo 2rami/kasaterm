@@ -37,6 +37,13 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # (headings/paragraphs/code/lists laid out directly with the cell renderer).
 pulldown-cmark = { version = "0.13", default-features = false }
 
+# macOS-only: patch the wgpu CAMetalLayer's contentsGravity to topLeft so
+# AppKit doesn't stretch stale layer contents during live window resize.
+# ghostty's trick — same gravity, no presentsWithTransaction needed.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
