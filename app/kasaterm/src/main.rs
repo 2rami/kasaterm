@@ -1236,6 +1236,16 @@ enum ImageBtn {
     Reset,
 }
 
+/// Terminal-pane action button kinds, painted on the right side of a
+/// terminal pane's header (split-v / split-h). New-terminal and web were
+/// dropped — the +button covers "new shell" and the web overlay added
+/// complexity for little payoff. Wired to per-frame `pane_action_hits`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionKind {
+    SplitV,
+    SplitH,
+}
+
 /// State for an in-flight in-pane tab reorder drag. A press on a tab arms
 /// this; it only becomes a real drag past the threshold, so a plain press
 /// just switches the active tab on release.
@@ -1250,6 +1260,10 @@ struct TabDrag {
     active: bool,
     /// Current insertion index (0..=tabs.len()) the tab would drop into.
     target: usize,
+    /// Pane the cursor is currently hovering. Equals `pane` for in-place
+    /// reorder; differs when the user dragged onto another pane's tab strip
+    /// — release commits a cross-pane move into `drop_pane.tabs[target]`.
+    drop_pane: String,
 }
 
 /// A terminal pane's screen state: the PTY-backed cell grid, cursor,
@@ -1308,75 +1322,88 @@ impl Default for PaneContent {
     }
 }
 
+/// One tab inside a pane. Stage 3: each tab carries its own content + PTY pid +
+/// title — switching tabs swaps which one drives the pane's header label,
+/// terminal grid, and input routing. `pid` is the key into `App.pty`; `None`
+/// for image / markdown tabs that have no shell behind them.
 #[derive(Default)]
-struct PaneState {
-    /// The pane's content (terminal grid / image / markdown).
+struct PaneTab {
     content: PaneContent,
-    /// OSC 0/2 title — `printf '\e]0;hello\a'` from a shell, or a pinned label.
-    /// The active pane's title is applied to the window chrome.
+    /// OSC 0/2 title — `printf '\e]0;hello\a'` from this tab's shell, or a
+    /// pinned label. Falls back to the live process name in the header paint
+    /// when None.
     title: Option<String>,
-    /// Accent color for this pane's header band (RGBA). None = default.
-    color: Option<[u8; 4]>,
     /// Sticky-title flag (set by `surface.rename`): while pinned, OSC titles
     /// from the inner program are ignored.
     title_pinned: bool,
-    /// Frame-dirty flag; cleared after the next render. When every pane is
-    /// clean and no chrome anim is pending, the render loop skips the GPU pass.
-    dirty: bool,
-    /// In-pane tab bar labels (stage 1: visual only). Empty = single-tab,
-    /// the header shows just the pane title. The "+" button appends here and
-    /// the title becomes tabs[0]; real per-tab PTY/content comes in stage 2.
-    tabs: Vec<String>,
-    /// Index into `tabs` of the visually-active tab.
-    active_tab: usize,
     /// Image-pane view state. `image_zoom < 1.0` clamps to fit; >= 1 zooms
     /// past native (image overflows the box, centered). `image_rot` is the
-    /// number of 90° CW rotations applied (0..4). Ignored for non-image panes.
+    /// number of 90° CW rotations applied (0..4). Ignored for non-image tabs.
     image_zoom: f32,
     image_rot: u8,
+    /// PtySession key in `App.pty` for terminal tabs. `None` for image /
+    /// markdown tabs. The outer pane id (the layout-tree key) equals the
+    /// pid of the *first* tab; secondary tabs have their own pid and a
+    /// reverse-map entry in `Workspace.pid_to_pane`.
+    pid: Option<String>,
 }
 
-impl PaneState {
-    /// Terminal state if this is a terminal pane.
+impl PaneTab {
     fn term(&self) -> Option<&TerminalPane> {
-        if let PaneContent::Terminal(t) = &self.content {
-            Some(t)
-        } else {
-            None
-        }
+        if let PaneContent::Terminal(t) = &self.content { Some(t) } else { None }
     }
     fn term_mut(&mut self) -> Option<&mut TerminalPane> {
-        if let PaneContent::Terminal(t) = &mut self.content {
-            Some(t)
-        } else {
-            None
-        }
+        if let PaneContent::Terminal(t) = &mut self.content { Some(t) } else { None }
     }
     fn markdown(&self) -> Option<&MarkdownPane> {
-        if let PaneContent::Markdown(m) = &self.content {
-            Some(m)
-        } else {
-            None
-        }
+        if let PaneContent::Markdown(m) = &self.content { Some(m) } else { None }
     }
     fn markdown_mut(&mut self) -> Option<&mut MarkdownPane> {
-        if let PaneContent::Markdown(m) = &mut self.content {
-            Some(m)
-        } else {
-            None
-        }
+        if let PaneContent::Markdown(m) = &mut self.content { Some(m) } else { None }
     }
-    /// Effective image zoom — `image_zoom` is 0.0 by Default so callers must
-    /// route through here to get the meaningful "fit" baseline of 1.0.
     fn image_view_zoom(&self) -> f32 {
         if self.image_zoom < 1.0 { 1.0 } else { self.image_zoom }
     }
     fn image(&self) -> Option<&Arc<ImagePane>> {
-        if let PaneContent::Image(i) = &self.content {
-            Some(i)
-        } else {
-            None
-        }
+        if let PaneContent::Image(i) = &self.content { Some(i) } else { None }
+    }
+}
+
+struct PaneState {
+    /// In-pane tabs. Always non-empty — single-tab panes have `tabs.len() == 1`.
+    /// `active_tab` indexes the visually-active tab; its state is exposed via
+    /// the `Deref`/`DerefMut` impls so the rest of the code can keep writing
+    /// `pane.title`, `pane.content`, `pane.term()` as if the pane were single.
+    tabs: Vec<PaneTab>,
+    /// Index into `tabs` of the visually-active tab.
+    active_tab: usize,
+    /// Accent color for this pane's header band (RGBA). None = default.
+    /// Pane-level, not per-tab — the band is shared above all tabs.
+    color: Option<[u8; 4]>,
+    /// Frame-dirty flag; cleared after the next render. When every pane is
+    /// clean and no chrome anim is pending, the render loop skips the GPU pass.
+    dirty: bool,
+}
+
+impl Default for PaneState {
+    fn default() -> Self {
+        Self { tabs: vec![PaneTab::default()], active_tab: 0, color: None, dirty: false }
+    }
+}
+
+impl std::ops::Deref for PaneState {
+    type Target = PaneTab;
+    fn deref(&self) -> &PaneTab {
+        // `tabs` is always non-empty (constructed via Default with 1 tab,
+        // close keeps the last tab) — index is clamped on tab mutations.
+        &self.tabs[self.active_tab.min(self.tabs.len() - 1)]
+    }
+}
+
+impl std::ops::DerefMut for PaneState {
+    fn deref_mut(&mut self) -> &mut PaneTab {
+        let i = self.active_tab.min(self.tabs.len() - 1);
+        &mut self.tabs[i]
     }
 }
 
@@ -1716,11 +1743,28 @@ fn build_markdown_doc(key_prefix: &str, p: &std::path::Path, text: &str) -> Mark
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
 /// most recently parsed Layout tree, and which pane is active for
 /// keyboard / selection / cursor display.
-#[derive(Default)]
 struct Workspace {
     panes: HashMap<String, PaneState>,
     layout: Option<Layout>,
     active_pane: Option<String>,
+    /// Reverse map: PtySession id (a tab's `pid`) → outer pane id (the layout
+    /// key in `panes`). Stage 3 lets one pane host multiple tabs each with
+    /// their own PTY; this lookup lets `pump_pty_screens` find the right
+    /// `(PaneState, tab_index)` from a backend update keyed by its own pid.
+    /// The first tab's pid equals the outer pane id, so single-tab panes
+    /// don't need an entry — but secondary tabs always insert/remove here.
+    pid_to_pane: HashMap<String, String>,
+}
+
+impl Default for Workspace {
+    fn default() -> Self {
+        Self {
+            panes: HashMap::new(),
+            layout: None,
+            active_pane: None,
+            pid_to_pane: HashMap::new(),
+        }
+    }
 }
 
 impl Workspace {
@@ -1739,6 +1783,50 @@ impl Workspace {
     fn active_mut(&mut self) -> Option<&mut PaneState> {
         let id = self.active_pane.clone()?;
         self.panes.get_mut(&id)
+    }
+
+    /// Rebuild `pid_to_pane` from the current `panes` so it's the
+    /// authoritative pid→outer lookup. Cheap (one HashMap rebuild per
+    /// layout/tab mutation) and lets the hot `outer_for_pty` path stay
+    /// O(1) — important because every PTY ScreenUpdate calls it.
+    fn rebuild_pid_map(&mut self) {
+        let mut m: HashMap<String, String> = HashMap::with_capacity(self.pid_to_pane.len());
+        for (outer, pane) in &self.panes {
+            for tab in &pane.tabs {
+                if let Some(pid) = tab.pid.as_deref() {
+                    m.insert(pid.to_string(), outer.clone());
+                }
+            }
+        }
+        self.pid_to_pane = m;
+    }
+
+    /// O(1) pid → outer pane lookup. `pid_to_pane` is maintained on every
+    /// layout/tab mutation; the panes-contains-key fallback only fires
+    /// in the brief window before the first `ScreenUpdate` for a fresh
+    /// shell has populated the tab's pid.
+    fn outer_for_pty(&self, pty_id: &str) -> Option<String> {
+        if let Some(outer) = self.pid_to_pane.get(pty_id) {
+            return Some(outer.clone());
+        }
+        if self.panes.contains_key(pty_id) {
+            return Some(pty_id.to_string());
+        }
+        None
+    }
+
+    /// Locate `(outer_pane, tab_index)` for a backend pty id. Used by
+    /// `pump_pty_screens` to write the right tab's content even when the
+    /// update came from a non-active or secondary-tab shell.
+    fn find_tab_by_pty<'a>(&'a mut self, pty_id: &str) -> Option<(&'a mut PaneState, usize)> {
+        let outer = self.outer_for_pty(pty_id)?;
+        let pane = self.panes.get_mut(&outer)?;
+        let idx = pane
+            .tabs
+            .iter()
+            .position(|t| t.pid.as_deref() == Some(pty_id))
+            .unwrap_or(0);
+        Some((pane, idx))
     }
 }
 
@@ -1955,6 +2043,13 @@ struct App {
     /// (ghostty's trick on top of wgpu). The final size that came in during
     /// the drag is stashed here so we can flush it once the user lets go.
     pending_resize: Option<winit::dpi::PhysicalSize<u32>>,
+    /// Time of the last throttled flush during a live-resize. Set by the
+    /// Resized handler when it decides to repaint mid-drag (every ~50ms);
+    /// cleared back to `None` when AppKit's drag loop releases (mouse up).
+    /// Without this, every Resized frame would pay surface.configure + PTY
+    /// reshape and the drag would lag; with it, the content reflows often
+    /// enough to feel live but cheaply enough to keep the drag smooth.
+    last_live_resize_flush: Option<std::time::Instant>,
     /// Pane that owns the in-flight mouse reporting drag. `Some(pane_id)`
     /// when we forwarded a button-press into a mouse-reporting TUI and
     /// are now relaying motion + release into the same pane. None means
@@ -2032,6 +2127,11 @@ struct App {
     /// dropped when its own window is closed. Webview must outlive its
     /// window, so both are owned together.
     preview_windows: Vec<(Arc<Window>, wry::WebView)>,
+    /// Per-frame hit rects for the terminal-pane right-side action cluster
+    /// (new-terminal / web / split-v / split-h). Re-built each chrome
+    /// paint alongside `image_btn_rects`; the mouse handler matches a
+    /// click against it before falling through to tab/plus/cell tests.
+    pane_action_hits: Vec<(String, ActionKind, (f32, f32, f32, f32))>,
     /// When the launch build banner began animating. Drives the
     /// hold-then-fade alpha and keeps the frame loop awake (WaitUntil)
     /// only while the banner is still visible.
@@ -2121,6 +2221,7 @@ impl App {
             sidebar_resize: None,
             last_resized_cells: (0, 0),
             pending_resize: None,
+            last_live_resize_flush: None,
             mouse_forward_pane: None,
             last_left_click: None,
             last_window_title: None,
@@ -2141,6 +2242,7 @@ impl App {
             session_panel_window: None,
             session_panel_webview: None,
             preview_windows: Vec::new(),
+            pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,
             git_menu_item: None,
@@ -2791,8 +2893,27 @@ impl App {
                 if ws.active_pane.is_none() {
                     ws.active_pane = Some(update.pane_id.clone());
                 }
-                let pane = ws.pane_mut(&update.pane_id);
-                let tp = pane.term_mut().expect("pty pane must be terminal");
+                // Route the update to the *tab* whose pid matches this stream.
+                // Single-tab panes round-trip through the outer id; secondary
+                // tabs spawned via the in-pane + button route through
+                // `pid_to_pane`. Falls back to creating an outer pane entry
+                // when the first update from a freshly-spawned shell arrives.
+                let (pane, tab_idx) = match ws.find_tab_by_pty(&update.pane_id) {
+                    Some(p) => p,
+                    None => {
+                        // Brand-new pty id → create the outer PaneState with a
+                        // single tab that owns this pid. Seed pid_to_pane so
+                        // subsequent updates hit the O(1) path.
+                        let pane = ws.pane_mut(&update.pane_id);
+                        pane.tabs[0].pid = Some(update.pane_id.clone());
+                        ws.pid_to_pane
+                            .insert(update.pane_id.clone(), update.pane_id.clone());
+                        let pane = ws.panes.get_mut(&update.pane_id).expect("just inserted");
+                        (pane, 0usize)
+                    }
+                };
+                let tab = &mut pane.tabs[tab_idx];
+                let tp = tab.term_mut().expect("pty pane must be terminal");
                 let resized = tp.cols != update.cols
                     || tp.rows != update.rows
                     || tp.cells.len() != update.rows as usize;
@@ -2831,16 +2952,15 @@ impl App {
                 // Pinned panes (renamed via surface.rename / run_job) keep
                 // their agent-set label; only unpinned panes track OSC.
                 if let Some(t) = update.title.clone() {
-                    if !pane.title_pinned {
-                        pane.title = Some(t);
+                    if !tab.title_pinned {
+                        tab.title = Some(t);
                     }
                 }
-                // Mark this pane dirty so the next render frame
-                // actually emits cells. render_frame short-circuits
-                // when every pane is clean, which is what makes
-                // wheel-scroll feel smooth during Claude Code
-                // streaming bursts: the PTY thread keeps pushing
-                // updates but the GPU only redraws once per 16ms.
+                // Any tab receiving output flips the pane dirty so the
+                // next frame's chrome (tab label, indicator) ticks promptly.
+                // Only the active tab's grid is painted; background-tab
+                // grids stay in `pane.tabs[i]` for when the user switches.
+                let _ = tab;
                 pane.dirty = true;
                 drop(ws);
                 if let Some(w) = win_screens.as_ref() {
@@ -3667,19 +3787,24 @@ impl App {
             return;
         }
         let n = self.autotabs_n;
-        if let Ok(mut ws) = self.ws.lock() {
-            if let Some(pid) = ws.active_pane.clone() {
-                if let Some(pane) = ws.panes.get_mut(&pid) {
-                    if pane.tabs.is_empty() {
-                        let cur = pane.title.clone().unwrap_or_else(|| pid.clone());
-                        pane.tabs.push(cur);
+        // Spawn N real PTY-backed tabs so the headless verify cycle exercises
+        // the stage-3 path (each tab has its own shell behind it). Falls back
+        // to dummy label-only tabs if the spawn fails (e.g. tmux mode).
+        let active = self.ws.lock().unwrap().active_pane.clone();
+        if let Some(outer) = active {
+            for i in 1..=n {
+                if self.spawn_new_tab(&outer).is_err() {
+                    if let Some(pane) = self.ws.lock().unwrap().panes.get_mut(&outer) {
+                        let mut t = PaneTab::default();
+                        t.title = Some(format!("탭 {}", i + 1));
+                        pane.tabs.push(t);
+                        pane.dirty = true;
                     }
-                    for i in 1..=n {
-                        pane.tabs.push(format!("탭 {}", i + 1));
-                    }
-                    pane.active_tab = 0;
-                    pane.dirty = true;
                 }
+            }
+            if let Some(pane) = self.ws.lock().unwrap().panes.get_mut(&outer) {
+                pane.active_tab = 0;
+                pane.dirty = true;
             }
         }
         eprintln!("[autotabs] added {n} tab(s) to active pane");
@@ -4199,8 +4324,19 @@ impl App {
     /// The PtySession that currently has keyboard focus, if any. Used
     /// by every routing-by-active-pane code path in PTY mode.
     fn active_pty(&self) -> Option<&Arc<pty_backend::PtySession>> {
-        let id = self.ws.lock().unwrap().active_pane.clone()?;
-        self.pty.get(&id)
+        // The active *tab*'s pid drives input/scroll/title — falling back
+        // to the outer pane id (== first-tab pid) for single-tab panes
+        // whose tabs haven't been initialised with an explicit pid yet
+        // (e.g. tmux-mode panes, where the outer key is what `pty` keys on).
+        let ws = self.ws.lock().unwrap();
+        let outer = ws.active_pane.clone()?;
+        let pid = ws
+            .panes
+            .get(&outer)
+            .and_then(|p| p.tabs.get(p.active_tab).and_then(|t| t.pid.clone()))
+            .unwrap_or(outer);
+        drop(ws);
+        self.pty.get(&pid)
     }
 
     /// Window size in cell coordinates. Source of truth for resize
@@ -4281,11 +4417,34 @@ impl App {
         let reserved_y_cells =
             ((header_px + 2.0 * PANE_INNER_Y) / self.cell.h.max(1.0)).ceil() as u16;
         let inset_x_cells = (2.0 * PANE_INNER_X / self.cell.w.max(1.0)).ceil() as u16;
+        // Per-leaf usable cells, indexed by outer pane id (the layout key,
+        // which after cross-pane drag is NOT guaranteed to equal any tab's
+        // pid). Walk ws.panes and resize each pane's tab PtySessions to its
+        // outer rect — single source of truth, works for both primary and
+        // in-pane secondary tabs.
+        let mut leaf_cells: HashMap<String, (u16, u16)> = HashMap::new();
         for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
-            if let Some(sess) = self.pty.get(&id) {
-                let pcols = w.saturating_sub(inset_x_cells).max(1);
-                let prows = h.saturating_sub(reserved_y_cells).max(1);
-                let _ = sess.resize(pcols, prows);
+            let pcols = w.saturating_sub(inset_x_cells).max(1);
+            let prows = h.saturating_sub(reserved_y_cells).max(1);
+            leaf_cells.insert(id, (pcols, prows));
+        }
+        let snapshot: Vec<(String, Vec<String>)> = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .iter()
+                .map(|(outer, p)| {
+                    let pids: Vec<String> =
+                        p.tabs.iter().filter_map(|t| t.pid.clone()).collect();
+                    (outer.clone(), pids)
+                })
+                .collect()
+        };
+        for (outer, pids) in snapshot {
+            let Some(&(pc, pr)) = leaf_cells.get(&outer) else { continue };
+            for pid in pids {
+                if let Some(sess) = self.pty.get(&pid) {
+                    let _ = sess.resize(pc, pr);
+                }
             }
         }
         // Re-publish the layout because rect proportions may have
@@ -4376,6 +4535,102 @@ impl App {
             w.request_redraw();
         }
         Ok(())
+    }
+
+    /// Stage-3 in-pane tab spawn. Creates a fresh PtySession with its own
+    /// pid, registers it in `pid_to_pane` so output streams find the right
+    /// (outer pane, tab) pair, and appends a `PaneTab` whose `pid` points at
+    /// the new shell. The new tab becomes active. Outer pane id and layout
+    /// don't change — adding a tab never reshapes the BSP tree.
+    fn spawn_new_tab(&mut self, outer: &str) -> Result<()> {
+        if self.tmux.is_some() {
+            anyhow::bail!("in-pane tabs not supported on tmux backend");
+        }
+        // Outer pane must already exist in the layout (it's the user's focused
+        // pane). Use its size for the initial pty so the shell starts at the
+        // right cols/rows — `resize_backend` after re-applies it anyway, but a
+        // sane initial size keeps the welcome banner from wrapping weird.
+        let (cols, rows) = self.pane_cells(outer).unwrap_or_else(|| self.window_cells());
+        let cwd = resolve_initial_cwd();
+        let new_pid = format!("%{}", self.next_pane_id);
+        self.next_pane_id += 1;
+        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+            shell: resolve_default_shell(),
+            cwd,
+            cols,
+            rows,
+            env: Vec::new(),
+            pane_id: new_pid.clone(),
+            initial_scrollback: Vec::new(),
+        })?;
+        self.pump_pty_screens(session.screens.clone(), new_pid.clone());
+        self.pty.insert(new_pid.clone(), Arc::new(session));
+        {
+            let mut ws = self.ws.lock().unwrap();
+            ws.pid_to_pane.insert(new_pid.clone(), outer.to_string());
+            if let Some(pane) = ws.panes.get_mut(outer) {
+                let mut tab = PaneTab::default();
+                tab.pid = Some(new_pid.clone());
+                pane.tabs.push(tab);
+                pane.active_tab = pane.tabs.len() - 1;
+                pane.dirty = true;
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+
+    /// Cell extent of `outer` inside the current `pty_layout`. Used by
+    /// `spawn_new_tab` to size a brand-new shell at the pane's real bounds.
+    /// Returns `None` when the layout is in single-pane fallback or the id
+    /// isn't a leaf.
+    fn pane_cells(&self, outer: &str) -> Option<(u16, u16)> {
+        let (cols, rows) = self.window_cells();
+        let tree = self.pty_layout.as_ref()?;
+        for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
+            if id == outer {
+                return Some((w.max(1), h.max(1)));
+            }
+        }
+        None
+    }
+
+    /// Drop a non-primary tab: kill its PTY, remove the pid map entry, drop
+    /// the slot. The primary tab (index 0, pid == outer pane id) can't be
+    /// closed this way — callers fall through to `remove_pane` for that.
+    fn close_tab(&mut self, outer: &str, idx: usize) {
+        let pid_opt: Option<String> = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .get(outer)
+                .and_then(|p| p.tabs.get(idx))
+                .and_then(|t| t.pid.clone())
+        };
+        if let Some(pid) = pid_opt.as_deref() {
+            if pid != outer {
+                // Secondary tab — drop its session entry; reader thread sees
+                // the channel close and pushes EOF to `dead_panes`, but with
+                // the pid_to_pane entry gone the reap pass routes through
+                // remove_pane(pid) which is a no-op (pty already gone). Fine.
+                self.pty.remove(pid);
+                self.ws.lock().unwrap().pid_to_pane.remove(pid);
+            }
+        }
+        let mut ws = self.ws.lock().unwrap();
+        if let Some(pane) = ws.panes.get_mut(outer) {
+            if idx < pane.tabs.len() {
+                pane.tabs.remove(idx);
+            }
+            if idx < pane.active_tab {
+                pane.active_tab -= 1;
+            }
+            if pane.active_tab >= pane.tabs.len() {
+                pane.active_tab = pane.tabs.len() - 1;
+            }
+            pane.dirty = true;
+        }
     }
 
     /// Split the active pane and fill the new pane with a decoded image
@@ -4681,6 +4936,188 @@ impl App {
         }
     }
 
+    /// Drag a single-tab pane onto its own body half. Spawns a fresh shell
+    /// next to `source` on the side OPPOSITE the drop, so the original
+    /// pane visually "lands" on the side the user threw it to. Distinct
+    /// from `drop_tab_into_body` (which lifts a tab into a new pane on the
+    /// drop side) — this one keeps the source intact and adds a sibling.
+    fn split_pane_opposite(&mut self, source: &str, zone: DropZone) -> Result<()> {
+        if self.tmux.is_some() {
+            anyhow::bail!("split via drag unsupported on tmux backend");
+        }
+        let (cols, rows) = self.pane_cells(source).unwrap_or_else(|| self.window_cells());
+        let cwd = resolve_initial_cwd();
+        let new_id = format!("%{}", self.next_pane_id);
+        self.next_pane_id += 1;
+        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+            shell: resolve_default_shell(),
+            cwd,
+            cols,
+            rows,
+            env: Vec::new(),
+            pane_id: new_id.clone(),
+            initial_scrollback: Vec::new(),
+        })?;
+        self.pump_pty_screens(session.screens.clone(), new_id.clone());
+        self.pty.insert(new_id.clone(), Arc::new(session));
+        // `before=true` means the new leaf becomes the LEFT/TOP child, so
+        // the source ends up on the RIGHT/BOTTOM. We want source on the
+        // dropped side → new on the opposite side.
+        let (dir, before) = match zone {
+            DropZone::Right => (pty_backend::SplitDir::Horizontal, true),
+            DropZone::Left => (pty_backend::SplitDir::Horizontal, false),
+            DropZone::Down => (pty_backend::SplitDir::Vertical, true),
+            DropZone::Up => (pty_backend::SplitDir::Vertical, false),
+        };
+        let inserted = self
+            .pty_layout
+            .as_mut()
+            .map(|t| t.insert_beside(source, dir, before, new_id.clone()))
+            .unwrap_or(false);
+        if !inserted {
+            // Source vanished mid-drag — bail and clean up the spawned shell.
+            self.pty.remove(&new_id);
+            self.next_pane_id -= 1;
+            return Ok(());
+        }
+        let (win_cols, win_rows) = self.window_cells();
+        self.resize_backend(win_cols, win_rows);
+        self.publish_pty_layout();
+        // Focus the freshly-spawned pane so the user is typing into it.
+        self.ws.lock().unwrap().active_pane = Some(new_id);
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+
+    /// Tab drag dropped onto another pane's BODY. Splits the target pane
+    /// in the matching quadrant and makes the moved tab the new leaf — the
+    /// dragged shell now lives in its own pane next to `target`. Unifies
+    /// the old "drag pane header" semantics into the tab drag so there's
+    /// one drop UX.
+    fn drop_tab_into_body(&mut self, td: &TabDrag, target: &str, zone: DropZone) {
+        // 1. Lift the tab out of source.
+        let (moved, src_empty): (Option<PaneTab>, bool) = {
+            let mut ws = self.ws.lock().unwrap();
+            let Some(src) = ws.panes.get_mut(&td.pane) else { return };
+            if td.from >= src.tabs.len() { return }
+            let t = src.tabs.remove(td.from);
+            if td.from < src.active_tab && src.active_tab > 0 {
+                src.active_tab -= 1;
+            }
+            if src.active_tab >= src.tabs.len() && !src.tabs.is_empty() {
+                src.active_tab = src.tabs.len() - 1;
+            }
+            src.dirty = true;
+            let empty = src.tabs.is_empty();
+            (Some(t), empty)
+        };
+        let Some(moved) = moved else { return };
+        // 2. If source emptied, drop it from layout (PtySession survives —
+        //    it's the very shell we're about to re-attach as a new leaf).
+        if src_empty {
+            self.ws.lock().unwrap().panes.remove(&td.pane);
+            self.collapse_layout_only(&td.pane);
+        }
+        // 3. Allocate a fresh layout id for the new pane. Layout ids and
+        //    pty ids decoupled from stage-3 onward, so this avoids any
+        //    clash with the moved tab's pid (which may have been the old
+        //    source's outer id).
+        let new_outer = format!("%{}", self.next_pane_id);
+        self.next_pane_id += 1;
+        let (dir, before) = match zone {
+            DropZone::Left => (pty_backend::SplitDir::Horizontal, true),
+            DropZone::Right => (pty_backend::SplitDir::Horizontal, false),
+            DropZone::Up => (pty_backend::SplitDir::Vertical, true),
+            DropZone::Down => (pty_backend::SplitDir::Vertical, false),
+        };
+        if let Some(tree) = self.pty_layout.as_mut() {
+            if !tree.insert_beside(target, dir, before, new_outer.clone()) {
+                // Target gone — fall back to inserting at the first leaf.
+                if let Some(anchor) = tree.leaves().first().map(|s| s.to_string()) {
+                    tree.insert_beside(&anchor, dir, before, new_outer.clone());
+                }
+            }
+        } else {
+            self.pty_layout = Some(pty_backend::PtyLayout::single(&new_outer));
+        }
+        // 4. Build the new PaneState with the moved tab as its only tab.
+        let moved_pid = moved.pid.clone();
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let mut ps = PaneState::default();
+            ps.tabs.clear();
+            ps.tabs.push(moved);
+            ps.active_tab = 0;
+            ps.dirty = true;
+            ws.panes.insert(new_outer.clone(), ps);
+            if let Some(pid) = moved_pid {
+                // Rebind the pid map so future ScreenUpdates / find_tab_by_pty
+                // route to new_outer even when pid != new_outer.
+                ws.pid_to_pane.insert(pid, new_outer.clone());
+            }
+            ws.active_pane = Some(new_outer.clone());
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Cross-pane drag aftermath. The source pane lost every tab to dest;
+    /// we just need its layout slot gone — *not* the PtySession (now owned
+    /// by dest under the same pid key) or the image / markdown caches the
+    /// moved tabs depend on. Picks a survivor focus exactly like
+    /// `remove_pane` so the chrome doesn't blink to "no active".
+    fn collapse_layout_only(&mut self, target: &str) {
+        let leaves: Vec<String> = match self.pty_layout.as_ref() {
+            Some(t) => t.leaves().iter().map(|s| s.to_string()).collect(),
+            None => return,
+        };
+        let was_active = self
+            .ws
+            .lock()
+            .unwrap()
+            .active_pane
+            .as_deref()
+            .map(|a| a == target)
+            .unwrap_or(false);
+        let next_focus: Option<String> = if was_active && leaves.len() > 1 {
+            let cur_idx = leaves.iter().position(|l| l == target).unwrap_or(0);
+            Some(if cur_idx + 1 < leaves.len() {
+                leaves[cur_idx + 1].clone()
+            } else {
+                leaves[cur_idx - 1].clone()
+            })
+        } else {
+            None
+        };
+        if leaves.len() > 1 {
+            if let Some(tree) = self.pty_layout.as_mut() {
+                tree.remove_leaf(target);
+            }
+        } else {
+            self.pty_layout = None;
+        }
+        {
+            let mut ws = self.ws.lock().unwrap();
+            ws.panes.remove(target);
+            ws.rebuild_pid_map();
+            if was_active && next_focus.is_some() {
+                ws.active_pane = next_focus;
+            }
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     /// Internal: drop a pane regardless of whether it's the active one.
     /// Used by both `close_active_pane` (Cmd+W) and `reap_dead_panes`
     /// (shell exit). Picks a survivor focus when removing the focused
@@ -4723,9 +5160,23 @@ impl App {
             g.drop_image(target);
         }
         self.md_content_h.remove(target);
+        // Drop secondary-tab ptys hosted by this pane and prune the reverse
+        // map. Without this, an in-pane tab's shell would linger past its
+        // container pane and `find_tab_by_pty` would point at a dead outer.
+        let secondary_pids: Vec<String> = {
+            let ws = self.ws.lock().unwrap();
+            ws.pid_to_pane
+                .iter()
+                .filter_map(|(pid, outer)| (outer == target).then(|| pid.clone()))
+                .collect()
+        };
+        for pid in &secondary_pids {
+            self.pty.remove(pid);
+        }
         {
             let mut ws = self.ws.lock().unwrap();
             ws.panes.remove(target);
+            ws.rebuild_pid_map();
             if was_active {
                 ws.active_pane = next_focus;
             }
@@ -6103,19 +6554,23 @@ impl App {
             pane_x,
             pane_y,
         ) = snap.unwrap_or((0, 0, false, 80, 0, 0, preedit_text.clone(), 0, 0));
-        // When split, every pane body is pushed down by its header band.
-        // The cursor / preedit / selection overlays anchor off the same
-        // origin as the cells, so they must apply the identical shift —
-        // otherwise the cursor floats up into the header row.
-        let header_shift = if self
+        // When split OR any pane is multi-tab, every pane body is pushed
+        // down by its header band. The cursor / preedit / selection
+        // overlays anchor off the same origin as the cells, so they must
+        // apply the identical shift — otherwise the cursor floats up into
+        // the header row (which is exactly what made it appear one line
+        // above the actual prompt after a cross-pane tab drop).
+        let show_headers = self
             .pty_layout
             .as_ref()
             .is_some_and(|t| t.leaves().len() > 1)
-        {
-            PANE_HEADER_HEIGHT
-        } else {
-            0.0
-        };
+            || self
+                .ws
+                .lock()
+                .ok()
+                .map(|ws| ws.panes.values().any(|p| p.tabs.len() > 1))
+                .unwrap_or(false);
+        let header_shift = if show_headers { PANE_HEADER_HEIGHT } else { 0.0 };
         GpuOverlay {
             cell_w: self.cell.w,
             cell_h: self.cell.h,
@@ -6257,6 +6712,10 @@ impl App {
             Option<Vec<String>>,
             (usize, usize),
         )> = Vec::new();
+        // Per-pane body rect (header-excluded) in logical px, collected for
+        // every pane so in-pane WebViews and other overlays can be snapped
+        // to their pane after the borrow scope ends.
+        let mut body_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         let (slots, headers): (Vec<PaneSlot>, Vec<HeaderInfo>) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
@@ -6281,9 +6740,15 @@ impl App {
                     None => Vec::new(),
                 }
             };
-            // Header bar only when split — a lone pane stays header-less
-            // so the first session reads as a plain terminal.
-            let show_headers = leaves.len() > 1;
+            // Header bar when split OR when any pane carries multiple tabs.
+            // A lone pane with a single tab stays header-less so the first
+            // session reads as a plain terminal; but a lone pane with two or
+            // more tabs (after a cross-pane drag, or a +button add) MUST
+            // keep its strip so the tabs stay reachable.
+            let any_multitab = leaves
+                .iter()
+                .any(|(id, _, _, _, _)| ws.panes.get(id).map_or(false, |p| p.tabs.len() > 1));
+            let show_headers = leaves.len() > 1 || any_multitab;
             let header_shift_px = if show_headers {
                 PANE_HEADER_HEIGHT * scale
             } else {
@@ -6381,59 +6846,60 @@ impl App {
                     // un-split pane is never dimmed.
                     dim: show_headers && active_id.as_deref() != Some(id.as_str()),
                 });
-                if img.is_some() || md.is_some() {
-                    // Body box (header band excluded, inset by the same
-                    // PANE_INNER margins the cell grid uses) in logical px.
-                    // Bottom-row stretch mirrors the header's box_h so the
-                    // content fills to the window edge with no seam.
-                    let bx = WINDOW_PADDING
-                        + sidebar_w
-                        + x_cells as f32 * self.cell.w
-                        + PANE_INNER_X;
-                    let by = TITLE_HEIGHT
-                        + y_cells as f32 * self.cell.h
-                        + header_shift_logical
-                        + PANE_INNER_Y;
-                    let base_w = w_cells as f32 * self.cell.w;
-                    let full_w = if x_cells + w_cells >= grid_cols {
-                        let extra = self.window.as_ref().map_or(0.0, |w| {
-                            let s = w.scale_factor() as f32;
-                            let raw_lw = w.inner_size().width as f32 / s;
-                            (raw_lw
-                                - (WINDOW_PADDING + sidebar_w + grid_cols as f32 * self.cell.w))
-                                .max(0.0)
-                        });
-                        base_w + extra
-                    } else {
-                        base_w
-                    };
-                    let bw = (full_w - 2.0 * PANE_INNER_X).max(1.0);
-                    let base_h = h_cells as f32 * self.cell.h;
-                    let full_h = if y_cells + h_cells >= grid_rows {
-                        let extra = self.window.as_ref().map_or(0.0, |w| {
-                            let s = w.scale_factor() as f32;
-                            let raw_lh = w.inner_size().height as f32 / s;
-                            (raw_lh - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h)).max(0.0)
-                        });
-                        base_h + extra
-                    } else {
-                        base_h
-                    };
-                    let bh = (full_h - header_shift_logical - 2.0 * PANE_INNER_Y).max(1.0);
-                    if let Some(image) = img {
-                        image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot));
-                    }
-                    if let Some((doc, raw_mode, lines, cursor, scroll)) = md {
-                        md_slots.push((
-                            id.clone(),
-                            doc,
-                            (bx, by, bw, bh),
-                            scroll,
-                            raw_mode,
-                            lines,
-                            cursor,
-                        ));
-                    }
+                // Body box (header band excluded, inset by the same
+                // PANE_INNER margins the cell grid uses) in logical px.
+                // Bottom-row stretch mirrors the header's box_h so the
+                // content fills to the window edge with no seam.
+                // Computed for EVERY pane (not just image/md) — in-pane
+                // WebViews need it too.
+                let bx = WINDOW_PADDING
+                    + sidebar_w
+                    + x_cells as f32 * self.cell.w
+                    + PANE_INNER_X;
+                let by = TITLE_HEIGHT
+                    + y_cells as f32 * self.cell.h
+                    + header_shift_logical
+                    + PANE_INNER_Y;
+                let base_w = w_cells as f32 * self.cell.w;
+                let full_w = if x_cells + w_cells >= grid_cols {
+                    let extra = self.window.as_ref().map_or(0.0, |w| {
+                        let s = w.scale_factor() as f32;
+                        let raw_lw = w.inner_size().width as f32 / s;
+                        (raw_lw
+                            - (WINDOW_PADDING + sidebar_w + grid_cols as f32 * self.cell.w))
+                            .max(0.0)
+                    });
+                    base_w + extra
+                } else {
+                    base_w
+                };
+                let bw = (full_w - 2.0 * PANE_INNER_X).max(1.0);
+                let base_h = h_cells as f32 * self.cell.h;
+                let full_h = if y_cells + h_cells >= grid_rows {
+                    let extra = self.window.as_ref().map_or(0.0, |w| {
+                        let s = w.scale_factor() as f32;
+                        let raw_lh = w.inner_size().height as f32 / s;
+                        (raw_lh - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h)).max(0.0)
+                    });
+                    base_h + extra
+                } else {
+                    base_h
+                };
+                let bh = (full_h - header_shift_logical - 2.0 * PANE_INNER_Y).max(1.0);
+                body_rects.push((id.clone(), (bx, by, bw, bh)));
+                if let Some(image) = img {
+                    image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot));
+                }
+                if let Some((doc, raw_mode, lines, cursor, scroll)) = md {
+                    md_slots.push((
+                        id.clone(),
+                        doc,
+                        (bx, by, bw, bh),
+                        scroll,
+                        raw_mode,
+                        lines,
+                        cursor,
+                    ));
                 }
                 if show_headers {
                     // Custom title (rename / OSC) wins; otherwise show the
@@ -6500,7 +6966,29 @@ impl App {
                         is_markdown: pane.markdown().is_some(),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
                         is_image: pane.image().is_some(),
-                        tabs: pane.tabs.clone(),
+                        tabs: pane
+                            .tabs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, t)| {
+                                t.title
+                                    .clone()
+                                    .filter(|s| !s.is_empty())
+                                    .or_else(|| {
+                                        // Per-tab process name: each tab's own
+                                        // pid drives its label (active pane's
+                                        // pid lives in tab.pid for stage 3).
+                                        t.pid
+                                            .as_deref()
+                                            .and_then(|p| self.pty.get(p))
+                                            .and_then(|s| s.active_process_name())
+                                            .filter(|s| !s.is_empty())
+                                    })
+                                    .unwrap_or_else(|| {
+                                        if i == 0 { id.clone() } else { format!("탭 {}", i + 1) }
+                                    })
+                            })
+                            .collect(),
                         active_tab: pane.active_tab,
                     });
                 }
@@ -6581,11 +7069,28 @@ impl App {
         // half of the target pane the dragged pane would land in. Computed
         // here (immutable self borrow) so the gpu block below only touches
         // the cached rect.
-        let drop_zone_rect: Option<(f32, f32, f32, f32)> = self
+        // Drop zone shows for BOTH header drags (whole pane → quadrant)
+        // and tab drags whose cursor is over a pane BODY (split + place
+        // moved tab as new pane). Tab drag over a strip is handled by
+        // tab_drag_info's insertion bar instead.
+        let (cur_px_x, cur_px_y) = self.cursor_px;
+        let cursor_over_strip = self.pane_tab_rects.iter().any(|(_, _, (_, ry, _, rh))| {
+            cur_px_y >= *ry && cur_px_y <= ry + rh
+        });
+        let header_drag_active = self
             .header_drag
             .as_ref()
-            .filter(|hd| hd.active)
-            .and_then(|_| self.drop_target_at(self.cursor_px.0, self.cursor_px.1))
+            .map(|hd| hd.active)
+            .unwrap_or(false);
+        let tab_drag_active = self
+            .tab_drag
+            .as_ref()
+            .map(|d| d.active)
+            .unwrap_or(false);
+        let show_drop_zone = header_drag_active || (tab_drag_active && !cursor_over_strip);
+        let drop_zone_rect: Option<(f32, f32, f32, f32)> = show_drop_zone
+            .then(|| self.drop_target_at(self.cursor_px.0, self.cursor_px.1))
+            .flatten()
             .and_then(|(target, zone)| {
                 let tree = self.pty_layout.as_ref()?;
                 let (cols, rows) = self.window_cells();
@@ -6689,6 +7194,9 @@ impl App {
         let mut tab_close_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         let mut plus_hits: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         let mut image_btn_hits: Vec<(String, ImageBtn, (f32, f32, f32, f32))> = Vec::new();
+        // Terminal-pane right-action cluster hit rects. Rebuilt every frame
+        // so a stale rect can't outlive its glyph after a layout change.
+        let mut pane_action_hits: Vec<(String, ActionKind, (f32, f32, f32, f32))> = Vec::new();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -6972,11 +7480,21 @@ impl App {
             // from the cell grid. The active tab is marked by a raised pill +
             // a top accent strip — not a darker "cage" — and only the active
             // tab carries a × (so clicking any inactive tab just switches).
+            // (drop_pane, target) — drives the insertion bar; updated to the
+            // pane the cursor is currently over (cross-pane drag).
             let tab_drag_info: Option<(String, usize)> = self
                 .tab_drag
                 .as_ref()
                 .filter(|d| d.active)
-                .map(|d| (d.pane.clone(), d.target));
+                .map(|d| (d.drop_pane.clone(), d.target));
+            // (source_pane, source_idx) — the tab being lifted. The source
+            // tab is drawn at reduced alpha so it reads as "in transit"
+            // while the user drags it into another strip.
+            let tab_drag_src: Option<(String, usize)> = self
+                .tab_drag
+                .as_ref()
+                .filter(|d| d.active)
+                .map(|d| (d.pane.clone(), d.from));
             let hover_info: Option<(String, usize)> = self.pane_tab_hover.clone();
             // Active-tab top accents we need to repaint after the pane
             // dividers (BORDER) draw, so a horizontal split's seam doesn't
@@ -6996,11 +7514,14 @@ impl App {
                 } else {
                     theme::with_alpha(theme::TEXT_DIM, 0x6B)
                 };
-                // Right action button cluster (pane-level: new-term, web,
-                // split-v, split-h). Reserved first so tabs don't overlap it.
+                // Right action button cluster. Terminal panes get
+                // split-v / split-h (new-terminal and web were dropped —
+                // the +button already opens a new shell, and the web
+                // overlay added complexity for little payoff). Image panes
+                // keep the 4-button zoom/rotate set.
                 let abw = icon_size + 2.0;
                 let agap = 2.0;
-                let n_btn = 4.0_f32;
+                let n_btn: f32 = if h.is_image { 4.0 } else { 2.0 };
                 let btn_cluster = abw * n_btn + agap * (n_btn - 1.0) + 12.0;
                 // ── In-pane tab bar ── empty tabs = single tab from `label`.
                 let tab_list: Vec<&str> = if h.tabs.is_empty() {
@@ -7041,20 +7562,31 @@ impl App {
                     let show_x = active || is_hover;
                     let reserve_x = true;
                     let bright = active || is_hover;
+                    // Tab being lifted in a cross-pane / reorder drag is
+                    // drawn faint — reads as "in transit" against the
+                    // insertion bar at the drop position.
+                    let being_dragged = tab_drag_src
+                        .as_ref()
+                        .map(|(p, idx)| p == &h.id && *idx == i)
+                        .unwrap_or(false);
+                    let alpha_mul = if being_dragged { 0x55 } else { 0xFF };
+                    let combine = |a: u8| ((a as u16 * alpha_mul as u16) / 0xFF) as u8;
                     let t_fg = if bright {
-                        theme::TEXT
+                        theme::with_alpha(theme::TEXT, combine(0xFF))
                     } else {
-                        theme::with_alpha(theme::TEXT, 0x82)
+                        theme::with_alpha(theme::TEXT, combine(0x82))
                     };
                     let t_icon = if bright {
-                        theme::TEXT_DIM
+                        theme::with_alpha(theme::TEXT_DIM, combine(0xFF))
                     } else {
-                        theme::with_alpha(theme::TEXT_DIM, 0x82)
+                        theme::with_alpha(theme::TEXT_DIM, combine(0x82))
                     };
                     // Truncate this tab's title to its share of the bar.
                     // × space is reserved on every tab — see `reserve_x`.
+                    // No per-tab terminal glyph: the +button already signals
+                    // "new shell"; doubling that icon on every tab was noise.
                     let x_reserve = if reserve_x { close_w + 8.0 } else { 0.0 };
-                    let budget = (per_tab - icon_w - 6.0 - x_reserve - 14.0).max(0.0);
+                    let budget = (per_tab - x_reserve - 14.0).max(0.0);
                     let mut label = tab.to_string();
                     let mut lw = g.measure_chrome_text(&label, chrome_font, active);
                     if lw > budget {
@@ -7067,8 +7599,9 @@ impl App {
                         }
                         label.push('…');
                     }
-                    // Pill geometry: spans icon..label + reserved × slot.
-                    let content_w = icon_w + 6.0 + lw + x_reserve;
+                    // Pill geometry: label + reserved × slot (terminal icon
+                    // removed — +button covers "new shell" duty).
+                    let content_w = lw + x_reserve;
                     // First tab sits flush with the pane's left edge so the
                     // active tab's accent strip joins the pane divider with
                     // no visible gap.
@@ -7091,14 +7624,9 @@ impl App {
                     // differentiate it. Structural lines drawn post-loop.
                     let stroke = 1.0_f32;
                     let _ = stroke;
+                    let _ = t_icon;
                     let cx = g.draw_text(
                         tx,
-                        icon_y,
-                        "\u{f489}",
-                        gpu::DrawOpts { font_size: icon_size, color: t_icon, bold: false, italic: false },
-                    );
-                    let cx = g.draw_text(
-                        cx + 6.0,
                         text_y,
                         &label,
                         gpu::DrawOpts { font_size: chrome_font, color: t_fg, bold: active, italic: false },
@@ -7162,11 +7690,11 @@ impl App {
                         deferred_accents.push((ax, h.y, aw, accent_col));
                     }
                 }
-                // Drag insertion bar: a 2px accent line at the drop boundary.
+                // Drag insertion bar: 2px accent line spanning the strip.
                 if let Some((ref dpane, target)) = tab_drag_info {
                     if *dpane == h.id {
                         let bar_x = tab_edges.get(target).copied().unwrap_or(tx - gap);
-                        g.rect(bar_x - 1.0, h.y + 3.0, 2.0, PANE_HEADER_HEIGHT - 6.0, theme::ACCENT);
+                        g.rect(bar_x - 1.0, h.y + 2.0, 2.0, PANE_HEADER_HEIGHT - 4.0, theme::ACCENT);
                     }
                 }
                 let (cur_x, cur_y) = self.cursor_px;
@@ -7175,45 +7703,51 @@ impl App {
                 // [+] new-tab button right after the tabs. Hover chip is a
                 // tight rounded square centered on the glyph so the glow
                 // hugs the icon instead of stretching across a tall band.
+                // Hidden while a tab drag is active so the +button doesn't
+                // sit on top of the insertion bar / accept a stray drop.
+                let dragging_tab = tab_drag_src.is_some();
                 let plus_iw = g.measure_chrome_text("\u{ea60}", icon_size, false);
                 let chip_size = (icon_size + 6.0).max(plus_iw + 6.0);
                 let chip_x = tx + (plus_iw - chip_size) / 2.0;
                 let chip_y = h.y + (PANE_HEADER_HEIGHT - chip_size) / 2.0;
                 let plus_rect = (chip_x, chip_y, chip_size, chip_size);
-                let plus_hover = inside(plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3);
+                let plus_hover = !dragging_tab && inside(plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3);
                 if plus_hover {
                     round_rect(g, plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3,
                         theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
                 }
                 let plus_color = if plus_hover { theme::TEXT } else { act_fg };
-                g.draw_text(
-                    tx,
-                    icon_y,
-                    "\u{ea60}",
-                    gpu::DrawOpts { font_size: icon_size, color: plus_color, bold: false, italic: false },
-                );
-                plus_hits.push((h.id.clone(), plus_rect));
+                if !dragging_tab {
+                    g.draw_text(
+                        tx,
+                        icon_y,
+                        "\u{ea60}",
+                        gpu::DrawOpts { font_size: icon_size, color: plus_color, bold: false, italic: false },
+                    );
+                    plus_hits.push((h.id.clone(), plus_rect));
+                }
                 // ── Right action buttons ── per-kind cluster: terminal panes
                 // get new-terminal/web/split-v/split-h; image panes get
                 // zoom-out / zoom-in / rotate / reset wired to the in-pane
                 // image-view state mutated by forward_key as well.
-                let action_set: Vec<(&str, Option<ImageBtn>)> = if h.is_image {
+                // Per cluster we carry either an ImageBtn (image pane) or an
+                // ActionKind (terminal pane). Keeping both as Option in one
+                // tuple keeps the paint loop unified.
+                let action_set: Vec<(&str, Option<ImageBtn>, Option<ActionKind>)> = if h.is_image {
                     vec![
-                        ("−", Some(ImageBtn::ZoomOut)),
-                        ("+", Some(ImageBtn::ZoomIn)),
-                        ("↻", Some(ImageBtn::Rotate)),
-                        ("0", Some(ImageBtn::Reset)),
+                        ("−", Some(ImageBtn::ZoomOut), None),
+                        ("+", Some(ImageBtn::ZoomIn), None),
+                        ("↻", Some(ImageBtn::Rotate), None),
+                        ("0", Some(ImageBtn::Reset), None),
                     ]
                 } else {
                     vec![
-                        ("\u{f489}", None),
-                        ("\u{f0ac}", None),
-                        ("\u{eb57}", None),
-                        ("\u{eb56}", None),
+                        ("\u{eb57}", None, Some(ActionKind::SplitV)),
+                        ("\u{eb56}", None, Some(ActionKind::SplitH)),
                     ]
                 };
                 let mut bx = h.x + h.w - 8.0 - (abw * n_btn + agap * (n_btn - 1.0));
-                for (ic, kind) in action_set {
+                for (ic, kind, action) in action_set {
                     let iw = g.measure_chrome_text(ic, icon_size, false);
                     let chip_size = icon_size + 6.0;
                     let chip_y = h.y + (PANE_HEADER_HEIGHT - chip_size) / 2.0;
@@ -7232,6 +7766,9 @@ impl App {
                     );
                     if let Some(k) = kind {
                         image_btn_hits.push((h.id.clone(), k, (chip_x, chip_y, chip_size, chip_size)));
+                    }
+                    if let Some(a) = action {
+                        pane_action_hits.push((h.id.clone(), a, (chip_x, chip_y, chip_size, chip_size)));
                     }
                     bx += abw + agap;
                 }
@@ -7361,6 +7898,9 @@ impl App {
         self.pane_tab_close_rects = tab_close_hits;
         self.pane_plus_rects = plus_hits;
         self.image_btn_rects = image_btn_hits;
+        self.pane_action_hits = pane_action_hits;
+        // body_rects collected per pane in case future overlays need them.
+        let _ = body_rects;
         // Damage flags get cleared here (parity with sugarloaf path
         // below) so successive frames short-circuit on idle.
         if let Ok(mut ws) = self.ws.lock() {
@@ -8227,18 +8767,34 @@ impl ApplicationHandler<UserEvent> for App {
                 });
             }
             WindowEvent::Resized(size) => {
-                // Ghostty-style live-resize: while AppKit's drag loop owns the
-                // window we stash the final size and skip ALL heavy work.
-                // The CAMetalLayer keeps its last IOSurface and gravity=topLeft
-                // anchors it under the new bounds — shrinking crops the old
-                // surface cleanly, growing shows the clear color in the
-                // newly revealed corner. about_to_wait flushes the stashed
-                // size once `inLiveResize` flips false (mouse released).
+                // Beats-ghostty live-resize: repaint EVERY Resized event with
+                // a lightweight path — wgpu surface.configure + render_frame.
+                // We skip the heavy PTY reshape (SIGWINCH + alacritty resize +
+                // per-pane row/col reflow) during the drag; CAMetalLayer's
+                // gravity=topLeft anchors the old grid while the chrome
+                // (title strip, sidebar, headers, dividers) reflows live every
+                // frame. On release, about_to_wait runs the heavy reshape +
+                // final render. No throttle: wgpu surface.configure is ~free
+                // relative to AppKit's tracking-loop cadence, and the cells
+                // pass short-circuits when nothing's dirty so per-frame cost
+                // stays tiny (just chrome quads).
                 if gpu::is_in_live_resize(&window) {
                     self.pending_resize = Some(size);
+                    gpu::with_disabled_layer_actions(|| {
+                        if gpu_mode {
+                            if let Some(g) = self.gpu.as_mut() {
+                                g.resize(size.width, size.height);
+                            }
+                        } else if let Some(sg) = self.sugarloaf.as_mut() {
+                            sg.resize(size.width, size.height);
+                        }
+                        self.chrome_dirty = true;
+                        self.render_frame();
+                    });
                     return;
                 }
                 self.pending_resize = None;
+                self.last_live_resize_flush = None;
                 gpu::with_disabled_layer_actions(|| {
                     if gpu_mode {
                         if let Some(g) = self.gpu.as_mut() {
@@ -8322,25 +8878,61 @@ impl ApplicationHandler<UserEvent> for App {
                 // pane's tab pills. The insertion bar is painted from
                 // `tab_drag.target`.
                 if self.tab_drag.is_some() {
-                    let (px, _) = self.cursor_px;
-                    let (start, pane) = {
+                    let (px, py) = self.cursor_px;
+                    let (start, src_pane) = {
                         let d = self.tab_drag.as_ref().unwrap();
                         (d.start, d.pane.clone())
                     };
                     let dx = self.cursor_px.0 - start.0;
                     let dy = self.cursor_px.1 - start.1;
-                    // Insertion index = #pills whose midpoint is left of cursor.
+                    // Per-pane horizontal extent of the tab strip, derived
+                    // from each pane's tab pills (min(x) .. max(x+w)). The
+                    // cursor counts as "over pane P" when its y is inside
+                    // any of P's pills *and* its x is inside that x-range —
+                    // crucially this still holds while the cursor sits over
+                    // the + button or the action cluster (which interrupt
+                    // the pill row), so the drop_pane doesn't flicker back
+                    // to source mid-flight.
+                    let mut drop_pane = src_pane.clone();
+                    let mut strip_y: HashMap<String, (f32, f32)> = HashMap::new();
+                    let mut strip_x: HashMap<String, (f32, f32)> = HashMap::new();
+                    for (pid, _i, (rx, ry, rw, rh)) in &self.pane_tab_rects {
+                        let y = strip_y
+                            .entry(pid.clone())
+                            .or_insert((*ry, ry + rh));
+                        y.0 = y.0.min(*ry);
+                        y.1 = y.1.max(ry + rh);
+                        let x = strip_x
+                            .entry(pid.clone())
+                            .or_insert((*rx, rx + rw));
+                        x.0 = x.0.min(*rx);
+                        x.1 = x.1.max(rx + rw);
+                    }
+                    for (pid, (y0, y1)) in &strip_y {
+                        if py >= *y0 && py <= *y1 {
+                            // Loose x-bound: anywhere inside the pane header
+                            // band counts. Avoids the + button "blocking"
+                            // the drop_pane switch when the cursor floats
+                            // above the pill gap.
+                            drop_pane = pid.clone();
+                            break;
+                        }
+                    }
+                    // Insertion index = #pills of drop_pane whose midpoint sits
+                    // left of cursor. Resets to 0 when the cursor enters a new
+                    // pane's strip so the bar starts at that pane's left edge.
                     let mut target = 0usize;
                     for (pid, idx, (rx, _, rw, _)) in &self.pane_tab_rects {
-                        if pid == &pane && px > rx + rw / 2.0 {
+                        if pid == &drop_pane && px > rx + rw / 2.0 {
                             target = idx + 1;
                         }
                     }
                     if let Some(d) = self.tab_drag.as_mut() {
-                        if !d.active && dx * dx + dy * dy > 25.0 {
+                        if !d.active && dx * dx + dy * dy > 9.0 {
                             d.active = true;
                         }
                         d.target = target;
+                        d.drop_pane = drop_pane;
                     }
                     if self.tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
                         window.set_cursor(CursorIcon::Grabbing);
@@ -8542,6 +9134,37 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // Terminal-pane right-action cluster (new-terminal /
+                    // web / split-v / split-h). Web spawns a separate OS
+                    // window with a wry browser; the other variants are
+                    // wired by the main pane-model.
+                    if let Some((pid, action)) = self
+                        .pane_action_hits
+                        .iter()
+                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, a, _)| (id.clone(), *a))
+                    {
+                        // Focus the clicked pane so splits/new-tabs target it.
+                        self.ws.lock().unwrap().active_pane = Some(pid.clone());
+                        match action {
+                            ActionKind::SplitV => {
+                                if let Err(e) = self
+                                    .split_active_pane(pty_backend::SplitDir::Vertical)
+                                {
+                                    eprintln!("[split-v] {e}");
+                                }
+                            }
+                            ActionKind::SplitH => {
+                                if let Err(e) = self
+                                    .split_active_pane(pty_backend::SplitDir::Horizontal)
+                                {
+                                    eprintln!("[split-h] {e}");
+                                }
+                            }
+                        }
+                        window.request_redraw();
+                        return;
+                    }
                     // Image-pane action buttons (zoom-out/in, rotate, reset).
                     // Checked before the tab/plus path so the image-only
                     // chrome cluster is never swallowed by tab hit-tests.
@@ -8587,15 +9210,10 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, _)| id.clone())
                     {
-                        if let Ok(mut ws) = self.ws.lock() {
-                            if let Some(pane) = ws.panes.get_mut(&pid) {
-                                if pane.tabs.is_empty() {
-                                    let cur = pane.title.clone().unwrap_or_else(|| pid.clone());
-                                    pane.tabs.push(cur);
-                                }
-                                pane.tabs.push("새 탭".to_string());
-                                pane.active_tab = pane.tabs.len() - 1;
-                            }
+                        // Stage 3: spawn a real PTY-backed tab. spawn_new_tab
+                        // pushes a PaneTab with its own pid and sets active.
+                        if let Err(e) = self.spawn_new_tab(&pid) {
+                            eprintln!("[spawn_new_tab] {e}");
                         }
                         window.request_redraw();
                         return;
@@ -8606,28 +9224,19 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
-                        let mut close_pane = false;
-                        if let Ok(mut ws) = self.ws.lock() {
-                            if let Some(pane) = ws.panes.get_mut(&pid) {
-                                if pane.tabs.len() <= 1 {
-                                    // Single tab → closing it closes the pane.
-                                    close_pane = true;
-                                } else {
-                                    pane.tabs.remove(idx);
-                                    // Keep pointing at the same tab the user
-                                    // had active: shift left if we removed
-                                    // one before it; clamp if it was the last.
-                                    if idx < pane.active_tab {
-                                        pane.active_tab -= 1;
-                                    }
-                                    if pane.active_tab >= pane.tabs.len() {
-                                        pane.active_tab = pane.tabs.len() - 1;
-                                    }
-                                }
-                            }
-                        }
-                        if close_pane {
+                        let tabs_len = self
+                            .ws
+                            .lock()
+                            .unwrap()
+                            .panes
+                            .get(&pid)
+                            .map(|p| p.tabs.len())
+                            .unwrap_or(0);
+                        if tabs_len <= 1 {
+                            // Single tab → closing it closes the pane.
                             self.remove_pane(&pid);
+                        } else {
+                            self.close_tab(&pid, idx);
                         }
                         window.request_redraw();
                         return;
@@ -8645,11 +9254,12 @@ impl ApplicationHandler<UserEvent> for App {
                             ws.active_pane = Some(pid.clone());
                         }
                         self.tab_drag = Some(TabDrag {
-                            pane: pid,
+                            pane: pid.clone(),
                             from: idx,
                             start: self.cursor_px,
                             active: false,
                             target: idx,
+                            drop_pane: pid,
                         });
                         window.request_redraw();
                         return;
@@ -8767,7 +9377,128 @@ impl ApplicationHandler<UserEvent> for App {
                         // list; a plain press just switches to that tab.
                         if let Some(td) = self.tab_drag.take() {
                             window.set_cursor(CursorIcon::Default);
-                            if let Ok(mut ws) = self.ws.lock() {
+                            // Tab → pane BODY drop: split the target pane in
+                            // the quadrant the cursor landed in and place the
+                            // moved tab as the new leaf. Eats the old
+                            // header-drag UX (drop in body = relocate) but
+                            // unified into the tab drag so the user never has
+                            // to find non-tab space on the header.
+                            let body_drop: Option<(String, DropZone)> = if td.active {
+                                let (cx, cy) = self.cursor_px;
+                                let over_strip = self
+                                    .pane_tab_rects
+                                    .iter()
+                                    .any(|(_, _, (_, ry, _, rh))| cy >= *ry && cy <= ry + rh);
+                                if over_strip {
+                                    None
+                                } else {
+                                    self.drop_target_at(cx, cy)
+                                }
+                            } else {
+                                None
+                            };
+                            if let Some((target, zone)) = body_drop {
+                                let src_tab_count = self
+                                    .ws
+                                    .lock()
+                                    .unwrap()
+                                    .panes
+                                    .get(&td.pane)
+                                    .map(|p| p.tabs.len())
+                                    .unwrap_or(0);
+                                if target == td.pane && src_tab_count == 1 {
+                                    // Single-tab pane dropped on its own body
+                                    // half: the user "threw" the pane to that
+                                    // side. Spawn a fresh shell on the
+                                    // OPPOSITE side so the original sits where
+                                    // it was dropped.
+                                    if let Err(e) =
+                                        self.split_pane_opposite(&td.pane, zone)
+                                    {
+                                        eprintln!("[split-opposite] {e}");
+                                    }
+                                    self.chrome_dirty = true;
+                                    window.request_redraw();
+                                    return;
+                                }
+                                if target != td.pane || src_tab_count > 1 {
+                                    // Multi-tab same-pane → lift dragged tab
+                                    // into a new pane on the drop side.
+                                    // Cross-pane → moved tab in a new pane on
+                                    // target's drop side.
+                                    self.drop_tab_into_body(&td, &target, zone);
+                                    self.chrome_dirty = true;
+                                    window.request_redraw();
+                                    return;
+                                }
+                            }
+                            let cross_pane = td.active && td.drop_pane != td.pane;
+                            if cross_pane {
+                                // Move the tab to another pane. We do this in
+                                // 3 steps:
+                                //   1. lift the PaneTab out of source.tabs
+                                //   2. update pid_to_pane so future PTY output
+                                //      routes to the destination pane
+                                //   3. insert at the target index in dest.tabs;
+                                //      if source ends up empty, collapse the
+                                //      source pane out of the layout entirely
+                                let mut moved_pid: Option<String> = None;
+                                let mut moved: Option<PaneTab> = None;
+                                let mut src_empty = false;
+                                {
+                                    let mut ws = self.ws.lock().unwrap();
+                                    if let Some(src) = ws.panes.get_mut(&td.pane) {
+                                        let n = src.tabs.len();
+                                        if td.from < n {
+                                            let tab = src.tabs.remove(td.from);
+                                            moved_pid = tab.pid.clone();
+                                            moved = Some(tab);
+                                            if td.from < src.active_tab && src.active_tab > 0 {
+                                                src.active_tab -= 1;
+                                            }
+                                            if src.active_tab >= src.tabs.len()
+                                                && !src.tabs.is_empty()
+                                            {
+                                                src.active_tab = src.tabs.len() - 1;
+                                            }
+                                            src.dirty = true;
+                                            src_empty = src.tabs.is_empty();
+                                        }
+                                    }
+                                    if let (Some(tab), Some(pid)) =
+                                        (moved.take(), moved_pid.clone())
+                                    {
+                                        // Re-bind the pid to the new outer.
+                                        ws.pid_to_pane.insert(pid, td.drop_pane.clone());
+                                        if let Some(dst) = ws.panes.get_mut(&td.drop_pane) {
+                                            let to = td.target.min(dst.tabs.len());
+                                            dst.tabs.insert(to, tab);
+                                            dst.active_tab = to;
+                                            dst.dirty = true;
+                                        }
+                                    }
+                                    if src_empty {
+                                        // Source has no tabs left — drop the
+                                        // outer entry so remove_pane below can
+                                        // collapse the layout cleanly.
+                                        ws.panes.remove(&td.pane);
+                                    }
+                                }
+                                if src_empty {
+                                    // Source is empty because every tab — INCLUDING the
+                                    // primary whose pid equalled the outer id — went to
+                                    // dest. `remove_pane` would kill self.pty[outer]
+                                    // here, which is the very PtySession we just handed
+                                    // to dest. Use a layout-only collapse that leaves
+                                    // self.pty / image textures / markdown untouched
+                                    // since those resources now belong to dest.
+                                    self.collapse_layout_only(&td.pane);
+                                }
+                                // Focus the destination pane so the moved
+                                // tab is immediately interactive.
+                                self.ws.lock().unwrap().active_pane =
+                                    Some(td.drop_pane.clone());
+                            } else if let Ok(mut ws) = self.ws.lock() {
                                 if let Some(pane) = ws.panes.get_mut(&td.pane) {
                                     let n = pane.tabs.len();
                                     if td.active && n > 1 {
@@ -8912,6 +9643,7 @@ impl ApplicationHandler<UserEvent> for App {
         {
             if !gpu::is_in_live_resize(&window) {
                 self.pending_resize = None;
+                self.last_live_resize_flush = None;
                 let gpu_mode = self.gpu.is_some();
                 gpu::with_disabled_layer_actions(|| {
                     if gpu_mode {
