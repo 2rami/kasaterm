@@ -580,6 +580,13 @@ fn spawn_reader_thread(
         // OSC 1337 inline-image capture state (a payload can span reads).
         let mut img_buf: Vec<u8> = Vec::new();
         let mut img_capturing = false;
+        // Kitty graphics protocol (APC `\x1b_G…\x1b\\`) capture state. One
+        // image can arrive as multiple APC chunks linked by `m=1` / `m=0` —
+        // `kitty_chunk_buf` is the current chunk's raw bytes, while
+        // `kitty_payload_buf` accumulates the decoded body across chunks.
+        let mut kitty_chunk_buf: Vec<u8> = Vec::new();
+        let mut kitty_payload_buf: Vec<u8> = Vec::new();
+        let mut kitty_capturing = false;
 
         loop {
             // Check for a pending resize before we read more bytes —
@@ -644,6 +651,12 @@ fn spawn_reader_thread(
             // parser (which drops them unhandled). Decoded payloads open in an
             // image pane via /open-image.
             scan_inline_image(processed_bytes, &mut img_buf, &mut img_capturing);
+            scan_kitty_graphics(
+                processed_bytes,
+                &mut kitty_chunk_buf,
+                &mut kitty_payload_buf,
+                &mut kitty_capturing,
+            );
 
             let update = {
                 let mut t = term.lock().unwrap();
@@ -954,6 +967,115 @@ fn scan_inline_image(bytes: &[u8], buf: &mut Vec<u8>, capturing: &mut bool) {
                 Some(start) => {
                     *capturing = true;
                     data = &data[start + MARKER.len()..];
+                }
+                None => return,
+            }
+        }
+    }
+}
+
+/// A completed kitty graphics payload (`f=100` PNG bytes already decoded). Same
+/// path as the iTerm OSC 1337 emitter — write a temp file and ask the kasaspace
+/// MCP to open it in an image pane.
+fn emit_kitty_image(payload: &[u8]) {
+    if payload.len() < 16 {
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("kasaterm-kitty-{nanos}.png"));
+    if std::fs::write(&tmp, payload).is_err() {
+        return;
+    }
+    let port = std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".into());
+    let url = format!("http://127.0.0.1:{port}/open-image");
+    let _ = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "--get",
+            "--data-urlencode",
+            &format!("path={}", tmp.display()),
+            &url,
+        ])
+        .status();
+}
+
+/// Capture a kitty graphics protocol sequence (APC `\x1b_G<params>;<body>\x1b\\`)
+/// that may span multiple PTY reads AND multiple chunks (linked by `m=1` /
+/// `m=0`). MVP: only `f=100` (PNG) direct-base64 payloads are accepted —
+/// `f=32`/`f=24` raw RGB(A) are skipped because the image pane expects a
+/// decodable container. alacritty's VT parser drops APCs, so we sniff in
+/// parallel from the raw byte stream.
+fn scan_kitty_graphics(
+    bytes: &[u8],
+    chunk_buf: &mut Vec<u8>,
+    payload_buf: &mut Vec<u8>,
+    capturing: &mut bool,
+) {
+    const APC_G: &[u8] = b"\x1b_G";
+    const ST: &[u8] = b"\x1b\\";
+    let mut data = bytes;
+    loop {
+        if *capturing {
+            match find_subslice(data, ST) {
+                Some(e) => {
+                    chunk_buf.extend_from_slice(&data[..e]);
+                    // Parse params (before ';') and body (after).
+                    let sep = chunk_buf.iter().position(|&b| b == b';');
+                    if let Some(sep_pos) = sep {
+                        let (params, body) = chunk_buf.split_at(sep_pos);
+                        let body = &body[1..]; // skip ';'
+                        let params_s = std::str::from_utf8(params).unwrap_or("");
+                        let mut more = false;
+                        let mut format_png = true; // default if missing
+                        for kv in params_s.split(',') {
+                            let kv = kv.trim();
+                            if let Some((k, v)) = kv.split_once('=') {
+                                match k {
+                                    "m" => more = v == "1",
+                                    // First chunk carries `f=`; subsequent
+                                    // chunks usually omit it.
+                                    "f" if !v.is_empty() => format_png = v == "100",
+                                    _ => {}
+                                }
+                            }
+                        }
+                        // Reject non-PNG formats once detected; clear state.
+                        if !format_png {
+                            payload_buf.clear();
+                            chunk_buf.clear();
+                            *capturing = false;
+                            data = &data[(e + ST.len()).min(data.len())..];
+                            continue;
+                        }
+                        let decoded = b64_decode(body);
+                        payload_buf.extend_from_slice(&decoded);
+                        if !more {
+                            emit_kitty_image(payload_buf);
+                            payload_buf.clear();
+                        }
+                    }
+                    chunk_buf.clear();
+                    *capturing = false;
+                    data = &data[(e + ST.len()).min(data.len())..];
+                }
+                None => {
+                    chunk_buf.extend_from_slice(data);
+                    if chunk_buf.len() > 8 * 1024 * 1024 {
+                        chunk_buf.clear();
+                        payload_buf.clear();
+                        *capturing = false;
+                    }
+                    return;
+                }
+            }
+        } else {
+            match find_subslice(data, APC_G) {
+                Some(start) => {
+                    *capturing = true;
+                    data = &data[start + APC_G.len()..];
                 }
                 None => return,
             }

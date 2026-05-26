@@ -1226,6 +1226,16 @@ struct HeaderDrag {
     active: bool,
 }
 
+/// Image-pane action button kinds, drawn in place of the terminal-action
+/// cluster on the right side of an image pane's header.
+#[derive(Clone, Copy, PartialEq)]
+enum ImageBtn {
+    ZoomOut,
+    ZoomIn,
+    Rotate,
+    Reset,
+}
+
 /// State for an in-flight in-pane tab reorder drag. A press on a tab arms
 /// this; it only becomes a real drag past the threshold, so a plain press
 /// just switches the active tab on release.
@@ -1319,6 +1329,11 @@ struct PaneState {
     tabs: Vec<String>,
     /// Index into `tabs` of the visually-active tab.
     active_tab: usize,
+    /// Image-pane view state. `image_zoom < 1.0` clamps to fit; >= 1 zooms
+    /// past native (image overflows the box, centered). `image_rot` is the
+    /// number of 90° CW rotations applied (0..4). Ignored for non-image panes.
+    image_zoom: f32,
+    image_rot: u8,
 }
 
 impl PaneState {
@@ -1350,6 +1365,11 @@ impl PaneState {
         } else {
             None
         }
+    }
+    /// Effective image zoom — `image_zoom` is 0.0 by Default so callers must
+    /// route through here to get the meaningful "fit" baseline of 1.0.
+    fn image_view_zoom(&self) -> f32 {
+        if self.image_zoom < 1.0 { 1.0 } else { self.image_zoom }
     }
     fn image(&self) -> Option<&Arc<ImagePane>> {
         if let PaneContent::Image(i) = &self.content {
@@ -1396,6 +1416,31 @@ fn decode_image_rgba(path: &std::path::Path) -> anyhow::Result<ImagePane> {
         w,
         h,
     })
+}
+
+/// Rotate RGBA8 image data by `quarters` * 90° clockwise. Returns the new
+/// pixel buffer plus its new (w, h). quarters=0 returns the input untouched.
+fn rotate_rgba_cw(rgba: &[u8], w: u32, h: u32, quarters: u8) -> (Vec<u8>, u32, u32) {
+    let q = quarters % 4;
+    if q == 0 || rgba.is_empty() {
+        return (rgba.to_vec(), w, h);
+    }
+    let (nw, nh) = if q % 2 == 1 { (h, w) } else { (w, h) };
+    let mut out = vec![0u8; rgba.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let src = ((y * w + x) * 4) as usize;
+            let (nx, ny) = match q {
+                1 => (h - 1 - y, x),         // 90° CW
+                2 => (w - 1 - x, h - 1 - y), // 180°
+                3 => (y, w - 1 - x),         // 270° CW
+                _ => unreachable!(),
+            };
+            let dst = ((ny * nw + nx) * 4) as usize;
+            out[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+        }
+    }
+    (out, nw, nh)
 }
 
 /// Byte offset of the `col`-th char in `s` (clamped to `s.len()`). Used by the
@@ -1889,12 +1934,27 @@ struct App {
     /// Currently hovered in-pane tab `(pane_id, tab_idx)`. Drives the
     /// hover-only × and brighter text on inactive tabs.
     pane_tab_hover: Option<(String, usize)>,
+    /// Image pane action button hit rects (zoom in/out, rotate, reset),
+    /// rebuilt each header paint. Mouse handler dispatches on these.
+    image_btn_rects: Vec<(String, ImageBtn, (f32, f32, f32, f32))>,
     /// Live width of the left window-tab sidebar (logical px). User-draggable
     /// via the right edge; defaults to `SIDEBAR_W`. `effective_sidebar_w()`
     /// reads this when visible.
     sidebar_w_logical: f32,
     /// In-flight sidebar resize drag — `(start_cursor_x, start_width)`.
     sidebar_resize: Option<(f32, f32)>,
+    /// Cell grid size last published to the PTY backend by the window-resize
+    /// path. Live-resize fires Resized at ~60Hz with pixel-granular sizes,
+    /// but only crosses a cell boundary every 16-32px — without this guard
+    /// we re-shape every pane PTY (alacritty Term::resize + SIGWINCH) and
+    /// re-publish layout on every wiggle of the pointer.
+    last_resized_cells: (u16, u16),
+    /// During a macOS live-resize we deliberately do NOT call surface.configure
+    /// or render — the CAMetalLayer keeps its old IOSurface and gravity=topLeft
+    /// anchors it to the top-left while AppKit stretches the layer bounds
+    /// (ghostty's trick on top of wgpu). The final size that came in during
+    /// the drag is stashed here so we can flush it once the user lets go.
+    pending_resize: Option<winit::dpi::PhysicalSize<u32>>,
     /// Pane that owns the in-flight mouse reporting drag. `Some(pane_id)`
     /// when we forwarded a button-press into a mouse-reporting TUI and
     /// are now relaying motion + release into the same pane. None means
@@ -2056,8 +2116,11 @@ impl App {
             header_drag: None,
             tab_drag: None,
             pane_tab_hover: None,
+            image_btn_rects: Vec::new(),
             sidebar_w_logical: SIDEBAR_W,
             sidebar_resize: None,
+            last_resized_cells: (0, 0),
+            pending_resize: None,
             mouse_forward_pane: None,
             last_left_click: None,
             last_window_title: None,
@@ -4347,6 +4410,19 @@ impl App {
             pane.title = Some(name);
             pane.title_pinned = true;
             pane.dirty = true;
+            // Headless-test handles: seed the image-view state from env so a
+            // verify cycle can capture zoomed/rotated frames without a key
+            // synthesis path. Real users still drive zoom/rot via +/-/r/0.
+            if let Ok(z) = std::env::var("KASATERM_TEST_IMG_ZOOM").map(|s| s.parse::<f32>()) {
+                if let Ok(z) = z {
+                    pane.image_zoom = z.clamp(1.0, 8.0);
+                }
+            }
+            if let Ok(r) = std::env::var("KASATERM_TEST_IMG_ROT").map(|s| s.parse::<u8>()) {
+                if let Ok(r) = r {
+                    pane.image_rot = r % 4;
+                }
+            }
         }
         let layout = self
             .pty_layout
@@ -5123,7 +5199,20 @@ impl App {
             id.map(|i| (i, osc))
         };
         let Some((id, osc)) = active else { return };
-        let mut label = Self::resolve_pane_label(&self.pty, &id, osc.as_deref());
+        let _ = osc;
+        let mut label = self
+            .pty
+            .get(&id)
+            .and_then(|p| p.shell_pid())
+            .and_then(socket::pid_cwd)
+            .map(|p| {
+                let s = p.to_string_lossy().into_owned();
+                match std::env::var("HOME").ok() {
+                    Some(home) if s.starts_with(&home) => s.replacen(&home, "~", 1),
+                    _ => s,
+                }
+            })
+            .unwrap_or_else(|| Self::resolve_pane_label(&self.pty, &id, None));
         // Claude Code response indicator. Priority:
         //   1. Lift Claude Code's own status line straight from the
         //      cell grid ("✻ Brewed for 5s") so the user sees the
@@ -5363,6 +5452,64 @@ impl App {
         // Touch the input timer so the cursor stays solid for a beat and
         // the blink phase re-starts from "on" once it kicks in.
         self.last_input_at = Instant::now();
+        // Image panes have no PTY — repurpose keys for view control.
+        //   +/=      zoom in     -    zoom out
+        //   0        reset       r/R  rotate 90° CW
+        // Every other key is swallowed (no shell to receive them).
+        let is_image = {
+            let ws = self.ws.lock().unwrap();
+            ws.active().map(|p| p.image().is_some()).unwrap_or(false)
+        };
+        if is_image {
+            let mut changed = false;
+            if let Key::Character(s) = &event.logical_key {
+                match s.as_str() {
+                    "+" | "=" => {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.active_mut() {
+                                let z = pane.image_view_zoom();
+                                pane.image_zoom = (z * 1.25).clamp(1.0, 8.0);
+                                changed = true;
+                            }
+                        }
+                    }
+                    "-" | "_" => {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.active_mut() {
+                                let z = pane.image_view_zoom();
+                                pane.image_zoom = (z / 1.25).max(1.0);
+                                changed = true;
+                            }
+                        }
+                    }
+                    "0" => {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.active_mut() {
+                                pane.image_zoom = 1.0;
+                                pane.image_rot = 0;
+                                changed = true;
+                            }
+                        }
+                    }
+                    "r" | "R" => {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.active_mut() {
+                                pane.image_rot = (pane.image_rot + 1) % 4;
+                                changed = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if changed {
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
         // Markdown panes have no PTY. In Raw mode keys edit the buffer; in
         // Render mode they're swallowed (scrolling is wheel-driven).
         let (is_md, is_raw) = {
@@ -6079,6 +6226,8 @@ impl App {
             is_markdown: bool,
             /// Current markdown mode (true = Raw editor) for pill highlighting.
             md_raw_mode: bool,
+            /// Image panes get zoom/rotate buttons instead of the terminal-action cluster.
+            is_image: bool,
             /// In-pane tab labels (empty = single-tab; header shows `label`).
             tabs: Vec<String>,
             /// Active tab index into `tabs`.
@@ -6094,7 +6243,8 @@ impl App {
         let mut copy_btns: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         // Image panes collected here (id, pixels, body box in LOGICAL px) so
         // the gpu block below can upload + queue them after the cell pass.
-        let mut image_slots: Vec<(String, Arc<ImagePane>, (f32, f32, f32, f32))> = Vec::new();
+        // (pid, image_data, body_box, zoom, rotation_quarters)
+        let mut image_slots: Vec<(String, Arc<ImagePane>, (f32, f32, f32, f32), f32, u8)> = Vec::new();
         // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
         // cursor). Render mode draws blocks; Raw mode draws the editor buffer.
         #[allow(clippy::type_complexity)]
@@ -6163,6 +6313,8 @@ impl App {
                 // makes draw_cells a no-op and the content (texture or laid-out
                 // document) is painted into the pane box instead (queued below).
                 let img = pane.image().cloned();
+                let img_zoom = pane.image_view_zoom();
+                let img_rot = pane.image_rot % 4;
                 // Snapshot markdown render data: (doc, raw_mode, edit lines if
                 // raw, cursor, scroll px).
                 let md: Option<(Arc<MarkdownDoc>, bool, Option<Vec<String>>, (usize, usize), f32)> =
@@ -6269,7 +6421,7 @@ impl App {
                     };
                     let bh = (full_h - header_shift_logical - 2.0 * PANE_INNER_Y).max(1.0);
                     if let Some(image) = img {
-                        image_slots.push((id.clone(), image, (bx, by, bw, bh)));
+                        image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot));
                     }
                     if let Some((doc, raw_mode, lines, cursor, scroll)) = md {
                         md_slots.push((
@@ -6347,6 +6499,7 @@ impl App {
                         color: pane.color,
                         is_markdown: pane.markdown().is_some(),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
+                        is_image: pane.image().is_some(),
                         tabs: pane.tabs.clone(),
                         active_tab: pane.active_tab,
                     });
@@ -6535,19 +6688,26 @@ impl App {
         let mut tab_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         let mut tab_close_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         let mut plus_hits: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+        let mut image_btn_hits: Vec<(String, ImageBtn, (f32, f32, f32, f32))> = Vec::new();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
             // frame. The image pass (in g.render) paints under the chrome so
             // pane headers / focus ring / dim overlay land on top.
-            for (id, image, _) in &image_slots {
-                if !g.has_image(id) {
-                    g.upload_image(id, &image.rgba, image.w, image.h);
+            for (id, image, _, _, rot) in &image_slots {
+                // Per-rotation cache key — rotated pixels uploaded once per
+                // (pane, rotation) pair so toggling between rotations doesn't
+                // re-rotate every frame.
+                let key = format!("{id}-r{rot}");
+                if !g.has_image(&key) {
+                    let (rgba, w, h) = rotate_rgba_cw(&image.rgba, image.w, image.h, *rot);
+                    g.upload_image(&key, &rgba, w, h);
                 }
             }
             g.draw_cells(&slot_views);
-            for (id, _, (bx, by, bw, bh)) in &image_slots {
-                g.queue_image(id, *bx, *by, *bw, *bh);
+            for (id, _, (bx, by, bw, bh), zoom, rot) in &image_slots {
+                let key = format!("{id}-r{rot}");
+                g.queue_image(&key, *bx, *by, *bw, *bh, *zoom);
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
@@ -6621,10 +6781,19 @@ impl App {
                         italic: false,
                     },
                 );
-                let cwd_str = std::env::current_dir()
-                    .ok()
-                    .map(|p| Self::shorten_cwd(&p))
-                    .unwrap_or_default();
+                // Title-bar cwd chip follows the FOCUSED pane's shell cwd —
+                // resolved via the shell's pid + /proc-style lookup. Falls
+                // back to kasaterm's own cwd when the pane has no PTY (image
+                // / markdown) or the pid couldn't be sniffed.
+                let cwd_str = {
+                    let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+                    active
+                        .and_then(|id| self.pty.get(&id).and_then(|p| p.shell_pid()))
+                        .and_then(socket::pid_cwd)
+                        .or_else(|| std::env::current_dir().ok())
+                        .map(|p| Self::shorten_cwd(&p))
+                        .unwrap_or_default()
+                };
                 g.draw_text(
                     after + 6.0,
                     ty,
@@ -7024,10 +7193,27 @@ impl App {
                     gpu::DrawOpts { font_size: icon_size, color: plus_color, bold: false, italic: false },
                 );
                 plus_hits.push((h.id.clone(), plus_rect));
-                // ── Right action buttons: new-terminal, web, split-v, split-h ──
-                let action_icons = ["\u{f489}", "\u{f0ac}", "\u{eb57}", "\u{eb56}"];
+                // ── Right action buttons ── per-kind cluster: terminal panes
+                // get new-terminal/web/split-v/split-h; image panes get
+                // zoom-out / zoom-in / rotate / reset wired to the in-pane
+                // image-view state mutated by forward_key as well.
+                let action_set: Vec<(&str, Option<ImageBtn>)> = if h.is_image {
+                    vec![
+                        ("−", Some(ImageBtn::ZoomOut)),
+                        ("+", Some(ImageBtn::ZoomIn)),
+                        ("↻", Some(ImageBtn::Rotate)),
+                        ("0", Some(ImageBtn::Reset)),
+                    ]
+                } else {
+                    vec![
+                        ("\u{f489}", None),
+                        ("\u{f0ac}", None),
+                        ("\u{eb57}", None),
+                        ("\u{eb56}", None),
+                    ]
+                };
                 let mut bx = h.x + h.w - 8.0 - (abw * n_btn + agap * (n_btn - 1.0));
-                for ic in action_icons {
+                for (ic, kind) in action_set {
                     let iw = g.measure_chrome_text(ic, icon_size, false);
                     let chip_size = icon_size + 6.0;
                     let chip_y = h.y + (PANE_HEADER_HEIGHT - chip_size) / 2.0;
@@ -7044,6 +7230,9 @@ impl App {
                         ic,
                         gpu::DrawOpts { font_size: icon_size, color, bold: false, italic: false },
                     );
+                    if let Some(k) = kind {
+                        image_btn_hits.push((h.id.clone(), k, (chip_x, chip_y, chip_size, chip_size)));
+                    }
                     bx += abw + agap;
                 }
             }
@@ -7171,6 +7360,7 @@ impl App {
         self.pane_tab_rects = tab_hits;
         self.pane_tab_close_rects = tab_close_hits;
         self.pane_plus_rects = plus_hits;
+        self.image_btn_rects = image_btn_hits;
         // Damage flags get cleared here (parity with sugarloaf path
         // below) so successive frames short-circuit on idle.
         if let Ok(mut ws) = self.ws.lock() {
@@ -8026,24 +8216,45 @@ impl ApplicationHandler<UserEvent> for App {
                     sg.rescale(scale_factor as f32);
                     sg.resize(size.width, size.height);
                 }
-                window.request_redraw();
+                // macOS live-resize coalesces queued RedrawRequested, so paint
+                // synchronously here — otherwise the window frame leads and the
+                // grid catches up a frame later (ghostty parity). Wrap in a
+                // CATransaction with implicit animations off so AppKit doesn't
+                // interpolate stale contents to the new bounds on zoom.
+                self.chrome_dirty = true;
+                gpu::with_disabled_layer_actions(|| {
+                    self.render_frame();
+                });
             }
             WindowEvent::Resized(size) => {
-                if gpu_mode {
-                    if let Some(g) = self.gpu.as_mut() {
-                        g.resize(size.width, size.height);
-                    }
-                } else if let Some(sg) = self.sugarloaf.as_mut() {
-                    sg.resize(size.width, size.height);
+                // Ghostty-style live-resize: while AppKit's drag loop owns the
+                // window we stash the final size and skip ALL heavy work.
+                // The CAMetalLayer keeps its last IOSurface and gravity=topLeft
+                // anchors it under the new bounds — shrinking crops the old
+                // surface cleanly, growing shows the clear color in the
+                // newly revealed corner. about_to_wait flushes the stashed
+                // size once `inLiveResize` flips false (mouse released).
+                if gpu::is_in_live_resize(&window) {
+                    self.pending_resize = Some(size);
+                    return;
                 }
-                // window_cells() already subtracts WINDOW_PADDING on
-                // both sides — using inline raw math here told the PTY
-                // there were 2 more rows than we actually paint, and
-                // the last two lines (Claude Code's `bypass…` row)
-                // landed past our grid bottom.
-                let (cols, rows) = self.window_cells();
-                self.resize_backend(cols, rows);
-                window.request_redraw();
+                self.pending_resize = None;
+                gpu::with_disabled_layer_actions(|| {
+                    if gpu_mode {
+                        if let Some(g) = self.gpu.as_mut() {
+                            g.resize(size.width, size.height);
+                        }
+                    } else if let Some(sg) = self.sugarloaf.as_mut() {
+                        sg.resize(size.width, size.height);
+                    }
+                    let (cols, rows) = self.window_cells();
+                    if (cols, rows) != self.last_resized_cells {
+                        self.last_resized_cells = (cols, rows);
+                        self.resize_backend(cols, rows);
+                    }
+                    self.chrome_dirty = true;
+                    self.render_frame();
+                });
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
@@ -8328,6 +8539,41 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                         }
+                        window.request_redraw();
+                        return;
+                    }
+                    // Image-pane action buttons (zoom-out/in, rotate, reset).
+                    // Checked before the tab/plus path so the image-only
+                    // chrome cluster is never swallowed by tab hit-tests.
+                    if let Some((pid, kind)) = self
+                        .image_btn_rects
+                        .iter()
+                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, k, _)| (id.clone(), *k))
+                    {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.panes.get_mut(&pid) {
+                                let z = pane.image_view_zoom();
+                                match kind {
+                                    ImageBtn::ZoomIn => {
+                                        pane.image_zoom = (z * 1.25).clamp(1.0, 8.0);
+                                    }
+                                    ImageBtn::ZoomOut => {
+                                        pane.image_zoom = (z / 1.25).max(1.0);
+                                    }
+                                    ImageBtn::Rotate => {
+                                        pane.image_rot = (pane.image_rot + 1) % 4;
+                                    }
+                                    ImageBtn::Reset => {
+                                        pane.image_zoom = 1.0;
+                                        pane.image_rot = 0;
+                                    }
+                                }
+                                pane.dirty = true;
+                            }
+                            ws.active_pane = Some(pid);
+                        }
+                        self.chrome_dirty = true;
                         window.request_redraw();
                         return;
                     }
@@ -8656,6 +8902,35 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Live-resize flush: if a Resized arrived while the user was dragging
+        // an edge we stashed it and skipped the actual resize work. Once the
+        // user lets go, inLiveResize flips false and we replay the final size
+        // here — surface.configure + PTY reshape + render happen once,
+        // off the critical path of the live-resize tracking loop.
+        if let (Some(window), Some(size)) =
+            (self.window.clone(), self.pending_resize)
+        {
+            if !gpu::is_in_live_resize(&window) {
+                self.pending_resize = None;
+                let gpu_mode = self.gpu.is_some();
+                gpu::with_disabled_layer_actions(|| {
+                    if gpu_mode {
+                        if let Some(g) = self.gpu.as_mut() {
+                            g.resize(size.width, size.height);
+                        }
+                    } else if let Some(sg) = self.sugarloaf.as_mut() {
+                        sg.resize(size.width, size.height);
+                    }
+                    let (cols, rows) = self.window_cells();
+                    if (cols, rows) != self.last_resized_cells {
+                        self.last_resized_cells = (cols, rows);
+                        self.resize_backend(cols, rows);
+                    }
+                    self.chrome_dirty = true;
+                    self.render_frame();
+                });
+            }
+        }
         // Drain menu clicks from muda's global channel. The "Git 패널" item
         // toggles the panel (open/close), bypassing the env gate.
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {

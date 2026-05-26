@@ -22,7 +22,7 @@ pub const SURFACE_HOVER: [u8; 4] = [48, 56, 67, 255];
 pub const SURFACE_ACTIVE: [u8; 4] = [60, 70, 84, 255];
 /// Hairlines, dividers, inactive borders. A muted gray a clear step above
 /// BG so seams read as soft lines, not black gaps.
-pub const BORDER: [u8; 4] = [80, 92, 110, 255];
+pub const BORDER: [u8; 4] = [80, 92, 110, 110];
 /// Single accent — selection ring, cursor, links, active markers.
 pub const ACCENT: [u8; 4] = [90, 140, 230, 255];
 pub const TEXT: [u8; 4] = [236, 238, 243, 255];
