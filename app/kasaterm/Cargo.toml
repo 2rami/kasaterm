@@ -12,6 +12,12 @@ agent-socket = { path = "../../crates/agent-socket" }
 hangul-ime = { path = "../../crates/hangul-ime" }
 cell-renderer = { path = "../../crates/cell-renderer" }
 wgpu = "28"
+# Direct HAL access — needed to reach wgpu's actual CAMetalLayer for
+# Display P3 colorspace tagging. The high-level wgpu Surface API
+# doesn't expose this knob and macOS layer-walk from the NSView root
+# misses the real render layer (verified: Color Meter still showed
+# pure sRGB 255,0,0 after walk-based tagging).
+wgpu-hal = { version = "28", features = ["metal"] }
 sugarloaf = { version = "0.4", features = ["wgpu"] }
 winit = "0.30"
 raw-window-handle = "0.6"

@@ -130,6 +130,13 @@ impl GpuRenderer {
         #[cfg(target_os = "macos")]
         unsafe {
             patch_metal_layer_gravity(&window);
+            // Promote wgpu's observer CAMetalLayer to be the NSView's
+            // ROOT layer (sugarloaf / ghostty pattern). Sublayer-based
+            // setups silently ignore CAMetalLayer.colorspace because
+            // macOS color-manages the COMPOSITE (root layer) and the
+            // P3 tag on a sublayer is dropped. Promotion makes the
+            // tag stick — verified by Color Meter.
+            promote_metal_layer_to_root(&window, &surface);
         }
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -167,12 +174,33 @@ impl GpuRenderer {
         // wider-gamut "look". Switching to an sRGB-tagged framebuffer +
         // shader decode introduced round-trip precision loss that
         // visibly dimmed Claude Code's saturated bgs.
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| !f.is_srgb())
-            .unwrap_or_else(|| caps.formats[0].remove_srgb_suffix());
+        // CAMetalLayer.colorspace = P3 is honored more reliably by macOS
+        // when the surface pixel format has wider precision than plain
+        // 8-bit Unorm. Try in order:
+        //   1. Rgba16Float (HDR-capable, P3 always honored)
+        //   2. Bgra8Unorm (legacy, works in sugarloaf but flaky on
+        //      macOS 26 sublayer setups)
+        // Env override KASATERM_PIXEL_FORMAT for diagnostics.
+        let prefer = std::env::var("KASATERM_PIXEL_FORMAT").unwrap_or_default();
+        let format = if prefer == "float" {
+            caps.formats
+                .iter()
+                .copied()
+                .find(|f| matches!(f, wgpu::TextureFormat::Rgba16Float))
+                .unwrap_or(wgpu::TextureFormat::Bgra8Unorm)
+        } else if prefer == "srgb" {
+            caps.formats
+                .iter()
+                .copied()
+                .find(|f| f.is_srgb())
+                .unwrap_or_else(|| caps.formats[0].add_srgb_suffix())
+        } else {
+            caps.formats
+                .iter()
+                .copied()
+                .find(|f| !f.is_srgb())
+                .unwrap_or_else(|| caps.formats[0].remove_srgb_suffix())
+        };
         eprintln!("[gpu] surface format = {:?} srgb={}", format, format.is_srgb());
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -278,13 +306,15 @@ impl GpuRenderer {
             }
         }
         let pipeline = Pipeline::new(&device, format, 32_768);
-        pipeline.write_uniforms(&queue, [config.width as f32, config.height as f32]);
+        let init_dims = [config.width as f32, config.height as f32];
+        let (init_gamma, init_contrast, init_sat) = text_render_knobs();
+        pipeline.write_uniforms_full(&queue, init_dims, init_gamma, init_contrast, init_sat);
         let bind_group = pipeline.make_bind_group(&device, atlas.view(), atlas.sampler());
 
         // Image pass: own buffer (a few quads), linear filtering for smooth
         // scaling. Shares the same screen-size uniform projection.
         let image_pipeline = Pipeline::with_filtering(&device, format, 64, true);
-        image_pipeline.write_uniforms(&queue, [config.width as f32, config.height as f32]);
+        image_pipeline.write_uniforms_full(&queue, init_dims, init_gamma, init_contrast, init_sat);
         let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("kasaterm image sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -1300,14 +1330,12 @@ impl GpuRenderer {
         self.config.width = w.max(1);
         self.config.height = h.max(1);
         self.surface.configure(&self.device, &self.config);
-        self.pipeline.write_uniforms(
-            &self.queue,
-            [self.config.width as f32, self.config.height as f32],
-        );
-        self.image_pipeline.write_uniforms(
-            &self.queue,
-            [self.config.width as f32, self.config.height as f32],
-        );
+        let dims = [self.config.width as f32, self.config.height as f32];
+        let (gamma, contrast, sat) = text_render_knobs();
+        self.pipeline
+            .write_uniforms_full(&self.queue, dims, gamma, contrast, sat);
+        self.image_pipeline
+            .write_uniforms_full(&self.queue, dims, gamma, contrast, sat);
     }
 
     /// Render one frame. `panes` covers every pane the caller wants
@@ -1534,6 +1562,25 @@ impl GpuRenderer {
     }
 
     pub fn render(&mut self, _panes: &[PaneSlot<'_>], _scale: f32) -> Result<usize> {
+        // Re-apply P3 colorspace before every drawable. wgpu's Metal HAL
+        // doesn't touch this, but in practice the byte we read off the
+        // panel ended up matching plain sRGB (255,0,0 measured as
+        // 255,0,0 not the P3-wider 234,51,35 ghostty produces). Setting
+        // it once at init wasn't enough on macOS 26.3 — possibly because
+        // the layer's pixelFormat / drawableSize reconfig drops the tag.
+        // Setting it every frame is cheap (one selector call) and keeps
+        // the wider gamut sticky frame-to-frame.
+        #[cfg(target_os = "macos")]
+        {
+            apply_p3_via_hal(&self.surface);
+            unsafe {
+                reapply_p3(self._window.as_ref());
+                // Re-promote every frame — wgpu's observer pattern
+                // may re-attach the metal layer as a sublayer between
+                // presents, undoing our root-promotion at init.
+                promote_metal_layer_to_root(self._window.as_ref(), &self.surface);
+            }
+        }
         let instance_count = self.chrome.len();
         self.pipeline
             .write_instances(&self.device, &self.queue, &self.chrome);
@@ -1847,6 +1894,38 @@ pub fn srgb_rgba_to_linear(rgba: [u8; 4]) -> [f32; 4] {
     ]
 }
 
+/// Text rendering knobs (text_gamma, text_contrast). WezTerm-style
+/// `text_gamma>1.0` bends the glyph alpha mask so antialiased mid-tones
+/// land more opaque — crisper text without changing the source colour.
+/// `text_contrast` is an extra multiplier on top. Both readable from env
+/// at startup so a user can tune without rebuilding.
+fn text_render_knobs() -> (f32, f32, f32) {
+    // gamma 1.0 = legacy linear alpha mask. Anything above sharpens but
+    // also makes text feel "lifted / airy"; 1.0 stays grounded.
+    let gamma = std::env::var("KASATERM_TEXT_GAMMA")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0_f32)
+        .max(0.1);
+    // 1.1 baseline lifts antialiased mid-tones a touch — text on coloured
+    // bg reads at ghostty-like opacity without changing glyph shape.
+    let contrast = std::env::var("KASATERM_TEXT_CONTRAST")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.1_f32)
+        .max(0.1);
+    // Saturation 1.0 default = passthrough. Bumping shifts perceived
+    // hue slightly even with luma preservation (claude code's # comment
+    // green drifted to chartreuse at 1.5). Source bytes go through
+    // unchanged unless user dials this up.
+    let sat = std::env::var("KASATERM_COLOR_SAT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0_f32)
+        .max(0.0);
+    (gamma, contrast, sat)
+}
+
 /// sRGB-encoded byte → linear-light float. Used for wgpu clear values
 /// against an sRGB-tagged framebuffer (the hardware re-encodes on store,
 /// so the clear must be in linear). IEC piecewise — same curve the
@@ -2104,6 +2183,31 @@ unsafe fn patch_metal_layer_gravity(window: &Window) {
     patch_recursive(root_layer, &gravity);
     eprintln!("[live-resize-probe] patched gravity recursively from root layer");
 
+    // NSWindow-level colorspace. wgpu attaches its CAMetalLayer as a
+    // SUBLAYER (sugarloaf replaces the view's layer entirely — that's
+    // why their P3 tag stuck and ours didn't). For sublayer-based
+    // setups the window's `colorSpace` is what macOS color-manages
+    // against; setting it propagates Display P3 to everything inside.
+    let ns_window: *mut AnyObject = msg_send![ns_view, window];
+    if !ns_window.is_null() {
+        if let Some(ns_cs_cls) = objc2::runtime::AnyClass::get(c"NSColorSpace") {
+            let p3: *mut AnyObject = msg_send![ns_cs_cls, displayP3ColorSpace];
+            if !p3.is_null() {
+                let _: () = msg_send![ns_window, setColorSpace: p3];
+                eprintln!("[gpu] NSWindow colorSpace → Display P3");
+            }
+        }
+    }
+
+    // Display P3 on CAMetalLayer. Doesn't modify source colours — just
+    // tells macOS to interpret the same sRGB-encoded bytes as P3 at
+    // scan-out. On Retina P3 panels the green (and red, blue) primaries
+    // reach the wider P3 gamut → noticeably punchier diff bg highlights
+    // / Claude Code colour chips. We had this once, removed it for fear
+    // of "altering the terminal", but it's the layer-level setting
+    // ghostty / iTerm2 use by default; the byte values stay untouched.
+    patch_p3_colorspace_safe(root_layer);
+
     // NSViewLayerContentsRedrawPolicy: 2 = .duringViewResize. Default
     // (.onSetNeedsDisplay) lets AppKit skip paint during the live-resize
     // tracking loop, which is what makes the grid lag behind the frame.
@@ -2111,6 +2215,141 @@ unsafe fn patch_metal_layer_gravity(window: &Window) {
     // NSViewLayerContentsPlacement: 9 = .topLeft — mirrors the layer gravity
     // so AppKit's own resize-time scaling doesn't stretch contents either.
     let _: () = msg_send![ns_view, setLayerContentsPlacement: 9_isize];
+}
+
+/// Promote wgpu's CAMetalLayer (created as a sublayer by `layer_observer`)
+/// to be the NSView's root layer. Without this, macOS color-manages
+/// the parent root and silently ignores the sublayer's `colorspace`
+/// tag, so Display P3 never takes effect (Color Meter reads pure sRGB).
+/// Sugarloaf does this directly because it owns the layer creation.
+#[cfg(target_os = "macos")]
+unsafe fn promote_metal_layer_to_root(
+    window: &winit::window::Window,
+    surface: &wgpu::Surface<'static>,
+) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::RawWindowHandle;
+    unsafe {
+        let Ok(handle) = window.window_handle() else { return };
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+        let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+        let hal_surface_opt = surface.as_hal::<wgpu_hal::api::Metal>();
+        let Some(hal_surface) = hal_surface_opt else { return };
+        let layer_lock = hal_surface.render_layer().lock();
+        let layer_ref = layer_lock.as_ref();
+        let layer_ptr: *mut AnyObject = layer_ref as *const _ as *mut AnyObject;
+        // setLayer: requires the view to want a layer.
+        let _: () = msg_send![ns_view, setLayer: layer_ptr];
+        let _: () = msg_send![ns_view, setWantsLayer: true];
+        // P3 colorspace stays sticky only when EDR is enabled — on Apple
+        // Silicon Mini-LED panels macOS color-manages SDR content to the
+        // sRGB primary subspace of the display unless wantsEDR is on.
+        // Use respondsToSelector to avoid the abort we hit earlier on
+        // macOS 26 when calling it via the wrong object.
+        let edr_sel = objc2::sel!(setWantsExtendedDynamicRangeContent:);
+        let responds: bool = msg_send![layer_ptr, respondsToSelector: edr_sel];
+        if responds {
+            let _: () = msg_send![layer_ptr, setWantsExtendedDynamicRangeContent: true];
+            eprintln!("[gpu] EDR enabled on render layer");
+        }
+        eprintln!("[gpu] promoted wgpu CAMetalLayer to NSView root layer");
+    }
+}
+
+/// Apply P3 colorspace through wgpu-hal directly — the actual render
+/// layer wgpu owns, not whatever sublayer we walked the NSView tree
+/// looking for. Without this, the layer-walk approach silently fails
+/// (Color Meter still reads 255,0,0 for a pure-red printf).
+#[cfg(target_os = "macos")]
+fn apply_p3_via_hal(surface: &wgpu::Surface<'static>) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use std::sync::OnceLock;
+    static CS: OnceLock<usize> = OnceLock::new();
+    let cs = *CS.get_or_init(|| unsafe {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGColorSpaceCreateWithName(name: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+            static kCGColorSpaceDisplayP3: *const std::ffi::c_void;
+        }
+        let p = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+        p as usize
+    });
+    if cs == 0 { return; }
+    unsafe {
+        let hal_surface_opt = surface.as_hal::<wgpu_hal::api::Metal>();
+        let Some(hal_surface) = hal_surface_opt else { return };
+        let layer_lock = hal_surface.render_layer().lock();
+        // metal::MetalLayerRef IS the CAMetalLayer Obj-C object — its
+        // `&Ref` IS the pointer. Cast through *const () to drop the
+        // type info safely.
+        let layer_ref = layer_lock.as_ref();
+        let layer_ptr: *mut AnyObject = layer_ref as *const _ as *mut AnyObject;
+        let _: () = msg_send![layer_ptr, setColorspace: cs as *mut std::ffi::c_void];
+        if std::env::var_os("KASATERM_COLORSPACE_DEBUG").is_some() {
+            let applied: *mut AnyObject = msg_send![layer_ptr, colorspace];
+            eprintln!(
+                "[gpu] HAL P3 set on render_layer={:p} applied={}",
+                layer_ptr,
+                !applied.is_null()
+            );
+        }
+    }
+}
+
+/// Per-frame P3 colorspace re-application via NSView layer walk. Kept as
+/// a belt-and-braces — wgpu-hal path is the real fix.
+#[cfg(target_os = "macos")]
+unsafe fn reapply_p3(window: &winit::window::Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::RawWindowHandle;
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<(usize, usize)> = OnceLock::new(); // (layer_ptr, cs_ptr)
+    let entry = CACHED.get_or_init(|| {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        unsafe extern "C" {
+            fn CGColorSpaceCreateWithName(name: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+            static kCGColorSpaceDisplayP3: *const std::ffi::c_void;
+        }
+        unsafe {
+            let cs = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+            let Ok(handle) = window.window_handle() else { return (0, 0) };
+            let RawWindowHandle::AppKit(h) = handle.as_raw() else { return (0, 0) };
+            let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+            let root_layer: *mut AnyObject = msg_send![ns_view, layer];
+            // Walk to find the first CAMetalLayer-subclass descendant.
+            let Some(metal_cls) = objc2::runtime::AnyClass::get(c"CAMetalLayer") else {
+                return (0, 0);
+            };
+            fn find(l: *mut AnyObject, cls: &objc2::runtime::AnyClass) -> *mut AnyObject {
+                unsafe {
+                    let is_metal: bool = msg_send![l, isKindOfClass: cls];
+                    if is_metal { return l; }
+                    let subs: *mut AnyObject = msg_send![l, sublayers];
+                    if !subs.is_null() {
+                        let n: usize = msg_send![subs, count];
+                        for i in 0..n {
+                            let s: *mut AnyObject = msg_send![subs, objectAtIndex: i];
+                            if !s.is_null() {
+                                let r = find(s, cls);
+                                if !r.is_null() { return r; }
+                            }
+                        }
+                    }
+                    std::ptr::null_mut()
+                }
+            }
+            let metal_layer = find(root_layer, metal_cls);
+            (metal_layer as usize, cs as usize)
+        }
+    });
+    let (layer_ptr, cs_ptr) = *entry;
+    if layer_ptr == 0 || cs_ptr == 0 { return; }
+    let layer = layer_ptr as *mut AnyObject;
+    let cs = cs_ptr as *mut std::ffi::c_void;
+    let _: () = unsafe { msg_send![layer, setColorspace: cs] };
 }
 
 /// Walks the layer tree and sets every CAMetalLayer descendant's
@@ -2124,14 +2363,28 @@ fn patch_p3_colorspace_safe(root_layer: *mut objc2::runtime::AnyObject) {
     use objc2::msg_send;
     use objc2::runtime::AnyClass;
     unsafe {
-        // CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3)
+        // ExtendedDisplayP3 (vs plain DisplayP3): the "extended" variant
+        // accepts encoded values outside [0,1] mapping to HDR-bright
+        // colours. Even on a Bgra8Unorm framebuffer (which clamps), the
+        // layer's intent telegraphs to the macOS compositor that we want
+        // the panel's widest available gamut. Ghostty / iTerm2 both
+        // settle on this when an EDR display is detected.
         #[link(name = "CoreGraphics", kind = "framework")]
         unsafe extern "C" {
             fn CGColorSpaceCreateWithName(name: *const std::ffi::c_void) -> *mut std::ffi::c_void;
             fn CGColorSpaceRelease(cs: *mut std::ffi::c_void);
             static kCGColorSpaceDisplayP3: *const std::ffi::c_void;
+            static kCGColorSpaceExtendedDisplayP3: *const std::ffi::c_void;
         }
-        let cs = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+        // env override KASATERM_COLORSPACE=p3|extended-p3|disabled
+        let cs_name = std::env::var("KASATERM_COLORSPACE")
+            .unwrap_or_else(|_| "p3".to_string());
+        let cs_ref: *const std::ffi::c_void = match cs_name.as_str() {
+            "disabled" => return,
+            "extended-p3" => kCGColorSpaceExtendedDisplayP3,
+            _ => kCGColorSpaceDisplayP3,
+        };
+        let cs = CGColorSpaceCreateWithName(cs_ref);
         if cs.is_null() {
             return;
         }
@@ -2143,28 +2396,38 @@ fn patch_p3_colorspace_safe(root_layer: *mut objc2::runtime::AnyObject) {
             layer: *mut objc2::runtime::AnyObject,
             cs: *mut std::ffi::c_void,
             metal_class: &AnyClass,
-        ) {
+        ) -> usize {
             unsafe {
+                let mut hits = 0usize;
                 let is_metal: bool = msg_send![layer, isKindOfClass: metal_class];
                 if is_metal {
                     let _: () = msg_send![layer, setColorspace: cs];
+                    hits += 1;
                 }
                 let subs: *mut objc2::runtime::AnyObject = msg_send![layer, sublayers];
                 if subs.is_null() {
-                    return;
+                    return hits;
                 }
                 let n: usize = msg_send![subs, count];
                 for i in 0..n {
                     let s: *mut objc2::runtime::AnyObject = msg_send![subs, objectAtIndex: i];
                     if !s.is_null() {
-                        walk(s, cs, metal_class);
+                        hits += walk(s, cs, metal_class);
                     }
                 }
+                hits
             }
         }
-        walk(root_layer, cs, metal_class);
-        CGColorSpaceRelease(cs);
-        eprintln!("[gpu] CAMetalLayer colorspace → Display P3");
+        let hits = walk(root_layer, cs, metal_class);
+        // Sugarloaf's defensive pattern: never release the colorspace
+        // we just handed to the layer. The CA property is documented to
+        // retain on set, but if Apple ever changes that semantics our
+        // colorspace would silently drop and the layer falls back to
+        // sRGB — exactly the "set returned ok but colours look wrong"
+        // symptom. We create one per process, so the leak is fine.
+        // (See sugarloaf-0.4.4/src/context/metal.rs.)
+        std::mem::forget(cs);
+        eprintln!("[gpu] CAMetalLayer colorspace → {cs_name} ({hits} layer(s) tagged)");
     }
 }
 
