@@ -23,3 +23,6 @@ arboard = "3"
 # together automatically; the swash/cell-renderer GPU path draws one
 # glyph per codepoint, so NFD shows as split jamo without this.
 unicode-normalization = "0.1"
+# Fast SIMD substring search — used in the reader hot path to short-circuit
+# the OSC 1337 / kitty graphics scans when neither prefix is present.
+memchr = "2"
