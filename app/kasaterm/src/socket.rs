@@ -510,6 +510,7 @@ pub fn session_file_path() -> Option<std::path::PathBuf> {
 }
 
 /// One pane's restore record — the payload carried by a layout-tree leaf.
+#[allow(dead_code)]
 pub struct PaneRestore {
     /// None when the saved cwd couldn't be resolved; restore uses the default.
     pub cwd: Option<std::path::PathBuf>,
