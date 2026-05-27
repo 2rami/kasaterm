@@ -561,15 +561,17 @@ impl EventListener for PtyEventForwarder {
                     13 => (0xC3, 0x97, 0xD8),
                     14 => (0x70, 0xC0, 0xB1),
                     15 => (0xEA, 0xEA, 0xEA),
-                    // 256 = NamedColor::Foreground. Match ghostty's
-                    // bright white fg (#C5C8C6, the same as palette[7]).
-                    256 => (0xC5, 0xC8, 0xC6),
-                    // 257 = NamedColor::Background. Match ghostty's
-                    // default dark bg #1D1F21. Claude Code uses this
-                    // to decide light/dark theme and the exact red
-                    // shade for diff highlights.
-                    257 => (0x1D, 0x1F, 0x21),
-                    // 258 = NamedColor::Cursor. Match palette[7].
+                    // 256 = NamedColor::Foreground. kasaterm's DEFAULT_FG
+                    // is pure white (cells::DEFAULT_FG = [255, 255, 255]).
+                    256 => (0xFF, 0xFF, 0xFF),
+                    // 257 = NamedColor::Background. kasaterm chrome bg
+                    // = theme::BG = [37, 44, 53] (#252C35). TUIs use this
+                    // OSC 11 reply to pick a syntax-highlight contrast
+                    // that actually matches what's behind their text on
+                    // screen — answering ghostty's bg would shift their
+                    // colour decisions slightly off.
+                    257 => (37, 44, 53),
+                    // 258 = NamedColor::Cursor. Match palette[7] (off-white).
                     258 => (0xC5, 0xC8, 0xC6),
                     // 16-255: xterm 6×6×6 cube + 24-step gray ramp,
                     // identical to ghostty's hardcoded fallback.
