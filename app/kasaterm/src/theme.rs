@@ -47,14 +47,6 @@ pub const RADIUS_SM: f32 = 6.0;
 pub const RADIUS_MD: f32 = 9.0;
 
 /// u8 sRGB RGBA → f32 [0,1] RGBA, for the sugarloaf path which takes floats.
-pub fn f32_rgba(c: [u8; 4]) -> [f32; 4] {
-    [
-        c[0] as f32 / 255.0,
-        c[1] as f32 / 255.0,
-        c[2] as f32 / 255.0,
-        c[3] as f32 / 255.0,
-    ]
-}
 
 /// Same color with an explicit alpha override (overlays / drop-zones).
 pub const fn with_alpha(c: [u8; 4], a: u8) -> [u8; 4] {

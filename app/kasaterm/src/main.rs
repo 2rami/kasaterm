@@ -12,13 +12,10 @@ mod socket;
 mod theme;
 
 use anyhow::Result;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use sugarloaf::layout::RootStyle;
-use sugarloaf::{Sugarloaf, SugarloafRenderer, SugarloafWindow, SugarloafWindowSize};
 use tmux_bridge::layout::{parse_layout, Layout};
 use tmux_bridge::screen::Cell as GridCell;
 use tmux_bridge::screen::Row;
@@ -101,7 +98,6 @@ fn tab_icon_glyph(name: &str) -> &'static str {
 /// `▀▄▌▐` characters) read as squares instead of tall rectangles. The
 /// earlier 1.3 stretched cells to 1:3 and made the sprite look
 /// elongated next to Ghostty / iTerm2.
-const LINE_HEIGHT_MULT: f32 = 1.0;
 /// Logical-pixel padding between the window edge and the cell grid on
 /// every side. Mirrors what Terminal.app / Ghostty give the content so
 /// text doesn't jam against the chrome. Must match `render_frame`'s
@@ -924,6 +920,7 @@ const MARKDOWN_EDITOR_HTML: &str = r#"<!DOCTYPE html>
 struct CellGeom {
     w: f32,
     h: f32,
+    #[allow(dead_code)]
     baseline: f32,
 }
 
@@ -1918,7 +1915,6 @@ struct Session {
 
 struct App {
     window: Option<Arc<Window>>,
-    sugarloaf: Option<Sugarloaf<'static>>,
     /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
     /// `sugarloaf` — both own a wgpu Surface, only one can present.
     gpu: Option<gpu::GpuRenderer>,
@@ -2237,7 +2233,6 @@ impl App {
     fn new(proxy: EventLoopProxy<UserEvent>) -> Self {
         Self {
             window: None,
-            sugarloaf: None,
             gpu: None,
             tmux: None,
             pty: HashMap::new(),
@@ -2752,20 +2747,6 @@ impl App {
                 window.request_redraw();
             }
             return;
-        }
-        // sugarloaf path (KASATERM_RENDERER=sugarloaf opt-in).
-        if let (Some(window), Some(sugarloaf)) = (self.window.as_ref(), self.sugarloaf.as_ref()) {
-            let scale = window.scale_factor() as f32;
-            let (_dim, metrics) =
-                sugarloaf.compute_cell_metrics(new, LINE_HEIGHT_MULT, scale);
-            self.cell = CellGeom {
-                w: (metrics.cell_width as f32) / scale,
-                h: (metrics.cell_height as f32) / scale,
-                baseline: 0.0,
-            };
-            let (cols, rows) = self.window_cells();
-            self.resize_backend(cols, rows);
-            window.request_redraw();
         }
     }
 
@@ -8265,432 +8246,6 @@ impl App {
             }
             return;
         }
-        // Captured before the long-lived &mut self.sugarloaf borrow below.
-        let sidebar_w = self.effective_sidebar_w();
-        let Some(sugarloaf) = self.sugarloaf.as_mut() else { return; };
-        let size = window.inner_size();
-        let win_w = size.width as f32 / scale;
-        let win_h = size.height as f32 / scale;
-        sugarloaf.rect(
-            None,
-            0.0,
-            0.0,
-            win_w,
-            win_h,
-            [
-                cells::DEFAULT_BG[0] as f32 / 255.0,
-                cells::DEFAULT_BG[1] as f32 / 255.0,
-                cells::DEFAULT_BG[2] as f32 / 255.0,
-                1.0,
-            ],
-            0.0,
-            0,
-        );
-        // Snapshot the per-pane render data under one lock so the
-        // sugarloaf draw calls below can run without re-locking. Each
-        // entry carries the pane's resolved rect (in cells), the cell
-        // grid we'll actually paint (history + live composed), and the
-        // cursor / title info the renderer reads.
-        #[allow(dead_code)]
-        struct PaneFrame {
-            id: String,
-            x_cells: u16,
-            y_cells: u16,
-            w_cells: u16,
-            h_cells: u16,
-            rows: Vec<Vec<GridCell>>,
-            cursor_row: u16,
-            cursor_col: u16,
-            cursor_visible: bool,
-            title: Option<String>,
-        }
-        // Hold the workspace lock across the entire render so we can
-        // `mem::take` each pane's cell grid into the PaneFrame
-        // without the PTY thread observing an empty Vec. The lock
-        // is released at the end of the function, after we restore
-        // the grids — sugarloaf.render() inside the held region
-        // pauses the PTY pump for one frame, well below the 16 ms
-        // budget.
-        let mut ws_guard = self.ws.lock().unwrap();
-        let (pane_frames, active_id) = {
-            let ws = &mut *ws_guard;
-            let active_id = ws.active_pane.clone();
-            let leaves: Vec<(String, u16, u16, u16, u16)> =
-                if let Some(layout) = ws.layout.as_ref() {
-                    layout
-                        .leaves()
-                        .into_iter()
-                        .filter_map(|n| match n {
-                            Layout::Pane { id, x, y, w, h } => {
-                                Some((format!("%{id}"), *x, *y, *w, *h))
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                } else {
-                    // No layout yet: fall back to one full-window pane.
-                    // First key in the map keeps things deterministic so
-                    // the active-pane lookup below points at the same one.
-                    match ws.panes.iter().next() {
-                        Some((id, p)) => {
-                            let (c, r) = p.term().map_or((0, 0), |t| (t.cols, t.rows));
-                            vec![(id.clone(), 0, 0, c, r)]
-                        }
-                        None => Vec::new(),
-                    }
-                };
-            let mut frames = Vec::with_capacity(leaves.len());
-            for (id, x, y, w, h) in leaves {
-                // Pre-fetch pane metadata under an immutable borrow,
-                // then drop it so we can take a mutable borrow to
-                // move the cell grid out without cloning. The pump
-                // thread can't observe the gap because it would need
-                // the same ws lock we already hold.
-                let (total, offset, cursor_row, cursor_col, cursor_visible, title) = {
-                    let Some(pane) = ws.panes.get(&id) else { continue };
-                    let title = pane.title.clone();
-                    // sugarloaf path only renders terminal panes (legacy A/B);
-                    // image/markdown panes are gpu-only.
-                    let Some(t) = pane.term() else { continue };
-                    (
-                        t.rows.max(1) as usize,
-                        t.scroll_offset.min(t.history.len()),
-                        t.cursor_row,
-                        t.cursor_col,
-                        t.cursor_visible,
-                        title,
-                    )
-                };
-                let composed: Vec<Vec<GridCell>> = if offset == 0 {
-                    // Hot path: move (not clone) the live grid out for rendering.
-                    ws.panes
-                        .get_mut(&id)
-                        .and_then(|p| p.term_mut())
-                        .map(|t| std::mem::take(&mut t.cells))
-                        .unwrap_or_default()
-                } else {
-                    let pane = ws.panes.get(&id).unwrap();
-                    let Some(t) = pane.term() else { continue };
-                    let mut out: Vec<Vec<GridCell>> = Vec::with_capacity(total);
-                    let hist_start = t.history.len() - offset;
-                    for row in t.history.iter().skip(hist_start) {
-                        out.push(row.clone());
-                        if out.len() >= total {
-                            break;
-                        }
-                    }
-                    let need = total.saturating_sub(out.len());
-                    for row in t.cells.iter().take(need) {
-                        out.push(row.clone());
-                    }
-                    out
-                };
-                frames.push(PaneFrame {
-                    id,
-                    x_cells: x,
-                    y_cells: y,
-                    w_cells: w,
-                    h_cells: h,
-                    rows: composed,
-                    cursor_row,
-                    cursor_col,
-                    cursor_visible: offset == 0 && cursor_visible,
-                    title,
-                });
-            }
-            (frames, active_id)
-        };
-
-        if pane_frames.is_empty() {
-            sugarloaf.render();
-            return;
-        }
-
-        // Resolve every pane's display label up front so the header
-        // rendering loop doesn't need to call back into `self`
-        // (resolve_pane_label borrows self.pty, which conflicts with
-        // the long-lived sugarloaf mutable borrow).
-        let pane_labels: Vec<String> = pane_frames
-            .iter()
-            .map(|f| Self::resolve_pane_label(&self.pty, &f.id, f.title.as_deref()))
-            .collect();
-
-        // Origin offset: TITLE_HEIGHT replaces the top padding so the
-        // cell grid starts immediately below the custom chrome strip.
-        // Add a small breathing margin so the first text row never
-        // bleeds into the strip rect on systems where sugarloaf
-        // interprets these coordinates slightly differently.
-        let origin_x = sidebar_w + WINDOW_PADDING;
-        let origin_y = TITLE_HEIGHT + 6.0;
-
-        // Pass 1: walk each pane and render its cell grid at its rect.
-        let log_layout = std::env::var_os("KASATERM_LOG_LAYOUT").is_some();
-        // Header strip is needed when the layout has a split (multiple panes)
-        // OR when any single pane carries >1 in-pane tabs (cross-pane drag,
-        // + button add). Matches the gpu path's condition.
-        let any_multitab = {
-            let ws = self.ws.lock().unwrap();
-            pane_frames
-                .iter()
-                .any(|f| ws.panes.get(&f.id).map_or(false, |p| p.tabs.len() > 1))
-        };
-        let show_headers = pane_frames.len() > 1 || any_multitab;
-        let header_shift = if show_headers { PANE_HEADER_HEIGHT } else { 0.0 };
-        for frame in &pane_frames {
-            let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
-            let pane_px_y =
-                origin_y + frame.y_cells as f32 * self.cell.h + header_shift;
-            if log_layout {
-                let total = frame.rows.len();
-                eprintln!(
-                    "[render] pane={} rows={total} cols={} px=({pane_px_x:.0},{pane_px_y:.0})",
-                    frame.id,
-                    frame.rows.first().map(|r| r.len()).unwrap_or(0),
-                );
-                for (i, row) in frame.rows.iter().enumerate().rev().take(8) {
-                    let preview: String = row
-                        .iter()
-                        .take(80)
-                        .map(|c| match c.ch.chars().next() {
-                            Some(ch) if !ch.is_whitespace() => ch,
-                            _ => '.',
-                        })
-                        .collect();
-                    let nonblank = row
-                        .iter()
-                        .filter(|c| !c.ch.is_empty() && c.ch != " ")
-                        .count();
-                    eprintln!("[render]   row[{i:>2}] non={nonblank:>3} {preview}");
-                }
-            }
-            cells::render_screen(
-                sugarloaf,
-                &frame.rows,
-                pane_px_x,
-                pane_px_y,
-                self.cell.w,
-                self.cell.h,
-                self.font_size,
-                self.cell.baseline,
-            );
-        }
-
-        // Pass 2: per-pane iTerm-style header bar. Only when the
-        // workspace is actually split — a single pane stays
-        // header-less so the first session reads as a plain terminal.
-        // The header sits *above* the cell grid (cell origin already
-        // shifted by `header_shift` in Pass 1), so painting here
-        // covers the gap between the pane top and the first text row.
-        if show_headers {
-            self.pane_header_rects = Vec::with_capacity(pane_frames.len());
-            for (idx, frame) in pane_frames.iter().enumerate() {
-                let is_active = active_id.as_deref() == Some(frame.id.as_str());
-                let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
-                let pane_top = origin_y + frame.y_cells as f32 * self.cell.h;
-                let pane_px_w = frame.w_cells as f32 * self.cell.w;
-                // Same tokens as the gpu path (B) — no separate drift.
-                let bg = if is_active {
-                    theme::f32_rgba(theme::SURFACE_ACTIVE)
-                } else {
-                    theme::f32_rgba(theme::SURFACE)
-                };
-                sugarloaf.rect(
-                    None,
-                    pane_px_x,
-                    pane_top,
-                    pane_px_w,
-                    PANE_HEADER_HEIGHT,
-                    bg,
-                    0.0,
-                    0,
-                );
-                // Hairline at the bottom of the header so it reads as
-                // a separate band from the cell grid.
-                sugarloaf.rect(
-                    None,
-                    pane_px_x,
-                    pane_top + PANE_HEADER_HEIGHT - 1.0,
-                    pane_px_w,
-                    1.0,
-                    theme::f32_rgba(theme::BORDER),
-                    0.0,
-                    0,
-                );
-                // Close button + title share the same font size and
-                // y baseline so they read as one row of chrome
-                // controls. Sugarloaf draws text from the bitmap
-                // top-left; we anchor it 8px below the header top so
-                // a ~0.85× cell-height glyph sits visually centered
-                // in the 28px strip.
-                // Match font size between close glyph and title so
-                // their bitmap tops sit on the same y. Centering math:
-                // a `chrome_font` glyph is ~chrome_font * 1.0 logical
-                // tall in this font, so the vertical inset that
-                // visually centers it in PANE_HEADER_HEIGHT is
-                // (PANE_HEADER_HEIGHT - chrome_font) / 2.
-                let chrome_font = 14.0;
-                let text_y = pane_top + (PANE_HEADER_HEIGHT - chrome_font) / 2.0;
-                let close_size = chrome_font + 4.0;
-                let close_rect = (
-                    pane_px_x + 6.0,
-                    pane_top + (PANE_HEADER_HEIGHT - close_size) / 2.0,
-                    close_size,
-                    close_size,
-                );
-                let chrome_color: [u8; 4] = if is_active {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_DIM
-                };
-                sugarloaf.text_mut().draw(
-                    close_rect.0,
-                    text_y,
-                    "x",
-                    &sugarloaf::text::DrawOpts {
-                        font_size: chrome_font,
-                        color: chrome_color,
-                        bold: false,
-                        italic: false,
-                        font_id: None,
-                    },
-                );
-                let title = pane_labels[idx].clone();
-                sugarloaf.text_mut().draw(
-                    close_rect.0 + close_rect.2 + 8.0,
-                    text_y,
-                    &title,
-                    &sugarloaf::text::DrawOpts {
-                        font_size: chrome_font,
-                        color: chrome_color,
-                        bold: is_active,
-                        italic: false,
-                        font_id: None,
-                    },
-                );
-                self.pane_header_rects.push((frame.id.clone(), close_rect));
-            }
-        } else {
-            self.pane_header_rects.clear();
-        }
-
-        // Pass 3: selection overlay + cursor block + preedit on the
-        // active pane only. Inactive panes show no cursor — matches the
-        // tmux / iTerm2 convention where the unfocused split fades its
-        // caret.
-        let active_frame = active_id
-            .as_deref()
-            .and_then(|id| pane_frames.iter().find(|f| f.id == id));
-        if let Some(frame) = active_frame {
-            let pane_px_x = origin_x + frame.x_cells as f32 * self.cell.w;
-            let pane_px_y =
-                origin_y + frame.y_cells as f32 * self.cell.h + header_shift;
-            if let Some(sel) = self.selection {
-                cells::render_selection_overlay(
-                    sugarloaf,
-                    sel.anchor,
-                    sel.end,
-                    pane_px_x,
-                    pane_px_y,
-                    self.cell.w,
-                    self.cell.h,
-                );
-            }
-            // Skip the cursor rect while preedit is active — the
-            // preedit overlay below paints its own opaque background +
-            // accent underline, which would be hidden underneath the
-            // translucent cursor and produce the "한글 합치는 중에
-            // 안 보이는" symptom the user reported.
-            if frame.cursor_visible && blink_on && self.preedit.is_empty() {
-                let cursor_x = pane_px_x + frame.cursor_col as f32 * self.cell.w;
-                let cursor_y = pane_px_y + frame.cursor_row as f32 * self.cell.h;
-                sugarloaf.rect(
-                    None,
-                    cursor_x,
-                    cursor_y,
-                    self.cell.w,
-                    self.cell.h,
-                    [
-                        cells::ITERM_CURSOR[0] as f32 / 255.0,
-                        cells::ITERM_CURSOR[1] as f32 / 255.0,
-                        cells::ITERM_CURSOR[2] as f32 / 255.0,
-                        0.55,
-                    ],
-                    0.0,
-                    0,
-                );
-            }
-            // Preedit must render regardless of `cursor_visible` —
-            // alt-screen TUIs (Claude Code, vim, lazygit, htop) hide
-            // the terminal cursor with `\e[?25l` while they draw their
-            // own input chrome. Gating on cursor_visible there caused
-            // the in-progress Hangul to disappear entirely. The
-            // reported cursor row/col still points at the active
-            // input position, so use it unconditionally.
-            if !self.preedit.is_empty() {
-                // Preedit sits exactly on the reported PTY cursor. We
-                // used to scan for a prompt sigil and snap to the row's
-                // last filled cell, but a TUI's grey placeholder ("Type
-                // something") counts as filled and dragged the composing
-                // syllable past it to the line's end. The cursor row/col
-                // already points at the active input position (incl.
-                // trailing spaces the PTY echoes), so trust it directly.
-                let (anchor_row, anchor_col) = (frame.cursor_row, frame.cursor_col);
-                let px = pane_px_x + anchor_col as f32 * self.cell.w;
-                let py = pane_px_y + anchor_row as f32 * self.cell.h;
-                if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
-                    eprintln!(
-                        "[preedit] text={:?} cursor=(row={}, col={}) anchor=(row={anchor_row}, col={anchor_col}) px=({px:.1},{py:.1}) cell=({:.1}x{:.1})",
-                        self.preedit, frame.cursor_row, frame.cursor_col, self.cell.w, self.cell.h
-                    );
-                }
-                cells::render_preedit(
-                    sugarloaf,
-                    &self.preedit,
-                    px,
-                    py,
-                    self.cell.w,
-                    self.cell.h,
-                    self.font_size,
-                    cells::ITERM_CURSOR,
-                    self.cell.baseline,
-                );
-            }
-        }
-
-        // Overlay re-pass dropped: with the coordinate-unit fix above
-        // (logical pixels everywhere), the strip already paints in the
-        // right place on the first pass and doesn't need an overdraw
-        // to mask cell-grid bleed.
-
-        let t_emit = t0.elapsed().as_micros();
-        sugarloaf.render();
-        if trace {
-            let t_total = t0.elapsed().as_micros();
-            eprintln!(
-                "[render] emit={t_emit}us render={t_present}us total={t_total}us frames={n} since_input={si}ms",
-                t_present = t_total - t_emit,
-                n = pane_frames.len(),
-                si = now.saturating_duration_since(self.last_input_at).as_millis(),
-            );
-        }
-        // Move the cell grids back and clear damage flags under the
-        // same lock we held throughout the render.
-        for frame in pane_frames {
-            if let Some(t) = ws_guard
-                .panes
-                .get_mut(&frame.id)
-                .and_then(|p| p.term_mut())
-            {
-                if t.cells.is_empty() {
-                    t.cells = frame.rows;
-                }
-            }
-        }
-        for pane in ws_guard.panes.values_mut() {
-            pane.dirty = false;
-        }
-        drop(ws_guard);
-        self.chrome_dirty = false;
     }
 }
 
@@ -8815,163 +8370,25 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
-        // Default = cell-renderer GPU path. All chrome UI work since
-        // 2026-05-26 (browser-tab header, multitab stage-3, sidebar
-        // drag-resize, image pane controls, hover effects) lives in
-        // `render_frame_gpu` (~850 lines of chrome code that never
-        // got ported to the sugarloaf `render_frame` body). Flipping
-        // the default to sugarloaf (2026-05-27 62a7844) lost all of
-        // that visually — the code is intact, just on the wrong path.
-        //
-        // `KASATERM_RENDERER=sugarloaf` opts into the sugarloaf path
-        // for P3 colour-reproduction A/B (see reference_kasaterm_color_pipeline).
-        // The colour gap is real but limited to chrome+text byte
-        // values; functionality lives on the gpu path.
-        let use_gpu = std::env::var("KASATERM_RENDERER")
-            .map(|v| !v.eq_ignore_ascii_case("sugarloaf"))
-            .unwrap_or(true);
-        let sg_window = SugarloafWindow {
-            handle: window.window_handle().unwrap().as_raw(),
-            display: window.display_handle().unwrap().as_raw(),
-            scale: window.scale_factor() as f32,
-            size: SugarloafWindowSize {
-                width: window.inner_size().width as f32,
-                height: window.inner_size().height as f32,
-            },
-        };
-        // Match the user's active macOS Terminal.app profile
-        // (Default Window Settings = "GitHub Dark Dimmed"). The plist
-        // stores the font as the NSKeyedArchiver bytes of an NSFont
-        // whose fontName() is "D2CodingLigatureNFM" — the PostScript
-        // name of D2CodingLigature Nerd Font Mono. CoreText / swash
-        // resolve through family names, so we point at the family the
-        // system registry lists for that .ttf and fall through to
-        // sugarloaf's bundled Cascadia when the face isn't installed.
-        let mut fonts = sugarloaf::font::fonts::SugarloafFonts::default();
-        // D2CodingLigature Nerd Font Mono — the macOS profile font,
-        // ships with the full Hangul / Latin / Nerd-icon glyph
-        // coverage we want on Windows too. dhnam/d2coding-nerd-font
-        // hosts the patched TTFs; install them into
-        // %LOCALAPPDATA%\Microsoft\Windows\Fonts and sugarloaf picks
-        // up the face by name. Falls back to sugarloaf's bundled
-        // Cascadia when the face isn't installed.
-        fonts.family = Some("D2CodingLigature Nerd Font Mono".to_string());
-        // Symbols-Only Nerd Font as an extra fallback so users who
-        // ship only the small Symbols variant still get the PUA
-        // icons claude code's statusline expects. The primary
-        // D2CodingLigature Nerd Font Mono already has these, so this
-        // is a safety net rather than the main path.
-        //
-        // Segoe UI Symbol carries U+23F5 ⏵ (the chevron in front of
-        // bypass-permissions) — no Nerd Font ships that glyph. cells.rs
-        // already breaks the run-batch on the U+2300–U+27BF range so
-        // the proportional glyph gets its own draw call instead of
-        // dragging neighbour ASCII through propo advances.
-        fonts.symbol_map = Some(vec![
-            sugarloaf::font::fonts::SymbolMap {
-                start: "2300".to_string(),
-                end: "23FF".to_string(),
-                font_family: "Segoe UI Symbol".to_string(),
-            },
-            sugarloaf::font::fonts::SymbolMap {
-                start: "E000".to_string(),
-                end: "F8FF".to_string(),
-                font_family: "Symbols Nerd Font Mono".to_string(),
-            },
-            sugarloaf::font::fonts::SymbolMap {
-                start: "F0000".to_string(),
-                end: "1FFFD".to_string(),
-                font_family: "Symbols Nerd Font Mono".to_string(),
-            },
-        ]);
-        // gpu path: skip sugarloaf init entirely, build the cell
-        // renderer and reuse the tail of this function (backend
-        // selection, sockets, autosend/autocapture/autosplit) for the
-        // sugarloaf path's bookkeeping. cell_geom uses our shaper.
-        if use_gpu {
-            let _ = sg_window; // not used on this path
-            let renderer = gpu::GpuRenderer::new(window.clone(), FONT_SIZE)
-                .expect("GpuRenderer init");
-            self.cell = CellGeom {
-                w: renderer.cell_w,
-                h: renderer.cell_h,
-                baseline: 0.0,
-            };
-            let scale = window.scale_factor() as f32;
-            eprintln!(
-                "[startup] gpu renderer; cell_geom w={:.2} h={:.2} (scale={scale})",
-                self.cell.w, self.cell.h,
-            );
-            self.gpu = Some(renderer);
-            self.window = Some(window);
-            let want_tmux = std::env::var("KASATERM_BACKEND")
-                .map(|v| v.eq_ignore_ascii_case("tmux"))
-                .unwrap_or(false);
-            let backend_result = if want_tmux {
-                self.start_tmux()
-            } else {
-                self.start_pty()
-            };
-            if let Err(e) = backend_result {
-                eprintln!("[tmuxify] backend start failed: {e}");
-            }
-            self.schedule_autosend();
-            self.schedule_autocapture();
-            self.arm_autosplit();
-            self.arm_autowindows();
-            self.arm_autotoggle();
-            self.arm_autotabs();
-            self.schedule_autoquit();
-            self.open_git_panel(event_loop, false);
-            return;
-        }
-        let (font_library, font_err) = sugarloaf::font::FontLibrary::new(fonts);
-        if let Some(err) = font_err {
-            if !err.fonts_not_found.is_empty() {
-                eprintln!(
-                    "[font] requested fonts not found, sugarloaf will fall back: {:?}",
-                    err.fonts_not_found
-                );
-            }
-        }
-        let sugarloaf = Sugarloaf::new(
-            sg_window,
-            SugarloafRenderer::default(),
-            &font_library,
-            RootStyle::default(),
-        )
-        .expect("Sugarloaf instance");
-        // Replace the CellGeom default with the actual font advance /
-        // ascent so columns align right of col ~80, where the 8.6
-        // estimate started drifting visibly.
-        let scale = window.scale_factor() as f32;
-        // line_height here is a multiplier (1.0 = font ascent+descent only),
-        // *not* a pixel value — rio's default is 1.0. Pass the multiplier
-        // directly; passing pixels produces absurd cell sizes.
-        let (_dim, metrics) =
-            sugarloaf.compute_cell_metrics(FONT_SIZE, LINE_HEIGHT_MULT, scale);
-        // compute_cell_metrics returns u32 physical pixels — divide by
-        // scale to land back in logical units the rest of the renderer
-        // works with.
-        // sugarloaf's `text.draw(x, y, ...)` treats `y` as the
-        // **text bounding box top-left**, not the baseline (see
-        // sugarloaf::components::text::TextInstance docs: bearings
-        // shift down to the bitmap top from `pos`). Passing row_top
-        // directly is enough — the per-glyph bearings already place
-        // the bitmap at the right vertical offset inside the cell.
-        // Stored as 0 so cells::render_screen / render_preedit's
-        // `y = origin_y + baseline_offset` formula collapses to
-        // `y = origin_y`.
+        // cell-renderer GPU path is the only path. The old sugarloaf
+        // opt-in branch (KASATERM_RENDERER=sugarloaf) was removed once
+        // cell-renderer absorbed P3 colour reproduction (shader
+        // sRGB→DisplayP3 + root metal layer install). sugarloaf never
+        // had the chrome UI ported across; keeping the branch in was
+        // bloating the binary for no user-facing benefit.
+        let renderer = gpu::GpuRenderer::new(window.clone(), FONT_SIZE)
+            .expect("GpuRenderer init");
         self.cell = CellGeom {
-            w: (metrics.cell_width as f32) / scale,
-            h: (metrics.cell_height as f32) / scale,
+            w: renderer.cell_w,
+            h: renderer.cell_h,
             baseline: 0.0,
         };
+        let scale = window.scale_factor() as f32;
         eprintln!(
-            "[startup] cell_geom w={:.2} h={:.2} baseline={:.2} (scale={scale})",
-            self.cell.w, self.cell.h, self.cell.baseline
+            "[startup] gpu renderer; cell_geom w={:.2} h={:.2} (scale={scale})",
+            self.cell.w, self.cell.h,
         );
-        self.sugarloaf = Some(sugarloaf);
+        self.gpu = Some(renderer);
         self.window = Some(window);
         // Backend selection. Defaults to the Phase C direct-PTY path —
         // no tmux daemon, no `set -g focus-events` warnings inside
@@ -9059,15 +8476,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+            WindowEvent::ScaleFactorChanged { scale_factor: _, .. } => {
                 let size = window.inner_size();
                 if gpu_mode {
                     if let Some(g) = self.gpu.as_mut() {
                         g.resize(size.width, size.height);
                     }
-                } else if let Some(sg) = self.sugarloaf.as_mut() {
-                    sg.rescale(scale_factor as f32);
-                    sg.resize(size.width, size.height);
                 }
                 // macOS live-resize coalesces queued RedrawRequested, so paint
                 // synchronously here — otherwise the window frame leads and the
@@ -9094,8 +8508,6 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some(g) = self.gpu.as_mut() {
                                 g.resize(size.width, size.height);
                             }
-                        } else if let Some(sg) = self.sugarloaf.as_mut() {
-                            sg.resize(size.width, size.height);
                         }
                         let (cols, rows) = self.window_cells();
                         if (cols, rows) != self.last_resized_cells {
@@ -9126,8 +8538,6 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(g) = self.gpu.as_mut() {
                             g.resize(size.width, size.height);
                         }
-                    } else if let Some(sg) = self.sugarloaf.as_mut() {
-                        sg.resize(size.width, size.height);
                     }
                     let (cols, rows) = self.window_cells();
                     if (cols, rows) != self.last_resized_cells {
@@ -10046,8 +9456,6 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(g) = self.gpu.as_mut() {
                             g.resize(size.width, size.height);
                         }
-                    } else if let Some(sg) = self.sugarloaf.as_mut() {
-                        sg.resize(size.width, size.height);
                     }
                     let (cols, rows) = self.window_cells();
                     if (cols, rows) != self.last_resized_cells {

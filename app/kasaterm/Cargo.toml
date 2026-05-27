@@ -18,7 +18,6 @@ wgpu = "28"
 # misses the real render layer (verified: Color Meter still showed
 # pure sRGB 255,0,0 after walk-based tagging).
 wgpu-hal = { version = "28", features = ["metal"] }
-sugarloaf = { version = "0.4", features = ["wgpu"] }
 winit = "0.30"
 raw-window-handle = "0.6"
 anyhow.workspace = true
