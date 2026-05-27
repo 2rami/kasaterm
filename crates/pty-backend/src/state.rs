@@ -132,7 +132,24 @@ impl PtySession {
         // either ignore or render as garbage. Force a consistent
         // identity and scrub the iTerm-specific leftovers so the
         // detection settles on kasaterm regardless of who launched us.
-        cmd.env("TERM", "xterm-256color");
+        // TERM defaults to xterm-256color. If the ghostty terminfo entry
+        // is installed on this machine (ghostty ships it in its app
+        // bundle), upgrade to TERM=xterm-ghostty + point TERMINFO at the
+        // ghostty terminfo dir — Claude Code / vim / less then read the
+        // richer capability set (SGR mouse, ccc/oc colour redefinition,
+        // title set/clear, repeat-character `rep`, undercurl, etc) and
+        // emit the wider variety of styles the user sees in real ghostty.
+        // Fallback path keeps working unchanged on machines without it.
+        let ghostty_terminfo_dir = "/Applications/Ghostty.app/Contents/Resources/terminfo";
+        let ghostty_terminfo_entry =
+            format!("{ghostty_terminfo_dir}/78/xterm-ghostty");
+        let has_ghostty_terminfo = std::path::Path::new(&ghostty_terminfo_entry).exists();
+        if has_ghostty_terminfo {
+            cmd.env("TERM", "xterm-ghostty");
+            cmd.env("TERMINFO", ghostty_terminfo_dir);
+        } else {
+            cmd.env("TERM", "xterm-256color");
+        }
         // Masquerade as Ghostty. Claude Code (and other TUIs) detects
         // host terminal via `TERM_PROGRAM` and adapts its theme — the
         // Ghostty profile uses the punchier diff bg / syntax colours
@@ -140,18 +157,39 @@ impl PtySession {
         // VT parser handles whatever escapes Ghostty-targeted TUIs
         // emit (sync output, kitty graphics, etc).
         cmd.env("TERM_PROGRAM", "ghostty");
-        cmd.env("TERM_PROGRAM_VERSION", "1.1.3");
+        // Match the actual ghostty version installed on this machine so
+        // Claude Code / Helix / etc don't disable capabilities they think
+        // we're too old for. Version-gated feature checks are a common
+        // pattern; the 1.1.3 placeholder we shipped earlier predated
+        // truecolor-default behaviour in some clients.
+        cmd.env("TERM_PROGRAM_VERSION", "1.3.1");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("GHOSTTY_RESOURCES_DIR", "/Applications/Ghostty.app/Contents/Resources/ghostty");
+        // No FORCE_COLOR — ghostty doesn't set it (verified by running
+        // `node -e 'console.log(process.env.FORCE_COLOR)'` inside ghostty,
+        // which returns `undefined`). Some color-detection libraries treat
+        // a present FORCE_COLOR as evidence the program is running under
+        // CI / a wrapper that's already stripped tty info, and downgrade
+        // to ANSI-256 instead of trusting COLORTERM=truecolor. Mirroring
+        // ghostty's environment exactly avoids that branch.
+        // Some clients double-check "is this a real ghostty" by looking
+        // for GHOSTTY_BIN_DIR (set by ghostty itself when it spawns a
+        // shell). Without it they fall back to a conservative capability
+        // set and emit ANSI-256 instead of truecolor.
+        cmd.env(
+            "GHOSTTY_BIN_DIR",
+            "/Applications/Ghostty.app/Contents/MacOS",
+        );
         for k in [
             "ITERM_SESSION_ID",
             "ITERM_PROFILE",
             "LC_TERMINAL",
             "LC_TERMINAL_VERSION",
-            // Ghostty / WezTerm / Alacritty leave their own crumbs too —
-            // strip them so a TUI can't mis-attribute us to whichever
-            // emulator happened to spawn the parent shell.
-            "GHOSTTY_RESOURCES_DIR",
+            // WezTerm / Alacritty leave their own crumbs too — strip them
+            // so a TUI can't mis-attribute us. GHOSTTY_RESOURCES_DIR is
+            // NOT in this list anymore because we want to set it
+            // ourselves below; portable-pty's `env_remove` wipes the
+            // entry from the same BTreeMap we just inserted into, so
+            // including it here would silently undo our `env` call.
             "WEZTERM_PANE",
             "WEZTERM_EXECUTABLE",
             "ALACRITTY_LOG",
@@ -180,9 +218,17 @@ impl PtySession {
             // prepend above.
             cmd.env("ZDOTDIR", &shim_dir);
         }
-        if let Ok(fake_tmux) = std::env::var("KASATERM_TMUX_SHIM_TMUX") {
-            cmd.env("TMUX", fake_tmux);
-        }
+        // Don't set TMUX in the child env. Claude Code / ink / chalk
+        // treat the presence of TMUX as "I'm inside tmux, which doesn't
+        // pass truecolor through by default" and downgrade their
+        // ANSI escape generation to 256-palette mode. Verified
+        // empirically: removing TMUX is the single change that makes
+        // claude code emit `\e[48;2;220;38;39m` to us instead of the
+        // quantised `\e[48;5;167m`. The KASATERM_TMUX_SHIM_TMUX env
+        // (a path to our shim socket) is still inherited as itself,
+        // so any tool that explicitly reads it for the shim still works;
+        // we just don't masquerade as a tmux-wrapped shell.
+        let _ = std::env::var("KASATERM_TMUX_SHIM_TMUX"); // intentionally not propagated as TMUX
         // Real tmux sets TMUX_PANE on every child so an `if [ -n
         // "$TMUX_PANE" ]` test passes inside a pane. Claude Code's
         // teammateMode reads this to know which pane it's currently
@@ -477,6 +523,32 @@ impl Clone for PtyEventForwarder {
 
 impl PtyEventForwarder {
     fn write_to_pty(&self, bytes: &[u8]) {
+        // Mirror outgoing replies into KASATERM_PTY_OUT_LOG so the
+        // ghostty-vs-us escape diff can include OUR side of the
+        // conversation (OSC 11 colour replies, TextAreaSize replies,
+        // clipboard responses, etc) — not just what claude code sends.
+        if let Ok(path) = std::env::var("KASATERM_PTY_OUT_LOG") {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
+                use std::io::Write;
+                let preview: String = bytes
+                    .iter()
+                    .take(2048)
+                    .map(|b| match b {
+                        0x20..=0x7e => (*b as char).to_string(),
+                        b'\n' => "\\n".to_string(),
+                        b'\r' => "\\r".to_string(),
+                        b'\t' => "\\t".to_string(),
+                        0x1b => "\\e".to_string(),
+                        _ => format!("\\x{b:02x}"),
+                    })
+                    .collect();
+                let _ = writeln!(file, "[out] {} bytes: {}", bytes.len(), preview);
+            }
+        }
         if let Ok(mut w) = self.writer.lock() {
             let _ = w.write_all(bytes);
         }
@@ -487,13 +559,65 @@ impl EventListener for PtyEventForwarder {
     fn send_event(&self, event: AlacEvent) {
         match event {
             AlacEvent::PtyWrite(s) => self.write_to_pty(s.as_bytes()),
-            AlacEvent::ColorRequest(_, formatter) => {
-                // Until we propagate a real palette, claim pure black
-                // for any indexed-color query so the shell stops
-                // blocking. Foreground/background detection that
-                // depends on this will be wrong, but cmd / bash never
-                // gate startup on the answer.
-                let reply = formatter(Rgb { r: 0, g: 0, b: 0 });
+            AlacEvent::ColorRequest(index, formatter) => {
+                // Reply with values that match ghostty's defaults so
+                // that Claude Code / other TUIs which probe the host
+                // via OSC 10 (fg), OSC 11 (bg), OSC 12 (cursor), or
+                // OSC 4;N (palette) make the same theme decisions
+                // they make under ghostty. The old "black for
+                // everything" answer caused Claude Code to treat us
+                // as a near-black or unknown background and pick a
+                // muted red palette (215,95,95 source instead of
+                // ghostty's 220,38,39).
+                //
+                // NamedColor::Foreground = 256, Background = 257,
+                // Cursor = 258 (per vte::ansi::NamedColor); 0-15 are
+                // the ANSI base palette, 16-255 the xterm cube + gray
+                // ramp.
+                let rgb = match index {
+                    // ANSI 16-base palette, ghostty default theme.
+                    0 => (0x1D, 0x1F, 0x21),
+                    1 => (0xCC, 0x66, 0x66),
+                    2 => (0xB5, 0xBD, 0x68),
+                    3 => (0xF0, 0xC6, 0x74),
+                    4 => (0x81, 0xA2, 0xBE),
+                    5 => (0xB2, 0x94, 0xBB),
+                    6 => (0x8A, 0xBE, 0xB7),
+                    7 => (0xC5, 0xC8, 0xC6),
+                    8 => (0x66, 0x66, 0x66),
+                    9 => (0xD5, 0x4E, 0x53),
+                    10 => (0xB9, 0xCA, 0x4A),
+                    11 => (0xE7, 0xC5, 0x47),
+                    12 => (0x7A, 0xA6, 0xDA),
+                    13 => (0xC3, 0x97, 0xD8),
+                    14 => (0x70, 0xC0, 0xB1),
+                    15 => (0xEA, 0xEA, 0xEA),
+                    // 256 = NamedColor::Foreground. Match ghostty's
+                    // bright white fg (#C5C8C6, the same as palette[7]).
+                    256 => (0xC5, 0xC8, 0xC6),
+                    // 257 = NamedColor::Background. Match ghostty's
+                    // default dark bg #1D1F21. Claude Code uses this
+                    // to decide light/dark theme and the exact red
+                    // shade for diff highlights.
+                    257 => (0x1D, 0x1F, 0x21),
+                    // 258 = NamedColor::Cursor. Match palette[7].
+                    258 => (0xC5, 0xC8, 0xC6),
+                    // 16-255: xterm 6×6×6 cube + 24-step gray ramp,
+                    // identical to ghostty's hardcoded fallback.
+                    n if n >= 16 && n < 232 => {
+                        let n = n - 16;
+                        let steps = [0u8, 95, 135, 175, 215, 255];
+                        (steps[n / 36], steps[(n / 6) % 6], steps[n % 6])
+                    }
+                    n if n >= 232 && n < 256 => {
+                        let v = 8 + ((n - 232) as u8) * 10;
+                        (v, v, v)
+                    }
+                    // Any other index (dim variants, etc): fall back
+                    // to a sensible neutral grey.
+                    _ => (0x66, 0x66, 0x66),
+                };
+                let reply = formatter(Rgb { r: rgb.0, g: rgb.1, b: rgb.2 });
                 self.write_to_pty(reply.as_bytes());
             }
             AlacEvent::TextAreaSizeRequest(formatter) => {
@@ -586,6 +710,18 @@ fn spawn_reader_thread(
         // per-read snapshot cost by 2-3× and capping throughput at ~90 fps.
         let mut buf = [0u8; 65536];
         let mut current_size = (cols, rows);
+        // Raw byte trace for diagnosing capability-detection differences
+        // between us and ghostty. Set `KASATERM_PTY_LOG=/tmp/pty.log` and
+        // each read appends `[pane_id] hex bytes\n` to that file. Open it
+        // only when the env var is present so production runs pay nothing.
+        let pty_log = std::env::var("KASATERM_PTY_LOG").ok().and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .ok()
+        });
+        let pty_log = std::sync::Mutex::new(pty_log);
         // Reassembles UTF-8 across read boundaries so NFC normalization
         // never sees a half codepoint (a multibyte char split between
         // two reads).
@@ -637,6 +773,24 @@ fn spawn_reader_thread(
                     return;
                 }
             };
+            // Append raw bytes (hex + escaped-printable preview) to the
+            // KASATERM_PTY_LOG file so claude-code escape sequences can
+            // be diffed against ghostty's `script` capture.
+            if let Some(file) = pty_log.lock().unwrap().as_mut() {
+                use std::io::Write;
+                let preview: String = buf[..n.min(2048)]
+                    .iter()
+                    .map(|b| match b {
+                        0x20..=0x7e => (*b as char).to_string(),
+                        b'\n' => "\\n".to_string(),
+                        b'\r' => "\\r".to_string(),
+                        b'\t' => "\\t".to_string(),
+                        0x1b => "\\e".to_string(),
+                        _ => format!("\\x{b:02x}"),
+                    })
+                    .collect();
+                let _ = writeln!(file, "[{}] {} bytes: {}", pane_id, n, preview);
+            }
             if std::env::var("KASATERM_LOG_PTY").is_ok() {
                 let preview: String = buf[..n.min(2048)]
                     .iter()

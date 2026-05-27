@@ -124,17 +124,16 @@ impl GpuRenderer {
         let font_size_px = (font_size_logical * scale).round() as u32;
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
-        // P3 color reproduction path (default on macOS): WE create a
-        // CAMetalLayer, install it as the NSView's ROOT layer, tag it
-        // Display P3, and hand the pointer to wgpu via
-        // `SurfaceTargetUnsafe::CoreAnimationLayer` instead of letting
-        // wgpu create its own sublayer-attached one (the sublayer
-        // pattern macOS refuses to color-manage). Combined with the
-        // sRGB→DisplayP3 Bradford matrix in shader.wgsl, this measures
-        // (234, 51, 35) for pure-red byte (255, 0, 0) — exactly what
-        // sugarloaf produces. Set `KASATERM_P3_ROOT=0` to fall back to
-        // the legacy RawHandle/sublayer path (plain sRGB, no P3 lift)
-        // for diagnostic A/B.
+        // P3 color reproduction is the DEFAULT path. Despite ghostty's
+        // `+show-config --default` advertising `window-colorspace = srgb`,
+        // empirical measurement against ghostty's actual output shows it
+        // applies the sRGB→Display P3 matrix in practice (e.g. emitting
+        // sRGB byte (202,58,50) makes Digital Color Meter read (186,70,58)
+        // on the same display, which matches the matrix-converted value).
+        // To match ghostty byte-for-byte we have to run the same matrix.
+        // Set `KASATERM_P3_ROOT=0` to fall back to the legacy
+        // RawHandle/sublayer path (byte passthrough — useful only when
+        // comparing against a non-P3 reference).
         #[cfg(target_os = "macos")]
         let p3_root = std::env::var("KASATERM_P3_ROOT")
             .ok()
@@ -408,6 +407,25 @@ impl GpuRenderer {
     /// Logical-pixel solid rect (sugarloaf.rect drop-in). Caller
     /// passes the same logical coordinates main.rs has been using;
     /// we promote to physical pixels here to stay consistent with
+    /// Resize the cell grid to a new logical font size (Cmd+= zoom).
+    /// Atlas glyphs are keyed by size internally, so a re-bake happens
+    /// lazily on the next draw — we just refresh the cached cell
+    /// metrics so chrome/layout code sees the new geometry on the
+    /// very next frame. Returns the new (cell_w, cell_h) in logical px.
+    pub fn set_font_size(&mut self, font_size_logical: f32) -> (f32, f32) {
+        let new_px = (font_size_logical * self.scale).round().max(8.0) as u32;
+        self.font_size_px = new_px;
+        let cell_w_px = self.shaper.cell_advance(new_px as f32).ceil();
+        let cell_h_px = self.shaper.line_height(new_px as f32).ceil();
+        self.cell_w = cell_w_px / self.scale;
+        self.cell_h = cell_h_px / self.scale;
+        eprintln!(
+            "[gpu] font resized → size_px={} cell={}x{} (logical {}x{})",
+            new_px, cell_w_px as u32, cell_h_px as u32, self.cell_w, self.cell_h
+        );
+        (self.cell_w, self.cell_h)
+    }
+
     /// the cell pass. `rgba_f` is 0..1.
     /// Logical-pixel solid rect (sugarloaf.rect drop-in). Caller
     /// passes the same u8 RGBA they would have handed sugarloaf —
@@ -1980,12 +1998,13 @@ fn text_render_knobs() -> (f32, f32, f32) {
         .and_then(|s| s.parse().ok())
         .unwrap_or(1.0_f32)
         .max(0.1);
-    // 1.1 baseline lifts antialiased mid-tones a touch — text on coloured
-    // bg reads at ghostty-like opacity without changing glyph shape.
+    // 1.0 baseline — let the rendering pipeline pass alpha through
+    // unchanged. The user wants knobs flat by default so the only
+    // colour-shaping layer is the palette + P3 matrix.
     let contrast = std::env::var("KASATERM_TEXT_CONTRAST")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1.1_f32)
+        .unwrap_or(1.0_f32)
         .max(0.1);
     // Saturation 1.0 default = passthrough. Bumping shifts perceived
     // hue slightly even with luma preservation (claude code's # comment
@@ -2195,12 +2214,13 @@ fn primary_bold_font_path() -> Option<(String, u32)> {
 fn default_font_path() -> String {
     #[cfg(target_os = "macos")]
     {
-        // D2CodingLigature Nerd Font Mono — original primary. Has
-        // designed Hangul that lines up cleanly on the monospace
-        // grid (자간 issues we saw came from JetBrains-as-primary
-        // routing Hangul through a fallback face with different
-        // sidebearings). JetBrains Mono drops to the fallback
-        // chain for ASCII / Latin / icons that D2Coding skips.
+        // D2CodingLigature Nerd Font Mono. Has designed Hangul that
+        // lines up cleanly on the monospace grid (자간 issues we saw
+        // came from JetBrains-as-primary routing Hangul through a
+        // fallback face with different sidebearings). Box-drawing
+        // chars are rendered as GPU quads via `block_rects` so the
+        // font choice doesn't affect line continuity — ghostty does
+        // the same thing in `src/font/sprite/draw/box.zig`.
         let home = std::env::var("HOME").unwrap_or_default();
         let d2 = format!("{home}/Library/Fonts/D2CodingLigatureNerdFontMono-Regular.ttf");
         if std::path::Path::new(&d2).exists() {
