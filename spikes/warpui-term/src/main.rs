@@ -1,3 +1,3 @@
 fn main() {
-    println!("warpui-term spike (tmux-bridge {})", tmux_bridge::placeholder::version());
+    println!("warpui-term spike (tmux-bridge {})", env!("CARGO_PKG_VERSION"));
 }

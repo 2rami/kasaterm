@@ -58,7 +58,11 @@ impl App {
                 match TmuxSession::start(StartOptions {
                     cwd: cwd.as_deref(),
                     auto_run: None,
+                    session_name: None,
+                    socket_name: None,
                     flush_interval: Duration::from_millis(33),
+                    cols: 80,
+                    rows: 24,
                 }) {
                     Ok(s) => {
                         let name = s.session_name.clone();

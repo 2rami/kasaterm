@@ -71,7 +71,11 @@ impl ApplicationHandler for App {
         match TmuxSession::start(StartOptions {
             cwd: cwd.as_deref(),
             auto_run: None,
+            session_name: None,
+            socket_name: None,
             flush_interval: Duration::from_millis(50),
+            cols: 80,
+            rows: 24,
         }) {
             Ok(s) => {
                 println!(
