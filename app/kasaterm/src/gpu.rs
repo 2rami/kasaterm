@@ -2018,20 +2018,6 @@ fn text_render_knobs() -> (f32, f32, f32) {
     (gamma, contrast, sat)
 }
 
-/// sRGB-encoded byte → linear-light float. Used for wgpu clear values
-/// against an sRGB-tagged framebuffer (the hardware re-encodes on store,
-/// so the clear must be in linear). IEC piecewise — same curve the
-/// fragment shader uses, so clear and per-pixel paths stay in lockstep.
-#[inline]
-pub fn srgb_byte_to_linear(byte: u8) -> f32 {
-    let c = byte as f32 / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
 /// Order matches the sugarloaf SugarloafFonts config we previously
 /// shipped (`fonts.family = "D2CodingLigature Nerd Font Mono"`,
 /// `symbol_map` for Misc-Tech / PUA / Supplementary PUA). Each entry
