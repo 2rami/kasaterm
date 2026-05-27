@@ -23,23 +23,28 @@ use tmux_bridge::screen::{Cell, Color};
 /// grayscale ramp follow xterm's standard 256-color extension.
 fn ansi_palette() -> [[u8; 3]; 256] {
     let mut p = [[0u8; 3]; 256];
+    // Ghostty default palette (Tomorrow Night Bright tone) — lifted
+    // verbatim from ghostty-org/ghostty src/terminal/color.zig Name.default.
+    // Combined with the cell-renderer's sRGB→DisplayP3 shader matrix,
+    // this is what produces the same colour byte values the user sees
+    // in ghostty itself.
     let base: [[u8; 3]; 16] = [
-        [99, 110, 123],   // 0  black     (#636e7b)
-        [244, 112, 103],  // 1  red       (#f47067)
-        [87, 171, 90],    // 2  green     (#57ab5a)
-        [198, 144, 38],   // 3  yellow    (#c69026)
-        [83, 155, 245],   // 4  blue      (#539bf5)
-        [176, 131, 240],  // 5  magenta   (#b083f0)
-        [57, 197, 207],   // 6  cyan      (#39c5cf)
-        [144, 157, 171],  // 7  white     (#909dab)
-        [99, 110, 123],   // 8  br black  (#636e7b)
-        [255, 147, 138],  // 9  br red    (#ff938a)
-        [107, 196, 109],  // 10 br green  (#6bc46d)
-        [218, 170, 63],   // 11 br yellow (#daaa3f)
-        [108, 182, 255],  // 12 br blue   (#6cb6ff)
-        [220, 189, 251],  // 13 br magenta(#dcbdfb)
-        [86, 212, 221],   // 14 br cyan   (#56d4dd)
-        [205, 217, 229],  // 15 br white  (#cdd9e5)
+        [0x1D, 0x1F, 0x21], // 0  black
+        [0xCC, 0x66, 0x66], // 1  red
+        [0xB5, 0xBD, 0x68], // 2  green
+        [0xF0, 0xC6, 0x74], // 3  yellow
+        [0x81, 0xA2, 0xBE], // 4  blue
+        [0xB2, 0x94, 0xBB], // 5  magenta
+        [0x8A, 0xBE, 0xB7], // 6  cyan
+        [0xC5, 0xC8, 0xC6], // 7  white
+        [0x66, 0x66, 0x66], // 8  br black
+        [0xD5, 0x4E, 0x53], // 9  br red
+        [0xB9, 0xCA, 0x4A], // 10 br green
+        [0xE7, 0xC5, 0x47], // 11 br yellow
+        [0x7A, 0xA6, 0xDA], // 12 br blue
+        [0xC3, 0x97, 0xD8], // 13 br magenta
+        [0x70, 0xC0, 0xB1], // 14 br cyan
+        [0xEA, 0xEA, 0xEA], // 15 br white
     ];
     p[..16].copy_from_slice(&base);
     // 216-color cube: 16..231
@@ -51,6 +56,12 @@ fn ansi_palette() -> [[u8; 3]; 256] {
             }
         }
     }
+    // (Earlier we hardcoded a handful of 256-palette overrides to
+    //  reverse claude code's nearest-cube quantisation. Once we found
+    //  that the real cause was `TMUX` being set in the child env —
+    //  which made chalk fall back to ANSI-256 mode — and removed it,
+    //  claude code emits truecolor escapes directly and the standard
+    //  xterm 6×6×6 cube is correct again.)
     // 24-step grayscale ramp: 232..255
     for i in 0..24 {
         let v = 8 + (i as u8) * 10;
@@ -193,6 +204,34 @@ pub fn block_rects(ch: char) -> Option<&'static [(f32, f32, f32, f32, f32)]> {
         '\u{259D}' => &[(0.5, 0.0, 1.0, 0.5, 1.0)],
         '\u{259E}' => &[(0.5, 0.0, 1.0, 0.5, 1.0), (0.0, 0.5, 0.5, 1.0, 1.0)],
         '\u{259F}' => &[(0.5, 0.0, 1.0, 0.5, 1.0), (0.0, 0.5, 1.0, 1.0, 1.0)],
+        // Box-drawing single-line characters. Glyph variants across fonts
+        // leave gaps between adjacent cells (the prompt input box on
+        // claude code reads as `---` instead of a continuous line under
+        // CascadiaCodeNF). Render them as cell-wide GPU quads so the
+        // line touches both edges and joins seamlessly with its neighbours.
+        // Stroke width approximates ghostty's: ~1.5px at our cell height
+        // = 6% of the cell.
+        '\u{2500}' => &[(0.0, 0.47, 1.0, 0.53, 1.0)],   // ─ light horizontal
+        '\u{2501}' => &[(0.0, 0.44, 1.0, 0.56, 1.0)],   // ━ heavy horizontal
+        '\u{2502}' => &[(0.47, 0.0, 0.53, 1.0, 1.0)],   // │ light vertical
+        '\u{2503}' => &[(0.44, 0.0, 0.56, 1.0, 1.0)],   // ┃ heavy vertical
+        // Light / heavy dashed variants — draw as continuous lines.
+        // The "dashed" visual is preserved by the eye when the line is
+        // thin; trying to draw discrete dashes here just reintroduces
+        // the gap we're fixing.
+        '\u{2504}' | '\u{2508}' | '\u{254C}' => &[(0.0, 0.47, 1.0, 0.53, 1.0)],
+        '\u{2505}' | '\u{2509}' | '\u{254D}' => &[(0.0, 0.44, 1.0, 0.56, 1.0)],
+        '\u{2506}' | '\u{250A}' | '\u{254E}' => &[(0.47, 0.0, 0.53, 1.0, 1.0)],
+        '\u{2507}' | '\u{250B}' | '\u{254F}' => &[(0.44, 0.0, 0.56, 1.0, 1.0)],
+        // Double-line horizontal / vertical (two parallel strokes).
+        '\u{2550}' => &[
+            (0.0, 0.40, 1.0, 0.46, 1.0),
+            (0.0, 0.54, 1.0, 0.60, 1.0),
+        ],
+        '\u{2551}' => &[
+            (0.40, 0.0, 0.46, 1.0, 1.0),
+            (0.54, 0.0, 0.60, 1.0, 1.0),
+        ],
         _ => return None,
     })
 }
@@ -567,17 +606,16 @@ mod tests {
     }
 
     #[test]
-    fn ansi_base_palette_matches_user_terminal_profile() {
-        // Values come from the user's macOS Terminal.app profile
-        // `GitHub Dark Dimmed` (active Default Window Settings).
-        // Decoded via NSKeyedUnarchiver on the bytes in
-        // ~/Library/Preferences/com.apple.Terminal.plist.
+    fn ansi_base_palette_matches_ghostty_default() {
+        // Values lifted from ghostty-org/ghostty src/terminal/color.zig
+        // `Name.default` — the palette every kasaterm user sees out of
+        // the box matches what ghostty draws with no theme configured.
         let p = ansi_palette();
-        assert_eq!(p[0], [99, 110, 123], "black");
-        assert_eq!(p[1], [244, 112, 103], "red");
-        assert_eq!(p[4], [83, 155, 245], "blue (GitHub link blue)");
-        assert_eq!(p[7], [144, 157, 171], "white");
-        assert_eq!(p[15], [205, 217, 229], "bright white");
+        assert_eq!(p[0], [0x1D, 0x1F, 0x21], "black");
+        assert_eq!(p[1], [0xCC, 0x66, 0x66], "red");
+        assert_eq!(p[4], [0x81, 0xA2, 0xBE], "blue");
+        assert_eq!(p[7], [0xC5, 0xC8, 0xC6], "white");
+        assert_eq!(p[15], [0xEA, 0xEA, 0xEA], "bright white");
     }
 
     #[test]

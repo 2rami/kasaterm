@@ -34,7 +34,10 @@ use winit::window::{CursorIcon, Theme, Window, WindowAttributes, WindowId};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::WindowAttributesExtMacOS;
 
-const FONT_SIZE: f32 = 14.0;
+// Match ghostty's default font-size=13. We were at 14, which made every
+// cell ~7.7% taller than ghostty's — visible side-by-side as a "slightly
+// larger" terminal even though the chrome looked identical.
+const FONT_SIZE: f32 = 13.0;
 
 /// Display columns a char occupies in a proportional-ish label: CJK /
 /// Hangul / fullwidth glyphs are double-width, everything else single.
@@ -2730,6 +2733,20 @@ impl App {
             return;
         }
         self.font_size = new;
+        // gpu (cell-renderer) path: resize the GpuRenderer's cached cell
+        // metrics so layout sees the new size immediately.
+        if let Some(gpu) = self.gpu.as_mut() {
+            let (cw, ch) = gpu.set_font_size(new);
+            self.cell = CellGeom { w: cw, h: ch, baseline: 0.0 };
+            if let Some(window) = self.window.as_ref() {
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
+                self.chrome_dirty = true;
+                window.request_redraw();
+            }
+            return;
+        }
+        // sugarloaf path (KASATERM_RENDERER=sugarloaf opt-in).
         if let (Some(window), Some(sugarloaf)) = (self.window.as_ref(), self.sugarloaf.as_ref()) {
             let scale = window.scale_factor() as f32;
             let (_dim, metrics) =
@@ -6330,16 +6347,36 @@ impl App {
                     // Font zoom: host_mod + = (or Shift = +) increases,
                     // host_mod + - (or Shift = _) decreases. `0` resets
                     // to the default. Layout the same as VS Code,
-                    // Windows Terminal, and most browsers.
-                    if code == KeyCode::Equal || code == KeyCode::NumpadAdd {
+                    // Windows Terminal, and most browsers. Match BOTH the
+                    // physical key (US layout assumption) AND the logical
+                    // key text — Korean / European layouts may emit the
+                    // same character from a different physical position,
+                    // and macOS Cmd shortcuts are nearly always logical.
+                    use winit::keyboard::Key;
+                    let logical_str = match &event.logical_key {
+                        Key::Character(s) => Some(s.as_str()),
+                        _ => None,
+                    };
+                    let is_plus = code == KeyCode::Equal
+                        || code == KeyCode::NumpadAdd
+                        || logical_str == Some("=")
+                        || logical_str == Some("+");
+                    let is_minus = code == KeyCode::Minus
+                        || code == KeyCode::NumpadSubtract
+                        || logical_str == Some("-")
+                        || logical_str == Some("_");
+                    let is_zero = code == KeyCode::Digit0
+                        || code == KeyCode::Numpad0
+                        || logical_str == Some("0");
+                    if is_plus {
                         self.change_font_size(1.0);
                         return;
                     }
-                    if code == KeyCode::Minus || code == KeyCode::NumpadSubtract {
+                    if is_minus {
                         self.change_font_size(-1.0);
                         return;
                     }
-                    if code == KeyCode::Digit0 || code == KeyCode::Numpad0 {
+                    if is_zero {
                         self.change_font_size(FONT_SIZE - self.font_size);
                         return;
                     }
@@ -9940,6 +9977,23 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // KASATERM_KEY_DEBUG=1 → dump every key event with its
+                // modifier snapshot. Used to debug "Cmd+= doesn't zoom"
+                // class issues where it's unclear whether the OS even
+                // forwards the chord to us or our handler ignores it.
+                if std::env::var_os("KASATERM_KEY_DEBUG").is_some() {
+                    eprintln!(
+                        "[key] state={:?} physical={:?} logical={:?} text={:?} super={} ctrl={} shift={} alt={}",
+                        event.state,
+                        event.physical_key,
+                        event.logical_key,
+                        event.text,
+                        self.modifiers.super_key(),
+                        self.modifiers.control_key(),
+                        self.modifiers.shift_key(),
+                        self.modifiers.alt_key(),
+                    );
+                }
                 self.forward_key(&event);
             }
             WindowEvent::DroppedFile(path) => {
