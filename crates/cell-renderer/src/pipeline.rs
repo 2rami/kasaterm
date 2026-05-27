@@ -44,7 +44,15 @@ pub struct Uniforms {
     /// passthrough; bumping (e.g. 1.4) closes the visual gap with
     /// ghostty's punchier reds / greens on the same P3 panel.
     pub color_sat: f32,
-    pub _pad: f32,
+    /// 0.0 = pass colours through unchanged (sRGB stays sRGB — what the
+    /// default RawHandle/sublayer path does and must do, because the
+    /// layer is treated as sRGB by macOS).
+    /// 1.0 = apply sugarloaf's sRGB→Display P3 Bradford matrix in linear
+    /// space, then re-encode. Combined with a CAMetalLayer that's
+    /// actually been tagged DisplayP3 (KASATERM_P3_ROOT path), this
+    /// produces the same byte values sugarloaf measures (e.g. byte
+    /// (255,0,0) → stored (234,52,35), display shows P3-red).
+    pub p3_convert: f32,
 }
 
 pub struct Pipeline {
@@ -211,7 +219,7 @@ impl Pipeline {
                 text_gamma: 1.3,
                 text_contrast: 1.0,
                 color_sat: 1.0,
-                _pad: 0.0,
+                p3_convert: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -252,12 +260,15 @@ impl Pipeline {
     }
 
     pub fn write_uniforms(&self, queue: &wgpu::Queue, screen_px: [f32; 2]) {
-        self.write_uniforms_full(queue, screen_px, 1.3, 1.0, 1.0);
+        self.write_uniforms_full(queue, screen_px, 1.3, 1.0, 1.0, false);
     }
 
     /// Same as `write_uniforms` but lets the host plug in custom text gamma
     /// / contrast / colour saturation. Defaults to WezTerm's 1.3 / 1.0
     /// baseline + neutral saturation when the 2-arg form is used.
+    /// `p3_convert` switches on the sRGB→Display P3 Bradford matrix in the
+    /// fragment shader — only meaningful when the surface's CAMetalLayer
+    /// is actually tagged DisplayP3 (otherwise colours look washed).
     pub fn write_uniforms_full(
         &self,
         queue: &wgpu::Queue,
@@ -265,13 +276,14 @@ impl Pipeline {
         text_gamma: f32,
         text_contrast: f32,
         color_sat: f32,
+        p3_convert: bool,
     ) {
         let u = Uniforms {
             screen_px,
             text_gamma,
             text_contrast,
             color_sat,
-            _pad: 0.0,
+            p3_convert: if p3_convert { 1.0 } else { 0.0 },
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&u));
     }
