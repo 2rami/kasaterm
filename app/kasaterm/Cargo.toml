@@ -1,6 +1,6 @@
 [package]
 name = "kasaterm"
-description = "kasaterm — Cross-platform terminal multiplexer. winit + sugarloaf renderer with a direct portable-pty + alacritty_terminal backend (Phase C, default) and a legacy tmux-bridge backend behind KASATERM_BACKEND=tmux. Exposes a cmux-compatible JSON-RPC socket so external agents can drive it."
+description = "kasaterm — Cross-platform terminal multiplexer. winit + cell-renderer (wgpu, sRGB→DisplayP3 shader matrix) with a direct portable-pty + alacritty_terminal backend (Phase C, default) and a legacy tmux-bridge backend behind KASATERM_BACKEND=tmux. Exposes a cmux-compatible JSON-RPC socket so external agents can drive it."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
