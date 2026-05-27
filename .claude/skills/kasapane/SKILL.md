@@ -132,6 +132,64 @@ mdopen  /절대경로/doc.md         # 마크다운 → 노션풍 렌더 pane
   # 마크다운은 /open-markdown
   ```
 
+#### 사용자가 잘 보이게 띄우기 — 레이아웃 사전 정리
+
+이미지/문서를 띄울 때 화면이 이미 4-pane으로 어수선하면 새로 뜬 pane이 손바닥만 해서 사용자가 못 본다. 띄우기 **전에** 한 번 확인 + 정리.
+
+**1) 사전 점검** (imgopen/mdopen 직전):
+```bash
+COUNT=$(cmux-compat list surfaces | python3 -c \
+  'import sys,json;print(len(json.load(sys.stdin)["result"]["surfaces"]))')
+echo "pane count: $COUNT"
+```
+
+**2) 갯수별 정책**:
+
+| pane 갯수 | 행동 |
+|---|---|
+| 1-2 | 그냥 `imgopen` — 자동 분할이 충분히 큰 자리 확보 |
+| 3 | 그냥 `imgopen` — 4-pane 되지만 보통 OK. 사이즈 작아 보이면 그때 정리 |
+| 4+ | **사용자한테 1줄 알림** ("스크린샷 띄울 자리 만들기 위해 이전 모니터 pane X 닫을게요") 후 본인이 만든 모니터/로그 pane 닫기. 사용자 작업 pane은 절대 안 건드림 |
+
+본인이 만든 모니터 pane 구별 — 헤더 색이 컨벤션(`#58a6ff` 로그 / `#d29922` 빌드 / `#3fb950` 테스트 / `#a371f7` 탐색) 중 하나면 본인이 만든 것. 사용자 pane은 보통 색 없음 또는 다른 색.
+
+```bash
+# 본인 만든 모니터 색을 가진 pane id 추출
+cmux-compat list surfaces | python3 -c "
+import sys, json
+rs = json.load(sys.stdin)['result']['surfaces']
+mine_colors = {'#58a6ff','#d29922','#3fb950','#a371f7','#ff8800'}
+for s in rs:
+    if (s.get('color') or '').lower() in mine_colors:
+        print(s['id'], s.get('title'))
+"
+```
+
+**3) 띄운 후 검증** — 새 이미지 pane이 충분히 큰지(논리 픽셀 가로 ≥ 500). 너무 작으면 다른 pane을 swap하거나 사용자에게 한 줄 알림.
+
+**4) 자동 정리 (다음 이미지로 교체될 때)** — 이미지가 일련의 결과 흐름(예: A 다음 B 다음 C)이면 이전 imgopen pane을 닫고 새로 띄움. 매번 새 pane 만들면 4개 금방 쌓임.
+```bash
+# 가장 최근 imgopen pane id를 변수에 저장
+PREV_IMG=$(cmux-compat list surfaces | python3 -c "
+import sys, json
+rs = json.load(sys.stdin)['result']['surfaces']
+imgs = [s['id'] for s in rs if (s.get('title') or '').endswith(('.png','.jpg','.jpeg','.webp'))]
+print(imgs[-1] if imgs else '')
+")
+[ -n "$PREV_IMG" ] && cmux-compat close "$PREV_IMG"
+imgopen /절대경로/new.png
+```
+
+**5) 검증용 임시 스샷은 imgopen 금지** — 모델 자체검증(헤드리스 캡처) 결과는 `Read("/tmp/...png")`로 본인이 확인만. 사용자 화면에 띄우는 건 **사용자가 봐야 하는 진짜 결과물**일 때만.
+
+**안티 패턴**:
+| 안 됨 | 왜 |
+|---|---|
+| 사전 점검 없이 매 결과마다 `imgopen` | 4-pane 넘어가면 사용자한테 손바닥만 함 |
+| 사용자 작업 pane을 정리 명목으로 close | 사용자 작업 날아감. 본인이 만든 monitor/log pane만 정리 |
+| 이전 이미지 pane 안 닫고 새로 띄움 | 누적되어 화면 어수선 |
+| 검증용 임시 스샷까지 띄움 | 사용자가 모델 내부 검증 흐름 다 보게 됨 — 시각 노이즈 |
+
 ### 패턴 E — `SendUserFile` 자동 imgopen Hook
 
 Claude Code의 `SendUserFile` 툴은 어느 터미널에서든 `[image] /path (size)` 텍스트 플레이스홀더만 출력하지(iTerm/kitty 인라인 escape를 emit 안 함), 실제 이미지를 인라인 렌더하지 않는다. kasaterm 안에서 작업할 땐 **PostToolUse hook**으로 SendUserFile 결과의 이미지 경로를 자동 `imgopen` 호출시켜 image pane으로 띄운다.
