@@ -659,6 +659,7 @@ setInterval(poll, 1000);
 /// Minimal HTML-escape for text dropped into a preview page's markup
 /// (the filename shown in the title strip). Covers the five characters
 /// that would otherwise break out of text content / an attribute.
+#[allow(dead_code)] // used by IMAGE_VIEWER_HTML / MARKDOWN_EDITOR_HTML preview path (wry webview spike, kept for future)
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -671,6 +672,7 @@ fn html_escape(s: &str) -> String {
 /// `__SRC__` a self-contained `data:` URI of the image bytes (injected at
 /// open time, so the page is fully offline). Fit-to-window by default;
 /// clicking the image toggles 1:1 actual size with scroll-to-pan.
+#[allow(dead_code)]
 const IMAGE_VIEWER_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -740,6 +742,7 @@ const IMAGE_VIEWER_HTML: &str = r#"<!DOCTYPE html>
 /// preview rendered by a tiny inline parser (no CDN, works offline). Save
 /// POSTs `{path, content}` as text/plain (a CORS "simple" request — no
 /// preflight, same trick the git-commit panel uses).
+#[allow(dead_code)]
 const MARKDOWN_EDITOR_HTML: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -940,6 +943,7 @@ struct Selection {
 /// Snapshot of every field `paint_gpu_overlays` reads. Built before
 /// we hand a `&mut gpu::GpuRenderer` to the painter so the borrow
 /// checker sees the snapshot and the mutable borrow as independent.
+#[allow(dead_code)] // some fields (font_size) are snapshot-only, never read after construction
 struct GpuOverlay {
     cell_w: f32,
     cell_h: f32,
@@ -2133,11 +2137,13 @@ struct App {
     /// fast redraws toggle between "✱ claude" and the live status
     /// every frame because Claude Code repaints the spinner phase
     /// across separate cells. 800ms of stickiness smooths it out.
+    #[allow(dead_code)]
     claude_busy_until: Option<Instant>,
     /// Most recent claude status line we lifted from the grid. Kept
     /// so the titlebar stays on the last "✻ Brewed for Ns" frame
     /// while Claude Code is mid-repaint and the marker row briefly
     /// vanishes. Cleared when the busy window expires.
+    #[allow(dead_code)]
     last_claude_status: Option<String>,
     /// When we last recomputed the macOS window title. Rate-limits
     /// `maybe_update_window_title` to ~200ms because it locks the
@@ -2637,6 +2643,7 @@ impl App {
     /// `with_html` + `build_as_child` pattern as the git/session panels.
     /// Returns an error (surfaced to the `imgopen`/`mdopen` caller) on a bad
     /// path or any window/webview build failure; the terminal is untouched.
+    #[allow(dead_code)]
     fn open_preview_window(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -3550,6 +3557,7 @@ impl App {
     /// claude panes get a queued `--resume`. Sessions are built into stashed
     /// slots, then the saved active session is swapped into the live fields —
     /// mirroring the stash-swap invariant new_session/switch_session use.
+    #[allow(dead_code)]
     fn restore_sessions(
         &mut self,
         state: socket::RestoreState,
@@ -3630,6 +3638,7 @@ impl App {
     /// Recursively spawn the panes for one restore node and return the matching
     /// live PtyLayout. Leaves spawn a PtySession at the saved cwd (queueing a
     /// claude resume when needed); splits recurse and preserve dir + ratio.
+    #[allow(dead_code)]
     fn build_restore_node(
         &mut self,
         node: &socket::RestoreNode,
@@ -5745,6 +5754,7 @@ impl App {
     /// rendered grid is the only signal Claude Code gives us — it
     /// doesn't push these as OSC titles — so this is how we mirror
     /// the live status into the macOS titlebar.
+    #[allow(dead_code)]
     fn active_claude_status(&self) -> Option<String> {
         let ws = self.ws.lock().unwrap();
         let id = ws.active_pane.as_deref()?;
@@ -5778,6 +5788,7 @@ impl App {
         None
     }
 
+    #[allow(dead_code)]
     fn active_spinner_glyph(&self) -> Option<char> {
         let ws = self.ws.lock().unwrap();
         let id = ws.active_pane.as_deref()?;
@@ -5836,7 +5847,7 @@ impl App {
         };
         let Some((id, osc)) = active else { return };
         let _ = osc;
-        let mut label = self
+        let label = self
             .pty
             .get(&id)
             .and_then(|p| p.shell_pid())
@@ -6871,6 +6882,7 @@ impl App {
         }
         // Header chrome carried in LOGICAL px — gpu.rect/draw_text
         // promote to physical internally, matching the cell pass.
+        #[allow(dead_code)]
         struct HeaderInfo {
             id: String,
             x: f32,
@@ -7313,7 +7325,7 @@ impl App {
         // and tab drags whose cursor is over a pane BODY (split + place
         // moved tab as new pane). Tab drag over a strip is handled by
         // tab_drag_info's insertion bar instead.
-        let (cur_px_x, cur_px_y) = self.cursor_px;
+        let (_cur_px_x, cur_px_y) = self.cursor_px;
         let cursor_over_strip = self.pane_tab_rects.iter().any(|(_, _, (_, ry, _, rh))| {
             cur_px_y >= *ry && cur_px_y <= ry + rh
         });
@@ -7810,7 +7822,7 @@ impl App {
                 } else {
                     h.tabs.iter().map(|s| s.as_str()).collect()
                 };
-                let icon_w = g.measure_chrome_text("\u{f489}", icon_size, false);
+                let _icon_w = g.measure_chrome_text("\u{f489}", icon_size, false);
                 let close_w = g.measure_chrome_text("\u{2715}", icon_size, false);
                 let plus_w = g.measure_chrome_text("\u{ea60}", icon_size, false);
                 // Each tab's title gets an equal share of the leftover width.
@@ -8279,6 +8291,7 @@ impl App {
         // entry carries the pane's resolved rect (in cells), the cell
         // grid we'll actually paint (history + live composed), and the
         // cursor / title info the renderer reads.
+        #[allow(dead_code)]
         struct PaneFrame {
             id: String,
             x_cells: u16,

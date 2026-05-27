@@ -179,6 +179,7 @@ impl Shaper {
     /// Walk the fallback chain and return the first face that covers
     /// `ch` together with its glyph id. Returns None when no face
     /// has a glyph for the codepoint (caller skips the cell).
+    #[allow(dead_code)]
     fn resolve(&self, ch: char) -> Option<(usize, u16)> {
         for i in 0..self.faces.len() {
             let f = self.face(i);
@@ -379,7 +380,7 @@ impl Shaper {
             // real bold face. Keeps consistent visual weight when JetBrains
             // Bold is missing on disk (D2Coding-only systems etc).
             let want_dilate = bold && !matches!(kind, FaceKind::Bold);
-            let mut render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
+            let render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
                 let font = FontRef::from_index(&font_data, font_index).unwrap();
                 let mut scaler = scale_ctx.builder(font).size(face_size).hint(true).build();
                 // Color sources first so Apple Color Emoji (sbix), CBDT, and

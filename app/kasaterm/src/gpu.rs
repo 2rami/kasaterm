@@ -106,6 +106,7 @@ pub struct PaneSlot<'a> {
 /// pipeline. Caller order is preserved so the rect-then-text painters
 /// in main.rs paint in the same z-order as before.
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct ChromeBuffer {
     pub instances: Vec<CellInstance>,
 }
@@ -731,6 +732,7 @@ impl GpuRenderer {
     }
 
     /// Space/cell advance for the requested font at `size_px`.
+    #[allow(dead_code)]
     fn font_cell_advance(&mut self, size_px: u32, font: u8) -> f32 {
         match font {
             2 => self.md_bold_shaper.cell_advance(size_px as f32),
@@ -2348,10 +2350,8 @@ unsafe fn install_root_p3_layer(
                 fn CGColorSpaceCreateWithName(name: *const std::ffi::c_void) -> *mut std::ffi::c_void;
                 static kCGColorSpaceDisplayP3: *const std::ffi::c_void;
             }
-            unsafe {
-                let p = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
-                p as usize
-            }
+            let p = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+            p as usize
         });
         if cs != 0 {
             let _: () = msg_send![layer_ptr, setColorspace: cs as *mut std::ffi::c_void];
@@ -2582,7 +2582,10 @@ fn patch_p3_colorspace_safe(root_layer: *mut objc2::runtime::AnyObject) {
         // sRGB — exactly the "set returned ok but colours look wrong"
         // symptom. We create one per process, so the leak is fine.
         // (See sugarloaf-0.4.4/src/context/metal.rs.)
-        std::mem::forget(cs);
+        // `cs` is a *mut c_void (Copy) — `mem::forget` on it is a no-op;
+        // we just want to suppress unused-result warnings. The actual
+        // retain happens at the setColorspace: msg_send above.
+        let _ = cs;
         eprintln!("[gpu] CAMetalLayer colorspace → {cs_name} ({hits} layer(s) tagged)");
     }
 }

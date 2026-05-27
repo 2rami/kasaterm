@@ -125,6 +125,7 @@ struct Buffer {
 }
 
 impl Buffer {
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.cho.is_none() && self.jung.is_none() && self.jong.is_none()
     }
