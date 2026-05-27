@@ -1256,13 +1256,16 @@ enum FocusDir {
 
 /// Which edge of the drop-target pane the cursor is over during a header
 /// drag. Determines where the dragged pane lands: a Left/Right drop
-/// splits horizontally, Up/Down splits vertically.
-#[derive(Clone, Copy, PartialEq)]
+/// splits horizontally, Up/Down splits vertically. `Center` means the
+/// cursor sits in the inner 50% square — drop merges the tab into the
+/// target pane's tab strip instead of splitting.
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum DropZone {
     Left,
     Right,
     Up,
     Down,
+    Center,
 }
 
 /// State for an in-flight header drag-and-drop relocation.
@@ -1945,6 +1948,11 @@ struct App {
     /// repro for the multi-pane render path. Empty in normal use.
     autosplit_plan: Vec<pty_backend::SplitDir>,
     autosplit_at: Option<Instant>,
+    /// Headless tab-drag simulation. KASATERM_AUTODRAG="src:from:dst"
+    /// (e.g. "%2:0:%0") fires `simulate_tab_merge` after AUTODRAG_MS so
+    /// the cross-pane merge path can be verified without a real mouse.
+    autodrag_plan: Option<(String, usize, String)>,
+    autodrag_at: Option<Instant>,
     /// Headless repro for the window sidebar: number of extra windows left to
     /// spawn (KASATERM_AUTOWINDOWS) and when the next one fires. 0 disables.
     autowindow_left: usize,
@@ -2242,6 +2250,8 @@ impl App {
             autoquit_at: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,
+            autodrag_plan: None,
+            autodrag_at: None,
             autowindow_left: 0,
             autowindow_at: None,
             autotoggle_sidebar_at: None,
@@ -3909,6 +3919,103 @@ impl App {
         self.autosplit_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
     }
 
+    /// Headless cross-pane tab-merge simulation. Reads
+    /// KASATERM_AUTODRAG="src:from:dst" (e.g. "%2:0:%0") and fires
+    /// `simulate_tab_merge` after KASATERM_AUTODRAG_MS (default 5500).
+    fn arm_autodrag(&mut self) {
+        let Ok(env) = std::env::var("KASATERM_AUTODRAG") else { return };
+        let parts: Vec<&str> = env.split(':').collect();
+        if parts.len() < 3 {
+            eprintln!("[autodrag] expected src:from:dst, got {env:?}");
+            return;
+        }
+        let from: usize = parts[1].parse().unwrap_or(0);
+        let ms: u64 = std::env::var("KASATERM_AUTODRAG_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5500);
+        self.autodrag_plan = Some((parts[0].to_string(), from, parts[2].to_string()));
+        self.autodrag_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+        eprintln!("[autodrag] armed: src={} from={} dst={} fire_in={ms}ms",
+            parts[0], from, parts[2]);
+    }
+
+    fn run_pending_autodrag(&mut self) {
+        let Some(t) = self.autodrag_at else { return };
+        if Instant::now() < t { return; }
+        self.autodrag_at = None;
+        let Some((src, from, dst)) = self.autodrag_plan.take() else { return };
+        self.simulate_tab_merge(&src, from, &dst);
+    }
+
+    /// Pane header centre in logical px, mirroring `drop_target_at`'s box
+    /// expansion. Used by `simulate_tab_merge` to land the synthetic
+    /// cursor exactly where a user would aim "drop on header band".
+    fn pane_header_center(&self, id: &str) -> Option<(f32, f32)> {
+        let tree = self.pty_layout.as_ref()?;
+        let leaves = tree.leaves().len();
+        let (cols, rows) = self.window_cells();
+        let rects = tree.leaf_rects(cols, rows);
+        let pad = WINDOW_PADDING + self.effective_sidebar_w();
+        let header_band = if leaves > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
+        let (_, cx, cy, cw, _) = rects.into_iter().find(|(i, ..)| i == id)?;
+        let bx = pad + cx as f32 * self.cell.w;
+        let by = TITLE_HEIGHT + cy as f32 * self.cell.h;
+        let bw = cw as f32 * self.cell.w;
+        Some((bx + bw / 2.0, by - header_band / 2.0))
+    }
+
+    /// Simulate dragging `src.tabs[from]` onto `dst`'s header. Mirrors the
+    /// release-handler's cross_pane merge branch so we can verify the
+    /// path without a real mouse. Logs to stderr.
+    fn simulate_tab_merge(&mut self, src: &str, from: usize, dst: &str) {
+        let Some((mx, my)) = self.pane_header_center(dst) else {
+            eprintln!("[autodrag] no rect for dst={dst}");
+            return;
+        };
+        eprintln!("[autodrag] simulate src={src} from={from} dst={dst} mouse=({mx:.0},{my:.0})");
+        let mut moved_pid: Option<String> = None;
+        let mut moved: Option<PaneTab> = None;
+        let mut src_empty = false;
+        {
+            let mut ws = self.ws.lock().unwrap();
+            if let Some(s) = ws.panes.get_mut(src) {
+                if from < s.tabs.len() {
+                    let tab = s.tabs.remove(from);
+                    moved_pid = tab.pid.clone();
+                    moved = Some(tab);
+                    if s.active_tab >= s.tabs.len() && !s.tabs.is_empty() {
+                        s.active_tab = s.tabs.len() - 1;
+                    }
+                    src_empty = s.tabs.is_empty();
+                    s.dirty = true;
+                }
+            }
+            if let (Some(tab), Some(pid)) = (moved.take(), moved_pid.clone()) {
+                ws.pid_to_pane.insert(pid, dst.to_string());
+                if let Some(d) = ws.panes.get_mut(dst) {
+                    let to = d.tabs.len();
+                    d.tabs.insert(to, tab);
+                    d.active_tab = to;
+                    d.dirty = true;
+                }
+            }
+            if src_empty {
+                ws.panes.remove(src);
+            }
+        }
+        if src_empty {
+            self.collapse_layout_only(src);
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        let dst_tabs = self.ws.lock().unwrap()
+            .panes.get(dst).map(|p| p.tabs.len()).unwrap_or(0);
+        eprintln!("[autodrag] done; src_empty={src_empty} dst_tabs={dst_tabs}");
+    }
+
     /// Headless repro for the in-pane tab header: queue N dummy tabs on the
     /// active pane KASATERM_AUTOTABS_MS (default 3200, after autosplit) later.
     fn arm_autotabs(&mut self) {
@@ -5143,6 +5250,9 @@ impl App {
             DropZone::Left => (pty_backend::SplitDir::Horizontal, false),
             DropZone::Down => (pty_backend::SplitDir::Vertical, true),
             DropZone::Up => (pty_backend::SplitDir::Vertical, false),
+            // Center is handled by the caller as a tab merge — splitting
+            // would lose the "drop into this pane's tabs" intent.
+            DropZone::Center => return Ok(()),
         };
         let inserted = self
             .pty_layout
@@ -5206,6 +5316,9 @@ impl App {
             DropZone::Right => (pty_backend::SplitDir::Horizontal, false),
             DropZone::Up => (pty_backend::SplitDir::Vertical, true),
             DropZone::Down => (pty_backend::SplitDir::Vertical, false),
+            // Caller routes Center to the cross-pane tab-merge path; if it
+            // slips through here, abort the split so we don't double-spawn.
+            DropZone::Center => return,
         };
         if let Some(tree) = self.pty_layout.as_mut() {
             if !tree.insert_beside(target, dir, before, new_outer.clone()) {
@@ -5284,7 +5397,11 @@ impl App {
             if was_active && next_focus.is_some() {
                 ws.active_pane = next_focus;
             }
+            for pane in ws.panes.values_mut() {
+                pane.dirty = true;
+            }
         }
+        self.chrome_dirty = true;
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -5355,7 +5472,14 @@ impl App {
             if was_active {
                 ws.active_pane = next_focus;
             }
+            // Layout shrank — every survivor needs a repaint, else the render
+            // loop sees pane.dirty=false and skips the GPU pass, leaving the
+            // closed pane's slot blank until the next dirty signal.
+            for pane in ws.panes.values_mut() {
+                pane.dirty = true;
+            }
         }
+        self.chrome_dirty = true;
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -5512,20 +5636,51 @@ impl App {
     /// resolves to one of the four edges. None when off every pane.
     fn drop_target_at(&self, x: f32, y: f32) -> Option<(String, DropZone)> {
         let tree = self.pty_layout.as_ref()?;
+        let leaves_count = tree.leaves().len();
         let (cols, rows) = self.window_cells();
         let rects = tree.leaf_rects(cols, rows);
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
+        // Per-pane tab-strip top: where the pill row starts. Combined
+        // with the header-band height below, this gives the full
+        // pane-header region (even when a single-tab pane has a tiny
+        // strip).
+        let mut strip_top: HashMap<String, f32> = HashMap::new();
+        for (pid, _, (_, ry, _, _)) in &self.pane_tab_rects {
+            strip_top
+                .entry(pid.clone())
+                .and_modify(|t| { if *ry < *t { *t = *ry; } })
+                .or_insert(*ry);
+        }
+        // When the layout has >1 leaf every pane gets a 30 logical-px
+        // header band — including single-tab panes — so the box must
+        // extend up by at least that amount or a drop onto a single-tab
+        // header falls into the body's Up zone (split-up) instead of
+        // Center (tab-merge), which was the "drag→merge gives split"
+        // bug.
+        let header_band = if leaves_count > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
         for (id, cx, cy, cw, ch) in rects {
             let bx = pad + cx as f32 * self.cell.w;
-            let by = TITLE_HEIGHT + cy as f32 * self.cell.h;
+            // pane_top = pane 시작 (헤더 띠 시작, chrome 포함). 기존엔
+            // 이걸 본문 시작으로 잘못 가정해 box_top을 한 칸 위로
+            // 잡았고 그래서 hit-test가 전부 30px 위로 shift됨 — 헤더 띠
+            // 안 마우스가 본문 판정, 헤더 위(title bar 영역)가 헤더 판정.
+            let pane_top = TITLE_HEIGHT + cy as f32 * self.cell.h;
             let bw = (cw as f32 * self.cell.w).max(1.0);
             let bh = (ch as f32 * self.cell.h).max(1.0);
-            if x >= bx && x <= bx + bw && y >= by && y <= by + bh {
-                let dx = (x - bx) / bw - 0.5;
-                let dy = (y - by) / bh - 0.5;
-                let zone = if dx.abs() > dy.abs() {
-                    if dx < 0.0 { DropZone::Left } else { DropZone::Right }
-                } else if dy < 0.0 {
+            let body_top = pane_top + header_band;
+            if x >= bx && x <= bx + bw && y >= pane_top && y <= pane_top + bh {
+                // 헤더 띠 (pane_top ~ body_top) = Center (tab merge).
+                // 본문 (body_top ~ pane_top+bh) = 4방향 split.
+                if y < body_top {
+                    return Some((id, DropZone::Center));
+                }
+                let dist_left = x - bx;
+                let dist_right = bx + bw - x;
+                let dist_top = y - body_top;
+                let dist_bottom = (pane_top + bh) - y;
+                let zone = if dist_left.min(dist_right) < dist_top.min(dist_bottom) {
+                    if dist_left < dist_right { DropZone::Left } else { DropZone::Right }
+                } else if dist_top < dist_bottom {
                     DropZone::Up
                 } else {
                     DropZone::Down
@@ -5549,6 +5704,9 @@ impl App {
             DropZone::Right => (pty_backend::SplitDir::Horizontal, false),
             DropZone::Up => (pty_backend::SplitDir::Vertical, true),
             DropZone::Down => (pty_backend::SplitDir::Vertical, false),
+            // Header drag onto a target's centre = ambiguous for a
+            // whole-pane move; ignore rather than picking a random edge.
+            DropZone::Center => return,
         };
         if let Some(tree) = self.pty_layout.as_mut() {
             if !tree.remove_leaf(moving) {
@@ -7306,10 +7464,6 @@ impl App {
         // and tab drags whose cursor is over a pane BODY (split + place
         // moved tab as new pane). Tab drag over a strip is handled by
         // tab_drag_info's insertion bar instead.
-        let (_cur_px_x, cur_px_y) = self.cursor_px;
-        let cursor_over_strip = self.pane_tab_rects.iter().any(|(_, _, (_, ry, _, rh))| {
-            cur_px_y >= *ry && cur_px_y <= ry + rh
-        });
         let header_drag_active = self
             .header_drag
             .as_ref()
@@ -7320,12 +7474,46 @@ impl App {
             .as_ref()
             .map(|d| d.active)
             .unwrap_or(false);
-        let show_drop_zone = header_drag_active || (tab_drag_active && !cursor_over_strip);
+        // The strip-only insertion bar gets replaced by the zone overlay
+        // — without it the user sees no preview when hovering the header,
+        // which is exactly the spot most people aim for when intending
+        // "merge into this pane".
+        let show_drop_zone = header_drag_active || tab_drag_active;
+        // Indicator policy:
+        //   - header band (cursor_on_header) → strip insertion bar only
+        //                                       (overlay 안 그림)
+        //   - body Center / split            → rectangle overlay
+        // 두 인디케이터가 동시에 뜨지 않게 mutually exclusive.
+        let current_zone = self.drop_target_at(self.cursor_px.0, self.cursor_px.1);
+        let cursor_on_header = matches!(current_zone, Some((_, DropZone::Center))) && {
+            // 헤더 = pane_top ~ pane_top + header_band. body_top
+            // 10px 위까지 관대 (좁은 헤더에서 마우스 못 맞추는 거 방지).
+            let cur_y = self.cursor_px.1;
+            let leaves = self.pty_layout.as_ref().map(|t| t.leaves().len()).unwrap_or(1);
+            let header_band = if leaves > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
+            current_zone
+                .as_ref()
+                .and_then(|(id, _)| {
+                    let tree = self.pty_layout.as_ref()?;
+                    let (cols, rows) = self.window_cells();
+                    tree.leaf_rects(cols, rows)
+                        .into_iter()
+                        .find(|(i, ..)| i == id)
+                        .map(|(_, _, cy, _, _)| TITLE_HEIGHT + cy as f32 * self.cell.h)
+                })
+                .map(|pane_top| cur_y < pane_top + header_band + 10.0)
+                .unwrap_or(false)
+        };
+        // Overlay shows when cursor is over a pane BODY (split zone or
+        // body-Center). Header-Center routes to the strip insertion bar.
+        let zone_overlay_active = tab_drag_active && current_zone.is_some() && !cursor_on_header;
         let drop_zone_rect: Option<(f32, f32, f32, f32)> = show_drop_zone
-            .then(|| self.drop_target_at(self.cursor_px.0, self.cursor_px.1))
+            .then_some(current_zone)
             .flatten()
+            .filter(|_| !cursor_on_header)
             .and_then(|(target, zone)| {
                 let tree = self.pty_layout.as_ref()?;
+                let leaves = tree.leaves().len();
                 let (cols, rows) = self.window_cells();
                 let pad = WINDOW_PADDING + self.effective_sidebar_w();
                 let (_, cx, cy, cw, ch) = tree
@@ -7333,14 +7521,19 @@ impl App {
                     .into_iter()
                     .find(|(id, ..)| *id == target)?;
                 let bx = pad + cx as f32 * self.cell.w;
-                let by = TITLE_HEIGHT + cy as f32 * self.cell.h;
+                let pane_top = TITLE_HEIGHT + cy as f32 * self.cell.h;
                 let bw = cw as f32 * self.cell.w;
                 let bh = ch as f32 * self.cell.h;
+                let header_band = if leaves > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
+                // Split overlay는 body 영역만 색칠 (헤더 띠 침범 X).
+                let body_top = pane_top + header_band;
+                let body_h = (bh - header_band).max(1.0);
                 Some(match zone {
-                    DropZone::Left => (bx, by, bw / 2.0, bh),
-                    DropZone::Right => (bx + bw / 2.0, by, bw / 2.0, bh),
-                    DropZone::Up => (bx, by, bw, bh / 2.0),
-                    DropZone::Down => (bx, by + bh / 2.0, bw, bh / 2.0),
+                    DropZone::Left => (bx, body_top, bw / 2.0, body_h),
+                    DropZone::Right => (bx + bw / 2.0, body_top, bw / 2.0, body_h),
+                    DropZone::Up => (bx, body_top, bw, body_h / 2.0),
+                    DropZone::Down => (bx, body_top + body_h / 2.0, bw, body_h / 2.0),
+                    DropZone::Center => return None,
                 })
             });
         // Ghostty-style split seams: one 1px hairline per interior split
@@ -7754,12 +7947,17 @@ impl App {
             // from the cell grid. The active tab is marked by a raised pill +
             // a top accent strip — not a darker "cage" — and only the active
             // tab carries a × (so clicking any inactive tab just switches).
-            // (drop_pane, target) — drives the insertion bar; updated to the
-            // pane the cursor is currently over (cross-pane drag).
+            // (drop_pane, target) — drives the insertion bar; updated to
+            // the pane the cursor is currently over (cross-pane drag).
+            // Suppressed whenever the zone-overlay rectangle is showing
+            // for the same drag — two simultaneous indicators is what
+            // the "pane 이동이랑 같이 떠" report was about. Falls back
+            // to the bar only when the cursor is outside every pane box
+            // (gap / window edge).
             let tab_drag_info: Option<(String, usize)> = self
                 .tab_drag
                 .as_ref()
-                .filter(|d| d.active)
+                .filter(|d| d.active && !zone_overlay_active)
                 .map(|d| (d.drop_pane.clone(), d.target));
             // (source_pane, source_idx) — the tab being lifted. The source
             // tab is drawn at reduced alpha so it reads as "in transit"
@@ -7964,11 +8162,12 @@ impl App {
                         deferred_accents.push((ax, h.y, aw, accent_col));
                     }
                 }
-                // Drag insertion bar: 2px accent line spanning the strip.
+                // Drag insertion bar: 6px accent line spanning the strip.
+                // 옛 2px는 Retina+at-speed drag에서 사실상 안 보였음.
                 if let Some((ref dpane, target)) = tab_drag_info {
                     if *dpane == h.id {
                         let bar_x = tab_edges.get(target).copied().unwrap_or(tx - gap);
-                        g.rect(bar_x - 1.0, h.y + 2.0, 2.0, PANE_HEADER_HEIGHT - 4.0, theme::ACCENT);
+                        g.rect(bar_x - 3.0, h.y + 1.0, 6.0, PANE_HEADER_HEIGHT - 2.0, theme::ACCENT);
                     }
                 }
                 let (cur_x, cur_y) = self.cursor_px;
@@ -8413,6 +8612,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autowindows();
         self.arm_autotoggle();
         self.arm_autotabs();
+        self.arm_autodrag();
         self.schedule_autoquit();
         self.open_git_panel(event_loop, false);
     }
@@ -8670,14 +8870,22 @@ impl ApplicationHandler<UserEvent> for App {
                         x.0 = x.0.min(*rx);
                         x.1 = x.1.max(rx + rw);
                     }
-                    for (pid, (y0, y1)) in &strip_y {
-                        if py >= *y0 && py <= *y1 {
-                            // Loose x-bound: anywhere inside the pane header
-                            // band counts. Avoids the + button "blocking"
-                            // the drop_pane switch when the cursor floats
-                            // above the pill gap.
-                            drop_pane = pid.clone();
-                            break;
+                    // Body-hit first — drop_target_at extends the hit box
+                    // to include the strip, so the same pane stays the
+                    // drop target when the cursor slides between body and
+                    // strip. Strip y-range scan is a fallback for cursors
+                    // that drop_target_at can't catch (e.g. between
+                    // panes' gap).
+                    if let Some((target_pane, _)) =
+                        self.drop_target_at(px, py)
+                    {
+                        drop_pane = target_pane;
+                    } else {
+                        for (pid, (y0, y1)) in &strip_y {
+                            if py >= *y0 && py <= *y1 {
+                                drop_pane = pid.clone();
+                                break;
+                            }
                         }
                     }
                     // Insertion index = #pills of drop_pane whose midpoint sits
@@ -9137,7 +9345,7 @@ impl ApplicationHandler<UserEvent> for App {
                     ElementState::Released => {
                         // End a tab drag: a real drag reorders the pane's tab
                         // list; a plain press just switches to that tab.
-                        if let Some(td) = self.tab_drag.take() {
+                        if let Some(mut td) = self.tab_drag.take() {
                             window.set_cursor(CursorIcon::Default);
                             // Tab → pane BODY drop: split the target pane in
                             // the quadrant the cursor landed in and place the
@@ -9145,21 +9353,39 @@ impl ApplicationHandler<UserEvent> for App {
                             // header-drag UX (drop in body = relocate) but
                             // unified into the tab drag so the user never has
                             // to find non-tab space on the header.
+                            // drop_target_at already covers the strip area
+                            // (box extends up to the pane's tab strip), so
+                            // we no longer need the over_strip fallback —
+                            // it was the source of body↔strip flicker.
                             let body_drop: Option<(String, DropZone)> = if td.active {
-                                let (cx, cy) = self.cursor_px;
-                                let over_strip = self
-                                    .pane_tab_rects
-                                    .iter()
-                                    .any(|(_, _, (_, ry, _, rh))| cy >= *ry && cy <= ry + rh);
-                                if over_strip {
-                                    None
-                                } else {
-                                    self.drop_target_at(cx, cy)
-                                }
+                                self.drop_target_at(self.cursor_px.0, self.cursor_px.1)
                             } else {
                                 None
                             };
                             if let Some((target, zone)) = body_drop {
+                                // Center on header = tab merge — route
+                                // through the cross-pane path below by
+                                // rewriting drop_pane; Center on self
+                                // cancels (drop on own header is a no-op).
+                                if zone == DropZone::Center {
+                                    if target != td.pane {
+                                        let dst_len = self
+                                            .ws
+                                            .lock()
+                                            .unwrap()
+                                            .panes
+                                            .get(&target)
+                                            .map(|p| p.tabs.len())
+                                            .unwrap_or(0);
+                                        td.drop_pane = target.clone();
+                                        td.target = dst_len;
+                                    } else {
+                                        self.chrome_dirty = true;
+                                        window.request_redraw();
+                                        return;
+                                    }
+                                    // Fall through to cross_pane merge.
+                                } else {
                                 let src_tab_count = self
                                     .ws
                                     .lock()
@@ -9192,6 +9418,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.chrome_dirty = true;
                                     window.request_redraw();
                                     return;
+                                }
                                 }
                             }
                             let cross_pane = td.active && td.drop_pane != td.pane;
@@ -9511,6 +9738,7 @@ impl ApplicationHandler<UserEvent> for App {
         // when no plan is queued.
         self.run_pending_autosplits();
         self.run_pending_autowindows();
+        self.run_pending_autodrag();
         self.run_pending_autotoggle();
         self.run_pending_autotabs();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
