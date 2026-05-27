@@ -132,53 +132,22 @@ impl PtySession {
         // either ignore or render as garbage. Force a consistent
         // identity and scrub the iTerm-specific leftovers so the
         // detection settles on kasaterm regardless of who launched us.
-        // TERM defaults to xterm-256color. If the ghostty terminfo entry
-        // is installed on this machine (ghostty ships it in its app
-        // bundle), upgrade to TERM=xterm-ghostty + point TERMINFO at the
-        // ghostty terminfo dir — Claude Code / vim / less then read the
-        // richer capability set (SGR mouse, ccc/oc colour redefinition,
-        // title set/clear, repeat-character `rep`, undercurl, etc) and
-        // emit the wider variety of styles the user sees in real ghostty.
-        // Fallback path keeps working unchanged on machines without it.
-        let ghostty_terminfo_dir = "/Applications/Ghostty.app/Contents/Resources/terminfo";
-        let ghostty_terminfo_entry =
-            format!("{ghostty_terminfo_dir}/78/xterm-ghostty");
-        let has_ghostty_terminfo = std::path::Path::new(&ghostty_terminfo_entry).exists();
-        if has_ghostty_terminfo {
-            cmd.env("TERM", "xterm-ghostty");
-            cmd.env("TERMINFO", ghostty_terminfo_dir);
-        } else {
-            cmd.env("TERM", "xterm-256color");
-        }
-        // Masquerade as Ghostty. Claude Code (and other TUIs) detects
-        // host terminal via `TERM_PROGRAM` and adapts its theme — the
-        // Ghostty profile uses the punchier diff bg / syntax colours
-        // the user wanted. OSC 52 clipboard still works; alacritty's
-        // VT parser handles whatever escapes Ghostty-targeted TUIs
-        // emit (sync output, kitty graphics, etc).
-        cmd.env("TERM_PROGRAM", "ghostty");
-        // Match the actual ghostty version installed on this machine so
-        // Claude Code / Helix / etc don't disable capabilities they think
-        // we're too old for. Version-gated feature checks are a common
-        // pattern; the 1.1.3 placeholder we shipped earlier predated
-        // truecolor-default behaviour in some clients.
-        cmd.env("TERM_PROGRAM_VERSION", "1.3.1");
-        cmd.env("COLORTERM", "truecolor");
-        // No FORCE_COLOR — ghostty doesn't set it (verified by running
-        // `node -e 'console.log(process.env.FORCE_COLOR)'` inside ghostty,
-        // which returns `undefined`). Some color-detection libraries treat
-        // a present FORCE_COLOR as evidence the program is running under
-        // CI / a wrapper that's already stripped tty info, and downgrade
-        // to ANSI-256 instead of trusting COLORTERM=truecolor. Mirroring
-        // ghostty's environment exactly avoids that branch.
-        // Some clients double-check "is this a real ghostty" by looking
-        // for GHOSTTY_BIN_DIR (set by ghostty itself when it spawns a
-        // shell). Without it they fall back to a conservative capability
-        // set and emit ANSI-256 instead of truecolor.
+        // The truecolor decision in claude code's chalk supports-color is
+        // gated on `COLORTERM === "truecolor"`. Once we stopped propagating
+        // TMUX into the child env (chalk treats it as "wrapped, no
+        // passthrough" and falls back to 256), COLORTERM alone is enough
+        // to drive truecolor — ghostty masquerade (TERM=xterm-ghostty,
+        // TERM_PROGRAM=ghostty, GHOSTTY_BIN_DIR, TERMINFO) is no longer
+        // needed for colour matching. Identifying as our real selves
+        // keeps the env simple and avoids breaking on ghostty-less
+        // machines that don't have the bundle paths above.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("TERM_PROGRAM", "kasaterm");
         cmd.env(
-            "GHOSTTY_BIN_DIR",
-            "/Applications/Ghostty.app/Contents/MacOS",
+            "TERM_PROGRAM_VERSION",
+            env!("CARGO_PKG_VERSION"),
         );
+        cmd.env("COLORTERM", "truecolor");
         for k in [
             "ITERM_SESSION_ID",
             "ITERM_PROFILE",
