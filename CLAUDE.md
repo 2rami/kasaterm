@@ -16,8 +16,8 @@ tmuxify (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 4. **체감(스크롤·입력 지연) 테스트는 반드시 release** — `cargo run --release -p kasaterm`. 디버그 빌드는 원래 버벅임(A/B 확인: debug=느림, release/.app=빠름). 디버그로 "느리다" 판단 금지
 5. **시각 확인** — 스크린샷 본 후 어색한 부분 직접 짚어내고 수정. "어때보여요?" 묻지 말고 너의 판단으로 다음 액션
 
-### 렌더러 기본값 (2026-05-27 후반 확정)
-기본 렌더러 = **cell-renderer(gpu.rs)** — chrome UI(browser-tab·멀티탭·사이드바·이미지 pane 등 ~850줄)가 `render_frame_gpu` 경로에만 있어서 sugarloaf 기본화 시도(62a7844) 즉시 revert. sugarloaf는 `KASATERM_RENDERER=sugarloaf`로 **색재현 A/B용 옵트인 전용**. P3 자체는 sugarloaf root layer install로만 동작(wgpu sublayer는 macOS compositor에서 setColorspace 무시). 렌더러 분기 토글 같은 한 줄 변경도 chrome UI 잔존 grep으로 확인 후 진행. 색재현 다시 건드리기 전 [[reference_kasaterm_color_pipeline]] 먼저 읽기.
+### 렌더러 기본값 (2026-05-27 final)
+기본 렌더러 = **cell-renderer(gpu.rs) + P3 색재현 통합**. 자체 CAMetalLayer를 NSView root에 install + `SurfaceTargetUnsafe::CoreAnimationLayer`로 wgpu 핸드오프 + shader sRGB→DisplayP3 Bradford matrix (sugarloaf `renderer.metal`에서 lift). 측정 (234,51,35) sugarloaf/ghostty 동급. chrome UI(browser-tab·멀티탭·사이드바·이미지 pane 등 ~850줄) 그대로 유지. `KASATERM_P3_ROOT=0`으로 옛 sublayer/sRGB 경로 폴백 가능. sugarloaf는 `KASATERM_RENDERER=sugarloaf`로 참조용 옵트인만. 색재현 건드리기 전 [[reference_kasaterm_color_pipeline]] 먼저 읽기 — layer tag만으론 효과 0, shader matrix가 진짜 핵심.
 
 ### 알려진 함정 1순위 ([[tmuxify-rendering-pipeline]] 메모리 참조)
 현재 기본 백엔드 = pty-backend(portable-pty + alacritty_terminal) + cell-renderer(`gpu.rs`). sugarloaf는 색재현 옵트인. 깨질 때 의심 순서:

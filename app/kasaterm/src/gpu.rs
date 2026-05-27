@@ -57,6 +57,12 @@ pub struct GpuRenderer {
     chrome: Vec<CellInstance>,
     /// Scale we cached on init. winit logical→physical conversion.
     scale: f32,
+    /// True when KASATERM_P3_ROOT installed our own root metal layer and
+    /// wgpu was given that layer via `SurfaceTargetUnsafe::CoreAnimationLayer`.
+    /// In this mode the legacy per-frame P3 re-apply / re-promote calls must
+    /// be skipped — they target wgpu's would-be sublayer, which doesn't
+    /// exist on this path, and on macOS 26 they actively undo our root install.
+    p3_root_owned: bool,
     /// Separate pipeline for image panes — built with linear filtering so a
     /// photo scaled to a pane reads smooth, not pixelated. Has its own
     /// instance buffer so the image quads don't collide with the chrome
@@ -118,11 +124,41 @@ impl GpuRenderer {
         let font_size_px = (font_size_logical * scale).round() as u32;
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
-        let surface_target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: window.display_handle()?.as_raw(),
-            raw_window_handle: window.window_handle()?.as_raw(),
+        // P3 color reproduction path (default on macOS): WE create a
+        // CAMetalLayer, install it as the NSView's ROOT layer, tag it
+        // Display P3, and hand the pointer to wgpu via
+        // `SurfaceTargetUnsafe::CoreAnimationLayer` instead of letting
+        // wgpu create its own sublayer-attached one (the sublayer
+        // pattern macOS refuses to color-manage). Combined with the
+        // sRGB→DisplayP3 Bradford matrix in shader.wgsl, this measures
+        // (234, 51, 35) for pure-red byte (255, 0, 0) — exactly what
+        // sugarloaf produces. Set `KASATERM_P3_ROOT=0` to fall back to
+        // the legacy RawHandle/sublayer path (plain sRGB, no P3 lift)
+        // for diagnostic A/B.
+        #[cfg(target_os = "macos")]
+        let p3_root = std::env::var("KASATERM_P3_ROOT")
+            .ok()
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true);
+        #[cfg(not(target_os = "macos"))]
+        let p3_root = false;
+        let surface = if p3_root {
+            #[cfg(target_os = "macos")]
+            unsafe {
+                let layer_ptr = install_root_p3_layer(&window, scale)
+                    .context("install_root_p3_layer failed")?;
+                let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer_ptr);
+                instance.create_surface_unsafe(target)?
+            }
+            #[cfg(not(target_os = "macos"))]
+            unreachable!()
+        } else {
+            let surface_target = wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: window.display_handle()?.as_raw(),
+                raw_window_handle: window.window_handle()?.as_raw(),
+            };
+            unsafe { instance.create_surface_unsafe(surface_target)? }
         };
-        let surface = unsafe { instance.create_surface_unsafe(surface_target)? };
         // Live-resize would otherwise show the layer's stale pixels stretched
         // into the new bounds until our next frame lands. Pinning the layer's
         // contentsGravity to top-left keeps content anchored — same trick
@@ -130,13 +166,15 @@ impl GpuRenderer {
         #[cfg(target_os = "macos")]
         unsafe {
             patch_metal_layer_gravity(&window);
-            // Promote wgpu's observer CAMetalLayer to be the NSView's
-            // ROOT layer (sugarloaf / ghostty pattern). Sublayer-based
-            // setups silently ignore CAMetalLayer.colorspace because
-            // macOS color-manages the COMPOSITE (root layer) and the
-            // P3 tag on a sublayer is dropped. Promotion makes the
-            // tag stick — verified by Color Meter.
-            promote_metal_layer_to_root(&window, &surface);
+            if !p3_root {
+                // Legacy path: promote wgpu's observer CAMetalLayer to root
+                // (try 5 — recorded as ineffective on macOS 26 because the
+                // observer reattaches its own layer as a child). Kept for
+                // the default `RawHandle` branch only.
+                promote_metal_layer_to_root(&window, &surface);
+            } else {
+                eprintln!("[gpu] P3 root layer path active (KASATERM_P3_ROOT)");
+            }
         }
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -308,13 +346,27 @@ impl GpuRenderer {
         let pipeline = Pipeline::new(&device, format, 32_768);
         let init_dims = [config.width as f32, config.height as f32];
         let (init_gamma, init_contrast, init_sat) = text_render_knobs();
-        pipeline.write_uniforms_full(&queue, init_dims, init_gamma, init_contrast, init_sat);
+        pipeline.write_uniforms_full(
+            &queue,
+            init_dims,
+            init_gamma,
+            init_contrast,
+            init_sat,
+            p3_root,
+        );
         let bind_group = pipeline.make_bind_group(&device, atlas.view(), atlas.sampler());
 
         // Image pass: own buffer (a few quads), linear filtering for smooth
         // scaling. Shares the same screen-size uniform projection.
         let image_pipeline = Pipeline::with_filtering(&device, format, 64, true);
-        image_pipeline.write_uniforms_full(&queue, init_dims, init_gamma, init_contrast, init_sat);
+        image_pipeline.write_uniforms_full(
+            &queue,
+            init_dims,
+            init_gamma,
+            init_contrast,
+            init_sat,
+            p3_root,
+        );
         let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("kasaterm image sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -343,6 +395,7 @@ impl GpuRenderer {
             cell_h: cell_h / scale,
             chrome: Vec::with_capacity(1024),
             scale,
+            p3_root_owned: p3_root,
             image_pipeline,
             image_sampler,
             images: HashMap::new(),
@@ -1332,10 +1385,22 @@ impl GpuRenderer {
         self.surface.configure(&self.device, &self.config);
         let dims = [self.config.width as f32, self.config.height as f32];
         let (gamma, contrast, sat) = text_render_knobs();
-        self.pipeline
-            .write_uniforms_full(&self.queue, dims, gamma, contrast, sat);
-        self.image_pipeline
-            .write_uniforms_full(&self.queue, dims, gamma, contrast, sat);
+        self.pipeline.write_uniforms_full(
+            &self.queue,
+            dims,
+            gamma,
+            contrast,
+            sat,
+            self.p3_root_owned,
+        );
+        self.image_pipeline.write_uniforms_full(
+            &self.queue,
+            dims,
+            gamma,
+            contrast,
+            sat,
+            self.p3_root_owned,
+        );
     }
 
     /// Render one frame. `panes` covers every pane the caller wants
@@ -1571,15 +1636,23 @@ impl GpuRenderer {
         // Setting it every frame is cheap (one selector call) and keeps
         // the wider gamut sticky frame-to-frame.
         #[cfg(target_os = "macos")]
-        {
+        if !self.p3_root_owned {
+            // Legacy `RawHandle` path: wgpu owns the layer and creates it as
+            // a sublayer that macOS won't color-manage. Re-apply / re-promote
+            // every frame as a (mostly ineffective) workaround.
             apply_p3_via_hal(&self.surface);
             unsafe {
                 reapply_p3(self._window.as_ref());
-                // Re-promote every frame — wgpu's observer pattern
-                // may re-attach the metal layer as a sublayer between
-                // presents, undoing our root-promotion at init.
                 promote_metal_layer_to_root(self._window.as_ref(), &self.surface);
             }
+        } else {
+            // P3_ROOT mode: we own the metal layer, but wgpu's
+            // `surface.configure()` calls `setPixelFormat` / `setDevice` on
+            // it which can quietly drop the Display P3 tag. Re-apply via the
+            // hal handle every frame — same cheap setColorspace selector as
+            // `apply_p3_via_hal`, just targeting the layer wgpu now reports
+            // (which IS our root layer in this mode).
+            apply_p3_via_hal(&self.surface);
         }
         let instance_count = self.chrome.len();
         self.pipeline
@@ -2215,6 +2288,83 @@ unsafe fn patch_metal_layer_gravity(window: &Window) {
     // NSViewLayerContentsPlacement: 9 = .topLeft — mirrors the layer gravity
     // so AppKit's own resize-time scaling doesn't stretch contents either.
     let _: () = msg_send![ns_view, setLayerContentsPlacement: 9_isize];
+}
+
+/// Create a fresh CAMetalLayer, install it as the NSView's root layer,
+/// tag it Display P3, and return the raw pointer. Used by the
+/// `KASATERM_P3_ROOT=1` opt-in path: feeding this pointer to
+/// `SurfaceTargetUnsafe::CoreAnimationLayer` makes wgpu reuse our layer
+/// rather than create a sublayer-attached one (the macOS-color-management
+/// blocker described in reference_kasaterm_color_pipeline).
+///
+/// Returns the layer pointer cast to `*mut c_void` — what wgpu wants.
+#[cfg(target_os = "macos")]
+unsafe fn install_root_p3_layer(
+    window: &winit::window::Window,
+    scale: f32,
+) -> Result<*mut std::ffi::c_void> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::RawWindowHandle;
+    use std::sync::OnceLock;
+
+    unsafe {
+        let handle = window.window_handle().context("no window handle")?;
+        let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+            anyhow::bail!("not an AppKit handle");
+        };
+        let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+
+        // Fresh CAMetalLayer instance — `[[CAMetalLayer alloc] init]`.
+        let metal_cls = objc2::runtime::AnyClass::get(c"CAMetalLayer")
+            .context("CAMetalLayer class missing")?;
+        let layer_obj: *mut AnyObject = msg_send![metal_cls, alloc];
+        let layer_ptr: *mut AnyObject = msg_send![layer_obj, init];
+        if layer_ptr.is_null() {
+            anyhow::bail!("CAMetalLayer init returned nil");
+        }
+
+        // setFrame on the layer requires the NSRect encode trait we
+        // don't bring in here — and wgpu's `surface.configure()` calls
+        // `setDrawableSize` later anyway, so skipping the initial frame
+        // is harmless. Just pin the backing scale.
+        let _: () = msg_send![layer_ptr, setContentsScale: scale as f64];
+        // Anchor content to top-left during live resize (same as
+        // patch_metal_layer_gravity for the legacy path).
+        let topleft = objc2_foundation::NSString::from_str("topLeft");
+        let _: () = msg_send![layer_ptr, setContentsGravity: &*topleft];
+
+        // P3 colorspace tag — cached because CGColorSpace is expensive.
+        static CS: OnceLock<usize> = OnceLock::new();
+        let cs = *CS.get_or_init(|| {
+            #[link(name = "CoreGraphics", kind = "framework")]
+            unsafe extern "C" {
+                fn CGColorSpaceCreateWithName(name: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+                static kCGColorSpaceDisplayP3: *const std::ffi::c_void;
+            }
+            unsafe {
+                let p = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
+                p as usize
+            }
+        });
+        if cs != 0 {
+            let _: () = msg_send![layer_ptr, setColorspace: cs as *mut std::ffi::c_void];
+        }
+
+        // Install as the NSView's root layer (layer-hosting view).
+        let _: () = msg_send![ns_view, setLayer: layer_ptr];
+        let _: () = msg_send![ns_view, setWantsLayer: true];
+        // Match the legacy patch_metal_layer_gravity: redraw on resize,
+        // keep contents top-left during live drag.
+        let _: () = msg_send![ns_view, setLayerContentsRedrawPolicy: 2_isize];
+        let _: () = msg_send![ns_view, setLayerContentsPlacement: 9_isize];
+
+        eprintln!(
+            "[gpu] installed root P3 metal layer {:p} on NSView {:p}",
+            layer_ptr, ns_view
+        );
+        Ok(layer_ptr as *mut std::ffi::c_void)
+    }
 }
 
 /// Promote wgpu's CAMetalLayer (created as a sublayer by `layer_observer`)

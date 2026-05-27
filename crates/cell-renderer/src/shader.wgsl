@@ -24,8 +24,57 @@ struct Uniforms {
     // bg/fg are pure white / black stay neutral because they have zero
     // chroma to scale.
     color_sat: f32,
-    _pad: f32,
+    // 0.0 = passthrough (sRGB stays sRGB).
+    // 1.0 = sRGB→DisplayP3 Bradford matrix in linear light, re-encode.
+    //   Only meaningful when the host's CAMetalLayer is actually tagged
+    //   DisplayP3 (KASATERM_P3_ROOT path). Without the layer tag, this
+    //   washes colours out — the bytes become P3-encoded but the layer
+    //   is still treated as sRGB by macOS, so they display dim.
+    p3_convert: f32,
 };
+
+// sRGB ↔ linear-light conversions (the IEC 61966-2-1 piecewise curve).
+// We split scalar / vector forms so the matrix dot products below stay
+// readable.
+fn srgb_to_linear_s(c: f32) -> f32 {
+    if (c <= 0.04045) { return c / 12.92; }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(srgb_to_linear_s(c.r), srgb_to_linear_s(c.g), srgb_to_linear_s(c.b));
+}
+fn linear_to_srgb_s(c: f32) -> f32 {
+    let cc = max(c, 0.0);
+    if (cc <= 0.0031308) { return cc * 12.92; }
+    return 1.055 * pow(cc, 1.0 / 2.4) - 0.055;
+}
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(linear_to_srgb_s(c.r), linear_to_srgb_s(c.g), linear_to_srgb_s(c.b));
+}
+
+// Bradford-adapted sRGB D65 primaries → DisplayP3 D65 primaries, in
+// linear light. Lifted directly from sugarloaf's renderer.metal so the
+// byte-level output matches what kasaterm's sugarloaf opt-in path
+// produces — same numbers, same gamut.
+fn srgb_to_p3(linear_srgb: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        dot(linear_srgb, vec3<f32>(0.82246197, 0.17753803, 0.0)),
+        dot(linear_srgb, vec3<f32>(0.03319420, 0.96680580, 0.0)),
+        dot(linear_srgb, vec3<f32>(0.01708263, 0.07239744, 0.91051993))
+    );
+}
+
+// One-shot wrapper. When `u.p3_convert > 0.5`, walk the colour through
+// the matrix; otherwise pass through. Branching cost is negligible
+// (uniform predicate, fully predicated by the driver).
+fn prepare_output(srgb: vec3<f32>) -> vec3<f32> {
+    if (u.p3_convert > 0.5) {
+        let lin = srgb_to_linear(srgb);
+        let p3_lin = srgb_to_p3(lin);
+        return linear_to_srgb(p3_lin);
+    }
+    return srgb;
+}
 
 // Push fg toward its primary chromaticity by `sat`. 1.0 = identity. We
 // move the chroma component (rgb - luma) outward and re-add luma so
@@ -102,17 +151,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // white×alpha, so fg.rgb × tex.a reproduces the monochrome path.
     if ((in.flags & 1u) != 0u) {
         let sat_rgb = boost_saturation(texel.rgb, u.color_sat);
-        return vec4<f32>(sat_rgb, texel.a * in.fg.a);
+        return vec4<f32>(prepare_output(sat_rgb), texel.a * in.fg.a);
     }
     let alpha_raw = clamp(texel.a, 0.0, 1.0);
     let alpha_gamma = pow(alpha_raw, 1.0 / max(u.text_gamma, 0.001));
     let alpha = clamp(alpha_gamma * u.text_contrast, 0.0, 1.0);
-    // Raw passthrough: this path is only entered when the user opts
-    // into `KASATERM_RENDERER=gpu`. macOS 26 silently drops the
-    // CAMetalLayer P3 tag for wgpu's sublayer pattern, so the gpu
-    // path's colour reproduction stays at plain sRGB — sugarloaf is
-    // the colour-correct default. Knobs (sat / gamma / contrast) let
-    // the user dial in a closer match if they really want gpu speed.
+    // `prepare_output` is the sRGB→Display P3 hop when KASATERM_P3_ROOT
+    // is on, identity otherwise. Same pattern sugarloaf uses — the
+    // byte we write is gamma-encoded P3, the CAMetalLayer is tagged
+    // DisplayP3, and macOS scans out the P3 chromaticity.
     let fg_sat = boost_saturation(in.fg.rgb, u.color_sat);
-    return vec4<f32>(fg_sat, in.fg.a * alpha);
+    return vec4<f32>(prepare_output(fg_sat), in.fg.a * alpha);
 }
