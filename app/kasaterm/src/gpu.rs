@@ -2085,6 +2085,24 @@ fn fallback_font_paths() -> Vec<(String, u32)> {
             0,
         );
     }
+    #[cfg(target_os = "windows")]
+    {
+        let push_if = |out: &mut Vec<(String, u32)>, p: &str, i: u32| {
+            if std::path::Path::new(p).exists() {
+                out.push((p.to_string(), i));
+            }
+        };
+        // Hangul — 맑은 고딕. The primary (consola) and bundled Cascadia
+        // fallbacks carry no Hangul glyphs, so without this the entire
+        // Korean output renders as blank cells.
+        push_if(&mut out, r"C:\Windows\Fonts\malgun.ttf", 0);
+        // CJK — Microsoft YaHei (Simplified Chinese) and Meiryo (Japanese).
+        push_if(&mut out, r"C:\Windows\Fonts\msyh.ttc", 0);
+        push_if(&mut out, r"C:\Windows\Fonts\meiryo.ttc", 0);
+        // Symbols and color emoji.
+        push_if(&mut out, r"C:\Windows\Fonts\seguisym.ttf", 0);
+        push_if(&mut out, r"C:\Windows\Fonts\seguiemj.ttf", 0);
+    }
     out
 }
 
@@ -2196,6 +2214,25 @@ fn primary_bold_font_path() -> Option<(String, u32)> {
             return Some((menlo_bold, 1));
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        // Designed bold matching the D2Coding primary; falls back to
+        // Consolas Bold. Without a real bold face the shaper synthesises
+        // bold via horizontal ink dilation, which spills past the glyph
+        // advance and overlaps neighbours in bold chrome labels (active
+        // tab title). The designed bold face fits its own advance.
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let d2b = format!(
+            r"{local}\Microsoft\Windows\Fonts\D2CodingLigatureNerdFontMono-Bold.ttf"
+        );
+        if std::path::Path::new(&d2b).exists() {
+            return Some((d2b, 0));
+        }
+        let p = r"C:\Windows\Fonts\consolab.ttf";
+        if std::path::Path::new(p).exists() {
+            return Some((p.to_string(), 0));
+        }
+    }
     None
 }
 
@@ -2218,6 +2255,19 @@ fn default_font_path() -> String {
     }
     #[cfg(target_os = "windows")]
     {
+        // Match the user's Windows Terminal font (D2CodingLigature Nerd
+        // Font) so kasaterm reads consistently alongside their other
+        // terminal. D2Coding's designed Hangul also lines up cleanly on
+        // the mono grid — the same reason it's the macOS primary.
+        // Per-user Nerd Font installs live under LocalAppData; fall back
+        // to Consolas when it isn't installed.
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let d2 = format!(
+            r"{local}\Microsoft\Windows\Fonts\D2CodingLigatureNerdFontMono-Regular.ttf"
+        );
+        if std::path::Path::new(&d2).exists() {
+            return d2;
+        }
         return r"C:\Windows\Fonts\consola.ttf".into();
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
