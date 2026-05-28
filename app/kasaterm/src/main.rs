@@ -2061,6 +2061,15 @@ struct App {
     window_tab_close_rects: Vec<(usize, (f32, f32, f32, f32))>,
     /// Sidebar "+" new-window button rect, logical px. None before first paint.
     new_window_btn_rect: Option<(f32, f32, f32, f32)>,
+    /// Whether the "+" shell picker popup is open. Toggled by clicking the
+    /// sidebar "+"; dismissed on item-click or an outside click.
+    shell_menu_open: bool,
+    /// Popup item hit rects `(shell_command, rect)`, logical px. Rebuilt each
+    /// paint while the menu is open; consumed by the MouseInput handler.
+    shell_menu_hits: Vec<(String, (f32, f32, f32, f32))>,
+    /// Shell command the next `spawn_session_pane` should launch instead of
+    /// the default. Set by a shell-picker selection, consumed (taken) once.
+    pending_shell: Option<String>,
     /// Per-window (name, cwd) tab labels, by window index. Refreshed on a
     /// throttle (cwd resolution shells out to lsof, so never per-frame).
     window_labels: Vec<(String, String)>,
@@ -2283,6 +2292,9 @@ impl App {
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
             new_window_btn_rect: None,
+            shell_menu_open: false,
+            shell_menu_hits: Vec::new(),
+            pending_shell: None,
             window_labels: Vec::new(),
             window_labels_at: None,
             selection: None,
@@ -3123,7 +3135,7 @@ impl App {
         let id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
         let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
-            shell: resolve_default_shell(),
+            shell: self.pending_shell.take().or_else(resolve_default_shell),
             cwd,
             cols,
             rows,
@@ -3301,6 +3313,11 @@ impl App {
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
         self.refresh_socket_snapshot();
+        // The sidebar highlight + window body are chrome state. Without
+        // flagging chrome_dirty, `about_to_wait` parks on WaitUntil(blink)
+        // and the switch only paints on the next blink tick (or not at all
+        // if the redraw request is coalesced) — the tab looks unresponsive.
+        self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
@@ -6494,14 +6511,18 @@ impl App {
                             return;
                         }
                     }
-                    // Font zoom: host_mod + = (or Shift = +) increases,
-                    // host_mod + - (or Shift = _) decreases. `0` resets
-                    // to the default. Layout the same as VS Code,
-                    // Windows Terminal, and most browsers. Match BOTH the
-                    // physical key (US layout assumption) AND the logical
-                    // key text — Korean / European layouts may emit the
-                    // same character from a different physical position,
-                    // and macOS Cmd shortcuts are nearly always logical.
+                }
+                // Font zoom. macOS gates on Cmd (= host_mod); Windows/Linux
+                // on plain Ctrl (Ctrl+= / Ctrl+- / Ctrl+0, matching Windows
+                // Terminal, VS Code, and browsers). Ctrl+Shift+= also lands
+                // here since `+` is Shift+`=`. macOS deliberately stays on
+                // Cmd so plain Ctrl+letter still reaches the shell as a
+                // control byte. Match BOTH the physical key (US layout
+                // assumption) AND the logical key text — Korean / European
+                // layouts may emit the same character from a different
+                // physical position.
+                let zoom_mod = if cfg!(target_os = "macos") { host } else { ctrl };
+                if zoom_mod {
                     use winit::keyboard::Key;
                     let logical_str = match &event.logical_key {
                         Key::Character(s) => Some(s.as_str()),
@@ -7600,6 +7621,30 @@ impl App {
         self.window_tab_rects = sb_tabs.clone();
         self.window_tab_close_rects = sb_closes.clone();
         self.new_window_btn_rect = Some(sb_plus);
+        // Shell picker popup layout, computed here (no GPU borrow) so the
+        // click hit-list and the painted boxes share one source of truth.
+        // Items stack directly under the "+" button.
+        let menu_open = self.shell_menu_open;
+        let shell_items: Vec<(&'static str, &'static str, String)> =
+            if menu_open { available_shells() } else { Vec::new() };
+        const SHELL_ITEM_H: f32 = 34.0;
+        let menu_w_for_paint = sb_plus.2.max(210.0);
+        let shell_menu_layout: Vec<(String, &'static str, &'static str, (f32, f32, f32, f32))> = {
+            let (px, py, _, ph) = sb_plus;
+            let mut iy = py + ph + 4.0;
+            shell_items
+                .iter()
+                .map(|(label, icon, cmd)| {
+                    let r = (px, iy, menu_w_for_paint, SHELL_ITEM_H);
+                    iy += SHELL_ITEM_H;
+                    (cmd.clone(), *label, *icon, r)
+                })
+                .collect()
+        };
+        self.shell_menu_hits = shell_menu_layout
+            .iter()
+            .map(|(cmd, _, _, r)| (cmd.clone(), *r))
+            .collect();
         let sb_active = self.active_window;
         // Which tab the cursor is over (for hover affordance + showing × only
         // where the user is pointing, Warp-style).
@@ -7941,6 +7986,42 @@ impl App {
                         italic: false,
                     },
                 );
+                // Shell picker popup, stacked under the "+" button. Layout
+                // (shell_menu_layout) and hit rects were computed before the
+                // GPU borrow so clicks land on the same boxes we paint.
+                if menu_open && !shell_menu_layout.is_empty() {
+                    let backdrop_h = shell_menu_layout.len() as f32 * SHELL_ITEM_H + 8.0;
+                    round_rect(
+                        g,
+                        px - 4.0,
+                        py + ph,
+                        menu_w_for_paint + 8.0,
+                        backdrop_h,
+                        theme::RADIUS_MD,
+                        theme::SURFACE_ACTIVE,
+                    );
+                    for (_, label, icon, (ix, iy, iw, ih)) in &shell_menu_layout {
+                        let hov = sb_cursor.0 >= *ix
+                            && sb_cursor.0 <= *ix + *iw
+                            && sb_cursor.1 >= *iy
+                            && sb_cursor.1 <= *iy + *ih;
+                        if hov {
+                            round_rect(g, *ix, *iy, *iw, *ih, theme::RADIUS_MD, theme::SURFACE_HOVER);
+                        }
+                        g.draw_text(
+                            *ix + 12.0,
+                            *iy + (*ih - 15.0) / 2.0,
+                            icon,
+                            gpu::DrawOpts { font_size: 15.0, color: theme::TEXT_DIM, bold: false, italic: false },
+                        );
+                        g.draw_text(
+                            *ix + 38.0,
+                            *iy + (*ih - 14.0) / 2.0,
+                            label,
+                            gpu::DrawOpts { font_size: 14.0, color: theme::TEXT, bold: false, italic: false },
+                        );
+                    }
+                }
             }
             // Per-pane header bar. The band is the unified BG (same as the
             // body) so there's no depth seam; a bottom hairline separates it
@@ -8976,6 +9057,26 @@ impl ApplicationHandler<UserEvent> for App {
                 if matches!(state, ElementState::Pressed) {
                     let cx = self.cursor_px.0;
                     let cy = self.cursor_px.1;
+                    // Shell picker popup. While open it owns the next click:
+                    // hit an item → spawn that shell in a new window; click
+                    // anywhere else → dismiss. Checked first so it captures
+                    // clicks before the sidebar / cell grid underneath.
+                    if self.shell_menu_open {
+                        let pick = self
+                            .shell_menu_hits
+                            .iter()
+                            .find(|(_, r)| {
+                                cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                            })
+                            .map(|(s, _)| s.clone());
+                        self.shell_menu_open = false;
+                        self.chrome_dirty = true;
+                        if let Some(shell) = pick {
+                            self.pending_shell = Some(shell);
+                            self.new_window();
+                        }
+                        return;
+                    }
                     // Sidebar-toggle button in the title strip (right of the
                     // traffic lights). Caught before the title-bar drag path
                     // so the click toggles instead of moving the window.
@@ -9025,7 +9126,11 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                         if self.new_window_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            self.new_window();
+                            // Open the shell picker instead of spawning a
+                            // default window directly. A selection sets
+                            // pending_shell and calls new_window.
+                            self.shell_menu_open = !self.shell_menu_open;
+                            self.chrome_dirty = true;
                             return;
                         }
                         // Empty sidebar space — swallow the click.
@@ -10105,17 +10210,54 @@ fn resolve_default_shell() -> Option<String> {
     }
     #[cfg(windows)]
     {
-        for candidate in &[
-            r"C:\Program Files\Git\bin\bash.exe",
-            r"C:\Program Files\Git\usr\bin\bash.exe",
-            r"C:\Program Files (x86)\Git\bin\bash.exe",
-        ] {
-            if std::path::Path::new(candidate).is_file() {
-                return Some((*candidate).to_string());
-            }
+        if let Some(bash) = git_bash_path() {
+            return Some(bash);
         }
     }
     None
+}
+
+/// First installed Git Bash, if any. Git for Windows ships a Unix-like
+/// shell that's the closest match to the macOS zsh workflow kasaterm was
+/// built around (so `ls`/`grep`/`claude` etc. just work).
+#[cfg(windows)]
+fn git_bash_path() -> Option<String> {
+    for candidate in &[
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+    ] {
+        if std::path::Path::new(candidate).is_file() {
+            return Some((*candidate).to_string());
+        }
+    }
+    None
+}
+
+/// Shells offered by the sidebar "+" picker: `(label, nerd-font icon,
+/// shell command)`. Only installed shells are listed, so WSL / PowerShell 7
+/// quietly drop off machines that lack them. Windows-only content for now;
+/// returns empty elsewhere so the render path stays cfg-free.
+fn available_shells() -> Vec<(&'static str, &'static str, String)> {
+    #[allow(unused_mut)]
+    let mut out: Vec<(&'static str, &'static str, String)> = Vec::new();
+    #[cfg(windows)]
+    {
+        let pwsh7 = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        if std::path::Path::new(pwsh7).is_file() {
+            out.push(("PowerShell 7", "\u{ebc7}", pwsh7.to_string()));
+        }
+        // Windows PowerShell ships with the OS — always present.
+        out.push(("Windows PowerShell", "\u{ebc7}", "powershell.exe".to_string()));
+        out.push(("Command Prompt", "\u{ebc4}", "cmd.exe".to_string()));
+        if let Some(bash) = git_bash_path() {
+            out.push(("Git Bash", "\u{f489}", bash));
+        }
+        if std::path::Path::new(r"C:\Windows\System32\wsl.exe").is_file() {
+            out.push(("WSL", "\u{f17c}", "wsl.exe".to_string()));
+        }
+    }
+    out
 }
 
 /// Decide where the agent-socket should live. Honors caller-supplied
