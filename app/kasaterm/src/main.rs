@@ -34,7 +34,7 @@ use winit::platform::macos::WindowAttributesExtMacOS;
 // Match ghostty's default font-size=13. We were at 14, which made every
 // cell ~7.7% taller than ghostty's — visible side-by-side as a "slightly
 // larger" terminal even though the chrome looked identical.
-const FONT_SIZE: f32 = 13.0;
+const FONT_SIZE: f32 = 16.0;
 
 /// Display columns a char occupies in a proportional-ish label: CJK /
 /// Hangul / fullwidth glyphs are double-width, everything else single.
@@ -2187,6 +2187,10 @@ struct App {
     /// `FONT_SIZE` constant so first-frame layout matches the original
     /// behavior before any zoom.
     font_size: f32,
+    /// Whole-UI zoom multiplier folded into the effective render scale
+    /// (`effective_scale = DPI scale × ui_zoom`). 1.0 = native. Ctrl +/-/0
+    /// drive this so chrome, sidebar, and every pane scale together.
+    ui_zoom: f32,
     /// Wakes the event loop from background threads (PTY snapshots,
     /// socket commands) so a parked WaitUntil repaints immediately.
     proxy: EventLoopProxy<UserEvent>,
@@ -2325,6 +2329,7 @@ impl App {
             last_wheel_emit: Instant::now() - std::time::Duration::from_secs(1),
             last_input_at: Instant::now(),
             font_size: FONT_SIZE,
+            ui_zoom: 1.0,
             proxy,
             git_panel_window: None,
             git_panel_webview: None,
@@ -2769,6 +2774,59 @@ impl App {
                 window.request_redraw();
             }
             return;
+        }
+    }
+
+    /// Effective render scale = DPI scale × whole-UI zoom. Everything that
+    /// converts logical↔physical (cell metrics, chrome coords, cursor px,
+    /// window→cols) routes through this so a single `ui_zoom` change scales
+    /// the entire UI uniformly.
+    fn effective_scale(&self) -> f32 {
+        let dpi = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        dpi * self.ui_zoom
+    }
+
+    /// Adjust the whole-UI zoom by `delta` (additive on the multiplier).
+    /// Clamped to a sane range; chrome + sidebar + every pane scale together.
+    fn change_ui_zoom(&mut self, delta: f32) {
+        let new = (self.ui_zoom + delta).clamp(0.5, 3.0);
+        if (new - self.ui_zoom).abs() < 0.01 {
+            return;
+        }
+        self.ui_zoom = new;
+        self.apply_effective_scale();
+    }
+
+    /// Reset whole-UI zoom to native (1.0).
+    fn reset_ui_zoom(&mut self) {
+        if (self.ui_zoom - 1.0).abs() < 0.01 {
+            return;
+        }
+        self.ui_zoom = 1.0;
+        self.apply_effective_scale();
+    }
+
+    /// Push the current effective scale into the GPU renderer and reflow the
+    /// cell grid + PTY size. Shared by zoom changes and (future) DPI
+    /// scale-factor changes when the window moves between monitors.
+    fn apply_effective_scale(&mut self) {
+        let eff = self.effective_scale();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_scale(eff);
+            let (cw, ch) = gpu.set_font_size(self.font_size);
+            self.cell = CellGeom { w: cw, h: ch, baseline: 0.0 };
+        }
+        if self.window.is_some() {
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+            self.chrome_dirty = true;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
         }
     }
 
@@ -4667,7 +4725,7 @@ impl App {
             return (80, 24);
         };
         let size = window.inner_size();
-        let scale = window.scale_factor() as f32;
+        let scale = self.effective_scale();
         let raw_lw = size.width as f32 / scale;
         let raw_lh = size.height as f32 / scale;
         let lw = (raw_lw - self.effective_sidebar_w() - 2.0 * WINDOW_PADDING).max(0.0);
@@ -6153,7 +6211,7 @@ impl App {
         if is_md {
             if let Some(id) = target_pane_id.as_deref() {
                 let visible_h = self.window.as_ref().map_or(400.0, |w| {
-                    w.inner_size().height as f32 / w.scale_factor() as f32
+                    w.inner_size().height as f32 / (w.scale_factor() as f32 * self.ui_zoom)
                 }) - TITLE_HEIGHT
                     - PANE_HEADER_HEIGHT
                     - 2.0 * PANE_INNER_Y;
@@ -6557,15 +6615,15 @@ impl App {
                         || code == KeyCode::Numpad0
                         || logical_str == Some("0");
                     if is_plus {
-                        self.change_font_size(1.0);
+                        self.change_ui_zoom(0.1);
                         return;
                     }
                     if is_minus {
-                        self.change_font_size(-1.0);
+                        self.change_ui_zoom(-0.1);
                         return;
                     }
                     if is_zero {
-                        self.change_font_size(FONT_SIZE - self.font_size);
+                        self.reset_ui_zoom();
                         return;
                     }
                 }
@@ -7303,7 +7361,7 @@ impl App {
                 let base_w = w_cells as f32 * self.cell.w;
                 let full_w = if x_cells + w_cells >= grid_cols {
                     let extra = self.window.as_ref().map_or(0.0, |w| {
-                        let s = w.scale_factor() as f32;
+                        let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lw = w.inner_size().width as f32 / s;
                         (raw_lw
                             - (WINDOW_PADDING + sidebar_w + grid_cols as f32 * self.cell.w))
@@ -7317,7 +7375,7 @@ impl App {
                 let base_h = h_cells as f32 * self.cell.h;
                 let full_h = if y_cells + h_cells >= grid_rows {
                     let extra = self.window.as_ref().map_or(0.0, |w| {
-                        let s = w.scale_factor() as f32;
+                        let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lh = w.inner_size().height as f32 / s;
                         (raw_lh - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h)).max(0.0)
                     });
@@ -7367,7 +7425,7 @@ impl App {
                             let base = w_cells as f32 * self.cell.w;
                             if x_cells + w_cells >= grid_cols {
                                 let extra = self.window.as_ref().map_or(0.0, |w| {
-                                    let s = w.scale_factor() as f32;
+                                    let s = w.scale_factor() as f32 * self.ui_zoom;
                                     let raw_lw = w.inner_size().width as f32 / s;
                                     (raw_lw
                                         - (WINDOW_PADDING
@@ -7389,7 +7447,7 @@ impl App {
                             let base = h_cells as f32 * self.cell.h;
                             if y_cells + h_cells >= grid_rows {
                                 let extra = self.window.as_ref().map_or(0.0, |w| {
-                                    let s = w.scale_factor() as f32;
+                                    let s = w.scale_factor() as f32 * self.ui_zoom;
                                     let raw_lh = w.inner_size().height as f32 / s;
                                     (raw_lh
                                         - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h))
@@ -7604,7 +7662,7 @@ impl App {
                         TITLE_HEIGHT + rows as f32 * self.cell.h,
                     ),
                     |w| {
-                        let s = w.scale_factor() as f32;
+                        let s = w.scale_factor() as f32 * self.ui_zoom;
                         (
                             w.inner_size().width as f32 / s,
                             w.inner_size().height as f32 / s,
@@ -8539,8 +8597,8 @@ impl App {
             return;
         }
         self.last_blink_on = blink_on;
-        let Some(window) = self.window.as_ref() else { return; };
-        let scale = window.scale_factor() as f32;
+        if self.window.is_none() { return; }
+        let scale = self.effective_scale();
         // gpu path takes over the whole frame — no chrome yet, just
         // the cell grid through the cell-renderer pipeline.
         if self.gpu.is_some() {
@@ -8691,7 +8749,7 @@ impl ApplicationHandler<UserEvent> for App {
             h: renderer.cell_h,
             baseline: 0.0,
         };
-        let scale = window.scale_factor() as f32;
+        let scale = window.scale_factor() as f32 * self.ui_zoom;
         eprintln!(
             "[startup] gpu renderer; cell_geom w={:.2} h={:.2} (scale={scale})",
             self.cell.w, self.cell.h,
@@ -8864,7 +8922,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_wheel(delta);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let scale = window.scale_factor() as f32;
+                let scale = self.effective_scale();
                 self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
                 // In-pane tab hover tracking — drives the hover-only × +
                 // brightened text on inactive tabs. Updated on every move but

@@ -115,7 +115,18 @@ impl PtySession {
         // its `new-session -d 'exec $SHELL -il'`).
         let mut cmd = if let Some(shell) = opts.shell.as_deref() {
             let mut c = CommandBuilder::new(shell);
-            c.arg("-il");
+            // `-il` (login + interactive) is a bash/zsh/sh-ism that sources
+            // rc files. PowerShell / cmd / wsl reject unknown flags ("Invalid
+            // argument '-il'"), so only hand it to POSIX-style shells, matched
+            // by executable stem (drops the `.exe` on Windows).
+            let stem = std::path::Path::new(shell)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(stem.as_str(), "bash" | "zsh" | "sh" | "dash" | "ksh") {
+                c.arg("-il");
+            }
             c
         } else {
             // Use the default shell from $SHELL.

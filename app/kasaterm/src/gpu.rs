@@ -331,6 +331,12 @@ impl GpuRenderer {
         // under the hood via cosmic-text).
         let cell_h = shaper.line_height(font_size_px as f32).ceil();
         let mut atlas = Atlas::new(&device, &queue, ATLAS_SIZE);
+        // Supersample glyphs on sub-Retina displays (scale < 2): at 100% DPI
+        // the logical pixel size (e.g. 13px) is too small to resolve a crisp
+        // coverage mask, so bake at 2x and let the Linear sampler downsample
+        // — Retina-class sharpness without changing layout. Retina (scale>=2)
+        // already has the pixels, so keep it 1:1.
+        atlas.set_oversample(if scale < 2.0 { 2 } else { 1 });
         for code in 0x20u32..0x7Fu32 {
             if let Some(ch) = char::from_u32(code) {
                 let key = GlyphKey {
@@ -343,7 +349,9 @@ impl GpuRenderer {
                 let _ = atlas.get_or_bake(&device, &queue, &mut shaper, key);
             }
         }
-        let pipeline = Pipeline::new(&device, format, 32_768);
+        // filterable=true: the glyph atlas now uses a Linear sampler so the
+        // supersampled glyphs downsample smoothly (see Atlas::set_oversample).
+        let pipeline = Pipeline::with_filtering(&device, format, 32_768, true);
         let init_dims = [config.width as f32, config.height as f32];
         let (init_gamma, init_contrast, init_sat) = text_render_knobs();
         pipeline.write_uniforms_full(
@@ -413,6 +421,13 @@ impl GpuRenderer {
     /// lazily on the next draw — we just refresh the cached cell
     /// metrics so chrome/layout code sees the new geometry on the
     /// very next frame. Returns the new (cell_w, cell_h) in logical px.
+    /// Update the effective render scale (DPI × ui_zoom). All chrome/cell
+    /// draws multiply logical coords by `self.scale`, so changing it here and
+    /// re-running `set_font_size` rescales the whole UI. Caller reflows layout.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = scale.max(0.1);
+    }
+
     pub fn set_font_size(&mut self, font_size_logical: f32) -> (f32, f32) {
         let new_px = (font_size_logical * self.scale).round().max(8.0) as u32;
         self.font_size_px = new_px;
