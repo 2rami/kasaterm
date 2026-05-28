@@ -2191,6 +2191,10 @@ struct App {
     /// (`effective_scale = DPI scale × ui_zoom`). 1.0 = native. Ctrl +/-/0
     /// drive this so chrome, sidebar, and every pane scale together.
     ui_zoom: f32,
+    /// Per-pane font multiplier, keyed by the pane's pty id (the BSP leaf id
+    /// the renderer + resize path use). Absent = 1.0. Keyed here rather than
+    /// on PaneState because split leaves don't all get a ws.panes entry.
+    pane_font_scales: std::collections::HashMap<String, f32>,
     /// Wakes the event loop from background threads (PTY snapshots,
     /// socket commands) so a parked WaitUntil repaints immediately.
     proxy: EventLoopProxy<UserEvent>,
@@ -2330,6 +2334,7 @@ impl App {
             last_input_at: Instant::now(),
             font_size: FONT_SIZE,
             ui_zoom: 1.0,
+            pane_font_scales: std::collections::HashMap::new(),
             proxy,
             git_panel_window: None,
             git_panel_webview: None,
@@ -2827,6 +2832,39 @@ impl App {
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
+        }
+    }
+
+    /// Adjust the focused pane's font multiplier (pane-local zoom). Only that
+    /// pane's glyphs + PTY grid change; the BSP layout and other panes stay
+    /// put. Delta is additive on the multiplier; clamped to a sane range.
+    fn change_pane_font(&mut self, delta: f32) {
+        let Some(active) = self.target_pane() else { return };
+        let cur = self.pane_font_scales.get(&active).copied().unwrap_or(1.0);
+        let new = (cur + delta).clamp(0.5, 3.0);
+        if (new - cur).abs() < 0.01 {
+            return;
+        }
+        self.pane_font_scales.insert(active, new);
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Reset the focused pane's font multiplier to match the rest of the UI.
+    fn reset_pane_font(&mut self) {
+        let Some(active) = self.target_pane() else { return };
+        if self.pane_font_scales.remove(&active).is_none() {
+            return;
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 
@@ -4796,12 +4834,6 @@ impl App {
         // pid). Walk ws.panes and resize each pane's tab PtySessions to its
         // outer rect — single source of truth, works for both primary and
         // in-pane secondary tabs.
-        let mut leaf_cells: HashMap<String, (u16, u16)> = HashMap::new();
-        for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
-            let pcols = w.saturating_sub(inset_x_cells).max(1);
-            let prows = h.saturating_sub(reserved_y_cells).max(1);
-            leaf_cells.insert(id, (pcols, prows));
-        }
         let snapshot: Vec<(String, Vec<String>)> = {
             let ws = self.ws.lock().unwrap();
             ws.panes
@@ -4813,6 +4845,21 @@ impl App {
                 })
                 .collect()
         };
+        // Per-pane font scale shrinks/grows that pane's usable cells: bigger
+        // glyphs ⇒ fewer cols/rows in the same box. 1.0 panes keep the exact
+        // integer-cell math; scaled panes divide the base cell span by the
+        // factor (the box stays on the base grid, matching the per-slot render
+        // which sizes glyphs by the same factor). Keyed by pty/leaf id.
+        let scale_of = self.pane_font_scales.clone();
+        let mut leaf_cells: HashMap<String, (u16, u16)> = HashMap::new();
+        for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
+            let fs = scale_of.get(&id).copied().unwrap_or(1.0).max(0.1);
+            let base_c = w.saturating_sub(inset_x_cells).max(1) as f32;
+            let base_r = h.saturating_sub(reserved_y_cells).max(1) as f32;
+            let pcols = (base_c / fs).floor().max(1.0) as u16;
+            let prows = (base_r / fs).floor().max(1.0) as u16;
+            leaf_cells.insert(id, (pcols, prows));
+        }
         for (outer, pids) in snapshot {
             let Some(&(pc, pr)) = leaf_cells.get(&outer) else { continue };
             for pid in pids {
@@ -6614,16 +6661,19 @@ impl App {
                     let is_zero = code == KeyCode::Digit0
                         || code == KeyCode::Numpad0
                         || logical_str == Some("0");
+                    // host_mod_alt (Win: Alt, mac: Shift) narrows the zoom to
+                    // just the focused pane; without it, the whole UI zooms.
+                    let pane_only = self.host_mod_alt();
                     if is_plus {
-                        self.change_ui_zoom(0.1);
+                        if pane_only { self.change_pane_font(0.1); } else { self.change_ui_zoom(0.1); }
                         return;
                     }
                     if is_minus {
-                        self.change_ui_zoom(-0.1);
+                        if pane_only { self.change_pane_font(-0.1); } else { self.change_ui_zoom(-0.1); }
                         return;
                     }
                     if is_zero {
-                        self.reset_ui_zoom();
+                        if pane_only { self.reset_pane_font(); } else { self.reset_ui_zoom(); }
                         return;
                     }
                 }
@@ -7114,6 +7164,7 @@ impl App {
             rows: Vec<Vec<GridCell>>,
             origin_px: (f32, f32),
             dim: bool,
+            font_scale: f32,
         }
         // Header chrome carried in LOGICAL px — gpu.rect/draw_text
         // promote to physical internally, matching the cell pass.
@@ -7145,6 +7196,9 @@ impl App {
         let sidebar_w = self.effective_sidebar_w();
         let pad_px = (WINDOW_PADDING + sidebar_w) * scale;
         let title_px = TITLE_HEIGHT * scale;
+        // Per-pane font multipliers (keyed by pty/leaf id), so each pane's
+        // glyphs can be sized independently of the shared base cell.
+        let pane_scales = self.pane_font_scales.clone();
         // Code-block copy buttons (text + logical rect), filled per pane in
         // the loop below and handed to both the mouse handler and overlay.
         let mut copy_btns: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
@@ -7337,12 +7391,14 @@ impl App {
                         copy_btns.push((text, (bx, by, COPY_BTN_W, COPY_BTN_H)));
                     }
                 }
+                let pane_font_scale = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                 slots.push(PaneSlot {
                     rows: composed,
                     origin_px,
                     // Unfocused panes dim their text only (no box veil). Single
                     // un-split pane is never dimmed.
                     dim: show_headers && active_id.as_deref() != Some(id.as_str()),
+                    font_scale: pane_font_scale,
                 });
                 // Body box (header band excluded, inset by the same
                 // PANE_INNER margins the cell grid uses) in logical px.
@@ -7521,6 +7577,7 @@ impl App {
                 rows: &s.rows,
                 origin_px: s.origin_px,
                 dim: s.dim,
+                font_scale: s.font_scale,
             })
             .collect();
         // Recompute the inline suggestion against the freshly-applied
