@@ -3302,13 +3302,26 @@ impl App {
         self.windows[self.active_window] = self.pty_layout.take();
         self.pty_layout = self.windows[idx].take();
         self.active_window = idx;
-        if let Some(first) = self
+        // Swapping in a stashed window produces no new PTY output, so nothing
+        // would flip a pane's `dirty` and the damage-tracked render would skip
+        // the frame — the screen stays on the old window. Mark every leaf of
+        // the incoming window dirty (plus chrome for the sidebar highlight) so
+        // the next redraw actually repaints.
+        let leaves: Vec<String> = self
             .pty_layout
             .as_ref()
-            .and_then(|l| l.leaves().first().map(|s| s.to_string()))
-        {
-            self.ws.lock().unwrap().active_pane = Some(first);
+            .map(|l| l.leaves().iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        if !leaves.is_empty() {
+            let mut ws = self.ws.lock().unwrap();
+            ws.active_pane = Some(leaves[0].clone());
+            for leaf in &leaves {
+                if let Some(p) = ws.panes.get_mut(leaf) {
+                    p.dirty = true;
+                }
+            }
         }
+        self.chrome_dirty = true;
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -4499,6 +4512,10 @@ impl App {
                 }
                 socket::PtyCommand::SwitchSession { idx, reply } => {
                     self.switch_session(idx);
+                    let _ = reply.send(Ok(()));
+                }
+                socket::PtyCommand::SwitchWindow { idx, reply } => {
+                    self.switch_window(idx);
                     let _ = reply.send(Ok(()));
                 }
                 socket::PtyCommand::NewSession { reply } => {
@@ -7112,8 +7129,19 @@ impl App {
                     })
                     .collect()
             } else {
-                match ws.panes.iter().next() {
-                    Some((id, _)) => vec![(id.clone(), 0, 0, 0, 0)],
+                // Single-pane fallback (no split tree). `ws.panes` holds EVERY
+                // window's pane (a session shares one pane map across its
+                // windows), so picking `.iter().next()` would draw an arbitrary
+                // HashMap entry — switching windows would leave the body on the
+                // same pane. Honor the active pane so a window switch repaints
+                // the body; fall back to any pane only if active is unset/gone.
+                let active = active_id
+                    .as_ref()
+                    .filter(|id| ws.panes.contains_key(*id))
+                    .cloned()
+                    .or_else(|| ws.panes.keys().next().cloned());
+                match active {
+                    Some(id) => vec![(id, 0, 0, 0, 0)],
                     None => Vec::new(),
                 }
             };
@@ -9126,10 +9154,16 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                         if self.new_window_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            // Open the shell picker instead of spawning a
-                            // default window directly. A selection sets
-                            // pending_shell and calls new_window.
-                            self.shell_menu_open = !self.shell_menu_open;
+                            // The shell picker only has entries on Windows
+                            // (PowerShell/CMD/Git Bash/WSL). On macOS/Linux
+                            // `available_shells()` is empty, so toggling the
+                            // menu would just swallow the click and never open
+                            // a tab — spawn a default window directly instead.
+                            if available_shells().is_empty() {
+                                self.new_window();
+                            } else {
+                                self.shell_menu_open = !self.shell_menu_open;
+                            }
                             self.chrome_dirty = true;
                             return;
                         }
