@@ -95,6 +95,11 @@ pub struct PaneSlot<'a> {
     pub rows: &'a [Vec<Cell>],
     /// Pane top-left in physical pixels.
     pub origin_px: (f32, f32),
+    /// Per-pane font multiplier. The shared cell metric (`cell_w`/`cell_h`)
+    /// and font size are multiplied by this so one pane can render bigger/
+    /// smaller than its neighbours without touching the BSP layout (which
+    /// stays on the base cell). 1.0 = same as the rest of the UI.
+    pub font_scale: f32,
     /// Unfocused pane: glyphs render at reduced alpha (text-only dim) so
     /// the active pane stands out without darkening the whole box.
     pub dim: bool,
@@ -1451,8 +1456,6 @@ impl GpuRenderer {
         // Glyph alpha for unfocused panes (PaneSlot.dim). Backgrounds keep
         // full alpha — only the text fades, so the box doesn't darken.
         const DIM_TEXT_ALPHA: f32 = 0.70;
-        let cell_w_px = self.cell_w * self.scale;
-        let cell_h_px = self.cell_h * self.scale;
         // Pass 1: backgrounds only. A tall CJK glyph bleeds a little
         // into the row below; emitting EVERY background first stops the
         // next row's bg fill from painting over the previous glyph's
@@ -1462,6 +1465,9 @@ impl GpuRenderer {
         // (Reverse-video spaces still fill here — claude's cursor is an
         // inverse space, "띄어쓰기 커서".)
         for pane in panes {
+            // Per-pane cell size: base metric × this pane's font multiplier.
+            let cell_w_px = self.cell_w * self.scale * pane.font_scale;
+            let cell_h_px = self.cell_h * self.scale * pane.font_scale;
             for (r, row) in pane.rows.iter().enumerate() {
                 for (col, cell) in row.iter().enumerate() {
                     let want_bg = !matches!(cell.bg, tmux_bridge::screen::Color::Default)
@@ -1483,6 +1489,9 @@ impl GpuRenderer {
         }
         // Pass 2: glyphs, drawn over every background.
         for pane in panes {
+            let cell_w_px = self.cell_w * self.scale * pane.font_scale;
+            let cell_h_px = self.cell_h * self.scale * pane.font_scale;
+            let pane_size_px = ((self.font_size_px as f32 * pane.font_scale).round() as u32).max(8);
             for (r, row) in pane.rows.iter().enumerate() {
                 for (col, cell) in row.iter().enumerate() {
                     // Blanks contribute no glyph.
@@ -1589,7 +1598,7 @@ impl GpuRenderer {
                         ch,
                         bold: cell.bold,
                         italic: cell.italic,
-                        size_px: self.font_size_px,
+                        size_px: pane_size_px,
                         font: 0,
                     };
                     let Some(entry) = self.atlas.get_or_bake(
