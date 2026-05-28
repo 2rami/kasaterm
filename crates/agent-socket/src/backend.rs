@@ -107,6 +107,11 @@ pub trait Backend: Send + Sync {
     fn switch_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("switch_session not supported")
     }
+    /// Switch the visible window (tmux-style tab within the current session,
+    /// shown in the left sidebar) to index `idx`. Default unsupported.
+    fn switch_window(&self, _idx: usize) -> Result<()> {
+        anyhow::bail!("switch_window not supported")
+    }
     /// Create a fresh session and switch to it. Default unsupported.
     fn new_session(&self) -> Result<()> {
         anyhow::bail!("new_session not supported")

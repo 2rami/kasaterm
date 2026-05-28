@@ -227,6 +227,12 @@ pub enum PtyCommand {
         idx: usize,
         reply: SyncSender<Result<()>>,
     },
+    /// Switch the visible window (sidebar tab within the current session) to
+    /// index `idx`.
+    SwitchWindow {
+        idx: usize,
+        reply: SyncSender<Result<()>>,
+    },
     /// Create a new session and switch to it.
     NewSession {
         reply: SyncSender<Result<()>>,
@@ -397,6 +403,10 @@ impl Backend for PtyBackend {
 
     fn switch_session(&self, idx: usize) -> Result<()> {
         self.submit(|reply| PtyCommand::SwitchSession { idx, reply })
+    }
+
+    fn switch_window(&self, idx: usize) -> Result<()> {
+        self.submit(|reply| PtyCommand::SwitchWindow { idx, reply })
     }
 
     fn new_session(&self) -> Result<()> {

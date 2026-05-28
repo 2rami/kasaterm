@@ -88,6 +88,12 @@ struct SwapArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+struct WindowIdxArgs {
+    /// Zero-based window (left-sidebar tab) index to switch to.
+    index: usize,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct RunJobArgs {
     /// Shell command to run in the new pane (no trailing newline needed).
     command: String,
@@ -271,6 +277,19 @@ impl KasaspaceTools {
         match self.backend.swap_surfaces(&args.a, &args.b) {
             Ok(()) => ok(format!("Swapped {} <-> {}", args.a, args.b)),
             Err(e) => fail(format!("swap failed: {e}")),
+        }
+    }
+
+    #[tool(
+        description = "Switch the visible window (left-sidebar tab) within the current session to a zero-based index. Windows are tmux-style tabs that share the session's panes; index 0 is the topmost tab."
+    )]
+    async fn kasaspace_switch_window(
+        &self,
+        Parameters(args): Parameters<WindowIdxArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        match self.backend.switch_window(args.index) {
+            Ok(()) => ok(format!("Switched to window {}", args.index)),
+            Err(e) => fail(format!("switch_window failed: {e}")),
         }
     }
 
