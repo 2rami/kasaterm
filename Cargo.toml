@@ -28,3 +28,11 @@ crossbeam-channel = "0.5"
 anyhow = "1"
 tmux-bridge = { path = "crates/tmux-bridge" }
 
+# kasaspace-mcp leans on heavy proc-macro crates (rmcp / schemars). The
+# Windows rustc/LLVM crashes (STATUS_ACCESS_VIOLATION / OOM) optimizing it at
+# any opt-level >= 1; only the unoptimized path survives. It's an MCP server
+# off the hot path, so pinning it to opt-level=0 in release dodges the crash
+# with no perceptible runtime cost.
+[profile.release.package.kasaspace-mcp]
+opt-level = 0
+

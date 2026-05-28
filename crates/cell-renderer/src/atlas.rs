@@ -60,6 +60,12 @@ pub struct Atlas {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     sampler: wgpu::Sampler,
+    /// Supersampling factor. Glyphs are rasterized at `size_px * oversample`
+    /// and stored at that resolution, while `AtlasEntry` geometry is divided
+    /// back down to logical pixels. With a Linear sampler this gives Retina-
+    /// class sharpness on 1x (100% DPI) displays where the logical pixel size
+    /// is too small to resolve a coverage mask cleanly. 1 = no supersampling.
+    oversample: u32,
 }
 
 impl Atlas {
@@ -97,11 +103,12 @@ impl Atlas {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            // Nearest matches the bitmap-perfect look terminal users
-            // expect on Retina; linear would mush edges of small
-            // monospace glyphs.
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
+            // Linear so the supersampled (oversample>1) atlas glyphs
+            // downsample smoothly to the logical quad size — that's what
+            // produces the Retina-class sharpness on 1x displays. At
+            // oversample=1 the glyph maps ~1:1 so Linear stays crisp too.
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
@@ -115,6 +122,7 @@ impl Atlas {
             texture,
             view,
             sampler,
+            oversample: 1,
         };
         // Reserve a 2×2 solid-white block at (0, 0). 2×2 (not 1×1)
         // keeps the bilinear sampler honest in case a caller picks
@@ -158,6 +166,17 @@ impl Atlas {
         (self.width, self.height)
     }
 
+    /// Set the supersampling factor (>=1). Clears the glyph cache since
+    /// every cached entry was baked at the old factor. Call once at startup
+    /// based on the display scale (e.g. 2 on a 1x display, 1 on Retina).
+    pub fn set_oversample(&mut self, factor: u32) {
+        let factor = factor.max(1);
+        if factor != self.oversample {
+            self.oversample = factor;
+            self.cache.clear();
+        }
+    }
+
     /// Look up a glyph; bake it if it isn't in the cache yet. Returns
     /// `None` when the font has no glyph for `ch` *or* the atlas is
     /// out of space — both cases are handled identically by the cell
@@ -172,8 +191,10 @@ impl Atlas {
         if let Some(slot) = self.cache.get(&key) {
             return *slot;
         }
-        let raster =
-            shaper.rasterize_styled(key.ch, key.size_px as f32, key.bold, key.italic);
+        // Rasterize at the supersampled resolution; `upload` divides the
+        // geometry back to logical pixels so the quad stays logical-sized.
+        let render_px = (key.size_px * self.oversample.max(1)) as f32;
+        let raster = shaper.rasterize_styled(key.ch, render_px, key.bold, key.italic);
         let entry = raster.and_then(|r| self.upload(device, queue, &r));
         self.cache.insert(key, entry);
         entry
@@ -246,14 +267,18 @@ impl Atlas {
             );
         }
         let (aw, ah) = (self.width as f32, self.height as f32);
+        // Texture region (uv) stays at the supersampled resolution; quad
+        // geometry is divided back to logical pixels so layout is unchanged
+        // and the Linear sampler downsamples the hi-res glyph into it.
+        let os = self.oversample.max(1);
         Some(AtlasEntry {
             uv_min: [x as f32 / aw, y as f32 / ah],
             uv_max: [(x + r.width) as f32 / aw, (y + r.height) as f32 / ah],
-            px_w: r.width,
-            px_h: r.height,
-            bearing_x: r.bearing_x,
-            bearing_y: r.bearing_y,
-            advance: r.advance,
+            px_w: r.width / os,
+            px_h: r.height / os,
+            bearing_x: r.bearing_x / os as i32,
+            bearing_y: r.bearing_y / os as i32,
+            advance: r.advance / os as f32,
             is_color: r.is_color,
         })
     }
