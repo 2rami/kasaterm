@@ -2,7 +2,7 @@
 # Quit the running kasaterm app, (re)install the built bundle, relaunch it.
 #
 # Why this is safe (the install-while-running hazard, see CLAUDE.md / shim
-# notes): kasaterm stages its tmux + cmux-compat helpers as *symlinks* into the
+# notes): kasaterm stages its tmux + kasaterm-cli helpers as *symlinks* into the
 # app bundle ($TMPDIR/kasaterm-shim-<pid>/tmux -> .../Contents/MacOS/tmux).
 # Overwriting the bundle while the app runs would dangle those symlinks mid
 # rm/cp and skew helper versions. So we quit FIRST and wait for full

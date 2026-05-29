@@ -7,9 +7,11 @@
 //! per actually-open pane.
 
 use agent_socket::backend::{
-    Backend, PanelGeom, PanelKind, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo,
+    Backend, PaneActivity, PanelGeom, PanelKind, SessionsInfo, SplitDirection, SurfaceInfo,
+    WorkspaceInfo,
 };
 use anyhow::{anyhow, Result};
+use std::collections::HashMap;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use tmux_bridge::TmuxSession;
@@ -279,6 +281,14 @@ pub enum PtyCommand {
         which: PanelKind,
         reply: SyncSender<Result<PanelGeom>>,
     },
+    /// Read the visible screen text (last `lines` rows, history + current
+    /// screen) of a pane. Lives on the main thread because that's where
+    /// the composed cell grid is — the socket worker only has snapshots.
+    Peek {
+        pane_id: String,
+        lines: usize,
+        reply: SyncSender<Result<String>>,
+    },
 }
 
 /// Read-only view the main thread publishes after every state change.
@@ -316,11 +326,21 @@ pub struct PtyBackendHandle {
 
 pub struct PtyBackend {
     handle: PtyBackendHandle,
+    /// Shared collaboration board: surface_id -> what that pane is doing.
+    /// Lives on the backend rather than the main thread because it's pure
+    /// metadata — announce/board never touch the renderer, so they skip
+    /// the submit() round-trip and just lock this map. The whole backend
+    /// is `Arc`-shared across socket connections, so every pane sees the
+    /// same board.
+    collab: Arc<Mutex<HashMap<String, PaneActivity>>>,
 }
 
 impl PtyBackend {
     pub fn new(handle: PtyBackendHandle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            collab: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     fn submit<T>(&self, build: impl FnOnce(SyncSender<Result<T>>) -> PtyCommand) -> Result<T> {
@@ -469,6 +489,51 @@ impl Backend for PtyBackend {
 
     fn panel_info(&self, which: PanelKind) -> Result<PanelGeom> {
         self.submit(|reply| PtyCommand::PanelInfo { which, reply })
+    }
+
+    fn announce(
+        &self,
+        surface_id: &str,
+        intent: &str,
+        status: &str,
+        files: &[String],
+    ) -> Result<()> {
+        self.collab.lock().unwrap().insert(
+            surface_id.to_string(),
+            PaneActivity {
+                surface_id: surface_id.to_string(),
+                intent: intent.to_string(),
+                status: status.to_string(),
+                files: files.to_vec(),
+            },
+        );
+        Ok(())
+    }
+
+    fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
+        let id = surface_id.to_string();
+        self.submit(|reply| PtyCommand::Peek { pane_id: id, lines, reply })
+    }
+
+    fn collab_board(&self) -> Result<Vec<PaneActivity>> {
+        // Drop entries for panes that have since closed so the board never
+        // shows a ghost. The live set comes from the same snapshot
+        // list_surfaces reads.
+        let live: std::collections::HashSet<String> = self
+            .handle
+            .snapshot
+            .lock()
+            .unwrap()
+            .surfaces
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        let board = self.collab.lock().unwrap();
+        Ok(board
+            .values()
+            .filter(|a| live.contains(&a.surface_id))
+            .cloned()
+            .collect())
     }
 }
 

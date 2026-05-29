@@ -581,9 +581,19 @@ impl GpuRenderer {
     /// like draw_cells, mirroring the sugarloaf fix that routes preedit
     /// through render_row. `origin` is logical px (top-left of the
     /// anchor cell); colors are the accent (text + underline).
-    pub fn draw_preedit(&mut self, origin_x: f32, origin_y: f32, text: &str, accent: [u8; 4]) {
-        let cell_w_px = self.cell_w * self.scale;
-        let cell_h_px = self.cell_h * self.scale;
+    pub fn draw_preedit(
+        &mut self,
+        origin_x: f32,
+        origin_y: f32,
+        text: &str,
+        accent: [u8; 4],
+        font_scale: f32,
+    ) {
+        let cell_w_px = self.cell_w * self.scale * font_scale;
+        let cell_h_px = self.cell_h * self.scale * font_scale;
+        // Glyph atlas size follows the pane zoom too — same rounding as
+        // draw_cells so the composing syllable matches committed text.
+        let size_px = ((self.font_size_px as f32 * font_scale).round() as u32).max(8);
         let ox = origin_x * self.scale;
         let oy = origin_y * self.scale;
         // Cell span: wide (CJK/Hangul) chars take two columns.
@@ -619,7 +629,7 @@ impl GpuRenderer {
                     ch,
                     bold: false,
                     italic: false,
-                    size_px: self.font_size_px,
+                    size_px,
                     font: 0,
                 };
                 if let Some(entry) = self.atlas.get_or_bake(
@@ -667,9 +677,17 @@ impl GpuRenderer {
     /// behind where the user would type. `max_cells` clips it to the
     /// remaining columns on the row (no wrapping). `origin` is logical px
     /// at the top-left of the first ghost cell.
-    pub fn draw_ghost(&mut self, origin_x: f32, origin_y: f32, text: &str, max_cells: u32) {
-        let cell_w_px = self.cell_w * self.scale;
-        let cell_h_px = self.cell_h * self.scale;
+    pub fn draw_ghost(
+        &mut self,
+        origin_x: f32,
+        origin_y: f32,
+        text: &str,
+        max_cells: u32,
+        font_scale: f32,
+    ) {
+        let cell_w_px = self.cell_w * self.scale * font_scale;
+        let cell_h_px = self.cell_h * self.scale * font_scale;
+        let size_px = ((self.font_size_px as f32 * font_scale).round() as u32).max(8);
         let ox = origin_x * self.scale;
         let oy = origin_y * self.scale;
         let fg = srgb_rgba_to_linear(crate::cells::GHOST_FG);
@@ -686,7 +704,7 @@ impl GpuRenderer {
                     ch,
                     bold: false,
                     italic: false,
-                    size_px: self.font_size_px,
+                    size_px,
                     font: 0,
                 };
                 if let Some(entry) =

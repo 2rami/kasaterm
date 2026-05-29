@@ -61,6 +61,11 @@ pub struct ScreenUpdate {
     /// this we'd have to fall back to the legacy X10 encoding which
     /// claude doesn't parse reliably.
     pub mouse_sgr: bool,
+    /// True when the inner app enabled DECCKM (application cursor keys,
+    /// DECSET 1). In this mode plain arrow keys must be sent as SS3
+    /// (`ESC O A`) not CSI (`ESC [ A`) — claude code / vim / readline
+    /// turn it on, and a CSI arrow silently no-ops their line navigation.
+    pub app_cursor: bool,
     /// Window title set by shell OSC 0/2 (vt100 parser exposes it).
     pub title: Option<String>,
     /// Sentinel: the PTY reader hit EOF / error (shell or claude exited).

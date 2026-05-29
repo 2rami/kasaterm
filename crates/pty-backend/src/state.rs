@@ -218,7 +218,7 @@ impl PtySession {
         cmd.env("TMUX_PANE", &opts.pane_id);
         // Cross-pane RPC: each pane needs to know (a) which surface it
         // is and (b) where to reach the host so a script inside one
-        // pane can drive another via cmux-compat. CommandBuilder
+        // pane can drive another via kasaterm-cli. CommandBuilder
         // inherits the parent env by default, but make these two
         // explicit so removing the inherit later doesn't silently
         // break the integration.
@@ -1045,6 +1045,7 @@ fn snapshot(
         || mode.contains(alacritty_terminal::term::TermMode::MOUSE_DRAG)
         || mode.contains(alacritty_terminal::term::TermMode::MOUSE_MOTION);
     let mouse_sgr = mode.contains(alacritty_terminal::term::TermMode::SGR_MOUSE);
+    let app_cursor = mode.contains(alacritty_terminal::term::TermMode::APP_CURSOR);
     // OSC 0 / OSC 2 title pushed by the inner program. Cached in the
     // forwarder so we can return the latest value on every snapshot
     // rather than draining alacritty's pending-title queue once and
@@ -1061,6 +1062,7 @@ fn snapshot(
         alt_screen,
         mouse_enabled,
         mouse_sgr,
+        app_cursor,
         title,
         eof: false,
         // Filled in by the reader thread when this batch carried an
