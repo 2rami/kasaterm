@@ -453,19 +453,27 @@ impl PtySession {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        // Propagate the new size into both the kernel-side PTY (so the
-        // child sees SIGWINCH) and our local Term state (so cell
-        // indices stay in range and the next reader pass reshapes).
-        let pty = self.master.lock().unwrap();
-        pty.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .context("pty resize")?;
-        let mut size = self.size.lock().unwrap();
-        *size = (cols, rows);
+        // Kernel-side PTY first (child sees SIGWINCH).
+        {
+            let pty = self.master.lock().unwrap();
+            pty.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("pty resize")?;
+        }
+        // Reshape the alacritty grid *here*, not lazily in the next reader
+        // pass: snapshot() (incl. full_snapshot from the daemon) indexes the
+        // grid by `size`, so a window where `size` is updated but the grid
+        // isn't yet panics with an out-of-bounds column. Resize the Term then
+        // publish `size` so any snapshot sees a grid that already matches.
+        {
+            let mut t = self.term.lock().unwrap();
+            t.resize(TermSize::new(cols as usize, rows as usize));
+        }
+        *self.size.lock().unwrap() = (cols, rows);
         Ok(())
     }
 }

@@ -328,8 +328,10 @@ impl Backend for DaemonBackend {
             *self.state.active_session.lock().unwrap() = sessions.len() - 1;
         }
         *self.state.active.lock().unwrap() = new_id;
+        // No push_active_snapshots: a freshly-spawned pane's Term isn't ready
+        // for a full snapshot yet (grid still sizing) — its forwarder sends the
+        // first frame as soon as the shell prints, which is what paints it.
         self.state.broadcast_state();
-        self.state.push_active_snapshots();
         Ok(())
     }
     fn new_window(&self) -> Result<()> {
@@ -345,8 +347,8 @@ impl Backend for DaemonBackend {
             }
         }
         *self.state.active.lock().unwrap() = new_id;
+        // New pane's forwarder paints it (see new_session); no full snapshot.
         self.state.broadcast_state();
-        self.state.push_active_snapshots();
         Ok(())
     }
     fn switch_session(&self, idx: usize) -> Result<()> {

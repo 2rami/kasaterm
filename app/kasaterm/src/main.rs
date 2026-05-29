@@ -9186,8 +9186,27 @@ impl ApplicationHandler<UserEvent> for App {
         // rects match the daemon. (Session/window metadata for the sidebar +
         // session panel is wired in the multi-session follow-up.)
         if let UserEvent::DaemonState(view) = event {
-            if let Some(lay) = view.active_layout() {
-                self.pty_layout = Some(lay);
+            // Project the daemon's active session onto the GUI's own
+            // stash-swap fields so the existing sidebar (windows) renderer
+            // works unchanged: active window's slot is None (its layout lives
+            // in pty_layout), the rest carry their layouts. Window switching
+            // is routed to the daemon over RPC, so these are render-only.
+            let asx = view.active_session;
+            if let Some(sess) = view.sessions.get(asx) {
+                self.windows = sess
+                    .windows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| {
+                        if i == sess.active_window {
+                            None
+                        } else {
+                            Some(w.layout.clone())
+                        }
+                    })
+                    .collect();
+                self.active_window = sess.active_window;
+                self.pty_layout = sess.windows.get(sess.active_window).map(|w| w.layout.clone());
                 self.publish_pty_layout();
             }
         }
