@@ -46,15 +46,6 @@ pub struct StateView {
     pub active_session: usize,
 }
 
-impl StateView {
-    /// The BSP tree the GUI should render right now (active session's active
-    /// window), if the structure is non-empty.
-    pub fn active_layout(&self) -> Option<PtyLayout> {
-        let s = self.sessions.get(self.active_session)?;
-        s.windows.get(s.active_window).map(|w| w.layout.clone())
-    }
-}
-
 /// Daemon→GUI stream message. `Frame` carries a screen diff (per pane, keyed by
 /// `pane_id`); `State` carries the whole session>window>pane structure after a
 /// split/close/new/switch so the GUI re-lays-out. Multiplexed over the one
@@ -224,14 +215,23 @@ pub fn spawn_daemon(ctrl_path: &Path) -> io::Result<()> {
         },
         None => (Stdio::null(), Stdio::null()),
     };
-    std::process::Command::new(exe)
-        .arg("--daemon")
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--daemon")
         .arg("--socket")
         .arg(ctrl_path)
         .stdin(Stdio::null())
         .stdout(out)
-        .stderr(err)
-        .spawn()?;
+        .stderr(err);
+    // Put the daemon in its OWN process group so it survives whatever kills
+    // the GUI: Ctrl+C (SIGINT) and terminal close (SIGHUP) are delivered to
+    // the foreground *group*, and the daemon must not be in it — otherwise it
+    // dies with the app and the whole point (outliving the GUI) is lost.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()?;
     Ok(())
 }
 
