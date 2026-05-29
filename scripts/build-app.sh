@@ -30,8 +30,8 @@ if [[ ! -f assets/AppIcon.icns ]]; then
 fi
 
 # Build the binaries. Besides kasaterm we need the tmux shim ("tmux")
-# and cmux-compat: claude code's teammate mode shells out to `tmux
-# split-window` / `send-keys`, which our shim rewrites into cmux-compat
+# and kasaterm-cli: claude code's teammate mode shells out to `tmux
+# split-window` / `send-keys`, which our shim rewrites into kasaterm-cli
 # socket calls. Without bundling these next to kasaterm, a packaged .app
 # can't find them (install_tmux_shim / locate_* look beside the exe) and
 # teammate splits silently fall back to the it2/real-tmux path.
@@ -49,7 +49,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BINDIR/kasaterm" "$APP/Contents/MacOS/kasaterm"
 cp "$BINDIR/tmux" "$APP/Contents/MacOS/tmux"
-cp "$BINDIR/cmux-compat" "$APP/Contents/MacOS/cmux-compat"
+cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 # Minimal Info.plist. Bundle id namespaced under the project root so

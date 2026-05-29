@@ -90,6 +90,30 @@ impl Default for SessionsInfo {
     }
 }
 
+/// One pane's self-reported activity, published to a shared board so
+/// sibling panes can coordinate without a human relaying between them:
+/// avoid editing the same file, wait out a neighbour's build, or notice
+/// two panes are chasing the same problem and join forces. Pure
+/// metadata — nothing here touches terminal I/O. Returned by
+/// `collab.board`, written by `collab.announce`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneActivity {
+    pub surface_id: String,
+    /// What this pane is doing and *why*, free text. The "why" is the
+    /// point — "fixing the login 500 in auth.ts" lets a sibling realise
+    /// it's on the same bug, where a bare "editing auth.ts" wouldn't.
+    pub intent: String,
+    /// Coarse state for at-a-glance scanning: conventionally one of
+    /// "working" | "building" | "blocked" | "idle", but free text is
+    /// allowed so a pane can be specific ("running test suite").
+    pub status: String,
+    /// Files this pane is currently touching. The conflict-detection
+    /// signal: a sibling checks the board before editing and backs off
+    /// if a path it wants is already claimed here.
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
 /// Plug point for terminal operations. Host apps implement this on a
 /// type that already owns the tmux session / portable-pty handle and
 /// the renderer state.
@@ -182,5 +206,32 @@ pub trait Backend: Send + Sync {
     /// caller can verify the webview tracks the window. Default unsupported.
     fn panel_info(&self, _which: PanelKind) -> Result<PanelGeom> {
         anyhow::bail!("panel_info not supported")
+    }
+
+    /// Publish (or overwrite) this pane's activity on the shared
+    /// collaboration board. Pure metadata, so a backend can satisfy this
+    /// without touching the renderer. Default unsupported.
+    fn announce(
+        &self,
+        _surface_id: &str,
+        _intent: &str,
+        _status: &str,
+        _files: &[String],
+    ) -> Result<()> {
+        anyhow::bail!("announce not supported")
+    }
+
+    /// Read every pane's announced activity. Default: empty board — a
+    /// backend that doesn't track activity reports nothing rather than
+    /// erroring, so callers can always scan.
+    fn collab_board(&self) -> Result<Vec<PaneActivity>> {
+        Ok(Vec::new())
+    }
+
+    /// Read the visible screen text (last `lines` rows) of a pane so a
+    /// sibling can check on a build or long-running job without focusing
+    /// it. Default unsupported.
+    fn peek(&self, _surface_id: &str, _lines: usize) -> Result<String> {
+        anyhow::bail!("peek not supported")
     }
 }

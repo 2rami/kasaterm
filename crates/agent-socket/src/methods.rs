@@ -54,6 +54,12 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.rename" => surface_rename(backend, id, &req.params),
         "surface.set_color" => surface_set_color(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
+        "surface.peek" => surface_peek(backend, id, &req.params),
+        "collab.announce" => collab_announce(backend, id, &req.params),
+        "collab.board" => match backend.collab_board() {
+            Ok(board) => Response::success(id, json!({ "board": board })),
+            Err(e) => backend_err(id, e),
+        },
         unknown => Response {
             id,
             ok: false,
@@ -114,9 +120,53 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.split",
                 "surface.send_text",
                 "surface.send_key",
+                "surface.peek",
+                "collab.announce",
+                "collab.board",
             ],
         }),
     )
+}
+
+fn collab_announce(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "collab.announce requires `surface_id` (string)"),
+    };
+    // intent is the point of the whole feature, but we don't hard-require
+    // it: a pane updating only its status (e.g. "idle") shouldn't fail.
+    let intent = params.get("intent").and_then(|v| v.as_str()).unwrap_or("");
+    let status = params
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("working");
+    let files: Vec<String> = params
+        .get("files")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    match backend.announce(surface_id, intent, status, &files) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_peek(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.peek requires `surface_id` (string)"),
+    };
+    // Default to a screenful-ish tail; callers wanting the whole buffer
+    // pass a big number.
+    let lines = params
+        .get("lines")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(30);
+    match backend.peek(surface_id, lines) {
+        Ok(text) => Response::success(id, json!({ "text": text })),
+        Err(e) => backend_err(id, e),
+    }
 }
 
 fn surface_focus(backend: &dyn Backend, id: Value, params: &Value) -> Response {

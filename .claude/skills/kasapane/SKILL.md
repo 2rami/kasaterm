@@ -1,7 +1,7 @@
 ---
 name: kasapane
-description: kasaterm/kasaspace pane을 다루고, 그 안에서 긴 잡(빌드·dev server·배포)을 풀 사이클로 돌리고, 작업 결과(이미지·마크다운)를 창 안 pane에 띄우고, kasaterm 자체 UI를 빌드→스폰→스크린샷→확인 사이클로 자체검증하고, TeamCreate로 띄운 팀원 pane의 race·좀비를 청소한다. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "pane 쪼개/이름/색", "dev 서버 옆에 띄워", "이미지/마크다운 띄워줘", "팀원 pane 정리", "팀 좀비 청소", "빌드 돌려줘", "kasaterm 화면 확인해줘", "스크린샷 찍어서 봐줘" 같은 요청, 또는 작업 중 만든 스샷·문서를 사용자 화면에 보여줄 때 사용. raw tmux(비-kasaterm) 컨텍스트는 tmux-pane-job 스킬로.
-version: 0.3.0
+description: kasaterm/kasaspace pane을 다루고, 그 안에서 긴 잡(빌드·dev server·배포)을 풀 사이클로 돌리고, 작업 결과(이미지·마크다운)를 창 안 pane에 띄우고, 여러 pane의 claude(또는 codex·antigravity 등)가 같은 레포를 동시에 만질 때 충돌 없이 협업하고(board·announce·send·peek), kasaterm 자체 UI를 빌드→스폰→스크린샷→확인 사이클로 자체검증하고, TeamCreate로 띄운 팀원 pane의 race·좀비를 청소한다. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "pane 쪼개/이름/색", "dev 서버 옆에 띄워", "이미지/마크다운 띄워줘", "다른/옆 pane 뭐하는지", "협업", "충돌 피해", "같이 작업", "팀원 pane 정리", "팀 좀비 청소", "빌드 돌려줘", "kasaterm 화면 확인해줘", "스크린샷 찍어서 봐줘" 같은 요청, 또는 멀티 pane 환경(KASATERM_PANE_ID env 존재)에서 코드 작업을 시작하거나 작업 중 만든 스샷·문서를 사용자 화면에 보여줄 때 사용. raw tmux(비-kasaterm) 컨텍스트는 tmux-pane-job 스킬로.
+version: 0.4.0
 user-invocable: true
 argument-hint: "[pane 작업 또는 검증할 UI 항목]"
 ---
@@ -10,7 +10,7 @@ argument-hint: "[pane 작업 또는 검증할 UI 항목]"
 
 이 스킬은 셋을 한 자리에 묶는다:
 
-1. **pane 제어** — kasaterm 안에서 pane을 만들고 꾸미고 결과를 띄운다 (cmux-compat).
+1. **pane 제어** — kasaterm 안에서 pane을 만들고 꾸미고 결과를 띄운다 (kasaterm-cli).
 2. **긴 잡 사이클** — 빌드·dev server·배포 같은 1분+ 명령을 별도 pane에서 안전히 돌리고 결과를 회수한다.
 3. **kasaterm 자체검증** — UI 코드를 고친 뒤 너 자신이 빌드→스폰→스크린샷→확인을 돌려 진짜 동작하는지 본다 (사용자에게 "테스트해보세요" 떠넘기지 않음).
 
@@ -18,11 +18,11 @@ raw tmux(예: debi-marlene 배포)는 [tmux-pane-job 스킬]로. 이 스킬은 k
 
 ## 전제: kasaterm 셸 안에서만 동작 (1·2번에 한함)
 
-`cmux-compat`은 `$KASATERM_SOCKET_PATH`(없으면 `$CMUX_SOCKET_PATH`)로 어느 kasaterm 인스턴스에 붙을지 정한다. 본체가 띄운 셸에는 이 env가 자동 export돼 있다(`pty-backend/src/state.rs`).
+`kasaterm-cli`은 `$KASATERM_SOCKET_PATH`(없으면 `$CMUX_SOCKET_PATH`)로 어느 kasaterm 인스턴스에 붙을지 정한다. 본체가 띄운 셸에는 이 env가 자동 export돼 있다(`pty-backend/src/state.rs`).
 
 ```bash
 echo "$KASATERM_SOCKET_PATH"          # 비어 있으면 kasaterm 셸이 아님 → 1·2번 중단, 3번만 가능
-cmux-compat list surfaces             # JSON pane 목록이 나오면 정상
+kasaterm-cli list surfaces             # JSON pane 목록이 나오면 정상
 ```
 
 env가 비어 있거나 list가 실패하면 pane 조작을 시도하지 말고 사용자에게 알린다 — 단, 3번 자체검증은 셸 밖에서도 가능(빌드·스폰·캡처는 모두 셸 무관).
@@ -31,12 +31,12 @@ env가 비어 있거나 list가 실패하면 pane 조작을 시도하지 말고 
 
 ## 도구 경계 — MCP vs Bash (가장 먼저 읽기)
 
-`mcp__kasaspace__*` 와 `cmux-compat`(bash) 둘 다 같은 socket을 친다. 결과는 같다. **언제 무엇을 쓸지**가 다르다.
+`mcp__kasaspace__*` 와 `kasaterm-cli`(bash) 둘 다 같은 socket을 친다. 결과는 같다. **언제 무엇을 쓸지**가 다르다.
 
 | 상황 | 쓰는 도구 | 왜 |
 |---|---|---|
 | 사용자가 직접 "이 이미지/문서 띄워" 시킨 일회성 GUI 액션 | **MCP** `mcp__kasaspace__*` | 의도 명확, 한 번이면 끝, 호출 흔적이 turn에 명시적으로 남음 |
-| pane 분할·이름·색·send·focus를 **루프나 다단계로** 엮는 자동화 | **Bash** `cmux-compat` | 변수 캡처(`NEW=$(...)`), 파이프, jq 등 셸 도구 결합 자유 |
+| pane 분할·이름·색·send·focus를 **루프나 다단계로** 엮는 자동화 | **Bash** `kasaterm-cli` | 변수 캡처(`NEW=$(...)`), 파이프, jq 등 셸 도구 결합 자유 |
 | TeamCreate 직후 race 검증·좀비 청소·config.json 조작 | **Bash** | jq + 조건 분기 + 파일 편집까지 한 흐름. MCP 없음 |
 | 빌드·dev server·테스트 풀 사이클 (tee+DONE+Monitor) | **Bash** | 시퀀스가 길고 로그 파일 회수까지 결합 |
 | 이미지·마크다운 결과물을 메인 창에 띄우기 (자동화의 마지막 한 컷) | **Bash** `imgopen`/`mdopen` | 자동화 흐름의 일부이면 셸로 끝맺음 |
@@ -48,28 +48,31 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 ---
 
-## 1) Pane 제어 — cmux-compat 명령 레퍼런스
+## 1) Pane 제어 — kasaterm-cli 명령 레퍼런스
 
 모든 명령은 JSON으로 응답한다(`{"ok":true,...}`). pane id는 `%0`, `%1` … 형식.
 
 | 명령 | 동작 |
 |---|---|
-| `cmux-compat list surfaces` | 현재 pane 목록 + id |
-| `cmux-compat split <left\|right\|up\|down>` | 현재 pane을 해당 방향으로 분할. 새 pane id 반환 |
-| `cmux-compat focus <id>` | 포커스 이동 |
-| `cmux-compat close <id>` | pane 닫기 (셸 종료) |
-| `cmux-compat rename <id> <제목>` | 헤더 제목 |
-| `cmux-compat color <id> <#rrggbb>` | 헤더 accent 색상 |
-| `cmux-compat swap <a> <b>` | 두 pane 위치 교환(내용 유지) |
-| `cmux-compat send --surface <id> <텍스트>` | 특정 pane에 텍스트 입력 |
-| `cmux-compat key <id> …` | 특정 pane에 키 전송 |
+| `kasaterm-cli list surfaces` | 현재 pane 목록 + id |
+| `kasaterm-cli split <left\|right\|up\|down>` | 현재 pane을 해당 방향으로 분할. 새 pane id 반환 |
+| `kasaterm-cli focus <id>` | 포커스 이동 |
+| `kasaterm-cli close <id>` | pane 닫기 (셸 종료) |
+| `kasaterm-cli rename <id> <제목>` | 헤더 제목 |
+| `kasaterm-cli color <id> <#rrggbb>` | 헤더 accent 색상 |
+| `kasaterm-cli swap <a> <b>` | 두 pane 위치 교환(내용 유지) |
+| `kasaterm-cli send --surface <id> <텍스트>` | 특정 pane에 텍스트 입력 |
+| `kasaterm-cli key <id> …` | 특정 pane에 키 전송 |
+| `kasaterm-cli board` | 모든 pane이 뭘 왜 하는지 (협업, §5) |
+| `kasaterm-cli announce <의도> [status]` | 내 pane 작업 등록 (협업, §5) |
+| `kasaterm-cli peek <id> [lines]` | 다른 pane 화면 텍스트 읽기 (협업, §5) |
 | `imgopen <파일.png>` | 이미지를 새 pane으로 띄움 (맞춤↔원본 토글) |
 | `mdopen <파일.md>` | 마크다운을 노션풍 렌더 pane (Render/Raw) |
 
 split이 반환하는 JSON의 `result.surface.id`가 새 pane id다.
 
 ```bash
-NEW=$(cmux-compat split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
+NEW=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
 echo "$NEW"   # 예: %1
 ```
 
@@ -78,10 +81,10 @@ echo "$NEW"   # 예: %1
 오래 도는 명령을 **별도 pane에서 돌려 로그를 흐르게** 한다. 메인 pane은 자유. 사용자와 claude가 같은 화면을 본다.
 
 ```bash
-NEW=$(cmux-compat split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
-cmux-compat rename "$NEW" "dev log"
-cmux-compat color  "$NEW" "#58a6ff"
-cmux-compat send --surface "$NEW" $'npm run dev\n'   # ANSI-C 따옴표로 엔터 보장
+NEW=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
+kasaterm-cli rename "$NEW" "dev log"
+kasaterm-cli color  "$NEW" "#58a6ff"
+kasaterm-cli send --surface "$NEW" $'npm run dev\n'   # ANSI-C 따옴표로 엔터 보장
 ```
 
 원칙:
@@ -94,9 +97,9 @@ cmux-compat send --surface "$NEW" $'npm run dev\n'   # ANSI-C 따옴표로 엔�
 분할은 **현재 포커스된 pane** 기준. 다음 분할 전에 `focus`로 기준 pane을 옮긴다.
 
 ```bash
-RIGHT=$(cmux-compat split right | ...id...)
-cmux-compat focus "$RIGHT"
-cmux-compat split down     # 오른쪽을 다시 위/아래로
+RIGHT=$(kasaterm-cli split right | ...id...)
+kasaterm-cli focus "$RIGHT"
+kasaterm-cli split down     # 오른쪽을 다시 위/아래로
 ```
 
 자리 잘못 잡았으면 `swap`으로 교환(내용 유지).
@@ -106,9 +109,9 @@ cmux-compat split down     # 오른쪽을 다시 위/아래로
 `TeamCreate`/`Agent`(teammateMode=tmux)로 만든 팀원 pane을 알아보기 쉽게.
 
 ```bash
-cmux-compat list surfaces                       # 새 팀원 pane id 확인
-cmux-compat rename "%2" "scout"
-cmux-compat color  "%2" "#a371f7"
+kasaterm-cli list surfaces                       # 새 팀원 pane id 확인
+kasaterm-cli rename "%2" "scout"
+kasaterm-cli color  "%2" "#a371f7"
 ```
 
 역할 색: 탐색=보라 `#a371f7`, 구현=파랑 `#58a6ff`, 검증=초록 `#3fb950`, 리드=노랑 `#d29922`.
@@ -138,7 +141,7 @@ mdopen  /절대경로/doc.md         # 마크다운 → 노션풍 렌더 pane
 
 **1) 사전 점검** (imgopen/mdopen 직전):
 ```bash
-COUNT=$(cmux-compat list surfaces | python3 -c \
+COUNT=$(kasaterm-cli list surfaces | python3 -c \
   'import sys,json;print(len(json.load(sys.stdin)["result"]["surfaces"]))')
 echo "pane count: $COUNT"
 ```
@@ -155,7 +158,7 @@ echo "pane count: $COUNT"
 
 ```bash
 # 본인 만든 모니터 색을 가진 pane id 추출
-cmux-compat list surfaces | python3 -c "
+kasaterm-cli list surfaces | python3 -c "
 import sys, json
 rs = json.load(sys.stdin)['result']['surfaces']
 mine_colors = {'#58a6ff','#d29922','#3fb950','#a371f7','#ff8800'}
@@ -170,13 +173,13 @@ for s in rs:
 **4) 자동 정리 (다음 이미지로 교체될 때)** — 이미지가 일련의 결과 흐름(예: A 다음 B 다음 C)이면 이전 imgopen pane을 닫고 새로 띄움. 매번 새 pane 만들면 4개 금방 쌓임.
 ```bash
 # 가장 최근 imgopen pane id를 변수에 저장
-PREV_IMG=$(cmux-compat list surfaces | python3 -c "
+PREV_IMG=$(kasaterm-cli list surfaces | python3 -c "
 import sys, json
 rs = json.load(sys.stdin)['result']['surfaces']
 imgs = [s['id'] for s in rs if (s.get('title') or '').endswith(('.png','.jpg','.jpeg','.webp'))]
 print(imgs[-1] if imgs else '')
 ")
-[ -n "$PREV_IMG" ] && cmux-compat close "$PREV_IMG"
+[ -n "$PREV_IMG" ] && kasaterm-cli close "$PREV_IMG"
 imgopen /절대경로/new.png
 ```
 
@@ -252,7 +255,7 @@ echo '{"tool_name":"SendUserFile","tool_input":{"files":["/tmp/foo.png"]}}' \
 
 ## 2) 긴 잡 사이클 — kasaterm pane에서 빌드·dev server·배포
 
-raw tmux의 `tmux send-keys` 대신 `cmux-compat send --surface`로 같은 패턴을 돌린다. 핵심 4요소는 동일.
+raw tmux의 `tmux send-keys` 대신 `kasaterm-cli send --surface`로 같은 패턴을 돌린다. 핵심 4요소는 동일.
 
 ### 언제 쓰는가
 
@@ -266,15 +269,15 @@ raw tmux의 `tmux send-keys` 대신 `cmux-compat send --surface`로 같은 패�
 
 **1) pane 생성 + 이름·색**
 ```bash
-NEW=$(cmux-compat split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
-cmux-compat rename "$NEW" "build"
-cmux-compat color  "$NEW" "#d29922"
+NEW=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
+kasaterm-cli rename "$NEW" "build"
+kasaterm-cli color  "$NEW" "#d29922"
 ```
 
 **2) 명령 박기 (표준 패턴)**
 ```bash
 TASK=cargo-release      # /tmp/<task>.log 파일명
-cmux-compat send --surface "$NEW" \
+kasaterm-cli send --surface "$NEW" \
   $"cd /Users/kasa/Desktop/momewomo/tmuxify && cargo build --release -p kasaterm 2>&1 | tee /tmp/$TASK.log; echo '---DONE---' >> /tmp/$TASK.log; exit\n"
 ```
 
@@ -308,7 +311,7 @@ dev server처럼 종료 안 하는 잡엔 Monitor X — 시작 후 사용자에�
 **5) 정리**
 ```bash
 rm /tmp/$TASK.log
-# pane은 `; exit`으로 닫혔어야 함. 잔존이면 `cmux-compat close $NEW`.
+# pane은 `; exit`으로 닫혔어야 함. 잔존이면 `kasaterm-cli close $NEW`.
 find /tmp -maxdepth 1 -name "*.log" -mtime +7 -delete 2>/dev/null
 ```
 
@@ -493,8 +496,8 @@ Agent({ team_name: "...", name: "scout", subagent_type: "general-purpose", ... }
 
 ```bash
 for ROLE in scout builder verify reviewer; do
-  PANE=$(cmux-compat list surfaces | python3 -c "import sys,json,re;rs=json.load(sys.stdin)['result']['surfaces'];print(next((s['id'] for s in rs if re.search(r'$ROLE', s.get('title') or '')), ''))")
-  [ -n "$PANE" ] && cmux-compat color "$PANE" "#ff8800"
+  PANE=$(kasaterm-cli list surfaces | python3 -c "import sys,json,re;rs=json.load(sys.stdin)['result']['surfaces'];print(next((s['id'] for s in rs if re.search(r'$ROLE', s.get('title') or '')), ''))")
+  [ -n "$PANE" ] && kasaterm-cli color "$PANE" "#ff8800"
 done
 ```
 
@@ -577,6 +580,46 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 ---
 
+## 5) pane 협업 — 서로 뭘 왜 하는지 (board · announce · send · peek)
+
+§4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 이미 떠 있는 pane들끼리 — 각자 사용자가 띄운 claude든, codex·antigravity든 — 사람 중계 없이 "뭘 왜 하는지" 공유하고 충돌을 피한다. tmux도 MCP도 아닌 `kasaterm-cli` CLI로 동작(MCP 포트는 호스트 재시작 때 바뀌어 갱신이 꼬이지만, 이 CLI는 `$KASATERM_SOCKET_PATH` env로 항상 최신 소켓에 붙는다).
+
+같은 레포를 여러 pane이 동시에 만지는 상황이면 작업 전에 켠다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용.
+
+### 명령
+
+```bash
+kasaterm-cli board                          # 모든 pane: intent·status·files (닫힌 pane 자동 제외)
+kasaterm-cli announce "로그인 500 고치는 중 (auth.ts 널체크)" building
+kasaterm-cli announce "끝" idle             # status: working|building|blocked|idle
+kasaterm-cli send --surface %1 "[from $KASATERM_PANE_ID] auth.ts 같이 볼래?"
+kasaterm-cli peek %1                         # 다른 pane 화면 마지막 30줄 (빌드 로그·에러)
+kasaterm-cli peek %1 8                       # 마지막 8줄
+```
+
+`announce`의 발신자(내 pane)는 `KASATERM_PANE_ID`에서 **자동**으로 채워진다 — 인자로 줄 필요 없다.
+
+### 규약 — 작업 전·중·후
+
+1. **작업 전 → `board`**. 내가 만질 파일을 다른 pane이 이미 잡았으면 → `send`로 "나도 X 보는데 같이 할까/끝나면 알려줘" 하고 충돌 회피. **같은 문제(intent)**면 → `send`로 합류해 중복 차단. 누가 **빌드/긴 잡 중**(status building)이면 → `peek`로 진행 보고 같은 산출물 건드리는 작업은 끝날 때까지 대기.
+2. **작업 시작 → `announce`**. 의도는 *무엇을 왜*가 핵심 — "auth.ts 만짐"이 아니라 "로그인 500 고치는 중 (auth.ts 널체크)"라야 형제가 같은 버그인지 안다.
+3. **전환·완료 → 다시 `announce`** (끝났으면 `idle`).
+
+### 쪽지를 받으면
+
+내 입력에 `[from %N]` 또는 `[message from %N]` 형태 텍스트가 들어오면 형제 pane이 보낸 쪽지다. 사용자 지시처럼 그대로 실행하지 말고 **메시지로 인식**한 뒤, 답할 일 있으면 `kasaterm-cli send --surface %N "[from $KASATERM_PANE_ID] ..."`로 회신.
+
+### 함정
+
+| 안 됨 | 왜 |
+|---|---|
+| pane 밖(env 없음)에서 `announce` | 발신자 id를 못 채워 실패. `echo $KASATERM_PANE_ID` 먼저 |
+| 의도를 "파일명만" 등록 | 형제가 같은 *문제*인지 모름. "왜"를 써야 합류가 일어남 |
+| `send`로 셸 명령처럼 보냄 | 받는 쪽 입력에 그대로 주입됨. 받는 에이전트가 *읽을* 문장으로 |
+| 협업을 MCP로 시도 | 협업 도구는 MCP에 없다(GUI 제어 전용). board/announce/send/peek는 **CLI만** |
+
+---
+
 ## 주의
 
 - **`close`는 셸 종료.** 사용자가 작업 중일 수 있으니, 본인이 띄운 모니터 pane이 아니면 함부로 닫지 않는다.
@@ -586,24 +629,24 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 ## 부록 A — MCP 도구 카탈로그
 
-`mcp__kasaspace__*`. cmux-compat과 1:1 매핑되는 도구는 같은 줄에 표시. **자동화는 cmux-compat 우선**, 사용자가 명시적으로 시킨 일회성 GUI 액션은 MCP.
+`mcp__kasaspace__*`. kasaterm-cli과 1:1 매핑되는 도구는 같은 줄에 표시. **자동화는 kasaterm-cli 우선**, 사용자가 명시적으로 시킨 일회성 GUI 액션은 MCP.
 
-| MCP 도구 | 인자 | cmux-compat 동치 | 비고 |
+| MCP 도구 | 인자 | kasaterm-cli 동치 | 비고 |
 |---|---|---|---|
-| `kasaspace_list` | — | `cmux-compat list surfaces` | surface 목록 + id |
-| `kasaspace_split` | `direction` (left/right/up/down) | `cmux-compat split <dir>` | 현재 focused pane 기준 분할 |
-| `kasaspace_focus` | `surface_id` | `cmux-compat focus <id>` | 포커스 이동 |
-| `kasaspace_close` | `surface_id` | `cmux-compat close <id>` | pane 종료. 사용자 작업 중일 수 있으니 신중 |
-| `kasaspace_rename` | `surface_id`, `title` | `cmux-compat rename <id> <제목>` | 헤더 제목 |
-| `kasaspace_set_color` | `surface_id`, `color` | `cmux-compat color <id> <#rgb>` | 헤더 accent |
-| `kasaspace_swap` | `a`, `b` | `cmux-compat swap <a> <b>` | 위치 교환(내용 유지) |
-| `kasaspace_send` | `text`, `[surface_id]` | `cmux-compat send --surface <id> <text>` | 텍스트 전송. 엔터 필요하면 `text`에 `\n` 포함 |
-| `kasaspace_send_key` | `key`(enter/tab/escape/…), `[surface_id]` | `cmux-compat key <id> …` | 명명 키 전송 |
+| `kasaspace_list` | — | `kasaterm-cli list surfaces` | surface 목록 + id |
+| `kasaspace_split` | `direction` (left/right/up/down) | `kasaterm-cli split <dir>` | 현재 focused pane 기준 분할 |
+| `kasaspace_focus` | `surface_id` | `kasaterm-cli focus <id>` | 포커스 이동 |
+| `kasaspace_close` | `surface_id` | `kasaterm-cli close <id>` | pane 종료. 사용자 작업 중일 수 있으니 신중 |
+| `kasaspace_rename` | `surface_id`, `title` | `kasaterm-cli rename <id> <제목>` | 헤더 제목 |
+| `kasaspace_set_color` | `surface_id`, `color` | `kasaterm-cli color <id> <#rgb>` | 헤더 accent |
+| `kasaspace_swap` | `a`, `b` | `kasaterm-cli swap <a> <b>` | 위치 교환(내용 유지) |
+| `kasaspace_send` | `text`, `[surface_id]` | `kasaterm-cli send --surface <id> <text>` | 텍스트 전송. 엔터 필요하면 `text`에 `\n` 포함 |
+| `kasaspace_send_key` | `key`(enter/tab/escape/…), `[surface_id]` | `kasaterm-cli key <id> …` | 명명 키 전송 |
 | `kasaspace_run_job` | `command`, `[title]`, `[color]`, `[direction]`, `[auto_close]` | (없음 — 직접 split+rename+color+send 조합) | **사용자 옆에서 실시간 진행 보여주는 잡 전용**. 출력 스트림은 모델한테 안 옴(pane 안에만). 빌드/dev/배포 사용자 시연용 |
 | `kasaspace_workspace_current` | — | (tmux session 정보) | 현재 워크스페이스 |
 | `kasaspace_workspace_list` | — | (tmux session 정보) | 워크스페이스 전수 |
 
-**`kasaspace_run_job` 주의**: 사용자가 "옆에 띄워서 보여줘" 요청하면 이게 가장 깔끔(타이틀+색+자동분할+자동종료 옵션 한 번에). 단 출력이 셸로 안 오니까 **로그 회수 필요한 자동화엔 부적합** — 그건 `cmux-compat send` + `tee /tmp/<task>.log` + Monitor.
+**`kasaspace_run_job` 주의**: 사용자가 "옆에 띄워서 보여줘" 요청하면 이게 가장 깔끔(타이틀+색+자동분할+자동종료 옵션 한 번에). 단 출력이 셸로 안 오니까 **로그 회수 필요한 자동화엔 부적합** — 그건 `kasaterm-cli send` + `tee /tmp/<task>.log` + Monitor.
 
 **언제 MCP를 쓸지 결정 흐름**:
 1. 사용자가 "지금 이거 띄워" 한 번 시킴? → MCP (`kasaspace_run_job`, `kasaspace_send` 등)
@@ -620,5 +663,5 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 - [[reference_kasaterm_design_unification]] — 디자인 토큰·통일 결정 (2026-05-26 배경 BG로 통일)
 - [[feedback_team_lead_role_in_teamcreate]] — 리드는 지시만
 - [[feedback_teamcreate_pane_failure]] — 병렬 Agent spawn race + 좀비 청소 절차 (이 스킬 §좀비 청소 절차)
-- [[feedback_tmux_send_keys_enter_eaten]] — 엔터 씹힘 패턴 (cmux-compat send도 같은 함정)
+- [[feedback_tmux_send_keys_enter_eaten]] — 엔터 씹힘 패턴 (kasaterm-cli send도 같은 함정)
 - [[feedback_background_jobs_in_tmux_pane]] — 백그라운드 잡은 항상 새 pane

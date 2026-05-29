@@ -454,6 +454,9 @@ fn spawn_flusher(
                 alt_screen: snap.alt_screen,
                 mouse_enabled: snap.mouse_enabled,
                 mouse_sgr: snap.mouse_sgr,
+                // tmux/vt100 backend doesn't surface DECCKM; PTY backend
+                // (the default) does the real work via TermMode::APP_CURSOR.
+                app_cursor: false,
                 title: snap.title,
                 eof: false,
                 // tmux backend doesn't track OSC 133 prompt marks; the

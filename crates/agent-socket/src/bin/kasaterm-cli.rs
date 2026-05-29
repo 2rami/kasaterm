@@ -4,15 +4,15 @@
 //!
 //! Subcommands map 1:1 to protocol methods:
 //!
-//!   cmux-compat ping
-//!   cmux-compat capabilities
-//!   cmux-compat identify
-//!   cmux-compat list workspaces|surfaces
-//!   cmux-compat focus  <surface_id>
-//!   cmux-compat split  <left|right|up|down>
-//!   cmux-compat send   <text>                  # writes to focused pane
-//!   cmux-compat send   <surface_id> <text>     # writes to specific pane
-//!   cmux-compat key    <enter|tab|...>
+//!   kasaterm-cli ping
+//!   kasaterm-cli capabilities
+//!   kasaterm-cli identify
+//!   kasaterm-cli list workspaces|surfaces
+//!   kasaterm-cli focus  <surface_id>
+//!   kasaterm-cli split  <left|right|up|down>
+//!   kasaterm-cli send   <text>                  # writes to focused pane
+//!   kasaterm-cli send   <surface_id> <text>     # writes to specific pane
+//!   kasaterm-cli key    <enter|tab|...>
 //!
 //! Socket path resolution mirrors what the host exports:
 //!   $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default
@@ -40,7 +40,7 @@ fn main() {
         }
         Ok(None) => {} // help / version path — already printed.
         Err(e) => {
-            eprintln!("cmux-compat: {e:#}");
+            eprintln!("kasaterm-cli: {e:#}");
             std::process::exit(2);
         }
     }
@@ -62,19 +62,22 @@ fn run() -> Result<Option<Response>> {
 fn print_help() {
     eprintln!("cmux-compatible JSON-RPC CLI for tmuxify / agent-socket\n");
     eprintln!("Usage:");
-    eprintln!("  cmux-compat ping");
-    eprintln!("  cmux-compat capabilities");
-    eprintln!("  cmux-compat identify");
-    eprintln!("  cmux-compat list <workspaces|surfaces>");
-    eprintln!("  cmux-compat focus <surface_id>");
-    eprintln!("  cmux-compat close <surface_id>");
-    eprintln!("  cmux-compat rename <surface_id> <title>");
-    eprintln!("  cmux-compat color <surface_id> <#rrggbb>");
-    eprintln!("  cmux-compat split <left|right|up|down>");
-    eprintln!("  cmux-compat swap  <surface_a> <surface_b>");
-    eprintln!("  cmux-compat send  <text>");
-    eprintln!("  cmux-compat send  --surface <id> <text>");
-    eprintln!("  cmux-compat key   <enter|tab|escape|backspace|delete|up|down|left|right>");
+    eprintln!("  kasaterm-cli ping");
+    eprintln!("  kasaterm-cli capabilities");
+    eprintln!("  kasaterm-cli identify");
+    eprintln!("  kasaterm-cli list <workspaces|surfaces>");
+    eprintln!("  kasaterm-cli focus <surface_id>");
+    eprintln!("  kasaterm-cli close <surface_id>");
+    eprintln!("  kasaterm-cli rename <surface_id> <title>");
+    eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
+    eprintln!("  kasaterm-cli split <left|right|up|down>");
+    eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
+    eprintln!("  kasaterm-cli send  <text>");
+    eprintln!("  kasaterm-cli send  --surface <id> <text>");
+    eprintln!("  kasaterm-cli key   <enter|tab|escape|backspace|delete|up|down|left|right>");
+    eprintln!("  kasaterm-cli announce <intent> [status]   # publish what THIS pane is doing");
+    eprintln!("  kasaterm-cli board                        # what every pane is doing");
+    eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
     eprintln!();
     eprintln!(
         "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
@@ -183,6 +186,38 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .first()
                 .ok_or_else(|| anyhow!("key needs a key name"))?;
             ("surface.send_key", json!({ "key": key }))
+        }
+        "announce" => {
+            // The pane announces *itself*: surface_id comes from the env
+            // the host injects, so a script inside a pane never has to
+            // figure out its own id.
+            let surface = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                anyhow!("announce needs $KASATERM_PANE_ID (run inside a kasaterm pane)")
+            })?;
+            let intent = args
+                .first()
+                .ok_or_else(|| anyhow!("announce needs an <intent> string"))?
+                .clone();
+            let status = args.get(1).cloned().unwrap_or_else(|| "working".to_string());
+            (
+                "collab.announce",
+                json!({ "surface_id": surface, "intent": intent, "status": status }),
+            )
+        }
+        "board" => ("collab.board", json!({})),
+        "peek" => {
+            // Default to this pane if no id given — handy for "what does my
+            // own screen look like" but the usual case is peeking a sibling.
+            let surface = args
+                .first()
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok())
+                .ok_or_else(|| anyhow!("peek needs a surface_id (or $KASATERM_PANE_ID)"))?;
+            let mut params = json!({ "surface_id": surface });
+            if let Some(lines) = args.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                params["lines"] = json!(lines);
+            }
+            ("surface.peek", params)
         }
         other => return Err(anyhow!("unknown command: {other}")),
     };

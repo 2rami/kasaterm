@@ -996,6 +996,12 @@ struct GpuOverlay {
     preedit_row: u16,
     preedit_col: u16,
     font_size: f32,
+    /// Active pane's font multiplier (pane-local zoom). The cursor /
+    /// preedit / selection / ghost overlays must scale their cell size
+    /// by this — `cell_w`/`cell_h` are the base (1.0) metrics, so a
+    /// zoomed pane would otherwise anchor them on the un-zoomed grid and
+    /// drift the composing Hangul off the prompt cell.
+    font_scale: f32,
     selection: Option<Selection>,
     /// Inline autosuggestion ghost text (empty = none). Drawn dim,
     /// starting at the cursor cell, clipped to the row's right edge.
@@ -1370,6 +1376,10 @@ struct TerminalPane {
     alt_screen: bool,
     mouse_enabled: bool,
     mouse_sgr: bool,
+    /// DECCKM (application cursor keys). When true, plain arrows go out
+    /// as SS3 (`ESC O A`) instead of CSI (`ESC [ A`) so claude code /
+    /// vim line navigation works. See the arrow-key send path.
+    app_cursor: bool,
     history: VecDeque<Vec<GridCell>>,
     /// Scrollback offset in rows. `0` = live tail; positive = N rows
     /// back into history visible at the top.
@@ -3216,6 +3226,7 @@ impl App {
                 tp.alt_screen = update.alt_screen;
                 tp.mouse_enabled = update.mouse_enabled;
                 tp.mouse_sgr = update.mouse_sgr;
+                tp.app_cursor = update.app_cursor;
                 // Carry the OSC 133 prompt-end mark only on frames that
                 // actually emitted one; keep the last otherwise so a
                 // mid-typing frame doesn't erase it.
@@ -3798,7 +3809,7 @@ impl App {
         // before the first ScreenUpdate lands. pump_pty_screens won't
         // overwrite a non-None active_pane.
         self.ws.lock().unwrap().active_pane = Some("%0".to_string());
-        // Bring up the cmux-compat socket *after* the initial pane(s) are
+        // Bring up the kasaterm-cli socket *after* the initial pane(s) are
         // wired so the very first surface.list call sees them.
         self.start_socket_pty();
         Ok(())
@@ -4788,6 +4799,20 @@ impl App {
                     let res = self.panel_window_info(which);
                     let _ = reply.send(res);
                 }
+                socket::PtyCommand::Peek { pane_id, lines, reply } => {
+                    // Reuse scrollback_lines (history + current screen as
+                    // trimmed text) and hand back just the requested tail.
+                    let ws = self.ws.lock().unwrap();
+                    let res = match ws.panes.get(&pane_id) {
+                        Some(pane) => {
+                            let mut all = scrollback_lines(pane);
+                            let start = all.len().saturating_sub(lines);
+                            Ok(all.split_off(start).join("\n"))
+                        }
+                        None => Err(anyhow::anyhow!("no such surface: {pane_id}")),
+                    };
+                    let _ = reply.send(res);
+                }
             }
         }
         self.refresh_socket_snapshot();
@@ -5053,18 +5078,9 @@ impl App {
         // by the same amount — otherwise claude code paints its
         // statusline / `bypass…` row off the bottom edge.
         let leaves = tree.leaves().len();
-        // Vertical reservation = header strip (only when split) + top and
-        // bottom inset, rounded up to whole cells in ONE ceil. Rounding the
-        // header and the inset *separately* each bumped to the next cell, so
-        // a split pane reserved up to a full extra row it never drew — that
-        // unused row showed through as a ~20px gray band (the window clear
-        // color) between the last text row and the pane's bottom border.
-        // One combined ceil keeps the unused tail under a single cell: the
-        // intended breathing margin, not a visible band.
+        // Header strip (only when split) eats off the top of each pane box;
+        // the rest is shared with the cell inset below.
         let header_px = if leaves > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
-        let reserved_y_cells =
-            ((header_px + 2.0 * PANE_INNER_Y) / self.cell.h.max(1.0)).ceil() as u16;
-        let inset_x_cells = (2.0 * PANE_INNER_X / self.cell.w.max(1.0)).ceil() as u16;
         // Per-leaf usable cells, indexed by outer pane id (the layout key,
         // which after cross-pane drag is NOT guaranteed to equal any tab's
         // pid). Walk ws.panes and resize each pane's tab PtySessions to its
@@ -5087,13 +5103,26 @@ impl App {
         // factor (the box stays on the base grid, matching the per-slot render
         // which sizes glyphs by the same factor). Keyed by pty/leaf id.
         let scale_of = self.pane_font_scales.clone();
+        let cw = self.cell.w.max(1.0);
+        let ch = self.cell.h.max(1.0);
         let mut leaf_cells: HashMap<String, (u16, u16)> = HashMap::new();
         for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
             let fs = scale_of.get(&id).copied().unwrap_or(1.0).max(0.1);
-            let base_c = w.saturating_sub(inset_x_cells).max(1) as f32;
-            let base_r = h.saturating_sub(reserved_y_cells).max(1) as f32;
-            let pcols = (base_c / fs).floor().max(1.0) as u16;
-            let prows = (base_r / fs).floor().max(1.0) as u16;
+            // Work in logical px on the BASE grid — exactly the span the
+            // renderer fills (origin + w·cell), then subtract the real px
+            // insets/header and divide by the ZOOMED cell. The old path
+            // rounded the inset to whole base cells and divided by fs, so a
+            // shrunk pane (small fs) amplified that ceil error ∝ 1/fs and
+            // told the PTY a grid that no longer matched the drawn area —
+            // that's the "비율 안 맞음" past a certain zoom-out.
+            let box_w_px = w as f32 * cw;
+            let box_h_px = h as f32 * ch;
+            let scaled_cw = cw * fs;
+            let scaled_ch = ch * fs;
+            let usable_w = (box_w_px - 2.0 * PANE_INNER_X).max(scaled_cw);
+            let usable_h = (box_h_px - header_px - 2.0 * PANE_INNER_Y).max(scaled_ch);
+            let pcols = (usable_w / scaled_cw).floor().max(1.0) as u16;
+            let prows = (usable_h / scaled_ch).floor().max(1.0) as u16;
             leaf_cells.insert(id, (pcols, prows));
         }
         for (outer, pids) in snapshot {
@@ -6455,10 +6484,17 @@ impl App {
     }
 
     fn handle_wheel(&mut self, delta: MouseScrollDelta) {
+        let wdbg = std::env::var_os("KASATERM_WHEEL_DEBUG").is_some();
         let dy_cells = match delta {
             MouseScrollDelta::LineDelta(_, y) => y * 0.3,
             MouseScrollDelta::PixelDelta(p) => (p.y as f32) / self.cell.h.max(1.0) * 0.3,
         };
+        if wdbg {
+            eprintln!(
+                "[wheel] delta={delta:?} dy_cells={dy_cells:.4} accum_before={:.4} cursor_px=({:.1},{:.1})",
+                self.wheel_accum_y, self.cursor_px.0, self.cursor_px.1
+            );
+        }
         let lines = match wheel_step(
             &mut self.wheel_accum_y,
             dy_cells,
@@ -6466,7 +6502,15 @@ impl App {
             Instant::now(),
         ) {
             Some(l) => l,
-            None => return,
+            None => {
+                if wdbg {
+                    eprintln!(
+                        "[wheel]   -> None (accum_after={:.4}, no emit)",
+                        self.wheel_accum_y
+                    );
+                }
+                return;
+            }
         };
         // Decide which pane handles this wheel: the pane the pointer is
         // hovering over. Falls back to the active pane if the pointer
@@ -6476,6 +6520,13 @@ impl App {
             .px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
             .map(|(id, _, _)| id)
             .or_else(|| self.target_pane());
+        if wdbg {
+            eprintln!(
+                "[wheel]   lines={lines} target_pane={:?} active={:?}",
+                target_pane_id,
+                self.ws.lock().unwrap().active_pane
+            );
+        }
         // Markdown pane: scroll the laid-out document by pixels (it has no PTY
         // history to delegate to). Clamp to the content height the renderer
         // last published so it can't scroll past the end.
@@ -6593,8 +6644,15 @@ impl App {
                 }
             } else if let Some(pty) = self.pty_for_pane(id) {
                 // Positive `lines` = scroll up = toward older history.
-                pty.scroll(if lines > 0 { step } else { -step });
+                let off = pty.scroll(if lines > 0 { step } else { -step });
+                if wdbg {
+                    eprintln!("[wheel]   pty.scroll step={step} -> display_offset={off}");
+                }
+            } else if wdbg {
+                eprintln!("[wheel]   no pty_for_pane({id}) -> NO-OP");
             }
+        } else if wdbg {
+            eprintln!("[wheel]   target_pane_id=None -> NO-OP");
         }
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -7029,13 +7087,19 @@ impl App {
             }
         }
         let bytes: Vec<u8> = match &event.logical_key {
-            // Shift+Enter → ESC+CR, which claude code / Ink reads as a
-            // newline instead of submitting. Plain Enter stays \r.
-            // Terminals can't distinguish the two by default (both send
-            // \r), so we encode the modifier ourselves.
+            // Shift+Enter / Option(Alt)+Enter insert a newline instead of
+            // submitting. claude code reads a bare LF (0x0a, the byte
+            // Ctrl+J sends) as a newline; plain Enter stays CR (0x0d),
+            // which submits. We used to send ESC+CR here, but current
+            // claude code / Ink doesn't treat that as a newline — so
+            // multiline never engaged and the up-arrow fell through to
+            // command history instead of moving between lines. claude
+            // never negotiates the kitty keyboard protocol (no `CSI ? u`
+            // in its startup modes), so CSI 13;2u wouldn't reach it
+            // either; a raw LF is the portable answer.
             Key::Named(NamedKey::Enter) => {
-                if self.modifiers.shift_key() {
-                    b"\x1b\r".to_vec()
+                if self.modifiers.shift_key() || self.modifiers.alt_key() {
+                    b"\n".to_vec()
                 } else {
                     // Plain Enter submits the line: remember it for
                     // instant suggestions and reset the buffer.
@@ -7086,7 +7150,25 @@ impl App {
                 } else if self.modifiers.alt_key() {
                     format!("\x1b[1;3{letter}").into_bytes()
                 } else {
-                    format!("\x1b[{letter}").into_bytes()
+                    // Plain arrow: honor the active pane's DECCKM. When the
+                    // inner app (claude code / vim / readline) set
+                    // application-cursor mode it expects SS3 (`ESC O A`);
+                    // sending CSI (`ESC [ A`) there silently fails, which
+                    // is why up/down line-navigation in the prompt did
+                    // nothing while modified arrows still worked.
+                    let app_cursor = self
+                        .ws
+                        .lock()
+                        .unwrap()
+                        .active()
+                        .and_then(|p| p.term())
+                        .map(|t| t.app_cursor)
+                        .unwrap_or(false);
+                    if app_cursor {
+                        format!("\x1bO{letter}").into_bytes()
+                    } else {
+                        format!("\x1b[{letter}").into_bytes()
+                    }
                 }
             }
             _ => match event.text.as_ref() {
@@ -7211,6 +7293,13 @@ impl App {
     fn gpu_overlay_snapshot(&self) -> GpuOverlay {
         let preedit_text = self.preedit.clone();
         let commit_overlay = self.commit_overlay.clone();
+        // Active pane's font multiplier — the overlay anchors to this same
+        // pane (see pane_origin below), so its cell size must match the
+        // pane's zoomed glyphs, not the base grid.
+        let pane_font_scale = self
+            .target_pane()
+            .and_then(|id| self.pane_font_scales.get(&id).copied())
+            .unwrap_or(1.0);
         let snap = {
             let ws = self.ws.lock().unwrap();
             // Active pane's top-left in cell units. When the workspace is
@@ -7317,6 +7406,7 @@ impl App {
             preedit_row,
             preedit_col,
             font_size: self.font_size,
+            font_scale: pane_font_scale,
             selection: self.selection,
             suggestion: self.current_suggestion.clone().unwrap_or_default(),
         }
@@ -7325,31 +7415,38 @@ impl App {
     /// Phase 2d overlays — pure free function on the snapshot so it
     /// doesn't fight a mutable borrow on `self.gpu`.
     fn paint_gpu_overlays(g: &mut gpu::GpuRenderer, ov: &GpuOverlay) {
+        // Effective cell size for THIS pane: base metric × pane zoom. The
+        // anchor (pad_x/pad_y) stays on the base grid because the pane's
+        // top-left lives there, but every per-column/row step must use the
+        // zoomed size or the cursor/preedit/selection drift right & down
+        // as the pane is shrunk.
+        let cw = ov.cell_w * ov.font_scale;
+        let ch = ov.cell_h * ov.font_scale;
         if ov.cursor_visible && ov.blink_on && ov.preedit.is_empty() {
-            let cx = ov.pad_x + ov.cursor_col as f32 * ov.cell_w;
-            let cy = ov.pad_y + ov.cursor_row as f32 * ov.cell_h;
+            let cx = ov.pad_x + ov.cursor_col as f32 * cw;
+            let cy = ov.pad_y + ov.cursor_row as f32 * ch;
             let mut c = cells::ITERM_CURSOR;
             c[3] = 140; // ~0.55 alpha
-            g.rect(cx, cy, ov.cell_w, ov.cell_h, c);
+            g.rect(cx, cy, cw, ch, c);
         }
         // Inline autosuggestion ghost text — dim, on the same baseline as
         // committed cells, starting at the cursor and clipped to the row's
         // right edge so it never wraps. Drawn only when not composing.
         if ov.preedit.is_empty() && !ov.suggestion.is_empty() {
-            let gx = ov.pad_x + ov.cursor_col as f32 * ov.cell_w;
-            let gy = ov.pad_y + ov.cursor_row as f32 * ov.cell_h;
+            let gx = ov.pad_x + ov.cursor_col as f32 * cw;
+            let gy = ov.pad_y + ov.cursor_row as f32 * ch;
             let max_cells = ov.cols.saturating_sub(ov.cursor_col) as u32;
             if max_cells > 0 {
-                g.draw_ghost(gx, gy, &ov.suggestion, max_cells);
+                g.draw_ghost(gx, gy, &ov.suggestion, max_cells, ov.font_scale);
             }
         }
         if !ov.preedit.is_empty() {
-            let px = ov.pad_x + ov.preedit_col as f32 * ov.cell_w;
-            let py = ov.pad_y + ov.preedit_row as f32 * ov.cell_h;
+            let px = ov.pad_x + ov.preedit_col as f32 * cw;
+            let py = ov.pad_y + ov.preedit_row as f32 * ch;
             // Route preedit through the cell-grid path so the composing
             // syllable sits on the same baseline as committed text
             // instead of floating above the row.
-            g.draw_preedit(px, py, &ov.preedit, cells::ITERM_CURSOR);
+            g.draw_preedit(px, py, &ov.preedit, cells::ITERM_CURSOR, ov.font_scale);
         }
         if let Some(sel) = ov.selection {
             let (start, stop) = if (sel.anchor.1, sel.anchor.0) <= (sel.end.1, sel.end.0) {
@@ -7359,22 +7456,22 @@ impl App {
             };
             let color = cells::ITERM_SELECTION;
             if start.1 == stop.1 {
-                let x = ov.pad_x + start.0 as f32 * ov.cell_w;
-                let y = ov.pad_y + start.1 as f32 * ov.cell_h;
-                let w = (stop.0 - start.0 + 1) as f32 * ov.cell_w;
-                g.rect(x, y, w, ov.cell_h, color);
+                let x = ov.pad_x + start.0 as f32 * cw;
+                let y = ov.pad_y + start.1 as f32 * ch;
+                let w = (stop.0 - start.0 + 1) as f32 * cw;
+                g.rect(x, y, w, ch, color);
             } else {
-                let x = ov.pad_x + start.0 as f32 * ov.cell_w;
-                let y = ov.pad_y + start.1 as f32 * ov.cell_h;
-                let row_w = (ov.cols - start.0) as f32 * ov.cell_w;
-                g.rect(x, y, row_w, ov.cell_h, color);
+                let x = ov.pad_x + start.0 as f32 * cw;
+                let y = ov.pad_y + start.1 as f32 * ch;
+                let row_w = (ov.cols - start.0) as f32 * cw;
+                g.rect(x, y, row_w, ch, color);
                 for r in (start.1 + 1)..stop.1 {
-                    let yy = ov.pad_y + r as f32 * ov.cell_h;
-                    g.rect(ov.pad_x, yy, ov.cols as f32 * ov.cell_w, ov.cell_h, color);
+                    let yy = ov.pad_y + r as f32 * ch;
+                    g.rect(ov.pad_x, yy, ov.cols as f32 * cw, ch, color);
                 }
-                let yy = ov.pad_y + stop.1 as f32 * ov.cell_h;
-                let last_w = (stop.0 + 1) as f32 * ov.cell_w;
-                g.rect(ov.pad_x, yy, last_w, ov.cell_h, color);
+                let yy = ov.pad_y + stop.1 as f32 * ch;
+                let last_w = (stop.0 + 1) as f32 * cw;
+                g.rect(ov.pad_x, yy, last_w, ch, color);
             }
         }
     }
@@ -7529,14 +7626,27 @@ impl App {
                 let (cols_now, rows_now) = if w_cells == 0 || h_cells == 0 {
                     (pty_cols, pty_rows)
                 } else {
-                    let inset_x_cells_now = (2.0 * PANE_INNER_X / self.cell.w.max(1.0))
-                        .ceil() as usize;
+                    // Mirror resize_backend EXACTLY: pane box in base-grid px,
+                    // minus real insets/header, divided by the ZOOMED cell.
+                    // The clip has to land on the same count the PTY was sized
+                    // to, or a zoomed-out pane (more cols/rows in the PTY) gets
+                    // truncated back to the base-grid count and the TUI's
+                    // layout tears.
+                    let fs = pane_scales
+                        .get(id.as_str())
+                        .copied()
+                        .unwrap_or(1.0)
+                        .max(0.1);
+                    let cw = self.cell.w.max(1.0);
+                    let ch = self.cell.h.max(1.0);
+                    let scaled_cw = cw * fs;
+                    let scaled_ch = ch * fs;
                     let header_px_now = if show_headers { PANE_HEADER_HEIGHT } else { 0.0 };
-                    let reserved_y_cells_now = ((header_px_now + 2.0 * PANE_INNER_Y)
-                        / self.cell.h.max(1.0))
-                        .ceil() as usize;
-                    let layout_cols = (w_cells as usize).saturating_sub(inset_x_cells_now);
-                    let layout_rows = (h_cells as usize).saturating_sub(reserved_y_cells_now);
+                    let usable_w = (w_cells as f32 * cw - 2.0 * PANE_INNER_X).max(scaled_cw);
+                    let usable_h =
+                        (h_cells as f32 * ch - header_px_now - 2.0 * PANE_INNER_Y).max(scaled_ch);
+                    let layout_cols = (usable_w / scaled_cw).floor() as usize;
+                    let layout_rows = (usable_h / scaled_ch).floor() as usize;
                     (layout_cols.min(pty_cols).max(1), layout_rows.min(pty_rows))
                 };
                 let normalise = |row: &Vec<GridCell>| -> Vec<GridCell> {
@@ -10412,21 +10522,21 @@ fn install_tmux_shim() {
         eprintln!("[shim] stage {shim_src:?} -> {target:?} failed: {e}");
         return;
     }
-    // Cross-pane RPC: stage cmux-compat next to the tmux shim so it is
+    // Cross-pane RPC: stage kasaterm-cli next to the tmux shim so it is
     // discoverable on the child shell's PATH. A pane can then run
-    // `cmux-compat send --surface %1 "..."` to drive a sibling pane
+    // `kasaterm-cli send --surface %1 "..."` to drive a sibling pane
     // without needing to know the absolute target/debug path. Failure
     // is non-fatal — the shim already works without it.
     if let Some(cmux_src) = locate_cmux_compat_binary() {
         let cmux_name = if cfg!(windows) {
-            "cmux-compat.exe"
+            "kasaterm-cli.exe"
         } else {
-            "cmux-compat"
+            "kasaterm-cli"
         };
         let cmux_target = shim_dir.join(cmux_name);
         let _ = std::fs::remove_file(&cmux_target);
         if let Err(e) = stage_shim(&cmux_src, &cmux_target) {
-            eprintln!("[shim] stage cmux-compat {cmux_src:?} -> {cmux_target:?} failed: {e}");
+            eprintln!("[shim] stage kasaterm-cli {cmux_src:?} -> {cmux_target:?} failed: {e}");
         }
     }
     // Drop `imgopen` / `mdopen` on the pane PATH so the user (or Claude) can
@@ -10724,7 +10834,7 @@ fn resolve_kasaterm_socket_path() -> String {
         })
 }
 
-/// Locate the cmux-compat binary so we can stage it alongside the
+/// Locate the kasaterm-cli binary so we can stage it alongside the
 /// tmux shim. Same lookup pattern as `locate_shim_binary` — env
 /// override first, then sibling of the current exe.
 fn locate_cmux_compat_binary() -> Option<std::path::PathBuf> {
@@ -10736,7 +10846,7 @@ fn locate_cmux_compat_binary() -> Option<std::path::PathBuf> {
     }
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
-    for name in ["cmux-compat.exe", "cmux-compat"] {
+    for name in ["kasaterm-cli.exe", "kasaterm-cli"] {
         let c = dir.join(name);
         if c.is_file() {
             return Some(c);

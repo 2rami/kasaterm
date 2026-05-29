@@ -160,7 +160,7 @@ fn handle_known(args: &[String]) -> Option<i32> {
         "list-panes" | "lsp" => {
             // claude code calls `list-panes -t @0 -F #{pane_id}` to
             // enumerate live panes. Query the real workspace via
-            // cmux-compat and print one surface id per line; fall back
+            // kasaterm-cli and print one surface id per line; fall back
             // to the canned mock output for any other format string.
             let format = args
                 .iter()
@@ -177,7 +177,7 @@ fn handle_known(args: &[String]) -> Option<i32> {
                         return Some(0);
                     }
                 }
-                // cmux-compat unreachable — still emit the focused pane
+                // kasaterm-cli unreachable — still emit the focused pane
                 // so a single-pane caller doesn't get an empty list.
                 let pane =
                     std::env::var("TMUX_PANE").unwrap_or_else(|_| "%0".to_string());
@@ -192,7 +192,7 @@ fn handle_known(args: &[String]) -> Option<i32> {
         // `tmux has-session [-t name]` — exit 0 means "yes it exists".
         "has-session" => Some(0),
         // Phase 2: route mutating commands to the kasaterm
-        // agent-socket via the cmux-compat binary staged next to us.
+        // agent-socket via the kasaterm-cli binary staged next to us.
         // `split-window`, `send-keys`, `select-pane` are the bare
         // minimum Claude Code's teammate-mode needs to spawn panes,
         // pump keystrokes, and bring a teammate to focus. Anything we
@@ -212,12 +212,12 @@ fn handle_known(args: &[String]) -> Option<i32> {
     }
 }
 
-/// Find the cmux-compat binary alongside us so the shim can spawn it
+/// Find the kasaterm-cli binary alongside us so the shim can spawn it
 /// without depending on PATH luck. install_tmux_shim drops it into the
 /// same dir that holds the tmux shim symlink and exports
 /// KASATERM_TMUX_SHIM_DIR.
 fn cmux_compat_path() -> Option<PathBuf> {
-    let exe = if cfg!(windows) { "cmux-compat.exe" } else { "cmux-compat" };
+    let exe = if cfg!(windows) { "kasaterm-cli.exe" } else { "kasaterm-cli" };
     // Primary lookup: env exported by install_tmux_shim.
     if let Ok(dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
         let p = PathBuf::from(dir).join(exe);
@@ -225,7 +225,7 @@ fn cmux_compat_path() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    // Fallback: cmux-compat staged next to us in the same dir. Covers
+    // Fallback: kasaterm-cli staged next to us in the same dir. Covers
     // standalone invocations where the env var isn't set.
     if let Ok(self_exe) = std::env::current_exe() {
         if let Some(parent) = self_exe.parent() {
@@ -240,10 +240,10 @@ fn cmux_compat_path() -> Option<PathBuf> {
 
 fn run_cmux_compat(args: &[&str]) -> Result<i32, String> {
     let path = cmux_compat_path()
-        .ok_or_else(|| "cmux-compat binary not found in KASATERM_TMUX_SHIM_DIR".to_string())?;
+        .ok_or_else(|| "kasaterm-cli binary not found in KASATERM_TMUX_SHIM_DIR".to_string())?;
     let mut cmd = Command::new(&path);
     cmd.args(args);
-    // Explicitly forward the socket env so cmux-compat doesn't fall
+    // Explicitly forward the socket env so kasaterm-cli doesn't fall
     // back to the platform default (`\\.\pipe\cmux` on Windows) when
     // a parent shell forgets — or refuses — to leak it on its own.
     if let Ok(sock) = std::env::var("KASATERM_SOCKET_PATH") {
@@ -252,12 +252,12 @@ fn run_cmux_compat(args: &[&str]) -> Result<i32, String> {
     if let Ok(sock) = std::env::var("CMUX_SOCKET_PATH") {
         cmd.env("CMUX_SOCKET_PATH", sock);
     }
-    let status = cmd.status().map_err(|e| format!("spawn cmux-compat: {e}"))?;
+    let status = cmd.status().map_err(|e| format!("spawn kasaterm-cli: {e}"))?;
     Ok(status.code().unwrap_or(1))
 }
 
 /// Map `tmux split-window [-h|-v] [-t target] ...` to
-/// `cmux-compat split <direction>`. tmux's -h means "horizontal split"
+/// `kasaterm-cli split <direction>`. tmux's -h means "horizontal split"
 /// = side-by-side (cmux `right`); -v means stacked (cmux `down`).
 /// Defaults to `down` to mirror tmux's own default for a flag-less
 /// `split-window`.
@@ -276,7 +276,7 @@ fn route_split_window(args: &[String]) -> i32 {
     };
     // tmux `-P` flag asks for the new pane's info to be printed; the
     // `-F #{pane_id}` format claude code's teammate-mode uses wants the
-    // pane id alone. cmux-compat speaks JSON, so capture stdout, fish
+    // pane id alone. kasaterm-cli speaks JSON, so capture stdout, fish
     // out `"id":"%N"` from the response, and emit just that. Without
     // this the JSON object ends up substituted into every follow-up
     // `-t ...` target.
@@ -284,7 +284,7 @@ fn route_split_window(args: &[String]) -> i32 {
     let path = match cmux_compat_path() {
         Some(p) => p,
         None => {
-            eprintln!("[tmux-shim] split-window: cmux-compat binary not found");
+            eprintln!("[tmux-shim] split-window: kasaterm-cli binary not found");
             return 1;
         }
     };
@@ -310,7 +310,7 @@ fn route_split_window(args: &[String]) -> i32 {
     output.status.code().unwrap_or(1)
 }
 
-/// Pull a `"id":"%N"` value out of a cmux-compat JSON response.
+/// Pull a `"id":"%N"` value out of a kasaterm-cli JSON response.
 /// Lightweight by design — we only need this one shape so a real
 /// serde_json dependency isn't worth the build-time hit on the shim.
 fn extract_surface_id(s: &str) -> Option<String> {
@@ -324,7 +324,7 @@ fn extract_surface_id(s: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-/// Pull every `%N`-shaped id out of a cmux-compat `list surfaces`
+/// Pull every `%N`-shaped id out of a kasaterm-cli `list surfaces`
 /// response. Mirrors `extract_surface_id`'s pragmatic string-search
 /// instead of pulling in serde_json.
 fn extract_all_surface_ids(s: &str) -> Vec<String> {
@@ -347,7 +347,7 @@ fn extract_all_surface_ids(s: &str) -> Vec<String> {
 }
 
 /// Map `tmux send-keys [-t target] <key-or-text>...` to a sequence of
-/// `cmux-compat send` / `key` calls. tmux send-keys is variadic: each
+/// `kasaterm-cli send` / `key` calls. tmux send-keys is variadic: each
 /// non-flag arg is either a literal string or a key name (Enter,
 /// C-c, etc.). We forward each accordingly so a typical
 /// `send-keys -t %1 "ls -al" C-m` becomes `send --surface %1 "ls -al"`
@@ -456,7 +456,7 @@ fn unwrap_outer_single_quotes(s: &str) -> String {
     s.to_string()
 }
 
-/// Translate tmux's key names into the cmux-compat `key` vocabulary.
+/// Translate tmux's key names into the kasaterm-cli `key` vocabulary.
 /// Returns None when the argument is a literal text fragment (no
 /// translation needed — caller forwards it as `send`).
 fn map_tmux_key(s: &str) -> Option<&'static str> {
@@ -474,7 +474,7 @@ fn map_tmux_key(s: &str) -> Option<&'static str> {
     }
 }
 
-/// `tmux select-pane -t <id>` → `cmux-compat focus <id>`. Tmux also
+/// `tmux select-pane -t <id>` → `kasaterm-cli focus <id>`. Tmux also
 /// accepts -L/-R/-U/-D for directional focus; we don't have a
 /// directional focus RPC yet, so log+0 those.
 fn route_select_pane(args: &[String]) -> i32 {
@@ -517,7 +517,7 @@ fn route_select_pane(args: &[String]) -> i32 {
     }
 }
 
-/// Map `tmux swap-pane -s <src> -t <dst>` to `cmux-compat swap <src>
+/// Map `tmux swap-pane -s <src> -t <dst>` to `kasaterm-cli swap <src>
 /// <dst>` so panes can trade places through the socket.
 fn route_swap_pane(args: &[String]) -> i32 {
     let args = if args.first().map(String::as_str) == Some("swap-pane") {
@@ -548,7 +548,7 @@ fn route_swap_pane(args: &[String]) -> i32 {
     }
 }
 
-/// Map `tmux kill-pane -t <target>` to `cmux-compat close <target>` so
+/// Map `tmux kill-pane -t <target>` to `kasaterm-cli close <target>` so
 /// a teammate (or any shell) can tear down a pane through the socket.
 fn route_kill_pane(args: &[String]) -> i32 {
     let args = if args.first().map(String::as_str) == Some("kill-pane") {
