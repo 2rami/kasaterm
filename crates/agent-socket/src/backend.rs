@@ -190,6 +190,11 @@ pub trait Backend: Send + Sync {
     fn new_session(&self) -> Result<()> {
         anyhow::bail!("new_session not supported")
     }
+    /// Create a fresh window in the current session and switch to it. Default
+    /// unsupported.
+    fn new_window(&self) -> Result<()> {
+        anyhow::bail!("new_window not supported")
+    }
     /// Close the session at index `idx`. Backends must keep at least one
     /// session alive (closing the last is rejected). Default unsupported.
     fn close_session(&self, _idx: usize) -> Result<()> {

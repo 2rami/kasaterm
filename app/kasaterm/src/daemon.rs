@@ -1,13 +1,15 @@
-//! Headless daemon process: owns every PtySession + the BSP layout tree,
-//! serves the JSON-RPC control socket and the bincode stream socket, and
-//! outlives the GUI so shells / claude / vim keep running across GUI
-//! restarts.
+//! Headless daemon process: owns every PtySession + the full session>window>
+//! pane structure, serves the JSON-RPC control socket and the bincode stream
+//! socket, and outlives the GUI so shells / claude / vim keep running across
+//! GUI restarts.
 //!
-//! Multi-pane (M3): the daemon is the layout authority. split/close/focus
-//! mutate the tree here and broadcast a `StreamMsg::Layout` to the attached
-//! GUI; per-pane screen frames are multiplexed onto the same stream. Every
-//! pane's screen channel is forwarded into one shared mpsc that the pump
-//! drains, so a single writer owns the stream socket.
+//! The daemon is the authority for layout AND for sessions/windows: split/
+//! close/focus/new/switch mutate the tree here and broadcast a
+//! `StreamMsg::State` (the whole structure) to the attached GUI. Per-pane
+//! screen frames are multiplexed onto the same stream — every pane's screen
+//! channel is forwarded into one shared mpsc the pump drains, so a single
+//! writer owns the stream socket. pane_id is allocated here (single source of
+//! truth) so the GUI never collides.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,76 +38,24 @@ struct PaneMeta {
     session_id: Option<String>,
 }
 
-/// `<control-socket>.state` — where the daemon persists its layout + pane
-/// cwds/claude sessions so a *daemon* restart (crash, machine reboot) can
-/// rebuild the workspace. A live detach/reattach never needs this; it's the
-/// floor for when the daemon process itself dies.
-fn daemon_state_path(control: &Path) -> PathBuf {
-    let mut s = control.as_os_str().to_os_string();
-    s.push(".state");
-    PathBuf::from(s)
-}
-
-/// Snapshot the layout tree + each pane's restore record to disk.
-fn save_daemon_state(state: &DaemonState, path: &Path) {
-    let layout_v = serde_json::to_value(&*state.layout.lock().unwrap()).unwrap_or(Value::Null);
-    let mut panes = serde_json::Map::new();
-    for (id, sess) in state.pty.lock().unwrap().iter() {
-        panes.insert(id.clone(), pane_record(sess));
-    }
-    let doc = json!({ "layout": layout_v, "panes": Value::Object(panes) });
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(path, doc.to_string());
-}
-
-/// Read back a saved daemon state: the BSP tree + per-pane metadata. None if
-/// the file is absent or unparseable (caller falls back to a single pane).
-fn load_daemon_state(path: &Path) -> Option<(PtyLayout, HashMap<String, PaneMeta>)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    let layout: PtyLayout = serde_json::from_value(v.get("layout")?.clone()).ok()?;
-    let mut metas = HashMap::new();
-    if let Some(panes) = v.get("panes").and_then(|p| p.as_object()) {
-        for (id, m) in panes {
-            metas.insert(
-                id.clone(),
-                PaneMeta {
-                    cwd: m.get("cwd").and_then(|x| x.as_str()).map(String::from),
-                    was_claude: m.get("was_claude").and_then(|x| x.as_bool()).unwrap_or(false),
-                    session_id: m.get("session_id").and_then(|x| x.as_str()).map(String::from),
-                },
-            );
-        }
-    }
-    Some((layout, metas))
-}
-
-/// After a restored claude pane's shell is ready, inject `claude --resume
-/// <id>` (or `--continue`) so the conversation picks up where it left off.
-fn schedule_claude_resume(sess: Arc<PtySession>, session_id: Option<String>) {
-    std::thread::spawn(move || {
-        // Wait out the shell's rc files so the command lands at a prompt.
-        std::thread::sleep(Duration::from_millis(1500));
-        let cmd = match session_id {
-            Some(id) => format!("claude --resume {id}\n"),
-            None => "claude --continue\n".to_string(),
-        };
-        let _ = sess.send_bytes(cmd.as_bytes());
-    });
+/// One session the daemon hosts: its windows (each a BSP tree) + which is
+/// active. All panes across all sessions live in the one global `pty` map.
+struct DaemonSession {
+    windows: Vec<PtyLayout>,
+    active_window: usize,
 }
 
 struct DaemonState {
     pty: Mutex<HashMap<String, Arc<PtySession>>>,
-    layout: Mutex<PtyLayout>,
+    sessions: Mutex<Vec<DaemonSession>>,
+    active_session: Mutex<usize>,
     next_id: Mutex<u32>,
     /// Active pane — split targets it, send_*/scroll default to it.
     active: Mutex<String>,
-    /// The currently-attached GUI's frame sink (single attach in M3; a Vec
+    /// The currently-attached GUI's frame sink (single attach for now; a Vec
     /// would make this multi-attach).
     subscriber: Mutex<Option<LocalStream>>,
-    /// Every pane forwarder + every layout broadcast feeds this; the pump
+    /// Every pane forwarder + every state broadcast feeds this; the pump
     /// drains it and writes to the subscriber. One writer for the socket.
     out_tx: Sender<StreamMsg>,
 }
@@ -125,23 +75,127 @@ impl DaemonState {
         }
     }
 
-    /// Current structure as a StateView. Single session/window for now —
-    /// multi-session lands in a follow-up; the wire shape already supports it.
+    fn alloc_id(&self) -> String {
+        let mut n = self.next_id.lock().unwrap();
+        *n += 1;
+        format!("%{}", *n)
+    }
+
+    /// Mutate the active session's active-window layout, if any.
+    fn with_active_layout<R>(&self, f: impl FnOnce(&mut PtyLayout) -> R) -> Option<R> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let asx = *self.active_session.lock().unwrap();
+        let sess = sessions.get_mut(asx)?;
+        let aw = sess.active_window;
+        sess.windows.get_mut(aw).map(f)
+    }
+
+    /// Leaf pane ids in the active session's active window.
+    fn active_window_leaves(&self) -> Vec<String> {
+        let sessions = self.sessions.lock().unwrap();
+        let asx = *self.active_session.lock().unwrap();
+        sessions
+            .get(asx)
+            .and_then(|s| s.windows.get(s.active_window))
+            .map(|w| w.leaves().iter().map(|l| l.to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Point `active` at the active window's first leaf (after switch/close).
+    fn update_active_pane(&self) {
+        if let Some(first) = self.active_window_leaves().into_iter().next() {
+            *self.active.lock().unwrap() = first;
+        }
+    }
+
+    /// Remove a pane from whichever window holds it, dropping a window that
+    /// becomes empty and a session whose windows all went away. Fixes up the
+    /// active indices. Returns true when no sessions remain.
+    fn remove_pane(&self, pane_id: &str) -> bool {
+        let mut sessions = self.sessions.lock().unwrap();
+        for s in sessions.iter_mut() {
+            s.windows.retain_mut(|w| {
+                let lv = w.leaves();
+                let only = lv.len() == 1 && lv[0] == pane_id;
+                let has = lv.iter().any(|&l| l == pane_id);
+                if only {
+                    false // window held just this pane → drop the window
+                } else {
+                    if has {
+                        w.remove_leaf(pane_id);
+                    }
+                    true
+                }
+            });
+            if s.active_window >= s.windows.len() && !s.windows.is_empty() {
+                s.active_window = s.windows.len() - 1;
+            }
+        }
+        sessions.retain(|s| !s.windows.is_empty());
+        let mut asx = self.active_session.lock().unwrap();
+        if *asx >= sessions.len() && !sessions.is_empty() {
+            *asx = sessions.len() - 1;
+        }
+        sessions.is_empty()
+    }
+
+    /// Push a full snapshot of every pane in the active window — used after a
+    /// switch so the GUI repaints the now-visible window.
+    fn push_active_snapshots(&self) {
+        let leaves = self.active_window_leaves();
+        let pty = self.pty.lock().unwrap();
+        for id in leaves {
+            if let Some(s) = pty.get(&id) {
+                let _ = self.out_tx.send(StreamMsg::Frame(s.full_snapshot()));
+            }
+        }
+    }
+
     fn state_view(&self) -> StateView {
-        let lay = self.layout.lock().unwrap().clone();
-        let label = lay.leaves().first().map(|s| s.to_string()).unwrap_or_default();
+        let sessions = self.sessions.lock().unwrap();
+        let pty = self.pty.lock().unwrap();
+        let views: Vec<SessionView> = sessions
+            .iter()
+            .map(|s| {
+                // Label = active window's first pane's cwd basename.
+                let label = s
+                    .windows
+                    .get(s.active_window)
+                    .and_then(|w| w.leaves().first().map(|l| l.to_string()))
+                    .and_then(|id| pty.get(&id).and_then(|p| p.shell_pid()).and_then(pid_cwd))
+                    .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+                    .unwrap_or_default();
+                SessionView {
+                    windows: s
+                        .windows
+                        .iter()
+                        .map(|w| WindowView { layout: w.clone() })
+                        .collect(),
+                    active_window: s.active_window,
+                    label,
+                }
+            })
+            .collect();
         StateView {
-            sessions: vec![SessionView {
-                windows: vec![WindowView { layout: lay }],
-                active_window: 0,
-                label,
-            }],
-            active_session: 0,
+            sessions: views,
+            active_session: *self.active_session.lock().unwrap(),
         }
     }
 
     fn broadcast_state(&self) {
         let _ = self.out_tx.send(StreamMsg::State(self.state_view()));
+    }
+
+    /// cwd of the active pane (for inheriting into a split/new window/session).
+    fn active_cwd(&self) -> Option<String> {
+        let active = self.active.lock().unwrap().clone();
+        self.pty
+            .lock()
+            .unwrap()
+            .get(&active)
+            .and_then(|s| s.shell_pid())
+            .and_then(pid_cwd)
+            .map(|p| p.to_string_lossy().into_owned())
     }
 }
 
@@ -158,11 +212,7 @@ fn spawn_forwarder(screens: ScreenReceiver<ScreenUpdate>, out: Sender<StreamMsg>
 
 /// Spawn a fresh pane shell with an inherited cwd, register its forwarder, and
 /// insert it into the pty map. Returns the new session.
-fn spawn_pane(
-    state: &DaemonState,
-    pane_id: &str,
-    cwd: Option<String>,
-) -> Result<Arc<PtySession>> {
+fn spawn_pane(state: &DaemonState, pane_id: &str, cwd: Option<String>) -> Result<Arc<PtySession>> {
     let sess = Arc::new(PtySession::start(PtyOptions {
         shell: None,
         cwd,
@@ -193,12 +243,12 @@ impl Backend for DaemonBackend {
         Ok(Some(WorkspaceInfo { id: WS_ID.into(), name: "kasaterm".into() }))
     }
     fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> {
-        let lay = self.state.layout.lock().unwrap();
-        Ok(lay
-            .leaves()
+        Ok(self
+            .state
+            .active_window_leaves()
             .into_iter()
             .map(|id| SurfaceInfo {
-                id: id.to_string(),
+                id,
                 workspace_id: WS_ID.into(),
                 title: None,
             })
@@ -213,27 +263,12 @@ impl Backend for DaemonBackend {
             SplitDirection::Left | SplitDirection::Right => SplitDir::Horizontal,
             SplitDirection::Up | SplitDirection::Down => SplitDir::Vertical,
         };
-        let new_id = {
-            let mut n = self.state.next_id.lock().unwrap();
-            *n += 1;
-            format!("%{}", *n)
-        };
+        let new_id = self.state.alloc_id();
         let active = self.state.active.lock().unwrap().clone();
-        // Inherit the active pane's cwd so a split lands in the same project.
-        let cwd = self
-            .state
-            .pty
-            .lock()
-            .unwrap()
-            .get(&active)
-            .and_then(|s| s.shell_pid())
-            .and_then(pid_cwd)
-            .map(|p| p.to_string_lossy().into_owned());
+        let cwd = self.state.active_cwd();
         spawn_pane(&self.state, &new_id, cwd)?;
-        {
-            let mut lay = self.state.layout.lock().unwrap();
-            lay.split_leaf(&active, axis, new_id.clone());
-        }
+        self.state
+            .with_active_layout(|lay| lay.split_leaf(&active, axis, new_id.clone()));
         *self.state.active.lock().unwrap() = new_id.clone();
         self.state.broadcast_state();
         Ok(SurfaceInfo {
@@ -243,16 +278,9 @@ impl Backend for DaemonBackend {
         })
     }
     fn close_surface(&self, surface_id: &str) -> Result<()> {
-        // Dropping the Arc kills the shell.
-        self.state.pty.lock().unwrap().remove(surface_id);
-        {
-            let mut lay = self.state.layout.lock().unwrap();
-            lay.remove_leaf(surface_id);
-        }
-        // Re-point active at a surviving leaf.
-        if let Some(first) = self.state.layout.lock().unwrap().leaves().first() {
-            *self.state.active.lock().unwrap() = first.to_string();
-        }
+        self.state.pty.lock().unwrap().remove(surface_id); // drop = kill
+        self.state.remove_pane(surface_id);
+        self.state.update_active_pane();
         self.state.broadcast_state();
         Ok(())
     }
@@ -287,23 +315,221 @@ impl Backend for DaemonBackend {
             .scroll(lines);
         Ok(())
     }
+    fn new_session(&self) -> Result<()> {
+        let new_id = self.state.alloc_id();
+        let cwd = self.state.active_cwd();
+        spawn_pane(&self.state, &new_id, cwd)?;
+        {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            sessions.push(DaemonSession {
+                windows: vec![PtyLayout::single(new_id.clone())],
+                active_window: 0,
+            });
+            *self.state.active_session.lock().unwrap() = sessions.len() - 1;
+        }
+        *self.state.active.lock().unwrap() = new_id;
+        self.state.broadcast_state();
+        self.state.push_active_snapshots();
+        Ok(())
+    }
+    fn new_window(&self) -> Result<()> {
+        let new_id = self.state.alloc_id();
+        let cwd = self.state.active_cwd();
+        spawn_pane(&self.state, &new_id, cwd)?;
+        {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            let asx = *self.state.active_session.lock().unwrap();
+            if let Some(s) = sessions.get_mut(asx) {
+                s.windows.push(PtyLayout::single(new_id.clone()));
+                s.active_window = s.windows.len() - 1;
+            }
+        }
+        *self.state.active.lock().unwrap() = new_id;
+        self.state.broadcast_state();
+        self.state.push_active_snapshots();
+        Ok(())
+    }
+    fn switch_session(&self, idx: usize) -> Result<()> {
+        {
+            let sessions = self.state.sessions.lock().unwrap();
+            if idx >= sessions.len() {
+                anyhow::bail!("session index {idx} out of range");
+            }
+        }
+        *self.state.active_session.lock().unwrap() = idx;
+        self.state.update_active_pane();
+        self.state.broadcast_state();
+        self.state.push_active_snapshots();
+        Ok(())
+    }
+    fn switch_window(&self, idx: usize) -> Result<()> {
+        {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            let asx = *self.state.active_session.lock().unwrap();
+            let s = sessions
+                .get_mut(asx)
+                .ok_or_else(|| anyhow!("no active session"))?;
+            if idx >= s.windows.len() {
+                anyhow::bail!("window index {idx} out of range");
+            }
+            s.active_window = idx;
+        }
+        self.state.update_active_pane();
+        self.state.broadcast_state();
+        self.state.push_active_snapshots();
+        Ok(())
+    }
+    fn close_session(&self, idx: usize) -> Result<()> {
+        let killed: Vec<String> = {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            if sessions.len() <= 1 {
+                anyhow::bail!("can't close the last session");
+            }
+            if idx >= sessions.len() {
+                anyhow::bail!("session index {idx} out of range");
+            }
+            let removed = sessions.remove(idx);
+            let mut asx = self.state.active_session.lock().unwrap();
+            if *asx >= sessions.len() {
+                *asx = sessions.len() - 1;
+            } else if *asx > idx {
+                *asx -= 1;
+            }
+            removed
+                .windows
+                .iter()
+                .flat_map(|w| w.leaves().iter().map(|l| l.to_string()).collect::<Vec<_>>())
+                .collect()
+        };
+        {
+            let mut pty = self.state.pty.lock().unwrap();
+            for id in &killed {
+                pty.remove(id); // drop = kill
+            }
+        }
+        self.state.update_active_pane();
+        self.state.broadcast_state();
+        self.state.push_active_snapshots();
+        Ok(())
+    }
 }
 
 /// Send the full attach handshake to a freshly-connected GUI: the structure
 /// first (so the GUI knows the session/window/pane layout), then one full
-/// snapshot per pane. Returns false if the peer dropped mid-handshake.
+/// snapshot per pane in the active window. Returns false if the peer dropped.
 fn send_handshake(state: &DaemonState, stream: &mut LocalStream) -> bool {
     if write_msg(stream, &StreamMsg::State(state.state_view())).is_err() {
         return false;
     }
-    let panes: Vec<Arc<PtySession>> =
-        state.pty.lock().unwrap().values().cloned().collect();
-    for s in panes {
-        if write_msg(stream, &StreamMsg::Frame(s.full_snapshot())).is_err() {
-            return false;
+    let leaves = state.active_window_leaves();
+    let pty = state.pty.lock().unwrap();
+    for id in leaves {
+        if let Some(s) = pty.get(&id) {
+            if write_msg(stream, &StreamMsg::Frame(s.full_snapshot())).is_err() {
+                return false;
+            }
         }
     }
     true
+}
+
+/// `<control-socket>.state` — where the daemon persists its structure so a
+/// *daemon* restart (crash, machine reboot) can rebuild the workspace. A live
+/// detach/reattach never needs this.
+fn daemon_state_path(control: &Path) -> PathBuf {
+    let mut s = control.as_os_str().to_os_string();
+    s.push(".state");
+    PathBuf::from(s)
+}
+
+/// Snapshot the full structure + each pane's restore record to disk.
+fn save_daemon_state(state: &DaemonState, path: &Path) {
+    let sessions_json: Vec<Value> = {
+        let sessions = state.sessions.lock().unwrap();
+        sessions
+            .iter()
+            .map(|s| {
+                let windows: Vec<Value> = s
+                    .windows
+                    .iter()
+                    .filter_map(|w| serde_json::to_value(w).ok())
+                    .collect();
+                json!({ "active_window": s.active_window, "windows": windows })
+            })
+            .collect()
+    };
+    let mut panes = serde_json::Map::new();
+    for (id, sess) in state.pty.lock().unwrap().iter() {
+        panes.insert(id.clone(), pane_record(sess));
+    }
+    let doc = json!({
+        "active_session": *state.active_session.lock().unwrap(),
+        "sessions": sessions_json,
+        "panes": Value::Object(panes),
+    });
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, doc.to_string());
+}
+
+/// Read back saved daemon state: sessions/windows + active index + per-pane
+/// metadata. None if absent/unparseable (caller starts one fresh pane).
+fn load_daemon_state(
+    path: &Path,
+) -> Option<(Vec<DaemonSession>, usize, HashMap<String, PaneMeta>)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let active_session = v.get("active_session").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+    let sessions: Vec<DaemonSession> = v
+        .get("sessions")?
+        .as_array()?
+        .iter()
+        .filter_map(|s| {
+            let active_window = s.get("active_window").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+            let windows: Vec<PtyLayout> = s
+                .get("windows")?
+                .as_array()?
+                .iter()
+                .filter_map(|w| serde_json::from_value::<PtyLayout>(w.clone()).ok())
+                .collect();
+            if windows.is_empty() {
+                return None;
+            }
+            Some(DaemonSession { windows, active_window })
+        })
+        .collect();
+    if sessions.is_empty() {
+        return None;
+    }
+    let mut metas = HashMap::new();
+    if let Some(panes) = v.get("panes").and_then(|p| p.as_object()) {
+        for (id, m) in panes {
+            metas.insert(
+                id.clone(),
+                PaneMeta {
+                    cwd: m.get("cwd").and_then(|x| x.as_str()).map(String::from),
+                    was_claude: m.get("was_claude").and_then(|x| x.as_bool()).unwrap_or(false),
+                    session_id: m.get("session_id").and_then(|x| x.as_str()).map(String::from),
+                },
+            );
+        }
+    }
+    let active_session = active_session.min(sessions.len() - 1);
+    Some((sessions, active_session, metas))
+}
+
+/// After a restored claude pane's shell is ready, inject `claude --resume
+/// <id>` (or `--continue`) so the conversation picks up where it left off.
+fn schedule_claude_resume(sess: Arc<PtySession>, session_id: Option<String>) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        let cmd = match session_id {
+            Some(id) => format!("claude --resume {id}\n"),
+            None => "claude --continue\n".to_string(),
+        };
+        let _ = sess.send_bytes(cmd.as_bytes());
+    });
 }
 
 /// Run the headless daemon to completion. Returns when the last pane exits or
@@ -314,10 +540,18 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
     let (out_tx, out_rx) = mpsc::channel::<StreamMsg>();
     let state_path = daemon_state_path(&control_path);
 
-    // Restore the saved layout if the daemon ran before; else one fresh pane.
-    let (layout, metas) =
-        load_daemon_state(&state_path).unwrap_or_else(|| (PtyLayout::single(PANE_0), HashMap::new()));
-    let leaves: Vec<String> = layout.leaves().iter().map(|s| s.to_string()).collect();
+    // Restore the saved structure if the daemon ran before; else one session
+    // with one fresh pane.
+    let (sessions, active_session, metas) = load_daemon_state(&state_path).unwrap_or_else(|| {
+        (
+            vec![DaemonSession {
+                windows: vec![PtyLayout::single(PANE_0)],
+                active_window: 0,
+            }],
+            0,
+            HashMap::new(),
+        )
+    });
     let default_cwd = std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
@@ -325,40 +559,50 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
     let mut map = HashMap::new();
     let mut max_id = 0u32;
     let mut resumes: Vec<(Arc<PtySession>, Option<String>)> = Vec::new();
-    for leaf in &leaves {
-        let meta = metas.get(leaf);
-        let cwd = meta.and_then(|m| m.cwd.clone()).or_else(|| default_cwd.clone());
-        let sess = Arc::new(PtySession::start(PtyOptions {
-            shell: None,
-            cwd,
-            cols: 80,
-            rows: 24,
-            env: Vec::new(),
-            pane_id: leaf.clone(),
-            initial_scrollback: Vec::new(),
-        })?);
-        spawn_forwarder(sess.screens.clone(), out_tx.clone());
-        if let Some(m) = meta {
-            if m.was_claude {
-                resumes.push((sess.clone(), m.session_id.clone()));
+    for s in &sessions {
+        for w in &s.windows {
+            for leaf in w.leaves() {
+                let meta = metas.get(leaf);
+                let cwd = meta.and_then(|m| m.cwd.clone()).or_else(|| default_cwd.clone());
+                let sess = Arc::new(PtySession::start(PtyOptions {
+                    shell: None,
+                    cwd,
+                    cols: 80,
+                    rows: 24,
+                    env: Vec::new(),
+                    pane_id: leaf.to_string(),
+                    initial_scrollback: Vec::new(),
+                })?);
+                spawn_forwarder(sess.screens.clone(), out_tx.clone());
+                if let Some(m) = meta {
+                    if m.was_claude {
+                        resumes.push((sess.clone(), m.session_id.clone()));
+                    }
+                }
+                if let Some(n) = leaf.strip_prefix('%').and_then(|s| s.parse::<u32>().ok()) {
+                    max_id = max_id.max(n);
+                }
+                map.insert(leaf.to_string(), sess);
             }
         }
-        if let Some(n) = leaf.strip_prefix('%').and_then(|s| s.parse::<u32>().ok()) {
-            max_id = max_id.max(n);
-        }
-        map.insert(leaf.clone(), sess);
     }
-    let active = leaves.first().cloned().unwrap_or_else(|| PANE_0.to_string());
+    // Active pane = active session's active window's first leaf.
+    let active = sessions
+        .get(active_session)
+        .and_then(|s| s.windows.get(s.active_window))
+        .and_then(|w| w.leaves().first().map(|l| l.to_string()))
+        .unwrap_or_else(|| PANE_0.to_string());
+
     let state = Arc::new(DaemonState {
         pty: Mutex::new(map),
-        layout: Mutex::new(layout),
+        sessions: Mutex::new(sessions),
+        active_session: Mutex::new(active_session),
         next_id: Mutex::new(max_id),
         active: Mutex::new(active),
         subscriber: Mutex::new(None),
         out_tx,
     });
 
-    // Kick off `claude --resume` on every restored claude pane.
     for (sess, id) in resumes {
         schedule_claude_resume(sess, id);
     }
@@ -403,11 +647,8 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         };
         if let StreamMsg::Frame(u) = &msg {
             if u.eof {
-                let empty = {
-                    state.pty.lock().unwrap().remove(&u.pane_id);
-                    state.layout.lock().unwrap().remove_leaf(&u.pane_id);
-                    state.pty.lock().unwrap().is_empty()
-                };
+                state.pty.lock().unwrap().remove(&u.pane_id);
+                let empty = state.remove_pane(&u.pane_id);
                 // Forward the EOF so the GUI reaps its pane.
                 if let Some(st) = state.subscriber.lock().unwrap().as_mut() {
                     let _ = write_msg(st, &msg);
@@ -415,10 +656,7 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
                 if empty {
                     break;
                 }
-                // Re-point active and tell the GUI the new tree.
-                if let Some(first) = state.layout.lock().unwrap().leaves().first() {
-                    *state.active.lock().unwrap() = first.to_string();
-                }
+                state.update_active_pane();
                 state.broadcast_state();
                 continue;
             }
