@@ -17,7 +17,7 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_socket::backend::{Backend, SplitDirection, SurfaceInfo, WorkspaceInfo};
+use agent_socket::backend::{Backend, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo};
 use agent_socket::transport::{LocalListener, LocalStream};
 use agent_socket::Server;
 use anyhow::{anyhow, Result};
@@ -314,6 +314,13 @@ impl Backend for DaemonBackend {
             .ok_or_else(|| anyhow!("no pane to scroll"))?
             .scroll(lines);
         Ok(())
+    }
+    fn sessions(&self) -> SessionsInfo {
+        SessionsInfo {
+            count: self.state.sessions.lock().unwrap().len(),
+            active: *self.state.active_session.lock().unwrap(),
+            saved: Vec::new(),
+        }
     }
     fn new_session(&self) -> Result<()> {
         let new_id = self.state.alloc_id();
@@ -619,9 +626,17 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         });
     }
 
-    // Control socket (JSON-RPC) on its own background threads.
+    // Control socket (JSON-RPC) + the kasaspace-mcp HTTP server (so the GUI's
+    // session-panel webview, which polls 127.0.0.1:8765/sessions, sees the
+    // daemon's sessions instead of the GUI's empty in-process backend).
+    let backend: Arc<dyn Backend> = Arc::new(DaemonBackend { state: state.clone() });
+    let mcp_port = std::env::var("KASASPACE_MCP_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8765);
+    let _ = kasaspace_mcp::spawn_http_server(backend.clone(), mcp_port);
     let server = Server::bind(control_path.clone())?;
-    let _ctrl = server.spawn(Arc::new(DaemonBackend { state: state.clone() }));
+    let _ctrl = server.spawn(backend);
 
     // Stream socket: accept a GUI, send the attach handshake, register it.
     let spath = stream_path(&control_path);
