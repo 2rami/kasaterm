@@ -125,6 +125,22 @@ pub trait Backend: Send + Sync {
     fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo>;
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()>;
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()>;
+    /// Send raw bytes straight to a surface's PTY (no symbolic-key mapping).
+    /// The GUI client forwards key input to a daemon-hosted pane this way so
+    /// escapes/UTF-8/control bytes pass through verbatim. Default unsupported.
+    fn send_raw(&self, _surface_id: Option<&str>, _bytes: &[u8]) -> Result<()> {
+        anyhow::bail!("send_raw unsupported by this backend")
+    }
+    /// Resize a surface's PTY grid to cols×rows (drives SIGWINCH). Default
+    /// unsupported.
+    fn resize_surface(&self, _surface_id: &str, _cols: u16, _rows: u16) -> Result<()> {
+        anyhow::bail!("resize_surface unsupported by this backend")
+    }
+    /// Scroll a surface's scrollback by `lines` (negative = toward older
+    /// history). Default unsupported.
+    fn scroll_surface(&self, _surface_id: &str, _lines: i32) -> Result<()> {
+        anyhow::bail!("scroll_surface unsupported by this backend")
+    }
     /// Close (kill) a surface by id. Removes its leaf from the layout.
     /// Default: unsupported — layout-managing backends (PTY) override it.
     fn close_surface(&self, _surface_id: &str) -> Result<()> {
@@ -233,5 +249,16 @@ pub trait Backend: Send + Sync {
     /// it. Default unsupported.
     fn peek(&self, _surface_id: &str, _lines: usize) -> Result<String> {
         anyhow::bail!("peek not supported")
+    }
+
+    /// Register a pane's claude-code transcript file (the
+    /// `~/.claude/projects/<cwd>/<session>.jsonl` it streams to) so the
+    /// host can tail it and auto-fill that pane's board activity from the
+    /// tool_use calls inside — no manual `announce` needed. Called by a
+    /// SessionStart/PreToolUse hook that knows both the `transcript_path`
+    /// (from its stdin) and the pane id (from `$KASATERM_PANE_ID`).
+    /// Default unsupported.
+    fn bind_transcript(&self, _surface_id: &str, _path: &str) -> Result<()> {
+        anyhow::bail!("bind_transcript not supported")
     }
 }

@@ -18,7 +18,7 @@
 
 use tmux_bridge::layout::Layout;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SplitDir {
     /// Children laid out left-to-right (vertical divider line).
     Horizontal,
@@ -26,7 +26,7 @@ pub enum SplitDir {
     Vertical,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum PtyLayout {
     Leaf {
         pane_id: String,

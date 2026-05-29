@@ -8,3 +8,4 @@ license.workspace = true
 vt100.workspace = true
 crossbeam-channel.workspace = true
 anyhow.workspace = true
+serde.workspace = true

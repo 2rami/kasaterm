@@ -443,6 +443,15 @@ impl PtySession {
         let _ = self.screens_tx.try_send(update);
     }
 
+    /// Build a full-grid ScreenUpdate (every row) without touching the live
+    /// channel — the daemon calls this on attach to seed a freshly-connected
+    /// GUI with the complete current screen before live dirty frames resume.
+    pub fn full_snapshot(&self) -> ScreenUpdate {
+        let (cols, rows) = *self.size.lock().unwrap();
+        let mut t = self.term.lock().unwrap();
+        snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true)
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         // Propagate the new size into both the kernel-side PTY (so the
         // child sees SIGWINCH) and our local Term state (so cell

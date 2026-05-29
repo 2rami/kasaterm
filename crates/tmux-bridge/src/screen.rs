@@ -1,13 +1,15 @@
 //! GUI-agnostic screen snapshot types produced from a vt100 parser.
 
-#[derive(Debug, Clone, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Color {
     Default,
     Idx(u8),
     Rgb(u8, u8, u8),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cell {
     /// One glyph per cell. `'\0'` is the blank/wide-char-spacer sentinel.
     /// A single `char` (4 bytes, inline) instead of a `String` avoids a heap
@@ -41,7 +43,7 @@ impl Cell {
 pub type Row = Vec<Cell>;
 
 /// Screen diff sent from the flusher thread to consumers.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScreenUpdate {
     pub pane_id: String,
     pub rows: u16,
