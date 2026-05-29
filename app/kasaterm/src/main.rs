@@ -4676,7 +4676,19 @@ impl App {
                     let _ = reply.send(res);
                 }
                 socket::PtyCommand::Close { pane_id, reply } => {
-                    if self.pty.contains_key(&pane_id) {
+                    // Close if the pane is in the pty map OR still a leaf in
+                    // the layout tree. The second case is the "zombie": a pane
+                    // whose PTY died (or never registered) but whose leaf
+                    // lingers in the tree — list_surfaces reads the tree so it
+                    // shows up, yet a pty-map-only guard rejected close,
+                    // leaving the slot frozen and un-closable. remove_pane is
+                    // tree-driven and pty.remove() no-ops when absent, so it
+                    // cleans up either case.
+                    let in_tree = self
+                        .pty_layout
+                        .as_ref()
+                        .map_or(false, |t| t.leaves().iter().any(|l| l == &pane_id));
+                    if self.pty.contains_key(&pane_id) || in_tree {
                         // remove_pane kills the PTY, drops the leaf from
                         // the BSP layout, reassigns focus, and redraws —
                         // same path Cmd+W uses.
@@ -8223,7 +8235,7 @@ impl App {
             {
                 let (tbx, _, tbw, _) = Self::sidebar_toggle_rect();
                 let px0 = tbx + tbw + 12.0;
-                let isz = chrome_font + 4.0;
+                let isz = theme::ICON_SIZE;
                 let iy = (TITLE_HEIGHT - isz) / 2.0;
                 let ty = (TITLE_HEIGHT - chrome_font) / 2.0;
                 let after = g.draw_text(
@@ -8372,12 +8384,14 @@ impl App {
                         theme::SURFACE_ACTIVE
                     };
                     round_rect(g, icon_x, icon_y, icon, icon, icon / 2.0, chip_bg);
+                    let chip_glyph = tab_icon_glyph(&name);
+                    let cg_w = g.measure_chrome_text(chip_glyph, theme::ICON_SIZE, true);
                     g.draw_text(
-                        icon_x + 9.0,
-                        icon_y + 7.0,
-                        tab_icon_glyph(&name),
+                        icon_x + (icon - cg_w) / 2.0,
+                        icon_y + (icon - theme::ICON_SIZE) / 2.0,
+                        chip_glyph,
                         gpu::DrawOpts {
-                            font_size: 14.0,
+                            font_size: theme::ICON_SIZE,
                             color: theme::TEXT_DIM,
                             bold: true,
                             italic: false,
@@ -8428,12 +8442,14 @@ impl App {
                         if let Some((_, (cx, cy, cw, ch))) =
                             sb_closes.iter().find(|(ci, _)| ci == i)
                         {
+                            let xg = "\u{2715}";
+                            let xw = g.measure_chrome_text(xg, theme::ICON_SIZE, false);
                             g.draw_text(
-                                *cx + (*cw - 11.0) / 2.0,
-                                *cy + (*ch - 11.0) / 2.0,
-                                "x",
+                                *cx + (*cw - xw) / 2.0,
+                                *cy + (*ch - theme::ICON_SIZE) / 2.0,
+                                xg,
                                 gpu::DrawOpts {
-                                    font_size: 11.0,
+                                    font_size: theme::ICON_SIZE,
                                     color: theme::TEXT_MUTE,
                                     bold: false,
                                     italic: false,
@@ -8452,12 +8468,14 @@ impl App {
                 if plus_hover {
                     round_rect(g, px, py, pw, ph, theme::RADIUS_MD, theme::SURFACE_HOVER);
                 }
+                let plus_g = "+";
+                let plus_gw = g.measure_chrome_text(plus_g, theme::ICON_SIZE, false);
                 g.draw_text(
-                    px + pw / 2.0 - 5.0,
-                    py + (ph - 17.0) / 2.0,
-                    "+",
+                    px + (pw - plus_gw) / 2.0,
+                    py + (ph - theme::ICON_SIZE) / 2.0,
+                    plus_g,
                     gpu::DrawOpts {
-                        font_size: 18.0,
+                        font_size: theme::ICON_SIZE,
                         color: theme::TEXT_MUTE,
                         bold: false,
                         italic: false,
@@ -8487,9 +8505,9 @@ impl App {
                         }
                         g.draw_text(
                             *ix + 12.0,
-                            *iy + (*ih - 15.0) / 2.0,
+                            *iy + (*ih - theme::ICON_SIZE) / 2.0,
                             icon,
-                            gpu::DrawOpts { font_size: 15.0, color: theme::TEXT_DIM, bold: false, italic: false },
+                            gpu::DrawOpts { font_size: theme::ICON_SIZE, color: theme::TEXT_DIM, bold: false, italic: false },
                         );
                         g.draw_text(
                             *ix + 38.0,
@@ -8536,7 +8554,7 @@ impl App {
                 // flows straight into the cell grid (browser-tab feel).
                 // Compact glyphs — a touch bigger than the label so icons
                 // read, but no longer the bulky +10 of the old design.
-                let icon_size = chrome_font + 5.0;
+                let icon_size = theme::ICON_SIZE;
                 let text_y = h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0;
                 let icon_y = h.y + (PANE_HEADER_HEIGHT - icon_size) / 2.0;
                 let act_fg: [u8; 4] = if h.is_active {
