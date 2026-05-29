@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
     let update = last.expect("at least one ScreenUpdate before exit");
     println!("rows={} cols={}", update.rows, update.cols);
     for (r, row) in &update.dirty {
-        let line: String = row.iter().map(|c| c.ch.as_str()).collect();
+        let line: String = row.iter().map(|c| c.ch).collect();
         let trimmed = line.trim_end();
         if !trimmed.is_empty() {
             println!("[{r}] {trimmed}");

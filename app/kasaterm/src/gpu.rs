@@ -1495,8 +1495,8 @@ impl GpuRenderer {
             for (r, row) in pane.rows.iter().enumerate() {
                 for (col, cell) in row.iter().enumerate() {
                     // Blanks contribute no glyph.
-                    let Some(ch) = cell.ch.chars().next() else { continue };
-                    if ch == ' ' || ch == '\0' || cell.ch.is_empty() {
+                    let ch = cell.ch;
+                    if ch == ' ' || ch == '\0' {
                         continue;
                     }
                     // Block Elements (U+2580..259F) — paint as GPU
@@ -1506,7 +1506,7 @@ impl GpuRenderer {
                     // blocks) tears when shaped as glyphs. The
                     // sub-cell rects from cells::block_rects fill the
                     // exact regions seamlessly.
-                    if cell.ch.chars().count() == 1 {
+                    {
                         if let Some(rects) = crate::cells::block_rects(ch) {
                             let mut fg = cell_fg_rgba(cell);
                             if pane.dim {

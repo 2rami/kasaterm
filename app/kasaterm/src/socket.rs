@@ -6,7 +6,9 @@
 //! become real tmux `@N` strings and `list_surfaces` returns one entry
 //! per actually-open pane.
 
-use agent_socket::backend::{Backend, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo};
+use agent_socket::backend::{
+    Backend, PanelGeom, PanelKind, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo,
+};
 use anyhow::{anyhow, Result};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -257,6 +259,26 @@ pub enum PtyCommand {
         path: String,
         reply: SyncSender<Result<()>>,
     },
+    /// Open or close a standalone panel window (git status / sessions).
+    /// Window creation needs the winit `ActiveEventLoop`, which only the
+    /// main thread has, so the socket worker queues this.
+    SetPanel {
+        which: PanelKind,
+        open: bool,
+        reply: SyncSender<Result<()>>,
+    },
+    /// Resize a panel window and re-bound its webview to match.
+    ResizePanel {
+        which: PanelKind,
+        w: u32,
+        h: u32,
+        reply: SyncSender<Result<()>>,
+    },
+    /// Read a panel window's geometry (window + webview bounds).
+    PanelInfo {
+        which: PanelKind,
+        reply: SyncSender<Result<PanelGeom>>,
+    },
 }
 
 /// Read-only view the main thread publishes after every state change.
@@ -435,6 +457,18 @@ impl Backend for PtyBackend {
         };
         let path = path.to_string();
         self.submit(|reply| PtyCommand::OpenPreview { kind, path, reply })
+    }
+
+    fn set_panel(&self, which: PanelKind, open: bool) -> Result<()> {
+        self.submit(|reply| PtyCommand::SetPanel { which, open, reply })
+    }
+
+    fn resize_panel(&self, which: PanelKind, w: u32, h: u32) -> Result<()> {
+        self.submit(|reply| PtyCommand::ResizePanel { which, w, h, reply })
+    }
+
+    fn panel_info(&self, which: PanelKind) -> Result<PanelGeom> {
+        self.submit(|reply| PtyCommand::PanelInfo { which, reply })
     }
 }
 

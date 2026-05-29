@@ -9,6 +9,7 @@ wgpu = "28"
 swash = "0.2"
 bytemuck = { version = "1", features = ["derive"] }
 anyhow = { workspace = true }
+memmap2 = "0.9"
 
 [dev-dependencies]
 winit = "0.30"

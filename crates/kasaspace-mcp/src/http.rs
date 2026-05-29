@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use agent_socket::backend::Backend;
+use agent_socket::backend::{Backend, PanelKind};
 use axum::{
     extract::Query, http::header, response::IntoResponse, routing::get, routing::post, Json,
 };
@@ -227,6 +227,86 @@ async fn session_restore_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// Resolve the `which` query param into a `PanelKind`.
+fn query_which(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<PanelKind, String> {
+    match params.get("which").map(|s| s.as_str()) {
+        Some("git") => Ok(PanelKind::Git),
+        Some("session") | Some("sessions") => Ok(PanelKind::Session),
+        other => Err(format!("bad or missing which={other:?} (expected git|session)")),
+    }
+}
+
+/// `POST /panel-open?which=git|session` — open a panel window.
+async fn panel_open_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match query_which(&params) {
+        Ok(w) => match backend.set_panel(w, true) {
+            Ok(()) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        },
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /panel-close?which=git|session` — close a panel window.
+async fn panel_close_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match query_which(&params) {
+        Ok(w) => match backend.set_panel(w, false) {
+            Ok(()) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        },
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /panel-resize?which=git&w=900&h=700` — resize a panel window and
+/// re-bound its webview.
+async fn panel_resize_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let w = params.get("w").and_then(|s| s.parse::<u32>().ok());
+    let h = params.get("h").and_then(|s| s.parse::<u32>().ok());
+    let body = match (query_which(&params), w, h) {
+        (Ok(which), Some(w), Some(h)) => match backend.resize_panel(which, w, h) {
+            Ok(()) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        },
+        (Err(e), _, _) => serde_json::json!({ "ok": false, "error": e }),
+        _ => serde_json::json!({ "ok": false, "error": "need w and h" }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `GET /panel-info?which=git|session` — window + webview geometry. When the
+/// panel is responsive, `view_w/view_h` equal `win_w/win_h`.
+async fn panel_info_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match query_which(&params) {
+        Ok(which) => match backend.panel_info(which) {
+            Ok(g) => serde_json::json!({
+                "ok": true, "open": g.open,
+                "win_w": g.win_w, "win_h": g.win_h,
+                "view_w": g.view_w, "view_h": g.view_h,
+            }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        },
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// Bind an MCP-over-HTTP server at `127.0.0.1:<port>/mcp` and run it on a
 /// background thread. Tries `preferred_port` first, then falls back to an
 /// OS-assigned port. Returns the actual port bound so the host can write
@@ -275,6 +355,10 @@ pub fn spawn_http_server(
                 let session_restore_backend = backend.clone();
                 let open_image_backend = backend.clone();
                 let open_markdown_backend = backend.clone();
+                let panel_open_backend = backend.clone();
+                let panel_close_backend = backend.clone();
+                let panel_resize_backend = backend.clone();
+                let panel_info_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -348,6 +432,30 @@ pub fn spawn_http_server(
                     .route(
                         "/save-markdown",
                         post(move |body: String| save_markdown_handler(body)),
+                    )
+                    .route(
+                        "/panel-open",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            panel_open_handler(panel_open_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/panel-close",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            panel_close_handler(panel_close_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/panel-resize",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            panel_resize_handler(panel_resize_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/panel-info",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            panel_info_handler(panel_info_backend.clone(), q)
+                        }),
                     )
                     .nest_service("/mcp", service);
                 if let Err(e) = axum::serve(tokio_listener, app).await {

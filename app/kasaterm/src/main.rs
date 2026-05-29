@@ -92,6 +92,41 @@ fn tab_icon_glyph(name: &str) -> &'static str {
         ">"
     }
 }
+
+/// Draw a chrome icon glyph centered inside a square chip whose top-left is
+/// (`chip_x`, `chip_y`). One place owns icon sizing / centering / hover so every
+/// icon button (title bar, sidebar, pane header, image controls) reads
+/// identically. The clickable area is `theme::ICON_CHIP` square — hit-test
+/// against the same rect.
+fn draw_icon(
+    g: &mut gpu::GpuRenderer,
+    chip_x: f32,
+    chip_y: f32,
+    glyph: &str,
+    color: [u8; 4],
+    hovered: bool,
+) {
+    if hovered {
+        round_rect(
+            g,
+            chip_x,
+            chip_y,
+            theme::ICON_CHIP,
+            theme::ICON_CHIP,
+            theme::ICON_CHIP_RADIUS,
+            theme::ICON_HOVER_BG,
+        );
+    }
+    let iw = g.measure_chrome_text(glyph, theme::ICON_SIZE, false);
+    let gx = chip_x + (theme::ICON_CHIP - iw) / 2.0;
+    let gy = chip_y + (theme::ICON_CHIP - theme::ICON_SIZE) / 2.0;
+    g.draw_text(
+        gx,
+        gy,
+        glyph,
+        gpu::DrawOpts { font_size: theme::ICON_SIZE, color, bold: false, italic: false },
+    );
+}
 /// Line spacing multiplier passed to `compute_cell_metrics`. 1.0 keeps
 /// rows at font ascent+descent so the cell aspect ratio stays close to
 /// 1:2 — that's what makes half-block sprite art (Claude Code's mascot,
@@ -993,15 +1028,15 @@ fn append_cells_text<'a>(cells: impl IntoIterator<Item = &'a GridCell>, out: &mu
             skip_spacer = false;
             // The spacer is blank by construction; only swallow it when it
             // really is empty/space so a glitch never eats real text.
-            if cell.ch.is_empty() || cell.ch == " " {
+            if cell.ch == '\0' || cell.ch == ' ' {
                 continue;
             }
         }
-        if cell.ch.is_empty() {
+        if cell.ch == '\0' {
             out.push(' ');
         } else {
-            out.push_str(&cell.ch);
-            skip_spacer = cell.ch.chars().next().map(gpu::is_wide_char).unwrap_or(false);
+            out.push(cell.ch);
+            skip_spacer = gpu::is_wide_char(cell.ch);
         }
     }
 }
@@ -2129,13 +2164,6 @@ struct App {
     /// (ghostty's trick on top of wgpu). The final size that came in during
     /// the drag is stashed here so we can flush it once the user lets go.
     pending_resize: Option<winit::dpi::PhysicalSize<u32>>,
-    /// Time of the last throttled flush during a live-resize. Set by the
-    /// Resized handler when it decides to repaint mid-drag (every ~50ms);
-    /// cleared back to `None` when AppKit's drag loop releases (mouse up).
-    /// Without this, every Resized frame would pay surface.configure + PTY
-    /// reshape and the drag would lag; with it, the content reflows often
-    /// enough to feel live but cheaply enough to keep the drag smooth.
-    last_live_resize_flush: Option<std::time::Instant>,
     /// Pane that owns the in-flight mouse reporting drag. `Some(pane_id)`
     /// when we forwarded a button-press into a mouse-reporting TUI and
     /// are now relaying motion + release into the same pane. None means
@@ -2147,6 +2175,12 @@ struct App {
     /// this for us when the OS owns the titlebar, but our
     /// fullsize_content_view setup means we intercept those clicks.
     last_left_click: Option<(Instant, (f32, f32))>,
+    /// A titlebar press that hasn't yet decided between "click" and "drag".
+    /// We defer `window.drag_window()` (which enters AppKit's modal move
+    /// loop and would eat the second click of a double-click) until the
+    /// pointer actually moves past a small threshold. Holds the press
+    /// position; cleared on release or once the drag starts.
+    titlebar_drag_pending: Option<(f32, f32)>,
     /// Cached value of the OS window title — `window.set_title` is
     /// cheap but not free, so we only call it when the resolved
     /// label actually changes.
@@ -2325,9 +2359,9 @@ impl App {
             sidebar_resize: None,
             last_resized_cells: (0, 0),
             pending_resize: None,
-            last_live_resize_flush: None,
             mouse_forward_pane: None,
             last_left_click: None,
+            titlebar_drag_pending: None,
             last_window_title: None,
             claude_busy_until: None,
             last_claude_status: None,
@@ -2445,7 +2479,7 @@ impl App {
                         r.iter()
                             .take(to)
                             .skip(from)
-                            .map(|c| if c.ch.is_empty() { " " } else { c.ch.as_str() })
+                            .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
                             .collect()
                     };
                     // Primary: OSC 133 mark still on the cursor's row.
@@ -4742,9 +4776,106 @@ impl App {
                     };
                     let _ = reply.send(res);
                 }
+                socket::PtyCommand::SetPanel { which, open, reply } => {
+                    self.set_panel_window(event_loop, which, open);
+                    let _ = reply.send(Ok(()));
+                }
+                socket::PtyCommand::ResizePanel { which, w, h, reply } => {
+                    let res = self.resize_panel_window(which, w, h);
+                    let _ = reply.send(res);
+                }
+                socket::PtyCommand::PanelInfo { which, reply } => {
+                    let res = self.panel_window_info(which);
+                    let _ = reply.send(res);
+                }
             }
         }
         self.refresh_socket_snapshot();
+    }
+
+    /// Open or close a panel window by kind (MCP-driven, mirrors the menu
+    /// toggles). `open=true` is idempotent — `open_*` already no-ops when the
+    /// window exists.
+    fn set_panel_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        which: agent_socket::backend::PanelKind,
+        open: bool,
+    ) {
+        use agent_socket::backend::PanelKind;
+        match (which, open) {
+            (PanelKind::Git, true) => self.open_git_panel(event_loop, true),
+            (PanelKind::Git, false) => {
+                self.git_panel_webview = None;
+                self.git_panel_window = None;
+            }
+            (PanelKind::Session, true) => self.open_session_panel(event_loop),
+            (PanelKind::Session, false) => {
+                self.session_panel_webview = None;
+                self.session_panel_window = None;
+            }
+        }
+    }
+
+    /// Resize a panel window and re-bound its webview to fill it. Same
+    /// full-bleed rebound the Resized handler does, but driven by MCP so a
+    /// caller can exercise the responsive path without a mouse drag.
+    fn resize_panel_window(
+        &self,
+        which: agent_socket::backend::PanelKind,
+        w: u32,
+        h: u32,
+    ) -> anyhow::Result<()> {
+        use agent_socket::backend::PanelKind;
+        let (win, wv) = match which {
+            PanelKind::Git => (self.git_panel_window.as_ref(), self.git_panel_webview.as_ref()),
+            PanelKind::Session => (
+                self.session_panel_window.as_ref(),
+                self.session_panel_webview.as_ref(),
+            ),
+        };
+        let win = win.ok_or_else(|| anyhow::anyhow!("panel not open"))?;
+        let _ = win.request_inner_size(winit::dpi::LogicalSize::new(w as f64, h as f64));
+        if let Some(wv) = wv {
+            wv.set_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(w as f64, h as f64).into(),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Report a panel window's geometry (window inner size + webview bounds,
+    /// both physical px) so an MCP caller can verify the webview tracks the
+    /// window after a resize — no screenshot needed.
+    fn panel_window_info(
+        &self,
+        which: agent_socket::backend::PanelKind,
+    ) -> anyhow::Result<agent_socket::backend::PanelGeom> {
+        use agent_socket::backend::{PanelGeom, PanelKind};
+        let (win, wv) = match which {
+            PanelKind::Git => (self.git_panel_window.as_ref(), self.git_panel_webview.as_ref()),
+            PanelKind::Session => (
+                self.session_panel_window.as_ref(),
+                self.session_panel_webview.as_ref(),
+            ),
+        };
+        let open = win.is_some();
+        let (win_w, win_h) = win
+            .map(|w| {
+                let s = w.inner_size();
+                (s.width, s.height)
+            })
+            .unwrap_or((0, 0));
+        let scale = win.map(|w| w.scale_factor()).unwrap_or(1.0);
+        let (view_w, view_h) = wv
+            .and_then(|v| v.bounds().ok())
+            .map(|b| {
+                let s = b.size.to_physical::<u32>(scale);
+                (s.width, s.height)
+            })
+            .unwrap_or((0, 0));
+        Ok(PanelGeom { open, win_w, win_h, view_w, view_h })
     }
 
     /// Convert logical-pixel position into a (pane_id, col, row) cell
@@ -6149,15 +6280,13 @@ impl App {
             let mut text = String::new();
             let mut has_marker = false;
             for cell in row {
-                if cell.ch.is_empty() {
+                if cell.ch == '\0' {
                     text.push(' ');
                 } else {
-                    text.push_str(&cell.ch);
-                    if let Some(c) = cell.ch.chars().next() {
-                        let cp = c as u32;
-                        if (0x2731..=0x274F).contains(&cp) {
-                            has_marker = true;
-                        }
+                    text.push(cell.ch);
+                    let cp = cell.ch as u32;
+                    if (0x2731..=0x274F).contains(&cp) {
+                        has_marker = true;
                     }
                 }
             }
@@ -6181,16 +6310,13 @@ impl App {
         let start = rows.saturating_sub(8);
         for row in &t.cells[start..] {
             for cell in row {
-                if let Some(c) = cell.ch.chars().next() {
-                    let cp = c as u32;
-                    // Braille spinners (npm, pure-prompt, etc.) +
-                    // Dingbats asterisks/stars (Claude Code uses
-                    // ✻/✶/✷/✸/✹/✺ as its "thinking" indicator).
-                    if (0x2800..=0x28FF).contains(&cp)
-                        || (0x2731..=0x274F).contains(&cp)
-                    {
-                        return Some(c);
-                    }
+                let c = cell.ch;
+                let cp = c as u32;
+                // Braille spinners (npm, pure-prompt, etc.) +
+                // Dingbats asterisks/stars (Claude Code uses
+                // ✻/✶/✷/✸/✹/✺ as its "thinking" indicator).
+                if (0x2800..=0x28FF).contains(&cp) || (0x2731..=0x274F).contains(&cp) {
+                    return Some(c);
                 }
             }
         }
@@ -8951,9 +9077,25 @@ impl ApplicationHandler<UserEvent> for App {
         // CloseRequested only drops the panel, it doesn't exit the app. The
         // webview paints itself, so we ignore everything else for it.
         if self.git_panel_window.as_ref().map(|w| w.id()) == Some(id) {
-            if matches!(event, WindowEvent::CloseRequested) {
-                self.git_panel_webview = None;
-                self.git_panel_window = None;
+            match &event {
+                WindowEvent::CloseRequested => {
+                    self.git_panel_webview = None;
+                    self.git_panel_window = None;
+                }
+                // The webview is pinned to a fixed (0,0)+size rect at build
+                // time. Without re-bounding on resize it keeps its original
+                // size while the NSView's bottom-left origin shoves it into
+                // the corner (the empty-space-plus-corner bug). Track the
+                // window so the panel stays full-bleed.
+                WindowEvent::Resized(size) => {
+                    if let Some(wv) = self.git_panel_webview.as_ref() {
+                        let _ = wv.set_bounds(wry::Rect {
+                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
+                        });
+                    }
+                }
+                _ => {}
             }
             return;
         }
@@ -8963,9 +9105,20 @@ impl ApplicationHandler<UserEvent> for App {
         // shrinking the main wgpu viewport uniform → everything renders
         // ~2x zoomed. (git panel had this guard, session panel did not.)
         if self.session_panel_window.as_ref().map(|w| w.id()) == Some(id) {
-            if matches!(event, WindowEvent::CloseRequested) {
-                self.session_panel_webview = None;
-                self.session_panel_window = None;
+            match &event {
+                WindowEvent::CloseRequested => {
+                    self.session_panel_webview = None;
+                    self.session_panel_window = None;
+                }
+                WindowEvent::Resized(size) => {
+                    if let Some(wv) = self.session_panel_webview.as_ref() {
+                        let _ = wv.set_bounds(wry::Rect {
+                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
+                        });
+                    }
+                }
+                _ => {}
             }
             return;
         }
@@ -9017,6 +9170,19 @@ impl ApplicationHandler<UserEvent> for App {
                 });
             }
             WindowEvent::Resized(size) => {
+                if std::env::var_os("KASATERM_RESIZE_DEBUG").is_some() {
+                    eprintln!(
+                        "[rsz {}ms] Resized {}x{} live={}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis()
+                            % 100000,
+                        size.width,
+                        size.height,
+                        gpu::is_in_live_resize(&window)
+                    );
+                }
                 // Beats-ghostty live-resize: chrome + cells reflow EVERY
                 // Resized event. wgpu surface.configure + render_frame
                 // happen every frame; PTY reshape (SIGWINCH + alacritty +
@@ -9035,19 +9201,12 @@ impl ApplicationHandler<UserEvent> for App {
                         let (cols, rows) = self.window_cells();
                         if (cols, rows) != self.last_resized_cells {
                             self.last_resized_cells = (cols, rows);
-                            // Throttle PTY reshape to ~10 Hz during a live
-                            // window resize too — same reasoning as the
-                            // divider path (Claude Code SIGWINCH cost).
-                            let now = std::time::Instant::now();
-                            let throttle_ok = self
-                                .last_live_resize_flush
-                                .map(|t| now.duration_since(t)
-                                    >= std::time::Duration::from_millis(100))
-                                .unwrap_or(true);
-                            if throttle_ok {
-                                self.resize_backend(cols, rows);
-                                self.last_live_resize_flush = Some(now);
-                            }
+                            // Reshape the PTY on every cell-boundary crossing
+                            // during a live drag. The (cols,rows) guard above
+                            // already coalesces sub-cell pixel moves, so the
+                            // shell reflows the instant the integer grid grows
+                            // — no throttle, the divider path does the same.
+                            self.resize_backend(cols, rows);
                         }
                         self.chrome_dirty = true;
                         self.render_frame();
@@ -9055,7 +9214,6 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 self.pending_resize = None;
-                self.last_live_resize_flush = None;
                 gpu::with_disabled_layer_actions(|| {
                     if gpu_mode {
                         if let Some(g) = self.gpu.as_mut() {
@@ -9080,6 +9238,17 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.effective_scale();
                 self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                // A deferred titlebar press turns into a window move once the
+                // pointer travels past the threshold (so a stationary press
+                // stays a click and the double-click path keeps working).
+                if let Some((px, py)) = self.titlebar_drag_pending {
+                    let (cx, cy) = self.cursor_px;
+                    if (cx - px).abs() > 4.0 || (cy - py).abs() > 4.0 {
+                        self.titlebar_drag_pending = None;
+                        let _ = window.drag_window();
+                        return;
+                    }
+                }
                 // In-pane tab hover tracking — drives the hover-only × +
                 // brightened text on inactive tabs. Updated on every move but
                 // only redraws when the hovered tab actually changes.
@@ -9640,10 +9809,25 @@ impl ApplicationHandler<UserEvent> for App {
                     self.last_left_click = Some((now, (cx, cy)));
                     if is_double {
                         window.set_maximized(!window.is_maximized());
+                        if std::env::var_os("KASATERM_RESIZE_DEBUG").is_some() {
+                            eprintln!(
+                                "[rsz {}ms] set_maximized -> {}",
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis()
+                                    % 100000,
+                                window.is_maximized()
+                            );
+                        }
                         self.last_left_click = None;
+                        self.titlebar_drag_pending = None;
                         return;
                     }
-                    let _ = window.drag_window();
+                    // Defer the actual window-move until the pointer moves —
+                    // calling drag_window() here would enter AppKit's modal
+                    // loop and swallow the second click of a double-click.
+                    self.titlebar_drag_pending = Some((cx, cy));
                     return;
                 }
                 match state {
@@ -9696,6 +9880,9 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     ElementState::Released => {
+                        // A titlebar press that never moved past the drag
+                        // threshold: just a click, drop the deferred move.
+                        self.titlebar_drag_pending = None;
                         // End a tab drag: a real drag reorders the pane's tab
                         // list; a plain press just switches to that tab.
                         if let Some(mut td) = self.tab_drag.take() {
@@ -10028,8 +10215,19 @@ impl ApplicationHandler<UserEvent> for App {
             (self.window.clone(), self.pending_resize)
         {
             if !gpu::is_in_live_resize(&window) {
+                if std::env::var_os("KASATERM_RESIZE_DEBUG").is_some() {
+                    eprintln!(
+                        "[rsz {}ms] about_to_wait flush {}x{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis()
+                            % 100000,
+                        size.width,
+                        size.height
+                    );
+                }
                 self.pending_resize = None;
-                self.last_live_resize_flush = None;
                 let gpu_mode = self.gpu.is_some();
                 gpu::with_disabled_layer_actions(|| {
                     if gpu_mode {
@@ -10731,7 +10929,7 @@ mod tests {
         let mut row = vec![GridCell::blank(); 10];
         for (i, c) in "hello".chars().enumerate() {
             row[i] = GridCell {
-                ch: c.to_string(),
+                ch: c,
                 ..GridCell::blank()
             };
         }
@@ -10754,9 +10952,9 @@ mod tests {
     fn wide_row(s: &str, width: usize) -> Vec<GridCell> {
         let mut row = Vec::new();
         for ch in s.chars() {
-            row.push(GridCell { ch: ch.to_string(), ..GridCell::blank() });
+            row.push(GridCell { ch, ..GridCell::blank() });
             if gpu::is_wide_char(ch) {
-                row.push(GridCell { ch: " ".into(), ..GridCell::blank() });
+                row.push(GridCell { ch: ' ', ..GridCell::blank() });
             }
         }
         while row.len() < width {

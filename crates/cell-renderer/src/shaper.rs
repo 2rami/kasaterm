@@ -13,6 +13,44 @@ use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::Format;
 use swash::FontRef;
 
+/// Backing storage for one font face. `Mapped` is the common case — the
+/// font file is mmap'd, so only the table/glyph pages swash actually touches
+/// become resident (a 180MB color-emoji font costs ~0 RSS until an emoji is
+/// drawn). `Owned` covers the primary font handed in as bytes and the small
+/// `include_bytes!` Nerd-icon face. Replacing `std::fs::read` (whole file →
+/// heap) with mmap is what keeps the fallback chain off the resident set.
+enum FontData {
+    Mapped(memmap2::Mmap),
+    Owned(Vec<u8>),
+}
+
+impl FontData {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            FontData::Mapped(m) => &m[..],
+            FontData::Owned(v) => v,
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+    /// Empty placeholder for an unfilled bold/italic slot.
+    fn empty() -> Self {
+        FontData::Owned(Vec::new())
+    }
+}
+
+/// mmap a font file. Returns None if the path is missing (optional fallbacks)
+/// or the bytes aren't a valid TTF/OTF/TTC entry.
+fn map_font(path: &str, index: u32) -> Option<FontData> {
+    let file = std::fs::File::open(path).ok()?;
+    // SAFETY: fonts are stable system files; we never mutate the mapping.
+    // Same assumption every terminal (incl. Ghostty) makes for font I/O.
+    let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
+    FontRef::from_index(&mmap[..], index as usize)?;
+    Some(FontData::Mapped(mmap))
+}
+
 pub struct Shaper {
     /// Owned font bytes for each face in the fallback chain. The
     /// primary face sits at index 0; subsequent faces are tried in
@@ -21,17 +59,17 @@ pub struct Shaper {
     /// Matches the cosmic-text fallback chain we configured under
     /// sugarloaf: D2Coding → JetBrainsMono → Apple SD → Apple
     /// Color Emoji on macOS.
-    faces: Vec<(Vec<u8>, u32)>,
+    faces: Vec<(FontData, u32)>,
     /// Optional bold-weight variant for each slot in `faces`. Parallel
-    /// indexing — `bold_faces[i]` mirrors `faces[i]` when present (empty
-    /// Vec means "no bold installed for this slot"). Filled via
+    /// indexing — `bold_faces[i]` mirrors `faces[i]` when present (an empty
+    /// face means "no bold installed for this slot"). Filled via
     /// `set_bold_face_path`; consumed by `rasterize` when bold=true.
-    bold_faces: Vec<(Vec<u8>, u32)>,
+    bold_faces: Vec<(FontData, u32)>,
     /// Optional italic variant for each slot. When set, `rasterize` uses
     /// it instead of synthesising italic via a swash skew transform.
     /// Fonts that ship a designed italic (JetBrains Mono) read much
     /// cleaner than skew-synth which can clip ascenders at the cell edge.
-    italic_faces: Vec<(Vec<u8>, u32)>,
+    italic_faces: Vec<(FontData, u32)>,
     scale_ctx: ScaleContext,
 }
 
@@ -108,7 +146,7 @@ impl Shaper {
         FontRef::from_index(&font_data, font_index as usize)
             .context("font bytes not a TTF/OTF/TTC entry")?;
         Ok(Self {
-            faces: vec![(font_data, font_index)],
+            faces: vec![(FontData::Owned(font_data), font_index)],
             bold_faces: Vec::new(),
             italic_faces: Vec::new(),
             scale_ctx: ScaleContext::new(),
@@ -122,31 +160,32 @@ impl Shaper {
     /// handled in the renderer caller, not here). Italic synthesises via
     /// swash's shear transform inside `rasterize`.
     pub fn set_bold_face_path(&mut self, idx: usize, path: &str, index: u32) {
-        let Ok(bytes) = std::fs::read(path) else { return };
-        if FontRef::from_index(&bytes, index as usize).is_some() {
-            while self.bold_faces.len() <= idx {
-                self.bold_faces.push((Vec::new(), 0));
-            }
-            self.bold_faces[idx] = (bytes, index);
+        let Some(data) = map_font(path, index) else { return };
+        while self.bold_faces.len() <= idx {
+            self.bold_faces.push((FontData::empty(), 0));
         }
+        self.bold_faces[idx] = (data, index);
     }
 
     /// Register a real italic face for slot `idx`. Mirrors `set_bold_face_path`.
     /// When present, italic cells render from this face instead of via swash
     /// skew — JetBrains Mono / Cascadia Italic look much better than synthesis.
     pub fn set_italic_face_path(&mut self, idx: usize, path: &str, index: u32) {
-        let Ok(bytes) = std::fs::read(path) else { return };
-        if FontRef::from_index(&bytes, index as usize).is_some() {
-            while self.italic_faces.len() <= idx {
-                self.italic_faces.push((Vec::new(), 0));
-            }
-            self.italic_faces[idx] = (bytes, index);
+        let Some(data) = map_font(path, index) else { return };
+        while self.italic_faces.len() <= idx {
+            self.italic_faces.push((FontData::empty(), 0));
         }
+        self.italic_faces[idx] = (data, index);
     }
 
     pub fn from_path(path: &str, index: u32) -> Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| format!("read font {path}"))?;
-        Self::from_bytes(bytes, index)
+        let data = map_font(path, index).with_context(|| format!("read font {path}"))?;
+        Ok(Self {
+            faces: vec![(data, index)],
+            bold_faces: Vec::new(),
+            italic_faces: Vec::new(),
+            scale_ctx: ScaleContext::new(),
+        })
     }
 
     /// Append a fallback face. Tried after the primary + every face
@@ -154,9 +193,8 @@ impl Shaper {
     /// that don't exist (so a caller can list optional fallbacks
     /// like Apple Color Emoji without erroring on Linux/Windows).
     pub fn add_fallback_path(&mut self, path: &str, index: u32) {
-        let Ok(bytes) = std::fs::read(path) else { return };
-        if FontRef::from_index(&bytes, index as usize).is_some() {
-            self.faces.push((bytes, index));
+        if let Some(data) = map_font(path, index) {
+            self.faces.push((data, index));
         }
     }
 
@@ -165,15 +203,14 @@ impl Shaper {
     /// the chain has Misc-Technical / Nerd icon coverage regardless
     /// of what's installed on the user's system.
     pub fn add_fallback_bytes(&mut self, bytes: &'static [u8], index: u32) {
-        let owned = bytes.to_vec();
-        if FontRef::from_index(&owned, index as usize).is_some() {
-            self.faces.push((owned, index));
+        if FontRef::from_index(bytes, index as usize).is_some() {
+            self.faces.push((FontData::Owned(bytes.to_vec()), index));
         }
     }
 
     fn face(&self, idx: usize) -> FontRef<'_> {
         let (bytes, fi) = &self.faces[idx];
-        FontRef::from_index(bytes, *fi as usize).unwrap()
+        FontRef::from_index(bytes.as_slice(), *fi as usize).unwrap()
     }
 
     /// Walk the fallback chain and return the first face that covers
@@ -346,18 +383,22 @@ impl Shaper {
             // cell when boosted, so we re-render it un-boosted if the boosted
             // raster is wider than the advance — no bleed into the next cell.
             let boost = face_idx != 0 && !is_cjk_wide(ch);
-            let (font_data, font_index) = match kind {
+            // Borrow the face bytes (mmap-backed) instead of cloning — the
+            // closure below holds this immutable borrow of `self.faces` while
+            // `render_at` takes `&mut self.scale_ctx`; disjoint fields, so the
+            // borrow checker is fine and we never copy a font into the heap.
+            let (font_data, font_index): (&[u8], usize) = match kind {
                 FaceKind::Bold => {
                     let (b, fi) = &self.bold_faces[face_idx];
-                    (b.clone(), *fi as usize)
+                    (b.as_slice(), *fi as usize)
                 }
                 FaceKind::Italic => {
                     let (b, fi) = &self.italic_faces[face_idx];
-                    (b.clone(), *fi as usize)
+                    (b.as_slice(), *fi as usize)
                 }
                 FaceKind::Regular => {
                     let (b, fi) = &self.faces[face_idx];
-                    (b.clone(), *fi as usize)
+                    (b.as_slice(), *fi as usize)
                 }
             };
             // Italic synthesis: if we wanted italic but landed on a
@@ -381,7 +422,7 @@ impl Shaper {
             // Bold is missing on disk (D2Coding-only systems etc).
             let want_dilate = bold && !matches!(kind, FaceKind::Bold);
             let render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
-                let font = FontRef::from_index(&font_data, font_index).unwrap();
+                let font = FontRef::from_index(font_data, font_index).unwrap();
                 let mut scaler = scale_ctx.builder(font).size(face_size).hint(true).build();
                 // Color sources first so Apple Color Emoji (sbix), CBDT, and
                 // COLR/CPAL faces render as full-color RGBA; swash falls

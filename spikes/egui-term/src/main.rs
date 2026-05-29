@@ -108,10 +108,10 @@ impl eframe::App for App {
 fn render_row(cells: &[Cell]) -> String {
     let mut s = String::with_capacity(cells.len());
     for c in cells {
-        if c.ch.is_empty() {
+        if c.ch == '\0' {
             s.push(' ');
         } else {
-            s.push_str(&c.ch);
+            s.push(c.ch);
         }
     }
     s

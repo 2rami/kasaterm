@@ -9,7 +9,11 @@ pub enum Color {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
-    pub ch: String,
+    /// One glyph per cell. `'\0'` is the blank/wide-char-spacer sentinel.
+    /// A single `char` (4 bytes, inline) instead of a `String` avoids a heap
+    /// allocation per cell — with millions of cells across scrollback + diff
+    /// copies, the per-cell `String` was the dominant RSS cost.
+    pub ch: char,
     pub fg: Color,
     pub bg: Color,
     pub bold: bool,
@@ -22,7 +26,7 @@ pub struct Cell {
 impl Cell {
     pub fn blank() -> Self {
         Self {
-            ch: " ".into(),
+            ch: ' ',
             fg: Color::Default,
             bg: Color::Default,
             bold: false,
@@ -81,7 +85,9 @@ pub(crate) fn vt_color(c: vt100::Color) -> Color {
 
 pub(crate) fn vt_cell(c: &vt100::Cell) -> Cell {
     let contents = c.contents();
-    let ch = if contents.is_empty() { " ".into() } else { contents };
+    // vt100 returns the cell's grapheme cluster; we keep only the base char
+    // (the renderer already shapes a single char per cell). Empty → blank.
+    let ch = contents.chars().next().unwrap_or(' ');
     Cell {
         ch,
         fg: vt_color(c.fgcolor()),
