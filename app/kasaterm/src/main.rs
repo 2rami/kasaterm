@@ -3297,6 +3297,10 @@ impl App {
     /// start a fresh empty session with its own ws/pty/layout, bring up its
     /// first pane.
     fn new_session(&mut self) {
+        if let Some(client) = self.daemon_client.as_ref() {
+            client.new_session();
+            return; // daemon creates it + pushes State (applied in user_event)
+        }
         self.sessions[self.active_session] = Some(Session {
             pty: std::mem::take(&mut self.pty),
             pty_layout: self.pty_layout.take(),
@@ -3324,6 +3328,10 @@ impl App {
     /// slot, swap the target in. Background sessions stay alive (their ws Arc
     /// is still updated by their pump threads).
     fn switch_session(&mut self, idx: usize) {
+        if let Some(client) = self.daemon_client.as_ref() {
+            client.switch_session(idx);
+            return; // daemon switches + pushes State
+        }
         if idx == self.active_session || idx >= self.sessions.len() {
             return;
         }
@@ -3360,6 +3368,10 @@ impl App {
     /// terminal keeps painting. Dropping a `Session` drops its `PtySession`
     /// Arcs, which kills the child shells — same teardown path as remove_pane.
     fn close_session(&mut self, idx: usize) -> Result<()> {
+        if let Some(client) = self.daemon_client.as_ref() {
+            client.close_session(idx);
+            return Ok(()); // daemon closes + pushes State
+        }
         if self.sessions.len() <= 1 {
             anyhow::bail!("cannot close the last session");
         }
@@ -3472,6 +3484,10 @@ impl App {
     /// them never tears a pane down. Windows are this session's tmux-style
     /// "windows"; the session list one level up is tmux "sessions".
     fn new_window(&mut self) {
+        if let Some(client) = self.daemon_client.as_ref() {
+            client.new_window();
+            return; // daemon creates it + pushes State
+        }
         // Active window's slot is None — its layout lives in pty_layout. Park
         // it back into the slot before opening a new window.
         self.windows[self.active_window] = self.pty_layout.take();
@@ -3496,6 +3512,10 @@ impl App {
     /// across the session's windows, so no PTY is touched — only which BSP tree
     /// the renderer draws. Focus lands on the target window's first pane.
     fn switch_window(&mut self, idx: usize) {
+        if let Some(client) = self.daemon_client.as_ref() {
+            client.switch_window(idx);
+            return; // daemon switches + pushes State
+        }
         if idx == self.active_window || idx >= self.windows.len() {
             return;
         }
@@ -8572,12 +8592,22 @@ impl App {
                         if let Some((_, (cx, cy, cw, ch))) =
                             sb_closes.iter().find(|(ci, _)| ci == i)
                         {
+                            // Hover chip behind the × — same lift the pane-header
+                            // close gets, so the sidebar close reads as clickable.
+                            let x_hover = sb_cursor.0 >= *cx
+                                && sb_cursor.0 <= *cx + *cw
+                                && sb_cursor.1 >= *cy
+                                && sb_cursor.1 <= *cy + *ch;
+                            if x_hover {
+                                round_rect(g, *cx, *cy, *cw, *ch, theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
+                            }
+                            let xcol = if x_hover { theme::TEXT } else { theme::TEXT_MUTE };
                             g.queue_icon(
                                 "x",
                                 *cx + (*cw - theme::ICON_SIZE) / 2.0,
                                 *cy + (*ch - theme::ICON_SIZE) / 2.0,
                                 theme::ICON_SIZE,
-                                theme::TEXT_MUTE,
+                                xcol,
                             );
                         }
                     }

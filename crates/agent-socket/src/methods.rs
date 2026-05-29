@@ -53,6 +53,11 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.send_raw" => surface_send_raw(backend, id, &req.params),
         "surface.resize" => surface_resize(backend, id, &req.params),
         "surface.scroll" => surface_scroll(backend, id, &req.params),
+        "session.new" => simple(id, backend.new_session()),
+        "window.new" => simple(id, backend.new_window()),
+        "session.switch" => switch_by_idx(id, &req.params, |i| backend.switch_session(i)),
+        "window.switch" => switch_by_idx(id, &req.params, |i| backend.switch_window(i)),
+        "session.close" => switch_by_idx(id, &req.params, |i| backend.close_session(i)),
         "surface.close" => surface_close(backend, id, &req.params),
         "surface.rename" => surface_rename(backend, id, &req.params),
         "surface.set_color" => surface_set_color(backend, id, &req.params),
@@ -78,6 +83,28 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
 
 fn backend_err(id: Value, e: anyhow::Error) -> Response {
     Response::error(id, codes::BACKEND_ERROR, format!("{e:#}"))
+}
+
+/// Fold a no-args backend call into an `{ok:true}` response.
+fn simple(id: Value, r: anyhow::Result<()>) -> Response {
+    match r {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// Dispatch a method whose only param is a `idx` (number): session/window
+/// switch + session close.
+fn switch_by_idx(
+    id: Value,
+    params: &Value,
+    f: impl FnOnce(usize) -> anyhow::Result<()>,
+) -> Response {
+    let idx = match params.get("idx").and_then(|v| v.as_u64()) {
+        Some(n) => n as usize,
+        None => return param_err(id, "method requires `idx` (number)"),
+    };
+    simple(id, f(idx))
 }
 
 fn param_err(id: Value, msg: impl Into<String>) -> Response {
