@@ -242,6 +242,12 @@ pub enum PtyCommand {
         idx: usize,
         reply: SyncSender<Result<()>>,
     },
+    /// Restore a saved (on-disk, not-yet-live) session at index `idx` in
+    /// `saved_session_labels`. Spawns its panes lazily and switches to it.
+    RestoreSession {
+        idx: usize,
+        reply: SyncSender<Result<()>>,
+    },
     /// Open a separate wry preview window (image viewer / markdown editor)
     /// for the file at `path`. Window creation needs the winit
     /// `ActiveEventLoop`, which only the main thread has, so the socket
@@ -415,6 +421,10 @@ impl Backend for PtyBackend {
 
     fn close_session(&self, idx: usize) -> Result<()> {
         self.submit(|reply| PtyCommand::CloseSession { idx, reply })
+    }
+
+    fn restore_session(&self, idx: usize) -> Result<()> {
+        self.submit(|reply| PtyCommand::RestoreSession { idx, reply })
     }
 
     fn open_preview(&self, kind: &str, path: &str) -> Result<()> {
