@@ -21,7 +21,11 @@ wgpu-hal = { version = "28", features = ["metal"] }
 winit = "0.30"
 raw-window-handle = "0.6"
 anyhow.workspace = true
+serde.workspace = true
 serde_json = "1"
+# bincode-framed ScreenUpdate stream between daemon and GUI (src/stream.rs).
+# Far more compact than JSON for the high-frequency per-frame cell payload.
+bincode.workspace = true
 pollster = "0.4"
 arboard = "3"
 kasaspace-mcp = { version = "0.1.0", path = "../../crates/kasaspace-mcp" }
@@ -41,6 +45,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # Parse markdown into an event stream for the in-pane document renderer
 # (headings/paragraphs/code/lists laid out directly with the cell renderer).
 pulldown-cmark = { version = "0.13", default-features = false }
+# Rasterize Lucide SVG chrome icons into alpha-mask textures. Drawn through
+# the glyph tint path (FLAG_COLOR off → texel.a × fg.rgb) so a single white
+# raster picks up any theme color / hover state. Bundles usvg + tiny-skia.
+resvg = "0.45"
 
 # macOS-only: patch the wgpu CAMetalLayer's contentsGravity to topLeft so
 # AppKit doesn't stretch stale layer contents during live window resize.

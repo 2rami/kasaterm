@@ -50,6 +50,9 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.split" => surface_split(backend, id, &req.params),
         "surface.send_text" => surface_send_text(backend, id, &req.params),
         "surface.send_key" => surface_send_key(backend, id, &req.params),
+        "surface.send_raw" => surface_send_raw(backend, id, &req.params),
+        "surface.resize" => surface_resize(backend, id, &req.params),
+        "surface.scroll" => surface_scroll(backend, id, &req.params),
         "surface.close" => surface_close(backend, id, &req.params),
         "surface.rename" => surface_rename(backend, id, &req.params),
         "surface.set_color" => surface_set_color(backend, id, &req.params),
@@ -60,6 +63,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             Ok(board) => Response::success(id, json!({ "board": board })),
             Err(e) => backend_err(id, e),
         },
+        "collab.bind_transcript" => collab_bind_transcript(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -120,9 +124,13 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.split",
                 "surface.send_text",
                 "surface.send_key",
+                "surface.send_raw",
+                "surface.resize",
+                "surface.scroll",
                 "surface.peek",
                 "collab.announce",
                 "collab.board",
+                "collab.bind_transcript",
             ],
         }),
     )
@@ -146,6 +154,21 @@ fn collab_announce(backend: &dyn Backend, id: Value, params: &Value) -> Response
         .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
         .unwrap_or_default();
     match backend.announce(surface_id, intent, status, &files) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn collab_bind_transcript(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "collab.bind_transcript requires `surface_id` (string)"),
+    };
+    let path = match params.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return param_err(id, "collab.bind_transcript requires `path` (string)"),
+    };
+    match backend.bind_transcript(surface_id, path) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
@@ -292,6 +315,65 @@ fn surface_send_key(backend: &dyn Backend, id: Value, params: &Value) -> Respons
     };
     let target = params.get("surface_id").and_then(|v| v.as_str());
     match backend.send_key(target, key) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+/// Decode space-separated 2-digit hex (e.g. "1b 5b 41") into bytes — the wire
+/// form used by send_raw, mirroring TmuxBackend::send_keys_hex so escapes and
+/// control bytes survive the JSON-RPC text channel intact.
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    s.split_whitespace()
+        .map(|t| u8::from_str_radix(t, 16).ok())
+        .collect()
+}
+
+fn surface_send_raw(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let hex = match params.get("hex").and_then(|v| v.as_str()) {
+        Some(h) => h,
+        None => return param_err(id, "surface.send_raw requires `hex` (space-separated hex bytes)"),
+    };
+    let bytes = match decode_hex(hex) {
+        Some(b) => b,
+        None => return param_err(id, "surface.send_raw: `hex` must be space-separated 2-digit hex"),
+    };
+    let target = params.get("surface_id").and_then(|v| v.as_str());
+    match backend.send_raw(target, &bytes) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_resize(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.resize requires `surface_id` (string)"),
+    };
+    let cols = match params.get("cols").and_then(|v| v.as_u64()) {
+        Some(c) => c as u16,
+        None => return param_err(id, "surface.resize requires `cols` (number)"),
+    };
+    let rows = match params.get("rows").and_then(|v| v.as_u64()) {
+        Some(r) => r as u16,
+        None => return param_err(id, "surface.resize requires `rows` (number)"),
+    };
+    match backend.resize_surface(surface_id, cols, rows) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_scroll(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.scroll requires `surface_id` (string)"),
+    };
+    let lines = match params.get("lines").and_then(|v| v.as_i64()) {
+        Some(l) => l as i32,
+        None => return param_err(id, "surface.scroll requires `lines` (number)"),
+    };
+    match backend.scroll_surface(surface_id, lines) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

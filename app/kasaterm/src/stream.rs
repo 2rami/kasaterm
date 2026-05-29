@@ -1,0 +1,248 @@
+//! Daemon→GUI screen-frame stream over a local socket, separate from the
+//! JSON-RPC control socket.
+//!
+//! The daemon owns the PtySessions and pushes bincode-encoded `ScreenUpdate`
+//! frames here; the GUI decodes them into its Workspace. One-directional and
+//! high-frequency, so it's kept off the line-delimited JSON-RPC control path
+//! on purpose. Attach handshake (layout, pane ids) goes over the control
+//! socket; this socket carries only the screen frames.
+//!
+//! Wire format: a `u32` little-endian length prefix followed by that many
+//! bincode bytes. One frame = one `ScreenUpdate`.
+
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use agent_socket::transport::LocalStream;
+use pty_backend::PtyLayout;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tmux_bridge::ScreenUpdate;
+
+/// One window inside a session: its BSP layout tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowView {
+    pub layout: PtyLayout,
+}
+
+/// One session: its windows + which is active + a display label (the active
+/// pane's cwd basename, for the session panel).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionView {
+    pub windows: Vec<WindowView>,
+    pub active_window: usize,
+    pub label: String,
+}
+
+/// The daemon's full session>window>pane structure pushed to the GUI. The GUI
+/// renders the active session's active window and uses the rest for the
+/// sidebar (windows) + session panel. Replaces the single-tree `Layout` msg —
+/// a single-pane daemon is just one session with one window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateView {
+    pub sessions: Vec<SessionView>,
+    pub active_session: usize,
+}
+
+impl StateView {
+    /// The BSP tree the GUI should render right now (active session's active
+    /// window), if the structure is non-empty.
+    pub fn active_layout(&self) -> Option<PtyLayout> {
+        let s = self.sessions.get(self.active_session)?;
+        s.windows.get(s.active_window).map(|w| w.layout.clone())
+    }
+}
+
+/// Daemon→GUI stream message. `Frame` carries a screen diff (per pane, keyed by
+/// `pane_id`); `State` carries the whole session>window>pane structure after a
+/// split/close/new/switch so the GUI re-lays-out. Multiplexed over the one
+/// stream socket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StreamMsg {
+    Frame(ScreenUpdate),
+    State(StateView),
+}
+
+/// `<control-socket>-stream` — the screen-frame socket path derived from the
+/// control socket path, so discovery only needs the one base path.
+pub fn stream_path(control: &Path) -> PathBuf {
+    let mut s = control.as_os_str().to_os_string();
+    s.push("-stream");
+    PathBuf::from(s)
+}
+
+/// Write one length-prefixed bincode message and flush.
+pub fn write_msg(w: &mut impl Write, msg: &StreamMsg) -> io::Result<()> {
+    let bytes = bincode::serialize(msg)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let len = bytes.len() as u32;
+    w.write_all(&len.to_le_bytes())?;
+    w.write_all(&bytes)?;
+    w.flush()
+}
+
+/// Read one length-prefixed bincode message. Returns `Ok(None)` on a clean EOF
+/// (peer detached) so the caller can stop the read loop without treating it as
+/// an error.
+pub fn read_msg(r: &mut impl Read) -> io::Result<Option<StreamMsg>> {
+    let mut len_buf = [0u8; 4];
+    match r.read_exact(&mut len_buf) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let len = u32::from_le_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf)?;
+    let msg = bincode::deserialize(&buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    Ok(Some(msg))
+}
+
+/// GUI-side handle to the daemon's control socket. Sends fire-and-forget
+/// JSON-RPC (input / resize / scroll); a background thread drains responses
+/// so the daemon never blocks on an unread reply.
+pub struct DaemonClient {
+    ctrl: Mutex<LocalStream>,
+}
+
+impl DaemonClient {
+    pub fn connect(ctrl_path: &Path) -> io::Result<Self> {
+        let stream = LocalStream::connect(ctrl_path)?;
+        // Drain (and discard) responses on a background thread — input RPC is
+        // fire-and-forget, but an unread reply would eventually back-pressure
+        // the daemon's per-connection writer.
+        let mut drain = stream.try_clone()?;
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            loop {
+                match drain.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        });
+        Ok(Self { ctrl: Mutex::new(stream) })
+    }
+
+    fn rpc(&self, method: &str, params: Value) {
+        let line = serde_json::to_string(&json!({"id": 0, "method": method, "params": params}))
+            .unwrap_or_default();
+        if let Ok(mut s) = self.ctrl.lock() {
+            let _ = s.write_all(line.as_bytes());
+            let _ = s.write_all(b"\n");
+            let _ = s.flush();
+        }
+    }
+
+    /// Forward raw key bytes to a pane's PTY (space-separated hex on the wire,
+    /// matching the daemon's `surface.send_raw` decoder).
+    pub fn send_raw(&self, surface_id: Option<&str>, bytes: &[u8]) {
+        let hex: String = bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut p = json!({ "hex": hex });
+        if let Some(t) = surface_id {
+            p["surface_id"] = json!(t);
+        }
+        self.rpc("surface.send_raw", p);
+    }
+
+    pub fn resize(&self, surface_id: &str, cols: u16, rows: u16) {
+        self.rpc(
+            "surface.resize",
+            json!({ "surface_id": surface_id, "cols": cols, "rows": rows }),
+        );
+    }
+
+    pub fn scroll(&self, surface_id: &str, lines: i32) {
+        self.rpc(
+            "surface.scroll",
+            json!({ "surface_id": surface_id, "lines": lines }),
+        );
+    }
+
+    /// Split the daemon's active pane along an axis (Horizontal = side-by-side,
+    /// Vertical = stacked). The daemon picks the new pane id and pushes a
+    /// `Layout` message back; we don't need the RPC reply.
+    pub fn split_dir(&self, dir: pty_backend::SplitDir) {
+        let d = match dir {
+            pty_backend::SplitDir::Horizontal => "right",
+            pty_backend::SplitDir::Vertical => "down",
+        };
+        self.rpc("surface.split", json!({ "direction": d }));
+    }
+
+    pub fn close(&self, surface_id: &str) {
+        self.rpc("surface.close", json!({ "surface_id": surface_id }));
+    }
+
+    pub fn focus(&self, surface_id: &str) {
+        self.rpc("surface.focus", json!({ "surface_id": surface_id }));
+    }
+
+    pub fn new_session(&self) {
+        self.rpc("session.new", json!({}));
+    }
+
+    pub fn new_window(&self) {
+        self.rpc("window.new", json!({}));
+    }
+
+    pub fn switch_session(&self, idx: usize) {
+        self.rpc("session.switch", json!({ "idx": idx }));
+    }
+
+    pub fn switch_window(&self, idx: usize) {
+        self.rpc("window.switch", json!({ "idx": idx }));
+    }
+
+    pub fn close_session(&self, idx: usize) {
+        self.rpc("session.close", json!({ "idx": idx }));
+    }
+}
+
+/// Spawn `self --daemon --socket <ctrl>` detached. The child outlives this GUI
+/// process. stdout/stderr go to a log file so daemon-side panics/errors are
+/// diagnosable (stdio-null would silently swallow them).
+pub fn spawn_daemon(ctrl_path: &Path) -> io::Result<()> {
+    use std::process::Stdio;
+    let exe = std::env::current_exe()?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/kasaterm-daemon.log")
+        .ok();
+    let (out, err) = match log {
+        Some(f) => match f.try_clone() {
+            Ok(f2) => (Stdio::from(f), Stdio::from(f2)),
+            Err(_) => (Stdio::null(), Stdio::null()),
+        },
+        None => (Stdio::null(), Stdio::null()),
+    };
+    std::process::Command::new(exe)
+        .arg("--daemon")
+        .arg("--socket")
+        .arg(ctrl_path)
+        .stdin(Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .spawn()?;
+    Ok(())
+}
+
+/// Poll-connect until the daemon's control socket accepts (or `timeout`).
+pub fn wait_for_socket(path: &Path, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if LocalStream::connect(path).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    false
+}

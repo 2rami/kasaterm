@@ -7,9 +7,12 @@
 
 mod autosuggest;
 mod cells;
+mod daemon;
 mod gpu;
 mod socket;
+mod stream;
 mod theme;
+mod transcript;
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
@@ -64,32 +67,22 @@ fn cjk_display_w(c: char) -> usize {
 /// radius `r`, giving genuine rounded corners. `r` is small (≤~10px) so this
 /// is only a handful of extra quads; rendering is throttled anyway.
 fn round_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
-    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
-    // Middle block (no rounding needed between the two caps).
-    g.rect(x, y + r, w, (h - 2.0 * r).max(0.0), col);
-    if r <= 0.0 {
-        return;
-    }
-    let steps = r.ceil() as i32;
-    for k in 0..steps {
-        let yy = k as f32; // distance inward from the cap's outer edge
-        // x-inset so the corner traces a circle of radius r.
-        let dx = r - (r * r - (r - yy) * (r - yy)).max(0.0).sqrt();
-        let rw = (w - 2.0 * dx).max(0.0);
-        g.rect(x + dx, y + yy, rw, 1.0, col); // top cap row
-        g.rect(x + dx, y + h - 1.0 - yy, rw, 1.0, col); // bottom cap row
-    }
+    // Single anti-aliased implementation lives on the renderer so the chrome
+    // and the markdown code-block chips round identically.
+    g.round_rect_fill(x, y, w, h, r, col);
 }
 
-/// Glyph shown in a sidebar tab's icon chip, chosen from the window label.
+/// Lucide icon name for a sidebar tab's chip, chosen from the window label.
+/// claude panes get the sparkle, markdown docs a file, everything else the
+/// terminal glyph — keeps window identity readable after the SVG switch.
 fn tab_icon_glyph(name: &str) -> &'static str {
     let l = name.to_ascii_lowercase();
     if name.contains('✳') || l.contains("claude") {
-        "✳"
+        "sparkles"
     } else if l.ends_with(".md") {
-        "M"
+        "file-text"
     } else {
-        ">"
+        "terminal"
     }
 }
 
@@ -98,35 +91,6 @@ fn tab_icon_glyph(name: &str) -> &'static str {
 /// icon button (title bar, sidebar, pane header, image controls) reads
 /// identically. The clickable area is `theme::ICON_CHIP` square — hit-test
 /// against the same rect.
-fn draw_icon(
-    g: &mut gpu::GpuRenderer,
-    chip_x: f32,
-    chip_y: f32,
-    glyph: &str,
-    color: [u8; 4],
-    hovered: bool,
-) {
-    if hovered {
-        round_rect(
-            g,
-            chip_x,
-            chip_y,
-            theme::ICON_CHIP,
-            theme::ICON_CHIP,
-            theme::ICON_CHIP_RADIUS,
-            theme::ICON_HOVER_BG,
-        );
-    }
-    let iw = g.measure_chrome_text(glyph, theme::ICON_SIZE, false);
-    let gx = chip_x + (theme::ICON_CHIP - iw) / 2.0;
-    let gy = chip_y + (theme::ICON_CHIP - theme::ICON_SIZE) / 2.0;
-    g.draw_text(
-        gx,
-        gy,
-        glyph,
-        gpu::DrawOpts { font_size: theme::ICON_SIZE, color, bold: false, italic: false },
-    );
-}
 /// Line spacing multiplier passed to `compute_cell_metrics`. 1.0 keeps
 /// rows at font ascent+descent so the cell aspect ratio stays close to
 /// 1:2 — that's what makes half-block sprite art (Claude Code's mascot,
@@ -1936,9 +1900,13 @@ impl Workspace {
 /// instead — winit delivers it as a `user_event` that wakes the loop
 /// immediately, so a committed Hangul echo / backspace / space paints
 /// without the ~0.5s blink-cadence lag.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum UserEvent {
     Redraw,
+    /// Daemon pushed its full session>window>pane structure (split/close/new/
+    /// switch happened on its side); the GUI adopts the active window's layout
+    /// and refreshes session/window metadata.
+    DaemonState(stream::StateView),
 }
 
 /// One terminal session: its own pane set, layout, and workspace. The visible
@@ -2025,6 +1993,11 @@ struct App {
     /// pushes commands here; the main thread drains them in
     /// `about_to_wait`. None until `start_socket_pty` wires it up.
     socket_handle: Option<socket::PtyBackendHandle>,
+    /// Set when running as a GUI attached to a daemon (KASATERM_DAEMON=1):
+    /// PTY input / resize / scroll route to the daemon over this client
+    /// instead of a local PtySession. None in the default in-process mode.
+    /// Arc so background timers (autosend) can hold a handle too.
+    daemon_client: Option<Arc<stream::DaemonClient>>,
     ws: Arc<Mutex<Workspace>>,
     /// All sessions (tmux-style tabs) by tab index. The visible session's slot
     /// holds `None` — its live state is the fields above (pty/pty_layout/ws).
@@ -2225,6 +2198,11 @@ struct App {
     /// per-pane `PaneState::dirty` instead.
     chrome_dirty: bool,
     cursor_px: (f32, f32),
+    /// Headless hover testing: KASATERM_AUTOHOVER="x,y" (logical px) pins
+    /// the cursor so a screenshot can capture a hover state without a real
+    /// mouse (cliclick needs Accessibility perms). Real CursorMoved events
+    /// are ignored while set.
+    autohover: Option<(f32, f32)>,
     modifiers: ModifiersState,
     wheel_accum_y: f32,
     last_wheel_emit: Instant,
@@ -2327,6 +2305,7 @@ impl App {
             autotabs_at: None,
             dead_panes: Arc::new(Mutex::new(Vec::new())),
             socket_handle: None,
+            daemon_client: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
             sessions: vec![None],
             saved_session_labels: Vec::new(),
@@ -2378,7 +2357,17 @@ impl App {
             last_window_title_check: None,
             last_blink_on: false,
             chrome_dirty: true,
-            cursor_px: (0.0, 0.0),
+            cursor_px: std::env::var("KASATERM_AUTOHOVER")
+                .ok()
+                .and_then(|s| {
+                    let (a, b) = s.split_once(',')?;
+                    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+                })
+                .unwrap_or((0.0, 0.0)),
+            autohover: std::env::var("KASATERM_AUTOHOVER").ok().and_then(|s| {
+                let (a, b) = s.split_once(',')?;
+                Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+            }),
             modifiers: ModifiersState::empty(),
             wheel_accum_y: 0.0,
             last_wheel_emit: Instant::now() - std::time::Duration::from_secs(1),
@@ -3069,13 +3058,16 @@ impl App {
         // grab the active session here so the closure doesn't need
         // self access.
         let pty = self.active_pty().cloned();
+        let daemon = self.daemon_client.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(ms));
             let mut payload = text.clone();
             if !payload.ends_with('\n') {
                 payload.push('\n');
             }
-            if let Some(t) = tmux.as_ref() {
+            if let Some(d) = daemon.as_ref() {
+                d.send_raw(None, payload.as_bytes());
+            } else if let Some(t) = tmux.as_ref() {
                 let hex: String = payload
                     .bytes()
                     .map(|b| format!("{b:02x}"))
@@ -3093,6 +3085,97 @@ impl App {
     /// `split_active_pane` (every additional pane), so the per-pane
     /// state arrives through the same path no matter when the session
     /// was spawned.
+    /// Apply one decoded ScreenUpdate to the workspace: route to the right
+    /// tab, reflow on size change, blit dirty rows, carry cursor/mode/title.
+    /// Shared by the in-process channel pump (`pump_pty_screens`) and the
+    /// daemon stream pump (`pump_daemon_stream`). The caller holds the ws lock
+    /// and fires the redraw; this only mutates ws.
+    fn apply_screen_update(ws: &mut Workspace, update: tmux_bridge::screen::ScreenUpdate) {
+        if ws.active_pane.is_none() {
+            ws.active_pane = Some(update.pane_id.clone());
+        }
+        // Route the update to the *tab* whose pid matches this stream.
+        // Single-tab panes round-trip through the outer id; secondary
+        // tabs spawned via the in-pane + button route through
+        // `pid_to_pane`. Falls back to creating an outer pane entry
+        // when the first update from a freshly-spawned shell arrives.
+        let (pane, tab_idx) = match ws.find_tab_by_pty(&update.pane_id) {
+            Some(p) => p,
+            None => {
+                // Brand-new pty id → create the outer PaneState with a
+                // single tab that owns this pid. Seed pid_to_pane so
+                // subsequent updates hit the O(1) path.
+                let pane = ws.pane_mut(&update.pane_id);
+                pane.tabs[0].pid = Some(update.pane_id.clone());
+                ws.pid_to_pane
+                    .insert(update.pane_id.clone(), update.pane_id.clone());
+                let pane = ws.panes.get_mut(&update.pane_id).expect("just inserted");
+                (pane, 0usize)
+            }
+        };
+        let tab = &mut pane.tabs[tab_idx];
+        let tp = tab.term_mut().expect("pty pane must be terminal");
+        let resized = tp.cols != update.cols
+            || tp.rows != update.rows
+            || tp.cells.len() != update.rows as usize;
+        if resized {
+            // Preserve existing rows / columns through a resize so
+            // the user sees their old content during the brief gap
+            // between SIGWINCH and the shell's reflowed repaint —
+            // otherwise the grid blanks for one frame and the
+            // divider drag flickers visibly on every cell crossing.
+            // Truncate / extend in place; the shell's subsequent
+            // `update.dirty` overwrites the affected rows.
+            tp.cols = update.cols;
+            tp.rows = update.rows;
+            let nr = update.rows as usize;
+            let nc = update.cols as usize;
+            tp.cells.truncate(nr);
+            while tp.cells.len() < nr {
+                tp.cells.push(vec![GridCell::blank(); nc]);
+            }
+            for row in &mut tp.cells {
+                row.truncate(nc);
+                while row.len() < nc {
+                    row.push(GridCell::blank());
+                }
+            }
+            tp.prev_cells.clear();
+        }
+        for (r, row) in update.dirty {
+            if let Some(dst) = tp.cells.get_mut(r as usize) {
+                *dst = row;
+            }
+        }
+        // Shift detection on the pty side is retired — alacritty handles
+        // scrollback natively via display_offset. Hand-rolled detection
+        // breaks scroll-region TUIs (like Claude Code) when they write to sync.
+        tp.cursor_row = update.cursor_row;
+        tp.cursor_col = update.cursor_col;
+        tp.cursor_visible = update.cursor_visible;
+        tp.alt_screen = update.alt_screen;
+        tp.mouse_enabled = update.mouse_enabled;
+        tp.mouse_sgr = update.mouse_sgr;
+        tp.app_cursor = update.app_cursor;
+        // Carry the OSC 133 prompt-end mark only on frames that
+        // actually emitted one; keep the last otherwise so a
+        // mid-typing frame doesn't erase it.
+        if let Some(pe) = update.prompt_end {
+            tp.prompt_end = Some(pe);
+        }
+        // OSC 0/2 title from the inner program (Claude Code's
+        // conversation summary, vim filename, etc.). Pinned panes
+        // (renamed via surface.rename / run_job) keep their agent-set
+        // label; only unpinned panes track OSC.
+        if let Some(t) = update.title.clone() {
+            if !tab.title_pinned {
+                tab.title = Some(t);
+            }
+        }
+        let _ = tab;
+        pane.dirty = true;
+    }
+
     fn pump_pty_screens(
         &self,
         screens: pty_backend::ScreenReceiver<tmux_bridge::screen::ScreenUpdate>,
@@ -3161,95 +3244,7 @@ impl App {
                     }
                 }
                 let mut ws = ws_screens.lock().unwrap();
-                if ws.active_pane.is_none() {
-                    ws.active_pane = Some(update.pane_id.clone());
-                }
-                // Route the update to the *tab* whose pid matches this stream.
-                // Single-tab panes round-trip through the outer id; secondary
-                // tabs spawned via the in-pane + button route through
-                // `pid_to_pane`. Falls back to creating an outer pane entry
-                // when the first update from a freshly-spawned shell arrives.
-                let (pane, tab_idx) = match ws.find_tab_by_pty(&update.pane_id) {
-                    Some(p) => p,
-                    None => {
-                        // Brand-new pty id → create the outer PaneState with a
-                        // single tab that owns this pid. Seed pid_to_pane so
-                        // subsequent updates hit the O(1) path.
-                        let pane = ws.pane_mut(&update.pane_id);
-                        pane.tabs[0].pid = Some(update.pane_id.clone());
-                        ws.pid_to_pane
-                            .insert(update.pane_id.clone(), update.pane_id.clone());
-                        let pane = ws.panes.get_mut(&update.pane_id).expect("just inserted");
-                        (pane, 0usize)
-                    }
-                };
-                let tab = &mut pane.tabs[tab_idx];
-                let tp = tab.term_mut().expect("pty pane must be terminal");
-                let resized = tp.cols != update.cols
-                    || tp.rows != update.rows
-                    || tp.cells.len() != update.rows as usize;
-                if resized {
-                    // Preserve existing rows / columns through a resize so
-                    // the user sees their old content during the brief gap
-                    // between SIGWINCH and the shell's reflowed repaint —
-                    // otherwise the grid blanks for one frame and the
-                    // divider drag flickers visibly on every cell crossing.
-                    // Truncate / extend in place; the shell's subsequent
-                    // `update.dirty` overwrites the affected rows.
-                    tp.cols = update.cols;
-                    tp.rows = update.rows;
-                    let nr = update.rows as usize;
-                    let nc = update.cols as usize;
-                    tp.cells.truncate(nr);
-                    while tp.cells.len() < nr {
-                        tp.cells.push(vec![GridCell::blank(); nc]);
-                    }
-                    for row in &mut tp.cells {
-                        row.truncate(nc);
-                        while row.len() < nc {
-                            row.push(GridCell::blank());
-                        }
-                    }
-                    tp.prev_cells.clear();
-                }
-                for (r, row) in update.dirty {
-                    if let Some(dst) = tp.cells.get_mut(r as usize) {
-                        *dst = row;
-                    }
-                }
-                // Shift detection on the pty side is retired — alacritty handles
-                // scrollback natively via display_offset. Hand-rolled detection
-                // breaks scroll-region TUIs (like Claude Code) when they write to sync.
-                tp.cursor_row = update.cursor_row;
-                tp.cursor_col = update.cursor_col;
-                tp.cursor_visible = update.cursor_visible;
-                tp.alt_screen = update.alt_screen;
-                tp.mouse_enabled = update.mouse_enabled;
-                tp.mouse_sgr = update.mouse_sgr;
-                tp.app_cursor = update.app_cursor;
-                // Carry the OSC 133 prompt-end mark only on frames that
-                // actually emitted one; keep the last otherwise so a
-                // mid-typing frame doesn't erase it.
-                if let Some(pe) = update.prompt_end {
-                    tp.prompt_end = Some(pe);
-                }
-                // OSC 0/2 title from the inner program (Claude Code's
-                // conversation summary, vim filename, etc.). Carry it
-                // through to PaneState so the chrome header + the
-                // macOS window title see the freshest value.
-                // Pinned panes (renamed via surface.rename / run_job) keep
-                // their agent-set label; only unpinned panes track OSC.
-                if let Some(t) = update.title.clone() {
-                    if !tab.title_pinned {
-                        tab.title = Some(t);
-                    }
-                }
-                // Any tab receiving output flips the pane dirty so the
-                // next frame's chrome (tab label, indicator) ticks promptly.
-                // Only the active tab's grid is painted; background-tab
-                // grids stay in `pane.tabs[i]` for when the user switches.
-                let _ = tab;
-                pane.dirty = true;
+                Self::apply_screen_update(&mut ws, update);
                 drop(ws);
                 if let Some(w) = win_screens.as_ref() {
                     w.request_redraw();
@@ -3743,6 +3738,20 @@ impl App {
 
     fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
+        // Daemon mode (default ON; opt out with KASATERM_DAEMON=0): don't spawn
+        // a local PTY — discover (or launch) the daemon and attach so shells
+        // survive GUI restarts. If attach fails for any reason, fall through to
+        // the in-process path so the app still comes up.
+        let daemon_enabled = std::env::var("KASATERM_DAEMON").map_or(true, |v| v != "0");
+        if daemon_enabled {
+            match self.attach_daemon() {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    eprintln!("[daemon] attach failed: {e}; falling back to in-process PTY");
+                    self.daemon_client = None;
+                }
+            }
+        }
         let (cols, rows) = self.window_cells();
         // Export the agent-socket path BEFORE the first PtySession spawn so the
         // initial shell inherits a working KASATERM_SOCKET_PATH. start_socket_pty
@@ -3813,6 +3822,116 @@ impl App {
         // wired so the very first surface.list call sees them.
         self.start_socket_pty();
         Ok(())
+    }
+
+    /// Daemon-mode startup: discover a running daemon (or spawn one), open the
+    /// control + stream sockets, and start rendering the daemon's pane. The
+    /// daemon owns the PTY, so this GUI holds no PtySession — input/resize/
+    /// scroll go out as RPC, screen frames come in over the stream socket.
+    /// Fixed control-socket path for the daemon. Unlike the pid-based
+    /// `resolve_kasaterm_socket_path` (per-process cmux socket), this stays
+    /// constant across GUI restarts so discovery finds the running daemon.
+    /// Deliberately NOT keyed off `KASATERM_SOCKET_PATH` (the per-process cmux
+    /// socket a parent kasaterm injects into child shells) so a nested kasaterm
+    /// doesn't mistake its parent's socket for the daemon. `KASATERM_DAEMON_
+    /// SOCKET` overrides it (tests use this for isolation).
+    fn daemon_control_path() -> std::path::PathBuf {
+        if let Ok(p) = std::env::var("KASATERM_DAEMON_SOCKET") {
+            if !p.is_empty() {
+                return std::path::PathBuf::from(p);
+            }
+        }
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        std::path::PathBuf::from(home).join(".config/kasaterm/daemon.sock")
+    }
+
+    fn attach_daemon(&mut self) -> Result<()> {
+        let ctrl_path = Self::daemon_control_path();
+        if let Some(parent) = ctrl_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let ctrl = ctrl_path.to_string_lossy().into_owned();
+        std::env::set_var("KASATERM_SOCKET_PATH", &ctrl);
+        std::env::set_var("CMUX_SOCKET_PATH", &ctrl);
+        // Discovery: connect to a live daemon, else spawn one and wait for it.
+        let client = match stream::DaemonClient::connect(&ctrl_path) {
+            Ok(c) => c,
+            Err(_) => {
+                stream::spawn_daemon(&ctrl_path).map_err(anyhow::Error::from)?;
+                if !stream::wait_for_socket(&ctrl_path, std::time::Duration::from_secs(3)) {
+                    anyhow::bail!("daemon control socket never came up");
+                }
+                stream::DaemonClient::connect(&ctrl_path).map_err(anyhow::Error::from)?
+            }
+        };
+        self.daemon_client = Some(Arc::new(client));
+        // The daemon binds the stream socket just after the control socket;
+        // retry briefly to dodge that startup gap.
+        let spath = stream::stream_path(&ctrl_path);
+        let mut conn = None;
+        for _ in 0..75 {
+            if let Ok(s) = agent_socket::transport::LocalStream::connect(&spath) {
+                conn = Some(s);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        let conn = conn.ok_or_else(|| anyhow::anyhow!("daemon stream socket unavailable"))?;
+        self.pump_daemon_stream(conn, "%0".to_string());
+        self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
+        self.ws.lock().unwrap().active_pane = Some("%0".to_string());
+        // Size the daemon's PTY to this window now that we're attached.
+        let (cols, rows) = self.window_cells();
+        if let Some(c) = self.daemon_client.as_ref() {
+            c.resize("%0", cols, rows);
+        }
+        Ok(())
+    }
+
+    /// Daemon stream pump: decode bincode frames off the stream socket and
+    /// apply them through the same `apply_screen_update` path the in-process
+    /// pump uses. Mirrors `pump_pty_screens` but reads from the socket.
+    fn pump_daemon_stream(&self, conn: agent_socket::transport::LocalStream, pane_id: String) {
+        let ws_screens = self.ws.clone();
+        let win_screens = self.window.clone();
+        let dead = self.dead_panes.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let mut conn = conn;
+            loop {
+                match stream::read_msg(&mut conn) {
+                    Ok(Some(stream::StreamMsg::Frame(update))) => {
+                        if update.eof {
+                            dead.lock().unwrap().push(update.pane_id.clone());
+                            let _ = proxy.send_event(UserEvent::Redraw);
+                            continue;
+                        }
+                        let mut ws = ws_screens.lock().unwrap();
+                        Self::apply_screen_update(&mut ws, update);
+                        drop(ws);
+                        if let Some(w) = win_screens.as_ref() {
+                            w.request_redraw();
+                        }
+                        let _ = proxy.send_event(UserEvent::Redraw);
+                    }
+                    // Structure change (split/close/new/switch on the daemon) —
+                    // hand to the main thread, which owns pty_layout + publish.
+                    Ok(Some(stream::StreamMsg::State(view))) => {
+                        let _ = proxy.send_event(UserEvent::DaemonState(view));
+                    }
+                    // Clean EOF (daemon gone) or decode error — flag the pane
+                    // dead so the main thread reaps it on its next tick.
+                    Ok(None) | Err(_) => {
+                        dead.lock().unwrap().push(pane_id);
+                        if let Some(w) = win_screens.as_ref() {
+                            w.request_redraw();
+                        }
+                        let _ = proxy.send_event(UserEvent::Redraw);
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     /// Rebuild every saved session (A3 restore). Each session's panes are
@@ -5079,6 +5198,14 @@ impl App {
     /// size. In tmux mode the daemon redistributes for us. In PTY mode
     /// we walk the BSP tree and SIGWINCH each leaf to its own rect.
     fn resize_backend(&self, cols: u16, rows: u16) {
+        if let Some(client) = self.daemon_client.as_ref() {
+            // M1: a single daemon pane fills the whole window — resize it to
+            // the full cell grid. Multi-pane layout math moves to the daemon
+            // in a later milestone.
+            client.resize("%0", cols, rows);
+            self.publish_pty_layout();
+            return;
+        }
         if let Some(tmux) = self.tmux.as_ref() {
             let _ = tmux.resize_client(cols, rows);
             return;
@@ -5191,6 +5318,17 @@ impl App {
     /// tmux mode — splits there go through the cmux socket / tmux
     /// `split-window` instead.
     fn split_active_pane(&mut self, dir: pty_backend::SplitDir) -> Result<()> {
+        if let Some(client) = self.daemon_client.as_ref() {
+            // Daemon owns the layout: it spawns the pane, splits its tree, and
+            // pushes the new Layout back (applied in user_event). Sync the
+            // daemon's active pane to ours first so the split lands on the
+            // pane the user is actually focused on.
+            if let Some(id) = self.ws.lock().unwrap().active_pane.clone() {
+                client.focus(&id);
+            }
+            client.split_dir(dir);
+            return Ok(());
+        }
         if self.tmux.is_some() {
             return Ok(());
         }
@@ -5910,6 +6048,12 @@ impl App {
     /// Last-pane close is a no-op — quitting the window is the
     /// user's exit there.
     fn close_active_pane(&mut self) {
+        if let Some(client) = self.daemon_client.as_ref() {
+            if let Some(id) = self.ws.lock().unwrap().active_pane.clone() {
+                client.close(&id);
+            }
+            return;
+        }
         if self.tmux.is_some() {
             return;
         }
@@ -6152,7 +6296,11 @@ impl App {
         // a tmux send-keys quirk (the daemon decodes hex pairs back
         // to bytes itself); for the pty backend we hand the raw bytes
         // straight to the PTY writer.
-        if let Some(tmux) = self.tmux.as_ref() {
+        if let Some(client) = self.daemon_client.as_ref() {
+            // Daemon-attached GUI: input goes over the control socket; the
+            // daemon owns the PTY writer.
+            client.send_raw(self.target_pane().as_deref(), bytes);
+        } else if let Some(tmux) = self.tmux.as_ref() {
             let hex: String = bytes
                 .iter()
                 .map(|b| format!("{b:02x}"))
@@ -6640,7 +6788,11 @@ impl App {
         let step = lines.unsigned_abs().min(8) as i32;
         let _ = hist_len;
         if let Some(id) = target_pane_id.as_deref() {
-            if self.tmux.is_some() {
+            if let Some(client) = self.daemon_client.as_ref() {
+                // Daemon owns the scrollback; it re-snapshots and streams the
+                // scrolled grid back to us. Positive `lines` = toward history.
+                client.scroll(id, if lines > 0 { step } else { -step });
+            } else if self.tmux.is_some() {
                 if let Ok(mut ws) = self.ws.lock() {
                     if let Some(pane) = ws.panes.get_mut(id) {
                         pane.dirty = true;
@@ -8210,25 +8362,18 @@ impl App {
                 if hover {
                     round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
                 }
-                let fg = if hover { theme::TEXT } else { theme::TEXT_DIM };
-                // Icon box centered in the button.
-                let iw = 16.0;
-                let ih = 12.0;
-                let ix = bx + (bw - iw) / 2.0;
-                let iy = by + (bh - ih) / 2.0;
-                let t = 1.5;
-                // Rounded-ish outline via four hairline edges.
-                g.rect(ix, iy, iw, t, fg);
-                g.rect(ix, iy + ih - t, iw, t, fg);
-                g.rect(ix, iy, t, ih, fg);
-                g.rect(ix + iw - t, iy, t, ih, fg);
-                // Left column divider + fill (the "sidebar"): solid when
-                // shown so the button reads as a state indicator.
-                let split_x = ix + iw * 0.36;
-                g.rect(split_x, iy, t, ih, fg);
-                if sidebar_w > 0.0 {
-                    g.rect(ix + t, iy + t, split_x - ix - t, ih - 2.0 * t, theme::with_alpha(fg, 0x66));
-                }
+                // Brighter when the sidebar is open (state indicator) or on
+                // hover; the panel-left SVG shape stays constant.
+                let active = sidebar_w > 0.0;
+                let fg = if hover || active { theme::TEXT } else { theme::TEXT_DIM };
+                let isz = theme::ICON_SIZE;
+                g.queue_icon(
+                    "panel-left",
+                    bx + (bw - isz) / 2.0,
+                    by + (bh - isz) / 2.0,
+                    isz,
+                    fg,
+                );
             }
             // Top bar: folder icon + current working directory, just right of
             // the sidebar toggle (Warp-style location chip).
@@ -8238,17 +8383,8 @@ impl App {
                 let isz = theme::ICON_SIZE;
                 let iy = (TITLE_HEIGHT - isz) / 2.0;
                 let ty = (TITLE_HEIGHT - chrome_font) / 2.0;
-                let after = g.draw_text(
-                    px0,
-                    iy,
-                    "\u{f07b}",
-                    gpu::DrawOpts {
-                        font_size: isz,
-                        color: theme::TEXT_DIM,
-                        bold: false,
-                        italic: false,
-                    },
-                );
+                g.queue_icon("folder", px0, iy, isz, theme::TEXT_DIM);
+                let after = px0 + isz;
                 // Title-bar cwd chip follows the FOCUSED pane's shell cwd —
                 // resolved via the shell's pid + /proc-style lookup. Falls
                 // back to kasaterm's own cwd when the pane has no PTY (image
@@ -8384,18 +8520,12 @@ impl App {
                         theme::SURFACE_ACTIVE
                     };
                     round_rect(g, icon_x, icon_y, icon, icon, icon / 2.0, chip_bg);
-                    let chip_glyph = tab_icon_glyph(&name);
-                    let cg_w = g.measure_chrome_text(chip_glyph, theme::ICON_SIZE, true);
-                    g.draw_text(
-                        icon_x + (icon - cg_w) / 2.0,
+                    g.queue_icon(
+                        tab_icon_glyph(&name),
+                        icon_x + (icon - theme::ICON_SIZE) / 2.0,
                         icon_y + (icon - theme::ICON_SIZE) / 2.0,
-                        chip_glyph,
-                        gpu::DrawOpts {
-                            font_size: theme::ICON_SIZE,
-                            color: theme::TEXT_DIM,
-                            bold: true,
-                            italic: false,
-                        },
+                        theme::ICON_SIZE,
+                        theme::TEXT_DIM,
                     );
                     // Two-line label to the right of the icon.
                     let text_x = icon_x + icon + 10.0;
@@ -8442,18 +8572,12 @@ impl App {
                         if let Some((_, (cx, cy, cw, ch))) =
                             sb_closes.iter().find(|(ci, _)| ci == i)
                         {
-                            let xg = "\u{2715}";
-                            let xw = g.measure_chrome_text(xg, theme::ICON_SIZE, false);
-                            g.draw_text(
-                                *cx + (*cw - xw) / 2.0,
+                            g.queue_icon(
+                                "x",
+                                *cx + (*cw - theme::ICON_SIZE) / 2.0,
                                 *cy + (*ch - theme::ICON_SIZE) / 2.0,
-                                xg,
-                                gpu::DrawOpts {
-                                    font_size: theme::ICON_SIZE,
-                                    color: theme::TEXT_MUTE,
-                                    bold: false,
-                                    italic: false,
-                                },
+                                theme::ICON_SIZE,
+                                theme::TEXT_MUTE,
                             );
                         }
                     }
@@ -8468,18 +8592,12 @@ impl App {
                 if plus_hover {
                     round_rect(g, px, py, pw, ph, theme::RADIUS_MD, theme::SURFACE_HOVER);
                 }
-                let plus_g = "+";
-                let plus_gw = g.measure_chrome_text(plus_g, theme::ICON_SIZE, false);
-                g.draw_text(
-                    px + (pw - plus_gw) / 2.0,
+                g.queue_icon(
+                    "plus",
+                    px + (pw - theme::ICON_SIZE) / 2.0,
                     py + (ph - theme::ICON_SIZE) / 2.0,
-                    plus_g,
-                    gpu::DrawOpts {
-                        font_size: theme::ICON_SIZE,
-                        color: theme::TEXT_MUTE,
-                        bold: false,
-                        italic: false,
-                    },
+                    theme::ICON_SIZE,
+                    theme::TEXT_MUTE,
                 );
                 // Shell picker popup, stacked under the "+" button. Layout
                 // (shell_menu_layout) and hit rects were computed before the
@@ -8495,7 +8613,7 @@ impl App {
                         theme::RADIUS_MD,
                         theme::SURFACE_ACTIVE,
                     );
-                    for (_, label, icon, (ix, iy, iw, ih)) in &shell_menu_layout {
+                    for (_, label, _icon, (ix, iy, iw, ih)) in &shell_menu_layout {
                         let hov = sb_cursor.0 >= *ix
                             && sb_cursor.0 <= *ix + *iw
                             && sb_cursor.1 >= *iy
@@ -8503,11 +8621,12 @@ impl App {
                         if hov {
                             round_rect(g, *ix, *iy, *iw, *ih, theme::RADIUS_MD, theme::SURFACE_HOVER);
                         }
-                        g.draw_text(
+                        g.queue_icon(
+                            "terminal",
                             *ix + 12.0,
                             *iy + (*ih - theme::ICON_SIZE) / 2.0,
-                            icon,
-                            gpu::DrawOpts { font_size: theme::ICON_SIZE, color: theme::TEXT_DIM, bold: false, italic: false },
+                            theme::ICON_SIZE,
+                            theme::TEXT_DIM,
                         );
                         g.draw_text(
                             *ix + 38.0,
@@ -8577,9 +8696,10 @@ impl App {
                 } else {
                     h.tabs.iter().map(|s| s.as_str()).collect()
                 };
-                let _icon_w = g.measure_chrome_text("\u{f489}", icon_size, false);
-                let close_w = g.measure_chrome_text("\u{2715}", icon_size, false);
-                let plus_w = g.measure_chrome_text("\u{ea60}", icon_size, false);
+                // SVG icons are square at icon_size; reserve that exact width
+                // (not a glyph measurement) so the × never crowds the tab edge.
+                let close_w = icon_size;
+                let plus_w = icon_size;
                 // Each tab's title gets an equal share of the leftover width.
                 let tabs_area = (h.w - 8.0 - btn_cluster - plus_w - 16.0).max(0.0);
                 let per_tab = if tab_list.len() == 1 {
@@ -8681,15 +8801,21 @@ impl App {
                     );
                     if show_x {
                         let close_x = cx + 8.0;
-                        let cxe = g.draw_text(
-                            close_x,
-                            icon_y,
-                            "\u{2715}",
-                            gpu::DrawOpts { font_size: icon_size, color: t_icon, bold: false, italic: false },
-                        );
+                        // Hover chip behind the × — same lift the +button gets,
+                        // so the close target reads as clickable on hover.
+                        let chip = icon_size + 6.0;
+                        let chip_x = close_x + (icon_size - chip) / 2.0;
+                        let chip_y = h.y + (PANE_HEADER_HEIGHT - chip) / 2.0;
+                        let (mx, my) = self.cursor_px;
+                        let x_hover =
+                            mx >= chip_x && mx <= chip_x + chip && my >= chip_y && my <= chip_y + chip;
+                        if x_hover {
+                            round_rect(g, chip_x, chip_y, chip, chip, theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
+                        }
+                        let xcol = if x_hover { theme::TEXT } else { t_icon };
+                        g.queue_icon("x", close_x, icon_y, icon_size, xcol);
                         // × close hit (widen a little for an easy target).
-                        let cw = (cxe - close_x).max(icon_size * 0.6);
-                        tab_close_hits.push((h.id.clone(), i, (close_x - 2.0, h.y, cw + 4.0, PANE_HEADER_HEIGHT)));
+                        tab_close_hits.push((h.id.clone(), i, (close_x - 2.0, h.y, icon_size + 4.0, PANE_HEADER_HEIGHT)));
                     }
                     // Whole-pill click/drag hit. Inactive tabs have no × inside,
                     // so the entire pill switches; the active tab's × is checked
@@ -8768,12 +8894,7 @@ impl App {
                 }
                 let plus_color = if plus_hover { theme::TEXT } else { act_fg };
                 if !dragging_tab {
-                    g.draw_text(
-                        tx,
-                        icon_y,
-                        "\u{ea60}",
-                        gpu::DrawOpts { font_size: icon_size, color: plus_color, bold: false, italic: false },
-                    );
+                    g.queue_icon("plus", tx, icon_y, icon_size, plus_color);
                     plus_hits.push((h.id.clone(), plus_rect));
                 }
                 // ── Right action buttons ── per-kind cluster: terminal panes
@@ -8785,20 +8906,19 @@ impl App {
                 // tuple keeps the paint loop unified.
                 let action_set: Vec<(&str, Option<ImageBtn>, Option<ActionKind>)> = if h.is_image {
                     vec![
-                        ("−", Some(ImageBtn::ZoomOut), None),
-                        ("+", Some(ImageBtn::ZoomIn), None),
-                        ("↻", Some(ImageBtn::Rotate), None),
-                        ("0", Some(ImageBtn::Reset), None),
+                        ("minus", Some(ImageBtn::ZoomOut), None),
+                        ("plus", Some(ImageBtn::ZoomIn), None),
+                        ("rotate-cw", Some(ImageBtn::Rotate), None),
+                        ("maximize", Some(ImageBtn::Reset), None),
                     ]
                 } else {
                     vec![
-                        ("\u{eb57}", None, Some(ActionKind::SplitV)),
-                        ("\u{eb56}", None, Some(ActionKind::SplitH)),
+                        ("columns-2", None, Some(ActionKind::SplitV)),
+                        ("rows-2", None, Some(ActionKind::SplitH)),
                     ]
                 };
                 let mut bx = h.x + h.w - 8.0 - (abw * n_btn + agap * (n_btn - 1.0));
                 for (ic, kind, action) in action_set {
-                    let iw = g.measure_chrome_text(ic, icon_size, false);
                     let chip_size = icon_size + 6.0;
                     let chip_y = h.y + (PANE_HEADER_HEIGHT - chip_size) / 2.0;
                     let chip_x = bx + (abw - chip_size) / 2.0;
@@ -8808,11 +8928,12 @@ impl App {
                             theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
                     }
                     let color = if hover { theme::TEXT } else { act_fg };
-                    g.draw_text(
-                        bx + (abw - iw) / 2.0,
-                        icon_y,
+                    g.queue_icon(
                         ic,
-                        gpu::DrawOpts { font_size: icon_size, color, bold: false, italic: false },
+                        chip_x + (chip_size - icon_size) / 2.0,
+                        chip_y + (chip_size - icon_size) / 2.0,
+                        icon_size,
+                        color,
                     );
                     if let Some(k) = kind {
                         image_btn_hits.push((h.id.clone(), k, (chip_x, chip_y, chip_size, chip_size)));
@@ -9029,7 +9150,17 @@ impl ApplicationHandler<UserEvent> for App {
     /// A background thread (PTY snapshot, socket) asked us to repaint.
     /// Delivered even while a WaitUntil is parked, so this is what makes
     /// committed-Hangul echo / backspace / space show up without lag.
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: UserEvent) {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        // Daemon-pushed structure: adopt the active window's layout as
+        // authoritative, then republish so the renderer's cached tree + pane
+        // rects match the daemon. (Session/window metadata for the sidebar +
+        // session panel is wired in the multi-session follow-up.)
+        if let UserEvent::DaemonState(view) = event {
+            if let Some(lay) = view.active_layout() {
+                self.pty_layout = Some(lay);
+                self.publish_pty_layout();
+            }
+        }
         // Render directly here instead of request_redraw → (next loop)
         // RedrawRequested. The PTY echo already paid a thread hop +
         // channel to reach us; bouncing through request_redraw adds
@@ -9365,7 +9496,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.effective_scale();
-                self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                if self.autohover.is_none() {
+                    self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                }
                 // A deferred titlebar press turns into a window move once the
                 // pointer travels past the threshold (so a stationary press
                 // stays a click and the double-click path keeps working).
@@ -10479,6 +10612,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     // of the binary still works (tmux calls inside the PTY fall back to
     // the real tmux on the user's PATH).
     install_tmux_shim();
+    // Headless daemon mode: own the PTY + sockets, no winit/GPU. The GUI
+    // spawns `self --daemon` and attaches over the socket; the daemon
+    // outlives the GUI so the shell keeps running across GUI restarts.
+    let mut args = std::env::args().skip(1);
+    let mut is_daemon = false;
+    let mut sock_arg: Option<String> = None;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--daemon" => is_daemon = true,
+            "--socket" => sock_arg = args.next(),
+            _ => {}
+        }
+    }
+    if is_daemon {
+        let path = sock_arg.unwrap_or_else(resolve_kasaterm_socket_path);
+        return daemon::run_daemon(std::path::PathBuf::from(path))
+            .map_err(|e| Box::<dyn Error>::from(e.to_string()));
+    }
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);

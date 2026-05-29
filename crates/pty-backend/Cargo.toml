@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 crossbeam-channel.workspace = true
+# Serialize the BSP layout tree so the daemon can ship it to an attaching GUI.
+serde.workspace = true
 portable-pty = "0.9"
 alacritty_terminal = "0.26"
 # Shared cell / color / ScreenUpdate types — tmuxify's renderer is

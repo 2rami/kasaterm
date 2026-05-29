@@ -26,6 +26,8 @@ license = "MIT"
 vt100 = "0.15"
 crossbeam-channel = "0.5"
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
 tmux-bridge = { path = "crates/tmux-bridge" }
 
 # kasaspace-mcp leans on heavy proc-macro crates (rmcp / schemars). The

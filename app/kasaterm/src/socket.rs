@@ -11,10 +11,14 @@ use agent_socket::backend::{
     WorkspaceInfo,
 };
 use anyhow::{anyhow, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tmux_bridge::TmuxSession;
+
+use crate::transcript::{build_activity, parse_line, ToolEvent, RECENT_MAX};
 
 const FIXED_WORKSPACE_ID: &str = "local-0";
 const FIXED_SURFACE_ID: &str = "pane-0";
@@ -326,20 +330,40 @@ pub struct PtyBackendHandle {
 
 pub struct PtyBackend {
     handle: PtyBackendHandle,
-    /// Shared collaboration board: surface_id -> what that pane is doing.
-    /// Lives on the backend rather than the main thread because it's pure
-    /// metadata — announce/board never touch the renderer, so they skip
-    /// the submit() round-trip and just lock this map. The whole backend
-    /// is `Arc`-shared across socket connections, so every pane sees the
-    /// same board.
+    /// Manual collaboration board: surface_id -> what that pane explicitly
+    /// announced. Lives on the backend rather than the main thread because
+    /// it's pure metadata — announce/board never touch the renderer, so they
+    /// skip the submit() round-trip and just lock this map. The whole backend
+    /// is `Arc`-shared across socket connections, so every pane sees the same
+    /// board. Kept separate from `collab_auto` so the transcript tail worker
+    /// and a manual announce never clobber each other.
     collab: Arc<Mutex<HashMap<String, PaneActivity>>>,
+    /// Auto board: surface_id -> activity derived by tailing that pane's
+    /// claude-code transcript (tool_use calls). Filled by the watcher thread,
+    /// not by any RPC. `collab_board` merges this with `collab` (auto wins,
+    /// since it reflects what the pane is *actually* doing) — so a pane never
+    /// has to call `announce`.
+    collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
+    /// Pending `bind_transcript` requests (surface_id, jsonl path) the watcher
+    /// thread drains. Pushed by the hook-driven RPC, consumed by the tail
+    /// worker. Re-binding a surface (e.g. `claude --resume` swaps the file)
+    /// replaces its entry.
+    binds: Arc<Mutex<Vec<(String, std::path::PathBuf)>>>,
 }
 
 impl PtyBackend {
     pub fn new(handle: PtyBackendHandle) -> Self {
+        let collab_auto = Arc::new(Mutex::new(HashMap::new()));
+        let binds = Arc::new(Mutex::new(Vec::new()));
+        // Tail each bound pane's claude transcript on a background thread,
+        // auto-filling collab_auto. Shares the snapshot so it can drop tails
+        // for closed panes. Renderer-free, so it never touches the main loop.
+        spawn_transcript_watcher(collab_auto.clone(), binds.clone(), handle.snapshot.clone());
         Self {
             handle,
             collab: Arc::new(Mutex::new(HashMap::new())),
+            collab_auto,
+            binds,
         }
     }
 
@@ -519,7 +543,7 @@ impl Backend for PtyBackend {
         // Drop entries for panes that have since closed so the board never
         // shows a ghost. The live set comes from the same snapshot
         // list_surfaces reads.
-        let live: std::collections::HashSet<String> = self
+        let live: HashSet<String> = self
             .handle
             .snapshot
             .lock()
@@ -528,13 +552,155 @@ impl Backend for PtyBackend {
             .iter()
             .map(|s| s.id.clone())
             .collect();
-        let board = self.collab.lock().unwrap();
-        Ok(board
-            .values()
+        // Merge manual announce (`collab`) with transcript-derived activity
+        // (`collab_auto`), auto winning — it reflects what the pane is
+        // *actually* doing, so a pane never has to call announce. Manual is
+        // the fallback for panes with no bound transcript (codex, etc.).
+        let mut by_id: HashMap<String, PaneActivity> = HashMap::new();
+        for a in self.collab.lock().unwrap().values() {
+            by_id.insert(a.surface_id.clone(), a.clone());
+        }
+        for a in self.collab_auto.lock().unwrap().values() {
+            by_id.insert(a.surface_id.clone(), a.clone());
+        }
+        Ok(by_id
+            .into_values()
             .filter(|a| live.contains(&a.surface_id))
-            .cloned()
             .collect())
     }
+
+    fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
+        // Queue for the tail worker; renderer-free so no submit() round-trip.
+        // Re-binding a surface (claude --resume swaps the jsonl) replaces its
+        // pending entry rather than stacking.
+        let mut binds = self.binds.lock().unwrap();
+        binds.retain(|(s, _)| s != surface_id);
+        binds.push((surface_id.to_string(), std::path::PathBuf::from(path)));
+        Ok(())
+    }
+}
+
+/// Per-pane transcript tail state held by the watcher thread.
+struct TranscriptTail {
+    path: PathBuf,
+    offset: u64,
+    recent: VecDeque<ToolEvent>,
+    last: Instant,
+}
+
+/// Background thread: tail each bound pane's claude transcript jsonl and keep
+/// `collab_auto` filled with derived PaneActivity, so a pane's board entry
+/// reflects its real tool_use without anyone calling `announce`. Polls at
+/// 750ms — `notify` isn't a dependency and the board is human-read, so
+/// sub-second latency is plenty. Drops tails for closed panes via `snapshot`.
+fn spawn_transcript_watcher(
+    collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
+    binds: Arc<Mutex<Vec<(String, PathBuf)>>>,
+    snapshot: Arc<Mutex<PtySnapshot>>,
+) {
+    std::thread::spawn(move || {
+        let mut tails: HashMap<String, TranscriptTail> = HashMap::new();
+        loop {
+            // 1. Drain new binds. Re-bind (claude --resume swaps the file)
+            //    replaces the tail and reseeds.
+            let new_binds: Vec<(String, PathBuf)> =
+                std::mem::take(&mut *binds.lock().unwrap());
+            for (sid, path) in new_binds {
+                let (offset, recent) = seed_tail(&path);
+                tails.insert(sid, TranscriptTail { path, offset, recent, last: Instant::now() });
+            }
+            // 2. Drop tails + auto entries for panes that have closed.
+            let live: HashSet<String> = snapshot
+                .lock()
+                .unwrap()
+                .surfaces
+                .iter()
+                .map(|s| s.id.clone())
+                .collect();
+            tails.retain(|sid, _| live.contains(sid));
+            collab_auto.lock().unwrap().retain(|sid, _| live.contains(sid));
+            // 3. Incremental read each tail → update recent ring → collab_auto.
+            for (sid, tail) in tails.iter_mut() {
+                let events = read_new_events(&tail.path, &mut tail.offset);
+                if !events.is_empty() {
+                    for ev in events {
+                        tail.recent.push_back(ev);
+                        while tail.recent.len() > RECENT_MAX {
+                            tail.recent.pop_front();
+                        }
+                    }
+                    tail.last = Instant::now();
+                }
+                let idle = tail.last.elapsed() > Duration::from_secs(60);
+                let act = build_activity(sid, &tail.recent, idle);
+                collab_auto.lock().unwrap().insert(sid.clone(), act);
+            }
+            std::thread::sleep(Duration::from_millis(750));
+        }
+    });
+}
+
+/// Read bytes appended since `offset`, parse complete lines into ToolEvents,
+/// and advance `offset` to the last newline (a partial trailing line waits
+/// for the next tick). Resets to 0 if the file shrank (rotation/truncate).
+fn read_new_events(path: &PathBuf, offset: &mut u64) -> Vec<ToolEvent> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let len = match f.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return Vec::new(),
+    };
+    if len < *offset {
+        *offset = 0;
+    }
+    if len <= *offset || f.seek(SeekFrom::Start(*offset)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = String::new();
+    if f.read_to_string(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let last_nl = match buf.rfind('\n') {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    *offset += (last_nl + 1) as u64;
+    buf[..=last_nl].lines().flat_map(parse_line).collect()
+}
+
+/// On bind, seed `recent` from the tail of an existing file (so a `--resume`d
+/// pane shows activity right away) and set offset to EOF — the rest of the
+/// history is ignored. Scans only the last ~64KB to keep it cheap.
+fn seed_tail(path: &PathBuf) -> (u64, VecDeque<ToolEvent>) {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (0, VecDeque::new()),
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(64 * 1024);
+    let mut recent = VecDeque::new();
+    if f.seek(SeekFrom::Start(start)).is_ok() {
+        let mut buf = String::new();
+        if f.read_to_string(&mut buf).is_ok() {
+            // If we started mid-file, drop the first (partial) line.
+            let body = if start > 0 {
+                buf.find('\n').map(|i| &buf[i + 1..]).unwrap_or("")
+            } else {
+                &buf[..]
+            };
+            for ev in body.lines().flat_map(parse_line) {
+                recent.push_back(ev);
+                while recent.len() > RECENT_MAX {
+                    recent.pop_front();
+                }
+            }
+        }
+    }
+    (len, recent)
 }
 
 /// Resolve a process's current working directory via lsof. macOS has no
@@ -590,11 +756,19 @@ fn pid_process_name(shell_pid: u32) -> Option<String> {
 /// that cwd (for `claude --resume`). `cwd` is null when the shell pid/cwd
 /// can't be resolved — restore then falls back to the default cwd.
 pub fn pane_record(sess: &pty_backend::PtySession) -> serde_json::Value {
-    let cwd = sess.shell_pid().and_then(pid_cwd);
+    let shell_pid = sess.shell_pid();
+    let cwd = shell_pid.and_then(pid_cwd);
     let was_claude = sess
         .active_process_name()
         .map_or(false, |p| p.contains("claude"));
-    let session_id = cwd.as_ref().and_then(|c| latest_claude_session_id(c));
+    // Prefer the id straight off the running claude's argv (exact per-pane);
+    // two claudes in the same cwd no longer collapse onto one id the way the
+    // cwd-mtime guess does. Fall back to the mtime guess for a fresh `claude`
+    // whose argv carries no id.
+    let session_id = shell_pid
+        .filter(|_| was_claude)
+        .and_then(claude_session_id_from_cmdline)
+        .or_else(|| cwd.as_ref().and_then(|c| latest_claude_session_id(c)));
     serde_json::json!({
         "cwd": cwd.as_ref().map(|c| c.to_string_lossy().into_owned()),
         "was_claude": was_claude,
@@ -763,6 +937,77 @@ fn parse_leaf(v: &serde_json::Value) -> PaneRestore {
             })
             .unwrap_or_default(),
     }
+}
+
+/// Pull the claude session id straight off the running claude process's argv
+/// (`--resume <uuid>` / `--session-id <uuid>`, `=`-joined or space-separated).
+/// Exact per-pane — unlike the cwd-mtime guess, two claudes in the same cwd
+/// keep distinct ids. Returns None for a fresh `claude` with no id on its argv.
+fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
+    // Most-recently-spawned child whose comm is claude — mirrors how
+    // pid_process_name picks the pane's foreground program.
+    let listing = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,comm="])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&listing.stdout);
+    let mut claude_pid: Option<u32> = None;
+    for line in s.lines() {
+        let mut parts = line.split_whitespace();
+        let (pid, ppid) = match (
+            parts.next().and_then(|x| x.parse::<u32>().ok()),
+            parts.next().and_then(|x| x.parse::<u32>().ok()),
+        ) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+        if ppid != shell_pid {
+            continue;
+        }
+        let comm = parts.collect::<Vec<_>>().join(" ");
+        let is_claude = std::path::Path::new(&comm)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .map_or(false, |n| n.contains("claude"));
+        if is_claude && claude_pid.map_or(true, |p| pid > p) {
+            claude_pid = Some(pid);
+        }
+    }
+    let pid = claude_pid?;
+    let args_out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output()
+        .ok()?;
+    let argv = String::from_utf8_lossy(&args_out.stdout);
+    let tokens: Vec<&str> = argv.split_whitespace().collect();
+    for (i, tok) in tokens.iter().enumerate() {
+        for flag in ["--resume=", "--session-id="] {
+            if let Some(v) = tok.strip_prefix(flag) {
+                if is_uuid(v) {
+                    return Some(v.to_string());
+                }
+            }
+        }
+        if matches!(*tok, "--resume" | "-r" | "--session-id") {
+            if let Some(v) = tokens.get(i + 1) {
+                if is_uuid(v) {
+                    return Some((*v).to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// claude session ids are canonical UUIDs (8-4-4-4-12 hex). Validating guards
+/// against grabbing a non-id token after a bare `-r`/`--resume` (the picker).
+fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, &c)| match i {
+            8 | 13 | 18 | 23 => c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
 }
 
 /// claude stores sessions under ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl,
