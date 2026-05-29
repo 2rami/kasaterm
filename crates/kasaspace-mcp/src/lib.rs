@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use agent_socket::backend::{Backend, SplitDirection};
+use agent_socket::backend::{Backend, PanelKind, SplitDirection};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content},
@@ -91,6 +91,20 @@ struct SwapArgs {
 struct WindowIdxArgs {
     /// Zero-based window (left-sidebar tab) index to switch to.
     index: usize,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct PanelArgs {
+    /// Which panel window: "git" (git status) or "session" (sessions list).
+    which: String,
+    /// What to do: "open" | "close" | "resize" | "info". "info" returns the
+    /// window + webview geometry so you can verify the webview tracks the
+    /// window (view_* should equal win_* when responsive).
+    action: String,
+    /// Width in logical px. Required for "resize".
+    w: Option<u32>,
+    /// Height in logical px. Required for "resize".
+    h: Option<u32>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -290,6 +304,45 @@ impl KasaspaceTools {
         match self.backend.switch_window(args.index) {
             Ok(()) => ok(format!("Switched to window {}", args.index)),
             Err(e) => fail(format!("switch_window failed: {e}")),
+        }
+    }
+
+    #[tool(
+        description = "Control a standalone panel window (git status / sessions). action: open|close|resize|info. which: git|session. For resize pass w and h (logical px). info returns window + webview geometry (view_* tracks win_* when the panel is responsive) so you can verify layout without a screenshot."
+    )]
+    async fn kasaspace_panel(
+        &self,
+        Parameters(args): Parameters<PanelArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let which = match args.which.as_str() {
+            "git" => PanelKind::Git,
+            "session" | "sessions" => PanelKind::Session,
+            other => return fail(format!("unknown panel {other:?} (expected git|session)")),
+        };
+        match args.action.as_str() {
+            "open" => match self.backend.set_panel(which, true) {
+                Ok(()) => ok(format!("Opened {} panel", args.which)),
+                Err(e) => fail(format!("open failed: {e}")),
+            },
+            "close" => match self.backend.set_panel(which, false) {
+                Ok(()) => ok(format!("Closed {} panel", args.which)),
+                Err(e) => fail(format!("close failed: {e}")),
+            },
+            "resize" => {
+                let (w, h) = match (args.w, args.h) {
+                    (Some(w), Some(h)) => (w, h),
+                    _ => return fail("resize requires both w and h (logical px)"),
+                };
+                match self.backend.resize_panel(which, w, h) {
+                    Ok(()) => ok(format!("Resized {} panel to {w}x{h}", args.which)),
+                    Err(e) => fail(format!("resize failed: {e}")),
+                }
+            }
+            "info" => match self.backend.panel_info(which) {
+                Ok(g) => ok(serde_json::to_string_pretty(&g).unwrap_or_else(|e| e.to_string())),
+                Err(e) => fail(format!("info failed: {e}")),
+            },
+            other => fail(format!("unknown action {other:?} (open|close|resize|info)")),
         }
     }
 

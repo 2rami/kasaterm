@@ -667,9 +667,40 @@ impl EventListener for PtyEventForwarder {
 /// Local Dimensions impl. alacritty_terminal exposes the trait but
 /// the concrete TermSize we want to pass lives behind a "test"
 /// feature gate in some versions; this keeps us decoupled.
+/// alacritty Cell = 24 bytes (EXPECTED_CELL_SIZE). Scrollback memory per pane
+/// ≈ history_lines × cols × 24. A fixed line count therefore lets a wide
+/// terminal silently use several times the RAM of a narrow one. Ghostty bounds
+/// scrollback by *memory* instead — we mirror that: fix a byte budget and
+/// derive the line cap from the current column width, recomputing on resize.
+const SCROLLBACK_BYTES_PER_CELL: usize = 24;
+const SCROLLBACK_MIN_LINES: usize = 1_000;
+const SCROLLBACK_MAX_LINES: usize = 100_000;
+
+fn scrollback_budget_bytes() -> usize {
+    std::env::var("KASATERM_SCROLLBACK_MB")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|mb| *mb > 0)
+        .unwrap_or(16)
+        * 1024
+        * 1024
+}
+
+/// Line cap that keeps one pane's scrollback within the byte budget at the
+/// given width. Clamped so a tiny width can't produce an absurd cap and a huge
+/// width still keeps a usable floor.
+fn history_lines_for_cols(cols: u16) -> usize {
+    let per_line = (cols.max(1) as usize) * SCROLLBACK_BYTES_PER_CELL;
+    (scrollback_budget_bytes() / per_line).clamp(SCROLLBACK_MIN_LINES, SCROLLBACK_MAX_LINES)
+}
+
 fn make_term(cols: u16, rows: u16, listener: PtyEventForwarder) -> Term<PtyEventForwarder> {
     let size = TermSize::new(cols as usize, rows as usize);
-    Term::new(TermConfig::default(), &size, listener)
+    let config = TermConfig {
+        scrolling_history: history_lines_for_cols(cols),
+        ..TermConfig::default()
+    };
+    Term::new(config, &size, listener)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -726,7 +757,14 @@ fn spawn_reader_thread(
             let want = *size.lock().unwrap();
             if want != current_size {
                 let s = TermSize::new(want.0 as usize, want.1 as usize);
-                term.lock().unwrap().resize(s);
+                let mut t = term.lock().unwrap();
+                t.resize(s);
+                // Width changed → bytes-per-line changed → re-fit the line cap
+                // to the byte budget so memory stays bounded across resizes.
+                if want.0 != current_size.0 {
+                    t.grid_mut().update_history(history_lines_for_cols(want.0));
+                }
+                drop(t);
                 current_size = want;
             }
             let n = match reader.read(&mut buf) {
@@ -1302,7 +1340,7 @@ fn build_last_login_line(tty: Option<&str>) -> Option<String> {
 fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
     let ch = if cell.c == '\0' { ' ' } else { cell.c };
     Cell {
-        ch: ch.to_string(),
+        ch,
         fg: convert_color(cell.fg),
         bg: convert_color(cell.bg),
         bold: cell

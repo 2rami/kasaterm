@@ -212,11 +212,12 @@ impl RenderState {
                     bold: false,
                     italic: false,
                     size_px: FONT_SIZE_PX as u32,
+                    font: 0,
                 };
                 let _ = atlas.get_or_bake(&device, &queue, &mut shaper, key);
             }
         }
-        let mut pipeline = Pipeline::new(&device, format, 16_384);
+        let pipeline = Pipeline::new(&device, format, 16_384);
         pipeline.write_uniforms(&queue, [config.width as f32, config.height as f32]);
         let bind_group = pipeline.make_bind_group(&device, atlas.view(), atlas.sampler());
 
@@ -279,6 +280,7 @@ impl RenderState {
                     bold: false,
                     italic: false,
                     size_px: FONT_SIZE_PX as u32,
+                    font: 0,
                 };
                 let Some(entry) =
                     self.atlas.get_or_bake(&self.device, &self.queue, &mut self.shaper, key)

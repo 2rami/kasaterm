@@ -23,6 +23,30 @@ pub enum SplitDirection {
     Down,
 }
 
+/// Which standalone panel window a panel command targets. The git status
+/// and sessions panels are separate OS windows (wry webviews) the host
+/// spawns next to the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelKind {
+    Git,
+    Session,
+}
+
+/// Geometry of a panel window and its embedded webview, returned by
+/// `panel_info`. When the panel is responsive the `view_*` (webview)
+/// dimensions track the `win_*` (window) ones; a mismatch means the
+/// webview failed to follow a window resize — the bug this lets a caller
+/// verify without a screenshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PanelGeom {
+    pub open: bool,
+    pub win_w: u32,
+    pub win_h: u32,
+    pub view_w: u32,
+    pub view_h: u32,
+}
+
 /// A workspace as seen by the protocol — analogous to a tmux session
 /// or a cmux workspace. Returned by `workspace.list` /
 /// `workspace.current`.
@@ -78,13 +102,23 @@ pub trait Backend: Send + Sync {
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()>;
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()>;
     /// Close (kill) a surface by id. Removes its leaf from the layout.
-    fn close_surface(&self, surface_id: &str) -> Result<()>;
-    /// Set a surface's header title (rename).
-    fn rename_surface(&self, surface_id: &str, title: &str) -> Result<()>;
+    /// Default: unsupported — layout-managing backends (PTY) override it.
+    fn close_surface(&self, _surface_id: &str) -> Result<()> {
+        anyhow::bail!("close_surface unsupported by this backend")
+    }
+    /// Set a surface's header title (rename). Default: unsupported.
+    fn rename_surface(&self, _surface_id: &str, _title: &str) -> Result<()> {
+        anyhow::bail!("rename_surface unsupported by this backend")
+    }
     /// Set a surface's accent color (header band), RGBA 0..255.
-    fn set_color(&self, surface_id: &str, color: [u8; 4]) -> Result<()>;
-    /// Swap two surfaces' positions in the layout.
-    fn swap_surfaces(&self, a: &str, b: &str) -> Result<()>;
+    /// Default: unsupported.
+    fn set_color(&self, _surface_id: &str, _color: [u8; 4]) -> Result<()> {
+        anyhow::bail!("set_color unsupported by this backend")
+    }
+    /// Swap two surfaces' positions in the layout. Default: unsupported.
+    fn swap_surfaces(&self, _a: &str, _b: &str) -> Result<()> {
+        anyhow::bail!("swap_surfaces unsupported by this backend")
+    }
     /// Current working directory of the active pane's shell, if the backend
     /// tracks it. Lets the git panel follow the user's terminal directory.
     /// Default `None` (e.g. the tmux backend doesn't track per-pane cwd).
@@ -133,5 +167,20 @@ pub trait Backend: Send + Sync {
     /// unsupported (e.g. the legacy tmux backend has no window host).
     fn open_preview(&self, _kind: &str, _path: &str) -> Result<()> {
         anyhow::bail!("open_preview not supported")
+    }
+    /// Open or close a standalone panel window (git status / sessions).
+    /// Default unsupported (e.g. the legacy tmux backend has no window host).
+    fn set_panel(&self, _which: PanelKind, _open: bool) -> Result<()> {
+        anyhow::bail!("set_panel not supported")
+    }
+    /// Resize a panel window to `w`x`h` logical px and re-bound its webview
+    /// to match. Errors if the panel isn't open. Default unsupported.
+    fn resize_panel(&self, _which: PanelKind, _w: u32, _h: u32) -> Result<()> {
+        anyhow::bail!("resize_panel not supported")
+    }
+    /// Report a panel window's geometry (window + webview bounds) so a
+    /// caller can verify the webview tracks the window. Default unsupported.
+    fn panel_info(&self, _which: PanelKind) -> Result<PanelGeom> {
+        anyhow::bail!("panel_info not supported")
     }
 }

@@ -217,10 +217,10 @@ fn render_row(cells: &[Cell]) -> String {
     for c in cells {
         let _ = (&c.fg, &c.bg, c.bold, c.italic, c.underline, c.inverse);
         let _ = matches!(&c.fg, Color::Default);
-        if c.ch.is_empty() {
+        if c.ch == '\0' {
             s.push(' ');
         } else {
-            s.push_str(&c.ch);
+            s.push(c.ch);
         }
     }
     s
