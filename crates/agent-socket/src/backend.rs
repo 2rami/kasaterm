@@ -121,6 +121,12 @@ pub trait Backend: Send + Sync {
     fn close_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("close_session not supported")
     }
+    /// Restore a saved (on-disk, not-yet-live) session at index `idx` in the
+    /// saved-session list — spawns its panes lazily and switches to it.
+    /// Default unsupported.
+    fn restore_session(&self, _idx: usize) -> Result<()> {
+        anyhow::bail!("restore_session not supported")
+    }
     /// Open a preview window for a file. `kind` is "image" or "markdown";
     /// `path` is an absolute path on the host. The host spawns a separate
     /// wry webview window (image viewer / markdown editor). Default

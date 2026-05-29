@@ -164,7 +164,7 @@ async fn save_markdown_handler(body: String) -> impl IntoResponse {
 /// session panel to poll: `{ count, active }`.
 async fn sessions_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let s = backend.sessions();
-    let body = serde_json::json!({ "count": s.count, "active": s.active });
+    let body = serde_json::json!({ "count": s.count, "active": s.active, "saved": s.saved });
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
@@ -207,6 +207,20 @@ async fn session_close_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let body = match backend.close_session(query_idx(&params)) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /session-restore?idx=<n>` — restore a saved (on-disk) session at
+/// `idx` and switch to it. Query param for the same no-preflight reason as
+/// session-switch.
+async fn session_restore_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match backend.restore_session(query_idx(&params)) {
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
@@ -258,6 +272,7 @@ pub fn spawn_http_server(
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let session_close_backend = backend.clone();
+                let session_restore_backend = backend.clone();
                 let open_image_backend = backend.clone();
                 let open_markdown_backend = backend.clone();
                 let service = StreamableHttpService::new(
@@ -310,6 +325,12 @@ pub fn spawn_http_server(
                         "/session-close",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             session_close_handler(session_close_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/session-restore",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            session_restore_handler(session_restore_backend.clone(), q)
                         }),
                     )
                     .route(

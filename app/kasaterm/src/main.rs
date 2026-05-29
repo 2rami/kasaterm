@@ -120,6 +120,8 @@ const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
 /// un-split window renders no header at all (matches the iTerm
 /// behavior the user pointed at).
 const PANE_HEADER_HEIGHT: f32 = 30.0;
+/// 활성 탭 상단 accent 선 두께(logical px). BORDER stroke(1px)보다 살짝 굵게.
+const ACTIVE_ACCENT_STROKE: f32 = 2.0;
 /// Inner padding between a pane's box edges and its cell grid, in logical
 /// pixels. Keeps text off the divider / window edge and gives abutting
 /// panes visible breathing room. The PTY's usable cols/rows shrink by the
@@ -1988,6 +1990,10 @@ struct App {
     /// the session panel as one-click restore rows. Filled once at startup
     /// from `session.json`; cleared as the user manually restores each.
     saved_session_labels: Vec<String>,
+    /// On-disk sessions loaded at startup but not yet restored. Parallel to
+    /// `saved_session_labels` (same index), so a restore-row click maps to
+    /// the right session. Drained as the user restores each.
+    saved_sessions_restore: Vec<socket::SessionRestore>,
     /// Index into `sessions` of the visible session (its slot is None).
     active_session: usize,
     /// Windows of the *visible* session, by index. The active window's slot
@@ -2280,6 +2286,7 @@ impl App {
             ws: Arc::new(Mutex::new(Workspace::default())),
             sessions: vec![None],
             saved_session_labels: Vec::new(),
+            saved_sessions_restore: Vec::new(),
             active_session: 0,
             windows: vec![None],
             active_window: 0,
@@ -3358,6 +3365,66 @@ impl App {
         Ok(())
     }
 
+    /// Restore a saved (on-disk) session at `idx` in the saved-session list:
+    /// stash the visible session, spawn the saved session's panes into fresh
+    /// live fields, and switch to it. The saved entry is consumed (removed
+    /// from both the parallel restore vec and the label list) so a session is
+    /// restored at most once per launch. claude panes queue a `--resume`.
+    fn restore_saved_session(&mut self, idx: usize) -> Result<()> {
+        if idx >= self.saved_sessions_restore.len() {
+            anyhow::bail!("no such saved session: {idx}");
+        }
+        let saved = self.saved_sessions_restore.remove(idx);
+        if idx < self.saved_session_labels.len() {
+            self.saved_session_labels.remove(idx);
+        }
+        let (cols, rows) = self.window_cells();
+        // Stash the visible session (same swap invariant as new_session).
+        self.sessions[self.active_session] = Some(Session {
+            pty: std::mem::take(&mut self.pty),
+            pty_layout: self.pty_layout.take(),
+            windows: std::mem::take(&mut self.windows),
+            active_window: self.active_window,
+            ws: self.ws.clone(),
+        });
+        // Fresh live fields for the restored session; pump threads spawned by
+        // build_restore_node capture this ws.
+        let ws = Arc::new(Mutex::new(Workspace::default()));
+        self.ws = ws.clone();
+        self.pty = HashMap::new();
+        let mut resume = Vec::new();
+        let mut window_layouts = Vec::new();
+        for node in &saved.windows {
+            window_layouts.push(self.build_restore_node(node, cols, rows, &mut resume)?);
+        }
+        if window_layouts.is_empty() {
+            anyhow::bail!("saved session {idx} had no windows");
+        }
+        let active_window = saved.active_window.min(window_layouts.len() - 1);
+        let mut windows: Vec<Option<pty_backend::PtyLayout>> =
+            window_layouts.into_iter().map(Some).collect();
+        let active_layout = windows[active_window].take();
+        if let Some(first) = active_layout
+            .as_ref()
+            .and_then(|l| l.leaves().first().map(|s| s.to_string()))
+        {
+            ws.lock().unwrap().active_pane = Some(first);
+        }
+        self.pty_layout = active_layout;
+        self.windows = windows;
+        self.active_window = active_window;
+        self.sessions.push(None);
+        self.active_session = self.sessions.len() - 1;
+        self.pending_restores.extend(resume);
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.refresh_socket_snapshot();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        Ok(())
+    }
+
     /// Create a new window inside the *current* session: stash the visible
     /// window's layout, then bring up a fresh window with a single new pane.
     /// The new pane's PTY joins the session's shared `pty` map and runs in the
@@ -3544,6 +3611,37 @@ impl App {
 
     /// Compress a cwd for the sidebar: home → `~`, then keep the tail if it
     /// runs past `max` chars so the meaningful (deepest) part stays visible.
+    /// 탭/헤더 라벨용. 셸이 idle이면 cwd의 마지막 폴더명, 명령 실행 중이면
+    /// 그 프로세스명. zsh 4개로 안 보이고 위치/작업이 드러나게.
+    fn smart_pane_label(sess: &pty_backend::PtySession) -> Option<String> {
+        let proc = sess.active_process_name().filter(|t| !t.is_empty());
+        let is_shell = proc.as_deref().map_or(false, |p| {
+            let base = p.strip_prefix('-').unwrap_or(p);
+            matches!(base, "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "ksh")
+        });
+        if is_shell {
+            sess.shell_pid()
+                .and_then(socket::pid_cwd)
+                .map(|p| Self::cwd_basename(&p))
+                .or(proc)
+        } else {
+            proc
+        }
+    }
+
+    /// cwd의 마지막 폴더명. 홈 디렉토리면 `~`.
+    fn cwd_basename(p: &std::path::Path) -> String {
+        if let Ok(h) = std::env::var("HOME") {
+            if !h.is_empty() && p == std::path::Path::new(&h) {
+                return "~".to_string();
+            }
+        }
+        p.file_name()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| "/".to_string())
+    }
+
     fn shorten_cwd(p: &std::path::Path) -> String {
         let raw = p.to_string_lossy().to_string();
         let s = match std::env::var("HOME") {
@@ -3646,6 +3744,9 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
+        // Keep the parsed sessions in memory (parallel to the labels) so a
+        // later restore-row click rebuilds the right on-disk session.
+        self.saved_sessions_restore = saved_state.map(|s| s.sessions).unwrap_or_default();
         let cwd = saved_cwd.or_else(resolve_initial_cwd);
         let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
             shell: resolve_default_shell(),
@@ -4620,6 +4721,10 @@ impl App {
                 }
                 socket::PtyCommand::CloseSession { idx, reply } => {
                     let res = self.close_session(idx);
+                    let _ = reply.send(res);
+                }
+                socket::PtyCommand::RestoreSession { idx, reply } => {
+                    let res = self.restore_saved_session(idx);
                     let _ = reply.send(res);
                 }
                 socket::PtyCommand::OpenPreview { kind, path, reply } => {
@@ -7459,16 +7564,12 @@ impl App {
                     // Custom title (rename / OSC) wins; otherwise show the
                     // live foreground process (vim, claude, zsh …); only
                     // fall back to the raw "%N" pane id if both are empty.
-                    let proc_name = self
-                        .pty
-                        .get(&id)
-                        .and_then(|p| p.active_process_name())
-                        .filter(|t| !t.is_empty());
+                    let smart = self.pty.get(&id).and_then(|p| Self::smart_pane_label(p));
                     let label = pane
                         .title
                         .clone()
                         .filter(|t| !t.is_empty())
-                        .or(proc_name)
+                        .or(smart)
                         .unwrap_or_else(|| id.clone());
                     headers.push(HeaderInfo {
                         id: id.clone(),
@@ -7529,14 +7630,11 @@ impl App {
                                     .clone()
                                     .filter(|s| !s.is_empty())
                                     .or_else(|| {
-                                        // Per-tab process name: each tab's own
-                                        // pid drives its label (active pane's
-                                        // pid lives in tab.pid for stage 3).
+                                        // 각 탭의 pid로 스마트 라벨(셸=cwd, 명령=프로세스).
                                         t.pid
                                             .as_deref()
                                             .and_then(|p| self.pty.get(p))
-                                            .and_then(|s| s.active_process_name())
-                                            .filter(|s| !s.is_empty())
+                                            .and_then(|s| Self::smart_pane_label(s))
                                     })
                                     .unwrap_or_else(|| {
                                         if i == 0 { id.clone() } else { format!("탭 {}", i + 1) }
@@ -8382,7 +8480,8 @@ impl App {
                     g.rect(tabs_right_edge - stroke, h.y, stroke, PANE_HEADER_HEIGHT, theme::BORDER);
                     if let Some((ax, aw)) = active_tab_box {
                         let accent_col = if h.is_active { theme::ACCENT } else { theme::TEXT };
-                        g.rect(ax, h.y, aw, stroke, accent_col);
+                        // accent 선은 BORDER stroke(1px)보다 살짝 굵게 — 활성 pane 강조.
+                        g.rect(ax, h.y, aw, ACTIVE_ACCENT_STROKE, accent_col);
                         deferred_accents.push((ax, h.y, aw, accent_col));
                     }
                 }
@@ -8482,7 +8581,7 @@ impl App {
             // Re-paint the active-tab accent strips so a horizontal pane
             // divider just above a pane doesn't wipe its accent color.
             for (ax, ay, aw, ac) in &deferred_accents {
-                g.rect(*ax, *ay, *aw, 1.0, *ac);
+                g.rect(*ax, *ay, *aw, ACTIVE_ACCENT_STROKE, *ac);
             }
             Self::paint_gpu_overlays(g, &overlay);
             // Code-block copy buttons, painted on top of the inactive-pane
