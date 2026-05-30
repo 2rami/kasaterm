@@ -580,30 +580,29 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 ---
 
-## 5) pane 협업 — 서로 뭘 왜 하는지 (board · announce · send · peek)
+## 5) pane 협업 — 서로 뭘 왜 하는지 (board · send · peek)
 
-§4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 이미 떠 있는 pane들끼리 — 각자 사용자가 띄운 claude든, codex·antigravity든 — 사람 중계 없이 "뭘 왜 하는지" 공유하고 충돌을 피한다. tmux도 MCP도 아닌 `kasaterm-cli` CLI로 동작(MCP 포트는 호스트 재시작 때 바뀌어 갱신이 꼬이지만, 이 CLI는 `$KASATERM_SOCKET_PATH` env로 항상 최신 소켓에 붙는다).
+§4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 이미 떠 있는 pane들끼리 — 각자 사용자가 띄운 claude든, codex·antigravity든 — 사람 중계 없이 "뭘 왜 하는지" 공유하고 충돌을 피한다. tmux도 MCP도 아닌 `kasaterm-cli` CLI로 동작(`$KASATERM_SOCKET_PATH` env로 항상 최신 소켓에 붙는다).
 
-같은 레포를 여러 pane이 동시에 만지는 상황이면 작업 전에 켠다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용.
+**핵심: board는 자동으로 채워진다.** 호스트가 각 pane claude의 transcript(`~/.claude/projects/.../*.jsonl`)를 tail해서 tool_use(Read/Edit/Bash…)를 읽어 그 pane의 활동을 자동 등록한다. 그래서 **너 자신은 협업을 위해 아무것도 호출할 필요가 없다** — 평소처럼 작업하면 board에 "Read auth.ts → Bash cargo build"가 저절로 뜬다(SessionStart/UserPromptSubmit hook이 transcript를 bind). 너가 할 일은 **남이 뭐 하는지 board로 확인**하고, 필요할 때 send/peek로 조율하는 것뿐.
+
+같은 레포를 여러 pane이 동시에 만지면 작업 전에 board를 본다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용.
 
 ### 명령
 
 ```bash
-kasaterm-cli board                          # 모든 pane: intent·status·files (닫힌 pane 자동 제외)
-kasaterm-cli announce "로그인 500 고치는 중 (auth.ts 널체크)" building
-kasaterm-cli announce "끝" idle             # status: working|building|blocked|idle
+kasaterm-cli board                          # 모든 pane: intent·status·files (자동 채워짐, 닫힌 pane 제외)
 kasaterm-cli send --surface %1 "[from $KASATERM_PANE_ID] auth.ts 같이 볼래?"
 kasaterm-cli peek %1                         # 다른 pane 화면 마지막 30줄 (빌드 로그·에러)
 kasaterm-cli peek %1 8                       # 마지막 8줄
 ```
 
-`announce`의 발신자(내 pane)는 `KASATERM_PANE_ID`에서 **자동**으로 채워진다 — 인자로 줄 필요 없다.
+(`announce <의도> [status]`도 있지만 — transcript 자동 등록이 대신하니 **직접 호출하지 마라**. claude 아닌 pane이나 명시적 수동 신고가 꼭 필요한 특수 경우만. 작업 중 announce는 흐름만 끊는다.)
 
-### 규약 — 작업 전·중·후
+### 규약 — 작업 전·중
 
-1. **작업 전 → `board`**. 내가 만질 파일을 다른 pane이 이미 잡았으면 → `send`로 "나도 X 보는데 같이 할까/끝나면 알려줘" 하고 충돌 회피. **같은 문제(intent)**면 → `send`로 합류해 중복 차단. 누가 **빌드/긴 잡 중**(status building)이면 → `peek`로 진행 보고 같은 산출물 건드리는 작업은 끝날 때까지 대기.
-2. **작업 시작 → `announce`**. 의도는 *무엇을 왜*가 핵심 — "auth.ts 만짐"이 아니라 "로그인 500 고치는 중 (auth.ts 널체크)"라야 형제가 같은 버그인지 안다.
-3. **전환·완료 → 다시 `announce`** (끝났으면 `idle`).
+1. **작업 전 → `board`**. 내가 만질 파일을 다른 pane이 이미 잡았으면(`files`에 보임) → `send`로 "나도 X 보는데 같이 할까/끝나면 알려줘" 하고 충돌 회피. **같은 문제**를 쫓고 있으면 → `send`로 합류해 중복 차단. 누가 **빌드 중**(status `building`)이면 → `peek`로 진행 보고 같은 산출물 건드리는 작업은 대기.
+2. **작업은 평소대로.** board는 너의 tool_use로 자동 갱신된다 — 신고 불필요.
 
 ### 쪽지를 받으면
 
@@ -613,10 +612,10 @@ kasaterm-cli peek %1 8                       # 마지막 8줄
 
 | 안 됨 | 왜 |
 |---|---|
-| pane 밖(env 없음)에서 `announce` | 발신자 id를 못 채워 실패. `echo $KASATERM_PANE_ID` 먼저 |
-| 의도를 "파일명만" 등록 | 형제가 같은 *문제*인지 모름. "왜"를 써야 합류가 일어남 |
+| 협업하려고 `announce`를 부지런히 호출 | 불필요 — transcript가 자동 등록. 작업 흐름만 끊는다 |
 | `send`로 셸 명령처럼 보냄 | 받는 쪽 입력에 그대로 주입됨. 받는 에이전트가 *읽을* 문장으로 |
-| 협업을 MCP로 시도 | 협업 도구는 MCP에 없다(GUI 제어 전용). board/announce/send/peek는 **CLI만** |
+| 협업을 MCP로 시도 | 협업은 CLI만(MCP는 GUI 제어 전용). board/send/peek |
+| board가 비어 보임 | 그 pane이 claude 아니거나(codex 등) hook 미설치 — 자동 등록 안 됨. 정상 |
 
 ---
 

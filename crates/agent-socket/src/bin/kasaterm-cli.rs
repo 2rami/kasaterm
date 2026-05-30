@@ -78,6 +78,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli announce <intent> [status]   # publish what THIS pane is doing");
     eprintln!("  kasaterm-cli board                        # what every pane is doing");
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
+    eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!();
     eprintln!(
         "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
@@ -205,6 +206,22 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             )
         }
         "board" => ("collab.board", json!({})),
+        "bind-transcript" => {
+            // The pane registers its own transcript: surface_id from the
+            // host-injected env, path from the hook's stdin (passed as the
+            // arg). Lets the host tail it and auto-fill the board.
+            let surface = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                anyhow!("bind-transcript needs $KASATERM_PANE_ID (run inside a kasaterm pane)")
+            })?;
+            let path = args
+                .first()
+                .ok_or_else(|| anyhow!("bind-transcript needs a <transcript_path>"))?
+                .clone();
+            (
+                "collab.bind_transcript",
+                json!({ "surface_id": surface, "path": path }),
+            )
+        }
         "peek" => {
             // Default to this pane if no id given — handy for "what does my
             // own screen look like" but the usual case is peeking a sibling.
