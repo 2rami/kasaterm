@@ -3793,6 +3793,14 @@ impl App {
         let ctrl = ctrl_path.to_string_lossy().into_owned();
         std::env::set_var("KASATERM_SOCKET_PATH", &ctrl);
         std::env::set_var("CMUX_SOCKET_PATH", &ctrl);
+        // Session-panel webview polls 127.0.0.1:<KASASPACE_MCP_PORT>/sessions.
+        // A parent in-process kasaterm (.app) injects KASASPACE_MCP_PORT=8765
+        // into child shells; if the daemon inherited that it would clash with
+        // the parent's server (bind fails) and the panel would show the
+        // parent's sessions. Pin a daemon-only port — the spawned daemon
+        // inherits this same var and serves /sessions there, and the session
+        // panel below reads the same var, so both agree on the daemon.
+        std::env::set_var("KASASPACE_MCP_PORT", "8766");
         // Discovery: connect to a live daemon, else spawn one and wait for it.
         let client = match stream::DaemonClient::connect(&ctrl_path) {
             Ok(c) => c,
