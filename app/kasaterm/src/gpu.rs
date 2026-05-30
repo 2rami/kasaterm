@@ -438,6 +438,13 @@ impl GpuRenderer {
         self.scale = scale.max(0.1);
     }
 
+    /// Current effective render scale the GPU side is drawing with. Used by
+    /// the render loop to detect drift from the window's `effective_scale()`
+    /// (a missed DPI change) and self-heal before painting a compressed frame.
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
     pub fn set_font_size(&mut self, font_size_logical: f32) -> (f32, f32) {
         let new_px = (font_size_logical * self.scale).round().max(8.0) as u32;
         self.font_size_px = new_px;

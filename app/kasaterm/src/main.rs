@@ -9139,6 +9139,20 @@ impl App {
         self.last_blink_on = blink_on;
         if self.window.is_none() { return; }
         let scale = self.effective_scale();
+        // Self-heal: if the GPU renderer's internal scale drifted from the
+        // window's effective scale, every logical→physical mapping is off by
+        // that ratio and the whole frame (chrome included) compresses into a
+        // corner. This happens whenever a DPI change reaches the renderer
+        // without a matching set_scale (a ScaleFactorChanged we didn't fully
+        // apply, sleep/wake, clamshell). Re-sync once before drawing so a bad
+        // frame fixes itself on the very next paint instead of staying broken.
+        let drifted = self
+            .gpu
+            .as_ref()
+            .map_or(false, |g| (g.scale() - scale).abs() > 0.001);
+        if drifted {
+            self.apply_effective_scale();
+        }
         // gpu path takes over the whole frame — no chrome yet, just
         // the cell grid through the cell-renderer pipeline.
         if self.gpu.is_some() {
@@ -9496,6 +9510,14 @@ impl ApplicationHandler<UserEvent> for App {
                         g.resize(size.width, size.height);
                     }
                 }
+                // DPI changed (monitor move / display-scale change). The
+                // renderer's internal scale must follow the window's new
+                // scale_factor — otherwise logical→physical mapping is off and
+                // the frame compresses into a corner. apply_effective_scale
+                // pushes set_scale + font metrics + cell geom + PTY resize.
+                // (apply_effective_scale's doc names this exact case as its
+                // intended-but-unwired "(future)" caller.)
+                self.apply_effective_scale();
                 // macOS live-resize coalesces queued RedrawRequested, so paint
                 // synchronously here — otherwise the window frame leads and the
                 // grid catches up a frame later (ghostty parity). Wrap in a
