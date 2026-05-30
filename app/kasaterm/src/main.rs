@@ -547,6 +547,8 @@ function render(d) {
   $("err").style.display = "none";
   const count = d.count || 1, active = d.active || 0;
   const saved = Array.isArray(d.saved) ? d.saved : [];
+  // Live per-session folder labels from the daemon (parallel to count).
+  const labels = Array.isArray(d.labels) ? d.labels : [];
   const ul = $("list");
   ul.innerHTML = "";
   for (let i = 0; i < count; i++) {
@@ -554,7 +556,7 @@ function render(d) {
     li.className = "sess" + (i === active ? " active" : "");
     const dot = document.createElement("span"); dot.className = "dot";
     const label = document.createElement("span"); label.className = "label";
-    label.textContent = "세션 " + (i + 1);
+    label.textContent = (labels[i] && labels[i].length) ? labels[i] : ("세션 " + (i + 1));
     const badge = document.createElement("span"); badge.className = "badge";
     if (i === active) badge.textContent = "활성";
     li.appendChild(dot); li.appendChild(label); li.appendChild(badge);
@@ -3802,14 +3804,21 @@ impl App {
         // panel below reads the same var, so both agree on the daemon.
         std::env::set_var("KASASPACE_MCP_PORT", "8766");
         // Discovery: connect to a live daemon, else spawn one and wait for it.
-        let client = match stream::DaemonClient::connect(&ctrl_path) {
-            Ok(c) => c,
+        // `existing` = we connected to a daemon that was already up (app
+        // restart while the daemon survived in the background). A freshly
+        // spawned daemon is `false` — it already starts with one empty
+        // session, so we leave that as-is.
+        let (client, existing) = match stream::DaemonClient::connect(&ctrl_path) {
+            Ok(c) => (c, true),
             Err(_) => {
                 stream::spawn_daemon(&ctrl_path).map_err(anyhow::Error::from)?;
                 if !stream::wait_for_socket(&ctrl_path, std::time::Duration::from_secs(3)) {
                     anyhow::bail!("daemon control socket never came up");
                 }
-                stream::DaemonClient::connect(&ctrl_path).map_err(anyhow::Error::from)?
+                (
+                    stream::DaemonClient::connect(&ctrl_path).map_err(anyhow::Error::from)?,
+                    false,
+                )
             }
         };
         self.daemon_client = Some(Arc::new(client));
@@ -3826,13 +3835,24 @@ impl App {
         }
         let conn = conn.ok_or_else(|| anyhow::anyhow!("daemon stream socket unavailable"))?;
         self.pump_daemon_stream(conn, "%0".to_string());
+        // Attached to a daemon that was ALREADY running with live sessions
+        // (the app restarted while the daemon stayed up). Start a fresh
+        // session so the user lands on a clean pane, while the previous
+        // sessions keep running in the background and surface in the session
+        // panel. The daemon answers new_session() by broadcasting a StateView
+        // that the DaemonState handler applies — installing the real layout
+        // and resizing every leaf. So we must NOT resize "%0" ourselves here:
+        // after new_session, "%0" belongs to a *background* session, and
+        // resizing it to this window would corrupt that session's layout.
+        if existing {
+            if let Some(c) = self.daemon_client.as_ref() {
+                c.new_session();
+            }
+        }
+        // Placeholder until the first StateView lands and the DaemonState
+        // handler installs the authoritative layout + sizes every leaf.
         self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
         self.ws.lock().unwrap().active_pane = Some("%0".to_string());
-        // Size the daemon's PTY to this window now that we're attached.
-        let (cols, rows) = self.window_cells();
-        if let Some(c) = self.daemon_client.as_ref() {
-            c.resize("%0", cols, rows);
-        }
         Ok(())
     }
 

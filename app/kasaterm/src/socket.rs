@@ -470,6 +470,10 @@ impl Backend for PtyBackend {
             count: snap.session_count.max(1),
             active: snap.active_session,
             saved: snap.saved_sessions.clone(),
+            // Live per-session labels are a daemon-path concern; the legacy
+            // in-process socket backend has no equivalent, so fall back to
+            // ordinal labels (empty).
+            labels: Vec::new(),
         }
     }
 
