@@ -164,7 +164,7 @@ async fn save_markdown_handler(body: String) -> impl IntoResponse {
 /// session panel to poll: `{ count, active }`.
 async fn sessions_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let s = backend.sessions();
-    let body = serde_json::json!({ "count": s.count, "active": s.active, "saved": s.saved });
+    let body = serde_json::json!({ "count": s.count, "active": s.active, "saved": s.saved, "labels": s.labels });
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 

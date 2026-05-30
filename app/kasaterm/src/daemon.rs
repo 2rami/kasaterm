@@ -316,10 +316,16 @@ impl Backend for DaemonBackend {
         Ok(())
     }
     fn sessions(&self) -> SessionsInfo {
+        // Reuse the same per-session labels the stream StateView already
+        // derives (active-window first-pane cwd basename), so the session
+        // panel shows live folder names. `saved` stays empty here — that's
+        // the on-disk cold-session list, a separate (later) concern.
+        let view = self.state.state_view();
         SessionsInfo {
-            count: self.state.sessions.lock().unwrap().len(),
-            active: *self.state.active_session.lock().unwrap(),
+            count: view.sessions.len(),
+            active: view.active_session,
             saved: Vec::new(),
+            labels: view.sessions.iter().map(|s| s.label.clone()).collect(),
         }
     }
     fn new_session(&self) -> Result<()> {

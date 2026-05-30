@@ -82,11 +82,19 @@ pub struct SessionsInfo {
     /// state is on disk.
     #[serde(default)]
     pub saved: Vec<String>,
+    /// Per-session display labels for the LIVE sessions the daemon is
+    /// hosting right now — typically each session's active-window
+    /// first-pane cwd basename — so the panel shows folder names instead
+    /// of "세션 1/2". Parallel to the live session list (index = session
+    /// idx); empty falls back to ordinal labels. Distinct from `saved`,
+    /// which lists on-disk COLD sessions from a previous shutdown.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 impl Default for SessionsInfo {
     fn default() -> Self {
-        Self { count: 1, active: 0, saved: Vec::new() }
+        Self { count: 1, active: 0, saved: Vec::new(), labels: Vec::new() }
     }
 }
 
