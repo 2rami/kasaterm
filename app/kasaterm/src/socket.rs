@@ -358,7 +358,45 @@ impl PtyBackend {
         // Tail each bound pane's claude transcript on a background thread,
         // auto-filling collab_auto. Shares the snapshot so it can drop tails
         // for closed panes. Renderer-free, so it never touches the main loop.
-        spawn_transcript_watcher(collab_auto.clone(), binds.clone(), handle.snapshot.clone());
+        spawn_transcript_watcher(collab_auto.clone(), binds.clone(), {
+            let snap = handle.snapshot.clone();
+            move || {
+                snap.lock()
+                    .unwrap()
+                    .surfaces
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect()
+            }
+        });
+        // Wake-capable delivery: tail the kasa-chat mailbox and inject new
+        // messages into the target pane's PTY (see inbox.rs). In-process
+        // backend injects by queuing a SendBytes for the main thread. (Note:
+        // the live app runs the daemon path, which wires its own watcher in
+        // run_daemon; this keeps the in-process path working too.)
+        let h_list = handle.clone();
+        let h_inj = handle.clone();
+        crate::inbox::spawn_inbox_watcher(
+            move || {
+                h_list
+                    .snapshot
+                    .lock()
+                    .unwrap()
+                    .surfaces
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect()
+            },
+            move |pane, bytes| {
+                let (tx, _rx) = sync_channel(1);
+                h_inj.inbox.lock().unwrap().push(PtyCommand::SendBytes {
+                    pane_id: Some(pane.to_string()),
+                    bytes: bytes.to_vec(),
+                    reply: tx,
+                });
+                (h_inj.wake)();
+            },
+        );
         Self {
             handle,
             collab: Arc::new(Mutex::new(HashMap::new())),
@@ -597,11 +635,13 @@ struct TranscriptTail {
 /// reflects its real tool_use without anyone calling `announce`. Polls at
 /// 750ms — `notify` isn't a dependency and the board is human-read, so
 /// sub-second latency is plenty. Drops tails for closed panes via `snapshot`.
-fn spawn_transcript_watcher(
+pub(crate) fn spawn_transcript_watcher<L>(
     collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
     binds: Arc<Mutex<Vec<(String, PathBuf)>>>,
-    snapshot: Arc<Mutex<PtySnapshot>>,
-) {
+    live_panes: L,
+) where
+    L: Fn() -> HashSet<String> + Send + 'static,
+{
     std::thread::spawn(move || {
         let mut tails: HashMap<String, TranscriptTail> = HashMap::new();
         loop {
@@ -614,13 +654,7 @@ fn spawn_transcript_watcher(
                 tails.insert(sid, TranscriptTail { path, offset, recent, last: Instant::now() });
             }
             // 2. Drop tails + auto entries for panes that have closed.
-            let live: HashSet<String> = snapshot
-                .lock()
-                .unwrap()
-                .surfaces
-                .iter()
-                .map(|s| s.id.clone())
-                .collect();
+            let live: HashSet<String> = live_panes();
             tails.retain(|sid, _| live.contains(sid));
             collab_auto.lock().unwrap().retain(|sid, _| live.contains(sid));
             // 3. Incremental read each tail → update recent ring → collab_auto.
@@ -765,14 +799,21 @@ pub fn pane_record(sess: &pty_backend::PtySession) -> serde_json::Value {
     let was_claude = sess
         .active_process_name()
         .map_or(false, |p| p.contains("claude"));
-    // Prefer the id straight off the running claude's argv (exact per-pane);
-    // two claudes in the same cwd no longer collapse onto one id the way the
-    // cwd-mtime guess does. Fall back to the mtime guess for a fresh `claude`
-    // whose argv carries no id.
-    let session_id = shell_pid
-        .filter(|_| was_claude)
-        .and_then(claude_session_id_from_cmdline)
-        .or_else(|| cwd.as_ref().and_then(|c| latest_claude_session_id(c)));
+    // Only record a session id for panes actually running claude. Prefer the
+    // id straight off the running claude's argv (exact per-pane); two claudes
+    // in the same cwd no longer collapse onto one id the way the cwd-mtime
+    // guess does. Fall back to the mtime guess for a fresh `claude` whose argv
+    // carries no id. Crucially the mtime fallback is INSIDE the was_claude
+    // guard — otherwise a plain shell pane (no claude) would still get the
+    // cwd's newest session id stapled on, so every pane sharing a cwd collapsed
+    // onto one id and `claude --resume` restored the wrong/duplicate session.
+    let session_id = if was_claude {
+        shell_pid
+            .and_then(claude_session_id_from_cmdline)
+            .or_else(|| cwd.as_ref().and_then(|c| latest_claude_session_id(c)))
+    } else {
+        None
+    };
     serde_json::json!({
         "cwd": cwd.as_ref().map(|c| c.to_string_lossy().into_owned()),
         "was_claude": was_claude,

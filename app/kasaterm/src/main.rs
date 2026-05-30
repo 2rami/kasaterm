@@ -9,6 +9,7 @@ mod autosuggest;
 mod cells;
 mod daemon;
 mod gpu;
+mod inbox;
 mod socket;
 mod stream;
 mod theme;
