@@ -5004,14 +5004,25 @@ impl App {
                     if gcol >= bx && gcol < bx + bw && grow >= by && grow < by + bh {
                         // Local cell uses the body origin: box edge + header
                         // band + inner inset, matching the render origin.
+                        let pid = format!("%{id}");
+                        // Per-pane font zoom: glyphs render at cell × fs, so the
+                        // pixel→cell divisor must use the same zoomed cell or a
+                        // font-bumped pane maps the cursor to the wrong row/col
+                        // (selection + mouse-report drift). The box origin stays
+                        // on the shared grid — only the in-pane step scales.
+                        let fs = self
+                            .pane_font_scales
+                            .get(&pid)
+                            .copied()
+                            .unwrap_or(1.0)
+                            .max(0.1);
                         let box_left = sb + WINDOW_PADDING + bx as f32 * self.cell.w;
                         let box_top = TITLE_HEIGHT + by as f32 * self.cell.h;
-                        let lc = ((px - box_left - PANE_INNER_X).max(0.0) / self.cell.w).floor()
-                            as u16;
-                        let lr = ((py - box_top - header_h - PANE_INNER_Y).max(0.0)
-                            / self.cell.h)
+                        let lc = ((px - box_left - PANE_INNER_X).max(0.0) / (self.cell.w * fs))
                             .floor() as u16;
-                        let pid = format!("%{id}");
+                        let lr = ((py - box_top - header_h - PANE_INNER_Y).max(0.0)
+                            / (self.cell.h * fs))
+                            .floor() as u16;
                         let (mc, mr) = ws
                             .panes
                             .get(&pid)
@@ -5035,9 +5046,11 @@ impl App {
         if t.cols == 0 || t.rows == 0 {
             return None;
         }
-        let lc =
-            ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0) / self.cell.w).floor() as u16;
-        let lr = ((py - TITLE_HEIGHT - PANE_INNER_Y).max(0.0) / self.cell.h).floor() as u16;
+        let fs = self.pane_font_scales.get(&id).copied().unwrap_or(1.0).max(0.1);
+        let lc = ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0) / (self.cell.w * fs))
+            .floor() as u16;
+        let lr =
+            ((py - TITLE_HEIGHT - PANE_INNER_Y).max(0.0) / (self.cell.h * fs)).floor() as u16;
         Some((id, lc.min(t.cols - 1), lr.min(t.rows - 1)))
     }
 
@@ -9977,6 +9990,18 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // Split-seam drag wins over the tab/header hits below.
+                    // The hover cursor already flips to a resize arrow through
+                    // this same `divider_at_px`, so a press on the seam MUST
+                    // resize too — otherwise a tab pill sitting on the seam
+                    // (the lower pane's header butts right up against it) grabs
+                    // a tab/pane move while the cursor is saying "resize".
+                    if let Some((path, dir)) =
+                        self.divider_at_px(self.cursor_px.0, self.cursor_px.1)
+                    {
+                        self.resize_drag = Some((path, dir));
+                        return;
+                    }
                     if let Some((pid, idx)) = self
                         .pane_tab_rects
                         .iter()
@@ -9998,16 +10023,6 @@ impl ApplicationHandler<UserEvent> for App {
                             drop_pane: pid,
                         });
                         window.request_redraw();
-                        return;
-                    }
-                    // Grab a split seam → start a divider drag. Checked
-                    // before the cell-grid click so dragging the boundary
-                    // never doubles as a text selection in the pane under
-                    // it.
-                    if let Some((path, dir)) =
-                        self.divider_at_px(self.cursor_px.0, self.cursor_px.1)
-                    {
-                        self.resize_drag = Some((path, dir));
                         return;
                     }
                     // Press on a pane header (not the × button) → focus it
