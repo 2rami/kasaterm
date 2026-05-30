@@ -55,12 +55,6 @@ pub const RADIUS_MD: f32 = 9.0;
 
 /// Base glyph size for chrome icons ("medium" — unifies the old 14..19 spread).
 pub const ICON_SIZE: f32 = 16.0;
-/// Square background/hit chip for an icon button (ICON_SIZE + padding/side).
-pub const ICON_CHIP: f32 = 26.0;
-/// Corner radius for the icon chip background.
-pub const ICON_CHIP_RADIUS: f32 = RADIUS_SM;
-/// Hover background overlay for an icon chip (subtle lift over any surface).
-pub const ICON_HOVER_BG: [u8; 4] = with_alpha(TEXT, 0x22);
 
 /// u8 sRGB RGBA → f32 [0,1] RGBA, for the sugarloaf path which takes floats.
 

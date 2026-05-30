@@ -29,6 +29,10 @@ pub struct CellInstance {
 
 impl CellInstance {
     pub const FLAG_COLOR: u32 = 1;
+    /// Bit 1 set = tint an SVG coverage mask (fg.rgb × texel.a) but skip the
+    /// WezTerm text gamma/contrast curve. That curve sharpens font stems but
+    /// hard-edges thin SVG strokes, which read as jagged pixels on hover.
+    pub const FLAG_ICON: u32 = 2;
 }
 
 #[repr(C)]
