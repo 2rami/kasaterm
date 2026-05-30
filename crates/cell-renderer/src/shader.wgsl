@@ -153,6 +153,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let sat_rgb = boost_saturation(texel.rgb, u.color_sat);
         return vec4<f32>(prepare_output(sat_rgb), texel.a * in.fg.a);
     }
+    // SVG icon mask: tint through coverage but keep the raster's own linear
+    // anti-aliasing — the text gamma/contrast curve below jaggies thin strokes.
+    if ((in.flags & 2u) != 0u) {
+        let icon_rgb = boost_saturation(in.fg.rgb, u.color_sat);
+        return vec4<f32>(prepare_output(icon_rgb), in.fg.a * clamp(texel.a, 0.0, 1.0));
+    }
     let alpha_raw = clamp(texel.a, 0.0, 1.0);
     let alpha_gamma = pow(alpha_raw, 1.0 / max(u.text_gamma, 0.001));
     let alpha = clamp(alpha_gamma * u.text_contrast, 0.0, 1.0);

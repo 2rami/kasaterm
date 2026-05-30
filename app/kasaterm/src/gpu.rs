@@ -76,6 +76,10 @@ pub struct GpuRenderer {
     /// Per-frame image quads: (pane id, instance). Drained in `render()`
     /// where each is drawn with that pane's texture bind group.
     image_quads: Vec<(String, CellInstance)>,
+    /// Per-frame chrome icon quads: (texture key, instance). Same texture
+    /// path as `image_quads`, but drawn AFTER the chrome pass so the icons
+    /// sit on top of the title bar / pane headers instead of under them.
+    icon_quads: Vec<(String, CellInstance)>,
     /// Logical-px rects of link spans drawn in the most recent markdown
     /// frame: (x, y, w, h, dest). main.rs hit-tests a click against these to
     /// open a file (Finder) or URL (browser). Cleared at the start of every
@@ -413,6 +417,7 @@ impl GpuRenderer {
             image_sampler,
             images: HashMap::new(),
             image_quads: Vec::new(),
+            icon_quads: Vec::new(),
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
         })
@@ -468,17 +473,39 @@ impl GpuRenderer {
     /// code blocks / inline-code chips.
     pub fn round_rect_fill(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
         let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+        // Straight middle band — no rounding needed between the two caps.
         self.rect(x, y + r, w, (h - 2.0 * r).max(0.0), col);
         if r <= 0.0 {
             return;
         }
-        let steps = r.ceil() as i32;
+        // Trace the caps at DEVICE-pixel resolution with a fractional-alpha
+        // edge column so the corner reads smooth instead of stair-stepped.
+        // The old version stepped one LOGICAL px (= 2 device px on retina)
+        // with no anti-aliasing, which is the "hover 사각형 모서리 픽셀" the
+        // user saw. One logical row here = `inv` device px; each row gets a
+        // partial-coverage pixel on each side plus a solid middle span.
+        let s = self.scale;
+        let inv = 1.0 / s;
+        let steps = (r * s).ceil() as i32;
         for k in 0..steps {
-            let yy = k as f32;
-            let dx = r - (r * r - (r - yy) * (r - yy)).max(0.0).sqrt();
-            let rw = (w - 2.0 * dx).max(0.0);
-            self.rect(x + dx, y + yy, rw, 1.0, col);
-            self.rect(x + dx, y + h - 1.0 - yy, rw, 1.0, col);
+            let yy = k as f32 * inv; // logical distance inward from the cap edge
+            let yc = yy + 0.5 * inv; // sample the row center for the circle test
+            let d = (r * r - (r - yc) * (r - yc)).max(0.0).sqrt();
+            let dx_dev = ((r - d) * s).max(0.0); // horizontal inset, device px
+            let dx_floor = dx_dev.floor();
+            let frac = dx_dev - dx_floor; // uncovered fraction of the boundary px
+            let edge_col = [col[0], col[1], col[2], (col[3] as f32 * (1.0 - frac)).round() as u8];
+            let lx = x + dx_floor * inv;
+            let rx = x + w - (dx_floor + 1.0) * inv;
+            let cx = x + (dx_floor + 1.0) * inv;
+            let cw = (w - 2.0 * (dx_floor + 1.0) * inv).max(0.0);
+            for ry in [y + yy, y + h - yy - inv] {
+                self.rect(lx, ry, inv, inv, edge_col);
+                self.rect(rx, ry, inv, inv, edge_col);
+                if cw > 0.0 {
+                    self.rect(cx, ry, cw, inv, col);
+                }
+            }
         }
     }
 
@@ -992,31 +1019,20 @@ impl GpuRenderer {
         pen_y + lh
     }
 
-    /// Copy-button glyph: two overlapping square outlines on a rounded chip.
-    /// Mirrors the terminal code-block copy button so markdown blocks read the
-    /// same. All logical px.
+    /// Copy-button: rounded chip background (chrome layer) + Lucide copy SVG
+    /// (icon layer, on top), sized to ICON_SIZE so it matches every other
+    /// chrome icon. All logical px.
     fn draw_copy_icon(&mut self, bx: f32, by: f32, bw: f32, bh: f32) {
         let bg = crate::theme::with_alpha(crate::theme::SURFACE_ACTIVE, 0xE0);
         self.round_rect_fill(bx, by, bw, bh, crate::theme::RADIUS_SM, bg);
-        let fg = crate::theme::TEXT_DIM;
-        let s = bw * 0.34;
-        let off = s * 0.3;
-        let t = (s * 0.16).max(1.0);
-        let gx = bx + (bw - (s + off)) / 2.0;
-        let gy = by + (bh - (s + off)) / 2.0;
-        // Back square (up-right), outline only.
-        let (r1x, r1y) = (gx + off, gy);
-        self.rect(r1x, r1y, s, t, fg);
-        self.rect(r1x, r1y + s - t, s, t, fg);
-        self.rect(r1x, r1y, t, s, fg);
-        self.rect(r1x + s - t, r1y, t, s, fg);
-        // Front square (down-left): refill the chip bg so it sits on top.
-        let (r2x, r2y) = (gx, gy + off);
-        self.rect(r2x, r2y, s, s, bg);
-        self.rect(r2x, r2y, s, t, fg);
-        self.rect(r2x, r2y + s - t, s, t, fg);
-        self.rect(r2x, r2y, t, s, fg);
-        self.rect(r2x + s - t, r2y, t, s, fg);
+        let isz = crate::theme::ICON_SIZE;
+        self.queue_icon(
+            "copy",
+            bx + (bw - isz) / 2.0,
+            by + (bh - isz) / 2.0,
+            isz,
+            crate::theme::TEXT_DIM,
+        );
     }
 
     /// Lay out + draw a markdown document into the pane box (all logical px).
@@ -1319,6 +1335,7 @@ impl GpuRenderer {
     pub fn clear_chrome(&mut self) {
         self.chrome.clear();
         self.image_quads.clear();
+        self.icon_quads.clear();
     }
 
     /// Has this pane's image already been uploaded? Lets the caller skip
@@ -1388,6 +1405,80 @@ impl GpuRenderer {
     /// Free a pane's image texture when the pane closes.
     pub fn drop_image(&mut self, id: &str) {
         self.images.remove(id);
+    }
+
+    /// Bundled Lucide SVG source for a chrome icon name. Compiled in so the
+    /// .app needs no external asset dir.
+    fn icon_svg(name: &str) -> Option<&'static str> {
+        Some(match name {
+            "folder" => include_str!("../assets/icons/folder.svg"),
+            "x" => include_str!("../assets/icons/x.svg"),
+            "plus" => include_str!("../assets/icons/plus.svg"),
+            "minus" => include_str!("../assets/icons/minus.svg"),
+            "panel-left" => include_str!("../assets/icons/panel-left.svg"),
+            "columns-2" => include_str!("../assets/icons/columns-2.svg"),
+            "rows-2" => include_str!("../assets/icons/rows-2.svg"),
+            "copy" => include_str!("../assets/icons/copy.svg"),
+            "terminal" => include_str!("../assets/icons/terminal.svg"),
+            "sparkles" => include_str!("../assets/icons/sparkles.svg"),
+            "rotate-cw" => include_str!("../assets/icons/rotate-cw.svg"),
+            "maximize" => include_str!("../assets/icons/maximize.svg"),
+            "file-text" => include_str!("../assets/icons/file-text.svg"),
+            _ => return None,
+        })
+    }
+
+    /// Rasterize an SVG into a square `px`-side RGBA8 buffer. `currentColor`
+    /// is forced white: only the alpha channel matters because icons draw
+    /// through the glyph tint path (texel.a × fg.rgb), so the theme color is
+    /// applied at draw time, not bake time.
+    fn rasterize_icon(svg: &str, px: u32) -> Option<Vec<u8>> {
+        let svg = svg.replace("currentColor", "#ffffff");
+        let opt = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_str(&svg, &opt).ok()?;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)?;
+        let size = tree.size();
+        let scale = px as f32 / size.width().max(size.height());
+        let tf = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        resvg::render(&tree, tf, &mut pixmap.as_mut());
+        Some(pixmap.data().to_vec())
+    }
+
+    /// Queue a chrome icon at `(x, y)` (logical px), `size`-side square, tinted
+    /// `color`. Lazily rasterizes + caches the white alpha mask at the exact
+    /// device-pixel resolution, then draws it through the monochrome tint path
+    /// (`flags = 0` → shader does texel.a × fg.rgb) so it picks up hover /
+    /// active colors exactly like a glyph would.
+    pub fn queue_icon(&mut self, name: &str, x: f32, y: f32, size: f32, color: [u8; 4]) {
+        let px = (size * self.scale).round() as u32;
+        if px == 0 {
+            return;
+        }
+        let key = format!("__icon:{name}:{px}");
+        if !self.images.contains_key(&key) {
+            let Some(svg) = Self::icon_svg(name) else { return };
+            let Some(rgba) = Self::rasterize_icon(svg, px) else { return };
+            self.upload_image(&key, &rgba, px, px);
+        }
+        if !self.images.contains_key(&key) {
+            return;
+        }
+        // Snap to whole device pixels: the texture is rasterized 1:1 at `px`,
+        // so a fractional dest makes the linear sampler blur / fringe the
+        // edges ("마우스오버 픽셀 보임"). Integer dest = crisp 1:1 blit.
+        let (dx, dy) = ((x * self.scale).round(), (y * self.scale).round());
+        let dpx = px as f32;
+        self.icon_quads.push((
+            key,
+            CellInstance {
+                cell_px: [dx, dy, dpx, dpx],
+                uv_min: [0.0, 0.0],
+                uv_max: [1.0, 1.0],
+                fg_rgba: srgb_rgba_to_linear(color),
+                flags: CellInstance::FLAG_ICON,
+                ..Default::default()
+            },
+        ));
     }
 
     /// Queue an image pane for this frame. `(x, y, w, h)` is the pane's body
@@ -1719,13 +1810,19 @@ impl GpuRenderer {
         let instance_count = self.chrome.len();
         self.pipeline
             .write_instances(&self.device, &self.queue, &self.chrome);
-        // Upload this frame's image quads into the image pipeline's own
-        // buffer; each is drawn individually below so it can bind its texture.
-        if !self.image_quads.is_empty() {
-            let img_instances: Vec<CellInstance> =
-                self.image_quads.iter().map(|(_, inst)| *inst).collect();
+        // Upload this frame's image + icon quads into the image pipeline's own
+        // buffer (images first, icons appended). Images draw under the chrome
+        // pass; icons draw over it. Both use the same per-texture bind groups.
+        let n_img = self.image_quads.len();
+        if !self.image_quads.is_empty() || !self.icon_quads.is_empty() {
+            let all_instances: Vec<CellInstance> = self
+                .image_quads
+                .iter()
+                .chain(self.icon_quads.iter())
+                .map(|(_, inst)| *inst)
+                .collect();
             self.image_pipeline
-                .write_instances(&self.device, &self.queue, &img_instances);
+                .write_instances(&self.device, &self.queue, &all_instances);
         }
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
@@ -1772,6 +1869,14 @@ impl GpuRenderer {
             }
             self.pipeline
                 .draw(&mut pass, &self.bind_group, instance_count as u32);
+            // Chrome icons on top of the title bar / pane headers. Indices
+            // continue past the image quads in the shared instance buffer.
+            for (j, (id, _)) in self.icon_quads.iter().enumerate() {
+                if let Some(entry) = self.images.get(id) {
+                    self.image_pipeline
+                        .draw_at(&mut pass, &entry.bind_group, (n_img + j) as u32);
+                }
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
