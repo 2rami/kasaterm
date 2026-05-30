@@ -11,13 +11,15 @@
 //! writer owns the stream socket. pane_id is allocated here (single source of
 //! truth) so the GUI never collides.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_socket::backend::{Backend, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo};
+use agent_socket::backend::{
+    Backend, PaneActivity, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo,
+};
 use agent_socket::transport::{LocalListener, LocalStream};
 use agent_socket::Server;
 use anyhow::{anyhow, Result};
@@ -58,6 +60,17 @@ struct DaemonState {
     /// Every pane forwarder + every state broadcast feeds this; the pump
     /// drains it and writes to the subscriber. One writer for the socket.
     out_tx: Sender<StreamMsg>,
+    /// Where the structure is persisted. Held here so any mutation can save
+    /// immediately (real-time) instead of waiting on the 10s backup timer —
+    /// the layout the user left is always on disk for the next launch.
+    state_path: PathBuf,
+    /// Collab board: manual `announce` (collab) merged with transcript-derived
+    /// activity (collab_auto). `binds` queues each pane's transcript path for
+    /// the tail watcher. The in-process PtyBackend used to host this, but it's
+    /// dead under the daemon — so the board lives here now.
+    collab: Arc<Mutex<HashMap<String, PaneActivity>>>,
+    collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
+    binds: Arc<Mutex<Vec<(String, PathBuf)>>>,
 }
 
 impl DaemonState {
@@ -179,11 +192,22 @@ impl DaemonState {
         StateView {
             sessions: views,
             active_session: *self.active_session.lock().unwrap(),
+            active_pane: Some(self.active.lock().unwrap().clone()),
         }
     }
 
     fn broadcast_state(&self) {
         let _ = self.out_tx.send(StreamMsg::State(self.state_view()));
+        // Every structural mutation funnels through here, so persisting in the
+        // same breath keeps the on-disk session in lock-step with the live
+        // layout — splits/closes survive even a hard kill, no 10s window.
+        self.persist();
+    }
+
+    /// Snapshot the structure to disk now. Cheap (the file is ~1 KB) and only
+    /// fires on structural changes, so it never thrashes.
+    fn persist(&self) {
+        save_daemon_state(self, &self.state_path);
     }
 
     /// cwd of the active pane (for inheriting into a split/new window/session).
@@ -255,6 +279,32 @@ impl Backend for DaemonBackend {
             .collect())
     }
     fn focus_surface(&self, surface_id: &str) -> Result<()> {
+        // Keep the active tuple consistent: making a pane "active" must also
+        // point active_session/active_window at the session+window that holds
+        // it. Otherwise a later split runs `with_active_layout` (the active
+        // session's window) but `split_leaf(active)` with a pane from another
+        // session — the target leaf isn't there, the split is dropped, and the
+        // freshly spawned pane is orphaned (in the pty map, in no layout). That
+        // orphan is the "empty pane" a cross-session focus-then-split produced.
+        let located = {
+            let sessions = self.state.sessions.lock().unwrap();
+            let mut hit = None;
+            'scan: for (si, s) in sessions.iter().enumerate() {
+                for (wi, w) in s.windows.iter().enumerate() {
+                    if w.leaves().iter().any(|&l| l == surface_id) {
+                        hit = Some((si, wi));
+                        break 'scan;
+                    }
+                }
+            }
+            hit
+        };
+        if let Some((si, wi)) = located {
+            *self.state.active_session.lock().unwrap() = si;
+            if let Some(s) = self.state.sessions.lock().unwrap().get_mut(si) {
+                s.active_window = wi;
+            }
+        }
         *self.state.active.lock().unwrap() = surface_id.to_string();
         Ok(())
     }
@@ -264,11 +314,34 @@ impl Backend for DaemonBackend {
             SplitDirection::Up | SplitDirection::Down => SplitDir::Vertical,
         };
         let new_id = self.state.alloc_id();
-        let active = self.state.active.lock().unwrap().clone();
+        // Split the active window's *real* leaf. If `active` drifted to another
+        // session's pane (belt-and-suspenders with the focus fix above), fall
+        // back to this window's first leaf so the new pane is never orphaned.
+        let active = {
+            let leaves = self.state.active_window_leaves();
+            let cur = self.state.active.lock().unwrap().clone();
+            if leaves.iter().any(|l| *l == cur) {
+                cur
+            } else {
+                leaves.into_iter().next().unwrap_or(cur)
+            }
+        };
         let cwd = self.state.active_cwd();
         spawn_pane(&self.state, &new_id, cwd)?;
-        self.state
+        let attached = self
+            .state
             .with_active_layout(|lay| lay.split_leaf(&active, axis, new_id.clone()));
+        if attached.is_none() {
+            // No active session/window to split into (e.g. the last pane was
+            // closed, emptying `sessions`). Adopt the new pane as a fresh
+            // session so a split can never orphan into an invisible pane.
+            let mut sessions = self.state.sessions.lock().unwrap();
+            sessions.push(DaemonSession {
+                windows: vec![PtyLayout::single(new_id.clone())],
+                active_window: 0,
+            });
+            *self.state.active_session.lock().unwrap() = sessions.len() - 1;
+        }
         *self.state.active.lock().unwrap() = new_id.clone();
         self.state.broadcast_state();
         Ok(SurfaceInfo {
@@ -279,8 +352,28 @@ impl Backend for DaemonBackend {
     }
     fn close_surface(&self, surface_id: &str) -> Result<()> {
         self.state.pty.lock().unwrap().remove(surface_id); // drop = kill
-        self.state.remove_pane(surface_id);
-        self.state.update_active_pane();
+        let emptied = self.state.remove_pane(surface_id);
+        if emptied {
+            // That was the last pane of the last session. Rather than leave a
+            // session-less daemon — where split/new have nothing to attach to
+            // and silently orphan (the "split does nothing" brick) — spawn a
+            // fresh shell as a new session so the window always has something
+            // usable, like a normal terminal opening a new prompt.
+            let new_id = self.state.alloc_id();
+            let cwd = std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned());
+            spawn_pane(&self.state, &new_id, cwd)?;
+            let mut sessions = self.state.sessions.lock().unwrap();
+            sessions.push(DaemonSession {
+                windows: vec![PtyLayout::single(new_id.clone())],
+                active_window: 0,
+            });
+            *self.state.active_session.lock().unwrap() = 0;
+            *self.state.active.lock().unwrap() = new_id;
+        } else {
+            self.state.update_active_pane();
+        }
         self.state.broadcast_state();
         Ok(())
     }
@@ -327,6 +420,44 @@ impl Backend for DaemonBackend {
             saved: Vec::new(),
             labels: view.sessions.iter().map(|s| s.label.clone()).collect(),
         }
+    }
+    fn announce(&self, surface_id: &str, intent: &str, status: &str, files: &[String]) -> Result<()> {
+        self.state.collab.lock().unwrap().insert(
+            surface_id.to_string(),
+            PaneActivity {
+                surface_id: surface_id.to_string(),
+                intent: intent.to_string(),
+                status: status.to_string(),
+                files: files.to_vec(),
+            },
+        );
+        Ok(())
+    }
+    fn collab_board(&self) -> Result<Vec<PaneActivity>> {
+        // Live = every pane the daemon owns, across sessions; drop board
+        // entries for closed panes so no ghosts linger. Manual announce
+        // (collab) is the fallback; transcript-derived activity (collab_auto)
+        // wins since it reflects what the pane is actually doing.
+        let live: HashSet<String> = self.state.pty.lock().unwrap().keys().cloned().collect();
+        let mut by_id: HashMap<String, PaneActivity> = HashMap::new();
+        for a in self.state.collab.lock().unwrap().values() {
+            by_id.insert(a.surface_id.clone(), a.clone());
+        }
+        for a in self.state.collab_auto.lock().unwrap().values() {
+            by_id.insert(a.surface_id.clone(), a.clone());
+        }
+        Ok(by_id
+            .into_values()
+            .filter(|a| live.contains(&a.surface_id))
+            .collect())
+    }
+    fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
+        // Queue for the tail watcher; re-binding (claude --resume swaps the
+        // jsonl) replaces the pending entry rather than stacking.
+        let mut binds = self.state.binds.lock().unwrap();
+        binds.retain(|(s, _)| s != surface_id);
+        binds.push((surface_id.to_string(), PathBuf::from(path)));
+        Ok(())
     }
     fn new_session(&self) -> Result<()> {
         let new_id = self.state.alloc_id();
@@ -616,10 +747,37 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         active: Mutex::new(active),
         subscriber: Mutex::new(None),
         out_tx,
+        state_path: state_path.clone(),
+        collab: Arc::new(Mutex::new(HashMap::new())),
+        collab_auto: Arc::new(Mutex::new(HashMap::new())),
+        binds: Arc::new(Mutex::new(Vec::new())),
     });
 
-    for (sess, id) in resumes {
-        schedule_claude_resume(sess, id);
+    // Cold restore (claude --resume into a restored pane) is deferred — the
+    // "live-first" decision: keep claude alive via the surviving daemon across
+    // GUI restarts, but on a *daemon* restart (crash/reboot) a restored pane
+    // comes up as a plain shell, not an auto-resumed claude. Auto-resume was
+    // resurrecting stale sessions (and firing surprise `claude --resume`s), so
+    // it's gated off by default; opt in with KASATERM_COLD_RESTORE=1.
+    if std::env::var("KASATERM_COLD_RESTORE").as_deref() == Ok("1") {
+        for (sess, id) in resumes {
+            schedule_claude_resume(sess, id);
+        }
+    } else {
+        let _ = resumes; // metadata still captured for a future opt-in restore
+    }
+
+    // Collab board under the daemon: tail each bound pane's claude transcript
+    // and fill collab_auto, so `board` works even though the in-process
+    // PtyBackend that used to host the watcher is dead here. Live panes = the
+    // pty map keys (every pane across every session).
+    {
+        let st = state.clone();
+        crate::socket::spawn_transcript_watcher(
+            state.collab_auto.clone(),
+            state.binds.clone(),
+            move || st.pty.lock().unwrap().keys().cloned().collect(),
+        );
     }
 
     // Persist state every 10s so a daemon crash loses at most that window.

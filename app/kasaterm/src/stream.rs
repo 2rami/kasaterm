@@ -44,6 +44,12 @@ pub struct SessionView {
 pub struct StateView {
     pub sessions: Vec<SessionView>,
     pub active_session: usize,
+    /// The daemon's authoritative active pane id. The GUI adopts this directly
+    /// instead of guessing — a stale guess (e.g. pointing at a just-closed
+    /// pane) is what made a close drop to the single-pane fallback and draw a
+    /// ghost. Optional so an older daemon stream still deserializes.
+    #[serde(default)]
+    pub active_pane: Option<String>,
 }
 
 /// Daemon→GUI stream message. `Frame` carries a screen diff (per pane, keyed by
