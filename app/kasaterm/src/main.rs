@@ -5159,44 +5159,29 @@ impl App {
     /// size. In tmux mode the daemon redistributes for us. In PTY mode
     /// we walk the BSP tree and SIGWINCH each leaf to its own rect.
     fn resize_backend(&self, cols: u16, rows: u16) {
-        if let Some(client) = self.daemon_client.as_ref() {
-            // M1: a single daemon pane fills the whole window — resize it to
-            // the full cell grid. Multi-pane layout math moves to the daemon
-            // in a later milestone.
-            client.resize("%0", cols, rows);
-            self.publish_pty_layout();
-            return;
-        }
         if let Some(tmux) = self.tmux.as_ref() {
             let _ = tmux.resize_client(cols, rows);
             return;
         }
-        let Some(tree) = self.pty_layout.as_ref() else { return; };
-        // When the workspace is split, every pane wears a per-pane
-        // header strip. That strip eats a few cell rows at the top of
-        // each pane's bounding box, so the PTY's usable grid shrinks
-        // by the same amount — otherwise claude code paints its
-        // statusline / `bypass…` row off the bottom edge.
-        let leaves = tree.leaves().len();
-        // Header strip (only when split) eats off the top of each pane box;
-        // the rest is shared with the cell inset below.
-        let header_px = if leaves > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
-        // Per-leaf usable cells, indexed by outer pane id (the layout key,
-        // which after cross-pane drag is NOT guaranteed to equal any tab's
-        // pid). Walk ws.panes and resize each pane's tab PtySessions to its
-        // outer rect — single source of truth, works for both primary and
-        // in-pane secondary tabs.
-        let snapshot: Vec<(String, Vec<String>)> = {
-            let ws = self.ws.lock().unwrap();
-            ws.panes
-                .iter()
-                .map(|(outer, p)| {
-                    let pids: Vec<String> =
-                        p.tabs.iter().filter_map(|t| t.pid.clone()).collect();
-                    (outer.clone(), pids)
-                })
-                .collect()
+        // The window is the single source of truth for size. Derive every
+        // leaf's usable grid from the window cell box here, then push those
+        // sizes to whoever owns the PTY — the daemon over RPC, or local
+        // sessions. Panes themselves only carry BSP ratios, never absolute
+        // rows/cols, so this one computation feeds both backends.
+        let Some(tree) = self.pty_layout.as_ref() else {
+            // No layout yet (very first daemon frame): the lone pane fills
+            // the whole window.
+            if let Some(client) = self.daemon_client.as_ref() {
+                client.resize("%0", cols, rows);
+            }
+            return;
         };
+        // When the workspace is split, every pane wears a per-pane header
+        // strip that eats a few cell rows off the top of its box, so the
+        // PTY's usable grid shrinks by the same amount — otherwise claude
+        // code paints its statusline / `bypass…` row off the bottom edge.
+        let leaves = tree.leaves().len();
+        let header_px = if leaves > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
         // Per-pane font scale shrinks/grows that pane's usable cells: bigger
         // glyphs ⇒ fewer cols/rows in the same box. 1.0 panes keep the exact
         // integer-cell math; scaled panes divide the base cell span by the
@@ -5225,6 +5210,32 @@ impl App {
             let prows = (usable_h / scaled_ch).floor().max(1.0) as u16;
             leaf_cells.insert(id, (pcols, prows));
         }
+        // Daemon owns the PTYs: the layout leaf id IS the pane id, so resize
+        // each leaf directly. This replaces the old M1 stub that only ever
+        // resized "%0" to the full window — which left freshly split panes
+        // stuck at their 80×24 spawn size and clipped claude's bottom rows.
+        if let Some(client) = self.daemon_client.as_ref() {
+            for (id, (pc, pr)) in &leaf_cells {
+                client.resize(id, *pc, *pr);
+            }
+            self.publish_pty_layout();
+            return;
+        }
+        // Local mode: the outer pane id (layout key) is NOT guaranteed to
+        // equal any tab's pid after a cross-pane drag, so map each outer
+        // rect onto its tabs' PtySessions — works for primary + in-pane
+        // secondary tabs alike.
+        let snapshot: Vec<(String, Vec<String>)> = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .iter()
+                .map(|(outer, p)| {
+                    let pids: Vec<String> =
+                        p.tabs.iter().filter_map(|t| t.pid.clone()).collect();
+                    (outer.clone(), pids)
+                })
+                .collect()
+        };
         for (outer, pids) in snapshot {
             let Some(&(pc, pr)) = leaf_cells.get(&outer) else { continue };
             for pid in pids {
@@ -9154,7 +9165,14 @@ impl ApplicationHandler<UserEvent> for App {
                     .collect();
                 self.active_window = sess.active_window;
                 self.pty_layout = sess.windows.get(sess.active_window).map(|w| w.layout.clone());
-                self.publish_pty_layout();
+                // The layout just changed (split / close / window switch). A
+                // freshly split pane is still at its 80×24 daemon spawn size,
+                // so re-derive every leaf's grid from the window and push the
+                // real sizes back — otherwise claude code's bottom rows are
+                // clipped until the user nudges the window. resize_backend
+                // republishes the layout for us.
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
             }
         }
         // Render directly here instead of request_redraw → (next loop)
