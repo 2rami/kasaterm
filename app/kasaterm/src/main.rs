@@ -10991,7 +10991,12 @@ fn first_leaf_cwd(node: &socket::RestoreNode) -> Option<String> {
     }
 }
 
-fn resolve_initial_cwd() -> Option<String> {
+pub(crate) fn resolve_initial_cwd() -> Option<String> {
+    if let Ok(dir) = std::env::var("KASATERM_CWD") {
+        if !dir.is_empty() {
+            return Some(dir);
+        }
+    }
     if let Ok(home) = std::env::var("HOME") {
         if !home.is_empty() {
             return Some(home);

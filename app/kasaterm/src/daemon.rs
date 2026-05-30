@@ -360,9 +360,7 @@ impl Backend for DaemonBackend {
             // fresh shell as a new session so the window always has something
             // usable, like a normal terminal opening a new prompt.
             let new_id = self.state.alloc_id();
-            let cwd = std::env::current_dir()
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned());
+            let cwd = crate::resolve_initial_cwd();
             spawn_pane(&self.state, &new_id, cwd)?;
             let mut sessions = self.state.sessions.lock().unwrap();
             sessions.push(DaemonSession {
@@ -698,9 +696,7 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
             HashMap::new(),
         )
     });
-    let default_cwd = std::env::current_dir()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned());
+    let default_cwd = crate::resolve_initial_cwd();
 
     let mut map = HashMap::new();
     let mut max_id = 0u32;
