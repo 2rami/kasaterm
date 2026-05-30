@@ -62,9 +62,19 @@ fn tool_event(name: &str, input: Option<&serde_json::Value>) -> ToolEvent {
             }
         }
         "Bash" => {
+            // 첫 명령만 (cd;build 같은 멀티라인/세미콜론 체인이 board를
+            // 줄바꿈으로 더럽히지 않게) + 공백 정규화 + 40자.
             let cmd = get("command").unwrap_or("");
+            let first = cmd.split(['\n', ';', '&']).next().unwrap_or("").trim();
+            let short: String = first
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(40)
+                .collect();
             ToolEvent {
-                label: format!("Bash {}", cmd.chars().take(40).collect::<String>()),
+                label: format!("Bash {short}"),
                 file: None,
             }
         }
@@ -85,11 +95,14 @@ fn basename(path: &str) -> &str {
 /// - files: Edit/Write 대상(충돌 신호), 중복 제거.
 /// - status: idle | building(빌드/테스트 류 Bash가 최근) | working.
 pub fn build_activity(surface_id: &str, recent: &VecDeque<ToolEvent>, idle: bool) -> PaneActivity {
-    let intent = recent
-        .iter()
-        .map(|e| e.label.as_str())
-        .collect::<Vec<_>>()
-        .join(" → ");
+    // 연속 중복 라벨 제거 — "Bash cd → Bash cd → Bash cd"가 한 번으로.
+    let mut labels: Vec<&str> = Vec::new();
+    for e in recent {
+        if labels.last() != Some(&e.label.as_str()) {
+            labels.push(e.label.as_str());
+        }
+    }
+    let intent = labels.join(" → ");
     let mut files: Vec<String> = Vec::new();
     for e in recent {
         if let Some(f) = &e.file {
