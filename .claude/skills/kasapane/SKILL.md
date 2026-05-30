@@ -604,11 +604,17 @@ kasa-chat log                                  # 최근 대화 사람이 읽기 
 - 컨텍스트의 `📋 다른 pane 작업 현황`에서 내가 만질 파일을 누가 잡고 있으면 → `kasa-chat`으로 "나도 X 보는데 같이?" 충돌 회피. 같은 문제면 합류. 빌드 중이면 `peek %N`로 보고 대기.
 - 그 외엔 **평소대로 작업** — board는 자동 갱신.
 
-### 상대가 idle이라 안 깨어날 때
+### 상대가 idle이어도 자동으로 깨어난다 — kasa-chat inbox (2026-05-30+)
 
-받는 pane이 완전히 멈춰(idle) 있으면 hook이 안 돌아 쪽지를 즉시 못 본다. 급하면:
-- `kasaterm-cli send --surface %N "..."` — 그 pane stdin에 직접 주입해 깨운다(단 **사용자 화면에 보인다, 비상용**).
-- 또는 새 pane 만들어 claude 띄우기(`kasaterm-cli split` 후 claude), 내장 팀 모드.
+`kasa-chat send --to %N` 은 받는 pane이 **완전히 idle이어도 깨운다.** kasaterm 데몬이
+mailbox(`~/.kasaterm-chat/log.jsonl`)를 watch하다 메시지가 오면 그 pane의 **PTY에
+직접 주입**한다 — idle claude가 새 user turn으로 받아 깨어난다. **focus 안 바뀌고**
+백그라운드 pane(다른 세션 포함)도 깨운다. 그러니 idle 걱정 없이 그냥 `kasa-chat send`.
+- `KASATERM_INBOX=0` 으로 watcher를 끌 수 있다.
+- hook(다음 턴 컨텍스트 주입)과 **이중 전달**될 수 있다 — 같은 쪽지를 두 번 받으면 그 때문.
+- **옛 빌드/비-kasaterm 셸 fallback**: inbox watcher 없으면 hook만 돌아 idle을 못 깨운다.
+  그땐 `kasaterm-cli send --surface %N "..."`로 PTY 직접 주입(화면에 보임, 비상용),
+  또는 새 pane에 claude(`kasaterm-cli split` 후).
 
 ### 함정
 
