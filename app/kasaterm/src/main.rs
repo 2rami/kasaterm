@@ -9186,12 +9186,55 @@ impl ApplicationHandler<UserEvent> for App {
                     .collect();
                 self.active_window = sess.active_window;
                 self.pty_layout = sess.windows.get(sess.active_window).map(|w| w.layout.clone());
-                // The layout just changed (split / close / window switch). A
-                // freshly split pane is still at its 80×24 daemon spawn size,
-                // so re-derive every leaf's grid from the window and push the
-                // real sizes back — otherwise claude code's bottom rows are
-                // clipped until the user nudges the window. resize_backend
-                // republishes the layout for us.
+                // The daemon's State is the authority for this session's pane
+                // set — and in daemon mode it's the ONLY close signal we get
+                // (a closed pane's PTY drop never reaches us as a dead-pane EOF,
+                // so reap_dead_panes never fires). So reconcile ws against it
+                // here, or a closed pane lingers in ws.panes with a stale grid
+                // and active_pane keeps pointing at it — then dropping to a
+                // single leaf makes the single-pane fallback draw that ghost.
+                //
+                //   1. drop panes the daemon no longer lists (across ALL of this
+                //      session's windows, so window-switch panes survive);
+                //   2. re-point active_pane to a live leaf if it was closed;
+                //   3. mark every visible leaf + chrome dirty so a freshly split
+                //      pane paints immediately (damage-tracking skips it
+                //      otherwise — that's why it used to need a manual resize);
+                //   4. resize_backend re-derives each leaf's grid + republishes.
+                // Live pane set across ALL sessions (not just the active one),
+                // so a session switch keeps the other sessions' panes and only
+                // a truly-closed pane (in no session's tree) gets dropped.
+                let all_leaves: std::collections::HashSet<String> = view
+                    .sessions
+                    .iter()
+                    .flat_map(|s| s.windows.iter())
+                    .flat_map(|w| w.layout.leaves())
+                    .map(|l| l.to_string())
+                    .collect();
+                let active_leaves: Vec<String> = self
+                    .pty_layout
+                    .as_ref()
+                    .map(|t| t.leaves().iter().map(|l| l.to_string()).collect())
+                    .unwrap_or_default();
+                {
+                    let mut ws = self.ws.lock().unwrap();
+                    ws.panes.retain(|id, _| all_leaves.contains(id));
+                    ws.pid_to_pane.retain(|_, outer| all_leaves.contains(outer));
+                    // Adopt the daemon's authoritative active pane (no more
+                    // guessing) — fall back to this window's first leaf only if
+                    // it's absent or not in the visible window.
+                    let daemon_active = view
+                        .active_pane
+                        .clone()
+                        .filter(|a| active_leaves.iter().any(|l| l == a));
+                    ws.active_pane = daemon_active.or_else(|| active_leaves.first().cloned());
+                    for leaf in &active_leaves {
+                        if let Some(p) = ws.panes.get_mut(leaf) {
+                            p.dirty = true;
+                        }
+                    }
+                }
+                self.chrome_dirty = true;
                 let (cols, rows) = self.window_cells();
                 self.resize_backend(cols, rows);
             }
