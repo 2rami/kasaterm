@@ -16,6 +16,7 @@
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, WindowSize};
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config as TermConfig, TermDamage};
@@ -1038,13 +1039,25 @@ fn snapshot(
     let mut dirty: Vec<(u16, Row)> = Vec::with_capacity(damaged.len());
     for &r in &damaged {
         let mut row: Row = Vec::with_capacity(cols as usize);
+        // Clamp to the grid's real dimensions: a resize updates `size` and the
+        // Term grid under separate locks, so for a frame they can disagree by a
+        // column/line. Indexing `cols` (from `size`) into a grid that's one
+        // smaller panics (OOB). Fill the overshoot with blanks — the next frame
+        // repaints correctly, and we never crash on the race.
+        let grid_cols = grid.columns();
+        let grid_lines = grid.screen_lines();
+        let line = r as i32 - display_offset;
+        let line_ok = line >= 0 && (line as usize) < grid_lines;
         for c in 0..cols {
-            let point = Point::new(
-                alacritty_terminal::index::Line(r as i32 - display_offset),
-                alacritty_terminal::index::Column(c as usize),
-            );
-            let cell = &grid[point];
-            row.push(convert_cell(cell));
+            if line_ok && (c as usize) < grid_cols {
+                let point = Point::new(
+                    alacritty_terminal::index::Line(line),
+                    alacritty_terminal::index::Column(c as usize),
+                );
+                row.push(convert_cell(&grid[point]));
+            } else {
+                row.push(Cell::blank());
+            }
         }
         dirty.push((r, row));
     }

@@ -3758,90 +3758,10 @@ impl App {
 
     fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
-        // Daemon mode (default ON; opt out with KASATERM_DAEMON=0): don't spawn
-        // a local PTY — discover (or launch) the daemon and attach so shells
-        // survive GUI restarts. If attach fails for any reason, fall through to
-        // the in-process path so the app still comes up.
-        let daemon_enabled = std::env::var("KASATERM_DAEMON").map_or(true, |v| v != "0");
-        if daemon_enabled {
-            match self.attach_daemon() {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    eprintln!("[daemon] attach failed: {e}; falling back to in-process PTY");
-                    self.daemon_client = None;
-                }
-            }
-        }
-        let (cols, rows) = self.window_cells();
-        // Export the agent-socket path BEFORE the first PtySession spawn so the
-        // initial shell inherits a working KASATERM_SOCKET_PATH. start_socket_pty
-        // (called below) binds the actual server at this same path — set_var here
-        // wins the race against PtyBackend's env::var lookup at spawn time.
-        let socket_path = resolve_kasaterm_socket_path();
-        std::env::set_var("KASATERM_SOCKET_PATH", &socket_path);
-        std::env::set_var("CMUX_SOCKET_PATH", &socket_path);
-        // Light-launch: always start with one fresh pane. The saved session
-        // (if any) only contributes its last-active leaf's cwd so the user
-        // lands in the same project directory they left from. The full
-        // layout tree / claude-resume queue stays on disk for an explicit
-        // "restore" action from the session menu (not done on launch).
-        let saved_state = socket::load_session_state();
-        let saved_cwd: Option<String> = saved_state.as_ref().and_then(|state| {
-            let active_session = state.sessions.get(state.active_session)?;
-            let win = active_session
-                .windows
-                .get(active_session.active_window)
-                .or_else(|| active_session.windows.first())?;
-            first_leaf_cwd(win)
-        });
-        // Surface the saved sessions in the session panel — each row labelled
-        // by the basename of its first leaf's cwd (or "세션 N" as a fallback).
-        self.saved_session_labels = saved_state
-            .as_ref()
-            .map(|state| {
-                state
-                    .sessions
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| {
-                        s.windows
-                            .first()
-                            .and_then(first_leaf_cwd)
-                            .map(|p| {
-                                std::path::Path::new(&p)
-                                    .file_name()
-                                    .map(|s| s.to_string_lossy().into_owned())
-                                    .unwrap_or(p)
-                            })
-                            .unwrap_or_else(|| format!("세션 {}", i + 1))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Keep the parsed sessions in memory (parallel to the labels) so a
-        // later restore-row click rebuilds the right on-disk session.
-        self.saved_sessions_restore = saved_state.map(|s| s.sessions).unwrap_or_default();
-        let cwd = saved_cwd.or_else(resolve_initial_cwd);
-        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
-            shell: resolve_default_shell(),
-            cwd,
-            cols,
-            rows,
-            env: Vec::new(),
-            pane_id: "%0".to_string(),
-            initial_scrollback: Vec::new(),
-        })?;
-        self.pump_pty_screens(session.screens.clone(), "%0".to_string());
-        self.pty.insert("%0".to_string(), Arc::new(session));
-        self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
-        // Seed active_pane immediately so split / focus shortcuts work
-        // before the first ScreenUpdate lands. pump_pty_screens won't
-        // overwrite a non-None active_pane.
-        self.ws.lock().unwrap().active_pane = Some("%0".to_string());
-        // Bring up the kasaterm-cli socket *after* the initial pane(s) are
-        // wired so the very first surface.list call sees them.
-        self.start_socket_pty();
-        Ok(())
+        // In-process PTY 경로 제거 — 데몬 전용. 데몬을 discover/spawn해 attach
+        // 하고 PTY를 위임한다(화면은 stream, 입력/resize/scroll은 RPC). attach가
+        // 실패하면 그대로 에러 — fallback 없음(데몬 spawn이 보장되어야 함).
+        self.attach_daemon()
     }
 
     /// Daemon-mode startup: discover a running daemon (or spawn one), open the
@@ -6454,6 +6374,8 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" ");
             let _ = tmux.send_keys_hex(Some(pane_id), &hex);
+        } else if let Some(client) = self.daemon_client.as_ref() {
+            client.send_raw(Some(pane_id), payload.as_bytes());
         } else if let Some(pty) = self.pty_for_pane(pane_id) {
             let _ = pty.send_bytes(payload.as_bytes());
         }
@@ -6776,7 +6698,9 @@ impl App {
                     let _ = tmux.send_keys_hex(Some(target), &hex);
                 }
             } else if let Some(id) = target_pane_id.as_deref() {
-                if let Some(pty) = self.pty_for_pane(id) {
+                if let Some(client) = self.daemon_client.as_ref() {
+                    client.send_raw(Some(id), &payload);
+                } else if let Some(pty) = self.pty_for_pane(id) {
                     let _ = pty.send_bytes(&payload);
                 }
             }
@@ -6794,7 +6718,9 @@ impl App {
                     let _ = tmux.send_keys_hex(Some(target), &hex);
                 }
             } else if let Some(id) = target_pane_id.as_deref() {
-                if let Some(pty) = self.pty_for_pane(id) {
+                if let Some(client) = self.daemon_client.as_ref() {
+                    client.send_raw(Some(id), esc);
+                } else if let Some(pty) = self.pty_for_pane(id) {
                     let _ = pty.send_bytes(esc);
                 }
             }
