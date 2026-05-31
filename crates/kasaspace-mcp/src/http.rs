@@ -168,6 +168,44 @@ async fn sessions_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /board` — JSON snapshot of every pane's activity (`collab.board`) for
+/// the board panel to poll: `{ board: [{surface_id, intent, status, files}] }`.
+async fn board_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let board = backend.collab_board().unwrap_or_default();
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "board": board })),
+    )
+}
+
+/// `POST /board-tell?surface=<id>` — inject a message into one pane's PTY and
+/// submit it, so an idle claude there wakes and acts on it. Body is the raw
+/// message text (text/plain → CORS "simple", no preflight; same rationale as
+/// `/git-commit`). Internal newlines are flattened to spaces so a stray `\n`
+/// can't fire a half-typed turn; the trailing `\r` (0x0d) is what claude treats
+/// as *submit* — a bare `\n` (0x0a) is only a newline insert, not a submit.
+async fn board_tell_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    body: String,
+) -> impl IntoResponse {
+    let surface = params.get("surface").cloned().unwrap_or_default();
+    let flat: String = body
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let payload = format!("{}\r", flat.trim());
+    let resp = if surface.is_empty() {
+        serde_json::json!({ "ok": false, "error": "missing surface param" })
+    } else {
+        match backend.send_text(Some(&surface), &payload) {
+            Ok(()) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(resp))
+}
+
 /// Read a required `usize` query param, defaulting to 0 when absent/garbage.
 fn query_idx(params: &std::collections::HashMap<String, String>) -> usize {
     params.get("idx").and_then(|s| s.parse().ok()).unwrap_or(0)
@@ -234,7 +272,8 @@ fn query_which(
     match params.get("which").map(|s| s.as_str()) {
         Some("git") => Ok(PanelKind::Git),
         Some("session") | Some("sessions") => Ok(PanelKind::Session),
-        other => Err(format!("bad or missing which={other:?} (expected git|session)")),
+        Some("board") => Ok(PanelKind::Board),
+        other => Err(format!("bad or missing which={other:?} (expected git|session|board)")),
     }
 }
 
@@ -349,6 +388,8 @@ pub fn spawn_http_server(
                 let push_backend = backend.clone();
                 let ai_backend = backend.clone();
                 let sessions_backend = backend.clone();
+                let board_backend = backend.clone();
+                let board_tell_backend = backend.clone();
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let session_close_backend = backend.clone();
@@ -394,6 +435,19 @@ pub fn spawn_http_server(
                     .route(
                         "/sessions",
                         get(move || sessions_handler(sessions_backend.clone())),
+                    )
+                    .route(
+                        "/board",
+                        get(move || board_handler(board_backend.clone())),
+                    )
+                    .route(
+                        "/board-tell",
+                        post(
+                            move |q: Query<std::collections::HashMap<String, String>>,
+                                  body: String| {
+                                board_tell_handler(board_tell_backend.clone(), q, body)
+                            },
+                        ),
                     )
                     .route(
                         "/session-switch",

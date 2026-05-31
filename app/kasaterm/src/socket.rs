@@ -369,34 +369,6 @@ impl PtyBackend {
                     .collect()
             }
         });
-        // Wake-capable delivery: tail the kasa-chat mailbox and inject new
-        // messages into the target pane's PTY (see inbox.rs). In-process
-        // backend injects by queuing a SendBytes for the main thread. (Note:
-        // the live app runs the daemon path, which wires its own watcher in
-        // run_daemon; this keeps the in-process path working too.)
-        let h_list = handle.clone();
-        let h_inj = handle.clone();
-        crate::inbox::spawn_inbox_watcher(
-            move || {
-                h_list
-                    .snapshot
-                    .lock()
-                    .unwrap()
-                    .surfaces
-                    .iter()
-                    .map(|s| s.id.clone())
-                    .collect()
-            },
-            move |pane, bytes| {
-                let (tx, _rx) = sync_channel(1);
-                h_inj.inbox.lock().unwrap().push(PtyCommand::SendBytes {
-                    pane_id: Some(pane.to_string()),
-                    bytes: bytes.to_vec(),
-                    reply: tx,
-                });
-                (h_inj.wake)();
-            },
-        );
         Self {
             handle,
             collab: Arc::new(Mutex::new(HashMap::new())),

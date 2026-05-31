@@ -1,6 +1,6 @@
 ---
 name: kasapane
-description: kasaterm/kasaspace pane을 다루고, 그 안에서 긴 잡(빌드·dev server·배포)을 풀 사이클로 돌리고, 작업 결과(이미지·마크다운)를 창 안 pane에 띄우고, 여러 pane의 claude(또는 codex·antigravity 등)가 같은 레포를 동시에 만질 때 충돌 없이 협업하고(board·announce·send·peek), kasaterm 자체 UI를 빌드→스폰→스크린샷→확인 사이클로 자체검증하고, TeamCreate로 띄운 팀원 pane의 race·좀비를 청소한다. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "pane 쪼개/이름/색", "dev 서버 옆에 띄워", "이미지/마크다운 띄워줘", "다른/옆 pane 뭐하는지", "협업", "충돌 피해", "같이 작업", "팀원 pane 정리", "팀 좀비 청소", "빌드 돌려줘", "kasaterm 화면 확인해줘", "스크린샷 찍어서 봐줘" 같은 요청, 또는 멀티 pane 환경(KASATERM_PANE_ID env 존재)에서 코드 작업을 시작하거나 작업 중 만든 스샷·문서를 사용자 화면에 보여줄 때 사용. raw tmux(비-kasaterm) 컨텍스트는 tmux-pane-job 스킬로.
+description: kasaterm/kasaspace pane을 다루고, 그 안에서 긴 잡(빌드·dev server·배포)을 풀 사이클로 돌리고, 작업 결과(이미지·마크다운)를 창 안 pane에 띄우고, 여러 pane의 claude(또는 codex·antigravity 등)가 같은 레포를 동시에 만질 때 충돌 없이 협업하고(board 패널·tell·peek), kasaterm 자체 UI를 빌드→스폰→스크린샷→확인 사이클로 자체검증하고, TeamCreate로 띄운 팀원 pane의 race·좀비를 청소한다. 사용자가 "모니터 띄워줘", "로그 따로 보게 해줘", "pane 쪼개/이름/색", "dev 서버 옆에 띄워", "이미지/마크다운 띄워줘", "다른/옆 pane 뭐하는지", "협업", "충돌 피해", "같이 작업", "팀원 pane 정리", "팀 좀비 청소", "빌드 돌려줘", "kasaterm 화면 확인해줘", "스크린샷 찍어서 봐줘" 같은 요청, 또는 멀티 pane 환경(KASATERM_PANE_ID env 존재)에서 코드 작업을 시작하거나 작업 중 만든 스샷·문서를 사용자 화면에 보여줄 때 사용. raw tmux(비-kasaterm) 컨텍스트는 tmux-pane-job 스킬로.
 version: 0.4.0
 user-invocable: true
 argument-hint: "[pane 작업 또는 검증할 UI 항목]"
@@ -61,7 +61,8 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 | `kasaterm-cli rename <id> <제목>` | 헤더 제목 |
 | `kasaterm-cli color <id> <#rrggbb>` | 헤더 accent 색상 |
 | `kasaterm-cli swap <a> <b>` | 두 pane 위치 교환(내용 유지) |
-| `kasaterm-cli send --surface <id> <텍스트>` | 특정 pane에 텍스트 입력 |
+| `kasaterm-cli send --surface <id> <텍스트>` | 특정 pane에 텍스트 입력(제출 안 함) |
+| `kasaterm-cli tell <id> <텍스트>` | 특정 pane에 보내기+제출 — idle claude 깨움 (협업, §5) |
 | `kasaterm-cli key <id> …` | 특정 pane에 키 전송 |
 | `kasaterm-cli board` | 모든 pane이 뭘 왜 하는지 (협업, §5) |
 | `kasaterm-cli announce <의도> [status]` | 내 pane 작업 등록 (협업, §5) |
@@ -580,50 +581,39 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 ---
 
-## 5) pane 협업 — 채팅 + board (둘 다 자동) (chat · board · peek)
+## 5) pane 협업 — board(작업현황 조회) + tell(직접 깨우기) (board · tell · peek)
 
-§4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 사람 중계 없이 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용.
+§4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용.
 
-**핵심: 받는 쪽은 전부 자동이다. 너가 능동으로 할 일은 "쪽지 보내기"뿐.**
-- **board (작업 현황)**: 호스트가 각 pane의 transcript를 tail해 tool_use(Read/Edit/Bash…)를 읽어 그 pane 활동을 자동 등록. 평소처럼 작업하면 "Read auth.ts → Bash cargo build"가 저절로 뜬다 — 신고 불필요.
-- **자동 주입**: 매 프롬프트 시작에 hook이 **"나한테 온 쪽지 + 다른 pane 작업 현황(board)"**을 네 컨텍스트에 넣어준다(사용자 화면엔 안 보이고 **너만** 본다). 그러니 board를 조회할 필요도, 쪽지를 확인할 필요도 없다 — 그냥 컨텍스트에 떠 있다.
+> **2026-05-31 구조 변경:** 파일 mailbox(`kasa-chat`)·`chat-inject` hook 자동주입·mailbox watcher inbox는 **전부 폐기**됐다. 이제 협업은 ① 자동 채워지는 **board**(사용자는 GUI 패널로, claude는 CLI로 조회) + ② **PTY 직접 주입 `tell`**(claude끼리·사용자 둘 다) 두 축뿐이다.
 
-### 쪽지 보내기 — `kasa-chat` (사용자 프롬프트창 안 거침)
+### board — 각 pane이 뭘 하는지 (자동 등록)
+
+호스트가 각 pane의 claude transcript를 tail해 tool_use(Read/Edit/Bash…)를 그 pane 활동으로 **자동 등록**한다. 평소처럼 작업하면 `Read auth.ts → Bash cargo build`가 저절로 뜬다 — `announce` 직접 호출 불필요.
+
+- **사용자(거노)**: 상단 **보기 메뉴 → "board 패널"** 로 전 pane 작업 현황을 직접 본다. 각 행에 그 pane으로 바로 보내는 메시지 입력창이 있다.
+- **claude(너)**: 자동 주입은 더 없으니 필요할 때 `kasaterm-cli board` 로 **직접 조회**한다. 내가 만질 파일을 board에서 다른 pane이 잡고 있으면 → 충돌 회피(같은 문제면 합류, 빌드 중이면 `peek %N`로 보고 대기).
+
+### tell — 다른 pane에게 말 걸기 + 깨우기
 
 ```bash
-kasa-chat send "auth.ts 같이 볼래?" --to %3   # 특정 pane
-kasa-chat send "빌드 깨졌으니 잠깐 멈춰"        # --to 생략 = 전체 broadcast
-kasa-chat log                                  # 최근 대화 사람이 읽기 좋게
+kasaterm-cli tell %3 "auth.ts 너가 맡아줄래? 난 ui 쪽 볼게"
 ```
 
-공유 채팅 로그(`~/.kasaterm-chat/log.jsonl`)에 쌓이고, 받는 pane은 다음 행동 직전 hook이 컨텍스트로 가져간다. **사용자 프롬프트창에 안 뜬다 — 에이전트끼리만.**
+`tell`은 대상 pane PTY에 텍스트를 주입하고 **끝에 `\r`(엔터)을 붙여 제출**한다 — 그래서 **idle claude도** 새 user turn으로 받아 깨어난다. focus는 안 바뀐다.
 
-### 받으면 / 작업 규약
-
-- 컨텍스트에 `📨 받은 쪽지: [from %N] ...` 가 떠 있으면 형제 pane 메시지. 답할 일 있으면 `kasa-chat send "..." --to %N`로 회신.
-- 컨텍스트의 `📋 다른 pane 작업 현황`에서 내가 만질 파일을 누가 잡고 있으면 → `kasa-chat`으로 "나도 X 보는데 같이?" 충돌 회피. 같은 문제면 합류. 빌드 중이면 `peek %N`로 보고 대기.
-- 그 외엔 **평소대로 작업** — board는 자동 갱신.
-
-### 상대가 idle이어도 자동으로 깨어난다 — kasa-chat inbox (2026-05-30+)
-
-`kasa-chat send --to %N` 은 받는 pane이 **완전히 idle이어도 깨운다.** kasaterm 데몬이
-mailbox(`~/.kasaterm-chat/log.jsonl`)를 watch하다 메시지가 오면 그 pane의 **PTY에
-직접 주입**한다 — idle claude가 새 user turn으로 받아 깨어난다. **focus 안 바뀌고**
-백그라운드 pane(다른 세션 포함)도 깨운다. 그러니 idle 걱정 없이 그냥 `kasa-chat send`.
-- `KASATERM_INBOX=0` 으로 watcher를 끌 수 있다.
-- hook(다음 턴 컨텍스트 주입)과 **이중 전달**될 수 있다 — 같은 쪽지를 두 번 받으면 그 때문.
-- **옛 빌드/비-kasaterm 셸 fallback**: inbox watcher 없으면 hook만 돌아 idle을 못 깨운다.
-  그땐 `kasaterm-cli send --surface %N "..."`로 PTY 직접 주입(화면에 보임, 비상용),
-  또는 새 pane에 claude(`kasaterm-cli split` 후).
+- `send`(=`surface.send_text`)는 제출(`\r`)을 안 붙여 프롬프트에 글자만 남는다. **깨우려면 반드시 `tell`.**
+- 사용자도 board 패널 각 행 입력창에서 같은 일을 한다(내부적으로 `POST /board-tell`).
 
 ### 함정
 
 | 안 됨 | 왜 |
 |---|---|
-| 쪽지를 `kasaterm-cli send`(stdin)로 일상 전송 | 사용자 프롬프트창에 뜬다. 일상 소통은 `kasa-chat`(화면 안 거침). stdin은 idle 깨우기 비상용만 |
-| board/쪽지를 능동 조회(`kasaterm-cli board`) | 불필요 — hook이 매 턴 컨텍스트에 자동 주입. (디버그용으론 호출해도 됨) |
-| 협업하려고 `announce` 호출 | 불필요 — transcript 자동 등록 |
-| board가 비어 보임 | 그 pane이 claude 아니거나 hook 미설치 — 정상 |
+| `kasa-chat send` / 공지방 / hook 자동주입에 의존 | **폐기됨(2026-05-31)**. board는 `kasaterm-cli board`로 조회, 깨우기는 `tell` |
+| `send`로 깨우려 함 | `send`는 `\r` 없음 → 프롬프트에 글자만. idle 깨우기는 `tell` |
+| `tell`에 surface_id 생략 | `tell`은 항상 `<surface_id> <text>`. 자기 자신엔 안 씀 |
+| board가 비어 보임 | 그 pane이 claude 아니거나 transcript 미bind — 정상 |
+| 협업하려고 `announce` 호출 | 불필요 — transcript가 자동 등록 |
 
 ---
 
