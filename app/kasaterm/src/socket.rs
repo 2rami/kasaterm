@@ -128,6 +128,25 @@ impl Backend for TmuxBackend {
     }
 }
 
+/// Peel any trailing submit bytes (CR/LF) off `bytes`, returning
+/// `(body, submit)` so a caller can ship them in two separate PTY writes.
+///
+/// `kasaterm-cli tell` appends `\r` to the message. When the body ends in a
+/// multibyte codepoint (한글·이모지) and that codepoint shares a single write
+/// with the trailing `\r`, claude (Ink) can submit on the CR before the
+/// last codepoint's bytes finish arriving across the read boundary — the
+/// half-delivered character is truncated into a lone UTF-16 high surrogate
+/// (`\ud83c` with no low half). That poisons the session's saved transcript
+/// and every later API request 400s ("no low surrogate in string"). Writing
+/// the body first, then the CR on its own, keeps the codepoint whole.
+pub(crate) fn split_trailing_submit(bytes: &[u8]) -> (&[u8], &[u8]) {
+    let body_len = bytes
+        .iter()
+        .rposition(|&b| b != b'\r' && b != b'\n')
+        .map_or(0, |i| i + 1);
+    bytes.split_at(body_len)
+}
+
 /// Shared key-to-bytes table used by both TmuxBackend and PtyBackend so
 /// the wire-level interpretation is identical no matter which backend
 /// is wired up. Returns a `Vec<u8>` so the literal-fallback path (when
@@ -340,7 +359,9 @@ pub struct PtyBackend {
     /// Pending `bind_transcript` requests (surface_id, jsonl path) the watcher
     /// thread drains. Pushed by the hook-driven RPC, consumed by the tail
     /// worker. Re-binding a surface (e.g. `claude --resume` swaps the file)
-    /// replaces its entry.
+    /// replaces its entry. Kept for back-compat with any external caller; the
+    /// watcher now self-maps from each pane's claude env, so this is no longer
+    /// the primary path.
     binds: Arc<Mutex<Vec<(String, std::path::PathBuf)>>>,
 }
 
@@ -353,12 +374,16 @@ impl PtyBackend {
         // for closed panes. Renderer-free, so it never touches the main loop.
         spawn_transcript_watcher(collab_auto.clone(), binds.clone(), {
             let snap = handle.snapshot.clone();
+            // The legacy in-process snapshot has no per-pane shell pid, so
+            // self-mapping is off here (every pane reports None) and this path
+            // relies on the external bind RPC, as it always did. The daemon
+            // path supplies a real pid per pane and self-maps.
             move || {
                 snap.lock()
                     .unwrap()
                     .surfaces
                     .iter()
-                    .map(|s| s.id.clone())
+                    .map(|s| (s.id.clone(), None))
                     .collect()
             }
         });
@@ -419,8 +444,19 @@ impl Backend for PtyBackend {
 
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
         let pane_id = surface_id.map(|s| s.to_string());
-        let bytes = text.as_bytes().to_vec();
-        self.submit(|reply| PtyCommand::SendBytes { pane_id, bytes, reply })
+        // Body and trailing submit (\r) go in separate writes so a multibyte
+        // tail isn't truncated into a lone surrogate. See split_trailing_submit.
+        let (body, submit) = split_trailing_submit(text.as_bytes());
+        if !body.is_empty() {
+            let bytes = body.to_vec();
+            let pane_id = pane_id.clone();
+            self.submit(|reply| PtyCommand::SendBytes { pane_id, bytes, reply })?;
+        }
+        if !submit.is_empty() {
+            let bytes = submit.to_vec();
+            self.submit(|reply| PtyCommand::SendBytes { pane_id, bytes, reply })?;
+        }
+        Ok(())
     }
 
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()> {
@@ -571,34 +607,86 @@ struct TranscriptTail {
     last: Instant,
 }
 
-/// Background thread: tail each bound pane's claude transcript jsonl and keep
+/// Background thread: tail each pane's claude transcript jsonl and keep
 /// `collab_auto` filled with derived PaneActivity, so a pane's board entry
 /// reflects its real tool_use without anyone calling `announce`. Polls at
 /// 750ms — `notify` isn't a dependency and the board is human-read, so
-/// sub-second latency is plenty. Drops tails for closed panes via `snapshot`.
+/// sub-second latency is plenty. Drops tails for closed panes via `live_panes`.
+///
+/// The watcher self-maps each live pane to its transcript by reading the
+/// running claude's `CLAUDE_CODE_SESSION_ID` env (exact, even when several
+/// panes share a cwd) — no hook needed. The `binds` queue (the external
+/// `bind_transcript` RPC) is still drained for back-compat, but a live
+/// self-map for the same pane wins, so a stale daemon-restart bind can't
+/// pin a pane to a dead file.
+///
+/// `live_panes` yields each surviving pane id → its shell pid (None when the
+/// pid can't be resolved); the watcher walks shell→claude itself.
 pub(crate) fn spawn_transcript_watcher<L>(
     collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
     binds: Arc<Mutex<Vec<(String, PathBuf)>>>,
     live_panes: L,
 ) where
-    L: Fn() -> HashSet<String> + Send + 'static,
+    L: Fn() -> HashMap<String, Option<u32>> + Send + 'static,
 {
     std::thread::spawn(move || {
         let mut tails: HashMap<String, TranscriptTail> = HashMap::new();
+        // pane_id -> (claude_pid, session_jsonl). Lets us skip the `ps eww`
+        // env read on ticks where the pane's claude pid hasn't changed —
+        // env is stable for a process's lifetime, so one read per claude is
+        // enough. Cleared for a pane when its claude pid changes or exits.
+        let mut env_cache: HashMap<String, (u32, PathBuf)> = HashMap::new();
         loop {
-            // 1. Drain new binds. Re-bind (claude --resume swaps the file)
-            //    replaces the tail and reseeds.
+            // 1. Drain external binds (hook-driven RPC, kept for back-compat).
+            //    Re-bind replaces the tail and reseeds. Self-mapping below may
+            //    later override this with the live env path.
             let new_binds: Vec<(String, PathBuf)> =
                 std::mem::take(&mut *binds.lock().unwrap());
             for (sid, path) in new_binds {
                 let (offset, recent) = seed_tail(&path);
                 tails.insert(sid, TranscriptTail { path, offset, recent, last: Instant::now() });
             }
-            // 2. Drop tails + auto entries for panes that have closed.
-            let live: HashSet<String> = live_panes();
-            tails.retain(|sid, _| live.contains(sid));
-            collab_auto.lock().unwrap().retain(|sid, _| live.contains(sid));
-            // 3. Incremental read each tail → update recent ring → collab_auto.
+            // 2. Drop tails/cache/auto entries for panes that have closed.
+            let live: HashMap<String, Option<u32>> = live_panes();
+            tails.retain(|sid, _| live.contains_key(sid));
+            env_cache.retain(|sid, _| live.contains_key(sid));
+            collab_auto.lock().unwrap().retain(|sid, _| live.contains_key(sid));
+            // 3. Self-map: for each live pane, find its claude pid and resolve
+            //    the transcript from CLAUDE_CODE_SESSION_ID. Bind/re-bind only
+            //    when the path actually changed, so a same-file tick keeps its
+            //    offset (no reseed, no lost progress).
+            for (sid, shell_pid) in live.iter() {
+                let Some(shell_pid) = shell_pid else { continue };
+                let Some(claude_pid) = claude_child_pid(*shell_pid) else {
+                    // claude not up (yet) for this pane — leave any prior tail
+                    // alone and skip silently.
+                    continue;
+                };
+                let path = match env_cache.get(sid) {
+                    // Same claude pid as last seen → env unchanged, reuse the
+                    // cached path and skip the subprocess.
+                    Some((cached_pid, p)) if *cached_pid == claude_pid => p.clone(),
+                    // New/changed claude pid → read env once and cache it.
+                    _ => match claude_session_path_from_env(claude_pid) {
+                        Some(p) => {
+                            env_cache.insert(sid.clone(), (claude_pid, p.clone()));
+                            p
+                        }
+                        // Couldn't read the session id (env not exposed yet) —
+                        // skip quietly; next tick retries.
+                        None => continue,
+                    },
+                };
+                let needs_bind = tails.get(sid).map_or(true, |t| t.path != path);
+                if needs_bind {
+                    let (offset, recent) = seed_tail(&path);
+                    tails.insert(
+                        sid.clone(),
+                        TranscriptTail { path, offset, recent, last: Instant::now() },
+                    );
+                }
+            }
+            // 4. Incremental read each tail → update recent ring → collab_auto.
             for (sid, tail) in tails.iter_mut() {
                 let events = read_new_events(&tail.path, &mut tail.offset);
                 if !events.is_empty() {
@@ -983,6 +1071,81 @@ fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
         }
     }
     None
+}
+
+/// The pid of the claude child of a shell pane, if any. Picks the most-recent
+/// (highest-pid) `claude`-named direct child of `shell_pid`, mirroring how
+/// `claude_session_id_from_cmdline` and `pid_process_name` resolve the
+/// foreground program. Returns None when no claude is running under the shell.
+fn claude_child_pid(shell_pid: u32) -> Option<u32> {
+    let out = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,comm="])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut best: Option<u32> = None;
+    for line in s.lines() {
+        let mut parts = line.split_whitespace();
+        let (pid, ppid) = match (
+            parts.next().and_then(|x| x.parse::<u32>().ok()),
+            parts.next().and_then(|x| x.parse::<u32>().ok()),
+        ) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+        if ppid != shell_pid {
+            continue;
+        }
+        let comm = parts.collect::<Vec<_>>().join(" ");
+        let is_claude = std::path::Path::new(&comm)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .map_or(false, |n| n.contains("claude"));
+        if is_claude && best.map_or(true, |p| pid > p) {
+            best = Some(pid);
+        }
+    }
+    best
+}
+
+/// Resolve a claude process's transcript jsonl from its environment. claude
+/// exports `CLAUDE_CODE_SESSION_ID=<uuid>`, which is exactly the transcript's
+/// file stem — so this is precise even when several panes share one cwd (the
+/// cwd-mtime guess collapses those onto a single file). macOS exposes a
+/// process's env via `ps eww` (KEY=VALUE tokens trail the argv); we scan for
+/// the session id and `PWD` to build `~/.claude/projects/<encoded-cwd>/<id>.jsonl`.
+fn claude_session_path_from_env(claude_pid: u32) -> Option<PathBuf> {
+    let out = std::process::Command::new("ps")
+        .args(["eww", "-p", &claude_pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&out.stdout);
+    let mut session_id: Option<String> = None;
+    let mut pwd: Option<String> = None;
+    for tok in line.split_whitespace() {
+        if let Some(v) = tok.strip_prefix("CLAUDE_CODE_SESSION_ID=") {
+            if is_uuid(v) {
+                session_id = Some(v.to_string());
+            }
+        } else if let Some(v) = tok.strip_prefix("PWD=") {
+            pwd = Some(v.to_string());
+        }
+    }
+    let session_id = session_id?;
+    let home = std::env::var("HOME").ok()?;
+    // Prefer the env's PWD (claude's launch cwd); fall back to lsof so a pane
+    // whose env hides PWD still maps. The encoded dir mirrors how claude names
+    // its project folder: `/` and `.` in the abs cwd become `-`.
+    let cwd = pwd
+        .map(std::path::PathBuf::from)
+        .or_else(|| pid_cwd(claude_pid))?;
+    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".claude/projects")
+            .join(encoded)
+            .join(format!("{session_id}.jsonl")),
+    )
 }
 
 /// claude session ids are canonical UUIDs (8-4-4-4-12 hex). Validating guards
