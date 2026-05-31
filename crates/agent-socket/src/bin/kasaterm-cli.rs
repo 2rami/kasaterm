@@ -75,6 +75,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
     eprintln!("  kasaterm-cli key   <enter|tab|escape|backspace|delete|up|down|left|right>");
+    eprintln!("  kasaterm-cli tell  <surface_id> <text>     # send + submit (wake an idle claude)");
     eprintln!("  kasaterm-cli announce <intent> [status]   # publish what THIS pane is doing");
     eprintln!("  kasaterm-cli board                        # what every pane is doing");
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
@@ -187,6 +188,31 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .first()
                 .ok_or_else(|| anyhow!("key needs a key name"))?;
             ("surface.send_key", json!({ "key": key }))
+        }
+        "tell" => {
+            // send + submit in one shot, so an idle claude in the target pane
+            // wakes and acts on the message:  tell <surface_id> <text>
+            let surface = args
+                .first()
+                .filter(|a| a.starts_with('%'))
+                .cloned()
+                .ok_or_else(|| anyhow!("tell needs <surface_id> <text> (e.g. tell %3 \"hi\")"))?;
+            let text = args
+                .get(1..)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow!("tell needs a text payload"))?
+                .join(" ");
+            // Flatten internal newlines so a stray \n can't fire a half-typed
+            // turn, then append \r — claude submits on CR (0x0d); a bare \n
+            // (0x0a) is only a newline insert, not a submit.
+            let flat: String = text
+                .chars()
+                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                .collect();
+            (
+                "surface.send_text",
+                json!({ "surface_id": surface, "text": format!("{}\r", flat.trim()) }),
+            )
         }
         "announce" => {
             // The pane announces *itself*: surface_id comes from the env

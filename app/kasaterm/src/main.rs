@@ -9,7 +9,6 @@ mod autosuggest;
 mod cells;
 mod daemon;
 mod gpu;
-mod inbox;
 mod socket;
 mod stream;
 mod theme;
@@ -650,6 +649,131 @@ async function poll() {
 }
 
 $("btn-new").onclick = doNew;
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>"#;
+
+/// Board panel: each pane's live activity (surface_id · status · intent ·
+/// files), auto-filled from the transcript watcher, in its own OS window
+/// driving a wry webview. Mirrors the session panel. Polls `/board` once a
+/// second; each row carries a message box that POSTs `/board-tell` to inject
+/// text into that pane's PTY and submit it (waking an idle claude). The user
+/// drives the collaboration instead of panes relaying through a mailbox.
+const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 14px;
+    font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
+    background: #1a1d23; color: #ecedf3;
+    -webkit-user-select: none; user-select: none;
+  }
+  .title { font-weight: 600; font-size: 14px; margin-bottom: 10px; }
+  .pane { background: #22262e; border: 1px solid #2e323b; border-radius: 9px; padding: 10px; margin-bottom: 8px; }
+  .row1 { display: flex; align-items: center; gap: 8px; }
+  .sid { font-weight: 600; color: #5a8ce6; }
+  .status { margin-left: auto; font-size: 11px; padding: 2px 8px; border-radius: 6px; background: #2e323b; color: #a0a6b0; }
+  .status.working { color: #5a8ce6; }
+  .status.building { color: #e3b341; }
+  .status.idle { color: #787e8a; }
+  .status.blocked { color: #f85149; }
+  .intent { margin-top: 5px; color: #ecedf3; word-break: break-word; }
+  .files { margin-top: 3px; font-size: 11px; color: #787e8a; word-break: break-all; }
+  .tell { display: flex; gap: 6px; margin-top: 9px; }
+  .tell input {
+    flex: 1; background: #1a1d23; border: 1px solid #2e323b; border-radius: 7px;
+    color: #ecedf3; padding: 6px 9px; font: 13px system-ui;
+    -webkit-user-select: text; user-select: text;
+  }
+  .tell input:focus { outline: none; border-color: #5a8ce6; }
+  .tell button { background: #2e323b; border: 1px solid #3a414c; border-radius: 7px;
+    color: #ecedf3; padding: 6px 12px; cursor: pointer; }
+  .tell button:hover { background: #3a414c; }
+  .empty { color: #787e8a; font-size: 12px; padding: 8px 2px; }
+  .err { color: #f85149; font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <div class="title">작업 현황</div>
+  <div id="list"></div>
+  <div id="err" class="err" style="display:none"></div>
+<script>
+const PORT = "__PORT__";
+const base = "http://127.0.0.1:" + PORT;
+const $ = (id) => document.getElementById(id);
+let busy = false;
+
+function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function leaf(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
+
+function render(board) {
+  $("err").style.display = "none";
+  const list = $("list");
+  // Preserve the value + focus of whatever the user is mid-typing so the
+  // 1s poll's full re-render doesn't wipe it.
+  const a = document.activeElement;
+  const focusSid = (a && a.dataset && a.dataset.sid) ? a.dataset.sid : null;
+  const val = focusSid ? a.value : null;
+  list.innerHTML = "";
+  if (!board || !board.length) {
+    const e = document.createElement("div");
+    e.className = "empty"; e.textContent = "활성 pane 없음";
+    list.appendChild(e);
+    return;
+  }
+  board.forEach(p => {
+    const st = (p.status || "").toLowerCase();
+    const files = (p.files || []).map(leaf).join(", ");
+    const d = document.createElement("div");
+    d.className = "pane";
+    d.innerHTML =
+      `<div class="row1"><span class="sid">${esc(p.surface_id)}</span>` +
+      `<span class="status ${esc(st)}">${esc(p.status || "")}</span></div>` +
+      `<div class="intent">${esc(p.intent || "")}</div>` +
+      (files ? `<div class="files">${esc(files)}</div>` : "") +
+      `<div class="tell"><input data-sid="${esc(p.surface_id)}" placeholder="이 pane에게 보내기…">` +
+      `<button>보내기</button></div>`;
+    const inp = d.querySelector("input");
+    const btn = d.querySelector("button");
+    const go = () => tell(p.surface_id, inp);
+    btn.onclick = go;
+    inp.onkeydown = (e) => { if (e.key === "Enter") go(); };
+    list.appendChild(d);
+    if (focusSid === p.surface_id) { inp.value = val; inp.focus(); }
+  });
+}
+
+async function tell(sid, inp) {
+  const text = inp.value;
+  if (busy || !text.trim()) return;
+  busy = true;
+  // text/plain body → CORS "simple request", no preflight (the panel's null
+  // origin would otherwise trip an OPTIONS the server 405s).
+  try {
+    await fetch(base + "/board-tell?surface=" + encodeURIComponent(sid),
+      { method: "POST", headers: { "Content-Type": "text/plain" }, body: text });
+    inp.value = "";
+  } catch (e) {}
+  busy = false;
+}
+
+async function poll() {
+  try {
+    const r = await fetch(base + "/board", { cache: "no-store" });
+    render((await r.json()).board);
+  } catch (e) {
+    $("err").style.display = "block";
+    $("err").textContent = "server unreachable :" + PORT;
+  }
+}
+
 poll();
 setInterval(poll, 1000);
 </script>
@@ -2241,6 +2365,11 @@ struct App {
     /// outlive its window, so both are owned here.
     session_panel_window: Option<Arc<Window>>,
     session_panel_webview: Option<wry::WebView>,
+    /// Board panel: a second OS window/webview showing each pane's live
+    /// activity (collab board) with a per-pane message box. Same lifetime
+    /// discipline as the git/session panels — webview must outlive its window.
+    board_panel_window: Option<Arc<Window>>,
+    board_panel_webview: Option<wry::WebView>,
     /// Open preview windows (image viewer / markdown editor), each a
     /// separate OS window + webview spawned by `imgopen` / `mdopen` (or the
     /// MCP `/open-image` `/open-markdown` endpoints). A Vec, not a single
@@ -2265,6 +2394,9 @@ struct App {
     /// "세션 패널" menu item id, matched against MenuEvents to toggle the
     /// session panel.
     session_menu_item: Option<muda::MenuItem>,
+    /// "board 패널" menu item id, matched against MenuEvents to toggle the
+    /// collab board panel.
+    board_menu_item: Option<muda::MenuItem>,
     /// History store for inline autosuggestion. See autosuggest.rs.
     autosuggest: autosuggest::History,
     /// What the user has typed at the current shell prompt since the last
@@ -2383,12 +2515,15 @@ impl App {
             git_panel_webview: None,
             session_panel_window: None,
             session_panel_webview: None,
+            board_panel_window: None,
+            board_panel_webview: None,
             preview_windows: Vec::new(),
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,
             git_menu_item: None,
             session_menu_item: None,
+            board_menu_item: None,
             autosuggest: autosuggest::History::new(),
             input_buf: String::new(),
             current_suggestion: None,
@@ -2703,6 +2838,58 @@ impl App {
             self.session_panel_window = None;
         } else {
             self.open_session_panel(event_loop);
+        }
+    }
+
+    /// Open the board panel in its own OS window. Mirrors open_session_panel:
+    /// the page polls `/board` on the MCP server. Best-effort — any failure
+    /// just logs and leaves the terminal untouched.
+    fn open_board_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if self.board_panel_window.is_some() {
+            return;
+        }
+        let port =
+            std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".to_string());
+        let attrs = WindowAttributes::default()
+            .with_title("board")
+            .with_theme(Some(Theme::Dark))
+            .with_inner_size(LogicalSize::new(320.0, 440.0));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("[board-panel] window create failed: {e}");
+                return;
+            }
+        };
+        let html = BOARD_PANEL_HTML.replace("__PORT__", &port);
+        // build_as_child for the same use-after-free reason as the git panel.
+        let webview = match wry::WebViewBuilder::new()
+            .with_html(html)
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(320.0, 440.0).into(),
+            })
+            .build_as_child(window.as_ref())
+        {
+            Ok(wv) => wv,
+            Err(e) => {
+                eprintln!("[board-panel] webview build failed: {e}");
+                return;
+            }
+        };
+        eprintln!("[board-panel] open; polling 127.0.0.1:{port}/board");
+        self.board_panel_window = Some(window);
+        self.board_panel_webview = Some(webview);
+    }
+
+    /// Toggle the board panel from the menu: close if open, open if not.
+    fn toggle_board_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if self.board_panel_window.is_some() {
+            // Drop the webview before the window it borrows from.
+            self.board_panel_webview = None;
+            self.board_panel_window = None;
+        } else {
+            self.open_board_panel(event_loop);
         }
     }
 
@@ -4939,6 +5126,11 @@ impl App {
                 self.session_panel_webview = None;
                 self.session_panel_window = None;
             }
+            (PanelKind::Board, true) => self.open_board_panel(event_loop),
+            (PanelKind::Board, false) => {
+                self.board_panel_webview = None;
+                self.board_panel_window = None;
+            }
         }
     }
 
@@ -4957,6 +5149,10 @@ impl App {
             PanelKind::Session => (
                 self.session_panel_window.as_ref(),
                 self.session_panel_webview.as_ref(),
+            ),
+            PanelKind::Board => (
+                self.board_panel_window.as_ref(),
+                self.board_panel_webview.as_ref(),
             ),
         };
         let win = win.ok_or_else(|| anyhow::anyhow!("panel not open"))?;
@@ -4983,6 +5179,10 @@ impl App {
             PanelKind::Session => (
                 self.session_panel_window.as_ref(),
                 self.session_panel_webview.as_ref(),
+            ),
+            PanelKind::Board => (
+                self.board_panel_window.as_ref(),
+                self.board_panel_webview.as_ref(),
             ),
         };
         let open = win.is_some();
@@ -9288,13 +9488,16 @@ impl ApplicationHandler<UserEvent> for App {
             let view_m = Submenu::new("보기", true);
             let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
             let session_item = MenuItem::new("세션 패널 켜기/끄기", true, None);
+            let board_item = MenuItem::new("board 패널 켜기/끄기", true, None);
             let _ = view_m.append(&git_item);
             let _ = view_m.append(&session_item);
+            let _ = view_m.append(&board_item);
             let _ = menu.append(&app_m);
             let _ = menu.append(&view_m);
             menu.init_for_nsapp();
             self.git_menu_item = Some(git_item);
             self.session_menu_item = Some(session_item);
+            self.board_menu_item = Some(board_item);
             self.menu = Some(menu);
         }
         // WaitUntil so the cursor blink ticks even when no terminal output
@@ -9463,6 +9666,24 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 WindowEvent::Resized(size) => {
                     if let Some(wv) = self.session_panel_webview.as_ref() {
+                        let _ = wv.set_bounds(wry::Rect {
+                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.board_panel_window.as_ref().map(|w| w.id()) == Some(id) {
+            match &event {
+                WindowEvent::CloseRequested => {
+                    self.board_panel_webview = None;
+                    self.board_panel_window = None;
+                }
+                WindowEvent::Resized(size) => {
+                    if let Some(wv) = self.board_panel_webview.as_ref() {
                         let _ = wv.set_bounds(wry::Rect {
                             position: wry::dpi::PhysicalPosition::new(0, 0).into(),
                             size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
@@ -10615,6 +10836,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.toggle_git_panel(event_loop);
             } else if self.session_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_session_panel(event_loop);
+            } else if self.board_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+                self.toggle_board_panel(event_loop);
             }
         }
         // Headless verification: clean-exit once the autoquit deadline passes

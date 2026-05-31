@@ -31,6 +31,7 @@ pub enum SplitDirection {
 pub enum PanelKind {
     Git,
     Session,
+    Board,
 }
 
 /// Geometry of a panel window and its embedded webview, returned by

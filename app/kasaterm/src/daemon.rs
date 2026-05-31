@@ -786,23 +786,6 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         });
     }
 
-    // Wake-capable inbox: tail the kasa-chat mailbox and inject each new note
-    // into the target pane's PTY (see inbox.rs). The daemon owns the PTYs, so
-    // it writes them directly — this is the live path (the in-process backend
-    // wires the same watcher in PtyBackend::new).
-    {
-        let st_list = state.clone();
-        let st_inj = state.clone();
-        crate::inbox::spawn_inbox_watcher(
-            move || st_list.pty.lock().unwrap().keys().cloned().collect(),
-            move |pane, bytes| {
-                if let Some(s) = st_inj.pane(Some(pane)) {
-                    let _ = s.send_bytes(bytes);
-                }
-            },
-        );
-    }
-
     // Control socket (JSON-RPC) + the kasaspace-mcp HTTP server (so the GUI's
     // session-panel webview, which polls 127.0.0.1:8765/sessions, sees the
     // daemon's sessions instead of the GUI's empty in-process backend).
