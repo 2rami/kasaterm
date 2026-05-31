@@ -104,7 +104,7 @@ impl Default for SessionsInfo {
 /// avoid editing the same file, wait out a neighbour's build, or notice
 /// two panes are chasing the same problem and join forces. Pure
 /// metadata — nothing here touches terminal I/O. Returned by
-/// `collab.board`, written by `collab.announce`.
+/// `collab.board`, filled by the transcript watcher.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneActivity {
     pub surface_id: String,
@@ -121,6 +121,20 @@ pub struct PaneActivity {
     /// if a path it wants is already claimed here.
     #[serde(default)]
     pub files: Vec<String>,
+}
+
+/// One pane's rectangle in the visible window, as percentages (0..100) of
+/// the window's width/height. Percentages rather than cells so a caller
+/// (claude deciding where to open a result pane, say) can reason about
+/// "right half / top third" without knowing the pixel size. `x,y` is the
+/// top-left corner; `w,h` the size. Returned by `window.layout`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaneRect {
+    pub surface_id: String,
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
 }
 
 /// Plug point for terminal operations. Host apps implement this on a
@@ -238,23 +252,18 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("panel_info not supported")
     }
 
-    /// Publish (or overwrite) this pane's activity on the shared
-    /// collaboration board. Pure metadata, so a backend can satisfy this
-    /// without touching the renderer. Default unsupported.
-    fn announce(
-        &self,
-        _surface_id: &str,
-        _intent: &str,
-        _status: &str,
-        _files: &[String],
-    ) -> Result<()> {
-        anyhow::bail!("announce not supported")
+    /// Read every pane's activity. Default: empty board — a backend that
+    /// doesn't track activity reports nothing rather than erroring, so
+    /// callers can always scan.
+    fn collab_board(&self) -> Result<Vec<PaneActivity>> {
+        Ok(Vec::new())
     }
 
-    /// Read every pane's announced activity. Default: empty board — a
-    /// backend that doesn't track activity reports nothing rather than
-    /// erroring, so callers can always scan.
-    fn collab_board(&self) -> Result<Vec<PaneActivity>> {
+    /// Geometry of the panes in the visible window, as window-relative
+    /// percentages — so a caller can see who sits where (right half, top
+    /// third) and pick a spot to split. Default: empty (backends that don't
+    /// track a layout report nothing rather than erroring).
+    fn window_layout(&self) -> Result<Vec<PaneRect>> {
         Ok(Vec::new())
     }
 

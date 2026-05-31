@@ -655,12 +655,12 @@ setInterval(poll, 1000);
 </body>
 </html>"#;
 
-/// Board panel: each pane's live activity (surface_id · status · intent ·
-/// files), auto-filled from the transcript watcher, in its own OS window
-/// driving a wry webview. Mirrors the session panel. Polls `/board` once a
-/// second; each row carries a message box that POSTs `/board-tell` to inject
-/// text into that pane's PTY and submit it (waking an idle claude). The user
-/// drives the collaboration instead of panes relaying through a mailbox.
+/// Board panel: a read-only monitor of each pane's live activity (surface_id ·
+/// status · intent · files), auto-filled from the transcript watcher, in its
+/// own OS window driving a wry webview. Mirrors the session panel. Polls
+/// `/board` once a second. No input here on purpose — the user and the panes
+/// just *watch* it; talking to a pane happens through that pane's own prompt
+/// (claude↔claude uses `kasaterm-cli tell`).
 const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -686,16 +686,6 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
   .status.blocked { color: #f85149; }
   .intent { margin-top: 5px; color: #ecedf3; word-break: break-word; }
   .files { margin-top: 3px; font-size: 11px; color: #787e8a; word-break: break-all; }
-  .tell { display: flex; gap: 6px; margin-top: 9px; }
-  .tell input {
-    flex: 1; background: #1a1d23; border: 1px solid #2e323b; border-radius: 7px;
-    color: #ecedf3; padding: 6px 9px; font: 13px system-ui;
-    -webkit-user-select: text; user-select: text;
-  }
-  .tell input:focus { outline: none; border-color: #5a8ce6; }
-  .tell button { background: #2e323b; border: 1px solid #3a414c; border-radius: 7px;
-    color: #ecedf3; padding: 6px 12px; cursor: pointer; }
-  .tell button:hover { background: #3a414c; }
   .empty { color: #787e8a; font-size: 12px; padding: 8px 2px; }
   .err { color: #f85149; font-size: 12px; margin-top: 10px; }
 </style>
@@ -708,7 +698,6 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
 const PORT = "__PORT__";
 const base = "http://127.0.0.1:" + PORT;
 const $ = (id) => document.getElementById(id);
-let busy = false;
 
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function leaf(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
@@ -716,11 +705,6 @@ function leaf(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) 
 function render(board) {
   $("err").style.display = "none";
   const list = $("list");
-  // Preserve the value + focus of whatever the user is mid-typing so the
-  // 1s poll's full re-render doesn't wipe it.
-  const a = document.activeElement;
-  const focusSid = (a && a.dataset && a.dataset.sid) ? a.dataset.sid : null;
-  const val = focusSid ? a.value : null;
   list.innerHTML = "";
   if (!board || !board.length) {
     const e = document.createElement("div");
@@ -737,31 +721,9 @@ function render(board) {
       `<div class="row1"><span class="sid">${esc(p.surface_id)}</span>` +
       `<span class="status ${esc(st)}">${esc(p.status || "")}</span></div>` +
       `<div class="intent">${esc(p.intent || "")}</div>` +
-      (files ? `<div class="files">${esc(files)}</div>` : "") +
-      `<div class="tell"><input data-sid="${esc(p.surface_id)}" placeholder="이 pane에게 보내기…">` +
-      `<button>보내기</button></div>`;
-    const inp = d.querySelector("input");
-    const btn = d.querySelector("button");
-    const go = () => tell(p.surface_id, inp);
-    btn.onclick = go;
-    inp.onkeydown = (e) => { if (e.key === "Enter") go(); };
+      (files ? `<div class="files">${esc(files)}</div>` : "");
     list.appendChild(d);
-    if (focusSid === p.surface_id) { inp.value = val; inp.focus(); }
   });
-}
-
-async function tell(sid, inp) {
-  const text = inp.value;
-  if (busy || !text.trim()) return;
-  busy = true;
-  // text/plain body → CORS "simple request", no preflight (the panel's null
-  // origin would otherwise trip an OPTIONS the server 405s).
-  try {
-    await fetch(base + "/board-tell?surface=" + encodeURIComponent(sid),
-      { method: "POST", headers: { "Content-Type": "text/plain" }, body: text });
-    inp.value = "";
-  } catch (e) {}
-  busy = false;
 }
 
 async function poll() {
@@ -2285,6 +2247,12 @@ struct App {
     /// this for us when the OS owns the titlebar, but our
     /// fullsize_content_view setup means we intercept those clicks.
     last_left_click: Option<(Instant, (f32, f32))>,
+    /// Pre-maximize window frame (Cocoa screen coords: x, y, w, h), stashed
+    /// when a title-strip double-click maximizes so the next double-click can
+    /// snap the window back instantly. `None` = currently un-maximized. See
+    /// `gpu::toggle_maximize_no_anim` — we drive the frame ourselves with
+    /// `animate:NO` to kill AppKit's slow zoom animation.
+    saved_window_frame: Option<(f64, f64, f64, f64)>,
     /// A titlebar press that hasn't yet decided between "click" and "drag".
     /// We defer `window.drag_window()` (which enters AppKit's modal move
     /// loop and would eat the second click of a double-click) until the
@@ -2485,6 +2453,7 @@ impl App {
             pending_resize: None,
             mouse_forward_pane: None,
             last_left_click: None,
+            saved_window_frame: None,
             titlebar_drag_pending: None,
             last_window_title: None,
             claude_busy_until: None,
@@ -7182,6 +7151,14 @@ impl App {
                 // Host-modifier shortcuts. macOS uses Cmd, Windows/Linux
                 // use Ctrl+Shift — see `host_mod()`.
                 if host {
+                    // OS 키 자동반복(키를 누르고 있을 때 반복 발사되는 Pressed
+                    // 이벤트, repeat=true)은 무시한다. Cmd 단축키는 전부 단발성
+                    // 동작이라, 안 거르면 Cmd+D를 살짝 길게 누르는 것만으로
+                    // split이 우르르 나가 pane이 증식하고 Cmd+W는 여러 pane을
+                    // 한꺼번에 닫는다. 글자 타이핑 반복은 이 블록 밖이라 무관.
+                    if event.repeat {
+                        return;
+                    }
                     if code == KeyCode::KeyC && self.selection.is_some() {
                         self.copy_selection();
                         return;
@@ -8170,6 +8147,14 @@ impl App {
                         .filter(|t| !t.is_empty())
                         .or(smart)
                         .unwrap_or_else(|| id.clone());
+                    // Prefix the pane id so the user can always see which pane
+                    // is which (for `tell %N`, etc.). Skip when the label has
+                    // already fallen back to the id — no "%18 · %18".
+                    let label = if label == id {
+                        label
+                    } else {
+                        format!("{id} · {label}")
+                    };
                     headers.push(HeaderInfo {
                         id: id.clone(),
                         x: WINDOW_PADDING + sidebar_w + x_cells as f32 * self.cell.w,
@@ -10392,7 +10377,10 @@ impl ApplicationHandler<UserEvent> for App {
                     };
                     self.last_left_click = Some((now, (cx, cy)));
                     if is_double {
-                        window.set_maximized(!window.is_maximized());
+                        // Drive the frame swap ourselves with animate:NO —
+                        // winit's set_maximized routes through AppKit zoom,
+                        // which animates the frame slowly ("늦게 커짐").
+                        gpu::toggle_maximize_no_anim(&window, &mut self.saved_window_frame);
                         if std::env::var_os("KASATERM_RESIZE_DEBUG").is_some() {
                             eprintln!(
                                 "[rsz {}ms] set_maximized -> {}",

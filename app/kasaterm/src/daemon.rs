@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_socket::backend::{
-    Backend, PaneActivity, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo,
+    Backend, PaneActivity, PaneRect, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo,
 };
 use agent_socket::transport::{LocalListener, LocalStream};
 use agent_socket::Server;
@@ -64,11 +64,10 @@ struct DaemonState {
     /// immediately (real-time) instead of waiting on the 10s backup timer —
     /// the layout the user left is always on disk for the next launch.
     state_path: PathBuf,
-    /// Collab board: manual `announce` (collab) merged with transcript-derived
-    /// activity (collab_auto). `binds` queues each pane's transcript path for
-    /// the tail watcher. The in-process PtyBackend used to host this, but it's
-    /// dead under the daemon — so the board lives here now.
-    collab: Arc<Mutex<HashMap<String, PaneActivity>>>,
+    /// Collab board: transcript-derived activity (collab_auto), filled by the
+    /// tail watcher. `binds` queues each pane's transcript path for the
+    /// watcher. The in-process PtyBackend used to host this, but it's dead
+    /// under the daemon — so the board lives here now.
     collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
     binds: Arc<Mutex<Vec<(String, PathBuf)>>>,
 }
@@ -419,34 +418,32 @@ impl Backend for DaemonBackend {
             labels: view.sessions.iter().map(|s| s.label.clone()).collect(),
         }
     }
-    fn announce(&self, surface_id: &str, intent: &str, status: &str, files: &[String]) -> Result<()> {
-        self.state.collab.lock().unwrap().insert(
-            surface_id.to_string(),
-            PaneActivity {
-                surface_id: surface_id.to_string(),
-                intent: intent.to_string(),
-                status: status.to_string(),
-                files: files.to_vec(),
-            },
-        );
-        Ok(())
-    }
     fn collab_board(&self) -> Result<Vec<PaneActivity>> {
         // Live = every pane the daemon owns, across sessions; drop board
-        // entries for closed panes so no ghosts linger. Manual announce
-        // (collab) is the fallback; transcript-derived activity (collab_auto)
-        // wins since it reflects what the pane is actually doing.
+        // entries for closed panes so no ghosts linger. Activity is
+        // transcript-derived (collab_auto) — it reflects what each pane is
+        // actually doing, so a pane never has to report itself.
         let live: HashSet<String> = self.state.pty.lock().unwrap().keys().cloned().collect();
-        let mut by_id: HashMap<String, PaneActivity> = HashMap::new();
-        for a in self.state.collab.lock().unwrap().values() {
-            by_id.insert(a.surface_id.clone(), a.clone());
-        }
-        for a in self.state.collab_auto.lock().unwrap().values() {
-            by_id.insert(a.surface_id.clone(), a.clone());
-        }
-        Ok(by_id
-            .into_values()
+        Ok(self
+            .state
+            .collab_auto
+            .lock()
+            .unwrap()
+            .values()
             .filter(|a| live.contains(&a.surface_id))
+            .cloned()
+            .collect())
+    }
+    fn window_layout(&self) -> Result<Vec<PaneRect>> {
+        // leaf_rects over a 100×100 grid → window-relative percentages, so
+        // callers reason about position/size without knowing the pixel size.
+        let rects = self
+            .state
+            .with_active_layout(|lay| lay.leaf_rects(100, 100))
+            .unwrap_or_default();
+        Ok(rects
+            .into_iter()
+            .map(|(surface_id, x, y, w, h)| PaneRect { surface_id, x, y, w, h })
             .collect())
     }
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
@@ -744,7 +741,6 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         subscriber: Mutex::new(None),
         out_tx,
         state_path: state_path.clone(),
-        collab: Arc::new(Mutex::new(HashMap::new())),
         collab_auto: Arc::new(Mutex::new(HashMap::new())),
         binds: Arc::new(Mutex::new(Vec::new())),
     });

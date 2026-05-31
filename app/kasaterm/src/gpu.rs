@@ -2849,3 +2849,65 @@ pub fn with_disabled_layer_actions<F: FnOnce()>(f: F) {
 pub fn with_disabled_layer_actions<F: FnOnce()>(f: F) {
     f();
 }
+
+/// Toggle window maximize ("zoom") with NO frame animation. winit's
+/// `set_maximized` routes through `[NSWindow zoom:]`, which animates the frame
+/// over `animationResizeTime:` — that's the slow "이상한 애니메이션으로 늦게
+/// 커짐" the user sees on a title-strip double-click. We drive the frame swap
+/// ourselves with `animate:NO` so it snaps instantly. `saved` holds the
+/// pre-zoom frame (Cocoa screen coords) so the next toggle can restore it;
+/// `None` means currently un-maximized.
+#[cfg(target_os = "macos")]
+pub fn toggle_maximize_no_anim(window: &Window, saved: &mut Option<(f64, f64, f64, f64)>) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use raw_window_handle::RawWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        // isZoomed reflects the real frame regardless of how it got there
+        // (our path, the green button, a live-resize drag), so it's a safer
+        // truth than tracking our own bool.
+        let is_zoomed: bool = msg_send![ns_window, isZoomed];
+        if is_zoomed {
+            if let Some((x, y, w, ht)) = saved.take() {
+                let frame = NSRect::new(NSPoint::new(x, y), NSSize::new(w, ht));
+                let _: () = msg_send![ns_window, setFrame: frame, display: true, animate: false];
+            }
+            // saved == None here means we never recorded a restore frame
+            // (e.g. the window was already zoomed by some other path). Leave
+            // it maximized rather than guessing a frame.
+        } else {
+            let cur: NSRect = msg_send![ns_window, frame];
+            *saved = Some((cur.origin.x, cur.origin.y, cur.size.width, cur.size.height));
+            let mut screen: *mut AnyObject = msg_send![ns_window, screen];
+            if screen.is_null() {
+                if let Some(cls) = AnyClass::get(c"NSScreen") {
+                    screen = msg_send![cls, mainScreen];
+                }
+            }
+            if screen.is_null() {
+                return;
+            }
+            // visibleFrame excludes the menu bar + Dock — same target AppKit
+            // zoom uses, so this matches the old maximize bounds exactly.
+            let vf: NSRect = msg_send![screen, visibleFrame];
+            let _: () = msg_send![ns_window, setFrame: vf, display: true, animate: false];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn toggle_maximize_no_anim(window: &Window, _saved: &mut Option<(f64, f64, f64, f64)>) {
+    window.set_maximized(!window.is_maximized());
+}
