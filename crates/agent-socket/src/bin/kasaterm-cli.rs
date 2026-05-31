@@ -56,7 +56,115 @@ fn run() -> Result<Option<Response>> {
     let request = build_request(&cmd, &args)?;
     let socket_path = resolve_socket_path()?;
     let response = roundtrip(&socket_path, &request)?;
+    // `layout` is meant to be *read*, not piped — render the pane rects as an
+    // ASCII diagram so claude (and a human) grasp the screen split at a glance.
+    // On error we fall through to the raw JSON so the failure is still visible.
+    if cmd == "layout" && response.ok {
+        println!("{}", render_layout(&response));
+        return Ok(None);
+    }
     Ok(Some(response))
+}
+
+/// Render `window.layout`'s pane rects (window-relative %) as a box diagram.
+fn render_layout(resp: &Response) -> String {
+    let panes = resp
+        .result
+        .as_ref()
+        .and_then(|v| v.get("panes"))
+        .and_then(|v| v.as_array());
+    let rects: Vec<(String, u16, u16, u16, u16)> = match panes {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|p| {
+                Some((
+                    p.get("surface_id")?.as_str()?.to_string(),
+                    p.get("x")?.as_u64()? as u16,
+                    p.get("y")?.as_u64()? as u16,
+                    p.get("w")?.as_u64()? as u16,
+                    p.get("h")?.as_u64()? as u16,
+                ))
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    if rects.is_empty() {
+        return "(빈 레이아웃 — 보이는 pane 없음)".to_string();
+    }
+    draw_boxes(&rects)
+}
+
+/// Box-drawing from pane rects given as 0..100 percentages of the window.
+/// Each cell accumulates U/D/L/R connection bits so shared borders between
+/// adjacent panes resolve to the right junction glyph (┬ ├ ┼ …) automatically.
+fn draw_boxes(rects: &[(String, u16, u16, u16, u16)]) -> String {
+    const W: usize = 46;
+    const H: usize = 15;
+    const U: u8 = 1;
+    const D: u8 = 2;
+    const L: u8 = 4;
+    const R: u8 = 8;
+    // % → cell (round). Width/height map onto the last index so 100% lands
+    // on the far edge.
+    let cx = |p: u16| -> usize { (p as usize * (W - 1) + 50) / 100 };
+    let cy = |p: u16| -> usize { (p as usize * (H - 1) + 50) / 100 };
+
+    let mut bits = vec![vec![0u8; W]; H];
+    let mut labels: Vec<(usize, usize, String)> = Vec::new();
+    for (id, x, y, w, h) in rects {
+        let x0 = cx(*x);
+        let y0 = cy(*y);
+        let x1 = cx(x + w).min(W - 1).max(x0 + 2);
+        let y1 = cy(y + h).min(H - 1).max(y0 + 2);
+        for xx in (x0 + 1)..x1 {
+            bits[y0][xx] |= L | R;
+            bits[y1][xx] |= L | R;
+        }
+        for yy in (y0 + 1)..y1 {
+            bits[yy][x0] |= U | D;
+            bits[yy][x1] |= U | D;
+        }
+        bits[y0][x0] |= R | D;
+        bits[y0][x1] |= L | D;
+        bits[y1][x0] |= R | U;
+        bits[y1][x1] |= L | U;
+        labels.push(((y0 + y1) / 2, (x0 + x1) / 2, id.clone()));
+    }
+    let glyph = |b: u8| -> char {
+        match b {
+            0 => ' ',
+            b if b == L | R => '─',
+            b if b == U | D => '│',
+            b if b == R | D => '┌',
+            b if b == L | D => '┐',
+            b if b == R | U => '└',
+            b if b == L | U => '┘',
+            b if b == L | R | D => '┬',
+            b if b == L | R | U => '┴',
+            b if b == U | D | R => '├',
+            b if b == U | D | L => '┤',
+            b if b == U | D | L | R => '┼',
+            _ => '·',
+        }
+    };
+    let mut grid: Vec<Vec<char>> = bits
+        .iter()
+        .map(|row| row.iter().map(|&b| glyph(b)).collect())
+        .collect();
+    for (cy_, cx_, id) in labels {
+        let lab: Vec<char> = id.chars().collect();
+        let sx = cx_.saturating_sub(lab.len() / 2);
+        for (i, c) in lab.iter().enumerate() {
+            let col = sx + i;
+            if col < W && grid[cy_][col] == ' ' {
+                grid[cy_][col] = *c;
+            }
+        }
+    }
+    grid.iter()
+        .map(|r| r.iter().collect::<String>().trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn print_help() {
@@ -76,8 +184,8 @@ fn print_help() {
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
     eprintln!("  kasaterm-cli key   <enter|tab|escape|backspace|delete|up|down|left|right>");
     eprintln!("  kasaterm-cli tell  <surface_id> <text>     # send + submit (wake an idle claude)");
-    eprintln!("  kasaterm-cli announce <intent> [status]   # publish what THIS pane is doing");
     eprintln!("  kasaterm-cli board                        # what every pane is doing");
+    eprintln!("  kasaterm-cli layout                       # where each pane sits (window-relative %)");
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!();
@@ -214,24 +322,8 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "text": format!("{}\r", flat.trim()) }),
             )
         }
-        "announce" => {
-            // The pane announces *itself*: surface_id comes from the env
-            // the host injects, so a script inside a pane never has to
-            // figure out its own id.
-            let surface = std::env::var("KASATERM_PANE_ID").map_err(|_| {
-                anyhow!("announce needs $KASATERM_PANE_ID (run inside a kasaterm pane)")
-            })?;
-            let intent = args
-                .first()
-                .ok_or_else(|| anyhow!("announce needs an <intent> string"))?
-                .clone();
-            let status = args.get(1).cloned().unwrap_or_else(|| "working".to_string());
-            (
-                "collab.announce",
-                json!({ "surface_id": surface, "intent": intent, "status": status }),
-            )
-        }
         "board" => ("collab.board", json!({})),
+        "layout" => ("window.layout", json!({})),
         "bind-transcript" => {
             // The pane registers its own transcript: surface_id from the
             // host-injected env, path from the hook's stdin (passed as the

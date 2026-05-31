@@ -3,8 +3,8 @@
 //! claude code는 세션을 `~/.claude/projects/<cwd>/<session>.jsonl`에
 //! 실시간으로 append한다. `type:"assistant"` 줄의 `message.content[]`에
 //! `tool_use`(name+input) 블록이 들어있어, 그걸 읽으면 그 pane이 "지금
-//! 무슨 파일을 읽고/고치고, 무슨 명령을 돌리는지"를 — claude가 announce를
-//! 직접 호출하지 않아도 — 알 수 있다. thinking 블록은 항상 redact(빈
+//! 무슨 파일을 읽고/고치고, 무슨 명령을 돌리는지"를 — 그 pane이 직접
+//! 보고하지 않아도 — 알 수 있다. thinking 블록은 항상 redact(빈
 //! 문자열)이라 무시한다.
 //!
 //! 이 모듈은 순수 파싱 함수만 둔다. 파일 tail/상태는 socket.rs의 watcher가

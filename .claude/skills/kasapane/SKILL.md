@@ -65,7 +65,6 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 | `kasaterm-cli tell <id> <텍스트>` | 특정 pane에 보내기+제출 — idle claude 깨움 (협업, §5) |
 | `kasaterm-cli key <id> …` | 특정 pane에 키 전송 |
 | `kasaterm-cli board` | 모든 pane이 뭘 왜 하는지 (협업, §5) |
-| `kasaterm-cli announce <의도> [status]` | 내 pane 작업 등록 (협업, §5) |
 | `kasaterm-cli peek <id> [lines]` | 다른 pane 화면 텍스트 읽기 (협업, §5) |
 | `imgopen <파일.png>` | 이미지를 새 pane으로 띄움 (맞춤↔원본 토글) |
 | `mdopen <파일.md>` | 마크다운을 노션풍 렌더 pane (Render/Raw) |
@@ -585,16 +584,28 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 §4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용.
 
-> **2026-05-31 구조 변경:** 파일 mailbox(`kasa-chat`)·`chat-inject` hook 자동주입·mailbox watcher inbox는 **전부 폐기**됐다. 이제 협업은 ① 자동 채워지는 **board**(사용자는 GUI 패널로, claude는 CLI로 조회) + ② **PTY 직접 주입 `tell`**(claude끼리·사용자 둘 다) 두 축뿐이다.
+> **2026-05-31 구조 변경:** 파일 mailbox(`kasa-chat`)·`chat-inject` hook 자동주입·mailbox watcher inbox는 **전부 폐기**됐다. 수동 `announce`도 폐기 — board는 transcript에서 100% 자동으로 채워진다. 이제 협업은 ① 자동 채워지는 **board**(사용자는 GUI 패널로, claude는 CLI로 조회) + ② **PTY 직접 주입 `tell`**(claude끼리·사용자 둘 다) 두 축뿐이다.
 
 ### board — 각 pane이 뭘 하는지 (자동 등록)
 
-호스트가 각 pane의 claude transcript를 tail해 tool_use(Read/Edit/Bash…)를 그 pane 활동으로 **자동 등록**한다. 평소처럼 작업하면 `Read auth.ts → Bash cargo build`가 저절로 뜬다 — `announce` 직접 호출 불필요.
+호스트가 각 pane의 claude transcript를 tail해 tool_use(Read/Edit/Bash…)를 그 pane 활동으로 **자동 등록**한다. 평소처럼 작업하면 `Read auth.ts → Bash cargo build`가 저절로 뜬다 — 내가 따로 보고할 필요 없다.
 
-- **사용자(거노)**: 상단 **보기 메뉴 → "board 패널"** 로 전 pane 작업 현황을 직접 본다. 각 행에 그 pane으로 바로 보내는 메시지 입력창이 있다.
-- **claude(너)**: 자동 주입은 더 없으니 필요할 때 `kasaterm-cli board` 로 **직접 조회**한다. 내가 만질 파일을 board에서 다른 pane이 잡고 있으면 → 충돌 회피(같은 문제면 합류, 빌드 중이면 `peek %N`로 보고 대기).
+- **사용자(거노)**: 상단 **보기 메뉴 → "board 패널"** 로 전 pane 작업 현황을 직접 본다. **읽기 전용 현황판**이다 — 입력 UI 없음. 특정 pane에 말할 일이 있으면 그 pane으로 가서 그 pane 프롬프트에 직접 친다.
+- **claude(너)**: 필요할 때 `kasaterm-cli board` 로 **직접 조회**한다. 내가 만질 파일을 board에서 다른 pane이 잡고 있으면 → 충돌 회피(같은 문제면 합류, 빌드 중이면 `peek %N`로 보고 대기).
 
-### tell — 다른 pane에게 말 걸기 + 깨우기
+#### board 상시 감시 (Monitor) — 권장
+
+매번 `board`를 조회하는 대신, **Monitor 도구로 board를 상시 감시**해두면 형제 pane 활동이 바뀔 때마다 알림이 온다. kasaterm pane이면 SessionStart hook(`kasaterm-collab-hint.sh`)이 이 안내를 자동 주입하므로 첫 턴에 띄우면 된다:
+
+```
+Monitor 도구 → command: ~/.claude/hooks/kasaterm-board-watch.sh  (persistent: true)
+```
+
+- 형제 pane이 **없으면 조용**하다 → "지금 협업 상황인지" 미리 판정할 필요 없다. 그냥 띄워두면 누가 옆 pane을 새로 여는 순간부터 알린다.
+- 알림에 뜬 다른 pane의 `files=[...]`에 내가 만지려는 경로가 있으면 **충돌** → `tell %N`으로 조율(같은 문제면 합류, 빌드 중이면 대기).
+- 감지(Monitor)는 **나에게만** 오고, 상대를 깨우는 건 `tell`(PTY 주입)이 한다 — 역할이 나뉜다. Monitor는 잠든 옆 claude를 못 깨운다.
+
+### tell — 다른 pane에게 말 걸기 + 깨우기 (claude끼리)
 
 ```bash
 kasaterm-cli tell %3 "auth.ts 너가 맡아줄래? 난 ui 쪽 볼게"
@@ -603,7 +614,7 @@ kasaterm-cli tell %3 "auth.ts 너가 맡아줄래? 난 ui 쪽 볼게"
 `tell`은 대상 pane PTY에 텍스트를 주입하고 **끝에 `\r`(엔터)을 붙여 제출**한다 — 그래서 **idle claude도** 새 user turn으로 받아 깨어난다. focus는 안 바뀐다.
 
 - `send`(=`surface.send_text`)는 제출(`\r`)을 안 붙여 프롬프트에 글자만 남는다. **깨우려면 반드시 `tell`.**
-- 사용자도 board 패널 각 행 입력창에서 같은 일을 한다(내부적으로 `POST /board-tell`).
+- board 패널엔 입력 기능이 없다(보기 전용). 사용자가 pane을 깨우려면 그 pane으로 가서 직접 입력한다.
 
 ### 함정
 
@@ -613,7 +624,7 @@ kasaterm-cli tell %3 "auth.ts 너가 맡아줄래? 난 ui 쪽 볼게"
 | `send`로 깨우려 함 | `send`는 `\r` 없음 → 프롬프트에 글자만. idle 깨우기는 `tell` |
 | `tell`에 surface_id 생략 | `tell`은 항상 `<surface_id> <text>`. 자기 자신엔 안 씀 |
 | board가 비어 보임 | 그 pane이 claude 아니거나 transcript 미bind — 정상 |
-| 협업하려고 `announce` 호출 | 불필요 — transcript가 자동 등록 |
+| `announce`로 내 작업 등록 | **폐기됨(2026-05-31)**. transcript가 자동 등록 — 따로 호출 안 함 |
 
 ---
 

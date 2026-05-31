@@ -330,19 +330,12 @@ pub struct PtyBackendHandle {
 
 pub struct PtyBackend {
     handle: PtyBackendHandle,
-    /// Manual collaboration board: surface_id -> what that pane explicitly
-    /// announced. Lives on the backend rather than the main thread because
-    /// it's pure metadata — announce/board never touch the renderer, so they
-    /// skip the submit() round-trip and just lock this map. The whole backend
-    /// is `Arc`-shared across socket connections, so every pane sees the same
-    /// board. Kept separate from `collab_auto` so the transcript tail worker
-    /// and a manual announce never clobber each other.
-    collab: Arc<Mutex<HashMap<String, PaneActivity>>>,
-    /// Auto board: surface_id -> activity derived by tailing that pane's
-    /// claude-code transcript (tool_use calls). Filled by the watcher thread,
-    /// not by any RPC. `collab_board` merges this with `collab` (auto wins,
-    /// since it reflects what the pane is *actually* doing) — so a pane never
-    /// has to call `announce`.
+    /// Collaboration board: surface_id -> activity derived by tailing that
+    /// pane's claude-code transcript (tool_use calls). Filled by the watcher
+    /// thread, not by any RPC — a pane never has to report its own activity.
+    /// Lives on the backend (not the main thread) because it's pure metadata
+    /// the renderer never touches, and the whole backend is `Arc`-shared
+    /// across socket connections so every pane sees the same board.
     collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
     /// Pending `bind_transcript` requests (surface_id, jsonl path) the watcher
     /// thread drains. Pushed by the hook-driven RPC, consumed by the tail
@@ -371,7 +364,6 @@ impl PtyBackend {
         });
         Self {
             handle,
-            collab: Arc::new(Mutex::new(HashMap::new())),
             collab_auto,
             binds,
         }
@@ -529,25 +521,6 @@ impl Backend for PtyBackend {
         self.submit(|reply| PtyCommand::PanelInfo { which, reply })
     }
 
-    fn announce(
-        &self,
-        surface_id: &str,
-        intent: &str,
-        status: &str,
-        files: &[String],
-    ) -> Result<()> {
-        self.collab.lock().unwrap().insert(
-            surface_id.to_string(),
-            PaneActivity {
-                surface_id: surface_id.to_string(),
-                intent: intent.to_string(),
-                status: status.to_string(),
-                files: files.to_vec(),
-            },
-        );
-        Ok(())
-    }
-
     fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
         let id = surface_id.to_string();
         self.submit(|reply| PtyCommand::Peek { pane_id: id, lines, reply })
@@ -566,20 +539,16 @@ impl Backend for PtyBackend {
             .iter()
             .map(|s| s.id.clone())
             .collect();
-        // Merge manual announce (`collab`) with transcript-derived activity
-        // (`collab_auto`), auto winning — it reflects what the pane is
-        // *actually* doing, so a pane never has to call announce. Manual is
-        // the fallback for panes with no bound transcript (codex, etc.).
-        let mut by_id: HashMap<String, PaneActivity> = HashMap::new();
-        for a in self.collab.lock().unwrap().values() {
-            by_id.insert(a.surface_id.clone(), a.clone());
-        }
-        for a in self.collab_auto.lock().unwrap().values() {
-            by_id.insert(a.surface_id.clone(), a.clone());
-        }
-        Ok(by_id
-            .into_values()
+        // Transcript-derived activity (`collab_auto`), filled by the tail
+        // watcher — it reflects what each pane is actually doing, so a pane
+        // never has to report itself.
+        Ok(self
+            .collab_auto
+            .lock()
+            .unwrap()
+            .values()
             .filter(|a| live.contains(&a.surface_id))
+            .cloned()
             .collect())
     }
 
