@@ -27,6 +27,17 @@ pub struct WindowView {
     pub layout: PtyLayout,
 }
 
+/// A non-terminal pane the daemon hosts (image / markdown preview). These have
+/// no PTY and emit no frames, so the daemon can't ship them as a screen grid —
+/// it ships the kind + file path and the GUI decodes/renders locally (same as
+/// the in-process `split_image_pane`/`split_markdown_pane` path).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PanePreview {
+    /// "image" | "markdown".
+    pub kind: String,
+    pub path: String,
+}
+
 /// One session: its windows + which is active + a display label (the active
 /// pane's cwd basename, for the session panel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +61,17 @@ pub struct StateView {
     /// ghost. Optional so an older daemon stream still deserializes.
     #[serde(default)]
     pub active_pane: Option<String>,
+    /// Per-pane shell cwd (pane id → absolute path), for the GUI header
+    /// breadcrumb. The daemon owns the PtySessions, so only it can resolve
+    /// these; a daemon-side poll re-broadcasts the state when a `cd` moves one.
+    /// Optional so an older daemon stream still deserializes.
+    #[serde(default)]
+    pub pane_cwds: std::collections::HashMap<String, String>,
+    /// Non-terminal panes (image / markdown), keyed by pane id. The GUI builds
+    /// a `PaneContent::Image/Markdown` for each from the path. Optional so an
+    /// older daemon stream still deserializes.
+    #[serde(default)]
+    pub pane_previews: std::collections::HashMap<String, PanePreview>,
 }
 
 /// Daemon→GUI stream message. `Frame` carries a screen diff (per pane, keyed by

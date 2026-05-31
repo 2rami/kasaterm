@@ -2282,6 +2282,23 @@ struct App {
     /// and a wheel burst fires `RedrawRequested` 60+ times per
     /// second.
     last_window_title_check: Option<Instant>,
+    /// Per-pane shell cwd cache (pane id → working dir), feeding the header
+    /// breadcrumb. Refreshed on a timer off the render path: `pid_cwd` shells
+    /// out to `lsof`, so resolving it per pane on every frame would spawn a
+    /// burst during a scroll/hover storm. See `refresh_pane_cwds`.
+    pane_cwd_cache: HashMap<String, std::path::PathBuf>,
+    /// Last `refresh_pane_cwds` sweep — rate-limits the lsof calls.
+    pane_cwd_check: Option<Instant>,
+    /// Preview panes (image/markdown) already materialized from the daemon's
+    /// StateView, keyed by pane id → the path we built it from. Guards against
+    /// re-decoding the image on every (frequent) State broadcast; a changed
+    /// path rebuilds. See the `UserEvent::DaemonState` handler.
+    applied_previews: HashMap<String, String>,
+    /// True while Alt/Option is held — draws each pane's %N big + centered
+    /// (tmux `display-panes`), so the user can read a pane id for `tell %N` /
+    /// focus without it cluttering the header normally. Toggled in
+    /// `ModifiersChanged`.
+    show_pane_numbers: bool,
     /// Cursor-blink phase captured at the last successful render.
     /// Used by `render_frame`'s early-return: a blink toggle counts
     /// as "something changed" and forces the GPU pass even when
@@ -2459,6 +2476,10 @@ impl App {
             claude_busy_until: None,
             last_claude_status: None,
             last_window_title_check: None,
+            pane_cwd_cache: HashMap::new(),
+            pane_cwd_check: None,
+            applied_previews: HashMap::new(),
+            show_pane_numbers: false,
             last_blink_on: false,
             chrome_dirty: true,
             cursor_px: std::env::var("KASATERM_AUTOHOVER")
@@ -3877,6 +3898,62 @@ impl App {
         }
     }
 
+    /// Refresh the per-pane shell cwd cache that feeds the header breadcrumb.
+    /// `pid_cwd` shells out to `lsof`, so resolving it per pane on every frame
+    /// would spawn a burst during a scroll/hover storm. Rate-limited to
+    /// ~700ms — a breadcrumb only moves on `cd`, so the lag is imperceptible.
+    fn refresh_pane_cwds(&mut self) {
+        // Daemon-attached mode keeps self.pty empty — the breadcrumb cache is
+        // filled from the daemon's StateView instead (see UserEvent::DaemonState).
+        // Bail so we never wipe that; only the in-process PTY backend fills
+        // self.pty and needs this lsof sweep.
+        if self.pty.is_empty() {
+            return;
+        }
+        if let Some(t) = self.pane_cwd_check {
+            if t.elapsed() < std::time::Duration::from_millis(700) {
+                return;
+            }
+        }
+        self.pane_cwd_check = Some(Instant::now());
+        let mut cache = HashMap::new();
+        for (id, sess) in &self.pty {
+            if let Some(cwd) = sess.shell_pid().and_then(socket::pid_cwd) {
+                cache.insert(id.clone(), cwd);
+            }
+        }
+        self.pane_cwd_cache = cache;
+    }
+
+    /// Path → breadcrumb segments ("app", "kasaterm", "src"), collapsing the
+    /// home prefix to "~". The header joins them with " › " and elides from
+    /// the front when space runs out, so the current folder always survives.
+    fn breadcrumb_segs(p: &std::path::Path) -> Vec<String> {
+        use std::path::Component;
+        let mut segs: Vec<String> = Vec::new();
+        let home = std::env::var("HOME").ok().filter(|h| !h.is_empty());
+        if let Some(h) = &home {
+            if let Ok(rest) = p.strip_prefix(h) {
+                segs.push("~".to_string());
+                for c in rest.components() {
+                    if let Component::Normal(s) = c {
+                        segs.push(s.to_string_lossy().into_owned());
+                    }
+                }
+                return segs;
+            }
+        }
+        for c in p.components() {
+            if let Component::Normal(s) = c {
+                segs.push(s.to_string_lossy().into_owned());
+            }
+        }
+        if segs.is_empty() {
+            segs.push("/".to_string());
+        }
+        segs
+    }
+
     /// Geometry of the left window-tab sidebar, in logical px. Returns
     /// `(tab_rects, close_rects, plus_rect)`:
     ///   - one `(window_idx, rect)` tab per window, stacked under the title
@@ -5261,6 +5338,24 @@ impl App {
         self.ws.lock().unwrap().active_pane.clone()
     }
 
+    /// Surface id that should receive keyboard input — the active pane's
+    /// *active tab*'s pid, not the outer pane id. `target_pane()` returns
+    /// the layout key (== first tab's pid), so once the user switches tabs
+    /// the daemon keeps routing keystrokes to the first tab. The daemon's
+    /// PTY map is keyed by tab pid, so input must name the active tab
+    /// explicitly. Falls back to the outer id for single-tab / tmux panes
+    /// whose tabs carry no explicit pid (same fallback as `active_pty`).
+    fn target_surface(&self) -> Option<String> {
+        let ws = self.ws.lock().ok()?;
+        let outer = ws.active_pane.clone()?;
+        let pid = ws
+            .panes
+            .get(&outer)
+            .and_then(|p| p.tabs.get(p.active_tab).and_then(|t| t.pid.clone()))
+            .unwrap_or(outer);
+        Some(pid)
+    }
+
     /// The PtySession that currently has keyboard focus, if any. Used
     /// by every routing-by-active-pane code path in PTY mode.
     /// PtySession of a pane's currently-active tab. Use this instead of
@@ -6454,6 +6549,20 @@ impl App {
         if bytes.is_empty() {
             return;
         }
+        // Route to whichever backend owns the *active tab*. In-pane tabs
+        // (`spawn_new_tab`) are always GUI-local PtySessions in `self.pty`,
+        // even when the GUI is daemon-attached: the daemon owns only the
+        // primary tab (pid == outer id). So a GUI-local hit must win over the
+        // daemon path — otherwise keystrokes for a secondary tab get sent to
+        // the daemon, which has no such surface and routes them to the primary
+        // tab instead (the "typing in another tab lands in the first tab" bug).
+        let surface = self.target_surface();
+        if let Some(pid) = surface.as_deref() {
+            if let Some(pty) = self.pty.get(pid) {
+                let _ = pty.send_bytes(bytes);
+                return;
+            }
+        }
         // Dispatch by which backend is wired up. The hex encoding is
         // a tmux send-keys quirk (the daemon decodes hex pairs back
         // to bytes itself); for the pty backend we hand the raw bytes
@@ -6461,7 +6570,7 @@ impl App {
         if let Some(client) = self.daemon_client.as_ref() {
             // Daemon-attached GUI: input goes over the control socket; the
             // daemon owns the PTY writer.
-            client.send_raw(self.target_pane().as_deref(), bytes);
+            client.send_raw(surface.as_deref(), bytes);
         } else if let Some(tmux) = self.tmux.as_ref() {
             let hex: String = bytes
                 .iter()
@@ -7817,6 +7926,8 @@ impl App {
     }
 
     fn render_frame_gpu(&mut self, scale: f32) {
+        // Keep the header breadcrumb's cwd cache fresh (self-rate-limited).
+        self.refresh_pane_cwds();
         let Some(window) = self.window.as_ref() else { return };
         // Snapshot for the launch banner before the &mut self.gpu borrow
         // below (which rules out re-borrowing &self inside that block).
@@ -8949,7 +9060,39 @@ impl App {
                     // "new shell"; doubling that icon on every tab was noise.
                     let x_reserve = if reserve_x { close_w + 8.0 } else { 0.0 };
                     let budget = (per_tab - x_reserve - 14.0).max(0.0);
-                    let mut label = tab.to_string();
+                    // On hover, swap the tab title for its shell cwd as a
+                    // breadcrumb ("app › src") — an on-demand path peek instead
+                    // of permanently crowding the header. Elide from the front
+                    // so the current folder (the useful tail) always survives;
+                    // the generic truncation below still guards a too-wide tail.
+                    let mut label = if is_hover {
+                        self.pane_cwd_cache
+                            .get(&h.id)
+                            .map(|p| Self::breadcrumb_segs(p))
+                            .filter(|s| !s.is_empty())
+                            .map(|segs| {
+                                let render = |st: usize| {
+                                    let body = segs[st..].join(" › ");
+                                    if st > 0 {
+                                        format!("… › {body}")
+                                    } else {
+                                        body
+                                    }
+                                };
+                                let mut st = 0usize;
+                                let mut s = render(st);
+                                while g.measure_chrome_text(&s, chrome_font, active) > budget
+                                    && st + 1 < segs.len()
+                                {
+                                    st += 1;
+                                    s = render(st);
+                                }
+                                s
+                            })
+                            .unwrap_or_else(|| tab.to_string())
+                    } else {
+                        tab.to_string()
+                    };
                     let mut lw = g.measure_chrome_text(&label, chrome_font, active);
                     if lw > budget {
                         while label.chars().count() > 1 {
@@ -9091,6 +9234,9 @@ impl App {
                     g.queue_icon("plus", tx, icon_y, icon_size, plus_color);
                     plus_hits.push((h.id.clone(), plus_rect));
                 }
+                // (cwd is shown on-demand: hovering a tab swaps its title for
+                // the breadcrumb path — see the label assignment above. No
+                // always-on breadcrumb here so the header stays clean.)
                 // ── Right action buttons ── per-kind cluster: terminal panes
                 // get new-terminal/web/split-v/split-h; image panes get
                 // zoom-out / zoom-in / rotate / reset wired to the in-pane
@@ -9221,6 +9367,45 @@ impl App {
                         italic: false,
                     },
                 );
+            }
+            // Alt/Option held → tmux "display-panes": each pane shows its %N
+            // big + centered on an accent pill, so the user can read the id
+            // (for `tell %N`, focus, etc.) without it crowding the header.
+            // Works in single-pane too — body_rects covers every pane.
+            if self.show_pane_numbers {
+                for (id, rect) in &body_rects {
+                    let (rx, ry, rw, rh) = *rect;
+                    if rw < 24.0 || rh < 24.0 {
+                        continue;
+                    }
+                    let font = (rh * 0.4).clamp(24.0, 72.0);
+                    let tw = g.measure_chrome_text(id, font, true);
+                    let pad = font * 0.4;
+                    let box_w = tw + pad * 2.0;
+                    let box_h = font + pad * 2.0;
+                    let bx = rx + (rw - box_w) / 2.0;
+                    let by = ry + (rh - box_h) / 2.0;
+                    round_rect(
+                        g,
+                        bx,
+                        by,
+                        box_w,
+                        box_h,
+                        theme::RADIUS_MD,
+                        theme::with_alpha(theme::ACCENT, 0xE6),
+                    );
+                    g.draw_text(
+                        bx + pad,
+                        by + pad,
+                        id,
+                        gpu::DrawOpts {
+                            font_size: font,
+                            color: [0xFF, 0xFF, 0xFF, 0xFF],
+                            bold: true,
+                            italic: false,
+                        },
+                    );
+                }
             }
             // Drop-zone highlight sits on top of everything during a drag.
             if let Some((zx, zy, zw, zh)) = drop_zone_rect {
@@ -9364,6 +9549,16 @@ impl ApplicationHandler<UserEvent> for App {
         // rects match the daemon. (Session/window metadata for the sidebar +
         // session panel is wired in the multi-session follow-up.)
         if let UserEvent::DaemonState(view) = event {
+            // Per-pane shell cwd for the header breadcrumb. In daemon mode
+            // self.pty is empty, so the daemon's StateView is the only place
+            // the GUI learns each pane's directory (its cwd poll re-broadcasts
+            // on `cd`). refresh_pane_cwds bails when self.pty is empty, so this
+            // is never clobbered.
+            self.pane_cwd_cache = view
+                .pane_cwds
+                .iter()
+                .map(|(id, p)| (id.clone(), std::path::PathBuf::from(p)))
+                .collect();
             // Project the daemon's active session onto the GUI's own
             // stash-swap fields so the existing sidebar (windows) renderer
             // works unchanged: active window's slot is None (its layout lives
@@ -9433,6 +9628,46 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                 }
+                // Non-terminal panes (image/markdown) the daemon hosts emit no
+                // frames — build their PaneContent from the path the daemon
+                // shipped. Only (re)build when the path for an id changes, so
+                // the frequent cwd-poll State broadcasts don't re-decode the
+                // image every second. decode/parse reuse the in-process path.
+                for (id, prev) in &view.pane_previews {
+                    if self.applied_previews.get(id) == Some(&prev.path) {
+                        continue;
+                    }
+                    let p = std::path::Path::new(&prev.path);
+                    let name = p
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| prev.path.clone());
+                    let built = match prev.kind.as_str() {
+                        "image" => decode_image_rgba(p).ok().map(|img| PaneContent::Image(Arc::new(img))),
+                        "markdown" => std::fs::read_to_string(p).ok().map(|text| {
+                            PaneContent::Markdown(MarkdownPane {
+                                doc: Arc::new(build_markdown_doc(id, p, &text)),
+                                raw_mode: false,
+                                edit_lines: Vec::new(),
+                                cur_line: 0,
+                                cur_col: 0,
+                                scroll: 0,
+                            })
+                        }),
+                        _ => None,
+                    };
+                    if let Some(content) = built {
+                        let mut ws = self.ws.lock().unwrap();
+                        let pane = ws.pane_mut(id);
+                        pane.content = content;
+                        pane.title = Some(name);
+                        pane.title_pinned = true;
+                        pane.dirty = true;
+                        self.applied_previews.insert(id.clone(), prev.path.clone());
+                    }
+                }
+                // Forget preview bookkeeping for panes the daemon dropped.
+                self.applied_previews.retain(|id, _| all_leaves.contains(id));
                 self.chrome_dirty = true;
                 let (cols, rows) = self.window_cells();
                 self.resize_backend(cols, rows);
@@ -9795,7 +10030,15 @@ impl ApplicationHandler<UserEvent> for App {
                 });
             }
             WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
+                let new = mods.state();
+                // Alt/Option held → show pane numbers (tmux display-panes).
+                let alt = new.alt_key();
+                if alt != self.show_pane_numbers {
+                    self.show_pane_numbers = alt;
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                }
+                self.modifiers = new;
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.handle_wheel(delta);

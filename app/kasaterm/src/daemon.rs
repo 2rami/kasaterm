@@ -28,7 +28,9 @@ use serde_json::{json, Value};
 use tmux_bridge::ScreenUpdate;
 
 use crate::socket::{key_to_bytes, pane_record, pid_cwd};
-use crate::stream::{stream_path, write_msg, SessionView, StateView, StreamMsg, WindowView};
+use crate::stream::{
+    stream_path, write_msg, PanePreview, SessionView, StateView, StreamMsg, WindowView,
+};
 
 const WS_ID: &str = "local-0";
 const PANE_0: &str = "%0";
@@ -70,6 +72,10 @@ struct DaemonState {
     /// under the daemon — so the board lives here now.
     collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
     binds: Arc<Mutex<Vec<(String, PathBuf)>>>,
+    /// Non-terminal panes (image / markdown previews), keyed by pane id. These
+    /// have no PtySession — they live only as a layout leaf + this metadata,
+    /// which `state_view` ships to the GUI to decode/render. See `open_preview`.
+    previews: Mutex<HashMap<String, PanePreview>>,
 }
 
 impl DaemonState {
@@ -188,10 +194,23 @@ impl DaemonState {
                 }
             })
             .collect();
+        // Per-pane cwd for the GUI breadcrumb — resolved here because the
+        // daemon owns the PtySessions. lsof-per-pane, but state_view only
+        // fires on structural changes + the ~1s cwd poll, never per frame.
+        let pane_cwds = pty
+            .iter()
+            .filter_map(|(id, s)| {
+                s.shell_pid()
+                    .and_then(pid_cwd)
+                    .map(|p| (id.clone(), p.to_string_lossy().into_owned()))
+            })
+            .collect();
         StateView {
             sessions: views,
             active_session: *self.active_session.lock().unwrap(),
             active_pane: Some(self.active.lock().unwrap().clone()),
+            pane_cwds,
+            pane_previews: self.previews.lock().unwrap().clone(),
         }
     }
 
@@ -349,8 +368,41 @@ impl Backend for DaemonBackend {
             title: None,
         })
     }
+    fn open_preview(&self, kind: &str, path: &str) -> Result<()> {
+        // Image / markdown panes have no PTY: add a layout leaf + record the
+        // kind+path, then broadcast. The GUI builds the PaneContent from the
+        // path (it decodes locally — same as the in-process split_*_pane).
+        // Split the active terminal, like split_image_pane does.
+        let new_id = self.state.alloc_id();
+        let active = {
+            let leaves = self.state.active_window_leaves();
+            let cur = self.state.active.lock().unwrap().clone();
+            if leaves.iter().any(|l| *l == cur) {
+                cur
+            } else {
+                leaves
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("no pane to open preview beside"))?
+            }
+        };
+        let attached = self
+            .state
+            .with_active_layout(|lay| lay.split_leaf(&active, SplitDir::Horizontal, new_id.clone()));
+        if attached != Some(true) {
+            return Err(anyhow!("no active window to open preview in"));
+        }
+        self.state.previews.lock().unwrap().insert(
+            new_id,
+            PanePreview { kind: kind.to_string(), path: path.to_string() },
+        );
+        // Keep focus on the terminal that opened it — previews take no input.
+        self.state.broadcast_state();
+        Ok(())
+    }
     fn close_surface(&self, surface_id: &str) -> Result<()> {
         self.state.pty.lock().unwrap().remove(surface_id); // drop = kill
+        self.state.previews.lock().unwrap().remove(surface_id); // preview, if any
         let emptied = self.state.remove_pane(surface_id);
         if emptied {
             // That was the last pane of the last session. Rather than leave a
@@ -375,10 +427,21 @@ impl Backend for DaemonBackend {
         Ok(())
     }
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
-        self.state
+        let pane = self
+            .state
             .pane(surface_id)
-            .ok_or_else(|| anyhow!("no pane to send to"))?
-            .send_bytes(text.as_bytes())
+            .ok_or_else(|| anyhow!("no pane to send to"))?;
+        // Body and trailing submit (\r) go in separate writes — each
+        // send_bytes flushes on its own — so a multibyte tail isn't
+        // truncated into a lone surrogate. See split_trailing_submit.
+        let (body, submit) = crate::socket::split_trailing_submit(text.as_bytes());
+        if !body.is_empty() {
+            pane.send_bytes(body)?;
+        }
+        if !submit.is_empty() {
+            pane.send_bytes(submit)?;
+        }
+        Ok(())
     }
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()> {
         self.state
@@ -743,6 +806,7 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         state_path: state_path.clone(),
         collab_auto: Arc::new(Mutex::new(HashMap::new())),
         binds: Arc::new(Mutex::new(Vec::new())),
+        previews: Mutex::new(HashMap::new()),
     });
 
     // Cold restore (claude --resume into a restored pane) is deferred — the
@@ -768,7 +832,16 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         crate::socket::spawn_transcript_watcher(
             state.collab_auto.clone(),
             state.binds.clone(),
-            move || st.pty.lock().unwrap().keys().cloned().collect(),
+            // Each live pane → its shell pid, so the watcher can walk shell→
+            // claude and self-map the transcript from claude's env (no hook).
+            move || {
+                st.pty
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(id, sess)| (id.clone(), sess.shell_pid()))
+                    .collect()
+            },
         );
     }
 
@@ -779,6 +852,35 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(10));
             save_daemon_state(&state, &path);
+        });
+    }
+
+    // Follow `cd`: structural broadcasts only fire on split/close/switch, so a
+    // shell changing directory would never reach the GUI breadcrumb on its
+    // own. Poll each pane's cwd ~1s and re-broadcast the state only when one
+    // actually moved — no disk persist (cwd isn't structural), no churn while
+    // idle.
+    {
+        let state = state.clone();
+        std::thread::spawn(move || {
+            let mut last: HashMap<String, String> = HashMap::new();
+            loop {
+                std::thread::sleep(Duration::from_millis(1000));
+                let cur: HashMap<String, String> = {
+                    let pty = state.pty.lock().unwrap();
+                    pty.iter()
+                        .filter_map(|(id, s)| {
+                            s.shell_pid()
+                                .and_then(pid_cwd)
+                                .map(|p| (id.clone(), p.to_string_lossy().into_owned()))
+                        })
+                        .collect()
+                };
+                if cur != last {
+                    last = cur;
+                    let _ = state.out_tx.send(StreamMsg::State(state.state_view()));
+                }
+            }
         });
     }
 
