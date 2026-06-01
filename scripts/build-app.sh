@@ -36,10 +36,10 @@ fi
 # can't find them (install_tmux_shim / locate_* look beside the exe) and
 # teammate splits silently fall back to the it2/real-tmux path.
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p kasaterm -p tmux-shim -p agent-socket
+  cargo build --release -p kasaterm -p kasa-shim -p kasa-socket
   BINDIR="target/release"
 else
-  cargo build -p kasaterm -p tmux-shim -p agent-socket
+  cargo build -p kasaterm -p kasa-shim -p kasa-socket
   BINDIR="target/debug"
 fi
 
