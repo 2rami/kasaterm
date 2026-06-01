@@ -237,6 +237,31 @@ async fn session_restore_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `POST /session-rename?idx=<n>&name=<name>` — set the session's custom
+/// display name (URL-encoded `name`; blank clears it). Query params for the
+/// same no-preflight reason as session-switch.
+async fn session_rename_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let name = params.get("name").cloned().unwrap_or_default();
+    let body = match backend.rename_session(query_idx(&params), &name) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /session-reset` — tear down every session/pane and leave one fresh
+/// empty session.
+async fn session_reset_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let body = match backend.reset_sessions() {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// Resolve the `which` query param into a `PanelKind`.
 fn query_which(
     params: &std::collections::HashMap<String, String>,
@@ -365,6 +390,8 @@ pub fn spawn_http_server(
                 let session_new_backend = backend.clone();
                 let session_close_backend = backend.clone();
                 let session_restore_backend = backend.clone();
+                let session_rename_backend = backend.clone();
+                let session_reset_backend = backend.clone();
                 let open_image_backend = backend.clone();
                 let open_markdown_backend = backend.clone();
                 let panel_open_backend = backend.clone();
@@ -432,6 +459,16 @@ pub fn spawn_http_server(
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             session_restore_handler(session_restore_backend.clone(), q)
                         }),
+                    )
+                    .route(
+                        "/session-rename",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            session_rename_handler(session_rename_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/session-reset",
+                        post(move || session_reset_handler(session_reset_backend.clone())),
                     )
                     .route(
                         "/open-image",

@@ -428,6 +428,34 @@ impl PtySession {
         after
     }
 
+    /// Read the live screen as plain text — the last `lines` visible rows,
+    /// each with trailing blanks trimmed. Lets a sibling `peek` at what a
+    /// pane is showing (a build log, an idle claude prompt) without focusing
+    /// it. Reads the live area at offset 0, not the scrollback view.
+    pub fn visible_text(&self, lines: usize) -> String {
+        let t = self.term.lock().unwrap();
+        let grid = t.grid();
+        let cols = grid.columns();
+        let total = grid.screen_lines();
+        let take = lines.min(total);
+        let start = total - take;
+        let mut out = String::with_capacity(take * (cols + 1));
+        for line in start..total {
+            let mut row = String::with_capacity(cols);
+            for c in 0..cols {
+                let point = Point::new(
+                    alacritty_terminal::index::Line(line as i32),
+                    alacritty_terminal::index::Column(c),
+                );
+                let ch = grid[point].c;
+                row.push(if ch == '\0' { ' ' } else { ch });
+            }
+            out.push_str(row.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+
     /// Jump straight to the live tail (display offset 0).
     pub fn scroll_to_bottom(&self) {
         let (cols, rows) = *self.size.lock().unwrap();
@@ -476,6 +504,20 @@ impl PtySession {
         }
         *self.size.lock().unwrap() = (cols, rows);
         Ok(())
+    }
+}
+
+impl Drop for PtySession {
+    /// A pane close drops its `Arc<PtySession>`; the final drop must guarantee
+    /// the shell actually dies. Closing the PTY master *should* SIGHUP the
+    /// child, but the master is `Arc`-shared (the reader thread holds a clone)
+    /// and can outlive this drop, so the hangup may never land — leaving a
+    /// zombie shell. Kill the child explicitly so a closed pane is always
+    /// fully reaped.
+    fn drop(&mut self) {
+        if let Ok(mut child) = self._child.lock() {
+            let _ = child.kill();
+        }
     }
 }
 

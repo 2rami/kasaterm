@@ -127,6 +127,7 @@ pub fn build_activity(surface_id: &str, recent: &VecDeque<ToolEvent>, idle: bool
         intent: if intent.is_empty() { "active".into() } else { intent },
         status: status.into(),
         files,
+        screen: None,
     }
 }
 

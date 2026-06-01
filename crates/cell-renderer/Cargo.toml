@@ -1,8 +1,31 @@
 [package]
-name = "cell-renderer"
+name = "kasa-cells"
+description = "Framework-neutral GPU cell renderer for terminal-style grids (wgpu). Bake glyphs into a swash atlas once, draw one instance per cell. sRGB→DisplayP3, box-drawing quads, CJK/emoji fallback, bundled Nerd fonts. Pairs with alacritty_terminal / wezterm-term."
 edition.workspace = true
 version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/2rami/kasaterm"
+homepage = "https://github.com/2rami/kasaterm"
+documentation = "https://docs.rs/kasa-cells"
+readme = "README.md"
+keywords = ["terminal", "wgpu", "renderer", "glyph", "gpu"]
+categories = ["rendering", "graphics", "gui"]
+authors = ["2rami <goenho0613@gmail.com>"]
+# Bundled fonts dominate the package size; keep target/ and stray files out.
+include = [
+    "src/**/*.rs",
+    "src/**/*.wgsl",
+    "examples/**/*.rs",
+    "assets/*.ttf",
+    "assets/THIRD-PARTY-FONTS.md",
+    "assets/OFL.txt",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
+
+[lib]
+name = "kasa_cells"
 
 [dependencies]
 wgpu = "28"

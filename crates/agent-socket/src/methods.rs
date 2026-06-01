@@ -63,10 +63,29 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.set_color" => surface_set_color(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),
-        "collab.board" => match backend.collab_board() {
-            Ok(board) => Response::success(id, json!({ "board": board })),
-            Err(e) => backend_err(id, e),
-        },
+        "surface.open_preview" => surface_open_preview(backend, id, &req.params),
+        "collab.board" => {
+            // Opt-in screen capture: a plain board stays metadata-only (cheap,
+            // what the per-turn board-context hook wants), but an orchestrator
+            // pane can pass `screen_lines` to fold each pane's visible tail in
+            // — board + peek in one round-trip.
+            let screen_lines = req
+                .params
+                .get("screen_lines")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
+            match backend.collab_board() {
+                Ok(mut board) => {
+                    if let Some(lines) = screen_lines {
+                        for entry in &mut board {
+                            entry.screen = backend.peek(&entry.surface_id, lines).ok();
+                        }
+                    }
+                    Response::success(id, json!({ "board": board }))
+                }
+                Err(e) => backend_err(id, e),
+            }
+        }
         "window.layout" => match backend.window_layout() {
             Ok(panes) => Response::success(id, json!({ "panes": panes })),
             Err(e) => backend_err(id, e),
@@ -158,12 +177,28 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.resize",
                 "surface.scroll",
                 "surface.peek",
+                "surface.open_preview",
                 "collab.board",
                 "window.layout",
                 "collab.bind_transcript",
             ],
         }),
     )
+}
+
+fn surface_open_preview(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let kind = match params.get("kind").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.open_preview requires `kind` (image|markdown)"),
+    };
+    let path = match params.get("path").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.open_preview requires `path` (string)"),
+    };
+    match backend.open_preview(kind, path) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
 }
 
 fn collab_bind_transcript(backend: &dyn Backend, id: Value, params: &Value) -> Response {

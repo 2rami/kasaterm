@@ -11,13 +11,13 @@
 //!
 //! Run:
 //!   KASATERM_GRID_FONT=/System/Library/Fonts/Menlo.ttc \
-//!     cargo run --release -p cell-renderer --example grid_bw
+//!     cargo run --release -p kasa-cells --example grid_bw
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use cell_renderer::{pipeline::CellInstance, Atlas, GlyphKey, Pipeline, Shaper};
+use kasa_cells::{pipeline::CellInstance, Atlas, GlyphKey, Pipeline, Shaper};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -36,7 +36,7 @@ fn build_buffer() -> Vec<String> {
     let mut out = Vec::with_capacity(600);
     let sigils = ["$ ", "> ", "# ", "  "];
     let snippets = [
-        "cargo run --release -p cell-renderer --example grid_bw",
+        "cargo run --release -p kasa-cells --example grid_bw",
         "fn main() -> Result<()> { let event_loop = EventLoop::new()?; }",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz 0123456789",
         "Finished `release` profile [optimized] target(s) in 4.21s",
