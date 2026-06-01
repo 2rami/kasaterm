@@ -17,15 +17,15 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agent_socket::backend::{
+use kasa_socket::backend::{
     Backend, PaneActivity, PaneRect, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo,
 };
-use agent_socket::transport::{LocalListener, LocalStream};
-use agent_socket::Server;
+use kasa_socket::transport::{LocalListener, LocalStream};
+use kasa_socket::Server;
 use anyhow::{anyhow, Result};
-use pty_backend::{PtyLayout, PtyOptions, PtySession, ScreenReceiver, SplitDir};
+use kasa_pty::{PtyLayout, PtyOptions, PtySession, ScreenReceiver, SplitDir};
 use serde_json::{json, Value};
-use tmux_bridge::ScreenUpdate;
+use kasa_bridge::ScreenUpdate;
 
 use crate::socket::{key_to_bytes, pane_record, pid_cwd};
 use crate::stream::{
@@ -668,6 +668,51 @@ impl Backend for DaemonBackend {
         self.state.push_active_snapshots();
         Ok(())
     }
+    fn close_window(&self, idx: usize) -> Result<()> {
+        // Daemon-authoritative window close. The GUI used to fake this by
+        // closing each pane off its *local* layout, which drifted from the
+        // daemon's tree and left windows that resurrected on the next state
+        // push (the window-increment bug). Here the daemon removes the window
+        // from its own active session and reaps the PTYs — the single source
+        // of truth.
+        let killed: Vec<String> = {
+            let sessions = self.state.sessions.lock().unwrap();
+            let asx = *self.state.active_session.lock().unwrap();
+            let s = sessions.get(asx).ok_or_else(|| anyhow!("no active session"))?;
+            if s.windows.len() <= 1 {
+                anyhow::bail!("can't close the last window of a session");
+            }
+            let w = s
+                .windows
+                .get(idx)
+                .ok_or_else(|| anyhow!("window index {idx} out of range"))?;
+            w.leaves().iter().map(|l| l.to_string()).collect()
+        };
+        {
+            let mut pty = self.state.pty.lock().unwrap();
+            let mut prev = self.state.previews.lock().unwrap();
+            for id in &killed {
+                pty.remove(id); // drop = kill
+                prev.remove(id);
+            }
+        }
+        {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            let asx = *self.state.active_session.lock().unwrap();
+            if let Some(s) = sessions.get_mut(asx) {
+                if idx < s.windows.len() {
+                    s.windows.remove(idx);
+                    if s.active_window >= s.windows.len() && !s.windows.is_empty() {
+                        s.active_window = s.windows.len() - 1;
+                    }
+                }
+            }
+        }
+        self.state.update_active_pane();
+        self.state.broadcast_state();
+        self.state.push_active_snapshots();
+        Ok(())
+    }
     fn rename_session(&self, idx: usize, name: &str) -> Result<()> {
         {
             let mut sessions = self.state.sessions.lock().unwrap();
@@ -1026,7 +1071,7 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8765);
-    let _ = kasaspace_mcp::spawn_http_server(backend.clone(), mcp_port);
+    let _ = kasa_mcp::spawn_http_server(backend.clone(), mcp_port);
     let server = Server::bind(control_path.clone())?;
     let _ctrl = server.spawn(backend);
 

@@ -230,6 +230,14 @@ pub trait Backend: Send + Sync {
     fn close_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("close_session not supported")
     }
+    /// Close the window at index `idx` in the active session, reaping its
+    /// panes. Backends must keep at least one window alive (closing the last
+    /// is rejected). Authoritative window teardown so a GUI need not fake it
+    /// by closing panes individually off a stale local layout. Default
+    /// unsupported.
+    fn close_window(&self, _idx: usize) -> Result<()> {
+        anyhow::bail!("close_window not supported")
+    }
     /// Restore a saved (on-disk, not-yet-live) session at index `idx` in the
     /// saved-session list — spawns its panes lazily and switches to it.
     /// Default unsupported.

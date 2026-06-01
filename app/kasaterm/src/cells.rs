@@ -11,7 +11,7 @@
 //! Default Dark theme (matches what kasaterm has been using, so the
 //! A/B comparison stays apples-to-apples).
 
-use tmux_bridge::screen::{Cell, Color};
+use kasa_bridge::screen::{Cell, Color};
 
 /// macOS Terminal.app "GitHub Dark Dimmed" — the user's active
 /// Default Window Settings. Decoded from

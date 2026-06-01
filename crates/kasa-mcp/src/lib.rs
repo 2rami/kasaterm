@@ -1,12 +1,12 @@
 //! kasaspace MCP — streamable-HTTP MCP server exposing kasaterm pane
 //! control as model-invoked tools, backed directly by the host's
-//! `agent_socket::Backend`. Replaces the external python bridge
-//! (mcp/kasaspace_mcp.py): same tool surface, but the long-lived Rust
+//! `kasa_socket::Backend`. Replaces the external python bridge
+//! (mcp/kasa_mcp.py): same tool surface, but the long-lived Rust
 //! host owns the tools so it can later expose GUI state dynamically.
 
 use std::sync::Arc;
 
-use agent_socket::backend::{Backend, PanelKind, SplitDirection};
+use kasa_socket::backend::{Backend, PanelKind, SplitDirection};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, Content},

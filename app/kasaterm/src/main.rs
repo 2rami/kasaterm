@@ -19,10 +19,10 @@ use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tmux_bridge::layout::{parse_layout, Layout};
-use tmux_bridge::screen::Cell as GridCell;
-use tmux_bridge::screen::Row;
-use tmux_bridge::{ScreenUpdate, StartOptions, TmuxEvent, TmuxSession};
+use kasa_bridge::layout::{parse_layout, Layout};
+use kasa_bridge::screen::Cell as GridCell;
+use kasa_bridge::screen::Row;
+use kasa_bridge::{ScreenUpdate, StartOptions, TmuxEvent, TmuxSession};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{
@@ -1262,7 +1262,7 @@ type CodeBlock = (usize, usize, usize, usize);
 /// enough span are a block. Purely heuristic — when it doesn't match
 /// (no bg box) it just returns nothing, so the caller shows no button.
 fn detect_code_blocks(rows: &[Vec<GridCell>]) -> Vec<CodeBlock> {
-    use tmux_bridge::screen::Color;
+    use kasa_bridge::screen::Color;
     // Minimum horizontal run of one bg color for a row to count as "inside
     // a box". Filters single-token inline highlights and 1-2 cell artifacts.
     const MIN_RUN: usize = 10;
@@ -2080,16 +2080,16 @@ enum UserEvent {
 /// another session is on screen (tmux-style detached sessions).
 #[allow(dead_code)]
 struct Session {
-    pty: HashMap<String, Arc<pty_backend::PtySession>>,
+    pty: HashMap<String, Arc<kasa_pty::PtySession>>,
     /// Layout of this session's *active* window. The other windows' layouts
     /// sit in `windows` (active slot `None`) — same stash-swap shape the
     /// session list uses one level up.
-    pty_layout: Option<pty_backend::PtyLayout>,
+    pty_layout: Option<kasa_pty::PtyLayout>,
     /// All windows in this session by index. The active window's slot is
     /// `None` (its layout lives in `pty_layout`). Switching windows swaps a
     /// slot in/out; every window shares this session's `pty`/`ws`, so window
     /// switches never tear down panes.
-    windows: Vec<Option<pty_backend::PtyLayout>>,
+    windows: Vec<Option<kasa_pty::PtyLayout>>,
     /// Index into `windows` of this session's active window.
     active_window: usize,
     ws: Arc<Mutex<Workspace>>,
@@ -2117,24 +2117,24 @@ struct App {
     /// warnings from Claude Code).
     /// All live PTY sessions, keyed by pane id. Empty when running in
     /// tmux mode. Multi-pane PTY mode inserts one entry per split.
-    pty: HashMap<String, Arc<pty_backend::PtySession>>,
+    pty: HashMap<String, Arc<kasa_pty::PtySession>>,
     /// BSP layout tree for multi-pane PTY mode. `None` in tmux mode —
     /// the tmux daemon owns the layout there and ships it via
     /// `%layout-change` instead.
-    pty_layout: Option<pty_backend::PtyLayout>,
+    pty_layout: Option<kasa_pty::PtyLayout>,
     /// Monotonic counter for the next "%N" pane id when splitting.
     next_pane_id: u32,
     /// Queued `claude --resume …\n` injections for restored panes, one per
     /// claude pane, fired once each pane's shell prompt is up. Holds the
     /// PtySession Arc directly so it works for panes in any session (active or
     /// stashed background). (session, command, time-to-send).
-    pending_restores: Vec<(Arc<pty_backend::PtySession>, String, std::time::Instant)>,
+    pending_restores: Vec<(Arc<kasa_pty::PtySession>, String, std::time::Instant)>,
     /// Headless verification: clean-exit (runs `exiting` → save_session_state)
     /// at this instant when KASATERM_AUTOQUIT_MS is set. None disables it.
     autoquit_at: Option<std::time::Instant>,
     /// Queued split directions driven by KASATERM_AUTOSPLIT — headless
     /// repro for the multi-pane render path. Empty in normal use.
-    autosplit_plan: Vec<pty_backend::SplitDir>,
+    autosplit_plan: Vec<kasa_pty::SplitDir>,
     autosplit_at: Option<Instant>,
     /// Headless tab-drag simulation. KASATERM_AUTODRAG="src:from:dst"
     /// (e.g. "%2:0:%0") fires `simulate_tab_merge` after AUTODRAG_MS so
@@ -2181,7 +2181,7 @@ struct App {
     /// windows swaps `pty_layout` ↔ `windows[idx]` while `pty`/`ws` stay put,
     /// so the panes' shells keep running across the switch (same session).
     /// When the visible session is stashed, these move into its `Session`.
-    windows: Vec<Option<pty_backend::PtyLayout>>,
+    windows: Vec<Option<kasa_pty::PtyLayout>>,
     /// Index into `windows` of the visible window.
     active_window: usize,
     /// Measured cell geometry from sugarloaf — see `compute_cell_metrics`.
@@ -2210,7 +2210,7 @@ struct App {
     /// "ㄱ + ㅏ → 가" reliably from the very first key we route every
     /// jamo through our own Composer instead of trusting macOS to
     /// queue it for us.
-    hangul: hangul_ime::Composer,
+    hangul: kasa_ime::Composer,
     /// (pane_id, close_rect) for every visible pane header. Populated
     /// by `render_frame` and consumed by the MouseInput handler so a
     /// click on the × button closes that pane.
@@ -2264,7 +2264,7 @@ struct App {
     /// In-flight pane-divider drag: the BSP tree path of the split being
     /// resized plus its axis. `Some` while the user holds the mouse on a
     /// seam; each motion event re-derives the ratio from the cursor.
-    resize_drag: Option<(Vec<u8>, pty_backend::SplitDir)>,
+    resize_drag: Option<(Vec<u8>, kasa_pty::SplitDir)>,
     /// Last cell-quantised divider position fired through `resize_backend`.
     /// Lets the divider-drag handler skip the heavy PTY reshape on every
     /// sub-cell wiggle of the cursor — only crossing a cell boundary
@@ -2517,7 +2517,7 @@ impl App {
             in_preedit: false,
             commit_overlay: None,
             ime_active: false,
-            hangul: hangul_ime::Composer::new(),
+            hangul: kasa_ime::Composer::new(),
             pane_header_rects: Vec::new(),
             copy_btn_rects: Vec::new(),
             md_content_h: HashMap::new(),
@@ -3238,7 +3238,7 @@ impl App {
     /// Shared by the in-process channel pump (`pump_pty_screens`) and the
     /// daemon stream pump (`pump_daemon_stream`). The caller holds the ws lock
     /// and fires the redraw; this only mutates ws.
-    fn apply_screen_update(ws: &mut Workspace, update: tmux_bridge::screen::ScreenUpdate) {
+    fn apply_screen_update(ws: &mut Workspace, update: kasa_bridge::screen::ScreenUpdate) {
         if ws.active_pane.is_none() {
             ws.active_pane = Some(update.pane_id.clone());
         }
@@ -3326,7 +3326,7 @@ impl App {
 
     fn pump_pty_screens(
         &self,
-        screens: pty_backend::ScreenReceiver<tmux_bridge::screen::ScreenUpdate>,
+        screens: kasa_pty::ScreenReceiver<kasa_bridge::screen::ScreenUpdate>,
         pane_id: String,
     ) {
         let ws_screens = self.ws.clone();
@@ -3377,7 +3377,7 @@ impl App {
                             }
                             let merged_dirty: Vec<(u16, Row)> =
                                 row_map.into_iter().collect();
-                            update = tmux_bridge::screen::ScreenUpdate {
+                            update = kasa_bridge::screen::ScreenUpdate {
                                 dirty: merged_dirty,
                                 ..next
                             };
@@ -3425,7 +3425,7 @@ impl App {
         let cwd = resolve_initial_cwd();
         let id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
-        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+        let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: self.pending_shell.take().or_else(resolve_default_shell),
             cwd,
             cols,
@@ -3436,7 +3436,7 @@ impl App {
         })?;
         self.pump_pty_screens(session.screens.clone(), id.clone());
         self.pty.insert(id.clone(), Arc::new(session));
-        self.pty_layout = Some(pty_backend::PtyLayout::single(&id));
+        self.pty_layout = Some(kasa_pty::PtyLayout::single(&id));
         self.ws.lock().unwrap().active_pane = Some(id);
         Ok(())
     }
@@ -3537,6 +3537,15 @@ impl App {
         if idx >= self.windows.len() {
             anyhow::bail!("no such window: {idx}");
         }
+        // Daemon mode: the daemon owns the window tree. Delegate the whole
+        // close so it drops the window from its own session and reaps the
+        // PTYs. Closing panes one-by-one off our *local* layout drifted from
+        // the daemon and left windows that resurrected on the next state push
+        // (the window-increment bug). The daemon's broadcast repaints us.
+        if let Some(client) = self.daemon_client.clone() {
+            client.close_window(idx);
+            return Ok(());
+        }
         // Pull the closing window's layout (active one lives in pty_layout) and
         // kill every pane it owns.
         let layout = if idx == self.active_window {
@@ -3545,17 +3554,8 @@ impl App {
             self.windows[idx].take()
         };
         if let Some(layout) = layout {
-            // In daemon mode the daemon owns these PTYs — without an explicit
-            // close per pane they survive on the daemon and resurrect on the
-            // next state sync (the window-close infinite-respawn bug). The
-            // local removal below still runs (and is the whole story in
-            // pty mode).
-            let daemon = self.daemon_client.clone();
             let mut ws = self.ws.lock().unwrap();
             for pane_id in layout.leaves() {
-                if let Some(client) = daemon.as_ref() {
-                    client.close(pane_id);
-                }
                 self.pty.remove(pane_id);
                 ws.panes.remove(pane_id);
             }
@@ -3647,7 +3647,7 @@ impl App {
     /// runs past `max` chars so the meaningful (deepest) part stays visible.
     /// 탭/헤더 라벨용. 셸이 idle이면 cwd의 마지막 폴더명, 명령 실행 중이면
     /// 그 프로세스명. zsh 4개로 안 보이고 위치/작업이 드러나게.
-    fn smart_pane_label(sess: &pty_backend::PtySession) -> Option<String> {
+    fn smart_pane_label(sess: &kasa_pty::PtySession) -> Option<String> {
         let proc = sess.active_process_name().filter(|t| !t.is_empty());
         let is_shell = proc.as_deref().map_or(false, |p| {
             let base = p.strip_prefix('-').unwrap_or(p);
@@ -3917,7 +3917,7 @@ impl App {
         let spath = stream::stream_path(&ctrl_path);
         let mut conn = None;
         for _ in 0..75 {
-            if let Ok(s) = agent_socket::transport::LocalStream::connect(&spath) {
+            if let Ok(s) = kasa_socket::transport::LocalStream::connect(&spath) {
                 conn = Some(s);
                 break;
             }
@@ -3941,7 +3941,7 @@ impl App {
         }
         // Placeholder until the first StateView lands and the DaemonState
         // handler installs the authoritative layout + sizes every leaf.
-        self.pty_layout = Some(pty_backend::PtyLayout::single("%0"));
+        self.pty_layout = Some(kasa_pty::PtyLayout::single("%0"));
         self.ws.lock().unwrap().active_pane = Some("%0".to_string());
         Ok(())
     }
@@ -3949,7 +3949,7 @@ impl App {
     /// Daemon stream pump: decode bincode frames off the stream socket and
     /// apply them through the same `apply_screen_update` path the in-process
     /// pump uses. Mirrors `pump_pty_screens` but reads from the socket.
-    fn pump_daemon_stream(&self, conn: agent_socket::transport::LocalStream, pane_id: String) {
+    fn pump_daemon_stream(&self, conn: kasa_socket::transport::LocalStream, pane_id: String) {
         let ws_screens = self.ws.clone();
         let win_screens = self.window.clone();
         let dead = self.dead_panes.clone();
@@ -4063,12 +4063,12 @@ impl App {
     /// Walk a live PtyLayout into the nested JSON the restore loader reads,
     /// resolving each leaf's pane id to its cwd/claude record.
     fn layout_to_json(
-        layout: &pty_backend::PtyLayout,
-        pty: &HashMap<String, Arc<pty_backend::PtySession>>,
+        layout: &kasa_pty::PtyLayout,
+        pty: &HashMap<String, Arc<kasa_pty::PtySession>>,
         ws: &Workspace,
     ) -> serde_json::Value {
         match layout {
-            pty_backend::PtyLayout::Leaf { pane_id } => {
+            kasa_pty::PtyLayout::Leaf { pane_id } => {
                 let mut rec = pty
                     .get(pane_id)
                     .map(|s| socket::pane_record(s))
@@ -4085,10 +4085,10 @@ impl App {
                 }
                 serde_json::json!({ "leaf": rec })
             }
-            pty_backend::PtyLayout::Split { dir, ratio, a, b } => {
+            kasa_pty::PtyLayout::Split { dir, ratio, a, b } => {
                 let dir = match dir {
-                    pty_backend::SplitDir::Horizontal => "h",
-                    pty_backend::SplitDir::Vertical => "v",
+                    kasa_pty::SplitDir::Horizontal => "h",
+                    kasa_pty::SplitDir::Vertical => "v",
                 };
                 serde_json::json!({ "split": {
                     "dir": dir,
@@ -4202,11 +4202,11 @@ impl App {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(2500);
-        let dirs: Vec<pty_backend::SplitDir> = plan
+        let dirs: Vec<kasa_pty::SplitDir> = plan
             .chars()
             .filter_map(|c| match c {
-                'h' | 'H' => Some(pty_backend::SplitDir::Horizontal),
-                'v' | 'V' => Some(pty_backend::SplitDir::Vertical),
+                'h' | 'H' => Some(kasa_pty::SplitDir::Horizontal),
+                'v' | 'V' => Some(kasa_pty::SplitDir::Vertical),
                 _ => None,
             })
             .collect();
@@ -4556,22 +4556,22 @@ impl App {
     /// Bind the unix socket + export env vars. Common to both backend
     /// modes — the caller decides which concrete `Backend` impl to plug
     /// in (TmuxBackend in tmux mode, PtyBackend in PTY mode).
-    fn start_socket_with(&self, backend: Arc<dyn agent_socket::Backend>) {
+    fn start_socket_with(&self, backend: Arc<dyn kasa_socket::Backend>) {
         // Model-invoked tools for the claude running inside a pane: the
         // same Backend, exposed over MCP-on-HTTP. Replaces the external
-        // python bridge (mcp/kasaspace_mcp.py).
-        match kasaspace_mcp::spawn_http_server(backend.clone(), 8765) {
+        // python bridge (mcp/kasa_mcp.py).
+        match kasa_mcp::spawn_http_server(backend.clone(), 8765) {
             Ok(port) => {
                 eprintln!("[kasaspace-mcp] HTTP MCP on 127.0.0.1:{port}/mcp");
                 std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
                 // No MCP auto-discovery: write our address into each AI
                 // client's config so any agent on this machine finds us.
-                kasaspace_mcp::register_clients(port);
+                kasa_mcp::register_clients(port);
             }
             Err(e) => eprintln!("[kasaspace-mcp] HTTP MCP start failed: {e}"),
         }
         let path = resolve_kasaterm_socket_path();
-        let server = match agent_socket::Server::bind(&path) {
+        let server = match kasa_socket::Server::bind(&path) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[agent-socket] bind {path:?} failed: {e:#}");
@@ -4585,7 +4585,7 @@ impl App {
         let _join = server.spawn(backend);
     }
 
-    fn start_socket_tmux(&self, tmux: Arc<tmux_bridge::TmuxSession>) {
+    fn start_socket_tmux(&self, tmux: Arc<kasa_bridge::TmuxSession>) {
         self.start_socket_with(Arc::new(socket::TmuxBackend::new(tmux)));
     }
 
@@ -4708,7 +4708,7 @@ impl App {
     /// `self.pty.get(outer_id)` — after a cross-pane tab drag the layout
     /// id and the active tab's pid diverge, and the direct lookup misses.
     /// Drives wheel scroll / mouse-reporting / pane-targeted send_bytes.
-    fn pty_for_pane(&self, outer_id: &str) -> Option<&Arc<pty_backend::PtySession>> {
+    fn pty_for_pane(&self, outer_id: &str) -> Option<&Arc<kasa_pty::PtySession>> {
         let ws = self.ws.lock().ok()?;
         let pid = ws
             .panes
@@ -4719,7 +4719,7 @@ impl App {
         self.pty.get(&pid)
     }
 
-    fn active_pty(&self) -> Option<&Arc<pty_backend::PtySession>> {
+    fn active_pty(&self) -> Option<&Arc<kasa_pty::PtySession>> {
         // The active *tab*'s pid drives input/scroll/title — falling back
         // to the outer pane id (== first-tab pid) for single-tab panes
         // whose tabs haven't been initialised with an explicit pid yet
@@ -4882,7 +4882,7 @@ impl App {
     /// If the cursor (logical px) rests on a split seam, return the BSP
     /// tree path of that split plus its axis. A few px of tolerance makes
     /// the thin seam easy to grab. None when not over any divider.
-    fn divider_at_px(&self, x: f32, y: f32) -> Option<(Vec<u8>, pty_backend::SplitDir)> {
+    fn divider_at_px(&self, x: f32, y: f32) -> Option<(Vec<u8>, kasa_pty::SplitDir)> {
         let tree = self.pty_layout.as_ref()?;
         if tree.leaves().len() <= 1 {
             return None;
@@ -4892,7 +4892,7 @@ impl App {
         let tol = 6.0_f32;
         for d in tree.dividers(cols, rows) {
             match d.dir {
-                pty_backend::SplitDir::Horizontal => {
+                kasa_pty::SplitDir::Horizontal => {
                     let seam_x = pad + d.edge as f32 * self.cell.w;
                     let y0 = TITLE_HEIGHT + d.span_start as f32 * self.cell.h;
                     let y1 = y0 + d.span_len as f32 * self.cell.h;
@@ -4900,7 +4900,7 @@ impl App {
                         return Some((d.path, d.dir));
                     }
                 }
-                pty_backend::SplitDir::Vertical => {
+                kasa_pty::SplitDir::Vertical => {
                     let seam_y = TITLE_HEIGHT + d.edge as f32 * self.cell.h;
                     let x0 = pad + d.span_start as f32 * self.cell.w;
                     let x1 = x0 + d.span_len as f32 * self.cell.w;
@@ -4919,7 +4919,7 @@ impl App {
     /// session so each one matches its new rect. Becomes a no-op in
     /// tmux mode — splits there go through the cmux socket / tmux
     /// `split-window` instead.
-    fn split_active_pane(&mut self, dir: pty_backend::SplitDir) -> Result<()> {
+    fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<()> {
         if let Some(client) = self.daemon_client.as_ref() {
             // Daemon owns the layout: it spawns the pane, splits its tree, and
             // pushes the new Layout back (applied in user_event). Sync the
@@ -4946,7 +4946,7 @@ impl App {
         // first bytes the shell prints before SIGWINCH lands.
         let (win_cols, win_rows) = self.window_cells();
         let cwd = resolve_initial_cwd();
-        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+        let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
             cols: win_cols,
@@ -4992,7 +4992,7 @@ impl App {
         let cwd = resolve_initial_cwd();
         let new_pid = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
-        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+        let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
             cols,
@@ -5253,7 +5253,7 @@ impl App {
         let cwd = resolve_initial_cwd();
         let new_id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
-        let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
+        let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
             cols,
@@ -5268,10 +5268,10 @@ impl App {
         // the source ends up on the RIGHT/BOTTOM. We want source on the
         // dropped side → new on the opposite side.
         let (dir, before) = match zone {
-            DropZone::Right => (pty_backend::SplitDir::Horizontal, true),
-            DropZone::Left => (pty_backend::SplitDir::Horizontal, false),
-            DropZone::Down => (pty_backend::SplitDir::Vertical, true),
-            DropZone::Up => (pty_backend::SplitDir::Vertical, false),
+            DropZone::Right => (kasa_pty::SplitDir::Horizontal, true),
+            DropZone::Left => (kasa_pty::SplitDir::Horizontal, false),
+            DropZone::Down => (kasa_pty::SplitDir::Vertical, true),
+            DropZone::Up => (kasa_pty::SplitDir::Vertical, false),
             // Center is handled by the caller as a tab merge — splitting
             // would lose the "drop into this pane's tabs" intent.
             DropZone::Center => return Ok(()),
@@ -5334,10 +5334,10 @@ impl App {
         let new_outer = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
         let (dir, before) = match zone {
-            DropZone::Left => (pty_backend::SplitDir::Horizontal, true),
-            DropZone::Right => (pty_backend::SplitDir::Horizontal, false),
-            DropZone::Up => (pty_backend::SplitDir::Vertical, true),
-            DropZone::Down => (pty_backend::SplitDir::Vertical, false),
+            DropZone::Left => (kasa_pty::SplitDir::Horizontal, true),
+            DropZone::Right => (kasa_pty::SplitDir::Horizontal, false),
+            DropZone::Up => (kasa_pty::SplitDir::Vertical, true),
+            DropZone::Down => (kasa_pty::SplitDir::Vertical, false),
             // Caller routes Center to the cross-pane tab-merge path; if it
             // slips through here, abort the split so we don't double-spawn.
             DropZone::Center => return,
@@ -5350,7 +5350,7 @@ impl App {
                 }
             }
         } else {
-            self.pty_layout = Some(pty_backend::PtyLayout::single(&new_outer));
+            self.pty_layout = Some(kasa_pty::PtyLayout::single(&new_outer));
         }
         // 4. Build the new PaneState with the moved tab as its only tab.
         let moved_pid = moved.pid.clone();
@@ -5726,10 +5726,10 @@ impl App {
             return;
         }
         let (dir, before) = match zone {
-            DropZone::Left => (pty_backend::SplitDir::Horizontal, true),
-            DropZone::Right => (pty_backend::SplitDir::Horizontal, false),
-            DropZone::Up => (pty_backend::SplitDir::Vertical, true),
-            DropZone::Down => (pty_backend::SplitDir::Vertical, false),
+            DropZone::Left => (kasa_pty::SplitDir::Horizontal, true),
+            DropZone::Right => (kasa_pty::SplitDir::Horizontal, false),
+            DropZone::Up => (kasa_pty::SplitDir::Vertical, true),
+            DropZone::Down => (kasa_pty::SplitDir::Vertical, false),
             // Header drag onto a target's centre = ambiguous for a
             // whole-pane move; ignore rather than picking a random edge.
             DropZone::Center => return,
@@ -6065,7 +6065,7 @@ impl App {
     }
 
     fn resolve_pane_label(
-        pty: &HashMap<String, Arc<pty_backend::PtySession>>,
+        pty: &HashMap<String, Arc<kasa_pty::PtySession>>,
         pane_id: &str,
         osc_title: Option<&str>,
     ) -> String {
@@ -6502,9 +6502,9 @@ impl App {
                     // dedicated KeyE binding is the practical one.
                     if code == KeyCode::KeyD {
                         let dir = if self.host_mod_alt() {
-                            pty_backend::SplitDir::Vertical
+                            kasa_pty::SplitDir::Vertical
                         } else {
-                            pty_backend::SplitDir::Horizontal
+                            kasa_pty::SplitDir::Horizontal
                         };
                         if let Err(e) = self.split_active_pane(dir) {
                             eprintln!("[tmuxify] split failed: {e}");
@@ -6512,7 +6512,7 @@ impl App {
                         return;
                     }
                     if code == KeyCode::KeyE {
-                        if let Err(e) = self.split_active_pane(pty_backend::SplitDir::Vertical) {
+                        if let Err(e) = self.split_active_pane(kasa_pty::SplitDir::Vertical) {
                             eprintln!("[tmuxify] split failed: {e}");
                         }
                         return;
@@ -7735,7 +7735,7 @@ impl App {
                 tree.dividers(cols, rows)
                     .into_iter()
                     .map(|d| match d.dir {
-                        pty_backend::SplitDir::Horizontal => {
+                        kasa_pty::SplitDir::Horizontal => {
                             let x = pad + d.edge as f32 * self.cell.w;
                             let y0 = TITLE_HEIGHT + d.span_start as f32 * self.cell.h;
                             let y1 = if d.span_start + d.span_len >= rows {
@@ -7746,7 +7746,7 @@ impl App {
                             };
                             (x, y0, 1.0, (y1 - y0).max(0.0))
                         }
-                        pty_backend::SplitDir::Vertical => {
+                        kasa_pty::SplitDir::Vertical => {
                             let y = TITLE_HEIGHT + d.edge as f32 * self.cell.h;
                             let x0 = pad + d.span_start as f32 * self.cell.w;
                             let x1 = if d.span_start + d.span_len >= cols {
@@ -9351,11 +9351,11 @@ impl ApplicationHandler<UserEvent> for App {
                     let (cols, rows) = self.window_cells();
                     let pad = WINDOW_PADDING + self.effective_sidebar_w();
                     let pos = match dir {
-                        pty_backend::SplitDir::Horizontal => (((self.cursor_px.0 - pad)
+                        kasa_pty::SplitDir::Horizontal => (((self.cursor_px.0 - pad)
                             / self.cell.w.max(1.0))
                         .round() as i32)
                             .clamp(0, cols as i32) as u16,
-                        pty_backend::SplitDir::Vertical => (((self.cursor_px.1 - TITLE_HEIGHT)
+                        kasa_pty::SplitDir::Vertical => (((self.cursor_px.1 - TITLE_HEIGHT)
                             / self.cell.h.max(1.0))
                         .round() as i32)
                             .clamp(0, rows as i32) as u16,
@@ -9507,8 +9507,8 @@ impl ApplicationHandler<UserEvent> for App {
                             .divider_at_px(self.cursor_px.0, self.cursor_px.1)
                             .map(|(_, d)| d)
                         {
-                            Some(pty_backend::SplitDir::Horizontal) => CursorIcon::ColResize,
-                            Some(pty_backend::SplitDir::Vertical) => CursorIcon::RowResize,
+                            Some(kasa_pty::SplitDir::Horizontal) => CursorIcon::ColResize,
+                            Some(kasa_pty::SplitDir::Vertical) => CursorIcon::RowResize,
                             None => CursorIcon::Default,
                         }
                     };
@@ -9742,14 +9742,14 @@ impl ApplicationHandler<UserEvent> for App {
                         match action {
                             ActionKind::SplitV => {
                                 if let Err(e) = self
-                                    .split_active_pane(pty_backend::SplitDir::Vertical)
+                                    .split_active_pane(kasa_pty::SplitDir::Vertical)
                                 {
                                     eprintln!("[split-v] {e}");
                                 }
                             }
                             ActionKind::SplitH => {
                                 if let Err(e) = self
-                                    .split_active_pane(pty_backend::SplitDir::Horizontal)
+                                    .split_active_pane(kasa_pty::SplitDir::Horizontal)
                                 {
                                     eprintln!("[split-h] {e}");
                                 }
@@ -10173,13 +10173,13 @@ impl ApplicationHandler<UserEvent> for App {
                             let (cols, rows) = self.window_cells();
                             let pad = WINDOW_PADDING + self.effective_sidebar_w();
                             let pos = match dir {
-                                pty_backend::SplitDir::Horizontal => (((self.cursor_px.0
+                                kasa_pty::SplitDir::Horizontal => (((self.cursor_px.0
                                     - pad)
                                     / self.cell.w.max(1.0))
                                 .round() as i32)
                                     .clamp(0, cols as i32)
                                     as u16,
-                                pty_backend::SplitDir::Vertical => (((self.cursor_px.1
+                                kasa_pty::SplitDir::Vertical => (((self.cursor_px.1
                                     - TITLE_HEIGHT)
                                     / self.cell.h.max(1.0))
                                 .round() as i32)

@@ -7,4 +7,4 @@ license.workspace = true
 [dependencies]
 winit = "0.30"
 softbuffer = "0.4"
-tmux-bridge.workspace = true
+kasa-bridge.workspace = true

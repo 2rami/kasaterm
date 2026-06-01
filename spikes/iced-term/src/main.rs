@@ -11,7 +11,7 @@ use iced::keyboard::{Key, Modifiers};
 use iced::widget::{button, column, container, row, scrollable, text, text_input};
 use iced::{Element, Event, Font, Length, Subscription, Task, Theme};
 
-use tmux_bridge::{Cell, Color, ScreenUpdate, StartOptions, TmuxSession};
+use kasa_bridge::{Cell, Color, ScreenUpdate, StartOptions, TmuxSession};
 
 const MONO: Font = Font::with_name("D2Coding");
 

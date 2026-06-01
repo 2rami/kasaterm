@@ -5,4 +5,4 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-tmux-bridge.workspace = true
+kasa-bridge.workspace = true

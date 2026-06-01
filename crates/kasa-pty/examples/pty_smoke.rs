@@ -3,7 +3,7 @@
 //! EOF, and prints the visible first row. If "hello" shows up there,
 //! the byte → VT → ScreenUpdate path is wired correctly.
 
-use pty_backend::{PtyOptions, PtySession};
+use kasa_pty::{PtyOptions, PtySession};
 
 fn main() -> anyhow::Result<()> {
     let session = PtySession::start(PtyOptions {

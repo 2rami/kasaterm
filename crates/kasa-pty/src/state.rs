@@ -27,7 +27,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
-use tmux_bridge::screen::{Cell, Color, Row, ScreenUpdate};
+use kasa_bridge::screen::{Cell, Color, Row, ScreenUpdate};
 
 /// What to spawn in the PTY. Sticks close to portable-pty's
 /// CommandBuilder so the user can override env / cwd without us

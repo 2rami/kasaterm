@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use agent_socket::backend::{Backend, SplitDirection, SurfaceInfo, WorkspaceInfo};
+use kasa_socket::backend::{Backend, SplitDirection, SurfaceInfo, WorkspaceInfo};
 use anyhow::Result;
 
 struct MockBackend;
@@ -53,7 +53,7 @@ impl Backend for MockBackend {
 }
 
 fn main() -> Result<()> {
-    let port = kasaspace_mcp::spawn_http_server(Arc::new(MockBackend), 8765)?;
+    let port = kasa_mcp::spawn_http_server(Arc::new(MockBackend), 8765)?;
     eprintln!("mock kasaspace MCP serving on http://127.0.0.1:{port}/mcp");
     std::thread::park();
     Ok(())

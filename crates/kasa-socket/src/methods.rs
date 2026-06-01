@@ -57,6 +57,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "window.new" => simple(id, backend.new_window()),
         "session.switch" => switch_by_idx(id, &req.params, |i| backend.switch_session(i)),
         "window.switch" => switch_by_idx(id, &req.params, |i| backend.switch_window(i)),
+        "window.close" => switch_by_idx(id, &req.params, |i| backend.close_window(i)),
         "session.close" => switch_by_idx(id, &req.params, |i| backend.close_session(i)),
         "surface.close" => surface_close(backend, id, &req.params),
         "surface.rename" => surface_rename(backend, id, &req.params),
