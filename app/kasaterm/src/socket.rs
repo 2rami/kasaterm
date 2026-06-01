@@ -7,13 +7,11 @@
 //! per actually-open pane.
 
 use agent_socket::backend::{
-    Backend, PaneActivity, PanelGeom, PanelKind, SessionsInfo, SplitDirection, SurfaceInfo,
-    WorkspaceInfo,
+    Backend, PaneActivity, SplitDirection, SurfaceInfo, WorkspaceInfo,
 };
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tmux_bridge::TmuxSession;
@@ -167,437 +165,6 @@ pub(crate) fn key_to_bytes(key: &str) -> Vec<u8> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PtyBackend — Phase C wiring.
-//
-// Socket calls fire on a worker thread, but every mutation that touches
-// the PTY HashMap or the BSP layout has to happen on the main thread
-// (it owns the winit Window, drives `split_active_pane`, and updates
-// the renderer state). The bridge is two shared Arc<Mutex>:
-//
-//   - `inbox`: PtyBackend pushes `PtyCommand`s; main thread drains them
-//     in `about_to_wait` and runs each through the existing
-//     split/focus/send paths.
-//   - `snapshot`: main thread publishes the surface list + active pane
-//     after every state change; PtyBackend serves read-only methods
-//     (list_surfaces, current_workspace) straight from this.
-//
-// Commands that need a return value (`split_surface` reports the new
-// pane id) carry a oneshot `SyncSender` so the worker thread blocks
-// until the main loop processes the request.
-// ---------------------------------------------------------------------------
-
-/// Direction enum mirroring `pty_backend::SplitDir` without forcing the
-/// agent-socket crate to depend on pty-backend. We translate cmux's
-/// 4-way direction (left/right/up/down) down into the 2-way BSP split
-/// (horizontal/vertical) — left/right both produce a side-by-side
-/// horizontal split, up/down both produce a stacked vertical split.
-#[derive(Debug, Clone, Copy)]
-pub enum PtySplitAxis {
-    Horizontal,
-    Vertical,
-}
-
-/// Which kind of preview window a `PtyCommand::OpenPreview` should spawn.
-/// Decoded from the MCP `/open-image` vs `/open-markdown` endpoints (and
-/// the `imgopen` / `mdopen` shims behind them).
-#[derive(Debug, Clone, Copy)]
-pub enum PreviewKind {
-    Image,
-    Markdown,
-}
-
-impl From<SplitDirection> for PtySplitAxis {
-    fn from(d: SplitDirection) -> Self {
-        match d {
-            SplitDirection::Left | SplitDirection::Right => PtySplitAxis::Horizontal,
-            SplitDirection::Up | SplitDirection::Down => PtySplitAxis::Vertical,
-        }
-    }
-}
-
-pub enum PtyCommand {
-    Focus {
-        pane_id: String,
-        reply: SyncSender<Result<()>>,
-    },
-    Split {
-        axis: PtySplitAxis,
-        reply: SyncSender<Result<String>>,
-    },
-    SendBytes {
-        pane_id: Option<String>,
-        bytes: Vec<u8>,
-        reply: SyncSender<Result<()>>,
-    },
-    Close {
-        pane_id: String,
-        reply: SyncSender<Result<()>>,
-    },
-    Rename {
-        pane_id: String,
-        title: String,
-        reply: SyncSender<Result<()>>,
-    },
-    SetColor {
-        pane_id: String,
-        color: [u8; 4],
-        reply: SyncSender<Result<()>>,
-    },
-    Swap {
-        a: String,
-        b: String,
-        reply: SyncSender<Result<()>>,
-    },
-    /// Switch the visible tmux-style session to index `idx`.
-    SwitchSession {
-        idx: usize,
-        reply: SyncSender<Result<()>>,
-    },
-    /// Switch the visible window (sidebar tab within the current session) to
-    /// index `idx`.
-    SwitchWindow {
-        idx: usize,
-        reply: SyncSender<Result<()>>,
-    },
-    /// Create a new session and switch to it.
-    NewSession {
-        reply: SyncSender<Result<()>>,
-    },
-    /// Close the tmux-style session at index `idx`.
-    CloseSession {
-        idx: usize,
-        reply: SyncSender<Result<()>>,
-    },
-    /// Restore a saved (on-disk, not-yet-live) session at index `idx` in
-    /// `saved_session_labels`. Spawns its panes lazily and switches to it.
-    RestoreSession {
-        idx: usize,
-        reply: SyncSender<Result<()>>,
-    },
-    /// Open a separate wry preview window (image viewer / markdown editor)
-    /// for the file at `path`. Window creation needs the winit
-    /// `ActiveEventLoop`, which only the main thread has, so the socket
-    /// worker queues this and the main loop spawns the window in its drain.
-    OpenPreview {
-        kind: PreviewKind,
-        path: String,
-        reply: SyncSender<Result<()>>,
-    },
-    /// Open or close a standalone panel window (git status / sessions).
-    /// Window creation needs the winit `ActiveEventLoop`, which only the
-    /// main thread has, so the socket worker queues this.
-    SetPanel {
-        which: PanelKind,
-        open: bool,
-        reply: SyncSender<Result<()>>,
-    },
-    /// Resize a panel window and re-bound its webview to match.
-    ResizePanel {
-        which: PanelKind,
-        w: u32,
-        h: u32,
-        reply: SyncSender<Result<()>>,
-    },
-    /// Read a panel window's geometry (window + webview bounds).
-    PanelInfo {
-        which: PanelKind,
-        reply: SyncSender<Result<PanelGeom>>,
-    },
-    /// Read the visible screen text (last `lines` rows, history + current
-    /// screen) of a pane. Lives on the main thread because that's where
-    /// the composed cell grid is — the socket worker only has snapshots.
-    Peek {
-        pane_id: String,
-        lines: usize,
-        reply: SyncSender<Result<String>>,
-    },
-}
-
-/// Read-only view the main thread publishes after every state change.
-/// PtyBackend serves list_surfaces / current_workspace from this so
-/// the socket worker never has to lock the workspace itself.
-#[derive(Default, Clone)]
-pub struct PtySnapshot {
-    pub surfaces: Vec<SurfaceInfo>,
-    pub active_pane: Option<String>,
-    /// PID of the active pane's shell, refreshed alongside surfaces. The git
-    /// panel resolves the terminal's current directory and foreground program
-    /// (for the AI-commit button) from this pid, live.
-    pub active_shell_pid: Option<u32>,
-    /// Total number of tmux-style sessions. The session panel polls this to
-    /// draw one tab per session. 0 until the first snapshot refresh.
-    pub session_count: usize,
-    /// Index of the visible session within the session list.
-    pub active_session: usize,
-    /// Persisted sessions from the previous shutdown — surfaced by the
-    /// session panel so the user can manually restore them (auto-restore at
-    /// launch was retired in favour of light-launch). Each entry is a label.
-    pub saved_sessions: Vec<String>,
-}
-
-#[derive(Clone)]
-pub struct PtyBackendHandle {
-    pub inbox: Arc<Mutex<Vec<PtyCommand>>>,
-    pub snapshot: Arc<Mutex<PtySnapshot>>,
-    /// Used by the worker thread to ask winit for a redraw after it
-    /// pushes a command. Not strictly required (about_to_wait will tick
-    /// on its own), but it keeps split/focus latency at one frame
-    /// instead of waiting on the blink timer.
-    pub wake: Arc<dyn Fn() + Send + Sync>,
-}
-
-pub struct PtyBackend {
-    handle: PtyBackendHandle,
-    /// Collaboration board: surface_id -> activity derived by tailing that
-    /// pane's claude-code transcript (tool_use calls). Filled by the watcher
-    /// thread, not by any RPC — a pane never has to report its own activity.
-    /// Lives on the backend (not the main thread) because it's pure metadata
-    /// the renderer never touches, and the whole backend is `Arc`-shared
-    /// across socket connections so every pane sees the same board.
-    collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
-    /// Pending `bind_transcript` requests (surface_id, jsonl path) the watcher
-    /// thread drains. Pushed by the hook-driven RPC, consumed by the tail
-    /// worker. Re-binding a surface (e.g. `claude --resume` swaps the file)
-    /// replaces its entry. Kept for back-compat with any external caller; the
-    /// watcher now self-maps from each pane's claude env, so this is no longer
-    /// the primary path.
-    binds: Arc<Mutex<Vec<(String, std::path::PathBuf)>>>,
-}
-
-impl PtyBackend {
-    pub fn new(handle: PtyBackendHandle) -> Self {
-        let collab_auto = Arc::new(Mutex::new(HashMap::new()));
-        let binds = Arc::new(Mutex::new(Vec::new()));
-        // Tail each bound pane's claude transcript on a background thread,
-        // auto-filling collab_auto. Shares the snapshot so it can drop tails
-        // for closed panes. Renderer-free, so it never touches the main loop.
-        spawn_transcript_watcher(collab_auto.clone(), binds.clone(), {
-            let snap = handle.snapshot.clone();
-            // The legacy in-process snapshot has no per-pane shell pid, so
-            // self-mapping is off here (every pane reports None) and this path
-            // relies on the external bind RPC, as it always did. The daemon
-            // path supplies a real pid per pane and self-maps.
-            move || {
-                snap.lock()
-                    .unwrap()
-                    .surfaces
-                    .iter()
-                    .map(|s| (s.id.clone(), None))
-                    .collect()
-            }
-        });
-        Self {
-            handle,
-            collab_auto,
-            binds,
-        }
-    }
-
-    fn submit<T>(&self, build: impl FnOnce(SyncSender<Result<T>>) -> PtyCommand) -> Result<T> {
-        let (tx, rx) = sync_channel::<Result<T>>(1);
-        self.handle.inbox.lock().unwrap().push(build(tx));
-        (self.handle.wake)();
-        // Bounded wait so a stuck main thread can't deadlock a socket
-        // client — three seconds is a comfortable upper bound for any
-        // synchronous frame-tied operation.
-        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-            Ok(res) => res,
-            Err(_) => Err(anyhow!("main thread did not respond within 3s")),
-        }
-    }
-}
-
-impl Backend for PtyBackend {
-    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
-        Ok(vec![WorkspaceInfo {
-            id: FIXED_WORKSPACE_ID.into(),
-            name: "kasaterm".into(),
-        }])
-    }
-
-    fn current_workspace(&self) -> Result<Option<WorkspaceInfo>> {
-        Ok(Some(WorkspaceInfo {
-            id: FIXED_WORKSPACE_ID.into(),
-            name: "kasaterm".into(),
-        }))
-    }
-
-    fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> {
-        Ok(self.handle.snapshot.lock().unwrap().surfaces.clone())
-    }
-
-    fn focus_surface(&self, surface_id: &str) -> Result<()> {
-        let id = surface_id.to_string();
-        self.submit(|reply| PtyCommand::Focus { pane_id: id, reply })
-    }
-
-    fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo> {
-        let axis = direction.into();
-        let new_id = self.submit(|reply| PtyCommand::Split { axis, reply })?;
-        Ok(SurfaceInfo {
-            id: new_id,
-            workspace_id: FIXED_WORKSPACE_ID.into(),
-            title: None,
-        })
-    }
-
-    fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
-        let pane_id = surface_id.map(|s| s.to_string());
-        // Body and trailing submit (\r) go in separate writes so a multibyte
-        // tail isn't truncated into a lone surrogate. See split_trailing_submit.
-        let (body, submit) = split_trailing_submit(text.as_bytes());
-        if !body.is_empty() {
-            let bytes = body.to_vec();
-            let pane_id = pane_id.clone();
-            self.submit(|reply| PtyCommand::SendBytes { pane_id, bytes, reply })?;
-        }
-        if !submit.is_empty() {
-            let bytes = submit.to_vec();
-            self.submit(|reply| PtyCommand::SendBytes { pane_id, bytes, reply })?;
-        }
-        Ok(())
-    }
-
-    fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()> {
-        let pane_id = surface_id.map(|s| s.to_string());
-        let bytes = key_to_bytes(key);
-        self.submit(|reply| PtyCommand::SendBytes { pane_id, bytes, reply })
-    }
-
-    fn close_surface(&self, surface_id: &str) -> Result<()> {
-        let id = surface_id.to_string();
-        self.submit(|reply| PtyCommand::Close { pane_id: id, reply })
-    }
-
-    fn rename_surface(&self, surface_id: &str, title: &str) -> Result<()> {
-        let id = surface_id.to_string();
-        let title = title.to_string();
-        self.submit(|reply| PtyCommand::Rename { pane_id: id, title, reply })
-    }
-
-    fn set_color(&self, surface_id: &str, color: [u8; 4]) -> Result<()> {
-        let id = surface_id.to_string();
-        self.submit(|reply| PtyCommand::SetColor { pane_id: id, color, reply })
-    }
-
-    fn swap_surfaces(&self, a: &str, b: &str) -> Result<()> {
-        let a = a.to_string();
-        let b = b.to_string();
-        self.submit(|reply| PtyCommand::Swap { a, b, reply })
-    }
-
-    fn active_cwd(&self) -> Option<std::path::PathBuf> {
-        let pid = self.handle.snapshot.lock().unwrap().active_shell_pid?;
-        pid_cwd(pid)
-    }
-
-    fn active_process_name(&self) -> Option<String> {
-        // Resolve live like active_cwd. Baking it into the snapshot only
-        // refreshes on focus/split/etc., so "claude launched in an already-
-        // focused pane" would be missed and read as the shell.
-        let pid = self.handle.snapshot.lock().unwrap().active_shell_pid?;
-        pid_process_name(pid)
-    }
-
-    fn sessions(&self) -> SessionsInfo {
-        let snap = self.handle.snapshot.lock().unwrap();
-        // Before the first snapshot refresh the count is 0; report a single
-        // session so the panel never renders an empty list.
-        SessionsInfo {
-            count: snap.session_count.max(1),
-            active: snap.active_session,
-            saved: snap.saved_sessions.clone(),
-            // Live per-session labels are a daemon-path concern; the legacy
-            // in-process socket backend has no equivalent, so fall back to
-            // ordinal labels (empty).
-            labels: Vec::new(),
-        }
-    }
-
-    fn switch_session(&self, idx: usize) -> Result<()> {
-        self.submit(|reply| PtyCommand::SwitchSession { idx, reply })
-    }
-
-    fn switch_window(&self, idx: usize) -> Result<()> {
-        self.submit(|reply| PtyCommand::SwitchWindow { idx, reply })
-    }
-
-    fn new_session(&self) -> Result<()> {
-        self.submit(|reply| PtyCommand::NewSession { reply })
-    }
-
-    fn close_session(&self, idx: usize) -> Result<()> {
-        self.submit(|reply| PtyCommand::CloseSession { idx, reply })
-    }
-
-    fn restore_session(&self, idx: usize) -> Result<()> {
-        self.submit(|reply| PtyCommand::RestoreSession { idx, reply })
-    }
-
-    fn open_preview(&self, kind: &str, path: &str) -> Result<()> {
-        let kind = match kind {
-            "image" => PreviewKind::Image,
-            "markdown" => PreviewKind::Markdown,
-            other => return Err(anyhow!("unknown preview kind: {other}")),
-        };
-        let path = path.to_string();
-        self.submit(|reply| PtyCommand::OpenPreview { kind, path, reply })
-    }
-
-    fn set_panel(&self, which: PanelKind, open: bool) -> Result<()> {
-        self.submit(|reply| PtyCommand::SetPanel { which, open, reply })
-    }
-
-    fn resize_panel(&self, which: PanelKind, w: u32, h: u32) -> Result<()> {
-        self.submit(|reply| PtyCommand::ResizePanel { which, w, h, reply })
-    }
-
-    fn panel_info(&self, which: PanelKind) -> Result<PanelGeom> {
-        self.submit(|reply| PtyCommand::PanelInfo { which, reply })
-    }
-
-    fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
-        let id = surface_id.to_string();
-        self.submit(|reply| PtyCommand::Peek { pane_id: id, lines, reply })
-    }
-
-    fn collab_board(&self) -> Result<Vec<PaneActivity>> {
-        // Drop entries for panes that have since closed so the board never
-        // shows a ghost. The live set comes from the same snapshot
-        // list_surfaces reads.
-        let live: HashSet<String> = self
-            .handle
-            .snapshot
-            .lock()
-            .unwrap()
-            .surfaces
-            .iter()
-            .map(|s| s.id.clone())
-            .collect();
-        // Transcript-derived activity (`collab_auto`), filled by the tail
-        // watcher — it reflects what each pane is actually doing, so a pane
-        // never has to report itself.
-        Ok(self
-            .collab_auto
-            .lock()
-            .unwrap()
-            .values()
-            .filter(|a| live.contains(&a.surface_id))
-            .cloned()
-            .collect())
-    }
-
-    fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
-        // Queue for the tail worker; renderer-free so no submit() round-trip.
-        // Re-binding a surface (claude --resume swaps the jsonl) replaces its
-        // pending entry rather than stacking.
-        let mut binds = self.binds.lock().unwrap();
-        binds.retain(|(s, _)| s != surface_id);
-        binds.push((surface_id.to_string(), std::path::PathBuf::from(path)));
-        Ok(())
-    }
-}
 
 /// Per-pane transcript tail state held by the watcher thread.
 struct TranscriptTail {
@@ -613,80 +180,43 @@ struct TranscriptTail {
 /// 750ms — `notify` isn't a dependency and the board is human-read, so
 /// sub-second latency is plenty. Drops tails for closed panes via `live_panes`.
 ///
-/// The watcher self-maps each live pane to its transcript by reading the
-/// running claude's `CLAUDE_CODE_SESSION_ID` env (exact, even when several
-/// panes share a cwd) — no hook needed. The `binds` queue (the external
-/// `bind_transcript` RPC) is still drained for back-compat, but a live
-/// self-map for the same pane wins, so a stale daemon-restart bind can't
-/// pin a pane to a dead file.
+/// The transcript path comes ONLY from the hook-driven `bind_transcript` RPC
+/// (`kasaterm-bind-transcript.sh`), which reads the exact `transcript_path`
+/// from claude's SessionStart/PreToolUse hook payload — the one trustworthy
+/// source. A self-map via the claude process's `CLAUDE_CODE_SESSION_ID` env
+/// used to back this up, but that env is inherited by child shells: a claude
+/// launched from a pane carried its PARENT's session id, so every pane sharing
+/// an ancestry collapsed onto one transcript. The env path is gone; a pane
+/// with no hook bind simply has no board entry until its next tool call binds.
 ///
-/// `live_panes` yields each surviving pane id → its shell pid (None when the
-/// pid can't be resolved); the watcher walks shell→claude itself.
+/// `live_panes` yields the set of surviving pane ids so tails for closed panes
+/// get dropped.
 pub(crate) fn spawn_transcript_watcher<L>(
     collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
     binds: Arc<Mutex<Vec<(String, PathBuf)>>>,
     live_panes: L,
 ) where
-    L: Fn() -> HashMap<String, Option<u32>> + Send + 'static,
+    L: Fn() -> HashSet<String> + Send + 'static,
 {
     std::thread::spawn(move || {
         let mut tails: HashMap<String, TranscriptTail> = HashMap::new();
-        // pane_id -> (claude_pid, session_jsonl). Lets us skip the `ps eww`
-        // env read on ticks where the pane's claude pid hasn't changed —
-        // env is stable for a process's lifetime, so one read per claude is
-        // enough. Cleared for a pane when its claude pid changes or exits.
-        let mut env_cache: HashMap<String, (u32, PathBuf)> = HashMap::new();
         loop {
-            // 1. Drain external binds (hook-driven RPC, kept for back-compat).
-            //    Re-bind replaces the tail and reseeds. Self-mapping below may
-            //    later override this with the live env path.
+            // 1. Drain hook-driven binds. A re-bind to a new path (claude
+            //    --resume swaps the jsonl) replaces the tail and reseeds; a
+            //    re-bind to the same path is a no-op so the offset survives.
             let new_binds: Vec<(String, PathBuf)> =
                 std::mem::take(&mut *binds.lock().unwrap());
             for (sid, path) in new_binds {
-                let (offset, recent) = seed_tail(&path);
-                tails.insert(sid, TranscriptTail { path, offset, recent, last: Instant::now() });
-            }
-            // 2. Drop tails/cache/auto entries for panes that have closed.
-            let live: HashMap<String, Option<u32>> = live_panes();
-            tails.retain(|sid, _| live.contains_key(sid));
-            env_cache.retain(|sid, _| live.contains_key(sid));
-            collab_auto.lock().unwrap().retain(|sid, _| live.contains_key(sid));
-            // 3. Self-map: for each live pane, find its claude pid and resolve
-            //    the transcript from CLAUDE_CODE_SESSION_ID. Bind/re-bind only
-            //    when the path actually changed, so a same-file tick keeps its
-            //    offset (no reseed, no lost progress).
-            for (sid, shell_pid) in live.iter() {
-                let Some(shell_pid) = shell_pid else { continue };
-                let Some(claude_pid) = claude_child_pid(*shell_pid) else {
-                    // claude not up (yet) for this pane — leave any prior tail
-                    // alone and skip silently.
-                    continue;
-                };
-                let path = match env_cache.get(sid) {
-                    // Same claude pid as last seen → env unchanged, reuse the
-                    // cached path and skip the subprocess.
-                    Some((cached_pid, p)) if *cached_pid == claude_pid => p.clone(),
-                    // New/changed claude pid → read env once and cache it.
-                    _ => match claude_session_path_from_env(claude_pid) {
-                        Some(p) => {
-                            env_cache.insert(sid.clone(), (claude_pid, p.clone()));
-                            p
-                        }
-                        // Couldn't read the session id (env not exposed yet) —
-                        // skip quietly; next tick retries.
-                        None => continue,
-                    },
-                };
-                let needs_bind = tails.get(sid).map_or(true, |t| t.path != path);
-                if needs_bind {
+                if tails.get(&sid).map_or(true, |t| t.path != path) {
                     let (offset, recent) = seed_tail(&path);
-                    tails.insert(
-                        sid.clone(),
-                        TranscriptTail { path, offset, recent, last: Instant::now() },
-                    );
+                    tails.insert(sid, TranscriptTail { path, offset, recent, last: Instant::now() });
                 }
             }
-            // 4. Incremental read each tail → update recent ring → collab_auto.
+            // 2. Drop tails/auto entries for panes that have closed.
+            let live: HashSet<String> = live_panes();
+            tails.retain(|sid, _| live.contains(sid));
+            collab_auto.lock().unwrap().retain(|sid, _| live.contains(sid));
+            // 3. Incremental read each tail → update recent ring → collab_auto.
             for (sid, tail) in tails.iter_mut() {
                 let events = read_new_events(&tail.path, &mut tail.offset);
                 if !events.is_empty() {
@@ -783,40 +313,6 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
         .find_map(|l| l.strip_prefix('n').map(std::path::PathBuf::from))
 }
 
-/// Foreground program of a shell pid: the comm of its most-recently-spawned
-/// child (e.g. "claude"). Resolved live from `ps` so the AI-commit button
-/// sees a claude started after the last snapshot, mirroring pid_cwd.
-fn pid_process_name(shell_pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,comm="])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    let mut best: Option<(u32, String)> = None;
-    for line in s.lines() {
-        let mut parts = line.split_whitespace();
-        let (row_pid, row_ppid) = match (
-            parts.next().and_then(|x| x.parse::<u32>().ok()),
-            parts.next().and_then(|x| x.parse::<u32>().ok()),
-        ) {
-            (Some(a), Some(b)) => (a, b),
-            _ => continue,
-        };
-        if row_ppid != shell_pid {
-            continue;
-        }
-        let comm = parts.collect::<Vec<_>>().join(" ");
-        let name = std::path::Path::new(&comm)
-            .file_name()
-            .and_then(|x| x.to_str())
-            .unwrap_or(&comm)
-            .to_string();
-        if best.as_ref().map_or(true, |(p, _)| row_pid > *p) {
-            best = Some((row_pid, name));
-        }
-    }
-    best.map(|(_, n)| n)
-}
 
 /// Build one layout-tree leaf's restore record from a live PtySession: its
 /// cwd, whether it was running claude, and the newest claude session id under
@@ -876,178 +372,15 @@ pub fn session_file_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(home).join(".config/kasaterm/session.json"))
 }
 
-/// One pane's restore record — the payload carried by a layout-tree leaf.
-#[allow(dead_code)]
-pub struct PaneRestore {
-    /// None when the saved cwd couldn't be resolved; restore uses the default.
-    pub cwd: Option<std::path::PathBuf>,
-    pub was_claude: bool,
-    pub session_id: Option<String>,
-    /// Saved scrollback as plain-text lines (oldest→newest), restored into the
-    /// pane's history so scroll-up shows what was on screen before the restart.
-    /// Empty when nothing was captured. Color/attrs are dropped in v1 — the
-    /// content is what matters for "what I typed/saw is still there".
-    pub scrollback: Vec<String>,
-}
-
-/// A node in a session's restore layout tree — mirrors `pty_backend::PtyLayout`
-/// but carries per-pane restore data at the leaves instead of live pane ids.
-pub enum RestoreNode {
-    Leaf(PaneRestore),
-    Split {
-        /// true = side-by-side (PtyLayout Horizontal), false = stacked.
-        horizontal: bool,
-        ratio: f32,
-        a: Box<RestoreNode>,
-        b: Box<RestoreNode>,
-    },
-}
-
-/// One restored session: its windows (each a layout tree) + which window was
-/// active. A session can hold several windows; each window shares the
-/// session's panes/ws once rebuilt.
-pub struct SessionRestore {
-    pub windows: Vec<RestoreNode>,
-    pub active_window: usize,
-}
-
-/// Full restore state: every session (with its windows) + which one was active.
-pub struct RestoreState {
-    pub active_session: usize,
-    pub sessions: Vec<SessionRestore>,
-}
-
-/// Read the saved session for restore on launch. Handles both the new nested
-/// `{active_session, sessions:[<node>]}` format and the legacy flat
-/// `{panes:[...]}` (restored as one single-pane session). None if no file.
-pub fn load_session_state() -> Option<RestoreState> {
-    let path = session_file_path()?;
-    let text = std::fs::read_to_string(&path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    if let Some(arr) = v.get("sessions").and_then(|x| x.as_array()) {
-        let sessions: Vec<SessionRestore> = arr.iter().filter_map(parse_session).collect();
-        if sessions.is_empty() {
-            return None;
-        }
-        let active = v
-            .get("active_session")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as usize;
-        return Some(RestoreState {
-            active_session: active.min(sessions.len() - 1),
-            sessions,
-        });
-    }
-    // Legacy flat format: one session, one window, first pane only.
-    if let Some(arr) = v.get("panes").and_then(|x| x.as_array()) {
-        let leaf = parse_leaf(arr.first()?);
-        return Some(RestoreState {
-            active_session: 0,
-            sessions: vec![SessionRestore {
-                windows: vec![RestoreNode::Leaf(leaf)],
-                active_window: 0,
-            }],
-        });
-    }
-    None
-}
-
-/// Parse one session entry. New format carries `{windows:[<node>...],
-/// active_window:N}`. Older saves stored each session as a single layout node
-/// (one window) — we wrap that as a one-window session so old session files
-/// still restore.
-fn parse_session(v: &serde_json::Value) -> Option<SessionRestore> {
-    if let Some(arr) = v.get("windows").and_then(|x| x.as_array()) {
-        let windows: Vec<RestoreNode> = arr.iter().filter_map(parse_node).collect();
-        if windows.is_empty() {
-            return None;
-        }
-        let active_window = v
-            .get("active_window")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as usize;
-        return Some(SessionRestore {
-            active_window: active_window.min(windows.len() - 1),
-            windows,
-        });
-    }
-    // Legacy: the session entry *is* a single layout node (one window).
-    let node = parse_node(v)?;
-    Some(SessionRestore {
-        windows: vec![node],
-        active_window: 0,
-    })
-}
-
-fn parse_node(v: &serde_json::Value) -> Option<RestoreNode> {
-    if let Some(leaf) = v.get("leaf") {
-        return Some(RestoreNode::Leaf(parse_leaf(leaf)));
-    }
-    if let Some(split) = v.get("split") {
-        let horizontal = split.get("dir").and_then(|x| x.as_str()) == Some("h");
-        let ratio = split.get("ratio").and_then(|x| x.as_f64()).unwrap_or(0.5) as f32;
-        let a = Box::new(parse_node(split.get("a")?)?);
-        let b = Box::new(parse_node(split.get("b")?)?);
-        return Some(RestoreNode::Split { horizontal, ratio, a, b });
-    }
-    None
-}
-
-fn parse_leaf(v: &serde_json::Value) -> PaneRestore {
-    PaneRestore {
-        cwd: v
-            .get("cwd")
-            .and_then(|x| x.as_str())
-            .map(std::path::PathBuf::from),
-        was_claude: v.get("was_claude").and_then(|x| x.as_bool()).unwrap_or(false),
-        session_id: v.get("session_id").and_then(|x| x.as_str()).map(String::from),
-        scrollback: v
-            .get("scrollback")
-            .and_then(|x| x.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|s| s.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default(),
-    }
-}
 
 /// Pull the claude session id straight off the running claude process's argv
 /// (`--resume <uuid>` / `--session-id <uuid>`, `=`-joined or space-separated).
 /// Exact per-pane — unlike the cwd-mtime guess, two claudes in the same cwd
 /// keep distinct ids. Returns None for a fresh `claude` with no id on its argv.
 fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
-    // Most-recently-spawned child whose comm is claude — mirrors how
-    // pid_process_name picks the pane's foreground program.
-    let listing = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,comm="])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&listing.stdout);
-    let mut claude_pid: Option<u32> = None;
-    for line in s.lines() {
-        let mut parts = line.split_whitespace();
-        let (pid, ppid) = match (
-            parts.next().and_then(|x| x.parse::<u32>().ok()),
-            parts.next().and_then(|x| x.parse::<u32>().ok()),
-        ) {
-            (Some(a), Some(b)) => (a, b),
-            _ => continue,
-        };
-        if ppid != shell_pid {
-            continue;
-        }
-        let comm = parts.collect::<Vec<_>>().join(" ");
-        let is_claude = std::path::Path::new(&comm)
-            .file_name()
-            .and_then(|x| x.to_str())
-            .map_or(false, |n| n.contains("claude"));
-        if is_claude && claude_pid.map_or(true, |p| pid > p) {
-            claude_pid = Some(pid);
-        }
-    }
-    let pid = claude_pid?;
+    // Most-recently-spawned claude child of this shell — shared with the
+    // transcript watcher's self-map path.
+    let pid = claude_child_pid(shell_pid)?;
     let args_out = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "args="])
         .output()
@@ -1074,9 +407,8 @@ fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
 }
 
 /// The pid of the claude child of a shell pane, if any. Picks the most-recent
-/// (highest-pid) `claude`-named direct child of `shell_pid`, mirroring how
-/// `claude_session_id_from_cmdline` and `pid_process_name` resolve the
-/// foreground program. Returns None when no claude is running under the shell.
+/// (highest-pid) `claude`-named direct child of `shell_pid`. Returns None when
+/// no claude is running under the shell.
 fn claude_child_pid(shell_pid: u32) -> Option<u32> {
     let out = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,comm="])
@@ -1106,46 +438,6 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
         }
     }
     best
-}
-
-/// Resolve a claude process's transcript jsonl from its environment. claude
-/// exports `CLAUDE_CODE_SESSION_ID=<uuid>`, which is exactly the transcript's
-/// file stem — so this is precise even when several panes share one cwd (the
-/// cwd-mtime guess collapses those onto a single file). macOS exposes a
-/// process's env via `ps eww` (KEY=VALUE tokens trail the argv); we scan for
-/// the session id and `PWD` to build `~/.claude/projects/<encoded-cwd>/<id>.jsonl`.
-fn claude_session_path_from_env(claude_pid: u32) -> Option<PathBuf> {
-    let out = std::process::Command::new("ps")
-        .args(["eww", "-p", &claude_pid.to_string(), "-o", "command="])
-        .output()
-        .ok()?;
-    let line = String::from_utf8_lossy(&out.stdout);
-    let mut session_id: Option<String> = None;
-    let mut pwd: Option<String> = None;
-    for tok in line.split_whitespace() {
-        if let Some(v) = tok.strip_prefix("CLAUDE_CODE_SESSION_ID=") {
-            if is_uuid(v) {
-                session_id = Some(v.to_string());
-            }
-        } else if let Some(v) = tok.strip_prefix("PWD=") {
-            pwd = Some(v.to_string());
-        }
-    }
-    let session_id = session_id?;
-    let home = std::env::var("HOME").ok()?;
-    // Prefer the env's PWD (claude's launch cwd); fall back to lsof so a pane
-    // whose env hides PWD still maps. The encoded dir mirrors how claude names
-    // its project folder: `/` and `.` in the abs cwd become `-`.
-    let cwd = pwd
-        .map(std::path::PathBuf::from)
-        .or_else(|| pid_cwd(claude_pid))?;
-    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
-    Some(
-        std::path::PathBuf::from(home)
-            .join(".claude/projects")
-            .join(encoded)
-            .join(format!("{session_id}.jsonl")),
-    )
 }
 
 /// claude session ids are canonical UUIDs (8-4-4-4-12 hex). Validating guards

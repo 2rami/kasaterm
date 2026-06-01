@@ -296,6 +296,13 @@ impl Backend for DaemonBackend {
             })
             .collect())
     }
+    fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
+        let sess = self
+            .state
+            .pane(Some(surface_id))
+            .ok_or_else(|| anyhow::anyhow!("no such pane: {surface_id}"))?;
+        Ok(sess.visible_text(lines))
+    }
     fn focus_surface(&self, surface_id: &str) -> Result<()> {
         // Keep the active tuple consistent: making a pane "active" must also
         // point active_session/active_window at the session+window that holds
@@ -832,16 +839,10 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         crate::socket::spawn_transcript_watcher(
             state.collab_auto.clone(),
             state.binds.clone(),
-            // Each live pane → its shell pid, so the watcher can walk shell→
-            // claude and self-map the transcript from claude's env (no hook).
-            move || {
-                st.pty
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|(id, sess)| (id.clone(), sess.shell_pid()))
-                    .collect()
-            },
+            // The set of live pane ids; the watcher drops tails for panes not
+            // in it. Transcript paths come from the hook-driven bind, not from
+            // walking processes, so the shell pid is no longer needed here.
+            move || st.pty.lock().unwrap().keys().cloned().collect(),
         );
     }
 
