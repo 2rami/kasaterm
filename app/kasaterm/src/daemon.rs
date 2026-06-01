@@ -475,6 +475,12 @@ impl Backend for DaemonBackend {
             self.state.update_active_pane();
         }
         self.state.broadcast_state();
+        // Push fresh frames for the now-visible panes. Without this, the pane
+        // that took over (or the freshly-spawned shell when the last pane
+        // closed) has no grid in the GUI yet and renders blank with input
+        // going nowhere — the "Cmd+W then everything's dead" bug. close_session
+        // and close_window already do this.
+        self.state.push_active_snapshots();
         Ok(())
     }
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
