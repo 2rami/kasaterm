@@ -184,7 +184,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
     eprintln!("  kasaterm-cli key   <enter|tab|escape|backspace|delete|up|down|left|right>");
     eprintln!("  kasaterm-cli tell  <surface_id> <text>     # send + submit (wake an idle claude)");
-    eprintln!("  kasaterm-cli board                        # what every pane is doing");
+    eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
     eprintln!("  kasaterm-cli layout                       # where each pane sits (window-relative %)");
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
@@ -322,7 +322,16 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "text": format!("{}\r", flat.trim()) }),
             )
         }
-        "board" => ("collab.board", json!({})),
+        "board" => {
+            // Bare `board` = metadata only. `board <N>` folds each pane's
+            // visible last N rows in — what an orchestrator pane reads to see
+            // who's stuck on a prompt without a peek-per-pane.
+            let mut params = json!({});
+            if let Some(lines) = args.first().and_then(|s| s.parse::<u64>().ok()) {
+                params["screen_lines"] = json!(lines);
+            }
+            ("collab.board", params)
+        }
         "layout" => ("window.layout", json!({})),
         "bind-transcript" => {
             // The pane registers its own transcript: surface_id from the

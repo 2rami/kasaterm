@@ -212,16 +212,15 @@ impl DaemonClient {
         self.rpc("window.new", json!({}));
     }
 
-    pub fn switch_session(&self, idx: usize) {
-        self.rpc("session.switch", json!({ "idx": idx }));
-    }
-
     pub fn switch_window(&self, idx: usize) {
         self.rpc("window.switch", json!({ "idx": idx }));
     }
 
-    pub fn close_session(&self, idx: usize) {
-        self.rpc("session.close", json!({ "idx": idx }));
+    /// Ask the daemon to open a non-PTY preview leaf (image or markdown) for
+    /// `path`. The daemon spawns the preview pane and pushes a `Layout` back,
+    /// so we don't wait on the RPC reply — same fire-and-forget as `split_dir`.
+    pub fn open_preview(&self, kind: &str, path: &str) {
+        self.rpc("surface.open_preview", json!({ "kind": kind, "path": path }));
     }
 }
 

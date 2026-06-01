@@ -47,6 +47,9 @@ struct PaneMeta {
 struct DaemonSession {
     windows: Vec<PtyLayout>,
     active_window: usize,
+    /// User-set display name from the session panel's rename. `None` falls
+    /// back to the auto-derived label (active-window first-pane cwd basename).
+    name: Option<String>,
 }
 
 struct DaemonState {
@@ -157,6 +160,33 @@ impl DaemonState {
         sessions.is_empty()
     }
 
+    /// Drop any layout leaf with no backing PTY and no preview — the
+    /// "ghost pane" guard. A leaf can outlive its pane when a close/EOF races
+    /// a split: the PTY vanishes (removed from `pty`) *before* its leaf is
+    /// registered in the tree, so the pump's `remove_pane` finds nothing to
+    /// drop and the leaf lingers. The GUI then paints an empty pane for every
+    /// orphan — the "빈 창 증식" bug. Run this before every broadcast/persist so
+    /// the layout can never advertise a pane the daemon isn't actually hosting.
+    /// No-op in the common case (every leaf is live).
+    fn reconcile_layout(&self) {
+        let live: HashSet<String> = {
+            let pty = self.pty.lock().unwrap();
+            let prev = self.previews.lock().unwrap();
+            pty.keys().chain(prev.keys()).cloned().collect()
+        };
+        {
+            let mut sessions = self.sessions.lock().unwrap();
+            let mut asx = self.active_session.lock().unwrap();
+            prune_ghost_leaves(&mut sessions, &mut asx, &live);
+        }
+        // The active pane may have pointed at a pruned leaf — re-anchor it to a
+        // live one so input/cwd never targets a ghost.
+        let active_dead = !live.contains(&*self.active.lock().unwrap());
+        if active_dead {
+            self.update_active_pane();
+        }
+    }
+
     /// Push a full snapshot of every pane in the active window — used after a
     /// switch so the GUI repaints the now-visible window.
     fn push_active_snapshots(&self) {
@@ -175,14 +205,16 @@ impl DaemonState {
         let views: Vec<SessionView> = sessions
             .iter()
             .map(|s| {
-                // Label = active window's first pane's cwd basename.
-                let label = s
-                    .windows
-                    .get(s.active_window)
-                    .and_then(|w| w.leaves().first().map(|l| l.to_string()))
-                    .and_then(|id| pty.get(&id).and_then(|p| p.shell_pid()).and_then(pid_cwd))
-                    .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
-                    .unwrap_or_default();
+                // Label = user-set name, else active window's first pane's
+                // cwd basename.
+                let label = s.name.clone().unwrap_or_else(|| {
+                    s.windows
+                        .get(s.active_window)
+                        .and_then(|w| w.leaves().first().map(|l| l.to_string()))
+                        .and_then(|id| pty.get(&id).and_then(|p| p.shell_pid()).and_then(pid_cwd))
+                        .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+                        .unwrap_or_default()
+                });
                 SessionView {
                     windows: s
                         .windows
@@ -215,6 +247,9 @@ impl DaemonState {
     }
 
     fn broadcast_state(&self) {
+        // Prune ghost leaves before anyone (GUI or disk) sees the layout, so a
+        // pane that lost its PTY can never reach the GUI as an empty pane.
+        self.reconcile_layout();
         let _ = self.out_tx.send(StreamMsg::State(self.state_view()));
         // Every structural mutation funnels through here, so persisting in the
         // same breath keeps the on-disk session in lock-step with the live
@@ -364,10 +399,18 @@ impl Backend for DaemonBackend {
             sessions.push(DaemonSession {
                 windows: vec![PtyLayout::single(new_id.clone())],
                 active_window: 0,
+                name: None,
             });
             *self.state.active_session.lock().unwrap() = sessions.len() - 1;
         }
-        *self.state.active.lock().unwrap() = new_id.clone();
+        // Race guard: the pane can die between `spawn_pane` and the
+        // `split_leaf` above (its EOF reaches the pump before the leaf exists,
+        // so the pump's remove_pane finds nothing to drop). Only promote it to
+        // active if it's still alive; broadcast_state's reconcile_layout then
+        // prunes the orphan leaf if it isn't, so the GUI never sees it.
+        if self.state.pty.lock().unwrap().contains_key(&new_id) {
+            *self.state.active.lock().unwrap() = new_id.clone();
+        }
         self.state.broadcast_state();
         Ok(SurfaceInfo {
             id: new_id,
@@ -424,6 +467,7 @@ impl Backend for DaemonBackend {
             sessions.push(DaemonSession {
                 windows: vec![PtyLayout::single(new_id.clone())],
                 active_window: 0,
+                name: None,
             });
             *self.state.active_session.lock().unwrap() = 0;
             *self.state.active.lock().unwrap() = new_id;
@@ -533,6 +577,7 @@ impl Backend for DaemonBackend {
             sessions.push(DaemonSession {
                 windows: vec![PtyLayout::single(new_id.clone())],
                 active_window: 0,
+                name: None,
             });
             *self.state.active_session.lock().unwrap() = sessions.len() - 1;
         }
@@ -623,6 +668,55 @@ impl Backend for DaemonBackend {
         self.state.push_active_snapshots();
         Ok(())
     }
+    fn rename_session(&self, idx: usize, name: &str) -> Result<()> {
+        {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            let s = sessions
+                .get_mut(idx)
+                .ok_or_else(|| anyhow!("session index {idx} out of range"))?;
+            let trimmed = name.trim();
+            // Blank clears back to the auto cwd-basename label.
+            s.name = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+        }
+        self.state.persist();
+        self.state.broadcast_state();
+        Ok(())
+    }
+    fn reset_sessions(&self) -> Result<()> {
+        // Spawn the replacement pane first so we never sit session-less even
+        // for an instant; then collect every old pane id and drop them.
+        let new_id = self.state.alloc_id();
+        let cwd = self.state.active_cwd();
+        spawn_pane(&self.state, &new_id, cwd)?;
+        let old: Vec<String> = {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            let old = sessions
+                .iter()
+                .flat_map(|s| {
+                    s.windows
+                        .iter()
+                        .flat_map(|w| w.leaves().iter().map(|l| l.to_string()).collect::<Vec<_>>())
+                })
+                .collect();
+            *sessions = vec![DaemonSession {
+                windows: vec![PtyLayout::single(new_id.clone())],
+                active_window: 0,
+                name: None,
+            }];
+            *self.state.active_session.lock().unwrap() = 0;
+            old
+        };
+        {
+            let mut pty = self.state.pty.lock().unwrap();
+            for id in &old {
+                pty.remove(id); // drop = kill
+            }
+        }
+        *self.state.active.lock().unwrap() = new_id;
+        self.state.persist();
+        self.state.broadcast_state();
+        Ok(())
+    }
 }
 
 /// Send the full attach handshake to a freshly-connected GUI: the structure
@@ -654,6 +748,39 @@ fn daemon_state_path(control: &Path) -> PathBuf {
 }
 
 /// Snapshot the full structure + each pane's restore record to disk.
+/// Remove every layout leaf not in `live` (no PTY / preview backing it), drop
+/// windows and sessions that empty out, and clamp the active-session index.
+/// Split out of `reconcile_layout` so the tree surgery can be unit-tested
+/// without standing up a live daemon.
+fn prune_ghost_leaves(
+    sessions: &mut Vec<DaemonSession>,
+    active_session: &mut usize,
+    live: &HashSet<String>,
+) {
+    for s in sessions.iter_mut() {
+        s.windows.retain_mut(|w| {
+            let ghosts: Vec<String> = w
+                .leaves()
+                .iter()
+                .filter(|l| !live.contains(**l))
+                .map(|l| l.to_string())
+                .collect();
+            for g in &ghosts {
+                w.remove_leaf(g);
+            }
+            // Keep the window only if a real pane still survives in it.
+            w.leaves().iter().any(|l| live.contains(*l))
+        });
+        if s.active_window >= s.windows.len() && !s.windows.is_empty() {
+            s.active_window = s.windows.len() - 1;
+        }
+    }
+    sessions.retain(|s| !s.windows.is_empty());
+    if *active_session >= sessions.len() && !sessions.is_empty() {
+        *active_session = sessions.len() - 1;
+    }
+}
+
 fn save_daemon_state(state: &DaemonState, path: &Path) {
     let sessions_json: Vec<Value> = {
         let sessions = state.sessions.lock().unwrap();
@@ -665,7 +792,7 @@ fn save_daemon_state(state: &DaemonState, path: &Path) {
                     .iter()
                     .filter_map(|w| serde_json::to_value(w).ok())
                     .collect();
-                json!({ "active_window": s.active_window, "windows": windows })
+                json!({ "active_window": s.active_window, "windows": windows, "name": s.name })
             })
             .collect()
     };
@@ -707,7 +834,12 @@ fn load_daemon_state(
             if windows.is_empty() {
                 return None;
             }
-            Some(DaemonSession { windows, active_window })
+            let name = s
+                .get("name")
+                .and_then(|x| x.as_str())
+                .filter(|n| !n.is_empty())
+                .map(String::from);
+            Some(DaemonSession { windows, active_window, name })
         })
         .collect();
     if sessions.is_empty() {
@@ -758,6 +890,7 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
             vec![DaemonSession {
                 windows: vec![PtyLayout::single(PANE_0)],
                 active_window: 0,
+                name: None,
             }],
             0,
             HashMap::new(),
@@ -951,4 +1084,102 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
     let _ = std::fs::remove_file(&control_path);
     let _ = std::fs::remove_file(&spath);
     Ok(())
+}
+
+#[cfg(test)]
+mod ghost_leaf_tests {
+    use super::*;
+
+    fn live(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn session(windows: Vec<PtyLayout>, active_window: usize) -> DaemonSession {
+        DaemonSession { windows, active_window, name: None }
+    }
+
+    // Split(%0, %4) where %4 has no PTY → collapses to the live %0.
+    #[test]
+    fn prunes_dead_leaf_keeps_live_sibling() {
+        let mut win = PtyLayout::single("%0");
+        win.split_leaf("%0", SplitDir::Horizontal, "%4".into());
+        let mut sessions = vec![session(vec![win], 0)];
+        let mut asx = 0;
+        prune_ghost_leaves(&mut sessions, &mut asx, &live(&["%0"]));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].windows.len(), 1);
+        assert_eq!(sessions[0].windows[0].leaves(), vec!["%0"]);
+    }
+
+    // Two dead siblings nested under a live pane: Split(%0, Split(%4, %5)),
+    // both %4/%5 dead → must fully collapse to %0.
+    #[test]
+    fn prunes_two_nested_ghosts() {
+        let mut win = PtyLayout::single("%0");
+        win.split_leaf("%0", SplitDir::Horizontal, "%4".into());
+        win.split_leaf("%4", SplitDir::Vertical, "%5".into());
+        let mut sessions = vec![session(vec![win], 0)];
+        let mut asx = 0;
+        prune_ghost_leaves(&mut sessions, &mut asx, &live(&["%0"]));
+        assert_eq!(sessions[0].windows[0].leaves(), vec!["%0"]);
+    }
+
+    // A window holding only dead leaves is dropped, and active_window clamps.
+    #[test]
+    fn drops_dead_only_window_and_clamps_active() {
+        let w0 = PtyLayout::single("%0");
+        let w1 = PtyLayout::single("%4"); // dead-only
+        let mut sessions = vec![session(vec![w0, w1], 1)];
+        let mut asx = 0;
+        prune_ghost_leaves(&mut sessions, &mut asx, &live(&["%0"]));
+        assert_eq!(sessions[0].windows.len(), 1);
+        assert_eq!(sessions[0].active_window, 0);
+    }
+
+    // A session whose every window died is removed, and active_session clamps.
+    #[test]
+    fn drops_dead_session_and_clamps_active_session() {
+        let s0 = session(vec![PtyLayout::single("%0")], 0);
+        let s1 = session(vec![PtyLayout::single("%4")], 0); // dead-only
+        let mut sessions = vec![s0, s1];
+        let mut asx = 1;
+        prune_ghost_leaves(&mut sessions, &mut asx, &live(&["%0"]));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(asx, 0);
+    }
+
+    // Healthy layout is untouched (no-op in the common case).
+    #[test]
+    fn noop_when_all_leaves_live() {
+        let mut win = PtyLayout::single("%0");
+        win.split_leaf("%0", SplitDir::Horizontal, "%1".into());
+        let mut sessions = vec![session(vec![win], 0)];
+        let mut asx = 0;
+        prune_ghost_leaves(&mut sessions, &mut asx, &live(&["%0", "%1"]));
+        assert_eq!(sessions[0].windows[0].leaves(), vec!["%0", "%1"]);
+        assert_eq!(asx, 0);
+    }
+
+    // The exact shape seen in the wild: 9 leaves, 4 with no PTY → 5 survive.
+    #[test]
+    fn matches_observed_ghost_state() {
+        // Build one window: %0,%3,%9,%10,%11 live + %4,%5,%6,%12 ghosts.
+        let mut win = PtyLayout::single("%0");
+        for id in ["%3", "%4", "%5", "%6", "%9", "%10", "%11", "%12"] {
+            // graft each onto the current first leaf — exact shape is irrelevant,
+            // only the leaf set matters for the prune.
+            let target = win.leaves()[0].to_string();
+            win.split_leaf(&target, SplitDir::Horizontal, id.into());
+        }
+        let mut sessions = vec![session(vec![win], 0)];
+        let mut asx = 0;
+        prune_ghost_leaves(
+            &mut sessions,
+            &mut asx,
+            &live(&["%0", "%3", "%9", "%10", "%11"]),
+        );
+        let mut survivors = sessions[0].windows[0].leaves();
+        survivors.sort();
+        assert_eq!(survivors, vec!["%0", "%10", "%11", "%3", "%9"]);
+    }
 }

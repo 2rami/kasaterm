@@ -121,6 +121,13 @@ pub struct PaneActivity {
     /// if a path it wants is already claimed here.
     #[serde(default)]
     pub files: Vec<String>,
+    /// The pane's visible screen tail as plain text — only filled when a
+    /// caller asks (`collab.board {screen_lines: N}`). Lets an orchestrator
+    /// pane read what a sibling is showing (a prompt it's stuck on, an
+    /// AskUserQuestion menu) straight from the board, without a separate
+    /// `surface.peek` per pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen: Option<String>,
 }
 
 /// One pane's rectangle in the visible window, as percentages (0..100) of
@@ -228,6 +235,17 @@ pub trait Backend: Send + Sync {
     /// Default unsupported.
     fn restore_session(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("restore_session not supported")
+    }
+    /// Give the session at index `idx` a custom display name (overrides the
+    /// auto-derived cwd-basename label). An empty/blank name clears it back to
+    /// the auto label. Default unsupported.
+    fn rename_session(&self, _idx: usize, _name: &str) -> Result<()> {
+        anyhow::bail!("rename_session not supported")
+    }
+    /// Tear down every session and pane, then leave a single fresh empty
+    /// session — the panel's "reset everything" button. Default unsupported.
+    fn reset_sessions(&self) -> Result<()> {
+        anyhow::bail!("reset_sessions not supported")
     }
     /// Open a preview window for a file. `kind` is "image" or "markdown";
     /// `path` is an absolute path on the host. The host spawns a separate

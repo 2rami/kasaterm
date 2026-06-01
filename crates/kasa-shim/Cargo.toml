@@ -1,5 +1,5 @@
 [package]
-name = "tmux-shim"
+name = "kasa-shim"
 description = "Drop-in `tmux` binary that intercepts every call from a kasaterm-spawned shell. Phase 0 is a trace-and-delegate: it appends the argv to $KASATERM_TMUX_TRACE then re-exec's the real tmux so the user sees no behavior change while we map out which commands Claude Code's teammate mode actually fires."
 edition.workspace = true
 version.workspace = true

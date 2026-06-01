@@ -8,7 +8,7 @@ members = [
     "crates/hangul-ime",
     "crates/pty-backend",
     "crates/tmux-bridge",
-    "crates/tmux-shim",
+    "crates/kasa-shim",
     "spikes/iced-term",
     "spikes/egui-term",
     "spikes/gpui-term",

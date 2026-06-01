@@ -522,6 +522,17 @@ const SESSION_PANEL_HTML: &str = r#"<!DOCTYPE html>
   .sess .close { background: none; border: none; color: #787e8a; font-size: 16px;
     line-height: 1; padding: 0 2px; margin-left: 8px; cursor: pointer; flex: 0 0 auto; }
   .sess .close:hover { color: #f85149; }
+  /* Pencil (rename) — only visible on row hover so the row stays clean. */
+  .sess .edit { background: none; border: none; color: #787e8a; padding: 0 2px;
+    margin-left: 8px; cursor: pointer; flex: 0 0 auto; display: inline-flex;
+    align-items: center; opacity: 0; transition: opacity .12s; }
+  .sess:hover .edit { opacity: 1; }
+  .sess .edit:hover { color: #5a8ce6; }
+  .sess .edit svg { width: 13px; height: 13px; }
+  /* Inline name editor, swapped in for the label span on pencil-click. */
+  .sess input.rename { flex: 1 1 auto; min-width: 0; font: inherit; font-weight: 600;
+    color: #ecedf3; background: #15171c; border: 1px solid #5a8ce6; border-radius: 5px;
+    padding: 1px 6px; outline: none; }
   .new {
     margin-top: 12px; width: 100%; padding: 9px 0; border-radius: 9px;
     background: #22262e; color: #ecedf3; border: 1px dashed #2e323b;
@@ -529,6 +540,13 @@ const SESSION_PANEL_HTML: &str = r#"<!DOCTYPE html>
   }
   .new:hover:not(:disabled) { background: #2a313b; border-color: #4a525e; }
   .new:disabled { opacity: .5; cursor: default; }
+  .reset {
+    margin-top: 8px; width: 100%; padding: 8px 0; border-radius: 9px;
+    background: none; color: #787e8a; border: 1px solid #2e323b;
+    font-size: 12px; cursor: pointer;
+  }
+  .reset:hover:not(:disabled) { background: #2a1d1f; border-color: #f85149; color: #f85149; }
+  .reset:disabled { opacity: .5; cursor: default; }
   .err { color: #f85149; font-size: 12px; margin-top: 10px; }
 </style>
 </head>
@@ -536,12 +554,16 @@ const SESSION_PANEL_HTML: &str = r#"<!DOCTYPE html>
   <div class="title">세션</div>
   <ul id="list"></ul>
   <button id="btn-new" class="new">+ 새 세션</button>
+  <button id="btn-reset" class="reset">전체 초기화</button>
   <div id="err" class="err" style="display:none"></div>
 <script>
 const PORT = "__PORT__";
 const $ = (id) => document.getElementById(id);
 const base = "http://127.0.0.1:" + PORT;
 let busy = false;
+// While inline-renaming, skip the 1s poll re-render so the open <input> isn't
+// yanked out from under the user mid-edit.
+let editing = false;
 
 function render(d) {
   $("err").style.display = "none";
@@ -549,6 +571,7 @@ function render(d) {
   const saved = Array.isArray(d.saved) ? d.saved : [];
   // Live per-session folder labels from the daemon (parallel to count).
   const labels = Array.isArray(d.labels) ? d.labels : [];
+  if (editing) return;
   const ul = $("list");
   ul.innerHTML = "";
   for (let i = 0; i < count; i++) {
@@ -560,6 +583,11 @@ function render(d) {
     const badge = document.createElement("span"); badge.className = "badge";
     if (i === active) badge.textContent = "활성";
     li.appendChild(dot); li.appendChild(label); li.appendChild(badge);
+    const pen = document.createElement("button");
+    pen.className = "edit"; pen.title = "이름 변경";
+    pen.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
+    pen.onclick = (e) => { e.stopPropagation(); startRename(i, li, label); };
+    li.appendChild(pen);
     if (count > 1) {
       const x = document.createElement("button");
       x.className = "close"; x.textContent = "×"; x.title = "세션 닫기";
@@ -626,6 +654,52 @@ async function closeSession(idx) {
   poll();
 }
 
+// Swap the label span for an inline <input>. Enter saves, Esc/blur leaves it.
+function startRename(idx, li, labelEl) {
+  if (editing) return;
+  editing = true;
+  const input = document.createElement("input");
+  input.className = "rename";
+  input.value = labelEl.textContent;
+  li.replaceChild(input, labelEl);
+  input.focus(); input.select();
+  let done = false;
+  const finish = (save) => {
+    if (done) return; done = true;
+    editing = false;
+    if (save) renameSession(idx, input.value.trim());
+    else poll();
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  };
+  input.onblur = () => finish(true);
+  input.onclick = (e) => e.stopPropagation();
+}
+
+async function renameSession(idx, name) {
+  busy = true;
+  try {
+    await fetch(base + "/session-rename?idx=" + idx + "&name=" + encodeURIComponent(name), { method: "POST" });
+  } catch (e) {}
+  busy = false;
+  poll();
+}
+
+async function doReset() {
+  if (busy) return;
+  if (!confirm("모든 세션과 pane을 닫고 새 세션 하나로 초기화할까요?")) return;
+  busy = true;
+  $("btn-reset").disabled = true;
+  try {
+    await fetch(base + "/session-reset", { method: "POST" });
+  } catch (e) {}
+  busy = false;
+  $("btn-reset").disabled = false;
+  poll();
+}
+
 async function doNew() {
   if (busy) return;
   busy = true;
@@ -649,6 +723,7 @@ async function poll() {
 }
 
 $("btn-new").onclick = doNew;
+$("btn-reset").onclick = doReset;
 poll();
 setInterval(poll, 1000);
 </script>
@@ -2020,6 +2095,15 @@ struct Session {
     ws: Arc<Mutex<Workspace>>,
 }
 
+/// One flattened row of the sidebar file tree (the expanded tree is walked
+/// into a flat Vec for rendering + hit-testing). `depth` drives indentation.
+struct FileNode {
+    path: std::path::PathBuf,
+    name: String,
+    is_dir: bool,
+    depth: usize,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
@@ -2078,10 +2162,6 @@ struct App {
     /// so the tree mutation runs without holding the workspace lock
     /// across a session drop.
     dead_panes: Arc<Mutex<Vec<String>>>,
-    /// Bridge to the cmux-compatible socket worker. The socket thread
-    /// pushes commands here; the main thread drains them in
-    /// `about_to_wait`. None until `start_socket_pty` wires it up.
-    socket_handle: Option<socket::PtyBackendHandle>,
     /// Set when running as a GUI attached to a daemon (KASATERM_DAEMON=1):
     /// PTY input / resize / scroll route to the daemon over this client
     /// instead of a local PtySession. None in the default in-process mode.
@@ -2093,14 +2173,6 @@ struct App {
     /// Switching swaps a slot in/out; background sessions keep running via
     /// their own ws Arc, captured by their pump_pty_screens threads.
     sessions: Vec<Option<Session>>,
-    /// Labels for sessions persisted on disk at last shutdown. Surfaced in
-    /// the session panel as one-click restore rows. Filled once at startup
-    /// from `session.json`; cleared as the user manually restores each.
-    saved_session_labels: Vec<String>,
-    /// On-disk sessions loaded at startup but not yet restored. Parallel to
-    /// `saved_session_labels` (same index), so a restore-row click maps to
-    /// the right session. Drained as the user restores each.
-    saved_sessions_restore: Vec<socket::SessionRestore>,
     /// Index into `sessions` of the visible session (its slot is None).
     active_session: usize,
     /// Windows of the *visible* session, by index. The active window's slot
@@ -2299,6 +2371,16 @@ struct App {
     /// focus without it cluttering the header normally. Toggled in
     /// `ModifiersChanged`.
     show_pane_numbers: bool,
+    /// Sidebar file-tree state. Root = the active pane's cwd (recomputed when
+    /// it changes — follows pane switch + `cd`). `nodes` is the flattened
+    /// expanded tree, rebuilt only on root/expand change (no per-frame
+    /// read_dir). `rects`/`hover` mirror the window-tab hit-test pattern.
+    file_tree_root: Option<std::path::PathBuf>,
+    file_tree_expanded: std::collections::HashSet<std::path::PathBuf>,
+    file_tree_nodes: Vec<FileNode>,
+    file_tree_hover: Option<std::path::PathBuf>,
+    file_tree_scroll: f32,
+    file_tree_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
     /// Cursor-blink phase captured at the last successful render.
     /// Used by `render_frame`'s early-return: a blink toggle counts
     /// as "something changed" and forces the GPU pass even when
@@ -2424,12 +2506,9 @@ impl App {
             autotabs_n: 0,
             autotabs_at: None,
             dead_panes: Arc::new(Mutex::new(Vec::new())),
-            socket_handle: None,
             daemon_client: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
             sessions: vec![None],
-            saved_session_labels: Vec::new(),
-            saved_sessions_restore: Vec::new(),
             active_session: 0,
             windows: vec![None],
             active_window: 0,
@@ -2480,6 +2559,12 @@ impl App {
             pane_cwd_check: None,
             applied_previews: HashMap::new(),
             show_pane_numbers: false,
+            file_tree_root: None,
+            file_tree_expanded: std::collections::HashSet::new(),
+            file_tree_nodes: Vec::new(),
+            file_tree_hover: None,
+            file_tree_scroll: 0.0,
+            file_tree_rects: Vec::new(),
             last_blink_on: false,
             chrome_dirty: true,
             cursor_px: std::env::var("KASATERM_AUTOHOVER")
@@ -2883,124 +2968,7 @@ impl App {
         }
     }
 
-    /// Open a separate preview window (image viewer / markdown editor) for
-    /// `path`. Reads the file on the main thread (it's tiny relative to a
-    /// frame and only fires on an explicit user action) and injects its
-    /// content into a self-contained HTML page — no served asset path, same
-    /// `with_html` + `build_as_child` pattern as the git/session panels.
-    /// Returns an error (surfaced to the `imgopen`/`mdopen` caller) on a bad
-    /// path or any window/webview build failure; the terminal is untouched.
-    #[allow(dead_code)]
-    fn open_preview_window(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        kind: socket::PreviewKind,
-        path: &str,
-    ) -> anyhow::Result<()> {
-        let p = std::path::Path::new(path);
-        if path.is_empty() || !p.is_file() {
-            anyhow::bail!("no such file: {path}");
-        }
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string());
 
-        let (title, html, size) = match kind {
-            socket::PreviewKind::Image => {
-                let bytes = std::fs::read(p)
-                    .map_err(|e| anyhow::anyhow!("read failed: {e}"))?;
-                let mime = match p
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_ascii_lowercase())
-                    .as_deref()
-                {
-                    Some("png") => "image/png",
-                    Some("jpg") | Some("jpeg") => "image/jpeg",
-                    Some("gif") => "image/gif",
-                    Some("webp") => "image/webp",
-                    Some("bmp") => "image/bmp",
-                    Some("svg") => "image/svg+xml",
-                    _ => "image/png",
-                };
-                let b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &bytes,
-                );
-                let src = format!("data:{mime};base64,{b64}");
-                let html = IMAGE_VIEWER_HTML
-                    .replace("__NAME__", &html_escape(&name))
-                    .replace("__SRC__", &src);
-                (format!("{name} — 이미지"), html, (820.0, 620.0))
-            }
-            socket::PreviewKind::Markdown => {
-                let text = std::fs::read_to_string(p)
-                    .map_err(|e| anyhow::anyhow!("read failed: {e}"))?;
-                let port = std::env::var("KASASPACE_MCP_PORT")
-                    .unwrap_or_else(|_| "8765".to_string());
-                // JSON-encode path + content so they drop into the page as
-                // safe JS string literals (handles quotes, newlines, unicode).
-                let path_js = serde_json::to_string(path).unwrap_or_else(|_| "\"\"".into());
-                let content_js =
-                    serde_json::to_string(&text).unwrap_or_else(|_| "\"\"".into());
-                let html = MARKDOWN_EDITOR_HTML
-                    .replace("__NAME__", &html_escape(&name))
-                    .replace("__PORT__", &port)
-                    .replace("__PATH__", &path_js)
-                    .replace("__CONTENT__", &content_js);
-                (format!("{name} — 마크다운"), html, (980.0, 680.0))
-            }
-        };
-
-        let attrs = WindowAttributes::default()
-            .with_title(title)
-            .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(size.0, size.1));
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .map_err(|e| anyhow::anyhow!("window create failed: {e}"))?,
-        );
-        // build_as_child for the same use-after-free reason as the git panel
-        // (winit keeps its content view; the webview fills the window).
-        let webview = wry::WebViewBuilder::new()
-            .with_html(html)
-            .with_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wry::dpi::LogicalSize::new(size.0, size.1).into(),
-            })
-            .build_as_child(window.as_ref())
-            .map_err(|e| anyhow::anyhow!("webview build failed: {e}"))?;
-        eprintln!("[preview] open {kind:?} {path}");
-        self.preview_windows.push((window, webview));
-        Ok(())
-    }
-
-    /// Adjust the live font size by `delta` (in logical points) and
-    /// reflow the cell grid + PTY size accordingly. Clamped to a sane
-    /// terminal range so the user can't shrink past readability or
-    /// blow the window contents out by accident.
-    fn change_font_size(&mut self, delta: f32) {
-        let new = (self.font_size + delta).clamp(8.0, 40.0);
-        if (new - self.font_size).abs() < 0.05 {
-            return;
-        }
-        self.font_size = new;
-        // gpu (cell-renderer) path: resize the GpuRenderer's cached cell
-        // metrics so layout sees the new size immediately.
-        if let Some(gpu) = self.gpu.as_mut() {
-            let (cw, ch) = gpu.set_font_size(new);
-            self.cell = CellGeom { w: cw, h: ch, baseline: 0.0 };
-            if let Some(window) = self.window.as_ref() {
-                let (cols, rows) = self.window_cells();
-                self.resize_backend(cols, rows);
-                self.chrome_dirty = true;
-                window.request_redraw();
-            }
-            return;
-        }
-    }
 
     /// Effective render scale = DPI scale × whole-UI zoom. Everything that
     /// converts logical↔physical (cell metrics, chrome coords, cursor px,
@@ -3473,189 +3441,9 @@ impl App {
         Ok(())
     }
 
-    /// Create a new tmux-style session: stash the visible one into its slot,
-    /// start a fresh empty session with its own ws/pty/layout, bring up its
-    /// first pane.
-    fn new_session(&mut self) {
-        if let Some(client) = self.daemon_client.as_ref() {
-            client.new_session();
-            return; // daemon creates it + pushes State (applied in user_event)
-        }
-        self.sessions[self.active_session] = Some(Session {
-            pty: std::mem::take(&mut self.pty),
-            pty_layout: self.pty_layout.take(),
-            windows: std::mem::take(&mut self.windows),
-            active_window: self.active_window,
-            ws: self.ws.clone(),
-        });
-        self.ws = Arc::new(Mutex::new(Workspace::default()));
-        self.pty = HashMap::new();
-        self.pty_layout = None;
-        self.windows = vec![None];
-        self.active_window = 0;
-        self.sessions.push(None);
-        self.active_session = self.sessions.len() - 1;
-        if let Err(e) = self.spawn_session_pane() {
-            eprintln!("[session] new session pane spawn failed: {e:#}");
-        }
-        self.refresh_socket_snapshot();
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
 
-    /// Switch the visible session to tab `idx`: swap the current out to its
-    /// slot, swap the target in. Background sessions stay alive (their ws Arc
-    /// is still updated by their pump threads).
-    fn switch_session(&mut self, idx: usize) {
-        if let Some(client) = self.daemon_client.as_ref() {
-            client.switch_session(idx);
-            return; // daemon switches + pushes State
-        }
-        if idx == self.active_session || idx >= self.sessions.len() {
-            return;
-        }
-        if self.sessions[idx].is_none() {
-            return;
-        }
-        self.sessions[self.active_session] = Some(Session {
-            pty: std::mem::take(&mut self.pty),
-            pty_layout: self.pty_layout.take(),
-            windows: std::mem::take(&mut self.windows),
-            active_window: self.active_window,
-            ws: self.ws.clone(),
-        });
-        let next = self.sessions[idx].take().unwrap();
-        self.pty = next.pty;
-        self.pty_layout = next.pty_layout;
-        self.windows = next.windows;
-        self.active_window = next.active_window;
-        self.ws = next.ws;
-        self.active_session = idx;
-        // Reflow PTYs to the current window and repaint.
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        self.publish_pty_layout();
-        self.refresh_socket_snapshot();
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
 
-    /// Close the session at `idx`. The last session can't be closed (the
-    /// terminal always needs one live session). Closing a background session
-    /// just drops it; closing the visible one first swaps a neighbor in so the
-    /// terminal keeps painting. Dropping a `Session` drops its `PtySession`
-    /// Arcs, which kills the child shells — same teardown path as remove_pane.
-    fn close_session(&mut self, idx: usize) -> Result<()> {
-        if let Some(client) = self.daemon_client.as_ref() {
-            client.close_session(idx);
-            return Ok(()); // daemon closes + pushes State
-        }
-        if self.sessions.len() <= 1 {
-            anyhow::bail!("cannot close the last session");
-        }
-        if idx >= self.sessions.len() {
-            anyhow::bail!("no such session: {idx}");
-        }
-        if idx == self.active_session {
-            // Pick a neighbor to become visible, then drop the active one.
-            let target = if idx == 0 { 1 } else { idx - 1 };
-            // Drop the active session's live PTYs (kills their shells).
-            self.pty.clear();
-            self.pty_layout = None;
-            // Drop the active session's stashed windows too — their layouts
-            // only reference the panes we're killing here.
-            self.windows = vec![None];
-            self.active_window = 0;
-            let next = self.sessions[target]
-                .take()
-                .expect("neighbor session slot must be occupied");
-            self.pty = next.pty;
-            self.pty_layout = next.pty_layout;
-            self.windows = next.windows;
-            self.active_window = next.active_window;
-            self.ws = next.ws;
-            self.sessions.remove(idx);
-            // After removing slot `idx`, every index above it shifts down one.
-            self.active_session = if target > idx { target - 1 } else { target };
-            let (cols, rows) = self.window_cells();
-            self.resize_backend(cols, rows);
-            self.publish_pty_layout();
-        } else {
-            // Background session: drop it (kills its shells) and drop the slot.
-            self.sessions[idx] = None;
-            self.sessions.remove(idx);
-            if idx < self.active_session {
-                self.active_session -= 1;
-            }
-        }
-        self.refresh_socket_snapshot();
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-        Ok(())
-    }
 
-    /// Restore a saved (on-disk) session at `idx` in the saved-session list:
-    /// stash the visible session, spawn the saved session's panes into fresh
-    /// live fields, and switch to it. The saved entry is consumed (removed
-    /// from both the parallel restore vec and the label list) so a session is
-    /// restored at most once per launch. claude panes queue a `--resume`.
-    fn restore_saved_session(&mut self, idx: usize) -> Result<()> {
-        if idx >= self.saved_sessions_restore.len() {
-            anyhow::bail!("no such saved session: {idx}");
-        }
-        let saved = self.saved_sessions_restore.remove(idx);
-        if idx < self.saved_session_labels.len() {
-            self.saved_session_labels.remove(idx);
-        }
-        let (cols, rows) = self.window_cells();
-        // Stash the visible session (same swap invariant as new_session).
-        self.sessions[self.active_session] = Some(Session {
-            pty: std::mem::take(&mut self.pty),
-            pty_layout: self.pty_layout.take(),
-            windows: std::mem::take(&mut self.windows),
-            active_window: self.active_window,
-            ws: self.ws.clone(),
-        });
-        // Fresh live fields for the restored session; pump threads spawned by
-        // build_restore_node capture this ws.
-        let ws = Arc::new(Mutex::new(Workspace::default()));
-        self.ws = ws.clone();
-        self.pty = HashMap::new();
-        let mut resume = Vec::new();
-        let mut window_layouts = Vec::new();
-        for node in &saved.windows {
-            window_layouts.push(self.build_restore_node(node, cols, rows, &mut resume)?);
-        }
-        if window_layouts.is_empty() {
-            anyhow::bail!("saved session {idx} had no windows");
-        }
-        let active_window = saved.active_window.min(window_layouts.len() - 1);
-        let mut windows: Vec<Option<pty_backend::PtyLayout>> =
-            window_layouts.into_iter().map(Some).collect();
-        let active_layout = windows[active_window].take();
-        if let Some(first) = active_layout
-            .as_ref()
-            .and_then(|l| l.leaves().first().map(|s| s.to_string()))
-        {
-            ws.lock().unwrap().active_pane = Some(first);
-        }
-        self.pty_layout = active_layout;
-        self.windows = windows;
-        self.active_window = active_window;
-        self.sessions.push(None);
-        self.active_session = self.sessions.len() - 1;
-        self.pending_restores.extend(resume);
-        self.resize_backend(cols, rows);
-        self.publish_pty_layout();
-        self.refresh_socket_snapshot();
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-        Ok(())
-    }
 
     /// Create a new window inside the *current* session: stash the visible
     /// window's layout, then bring up a fresh window with a single new pane.
@@ -3681,7 +3469,6 @@ impl App {
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
-        self.refresh_socket_snapshot();
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
@@ -3728,7 +3515,6 @@ impl App {
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
-        self.refresh_socket_snapshot();
         // The sidebar highlight + window body are chrome state. Without
         // flagging chrome_dirty, `about_to_wait` parks on WaitUntil(blink)
         // and the switch only paints on the next blink tick (or not at all
@@ -3759,8 +3545,17 @@ impl App {
             self.windows[idx].take()
         };
         if let Some(layout) = layout {
+            // In daemon mode the daemon owns these PTYs — without an explicit
+            // close per pane they survive on the daemon and resurrect on the
+            // next state sync (the window-close infinite-respawn bug). The
+            // local removal below still runs (and is the whole story in
+            // pty mode).
+            let daemon = self.daemon_client.clone();
             let mut ws = self.ws.lock().unwrap();
             for pane_id in layout.leaves() {
+                if let Some(client) = daemon.as_ref() {
+                    client.close(pane_id);
+                }
                 self.pty.remove(pane_id);
                 ws.panes.remove(pane_id);
             }
@@ -3786,7 +3581,6 @@ impl App {
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
-        self.refresh_socket_snapshot();
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
@@ -3952,6 +3746,68 @@ impl App {
             segs.push("/".to_string());
         }
         segs
+    }
+
+    /// Recompute the sidebar file tree when its root (the active pane's cwd)
+    /// changes — pane switch or `cd`. Cheap string compare per frame; the
+    /// read_dir walk only runs on a real change (or after expand/collapse,
+    /// which calls `rebuild_file_tree_nodes` directly).
+    fn refresh_file_tree(&mut self) {
+        let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+        let root = active
+            .as_ref()
+            .and_then(|id| self.pane_cwd_cache.get(id).cloned())
+            .or_else(|| std::env::current_dir().ok());
+        if root == self.file_tree_root {
+            return;
+        }
+        self.file_tree_root = root;
+        self.file_tree_scroll = 0.0;
+        self.rebuild_file_tree_nodes();
+    }
+
+    /// Walk the root + every expanded folder into the flat `file_tree_nodes`.
+    fn rebuild_file_tree_nodes(&mut self) {
+        self.file_tree_nodes.clear();
+        if let Some(root) = self.file_tree_root.clone() {
+            Self::walk_dir(&root, 0, &self.file_tree_expanded, &mut self.file_tree_nodes);
+        }
+    }
+
+    /// Recursive read_dir: folders first then files (case-insensitive), dotfiles
+    /// skipped, descending only into expanded folders.
+    fn walk_dir(
+        dir: &std::path::Path,
+        depth: usize,
+        expanded: &std::collections::HashSet<std::path::PathBuf>,
+        out: &mut Vec<FileNode>,
+    ) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<FileNode> = rd
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    return None;
+                }
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                Some(FileNode { path: e.path(), name, is_dir, depth })
+            })
+            .collect();
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        for node in entries {
+            let (is_dir, path) = (node.is_dir, node.path.clone());
+            out.push(node);
+            if is_dir && expanded.contains(&path) {
+                Self::walk_dir(&path, depth + 1, expanded, out);
+            }
+        }
     }
 
     /// Geometry of the left window-tab sidebar, in logical px. Returns
@@ -4136,157 +3992,7 @@ impl App {
         });
     }
 
-    /// Rebuild every saved session (A3 restore). Each session's panes are
-    /// spawned into a fresh workspace and laid out per the saved BSP tree;
-    /// claude panes get a queued `--resume`. Sessions are built into stashed
-    /// slots, then the saved active session is swapped into the live fields —
-    /// mirroring the stash-swap invariant new_session/switch_session use.
-    #[allow(dead_code)]
-    fn restore_sessions(
-        &mut self,
-        state: socket::RestoreState,
-        cols: u16,
-        rows: u16,
-    ) -> Result<()> {
-        let mut resume = Vec::new();
-        let mut pane_count = 0usize;
-        let mut window_count = 0usize;
-        self.sessions.clear();
-        for sess in &state.sessions {
-            // Fresh workspace per session so each pane's pump thread (which
-            // captures self.ws at spawn time) updates the right one. Every
-            // window in this session shares this ws/pty map.
-            let ws = Arc::new(Mutex::new(Workspace::default()));
-            self.ws = ws.clone();
-            self.pty = HashMap::new();
-            // Rebuild each window's layout tree (spawns its panes).
-            let mut window_layouts = Vec::new();
-            for node in &sess.windows {
-                let layout = self.build_restore_node(node, cols, rows, &mut resume)?;
-                pane_count += layout.leaves().len();
-                window_layouts.push(layout);
-            }
-            if window_layouts.is_empty() {
-                continue;
-            }
-            window_count += window_layouts.len();
-            let active_window = sess.active_window.min(window_layouts.len() - 1);
-            // Active window's layout → pty_layout slot; the rest stay in the
-            // windows vec (active slot taken to None to match the live invariant).
-            let mut windows: Vec<Option<pty_backend::PtyLayout>> =
-                window_layouts.into_iter().map(Some).collect();
-            let active_layout = windows[active_window].take();
-            // Focus the active window's first leaf so split/focus shortcuts
-            // work pre-paint.
-            if let Some(first) = active_layout
-                .as_ref()
-                .and_then(|l| l.leaves().first().map(|s| s.to_string()))
-            {
-                ws.lock().unwrap().active_pane = Some(first);
-            }
-            self.sessions.push(Some(Session {
-                pty: std::mem::take(&mut self.pty),
-                pty_layout: active_layout,
-                windows,
-                active_window,
-                ws,
-            }));
-        }
-        // Swap the active session out of its slot into the live fields.
-        let active = state.active_session.min(self.sessions.len() - 1);
-        let s = self.sessions[active]
-            .take()
-            .expect("active session slot occupied");
-        self.pty = s.pty;
-        self.pty_layout = s.pty_layout;
-        self.windows = s.windows;
-        self.active_window = s.active_window;
-        self.ws = s.ws;
-        self.active_session = active;
-        eprintln!(
-            "[restore] {} session(s), {} window(s), {} pane(s), {} claude resume(s), active={}",
-            self.sessions.len(),
-            window_count,
-            pane_count,
-            resume.len(),
-            active
-        );
-        self.pending_restores = resume;
-        // SIGWINCH every restored pane to its real rect + publish the layout so
-        // the renderer draws the splits (single-pane uses the fallback anyway).
-        self.resize_backend(cols, rows);
-        self.publish_pty_layout();
-        Ok(())
-    }
 
-    /// Recursively spawn the panes for one restore node and return the matching
-    /// live PtyLayout. Leaves spawn a PtySession at the saved cwd (queueing a
-    /// claude resume when needed); splits recurse and preserve dir + ratio.
-    #[allow(dead_code)]
-    fn build_restore_node(
-        &mut self,
-        node: &socket::RestoreNode,
-        cols: u16,
-        rows: u16,
-        resume: &mut Vec<(Arc<pty_backend::PtySession>, String, std::time::Instant)>,
-    ) -> Result<pty_backend::PtyLayout> {
-        match node {
-            socket::RestoreNode::Leaf(p) => {
-                let id = format!("%{}", self.next_pane_id);
-                self.next_pane_id += 1;
-                let cwd = p
-                    .cwd
-                    .as_ref()
-                    .map(|c| c.to_string_lossy().into_owned())
-                    .or_else(resolve_initial_cwd);
-                let session = pty_backend::PtySession::start(pty_backend::PtyOptions {
-                    shell: resolve_default_shell(),
-                    cwd,
-                    cols,
-                    rows,
-                    env: Vec::new(),
-                    pane_id: id.clone(),
-                    // Restored scrollback → seeded into alacritty so scroll-up
-                    // shows the pre-restart screen. The renderer reads
-                    // alacritty's own scrollback (display_offset), not our
-                    // PaneState.history, so seeding here is what actually shows.
-                    initial_scrollback: p.scrollback.clone(),
-                })?;
-                self.pump_pty_screens(session.screens.clone(), id.clone());
-                let arc = Arc::new(session);
-                self.pty.insert(id.clone(), arc.clone());
-                if p.was_claude {
-                    let cmd = match &p.session_id {
-                        Some(sid) => format!("claude --resume {sid}\n"),
-                        None => "claude --continue\n".to_string(),
-                    };
-                    // Stagger slightly past the shell prompt (rc files + OSC133
-                    // hook). Sent too early the shell eats it.
-                    resume.push((
-                        arc,
-                        cmd,
-                        std::time::Instant::now() + std::time::Duration::from_millis(1200),
-                    ));
-                }
-                Ok(pty_backend::PtyLayout::single(id))
-            }
-            socket::RestoreNode::Split { horizontal, ratio, a, b } => {
-                let a_l = self.build_restore_node(a, cols, rows, resume)?;
-                let b_l = self.build_restore_node(b, cols, rows, resume)?;
-                let dir = if *horizontal {
-                    pty_backend::SplitDir::Horizontal
-                } else {
-                    pty_backend::SplitDir::Vertical
-                };
-                Ok(pty_backend::PtyLayout::Split {
-                    dir,
-                    ratio: *ratio,
-                    a: Box::new(a_l),
-                    b: Box::new(b_l),
-                })
-            }
-        }
-    }
 
     /// Serialize every session (active + stashed) as a layout tree so the next
     /// launch can restore the full multi-pane, multi-session workspace. Written
@@ -4883,371 +4589,11 @@ impl App {
         self.start_socket_with(Arc::new(socket::TmuxBackend::new(tmux)));
     }
 
-    /// PTY-mode socket wiring. Builds the shared inbox + snapshot,
-    /// stores the handle on self so the main loop can drain commands,
-    /// then spawns the server with a PtyBackend that routes through
-    /// that same handle.
-    fn start_socket_pty(&mut self) {
-        let window = self.window.clone();
-        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            if let Some(w) = window.as_ref() {
-                w.request_redraw();
-            }
-        });
-        let handle = socket::PtyBackendHandle {
-            inbox: Arc::new(Mutex::new(Vec::new())),
-            snapshot: Arc::new(Mutex::new(socket::PtySnapshot::default())),
-            wake,
-        };
-        self.socket_handle = Some(handle.clone());
-        self.refresh_socket_snapshot();
-        self.start_socket_with(Arc::new(socket::PtyBackend::new(handle)));
-    }
 
-    /// Publish the current pane state to the shared snapshot the
-    /// PtyBackend reads from. Call after every mutation that adds /
-    /// removes a pane or shifts focus, so external agents see fresh
-    /// `surface.list` results on the very next poll.
-    fn refresh_socket_snapshot(&self) {
-        let Some(handle) = self.socket_handle.as_ref() else { return; };
-        let ws = self.ws.lock().unwrap();
-        let leaves: Vec<String> = self
-            .pty_layout
-            .as_ref()
-            .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
-            .unwrap_or_else(|| self.pty.keys().cloned().collect());
-        let surfaces = leaves
-            .iter()
-            .map(|id| agent_socket::backend::SurfaceInfo {
-                id: id.clone(),
-                workspace_id: "local-0".to_string(),
-                title: ws
-                    .panes
-                    .get(id)
-                    .and_then(|p| p.title.clone()),
-            })
-            .collect();
-        let mut snap = handle.snapshot.lock().unwrap();
-        snap.surfaces = surfaces;
-        snap.active_pane = ws.active_pane.clone();
-        // Active pane's shell pid → the git panel resolves its cwd from this
-        // so it follows whatever directory the focused terminal is in.
-        snap.active_shell_pid = ws
-            .active_pane
-            .as_ref()
-            .and_then(|id| self.pty.get(id))
-            .and_then(|s| s.shell_pid());
-        snap.session_count = self.sessions.len();
-        snap.active_session = self.active_session;
-        snap.saved_sessions = self.saved_session_labels.clone();
-    }
 
-    /// Drain pending socket commands and run them on the main thread.
-    /// Called once per loop turn from `about_to_wait`.
-    fn drain_socket_inbox(&mut self, event_loop: &ActiveEventLoop) {
-        let cmds: Vec<socket::PtyCommand> = match self.socket_handle.as_ref() {
-            Some(h) => std::mem::take(&mut *h.inbox.lock().unwrap()),
-            None => return,
-        };
-        if cmds.is_empty() {
-            return;
-        }
-        for cmd in cmds {
-            match cmd {
-                socket::PtyCommand::Focus { pane_id, reply } => {
-                    let known = self.pty.contains_key(&pane_id);
-                    if known {
-                        self.ws.lock().unwrap().active_pane = Some(pane_id);
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                        let _ = reply.send(Ok(()));
-                    } else {
-                        let _ = reply.send(Err(anyhow::anyhow!(
-                            "no such surface: {pane_id}"
-                        )));
-                    }
-                }
-                socket::PtyCommand::Split { axis, reply } => {
-                    let dir = match axis {
-                        socket::PtySplitAxis::Horizontal => pty_backend::SplitDir::Horizontal,
-                        socket::PtySplitAxis::Vertical => pty_backend::SplitDir::Vertical,
-                    };
-                    let split_res = self.split_active_pane(dir);
-                    let answer = split_res.map(|_| {
-                        // split_active_pane sets active_pane to the new
-                        // leaf; that's the id the client wants back.
-                        self.ws
-                            .lock()
-                            .unwrap()
-                            .active_pane
-                            .clone()
-                            .unwrap_or_default()
-                    });
-                    let _ = reply.send(answer);
-                }
-                socket::PtyCommand::SendBytes { pane_id, bytes, reply } => {
-                    let target = pane_id.or_else(|| {
-                        self.ws.lock().unwrap().active_pane.clone()
-                    });
-                    let res = match target.and_then(|id| self.pty.get(&id).cloned()) {
-                        Some(pty) => pty.send_bytes(&bytes).map_err(anyhow::Error::from),
-                        None => Err(anyhow::anyhow!("no surface to send to")),
-                    };
-                    let _ = reply.send(res);
-                }
-                socket::PtyCommand::Close { pane_id, reply } => {
-                    // Close if the pane is in the pty map OR still a leaf in
-                    // the layout tree. The second case is the "zombie": a pane
-                    // whose PTY died (or never registered) but whose leaf
-                    // lingers in the tree — list_surfaces reads the tree so it
-                    // shows up, yet a pty-map-only guard rejected close,
-                    // leaving the slot frozen and un-closable. remove_pane is
-                    // tree-driven and pty.remove() no-ops when absent, so it
-                    // cleans up either case.
-                    let in_tree = self
-                        .pty_layout
-                        .as_ref()
-                        .map_or(false, |t| t.leaves().iter().any(|l| l == &pane_id));
-                    if self.pty.contains_key(&pane_id) || in_tree {
-                        // remove_pane kills the PTY, drops the leaf from
-                        // the BSP layout, reassigns focus, and redraws —
-                        // same path Cmd+W uses.
-                        self.remove_pane(&pane_id);
-                        let _ = reply.send(Ok(()));
-                    } else {
-                        let _ = reply.send(Err(anyhow::anyhow!(
-                            "no such surface: {pane_id}"
-                        )));
-                    }
-                }
-                socket::PtyCommand::Rename { pane_id, title, reply } => {
-                    // Existence via self.pty (layout/pty truth) — ws.panes
-                    // may not have the leaf yet right after a split (no
-                    // shell output landed). pane_mut creates it so the
-                    // title sticks until the first ScreenUpdate fills it.
-                    if self.pty.contains_key(&pane_id) {
-                        {
-                            let mut ws = self.ws.lock().unwrap();
-                            let pane = ws.pane_mut(&pane_id);
-                            pane.title = Some(title);
-                            // Explicit rename pins the label so later OSC
-                            // titles from the inner program don't overwrite it.
-                            pane.title_pinned = true;
-                        }
-                        self.chrome_dirty = true;
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                        let _ = reply.send(Ok(()));
-                    } else {
-                        let _ = reply.send(Err(anyhow::anyhow!(
-                            "no such surface: {pane_id}"
-                        )));
-                    }
-                }
-                socket::PtyCommand::SetColor { pane_id, color, reply } => {
-                    if self.pty.contains_key(&pane_id) {
-                        self.ws.lock().unwrap().pane_mut(&pane_id).color = Some(color);
-                        self.chrome_dirty = true;
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                        let _ = reply.send(Ok(()));
-                    } else {
-                        let _ = reply.send(Err(anyhow::anyhow!(
-                            "no such surface: {pane_id}"
-                        )));
-                    }
-                }
-                socket::PtyCommand::Swap { a, b, reply } => {
-                    let both = self.pty.contains_key(&a) && self.pty.contains_key(&b);
-                    let swapped = both
-                        && self
-                            .pty_layout
-                            .as_mut()
-                            .map(|l| l.swap_leaves(&a, &b))
-                            .unwrap_or(false);
-                    if swapped {
-                        // Re-SIGWINCH each pane to its new rect and
-                        // republish the layout so the renderer + socket
-                        // snapshot reflect the swapped positions.
-                        let (cols, rows) = self.window_cells();
-                        self.resize_backend(cols, rows);
-                        self.publish_pty_layout();
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                        let _ = reply.send(Ok(()));
-                    } else {
-                        let _ = reply.send(Err(anyhow::anyhow!(
-                            "swap: surface {a} or {b} not found"
-                        )));
-                    }
-                }
-                socket::PtyCommand::SwitchSession { idx, reply } => {
-                    self.switch_session(idx);
-                    let _ = reply.send(Ok(()));
-                }
-                socket::PtyCommand::SwitchWindow { idx, reply } => {
-                    self.switch_window(idx);
-                    let _ = reply.send(Ok(()));
-                }
-                socket::PtyCommand::NewSession { reply } => {
-                    self.new_session();
-                    let _ = reply.send(Ok(()));
-                }
-                socket::PtyCommand::CloseSession { idx, reply } => {
-                    let res = self.close_session(idx);
-                    let _ = reply.send(res);
-                }
-                socket::PtyCommand::RestoreSession { idx, reply } => {
-                    let res = self.restore_saved_session(idx);
-                    let _ = reply.send(res);
-                }
-                socket::PtyCommand::OpenPreview { kind, path, reply } => {
-                    // Both images and markdown open as in-window split panes
-                    // (wgpu-rendered). Markdown images (![](...)) render as wgpu
-                    // textures inline, same path as the image pane.
-                    let _ = event_loop;
-                    let res = match kind {
-                        socket::PreviewKind::Image => {
-                            self.split_image_pane(&path, pty_backend::SplitDir::Horizontal)
-                        }
-                        socket::PreviewKind::Markdown => {
-                            self.split_markdown_pane(&path, pty_backend::SplitDir::Horizontal)
-                        }
-                    };
-                    let _ = reply.send(res);
-                }
-                socket::PtyCommand::SetPanel { which, open, reply } => {
-                    self.set_panel_window(event_loop, which, open);
-                    let _ = reply.send(Ok(()));
-                }
-                socket::PtyCommand::ResizePanel { which, w, h, reply } => {
-                    let res = self.resize_panel_window(which, w, h);
-                    let _ = reply.send(res);
-                }
-                socket::PtyCommand::PanelInfo { which, reply } => {
-                    let res = self.panel_window_info(which);
-                    let _ = reply.send(res);
-                }
-                socket::PtyCommand::Peek { pane_id, lines, reply } => {
-                    // Reuse scrollback_lines (history + current screen as
-                    // trimmed text) and hand back just the requested tail.
-                    let ws = self.ws.lock().unwrap();
-                    let res = match ws.panes.get(&pane_id) {
-                        Some(pane) => {
-                            let mut all = scrollback_lines(pane);
-                            let start = all.len().saturating_sub(lines);
-                            Ok(all.split_off(start).join("\n"))
-                        }
-                        None => Err(anyhow::anyhow!("no such surface: {pane_id}")),
-                    };
-                    let _ = reply.send(res);
-                }
-            }
-        }
-        self.refresh_socket_snapshot();
-    }
 
-    /// Open or close a panel window by kind (MCP-driven, mirrors the menu
-    /// toggles). `open=true` is idempotent — `open_*` already no-ops when the
-    /// window exists.
-    fn set_panel_window(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        which: agent_socket::backend::PanelKind,
-        open: bool,
-    ) {
-        use agent_socket::backend::PanelKind;
-        match (which, open) {
-            (PanelKind::Git, true) => self.open_git_panel(event_loop, true),
-            (PanelKind::Git, false) => {
-                self.git_panel_webview = None;
-                self.git_panel_window = None;
-            }
-            (PanelKind::Session, true) => self.open_session_panel(event_loop),
-            (PanelKind::Session, false) => {
-                self.session_panel_webview = None;
-                self.session_panel_window = None;
-            }
-            (PanelKind::Board, true) => self.open_board_panel(event_loop),
-            (PanelKind::Board, false) => {
-                self.board_panel_webview = None;
-                self.board_panel_window = None;
-            }
-        }
-    }
 
-    /// Resize a panel window and re-bound its webview to fill it. Same
-    /// full-bleed rebound the Resized handler does, but driven by MCP so a
-    /// caller can exercise the responsive path without a mouse drag.
-    fn resize_panel_window(
-        &self,
-        which: agent_socket::backend::PanelKind,
-        w: u32,
-        h: u32,
-    ) -> anyhow::Result<()> {
-        use agent_socket::backend::PanelKind;
-        let (win, wv) = match which {
-            PanelKind::Git => (self.git_panel_window.as_ref(), self.git_panel_webview.as_ref()),
-            PanelKind::Session => (
-                self.session_panel_window.as_ref(),
-                self.session_panel_webview.as_ref(),
-            ),
-            PanelKind::Board => (
-                self.board_panel_window.as_ref(),
-                self.board_panel_webview.as_ref(),
-            ),
-        };
-        let win = win.ok_or_else(|| anyhow::anyhow!("panel not open"))?;
-        let _ = win.request_inner_size(winit::dpi::LogicalSize::new(w as f64, h as f64));
-        if let Some(wv) = wv {
-            wv.set_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wry::dpi::LogicalSize::new(w as f64, h as f64).into(),
-            })?;
-        }
-        Ok(())
-    }
 
-    /// Report a panel window's geometry (window inner size + webview bounds,
-    /// both physical px) so an MCP caller can verify the webview tracks the
-    /// window after a resize — no screenshot needed.
-    fn panel_window_info(
-        &self,
-        which: agent_socket::backend::PanelKind,
-    ) -> anyhow::Result<agent_socket::backend::PanelGeom> {
-        use agent_socket::backend::{PanelGeom, PanelKind};
-        let (win, wv) = match which {
-            PanelKind::Git => (self.git_panel_window.as_ref(), self.git_panel_webview.as_ref()),
-            PanelKind::Session => (
-                self.session_panel_window.as_ref(),
-                self.session_panel_webview.as_ref(),
-            ),
-            PanelKind::Board => (
-                self.board_panel_window.as_ref(),
-                self.board_panel_webview.as_ref(),
-            ),
-        };
-        let open = win.is_some();
-        let (win_w, win_h) = win
-            .map(|w| {
-                let s = w.inner_size();
-                (s.width, s.height)
-            })
-            .unwrap_or((0, 0));
-        let scale = win.map(|w| w.scale_factor()).unwrap_or(1.0);
-        let (view_w, view_h) = wv
-            .and_then(|v| v.bounds().ok())
-            .map(|b| {
-                let s = b.size.to_physical::<u32>(scale);
-                (s.width, s.height)
-            })
-            .unwrap_or((0, 0));
-        Ok(PanelGeom { open, win_w, win_h, view_w, view_h })
-    }
 
     /// Convert logical-pixel position into a (pane_id, col, row) cell
     /// inside the pane the click landed in. Multi-pane aware: walks the
@@ -5437,7 +4783,6 @@ impl App {
         // every code path that adds/removes panes or moves focus goes
         // through publish_pty_layout, so this is the one spot we have
         // to wire the cmux mirror.
-        self.refresh_socket_snapshot();
     }
 
     /// Resize every backend session so its grid matches the new window
@@ -5726,141 +5071,7 @@ impl App {
         }
     }
 
-    /// Split the active pane and fill the new pane with a decoded image
-    /// instead of a shell. Mirrors `split_active_pane` but skips the
-    /// PtySession: the pane has no PTY, so `active_pty()` returns None (key
-    /// input is dropped) and the render loop paints the texture into the
-    /// pane box. Backs the `imgopen` shim (OpenPreview → Image).
-    fn split_image_pane(&mut self, path: &str, dir: pty_backend::SplitDir) -> Result<()> {
-        if self.tmux.is_some() {
-            anyhow::bail!("image pane unsupported on tmux backend");
-        }
-        let p = std::path::Path::new(path);
-        if path.is_empty() || !p.is_file() {
-            anyhow::bail!("no such file: {path}");
-        }
-        let image = decode_image_rgba(p)?;
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string());
-        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
-            anyhow::bail!("no active pane to split");
-        };
-        let new_id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
-        {
-            let mut ws = self.ws.lock().unwrap();
-            let pane = ws.pane_mut(&new_id);
-            pane.content = PaneContent::Image(Arc::new(image));
-            // Pin the filename as the header label so the OSC-title path
-            // (which only fires for PTY panes anyway) can't clobber it.
-            pane.title = Some(name);
-            pane.title_pinned = true;
-            pane.dirty = true;
-            // Headless-test handles: seed the image-view state from env so a
-            // verify cycle can capture zoomed/rotated frames without a key
-            // synthesis path. Real users still drive zoom/rot via +/-/r/0.
-            if let Ok(z) = std::env::var("KASATERM_TEST_IMG_ZOOM").map(|s| s.parse::<f32>()) {
-                if let Ok(z) = z {
-                    pane.image_zoom = z.clamp(1.0, 8.0);
-                }
-            }
-            if let Ok(r) = std::env::var("KASATERM_TEST_IMG_ROT").map(|s| s.parse::<u8>()) {
-                if let Ok(r) = r {
-                    pane.image_rot = r % 4;
-                }
-            }
-        }
-        let layout = self
-            .pty_layout
-            .as_mut()
-            .expect("pty_layout set in start_pty");
-        if !layout.split_leaf(&active, dir, new_id.clone()) {
-            self.ws.lock().unwrap().panes.remove(&new_id);
-            self.next_pane_id -= 1;
-            anyhow::bail!("active pane not found in layout");
-        }
-        // Keep focus on the shell that opened the image — the image pane takes
-        // no keyboard input, so handing it focus would just force the user to
-        // click back to keep typing.
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        self.publish_pty_layout();
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
-        Ok(())
-    }
 
-    /// Split the active pane and fill the new pane with a rendered markdown
-    /// document. Like `split_image_pane` but the new pane *does* become active
-    /// so the user can scroll it (markdown can exceed the pane height); key
-    /// input is still dropped (no PTY) — only wheel/scroll keys act on it.
-    fn split_markdown_pane(&mut self, path: &str, dir: pty_backend::SplitDir) -> Result<()> {
-        if self.tmux.is_some() {
-            anyhow::bail!("markdown pane unsupported on tmux backend");
-        }
-        let p = std::path::Path::new(path);
-        if path.is_empty() || !p.is_file() {
-            anyhow::bail!("no such file: {path}");
-        }
-        let text = std::fs::read_to_string(p)
-            .map_err(|e| anyhow::anyhow!("read failed: {e}"))?;
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string());
-        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
-            anyhow::bail!("no active pane to split");
-        };
-        let new_id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
-        let doc = build_markdown_doc(&new_id, p, &text);
-        {
-            let mut ws = self.ws.lock().unwrap();
-            // Test hook: open straight into Raw mode (for screenshots).
-            let raw_mode = std::env::var_os("KASATERM_MD_RAW").is_some();
-            let mut edit_lines: Vec<String> = if raw_mode {
-                text.split('\n').map(String::from).collect()
-            } else {
-                Vec::new()
-            };
-            if raw_mode && edit_lines.is_empty() {
-                edit_lines.push(String::new());
-            }
-            let pane = ws.pane_mut(&new_id);
-            pane.content = PaneContent::Markdown(MarkdownPane {
-                doc: Arc::new(doc),
-                raw_mode,
-                edit_lines,
-                cur_line: 0,
-                cur_col: 0,
-                scroll: 0,
-            });
-            pane.title = Some(name);
-            pane.title_pinned = true;
-            pane.dirty = true;
-        }
-        let layout = self
-            .pty_layout
-            .as_mut()
-            .expect("pty_layout set in start_pty");
-        if !layout.split_leaf(&active, dir, new_id.clone()) {
-            self.ws.lock().unwrap().panes.remove(&new_id);
-            self.next_pane_id -= 1;
-            anyhow::bail!("active pane not found in layout");
-        }
-        // Markdown panes take focus so the wheel/PageDown path scrolls them.
-        self.ws.lock().unwrap().active_pane = Some(new_id);
-        let (cols, rows) = self.window_cells();
-        self.resize_backend(cols, rows);
-        self.publish_pty_layout();
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
-        Ok(())
-    }
 
     /// Insert text at the active markdown editor's cursor (committed Hangul or
     /// pasted text). Multi-char safe; advances the cursor by char count.
@@ -6348,7 +5559,6 @@ impl App {
         let new_idx = ((cur_idx as i32 + delta).rem_euclid(n)) as usize;
         ws.active_pane = Some(leaves[new_idx].clone());
         drop(ws);
-        self.refresh_socket_snapshot();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -6399,7 +5609,6 @@ impl App {
     fn focus_dir(&self, dir: FocusDir) {
         if let Some(id) = self.adjacent_pane(dir) {
             self.ws.lock().unwrap().active_pane = Some(id);
-            self.refresh_socket_snapshot();
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -7928,6 +7137,10 @@ impl App {
     fn render_frame_gpu(&mut self, scale: f32) {
         // Keep the header breadcrumb's cwd cache fresh (self-rate-limited).
         self.refresh_pane_cwds();
+        // Sidebar file tree follows the active pane's cwd (rebuild on change).
+        if self.sidebar_visible {
+            self.refresh_file_tree();
+        }
         let Some(window) = self.window.as_ref() else { return };
         // Snapshot for the launch banner before the &mut self.gpu borrow
         // below (which rules out re-borrowing &self inside that block).
@@ -8904,6 +8117,42 @@ impl App {
                     theme::ICON_SIZE,
                     theme::TEXT_MUTE,
                 );
+                // ── File tree ── the active pane's cwd, below the "+" button.
+                // Folders first; click a folder to expand, a file to preview.
+                // Built in refresh_file_tree (no per-frame read_dir); we just
+                // lay rows out here + cache hit rects (window-tab pattern).
+                {
+                    let inset = SIDEBAR_TAB_INSET;
+                    let item_h = 22.0_f32;
+                    let tree_w = (self.sidebar_w_logical - inset * 2.0).max(0.0);
+                    let start_y = py + ph + 10.0;
+                    let win_h = win_px.1 / scale;
+                    let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
+                    for (idx, node) in self.file_tree_nodes.iter().enumerate() {
+                        let y = start_y - self.file_tree_scroll + idx as f32 * item_h;
+                        if y + item_h < start_y || y > win_h {
+                            continue; // off-screen → clip (and don't cache a hit rect)
+                        }
+                        let indent = node.depth as f32 * 12.0;
+                        let hovered =
+                            self.file_tree_hover.as_deref() == Some(node.path.as_path());
+                        if hovered {
+                            round_rect(g, inset, y, tree_w, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                        }
+                        let fg = if hovered { theme::TEXT } else { theme::TEXT_DIM };
+                        let isz = 14.0_f32;
+                        let icon = if node.is_dir { "folder" } else { "file-text" };
+                        g.queue_icon(icon, inset + indent + 4.0, y + (item_h - isz) / 2.0, isz, fg);
+                        g.draw_text(
+                            inset + indent + 4.0 + isz + 6.0,
+                            y + (item_h - 12.0) / 2.0,
+                            &node.name,
+                            gpu::DrawOpts { font_size: 12.0, color: fg, bold: false, italic: false },
+                        );
+                        rects.push((node.path.clone(), (inset, y, tree_w, item_h)));
+                    }
+                    self.file_tree_rects = rects;
+                }
                 // Shell picker popup, stacked under the "+" button. Layout
                 // (shell_menu_layout) and hit rects were computed before the
                 // GPU borrow so clicks land on the same boxes we paint.
@@ -10360,6 +9609,48 @@ impl ApplicationHandler<UserEvent> for App {
                             self.chrome_dirty = true;
                             return;
                         }
+                        // File tree row: folder → toggle expand, file → preview.
+                        if let Some(path) = self
+                            .file_tree_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(p, _)| p.clone())
+                        {
+                            let is_dir = self
+                                .file_tree_nodes
+                                .iter()
+                                .find(|n| n.path == path)
+                                .map(|n| n.is_dir)
+                                .unwrap_or(false);
+                            if is_dir {
+                                if !self.file_tree_expanded.remove(&path) {
+                                    self.file_tree_expanded.insert(path.clone());
+                                }
+                                self.rebuild_file_tree_nodes();
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                            } else {
+                                // Preview by extension: images → image pane,
+                                // everything else → markdown (renders .md, shows
+                                // other text as raw-ish). Routed to the daemon in
+                                // daemon mode, else the in-process split.
+                                let ext = path
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .unwrap_or("")
+                                    .to_lowercase();
+                                let kind = match ext.as_str() {
+                                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff"
+                                    | "tif" | "ico" => "image",
+                                    _ => "markdown",
+                                };
+                                let ps = path.to_string_lossy().into_owned();
+                                if let Some(client) = self.daemon_client.as_ref() {
+                                    client.open_preview(kind, &ps);
+                                }
+                            }
+                            return;
+                        }
                         // Empty sidebar space — swallow the click.
                         return;
                     }
@@ -10591,7 +9882,6 @@ impl ApplicationHandler<UserEvent> for App {
                             start: self.cursor_px,
                             active: false,
                         });
-                        self.refresh_socket_snapshot();
                         window.request_redraw();
                         return;
                     }
@@ -11101,7 +10391,6 @@ impl ApplicationHandler<UserEvent> for App {
         // through the same split/focus/send paths Cmd+D etc use, so
         // visible behavior is identical regardless of whether the
         // trigger came from a keystroke or a JSON-RPC call.
-        self.drain_socket_inbox(event_loop);
         // Fire any due KASATERM_AUTOSPLIT step before parking. No-op
         // when no plan is queued.
         self.run_pending_autosplits();
@@ -11447,25 +10736,6 @@ fn decorate_process_name(comm: &str) -> String {
     }
 }
 
-/// Working directory for a freshly spawned shell. Terminals open new
-/// sessions in the user's HOME by default (Terminal.app, iTerm), so a
-/// double-clicked kasaterm.app — whose process cwd is `/` — would
-/// otherwise leave the shell at root, where `cd Desktop` fails. Prefer
-/// HOME; fall back to the process cwd only when HOME is unset.
-/// Recursively walk a RestoreNode looking for the first leaf with a cwd.
-/// Used at launch to inherit the previous session's working directory
-/// without spinning up the rest of its layout.
-fn first_leaf_cwd(node: &socket::RestoreNode) -> Option<String> {
-    match node {
-        socket::RestoreNode::Leaf(p) => p
-            .cwd
-            .as_ref()
-            .and_then(|c| c.to_str().map(String::from)),
-        socket::RestoreNode::Split { a, b, .. } => {
-            first_leaf_cwd(a).or_else(|| first_leaf_cwd(b))
-        }
-    }
-}
 
 pub(crate) fn resolve_initial_cwd() -> Option<String> {
     if let Ok(dir) = std::env::var("KASATERM_CWD") {

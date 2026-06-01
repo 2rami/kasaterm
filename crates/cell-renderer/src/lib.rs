@@ -1,14 +1,27 @@
-//! Retained-mode GPU cell renderer for terminal-style grids.
+//! Framework-neutral, retained-mode GPU cell renderer for
+//! terminal-style grids — the rendering half of a terminal emulator,
+//! with no terminal state machine attached. Pair it with a parser
+//! crate (`alacritty_terminal`, `wezterm-term`, `vte`) for the cell
+//! model, then hand the resulting cells to this crate to draw.
 //!
-//! Replaces the `sugarloaf` immediate-mode `text.draw` path that
-//! shapes each visible glyph every frame (~30-50ms on a 164×63 grid).
-//! Here glyphs are baked into an atlas once per (codepoint, weight,
-//! style, size) tuple; rendering issues one instance per cell from a
-//! single quad pipeline.
+//! Glyphs are baked into a swash atlas once per (codepoint, weight,
+//! style, size) tuple; each frame issues one instance per cell from a
+//! single quad pipeline. On a 164×63 grid this drops per-frame cost
+//! from the ~30-50ms of shape-every-glyph paths down to a single
+//! instance-buffer write plus one draw call.
 //!
-//! Phase 1 surface: B&W ASCII only. Single font, no fallback, no
-//! per-cell RGB. Bigger pieces (color, bold/italic, CJK fallback,
-//! selection/preedit overlays) land in later phases.
+//! Pure GPU: it takes [`CellInstance`] arrays and a wgpu device — not
+//! any caller-side grid type — so it embeds under winit, egui, iced,
+//! or a bare wgpu surface without binding to a UI framework's paint
+//! path.
+//!
+//! Included: per-cell RGBA color, bold/italic, CJK/wide-char layout,
+//! emoji bitmaps, Nerd-icon cell fitting, box-drawing quads, and an
+//! optional sRGB→DisplayP3 conversion in the shader. Two Nerd fonts
+//! are bundled so icons render without a system-font install.
+//!
+//! See `examples/grid_bw.rs` for a self-contained winit window that
+//! scrolls a 600-line buffer through the pipeline.
 
 pub mod atlas;
 pub mod pipeline;

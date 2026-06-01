@@ -10,7 +10,7 @@ tmux-bridge.workspace = true
 pty-backend = { path = "../../crates/pty-backend" }
 agent-socket = { path = "../../crates/agent-socket" }
 hangul-ime = { path = "../../crates/hangul-ime" }
-cell-renderer = { path = "../../crates/cell-renderer" }
+kasa-cells = { path = "../../crates/cell-renderer" }
 wgpu = "28"
 # Direct HAL access — needed to reach wgpu's actual CAMetalLayer for
 # Display P3 colorspace tagging. The high-level wgpu Surface API

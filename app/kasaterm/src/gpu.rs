@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use cell_renderer::pipeline::CellInstance;
-use cell_renderer::{Atlas, AtlasEntry, GlyphKey, Pipeline, Shaper};
+use kasa_cells::pipeline::CellInstance;
+use kasa_cells::{Atlas, AtlasEntry, GlyphKey, Pipeline, Shaper};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tmux_bridge::screen::Cell;
 use winit::window::Window;
@@ -306,8 +306,8 @@ impl GpuRenderer {
         // the end of the chain so a user-installed Nerd Font still
         // wins, but blank-outline gaps in the primary fall through
         // here for a guaranteed glyph.
-        shaper.add_fallback_bytes(cell_renderer::CASCADIA_CODE_NF, 0);
-        shaper.add_fallback_bytes(cell_renderer::SYMBOLS_NERD_FONT_MONO, 0);
+        shaper.add_fallback_bytes(kasa_cells::CASCADIA_CODE_NF, 0);
+        shaper.add_fallback_bytes(kasa_cells::SYMBOLS_NERD_FONT_MONO, 0);
         // Markdown body font — a proportional gothic. Falls back to the primary
         // mono if the gothic can't load so the renderer never panics.
         let (md_font, md_idx) = md_font_path();
@@ -320,8 +320,8 @@ impl GpuRenderer {
         for (path, idx) in fallback_font_paths() {
             md_shaper.add_fallback_path(&path, idx);
         }
-        md_shaper.add_fallback_bytes(cell_renderer::CASCADIA_CODE_NF, 0);
-        md_shaper.add_fallback_bytes(cell_renderer::SYMBOLS_NERD_FONT_MONO, 0);
+        md_shaper.add_fallback_bytes(kasa_cells::CASCADIA_CODE_NF, 0);
+        md_shaper.add_fallback_bytes(kasa_cells::SYMBOLS_NERD_FONT_MONO, 0);
         // Bold weight of the markdown gothic.
         let (md_bold_font, md_bold_idx) = md_bold_font_path();
         let mut md_bold_shaper = Shaper::from_path(&md_bold_font, md_bold_idx)
@@ -330,8 +330,8 @@ impl GpuRenderer {
         for (path, idx) in fallback_font_paths() {
             md_bold_shaper.add_fallback_path(&path, idx);
         }
-        md_bold_shaper.add_fallback_bytes(cell_renderer::CASCADIA_CODE_NF, 0);
-        md_bold_shaper.add_fallback_bytes(cell_renderer::SYMBOLS_NERD_FONT_MONO, 0);
+        md_bold_shaper.add_fallback_bytes(kasa_cells::CASCADIA_CODE_NF, 0);
+        md_bold_shaper.add_fallback_bytes(kasa_cells::SYMBOLS_NERD_FONT_MONO, 0);
         let cell_w = shaper.cell_advance(font_size_px as f32).ceil();
         // Use the font's natural line metric (ascent+descent+leading)
         // for cell height instead of an arbitrary multiplier. Lines
