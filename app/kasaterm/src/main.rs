@@ -5234,8 +5234,13 @@ impl App {
         }
         // Last pane closed (e.g. user typed `exit` in the only shell):
         // shut the window so tmuxify exits cleanly the way users
-        // expect from a regular terminal.
-        if self.tmux.is_none() && self.pty.is_empty() {
+        // expect from a regular terminal. NOT in daemon mode: there self.pty
+        // is always empty (the daemon owns the PTYs), so a closed pane's eof
+        // frame lands in dead_panes and this would quit the whole app on every
+        // window/pane close. The daemon always keeps a pane alive (close spawns
+        // a fresh shell when it'd empty out), so the GUI never self-exits —
+        // quit goes through Cmd+Q / the menu.
+        if self.tmux.is_none() && self.pty.is_empty() && self.daemon_client.is_none() {
             event_loop.exit();
         }
     }
