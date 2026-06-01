@@ -10,7 +10,7 @@
 //! 이 모듈은 순수 파싱 함수만 둔다. 파일 tail/상태는 socket.rs의 watcher가
 //! 들고 이 함수들을 호출한다.
 
-use agent_socket::backend::PaneActivity;
+use kasa_socket::backend::PaneActivity;
 use std::collections::VecDeque;
 
 /// board의 intent에 보여줄 최근 도구 사용 개수.

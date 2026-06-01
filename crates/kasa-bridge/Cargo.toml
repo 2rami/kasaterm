@@ -1,5 +1,5 @@
 [package]
-name = "tmux-bridge"
+name = "kasa-bridge"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

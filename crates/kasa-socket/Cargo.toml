@@ -1,5 +1,5 @@
 [package]
-name = "agent-socket"
+name = "kasa-socket"
 description = "cmux-compatible Unix-socket JSON-RPC server. Speaks the same wire format as cmux's CLI so Claude Code's teammateMode (when it lands) drives tmuxify with no protocol shim."
 edition.workspace = true
 version.workspace = true

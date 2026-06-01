@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use agent_socket::backend::{Backend, PanelKind};
+use kasa_socket::backend::{Backend, PanelKind};
 use axum::{
     extract::Query, http::header, response::IntoResponse, routing::get, routing::post, Json,
 };

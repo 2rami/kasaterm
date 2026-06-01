@@ -6,7 +6,7 @@
 //! become real tmux `@N` strings and `list_surfaces` returns one entry
 //! per actually-open pane.
 
-use agent_socket::backend::{
+use kasa_socket::backend::{
     Backend, PaneActivity, SplitDirection, SurfaceInfo, WorkspaceInfo,
 };
 use anyhow::Result;
@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tmux_bridge::TmuxSession;
+use kasa_bridge::TmuxSession;
 
 use crate::transcript::{build_activity, parse_line, ToolEvent, RECENT_MAX};
 
@@ -318,7 +318,7 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
 /// cwd, whether it was running claude, and the newest claude session id under
 /// that cwd (for `claude --resume`). `cwd` is null when the shell pid/cwd
 /// can't be resolved — restore then falls back to the default cwd.
-pub fn pane_record(sess: &pty_backend::PtySession) -> serde_json::Value {
+pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     let shell_pid = sess.shell_pid();
     let cwd = shell_pid.and_then(pid_cwd);
     let was_claude = sess

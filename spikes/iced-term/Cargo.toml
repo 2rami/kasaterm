@@ -5,6 +5,6 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-tmux-bridge.workspace = true
+kasa-bridge.workspace = true
 iced = { version = "0.13", features = ["tokio", "advanced"] }
 tokio = { version = "1", features = ["time", "sync", "rt"] }

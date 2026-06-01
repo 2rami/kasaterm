@@ -1,5 +1,5 @@
 [package]
-name = "hangul-ime"
+name = "kasa-ime"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
-name = "pty-backend"
-description = "Direct PTY + alacritty_terminal backend. Phase C replacement for tmux-bridge so tmuxify can run natively on Windows (via portable-pty's ConPTY) and stop depending on a tmux daemon."
+name = "kasa-pty"
+description = "Direct PTY + alacritty_terminal backend. Phase C replacement for kasa-bridge so tmuxify can run natively on Windows (via portable-pty's ConPTY) and stop depending on a tmux daemon."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -13,12 +13,12 @@ serde.workspace = true
 portable-pty = "0.9"
 alacritty_terminal = "0.26"
 # Shared cell / color / ScreenUpdate types — tmuxify's renderer is
-# already keyed off these and we want pty-backend to be drop-in
-# compatible with tmux-bridge. The tmux-bridge crate itself stops
+# already keyed off these and we want kasa-pty to be drop-in
+# compatible with kasa-bridge. The kasa-bridge crate itself stops
 # being a runtime dependency once Phase D lands (kasaterm-cli +
-# tmux-bridge can be retired); the type re-use here is just the
+# kasa-bridge can be retired); the type re-use here is just the
 # shared vocabulary the renderer speaks.
-tmux-bridge.workspace = true
+kasa-bridge.workspace = true
 arboard = "3"
 # NFC-normalize PTY output so decomposed (NFD) Hangul jamo collapse into
 # precomposed syllables. cosmic_text (sugarloaf path) shaped jamo back

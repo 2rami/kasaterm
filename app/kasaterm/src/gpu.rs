@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use kasa_cells::pipeline::CellInstance;
 use kasa_cells::{Atlas, AtlasEntry, GlyphKey, Pipeline, Shaper};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use tmux_bridge::screen::Cell;
+use kasa_bridge::screen::Cell;
 use winit::window::Window;
 
 const ATLAS_SIZE: u32 = 2048;
@@ -1586,7 +1586,7 @@ impl GpuRenderer {
             let cell_h_px = self.cell_h * self.scale * pane.font_scale;
             for (r, row) in pane.rows.iter().enumerate() {
                 for (col, cell) in row.iter().enumerate() {
-                    let want_bg = !matches!(cell.bg, tmux_bridge::screen::Color::Default)
+                    let want_bg = !matches!(cell.bg, kasa_bridge::screen::Color::Default)
                         || cell.inverse;
                     let bg = cell_bg_rgba(cell);
                     if want_bg && bg[3] > 0 {

@@ -15,11 +15,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use agent_socket::transport::LocalStream;
-use pty_backend::PtyLayout;
+use kasa_socket::transport::LocalStream;
+use kasa_pty::PtyLayout;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tmux_bridge::ScreenUpdate;
+use kasa_bridge::ScreenUpdate;
 
 /// One window inside a session: its BSP layout tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,10 +188,10 @@ impl DaemonClient {
     /// Split the daemon's active pane along an axis (Horizontal = side-by-side,
     /// Vertical = stacked). The daemon picks the new pane id and pushes a
     /// `Layout` message back; we don't need the RPC reply.
-    pub fn split_dir(&self, dir: pty_backend::SplitDir) {
+    pub fn split_dir(&self, dir: kasa_pty::SplitDir) {
         let d = match dir {
-            pty_backend::SplitDir::Horizontal => "right",
-            pty_backend::SplitDir::Vertical => "down",
+            kasa_pty::SplitDir::Horizontal => "right",
+            kasa_pty::SplitDir::Vertical => "down",
         };
         self.rpc("surface.split", json!({ "direction": d }));
     }
@@ -214,6 +214,12 @@ impl DaemonClient {
 
     pub fn switch_window(&self, idx: usize) {
         self.rpc("window.switch", json!({ "idx": idx }));
+    }
+
+    /// Close window `idx` in the active session — daemon-authoritative, so the
+    /// closed window can't resurrect on the next state push.
+    pub fn close_window(&self, idx: usize) {
+        self.rpc("window.close", json!({ "idx": idx }));
     }
 
     /// Ask the daemon to open a non-PTY preview leaf (image or markdown) for

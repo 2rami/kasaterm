@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use eframe::egui;
-use tmux_bridge::{Cell, ScreenUpdate, StartOptions, TmuxSession};
+use kasa_bridge::{Cell, ScreenUpdate, StartOptions, TmuxSession};
 
 struct App {
     status: String,

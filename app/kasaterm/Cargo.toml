@@ -1,16 +1,16 @@
 [package]
 name = "kasaterm"
-description = "kasaterm — Cross-platform terminal multiplexer. winit + cell-renderer (wgpu, sRGB→DisplayP3 shader matrix) with a direct portable-pty + alacritty_terminal backend (Phase C, default) and a legacy tmux-bridge backend behind KASATERM_BACKEND=tmux. Exposes a cmux-compatible JSON-RPC socket so external agents can drive it."
+description = "kasaterm — Cross-platform terminal multiplexer. winit + cell-renderer (wgpu, sRGB→DisplayP3 shader matrix) with a direct portable-pty + alacritty_terminal backend (Phase C, default) and a legacy kasa-bridge backend behind KASATERM_BACKEND=tmux. Exposes a cmux-compatible JSON-RPC socket so external agents can drive it."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [dependencies]
-tmux-bridge.workspace = true
-pty-backend = { path = "../../crates/pty-backend" }
-agent-socket = { path = "../../crates/agent-socket" }
-hangul-ime = { path = "../../crates/hangul-ime" }
-kasa-cells = { path = "../../crates/cell-renderer" }
+kasa-bridge.workspace = true
+kasa-pty = { path = "../../crates/kasa-pty" }
+kasa-socket = { path = "../../crates/kasa-socket" }
+kasa-ime = { path = "../../crates/kasa-ime" }
+kasa-cells = { path = "../../crates/kasa-cells" }
 wgpu = "28"
 # Direct HAL access — needed to reach wgpu's actual CAMetalLayer for
 # Display P3 colorspace tagging. The high-level wgpu Surface API
@@ -28,7 +28,7 @@ serde_json = "1"
 bincode.workspace = true
 pollster = "0.4"
 arboard = "3"
-kasaspace-mcp = { version = "0.1.0", path = "../../crates/kasaspace-mcp" }
+kasa-mcp = { version = "0.1.0", path = "../../crates/kasa-mcp" }
 # Git-status panel webview. Separate OS window so it can't touch the wgpu
 # surface the terminal renders into — wry runs WKWebView/WebView2/WebKitGTK
 # in its own layer. raw-window-handle 0.6 matches the workspace's winit 0.30.

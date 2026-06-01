@@ -17,7 +17,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use hangul::{dubeolsik, Composer};
-use tmux_bridge::{StartOptions, TmuxSession};
+use kasa_bridge::{StartOptions, TmuxSession};
 
 use std::fmt::Write as _;
 use std::time::Duration;

@@ -24,8 +24,8 @@
 //! through `jq`. Exit code is 0 on `ok: true`, 1 on `ok: false`, 2 on
 //! a transport / framing error.
 
-use agent_socket::protocol::{Request, Response};
-use agent_socket::transport::LocalStream;
+use kasa_socket::protocol::{Request, Response};
+use kasa_socket::transport::LocalStream;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
