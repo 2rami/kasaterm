@@ -176,6 +176,15 @@ pub trait Backend: Send + Sync {
     fn close_surface(&self, _surface_id: &str) -> Result<()> {
         anyhow::bail!("close_surface unsupported by this backend")
     }
+    /// Fold a surface into its session's dock — the layout leaf is removed but
+    /// the PTY stays alive (kill-free). Default: unsupported.
+    fn dock_surface(&self, _surface_id: &str) -> Result<()> {
+        anyhow::bail!("dock_surface unsupported by this backend")
+    }
+    /// Restore a docked surface back into the active window. Default: unsupported.
+    fn undock_surface(&self, _surface_id: &str) -> Result<()> {
+        anyhow::bail!("undock_surface unsupported by this backend")
+    }
     /// Set a surface's header title (rename). Default: unsupported.
     fn rename_surface(&self, _surface_id: &str, _title: &str) -> Result<()> {
         anyhow::bail!("rename_surface unsupported by this backend")
@@ -188,6 +197,13 @@ pub trait Backend: Send + Sync {
     /// Swap two surfaces' positions in the layout. Default: unsupported.
     fn swap_surfaces(&self, _a: &str, _b: &str) -> Result<()> {
         anyhow::bail!("swap_surfaces unsupported by this backend")
+    }
+    /// Move `surface_id` beside `target` along `direction` — detach its leaf
+    /// and re-insert next to target. The PTY stays alive (pure layout move,
+    /// unlike close). Drag-and-drop relocation routes through this so the
+    /// daemon stays the layout authority. Default: unsupported.
+    fn move_surface(&self, _surface_id: &str, _target: &str, _direction: SplitDirection) -> Result<()> {
+        anyhow::bail!("move_surface unsupported by this backend")
     }
     /// Current working directory of the active pane's shell, if the backend
     /// tracks it. Lets the git panel follow the user's terminal directory.

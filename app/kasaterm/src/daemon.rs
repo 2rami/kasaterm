@@ -50,6 +50,11 @@ struct DaemonSession {
     /// User-set display name from the session panel's rename. `None` falls
     /// back to the auto-derived label (active-window first-pane cwd basename).
     name: Option<String>,
+    /// Panes folded into this session's dock — layout leaf removed but the
+    /// PtySession stays alive in the global `pty` map, so reconcile never kills
+    /// it (pty is live) and prune sees no ghost leaf (no leaf). Per-session so a
+    /// session switch shows only this 지구's dock. Restore via undock_surface.
+    docked: Vec<String>,
 }
 
 struct DaemonState {
@@ -75,6 +80,13 @@ struct DaemonState {
     /// under the daemon — so the board lives here now.
     collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
     binds: Arc<Mutex<Vec<(String, PathBuf)>>>,
+    /// pane id → cwd path, refreshed by the 1s cwd-poll thread. state_view
+    /// reads this instead of spawning `lsof` per pane on every broadcast — so a
+    /// close/dock/split RPC returns without blocking on N subprocess calls (the
+    /// dock× 0.2s lag). spawn_pane seeds new panes; the poll fills the rest
+    /// within 1s. cwd is display-only (breadcrumb/label), never a correctness
+    /// input, so a brief stale/empty entry is harmless.
+    cwd_cache: Mutex<HashMap<String, String>>,
     /// Non-terminal panes (image / markdown previews), keyed by pane id. These
     /// have no PtySession — they live only as a layout leaf + this metadata,
     /// which `state_view` ships to the GUI to decode/render. See `open_preview`.
@@ -152,7 +164,7 @@ impl DaemonState {
                 s.active_window = s.windows.len() - 1;
             }
         }
-        sessions.retain(|s| !s.windows.is_empty());
+        sessions.retain(|s| !s.windows.is_empty() || !s.docked.is_empty());
         let mut asx = self.active_session.lock().unwrap();
         if *asx >= sessions.len() && !sessions.is_empty() {
             *asx = sessions.len() - 1;
@@ -211,8 +223,12 @@ impl DaemonState {
                     s.windows
                         .get(s.active_window)
                         .and_then(|w| w.leaves().first().map(|l| l.to_string()))
-                        .and_then(|id| pty.get(&id).and_then(|p| p.shell_pid()).and_then(pid_cwd))
-                        .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+                        .and_then(|id| self.cwd_cache.lock().unwrap().get(&id).cloned())
+                        .and_then(|p| {
+                            std::path::Path::new(&p)
+                                .file_name()
+                                .map(|f| f.to_string_lossy().into_owned())
+                        })
                         .unwrap_or_default()
                 });
                 SessionView {
@@ -223,20 +239,31 @@ impl DaemonState {
                         .collect(),
                     active_window: s.active_window,
                     label,
+                    docked: s
+                        .docked
+                        .iter()
+                        .map(|id| {
+                            let label = self
+                                .cwd_cache
+                                .lock()
+                                .unwrap()
+                                .get(id)
+                                .and_then(|p| {
+                                    std::path::Path::new(p)
+                                        .file_name()
+                                        .map(|f| f.to_string_lossy().into_owned())
+                                })
+                                .unwrap_or_default();
+                            crate::stream::DockedView { id: id.clone(), label }
+                        })
+                        .collect(),
                 }
             })
             .collect();
-        // Per-pane cwd for the GUI breadcrumb — resolved here because the
-        // daemon owns the PtySessions. lsof-per-pane, but state_view only
-        // fires on structural changes + the ~1s cwd poll, never per frame.
-        let pane_cwds = pty
-            .iter()
-            .filter_map(|(id, s)| {
-                s.shell_pid()
-                    .and_then(pid_cwd)
-                    .map(|p| (id.clone(), p.to_string_lossy().into_owned()))
-            })
-            .collect();
+        // Per-pane cwd for the GUI breadcrumb — read from the poll-filled cache,
+        // NOT lsof, so close/dock/split/move broadcasts return without blocking
+        // on N subprocess calls. The 1s cwd poll keeps the cache fresh.
+        let pane_cwds = self.cwd_cache.lock().unwrap().clone();
         // tty is fixed for the pane's life (the master's slave path), so unlike
         // cwd it needs no poll — just ship it whenever state broadcasts.
         let pane_ttys = pty
@@ -297,6 +324,11 @@ fn spawn_forwarder(screens: ScreenReceiver<ScreenUpdate>, out: Sender<StreamMsg>
 /// Spawn a fresh pane shell with an inherited cwd, register its forwarder, and
 /// insert it into the pty map. Returns the new session.
 fn spawn_pane(state: &DaemonState, pane_id: &str, cwd: Option<String>) -> Result<Arc<PtySession>> {
+    // Seed the cwd cache so the new pane's breadcrumb/label shows immediately
+    // instead of waiting up to 1s for the poll thread's first scan.
+    if let Some(c) = &cwd {
+        state.cwd_cache.lock().unwrap().insert(pane_id.to_string(), c.clone());
+    }
     let sess = Arc::new(PtySession::start(PtyOptions {
         shell: None,
         cwd,
@@ -386,6 +418,10 @@ impl Backend for DaemonBackend {
         Ok(())
     }
     fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo> {
+        // Prune dead leaves before choosing the split anchor — a closed pane
+        // still lingering in this window's layout could otherwise become the
+        // anchor (or the active-drift fallback) and orphan/multiply the new pane.
+        self.state.reconcile_layout();
         let axis = match direction {
             SplitDirection::Left | SplitDirection::Right => SplitDir::Horizontal,
             SplitDirection::Up | SplitDirection::Down => SplitDir::Vertical,
@@ -408,15 +444,17 @@ impl Backend for DaemonBackend {
         let attached = self
             .state
             .with_active_layout(|lay| lay.split_leaf(&active, axis, new_id.clone()));
-        if attached.is_none() {
-            // No active session/window to split into (e.g. the last pane was
-            // closed, emptying `sessions`). Adopt the new pane as a fresh
-            // session so a split can never orphan into an invisible pane.
+        // None = no active session/window; Some(false) = split_leaf couldn't
+        // find the anchor leaf. Either way the new pane didn't attach, so adopt
+        // it as a fresh session — a split must never orphan a pane (alive in the
+        // pty map, present in no layout → unrenderable, uncloseable).
+        if !matches!(attached, Some(true)) {
             let mut sessions = self.state.sessions.lock().unwrap();
             sessions.push(DaemonSession {
                 windows: vec![PtyLayout::single(new_id.clone())],
                 active_window: 0,
                 name: None,
+                docked: Vec::new(),
             });
             *self.state.active_session.lock().unwrap() = sessions.len() - 1;
         }
@@ -470,6 +508,19 @@ impl Backend for DaemonBackend {
     fn close_surface(&self, surface_id: &str) -> Result<()> {
         self.state.pty.lock().unwrap().remove(surface_id); // drop = kill
         self.state.previews.lock().unwrap().remove(surface_id); // preview, if any
+        // A docked pane has no layout leaf for remove_pane to find, so scrub the
+        // docked Vec too — a killed PTY must vanish from the dock (invariant),
+        // else its chip resurrects on the next broadcast and run_daemon re-spawns
+        // a zombie shell on restart. Mirror undock_surface's docked removal.
+        {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            for s in sessions.iter_mut() {
+                if let Some(pos) = s.docked.iter().position(|d| d == surface_id) {
+                    s.docked.remove(pos);
+                    break;
+                }
+            }
+        }
         let emptied = self.state.remove_pane(surface_id);
         if emptied {
             // That was the last pane of the last session. Rather than leave a
@@ -485,6 +536,7 @@ impl Backend for DaemonBackend {
                 windows: vec![PtyLayout::single(new_id.clone())],
                 active_window: 0,
                 name: None,
+                docked: Vec::new(),
             });
             *self.state.active_session.lock().unwrap() = 0;
             *self.state.active.lock().unwrap() = new_id;
@@ -497,6 +549,154 @@ impl Backend for DaemonBackend {
         // closed) has no grid in the GUI yet and renders blank with input
         // going nowhere — the "Cmd+W then everything's dead" bug. close_session
         // and close_window already do this.
+        self.state.push_active_snapshots();
+        Ok(())
+    }
+    fn dock_surface(&self, surface_id: &str) -> Result<()> {
+        // An idle pane (bare prompt, no child command) isn't worth folding into
+        // the dock — close it outright so no empty chip appears (거노 요청). Only
+        // panes with a running job (claude/build/editor) become dock chips.
+        let idle = {
+            let sess = self.state.pty.lock().unwrap().get(surface_id).cloned();
+            sess.map(|s| !s.has_active_job()).unwrap_or(true)
+        };
+        if idle {
+            return self.close_surface(surface_id);
+        }
+        // Fold, don't kill: the PtySession stays in the global `pty` map (so
+        // reconcile never prunes it — pty is live), only the layout leaf goes.
+        // Register in the owning session's dock BEFORE remove_pane, because
+        // remove_pane drops a session whose windows all emptied — the retain
+        // guard keeps it alive only if `docked` is already non-empty.
+        let located = {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            let mut hit = false;
+            'scan: for s in sessions.iter_mut() {
+                for w in &s.windows {
+                    if w.leaves().iter().any(|&l| l == surface_id) {
+                        if !s.docked.iter().any(|d| d == surface_id) {
+                            s.docked.push(surface_id.to_string());
+                        }
+                        hit = true;
+                        break 'scan;
+                    }
+                }
+            }
+            hit
+        };
+        if !located {
+            return Ok(()); // not in any layout (already docked/closed) — no-op
+        }
+        self.state.remove_pane(surface_id); // layout only; pty left alive
+        self.state.update_active_pane();
+        self.state.broadcast_state();
+        self.state.push_active_snapshots();
+        Ok(())
+    }
+    fn undock_surface(&self, surface_id: &str) -> Result<()> {
+        // Restore a folded pane into the active window. Find its owning session,
+        // make that session active, then reattach beside the active leaf (or as
+        // the sole leaf if the window emptied). reconcile first so the anchor is
+        // always a live leaf (split_surface uses the same guard).
+        self.state.reconcile_layout();
+        let target = {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            let mut idx = None;
+            for (si, s) in sessions.iter_mut().enumerate() {
+                if let Some(pos) = s.docked.iter().position(|d| d == surface_id) {
+                    s.docked.remove(pos);
+                    idx = Some(si);
+                    break;
+                }
+            }
+            idx
+        };
+        let Some(si) = target else {
+            return Ok(()); // not docked anywhere — no-op
+        };
+        *self.state.active_session.lock().unwrap() = si;
+        let anchor = {
+            let lv = self.state.active_window_leaves();
+            let cur = self.state.active.lock().unwrap().clone();
+            if lv.iter().any(|l| *l == cur) {
+                Some(cur)
+            } else {
+                lv.into_iter().next()
+            }
+        };
+        let attached = match anchor {
+            Some(a) => self.state.with_active_layout(|lay| {
+                lay.insert_beside(&a, SplitDir::Horizontal, false, surface_id.to_string())
+            }),
+            None => self.state.with_active_layout(|lay| {
+                *lay = PtyLayout::single(surface_id.to_string());
+                true
+            }),
+        };
+        if attached == Some(true) {
+            *self.state.active.lock().unwrap() = surface_id.to_string();
+        }
+        self.state.broadcast_state();
+        self.state.push_active_snapshots();
+        Ok(())
+    }
+    fn move_surface(&self, surface_id: &str, target: &str, direction: SplitDirection) -> Result<()> {
+        if surface_id == target {
+            return Ok(());
+        }
+        // reconcile so the anchor is always a live leaf (split/undock share this).
+        self.state.reconcile_layout();
+        let (axis, before) = match direction {
+            SplitDirection::Left => (SplitDir::Horizontal, true),
+            SplitDirection::Right => (SplitDir::Horizontal, false),
+            SplitDirection::Up => (SplitDir::Vertical, true),
+            SplitDirection::Down => (SplitDir::Vertical, false),
+        };
+        // Locate target's session+window; make it active so with_active_layout
+        // operates on that tree (drag drops onto a visible pane).
+        let located = {
+            let sessions = self.state.sessions.lock().unwrap();
+            let mut hit = None;
+            'scan: for (si, s) in sessions.iter().enumerate() {
+                for (wi, w) in s.windows.iter().enumerate() {
+                    if w.leaves().iter().any(|&l| l == target) {
+                        hit = Some((si, wi));
+                        break 'scan;
+                    }
+                }
+            }
+            hit
+        };
+        let Some((si, wi)) = located else {
+            return Ok(()); // target gone — drop the move
+        };
+        *self.state.active_session.lock().unwrap() = si;
+        if let Some(s) = self.state.sessions.lock().unwrap().get_mut(si) {
+            s.active_window = wi;
+        }
+        // Detach the moving leaf and re-attach beside target — both in the
+        // active window. PTY untouched (pure layout move, unlike close). If
+        // moving isn't in this window (cross-window drag, not yet supported)
+        // remove_leaf returns false and we skip the insert so it's never
+        // duplicated into a second copy.
+        let moved = self
+            .state
+            .with_active_layout(|lay| {
+                if !lay.remove_leaf(surface_id) {
+                    return false;
+                }
+                if !lay.insert_beside(target, axis, before, surface_id.to_string()) {
+                    if let Some(a) = lay.leaves().first().map(|s| s.to_string()) {
+                        lay.insert_beside(&a, axis, before, surface_id.to_string());
+                    }
+                }
+                true
+            })
+            .unwrap_or(false);
+        if moved {
+            *self.state.active.lock().unwrap() = surface_id.to_string();
+        }
+        self.state.broadcast_state();
         self.state.push_active_snapshots();
         Ok(())
     }
@@ -601,6 +801,7 @@ impl Backend for DaemonBackend {
                 windows: vec![PtyLayout::single(new_id.clone())],
                 active_window: 0,
                 name: None,
+                docked: Vec::new(),
             });
             *self.state.active_session.lock().unwrap() = sessions.len() - 1;
         }
@@ -770,6 +971,7 @@ impl Backend for DaemonBackend {
                 windows: vec![PtyLayout::single(new_id.clone())],
                 active_window: 0,
                 name: None,
+                docked: Vec::new(),
             }];
             *self.state.active_session.lock().unwrap() = 0;
             old
@@ -843,7 +1045,7 @@ fn prune_ghost_leaves(
             s.active_window = s.windows.len() - 1;
         }
     }
-    sessions.retain(|s| !s.windows.is_empty());
+    sessions.retain(|s| !s.windows.is_empty() || !s.docked.is_empty());
     if *active_session >= sessions.len() && !sessions.is_empty() {
         *active_session = sessions.len() - 1;
     }
@@ -860,7 +1062,7 @@ fn save_daemon_state(state: &DaemonState, path: &Path) {
                     .iter()
                     .filter_map(|w| serde_json::to_value(w).ok())
                     .collect();
-                json!({ "active_window": s.active_window, "windows": windows, "name": s.name })
+                json!({ "active_window": s.active_window, "windows": windows, "name": s.name, "docked": s.docked })
             })
             .collect()
     };
@@ -907,7 +1109,12 @@ fn load_daemon_state(
                 .and_then(|x| x.as_str())
                 .filter(|n| !n.is_empty())
                 .map(String::from);
-            Some(DaemonSession { windows, active_window, name })
+            let docked = s
+                .get("docked")
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            Some(DaemonSession { windows, active_window, name, docked })
         })
         .collect();
     if sessions.is_empty() {
@@ -959,6 +1166,7 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
                 windows: vec![PtyLayout::single(PANE_0)],
                 active_window: 0,
                 name: None,
+                docked: Vec::new(),
             }],
             0,
             HashMap::new(),
@@ -995,6 +1203,32 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
                 map.insert(leaf.to_string(), sess);
             }
         }
+        // Dock panes have no layout leaf — spawn them too so a restored chip is
+        // a live shell that undock can reattach (else the chip points at a dead
+        // PTY). Same PtyOptions as a leaf pane.
+        for d in &s.docked {
+            let meta = metas.get(d);
+            let cwd = meta.and_then(|m| m.cwd.clone()).or_else(|| default_cwd.clone());
+            let sess = Arc::new(PtySession::start(PtyOptions {
+                shell: None,
+                cwd,
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+                pane_id: d.to_string(),
+                initial_scrollback: Vec::new(),
+            })?);
+            spawn_forwarder(sess.screens.clone(), out_tx.clone());
+            if let Some(m) = meta {
+                if m.was_claude {
+                    resumes.push((sess.clone(), m.session_id.clone()));
+                }
+            }
+            if let Some(n) = d.strip_prefix('%').and_then(|s| s.parse::<u32>().ok()) {
+                max_id = max_id.max(n);
+            }
+            map.insert(d.to_string(), sess);
+        }
     }
     // Active pane = active session's active window's first leaf.
     let active = sessions
@@ -1015,6 +1249,7 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         collab_auto: Arc::new(Mutex::new(HashMap::new())),
         binds: Arc::new(Mutex::new(Vec::new())),
         previews: Mutex::new(HashMap::new()),
+        cwd_cache: Mutex::new(HashMap::new()),
     });
 
     // Cold restore (claude --resume into a restored pane) is deferred — the
@@ -1079,7 +1314,19 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
                         .collect()
                 };
                 if cur != last {
+                    // Publish the fresh cwds so state_view reads them from the
+                    // cache instead of re-spawning lsof per pane on every RPC
+                    // broadcast. Whole-map replace drops cwds of closed panes.
+                    *state.cwd_cache.lock().unwrap() = cur.clone();
                     last = cur;
+                    // Reconcile first — the RPC broadcast paths (broadcast_state)
+                    // do, but this poll path didn't. A close that lands mid-poll
+                    // could otherwise ship a layout still referencing the dead
+                    // pane, and the GUI's ws.panes.retain repaints it (the
+                    // "closed pane resurrects when you open a new one" race).
+                    // reconcile_layout is idempotent: it only prunes leaves with
+                    // no live PTY, never resurrects or mutates valid ones.
+                    state.reconcile_layout();
                     let _ = state.out_tx.send(StreamMsg::State(state.state_view()));
                 }
             }
@@ -1163,7 +1410,7 @@ mod ghost_leaf_tests {
     }
 
     fn session(windows: Vec<PtyLayout>, active_window: usize) -> DaemonSession {
-        DaemonSession { windows, active_window, name: None }
+        DaemonSession { windows, active_window, name: None, docked: Vec::new() }
     }
 
     // Split(%0, %4) where %4 has no PTY → collapses to the live %0.

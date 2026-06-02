@@ -88,6 +88,24 @@ impl PtyLayout {
         }
     }
 
+    /// True when two trees have the same shape — identical leaf ids in the same
+    /// positions AND the same split directions — IGNORING split ratios. Lets the
+    /// GUI skip a full re-adopt on a cwd-only poll (shape unchanged) while still
+    /// catching a move/swap/split (shape changed). A plain leaves-Vec compare
+    /// misses a move that keeps the same leaves but flips a split's direction
+    /// (좌우 → 상하) — exactly drag-relocation. Ratios are excluded so a
+    /// divider's drag-set ratio (the daemon doesn't store it) isn't a change.
+    pub fn same_shape(&self, other: &PtyLayout) -> bool {
+        match (self, other) {
+            (PtyLayout::Leaf { pane_id: a }, PtyLayout::Leaf { pane_id: b }) => a == b,
+            (
+                PtyLayout::Split { dir: d1, a: a1, b: b1, .. },
+                PtyLayout::Split { dir: d2, a: a2, b: b2, .. },
+            ) => d1 == d2 && a1.same_shape(a2) && b1.same_shape(b2),
+            _ => false,
+        }
+    }
+
     /// Remove the leaf with `target` pane id. Its sibling absorbs the
     /// space (the parent Split collapses into the surviving child).
     /// Returns true if removed. Removing the last leaf returns false —
