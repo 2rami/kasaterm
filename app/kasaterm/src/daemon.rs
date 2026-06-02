@@ -237,11 +237,18 @@ impl DaemonState {
                     .map(|p| (id.clone(), p.to_string_lossy().into_owned()))
             })
             .collect();
+        // tty is fixed for the pane's life (the master's slave path), so unlike
+        // cwd it needs no poll — just ship it whenever state broadcasts.
+        let pane_ttys = pty
+            .iter()
+            .filter_map(|(id, s)| s.tty().map(|t| (id.clone(), t.to_string())))
+            .collect();
         StateView {
             sessions: views,
             active_session: *self.active_session.lock().unwrap(),
             active_pane: Some(self.active.lock().unwrap().clone()),
             pane_cwds,
+            pane_ttys,
             pane_previews: self.previews.lock().unwrap().clone(),
         }
     }
@@ -364,8 +371,18 @@ impl Backend for DaemonBackend {
             if let Some(s) = self.state.sessions.lock().unwrap().get_mut(si) {
                 s.active_window = wi;
             }
+            *self.state.active.lock().unwrap() = surface_id.to_string();
+        } else {
+            // The pane isn't in any layout — the GUI focused a pane it just
+            // closed (close/focus race). Setting a dead pane active makes a
+            // later split fall back to spawning a fresh session, so the closed
+            // pane appears to "resurrect" (and that orphan never gets resized,
+            // so its grid/input row is wrong). Re-anchor to a live leaf instead.
+            self.state.update_active_pane();
         }
-        *self.state.active.lock().unwrap() = surface_id.to_string();
+        // Reflect the focus change to GUI + disk so the active pointer never
+        // drifts out of sync — that drift is the focus-then-split orphan source.
+        self.state.broadcast_state();
         Ok(())
     }
     fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo> {

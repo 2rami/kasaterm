@@ -96,6 +96,10 @@ pub struct PtySession {
     screens_tx: Sender<ScreenUpdate>,
     title_handle: Arc<Mutex<Option<String>>>,
     pane_id: String,
+    /// The shell's controlling tty short name (e.g. "ttys004"), captured from
+    /// the PTY master at spawn — what ghostty / Terminal.app surface. Immutable
+    /// for the pane's life; None on Windows. Shown in the pane header.
+    tty_short: Option<String>,
 }
 
 impl PtySession {
@@ -325,6 +329,7 @@ impl PtySession {
             screens_tx: tx,
             title_handle,
             pane_id: opts.pane_id.clone(),
+            tty_short,
         })
     }
 
@@ -338,6 +343,12 @@ impl PtySession {
     /// the active pane's cwd for the git panel.
     pub fn shell_pid(&self) -> Option<u32> {
         self.shell_pid
+    }
+
+    /// The shell's controlling tty short name (e.g. "ttys004"), or None on
+    /// Windows. Shown in the pane header — mirrors ghostty / Terminal.app.
+    pub fn tty(&self) -> Option<&str> {
+        self.tty_short.as_deref()
     }
 
     pub fn active_process_name(&self) -> Option<String> {
