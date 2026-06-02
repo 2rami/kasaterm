@@ -67,6 +67,12 @@ pub struct StateView {
     /// Optional so an older daemon stream still deserializes.
     #[serde(default)]
     pub pane_cwds: std::collections::HashMap<String, String>,
+    /// Per-pane controlling tty short name (pane id → "ttys004"), for the pane
+    /// header — ghostty / Terminal.app surface this. The daemon resolves it (it
+    /// owns the PtySessions). Immutable per pane, so it rides the StateView.
+    /// Optional so an older daemon stream still deserializes.
+    #[serde(default)]
+    pub pane_ttys: std::collections::HashMap<String, String>,
     /// Non-terminal panes (image / markdown), keyed by pane id. The GUI builds
     /// a `PaneContent::Image/Markdown` for each from the path. Optional so an
     /// older daemon stream still deserializes.

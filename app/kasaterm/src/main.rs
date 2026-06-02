@@ -2359,6 +2359,13 @@ struct App {
     /// out to `lsof`, so resolving it per pane on every frame would spawn a
     /// burst during a scroll/hover storm. See `refresh_pane_cwds`.
     pane_cwd_cache: HashMap<String, std::path::PathBuf>,
+    /// Per-pane controlling tty short name (pane id → "ttys004") from the
+    /// daemon's StateView. Shown in the pane header; fixed per pane.
+    pane_tty_cache: HashMap<String, String>,
+    /// Single-pane Cmd+W in daemon mode sets this to close the GUI window
+    /// (ghostty-style) on the next about_to_wait, instead of killing the pane.
+    /// The daemon keeps the session alive so relaunch restores it.
+    should_exit: bool,
     /// Last `refresh_pane_cwds` sweep — rate-limits the lsof calls.
     pane_cwd_check: Option<Instant>,
     /// Preview panes (image/markdown) already materialized from the daemon's
@@ -2556,6 +2563,8 @@ impl App {
             last_claude_status: None,
             last_window_title_check: None,
             pane_cwd_cache: HashMap::new(),
+            pane_tty_cache: HashMap::new(),
+            should_exit: false,
             pane_cwd_check: None,
             applied_previews: HashMap::new(),
             show_pane_numbers: false,
@@ -4610,7 +4619,12 @@ impl App {
             // Box hit-test runs in whole-grid cells (header included, no
             // inset) so a click anywhere in the pane box selects it.
             let gcol = ((px - sb - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as i32;
-            let grow = ((py - TITLE_HEIGHT).max(0.0) / self.cell.h).floor() as i32;
+            // Render shifts every split pane down by the header band (origin_y
+            // += header_shift, see render_frame_gpu). The box hit-test must
+            // subtract the same band, or the lower pane's rows map ~one header
+            // above where they're actually drawn — clicks / scroll there miss
+            // the pane entirely.
+            let grow = ((py - TITLE_HEIGHT - header_h).max(0.0) / self.cell.h).floor() as i32;
             for leaf in layout.leaves() {
                 if let Layout::Pane { id, x, y, w, h } = leaf {
                     let (bx, by, bw, bh) = (*x as i32, *y as i32, *w as i32, *h as i32);
@@ -5522,6 +5536,17 @@ impl App {
     /// user's exit there.
     fn close_active_pane(&mut self) {
         if let Some(client) = self.daemon_client.as_ref() {
+            // Single pane (this session's only window holds one leaf): ghostty
+            // behavior — don't close it (the daemon would fresh-spawn a
+            // replacement shell and the GUI desyncs into a dead pane). Flag the
+            // GUI window to exit; the daemon keeps this pane/session alive on
+            // disk, so the next launch restores it. Multi-pane closes as usual.
+            let single = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len()) <= 1
+                && self.windows.len() <= 1;
+            if single {
+                self.should_exit = true;
+                return;
+            }
             if let Some(id) = self.ws.lock().unwrap().active_pane.clone() {
                 client.close(&id);
             }
@@ -7484,6 +7509,17 @@ impl App {
                     } else {
                         format!("{id} · {label}")
                     };
+                    // Append the pane's real OS tty (ghostty-style) — daemon
+                    // cache first (the daemon owns the PTY), else local pty.
+                    let tty = self
+                        .pane_tty_cache
+                        .get(&id)
+                        .cloned()
+                        .or_else(|| self.pty.get(&id).and_then(|p| p.tty().map(str::to_string)));
+                    let label = match tty {
+                        Some(t) => format!("{label}  ·  {t}"),
+                        None => label,
+                    };
                     headers.push(HeaderInfo {
                         id: id.clone(),
                         x: WINDOW_PADDING + sidebar_w + x_cells as f32 * self.cell.w,
@@ -7929,7 +7965,8 @@ impl App {
                 // redundant but still useful as "which pane has focus".
                 let title_text: String = {
                     let ws = self.ws.lock().unwrap();
-                    ws.active_pane
+                    let active = ws.active_pane.clone();
+                    let title = active
                         .as_deref()
                         .and_then(|id| ws.panes.get(id).map(|p| (id.to_string(), p.title.clone())))
                         .and_then(|(id, osc)| {
@@ -7940,7 +7977,21 @@ impl App {
                                     .filter(|s| !s.is_empty())
                             })
                         })
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    // Append the pane's real OS tty (ghostty-style) — daemon
+                    // cache first (the daemon owns the PTY in daemon mode), else
+                    // the local pty session.
+                    let tty = active.as_deref().and_then(|id| {
+                        self.pane_tty_cache
+                            .get(id)
+                            .cloned()
+                            .or_else(|| self.pty.get(id).and_then(|p| p.tty().map(str::to_string)))
+                    });
+                    match (title.is_empty(), tty) {
+                        (false, Some(t)) => format!("{title}  ·  {t}"),
+                        (true, Some(t)) => t,
+                        (_, None) => title,
+                    }
                 };
                 if !title_text.is_empty() {
                     let tw = g.measure_chrome_text(&title_text, chrome_font, true);
@@ -8813,6 +8864,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .iter()
                 .map(|(id, p)| (id.clone(), std::path::PathBuf::from(p)))
                 .collect();
+            self.pane_tty_cache = view.pane_ttys.clone();
             // Project the daemon's active session onto the GUI's own
             // stash-swap fields so the existing sidebar (windows) renderer
             // works unchanged: active window's slot is None (its layout lives
@@ -10392,6 +10444,12 @@ impl ApplicationHandler<UserEvent> for App {
         // should disappear from the layout on the very next loop turn
         // so the user sees the gap collapse immediately.
         self.reap_dead_panes(event_loop);
+        // Single-pane Cmd+W (daemon mode) asked to close the window ghostty-
+        // style. The daemon keeps the session, so this exit is non-destructive
+        // — relaunch reconnects and restores the pane.
+        if self.should_exit {
+            event_loop.exit();
+        }
         // Drain socket commands from external cmux clients. These run
         // through the same split/focus/send paths Cmd+D etc use, so
         // visible behavior is identical regardless of whether the
