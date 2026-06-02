@@ -60,9 +60,12 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "window.close" => switch_by_idx(id, &req.params, |i| backend.close_window(i)),
         "session.close" => switch_by_idx(id, &req.params, |i| backend.close_session(i)),
         "surface.close" => surface_close(backend, id, &req.params),
+        "surface.dock" => surface_dock(backend, id, &req.params),
+        "surface.undock" => surface_undock(backend, id, &req.params),
         "surface.rename" => surface_rename(backend, id, &req.params),
         "surface.set_color" => surface_set_color(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
+        "surface.move" => surface_move(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),
         "surface.open_preview" => surface_open_preview(backend, id, &req.params),
         "collab.board" => {
@@ -179,6 +182,9 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.scroll",
                 "surface.peek",
                 "surface.open_preview",
+                "surface.dock",
+                "surface.undock",
+                "surface.move",
                 "collab.board",
                 "window.layout",
                 "collab.bind_transcript",
@@ -257,6 +263,28 @@ fn surface_close(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     }
 }
 
+fn surface_dock(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.dock requires `surface_id` (string)"),
+    };
+    match backend.dock_surface(surface_id) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_undock(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.undock requires `surface_id` (string)"),
+    };
+    match backend.undock_surface(surface_id) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
 fn surface_rename(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
         Some(s) => s,
@@ -297,6 +325,30 @@ fn surface_swap(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         None => return param_err(id, "surface.swap requires `b` (surface_id)"),
     };
     match backend.swap_surfaces(a, b) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_move(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.move requires `surface_id` (string)"),
+    };
+    let target = match params.get("target").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.move requires `target` (surface_id)"),
+    };
+    let dir = match params.get("direction").and_then(|v| v.as_str()) {
+        Some("left") => SplitDirection::Left,
+        Some("right") => SplitDirection::Right,
+        Some("up") => SplitDirection::Up,
+        Some("down") => SplitDirection::Down,
+        _ => {
+            return param_err(id, "surface.move requires `direction` (left/right/up/down)")
+        }
+    };
+    match backend.move_surface(surface_id, target, dir) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

@@ -119,6 +119,9 @@ const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
 /// un-split window renders no header at all (matches the iTerm
 /// behavior the user pointed at).
 const PANE_HEADER_HEIGHT: f32 = 30.0;
+/// Bottom dock bar height (logical px) — folded-pane chips. Reserved from the
+/// grid only when the dock is non-empty.
+const DOCK_HEIGHT: f32 = 40.0;
 /// 활성 탭 상단 accent 선 두께(logical px). BORDER stroke(1px)보다 살짝 굵게.
 const ACTIVE_ACCENT_STROKE: f32 = 2.0;
 /// Inner padding between a pane's box edges and its cell grid, in logical
@@ -2234,6 +2237,19 @@ struct App {
     pane_tab_close_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
     /// "+" new-tab button hit rect per pane: (pane id, logical rect).
     pane_plus_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// Panes folded into the active session's dock (bottom-bar chips). Mirror of
+    /// the daemon's per-session docked list, so a session switch shows only this
+    /// 지구's dock — render-only.
+    docked: Vec<stream::DockedView>,
+    /// True once the first daemon State has been fully applied. Until then every
+    /// State runs the full layout-adopt path; afterwards a State whose active-
+    /// window leaves (in order) + dock are unchanged (a cwd-only 1s poll) skips
+    /// the heavy resize/repaint so idle stays at 0 GPU passes (ghostty-fast).
+    daemon_synced: bool,
+    /// Dock chip hit rects: (pane id, logical rect). Click restores (undock).
+    dock_chip_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// Dock chip × hit rects: (pane id, logical rect). Click kills the pane.
+    dock_chip_close_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// When the "복사됨" copy toast started animating. Drives its fade in the
     /// overlay pass; `None` once faded out. Set on a successful block copy.
     copy_toast_at: Option<Instant>,
@@ -2532,6 +2548,10 @@ impl App {
             pane_tab_rects: Vec::new(),
             pane_tab_close_rects: Vec::new(),
             pane_plus_rects: Vec::new(),
+            docked: Vec::new(),
+            daemon_synced: false,
+            dock_chip_rects: Vec::new(),
+            dock_chip_close_rects: Vec::new(),
             copy_toast_at: None,
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
@@ -4767,7 +4787,9 @@ impl App {
         let lw = (raw_lw - self.effective_sidebar_w() - 2.0 * WINDOW_PADDING).max(0.0);
         // Top: TITLE_HEIGHT (chrome strip). Bottom: WINDOW_PADDING. The
         // asymmetry is intentional — the strip replaces the top padding.
-        let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING).max(0.0);
+        // Reserve the dock bar from the grid only when it carries chips.
+        let dock = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+        let lh = (raw_lh - TITLE_HEIGHT - WINDOW_PADDING - dock).max(0.0);
         let cols = (lw / self.cell.w).floor().max(40.0) as u16;
         let rows = (lh / self.cell.h).floor().max(10.0) as u16;
         if std::env::var_os("KASATERM_LOG_LAYOUT").is_some() {
@@ -5268,6 +5290,22 @@ impl App {
         if self.tmux.is_some() {
             anyhow::bail!("split via drag unsupported on tmux backend");
         }
+        // Daemon mode: the daemon owns PTYs/layout. A local PTY spawn + local
+        // tree mutation desyncs — the next State overwrites it and the pane goes
+        // dead. Delegate: focus source, split along the drop axis; the daemon
+        // spawns the pane and broadcasts the new layout back.
+        if let Some(client) = self.daemon_client.clone() {
+            if matches!(zone, DropZone::Center) {
+                return Ok(());
+            }
+            client.focus(source);
+            let dir = match zone {
+                DropZone::Left | DropZone::Right => kasa_pty::SplitDir::Horizontal,
+                _ => kasa_pty::SplitDir::Vertical,
+            };
+            client.split_dir(dir);
+            return Ok(());
+        }
         let (cols, rows) = self.pane_cells(source).unwrap_or_else(|| self.window_cells());
         let cwd = resolve_initial_cwd();
         let new_id = format!("%{}", self.next_pane_id);
@@ -5529,26 +5567,41 @@ impl App {
         }
     }
 
+    /// Daemon-mode pane close shared by Cmd+W and the header × button so the
+    /// two never diverge. Single pane (only leaf in the only window) → ghostty:
+    /// flag the GUI window to exit and let the daemon keep the session alive on
+    /// disk for next-launch restore (a daemon close here would fresh-spawn a
+    /// replacement shell and desync the GUI). Otherwise delegate the close to
+    /// the daemon, which removes the pane and broadcasts the layout back.
+    fn daemon_close_pane(&mut self, pid: &str) {
+        let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
+        if leaves <= 1 {
+            // Window's last pane → don't dock (that would leave an empty
+            // window). The whole session's last pane (single window) → ghostty
+            // window-close, the daemon keeps the session for next-launch
+            // restore; otherwise close just this window's pane.
+            if self.windows.len() <= 1 {
+                self.should_exit = true;
+            } else if let Some(client) = self.daemon_client.as_ref() {
+                client.close(pid);
+            }
+        } else if let Some(client) = self.daemon_client.as_ref() {
+            client.dock(pid); // split state → fold into the dock (kill-free)
+        }
+    }
+
     /// Remove the focused pane from the BSP tree and drop its PTY
     /// session. Focus moves to the next pane in document order
     /// (wrapping to the previous when we just closed the last one).
     /// Last-pane close is a no-op — quitting the window is the
     /// user's exit there.
     fn close_active_pane(&mut self) {
-        if let Some(client) = self.daemon_client.as_ref() {
-            // Single pane (this session's only window holds one leaf): ghostty
-            // behavior — don't close it (the daemon would fresh-spawn a
-            // replacement shell and the GUI desyncs into a dead pane). Flag the
-            // GUI window to exit; the daemon keeps this pane/session alive on
-            // disk, so the next launch restores it. Multi-pane closes as usual.
-            let single = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len()) <= 1
-                && self.windows.len() <= 1;
-            if single {
-                self.should_exit = true;
-                return;
-            }
-            if let Some(id) = self.ws.lock().unwrap().active_pane.clone() {
-                client.close(&id);
+        if self.daemon_client.is_some() {
+            // Bind first so the MutexGuard drops before daemon_close_pane takes
+            // &mut self (else the lock holds an immutable borrow across it).
+            let active = self.ws.lock().unwrap().active_pane.clone();
+            if let Some(id) = active {
+                self.daemon_close_pane(&id);
             }
             return;
         }
@@ -5650,6 +5703,13 @@ impl App {
     /// the other's slot while the PTYs stay put; focus rides along with
     /// the active id into its new position.
     fn swap_dir(&mut self, dir: FocusDir) {
+        // No daemon swap RPC exists yet, so a local swap_leaves would be
+        // reverted by the next State broadcast (a silent no-op in daemon mode).
+        // Block here until a surface.swap RPC is added (daemon.rs/methods.rs/
+        // stream.rs, mirroring move_surface). Non-daemon/tmux: local swap is fine.
+        if self.daemon_client.is_some() {
+            return;
+        }
         let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
             return;
         };
@@ -5753,6 +5813,25 @@ impl App {
     /// when source and target are the same pane.
     fn move_pane(&mut self, moving: &str, target: &str, zone: DropZone) {
         if moving == target {
+            return;
+        }
+        // Daemon authority: a header-drag relocation MUST go through the daemon
+        // (surface.move RPC). A local pty_layout change here is overwritten by
+        // the next State broadcast → the pane goes dead (the header-drag
+        // "아무반응없음"). Mirrors the tab-drag single-tab path + split_active_pane.
+        if let Some(client) = self.daemon_client.clone() {
+            let dir = match zone {
+                DropZone::Left => "left",
+                DropZone::Right => "right",
+                DropZone::Up => "up",
+                DropZone::Down => "down",
+                DropZone::Center => return, // ambiguous for a whole-pane move
+            };
+            client.move_pane(moving, target, dir);
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
             return;
         }
         let (dir, before) = match zone {
@@ -6558,7 +6637,17 @@ impl App {
                     // that window. Digit0 is font-reset above, so windows
                     // start at 1.
                     if code == KeyCode::KeyT && self.tmux.is_none() {
-                        self.new_window();
+                        if self.modifiers.shift_key() {
+                            // Cmd+Shift+T → restore the most recently docked pane
+                            // (ghostty reopen-closed-tab). No-op if dock empty.
+                            if let (Some(client), Some(d)) =
+                                (self.daemon_client.as_ref(), self.docked.last())
+                            {
+                                client.undock(&d.id);
+                            }
+                        } else {
+                            self.new_window();
+                        }
                         return;
                     }
                     let win_digit = match code {
@@ -7265,15 +7354,15 @@ impl App {
             } else {
                 // Single-pane fallback (no split tree). `ws.panes` holds EVERY
                 // window's pane (a session shares one pane map across its
-                // windows), so picking `.iter().next()` would draw an arbitrary
-                // HashMap entry — switching windows would leave the body on the
-                // same pane. Honor the active pane so a window switch repaints
-                // the body; fall back to any pane only if active is unset/gone.
+                // windows), so an arbitrary entry would draw another
+                // window's/session's pane here — the dead-pane "resurrection"
+                // in an emptied window. Honor ONLY the active pane; if it's
+                // unset/gone, draw nothing and let the next State broadcast set
+                // the right one. Never fall back to an arbitrary HashMap entry.
                 let active = active_id
                     .as_ref()
                     .filter(|id| ws.panes.contains_key(*id))
-                    .cloned()
-                    .or_else(|| ws.panes.keys().next().cloned());
+                    .cloned();
                 match active {
                     Some(id) => vec![(id, 0, 0, 0, 0)],
                     None => Vec::new(),
@@ -7462,19 +7551,26 @@ impl App {
                 } else {
                     base_w
                 };
-                let bw = (full_w - 2.0 * PANE_INNER_X).max(1.0);
+                // An edge pane meets the window border, not a divider, so it
+                // gets no inner inset on that side — otherwise the right/bottom
+                // edge keeps an inner-pad-width empty strip (the "우측하단 빈칸"
+                // a drag leaves when it puts a pane against the window edge).
+                let right_inset = if x_cells + w_cells >= grid_cols { 0.0 } else { PANE_INNER_X };
+                let bw = (full_w - PANE_INNER_X - right_inset).max(1.0);
                 let base_h = h_cells as f32 * self.cell.h;
                 let full_h = if y_cells + h_cells >= grid_rows {
                     let extra = self.window.as_ref().map_or(0.0, |w| {
                         let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lh = w.inner_size().height as f32 / s;
-                        (raw_lh - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h)).max(0.0)
+                        let dock = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+                        (raw_lh - dock - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h)).max(0.0)
                     });
                     base_h + extra
                 } else {
                     base_h
                 };
-                let bh = (full_h - header_shift_logical - 2.0 * PANE_INNER_Y).max(1.0);
+                let bottom_inset = if y_cells + h_cells >= grid_rows { 0.0 } else { PANE_INNER_Y };
+                let bh = (full_h - header_shift_logical - PANE_INNER_Y - bottom_inset).max(1.0);
                 body_rects.push((id.clone(), (bx, by, bw, bh)));
                 if let Some(image) = img {
                     image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot));
@@ -8712,6 +8808,60 @@ impl App {
                     );
                 }
             }
+            // Bottom dock bar: chips for panes folded out of the layout
+            // (window_cells reserves DOCK_HEIGHT below the grid when non-empty).
+            // Click a chip to restore (undock); its × kills the pane.
+            if !self.docked.is_empty() {
+                let win_w = win_px.0 / scale;
+                let win_h = win_px.1 / scale;
+                let bar_y = win_h - DOCK_HEIGHT;
+                g.rect(0.0, bar_y, win_w, DOCK_HEIGHT, theme::SURFACE);
+                g.rect(0.0, bar_y, win_w, 1.0, theme::BORDER);
+                let chip_h = DOCK_HEIGHT - 12.0;
+                let cy = bar_y + 6.0;
+                let icon = theme::ICON_SIZE;
+                let (mx, my) = (self.cursor_px.0 / scale, self.cursor_px.1 / scale);
+                let mut cx = sidebar_w + 8.0;
+                let mut chip_hits = Vec::new();
+                let mut chip_close_hits = Vec::new();
+                for d in &self.docked {
+                    let label: &str =
+                        if d.label.is_empty() { "shell" } else { d.label.as_str() };
+                    let lw = g.measure_chrome_text(label, chrome_font, false);
+                    let chip_w = lw + icon + 24.0;
+                    let hover = mx >= cx && mx <= cx + chip_w && my >= cy && my <= cy + chip_h;
+                    round_rect(
+                        g,
+                        cx,
+                        cy,
+                        chip_w,
+                        chip_h,
+                        theme::RADIUS_SM,
+                        if hover { theme::SURFACE_HOVER } else { theme::SURFACE_ACTIVE },
+                    );
+                    g.draw_text(
+                        cx + 10.0,
+                        cy + (chip_h - chrome_font) / 2.0 + 1.0,
+                        label,
+                        gpu::DrawOpts {
+                            font_size: chrome_font,
+                            color: theme::TEXT,
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    let close_x = cx + chip_w - icon - 6.0;
+                    g.queue_icon("x", close_x, cy + (chip_h - icon) / 2.0, icon, theme::TEXT_DIM);
+                    chip_close_hits.push((d.id.clone(), (close_x - 2.0, cy, icon + 6.0, chip_h)));
+                    chip_hits.push((d.id.clone(), (cx, cy, chip_w - icon - 8.0, chip_h)));
+                    cx += chip_w + 6.0;
+                }
+                self.dock_chip_rects = chip_hits;
+                self.dock_chip_close_rects = chip_close_hits;
+            } else {
+                self.dock_chip_rects.clear();
+                self.dock_chip_close_rects.clear();
+            }
             // Drop-zone highlight sits on top of everything during a drag.
             if let Some((zx, zy, zw, zh)) = drop_zone_rect {
                 g.rect(zx, zy, zw, zh, theme::with_alpha(theme::ACCENT, 90));
@@ -8872,38 +9022,16 @@ impl ApplicationHandler<UserEvent> for App {
             // is routed to the daemon over RPC, so these are render-only.
             let asx = view.active_session;
             if let Some(sess) = view.sessions.get(asx) {
-                self.windows = sess
-                    .windows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, w)| {
-                        if i == sess.active_window {
-                            None
-                        } else {
-                            Some(w.layout.clone())
-                        }
-                    })
-                    .collect();
-                self.active_window = sess.active_window;
-                self.pty_layout = sess.windows.get(sess.active_window).map(|w| w.layout.clone());
-                // The daemon's State is the authority for this session's pane
-                // set — and in daemon mode it's the ONLY close signal we get
-                // (a closed pane's PTY drop never reaches us as a dead-pane EOF,
-                // so reap_dead_panes never fires). So reconcile ws against it
-                // here, or a closed pane lingers in ws.panes with a stale grid
-                // and active_pane keeps pointing at it — then dropping to a
-                // single leaf makes the single-pane fallback draw that ghost.
-                //
-                //   1. drop panes the daemon no longer lists (across ALL of this
-                //      session's windows, so window-switch panes survive);
-                //   2. re-point active_pane to a live leaf if it was closed;
-                //   3. mark every visible leaf + chrome dirty so a freshly split
-                //      pane paints immediately (damage-tracking skips it
-                //      otherwise — that's why it used to need a manual resize);
-                //   4. resize_backend re-derives each leaf's grid + republishes.
-                // Live pane set across ALL sessions (not just the active one),
-                // so a session switch keeps the other sessions' panes and only
-                // a truly-closed pane (in no session's tree) gets dropped.
+                // ghostty-fast gate: a State that only carries fresh cwds (the 1s
+                // poll) has the SAME active-window leaves (in order) + dock as the
+                // last one. Then don't re-adopt the layout (which would also
+                // clobber a divider's drag-set ratio back to the daemon's 0.5)
+                // and don't resize/dirty every pane — idle → 0 GPU passes. The
+                // first sync after attach always runs the full path.
+                let first_sync = !self.daemon_synced;
+                self.daemon_synced = true;
+                // Live pane set across ALL sessions — used by preview retain and
+                // (on the structural path) ws.panes pruning. Cheap (no lsof).
                 let all_leaves: std::collections::HashSet<String> = view
                     .sessions
                     .iter()
@@ -8911,27 +9039,97 @@ impl ApplicationHandler<UserEvent> for App {
                     .flat_map(|w| w.layout.leaves())
                     .map(|l| l.to_string())
                     .collect();
-                let active_leaves: Vec<String> = self
+                let new_active_leaves: Vec<String> = sess
+                    .windows
+                    .get(sess.active_window)
+                    .map(|w| w.layout.leaves().iter().map(|l| l.to_string()).collect())
+                    .unwrap_or_default();
+                let cur_active_leaves: Vec<String> = self
                     .pty_layout
                     .as_ref()
                     .map(|t| t.leaves().iter().map(|l| l.to_string()).collect())
                     .unwrap_or_default();
-                {
-                    let mut ws = self.ws.lock().unwrap();
-                    ws.panes.retain(|id, _| all_leaves.contains(id));
-                    ws.pid_to_pane.retain(|_, outer| all_leaves.contains(outer));
-                    // Adopt the daemon's authoritative active pane (no more
-                    // guessing) — fall back to this window's first leaf only if
-                    // it's absent or not in the visible window.
-                    let daemon_active = view
+                // Compare TREE SHAPE (leaf ids in position + split directions,
+                // ratios ignored). A leaves-Vec compare misses a move that keeps
+                // the same leaves but flips a split's direction (좌우 → 상하) —
+                // exactly drag-relocation — leaving the GUI on the old layout
+                // ("아무 반응"). same_shape catches it, while still ignoring a
+                // divider's drag ratio (the daemon doesn't store it) so a
+                // cwd-only poll stays a no-op (idle 0 repaint).
+                let structural_unchanged = !first_sync
+                    && self.active_window == sess.active_window
+                    && sess.docked == self.docked
+                    && match (
+                        self.pty_layout.as_ref(),
+                        sess.windows.get(sess.active_window).map(|w| &w.layout),
+                    ) {
+                        (Some(cur), Some(new)) => cur.same_shape(new),
+                        _ => false,
+                    };
+                if !structural_unchanged {
+                    // Structural change (split/close/dock/undock/move/window
+                    // switch): adopt the daemon's authoritative layout + dock,
+                    // reconcile ws.panes, and full-resize so a fresh pane paints.
+                    // The daemon's State is the authority for this session's pane
+                    // set — and in daemon mode it's the ONLY close signal we get
+                    // (a closed pane's PTY drop never reaches us as a dead-pane
+                    // EOF, so reap_dead_panes never fires).
+                    self.windows = sess
+                        .windows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, w)| {
+                            if i == sess.active_window {
+                                None
+                            } else {
+                                Some(w.layout.clone())
+                            }
+                        })
+                        .collect();
+                    self.active_window = sess.active_window;
+                    self.pty_layout =
+                        sess.windows.get(sess.active_window).map(|w| w.layout.clone());
+                    self.docked = sess.docked.clone();
+                    {
+                        let mut ws = self.ws.lock().unwrap();
+                        ws.panes.retain(|id, _| all_leaves.contains(id));
+                        ws.pid_to_pane.retain(|_, outer| all_leaves.contains(outer));
+                        let daemon_active = view
+                            .active_pane
+                            .clone()
+                            .filter(|a| new_active_leaves.iter().any(|l| l == a));
+                        ws.active_pane =
+                            daemon_active.or_else(|| new_active_leaves.first().cloned());
+                        for leaf in &new_active_leaves {
+                            if let Some(p) = ws.panes.get_mut(leaf) {
+                                p.dirty = true;
+                            }
+                        }
+                    }
+                    self.chrome_dirty = true;
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                } else {
+                    // Structure identical (cwd-only poll, or a focus change that
+                    // kept the same leaves): move only the active-pane highlight,
+                    // and mark chrome dirty ONLY when it actually changed. No
+                    // resize, no per-pane dirty → idle stays at 0 GPU passes.
+                    let new_active = view
                         .active_pane
                         .clone()
-                        .filter(|a| active_leaves.iter().any(|l| l == a));
-                    ws.active_pane = daemon_active.or_else(|| active_leaves.first().cloned());
-                    for leaf in &active_leaves {
-                        if let Some(p) = ws.panes.get_mut(leaf) {
-                            p.dirty = true;
+                        .filter(|a| cur_active_leaves.iter().any(|l| l == a))
+                        .or_else(|| cur_active_leaves.first().cloned());
+                    let changed = {
+                        let mut ws = self.ws.lock().unwrap();
+                        if ws.active_pane != new_active {
+                            ws.active_pane = new_active;
+                            true
+                        } else {
+                            false
                         }
+                    };
+                    if changed {
+                        self.chrome_dirty = true;
                     }
                 }
                 // Non-terminal panes (image/markdown) the daemon hosts emit no
@@ -8974,9 +9172,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // Forget preview bookkeeping for panes the daemon dropped.
                 self.applied_previews.retain(|id, _| all_leaves.contains(id));
-                self.chrome_dirty = true;
-                let (cols, rows) = self.window_cells();
-                self.resize_backend(cols, rows);
+                // No unconditional chrome_dirty/resize_backend here — that fired
+                // a full per-leaf client.resize RPC on EVERY cwd-poll State (1s),
+                // defeating the idle gate (거노 "여전히 느려"). The structural
+                // branch above already resized; a cwd-only poll stays at 0 work.
             }
         }
         // Render directly here instead of request_redraw → (next loop)
@@ -9850,6 +10049,32 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // Dock chips overlay the window bottom, so they win over the
+                    // pane header hits below. Chip × → real kill; body → restore.
+                    if let Some(id) = self
+                        .dock_chip_close_rects
+                        .iter()
+                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, _)| id.clone())
+                    {
+                        if let Some(c) = self.daemon_client.as_ref() {
+                            c.close(&id);
+                        }
+                        window.request_redraw();
+                        return;
+                    }
+                    if let Some(id) = self
+                        .dock_chip_rects
+                        .iter()
+                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, _)| id.clone())
+                    {
+                        if let Some(c) = self.daemon_client.as_ref() {
+                            c.undock(&id);
+                        }
+                        window.request_redraw();
+                        return;
+                    }
                     // In-pane tab bar: + new-tab, per-tab × close, tab switch.
                     // Checked before the cell grid so a header click never
                     // selects text. (Stage 2: tabs are visual labels; each
@@ -9883,8 +10108,18 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|p| p.tabs.len())
                             .unwrap_or(0);
                         if tabs_len <= 1 {
-                            // Single tab → closing it closes the pane.
-                            self.remove_pane(&pid);
+                            // Single tab → closing it closes the pane. Daemon
+                            // mode routes through the shared ghostty-guarded path
+                            // (daemon_close_pane): the last pane keeps the session
+                            // (window-exit), else the daemon removes it and
+                            // rebroadcasts. A local remove_pane alone would leave
+                            // the pane alive in the daemon and the next State
+                            // broadcast resurrects it on window-switch.
+                            if self.daemon_client.is_some() {
+                                self.daemon_close_pane(&pid);
+                            } else {
+                                self.remove_pane(&pid);
+                            }
                         } else {
                             self.close_tab(&pid, idx);
                         }
@@ -10112,10 +10347,31 @@ impl ApplicationHandler<UserEvent> for App {
                                     return;
                                 }
                                 if target != td.pane || src_tab_count > 1 {
-                                    // Multi-tab same-pane → lift dragged tab
-                                    // into a new pane on the drop side.
-                                    // Cross-pane → moved tab in a new pane on
-                                    // target's drop side.
+                                    // Daemon mode + single-tab cross-pane = move
+                                    // the whole pane beside target → surface.move
+                                    // RPC (daemon authority). A local
+                                    // drop_tab_into_body wouldn't reach the daemon,
+                                    // so the next State overwrites it and the pane
+                                    // goes dead (drag먹통).
+                                    if target != td.pane && src_tab_count == 1 {
+                                        if let Some(client) = self.daemon_client.clone() {
+                                            let dir = match zone {
+                                                DropZone::Left => "left",
+                                                DropZone::Right => "right",
+                                                DropZone::Up => "up",
+                                                DropZone::Down | DropZone::Center => "down",
+                                            };
+                                            client.move_pane(&td.pane, &target, dir);
+                                            self.chrome_dirty = true;
+                                            window.request_redraw();
+                                            return;
+                                        }
+                                    }
+                                    // Multi-tab same-pane → lift dragged tab into
+                                    // a new pane. Cross-pane (non-daemon) → moved
+                                    // tab in a new pane on target's drop side.
+                                    // (Daemon multi-tab lift = GUI-local 보조탭;
+                                    // 데몬 동기화는 후속.)
                                     self.drop_tab_into_body(&td, &target, zone);
                                     self.chrome_dirty = true;
                                     window.request_redraw();

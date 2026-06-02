@@ -38,6 +38,13 @@ pub struct PanePreview {
     pub path: String,
 }
 
+/// A pane folded into the dock: its id + a display label (cwd basename).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DockedView {
+    pub id: String,
+    pub label: String,
+}
+
 /// One session: its windows + which is active + a display label (the active
 /// pane's cwd basename, for the session panel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +52,11 @@ pub struct SessionView {
     pub windows: Vec<WindowView>,
     pub active_window: usize,
     pub label: String,
+    /// Panes folded into this session's dock — bottom-bar chips. Per-session so
+    /// a session switch shows only this 지구's dock. `#[serde(default)]` so an
+    /// older stream/disk without the field still deserializes.
+    #[serde(default)]
+    pub docked: Vec<DockedView>,
 }
 
 /// The daemon's full session>window>pane structure pushed to the GUI. The GUI
@@ -204,6 +216,32 @@ impl DaemonClient {
 
     pub fn close(&self, surface_id: &str) {
         self.rpc("surface.close", json!({ "surface_id": surface_id }));
+    }
+
+    /// Fold a pane into the dock (kill-free) — daemon-authoritative like close.
+    pub fn dock(&self, surface_id: &str) {
+        self.rpc("surface.dock", json!({ "surface_id": surface_id }));
+    }
+
+    /// Restore a docked pane into the active window.
+    pub fn undock(&self, surface_id: &str) {
+        self.rpc("surface.undock", json!({ "surface_id": surface_id }));
+    }
+
+    /// Move a pane beside `target` along `direction` (left/right/up/down).
+    /// Daemon-authoritative layout move — PTY stays alive. Drag-and-drop
+    /// relocation uses this instead of mutating the GUI-local tree (which the
+    /// next daemon State would overwrite, leaving the pane dead — drag먹통).
+    pub fn move_pane(&self, surface_id: &str, target: &str, direction: &str) {
+        self.rpc(
+            "surface.move",
+            json!({ "surface_id": surface_id, "target": target, "direction": direction }),
+        );
+    }
+
+    /// Switch the active session (지구) to index `idx`.
+    pub fn switch_session(&self, idx: usize) {
+        self.rpc("session.switch", json!({ "idx": idx }));
     }
 
     pub fn focus(&self, surface_id: &str) {

@@ -394,6 +394,25 @@ impl PtySession {
         resolved
     }
 
+    /// True when the shell has a child process (a command/claude/build/editor is
+    /// running) — the pane has "작업현황". False for a bare idle prompt. Lets a
+    /// close decide between folding into the dock (busy → keep) and just closing
+    /// (idle → no chip). One `ps` scan; called only on dock/close, not per frame.
+    pub fn has_active_job(&self) -> bool {
+        let Some(pid) = self.shell_pid else {
+            return false;
+        };
+        let Ok(output) = std::process::Command::new("ps")
+            .args(["-A", "-o", "ppid="])
+            .output()
+        else {
+            return false;
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.trim().parse::<u32>().ok() == Some(pid))
+    }
+
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
         let mut w = self.writer.lock().unwrap();
         w.write_all(bytes).context("pty write")?;
