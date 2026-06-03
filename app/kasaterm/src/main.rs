@@ -151,6 +151,14 @@ const SIDEBAR_W: f32 = 200.0;
 const SIDEBAR_TAB_H: f32 = 54.0;
 const SIDEBAR_TAB_GAP: f32 = 3.0;
 const SIDEBAR_TAB_INSET: f32 = 8.0;
+/// File-tree column, parked just right of the session-tab sidebar (VSCode
+/// explorer layout). Its own width + visibility, independent of the tab
+/// strip, so the tree can be toggled / resized without touching the tabs.
+/// `effective_sidebar_w()` folds this in, so the cell grid origin shifts
+/// right by tabs+tree together and the terminal reflows automatically.
+const FILE_TREE_W: f32 = 220.0;
+const FILE_TREE_W_MIN: f32 = 140.0;
+const FILE_TREE_W_MAX: f32 = 480.0;
 const SCROLLBACK_MAX: usize = 5000;
 /// Min ms between wheel emits. Default 0 = pass every macOS scroll event
 /// straight through to `pty.scroll`; the try_send-based reader pipeline
@@ -764,6 +772,9 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
   .status.blocked { color: #f85149; }
   .intent { margin-top: 5px; color: #ecedf3; word-break: break-word; }
   .files { margin-top: 3px; font-size: 11px; color: #787e8a; word-break: break-all; }
+  .bell { background: none; border: 0; padding: 2px 4px; margin-left: 6px; cursor: pointer; color: #5a8ce6; display: inline-flex; align-items: center; border-radius: 6px; flex: none; }
+  .bell:hover { background: #2e323b; }
+  .bell.off { color: #5a5f6b; }
   .empty { color: #787e8a; font-size: 12px; padding: 8px 2px; }
   .err { color: #f85149; font-size: 12px; margin-top: 10px; }
 </style>
@@ -776,6 +787,8 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
 const PORT = "__PORT__";
 const base = "http://127.0.0.1:" + PORT;
 const $ = (id) => document.getElementById(id);
+const BELL_ON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
+const BELL_OFF = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.7 4.7 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function leaf(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
@@ -793,11 +806,14 @@ function render(board) {
   board.forEach(p => {
     const st = (p.status || "").toLowerCase();
     const files = (p.files || []).map(leaf).join(", ");
+    const muted = !!p.muted;
     const d = document.createElement("div");
     d.className = "pane";
     d.innerHTML =
       `<div class="row1"><span class="sid">${esc(p.surface_id)}</span>` +
-      `<span class="status ${esc(st)}">${esc(p.status || "")}</span></div>` +
+      `<span class="status ${esc(st)}">${esc(p.status || "")}</span>` +
+      `<button class="bell ${muted ? "off" : ""}" data-sid="${esc(p.surface_id)}" data-muted="${muted}" ` +
+      `title="${muted ? "알림 꺼짐 — 클릭해서 켜기" : "알림 켜짐 — 클릭해서 끄기"}">${muted ? BELL_OFF : BELL_ON}</button></div>` +
       `<div class="intent">${esc(p.intent || "")}</div>` +
       (files ? `<div class="files">${esc(files)}</div>` : "");
     list.appendChild(d);
@@ -814,6 +830,18 @@ async function poll() {
   }
 }
 
+// Mute toggle: event-delegated so it survives the list.innerHTML rebuild each
+// poll. `data-muted` is the CURRENT state, so the POST flips it.
+$("list").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".bell");
+  if (!btn) return;
+  const sid = btn.dataset.sid;
+  const on = btn.dataset.muted === "true" ? "false" : "true";
+  try {
+    await fetch(base + "/board-mute?surface=" + encodeURIComponent(sid) + "&on=" + on, { method: "POST" });
+    poll();
+  } catch (e) {}
+});
 poll();
 setInterval(poll, 1000);
 </script>
@@ -2107,6 +2135,94 @@ struct FileNode {
     depth: usize,
 }
 
+/// File-tree icon + tint for a file, chosen by name/extension. The icon is a
+/// generic Lucide shape per file *class* (code/doc/image/config/…) and the
+/// color is a language brand color (colors aren't copyrightable) so the tree
+/// reads by hue at a glance — all code shares the code glyph but rust/go/py
+/// stay distinct by hue. Folders are handled separately. Whole-name matches
+/// (Dockerfile, Cargo.toml…) win over the extension.
+fn file_icon_spec(name: &str) -> (&'static str, [u8; 4]) {
+    let lower = name.to_ascii_lowercase();
+    let whole: Option<(&'static str, [u8; 4])> = match lower.as_str() {
+        "dockerfile" | ".dockerignore" => Some(("settings-2", [36, 150, 237, 255])),
+        ".gitignore" | ".gitattributes" | ".gitmodules" => Some(("settings-2", [240, 81, 51, 255])),
+        "makefile" => Some(("settings-2", [109, 128, 134, 255])),
+        "package.json" => Some(("braces", [203, 56, 55, 255])),
+        "readme.md" | "readme" => Some(("file-text", [97, 175, 239, 255])),
+        "license" | "license.md" | "license.txt" => Some(("file-text", [142, 142, 142, 255])),
+        _ => None,
+    };
+    if let Some(v) = whole {
+        return v;
+    }
+    let ext = lower.rsplit('.').next().unwrap_or("");
+    match ext {
+        "rs" => ("file-code", [201, 116, 59, 255]),
+        "py" | "pyi" | "pyw" => ("file-code", [59, 130, 196, 255]),
+        "js" | "mjs" | "cjs" | "jsx" => ("file-code", [184, 161, 0, 255]),
+        "ts" | "tsx" => ("file-code", [49, 120, 198, 255]),
+        "go" => ("file-code", [0, 173, 216, 255]),
+        "rb" => ("file-code", [204, 52, 45, 255]),
+        "java" => ("file-code", [231, 111, 0, 255]),
+        "kt" | "kts" => ("file-code", [139, 92, 246, 255]),
+        "swift" => ("file-code", [240, 81, 56, 255]),
+        "c" | "h" => ("file-code", [92, 107, 192, 255]),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => ("file-code", [0, 122, 193, 255]),
+        "cs" => ("file-code", [137, 75, 158, 255]),
+        "php" => ("file-code", [119, 123, 180, 255]),
+        "lua" => ("file-code", [88, 140, 220, 255]),
+        "vue" => ("file-code", [65, 184, 131, 255]),
+        "rkt" => ("file-code", [159, 60, 64, 255]),
+        "sql" => ("file-code", [217, 142, 0, 255]),
+        "wgsl" | "glsl" | "vert" | "frag" => ("file-code", [158, 110, 184, 255]),
+        "html" | "htm" | "xml" => ("file-code", [227, 100, 60, 255]),
+        "css" => ("file-code", [65, 120, 230, 255]),
+        "scss" | "sass" | "less" => ("file-code", [205, 103, 153, 255]),
+        "json" | "jsonc" => ("braces", [200, 180, 70, 255]),
+        "yml" | "yaml" => ("settings-2", [180, 110, 110, 255]),
+        "toml" => ("settings-2", [185, 110, 80, 255]),
+        "ini" | "conf" | "cfg" | "env" | "lock" => ("settings-2", [134, 144, 158, 255]),
+        "md" | "markdown" | "rst" => ("file-text", [120, 170, 220, 255]),
+        "txt" | "log" => ("file-text", [150, 157, 168, 255]),
+        "sh" | "bash" | "zsh" | "fish" => ("terminal", [120, 200, 90, 255]),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tiff" | "tif" => {
+            ("image", [170, 120, 210, 255])
+        }
+        "svg" => ("image", [224, 150, 60, 255]),
+        "pdf" => ("file-text", [209, 80, 50, 255]),
+        _ => ("file", theme::FT_DEFAULT),
+    }
+}
+
+/// Map a file extension to the syntax-highlighter language name (the same
+/// names `syn_keywords`/`syn_line_comment` match on). Unknown → "" (the
+/// highlighter still colors strings/numbers/comments generically).
+fn code_lang_for_path(p: &std::path::Path) -> &'static str {
+    match p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "rs" => "rust",
+        "py" | "pyi" | "pyw" => "python",
+        "js" | "mjs" | "cjs" | "jsx" => "javascript",
+        "ts" | "tsx" => "typescript",
+        "go" => "go",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => "c++",
+        "json" | "jsonc" => "json",
+        "sh" | "bash" | "zsh" | "fish" => "bash",
+        "sql" => "sql",
+        "toml" => "toml",
+        "yml" | "yaml" => "yaml",
+        "html" | "htm" => "html",
+        "css" | "scss" | "sass" => "css",
+        _ => "",
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
@@ -2378,6 +2494,13 @@ struct App {
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,
+    /// Sidebar git badge cache (cwd → branch/+ins/-del). A background thread
+    /// polls each window's cwd directly (not via the daemon), so this stays
+    /// off `%0`'s daemon path. Render reads it; the poller writes it.
+    window_git: std::sync::Arc<std::sync::Mutex<HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge>>>,
+    /// cwds the git poller should refresh, set from the current windows' repr
+    /// cwd just before the sidebar paints. Shared with the poll thread.
+    git_poll_cwds: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
     /// Single-pane Cmd+W in daemon mode sets this to close the GUI window
     /// (ghostty-style) on the next about_to_wait, instead of killing the pane.
     /// The daemon keeps the session alive so relaunch restores it.
@@ -2404,6 +2527,12 @@ struct App {
     file_tree_hover: Option<std::path::PathBuf>,
     file_tree_scroll: f32,
     file_tree_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
+    /// File-tree column visibility + live width (logical px), independent of
+    /// the session-tab sidebar. `effective_sidebar_w()` adds this when shown.
+    file_tree_visible: bool,
+    file_tree_w_logical: f32,
+    /// In-flight tree-column resize drag — `(start_cursor_x, start_width)`.
+    file_tree_resize: Option<(f32, f32)>,
     /// Cursor-blink phase captured at the last successful render.
     /// Used by `render_frame`'s early-return: a blink toggle counts
     /// as "something changed" and forces the GPU pass even when
@@ -2584,6 +2713,8 @@ impl App {
             last_window_title_check: None,
             pane_cwd_cache: HashMap::new(),
             pane_tty_cache: HashMap::new(),
+            window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             should_exit: false,
             pane_cwd_check: None,
             applied_previews: HashMap::new(),
@@ -2594,6 +2725,9 @@ impl App {
             file_tree_hover: None,
             file_tree_scroll: 0.0,
             file_tree_rects: Vec::new(),
+            file_tree_visible: true,
+            file_tree_w_logical: FILE_TREE_W,
+            file_tree_resize: None,
             last_blink_on: false,
             chrome_dirty: true,
             cursor_px: std::env::var("KASATERM_AUTOHOVER")
@@ -2643,11 +2777,31 @@ impl App {
     /// origin_x / window_cells / hit-test calc routes through here so a
     /// single `sidebar_visible` flip reflows the whole grid.
     fn effective_sidebar_w(&self) -> f32 {
+        self.tab_strip_w() + self.file_tree_col_w()
+    }
+
+    /// Width of the session-tab strip alone (0 when collapsed).
+    fn tab_strip_w(&self) -> f32 {
         if self.sidebar_visible {
             self.sidebar_w_logical
         } else {
             0.0
         }
+    }
+
+    /// File-tree column width (0 when hidden). Independent of the tab strip.
+    fn file_tree_col_w(&self) -> f32 {
+        if self.file_tree_visible {
+            self.file_tree_w_logical
+        } else {
+            0.0
+        }
+    }
+
+    /// Left edge (logical x) of the file-tree column — right after the tab
+    /// strip. The column sits between the tabs and the cell grid.
+    fn file_tree_col_x(&self) -> f32 {
+        self.tab_strip_w()
     }
 
     /// Title-bar sidebar-toggle button rect (logical px), parked just
@@ -2661,12 +2815,32 @@ impl App {
         (x, y, w, h)
     }
 
+    /// File-tree-toggle button rect, parked just right of the sidebar toggle.
+    fn file_tree_toggle_rect() -> (f32, f32, f32, f32) {
+        let (sx, sy, sw, sh) = Self::sidebar_toggle_rect();
+        (sx + sw + 2.0, sy, sw, sh)
+    }
+
     /// Show/hide the left window-tab sidebar. The cell grid reflows to the
     /// new usable width (every layout calc reads `effective_sidebar_w()`),
     /// so we just flip the flag, resize the PTYs to the new cols/rows, and
     /// repaint.
     fn toggle_sidebar(&mut self) {
         self.sidebar_visible = !self.sidebar_visible;
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Show/hide the file-tree column. Same reflow path as `toggle_sidebar`.
+    fn toggle_file_tree(&mut self) {
+        self.file_tree_visible = !self.file_tree_visible;
+        if self.file_tree_visible {
+            self.refresh_file_tree();
+        }
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
@@ -2842,8 +3016,7 @@ impl App {
                 return;
             }
         }
-        let port =
-            std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".to_string());
+        let port = mcp_panel_port();
         let attrs = WindowAttributes::default()
             .with_title("git status")
             .with_theme(Some(Theme::Dark))
@@ -2900,8 +3073,7 @@ impl App {
         if self.session_panel_window.is_some() {
             return;
         }
-        let port =
-            std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".to_string());
+        let port = mcp_panel_port();
         let attrs = WindowAttributes::default()
             .with_title("sessions")
             .with_theme(Some(Theme::Dark))
@@ -2952,8 +3124,7 @@ impl App {
         if self.board_panel_window.is_some() {
             return;
         }
-        let port =
-            std::env::var("KASASPACE_MCP_PORT").unwrap_or_else(|_| "8765".to_string());
+        let port = mcp_panel_port();
         let attrs = WindowAttributes::default()
             .with_title("board")
             .with_theme(Some(Theme::Dark))
@@ -3672,6 +3843,25 @@ impl App {
         self.window_labels_at = Some(now);
     }
 
+    /// Window `i`'s representative-pane cwd (first leaf of its layout). Daemon
+    /// mode reads the broadcast `pane_cwd_cache`; local mode resolves the shell
+    /// pid. Targets the sidebar git-badge poller and the badge lookup at paint.
+    fn window_repr_cwd(&self, i: usize) -> Option<std::path::PathBuf> {
+        let layout = if i == self.active_window {
+            self.pty_layout.as_ref()
+        } else {
+            self.windows.get(i).and_then(|o| o.as_ref())
+        };
+        let id = layout.and_then(|l| l.leaves().first().map(|s| s.to_string()))?;
+        if let Some(p) = self.pane_cwd_cache.get(&id) {
+            return Some(p.clone());
+        }
+        self.pty
+            .get(&id)
+            .and_then(|p| p.shell_pid())
+            .and_then(socket::pid_cwd)
+    }
+
     /// Compress a cwd for the sidebar: home → `~`, then keep the tail if it
     /// runs past `max` chars so the meaningful (deepest) part stays visible.
     /// 탭/헤더 라벨용. 셸이 idle이면 cwd의 마지막 폴더명, 명령 실행 중이면
@@ -3903,7 +4093,16 @@ impl App {
             }
         }
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        std::path::PathBuf::from(home).join(".config/kasaterm/daemon.sock")
+        // A debug build (cargo run / target/debug) runs its own daemon on a
+        // separate socket so building & launching a dev kasaterm never hijacks
+        // the release .app's daemon — the single-subscriber stream would
+        // otherwise steal the working window's screen ("작업 kasaterm 멈춤").
+        let sock = if cfg!(debug_assertions) {
+            "daemon-dev.sock"
+        } else {
+            "daemon.sock"
+        };
+        std::path::PathBuf::from(home).join(".config/kasaterm").join(sock)
     }
 
     fn attach_daemon(&mut self) -> Result<()> {
@@ -3921,7 +4120,11 @@ impl App {
         // parent's sessions. Pin a daemon-only port — the spawned daemon
         // inherits this same var and serves /sessions there, and the session
         // panel below reads the same var, so both agree on the daemon.
-        std::env::set_var("KASASPACE_MCP_PORT", "8766");
+        // A debug build uses its own port too (it runs its own daemon on
+        // daemon-dev.sock): sharing 8766 would clash with the release .app's
+        // daemon server (bind fails), undoing the socket split above.
+        let mcp_port = if cfg!(debug_assertions) { "8767" } else { "8766" };
+        std::env::set_var("KASASPACE_MCP_PORT", mcp_port);
         // Discovery: connect to a live daemon, else spawn one and wait for it.
         // `existing` = we connected to a daemon that was already up (app
         // restart while the daemon survived in the background). A freshly
@@ -4593,6 +4796,7 @@ impl App {
             Ok(port) => {
                 eprintln!("[kasaspace-mcp] HTTP MCP on 127.0.0.1:{port}/mcp");
                 std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
+                let _ = std::fs::write(mcp_port_file_path(), port.to_string());
                 // No MCP auto-discovery: write our address into each AI
                 // client's config so any agent on this machine finds us.
                 kasa_mcp::register_clients(port);
@@ -5640,8 +5844,14 @@ impl App {
             .unwrap_or(0);
         let n = leaves.len() as i32;
         let new_idx = ((cur_idx as i32 + delta).rem_euclid(n)) as usize;
-        ws.active_pane = Some(leaves[new_idx].clone());
+        let new_active = leaves[new_idx].clone();
+        ws.active_pane = Some(new_active.clone());
         drop(ws);
+        // Sync the daemon's active pointer (see body-click note) — else a
+        // cwd poll reverts this keyboard focus on the next `cd`.
+        if let Some(client) = self.daemon_client.as_ref() {
+            client.focus(&new_active);
+        }
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -5691,7 +5901,11 @@ impl App {
     /// Move keyboard focus to the adjacent pane in `dir`.
     fn focus_dir(&self, dir: FocusDir) {
         if let Some(id) = self.adjacent_pane(dir) {
-            self.ws.lock().unwrap().active_pane = Some(id);
+            self.ws.lock().unwrap().active_pane = Some(id.clone());
+            // Sync the daemon's active pointer (see body-click note).
+            if let Some(client) = self.daemon_client.as_ref() {
+                client.focus(&id);
+            }
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -6263,6 +6477,34 @@ impl App {
                 return;
             }
         };
+        // File-tree column: the pointer is over the tree, not a terminal, so
+        // scroll the rows instead of delegating to a pane (px_to_pane_cell
+        // returns None here and would otherwise fall through to the active
+        // pane). Clamp so it can't scroll above the top or past the last row.
+        if self.file_tree_visible
+            && self.cursor_px.1 > TITLE_HEIGHT
+            && self.cursor_px.0 >= self.file_tree_col_x()
+            && self.cursor_px.0 < self.file_tree_col_x() + self.file_tree_w_logical
+        {
+            let item_h = 22.0_f32;
+            let win_h = self.window.as_ref().map_or(800.0, |w| {
+                w.inner_size().height as f32 / self.effective_scale()
+            });
+            let start_y = TITLE_HEIGHT + 10.0;
+            let content_h = self.file_tree_nodes.len() as f32 * item_h;
+            let max_scroll = (content_h - (win_h - start_y).max(0.0)).max(0.0);
+            // lines>0 = wheel up = toward the top = less scroll.
+            let delta_px = lines as f32 * item_h;
+            let next = (self.file_tree_scroll - delta_px).clamp(0.0, max_scroll);
+            if (next - self.file_tree_scroll).abs() > 0.01 {
+                self.file_tree_scroll = next;
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
         // Decide which pane handles this wheel: the pane the pointer is
         // hovering over. Falls back to the active pane if the pointer
         // is in a gutter. Multi-pane lets the user scroll inside any
@@ -7256,8 +7498,8 @@ impl App {
     fn render_frame_gpu(&mut self, scale: f32) {
         // Keep the header breadcrumb's cwd cache fresh (self-rate-limited).
         self.refresh_pane_cwds();
-        // Sidebar file tree follows the active pane's cwd (rebuild on change).
-        if self.sidebar_visible {
+        // File-tree column follows the active pane's cwd (rebuild on change).
+        if self.file_tree_visible {
             self.refresh_file_tree();
         }
         let Some(window) = self.window.as_ref() else { return };
@@ -7304,7 +7546,13 @@ impl App {
         }
         // Captured once so the &mut self.gpu block below (which can't
         // re-borrow &self) can still see the collapsed/expanded width.
+        // `sidebar_w` = full left chrome (tabs + tree) for the cell-grid
+        // origin; the tab strip and tree column have their own widths so
+        // each paints into its own band.
         let sidebar_w = self.effective_sidebar_w();
+        let tab_strip_w = self.tab_strip_w();
+        let tree_col_x = self.file_tree_col_x();
+        let tree_col_w = self.file_tree_col_w();
         let pad_px = (WINDOW_PADDING + sidebar_w) * scale;
         let title_px = TITLE_HEIGHT * scale;
         // Per-pane font multipliers (keyed by pty/leaf id), so each pane's
@@ -8009,7 +8257,7 @@ impl App {
                 }
                 // Brighter when the sidebar is open (state indicator) or on
                 // hover; the panel-left SVG shape stays constant.
-                let active = sidebar_w > 0.0;
+                let active = tab_strip_w > 0.0;
                 let fg = if hover || active { theme::TEXT } else { theme::TEXT_DIM };
                 let isz = theme::ICON_SIZE;
                 g.queue_icon(
@@ -8020,10 +8268,32 @@ impl App {
                     fg,
                 );
             }
-            // Top bar: folder icon + current working directory, just right of
-            // the sidebar toggle (Warp-style location chip).
+            // File-tree toggle, just right of the sidebar toggle. Same chip
+            // treatment; lit when the tree column is shown.
             {
-                let (tbx, _, tbw, _) = Self::sidebar_toggle_rect();
+                let (bx, by, bw, bh) = Self::file_tree_toggle_rect();
+                let hover = sb_cursor.0 >= bx
+                    && sb_cursor.0 <= bx + bw
+                    && sb_cursor.1 >= by
+                    && sb_cursor.1 <= by + bh;
+                if hover {
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                }
+                let active = tree_col_w > 0.0;
+                let fg = if hover || active { theme::TEXT } else { theme::TEXT_DIM };
+                let isz = theme::ICON_SIZE;
+                g.queue_icon(
+                    "folder-tree",
+                    bx + (bw - isz) / 2.0,
+                    by + (bh - isz) / 2.0,
+                    isz,
+                    fg,
+                );
+            }
+            // Top bar: folder icon + current working directory, just right of
+            // the file-tree toggle (Warp-style location chip).
+            {
+                let (tbx, _, tbw, _) = Self::file_tree_toggle_rect();
                 let px0 = tbx + tbw + 12.0;
                 let isz = theme::ICON_SIZE;
                 let iy = (TITLE_HEIGHT - isz) / 2.0;
@@ -8113,19 +8383,19 @@ impl App {
             }
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
-            if sidebar_w > 0.0 {
+            if tab_strip_w > 0.0 {
                 // Strip background: the unified BG, set apart from the cell
                 // grid only by the right hairline below — not a darker fill.
                 g.rect(
                     0.0,
                     TITLE_HEIGHT,
-                    sidebar_w,
+                    tab_strip_w,
                     (sb_win_h - TITLE_HEIGHT).max(0.0),
                     theme::BG,
                 );
                 // Right hairline so the strip reads as a distinct column.
                 g.rect(
-                    sidebar_w - 1.0,
+                    tab_strip_w - 1.0,
                     TITLE_HEIGHT,
                     1.0,
                     (sb_win_h - TITLE_HEIGHT).max(0.0),
@@ -8269,42 +8539,6 @@ impl App {
                     theme::ICON_SIZE,
                     theme::TEXT_MUTE,
                 );
-                // ── File tree ── the active pane's cwd, below the "+" button.
-                // Folders first; click a folder to expand, a file to preview.
-                // Built in refresh_file_tree (no per-frame read_dir); we just
-                // lay rows out here + cache hit rects (window-tab pattern).
-                {
-                    let inset = SIDEBAR_TAB_INSET;
-                    let item_h = 22.0_f32;
-                    let tree_w = (self.sidebar_w_logical - inset * 2.0).max(0.0);
-                    let start_y = py + ph + 10.0;
-                    let win_h = win_px.1 / scale;
-                    let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
-                    for (idx, node) in self.file_tree_nodes.iter().enumerate() {
-                        let y = start_y - self.file_tree_scroll + idx as f32 * item_h;
-                        if y + item_h < start_y || y > win_h {
-                            continue; // off-screen → clip (and don't cache a hit rect)
-                        }
-                        let indent = node.depth as f32 * 12.0;
-                        let hovered =
-                            self.file_tree_hover.as_deref() == Some(node.path.as_path());
-                        if hovered {
-                            round_rect(g, inset, y, tree_w, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
-                        }
-                        let fg = if hovered { theme::TEXT } else { theme::TEXT_DIM };
-                        let isz = 14.0_f32;
-                        let icon = if node.is_dir { "folder" } else { "file-text" };
-                        g.queue_icon(icon, inset + indent + 4.0, y + (item_h - isz) / 2.0, isz, fg);
-                        g.draw_text(
-                            inset + indent + 4.0 + isz + 6.0,
-                            y + (item_h - 12.0) / 2.0,
-                            &node.name,
-                            gpu::DrawOpts { font_size: 12.0, color: fg, bold: false, italic: false },
-                        );
-                        rects.push((node.path.clone(), (inset, y, tree_w, item_h)));
-                    }
-                    self.file_tree_rects = rects;
-                }
                 // Shell picker popup, stacked under the "+" button. Layout
                 // (shell_menu_layout) and hit rects were computed before the
                 // GPU borrow so clicks land on the same boxes we paint.
@@ -8342,6 +8576,89 @@ impl App {
                         );
                     }
                 }
+            }
+            // ── File-tree column ── independent of the tab strip, parked just
+            // right of it (VSCode explorer). Root = active pane's cwd; folders
+            // first — click a folder to expand, a file to preview. Rows laid
+            // out + hit rects cached here (window-tab pattern); the read_dir
+            // build lives in refresh_file_tree, never per-frame.
+            if tree_col_w > 0.0 {
+                let col_h = (sb_win_h - TITLE_HEIGHT).max(0.0);
+                // Own background + right hairline so the column reads as a
+                // distinct pane between the tabs and the cell grid.
+                g.rect(tree_col_x, TITLE_HEIGHT, tree_col_w, col_h, theme::BG);
+                g.rect(
+                    tree_col_x + tree_col_w - 1.0,
+                    TITLE_HEIGHT,
+                    1.0,
+                    col_h,
+                    theme::BORDER,
+                );
+                let inset = SIDEBAR_TAB_INSET;
+                let item_h = 22.0_f32;
+                let row_x = tree_col_x + inset;
+                let row_w = (tree_col_w - inset * 2.0).max(0.0);
+                let start_y = TITLE_HEIGHT + 10.0;
+                let win_h = win_px.1 / scale;
+                let step = 14.0_f32; // per-depth indent width
+                let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
+                for (idx, node) in self.file_tree_nodes.iter().enumerate() {
+                    let y = start_y - self.file_tree_scroll + idx as f32 * item_h;
+                    if y + item_h < start_y || y > win_h {
+                        continue; // off-screen → clip (and don't cache a hit rect)
+                    }
+                    let hovered =
+                        self.file_tree_hover.as_deref() == Some(node.path.as_path());
+                    let expanded =
+                        node.is_dir && self.file_tree_expanded.contains(&node.path);
+                    // Row background: hover wins; an open folder keeps a faint
+                    // tint so the expanded branch reads as a group.
+                    if hovered {
+                        round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                    } else if expanded {
+                        round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::with_alpha(theme::SURFACE_HOVER, 0x33));
+                    }
+                    // Indent guides — one faint rule per ancestor level so deep
+                    // nesting stays legible.
+                    for d in 0..node.depth {
+                        let gx = row_x + 6.0 + d as f32 * step;
+                        g.rect(gx, y, 1.0, item_h, theme::with_alpha(theme::BORDER, 0x55));
+                    }
+                    let base_x = row_x + node.depth as f32 * step;
+                    let isz = 15.0_f32;
+                    let iy = y + (item_h - isz) / 2.0;
+                    // Chevron column (folders only); files align past it.
+                    if node.is_dir {
+                        let chev = if expanded { "chevron-down" } else { "chevron-right" };
+                        let cc = if hovered { theme::TEXT } else { theme::TEXT_MUTE };
+                        g.queue_icon(chev, base_x + 2.0, y + (item_h - 12.0) / 2.0, 12.0, cc);
+                    }
+                    let icon_x = base_x + 17.0;
+                    // Icon shape = file class, tint = language. Folders take the
+                    // warm folder color and an open/closed glyph.
+                    let (icon, tint) = if node.is_dir {
+                        (if expanded { "folder-open" } else { "folder" }, theme::FT_FOLDER)
+                    } else {
+                        let fname = node
+                            .path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(node.name.as_str());
+                        file_icon_spec(fname)
+                    };
+                    g.queue_icon(icon, icon_x, iy, isz, tint);
+                    // Folders read brighter than files (soft hierarchy); hover
+                    // lifts a file to full strength.
+                    let fg = if hovered || node.is_dir { theme::TEXT } else { theme::TEXT_DIM };
+                    g.draw_text(
+                        icon_x + isz + 7.0,
+                        y + (item_h - 12.0) / 2.0,
+                        &node.name,
+                        gpu::DrawOpts { font_size: 12.0, color: fg, bold: false, italic: false },
+                    );
+                    rects.push((node.path.clone(), (row_x, y, row_w, item_h)));
+                }
+                self.file_tree_rects = rects;
             }
             // Per-pane header bar. The band is the unified BG (same as the
             // body) so there's no depth seam; a bottom hairline separates it
@@ -9158,6 +9475,23 @@ impl ApplicationHandler<UserEvent> for App {
                                 scroll: 0,
                             })
                         }),
+                        "code" => std::fs::read_to_string(p).ok().map(|text| {
+                            // Reuse the markdown code-block path: fence the file
+                            // so parse_markdown tags it Code and the renderer
+                            // runs highlight_code_line. A ~~~ fence survives a
+                            // ``` that appears inside the source.
+                            let lang = code_lang_for_path(p);
+                            let body =
+                                format!("~~~{lang}\n{}\n~~~", text.trim_end_matches('\n'));
+                            PaneContent::Markdown(MarkdownPane {
+                                doc: Arc::new(build_markdown_doc(id, p, &body)),
+                                raw_mode: false,
+                                edit_lines: Vec::new(),
+                                cur_line: 0,
+                                cur_col: 0,
+                                scroll: 0,
+                            })
+                        }),
                         _ => None,
                     };
                     if let Some(content) = built {
@@ -9294,6 +9628,42 @@ impl ApplicationHandler<UserEvent> for App {
                 std::thread::sleep(std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS));
                 if blink_proxy.send_event(UserEvent::Redraw).is_err() {
                     break;
+                }
+            });
+        }
+        // Sidebar git-badge poller. The sidebar paint publishes each window's
+        // repr cwd into `git_poll_cwds`; this thread shells out to `git_badge`
+        // off the main thread and wakes the loop only when a badge actually
+        // changed — an idle repo costs one cheap git call per distinct cwd
+        // every interval, with no repaint. Dedups cwds so N windows in one
+        // repo run git once.
+        {
+            let git_proxy = self.proxy.clone();
+            let poll_cwds = self.git_poll_cwds.clone();
+            let git_cache = self.window_git.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                let targets: Vec<std::path::PathBuf> = poll_cwds.lock().unwrap().clone();
+                let mut next: HashMap<std::path::PathBuf, kasa_mcp::git::GitBadge> =
+                    HashMap::new();
+                for cwd in targets {
+                    if next.contains_key(&cwd) {
+                        continue;
+                    }
+                    if let Some(b) = kasa_mcp::git::git_badge(&cwd) {
+                        next.insert(cwd, b);
+                    }
+                }
+                let mut guard = match git_cache.lock() {
+                    Ok(g) => g,
+                    Err(_) => break,
+                };
+                if *guard != next {
+                    *guard = next;
+                    drop(guard);
+                    if git_proxy.send_event(UserEvent::Redraw).is_err() {
+                        break;
+                    }
                 }
             });
         }
@@ -9580,11 +9950,39 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                     }
                 }
+                // File-tree row hover — drives the row highlight.
+                {
+                    let (cx, cy) = self.cursor_px;
+                    let new_hover = self
+                        .file_tree_rects
+                        .iter()
+                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(p, _)| p.clone());
+                    if new_hover != self.file_tree_hover {
+                        self.file_tree_hover = new_hover;
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                }
                 // Sidebar resize drag in progress: update width and reflow.
                 if let Some((start_x, start_w)) = self.sidebar_resize {
                     let new_w = (start_w + (self.cursor_px.0 - start_x)).clamp(140.0, 520.0);
                     if (new_w - self.sidebar_w_logical).abs() > 0.5 {
                         self.sidebar_w_logical = new_w;
+                        let (cols, rows) = self.window_cells();
+                        self.resize_backend(cols, rows);
+                        self.chrome_dirty = true;
+                        window.set_cursor(CursorIcon::ColResize);
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                // File-tree column resize drag in progress.
+                if let Some((start_x, start_w)) = self.file_tree_resize {
+                    let new_w = (start_w + (self.cursor_px.0 - start_x))
+                        .clamp(FILE_TREE_W_MIN, FILE_TREE_W_MAX);
+                    if (new_w - self.file_tree_w_logical).abs() > 0.5 {
+                        self.file_tree_w_logical = new_w;
                         let (cols, rows) = self.window_cells();
                         self.resize_backend(cols, rows);
                         self.chrome_dirty = true;
@@ -9756,7 +10154,10 @@ impl ApplicationHandler<UserEvent> for App {
                     let on_sidebar_edge = self.sidebar_visible
                         && cy > TITLE_HEIGHT
                         && (cx - self.sidebar_w_logical).abs() <= 3.0;
-                    let icon = if on_sidebar_edge {
+                    let on_tree_edge = self.file_tree_visible
+                        && cy > TITLE_HEIGHT
+                        && (cx - (self.file_tree_col_x() + self.file_tree_w_logical)).abs() <= 3.0;
+                    let icon = if on_sidebar_edge || on_tree_edge {
                         CursorIcon::ColResize
                     } else {
                         match self
@@ -9813,6 +10214,14 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    // File-tree toggle, just right of the sidebar toggle.
+                    {
+                        let (bx, by, bw, bh) = Self::file_tree_toggle_rect();
+                        if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
+                            self.toggle_file_tree();
+                            return;
+                        }
+                    }
                     // Sidebar resize grip — a 6px hot zone straddling the
                     // sidebar's right edge below the title strip. Caught
                     // before the sidebar click path so dragging the edge
@@ -9821,6 +10230,16 @@ impl ApplicationHandler<UserEvent> for App {
                         let edge = self.sidebar_w_logical;
                         if cx >= edge - 3.0 && cx <= edge + 3.0 {
                             self.sidebar_resize = Some((cx, self.sidebar_w_logical));
+                            return;
+                        }
+                    }
+                    // File-tree column resize grip — straddles the tree's right
+                    // edge. Caught before the tree click path so dragging the
+                    // seam resizes instead of selecting the last row.
+                    if self.file_tree_visible && cy > TITLE_HEIGHT {
+                        let edge = self.file_tree_col_x() + self.file_tree_w_logical;
+                        if cx >= edge - 3.0 && cx <= edge + 3.0 {
+                            self.file_tree_resize = Some((cx, self.file_tree_w_logical));
                             return;
                         }
                     }
@@ -9865,7 +10284,21 @@ impl ApplicationHandler<UserEvent> for App {
                             self.chrome_dirty = true;
                             return;
                         }
-                        // File tree row: folder → toggle expand, file → preview.
+                        // Empty sidebar space — swallow the click.
+                        return;
+                    }
+                    // File-tree column — its own band, right of the tab strip.
+                    // Caught before the cell grid so a row click never falls
+                    // through to the terminal underneath.
+                    if self.file_tree_visible
+                        && cy > TITLE_HEIGHT
+                        && cx >= self.file_tree_col_x()
+                        && cx < self.file_tree_col_x() + self.file_tree_w_logical
+                    {
+                        let inside = |r: &(f32, f32, f32, f32)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        };
+                        // Row: folder → toggle expand, file → preview.
                         if let Some(path) = self
                             .file_tree_rects
                             .iter()
@@ -9898,6 +10331,15 @@ impl ApplicationHandler<UserEvent> for App {
                                 let kind = match ext.as_str() {
                                     "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff"
                                     | "tif" | "ico" => "image",
+                                    "md" | "markdown" | "txt" | "log" | "" => "markdown",
+                                    "rs" | "py" | "pyi" | "pyw" | "js" | "mjs" | "cjs" | "jsx"
+                                    | "ts" | "tsx" | "go" | "rb" | "java" | "kt" | "kts"
+                                    | "swift" | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hxx"
+                                    | "cs" | "php" | "html" | "htm" | "css" | "scss" | "sass"
+                                    | "json" | "jsonc" | "yml" | "yaml" | "toml" | "ini"
+                                    | "conf" | "cfg" | "env" | "sh" | "bash" | "zsh" | "fish"
+                                    | "sql" | "lua" | "vue" | "wgsl" | "glsl" | "vert"
+                                    | "frag" => "code",
                                     _ => "markdown",
                                 };
                                 let ps = path.to_string_lossy().into_owned();
@@ -9907,7 +10349,7 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             return;
                         }
-                        // Empty sidebar space — swallow the click.
+                        // Empty tree space — swallow the click.
                         return;
                     }
                     // Code-block copy button. Checked before the cell-grid /
@@ -10043,7 +10485,10 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 pane.dirty = true;
                             }
-                            ws.active_pane = Some(pid);
+                            ws.active_pane = Some(pid.clone());
+                        }
+                        if let Some(client) = self.daemon_client.as_ref() {
+                            client.focus(&pid);
                         }
                         self.chrome_dirty = true;
                         window.request_redraw();
@@ -10169,6 +10614,11 @@ impl ApplicationHandler<UserEvent> for App {
                         self.header_at_px(self.cursor_px.0, self.cursor_px.1)
                     {
                         self.ws.lock().unwrap().active_pane = Some(pane.clone());
+                        // Propagate the focus to the daemon (see body-click
+                        // note) so a later cwd poll doesn't snap focus away.
+                        if let Some(client) = self.daemon_client.as_ref() {
+                            client.focus(&pane);
+                        }
                         self.header_drag = Some(HeaderDrag {
                             pane,
                             start: self.cursor_px,
@@ -10240,6 +10690,14 @@ impl ApplicationHandler<UserEvent> for App {
                                 switched
                             };
                             if switched {
+                                // Daemon owns the active pointer: its cwd poll
+                                // re-broadcasts active_pane, so a local-only set
+                                // is reverted by the next State — `cd` then snaps
+                                // focus back to the daemon's stale active. Mirror
+                                // the click to the daemon so its pointer tracks.
+                                if let Some(client) = self.daemon_client.as_ref() {
+                                    client.focus(&pane_id);
+                                }
                                 self.selection = None;
                                 self.drag_anchor = None;
                                 self.mouse_forward_pane = None;
@@ -10473,6 +10931,11 @@ impl ApplicationHandler<UserEvent> for App {
                         // End a sidebar resize drag (no other commit needed —
                         // the live width is already in self.sidebar_w_logical).
                         if self.sidebar_resize.take().is_some() {
+                            window.set_cursor(CursorIcon::Default);
+                            return;
+                        }
+                        // End a file-tree column resize drag.
+                        if self.file_tree_resize.take().is_some() {
                             window.set_cursor(CursorIcon::Default);
                             return;
                         }
@@ -11141,6 +11604,38 @@ fn available_shells() -> Vec<(&'static str, &'static str, String)> {
 /// in two places — the early env-var seed in `start_pty` so the very
 /// first shell sees a stable value, and the actual server bind in
 /// `start_socket_with` — and must return the same path in both.
+/// Path of the file the http-serving process (daemon, or in-process GUI)
+/// writes its ACTUAL bound MCP port into, so the panel webviews poll the right
+/// port even when the preferred one was taken and `spawn_http_server` fell back
+/// to an OS-assigned one. Lives beside the control socket (same
+/// `KASATERM_SOCKET_PATH` the daemon inherits) so GUI and daemon resolve the
+/// same file.
+pub(crate) fn mcp_port_file_path() -> std::path::PathBuf {
+    let sock = std::env::var("KASATERM_SOCKET_PATH").unwrap_or_else(|_| {
+        format!(
+            "{}/.config/kasaterm/daemon.sock",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    });
+    std::path::Path::new(&sock)
+        .parent()
+        .map(|p| p.join("mcp_port"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kasaterm-mcp-port"))
+}
+
+/// Port the panel webviews should poll: the actual bound port recorded in
+/// `mcp_port_file_path` if present, else the env hint, else the 8765 default.
+/// The file beats the env so a daemon that fell back off its preferred port
+/// still lines up with the panels.
+fn mcp_panel_port() -> String {
+    std::fs::read_to_string(mcp_port_file_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("KASASPACE_MCP_PORT").ok())
+        .unwrap_or_else(|| "8765".to_string())
+}
+
 fn resolve_kasaterm_socket_path() -> String {
     std::env::var("KASATERM_SOCKET_PATH")
         .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))

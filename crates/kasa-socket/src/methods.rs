@@ -95,6 +95,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             Err(e) => backend_err(id, e),
         },
         "collab.bind_transcript" => collab_bind_transcript(backend, id, &req.params),
+        "collab.notify" => collab_notify(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -188,6 +189,7 @@ fn system_capabilities(id: Value) -> Response {
                 "collab.board",
                 "window.layout",
                 "collab.bind_transcript",
+                "collab.notify",
             ],
         }),
     )
@@ -221,6 +223,17 @@ fn collab_bind_transcript(backend: &dyn Backend, id: Value, params: &Value) -> R
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
+}
+
+fn collab_notify(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let from = match params.get("from").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "collab.notify requires `from` (surface_id)"),
+    };
+    // kind is advisory; an unknown/missing value falls back to "stop" so a
+    // terse hook (`notify` with no arg) still does the sensible thing.
+    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("stop");
+    simple(id, backend.collab_notify(from, kind))
 }
 
 fn surface_peek(backend: &dyn Backend, id: Value, params: &Value) -> Response {

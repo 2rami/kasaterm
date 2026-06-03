@@ -128,6 +128,7 @@ pub fn build_activity(surface_id: &str, recent: &VecDeque<ToolEvent>, idle: bool
         status: status.into(),
         files,
         screen: None,
+        muted: false,
     }
 }
 

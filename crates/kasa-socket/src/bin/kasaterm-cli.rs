@@ -182,12 +182,13 @@ fn print_help() {
     eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
-    eprintln!("  kasaterm-cli key   <enter|tab|escape|backspace|delete|up|down|left|right>");
+    eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
     eprintln!("  kasaterm-cli tell  <surface_id> <text>     # send + submit (wake an idle claude)");
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
     eprintln!("  kasaterm-cli layout                       # where each pane sits (window-relative %)");
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
+    eprintln!("  kasaterm-cli notify [start|stop]          # tell siblings THIS pane began/finished (hook)");
     eprintln!();
     eprintln!(
         "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
@@ -292,10 +293,34 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             ("surface.send_text", params)
         }
         "key" => {
-            let key = args
-                .first()
-                .ok_or_else(|| anyhow!("key needs a key name"))?;
-            ("surface.send_key", json!({ "key": key }))
+            // key [--surface <id>] <key-name> — send a key (enter/escape/up/
+            // down/left/right/tab/...) to a specific pane, e.g. to answer an
+            // AskUserQuestion from outside (arrow keys + enter). Without
+            // --surface it targets the focused pane.
+            let (surface, key) = if args.first().is_some_and(|a| a == "--surface") {
+                (
+                    Some(
+                        args.get(1)
+                            .ok_or_else(|| anyhow!("--surface needs an id"))?
+                            .clone(),
+                    ),
+                    args.get(2)
+                        .ok_or_else(|| anyhow!("key needs a key name"))?
+                        .clone(),
+                )
+            } else {
+                (
+                    None,
+                    args.first()
+                        .ok_or_else(|| anyhow!("key needs a key name"))?
+                        .clone(),
+                )
+            };
+            let mut params = json!({ "key": key });
+            if let Some(s) = surface {
+                params["surface_id"] = json!(s);
+            }
+            ("surface.send_key", params)
         }
         "tell" => {
             // send + submit in one shot, so an idle claude in the target pane
@@ -348,6 +373,16 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 "collab.bind_transcript",
                 json!({ "surface_id": surface, "path": path }),
             )
+        }
+        "notify" => {
+            // A pane announces its own turn boundary to siblings, driven by
+            // its UserPromptSubmit (start) / Stop (stop) hook. from = this
+            // pane's injected id; kind defaults to stop.
+            let kind = args.first().map(|s| s.as_str()).unwrap_or("stop");
+            let from = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                anyhow!("notify needs $KASATERM_PANE_ID (run inside a kasaterm pane)")
+            })?;
+            ("collab.notify", json!({ "from": from, "kind": kind }))
         }
         "peek" => {
             // Default to this pane if no id given — handy for "what does my
