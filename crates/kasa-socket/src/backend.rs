@@ -128,6 +128,12 @@ pub struct PaneActivity {
     /// `surface.peek` per pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
+    /// True when this pane's start/stop notices are muted (board-panel
+    /// toggle): the host drops its `collab_notify` instead of waking
+    /// siblings. Read-only mirror of the daemon's mute set, surfaced so the
+    /// panel can render the toggle state.
+    #[serde(default)]
+    pub muted: bool,
 }
 
 /// One pane's rectangle in the visible window, as percentages (0..100) of
@@ -299,6 +305,23 @@ pub trait Backend: Send + Sync {
     /// callers can always scan.
     fn collab_board(&self) -> Result<Vec<PaneActivity>> {
         Ok(Vec::new())
+    }
+
+    /// Wake every *other* live pane with a one-line notice that pane `from`
+    /// crossed a turn boundary — `kind` is "start" (began working) or "stop"
+    /// (finished). The host injects the line into each sibling's prompt so a
+    /// claude there learns the news without polling the board. Driven by the
+    /// announcing pane's own UserPromptSubmit / Stop hook. Default no-op (a
+    /// backend with no panes has nobody to wake).
+    fn collab_notify(&self, _from: &str, _kind: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Mute or unmute a pane's collab notices. While muted, `collab_notify`
+    /// from `surface_id` is dropped so it never wakes a sibling. Toggled from
+    /// the board panel (`POST /board-mute`). Default no-op.
+    fn set_collab_mute(&self, _surface_id: &str, _muted: bool) -> Result<()> {
+        Ok(())
     }
 
     /// Geometry of the panes in the visible window, as window-relative

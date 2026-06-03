@@ -36,7 +36,68 @@ pub fn git_status(repo: &Path) -> Value {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_porcelain_v2(&stdout)
+    let mut v = parse_porcelain_v2(&stdout);
+    // 사이드바 배지("+460 -59")는 변경 *라인* 수를 보여주는데 porcelain v2는
+    // 파일 단위만 주므로 --shortstat을 한 번 더 돌려 끼워 넣는다.
+    let (ins, del) = diff_line_stat(repo);
+    v["insertions"] = json!(ins);
+    v["deletions"] = json!(del);
+    v
+}
+
+/// 사이드바 탭 git 배지(브랜치 + "+460 -59")용 경량 스냅샷. GUI가 윈도우마다
+/// 1초 폴링으로 직접 호출하므로(데몬을 안 거침) 전체 `git_status`의 porcelain v2
+/// 파싱 대신 rev-parse + shortstat 두 번만 돌려 호출당 비용을 줄인다.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GitBadge {
+    pub branch: String,
+    pub insertions: u32,
+    pub deletions: u32,
+}
+
+/// `repo`가 git 워크트리면 배지 정보를, 아니면 `None`. 브랜치를 못 읽으면
+/// (git repo 아님 등) 배지 자체를 숨기는 게 자연스러우므로 `None`을 돌린다.
+pub fn git_badge(repo: &Path) -> Option<GitBadge> {
+    let (ok, head) = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    if !ok {
+        return None;
+    }
+    let branch = head.trim().to_string();
+    if branch.is_empty() {
+        return None;
+    }
+    let (_o, stat) = run_git(repo, &["diff", "HEAD", "--shortstat"]);
+    let (insertions, deletions) = parse_shortstat(&stat);
+    Some(GitBadge {
+        branch,
+        insertions,
+        deletions,
+    })
+}
+
+/// HEAD 대비 작업트리의 추가/삭제 라인 수. 사이드바 git 배지("+460 -59")용.
+/// 추적 파일만 집계한다(untracked 새 파일은 `--shortstat`에 안 잡힘) — 배지는
+/// "이 repo가 HEAD에서 얼마나 벌어졌나"의 한눈 신호라 그 정도로 충분하다.
+fn diff_line_stat(repo: &Path) -> (u32, u32) {
+    let (_ok, out) = run_git(repo, &["diff", "HEAD", "--shortstat"]);
+    parse_shortstat(&out)
+}
+
+/// `git diff --shortstat` 한 줄에서 추가/삭제 라인을 뽑는다. 형식:
+/// ` 3 files changed, 460 insertions(+), 59 deletions(-)`. insertions나
+/// deletions 한쪽이 빠질 수 있으니(추가만/삭제만) 각각 독립적으로 찾는다.
+fn parse_shortstat(text: &str) -> (u32, u32) {
+    let num_before = |kw: &str| -> u32 {
+        text.find(kw).and_then(|pos| {
+            text[..pos]
+                .rsplit(',')
+                .next()
+                .and_then(|seg| seg.split_whitespace().next())
+                .and_then(|n| n.parse().ok())
+        })
+        .unwrap_or(0)
+    };
+    (num_before("insertion"), num_before("deletion"))
 }
 
 /// Parse the porcelain v2 + --branch stream. Header lines start with `# `;
@@ -226,6 +287,19 @@ mod tests {
         assert_eq!(v["staged"], serde_json::json!(["staged.rs", "new.rs"]));
         assert_eq!(v["untracked"], serde_json::json!(["brand new.rs"]));
         assert_eq!(v["clean"], false);
+    }
+
+    #[test]
+    fn shortstat_parses_both_and_one_sided() {
+        assert_eq!(
+            parse_shortstat(" 3 files changed, 460 insertions(+), 59 deletions(-)"),
+            (460, 59)
+        );
+        // 추가만 / 삭제만 — 한쪽이 빠진 형식.
+        assert_eq!(parse_shortstat(" 1 file changed, 7 insertions(+)"), (7, 0));
+        assert_eq!(parse_shortstat(" 1 file changed, 4 deletions(-)"), (0, 4));
+        // 변경 없음(빈 출력).
+        assert_eq!(parse_shortstat(""), (0, 0));
     }
 
     #[test]

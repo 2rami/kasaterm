@@ -80,6 +80,13 @@ struct DaemonState {
     /// under the daemon — so the board lives here now.
     collab_auto: Arc<Mutex<HashMap<String, PaneActivity>>>,
     binds: Arc<Mutex<Vec<(String, PathBuf)>>>,
+    /// Surface ids whose collab start/stop notices are muted (board-panel
+    /// toggle). `collab_notify` from a muted pane is dropped before broadcast.
+    muted: Mutex<HashSet<String>>,
+    /// Panes we just delivered a notice to. The next notify FROM such a pane
+    /// (its watcher woke it → it answered → its turn ended → it fires notify)
+    /// is dropped once, so the echo dies after one hop instead of ping-ponging.
+    notify_suppress: Mutex<HashSet<String>>,
     /// pane id → cwd path, refreshed by the 1s cwd-poll thread. state_view
     /// reads this instead of spawning `lsof` per pane on every broadcast — so a
     /// close/dock/split RPC returns without blocking on N subprocess calls (the
@@ -713,6 +720,14 @@ impl Backend for DaemonBackend {
             pane.send_bytes(body)?;
         }
         if !submit.is_empty() {
+            // Give claude's Ink prompt a beat to ingest+render the body before
+            // the Enter lands. Sent back-to-back, claude can't keep up with the
+            // fast input and treats the \r as text instead of a submit — the
+            // line just sits in the prompt unsent (confirmed by repro: same
+            // text submits fine when the Enter is delayed ~80ms).
+            if !body.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
             pane.send_bytes(submit)?;
         }
         Ok(())
@@ -761,6 +776,7 @@ impl Backend for DaemonBackend {
         // transcript-derived (collab_auto) — it reflects what each pane is
         // actually doing, so a pane never has to report itself.
         let live: HashSet<String> = self.state.pty.lock().unwrap().keys().cloned().collect();
+        let muted = self.state.muted.lock().unwrap();
         Ok(self
             .state
             .collab_auto
@@ -768,8 +784,82 @@ impl Backend for DaemonBackend {
             .unwrap()
             .values()
             .filter(|a| live.contains(&a.surface_id))
-            .cloned()
+            .map(|a| {
+                let mut a = a.clone();
+                a.muted = muted.contains(&a.surface_id);
+                a
+            })
             .collect())
+    }
+    fn collab_notify(&self, from: &str, kind: &str) -> Result<()> {
+        // Muted panes don't wake siblings — the board-panel toggle drops their
+        // notices here, before any work.
+        if self.state.muted.lock().unwrap().contains(from) {
+            return Ok(());
+        }
+        // Loop-breaker: a pane woken BY a notice (watcher fired → it answered →
+        // turn ended → this notify) gets dropped once, so the echo dies after
+        // one hop rather than ping-ponging across panes.
+        if self.state.notify_suppress.lock().unwrap().remove(from) {
+            return Ok(());
+        }
+        // The announcing pane's latest transcript-derived intent (what it was
+        // just doing) rides along so "%2 완료" becomes "%2 완료 · daemon.rs",
+        // not a bare ping. Empty if that pane never bound a transcript.
+        let intent = self
+            .state
+            .collab_auto
+            .lock()
+            .unwrap()
+            .get(from)
+            .map(|a| a.intent.clone())
+            .unwrap_or_default();
+        // The `[알림]` prefix is the loop-breaker. Injecting this line wakes a
+        // sibling, whose own UserPromptSubmit/Stop would re-fire notify and
+        // ping-pong forever — but the notify hook bails when the triggering
+        // prompt starts with `[알림]`, so the echo dies after one hop.
+        let msg = match kind {
+            "start" => format!("[알림] {from} 시작"),
+            _ if intent.is_empty() => format!("[알림] {from} 완료"),
+            _ => format!("[알림] {from} 완료 · {intent}"),
+        };
+        // Snapshot targets, then drop the pty lock before send_text (which
+        // re-locks pty per pane). Sender excluded; mute filtering lands with
+        // the board-panel toggle in a later pass.
+        let targets: Vec<String> = {
+            let pty = self.state.pty.lock().unwrap();
+            pty.keys().filter(|s| s.as_str() != from).cloned().collect()
+        };
+        let mut suppress = self.state.notify_suppress.lock().unwrap();
+        for sid in targets {
+            // Append to the pane's inbox file instead of injecting into its PTY.
+            // That pane's `run_in_background` watcher tails this and exits → its
+            // claude is re-invoked by a task-notification: no fake keystrokes,
+            // no IME corruption, works busy or idle. Mark it suppressed so the
+            // notify it fires right after reading this is dropped (loop-break).
+            let safe = sid.trim_start_matches('%');
+            let dir = std::path::Path::new("/tmp/kasaterm-inbox");
+            let _ = std::fs::create_dir_all(dir);
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join(format!("{safe}.jsonl")))
+            {
+                let _ = writeln!(f, "{msg}");
+            }
+            suppress.insert(sid);
+        }
+        Ok(())
+    }
+    fn set_collab_mute(&self, surface_id: &str, muted: bool) -> Result<()> {
+        let mut set = self.state.muted.lock().unwrap();
+        if muted {
+            set.insert(surface_id.to_string());
+        } else {
+            set.remove(surface_id);
+        }
+        Ok(())
     }
     fn window_layout(&self) -> Result<Vec<PaneRect>> {
         // leaf_rects over a 100×100 grid → window-relative percentages, so
@@ -1248,6 +1338,8 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         state_path: state_path.clone(),
         collab_auto: Arc::new(Mutex::new(HashMap::new())),
         binds: Arc::new(Mutex::new(Vec::new())),
+        muted: Mutex::new(HashSet::new()),
+        notify_suppress: Mutex::new(HashSet::new()),
         previews: Mutex::new(HashMap::new()),
         cwd_cache: Mutex::new(HashMap::new()),
     });
@@ -1341,7 +1433,14 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8765);
-    let _ = kasa_mcp::spawn_http_server(backend.clone(), mcp_port);
+    match kasa_mcp::spawn_http_server(backend.clone(), mcp_port) {
+        Ok(actual) => {
+            // Record the ACTUAL bound port so the GUI's panel webviews poll the
+            // right place even if `mcp_port` was taken and we fell back.
+            let _ = std::fs::write(crate::mcp_port_file_path(), actual.to_string());
+        }
+        Err(e) => eprintln!("[kasaspace-mcp] daemon http start failed: {e}"),
+    }
     let server = Server::bind(control_path.clone())?;
     let _ctrl = server.spawn(backend);
 

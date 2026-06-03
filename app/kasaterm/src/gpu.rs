@@ -1423,6 +1423,15 @@ impl GpuRenderer {
             "plus" => include_str!("../assets/icons/plus.svg"),
             "minus" => include_str!("../assets/icons/minus.svg"),
             "panel-left" => include_str!("../assets/icons/panel-left.svg"),
+            "folder-tree" => include_str!("../assets/icons/folder-tree.svg"),
+            "folder-open" => include_str!("../assets/icons/folder-open.svg"),
+            "chevron-right" => include_str!("../assets/icons/chevron-right.svg"),
+            "chevron-down" => include_str!("../assets/icons/chevron-down.svg"),
+            "file" => include_str!("../assets/icons/file.svg"),
+            "file-code" => include_str!("../assets/icons/file-code.svg"),
+            "image" => include_str!("../assets/icons/image.svg"),
+            "braces" => include_str!("../assets/icons/braces.svg"),
+            "settings-2" => include_str!("../assets/icons/settings-2.svg"),
             "columns-2" => include_str!("../assets/icons/columns-2.svg"),
             "rows-2" => include_str!("../assets/icons/rows-2.svg"),
             "copy" => include_str!("../assets/icons/copy.svg"),
@@ -1443,6 +1452,34 @@ impl GpuRenderer {
         let svg = svg.replace("currentColor", "#ffffff");
         let opt = resvg::usvg::Options::default();
         let tree = resvg::usvg::Tree::from_str(&svg, &opt).ok()?;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)?;
+        let size = tree.size();
+        let scale = px as f32 / size.width().max(size.height());
+        let tf = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        resvg::render(&tree, tf, &mut pixmap.as_mut());
+        Some(pixmap.data().to_vec())
+    }
+
+    /// System fontdb for SVG `<text>` (the file-icon extension labels), loaded
+    /// once — load_system_fonts is slow and icons are cached after first paint.
+    fn icon_fontdb() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
+        static DB: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
+            std::sync::OnceLock::new();
+        DB.get_or_init(|| {
+            let mut db = resvg::usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            std::sync::Arc::new(db)
+        })
+        .clone()
+    }
+
+    /// Rasterize a MULTI-COLOR svg (file-type icons) preserving its own fills —
+    /// unlike `rasterize_icon`, no currentColor→white flatten. Drawn through the
+    /// FLAG_COLOR path so the authored colors land on screen unchanged.
+    fn rasterize_color_svg(svg: &str, px: u32) -> Option<Vec<u8>> {
+        let mut opt = resvg::usvg::Options::default();
+        opt.fontdb = Self::icon_fontdb();
+        let tree = resvg::usvg::Tree::from_str(svg, &opt).ok()?;
         let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)?;
         let size = tree.size();
         let scale = px as f32 / size.width().max(size.height());
@@ -1483,6 +1520,39 @@ impl GpuRenderer {
                 uv_max: [1.0, 1.0],
                 fg_rgba: srgb_rgba_to_linear(color),
                 flags: CellInstance::FLAG_ICON,
+                ..Default::default()
+            },
+        ));
+    }
+
+    /// Queue a multi-color file-type icon (own fills, not tinted) at `(x,y)`,
+    /// `size`-side square. `key` keys the cache (e.g. "file:rs"); `svg` is the
+    /// authored color SVG. Same draw list as `queue_icon` (after the chrome
+    /// pass) but FLAG_COLOR so the fills survive instead of flattening to one
+    /// tint. Cache holds the rasterized RGBA so each (key,px) bakes once.
+    pub fn queue_color_icon(&mut self, key: &str, svg: &str, x: f32, y: f32, size: f32) {
+        let px = (size * self.scale).round() as u32;
+        if px == 0 {
+            return;
+        }
+        let cache = format!("__cicon:{key}:{px}");
+        if !self.images.contains_key(&cache) {
+            let Some(rgba) = Self::rasterize_color_svg(svg, px) else { return };
+            self.upload_image(&cache, &rgba, px, px);
+        }
+        if !self.images.contains_key(&cache) {
+            return;
+        }
+        let (dx, dy) = ((x * self.scale).round(), (y * self.scale).round());
+        let dpx = px as f32;
+        self.icon_quads.push((
+            cache,
+            CellInstance {
+                cell_px: [dx, dy, dpx, dpx],
+                uv_min: [0.0, 0.0],
+                uv_max: [1.0, 1.0],
+                fg_rgba: [1.0, 1.0, 1.0, 1.0],
+                flags: CellInstance::FLAG_COLOR,
                 ..Default::default()
             },
         ));
