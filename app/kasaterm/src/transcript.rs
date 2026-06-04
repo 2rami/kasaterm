@@ -129,6 +129,9 @@ pub fn build_activity(surface_id: &str, recent: &VecDeque<ToolEvent>, idle: bool
         files,
         screen: None,
         muted: false,
+        // The transcript can't tell us claude is blocked on a prompt; only
+        // `agents --json` knows. The watcher's agents poll fills this in.
+        waiting_for: None,
     }
 }
 

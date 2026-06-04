@@ -770,6 +770,7 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
   .status.building { color: #e3b341; }
   .status.idle { color: #787e8a; }
   .status.blocked { color: #f85149; }
+  .status.waiting { color: #f0883e; font-weight: 600; }
   .intent { margin-top: 5px; color: #ecedf3; word-break: break-word; }
   .files { margin-top: 3px; font-size: 11px; color: #787e8a; word-break: break-all; }
   .bell { background: none; border: 0; padding: 2px 4px; margin-left: 6px; cursor: pointer; color: #5a8ce6; display: inline-flex; align-items: center; border-radius: 6px; flex: none; }
@@ -807,11 +808,16 @@ function render(board) {
     const st = (p.status || "").toLowerCase();
     const files = (p.files || []).map(leaf).join(", ");
     const muted = !!p.muted;
+    // "waiting" = claude blocked on a permission/input prompt (agents --json).
+    // The transcript can't see this, so it's the one status worth flagging hard.
+    const statusLabel = st === "waiting"
+      ? "⚠ 권한 대기중" + (p.waiting_for ? ` (${esc(p.waiting_for)})` : "")
+      : esc(p.status || "");
     const d = document.createElement("div");
     d.className = "pane";
     d.innerHTML =
       `<div class="row1"><span class="sid">${esc(p.surface_id)}</span>` +
-      `<span class="status ${esc(st)}">${esc(p.status || "")}</span>` +
+      `<span class="status ${esc(st)}">${statusLabel}</span>` +
       `<button class="bell ${muted ? "off" : ""}" data-sid="${esc(p.surface_id)}" data-muted="${muted}" ` +
       `title="${muted ? "알림 꺼짐 — 클릭해서 켜기" : "알림 켜짐 — 클릭해서 끄기"}">${muted ? BELL_OFF : BELL_ON}</button></div>` +
       `<div class="intent">${esc(p.intent || "")}</div>` +

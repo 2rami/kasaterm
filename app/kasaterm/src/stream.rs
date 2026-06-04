@@ -45,6 +45,25 @@ pub struct DockedView {
     pub label: String,
 }
 
+/// One pane's coarse activity, projected from the daemon's transcript watcher
+/// (`PaneActivity`) for the GUI's working indicator + completion toast. `busy`
+/// is simply `status != "idle"`. Derives `PartialEq` so the GUI's repaint gate
+/// can tell when a pane flipped working↔idle and force a frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PaneStatusView {
+    /// "working" | "building" | "blocked" | "idle" | "waiting" (free text from
+    /// the watcher; "waiting" is agents-sourced — claude blocked on a prompt).
+    pub status: String,
+    /// Free-text "what + why" the pane is doing — shown in the completion toast
+    /// so "%3 완료" becomes "%3 완료 · git 패널 통합".
+    pub intent: String,
+    /// Why `status == "waiting"` (agents --json `waitingFor`), so the GUI can
+    /// label "⚠ 권한 대기중". `None` unless waiting. The GUI's repaint gate keys
+    /// on `PartialEq`, so a change here forces a frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
+}
+
 /// One session: its windows + which is active + a display label (the active
 /// pane's cwd basename, for the session panel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +109,15 @@ pub struct StateView {
     /// older daemon stream still deserializes.
     #[serde(default)]
     pub pane_previews: std::collections::HashMap<String, PanePreview>,
+    /// Per-pane collab activity (busy/idle + intent), so the GUI draws a working
+    /// indicator in the pane header AND the sidebar window list — for every pane
+    /// across all windows, not just the visible one. The visible window could
+    /// scan its own screen for a spinner glyph, but off-screen windows can't, so
+    /// this StateView field is the single cross-window source. Sourced from the
+    /// transcript watcher's `collab_auto`. Optional/default so an older daemon
+    /// stream still deserializes.
+    #[serde(default)]
+    pub pane_activity: std::collections::HashMap<String, PaneStatusView>,
 }
 
 /// Daemon→GUI stream message. `Frame` carries a screen diff (per pane, keyed by

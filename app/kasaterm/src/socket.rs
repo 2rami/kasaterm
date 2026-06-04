@@ -7,7 +7,8 @@
 //! per actually-open pane.
 
 use kasa_socket::backend::{
-    Backend, PaneActivity, SplitDirection, SurfaceInfo, WorkspaceInfo,
+    parse_agents_json, AgentStatus, Backend, PaneActivity, SplitDirection, SurfaceInfo,
+    WorkspaceInfo,
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -200,6 +201,17 @@ pub(crate) fn spawn_transcript_watcher<L>(
 {
     std::thread::spawn(move || {
         let mut tails: HashMap<String, TranscriptTail> = HashMap::new();
+        let mut tick = 0u64;
+        // Last `agents --json` result (sessionId → status), refreshed by the
+        // throttled poll but re-applied every tick. build_activity rewrites
+        // collab_auto each tick, so a one-shot overlay would be erased on the
+        // very next tick — caching + re-applying keeps `waiting` sticky.
+        let mut last_agents: HashMap<String, AgentStatus> = HashMap::new();
+        // OPT-IN: `claude agents --json` reads claude's session registry every
+        // 1.5s. That can contend with a claude session the user is actively
+        // running and stall it ("claude 켜면 어느 순간 멈춘다"). Off unless
+        // KASATERM_AGENTS_POLL is set, until the contention is ruled out.
+        let agents_poll = std::env::var_os("KASATERM_AGENTS_POLL").is_some();
         loop {
             // 1. Drain hook-driven binds. A re-bind to a new path (claude
             //    --resume swaps the jsonl) replaces the tail and reseeds; a
@@ -232,9 +244,94 @@ pub(crate) fn spawn_transcript_watcher<L>(
                 let act = build_activity(sid, &tail.recent, idle);
                 collab_auto.lock().unwrap().insert(sid.clone(), act);
             }
+            // 4. Overlay the official `claude agents --json` status. The
+            //    transcript watcher above guesses idle/working from tool_use but
+            //    goes blind when claude blocks on a permission prompt (nothing is
+            //    written, so it reads as idle); agents --json reports `waiting` +
+            //    `waitingFor` for exactly that case. The subprocess runs every
+            //    2nd tick (~1.5s) to halve its cost, but the cached result is
+            //    re-applied EVERY tick — build_activity rewrites collab_auto each
+            //    tick, so applying only on the poll tick would let the next tick
+            //    erase `waiting`. Skipped entirely when no pane is bound (idle
+            //    gate — don't even spawn `claude`).
+            tick = tick.wrapping_add(1);
+            if agents_poll && !tails.is_empty() {
+                if tick % 2 == 0 {
+                    // A successful poll replaces the cache wholesale (an empty
+                    // result clears it — a session that went idle/exited stops
+                    // overriding); only a failed spawn keeps the stale cache.
+                    if let Some(out) = run_agents_json() {
+                        last_agents = parse_agents_json(&out);
+                    }
+                }
+                if !last_agents.is_empty() {
+                    // sessionId == transcript filename stem → pane_id. `tails`
+                    // is local to this thread, so this reverse map is free.
+                    let by_session: HashMap<String, String> = tails
+                        .iter()
+                        .filter_map(|(pane, t)| {
+                            t.path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .map(|sid| (sid.to_string(), pane.clone()))
+                        })
+                        .collect();
+                    let mut auto = collab_auto.lock().unwrap();
+                    for (sid, st) in &last_agents {
+                        if let Some(pane) = by_session.get(sid) {
+                            if let Some(act) = auto.get_mut(pane) {
+                                apply_official(act, st);
+                            }
+                        }
+                    }
+                }
+            }
             std::thread::sleep(Duration::from_millis(750));
         }
     });
+}
+
+/// Run `claude agents --json` and return stdout, or `None` on any failure
+/// (binary not on PATH, non-zero exit, non-UTF8). `claude agents --json`
+/// prints the live session list and exits immediately, so this is cheap and
+/// non-blocking in practice. Failure is fail-safe: the caller keeps the
+/// transcript-derived status, so a missing/old `claude` just means no overlay.
+fn run_agents_json() -> Option<String> {
+    let out = std::process::Command::new("claude")
+        .args(["agents", "--json"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+/// Fold one session's official `agents --json` status into its pane activity.
+/// `waiting`/`waitingFor` are agents-only (the transcript can't observe a
+/// blocked prompt), so they override outright. `idle` is trusted over the
+/// watcher's guess — it corrects the false "working" left when claude stopped
+/// without a closing tool_use. `busy` keeps a more specific "building" but
+/// otherwise normalises to "working".
+fn apply_official(act: &mut PaneActivity, st: &AgentStatus) {
+    match st.status.as_str() {
+        "waiting" => {
+            act.status = "waiting".into();
+            act.waiting_for = st.waiting_for.clone();
+        }
+        "idle" => {
+            act.status = "idle".into();
+            act.waiting_for = None;
+        }
+        "busy" => {
+            if act.status != "building" {
+                act.status = "working".into();
+            }
+            act.waiting_for = None;
+        }
+        _ => {}
+    }
 }
 
 /// Read bytes appended since `offset`, parse complete lines into ToolEvents,
@@ -372,6 +469,45 @@ pub fn session_file_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(home).join(".config/kasaterm/session.json"))
 }
 
+fn window_size_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_WINDOW_FILE") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/window.json"))
+}
+
+/// Persist the last logical window size so the next launch restores it instead
+/// of the hardcoded default. Logical (DPI-independent) so moving between a
+/// Retina and an external display restores the same on-screen size.
+pub fn write_window_size(w: f64, h: f64) {
+    use std::io::Write;
+    let Some(path) = window_size_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::File::create(&path) {
+        let _ = f.write_all(format!("{{\"w\":{w},\"h\":{h}}}").as_bytes());
+    }
+}
+
+/// Read the persisted logical window size. Rejects degenerate sizes (a window
+/// minimized/zero at exit) so a bad value can't trap the next launch tiny.
+pub fn read_window_size() -> Option<(f64, f64)> {
+    let path = window_size_path()?;
+    let txt = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    let w = v.get("w")?.as_f64()?;
+    let h = v.get("h")?.as_f64()?;
+    if w >= 400.0 && h >= 300.0 {
+        Some((w, h))
+    } else {
+        None
+    }
+}
+
 
 /// Pull the claude session id straight off the running claude process's argv
 /// (`--resume <uuid>` / `--session-id <uuid>`, `=`-joined or space-separated).
@@ -473,4 +609,59 @@ fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
         }
     }
     newest.map(|(_, id)| id)
+}
+
+#[cfg(test)]
+mod agents_tests {
+    use super::*;
+
+    fn act(status: &str) -> PaneActivity {
+        PaneActivity {
+            surface_id: "%1".into(),
+            intent: "x".into(),
+            status: status.into(),
+            files: vec![],
+            screen: None,
+            muted: false,
+            waiting_for: None,
+        }
+    }
+    fn agent(status: &str, wf: Option<&str>) -> AgentStatus {
+        AgentStatus {
+            session_id: "s".into(),
+            status: status.into(),
+            waiting_for: wf.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn waiting_overrides_and_carries_reason() {
+        let mut a = act("working");
+        apply_official(&mut a, &agent("waiting", Some("permission")));
+        assert_eq!(a.status, "waiting");
+        assert_eq!(a.waiting_for.as_deref(), Some("permission"));
+    }
+
+    #[test]
+    fn idle_official_corrects_transcript_false_working() {
+        let mut a = act("working");
+        a.waiting_for = Some("permission".into());
+        apply_official(&mut a, &agent("idle", None));
+        assert_eq!(a.status, "idle");
+        assert_eq!(a.waiting_for, None);
+    }
+
+    #[test]
+    fn busy_keeps_building_else_working_and_clears_waiting() {
+        // A more-specific "building" survives a generic busy.
+        let mut a = act("building");
+        apply_official(&mut a, &agent("busy", None));
+        assert_eq!(a.status, "building");
+        // Otherwise busy normalises to working and clears any stale reason.
+        let mut b = act("idle");
+        b.waiting_for = Some("permission".into());
+        apply_official(&mut b, &agent("busy", None));
+        assert_eq!(b.status, "working");
+        assert_eq!(b.waiting_for, None);
+    }
 }

@@ -277,6 +277,26 @@ impl DaemonState {
             .iter()
             .filter_map(|(id, s)| s.tty().map(|t| (id.clone(), t.to_string())))
             .collect();
+        // Project the transcript watcher's per-pane activity (busy/idle + intent)
+        // onto the StateView so the GUI draws a working indicator for EVERY pane
+        // across all windows — the cross-window source an on-screen glyph scan
+        // can't provide. Cheap clone of a small map (one entry per claude pane).
+        let pane_activity = self
+            .collab_auto
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, a)| {
+                (
+                    id.clone(),
+                    crate::stream::PaneStatusView {
+                        status: a.status.clone(),
+                        intent: a.intent.clone(),
+                        waiting_for: a.waiting_for.clone(),
+                    },
+                )
+            })
+            .collect();
         StateView {
             sessions: views,
             active_session: *self.active_session.lock().unwrap(),
@@ -284,6 +304,7 @@ impl DaemonState {
             pane_cwds,
             pane_ttys,
             pane_previews: self.previews.lock().unwrap().clone(),
+            pane_activity,
         }
     }
 
@@ -1384,33 +1405,60 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
         });
     }
 
-    // Follow `cd`: structural broadcasts only fire on split/close/switch, so a
-    // shell changing directory would never reach the GUI breadcrumb on its
-    // own. Poll each pane's cwd ~1s and re-broadcast the state only when one
-    // actually moved — no disk persist (cwd isn't structural), no churn while
-    // idle.
+    // Follow `cd` AND collab activity: structural broadcasts only fire on
+    // split/close/switch, so a shell changing directory — or a pane flipping
+    // working↔idle in the transcript watcher — would never reach the GUI on its
+    // own. Poll each pane's cwd + status ~1s and re-broadcast only when one
+    // actually changed — no disk persist (neither is structural), no churn while
+    // idle: status holds a steady "working"/"idle" between transitions, so a
+    // busy-but-unchanged pane emits nothing; only the flip broadcasts, which is
+    // exactly what drives the GUI's working bar + completion toast.
     {
         let state = state.clone();
         std::thread::spawn(move || {
             let mut last: HashMap<String, String> = HashMap::new();
+            let mut last_status: HashMap<String, (String, Option<String>)> = HashMap::new();
             loop {
                 std::thread::sleep(Duration::from_millis(1000));
-                let cur: HashMap<String, String> = {
+                // Snapshot (id, pid) under the lock, then run lsof OUTSIDE it.
+                // pid_cwd shells out to lsof (~40ms each, slower under load);
+                // holding `pty` across every pane's lsof meant N panes × 40ms+
+                // of lock time each second, during which every RPC/broadcast
+                // that needs `pty` blocked — the daemon (and thus the GUI)
+                // stalled whenever many claude processes were live ("claude 켜면
+                // 어느 순간 멈춘다"). The lock now only spans a cheap pid copy.
+                let pids: Vec<(String, u32)> = {
                     let pty = state.pty.lock().unwrap();
                     pty.iter()
-                        .filter_map(|(id, s)| {
-                            s.shell_pid()
-                                .and_then(pid_cwd)
-                                .map(|p| (id.clone(), p.to_string_lossy().into_owned()))
-                        })
+                        .filter_map(|(id, s)| s.shell_pid().map(|p| (id.clone(), p)))
                         .collect()
                 };
-                if cur != last {
+                let cur: HashMap<String, String> = pids
+                    .into_iter()
+                    .filter_map(|(id, pid)| {
+                        pid_cwd(pid).map(|p| (id, p.to_string_lossy().into_owned()))
+                    })
+                    .collect();
+                // Per-pane coarse status (working/idle/waiting/…) — the
+                // cross-window busy signal the GUI draws as a working bar +
+                // completion toast. Cheap map, compared by value so a steady
+                // "working" emits nothing; a working↔idle↔waiting flip changes
+                // it. `waiting_for` is in the key so a same-status reason change
+                // (permission→input) also forces a broadcast.
+                let cur_status: HashMap<String, (String, Option<String>)> = state
+                    .collab_auto
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(id, a)| (id.clone(), (a.status.clone(), a.waiting_for.clone())))
+                    .collect();
+                if cur != last || cur_status != last_status {
                     // Publish the fresh cwds so state_view reads them from the
                     // cache instead of re-spawning lsof per pane on every RPC
                     // broadcast. Whole-map replace drops cwds of closed panes.
                     *state.cwd_cache.lock().unwrap() = cur.clone();
                     last = cur;
+                    last_status = cur_status;
                     // Reconcile first — the RPC broadcast paths (broadcast_state)
                     // do, but this poll path didn't. A close that lands mid-poll
                     // could otherwise ship a layout still referencing the dead
