@@ -134,6 +134,43 @@ pub struct PaneActivity {
     /// panel can render the toggle state.
     #[serde(default)]
     pub muted: bool,
+    /// Why this pane is `status == "waiting"` — the `waitingFor` field from
+    /// `claude agents --json` (2.1.162+), e.g. "permission" or "user input".
+    /// The transcript watcher can't see this: when claude blocks on a
+    /// permission prompt it writes nothing, so the watcher would read the
+    /// pane as idle. Only the official `agents --json` poll knows, so this
+    /// is always agents-sourced and overrides the watcher's guess. `None`
+    /// unless `status == "waiting"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
+}
+
+/// One live session from `claude agents --json` (Claude Code 2.1.162+).
+/// Only the fields we consume are named; serde ignores the rest (`pid`,
+/// `cwd`, `kind`, `startedAt`, `name`). `sessionId` is the join key: it
+/// equals the stem of the pane's bound transcript path
+/// (`~/.claude/projects/<cwd>/<sessionId>.jsonl`), so the watcher maps a
+/// session back to its pane without tracking pids.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentStatus {
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    /// "idle" | "busy" | "waiting".
+    pub status: String,
+    /// What a `waiting` session is blocked on (e.g. "permission"). 2.1.162+.
+    #[serde(rename = "waitingFor", default)]
+    pub waiting_for: Option<String>,
+}
+
+/// Parse `claude agents --json` stdout into a `sessionId → AgentStatus` map.
+/// Pure (string in, map out) so the watcher's subprocess plumbing stays
+/// separate from the parse and the parse is unit-testable. Any parse
+/// failure or empty output yields an empty map — the caller then leaves the
+/// transcript-derived status untouched (fail safe, never worse than today).
+pub fn parse_agents_json(stdout: &str) -> std::collections::HashMap<String, AgentStatus> {
+    serde_json::from_str::<Vec<AgentStatus>>(stdout)
+        .map(|v| v.into_iter().map(|a| (a.session_id.clone(), a)).collect())
+        .unwrap_or_default()
 }
 
 /// One pane's rectangle in the visible window, as percentages (0..100) of
@@ -348,5 +385,35 @@ pub trait Backend: Send + Sync {
     /// Default unsupported.
     fn bind_transcript(&self, _surface_id: &str, _path: &str) -> Result<()> {
         anyhow::bail!("bind_transcript not supported")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_agents_keys_by_session_and_reads_waiting_for() {
+        // Real `claude agents --json` shape: extra fields (pid/cwd/…) ignored,
+        // a waiting session carries waitingFor, others omit it.
+        let json = r#"[
+            {"pid":284,"cwd":"/a","kind":"interactive","startedAt":1,"sessionId":"sess-idle","status":"idle"},
+            {"pid":99,"cwd":"/b","kind":"interactive","startedAt":2,"sessionId":"sess-busy","name":"그림","status":"busy"},
+            {"pid":12,"cwd":"/c","kind":"interactive","startedAt":3,"sessionId":"sess-wait","status":"waiting","waitingFor":"permission"}
+        ]"#;
+        let map = parse_agents_json(json);
+        assert_eq!(map.len(), 3);
+        assert_eq!(map["sess-idle"].status, "idle");
+        assert_eq!(map["sess-idle"].waiting_for, None);
+        assert_eq!(map["sess-busy"].status, "busy");
+        assert_eq!(map["sess-wait"].status, "waiting");
+        assert_eq!(map["sess-wait"].waiting_for.as_deref(), Some("permission"));
+    }
+
+    #[test]
+    fn parse_agents_empty_or_garbage_is_empty_map() {
+        assert!(parse_agents_json("").is_empty());
+        assert!(parse_agents_json("not json").is_empty());
+        assert!(parse_agents_json("[]").is_empty());
     }
 }
