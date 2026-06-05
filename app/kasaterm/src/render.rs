@@ -1516,10 +1516,31 @@ impl App {
                     // Folders read brighter than files (soft hierarchy); hover
                     // lifts a file to full strength.
                     let fg = if hovered || node.is_dir { theme::TEXT } else { theme::TEXT_DIM };
+                    let text_x = icon_x + isz + 7.0;
+                    // Clip the name to the column width with an ellipsis — long
+                    // hashed file names (webp/jpg) otherwise overflow the sidebar
+                    // straight into the terminal grid.
+                    let avail = (row_x + row_w - text_x - 4.0).max(0.0);
+                    let label = if g.measure_chrome_text(&node.name, 12.0, false) <= avail {
+                        node.name.clone()
+                    } else {
+                        let mut s = String::new();
+                        for ch in node.name.chars() {
+                            let mut trial = s.clone();
+                            trial.push(ch);
+                            trial.push('…');
+                            if g.measure_chrome_text(&trial, 12.0, false) > avail {
+                                break;
+                            }
+                            s.push(ch);
+                        }
+                        s.push('…');
+                        s
+                    };
                     g.draw_text(
-                        icon_x + isz + 7.0,
+                        text_x,
                         y + (item_h - 12.0) / 2.0,
-                        &node.name,
+                        &label,
                         gpu::DrawOpts { font_size: 12.0, color: fg, bold: false, italic: false },
                     );
                     rects.push((node.path.clone(), (row_x, y, row_w, item_h)));
