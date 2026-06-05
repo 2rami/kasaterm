@@ -7,6 +7,35 @@ impl ApplicationHandler<UserEvent> for App {
     /// Delivered even while a WaitUntil is parked, so this is what makes
     /// committed-Hangul echo / backspace / space show up without lag.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        // Local cmux socket backend delegated a pane write / split / focus to
+        // this GUI thread (the socket server can't touch self.pty directly).
+        match &event {
+            UserEvent::SocketBytes(sid, bytes) => {
+                {
+                    let target = match sid.as_deref() {
+                        Some(id) => self.pty_for_pane(id),
+                        None => self.active_pty(),
+                    };
+                    if let Some(p) = target {
+                        let _ = p.send_bytes(bytes);
+                    }
+                }
+                self.render_frame();
+                return;
+            }
+            UserEvent::SocketSplit(dir) => {
+                let _ = self.split_active_pane(*dir);
+                self.render_frame();
+                return;
+            }
+            UserEvent::SocketFocus(id) => {
+                self.ws.lock().unwrap().active_pane = Some(id.clone());
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
+            _ => {}
+        }
         // Daemon-pushed structure: adopt the active window's layout as
         // authoritative, then republish so the renderer's cached tree + pane
         // rects match the daemon. (Session/window metadata for the sidebar +
