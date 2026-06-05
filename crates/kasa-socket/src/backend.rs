@@ -187,6 +187,20 @@ pub struct PaneRect {
     pub h: u16,
 }
 
+/// One window in the active session, with its panes and their rects.
+/// `surface.list` and `window.layout` only ever expose the *active*
+/// window, but the daemon holds every window — this lets an agent inspect
+/// a window it isn't currently viewing ("what's in window 1, who's there,
+/// how is it split"). `idx` matches the left sidebar's window order.
+/// Returned by `window.list`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowOverview {
+    pub idx: usize,
+    pub active: bool,
+    pub surfaces: Vec<String>,
+    pub panes: Vec<PaneRect>,
+}
+
 /// Plug point for terminal operations. Host apps implement this on a
 /// type that already owns the tmux session / portable-pty handle and
 /// the renderer state.
@@ -248,6 +262,13 @@ pub trait Backend: Send + Sync {
     fn move_surface(&self, _surface_id: &str, _target: &str, _direction: SplitDirection) -> Result<()> {
         anyhow::bail!("move_surface unsupported by this backend")
     }
+    /// Set the split ratio at `path` (the seam the GUI just dragged) so the
+    /// daemon — the layout authority — persists it and restores it on restart.
+    /// `path` is the tree route to the owning Split node (0 = child a, 1 = b).
+    /// Default: unsupported.
+    fn resize_divider(&self, _path: &[u8], _ratio: f32) -> Result<()> {
+        anyhow::bail!("resize_divider unsupported by this backend")
+    }
     /// Current working directory of the active pane's shell, if the backend
     /// tracks it. Lets the git panel follow the user's terminal directory.
     /// Default `None` (e.g. the tmux backend doesn't track per-pane cwd).
@@ -274,6 +295,12 @@ pub trait Backend: Send + Sync {
     /// shown in the left sidebar) to index `idx`. Default unsupported.
     fn switch_window(&self, _idx: usize) -> Result<()> {
         anyhow::bail!("switch_window not supported")
+    }
+    /// Reorder the window at index `from` to index `to` within the active
+    /// session's window list (sidebar tab drag-reorder). The daemon owns the
+    /// window order, so the GUI routes the drop through this. Default unsupported.
+    fn reorder_window(&self, _from: usize, _to: usize) -> Result<()> {
+        anyhow::bail!("reorder_window not supported")
     }
     /// Create a fresh session and switch to it. Default unsupported.
     fn new_session(&self) -> Result<()> {
@@ -314,11 +341,13 @@ pub trait Backend: Send + Sync {
     fn reset_sessions(&self) -> Result<()> {
         anyhow::bail!("reset_sessions not supported")
     }
-    /// Open a preview window for a file. `kind` is "image" or "markdown";
-    /// `path` is an absolute path on the host. The host spawns a separate
-    /// wry webview window (image viewer / markdown editor). Default
-    /// unsupported (e.g. the legacy tmux backend has no window host).
-    fn open_preview(&self, _kind: &str, _path: &str) -> Result<()> {
+    /// Open a preview pane for a file. `kind` is "image" or "markdown";
+    /// `path` is an absolute path on the host. `target` is the pane that
+    /// requested it (from `$KASATERM_PANE_ID` via imgopen) so the preview
+    /// splits beside the *working* pane, not whatever window the sidebar
+    /// last focused; None falls back to the active pane. Default unsupported
+    /// (e.g. the legacy tmux backend has no window host).
+    fn open_preview(&self, _kind: &str, _path: &str, _target: Option<&str>) -> Result<()> {
         anyhow::bail!("open_preview not supported")
     }
     /// Open or close a standalone panel window (git status / sessions).
@@ -366,6 +395,15 @@ pub trait Backend: Send + Sync {
     /// third) and pick a spot to split. Default: empty (backends that don't
     /// track a layout report nothing rather than erroring).
     fn window_layout(&self) -> Result<Vec<PaneRect>> {
+        Ok(Vec::new())
+    }
+
+    /// Every window in the active session, each with its panes and rects —
+    /// unlike `window_layout`/`list_surfaces`, which only expose the active
+    /// window. Lets an agent inspect a window it isn't viewing ("what's in
+    /// window 1"). Default: empty (single-window backends report nothing
+    /// beyond what `window_layout` already gives).
+    fn windows_overview(&self) -> Result<Vec<WindowOverview>> {
         Ok(Vec::new())
     }
 

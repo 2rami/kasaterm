@@ -18,7 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kasa_socket::backend::{
-    Backend, PaneActivity, PaneRect, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo,
+    Backend, PaneActivity, PaneRect, SessionsInfo, SplitDirection, SurfaceInfo, WindowOverview,
+    WorkspaceInfo,
 };
 use kasa_socket::transport::{LocalListener, LocalStream};
 use kasa_socket::Server;
@@ -188,6 +189,17 @@ impl DaemonState {
     /// the layout can never advertise a pane the daemon isn't actually hosting.
     /// No-op in the common case (every leaf is live).
     fn reconcile_layout(&self) {
+        // Drop in-pane previews whose host terminal is gone (the host pane was
+        // closed) — they have no layout leaf to prune, so without this they leak
+        // in the previews map and re-broadcast forever to a host that no longer
+        // exists. Leaf-hosted previews (host=None) are pruned via the layout.
+        {
+            let pty = self.pty.lock().unwrap();
+            self.previews
+                .lock()
+                .unwrap()
+                .retain(|_, p| p.host.as_ref().map_or(true, |h| pty.contains_key(h)));
+        }
         let live: HashSet<String> = {
             let pty = self.pty.lock().unwrap();
             let prev = self.previews.lock().unwrap();
@@ -215,6 +227,34 @@ impl DaemonState {
             if let Some(s) = pty.get(&id) {
                 let _ = self.out_tx.send(StreamMsg::Frame(s.full_snapshot()));
             }
+        }
+    }
+
+    /// Dock-chip display name. Mirrors the GUI header label exactly: OSC title
+    /// wins, else the live foreground process (claude, vim …); a bare login
+    /// shell falls back to the cwd basename so idle shells still read sensibly.
+    fn dock_chip_label(&self, sess: &kasa_pty::PtySession, id: &str) -> Option<String> {
+        if let Some(t) = sess.osc_title().filter(|t| !t.is_empty()) {
+            return Some(t);
+        }
+        let proc = sess.active_process_name().filter(|t| !t.is_empty());
+        let is_shell = proc.as_deref().map_or(false, |p| {
+            let base = p.strip_prefix('-').unwrap_or(p);
+            matches!(base, "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "ksh")
+        });
+        if is_shell {
+            self.cwd_cache
+                .lock()
+                .unwrap()
+                .get(id)
+                .and_then(|p| {
+                    std::path::Path::new(p)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                })
+                .or(proc)
+        } else {
+            proc
         }
     }
 
@@ -250,16 +290,9 @@ impl DaemonState {
                         .docked
                         .iter()
                         .map(|id| {
-                            let label = self
-                                .cwd_cache
-                                .lock()
-                                .unwrap()
+                            let label = pty
                                 .get(id)
-                                .and_then(|p| {
-                                    std::path::Path::new(p)
-                                        .file_name()
-                                        .map(|f| f.to_string_lossy().into_owned())
-                                })
+                                .and_then(|sess| self.dock_chip_label(sess, id))
                                 .unwrap_or_default();
                             crate::stream::DockedView { id: id.clone(), label }
                         })
@@ -501,12 +534,35 @@ impl Backend for DaemonBackend {
             title: None,
         })
     }
-    fn open_preview(&self, kind: &str, path: &str) -> Result<()> {
-        // Image / markdown panes have no PTY: add a layout leaf + record the
-        // kind+path, then broadcast. The GUI builds the PaneContent from the
-        // path (it decodes locally — same as the in-process split_*_pane).
-        // Split the active terminal, like split_image_pane does.
+    fn open_preview(&self, kind: &str, path: &str, target: Option<&str>) -> Result<()> {
+        // Image / markdown panes have no PTY: the GUI builds the PaneContent
+        // from the path (it decodes locally — same as the in-process
+        // split_*_pane). Two placements:
+        //
+        // 1. `target` is a live pane (imgopen passes $KASATERM_PANE_ID): open
+        //    the preview *inside* that pane as an in-pane tab. No layout leaf —
+        //    in-pane tabs are GUI-local (the daemon owns only primary leaves),
+        //    so we just record the preview with `host` set and let the GUI
+        //    attach the tab. Focus the host first so it's the visible pane.
+        // 2. No target (git-column / file-tree click): legacy behavior — split
+        //    a new leaf beside the active pane and host the preview there.
+        let host = target.filter(|t| self.state.pty.lock().unwrap().contains_key(*t));
         let new_id = self.state.alloc_id();
+        if let Some(h) = host {
+            // Tab mode: make the host the active/visible pane, then record the
+            // preview keyed by a synthetic id (not a leaf) carrying `host`.
+            let _ = self.focus_surface(h);
+            self.state.previews.lock().unwrap().insert(
+                new_id,
+                PanePreview {
+                    kind: kind.to_string(),
+                    path: path.to_string(),
+                    host: Some(h.to_string()),
+                },
+            );
+            self.state.broadcast_state();
+            return Ok(());
+        }
         let active = {
             let leaves = self.state.active_window_leaves();
             let cur = self.state.active.lock().unwrap().clone();
@@ -527,7 +583,7 @@ impl Backend for DaemonBackend {
         }
         self.state.previews.lock().unwrap().insert(
             new_id,
-            PanePreview { kind: kind.to_string(), path: path.to_string() },
+            PanePreview { kind: kind.to_string(), path: path.to_string(), host: None },
         );
         // Keep focus on the terminal that opened it — previews take no input.
         self.state.broadcast_state();
@@ -680,52 +736,99 @@ impl Backend for DaemonBackend {
             SplitDirection::Up => (SplitDir::Vertical, true),
             SplitDirection::Down => (SplitDir::Vertical, false),
         };
-        // Locate target's session+window; make it active so with_active_layout
-        // operates on that tree (drag drops onto a visible pane).
-        let located = {
-            let sessions = self.state.sessions.lock().unwrap();
-            let mut hit = None;
-            'scan: for (si, s) in sessions.iter().enumerate() {
+        // Locate which (session, window) a pane id sits in.
+        fn locate(sessions: &[DaemonSession], id: &str) -> Option<(usize, usize)> {
+            for (si, s) in sessions.iter().enumerate() {
                 for (wi, w) in s.windows.iter().enumerate() {
-                    if w.leaves().iter().any(|&l| l == target) {
-                        hit = Some((si, wi));
-                        break 'scan;
+                    if w.leaves().iter().any(|&l| l == id) {
+                        return Some((si, wi));
                     }
                 }
             }
-            hit
+            None
+        }
+        let (target_loc, moving_loc) = {
+            let sessions = self.state.sessions.lock().unwrap();
+            (locate(&sessions, target), locate(&sessions, surface_id))
         };
-        let Some((si, wi)) = located else {
+        let Some((tsi, twi)) = target_loc else {
             return Ok(()); // target gone — drop the move
         };
-        *self.state.active_session.lock().unwrap() = si;
-        if let Some(s) = self.state.sessions.lock().unwrap().get_mut(si) {
-            s.active_window = wi;
-        }
-        // Detach the moving leaf and re-attach beside target — both in the
-        // active window. PTY untouched (pure layout move, unlike close). If
-        // moving isn't in this window (cross-window drag, not yet supported)
-        // remove_leaf returns false and we skip the insert so it's never
-        // duplicated into a second copy.
-        let moved = self
-            .state
-            .with_active_layout(|lay| {
-                if !lay.remove_leaf(surface_id) {
-                    return false;
+
+        if moving_loc.map_or(false, |m| m != (tsi, twi)) {
+            // Cross-window drag: the moving leaf lives in a different window than
+            // the drop target. remove_pane detaches it (PTY stays alive — this is
+            // a layout-only move) AND drops an emptied source window + fixes the
+            // active indices. Dropping a window before the target shifts the
+            // target's (si, wi), so re-locate it before inserting.
+            self.state.remove_pane(surface_id);
+            let target_loc2 = {
+                let sessions = self.state.sessions.lock().unwrap();
+                locate(&sessions, target)
+            };
+            let Some((tsi2, twi2)) = target_loc2 else {
+                self.state.broadcast_state();
+                return Ok(());
+            };
+            *self.state.active_session.lock().unwrap() = tsi2;
+            {
+                let mut sessions = self.state.sessions.lock().unwrap();
+                if let Some(s) = sessions.get_mut(tsi2) {
+                    s.active_window = twi2;
                 }
-                if !lay.insert_beside(target, axis, before, surface_id.to_string()) {
-                    if let Some(a) = lay.leaves().first().map(|s| s.to_string()) {
-                        lay.insert_beside(&a, axis, before, surface_id.to_string());
+            }
+            let inserted = self
+                .state
+                .with_active_layout(|lay| {
+                    lay.insert_beside(target, axis, before, surface_id.to_string())
+                })
+                .unwrap_or(false);
+            if inserted {
+                *self.state.active.lock().unwrap() = surface_id.to_string();
+            }
+        } else {
+            // Same-window relocation: detach + re-attach within one tree. Make
+            // the target's window active so with_active_layout operates on it.
+            *self.state.active_session.lock().unwrap() = tsi;
+            {
+                let mut sessions = self.state.sessions.lock().unwrap();
+                if let Some(s) = sessions.get_mut(tsi) {
+                    s.active_window = twi;
+                }
+            }
+            let moved = self
+                .state
+                .with_active_layout(|lay| {
+                    if !lay.remove_leaf(surface_id) {
+                        return false;
                     }
-                }
-                true
-            })
-            .unwrap_or(false);
-        if moved {
-            *self.state.active.lock().unwrap() = surface_id.to_string();
+                    if !lay.insert_beside(target, axis, before, surface_id.to_string()) {
+                        if let Some(a) = lay.leaves().first().map(|s| s.to_string()) {
+                            lay.insert_beside(&a, axis, before, surface_id.to_string());
+                        }
+                    }
+                    true
+                })
+                .unwrap_or(false);
+            if moved {
+                *self.state.active.lock().unwrap() = surface_id.to_string();
+            }
         }
         self.state.broadcast_state();
         self.state.push_active_snapshots();
+        Ok(())
+    }
+    fn resize_divider(&self, path: &[u8], ratio: f32) -> Result<()> {
+        // Pure ratio write into the authoritative tree — no PTY churn (the GUI
+        // already SIGWINCH'd its own leaves during the drag). broadcast_state
+        // persists the new ratio and pushes it to every GUI; restart restores it.
+        let ok = self
+            .state
+            .with_active_layout(|lay| lay.set_ratio_at(path, ratio))
+            .unwrap_or(false);
+        if ok {
+            self.state.broadcast_state();
+        }
         Ok(())
     }
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
@@ -894,6 +997,31 @@ impl Backend for DaemonBackend {
             .map(|(surface_id, x, y, w, h)| PaneRect { surface_id, x, y, w, h })
             .collect())
     }
+    fn windows_overview(&self) -> Result<Vec<WindowOverview>> {
+        // Every window in the active session — list_surfaces/window_layout
+        // only expose the active one, but the daemon holds them all, so an
+        // agent can inspect a window it isn't viewing.
+        let sessions = self.state.sessions.lock().unwrap();
+        let asx = *self.state.active_session.lock().unwrap();
+        let Some(sess) = sessions.get(asx) else {
+            return Ok(Vec::new());
+        };
+        Ok(sess
+            .windows
+            .iter()
+            .enumerate()
+            .map(|(i, w)| WindowOverview {
+                idx: i,
+                active: i == sess.active_window,
+                surfaces: w.leaves().iter().map(|l| l.to_string()).collect(),
+                panes: w
+                    .leaf_rects(100, 100)
+                    .into_iter()
+                    .map(|(surface_id, x, y, w, h)| PaneRect { surface_id, x, y, w, h })
+                    .collect(),
+            })
+            .collect())
+    }
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
         // Queue for the tail watcher; re-binding (claude --resume swaps the
         // jsonl) replaces the pending entry rather than stacking.
@@ -966,6 +1094,43 @@ impl Backend for DaemonBackend {
             s.active_window = idx;
         }
         self.state.update_active_pane();
+        self.state.broadcast_state();
+        self.state.push_active_snapshots();
+        Ok(())
+    }
+    fn reorder_window(&self, from: usize, to: usize) -> Result<()> {
+        {
+            let mut sessions = self.state.sessions.lock().unwrap();
+            let asx = *self.state.active_session.lock().unwrap();
+            let s = sessions
+                .get_mut(asx)
+                .ok_or_else(|| anyhow!("no active session"))?;
+            let n = s.windows.len();
+            if from >= n {
+                anyhow::bail!("window index {from} out of range");
+            }
+            let to = to.min(n - 1);
+            if from == to {
+                return Ok(());
+            }
+            // Track the active window by its first leaf id so its index is
+            // recovered after the shift — avoids fragile index arithmetic.
+            let active_anchor = s
+                .windows
+                .get(s.active_window)
+                .and_then(|w| w.leaves().first().map(|l| l.to_string()));
+            let w = s.windows.remove(from);
+            s.windows.insert(to, w);
+            if let Some(anchor) = active_anchor {
+                if let Some(new_aw) = s
+                    .windows
+                    .iter()
+                    .position(|w| w.leaves().first().map_or(false, |l| *l == anchor))
+                {
+                    s.active_window = new_aw;
+                }
+            }
+        }
         self.state.broadcast_state();
         self.state.push_active_snapshots();
         Ok(())
@@ -1445,12 +1610,27 @@ pub fn run_daemon(control_path: PathBuf) -> Result<()> {
                 // "working" emits nothing; a working↔idle↔waiting flip changes
                 // it. `waiting_for` is in the key so a same-status reason change
                 // (permission→input) also forces a broadcast.
+                // Coarse busy/idle/waiting class, NOT the raw status. The GUI
+                // only needs busy-vs-idle for the working bar, so collapsing
+                // working↔building here stops the transcript watcher's tool-type
+                // flips (Bash↔Read↔Edit each tick) from firing a full state
+                // broadcast every second per pane — the idle churn the multi-
+                // claude setup hit. cwd and busy-set changes still publish.
                 let cur_status: HashMap<String, (String, Option<String>)> = state
                     .collab_auto
                     .lock()
                     .unwrap()
                     .iter()
-                    .map(|(id, a)| (id.clone(), (a.status.clone(), a.waiting_for.clone())))
+                    .map(|(id, a)| {
+                        let class = if a.status == "idle" || a.status.is_empty() {
+                            "idle"
+                        } else if a.status == "waiting" {
+                            "waiting"
+                        } else {
+                            "busy"
+                        };
+                        (id.clone(), (class.to_string(), a.waiting_for.clone()))
+                    })
                     .collect();
                 if cur != last || cur_status != last_status {
                     // Publish the fresh cwds so state_view reads them from the

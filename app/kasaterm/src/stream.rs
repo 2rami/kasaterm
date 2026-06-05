@@ -36,6 +36,13 @@ pub struct PanePreview {
     /// "image" | "markdown".
     pub kind: String,
     pub path: String,
+    /// Host terminal pane this preview opens *inside* as an in-pane tab
+    /// (the pane that ran `imgopen`, via `$KASATERM_PANE_ID`). When set, the
+    /// daemon does NOT give the preview its own layout leaf — the GUI attaches
+    /// it as a tab on the host pane. None = legacy split-beside-active leaf
+    /// (git-column / file-tree clicks).
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 /// A pane folded into the dock: its id + a display label (cwd basename).
@@ -267,6 +274,17 @@ impl DaemonClient {
         );
     }
 
+    /// Forward a finished divider drag to the daemon as a resolution-independent
+    /// ratio. Without this the seam moves only in the GUI-local tree, which the
+    /// next daemon State overwrites and which the daemon never persists — so the
+    /// split snaps back to 0.5 on restart (renderer-ephemeral, 데몬 미전파 버그).
+    pub fn resize_divider(&self, path: &[u8], ratio: f32) {
+        self.rpc(
+            "surface.resize_divider",
+            json!({ "path": path, "ratio": ratio }),
+        );
+    }
+
     /// Switch the active session (지구) to index `idx`.
     pub fn switch_session(&self, idx: usize) {
         self.rpc("session.switch", json!({ "idx": idx }));
@@ -286,6 +304,10 @@ impl DaemonClient {
 
     pub fn switch_window(&self, idx: usize) {
         self.rpc("window.switch", json!({ "idx": idx }));
+    }
+
+    pub fn reorder_window(&self, from: usize, to: usize) {
+        self.rpc("window.reorder", json!({ "from": from, "to": to }));
     }
 
     /// Close window `idx` in the active session — daemon-authoritative, so the

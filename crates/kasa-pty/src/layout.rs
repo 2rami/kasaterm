@@ -371,6 +371,46 @@ impl PtyLayout {
         self.resize_at(path, pos, 0, 0, total_w, total_h)
     }
 
+    /// Read the split ratio at `path` (the seam the GUI just dragged). Used to
+    /// forward a divider drag to the daemon as a resolution-independent ratio —
+    /// the headless daemon has no pixel grid, so pos/cols would be meaningless.
+    pub fn ratio_at(&self, path: &[u8]) -> Option<f32> {
+        let PtyLayout::Split { ratio, a, b, .. } = self else {
+            return None;
+        };
+        match path.split_first() {
+            None => Some(*ratio),
+            Some((head, tail)) => {
+                if *head == 0 {
+                    a.ratio_at(tail)
+                } else {
+                    b.ratio_at(tail)
+                }
+            }
+        }
+    }
+
+    /// Set the split ratio at `path` directly (daemon side of a divider drag).
+    /// Mirrors resize_at's 0.1..0.9 clamp so the seam can't collapse a pane.
+    pub fn set_ratio_at(&mut self, path: &[u8], ratio: f32) -> bool {
+        let PtyLayout::Split { ratio: r, a, b, .. } = self else {
+            return false;
+        };
+        match path.split_first() {
+            None => {
+                *r = ratio.clamp(0.1, 0.9);
+                true
+            }
+            Some((head, tail)) => {
+                if *head == 0 {
+                    a.set_ratio_at(tail, ratio)
+                } else {
+                    b.set_ratio_at(tail, ratio)
+                }
+            }
+        }
+    }
+
     fn resize_at(&mut self, path: &[u8], pos: u16, x: u16, y: u16, w: u16, h: u16) -> bool {
         let PtyLayout::Split { dir, ratio, a, b } = self else {
             return false;
@@ -538,6 +578,29 @@ mod tests {
         assert!(t.resize_divider(&path, 20, 80, 24));
         assert_eq!(t.leaf_rects(80, 24)[0].3, 20);
         assert_eq!(t.leaf_rects(80, 24)[1].3, 60);
+    }
+
+    #[test]
+    fn ratio_roundtrip_through_path() {
+        // The daemon path of a divider drag: GUI reads the ratio it just set,
+        // ships it over RPC, daemon writes it back at the same path.
+        let mut t = PtyLayout::single("%0");
+        t.split_leaf("%0", SplitDir::Horizontal, "%1".into());
+        t.split_leaf("%1", SplitDir::Vertical, "%2".into());
+        let vert = t
+            .dividers(80, 24)
+            .into_iter()
+            .find(|d| d.dir == SplitDir::Vertical)
+            .expect("vertical seam");
+        assert!(t.set_ratio_at(&vert.path, 0.25));
+        assert_eq!(t.ratio_at(&vert.path), Some(0.25));
+        // Clamp matches resize_at so a pane can't collapse.
+        assert!(t.set_ratio_at(&vert.path, 0.99));
+        assert_eq!(t.ratio_at(&vert.path), Some(0.9));
+        // A path that runs past a leaf is a no-op, never a panic. Child a is
+        // Leaf %0, so descending into it (path [0, …]) finds no Split.
+        assert!(!t.set_ratio_at(&[0, 0], 0.3));
+        assert_eq!(t.ratio_at(&[0, 0]), None);
     }
 
     #[test]
