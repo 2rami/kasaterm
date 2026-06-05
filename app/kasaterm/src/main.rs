@@ -7,7 +7,6 @@
 
 mod autosuggest;
 mod cells;
-mod daemon;
 mod gpu;
 mod render;
 mod handler;
@@ -1890,10 +1889,6 @@ impl Workspace {
 #[derive(Debug, Clone)]
 enum UserEvent {
     Redraw,
-    /// Daemon pushed its full session>window>pane structure (split/close/new/
-    /// switch happened on its side); the GUI adopts the active window's layout
-    /// and refreshes session/window metadata.
-    DaemonState(stream::StateView),
     /// Local cmux socket backend → GUI delegation. The socket server runs on
     /// its own thread and can't touch `self.pty` (not Arc<Mutex>), so it routes
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
@@ -2139,7 +2134,6 @@ struct App {
     /// PTY input / resize / scroll route to the daemon over this client
     /// instead of a local PtySession. None in the default in-process mode.
     /// Arc so background timers (autosend) can hold a handle too.
-    daemon_client: Option<Arc<stream::DaemonClient>>,
     ws: Arc<Mutex<Workspace>>,
     /// All sessions (tmux-style tabs) by tab index. The visible session's slot
     /// holds `None` — its live state is the fields above (pty/pty_layout/ws).
@@ -2215,7 +2209,6 @@ struct App {
     /// State runs the full layout-adopt path; afterwards a State whose active-
     /// window leaves (in order) + dock are unchanged (a cwd-only 1s poll) skips
     /// the heavy resize/repaint so idle stays at 0 GPU passes (ghostty-fast).
-    daemon_synced: bool,
     /// Dock chip hit rects: (pane id, logical rect). Click restores (undock).
     dock_chip_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// Dock chip × hit rects: (pane id, logical rect). Click kills the pane.
@@ -2409,14 +2402,12 @@ struct App {
     /// Single-pane Cmd+W in daemon mode sets this to close the GUI window
     /// (ghostty-style) on the next about_to_wait, instead of killing the pane.
     /// The daemon keeps the session alive so relaunch restores it.
-    should_exit: bool,
     /// Last `refresh_pane_cwds` sweep — rate-limits the lsof calls.
     pane_cwd_check: Option<Instant>,
     /// Preview panes (image/markdown) already materialized from the daemon's
     /// StateView, keyed by pane id → the path we built it from. Guards against
     /// re-decoding the image on every (frequent) State broadcast; a changed
     /// path rebuilds. See the `UserEvent::DaemonState` handler.
-    applied_previews: HashMap<String, String>,
     /// True while Alt/Option is held — draws each pane's %N big + centered
     /// (tmux `display-panes`), so the user can read a pane id for `tell %N` /
     /// focus without it cluttering the header normally. Toggled in
@@ -2556,7 +2547,6 @@ impl App {
             autotabs_n: 0,
             autotabs_at: None,
             dead_panes: Arc::new(Mutex::new(Vec::new())),
-            daemon_client: None,
             ws: Arc::new(Mutex::new(Workspace::default())),
             sessions: vec![None],
             active_session: 0,
@@ -2576,7 +2566,6 @@ impl App {
             pane_tab_close_rects: Vec::new(),
             pane_plus_rects: Vec::new(),
             docked: Vec::new(),
-            daemon_synced: false,
             dock_chip_rects: Vec::new(),
             dock_chip_close_rects: Vec::new(),
             copy_toast_at: None,
@@ -2634,9 +2623,7 @@ impl App {
             git_branch_hdr_rect: None,
             git_path_menu_rects: Vec::new(),
             git_branch_menu_rects: Vec::new(),
-            should_exit: false,
             pane_cwd_check: None,
-            applied_previews: HashMap::new(),
             show_pane_numbers: false,
             file_tree_root: None,
             file_tree_expanded: std::collections::HashSet::new(),
@@ -2850,24 +2837,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // of the binary still works (tmux calls inside the PTY fall back to
     // the real tmux on the user's PATH).
     install_tmux_shim();
-    // Headless daemon mode: own the PTY + sockets, no winit/GPU. The GUI
-    // spawns `self --daemon` and attaches over the socket; the daemon
-    // outlives the GUI so the shell keeps running across GUI restarts.
-    let mut args = std::env::args().skip(1);
-    let mut is_daemon = false;
-    let mut sock_arg: Option<String> = None;
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--daemon" => is_daemon = true,
-            "--socket" => sock_arg = args.next(),
-            _ => {}
-        }
-    }
-    if is_daemon {
-        let path = sock_arg.unwrap_or_else(resolve_kasaterm_socket_path);
-        return daemon::run_daemon(std::path::PathBuf::from(path))
-            .map_err(|e| Box::<dyn Error>::from(e.to_string()));
-    }
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);

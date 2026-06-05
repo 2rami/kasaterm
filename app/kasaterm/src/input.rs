@@ -24,11 +24,8 @@ impl App {
         // a tmux send-keys quirk (the daemon decodes hex pairs back
         // to bytes itself); for the pty backend we hand the raw bytes
         // straight to the PTY writer.
-        if let Some(client) = self.daemon_client.as_ref() {
-            // Daemon-attached GUI: input goes over the control socket; the
-            // daemon owns the PTY writer.
-            client.send_raw(surface.as_deref(), bytes);
-        } else if let Some(tmux) = self.tmux.as_ref() {
+        let _ = &surface;
+        if let Some(tmux) = self.tmux.as_ref() {
             let hex: String = bytes
                 .iter()
                 .map(|b| format!("{b:02x}"))
@@ -82,8 +79,6 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" ");
             let _ = tmux.send_keys_hex(Some(pane_id), &hex);
-        } else if let Some(client) = self.daemon_client.as_ref() {
-            client.send_raw(Some(pane_id), payload.as_bytes());
         } else if let Some(pty) = self.pty_for_pane(pane_id) {
             let _ = pty.send_bytes(payload.as_bytes());
         }
@@ -460,9 +455,7 @@ impl App {
                     let _ = tmux.send_keys_hex(Some(target), &hex);
                 }
             } else if let Some(id) = target_pane_id.as_deref() {
-                if let Some(client) = self.daemon_client.as_ref() {
-                    client.send_raw(Some(id), &payload);
-                } else if let Some(pty) = self.pty_for_pane(id) {
+                if let Some(pty) = self.pty_for_pane(id) {
                     let _ = pty.send_bytes(&payload);
                 }
             }
@@ -480,9 +473,7 @@ impl App {
                     let _ = tmux.send_keys_hex(Some(target), &hex);
                 }
             } else if let Some(id) = target_pane_id.as_deref() {
-                if let Some(client) = self.daemon_client.as_ref() {
-                    client.send_raw(Some(id), esc);
-                } else if let Some(pty) = self.pty_for_pane(id) {
+                if let Some(pty) = self.pty_for_pane(id) {
                     let _ = pty.send_bytes(esc);
                 }
             }
@@ -496,11 +487,7 @@ impl App {
         let step = lines.unsigned_abs().min(8) as i32;
         let _ = hist_len;
         if let Some(id) = target_pane_id.as_deref() {
-            if let Some(client) = self.daemon_client.as_ref() {
-                // Daemon owns the scrollback; it re-snapshots and streams the
-                // scrolled grid back to us. Positive `lines` = toward history.
-                client.scroll(id, if lines > 0 { step } else { -step });
-            } else if self.tmux.is_some() {
+            if self.tmux.is_some() {
                 if let Ok(mut ws) = self.ws.lock() {
                     if let Some(pane) = ws.panes.get_mut(id) {
                         pane.dirty = true;
@@ -750,13 +737,9 @@ impl App {
                     // start at 1.
                     if code == KeyCode::KeyT && self.tmux.is_none() {
                         if self.modifiers.shift_key() {
-                            // Cmd+Shift+T → restore the most recently docked pane
-                            // (ghostty reopen-closed-tab). No-op if dock empty.
-                            if let (Some(client), Some(d)) =
-                                (self.daemon_client.as_ref(), self.docked.last())
-                            {
-                                client.undock(&d.id);
-                            }
+                            // Cmd+Shift+T → reopen closed pane (ghostty). dock이
+                            // 제거됐으므로 후속에서 claude --resume 식 로컬 복원으로
+                            // 재구현 예정 — 현재는 no-op.
                         } else {
                             self.new_window();
                         }

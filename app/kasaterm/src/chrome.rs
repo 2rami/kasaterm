@@ -202,9 +202,9 @@ impl App {
             _ => "code",
         };
         let ps = abs.to_string_lossy().into_owned();
-        if let Some(client) = self.daemon_client.as_ref() {
-            client.open_preview(kind, &ps);
-        }
+        let _ = (kind, ps);
+        // TODO(local-mode): 파일 미리보기를 로컬에서 직접 spawn
+        // (split_image_pane / split_markdown_pane). 데몬 open_preview RPC 제거됨.
     }
     /// Title-bar sidebar-toggle button rect (logical px), parked just
     /// right of the macOS traffic lights. Fixed position (doesn't depend
