@@ -42,12 +42,6 @@ pub const SYN_COMMENT: [u8; 4] = [106, 115, 130, 255]; // muted gray — // #
 pub const SYN_FUNCTION: [u8; 4] = [97, 175, 239, 255]; // blue — foo(
 pub const SYN_TYPE: [u8; 4] = [229, 192, 123, 255]; // yellow — Capitalized
 
-/// File-tree colors. Folders take the warm accent; per-extension file colors
-/// live inline in `file_icon_spec` (language brand hues). Unknown files fall
-/// back to neutral here.
-pub const FT_FOLDER: [u8; 4] = [224, 186, 112, 255]; // warm gold
-pub const FT_DEFAULT: [u8; 4] = [150, 157, 168, 255]; // neutral — unknown
-
 /// Corner radii (logical px) for the native `round_rect` helper.
 pub const RADIUS_SM: f32 = 6.0;
 pub const RADIUS_MD: f32 = 9.0;
