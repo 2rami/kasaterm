@@ -58,6 +58,14 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "session.switch" => switch_by_idx(id, &req.params, |i| backend.switch_session(i)),
         "window.switch" => switch_by_idx(id, &req.params, |i| backend.switch_window(i)),
         "window.close" => switch_by_idx(id, &req.params, |i| backend.close_window(i)),
+        "window.reorder" => {
+            let from = req.params.get("from").and_then(|v| v.as_u64());
+            let to = req.params.get("to").and_then(|v| v.as_u64());
+            match (from, to) {
+                (Some(f), Some(t)) => simple(id, backend.reorder_window(f as usize, t as usize)),
+                _ => param_err(id, "window.reorder requires `from` and `to` (usize)"),
+            }
+        }
         "session.close" => switch_by_idx(id, &req.params, |i| backend.close_session(i)),
         "surface.close" => surface_close(backend, id, &req.params),
         "surface.dock" => surface_dock(backend, id, &req.params),
@@ -66,6 +74,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.set_color" => surface_set_color(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
         "surface.move" => surface_move(backend, id, &req.params),
+        "surface.resize_divider" => surface_resize_divider(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),
         "surface.open_preview" => surface_open_preview(backend, id, &req.params),
         "collab.board" => {
@@ -92,6 +101,10 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         }
         "window.layout" => match backend.window_layout() {
             Ok(panes) => Response::success(id, json!({ "panes": panes })),
+            Err(e) => backend_err(id, e),
+        },
+        "window.list" => match backend.windows_overview() {
+            Ok(windows) => Response::success(id, json!({ "windows": windows })),
             Err(e) => backend_err(id, e),
         },
         "collab.bind_transcript" => collab_bind_transcript(backend, id, &req.params),
@@ -186,8 +199,10 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.dock",
                 "surface.undock",
                 "surface.move",
+                "surface.resize_divider",
                 "collab.board",
                 "window.layout",
+                "window.list",
                 "collab.bind_transcript",
                 "collab.notify",
             ],
@@ -204,7 +219,8 @@ fn surface_open_preview(backend: &dyn Backend, id: Value, params: &Value) -> Res
         Some(s) => s,
         None => return param_err(id, "surface.open_preview requires `path` (string)"),
     };
-    match backend.open_preview(kind, path) {
+    let target = params.get("target").and_then(|v| v.as_str());
+    match backend.open_preview(kind, path, target) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
@@ -367,6 +383,21 @@ fn surface_move(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     }
 }
 
+fn surface_resize_divider(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let path: Vec<u8> = match params.get("path").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|n| n.as_u64().map(|x| x as u8)).collect(),
+        None => return param_err(id, "surface.resize_divider requires `path` (array of 0/1)"),
+    };
+    let ratio = match params.get("ratio").and_then(|v| v.as_f64()) {
+        Some(r) => r as f32,
+        None => return param_err(id, "surface.resize_divider requires `ratio` (number)"),
+    };
+    match backend.resize_divider(&path, ratio) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
 /// Parse `#rrggbb` (or bare `rrggbb`) into RGBA with full alpha.
 fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
     let s = s.strip_prefix('#').unwrap_or(s);
@@ -500,6 +531,7 @@ mod tests {
     struct FakeBackend {
         sent_text: Mutex<Vec<(Option<String>, String)>>,
         sent_keys: Mutex<Vec<(Option<String>, String)>>,
+        resized: Mutex<Vec<(Vec<u8>, f32)>>,
     }
 
     impl Backend for FakeBackend {
@@ -546,6 +578,10 @@ mod tests {
                 .push((surface.map(String::from), key.into()));
             Ok(())
         }
+        fn resize_divider(&self, path: &[u8], ratio: f32) -> anyhow::Result<()> {
+            self.resized.lock().unwrap().push((path.to_vec(), ratio));
+            Ok(())
+        }
     }
 
     fn req(method: &str, params: Value) -> Request {
@@ -567,6 +603,32 @@ mod tests {
         let methods = r.result.unwrap()["methods"].as_array().unwrap().clone();
         assert!(methods.iter().any(|m| m == "surface.split"));
         assert!(methods.iter().any(|m| m == "system.ping"));
+        assert!(methods.iter().any(|m| m == "surface.resize_divider"));
+    }
+
+    #[test]
+    fn resize_divider_forwards_path_and_ratio() {
+        let backend = FakeBackend::default();
+        let r = dispatch(
+            &backend,
+            req("surface.resize_divider", json!({"path": [1, 0], "ratio": 0.3})),
+        );
+        assert!(r.ok);
+        let calls = backend.resized.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, vec![1u8, 0]);
+        assert!((calls[0].1 - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn resize_divider_requires_path_and_ratio() {
+        let backend = FakeBackend::default();
+        let no_path = dispatch(&backend, req("surface.resize_divider", json!({"ratio": 0.3})));
+        assert!(!no_path.ok);
+        let no_ratio = dispatch(&backend, req("surface.resize_divider", json!({"path": [0]})));
+        assert!(!no_ratio.ok);
+        // A malformed call must never reach the backend.
+        assert!(backend.resized.lock().unwrap().is_empty());
     }
 
     #[test]

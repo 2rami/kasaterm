@@ -351,6 +351,13 @@ impl PtySession {
         self.tty_short.as_deref()
     }
 
+    /// The pane's current OSC 0/2 title (set by the inner program), or None.
+    /// Mirrors the header label's first-priority source so the dock chip can
+    /// show the same name the header does.
+    pub fn osc_title(&self) -> Option<String> {
+        self.title_handle.lock().ok().and_then(|t| t.clone())
+    }
+
     pub fn active_process_name(&self) -> Option<String> {
         let pid = self.shell_pid?;
         let now = Instant::now();

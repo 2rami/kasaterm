@@ -263,6 +263,36 @@ pub fn git_push(repo: &Path) -> Value {
     json!({ "ok": ok, "output": out.trim() })
 }
 
+/// 작업트리의 모든 변경을 stage (`git add -A`) — 패널의 "전체 Stage".
+pub fn git_stage_all(repo: &Path) -> Value {
+    let (ok, out) = run_git(repo, &["add", "-A"]);
+    json!({ "ok": ok, "output": out.trim() })
+}
+
+/// 로컬 브랜치 이름 목록. 패널의 브랜치 전환 드롭다운용. repo가 아니거나
+/// 브랜치가 없으면 빈 Vec. 현재 브랜치 표시는 호출부가 `git_status`의
+/// branch와 비교해서 한다(여기선 순수 목록만).
+pub fn git_branches(repo: &Path) -> Vec<String> {
+    let (ok, out) = run_git(repo, &["branch", "--format=%(refname:short)"]);
+    if !ok {
+        return Vec::new();
+    }
+    out.lines()
+        .map(str::trim)
+        // detached HEAD는 빈 줄/"(HEAD …)"로 나올 수 있어 거른다.
+        .filter(|l| !l.is_empty() && !l.starts_with("(HEAD") && *l != "HEAD")
+        .map(String::from)
+        .collect()
+}
+
+/// `branch`로 전환 (`git checkout`). dirty 작업트리면 git이 명확한 메시지로
+/// 거부하는데, stash/force 하지 않고 그 메시지를 그대로 돌려준다 — 사용자가
+/// 모르는 사이 작업이 stash로 숨겨지는 일이 없도록.
+pub fn git_checkout(repo: &Path, branch: &str) -> Value {
+    let (ok, out) = run_git(repo, &["checkout", branch]);
+    json!({ "ok": ok, "output": out.trim() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

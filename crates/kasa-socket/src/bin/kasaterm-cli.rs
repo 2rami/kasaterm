@@ -63,7 +63,70 @@ fn run() -> Result<Option<Response>> {
         println!("{}", render_layout(&response));
         return Ok(None);
     }
+    // `windows` lists every window (not just the visible one) so an agent can
+    // answer "what's in window 1" — each gets a header + its own box diagram.
+    if cmd == "windows" && response.ok {
+        println!("{}", render_windows(&response));
+        return Ok(None);
+    }
     Ok(Some(response))
+}
+
+/// Render `window.list`'s windows as a labelled stack of box diagrams, one
+/// per window, with the active one marked.
+fn render_windows(resp: &Response) -> String {
+    let windows = resp
+        .result
+        .as_ref()
+        .and_then(|v| v.get("windows"))
+        .and_then(|v| v.as_array());
+    let Some(arr) = windows else {
+        return "(윈도우 정보 없음)".to_string();
+    };
+    if arr.is_empty() {
+        return "(윈도우 없음)".to_string();
+    }
+    let mut out = String::new();
+    for w in arr {
+        let idx = w.get("idx").and_then(|v| v.as_u64()).unwrap_or(0);
+        let active = w.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        let surfaces: Vec<String> = w
+            .get("surfaces")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let mark = if active { "  ← 현재 보이는 윈도우" } else { "" };
+        out.push_str(&format!(
+            "■ 윈도우 {idx}{mark}\n  pane: {}\n",
+            surfaces.join(" ")
+        ));
+        let rects: Vec<(String, u16, u16, u16, u16)> = w
+            .get("panes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| {
+                        Some((
+                            p.get("surface_id")?.as_str()?.to_string(),
+                            p.get("x")?.as_u64()? as u16,
+                            p.get("y")?.as_u64()? as u16,
+                            p.get("w")?.as_u64()? as u16,
+                            p.get("h")?.as_u64()? as u16,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !rects.is_empty() {
+            for line in draw_boxes(&rects).lines() {
+                out.push_str("  ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 /// Render `window.layout`'s pane rects (window-relative %) as a box diagram.
@@ -185,7 +248,8 @@ fn print_help() {
     eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
     eprintln!("  kasaterm-cli tell  <surface_id> <text>     # send + submit (wake an idle claude)");
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
-    eprintln!("  kasaterm-cli layout                       # where each pane sits (window-relative %)");
+    eprintln!("  kasaterm-cli layout                       # where each pane sits (active window, %)");
+    eprintln!("  kasaterm-cli windows                      # every window (sidebar order) + its panes");
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!("  kasaterm-cli notify [start|stop]          # tell siblings THIS pane began/finished (hook)");
@@ -342,9 +406,15 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .chars()
                 .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
                 .collect();
+            // Prepend Ctrl+U (0x15): clear any half-typed line already resident
+            // in the target's prompt before our message lands. Without it the
+            // resident text and the tell body merge into one forced submit —
+            // the user's in-progress input is lost and the message is polluted.
+            // Ctrl+U only wipes the input buffer, so it stays safe mid-generation
+            // (esc would interrupt the target claude instead).
             (
                 "surface.send_text",
-                json!({ "surface_id": surface, "text": format!("{}\r", flat.trim()) }),
+                json!({ "surface_id": surface, "text": format!("\x15{}\r", flat.trim()) }),
             )
         }
         "board" => {
@@ -358,6 +428,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             ("collab.board", params)
         }
         "layout" => ("window.layout", json!({})),
+        "windows" => ("window.list", json!({})),
         "bind-transcript" => {
             // The pane registers its own transcript: surface_id from the
             // host-injected env, path from the hook's stdin (passed as the

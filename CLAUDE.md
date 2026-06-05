@@ -27,6 +27,6 @@ tmuxify (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 2. `publish_pty_layout`은 cmux 미러(`ws.layout`)만 갱신, **데몬 미전파** — "publish 했으니 동기화" 착각 금지. 데몬 동기화는 RPC뿐.
 3. 해당 RPC가 데몬에 없으면(예: swap) 데몬 모드 **early-return 차단** 후 `daemon.rs`/`methods.rs`/`stream.rs`/`backend.rs` 4곳에 `move_surface` 패턴 복제해 신설.
 4. 성능: `DaemonState` 핸들러의 `resize_backend`/`chrome_dirty`/layout 덮어쓰기는 **`structural_unchanged` 게이트 안에서만**. cwd 1s 폴링이 leaf당 `client.resize` RPC를 쏘면 O(N) 낭비 → idle 안 가벼움.
-5. 로컬 허용 예외 둘뿐: 인페인 보조탭(`spawn_new_tab` — 데몬은 primary pid만 소유) + 디바이더 ratio(렌더 ephemeral, 데몬 미저장).
+5. 로컬 허용 예외: 인페인 보조탭(`spawn_new_tab` — 데몬은 primary pid만 소유). 디바이더 ratio는 **드래그 중에만** 로컬 ephemeral — release 시 `surface.resize_divider` RPC(ratio 직접 전송, 데몬 헤드리스라 pos 무의미)로 데몬 commit→`broadcast_state`→persist→재시작 복원. 윈도우 크기는 GUI 고유(데몬=헤드리스, 창 없음)라 데몬 아닌 `~/.config/kasaterm/window.json`(`exiting()` 저장 / `resumed()` 복원, logical/DPI 독립).
 
 검증: RPC 실제 도달은 `daemon.rs` eprintln이 `/tmp/kasaterm-daemon.log`에 찍히는지로. 안 찍히면 로컬변형 버그. **미해결(후속):** 멀티탭 cross-pane drag(보조탭 한 탭 lift — 데몬이 pid 모름) GUI-local desync, `surface.swap` RPC 미구현(현재 데몬 모드 차단). 상세 [[project_kasaterm_session_lifecycle]].

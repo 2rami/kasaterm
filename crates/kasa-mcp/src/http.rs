@@ -119,7 +119,10 @@ async fn open_image_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let path = params.get("path").cloned().unwrap_or_default();
-    let body = match backend.open_preview("image", &path) {
+    // `pane` (the caller's $KASATERM_PANE_ID) lets the host split the preview
+    // beside the requesting pane instead of the last-focused sidebar window.
+    let pane = params.get("pane").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    let body = match backend.open_preview("image", &path, pane) {
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
@@ -131,7 +134,8 @@ async fn open_markdown_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let path = params.get("path").cloned().unwrap_or_default();
-    let body = match backend.open_preview("markdown", &path) {
+    let pane = params.get("pane").map(|s| s.as_str()).filter(|s| !s.is_empty());
+    let body = match backend.open_preview("markdown", &path, pane) {
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
