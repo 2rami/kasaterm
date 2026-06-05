@@ -23,9 +23,9 @@ tmuxify (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 `main.rs` = `struct App`/기타 struct·enum 정의 + `new` 생성자 + 자유함수(`file_icon`/`parse_markdown`/`round_rect` 등) + `fn main` + tests 만. **App 메서드는 기능별 모듈로 분리**(전부 `impl App { ... }` 확장 + `use super::*`, 타입·자유함수는 crate root 그대로 참조, cross-module 호출 메서드는 `pub(crate)`):
 
 - `render.rs` — GPU 렌더 패스(`render_frame`/`render_frame_gpu`/`paint_gpu_overlays`/`gpu_overlay_snapshot`)
-- `handler.rs` — winit `ApplicationHandler`(`window_event`/`user_event`/`new_events`/`resumed`/`exiting`/`about_to_wait`). **`DaemonState` broadcast 덮어쓰기·`structural_unchanged` 게이트·`window.json` 저장(`exiting`)/복원(`resumed`)·드래그 release `resize_divider` RPC 가 전부 여기**
+- `handler.rs` — winit `ApplicationHandler`(`window_event`/`user_event`/`new_events`/`resumed`/`exiting`/`about_to_wait`). 소켓 백엔드 위임(`SocketBytes`/`SocketSplit`/`SocketFocus`) 처리·`window.json` 저장(`exiting`)/복원(`resumed`)·header/divider drag·tab-drag move·socket 명령 드레인
 - `layout.rs` — pane 조작(`split_active_pane`/`move_pane`/`close_active_pane`/`spawn_new_tab`/`swap_dir`/`focus_dir`/`drop_*`/`divider_at_px`/`toggle_pane_zoom`/`close_tab`) + `resize_backend`/`publish_pty_layout`/좌표·`target_*`
-- `session.rs` — window/session/cwd·label·`attach_daemon`/`pump_daemon_stream`·pty·tmux/socket·`save_session_state`·`apply_screen_update`/`pump_pty_screens`
+- `session.rs` — `start_pty`(로컬 pane spawn)·`start_socket_pty`(cmux 소켓 + `socket::PtyBackend`)·window/session/cwd·label·tmux/socket·`save_session_state`·`apply_screen_update`/`pump_pty_screens`
 - `chrome.rs` — 치수 getter·git col·사이드바/파일트리 토글·패널·줌/폰트·toast/version
 - `input.rs` — `send_bytes`·mouse(`send_mouse_sgr`)·copy/paste·`handle_wheel`·`forward_key`·claude 상태 글리프
 - `markdown.rs` — `md_editor_*`·md 링크/블록
@@ -33,15 +33,14 @@ tmuxify (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].
 
-## daemon-authoritative 불변식 (구조변경 GUI 액션 必)
+## 로컬 PTY 모드 (데몬 완전 제거 — 2026-06-05)
 
-데몬(`daemon.rs`)이 layout/pty/세션/docked **단일 권위**. GUI(`handler.rs` 의 `DaemonState` 핸들러)는 broadcast 받을 때마다 `self.pty_layout`/`windows`/`docked`를 데몬 권위로 **통째 덮어쓴다**. → GUI 액션이 로컬(`self.pty_layout`/`ws.panes`/`next_pane_id`)만 바꾸면 다음 broadcast가 즉시 되돌려 **no-op/먹통/부활/증식**. drag 먹통·닫은 pane 부활·증식이 **전부 이 근원**이고 반복 재발했다.
+**데몬은 폐기됐다.** GUI(`App`)가 PTY를 직접 소유(`self.pty: HashMap<String, Arc<PtySession>>`)하고 split/focus/close/window가 **전부 로컬 즉시** 처리된다 — RPC 왕복·broadcast·통째 덮어쓰기가 없으니 옛 daemon-authoritative 불변식(부활/증식/drag먹통/덮어쓰기)은 **클래스째 사라졌다**. 구조변경 GUI 액션은 `self.pty_layout`/`ws.panes`를 직접 수정하면 된다. (데몬 detach/reattach·백그라운드 실행이 필요해지면 `archive/daemon-mode` 브랜치에 코드 전부 박제돼 있음.)
 
-새 구조변경 GUI 액션(split/close/move/dock/undock/swap/window·session 변경) 추가 시:
-1. `self.pty_layout`/`ws.panes` **직접 수정 금지**. 함수 맨 앞에 `if let Some(client)=self.daemon_client.clone(){ client.<rpc>(...); return; }` 데몬 위임부터, 그 뒤에만 비데몬(로컬 PTY) fallback. 모범(`layout.rs`) = `split_active_pane`(focus→split_dir) / `move_pane`(surface.move) / `close_active_pane`(close/dock).
-2. `publish_pty_layout`(`layout.rs`)은 cmux 미러(`ws.layout`)만 갱신, **데몬 미전파** — "publish 했으니 동기화" 착각 금지. 데몬 동기화는 RPC뿐.
-3. 해당 RPC가 데몬에 없으면(예: swap) 데몬 모드 **early-return 차단** 후 `daemon.rs`/`methods.rs`/`stream.rs`/`backend.rs` 4곳에 `move_surface` 패턴 복제해 신설.
-4. 성능: `handler.rs`의 `DaemonState` 핸들러에서 `resize_backend`(`layout.rs`)/`chrome_dirty`/layout 덮어쓰기는 **`structural_unchanged` 게이트 안에서만**. cwd 1s 폴링이 leaf당 `client.resize` RPC를 쏘면 O(N) 낭비 → idle 안 가벼움.
-5. 로컬 허용 예외: 인페인 보조탭(`spawn_new_tab`, `layout.rs` — 데몬은 primary pid만 소유). 디바이더 ratio는 **드래그 중에만** 로컬 ephemeral — release 시 `surface.resize_divider` RPC(`handler.rs`, ratio 직접 전송, 데몬 헤드리스라 pos 무의미)로 데몬 commit→`broadcast_state`→persist→재시작 복원. 윈도우 크기는 GUI 고유(데몬=헤드리스, 창 없음)라 데몬 아닌 `~/.config/kasaterm/window.json`(`handler.rs`의 `exiting()` 저장 / `resumed()` 복원, IO는 `socket.rs`, logical/DPI 독립).
+핵심 패턴:
+- **초기 부팅**: `start_pty`(`session.rs`) = `spawn_session_pane`(로컬 pane spawn) + `start_socket_pty`(cmux 소켓 서버). 데몬 discover/attach 없음.
+- **cmux 소켓**: claude tmux shim·kasaterm-cli·pane 협업이 쓰는 소켓 서버는 `socket::PtyBackend`. `App.pty`가 `Arc<Mutex>`가 아니라 별도 스레드서 직접 못 만져 → `send_text`/`split`/`focus`를 `EventLoopProxy`로 GUI 스레드에 위임(`UserEvent::SocketBytes`/`SocketSplit`/`SocketFocus`, `handler.rs` user_event서 처리).
+- **resize**: `resize_backend`(`layout.rs`)는 **`leaf_cells` 기반**(leaf id == primary pid 직접 resize). split 직후 새 pane은 `ws.panes`에 PaneState가 아직 없어 ws.panes 순회 방식은 80×24 방치→화면 겹침이었음. 보조탭만 ws.panes로.
+- **divider/window 영속**: ratio는 `save_session_state`의 layout(json)에 저장→복원. 윈도우 크기는 `~/.config/kasaterm/window.json`(`handler.rs` exiting/resumed, IO는 `socket.rs`).
 
-검증: RPC 실제 도달은 `daemon.rs` eprintln이 `/tmp/kasaterm-daemon.log`에 찍히는지로. 안 찍히면 로컬변형 버그. **미해결(후속):** 멀티탭 cross-pane drag(보조탭 한 탭 lift — 데몬이 pid 모름) GUI-local desync, `surface.swap` RPC 미구현(현재 데몬 모드 차단). 상세 [[project_kasaterm_session_lifecycle]].
+**후속 미구현(데몬 제거로 빠진 것 — 로컬 재구현):** ① `claude --resume` 세션 복원("열면 이어가기" 핵심, `start_pty`가 아직 복원 안 함, `pane_record`는 저장 중) ② working bar status(transcript watcher가 데몬 연결이라 dead) ③ dock/undock·파일 미리보기(`open_preview`)·cross-window drag. 상세 [[project_kasaterm_session_lifecycle]] · [[reference_kasaterm_daemon_removal]].
