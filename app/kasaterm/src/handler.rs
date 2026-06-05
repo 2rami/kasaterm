@@ -1600,18 +1600,8 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|p| p.tabs.len())
                             .unwrap_or(0);
                         if tabs_len <= 1 {
-                            // Single tab → closing it closes the pane. Daemon
-                            // mode routes through the shared ghostty-guarded path
-                            // (daemon_close_pane): the last pane keeps the session
-                            // (window-exit), else the daemon removes it and
-                            // rebroadcasts. A local remove_pane alone would leave
-                            // the pane alive in the daemon and the next State
-                            // broadcast resurrects it on window-switch.
-                            if self.daemon_client.is_some() {
-                                self.daemon_close_pane(&pid);
-                            } else {
-                                self.remove_pane(&pid);
-                            }
+                            // Single tab → closing it closes the pane.
+                            self.remove_pane(&pid);
                         } else {
                             self.close_tab(&pid, idx);
                         }

@@ -209,11 +209,6 @@ impl App {
         // sessions. Panes themselves only carry BSP ratios, never absolute
         // rows/cols, so this one computation feeds both backends.
         let Some(tree) = self.pty_layout.as_ref() else {
-            // No layout yet (very first daemon frame): the lone pane fills
-            // the whole window.
-            if let Some(client) = self.daemon_client.as_ref() {
-                client.resize("%0", cols, rows);
-            }
             return;
         };
         // When the workspace is split, every pane wears a per-pane header
@@ -250,28 +245,28 @@ impl App {
             let prows = (usable_h / scaled_ch).floor().max(1.0) as u16;
             leaf_cells.insert(id, (pcols, prows));
         }
-        // Daemon owns the PTYs: the layout leaf id IS the pane id, so resize
-        // each leaf directly. This replaces the old M1 stub that only ever
-        // resized "%0" to the full window — which left freshly split panes
-        // stuck at their 80×24 spawn size and clipped claude's bottom rows.
-        if let Some(client) = self.daemon_client.as_ref() {
-            for (id, (pc, pr)) in &leaf_cells {
-                client.resize(id, *pc, *pr);
+        // Each leaf id IS its primary pane's pid, so resize that PTY directly
+        // from leaf_cells — no dependency on ws.panes being populated. A
+        // freshly split pane has no PaneState until its first output, so the
+        // old ws.panes walk left it at 80×24 spawn size (화면 겹침/하단 잘림).
+        for (id, (pc, pr)) in &leaf_cells {
+            if let Some(sess) = self.pty.get(id) {
+                let _ = sess.resize(*pc, *pr);
             }
-            self.publish_pty_layout();
-            return;
         }
-        // Local mode: the outer pane id (layout key) is NOT guaranteed to
-        // equal any tab's pid after a cross-pane drag, so map each outer
-        // rect onto its tabs' PtySessions — works for primary + in-pane
-        // secondary tabs alike.
+        // In-pane secondary tabs (pid != outer) still resolve via ws.panes —
+        // they share the outer leaf's rect but have their own PtySession.
         let snapshot: Vec<(String, Vec<String>)> = {
             let ws = self.ws.lock().unwrap();
             ws.panes
                 .iter()
                 .map(|(outer, p)| {
-                    let pids: Vec<String> =
-                        p.tabs.iter().filter_map(|t| t.pid.clone()).collect();
+                    let pids: Vec<String> = p
+                        .tabs
+                        .iter()
+                        .filter_map(|t| t.pid.clone())
+                        .filter(|pid| pid != outer)
+                        .collect();
                     (outer.clone(), pids)
                 })
                 .collect()
@@ -328,26 +323,6 @@ impl App {
     /// tmux mode — splits there go through the cmux socket / tmux
     /// `split-window` instead.
     pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<()> {
-        if let Some(client) = self.daemon_client.as_ref() {
-            // Daemon owns the layout: it spawns the pane, splits its tree, and
-            // pushes the new Layout back (applied in user_event). Sync the
-            // daemon's active pane to ours first so the split lands on the
-            // pane the user is actually focused on.
-            if let Some(id) = self.ws.lock().unwrap().active_pane.clone() {
-                client.focus(&id);
-            }
-            client.split_dir(dir);
-            if std::env::var_os("KASATERM_PROFILE").is_some() {
-                eprintln!(
-                    "[pf-split] rpc sent {}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis()
-                );
-            }
-            return Ok(());
-        }
         if self.tmux.is_some() {
             return Ok(());
         }
@@ -506,14 +481,9 @@ impl App {
                 self.ws.lock().unwrap().pid_to_pane.remove(pid);
             }
         }
-        // Host-attached preview tab: tell the daemon to forget the preview, else
-        // the next broadcast's reconcile re-adds the tab. The local removal below
-        // is immediate feedback; the daemon drop keeps it from resurrecting.
-        if let Some(prev_id) = preview_opt {
-            if let Some(client) = self.daemon_client.clone() {
-                client.close(&prev_id);
-            }
-        }
+        // Preview tab removal is immediate via the ws.panes mutation below;
+        // with no daemon there's no broadcast to resurrect it.
+        let _ = preview_opt;
         let mut ws = self.ws.lock().unwrap();
         if let Some(pane) = ws.panes.get_mut(outer) {
             if idx < pane.tabs.len() {
@@ -543,15 +513,10 @@ impl App {
             }
             self.remove_pane(&id);
         }
-        // Last pane closed (e.g. user typed `exit` in the only shell):
-        // shut the window so tmuxify exits cleanly the way users
-        // expect from a regular terminal. NOT in daemon mode: there self.pty
-        // is always empty (the daemon owns the PTYs), so a closed pane's eof
-        // frame lands in dead_panes and this would quit the whole app on every
-        // window/pane close. The daemon always keeps a pane alive (close spawns
-        // a fresh shell when it'd empty out), so the GUI never self-exits —
-        // quit goes through Cmd+Q / the menu.
-        if self.tmux.is_none() && self.pty.is_empty() && self.daemon_client.is_none() {
+        // Last pane closed (e.g. user typed `exit` in the only shell): shut the
+        // window so kasaterm exits cleanly the way users expect from a regular
+        // terminal.
+        if self.tmux.is_none() && self.pty.is_empty() {
             event_loop.exit();
         }
     }
@@ -563,22 +528,6 @@ impl App {
     pub(crate) fn split_pane_opposite(&mut self, source: &str, zone: DropZone) -> Result<()> {
         if self.tmux.is_some() {
             anyhow::bail!("split via drag unsupported on tmux backend");
-        }
-        // Daemon mode: the daemon owns PTYs/layout. A local PTY spawn + local
-        // tree mutation desyncs — the next State overwrites it and the pane goes
-        // dead. Delegate: focus source, split along the drop axis; the daemon
-        // spawns the pane and broadcasts the new layout back.
-        if let Some(client) = self.daemon_client.clone() {
-            if matches!(zone, DropZone::Center) {
-                return Ok(());
-            }
-            client.focus(source);
-            let dir = match zone {
-                DropZone::Left | DropZone::Right => kasa_pty::SplitDir::Horizontal,
-                _ => kasa_pty::SplitDir::Vertical,
-            };
-            client.split_dir(dir);
-            return Ok(());
         }
         let (cols, rows) = self.pane_cells(source).unwrap_or_else(|| self.window_cells());
         let cwd = resolve_initial_cwd();
@@ -837,60 +786,26 @@ impl App {
             w.request_redraw();
         }
     }
-    /// Daemon-mode pane close shared by Cmd+W and the header × button so the
-    /// two never diverge. Single pane (only leaf in the only window) → ghostty:
-    /// flag the GUI window to exit and let the daemon keep the session alive on
-    /// disk for next-launch restore (a daemon close here would fresh-spawn a
-    /// replacement shell and desync the GUI). Otherwise delegate the close to
-    /// the daemon, which removes the pane and broadcasts the layout back.
-    pub(crate) fn daemon_close_pane(&mut self, pid: &str) {
-        let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
-        if leaves <= 1 {
-            // Window's last pane → don't dock (that would leave an empty
-            // window). The whole session's last pane (single window) → ghostty
-            // window-close, the daemon keeps the session for next-launch
-            // restore; otherwise close just this window's pane.
-            if self.windows.len() <= 1 {
-                self.should_exit = true;
-            } else if let Some(client) = self.daemon_client.as_ref() {
-                client.close(pid);
-            }
-        } else if let Some(client) = self.daemon_client.as_ref() {
-            client.dock(pid); // split state → fold into the dock (kill-free)
-        }
-    }
-    /// Remove the focused pane from the BSP tree and drop its PTY
-    /// session. Focus moves to the next pane in document order
-    /// (wrapping to the previous when we just closed the last one).
-    /// Last-pane close is a no-op — quitting the window is the
-    /// user's exit there.
-    pub(crate) fn close_active_pane(&mut self) {
-        if self.daemon_client.is_some() {
-            // Bind first so the MutexGuard drops before daemon_close_pane takes
-            // &mut self (else the lock holds an immutable borrow across it).
-            let active = self.ws.lock().unwrap().active_pane.clone();
-            if let Some(id) = active {
-                self.daemon_close_pane(&id);
-            }
-            return;
-        }
+    /// Close `pid`'s pane: remove it from the BSP tree and drop its PTY.
+    /// Shared by Cmd+W and the header × button. The window's last pane is a
+    /// no-op — the OS close button quits a single-pane window, and a shell
+    /// `exit` cascades through reap_dead_panes.
+    pub(crate) fn close_pane(&mut self, pid: &str) {
         if self.tmux.is_some() {
             return;
         }
-        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
-            return;
-        };
-        // Last-pane Cmd+W is a no-op — the OS close button is how
-        // users quit a single-pane window. The shell-exit path takes
-        // care of the cascade close when the last shell `exit`s.
-        let leaves = match self.pty_layout.as_ref() {
-            Some(t) => t.leaves().len(),
-            None => 0,
-        };
+        let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
         if leaves <= 1 {
             return;
         }
-        self.remove_pane(&active);
+        self.remove_pane(pid);
+    }
+    /// Remove the focused pane. Focus moves to the next pane in document order.
+    pub(crate) fn close_active_pane(&mut self) {
+        let active = self.ws.lock().unwrap().active_pane.clone();
+        if let Some(id) = active {
+            self.close_pane(&id);
+        }
     }
     /// Cycle focus to the previous (delta=-1) or next (delta=+1) pane
     /// in document order. No-op when there's only one pane.
@@ -911,11 +826,7 @@ impl App {
         let new_active = leaves[new_idx].clone();
         ws.active_pane = Some(new_active.clone());
         drop(ws);
-        // Sync the daemon's active pointer (see body-click note) — else a
-        // cwd poll reverts this keyboard focus on the next `cd`.
-        if let Some(client) = self.daemon_client.as_ref() {
-            client.focus(&new_active);
-        }
+        let _ = new_active;
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -963,11 +874,7 @@ impl App {
     /// Move keyboard focus to the adjacent pane in `dir`.
     pub(crate) fn focus_dir(&self, dir: FocusDir) {
         if let Some(id) = self.adjacent_pane(dir) {
-            self.ws.lock().unwrap().active_pane = Some(id.clone());
-            // Sync the daemon's active pointer (see body-click note).
-            if let Some(client) = self.daemon_client.as_ref() {
-                client.focus(&id);
-            }
+            self.ws.lock().unwrap().active_pane = Some(id);
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -978,13 +885,6 @@ impl App {
     /// the other's slot while the PTYs stay put; focus rides along with
     /// the active id into its new position.
     pub(crate) fn swap_dir(&mut self, dir: FocusDir) {
-        // No daemon swap RPC exists yet, so a local swap_leaves would be
-        // reverted by the next State broadcast (a silent no-op in daemon mode).
-        // Block here until a surface.swap RPC is added (daemon.rs/methods.rs/
-        // stream.rs, mirroring move_surface). Non-daemon/tmux: local swap is fine.
-        if self.daemon_client.is_some() {
-            return;
-        }
         let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
             return;
         };
@@ -1107,25 +1007,6 @@ impl App {
     /// when source and target are the same pane.
     pub(crate) fn move_pane(&mut self, moving: &str, target: &str, zone: DropZone) {
         if moving == target {
-            return;
-        }
-        // Daemon authority: a header-drag relocation MUST go through the daemon
-        // (surface.move RPC). A local pty_layout change here is overwritten by
-        // the next State broadcast → the pane goes dead (the header-drag
-        // "아무반응없음"). Mirrors the tab-drag single-tab path + split_active_pane.
-        if let Some(client) = self.daemon_client.clone() {
-            let dir = match zone {
-                DropZone::Left => "left",
-                DropZone::Right => "right",
-                DropZone::Up => "up",
-                DropZone::Down => "down",
-                DropZone::Center => return, // ambiguous for a whole-pane move
-            };
-            client.move_pane(moving, target, dir);
-            self.chrome_dirty = true;
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
             return;
         }
         let (dir, before) = match zone {

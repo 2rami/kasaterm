@@ -219,10 +219,6 @@ impl App {
     /// them never tears a pane down. Windows are this session's tmux-style
     /// "windows"; the session list one level up is tmux "sessions".
     pub(crate) fn new_window(&mut self) {
-        if let Some(client) = self.daemon_client.as_ref() {
-            client.new_window();
-            return; // daemon creates it + pushes State
-        }
         // Active window's slot is None — its layout lives in pty_layout. Park
         // it back into the slot before opening a new window.
         self.windows[self.active_window] = self.pty_layout.take();
@@ -245,10 +241,6 @@ impl App {
     /// across the session's windows, so no PTY is touched — only which BSP tree
     /// the renderer draws. Focus lands on the target window's first pane.
     pub(crate) fn switch_window(&mut self, idx: usize) {
-        if let Some(client) = self.daemon_client.as_ref() {
-            client.switch_window(idx);
-            return; // daemon switches + pushes State
-        }
         if idx == self.active_window || idx >= self.windows.len() {
             return;
         }
@@ -301,15 +293,6 @@ impl App {
         }
         if idx >= self.windows.len() {
             anyhow::bail!("no such window: {idx}");
-        }
-        // Daemon mode: the daemon owns the window tree. Delegate the whole
-        // close so it drops the window from its own session and reaps the
-        // PTYs. Closing panes one-by-one off our *local* layout drifted from
-        // the daemon and left windows that resurrected on the next state push
-        // (the window-increment bug). The daemon's broadcast repaints us.
-        if let Some(client) = self.daemon_client.clone() {
-            client.close_window(idx);
-            return Ok(());
         }
         // Pull the closing window's layout (active one lives in pty_layout) and
         // kill every pane it owns.
