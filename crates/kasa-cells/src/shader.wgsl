@@ -31,6 +31,11 @@ struct Uniforms {
     //   washes colours out — the bytes become P3-encoded but the layer
     //   is still treated as sRGB by macOS, so they display dim.
     p3_convert: f32,
+    // Monotonic seconds for GPU-driven animation (the working-bar sweep). The
+    // CPU rewrites only this each present, so a busy pane animates without
+    // re-emitting any chrome instances — idle stays at 0 CPU rebuild work.
+    time: f32,
+    _pad: f32,
 };
 
 // sRGB ↔ linear-light conversions (the IEC 61966-2-1 piecewise curve).
@@ -146,6 +151,18 @@ fn vs_main(in: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(atlas_tex, atlas_sampler, in.uv);
+    // Working-bar (flags & 4): an indeterminate ~32% segment sweeps a faint
+    // track on a 1.2s loop, driven entirely by `u.time` — the CPU emits the
+    // bar quad once and the GPU animates the sweep, so a busy pane costs no
+    // per-frame chrome rebuild. `in.uv.x` is the 0..1 horizontal position.
+    if ((in.flags & 4u) != 0u) {
+        let seg = 0.32;
+        let head = -seg + (1.0 + seg) * fract(u.time / 1.2);
+        let inseg = step(head, in.uv.x) * step(in.uv.x, head + seg);
+        let a = in.fg.a * mix(0.15, 1.0, inseg);
+        let rgb = boost_saturation(in.fg.rgb, u.color_sat);
+        return vec4<f32>(prepare_output(rgb), a);
+    }
     // Color glyphs (emoji) are baked as full RGBA — draw them verbatim,
     // letting fg.a act as a global opacity. Coverage masks are baked as
     // white×alpha, so fg.rgb × tex.a reproduces the monochrome path.
