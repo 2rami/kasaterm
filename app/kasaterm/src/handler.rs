@@ -36,340 +36,6 @@ impl ApplicationHandler<UserEvent> for App {
             }
             _ => {}
         }
-        // Daemon-pushed structure: adopt the active window's layout as
-        // authoritative, then republish so the renderer's cached tree + pane
-        // rects match the daemon. (Session/window metadata for the sidebar +
-        // session panel is wired in the multi-session follow-up.)
-        if let UserEvent::DaemonState(view) = event {
-            // Per-pane shell cwd for the header breadcrumb. In daemon mode
-            // self.pty is empty, so the daemon's StateView is the only place
-            // the GUI learns each pane's directory (its cwd poll re-broadcasts
-            // on `cd`). refresh_pane_cwds bails when self.pty is empty, so this
-            // is never clobbered.
-            self.pane_cwd_cache = view
-                .pane_cwds
-                .iter()
-                .map(|(id, p)| (id.clone(), std::path::PathBuf::from(p)))
-                .collect();
-            self.pane_tty_cache = view.pane_ttys.clone();
-            // Per-pane collab activity for the working bar / sidebar dot / toast.
-            // Whole-map replace; the working↔idle diff (for the toast + a forced
-            // repaint) happens in the chrome-dirty gate below, not here.
-            // Per-pane collab activity → working bar / sidebar dot / toast. Diff
-            // the incoming status against the stored one BEFORE replacing it: a
-            // working→idle flip is a sibling completion (toast + unread badge).
-            // Guard on daemon_synced so the first sync (no baseline) can't
-            // false-fire a toast for every already-running pane on attach.
-            if self.daemon_synced {
-                for (id, act) in &view.pane_activity {
-                    let prev = self
-                        .pane_activity
-                        .get(id)
-                        .map(|a| a.status.as_str())
-                        .unwrap_or("idle");
-                    let was_busy = prev != "idle" && !prev.is_empty();
-                    let now_busy = act.status != "idle" && !act.status.is_empty();
-                    if was_busy && !now_busy {
-                        let detail = if act.intent.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" · {}", act.intent)
-                        };
-                        // Prefer a human name (custom title → cwd basename) over
-                        // the raw "%N" id, matching what the user reads off the
-                        // header. try_lock avoids re-entering a ws lock that may
-                        // be held higher up this handler.
-                        let name = self
-                            .ws
-                            .try_lock()
-                            .ok()
-                            .and_then(|ws| ws.panes.get(id).and_then(|p| p.title.clone()))
-                            .filter(|t| !t.is_empty())
-                            .or_else(|| {
-                                self.pane_cwd_cache
-                                    .get(id)
-                                    .and_then(|p| p.file_name())
-                                    .map(|f| f.to_string_lossy().into_owned())
-                                    .filter(|s| !s.is_empty())
-                            })
-                            .unwrap_or_else(|| id.clone());
-                        self.collab_toast =
-                            Some((format!("{name} 완료{detail}"), Instant::now()));
-                        self.collab_unread = self.collab_unread.saturating_add(1);
-                        self.chrome_dirty = true;
-                    }
-                }
-            }
-            // Mark chrome dirty only when the BUSY SET changed (a pane started
-            // or stopped working) — that's what adds or removes a working-bar
-            // quad. A steady-busy pane needs no rebuild: its bar is already in
-            // the cached chrome and the GPU advances the sweep from u.time, so
-            // an unchanged busy set leaves idle CPU at zero.
-            let busy_now: std::collections::BTreeSet<&str> = view
-                .pane_activity
-                .iter()
-                .filter(|(_, a)| a.status != "idle" && !a.status.is_empty())
-                .map(|(id, _)| id.as_str())
-                .collect();
-            let busy_prev: std::collections::BTreeSet<&str> = self
-                .pane_activity
-                .iter()
-                .filter(|(_, a)| a.status != "idle" && !a.status.is_empty())
-                .map(|(id, _)| id.as_str())
-                .collect();
-            if busy_now != busy_prev {
-                self.chrome_dirty = true;
-            }
-            self.pane_activity = view.pane_activity.clone();
-            // Project the daemon's active session onto the GUI's own
-            // stash-swap fields so the existing sidebar (windows) renderer
-            // works unchanged: active window's slot is None (its layout lives
-            // in pty_layout), the rest carry their layouts. Window switching
-            // is routed to the daemon over RPC, so these are render-only.
-            let asx = view.active_session;
-            if let Some(sess) = view.sessions.get(asx) {
-                // ghostty-fast gate: a State that only carries fresh cwds (the 1s
-                // poll) has the SAME active-window leaves (in order) + dock as the
-                // last one. Then don't re-adopt the layout (which would also
-                // clobber a divider's drag-set ratio back to the daemon's 0.5)
-                // and don't resize/dirty every pane — idle → 0 GPU passes. The
-                // first sync after attach always runs the full path.
-                let first_sync = !self.daemon_synced;
-                self.daemon_synced = true;
-                // Live pane set across ALL sessions — used by preview retain and
-                // (on the structural path) ws.panes pruning. Cheap (no lsof).
-                let all_leaves: std::collections::HashSet<String> = view
-                    .sessions
-                    .iter()
-                    .flat_map(|s| s.windows.iter())
-                    .flat_map(|w| w.layout.leaves())
-                    .map(|l| l.to_string())
-                    .collect();
-                let new_active_leaves: Vec<String> = sess
-                    .windows
-                    .get(sess.active_window)
-                    .map(|w| w.layout.leaves().iter().map(|l| l.to_string()).collect())
-                    .unwrap_or_default();
-                let cur_active_leaves: Vec<String> = self
-                    .pty_layout
-                    .as_ref()
-                    .map(|t| t.leaves().iter().map(|l| l.to_string()).collect())
-                    .unwrap_or_default();
-                // Compare TREE SHAPE (leaf ids in position + split directions,
-                // ratios ignored). A leaves-Vec compare misses a move that keeps
-                // the same leaves but flips a split's direction (좌우 → 상하) —
-                // exactly drag-relocation — leaving the GUI on the old layout
-                // ("아무 반응"). same_shape catches it, while still ignoring a
-                // divider's drag ratio so a cwd-only poll stays a no-op (idle 0
-                // repaint). The daemon now persists ratio (surface.resize_divider,
-                // for restart restore), but the dragging GUI is already at that
-                // ratio, so skipping the adopt here keeps the seam from snapping.
-                let structural_unchanged = !first_sync
-                    && self.active_window == sess.active_window
-                    && sess.docked == self.docked
-                    && match (
-                        self.pty_layout.as_ref(),
-                        sess.windows.get(sess.active_window).map(|w| &w.layout),
-                    ) {
-                        (Some(cur), Some(new)) => cur.same_shape(new),
-                        _ => false,
-                    };
-                if !structural_unchanged {
-                    // Structural change (split/close/dock/undock/move/window
-                    // switch): adopt the daemon's authoritative layout + dock,
-                    // reconcile ws.panes, and full-resize so a fresh pane paints.
-                    // The daemon's State is the authority for this session's pane
-                    // set — and in daemon mode it's the ONLY close signal we get
-                    // (a closed pane's PTY drop never reaches us as a dead-pane
-                    // EOF, so reap_dead_panes never fires).
-                    self.windows = sess
-                        .windows
-                        .iter()
-                        .enumerate()
-                        .map(|(i, w)| {
-                            if i == sess.active_window {
-                                None
-                            } else {
-                                Some(w.layout.clone())
-                            }
-                        })
-                        .collect();
-                    self.active_window = sess.active_window;
-                    self.pty_layout =
-                        sess.windows.get(sess.active_window).map(|w| w.layout.clone());
-                    self.docked = sess.docked.clone();
-                    {
-                        let mut ws = self.ws.lock().unwrap();
-                        ws.panes.retain(|id, _| all_leaves.contains(id));
-                        ws.pid_to_pane.retain(|_, outer| all_leaves.contains(outer));
-                        let daemon_active = view
-                            .active_pane
-                            .clone()
-                            .filter(|a| new_active_leaves.iter().any(|l| l == a));
-                        ws.active_pane =
-                            daemon_active.or_else(|| new_active_leaves.first().cloned());
-                        for leaf in &new_active_leaves {
-                            if let Some(p) = ws.panes.get_mut(leaf) {
-                                p.dirty = true;
-                            }
-                        }
-                    }
-                    self.chrome_dirty = true;
-                    let (cols, rows) = self.window_cells();
-                    self.resize_backend(cols, rows);
-                    if std::env::var_os("KASATERM_PROFILE").is_some() {
-                        eprintln!(
-                            "[pf-split] state applied {}",
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis()
-                        );
-                    }
-                } else {
-                    // Structure identical (cwd-only poll, or a focus change that
-                    // kept the same leaves): move only the active-pane highlight,
-                    // and mark chrome dirty ONLY when it actually changed. No
-                    // resize, no per-pane dirty → idle stays at 0 GPU passes.
-                    let new_active = view
-                        .active_pane
-                        .clone()
-                        .filter(|a| cur_active_leaves.iter().any(|l| l == a))
-                        .or_else(|| cur_active_leaves.first().cloned());
-                    let changed = {
-                        let mut ws = self.ws.lock().unwrap();
-                        if ws.active_pane != new_active {
-                            ws.active_pane = new_active;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if changed {
-                        self.chrome_dirty = true;
-                    }
-                }
-                // Non-terminal panes (image/markdown) the daemon hosts emit no
-                // frames — build their PaneContent from the path the daemon
-                // shipped. Only (re)build when the path for an id changes, so
-                // the frequent cwd-poll State broadcasts don't re-decode the
-                // image every second. decode/parse reuse the in-process path.
-                for (id, prev) in &view.pane_previews {
-                    if self.applied_previews.get(id) == Some(&prev.path) {
-                        continue;
-                    }
-                    let p = std::path::Path::new(&prev.path);
-                    let name = p
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| prev.path.clone());
-                    let built = match prev.kind.as_str() {
-                        "image" => decode_image_rgba(p).ok().map(|img| PaneContent::Image(Arc::new(img))),
-                        "markdown" => std::fs::read_to_string(p).ok().map(|text| {
-                            PaneContent::Markdown(MarkdownPane {
-                                doc: Arc::new(build_markdown_doc(id, p, &text)),
-                                raw_mode: false,
-                                edit_lines: Vec::new(),
-                                cur_line: 0,
-                                cur_col: 0,
-                                scroll: 0,
-                            })
-                        }),
-                        "code" => std::fs::read_to_string(p).ok().map(|text| {
-                            // Reuse the markdown code-block path: fence the file
-                            // so parse_markdown tags it Code and the renderer
-                            // runs highlight_code_line. A ~~~ fence survives a
-                            // ``` that appears inside the source.
-                            let lang = code_lang_for_path(p);
-                            let body =
-                                format!("~~~{lang}\n{}\n~~~", text.trim_end_matches('\n'));
-                            PaneContent::Markdown(MarkdownPane {
-                                doc: Arc::new(build_markdown_doc(id, p, &body)),
-                                raw_mode: false,
-                                edit_lines: Vec::new(),
-                                cur_line: 0,
-                                cur_col: 0,
-                                scroll: 0,
-                            })
-                        }),
-                        _ => None,
-                    };
-                    if let Some(content) = built {
-                        let mut ws = self.ws.lock().unwrap();
-                        if let Some(host) = &prev.host {
-                            // Tab mode: attach the preview as an in-pane tab on
-                            // the host (the pane that ran imgopen), not its own
-                            // leaf. Update in place if the tab already exists
-                            // (path change), else push a new tab and focus it.
-                            if let Some(pane) = ws.panes.get_mut(host) {
-                                if let Some(t) = pane
-                                    .tabs
-                                    .iter_mut()
-                                    .find(|t| t.preview_id.as_deref() == Some(id.as_str()))
-                                {
-                                    t.content = content;
-                                    t.title = Some(name);
-                                } else {
-                                    let tab = PaneTab {
-                                        content,
-                                        title: Some(name),
-                                        title_pinned: true,
-                                        preview_id: Some(id.clone()),
-                                        ..PaneTab::default()
-                                    };
-                                    pane.tabs.push(tab);
-                                    pane.active_tab = pane.tabs.len() - 1;
-                                }
-                                pane.dirty = true;
-                                self.chrome_dirty = true;
-                                self.applied_previews.insert(id.clone(), prev.path.clone());
-                            }
-                        } else {
-                            let pane = ws.pane_mut(id);
-                            pane.content = content;
-                            pane.title = Some(name);
-                            pane.title_pinned = true;
-                            pane.dirty = true;
-                            self.applied_previews.insert(id.clone(), prev.path.clone());
-                        }
-                    }
-                }
-                // Drop in-pane preview tabs the daemon no longer lists (the tab
-                // was closed → close_surface dropped the preview, or its host
-                // pane vanished). Without this the tab lingers after the daemon
-                // forgot the preview.
-                {
-                    let live: std::collections::HashSet<&str> =
-                        view.pane_previews.keys().map(|s| s.as_str()).collect();
-                    let mut ws = self.ws.lock().unwrap();
-                    for pane in ws.panes.values_mut() {
-                        let before = pane.tabs.len();
-                        pane.tabs.retain(|t| {
-                            t.preview_id
-                                .as_deref()
-                                .map(|pid| live.contains(pid))
-                                .unwrap_or(true)
-                        });
-                        if pane.tabs.len() != before {
-                            if pane.tabs.is_empty() {
-                                pane.tabs.push(PaneTab::default());
-                            }
-                            pane.active_tab = pane.active_tab.min(pane.tabs.len() - 1);
-                            pane.dirty = true;
-                            self.chrome_dirty = true;
-                        }
-                    }
-                }
-                // Forget preview bookkeeping the daemon dropped (host-preview ids
-                // aren't layout leaves, so key off the daemon's preview list).
-                self.applied_previews
-                    .retain(|id, _| view.pane_previews.contains_key(id));
-                // No unconditional chrome_dirty/resize_backend here — that fired
-                // a full per-leaf client.resize RPC on EVERY cwd-poll State (1s),
-                // defeating the idle gate (거노 "여전히 느려"). The structural
-                // branch above already resized; a cwd-only poll stays at 0 work.
-            }
-        }
         // Render directly here instead of request_redraw → (next loop)
         // RedrawRequested. The PTY echo already paid a thread hop +
         // channel to reach us; bouncing through request_redraw adds
@@ -1310,9 +976,8 @@ impl ApplicationHandler<UserEvent> for App {
                                     _ => "markdown",
                                 };
                                 let ps = path.to_string_lossy().into_owned();
-                                if let Some(client) = self.daemon_client.as_ref() {
-                                    client.open_preview(kind, &ps);
-                                }
+                                let _ = (kind, ps);
+                                // TODO(local-mode): 로컬 파일 미리보기 직접 spawn
                             }
                             return;
                         }
@@ -1534,36 +1199,7 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             ws.active_pane = Some(pid.clone());
                         }
-                        if let Some(client) = self.daemon_client.as_ref() {
-                            client.focus(&pid);
-                        }
                         self.chrome_dirty = true;
-                        window.request_redraw();
-                        return;
-                    }
-                    // Dock chips overlay the window bottom, so they win over the
-                    // pane header hits below. Chip × → real kill; body → restore.
-                    if let Some(id) = self
-                        .dock_chip_close_rects
-                        .iter()
-                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
-                        .map(|(id, _)| id.clone())
-                    {
-                        if let Some(c) = self.daemon_client.as_ref() {
-                            c.close(&id);
-                        }
-                        window.request_redraw();
-                        return;
-                    }
-                    if let Some(id) = self
-                        .dock_chip_rects
-                        .iter()
-                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
-                        .map(|(id, _)| id.clone())
-                    {
-                        if let Some(c) = self.daemon_client.as_ref() {
-                            c.undock(&id);
-                        }
                         window.request_redraw();
                         return;
                     }
@@ -1669,11 +1305,6 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                         self.ws.lock().unwrap().active_pane = Some(pane.clone());
-                        // Propagate the focus to the daemon (see body-click
-                        // note) so a later cwd poll doesn't snap focus away.
-                        if let Some(client) = self.daemon_client.as_ref() {
-                            client.focus(&pane);
-                        }
                         self.header_drag = Some(HeaderDrag {
                             pane,
                             start: self.cursor_px,
@@ -1746,13 +1377,6 @@ impl ApplicationHandler<UserEvent> for App {
                             };
                             if switched {
                                 // Daemon owns the active pointer: its cwd poll
-                                // re-broadcasts active_pane, so a local-only set
-                                // is reverted by the next State — `cd` then snaps
-                                // focus back to the daemon's stale active. Mirror
-                                // the click to the daemon so its pointer tracks.
-                                if let Some(client) = self.daemon_client.as_ref() {
-                                    client.focus(&pane_id);
-                                }
                                 self.selection = None;
                                 self.drag_anchor = None;
                                 self.mouse_forward_pane = None;
@@ -1867,18 +1491,10 @@ impl ApplicationHandler<UserEvent> for App {
                                     // so the next State overwrites it and the pane
                                     // goes dead (drag먹통).
                                     if target != td.pane && src_tab_count == 1 {
-                                        if let Some(client) = self.daemon_client.clone() {
-                                            let dir = match zone {
-                                                DropZone::Left => "left",
-                                                DropZone::Right => "right",
-                                                DropZone::Up => "up",
-                                                DropZone::Down | DropZone::Center => "down",
-                                            };
-                                            client.move_pane(&td.pane, &target, dir);
-                                            self.chrome_dirty = true;
-                                            window.request_redraw();
-                                            return;
-                                        }
+                                        self.move_pane(&td.pane, &target, zone);
+                                        self.chrome_dirty = true;
+                                        window.request_redraw();
+                                        return;
                                     }
                                     // Multi-tab same-pane → lift dragged tab into
                                     // a new pane. Cross-pane (non-daemon) → moved
@@ -2024,17 +1640,6 @@ impl ApplicationHandler<UserEvent> for App {
                             };
                             if let Some(tree) = self.pty_layout.as_mut() {
                                 tree.resize_divider(&path, pos, cols, rows);
-                            }
-                            // Daemon owns the layout: forward the final ratio so
-                            // it persists (restore on restart) and the next State
-                            // push doesn't snap the seam back to 0.5. Drag-in-
-                            // progress stays GUI-local; only the release commits.
-                            if let Some(client) = self.daemon_client.as_ref() {
-                                if let Some(ratio) =
-                                    self.pty_layout.as_ref().and_then(|t| t.ratio_at(&path))
-                                {
-                                    client.resize_divider(&path, ratio);
-                                }
                             }
                             self.resize_backend(cols, rows);
                             self.last_divider_pos = None;
@@ -2242,12 +1847,6 @@ impl ApplicationHandler<UserEvent> for App {
         // should disappear from the layout on the very next loop turn
         // so the user sees the gap collapse immediately.
         self.reap_dead_panes(event_loop);
-        // Single-pane Cmd+W (daemon mode) asked to close the window ghostty-
-        // style. The daemon keeps the session, so this exit is non-destructive
-        // — relaunch reconnects and restores the pane.
-        if self.should_exit {
-            event_loop.exit();
-        }
         // Drain socket commands from external cmux clients. These run
         // through the same split/focus/send paths Cmd+D etc use, so
         // visible behavior is identical regardless of whether the

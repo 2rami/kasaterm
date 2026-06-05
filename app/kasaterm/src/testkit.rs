@@ -107,16 +107,13 @@ impl App {
         // grab the active session here so the closure doesn't need
         // self access.
         let pty = self.active_pty().cloned();
-        let daemon = self.daemon_client.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(ms));
             let mut payload = text.clone();
             if !payload.ends_with('\n') {
                 payload.push('\n');
             }
-            if let Some(d) = daemon.as_ref() {
-                d.send_raw(None, payload.as_bytes());
-            } else if let Some(t) = tmux.as_ref() {
+            if let Some(t) = tmux.as_ref() {
                 let hex: String = payload
                     .bytes()
                     .map(|b| format!("{b:02x}"))
