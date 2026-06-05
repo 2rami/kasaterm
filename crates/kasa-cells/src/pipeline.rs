@@ -33,6 +33,10 @@ impl CellInstance {
     /// WezTerm text gamma/contrast curve. That curve sharpens font stems but
     /// hard-edges thin SVG strokes, which read as jagged pixels on hover.
     pub const FLAG_ICON: u32 = 2;
+    /// Bit 2 set = a working-bar quad. The fragment shader ignores the atlas and
+    /// draws an indeterminate sweep over a faint track using `u.time`, so a busy
+    /// pane's loading bar animates on the GPU with no per-frame CPU rebuild.
+    pub const FLAG_WORKING_BAR: u32 = 4;
 }
 
 #[repr(C)]
@@ -57,6 +61,10 @@ pub struct Uniforms {
     /// produces the same byte values sugarloaf measures (e.g. byte
     /// (255,0,0) → stored (234,52,35), display shows P3-red).
     pub p3_convert: f32,
+    /// Monotonic seconds for GPU-driven animation (the working-bar sweep).
+    /// Rewritten every present; the bar quad itself never re-emits.
+    pub time: f32,
+    pub _pad: f32,
 }
 
 pub struct Pipeline {
@@ -224,6 +232,8 @@ impl Pipeline {
                 text_contrast: 1.0,
                 color_sat: 1.0,
                 p3_convert: 0.0,
+                time: 0.0,
+                _pad: 0.0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -264,7 +274,7 @@ impl Pipeline {
     }
 
     pub fn write_uniforms(&self, queue: &wgpu::Queue, screen_px: [f32; 2]) {
-        self.write_uniforms_full(queue, screen_px, 1.3, 1.0, 1.0, false);
+        self.write_uniforms_full(queue, screen_px, 1.3, 1.0, 1.0, false, 0.0);
     }
 
     /// Same as `write_uniforms` but lets the host plug in custom text gamma
@@ -281,6 +291,7 @@ impl Pipeline {
         text_contrast: f32,
         color_sat: f32,
         p3_convert: bool,
+        time: f32,
     ) {
         let u = Uniforms {
             screen_px,
@@ -288,8 +299,18 @@ impl Pipeline {
             text_contrast,
             color_sat,
             p3_convert: if p3_convert { 1.0 } else { 0.0 },
+            time,
+            _pad: 0.0,
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&u));
+    }
+
+    /// Refresh only the `time` field for per-present GPU animation (the
+    /// working-bar sweep) without re-sending the full uniform block or
+    /// re-reading render knobs. Offset-targeted write into the existing buffer.
+    pub fn write_time(&self, queue: &wgpu::Queue, time: f32) {
+        let off = std::mem::offset_of!(Uniforms, time) as u64;
+        queue.write_buffer(&self.uniform_buffer, off, bytemuck::bytes_of(&time));
     }
 
     pub fn write_instances(

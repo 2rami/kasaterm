@@ -72,6 +72,82 @@ fn round_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, 
     g.round_rect_fill(x, y, w, h, r, col);
 }
 
+/// Paint the git-column header dropdowns (repo path picker + branch switcher)
+/// and fill their click rects. A free fn, not a method, so it can run inside
+/// the `&mut self.gpu` block (which can't re-borrow `&self`): the caller hands
+/// it `g` plus the disjoint rect Vecs. Drawn last so it overlays the list.
+#[allow(clippy::too_many_arguments)]
+fn git_paint_dropdowns(
+    g: &mut gpu::GpuRenderer,
+    col_x: f32,
+    col_w: f32,
+    _title_h: f32,
+    path_hdr: Option<(f32, f32, f32, f32)>,
+    branch_hdr: Option<(f32, f32, f32, f32)>,
+    path_open: bool,
+    branch_open: bool,
+    repos: &[std::path::PathBuf],
+    pinned: &Option<std::path::PathBuf>,
+    branches: &[String],
+    current_branch: &str,
+    path_rects: &mut Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
+    branch_rects: &mut Vec<(String, (f32, f32, f32, f32))>,
+) {
+    let item_h = 28.0_f32;
+    let pad = 6.0_f32;
+    let px = col_x + 6.0;
+    let pw = (col_w - 12.0).max(0.0);
+    // A raised menu panel with a 1px border so it reads above the list.
+    let panel = |g: &mut gpu::GpuRenderer, y: f32, h: f32| {
+        round_rect(g, px - 1.0, y - 1.0, pw + 2.0, h + 2.0, theme::RADIUS_MD, theme::BORDER);
+        round_rect(g, px, y, pw, h, theme::RADIUS_MD, theme::SURFACE_ACTIVE);
+    };
+    let row = |g: &mut gpu::GpuRenderer, iy: f32, label: &str, on: bool| {
+        if on {
+            round_rect(g, px + 4.0, iy + 1.0, pw - 8.0, item_h - 2.0, theme::RADIUS_SM, theme::with_alpha(theme::ACCENT, 0x40));
+        }
+        let col = if on { theme::TEXT } else { theme::TEXT_DIM };
+        g.draw_text(px + 12.0, iy + (item_h - 12.0) / 2.0, label, gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false });
+    };
+    if path_open {
+        if let Some((_hx, hy, _hw, hh)) = path_hdr {
+            let n = repos.len() + 1; // +1 for the "자동 추적" toggle
+            let menu_h = n as f32 * item_h + pad * 2.0;
+            let my = hy + hh + 2.0;
+            panel(g, my, menu_h);
+            let mut iy = my + pad;
+            // "자동 추적" — selected when nothing is pinned.
+            row(g, iy, "자동 추적 (활성 pane)", pinned.is_none());
+            path_rects.push((None, (px, iy, pw, item_h)));
+            iy += item_h;
+            for r in repos {
+                let name = r.file_name().and_then(|s| s.to_str()).unwrap_or("?");
+                let sel = pinned.as_ref() == Some(r);
+                row(g, iy, name, sel);
+                path_rects.push((Some(r.clone()), (px, iy, pw, item_h)));
+                iy += item_h;
+            }
+        }
+    }
+    if branch_open {
+        if let Some((_hx, hy, _hw, hh)) = branch_hdr {
+            let n = branches.len().max(1);
+            let menu_h = n as f32 * item_h + pad * 2.0;
+            let my = hy + hh + 2.0;
+            panel(g, my, menu_h);
+            let mut iy = my + pad;
+            if branches.is_empty() {
+                row(g, iy, "(브랜치 없음)", false);
+            }
+            for b in branches {
+                row(g, iy, b, b == current_branch);
+                branch_rects.push((b.clone(), (px, iy, pw, item_h)));
+                iy += item_h;
+            }
+        }
+    }
+}
+
 /// Lucide icon name for a sidebar tab's chip, chosen from the window label.
 /// claude panes get the sparkle, markdown docs a file, everything else the
 /// terminal glyph — keeps window identity readable after the SVG switch.
@@ -159,6 +235,12 @@ const SIDEBAR_TAB_INSET: f32 = 8.0;
 const FILE_TREE_W: f32 = 220.0;
 const FILE_TREE_W_MIN: f32 = 140.0;
 const FILE_TREE_W_MAX: f32 = 480.0;
+/// Right-hand git column, mirroring the file-tree column on the left:
+/// `effective_right_chrome_w()` folds its width in so the cell grid reflows
+/// and panes never overlap it.
+const GIT_COL_W: f32 = 264.0;
+const GIT_COL_W_MIN: f32 = 190.0;
+const GIT_COL_W_MAX: f32 = 460.0;
 const SCROLLBACK_MAX: usize = 5000;
 /// Min ms between wheel emits. Default 0 = pass every macOS scroll event
 /// straight through to `pty.scroll`; the try_send-based reader pipeline
@@ -187,316 +269,6 @@ const VERSION_FADE_MS: u128 = 1200;
 /// idea as iTerm2's "smart cursor" pause.
 const BLINK_PAUSE_AFTER_INPUT_MS: u64 = 700;
 
-/// Git-status panel page. `__PORT__` is substituted at window-open time
-/// with the live MCP port. Polls `/git-status` every second and renders
-/// progressive disclosure: a small green dot when clean, an expanded file
-/// list when there are changes. Self-contained (inline CSS/JS) so it can
-/// load via `with_html` without a served asset path; the cross-origin
-/// fetch relies on the endpoint's `Access-Control-Allow-Origin: *`.
-const GIT_PANEL_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; padding: 14px;
-    font: 13px/1.5 -apple-system, "SF Pro Text", system-ui, sans-serif;
-    background: #1a1d23; color: #ecedf3;
-    -webkit-user-select: none; user-select: none;
-  }
-  .branch { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; color: #ecedf3; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; }
-  .dot.clean { background: #3fb950; box-shadow: 0 0 6px #3fb95066; }
-  .dot.dirty { background: #d29922; box-shadow: 0 0 6px #d2992266; }
-  .dot.error { background: #f85149; }
-  .dot.none { background: #787e8a; box-shadow: none; }
-  .hint { margin-top: 8px; font-size: 11px; color: #787e8a; }
-  .ab { margin-left: auto; display: flex; gap: 10px; font-size: 12px; color: #a0a6b0; }
-  .ab b { color: #ecedf3; font-weight: 600; }
-  .summary { margin-top: 4px; font-size: 12px; color: #787e8a; }
-  .all-wrap { display: none; margin-top: 10px; font-size: 12px; color: #a0a6b0;
-    align-items: center; gap: 6px; cursor: pointer; user-select: none; }
-  .all-wrap input { margin: 0; cursor: pointer; }
-  .groups { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
-  .group { display: none; }
-  .group.show { display: block; }
-  .group h4 {
-    margin: 0 0 6px; font-size: 11px; text-transform: uppercase;
-    letter-spacing: .04em; display: flex; align-items: center; gap: 6px;
-  }
-  .group h4 .n { color: #787e8a; font-weight: 500; }
-  .staged h4 { color: #3fb950; }
-  .modified h4 { color: #d29922; }
-  .untracked h4 { color: #5a8ce6; }
-  ul { margin: 0; padding: 0; list-style: none; }
-  .file { margin-bottom: 1px; }
-  .file-row { display: flex; align-items: center; gap: 6px;
-    font: 12px/1.7 ui-monospace, "SF Mono", Menlo, monospace; }
-  .file-row input { margin: 0; flex: 0 0 auto; cursor: pointer; }
-  .toggle { color: #787e8a; cursor: pointer; flex: 0 0 auto; width: 10px; text-align: center; }
-  .fname { color: #a0a6b0; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .diff { margin: 3px 0 6px 22px; padding: 6px 8px; background: #101217; border-radius: 9px;
-    font: 11px/1.5 ui-monospace, Menlo, monospace; white-space: pre; overflow-x: auto; max-height: 220px; }
-  .diff .add { color: #3fb950; }
-  .diff .del { color: #f85149; }
-  .diff .hunk { color: #5a8ce6; }
-  .diff .ctx { color: #787e8a; }
-  .commit { margin-top: 14px; border-top: 1px solid #22262e; padding-top: 12px; }
-  .commit textarea { width: 100%; background: #101217; color: #ecedf3; border: 1px solid #22262e;
-    border-radius: 9px; padding: 6px 8px; resize: vertical;
-    font: 12px/1.4 -apple-system, system-ui, sans-serif; }
-  .msg-wrap { position: relative; }
-  .msg-wrap textarea { padding-right: 30px; }
-  .ai-btn { position: absolute; top: 7px; right: 7px; display: flex; padding: 2px; line-height: 0;
-    background: none; border: none; color: #a0a6b0; cursor: pointer; }
-  .ai-btn:hover:not(:disabled) { color: #c8a6ff; }
-  .ai-btn:disabled { opacity: .5; cursor: default; }
-  .actions { display: flex; gap: 8px; margin-top: 8px; }
-  .actions button { flex: 1; background: #22262e; color: #ecedf3; border: 1px solid #2e323b;
-    border-radius: 9px; padding: 6px 0; font-size: 12px; cursor: pointer; }
-  .actions button:hover { background: #2e323b; }
-  .actions button:disabled { opacity: .5; cursor: default; }
-  #btn-commit { background: #238636; border-color: #2ea043; color: #fff; }
-  #btn-commit:hover:not(:disabled) { background: #2ea043; }
-  .result { margin-top: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
-  .result.ok { color: #3fb950; }
-  .result.bad { color: #f85149; }
-  .err { color: #f85149; font-size: 12px; margin-top: 10px; }
-</style>
-</head>
-<body>
-  <div class="branch">
-    <span id="dot" class="dot clean"></span>
-    <span id="branch">…</span>
-    <span class="ab">
-      <span id="ahead" title="unpushed commits">↑0</span>
-      <span id="behind" title="commits behind">↓0</span>
-    </span>
-  </div>
-  <div id="summary" class="summary">connecting…</div>
-  <label id="all-wrap" class="all-wrap"><input type="checkbox" id="check-all"> 전체 선택</label>
-  <div class="groups">
-    <div class="group staged" id="g-staged"><h4>staged <span class="n" id="n-staged"></span></h4><ul id="l-staged"></ul></div>
-    <div class="group modified" id="g-modified"><h4>modified <span class="n" id="n-modified"></span></h4><ul id="l-modified"></ul></div>
-    <div class="group untracked" id="g-untracked"><h4>untracked <span class="n" id="n-untracked"></span></h4><ul id="l-untracked"></ul></div>
-  </div>
-  <div id="hint" class="hint" style="display:none">폴더로 이동하면 상태가 떠요</div>
-  <div id="err" class="err" style="display:none"></div>
-  <div id="commit" class="commit" style="display:none">
-    <div class="msg-wrap">
-      <textarea id="msg" placeholder="커밋 메시지" rows="2"></textarea>
-      <button id="btn-ai" class="ai-btn" title="AI가 변경사항 보고 커밋">
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l1.3 3.9a2 2 0 0 0 1.3 1.3L14.5 7.5a.3.3 0 0 1 0 .6l-3.9 1.3a2 2 0 0 0-1.3 1.3L8 14.5a.3.3 0 0 1-.6 0l-1.3-3.9a2 2 0 0 0-1.3-1.3L1.5 8.1a.3.3 0 0 1 0-.6l3.9-1.3a2 2 0 0 0 1.3-1.3z"/><path d="M13 1l.4 1.1 1.1.4-1.1.4L13 4l-.4-1.1-1.1-.4 1.1-.4z"/></svg>
-      </button>
-    </div>
-    <div class="actions">
-      <button id="btn-commit">commit</button>
-      <button id="btn-push">push</button>
-    </div>
-    <div id="result" class="result" style="display:none"></div>
-  </div>
-<script>
-const PORT = "__PORT__";
-const $ = (id) => document.getElementById(id);
-const base = "http://127.0.0.1:" + PORT;
-// 사용자 선택/펼침 상태. 1초 폴링이 DOM을 다시 그려도 여기서 복원한다.
-const checked = new Set();
-const expanded = new Set();
-const diffCache = new Map();
-
-function colorize(text) {
-  const frag = document.createDocumentFragment();
-  for (const line of text.split("\n")) {
-    const div = document.createElement("div");
-    if (line.startsWith("+") && !line.startsWith("+++")) div.className = "add";
-    else if (line.startsWith("-") && !line.startsWith("---")) div.className = "del";
-    else if (line.startsWith("@@")) div.className = "hunk";
-    else div.className = "ctx";
-    div.textContent = line || " ";
-    frag.appendChild(div);
-  }
-  return frag;
-}
-
-async function loadDiff(path, box) {
-  let text = diffCache.get(path);
-  if (text === undefined) {
-    box.textContent = "로딩…";
-    try {
-      const r = await fetch(base + "/git-diff?path=" + encodeURIComponent(path), { cache: "no-store" });
-      text = (await r.json()).diff || "(변경 없음)";
-    } catch (e) { text = "diff 로드 실패"; }
-    diffCache.set(path, text);
-  }
-  box.textContent = "";
-  box.appendChild(colorize(text));
-}
-
-function fileRow(path) {
-  const row = document.createElement("div"); row.className = "file";
-  const head = document.createElement("div"); head.className = "file-row";
-  const cb = document.createElement("input"); cb.type = "checkbox";
-  cb.checked = checked.has(path);
-  cb.dataset.path = path;
-  cb.onchange = () => { cb.checked ? checked.add(path) : checked.delete(path); };
-  const tog = document.createElement("span"); tog.className = "toggle";
-  tog.textContent = expanded.has(path) ? "▾" : "▸";
-  const name = document.createElement("span"); name.className = "fname";
-  name.textContent = path; name.title = path;
-  const box = document.createElement("pre"); box.className = "diff";
-  box.style.display = expanded.has(path) ? "block" : "none";
-  const toggle = () => {
-    if (expanded.has(path)) {
-      expanded.delete(path); box.style.display = "none"; tog.textContent = "▸";
-    } else {
-      expanded.add(path); box.style.display = "block"; tog.textContent = "▾"; loadDiff(path, box);
-    }
-  };
-  tog.onclick = toggle; name.onclick = toggle;
-  if (expanded.has(path)) loadDiff(path, box);
-  head.appendChild(cb); head.appendChild(tog); head.appendChild(name);
-  row.appendChild(head); row.appendChild(box);
-  return row;
-}
-
-function fill(group, files) {
-  const n = files.length;
-  $("g-" + group).classList.toggle("show", n > 0);
-  $("n-" + group).textContent = n ? n : "";
-  const ul = $("l-" + group);
-  ul.innerHTML = "";
-  for (const f of files) ul.appendChild(fileRow(f));
-}
-
-function render(d) {
-  $("err").style.display = "none";
-  $("hint").style.display = "none";
-  $("commit").style.display = "none";
-  $("all-wrap").style.display = "none";
-  if (d.no_repo) {
-    $("dot").className = "dot none";
-    $("branch").textContent = d.path || "—";
-    $("ahead").textContent = ""; $("behind").textContent = "";
-    $("summary").textContent = "git 저장소 아님";
-    $("hint").style.display = "block";
-    fill("staged", []); fill("modified", []); fill("untracked", []);
-    return;
-  }
-  if (d.error) {
-    $("dot").className = "dot error";
-    $("branch").textContent = "git";
-    $("summary").textContent = "";
-    $("err").style.display = "block";
-    $("err").textContent = d.error;
-    return;
-  }
-  $("branch").textContent = d.branch || "(detached)";
-  const ahead = d.ahead || 0, behind = d.behind || 0;
-  $("ahead").textContent = "↑" + ahead;
-  $("behind").textContent = "↓" + behind;
-  const staged = d.staged || [], modified = d.modified || [], untracked = d.untracked || [];
-  const total = staged.length + modified.length + untracked.length;
-  $("dot").className = "dot " + (d.clean ? "clean" : "dirty");
-  $("summary").textContent = d.clean
-    ? "working tree clean"
-    : total + (total === 1 ? " change" : " changes");
-  fill("staged", staged);
-  fill("modified", modified);
-  fill("untracked", untracked);
-  // 변경이 있거나 보낼 커밋이 있으면 커밋/푸시 영역 노출.
-  $("commit").style.display = (total > 0 || ahead > 0) ? "block" : "none";
-  $("all-wrap").style.display = total > 0 ? "flex" : "none";
-  $("btn-push").textContent = ahead > 0 ? ("push ↑" + ahead) : "push";
-  $("btn-commit").disabled = total === 0;
-}
-
-function showResult(msg, ok) {
-  const el = $("result");
-  el.textContent = msg;
-  el.className = "result " + (ok ? "ok" : "bad");
-  el.style.display = "block";
-}
-
-async function doCommit() {
-  const files = [...checked];
-  const message = $("msg").value;
-  if (!files.length) { showResult("커밋할 파일을 체크하세요", false); return; }
-  if (!message.trim()) { showResult("커밋 메시지를 입력하세요", false); return; }
-  $("btn-commit").disabled = true;
-  try {
-    // No Content-Type header → browser sends text/plain (CORS-safe), so no
-    // preflight from this null-origin webview. Server parses the JSON string.
-    const r = await fetch(base + "/git-commit", {
-      method: "POST",
-      body: JSON.stringify({ files: files, message: message })
-    });
-    const d = await r.json();
-    showResult(d.output || (d.ok ? "커밋됨" : "실패"), d.ok);
-    if (d.ok) { $("msg").value = ""; checked.clear(); expanded.clear(); diffCache.clear(); }
-  } catch (e) { showResult("커밋 요청 실패", false); }
-  poll();
-}
-
-async function doPush() {
-  $("btn-push").disabled = true;
-  showResult("푸시 중…", true);
-  try {
-    const r = await fetch(base + "/git-push", { method: "POST" });
-    const d = await r.json();
-    showResult(d.output || (d.ok ? "푸시됨" : "실패"), d.ok);
-  } catch (e) { showResult("푸시 요청 실패", false); }
-  $("btn-push").disabled = false;
-  poll();
-}
-
-async function doAiCommit() {
-  const files = [...checked];
-  $("btn-ai").disabled = true;
-  showResult("AI에게 커밋 요청 중…", true);
-  try {
-    // text/plain (no Content-Type) → no CORS preflight; see doCommit.
-    const r = await fetch(base + "/git-ai-commit", {
-      method: "POST",
-      body: JSON.stringify({ files: files })
-    });
-    const d = await r.json();
-    showResult(d.output || (d.ok ? "요청됨" : "실패"), d.ok);
-  } catch (e) { showResult("AI 커밋 요청 실패", false); }
-  $("btn-ai").disabled = false;
-}
-
-async function poll() {
-  try {
-    const r = await fetch(base + "/git-status", { cache: "no-store" });
-    render(await r.json());
-  } catch (e) {
-    $("dot").className = "dot error";
-    $("summary").textContent = "";
-    $("commit").style.display = "none";
-    $("err").style.display = "block";
-    $("err").textContent = "server unreachable :" + PORT;
-  }
-}
-
-$("btn-commit").onclick = doCommit;
-$("btn-push").onclick = doPush;
-$("btn-ai").onclick = doAiCommit;
-$("check-all").onchange = () => {
-  const on = $("check-all").checked;
-  document.querySelectorAll(".file-row input[type=checkbox]").forEach((cb) => {
-    cb.checked = on;
-    const p = cb.dataset.path;
-    if (p) { on ? checked.add(p) : checked.delete(p); }
-  });
-};
-poll();
-setInterval(poll, 1000);
-</script>
-</body>
-</html>"#;
 
 /// Session panel: a tmux-style list of sessions in its own OS window driving
 /// a wry webview, mirroring the git panel. Polls `/sessions` once a second to
@@ -1611,6 +1383,12 @@ struct PaneTab {
     /// pid of the *first* tab; secondary tabs have their own pid and a
     /// reverse-map entry in `Workspace.pid_to_pane`.
     pid: Option<String>,
+    /// Daemon preview id when this tab is a host-attached image/markdown
+    /// preview (`imgopen` inside this pane). The GUI reconciles these tabs
+    /// against `view.pane_previews` each broadcast; closing the tab fires
+    /// `close_surface(preview_id)` so the daemon drops it (else it resurrects).
+    /// `None` for normal terminal / leaf tabs.
+    preview_id: Option<String>,
 }
 
 impl PaneTab {
@@ -2141,62 +1919,117 @@ struct FileNode {
     depth: usize,
 }
 
-/// File-tree icon + tint for a file, chosen by name/extension. The icon is a
-/// generic Lucide shape per file *class* (code/doc/image/config/…) and the
-/// color is a language brand color (colors aren't copyrightable) so the tree
-/// reads by hue at a glance — all code shares the code glyph but rust/go/py
-/// stay distinct by hue. Folders are handled separately. Whole-name matches
-/// (Dockerfile, Cargo.toml…) win over the extension.
-fn file_icon_spec(name: &str) -> (&'static str, [u8; 4]) {
+/// Parsed `git status` snapshot for the right-hand git column. The background
+/// poller fills it from `kasa_mcp::git::git_status` (off the main thread);
+/// the render reads it. Kept as a flat, render-ready struct so the gpu block
+/// (which can't re-borrow `&self` to call helpers) paints straight from it.
+#[derive(Clone, Default, PartialEq)]
+struct GitColView {
+    /// cwd this snapshot was computed for — so a stale repo's rows aren't
+    /// shown after a pane switch until the poller catches the new cwd.
+    cwd: Option<std::path::PathBuf>,
+    /// `git_status` found no repo here (home / arbitrary dir): render a soft
+    /// notice instead of a branch + file list.
+    no_repo: bool,
+    branch: String,
+    ahead: u32,
+    behind: u32,
+    insertions: u32,
+    deletions: u32,
+    clean: bool,
+    /// One row per changed file: `(marker, path)` where marker is
+    /// `A` staged · `M` modified · `?` untracked. Ordered staged→modified→new.
+    files: Vec<(char, String)>,
+    /// Local branch names for the switcher dropdown (current one is `branch`).
+    branches: Vec<String>,
+}
+
+/// Action buttons at the foot of the git column. `StageAll` runs `git add -A`;
+/// `Commit` hands the commit to the active claude pane; `Push` pushes the
+/// current branch. All shell out through `kasa_mcp::git` on a worker thread so
+/// the UI never blocks.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitColBtn {
+    StageAll,
+    Commit,
+    Push,
+}
+
+/// File-tree icon (Material Icon Theme name) for a file, chosen by name then
+/// extension. The SVG is multi-color (authored fills) so it draws through
+/// `queue_ft_icon` untinted — VS Code-style language logos that read at a
+/// glance. Whole-name matches (Dockerfile, package.json…) win over extension.
+fn file_icon(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
-    let whole: Option<(&'static str, [u8; 4])> = match lower.as_str() {
-        "dockerfile" | ".dockerignore" => Some(("settings-2", [36, 150, 237, 255])),
-        ".gitignore" | ".gitattributes" | ".gitmodules" => Some(("settings-2", [240, 81, 51, 255])),
-        "makefile" => Some(("settings-2", [109, 128, 134, 255])),
-        "package.json" => Some(("braces", [203, 56, 55, 255])),
-        "readme.md" | "readme" => Some(("file-text", [97, 175, 239, 255])),
-        "license" | "license.md" | "license.txt" => Some(("file-text", [142, 142, 142, 255])),
-        _ => None,
-    };
-    if let Some(v) = whole {
-        return v;
+    match lower.as_str() {
+        "dockerfile" | ".dockerignore" | "docker-compose.yml" | "compose.yaml" => return "docker",
+        ".gitignore" | ".gitattributes" | ".gitmodules" => return "git",
+        "package.json" | "package-lock.json" => return "nodejs",
+        "tsconfig.json" => return "tsconfig",
+        "readme.md" | "readme" | "readme.txt" => return "readme",
+        "license" | "license.md" | "license.txt" | "copying" => return "license",
+        "todo.md" | "todo" | "todo.txt" => return "todo",
+        _ => {}
     }
     let ext = lower.rsplit('.').next().unwrap_or("");
     match ext {
-        "rs" => ("file-code", [201, 116, 59, 255]),
-        "py" | "pyi" | "pyw" => ("file-code", [59, 130, 196, 255]),
-        "js" | "mjs" | "cjs" | "jsx" => ("file-code", [184, 161, 0, 255]),
-        "ts" | "tsx" => ("file-code", [49, 120, 198, 255]),
-        "go" => ("file-code", [0, 173, 216, 255]),
-        "rb" => ("file-code", [204, 52, 45, 255]),
-        "java" => ("file-code", [231, 111, 0, 255]),
-        "kt" | "kts" => ("file-code", [139, 92, 246, 255]),
-        "swift" => ("file-code", [240, 81, 56, 255]),
-        "c" | "h" => ("file-code", [92, 107, 192, 255]),
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => ("file-code", [0, 122, 193, 255]),
-        "cs" => ("file-code", [137, 75, 158, 255]),
-        "php" => ("file-code", [119, 123, 180, 255]),
-        "lua" => ("file-code", [88, 140, 220, 255]),
-        "vue" => ("file-code", [65, 184, 131, 255]),
-        "rkt" => ("file-code", [159, 60, 64, 255]),
-        "sql" => ("file-code", [217, 142, 0, 255]),
-        "wgsl" | "glsl" | "vert" | "frag" => ("file-code", [158, 110, 184, 255]),
-        "html" | "htm" | "xml" => ("file-code", [227, 100, 60, 255]),
-        "css" => ("file-code", [65, 120, 230, 255]),
-        "scss" | "sass" | "less" => ("file-code", [205, 103, 153, 255]),
-        "json" | "jsonc" => ("braces", [200, 180, 70, 255]),
-        "yml" | "yaml" => ("settings-2", [180, 110, 110, 255]),
-        "toml" => ("settings-2", [185, 110, 80, 255]),
-        "ini" | "conf" | "cfg" | "env" | "lock" => ("settings-2", [134, 144, 158, 255]),
-        "md" | "markdown" | "rst" => ("file-text", [120, 170, 220, 255]),
-        "txt" | "log" => ("file-text", [150, 157, 168, 255]),
-        "sh" | "bash" | "zsh" | "fish" => ("terminal", [120, 200, 90, 255]),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tiff" | "tif" => {
-            ("image", [170, 120, 210, 255])
-        }
-        "svg" => ("image", [224, 150, 60, 255]),
-        "pdf" => ("file-text", [209, 80, 50, 255]),
-        _ => ("file", theme::FT_DEFAULT),
+        "rs" => "rust",
+        "py" | "pyi" | "pyw" => "python",
+        "js" | "mjs" | "cjs" => "javascript",
+        "jsx" | "tsx" => "react",
+        "ts" => "typescript",
+        "go" => "go",
+        "rb" => "ruby",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => "cpp",
+        "cs" => "csharp",
+        "php" => "php",
+        "lua" => "lua",
+        "vue" => "vue",
+        "prisma" => "prisma",
+        "graphql" | "gql" => "graphql",
+        "sql" => "database",
+        "html" | "htm" | "xml" => "html",
+        "css" => "css",
+        "scss" | "sass" | "less" => "sass",
+        "json" | "jsonc" => "json",
+        "yml" | "yaml" => "yaml",
+        "toml" | "ini" | "conf" | "cfg" | "env" => "settings",
+        "lock" => "lock",
+        "md" | "markdown" | "rst" => "markdown",
+        "txt" | "log" => "document",
+        "sh" | "bash" | "zsh" | "fish" => "console",
+        "ps1" => "powershell",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tiff" | "tif" => "image",
+        "svg" => "svg",
+        "pdf" => "pdf",
+        "ttf" | "otf" | "woff" | "woff2" => "font",
+        "zip" | "tar" | "gz" | "tgz" | "rar" | "7z" | "xz" => "zip",
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => "audio",
+        "mp4" | "mov" | "avi" | "mkv" | "webm" => "video",
+        _ => "document",
+    }
+}
+
+/// File-tree folder icon (Material Icon Theme name) chosen by folder name, so
+/// common dirs (src, test, .github…) carry a tinted variant like VS Code.
+/// Unknown folders fall back to the plain blue `folder-base`.
+fn folder_icon(name: &str) -> &'static str {
+    match name.to_ascii_lowercase().as_str() {
+        "src" | "lib" | "app" | "source" | "crates" => "folder-src",
+        "test" | "tests" | "__tests__" | "spec" | "specs" => "folder-test",
+        "node_modules" => "folder-node",
+        "dist" | "build" | "out" | "release" => "folder-dist",
+        "target" => "folder-target",
+        "public" | "static" | "www" => "folder-public",
+        "assets" | "images" | "img" | "icons" | "media" => "folder-images",
+        "docs" | "doc" | "documentation" => "folder-docs",
+        ".github" => "folder-github",
+        "config" | ".config" | "conf" | "settings" => "folder-config",
+        _ => "folder-base",
     }
 }
 
@@ -2457,6 +2290,10 @@ struct App {
     /// this for us when the OS owns the titlebar, but our
     /// fullsize_content_view setup means we intercept those clicks.
     last_left_click: Option<(Instant, (f32, f32))>,
+    /// Pane id currently zoomed (tmux-style): rendered alone filling the work
+    /// area with the other panes hidden, until toggled off. GUI-local render
+    /// state — the daemon's layout tree is untouched (like a divider ratio).
+    zoomed_pane: Option<String>,
     /// Pre-maximize window frame (Cocoa screen coords: x, y, w, h), stashed
     /// when a title-strip double-click maximizes so the next double-click can
     /// snap the window back instantly. `None` = currently un-maximized. See
@@ -2486,6 +2323,21 @@ struct App {
     /// vanishes. Cleared when the busy window expires.
     #[allow(dead_code)]
     last_claude_status: Option<String>,
+    /// Per-pane collab activity (status + intent) from the daemon's StateView —
+    /// the cross-window busy source. A "working" pane draws a header bar + a
+    /// sidebar-window dot; a working→idle flip fires the completion toast. Keyed
+    /// by surface id, replaced wholesale on each StateView.
+    pane_activity: HashMap<String, crate::stream::PaneStatusView>,
+    /// Active completion toast (message + start instant) for a sibling pane's
+    /// working→idle flip — "✓ %3 완료 · git 패널". Fades like `copy_toast_at`.
+    /// Replaced by the newest flip; a brief overlap just shows the latest.
+    collab_toast: Option<(String, Instant)>,
+    /// Unread completion count, for a badge on the collab board entry. Bumped on
+    /// each completion toast; the badge render + clear land with the sidebar
+    /// work (P3) — the board has no GUI button yet (menu-toggle only), so the
+    /// sidebar window list is its natural home.
+    #[allow(dead_code)]
+    collab_unread: u32,
     /// When we last recomputed the macOS window title. Rate-limits
     /// `maybe_update_window_title` to ~200ms because it locks the
     /// workspace + calls `ps -A` (process-tree lookup) on every hit,
@@ -2507,6 +2359,38 @@ struct App {
     /// cwds the git poller should refresh, set from the current windows' repr
     /// cwd just before the sidebar paints. Shared with the poll thread.
     git_poll_cwds: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    /// Right-hand git column (the in-window replacement for the old floating
+    /// webview git panel). Visibility + live width, an in-flight resize drag,
+    /// a scroll offset, and the per-frame file-row + button hit rects — all
+    /// mirroring the file-tree column on the left.
+    git_col_visible: bool,
+    git_col_w_logical: f32,
+    git_col_resize: Option<(f32, f32)>,
+    git_col_scroll: f32,
+    git_col_file_rects: Vec<(String, (f32, f32, f32, f32))>,
+    git_col_btn_rects: Vec<(GitColBtn, (f32, f32, f32, f32))>,
+    /// `git status` snapshot for the active pane's cwd: the poller writes it
+    /// off the main thread, the render reads it. `git_col_cwd` is the cwd the
+    /// poller should refresh (render publishes the active pane's cwd into it).
+    /// Same pattern as `window_git` / `git_poll_cwds`.
+    git_col_data: std::sync::Arc<std::sync::Mutex<GitColView>>,
+    git_col_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+    /// User-pinned repo for the column. `Some` = show this repo regardless of
+    /// the focused pane (picked from the path dropdown); `None` = follow the
+    /// active pane's cwd. `publish_git_col_cwd` honours it.
+    git_col_pinned_cwd: Option<std::path::PathBuf>,
+    /// Open dropdowns in the git-column header (path picker / branch switcher).
+    /// Only one is meaningfully open at a time. The per-frame hit rects are
+    /// rebuilt by the render (like `shell_menu_*`).
+    git_path_menu_open: bool,
+    git_branch_menu_open: bool,
+    /// Header click targets + dropdown item rects, rebuilt each paint. The path
+    /// menu's `None` entry is the "자동 추적" toggle; branch items carry the
+    /// branch name to check out.
+    git_path_hdr_rect: Option<(f32, f32, f32, f32)>,
+    git_branch_hdr_rect: Option<(f32, f32, f32, f32)>,
+    git_path_menu_rects: Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
+    git_branch_menu_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// Single-pane Cmd+W in daemon mode sets this to close the GUI window
     /// (ghostty-style) on the next about_to_wait, instead of killing the pane.
     /// The daemon keeps the session alive so relaunch restores it.
@@ -2578,13 +2462,6 @@ struct App {
     /// Wakes the event loop from background threads (PTY snapshots,
     /// socket commands) so a parked WaitUntil repaints immediately.
     proxy: EventLoopProxy<UserEvent>,
-    /// Git-status panel: a second OS window driving a wry webview, kept
-    /// fully separate from the terminal's wgpu window so it can never
-    /// disturb the render/damage path. `None` unless KASASPACE_GIT_PANEL
-    /// opted in at startup. The webview must outlive its window, so both
-    /// are owned here.
-    git_panel_window: Option<Arc<Window>>,
-    git_panel_webview: Option<wry::WebView>,
     /// Session panel: a second OS window/webview listing the tmux-style
     /// sessions. Same lifetime discipline as the git panel — webview must
     /// outlive its window, so both are owned here.
@@ -2711,16 +2588,37 @@ impl App {
             pending_resize: None,
             mouse_forward_pane: None,
             last_left_click: None,
+            zoomed_pane: None,
             saved_window_frame: None,
             titlebar_drag_pending: None,
             last_window_title: None,
             claude_busy_until: None,
             last_claude_status: None,
+            pane_activity: HashMap::new(),
+            collab_toast: None,
+            collab_unread: 0,
             last_window_title_check: None,
             pane_cwd_cache: HashMap::new(),
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            git_col_visible: std::env::var("KASASPACE_GIT_PANEL")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            git_col_w_logical: GIT_COL_W,
+            git_col_resize: None,
+            git_col_scroll: 0.0,
+            git_col_file_rects: Vec::new(),
+            git_col_btn_rects: Vec::new(),
+            git_col_data: std::sync::Arc::new(std::sync::Mutex::new(GitColView::default())),
+            git_col_cwd: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            git_col_pinned_cwd: None,
+            git_path_menu_open: false,
+            git_branch_menu_open: false,
+            git_path_hdr_rect: None,
+            git_branch_hdr_rect: None,
+            git_path_menu_rects: Vec::new(),
+            git_branch_menu_rects: Vec::new(),
             should_exit: false,
             pane_cwd_check: None,
             applied_previews: HashMap::new(),
@@ -2755,8 +2653,6 @@ impl App {
             ui_zoom: 1.0,
             pane_font_scales: std::collections::HashMap::new(),
             proxy,
-            git_panel_window: None,
-            git_panel_webview: None,
             session_panel_window: None,
             session_panel_webview: None,
             board_panel_window: None,
@@ -2808,6 +2704,192 @@ impl App {
     /// strip. The column sits between the tabs and the cell grid.
     fn file_tree_col_x(&self) -> f32 {
         self.tab_strip_w()
+    }
+
+    /// Right-hand chrome width (the git column), mirroring `effective_sidebar_w`
+    /// on the left. Folded into `window_cells` so the cell grid reflows and no
+    /// pane ever overlaps the column.
+    fn effective_right_chrome_w(&self) -> f32 {
+        self.git_col_w()
+    }
+
+    /// Git-column width (0 when hidden).
+    fn git_col_w(&self) -> f32 {
+        if self.git_col_visible {
+            self.git_col_w_logical
+        } else {
+            0.0
+        }
+    }
+
+    /// Left edge (logical x) of the git column — flush against the window's
+    /// right edge. 0 before the window exists (no paint yet).
+    fn git_col_x(&self) -> f32 {
+        let w = self.git_col_w();
+        self.window.as_ref().map_or(0.0, |win| {
+            let scale = self.effective_scale();
+            win.inner_size().width as f32 / scale - w
+        })
+    }
+
+    /// Git-column-toggle button rect, parked at the right end of the title
+    /// strip (mirrors the file-tree toggle on the left). Needs the window
+    /// width, so it returns `None` before the first paint.
+    fn git_col_toggle_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        let w = 26.0;
+        let h = 22.0;
+        let win_w = self.window.as_ref().map(|win| {
+            let scale = self.effective_scale();
+            win.inner_size().width as f32 / scale
+        })?;
+        let x = win_w - w - 8.0;
+        let y = (TITLE_HEIGHT - h) / 2.0;
+        Some((x, y, w, h))
+    }
+
+    /// Show/hide the git column. Same reflow path as `toggle_sidebar`: flip the
+    /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
+    /// active cwd so the poller has something to refresh the moment it opens.
+    fn toggle_git_col(&mut self) {
+        self.git_col_visible = !self.git_col_visible;
+        if self.git_col_visible {
+            self.publish_git_col_cwd();
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Push the active pane's cwd into the shared `git_col_cwd` so the git
+    /// poller refreshes the right repo. Cheap string clone; called from the
+    /// render right before the column paints (mirrors `git_poll_cwds`).
+    fn publish_git_col_cwd(&self) {
+        if !self.git_col_visible {
+            return;
+        }
+        // A user-pinned repo (picked from the path dropdown) overrides the
+        // active-pane follow — the column stays on that repo until unpinned.
+        if let Some(pinned) = self.git_col_pinned_cwd.clone() {
+            if let Ok(mut guard) = self.git_col_cwd.lock() {
+                *guard = Some(pinned);
+            }
+            return;
+        }
+        let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+        let resolved = active
+            .as_ref()
+            .and_then(|id| self.pane_cwd_cache.get(id).cloned());
+        if let Ok(mut guard) = self.git_col_cwd.lock() {
+            match resolved {
+                // A confidently-resolved pane cwd always wins.
+                Some(cwd) => *guard = Some(cwd),
+                // Cache miss (e.g. right after a pane switch, before the cwd
+                // sniffer catches up): keep the last good cwd instead of
+                // flashing the launch dir — which is often a non-repo and
+                // would read as "not a repo". Seed from current_dir only on
+                // the very first frame, when nothing is known yet.
+                None if guard.is_none() => *guard = std::env::current_dir().ok(),
+                None => {}
+            }
+        }
+    }
+
+    /// Run a git-column button. Push shells out on a worker thread so the UI
+    /// never blocks on the network; Commit hands the work to the claude in the
+    /// active pane (native commit-message input is phase 2), mirroring the old
+    /// webview panel's AI-commit. Both read the column's repo from the poller's
+    /// snapshot so the action always targets what the user sees.
+    fn run_git_col_action(&mut self, btn: GitColBtn) {
+        let cwd = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone());
+        let Some(cwd) = cwd else { return };
+        match btn {
+            GitColBtn::StageAll => {
+                // `git add -A` off-thread; the poller's next tick flips the
+                // rows to staged.
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = kasa_mcp::git::git_stage_all(&cwd);
+                    let _ = proxy.send_event(UserEvent::Redraw);
+                });
+            }
+            GitColBtn::Push => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = kasa_mcp::git::git_push(&cwd);
+                    // Wake the loop so the poller's next tick repaints ahead/behind.
+                    let _ = proxy.send_event(UserEvent::Redraw);
+                });
+            }
+            GitColBtn::Commit => {
+                if self.active_pane_is_claude() {
+                    self.send_bytes(
+                        "git 패널에서 커밋을 눌렀어. 지금 작업 디렉토리의 변경사항을 검토하고 적절한 한국어 커밋 메시지로 git add + commit 해줘.\n"
+                            .as_bytes(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Check out `branch` in the column's repo (off-thread). A dirty tree makes
+    /// git refuse with a clear message — we don't stash/force, just let the
+    /// poller repaint whatever git did. Closes the branch dropdown.
+    fn run_git_checkout(&mut self, branch: String) {
+        self.git_branch_menu_open = false;
+        let cwd = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone());
+        let Some(cwd) = cwd else { return };
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let _ = kasa_mcp::git::git_checkout(&cwd, &branch);
+            let _ = proxy.send_event(UserEvent::Redraw);
+        });
+    }
+
+    /// True when the active pane runs claude — gates the AI-commit injection so
+    /// a multi-line instruction never lands (and auto-submits) on a bare shell.
+    fn active_pane_is_claude(&self) -> bool {
+        let Some(id) = self.target_surface() else {
+            return false;
+        };
+        if let Some(p) = self.pty.get(&id) {
+            if let Some(l) = Self::smart_pane_label(p) {
+                return l.to_lowercase().contains("claude");
+            }
+        }
+        // Daemon-owned pane: fall back to the title the daemon pushed.
+        self.ws
+            .lock()
+            .ok()
+            .and_then(|ws| ws.panes.get(&id).and_then(|p| p.title.clone()))
+            .map(|t| t.to_lowercase().contains("claude"))
+            .unwrap_or(false)
+    }
+
+    /// Preview a changed file from the git column (image/code/markdown by
+    /// extension), resolved against the column's repo cwd. A native diff view
+    /// is phase 2; opening the file is the useful v1. Daemon-only, like the
+    /// file-tree's file-click path.
+    fn open_git_file(&mut self, rel: &str) {
+        let cwd = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone());
+        let Some(cwd) = cwd else { return };
+        let abs = cwd.join(rel);
+        let ext = abs
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let kind = match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" => "image",
+            "md" | "markdown" | "txt" | "log" | "" => "markdown",
+            _ => "code",
+        };
+        let ps = abs.to_string_lossy().into_owned();
+        if let Some(client) = self.daemon_client.as_ref() {
+            client.open_preview(kind, &ps);
+        }
     }
 
     /// Title-bar sidebar-toggle button rect (logical px), parked just
@@ -2981,6 +3063,23 @@ impl App {
         }
     }
 
+    /// 0.0..1.0 opacity for a collab completion toast: a longer hold than the
+    /// copy toast (a sibling finishing is worth a real glance) then a fade.
+    /// Returns 0 with no active toast, so callers gate paint + frame-loop wake.
+    fn collab_toast_alpha(&self) -> f32 {
+        const HOLD: u128 = 2400;
+        const FADE: u128 = 600;
+        let Some((_, at)) = self.collab_toast.as_ref() else { return 0.0 };
+        let e = at.elapsed().as_millis();
+        if e < HOLD {
+            1.0
+        } else if e < HOLD + FADE {
+            1.0 - (e - HOLD) as f32 / FADE as f32
+        } else {
+            0.0
+        }
+    }
+
     /// Copy a detected code block's text to the clipboard and arm the
     /// toast. Reuses arboard like `copy_selection`. Best-effort: a
     /// clipboard failure just logs (the toast still fires on success).
@@ -3003,74 +3102,6 @@ impl App {
         self.copy_toast_at = Some(Instant::now());
     }
 
-    /// Open the git-status panel in its own OS window when
-    /// KASASPACE_GIT_PANEL is set (=1/true). Best-effort: any failure
-    /// (window or webview) just logs and leaves the terminal untouched —
-    /// the panel is auxiliary and must never block startup. The page polls
-    /// `/git-status` on the MCP server (KASASPACE_MCP_PORT, default 8765).
-    fn open_git_panel(&mut self, event_loop: &ActiveEventLoop, force: bool) {
-        if self.git_panel_window.is_some() {
-            return;
-        }
-        // The menu toggle passes force=true (explicit user action); startup
-        // otherwise gates on the KASASPACE_GIT_PANEL env opt-in.
-        if !force {
-            let on = std::env::var("KASASPACE_GIT_PANEL")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            if !on {
-                return;
-            }
-        }
-        let port = mcp_panel_port();
-        let attrs = WindowAttributes::default()
-            .with_title("git status")
-            .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(300.0, 460.0));
-        let window = match event_loop.create_window(attrs) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                eprintln!("[git-panel] window create failed: {e}");
-                return;
-            }
-        };
-        let html = GIT_PANEL_HTML.replace("__PORT__", &port);
-        // build_as_child (not build): keep winit's own content view. build()
-        // replaces it with the webview, so winit's macOS delegate touches a
-        // freed view on focus changes (window_did_resign_key) → use-after-
-        // free crash. As a child, the webview fills the panel window while
-        // winit keeps its view. This is a separate window from the terminal,
-        // so there's no wgpu surface to overlap.
-        let webview = match wry::WebViewBuilder::new()
-            .with_html(html)
-            .with_bounds(wry::Rect {
-                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
-                size: wry::dpi::LogicalSize::new(300.0, 460.0).into(),
-            })
-            .build_as_child(window.as_ref())
-        {
-            Ok(wv) => wv,
-            Err(e) => {
-                eprintln!("[git-panel] webview build failed: {e}");
-                return;
-            }
-        };
-        eprintln!("[git-panel] open; polling 127.0.0.1:{port}/git-status");
-        self.git_panel_window = Some(window);
-        self.git_panel_webview = Some(webview);
-    }
-
-    /// Toggle the git panel from the menu: close if open, force-open if not.
-    /// Bypasses the env gate since the menu click is an explicit user action.
-    fn toggle_git_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if self.git_panel_window.is_some() {
-            // Drop the webview before the window it borrows from.
-            self.git_panel_webview = None;
-            self.git_panel_window = None;
-        } else {
-            self.open_git_panel(event_loop, true);
-        }
-    }
 
     /// Open the session panel in its own OS window. Mirrors open_git_panel:
     /// the page polls `/sessions` on the MCP server. Best-effort — any failure
@@ -4994,7 +5025,11 @@ impl App {
         let scale = self.effective_scale();
         let raw_lw = size.width as f32 / scale;
         let raw_lh = size.height as f32 / scale;
-        let lw = (raw_lw - self.effective_sidebar_w() - 2.0 * WINDOW_PADDING).max(0.0);
+        let lw = (raw_lw
+            - self.effective_sidebar_w()
+            - self.effective_right_chrome_w()
+            - 2.0 * WINDOW_PADDING)
+            .max(0.0);
         // Top: TITLE_HEIGHT (chrome strip). Bottom: WINDOW_PADDING. The
         // asymmetry is intentional — the strip replaces the top padding.
         // Reserve the dock bar from the grid only when it carries chips.
@@ -5067,7 +5102,7 @@ impl App {
         let cw = self.cell.w.max(1.0);
         let ch = self.cell.h.max(1.0);
         let mut leaf_cells: HashMap<String, (u16, u16)> = HashMap::new();
-        for (id, _x, _y, w, h) in tree.leaf_rects(cols, rows) {
+        for (id, _x, _y, w, h) in self.effective_leaf_rects(cols, rows) {
             let fs = scale_of.get(&id).copied().unwrap_or(1.0).max(0.1);
             // Work in logical px on the BASE grid — exactly the span the
             // renderer fills (origin + w·cell), then subtract the real px
@@ -5281,16 +5316,54 @@ impl App {
         None
     }
 
+    /// Leaf rects for render / hit-test / resize, honoring a tmux-style zoom.
+    /// When a pane is zoomed it fills the whole work area and the others are
+    /// hidden; the daemon's layout tree is untouched (zoom is GUI-local render
+    /// state). If the zoomed pane is gone (closed or moved out by a broadcast)
+    /// this falls back to the real layout, so a stale zoom never paints a
+    /// phantom pane.
+    fn effective_leaf_rects(&self, cols: u16, rows: u16) -> Vec<(String, u16, u16, u16, u16)> {
+        if let Some(z) = self.zoomed_pane.as_ref() {
+            if let Some(tree) = self.pty_layout.as_ref() {
+                if tree.leaves().iter().any(|l| *l == z.as_str()) {
+                    return vec![(z.clone(), 0, 0, cols, rows)];
+                }
+            }
+        }
+        self.pty_layout
+            .as_ref()
+            .map(|t| t.leaf_rects(cols, rows))
+            .unwrap_or_default()
+    }
+
+    /// Toggle tmux-style zoom on `pane`: zoom fills the work area with just that
+    /// pane; toggling again (or the pane already being zoomed) restores the
+    /// split. Reflows the backend so the PTY matches its new extent.
+    fn toggle_pane_zoom(&mut self, pane: &str) {
+        if self.zoomed_pane.as_deref() == Some(pane) {
+            self.zoomed_pane = None;
+        } else {
+            self.zoomed_pane = Some(pane.to_string());
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// Drop a non-primary tab: kill its PTY, remove the pid map entry, drop
     /// the slot. The primary tab (index 0, pid == outer pane id) can't be
     /// closed this way — callers fall through to `remove_pane` for that.
     fn close_tab(&mut self, outer: &str, idx: usize) {
-        let pid_opt: Option<String> = {
+        let (pid_opt, preview_opt): (Option<String>, Option<String>) = {
             let ws = self.ws.lock().unwrap();
-            ws.panes
-                .get(outer)
-                .and_then(|p| p.tabs.get(idx))
-                .and_then(|t| t.pid.clone())
+            let tab = ws.panes.get(outer).and_then(|p| p.tabs.get(idx));
+            (
+                tab.and_then(|t| t.pid.clone()),
+                tab.and_then(|t| t.preview_id.clone()),
+            )
         };
         if let Some(pid) = pid_opt.as_deref() {
             if pid != outer {
@@ -5300,6 +5373,14 @@ impl App {
                 // remove_pane(pid) which is a no-op (pty already gone). Fine.
                 self.pty.remove(pid);
                 self.ws.lock().unwrap().pid_to_pane.remove(pid);
+            }
+        }
+        // Host-attached preview tab: tell the daemon to forget the preview, else
+        // the next broadcast's reconcile re-adds the tab. The local removal below
+        // is immediate feedback; the daemon drop keeps it from resurrecting.
+        if let Some(prev_id) = preview_opt {
+            if let Some(client) = self.daemon_client.clone() {
+                client.close(&prev_id);
             }
         }
         let mut ws = self.ws.lock().unwrap();
@@ -5949,10 +6030,11 @@ impl App {
     /// Pane whose header band contains the cursor (logical px), or None.
     /// Headers only exist when the workspace is split.
     fn header_at_px(&self, x: f32, y: f32) -> Option<String> {
-        let tree = self.pty_layout.as_ref()?;
         let (cols, rows) = self.window_cells();
-        let rects = tree.leaf_rects(cols, rows);
-        if rects.len() <= 1 {
+        let rects = self.effective_leaf_rects(cols, rows);
+        // A zoomed pane is a single rect but still has a header (to un-zoom),
+        // so only bail on a lone pane when nothing is zoomed.
+        if rects.len() <= 1 && self.zoomed_pane.is_none() {
             return None;
         }
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
@@ -5974,7 +6056,7 @@ impl App {
         let tree = self.pty_layout.as_ref()?;
         let leaves_count = tree.leaves().len();
         let (cols, rows) = self.window_cells();
-        let rects = tree.leaf_rects(cols, rows);
+        let rects = self.effective_leaf_rects(cols, rows);
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
         // Per-pane tab-strip top: where the pill row starts. Combined
         // with the header-band height below, this gives the full
@@ -6025,6 +6107,28 @@ impl App {
             }
         }
         None
+    }
+
+    /// Window chip in the left sidebar under the cursor, resolved to that
+    /// window's anchor leaf — the drop target for a cross-window header drag.
+    /// Returns None when off every chip or over the already-active window (its
+    /// panes are on screen, so an in-window drop is `drop_target_at`'s job).
+    /// The daemon's `move_surface` does the actual cross-window detach/insert.
+    fn sidebar_window_drop_target(&self, x: f32, y: f32) -> Option<String> {
+        let inside =
+            |r: &(f32, f32, f32, f32)| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3;
+        let idx = self
+            .window_tab_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(i, _)| *i)?;
+        if idx == self.active_window {
+            return None;
+        }
+        self.windows
+            .get(idx)
+            .and_then(|w| w.as_ref())
+            .and_then(|l| l.leaves().first().map(|s| s.to_string()))
     }
 
     /// Relocate `moving` next to `target` along the edge given by `zone`.
@@ -6504,6 +6608,39 @@ impl App {
             let next = (self.file_tree_scroll - delta_px).clamp(0.0, max_scroll);
             if (next - self.file_tree_scroll).abs() > 0.01 {
                 self.file_tree_scroll = next;
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
+        // Git column: scroll the change list when the pointer is over it. Same
+        // clamp idea as the file tree; the visible height is the band between
+        // the header and the bottom button zone.
+        if self.git_col_visible
+            && self.cursor_px.1 > TITLE_HEIGHT
+            && self.cursor_px.0 >= self.git_col_x()
+        {
+            let item_h = 22.0_f32;
+            let n = self
+                .git_col_data
+                .lock()
+                .map(|g| g.files.len())
+                .unwrap_or(0);
+            let win_h = self.window.as_ref().map_or(800.0, |w| {
+                w.inner_size().height as f32 / self.effective_scale()
+            });
+            let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+            // Header (branch + summary + rule) ≈ 68px; button zone ≈ 44px.
+            let list_top = TITLE_HEIGHT + 68.0;
+            let visible_h = (win_h - dock_h - list_top - 44.0).max(0.0);
+            let content_h = n as f32 * item_h;
+            let max_scroll = (content_h - visible_h).max(0.0);
+            let delta_px = lines as f32 * item_h;
+            let next = (self.git_col_scroll - delta_px).clamp(0.0, max_scroll);
+            if (next - self.git_col_scroll).abs() > 0.01 {
+                self.git_col_scroll = next;
                 self.chrome_dirty = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -7501,13 +7638,16 @@ impl App {
         }
     }
 
-    fn render_frame_gpu(&mut self, scale: f32) {
+    fn render_frame_gpu(&mut self, scale: f32, time_secs: f32) {
         // Keep the header breadcrumb's cwd cache fresh (self-rate-limited).
         self.refresh_pane_cwds();
         // File-tree column follows the active pane's cwd (rebuild on change).
         if self.file_tree_visible {
             self.refresh_file_tree();
         }
+        // Git column follows the same active-pane cwd; publish it so the
+        // off-thread poller refreshes the right repo.
+        self.publish_git_col_cwd();
         let Some(window) = self.window.as_ref() else { return };
         // Snapshot for the launch banner before the &mut self.gpu borrow
         // below (which rules out re-borrowing &self inside that block).
@@ -7549,6 +7689,10 @@ impl App {
             tabs: Vec<String>,
             /// Active tab index into `tabs`.
             active_tab: usize,
+            /// True while this pane is working (daemon transcript watcher sees a
+            /// running tool, cross-window). Draws the flowing bar along the
+            /// header bottom; idle panes draw nothing.
+            busy: bool,
         }
         // Captured once so the &mut self.gpu block below (which can't
         // re-borrow &self) can still see the collapsed/expanded width.
@@ -7559,6 +7703,40 @@ impl App {
         let tab_strip_w = self.tab_strip_w();
         let tree_col_x = self.file_tree_col_x();
         let tree_col_w = self.file_tree_col_w();
+        // Right-hand git column geometry (logical px) + this frame's status
+        // snapshot, all captured before the &mut self.gpu block (which can't
+        // re-borrow &self). `git_reserve` is what the rightmost pane's stretch
+        // must leave free on the right: the column plus one window padding, or
+        // 0 when the column is hidden (so the pane keeps hugging the edge).
+        let git_col_w = self.git_col_w();
+        let git_col_x = (win_px.0 / scale - git_col_w).max(0.0);
+        let git_reserve = if git_col_w > 0.0 {
+            git_col_w + WINDOW_PADDING
+        } else {
+            0.0
+        };
+        let git_view = self
+            .git_col_data
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        // Distinct repos to offer in the path dropdown. Union of every cwd we
+        // can see — the badge cache (`window_git` keys), the pane-cwd cache,
+        // and the column's current repo — so the list isn't empty when one
+        // source is sparse (the daemon-mode pane-cwd cache often is). Deduped
+        // + sorted for a stable order.
+        let git_repo_list: Vec<std::path::PathBuf> = {
+            let mut set: std::collections::BTreeSet<std::path::PathBuf> = self
+                .window_git
+                .lock()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            set.extend(self.pane_cwd_cache.values().cloned());
+            if let Some(cur) = git_view.cwd.clone() {
+                set.insert(cur);
+            }
+            set.into_iter().collect()
+        };
         let pad_px = (WINDOW_PADDING + sidebar_w) * scale;
         let title_px = TITLE_HEIGHT * scale;
         // Per-pane font multipliers (keyed by pty/leaf id), so each pane's
@@ -7594,7 +7772,19 @@ impl App {
             // pane so it can stretch to the window's true edge (window_cells
             // floors both, leaving a sub-cell remainder otherwise).
             let (grid_cols, grid_rows) = self.window_cells();
-            let leaves: Vec<(String, u16, u16, u16, u16)> = if let Some(layout) = ws.layout.as_ref() {
+            // tmux-style zoom: render only the zoomed pane, filling the grid and
+            // hiding the rest. Skips when the zoomed pane isn't in this window's
+            // map (closed / moved out) so no phantom paints.
+            let zoom_leaves: Option<Vec<(String, u16, u16, u16, u16)>> =
+                match self.zoomed_pane.as_deref() {
+                    Some(z) if ws.panes.contains_key(z) => {
+                        Some(vec![(z.to_string(), 0, 0, grid_cols, grid_rows)])
+                    }
+                    _ => None,
+                };
+            let leaves: Vec<(String, u16, u16, u16, u16)> = if let Some(z) = zoom_leaves {
+                z
+            } else if let Some(layout) = ws.layout.as_ref() {
                 layout
                     .leaves()
                     .into_iter()
@@ -7630,7 +7820,9 @@ impl App {
             let any_multitab = leaves
                 .iter()
                 .any(|(id, _, _, _, _)| ws.panes.get(id).map_or(false, |p| p.tabs.len() > 1));
-            let show_headers = leaves.len() > 1 || any_multitab;
+            // A zoomed pane keeps its header even though it's the only visible
+            // leaf — otherwise there's no double-click target to un-zoom.
+            let show_headers = leaves.len() > 1 || any_multitab || self.zoomed_pane.is_some();
             let header_shift_px = if show_headers {
                 PANE_HEADER_HEIGHT * scale
             } else {
@@ -7797,7 +7989,10 @@ impl App {
                     let extra = self.window.as_ref().map_or(0.0, |w| {
                         let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lw = w.inner_size().width as f32 / s;
+                        // Stop at the git column's left padding when it's shown,
+                        // else hug the true window edge (git_reserve == 0).
                         (raw_lw
+                            - git_reserve
                             - (WINDOW_PADDING + sidebar_w + grid_cols as f32 * self.cell.w))
                             .max(0.0)
                     });
@@ -7883,7 +8078,10 @@ impl App {
                                 let extra = self.window.as_ref().map_or(0.0, |w| {
                                     let s = w.scale_factor() as f32 * self.ui_zoom;
                                     let raw_lw = w.inner_size().width as f32 / s;
+                                    // Leave the git column free on the right
+                                    // (git_reserve == 0 when it's hidden).
                                     (raw_lw
+                                        - git_reserve
                                         - (WINDOW_PADDING
                                             + sidebar_w
                                             + grid_cols as f32 * self.cell.w))
@@ -7916,6 +8114,13 @@ impl App {
                         },
                         label,
                         is_active: active_id.as_deref() == Some(id.as_str()),
+                        // Busy = the daemon's transcript watcher sees this pane
+                        // working (cross-window). Drives the header working bar.
+                        busy: self
+                            .pane_activity
+                            .get(&id)
+                            .map(|a| a.status != "idle" && !a.status.is_empty())
+                            .unwrap_or(false),
                         color: pane.color,
                         is_markdown: pane.markdown().is_some(),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
@@ -7968,6 +8173,10 @@ impl App {
             })
             .collect();
         let toast_alpha = self.copy_toast_alpha();
+        // Collab completion toast (top-right). Pre-read here like toast_alpha so
+        // the render block below never re-borrows self while g is held.
+        let collab_toast_alpha = self.collab_toast_alpha();
+        let collab_toast_msg = self.collab_toast.as_ref().map(|(m, _)| m.clone());
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
             .map(|s| gpu::PaneSlot {
@@ -8097,6 +8306,15 @@ impl App {
                     DropZone::Center => return None,
                 })
             });
+        // Floating drag-ghost data (label + cursor), captured before the gpu
+        // borrow below so the paint pass draws it without re-borrowing self.
+        let drag_ghost: Option<(String, (f32, f32))> = if header_drag_active {
+            self.header_drag
+                .as_ref()
+                .map(|hd| (hd.pane.clone(), self.cursor_px))
+        } else {
+            None
+        };
         // Ghostty-style split seams: one 1px hairline per interior split
         // boundary instead of a 4-side border around every pane (which
         // doubled up into a thick seam between abutting panes). Coords match
@@ -8158,8 +8376,12 @@ impl App {
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
         let (sb_tabs, sb_closes, sb_plus) = self.sidebar_layout(sb_win_h);
-        self.window_tab_rects = sb_tabs.clone();
-        self.window_tab_close_rects = sb_closes.clone();
+        // Only register hit-rects when the tab strip is actually painted. A
+        // hidden sidebar (file-tree-only / collapsed) must not leave stale tab
+        // rects that a header-drag would false-hit as a cross-window drop.
+        let sidebar_shown = self.tab_strip_w() > 0.0;
+        self.window_tab_rects = if sidebar_shown { sb_tabs.clone() } else { Vec::new() };
+        self.window_tab_close_rects = if sidebar_shown { sb_closes.clone() } else { Vec::new() };
         self.new_window_btn_rect = Some(sb_plus);
         // Shell picker popup layout, computed here (no GPU borrow) so the
         // click hit-list and the painted boxes share one source of truth.
@@ -8186,6 +8408,27 @@ impl App {
             .map(|(cmd, _, _, r)| (cmd.clone(), *r))
             .collect();
         let sb_active = self.active_window;
+        // Per-window "working" flag for the sidebar dot: true when any pane in
+        // that window is mid-task (cross-window collab, from pane_activity). The
+        // active window's tree lives in pty_layout (its slot is None); the rest
+        // carry their own layout. Built here (no GPU borrow) so the paint loop
+        // just indexes sb_busy[i].
+        let sb_busy: Vec<bool> = (0..sb_labels.len())
+            .map(|i| {
+                let layout = if i == self.active_window {
+                    self.pty_layout.as_ref()
+                } else {
+                    self.windows.get(i).and_then(|w| w.as_ref())
+                };
+                layout.map_or(false, |l| {
+                    l.leaves().iter().any(|leaf| {
+                        self.pane_activity
+                            .get(&leaf.to_string())
+                            .map_or(false, |a| a.status != "idle" && !a.status.is_empty())
+                    })
+                })
+            })
+            .collect();
         // Which tab the cursor is over (for hover affordance + showing × only
         // where the user is pointing, Warp-style).
         let sb_cursor = self.cursor_px;
@@ -8295,6 +8538,35 @@ impl App {
                     isz,
                     fg,
                 );
+            }
+            // Git-column toggle, parked at the right end of the title strip
+            // (the column lives on the right). Hand-drawn "panel-right" glyph —
+            // an outlined panel with its right column filled — so it needs no
+            // new icon asset (and reads as "right panel" at a glance).
+            {
+                let bw = 26.0_f32;
+                let bh = 22.0_f32;
+                let bx = win_px.0 / scale - bw - 8.0;
+                let by = (TITLE_HEIGHT - bh) / 2.0;
+                let hover = sb_cursor.0 >= bx
+                    && sb_cursor.0 <= bx + bw
+                    && sb_cursor.1 >= by
+                    && sb_cursor.1 <= by + bh;
+                if hover {
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                }
+                let active = git_col_w > 0.0;
+                let fg = if hover || active { theme::TEXT } else { theme::TEXT_DIM };
+                let gs = 15.0_f32;
+                let gx = bx + (bw - gs) / 2.0;
+                let gy = by + (bh - gs) / 2.0;
+                // Outline (fg square hollowed by a BG inset), then the right
+                // third filled + a seam line so it reads as a side panel.
+                round_rect(g, gx, gy, gs, gs, 3.0, fg);
+                round_rect(g, gx + 1.3, gy + 1.3, gs - 2.6, gs - 2.6, 2.0, theme::BG);
+                let split = gx + gs * 0.58;
+                g.rect(split, gy + 1.3, gx + gs - 1.3 - split, gs - 2.6, fg);
+                g.rect(split, gy + 1.3, 1.0, gs - 2.6, fg);
             }
             // Top bar: folder icon + current working directory, just right of
             // the file-tree toggle (Warp-style location chip).
@@ -8463,6 +8735,36 @@ impl App {
                         theme::ICON_SIZE,
                         theme::TEXT_DIM,
                     );
+                    // Window number badge — a small circle nicked into the
+                    // chip's top-left corner so the user can refer to "window
+                    // 2" (and `kasaterm-cli windows` lists the same ordinals).
+                    // Bright on the active tab, muted otherwise.
+                    // Vertically centered on the icon's left edge, not nicked
+                    // into the top-left corner (which read as a notification
+                    // badge). Smaller, so it's clearly an ordinal, not an alert.
+                    let bsz = 10.0_f32;
+                    let bx = icon_x - 6.0;
+                    let by = icon_y + (icon - bsz) / 2.0;
+                    let badge_bg = if is_active { theme::TEXT } else { theme::TEXT_MUTE };
+                    round_rect(g, bx, by, bsz, bsz, bsz / 2.0, badge_bg);
+                    let num = format!("{}", *i + 1);
+                    let nw = g.measure_chrome_text(&num, 9.0, true);
+                    g.draw_text(
+                        bx + (bsz - nw) / 2.0,
+                        by + 1.5,
+                        &num,
+                        gpu::DrawOpts { font_size: 9.0, color: theme::BG, bold: true, italic: false },
+                    );
+                    // Working dot: this window has a pane mid-task (cross-window
+                    // collab). Top-right of the icon chip, opposite the number
+                    // badge (top-left) so the two never overlap. Static accent
+                    // dot — the flowing bar lives on the in-window pane header.
+                    if sb_busy.get(*i).copied().unwrap_or(false) {
+                        let dsz = 9.0_f32;
+                        let dx = icon_x + icon - dsz + 3.0;
+                        let dy = icon_y - 3.0;
+                        round_rect(g, dx, dy, dsz, dsz, dsz / 2.0, theme::ACCENT);
+                    }
                     // Two-line label to the right of the icon.
                     let text_x = icon_x + icon + 10.0;
                     let name_fg: [u8; 4] = if is_active {
@@ -8640,19 +8942,16 @@ impl App {
                         g.queue_icon(chev, base_x + 2.0, y + (item_h - 12.0) / 2.0, 12.0, cc);
                     }
                     let icon_x = base_x + 17.0;
-                    // Icon shape = file class, tint = language. Folders take the
-                    // warm folder color and an open/closed glyph.
-                    let (icon, tint) = if node.is_dir {
-                        (if expanded { "folder-open" } else { "folder" }, theme::FT_FOLDER)
-                    } else {
-                        let fname = node
-                            .path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or(node.name.as_str());
-                        file_icon_spec(fname)
-                    };
-                    g.queue_icon(icon, icon_x, iy, isz, tint);
+                    // Multi-color Material icon: language logo per file, tinted
+                    // folder variant per common dir name. Chevron already shows
+                    // open/closed, so folders reuse the closed glyph.
+                    let fname = node
+                        .path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(node.name.as_str());
+                    let icon = if node.is_dir { folder_icon(fname) } else { file_icon(fname) };
+                    g.queue_ft_icon(icon, icon_x, iy, isz);
                     // Folders read brighter than files (soft hierarchy); hover
                     // lifts a file to full strength.
                     let fg = if hovered || node.is_dir { theme::TEXT } else { theme::TEXT_DIM };
@@ -8665,6 +8964,237 @@ impl App {
                     rects.push((node.path.clone(), (row_x, y, row_w, item_h)));
                 }
                 self.file_tree_rects = rects;
+            }
+            // ── Git column ── right-hand chrome mirroring the file-tree column
+            // on the left, but native instead of the old floating webview: the
+            // poller fills `git_view` off-thread and this paints branch +
+            // change list + Commit/Push, caching file-row / button hit rects
+            // for the mouse handler. window_cells already reserved its width so
+            // no pane overlaps it; it stops above the dock so the dock bar and
+            // the action buttons never fight for the same strip.
+            self.git_col_file_rects.clear();
+            self.git_col_btn_rects.clear();
+            self.git_path_hdr_rect = None;
+            self.git_branch_hdr_rect = None;
+            self.git_path_menu_rects.clear();
+            self.git_branch_menu_rects.clear();
+            if git_col_w > 0.0 {
+                let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+                let gcx0 = git_col_x + 14.0;
+                let gcw = (git_col_w - 28.0).max(0.0);
+                let top = TITLE_HEIGHT;
+                let bottom = (win_px.1 / scale - dock_h).max(top);
+                // Background + left hairline so the column reads as its own pane.
+                g.rect(git_col_x, top, git_col_w, bottom - top, theme::BG);
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::BORDER);
+                let red = [229, 83, 75, 255];
+                let orange = [224, 142, 80, 255];
+                let mut y = top + 12.0;
+                // Repo-path header (shown even when not a repo so you can switch
+                // away): the repo folder name + ▾ opens the open-repo picker. A
+                // pinned repo (no longer following the focused pane) reads in the
+                // accent colour.
+                {
+                    let label = git_view
+                        .cwd
+                        .as_ref()
+                        .and_then(|p| p.file_name())
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("—");
+                    let col = if self.git_col_pinned_cwd.is_some() {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT
+                    };
+                    let ex = g.draw_text(gcx0, y, label, gpu::DrawOpts { font_size: 13.0, color: col, bold: true, italic: false });
+                    g.draw_text(ex + 5.0, y, "▾", gpu::DrawOpts { font_size: 11.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                    self.git_path_hdr_rect = Some((git_col_x, y - 3.0, git_col_w, 21.0));
+                }
+                y += 22.0;
+                if git_view.no_repo {
+                    g.draw_text(
+                        gcx0,
+                        y,
+                        "git 저장소가 아닙니다",
+                        gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_MUTE, bold: false, italic: false },
+                    );
+                } else {
+                    // Branch name + ▾ (click → switcher) and ahead/behind right.
+                    let branch = if git_view.branch.is_empty() { "—" } else { git_view.branch.as_str() };
+                    let bex = g.draw_text(
+                        gcx0,
+                        y,
+                        branch,
+                        gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: false, italic: false },
+                    );
+                    g.draw_text(bex + 5.0, y, "▾", gpu::DrawOpts { font_size: 10.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                    self.git_branch_hdr_rect = Some((gcx0 - 4.0, y - 3.0, (bex - gcx0) + 26.0, 19.0));
+                    let mut ab = String::new();
+                    if git_view.ahead > 0 {
+                        ab.push_str(&format!("↑{}", git_view.ahead));
+                    }
+                    if git_view.behind > 0 {
+                        if !ab.is_empty() {
+                            ab.push(' ');
+                        }
+                        ab.push_str(&format!("↓{}", git_view.behind));
+                    }
+                    if !ab.is_empty() {
+                        let w = g.measure_chrome_text(&ab, 12.0, false);
+                        g.draw_text(
+                            git_col_x + git_col_w - 14.0 - w,
+                            y + 1.0,
+                            &ab,
+                            gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_DIM, bold: false, italic: false },
+                        );
+                    }
+                    y += 21.0;
+                    // +ins / -del summary line.
+                    if git_view.insertions > 0 || git_view.deletions > 0 {
+                        let mut px = gcx0;
+                        if git_view.insertions > 0 {
+                            px = g.draw_text(
+                                px,
+                                y,
+                                &format!("+{}", git_view.insertions),
+                                gpu::DrawOpts { font_size: 12.0, color: theme::SUCCESS, bold: false, italic: false },
+                            );
+                            px += 9.0;
+                        }
+                        if git_view.deletions > 0 {
+                            g.draw_text(
+                                px,
+                                y,
+                                &format!("-{}", git_view.deletions),
+                                gpu::DrawOpts { font_size: 12.0, color: red, bold: false, italic: false },
+                            );
+                        }
+                        y += 20.0;
+                    } else {
+                        y += 2.0;
+                    }
+                    g.rect(gcx0, y, gcw, 1.0, theme::with_alpha(theme::BORDER, 0x80));
+                    y += 11.0;
+                    // Buttons pinned to the bottom; the file list scrolls between
+                    // the header and the button zone.
+                    let btn_h = 30.0_f32;
+                    let btn_zone_top = bottom - btn_h - 14.0;
+                    let list_top = y;
+                    if git_view.clean {
+                        round_rect(g, gcx0, list_top + 4.0, 8.0, 8.0, 4.0, theme::SUCCESS);
+                        g.draw_text(
+                            gcx0 + 15.0,
+                            list_top + 1.0,
+                            "변경 없음",
+                            gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_DIM, bold: false, italic: false },
+                        );
+                    } else {
+                        let item_h = 22.0_f32;
+                        let mut rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+                        for (idx, (marker, path)) in git_view.files.iter().enumerate() {
+                            let ry = list_top - self.git_col_scroll + idx as f32 * item_h;
+                            if ry + item_h < list_top || ry > btn_zone_top {
+                                continue; // off-screen / under the button zone → clip
+                            }
+                            let hovered = self.cursor_px.0 >= git_col_x
+                                && self.cursor_px.0 <= git_col_x + git_col_w
+                                && self.cursor_px.1 >= ry
+                                && self.cursor_px.1 < ry + item_h;
+                            if hovered {
+                                round_rect(g, gcx0 - 5.0, ry, gcw + 10.0, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                            }
+                            let mcol = match marker {
+                                'A' => theme::SUCCESS,
+                                'M' => orange,
+                                _ => theme::ACCENT,
+                            };
+                            // Status badge: a tinted chip with the marker letter.
+                            round_rect(g, gcx0, ry + 3.0, 16.0, 16.0, 4.0, theme::with_alpha(mcol, 0x33));
+                            g.draw_text(
+                                gcx0 + 4.5,
+                                ry + (item_h - 11.0) / 2.0,
+                                &marker.to_string(),
+                                gpu::DrawOpts { font_size: 11.0, color: mcol, bold: true, italic: false },
+                            );
+                            // Filename bright, parent dir dim after it (so the
+                            // name stays readable even when the path is long).
+                            let fname = path.rsplit('/').next().unwrap_or(path.as_str());
+                            let dir = path.strip_suffix(fname).unwrap_or("").trim_end_matches('/');
+                            let tx = gcx0 + 24.0;
+                            let ty = ry + (item_h - 12.0) / 2.0;
+                            let endx = g.draw_text(
+                                tx,
+                                ty,
+                                fname,
+                                gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: false, italic: false },
+                            );
+                            if !dir.is_empty() {
+                                g.draw_text(
+                                    endx + 7.0,
+                                    ty + 0.5,
+                                    dir,
+                                    gpu::DrawOpts { font_size: 11.0, color: theme::TEXT_MUTE, bold: false, italic: false },
+                                );
+                            }
+                            rects.push((path.clone(), (git_col_x, ry, git_col_w, item_h)));
+                        }
+                        self.git_col_file_rects = rects;
+                    }
+                    // Stage all / Commit / Push, pinned to the bottom. Greyed
+                    // when there's nothing to do; all shell out off-thread.
+                    let gap = 7.0_f32;
+                    let bw = ((gcw - gap * 2.0) / 3.0).max(0.0);
+                    let stage_rect = (gcx0, btn_zone_top, bw, btn_h);
+                    let commit_rect = (gcx0 + bw + gap, btn_zone_top, bw, btn_h);
+                    let push_rect = (gcx0 + (bw + gap) * 2.0, btn_zone_top, bw, btn_h);
+                    let can_stage = !git_view.clean;
+                    let can_commit = !git_view.clean && !git_view.files.is_empty();
+                    let can_push = git_view.ahead > 0;
+                    for (rect, label, on) in [
+                        (stage_rect, "Stage", can_stage),
+                        (commit_rect, "Commit", can_commit),
+                        (push_rect, "Push", can_push),
+                    ] {
+                        let bg = if on {
+                            theme::SURFACE_ACTIVE
+                        } else {
+                            theme::with_alpha(theme::SURFACE_HOVER, 0x66)
+                        };
+                        round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::RADIUS_SM, bg);
+                        let col = if on { theme::TEXT } else { theme::TEXT_MUTE };
+                        let tw = g.measure_chrome_text(label, 11.0, true);
+                        g.draw_text(
+                            rect.0 + (rect.2 - tw) / 2.0,
+                            rect.1 + (rect.3 - 11.0) / 2.0,
+                            label,
+                            gpu::DrawOpts { font_size: 11.0, color: col, bold: true, italic: false },
+                        );
+                    }
+                    self.git_col_btn_rects = vec![
+                        (GitColBtn::StageAll, stage_rect),
+                        (GitColBtn::Commit, commit_rect),
+                        (GitColBtn::Push, push_rect),
+                    ];
+                }
+                // Dropdowns (path picker / branch switcher) paint last so they
+                // overlay the list + buttons. Built from the precomputed repo
+                // list and the poller's branch list.
+                git_paint_dropdowns(
+                    g,
+                    git_col_x,
+                    git_col_w,
+                    TITLE_HEIGHT,
+                    self.git_path_hdr_rect,
+                    self.git_branch_hdr_rect,
+                    self.git_path_menu_open,
+                    self.git_branch_menu_open,
+                    &git_repo_list,
+                    &self.git_col_pinned_cwd,
+                    &git_view.branches,
+                    &git_view.branch,
+                    &mut self.git_path_menu_rects,
+                    &mut self.git_branch_menu_rects,
+                );
             }
             // Per-pane header bar. The band is the unified BG (same as the
             // body) so there's no depth seam; a bottom hairline separates it
@@ -8698,6 +9228,19 @@ impl App {
             let mut deferred_accents: Vec<(f32, f32, f32, [u8; 4])> = Vec::new();
             for h in &headers {
                 g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, theme::BG);
+                // Working indicator: a ~32% segment sweeps the header bottom on
+                // a 1.2s loop while this pane is busy (claude running) — the
+                // "로딩바" the user picked. 2px over a faint accent rail; idle
+                // panes draw nothing. about_to_wait keeps frames coming (a
+                // cheap GPU-time present, no chrome rebuild) while a pane is busy.
+                if h.busy {
+                    let bar_h = 2.0;
+                    let by = h.y + PANE_HEADER_HEIGHT - bar_h;
+                    // One FLAG_WORKING_BAR quad — the shader sweeps the segment
+                    // over a faint track from u.time, so there's no per-frame
+                    // CPU phase math and no chrome rebuild to keep it moving.
+                    g.working_bar(h.x, by, h.w, bar_h, theme::ACCENT);
+                }
                 // No bottom hairline: the band == body, and the active tab
                 // flows straight into the cell grid (browser-tab feel).
                 // Compact glyphs — a touch bigger than the label so icons
@@ -9092,6 +9635,44 @@ impl App {
                     },
                 );
             }
+            // Collab completion toast, top-right: a sibling pane flipped
+            // working→idle. Top-right so it never collides with the
+            // bottom-center copy pill; longer hold (a sibling finishing is worth
+            // a glance). Tap the board button to clear the unread badge.
+            if collab_toast_alpha > 0.0 {
+                if let Some(msg) = collab_toast_msg.as_ref() {
+                    let t_font = 13.0_f32;
+                    let win_w = win_px.0 / scale;
+                    let text_w = g.measure_chrome_text(msg, t_font, true);
+                    let (px, py) = (14.0_f32, 8.0_f32);
+                    let box_w = text_w + px * 2.0;
+                    let box_h = t_font + py * 2.0;
+                    let bx = win_w - box_w - 16.0;
+                    let by = TITLE_HEIGHT + 12.0;
+                    let a = (235.0 * collab_toast_alpha).round() as u8;
+                    round_rect(
+                        g,
+                        bx,
+                        by,
+                        box_w,
+                        box_h,
+                        theme::RADIUS_MD,
+                        theme::with_alpha(theme::SURFACE_ACTIVE, a),
+                    );
+                    let ta = (255.0 * collab_toast_alpha).round() as u8;
+                    g.draw_text(
+                        bx + px,
+                        by + py,
+                        msg,
+                        gpu::DrawOpts {
+                            font_size: t_font,
+                            color: theme::with_alpha(theme::SUCCESS, ta),
+                            bold: true,
+                            italic: false,
+                        },
+                    );
+                }
+            }
             // Alt/Option held → tmux "display-panes": each pane shows its %N
             // big + centered on an accent pill, so the user can read the id
             // (for `tell %N`, focus, etc.) without it crowding the header.
@@ -9138,13 +9719,23 @@ impl App {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 let bar_y = win_h - DOCK_HEIGHT;
-                g.rect(0.0, bar_y, win_w, DOCK_HEIGHT, theme::SURFACE);
-                g.rect(0.0, bar_y, win_w, 1.0, theme::BORDER);
+                // Confine the dock to the pane-grid band: it must not bleed under
+                // the session-tab strip / file tree on the left or the git column
+                // on the right. Same bounds the cell grid uses in window_cells().
+                let grid_x = sidebar_w + WINDOW_PADDING;
+                let grid_right = win_w - git_col_w - WINDOW_PADDING;
+                let grid_w = (grid_right - grid_x).max(0.0);
+                // BG (not SURFACE): SURFACE is the darkest code-block layer and
+                // read as a black gap against the lighter main background. BG
+                // matches the rest of the chrome; the top border + raised chips
+                // still set the dock apart.
+                g.rect(grid_x, bar_y, grid_w, DOCK_HEIGHT, theme::BG);
+                g.rect(grid_x, bar_y, grid_w, 1.0, theme::BORDER);
                 let chip_h = DOCK_HEIGHT - 12.0;
                 let cy = bar_y + 6.0;
                 let icon = theme::ICON_SIZE;
                 let (mx, my) = (self.cursor_px.0 / scale, self.cursor_px.1 / scale);
-                let mut cx = sidebar_w + 8.0;
+                let mut cx = grid_x + 8.0;
                 let mut chip_hits = Vec::new();
                 let mut chip_close_hits = Vec::new();
                 for d in &self.docked {
@@ -9189,6 +9780,23 @@ impl App {
             if let Some((zx, zy, zw, zh)) = drop_zone_rect {
                 g.rect(zx, zy, zw, zh, theme::with_alpha(theme::ACCENT, 90));
             }
+            // Floating drag ghost under the cursor: the pane being carried is
+            // visibly "lifted out" so dragging it onto a sidebar window for a
+            // cross-window move reads as physically picking the pane up.
+            if let Some((label, (cgx, cgy))) = &drag_ghost {
+                let gw = 140.0_f32;
+                let gh = 26.0_f32;
+                let gx = *cgx - gw / 2.0;
+                let gy = *cgy - gh / 2.0;
+                g.round_rect_fill(gx, gy, gw, gh, 6.0, theme::with_alpha(theme::SURFACE_ACTIVE, 230));
+                g.rect(gx, gy, gw, 2.0, theme::ACCENT);
+                g.draw_text(
+                    gx + 10.0,
+                    gy + (gh - 12.0) / 2.0,
+                    label,
+                    gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: false, italic: false },
+                );
+            }
             // Launch build banner, bottom-right, painted last so it sits
             // on top. Faint and short-lived — fades out after a few
             // seconds. Coords are logical px (gpu promotes to physical).
@@ -9218,7 +9826,7 @@ impl App {
                     },
                 );
             }
-            if let Err(e) = g.render(&slot_views, scale) {
+            if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }
         }
@@ -9274,14 +9882,26 @@ impl App {
         // pass even when panes are clean (about_to_wait re-arms WaitUntil
         // to keep waking us through the fade).
         let version_animating = self.version_alpha() > 0.0;
-        // Same for the copy toast: its fade changes the picture every frame.
-        let toast_animating = self.copy_toast_alpha() > 0.0;
-        if !pty_dirty
-            && !self.chrome_dirty
-            && !blink_changed
-            && !version_animating
-            && !toast_animating
-        {
+        // Same for the copy toast + collab completion toast: their fade changes
+        // the picture every frame.
+        let toast_animating =
+            self.copy_toast_alpha() > 0.0 || self.collab_toast_alpha() > 0.0;
+        // A busy pane's header bar sweeps every frame, so it's an animation
+        // source too — keep painting while any pane is working.
+        let bar_animating = self
+            .pane_activity
+            .values()
+            .any(|a| a.status != "idle" && !a.status.is_empty());
+        // Split "needs a full chrome+grid rebuild" from "only the working-bar
+        // sweep advances". A bar-only frame redraws cached chrome with a fresh
+        // GPU time uniform — no clear_chrome, no per-pane grid clone, no draw-
+        // list rebuild — so a busy pane no longer pins the CPU at 30fps.
+        let rebuild = pty_dirty
+            || self.chrome_dirty
+            || blink_changed
+            || version_animating
+            || toast_animating;
+        if !rebuild && !bar_animating {
             return;
         }
         self.last_blink_on = blink_on;
@@ -9304,7 +9924,11 @@ impl App {
         // gpu path takes over the whole frame — no chrome yet, just
         // the cell grid through the cell-renderer pipeline.
         if self.gpu.is_some() {
-            self.render_frame_gpu(scale);
+            let time_secs = self.version_anim_start.elapsed().as_secs_f32();
+            // (echo-stale 격리) bar-only 경로 임시 제거 — busy여도 항상 전체
+            // render_frame_gpu로 cells를 다시 그려 echo가 stale되지 않게.
+            let _ = rebuild;
+            self.render_frame_gpu(scale, time_secs);
             if trace {
                 eprintln!(
                     "[render-gpu] {}us since_input={}ms",
@@ -9338,6 +9962,75 @@ impl ApplicationHandler<UserEvent> for App {
                 .map(|(id, p)| (id.clone(), std::path::PathBuf::from(p)))
                 .collect();
             self.pane_tty_cache = view.pane_ttys.clone();
+            // Per-pane collab activity for the working bar / sidebar dot / toast.
+            // Whole-map replace; the working↔idle diff (for the toast + a forced
+            // repaint) happens in the chrome-dirty gate below, not here.
+            // Per-pane collab activity → working bar / sidebar dot / toast. Diff
+            // the incoming status against the stored one BEFORE replacing it: a
+            // working→idle flip is a sibling completion (toast + unread badge).
+            // Guard on daemon_synced so the first sync (no baseline) can't
+            // false-fire a toast for every already-running pane on attach.
+            if self.daemon_synced {
+                for (id, act) in &view.pane_activity {
+                    let prev = self
+                        .pane_activity
+                        .get(id)
+                        .map(|a| a.status.as_str())
+                        .unwrap_or("idle");
+                    let was_busy = prev != "idle" && !prev.is_empty();
+                    let now_busy = act.status != "idle" && !act.status.is_empty();
+                    if was_busy && !now_busy {
+                        let detail = if act.intent.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", act.intent)
+                        };
+                        // Prefer a human name (custom title → cwd basename) over
+                        // the raw "%N" id, matching what the user reads off the
+                        // header. try_lock avoids re-entering a ws lock that may
+                        // be held higher up this handler.
+                        let name = self
+                            .ws
+                            .try_lock()
+                            .ok()
+                            .and_then(|ws| ws.panes.get(id).and_then(|p| p.title.clone()))
+                            .filter(|t| !t.is_empty())
+                            .or_else(|| {
+                                self.pane_cwd_cache
+                                    .get(id)
+                                    .and_then(|p| p.file_name())
+                                    .map(|f| f.to_string_lossy().into_owned())
+                                    .filter(|s| !s.is_empty())
+                            })
+                            .unwrap_or_else(|| id.clone());
+                        self.collab_toast =
+                            Some((format!("{name} 완료{detail}"), Instant::now()));
+                        self.collab_unread = self.collab_unread.saturating_add(1);
+                        self.chrome_dirty = true;
+                    }
+                }
+            }
+            // Mark chrome dirty only when the BUSY SET changed (a pane started
+            // or stopped working) — that's what adds or removes a working-bar
+            // quad. A steady-busy pane needs no rebuild: its bar is already in
+            // the cached chrome and the GPU advances the sweep from u.time, so
+            // an unchanged busy set leaves idle CPU at zero.
+            let busy_now: std::collections::BTreeSet<&str> = view
+                .pane_activity
+                .iter()
+                .filter(|(_, a)| a.status != "idle" && !a.status.is_empty())
+                .map(|(id, _)| id.as_str())
+                .collect();
+            let busy_prev: std::collections::BTreeSet<&str> = self
+                .pane_activity
+                .iter()
+                .filter(|(_, a)| a.status != "idle" && !a.status.is_empty())
+                .map(|(id, _)| id.as_str())
+                .collect();
+            if busy_now != busy_prev {
+                self.chrome_dirty = true;
+            }
+            self.pane_activity = view.pane_activity.clone();
             // Project the daemon's active session onto the GUI's own
             // stash-swap fields so the existing sidebar (windows) renderer
             // works unchanged: active window's slot is None (its layout lives
@@ -9377,8 +10070,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // the same leaves but flips a split's direction (좌우 → 상하) —
                 // exactly drag-relocation — leaving the GUI on the old layout
                 // ("아무 반응"). same_shape catches it, while still ignoring a
-                // divider's drag ratio (the daemon doesn't store it) so a
-                // cwd-only poll stays a no-op (idle 0 repaint).
+                // divider's drag ratio so a cwd-only poll stays a no-op (idle 0
+                // repaint). The daemon now persists ratio (surface.resize_divider,
+                // for restart restore), but the dragging GUI is already at that
+                // ratio, so skipping the adopt here keeps the seam from snapping.
                 let structural_unchanged = !first_sync
                     && self.active_window == sess.active_window
                     && sess.docked == self.docked
@@ -9502,16 +10197,74 @@ impl ApplicationHandler<UserEvent> for App {
                     };
                     if let Some(content) = built {
                         let mut ws = self.ws.lock().unwrap();
-                        let pane = ws.pane_mut(id);
-                        pane.content = content;
-                        pane.title = Some(name);
-                        pane.title_pinned = true;
-                        pane.dirty = true;
-                        self.applied_previews.insert(id.clone(), prev.path.clone());
+                        if let Some(host) = &prev.host {
+                            // Tab mode: attach the preview as an in-pane tab on
+                            // the host (the pane that ran imgopen), not its own
+                            // leaf. Update in place if the tab already exists
+                            // (path change), else push a new tab and focus it.
+                            if let Some(pane) = ws.panes.get_mut(host) {
+                                if let Some(t) = pane
+                                    .tabs
+                                    .iter_mut()
+                                    .find(|t| t.preview_id.as_deref() == Some(id.as_str()))
+                                {
+                                    t.content = content;
+                                    t.title = Some(name);
+                                } else {
+                                    let tab = PaneTab {
+                                        content,
+                                        title: Some(name),
+                                        title_pinned: true,
+                                        preview_id: Some(id.clone()),
+                                        ..PaneTab::default()
+                                    };
+                                    pane.tabs.push(tab);
+                                    pane.active_tab = pane.tabs.len() - 1;
+                                }
+                                pane.dirty = true;
+                                self.chrome_dirty = true;
+                                self.applied_previews.insert(id.clone(), prev.path.clone());
+                            }
+                        } else {
+                            let pane = ws.pane_mut(id);
+                            pane.content = content;
+                            pane.title = Some(name);
+                            pane.title_pinned = true;
+                            pane.dirty = true;
+                            self.applied_previews.insert(id.clone(), prev.path.clone());
+                        }
                     }
                 }
-                // Forget preview bookkeeping for panes the daemon dropped.
-                self.applied_previews.retain(|id, _| all_leaves.contains(id));
+                // Drop in-pane preview tabs the daemon no longer lists (the tab
+                // was closed → close_surface dropped the preview, or its host
+                // pane vanished). Without this the tab lingers after the daemon
+                // forgot the preview.
+                {
+                    let live: std::collections::HashSet<&str> =
+                        view.pane_previews.keys().map(|s| s.as_str()).collect();
+                    let mut ws = self.ws.lock().unwrap();
+                    for pane in ws.panes.values_mut() {
+                        let before = pane.tabs.len();
+                        pane.tabs.retain(|t| {
+                            t.preview_id
+                                .as_deref()
+                                .map(|pid| live.contains(pid))
+                                .unwrap_or(true)
+                        });
+                        if pane.tabs.len() != before {
+                            if pane.tabs.is_empty() {
+                                pane.tabs.push(PaneTab::default());
+                            }
+                            pane.active_tab = pane.active_tab.min(pane.tabs.len() - 1);
+                            pane.dirty = true;
+                            self.chrome_dirty = true;
+                        }
+                    }
+                }
+                // Forget preview bookkeeping the daemon dropped (host-preview ids
+                // aren't layout leaves, so key off the daemon's preview list).
+                self.applied_previews
+                    .retain(|id, _| view.pane_previews.contains_key(id));
                 // No unconditional chrome_dirty/resize_backend here — that fired
                 // a full per-leaf client.resize RPC on EVERY cwd-poll State (1s),
                 // defeating the idle gate (거노 "여전히 느려"). The structural
@@ -9530,6 +10283,13 @@ impl ApplicationHandler<UserEvent> for App {
         // Persist every session's layout + pane cwds + claude sessions so the
         // next launch restores the full workspace (A3).
         self.save_session_state();
+        // Persist the window size so the next launch restores it instead of the
+        // hardcoded default (껐던 크기 복원).
+        if let Some(win) = self.window.as_ref() {
+            let scale = win.scale_factor().max(0.5);
+            let sz = win.inner_size();
+            crate::socket::write_window_size(sz.width as f64 / scale, sz.height as f64 / scale);
+        }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -9572,6 +10332,9 @@ impl ApplicationHandler<UserEvent> for App {
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             Instant::now() + std::time::Duration::from_millis(BLINK_HALF_PERIOD_MS),
         ));
+        // Restore the last window size; fall back to the default on first run.
+        let (init_w, init_h) =
+            crate::socket::read_window_size().unwrap_or((1100.0, 860.0));
         let attrs = WindowAttributes::default()
             .with_title("kasaterm")
             // Force dark appearance so the system titlebar paints its
@@ -9579,7 +10342,7 @@ impl ApplicationHandler<UserEvent> for App {
             // give black text on our dark content view and make the
             // process-name label nearly invisible in light mode.
             .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(1100.0, 860.0));
+            .with_inner_size(LogicalSize::new(init_w, init_h));
         // Custom chrome: traffic-light row sits inside the content view
         // so we can paint tabs and drag handles right next to the
         // native buttons. OS still owns the traffic lights themselves
@@ -9673,6 +10436,78 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        // Right-hand git-column poller. The render publishes the active pane's
+        // cwd into `git_col_cwd`; this thread runs the full `git_status`
+        // (porcelain v2 + shortstat) off the main thread and wakes the loop
+        // only when the snapshot actually changes — so an unchanged repo costs
+        // one git call per interval with no repaint. Separate from the badge
+        // poller above because this one needs the file list, not just the
+        // branch/+/- summary.
+        {
+            let git_proxy = self.proxy.clone();
+            let panel_cwd = self.git_col_cwd.clone();
+            let panel_data = self.git_col_data.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(1200));
+                let cwd = panel_cwd.lock().ok().and_then(|g| g.clone());
+                let Some(cwd) = cwd else { continue };
+                let v = kasa_mcp::git::git_status(&cwd);
+                // A transient git failure ('index.lock' contention while another
+                // pane commits, a half-written index, …) is NOT "not a repo" —
+                // skip this tick and keep the last good snapshot so the column
+                // never flashes the notice mid-operation. Only an explicit
+                // no_repo (home / arbitrary dir) shows it.
+                if v.get("error").is_some() {
+                    continue;
+                }
+                let mut view = GitColView {
+                    cwd: Some(cwd.clone()),
+                    ..Default::default()
+                };
+                if v.get("no_repo").and_then(|b| b.as_bool()).unwrap_or(false) {
+                    view.no_repo = true;
+                } else {
+                    view.branch = v
+                        .get("branch")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    view.ahead = v.get("ahead").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+                    view.behind = v.get("behind").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+                    view.insertions =
+                        v.get("insertions").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+                    view.deletions =
+                        v.get("deletions").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+                    view.clean = v.get("clean").and_then(|b| b.as_bool()).unwrap_or(false);
+                    // staged → modified → untracked, deduped (a file staged
+                    // with further edits shows once, under its strongest state).
+                    let mut seen = std::collections::HashSet::new();
+                    for (key, marker) in [("staged", 'A'), ("modified", 'M'), ("untracked", 'U')] {
+                        if let Some(arr) = v.get(key).and_then(|a| a.as_array()) {
+                            for p in arr.iter().filter_map(|p| p.as_str()) {
+                                if seen.insert(p.to_string()) {
+                                    view.files.push((marker, p.to_string()));
+                                }
+                            }
+                        }
+                    }
+                    // Local branches for the switcher dropdown (cheap `git
+                    // branch`); only when it's a real repo.
+                    view.branches = kasa_mcp::git::git_branches(&cwd);
+                }
+                let mut guard = match panel_data.lock() {
+                    Ok(g) => g,
+                    Err(_) => break,
+                };
+                if *guard != view {
+                    *guard = view;
+                    drop(guard);
+                    if git_proxy.send_event(UserEvent::Redraw).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
         // cell-renderer GPU path is the only path. The old sugarloaf
         // opt-in branch (KASATERM_RENDERER=sugarloaf) was removed once
         // cell-renderer absorbed P3 colour reproduction (shader
@@ -9718,7 +10553,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autotabs();
         self.arm_autodrag();
         self.schedule_autoquit();
-        self.open_git_panel(event_loop, false);
     }
 
     fn window_event(
@@ -9727,38 +10561,12 @@ impl ApplicationHandler<UserEvent> for App {
         id: WindowId,
         event: WindowEvent,
     ) {
-        // The git panel is a second window with its own webview. Its events
-        // must never reach the terminal logic below — in particular a panel
-        // CloseRequested only drops the panel, it doesn't exit the app. The
-        // webview paints itself, so we ignore everything else for it.
-        if self.git_panel_window.as_ref().map(|w| w.id()) == Some(id) {
-            match &event {
-                WindowEvent::CloseRequested => {
-                    self.git_panel_webview = None;
-                    self.git_panel_window = None;
-                }
-                // The webview is pinned to a fixed (0,0)+size rect at build
-                // time. Without re-bounding on resize it keeps its original
-                // size while the NSView's bottom-left origin shoves it into
-                // the corner (the empty-space-plus-corner bug). Track the
-                // window so the panel stays full-bleed.
-                WindowEvent::Resized(size) => {
-                    if let Some(wv) = self.git_panel_webview.as_ref() {
-                        let _ = wv.set_bounds(wry::Rect {
-                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
-                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
-                        });
-                    }
-                }
-                _ => {}
-            }
-            return;
-        }
-        // Same guard for the session panel. Without it the panel window's
-        // Resized/ScaleFactorChanged events fall through to the terminal
-        // handler below and call gpu.resize() with the panel's tiny size,
-        // shrinking the main wgpu viewport uniform → everything renders
-        // ~2x zoomed. (git panel had this guard, session panel did not.)
+        // Child panel windows (session/board) drive their own wry webviews.
+        // Their events must never reach the terminal logic below: without this
+        // guard a panel's Resized/ScaleFactorChanged falls through and calls
+        // gpu.resize() with the panel's tiny size, shrinking the main wgpu
+        // viewport uniform → everything renders ~2x zoomed; a CloseRequested
+        // would exit the whole app instead of just closing the panel.
         if self.session_panel_window.as_ref().map(|w| w.id()) == Some(id) {
             match &event {
                 WindowEvent::CloseRequested => {
@@ -9970,6 +10778,17 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                     }
                 }
+                // Git column hover — repaint so the row + button highlights
+                // track the cursor (the render reads cursor_px live). Only
+                // while the cursor is actually over the column, so it costs
+                // nothing elsewhere.
+                if self.git_col_visible {
+                    let (cx, cy) = self.cursor_px;
+                    if cy > TITLE_HEIGHT && cx >= self.git_col_x() {
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                }
                 // Sidebar resize drag in progress: update width and reflow.
                 if let Some((start_x, start_w)) = self.sidebar_resize {
                     let new_w = (start_w + (self.cursor_px.0 - start_x)).clamp(140.0, 520.0);
@@ -9989,6 +10808,22 @@ impl ApplicationHandler<UserEvent> for App {
                         .clamp(FILE_TREE_W_MIN, FILE_TREE_W_MAX);
                     if (new_w - self.file_tree_w_logical).abs() > 0.5 {
                         self.file_tree_w_logical = new_w;
+                        let (cols, rows) = self.window_cells();
+                        self.resize_backend(cols, rows);
+                        self.chrome_dirty = true;
+                        window.set_cursor(CursorIcon::ColResize);
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                // Git column resize drag in progress. Its grip is the LEFT edge
+                // (flush-right column), so dragging left widens it — hence the
+                // negated delta versus the left-hand columns.
+                if let Some((start_x, start_w)) = self.git_col_resize {
+                    let new_w = (start_w - (self.cursor_px.0 - start_x))
+                        .clamp(GIT_COL_W_MIN, GIT_COL_W_MAX);
+                    if (new_w - self.git_col_w_logical).abs() > 0.5 {
+                        self.git_col_w_logical = new_w;
                         let (cols, rows) = self.window_cells();
                         self.resize_backend(cols, rows);
                         self.chrome_dirty = true;
@@ -10163,7 +10998,10 @@ impl ApplicationHandler<UserEvent> for App {
                     let on_tree_edge = self.file_tree_visible
                         && cy > TITLE_HEIGHT
                         && (cx - (self.file_tree_col_x() + self.file_tree_w_logical)).abs() <= 3.0;
-                    let icon = if on_sidebar_edge || on_tree_edge {
+                    let on_git_edge = self.git_col_visible
+                        && cy > TITLE_HEIGHT
+                        && (cx - self.git_col_x()).abs() <= 3.0;
+                    let icon = if on_sidebar_edge || on_tree_edge || on_git_edge {
                         CursorIcon::ColResize
                     } else {
                         match self
@@ -10228,6 +11066,13 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    // Git-column toggle, parked at the right end of the strip.
+                    if let Some((bx, by, bw, bh)) = self.git_col_toggle_rect() {
+                        if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
+                            self.toggle_git_col();
+                            return;
+                        }
+                    }
                     // Sidebar resize grip — a 6px hot zone straddling the
                     // sidebar's right edge below the title strip. Caught
                     // before the sidebar click path so dragging the edge
@@ -10246,6 +11091,16 @@ impl ApplicationHandler<UserEvent> for App {
                         let edge = self.file_tree_col_x() + self.file_tree_w_logical;
                         if cx >= edge - 3.0 && cx <= edge + 3.0 {
                             self.file_tree_resize = Some((cx, self.file_tree_w_logical));
+                            return;
+                        }
+                    }
+                    // Git column resize grip — its LEFT edge (the column is
+                    // flush-right, so dragging the seam left widens it). Caught
+                    // before the column click path.
+                    if self.git_col_visible && cy > TITLE_HEIGHT {
+                        let edge = self.git_col_x();
+                        if cx >= edge - 3.0 && cx <= edge + 3.0 {
+                            self.git_col_resize = Some((cx, self.git_col_w_logical));
                             return;
                         }
                     }
@@ -10356,6 +11211,86 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                         // Empty tree space — swallow the click.
+                        return;
+                    }
+                    // Git column — right-hand chrome. Caught before the cell
+                    // grid so a click never falls through to the terminal.
+                    if self.git_col_visible && cy > TITLE_HEIGHT && cx >= self.git_col_x() {
+                        let inside = |r: &(f32, f32, f32, f32)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        };
+                        // Open dropdowns overlay everything — resolve their items
+                        // (and the header toggles) before the list/buttons under.
+                        if self.git_path_menu_open {
+                            if let Some(key) = self
+                                .git_path_menu_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(k, _)| k.clone())
+                            {
+                                // None = "자동 추적" (unpin); Some = pin that repo.
+                                self.git_col_pinned_cwd = key;
+                                self.git_path_menu_open = false;
+                                self.publish_git_col_cwd();
+                                window.request_redraw();
+                                return;
+                            }
+                        }
+                        if self.git_branch_menu_open {
+                            if let Some(b) = self
+                                .git_branch_menu_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(b, _)| b.clone())
+                            {
+                                self.run_git_checkout(b);
+                                window.request_redraw();
+                                return;
+                            }
+                        }
+                        // Header rows toggle their dropdowns (mutually exclusive).
+                        if self.git_path_hdr_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.git_path_menu_open = !self.git_path_menu_open;
+                            self.git_branch_menu_open = false;
+                            window.request_redraw();
+                            return;
+                        }
+                        if self.git_branch_hdr_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.git_branch_menu_open = !self.git_branch_menu_open;
+                            self.git_path_menu_open = false;
+                            window.request_redraw();
+                            return;
+                        }
+                        // A click elsewhere in the column dismisses an open menu
+                        // (swallowed, so it doesn't also hit the list/buttons).
+                        if self.git_path_menu_open || self.git_branch_menu_open {
+                            self.git_path_menu_open = false;
+                            self.git_branch_menu_open = false;
+                            window.request_redraw();
+                            return;
+                        }
+                        // Action buttons sit on top of the list zone — first.
+                        if let Some(btn) = self
+                            .git_col_btn_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(b, _)| *b)
+                        {
+                            self.run_git_col_action(btn);
+                            window.request_redraw();
+                            return;
+                        }
+                        // File row → preview the changed file.
+                        if let Some(path) = self
+                            .git_col_file_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(p, _)| p.clone())
+                        {
+                            self.open_git_file(&path);
+                            return;
+                        }
+                        // Empty column space — swallow the click.
                         return;
                     }
                     // Code-block copy button. Checked before the cell-grid /
@@ -10619,6 +11554,24 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(pane) =
                         self.header_at_px(self.cursor_px.0, self.cursor_px.1)
                     {
+                        // A double-click on a pane header toggles tmux-style
+                        // zoom (that pane alone fills the work area). Reuse the
+                        // same last_left_click window as the titlebar maximize.
+                        let (dx, dy) = self.cursor_px;
+                        let now = Instant::now();
+                        let is_double = matches!(
+                            self.last_left_click,
+                            Some((t, (x, y)))
+                                if now.duration_since(t).as_millis() < 400
+                                    && (x - dx).abs() < 5.0
+                                    && (y - dy).abs() < 5.0
+                        );
+                        self.last_left_click = Some((now, (dx, dy)));
+                        if is_double {
+                            self.toggle_pane_zoom(&pane);
+                            self.last_left_click = None;
+                            return;
+                        }
                         self.ws.lock().unwrap().active_pane = Some(pane.clone());
                         // Propagate the focus to the daemon (see body-click
                         // note) so a later cwd poll doesn't snap focus away.
@@ -10945,6 +11898,11 @@ impl ApplicationHandler<UserEvent> for App {
                             window.set_cursor(CursorIcon::Default);
                             return;
                         }
+                        // End a git-column resize drag.
+                        if self.git_col_resize.take().is_some() {
+                            window.set_cursor(CursorIcon::Default);
+                            return;
+                        }
                         // End a divider drag without falling through to the
                         // selection-release path under it.
                         if let Some((path, dir)) = self.resize_drag.take() {
@@ -10971,6 +11929,17 @@ impl ApplicationHandler<UserEvent> for App {
                             if let Some(tree) = self.pty_layout.as_mut() {
                                 tree.resize_divider(&path, pos, cols, rows);
                             }
+                            // Daemon owns the layout: forward the final ratio so
+                            // it persists (restore on restart) and the next State
+                            // push doesn't snap the seam back to 0.5. Drag-in-
+                            // progress stays GUI-local; only the release commits.
+                            if let Some(client) = self.daemon_client.as_ref() {
+                                if let Some(ratio) =
+                                    self.pty_layout.as_ref().and_then(|t| t.ratio_at(&path))
+                                {
+                                    client.resize_divider(&path, ratio);
+                                }
+                            }
                             self.resize_backend(cols, rows);
                             self.last_divider_pos = None;
                             self.last_divider_pty_resize = None;
@@ -10988,6 +11957,14 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.drop_target_at(self.cursor_px.0, self.cursor_px.1)
                                 {
                                     self.move_pane(&hd.pane, &target, zone);
+                                } else if let Some(target) = self
+                                    .sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
+                                {
+                                    // Dropped onto a sidebar window chip: relocate the
+                                    // pane into that window. The daemon's move_surface
+                                    // does the cross-window detach/insert; the zone is
+                                    // arbitrary (it lands beside that window's anchor).
+                                    self.move_pane(&hd.pane, &target, DropZone::Right);
                                 }
                             }
                             return;
@@ -11133,10 +12110,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         // Drain menu clicks from muda's global channel. The "Git 패널" item
-        // toggles the panel (open/close), bypassing the env gate.
+        // toggles the in-window git column (open/close).
         while let Ok(ev) = muda::MenuEvent::receiver().try_recv() {
             if self.git_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
-                self.toggle_git_panel(event_loop);
+                self.toggle_git_col();
             } else if self.session_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_session_panel(event_loop);
             } else if self.board_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
@@ -11202,6 +12179,8 @@ impl ApplicationHandler<UserEvent> for App {
         // ~30fps WaitUntil until the fade finishes, then fall back to the
         // idle Wait. (new_events → request_redraw on the timer fire.)
         // The copy toast fade needs the same treatment as the launch banner.
+        // (echo-stale 격리) busy 30fps 펌프 임시 제거 — version/copy 토스트만
+        // WaitUntil, 나머지는 Wait. ws lock 경합이 echo stream을 막는지 확인.
         if self.version_alpha() > 0.0 || self.copy_toast_alpha() > 0.0 {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + std::time::Duration::from_millis(33),
@@ -11448,6 +12427,7 @@ if command -v realpath >/dev/null 2>&1; then abs=$(realpath \"$f\"); \
 else case \"$f\" in /*) abs=\"$f\";; *) abs=\"$PWD/$f\";; esac; fi\n\
 port=${{KASASPACE_MCP_PORT:-8765}}\n\
 curl -s --get --data-urlencode \"path=$abs\" \
+--data-urlencode \"pane=${{KASATERM_PANE_ID:-}}\" \
 \"http://127.0.0.1:$port/{endpoint}\" >/dev/null \
 || {{ echo \"{cmd}: failed to reach kasaterm\" >&2; exit 1; }}\n"
         )
