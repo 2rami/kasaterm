@@ -370,6 +370,7 @@ impl GpuRenderer {
             init_contrast,
             init_sat,
             p3_root,
+            0.0,
         );
         let bind_group = pipeline.make_bind_group(&device, atlas.view(), atlas.sampler());
 
@@ -383,6 +384,7 @@ impl GpuRenderer {
             init_contrast,
             init_sat,
             p3_root,
+            0.0,
         );
         let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("kasaterm image sampler"),
@@ -471,6 +473,23 @@ impl GpuRenderer {
             uv_min: Atlas::SOLID_UV,
             uv_max: Atlas::SOLID_UV,
             fg_rgba: srgb_rgba_to_linear(rgba_u8),
+            ..Default::default()
+        });
+    }
+
+    /// Working-indicator rail (logical px). Pushes ONE `FLAG_WORKING_BAR`
+    /// instance; the shader sweeps an indeterminate ~32% segment over a faint
+    /// track from `u.time`, so a busy pane's loading bar animates on the GPU
+    /// and the CPU never re-emits the bar per frame — the key to idle-0 CPU
+    /// while any pane is working. uv carries the 0..1 horizontal sweep coord.
+    pub fn working_bar(&mut self, x: f32, y: f32, w: f32, h: f32, rgba_u8: [u8; 4]) {
+        let s = self.scale;
+        self.chrome.push(CellInstance {
+            cell_px: [x * s, y * s, w * s, h * s],
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+            fg_rgba: srgb_rgba_to_linear(rgba_u8),
+            flags: CellInstance::FLAG_WORKING_BAR,
             ..Default::default()
         });
     }
@@ -1444,6 +1463,32 @@ impl GpuRenderer {
         })
     }
 
+    /// Bundled Material Icon Theme SVG for a file-type icon name (multi-color,
+    /// own fills — drawn through `queue_ft_icon`, not tinted). Compiled in so
+    /// the .app needs no external asset dir. Sourced from
+    /// material-extensions/vscode-material-icon-theme (MIT).
+    fn ft_icon_svg(name: &str) -> Option<&'static str> {
+        macro_rules! ft {
+            ($($n:literal),* $(,)?) => {
+                match name {
+                    $($n => include_str!(concat!("../assets/icons/ft/", $n, ".svg")),)*
+                    _ => return None,
+                }
+            };
+        }
+        Some(ft!(
+            "audio", "c", "console", "cpp", "csharp", "css", "database", "docker",
+            "document", "folder-base", "folder-config", "folder-dist", "folder-docs",
+            "folder-github", "folder-images", "folder-node", "folder-public",
+            "folder-src", "folder-target", "folder-test", "font", "git", "go",
+            "graphql", "html", "image", "java", "javascript", "json", "kotlin",
+            "license", "lock", "lua", "markdown", "nodejs", "pdf", "php", "powershell",
+            "prisma", "python", "react", "readme", "ruby", "rust", "sass", "settings",
+            "svg", "swift", "todo", "tsconfig", "typescript", "video", "vue", "yaml",
+            "zip",
+        ))
+    }
+
     /// Rasterize an SVG into a square `px`-side RGBA8 buffer. `currentColor`
     /// is forced white: only the alpha channel matters because icons draw
     /// through the glyph tint path (texel.a × fg.rgb), so the theme color is
@@ -1558,6 +1603,15 @@ impl GpuRenderer {
         ));
     }
 
+    /// Queue a Material file-type icon by name (e.g. "rust", "folder-src") at
+    /// `(x, y)`, `size`-side square. Looks up the bundled multi-color SVG and
+    /// draws it through `queue_color_icon` so the authored colors land
+    /// unchanged. Unknown names are skipped (caller picks the fallback).
+    pub fn queue_ft_icon(&mut self, name: &str, x: f32, y: f32, size: f32) {
+        let Some(svg) = Self::ft_icon_svg(name) else { return };
+        self.queue_color_icon(name, svg, x, y, size);
+    }
+
     /// Queue an image pane for this frame. `(x, y, w, h)` is the pane's body
     /// box in LOGICAL px; the image is contain-fit (aspect preserved,
     /// centered) inside it. `zoom >= 1.0` scales past the fit size — when
@@ -1618,6 +1672,7 @@ impl GpuRenderer {
             contrast,
             sat,
             self.p3_root_owned,
+            0.0,
         );
         self.image_pipeline.write_uniforms_full(
             &self.queue,
@@ -1626,6 +1681,7 @@ impl GpuRenderer {
             contrast,
             sat,
             self.p3_root_owned,
+            0.0,
         );
     }
 
@@ -1856,7 +1912,13 @@ impl GpuRenderer {
         }
     }
 
-    pub fn render(&mut self, _panes: &[PaneSlot<'_>], _scale: f32) -> Result<usize> {
+    pub fn render(
+        &mut self,
+        _panes: &[PaneSlot<'_>],
+        _scale: f32,
+        time_secs: f32,
+        chrome_changed: bool,
+    ) -> Result<usize> {
         // Re-apply P3 colorspace before every drawable. wgpu's Metal HAL
         // doesn't touch this, but in practice the byte we read off the
         // panel ended up matching plain sRGB (255,0,0 measured as
@@ -1884,22 +1946,29 @@ impl GpuRenderer {
             // (which IS our root layer in this mode).
             apply_p3_via_hal(&self.surface);
         }
+        // Advance the working-bar sweep on the GPU every present (cheap
+        // offset write). When chrome is unchanged — a bar-only frame while a
+        // pane is busy — skip re-uploading the instance buffers entirely, so a
+        // working pane costs one uniform write + the draw, not a full chrome
+        // rebuild. The cached instance buffer redraws as-is.
+        self.pipeline.write_time(&self.queue, time_secs);
         let instance_count = self.chrome.len();
-        self.pipeline
-            .write_instances(&self.device, &self.queue, &self.chrome);
-        // Upload this frame's image + icon quads into the image pipeline's own
-        // buffer (images first, icons appended). Images draw under the chrome
-        // pass; icons draw over it. Both use the same per-texture bind groups.
         let n_img = self.image_quads.len();
-        if !self.image_quads.is_empty() || !self.icon_quads.is_empty() {
-            let all_instances: Vec<CellInstance> = self
-                .image_quads
-                .iter()
-                .chain(self.icon_quads.iter())
-                .map(|(_, inst)| *inst)
-                .collect();
-            self.image_pipeline
-                .write_instances(&self.device, &self.queue, &all_instances);
+        if chrome_changed {
+            self.pipeline
+                .write_instances(&self.device, &self.queue, &self.chrome);
+            // Upload this frame's image + icon quads (images first, icons
+            // appended). Images draw under the chrome pass; icons over it.
+            if !self.image_quads.is_empty() || !self.icon_quads.is_empty() {
+                let all_instances: Vec<CellInstance> = self
+                    .image_quads
+                    .iter()
+                    .chain(self.icon_quads.iter())
+                    .map(|(_, inst)| *inst)
+                    .collect();
+                self.image_pipeline
+                    .write_instances(&self.device, &self.queue, &all_instances);
+            }
         }
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
