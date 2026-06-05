@@ -622,10 +622,14 @@ impl App {
     }
     pub(crate) fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");
-        // In-process PTY 경로 제거 — 데몬 전용. 데몬을 discover/spawn해 attach
-        // 하고 PTY를 위임한다(화면은 stream, 입력/resize/scroll은 RPC). attach가
-        // 실패하면 그대로 에러 — fallback 없음(데몬 spawn이 보장되어야 함).
-        self.attach_daemon()
+        // Local PTY mode: spawn one pane in *this* process and bring up the
+        // cmux socket server (claude tmux shim, kasaterm-cli, pane collab)
+        // backed by our own panes. No daemon — split/focus are immediate
+        // local ops; session continuity comes from claude --resume on relaunch
+        // (load_local_session, follow-up).
+        self.spawn_session_pane()?;
+        self.start_socket_pty();
+        Ok(())
     }
     /// Daemon-mode startup: discover a running daemon (or spawn one), open the
     /// control + stream sockets, and start rendering the daemon's pane. The
@@ -1096,5 +1100,12 @@ impl App {
     }
     pub(crate) fn start_socket_tmux(&self, tmux: Arc<kasa_bridge::TmuxSession>) {
         self.start_socket_with(Arc::new(socket::TmuxBackend::new(tmux)));
+    }
+    /// Local PTY-mode socket server. Same cmux/MCP surface as tmux mode but
+    /// backed by the GUI's own panes — pane writes/split/focus delegate to the
+    /// GUI thread via the proxy (see socket::PtyBackend).
+    pub(crate) fn start_socket_pty(&self) {
+        let backend = Arc::new(socket::PtyBackend::new(self.proxy.clone(), self.ws.clone()));
+        self.start_socket_with(backend);
     }
 }

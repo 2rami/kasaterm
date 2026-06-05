@@ -1894,6 +1894,13 @@ enum UserEvent {
     /// switch happened on its side); the GUI adopts the active window's layout
     /// and refreshes session/window metadata.
     DaemonState(stream::StateView),
+    /// Local cmux socket backend → GUI delegation. The socket server runs on
+    /// its own thread and can't touch `self.pty` (not Arc<Mutex>), so it routes
+    /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
+    /// None = active pane.
+    SocketBytes(Option<String>, Vec<u8>),
+    SocketSplit(kasa_pty::SplitDir),
+    SocketFocus(String),
 }
 
 /// One terminal session: its own pane set, layout, and workspace. The visible

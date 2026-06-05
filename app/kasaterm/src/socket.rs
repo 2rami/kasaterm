@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use kasa_bridge::TmuxSession;
 
 use crate::transcript::{build_activity, parse_line, ToolEvent, RECENT_MAX};
+use crate::{UserEvent, Workspace};
+use winit::event_loop::EventLoopProxy;
 
 const FIXED_WORKSPACE_ID: &str = "local-0";
 const FIXED_SURFACE_ID: &str = "pane-0";
@@ -124,6 +126,86 @@ impl Backend for TmuxBackend {
 
     fn swap_surfaces(&self, _a: &str, _b: &str) -> Result<()> {
         anyhow::bail!("swap_surfaces not supported on the tmux backend")
+    }
+}
+
+/// Local PTY-mode cmux socket backend. The socket server (claude tmux shim,
+/// kasaterm-cli, pane collab) runs on its own thread and can't touch
+/// `App.pty` (a plain HashMap, not Arc<Mutex>), so every pane write / split /
+/// focus is routed to the GUI thread through the EventLoopProxy.
+pub struct PtyBackend {
+    proxy: EventLoopProxy<UserEvent>,
+    ws: Arc<Mutex<Workspace>>,
+}
+
+impl PtyBackend {
+    pub fn new(proxy: EventLoopProxy<UserEvent>, ws: Arc<Mutex<Workspace>>) -> Self {
+        Self { proxy, ws }
+    }
+}
+
+impl Backend for PtyBackend {
+    fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>> {
+        Ok(vec![WorkspaceInfo {
+            id: FIXED_WORKSPACE_ID.into(),
+            name: "kasaterm".into(),
+        }])
+    }
+
+    fn current_workspace(&self) -> Result<Option<WorkspaceInfo>> {
+        Ok(Some(WorkspaceInfo {
+            id: FIXED_WORKSPACE_ID.into(),
+            name: "kasaterm".into(),
+        }))
+    }
+
+    fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> {
+        let ws = self.ws.lock().unwrap();
+        Ok(ws
+            .panes
+            .keys()
+            .map(|id| SurfaceInfo {
+                id: id.clone(),
+                workspace_id: FIXED_WORKSPACE_ID.into(),
+                title: None,
+            })
+            .collect())
+    }
+
+    fn focus_surface(&self, surface_id: &str) -> Result<()> {
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketFocus(surface_id.to_string()));
+        Ok(())
+    }
+
+    fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo> {
+        let dir = match direction {
+            SplitDirection::Right | SplitDirection::Left => kasa_pty::SplitDir::Horizontal,
+            SplitDirection::Up | SplitDirection::Down => kasa_pty::SplitDir::Vertical,
+        };
+        let _ = self.proxy.send_event(UserEvent::SocketSplit(dir));
+        Ok(SurfaceInfo {
+            id: "pane-new".into(),
+            workspace_id: FIXED_WORKSPACE_ID.into(),
+            title: None,
+        })
+    }
+
+    fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
+        let _ = self.proxy.send_event(UserEvent::SocketBytes(
+            surface_id.map(|s| s.to_string()),
+            text.as_bytes().to_vec(),
+        ));
+        Ok(())
+    }
+
+    fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()> {
+        let _ = self.proxy.send_event(UserEvent::SocketBytes(
+            surface_id.map(|s| s.to_string()),
+            key_to_bytes(key),
+        ));
+        Ok(())
     }
 }
 
