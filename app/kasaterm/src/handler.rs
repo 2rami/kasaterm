@@ -188,6 +188,15 @@ impl ApplicationHandler<UserEvent> for App {
                     self.chrome_dirty = true;
                     let (cols, rows) = self.window_cells();
                     self.resize_backend(cols, rows);
+                    if std::env::var_os("KASATERM_PROFILE").is_some() {
+                        eprintln!(
+                            "[pf-split] state applied {}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis()
+                        );
+                    }
                 } else {
                     // Structure identical (cwd-only poll, or a focus change that
                     // kept the same leaves): move only the active-pane highlight,
@@ -789,6 +798,13 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                 }
                 self.modifiers = new;
+            }
+            // 포커스/가림 복귀 시 즉시 다시 그린다. idle은 ControlFlow::Wait라
+            // 이 이벤트가 redraw를 안 걸면 다음 blink 타이머(530ms)가 깨울
+            // 때까지 화면이 stale — "다른 앱 보다가 돌아오면 0.5초 늦음"의 원인.
+            WindowEvent::Focused(true) | WindowEvent::Occluded(false) => {
+                self.chrome_dirty = true;
+                window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.handle_wheel(delta);
