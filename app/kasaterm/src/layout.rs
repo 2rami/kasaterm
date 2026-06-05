@@ -337,6 +337,15 @@ impl App {
                 client.focus(&id);
             }
             client.split_dir(dir);
+            if std::env::var_os("KASATERM_PROFILE").is_some() {
+                eprintln!(
+                    "[pf-split] rpc sent {}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis()
+                );
+            }
             return Ok(());
         }
         if self.tmux.is_some() {
