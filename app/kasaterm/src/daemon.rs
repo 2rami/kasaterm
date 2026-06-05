@@ -479,6 +479,16 @@ impl Backend for DaemonBackend {
         Ok(())
     }
     fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo> {
+        let pf = std::env::var_os("KASATERM_PROFILE").is_some();
+        let now_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        };
+        if pf {
+            eprintln!("[pf-dsplit] enter {}", now_ms());
+        }
         // Prune dead leaves before choosing the split anchor — a closed pane
         // still lingering in this window's layout could otherwise become the
         // anchor (or the active-drift fallback) and orphan/multiply the new pane.
@@ -501,7 +511,13 @@ impl Backend for DaemonBackend {
             }
         };
         let cwd = self.state.active_cwd();
+        if pf {
+            eprintln!("[pf-dsplit] after active_cwd {}", now_ms());
+        }
         spawn_pane(&self.state, &new_id, cwd)?;
+        if pf {
+            eprintln!("[pf-dsplit] after spawn_pane {}", now_ms());
+        }
         let attached = self
             .state
             .with_active_layout(|lay| lay.split_leaf(&active, axis, new_id.clone()));
@@ -527,7 +543,13 @@ impl Backend for DaemonBackend {
         if self.state.pty.lock().unwrap().contains_key(&new_id) {
             *self.state.active.lock().unwrap() = new_id.clone();
         }
+        if pf {
+            eprintln!("[pf-dsplit] before broadcast {}", now_ms());
+        }
         self.state.broadcast_state();
+        if pf {
+            eprintln!("[pf-dsplit] after broadcast {}", now_ms());
+        }
         Ok(SurfaceInfo {
             id: new_id,
             workspace_id: WS_ID.into(),
