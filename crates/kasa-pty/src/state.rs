@@ -213,7 +213,18 @@ impl PtySession {
         // (a path to our shim socket) is still inherited as itself,
         // so any tool that explicitly reads it for the shim still works;
         // we just don't masquerade as a tmux-wrapped shell.
-        let _ = std::env::var("KASATERM_TMUX_SHIM_TMUX"); // intentionally not propagated as TMUX
+        // Claude Code's teammate-mode (tmux backend) only spawns real split
+        // panes when it believes it's inside tmux — it gates on $TMUX before
+        // issuing `split-window`, otherwise it falls back to an in-process
+        // teammate. So we DO propagate the shim's fake $TMUX here, which makes
+        // teammates land as kasaterm panes via our tmux-shim. COLORTERM=
+        // truecolor (set above) is what keeps chalk emitting 24-bit color
+        // despite the tmux masquerade; CLAUDE_CODE_TEAMMATE_MODE=tmux forces
+        // the split-pane path where auto-detect would otherwise bail (Windows).
+        if let Ok(shim_tmux) = std::env::var("KASATERM_TMUX_SHIM_TMUX") {
+            cmd.env("TMUX", shim_tmux);
+        }
+        cmd.env("CLAUDE_CODE_TEAMMATE_MODE", "tmux");
         // Real tmux sets TMUX_PANE on every child so an `if [ -n
         // "$TMUX_PANE" ]` test passes inside a pane. Claude Code's
         // teammateMode reads this to know which pane it's currently
