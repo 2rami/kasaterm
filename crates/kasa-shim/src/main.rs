@@ -58,6 +58,20 @@ fn main() {
         );
     }
 
+    // `tmux -V` / `tmux -version`: the version probe is the FIRST thing
+    // Claude Code's teammate-mode runs to decide whether tmux is usable
+    // before it touches has-session/new-window/split-window. -V is a
+    // global flag that strip_global_options() drops, which left
+    // handle_known() with an empty arg list → fall-through to
+    // find_real_tmux() → exit 127 on Windows (no real tmux on disk). A
+    // non-zero exit made Claude judge tmux unavailable and abandon the
+    // split-pane path entirely (trace: only `tmux -V` ever logged).
+    // Answer the version ourselves so the probe succeeds.
+    if args.iter().any(|a| a == "-V" || a == "-version") {
+        println!("tmux 3.4");
+        std::process::exit(0);
+    }
+
     // Phase 1 minimum: serve a handful of read-only queries directly
     // so child tools that need "am I in tmux?" answers don't see real
     // tmux fail on our fake socket. Anything we don't recognize still
@@ -131,17 +145,34 @@ fn handle_known(args: &[String]) -> Option<i32> {
                 .map(String::as_str)
                 .unwrap_or("");
             let pane = std::env::var("TMUX_PANE").unwrap_or_else(|_| "%0".to_string());
-            let out = match fmt {
-                "#{pane_id}" => pane.clone(),
-                "#{session_name}" => "kasaterm".to_string(),
-                "#{session_id}" => "$0".to_string(),
-                "#{window_id}" => "@0".to_string(),
-                "#S:#W.#P" => format!("kasaterm:0.{}", strip_pct(&pane)),
-                "#S" => "kasaterm".to_string(),
-                "#{pane_pid}" => std::process::id().to_string(),
-                other if other.is_empty() => pane.clone(),
-                // Unknown format — print empty rather than blow up.
-                _ => String::new(),
+            let pid = std::process::id().to_string();
+            let idx = strip_pct(&pane);
+            // Substitute EVERY known tmux format token, so composite formats
+            // like "pane=#{pane_id} session=#{session_name} #{pane_width}x..."
+            // resolve fully instead of returning empty. Claude Code probes
+            // tmux with arbitrary (even free-text) formats to validate the
+            // session before spawning teammates; an empty reply made it judge
+            // the session bad and never reach `split-window`. Longest/most-
+            // specific tokens are replaced first so `#{session_id}` isn't
+            // clipped by a `#S` pass.
+            let out = if fmt.is_empty() {
+                pane.clone()
+            } else {
+                fmt.replace("#{pane_id}", &pane)
+                    .replace("#{session_name}", "kasaterm")
+                    .replace("#{session_id}", "$0")
+                    .replace("#{window_id}", "@0")
+                    .replace("#{window_index}", "0")
+                    .replace("#{window_name}", "kasaterm")
+                    .replace("#{pane_index}", &idx)
+                    .replace("#{pane_pid}", &pid)
+                    .replace("#{pane_width}", "80")
+                    .replace("#{pane_height}", "24")
+                    .replace("#{pane_current_path}", "")
+                    .replace("#S", "kasaterm")
+                    .replace("#W", "kasaterm")
+                    .replace("#P", &idx)
+                    .replace("#D", &pane)
             };
             println!("{out}");
             Some(0)
@@ -184,8 +215,20 @@ fn handle_known(args: &[String]) -> Option<i32> {
                 println!("{pane}");
                 Some(0)
             } else {
-                let pane = std::env::var("TMUX_PANE").unwrap_or_else(|_| "%0".to_string());
-                println!("0: [80x24] [history 0/2000, 0 bytes] {pane} (active)");
+                // Plain `list-panes`: emit EVERY live pane in tmux's default
+                // human format (not just the focused one) so Claude Code's
+                // pane enumerator sees the whole workspace and can target or
+                // reuse a pane instead of bailing on a one-line list.
+                let active = std::env::var("TMUX_PANE").unwrap_or_else(|_| "%0".to_string());
+                let ids = cmux_compat_path()
+                    .and_then(|p| Command::new(&p).args(["list", "surfaces"]).output().ok())
+                    .map(|o| extract_all_surface_ids(&String::from_utf8_lossy(&o.stdout)))
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| vec![active.clone()]);
+                for (i, id) in ids.iter().enumerate() {
+                    let act = if *id == active { " (active)" } else { "" };
+                    println!("{i}: [80x24] [history 0/2000, 0 bytes] {id}{act}");
+                }
                 Some(0)
             }
         }
@@ -202,7 +245,9 @@ fn handle_known(args: &[String]) -> Option<i32> {
         "select-pane" => Some(route_select_pane(&args)),
         "kill-pane" => Some(route_kill_pane(&args)),
         "swap-pane" => Some(route_swap_pane(&args)),
-        "new-window" | "new-session" | "rename-window"
+        // capture-pane: no pane-content RPC yet, so emit nothing and exit 0
+        // (a hard error makes Claude abort the pane probe entirely).
+        "capture-pane" | "new-window" | "new-session" | "rename-window"
         | "set-environment" | "setenv" | "set-option" | "set" | "set-hook"
         | "show-environment" | "showenv" => {
             eprintln!("[tmux-shim] {head} accepted (stub, no kasaterm RPC yet)");
@@ -281,6 +326,12 @@ fn route_split_window(args: &[String]) -> i32 {
     // this the JSON object ends up substituted into every follow-up
     // `-t ...` target.
     let print_pane_id = args.iter().any(|a| a == "-P");
+    // tmux `split-window [opts] [shell-command]` runs the trailing command
+    // in the new pane. Claude Code's pane probe (`echo PANE_OK; sleep 60`)
+    // AND real teammate launches (`claude …`) ride on this — without it the
+    // new pane is a bare shell and the probe's capture-pane never sees the
+    // marker, so Claude judges the pane dead and never spawns the teammate.
+    let command = extract_split_command(args);
     let path = match cmux_compat_path() {
         Some(p) => p,
         None => {
@@ -295,19 +346,43 @@ fn route_split_window(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let new_id = extract_surface_id(&String::from_utf8_lossy(&output.stdout));
+    // Run the trailing shell command in the freshly-split pane.
+    if let (Some(cmd), Some(id)) = (&command, &new_id) {
+        let line = format!("{cmd}\n");
+        let _ = Command::new(&path)
+            .args(["send", "--surface", id, &line])
+            .status();
+    }
     if print_pane_id {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(id) = extract_surface_id(&stdout) {
+        if let Some(id) = &new_id {
             println!("{id}");
         } else {
-            // Fall back to echoing raw stdout when we can't find an id —
-            // worst case the caller fails the same way it did before.
-            print!("{stdout}");
+            print!("{}", String::from_utf8_lossy(&output.stdout));
         }
-    } else {
-        // No -P: tmux is silent on success; mirror that.
     }
     output.status.code().unwrap_or(1)
+}
+
+/// Pull the trailing shell-command out of `split-window` args. tmux value
+/// options (`-t/-F/-l/-p/-c/-e/-O`) consume the next token; flags are bare.
+/// Whatever non-flag token remains is the command to run in the new pane.
+fn extract_split_command(args: &[String]) -> Option<String> {
+    const VAL_OPTS: &[&str] = &["-t", "-F", "-l", "-p", "-c", "-e", "-O"];
+    let mut i = 0;
+    let mut cmd = None;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if VAL_OPTS.contains(&a) {
+            i += 2;
+        } else if a.starts_with('-') {
+            i += 1;
+        } else {
+            cmd = Some(args[i].clone());
+            i += 1;
+        }
+    }
+    cmd
 }
 
 /// Pull a `"id":"%N"` value out of a kasaterm-cli JSON response.
