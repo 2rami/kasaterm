@@ -1108,6 +1108,10 @@ impl App {
                 let bw = 26.0_f32;
                 let bh = 22.0_f32;
                 let bx = win_px.0 / scale - bw - 8.0;
+                // Windows paints its own min/max/close at the right edge; shove
+                // the git-column toggle left of that cluster so they don't stack.
+                #[cfg(windows)]
+                let bx = Self::win_control_rects(win_px.0 / scale)[0].0 - 2.0 - bw;
                 let by = (TITLE_HEIGHT - bh) / 2.0;
                 let hover = sb_cursor.0 >= bx
                     && sb_cursor.0 <= bx + bw
@@ -1128,6 +1132,32 @@ impl App {
                 let split = gx + gs * 0.58;
                 g.rect(split, gy + 1.3, gx + gs - 1.3 - split, gs - 2.6, fg);
                 g.rect(split, gy + 1.3, 1.0, gs - 2.6, fg);
+            }
+            // Windows frameless window controls (min / max / close) at the
+            // strip's right edge. Native decorations are off on Windows, so we
+            // paint and route these ourselves — same chip family as the toggles.
+            #[cfg(windows)]
+            {
+                let ctrls = Self::win_control_rects(win_px.0 / scale);
+                let icons = ["minus", "maximize", "x"];
+                for (i, &(bx, by, bw, bh)) in ctrls.iter().enumerate() {
+                    let hover = sb_cursor.0 >= bx
+                        && sb_cursor.0 <= bx + bw
+                        && sb_cursor.1 >= by
+                        && sb_cursor.1 <= by + bh;
+                    if hover {
+                        round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                    }
+                    let fg = if hover { theme::TEXT } else { theme::TEXT_DIM };
+                    let isz = theme::ICON_SIZE;
+                    g.queue_icon(
+                        icons[i],
+                        bx + (bw - isz) / 2.0,
+                        by + (bh - isz) / 2.0,
+                        isz,
+                        fg,
+                    );
+                }
             }
             // Top bar: folder icon + current working directory, just right of
             // the file-tree toggle (Warp-style location chip).
