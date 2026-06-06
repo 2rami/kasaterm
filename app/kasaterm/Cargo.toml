@@ -1,5 +1,6 @@
 [package]
 name = "kasaterm"
+authors = ["모묘모"]
 description = "kasaterm — Cross-platform terminal multiplexer. winit + cell-renderer (wgpu, sRGB→DisplayP3 shader matrix) with a direct portable-pty + alacritty_terminal backend (Phase C, default) and a legacy kasa-bridge backend behind KASATERM_BACKEND=tmux. Exposes a cmux-compatible JSON-RPC socket so external agents can drive it."
 edition.workspace = true
 version.workspace = true
@@ -65,3 +66,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 png = "0.17"
+
+# Embed the app icon (assets/app.ico) + version info into kasaterm.exe so the
+# taskbar / Start menu / .msi installer show the real icon, not the default.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

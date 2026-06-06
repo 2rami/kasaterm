@@ -13,6 +13,19 @@ fn main() {
     // build — acceptable for a launch banner.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/index");
+
+    // Windows: stamp the app icon into the exe so the taskbar / Start menu /
+    // installer use it instead of the generic default. rc.exe (MSVC) does the
+    // embed; a missing toolchain just warns rather than failing the build.
+    #[cfg(windows)]
+    {
+        println!("cargo:rerun-if-changed=../../assets/app.ico");
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("../../assets/app.ico");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=winresource icon embed failed: {e}");
+        }
+    }
 }
 
 fn git_rev() -> Option<String> {

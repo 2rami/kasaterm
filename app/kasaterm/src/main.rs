@@ -1,3 +1,7 @@
+// Release builds hide the console window so kasaterm launches as a pure GUI
+// app (Start menu / .msi install). Debug builds keep the console so stderr
+// startup/IME logs stay visible for the self-test cycle.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! tmuxify — sugarloaf-rendered terminal driven by
 //! tmux-bridge. Multi-pane: tmux's split-window creates additional
 //! panes, layout-change events tell us how to lay them out, and we
