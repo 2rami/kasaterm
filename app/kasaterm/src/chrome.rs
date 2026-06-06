@@ -64,6 +64,10 @@ impl App {
             win.inner_size().width as f32 / scale
         })?;
         let x = win_w - w - 8.0;
+        // Windows paints min/max/close at the right edge; keep this toggle left
+        // of that cluster so render (render.rs) and this hit-test agree.
+        #[cfg(windows)]
+        let x = Self::win_control_rects(win_w)[0].0 - 2.0 - w;
         let y = (TITLE_HEIGHT - h) / 2.0;
         Some((x, y, w, h))
     }
@@ -212,7 +216,12 @@ impl App {
     pub(crate) fn sidebar_toggle_rect() -> (f32, f32, f32, f32) {
         let w = 26.0;
         let h = 22.0;
+        #[cfg(not(windows))]
         let x = TRAFFIC_LIGHT_WIDTH + 6.0;
+        // Windows is frameless with no traffic-light cluster to clear — start
+        // the toggles at the left edge instead of reserving the macOS width.
+        #[cfg(windows)]
+        let x = 10.0;
         let y = (TITLE_HEIGHT - h) / 2.0;
         (x, y, w, h)
     }
@@ -220,6 +229,24 @@ impl App {
     pub(crate) fn file_tree_toggle_rect() -> (f32, f32, f32, f32) {
         let (sx, sy, sw, sh) = Self::sidebar_toggle_rect();
         (sx + sw + 2.0, sy, sw, sh)
+    }
+    /// Windows-only frameless window controls (minimize / maximize / close),
+    /// parked at the right end of the title strip. macOS keeps the native
+    /// traffic lights, so this exists only where we drop OS decorations.
+    /// Returns `[minimize, maximize, close]` left→right; close is the
+    /// right-most so it lands where Windows users reach for it. Same chip
+    /// size as the sidebar toggle to read as one button family.
+    #[cfg(windows)]
+    pub(crate) fn win_control_rects(win_w_logical: f32) -> [(f32, f32, f32, f32); 3] {
+        let w = 26.0;
+        let h = 22.0;
+        let gap = 2.0;
+        let right_pad = 8.0;
+        let y = (TITLE_HEIGHT - h) / 2.0;
+        let close_x = win_w_logical - right_pad - w;
+        let max_x = close_x - gap - w;
+        let min_x = max_x - gap - w;
+        [(min_x, y, w, h), (max_x, y, w, h), (close_x, y, w, h)]
     }
     /// Show/hide the left window-tab sidebar. The cell grid reflows to the
     /// new usable width (every layout calc reads `effective_sidebar_w()`),

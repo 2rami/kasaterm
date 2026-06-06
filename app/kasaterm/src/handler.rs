@@ -121,6 +121,12 @@ impl ApplicationHandler<UserEvent> for App {
             // our sidebar-toggle button.
             .with_title_hidden(true)
             .with_fullsize_content_view(true);
+        // Windows: drop the native title bar entirely so our chrome strip is
+        // the only top bar (no double titlebar). We then paint our own
+        // min/max/close, route window drag from the strip, and handle resize
+        // from the window edges (see window_event mouse handling).
+        #[cfg(windows)]
+        let attrs = attrs.with_decorations(false);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -785,6 +791,23 @@ impl ApplicationHandler<UserEvent> for App {
                             None => CursorIcon::Default,
                         }
                     };
+                    // Windows frameless: edge hover shows a resize cursor so the
+                    // 8px resize border reads as draggable.
+                    #[cfg(windows)]
+                    let icon = {
+                        let sf = self.effective_scale();
+                        let w = window.inner_size().width as f32 / sf;
+                        let h = window.inner_size().height as f32 / sf;
+                        const B: f32 = 8.0;
+                        let (l, r, t, b) = (cx <= B, cx >= w - B, cy <= B, cy >= h - B);
+                        match (t, b, l, r) {
+                            (true, _, true, _) | (_, true, _, true) => CursorIcon::NwseResize,
+                            (true, _, _, true) | (_, true, true, _) => CursorIcon::NeswResize,
+                            (true, _, _, _) | (_, true, _, _) => CursorIcon::NsResize,
+                            (_, _, true, _) | (_, _, _, true) => CursorIcon::EwResize,
+                            _ => icon,
+                        }
+                    };
                     window.set_cursor(icon);
                     // Hover glow on chrome buttons (+ / action cluster) needs
                     // a redraw on every move — paint reads self.cursor_px to
@@ -800,6 +823,33 @@ impl ApplicationHandler<UserEvent> for App {
                 if matches!(state, ElementState::Pressed) {
                     let cx = self.cursor_px.0;
                     let cy = self.cursor_px.1;
+                    // Windows frameless: resize from the window edges. An 8px
+                    // hot border drives drag_resize_window in the matching
+                    // direction. Checked first so an edge press resizes instead
+                    // of starting a window drag or hitting a button.
+                    #[cfg(windows)]
+                    {
+                        let sf = self.effective_scale();
+                        let w = window.inner_size().width as f32 / sf;
+                        let h = window.inner_size().height as f32 / sf;
+                        const B: f32 = 8.0;
+                        let (l, r, t, b) = (cx <= B, cx >= w - B, cy <= B, cy >= h - B);
+                        let dir = match (t, b, l, r) {
+                            (true, _, true, _) => Some(winit::window::ResizeDirection::NorthWest),
+                            (true, _, _, true) => Some(winit::window::ResizeDirection::NorthEast),
+                            (_, true, true, _) => Some(winit::window::ResizeDirection::SouthWest),
+                            (_, true, _, true) => Some(winit::window::ResizeDirection::SouthEast),
+                            (true, _, _, _) => Some(winit::window::ResizeDirection::North),
+                            (_, true, _, _) => Some(winit::window::ResizeDirection::South),
+                            (_, _, true, _) => Some(winit::window::ResizeDirection::West),
+                            (_, _, _, true) => Some(winit::window::ResizeDirection::East),
+                            _ => None,
+                        };
+                        if let Some(dir) = dir {
+                            let _ = window.drag_resize_window(dir);
+                            return;
+                        }
+                    }
                     // Shell picker popup. While open it owns the next click:
                     // hit an item → spawn that shell in a new window; click
                     // anywhere else → dismiss. Checked first so it captures
@@ -843,6 +893,29 @@ impl ApplicationHandler<UserEvent> for App {
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_git_col();
                             return;
+                        }
+                    }
+                    // Windows frameless window controls (min / max / close) at
+                    // the strip's right edge. Pressed-time hit-test, before the
+                    // titlebar-drag path, so a button click isn't a window move.
+                    #[cfg(windows)]
+                    {
+                        // cursor_px is logical px at effective_scale (= dpi *
+                        // ui_zoom); match it or the hit-test misses when zoomed.
+                        let win_w = window.inner_size().width as f32 / self.effective_scale();
+                        let ctrls = Self::win_control_rects(win_w);
+                        for (i, &(bx, by, bw, bh)) in ctrls.iter().enumerate() {
+                            if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
+                                match i {
+                                    0 => window.set_minimized(true),
+                                    1 => gpu::toggle_maximize_no_anim(
+                                        &window,
+                                        &mut self.saved_window_frame,
+                                    ),
+                                    _ => event_loop.exit(),
+                                }
+                                return;
+                            }
                         }
                     }
                     // Sidebar resize grip — a 6px hot zone straddling the
@@ -1320,10 +1393,17 @@ impl ApplicationHandler<UserEvent> for App {
                 // lost when we turned on fullsize_content_view. macOS
                 // owns the traffic-light cluster, so we only act past
                 // its width.
-                if matches!(state, ElementState::Pressed)
+                #[cfg(not(windows))]
+                let titlebar_press = matches!(state, ElementState::Pressed)
                     && self.cursor_px.1 < TITLE_HEIGHT
-                    && self.cursor_px.0 > TRAFFIC_LIGHT_WIDTH
-                {
+                    && self.cursor_px.0 > TRAFFIC_LIGHT_WIDTH;
+                // Windows has no traffic-light cluster to dodge; the whole strip
+                // is draggable. Toggle + window-control buttons already returned
+                // above, and the top resize border is handled before this.
+                #[cfg(windows)]
+                let titlebar_press =
+                    matches!(state, ElementState::Pressed) && self.cursor_px.1 < TITLE_HEIGHT;
+                if titlebar_press {
                     let (cx, cy) = self.cursor_px;
                     let now = Instant::now();
                     let is_double = match self.last_left_click {
