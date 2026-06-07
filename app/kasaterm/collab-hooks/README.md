@@ -9,36 +9,34 @@ pane 간 협업(누가 뭘 하는지·충돌차단·분담·메시지)을 굴리
 ./install-hooks.sh            # 복사 (친구 배포·재현)
 ./install-hooks.sh --symlink  # 심볼릭 (거노 개발 머신 — 레포 수정 즉시 반영)
 ```
-`settings.json` 은 건드리지 않는다(이미 `~/.claude/hooks/<name>` 경로 등록).
+hook 파일은 배포하지만 `settings.json` 등록은 별도다 — Claude Code 가 `settings.json` 의 `hooks` 에 명시된 것만 실행한다(파일이 `~/.claude/hooks/` 에 있어도 등록 안 하면 안 돈다).
 
-## hook ↔ 이벤트 매핑
+## board 모니터링 = 매 턴 board-context 주입 (기본)
+모든 pane 이 자기 턴 시작 시 board(다른 pane 활동)를 프롬프트로 **자동으로 받는다** — `board-context.py`(UserPromptSubmit hook). 따로 Monitor 를 걸 필요도, 팀장 지정도 없이 모든 pane 이 서로를 인지한다(pull). 혼자면 조용.
+
+board 를 채우는 건 `bind-transcript.sh`(UserPromptSubmit) — 각 pane 의 claude transcript 경로를 등록해 `collab_board` 가 읽게 한다. **이 둘이 모니터링의 최소 한 쌍이고, 현재 `settings.json` 에 등록된 kasaterm hook 은 이 둘뿐이다.**
+
+## 현재 등록 hook (settings.json)
 | 파일 | 이벤트 | 역할 |
 |---|---|---|
-| `kasaterm-bind-transcript.sh` | SessionStart, UserPromptSubmit | claude transcript 경로 등록(`kasaterm-cli bind-transcript`) — **board 데이터 소스, 필수** |
-| `kasaterm-collab-hint.sh` | SessionStart | 협업 체계 안내문 주입 |
-| `kasaterm-conflict-guard.py` | PreToolUse(Edit/Write/MultiEdit) | 같은 파일 동시편집 차단. **transcript 직접판정(백엔드무관)** |
-| `kasacollab.py` | (CLI, hook 아님) | task 분담·msg. `python3 ~/.claude/hooks/kasacollab.py` |
-| `kasaterm-lead-watch.sh` | (Monitor 도구용) | 팀장이 idle+권한대기 pane 을 peek 로 확증·대리응답 |
+| `kasaterm-bind-transcript.sh` | UserPromptSubmit | claude transcript 경로 등록 — **board 데이터 소스** |
+| `kasaterm-board-context.py` | UserPromptSubmit | 매 턴 모든 pane 에 board(제목·상태·시킨일) 주입 |
 
-## board 모니터링 = Claude Code Monitor
-board 를 "항상 보는" 건 감시할 pane 이 Monitor 도구로 board 워처를 거는 방식. 용도에 따라 둘 중 하나:
+## 보관 hook (settings 미등록 — 필요 시 재등록)
+| 파일 | 용도 |
+|---|---|
+| `kasaterm-collab-hint.sh` | SessionStart 협업 안내문 주입 |
+| `kasaterm-conflict-guard.py` | PreToolUse 같은 파일 동시편집 차단(transcript 직접판정) |
+| `kasacollab.py` | (CLI) task 분담·msg·lead |
+| `kasaterm-lead-watch.sh` | (Monitor 도구용) 팀장이 멈춘 워커 peek 확증·대리응답 |
 
-**1. board-watch (범용)** — "누가 뭐 하나" 상태변화 스트림:
-```
-Monitor(command="kasaterm-cli board-watch 3", persistent=true)
-```
-상태 바뀐 pane 만 한 줄씩(working↔idle↔building↔waiting, 합류=새 id, 종료=closed).
-
-**2. lead-watch (팀장/오케스트레이터)** — 멈춘 워커를 잡아 대신 답한다:
-```
-kasacollab lead set     # 이 pane = 팀장 (한 방에 한 명, lead off 로 해제)
-Monitor(command="bash ~/.claude/hooks/kasaterm-lead-watch.sh", persistent=true)
-```
-워커가 idle+사람입력대기(AskUserQuestion·`❯`)로 멈추면 화면째 팀장에게 넘기고, 팀장이 `kasaterm-cli send --surface %N "번호"` 로 대신 답한다. 팀장은 `peek`/`transcript`/`tell`/`split`/`focus`/`close` 로 **모든 pane 을 제어**한다(socket=PtyBackend). 팀장은 사람(거노)이 명시적으로 띄워 지정한다.
-
-매 턴 프롬프트 주입(옛 `board-context.py`)·능동 푸시(옛 `collab-notify.sh`/mute)는 **폐기** — 모니터링은 Monitor 단일.
+## (옵션) Monitor 기반 감시
+매 턴 주입 외에, 감시 전담 pane 이 Claude Code Monitor 로 board 워처를 걸 수도 있다(기본 hook 으론 안 건다):
+- `Monitor(command="kasaterm-cli board-watch 3", persistent=true)` — 상태 바뀐 pane 만 스트림(working↔idle↔building↔waiting, 합류=새 id, 종료=closed).
+- `kasacollab lead set` → `Monitor(command="bash ~/.claude/hooks/kasaterm-lead-watch.sh", persistent=true)` — 팀장이 idle+사람입력대기로 멈춘 워커를 화면째 받아 `kasaterm-cli send --surface %N "번호"` 로 대신 답.
 
 ## 설계 불변식
-- **`conflict-guard` 는 transcript 직접판정** — `~/.claude/projects/<cwd>/*.jsonl` 을 직접 읽어 PreToolUse 동기 차단. 백엔드가 죽어도/리빌드 중에도 충돌차단이 살아있게 하는 의도적 선택.
 - **board 는 pull** — `collab_board` 가 호출 시점에 각 pane transcript tail(64KB)을 읽어 생성(`ai-title`·`last-prompt`·최근 답변·tool_use). 상시 watcher 스레드 없음(폐기).
-- **notify(능동 푸시)·mute 는 폐기** — 턴 경계 방송 대신 Monitor pull 감시로 단일화.
+- **모니터링 = 매 턴 주입(board-context)이 기본** — 모든 pane 이 자기 턴에 board 를 본다. Monitor(board-watch/lead-watch)는 감시 전담용 옵션.
+- **notify(능동 푸시)·mute 는 폐기** — 턴 경계 방송 대신 board pull 로 단일화.
+- **`conflict-guard` 는 transcript 직접판정**(보관) — `~/.claude/projects/<cwd>/*.jsonl` 직접 읽어 PreToolUse 동기 차단. 백엔드 무관하게 살아있는 안전망.
