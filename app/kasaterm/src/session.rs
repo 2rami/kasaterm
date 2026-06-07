@@ -817,8 +817,12 @@ impl App {
         // backed by our own panes. No daemon — split/focus are immediate
         // local ops; session continuity comes from claude --resume on relaunch
         // (load_local_session, follow-up).
-        self.spawn_session_pane()?;
+        // Socket server FIRST so KASATERM_SOCKET_PATH is exported into the
+        // process env *before* the first pane's shell is spawned — otherwise
+        // pane %1 (and only %1) inherits an empty socket path and can't reach
+        // the board/bind-transcript, while later split panes get it fine.
         self.start_socket_pty();
+        self.spawn_session_pane()?;
         Ok(())
     }
     /// Serialize every session (active + stashed) as a layout tree so the next
