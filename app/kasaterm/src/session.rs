@@ -512,10 +512,23 @@ impl App {
     /// read_dir walk only runs on a real change (or after expand/collapse,
     /// which calls `rebuild_file_tree_nodes` directly).
     pub(crate) fn refresh_file_tree(&mut self) {
+        self.ensure_file_tree_watcher();
+        // A background watcher flagged an on-disk change (file added / removed /
+        // renamed / modified) — rebuild even if the root is unchanged.
+        if self
+            .file_tree_fs_dirty
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.rebuild_file_tree_nodes();
+        }
         let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
         let root = active
             .as_ref()
             .and_then(|id| self.pane_cwd_cache.get(id).cloned())
+            // Preview panes (markdown/image splits) have no cwd in the cache —
+            // keep the current tree root rather than snapping to the process
+            // cwd, so opening a file doesn't reshuffle the sidebar root.
+            .or_else(|| self.file_tree_root.clone())
             .or_else(|| std::env::current_dir().ok());
         if root == self.file_tree_root {
             return;
@@ -524,11 +537,205 @@ impl App {
         self.file_tree_scroll = 0.0;
         self.rebuild_file_tree_nodes();
     }
+    /// Spawn the file-tree FS poller once. It watches the dirs in
+    /// `file_tree_watch` (root + expanded folders, kept current by
+    /// `rebuild_file_tree_nodes`), hashing each entry's name/mtime/kind every
+    /// ~800ms; on any change it sets `file_tree_fs_dirty` and wakes the loop so
+    /// `refresh_file_tree` rebuilds. Polling lives off the GUI thread, so the
+    /// event-driven loop stays parked until the disk actually changes.
+    pub(crate) fn ensure_file_tree_watcher(&mut self) {
+        if self.file_tree_watch_started {
+            return;
+        }
+        self.file_tree_watch_started = true;
+        let watch = self.file_tree_watch.clone();
+        let dirty = self.file_tree_fs_dirty.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let mut last: u64 = 0;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                let dirs = watch.lock().map(|d| d.clone()).unwrap_or_default();
+                if dirs.is_empty() {
+                    continue;
+                }
+                let mut sig: u64 = 1469598103934665603; // FNV offset basis
+                let mut mix = |bytes: &[u8]| {
+                    for &b in bytes {
+                        sig ^= b as u64;
+                        sig = sig.wrapping_mul(1099511628211);
+                    }
+                };
+                for dir in &dirs {
+                    let Ok(rd) = std::fs::read_dir(dir) else { continue };
+                    for ent in rd.flatten() {
+                        mix(ent.file_name().as_encoded_bytes());
+                        if let Ok(md) = ent.metadata() {
+                            mix(&[md.is_dir() as u8]);
+                            if let Ok(mt) = md.modified() {
+                                if let Ok(d) = mt.duration_since(std::time::UNIX_EPOCH) {
+                                    mix(&d.as_secs().to_le_bytes());
+                                }
+                            }
+                        }
+                    }
+                }
+                if sig != last {
+                    last = sig;
+                    dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let _ = proxy.send_event(UserEvent::Redraw);
+                }
+            }
+        });
+    }
+    /// Open a sidebar file in a fresh split pane (right of the active pane).
+    /// Images decode into an `Image` pane; real markdown renders as a laid-out
+    /// doc; any other text loads as a fenced code block so the highlighter
+    /// colors it. Re-opening a file already on screen just focuses its pane
+    /// instead of stacking duplicate splits. PTY-less — `resize_backend` skips
+    /// leaves with no `self.pty` entry, so the new pane never spawns a shell.
+    pub(crate) fn open_file_split(&mut self, path: std::path::PathBuf) {
+        if self.tmux.is_some() {
+            return;
+        }
+        // Already open? Focus that pane rather than spawning a duplicate.
+        let existing = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes.iter().find_map(|(id, p)| {
+                p.tabs
+                    .iter()
+                    .any(|t| t.preview_path.as_deref() == Some(path.as_path()))
+                    .then(|| id.clone())
+            })
+        };
+        if let Some(id) = existing {
+            self.ws.lock().unwrap().active_pane = Some(id);
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
+        let new_id = format!("%{}", self.next_pane_id);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let is_image = matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico"
+        );
+        let content = if is_image {
+            match decode_image_rgba(&path) {
+                Ok(img) => PaneContent::Image(Arc::new(img)),
+                Err(e) => {
+                    eprintln!("[open] 이미지 디코드 실패 {}: {e}", path.display());
+                    return;
+                }
+            }
+        } else {
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[open] 파일 읽기 실패 {}: {e}", path.display());
+                    return;
+                }
+            };
+            let is_md = matches!(ext.as_str(), "md" | "markdown");
+            let doc = Arc::new(build_markdown_doc(&new_id, &path, &raw));
+            // Markdown renders as a laid-out doc; code/text opens straight into
+            // the raw editor (line-number gutter + syntax highlight + editable)
+            // — the fenced-code-block render path mangled long lines and was
+            // read-only, which is wrong for source files.
+            let edit_lines: Vec<String> = if is_md {
+                Vec::new()
+            } else {
+                raw.split('\n').map(|s| s.to_string()).collect()
+            };
+            PaneContent::Markdown(MarkdownPane {
+                doc,
+                raw_mode: !is_md,
+                edit_lines,
+                cur_line: 0,
+                cur_col: 0,
+                scroll: 0,
+                h_scroll: 0.0,
+            })
+        };
+
+        let active = self.ws.lock().unwrap().active_pane.clone();
+        let Some(active) = active else {
+            return;
+        };
+        self.next_pane_id += 1;
+        let title = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
+        let mut tab = PaneTab::default();
+        tab.content = content;
+        tab.title = title;
+        tab.title_pinned = true;
+        tab.preview_path = Some(path.clone());
+        // Headless verification of the zoom + pan crop (mouse drags aren't
+        // injectable in a background run). KASATERM_TEST_IMG_ZOOM sets the
+        // initial zoom; KASATERM_TEST_IMG_PAN="x,y" the initial pan (logical
+        // px). Only meaningful for image panes.
+        if is_image {
+            if let Some(z) = std::env::var("KASATERM_TEST_IMG_ZOOM")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+            {
+                tab.image_zoom = z;
+            }
+            if let Some((px, py)) = std::env::var("KASATERM_TEST_IMG_PAN").ok().and_then(|s| {
+                let (a, b) = s.split_once(',')?;
+                Some((a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?))
+            }) {
+                tab.image_pan_x = px;
+                tab.image_pan_y = py;
+            }
+        }
+        let ps = PaneState { tabs: vec![tab], active_tab: 0, color: None, dirty: true };
+        self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
+
+        let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
+        if !layout.split_leaf(&active, kasa_pty::SplitDir::Horizontal, new_id.clone()) {
+            // Active pane isn't in the tree — undo the orphan insert.
+            self.ws.lock().unwrap().panes.remove(&new_id);
+            self.next_pane_id -= 1;
+            return;
+        }
+        self.ws.lock().unwrap().active_pane = Some(new_id);
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
     /// Walk the root + every expanded folder into the flat `file_tree_nodes`.
     pub(crate) fn rebuild_file_tree_nodes(&mut self) {
         self.file_tree_nodes.clear();
         if let Some(root) = self.file_tree_root.clone() {
             Self::walk_dir(&root, 0, &self.file_tree_expanded, &mut self.file_tree_nodes);
+        }
+        // Hand the FS watcher the dirs currently on screen (root + each expanded
+        // folder) so it polls exactly what the user can see change.
+        if let Ok(mut watch) = self.file_tree_watch.lock() {
+            watch.clear();
+            if let Some(root) = &self.file_tree_root {
+                watch.push(root.clone());
+            }
+            watch.extend(
+                self.file_tree_nodes
+                    .iter()
+                    .filter(|n| n.is_dir && self.file_tree_expanded.contains(&n.path))
+                    .map(|n| n.path.clone()),
+            );
         }
     }
     /// Recursive read_dir: folders first then files (case-insensitive), dotfiles

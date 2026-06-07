@@ -30,8 +30,8 @@ pub const TEXT_DIM: [u8; 4] = [160, 166, 176, 255];
 pub const TEXT_MUTE: [u8; 4] = [120, 126, 138, 255];
 /// Status colors (git panel, etc.).
 pub const SUCCESS: [u8; 4] = [63, 185, 80, 255];
-// WARN/DANGER were defined for git panel status but never wired up;
-// removed to keep theme tokens to what's actually referenced.
+/// Destructive-action accent — the confirm-close modal's 닫기 button.
+pub const DANGER: [u8; 4] = [224, 88, 78, 255];
 
 /// Syntax-highlight palette for markdown code blocks (One Dark-ish, tuned
 /// to read on the SURFACE code-block background).

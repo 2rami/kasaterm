@@ -308,10 +308,12 @@ impl App {
         let mut copy_btns: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         // Image panes collected here (id, pixels, body box in LOGICAL px) so
         // the gpu block below can upload + queue them after the cell pass.
-        // (pid, image_data, body_box, zoom, rotation_quarters)
-        let mut image_slots: Vec<(String, Arc<ImagePane>, (f32, f32, f32, f32), f32, u8)> = Vec::new();
+        // (pid, image_data, body_box, zoom, rotation_quarters, pan_xy)
+        let mut image_slots: Vec<(String, Arc<ImagePane>, (f32, f32, f32, f32), f32, u8, (f32, f32))> =
+            Vec::new();
         // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
-        // cursor). Render mode draws blocks; Raw mode draws the editor buffer.
+        // cursor, h_scroll px, syntax lang). Render mode draws blocks; Raw mode
+        // draws the editor buffer.
         #[allow(clippy::type_complexity)]
         let mut md_slots: Vec<(
             String,
@@ -321,6 +323,8 @@ impl App {
             bool,
             Option<Vec<String>>,
             (usize, usize),
+            f32,
+            &'static str,
         )> = Vec::new();
         // Per-pane body rect (header-excluded) in logical px, collected for
         // every pane so in-pane WebViews and other overlays can be snapped
@@ -454,22 +458,32 @@ impl App {
                 let img = pane.image().cloned();
                 let img_zoom = pane.image_view_zoom();
                 let img_rot = pane.image_rot % 4;
+                let img_pan = (pane.image_pan_x, pane.image_pan_y);
                 // Snapshot markdown render data: (doc, raw_mode, edit lines if
-                // raw, cursor, scroll px).
-                let md: Option<(Arc<MarkdownDoc>, bool, Option<Vec<String>>, (usize, usize), f32)> =
-                    pane.markdown().map(|m| {
-                        (
-                            m.doc.clone(),
-                            m.raw_mode,
-                            if m.raw_mode {
-                                Some(m.edit_lines.clone())
-                            } else {
-                                None
-                            },
-                            (m.cur_line, m.cur_col),
-                            m.scroll as f32,
-                        )
-                    });
+                // raw, cursor, scroll px, h_scroll px, syntax lang).
+                let md: Option<(
+                    Arc<MarkdownDoc>,
+                    bool,
+                    Option<Vec<String>>,
+                    (usize, usize),
+                    f32,
+                    f32,
+                    &'static str,
+                )> = pane.markdown().map(|m| {
+                    (
+                        m.doc.clone(),
+                        m.raw_mode,
+                        if m.raw_mode {
+                            Some(m.edit_lines.clone())
+                        } else {
+                            None
+                        },
+                        (m.cur_line, m.cur_col),
+                        m.scroll as f32,
+                        m.h_scroll,
+                        code_lang_for_path(std::path::Path::new(&m.doc.path)),
+                    )
+                });
                 let composed: Vec<Vec<GridCell>> = match pane.term() {
                     Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
                     None => Vec::new(),
@@ -583,9 +597,9 @@ impl App {
                 let bh = (full_h - header_shift_logical - PANE_INNER_Y - bottom_inset).max(1.0);
                 body_rects.push((id.clone(), (bx, by, bw, bh)));
                 if let Some(image) = img {
-                    image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot));
+                    image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot, img_pan));
                 }
-                if let Some((doc, raw_mode, lines, cursor, scroll)) = md {
+                if let Some((doc, raw_mode, lines, cursor, scroll, h_scroll, lang)) = md {
                     md_slots.push((
                         id.clone(),
                         doc,
@@ -594,6 +608,8 @@ impl App {
                         raw_mode,
                         lines,
                         cursor,
+                        h_scroll,
+                        lang,
                     ));
                 }
                 if show_headers {
@@ -1012,12 +1028,16 @@ impl App {
         // Terminal-pane right-action cluster hit rects. Rebuilt every frame
         // so a stale rect can't outlive its glyph after a layout change.
         let mut pane_action_hits: Vec<(String, ActionKind, (f32, f32, f32, f32))> = Vec::new();
+        let mut confirm_btn_hits: Vec<(ConfirmBtn, (f32, f32, f32, f32))> = Vec::new();
+        // Caret blink for the git commit input, computed before `g` borrows
+        // `self.gpu` (the method takes `&self`, which the mutable borrow blocks).
+        let commit_caret_on = self.cursor_blink_on(std::time::Instant::now());
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
             // frame. The image pass (in g.render) paints under the chrome so
             // pane headers / focus ring / dim overlay land on top.
-            for (id, image, _, _, rot) in &image_slots {
+            for (id, image, _, _, rot, _) in &image_slots {
                 // Per-rotation cache key — rotated pixels uploaded once per
                 // (pane, rotation) pair so toggling between rotations doesn't
                 // re-rotate every frame.
@@ -1028,17 +1048,19 @@ impl App {
                 }
             }
             g.draw_cells(&slot_views);
-            for (id, _, (bx, by, bw, bh), zoom, rot) in &image_slots {
+            for (id, _, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {
                 let key = format!("{id}-r{rot}");
-                g.queue_image(&key, *bx, *by, *bw, *bh, *zoom);
+                g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
             // top. The returned content height feeds scroll clamping.
-            for (id, doc, (bx, by, bw, bh), scroll, raw_mode, lines, cursor) in &md_slots {
+            for (id, doc, (bx, by, bw, bh), scroll, raw_mode, lines, cursor, h_scroll, lang) in &md_slots {
                 let content_h = if *raw_mode {
                     let lines = lines.as_deref().unwrap_or(&[]);
-                    g.draw_raw_editor(lines, *cursor, *bx, *by, *bw, *bh, *scroll, &md_preedit)
+                    g.draw_raw_editor(
+                        lines, *cursor, *bx, *by, *bw, *bh, *scroll, *h_scroll, lang, &md_preedit,
+                    )
                 } else {
                     // Upload this doc's inline images once (keyed per block).
                     for im in &doc.images {
@@ -1501,6 +1523,15 @@ impl App {
                 let win_h = win_px.1 / scale;
                 let step = 14.0_f32; // per-depth indent width
                 let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
+                // File the focused pane is currently showing — its row gets an
+                // active tint + accent bar so the sidebar tracks the open file.
+                // Inlined (not the `active_preview_path` helper) so it borrows
+                // only `self.ws`, disjoint from the `g` mutable borrow alive here.
+                let active_file: Option<std::path::PathBuf> = self.ws.lock().ok().and_then(|ws| {
+                    ws.active_pane
+                        .as_ref()
+                        .and_then(|id| ws.panes.get(id).and_then(|p| p.preview_path.clone()))
+                });
                 for (idx, node) in self.file_tree_nodes.iter().enumerate() {
                     let y = start_y - self.file_tree_scroll + idx as f32 * item_h;
                     if y + item_h < start_y || y > win_h {
@@ -1510,12 +1541,20 @@ impl App {
                         self.file_tree_hover.as_deref() == Some(node.path.as_path());
                     let expanded =
                         node.is_dir && self.file_tree_expanded.contains(&node.path);
-                    // Row background: hover wins; an open folder keeps a faint
+                    let is_open = active_file.as_deref() == Some(node.path.as_path());
+                    // Row background: hover wins; the open file keeps a solid
+                    // active tint + accent bar; an open folder keeps a faint
                     // tint so the expanded branch reads as a group.
                     if hovered {
                         round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                    } else if is_open {
+                        round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
                     } else if expanded {
                         round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::with_alpha(theme::SURFACE_HOVER, 0x33));
+                    }
+                    if is_open {
+                        // Accent rail on the left edge — VSCode "active file" cue.
+                        g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::ACCENT);
                     }
                     // Indent guides — one faint rule per ancestor level so deep
                     // nesting stays legible.
@@ -1545,7 +1584,7 @@ impl App {
                     g.queue_ft_icon(icon, icon_x, iy, isz);
                     // Folders read brighter than files (soft hierarchy); hover
                     // lifts a file to full strength.
-                    let fg = if hovered || node.is_dir { theme::TEXT } else { theme::TEXT_DIM };
+                    let fg = if hovered || is_open || node.is_dir { theme::TEXT } else { theme::TEXT_DIM };
                     let text_x = icon_x + isz + 7.0;
                     // Clip the name to the column width with an ellipsis — long
                     // hashed file names (webp/jpg) otherwise overflow the sidebar
@@ -1687,10 +1726,13 @@ impl App {
                     }
                     g.rect(gcx0, y, gcw, 1.0, theme::with_alpha(theme::BORDER, 0x80));
                     y += 11.0;
-                    // Buttons pinned to the bottom; the file list scrolls between
-                    // the header and the button zone.
+                    // Buttons + commit input pinned to the bottom; the file list
+                    // scrolls between the header and the input zone.
                     let btn_h = 30.0_f32;
+                    let input_h = 30.0_f32;
+                    let input_gap = 8.0_f32;
                     let btn_zone_top = bottom - btn_h - 14.0;
+                    let input_top = btn_zone_top - input_h - input_gap;
                     let list_top = y;
                     if git_view.clean {
                         round_rect(g, gcx0, list_top + 4.0, 8.0, 8.0, 4.0, theme::SUCCESS);
@@ -1702,78 +1744,174 @@ impl App {
                         );
                     } else {
                         let item_h = 22.0_f32;
+                        let header_h = 21.0_f32;
                         let mut rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
-                        for (idx, (marker, path)) in git_view.files.iter().enumerate() {
-                            let ry = list_top - self.git_col_scroll + idx as f32 * item_h;
-                            if ry + item_h < list_top || ry > btn_zone_top {
-                                continue; // off-screen / under the button zone → clip
+                        let mut stage_rects: Vec<(bool, String, (f32, f32, f32, f32))> = Vec::new();
+                        // Two stacked sections (VSCode model). `staged` true =
+                        // "Staged Changes" (− unstages); false = "Changes" (+
+                        // stages). Both scroll together off git_col_scroll.
+                        let mut y_cur = list_top - self.git_col_scroll;
+                        for (title, staged, files) in [
+                            ("Staged Changes", true, &git_view.staged),
+                            ("Changes", false, &git_view.unstaged),
+                        ] {
+                            if files.is_empty() {
+                                continue;
                             }
-                            let hovered = self.cursor_px.0 >= git_col_x
-                                && self.cursor_px.0 <= git_col_x + git_col_w
-                                && self.cursor_px.1 >= ry
-                                && self.cursor_px.1 < ry + item_h;
-                            if hovered {
-                                round_rect(g, gcx0 - 5.0, ry, gcw + 10.0, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
-                            }
-                            let mcol = match marker {
-                                'A' => theme::SUCCESS,
-                                'M' => orange,
-                                _ => theme::ACCENT,
-                            };
-                            // Status badge: a tinted chip with the marker letter.
-                            round_rect(g, gcx0, ry + 3.0, 16.0, 16.0, 4.0, theme::with_alpha(mcol, 0x33));
-                            g.draw_text(
-                                gcx0 + 4.5,
-                                ry + (item_h - 11.0) / 2.0,
-                                &marker.to_string(),
-                                gpu::DrawOpts { font_size: 11.0, color: mcol, bold: true, italic: false },
-                            );
-                            // Filename bright, parent dir dim after it (so the
-                            // name stays readable even when the path is long).
-                            let fname = path.rsplit('/').next().unwrap_or(path.as_str());
-                            let dir = path.strip_suffix(fname).unwrap_or("").trim_end_matches('/');
-                            let tx = gcx0 + 24.0;
-                            let ty = ry + (item_h - 12.0) / 2.0;
-                            let endx = g.draw_text(
-                                tx,
-                                ty,
-                                fname,
-                                gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: false, italic: false },
-                            );
-                            if !dir.is_empty() {
+                            // Section header (count) — clipped to the list zone.
+                            if y_cur + header_h > list_top && y_cur < input_top {
                                 g.draw_text(
-                                    endx + 7.0,
-                                    ty + 0.5,
-                                    dir,
-                                    gpu::DrawOpts { font_size: 11.0, color: theme::TEXT_MUTE, bold: false, italic: false },
+                                    gcx0,
+                                    y_cur + 5.0,
+                                    &format!("{}  {}", title, files.len()),
+                                    gpu::DrawOpts { font_size: 11.0, color: theme::TEXT_MUTE, bold: true, italic: false },
                                 );
                             }
-                            rects.push((path.clone(), (git_col_x, ry, git_col_w, item_h)));
+                            y_cur += header_h;
+                            for (marker, path) in files.iter() {
+                                let ry = y_cur;
+                                y_cur += item_h;
+                                if ry + item_h < list_top || ry > input_top {
+                                    continue; // off-screen / under the input+button zone → clip
+                                }
+                                let hovered = self.cursor_px.0 >= git_col_x
+                                    && self.cursor_px.0 <= git_col_x + git_col_w
+                                    && self.cursor_px.1 >= ry
+                                    && self.cursor_px.1 < ry + item_h;
+                                if hovered {
+                                    round_rect(g, gcx0 - 5.0, ry, gcw + 10.0, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                                }
+                                let mcol = match marker {
+                                    'A' => theme::SUCCESS,
+                                    'M' => orange,
+                                    _ => theme::ACCENT,
+                                };
+                                // Status badge: a tinted chip with the marker letter.
+                                round_rect(g, gcx0, ry + 3.0, 16.0, 16.0, 4.0, theme::with_alpha(mcol, 0x33));
+                                g.draw_text(
+                                    gcx0 + 4.5,
+                                    ry + (item_h - 11.0) / 2.0,
+                                    &marker.to_string(),
+                                    gpu::DrawOpts { font_size: 11.0, color: mcol, bold: true, italic: false },
+                                );
+                                // Filename bright, parent dir dim after it (so the
+                                // name stays readable even when the path is long).
+                                let fname = path.rsplit('/').next().unwrap_or(path.as_str());
+                                let dir = path.strip_suffix(fname).unwrap_or("").trim_end_matches('/');
+                                let tx = gcx0 + 24.0;
+                                let ty = ry + (item_h - 12.0) / 2.0;
+                                let endx = g.draw_text(
+                                    tx,
+                                    ty,
+                                    fname,
+                                    gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: false, italic: false },
+                                );
+                                if !dir.is_empty() {
+                                    g.draw_text(
+                                        endx + 7.0,
+                                        ty + 0.5,
+                                        dir,
+                                        gpu::DrawOpts { font_size: 11.0, color: theme::TEXT_MUTE, bold: false, italic: false },
+                                    );
+                                }
+                                // Hovered row gets a +/− action button on the
+                                // right: + stages a Change, − unstages a Staged.
+                                if hovered {
+                                    let aw = 18.0_f32;
+                                    let ax = git_col_x + git_col_w - 14.0 - aw;
+                                    round_rect(g, ax, ry + 2.0, aw, 18.0, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
+                                    let sym = if staged { "-" } else { "+" };
+                                    let sw = g.measure_chrome_text(sym, 13.0, true);
+                                    g.draw_text(
+                                        ax + (aw - sw) / 2.0,
+                                        ry + (item_h - 12.0) / 2.0,
+                                        sym,
+                                        gpu::DrawOpts { font_size: 13.0, color: theme::TEXT, bold: true, italic: false },
+                                    );
+                                    stage_rects.push((!staged, path.clone(), (ax - 3.0, ry, aw + 6.0, item_h)));
+                                }
+                                rects.push((path.clone(), (git_col_x, ry, git_col_w, item_h)));
+                            }
                         }
                         self.git_col_file_rects = rects;
+                        self.git_col_stage_rects = stage_rects;
                     }
-                    // Stage all / Commit / Push, pinned to the bottom. Greyed
-                    // when there's nothing to do; all shell out off-thread.
-                    let gap = 7.0_f32;
-                    let bw = ((gcw - gap * 2.0) / 3.0).max(0.0);
+                    // Commit message input, just above the buttons. Click to
+                    // focus (column mouse handler); typing routes here via
+                    // forward_key. A focus ring + caret echo VSCode's box.
+                    {
+                        let focused = self.git_commit_focused;
+                        if focused {
+                            round_rect(g, gcx0 - 1.0, input_top - 1.0, gcw + 2.0, input_h + 2.0, theme::RADIUS_SM, theme::ACCENT);
+                        }
+                        round_rect(g, gcx0, input_top, gcw, input_h, theme::RADIUS_SM, theme::SURFACE);
+                        let pad = 8.0_f32;
+                        let tx = gcx0 + pad;
+                        let ty = input_top + (input_h - 12.0) / 2.0;
+                        let preedit = if focused { self.preedit.as_str() } else { "" };
+                        let cur = self.git_commit_cursor.min(self.git_commit_msg.chars().count());
+                        let before: String = self.git_commit_msg.chars().take(cur).collect();
+                        let after: String = self.git_commit_msg.chars().skip(cur).collect();
+                        // Placeholder sits behind the caret when the field is empty.
+                        if self.git_commit_msg.is_empty() && preedit.is_empty() {
+                            g.draw_text(tx, ty, "커밋 메시지", gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                        }
+                        let mut px = tx;
+                        if !before.is_empty() {
+                            px = g.draw_text(px, ty, &before, gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: false, italic: false });
+                        }
+                        let caret_x = px;
+                        if !preedit.is_empty() {
+                            px = g.draw_text(px, ty, preedit, gpu::DrawOpts { font_size: 12.0, color: theme::ACCENT, bold: false, italic: false });
+                        }
+                        if !after.is_empty() {
+                            g.draw_text(px, ty, &after, gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: false, italic: false });
+                        }
+                        // Caret: shown whenever focused (even on an empty field).
+                        if focused && preedit.is_empty() && commit_caret_on {
+                            g.rect(caret_x, input_top + 6.0, 1.5, input_h - 12.0, theme::TEXT);
+                        }
+                        self.git_commit_input_rect = Some((gcx0, input_top, gcw, input_h));
+                    }
+                    // Stage / Commit / Pull / Push, pinned to the bottom. Greyed
+                    // when there's nothing to do; hovering an active one brightens
+                    // it. All shell out off-thread.
+                    let gap = 6.0_f32;
+                    let bw = ((gcw - gap * 3.0) / 4.0).max(0.0);
                     let stage_rect = (gcx0, btn_zone_top, bw, btn_h);
-                    let commit_rect = (gcx0 + bw + gap, btn_zone_top, bw, btn_h);
-                    let push_rect = (gcx0 + (bw + gap) * 2.0, btn_zone_top, bw, btn_h);
-                    let can_stage = !git_view.clean;
-                    let can_commit = !git_view.clean && !git_view.files.is_empty();
+                    let commit_rect = (gcx0 + (bw + gap), btn_zone_top, bw, btn_h);
+                    let pull_rect = (gcx0 + (bw + gap) * 2.0, btn_zone_top, bw, btn_h);
+                    let push_rect = (gcx0 + (bw + gap) * 3.0, btn_zone_top, bw, btn_h);
+                    let can_stage = !git_view.unstaged.is_empty();
+                    let can_commit = !git_view.staged.is_empty() && !self.git_commit_msg.trim().is_empty();
+                    let can_pull = git_view.behind > 0;
                     let can_push = git_view.ahead > 0;
                     for (rect, label, on) in [
                         (stage_rect, "Stage", can_stage),
                         (commit_rect, "Commit", can_commit),
+                        (pull_rect, "Pull", can_pull),
                         (push_rect, "Push", can_push),
                     ] {
-                        let bg = if on {
-                            theme::SURFACE_ACTIVE
-                        } else {
+                        let hovered = on
+                            && self.cursor_px.0 >= rect.0
+                            && self.cursor_px.0 <= rect.0 + rect.2
+                            && self.cursor_px.1 >= rect.1
+                            && self.cursor_px.1 <= rect.1 + rect.3;
+                        let bg = if !on {
                             theme::with_alpha(theme::SURFACE_HOVER, 0x66)
+                        } else if hovered {
+                            theme::ACCENT
+                        } else {
+                            theme::SURFACE_ACTIVE
                         };
                         round_rect(g, rect.0, rect.1, rect.2, rect.3, theme::RADIUS_SM, bg);
-                        let col = if on { theme::TEXT } else { theme::TEXT_MUTE };
+                        let col = if !on {
+                            theme::TEXT_MUTE
+                        } else if hovered {
+                            [255, 255, 255, 255]
+                        } else {
+                            theme::TEXT
+                        };
                         let tw = g.measure_chrome_text(label, 11.0, true);
                         g.draw_text(
                             rect.0 + (rect.2 - tw) / 2.0,
@@ -1785,6 +1923,7 @@ impl App {
                     self.git_col_btn_rects = vec![
                         (GitColBtn::StageAll, stage_rect),
                         (GitColBtn::Commit, commit_rect),
+                        (GitColBtn::Pull, pull_rect),
                         (GitColBtn::Push, push_rect),
                     ];
                 }
@@ -2438,10 +2577,91 @@ impl App {
                     },
                 );
             }
+            // Confirm-close modal: a dim scrim + centered card with 취소/닫기,
+            // queued last so it sits over every pane, overlay and toast.
+            if let Some(dlg) = self.confirm_close.clone() {
+                let win_w = win_px.0 / scale;
+                let win_h = win_px.1 / scale;
+                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                let card_w = 360.0_f32;
+                let card_h = 168.0_f32;
+                let cx0 = ((win_w - card_w) / 2.0).round();
+                let cy0 = ((win_h - card_h) / 2.0).round();
+                round_rect(g, cx0, cy0, card_w, card_h, theme::RADIUS_MD, theme::SURFACE_ACTIVE);
+                let title = format!("{} 실행 중이에요", dlg.proc);
+                let subtitle = match dlg.action {
+                    crate::PendingClose::Window => "앱을 닫을까요?",
+                    _ => "이 탭을 닫을까요?",
+                };
+                g.draw_text(
+                    cx0 + 24.0,
+                    cy0 + 30.0,
+                    &title,
+                    gpu::DrawOpts { font_size: 15.0, color: theme::TEXT, bold: true, italic: false },
+                );
+                g.draw_text(
+                    cx0 + 24.0,
+                    cy0 + 60.0,
+                    subtitle,
+                    gpu::DrawOpts { font_size: 13.0, color: theme::TEXT_DIM, bold: false, italic: false },
+                );
+                let (mx, my) = self.cursor_px;
+                let bf = 13.0_f32;
+                let bpad = 18.0_f32;
+                let btn_h = 34.0_f32;
+                let btn_y = cy0 + card_h - 20.0 - btn_h;
+                // 닫기 (destructive), flush to the card's right edge.
+                let close_w = "닫기".chars().count() as f32 * bf + bpad * 2.0;
+                let close_x = cx0 + card_w - 24.0 - close_w;
+                let close_hover = mx >= close_x
+                    && mx <= close_x + close_w
+                    && my >= btn_y
+                    && my <= btn_y + btn_h;
+                round_rect(
+                    g,
+                    close_x,
+                    btn_y,
+                    close_w,
+                    btn_h,
+                    theme::RADIUS_SM,
+                    theme::with_alpha(theme::DANGER, if close_hover { 0xFF } else { 0xDD }),
+                );
+                g.draw_text(
+                    close_x + bpad,
+                    btn_y + (btn_h - bf) / 2.0,
+                    "닫기",
+                    gpu::DrawOpts { font_size: bf, color: [0xFF, 0xFF, 0xFF, 0xFF], bold: true, italic: false },
+                );
+                confirm_btn_hits.push((crate::ConfirmBtn::Close, (close_x, btn_y, close_w, btn_h)));
+                // 취소, to its left.
+                let cancel_w = "취소".chars().count() as f32 * bf + bpad * 2.0;
+                let cancel_x = close_x - 10.0 - cancel_w;
+                let cancel_hover = mx >= cancel_x
+                    && mx <= cancel_x + cancel_w
+                    && my >= btn_y
+                    && my <= btn_y + btn_h;
+                round_rect(
+                    g,
+                    cancel_x,
+                    btn_y,
+                    cancel_w,
+                    btn_h,
+                    theme::RADIUS_SM,
+                    if cancel_hover { theme::SURFACE_HOVER } else { theme::SURFACE },
+                );
+                g.draw_text(
+                    cancel_x + bpad,
+                    btn_y + (btn_h - bf) / 2.0,
+                    "취소",
+                    gpu::DrawOpts { font_size: bf, color: theme::TEXT, bold: false, italic: false },
+                );
+                confirm_btn_hits.push((crate::ConfirmBtn::Cancel, (cancel_x, btn_y, cancel_w, btn_h)));
+            }
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }
         }
+        self.confirm_btn_rects = confirm_btn_hits;
         self.pane_tab_rects = tab_hits;
         self.pane_tab_close_rects = tab_close_hits;
         self.pane_plus_rects = plus_hits;

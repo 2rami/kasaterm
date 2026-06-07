@@ -119,11 +119,11 @@ impl App {
             }
         }
     }
-    /// Run a git-column button. Push shells out on a worker thread so the UI
-    /// never blocks on the network; Commit hands the work to the claude in the
-    /// active pane (native commit-message input is phase 2), mirroring the old
-    /// webview panel's AI-commit. Both read the column's repo from the poller's
-    /// snapshot so the action always targets what the user sees.
+    /// Run a git-column button off a worker thread so the UI never blocks on
+    /// git/network. StageAll = `git add -A`; Pull/Push sync the branch; Commit
+    /// commits the STAGED changes with the panel's message (VSCode model). All
+    /// read the column's repo from the poller's snapshot so the action always
+    /// targets what the user sees.
     pub(crate) fn run_git_col_action(&mut self, btn: GitColBtn) {
         let cwd = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone());
         let Some(cwd) = cwd else { return };
@@ -137,6 +137,14 @@ impl App {
                     let _ = proxy.send_event(UserEvent::Redraw);
                 });
             }
+            GitColBtn::Pull => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = kasa_mcp::git::git_pull(&cwd);
+                    // Wake the loop so the poller's next tick repaints ahead/behind.
+                    let _ = proxy.send_event(UserEvent::Redraw);
+                });
+            }
             GitColBtn::Push => {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
@@ -146,12 +154,24 @@ impl App {
                 });
             }
             GitColBtn::Commit => {
-                if self.active_pane_is_claude() {
-                    self.send_bytes(
-                        "git 패널에서 커밋을 눌렀어. 지금 작업 디렉토리의 변경사항을 검토하고 적절한 한국어 커밋 메시지로 git add + commit 해줘.\n"
-                            .as_bytes(),
-                    );
+                // Commit the STAGED changes with the panel's message (VSCode
+                // model — commit -m, no add). Empty message → focus the input
+                // instead of a silent no-op, so the user sees where to type.
+                let msg = self.git_commit_msg.trim().to_string();
+                if msg.is_empty() {
+                    self.git_commit_focused = true;
+                    self.chrome_dirty = true;
+                    return;
                 }
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = kasa_mcp::git::git_commit_staged(&cwd, &msg);
+                    let _ = proxy.send_event(UserEvent::Redraw);
+                });
+                self.git_commit_msg.clear();
+                self.git_commit_cursor = 0;
+                self.git_commit_focused = false;
+                self.chrome_dirty = true;
             }
         }
     }
@@ -167,25 +187,6 @@ impl App {
             let _ = kasa_mcp::git::git_checkout(&cwd, &branch);
             let _ = proxy.send_event(UserEvent::Redraw);
         });
-    }
-    /// True when the active pane runs claude — gates the AI-commit injection so
-    /// a multi-line instruction never lands (and auto-submits) on a bare shell.
-    pub(crate) fn active_pane_is_claude(&self) -> bool {
-        let Some(id) = self.target_surface() else {
-            return false;
-        };
-        if let Some(p) = self.pty.get(&id) {
-            if let Some(l) = Self::smart_pane_label(p) {
-                return l.to_lowercase().contains("claude");
-            }
-        }
-        // Daemon-owned pane: fall back to the title the daemon pushed.
-        self.ws
-            .lock()
-            .ok()
-            .and_then(|ws| ws.panes.get(&id).and_then(|p| p.title.clone()))
-            .map(|t| t.to_lowercase().contains("claude"))
-            .unwrap_or(false)
     }
     /// Preview a changed file from the git column (image/code/markdown by
     /// extension), resolved against the column's repo cwd. A native diff view
@@ -648,6 +649,90 @@ impl App {
             self.modifiers.shift_key()
         } else {
             self.modifiers.alt_key()
+        }
+    }
+    /// The foreground job name of `pid`'s session if it's something other than
+    /// a plain login shell — what makes closing it worth a confirmation.
+    /// `None` when the pane is idle at a shell prompt or has no session.
+    pub(crate) fn pid_busy(&self, pid: &str) -> Option<String> {
+        let name = self.pty.get(pid)?.active_process_name()?;
+        if name.is_empty() || is_shell_name(&name) {
+            None
+        } else {
+            Some(decorate_process_name(&name))
+        }
+    }
+    /// First running job across every pane/tab — drives the window-close
+    /// confirmation ("close the whole app while claude is mid-run?").
+    fn any_pane_busy(&self) -> Option<String> {
+        let pids: Vec<String> = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .values()
+                .flat_map(|p| p.tabs.iter().filter_map(|t| t.pid.clone()))
+                .collect()
+        };
+        pids.iter().find_map(|p| self.pid_busy(p))
+    }
+    /// Cmd+W / header ×: close tab `idx` of `pane`. A multi-tab pane drops just
+    /// that tab; the last tab drops the pane (no-op on a single-pane window, so
+    /// we skip it there and leave the OS close button to quit). If the tab is
+    /// running a real job, raise the confirm modal instead of closing now.
+    pub(crate) fn confirm_or_close_tab(&mut self, pane: &str, idx: usize) {
+        let (tabs_len, pid) = {
+            let ws = self.ws.lock().unwrap();
+            match ws.panes.get(pane) {
+                Some(p) => (p.tabs.len(), p.tabs.get(idx).and_then(|t| t.pid.clone())),
+                None => return,
+            }
+        };
+        let action = if tabs_len > 1 {
+            PendingClose::Tab { pane: pane.to_string(), idx }
+        } else {
+            let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
+            if leaves <= 1 {
+                // Last pane of the window: close is a no-op (OS button quits),
+                // so don't even confirm.
+                return;
+            }
+            PendingClose::Pane { pane: pane.to_string() }
+        };
+        match pid.as_deref().and_then(|p| self.pid_busy(p)) {
+            Some(proc) => self.open_confirm_close(proc, action),
+            None => self.do_close(action),
+        }
+    }
+    /// CloseRequested (red light / Cmd+Q): returns true when a job is running
+    /// and the confirm modal was raised — the caller must NOT exit yet. Returns
+    /// false when nothing's running, so the caller exits immediately.
+    pub(crate) fn confirm_or_close_window(&mut self) -> bool {
+        match self.any_pane_busy() {
+            Some(proc) => {
+                self.open_confirm_close(proc, PendingClose::Window);
+                true
+            }
+            None => false,
+        }
+    }
+    fn open_confirm_close(&mut self, proc: String, action: PendingClose) {
+        self.confirm_close = Some(ConfirmClose { proc, action });
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+    /// Run a non-window close action immediately. `Window` is left to the
+    /// caller (it needs the event loop to exit).
+    pub(crate) fn do_close(&mut self, action: PendingClose) {
+        match action {
+            PendingClose::Tab { pane, idx } => {
+                self.close_tab(&pane, idx);
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            PendingClose::Pane { pane } => self.close_pane(&pane),
+            PendingClose::Window => {}
         }
     }
 }

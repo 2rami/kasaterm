@@ -1245,7 +1245,7 @@ impl GpuRenderer {
                         let disp_w = w.min(iw / self.scale);
                         let disp_h = disp_w * ih / iw;
                         if pen_y + disp_h > clip_top && pen_y < clip_bot {
-                            self.queue_image(key, x, pen_y, disp_w, disp_h, 1.0);
+                            self.queue_image(key, x, pen_y, disp_w, disp_h, 1.0, 0.0, 0.0);
                         }
                         pen_y += disp_h + base * 0.7;
                     } else {
@@ -1285,6 +1285,8 @@ impl GpuRenderer {
         _w: f32,
         h: f32,
         scroll: f32,
+        h_scroll: f32,
+        lang: &str,
         preedit: &str,
     ) -> f32 {
         let base = self.font_size_px as f32 / self.scale;
@@ -1294,41 +1296,32 @@ impl GpuRenderer {
         let digits = ((lines.len().max(1)) as f32).log10().floor() as usize + 1;
         let gutter_w = base * 0.62 * digits as f32 + base * 1.0;
         let cx0 = x + pad + gutter_w;
+        // Text origin pans left with the horizontal scroll; the fixed gutter is
+        // overpainted after each line so panned-left text never bleeds into it.
+        let tx0 = cx0 - h_scroll;
         let clip_top = y;
         let clip_bot = y + h;
         let top0 = (y - scroll) + pad;
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
             if pen_y + lh > clip_top && pen_y < clip_bot {
-                // Right-aligned line number in the gutter.
-                let num = format!("{}", li + 1);
-                let num_w = self.measure_run(&num, base, false, false, true, false);
-                self.draw_text(
-                    x + pad + (gutter_w - base * 0.5 - num_w).max(0.0),
-                    pen_y,
-                    &num,
-                    DrawOpts {
-                        font_size: base,
-                        color: crate::theme::TEXT_MUTE,
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                self.draw_text(
-                    cx0,
-                    pen_y,
-                    line,
-                    DrawOpts {
-                        font_size: base,
-                        color: crate::theme::TEXT,
-                        bold: false,
-                        italic: false,
-                    },
-                );
+                // Code line, syntax-highlighted (single TEXT color when `lang`
+                // is empty, e.g. plain text), panned by h_scroll.
+                let mut tx = tx0;
+                for (tok, col) in highlight_code_line(line, lang, crate::theme::TEXT) {
+                    tx = self.draw_text(
+                        tx,
+                        pen_y,
+                        &tok,
+                        DrawOpts { font_size: base, color: col, bold: false, italic: false },
+                    );
+                }
+                // Cursor (drawn before the gutter mask so one panned under the
+                // gutter gets clipped away cleanly).
                 if li == cursor.0 {
                     let prefix: String = line.chars().take(cursor.1).collect();
                     let cw = self.measure_run(&prefix, base, false, false, true, false);
-                    let mut cur_x = cx0 + cw;
+                    let mut cur_x = tx0 + cw;
                     // Composing Hangul: draw the preedit at the cursor with an
                     // accent underline, cursor sits after it.
                     if !preedit.is_empty() {
@@ -1347,8 +1340,26 @@ impl GpuRenderer {
                         );
                         cur_x += pw;
                     }
-                    self.rect(cur_x, pen_y, 2.0, lh, crate::theme::ACCENT);
+                    if cur_x >= cx0 {
+                        self.rect(cur_x, pen_y, 2.0, lh, crate::theme::ACCENT);
+                    }
                 }
+                // Gutter mask: repaint the column over any text that scrolled
+                // under it, then the right-aligned line number on top.
+                self.rect(x, pen_y, cx0 - x, lh, crate::theme::BG);
+                let num = format!("{}", li + 1);
+                let num_w = self.measure_run(&num, base, false, false, true, false);
+                self.draw_text(
+                    x + pad + (gutter_w - base * 0.5 - num_w).max(0.0),
+                    pen_y,
+                    &num,
+                    DrawOpts {
+                        font_size: base,
+                        color: crate::theme::TEXT_MUTE,
+                        bold: false,
+                        italic: false,
+                    },
+                );
             }
             pen_y += lh;
         }
@@ -1617,8 +1628,20 @@ impl GpuRenderer {
     /// centered) inside it. `zoom >= 1.0` scales past the fit size — when
     /// it would overflow the pane box we clip the dest rect AND adjust UVs
     /// so the image stays inside the pane (cropped to its center, never
-    /// leaking into adjacent panes).
-    pub fn queue_image(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32, zoom: f32) {
+    /// leaking into adjacent panes). `(pan_x, pan_y)` shift the crop window
+    /// (logical px, image-center offset) so a drag pans a zoomed image;
+    /// clamped here so the window never leaves the texture.
+    pub fn queue_image(
+        &mut self,
+        id: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        zoom: f32,
+        pan_x: f32,
+        pan_y: f32,
+    ) {
         let Some(entry) = self.images.get(id) else { return };
         let s = self.scale;
         let (bx, by, bw, bh) = (x * s, y * s, w * s, h * s);
@@ -1632,19 +1655,27 @@ impl GpuRenderer {
         let z = zoom.max(1.0);
         let raw_dw = iw * fit * z;
         let raw_dh = ih * fit * z;
-        // Per-axis: if the zoomed image fits, center it; if it overflows,
-        // clip the dest to the pane edge and crop the UV symmetrically.
+        // Per-axis: if the zoomed image fits, center it (pan has no room to
+        // act); if it overflows, clip the dest to the pane edge and crop the
+        // UV — shifted by the clamped pan so the visible window slides over
+        // the texture instead of staying centered.
         let (dx, dw, uv_x0, uv_x1) = if raw_dw <= bw {
             (bx + (bw - raw_dw) * 0.5, raw_dw, 0.0_f32, 1.0_f32)
         } else {
+            let max_off = (raw_dw - bw) * 0.5;
+            let off = (pan_x * s).clamp(-max_off, max_off);
             let frac = (raw_dw - bw) / (2.0 * raw_dw);
-            (bx, bw, frac, 1.0 - frac)
+            let d = off / raw_dw;
+            (bx, bw, frac - d, 1.0 - frac - d)
         };
         let (dy, dh, uv_y0, uv_y1) = if raw_dh <= bh {
             (by + (bh - raw_dh) * 0.5, raw_dh, 0.0_f32, 1.0_f32)
         } else {
+            let max_off = (raw_dh - bh) * 0.5;
+            let off = (pan_y * s).clamp(-max_off, max_off);
             let frac = (raw_dh - bh) / (2.0 * raw_dh);
-            (by, bh, frac, 1.0 - frac)
+            let d = off / raw_dh;
+            (by, bh, frac - d, 1.0 - frac - d)
         };
         self.image_quads.push((
             id.to_string(),

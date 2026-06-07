@@ -1274,6 +1274,40 @@ enum ImageBtn {
     Reset,
 }
 
+/// What a confirmed close-dialog should actually close.
+#[derive(Clone)]
+enum PendingClose {
+    /// Drop one tab of a multi-tab pane.
+    Tab { pane: String, idx: usize },
+    /// Drop a whole pane (its last tab).
+    Pane { pane: String },
+    /// Quit the app (window red-light / Cmd+W on the last pane).
+    Window,
+}
+
+/// A pending "something's running — close anyway?" confirmation. `proc` is the
+/// foreground process name that triggered it (for the message); `action` is
+/// what the 닫기 button runs.
+#[derive(Clone)]
+struct ConfirmClose {
+    proc: String,
+    action: PendingClose,
+}
+
+/// The two buttons in the confirm-close modal.
+#[derive(Clone, Copy, PartialEq)]
+enum ConfirmBtn {
+    Cancel,
+    Close,
+}
+
+/// A login shell (vs. a real foreground job like claude / vim / a build).
+/// Closing a pane whose foreground is just a shell needs no confirmation.
+fn is_shell_name(name: &str) -> bool {
+    let base = name.strip_prefix('-').unwrap_or(name);
+    matches!(base, "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "ksh")
+}
+
 /// Terminal-pane action button kinds, painted on the right side of a
 /// terminal pane's header (split-v / split-h). New-terminal and web were
 /// dropped — the +button covers "new shell" and the web overlay added
@@ -1345,6 +1379,10 @@ struct MarkdownPane {
     cur_col: usize,
     /// Scroll offset in logical px (both Render and Raw).
     scroll: usize,
+    /// Raw-mode horizontal scroll in logical px. Long code lines (checksums,
+    /// URLs) overflow the pane — this pans the text under a fixed line-number
+    /// gutter. 0 = flush left. Render mode ignores it (markdown wraps).
+    h_scroll: f32,
 }
 
 /// What a pane shows. Terminal panes drive a PTY + cell grid; image/markdown
@@ -1383,6 +1421,12 @@ struct PaneTab {
     /// number of 90° CW rotations applied (0..4). Ignored for non-image tabs.
     image_zoom: f32,
     image_rot: u8,
+    /// Pan offset (logical px) of the zoomed image's center from the pane
+    /// center, set by dragging the image body. Only has an effect while the
+    /// image overflows its box (zoomed in); `queue_image` clamps it so the
+    /// crop window never leaves the texture. 0,0 = centered.
+    image_pan_x: f32,
+    image_pan_y: f32,
     /// PtySession key in `App.pty` for terminal tabs. `None` for image /
     /// markdown tabs. The outer pane id (the layout-tree key) equals the
     /// pid of the *first* tab; secondary tabs have their own pid and a
@@ -1394,6 +1438,11 @@ struct PaneTab {
     /// `close_surface(preview_id)` so the daemon drops it (else it resurrects).
     /// `None` for normal terminal / leaf tabs.
     preview_id: Option<String>,
+    /// Source file path for a locally-opened image/markdown preview (file-tree
+    /// double-click). Markdown also carries its path in `doc.path`, but image
+    /// tabs have nowhere else to keep it; this single field lets the file-tree
+    /// highlight + de-dup logic ask "which file is this tab showing" uniformly.
+    preview_path: Option<std::path::PathBuf>,
 }
 
 impl PaneTab {
@@ -1968,21 +2017,26 @@ struct GitColView {
     insertions: u32,
     deletions: u32,
     clean: bool,
-    /// One row per changed file: `(marker, path)` where marker is
-    /// `A` staged · `M` modified · `?` untracked. Ordered staged→modified→new.
-    files: Vec<(char, String)>,
+    /// Index (staged) changes — VSCode's "Staged Changes". `(marker, path)`
+    /// where marker is `A`/`M`/`D`. Each row's - button unstages it.
+    staged: Vec<(char, String)>,
+    /// Worktree changes not yet staged — VSCode's "Changes". `(marker, path)`
+    /// where marker is `M` modified · `?` untracked. Each row's + button
+    /// stages it. A partially-staged file appears in BOTH lists.
+    unstaged: Vec<(char, String)>,
     /// Local branch names for the switcher dropdown (current one is `branch`).
     branches: Vec<String>,
 }
 
 /// Action buttons at the foot of the git column. `StageAll` runs `git add -A`;
-/// `Commit` hands the commit to the active claude pane; `Push` pushes the
-/// current branch. All shell out through `kasa_mcp::git` on a worker thread so
-/// the UI never blocks.
+/// `Commit` hands the commit to the active claude pane; `Pull`/`Push` sync the
+/// current branch with its upstream. All shell out through `kasa_mcp::git` on a
+/// worker thread so the UI never blocks.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GitColBtn {
     StageAll,
     Commit,
+    Pull,
     Push,
 }
 
@@ -2085,7 +2139,7 @@ fn code_lang_for_path(p: &std::path::Path) -> &'static str {
         "json" | "jsonc" => "json",
         "sh" | "bash" | "zsh" | "fish" => "bash",
         "sql" => "sql",
-        "toml" => "toml",
+        "toml" | "lock" => "toml", // Cargo.lock is TOML
         "yml" | "yaml" => "yaml",
         "html" | "htm" => "html",
         "css" | "scss" | "sass" => "css",
@@ -2125,6 +2179,13 @@ struct App {
     /// repro for the multi-pane render path. Empty in normal use.
     autosplit_plan: Vec<kasa_pty::SplitDir>,
     autosplit_at: Option<Instant>,
+    /// Headless file-open repro. KASATERM_AUTOOPEN=<path> fires
+    /// `open_file_split` after AUTOOPEN_MS so the preview-pane + file-tree
+    /// highlight path can be screenshotted without a real double-click.
+    autoopen_path: Option<std::path::PathBuf>,
+    autoopen_at: Option<Instant>,
+    /// Headless confirm-modal repro: deadline to fire `confirm_or_close_window`.
+    autoconfirm_at: Option<Instant>,
     /// Headless tab-drag simulation. KASATERM_AUTODRAG="src:from:dst"
     /// (e.g. "%2:0:%0") fires `simulate_tab_merge` after AUTODRAG_MS so
     /// the cross-pane merge path can be verified without a real mouse.
@@ -2284,6 +2345,16 @@ struct App {
     /// on a tab; releasing either reorders (if it became a drag) or switches
     /// the active tab (if it stayed a click).
     tab_drag: Option<TabDrag>,
+    /// In-flight image-pane pan drag: `(pane_id, start_cursor_px, base_pan)`.
+    /// `Some` while dragging a zoomed image's body; CursorMoved updates the
+    /// active tab's `image_pan_*` from `base_pan + (cursor - start)`.
+    image_pan_drag: Option<(String, (f32, f32), (f32, f32))>,
+    /// Active "close while a process is running?" modal. While `Some`, the
+    /// dialog is painted over everything and swallows input until the user
+    /// picks 취소/닫기.
+    confirm_close: Option<ConfirmClose>,
+    /// Confirm-modal button hit rects, refreshed each frame: `(btn, rect)`.
+    confirm_btn_rects: Vec<(ConfirmBtn, (f32, f32, f32, f32))>,
     /// Currently hovered in-pane tab `(pane_id, tab_idx)`. Drives the
     /// hover-only × and brighter text on inactive tabs.
     pane_tab_hover: Option<(String, usize)>,
@@ -2319,6 +2390,10 @@ struct App {
     /// this for us when the OS owns the titlebar, but our
     /// fullsize_content_view setup means we intercept those clicks.
     last_left_click: Option<(Instant, (f32, f32))>,
+    /// Last file-tree row click (time + path). A second click on the *same*
+    /// file row within the double-click window opens it in a split — folders
+    /// keep their single-click expand, so files need their own gate.
+    last_tree_click: Option<(Instant, std::path::PathBuf)>,
     /// Pane id currently zoomed (tmux-style): rendered alone filling the work
     /// area with the other panes hidden, until toggled off. GUI-local render
     /// state — the daemon's layout tree is untouched (like a divider ratio).
@@ -2398,6 +2473,18 @@ struct App {
     git_col_scroll: f32,
     git_col_file_rects: Vec<(String, (f32, f32, f32, f32))>,
     git_col_btn_rects: Vec<(GitColBtn, (f32, f32, f32, f32))>,
+    /// Per-row stage/unstage button hit rects: `(stage, path, rect)` where
+    /// `stage == true` means the + button (git add), `false` the − (unstage).
+    /// Rebuilt each paint; only the hovered row's button is present.
+    git_col_stage_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
+    /// VSCode-style commit message input above the action buttons. The buffer
+    /// is single-line (commit subject); `cursor` is a char index into it.
+    /// `focused` routes keystrokes here (see `forward_key`) instead of the PTY.
+    /// `input_rect` is the per-paint hit target for click-to-focus.
+    git_commit_msg: String,
+    git_commit_cursor: usize,
+    git_commit_focused: bool,
+    git_commit_input_rect: Option<(f32, f32, f32, f32)>,
     /// `git status` snapshot for the active pane's cwd: the poller writes it
     /// off the main thread, the render reads it. `git_col_cwd` is the cwd the
     /// poller should refresh (render publishes the active pane's cwd into it).
@@ -2441,6 +2528,14 @@ struct App {
     file_tree_root: Option<std::path::PathBuf>,
     file_tree_expanded: std::collections::HashSet<std::path::PathBuf>,
     file_tree_nodes: Vec<FileNode>,
+    /// Live file-tree refresh. A background thread polls the dirs in
+    /// `file_tree_watch` (root + expanded folders) ~800ms apart and, on any
+    /// add/remove/rename/mtime change, sets `file_tree_fs_dirty` + wakes the
+    /// loop. `refresh_file_tree` rebuilds when the flag is set. Off-GUI-thread
+    /// so the event-driven loop stays idle until the FS actually changes.
+    file_tree_fs_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    file_tree_watch: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    file_tree_watch_started: bool,
     file_tree_hover: Option<std::path::PathBuf>,
     file_tree_scroll: f32,
     file_tree_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
@@ -2559,6 +2654,9 @@ impl App {
             autoquit_at: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,
+            autoopen_path: None,
+            autoopen_at: None,
+            autoconfirm_at: None,
             autodrag_plan: None,
             autodrag_at: None,
             autowindow_left: 0,
@@ -2605,6 +2703,9 @@ impl App {
             last_divider_pty_resize: None,
             header_drag: None,
             tab_drag: None,
+            image_pan_drag: None,
+            confirm_close: None,
+            confirm_btn_rects: Vec::new(),
             pane_tab_hover: None,
             image_btn_rects: Vec::new(),
             sidebar_w_logical: SIDEBAR_W,
@@ -2613,6 +2714,7 @@ impl App {
             pending_resize: None,
             mouse_forward_pane: None,
             last_left_click: None,
+            last_tree_click: None,
             zoomed_pane: None,
             saved_window_frame: None,
             titlebar_drag_pending: None,
@@ -2635,6 +2737,11 @@ impl App {
             git_col_scroll: 0.0,
             git_col_file_rects: Vec::new(),
             git_col_btn_rects: Vec::new(),
+            git_col_stage_rects: Vec::new(),
+            git_commit_msg: String::new(),
+            git_commit_cursor: 0,
+            git_commit_focused: false,
+            git_commit_input_rect: None,
             git_col_data: std::sync::Arc::new(std::sync::Mutex::new(GitColView::default())),
             git_col_cwd: std::sync::Arc::new(std::sync::Mutex::new(None)),
             git_col_pinned_cwd: None,
@@ -2647,6 +2754,9 @@ impl App {
             pane_cwd_check: None,
             show_pane_numbers: false,
             file_tree_root: None,
+            file_tree_fs_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            file_tree_watch: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            file_tree_watch_started: false,
             file_tree_expanded: std::collections::HashSet::new(),
             file_tree_nodes: Vec::new(),
             file_tree_hover: None,
