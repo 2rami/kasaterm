@@ -479,6 +479,26 @@ impl App {
         }
         self.pane_cwd_cache = cache;
     }
+    /// A pane's current shell cwd — cache first (refreshed ~700ms), else a live
+    /// `lsof` on its shell pid so a just-spawned pane (not yet in the cache)
+    /// still resolves. Used to inherit the cwd into a sibling on split/tab.
+    pub(crate) fn pane_current_cwd(&self, id: &str) -> Option<std::path::PathBuf> {
+        if let Some(p) = self.pane_cwd_cache.get(id) {
+            return Some(p.clone());
+        }
+        self.pty
+            .get(id)
+            .and_then(|s| s.shell_pid())
+            .and_then(socket::pid_cwd)
+    }
+    /// cwd for a shell about to be spawned off `prev_pane` (the pane being split
+    /// or tabbed). Threads the spawning pane's live cwd into `resolve_spawn_cwd`
+    /// so the `"last"` setting behaves like other terminals' "reuse previous
+    /// directory" mode.
+    pub(crate) fn spawn_cwd_from(&self, prev_pane: Option<&str>) -> Option<String> {
+        let prev = prev_pane.and_then(|id| self.pane_current_cwd(id));
+        resolve_spawn_cwd(prev)
+    }
     /// Recompute the sidebar file tree when its root (the active pane's cwd)
     /// changes — pane switch or `cd`. Cheap string compare per frame; the
     /// read_dir walk only runs on a real change (or after expand/collapse,
@@ -694,6 +714,19 @@ impl App {
         self.file_tree_nodes.clear();
         if let Some(root) = self.file_tree_root.clone() {
             Self::walk_dir(&root, 0, &self.file_tree_expanded, &mut self.file_tree_nodes);
+            // Second pass: one batched `git check-ignore` over every visible
+            // path marks the gitignored rows italic+dim. Dotfiles get the same
+            // treatment regardless (check-ignore won't flag a tracked dotfile).
+            let paths: Vec<String> = self
+                .file_tree_nodes
+                .iter()
+                .map(|n| n.path.to_string_lossy().into_owned())
+                .collect();
+            let ignored = kasa_mcp::git::git_ignored(&root, &paths);
+            for n in &mut self.file_tree_nodes {
+                n.ignored = n.name.starts_with('.')
+                    || ignored.contains(n.path.to_string_lossy().as_ref());
+            }
         }
         // Hand the FS watcher the dirs currently on screen (root + each expanded
         // folder) so it polls exactly what the user can see change.
@@ -710,6 +743,52 @@ impl App {
             );
         }
     }
+    /// Rebuild `file_tree_nodes` as flat whole-tree search hits for the current
+    /// query (empty → restore the normal expanded tree). Recurses every folder
+    /// (not just expanded ones) so a collapsed branch is still searchable, but
+    /// skips heavy/ignored dirs and caps results so a huge repo can't stall the
+    /// GUI. Matches are flattened to depth 0 — a hit list, not a tree.
+    pub(crate) fn file_tree_search_collect(&mut self) {
+        let q = self.file_tree_search_query.to_lowercase();
+        if q.is_empty() {
+            self.rebuild_file_tree_nodes();
+            return;
+        }
+        self.file_tree_nodes.clear();
+        if let Some(root) = self.file_tree_root.clone() {
+            Self::search_walk(&root, &q, 0, &mut self.file_tree_nodes);
+        }
+    }
+    /// Depth-bounded recursive name search. `.git`, deep nests, and the usual
+    /// build/dep dirs are skipped (they're huge and gitignored anyway); the hit
+    /// list is capped at 300 so the worst case stays bounded.
+    fn search_walk(dir: &std::path::Path, q: &str, depth: usize, out: &mut Vec<FileNode>) {
+        if out.len() >= 300 || depth > 7 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let heavy = ["node_modules", "target", "dist", ".git", "build", ".next"];
+        let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
+        for e in rd.filter_map(|e| e.ok()) {
+            let name = nfc_hangul(&e.file_name().to_string_lossy());
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if name.to_lowercase().contains(q) {
+                out.push(FileNode { path: e.path(), name: name.clone(), is_dir, depth: 0, ignored: false });
+                if out.len() >= 300 {
+                    return;
+                }
+            }
+            if is_dir && !heavy.contains(&name.as_str()) {
+                subdirs.push(e.path());
+            }
+        }
+        for sub in subdirs {
+            Self::search_walk(&sub, q, depth + 1, out);
+            if out.len() >= 300 {
+                return;
+            }
+        }
+    }
     /// Recursive read_dir: folders first then files (case-insensitive), dotfiles
     /// skipped, descending only into expanded folders.
     pub(crate) fn walk_dir(
@@ -724,12 +803,15 @@ impl App {
         let mut entries: Vec<FileNode> = rd
             .filter_map(|e| e.ok())
             .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
+                let name = nfc_hangul(&e.file_name().to_string_lossy());
+                // `.git` is the one dotfile we hide: expanding it floods the
+                // tree with thousands of object files. Everything else (.claude,
+                // .gitignore …) shows, just italic + dim (set in rebuild).
+                if name == ".git" {
                     return None;
                 }
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                Some(FileNode { path: e.path(), name, is_dir, depth })
+                Some(FileNode { path: e.path(), name, is_dir, depth, ignored: false })
             })
             .collect();
         entries.sort_by(|a, b| {

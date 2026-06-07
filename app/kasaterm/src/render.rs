@@ -633,16 +633,19 @@ impl App {
                 // bar anchors off box_y + box_h whether or not a header is drawn.
                 let box_x = WINDOW_PADDING + sidebar_w + x_cells as f32 * self.cell.w;
                 let box_y = TITLE_HEIGHT + y_cells as f32 * self.cell.h;
+                // A lone unsplit pane arrives as a (0,0,0,0) placeholder (see the
+                // clip note above), which would leave the box 0×0 and starve the
+                // footer (`fbox_h < PANE_FOOTER_HEIGHT` → skipped). Treat a 0 span
+                // as "fills the grid" so the box — and its status bar — spans the
+                // whole pane area just like a real right/bottom-edge leaf.
                 let box_w = {
                     let base = w_cells as f32 * self.cell.w;
-                    if x_cells + w_cells >= grid_cols {
+                    if w_cells == 0 || x_cells + w_cells >= grid_cols {
+                        let right_edge = WINDOW_PADDING + sidebar_w + (x_cells + w_cells) as f32 * self.cell.w;
                         let extra = self.window.as_ref().map_or(0.0, |w| {
                             let s = w.scale_factor() as f32 * self.ui_zoom;
                             let raw_lw = w.inner_size().width as f32 / s;
-                            (raw_lw
-                                - git_reserve
-                                - (WINDOW_PADDING + sidebar_w + grid_cols as f32 * self.cell.w))
-                                .max(0.0)
+                            (raw_lw - git_reserve - right_edge).max(0.0)
                         });
                         base + extra
                     } else {
@@ -651,11 +654,12 @@ impl App {
                 };
                 let box_h = {
                     let base = h_cells as f32 * self.cell.h;
-                    if y_cells + h_cells >= grid_rows {
+                    if h_cells == 0 || y_cells + h_cells >= grid_rows {
+                        let bottom_edge = TITLE_HEIGHT + (y_cells + h_cells) as f32 * self.cell.h;
                         let extra = self.window.as_ref().map_or(0.0, |w| {
                             let s = w.scale_factor() as f32 * self.ui_zoom;
                             let raw_lh = w.inner_size().height as f32 / s;
-                            (raw_lh - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h)).max(0.0)
+                            (raw_lh - bottom_edge).max(0.0)
                         });
                         base + extra
                     } else {
@@ -1552,13 +1556,40 @@ impl App {
                     theme::BORDER,
                 );
                 let inset = SIDEBAR_TAB_INSET;
-                let item_h = 22.0_f32;
+                let item_h = 26.0_f32;
                 let row_x = tree_col_x + inset;
                 let row_w = (tree_col_w - inset * 2.0).max(0.0);
-                let start_y = TITLE_HEIGHT + 10.0;
+                // Search box pinned to the column top; the tree starts below it.
+                let search_box_h = 28.0_f32;
+                let sbx_y = TITLE_HEIGHT + 8.0;
+                {
+                    let active = self.file_tree_search_active;
+                    let fill = if active { theme::SURFACE_ACTIVE } else { theme::SURFACE };
+                    round_rect(g, row_x, sbx_y, row_w, search_box_h, theme::RADIUS_SM, theme::BORDER);
+                    round_rect(g, row_x + 1.0, sbx_y + 1.0, row_w - 2.0, search_box_h - 2.0, theme::RADIUS_SM - 1.0, fill);
+                    let ic = if active { theme::TEXT } else { theme::TEXT_DIM };
+                    g.queue_icon("folder-tree", row_x + 8.0, sbx_y + (search_box_h - 14.0) / 2.0, 14.0, ic);
+                    let mut shown = self.file_tree_search_query.clone();
+                    if active && self.in_preedit {
+                        shown.push_str(&self.preedit);
+                    }
+                    let (txt, col) = if shown.is_empty() {
+                        ("파일 검색…".to_string(), theme::TEXT_MUTE)
+                    } else {
+                        (shown, theme::TEXT)
+                    };
+                    g.draw_text(row_x + 30.0, sbx_y + (search_box_h - 13.0) / 2.0, &txt,
+                        gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
+                    self.file_tree_search_rect = (row_x, sbx_y, row_w, search_box_h);
+                }
+                let start_y = sbx_y + search_box_h + 8.0;
                 let win_h = win_px.1 / scale;
                 let step = 14.0_f32; // per-depth indent width
                 let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
+                // `file_tree_nodes` already holds the right set: a query swaps it
+                // for whole-tree search hits (file_tree_search_collect), empty
+                // restores the expanded tree. So just render it as-is.
+                let vis_nodes: Vec<&FileNode> = self.file_tree_nodes.iter().collect();
                 // File the focused pane is currently showing — its row gets an
                 // active tint + accent bar so the sidebar tracks the open file.
                 // Inlined (not the `active_preview_path` helper) so it borrows
@@ -1568,7 +1599,8 @@ impl App {
                         .as_ref()
                         .and_then(|id| ws.panes.get(id).and_then(|p| p.preview_path.clone()))
                 });
-                for (idx, node) in self.file_tree_nodes.iter().enumerate() {
+                for (idx, node) in vis_nodes.iter().enumerate() {
+                    let node = *node;
                     let y = start_y - self.file_tree_scroll + idx as f32 * item_h;
                     if y + item_h < start_y || y > win_h {
                         continue; // off-screen → clip (and don't cache a hit rect)
@@ -1599,34 +1631,43 @@ impl App {
                         g.rect(gx, y, 1.0, item_h, theme::with_alpha(theme::BORDER, 0x55));
                     }
                     let base_x = row_x + node.depth as f32 * step;
-                    let isz = 15.0_f32;
+                    let isz = 16.0_f32;
                     let iy = y + (item_h - isz) / 2.0;
+                    let font = 13.0_f32;
                     // Chevron column (folders only); files align past it.
                     if node.is_dir {
                         let chev = if expanded { "chevron-down" } else { "chevron-right" };
                         let cc = if hovered { theme::TEXT } else { theme::TEXT_MUTE };
                         g.queue_icon(chev, base_x + 2.0, y + (item_h - 12.0) / 2.0, 12.0, cc);
                     }
-                    let icon_x = base_x + 17.0;
-                    // Multi-color Material icon: language logo per file, tinted
-                    // folder variant per common dir name. Chevron already shows
-                    // open/closed, so folders reuse the closed glyph.
-                    let fname = node
-                        .path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(node.name.as_str());
-                    let icon = if node.is_dir { folder_icon(fname) } else { file_icon(fname) };
-                    g.queue_ft_icon(icon, icon_x, iy, isz);
-                    // Folders read brighter than files (soft hierarchy); hover
-                    // lifts a file to full strength.
-                    let fg = if hovered || is_open || node.is_dir { theme::TEXT } else { theme::TEXT_DIM };
-                    let text_x = icon_x + isz + 7.0;
+                    let icon_x = base_x + 18.0;
+                    // Single-color outline icon (cursor/VSCode style): a plain
+                    // folder or file glyph, tinted by row state. Ignored/dotfile
+                    // rows render dim + italic so build output (target, dist) and
+                    // config (.git, .claude) recede from real source.
+                    let icon_color = if node.ignored {
+                        theme::with_alpha(theme::TEXT_DIM, 0x99)
+                    } else if hovered || is_open {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    g.queue_icon(if node.is_dir { "folder" } else { "file" }, icon_x, iy, isz, icon_color);
+                    // Folders read brighter than files (soft hierarchy); ignored
+                    // rows are muted; hover/open lift to full strength.
+                    let fg = if node.ignored {
+                        theme::TEXT_MUTE
+                    } else if hovered || is_open || node.is_dir {
+                        theme::TEXT
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    let text_x = icon_x + isz + 8.0;
                     // Clip the name to the column width with an ellipsis — long
                     // hashed file names (webp/jpg) otherwise overflow the sidebar
                     // straight into the terminal grid.
                     let avail = (row_x + row_w - text_x - 4.0).max(0.0);
-                    let label = if g.measure_chrome_text(&node.name, 12.0, false) <= avail {
+                    let label = if g.measure_chrome_text(&node.name, font, false) <= avail {
                         node.name.clone()
                     } else {
                         let mut s = String::new();
@@ -1634,7 +1675,7 @@ impl App {
                             let mut trial = s.clone();
                             trial.push(ch);
                             trial.push('…');
-                            if g.measure_chrome_text(&trial, 12.0, false) > avail {
+                            if g.measure_chrome_text(&trial, font, false) > avail {
                                 break;
                             }
                             s.push(ch);
@@ -1644,9 +1685,9 @@ impl App {
                     };
                     g.draw_text(
                         text_x,
-                        y + (item_h - 12.0) / 2.0,
+                        y + (item_h - font) / 2.0,
                         &label,
-                        gpu::DrawOpts { font_size: 12.0, color: fg, bold: false, italic: false },
+                        gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: node.ignored },
                     );
                     rects.push((node.path.clone(), (row_x, y, row_w, item_h)));
                 }
@@ -2211,7 +2252,7 @@ impl App {
                 // panes draw nothing. about_to_wait keeps frames coming (a
                 // cheap GPU-time present, no chrome rebuild) while a pane is busy.
                 if h.busy {
-                    let bar_h = 2.0;
+                    let bar_h = 3.0;
                     let by = h.y + PANE_HEADER_HEIGHT - bar_h;
                     // One FLAG_WORKING_BAR quad — the shader sweeps the segment
                     // over a faint track from u.time, so there's no per-frame
@@ -2553,10 +2594,11 @@ impl App {
                     .as_ref()
                     .map(|p| {
                         let s = p.to_string_lossy().into_owned();
-                        match &sb_home {
+                        let s = match &sb_home {
                             Some(h) if s.starts_with(h.as_str()) => format!("~{}", &s[h.len()..]),
                             _ => s,
-                        }
+                        };
+                        nfc_hangul(&s)
                     })
                     .unwrap_or_else(|| "—".to_string());
                 // cwd pill — folder icon + path.
@@ -2712,6 +2754,9 @@ impl App {
                 };
                 if let Some((ax, ay, _aw, _ah)) = anchor {
                     // Item labels (and the value each row carries on click).
+                    // Dir names normalized NFC so macOS-decomposed Hangul reads
+                    // as composed syllables, not scattered jamo.
+                    let is_path = matches!(kind, StatusbarMenu::Path);
                     let labels: Vec<String> = match kind {
                         StatusbarMenu::Path => self
                             .statusbar_menu_dirs
@@ -2721,33 +2766,76 @@ impl App {
                                 if i == 0 {
                                     ".. (상위 폴더)".to_string()
                                 } else {
-                                    p.file_name()
-                                        .and_then(|s| s.to_str())
-                                        .unwrap_or("?")
-                                        .to_string()
+                                    nfc_hangul(p.file_name().and_then(|s| s.to_str()).unwrap_or("?"))
                                 }
                             })
                             .collect(),
                         StatusbarMenu::Branch => self.statusbar_menu_branches.clone(),
                     };
-                    let item_h = 24.0;
+                    // Live-search filter (path picker only). Inlined as field
+                    // reads — the gpu borrow (`g`) rules out &self method calls.
+                    let q = self.statusbar_menu_search.to_lowercase();
+                    let fidx: Vec<usize> = if is_path {
+                        self.statusbar_menu_dirs
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, p)| {
+                                q.is_empty()
+                                    || *i == 0
+                                    || p.file_name()
+                                        .and_then(|s| s.to_str())
+                                        .map(|s| nfc_hangul(s).to_lowercase().contains(&q))
+                                        .unwrap_or(false)
+                            })
+                            .map(|(i, _)| i)
+                            .collect()
+                    } else {
+                        (0..labels.len()).collect()
+                    };
+                    let item_h = if is_path { 28.0 } else { 24.0 };
+                    // Search field band at the top of the path picker.
+                    let search_h = if is_path { 34.0 } else { 0.0 };
                     let max_rows = 12usize;
-                    let shown = labels.len().min(max_rows);
-                    let menu_w = 240.0_f32;
-                    let menu_h = item_h * shown.max(1) as f32 + 8.0;
+                    let total = fidx.len();
+                    let view_rows = total.min(max_rows);
+                    let menu_w = if is_path { 300.0_f32 } else { 240.0_f32 };
+                    let menu_h = search_h + item_h * view_rows.max(1) as f32 + 8.0;
                     let menu_x = ax.min((win_px.0 / scale) - menu_w - 8.0).max(4.0);
                     let menu_y = (ay - menu_h - 2.0).max(TITLE_HEIGHT + 2.0);
+                    // Whole-row scroll: this renderer has no scissor clip, so a
+                    // partial row would spill past the rounded menu edge. Snap
+                    // the wheel offset to row units and page by integer rows.
+                    let overflow = total.saturating_sub(view_rows);
+                    let scroll = self.statusbar_menu_scroll.clamp(0.0, overflow as f32 * item_h);
+                    self.statusbar_menu_scroll = scroll;
+                    let first = ((scroll / item_h).round() as usize).min(overflow);
+                    self.statusbar_menu_rect = Some((menu_x, menu_y, menu_w, menu_h));
                     round_rect(g, menu_x, menu_y, menu_w, menu_h, theme::RADIUS_MD, theme::SURFACE);
                     round_rect(g, menu_x, menu_y, menu_w, menu_h, theme::RADIUS_MD, theme::with_alpha(theme::BORDER, 0xFF));
-                    if labels.is_empty() {
-                        g.draw_text(
-                            menu_x + 12.0,
-                            menu_y + 6.0,
-                            "(없음)",
-                            gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_MUTE, bold: false, italic: false },
-                        );
+                    let rows_top = menu_y + 4.0 + search_h;
+                    // Inset search field + live query (or dim placeholder). Typing
+                    // anywhere while the picker is open feeds this (forward_key).
+                    if is_path {
+                        let fy = menu_y + 6.0;
+                        let fh = search_h - 8.0;
+                        round_rect(g, menu_x + 8.0, fy, menu_w - 16.0, fh, theme::RADIUS_SM, theme::BG);
+                        g.queue_icon("folder-tree", menu_x + 16.0, fy + (fh - 14.0) / 2.0, 14.0, theme::TEXT_DIM);
+                        let mut shown = self.statusbar_menu_search.clone();
+                        if self.in_preedit {
+                            shown.push_str(&self.preedit);
+                        }
+                        let (txt, col) = if shown.is_empty() {
+                            ("디렉터리 검색…".to_string(), theme::TEXT_MUTE)
+                        } else {
+                            (shown, theme::TEXT)
+                        };
+                        g.draw_text(menu_x + 38.0, fy + (fh - 13.0) / 2.0, &txt,
+                            gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
                     }
-                    let mut iy = menu_y + 4.0;
+                    if total == 0 {
+                        g.draw_text(menu_x + 16.0, rows_top + 4.0, "(없음)",
+                            gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                    }
                     let current_branch = matches!(kind, StatusbarMenu::Branch)
                         .then(|| {
                             self.pane_cwd_cache
@@ -2755,22 +2843,45 @@ impl App {
                                 .and_then(|p| self.window_git.lock().ok().and_then(|m| m.get(p).map(|b| b.branch.clone())))
                         })
                         .flatten();
-                    for (i, label) in labels.iter().take(shown).enumerate() {
+                    let font = if is_path { 13.0 } else { 12.0 };
+                    for vis in 0..view_rows {
+                        let Some(&i) = fidx.get(first + vis) else { break };
+                        let Some(label) = labels.get(i) else { break };
+                        let iy = rows_top + vis as f32 * item_h;
                         let row = (menu_x, iy, menu_w, item_h);
                         let hover = sb_mx >= row.0
                             && sb_mx <= row.0 + row.2
                             && sb_my >= row.1
                             && sb_my <= row.1 + row.3;
+                        // Hovered row = bright accent fill (cursor's selected-item
+                        // cue); its glyphs flip to dark for contrast.
                         if hover {
-                            round_rect(g, row.0 + 2.0, row.1, row.2 - 4.0, row.3, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                            round_rect(g, row.0 + 2.0, row.1, row.2 - 4.0, row.3, theme::RADIUS_SM, theme::ACCENT);
                         }
                         let is_current = current_branch.as_deref() == Some(label.as_str());
-                        let color = if is_current { theme::ACCENT } else { theme::TEXT };
+                        let mut text_x = menu_x + 12.0;
+                        // Path picker: leading ↑ / folder / file icon per row.
+                        if is_path {
+                            let is_parent = i == 0;
+                            let is_dir = is_parent
+                                || self.statusbar_menu_dirs.get(i).map(|p| p.is_dir()).unwrap_or(false);
+                            let glyph = if is_parent { "arrow-up" } else if is_dir { "folder" } else { "file" };
+                            let icon_c = if hover { theme::BG } else { theme::TEXT_DIM };
+                            g.queue_icon(glyph, text_x, iy + (item_h - 15.0) / 2.0, 15.0, icon_c);
+                            text_x += 15.0 + 9.0;
+                        }
+                        let color = if hover {
+                            theme::BG
+                        } else if is_current {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT
+                        };
                         g.draw_text(
-                            menu_x + 12.0,
-                            iy + (item_h - 12.0) / 2.0,
+                            text_x,
+                            iy + (item_h - font) / 2.0,
                             label,
-                            gpu::DrawOpts { font_size: 12.0, color, bold: is_current, italic: false },
+                            gpu::DrawOpts { font_size: font, color, bold: is_current, italic: false },
                         );
                         match kind {
                             StatusbarMenu::Path => self
@@ -2780,9 +2891,23 @@ impl App {
                                 .statusbar_menu_branch_rects
                                 .push((label.clone(), row)),
                         }
-                        iy += item_h;
                     }
+                    // Scrollbar — thin thumb on the right edge so overflow is
+                    // visible; only when the list exceeds the viewport.
+                    if overflow > 0 {
+                        let track_x = menu_x + menu_w - 4.0;
+                        let track_y = rows_top;
+                        let track_h = view_rows as f32 * item_h;
+                        let thumb_h = (track_h * view_rows as f32 / total as f32).max(18.0);
+                        let thumb_y = track_y
+                            + (track_h - thumb_h) * (first as f32 / overflow as f32);
+                        round_rect(g, track_x, thumb_y, 3.0, thumb_h, 1.5, theme::with_alpha(theme::TEXT, 0x55));
+                    }
+                } else {
+                    self.statusbar_menu_rect = None;
                 }
+            } else {
+                self.statusbar_menu_rect = None;
             }
             // "복사됨" toast, bottom-center, brief fade after a block copy.
             if toast_alpha > 0.0 {

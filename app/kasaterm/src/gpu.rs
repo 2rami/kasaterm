@@ -1499,32 +1499,6 @@ impl GpuRenderer {
         })
     }
 
-    /// Bundled Material Icon Theme SVG for a file-type icon name (multi-color,
-    /// own fills — drawn through `queue_ft_icon`, not tinted). Compiled in so
-    /// the .app needs no external asset dir. Sourced from
-    /// material-extensions/vscode-material-icon-theme (MIT).
-    fn ft_icon_svg(name: &str) -> Option<&'static str> {
-        macro_rules! ft {
-            ($($n:literal),* $(,)?) => {
-                match name {
-                    $($n => include_str!(concat!("../assets/icons/ft/", $n, ".svg")),)*
-                    _ => return None,
-                }
-            };
-        }
-        Some(ft!(
-            "audio", "c", "console", "cpp", "csharp", "css", "database", "docker",
-            "document", "folder-base", "folder-config", "folder-dist", "folder-docs",
-            "folder-github", "folder-images", "folder-node", "folder-public",
-            "folder-src", "folder-target", "folder-test", "font", "git", "go",
-            "graphql", "html", "image", "java", "javascript", "json", "kotlin",
-            "license", "lock", "lua", "markdown", "nodejs", "pdf", "php", "powershell",
-            "prisma", "python", "react", "readme", "ruby", "rust", "sass", "settings",
-            "svg", "swift", "todo", "tsconfig", "typescript", "video", "vue", "yaml",
-            "zip",
-        ))
-    }
-
     /// Rasterize an SVG into a square `px`-side RGBA8 buffer. `currentColor`
     /// is forced white: only the alpha channel matters because icons draw
     /// through the glyph tint path (texel.a × fg.rgb), so the theme color is
@@ -1533,34 +1507,6 @@ impl GpuRenderer {
         let svg = svg.replace("currentColor", "#ffffff");
         let opt = resvg::usvg::Options::default();
         let tree = resvg::usvg::Tree::from_str(&svg, &opt).ok()?;
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)?;
-        let size = tree.size();
-        let scale = px as f32 / size.width().max(size.height());
-        let tf = resvg::tiny_skia::Transform::from_scale(scale, scale);
-        resvg::render(&tree, tf, &mut pixmap.as_mut());
-        Some(pixmap.data().to_vec())
-    }
-
-    /// System fontdb for SVG `<text>` (the file-icon extension labels), loaded
-    /// once — load_system_fonts is slow and icons are cached after first paint.
-    fn icon_fontdb() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
-        static DB: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
-            std::sync::OnceLock::new();
-        DB.get_or_init(|| {
-            let mut db = resvg::usvg::fontdb::Database::new();
-            db.load_system_fonts();
-            std::sync::Arc::new(db)
-        })
-        .clone()
-    }
-
-    /// Rasterize a MULTI-COLOR svg (file-type icons) preserving its own fills —
-    /// unlike `rasterize_icon`, no currentColor→white flatten. Drawn through the
-    /// FLAG_COLOR path so the authored colors land on screen unchanged.
-    fn rasterize_color_svg(svg: &str, px: u32) -> Option<Vec<u8>> {
-        let mut opt = resvg::usvg::Options::default();
-        opt.fontdb = Self::icon_fontdb();
-        let tree = resvg::usvg::Tree::from_str(svg, &opt).ok()?;
         let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)?;
         let size = tree.size();
         let scale = px as f32 / size.width().max(size.height());
@@ -1604,48 +1550,6 @@ impl GpuRenderer {
                 ..Default::default()
             },
         ));
-    }
-
-    /// Queue a multi-color file-type icon (own fills, not tinted) at `(x,y)`,
-    /// `size`-side square. `key` keys the cache (e.g. "file:rs"); `svg` is the
-    /// authored color SVG. Same draw list as `queue_icon` (after the chrome
-    /// pass) but FLAG_COLOR so the fills survive instead of flattening to one
-    /// tint. Cache holds the rasterized RGBA so each (key,px) bakes once.
-    pub fn queue_color_icon(&mut self, key: &str, svg: &str, x: f32, y: f32, size: f32) {
-        let px = (size * self.scale).round() as u32;
-        if px == 0 {
-            return;
-        }
-        let cache = format!("__cicon:{key}:{px}");
-        if !self.images.contains_key(&cache) {
-            let Some(rgba) = Self::rasterize_color_svg(svg, px) else { return };
-            self.upload_image(&cache, &rgba, px, px);
-        }
-        if !self.images.contains_key(&cache) {
-            return;
-        }
-        let (dx, dy) = ((x * self.scale).round(), (y * self.scale).round());
-        let dpx = px as f32;
-        self.icon_quads.push((
-            cache,
-            CellInstance {
-                cell_px: [dx, dy, dpx, dpx],
-                uv_min: [0.0, 0.0],
-                uv_max: [1.0, 1.0],
-                fg_rgba: [1.0, 1.0, 1.0, 1.0],
-                flags: CellInstance::FLAG_COLOR,
-                ..Default::default()
-            },
-        ));
-    }
-
-    /// Queue a Material file-type icon by name (e.g. "rust", "folder-src") at
-    /// `(x, y)`, `size`-side square. Looks up the bundled multi-color SVG and
-    /// draws it through `queue_color_icon` so the authored colors land
-    /// unchanged. Unknown names are skipped (caller picks the fallback).
-    pub fn queue_ft_icon(&mut self, name: &str, x: f32, y: f32, size: f32) {
-        let Some(svg) = Self::ft_icon_svg(name) else { return };
-        self.queue_color_icon(name, svg, x, y, size);
     }
 
     /// Queue an image pane for this frame. `(x, y, w, h)` is the pane's body

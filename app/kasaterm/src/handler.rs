@@ -1062,6 +1062,14 @@ impl ApplicationHandler<UserEvent> for App {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
+                        // Search box click → focus it (keystrokes now filter the
+                        // tree). Clicking it again keeps focus; Esc clears.
+                        if inside(&self.file_tree_search_rect) {
+                            self.file_tree_search_active = true;
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
                         // Row: folder → toggle expand, file → preview.
                         if let Some(path) = self
                             .file_tree_rects
@@ -1432,13 +1440,21 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some((pid, kind)) = self.statusbar_menu.clone() {
                         match kind {
                             StatusbarMenu::Path => {
-                                if let Some(dir) = self
+                                if let Some(path) = self
                                     .statusbar_menu_dir_rects
                                     .iter()
                                     .find(|(_, r)| sb_hit(r))
                                     .map(|(d, _)| d.clone())
                                 {
-                                    self.statusbar_cd(&pid, &dir);
+                                    // Folder → cd the pane; file → open it in a
+                                    // preview pane (the picker doubles as a file
+                                    // opener now that it lists files too).
+                                    if path.is_dir() {
+                                        self.statusbar_cd(&pid, &path);
+                                    } else {
+                                        self.statusbar_menu = None;
+                                        self.open_file_split(path);
+                                    }
                                     window.request_redraw();
                                     return;
                                 }
@@ -2291,6 +2307,9 @@ impl ApplicationHandler<UserEvent> for App {
         // should disappear from the layout on the very next loop turn
         // so the user sees the gap collapse immediately.
         self.reap_dead_panes(event_loop);
+        // Refresh per-pane busy state (Claude's working spinner → header bar +
+        // completion toast). Self-throttled, so this is cheap per loop turn.
+        self.refresh_pane_activity();
         // Drain socket commands from external cmux clients. These run
         // through the same split/focus/send paths Cmd+D etc use, so
         // visible behavior is identical regardless of whether the
@@ -2324,7 +2343,14 @@ impl ApplicationHandler<UserEvent> for App {
         // WaitUntil, 나머지는 Wait. ws lock 경합이 echo stream을 막는지 확인.
         if self.version_alpha() > 0.0
             || self.copy_toast_alpha() > 0.0
+            || self.collab_toast_alpha() > 0.0
             || self.any_notify_flash()
+            // A busy pane's header working bar sweeps every frame — pump ~30fps
+            // so the bar animates and the working→idle flip is caught promptly.
+            || self
+                .pane_activity
+                .values()
+                .any(|a| a.status != "idle" && !a.status.is_empty())
             || self.pending_capture.is_some()
             || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()

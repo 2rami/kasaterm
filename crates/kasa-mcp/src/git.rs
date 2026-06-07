@@ -387,6 +387,44 @@ pub fn git_numstat(repo: &Path) -> std::collections::HashMap<String, (u32, u32)>
     m
 }
 
+/// Subset of `paths` that git ignores, as a set of the same strings passed in.
+/// One `git check-ignore --stdin` call — paths fed on stdin, the ignored ones
+/// echoed back verbatim — so a whole file-tree level costs a single process.
+/// `.git` is never matched by check-ignore, so callers italicize dotfiles
+/// separately. Empty set on any failure (non-repo, git missing).
+pub fn git_ignored(repo: &Path, paths: &[String]) -> std::collections::HashSet<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut set = std::collections::HashSet::new();
+    if paths.is_empty() {
+        return set;
+    }
+    let mut child = match Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["check-ignore", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return set,
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(paths.join("\n").as_bytes());
+        // stdin dropped here → EOF, so git stops waiting for more paths.
+    }
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(_) => return set,
+    };
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        set.insert(line.to_string());
+    }
+    set
+}
+
 /// One row of a unified diff, line-numbered for the gutter. `Hunk` is the
 /// `@@ … @@` separator (carries no line numbers); `Context`/`Add`/`Del` carry
 /// the side(s) they belong to.

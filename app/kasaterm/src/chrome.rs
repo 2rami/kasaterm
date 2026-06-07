@@ -174,27 +174,39 @@ impl App {
         let cwd = self.pane_cwd_cache.get(id).cloned();
         self.statusbar_menu_dirs.clear();
         self.statusbar_menu_branches.clear();
+        self.statusbar_menu_scroll = 0.0;
+        self.statusbar_menu_search.clear();
         match kind {
             StatusbarMenu::Path => {
                 if let Some(cwd) = cwd.as_ref() {
-                    // `..` first, then visible child directories, sorted.
+                    // `..` first, then child entries (folders before files, each
+                    // alpha-sorted) — a quick-nav picker, so files show too, not
+                    // just directories. Dotfiles (and `.git`) stay hidden here.
                     if let Some(parent) = cwd.parent() {
                         self.statusbar_menu_dirs.push(parent.to_path_buf());
                     }
                     if let Ok(rd) = std::fs::read_dir(cwd) {
-                        let mut dirs: Vec<std::path::PathBuf> = rd
+                        let mut entries: Vec<(bool, std::path::PathBuf)> = rd
                             .filter_map(|e| e.ok())
-                            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                            .map(|e| e.path())
-                            .filter(|p| {
-                                p.file_name()
-                                    .and_then(|s| s.to_str())
+                            .filter(|e| {
+                                e.file_name()
+                                    .to_str()
                                     .map(|s| !s.starts_with('.'))
                                     .unwrap_or(false)
                             })
+                            .map(|e| {
+                                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                                (is_dir, e.path())
+                            })
                             .collect();
-                        dirs.sort();
-                        self.statusbar_menu_dirs.extend(dirs);
+                        entries.sort_by(|a, b| {
+                            b.0.cmp(&a.0).then_with(|| {
+                                a.1.file_name()
+                                    .map(|s| s.to_ascii_lowercase())
+                                    .cmp(&b.1.file_name().map(|s| s.to_ascii_lowercase()))
+                            })
+                        });
+                        self.statusbar_menu_dirs.extend(entries.into_iter().map(|(_, p)| p));
                     }
                 }
             }
@@ -206,6 +218,46 @@ impl App {
         }
         self.statusbar_menu = Some((id.to_string(), kind));
         self.chrome_dirty = true;
+    }
+    /// Indices into `statusbar_menu_dirs` that survive the live search query
+    /// (case-insensitive substring on the entry name; the `..` parent row at
+    /// index 0 always shows). Drives both the dropdown render and Enter-to-open.
+    pub(crate) fn statusbar_menu_filtered(&self) -> Vec<usize> {
+        let q = self.statusbar_menu_search.to_lowercase();
+        self.statusbar_menu_dirs
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| {
+                if q.is_empty() || *i == 0 {
+                    return true;
+                }
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| nfc_hangul(s).to_lowercase().contains(&q))
+                    .unwrap_or(false)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+    /// Enter on the path dropdown: open the first real match (folder → cd, file
+    /// → preview pane). With an active query the `..` parent is skipped so Enter
+    /// commits to a searched entry, not the parent.
+    pub(crate) fn statusbar_menu_activate_first(&mut self) {
+        let Some((pid, _)) = self.statusbar_menu.clone() else { return };
+        let idxs = self.statusbar_menu_filtered();
+        let target = if self.statusbar_menu_search.is_empty() {
+            idxs.first().copied()
+        } else {
+            idxs.iter().find(|&&i| i != 0).or_else(|| idxs.first()).copied()
+        };
+        if let Some(path) = target.and_then(|i| self.statusbar_menu_dirs.get(i).cloned()) {
+            if path.is_dir() {
+                self.statusbar_cd(&pid, &path);
+            } else {
+                self.statusbar_menu = None;
+                self.open_file_split(path);
+            }
+        }
     }
     /// `cd` pane `id`'s shell into `dir` (status-bar path picker). Sent straight
     /// to that pane's PTY — single-quoted so spaces survive — and the dropdown
