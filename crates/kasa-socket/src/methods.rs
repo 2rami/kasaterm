@@ -109,6 +109,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         },
         "collab.bind_transcript" => collab_bind_transcript(backend, id, &req.params),
         "collab.transcript" => collab_transcript(backend, id, &req.params),
+        "surface.notify" => surface_notify(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -205,6 +206,7 @@ fn system_capabilities(id: Value) -> Response {
                 "window.list",
                 "collab.bind_transcript",
                 "collab.transcript",
+                "surface.notify",
             ],
         }),
     )
@@ -255,6 +257,19 @@ fn collab_transcript(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         .unwrap_or(6);
     match backend.transcript_tail(surface_id, turns) {
         Ok(t) => Response::success(id, json!({ "turns": t })),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_notify(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.notify requires `surface_id` (string)"),
+    };
+    let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
+    let body = params.get("body").and_then(|v| v.as_str()).unwrap_or("");
+    match backend.notify(surface_id, title, body) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
 }

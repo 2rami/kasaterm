@@ -62,3 +62,11 @@ pub const ICON_SIZE: f32 = 16.0;
 pub const fn with_alpha(c: [u8; 4], a: u8) -> [u8; 4] {
     [c[0], c[1], c[2], a]
 }
+
+/// Linear blend `t` of the way from `a` to `b` (`t` clamped to 0..1), opaque.
+/// Used for transient tints like the completion-flash header pulse.
+pub fn lerp(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t).round() as u8;
+    [mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2]), 255]
+}

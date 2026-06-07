@@ -206,6 +206,12 @@ const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
 /// un-split window renders no header at all (matches the iTerm
 /// behavior the user pointed at).
 const PANE_HEADER_HEIGHT: f32 = 30.0;
+/// Per-pane status bar height (logical px) — the strip below a pane's cell grid
+/// holding the cwd / git-branch / diff chips. Mirrors the header band: when a
+/// pane shows its bar, the PTY's usable rows shrink by the equivalent cell
+/// count so the grid still fits above it. Toggled per pane (see
+/// `statusbar_hidden`); a hidden pane reserves nothing.
+const PANE_FOOTER_HEIGHT: f32 = 24.0;
 /// Bottom dock bar height (logical px) — folded-pane chips. Reserved from the
 /// grid only when the dock is non-empty.
 const DOCK_HEIGHT: f32 = 40.0;
@@ -249,9 +255,9 @@ const FILE_TREE_W_MAX: f32 = 480.0;
 /// Right-hand git column, mirroring the file-tree column on the left:
 /// `effective_right_chrome_w()` folds its width in so the cell grid reflows
 /// and panes never overlap it.
-const GIT_COL_W: f32 = 264.0;
-const GIT_COL_W_MIN: f32 = 190.0;
-const GIT_COL_W_MAX: f32 = 460.0;
+const GIT_COL_W: f32 = 420.0;
+const GIT_COL_W_MIN: f32 = 220.0;
+const GIT_COL_W_MAX: f32 = 720.0;
 const SCROLLBACK_MAX: usize = 5000;
 /// Min ms between wheel emits. Default 0 = pass every macOS scroll event
 /// straight through to `pty.scroll`; the try_send-based reader pipeline
@@ -1316,6 +1322,9 @@ fn is_shell_name(name: &str) -> bool {
 enum ActionKind {
     SplitV,
     SplitH,
+    /// Toggle this pane's bottom status bar (cwd / branch / diff). Lives next to
+    /// the split buttons; collapsing the bar gives the cell grid its rows back.
+    ToggleStatusbar,
 }
 
 /// State for an in-flight in-pane tab reorder drag. A press on a tab arms
@@ -1964,8 +1973,19 @@ enum UserEvent {
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
     /// None = active pane.
     SocketBytes(Option<String>, Vec<u8>),
-    SocketSplit(kasa_pty::SplitDir),
+    /// Split delegated from the socket thread. The `Sender` carries the new
+    /// pane's real id back so `split_surface` can return it instead of the old
+    /// `"pane-new"` placeholder — without it the teammate launcher targets a
+    /// non-existent pane and its `send-keys` payload is dropped.
+    SocketSplit(kasa_pty::SplitDir, std::sync::mpsc::Sender<String>),
     SocketFocus(String),
+    /// A pane's claude finished (Stop hook → `kasaterm-cli notify`). Raise a
+    /// desktop alert unless that pane is already the focused one, cmux-style.
+    Notify {
+        surface_id: String,
+        title: String,
+        body: String,
+    },
 }
 
 /// One terminal session: its own pane set, layout, and workspace. The visible
@@ -2026,6 +2046,9 @@ struct GitColView {
     unstaged: Vec<(char, String)>,
     /// Local branch names for the switcher dropdown (current one is `branch`).
     branches: Vec<String>,
+    /// Per-file `(insertions, deletions)` for the row's `+N -M` count, keyed by
+    /// path. Filled from `git diff --numstat` (+ `--cached`).
+    numstat: HashMap<String, (u32, u32)>,
 }
 
 /// Action buttons at the foot of the git column. `StageAll` runs `git add -A`;
@@ -2038,6 +2061,35 @@ enum GitColBtn {
     Commit,
     Pull,
     Push,
+}
+
+/// Items in the Commit-button split dropdown (cursor-style): plain commit,
+/// commit + push, or open a PR. Wired to `git_commit_menu_rects`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitCommitAction {
+    Commit,
+    Push,
+    CreatePr,
+}
+
+/// Clickable targets inside the Commit modal (screenshot #5).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitModalBtn {
+    Close,
+    IncludeUnstaged,
+    Commit,
+    CommitAndPush,
+    Cancel,
+    Confirm,
+}
+
+/// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
+/// directories (click → cd that pane); `Branch` lists local branches (click →
+/// checkout in that pane's repo).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusbarMenu {
+    Path,
+    Branch,
 }
 
 /// File-tree icon (Material Icon Theme name) for a file, chosen by name then
@@ -2175,6 +2227,14 @@ struct App {
     /// Headless verification: clean-exit (runs `exiting` → save_session_state)
     /// at this instant when KASATERM_AUTOQUIT_MS is set. None disables it.
     autoquit_at: Option<std::time::Instant>,
+    /// Pending GPU self-capture `(deadline, png path)` from KASATERM_AUTOCAPTURE_MS.
+    /// `about_to_wait` arms `gpu.capture_next` once the deadline passes so the
+    /// next render reads the frame back to a PNG — no screen-record permission.
+    pending_capture: Option<(std::time::Instant, String)>,
+    /// Headless git-panel demo `(deadline, action)` from KASATERM_AUTOGIT —
+    /// "diff" expands the first changed file's inline diff, "modal" opens the
+    /// commit modal, so those states can be self-captured without clicking.
+    pending_autogit: Option<(std::time::Instant, String)>,
     /// Queued split directions driven by KASATERM_AUTOSPLIT — headless
     /// repro for the multi-pane render path. Empty in normal use.
     autosplit_plan: Vec<kasa_pty::SplitDir>,
@@ -2432,6 +2492,14 @@ struct App {
     /// sidebar-window dot; a working→idle flip fires the completion toast. Keyed
     /// by surface id, replaced wholesale on each StateView.
     pane_activity: HashMap<String, crate::stream::PaneStatusView>,
+    /// Whether our window currently has OS focus. Drives notification
+    /// suppression: a completion alert for the already-focused active pane is
+    /// pointless (the user is looking right at it), so we skip the desktop
+    /// alert when `window_focused && notify target == active pane`.
+    window_focused: bool,
+    /// Pane id → instant a completion notification flashed its header, so the
+    /// render pass can pulse it for a beat then let it settle.
+    notify_flash: HashMap<String, std::time::Instant>,
     /// Active completion toast (message + start instant) for a sibling pane's
     /// working→idle flip — "✓ %3 완료 · git 패널". Fades like `copy_toast_at`.
     /// Replaced by the newest flip; a brief overlap just shows the latest.
@@ -2471,12 +2539,37 @@ struct App {
     git_col_w_logical: f32,
     git_col_resize: Option<(f32, f32)>,
     git_col_scroll: f32,
-    git_col_file_rects: Vec<(String, (f32, f32, f32, f32))>,
+    git_col_file_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
     git_col_btn_rects: Vec<(GitColBtn, (f32, f32, f32, f32))>,
+    /// Files whose inline unified-diff is expanded in the panel, keyed by
+    /// `(staged, path)` so a partially-staged file can expand each side
+    /// independently. `git_col_diff_cache` holds the parsed rows, loaded when a
+    /// row is expanded and cleared whenever the status snapshot changes.
+    git_col_expanded: std::collections::HashSet<(bool, String)>,
+    git_col_diff_cache: HashMap<(bool, String), Vec<kasa_mcp::git::DiffLine>>,
+    /// cursor-style header chrome: panel close/expand buttons, the split Commit
+    /// button + its caret, and the caret's dropdown (Commit / Push / Create PR).
+    /// All rebuilt each paint like the other git-column hit rects.
+    git_col_close_rect: Option<(f32, f32, f32, f32)>,
+    git_col_expand_rect: Option<(f32, f32, f32, f32)>,
+    git_commit_btn_rect: Option<(f32, f32, f32, f32)>,
+    git_commit_caret_rect: Option<(f32, f32, f32, f32)>,
+    git_commit_menu_open: bool,
+    git_commit_menu_rects: Vec<(GitCommitAction, (f32, f32, f32, f32))>,
+    /// Commit modal (screenshot #5): full-panel overlay with branch, an
+    /// include-unstaged toggle, the file list, a message box, and the
+    /// Commit / Commit-and-push + Cancel/Confirm actions.
+    git_commit_modal_open: bool,
+    git_commit_modal_include_unstaged: bool,
+    git_commit_modal_rects: Vec<(GitModalBtn, (f32, f32, f32, f32))>,
     /// Per-row stage/unstage button hit rects: `(stage, path, rect)` where
     /// `stage == true` means the + button (git add), `false` the − (unstage).
     /// Rebuilt each paint; only the hovered row's button is present.
     git_col_stage_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
+    /// Hovered-row action buttons beside stage: ↩ discard (path, untracked) and
+    /// ⤴ open-in-preview (path). Rebuilt each paint like `git_col_stage_rects`.
+    git_col_discard_rects: Vec<(String, bool, (f32, f32, f32, f32))>,
+    git_col_open_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// VSCode-style commit message input above the action buttons. The buffer
     /// is single-line (commit subject); `cursor` is a char index into it.
     /// `focused` routes keystrokes here (see `forward_key`) instead of the PTY.
@@ -2507,6 +2600,30 @@ struct App {
     git_branch_hdr_rect: Option<(f32, f32, f32, f32)>,
     git_path_menu_rects: Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
     git_branch_menu_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// Per-pane status bar (cwd / branch / diff chips at the foot of each pane).
+    /// `statusbar_hidden` holds the pane ids whose bar is collapsed — default is
+    /// shown, so absence means visible. A hidden pane reserves no footer rows.
+    statusbar_hidden: std::collections::HashSet<String>,
+    /// Per-frame status-bar hit rects, rebuilt each paint (like the git column's
+    /// header rects). `path`/`branch` carry the pane id so a click resolves the
+    /// repo; `toggle` is the eye button in the pane header that hides the bar.
+    statusbar_path_rects: Vec<(String, (f32, f32, f32, f32))>,
+    statusbar_branch_rects: Vec<(String, (f32, f32, f32, f32))>,
+    statusbar_toggle_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// diff chip hit rects (pane id → rect). Clicking opens the git column for
+    /// that pane's repo.
+    statusbar_diff_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// Open status-bar dropdown: `(pane_id, kind)` where kind picks the path
+    /// picker or branch switcher. The item rects + their backing data are
+    /// rebuilt by the render while the menu is open.
+    statusbar_menu: Option<(String, StatusbarMenu)>,
+    statusbar_menu_dir_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
+    statusbar_menu_branch_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// Backing data for the open status-bar dropdown, snapshotted when it opens
+    /// (read_dir / git_branches are off the render path). `dirs` is `..` + the
+    /// cwd's child directories; `branches` is the repo's local branches.
+    statusbar_menu_dirs: Vec<std::path::PathBuf>,
+    statusbar_menu_branches: Vec<String>,
     /// Single-pane Cmd+W in daemon mode sets this to close the GUI window
     /// (ghostty-style) on the next about_to_wait, instead of killing the pane.
     /// The daemon keeps the session alive so relaunch restores it.
@@ -2652,6 +2769,8 @@ impl App {
             next_pane_id: 1, // %0 is the initial pane created in start_pty
             pending_restores: Vec::new(),
             autoquit_at: None,
+            pending_capture: None,
+            pending_autogit: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,
             autoopen_path: None,
@@ -2722,6 +2841,8 @@ impl App {
             claude_busy_until: None,
             last_claude_status: None,
             pane_activity: HashMap::new(),
+            window_focused: true,
+            notify_flash: HashMap::new(),
             collab_toast: None,
             collab_unread: 0,
             last_window_title_check: None,
@@ -2737,7 +2858,20 @@ impl App {
             git_col_scroll: 0.0,
             git_col_file_rects: Vec::new(),
             git_col_btn_rects: Vec::new(),
+            git_col_expanded: std::collections::HashSet::new(),
+            git_col_diff_cache: HashMap::new(),
+            git_col_close_rect: None,
+            git_col_expand_rect: None,
+            git_commit_btn_rect: None,
+            git_commit_caret_rect: None,
+            git_commit_menu_open: false,
+            git_commit_menu_rects: Vec::new(),
+            git_commit_modal_open: false,
+            git_commit_modal_include_unstaged: true,
+            git_commit_modal_rects: Vec::new(),
             git_col_stage_rects: Vec::new(),
+            git_col_discard_rects: Vec::new(),
+            git_col_open_rects: Vec::new(),
             git_commit_msg: String::new(),
             git_commit_cursor: 0,
             git_commit_focused: false,
@@ -2751,6 +2885,16 @@ impl App {
             git_branch_hdr_rect: None,
             git_path_menu_rects: Vec::new(),
             git_branch_menu_rects: Vec::new(),
+            statusbar_hidden: std::collections::HashSet::new(),
+            statusbar_path_rects: Vec::new(),
+            statusbar_branch_rects: Vec::new(),
+            statusbar_toggle_rects: Vec::new(),
+            statusbar_diff_rects: Vec::new(),
+            statusbar_menu: None,
+            statusbar_menu_dir_rects: Vec::new(),
+            statusbar_menu_branch_rects: Vec::new(),
+            statusbar_menu_dirs: Vec::new(),
+            statusbar_menu_branches: Vec::new(),
             pane_cwd_check: None,
             show_pane_numbers: false,
             file_tree_root: None,

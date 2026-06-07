@@ -23,14 +23,20 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketSplit(dir) => {
-                let _ = self.split_active_pane(*dir);
+            UserEvent::SocketSplit(dir, reply) => {
+                let new_id = self.split_active_pane(*dir).unwrap_or_default();
+                let _ = reply.send(new_id);
                 self.render_frame();
                 return;
             }
             UserEvent::SocketFocus(id) => {
                 self.ws.lock().unwrap().active_pane = Some(id.clone());
                 self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
+            UserEvent::Notify { surface_id, title, body } => {
+                self.handle_notify(surface_id, title, body);
                 self.render_frame();
                 return;
             }
@@ -472,7 +478,12 @@ impl ApplicationHandler<UserEvent> for App {
             // 포커스/가림 복귀 시 즉시 다시 그린다. idle은 ControlFlow::Wait라
             // 이 이벤트가 redraw를 안 걸면 다음 blink 타이머(530ms)가 깨울
             // 때까지 화면이 stale — "다른 앱 보다가 돌아오면 0.5초 늦음"의 원인.
-            WindowEvent::Focused(true) | WindowEvent::Occluded(false) => {
+            WindowEvent::Focused(focused) => {
+                self.window_focused = focused;
+                self.chrome_dirty = true;
+                window.request_redraw();
+            }
+            WindowEvent::Occluded(false) => {
                 self.chrome_dirty = true;
                 window.request_redraw();
             }
@@ -1090,6 +1101,33 @@ impl ApplicationHandler<UserEvent> for App {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
+                        // Commit modal overlays the whole panel — resolve it first
+                        // and swallow every other click while it's open.
+                        if self.git_commit_modal_open {
+                            if let Some(btn) = self
+                                .git_commit_modal_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(b, _)| *b)
+                            {
+                                match btn {
+                                    crate::GitModalBtn::Close | crate::GitModalBtn::Cancel => self.close_commit_modal(),
+                                    crate::GitModalBtn::IncludeUnstaged => {
+                                        self.git_commit_modal_include_unstaged = !self.git_commit_modal_include_unstaged;
+                                        window.request_redraw();
+                                    }
+                                    crate::GitModalBtn::Commit | crate::GitModalBtn::Confirm => self.run_commit_modal(false),
+                                    crate::GitModalBtn::CommitAndPush => self.run_commit_modal(true),
+                                }
+                                return;
+                            }
+                            if self.git_commit_input_rect.map(|r| inside(&r)).unwrap_or(false) {
+                                self.git_commit_focused = true;
+                                window.request_redraw();
+                                return;
+                            }
+                            return;
+                        }
                         // Open dropdowns overlay everything — resolve their items
                         // (and the header toggles) before the list/buttons under.
                         if self.git_path_menu_open {
@@ -1140,21 +1178,45 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        // Commit input: click focuses it (blur on outside clicks
-                        // is handled at the MouseInput entry above).
-                        if self.git_commit_input_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            self.git_commit_focused = true;
+                        // Commit-button dropdown items (overlay) first.
+                        if self.git_commit_menu_open {
+                            if let Some(act) = self
+                                .git_commit_menu_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(a, _)| *a)
+                            {
+                                self.git_commit_menu_open = false;
+                                match act {
+                                    crate::GitCommitAction::Commit => self.open_commit_modal(),
+                                    crate::GitCommitAction::Push => self.run_git_col_action(crate::GitColBtn::Push),
+                                    crate::GitCommitAction::CreatePr => self.create_git_pr(),
+                                }
+                                window.request_redraw();
+                                return;
+                            }
+                            self.git_commit_menu_open = false;
                             window.request_redraw();
                             return;
                         }
-                        // Action buttons sit on top of the list zone — first.
-                        if let Some(btn) = self
-                            .git_col_btn_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(b, _)| *b)
-                        {
-                            self.run_git_col_action(btn);
+                        // Panel header: close / expand.
+                        if self.git_col_close_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.toggle_git_col();
+                            return;
+                        }
+                        if self.git_col_expand_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.toggle_git_col_expand();
+                            window.request_redraw();
+                            return;
+                        }
+                        // Commit split button: main → modal, caret → dropdown.
+                        if self.git_commit_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.open_commit_modal();
+                            window.request_redraw();
+                            return;
+                        }
+                        if self.git_commit_caret_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.git_commit_menu_open = !self.git_commit_menu_open;
                             window.request_redraw();
                             return;
                         }
@@ -1187,17 +1249,54 @@ impl ApplicationHandler<UserEvent> for App {
                                     let _ = proxy.send_event(UserEvent::Redraw);
                                 });
                             }
+                            // The file jumps sections (staged↔changes); cached
+                            // diffs keyed by (staged, path) are now stale.
+                            self.invalidate_git_diffs();
                             window.request_redraw();
                             return;
                         }
-                        // File row → preview the changed file.
+                        // Row ↩ discard → restore the file (or delete if untracked).
+                        if let Some((path, untracked)) = self
+                            .git_col_discard_rects
+                            .iter()
+                            .find(|(_, _, r)| inside(r))
+                            .map(|(p, u, _)| (p.clone(), *u))
+                        {
+                            if let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+                                let proxy = self.proxy.clone();
+                                let data = self.git_col_data.clone();
+                                std::thread::spawn(move || {
+                                    let _ = kasa_mcp::git::git_discard_path(&cwd, &path, untracked);
+                                    if let Some(view) = fetch_git_col_view(&cwd) {
+                                        if let Ok(mut g) = data.lock() {
+                                            *g = view;
+                                        }
+                                    }
+                                    let _ = proxy.send_event(UserEvent::Redraw);
+                                });
+                            }
+                            self.invalidate_git_diffs();
+                            window.request_redraw();
+                            return;
+                        }
+                        // Row ⤴ open → preview the file in a pane.
                         if let Some(path) = self
-                            .git_col_file_rects
+                            .git_col_open_rects
                             .iter()
                             .find(|(_, r)| inside(r))
                             .map(|(p, _)| p.clone())
                         {
                             self.open_git_file(&path);
+                            return;
+                        }
+                        // File row → toggle its inline unified diff.
+                        if let Some((staged, path)) = self
+                            .git_col_file_rects
+                            .iter()
+                            .find(|(_, _, r)| inside(r))
+                            .map(|(s, p, _)| (*s, p.clone()))
+                        {
+                            self.toggle_git_diff(staged, path);
                             return;
                         }
                         // Empty column space — swallow the click.
@@ -1303,7 +1402,89 @@ impl ApplicationHandler<UserEvent> for App {
                                     eprintln!("[split-h] {e}");
                                 }
                             }
+                            ActionKind::ToggleStatusbar => {
+                                self.toggle_statusbar(&pid);
+                            }
                         }
+                        window.request_redraw();
+                        return;
+                    }
+                    // Per-pane status bar (footer). Open dropdown items overlay
+                    // everything, so resolve them first; then the collapse
+                    // handle, then the cwd / branch chips. All return so a click
+                    // in the footer band never falls through to the cell grid.
+                    let sb_hit = |r: &(f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    if let Some((pid, kind)) = self.statusbar_menu.clone() {
+                        match kind {
+                            StatusbarMenu::Path => {
+                                if let Some(dir) = self
+                                    .statusbar_menu_dir_rects
+                                    .iter()
+                                    .find(|(_, r)| sb_hit(r))
+                                    .map(|(d, _)| d.clone())
+                                {
+                                    self.statusbar_cd(&pid, &dir);
+                                    window.request_redraw();
+                                    return;
+                                }
+                            }
+                            StatusbarMenu::Branch => {
+                                if let Some(b) = self
+                                    .statusbar_menu_branch_rects
+                                    .iter()
+                                    .find(|(_, r)| sb_hit(r))
+                                    .map(|(b, _)| b.clone())
+                                {
+                                    self.statusbar_checkout(&pid, b);
+                                    window.request_redraw();
+                                    return;
+                                }
+                            }
+                        }
+                        // Click outside the open menu dismisses it (swallowed).
+                        self.statusbar_menu = None;
+                        window.request_redraw();
+                        return;
+                    }
+                    if let Some(pid) = self
+                        .statusbar_toggle_rects
+                        .iter()
+                        .find(|(_, r)| sb_hit(r))
+                        .map(|(p, _)| p.clone())
+                    {
+                        self.toggle_statusbar(&pid);
+                        window.request_redraw();
+                        return;
+                    }
+                    if let Some(pid) = self
+                        .statusbar_path_rects
+                        .iter()
+                        .find(|(_, r)| sb_hit(r))
+                        .map(|(p, _)| p.clone())
+                    {
+                        self.open_statusbar_menu(&pid, StatusbarMenu::Path);
+                        window.request_redraw();
+                        return;
+                    }
+                    if let Some(pid) = self
+                        .statusbar_branch_rects
+                        .iter()
+                        .find(|(_, r)| sb_hit(r))
+                        .map(|(p, _)| p.clone())
+                    {
+                        self.open_statusbar_menu(&pid, StatusbarMenu::Branch);
+                        window.request_redraw();
+                        return;
+                    }
+                    if let Some(pid) = self
+                        .statusbar_diff_rects
+                        .iter()
+                        .find(|(_, r)| sb_hit(r))
+                        .map(|(p, _)| p.clone())
+                    {
+                        self.open_git_panel_for(&pid);
                         window.request_redraw();
                         return;
                     }
@@ -1951,12 +2132,40 @@ impl ApplicationHandler<UserEvent> for App {
                 self.forward_key(&event);
             }
             WindowEvent::DroppedFile(path) => {
-                // Drag-and-drop → type the file's shell-quoted path into
-                // the active pane (iTerm behavior). claude code reads an
-                // image path dropped this way and attaches it. The
-                // trailing space separates it from whatever the user
-                // types next. Single-quote so spaces in the path stay
-                // one token; embedded quotes get the '\'' escape.
+                // 이미지 파일을 떨구면 클립보드에 비트맵으로 실은 뒤
+                // Ctrl+V(0x16)를 위임한다 — claude code가 osascript로 클립보드
+                // PNG를 직접 읽어 [Image] 칩으로 첨부한다. 경로 텍스트만 박던
+                // 옛 방식은 claude 가 이미지로 인식 못 해 칩이 안 떴다.
+                let is_img = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| {
+                        matches!(
+                            e.to_ascii_lowercase().as_str(),
+                            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+                        )
+                    })
+                    .unwrap_or(false);
+                if is_img {
+                    if let Ok(img) = image::open(&path) {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = rgba.dimensions();
+                        let data = arboard::ImageData {
+                            width: w as usize,
+                            height: h as usize,
+                            bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+                        };
+                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                            if cb.set_image(data).is_ok() {
+                                self.send_bytes(&[0x16]);
+                                return;
+                            }
+                        }
+                    }
+                }
+                // 비이미지(코드 파일 등) 또는 디코드/클립보드 실패 → 경로 입력.
+                // iTerm 동작: shell-quoted 경로 + 끝 공백. 작은따옴표로 공백을
+                // 한 토큰으로 묶고, 경로 속 따옴표는 '\'' 로 escape.
                 let p = path.to_string_lossy();
                 let quoted = format!("'{}' ", p.replace('\'', "'\\''"));
                 self.send_bytes(quoted.as_bytes());
@@ -2020,6 +2229,29 @@ impl ApplicationHandler<UserEvent> for App {
                 self.toggle_board_panel(event_loop);
             }
         }
+        // Headless git-panel demo (expand diff / open modal) before the capture.
+        if let Some((at, action)) = self.pending_autogit.clone() {
+            if std::time::Instant::now() >= at {
+                self.run_autogit(&action);
+                self.pending_autogit = None;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+        }
+        // Headless verification: arm a GPU frame-readback capture once its
+        // deadline passes (before autoquit, so the capture lands first).
+        if let Some((at, path)) = self.pending_capture.clone() {
+            if std::time::Instant::now() >= at {
+                if let Some(g) = self.gpu.as_mut() {
+                    g.capture_next = Some(path);
+                }
+                self.pending_capture = None;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+        }
         // Headless verification: clean-exit once the autoquit deadline passes
         // so save-on-exit (and the next launch's restore) can be tested.
         if let Some(at) = self.autoquit_at {
@@ -2077,7 +2309,13 @@ impl ApplicationHandler<UserEvent> for App {
         // The copy toast fade needs the same treatment as the launch banner.
         // (echo-stale 격리) busy 30fps 펌프 임시 제거 — version/copy 토스트만
         // WaitUntil, 나머지는 Wait. ws lock 경합이 echo stream을 막는지 확인.
-        if self.version_alpha() > 0.0 || self.copy_toast_alpha() > 0.0 {
+        if self.version_alpha() > 0.0
+            || self.copy_toast_alpha() > 0.0
+            || self.any_notify_flash()
+            || self.pending_capture.is_some()
+            || self.pending_autogit.is_some()
+            || self.autoquit_at.is_some()
+        {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + std::time::Duration::from_millis(33),
             ));
@@ -2160,5 +2398,6 @@ fn fetch_git_col_view(cwd: &std::path::Path) -> Option<GitColView> {
         }
     }
     view.branches = kasa_mcp::git::git_branches(cwd);
+    view.numstat = kasa_mcp::git::git_numstat(cwd);
     Some(view)
 }

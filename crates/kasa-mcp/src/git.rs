@@ -51,6 +51,9 @@ pub fn git_status(repo: &Path) -> Value {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GitBadge {
     pub branch: String,
+    /// Files changed vs HEAD (the leading `N` of `--shortstat`). Tracked-only,
+    /// like insertions/deletions.
+    pub files: u32,
     pub insertions: u32,
     pub deletions: u32,
 }
@@ -68,8 +71,15 @@ pub fn git_badge(repo: &Path) -> Option<GitBadge> {
     }
     let (_o, stat) = run_git(repo, &["diff", "HEAD", "--shortstat"]);
     let (insertions, deletions) = parse_shortstat(&stat);
+    // Leading `N` of " 11 files changed, …" — 0 when the tree is clean.
+    let files = stat
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
     Some(GitBadge {
         branch,
+        files,
         insertions,
         deletions,
     })
@@ -337,6 +347,161 @@ pub fn git_branches(repo: &Path) -> Vec<String> {
 pub fn git_checkout(repo: &Path, branch: &str) -> Value {
     let (ok, out) = run_git(repo, &["checkout", branch]);
     json!({ "ok": ok, "output": out.trim() })
+}
+
+/// Discard a file's worktree changes (status-bar / git-panel ↩ button). Tracked
+/// files are restored to HEAD (`checkout --`); an untracked file is removed.
+pub fn git_discard_path(repo: &Path, path: &str, untracked: bool) -> Value {
+    if untracked {
+        let ok = std::fs::remove_file(repo.join(path)).is_ok();
+        return json!({ "ok": ok, "output": "" });
+    }
+    let (ok, out) = run_git(repo, &["checkout", "--", path]);
+    json!({ "ok": ok, "output": out.trim() })
+}
+
+/// Per-file `(insertions, deletions)` vs HEAD, keyed by path — both worktree
+/// (`--numstat`) and index (`--cached`) merged (max each side) so a file shows a
+/// count whichever side it changed on. Binary files (`-\t-`) count as 0.
+pub fn git_numstat(repo: &Path) -> std::collections::HashMap<String, (u32, u32)> {
+    let mut m: std::collections::HashMap<String, (u32, u32)> = std::collections::HashMap::new();
+    for args in [
+        ["diff", "--numstat"].as_slice(),
+        ["diff", "--cached", "--numstat"].as_slice(),
+    ] {
+        let (ok, out) = run_git(repo, args);
+        if !ok {
+            continue;
+        }
+        for line in out.lines() {
+            let mut parts = line.split('\t');
+            let ins: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let del: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            if let Some(path) = parts.next() {
+                let e = m.entry(path.to_string()).or_insert((0, 0));
+                e.0 = e.0.max(ins);
+                e.1 = e.1.max(del);
+            }
+        }
+    }
+    m
+}
+
+/// One row of a unified diff, line-numbered for the gutter. `Hunk` is the
+/// `@@ … @@` separator (carries no line numbers); `Context`/`Add`/`Del` carry
+/// the side(s) they belong to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DiffLineKind {
+    Hunk,
+    Context,
+    Add,
+    Del,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiffLine {
+    pub kind: DiffLineKind,
+    pub old_no: Option<u32>,
+    pub new_no: Option<u32>,
+    pub text: String,
+}
+
+/// Unified diff of one file for the git panel's inline expander. `staged` picks
+/// the index diff (`--cached`) vs the worktree diff. An untracked file has no
+/// tracked diff, so we fall back to `--no-index` against /dev/null to render the
+/// whole file as additions.
+pub fn git_file_diff(repo: &Path, path: &str, staged: bool) -> Vec<DiffLine> {
+    let (ok, out) = if staged {
+        run_git(repo, &["diff", "--cached", "--", path])
+    } else {
+        let (ok, out) = run_git(repo, &["diff", "--", path]);
+        if ok && out.trim().is_empty() {
+            // Likely untracked — show every line as an addition.
+            run_git(repo, &["diff", "--no-index", "--", "/dev/null", path])
+        } else {
+            (ok, out)
+        }
+    };
+    let _ = ok;
+    parse_unified_diff(&out)
+}
+
+/// Parse `git diff` output into line-numbered rows. File headers (`diff`,
+/// `index`, `+++`, `---`, `new file`, …) are dropped; only hunks + body lines
+/// survive. Line numbers track from each hunk header's `@@ -old +new @@`.
+fn parse_unified_diff(text: &str) -> Vec<DiffLine> {
+    let mut rows = Vec::new();
+    let mut old_no = 0u32;
+    let mut new_no = 0u32;
+    for line in text.lines() {
+        if line.starts_with("@@") {
+            // @@ -<old>[,n] +<new>[,n] @@ …
+            let nums = |seg: &str| -> u32 {
+                seg.trim_start_matches(['-', '+'])
+                    .split(',')
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(1)
+            };
+            let mut parts = line.split_whitespace();
+            let _ = parts.next(); // "@@"
+            if let Some(o) = parts.next() {
+                old_no = nums(o);
+            }
+            if let Some(n) = parts.next() {
+                new_no = nums(n);
+            }
+            rows.push(DiffLine {
+                kind: DiffLineKind::Hunk,
+                old_no: None,
+                new_no: None,
+                text: line.to_string(),
+            });
+            continue;
+        }
+        if line.starts_with("diff ")
+            || line.starts_with("index ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("new file")
+            || line.starts_with("deleted file")
+            || line.starts_with("old mode")
+            || line.starts_with("new mode")
+            || line.starts_with("similarity")
+            || line.starts_with("rename ")
+            || line.starts_with("\\ No newline")
+        {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('+') {
+            rows.push(DiffLine {
+                kind: DiffLineKind::Add,
+                old_no: None,
+                new_no: Some(new_no),
+                text: rest.to_string(),
+            });
+            new_no += 1;
+        } else if let Some(rest) = line.strip_prefix('-') {
+            rows.push(DiffLine {
+                kind: DiffLineKind::Del,
+                old_no: Some(old_no),
+                new_no: None,
+                text: rest.to_string(),
+            });
+            old_no += 1;
+        } else {
+            let rest = line.strip_prefix(' ').unwrap_or(line);
+            rows.push(DiffLine {
+                kind: DiffLineKind::Context,
+                old_no: Some(old_no),
+                new_no: Some(new_no),
+                text: rest.to_string(),
+            });
+            old_no += 1;
+            new_no += 1;
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
