@@ -214,6 +214,76 @@ impl App {
         }
         None
     }
+    /// Refresh per-pane busy state by scanning each pane's grid for Claude
+    /// Code's "working" marker, then drive the header working bar + completion
+    /// toast off it. This is the local replacement for the removed daemon's
+    /// transcript watcher: Claude doesn't push status over OSC, so the rendered
+    /// grid is the only live signal. A `working → idle` flip fires the
+    /// top-right completion toast + a header pulse, same as the old daemon path.
+    /// Throttled (the scan walks every pane), so safe to call each frame.
+    pub(crate) fn refresh_pane_activity(&mut self) {
+        let now = Instant::now();
+        if let Some(t) = self.pane_busy_check {
+            if now.duration_since(t).as_millis() < 300 {
+                return;
+            }
+        }
+        self.pane_busy_check = Some(now);
+
+        // Scan under the lock, then mutate `pane_activity` after dropping it —
+        // the completion-toast path takes no further workspace lock.
+        let busy_now: Vec<(String, bool)> = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .iter()
+                .map(|(id, pane)| (id.clone(), pane.term().map_or(false, term_is_working)))
+                .collect()
+        };
+
+        let mut completed: Vec<String> = Vec::new();
+        for (id, busy) in &busy_now {
+            let was_busy = self
+                .pane_activity
+                .get(id)
+                .map_or(false, |a| a.status != "idle" && !a.status.is_empty());
+            if was_busy && !busy {
+                completed.push(id.clone());
+            }
+            let status = if *busy { "working" } else { "idle" };
+            self.pane_activity
+                .entry(id.clone())
+                .and_modify(|a| a.status = status.to_string())
+                .or_insert_with(|| crate::stream::PaneStatusView {
+                    status: status.to_string(),
+                    ..Default::default()
+                });
+        }
+        // Drop entries for panes that no longer exist (closed/undocked).
+        self.pane_activity
+            .retain(|k, _| busy_now.iter().any(|(id, _)| id == k));
+
+        if completed.is_empty() {
+            return;
+        }
+        // A sibling finished: top-right toast + header pulse. Label the toast
+        // with the pane's short cwd basename when known, else a generic mark.
+        let label = completed
+            .iter()
+            .find_map(|id| self.pane_cwd_cache.get(id))
+            .and_then(|cwd| cwd.file_name().and_then(|s| s.to_str()).map(String::from));
+        let msg = match label {
+            Some(name) => format!("✓ {name} 작업 완료"),
+            None => "✓ 작업 완료".to_string(),
+        };
+        self.collab_toast = Some((msg, now));
+        for id in completed {
+            self.notify_flash.insert(id, now);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     /// Sync the macOS window title (Dock label, ⌘-Tab switcher) with
     /// the active pane's resolved label when only one pane is open.
     /// Skipped for multi-pane workspaces — there the per-pane header
@@ -385,6 +455,23 @@ impl App {
                 return;
             }
         };
+        // Open status-bar dropdown overlays everything, so the wheel scrolls
+        // its list first when the pointer is inside it (a cwd with many subdirs
+        // overflows the capped viewport). Whole-row steps to match the render.
+        if let Some((mx, my, mw, mh)) = self.statusbar_menu_rect {
+            let (cx, cy) = self.cursor_px;
+            if cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh {
+                let item_h = 24.0_f32;
+                // lines>0 = wheel up = toward the top = less scroll.
+                self.statusbar_menu_scroll =
+                    (self.statusbar_menu_scroll - lines as f32 * item_h).max(0.0);
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+        }
         // File-tree column: the pointer is over the tree, not a terminal, so
         // scroll the rows instead of delegating to a pane (px_to_pane_cell
         // returns None here and would otherwise fall through to the active
@@ -394,7 +481,7 @@ impl App {
             && self.cursor_px.0 >= self.file_tree_col_x()
             && self.cursor_px.0 < self.file_tree_col_x() + self.file_tree_w_logical
         {
-            let item_h = 22.0_f32;
+            let item_h = 26.0_f32;
             let win_h = self.window.as_ref().map_or(800.0, |w| {
                 w.inner_size().height as f32 / self.effective_scale()
             });
@@ -731,6 +818,135 @@ impl App {
         self.git_commit_cursor = col;
         self.chrome_dirty = true;
     }
+    /// Type-to-search for the open path dropdown. Append-only (no mid-string
+    /// cursor — a search box doesn't need one), with the shared Hangul composer
+    /// so Korean filters compose. Esc closes, Enter opens the first match,
+    /// Backspace deletes a jamo then a char. Every edit resets the scroll.
+    pub(crate) fn statusbar_menu_search_key(&mut self, event: &KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        #[cfg(target_os = "macos")]
+        if let Some(t) = &event.text {
+            if t.chars().count() == 1 {
+                if let Some(c) = t.chars().next() {
+                    if (0x3130..=0x318F).contains(&(c as u32)) {
+                        if let Some(commit) = self.hangul.feed(c) {
+                            self.statusbar_menu_search.push_str(&commit);
+                        }
+                        self.preedit = self.hangul.preedit().unwrap_or_default();
+                        self.in_preedit = !self.preedit.is_empty();
+                        self.statusbar_menu_scroll = 0.0;
+                        self.chrome_dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.statusbar_menu = None;
+                self.preedit.clear();
+                self.in_preedit = false;
+                let _ = self.hangul.flush();
+                self.chrome_dirty = true;
+                return;
+            }
+            Key::Named(NamedKey::Enter) => {
+                let _ = self.hangul.flush();
+                self.preedit.clear();
+                self.in_preedit = false;
+                self.statusbar_menu_activate_first();
+                self.chrome_dirty = true;
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if self.hangul.backspace() {
+                    self.preedit = self.hangul.preedit().unwrap_or_default();
+                    self.in_preedit = !self.preedit.is_empty();
+                } else {
+                    self.statusbar_menu_search.pop();
+                }
+                self.statusbar_menu_scroll = 0.0;
+                self.chrome_dirty = true;
+                return;
+            }
+            _ => {}
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.statusbar_menu_search.push_str(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        match &event.logical_key {
+            Key::Named(NamedKey::Space) => self.statusbar_menu_search.push(' '),
+            Key::Character(txt) => self.statusbar_menu_search.push_str(txt),
+            _ => {}
+        }
+        self.statusbar_menu_scroll = 0.0;
+        self.chrome_dirty = true;
+    }
+    /// Same append-only search entry for the file-tree column's search box.
+    /// Esc closes the box, Backspace deletes a jamo then a char. The filtered
+    /// node list is recomputed by `rebuild_file_tree_nodes` on each edit.
+    pub(crate) fn file_tree_search_key(&mut self, event: &KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        #[cfg(target_os = "macos")]
+        if let Some(t) = &event.text {
+            if t.chars().count() == 1 {
+                if let Some(c) = t.chars().next() {
+                    if (0x3130..=0x318F).contains(&(c as u32)) {
+                        if let Some(commit) = self.hangul.feed(c) {
+                            self.file_tree_search_query.push_str(&commit);
+                            self.file_tree_search_collect();
+                        }
+                        self.preedit = self.hangul.preedit().unwrap_or_default();
+                        self.in_preedit = !self.preedit.is_empty();
+                        self.file_tree_scroll = 0.0;
+                        self.chrome_dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.file_tree_search_active = false;
+                self.file_tree_search_query.clear();
+                self.preedit.clear();
+                self.in_preedit = false;
+                let _ = self.hangul.flush();
+                self.file_tree_search_collect(); // empty query → restore tree
+                self.file_tree_scroll = 0.0;
+                self.chrome_dirty = true;
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if self.hangul.backspace() {
+                    self.preedit = self.hangul.preedit().unwrap_or_default();
+                    self.in_preedit = !self.preedit.is_empty();
+                } else {
+                    self.file_tree_search_query.pop();
+                }
+                self.file_tree_search_collect();
+                self.file_tree_scroll = 0.0;
+                self.chrome_dirty = true;
+                return;
+            }
+            _ => {}
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.file_tree_search_query.push_str(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        match &event.logical_key {
+            Key::Named(NamedKey::Space) => self.file_tree_search_query.push(' '),
+            Key::Character(txt) => self.file_tree_search_query.push_str(txt),
+            _ => {}
+        }
+        self.file_tree_search_collect();
+        self.file_tree_scroll = 0.0;
+        self.chrome_dirty = true;
+    }
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
@@ -742,6 +958,29 @@ impl App {
         // (Click elsewhere blurs it — see the column's mouse handler.)
         if self.git_commit_focused {
             self.git_commit_input(event);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        // Open path dropdown is a modal search: keystrokes filter it, not the
+        // PTY. (Branch menu has no search — its lists are short — so it falls
+        // through.)
+        if self
+            .statusbar_menu
+            .as_ref()
+            .map(|(_, k)| matches!(k, StatusbarMenu::Path))
+            .unwrap_or(false)
+        {
+            self.statusbar_menu_search_key(event);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+        // File-tree search box has focus: keystrokes filter the tree.
+        if self.file_tree_search_active {
+            self.file_tree_search_key(event);
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -1383,4 +1622,21 @@ impl App {
             self.send_bytes(&commit_prefix);
         }
     }
+}
+
+/// True when a pane's grid shows a live "working" animation in its bottom rows:
+/// Braille spinners (U+2800..U+28FF — npm, pure-prompt) or Dingbat stars
+/// (U+2731..U+274F — Claude Code's ✻/✶/✷ thinking indicator). Claude clears
+/// this line the moment it goes idle, so the absence of a marker is a reliable
+/// idle signal. Only the last ~10 rows are scanned (the live status sits at the
+/// bottom); scrollback above is ignored.
+fn term_is_working(t: &TerminalPane) -> bool {
+    let rows = t.cells.len();
+    let start = rows.saturating_sub(10);
+    t.cells[start..].iter().any(|row| {
+        row.iter().any(|cell| {
+            let cp = cell.ch as u32;
+            (0x2800..=0x28FF).contains(&cp) || (0x2731..=0x274F).contains(&cp)
+        })
+    })
 }

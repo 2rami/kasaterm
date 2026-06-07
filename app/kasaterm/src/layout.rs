@@ -344,7 +344,7 @@ impl App {
         // rect, so the initial cols/rows here only matters for the
         // first bytes the shell prints before SIGWINCH lands.
         let (win_cols, win_rows) = self.window_cells();
-        let cwd = resolve_initial_cwd();
+        let cwd = self.spawn_cwd_from(Some(&active));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
@@ -387,7 +387,7 @@ impl App {
         // right cols/rows — `resize_backend` after re-applies it anyway, but a
         // sane initial size keeps the welcome banner from wrapping weird.
         let (cols, rows) = self.pane_cells(outer).unwrap_or_else(|| self.window_cells());
-        let cwd = resolve_initial_cwd();
+        let cwd = self.spawn_cwd_from(Some(outer));
         let new_pid = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
@@ -537,7 +537,7 @@ impl App {
             anyhow::bail!("split via drag unsupported on tmux backend");
         }
         let (cols, rows) = self.pane_cells(source).unwrap_or_else(|| self.window_cells());
-        let cwd = resolve_initial_cwd();
+        let cwd = self.spawn_cwd_from(Some(source));
         let new_id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {

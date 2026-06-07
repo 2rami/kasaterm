@@ -159,7 +159,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let seg = 0.32;
         let head = -seg + (1.0 + seg) * fract(u.time / 1.2);
         let inseg = step(head, in.uv.x) * step(in.uv.x, head + seg);
-        let a = in.fg.a * mix(0.15, 1.0, inseg);
+        let a = in.fg.a * mix(0.22, 1.0, inseg);
         let rgb = boost_saturation(in.fg.rgb, u.color_sat);
         return vec4<f32>(prepare_output(rgb), a);
     }

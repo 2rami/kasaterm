@@ -2017,6 +2017,10 @@ struct FileNode {
     name: String,
     is_dir: bool,
     depth: usize,
+    /// Gitignored or a dotfile — rendered italic + dim (VSCode/cursor cue).
+    /// Set in a second pass by `rebuild_file_tree_nodes` (one batched
+    /// `git check-ignore`), so `walk_dir` leaves it `false`.
+    ignored: bool,
 }
 
 /// Parsed `git status` snapshot for the right-hand git column. The background
@@ -2092,82 +2096,54 @@ enum StatusbarMenu {
     Branch,
 }
 
-/// File-tree icon (Material Icon Theme name) for a file, chosen by name then
-/// extension. The SVG is multi-color (authored fills) so it draws through
-/// `queue_ft_icon` untinted — VS Code-style language logos that read at a
-/// glance. Whole-name matches (Dockerfile, package.json…) win over extension.
-fn file_icon(name: &str) -> &'static str {
-    let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "dockerfile" | ".dockerignore" | "docker-compose.yml" | "compose.yaml" => return "docker",
-        ".gitignore" | ".gitattributes" | ".gitmodules" => return "git",
-        "package.json" | "package-lock.json" => return "nodejs",
-        "tsconfig.json" => return "tsconfig",
-        "readme.md" | "readme" | "readme.txt" => return "readme",
-        "license" | "license.md" | "license.txt" | "copying" => return "license",
-        "todo.md" | "todo" | "todo.txt" => return "todo",
-        _ => {}
+/// Recompose conjoining Hangul jamo (NFD) back into precomposed syllables
+/// (NFC). macOS returns filenames decomposed, so a Korean name like "한글"
+/// arrives as `ㅎ ㅏ ㄴ ㄱ ㅡ ㄹ` and renders as scattered jamo / boxes. This
+/// is the canonical Hangul composition (L+V[+T]) only — no full Unicode table,
+/// since the visible breakage is Hangul-specific. Non-Hangul codepoints pass
+/// through untouched, so a string with no jamo returns an identical copy.
+fn nfc_hangul(s: &str) -> String {
+    const S_BASE: u32 = 0xAC00;
+    const L_BASE: u32 = 0x1100;
+    const V_BASE: u32 = 0x1161;
+    const T_BASE: u32 = 0x11A7;
+    const L_COUNT: u32 = 19;
+    const V_COUNT: u32 = 21;
+    const T_COUNT: u32 = 28;
+    const N_COUNT: u32 = V_COUNT * T_COUNT;
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        let c = ch as u32;
+        // Trailing jamo onto an already-composed LV syllable → LVT.
+        if (T_BASE + 1..T_BASE + T_COUNT).contains(&c) {
+            if let Some(prev) = out.chars().last() {
+                let p = prev as u32;
+                if p >= S_BASE && (p - S_BASE) % T_COUNT == 0 && p < S_BASE + L_COUNT * N_COUNT {
+                    out.pop();
+                    if let Some(syl) = char::from_u32(p + (c - T_BASE)) {
+                        out.push(syl);
+                        continue;
+                    }
+                }
+            }
+        }
+        // Vowel jamo onto a leading consonant → LV syllable.
+        if (V_BASE..V_BASE + V_COUNT).contains(&c) {
+            if let Some(prev) = out.chars().last() {
+                let l = prev as u32;
+                if (L_BASE..L_BASE + L_COUNT).contains(&l) {
+                    out.pop();
+                    let syl = S_BASE + ((l - L_BASE) * V_COUNT + (c - V_BASE)) * T_COUNT;
+                    if let Some(syl) = char::from_u32(syl) {
+                        out.push(syl);
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(ch);
     }
-    let ext = lower.rsplit('.').next().unwrap_or("");
-    match ext {
-        "rs" => "rust",
-        "py" | "pyi" | "pyw" => "python",
-        "js" | "mjs" | "cjs" => "javascript",
-        "jsx" | "tsx" => "react",
-        "ts" => "typescript",
-        "go" => "go",
-        "rb" => "ruby",
-        "java" => "java",
-        "kt" | "kts" => "kotlin",
-        "swift" => "swift",
-        "c" | "h" => "c",
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => "cpp",
-        "cs" => "csharp",
-        "php" => "php",
-        "lua" => "lua",
-        "vue" => "vue",
-        "prisma" => "prisma",
-        "graphql" | "gql" => "graphql",
-        "sql" => "database",
-        "html" | "htm" | "xml" => "html",
-        "css" => "css",
-        "scss" | "sass" | "less" => "sass",
-        "json" | "jsonc" => "json",
-        "yml" | "yaml" => "yaml",
-        "toml" | "ini" | "conf" | "cfg" | "env" => "settings",
-        "lock" => "lock",
-        "md" | "markdown" | "rst" => "markdown",
-        "txt" | "log" => "document",
-        "sh" | "bash" | "zsh" | "fish" => "console",
-        "ps1" => "powershell",
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tiff" | "tif" => "image",
-        "svg" => "svg",
-        "pdf" => "pdf",
-        "ttf" | "otf" | "woff" | "woff2" => "font",
-        "zip" | "tar" | "gz" | "tgz" | "rar" | "7z" | "xz" => "zip",
-        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => "audio",
-        "mp4" | "mov" | "avi" | "mkv" | "webm" => "video",
-        _ => "document",
-    }
-}
-
-/// File-tree folder icon (Material Icon Theme name) chosen by folder name, so
-/// common dirs (src, test, .github…) carry a tinted variant like VS Code.
-/// Unknown folders fall back to the plain blue `folder-base`.
-fn folder_icon(name: &str) -> &'static str {
-    match name.to_ascii_lowercase().as_str() {
-        "src" | "lib" | "app" | "source" | "crates" => "folder-src",
-        "test" | "tests" | "__tests__" | "spec" | "specs" => "folder-test",
-        "node_modules" => "folder-node",
-        "dist" | "build" | "out" | "release" => "folder-dist",
-        "target" => "folder-target",
-        "public" | "static" | "www" => "folder-public",
-        "assets" | "images" | "img" | "icons" | "media" => "folder-images",
-        "docs" | "doc" | "documentation" => "folder-docs",
-        ".github" => "folder-github",
-        "config" | ".config" | "conf" | "settings" => "folder-config",
-        _ => "folder-base",
-    }
+    out
 }
 
 /// Map a file extension to the syntax-highlighter language name (the same
@@ -2358,6 +2334,10 @@ struct App {
     /// When the "복사됨" copy toast started animating. Drives its fade in the
     /// overlay pass; `None` once faded out. Set on a successful block copy.
     copy_toast_at: Option<Instant>,
+    /// Throttle for `refresh_pane_activity`: the working-bar/completion-toast
+    /// busy scan walks every pane's grid, so it runs at most a few times a
+    /// second rather than per frame. `None` until the first scan.
+    pane_busy_check: Option<Instant>,
     /// (window index, rect) for every window tab in the left sidebar.
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
@@ -2624,6 +2604,23 @@ struct App {
     /// cwd's child directories; `branches` is the repo's local branches.
     statusbar_menu_dirs: Vec<std::path::PathBuf>,
     statusbar_menu_branches: Vec<String>,
+    /// Vertical scroll (logical px) of the open status-bar dropdown. The list
+    /// caps its visible rows, so a cwd with many subdirs needs the wheel to
+    /// reach the rest. Reset to 0 each time a menu opens.
+    statusbar_menu_scroll: f32,
+    /// Full menu rect (logical px) of the open dropdown, cached each frame so
+    /// the wheel handler can tell when the cursor is hovering it.
+    statusbar_menu_rect: Option<(f32, f32, f32, f32)>,
+    /// Live search query for the open path dropdown — typing while it's open
+    /// filters the rows (cursor-style quick-nav). Reset when a menu opens.
+    statusbar_menu_search: String,
+    /// File-tree column search box: active flag + query. When active a search
+    /// field shows atop the tree and the rows are filtered to name matches.
+    file_tree_search_active: bool,
+    file_tree_search_query: String,
+    /// Search-box rect (logical px), cached each frame so the mouse handler can
+    /// tell when a click lands on it (→ focus the file-tree search).
+    file_tree_search_rect: (f32, f32, f32, f32),
     /// Single-pane Cmd+W in daemon mode sets this to close the GUI window
     /// (ghostty-style) on the next about_to_wait, instead of killing the pane.
     /// The daemon keeps the session alive so relaunch restores it.
@@ -2807,6 +2804,7 @@ impl App {
             dock_chip_rects: Vec::new(),
             dock_chip_close_rects: Vec::new(),
             copy_toast_at: None,
+            pane_busy_check: None,
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
             new_window_btn_rect: None,
@@ -2895,6 +2893,12 @@ impl App {
             statusbar_menu_branch_rects: Vec::new(),
             statusbar_menu_dirs: Vec::new(),
             statusbar_menu_branches: Vec::new(),
+            statusbar_menu_scroll: 0.0,
+            statusbar_menu_rect: None,
+            statusbar_menu_search: String::new(),
+            file_tree_search_active: false,
+            file_tree_search_query: String::new(),
+            file_tree_search_rect: (0.0, 0.0, 0.0, 0.0),
             pane_cwd_check: None,
             show_pane_numbers: false,
             file_tree_root: None,
@@ -3375,10 +3379,51 @@ fn decorate_process_name(comm: &str) -> String {
 }
 
 
+/// Where the first shell of a fresh session starts. No spawning pane exists
+/// yet, so the `"last"` mode falls back to home — same as every terminal's
+/// very first window.
 pub(crate) fn resolve_initial_cwd() -> Option<String> {
+    resolve_spawn_cwd(None)
+}
+
+/// Resolve the cwd for a newly spawned shell, honoring the user's `default_cwd`
+/// setting like other terminals' "working directory" option:
+///   - `"last"` (default) with a spawning `prev` pane → inherit its cwd. This
+///     wins over `KASATERM_CWD` on purpose: that env is a *first-pane* launch
+///     override (a launcher saying "start this instance here"), and it leaks
+///     into child shells via env inheritance, so letting it beat the split
+///     inheritance would pin every sibling to the launch dir instead of the
+///     pane the user split off.
+///   - `KASATERM_CWD` env (explicit launch override) — first pane / fixed modes.
+///   - `"home"` → `$HOME`.
+///   - an absolute or `~`-prefixed path → that directory if it exists.
+/// Anything unresolved falls through to home, then the process cwd.
+pub(crate) fn resolve_spawn_cwd(prev: Option<std::path::PathBuf>) -> Option<String> {
+    let mode = socket::read_default_cwd_mode();
+    if mode == "last" {
+        if let Some(p) = prev.and_then(|p| p.to_str().map(String::from)) {
+            return Some(p);
+        }
+    }
     if let Ok(dir) = std::env::var("KASATERM_CWD") {
         if !dir.is_empty() {
             return Some(dir);
+        }
+    }
+    match mode.as_str() {
+        // "last" with no prev (first boot) falls through to home.
+        "last" | "home" => {}
+        path => {
+            let expanded = match path.strip_prefix("~/") {
+                Some(rest) => match std::env::var("HOME") {
+                    Ok(home) if !home.is_empty() => format!("{home}/{rest}"),
+                    _ => path.to_string(),
+                },
+                None => path.to_string(),
+            };
+            if std::path::Path::new(&expanded).is_dir() {
+                return Some(expanded);
+            }
         }
     }
     if let Ok(home) = std::env::var("HOME") {

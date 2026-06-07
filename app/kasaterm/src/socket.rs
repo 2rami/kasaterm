@@ -449,6 +449,32 @@ fn window_size_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(home).join(".config/kasaterm/window.json"))
 }
 
+fn settings_file_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_SETTINGS_FILE") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/settings.json"))
+}
+
+/// User's `default_cwd` preference for where new shells start — mirrors the
+/// "working directory" setting every other terminal exposes. Returns the raw
+/// string: `"last"` (inherit the spawning pane's cwd, the standard default),
+/// `"home"`, or an absolute/`~`-prefixed path. Missing file/key → `"last"`.
+pub fn read_default_cwd_mode() -> String {
+    let fallback = || "last".to_string();
+    let Some(path) = settings_file_path() else { return fallback() };
+    let Ok(txt) = std::fs::read_to_string(&path) else { return fallback() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { return fallback() };
+    v.get("default_cwd")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .unwrap_or_else(fallback)
+}
+
 /// Persist the last logical window size so the next launch restores it instead
 /// of the hardcoded default. Logical (DPI-independent) so moving between a
 /// Retina and an external display restores the same on-screen size.
