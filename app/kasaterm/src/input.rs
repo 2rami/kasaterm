@@ -328,7 +328,22 @@ impl App {
         }
     }
     pub(crate) fn paste_clipboard(&self) {
-        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+        let mut cb = match arboard::Clipboard::new() {
+            Ok(cb) => cb,
+            Err(e) => {
+                eprintln!("[tmuxify] clipboard open failed: {e}");
+                return;
+            }
+        };
+        // 클립보드에 비트맵 이미지가 있으면 텍스트(파일 경로)를 붙여넣는 대신
+        // Ctrl+V(0x16)를 그대로 흘려보낸다 — claude code가 osascript로 클립보드
+        // PNG를 직접 읽어 [Image] 칩으로 첨부한다. get_text 만 읽던 옛 경로는
+        // 이미지를 경로 문자열로 박아버려 Ghostty 같은 칩 표시가 안 됐다.
+        if cb.get_image().is_ok() {
+            self.send_bytes(&[0x16]);
+            return;
+        }
+        let text = match cb.get_text() {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("[tmuxify] clipboard read failed: {e}");

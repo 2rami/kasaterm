@@ -11,7 +11,7 @@ impl App {
         eprintln!("[autoquit] clean exit in {ms}ms");
         self.autoquit_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(ms));
     }
-    pub(crate) fn schedule_autocapture(&self) {
+    pub(crate) fn schedule_autocapture(&mut self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOCAPTURE_MS") else { return; };
         let Ok(ms) = ms_str.parse::<u64>() else { return; };
         let path = std::env::var("KASATERM_AUTOCAPTURE_PATH").unwrap_or_else(|_| {
@@ -20,77 +20,53 @@ impl App {
                 .to_string_lossy()
                 .into_owned()
         });
-        eprintln!("[autocapture] in {ms}ms → {path}");
-
-        // macOS: derive the capture region from winit's own window geometry
-        // (logical px = screen points) so `screencapture -R` is bounded to the
-        // window even when osascript / System Events permission is denied. The
-        // old AppleScript bounds query returned None in headless runs, which
-        // fell back to grabbing the whole desktop.
-        #[cfg(target_os = "macos")]
-        let region: Option<String> = self.window.as_ref().and_then(|w| {
-            let scale = w.scale_factor();
-            let pos = w.outer_position().ok()?;
-            let size = w.outer_size();
-            let x = (pos.x as f64 / scale).round() as i64;
-            let y = (pos.y as f64 / scale).round() as i64;
-            let ww = (size.width as f64 / scale).round() as i64;
-            let hh = (size.height as f64 / scale).round() as i64;
-            Some(format!("{x},{y},{ww},{hh}"))
-        });
-
-        // Windows: pull HWND on the main thread (raw-window-handle isn't
-        // Send), pass the address into the timer thread as isize.
-        #[cfg(windows)]
-        let hwnd_isize: Option<isize> = self.window.as_ref().and_then(|w| {
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            w.window_handle().ok().and_then(|h| match h.as_raw() {
-                RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
-                _ => None,
-            })
-        });
-
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-
-            #[cfg(target_os = "macos")]
-            {
-                let pid = std::process::id();
-                // Force our window to the front so nothing overlaps the region,
-                // then capture the winit-derived bounds. Frontmost is best-
-                // effort (needs Accessibility permission); the region itself
-                // comes from winit, not osascript, so capture works regardless.
-                let _ = std::process::Command::new("osascript")
-                    .args([
-                        "-e",
-                        &format!(
-                            "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
-                        ),
-                    ])
-                    .status();
-                std::thread::sleep(std::time::Duration::from_millis(400));
-                let mut cmd = std::process::Command::new("screencapture");
-                cmd.args(["-x", "-t", "png"]);
-                if let Some(r) = region.as_deref() {
-                    cmd.args(["-R", r]);
-                }
-                cmd.arg(&path);
-                let _ = cmd.status();
-                eprintln!("[autocapture] captured {path} region={:?}", region);
-            }
-
-            #[cfg(windows)]
-            {
-                let Some(hwnd) = hwnd_isize else {
-                    eprintln!("[autocapture] no HWND available");
-                    return;
-                };
-                match capture_window_to_png_windows(hwnd, &path) {
-                    Ok((w, h)) => eprintln!("[autocapture] captured {path} ({w}x{h})"),
-                    Err(e) => eprintln!("[autocapture] failed: {e}"),
+        // Optional git-panel demo before the capture: expand the first changed
+        // file's inline diff ("diff") or open the commit modal ("modal").
+        if let Ok(action) = std::env::var("KASATERM_AUTOGIT") {
+            let gms: u64 = std::env::var("KASATERM_AUTOGIT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(ms.saturating_sub(1500));
+            self.pending_autogit = Some((
+                std::time::Instant::now() + std::time::Duration::from_millis(gms),
+                action,
+            ));
+        }
+        eprintln!("[autocapture] in {ms}ms → {path} (gpu readback)");
+        // GPU frame readback (gpu::render → save_rgba_png) needs no OS
+        // screen-record permission, so it works headless on every platform —
+        // replacing the old screencapture (macOS, permission-blocked) and
+        // PrintWindow (Windows, can't grab the Vulkan/Metal surface) paths.
+        self.pending_capture = Some((
+            std::time::Instant::now() + std::time::Duration::from_millis(ms),
+            path,
+        ));
+    }
+    /// Run a queued git-panel demo action (KASATERM_AUTOGIT) so headless capture
+    /// can show the inline diff / commit modal without a real click.
+    pub(crate) fn run_autogit(&mut self, action: &str) {
+        match action {
+            "diff" => {
+                let pick = self.git_col_data.lock().ok().and_then(|g| {
+                    g.unstaged
+                        .first()
+                        .map(|(_, p)| (false, p.clone()))
+                        .or_else(|| g.staged.first().map(|(_, p)| (true, p.clone())))
+                });
+                if let Some((staged, path)) = pick {
+                    self.toggle_git_diff(staged, path);
                 }
             }
-        });
+            "modal" => self.open_commit_modal(),
+            "hover" => {
+                // Park the cursor over the first file row so its action cluster
+                // (open / discard / stage) renders for a headless capture.
+                let gx = self.git_col_x();
+                let gw = self.git_col_w();
+                self.cursor_px = (gx + gw - 30.0, TITLE_HEIGHT + 150.0);
+            }
+            _ => {}
+        }
     }
     pub(crate) fn schedule_autosend(&self) {
         let Ok(text) = std::env::var("KASATERM_AUTOSEND") else { return; };

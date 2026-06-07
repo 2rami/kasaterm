@@ -191,9 +191,19 @@ impl Backend for PtyBackend {
             SplitDirection::Right | SplitDirection::Left => kasa_pty::SplitDir::Horizontal,
             SplitDirection::Up | SplitDirection::Down => kasa_pty::SplitDir::Vertical,
         };
-        let _ = self.proxy.send_event(UserEvent::SocketSplit(dir));
+        // Split runs on the GUI thread; block on a reply channel so we can hand
+        // the new pane's real id back to the caller. The teammate launcher uses
+        // it as the `-t` target for every follow-up send-keys — returning the
+        // old "pane-new" placeholder dropped the `claude …` launch silently.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketSplit(dir, tx));
+        let id = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "pane-new".into());
         Ok(SurfaceInfo {
-            id: "pane-new".into(),
+            id,
             workspace_id: FIXED_WORKSPACE_ID.into(),
             title: None,
         })
@@ -277,6 +287,17 @@ impl Backend for PtyBackend {
             .collect();
         board.sort_by(|a, b| a.surface_id.cmp(&b.surface_id));
         Ok(board)
+    }
+
+    fn notify(&self, surface_id: &str, title: &str, body: &str) -> Result<()> {
+        // Hand off to the GUI thread — the desktop alert (objc/osascript) and
+        // any pane/sidebar flash both need App state we can't touch here.
+        let _ = self.proxy.send_event(UserEvent::Notify {
+            surface_id: surface_id.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+        });
+        Ok(())
     }
 }
 

@@ -289,6 +289,14 @@ pub trait Backend: Send + Sync {
     fn active_process_name(&self) -> Option<String> {
         None
     }
+    /// Fire a "work complete" notification for a surface. The push half of
+    /// the board (which is pull-only): a claude `Stop` hook runs
+    /// `kasaterm-cli notify`, the host decides whether to raise a desktop
+    /// alert (suppressed when that pane is already focused, cmux-style) and
+    /// flashes the pane / sidebar. Default unsupported.
+    fn notify(&self, _surface_id: &str, _title: &str, _body: &str) -> Result<()> {
+        anyhow::bail!("notify unsupported by this backend")
+    }
     /// Multi-session (tmux-style tab) state for the session panel. Default
     /// is a single session — backends that don't support sessions just
     /// report one.

@@ -82,21 +82,26 @@ fn run() -> Result<Option<Response>> {
     Ok(Some(response))
 }
 
-/// Poll `collab.board` every `interval_secs` and print one line per pane whose
-/// status/intent changed since the last tick (plus `closed` for panes that
-/// vanished). Each line is a Monitor event. The first tick emits the current
-/// board as the baseline. Transient socket failures are swallowed — one dropped
-/// poll must not kill a long-running watch. Never returns (Ctrl-C / Monitor
-/// timeout ends it).
+/// Poll `collab.board` AND this pane's inbox every `interval_secs`, printing
+/// one Monitor event line per change: a pane whose status/intent changed (or
+/// `closed`), and a new `✉` message addressed to `$KASATERM_PANE_ID`. The first
+/// tick baselines both (board state + existing messages) silently so a fresh
+/// watch doesn't replay history. Transient failures are swallowed. Never
+/// returns (Ctrl-C / Monitor timeout ends it).
 fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     let req = Request {
         id: "board-watch".into(),
         method: "collab.board".into(),
         params: json!({}),
     };
+    let me = std::env::var("KASATERM_PANE_ID").unwrap_or_default();
+    let msgs_path = collab_messages_path();
     let mut prev: BTreeMap<String, String> = BTreeMap::new();
+    let mut seen_msgs: HashSet<String> = HashSet::new();
+    let mut first = true;
     loop {
+        // --- board: status/intent changes + closed panes ---
         if let Ok(resp) = roundtrip(socket_path, &req) {
             if let Some(board) = resp
                 .result
@@ -111,6 +116,9 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("?")
                         .to_string();
+                    if id == me {
+                        continue; // 내 변화는 내가 이미 안다 — 노이즈 제거
+                    }
                     let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("");
                     let intent = e.get("intent").and_then(|v| v.as_str()).unwrap_or("");
                     let waiting = e.get("waiting_for").and_then(|v| v.as_str());
@@ -135,8 +143,51 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
                 prev = cur;
             }
         }
+        // --- inbox: new messages addressed to me (kasacollab msg) ---
+        if std::env::var_os("KASATERM_BW_DEBUG").is_some() {
+            eprintln!("[bw-dbg] me={me:?} path={msgs_path:?} exists={} seen={}",
+                msgs_path.exists(), seen_msgs.len());
+        }
+        if !me.is_empty() {
+            if let Ok(content) = std::fs::read_to_string(&msgs_path) {
+                let mut out = std::io::stdout().lock();
+                for line in content.lines() {
+                    let Ok(m) = serde_json::from_str::<Value>(line) else { continue };
+                    if m.get("to").and_then(|v| v.as_str()) != Some(me.as_str()) {
+                        continue;
+                    }
+                    let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if id.is_empty() || !seen_msgs.insert(id.to_string()) {
+                        continue; // already seen (or baselined on first tick)
+                    }
+                    if !first {
+                        let from = m.get("from").and_then(|v| v.as_str()).unwrap_or("?");
+                        let text = m.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        let _ = writeln!(out, "✉ {from} → 나: {text}");
+                    }
+                }
+                let _ = out.flush();
+            }
+        }
+        first = false;
         std::thread::sleep(std::time::Duration::from_secs(interval_secs.max(1)));
     }
+}
+
+/// `/tmp/kasaterm-collab/<cwd-with-/-and-.-as-->/messages.jsonl` — the same
+/// path kasacollab.py derives, so `board-watch` reads the inbox kasacollab msg
+/// writes. cwd-dependent, so the watch must run from the project directory.
+fn collab_messages_path() -> std::path::PathBuf {
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let enc: String = cwd
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect();
+    std::path::Path::new("/tmp/kasaterm-collab")
+        .join(enc)
+        .join("messages.jsonl")
 }
 
 /// Render `window.list`'s windows as a labelled stack of box diagrams, one
@@ -321,6 +372,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
     eprintln!("  kasaterm-cli transcript [surface_id] [N]  # last N turns (prompts+replies) of a pane's claude");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
+    eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
     eprintln!();
     eprintln!(
         "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
@@ -494,6 +546,33 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 params["screen_lines"] = json!(lines);
             }
             ("collab.board", params)
+        }
+        "notify" => {
+            // notify [--surface <id>] <title> [body...] — fire a "work
+            // complete" notification for a pane. A claude Stop hook runs this;
+            // --surface defaults to $KASATERM_PANE_ID (the pane it fired in).
+            let (surface, rest): (String, &[String]) =
+                if args.first().is_some_and(|a| a == "--surface") {
+                    let s = args
+                        .get(1)
+                        .ok_or_else(|| anyhow!("--surface needs an id"))?
+                        .clone();
+                    (s, args.get(2..).unwrap_or(&[]))
+                } else {
+                    let s = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                        anyhow!("notify needs --surface <id> or $KASATERM_PANE_ID")
+                    })?;
+                    (s, &args[..])
+                };
+            let title = rest
+                .first()
+                .ok_or_else(|| anyhow!("notify needs a <title>"))?
+                .clone();
+            let body = rest.get(1..).map(|s| s.join(" ")).unwrap_or_default();
+            (
+                "surface.notify",
+                json!({ "surface_id": surface, "title": title, "body": body }),
+            )
         }
         "layout" => ("window.layout", json!({})),
         "windows" => ("window.list", json!({})),

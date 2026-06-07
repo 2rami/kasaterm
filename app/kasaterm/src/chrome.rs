@@ -1,7 +1,51 @@
 //! 사이드바·git col·파일트리 토글·패널·줌/폰트·toast 등 chrome UI 메서드.
 use super::*;
 
+/// How long a completion notification pulses a pane header / sidebar done-dot.
+const NOTIFY_FLASH_MS: u128 = 1800;
+
 impl App {
+    /// A pane's claude finished (Stop hook → `kasaterm-cli notify` → socket →
+    /// `UserEvent::Notify`). Flash the pane's header and, unless the user is
+    /// already looking at that exact pane (our window focused + it's the
+    /// active pane), raise a desktop alert. cmux-style suppression keeps the
+    /// alert for the cases that actually need attention (background window or
+    /// a sibling pane).
+    pub(crate) fn handle_notify(&mut self, surface_id: &str, title: &str, body: &str) {
+        let is_active_pane = self
+            .ws
+            .lock()
+            .unwrap()
+            .active_pane
+            .as_deref()
+            == Some(surface_id);
+        self.notify_flash
+            .insert(surface_id.to_string(), std::time::Instant::now());
+        self.chrome_dirty = true;
+        if !(self.window_focused && is_active_pane) {
+            notify_desktop(title, body);
+        }
+    }
+
+    /// Flash strength (1.0 → 0.0) for `id`'s completion pulse, or `None` when
+    /// it isn't flashing. Drives the header pulse and the sidebar done-dot;
+    /// both fade over `NOTIFY_FLASH_MS`.
+    pub(crate) fn notify_flash_factor(&self, id: &str) -> Option<f32> {
+        self.notify_flash.get(id).and_then(|t| {
+            let age = t.elapsed().as_millis();
+            (age < NOTIFY_FLASH_MS).then(|| 1.0 - age as f32 / NOTIFY_FLASH_MS as f32)
+        })
+    }
+
+    /// Whether any pane is mid-flash — `about_to_wait` pumps ~30fps frames
+    /// while this is true so the pulse fades smoothly instead of freezing on
+    /// the last painted frame.
+    pub(crate) fn any_notify_flash(&self) -> bool {
+        self.notify_flash
+            .values()
+            .any(|t| t.elapsed().as_millis() < NOTIFY_FLASH_MS)
+    }
+
     /// Sidebar width that layout math should actually use: the full
     /// `SIDEBAR_W` when the strip is shown, 0 when collapsed. Every
     /// origin_x / window_cells / hit-test calc routes through here so a
@@ -53,6 +97,21 @@ impl App {
             win.inner_size().width as f32 / scale - w
         })
     }
+    /// Whether `id`'s per-pane status bar is shown (default true — only the
+    /// pane ids the user explicitly collapsed sit in `statusbar_hidden`).
+    pub(crate) fn statusbar_visible(&self, id: &str) -> bool {
+        !self.statusbar_hidden.contains(id)
+    }
+    /// Logical-px footer band `id` reserves for its status bar — `PANE_FOOTER_HEIGHT`
+    /// when shown, 0 when collapsed. Mirrors the header band in `resize_backend`
+    /// and the render clip so the PTY grid stops exactly above the bar.
+    pub(crate) fn statusbar_px(&self, id: &str) -> f32 {
+        if self.statusbar_visible(id) {
+            PANE_FOOTER_HEIGHT
+        } else {
+            0.0
+        }
+    }
     /// Git-column-toggle button rect, parked at the right end of the title
     /// strip (mirrors the file-tree toggle on the left). Needs the window
     /// width, so it returns `None` before the first paint.
@@ -84,6 +143,184 @@ impl App {
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
+        }
+    }
+    /// Show/hide pane `id`'s status bar. Collapsing returns the footer rows to
+    /// the cell grid, so the PTY is reshaped; an open dropdown on that bar is
+    /// dismissed. `resize_backend` reads `statusbar_px` per leaf, so the toggle
+    /// is all the state it needs.
+    pub(crate) fn toggle_statusbar(&mut self, id: &str) {
+        if self.statusbar_hidden.contains(id) {
+            self.statusbar_hidden.remove(id);
+        } else {
+            self.statusbar_hidden.insert(id.to_string());
+            if self.statusbar_menu.as_ref().map(|(p, _)| p == id).unwrap_or(false) {
+                self.statusbar_menu = None;
+            }
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+    }
+    /// Open (or toggle) a status-bar dropdown for pane `id`. The list is
+    /// snapshotted now — `read_dir` / `git_branches` block, so they can't run on
+    /// the render path. A second click on the same chip closes the menu.
+    pub(crate) fn open_statusbar_menu(&mut self, id: &str, kind: StatusbarMenu) {
+        if self.statusbar_menu.as_ref() == Some(&(id.to_string(), kind)) {
+            self.statusbar_menu = None;
+            self.chrome_dirty = true;
+            return;
+        }
+        let cwd = self.pane_cwd_cache.get(id).cloned();
+        self.statusbar_menu_dirs.clear();
+        self.statusbar_menu_branches.clear();
+        match kind {
+            StatusbarMenu::Path => {
+                if let Some(cwd) = cwd.as_ref() {
+                    // `..` first, then visible child directories, sorted.
+                    if let Some(parent) = cwd.parent() {
+                        self.statusbar_menu_dirs.push(parent.to_path_buf());
+                    }
+                    if let Ok(rd) = std::fs::read_dir(cwd) {
+                        let mut dirs: Vec<std::path::PathBuf> = rd
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                            .map(|e| e.path())
+                            .filter(|p| {
+                                p.file_name()
+                                    .and_then(|s| s.to_str())
+                                    .map(|s| !s.starts_with('.'))
+                                    .unwrap_or(false)
+                            })
+                            .collect();
+                        dirs.sort();
+                        self.statusbar_menu_dirs.extend(dirs);
+                    }
+                }
+            }
+            StatusbarMenu::Branch => {
+                if let Some(cwd) = cwd.as_ref() {
+                    self.statusbar_menu_branches = kasa_mcp::git::git_branches(cwd);
+                }
+            }
+        }
+        self.statusbar_menu = Some((id.to_string(), kind));
+        self.chrome_dirty = true;
+    }
+    /// `cd` pane `id`'s shell into `dir` (status-bar path picker). Sent straight
+    /// to that pane's PTY — single-quoted so spaces survive — and the dropdown
+    /// closes. The cwd sniffer repaints the bar once the shell reports the move.
+    pub(crate) fn statusbar_cd(&mut self, id: &str, dir: &std::path::Path) {
+        self.statusbar_menu = None;
+        let q = dir.to_string_lossy().replace('\'', "'\\''");
+        let cmd = format!("cd '{q}'\r");
+        if let Some(pty) = self.pty.get(id) {
+            let _ = pty.send_bytes(cmd.as_bytes());
+        }
+        self.chrome_dirty = true;
+    }
+    /// Check out `branch` in pane `id`'s repo (status-bar branch switcher). Runs
+    /// inline so the result can become a toast: a dirty tree makes git refuse
+    /// (the silent failure that read as "branch switch doesn't work"), so we
+    /// surface its message instead of dropping it. We don't stash/force — same
+    /// no-surprises stance as the git column.
+    pub(crate) fn statusbar_checkout(&mut self, id: &str, branch: String) {
+        self.statusbar_menu = None;
+        self.chrome_dirty = true;
+        let Some(cwd) = self.pane_cwd_cache.get(id).cloned() else { return };
+        let res = kasa_mcp::git::git_checkout(&cwd, &branch);
+        let ok = res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        let msg = if ok {
+            format!("{branch} 브랜치로 전환")
+        } else {
+            let out = res.get("output").and_then(|v| v.as_str()).unwrap_or("");
+            if out.contains("would be overwritten") {
+                "변경사항 때문에 전환 불가 — 커밋하거나 stash 먼저".to_string()
+            } else if out.is_empty() {
+                "브랜치 전환 실패".to_string()
+            } else {
+                format!("전환 실패: {}", out.lines().next().unwrap_or(""))
+            }
+        };
+        self.collab_toast = Some((msg, std::time::Instant::now()));
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// Expand/collapse a file's inline unified diff in the git panel. The diff
+    /// is parsed once on first expand and cached; `git diff` for a single file
+    /// is cheap but not render-loop cheap, so it must not run per frame.
+    pub(crate) fn toggle_git_diff(&mut self, staged: bool, path: String) {
+        let key = (staged, path.clone());
+        if self.git_col_expanded.remove(&key) {
+            self.chrome_dirty = true;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return;
+        }
+        if !self.git_col_diff_cache.contains_key(&key) {
+            if let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+                let rows = kasa_mcp::git::git_file_diff(&cwd, &path, staged);
+                self.git_col_diff_cache.insert(key.clone(), rows);
+            }
+        }
+        self.git_col_expanded.insert(key);
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// Collapse + drop cached diffs after a stage/unstage/commit changes the
+    /// tree — the cached rows (and which side a file lives on) are now stale, so
+    /// closing them is the no-surprise reset; the user re-expands for fresh diff.
+    pub(crate) fn invalidate_git_diffs(&mut self) {
+        self.git_col_expanded.clear();
+        self.git_col_diff_cache.clear();
+    }
+    /// Open the git column for pane `id`'s repo (status-bar diff chip click).
+    /// Focuses that pane so the column follows it (auto-track), then opens the
+    /// column if it's hidden. A second click on an already-open column for the
+    /// same pane closes it (toggle).
+    pub(crate) fn open_git_panel_for(&mut self, id: &str) {
+        let already = self.git_col_visible
+            && self
+                .ws
+                .lock()
+                .ok()
+                .and_then(|w| w.active_pane.clone())
+                .as_deref()
+                == Some(id);
+        if already {
+            self.toggle_git_col();
+            return;
+        }
+        if let Ok(mut w) = self.ws.lock() {
+            w.active_pane = Some(id.to_string());
+        }
+        self.git_col_pinned_cwd = None;
+        if self.git_col_visible {
+            self.publish_git_col_cwd();
+            self.chrome_dirty = true;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        } else {
+            self.toggle_git_col();
+        }
+    }
+    /// Feed every pane's cwd into the badge poller (`git_poll_cwds`) so each
+    /// pane's status bar shows its own repo's branch/diff, not just the active
+    /// one. The poller dedups + rate-limits, so a flat overwrite each frame is
+    /// fine. Skipped entirely when no pane shows a bar (nothing to refresh).
+    pub(crate) fn publish_pane_git_cwds(&self) {
+        if self.statusbar_hidden.len() >= self.pane_cwd_cache.len() && !self.git_col_visible {
+            // Every bar collapsed and the git column hidden — no badge consumer.
+            return;
+        }
+        let cwds: Vec<std::path::PathBuf> = self.pane_cwd_cache.values().cloned().collect();
+        if let Ok(mut guard) = self.git_poll_cwds.lock() {
+            *guard = cwds;
         }
     }
     /// Push the active pane's cwd into the shared `git_col_cwd` so the git
@@ -174,6 +411,80 @@ impl App {
                 self.chrome_dirty = true;
             }
         }
+    }
+    /// Open the cursor-style Commit modal: pre-fill nothing, focus the message
+    /// box, default to including unstaged changes (the toggle in the modal).
+    pub(crate) fn open_commit_modal(&mut self) {
+        self.git_commit_menu_open = false;
+        self.git_commit_modal_open = true;
+        self.git_commit_focused = true;
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    pub(crate) fn close_commit_modal(&mut self) {
+        self.git_commit_modal_open = false;
+        self.git_commit_focused = false;
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// Run the modal's commit. `push` also pushes after. Honors the
+    /// include-unstaged toggle: when on, stage everything first (`git add -A`),
+    /// else commit only what's already staged. Empty message is a no-op.
+    pub(crate) fn run_commit_modal(&mut self, push: bool) {
+        let msg = self.git_commit_msg.trim().to_string();
+        if msg.is_empty() {
+            self.git_commit_focused = true;
+            self.chrome_dirty = true;
+            return;
+        }
+        let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
+        let include = self.git_commit_modal_include_unstaged;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            if include {
+                // Stage everything, then commit all staged.
+                let _ = kasa_mcp::git::git_commit_all(&cwd, &msg);
+            } else {
+                let _ = kasa_mcp::git::git_commit_staged(&cwd, &msg);
+            }
+            if push {
+                let _ = kasa_mcp::git::git_push(&cwd);
+            }
+            let _ = proxy.send_event(UserEvent::Redraw);
+        });
+        self.git_commit_msg.clear();
+        self.git_commit_cursor = 0;
+        self.git_commit_focused = false;
+        self.git_commit_modal_open = false;
+        self.invalidate_git_diffs();
+        self.chrome_dirty = true;
+    }
+    /// `gh pr create --web` for the column's repo (Commit-menu → Create PR).
+    pub(crate) fn create_git_pr(&mut self) {
+        self.git_commit_menu_open = false;
+        let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("gh")
+                .args(["pr", "create", "--web"])
+                .current_dir(&cwd)
+                .spawn();
+        });
+        self.collab_toast = Some(("gh pr create --web 실행".to_string(), std::time::Instant::now()));
+        self.chrome_dirty = true;
+    }
+    /// Expand/restore the git column width (header ⤢ button). Toggles between a
+    /// wide reading width and the normal sidebar width; reshapes the PTYs.
+    pub(crate) fn toggle_git_col_expand(&mut self) {
+        let wide = 620.0_f32;
+        let normal = 340.0_f32;
+        self.git_col_w_logical = if self.git_col_w_logical >= wide - 1.0 { normal } else { wide };
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
     }
     /// Check out `branch` in the column's repo (off-thread). A dirty tree makes
     /// git refuse with a clear message — we don't stash/force, just let the
@@ -735,4 +1046,41 @@ impl App {
             PendingClose::Window => {}
         }
     }
+}
+
+/// Raise a macOS desktop notification. Uses `osascript` rather than
+/// `UNUserNotificationCenter`: the latter needs a bundled, code-signed app
+/// with notification authorization, which the bare `cargo run` binary lacks.
+/// The .app bundle can swap in a native UN notification later for the click
+/// action / sound control cmux gets.
+#[cfg(target_os = "macos")]
+fn notify_desktop(title: &str, body: &str) {
+    let script = format!(
+        "display notification {} with title {}",
+        applescript_quote(body),
+        applescript_quote(title),
+    );
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn notify_desktop(_title: &str, _body: &str) {}
+
+/// Wrap `s` in an AppleScript string literal, escaping `"` and `\` so a pane
+/// title with quotes can't break out of the `display notification` command.
+#[cfg(target_os = "macos")]
+fn applescript_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
 }

@@ -239,8 +239,12 @@ impl App {
             let box_h_px = h as f32 * ch;
             let scaled_cw = cw * fs;
             let scaled_ch = ch * fs;
+            // The status bar lives below the grid, so a pane that shows it
+            // loses the same footer band off its usable height — otherwise the
+            // shell paints its last rows behind the bar.
+            let footer_px = self.statusbar_px(&id);
             let usable_w = (box_w_px - 2.0 * PANE_INNER_X).max(scaled_cw);
-            let usable_h = (box_h_px - header_px - 2.0 * PANE_INNER_Y).max(scaled_ch);
+            let usable_h = (box_h_px - header_px - footer_px - 2.0 * PANE_INNER_Y).max(scaled_ch);
             let pcols = (usable_w / scaled_cw).floor().max(1.0) as u16;
             let prows = (usable_h / scaled_ch).floor().max(1.0) as u16;
             leaf_cells.insert(id, (pcols, prows));
@@ -322,12 +326,15 @@ impl App {
     /// session so each one matches its new rect. Becomes a no-op in
     /// tmux mode — splits there go through the cmux socket / tmux
     /// `split-window` instead.
-    pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<()> {
+    /// Splits the active pane and returns the new pane's id. The socket
+    /// backend forwards this id back to the teammate launcher; an empty
+    /// string means no pane was created (tmux backend / no active pane).
+    pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
         if self.tmux.is_some() {
-            return Ok(());
+            return Ok(String::new());
         }
         let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
-            return Ok(());
+            return Ok(String::new());
         };
         let new_id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
@@ -356,15 +363,15 @@ impl App {
             // bail without leaking the spawned session entry.
             self.pty.remove(&new_id);
             self.next_pane_id -= 1;
-            return Ok(());
+            return Ok(String::new());
         }
-        self.ws.lock().unwrap().active_pane = Some(new_id);
+        self.ws.lock().unwrap().active_pane = Some(new_id.clone());
         self.resize_backend(win_cols, win_rows);
         self.publish_pty_layout();
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        Ok(())
+        Ok(new_id)
     }
     /// Stage-3 in-pane tab spawn. Creates a fresh PtySession with its own
     /// pid, registers it in `pid_to_pane` so output streams find the right

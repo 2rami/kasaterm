@@ -38,6 +38,9 @@ pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// When set, the next `render` reads the presented frame back into a PNG at
+    /// this path — permission-free self-capture for headless verification.
+    pub capture_next: Option<String>,
     pipeline: Pipeline,
     atlas: Atlas,
     shaper: Shaper,
@@ -250,7 +253,9 @@ impl GpuRenderer {
         };
         eprintln!("[gpu] surface format = {:?} srgb={}", format, format.is_srgb());
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // COPY_SRC lets us read the presented frame back into a buffer for
+            // headless self-capture (no screen-recording permission needed).
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -402,6 +407,7 @@ impl GpuRenderer {
             surface,
             device,
             queue,
+            capture_next: None,
             config,
             pipeline,
             atlas,
@@ -1375,6 +1381,15 @@ impl GpuRenderer {
         self.icon_quads.clear();
     }
 
+    /// Drop pending chrome icons only. Icons draw in their own pass *after*
+    /// the chrome pass (see `icon_quads`), so a full-screen modal scrim — a
+    /// plain chrome rect — can't cover them; the split/action glyphs bleed
+    /// through. A modal that owns no icons of its own calls this so every
+    /// icon queued below it disappears under the scrim.
+    pub fn clear_icons(&mut self) {
+        self.icon_quads.clear();
+    }
+
     /// Has this pane's image already been uploaded? Lets the caller skip
     /// re-handing us the pixel buffer every frame.
     pub fn has_image(&self, id: &str) -> bool {
@@ -1470,6 +1485,16 @@ impl GpuRenderer {
             "rotate-cw" => include_str!("../assets/icons/rotate-cw.svg"),
             "maximize" => include_str!("../assets/icons/maximize.svg"),
             "file-text" => include_str!("../assets/icons/file-text.svg"),
+            "git-branch" => include_str!("../assets/icons/git-branch.svg"),
+            "chevrons-down-up" => include_str!("../assets/icons/chevrons-down-up.svg"),
+            "panel-bottom" => include_str!("../assets/icons/panel-bottom.svg"),
+            "panel-bottom-dashed" => include_str!("../assets/icons/panel-bottom-dashed.svg"),
+            "git-commit-horizontal" => include_str!("../assets/icons/git-commit-horizontal.svg"),
+            "ellipsis-vertical" => include_str!("../assets/icons/ellipsis-vertical.svg"),
+            "arrow-up" => include_str!("../assets/icons/arrow-up.svg"),
+            "github" => include_str!("../assets/icons/github.svg"),
+            "undo-2" => include_str!("../assets/icons/undo-2.svg"),
+            "external-link" => include_str!("../assets/icons/external-link.svg"),
             _ => return None,
         })
     }
@@ -2055,10 +2080,83 @@ impl GpuRenderer {
                 }
             }
         }
+        // Self-capture: copy the just-rendered frame into a buffer before
+        // present, then read it back to a PNG. No OS screen-record permission
+        // needed (screencapture is blocked in headless runs).
+        let capture = self.capture_next.take();
+        let cap = if capture.is_some() {
+            let w = self.config.width;
+            let h = self.config.height;
+            let bpr = w.div_ceil(64) * 256; // align(w*4, 256)
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("capture readback"),
+                size: (bpr * h) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &frame.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bpr),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            Some((buf, w, h, bpr))
+        } else {
+            None
+        };
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+        if let (Some(path), Some((buf, w, h, bpr))) = (capture, cap) {
+            buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+            let bgra = matches!(
+                self.config.format,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+            );
+            {
+                let data = buf.slice(..).get_mapped_range();
+                let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                for row in 0..h {
+                    let s = (row * bpr) as usize;
+                    let line = &data[s..s + (w * 4) as usize];
+                    for px in line.chunks_exact(4) {
+                        if bgra {
+                            rgba.extend_from_slice(&[px[2], px[1], px[0], 0xFF]);
+                        } else {
+                            rgba.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
+                        }
+                    }
+                }
+                match save_rgba_png(&path, &rgba, w, h) {
+                    Ok(()) => eprintln!("[autocapture] gpu readback → {path} ({w}x{h})"),
+                    Err(e) => eprintln!("[autocapture] gpu png failed: {e}"),
+                }
+            }
+            buf.unmap();
+        }
         Ok(instance_count)
     }
+}
+
+/// Encode RGBA8 pixels to a PNG file. Used by the GPU self-capture path. Uses
+/// the `image` crate (available on every target; `png` is Windows-only here).
+pub(crate) fn save_rgba_png(path: &str, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
+    image::save_buffer(path, rgba, w, h, image::ExtendedColorType::Rgba8)
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 /// Nerd Font / symbol icon codepoint ranges that should be scaled to

@@ -479,34 +479,6 @@ impl App {
         }
         self.pane_cwd_cache = cache;
     }
-    /// Path → breadcrumb segments ("app", "kasaterm", "src"), collapsing the
-    /// home prefix to "~". The header joins them with " › " and elides from
-    /// the front when space runs out, so the current folder always survives.
-    pub(crate) fn breadcrumb_segs(p: &std::path::Path) -> Vec<String> {
-        use std::path::Component;
-        let mut segs: Vec<String> = Vec::new();
-        let home = std::env::var("HOME").ok().filter(|h| !h.is_empty());
-        if let Some(h) = &home {
-            if let Ok(rest) = p.strip_prefix(h) {
-                segs.push("~".to_string());
-                for c in rest.components() {
-                    if let Component::Normal(s) = c {
-                        segs.push(s.to_string_lossy().into_owned());
-                    }
-                }
-                return segs;
-            }
-        }
-        for c in p.components() {
-            if let Component::Normal(s) = c {
-                segs.push(s.to_string_lossy().into_owned());
-            }
-        }
-        if segs.is_empty() {
-            segs.push("/".to_string());
-        }
-        segs
-    }
     /// Recompute the sidebar file tree when its root (the active pane's cwd)
     /// changes — pane switch or `cd`. Cheap string compare per frame; the
     /// read_dir walk only runs on a real change (or after expand/collapse,
