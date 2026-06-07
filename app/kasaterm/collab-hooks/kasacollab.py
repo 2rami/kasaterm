@@ -153,7 +153,7 @@ def cmd_lead(args):
     else:  # set (default): 실행한 pane이 팀장이 된다
         with open(lead_path(), "w") as f:
             f.write(me())
-        print(f"팀장 = {me()}. 이제 lead-watch를 Monitor에 persistent로 걸어 통솔을 시작하라:")
+        print(f"팀장 = {me()}. lead-watch 를 Monitor 에 persistent 로 걸어 통솔 시작:")
         print('  Monitor(command="bash ~/.claude/hooks/kasaterm-lead-watch.sh", '
               'description="사람 입력 대기 pane", persistent=true)')
 
