@@ -222,50 +222,11 @@ impl ApplicationHandler<UserEvent> for App {
                 std::thread::sleep(std::time::Duration::from_millis(1200));
                 let cwd = panel_cwd.lock().ok().and_then(|g| g.clone());
                 let Some(cwd) = cwd else { continue };
-                let v = kasa_mcp::git::git_status(&cwd);
                 // A transient git failure ('index.lock' contention while another
-                // pane commits, a half-written index, …) is NOT "not a repo" —
-                // skip this tick and keep the last good snapshot so the column
-                // never flashes the notice mid-operation. Only an explicit
-                // no_repo (home / arbitrary dir) shows it.
-                if v.get("error").is_some() {
-                    continue;
-                }
-                let mut view = GitColView {
-                    cwd: Some(cwd.clone()),
-                    ..Default::default()
-                };
-                if v.get("no_repo").and_then(|b| b.as_bool()).unwrap_or(false) {
-                    view.no_repo = true;
-                } else {
-                    view.branch = v
-                        .get("branch")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    view.ahead = v.get("ahead").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-                    view.behind = v.get("behind").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-                    view.insertions =
-                        v.get("insertions").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-                    view.deletions =
-                        v.get("deletions").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-                    view.clean = v.get("clean").and_then(|b| b.as_bool()).unwrap_or(false);
-                    // staged → modified → untracked, deduped (a file staged
-                    // with further edits shows once, under its strongest state).
-                    let mut seen = std::collections::HashSet::new();
-                    for (key, marker) in [("staged", 'A'), ("modified", 'M'), ("untracked", 'U')] {
-                        if let Some(arr) = v.get(key).and_then(|a| a.as_array()) {
-                            for p in arr.iter().filter_map(|p| p.as_str()) {
-                                if seen.insert(p.to_string()) {
-                                    view.files.push((marker, p.to_string()));
-                                }
-                            }
-                        }
-                    }
-                    // Local branches for the switcher dropdown (cheap `git
-                    // branch`); only when it's a real repo.
-                    view.branches = kasa_mcp::git::git_branches(&cwd);
-                }
+                // pane commits, a half-written index, …) returns None — skip
+                // this tick and keep the last good snapshot so the column never
+                // flashes the notice mid-operation.
+                let Some(view) = fetch_git_col_view(&cwd) else { continue };
                 let mut guard = match panel_data.lock() {
                     Ok(g) => g,
                     Err(_) => break,
@@ -323,6 +284,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autotoggle();
         self.arm_autotabs();
         self.arm_autodrag();
+        self.arm_autoopen();
+        self.arm_autoconfirm();
         self.schedule_autoquit();
     }
 
@@ -403,7 +366,13 @@ impl ApplicationHandler<UserEvent> for App {
             self.chrome_dirty = true;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // A running job (claude / build / editor) gets a confirm modal
+                // first; an idle window quits straight away.
+                if !self.confirm_or_close_window() {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::ScaleFactorChanged { scale_factor: _, .. } => {
                 let size = window.inner_size();
                 if gpu_mode {
@@ -659,6 +628,23 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // Image pan drag: slide the zoomed image by the cursor delta,
+                // clamped to the slack so it can't be dragged off the texture.
+                if let Some((pane_id, start, base)) = self.image_pan_drag.clone() {
+                    let (mx, my) = self.image_pan_bounds(&pane_id);
+                    let nx = (base.0 + (self.cursor_px.0 - start.0)).clamp(-mx, mx);
+                    let ny = (base.1 + (self.cursor_px.1 - start.1)).clamp(-my, my);
+                    if let Ok(mut ws) = self.ws.lock() {
+                        if let Some(pane) = ws.panes.get_mut(&pane_id) {
+                            pane.image_pan_x = nx;
+                            pane.image_pan_y = ny;
+                            pane.dirty = true;
+                        }
+                    }
+                    window.set_cursor(CursorIcon::Grabbing);
+                    window.request_redraw();
+                    return;
+                }
                 // Tab reorder drag: flip to active past the threshold, then
                 // re-derive the drop index from the cursor's x over this
                 // pane's tab pills. The insertion bar is painted from
@@ -808,6 +794,22 @@ impl ApplicationHandler<UserEvent> for App {
                             _ => icon,
                         }
                     };
+                    // Over a zoomed image pane's body → grab cursor, so the
+                    // drag-to-pan affordance reads. Only when there's slack to
+                    // pan (image overflows its box).
+                    let icon = if matches!(icon, CursorIcon::Default) {
+                        match self.px_to_pane_cell(cx, cy) {
+                            Some((pid, _, _))
+                                if self.pane_is_image(&pid)
+                                    && self.image_pan_bounds(&pid) != (0.0, 0.0) =>
+                            {
+                                CursorIcon::Grab
+                            }
+                            _ => icon,
+                        }
+                    } else {
+                        icon
+                    };
                     window.set_cursor(icon);
                     // Hover glow on chrome buttons (+ / action cluster) needs
                     // a redraw on every move — paint reads self.cursor_px to
@@ -817,12 +819,44 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                // Confirm-close modal swallows every click while it's up. A hit
+                // on a button acts; a click on the scrim is ignored (Esc/취소
+                // dismiss). Checked before any other hit-test so nothing behind
+                // the dim leaks a click.
+                if self.confirm_close.is_some() {
+                    if matches!(state, ElementState::Pressed) {
+                        let (cx, cy) = self.cursor_px;
+                        if let Some(btn) = self
+                            .confirm_btn_rects
+                            .iter()
+                            .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                            .map(|(b, _)| *b)
+                        {
+                            self.confirm_dialog_pick(btn, event_loop);
+                            window.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 // Pane header × close button. Catches clicks anywhere
                 // in the multi-pane workspace before we drop into the
                 // cell-grid click path.
                 if matches!(state, ElementState::Pressed) {
                     let cx = self.cursor_px.0;
                     let cy = self.cursor_px.1;
+                    // Any press outside the commit input blurs it, so typing
+                    // goes back to the PTY. A press on the input keeps focus
+                    // (the git-column handler re-asserts it below).
+                    if self.git_commit_focused {
+                        let on_input = self
+                            .git_commit_input_rect
+                            .map(|(x, y, w, h)| cx >= x && cx <= x + w && cy >= y && cy <= y + h)
+                            .unwrap_or(false);
+                        if !on_input {
+                            self.git_commit_focused = false;
+                            self.chrome_dirty = true;
+                        }
+                    }
                     // Windows frameless: resize from the window edges. An 8px
                     // hot border drives drag_resize_window in the matching
                     // direction. Checked first so an edge press resizes instead
@@ -1025,32 +1059,25 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.chrome_dirty = true;
                                 window.request_redraw();
                             } else {
-                                // Preview by extension: images → image pane,
-                                // everything else → markdown (renders .md, shows
-                                // other text as raw-ish). Routed to the daemon in
-                                // daemon mode, else the in-process split.
-                                let ext = path
-                                    .extension()
-                                    .and_then(|e| e.to_str())
-                                    .unwrap_or("")
-                                    .to_lowercase();
-                                let kind = match ext.as_str() {
-                                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff"
-                                    | "tif" | "ico" => "image",
-                                    "md" | "markdown" | "txt" | "log" | "" => "markdown",
-                                    "rs" | "py" | "pyi" | "pyw" | "js" | "mjs" | "cjs" | "jsx"
-                                    | "ts" | "tsx" | "go" | "rb" | "java" | "kt" | "kts"
-                                    | "swift" | "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hxx"
-                                    | "cs" | "php" | "html" | "htm" | "css" | "scss" | "sass"
-                                    | "json" | "jsonc" | "yml" | "yaml" | "toml" | "ini"
-                                    | "conf" | "cfg" | "env" | "sh" | "bash" | "zsh" | "fish"
-                                    | "sql" | "lua" | "vue" | "wgsl" | "glsl" | "vert"
-                                    | "frag" => "code",
-                                    _ => "markdown",
-                                };
-                                let ps = path.to_string_lossy().into_owned();
-                                let _ = (kind, ps);
-                                // TODO(local-mode): 로컬 파일 미리보기 직접 spawn
+                                // File row: a second click on the SAME file
+                                // within the double-click window opens it in a
+                                // split (folders keep single-click expand, so
+                                // files get their own gate to avoid opening on
+                                // every stray click). Image/markdown/code is
+                                // routed by extension inside open_file_split.
+                                let now = Instant::now();
+                                let is_double = matches!(
+                                    self.last_tree_click.as_ref(),
+                                    Some((t, p))
+                                        if *p == path
+                                            && now.duration_since(*t).as_millis() < 400
+                                );
+                                if is_double {
+                                    self.last_tree_click = None;
+                                    self.open_file_split(path.clone());
+                                } else {
+                                    self.last_tree_click = Some((now, path.clone()));
+                                }
                             }
                             return;
                         }
@@ -1113,6 +1140,13 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        // Commit input: click focuses it (blur on outside clicks
+                        // is handled at the MouseInput entry above).
+                        if self.git_commit_input_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.git_commit_focused = true;
+                            window.request_redraw();
+                            return;
+                        }
                         // Action buttons sit on top of the list zone — first.
                         if let Some(btn) = self
                             .git_col_btn_rects
@@ -1121,6 +1155,38 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|(b, _)| *b)
                         {
                             self.run_git_col_action(btn);
+                            window.request_redraw();
+                            return;
+                        }
+                        // Row +/− button → stage / unstage that one file. Checked
+                        // before the file-preview path since it sits inside the
+                        // row rect. Off-thread; the poller repaints the lists.
+                        if let Some((stage, path)) = self
+                            .git_col_stage_rects
+                            .iter()
+                            .find(|(_, _, r)| inside(r))
+                            .map(|(s, p, _)| (*s, p.clone()))
+                        {
+                            if let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+                                let proxy = self.proxy.clone();
+                                let data = self.git_col_data.clone();
+                                std::thread::spawn(move || {
+                                    if stage {
+                                        let _ = kasa_mcp::git::git_add_path(&cwd, &path);
+                                    } else {
+                                        let _ = kasa_mcp::git::git_unstage_path(&cwd, &path);
+                                    }
+                                    // Re-read status right away so the row jumps
+                                    // sections immediately instead of waiting for
+                                    // the 1.2s poller tick.
+                                    if let Some(view) = fetch_git_col_view(&cwd) {
+                                        if let Ok(mut g) = data.lock() {
+                                            *g = view;
+                                        }
+                                    }
+                                    let _ = proxy.send_event(UserEvent::Redraw);
+                                });
+                            }
                             window.request_redraw();
                             return;
                         }
@@ -1259,13 +1325,24 @@ impl ApplicationHandler<UserEvent> for App {
                                     }
                                     ImageBtn::ZoomOut => {
                                         pane.image_zoom = (z / 1.25).max(1.0);
+                                        // Back at fit → no pan room; recenter.
+                                        if pane.image_zoom <= 1.0 {
+                                            pane.image_pan_x = 0.0;
+                                            pane.image_pan_y = 0.0;
+                                        }
                                     }
                                     ImageBtn::Rotate => {
                                         pane.image_rot = (pane.image_rot + 1) % 4;
+                                        // Pan is in screen space; rotating the
+                                        // texture invalidates it.
+                                        pane.image_pan_x = 0.0;
+                                        pane.image_pan_y = 0.0;
                                     }
                                     ImageBtn::Reset => {
                                         pane.image_zoom = 1.0;
                                         pane.image_rot = 0;
+                                        pane.image_pan_x = 0.0;
+                                        pane.image_pan_y = 0.0;
                                     }
                                 }
                                 pane.dirty = true;
@@ -1300,20 +1377,8 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
-                        let tabs_len = self
-                            .ws
-                            .lock()
-                            .unwrap()
-                            .panes
-                            .get(&pid)
-                            .map(|p| p.tabs.len())
-                            .unwrap_or(0);
-                        if tabs_len <= 1 {
-                            // Single tab → closing it closes the pane.
-                            self.remove_pane(&pid);
-                        } else {
-                            self.close_tab(&pid, idx);
-                        }
+                        // Same tab-vs-pane + "job running?" logic as Cmd+W.
+                        self.confirm_or_close_tab(&pid, idx);
                         window.request_redraw();
                         return;
                     }
@@ -1460,6 +1525,12 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.selection = None;
                                 self.drag_anchor = None;
                                 self.mouse_forward_pane = None;
+                                // A press that also focuses an image pane still
+                                // arms a pan — dragging works on the first grab,
+                                // no need to click twice.
+                                if self.pane_is_image(&pane_id) {
+                                    self.begin_image_pan(&pane_id);
+                                }
                             } else if self.pane_takes_mouse(&pane_id) {
                                 // Hand the press to the TUI. Its own
                                 // selection / copy-on-select kicks in
@@ -1468,12 +1539,18 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.drag_anchor = None;
                                 self.send_mouse_sgr(&pane_id, 0, col, row, true);
                                 self.mouse_forward_pane = Some(pane_id.clone());
+                            } else if self.pane_is_image(&pane_id) {
+                                // Image pane: a drag pans the zoomed image
+                                // instead of selecting text.
+                                self.selection = None;
+                                self.drag_anchor = None;
+                                self.begin_image_pan(&pane_id);
                             } else if !self.pane_is_terminal(&pane_id) {
-                                // Markdown / image panes are document views,
-                                // not terminals — a drag here must not start a
-                                // cell text-selection. Focus already switched.
-                                // A click on a code-block copy button copies it;
-                                // otherwise a click on a link opens it.
+                                // Markdown panes are document views, not
+                                // terminals — a drag here must not start a cell
+                                // text-selection. A click on a code-block copy
+                                // button copies it; otherwise a click on a link
+                                // opens it.
                                 self.selection = None;
                                 self.drag_anchor = None;
                                 if !self.try_copy_md_block() {
@@ -1497,6 +1574,12 @@ impl ApplicationHandler<UserEvent> for App {
                         // A titlebar press that never moved past the drag
                         // threshold: just a click, drop the deferred move.
                         self.titlebar_drag_pending = None;
+                        // End an image pan drag.
+                        if self.image_pan_drag.take().is_some() {
+                            window.set_cursor(CursorIcon::Default);
+                            window.request_redraw();
+                            return;
+                        }
                         // End a tab drag: a real drag reorders the pane's tab
                         // list; a plain press just switches to that tab.
                         if let Some(mut td) = self.tab_drag.take() {
@@ -1812,6 +1895,24 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // Confirm-close modal: Enter = 닫기, Esc = 취소. Swallow all
+                // other keys so nothing reaches the PTY behind the dim.
+                if self.confirm_close.is_some() {
+                    if matches!(event.state, ElementState::Pressed) {
+                        use winit::keyboard::{Key, NamedKey};
+                        match event.logical_key {
+                            Key::Named(NamedKey::Enter) => {
+                                self.confirm_dialog_pick(ConfirmBtn::Close, event_loop);
+                            }
+                            Key::Named(NamedKey::Escape) => {
+                                self.confirm_dialog_pick(ConfirmBtn::Cancel, event_loop);
+                            }
+                            _ => {}
+                        }
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // KASATERM_KEY_DEBUG=1 → dump every key event with its
                 // modifier snapshot. Used to debug "Cmd+= doesn't zoom"
                 // class issues where it's unclear whether the OS even
@@ -1828,6 +1929,24 @@ impl ApplicationHandler<UserEvent> for App {
                         self.modifiers.shift_key(),
                         self.modifiers.alt_key(),
                     );
+                }
+                // Cmd+Q (macOS) / Ctrl+Shift+Q (Win/Linux): quit, but raise the
+                // confirm modal first when a job is running. macOS hands Cmd+Q
+                // to us as a key event — we never register an app-menu Quit item
+                // that would otherwise swallow it. Routes through the same
+                // confirm path as the red-light close so both agree.
+                if matches!(event.state, ElementState::Pressed)
+                    && !event.repeat
+                    && self.host_mod()
+                    && matches!(
+                        event.physical_key,
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ)
+                    )
+                {
+                    if !self.confirm_or_close_window() {
+                        event_loop.exit();
+                    }
+                    return;
                 }
                 self.forward_key(&event);
             }
@@ -1938,6 +2057,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autodrag();
         self.run_pending_autotoggle();
         self.run_pending_autotabs();
+        self.run_pending_autoopen();
+        self.run_pending_autoconfirm();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was
@@ -1983,4 +2104,61 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
     }
+}
+
+impl App {
+    /// Resolve a confirm-close modal: 취소 just dismisses; 닫기 runs the pending
+    /// action (a `Window` close needs the event loop to exit, the rest go
+    /// through `do_close`).
+    pub(crate) fn confirm_dialog_pick(&mut self, btn: ConfirmBtn, event_loop: &ActiveEventLoop) {
+        let Some(dlg) = self.confirm_close.take() else { return };
+        self.chrome_dirty = true;
+        if btn == ConfirmBtn::Cancel {
+            return;
+        }
+        match dlg.action {
+            PendingClose::Window => event_loop.exit(),
+            other => self.do_close(other),
+        }
+    }
+}
+
+/// Build a git-column snapshot from `git_status`, split into Staged Changes /
+/// Changes (VSCode model; no dedup, so a partially-staged file shows in both).
+/// Returns `None` on a transient git failure so the caller keeps the last good
+/// snapshot. Shared by the 1.2s poller and the per-click stage/unstage refresh
+/// so a + / − press reflects immediately instead of waiting for the next tick.
+fn fetch_git_col_view(cwd: &std::path::Path) -> Option<GitColView> {
+    let v = kasa_mcp::git::git_status(cwd);
+    if v.get("error").is_some() {
+        return None;
+    }
+    let mut view = GitColView {
+        cwd: Some(cwd.to_path_buf()),
+        ..Default::default()
+    };
+    if v.get("no_repo").and_then(|b| b.as_bool()).unwrap_or(false) {
+        view.no_repo = true;
+        return Some(view);
+    }
+    view.branch = v.get("branch").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    view.ahead = v.get("ahead").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+    view.behind = v.get("behind").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+    view.insertions = v.get("insertions").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+    view.deletions = v.get("deletions").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
+    view.clean = v.get("clean").and_then(|b| b.as_bool()).unwrap_or(false);
+    if let Some(arr) = v.get("staged").and_then(|a| a.as_array()) {
+        for p in arr.iter().filter_map(|p| p.as_str()) {
+            view.staged.push(('A', p.to_string()));
+        }
+    }
+    for (key, marker) in [("modified", 'M'), ("untracked", 'U')] {
+        if let Some(arr) = v.get(key).and_then(|a| a.as_array()) {
+            for p in arr.iter().filter_map(|p| p.as_str()) {
+                view.unstaged.push((marker, p.to_string()));
+            }
+        }
+    }
+    view.branches = kasa_mcp::git::git_branches(cwd);
+    Some(view)
 }

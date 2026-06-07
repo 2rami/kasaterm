@@ -257,9 +257,55 @@ pub fn git_commit(repo: &Path, files: &[String], message: &str) -> Value {
     json!({ "ok": ok, "output": out.trim() })
 }
 
+/// 패널 입력칸의 메시지로 작업트리 전체를 커밋(`git add -A` → `git commit -m`).
+/// VSCode 식 "전부 stage 하고 커밋" — 선택 stage 없이 한 번에. 빈 메시지는 거부.
+pub fn git_commit_all(repo: &Path, message: &str) -> Value {
+    if message.trim().is_empty() {
+        return json!({ "ok": false, "output": "커밋 메시지가 비어 있습니다" });
+    }
+    let (add_ok, add_out) = run_git(repo, &["add", "-A"]);
+    if !add_ok {
+        return json!({ "ok": false, "output": add_out.trim() });
+    }
+    let (ok, out) = run_git(repo, &["commit", "-m", message]);
+    json!({ "ok": ok, "output": out.trim() })
+}
+
+/// 이미 index 에 올라간(staged) 변경만 커밋(`git commit -m`, add 없음). VSCode
+/// 처럼 "Staged Changes 만 커밋" — 패널이 staged 비었는지 검사하므로 여기선
+/// 빈 메시지만 막는다(git 이 staged 없으면 알아서 실패 메시지를 돌려준다).
+pub fn git_commit_staged(repo: &Path, message: &str) -> Value {
+    if message.trim().is_empty() {
+        return json!({ "ok": false, "output": "커밋 메시지가 비어 있습니다" });
+    }
+    let (ok, out) = run_git(repo, &["commit", "-m", message]);
+    json!({ "ok": ok, "output": out.trim() })
+}
+
+/// 한 파일을 stage (`git add -- <path>`). 패널 Changes 행의 + 버튼.
+pub fn git_add_path(repo: &Path, path: &str) -> Value {
+    let (ok, out) = run_git(repo, &["add", "--", path]);
+    json!({ "ok": ok, "output": out.trim() })
+}
+
+/// 한 파일을 unstage (`git reset -q HEAD -- <path>`). 패널 Staged 행의 - 버튼.
+/// 워킹트리는 건드리지 않고 index 에서만 내린다.
+pub fn git_unstage_path(repo: &Path, path: &str) -> Value {
+    let (ok, out) = run_git(repo, &["reset", "-q", "HEAD", "--", path]);
+    json!({ "ok": ok, "output": out.trim() })
+}
+
 /// `git push`. 결과 텍스트를 그대로 패널에 돌려준다.
 pub fn git_push(repo: &Path) -> Value {
     let (ok, out) = run_git(repo, &["push"]);
+    json!({ "ok": ok, "output": out.trim() })
+}
+
+/// `git pull`. behind 커밋을 받아온다. fast-forward면 조용히 합쳐지고,
+/// 갈라졌으면 git이 merge 커밋을 만들거나 충돌을 output에 보고한다(우리가
+/// stash/force 하지 않는다 — push와 대칭). 패널은 poller 다음 틱에 repaint.
+pub fn git_pull(repo: &Path) -> Value {
+    let (ok, out) = run_git(repo, &["pull"]);
     json!({ "ok": ok, "output": out.trim() })
 }
 

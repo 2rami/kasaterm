@@ -125,6 +125,47 @@ impl App {
             }
         });
     }
+    /// Headless confirm-modal repro: after `KASATERM_TEST_CONFIRM_MS` fire the
+    /// window-close confirm path, so a background run can screenshot the modal
+    /// (pair with AUTOSEND="sleep 300" to give a pane a real foreground job).
+    pub(crate) fn arm_autoconfirm(&mut self) {
+        let Ok(ms) = std::env::var("KASATERM_TEST_CONFIRM_MS") else { return };
+        let Ok(ms) = ms.parse::<u64>() else { return };
+        self.autoconfirm_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+    }
+    pub(crate) fn run_pending_autoconfirm(&mut self) {
+        let Some(due) = self.autoconfirm_at else { return };
+        if Instant::now() < due {
+            return;
+        }
+        self.autoconfirm_at = None;
+        let raised = self.confirm_or_close_window();
+        eprintln!("[autoconfirm] confirm_or_close_window -> raised={raised}");
+    }
+    /// Headless file-open repro: schedule `open_file_split` on the path in
+    /// `KASATERM_AUTOOPEN` after `KASATERM_AUTOOPEN_MS` (default 4000ms), so a
+    /// background run can prove the preview pane + file-tree highlight without
+    /// a real double-click (mouse events aren't injectable headlessly).
+    pub(crate) fn arm_autoopen(&mut self) {
+        let Ok(p) = std::env::var("KASATERM_AUTOOPEN") else { return };
+        let ms: u64 = std::env::var("KASATERM_AUTOOPEN_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4000);
+        self.autoopen_path = Some(std::path::PathBuf::from(p));
+        self.autoopen_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+    }
+    pub(crate) fn run_pending_autoopen(&mut self) {
+        let Some(due) = self.autoopen_at else { return };
+        if Instant::now() < due {
+            return;
+        }
+        self.autoopen_at = None;
+        if let Some(p) = self.autoopen_path.take() {
+            eprintln!("[autoopen] open_file_split {}", p.display());
+            self.open_file_split(p);
+        }
+    }
     /// Headless verification helper. Reads `KASATERM_AUTOSPLIT` ("h" / "v"
     /// / "hv" / "vh" ...) and fires the matching splits from
     /// `about_to_wait` after `KASATERM_AUTOSPLIT_MS` (default 2500ms),

@@ -64,6 +64,66 @@ impl App {
             .map(|p| matches!(p.content, PaneContent::Terminal(_)))
             .unwrap_or(true)
     }
+    /// True if the pane's active tab is an image view — a drag here pans the
+    /// zoomed image instead of selecting text / following a markdown link.
+    pub(crate) fn pane_is_image(&self, pane_id: &str) -> bool {
+        let ws = self.ws.lock().unwrap();
+        ws.panes
+            .get(pane_id)
+            .map(|p| matches!(p.content, PaneContent::Image(_)))
+            .unwrap_or(false)
+    }
+    /// Max pan offset (logical px, per axis) for the image pane's current
+    /// zoom/rotation against its last-known body box — the slack between the
+    /// zoomed image and the box. Clamping the stored pan to this keeps a drag
+    /// past the edge from building dead-zone slack. Returns (0,0) when the
+    /// image fits (no room to pan) or the box/image is unknown.
+    pub(crate) fn image_pan_bounds(&self, pane_id: &str) -> (f32, f32) {
+        // Body box ≈ the pane's leaf cell span in logical px. Close enough for
+        // clamping the stored pan; `queue_image` does the pixel-exact crop.
+        let (cols, rows) = self.window_cells();
+        let Some((bw, bh)) = self
+            .effective_leaf_rects(cols, rows)
+            .into_iter()
+            .find(|(id, _, _, _, _)| id == pane_id)
+            .map(|(_, _, _, cw, ch)| (cw as f32 * self.cell.w, ch as f32 * self.cell.h))
+        else {
+            return (0.0, 0.0);
+        };
+        let ws = self.ws.lock().unwrap();
+        let Some(pane) = ws.panes.get(pane_id) else { return (0.0, 0.0) };
+        let Some(img) = pane.image() else { return (0.0, 0.0) };
+        // Rotation by an odd quarter swaps the texture's width/height.
+        let (iw, ih) = if pane.image_rot % 2 == 1 {
+            (img.h as f32, img.w as f32)
+        } else {
+            (img.w as f32, img.h as f32)
+        };
+        if iw <= 0.0 || ih <= 0.0 || bw <= 0.0 || bh <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let fit = (bw / iw).min(bh / ih).min(1.0);
+        let z = pane.image_view_zoom().max(1.0);
+        let raw_w = iw * fit * z;
+        let raw_h = ih * fit * z;
+        (
+            ((raw_w - bw) * 0.5).max(0.0),
+            ((raw_h - bh) * 0.5).max(0.0),
+        )
+    }
+    /// Arm an image-pane pan drag from the current cursor, snapshotting the
+    /// pane's current pan so CursorMoved can apply `base + delta`.
+    pub(crate) fn begin_image_pan(&mut self, pane_id: &str) {
+        let base = self
+            .ws
+            .lock()
+            .unwrap()
+            .panes
+            .get(pane_id)
+            .map(|p| (p.image_pan_x, p.image_pan_y))
+            .unwrap_or((0.0, 0.0));
+        self.image_pan_drag = Some((pane_id.to_string(), self.cursor_px, base));
+    }
     /// Encode an SGR mouse event and ship it to the pane. `button` is
     /// the SGR button code (0 = left press/motion/release, +32 for
     /// motion-with-button-held). `press` toggles the final byte
@@ -349,7 +409,7 @@ impl App {
             let n = self
                 .git_col_data
                 .lock()
-                .map(|g| g.files.len())
+                .map(|g| g.staged.len() + g.unstaged.len())
                 .unwrap_or(0);
             let win_h = self.window.as_ref().map_or(800.0, |w| {
                 w.inner_size().height as f32 / self.effective_scale()
@@ -389,14 +449,47 @@ impl App {
         // Markdown pane: scroll the laid-out document by pixels (it has no PTY
         // history to delegate to). Clamp to the content height the renderer
         // last published so it can't scroll past the end.
-        let is_md = {
+        let (is_md, is_raw) = {
             let ws = self.ws.lock().unwrap();
             target_pane_id
                 .as_deref()
                 .and_then(|id| ws.panes.get(id))
-                .map_or(false, |p| p.markdown().is_some())
+                .and_then(|p| p.markdown())
+                .map_or((false, false), |m| (true, m.raw_mode))
         };
         if is_md {
+            // Raw editor: a horizontal wheel/trackpad component pans long code
+            // lines under the fixed gutter. Clamp to the longest line so it
+            // can't scroll into empty space past the end of the text.
+            if is_raw {
+                let dx_px = match delta {
+                    MouseScrollDelta::LineDelta(x, _) => x * self.cell.w * 3.0,
+                    MouseScrollDelta::PixelDelta(p) => p.x as f32,
+                };
+                if dx_px.abs() > 0.01 {
+                    if let Some(id) = target_pane_id.as_deref() {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.panes.get_mut(id) {
+                                let cw = self.cell.w;
+                                if let Some(m) = pane.markdown_mut() {
+                                    let longest = m
+                                        .edit_lines
+                                        .iter()
+                                        .map(|l| l.chars().count())
+                                        .max()
+                                        .unwrap_or(0);
+                                    let max_h = (longest as f32 * cw - cw * 4.0).max(0.0);
+                                    m.h_scroll = (m.h_scroll - dx_px).clamp(0.0, max_h);
+                                }
+                                pane.dirty = true;
+                            }
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+            }
             if let Some(id) = target_pane_id.as_deref() {
                 let visible_h = self.window.as_ref().map_or(400.0, |w| {
                     w.inner_size().height as f32 / (w.scale_factor() as f32 * self.ui_zoom)
@@ -517,6 +610,112 @@ impl App {
             w.request_redraw();
         }
     }
+    /// Insert text at the commit-message cursor (committed Hangul or a typed
+    /// char). Char-indexed; advances the cursor by the inserted char count.
+    pub(crate) fn git_commit_insert(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let col = self.git_commit_cursor.min(self.git_commit_msg.chars().count());
+        let b = char_byte(&self.git_commit_msg, col);
+        self.git_commit_msg.insert_str(b, text);
+        self.git_commit_cursor = col + text.chars().count();
+    }
+    /// Commit-input key entry with Hangul composition, mirroring
+    /// `md_editor_input` for the single-line git commit field. macOS hands jamo
+    /// through `event.text`; feed the shared composer, insert committed
+    /// syllables, keep the preedit in `self.preedit` for the overlay. Non-jamo
+    /// flushes the pending syllable first, then edits.
+    pub(crate) fn git_commit_input(&mut self, event: &KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        #[cfg(target_os = "macos")]
+        if let Some(t) = &event.text {
+            if t.chars().count() == 1 {
+                if let Some(c) = t.chars().next() {
+                    if (0x3130..=0x318F).contains(&(c as u32)) {
+                        if let Some(commit) = self.hangul.feed(c) {
+                            self.git_commit_insert(&commit);
+                        }
+                        self.preedit = self.hangul.preedit().unwrap_or_default();
+                        self.in_preedit = !self.preedit.is_empty();
+                        self.chrome_dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
+            self.preedit = self.hangul.preedit().unwrap_or_default();
+            self.in_preedit = !self.preedit.is_empty();
+            self.chrome_dirty = true;
+            return;
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            self.git_commit_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        self.git_commit_key(event);
+    }
+    /// Single-line editing for the commit field: char insert, backspace/delete,
+    /// left/right/home/end. Enter submits the commit, Escape blurs. Hangul is
+    /// composed in `git_commit_input` before this runs.
+    pub(crate) fn git_commit_key(&mut self, event: &KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        let len = self.git_commit_msg.chars().count();
+        let mut col = self.git_commit_cursor.min(len);
+        match &event.logical_key {
+            Key::Named(NamedKey::Backspace) => {
+                if col > 0 {
+                    let b0 = char_byte(&self.git_commit_msg, col - 1);
+                    let b1 = char_byte(&self.git_commit_msg, col);
+                    self.git_commit_msg.replace_range(b0..b1, "");
+                    col -= 1;
+                }
+            }
+            Key::Named(NamedKey::Delete) => {
+                if col < len {
+                    let b0 = char_byte(&self.git_commit_msg, col);
+                    let b1 = char_byte(&self.git_commit_msg, col + 1);
+                    self.git_commit_msg.replace_range(b0..b1, "");
+                }
+            }
+            Key::Named(NamedKey::ArrowLeft) => col = col.saturating_sub(1),
+            Key::Named(NamedKey::ArrowRight) => {
+                if col < len {
+                    col += 1;
+                }
+            }
+            Key::Named(NamedKey::Home) => col = 0,
+            Key::Named(NamedKey::End) => col = len,
+            Key::Named(NamedKey::Enter) => {
+                self.git_commit_cursor = col;
+                self.run_git_col_action(GitColBtn::Commit);
+                return;
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.git_commit_focused = false;
+                self.preedit.clear();
+                self.in_preedit = false;
+                let _ = self.hangul.flush();
+                self.chrome_dirty = true;
+                return;
+            }
+            Key::Named(NamedKey::Space) => {
+                let b = char_byte(&self.git_commit_msg, col);
+                self.git_commit_msg.insert(b, ' ');
+                col += 1;
+            }
+            Key::Character(txt) => {
+                let b = char_byte(&self.git_commit_msg, col);
+                self.git_commit_msg.insert_str(b, txt);
+                col += txt.chars().count();
+            }
+            _ => {}
+        }
+        self.git_commit_cursor = col;
+        self.chrome_dirty = true;
+    }
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
@@ -524,6 +723,15 @@ impl App {
         // Touch the input timer so the cursor stays solid for a beat and
         // the blink phase re-starts from "on" once it kicks in.
         self.last_input_at = Instant::now();
+        // Git commit field has focus: keystrokes edit the message, not the PTY.
+        // (Click elsewhere blurs it — see the column's mouse handler.)
+        if self.git_commit_focused {
+            self.git_commit_input(event);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         // Image panes have no PTY — repurpose keys for view control.
         //   +/=      zoom in     -    zoom out
         //   0        reset       r/R  rotate 90° CW
@@ -550,6 +758,10 @@ impl App {
                             if let Some(pane) = ws.active_mut() {
                                 let z = pane.image_view_zoom();
                                 pane.image_zoom = (z / 1.25).max(1.0);
+                                if pane.image_zoom <= 1.0 {
+                                    pane.image_pan_x = 0.0;
+                                    pane.image_pan_y = 0.0;
+                                }
                                 changed = true;
                             }
                         }
@@ -559,6 +771,8 @@ impl App {
                             if let Some(pane) = ws.active_mut() {
                                 pane.image_zoom = 1.0;
                                 pane.image_rot = 0;
+                                pane.image_pan_x = 0.0;
+                                pane.image_pan_y = 0.0;
                                 changed = true;
                             }
                         }
@@ -567,6 +781,8 @@ impl App {
                         if let Ok(mut ws) = self.ws.lock() {
                             if let Some(pane) = ws.active_mut() {
                                 pane.image_rot = (pane.image_rot + 1) % 4;
+                                pane.image_pan_x = 0.0;
+                                pane.image_pan_y = 0.0;
                                 changed = true;
                             }
                         }
@@ -725,10 +941,11 @@ impl App {
                         }
                         return;
                     }
-                    // Close the focused pane. Last-pane close is left
-                    // to the OS close button.
+                    // Close the focused tab (a multi-tab pane keeps its other
+                    // tabs). Last-tab/last-pane close is left to the OS close
+                    // button.
                     if code == KeyCode::KeyW {
-                        self.close_active_pane();
+                        self.close_active_tab();
                         return;
                     }
                     // Cmd+T → new window in the current session (PTY backend

@@ -710,7 +710,7 @@ impl App {
         }
     }
     /// Internal: drop a pane regardless of whether it's the active one.
-    /// Used by both `close_active_pane` (Cmd+W) and `reap_dead_panes`
+    /// Used by both `close_pane` (Cmd+W / header ×) and `reap_dead_panes`
     /// (shell exit). Picks a survivor focus when removing the focused
     /// pane.
     pub(crate) fn remove_pane(&mut self, target: &str) {
@@ -800,12 +800,19 @@ impl App {
         }
         self.remove_pane(pid);
     }
-    /// Remove the focused pane. Focus moves to the next pane in document order.
-    pub(crate) fn close_active_pane(&mut self) {
-        let active = self.ws.lock().unwrap().active_pane.clone();
-        if let Some(id) = active {
-            self.close_pane(&id);
-        }
+    /// Cmd+W: close the active *tab*. A pane with several tabs drops only the
+    /// focused one — the rest stay alive (the "Cmd+W killed every bound tab /
+    /// my claude pane" bug). Routes through `confirm_or_close_tab`, which both
+    /// decides tab-vs-pane (last tab → pane, no-op on a single-pane window) and
+    /// raises the "close while a job is running?" modal when needed.
+    pub(crate) fn close_active_tab(&mut self) {
+        let (pane, idx) = {
+            let ws = self.ws.lock().unwrap();
+            let Some(id) = ws.active_pane.clone() else { return };
+            let idx = ws.panes.get(&id).map(|p| p.active_tab).unwrap_or(0);
+            (id, idx)
+        };
+        self.confirm_or_close_tab(&pane, idx);
     }
     /// Cycle focus to the previous (delta=-1) or next (delta=+1) pane
     /// in document order. No-op when there's only one pane.
