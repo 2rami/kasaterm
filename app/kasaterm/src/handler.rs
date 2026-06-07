@@ -17,7 +17,20 @@ impl ApplicationHandler<UserEvent> for App {
                         None => self.active_pty(),
                     };
                     if let Some(p) = target {
-                        let _ = p.send_bytes(bytes);
+                        // Ship the trailing CR/LF as its own PTY write. A
+                        // `tell`'s submit byte (`\r`) fused to the message body
+                        // reads as a newline insert in claude (Ink), not a
+                        // submit — the message types in but never fires. A
+                        // standalone CR submits, and splitting also keeps a
+                        // trailing 한글/이모지 codepoint from truncating across
+                        // the read boundary ahead of the CR.
+                        let (body, submit) = crate::socket::split_trailing_submit(bytes);
+                        if !body.is_empty() {
+                            let _ = p.send_bytes(body);
+                        }
+                        if !submit.is_empty() {
+                            let _ = p.send_bytes(submit);
+                        }
                     }
                 }
                 self.render_frame();
