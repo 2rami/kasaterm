@@ -554,11 +554,14 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
   .status.idle { color: #787e8a; }
   .status.blocked { color: #f85149; }
   .status.waiting { color: #f0883e; font-weight: 600; }
-  .intent { margin-top: 5px; color: #ecedf3; word-break: break-word; }
+  .row1 { display: flex; align-items: center; }
+  .ptitle { font-weight: 600; color: #ecedf3; margin-left: 8px; flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ptitle.empty-title { color: #5a5f6b; font-weight: 400; font-style: italic; }
+  .prompt { margin-top: 7px; color: #c9cedb; word-break: break-word; }
+  .prompt::before { content: "▸ "; color: #5a8ce6; }
+  .reply { margin-top: 3px; color: #8b91a0; font-size: 12px; word-break: break-word; }
+  .intent { margin-top: 4px; font-size: 11px; color: #5a5f6b; word-break: break-word; }
   .files { margin-top: 3px; font-size: 11px; color: #787e8a; word-break: break-all; }
-  .bell { background: none; border: 0; padding: 2px 4px; margin-left: 6px; cursor: pointer; color: #5a8ce6; display: inline-flex; align-items: center; border-radius: 6px; flex: none; }
-  .bell:hover { background: #2e323b; }
-  .bell.off { color: #5a5f6b; }
   .empty { color: #787e8a; font-size: 12px; padding: 8px 2px; }
   .err { color: #f85149; font-size: 12px; margin-top: 10px; }
 </style>
@@ -571,8 +574,6 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
 const PORT = "__PORT__";
 const base = "http://127.0.0.1:" + PORT;
 const $ = (id) => document.getElementById(id);
-const BELL_ON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
-const BELL_OFF = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5"/><path d="M17 17H3s3-2 3-9a4.7 4.7 0 0 1 .3-1.7"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function leaf(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
@@ -590,20 +591,25 @@ function render(board) {
   board.forEach(p => {
     const st = (p.status || "").toLowerCase();
     const files = (p.files || []).map(leaf).join(", ");
-    const muted = !!p.muted;
-    // "waiting" = claude blocked on a permission/input prompt (agents --json).
-    // The transcript can't see this, so it's the one status worth flagging hard.
+    // "waiting" = claude blocked on a permission/input prompt. The transcript
+    // can't see this, so it's the one status worth flagging hard.
     const statusLabel = st === "waiting"
       ? "⚠ 권한 대기중" + (p.waiting_for ? ` (${esc(p.waiting_for)})` : "")
       : esc(p.status || "");
     const d = document.createElement("div");
     d.className = "pane";
+    const title = p.title
+      ? `<span class="ptitle">${esc(p.title)}</span>`
+      : `<span class="ptitle empty-title">제목 없음</span>`;
+    const intent = (p.intent && p.intent !== "active")
+      ? `<div class="intent">${esc(p.intent)}</div>` : "";
     d.innerHTML =
       `<div class="row1"><span class="sid">${esc(p.surface_id)}</span>` +
-      `<span class="status ${esc(st)}">${statusLabel}</span>` +
-      `<button class="bell ${muted ? "off" : ""}" data-sid="${esc(p.surface_id)}" data-muted="${muted}" ` +
-      `title="${muted ? "알림 꺼짐 — 클릭해서 켜기" : "알림 켜짐 — 클릭해서 끄기"}">${muted ? BELL_OFF : BELL_ON}</button></div>` +
-      `<div class="intent">${esc(p.intent || "")}</div>` +
+      title +
+      `<span class="status ${esc(st)}">${statusLabel}</span></div>` +
+      (p.last_prompt ? `<div class="prompt">${esc(p.last_prompt)}</div>` : "") +
+      (p.last_reply ? `<div class="reply">${esc(p.last_reply)}</div>` : "") +
+      intent +
       (files ? `<div class="files">${esc(files)}</div>` : "");
     list.appendChild(d);
   });
@@ -619,18 +625,6 @@ async function poll() {
   }
 }
 
-// Mute toggle: event-delegated so it survives the list.innerHTML rebuild each
-// poll. `data-muted` is the CURRENT state, so the POST flips it.
-$("list").addEventListener("click", async (e) => {
-  const btn = e.target.closest(".bell");
-  if (!btn) return;
-  const sid = btn.dataset.sid;
-  const on = btn.dataset.muted === "true" ? "false" : "true";
-  try {
-    await fetch(base + "/board-mute?surface=" + encodeURIComponent(sid) + "&on=" + on, { method: "POST" });
-    poll();
-  } catch (e) {}
-});
 poll();
 setInterval(poll, 1000);
 </script>
@@ -1408,6 +1402,29 @@ impl PaneTab {
     }
     fn term_mut(&mut self) -> Option<&mut TerminalPane> {
         if let PaneContent::Terminal(t) = &mut self.content { Some(t) } else { None }
+    }
+    /// The visible screen as text — the last `lines` non-blank rows of the
+    /// current grid (0 = all). Trailing blank rows are dropped so a peek of a
+    /// half-empty screen doesn't return a wall of whitespace. Backs
+    /// `surface.peek` / the board's `screen_lines` so a sibling can read what
+    /// this pane is currently showing (a prompt, a menu, build output).
+    pub(crate) fn visible_text(&self, lines: usize) -> String {
+        let Some(t) = self.term() else {
+            return String::new();
+        };
+        let mut out: Vec<String> = Vec::new();
+        for row in t.cells.iter() {
+            let mut s = String::new();
+            append_cells_text(row.iter(), &mut s);
+            out.push(s.trim_end().to_string());
+        }
+        while out.last().map_or(false, |l| l.is_empty()) {
+            out.pop();
+        }
+        if lines > 0 && out.len() > lines {
+            out.drain(0..out.len() - lines);
+        }
+        out.join("\n")
     }
     fn markdown(&self) -> Option<&MarkdownPane> {
         if let PaneContent::Markdown(m) = &self.content { Some(m) } else { None }

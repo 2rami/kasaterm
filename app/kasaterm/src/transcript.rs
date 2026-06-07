@@ -1,20 +1,17 @@
-//! claude-code transcript(jsonl) → 협업 board 활동 추출.
+//! claude-code transcript(jsonl) → board 스냅샷 추출.
 //!
 //! claude code는 세션을 `~/.claude/projects/<cwd>/<session>.jsonl`에
-//! 실시간으로 append한다. `type:"assistant"` 줄의 `message.content[]`에
-//! `tool_use`(name+input) 블록이 들어있어, 그걸 읽으면 그 pane이 "지금
-//! 무슨 파일을 읽고/고치고, 무슨 명령을 돌리는지"를 — 그 pane이 직접
-//! 보고하지 않아도 — 알 수 있다. thinking 블록은 항상 redact(빈
-//! 문자열)이라 무시한다.
+//! 실시간으로 append한다. 그 줄들에서 board에 필요한 것만 뽑는다:
+//! - `ai-title` → 세션 제목(이 pane이 통째로 뭐 하는지)
+//! - `last-prompt` → 마지막 사용자 프롬프트(지금 뭘 시켰나)
+//! - `assistant`의 `text` → 최근 답변, `tool_use` → 최근 도구·충돌 파일
+//! `thinking` 블록은 항상 redact(빈 문자열)이라 무시한다.
 //!
-//! 이 모듈은 순수 파싱 함수만 둔다. 파일 tail/상태는 socket.rs의 watcher가
-//! 들고 이 함수들을 호출한다.
+//! 순수 파싱만 둔다 — 파일 tail 읽기·idle 판정은 socket.rs가 들고
+//! `snapshot_from_tail`을 호출한다. **상시 폴링 스레드(watcher)는 없다**:
+//! board를 부를 때 그 자리에서 transcript tail을 읽어 만든다(pull).
 
-use kasa_socket::backend::PaneActivity;
-use std::collections::VecDeque;
-
-/// board의 intent에 보여줄 최근 도구 사용 개수.
-pub const RECENT_MAX: usize = 4;
+use kasa_socket::backend::{ConversationTurn, PaneActivity};
 
 /// transcript에서 뽑은 한 번의 도구 사용.
 #[derive(Clone, Debug)]
@@ -26,30 +23,8 @@ pub struct ToolEvent {
     pub file: Option<String>,
 }
 
-/// jsonl 한 줄에서 tool_use 이벤트들을 뽑는다. assistant 줄이 아니거나
-/// 파싱 실패면 빈 Vec(불완전한 마지막 줄도 안전).
-pub fn parse_line(line: &str) -> Vec<ToolEvent> {
-    let v: serde_json::Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-        return Vec::new();
-    }
-    let content = match v.pointer("/message/content").and_then(|c| c.as_array()) {
-        Some(c) => c,
-        None => return Vec::new(),
-    };
-    content
-        .iter()
-        .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
-        .map(|b| {
-            let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-            tool_event(name, b.get("input"))
-        })
-        .collect()
-}
-
+/// 한 `tool_use` 블록(name+input)을 board 라벨로. `snapshot_from_tail`이
+/// 최신 tool_use 하나에 대해 호출한다.
 fn tool_event(name: &str, input: Option<&serde_json::Value>) -> ToolEvent {
     let get = |k: &str| input.and_then(|i| i.get(k)).and_then(|v| v.as_str());
     match name {
@@ -90,48 +65,123 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// 최근 도구 사용 링버퍼 + idle 여부 → PaneActivity.
-/// - intent: 최근 도구들을 시간순으로 `"Read auth.ts → Bash cargo build"`.
-/// - files: Edit/Write 대상(충돌 신호), 중복 제거.
-/// - status: idle | building(빌드/테스트 류 Bash가 최근) | working.
-pub fn build_activity(surface_id: &str, recent: &VecDeque<ToolEvent>, idle: bool) -> PaneActivity {
-    // 연속 중복 라벨 제거 — "Bash cd → Bash cd → Bash cd"가 한 번으로.
-    let mut labels: Vec<&str> = Vec::new();
-    for e in recent {
-        if labels.last() != Some(&e.label.as_str()) {
-            labels.push(e.label.as_str());
-        }
-    }
-    let intent = labels.join(" → ");
-    let mut files: Vec<String> = Vec::new();
-    for e in recent {
-        if let Some(f) = &e.file {
-            if !files.contains(f) {
-                files.push(f.clone());
-            }
-        }
-    }
-    let status = if idle {
-        "idle"
-    } else if recent.back().map_or(false, |e| {
-        let l = e.label.to_lowercase();
-        l.starts_with("bash")
-            && (l.contains("build") || l.contains("test") || l.contains("cargo") || l.contains("compile"))
-    }) {
-        "building"
+/// 한 줄 텍스트를 board용으로 정규화: 줄바꿈→공백, `max` 글자 초과 시 자르고 `…`.
+fn clip(s: &str, max: usize) -> String {
+    let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > max {
+        flat.chars().take(max).collect::<String>() + "…"
     } else {
-        "working"
-    };
+        flat
+    }
+}
+
+/// transcript의 **마지막 부분**(socket.rs가 tail 64KB를 잘라 넘김)을 역순으로
+/// 1패스 훑어 board 한 줄을 만든다. 각 필드는 **처음 만나는(=최신)** 값에서
+/// 채우고, 다 차면 조기 종료한다. `idle`(파일 mtime 기준)은 socket.rs가 판정해
+/// 넘긴다 — transcript 자체엔 "막힘/대기" 신호가 없다.
+pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
+    let mut title = String::new();
+    let mut last_prompt = String::new();
+    let mut last_reply = String::new();
+    let mut intent = String::new();
+    let mut files: Vec<String> = Vec::new();
+
+    for line in tail.lines().rev() {
+        if !title.is_empty() && !last_prompt.is_empty() && !last_reply.is_empty() && !intent.is_empty()
+        {
+            break;
+        }
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue, // tail 첫 줄은 잘렸을 수 있다 — 안전하게 무시.
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("ai-title") if title.is_empty() => {
+                if let Some(t) = v.get("aiTitle").and_then(|x| x.as_str()) {
+                    title = clip(t, 60);
+                }
+            }
+            Some("last-prompt") if last_prompt.is_empty() => {
+                if let Some(p) = v.get("lastPrompt").and_then(|x| x.as_str()) {
+                    last_prompt = clip(p, 100);
+                }
+            }
+            Some("assistant") => {
+                let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) else {
+                    continue;
+                };
+                for b in content {
+                    match b.get("type").and_then(|t| t.as_str()) {
+                        Some("text") if last_reply.is_empty() => {
+                            if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
+                                last_reply = clip(t, 120);
+                            }
+                        }
+                        Some("tool_use") if intent.is_empty() => {
+                            let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                            let ev = tool_event(name, b.get("input"));
+                            intent = ev.label;
+                            if let Some(f) = ev.file {
+                                files.push(f);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     PaneActivity {
         surface_id: surface_id.to_string(),
+        title,
+        last_prompt,
+        last_reply,
         intent: if intent.is_empty() { "active".into() } else { intent },
-        status: status.into(),
+        status: if idle { "idle".into() } else { "working".into() },
         files,
         screen: None,
-        muted: false,
-        // The transcript can't tell us claude is blocked on a prompt; only
-        // `agents --json` knows. The watcher's agents poll fills this in.
+        // transcript는 permission 대기를 기록하지 않는다 — 화면 peek로만 보인다.
         waiting_for: None,
+    }
+}
+
+/// jsonl 한 줄을 대화 turn으로. 모니터링에 의미있는 것만 `Some`:
+/// - `type:"user"` 이고 content가 **문자열**(사람/오케스트레이터가 타이핑한
+///   프롬프트)일 때만. content가 배열이면 tool_result(노이즈)라 버린다.
+/// - `type:"assistant"` 의 `text` 블록을 모아 답변으로. tool_use·thinking만
+///   있는 turn은 텍스트가 비어 `None`.
+pub fn parse_turn(line: &str) -> Option<ConversationTurn> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    match v.get("type").and_then(|t| t.as_str())? {
+        "user" => {
+            let text = v.pointer("/message/content")?.as_str()?.trim();
+            (!text.is_empty()).then(|| ConversationTurn {
+                role: "user".into(),
+                text: text.to_string(),
+            })
+        }
+        "assistant" => {
+            let content = v.pointer("/message/content")?.as_array()?;
+            let mut text = String::new();
+            for b in content {
+                if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(t);
+                    }
+                }
+            }
+            let text = text.trim();
+            (!text.is_empty()).then(|| ConversationTurn {
+                role: "assistant".into(),
+                text: text.to_string(),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -140,54 +190,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn read_label_no_file_claim() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/a/b/auth.ts"}}]}}"#;
-        let ev = parse_line(line);
-        assert_eq!(ev.len(), 1);
-        assert_eq!(ev[0].label, "Read auth.ts");
-        assert_eq!(ev[0].file, None, "Read는 충돌 신호 아님");
-    }
-
-    #[test]
-    fn edit_marks_file_claim() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/a/auth.ts"}}]}}"#;
-        let ev = parse_line(line);
-        assert_eq!(ev[0].file.as_deref(), Some("/a/auth.ts"));
-        assert_eq!(ev[0].label, "Edit auth.ts");
-    }
-
-    #[test]
-    fn bash_label_truncated() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo build --release -p kasaterm"}}]}}"#;
-        let ev = parse_line(line);
-        assert!(ev[0].label.starts_with("Bash cargo build"));
-        assert!(ev[0].label.len() <= "Bash ".len() + 40);
-    }
-
-    #[test]
-    fn non_assistant_and_garbage_ignored() {
-        assert!(parse_line(r#"{"type":"user","message":{"content":[]}}"#).is_empty());
-        assert!(parse_line("not json").is_empty());
-        assert!(parse_line("").is_empty());
-    }
-
-    #[test]
-    fn multiple_tool_uses_in_one_line() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"},{"type":"tool_use","name":"Read","input":{"file_path":"/x.rs"}},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#;
-        assert_eq!(parse_line(line).len(), 2);
-    }
-
-    #[test]
-    fn activity_intent_files_status() {
-        let mut r = VecDeque::new();
-        r.push_back(ToolEvent { label: "Read auth.ts".into(), file: None });
-        r.push_back(ToolEvent { label: "Edit auth.ts".into(), file: Some("/a/auth.ts".into()) });
-        r.push_back(ToolEvent { label: "Bash cargo build".into(), file: None });
-        let a = build_activity("%1", &r, false);
-        assert_eq!(a.intent, "Read auth.ts → Edit auth.ts → Bash cargo build");
+    fn snapshot_picks_latest_of_each_field() {
+        // 역순 파싱: ai-title·last-prompt·최근 text·최근 tool_use를 각각 집고,
+        // tool_result(user array)는 무시한다.
+        let tail = [
+            r#"{"type":"ai-title","aiTitle":"auth 500 디버깅"}"#,
+            r#"{"type":"last-prompt","lastPrompt":"null 체크 넣어줘"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"auth.ts 보고 있어"},{"type":"tool_use","name":"Edit","input":{"file_path":"/a/auth.ts"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"고쳤어"}]}}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!(a.title, "auth 500 디버깅");
+        assert_eq!(a.last_prompt, "null 체크 넣어줘");
+        assert_eq!(a.last_reply, "고쳤어", "역순 첫 text = 최신 답변");
+        assert_eq!(a.intent, "Edit auth.ts");
         assert_eq!(a.files, vec!["/a/auth.ts"]);
-        assert_eq!(a.status, "building");
-        let idle = build_activity("%1", &r, true);
-        assert_eq!(idle.status, "idle");
+        assert_eq!(a.status, "working");
+    }
+
+    #[test]
+    fn snapshot_idle_and_truncated_first_line() {
+        // 잘린 첫 줄은 무시, idle=true면 status=idle.
+        let tail = [
+            r#"e":"Edit","input":{"file_path":"/x"}}]}}"#, // 잘린 쓰레기
+            r#"{"type":"ai-title","aiTitle":"x"}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%2", &tail, true);
+        assert_eq!(a.title, "x");
+        assert_eq!(a.status, "idle");
+        assert_eq!(a.intent, "active", "tool_use 없으면 active");
+    }
+
+    #[test]
+    fn parse_turn_skips_tool_result_keeps_prompt_and_reply() {
+        assert!(parse_turn(r#"{"type":"user","message":{"content":[{"type":"tool_result"}]}}"#).is_none());
+        let u = parse_turn(r#"{"type":"user","message":{"content":"고쳐줘"}}"#).unwrap();
+        assert_eq!((u.role.as_str(), u.text.as_str()), ("user", "고쳐줘"));
+        let a = parse_turn(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#).unwrap();
+        assert_eq!((a.role.as_str(), a.text.as_str()), ("assistant", "ok"));
     }
 }

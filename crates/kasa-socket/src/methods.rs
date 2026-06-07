@@ -79,9 +79,9 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.open_preview" => surface_open_preview(backend, id, &req.params),
         "collab.board" => {
             // Opt-in screen capture: a plain board stays metadata-only (cheap,
-            // what the per-turn board-context hook wants), but an orchestrator
-            // pane can pass `screen_lines` to fold each pane's visible tail in
-            // — board + peek in one round-trip.
+            // what board-watch polling wants), but an orchestrator pane can
+            // pass `screen_lines` to fold each pane's visible tail in — board
+            // + peek in one round-trip.
             let screen_lines = req
                 .params
                 .get("screen_lines")
@@ -108,7 +108,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             Err(e) => backend_err(id, e),
         },
         "collab.bind_transcript" => collab_bind_transcript(backend, id, &req.params),
-        "collab.notify" => collab_notify(backend, id, &req.params),
+        "collab.transcript" => collab_transcript(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -204,7 +204,7 @@ fn system_capabilities(id: Value) -> Response {
                 "window.layout",
                 "window.list",
                 "collab.bind_transcript",
-                "collab.notify",
+                "collab.transcript",
             ],
         }),
     )
@@ -241,15 +241,22 @@ fn collab_bind_transcript(backend: &dyn Backend, id: Value, params: &Value) -> R
     }
 }
 
-fn collab_notify(backend: &dyn Backend, id: Value, params: &Value) -> Response {
-    let from = match params.get("from").and_then(|v| v.as_str()) {
+fn collab_transcript(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
         Some(s) => s,
-        None => return param_err(id, "collab.notify requires `from` (surface_id)"),
+        None => return param_err(id, "collab.transcript requires `surface_id` (string)"),
     };
-    // kind is advisory; an unknown/missing value falls back to "stop" so a
-    // terse hook (`notify` with no arg) still does the sensible thing.
-    let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("stop");
-    simple(id, backend.collab_notify(from, kind))
+    // Default to the last 6 turns — enough to see the current exchange plus a
+    // little context, without dumping a whole session.
+    let turns = params
+        .get("turns")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(6);
+    match backend.transcript_tail(surface_id, turns) {
+        Ok(t) => Response::success(id, json!({ "turns": t })),
+        Err(e) => backend_err(id, e),
+    }
 }
 
 fn surface_peek(backend: &dyn Backend, id: Value, params: &Value) -> Response {
