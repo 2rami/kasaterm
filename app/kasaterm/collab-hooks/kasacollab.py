@@ -6,8 +6,8 @@ board(감지)·conflict-guard(차단) 위에 얹는 '분담·대화' 층. 두 �
   - tasks.json     : 작업판 — 누가 무슨 일을 맡았나(중복 분담 방지)
   - messages.jsonl : 메시지함 — pane끼리 주고받는 메모/지시/질문
 
-board-context 훅이 매 턴 이 상태를 claude에 주입하므로, claude는 호출 없이도
-'현재 분담'과 '받은 메시지'를 자기 턴에 본다(tell의 타이밍 한계 없이 pull).
+매 턴 자동 주입(옛 board-context)은 폐기 — `kasacollab task list`/`inbox` 로
+직접 조회한다. 모니터링은 팀장이 lead-watch 를 Monitor 에 거는 방식(아래 lead).
 
 사용:
   kasacollab task add "BSP 레이아웃 리팩터"   # 내 pane이 이 일 맡음(선언)
@@ -136,8 +136,8 @@ def lead_path():
 def cmd_lead(args):
     # 이 cwd 협업방의 '팀장' 마커. 팀장 = lead-watch를 Monitor에 걸고 다른
     # pane이 사람 입력 대기로 멈추면 대신 답하는 오케스트레이터. 한 방에
-    # 한 명만(중복 답변 충돌 방지). board-context가 이 마커를 다른 pane에
-    # 알려, 막힌 pane은 "팀장이 답해줄 것"을 인지한다.
+    # 한 명만(중복 답변 충돌 방지). 워커는 팀장 존재를 몰라도 되고, 팀장이
+    # board pull로 멈춘 pane을 능동 감지해 대신 답한다.
     sub = args[0] if args else "set"
     if sub in ("off", "clear"):
         try:

@@ -108,9 +108,23 @@ impl Default for SessionsInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneActivity {
     pub surface_id: String,
-    /// What this pane is doing and *why*, free text. The "why" is the
-    /// point — "fixing the login 500 in auth.ts" lets a sibling realise
-    /// it's on the same bug, where a bare "editing auth.ts" wouldn't.
+    /// The pane session's auto-generated title (`ai-title` line in the
+    /// transcript), e.g. "Git 패널 stage 기능". One line saying what this pane
+    /// is *for*, as a whole — the board's headline label. Empty until claude
+    /// names the session.
+    #[serde(default)]
+    pub title: String,
+    /// The latest user prompt (`last-prompt` line), i.e. what this pane was
+    /// just told to do. Empty if nothing's been asked yet.
+    #[serde(default)]
+    pub last_prompt: String,
+    /// The pane's most recent assistant reply text (trimmed/clipped), so the
+    /// board shows what claude last *said*, not just what tool it ran.
+    #[serde(default)]
+    pub last_reply: String,
+    /// The most recent tool call as a short label ("Edit auth.ts"), derived
+    /// from the transcript's last `tool_use`. What the pane is touching right
+    /// now; pairs with `files` for conflict detection.
     pub intent: String,
     /// Coarse state for at-a-glance scanning: conventionally one of
     /// "working" | "building" | "blocked" | "idle", but free text is
@@ -128,12 +142,6 @@ pub struct PaneActivity {
     /// `surface.peek` per pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
-    /// True when this pane's start/stop notices are muted (board-panel
-    /// toggle): the host drops its `collab_notify` instead of waking
-    /// siblings. Read-only mirror of the daemon's mute set, surfaced so the
-    /// panel can render the toggle state.
-    #[serde(default)]
-    pub muted: bool,
     /// Why this pane is `status == "waiting"` — the `waitingFor` field from
     /// `claude agents --json` (2.1.162+), e.g. "permission" or "user input".
     /// The transcript watcher can't see this: when claude blocks on a
@@ -373,23 +381,6 @@ pub trait Backend: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Wake every *other* live pane with a one-line notice that pane `from`
-    /// crossed a turn boundary — `kind` is "start" (began working) or "stop"
-    /// (finished). The host injects the line into each sibling's prompt so a
-    /// claude there learns the news without polling the board. Driven by the
-    /// announcing pane's own UserPromptSubmit / Stop hook. Default no-op (a
-    /// backend with no panes has nobody to wake).
-    fn collab_notify(&self, _from: &str, _kind: &str) -> Result<()> {
-        Ok(())
-    }
-
-    /// Mute or unmute a pane's collab notices. While muted, `collab_notify`
-    /// from `surface_id` is dropped so it never wakes a sibling. Toggled from
-    /// the board panel (`POST /board-mute`). Default no-op.
-    fn set_collab_mute(&self, _surface_id: &str, _muted: bool) -> Result<()> {
-        Ok(())
-    }
-
     /// Geometry of the panes in the visible window, as window-relative
     /// percentages — so a caller can see who sits where (right half, top
     /// third) and pick a spot to split. Default: empty (backends that don't
@@ -424,6 +415,27 @@ pub trait Backend: Send + Sync {
     fn bind_transcript(&self, _surface_id: &str, _path: &str) -> Result<()> {
         anyhow::bail!("bind_transcript not supported")
     }
+
+    /// Read the last `turns` conversation turns (user prompts + assistant
+    /// replies) from a pane's bound transcript. Where `peek` shows the raw
+    /// screen (whatever's currently rendered), this gives the structured
+    /// dialogue — what a sibling claude was *asked* and what it *answered* —
+    /// including turns that have already scrolled off-screen. An orchestrator
+    /// pane reads this to monitor what its workers are actually doing.
+    /// Default: empty (a backend that tracks no transcripts reports nothing).
+    fn transcript_tail(&self, _surface_id: &str, _turns: usize) -> Result<Vec<ConversationTurn>> {
+        Ok(Vec::new())
+    }
+}
+
+/// One turn of a pane's claude conversation, extracted from its transcript
+/// jsonl. `role` is "user" (a typed prompt — tool_results are skipped as
+/// noise) or "assistant" (the reply text, tool_use blocks dropped). Returned
+/// by `transcript_tail` / `collab.transcript`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationTurn {
+    pub role: String,
+    pub text: String,
 }
 
 #[cfg(test)]

@@ -6,9 +6,6 @@
 #
 #   ./install-hooks.sh            친구 배포·재현용. 소스를 ~/.claude/hooks 로 복사.
 #   ./install-hooks.sh --symlink  개발용. 심볼릭 링크 → 레포에서 고치면 즉시 반영.
-#
-# board-context.py 는 아직 이 디렉터리에 없을 수 있다(%49 status 섹션 인계 대기) —
-# 있는 파일만 배포하므로 안전하다.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"

@@ -182,25 +182,6 @@ async fn board_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     )
 }
 
-/// `POST /board-mute?surface=%N&on=true|false` — mute/unmute a pane's collab
-/// start/stop notices. Query params for the same no-preflight reason as
-/// session-switch (bodyless POST = CORS simple request, no OPTIONS preflight).
-async fn board_mute_handler(
-    backend: Arc<dyn Backend>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let surface = params.get("surface").cloned().unwrap_or_default();
-    let on = params.get("on").map(|s| s == "true").unwrap_or(false);
-    let body = if surface.is_empty() {
-        serde_json::json!({ "ok": false, "error": "missing surface" })
-    } else {
-        match backend.set_collab_mute(&surface, on) {
-            Ok(()) => serde_json::json!({ "ok": true }),
-            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-        }
-    };
-    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
-}
 
 /// Read a required `usize` query param, defaulting to 0 when absent/garbage.
 fn query_idx(params: &std::collections::HashMap<String, String>) -> usize {
@@ -410,7 +391,6 @@ pub fn spawn_http_server(
                 let ai_backend = backend.clone();
                 let sessions_backend = backend.clone();
                 let board_backend = backend.clone();
-                let board_mute_backend = backend.clone();
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let session_close_backend = backend.clone();
@@ -462,12 +442,6 @@ pub fn spawn_http_server(
                     .route(
                         "/board",
                         get(move || board_handler(board_backend.clone())),
-                    )
-                    .route(
-                        "/board-mute",
-                        post(move |q: Query<std::collections::HashMap<String, String>>| {
-                            board_mute_handler(board_mute_backend.clone(), q)
-                        }),
                     )
                     .route(
                         "/session-switch",

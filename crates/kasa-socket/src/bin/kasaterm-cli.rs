@@ -53,6 +53,16 @@ fn run() -> Result<Option<Response>> {
         return Ok(None);
     }
     let cmd = args.remove(0);
+    // `board-watch` is a polling loop, not a single round-trip: it streams one
+    // line per *changed* pane so a Claude Code Monitor can watch the board and
+    // wake on transitions (a worker going `waiting` for a permission prompt,
+    // finishing → `idle`, etc.) without dumping the whole board every tick.
+    if cmd == "board-watch" {
+        let interval = args.first().and_then(|s| s.parse::<u64>().ok()).unwrap_or(3);
+        let socket_path = resolve_socket_path()?;
+        run_board_watch(&socket_path, interval)?;
+        return Ok(None);
+    }
     let request = build_request(&cmd, &args)?;
     let socket_path = resolve_socket_path()?;
     let response = roundtrip(&socket_path, &request)?;
@@ -70,6 +80,63 @@ fn run() -> Result<Option<Response>> {
         return Ok(None);
     }
     Ok(Some(response))
+}
+
+/// Poll `collab.board` every `interval_secs` and print one line per pane whose
+/// status/intent changed since the last tick (plus `closed` for panes that
+/// vanished). Each line is a Monitor event. The first tick emits the current
+/// board as the baseline. Transient socket failures are swallowed — one dropped
+/// poll must not kill a long-running watch. Never returns (Ctrl-C / Monitor
+/// timeout ends it).
+fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
+    use std::collections::BTreeMap;
+    let req = Request {
+        id: "board-watch".into(),
+        method: "collab.board".into(),
+        params: json!({}),
+    };
+    let mut prev: BTreeMap<String, String> = BTreeMap::new();
+    loop {
+        if let Ok(resp) = roundtrip(socket_path, &req) {
+            if let Some(board) = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("board"))
+                .and_then(|v| v.as_array())
+            {
+                let mut cur: BTreeMap<String, String> = BTreeMap::new();
+                for e in board {
+                    let id = e
+                        .get("surface_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let intent = e.get("intent").and_then(|v| v.as_str()).unwrap_or("");
+                    let waiting = e.get("waiting_for").and_then(|v| v.as_str());
+                    let line = match waiting {
+                        Some(w) => format!("{status} (waiting: {w}) — {intent}"),
+                        None => format!("{status} — {intent}"),
+                    };
+                    cur.insert(id, line);
+                }
+                let mut out = std::io::stdout().lock();
+                for (id, line) in &cur {
+                    if prev.get(id) != Some(line) {
+                        let _ = writeln!(out, "{id}  {line}");
+                    }
+                }
+                for id in prev.keys() {
+                    if !cur.contains_key(id) {
+                        let _ = writeln!(out, "{id}  closed");
+                    }
+                }
+                let _ = out.flush();
+                prev = cur;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval_secs.max(1)));
+    }
 }
 
 /// Render `window.list`'s windows as a labelled stack of box diagrams, one
@@ -248,11 +315,12 @@ fn print_help() {
     eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
     eprintln!("  kasaterm-cli tell  <surface_id> <text>     # send + submit (wake an idle claude)");
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
+    eprintln!("  kasaterm-cli board-watch [interval_s]     # stream changed pane status (1 line/change) — feed a Claude Code Monitor");
     eprintln!("  kasaterm-cli layout                       # where each pane sits (active window, %)");
     eprintln!("  kasaterm-cli windows                      # every window (sidebar order) + its panes");
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");
+    eprintln!("  kasaterm-cli transcript [surface_id] [N]  # last N turns (prompts+replies) of a pane's claude");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
-    eprintln!("  kasaterm-cli notify [start|stop]          # tell siblings THIS pane began/finished (hook)");
     eprintln!();
     eprintln!(
         "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
@@ -445,16 +513,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "path": path }),
             )
         }
-        "notify" => {
-            // A pane announces its own turn boundary to siblings, driven by
-            // its UserPromptSubmit (start) / Stop (stop) hook. from = this
-            // pane's injected id; kind defaults to stop.
-            let kind = args.first().map(|s| s.as_str()).unwrap_or("stop");
-            let from = std::env::var("KASATERM_PANE_ID").map_err(|_| {
-                anyhow!("notify needs $KASATERM_PANE_ID (run inside a kasaterm pane)")
-            })?;
-            ("collab.notify", json!({ "from": from, "kind": kind }))
-        }
         "peek" => {
             // Default to this pane if no id given — handy for "what does my
             // own screen look like" but the usual case is peeking a sibling.
@@ -468,6 +526,21 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 params["lines"] = json!(lines);
             }
             ("surface.peek", params)
+        }
+        "transcript" => {
+            // Structured dialogue of a sibling pane's claude: the last N turns
+            // (user prompts + assistant replies), including ones scrolled off
+            // the screen that `peek` can't reach.  transcript <surface_id> [N]
+            let surface = args
+                .first()
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok())
+                .ok_or_else(|| anyhow!("transcript needs a surface_id (or $KASATERM_PANE_ID)"))?;
+            let mut params = json!({ "surface_id": surface });
+            if let Some(turns) = args.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                params["turns"] = json!(turns);
+            }
+            ("collab.transcript", params)
         }
         other => return Err(anyhow!("unknown command: {other}")),
     };
