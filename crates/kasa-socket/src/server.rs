@@ -31,7 +31,16 @@ impl Server {
         {
             // Stale socket from a previous crash — UnixListener::bind
             // would EADDRINUSE on top of an existing file, so clear it.
+            // But never clobber a *live* listener: if connect() succeeds
+            // another instance owns this path, and removing+rebinding would
+            // hijack it (every kasaterm-cli would then hit us instead). Refuse
+            // so the caller (resolve_kasaterm_socket_path) keeps us isolated.
             if socket_path.exists() {
+                if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+                    anyhow::bail!(
+                        "socket {socket_path:?} is already owned by a live instance — refusing to hijack"
+                    );
+                }
                 let _ = std::fs::remove_file(&socket_path);
             }
             if let Some(parent) = socket_path.parent() {

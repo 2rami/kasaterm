@@ -143,6 +143,71 @@ impl App {
         m.cur_line = line;
         m.cur_col = col;
     }
+    /// Place the raw-editor caret at a click. Reads the pane's body box (stashed
+    /// by the renderer), hit-tests the pixel to a (line, col) via the GPU shaper,
+    /// then writes it back. No-op unless `id` is a raw-mode markdown pane.
+    pub(crate) fn md_click_caret(&mut self, id: &str, px: f32, py: f32) {
+        let Some(&(bx, by, _bw, _bh)) = self.md_body_rects.get(id) else { return };
+        // Pull the lines + pan out under a short lock so the GPU borrow below
+        // doesn't overlap the workspace borrow.
+        let snapshot = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes.get(id).and_then(|p| p.markdown()).and_then(|m| {
+                m.raw_mode
+                    .then(|| (m.edit_lines.clone(), m.scroll as f32, m.h_scroll))
+            })
+        };
+        let Some((lines, scroll, h_scroll)) = snapshot else { return };
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        let (line, col) = gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py);
+        let mut ws = self.ws.lock().unwrap();
+        if let Some(pane) = ws.panes.get_mut(id) {
+            pane.dirty = true;
+            if let Some(m) = pane.markdown_mut() {
+                m.cur_line = line;
+                m.cur_col = col;
+            }
+        }
+    }
+    /// Set a markdown pane's view mode from the header "Rendered | Raw" toggle.
+    /// No-op if already in `want_raw`. Render → Raw seeds the edit buffer from
+    /// the doc source; Raw → Render writes the buffer back to disk and re-parses
+    /// so the laid-out view reflects the edits.
+    pub(crate) fn set_md_mode(&mut self, id: &str, want_raw: bool) {
+        let mut ws = self.ws.lock().unwrap();
+        let Some(pane) = ws.panes.get_mut(id) else { return };
+        let is_raw = pane.markdown().map_or(false, |m| m.raw_mode);
+        if is_raw == want_raw {
+            return;
+        }
+        pane.dirty = true;
+        if is_raw {
+            // Raw → Render: persist the edits first, then re-parse.
+            let save = pane
+                .markdown()
+                .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()));
+            if let Some((text, path)) = save {
+                let _ = std::fs::write(&path, &text);
+                let doc = build_markdown_doc(id, std::path::Path::new(&path), &text);
+                if let Some(m) = pane.markdown_mut() {
+                    m.doc = Arc::new(doc);
+                    m.scroll = 0;
+                    m.raw_mode = false;
+                }
+            }
+        } else if let Some(m) = pane.markdown_mut() {
+            // Render → Raw: seed the edit buffer from the source.
+            m.edit_lines = m.doc.raw.split('\n').map(String::from).collect();
+            if m.edit_lines.is_empty() {
+                m.edit_lines.push(String::new());
+            }
+            m.cur_line = 0;
+            m.cur_col = 0;
+            m.scroll = 0;
+            m.raw_mode = true;
+        }
+    }
+
     /// Directory of the active markdown pane's source file, for resolving
     /// relative link destinations.
     pub(crate) fn active_markdown_dir(&self) -> Option<std::path::PathBuf> {

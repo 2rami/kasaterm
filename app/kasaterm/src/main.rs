@@ -77,6 +77,20 @@ fn cjk_display_w(c: char) -> usize {
 /// middle block plus per-row caps whose horizontal inset follows a circle of
 /// radius `r`, giving genuine rounded corners. `r` is small (≤~10px) so this
 /// is only a handful of extra quads; rendering is throttled anyway.
+/// Quote a filesystem path for safe pasting into a shell prompt. Bare when it
+/// holds only shell-safe characters, single-quoted (with embedded quotes
+/// escaped) otherwise — covers spaces, parens, and non-ASCII (e.g. 한글) paths.
+fn shell_quote_path(p: &str) -> String {
+    let safe = !p.is_empty()
+        && p.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-/~+=,@:".contains(&b));
+    if safe {
+        p.to_string()
+    } else {
+        format!("'{}'", p.replace('\'', "'\\''"))
+    }
+}
+
 fn round_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, col: [u8; 4]) {
     // Single anti-aliased implementation lives on the renderer so the chrome
     // and the markdown code-block chips round identically.
@@ -1325,6 +1339,11 @@ enum ActionKind {
     /// Toggle this pane's bottom status bar (cwd / branch / diff). Lives next to
     /// the split buttons; collapsing the bar gives the cell grid its rows back.
     ToggleStatusbar,
+    /// Markdown panes only: the "Rendered | Raw" header segmented toggle.
+    /// `MdRender` shows the laid-out doc; `MdRaw` opens the wgpu source editor
+    /// (and `MdRender` from Raw writes the buffer back to disk + re-parses).
+    MdRender,
+    MdRaw,
 }
 
 /// State for an in-flight in-pane tab reorder drag. A press on a tab arms
@@ -1345,6 +1364,20 @@ struct TabDrag {
     /// reorder; differs when the user dragged onto another pane's tab strip
     /// — release commits a cross-pane move into `drop_pane.tabs[target]`.
     drop_pane: String,
+}
+
+/// In-flight file-tree → terminal drag. Armed on a press over a tree row;
+/// once the cursor moves past the threshold (`active`), releasing over a
+/// terminal pane types that file's path into the dropped-on shell. A press
+/// that never moves stays a plain click (the row's expand/preview already
+/// fired on press), so this is take-and-ignore on release.
+struct FileTreeDrag {
+    /// Absolute path of the grabbed row.
+    path: std::path::PathBuf,
+    /// Press position in logical px, for the click→drag threshold.
+    start: (f32, f32),
+    /// True once the cursor moved past the threshold.
+    active: bool,
 }
 
 /// A terminal pane's screen state: the PTY-backed cell grid, cursor,
@@ -1379,6 +1412,10 @@ struct TerminalPane {
 /// A markdown pane's state: the parsed doc plus the Raw editor buffer/cursor.
 struct MarkdownPane {
     doc: Arc<MarkdownDoc>,
+    /// true only for actual `.md`/`.markdown` files. Code/text files reuse this
+    /// pane as a plain Raw editor but get no "Rendered | Raw" header toggle —
+    /// rendering a `.toml` as markdown would just mangle it.
+    is_md_doc: bool,
     /// false = Render (laid-out view), true = Raw (wgpu text editor).
     raw_mode: bool,
     /// Raw-mode edit buffer, one entry per line.
@@ -1986,6 +2023,15 @@ enum UserEvent {
         title: String,
         body: String,
     },
+    /// A pane's claude is blocked on a permission / input prompt (its
+    /// `Notification` hook → `kasaterm-cli attention`). Toast + flash the pane
+    /// and, unless it's the focused pane, raise a desktop alert — the case cmux
+    /// treats as its headline feature (a backgrounded agent stuck on "approve
+    /// Bash?" that the transcript-board can't see).
+    Attention {
+        surface_id: String,
+        reason: String,
+    },
 }
 
 /// One terminal session: its own pane set, layout, and workspace. The visible
@@ -2309,9 +2355,10 @@ struct App {
     /// the renderer each frame. The scroll handler clamps scroll_offset to
     /// (content_h - visible_h) so a markdown pane can't over-scroll.
     md_content_h: HashMap<String, f32>,
-    /// Render/Raw toggle pill hit rects for markdown pane headers:
-    /// (pane id, is_raw, logical rect). A click sets that pane's md_raw_mode.
-    md_toggle_rects: Vec<(String, bool, (f32, f32, f32, f32))>,
+    /// Raw-editor body box (logical px) per pane id, published by the renderer
+    /// each frame. A click in this box hit-tests to a caret position so the
+    /// mouse can place the edit cursor (see `md_click_caret`).
+    md_body_rects: HashMap<String, (f32, f32, f32, f32)>,
     /// In-pane tab hit rects: (pane id, tab index, logical rect). Click
     /// switches that pane's active_tab. Rebuilt each header paint.
     pane_tab_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
@@ -2338,6 +2385,12 @@ struct App {
     /// busy scan walks every pane's grid, so it runs at most a few times a
     /// second rather than per frame. `None` until the first scan.
     pane_busy_check: Option<Instant>,
+    /// Last time each pane's grid showed a spinner glyph. The claude spinner
+    /// blanks/scrolls between frames, so a raw per-scan check flickers
+    /// working↔idle and fires a bogus "완료" toast every blink. We hold `busy`
+    /// for `BUSY_GRACE` after the last spinner sighting so only a real stop
+    /// (grace elapsed) counts as completion.
+    pane_last_busy: HashMap<String, Instant>,
     /// (window index, rect) for every window tab in the left sidebar.
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
@@ -2389,6 +2442,24 @@ struct App {
     /// `Some` while dragging a zoomed image's body; CursorMoved updates the
     /// active tab's `image_pan_*` from `base_pan + (cursor - start)`.
     image_pan_drag: Option<(String, (f32, f32), (f32, f32))>,
+    /// In-flight file-tree → terminal path drag. `Some` while a tree row is
+    /// held; releasing over a pane types the path into that shell.
+    file_tree_drag: Option<FileTreeDrag>,
+    /// Inline "new file / folder" entry. `Some((is_dir, name_buffer))` while
+    /// the user is naming a freshly-requested entry; Enter creates it under
+    /// the tree root, Esc cancels. Keystrokes route here like the search box.
+    file_tree_new: Option<(bool, String)>,
+    /// Hit rects for the new-folder / new-file buttons beside the search box,
+    /// refreshed each frame.
+    file_tree_new_folder_rect: (f32, f32, f32, f32),
+    file_tree_new_file_rect: (f32, f32, f32, f32),
+    /// Row rect of the inline new-entry naming box (for the I-beam hit-test).
+    file_tree_new_row_rect: (f32, f32, f32, f32),
+    /// Tree row the user last clicked — the Cmd+Delete target.
+    file_tree_selected: Option<std::path::PathBuf>,
+    /// Whether the text (I-beam) mouse cursor is currently shown, so we only
+    /// flip the OS cursor on the transition in/out of an input box.
+    text_cursor_shown: bool,
     /// Active "close while a process is running?" modal. While `Some`, the
     /// dialog is painted over everything and swallows input until the user
     /// picks 취소/닫기.
@@ -2484,6 +2555,10 @@ struct App {
     /// working→idle flip — "✓ %3 완료 · git 패널". Fades like `copy_toast_at`.
     /// Replaced by the newest flip; a brief overlap just shows the latest.
     collab_toast: Option<(String, Instant)>,
+    /// The completion toast's logical-px rect while it's visible, so a click
+    /// dismisses it. None when the toast isn't drawn. Set by the render path,
+    /// consumed by the MouseInput handler.
+    collab_toast_rect: Option<(f32, f32, f32, f32)>,
     /// Unread completion count, for a badge on the collab board entry. Bumped on
     /// each completion toast; the badge render + clear land with the sidebar
     /// work (P3) — the board has no GUI button yet (menu-toggle only), so the
@@ -2796,7 +2871,7 @@ impl App {
             pane_header_rects: Vec::new(),
             copy_btn_rects: Vec::new(),
             md_content_h: HashMap::new(),
-            md_toggle_rects: Vec::new(),
+            md_body_rects: HashMap::new(),
             pane_tab_rects: Vec::new(),
             pane_tab_close_rects: Vec::new(),
             pane_plus_rects: Vec::new(),
@@ -2805,6 +2880,7 @@ impl App {
             dock_chip_close_rects: Vec::new(),
             copy_toast_at: None,
             pane_busy_check: None,
+            pane_last_busy: HashMap::new(),
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
             new_window_btn_rect: None,
@@ -2821,6 +2897,13 @@ impl App {
             header_drag: None,
             tab_drag: None,
             image_pan_drag: None,
+            file_tree_drag: None,
+            file_tree_new: None,
+            file_tree_new_folder_rect: (0.0, 0.0, 0.0, 0.0),
+            file_tree_new_file_rect: (0.0, 0.0, 0.0, 0.0),
+            file_tree_new_row_rect: (0.0, 0.0, 0.0, 0.0),
+            file_tree_selected: None,
+            text_cursor_shown: false,
             confirm_close: None,
             confirm_btn_rects: Vec::new(),
             pane_tab_hover: None,
@@ -2842,6 +2925,7 @@ impl App {
             window_focused: true,
             notify_flash: HashMap::new(),
             collab_toast: None,
+            collab_toast_rect: None,
             collab_unread: 0,
             last_window_title_check: None,
             pane_cwd_cache: HashMap::new(),
@@ -3538,15 +3622,35 @@ fn mcp_panel_port() -> String {
 }
 
 fn resolve_kasaterm_socket_path() -> String {
-    std::env::var("KASATERM_SOCKET_PATH")
+    let own = || {
+        format!(
+            "{}/kasaterm-{}.sock",
+            std::env::temp_dir().to_string_lossy(),
+            std::process::id()
+        )
+    };
+    let inherited = std::env::var("KASATERM_SOCKET_PATH")
         .or_else(|_| std::env::var("CMUX_SOCKET_PATH"))
-        .unwrap_or_else(|_| {
-            format!(
-                "{}/kasaterm-{}.sock",
-                std::env::temp_dir().to_string_lossy(),
-                std::process::id()
-            )
-        })
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match inherited {
+        // 부모 pane이 물려준 소켓 경로가 *이미 살아있는 다른 인스턴스*를 가리키면
+        // (우리가 claude pane 안에서 `cargo run`으로 띄워진 자식인 경우), 그 경로에
+        // bind 하면 Server::bind 가 기존 소켓 파일을 지우고 덮어써 메인 앱 소켓을
+        // 탈취한다 — 그 결과 모든 pane 의 kasaterm-cli 가 빈 자식 인스턴스로 붙어
+        // board 가 텅 빈다. connect 가 성공하면(=살아있는 리스너) 탈취하지 말고 우리
+        // PID 경로로 격리한다. start_socket_with 가 resolved 경로를 자식 pane 에 다시
+        // export 하므로 자식 창 pane 들도 자동으로 우리 소켓을 따라온다.
+        Some(p) => {
+            #[cfg(unix)]
+            if std::os::unix::net::UnixStream::connect(&p).is_ok() {
+                return own();
+            }
+            p
+        }
+        None => own(),
+    }
 }
 
 /// Locate the kasaterm-cli binary so we can stage it alongside the

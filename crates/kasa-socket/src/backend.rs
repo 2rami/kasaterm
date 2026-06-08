@@ -297,6 +297,16 @@ pub trait Backend: Send + Sync {
     fn notify(&self, _surface_id: &str, _title: &str, _body: &str) -> Result<()> {
         anyhow::bail!("notify unsupported by this backend")
     }
+    /// A pane's agent is blocked waiting for the user — a permission prompt or
+    /// an idle input prompt — surfaced by claude's `Notification` hook running
+    /// `kasaterm-cli attention`. Unlike `notify` (a one-shot push), this marks
+    /// the pane as `waiting` so `collab_board` can flag it (the transcript
+    /// can't: a blocked claude writes nothing), and raises a desktop alert when
+    /// the pane isn't already focused. `reason` is the hook's message (e.g.
+    /// "permission" / the prompt text); empty is fine. Default unsupported.
+    fn attention(&self, _surface_id: &str, _reason: &str) -> Result<()> {
+        anyhow::bail!("attention unsupported by this backend")
+    }
     /// Multi-session (tmux-style tab) state for the session panel. Default
     /// is a single session — backends that don't support sessions just
     /// report one.

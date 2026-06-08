@@ -713,7 +713,7 @@ impl App {
                             .map(|a| a.status != "idle" && !a.status.is_empty())
                             .unwrap_or(false),
                         color: pane.color,
-                        is_markdown: pane.markdown().is_some(),
+                        is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
                         is_image: pane.image().is_some(),
                         tabs: pane
@@ -812,9 +812,8 @@ impl App {
                 (h.id.clone(), close)
             })
             .collect();
-        // Markdown Render/Raw toggle now lives in the pane action buttons
-        // (drawn in the header loop); the old right-aligned pills are gone.
-        self.md_toggle_rects = Vec::new();
+        // Markdown Render/Raw toggle lives in the pane action buttons
+        // (drawn in the header loop), not a separate pill.
         // Session tabs live in a wry webview panel (like the git panel), not
         // the native title bar — drawing them here collided with the OSC title.
         // Drop-zone overlay: while a header drag is active, highlight the
@@ -1050,6 +1049,9 @@ impl App {
             })
             .map(|(i, _)| *i);
         let md_preedit = self.preedit.clone();
+        // Raw-editor cursor blink phase (shared with the terminal cursor), read
+        // before the gpu borrow so the editor cursor blinks in step.
+        let raw_cursor_on = self.cursor_blink_on(std::time::Instant::now());
         // In-pane tab hit rects, collected during the header paint (needs the
         // measured tab widths) and published to self after the gpu borrow.
         let mut tab_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
@@ -1090,11 +1092,18 @@ impl App {
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
             // top. The returned content height feeds scroll clamping.
+            // Rebuilt fresh each frame so a pane toggled out of raw mode (or
+            // closed) drops its caret hit box.
+            self.md_body_rects.clear();
             for (id, doc, (bx, by, bw, bh), scroll, raw_mode, lines, cursor, h_scroll, lang) in &md_slots {
                 let content_h = if *raw_mode {
                     let lines = lines.as_deref().unwrap_or(&[]);
+                    // Stash the body box so a mouse click can hit-test to a caret
+                    // position (md_click_caret reads this).
+                    self.md_body_rects.insert(id.clone(), (*bx, *by, *bw, *bh));
                     g.draw_raw_editor(
                         lines, *cursor, *bx, *by, *bw, *bh, *scroll, *h_scroll, lang, &md_preedit,
+                        raw_cursor_on,
                     )
                 } else {
                     // Upload this doc's inline images once (keyed per block).
@@ -1562,27 +1571,81 @@ impl App {
                 // Search box pinned to the column top; the tree starts below it.
                 let search_box_h = 28.0_f32;
                 let sbx_y = TITLE_HEIGHT + 8.0;
+                // Reserve room on the right for the new-folder / new-file
+                // buttons; the search box takes what's left.
+                let btn_sz = 24.0_f32;
+                let btn_gap = 4.0_f32;
+                let buttons_w = btn_sz * 2.0 + btn_gap;
+                let search_w = (row_w - buttons_w - 6.0).max(40.0);
                 {
                     let active = self.file_tree_search_active;
                     let fill = if active { theme::SURFACE_ACTIVE } else { theme::SURFACE };
-                    round_rect(g, row_x, sbx_y, row_w, search_box_h, theme::RADIUS_SM, theme::BORDER);
-                    round_rect(g, row_x + 1.0, sbx_y + 1.0, row_w - 2.0, search_box_h - 2.0, theme::RADIUS_SM - 1.0, fill);
+                    round_rect(g, row_x, sbx_y, search_w, search_box_h, theme::RADIUS_SM, theme::BORDER);
+                    round_rect(g, row_x + 1.0, sbx_y + 1.0, search_w - 2.0, search_box_h - 2.0, theme::RADIUS_SM - 1.0, fill);
                     let ic = if active { theme::TEXT } else { theme::TEXT_DIM };
                     g.queue_icon("folder-tree", row_x + 8.0, sbx_y + (search_box_h - 14.0) / 2.0, 14.0, ic);
                     let mut shown = self.file_tree_search_query.clone();
                     if active && self.in_preedit {
                         shown.push_str(&self.preedit);
                     }
+                    let caret_w = g.measure_chrome_text(&shown, 13.0, false);
                     let (txt, col) = if shown.is_empty() {
-                        ("파일 검색…".to_string(), theme::TEXT_MUTE)
+                        ("검색…".to_string(), theme::TEXT_MUTE)
                     } else {
                         (shown, theme::TEXT)
                     };
                     g.draw_text(row_x + 30.0, sbx_y + (search_box_h - 13.0) / 2.0, &txt,
                         gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
-                    self.file_tree_search_rect = (row_x, sbx_y, row_w, search_box_h);
+                    // Blinking text caret when the box has focus.
+                    if active && commit_caret_on {
+                        g.rect(row_x + 30.0 + caret_w, sbx_y + (search_box_h - 14.0) / 2.0,
+                            1.5, 14.0, theme::TEXT);
+                    }
+                    self.file_tree_search_rect = (row_x, sbx_y, search_w, search_box_h);
+                    // New-folder / new-file buttons.
+                    let (mx, my) = self.cursor_px;
+                    let bty = sbx_y + (search_box_h - btn_sz) / 2.0;
+                    let nf_x = row_x + search_w + 6.0;
+                    let nfile_x = nf_x + btn_sz + btn_gap;
+                    for (bx, icon) in [(nf_x, "folder-plus"), (nfile_x, "file-plus")] {
+                        let hover = mx >= bx && mx <= bx + btn_sz && my >= bty && my <= bty + btn_sz;
+                        if hover {
+                            round_rect(g, bx, bty, btn_sz, btn_sz, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                        }
+                        let ic = if hover { theme::TEXT } else { theme::TEXT_DIM };
+                        g.queue_icon(icon, bx + (btn_sz - 15.0) / 2.0, bty + (btn_sz - 15.0) / 2.0, 15.0, ic);
+                    }
+                    self.file_tree_new_folder_rect = (nf_x, bty, btn_sz, btn_sz);
+                    self.file_tree_new_file_rect = (nfile_x, bty, btn_sz, btn_sz);
                 }
-                let start_y = sbx_y + search_box_h + 8.0;
+                // Inline "new file/folder" naming row, pinned above the tree.
+                let mut tree_top = sbx_y + search_box_h + 8.0;
+                if let Some((is_dir, buf)) = self.file_tree_new.clone() {
+                    let iy = tree_top;
+                    round_rect(g, row_x, iy, row_w, item_h, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
+                    g.rect(row_x, iy + 2.0, 2.0, item_h - 4.0, theme::ACCENT);
+                    g.queue_icon(if is_dir { "folder" } else { "file" }, row_x + 18.0, iy + (item_h - 16.0) / 2.0, 16.0, theme::TEXT);
+                    let mut shown = buf.clone();
+                    if self.in_preedit {
+                        shown.push_str(&self.preedit);
+                    }
+                    let caret_w = g.measure_chrome_text(&shown, 13.0, false);
+                    let (txt, col) = if shown.is_empty() {
+                        ((if is_dir { "폴더 이름…" } else { "파일 이름…" }).to_string(), theme::TEXT_MUTE)
+                    } else {
+                        (shown, theme::TEXT)
+                    };
+                    g.draw_text(row_x + 44.0, iy + (item_h - 13.0) / 2.0, &txt,
+                        gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
+                    if commit_caret_on {
+                        g.rect(row_x + 44.0 + caret_w, iy + (item_h - 14.0) / 2.0, 1.5, 14.0, theme::TEXT);
+                    }
+                    self.file_tree_new_row_rect = (row_x, iy, row_w, item_h);
+                    tree_top += item_h;
+                } else {
+                    self.file_tree_new_row_rect = (0.0, 0.0, 0.0, 0.0);
+                }
+                let start_y = tree_top;
                 let win_h = win_px.1 / scale;
                 let step = 14.0_f32; // per-depth indent width
                 let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
@@ -1610,17 +1673,19 @@ impl App {
                     let expanded =
                         node.is_dir && self.file_tree_expanded.contains(&node.path);
                     let is_open = active_file.as_deref() == Some(node.path.as_path());
-                    // Row background: hover wins; the open file keeps a solid
-                    // active tint + accent bar; an open folder keeps a faint
-                    // tint so the expanded branch reads as a group.
+                    let is_selected =
+                        self.file_tree_selected.as_deref() == Some(node.path.as_path());
+                    // Row background: hover wins; the open file / Cmd+Delete
+                    // selection keeps a solid active tint + accent bar; an open
+                    // folder keeps a faint tint so the branch reads as a group.
                     if hovered {
                         round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
-                    } else if is_open {
+                    } else if is_open || is_selected {
                         round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
                     } else if expanded {
                         round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::with_alpha(theme::SURFACE_HOVER, 0x33));
                     }
-                    if is_open {
+                    if is_open || is_selected {
                         // Accent rail on the left edge — VSCode "active file" cue.
                         g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::ACCENT);
                     }
@@ -1692,6 +1757,55 @@ impl App {
                     rects.push((node.path.clone(), (row_x, y, row_w, item_h)));
                 }
                 self.file_tree_rects = rects;
+
+                // Overflow affordances: a soft fade at whichever edge still has
+                // hidden rows, plus a hover-only scrollbar thumb. The viewport
+                // runs from the first row (`start_y`, already below the search
+                // box / inline new-row) to the column bottom, so the fade never
+                // eats the chrome above it.
+                let view_top = start_y;
+                let view_bottom = TITLE_HEIGHT + col_h;
+                let viewport_h = (view_bottom - view_top).max(0.0);
+                let content_h = self.file_tree_nodes.len() as f32 * item_h;
+                if content_h > viewport_h + 0.5 {
+                    let overflow = content_h - viewport_h;
+                    let scroll = self.file_tree_scroll;
+                    let fade_h = 28.0_f32;
+                    let strips = 16;
+                    let strip_h = fade_h / strips as f32 + 0.5;
+                    // Top fade ramps in over the first `fade_h` of scroll so it
+                    // appears gently instead of snapping on at the first pixel.
+                    if scroll > 0.5 {
+                        let k = (scroll / fade_h).min(1.0);
+                        for i in 0..strips {
+                            let t = i as f32 / (strips - 1) as f32; // 0 top → 1 bottom of band
+                            let a = ((1.0 - t) * 0.92 * k * 255.0) as u8;
+                            g.rect(tree_col_x, view_top + t * fade_h, tree_col_w - 1.0, strip_h, theme::with_alpha(theme::BG, a));
+                        }
+                    }
+                    // Bottom fade — rows still hidden below the last visible line.
+                    if scroll < overflow - 0.5 {
+                        let k = ((overflow - scroll) / fade_h).min(1.0);
+                        for i in 0..strips {
+                            let t = i as f32 / (strips - 1) as f32; // 0 top → 1 bottom of band
+                            let a = (t * 0.92 * k * 255.0) as u8;
+                            g.rect(tree_col_x, view_bottom - fade_h + t * fade_h, tree_col_w - 1.0, strip_h, theme::with_alpha(theme::BG, a));
+                        }
+                    }
+                    // Scrollbar thumb — only while the cursor hovers the column,
+                    // so the chrome stays clean when you're reading, not scrolling.
+                    let (mx, my) = self.cursor_px;
+                    let over_col = mx >= tree_col_x
+                        && mx < tree_col_x + tree_col_w
+                        && my >= view_top
+                        && my < view_bottom;
+                    if over_col {
+                        let thumb_h = (viewport_h * viewport_h / content_h).max(28.0);
+                        let thumb_y =
+                            view_top + (viewport_h - thumb_h) * (scroll / overflow).clamp(0.0, 1.0);
+                        round_rect(g, tree_col_x + tree_col_w - 6.0, thumb_y, 3.5, thumb_h, 1.75, theme::with_alpha(theme::TEXT, 0x66));
+                    }
+                }
             }
             // ── Git column ── right-hand chrome mirroring the file-tree column
             // on the left, but native instead of the old floating webview: the
@@ -2279,7 +2393,24 @@ impl App {
                 let abw = icon_size + 2.0;
                 let agap = 2.0;
                 let n_btn: f32 = if h.is_image { 4.0 } else { 3.0 };
-                let btn_cluster = abw * n_btn + agap * (n_btn - 1.0) + 12.0;
+                // Markdown panes show a "Rendered | Raw" segmented toggle instead
+                // of an icon cluster; reserve its measured width on the right.
+                let seg_font = 11.0_f32;
+                let seg_pad = 9.0_f32;
+                let (md_rendered_w, md_raw_w) = if h.is_markdown {
+                    (
+                        g.measure_chrome_text("Rendered", seg_font, false),
+                        g.measure_chrome_text("Raw", seg_font, false),
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
+                let seg_w = md_rendered_w + md_raw_w + seg_pad * 4.0;
+                let btn_cluster = if h.is_markdown {
+                    seg_w + 12.0
+                } else {
+                    abw * n_btn + agap * (n_btn - 1.0) + 12.0
+                };
                 // ── In-pane tab bar ── empty tabs = single tab from `label`.
                 let tab_list: Vec<&str> = if h.tabs.is_empty() {
                     vec![h.label.as_str()]
@@ -2501,6 +2632,10 @@ impl App {
                         ("rotate-cw", Some(ImageBtn::Rotate), None),
                         ("maximize", Some(ImageBtn::Reset), None),
                     ]
+                } else if h.is_markdown {
+                    // Markdown panes use a text "Rendered | Raw" segmented
+                    // toggle (drawn below), not an icon cluster.
+                    vec![]
                 } else {
                     // The status-bar toggle reads "filled" (panel-bottom) when the
                     // bar is shown and "dashed" when it's collapsed, so the icon
@@ -2541,6 +2676,40 @@ impl App {
                         pane_action_hits.push((h.id.clone(), a, (chip_x, chip_y, chip_size, chip_size)));
                     }
                     bx += abw + agap;
+                }
+                // ── Markdown "Rendered | Raw" segmented toggle ── outer pill
+                // with the active half filled; each half is its own hit rect so
+                // a click sets that exact mode (vs flipping).
+                if h.is_markdown {
+                    let seg_h = icon_size + 6.0;
+                    let seg_y = h.y + (PANE_HEADER_HEIGHT - seg_h) / 2.0;
+                    let mut sx = h.x + h.w - 8.0 - seg_w;
+                    round_rect(g, sx, seg_y, seg_w, seg_h, theme::RADIUS_SM, theme::SURFACE);
+                    let ty = seg_y + (seg_h - seg_font) / 2.0;
+                    for (label, lw, raw) in
+                        [("Rendered", md_rendered_w, false), ("Raw", md_raw_w, true)]
+                    {
+                        let cell_w = lw + seg_pad * 2.0;
+                        let active = h.md_raw_mode == raw;
+                        let hover = inside(sx, seg_y, cell_w, seg_h);
+                        if active {
+                            round_rect(g, sx, seg_y, cell_w, seg_h,
+                                theme::RADIUS_SM, theme::SURFACE_HOVER);
+                        } else if hover {
+                            round_rect(g, sx, seg_y, cell_w, seg_h,
+                                theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x18));
+                        }
+                        let color = if active { theme::TEXT } else { theme::TEXT_DIM };
+                        g.draw_text(
+                            sx + seg_pad,
+                            ty,
+                            label,
+                            gpu::DrawOpts { font_size: seg_font, color, bold: false, italic: false },
+                        );
+                        let act = if raw { ActionKind::MdRaw } else { ActionKind::MdRender };
+                        pane_action_hits.push((h.id.clone(), act, (sx, seg_y, cell_w, seg_h)));
+                        sx += cell_w;
+                    }
                 }
             }
             // Focus by contrast: unfocused panes fade their text only (via
@@ -2949,6 +3118,7 @@ impl App {
             // working→idle. Top-right so it never collides with the
             // bottom-center copy pill; longer hold (a sibling finishing is worth
             // a glance). Tap the board button to clear the unread badge.
+            self.collab_toast_rect = None;
             if collab_toast_alpha > 0.0 {
                 if let Some(msg) = collab_toast_msg.as_ref() {
                     let t_font = 13.0_f32;
@@ -2959,6 +3129,7 @@ impl App {
                     let box_h = t_font + py * 2.0;
                     let bx = win_w - box_w - 16.0;
                     let by = TITLE_HEIGHT + 12.0;
+                    self.collab_toast_rect = Some((bx, by, box_w, box_h));
                     let a = (235.0 * collab_toast_alpha).round() as u8;
                     round_rect(
                         g,
@@ -3219,6 +3390,37 @@ impl App {
                     gpu::DrawOpts { font_size: bf, color: theme::TEXT, bold: false, italic: false },
                 );
                 confirm_btn_hits.push((crate::ConfirmBtn::Cancel, (cancel_x, btn_y, cancel_w, btn_h)));
+            }
+            // File-tree drag ghost — a small pill trailing the cursor with the
+            // dragged item's name, drawn last so it floats over everything.
+            if let Some(drag) = self.file_tree_drag.as_ref() {
+                if drag.active {
+                    let name = drag
+                        .path
+                        .file_name()
+                        .map(|n| nfc_hangul(&n.to_string_lossy()))
+                        .unwrap_or_default();
+                    let is_dir = self
+                        .file_tree_nodes
+                        .iter()
+                        .find(|n| n.path == drag.path)
+                        .map(|n| n.is_dir)
+                        .unwrap_or(false);
+                    let (cx, cy) = self.cursor_px;
+                    let gf = 12.0_f32;
+                    let tw = g.measure_chrome_text(&name, gf, false);
+                    let pill_w = 18.0 + tw + 16.0;
+                    let pill_h = 22.0_f32;
+                    let gx = cx + 12.0;
+                    let gy = cy + 10.0;
+                    round_rect(g, gx, gy, pill_w, pill_h, theme::RADIUS_SM, theme::ACCENT);
+                    round_rect(g, gx + 1.0, gy + 1.0, pill_w - 2.0, pill_h - 2.0,
+                        theme::RADIUS_SM - 1.0, theme::with_alpha(theme::SURFACE_ACTIVE, 0xF5));
+                    g.queue_icon(if is_dir { "folder" } else { "file" },
+                        gx + 6.0, gy + (pill_h - 14.0) / 2.0, 14.0, theme::TEXT);
+                    g.draw_text(gx + 24.0, gy + (pill_h - gf) / 2.0, &name,
+                        gpu::DrawOpts { font_size: gf, color: theme::TEXT, bold: false, italic: false });
+                }
             }
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");

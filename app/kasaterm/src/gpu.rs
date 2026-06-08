@@ -581,10 +581,31 @@ impl GpuRenderer {
     }
 
     pub fn draw_text(&mut self, x: f32, y: f32, text: &str, opts: DrawOpts) -> f32 {
+        self.draw_text_clipped(x, y, text, opts, f32::NEG_INFINITY, f32::INFINITY)
+    }
+
+    /// `draw_text` with hard left/right edges (logical px): a glyph that would
+    /// cross either edge is skipped, but the pen keeps advancing so the returned
+    /// width stays accurate. This renderer has no scissor (see render loop), so
+    /// a Raw-editor pane's long code line would otherwise bleed past the pane
+    /// (right) or, once panned by horizontal scroll, into the line-number gutter
+    /// (left). Pass the pane's right edge and the gutter's right edge to fence
+    /// the text in on both sides.
+    pub fn draw_text_clipped(
+        &mut self,
+        x: f32,
+        y: f32,
+        text: &str,
+        opts: DrawOpts,
+        clip_left: f32,
+        clip_right: f32,
+    ) -> f32 {
         let s = self.scale;
         let size_px = (opts.font_size * s).round() as u32;
         let baseline_px = y * s + (size_px as f32 * 0.78);
         let fg = srgb_rgba_to_linear(opts.color);
+        let clip_l = clip_left * s;
+        let clip_px = clip_right * s;
         let mut pen = x * s;
         for ch in text.chars() {
             if ch == ' ' {
@@ -609,6 +630,14 @@ impl GpuRenderer {
             };
             let glyph_x = pen + entry.bearing_x as f32;
             let glyph_y = baseline_px - entry.bearing_y as f32;
+            if glyph_x < clip_l || glyph_x + entry.px_w as f32 > clip_px {
+                pen += if is_wide_char(ch) {
+                    entry.px_w as f32 + size_px as f32 * 0.18
+                } else {
+                    entry.advance
+                };
+                continue;
+            }
             self.chrome.push(CellInstance {
                 cell_px: [glyph_x, glyph_y, entry.px_w as f32, entry.px_h as f32],
                 uv_min: entry.uv_min,
@@ -1282,22 +1311,69 @@ impl GpuRenderer {
 
     /// Draw the Raw markdown editor: source lines in the mono font + a cursor
     /// bar. All logical px; returns total content height for scroll clamping.
+    /// Hit-test a click (logical px) inside a raw-editor body box to a caret
+    /// (line, col). Mirrors `draw_raw_editor`'s metrics so the caret lands where
+    /// the glyph the user clicked actually sits. `x`/`y` are the body box origin,
+    /// `scroll`/`h_scroll` the editor's pan.
+    pub fn raw_editor_caret_at(
+        &mut self,
+        lines: &[String],
+        x: f32,
+        y: f32,
+        scroll: f32,
+        h_scroll: f32,
+        click_x: f32,
+        click_y: f32,
+    ) -> (usize, usize) {
+        let base = self.font_size_px as f32 / self.scale;
+        let pad = base * 0.6;
+        let lh = (self.shaper.line_height(base * self.scale).ceil() / self.scale) * 1.25;
+        let digits = ((lines.len().max(1)) as f32).log10().floor() as usize + 1;
+        let gutter_w = base * 0.62 * digits as f32 + base * 1.0;
+        let cx0 = x + pad + gutter_w;
+        let tx0 = cx0 - h_scroll;
+        let top0 = (y - scroll) + pad;
+        let line = (((click_y - top0) / lh).floor().max(0.0) as usize)
+            .min(lines.len().saturating_sub(1));
+        let chars: Vec<char> = lines.get(line).map(|l| l.chars().collect()).unwrap_or_default();
+        // Walk the prefixes and pick the column whose pen-x is nearest the click.
+        let mut best_col = 0;
+        let mut best_d = f32::MAX;
+        for col in 0..=chars.len() {
+            let prefix: String = chars[..col].iter().collect();
+            let px = tx0 + self.measure_run(&prefix, base, false, false, true, false);
+            let d = (px - click_x).abs();
+            if d < best_d {
+                best_d = d;
+                best_col = col;
+            }
+        }
+        (line, best_col)
+    }
+
     pub fn draw_raw_editor(
         &mut self,
         lines: &[String],
         cursor: (usize, usize),
         x: f32,
         y: f32,
-        _w: f32,
+        w: f32,
         h: f32,
         scroll: f32,
         h_scroll: f32,
         lang: &str,
         preedit: &str,
+        cursor_on: bool,
     ) -> f32 {
+        let clip_right = x + w;
         let base = self.font_size_px as f32 / self.scale;
         let pad = base * 0.6;
         let lh = (self.shaper.line_height(base * self.scale).ceil() / self.scale) * 1.25;
+        // The line box (lh) is 1.25× the glyph height for breathing room, so the
+        // text/number/cursor must drop by half the slack to sit centered in the
+        // row — otherwise they cling to the top and the current-line highlight
+        // band (which fills the whole box) looks misaligned.
+        let glyph_voff = (lh - base) * 0.5;
         // Line-number gutter, sized to the digit count, right-aligned numbers.
         let digits = ((lines.len().max(1)) as f32).log10().floor() as usize + 1;
         let gutter_w = base * 0.62 * digits as f32 + base * 1.0;
@@ -1311,15 +1387,23 @@ impl GpuRenderer {
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
             if pen_y + lh > clip_top && pen_y < clip_bot {
+                // Current-line highlight: a faint band across the pane behind
+                // the cursor's row (drawn first so code paints on top). Must be
+                // brighter than BG — SURFACE is *darker*, so it reads invisible.
+                if li == cursor.0 {
+                    self.rect(x, pen_y, w, lh, crate::theme::SURFACE_HOVER);
+                }
                 // Code line, syntax-highlighted (single TEXT color when `lang`
                 // is empty, e.g. plain text), panned by h_scroll.
                 let mut tx = tx0;
                 for (tok, col) in highlight_code_line(line, lang, crate::theme::TEXT) {
-                    tx = self.draw_text(
+                    tx = self.draw_text_clipped(
                         tx,
-                        pen_y,
+                        pen_y + glyph_voff,
                         &tok,
                         DrawOpts { font_size: base, color: col, bold: false, italic: false },
+                        cx0,
+                        clip_right,
                     );
                 }
                 // Cursor (drawn before the gutter mask so one panned under the
@@ -1332,10 +1416,10 @@ impl GpuRenderer {
                     // accent underline, cursor sits after it.
                     if !preedit.is_empty() {
                         let pw = self.measure_run(preedit, base, false, false, true, false);
-                        self.rect(cur_x, pen_y + lh - 2.0, pw, 2.0, crate::theme::ACCENT);
-                        self.draw_text(
+                        self.rect(cur_x, pen_y + glyph_voff + base - 2.0, pw, 2.0, crate::theme::ACCENT);
+                        self.draw_text_clipped(
                             cur_x,
-                            pen_y,
+                            pen_y + glyph_voff,
                             preedit,
                             DrawOpts {
                                 font_size: base,
@@ -1343,21 +1427,33 @@ impl GpuRenderer {
                                 bold: false,
                                 italic: false,
                             },
+                            cx0,
+                            clip_right,
                         );
                         cur_x += pw;
                     }
-                    if cur_x >= cx0 {
-                        self.rect(cur_x, pen_y, 2.0, lh, crate::theme::ACCENT);
+                    if cursor_on && cur_x >= cx0 {
+                        // Cursor bar matches the glyph box (same voff + height as
+                        // the text) so it lines up with the characters, not the
+                        // padded line box.
+                        self.rect(cur_x, pen_y + glyph_voff, 2.0, base, crate::theme::ACCENT);
                     }
                 }
                 // Gutter mask: repaint the column over any text that scrolled
-                // under it, then the right-aligned line number on top.
-                self.rect(x, pen_y, cx0 - x, lh, crate::theme::BG);
+                // under it, then the right-aligned line number on top. The
+                // current row keeps its highlight tint so the band reads as full
+                // width (line number included).
+                let gutter_bg = if li == cursor.0 {
+                    crate::theme::SURFACE_HOVER
+                } else {
+                    crate::theme::BG
+                };
+                self.rect(x, pen_y, cx0 - x, lh, gutter_bg);
                 let num = format!("{}", li + 1);
                 let num_w = self.measure_run(&num, base, false, false, true, false);
                 self.draw_text(
                     x + pad + (gutter_w - base * 0.5 - num_w).max(0.0),
-                    pen_y,
+                    pen_y + glyph_voff,
                     &num,
                     DrawOpts {
                         font_size: base,
@@ -1470,6 +1566,8 @@ impl GpuRenderer {
             "panel-left" => include_str!("../assets/icons/panel-left.svg"),
             "folder-tree" => include_str!("../assets/icons/folder-tree.svg"),
             "folder-open" => include_str!("../assets/icons/folder-open.svg"),
+            "folder-plus" => include_str!("../assets/icons/folder-plus.svg"),
+            "file-plus" => include_str!("../assets/icons/file-plus.svg"),
             "chevron-right" => include_str!("../assets/icons/chevron-right.svg"),
             "chevron-down" => include_str!("../assets/icons/chevron-down.svg"),
             "file" => include_str!("../assets/icons/file.svg"),

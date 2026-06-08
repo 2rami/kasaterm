@@ -4,6 +4,6 @@ Cargo.lock
 .DS_Store
 /dist
 .antigravitycli/
-mcp/__pycache__/
+**/__pycache__/
 .memory
 .claude/scheduled_tasks.lock
