@@ -1994,33 +1994,55 @@ impl App {
                     let bh = 24.0_f32;
                     let by = y - 4.0;
                     let caret_w = 20.0_f32;
+                    let busy = self.git_op;
                     let can_commit = !git_view.staged.is_empty() || !git_view.unstaged.is_empty();
-                    // No uncommitted changes but commits to push → the primary
-                    // button becomes "↑ Push N" (GitHub-Desktop style); with
-                    // changes it's Commit. The caret dropdown always offers the
-                    // full set (Commit / Push / Pull / Create PR).
-                    let push_mode = !can_commit && git_view.ahead > 0;
-                    let can_drop = can_commit || git_view.ahead > 0;
-                    let main_active = can_commit || push_mode;
-                    let (main_icon, main_label) = if push_mode {
-                        ("arrow-up", format!("Push  {}", git_view.ahead))
+                    // While a git op runs, the button shows a spinner + "Pushing…"
+                    // and ignores clicks. No uncommitted changes but commits to
+                    // push → the primary button becomes "↑ Push N" (GitHub-Desktop
+                    // style); with changes it's Commit. The caret dropdown always
+                    // offers the full set (Commit / Push / Pull / Create PR).
+                    let push_mode = busy.is_none() && !can_commit && git_view.ahead > 0;
+                    let can_drop = busy.is_none() && (can_commit || git_view.ahead > 0);
+                    let main_active = busy.is_none() && (can_commit || push_mode);
+                    let main_label = if let Some(op) = busy {
+                        format!("{op}…")
+                    } else if push_mode {
+                        format!("Push  {}", git_view.ahead)
                     } else {
-                        ("git-commit-horizontal", "Commit".to_string())
+                        "Commit".to_string()
                     };
+                    let main_icon = if push_mode { "arrow-up" } else { "git-commit-horizontal" };
                     let lw = g.measure_chrome_text(&main_label, 12.0, true);
                     let main_w = 24.0 + lw + 10.0;
                     let total_w = main_w + caret_w;
                     let bx = git_col_x + git_col_w - 12.0 - total_w;
                     let mhov = self.cursor_px.0 >= bx && self.cursor_px.0 <= bx + main_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
                     let chov = self.cursor_px.0 >= bx + main_w && self.cursor_px.0 <= bx + total_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
-                    let base = if can_drop { theme::surface_active() } else { theme::with_alpha(theme::surface_hover(), 0x66) };
+                    let base = if can_drop || busy.is_some() { theme::surface_active() } else { theme::with_alpha(theme::surface_hover(), 0x66) };
                     round_rect(g, bx, by, total_w, bh, theme::RADIUS_SM, base);
                     if main_active && mhov { round_rect(g, bx, by, main_w, bh, theme::RADIUS_SM, theme::accent()); }
                     if can_drop && chov { round_rect(g, bx + main_w, by, caret_w, bh, theme::RADIUS_SM, theme::accent()); }
                     g.rect(bx + main_w, by + 5.0, 1.0, bh - 10.0, theme::with_alpha(theme::bg(), 0x99));
-                    let fg_main = if main_active { theme::text() } else { theme::text_mute() };
+                    let fg_main = if main_active || busy.is_some() { theme::text() } else { theme::text_mute() };
                     let fg_caret = if can_drop { theme::text() } else { theme::text_mute() };
-                    g.queue_icon(main_icon, bx + 8.0, by + (bh - 13.0) / 2.0, 13.0, fg_main);
+                    if busy.is_some() {
+                        // Spinner: 8 dots round the icon slot, the bright one
+                        // chasing round once a second.
+                        let scx = bx + 14.0;
+                        let scy = by + bh / 2.0;
+                        let head = (time_secs * 1.1).fract();
+                        for i in 0..8 {
+                            let ang = (i as f32 / 8.0) * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+                            let p = i as f32 / 8.0;
+                            let mut dd = head - p;
+                            if dd < 0.0 { dd += 1.0; }
+                            let a = (1.0 - dd).powf(1.6);
+                            let d = 1.5_f32;
+                            round_rect(g, scx + ang.cos() * 5.5 - d, scy + ang.sin() * 5.5 - d, d * 2.0, d * 2.0, d, theme::with_alpha(theme::text(), 30 + (a * 220.0) as u8));
+                        }
+                    } else {
+                        g.queue_icon(main_icon, bx + 8.0, by + (bh - 13.0) / 2.0, 13.0, fg_main);
+                    }
                     g.draw_text(bx + 24.0, by + (bh - 12.0) / 2.0, &main_label, gpu::DrawOpts { font_size: 12.0, color: fg_main, bold: true, italic: false });
                     g.draw_text(bx + main_w + (caret_w - 7.0) / 2.0, by + (bh - 11.0) / 2.0, "▾", gpu::DrawOpts { font_size: 11.0, color: fg_caret, bold: false, italic: false });
                     self.git_commit_btn_rect = Some((bx, by, main_w, bh));
@@ -3599,6 +3621,13 @@ impl App {
             }
         }
         self.chrome_dirty = false;
+        // Keep the frame loop alive while a git op spins, so the spinner
+        // animates until GitOpDone clears it.
+        if self.git_op.is_some() {
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
     }
 
     pub(crate) fn render_frame(&mut self) {
@@ -3650,11 +3679,14 @@ impl App {
         // sweep advances". A bar-only frame redraws cached chrome with a fresh
         // GPU time uniform — no clear_chrome, no per-pane grid clone, no draw-
         // list rebuild — so a busy pane no longer pins the CPU at 30fps.
+        // A running git op spins a button spinner every frame.
+        let git_op_animating = self.git_op.is_some();
         let rebuild = pty_dirty
             || self.chrome_dirty
             || blink_changed
             || version_animating
-            || toast_animating;
+            || toast_animating
+            || git_op_animating;
         if !rebuild && !bar_animating {
             return;
         }

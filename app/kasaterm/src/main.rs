@@ -2006,6 +2006,9 @@ impl Workspace {
 #[derive(Debug, Clone)]
 enum UserEvent {
     Redraw,
+    /// A background git op (push/pull/commit) finished — clears the panel's
+    /// spinner. Carries nothing: only one git op runs at a time.
+    GitOpDone,
     /// Local cmux socket backend → GUI delegation. The socket server runs on
     /// its own thread and can't touch `self.pty` (not Arc<Mutex>), so it routes
     /// pane writes / split / focus to the GUI thread via the proxy. `surface_id`
@@ -2673,6 +2676,10 @@ struct App {
     /// poller should refresh (render publishes the active pane's cwd into it).
     /// Same pattern as `window_git` / `git_poll_cwds`.
     git_col_data: std::sync::Arc<std::sync::Mutex<GitColView>>,
+    /// Label of the in-flight git op (push/pull/commit…) for the panel spinner,
+    /// or `None` when idle. Set on the GUI thread when the op starts, cleared by
+    /// `UserEvent::GitOpDone` when the worker finishes.
+    git_op: Option<&'static str>,
     git_col_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
     /// User-pinned repo for the column. `Some` = show this repo regardless of
     /// the focused pane (picked from the path dropdown); `None` = follow the
@@ -3012,6 +3019,7 @@ impl App {
             git_commit_focused: false,
             git_commit_input_rect: None,
             git_col_data: std::sync::Arc::new(std::sync::Mutex::new(GitColView::default())),
+            git_op: None,
             git_col_cwd: std::sync::Arc::new(std::sync::Mutex::new(None)),
             git_col_pinned_cwd: None,
             git_path_menu_open: false,
