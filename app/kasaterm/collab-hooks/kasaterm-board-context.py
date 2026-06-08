@@ -47,7 +47,8 @@ def board_section():
         if prompt:
             line += f" — 시킴: {prompt[:60]}"
         lines.append(line)
-    return "[협업 보드] 같은 레포를 동시에 만지는 다른 pane:\n" + "\n".join(lines)
+    return (f"[협업 보드] 너 = {me}. 같은 레포를 동시에 만지는 다른 pane:\n"
+            + "\n".join(lines))
 
 
 def inbox_section():
@@ -59,7 +60,8 @@ def inbox_section():
         msgs = [json.loads(l) for l in open(p).read().splitlines() if l.strip()]
     except Exception:
         return None
-    mine = [m for m in msgs if m.get("to") == me and not m.get("read")]
+    mine = [m for m in msgs
+            if m.get("to") == me and m.get("from") != me and not m.get("read")]
     if not mine:
         return None
     for m in mine:
@@ -80,8 +82,12 @@ if not parts:
     sys.exit(0)
 
 ctx = ("\n".join(parts)
-       + "\n(자세히: kasaterm-cli transcript %N / peek %N. 겹치면 피하거나 합류. "
-       "급히 깨우기: kasaterm-cli tell %N \"메시지\".)")
+       + f"\n(협업 규약: 너 = {me} 다 — board/inbox 에 뜬 다른 id 가 상대다(자기 자신에겐 "
+       "못 보낸다). ① 대화·조율은 `kasacollab msg %N \"...\"` — 메시지를 상대 inbox 에 쌓고 "
+       "그 즉시 tell 로 깨운다. board·inbox 는 매 턴 자동 주입이라 상대가 자기 턴에 바로 본다"
+       "(모니터링 불필요). ② `kasaterm-cli tell %N \"...\"` 단독은 inbox 없이 그냥 깨우거나 "
+       "즉시 행동시킬 때 — 강제 제출이라 바쁜 상대 입력창엔 누적된다. 겹치면 피하거나 합류. "
+       "자세히: kasaterm-cli transcript %N / peek %N.)")
 print(json.dumps({
     "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}
 }))

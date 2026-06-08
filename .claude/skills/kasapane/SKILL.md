@@ -580,51 +580,55 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 ---
 
-## 5) pane 협업 — board(작업현황 조회) + tell(직접 깨우기) (board · tell · peek)
+## 5) pane 협업 — board(자동 현황) + inbox(대화) + tell(깨우기)
 
 §4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용.
 
-> **2026-05-31 구조 변경:** 파일 mailbox(`kasa-chat`)·`chat-inject` hook 자동주입·mailbox watcher inbox는 **전부 폐기**됐다. 수동 `announce`도 폐기 — board는 transcript에서 100% 자동으로 채워진다. 이제 협업은 ① 자동 채워지는 **board**(사용자는 GUI 패널로, claude는 CLI로 조회) + ② **PTY 직접 주입 `tell`**(claude끼리·사용자 둘 다) 두 축뿐이다.
+§4 팀 모드가 **TeamCreate 위계**라면 이건 **위계 없는 peer 협업**. 세 축이다:
 
-### board — 각 pane이 뭘 하는지 (자동 등록)
+- **board** — 누가 뭘 하나. `UserPromptSubmit` hook(`kasaterm-board-context.py`)이 **매 턴 자동 주입** → 따로 조회·Monitor 불필요. 즉시 최신이 필요할 때만 `kasaterm-cli board`.
+- **inbox** — pane끼리 **대화·조율**. `kasacollab msg %N "..."`. 상대가 working/선택지 대기 중이어도 **100% 전달되고 상대 입력창을 안 건드린다** → 협업 대화의 기본 채널.
+- **tell** — idle 상대를 **급히 깨워 즉시 행동**시킬 때만. 강제 제출이라 바쁜 상대에겐 입력창에 누적된다.
 
-호스트가 각 pane의 claude transcript를 tail해 tool_use(Read/Edit/Bash…)를 그 pane 활동으로 **자동 등록**한다. 평소처럼 작업하면 `Read auth.ts → Bash cargo build`가 저절로 뜬다 — 내가 따로 보고할 필요 없다.
+### board — 각 pane이 뭘 하는지 (매 턴 자동 주입)
 
-- **사용자(거노)**: 상단 **보기 메뉴 → "board 패널"** 로 전 pane 작업 현황을 직접 본다. **읽기 전용 현황판**이다 — 입력 UI 없음. 특정 pane에 말할 일이 있으면 그 pane으로 가서 그 pane 프롬프트에 직접 친다.
-- **claude(너)**: 필요할 때 `kasaterm-cli board` 로 **직접 조회**한다. 내가 만질 파일을 board에서 다른 pane이 잡고 있으면 → 충돌 회피(같은 문제면 합류, 빌드 중이면 `peek %N`로 보고 대기).
+`kasaterm-bind-transcript.sh`(SessionStart/UserPromptSubmit hook)가 각 pane의 transcript를 소켓에 등록하고, `kasaterm-board-context.py`(UserPromptSubmit hook)가 매 턴 **board(형제 활동) + inbox(내게 온 메시지)를 프롬프트에 자동 주입**한다. 평소처럼 작업하면 저절로 등록·표시 — 보고·조회·Monitor 다 불필요.
 
-#### board 상시 감시 (Monitor) — 권장
+- **사용자(거노)**: 상단 **보기 메뉴 → "board 패널"** 로 전 pane 현황을 본다(읽기 전용).
+- **claude(너)**: 매 턴 자동 주입되는 board를 그냥 읽으면 된다. 내가 만질 파일을 다른 pane이 잡고 있으면 충돌 회피(같은 문제면 합류, 빌드 중이면 `peek %N`로 보고 대기).
 
-매번 `board`를 조회하는 대신, **Monitor 도구로 board를 상시 감시**해두면 형제 pane 활동이 바뀔 때마다 알림이 온다. kasaterm pane이면 SessionStart hook(`kasaterm-collab-hint.sh`)이 이 안내를 자동 주입하므로 첫 턴에 띄우면 된다:
-
-```
-Monitor 도구 → command: ~/.claude/hooks/kasaterm-board-watch.sh  (persistent: true)
-```
-
-- 형제 pane이 **없으면 조용**하다 → "지금 협업 상황인지" 미리 판정할 필요 없다. 그냥 띄워두면 누가 옆 pane을 새로 여는 순간부터 알린다.
-- 알림에 뜬 다른 pane의 `files=[...]`에 내가 만지려는 경로가 있으면 **충돌** → `tell %N`으로 조율(같은 문제면 합류, 빌드 중이면 대기).
-- 감지(Monitor)는 **나에게만** 오고, 상대를 깨우는 건 `tell`(PTY 주입)이 한다 — 역할이 나뉜다. Monitor는 잠든 옆 claude를 못 깨운다.
-
-### tell — 다른 pane에게 말 걸기 + 깨우기 (claude끼리)
+### inbox — pane끼리 대화·조율 (kasacollab)
 
 ```bash
-kasaterm-cli tell %3 "auth.ts 너가 맡아줄래? 난 ui 쪽 볼게"
+kasacollab msg %3 "auth.ts 곧 끝나, 5분만"   # %3에게 메시지
+kasacollab inbox                               # 내게 온 미읽(읽음 처리) — board-context가 매 턴 자동으로도 보여줌
+kasacollab task add "BSP 리팩터"               # 작업 분담 선언(중복 방지)
+kasacollab task list
 ```
 
-`tell`은 대상 pane PTY에 텍스트를 주입하고 **끝에 `\r`(엔터)을 붙여 제출**한다 — 그래서 **idle claude도** 새 user turn으로 받아 깨어난다. focus는 안 바뀐다.
+- 메시지는 `/tmp/kasaterm-collab/<cwd>/messages.jsonl`에 쌓이고 상대가 **자기 다음 턴에** board-context로 자동으로 본다. 상대 상태(working/idle/선택지) 무관 — 누적·엉킴·선택지 오염 없음.
+- **대화는 전부 inbox로.** tell은 깨울 때만. (kasacollab은 `~/.local/bin/kasacollab` PATH 래퍼 + hashlib 의존 제거로 어느 python3에서도 즉시 돈다 — 2026-06-08.)
 
-- `send`(=`surface.send_text`)는 제출(`\r`)을 안 붙여 프롬프트에 글자만 남는다. **깨우려면 반드시 `tell`.**
-- board 패널엔 입력 기능이 없다(보기 전용). 사용자가 pane을 깨우려면 그 pane으로 가서 직접 입력한다.
+### tell — idle 상대 급히 깨우기 (강제 제출)
+
+```bash
+kasaterm-cli tell %3 "지금 멈춘 거 같은데 이거 먼저 봐줘"
+```
+
+`tell`은 대상 PTY에 텍스트 주입 후 `\r`로 제출 — idle claude를 새 user turn으로 깨운다. focus는 안 바뀐다.
+
+- **상대가 working/선택지 대기면 입력창에 누적**되고 즉시 처리 안 된다(claude가 입력을 큐잉). 그래서 **대화는 inbox, tell은 "지금 깨워야 한다" 싶을 때만.**
+- `send`(=`surface.send_text`)는 `\r` 없이 글자만 남는다. 깨우려면 `tell`.
 
 ### 함정
 
 | 안 됨 | 왜 |
 |---|---|
-| `kasa-chat send` / 공지방 / hook 자동주입에 의존 | **폐기됨(2026-05-31)**. board는 `kasaterm-cli board`로 조회, 깨우기는 `tell` |
-| `send`로 깨우려 함 | `send`는 `\r` 없음 → 프롬프트에 글자만. idle 깨우기는 `tell` |
-| `tell`에 surface_id 생략 | `tell`은 항상 `<surface_id> <text>`. 자기 자신엔 안 씀 |
-| board가 비어 보임 | 그 pane이 claude 아니거나 transcript 미bind — 정상 |
-| `announce`로 내 작업 등록 | **폐기됨(2026-05-31)**. transcript가 자동 등록 — 따로 호출 안 함 |
+| working/선택지 상대에게 tell로 대화 | 입력창 누적·선택지 오염. **대화는 `kasacollab msg`(inbox)** |
+| `kasacollab`이 행/없음 | PATH 래퍼 + hashlib 제거로 해결됨(2026-06-08). framework python 3.14에서 hashlib import가 행하던 게 원인 |
+| `send`로 깨우려 함 | `\r` 없음 → 글자만. idle 깨우기는 `tell` |
+| `tell`에 surface_id 생략 | 항상 `<surface_id> <text>`. 자기 자신엔 안 씀 |
+| board가 비어 보임 | 미bind이거나, **소켓 탈취**(claude pane에서 `cargo run`이 메인 .app 소켓 가로챔 — 2026-06-08 수정). 인스턴스 난립 의심 |
 
 ---
 

@@ -373,6 +373,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli transcript [surface_id] [N]  # last N turns (prompts+replies) of a pane's claude");
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
+    eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
     eprintln!();
     eprintln!(
         "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
@@ -572,6 +573,30 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             (
                 "surface.notify",
                 json!({ "surface_id": surface, "title": title, "body": body }),
+            )
+        }
+        "attention" => {
+            // attention [--surface <id>] [reason...] — flag a pane as blocked
+            // on a permission / input prompt. A claude `Notification` hook runs
+            // this; --surface defaults to $KASATERM_PANE_ID (the pane it fired
+            // in). `reason` is free text (the hook's message), optional.
+            let (surface, rest): (String, &[String]) =
+                if args.first().is_some_and(|a| a == "--surface") {
+                    let s = args
+                        .get(1)
+                        .ok_or_else(|| anyhow!("--surface needs an id"))?
+                        .clone();
+                    (s, args.get(2..).unwrap_or(&[]))
+                } else {
+                    let s = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                        anyhow!("attention needs --surface <id> or $KASATERM_PANE_ID")
+                    })?;
+                    (s, &args[..])
+                };
+            let reason = rest.join(" ");
+            (
+                "surface.attention",
+                json!({ "surface_id": surface, "reason": reason }),
             )
         }
         "layout" => ("window.layout", json!({})),

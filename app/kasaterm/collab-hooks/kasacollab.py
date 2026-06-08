@@ -17,7 +17,7 @@ board(감지)·conflict-guard(차단) 위에 얹는 '분담·대화' 층. 두 �
   kasacollab msg %2 "이 파일 곧 끝나"           # %2에게 메시지
   kasacollab inbox                               # 내게 온 미읽 메시지(읽음 처리)
 """
-import sys, os, json, time, hashlib
+import sys, os, json, time, subprocess
 
 
 def base():
@@ -51,7 +51,10 @@ def save_tasks(t):
 
 
 def short_id():
-    return hashlib.md5(f"{time.time()}{me()}".encode()).hexdigest()[:4]
+    # time+pane 기반 4hex. hashlib.md5는 이 머신 framework python 3.14에서
+    # import 자체가 행한다(OpenSSL 로드 블록) — id 생성에만 쓰던 의존을 끊어
+    # 어느 python3 에서도 즉시 돌게 한다. 한 ms 안의 충돌은 pane id XOR로 분산.
+    return f"{(int(time.time() * 1000) ^ hash(me())) & 0xFFFF:04x}"
 
 
 def cmd_task(args):
@@ -110,16 +113,34 @@ def cmd_msg(args):
         print('msg <pane> "<text>"')
         return
     to, text = args[0], " ".join(args[1:])
+    if to == me():
+        print(f"자기 자신({to})에게는 못 보냄 — 내 pane id가 {me()}다. "
+              f"받는 상대 id를 board에서 다시 확인해라.")
+        return
     m = {"id": short_id(), "from": me(), "to": to, "text": text,
          "ts": time.time(), "read": False}
     with open(msgs_path(), "a") as f:
         f.write(json.dumps(m, ensure_ascii=False) + "\n")
-    print(f"→ {to}: {text}")
+    # inbox는 상대 '다음 턴'에야 자동 주입돼 working 중이면 한참 뒤에 본다.
+    # 보낸 즉시 tell 로 깨워 그 턴의 board-context hook 이 이 메시지를 바로
+    # 끌어가게 한다. tell 본문은 트리거일 뿐 — 실제 내용은 inbox 주입이 싣는다.
+    cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
+    woke = False
+    try:
+        r = subprocess.run(
+            [cli, "tell", to, f"[inbox] {me()} 메시지 도착 — 위 '받은 메시지' 확인하고 "
+             f"필요하면 답장(kasacollab msg {me()} \"...\")"],
+            capture_output=True, text=True, timeout=3)
+        woke = r.returncode == 0
+    except Exception:
+        pass
+    print(f"→ {to}: {text}" + (" · tell 로 깨움" if woke else " · (tell 실패, inbox 에만 쌓임)"))
 
 
 def cmd_inbox(args):
     msgs = read_msgs()
-    mine = [m for m in msgs if m.get("to") == me() and not m.get("read")]
+    mine = [m for m in msgs
+            if m.get("to") == me() and m.get("from") != me() and not m.get("read")]
     if not mine:
         print("(새 메시지 없음)")
         return

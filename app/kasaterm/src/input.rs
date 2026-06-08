@@ -240,16 +240,30 @@ impl App {
                 .collect()
         };
 
+        // The claude spinner blanks/scrolls between frames, so the raw glyph
+        // scan flickers working↔idle. Hold `busy` for BUSY_GRACE past the last
+        // spinner sighting; only a real stop (grace elapsed with no spinner)
+        // counts as completion — otherwise every blink fired a bogus toast.
+        const BUSY_GRACE: std::time::Duration = std::time::Duration::from_millis(1200);
         let mut completed: Vec<String> = Vec::new();
-        for (id, busy) in &busy_now {
+        for (id, raw_busy) in &busy_now {
+            if *raw_busy {
+                self.pane_last_busy.insert(id.clone(), now);
+            }
+            let busy = *raw_busy
+                || self
+                    .pane_last_busy
+                    .get(id)
+                    .map_or(false, |t| now.duration_since(*t) < BUSY_GRACE);
             let was_busy = self
                 .pane_activity
                 .get(id)
                 .map_or(false, |a| a.status != "idle" && !a.status.is_empty());
             if was_busy && !busy {
                 completed.push(id.clone());
+                self.pane_last_busy.remove(id);
             }
-            let status = if *busy { "working" } else { "idle" };
+            let status = if busy { "working" } else { "idle" };
             self.pane_activity
                 .entry(id.clone())
                 .and_modify(|a| a.status = status.to_string())
@@ -261,17 +275,17 @@ impl App {
         // Drop entries for panes that no longer exist (closed/undocked).
         self.pane_activity
             .retain(|k, _| busy_now.iter().any(|(id, _)| id == k));
+        self.pane_last_busy
+            .retain(|k, _| busy_now.iter().any(|(id, _)| id == k));
 
         if completed.is_empty() {
             return;
         }
         // A sibling finished: top-right toast + header pulse. Label the toast
-        // with the pane's short cwd basename when known, else a generic mark.
-        let label = completed
-            .iter()
-            .find_map(|id| self.pane_cwd_cache.get(id))
-            .and_then(|cwd| cwd.file_name().and_then(|s| s.to_str()).map(String::from));
-        let msg = match label {
+        // with the pane's tab-header name (custom title / foreground process),
+        // matching what the user reads in the tab strip — not the cwd basename.
+        let name = completed.first().map(|id| self.pane_header_label(id));
+        let msg = match name {
             Some(name) => format!("✓ {name} 작업 완료"),
             None => "✓ 작업 완료".to_string(),
         };
@@ -564,11 +578,15 @@ impl App {
             // lines under the fixed gutter. Clamp to the longest line so it
             // can't scroll into empty space past the end of the text.
             if is_raw {
-                let dx_px = match delta {
-                    MouseScrollDelta::LineDelta(x, _) => x * self.cell.w * 3.0,
-                    MouseScrollDelta::PixelDelta(p) => p.x as f32,
+                let (dx_px, dy_cmp) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x * self.cell.w * 3.0, y),
+                    MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                 };
-                if dx_px.abs() > 0.01 {
+                // Trackpad vertical swipes carry a stray horizontal component
+                // (e.g. x:36, y:-98). Pan only when the gesture is decisively
+                // horizontal (dx > 2×dy) — otherwise a plain up/down scroll
+                // yanks long code lines sideways and the short ones vanish.
+                if dx_px.abs() > dy_cmp.abs() * 2.0 && dx_px.abs() > 1.0 {
                     if let Some(id) = target_pane_id.as_deref() {
                         if let Ok(mut ws) = self.ws.lock() {
                             if let Some(pane) = ws.panes.get_mut(id) {
@@ -947,6 +965,83 @@ impl App {
         self.file_tree_scroll = 0.0;
         self.chrome_dirty = true;
     }
+    /// Name entry for the inline new-file/folder row. Enter creates the entry,
+    /// Esc cancels; Hangul composes like the search box.
+    pub(crate) fn file_tree_new_key(&mut self, event: &KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        #[cfg(target_os = "macos")]
+        if let Some(t) = &event.text {
+            if t.chars().count() == 1 {
+                if let Some(c) = t.chars().next() {
+                    if (0x3130..=0x318F).contains(&(c as u32)) {
+                        if let Some(commit) = self.hangul.feed(c) {
+                            if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                                buf.push_str(&commit);
+                            }
+                        }
+                        self.preedit = self.hangul.preedit().unwrap_or_default();
+                        self.in_preedit = !self.preedit.is_empty();
+                        self.chrome_dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.file_tree_new = None;
+                self.preedit.clear();
+                self.in_preedit = false;
+                let _ = self.hangul.flush();
+                self.chrome_dirty = true;
+                return;
+            }
+            Key::Named(NamedKey::Enter) => {
+                if let Some(f) = self.hangul.flush() {
+                    if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                        buf.push_str(&f);
+                    }
+                }
+                self.preedit.clear();
+                self.in_preedit = false;
+                self.commit_new_entry();
+                self.chrome_dirty = true;
+                return;
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if self.hangul.backspace() {
+                    self.preedit = self.hangul.preedit().unwrap_or_default();
+                    self.in_preedit = !self.preedit.is_empty();
+                } else if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                    buf.pop();
+                }
+                self.chrome_dirty = true;
+                return;
+            }
+            _ => {}
+        }
+        if let Some(flushed) = self.hangul.flush() {
+            if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                buf.push_str(&flushed);
+            }
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+        match &event.logical_key {
+            Key::Named(NamedKey::Space) => {
+                if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                    buf.push(' ');
+                }
+            }
+            Key::Character(txt) => {
+                if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                    buf.push_str(txt);
+                }
+            }
+            _ => {}
+        }
+        self.chrome_dirty = true;
+    }
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
@@ -978,6 +1073,35 @@ impl App {
             }
             return;
         }
+        // Cmd+Delete (= Cmd+Backspace) on a selected tree row → trash it.
+        // Gated on no text input having focus so it never eats shell editing
+        // keys; the selection clears when a terminal pane is clicked.
+        if !self.git_commit_focused
+            && self.file_tree_new.is_none()
+            && !self.file_tree_search_active
+        {
+            if let Some(sel) = self.file_tree_selected.clone() {
+                use winit::keyboard::{Key, NamedKey};
+                let del = matches!(&event.logical_key, Key::Named(NamedKey::Delete))
+                    || (self.modifiers.super_key()
+                        && matches!(&event.logical_key, Key::Named(NamedKey::Backspace)));
+                if del {
+                    self.delete_tree_entry(&sel);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+            }
+        }
+        // Inline new-file/folder naming row is open: keystrokes name it.
+        if self.file_tree_new.is_some() {
+            self.file_tree_new_key(event);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
         // File-tree search box has focus: keystrokes filter the tree.
         if self.file_tree_search_active {
             self.file_tree_search_key(event);
@@ -986,6 +1110,10 @@ impl App {
             }
             return;
         }
+        // Past here the key is bound for the shell (or an image/raw pane), so
+        // drop any tree selection — a later Cmd+Backspace then edits the shell
+        // line, not the previously-clicked file.
+        self.file_tree_selected = None;
         // Image panes have no PTY — repurpose keys for view control.
         //   +/=      zoom in     -    zoom out
         //   0        reset       r/R  rotate 90° CW
@@ -1631,12 +1759,87 @@ impl App {
 /// idle signal. Only the last ~10 rows are scanned (the live status sits at the
 /// bottom); scrollback above is ignored.
 fn term_is_working(t: &TerminalPane) -> bool {
-    let rows = t.cells.len();
-    let start = rows.saturating_sub(10);
-    t.cells[start..].iter().any(|row| {
-        row.iter().any(|cell| {
-            let cp = cell.ch as u32;
-            (0x2800..=0x28FF).contains(&cp) || (0x2731..=0x274F).contains(&cp)
-        })
+    rows_show_working(&t.cells)
+}
+
+/// Whether the bottom of `cells` shows a live "agent working" indicator.
+///
+/// Scans the last 10 *non-blank* rows, not the last 10 physical rows. Claude
+/// (and other TUIs) leave blank padding rows at the bottom of the grid, so
+/// `cells[rows-10..]` can be all whitespace with the live status line
+/// ("✢ Gitifying…") sitting just above the window — the bar then never shows
+/// even while the spinner is clearly on screen. Anchor on the last non-blank
+/// row instead (the same content range `visible_text`/peek report), which is
+/// why peek saw the spinner but the working bar didn't.
+///
+/// Claude's live footer reads "✳ Verbing… (12s · esc to interrupt)". Three
+/// signals, in order of reliability:
+///   - "esc to interrupt" — exact, but TRUNCATED on narrow panes, so it can't
+///     be the only cue.
+///   - star dingbat (✢✳✻… U+2720–274F) + "…" ellipsis on the SAME line —
+///     present at any width. The completion summary ("✻ Churned for 42s") keeps
+///     the star but DROPS the ellipsis, so requiring both rejects it. (The old
+///     bare-star check pinned the bar on forever after a turn.)
+///   - braille spinner (other CLIs) — animation-only, safe on its own.
+fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
+    let Some(last) = cells
+        .iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))
+    else {
+        return false;
+    };
+    let start = (last + 1).saturating_sub(10);
+    cells[start..=last].iter().any(|row| {
+        let line: String = row.iter().map(|cell| cell.ch).collect();
+        if line.contains("esc to interrupt") {
+            return true;
+        }
+        let has_star = row.iter().any(|cell| (0x2720..=0x274F).contains(&(cell.ch as u32)));
+        let has_braille = row.iter().any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
+        (has_star && line.contains('…')) || has_braille
     })
+}
+
+#[cfg(test)]
+mod working_scan_tests {
+    use super::*;
+    use kasa_bridge::screen::Cell;
+
+    fn row(s: &str) -> Vec<GridCell> {
+        s.chars().map(|ch| Cell { ch, ..Cell::blank() }).collect()
+    }
+    fn blank() -> Vec<GridCell> {
+        vec![Cell::blank(); 8]
+    }
+
+    #[test]
+    fn spinner_above_trailing_blank_padding_is_working() {
+        // The exact 거노 case: claude's status line, then a wall of blank
+        // padding rows filling out the grid. The old `cells[rows-10..]` scan
+        // saw only blanks here and missed it.
+        let mut cells = vec![row("✢ Gitifying… (1m 35s · ↑ 4.9k tokens)")];
+        cells.extend(std::iter::repeat_with(blank).take(12));
+        assert!(rows_show_working(&cells));
+    }
+
+    #[test]
+    fn all_blank_is_idle() {
+        assert!(!rows_show_working(&vec![blank(); 20]));
+    }
+
+    #[test]
+    fn completion_summary_without_ellipsis_is_idle() {
+        // "✻ Churned for 42s" keeps the star but drops the ellipsis.
+        assert!(!rows_show_working(&[row("✻ Churned for 42s")]));
+    }
+
+    #[test]
+    fn esc_to_interrupt_is_working() {
+        assert!(rows_show_working(&[row("Working (esc to interrupt)")]));
+    }
+
+    #[test]
+    fn braille_spinner_is_working() {
+        assert!(rows_show_working(&[row("⠋ installing")]));
+    }
 }

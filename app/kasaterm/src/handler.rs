@@ -53,6 +53,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::Attention { surface_id, reason } => {
+                self.handle_attention(surface_id, reason);
+                self.render_frame();
+                return;
+            }
             _ => {}
         }
         // Render directly here instead of request_redraw → (next loop)
@@ -549,6 +554,57 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                     }
                 }
+                // File-tree path drag: once the cursor leaves the press point,
+                // a held row becomes a drag. Releasing over a terminal pane
+                // types its path into that shell (handled on release).
+                let dragging_tree = if let Some(drag) = self.file_tree_drag.as_mut() {
+                    if !drag.active {
+                        let (cx, cy) = self.cursor_px;
+                        if (cx - drag.start.0).abs() > 4.0 || (cy - drag.start.1).abs() > 4.0 {
+                            drag.active = true;
+                            window.set_cursor(CursorIcon::Grabbing);
+                        }
+                    }
+                    drag.active
+                } else {
+                    false
+                };
+                // While dragging, repaint every move so the ghost pill tracks
+                // the cursor.
+                if dragging_tree {
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                }
+                // I-beam mouse cursor over the search box / new-entry naming
+                // row, restored to default on the way out. Only flipped on the
+                // transition so it doesn't fight other cursor setters.
+                {
+                    let (cx, cy) = self.cursor_px;
+                    let hit = |r: (f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    let want_text = (self.file_tree_search_active && hit(self.file_tree_search_rect))
+                        || (self.file_tree_new.is_some() && hit(self.file_tree_new_row_rect));
+                    if want_text != self.text_cursor_shown {
+                        self.text_cursor_shown = want_text;
+                        window.set_cursor(if want_text {
+                            CursorIcon::Text
+                        } else {
+                            CursorIcon::Default
+                        });
+                    }
+                }
+                // File-tree column hover — repaint while the cursor is over the
+                // column so the hover-only scrollbar thumb appears (and clears
+                // on the way out). The render reads cursor_px live.
+                if self.file_tree_visible {
+                    let (cx, cy) = self.cursor_px;
+                    let tx = self.file_tree_col_x();
+                    if cy > TITLE_HEIGHT && cx >= tx && cx < tx + self.file_tree_col_w() {
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                }
                 // Git column hover — repaint so the row + button highlights
                 // track the cursor (the render reads cursor_px live). Only
                 // while the cursor is actually over the column, so it costs
@@ -834,6 +890,15 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         icon
                     };
+                    // Raw editor body → I-beam, so the text reads as editable.
+                    let icon = if matches!(icon, CursorIcon::Default)
+                        && self.md_body_rects.values().any(|&(bx, by, bw, bh)| {
+                            cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh
+                        }) {
+                        CursorIcon::Text
+                    } else {
+                        icon
+                    };
                     window.set_cursor(icon);
                     // Hover glow on chrome buttons (+ / action cluster) needs
                     // a redraw on every move — paint reads self.cursor_px to
@@ -843,6 +908,73 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                // Resolve a file-tree → terminal path drag first, before any
+                // other hit-test, so a release anywhere disarms it. A real drag
+                // (cursor left the row) released over a pane types that path
+                // into the shell; otherwise it just disarms — the row's
+                // expand/preview click already fired on press.
+                if matches!(state, ElementState::Released) {
+                    if let Some(drag) = self.file_tree_drag.take() {
+                        window.set_cursor(CursorIcon::Default);
+                        if drag.active {
+                            let (cx, cy) = self.cursor_px;
+                            // Drop inside the file-tree column → move the entry
+                            // into the folder under the cursor (or a file's
+                            // parent, or the root if the drop missed a row).
+                            let tree_x = self.file_tree_col_x();
+                            let tree_w = self.file_tree_col_w();
+                            let in_tree = self.file_tree_visible
+                                && cy > TITLE_HEIGHT
+                                && cx >= tree_x
+                                && cx < tree_x + tree_w;
+                            if in_tree {
+                                let hit = self
+                                    .file_tree_rects
+                                    .iter()
+                                    .find(|(_, r)| {
+                                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                                    })
+                                    .map(|(p, _)| p.clone());
+                                let dst_dir = hit
+                                    .and_then(|p| {
+                                        let is_dir = self
+                                            .file_tree_nodes
+                                            .iter()
+                                            .find(|n| n.path == p)
+                                            .map(|n| n.is_dir)
+                                            .unwrap_or(false);
+                                        if is_dir {
+                                            Some(p)
+                                        } else {
+                                            p.parent().map(|x| x.to_path_buf())
+                                        }
+                                    })
+                                    .or_else(|| self.file_tree_root.clone());
+                                if let Some(dst_dir) = dst_dir {
+                                    self.move_tree_entry(&drag.path, &dst_dir);
+                                }
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
+                            if let Some((pid, _, _)) = self.px_to_pane_cell(cx, cy) {
+                                if let Ok(mut w) = self.ws.lock() {
+                                    w.active_pane = Some(pid);
+                                }
+                                let mut text =
+                                    shell_quote_path(&drag.path.to_string_lossy());
+                                text.push(' ');
+                                self.send_bytes(text.as_bytes());
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
+                        }
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                        return;
+                    }
+                }
                 // Confirm-close modal swallows every click while it's up. A hit
                 // on a button acts; a click on the scrim is ignored (Esc/취소
                 // dismiss). Checked before any other hit-test so nothing behind
@@ -868,6 +1000,31 @@ impl ApplicationHandler<UserEvent> for App {
                 if matches!(state, ElementState::Pressed) {
                     let cx = self.cursor_px.0;
                     let cy = self.cursor_px.1;
+                    // A press outside the inline new-entry row + its buttons
+                    // cancels the pending creation. Falls through so the click
+                    // still does its normal job (focus a pane, etc.).
+                    if self.file_tree_new.is_some() {
+                        let hit = |r: (f32, f32, f32, f32)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        };
+                        if !hit(self.file_tree_new_row_rect)
+                            && !hit(self.file_tree_new_folder_rect)
+                            && !hit(self.file_tree_new_file_rect)
+                        {
+                            self.file_tree_new = None;
+                            self.chrome_dirty = true;
+                        }
+                    }
+                    // Completion toast: a click anywhere on it dismisses it
+                    // immediately (top-right, tested before the cell grid).
+                    if let Some((tx, ty, tw, th)) = self.collab_toast_rect {
+                        if cx >= tx && cx <= tx + tw && cy >= ty && cy <= ty + th {
+                            self.collab_toast = None;
+                            self.collab_toast_rect = None;
+                            window.request_redraw();
+                            return;
+                        }
+                    }
                     // Any press outside the commit input blurs it, so typing
                     // goes back to the PTY. A press on the input keeps focus
                     // (the git-column handler re-asserts it below).
@@ -1062,6 +1219,24 @@ impl ApplicationHandler<UserEvent> for App {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
+                        // New-folder / new-file buttons beside the search box:
+                        // open an inline naming row (keystrokes route to it).
+                        if inside(&self.file_tree_new_folder_rect) {
+                            self.file_tree_new = Some((true, String::new()));
+                            self.file_tree_search_active = false;
+                            self.file_tree_scroll = 0.0;
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
+                        if inside(&self.file_tree_new_file_rect) {
+                            self.file_tree_new = Some((false, String::new()));
+                            self.file_tree_search_active = false;
+                            self.file_tree_scroll = 0.0;
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
                         // Search box click → focus it (keystrokes now filter the
                         // tree). Clicking it again keeps focus; Esc clears.
                         if inside(&self.file_tree_search_rect) {
@@ -1077,12 +1252,23 @@ impl ApplicationHandler<UserEvent> for App {
                             .find(|(_, r)| inside(r))
                             .map(|(p, _)| p.clone())
                         {
+                            // Mark it the Cmd+Delete target.
+                            self.file_tree_selected = Some(path.clone());
                             let is_dir = self
                                 .file_tree_nodes
                                 .iter()
                                 .find(|n| n.path == path)
                                 .map(|n| n.is_dir)
                                 .unwrap_or(false);
+                            // Arm a drag from this row. The expand/preview
+                            // click action still fires below; only if the
+                            // cursor then travels off the sidebar does this
+                            // turn into a path drop (handled on release).
+                            self.file_tree_drag = Some(crate::FileTreeDrag {
+                                path: path.clone(),
+                                start: self.cursor_px,
+                                active: false,
+                            });
                             if is_dir {
                                 if !self.file_tree_expanded.remove(&path) {
                                     self.file_tree_expanded.insert(path.clone());
@@ -1339,63 +1525,6 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
-                    // Markdown header Render/Raw toggle → switch that pane's mode.
-                    // Entering Raw seeds the edit buffer from the doc source.
-                    if let Some((id, is_raw)) = self
-                        .md_toggle_rects
-                        .iter()
-                        .find(|(_, _, r)| {
-                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                        })
-                        .map(|(id, raw, _)| (id.clone(), *raw))
-                    {
-                        {
-                            let mut ws = self.ws.lock().unwrap();
-                            if let Some(pane) = ws.panes.get_mut(&id) {
-                                pane.dirty = true;
-                                if is_raw {
-                                    // Render → Raw: seed the edit buffer.
-                                    if let Some(m) = pane.markdown_mut() {
-                                        if !m.raw_mode {
-                                            m.edit_lines =
-                                                m.doc.raw.split('\n').map(String::from).collect();
-                                            if m.edit_lines.is_empty() {
-                                                m.edit_lines.push(String::new());
-                                            }
-                                            m.cur_line = 0;
-                                            m.cur_col = 0;
-                                            m.scroll = 0;
-                                        }
-                                        m.raw_mode = true;
-                                    }
-                                } else {
-                                    // Raw → Render: write the file + re-parse so
-                                    // the rendered view reflects the edits.
-                                    let save = pane
-                                        .markdown()
-                                        .filter(|m| m.raw_mode)
-                                        .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()));
-                                    if let Some((text, path)) = save {
-                                        let _ = std::fs::write(&path, &text);
-                                        let doc = build_markdown_doc(
-                                            &id,
-                                            std::path::Path::new(&path),
-                                            &text,
-                                        );
-                                        if let Some(m) = pane.markdown_mut() {
-                                            m.doc = Arc::new(doc);
-                                            m.scroll = 0;
-                                        }
-                                    }
-                                    if let Some(m) = pane.markdown_mut() {
-                                        m.raw_mode = false;
-                                    }
-                                }
-                            }
-                        }
-                        window.request_redraw();
-                        return;
-                    }
                     // Terminal-pane right-action cluster (new-terminal /
                     // web / split-v / split-h). Web spawns a separate OS
                     // window with a wry browser; the other variants are
@@ -1425,6 +1554,12 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             ActionKind::ToggleStatusbar => {
                                 self.toggle_statusbar(&pid);
+                            }
+                            ActionKind::MdRender => {
+                                self.set_md_mode(&pid, false);
+                            }
+                            ActionKind::MdRaw => {
+                                self.set_md_mode(&pid, true);
                             }
                         }
                         window.request_redraw();
@@ -1759,12 +1894,21 @@ impl ApplicationHandler<UserEvent> for App {
                                 // Markdown panes are document views, not
                                 // terminals — a drag here must not start a cell
                                 // text-selection. A click on a code-block copy
-                                // button copies it; otherwise a click on a link
-                                // opens it.
+                                // button copies it; otherwise (raw editor) the
+                                // click places the edit caret, and in rendered
+                                // mode it opens a link.
                                 self.selection = None;
                                 self.drag_anchor = None;
                                 if !self.try_copy_md_block() {
-                                    self.try_open_md_link();
+                                    if self.md_body_rects.contains_key(&pane_id) {
+                                        self.md_click_caret(
+                                            &pane_id,
+                                            self.cursor_px.0,
+                                            self.cursor_px.1,
+                                        );
+                                    } else {
+                                        self.try_open_md_link();
+                                    }
                                 }
                             } else {
                                 self.drag_anchor = Some((col, row));

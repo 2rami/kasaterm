@@ -139,6 +139,12 @@ pub struct PtyBackend {
     /// pane's transcript tail *on demand* (pull) — there is no background
     /// watcher thread filling a cache.
     bound: Arc<Mutex<HashMap<String, PathBuf>>>,
+    /// surface_id → why it's blocked (the `Notification` hook's message, may be
+    /// ""). Set by `attention`, cleared by `notify` (turn done) or when the
+    /// pane's transcript grows again (claude resumed). The board's only source
+    /// of `waiting`: a blocked claude writes nothing, so the transcript tail
+    /// can't tell `collab_board` the pane is stuck — this map can.
+    attention: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl PtyBackend {
@@ -147,6 +153,7 @@ impl PtyBackend {
             proxy,
             ws,
             bound: Arc::new(Mutex::new(HashMap::new())),
+            attention: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -277,25 +284,60 @@ impl Backend for PtyBackend {
         // bind (no claude / not started) simply don't appear.
         let live: HashSet<String> = self.ws.lock().unwrap().panes.keys().cloned().collect();
         let bound = self.bound.lock().unwrap();
+        let mut attention = self.attention.lock().unwrap();
         let mut board: Vec<PaneActivity> = bound
             .iter()
             .filter(|(sid, _)| live.contains(sid.as_str()))
             .map(|(sid, path)| {
                 let (tail, idle) = read_tail(path, 64 * 1024);
-                snapshot_from_tail(sid, &tail, idle)
+                let mut row = snapshot_from_tail(sid, &tail, idle);
+                // A claude blocked on a permission/input prompt writes nothing,
+                // so `idle` reads true and the transcript snapshot can't tell
+                // it's stuck. If its Notification hook flagged it, surface that
+                // as `waiting`. Once it resumes (transcript grows → !idle) the
+                // flag is stale: drop it and trust the fresh snapshot.
+                if idle {
+                    if let Some(reason) = attention.get(sid) {
+                        row.status = "waiting".to_string();
+                        row.waiting_for = (!reason.is_empty()).then(|| reason.clone());
+                    }
+                } else {
+                    attention.remove(sid);
+                }
+                row
             })
             .collect();
+        // Drop flags for panes that have closed since they were set.
+        attention.retain(|sid, _| live.contains(sid.as_str()));
         board.sort_by(|a, b| a.surface_id.cmp(&b.surface_id));
         Ok(board)
     }
 
     fn notify(&self, surface_id: &str, title: &str, body: &str) -> Result<()> {
+        // The turn finished → the pane can't still be blocked waiting. Clear any
+        // attention flag so the board drops back to idle even if the resume
+        // didn't write enough transcript to flip `idle` first.
+        self.attention.lock().unwrap().remove(surface_id);
         // Hand off to the GUI thread — the desktop alert (objc/osascript) and
         // any pane/sidebar flash both need App state we can't touch here.
         let _ = self.proxy.send_event(UserEvent::Notify {
             surface_id: surface_id.to_string(),
             title: title.to_string(),
             body: body.to_string(),
+        });
+        Ok(())
+    }
+
+    fn attention(&self, surface_id: &str, reason: &str) -> Result<()> {
+        // Remember it for the board (socket-side, pull), then hand the GUI-side
+        // surfacing (toast / flash / desktop alert) to the GUI thread.
+        self.attention
+            .lock()
+            .unwrap()
+            .insert(surface_id.to_string(), reason.to_string());
+        let _ = self.proxy.send_event(UserEvent::Attention {
+            surface_id: surface_id.to_string(),
+            reason: reason.to_string(),
         });
         Ok(())
     }

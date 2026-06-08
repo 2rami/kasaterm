@@ -50,6 +50,9 @@ pulldown-cmark = { version = "0.13", default-features = false }
 # the glyph tint path (FLAG_COLOR off → texel.a × fg.rgb) so a single white
 # raster picks up any theme color / hover state. Bundles usvg + tiny-skia.
 resvg = "0.45"
+# Move deleted file-tree entries to the OS trash (recoverable) instead of a
+# hard unlink, cross-platform.
+trash = "5"
 
 # macOS-only: patch the wgpu CAMetalLayer's contentsGravity to topLeft so
 # AppKit doesn't stretch stale layer contents during live window resize.

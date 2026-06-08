@@ -12,6 +12,7 @@ impl App {
     /// alert for the cases that actually need attention (background window or
     /// a sibling pane).
     pub(crate) fn handle_notify(&mut self, surface_id: &str, title: &str, body: &str) {
+        let now = std::time::Instant::now();
         let is_active_pane = self
             .ws
             .lock()
@@ -19,11 +20,62 @@ impl App {
             .active_pane
             .as_deref()
             == Some(surface_id);
-        self.notify_flash
-            .insert(surface_id.to_string(), std::time::Instant::now());
+        // claude's Stop hook fired → this pane's turn is DONE. Trust this push
+        // over the glyph heuristic: force the pane idle right now so the working
+        // bar can't linger on a stale "✻ Churned for 42s" line, and drop the
+        // busy-grace timer. The completion toast is surfaced here (named by the
+        // pane's tab-header label); the glyph working→idle path in
+        // `refresh_pane_activity` then sees the pane is already idle and won't
+        // double-fire. A pane that wasn't working (idle hook re-fire) skips the
+        // toast.
+        self.pane_last_busy.remove(surface_id);
+        let was_working = self
+            .pane_activity
+            .get(surface_id)
+            .map_or(false, |a| a.status != "idle" && !a.status.is_empty());
+        self.pane_activity
+            .entry(surface_id.to_string())
+            .and_modify(|a| a.status = "idle".to_string())
+            .or_insert_with(|| crate::stream::PaneStatusView {
+                status: "idle".to_string(),
+                ..Default::default()
+            });
+        if was_working {
+            let name = self.pane_header_label(surface_id);
+            self.collab_toast = Some((format!("✓ {name} 작업 완료"), now));
+            self.collab_toast_rect = None;
+        }
+        self.notify_flash.insert(surface_id.to_string(), now);
         self.chrome_dirty = true;
         if !(self.window_focused && is_active_pane) {
             notify_desktop(title, body);
+        }
+    }
+
+    /// A pane's claude is blocked on a permission / input prompt (its
+    /// `Notification` hook → `kasaterm-cli attention` → `UserEvent::Attention`).
+    /// Toast + pulse the pane, and unless the user is already looking at that
+    /// exact pane (our window focused + it's the active pane), raise a desktop
+    /// alert. Same suppression as `handle_notify`, but this is the *attention*
+    /// case — the agent isn't done, it's stuck waiting on you. The board's
+    /// `waiting` flag is set separately in `collab_board` (socket thread, off
+    /// the shared attention map); here we only own the GUI-side surfacing.
+    pub(crate) fn handle_attention(&mut self, surface_id: &str, reason: &str) {
+        let now = std::time::Instant::now();
+        let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(surface_id);
+        let name = self.pane_header_label(surface_id);
+        let reason = reason.trim();
+        let detail = if reason.is_empty() {
+            String::new()
+        } else {
+            format!(" — {reason}")
+        };
+        self.collab_toast = Some((format!("⚠ {name} 권한 대기중{detail}"), now));
+        self.collab_toast_rect = None;
+        self.notify_flash.insert(surface_id.to_string(), now);
+        self.chrome_dirty = true;
+        if !(self.window_focused && is_active_pane) {
+            notify_desktop("⚠ 권한 필요", &format!("{name}{detail}"));
         }
     }
 
@@ -295,6 +347,14 @@ impl App {
             }
         };
         self.collab_toast = Some((msg, std::time::Instant::now()));
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// Surface a transient top-right toast (reuses the collab toast slot).
+    pub(crate) fn set_toast(&mut self, msg: String) {
+        self.collab_toast = Some((msg, std::time::Instant::now()));
+        self.collab_toast_rect = None;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }

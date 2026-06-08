@@ -110,6 +110,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "collab.bind_transcript" => collab_bind_transcript(backend, id, &req.params),
         "collab.transcript" => collab_transcript(backend, id, &req.params),
         "surface.notify" => surface_notify(backend, id, &req.params),
+        "surface.attention" => surface_attention(backend, id, &req.params),
         unknown => Response {
             id,
             ok: false,
@@ -207,6 +208,7 @@ fn system_capabilities(id: Value) -> Response {
                 "collab.bind_transcript",
                 "collab.transcript",
                 "surface.notify",
+                "surface.attention",
             ],
         }),
     )
@@ -269,6 +271,18 @@ fn surface_notify(backend: &dyn Backend, id: Value, params: &Value) -> Response 
     let title = params.get("title").and_then(|v| v.as_str()).unwrap_or("");
     let body = params.get("body").and_then(|v| v.as_str()).unwrap_or("");
     match backend.notify(surface_id, title, body) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_attention(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.attention requires `surface_id` (string)"),
+    };
+    let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+    match backend.attention(surface_id, reason) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

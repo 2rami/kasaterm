@@ -426,6 +426,22 @@ impl App {
             proc
         }
     }
+    /// The pane's tab-header label — custom title (rename/OSC) wins, else the
+    /// live foreground process, else the raw `%N` id. Mirrors the header render
+    /// path (render.rs) so the completion toast names a pane the same way the
+    /// user sees it in the tab strip.
+    pub(crate) fn pane_header_label(&self, id: &str) -> String {
+        let title = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .get(id)
+                .and_then(|p| p.title.clone())
+                .filter(|t| !t.is_empty())
+        };
+        title
+            .or_else(|| self.pty.get(id).and_then(|p| Self::smart_pane_label(p)))
+            .unwrap_or_else(|| id.to_string())
+    }
     /// cwd의 마지막 폴더명. 홈 디렉토리면 `~`.
     pub(crate) fn cwd_basename(p: &std::path::Path) -> String {
         if let Ok(h) = std::env::var("HOME") {
@@ -524,6 +540,11 @@ impl App {
             .or_else(|| std::env::current_dir().ok());
         if root == self.file_tree_root {
             return;
+        }
+        // Open the new root by default so the sidebar shows its contents
+        // immediately rather than a single collapsed folder row.
+        if let Some(r) = &root {
+            self.file_tree_expanded.insert(r.clone());
         }
         self.file_tree_root = root;
         self.file_tree_scroll = 0.0;
@@ -648,6 +669,7 @@ impl App {
             };
             PaneContent::Markdown(MarkdownPane {
                 doc,
+                is_md_doc: is_md,
                 raw_mode: !is_md,
                 edit_lines,
                 cur_line: 0,
@@ -713,7 +735,23 @@ impl App {
     pub(crate) fn rebuild_file_tree_nodes(&mut self) {
         self.file_tree_nodes.clear();
         if let Some(root) = self.file_tree_root.clone() {
-            Self::walk_dir(&root, 0, &self.file_tree_expanded, &mut self.file_tree_nodes);
+            // Show the project root itself as the first row (depth 0) so the
+            // sidebar is anchored on the folder you're in, not a rootless list
+            // of its children. Its contents nest under it at depth 1+.
+            let root_name = root
+                .file_name()
+                .map(|n| nfc_hangul(&n.to_string_lossy()))
+                .unwrap_or_else(|| root.to_string_lossy().into_owned());
+            self.file_tree_nodes.push(FileNode {
+                path: root.clone(),
+                name: root_name,
+                is_dir: true,
+                depth: 0,
+                ignored: false,
+            });
+            if self.file_tree_expanded.contains(&root) {
+                Self::walk_dir(&root, 1, &self.file_tree_expanded, &mut self.file_tree_nodes);
+            }
             // Second pass: one batched `git check-ignore` over every visible
             // path marks the gitignored rows italic+dim. Dotfiles get the same
             // treatment regardless (check-ignore won't flag a tracked dotfile).
@@ -788,6 +826,85 @@ impl App {
                 return;
             }
         }
+    }
+    /// Move a tree entry into `dst_dir` (drag-and-drop in the sidebar). No-ops
+    /// when the move is meaningless or unsafe: already in that dir, dropping a
+    /// folder onto itself or a descendant, or a name clash at the target.
+    pub(crate) fn move_tree_entry(&mut self, src: &std::path::Path, dst_dir: &std::path::Path) {
+        if !dst_dir.is_dir() {
+            return;
+        }
+        let Some(name) = src.file_name() else { return };
+        if src.parent() == Some(dst_dir) {
+            return; // already here
+        }
+        if dst_dir == src || dst_dir.starts_with(src) {
+            return; // would move a folder inside itself
+        }
+        let target = dst_dir.join(name);
+        if target.exists() {
+            self.set_toast(format!("이미 있음: {}", name.to_string_lossy()));
+            return;
+        }
+        if let Err(e) = std::fs::rename(src, &target) {
+            self.set_toast(format!("이동 실패: {e}"));
+            return;
+        }
+        // Carry the expanded state across the move and reveal the drop target.
+        if self.file_tree_expanded.remove(src) {
+            self.file_tree_expanded.insert(target.clone());
+        }
+        self.file_tree_expanded.insert(dst_dir.to_path_buf());
+        self.rebuild_file_tree_nodes();
+    }
+    /// Move a tree entry to the OS trash (recoverable), then refresh.
+    pub(crate) fn delete_tree_entry(&mut self, path: &std::path::Path) {
+        match trash::delete(path) {
+            Ok(()) => {
+                self.file_tree_expanded.remove(path);
+                if self.file_tree_selected.as_deref() == Some(path) {
+                    self.file_tree_selected = None;
+                }
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.set_toast(format!("휴지통으로 이동: {name}"));
+                self.rebuild_file_tree_nodes();
+            }
+            Err(e) => self.set_toast(format!("삭제 실패: {e}")),
+        }
+    }
+    /// Create the entry the inline "new file/folder" row is naming, under the
+    /// current tree root, then clear the entry and refresh the tree.
+    pub(crate) fn commit_new_entry(&mut self) {
+        let Some((is_dir, name)) = self.file_tree_new.take() else { return };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        if let Some(root) = self.file_tree_root.clone() {
+            let path = root.join(&name);
+            if path.exists() {
+                self.set_toast(format!("이미 있음: {name}"));
+                return;
+            }
+            let res = if is_dir {
+                std::fs::create_dir(&path)
+            } else {
+                std::fs::File::create(&path).map(|_| ())
+            };
+            match res {
+                Ok(()) => {
+                    self.file_tree_expanded.insert(root.clone());
+                    if is_dir {
+                        self.file_tree_expanded.insert(path.clone());
+                    }
+                }
+                Err(e) => self.set_toast(format!("생성 실패: {e}")),
+            }
+        }
+        self.rebuild_file_tree_nodes();
     }
     /// Recursive read_dir: folders first then files (case-insensitive), dotfiles
     /// skipped, descending only into expanded folders.
