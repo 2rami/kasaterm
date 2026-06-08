@@ -583,7 +583,7 @@ impl ApplicationHandler<UserEvent> for App {
                     let hit = |r: (f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
-                    let want_text = (self.file_tree_search_active && hit(self.file_tree_search_rect))
+                    let want_text = (self.file_tree_visible && hit(self.file_tree_search_rect))
                         || (self.file_tree_new.is_some() && hit(self.file_tree_new_row_rect));
                     if want_text != self.text_cursor_shown {
                         self.text_cursor_shown = want_text;
@@ -994,6 +994,37 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Settings: the sidebar entry toggles the screen. While it's
+                // open, clicks in the view area (right of the sidebar) route to
+                // the form; a click on the session sidebar closes settings and
+                // falls through to normal tab handling below.
+                if matches!(state, ElementState::Pressed) {
+                    let (cx, cy) = self.cursor_px;
+                    let hit = |r: (f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    if hit(self.settings_btn_rect) {
+                        if self.settings_open {
+                            self.close_settings();
+                        } else {
+                            self.open_settings();
+                        }
+                        window.request_redraw();
+                        return;
+                    }
+                    // Settings open: only the main content area (below the title
+                    // strip, right of the sidebar) routes to the form. The title
+                    // strip toggles and the sidebar stay live so you're never
+                    // trapped in the screen.
+                    if self.settings_open
+                        && cy > TITLE_HEIGHT
+                        && cx >= self.tab_strip_w()
+                    {
+                        self.settings_click(cx, cy);
+                        window.request_redraw();
+                        return;
+                    }
+                }
                 // Pane header × close button. Catches clicks anywhere
                 // in the multi-pane workspace before we drop into the
                 // cell-grid click path.
@@ -1103,6 +1134,17 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    // Settings toggle, left of the git-column toggle.
+                    if let Some((bx, by, bw, bh)) = self.settings_toggle_rect() {
+                        if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
+                            if self.settings_open {
+                                self.close_settings();
+                            } else {
+                                self.open_settings();
+                            }
+                            return;
+                        }
+                    }
                     // Git-column toggle, parked at the right end of the strip.
                     if let Some((bx, by, bw, bh)) = self.git_col_toggle_rect() {
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
@@ -1188,10 +1230,18 @@ impl ApplicationHandler<UserEvent> for App {
                             .find(|(_, r)| inside(r))
                             .map(|(i, _)| *i)
                         {
+                            // Picking a session tab means you want to see it, so
+                            // leave the settings screen first.
+                            if self.settings_open {
+                                self.close_settings();
+                            }
                             self.switch_window(idx);
                             return;
                         }
                         if self.new_window_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            if self.settings_open {
+                                self.close_settings();
+                            }
                             // The shell picker only has entries on Windows
                             // (PowerShell/CMD/Git Bash/WSL). On macOS/Linux
                             // `available_shells()` is empty, so toggling the
@@ -1207,6 +1257,19 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // Empty sidebar space — swallow the click.
                         return;
+                    }
+                    // Click outside the tree column drops search focus — else
+                    // keystrokes meant for the clicked terminal pane keep
+                    // landing in the filter box.
+                    if self.file_tree_search_active {
+                        let in_col = self.file_tree_visible
+                            && cy > TITLE_HEIGHT
+                            && cx >= self.file_tree_col_x()
+                            && cx < self.file_tree_col_x() + self.file_tree_w_logical;
+                        if !in_col {
+                            self.file_tree_search_active = false;
+                            self.chrome_dirty = true;
+                        }
                     }
                     // File-tree column — its own band, right of the tab strip.
                     // Caught before the cell grid so a row click never falls

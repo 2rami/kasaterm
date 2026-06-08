@@ -1049,6 +1049,18 @@ impl App {
         // Touch the input timer so the cursor stays solid for a beat and
         // the blink phase re-starts from "on" once it kicks in.
         self.last_input_at = Instant::now();
+        // Settings screen swallows all keys (never leaks to the PTY). A focused
+        // text field consumes them; Esc with no field open closes the screen.
+        if self.settings_open {
+            use winit::keyboard::{Key, NamedKey};
+            if self.settings_key(event) {
+                return;
+            }
+            if matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
+                self.close_settings();
+            }
+            return;
+        }
         // Git commit field has focus: keystrokes edit the message, not the PTY.
         // (Click elsewhere blurs it — see the column's mouse handler.)
         if self.git_commit_focused {

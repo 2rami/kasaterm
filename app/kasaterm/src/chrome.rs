@@ -182,6 +182,23 @@ impl App {
         let y = (TITLE_HEIGHT - h) / 2.0;
         Some((x, y, w, h))
     }
+    /// Settings-screen toggle, parked just left of the git-column toggle at the
+    /// right end of the title strip. Always present (unlike the sidebar's
+    /// bottom entry, which hides when the sidebar is collapsed) so the screen is
+    /// always one click away.
+    pub(crate) fn settings_toggle_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        let w = 26.0;
+        let h = 22.0;
+        let win_w = self.window.as_ref().map(|win| {
+            let scale = self.effective_scale();
+            win.inner_size().width as f32 / scale
+        })?;
+        let x = win_w - w - 8.0 - (w + 4.0);
+        #[cfg(windows)]
+        let x = Self::win_control_rects(win_w)[0].0 - 2.0 - w - (w + 4.0);
+        let y = (TITLE_HEIGHT - h) / 2.0;
+        Some((x, y, w, h))
+    }
     /// Show/hide the git column. Same reflow path as `toggle_sidebar`: flip the
     /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
     /// active cwd so the poller has something to refresh the moment it opens.

@@ -517,6 +517,58 @@ pub fn read_default_cwd_mode() -> String {
         .unwrap_or_else(fallback)
 }
 
+/// Whole `settings.json` as a JSON object (empty object if missing/invalid).
+/// The settings screen reads this once to populate its controls.
+pub fn read_settings() -> serde_json::Value {
+    let empty = || serde_json::json!({});
+    let Some(path) = settings_file_path() else { return empty() };
+    let Ok(txt) = std::fs::read_to_string(&path) else { return empty() };
+    serde_json::from_str::<serde_json::Value>(&txt)
+        .ok()
+        .filter(|v| v.is_object())
+        .unwrap_or_else(empty)
+}
+
+/// Set one key in `settings.json`, preserving every other key. Loads the
+/// existing object first so writing `default_shell` never clobbers
+/// `default_cwd`. Silently no-ops if the path/dir can't be resolved.
+pub fn write_setting(key: &str, value: serde_json::Value) {
+    use std::io::Write;
+    let Some(path) = settings_file_path() else { return };
+    let mut obj = match read_settings() {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert(key.to_string(), value);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(txt) = serde_json::to_string_pretty(&serde_json::Value::Object(obj)) {
+        if let Ok(mut f) = std::fs::File::create(&path) {
+            let _ = f.write_all(txt.as_bytes());
+        }
+    }
+}
+
+/// Whether the file-tree sidebar starts open on launch. Default `false`
+/// (terminal-only first screen).
+pub fn read_file_tree_default() -> bool {
+    read_settings()
+        .get("file_tree_default")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+}
+
+/// User's preferred shell override (`default_shell` key). Empty/missing → None,
+/// letting `$SHELL`/login-shell detection take over.
+pub fn read_default_shell() -> Option<String> {
+    read_settings()
+        .get("default_shell")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 /// Persist the last logical window size so the next launch restores it instead
 /// of the hardcoded default. Logical (DPI-independent) so moving between a
 /// Retina and an external display restores the same on-screen size.
