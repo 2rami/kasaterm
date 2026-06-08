@@ -2122,6 +2122,7 @@ enum GitColBtn {
 enum GitCommitAction {
     Commit,
     Push,
+    Pull,
     CreatePr,
 }
 

@@ -2042,6 +2042,12 @@ impl App {
                         // "Staged Changes" (− unstages); false = "Changes" (+
                         // stages). Both scroll together off git_col_scroll.
                         let mut y_cur = list_top - self.git_col_scroll;
+                        // While a menu is up, skip the change list entirely — its
+                        // text/icons draw in the glyph layer (above the dim quad)
+                        // so they'd otherwise bleed through the menu.
+                        let menus_open = self.git_commit_menu_open
+                            || self.git_path_menu_open
+                            || self.git_branch_menu_open;
                         for (title, staged, files) in [
                             ("Staged Changes", true, &git_view.staged),
                             ("Changes", false, &git_view.unstaged),
@@ -2050,7 +2056,7 @@ impl App {
                                 continue;
                             }
                             // Section header (count) — clipped to the list zone.
-                            if y_cur + header_h > list_top && y_cur < input_top {
+                            if !menus_open && y_cur + header_h > list_top && y_cur < input_top {
                                 g.draw_text(
                                     gcx0,
                                     y_cur + 5.0,
@@ -2063,7 +2069,7 @@ impl App {
                                 let ry = y_cur;
                                 y_cur += item_h;
                                 let expanded = self.git_col_expanded.contains(&(staged, path.clone()));
-                                let row_visible = !(ry + item_h < list_top || ry > input_top);
+                                let row_visible = !menus_open && !(ry + item_h < list_top || ry > input_top);
                                 if row_visible {
                                     let hovered = self.cursor_px.0 >= git_col_x
                                         && self.cursor_px.0 <= git_col_x + git_col_w
@@ -2267,10 +2273,26 @@ impl App {
                 self.git_commit_menu_rects.clear();
                 if self.git_commit_menu_open {
                     if let Some((ccx, ccy, ccw, cch)) = self.git_commit_caret_rect {
-                        let items = [
-                            ("git-commit-horizontal", "Commit", GitCommitAction::Commit),
-                            ("arrow-up", "Push", GitCommitAction::Push),
-                            ("github", "Create PR", GitCommitAction::CreatePr),
+                        // Dim the panel behind the menu so the change-list rows
+                        // (and their hover buttons) don't bleed alongside it.
+                        g.rect(git_col_x, top, git_col_w, bottom - top, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                        // Push/Pull carry their ahead/behind counts so you can
+                        // see what's pending before clicking.
+                        let push_label = if git_view.ahead > 0 {
+                            format!("Push  ↑{}", git_view.ahead)
+                        } else {
+                            "Push".to_string()
+                        };
+                        let pull_label = if git_view.behind > 0 {
+                            format!("Pull  ↓{}", git_view.behind)
+                        } else {
+                            "Pull".to_string()
+                        };
+                        let items: [(&str, String, GitCommitAction); 4] = [
+                            ("git-commit-horizontal", "Commit".to_string(), GitCommitAction::Commit),
+                            ("arrow-up", push_label, GitCommitAction::Push),
+                            ("arrow-down", pull_label, GitCommitAction::Pull),
+                            ("github", "Create PR".to_string(), GitCommitAction::CreatePr),
                         ];
                         let iw = 190.0_f32;
                         let ih = 34.0_f32;
@@ -2286,7 +2308,7 @@ impl App {
                                 round_rect(g, mx + 4.0, iy, iw - 8.0, ih, theme::RADIUS_SM, theme::surface_hover());
                             }
                             g.queue_icon(icon, mx + 14.0, iy + (ih - 15.0) / 2.0, 15.0, theme::text_dim());
-                            g.draw_text(mx + 38.0, iy + (ih - 13.0) / 2.0, label, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
+                            g.draw_text(mx + 38.0, iy + (ih - 13.0) / 2.0, &label, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
                             self.git_commit_menu_rects.push((act, (mx, iy, iw, ih)));
                             iy += ih;
                         }
@@ -2295,11 +2317,16 @@ impl App {
                 // ── Commit modal (screenshot #5): dim + centered card.
                 self.git_commit_modal_rects.clear();
                 if self.git_commit_modal_open {
-                    g.rect(git_col_x, top, git_col_w, bottom - top, theme::with_alpha([0, 0, 0, 255], 0x99));
-                    let bw = (git_col_w - 40.0).min(640.0).max(0.0);
-                    let bx = git_col_x + (git_col_w - bw) / 2.0;
-                    let bh = (bottom - top - 50.0).min(660.0).max(0.0);
-                    let bxy = top + (bottom - top - bh) / 2.0;
+                    // Full-window dim + centered card (not clipped to the git
+                    // column) so the modal reads as a real dialog and nothing
+                    // behind it bleeds through.
+                    let win_w = win_px.0 / scale;
+                    let win_h = win_px.1 / scale;
+                    g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xCC));
+                    let bw = 560.0_f32.min(win_w - 60.0).max(0.0);
+                    let bx = (win_w - bw) / 2.0;
+                    let bh = (win_h - TITLE_HEIGHT - 60.0).min(660.0).max(0.0);
+                    let bxy = TITLE_HEIGHT + (win_h - TITLE_HEIGHT - bh) / 2.0;
                     round_rect(g, bx - 1.0, bxy - 1.0, bw + 2.0, bh + 2.0, theme::RADIUS_MD, theme::with_alpha(theme::border(), 0xFF));
                     round_rect(g, bx, bxy, bw, bh, theme::RADIUS_MD, theme::bg());
                     let pad = 22.0_f32;
