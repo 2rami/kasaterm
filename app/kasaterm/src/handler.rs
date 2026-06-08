@@ -583,8 +583,17 @@ impl ApplicationHandler<UserEvent> for App {
                     let hit = |r: (f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
+                    // I-beam over every text input: file-tree search / new-entry
+                    // name, the git commit message box, and the settings screen's
+                    // editable fields (custom cwd path / shell).
                     let want_text = (self.file_tree_visible && hit(self.file_tree_search_rect))
-                        || (self.file_tree_new.is_some() && hit(self.file_tree_new_row_rect));
+                        || (self.file_tree_new.is_some() && hit(self.file_tree_new_row_rect))
+                        || self.git_commit_input_rect.map(hit).unwrap_or(false)
+                        || (self.settings_open
+                            && self.settings_rects.iter().any(|(a, r)| {
+                                matches!(a, SettingsAction::FocusCwdPath | SettingsAction::FocusShell)
+                                    && hit(*r)
+                            }));
                     if want_text != self.text_cursor_shown {
                         self.text_cursor_shown = want_text;
                         window.set_cursor(if want_text {
@@ -994,6 +1003,40 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Commit modal is a full-window dialog — handled before the git
+                // column (and everything else) so clicks outside the column
+                // still hit its buttons, and the scrim swallows the rest.
+                if self.git_commit_modal_open {
+                    if matches!(state, ElementState::Pressed) {
+                        let (cx, cy) = self.cursor_px;
+                        let inside = |r: &(f32, f32, f32, f32)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        };
+                        if let Some(btn) = self
+                            .git_commit_modal_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(b, _)| *b)
+                        {
+                            match btn {
+                                crate::GitModalBtn::Close | crate::GitModalBtn::Cancel => self.close_commit_modal(),
+                                crate::GitModalBtn::IncludeUnstaged => {
+                                    self.git_commit_modal_include_unstaged = !self.git_commit_modal_include_unstaged;
+                                    window.request_redraw();
+                                }
+                                crate::GitModalBtn::Commit | crate::GitModalBtn::Confirm => self.run_commit_modal(false),
+                                crate::GitModalBtn::CommitAndPush => self.run_commit_modal(true),
+                            }
+                            return;
+                        }
+                        if self.git_commit_input_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.git_commit_focused = true;
+                            window.request_redraw();
+                            return;
+                        }
+                    }
+                    return;
+                }
                 // Settings: the sidebar entry toggles the screen. While it's
                 // open, clicks in the view area (right of the sidebar) route to
                 // the form; a click on the session sidebar closes settings and
@@ -1371,33 +1414,6 @@ impl ApplicationHandler<UserEvent> for App {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
-                        // Commit modal overlays the whole panel — resolve it first
-                        // and swallow every other click while it's open.
-                        if self.git_commit_modal_open {
-                            if let Some(btn) = self
-                                .git_commit_modal_rects
-                                .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(b, _)| *b)
-                            {
-                                match btn {
-                                    crate::GitModalBtn::Close | crate::GitModalBtn::Cancel => self.close_commit_modal(),
-                                    crate::GitModalBtn::IncludeUnstaged => {
-                                        self.git_commit_modal_include_unstaged = !self.git_commit_modal_include_unstaged;
-                                        window.request_redraw();
-                                    }
-                                    crate::GitModalBtn::Commit | crate::GitModalBtn::Confirm => self.run_commit_modal(false),
-                                    crate::GitModalBtn::CommitAndPush => self.run_commit_modal(true),
-                                }
-                                return;
-                            }
-                            if self.git_commit_input_rect.map(|r| inside(&r)).unwrap_or(false) {
-                                self.git_commit_focused = true;
-                                window.request_redraw();
-                                return;
-                            }
-                            return;
-                        }
                         // Open dropdowns overlay everything — resolve their items
                         // (and the header toggles) before the list/buttons under.
                         if self.git_path_menu_open {
@@ -1460,6 +1476,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 match act {
                                     crate::GitCommitAction::Commit => self.open_commit_modal(),
                                     crate::GitCommitAction::Push => self.run_git_col_action(crate::GitColBtn::Push),
+                                    crate::GitCommitAction::Pull => self.run_git_col_action(crate::GitColBtn::Pull),
                                     crate::GitCommitAction::CreatePr => self.create_git_pr(),
                                 }
                                 window.request_redraw();

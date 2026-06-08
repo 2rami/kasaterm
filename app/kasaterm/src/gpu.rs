@@ -1590,6 +1590,7 @@ impl GpuRenderer {
             "git-commit-horizontal" => include_str!("../assets/icons/git-commit-horizontal.svg"),
             "ellipsis-vertical" => include_str!("../assets/icons/ellipsis-vertical.svg"),
             "arrow-up" => include_str!("../assets/icons/arrow-up.svg"),
+            "arrow-down" => include_str!("../assets/icons/arrow-down.svg"),
             "github" => include_str!("../assets/icons/github.svg"),
             "undo-2" => include_str!("../assets/icons/undo-2.svg"),
             "external-link" => include_str!("../assets/icons/external-link.svg"),
