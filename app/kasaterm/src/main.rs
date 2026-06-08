@@ -2100,6 +2100,8 @@ struct GitColView {
     /// Per-file `(insertions, deletions)` for the row's `+N -M` count, keyed by
     /// path. Filled from `git diff --numstat` (+ `--cached`).
     numstat: HashMap<String, (u32, u32)>,
+    /// Most recent commits `(short_hash, subject)` for the panel's preview list.
+    recent_commits: Vec<(String, String)>,
 }
 
 /// Action buttons at the foot of the git column. `StageAll` runs `git add -A`;

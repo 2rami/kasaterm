@@ -45,6 +45,10 @@ impl App {
     /// Run a queued git-panel demo action (KASATERM_AUTOGIT) so headless capture
     /// can show the inline diff / commit modal without a real click.
     pub(crate) fn run_autogit(&mut self, action: &str) {
+        // The demo actions assume the column is up; open it for headless capture.
+        if !self.git_col_visible {
+            self.toggle_git_col();
+        }
         match action {
             "diff" => {
                 let pick = self.git_col_data.lock().ok().and_then(|g| {
