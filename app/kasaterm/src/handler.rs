@@ -17,19 +17,28 @@ impl ApplicationHandler<UserEvent> for App {
                         None => self.active_pty(),
                     };
                     if let Some(p) = target {
-                        // Ship the trailing CR/LF as its own PTY write. A
-                        // `tell`'s submit byte (`\r`) fused to the message body
-                        // reads as a newline insert in claude (Ink), not a
-                        // submit — the message types in but never fires. A
-                        // standalone CR submits, and splitting also keeps a
-                        // trailing 한글/이모지 codepoint from truncating across
-                        // the read boundary ahead of the CR.
+                        // Ship the trailing CR/LF as its own *delayed* PTY
+                        // write. Splitting the write alone isn't enough: the PTY
+                        // is a byte stream, so a CR written right after the body
+                        // lands in the *same* read() on the claude side (verified:
+                        // one chunk b'\x15msg\r'), and Ink treats a CR fused to
+                        // text as a newline insert, not a submit — the message
+                        // types in but never fires (the "tell doesn't press
+                        // enter" bug, even on an idle pane). A short delay makes
+                        // the CR arrive as its own read (verified: b'msg' then a
+                        // separate b'\r'), which Ink reads as Enter. 50ms is below
+                        // human-perceptible latency.
                         let (body, submit) = crate::socket::split_trailing_submit(bytes);
                         if !body.is_empty() {
                             let _ = p.send_bytes(body);
                         }
                         if !submit.is_empty() {
-                            let _ = p.send_bytes(submit);
+                            let p2 = Arc::clone(p);
+                            let submit = submit.to_vec();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                let _ = p2.send_bytes(&submit);
+                            });
                         }
                     }
                 }
@@ -928,6 +937,16 @@ impl ApplicationHandler<UserEvent> for App {
                             cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh
                         }) {
                         CursorIcon::Text
+                    } else {
+                        icon
+                    };
+                    // Over a detected URL → pointer (hand) cursor + the blue
+                    // hover underline (drawn in draw_cells from cursor_px).
+                    // Only when nothing more specific already claimed the cursor.
+                    let icon = if matches!(icon, CursorIcon::Default)
+                        && self.link_hit(cx, cy).is_some()
+                    {
+                        CursorIcon::Pointer
                     } else {
                         icon
                     };
@@ -1970,6 +1989,17 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 match state {
                     ElementState::Pressed => {
+                        // URL under the press → arm it and bail out before any
+                        // text-selection / mouse-forwarding starts. A release
+                        // that stays put (a click, not a drag) opens it. We
+                        // still move focus to the pane it landed in.
+                        if let Some((pid, _, url)) =
+                            self.link_hit(self.cursor_px.0, self.cursor_px.1)
+                        {
+                            self.link_armed = Some((url, self.cursor_px));
+                            self.ws.lock().unwrap().active_pane = Some(pid);
+                            return;
+                        }
                         if let Some((pane_id, col, row)) =
                             self.px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
                         {
@@ -2043,6 +2073,19 @@ impl ApplicationHandler<UserEvent> for App {
                         // A titlebar press that never moved past the drag
                         // threshold: just a click, drop the deferred move.
                         self.titlebar_drag_pending = None;
+                        // Armed URL: a click (cursor barely moved) opens it; a
+                        // drag past the threshold just disarms (text selection
+                        // never started since the press returned early).
+                        if let Some((url, (px, py))) = self.link_armed.take() {
+                            let (cx, cy) = self.cursor_px;
+                            if (cx - px).abs() < 4.0 && (cy - py).abs() < 4.0 {
+                                let _ = std::process::Command::new("open")
+                                    .arg(&url)
+                                    .spawn();
+                                window.request_redraw();
+                                return;
+                            }
+                        }
                         // End an image pan drag.
                         if self.image_pan_drag.take().is_some() {
                             window.set_cursor(CursorIcon::Default);

@@ -110,6 +110,9 @@ pub struct PaneSlot<'a> {
     /// Unfocused pane: glyphs render at reduced alpha (text-only dim) so
     /// the active pane stands out without darkening the whole box.
     pub dim: bool,
+    /// Clickable URL ranges in this pane's visible rows. Drawn as accent
+    /// underlines (always-on hyperlink affordance) after the glyph pass.
+    pub links: Vec<crate::links::LinkSpan>,
 }
 
 /// Pending chrome instances accumulated between `clear()` and the
@@ -1754,6 +1757,10 @@ impl GpuRenderer {
     /// pipeline draws everything in insertion order, so painting
     /// layers fall out naturally from the call sequence.
     pub fn draw_cells(&mut self, panes: &[PaneSlot<'_>]) {
+        // The URL currently under the mouse renders in this blue — both its
+        // glyphs (Pass 2) and its underline (Pass 3) — so a hovered link reads
+        // like a hyperlink. `pane.links` holds the 0..1 hovered range.
+        const LINK_BLUE: [u8; 4] = [0x0a, 0x84, 0xff, 0xff];
         // Glyph alpha for unfocused panes (PaneSlot.dim). Backgrounds keep
         // full alpha — only the text fades, so the box doesn't darken.
         const DIM_TEXT_ALPHA: f32 = 0.70;
@@ -1838,6 +1845,13 @@ impl GpuRenderer {
                     let cell_x = pane.origin_px.0 + col as f32 * cell_w_px;
                     let cell_y = pane.origin_px.1 + r as f32 * cell_h_px;
                     let mut fg = cell_fg_rgba(cell);
+                    if pane.links.iter().any(|l| {
+                        l.row as usize == r
+                            && (col as u16) >= l.col_start
+                            && (col as u16) < l.col_end
+                    }) {
+                        fg = LINK_BLUE;
+                    }
                     if pane.dim {
                         fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
                     }
@@ -1967,6 +1981,37 @@ impl GpuRenderer {
                         });
                     }
                 }
+            }
+        }
+        // Pass 3: blue underline beneath the URL currently under the mouse —
+        // the hover hyperlink affordance (links are bare text until hovered).
+        // The event handler flips the cursor to a pointer over the same range
+        // and opens it on click. `pane.links` holds 0..1 ranges (the hovered
+        // one), filled in render_frame_gpu from the live cursor position.
+        let link_rgba = LINK_BLUE;
+        for pane in panes {
+            if pane.links.is_empty() {
+                continue;
+            }
+            let cell_w_px = self.cell_w * self.scale * pane.font_scale;
+            let cell_h_px = self.cell_h * self.scale * pane.font_scale;
+            let thick = (cell_h_px * 0.06).max(1.0);
+            let mut col = link_rgba;
+            if pane.dim {
+                col[3] = (col[3] as f32 * DIM_TEXT_ALPHA) as u8;
+            }
+            let lin = srgb_rgba_to_linear(col);
+            for link in &pane.links {
+                let x = pane.origin_px.0 + link.col_start as f32 * cell_w_px;
+                let y = pane.origin_px.1 + (link.row as f32 + 1.0) * cell_h_px - thick - 1.0;
+                let w = (link.col_end - link.col_start) as f32 * cell_w_px;
+                self.chrome.push(CellInstance {
+                    cell_px: [x, y, w, thick],
+                    uv_min: Atlas::SOLID_UV,
+                    uv_max: Atlas::SOLID_UV,
+                    fg_rgba: lin,
+                    ..Default::default()
+                });
             }
         }
     }

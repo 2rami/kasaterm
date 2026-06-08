@@ -218,6 +218,10 @@ impl App {
         let win_size = window.inner_size();
         let win_px = (win_size.width as f32, win_size.height as f32);
         let version_alpha = self.version_alpha();
+        // URL under the mouse right now (pane id + cell range). Hovering it
+        // draws a blue underline; computed before the workspace lock below so
+        // it doesn't re-enter it. None when the cursor isn't over a link.
+        let hovered_link = self.link_hit(self.cursor_px.0, self.cursor_px.1);
         let cell_w_px = self.cell.w * scale;
         let cell_h_px = self.cell.h * scale;
         // Snapshot per-pane cell grids while we hold the workspace
@@ -228,6 +232,10 @@ impl App {
             origin_px: (f32, f32),
             dim: bool,
             font_scale: f32,
+            /// The single URL range under the mouse, if it's in this pane —
+            /// drawn as a blue hover underline. Empty otherwise (links only
+            /// show on hover, not always-on).
+            links: Vec<crate::links::LinkSpan>,
         }
         // Header chrome carried in LOGICAL px — gpu.rect/draw_text
         // promote to physical internally, matching the cell pass.
@@ -552,6 +560,11 @@ impl App {
                     }
                 }
                 let pane_font_scale = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                let hover_links = hovered_link
+                    .as_ref()
+                    .filter(|(pid, _, _)| pid.as_str() == id.as_str())
+                    .map(|(_, span, _)| vec![span.clone()])
+                    .unwrap_or_default();
                 slots.push(PaneSlot {
                     rows: composed,
                     origin_px,
@@ -559,6 +572,7 @@ impl App {
                     // un-split pane is never dimmed.
                     dim: show_headers && active_id.as_deref() != Some(id.as_str()),
                     font_scale: pane_font_scale,
+                    links: hover_links,
                 });
                 // Body box (header band excluded, inset by the same
                 // PANE_INNER margins the cell grid uses) in logical px.
@@ -775,6 +789,7 @@ impl App {
                 origin_px: s.origin_px,
                 dim: s.dim,
                 font_scale: s.font_scale,
+                links: s.links.clone(),
             })
             .collect();
         // Recompute the inline suggestion against the freshly-applied
