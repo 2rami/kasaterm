@@ -2645,5 +2645,17 @@ fn fetch_git_col_view(cwd: &std::path::Path) -> Option<GitColView> {
     }
     view.branches = kasa_mcp::git::git_branches(cwd);
     view.numstat = kasa_mcp::git::git_numstat(cwd);
+    view.recent_commits = kasa_mcp::git::git_log(cwd, 5)
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let h = c.get("hash")?.as_str()?.to_string();
+                    let s = c.get("subject").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    Some((h, s))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Some(view)
 }

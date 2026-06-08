@@ -1938,6 +1938,18 @@ impl App {
                         let cx2 = g.draw_text(px, y, " : ", gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
                         let bend = g.draw_text(cx2, y, branch, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
                         self.git_branch_hdr_rect = Some((cx2 - 3.0, y - 3.0, (bend - cx2) + 6.0, 19.0));
+                        // ahead/behind counts vs origin, as plain text right after
+                        // the branch (↑ unpushed, ↓ unpulled). Push/pull actions
+                        // live in the Commit split-button dropdown, not here.
+                        let mut hx = bend + 10.0;
+                        if git_view.ahead > 0 {
+                            hx = g.draw_text(hx, y, &format!("↑{}", git_view.ahead),
+                                gpu::DrawOpts { font_size: 12.0, color: theme::accent(), bold: false, italic: false }) + 8.0;
+                        }
+                        if git_view.behind > 0 {
+                            g.draw_text(hx, y, &format!("↓{}", git_view.behind),
+                                gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: false, italic: false });
+                        }
                         // N · +ins -del, right-aligned just left of the buttons.
                         let files = git_view.staged.len() + git_view.unstaged.len();
                         let fnum = files.to_string();
@@ -1963,7 +1975,14 @@ impl App {
                 y += 27.0;
                 // ── Row 2: ⎇ Uncommitted changes ···· [ ⎯o Commit | ▾ ]
                 let list_top;
-                let input_top = bottom;
+                // Reserve the column foot for the recent-commits preview; the
+                // change list clips to what's left above it.
+                let commits_h = if git_view.recent_commits.is_empty() {
+                    0.0
+                } else {
+                    24.0 + git_view.recent_commits.len() as f32 * 20.0
+                };
+                let input_top = bottom - commits_h;
                 if git_view.no_repo {
                     g.draw_text(gcx0, y, "git 저장소가 아닙니다", gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
                     self.git_commit_btn_rect = None;
@@ -1980,17 +1999,22 @@ impl App {
                     let total_w = main_w + caret_w;
                     let bx = git_col_x + git_col_w - 12.0 - total_w;
                     let can_commit = !git_view.staged.is_empty() || !git_view.unstaged.is_empty();
+                    // The caret dropdown holds Push/Create-PR, so it stays live
+                    // when there's something to push (ahead > 0) even with no
+                    // uncommitted changes — that's how you push after committing.
+                    let can_drop = can_commit || git_view.ahead > 0;
                     let mhov = self.cursor_px.0 >= bx && self.cursor_px.0 <= bx + main_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
                     let chov = self.cursor_px.0 >= bx + main_w && self.cursor_px.0 <= bx + total_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
-                    let base = if can_commit { theme::surface_active() } else { theme::with_alpha(theme::surface_hover(), 0x66) };
+                    let base = if can_drop { theme::surface_active() } else { theme::with_alpha(theme::surface_hover(), 0x66) };
                     round_rect(g, bx, by, total_w, bh, theme::RADIUS_SM, base);
                     if can_commit && mhov { round_rect(g, bx, by, main_w, bh, theme::RADIUS_SM, theme::accent()); }
-                    if can_commit && chov { round_rect(g, bx + main_w, by, caret_w, bh, theme::RADIUS_SM, theme::accent()); }
+                    if can_drop && chov { round_rect(g, bx + main_w, by, caret_w, bh, theme::RADIUS_SM, theme::accent()); }
                     g.rect(bx + main_w, by + 5.0, 1.0, bh - 10.0, theme::with_alpha(theme::bg(), 0x99));
-                    let fg = if can_commit { theme::text() } else { theme::text_mute() };
-                    g.queue_icon("git-commit-horizontal", bx + 8.0, by + (bh - 13.0) / 2.0, 13.0, fg);
-                    g.draw_text(bx + 24.0, by + (bh - 12.0) / 2.0, "Commit", gpu::DrawOpts { font_size: 12.0, color: fg, bold: true, italic: false });
-                    g.draw_text(bx + main_w + (caret_w - 7.0) / 2.0, by + (bh - 11.0) / 2.0, "▾", gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false });
+                    let fg_main = if can_commit { theme::text() } else { theme::text_mute() };
+                    let fg_caret = if can_drop { theme::text() } else { theme::text_mute() };
+                    g.queue_icon("git-commit-horizontal", bx + 8.0, by + (bh - 13.0) / 2.0, 13.0, fg_main);
+                    g.draw_text(bx + 24.0, by + (bh - 12.0) / 2.0, "Commit", gpu::DrawOpts { font_size: 12.0, color: fg_main, bold: true, italic: false });
+                    g.draw_text(bx + main_w + (caret_w - 7.0) / 2.0, by + (bh - 11.0) / 2.0, "▾", gpu::DrawOpts { font_size: 11.0, color: fg_caret, bold: false, italic: false });
                     self.git_commit_btn_rect = Some((bx, by, main_w, bh));
                     self.git_commit_caret_rect = Some((bx + main_w, by, caret_w, bh));
                     y += 24.0;
@@ -2198,6 +2222,27 @@ impl App {
                         self.git_col_stage_rects = stage_rects;
                         self.git_col_discard_rects = discard_rects;
                         self.git_col_open_rects = open_rects;
+                    }
+                    // ── Recent commits preview, pinned to the column foot below
+                    // the change list (input_top already reserved the space).
+                    if !git_view.recent_commits.is_empty() {
+                        let mut cy2 = input_top + 6.0;
+                        g.rect(gcx0, cy2 - 2.0, gcw, 1.0, theme::with_alpha(theme::border(), 0x80));
+                        g.draw_text(gcx0, cy2 + 4.0, "최근 커밋", gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: true, italic: false });
+                        cy2 += 22.0;
+                        let clip_r = git_col_x + git_col_w - 12.0;
+                        for (hash, subj) in &git_view.recent_commits {
+                            let hxc = g.draw_text(gcx0, cy2, hash, gpu::DrawOpts { font_size: 11.0, color: theme::accent(), bold: false, italic: false });
+                            g.draw_text_clipped(
+                                hxc + 8.0,
+                                cy2,
+                                subj,
+                                gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
+                                gcx0,
+                                clip_r,
+                            );
+                            cy2 += 20.0;
+                        }
                     }
                 // Dropdowns (path picker / branch switcher) paint last so they
                 // overlay the list + buttons. Built from the precomputed repo

@@ -319,6 +319,29 @@ pub fn git_pull(repo: &Path) -> Value {
     json!({ "ok": ok, "output": out.trim() })
 }
 
+/// 최근 커밋 `n`개를 `[{ "hash": "abc1234", "subject": "..." }]` 로. 패널의
+/// "최근 커밋" 미리보기용. repo가 아니거나 커밋이 없으면 빈 배열.
+pub fn git_log(repo: &Path, n: u32) -> Value {
+    let arg = format!("-{n}");
+    let (ok, out) = run_git(repo, &["log", &arg, "--pretty=format:%h\x1f%s"]);
+    if !ok {
+        return json!([]);
+    }
+    let commits: Vec<Value> = out
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(2, '\x1f');
+            let hash = parts.next()?.trim();
+            if hash.is_empty() {
+                return None;
+            }
+            let subject = parts.next().unwrap_or("").trim();
+            Some(json!({ "hash": hash, "subject": subject }))
+        })
+        .collect();
+    json!(commits)
+}
+
 /// 작업트리의 모든 변경을 stage (`git add -A`) — 패널의 "전체 Stage".
 pub fn git_stage_all(repo: &Path) -> Value {
     let (ok, out) = run_git(repo, &["add", "-A"]);
