@@ -75,14 +75,23 @@ fn ansi_palette() -> [[u8; 3]; 256] {
 // (#FFFFFF). The old [187,198,209] came from the user's Terminal.app
 // "GitHub Dark Dimmed" profile and read noticeably greyer than
 // Ghostty's body text.
-pub const DEFAULT_FG: [u8; 4] = [255, 255, 255, 0xff];
+#[inline]
+pub fn default_fg() -> [u8; 4] {
+    crate::theme::fg()
+}
 /// Terminal body background — the single source is the theme token so chrome
 /// and body share one palette.
-pub const DEFAULT_BG: [u8; 4] = crate::theme::BG;
+#[inline]
+pub fn default_bg() -> [u8; 4] {
+    crate::theme::bg()
+}
 
 /// Cursor + selection accents. Cursor uses the shared accent so it matches the
 /// focus ring / links across the whole UI; selection is a muted blue.
-pub const ITERM_CURSOR: [u8; 4] = crate::theme::ACCENT;
+#[inline]
+pub fn iterm_cursor() -> [u8; 4] {
+    crate::theme::accent()
+}
 pub const ITERM_SELECTION: [u8; 4] = [49, 99, 139, 0x99];
 /// Inline-autosuggestion ghost text. A dim, low-contrast grey-blue that
 /// sits clearly behind committed foreground text — fish/zsh style.
@@ -101,18 +110,18 @@ fn color_to_rgba(c: &Color, default: [u8; 4]) -> [u8; 4] {
 
 
 pub fn cell_fg(cell: &Cell) -> [u8; 4] {
-    let mut fg = color_to_rgba(&cell.fg, DEFAULT_FG);
+    let mut fg = color_to_rgba(&cell.fg, default_fg());
     if cell.inverse {
-        fg = color_to_rgba(&cell.bg, DEFAULT_BG);
+        fg = color_to_rgba(&cell.bg, default_bg());
     }
     // SGR 2 (faint). Claude Code uses this for ghost-text autosuggestions;
     // without it the suggestion reads as committed input. Mix toward bg by
     // ~55% so the glyph stays legible but visibly secondary.
     if cell.dim {
         let bg = if cell.inverse {
-            color_to_rgba(&cell.fg, DEFAULT_FG)
+            color_to_rgba(&cell.fg, default_fg())
         } else {
-            color_to_rgba(&cell.bg, DEFAULT_BG)
+            color_to_rgba(&cell.bg, default_bg())
         };
         let t = 0.55_f32;
         for i in 0..3 {
@@ -123,9 +132,9 @@ pub fn cell_fg(cell: &Cell) -> [u8; 4] {
 }
 
 pub fn cell_bg(cell: &Cell) -> [u8; 4] {
-    let mut bg = color_to_rgba(&cell.bg, DEFAULT_BG);
+    let mut bg = color_to_rgba(&cell.bg, default_bg());
     if cell.inverse {
-        bg = color_to_rgba(&cell.fg, DEFAULT_FG);
+        bg = color_to_rgba(&cell.fg, default_fg());
     }
     bg
 }

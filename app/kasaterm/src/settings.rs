@@ -26,6 +26,8 @@ pub(crate) struct SettingsCtx {
     pub input: Option<SettingsInput>,
     pub cursor: (f32, f32),
     pub caret_on: bool,
+    pub theme_light: bool,
+    pub accent: String,
 }
 
 fn inside(r: Rect, p: (f32, f32)) -> bool {
@@ -106,7 +108,20 @@ impl App {
             input: self.settings_input,
             cursor: self.cursor_px,
             caret_on: self.last_blink_on,
+            theme_light: theme::is_light(),
+            accent: theme::accent_name().to_string(),
         }
+    }
+
+    /// Mark every pane + chrome dirty so a theme/accent change repaints the
+    /// whole window (cell backgrounds pick up the new palette too).
+    fn repaint_all(&mut self) {
+        if let Ok(mut ws) = self.ws.lock() {
+            for p in ws.panes.values_mut() {
+                p.dirty = true;
+            }
+        }
+        self.chrome_dirty = true;
     }
 
     /// Hit-test a click against the settings screen. Returns true if the click
@@ -160,6 +175,16 @@ impl App {
             SettingsAction::FocusShell => {
                 self.settings_input = Some(SettingsInput::Shell);
             }
+            SettingsAction::ThemeMode(m) => {
+                theme::set_theme(m);
+                socket::write_setting("theme", serde_json::Value::String(m.to_string()));
+                self.repaint_all();
+            }
+            SettingsAction::Accent(name) => {
+                theme::set_accent(&name);
+                socket::write_setting("accent", serde_json::Value::String(name));
+                self.repaint_all();
+            }
         }
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
@@ -206,16 +231,16 @@ pub(crate) fn paint_settings(
     let mut rects: Vec<(SettingsAction, Rect)> = Vec::new();
     let (ax, ay, aw, ah) = ctx.area;
     // Opaque backdrop over the pane grid.
-    g.rect(ax, ay, aw, ah, theme::BG);
+    g.rect(ax, ay, aw, ah, theme::bg());
 
     // ── Left category nav ────────────────────────────────────────────────
-    g.rect(ax, ay, CAT_W, ah, theme::BG);
-    g.rect(ax + CAT_W - 1.0, ay, 1.0, ah, theme::BORDER);
+    g.rect(ax, ay, CAT_W, ah, theme::bg());
+    g.rect(ax + CAT_W - 1.0, ay, 1.0, ah, theme::border());
     g.draw_text(
         ax + 20.0,
         ay + 20.0,
         "Settings",
-        gpu::DrawOpts { font_size: 13.0, color: theme::TEXT_MUTE, bold: true, italic: false },
+        gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: true, italic: false },
     );
     let cats = [
         (SettingsCat::General, "일반"),
@@ -228,9 +253,9 @@ pub(crate) fn paint_settings(
         let selected = cat == ctx.cat;
         let hover = inside(r, ctx.cursor);
         if selected {
-            round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD, theme::SURFACE_ACTIVE);
+            round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD, theme::surface_active());
         } else if hover {
-            round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD, theme::SURFACE_HOVER);
+            round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD, theme::surface_hover());
         }
         g.draw_text(
             r.0 + 14.0,
@@ -238,7 +263,7 @@ pub(crate) fn paint_settings(
             label,
             gpu::DrawOpts {
                 font_size: 14.0,
-                color: if selected { theme::TEXT } else { theme::TEXT_DIM },
+                color: if selected { theme::text() } else { theme::text_dim() },
                 bold: selected,
                 italic: false,
             },
@@ -278,7 +303,7 @@ pub(crate) fn paint_settings(
                 let hover = inside(r, ctx.cursor);
                 round_rect(
                     g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
-                    if sel { theme::ACCENT } else if hover { theme::SURFACE_HOVER } else { theme::SURFACE_ACTIVE },
+                    if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
                 );
                 g.draw_text(
                     r.0 + 14.0,
@@ -286,7 +311,7 @@ pub(crate) fn paint_settings(
                     label,
                     gpu::DrawOpts {
                         font_size: 13.0,
-                        color: if sel { theme::BG } else { theme::TEXT_DIM },
+                        color: if sel { theme::bg() } else { theme::text_dim() },
                         bold: sel,
                         italic: false,
                     },
@@ -314,8 +339,57 @@ pub(crate) fn paint_settings(
             rects.push((SettingsAction::ToggleFileTree, tr));
         }
         SettingsCat::Appearance => {
-            section_label(g, fx, fy, "테마 · 색");
-            help_text(g, fx, fy + 28.0, "준비 중 — 다음 업데이트에서 다크/라이트 + 강조색 프리셋이 추가됩니다.");
+            let mut y = fy;
+            // 테마 모드
+            section_label(g, fx, y, "테마");
+            y += 24.0;
+            help_text(g, fx, y, "전체 색 모드");
+            y += 26.0;
+            let modes: [(&'static str, &str); 2] = [("dark", "다크"), ("light", "라이트")];
+            let mut sx = fx;
+            for (val, label) in modes {
+                let sel = (val == "light") == ctx.theme_light;
+                let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
+                let r = (sx, y, tw, 32.0);
+                let hover = inside(r, ctx.cursor);
+                round_rect(
+                    g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
+                    if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
+                );
+                g.draw_text(
+                    r.0 + 14.0,
+                    r.1 + 8.0,
+                    label,
+                    gpu::DrawOpts {
+                        font_size: 13.0,
+                        color: if sel { theme::bg() } else { theme::text_dim() },
+                        bold: sel,
+                        italic: false,
+                    },
+                );
+                rects.push((SettingsAction::ThemeMode(val), r));
+                sx += tw + 8.0;
+            }
+            y += 44.0 + ROW_GAP;
+            // 강조색
+            section_label(g, fx, y, "강조색");
+            y += 24.0;
+            help_text(g, fx, y, "선택·커서·링크에 쓰이는 색");
+            y += 32.0;
+            let mut cxp = fx;
+            for (name, col) in theme::ACCENT_PRESETS {
+                let sz = 30.0_f32;
+                let r = (cxp, y, sz, sz);
+                let sel = *name == ctx.accent;
+                // Selected ring: a slightly larger text-colored disc behind the
+                // swatch reads as a halo.
+                if sel {
+                    round_rect(g, r.0 - 3.0, r.1 - 3.0, sz + 6.0, sz + 6.0, (sz + 6.0) / 2.0, theme::text());
+                }
+                round_rect(g, r.0, r.1, sz, sz, sz / 2.0, *col);
+                rects.push((SettingsAction::Accent(name.to_string()), r));
+                cxp += sz + 14.0;
+            }
         }
         SettingsCat::Shell => {
             let mut y = fy;
@@ -334,7 +408,7 @@ pub(crate) fn paint_settings(
                 let hover = inside(r, ctx.cursor);
                 round_rect(
                     g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
-                    if sel { theme::ACCENT } else if hover { theme::SURFACE_HOVER } else { theme::SURFACE_ACTIVE },
+                    if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
                 );
                 g.draw_text(
                     r.0 + 14.0,
@@ -342,7 +416,7 @@ pub(crate) fn paint_settings(
                     label,
                     gpu::DrawOpts {
                         font_size: 13.0,
-                        color: if sel { theme::BG } else { theme::TEXT_DIM },
+                        color: if sel { theme::bg() } else { theme::text_dim() },
                         bold: sel,
                         italic: false,
                     },
@@ -359,7 +433,7 @@ pub(crate) fn paint_settings(
                 let hover = inside(r, ctx.cursor);
                 round_rect(
                     g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
-                    if sel { theme::ACCENT } else if hover { theme::SURFACE_HOVER } else { theme::SURFACE_ACTIVE },
+                    if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
                 );
                 g.draw_text(
                     r.0 + 14.0,
@@ -367,7 +441,7 @@ pub(crate) fn paint_settings(
                     label,
                     gpu::DrawOpts {
                         font_size: 13.0,
-                        color: if sel { theme::BG } else { theme::TEXT_DIM },
+                        color: if sel { theme::bg() } else { theme::text_dim() },
                         bold: sel,
                         italic: false,
                     },
@@ -392,7 +466,7 @@ fn section_label(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
         x,
         y,
         text,
-        gpu::DrawOpts { font_size: 15.0, color: theme::TEXT, bold: true, italic: false },
+        gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
     );
 }
 
@@ -401,23 +475,23 @@ fn help_text(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
         x,
         y,
         text,
-        gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_MUTE, bold: false, italic: false },
+        gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
     );
 }
 
 fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, f32)) {
     let hover = inside(r, cursor);
     let track = if on {
-        theme::ACCENT
+        theme::accent()
     } else if hover {
-        theme::SURFACE_HOVER
+        theme::surface_hover()
     } else {
-        theme::SURFACE_ACTIVE
+        theme::surface_active()
     };
     round_rect(g, r.0, r.1, r.2, r.3, r.3 / 2.0, track);
     let knob = r.3 - 8.0;
     let kx = if on { r.0 + r.2 - knob - 4.0 } else { r.0 + 4.0 };
-    round_rect(g, kx, r.1 + 4.0, knob, knob, knob / 2.0, theme::TEXT);
+    round_rect(g, kx, r.1 + 4.0, knob, knob, knob / 2.0, theme::text());
 }
 
 fn text_field(
@@ -429,13 +503,13 @@ fn text_field(
     cursor: (f32, f32),
 ) {
     let hover = inside(r, cursor);
-    round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
+    round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_SM, theme::surface_active());
     let border = if focused {
-        theme::ACCENT
+        theme::accent()
     } else if hover {
-        theme::TEXT_MUTE
+        theme::text_mute()
     } else {
-        theme::BORDER
+        theme::border()
     };
     // 1px frame via four hairlines.
     g.rect(r.0, r.1, r.2, 1.0, border);
@@ -448,9 +522,9 @@ fn text_field(
         tx,
         ty,
         text,
-        gpu::DrawOpts { font_size: 13.0, color: theme::TEXT, bold: false, italic: false },
+        gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
     );
     if focused && caret_on {
-        g.rect(tx + adv + 1.0, r.1 + 7.0, 1.5, r.3 - 14.0, theme::TEXT);
+        g.rect(tx + adv + 1.0, r.1 + 7.0, 1.5, r.3 - 14.0, theme::text());
     }
 }

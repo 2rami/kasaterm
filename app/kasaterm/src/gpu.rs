@@ -696,7 +696,7 @@ impl GpuRenderer {
             cell_px: [ox, oy, span_px, cell_h_px],
             uv_min: Atlas::SOLID_UV,
             uv_max: Atlas::SOLID_UV,
-            fg_rgba: srgb_rgba_to_linear(crate::cells::DEFAULT_BG),
+            fg_rgba: srgb_rgba_to_linear(crate::cells::default_bg()),
             ..Default::default()
         });
         let acc = srgb_rgba_to_linear(accent);
@@ -1029,7 +1029,7 @@ impl GpuRenderer {
                                 chip_w,
                                 size * 1.04,
                                 size * 0.28,
-                                crate::theme::SURFACE_ACTIVE,
+                                crate::theme::surface_active(),
                             );
                         }
                         if span.code {
@@ -1040,7 +1040,7 @@ impl GpuRenderer {
                             // to the gothic via cjk_gothic=true so it never
                             // overlaps inside the chip.
                             let mut tpx = pen_x;
-                            for (tok, tcol) in highlight_code_line(trimmed, "", crate::theme::TEXT) {
+                            for (tok, tcol) in highlight_code_line(trimmed, "", crate::theme::text()) {
                                 self.md_draw_word(
                                     &tok, tpx, pen_y, size, tcol, bold, span.italic, 0, true,
                                 );
@@ -1084,7 +1084,7 @@ impl GpuRenderer {
     /// (icon layer, on top), sized to ICON_SIZE so it matches every other
     /// chrome icon. All logical px.
     fn draw_copy_icon(&mut self, bx: f32, by: f32, bw: f32, bh: f32) {
-        let bg = crate::theme::with_alpha(crate::theme::SURFACE_ACTIVE, 0xE0);
+        let bg = crate::theme::with_alpha(crate::theme::surface_active(), 0xE0);
         self.round_rect_fill(bx, by, bw, bh, crate::theme::RADIUS_SM, bg);
         let isz = crate::theme::ICON_SIZE;
         self.queue_icon(
@@ -1092,7 +1092,7 @@ impl GpuRenderer {
             bx + (bw - isz) / 2.0,
             by + (bh - isz) / 2.0,
             isz,
-            crate::theme::TEXT_DIM,
+            crate::theme::text_dim(),
         );
     }
 
@@ -1143,14 +1143,14 @@ impl GpuRenderer {
                     // to the text it introduces.
                     pen_y += if *level <= 1 { base * 1.6 } else { base * 1.2 };
                     pen_y = self.md_runs(
-                        spans, x, pen_y, w, size, true, crate::theme::TEXT, clip_top, clip_bot,
+                        spans, x, pen_y, w, size, true, crate::theme::text(), clip_top, clip_bot,
                     );
                     pen_y += base * 0.35;
                 }
                 MdBlock::Para { spans } => {
                     let size = base;
                     pen_y = self.md_runs(
-                        spans, x, pen_y, w, size, false, crate::theme::TEXT, clip_top, clip_bot,
+                        spans, x, pen_y, w, size, false, crate::theme::text(), clip_top, clip_bot,
                     );
                     pen_y += base * 0.85;
                 }
@@ -1164,7 +1164,7 @@ impl GpuRenderer {
                     let block_top = pen_y;
                     let visible = pen_y + block_h > clip_top && pen_y < clip_bot;
                     if visible {
-                        self.round_rect_fill(x, pen_y, w, block_h, base * 0.5, crate::theme::SURFACE);
+                        self.round_rect_fill(x, pen_y, w, block_h, base * 0.5, crate::theme::surface());
                     }
                     let mut ly = pen_y + pad;
                     for line in &lines {
@@ -1172,7 +1172,7 @@ impl GpuRenderer {
                             // Syntax-highlight: draw each token in its color,
                             // chaining pen-x from draw_text's return value.
                             let mut tx = x + pad;
-                            for (tok, col) in highlight_code_line(line, lang, crate::theme::TEXT_DIM) {
+                            for (tok, col) in highlight_code_line(line, lang, crate::theme::text_dim()) {
                                 tx = self.draw_text(
                                     tx,
                                     ly,
@@ -1204,7 +1204,7 @@ impl GpuRenderer {
                                 lang,
                                 DrawOpts {
                                     font_size: size * 0.82,
-                                    color: crate::theme::TEXT_MUTE,
+                                    color: crate::theme::text_mute(),
                                     bold: false,
                                     italic: false,
                                 },
@@ -1224,7 +1224,7 @@ impl GpuRenderer {
                             marker,
                             DrawOpts {
                                 font_size: size,
-                                color: crate::theme::ACCENT,
+                                color: crate::theme::accent(),
                                 bold: false,
                                 italic: false,
                             },
@@ -1237,7 +1237,7 @@ impl GpuRenderer {
                         (w - indent).max(1.0),
                         size,
                         false,
-                        crate::theme::TEXT,
+                        crate::theme::text(),
                         clip_top,
                         clip_bot,
                     );
@@ -1254,20 +1254,20 @@ impl GpuRenderer {
                         (w - indent).max(1.0),
                         size,
                         false,
-                        crate::theme::TEXT_DIM,
+                        crate::theme::text_dim(),
                         clip_top,
                         clip_bot,
                     );
                     let bar_h = pen_y - start_y;
                     if start_y + bar_h > clip_top && start_y < clip_bot {
-                        self.rect(x, start_y, base * 0.22, bar_h, crate::theme::ACCENT);
+                        self.rect(x, start_y, base * 0.22, bar_h, crate::theme::accent());
                     }
                     pen_y += base * 0.8;
                 }
                 MdBlock::Rule => {
                     pen_y += base * 0.9;
                     if pen_y > clip_top && pen_y < clip_bot {
-                        self.rect(x, pen_y, w, 1.0, crate::theme::BORDER);
+                        self.rect(x, pen_y, w, 1.0, crate::theme::border());
                     }
                     pen_y += base * 0.9;
                 }
@@ -1294,7 +1294,7 @@ impl GpuRenderer {
                                 x,
                                 pen_y,
                                 base,
-                                crate::theme::TEXT_MUTE,
+                                crate::theme::text_mute(),
                                 false,
                                 true,
                                 1,
@@ -1391,12 +1391,12 @@ impl GpuRenderer {
                 // the cursor's row (drawn first so code paints on top). Must be
                 // brighter than BG — SURFACE is *darker*, so it reads invisible.
                 if li == cursor.0 {
-                    self.rect(x, pen_y, w, lh, crate::theme::SURFACE_HOVER);
+                    self.rect(x, pen_y, w, lh, crate::theme::surface_hover());
                 }
                 // Code line, syntax-highlighted (single TEXT color when `lang`
                 // is empty, e.g. plain text), panned by h_scroll.
                 let mut tx = tx0;
-                for (tok, col) in highlight_code_line(line, lang, crate::theme::TEXT) {
+                for (tok, col) in highlight_code_line(line, lang, crate::theme::text()) {
                     tx = self.draw_text_clipped(
                         tx,
                         pen_y + glyph_voff,
@@ -1416,14 +1416,14 @@ impl GpuRenderer {
                     // accent underline, cursor sits after it.
                     if !preedit.is_empty() {
                         let pw = self.measure_run(preedit, base, false, false, true, false);
-                        self.rect(cur_x, pen_y + glyph_voff + base - 2.0, pw, 2.0, crate::theme::ACCENT);
+                        self.rect(cur_x, pen_y + glyph_voff + base - 2.0, pw, 2.0, crate::theme::accent());
                         self.draw_text_clipped(
                             cur_x,
                             pen_y + glyph_voff,
                             preedit,
                             DrawOpts {
                                 font_size: base,
-                                color: crate::theme::ACCENT,
+                                color: crate::theme::accent(),
                                 bold: false,
                                 italic: false,
                             },
@@ -1436,7 +1436,7 @@ impl GpuRenderer {
                         // Cursor bar matches the glyph box (same voff + height as
                         // the text) so it lines up with the characters, not the
                         // padded line box.
-                        self.rect(cur_x, pen_y + glyph_voff, 2.0, base, crate::theme::ACCENT);
+                        self.rect(cur_x, pen_y + glyph_voff, 2.0, base, crate::theme::accent());
                     }
                 }
                 // Gutter mask: repaint the column over any text that scrolled
@@ -1444,9 +1444,9 @@ impl GpuRenderer {
                 // current row keeps its highlight tint so the band reads as full
                 // width (line number included).
                 let gutter_bg = if li == cursor.0 {
-                    crate::theme::SURFACE_HOVER
+                    crate::theme::surface_hover()
                 } else {
-                    crate::theme::BG
+                    crate::theme::bg()
                 };
                 self.rect(x, pen_y, cx0 - x, lh, gutter_bg);
                 let num = format!("{}", li + 1);
@@ -1457,7 +1457,7 @@ impl GpuRenderer {
                     &num,
                     DrawOpts {
                         font_size: base,
-                        color: crate::theme::TEXT_MUTE,
+                        color: crate::theme::text_mute(),
                         bold: false,
                         italic: false,
                     },
@@ -2045,8 +2045,8 @@ impl GpuRenderer {
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear({
                             // Raw sRGB bytes → non-sRGB target = shown
-                            // verbatim, matching cells::DEFAULT_BG.
-                            let b = crate::cells::DEFAULT_BG;
+                            // verbatim, matching cells::default_bg().
+                            let b = crate::cells::default_bg();
                             wgpu::Color {
                                 r: b[0] as f64 / 255.0,
                                 g: b[1] as f64 / 255.0,
@@ -2195,13 +2195,13 @@ pub(crate) fn is_wide_char(ch: char) -> bool {
 /// flat blue: web=accent blue, local file=green, mailto=purple, anchor=cyan.
 fn link_color(dest: &str) -> [u8; 4] {
     if dest.starts_with("http://") || dest.starts_with("https://") {
-        crate::theme::ACCENT
+        crate::theme::accent()
     } else if dest.starts_with("mailto:") {
-        crate::theme::SYN_KEYWORD
+        crate::theme::syn_keyword()
     } else if dest.starts_with('#') {
-        crate::theme::SYN_FUNCTION
+        crate::theme::syn_function()
     } else {
-        crate::theme::SYN_STRING
+        crate::theme::syn_string()
     }
 }
 
@@ -2285,7 +2285,7 @@ pub(crate) fn highlight_code_line(line: &str, lang: &str, base: [u8; 4]) -> Vec<
     while i < n {
         let c = ch[i];
         if starts_comment(i) {
-            out.push((ch[i..].iter().collect(), theme::SYN_COMMENT));
+            out.push((ch[i..].iter().collect(), theme::syn_comment()));
             break;
         }
         if c == '"' || c == '\'' || c == '`' {
@@ -2303,7 +2303,7 @@ pub(crate) fn highlight_code_line(line: &str, lang: &str, base: [u8; 4]) -> Vec<
                 j += 1;
             }
             let j = j.min(n);
-            out.push((ch[i..j].iter().collect(), theme::SYN_STRING));
+            out.push((ch[i..j].iter().collect(), theme::syn_string()));
             i = j;
             continue;
         }
@@ -2312,7 +2312,7 @@ pub(crate) fn highlight_code_line(line: &str, lang: &str, base: [u8; 4]) -> Vec<
             while j < n && (ch[j].is_ascii_alphanumeric() || ch[j] == '.' || ch[j] == '_') {
                 j += 1;
             }
-            out.push((ch[i..j].iter().collect(), theme::SYN_NUMBER));
+            out.push((ch[i..j].iter().collect(), theme::syn_number()));
             i = j;
             continue;
         }
@@ -2323,11 +2323,11 @@ pub(crate) fn highlight_code_line(line: &str, lang: &str, base: [u8; 4]) -> Vec<
             }
             let word: String = ch[i..j].iter().collect();
             let col = if kws.contains(&word.as_str()) {
-                theme::SYN_KEYWORD
+                theme::syn_keyword()
             } else if word.chars().next().is_some_and(|c0| c0.is_uppercase()) {
-                theme::SYN_TYPE
+                theme::syn_type()
             } else if j < n && ch[j] == '(' {
-                theme::SYN_FUNCTION
+                theme::syn_function()
             } else {
                 base
             };
