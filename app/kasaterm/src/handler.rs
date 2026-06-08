@@ -524,6 +524,29 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 }
+                // Commit modal / settings screen are full-window overlays over
+                // the pane grid — drive their cursor here (I-beam over a text
+                // field, default elsewhere) and skip the pane/column hover below
+                // so it can't override the cursor.
+                if self.git_commit_modal_open || self.settings_open {
+                    let (cx, cy) = self.cursor_px;
+                    let hit = |r: (f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    let want_text = self.git_commit_input_rect.map(hit).unwrap_or(false)
+                        || (self.settings_open
+                            && self.settings_rects.iter().any(|(a, r)| {
+                                matches!(a, SettingsAction::FocusCwdPath | SettingsAction::FocusShell)
+                                    && hit(*r)
+                            }));
+                    if want_text != self.text_cursor_shown {
+                        self.text_cursor_shown = want_text;
+                        window.set_cursor(if want_text { CursorIcon::Text } else { CursorIcon::Default });
+                    }
+                    self.chrome_dirty = true;
+                    window.request_redraw();
+                    return;
+                }
                 // In-pane tab hover tracking — drives the hover-only × +
                 // brightened text on inactive tabs. Updated on every move but
                 // only redraws when the hovered tab actually changes.
@@ -583,17 +606,11 @@ impl ApplicationHandler<UserEvent> for App {
                     let hit = |r: (f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
-                    // I-beam over every text input: file-tree search / new-entry
-                    // name, the git commit message box, and the settings screen's
-                    // editable fields (custom cwd path / shell).
+                    // I-beam over the file-tree text inputs (search box / inline
+                    // new-entry name). The commit modal + settings screen are
+                    // full-window overlays, handled by the earlier branch.
                     let want_text = (self.file_tree_visible && hit(self.file_tree_search_rect))
-                        || (self.file_tree_new.is_some() && hit(self.file_tree_new_row_rect))
-                        || self.git_commit_input_rect.map(hit).unwrap_or(false)
-                        || (self.settings_open
-                            && self.settings_rects.iter().any(|(a, r)| {
-                                matches!(a, SettingsAction::FocusCwdPath | SettingsAction::FocusShell)
-                                    && hit(*r)
-                            }));
+                        || (self.file_tree_new.is_some() && hit(self.file_tree_new_row_rect));
                     if want_text != self.text_cursor_shown {
                         self.text_cursor_shown = want_text;
                         window.set_cursor(if want_text {
@@ -1498,7 +1515,19 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // Commit split button: main → modal, caret → dropdown.
                         if self.git_commit_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            self.open_commit_modal();
+                            // Matches the render: with no changes but commits to
+                            // push, the primary button is Push, not Commit.
+                            let push_mode = self
+                                .git_col_data
+                                .lock()
+                                .ok()
+                                .map(|g| g.staged.is_empty() && g.unstaged.is_empty() && g.ahead > 0)
+                                .unwrap_or(false);
+                            if push_mode {
+                                self.run_git_col_action(crate::GitColBtn::Push);
+                            } else {
+                                self.open_commit_modal();
+                            }
                             window.request_redraw();
                             return;
                         }
