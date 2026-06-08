@@ -145,6 +145,11 @@ pub struct PtyBackend {
     /// of `waiting`: a blocked claude writes nothing, so the transcript tail
     /// can't tell `collab_board` the pane is stuck — this map can.
     attention: Arc<Mutex<HashMap<String, String>>>,
+    /// Cached `claude agents --json` output (sessionId → official status:
+    /// idle/busy/waiting). The board polls ~1/s; shelling out to `claude` that
+    /// often both costs a process spawn and risks racing claude's session
+    /// registry, so we refresh at most once every 2s.
+    agents_cache: Arc<Mutex<Option<(std::time::Instant, HashMap<String, String>)>>>,
 }
 
 impl PtyBackend {
@@ -154,7 +159,57 @@ impl PtyBackend {
             ws,
             bound: Arc::new(Mutex::new(HashMap::new())),
             attention: Arc::new(Mutex::new(HashMap::new())),
+            agents_cache: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// sessionId → official claude status (idle/busy/waiting), cached 2s.
+    /// `claude agents --json` is authoritative; the transcript-mtime heuristic
+    /// in `read_tail`/`snapshot_from_tail` is only a fallback for sessions
+    /// claude doesn't report. One sessionId can span several processes (shells
+    /// inherit the parent's session id), so we collapse to the most-active
+    /// state (busy > waiting > idle).
+    fn agents_status(&self) -> HashMap<String, String> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+        let now = std::time::Instant::now();
+        if let Some((at, map)) = self.agents_cache.lock().unwrap().as_ref() {
+            if now.duration_since(*at) < TTL {
+                return map.clone();
+            }
+        }
+        let mut map: HashMap<String, String> = HashMap::new();
+        if let Ok(out) = std::process::Command::new("claude")
+            .args(["agents", "--json"])
+            .output()
+        {
+            if out.status.success() {
+                if let Ok(items) =
+                    serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
+                {
+                    let rank = |s: &str| match s {
+                        "busy" => 3,
+                        "waiting" => 2,
+                        _ => 1,
+                    };
+                    for it in &items {
+                        let (Some(sid), Some(st)) = (
+                            it.get("sessionId").and_then(|v| v.as_str()),
+                            it.get("status").and_then(|v| v.as_str()),
+                        ) else {
+                            continue;
+                        };
+                        let e = map
+                            .entry(sid.to_string())
+                            .or_insert_with(|| st.to_string());
+                        if rank(st) > rank(e) {
+                            *e = st.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        *self.agents_cache.lock().unwrap() = Some((now, map.clone()));
+        map
     }
 }
 
@@ -283,20 +338,45 @@ impl Backend for PtyBackend {
         // is exactly as fresh as the moment it's asked for. Panes with no hook
         // bind (no claude / not started) simply don't appear.
         let live: HashSet<String> = self.ws.lock().unwrap().panes.keys().cloned().collect();
+        let agents = self.agents_status();
         let bound = self.bound.lock().unwrap();
         let mut attention = self.attention.lock().unwrap();
         let mut board: Vec<PaneActivity> = bound
             .iter()
             .filter(|(sid, _)| live.contains(sid.as_str()))
             .map(|(sid, path)| {
-                let (tail, idle) = read_tail(path, 64 * 1024);
-                let mut row = snapshot_from_tail(sid, &tail, idle);
-                // A claude blocked on a permission/input prompt writes nothing,
-                // so `idle` reads true and the transcript snapshot can't tell
-                // it's stuck. If its Notification hook flagged it, surface that
-                // as `waiting`. Once it resumes (transcript grows → !idle) the
-                // flag is stale: drop it and trust the fresh snapshot.
-                if idle {
+                let (tail, mtime_idle) = read_tail(path, 64 * 1024);
+                let mut row = snapshot_from_tail(sid, &tail, mtime_idle);
+                // Prefer claude's official status when it reports this session
+                // (matched by transcript filename stem == sessionId). The
+                // mtime heuristic above is only a fallback for sessions claude
+                // doesn't list. `effectively_idle` then drives the attention
+                // (permission-prompt) override below.
+                let official = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|stem| agents.get(stem))
+                    .map(|s| s.as_str());
+                let effectively_idle = match official {
+                    Some("busy") => {
+                        row.status = "working".into();
+                        false
+                    }
+                    Some("waiting") => {
+                        row.status = "waiting".into();
+                        false
+                    }
+                    Some(_) => {
+                        row.status = "idle".into();
+                        true
+                    }
+                    None => mtime_idle,
+                };
+                // A claude blocked on a permission/input prompt writes nothing
+                // and reports idle, so its Notification hook flag is the only
+                // `waiting` signal. Apply it only when otherwise idle; drop the
+                // stale flag once the pane is active again.
+                if effectively_idle {
                     if let Some(reason) = attention.get(sid) {
                         row.status = "waiting".to_string();
                         row.waiting_for = (!reason.is_empty()).then(|| reason.clone());

@@ -25,6 +25,7 @@ mod layout;
 mod markdown;
 mod input;
 mod settings;
+mod links;
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
@@ -2453,6 +2454,9 @@ struct App {
     window_labels_at: Option<Instant>,
     selection: Option<Selection>,
     drag_anchor: Option<(u16, u16)>,
+    /// A left-press that landed on a detected URL. Holds (url, press_px) so a
+    /// release that stayed put (a click, not a drag) opens it; a drag clears it.
+    link_armed: Option<(String, (f32, f32))>,
     /// In-flight pane-divider drag: the BSP tree path of the split being
     /// resized plus its axis. `Some` while the user holds the mouse on a
     /// seam; each motion event re-derives the ratio from the cursor.
@@ -2951,6 +2955,7 @@ impl App {
             window_labels_at: None,
             selection: None,
             drag_anchor: None,
+            link_armed: None,
             resize_drag: None,
             last_divider_pos: None,
             last_divider_pty_resize: None,
