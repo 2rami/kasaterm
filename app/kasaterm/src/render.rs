@@ -1994,26 +1994,34 @@ impl App {
                     let bh = 24.0_f32;
                     let by = y - 4.0;
                     let caret_w = 20.0_f32;
-                    let lw = g.measure_chrome_text("Commit", 12.0, true);
+                    let can_commit = !git_view.staged.is_empty() || !git_view.unstaged.is_empty();
+                    // No uncommitted changes but commits to push → the primary
+                    // button becomes "↑ Push N" (GitHub-Desktop style); with
+                    // changes it's Commit. The caret dropdown always offers the
+                    // full set (Commit / Push / Pull / Create PR).
+                    let push_mode = !can_commit && git_view.ahead > 0;
+                    let can_drop = can_commit || git_view.ahead > 0;
+                    let main_active = can_commit || push_mode;
+                    let (main_icon, main_label) = if push_mode {
+                        ("arrow-up", format!("Push  {}", git_view.ahead))
+                    } else {
+                        ("git-commit-horizontal", "Commit".to_string())
+                    };
+                    let lw = g.measure_chrome_text(&main_label, 12.0, true);
                     let main_w = 24.0 + lw + 10.0;
                     let total_w = main_w + caret_w;
                     let bx = git_col_x + git_col_w - 12.0 - total_w;
-                    let can_commit = !git_view.staged.is_empty() || !git_view.unstaged.is_empty();
-                    // The caret dropdown holds Push/Create-PR, so it stays live
-                    // when there's something to push (ahead > 0) even with no
-                    // uncommitted changes — that's how you push after committing.
-                    let can_drop = can_commit || git_view.ahead > 0;
                     let mhov = self.cursor_px.0 >= bx && self.cursor_px.0 <= bx + main_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
                     let chov = self.cursor_px.0 >= bx + main_w && self.cursor_px.0 <= bx + total_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
                     let base = if can_drop { theme::surface_active() } else { theme::with_alpha(theme::surface_hover(), 0x66) };
                     round_rect(g, bx, by, total_w, bh, theme::RADIUS_SM, base);
-                    if can_commit && mhov { round_rect(g, bx, by, main_w, bh, theme::RADIUS_SM, theme::accent()); }
+                    if main_active && mhov { round_rect(g, bx, by, main_w, bh, theme::RADIUS_SM, theme::accent()); }
                     if can_drop && chov { round_rect(g, bx + main_w, by, caret_w, bh, theme::RADIUS_SM, theme::accent()); }
                     g.rect(bx + main_w, by + 5.0, 1.0, bh - 10.0, theme::with_alpha(theme::bg(), 0x99));
-                    let fg_main = if can_commit { theme::text() } else { theme::text_mute() };
+                    let fg_main = if main_active { theme::text() } else { theme::text_mute() };
                     let fg_caret = if can_drop { theme::text() } else { theme::text_mute() };
-                    g.queue_icon("git-commit-horizontal", bx + 8.0, by + (bh - 13.0) / 2.0, 13.0, fg_main);
-                    g.draw_text(bx + 24.0, by + (bh - 12.0) / 2.0, "Commit", gpu::DrawOpts { font_size: 12.0, color: fg_main, bold: true, italic: false });
+                    g.queue_icon(main_icon, bx + 8.0, by + (bh - 13.0) / 2.0, 13.0, fg_main);
+                    g.draw_text(bx + 24.0, by + (bh - 12.0) / 2.0, &main_label, gpu::DrawOpts { font_size: 12.0, color: fg_main, bold: true, italic: false });
                     g.draw_text(bx + main_w + (caret_w - 7.0) / 2.0, by + (bh - 11.0) / 2.0, "▾", gpu::DrawOpts { font_size: 11.0, color: fg_caret, bold: false, italic: false });
                     self.git_commit_btn_rect = Some((bx, by, main_w, bh));
                     self.git_commit_caret_rect = Some((bx + main_w, by, caret_w, bh));
@@ -2279,12 +2287,12 @@ impl App {
                         // Push/Pull carry their ahead/behind counts so you can
                         // see what's pending before clicking.
                         let push_label = if git_view.ahead > 0 {
-                            format!("Push  ↑{}", git_view.ahead)
+                            format!("Push  {}", git_view.ahead)
                         } else {
                             "Push".to_string()
                         };
                         let pull_label = if git_view.behind > 0 {
-                            format!("Pull  ↓{}", git_view.behind)
+                            format!("Pull  {}", git_view.behind)
                         } else {
                             "Pull".to_string()
                         };
