@@ -1062,6 +1062,15 @@ impl App {
         // so a stale rect can't outlive its glyph after a layout change.
         let mut pane_action_hits: Vec<(String, ActionKind, (f32, f32, f32, f32))> = Vec::new();
         let mut confirm_btn_hits: Vec<(ConfirmBtn, (f32, f32, f32, f32))> = Vec::new();
+        // Settings screen: sidebar entry rect + (when open) the full-view paint
+        // snapshot, both captured before the gpu borrow. The screen's clickable
+        // rects come back from paint_settings inside the borrow.
+        let win_h_logical = win_px.1 / scale;
+        let settings_btn = self.settings_btn_rect(win_h_logical);
+        self.settings_btn_rect = settings_btn;
+        let settings_ctx = self.settings_open.then(|| self.settings_snapshot(win_px, scale));
+        let settings_toggle = self.settings_toggle_rect();
+        let mut settings_rects_out: Vec<(SettingsAction, (f32, f32, f32, f32))> = Vec::new();
         // Caret blink for the commit-modal message box, computed before `g`
         // borrows `self.gpu` (the blink helper takes `&self`).
         let commit_caret_on = self.cursor_blink_on(std::time::Instant::now());
@@ -1164,6 +1173,28 @@ impl App {
                     by + (bh - isz) / 2.0,
                     isz,
                     fg,
+                );
+            }
+            // Settings toggle, left of the git-column toggle. Always painted so
+            // the screen is reachable even with the sidebar collapsed.
+            if let Some((bx, by, bw, bh)) = settings_toggle {
+                let hover = sb_cursor.0 >= bx
+                    && sb_cursor.0 <= bx + bw
+                    && sb_cursor.1 >= by
+                    && sb_cursor.1 <= by + bh;
+                let active = self.settings_open;
+                if active {
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
+                } else if hover {
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                }
+                let isz = theme::ICON_SIZE;
+                g.queue_icon(
+                    "settings-2",
+                    bx + (bw - isz) / 2.0,
+                    by + (bh - isz) / 2.0,
+                    isz,
+                    if hover || active { theme::TEXT } else { theme::TEXT_DIM },
                 );
             }
             // Git-column toggle, parked at the right end of the title strip
@@ -1545,6 +1576,46 @@ impl App {
                             gpu::DrawOpts { font_size: 14.0, color: theme::TEXT, bold: false, italic: false },
                         );
                     }
+                }
+                // Settings entry — same tab-box style as the session tabs, so it
+                // reads as the last item in the list. Active (selected) box
+                // while the screen is open, faint hover box otherwise.
+                {
+                    let (bx, by, bw, bh) = settings_btn;
+                    let active = self.settings_open;
+                    let hover = sb_cursor.0 >= bx
+                        && sb_cursor.0 <= bx + bw
+                        && sb_cursor.1 >= by
+                        && sb_cursor.1 <= by + bh;
+                    if active {
+                        round_rect(g, bx, by, bw, bh, theme::RADIUS_MD, theme::SURFACE_ACTIVE);
+                    } else if hover {
+                        round_rect(g, bx, by, bw, bh, theme::RADIUS_MD, theme::SURFACE_HOVER);
+                    }
+                    // Icon chip, matching the session tabs' chip geometry.
+                    let icon = 30.0_f32;
+                    let icon_x = bx + 24.0;
+                    let icon_y = by + (bh - icon) / 2.0;
+                    let chip_bg = if active { theme::SURFACE_HOVER } else { theme::SURFACE_ACTIVE };
+                    round_rect(g, icon_x, icon_y, icon, icon, icon / 2.0, chip_bg);
+                    g.queue_icon(
+                        "settings-2",
+                        icon_x + (icon - theme::ICON_SIZE) / 2.0,
+                        icon_y + (icon - theme::ICON_SIZE) / 2.0,
+                        theme::ICON_SIZE,
+                        if active { theme::TEXT } else { theme::TEXT_DIM },
+                    );
+                    g.draw_text(
+                        icon_x + icon + 10.0,
+                        by + (bh - 14.0) / 2.0,
+                        "Settings",
+                        gpu::DrawOpts {
+                            font_size: 14.0,
+                            color: if active { theme::TEXT } else { theme::TEXT_DIM },
+                            bold: active,
+                            italic: false,
+                        },
+                    );
                 }
             }
             // ── File-tree column ── independent of the tab strip, parked just
@@ -3422,10 +3493,16 @@ impl App {
                         gpu::DrawOpts { font_size: gf, color: theme::TEXT, bold: false, italic: false });
                 }
             }
+            // Settings screen on top of everything (covers the pane grid; the
+            // sidebar to its left stays visible).
+            if let Some(ctx) = &settings_ctx {
+                settings_rects_out = settings::paint_settings(g, ctx);
+            }
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }
         }
+        self.settings_rects = settings_rects_out;
         self.confirm_btn_rects = confirm_btn_hits;
         self.pane_tab_rects = tab_hits;
         self.pane_tab_close_rects = tab_close_hits;

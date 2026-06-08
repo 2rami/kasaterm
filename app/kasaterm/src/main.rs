@@ -24,6 +24,7 @@ mod session;
 mod layout;
 mod markdown;
 mod input;
+mod settings;
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
@@ -2133,6 +2134,35 @@ enum GitModalBtn {
     Confirm,
 }
 
+/// Left-nav category in the settings screen (Warp-style: list on the left,
+/// form on the right). `Appearance` is the theme placeholder for phase 2.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsCat {
+    General,
+    Appearance,
+    Shell,
+}
+
+/// The two free-text fields in the settings form. Tracks which one (if any)
+/// has keyboard focus so keystrokes route to its buffer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsInput {
+    CwdPath,
+    Shell,
+}
+
+/// Clickable targets painted into the settings screen, collected each frame for
+/// hit-testing. String-carrying variants (shell presets) keep this `Clone`.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum SettingsAction {
+    Category(SettingsCat),
+    CwdMode(&'static str),
+    FocusCwdPath,
+    ToggleFileTree,
+    ShellPreset(String),
+    FocusShell,
+}
+
 /// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
 /// directories (click → cd that pane); `Branch` lists local branches (click →
 /// checkout in that pane's repo).
@@ -2734,6 +2764,24 @@ struct App {
     file_tree_w_logical: f32,
     /// In-flight tree-column resize drag — `(start_cursor_x, start_width)`.
     file_tree_resize: Option<(f32, f32)>,
+    /// Settings screen (Warp-style full-view, reached from the sidebar). When
+    /// open it replaces the pane grid; the sidebar/titlebar stay live.
+    settings_open: bool,
+    settings_cat: SettingsCat,
+    /// In-memory mirror of settings.json, edited live and written on each
+    /// change so the next launch (and `resolve_*`) pick it up.
+    set_cwd_mode: String,
+    set_file_tree_default: bool,
+    set_shell: String,
+    /// True when opening settings auto-expanded a collapsed sidebar, so closing
+    /// can restore it (but leaves a sidebar the user opened themselves alone).
+    settings_expanded_sidebar: bool,
+    /// Which form text field has focus (cwd custom path / shell), if any.
+    settings_input: Option<SettingsInput>,
+    /// Clickable targets collected during the settings paint, for hit-testing.
+    settings_rects: Vec<(SettingsAction, (f32, f32, f32, f32))>,
+    /// Sidebar "Settings" entry rect (bottom-anchored), for hit-testing.
+    settings_btn_rect: (f32, f32, f32, f32),
     /// Cursor-blink phase captured at the last successful render.
     /// Used by `render_frame`'s early-return: a blink toggle counts
     /// as "something changed" and forces the GPU pass even when
@@ -2994,9 +3042,22 @@ impl App {
             file_tree_hover: None,
             file_tree_scroll: 0.0,
             file_tree_rects: Vec::new(),
-            file_tree_visible: true,
+            file_tree_visible: socket::read_file_tree_default(),
             file_tree_w_logical: FILE_TREE_W,
             file_tree_resize: None,
+            settings_open: std::env::var("KASATERM_OPEN_SETTINGS").is_ok(),
+            settings_cat: match std::env::var("KASATERM_OPEN_SETTINGS").as_deref() {
+                Ok("shell") => SettingsCat::Shell,
+                Ok("appearance") => SettingsCat::Appearance,
+                _ => SettingsCat::General,
+            },
+            set_cwd_mode: socket::read_default_cwd_mode(),
+            set_file_tree_default: socket::read_file_tree_default(),
+            set_shell: socket::read_default_shell().unwrap_or_default(),
+            settings_expanded_sidebar: false,
+            settings_input: None,
+            settings_rects: Vec::new(),
+            settings_btn_rect: (0.0, 0.0, 0.0, 0.0),
             last_blink_on: false,
             chrome_dirty: true,
             cursor_px: std::env::var("KASATERM_AUTOHOVER")
@@ -3525,6 +3586,12 @@ fn resolve_default_shell() -> Option<String> {
         if !s.is_empty() {
             return Some(s);
         }
+    }
+    // User's explicit choice in the settings screen wins over `$SHELL` so it
+    // overrides the inherited login shell, but stays below the env launch
+    // override above.
+    if let Some(s) = socket::read_default_shell() {
+        return Some(s);
     }
     if let Ok(s) = std::env::var("SHELL") {
         if !s.is_empty() {
