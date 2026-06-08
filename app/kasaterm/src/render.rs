@@ -148,7 +148,7 @@ impl App {
         if ov.cursor_visible && ov.blink_on && ov.preedit.is_empty() {
             let cx = ov.pad_x + ov.cursor_col as f32 * cw;
             let cy = ov.pad_y + ov.cursor_row as f32 * ch;
-            let mut c = cells::ITERM_CURSOR;
+            let mut c = cells::iterm_cursor();
             c[3] = 140; // ~0.55 alpha
             g.rect(cx, cy, cw, ch, c);
         }
@@ -169,7 +169,7 @@ impl App {
             // Route preedit through the cell-grid path so the composing
             // syllable sits on the same baseline as committed text
             // instead of floating above the row.
-            g.draw_preedit(px, py, &ov.preedit, cells::ITERM_CURSOR, ov.font_scale);
+            g.draw_preedit(px, py, &ov.preedit, cells::iterm_cursor(), ov.font_scale);
         }
         if let Some(sel) = ov.selection {
             let (start, stop) = if (sel.anchor.1, sel.anchor.0) <= (sel.end.1, sel.end.0) {
@@ -1127,7 +1127,7 @@ impl App {
             }
             // Title strip fill: the unified BG so the top bar reads as one
             // surface with the sidebar and terminal body (no depth seam).
-            g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::BG);
+            g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::bg());
             // Sidebar-toggle button, just right of the traffic lights.
             // VSCode / Warp-style glyph: an outlined panel with its left
             // column filled when the sidebar is shown, hollow when hidden.
@@ -1138,12 +1138,12 @@ impl App {
                     && sb_cursor.1 >= by
                     && sb_cursor.1 <= by + bh;
                 if hover {
-                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::surface_hover());
                 }
                 // Brighter when the sidebar is open (state indicator) or on
                 // hover; the panel-left SVG shape stays constant.
                 let active = tab_strip_w > 0.0;
-                let fg = if hover || active { theme::TEXT } else { theme::TEXT_DIM };
+                let fg = if hover || active { theme::text() } else { theme::text_dim() };
                 let isz = theme::ICON_SIZE;
                 g.queue_icon(
                     "panel-left",
@@ -1162,10 +1162,10 @@ impl App {
                     && sb_cursor.1 >= by
                     && sb_cursor.1 <= by + bh;
                 if hover {
-                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::surface_hover());
                 }
                 let active = tree_col_w > 0.0;
-                let fg = if hover || active { theme::TEXT } else { theme::TEXT_DIM };
+                let fg = if hover || active { theme::text() } else { theme::text_dim() };
                 let isz = theme::ICON_SIZE;
                 g.queue_icon(
                     "folder-tree",
@@ -1184,9 +1184,9 @@ impl App {
                     && sb_cursor.1 <= by + bh;
                 let active = self.settings_open;
                 if active {
-                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::surface_active());
                 } else if hover {
-                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::surface_hover());
                 }
                 let isz = theme::ICON_SIZE;
                 g.queue_icon(
@@ -1194,7 +1194,7 @@ impl App {
                     bx + (bw - isz) / 2.0,
                     by + (bh - isz) / 2.0,
                     isz,
-                    if hover || active { theme::TEXT } else { theme::TEXT_DIM },
+                    if hover || active { theme::text() } else { theme::text_dim() },
                 );
             }
             // Git-column toggle, parked at the right end of the title strip
@@ -1215,17 +1215,17 @@ impl App {
                     && sb_cursor.1 >= by
                     && sb_cursor.1 <= by + bh;
                 if hover {
-                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::surface_hover());
                 }
                 let active = git_col_w > 0.0;
-                let fg = if hover || active { theme::TEXT } else { theme::TEXT_DIM };
+                let fg = if hover || active { theme::text() } else { theme::text_dim() };
                 let gs = 15.0_f32;
                 let gx = bx + (bw - gs) / 2.0;
                 let gy = by + (bh - gs) / 2.0;
                 // Outline (fg square hollowed by a BG inset), then the right
                 // third filled + a seam line so it reads as a side panel.
                 round_rect(g, gx, gy, gs, gs, 3.0, fg);
-                round_rect(g, gx + 1.3, gy + 1.3, gs - 2.6, gs - 2.6, 2.0, theme::BG);
+                round_rect(g, gx + 1.3, gy + 1.3, gs - 2.6, gs - 2.6, 2.0, theme::bg());
                 let split = gx + gs * 0.58;
                 g.rect(split, gy + 1.3, gx + gs - 1.3 - split, gs - 2.6, fg);
                 g.rect(split, gy + 1.3, 1.0, gs - 2.6, fg);
@@ -1243,9 +1243,9 @@ impl App {
                         && sb_cursor.1 >= by
                         && sb_cursor.1 <= by + bh;
                     if hover {
-                        round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                        round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::surface_hover());
                     }
-                    let fg = if hover { theme::TEXT } else { theme::TEXT_DIM };
+                    let fg = if hover { theme::text() } else { theme::text_dim() };
                     let isz = theme::ICON_SIZE;
                     g.queue_icon(
                         icons[i],
@@ -1264,7 +1264,7 @@ impl App {
                 let isz = theme::ICON_SIZE;
                 let iy = (TITLE_HEIGHT - isz) / 2.0;
                 let ty = (TITLE_HEIGHT - chrome_font) / 2.0;
-                g.queue_icon("folder", px0, iy, isz, theme::TEXT_DIM);
+                g.queue_icon("folder", px0, iy, isz, theme::text_dim());
                 let after = px0 + isz;
                 // Title-bar cwd chip follows the FOCUSED pane's shell cwd —
                 // resolved via the shell's pid + /proc-style lookup. Falls
@@ -1285,7 +1285,7 @@ impl App {
                     &cwd_str,
                     gpu::DrawOpts {
                         font_size: chrome_font,
-                        color: theme::TEXT,
+                        color: theme::text(),
                         bold: false,
                         italic: false,
                     },
@@ -1340,7 +1340,7 @@ impl App {
                         &title_text,
                         gpu::DrawOpts {
                             font_size: chrome_font,
-                            color: theme::TEXT,
+                            color: theme::text(),
                             bold: true,
                             italic: false,
                         },
@@ -1357,7 +1357,7 @@ impl App {
                     TITLE_HEIGHT,
                     tab_strip_w,
                     (sb_win_h - TITLE_HEIGHT).max(0.0),
-                    theme::BG,
+                    theme::bg(),
                 );
                 // Right hairline so the strip reads as a distinct column.
                 g.rect(
@@ -1365,7 +1365,7 @@ impl App {
                     TITLE_HEIGHT,
                     1.0,
                     (sb_win_h - TITLE_HEIGHT).max(0.0),
-                    theme::BORDER,
+                    theme::border(),
                 );
                 // Truncate a label to a *display-width* budget (CJK glyphs are
                 // double-width) with a trailing ellipsis, so long Hangul/CJK
@@ -1396,9 +1396,9 @@ impl App {
                     // accent bar). Non-selected: flat, only a faint box on
                     // hover. Warp-style.
                     if is_active {
-                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_MD, theme::SURFACE_ACTIVE);
+                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_MD, theme::surface_active());
                     } else if is_hover {
-                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_MD, theme::SURFACE_HOVER);
+                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_MD, theme::surface_hover());
                     }
                     // Icon chip: small rounded square with a glyph.
                     let (name, cwd) = sb_labels
@@ -1413,9 +1413,9 @@ impl App {
                     // Chip contrasts with its backdrop either way: lighter than
                     // the strip on a flat tab, a hair darker than the active box.
                     let chip_bg = if is_active {
-                        theme::SURFACE_HOVER
+                        theme::surface_hover()
                     } else {
-                        theme::SURFACE_ACTIVE
+                        theme::surface_active()
                     };
                     round_rect(g, icon_x, icon_y, icon, icon, icon / 2.0, chip_bg);
                     g.queue_icon(
@@ -1423,7 +1423,7 @@ impl App {
                         icon_x + (icon - theme::ICON_SIZE) / 2.0,
                         icon_y + (icon - theme::ICON_SIZE) / 2.0,
                         theme::ICON_SIZE,
-                        theme::TEXT_DIM,
+                        theme::text_dim(),
                     );
                     // Window ordinal — a plain bold number in the left gutter,
                     // vertically centered on the icon. No badge circle (that
@@ -1431,7 +1431,7 @@ impl App {
                     // chip. `kasaterm-cli windows` lists the same ordinals.
                     let num = format!("{}", *i + 1);
                     let nfs = 14.0_f32;
-                    let num_fg = if is_active { theme::TEXT } else { theme::TEXT_MUTE };
+                    let num_fg = if is_active { theme::text() } else { theme::text_mute() };
                     let nw = g.measure_chrome_text(&num, nfs, true);
                     g.draw_text(
                         *tx + 12.0 - nw / 2.0,
@@ -1447,7 +1447,7 @@ impl App {
                         let dsz = 9.0_f32;
                         let dx = icon_x + icon - dsz + 3.0;
                         let dy = icon_y - 3.0;
-                        round_rect(g, dx, dy, dsz, dsz, dsz / 2.0, theme::ACCENT);
+                        round_rect(g, dx, dy, dsz, dsz, dsz / 2.0, theme::accent());
                     }
                     // Completion dot: a pane in this window just finished
                     // (notify_flash). SUCCESS green at the bottom-right corner so
@@ -1456,16 +1456,16 @@ impl App {
                         let dsz = 9.0_f32;
                         let dx = icon_x + icon - dsz + 3.0;
                         let dy = icon_y + icon - dsz + 3.0;
-                        round_rect(g, dx, dy, dsz, dsz, dsz / 2.0, theme::SUCCESS);
+                        round_rect(g, dx, dy, dsz, dsz, dsz / 2.0, theme::success());
                     }
                     // Two-line label to the right of the icon.
                     let text_x = icon_x + icon + 10.0;
                     let name_fg: [u8; 4] = if is_active {
-                        theme::TEXT
+                        theme::text()
                     } else {
-                        theme::TEXT_DIM
+                        theme::text_dim()
                     };
-                    let cwd_fg: [u8; 4] = theme::TEXT_MUTE;
+                    let cwd_fg: [u8; 4] = theme::text_mute();
                     let show_close = multi && (is_active || is_hover);
                     // Display-width budget derived from the live sidebar width:
                     // ~8.4 logical px per CJK glyph, minus icon (~50) and the
@@ -1510,9 +1510,9 @@ impl App {
                                 && sb_cursor.1 >= *cy
                                 && sb_cursor.1 <= *cy + *ch;
                             if x_hover {
-                                round_rect(g, *cx, *cy, *cw, *ch, theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
+                                round_rect(g, *cx, *cy, *cw, *ch, theme::RADIUS_SM, theme::with_alpha(theme::text(), 0x22));
                             }
-                            let xcol = if x_hover { theme::TEXT } else { theme::TEXT_MUTE };
+                            let xcol = if x_hover { theme::text() } else { theme::text_mute() };
                             g.queue_icon(
                                 "x",
                                 *cx + (*cw - theme::ICON_SIZE) / 2.0,
@@ -1531,14 +1531,14 @@ impl App {
                     && sb_cursor.1 >= py
                     && sb_cursor.1 <= py + ph;
                 if plus_hover {
-                    round_rect(g, px, py, pw, ph, theme::RADIUS_MD, theme::SURFACE_HOVER);
+                    round_rect(g, px, py, pw, ph, theme::RADIUS_MD, theme::surface_hover());
                 }
                 g.queue_icon(
                     "plus",
                     px + (pw - theme::ICON_SIZE) / 2.0,
                     py + (ph - theme::ICON_SIZE) / 2.0,
                     theme::ICON_SIZE,
-                    theme::TEXT_MUTE,
+                    theme::text_mute(),
                 );
                 // Shell picker popup, stacked under the "+" button. Layout
                 // (shell_menu_layout) and hit rects were computed before the
@@ -1552,7 +1552,7 @@ impl App {
                         menu_w_for_paint + 8.0,
                         backdrop_h,
                         theme::RADIUS_MD,
-                        theme::SURFACE_ACTIVE,
+                        theme::surface_active(),
                     );
                     for (_, label, _icon, (ix, iy, iw, ih)) in &shell_menu_layout {
                         let hov = sb_cursor.0 >= *ix
@@ -1560,20 +1560,20 @@ impl App {
                             && sb_cursor.1 >= *iy
                             && sb_cursor.1 <= *iy + *ih;
                         if hov {
-                            round_rect(g, *ix, *iy, *iw, *ih, theme::RADIUS_MD, theme::SURFACE_HOVER);
+                            round_rect(g, *ix, *iy, *iw, *ih, theme::RADIUS_MD, theme::surface_hover());
                         }
                         g.queue_icon(
                             "terminal",
                             *ix + 12.0,
                             *iy + (*ih - theme::ICON_SIZE) / 2.0,
                             theme::ICON_SIZE,
-                            theme::TEXT_DIM,
+                            theme::text_dim(),
                         );
                         g.draw_text(
                             *ix + 38.0,
                             *iy + (*ih - 14.0) / 2.0,
                             label,
-                            gpu::DrawOpts { font_size: 14.0, color: theme::TEXT, bold: false, italic: false },
+                            gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: false, italic: false },
                         );
                     }
                 }
@@ -1588,22 +1588,22 @@ impl App {
                         && sb_cursor.1 >= by
                         && sb_cursor.1 <= by + bh;
                     if active {
-                        round_rect(g, bx, by, bw, bh, theme::RADIUS_MD, theme::SURFACE_ACTIVE);
+                        round_rect(g, bx, by, bw, bh, theme::RADIUS_MD, theme::surface_active());
                     } else if hover {
-                        round_rect(g, bx, by, bw, bh, theme::RADIUS_MD, theme::SURFACE_HOVER);
+                        round_rect(g, bx, by, bw, bh, theme::RADIUS_MD, theme::surface_hover());
                     }
                     // Icon chip, matching the session tabs' chip geometry.
                     let icon = 30.0_f32;
                     let icon_x = bx + 24.0;
                     let icon_y = by + (bh - icon) / 2.0;
-                    let chip_bg = if active { theme::SURFACE_HOVER } else { theme::SURFACE_ACTIVE };
+                    let chip_bg = if active { theme::surface_hover() } else { theme::surface_active() };
                     round_rect(g, icon_x, icon_y, icon, icon, icon / 2.0, chip_bg);
                     g.queue_icon(
                         "settings-2",
                         icon_x + (icon - theme::ICON_SIZE) / 2.0,
                         icon_y + (icon - theme::ICON_SIZE) / 2.0,
                         theme::ICON_SIZE,
-                        if active { theme::TEXT } else { theme::TEXT_DIM },
+                        if active { theme::text() } else { theme::text_dim() },
                     );
                     g.draw_text(
                         icon_x + icon + 10.0,
@@ -1611,7 +1611,7 @@ impl App {
                         "Settings",
                         gpu::DrawOpts {
                             font_size: 14.0,
-                            color: if active { theme::TEXT } else { theme::TEXT_DIM },
+                            color: if active { theme::text() } else { theme::text_dim() },
                             bold: active,
                             italic: false,
                         },
@@ -1627,13 +1627,13 @@ impl App {
                 let col_h = (sb_win_h - TITLE_HEIGHT).max(0.0);
                 // Own background + right hairline so the column reads as a
                 // distinct pane between the tabs and the cell grid.
-                g.rect(tree_col_x, TITLE_HEIGHT, tree_col_w, col_h, theme::BG);
+                g.rect(tree_col_x, TITLE_HEIGHT, tree_col_w, col_h, theme::bg());
                 g.rect(
                     tree_col_x + tree_col_w - 1.0,
                     TITLE_HEIGHT,
                     1.0,
                     col_h,
-                    theme::BORDER,
+                    theme::border(),
                 );
                 let inset = SIDEBAR_TAB_INSET;
                 let item_h = 26.0_f32;
@@ -1650,10 +1650,10 @@ impl App {
                 let search_w = (row_w - buttons_w - 6.0).max(40.0);
                 {
                     let active = self.file_tree_search_active;
-                    let fill = if active { theme::SURFACE_ACTIVE } else { theme::SURFACE };
-                    round_rect(g, row_x, sbx_y, search_w, search_box_h, theme::RADIUS_SM, theme::BORDER);
+                    let fill = if active { theme::surface_active() } else { theme::surface() };
+                    round_rect(g, row_x, sbx_y, search_w, search_box_h, theme::RADIUS_SM, theme::border());
                     round_rect(g, row_x + 1.0, sbx_y + 1.0, search_w - 2.0, search_box_h - 2.0, theme::RADIUS_SM - 1.0, fill);
-                    let ic = if active { theme::TEXT } else { theme::TEXT_DIM };
+                    let ic = if active { theme::text() } else { theme::text_dim() };
                     g.queue_icon("folder-tree", row_x + 8.0, sbx_y + (search_box_h - 14.0) / 2.0, 14.0, ic);
                     let mut shown = self.file_tree_search_query.clone();
                     if active && self.in_preedit {
@@ -1661,16 +1661,16 @@ impl App {
                     }
                     let caret_w = g.measure_chrome_text(&shown, 13.0, false);
                     let (txt, col) = if shown.is_empty() {
-                        ("검색…".to_string(), theme::TEXT_MUTE)
+                        ("검색…".to_string(), theme::text_mute())
                     } else {
-                        (shown, theme::TEXT)
+                        (shown, theme::text())
                     };
                     g.draw_text(row_x + 30.0, sbx_y + (search_box_h - 13.0) / 2.0, &txt,
                         gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
                     // Blinking text caret when the box has focus.
                     if active && commit_caret_on {
                         g.rect(row_x + 30.0 + caret_w, sbx_y + (search_box_h - 14.0) / 2.0,
-                            1.5, 14.0, theme::TEXT);
+                            1.5, 14.0, theme::text());
                     }
                     self.file_tree_search_rect = (row_x, sbx_y, search_w, search_box_h);
                     // New-folder / new-file buttons.
@@ -1681,9 +1681,9 @@ impl App {
                     for (bx, icon) in [(nf_x, "folder-plus"), (nfile_x, "file-plus")] {
                         let hover = mx >= bx && mx <= bx + btn_sz && my >= bty && my <= bty + btn_sz;
                         if hover {
-                            round_rect(g, bx, bty, btn_sz, btn_sz, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                            round_rect(g, bx, bty, btn_sz, btn_sz, theme::RADIUS_SM, theme::surface_hover());
                         }
-                        let ic = if hover { theme::TEXT } else { theme::TEXT_DIM };
+                        let ic = if hover { theme::text() } else { theme::text_dim() };
                         g.queue_icon(icon, bx + (btn_sz - 15.0) / 2.0, bty + (btn_sz - 15.0) / 2.0, 15.0, ic);
                     }
                     self.file_tree_new_folder_rect = (nf_x, bty, btn_sz, btn_sz);
@@ -1693,23 +1693,23 @@ impl App {
                 let mut tree_top = sbx_y + search_box_h + 8.0;
                 if let Some((is_dir, buf)) = self.file_tree_new.clone() {
                     let iy = tree_top;
-                    round_rect(g, row_x, iy, row_w, item_h, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
-                    g.rect(row_x, iy + 2.0, 2.0, item_h - 4.0, theme::ACCENT);
-                    g.queue_icon(if is_dir { "folder" } else { "file" }, row_x + 18.0, iy + (item_h - 16.0) / 2.0, 16.0, theme::TEXT);
+                    round_rect(g, row_x, iy, row_w, item_h, theme::RADIUS_SM, theme::surface_active());
+                    g.rect(row_x, iy + 2.0, 2.0, item_h - 4.0, theme::accent());
+                    g.queue_icon(if is_dir { "folder" } else { "file" }, row_x + 18.0, iy + (item_h - 16.0) / 2.0, 16.0, theme::text());
                     let mut shown = buf.clone();
                     if self.in_preedit {
                         shown.push_str(&self.preedit);
                     }
                     let caret_w = g.measure_chrome_text(&shown, 13.0, false);
                     let (txt, col) = if shown.is_empty() {
-                        ((if is_dir { "폴더 이름…" } else { "파일 이름…" }).to_string(), theme::TEXT_MUTE)
+                        ((if is_dir { "폴더 이름…" } else { "파일 이름…" }).to_string(), theme::text_mute())
                     } else {
-                        (shown, theme::TEXT)
+                        (shown, theme::text())
                     };
                     g.draw_text(row_x + 44.0, iy + (item_h - 13.0) / 2.0, &txt,
                         gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
                     if commit_caret_on {
-                        g.rect(row_x + 44.0 + caret_w, iy + (item_h - 14.0) / 2.0, 1.5, 14.0, theme::TEXT);
+                        g.rect(row_x + 44.0 + caret_w, iy + (item_h - 14.0) / 2.0, 1.5, 14.0, theme::text());
                     }
                     self.file_tree_new_row_rect = (row_x, iy, row_w, item_h);
                     tree_top += item_h;
@@ -1750,21 +1750,21 @@ impl App {
                     // selection keeps a solid active tint + accent bar; an open
                     // folder keeps a faint tint so the branch reads as a group.
                     if hovered {
-                        round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                        round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::surface_hover());
                     } else if is_open || is_selected {
-                        round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
+                        round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::surface_active());
                     } else if expanded {
-                        round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::with_alpha(theme::SURFACE_HOVER, 0x33));
+                        round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::with_alpha(theme::surface_hover(), 0x33));
                     }
                     if is_open || is_selected {
                         // Accent rail on the left edge — VSCode "active file" cue.
-                        g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::ACCENT);
+                        g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::accent());
                     }
                     // Indent guides — one faint rule per ancestor level so deep
                     // nesting stays legible.
                     for d in 0..node.depth {
                         let gx = row_x + 6.0 + d as f32 * step;
-                        g.rect(gx, y, 1.0, item_h, theme::with_alpha(theme::BORDER, 0x55));
+                        g.rect(gx, y, 1.0, item_h, theme::with_alpha(theme::border(), 0x55));
                     }
                     let base_x = row_x + node.depth as f32 * step;
                     let isz = 16.0_f32;
@@ -1773,7 +1773,7 @@ impl App {
                     // Chevron column (folders only); files align past it.
                     if node.is_dir {
                         let chev = if expanded { "chevron-down" } else { "chevron-right" };
-                        let cc = if hovered { theme::TEXT } else { theme::TEXT_MUTE };
+                        let cc = if hovered { theme::text() } else { theme::text_mute() };
                         g.queue_icon(chev, base_x + 2.0, y + (item_h - 12.0) / 2.0, 12.0, cc);
                     }
                     let icon_x = base_x + 18.0;
@@ -1782,21 +1782,21 @@ impl App {
                     // rows render dim + italic so build output (target, dist) and
                     // config (.git, .claude) recede from real source.
                     let icon_color = if node.ignored {
-                        theme::with_alpha(theme::TEXT_DIM, 0x99)
+                        theme::with_alpha(theme::text_dim(), 0x99)
                     } else if hovered || is_open {
-                        theme::TEXT
+                        theme::text()
                     } else {
-                        theme::TEXT_DIM
+                        theme::text_dim()
                     };
                     g.queue_icon(if node.is_dir { "folder" } else { "file" }, icon_x, iy, isz, icon_color);
                     // Folders read brighter than files (soft hierarchy); ignored
                     // rows are muted; hover/open lift to full strength.
                     let fg = if node.ignored {
-                        theme::TEXT_MUTE
+                        theme::text_mute()
                     } else if hovered || is_open || node.is_dir {
-                        theme::TEXT
+                        theme::text()
                     } else {
-                        theme::TEXT_DIM
+                        theme::text_dim()
                     };
                     let text_x = icon_x + isz + 8.0;
                     // Clip the name to the column width with an ellipsis — long
@@ -1851,7 +1851,7 @@ impl App {
                         for i in 0..strips {
                             let t = i as f32 / (strips - 1) as f32; // 0 top → 1 bottom of band
                             let a = ((1.0 - t) * 0.92 * k * 255.0) as u8;
-                            g.rect(tree_col_x, view_top + t * fade_h, tree_col_w - 1.0, strip_h, theme::with_alpha(theme::BG, a));
+                            g.rect(tree_col_x, view_top + t * fade_h, tree_col_w - 1.0, strip_h, theme::with_alpha(theme::bg(), a));
                         }
                     }
                     // Bottom fade — rows still hidden below the last visible line.
@@ -1860,7 +1860,7 @@ impl App {
                         for i in 0..strips {
                             let t = i as f32 / (strips - 1) as f32; // 0 top → 1 bottom of band
                             let a = (t * 0.92 * k * 255.0) as u8;
-                            g.rect(tree_col_x, view_bottom - fade_h + t * fade_h, tree_col_w - 1.0, strip_h, theme::with_alpha(theme::BG, a));
+                            g.rect(tree_col_x, view_bottom - fade_h + t * fade_h, tree_col_w - 1.0, strip_h, theme::with_alpha(theme::bg(), a));
                         }
                     }
                     // Scrollbar thumb — only while the cursor hovers the column,
@@ -1874,7 +1874,7 @@ impl App {
                         let thumb_h = (viewport_h * viewport_h / content_h).max(28.0);
                         let thumb_y =
                             view_top + (viewport_h - thumb_h) * (scroll / overflow).clamp(0.0, 1.0);
-                        round_rect(g, tree_col_x + tree_col_w - 6.0, thumb_y, 3.5, thumb_h, 1.75, theme::with_alpha(theme::TEXT, 0x66));
+                        round_rect(g, tree_col_x + tree_col_w - 6.0, thumb_y, 3.5, thumb_h, 1.75, theme::with_alpha(theme::text(), 0x66));
                     }
                 }
             }
@@ -1898,8 +1898,8 @@ impl App {
                 let top = TITLE_HEIGHT;
                 let bottom = (win_px.1 / scale - dock_h).max(top);
                 // Background + left hairline so the column reads as its own pane.
-                g.rect(git_col_x, top, git_col_w, bottom - top, theme::BG);
-                g.rect(git_col_x, top, 1.0, bottom - top, theme::BORDER);
+                g.rect(git_col_x, top, git_col_w, bottom - top, theme::bg());
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 let red = [229, 83, 75, 255];
                 let mut y = top + 10.0;
                 // ── Row 1: ~path : branch  ····  N · +ins -del   ⤢ ✕
@@ -1914,8 +1914,8 @@ impl App {
                             && self.cursor_px.1 >= y - 3.0
                             && self.cursor_px.1 <= y + bi + 3.0
                     };
-                    g.queue_icon("maximize", expand_x, y, bi, if bhov(expand_x) { theme::TEXT } else { theme::TEXT_MUTE });
-                    g.queue_icon("x", close_x, y, bi, if bhov(close_x) { theme::TEXT } else { theme::TEXT_MUTE });
+                    g.queue_icon("maximize", expand_x, y, bi, if bhov(expand_x) { theme::text() } else { theme::text_mute() });
+                    g.queue_icon("x", close_x, y, bi, if bhov(close_x) { theme::text() } else { theme::text_mute() });
                     self.git_col_expand_rect = Some((expand_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
                     self.git_col_close_rect = Some((close_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
                     let home = std::env::var("HOME").ok();
@@ -1930,13 +1930,13 @@ impl App {
                             }
                         })
                         .unwrap_or_else(|| "—".to_string());
-                    let pcol = if self.git_col_pinned_cwd.is_some() { theme::ACCENT } else { theme::TEXT_DIM };
+                    let pcol = if self.git_col_pinned_cwd.is_some() { theme::accent() } else { theme::text_dim() };
                     let px = g.draw_text(gcx0, y, &path_disp, gpu::DrawOpts { font_size: 12.0, color: pcol, bold: false, italic: false });
                     self.git_path_hdr_rect = Some((gcx0 - 3.0, y - 3.0, (px - gcx0) + 6.0, 19.0));
                     if !git_view.no_repo {
                         let branch = if git_view.branch.is_empty() { "—" } else { git_view.branch.as_str() };
-                        let cx2 = g.draw_text(px, y, " : ", gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_MUTE, bold: false, italic: false });
-                        let bend = g.draw_text(cx2, y, branch, gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: true, italic: false });
+                        let cx2 = g.draw_text(px, y, " : ", gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
+                        let bend = g.draw_text(cx2, y, branch, gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
                         self.git_branch_hdr_rect = Some((cx2 - 3.0, y - 3.0, (bend - cx2) + 6.0, 19.0));
                         // N · +ins -del, right-aligned just left of the buttons.
                         let files = git_view.staged.len() + git_view.unstaged.len();
@@ -1951,11 +1951,11 @@ impl App {
                             + g.measure_chrome_text(&minus, 12.0, false);
                         let sx0 = expand_x - 12.0 - total;
                         if sx0 > bend + 14.0 {
-                            g.queue_icon("file-text", sx0, y, 12.0, theme::TEXT_MUTE);
+                            g.queue_icon("file-text", sx0, y, 12.0, theme::text_mute());
                             let mut sx = sx0 + 16.0;
-                            sx = g.draw_text(sx, y, &fnum, gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_DIM, bold: false, italic: false });
-                            sx = g.draw_text(sx + 4.0, y, "·", gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_MUTE, bold: false, italic: false });
-                            sx = g.draw_text(sx + 4.0, y, &plus, gpu::DrawOpts { font_size: 12.0, color: theme::SUCCESS, bold: false, italic: false });
+                            sx = g.draw_text(sx, y, &fnum, gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: false, italic: false });
+                            sx = g.draw_text(sx + 4.0, y, "·", gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
+                            sx = g.draw_text(sx + 4.0, y, &plus, gpu::DrawOpts { font_size: 12.0, color: theme::success(), bold: false, italic: false });
                             g.draw_text(sx + 4.0, y, &minus, gpu::DrawOpts { font_size: 12.0, color: red, bold: false, italic: false });
                         }
                     }
@@ -1965,13 +1965,13 @@ impl App {
                 let list_top;
                 let input_top = bottom;
                 if git_view.no_repo {
-                    g.draw_text(gcx0, y, "git 저장소가 아닙니다", gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                    g.draw_text(gcx0, y, "git 저장소가 아닙니다", gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
                     self.git_commit_btn_rect = None;
                     self.git_commit_caret_rect = None;
                     list_top = y + 8.0;
                 } else {
-                    g.queue_icon("git-branch", gcx0, y + 1.0, 13.0, theme::TEXT_MUTE);
-                    g.draw_text(gcx0 + 18.0, y, "Uncommitted changes", gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: true, italic: false });
+                    g.queue_icon("git-branch", gcx0, y + 1.0, 13.0, theme::text_mute());
+                    g.draw_text(gcx0 + 18.0, y, "Uncommitted changes", gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false });
                     let bh = 24.0_f32;
                     let by = y - 4.0;
                     let caret_w = 20.0_f32;
@@ -1982,28 +1982,28 @@ impl App {
                     let can_commit = !git_view.staged.is_empty() || !git_view.unstaged.is_empty();
                     let mhov = self.cursor_px.0 >= bx && self.cursor_px.0 <= bx + main_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
                     let chov = self.cursor_px.0 >= bx + main_w && self.cursor_px.0 <= bx + total_w && self.cursor_px.1 >= by && self.cursor_px.1 <= by + bh;
-                    let base = if can_commit { theme::SURFACE_ACTIVE } else { theme::with_alpha(theme::SURFACE_HOVER, 0x66) };
+                    let base = if can_commit { theme::surface_active() } else { theme::with_alpha(theme::surface_hover(), 0x66) };
                     round_rect(g, bx, by, total_w, bh, theme::RADIUS_SM, base);
-                    if can_commit && mhov { round_rect(g, bx, by, main_w, bh, theme::RADIUS_SM, theme::ACCENT); }
-                    if can_commit && chov { round_rect(g, bx + main_w, by, caret_w, bh, theme::RADIUS_SM, theme::ACCENT); }
-                    g.rect(bx + main_w, by + 5.0, 1.0, bh - 10.0, theme::with_alpha(theme::BG, 0x99));
-                    let fg = if can_commit { theme::TEXT } else { theme::TEXT_MUTE };
+                    if can_commit && mhov { round_rect(g, bx, by, main_w, bh, theme::RADIUS_SM, theme::accent()); }
+                    if can_commit && chov { round_rect(g, bx + main_w, by, caret_w, bh, theme::RADIUS_SM, theme::accent()); }
+                    g.rect(bx + main_w, by + 5.0, 1.0, bh - 10.0, theme::with_alpha(theme::bg(), 0x99));
+                    let fg = if can_commit { theme::text() } else { theme::text_mute() };
                     g.queue_icon("git-commit-horizontal", bx + 8.0, by + (bh - 13.0) / 2.0, 13.0, fg);
                     g.draw_text(bx + 24.0, by + (bh - 12.0) / 2.0, "Commit", gpu::DrawOpts { font_size: 12.0, color: fg, bold: true, italic: false });
                     g.draw_text(bx + main_w + (caret_w - 7.0) / 2.0, by + (bh - 11.0) / 2.0, "▾", gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false });
                     self.git_commit_btn_rect = Some((bx, by, main_w, bh));
                     self.git_commit_caret_rect = Some((bx + main_w, by, caret_w, bh));
                     y += 24.0;
-                    g.rect(gcx0, y, gcw, 1.0, theme::with_alpha(theme::BORDER, 0x80));
+                    g.rect(gcx0, y, gcw, 1.0, theme::with_alpha(theme::border(), 0x80));
                     list_top = y + 10.0;
                 }
                     if git_view.clean {
-                        round_rect(g, gcx0, list_top + 4.0, 8.0, 8.0, 4.0, theme::SUCCESS);
+                        round_rect(g, gcx0, list_top + 4.0, 8.0, 8.0, 4.0, theme::success());
                         g.draw_text(
                             gcx0 + 15.0,
                             list_top + 1.0,
                             "변경 없음",
-                            gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_DIM, bold: false, italic: false },
+                            gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: false, italic: false },
                         );
                     } else {
                         let item_h = 22.0_f32;
@@ -2031,7 +2031,7 @@ impl App {
                                     gcx0,
                                     y_cur + 5.0,
                                     &format!("{}  {}", title, files.len()),
-                                    gpu::DrawOpts { font_size: 11.0, color: theme::TEXT_MUTE, bold: true, italic: false },
+                                    gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: true, italic: false },
                                 );
                             }
                             y_cur += header_h;
@@ -2046,7 +2046,7 @@ impl App {
                                         && self.cursor_px.1 >= ry
                                         && self.cursor_px.1 < ry + item_h;
                                     if hovered {
-                                        round_rect(g, gcx0 - 5.0, ry, gcw + 10.0, item_h, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                                        round_rect(g, gcx0 - 5.0, ry, gcw + 10.0, item_h, theme::RADIUS_SM, theme::surface_hover());
                                     }
                                     // Expander chevron at the row's left edge.
                                     g.queue_icon(
@@ -2054,7 +2054,7 @@ impl App {
                                         gcx0,
                                         ry + (item_h - 12.0) / 2.0,
                                         12.0,
-                                        theme::TEXT_MUTE,
+                                        theme::text_mute(),
                                     );
                                     let untracked = *marker == 'U';
                                     // Filename bright, parent dir dim after it (so the
@@ -2068,14 +2068,14 @@ impl App {
                                         tx,
                                         ty,
                                         fname,
-                                        gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: false, italic: false },
+                                        gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false },
                                     );
                                     if !dir.is_empty() {
                                         g.draw_text(
                                             endx + 7.0,
                                             ty + 0.5,
                                             dir,
-                                            gpu::DrawOpts { font_size: 11.0, color: theme::TEXT_MUTE, bold: false, italic: false },
+                                            gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false },
                                         );
                                     }
                                     // Action cluster (cursor style), always visible
@@ -2084,20 +2084,20 @@ impl App {
                                     let aw = 19.0_f32;
                                     let agap = 1.0_f32;
                                     let mut ax = git_col_x + git_col_w - 12.0 - aw;
-                                    let icon_dim = if hovered { theme::TEXT_DIM } else { theme::with_alpha(theme::TEXT_DIM, 0x88) };
+                                    let icon_dim = if hovered { theme::text_dim() } else { theme::with_alpha(theme::text_dim(), 0x88) };
                                     {
                                         let bh = self.cursor_px.0 >= ax && self.cursor_px.0 <= ax + aw && self.cursor_px.1 >= ry && self.cursor_px.1 < ry + item_h;
                                         if bh {
-                                            round_rect(g, ax, ry + 2.0, aw, 18.0, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
+                                            round_rect(g, ax, ry + 2.0, aw, 18.0, theme::RADIUS_SM, theme::surface_active());
                                         }
-                                        g.queue_icon(if staged { "minus" } else { "plus" }, ax + (aw - 13.0) / 2.0, ry + (item_h - 13.0) / 2.0, 13.0, if bh { theme::TEXT } else { icon_dim });
+                                        g.queue_icon(if staged { "minus" } else { "plus" }, ax + (aw - 13.0) / 2.0, ry + (item_h - 13.0) / 2.0, 13.0, if bh { theme::text() } else { icon_dim });
                                         stage_rects.push((!staged, path.clone(), (ax - 1.0, ry, aw + 2.0, item_h)));
                                         ax -= aw + agap;
                                     }
                                     {
                                         let bh = self.cursor_px.0 >= ax && self.cursor_px.0 <= ax + aw && self.cursor_px.1 >= ry && self.cursor_px.1 < ry + item_h;
                                         if bh {
-                                            round_rect(g, ax, ry + 2.0, aw, 18.0, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
+                                            round_rect(g, ax, ry + 2.0, aw, 18.0, theme::RADIUS_SM, theme::surface_active());
                                         }
                                         g.queue_icon("undo-2", ax + (aw - 13.0) / 2.0, ry + (item_h - 13.0) / 2.0, 13.0, if bh { red } else { icon_dim });
                                         discard_rects.push((path.clone(), untracked, (ax - 1.0, ry, aw + 2.0, item_h)));
@@ -2106,9 +2106,9 @@ impl App {
                                     {
                                         let bh = self.cursor_px.0 >= ax && self.cursor_px.0 <= ax + aw && self.cursor_px.1 >= ry && self.cursor_px.1 < ry + item_h;
                                         if bh {
-                                            round_rect(g, ax, ry + 2.0, aw, 18.0, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
+                                            round_rect(g, ax, ry + 2.0, aw, 18.0, theme::RADIUS_SM, theme::surface_active());
                                         }
-                                        g.queue_icon("external-link", ax + (aw - 13.0) / 2.0, ry + (item_h - 13.0) / 2.0, 13.0, if bh { theme::TEXT } else { icon_dim });
+                                        g.queue_icon("external-link", ax + (aw - 13.0) / 2.0, ry + (item_h - 13.0) / 2.0, 13.0, if bh { theme::text() } else { icon_dim });
                                         open_rects.push((path.clone(), (ax - 1.0, ry, aw + 2.0, item_h)));
                                     }
                                     // numstat — right-aligned just left of the actions.
@@ -2126,7 +2126,7 @@ impl App {
                                             }
                                             if *ins > 0 {
                                                 rx -= wp;
-                                                g.draw_text(rx, ty, &plus, gpu::DrawOpts { font_size: 11.0, color: theme::SUCCESS, bold: false, italic: false });
+                                                g.draw_text(rx, ty, &plus, gpu::DrawOpts { font_size: 11.0, color: theme::success(), bold: false, italic: false });
                                             }
                                         }
                                     }
@@ -2146,10 +2146,10 @@ impl App {
                                             }
                                             use kasa_mcp::git::DiffLineKind as K;
                                             let (bg, sign, scol) = match dl.kind {
-                                                K::Add => (theme::with_alpha(theme::SUCCESS, 0x22), "+", theme::SUCCESS),
+                                                K::Add => (theme::with_alpha(theme::success(), 0x22), "+", theme::success()),
                                                 K::Del => (theme::with_alpha(red, 0x22), "-", red),
-                                                K::Hunk => (theme::with_alpha(theme::ACCENT, 0x14), "", theme::TEXT_MUTE),
-                                                K::Context => ([0, 0, 0, 0], " ", theme::TEXT_MUTE),
+                                                K::Hunk => (theme::with_alpha(theme::accent(), 0x14), "", theme::text_mute()),
+                                                K::Context => ([0, 0, 0, 0], " ", theme::text_mute()),
                                             };
                                             if bg[3] > 0 {
                                                 g.rect(gcx0 - 5.0, dy, gcw + 10.0, dline_h, bg);
@@ -2159,7 +2159,7 @@ impl App {
                                                     gcx0,
                                                     dy + 1.5,
                                                     dl.text.trim_end(),
-                                                    gpu::DrawOpts { font_size: 10.0, color: theme::TEXT_MUTE, bold: false, italic: false },
+                                                    gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
                                                 );
                                                 continue;
                                             }
@@ -2171,7 +2171,7 @@ impl App {
                                                     gcx0 + gutter_w - nw - 4.0,
                                                     dy + 1.5,
                                                     &ns,
-                                                    gpu::DrawOpts { font_size: 10.0, color: theme::TEXT_MUTE, bold: false, italic: false },
+                                                    gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
                                                 );
                                             }
                                             g.draw_text(
@@ -2181,7 +2181,7 @@ impl App {
                                                 gpu::DrawOpts { font_size: 11.0, color: scol, bold: false, italic: false },
                                             );
                                             let mut tx = gcx0 + gutter_w + 9.0;
-                                            for (tok, col) in gpu::highlight_code_line(dl.text.trim_end(), lang, theme::TEXT_DIM) {
+                                            for (tok, col) in gpu::highlight_code_line(dl.text.trim_end(), lang, theme::text_dim()) {
                                                 tx = g.draw_text(
                                                     tx,
                                                     dy + 1.5,
@@ -2232,16 +2232,16 @@ impl App {
                         let mh = ih * items.len() as f32 + 8.0;
                         let mx = (ccx + ccw - iw).max(git_col_x + 8.0);
                         let my = ccy + cch + 4.0;
-                        round_rect(g, mx - 1.0, my - 1.0, iw + 2.0, mh + 2.0, theme::RADIUS_MD, theme::with_alpha(theme::BORDER, 0xFF));
-                        round_rect(g, mx, my, iw, mh, theme::RADIUS_MD, theme::SURFACE);
+                        round_rect(g, mx - 1.0, my - 1.0, iw + 2.0, mh + 2.0, theme::RADIUS_MD, theme::with_alpha(theme::border(), 0xFF));
+                        round_rect(g, mx, my, iw, mh, theme::RADIUS_MD, theme::surface());
                         let mut iy = my + 4.0;
                         for (icon, label, act) in items {
                             let hov = self.cursor_px.0 >= mx && self.cursor_px.0 <= mx + iw && self.cursor_px.1 >= iy && self.cursor_px.1 <= iy + ih;
                             if hov {
-                                round_rect(g, mx + 4.0, iy, iw - 8.0, ih, theme::RADIUS_SM, theme::SURFACE_HOVER);
+                                round_rect(g, mx + 4.0, iy, iw - 8.0, ih, theme::RADIUS_SM, theme::surface_hover());
                             }
-                            g.queue_icon(icon, mx + 14.0, iy + (ih - 15.0) / 2.0, 15.0, theme::TEXT_DIM);
-                            g.draw_text(mx + 38.0, iy + (ih - 13.0) / 2.0, label, gpu::DrawOpts { font_size: 13.0, color: theme::TEXT, bold: false, italic: false });
+                            g.queue_icon(icon, mx + 14.0, iy + (ih - 15.0) / 2.0, 15.0, theme::text_dim());
+                            g.draw_text(mx + 38.0, iy + (ih - 13.0) / 2.0, label, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
                             self.git_commit_menu_rects.push((act, (mx, iy, iw, ih)));
                             iy += ih;
                         }
@@ -2255,39 +2255,39 @@ impl App {
                     let bx = git_col_x + (git_col_w - bw) / 2.0;
                     let bh = (bottom - top - 50.0).min(660.0).max(0.0);
                     let bxy = top + (bottom - top - bh) / 2.0;
-                    round_rect(g, bx - 1.0, bxy - 1.0, bw + 2.0, bh + 2.0, theme::RADIUS_MD, theme::with_alpha(theme::BORDER, 0xFF));
-                    round_rect(g, bx, bxy, bw, bh, theme::RADIUS_MD, theme::BG);
+                    round_rect(g, bx - 1.0, bxy - 1.0, bw + 2.0, bh + 2.0, theme::RADIUS_MD, theme::with_alpha(theme::border(), 0xFF));
+                    round_rect(g, bx, bxy, bw, bh, theme::RADIUS_MD, theme::bg());
                     let pad = 22.0_f32;
                     let cx = bx + pad;
                     let cw = bw - pad * 2.0;
                     let mut my = bxy + pad;
                     // Header: icon chip + X
-                    round_rect(g, cx, my, 36.0, 36.0, theme::RADIUS_SM, theme::SURFACE_ACTIVE);
-                    g.queue_icon("git-commit-horizontal", cx + 10.0, my + 10.0, 16.0, theme::TEXT);
+                    round_rect(g, cx, my, 36.0, 36.0, theme::RADIUS_SM, theme::surface_active());
+                    g.queue_icon("git-commit-horizontal", cx + 10.0, my + 10.0, 16.0, theme::text());
                     let xx = bx + bw - pad - 16.0;
                     let xhov = self.cursor_px.0 >= xx - 5.0 && self.cursor_px.0 <= xx + 21.0 && self.cursor_px.1 >= my && self.cursor_px.1 <= my + 24.0;
-                    g.queue_icon("x", xx, my + 4.0, 16.0, if xhov { theme::TEXT } else { theme::TEXT_MUTE });
+                    g.queue_icon("x", xx, my + 4.0, 16.0, if xhov { theme::text() } else { theme::text_mute() });
                     self.git_commit_modal_rects.push((GitModalBtn::Close, (xx - 5.0, my, 26.0, 26.0)));
                     my += 36.0 + 18.0;
-                    g.draw_text(cx, my, "Commit your changes", gpu::DrawOpts { font_size: 19.0, color: theme::TEXT, bold: true, italic: false });
+                    g.draw_text(cx, my, "Commit your changes", gpu::DrawOpts { font_size: 19.0, color: theme::text(), bold: true, italic: false });
                     my += 36.0;
                     // Branch
-                    g.draw_text(cx, my, "Branch", gpu::DrawOpts { font_size: 13.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                    g.draw_text(cx, my, "Branch", gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false });
                     my += 22.0;
-                    g.queue_icon("git-branch", cx, my, 15.0, theme::TEXT_DIM);
+                    g.queue_icon("git-branch", cx, my, 15.0, theme::text_dim());
                     let mbranch = if git_view.branch.is_empty() { "—" } else { git_view.branch.as_str() };
-                    g.draw_text(cx + 22.0, my + 1.0, mbranch, gpu::DrawOpts { font_size: 14.0, color: theme::TEXT, bold: false, italic: false });
+                    g.draw_text(cx + 22.0, my + 1.0, mbranch, gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: false, italic: false });
                     my += 34.0;
                     // Changes + Include unstaged toggle
-                    g.draw_text(cx, my, "Changes", gpu::DrawOpts { font_size: 13.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                    g.draw_text(cx, my, "Changes", gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false });
                     let tw = 38.0_f32;
                     let th = 20.0_f32;
                     let tx = bx + bw - pad - tw;
                     let tlbl = "Include unstaged";
                     let tlw = g.measure_chrome_text(tlbl, 13.0, false);
-                    g.draw_text(tx - 8.0 - tlw, my, tlbl, gpu::DrawOpts { font_size: 13.0, color: theme::TEXT_DIM, bold: false, italic: false });
+                    g.draw_text(tx - 8.0 - tlw, my, tlbl, gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false });
                     let on = self.git_commit_modal_include_unstaged;
-                    round_rect(g, tx, my - 2.0, tw, th, th / 2.0, if on { theme::ACCENT } else { theme::SURFACE_ACTIVE });
+                    round_rect(g, tx, my - 2.0, tw, th, th / 2.0, if on { theme::accent() } else { theme::surface_active() });
                     let knob = th - 6.0;
                     let kx = if on { tx + tw - knob - 3.0 } else { tx + 3.0 };
                     round_rect(g, kx, my - 2.0 + 3.0, knob, knob, knob / 2.0, [255, 255, 255, 255]);
@@ -2295,11 +2295,11 @@ impl App {
                     my += 28.0;
                     // File list box
                     let lh = (bh * 0.28).min(180.0).max(60.0);
-                    round_rect(g, cx - 1.0, my - 1.0, cw + 2.0, lh + 2.0, theme::RADIUS_SM, theme::with_alpha(theme::BORDER, 0xFF));
-                    round_rect(g, cx, my, cw, lh, theme::RADIUS_SM, theme::SURFACE);
+                    round_rect(g, cx - 1.0, my - 1.0, cw + 2.0, lh + 2.0, theme::RADIUS_SM, theme::with_alpha(theme::border(), 0xFF));
+                    round_rect(g, cx, my, cw, lh, theme::RADIUS_SM, theme::surface());
                     let nf = git_view.staged.len() + git_view.unstaged.len();
-                    let mut fx = g.draw_text(cx + 12.0, my + 10.0, &format!("{} files", nf), gpu::DrawOpts { font_size: 13.0, color: theme::TEXT, bold: true, italic: false });
-                    fx = g.draw_text(fx + 10.0, my + 10.0, &format!("+{}", git_view.insertions), gpu::DrawOpts { font_size: 13.0, color: theme::SUCCESS, bold: false, italic: false });
+                    let mut fx = g.draw_text(cx + 12.0, my + 10.0, &format!("{} files", nf), gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false });
+                    fx = g.draw_text(fx + 10.0, my + 10.0, &format!("+{}", git_view.insertions), gpu::DrawOpts { font_size: 13.0, color: theme::success(), bold: false, italic: false });
                     g.draw_text(fx + 8.0, my + 10.0, &format!("-{}", git_view.deletions), gpu::DrawOpts { font_size: 13.0, color: red, bold: false, italic: false });
                     let mut ly = my + 34.0;
                     for (_m, path) in git_view.staged.iter().chain(git_view.unstaged.iter()) {
@@ -2308,9 +2308,9 @@ impl App {
                         }
                         let fname = path.rsplit('/').next().unwrap_or(path.as_str());
                         let dir = path.strip_suffix(fname).unwrap_or("").trim_end_matches('/');
-                        let ex = g.draw_text(cx + 12.0, ly, fname, gpu::DrawOpts { font_size: 13.0, color: theme::TEXT, bold: false, italic: false });
+                        let ex = g.draw_text(cx + 12.0, ly, fname, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
                         if !dir.is_empty() {
-                            g.draw_text(ex + 7.0, ly + 0.5, dir, gpu::DrawOpts { font_size: 11.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                            g.draw_text(ex + 7.0, ly + 0.5, dir, gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: false, italic: false });
                         }
                         if let Some((ins, del)) = git_view.numstat.get(path) {
                             let minus = format!("-{del}");
@@ -2325,39 +2325,39 @@ impl App {
                             }
                             if *ins > 0 {
                                 rx -= wp;
-                                g.draw_text(rx, ly, &plus, gpu::DrawOpts { font_size: 12.0, color: theme::SUCCESS, bold: false, italic: false });
+                                g.draw_text(rx, ly, &plus, gpu::DrawOpts { font_size: 12.0, color: theme::success(), bold: false, italic: false });
                             }
                         }
                         ly += 22.0;
                     }
                     my += lh + 18.0;
                     // Commit message box
-                    g.draw_text(cx, my, "Commit message", gpu::DrawOpts { font_size: 13.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                    g.draw_text(cx, my, "Commit message", gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false });
                     my += 22.0;
                     let inh = 70.0_f32;
                     if self.git_commit_focused {
-                        round_rect(g, cx - 1.0, my - 1.0, cw + 2.0, inh + 2.0, theme::RADIUS_SM, theme::ACCENT);
+                        round_rect(g, cx - 1.0, my - 1.0, cw + 2.0, inh + 2.0, theme::RADIUS_SM, theme::accent());
                     }
-                    round_rect(g, cx, my, cw, inh, theme::RADIUS_SM, theme::SURFACE);
+                    round_rect(g, cx, my, cw, inh, theme::RADIUS_SM, theme::surface());
                     let itx = cx + 10.0;
                     let ity = my + 9.0;
                     let preedit = if self.git_commit_focused { self.preedit.as_str() } else { "" };
                     if self.git_commit_msg.is_empty() && preedit.is_empty() {
-                        g.draw_text(itx, ity, "변경 사항 설명…", gpu::DrawOpts { font_size: 13.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                        g.draw_text(itx, ity, "변경 사항 설명…", gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: false, italic: false });
                     }
                     let cur = self.git_commit_cursor.min(self.git_commit_msg.chars().count());
                     let before: String = self.git_commit_msg.chars().take(cur).collect();
                     let after: String = self.git_commit_msg.chars().skip(cur).collect();
-                    let mut px = g.draw_text(itx, ity, &before, gpu::DrawOpts { font_size: 13.0, color: theme::TEXT, bold: false, italic: false });
+                    let mut px = g.draw_text(itx, ity, &before, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
                     let caret_x = px;
                     if !preedit.is_empty() {
-                        px = g.draw_text(px, ity, preedit, gpu::DrawOpts { font_size: 13.0, color: theme::ACCENT, bold: false, italic: false });
+                        px = g.draw_text(px, ity, preedit, gpu::DrawOpts { font_size: 13.0, color: theme::accent(), bold: false, italic: false });
                     }
                     if !after.is_empty() {
-                        g.draw_text(px, ity, &after, gpu::DrawOpts { font_size: 13.0, color: theme::TEXT, bold: false, italic: false });
+                        g.draw_text(px, ity, &after, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
                     }
                     if self.git_commit_focused && preedit.is_empty() && commit_caret_on {
-                        g.rect(caret_x, ity, 1.5, 14.0, theme::TEXT);
+                        g.rect(caret_x, ity, 1.5, 14.0, theme::text());
                     }
                     self.git_commit_input_rect = Some((cx, my, cw, inh));
                     my += inh + 14.0;
@@ -2368,9 +2368,9 @@ impl App {
                         ("arrow-up", "Commit and push", GitModalBtn::CommitAndPush),
                     ] {
                         let hov = self.cursor_px.0 >= cx && self.cursor_px.0 <= cx + cw && self.cursor_px.1 >= my && self.cursor_px.1 <= my + bbh;
-                        round_rect(g, cx, my, cw, bbh, theme::RADIUS_SM, if hov { theme::SURFACE_HOVER } else { theme::SURFACE_ACTIVE });
-                        g.queue_icon(icon, cx + 14.0, my + (bbh - 15.0) / 2.0, 15.0, theme::TEXT);
-                        g.draw_text(cx + 38.0, my + (bbh - 13.0) / 2.0, label, gpu::DrawOpts { font_size: 13.0, color: theme::TEXT, bold: false, italic: false });
+                        round_rect(g, cx, my, cw, bbh, theme::RADIUS_SM, if hov { theme::surface_hover() } else { theme::surface_active() });
+                        g.queue_icon(icon, cx + 14.0, my + (bbh - 15.0) / 2.0, 15.0, theme::text());
+                        g.draw_text(cx + 38.0, my + (bbh - 13.0) / 2.0, label, gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
                         self.git_commit_modal_rects.push((btn, (cx, my, cw, bbh)));
                         my += bbh + 8.0;
                     }
@@ -2383,11 +2383,11 @@ impl App {
                     let conf_hov = self.cursor_px.0 >= conf_x && self.cursor_px.0 <= conf_x + confirm_w && self.cursor_px.1 >= cby && self.cursor_px.1 <= cby + 34.0;
                     let canc_hov = self.cursor_px.0 >= canc_x && self.cursor_px.0 <= canc_x + cancel_w && self.cursor_px.1 >= cby && self.cursor_px.1 <= cby + 34.0;
                     let wcanc = g.measure_chrome_text("Cancel", 13.0, false);
-                    g.draw_text(canc_x + (cancel_w - wcanc) / 2.0, cby + 10.0, "Cancel", gpu::DrawOpts { font_size: 13.0, color: if canc_hov { theme::TEXT } else { theme::TEXT_DIM }, bold: false, italic: false });
+                    g.draw_text(canc_x + (cancel_w - wcanc) / 2.0, cby + 10.0, "Cancel", gpu::DrawOpts { font_size: 13.0, color: if canc_hov { theme::text() } else { theme::text_dim() }, bold: false, italic: false });
                     self.git_commit_modal_rects.push((GitModalBtn::Cancel, (canc_x, cby, cancel_w, 34.0)));
-                    round_rect(g, conf_x, cby, confirm_w, 34.0, theme::RADIUS_SM, if conf_hov { theme::ACCENT } else { theme::SURFACE_ACTIVE });
+                    round_rect(g, conf_x, cby, confirm_w, 34.0, theme::RADIUS_SM, if conf_hov { theme::accent() } else { theme::surface_active() });
                     let wconf = g.measure_chrome_text("Confirm", 13.0, true);
-                    g.draw_text(conf_x + (confirm_w - wconf) / 2.0, cby + 10.0, "Confirm", gpu::DrawOpts { font_size: 13.0, color: theme::TEXT, bold: true, italic: false });
+                    g.draw_text(conf_x + (confirm_w - wconf) / 2.0, cby + 10.0, "Confirm", gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false });
                     self.git_commit_modal_rects.push((GitModalBtn::Confirm, (conf_x, cby, confirm_w, 34.0)));
                 }
             }
@@ -2427,8 +2427,8 @@ impl App {
                 // notification has an in-window visual even when the desktop
                 // alert is suppressed (focused pane).
                 let hdr_bg = match header_flash[hi] {
-                    Some(k) => theme::lerp(theme::BG, theme::SUCCESS, 0.7 * k),
-                    None => theme::BG,
+                    Some(k) => theme::lerp(theme::bg(), theme::success(), 0.7 * k),
+                    None => theme::bg(),
                 };
                 g.rect(h.x, h.y, h.w, PANE_HEADER_HEIGHT, hdr_bg);
                 // Working indicator: a ~32% segment sweeps the header bottom on
@@ -2442,7 +2442,7 @@ impl App {
                     // One FLAG_WORKING_BAR quad — the shader sweeps the segment
                     // over a faint track from u.time, so there's no per-frame
                     // CPU phase math and no chrome rebuild to keep it moving.
-                    g.working_bar(h.x, by, h.w, bar_h, theme::ACCENT);
+                    g.working_bar(h.x, by, h.w, bar_h, theme::accent());
                 }
                 // No bottom hairline: the band == body, and the active tab
                 // flows straight into the cell grid (browser-tab feel).
@@ -2452,9 +2452,9 @@ impl App {
                 let text_y = h.y + (PANE_HEADER_HEIGHT - chrome_font) / 2.0;
                 let icon_y = h.y + (PANE_HEADER_HEIGHT - icon_size) / 2.0;
                 let act_fg: [u8; 4] = if h.is_active {
-                    theme::TEXT_DIM
+                    theme::text_dim()
                 } else {
-                    theme::with_alpha(theme::TEXT_DIM, 0x6B)
+                    theme::with_alpha(theme::text_dim(), 0x6B)
                 };
                 // Right action button cluster. Terminal panes get
                 // split-v / split-h (new-terminal and web were dropped —
@@ -2532,14 +2532,14 @@ impl App {
                     let alpha_mul = if being_dragged { 0x55 } else { 0xFF };
                     let combine = |a: u8| ((a as u16 * alpha_mul as u16) / 0xFF) as u8;
                     let t_fg = if bright {
-                        theme::with_alpha(theme::TEXT, combine(0xFF))
+                        theme::with_alpha(theme::text(), combine(0xFF))
                     } else {
-                        theme::with_alpha(theme::TEXT, combine(0x82))
+                        theme::with_alpha(theme::text(), combine(0x82))
                     };
                     let t_icon = if bright {
-                        theme::with_alpha(theme::TEXT_DIM, combine(0xFF))
+                        theme::with_alpha(theme::text_dim(), combine(0xFF))
                     } else {
-                        theme::with_alpha(theme::TEXT_DIM, combine(0x82))
+                        theme::with_alpha(theme::text_dim(), combine(0x82))
                     };
                     // Truncate this tab's title to its share of the bar.
                     // × space is reserved on every tab — see `reserve_x`.
@@ -2602,9 +2602,9 @@ impl App {
                         let x_hover =
                             mx >= chip_x && mx <= chip_x + chip && my >= chip_y && my <= chip_y + chip;
                         if x_hover {
-                            round_rect(g, chip_x, chip_y, chip, chip, theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
+                            round_rect(g, chip_x, chip_y, chip, chip, theme::RADIUS_SM, theme::with_alpha(theme::text(), 0x22));
                         }
-                        let xcol = if x_hover { theme::TEXT } else { t_icon };
+                        let xcol = if x_hover { theme::text() } else { t_icon };
                         g.queue_icon("x", close_x, icon_y, icon_size, xcol);
                         // × close hit (widen a little for an easy target).
                         tab_close_hits.push((h.id.clone(), i, (close_x - 2.0, h.y, icon_size + 4.0, PANE_HEADER_HEIGHT)));
@@ -2627,7 +2627,7 @@ impl App {
                 if let Some(left) = tabs_left {
                     let stroke = 1.0_f32;
                     let band_w = (tabs_right_edge - left).max(0.0);
-                    g.rect(left, h.y, band_w, stroke, theme::BORDER);
+                    g.rect(left, h.y, band_w, stroke, theme::border());
                     // Bottom BORDER across the WHOLE pane header (tabs + plus
                     // button + action cluster), broken only under the active
                     // tab so it flows into the body.
@@ -2635,23 +2635,23 @@ impl App {
                     let h_right = h.x + h.w;
                     if let Some((ax, aw)) = active_tab_box {
                         let lw = (ax - h.x).max(0.0);
-                        g.rect(h.x, by, lw, stroke, theme::BORDER);
+                        g.rect(h.x, by, lw, stroke, theme::border());
                         let rx = ax + aw;
                         let rw = (h_right - rx).max(0.0);
-                        g.rect(rx, by, rw, stroke, theme::BORDER);
+                        g.rect(rx, by, rw, stroke, theme::border());
                     } else {
-                        g.rect(h.x, by, h.w, stroke, theme::BORDER);
+                        g.rect(h.x, by, h.w, stroke, theme::border());
                     }
                     for b in &inter_boundaries {
-                        g.rect(*b, h.y, stroke, PANE_HEADER_HEIGHT, theme::BORDER);
+                        g.rect(*b, h.y, stroke, PANE_HEADER_HEIGHT, theme::border());
                     }
                     // Right edge of the strip — gives the last tab (often the
                     // active one when only the trailing tab is selected) a
                     // visible right boundary. Left edge is left to the pane
                     // divider so it never doubles up.
-                    g.rect(tabs_right_edge - stroke, h.y, stroke, PANE_HEADER_HEIGHT, theme::BORDER);
+                    g.rect(tabs_right_edge - stroke, h.y, stroke, PANE_HEADER_HEIGHT, theme::border());
                     if let Some((ax, aw)) = active_tab_box {
-                        let accent_col = if h.is_active { theme::ACCENT } else { theme::TEXT };
+                        let accent_col = if h.is_active { theme::accent() } else { theme::text() };
                         // accent 선은 BORDER stroke(1px)보다 살짝 굵게 — 활성 pane 강조.
                         g.rect(ax, h.y, aw, ACTIVE_ACCENT_STROKE, accent_col);
                         deferred_accents.push((ax, h.y, aw, accent_col));
@@ -2662,7 +2662,7 @@ impl App {
                 if let Some((ref dpane, target)) = tab_drag_info {
                     if *dpane == h.id {
                         let bar_x = tab_edges.get(target).copied().unwrap_or(tx - gap);
-                        g.rect(bar_x - 3.0, h.y + 1.0, 6.0, PANE_HEADER_HEIGHT - 2.0, theme::ACCENT);
+                        g.rect(bar_x - 3.0, h.y + 1.0, 6.0, PANE_HEADER_HEIGHT - 2.0, theme::accent());
                     }
                 }
                 let (cur_x, cur_y) = self.cursor_px;
@@ -2682,9 +2682,9 @@ impl App {
                 let plus_hover = !dragging_tab && inside(plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3);
                 if plus_hover {
                     round_rect(g, plus_rect.0, plus_rect.1, plus_rect.2, plus_rect.3,
-                        theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
+                        theme::RADIUS_SM, theme::with_alpha(theme::text(), 0x22));
                 }
-                let plus_color = if plus_hover { theme::TEXT } else { act_fg };
+                let plus_color = if plus_hover { theme::text() } else { act_fg };
                 if !dragging_tab {
                     g.queue_icon("plus", tx, icon_y, icon_size, plus_color);
                     plus_hits.push((h.id.clone(), plus_rect));
@@ -2730,9 +2730,9 @@ impl App {
                     let hover = inside(chip_x, chip_y, chip_size, chip_size);
                     if hover {
                         round_rect(g, chip_x, chip_y, chip_size, chip_size,
-                            theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
+                            theme::RADIUS_SM, theme::with_alpha(theme::text(), 0x22));
                     }
-                    let color = if hover { theme::TEXT } else { act_fg };
+                    let color = if hover { theme::text() } else { act_fg };
                     g.queue_icon(
                         ic,
                         chip_x + (chip_size - icon_size) / 2.0,
@@ -2755,7 +2755,7 @@ impl App {
                     let seg_h = icon_size + 6.0;
                     let seg_y = h.y + (PANE_HEADER_HEIGHT - seg_h) / 2.0;
                     let mut sx = h.x + h.w - 8.0 - seg_w;
-                    round_rect(g, sx, seg_y, seg_w, seg_h, theme::RADIUS_SM, theme::SURFACE);
+                    round_rect(g, sx, seg_y, seg_w, seg_h, theme::RADIUS_SM, theme::surface());
                     let ty = seg_y + (seg_h - seg_font) / 2.0;
                     for (label, lw, raw) in
                         [("Rendered", md_rendered_w, false), ("Raw", md_raw_w, true)]
@@ -2765,12 +2765,12 @@ impl App {
                         let hover = inside(sx, seg_y, cell_w, seg_h);
                         if active {
                             round_rect(g, sx, seg_y, cell_w, seg_h,
-                                theme::RADIUS_SM, theme::SURFACE_HOVER);
+                                theme::RADIUS_SM, theme::surface_hover());
                         } else if hover {
                             round_rect(g, sx, seg_y, cell_w, seg_h,
-                                theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x18));
+                                theme::RADIUS_SM, theme::with_alpha(theme::text(), 0x18));
                         }
-                        let color = if active { theme::TEXT } else { theme::TEXT_DIM };
+                        let color = if active { theme::text() } else { theme::text_dim() };
                         g.draw_text(
                             sx + seg_pad,
                             ty,
@@ -2790,7 +2790,7 @@ impl App {
             // border (that doubled into a thick seam between abutting panes
             // and read as caged tiles).
             for (sx, sy, sw, sh) in &pane_seams {
-                g.rect(*sx, *sy, *sw, *sh, theme::BORDER);
+                g.rect(*sx, *sy, *sw, *sh, theme::border());
             }
             // Re-paint the active-tab accent strips so a horizontal pane
             // divider just above a pane doesn't wipe its accent color.
@@ -2812,8 +2812,8 @@ impl App {
                     continue;
                 }
                 let bar_y = fy + fbox_h - PANE_FOOTER_HEIGHT;
-                g.rect(*fx, bar_y, *fw, PANE_FOOTER_HEIGHT, theme::BG);
-                g.rect(*fx, bar_y, *fw, 1.0, theme::BORDER);
+                g.rect(*fx, bar_y, *fw, PANE_FOOTER_HEIGHT, theme::bg());
+                g.rect(*fx, bar_y, *fw, 1.0, theme::border());
                 // Pill metrics shared by every chip.
                 let pill_h = 18.0_f32;
                 let pill_y = bar_y + (PANE_FOOTER_HEIGHT - pill_h) / 2.0;
@@ -2849,13 +2849,13 @@ impl App {
                         && sb_mx <= cx + pw
                         && sb_my >= pill_y
                         && sb_my <= pill_y + pill_h;
-                    round_rect(g, cx, pill_y, pw, pill_h, theme::RADIUS_SM, theme::BORDER);
+                    round_rect(g, cx, pill_y, pw, pill_h, theme::RADIUS_SM, theme::border());
                     round_rect(g, cx + 1.0, pill_y + 1.0, pw - 2.0, pill_h - 2.0,
                         theme::RADIUS_SM - 1.0,
-                        if hov { theme::SURFACE_ACTIVE } else { theme::SURFACE_HOVER });
-                    g.queue_icon("folder", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::TEXT_DIM);
+                        if hov { theme::surface_active() } else { theme::surface_hover() });
+                    g.queue_icon("folder", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::text_dim());
                     g.draw_text(cx + pad_x + icon_sz + icon_gap, txt_y, &disp,
-                        gpu::DrawOpts { font_size: font, color: theme::TEXT, bold: false, italic: false });
+                        gpu::DrawOpts { font_size: font, color: theme::text(), bold: false, italic: false });
                     self.statusbar_path_rects.push((fid.clone(), (cx, pill_y, pw, pill_h)));
                     cx += pw + chip_gap;
                 }
@@ -2871,13 +2871,13 @@ impl App {
                             && sb_mx <= cx + pw
                             && sb_my >= pill_y
                             && sb_my <= pill_y + pill_h;
-                        round_rect(g, cx, pill_y, pw, pill_h, theme::RADIUS_SM, theme::BORDER);
+                        round_rect(g, cx, pill_y, pw, pill_h, theme::RADIUS_SM, theme::border());
                         round_rect(g, cx + 1.0, pill_y + 1.0, pw - 2.0, pill_h - 2.0,
                             theme::RADIUS_SM - 1.0,
-                            if hov { theme::SURFACE_ACTIVE } else { theme::SURFACE_HOVER });
-                        g.queue_icon("git-branch", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::TEXT_DIM);
+                            if hov { theme::surface_active() } else { theme::surface_hover() });
+                        g.queue_icon("git-branch", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::text_dim());
                         g.draw_text(cx + pad_x + icon_sz + icon_gap, txt_y, &badge.branch,
-                            gpu::DrawOpts { font_size: font, color: theme::TEXT, bold: false, italic: false });
+                            gpu::DrawOpts { font_size: font, color: theme::text(), bold: false, italic: false });
                         self.statusbar_branch_rects.push((fid.clone(), (cx, pill_y, pw, pill_h)));
                         cx += pw + chip_gap;
                     }
@@ -2898,22 +2898,22 @@ impl App {
                             && sb_mx <= cx + pw
                             && sb_my >= pill_y
                             && sb_my <= pill_y + pill_h;
-                        round_rect(g, cx, pill_y, pw, pill_h, theme::RADIUS_SM, theme::BORDER);
+                        round_rect(g, cx, pill_y, pw, pill_h, theme::RADIUS_SM, theme::border());
                         round_rect(g, cx + 1.0, pill_y + 1.0, pw - 2.0, pill_h - 2.0,
                             theme::RADIUS_SM - 1.0,
-                            if hov { theme::SURFACE_ACTIVE } else { theme::SURFACE_HOVER });
-                        g.queue_icon("file-text", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::TEXT_DIM);
+                            if hov { theme::surface_active() } else { theme::surface_hover() });
+                        g.queue_icon("file-text", cx + pad_x, pill_y + (pill_h - icon_sz) / 2.0, icon_sz, theme::text_dim());
                         let mut tx = cx + pad_x + icon_sz + icon_gap;
                         tx = g.draw_text(tx, txt_y, &files_s,
-                            gpu::DrawOpts { font_size: font, color: theme::TEXT, bold: false, italic: false });
+                            gpu::DrawOpts { font_size: font, color: theme::text(), bold: false, italic: false });
                         tx = g.draw_text(tx, txt_y, dot_s,
-                            gpu::DrawOpts { font_size: font, color: theme::TEXT_MUTE, bold: false, italic: false });
+                            gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false });
                         tx = g.draw_text(tx, txt_y, &plus_s,
-                            gpu::DrawOpts { font_size: font, color: theme::SUCCESS, bold: false, italic: false });
+                            gpu::DrawOpts { font_size: font, color: theme::success(), bold: false, italic: false });
                         tx = g.draw_text(tx, txt_y, gap_s,
-                            gpu::DrawOpts { font_size: font, color: theme::TEXT_MUTE, bold: false, italic: false });
+                            gpu::DrawOpts { font_size: font, color: theme::text_mute(), bold: false, italic: false });
                         g.draw_text(tx, txt_y, &minus_s,
-                            gpu::DrawOpts { font_size: font, color: theme::DANGER, bold: false, italic: false });
+                            gpu::DrawOpts { font_size: font, color: theme::danger(), bold: false, italic: false });
                         self.statusbar_diff_rects.push((fid.clone(), (cx, pill_y, pw, pill_h)));
                         cx += pw + chip_gap;
                     }
@@ -2931,10 +2931,10 @@ impl App {
                         && sb_my <= bar_y + PANE_FOOTER_HEIGHT;
                     if h_hover {
                         round_rect(g, h_x - 4.0, h_y - 2.0, h_sz + 8.0, h_sz + 4.0,
-                            theme::RADIUS_SM, theme::with_alpha(theme::TEXT, 0x22));
+                            theme::RADIUS_SM, theme::with_alpha(theme::text(), 0x22));
                     }
                     g.queue_icon("chevrons-down-up", h_x, h_y, h_sz,
-                        if h_hover { theme::TEXT } else { theme::TEXT_MUTE });
+                        if h_hover { theme::text() } else { theme::text_mute() });
                     self.statusbar_toggle_rects
                         .push((fid.clone(), (h_x - 4.0, bar_y, h_sz + 12.0, PANE_FOOTER_HEIGHT)));
                 }
@@ -2947,12 +2947,12 @@ impl App {
             for (bx, by, bw, bh, hover) in &copy_btns_draw {
                 let (bx, by, bw, bh) = (*bx, *by, *bw, *bh);
                 let bg = if *hover {
-                    theme::SURFACE_HOVER
+                    theme::surface_hover()
                 } else {
-                    theme::with_alpha(theme::SURFACE_ACTIVE, 0xE0)
+                    theme::with_alpha(theme::surface_active(), 0xE0)
                 };
                 round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, bg);
-                let fg = if *hover { theme::TEXT } else { theme::TEXT_DIM };
+                let fg = if *hover { theme::text() } else { theme::text_dim() };
                 let s = 8.0; // square side
                 let off = 2.5; // overlap offset
                 let t = 1.3; // stroke
@@ -3050,31 +3050,31 @@ impl App {
                     self.statusbar_menu_scroll = scroll;
                     let first = ((scroll / item_h).round() as usize).min(overflow);
                     self.statusbar_menu_rect = Some((menu_x, menu_y, menu_w, menu_h));
-                    round_rect(g, menu_x, menu_y, menu_w, menu_h, theme::RADIUS_MD, theme::SURFACE);
-                    round_rect(g, menu_x, menu_y, menu_w, menu_h, theme::RADIUS_MD, theme::with_alpha(theme::BORDER, 0xFF));
+                    round_rect(g, menu_x, menu_y, menu_w, menu_h, theme::RADIUS_MD, theme::surface());
+                    round_rect(g, menu_x, menu_y, menu_w, menu_h, theme::RADIUS_MD, theme::with_alpha(theme::border(), 0xFF));
                     let rows_top = menu_y + 4.0 + search_h;
                     // Inset search field + live query (or dim placeholder). Typing
                     // anywhere while the picker is open feeds this (forward_key).
                     if is_path {
                         let fy = menu_y + 6.0;
                         let fh = search_h - 8.0;
-                        round_rect(g, menu_x + 8.0, fy, menu_w - 16.0, fh, theme::RADIUS_SM, theme::BG);
-                        g.queue_icon("folder-tree", menu_x + 16.0, fy + (fh - 14.0) / 2.0, 14.0, theme::TEXT_DIM);
+                        round_rect(g, menu_x + 8.0, fy, menu_w - 16.0, fh, theme::RADIUS_SM, theme::bg());
+                        g.queue_icon("folder-tree", menu_x + 16.0, fy + (fh - 14.0) / 2.0, 14.0, theme::text_dim());
                         let mut shown = self.statusbar_menu_search.clone();
                         if self.in_preedit {
                             shown.push_str(&self.preedit);
                         }
                         let (txt, col) = if shown.is_empty() {
-                            ("디렉터리 검색…".to_string(), theme::TEXT_MUTE)
+                            ("디렉터리 검색…".to_string(), theme::text_mute())
                         } else {
-                            (shown, theme::TEXT)
+                            (shown, theme::text())
                         };
                         g.draw_text(menu_x + 38.0, fy + (fh - 13.0) / 2.0, &txt,
                             gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false });
                     }
                     if total == 0 {
                         g.draw_text(menu_x + 16.0, rows_top + 4.0, "(없음)",
-                            gpu::DrawOpts { font_size: 12.0, color: theme::TEXT_MUTE, bold: false, italic: false });
+                            gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false });
                     }
                     let current_branch = matches!(kind, StatusbarMenu::Branch)
                         .then(|| {
@@ -3096,7 +3096,7 @@ impl App {
                         // Hovered row = bright accent fill (cursor's selected-item
                         // cue); its glyphs flip to dark for contrast.
                         if hover {
-                            round_rect(g, row.0 + 2.0, row.1, row.2 - 4.0, row.3, theme::RADIUS_SM, theme::ACCENT);
+                            round_rect(g, row.0 + 2.0, row.1, row.2 - 4.0, row.3, theme::RADIUS_SM, theme::accent());
                         }
                         let is_current = current_branch.as_deref() == Some(label.as_str());
                         let mut text_x = menu_x + 12.0;
@@ -3106,16 +3106,16 @@ impl App {
                             let is_dir = is_parent
                                 || self.statusbar_menu_dirs.get(i).map(|p| p.is_dir()).unwrap_or(false);
                             let glyph = if is_parent { "arrow-up" } else if is_dir { "folder" } else { "file" };
-                            let icon_c = if hover { theme::BG } else { theme::TEXT_DIM };
+                            let icon_c = if hover { theme::bg() } else { theme::text_dim() };
                             g.queue_icon(glyph, text_x, iy + (item_h - 15.0) / 2.0, 15.0, icon_c);
                             text_x += 15.0 + 9.0;
                         }
                         let color = if hover {
-                            theme::BG
+                            theme::bg()
                         } else if is_current {
-                            theme::ACCENT
+                            theme::accent()
                         } else {
-                            theme::TEXT
+                            theme::text()
                         };
                         g.draw_text(
                             text_x,
@@ -3141,7 +3141,7 @@ impl App {
                         let thumb_h = (track_h * view_rows as f32 / total as f32).max(18.0);
                         let thumb_y = track_y
                             + (track_h - thumb_h) * (first as f32 / overflow as f32);
-                        round_rect(g, track_x, thumb_y, 3.0, thumb_h, 1.5, theme::with_alpha(theme::TEXT, 0x55));
+                        round_rect(g, track_x, thumb_y, 3.0, thumb_h, 1.5, theme::with_alpha(theme::text(), 0x55));
                     }
                 } else {
                     self.statusbar_menu_rect = None;
@@ -3170,7 +3170,7 @@ impl App {
                     box_w,
                     box_h,
                     theme::RADIUS_MD,
-                    theme::with_alpha(theme::SURFACE_ACTIVE, a),
+                    theme::with_alpha(theme::surface_active(), a),
                 );
                 let ta = (255.0 * toast_alpha).round() as u8;
                 g.draw_text(
@@ -3179,7 +3179,7 @@ impl App {
                     msg,
                     gpu::DrawOpts {
                         font_size: t_font,
-                        color: theme::with_alpha(theme::SUCCESS, ta),
+                        color: theme::with_alpha(theme::success(), ta),
                         bold: true,
                         italic: false,
                     },
@@ -3209,7 +3209,7 @@ impl App {
                         box_w,
                         box_h,
                         theme::RADIUS_MD,
-                        theme::with_alpha(theme::SURFACE_ACTIVE, a),
+                        theme::with_alpha(theme::surface_active(), a),
                     );
                     let ta = (255.0 * collab_toast_alpha).round() as u8;
                     g.draw_text(
@@ -3218,7 +3218,7 @@ impl App {
                         msg,
                         gpu::DrawOpts {
                             font_size: t_font,
-                            color: theme::with_alpha(theme::SUCCESS, ta),
+                            color: theme::with_alpha(theme::success(), ta),
                             bold: true,
                             italic: false,
                         },
@@ -3249,7 +3249,7 @@ impl App {
                         box_w,
                         box_h,
                         theme::RADIUS_MD,
-                        theme::with_alpha(theme::ACCENT, 0xE6),
+                        theme::with_alpha(theme::accent(), 0xE6),
                     );
                     g.draw_text(
                         bx + pad,
@@ -3281,8 +3281,8 @@ impl App {
                 // read as a black gap against the lighter main background. BG
                 // matches the rest of the chrome; the top border + raised chips
                 // still set the dock apart.
-                g.rect(grid_x, bar_y, grid_w, DOCK_HEIGHT, theme::BG);
-                g.rect(grid_x, bar_y, grid_w, 1.0, theme::BORDER);
+                g.rect(grid_x, bar_y, grid_w, DOCK_HEIGHT, theme::bg());
+                g.rect(grid_x, bar_y, grid_w, 1.0, theme::border());
                 let chip_h = DOCK_HEIGHT - 12.0;
                 let cy = bar_y + 6.0;
                 let icon = theme::ICON_SIZE;
@@ -3303,7 +3303,7 @@ impl App {
                         chip_w,
                         chip_h,
                         theme::RADIUS_SM,
-                        if hover { theme::SURFACE_HOVER } else { theme::SURFACE_ACTIVE },
+                        if hover { theme::surface_hover() } else { theme::surface_active() },
                     );
                     g.draw_text(
                         cx + 10.0,
@@ -3311,13 +3311,13 @@ impl App {
                         label,
                         gpu::DrawOpts {
                             font_size: chrome_font,
-                            color: theme::TEXT,
+                            color: theme::text(),
                             bold: false,
                             italic: false,
                         },
                     );
                     let close_x = cx + chip_w - icon - 6.0;
-                    g.queue_icon("x", close_x, cy + (chip_h - icon) / 2.0, icon, theme::TEXT_DIM);
+                    g.queue_icon("x", close_x, cy + (chip_h - icon) / 2.0, icon, theme::text_dim());
                     chip_close_hits.push((d.id.clone(), (close_x - 2.0, cy, icon + 6.0, chip_h)));
                     chip_hits.push((d.id.clone(), (cx, cy, chip_w - icon - 8.0, chip_h)));
                     cx += chip_w + 6.0;
@@ -3330,7 +3330,7 @@ impl App {
             }
             // Drop-zone highlight sits on top of everything during a drag.
             if let Some((zx, zy, zw, zh)) = drop_zone_rect {
-                g.rect(zx, zy, zw, zh, theme::with_alpha(theme::ACCENT, 90));
+                g.rect(zx, zy, zw, zh, theme::with_alpha(theme::accent(), 90));
             }
             // Floating drag ghost under the cursor: the pane being carried is
             // visibly "lifted out" so dragging it onto a sidebar window for a
@@ -3340,13 +3340,13 @@ impl App {
                 let gh = 26.0_f32;
                 let gx = *cgx - gw / 2.0;
                 let gy = *cgy - gh / 2.0;
-                g.round_rect_fill(gx, gy, gw, gh, 6.0, theme::with_alpha(theme::SURFACE_ACTIVE, 230));
-                g.rect(gx, gy, gw, 2.0, theme::ACCENT);
+                g.round_rect_fill(gx, gy, gw, gh, 6.0, theme::with_alpha(theme::surface_active(), 230));
+                g.rect(gx, gy, gw, 2.0, theme::accent());
                 g.draw_text(
                     gx + 10.0,
                     gy + (gh - 12.0) / 2.0,
                     label,
-                    gpu::DrawOpts { font_size: 12.0, color: theme::TEXT, bold: false, italic: false },
+                    gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false },
                 );
             }
             // Launch build banner, bottom-right, painted last so it sits
@@ -3372,7 +3372,7 @@ impl App {
                     &label,
                     gpu::DrawOpts {
                         font_size: v_font,
-                        color: theme::with_alpha(theme::TEXT_DIM, a),
+                        color: theme::with_alpha(theme::text_dim(), a),
                         bold: false,
                         italic: false,
                     },
@@ -3392,7 +3392,7 @@ impl App {
                 let card_h = 168.0_f32;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
-                round_rect(g, cx0, cy0, card_w, card_h, theme::RADIUS_MD, theme::SURFACE_ACTIVE);
+                round_rect(g, cx0, cy0, card_w, card_h, theme::RADIUS_MD, theme::surface_active());
                 let title = format!("{} 실행 중이에요", dlg.proc);
                 let subtitle = match dlg.action {
                     crate::PendingClose::Window => "앱을 닫을까요?",
@@ -3402,13 +3402,13 @@ impl App {
                     cx0 + 24.0,
                     cy0 + 30.0,
                     &title,
-                    gpu::DrawOpts { font_size: 15.0, color: theme::TEXT, bold: true, italic: false },
+                    gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
                 );
                 g.draw_text(
                     cx0 + 24.0,
                     cy0 + 60.0,
                     subtitle,
-                    gpu::DrawOpts { font_size: 13.0, color: theme::TEXT_DIM, bold: false, italic: false },
+                    gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
                 );
                 let (mx, my) = self.cursor_px;
                 let bf = 13.0_f32;
@@ -3429,7 +3429,7 @@ impl App {
                     close_w,
                     btn_h,
                     theme::RADIUS_SM,
-                    theme::with_alpha(theme::DANGER, if close_hover { 0xFF } else { 0xDD }),
+                    theme::with_alpha(theme::danger(), if close_hover { 0xFF } else { 0xDD }),
                 );
                 g.draw_text(
                     close_x + bpad,
@@ -3452,13 +3452,13 @@ impl App {
                     cancel_w,
                     btn_h,
                     theme::RADIUS_SM,
-                    if cancel_hover { theme::SURFACE_HOVER } else { theme::SURFACE },
+                    if cancel_hover { theme::surface_hover() } else { theme::surface() },
                 );
                 g.draw_text(
                     cancel_x + bpad,
                     btn_y + (btn_h - bf) / 2.0,
                     "취소",
-                    gpu::DrawOpts { font_size: bf, color: theme::TEXT, bold: false, italic: false },
+                    gpu::DrawOpts { font_size: bf, color: theme::text(), bold: false, italic: false },
                 );
                 confirm_btn_hits.push((crate::ConfirmBtn::Cancel, (cancel_x, btn_y, cancel_w, btn_h)));
             }
@@ -3484,13 +3484,13 @@ impl App {
                     let pill_h = 22.0_f32;
                     let gx = cx + 12.0;
                     let gy = cy + 10.0;
-                    round_rect(g, gx, gy, pill_w, pill_h, theme::RADIUS_SM, theme::ACCENT);
+                    round_rect(g, gx, gy, pill_w, pill_h, theme::RADIUS_SM, theme::accent());
                     round_rect(g, gx + 1.0, gy + 1.0, pill_w - 2.0, pill_h - 2.0,
-                        theme::RADIUS_SM - 1.0, theme::with_alpha(theme::SURFACE_ACTIVE, 0xF5));
+                        theme::RADIUS_SM - 1.0, theme::with_alpha(theme::surface_active(), 0xF5));
                     g.queue_icon(if is_dir { "folder" } else { "file" },
-                        gx + 6.0, gy + (pill_h - 14.0) / 2.0, 14.0, theme::TEXT);
+                        gx + 6.0, gy + (pill_h - 14.0) / 2.0, 14.0, theme::text());
                     g.draw_text(gx + 24.0, gy + (pill_h - gf) / 2.0, &name,
-                        gpu::DrawOpts { font_size: gf, color: theme::TEXT, bold: false, italic: false });
+                        gpu::DrawOpts { font_size: gf, color: theme::text(), bold: false, italic: false });
                 }
             }
             // Settings screen on top of everything (covers the pane grid; the

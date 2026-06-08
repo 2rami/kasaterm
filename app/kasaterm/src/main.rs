@@ -125,14 +125,14 @@ fn git_paint_dropdowns(
     let pw = (col_w - 12.0).max(0.0);
     // A raised menu panel with a 1px border so it reads above the list.
     let panel = |g: &mut gpu::GpuRenderer, y: f32, h: f32| {
-        round_rect(g, px - 1.0, y - 1.0, pw + 2.0, h + 2.0, theme::RADIUS_MD, theme::BORDER);
-        round_rect(g, px, y, pw, h, theme::RADIUS_MD, theme::SURFACE_ACTIVE);
+        round_rect(g, px - 1.0, y - 1.0, pw + 2.0, h + 2.0, theme::RADIUS_MD, theme::border());
+        round_rect(g, px, y, pw, h, theme::RADIUS_MD, theme::surface_active());
     };
     let row = |g: &mut gpu::GpuRenderer, iy: f32, label: &str, on: bool| {
         if on {
-            round_rect(g, px + 4.0, iy + 1.0, pw - 8.0, item_h - 2.0, theme::RADIUS_SM, theme::with_alpha(theme::ACCENT, 0x40));
+            round_rect(g, px + 4.0, iy + 1.0, pw - 8.0, item_h - 2.0, theme::RADIUS_SM, theme::with_alpha(theme::accent(), 0x40));
         }
-        let col = if on { theme::TEXT } else { theme::TEXT_DIM };
+        let col = if on { theme::text() } else { theme::text_dim() };
         g.draw_text(px + 12.0, iy + (item_h - 12.0) / 2.0, label, gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false });
     };
     if path_open {
@@ -2161,6 +2161,8 @@ pub(crate) enum SettingsAction {
     ToggleFileTree,
     ShellPreset(String),
     FocusShell,
+    ThemeMode(&'static str),
+    Accent(String),
 }
 
 /// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
@@ -3255,6 +3257,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // `open`-launched instance. Loaded (and deleted) before anything
     // reads KASATERM_* vars.
     load_capture_config();
+    // Apply the persisted theme + accent into the global color slots before any
+    // window or pane paints, so the first frame is already in the right palette.
+    theme::apply_from_settings();
     // Wire up the tmux shim before anything spawns a shell — every
     // PtySession reads the env vars we set here. install_tmux_shim is
     // best-effort: a missing shim binary just logs and skips, the rest
