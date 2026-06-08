@@ -504,19 +504,21 @@ impl App {
                 });
             }
             GitColBtn::Pull => {
+                self.git_op = Some("Pulling");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     let _ = kasa_mcp::git::git_pull(&cwd);
-                    // Wake the loop so the poller's next tick repaints ahead/behind.
-                    let _ = proxy.send_event(UserEvent::Redraw);
+                    // GitOpDone clears the spinner; the poller's next tick
+                    // repaints ahead/behind.
+                    let _ = proxy.send_event(UserEvent::GitOpDone);
                 });
             }
             GitColBtn::Push => {
+                self.git_op = Some("Pushing");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     let _ = kasa_mcp::git::git_push(&cwd);
-                    // Wake the loop so the poller's next tick repaints ahead/behind.
-                    let _ = proxy.send_event(UserEvent::Redraw);
+                    let _ = proxy.send_event(UserEvent::GitOpDone);
                 });
             }
             GitColBtn::Commit => {
@@ -529,10 +531,11 @@ impl App {
                     self.chrome_dirty = true;
                     return;
                 }
+                self.git_op = Some("Committing");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     let _ = kasa_mcp::git::git_commit_staged(&cwd, &msg);
-                    let _ = proxy.send_event(UserEvent::Redraw);
+                    let _ = proxy.send_event(UserEvent::GitOpDone);
                 });
                 self.git_commit_msg.clear();
                 self.git_commit_cursor = 0;
@@ -572,6 +575,7 @@ impl App {
         }
         let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
         let include = self.git_commit_modal_include_unstaged;
+        self.git_op = Some(if push { "Pushing" } else { "Committing" });
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             if include {
@@ -583,7 +587,7 @@ impl App {
             if push {
                 let _ = kasa_mcp::git::git_push(&cwd);
             }
-            let _ = proxy.send_event(UserEvent::Redraw);
+            let _ = proxy.send_event(UserEvent::GitOpDone);
         });
         self.git_commit_msg.clear();
         self.git_commit_cursor = 0;

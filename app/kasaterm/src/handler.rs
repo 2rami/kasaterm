@@ -58,6 +58,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::GitOpDone => {
+                self.git_op = None;
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             _ => {}
         }
         // Render directly here instead of request_redraw → (next loop)

@@ -63,6 +63,7 @@ impl App {
             }
             "modal" => self.open_commit_modal(),
             "menu" => self.git_commit_menu_open = true,
+            "spin" => self.git_op = Some("Pushing"),
             "hover" => {
                 // Park the cursor over the first file row so its action cluster
                 // (open / discard / stage) renders for a headless capture.
