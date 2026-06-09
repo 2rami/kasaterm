@@ -3657,6 +3657,27 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n";
             eprintln!("[shim] chmod claude wrapper failed: {e}");
         }
     }
+    // kasacollab(협업 CLI)도 pane PATH 에 스테이징 — 훅이 아니라 셸/claude 가
+    // 직접 부르는 명령이라 settings 주입으로는 못 싣는다. 예전엔 ~/.local/bin
+    // 수동 설치(개인 설정 오염 + 정본 이동 시 무음 고장)였다.
+    let collab = format!(
+        "#!/bin/sh\nexec python3 \"{}/kasacollab.py\" \"$@\"\n",
+        hooks_dir.display()
+    );
+    let collab_path = shim_dir.join("kasacollab");
+    if let Err(e) = std::fs::write(&collab_path, collab) {
+        eprintln!("[shim] write kasacollab wrapper failed: {e}");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(&collab_path, std::fs::Permissions::from_mode(0o755))
+        {
+            eprintln!("[shim] chmod kasacollab wrapper failed: {e}");
+        }
+    }
 }
 
 /// Pick the shell to spawn inside a PTY. claude code's teammate mode

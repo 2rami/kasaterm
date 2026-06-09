@@ -109,16 +109,19 @@ def write_msgs(msgs):
 
 
 def live_panes():
-    """board 에 살아있는 surface_id 집합. 조회 실패/비활성이면 None(검증 스킵).
+    """실재하는 surface_id 집합(`list surfaces`). 조회 실패면 None(검증 스킵).
     msg 보낼 때 받는 id 가 실재하는지 즉시 확인하는 데 쓴다 — stale god id
-    (재시작 전 %3 등)나 오타로 죽은 pane 에 보내 좀비 메시지가 쌓이는 걸 막는다."""
+    (재시작 전 %3 등)나 오타로 죽은 pane 에 보내 좀비 메시지가 쌓이는 걸 막는다.
+    board(bind 기반)를 쓰면 resume 직후 아직 프롬프트를 안 받아 bind 안 된
+    claude pane 을 '죽음'으로 거부하는 닭-달걀(깨워야 bind 되는데 msg 가 막힘)
+    이 생겨 surfaces 기준으로 판정한다(2026-06-10 실측)."""
     cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
     try:
-        r = subprocess.run([cli, "board"], capture_output=True, text=True, timeout=3)
+        r = subprocess.run([cli, "list", "surfaces"], capture_output=True, text=True, timeout=3)
         if r.returncode != 0:
             return None
-        board = (json.loads(r.stdout).get("result") or {}).get("board") or []
-        ids = {row.get("surface_id") for row in board if row.get("surface_id")}
+        surfaces = (json.loads(r.stdout).get("result") or {}).get("surfaces") or []
+        ids = {s.get("id") for s in surfaces if s.get("id")}
         return ids or None
     except Exception:
         return None
