@@ -40,7 +40,9 @@ impl App {
                 status: "idle".to_string(),
                 ..Default::default()
             });
-        if was_working {
+        // A sticky approval toast (chips waiting on the user) outranks a
+        // completion blip — same guard as the grid-scan path in input.rs.
+        if was_working && self.collab_toast_action.is_none() {
             let name = self.pane_header_label(surface_id);
             self.collab_toast = Some((format!("✓ {name} 작업 완료"), now));
             self.collab_toast_rect = None;
