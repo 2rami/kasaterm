@@ -19,6 +19,19 @@ cargo run --release -p kasaterm
 
 macOS `.app` 번들 빌드는 별도 스크립트 사용(.icns/codesign/설치 포함).
 
+앱을 빌드/실행하면 pane 제어 CLI(`kasaterm-cli`)와 MCP 서버가 함께 제공되며, MCP는 실행 시 Claude Code/Antigravity 설정에 자동 등록된다.
+
+## Claude Code 플러그인 (kasapane 스킬)
+
+멀티 pane 제어·협업·긴 잡 사이클·UI 자체검증 워크플로우를 Claude Code 스킬로 묶어 제공한다. 한 줄 설치:
+
+```bash
+claude plugin marketplace add 2rami/kasaterm
+claude plugin install kasapane@kasaterm
+```
+
+설치 후 `/kasapane` 으로 호출한다. 스킬이 쓰는 `kasaterm-cli`·MCP 서버는 위 앱 빌드에 내장돼 있으니, 앱을 빌드/실행한 상태에서 스킬을 사용하면 된다.
+
 ## 단축키
 
 macOS는 `Cmd`를, Windows/Linux는 `Ctrl+Shift`를 "호스트 modifier"로 쓴다 (Ctrl+letter를 셸로 흘려보내기 위함). 폰트 zoom만 Windows/Linux에서 `Ctrl` 단독.
@@ -60,13 +73,13 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 | 경로 | 역할 |
 |---|---|
 | `app/kasaterm` | 메인 바이너리. winit+wgpu 윈도우, chrome UI(탭·사이드바·이미지 pane 등), 입력·단축키 라우팅 |
-| `crates/cell-renderer` | **기본 렌더러**. retained-mode GPU 셀 렌더러 (swash atlas + wgpu instance). P3 색재현 통합 |
-| `crates/pty-backend` | **기본 백엔드**. portable-pty + alacritty_terminal. 크로스플랫폼(ConPTY 포함) |
-| `crates/hangul-ime` | 자체 두벌식 한글 입력 오토마타. OS IME 비의존, 복합 종성 지원 |
-| `crates/agent-socket` | cmux 호환 Unix-socket JSON-RPC 서버. Claude Code teammateMode 연동용 |
-| `crates/kasaspace-mcp` | kasaterm pane 제어를 모델 도구로 노출하는 streamable-HTTP MCP 서버 |
-| `crates/tmux-shim` | kasaterm이 띄운 셸의 `tmux` 호출을 가로채 trace 후 진짜 tmux로 위임 |
-| `crates/tmux-bridge` | tmux `-C`(control mode) 브리지. 레거시 백엔드 (현재 비기본) |
+| `crates/kasa-cells` | **기본 렌더러**. retained-mode GPU 셀 렌더러 (swash atlas + wgpu instance). P3 색재현 통합 |
+| `crates/kasa-pty` | **기본 백엔드**. portable-pty + alacritty_terminal. 크로스플랫폼(ConPTY 포함) |
+| `crates/kasa-ime` | 자체 두벌식 한글 입력 오토마타. OS IME 비의존, 복합 종성 지원 |
+| `crates/kasa-socket` | cmux 호환 Unix-socket JSON-RPC 서버. Claude Code teammateMode 연동용. `kasaterm-cli` 바이너리 포함 |
+| `crates/kasa-mcp` | kasaterm pane 제어를 모델 도구로 노출하는 streamable-HTTP MCP 서버 |
+| `crates/kasa-shim` | kasaterm이 띄운 셸의 `tmux` 호출을 가로채 trace 후 진짜 tmux로 위임 |
+| `crates/kasa-bridge` | tmux `-C`(control mode) 브리지. 레거시 백엔드 (현재 비기본) |
 | `spikes/*` | iced/egui/gpui/warpui 등 GUI 프레임워크 PoC. 채택 안 된 실험 |
 
 ## 렌더러 / 환경 변수
@@ -81,9 +94,9 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 | `KASATERM_AUTOCAPTURE_MS` / `_PATH` | N초 후 자동 스크린샷 (자체 테스트용) |
 | `KASATERM_AUTOSEND` / `_MS` | N초 후 키 자동 전송 (자체 테스트용) |
 
-## kasaspace MCP
+## MCP 서버
 
-`crates/kasaspace-mcp`가 띄우는 MCP 서버로, Claude가 pane을 직접 제어할 수 있다. 도구 목록:
+`crates/kasa-mcp`가 띄우는 streamable-HTTP MCP 서버로, Claude가 pane을 직접 제어할 수 있다. 앱이 부팅하면 MCP 서버가 자동으로 켜지고 Claude Code/Antigravity 설정에 자동 등록된다(별도 빌드·설치 불필요). 도구 목록:
 
 `kasaspace_list` · `kasaspace_split` · `kasaspace_close` · `kasaspace_focus` · `kasaspace_swap` · `kasaspace_rename` · `kasaspace_set_color` · `kasaspace_send` · `kasaspace_send_key` · `kasaspace_run_job` · `kasaspace_switch_window` · `kasaspace_workspace_list` · `kasaspace_workspace_current`
 

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "kasaterm",
+  "owner": { "name": "2rami", "url": "https://github.com/2rami" },
+  "metadata": {
+    "description": "kasaterm 플러그인 마켓플레이스 — pane 제어·협업 워크플로우 스킬"
+  },
+  "plugins": [
+    {
+      "name": "kasapane",
+      "source": "./",
+      "description": "kasaterm 멀티 pane 제어·협업·긴 잡 사이클·UI 자체검증 스킬"
+    }
+  ]
+}

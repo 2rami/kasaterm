@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "kasapane",
+  "version": "0.4.0",
+  "description": "kasaterm 멀티 pane 제어·협업·긴 잡 사이클·UI 자체검증 스킬",
+  "author": { "name": "2rami", "url": "https://github.com/2rami" },
+  "homepage": "https://github.com/2rami/kasaterm",
+  "repository": "https://github.com/2rami/kasaterm",
+  "license": "MIT",
+  "keywords": ["kasaterm", "tmux", "pane", "collaboration", "terminal"]
+}
