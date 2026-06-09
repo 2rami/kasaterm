@@ -1171,12 +1171,40 @@ impl ApplicationHandler<UserEvent> for App {
                             self.chrome_dirty = true;
                         }
                     }
+                    // 승인 토스트 칩 — 일반 토스트 dismiss 보다 먼저 검사해야
+                    // 칩 클릭이 pane/dismiss 로 새지 않는다 (hit-test 순서 의존).
+                    if let Some(target) = self.collab_toast_action.clone() {
+                        let hit = |r: Option<(f32, f32, f32, f32)>| {
+                            r.map_or(false, |(x, y, w, h)| {
+                                cx >= x && cx <= x + w && cy >= y && cy <= y + h
+                            })
+                        };
+                        let ok = hit(self.collab_toast_approve_rect);
+                        let no = hit(self.collab_toast_deny_rect);
+                        if ok || no {
+                            self.respond_approval(&target, ok);
+                            // pane_prompt_wait/attention 은 여기서 걷지 않는다 —
+                            // 주입한 키로 프롬프트가 실제로 사라질 때
+                            // route_approval_prompts 가 board 까지 함께 정리.
+                            // (flag 가 남아 있는 동안은 토스트 재무장도 없다.)
+                            self.clear_approval_toast();
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
+                    }
                     // Completion toast: a click anywhere on it dismisses it
                     // immediately (top-right, tested before the cell grid).
+                    // 승인 토스트(칩 비적중)의 본문 클릭은 해당 pane 으로 점프 —
+                    // 프롬프트 원문을 읽고 직접 답하라는 의미. 플래그는 유지해
+                    // 그리드 스캔이 프롬프트 해소 시점에 board까지 정리한다.
                     if let Some((tx, ty, tw, th)) = self.collab_toast_rect {
                         if cx >= tx && cx <= tx + tw && cy >= ty && cy <= ty + th {
-                            self.collab_toast = None;
-                            self.collab_toast_rect = None;
+                            if let Some(target) = self.collab_toast_action.take() {
+                                self.ws.lock().unwrap().active_pane = Some(target);
+                            }
+                            self.clear_approval_toast();
+                            self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }
@@ -2732,14 +2760,18 @@ impl ApplicationHandler<UserEvent> for App {
         // WaitUntil, 나머지는 Wait. ws lock 경합이 echo stream을 막는지 확인.
         if self.version_alpha() > 0.0
             || self.copy_toast_alpha() > 0.0
-            || self.collab_toast_alpha() > 0.0
+            // Sticky approval toast doesn't animate — only a *fading* collab
+            // toast needs the timer pump. (A blocked pane can sit for minutes;
+            // pumping 30fps the whole time would burn battery for nothing.)
+            || (self.collab_toast_alpha() > 0.0 && self.collab_toast_action.is_none())
             || self.any_notify_flash()
             // A busy pane's header working bar sweeps every frame — pump ~30fps
             // so the bar animates and the working→idle flip is caught promptly.
+            // `blocked`/`waiting` (approval prompt) are static states: no pump.
             || self
                 .pane_activity
                 .values()
-                .any(|a| a.status != "idle" && !a.status.is_empty())
+                .any(|a| a.status == "working")
             || self.pending_capture.is_some()
             || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()

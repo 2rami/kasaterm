@@ -2649,6 +2649,22 @@ struct App {
     /// dismisses it. None when the toast isn't drawn. Set by the render path,
     /// consumed by the MouseInput handler.
     collab_toast_rect: Option<(f32, f32, f32, f32)>,
+    /// 승인 토스트 모드(munder식 god 승인 카드): Some(pane id)면 `collab_toast`가
+    /// 페이드 없이 고정되고 승인/거부 칩이 함께 렌더된다. 칩 클릭이 이 pane 의
+    /// PTY 로 응답 키를 보낸다 (`respond_approval`). 프롬프트가 풀리면 해제.
+    collab_toast_action: Option<String>,
+    /// 승인 토스트의 승인/거부 칩 hit-rect (logical px). 렌더 패스가 쓰고
+    /// MouseInput 이 소비 — 일반 토스트 dismiss 보다 먼저 검사해야 한다.
+    collab_toast_approve_rect: Option<(f32, f32, f32, f32)>,
+    collab_toast_deny_rect: Option<(f32, f32, f32, f32)>,
+    /// 승인 프롬프트가 떠 있는 pane → "사용자 직행(god/단독)인가". 그리드 스캔
+    /// (`route_approval_prompts`)의 edge-trigger 상태: 새로 뜨면 라우팅 1회,
+    /// 풀리면 board waiting 플래그까지 함께 걷는다.
+    pane_prompt_wait: HashMap<String, bool>,
+    /// 협업 board 의 `waiting` 플래그 — socket `PtyBackend` 와 공유(Arc). hook
+    /// (`kasaterm-cli attention`) 경로와 그리드 감지 경로가 같은 맵에 쓰므로
+    /// god 이 board 어디서 보든 워커 막힘이 보인다.
+    collab_attention: Arc<Mutex<HashMap<String, String>>>,
     /// Unread completion count, for a badge on the collab board entry. Bumped on
     /// each completion toast; the badge render + clear land with the sidebar
     /// work (P3) — the board has no GUI button yet (menu-toggle only), so the
@@ -3050,6 +3066,11 @@ impl App {
             window_alert: std::collections::HashSet::new(),
             collab_toast: None,
             collab_toast_rect: None,
+            collab_toast_action: None,
+            collab_toast_approve_rect: None,
+            collab_toast_deny_rect: None,
+            pane_prompt_wait: HashMap::new(),
+            collab_attention: Arc::new(Mutex::new(HashMap::new())),
             collab_unread: 0,
             last_window_title_check: None,
             pane_cwd_cache: HashMap::new(),
