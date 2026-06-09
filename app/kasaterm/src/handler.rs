@@ -87,6 +87,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketRenameWindow(id, title) => {
+                // Mark the window/session the pane belongs to. window_of_pane
+                // resolves the index; the override wins in refresh_window_labels
+                // so the sidebar session reads the god marker even when this
+                // pane isn't the window's representative leaf.
+                if let Some(wi) = self.window_of_pane(id) {
+                    self.window_name_override.insert(wi, title.clone());
+                    self.window_labels_at = None; // force a relabel next paint
+                }
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketColor(id, color) => {
                 if let Some(p) = self.ws.lock().unwrap().panes.get_mut(id) {
                     p.color = Some(*color);

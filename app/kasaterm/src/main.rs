@@ -2062,6 +2062,10 @@ enum UserEvent {
     /// thread may touch, so the backend routes them here. `(surface_id, title)`
     /// / `(surface_id, rgba)`.
     SocketRename(String, String),
+    /// `window.rename` delegated from the socket thread. `(surface_id, title)`:
+    /// rename the window/session the pane belongs to (sidebar label), not the
+    /// pane header. Used by the god marker.
+    SocketRenameWindow(String, String),
     SocketColor(String, [u8; 4]),
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify`). Raise a
     /// desktop alert unless that pane is already the focused one, cmux-style.
@@ -2500,6 +2504,13 @@ struct App {
     /// throttle (cwd resolution shells out to lsof, so never per-frame).
     window_labels: Vec<(String, String)>,
     window_labels_at: Option<Instant>,
+    /// Explicit window/session name overrides by window index (`window.rename`).
+    /// `refresh_window_labels` derives labels from the representative pane, but
+    /// the god marker needs the session to read "● god" regardless of which
+    /// pane is the representative — this map wins over the derived name. Not
+    /// persisted: god-elect.sh re-applies it every turn, so a restart that
+    /// re-elects a god re-marks the window.
+    window_name_override: HashMap<usize, String>,
     selection: Option<Selection>,
     drag_anchor: Option<(u16, u16)>,
     /// A left-press that landed on a detected URL. Holds (url, press_px) so a
@@ -3032,6 +3043,7 @@ impl App {
             pending_shell: None,
             window_labels: Vec::new(),
             window_labels_at: None,
+            window_name_override: HashMap::new(),
             selection: None,
             drag_anchor: None,
             link_armed: None,

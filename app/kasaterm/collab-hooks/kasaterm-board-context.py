@@ -117,6 +117,62 @@ def god_fleet_digest():
     return "\n".join(out) if out else None
 
 
+def _live_surface_ids():
+    """현재 board 에 떠 있는 pane id 집합. roster 의 죽은 세션 판정에 쓴다."""
+    cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
+    try:
+        r = subprocess.run([cli, "board"], capture_output=True, text=True, timeout=3)
+        board = (json.loads(r.stdout).get("result") or {}).get("board") or []
+        return {row.get("surface_id") for row in board if row.get("surface_id")}
+    except Exception:
+        return set()
+
+
+def _rel_age(ts):
+    s = max(0, int(time.time() - ts))
+    if s < 3600:
+        return f"{s // 60}분 전"
+    if s < 86400:
+        return f"{s // 3600}시간 전"
+    return f"{s // 86400}일 전"
+
+
+def roster_recovery():
+    """god 전용: roster(영속)에 기록된 과거 에이전트 중 지금 board 에 안 떠 있는
+    세션을 복구 후보로 나열. 재시작하면 워커 pane 이 다 사라지고 god 만 남는데,
+    이 주입을 보고 god 이 `claude --resume` 로 워커들을 부활시킨다.
+    pane_id 기준 live 판정(드물게 pane_id 재사용 시 누락 가능 — 정확 매칭은
+    board 에 session_id 노출 후속)."""
+    slug = os.getcwd().replace("/", "-").replace(".", "-")
+    p = os.path.expanduser(f"~/.config/kasaterm/agent-roster/{slug}.json")
+    try:
+        roster = json.load(open(p))
+    except Exception:
+        return None
+    if not isinstance(roster, dict) or not roster:
+        return None
+    live = _live_surface_ids()
+    # 살아있는 pane 이 이미 잡고 있는 session 은 복구 후보에서 제외 — 재시작 후
+    # god 이 옛 pane id 로 남은 '자기 자신의 세션'을 복구하라는 안내를 받아 같은
+    # 세션을 pane 두 개에 이중 attach 하는 사고 방지. rebind upsert 가 새 pane id
+    # 로 같은 sid 를 기록하므로 sid 대조만으로 걸러진다.
+    live_sids = {v.get("session_id") for v in roster.values() if v.get("pane_id") in live}
+    dead = [v for v in roster.values()
+            if v.get("pane_id") not in live and v.get("session_id") not in live_sids]
+    if not dead:
+        return None
+    dead.sort(key=lambda v: v.get("ts", 0), reverse=True)
+    lines = ["[복구 가능 에이전트] 이 방에서 돌던 세션 중 지금 안 떠 있는 것 — "
+             "워커를 부활시키려면 새 pane 띄우고 그 세션을 resume:"]
+    for v in dead[:8]:
+        lines.append(f"  session {v.get('session_id','?')} "
+                     f"(마지막 {v.get('pane_id','?')}, {_rel_age(v.get('ts',0))})")
+    lines.append("  복구 절차: `kasaterm-cli split right` (출력의 새 pane id 확인) "
+                 "→ `kasaterm-cli tell <새id> \"claude --resume <session_id>\"`. "
+                 "부활한 pane 이 다시 bind 되면 roster 가 자동 갱신된다.")
+    return "\n".join(lines)
+
+
 def god_section():
     """god 체제 규약. lead 파일로 god 파악 — 내가 god 이면 커밋 책임 + 변경점
     종합, 워커면 커밋 금지(god 에게 done 보고). god 없으면(혼자/미선출) None."""
@@ -131,7 +187,8 @@ def god_section():
                 "단독으로 git add/commit/push 한다(워커는 커밋 안 함). 부하가 많으면 "
                 "split 로 워커를 더 띄워 위임한다.")
         digest = god_fleet_digest()
-        return base + (("\n" + digest) if digest else "")
+        recovery = roster_recovery()
+        return base + (("\n" + digest) if digest else "") + (("\n" + recovery) if recovery else "")
     return (f"[god 체제] god = {god}. 너는 워커 — 직접 git commit/push 하지 마라. "
             f"작업이 끝나면 `kasacollab msg {god} \"done: <요약> | files: a,b\"` 로 "
             f"보고하면 god 이 검토 후 단독 커밋한다.")

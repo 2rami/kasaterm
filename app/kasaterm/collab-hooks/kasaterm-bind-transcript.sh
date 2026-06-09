@@ -21,5 +21,31 @@ sig="$(stat -f %i "$sock" 2>/dev/null || stat -c %i "$sock" 2>/dev/null):$tp"
 [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] && exit 0
 if kasaterm-cli bind-transcript "$tp" >/dev/null 2>&1; then
   printf '%s' "$sig" > "$marker"
+  # roster upsert — 재시작 후 god 이 워커들을 `claude --resume` 로 부활시킬 수
+  # 있게 {pane_id, session_id(transcript uuid), cwd, ts} 를 영속 기록한다.
+  # **/tmp 아님** (~/.config): 재시작 청소가 /tmp/kasaterm-collab 를 비워도
+  # roster 는 살아남아야 복구가 된다. 같은 pane_id 는 갱신(claude --resume 로
+  # session 이 바뀌면 최신으로 수렴). 30일 지난 entry 는 prune.
+  python3 - "$KASATERM_PANE_ID" "$tp" "$PWD" <<'PY' 2>/dev/null || true
+import sys, os, json, time
+pane, tp, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
+sid = os.path.splitext(os.path.basename(tp))[0]  # transcript 파일명 = session uuid
+slug = cwd.replace('/', '-').replace('.', '-')
+d = os.path.expanduser('~/.config/kasaterm/agent-roster')
+os.makedirs(d, exist_ok=True)
+p = os.path.join(d, slug + '.json')
+try:
+    roster = json.load(open(p))
+    if not isinstance(roster, dict):
+        roster = {}
+except Exception:
+    roster = {}
+roster[pane] = {"pane_id": pane, "session_id": sid, "cwd": cwd, "ts": time.time()}
+cutoff = time.time() - 30 * 86400
+roster = {k: v for k, v in roster.items() if v.get("ts", 0) >= cutoff}
+tmp = p + ".tmp"
+json.dump(roster, open(tmp, "w"), ensure_ascii=False)
+os.replace(tmp, p)
+PY
 fi
 exit 0

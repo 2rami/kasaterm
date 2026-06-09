@@ -284,6 +284,13 @@ pub trait Backend: Send + Sync {
     fn rename_surface(&self, _surface_id: &str, _title: &str) -> Result<()> {
         anyhow::bail!("rename_surface unsupported by this backend")
     }
+    /// Rename the *window/session* that `surface_id` belongs to (sidebar
+    /// session label), independent of the pane header. The god marker uses this
+    /// so the session reads "● god" even when the god pane isn't the window's
+    /// representative (first-leaf) pane. Default: unsupported.
+    fn rename_window(&self, _surface_id: &str, _title: &str) -> Result<()> {
+        anyhow::bail!("rename_window unsupported by this backend")
+    }
     /// Set a surface's accent color (header band), RGBA 0..255.
     /// Default: unsupported.
     fn set_color(&self, _surface_id: &str, _color: [u8; 4]) -> Result<()> {

@@ -71,6 +71,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.dock" => surface_dock(backend, id, &req.params),
         "surface.undock" => surface_undock(backend, id, &req.params),
         "surface.rename" => surface_rename(backend, id, &req.params),
+        "window.rename" => window_rename(backend, id, &req.params),
         "surface.set_color" => surface_set_color(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
         "surface.move" => surface_move(backend, id, &req.params),
@@ -202,6 +203,7 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.undock",
                 "surface.move",
                 "surface.rename",
+                "window.rename",
                 "surface.set_color",
                 "surface.resize_divider",
                 "collab.board",
@@ -362,6 +364,21 @@ fn surface_rename(backend: &dyn Backend, id: Value, params: &Value) -> Response 
         None => return param_err(id, "surface.rename requires `title` (string)"),
     };
     match backend.rename_surface(surface_id, title) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn window_rename(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "window.rename requires `surface_id` (string)"),
+    };
+    let title = match params.get("title").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "window.rename requires `title` (string)"),
+    };
+    match backend.rename_window(surface_id, title) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

@@ -377,19 +377,25 @@ impl App {
                 };
                 layout.and_then(|l| l.leaves().first().map(|s| s.to_string()))
             };
-            let name = repr
-                .as_ref()
-                .and_then(|id| {
-                    ws.panes
-                        .get(id)
-                        .and_then(|p| p.title.clone())
-                        .filter(|t| !t.is_empty())
-                        .or_else(|| {
-                            self.pty
-                                .get(id)
-                                .and_then(|p| p.active_process_name())
-                                .filter(|t| !t.is_empty())
-                        })
+            // window.rename override (god marker) wins over the derived name —
+            // it must hold even when the god pane isn't the representative leaf.
+            let name = self
+                .window_name_override
+                .get(&i)
+                .cloned()
+                .or_else(|| {
+                    repr.as_ref().and_then(|id| {
+                        ws.panes
+                            .get(id)
+                            .and_then(|p| p.title.clone())
+                            .filter(|t| !t.is_empty())
+                            .or_else(|| {
+                                self.pty
+                                    .get(id)
+                                    .and_then(|p| p.active_process_name())
+                                    .filter(|t| !t.is_empty())
+                            })
+                    })
                 })
                 .unwrap_or_else(|| format!("win {}", i + 1));
             let cwd = repr

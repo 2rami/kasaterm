@@ -41,6 +41,9 @@ start_god_loop() {
 ensure_god_look() {
   $CLI color "$ME" "$GOD_COLOR" >/dev/null 2>&1
   $CLI rename "$ME" "● god" >/dev/null 2>&1
+  # 사이드바 세션 이름도 god 마킹 — pane 헤더만이 아니라 세션 라벨까지(거노 요청).
+  # 강등 원복은 안 함(단순화 — god 윈도우만 마킹, 재선출 때 갱신).
+  $CLI rename-window "● god" >/dev/null 2>&1
   # god 인데 워처가 죽어있으면 조용히 재기동(자가치유) — '반드시 켜짐'.
   pgrep -f "god-loop.sh $ME" >/dev/null 2>&1 || start_god_loop
 }
