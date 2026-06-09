@@ -265,6 +265,14 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn rename_window(&self, surface_id: &str, title: &str) -> Result<()> {
+        let _ = self.proxy.send_event(UserEvent::SocketRenameWindow(
+            surface_id.to_string(),
+            title.to_string(),
+        ));
+        Ok(())
+    }
+
     fn set_color(&self, surface_id: &str, color: [u8; 4]) -> Result<()> {
         let _ = self
             .proxy

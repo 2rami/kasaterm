@@ -358,6 +358,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli focus <surface_id>");
     eprintln!("  kasaterm-cli close <surface_id>");
     eprintln!("  kasaterm-cli rename <surface_id> <title>");
+    eprintln!("  kasaterm-cli rename-window <title>          # 이 pane 의 세션 이름");
     eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
     eprintln!("  kasaterm-cli split <left|right|up|down> [--focus]  # 기본 no-focus");
     eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
@@ -419,6 +420,21 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .ok_or_else(|| anyhow!("rename needs a title"))?;
             (
                 "surface.rename",
+                json!({ "surface_id": surface, "title": title }),
+            )
+        }
+        "rename-window" => {
+            // 윈도우/세션 이름 변경. surface.rename 과 달리 surface_id 를 받지 않고
+            // 호출한 pane($KASATERM_PANE_ID)이 속한 윈도우를 대상으로 한다 —
+            // god-elect.sh 가 god pane 에서 `rename-window "● god"` 로 부른다.
+            let title = args
+                .first()
+                .ok_or_else(|| anyhow!("rename-window needs <title>"))?;
+            let surface = std::env::var("KASATERM_PANE_ID").map_err(|_| {
+                anyhow!("rename-window needs $KASATERM_PANE_ID (run inside a kasaterm pane)")
+            })?;
+            (
+                "window.rename",
                 json!({ "surface_id": surface, "title": title }),
             )
         }
