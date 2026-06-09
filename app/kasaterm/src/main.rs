@@ -3412,6 +3412,9 @@ fn install_pane_shims() {
     // pop an image viewer / markdown editor into its own window with zero
     // install — each just curls the host's MCP open-preview endpoint.
     install_preview_shims(&shim_dir);
+    // Stage a `claude` wrapper that injects the collab hooks session-scoped
+    // (`--settings`) so ~/.claude/settings.json is never modified.
+    install_claude_hook_shim(&shim_dir);
     // Force our shim dir to the FRONT of PATH even after the user's rc
     // files run. A login+interactive zsh sources brew's zprofile, which
     // prepends /opt/homebrew/bin (the real tmux) ahead of the PATH we
@@ -3506,6 +3509,114 @@ curl -s --get --data-urlencode \"path=$abs\" \
             {
                 eprintln!("[shim] chmod {name} failed: {e}");
             }
+        }
+    }
+}
+
+/// Locate the canonical collab-hooks directory the generated hook settings
+/// point at. Env override first, then the .app bundle's Resources, then the
+/// repo source next to this crate (cargo run). The scripts resolve their
+/// siblings via `dirname $0`, so pointing at any one complete copy works.
+fn locate_collab_hooks_dir() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
+        let p = std::path::PathBuf::from(p);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        // <bundle>/Contents/MacOS/kasaterm → <bundle>/Contents/Resources/collab-hooks
+        if let Some(res) = exe
+            .parent()
+            .and_then(|m| m.parent())
+            .map(|c| c.join("Resources/collab-hooks"))
+        {
+            if res.is_dir() {
+                return Some(res);
+            }
+        }
+    }
+    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("collab-hooks");
+    if dev.is_dir() {
+        return Some(dev);
+    }
+    None
+}
+
+/// Stage a `claude` wrapper + a session-scoped hook settings file on the pane
+/// PATH (munder-difflin pattern). Collab hooks ride in via `claude --settings`
+/// instead of edits to ~/.claude/settings.json, so claude outside a kasaterm
+/// pane runs exactly as the user configured it and install-hooks.sh is no
+/// longer needed.
+fn install_claude_hook_shim(shim_dir: &std::path::Path) {
+    // The wrapper is a POSIX sh script; the Windows pane PATH has no sh.
+    if cfg!(windows) {
+        return;
+    }
+    let Some(hooks_dir) = locate_collab_hooks_dir() else {
+        eprintln!("[shim] collab-hooks dir not found — claude hook shim skipped");
+        return;
+    };
+    let hd = hooks_dir.display();
+    let cmd = |script: &str, timeout: u64| {
+        serde_json::json!({ "type": "command", "command": format!("\"{hd}/{script}\""), "timeout": timeout })
+    };
+    // Mirrors what install-hooks.sh used to register globally — same matcher
+    // and timeouts, so in-pane behavior is unchanged.
+    let settings = serde_json::json!({
+        "hooks": {
+            "UserPromptSubmit": [{ "hooks": [
+                cmd("kasaterm-bind-transcript.sh", 5000),
+                cmd("kasaterm-board-context.py", 5000),
+            ]}],
+            "PostToolUse": [{ "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 10)] }],
+            "Stop": [{ "hooks": [cmd("kasaterm-notify-complete.sh", 5000)] }],
+            "Notification": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5000)] }],
+        }
+    });
+    let settings_path = shim_dir.join("claude-hooks-settings.json");
+    match serde_json::to_string_pretty(&settings) {
+        Ok(s) => {
+            if let Err(e) = std::fs::write(&settings_path, s) {
+                eprintln!("[shim] write claude-hooks-settings.json failed: {e}");
+                return;
+            }
+        }
+        Err(e) => {
+            eprintln!("[shim] serialize claude hook settings failed: {e}");
+            return;
+        }
+    }
+    let wrapper = "#!/bin/sh\n\
+# kasaterm pane-only claude wrapper — injects the collab hooks session-scoped\n\
+# (--settings) so ~/.claude/settings.json stays untouched. Outside a pane this\n\
+# wrapper isn't on PATH and claude runs exactly as the user configured it.\n\
+SELF_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
+CLEAN_PATH=$(printf '%s' \"$PATH\" | tr ':' '\\n' | grep -vxF \"$SELF_DIR\" | paste -sd: -)\n\
+REAL=$(PATH=\"$CLEAN_PATH\" command -v claude 2>/dev/null)\n\
+if [ -z \"$REAL\" ]; then\n\
+  echo \"kasaterm claude shim: real claude not found on PATH\" >&2\n\
+  exit 127\n\
+fi\n\
+SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
+# A user-supplied --settings wins; ours is skipped to avoid a duplicate flag.\n\
+for a in \"$@\"; do\n\
+  [ \"$a\" = \"--settings\" ] && exec \"$REAL\" \"$@\"\n\
+done\n\
+[ -f \"$SETTINGS\" ] || exec \"$REAL\" \"$@\"\n\
+exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n";
+    let wrapper_path = shim_dir.join("claude");
+    if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
+        eprintln!("[shim] write claude wrapper failed: {e}");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
+        {
+            eprintln!("[shim] chmod claude wrapper failed: {e}");
         }
     }
 }

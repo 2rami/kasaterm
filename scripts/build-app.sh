@@ -46,6 +46,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINDIR/kasaterm" "$APP/Contents/MacOS/kasaterm"
 cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# 협업 훅 정본 — claude PATH shim 이 --settings 로 가리키는 스크립트들
+# (locate_collab_hooks_dir 의 번들 경로). install-hooks.sh 배포 불필요.
+cp -R app/kasaterm/collab-hooks "$APP/Contents/Resources/collab-hooks"
+rm -rf "$APP/Contents/Resources/collab-hooks/__pycache__"
 
 # Minimal Info.plist. Bundle id namespaced under the project root so
 # Launchpad / Spotlight key the icon to this binary specifically.
