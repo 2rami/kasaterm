@@ -20,6 +20,9 @@ import sys, os, json, subprocess, time, hashlib
 # inbox 읽음 처리는 kasacollab 의 공용 drain_unread()를 쓴다 — 락+atomic 로
 # lost-update 를 막는 단일 임계구역을 두 파일이 공유해야 동작이 일치한다(인라인
 # 복사는 락 없는 옛 재작성이라 마킹 유실의 원인이었다). import-safe(main 가드).
+# .pyc 생성 금지 — 이 파일은 서명된 .app 번들 Resources 에서 돌므로 import 가
+# __pycache__ 를 번들 안에 쓰면 codesign seal 이 깨진다(실측).
+sys.dont_write_bytecode = True
 _HD = os.path.dirname(os.path.abspath(__file__))
 if _HD not in sys.path:
     sys.path.insert(0, _HD)
