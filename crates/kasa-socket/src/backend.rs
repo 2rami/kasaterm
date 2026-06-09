@@ -242,7 +242,12 @@ pub trait Backend: Send + Sync {
     fn current_workspace(&self) -> Result<Option<WorkspaceInfo>>;
     fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>>;
     fn focus_surface(&self, surface_id: &str) -> Result<()>;
-    fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo>;
+    /// Split the focused surface. `focus` decides whether the *new* pane
+    /// becomes active: CLI/automation callers pass `false` so a scripted split
+    /// doesn't yank the user's focus (like `tell`, it stays put); the GUI's own
+    /// keyboard split keeps focus-follows behavior by going through `layout`
+    /// directly, not this method.
+    fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo>;
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()>;
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()>;
     /// Send raw bytes straight to a surface's PTY (no symbolic-key mapping).

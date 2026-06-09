@@ -9,7 +9,7 @@
 //!   kasaterm-cli identify
 //!   kasaterm-cli list workspaces|surfaces
 //!   kasaterm-cli focus  <surface_id>
-//!   kasaterm-cli split  <left|right|up|down>
+//!   kasaterm-cli split  <left|right|up|down> [--focus]
 //!   kasaterm-cli send   <text>                  # writes to focused pane
 //!   kasaterm-cli send   <surface_id> <text>     # writes to specific pane
 //!   kasaterm-cli key    <enter|tab|...>
@@ -359,7 +359,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli close <surface_id>");
     eprintln!("  kasaterm-cli rename <surface_id> <title>");
     eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
-    eprintln!("  kasaterm-cli split <left|right|up|down>");
+    eprintln!("  kasaterm-cli split <left|right|up|down> [--focus]  # 기본 no-focus");
     eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
@@ -435,10 +435,13 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             )
         }
         "split" => {
+            // 기본 no-focus(자동화: tell 처럼 포커스 안 뺏음). --focus 로 옵트인.
+            let focus = args.iter().any(|a| a == "--focus");
             let dir = args
-                .first()
+                .iter()
+                .find(|a| !a.starts_with("--"))
                 .ok_or_else(|| anyhow!("split needs a direction"))?;
-            ("surface.split", json!({ "direction": dir }))
+            ("surface.split", json!({ "direction": dir, "focus": focus }))
         }
         "swap" => {
             let a = args

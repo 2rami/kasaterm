@@ -45,14 +45,32 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketSplit(dir, reply) => {
+            UserEvent::SocketSplit(dir, focus, reply) => {
+                // `split_active_pane` always sets the new pane active (correct
+                // for the GUI's keyboard split). The socket path defaults to
+                // no-focus so a scripted split doesn't yank the user's focus
+                // (like `tell`) — restore the prior active pane unless the
+                // caller opted in with `--focus`.
+                let prev = self.ws.lock().unwrap().active_pane.clone();
                 let new_id = self.split_active_pane(*dir).unwrap_or_default();
+                if !*focus {
+                    if let Some(prev) = prev {
+                        self.ws.lock().unwrap().active_pane = Some(prev);
+                    }
+                }
                 let _ = reply.send(new_id);
+                self.chrome_dirty = true;
                 self.render_frame();
                 return;
             }
             UserEvent::SocketFocus(id) => {
                 self.ws.lock().unwrap().active_pane = Some(id.clone());
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
+            UserEvent::SocketClose(id) => {
+                self.close_pane(id);
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;

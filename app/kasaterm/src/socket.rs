@@ -61,19 +61,21 @@ impl Backend for TmuxBackend {
         Ok(())
     }
 
-    fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo> {
+    fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo> {
         // tmux's split-window takes -h for horizontal split, -v for
         // vertical. cmux's direction terminology is what *cell rows*
         // grow into — right/left are horizontal splits, up/down are
         // vertical. -b prepends the new pane before the current one,
-        // which matches cmux's "left" / "up" semantics.
-        let cmd = match direction {
+        // which matches cmux's "left" / "up" semantics. `-d` keeps focus
+        // on the current pane (no-focus default); omit it to follow.
+        let base = match direction {
             SplitDirection::Right => "split-window -h",
             SplitDirection::Left => "split-window -hb",
             SplitDirection::Down => "split-window -v",
             SplitDirection::Up => "split-window -vb",
         };
-        self.tmux.send_cmd(cmd)?;
+        let cmd = if focus { base.to_string() } else { format!("{base} -d") };
+        self.tmux.send_cmd(&cmd)?;
         // We don't have a way to get the new pane's tmux id back
         // synchronously yet — control-mode reports it via a layout-change
         // event which the host's flusher thread receives. For the PoC
@@ -270,7 +272,7 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo> {
+    fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo> {
         let dir = match direction {
             SplitDirection::Right | SplitDirection::Left => kasa_pty::SplitDir::Horizontal,
             SplitDirection::Up | SplitDirection::Down => kasa_pty::SplitDir::Vertical,
@@ -279,8 +281,10 @@ impl Backend for PtyBackend {
         // the new pane's real id back to the caller. The teammate launcher uses
         // it as the `-t` target for every follow-up send-keys — returning the
         // old "pane-new" placeholder dropped the `claude …` launch silently.
+        // `focus` rides along so the GUI thread keeps focus on the current pane
+        // unless the caller opted in (CLI `--focus`).
         let (tx, rx) = std::sync::mpsc::channel();
-        let _ = self.proxy.send_event(UserEvent::SocketSplit(dir, tx));
+        let _ = self.proxy.send_event(UserEvent::SocketSplit(dir, focus, tx));
         let id = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .ok()
@@ -291,6 +295,16 @@ impl Backend for PtyBackend {
             workspace_id: FIXED_WORKSPACE_ID.into(),
             title: None,
         })
+    }
+
+    fn close_surface(&self, surface_id: &str) -> Result<()> {
+        // 로컬 PTY 모드: close 도 split/focus 처럼 GUI 스레드에 위임(App.pty 는
+        // 별도 스레드서 못 만짐). layout.rs close_pane 이 leaf 제거 + 다음 pane
+        // 으로 포커스 이동까지 한다.
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketClose(surface_id.to_string()));
+        Ok(())
     }
 
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {

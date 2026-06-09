@@ -202,7 +202,7 @@ impl KasaspaceTools {
             Ok(d) => d,
             Err(e) => return fail(e),
         };
-        match self.backend.split_surface(dir) {
+        match self.backend.split_surface(dir, false) {
             Ok(surf) => ok(format!(
                 "Split {}. New surface: {}",
                 args.direction,
@@ -374,7 +374,7 @@ impl KasaspaceTools {
             Ok(d) => d,
             Err(e) => return fail(e),
         };
-        let surf = match self.backend.split_surface(dir) {
+        let surf = match self.backend.split_surface(dir, false) {
             Ok(s) => s,
             Err(e) => return fail(format!("run_job split failed: {e}")),
         };
