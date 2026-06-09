@@ -622,7 +622,7 @@ impl App {
                     let extra = self.window.as_ref().map_or(0.0, |w| {
                         let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lh = w.inner_size().height as f32 / s;
-                        let dock = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+                        let dock = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
                         (raw_lh - dock - (TITLE_HEIGHT + grid_rows as f32 * self.cell.h)).max(0.0)
                     });
                     base_h + extra
@@ -931,8 +931,12 @@ impl App {
         // boundary instead of a 4-side border around every pane (which
         // doubled up into a thick seam between abutting panes). Coords match
         // divider_at_px so drag hit-testing lines up with the drawn line.
-        let pane_seams: Vec<(f32, f32, f32, f32)> = self
-            .pty_layout
+        let pane_seams: Vec<(f32, f32, f32, f32)> = if self.zoomed_pane.is_some() {
+            // Zoom 최대화 시 형제 pane이 숨겨지므로 분할선도 생략한다 — 안 그러면
+            // 가려진 split 경계선이 최대화 화면 위에 1px 선으로 남는다(C 버그).
+            Vec::new()
+        } else {
+            self.pty_layout
             .as_ref()
             .map(|tree| {
                 let (cols, rows) = self.window_cells();
@@ -980,7 +984,8 @@ impl App {
                     })
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_default()
+        };
         // Left window-tab sidebar geometry. Cache the hit rects for the
         // mouse handler; the gpu block below paints from the same numbers so
         // a click always lands on what the user sees.
@@ -1939,7 +1944,7 @@ impl App {
             self.git_path_menu_rects.clear();
             self.git_branch_menu_rects.clear();
             if git_col_w > 0.0 {
-                let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
                 let gcx0 = git_col_x + 14.0;
                 let gcw = (git_col_w - 28.0).max(0.0);
                 let top = TITLE_HEIGHT;
@@ -3431,7 +3436,45 @@ impl App {
             // Bottom dock bar: chips for panes folded out of the layout
             // (window_cells reserves DOCK_HEIGHT below the grid when non-empty).
             // Click a chip to restore (undock); its × kills the pane.
-            if !self.docked.is_empty() {
+            // Dock bar: docked panes (chips, ×=kill) OR — while a pane is zoomed
+            // — the hidden sibling panes, so the maximize visibly "sends the
+            // others to the dock" and a sibling chip click switches the zoom to
+            // it. zoom siblings have no × (they're live panes, not parked).
+            let dock_items: Vec<(String, String, bool)> = if let Some(z) = self.zoomed_pane.clone() {
+                let ws = self.ws.lock().unwrap();
+                self.pty_layout
+                    .as_ref()
+                    .map(|t| {
+                        t.leaves()
+                            .iter()
+                            .filter(|l| **l != z.as_str())
+                            .map(|l| {
+                                let label = ws
+                                    .panes
+                                    .get(*l)
+                                    .and_then(|p| {
+                                        p.tabs.get(p.active_tab).and_then(|tb| tb.title.clone())
+                                    })
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| l.to_string());
+                                (l.to_string(), label, false)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                self.docked
+                    .iter()
+                    .map(|d| {
+                        (
+                            d.id.clone(),
+                            if d.label.is_empty() { "shell".to_string() } else { d.label.clone() },
+                            true,
+                        )
+                    })
+                    .collect()
+            };
+            if !dock_items.is_empty() {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 let bar_y = win_h - DOCK_HEIGHT;
@@ -3454,11 +3497,9 @@ impl App {
                 let mut cx = grid_x + 8.0;
                 let mut chip_hits = Vec::new();
                 let mut chip_close_hits = Vec::new();
-                for d in &self.docked {
-                    let label: &str =
-                        if d.label.is_empty() { "shell" } else { d.label.as_str() };
+                for (id, label, killable) in &dock_items {
                     let lw = g.measure_chrome_text(label, chrome_font, false);
-                    let chip_w = lw + icon + 24.0;
+                    let chip_w = if *killable { lw + icon + 24.0 } else { lw + 20.0 };
                     let hover = mx >= cx && mx <= cx + chip_w && my >= cy && my <= cy + chip_h;
                     round_rect(
                         g,
@@ -3480,10 +3521,14 @@ impl App {
                             italic: false,
                         },
                     );
-                    let close_x = cx + chip_w - icon - 6.0;
-                    g.queue_icon("x", close_x, cy + (chip_h - icon) / 2.0, icon, theme::text_dim());
-                    chip_close_hits.push((d.id.clone(), (close_x - 2.0, cy, icon + 6.0, chip_h)));
-                    chip_hits.push((d.id.clone(), (cx, cy, chip_w - icon - 8.0, chip_h)));
+                    if *killable {
+                        let close_x = cx + chip_w - icon - 6.0;
+                        g.queue_icon("x", close_x, cy + (chip_h - icon) / 2.0, icon, theme::text_dim());
+                        chip_close_hits.push((id.clone(), (close_x - 2.0, cy, icon + 6.0, chip_h)));
+                        chip_hits.push((id.clone(), (cx, cy, chip_w - icon - 8.0, chip_h)));
+                    } else {
+                        chip_hits.push((id.clone(), (cx, cy, chip_w, chip_h)));
+                    }
                     cx += chip_w + 6.0;
                 }
                 self.dock_chip_rects = chip_hits;
