@@ -17,6 +17,17 @@
 """
 import sys, os, json, subprocess, time, hashlib
 
+# inbox 읽음 처리는 kasacollab 의 공용 drain_unread()를 쓴다 — 락+atomic 로
+# lost-update 를 막는 단일 임계구역을 두 파일이 공유해야 동작이 일치한다(인라인
+# 복사는 락 없는 옛 재작성이라 마킹 유실의 원인이었다). import-safe(main 가드).
+_HD = os.path.dirname(os.path.abspath(__file__))
+if _HD not in sys.path:
+    sys.path.insert(0, _HD)
+try:
+    import kasacollab
+except Exception:
+    kasacollab = None
+
 me = os.environ.get("KASATERM_PANE_ID")
 if not me:
     sys.exit(0)
@@ -68,26 +79,14 @@ def board_section():
 
 
 def inbox_section():
-    """내게 온 미읽 메시지. 띄우면서 읽음 처리(턴에 실으면 본 것). 없으면 None."""
-    p = os.path.join(collab_dir(), "messages.jsonl")
-    if not os.path.exists(p):
+    """내게 온 미읽 메시지. 읽음 처리(턴에 실으면 본 것)는 kasacollab 의 공용
+    drain_unread()(락+atomic)에 위임 — 동시 재작성에 마킹이 유실되던 race 해소.
+    없으면 None."""
+    if kasacollab is None:
         return None
-    try:
-        msgs = [json.loads(l) for l in open(p).read().splitlines() if l.strip()]
-    except Exception:
-        return None
-    mine = [m for m in msgs
-            if m.get("to") == me and m.get("from") != me and not m.get("read")]
+    mine = kasacollab.drain_unread()
     if not mine:
         return None
-    for m in mine:
-        m["read"] = True
-    try:
-        with open(p, "w") as f:
-            for m in msgs:
-                f.write(json.dumps(m, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
     lines = [f"  {m.get('from', '?')}: {m.get('text', '')}" for m in mine]
     return ("[받은 메시지] 나한테 온 말 (답장: kasacollab msg <상대> \"...\"):\n"
             + "\n".join(lines))

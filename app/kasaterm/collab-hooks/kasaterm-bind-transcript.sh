@@ -28,24 +28,38 @@ if kasaterm-cli bind-transcript "$tp" >/dev/null 2>&1; then
   # session 이 바뀌면 최신으로 수렴). 30일 지난 entry 는 prune.
   python3 - "$KASATERM_PANE_ID" "$tp" "$PWD" <<'PY' 2>/dev/null || true
 import sys, os, json, time
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 pane, tp, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
 sid = os.path.splitext(os.path.basename(tp))[0]  # transcript 파일명 = session uuid
 slug = cwd.replace('/', '-').replace('.', '-')
 d = os.path.expanduser('~/.config/kasaterm/agent-roster')
 os.makedirs(d, exist_ok=True)
 p = os.path.join(d, slug + '.json')
+# 동시 bind(여러 pane 이 같은 cwd roster 를 read-modify-write)의 lost-update 를
+# 막는다 — 별도 .lock 에 flock(본 파일은 os.replace 로 inode 가 바뀌므로).
+lf = open(p + '.lock', 'w')
+if fcntl is not None:
+    fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
 try:
-    roster = json.load(open(p))
-    if not isinstance(roster, dict):
+    try:
+        roster = json.load(open(p))
+        if not isinstance(roster, dict):
+            roster = {}
+    except Exception:
         roster = {}
-except Exception:
-    roster = {}
-roster[pane] = {"pane_id": pane, "session_id": sid, "cwd": cwd, "ts": time.time()}
-cutoff = time.time() - 30 * 86400
-roster = {k: v for k, v in roster.items() if v.get("ts", 0) >= cutoff}
-tmp = p + ".tmp"
-json.dump(roster, open(tmp, "w"), ensure_ascii=False)
-os.replace(tmp, p)
+    roster[pane] = {"pane_id": pane, "session_id": sid, "cwd": cwd, "ts": time.time()}
+    cutoff = time.time() - 30 * 86400
+    roster = {k: v for k, v in roster.items() if v.get("ts", 0) >= cutoff}
+    tmp = p + ".tmp"
+    json.dump(roster, open(tmp, "w"), ensure_ascii=False)
+    os.replace(tmp, p)
+finally:
+    if fcntl is not None:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+    lf.close()
 PY
 fi
 exit 0

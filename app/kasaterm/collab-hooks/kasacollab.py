@@ -18,6 +18,45 @@ board(감지)·conflict-guard(차단) 위에 얹는 '분담·대화' 층. 두 �
   kasacollab inbox                               # 내게 온 미읽 메시지(읽음 처리)
 """
 import sys, os, json, time, subprocess
+from contextlib import contextmanager
+
+try:
+    import fcntl  # POSIX 전용 — Windows pane 에선 없음(아래 _locked 가 no-op 폴백)
+except ImportError:
+    fcntl = None
+
+
+@contextmanager
+def _locked(path):
+    """`path` 에 대한 배타 락(임계구역). 본 파일이 아니라 별도 `<path>.lock` 에
+    flock 을 잡는다 — read-modify-write 가 본 파일을 os.replace 로 갈아치우면
+    inode 가 바뀌어 본 파일에 잡은 flock 은 새 파일과 무관해지지만, 락 파일은
+    교체되지 않아 inode 가 불변이라 직렬화가 유지된다. fcntl 없는 플랫폼
+    (Windows)에선 no-op — atomic replace 만으로 부분읽기는 막고 lost-update 만
+    남으나 협업은 POSIX pane 위주라 허용."""
+    if fcntl is None:
+        yield
+        return
+    lockp = path + ".lock"
+    f = open(lockp, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()
+
+
+def _write_lines_atomic(path, lines):
+    """lines 를 tmp 에 쓰고 os.replace 로 원자 교체 — 읽는 쪽은 항상 완전한
+    옛 파일 또는 완전한 새 파일을 본다(중간 잘린 상태 없음)."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        for l in lines:
+            f.write(l + "\n")
+    os.replace(tmp, path)
 
 
 def base():
@@ -47,7 +86,10 @@ def load_tasks():
 
 
 def save_tasks(t):
-    json.dump(t, open(tasks_path(), "w"), ensure_ascii=False)
+    p = tasks_path()
+    tmp = p + ".tmp"
+    json.dump(t, open(tmp, "w"), ensure_ascii=False)
+    os.replace(tmp, p)  # 원자 교체 — 읽는 쪽은 완전한 옛/새 파일만 본다
 
 
 def short_id():
@@ -61,35 +103,41 @@ def cmd_task(args):
     if not args:
         print("kasacollab task add|list|done|drop")
         return
-    sub, t = args[0], load_tasks()
-    if sub == "add":
+    sub = args[0]
+    if sub == "list":
+        # read-only — atomic write 라 완전한 파일을 보므로 락 불필요.
+        live = [i for i in load_tasks() if i.get("status") == "doing"]
+        if not live:
+            print("(진행 중 작업 없음)")
+            return
+        for i in live:
+            print(f"[{i['id']}] {i['pane']}: {i['desc']}")
+    elif sub == "add":
         desc = " ".join(args[1:]).strip()
         if not desc:
             print("desc 필요: task add \"<무슨 일>\"")
             return
         item = {"id": short_id(), "pane": me(), "desc": desc,
                 "status": "doing", "ts": time.time()}
-        t.append(item)
-        save_tasks(t)
+        # 락 안에서 최신 스냅샷 재load → 변경 → atomic save (lost-update 방지).
+        with _locked(tasks_path()):
+            t = load_tasks()
+            t.append(item)
+            save_tasks(t)
         print(f"맡음 [{item['id']}] {desc}")
-    elif sub == "list":
-        live = [i for i in t if i.get("status") == "doing"]
-        if not live:
-            print("(진행 중 작업 없음)")
-            return
-        for i in live:
-            print(f"[{i['id']}] {i['pane']}: {i['desc']}")
     elif sub in ("done", "drop"):
         if len(args) < 2:
             print(f"{sub} <id>")
             return
         tid = args[1]
-        hit = False
-        for i in t:
-            if i["id"] == tid:
-                i["status"] = "done" if sub == "done" else "dropped"
-                hit = True
-        save_tasks(t)
+        with _locked(tasks_path()):
+            t = load_tasks()
+            hit = False
+            for i in t:
+                if i["id"] == tid:
+                    i["status"] = "done" if sub == "done" else "dropped"
+                    hit = True
+            save_tasks(t)
         print(f"{tid} {sub}" if hit else f"{tid} 없음")
     else:
         print("kasacollab task add|list|done|drop")
@@ -99,13 +147,38 @@ def read_msgs():
     p = msgs_path()
     if not os.path.exists(p):
         return []
-    return [json.loads(l) for l in open(p).read().splitlines() if l.strip()]
+    try:
+        return [json.loads(l) for l in open(p).read().splitlines() if l.strip()]
+    except Exception:
+        return []
 
 
-def write_msgs(msgs):
-    with open(msgs_path(), "w") as f:
-        for m in msgs:
+def append_msg(m):
+    """메시지 1건 추가 — 락 안에서. read-modify-write(drain_unread)와 같은 락을
+    공유해, 마킹이 도는 사이 append 가 끼어 옛 스냅샷 재작성에 유실되는 걸 막는다."""
+    p = msgs_path()
+    with _locked(p):
+        with open(p, "a") as f:
             f.write(json.dumps(m, ensure_ascii=False) + "\n")
+
+
+def drain_unread():
+    """내게 온 미읽 메시지(to==me·from!=me·read=False)를 read=True 로 마킹하고
+    그 목록을 반환. **inbox·drain-stop·board-context 가 공유하는 단일 임계구역** —
+    락+atomic 으로 lost-update(동시 재작성이 마킹 유실)을 구조로 막는다. 없으면 []."""
+    p = msgs_path()
+    if not os.path.exists(p):
+        return []
+    with _locked(p):
+        msgs = read_msgs()
+        mine = [m for m in msgs
+                if m.get("to") == me() and m.get("from") != me() and not m.get("read")]
+        if not mine:
+            return []
+        for m in mine:
+            m["read"] = True
+        _write_lines_atomic(p, [json.dumps(m, ensure_ascii=False) for m in msgs])
+        return mine
 
 
 def live_panes():
@@ -147,8 +220,7 @@ def cmd_msg(args):
         return
     m = {"id": short_id(), "from": me(), "to": to, "text": text,
          "ts": time.time(), "read": False}
-    with open(msgs_path(), "a") as f:
-        f.write(json.dumps(m, ensure_ascii=False) + "\n")
+    append_msg(m)  # 락 안 append — drain 과 같은 임계구역
     # inbox는 상대 '다음 턴'에야 자동 주입돼 working 중이면 한참 뒤에 본다.
     # 보낸 즉시 tell 로 깨워 그 턴의 board-context hook 이 이 메시지를 바로
     # 끌어가게 한다. tell 본문은 트리거일 뿐 — 실제 내용은 inbox 주입이 싣는다.
@@ -166,16 +238,12 @@ def cmd_msg(args):
 
 
 def cmd_inbox(args):
-    msgs = read_msgs()
-    mine = [m for m in msgs
-            if m.get("to") == me() and m.get("from") != me() and not m.get("read")]
+    mine = drain_unread()
     if not mine:
         print("(새 메시지 없음)")
         return
     for m in mine:
         print(f"{m['from']}: {m['text']}")
-        m["read"] = True
-    write_msgs(msgs)
 
 
 def cmd_drain_stop(args):
@@ -189,14 +257,11 @@ def cmd_drain_stop(args):
     # 불가능하므로 board-context.py 가 이미 쓰는 'read' 플래그를 멱등 키로
     # 공유한다. 한 번 surface 된 메시지는 read=True 라 다음 Stop 에 안 잡혀
     # 무한루프가 안 난다(+ Stop hook 스크립트의 stop_hook_active 가드로 이중).
-    msgs = read_msgs()
-    mine = [m for m in msgs
-            if m.get("to") == me() and m.get("from") != me() and not m.get("read")]
+    # drain_unread 가 락+atomic 으로 마킹해 동시 재작성이 마킹을 유실시켜 같은
+    # 메시지가 재surface 되던 lost-update 사고(거노 실측)를 구조로 막는다.
+    mine = drain_unread()
     if not mine:
         sys.exit(0)
-    for m in mine:
-        m["read"] = True
-    write_msgs(msgs)
     lines = "\n".join(f"- {m['from']}: {m['text']}" for m in mine)
     reason = (f"끝내기 전에 inbox 에 안 읽은 협업 메시지 {len(mine)}건이 있어. "
               f"각각 확인하고 필요하면 답장(kasacollab msg <상대> \"...\")해라:\n{lines}")
