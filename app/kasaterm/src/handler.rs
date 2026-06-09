@@ -100,6 +100,9 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
+        // Ask for desktop-notification permission up front so the prompt
+        // appears at launch rather than mid-work on the first completion.
+        crate::chrome::ensure_notification_authorization();
         // macOS menu bar: app submenu (About/Quit) + a "보기" submenu with
         // the "Git 패널" toggle. Built once (NSApp exists by resumed). Clicks
         // arrive on muda's global channel, drained in about_to_wait. Stored

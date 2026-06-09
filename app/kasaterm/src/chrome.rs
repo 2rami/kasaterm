@@ -1181,13 +1181,68 @@ impl App {
     }
 }
 
-/// Raise a macOS desktop notification. Uses `osascript` rather than
-/// `UNUserNotificationCenter`: the latter needs a bundled, code-signed app
-/// with notification authorization, which the bare `cargo run` binary lacks.
-/// The .app bundle can swap in a native UN notification later for the click
-/// action / sound control cmux gets.
+/// Raise a macOS desktop notification. Inside the signed `.app` bundle we use
+/// `UNUserNotificationCenter` so the alert carries kasaterm's own app icon (and
+/// gets the native sound/click affordances). The bare `cargo run` binary has no
+/// bundle identifier and can't obtain notification authorization, so there we
+/// fall back to `osascript` — which shows the Script Editor icon (dev-only).
 #[cfg(target_os = "macos")]
 fn notify_desktop(title: &str, body: &str) {
+    if is_bundled() {
+        notify_native(title, body);
+    } else {
+        notify_osascript(title, body);
+    }
+}
+
+/// True when running from a `.app` bundle (has a `CFBundleIdentifier`). Native
+/// `UNUserNotificationCenter` requires this; the bare binary returns `None`.
+#[cfg(target_os = "macos")]
+fn is_bundled() -> bool {
+    objc2_foundation::NSBundle::mainBundle()
+        .bundleIdentifier()
+        .is_some()
+}
+
+/// Request alert/sound authorization once per process. The system shows the
+/// permission prompt on first call; the grant persists across launches.
+#[cfg(target_os = "macos")]
+pub(crate) fn ensure_notification_authorization() {
+    use objc2_user_notifications::{UNAuthorizationOptions, UNUserNotificationCenter};
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !is_bundled() {
+            return;
+        }
+        let handler = block2::RcBlock::new(|_granted: objc2::runtime::Bool, _err: *mut objc2_foundation::NSError| {});
+        let center = UNUserNotificationCenter::currentNotificationCenter();
+        let opts = UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound;
+        center.requestAuthorizationWithOptions_completionHandler(opts, &handler);
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn notify_native(title: &str, body: &str) {
+    use objc2_foundation::NSString;
+    use objc2_user_notifications::{
+        UNMutableNotificationContent, UNNotificationRequest, UNUserNotificationCenter,
+    };
+    ensure_notification_authorization();
+    // Unique id per request so rapid completions don't replace each other.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(title));
+    content.setBody(&NSString::from_str(body));
+    let ident = NSString::from_str(&format!("kasaterm-notify-{seq}"));
+    let request =
+        UNNotificationRequest::requestWithIdentifier_content_trigger(&ident, &content, None);
+    let center = UNUserNotificationCenter::currentNotificationCenter();
+    center.addNotificationRequest_withCompletionHandler(&request, None);
+}
+
+#[cfg(target_os = "macos")]
+fn notify_osascript(title: &str, body: &str) {
     let script = format!(
         "display notification {} with title {}",
         applescript_quote(body),
@@ -1201,6 +1256,9 @@ fn notify_desktop(title: &str, body: &str) {
 
 #[cfg(not(target_os = "macos"))]
 fn notify_desktop(_title: &str, _body: &str) {}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn ensure_notification_authorization() {}
 
 /// Wrap `s` in an AppleScript string literal, escaping `"` and `\` so a pane
 /// title with quotes can't break out of the `display notification` command.
