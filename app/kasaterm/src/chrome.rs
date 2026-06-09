@@ -109,11 +109,31 @@ impl App {
     /// (munder: "only the god agent talks to the human"). 협업방이 없으면(단독
     /// 사용) 모든 pane 이 사용자 직행 — 기존 동작 그대로. lead 파일은 pane cwd 의
     /// slug(`/`·`.` → `-`, god-elect.sh/kasacollab 과 동일 규칙)로 찾는다.
-    /// 프롬프트 감지 같은 저빈도 경로 전용 (파일 1회 read).
+    ///
+    /// cwd 는 **캐시(pane_cwd_cache)를 우회하고 라이브 lsof** 로 푼다. 캐시는
+    /// split 시점값이 박제될 수 있어(refresh 타이밍·키 불일치) cd 후 옛 방 lead
+    /// 를 읽어 god/워커를 오판했다(거노 실측: %4 가 cd /tmp 후 권한 메뉴 떴는데
+    /// 레포 방 lead 로 워커 취급→토스트 미발화). claude pane 은 claude 가 cd 를
+    /// 못 하므로 shell cwd = claude 시작 cwd = 협업방 slug 가 항상 일치 →
+    /// 라이브 pid_cwd 가 정확하다(collab_board god 판정과 같은 결과). 승인 프롬프트
+    /// 는 저빈도라 lsof 1회 비용은 무시 가능. 라이브 실패 시에만 캐시 폴백.
     pub(crate) fn pane_faces_user(&self, id: &str) -> bool {
-        let Some(cwd) = self.pane_current_cwd(id) else {
-            return true;
+        let cwd = self
+            .pty
+            .get(id)
+            .and_then(|s| s.shell_pid())
+            .and_then(socket::pid_cwd)
+            .or_else(|| self.pane_cwd_cache.get(id).cloned());
+        let Some(cwd) = cwd else {
+            return true; // cwd 를 못 풀면 보수적으로 사용자 직행(기존 동작)
         };
+        Self::pane_faces_user_for(&cwd, id)
+    }
+
+    /// `pane_faces_user` 의 순수 판정부 — cwd + pane id 로 협업방 lead 를 읽어
+    /// 이 pane 이 god(또는 협업방 없음)이라 사용자 직행인지 본다. cwd 조회(lsof)와
+    /// 분리해 단위테스트가 가능하다.
+    pub(crate) fn pane_faces_user_for(cwd: &std::path::Path, id: &str) -> bool {
         let slug: String = cwd
             .to_string_lossy()
             .chars()
@@ -121,7 +141,7 @@ impl App {
             .collect();
         match std::fs::read_to_string(format!("/tmp/kasaterm-collab/{slug}/lead")) {
             Ok(lead) => lead.trim() == id,
-            Err(_) => true,
+            Err(_) => true, // 협업방 없음(단독) → 사용자 직행
         }
     }
 
@@ -1325,4 +1345,48 @@ fn applescript_quote(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod faces_user_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // 실제 협업방 루트(/tmp/kasaterm-collab)를 오염 안 시키게 pid+태그로 유니크한
+    // cwd 를 만들어 그 slug 경로에 lead 를 깐다. pane_faces_user_for 는 cwd→slug
+    // 변환 후 그 lead 를 읽으므로 cwd 만 유니크하면 격리된다.
+    fn room(tag: &str) -> (PathBuf, String) {
+        let cwd = PathBuf::from(format!("/tmp/kt-faces-test-{}-{tag}", std::process::id()));
+        let slug: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '-' } else { c })
+            .collect();
+        let dir = format!("/tmp/kasaterm-collab/{slug}");
+        std::fs::create_dir_all(&dir).unwrap();
+        (cwd, dir)
+    }
+
+    #[test]
+    fn god_pane_faces_user() {
+        let (cwd, dir) = room("god");
+        std::fs::write(format!("{dir}/lead"), "%1\n").unwrap();
+        assert!(App::pane_faces_user_for(&cwd, "%1")); // god 본인 → 직행
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn worker_pane_does_not_face_user() {
+        let (cwd, dir) = room("worker");
+        std::fs::write(format!("{dir}/lead"), "%1\n").unwrap();
+        assert!(!App::pane_faces_user_for(&cwd, "%2")); // 워커 → god 이 처리
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn no_lead_means_solo_faces_user() {
+        let (cwd, dir) = room("solo"); // dir 만들되 lead 안 씀
+        assert!(App::pane_faces_user_for(&cwd, "%7")); // 협업방 없음(단독) → 직행
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
