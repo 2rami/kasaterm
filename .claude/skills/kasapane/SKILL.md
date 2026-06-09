@@ -342,7 +342,7 @@ UI 변경 후 사용자에게 "테스트해보세요" 떠넘기지 말 것. **�
 | `KASATERM_AUTOWINDOWS` | 0 | N개 추가 window 스폰 (사이드바 멀티-윈도우 테스트) |
 | `KASATERM_AUTOTOGGLE_SIDEBAR_MS` | (없음) | 사이드바 토글 후 캡처 |
 | `KASATERM_AUTOCAPTURE_MS` | (없음) | N ms 후 PNG 캡처 |
-| `KASATERM_AUTOCAPTURE_PATH` | `$TMPDIR/tmuxify.png` | 캡처 저장 경로 |
+| `KASATERM_AUTOCAPTURE_PATH` | `$TMPDIR/kasaterm.png` | 캡처 저장 경로 |
 | `KASATERM_AUTOQUIT_MS` | (없음) | N ms 후 깨끗하게 종료(저장됨). 캡처 전용 run엔 **설정하지 말 것** — 종료 시 `session.json`이 테스트 레이아웃으로 덮어쓰임 |
 | `KASATERM_AUTOSEND` / `_MS` | (없음) | 활성 pane에 키 자동 전송 (IME 조합 경로는 재현 X) |
 | `KASATERM_IME_DEBUG=1` | — | 키 코드포인트 로깅 |

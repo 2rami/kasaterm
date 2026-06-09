@@ -1,5 +1,5 @@
 //! Behavior delegation. The protocol crate owns framing and dispatch;
-//! the embedding host (tmuxify, kasaterm-sugarloaf-cli, etc.) plugs in
+//! the embedding host (kasaterm, kasaterm-sugarloaf-cli, etc.) plugs in
 //! a `Backend` that translates method calls into actual terminal
 //! operations.
 //!

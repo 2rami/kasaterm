@@ -1,6 +1,6 @@
 [package]
 name = "kasa-pty"
-description = "Direct PTY + alacritty_terminal backend. Phase C replacement for kasa-bridge so tmuxify can run natively on Windows (via portable-pty's ConPTY) and stop depending on a tmux daemon."
+description = "Direct PTY + alacritty_terminal backend. Phase C replacement for kasa-bridge so kasaterm can run natively on Windows (via portable-pty's ConPTY) and stop depending on a tmux daemon."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ crossbeam-channel.workspace = true
 serde.workspace = true
 portable-pty = "0.9"
 alacritty_terminal = "0.26"
-# Shared cell / color / ScreenUpdate types — tmuxify's renderer is
+# Shared cell / color / ScreenUpdate types — kasaterm's renderer is
 # already keyed off these and we want kasa-pty to be drop-in
 # compatible with kasa-bridge. The kasa-bridge crate itself stops
 # being a runtime dependency once Phase D lands (kasaterm-cli +

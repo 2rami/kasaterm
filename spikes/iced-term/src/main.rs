@@ -303,7 +303,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 fn main() -> iced::Result {
-    iced::application("tmuxify spike — iced", App::update, App::view)
+    iced::application("kasaterm spike — iced", App::update, App::view)
         .subscription(App::subscription)
         .theme(|_| Theme::Dark)
         .run()

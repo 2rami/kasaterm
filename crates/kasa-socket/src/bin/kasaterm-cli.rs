@@ -349,7 +349,7 @@ fn draw_boxes(rects: &[(String, u16, u16, u16, u16)]) -> String {
 }
 
 fn print_help() {
-    eprintln!("cmux-compatible JSON-RPC CLI for tmuxify / agent-socket\n");
+    eprintln!("cmux-compatible JSON-RPC CLI for kasaterm / agent-socket\n");
     eprintln!("Usage:");
     eprintln!("  kasaterm-cli ping");
     eprintln!("  kasaterm-cli capabilities");

@@ -4,7 +4,7 @@
 //! JSON over a Unix socket at `$CMUX_SOCKET_PATH` / `$KASATERM_SOCKET_PATH`)
 //! so any agent that speaks the cmux protocol — currently Claude Code's
 //! teammateMode proposal in anthropics/claude-code#36926 — can drive a
-//! tmuxify session with no protocol shim. The cmux project's own CLI
+//! kasaterm session with no protocol shim. The cmux project's own CLI
 //! (`cmux notify`, `cmux split`, etc.) also targets the same socket
 //! contract.
 //!

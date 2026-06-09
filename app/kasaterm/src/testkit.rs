@@ -16,7 +16,7 @@ impl App {
         let Ok(ms) = ms_str.parse::<u64>() else { return; };
         let path = std::env::var("KASATERM_AUTOCAPTURE_PATH").unwrap_or_else(|_| {
             std::env::temp_dir()
-                .join("tmuxify.png")
+                .join("kasaterm.png")
                 .to_string_lossy()
                 .into_owned()
         });

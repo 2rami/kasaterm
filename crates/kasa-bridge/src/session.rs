@@ -41,7 +41,7 @@ pub struct TmuxSession {
 pub struct StartOptions<'a> {
     pub cwd: Option<&'a str>,
     pub auto_run: Option<&'a str>,
-    /// Override the auto-derived session name. Used by tmuxify to keep
+    /// Override the auto-derived session name. Used by kasaterm to keep
     /// one tmux session per desktop.
     pub session_name: Option<&'a str>,
     /// `tmux -L <socket_name>` — isolates the tmux server from any other
@@ -82,7 +82,7 @@ impl TmuxSession {
                     .filter(|p| !p.is_empty())
                     .map(session_name_for_path)
             })
-            .unwrap_or_else(|| "tmuxify-main".into());
+            .unwrap_or_else(|| "kasaterm-main".into());
 
         // has-session must use the same socket as the spawn below or
         // tmux will lie about session existence.
@@ -547,5 +547,5 @@ fn session_name_for_path(path: &str) -> String {
             }
         })
         .collect();
-    format!("tmuxify-{}-{}", safe_base, short)
+    format!("kasaterm-{}-{}", safe_base, short)
 }

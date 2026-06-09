@@ -405,17 +405,17 @@ impl App {
         match arboard::Clipboard::new() {
             Ok(mut cb) => {
                 if let Err(e) = cb.set_text(text) {
-                    eprintln!("[tmuxify] clipboard write failed: {e}");
+                    eprintln!("[kasaterm] clipboard write failed: {e}");
                 }
             }
-            Err(e) => eprintln!("[tmuxify] clipboard open failed: {e}"),
+            Err(e) => eprintln!("[kasaterm] clipboard open failed: {e}"),
         }
     }
     pub(crate) fn paste_clipboard(&self) {
         let mut cb = match arboard::Clipboard::new() {
             Ok(cb) => cb,
             Err(e) => {
-                eprintln!("[tmuxify] clipboard open failed: {e}");
+                eprintln!("[kasaterm] clipboard open failed: {e}");
                 return;
             }
         };
@@ -430,7 +430,7 @@ impl App {
         let text = match cb.get_text() {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("[tmuxify] clipboard read failed: {e}");
+                eprintln!("[kasaterm] clipboard read failed: {e}");
                 return;
             }
         };
@@ -1325,13 +1325,13 @@ impl App {
                             kasa_pty::SplitDir::Horizontal
                         };
                         if let Err(e) = self.split_active_pane(dir) {
-                            eprintln!("[tmuxify] split failed: {e}");
+                            eprintln!("[kasaterm] split failed: {e}");
                         }
                         return;
                     }
                     if code == KeyCode::KeyE {
                         if let Err(e) = self.split_active_pane(kasa_pty::SplitDir::Vertical) {
-                            eprintln!("[tmuxify] split failed: {e}");
+                            eprintln!("[kasaterm] split failed: {e}");
                         }
                         return;
                     }
