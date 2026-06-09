@@ -287,6 +287,45 @@ impl App {
         let Some((src, from, dst)) = self.autodrag_plan.take() else { return };
         self.simulate_tab_merge(&src, from, &dst);
     }
+    /// Headless cross-window pane move. KASATERM_AUTOPANEMOVE=<dst window idx>
+    /// relocates the active window's first leaf beside that window's first leaf
+    /// via `move_pane`, exercising the sidebar-chip drop path without a drag.
+    pub(crate) fn arm_autopanemove(&mut self) {
+        let Ok(env) = std::env::var("KASATERM_AUTOPANEMOVE") else { return };
+        let Ok(dst) = env.parse::<usize>() else {
+            eprintln!("[autopanemove] expected a window index, got {env:?}");
+            return;
+        };
+        let ms: u64 = std::env::var("KASATERM_AUTOPANEMOVE_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5500);
+        self.autopanemove_dst = Some(dst);
+        self.autopanemove_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+        eprintln!("[autopanemove] armed: dst_window={dst} fire_in={ms}ms");
+    }
+    pub(crate) fn run_pending_autopanemove(&mut self) {
+        let Some(t) = self.autopanemove_at else { return };
+        if Instant::now() < t { return; }
+        self.autopanemove_at = None;
+        let Some(dst_win) = self.autopanemove_dst.take() else { return };
+        let moving = self
+            .pty_layout
+            .as_ref()
+            .and_then(|l| l.leaves().first().map(|s| s.to_string()));
+        let target = self
+            .windows
+            .get(dst_win)
+            .and_then(|w| w.as_ref())
+            .and_then(|l| l.leaves().first().map(|s| s.to_string()));
+        match (moving, target) {
+            (Some(m), Some(tg)) => {
+                eprintln!("[autopanemove] move {m} → window {dst_win} (target {tg})");
+                self.move_pane(&m, &tg, DropZone::Right);
+            }
+            (m, tg) => eprintln!("[autopanemove] skipped: moving={m:?} target={tg:?}"),
+        }
+    }
     /// Pane header centre in logical px, mirroring `drop_target_at`'s box
     /// expansion. Used by `simulate_tab_merge` to land the synthetic
     /// cursor exactly where a user would aim "drop on header band".
