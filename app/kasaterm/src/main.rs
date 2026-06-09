@@ -3591,7 +3591,7 @@ fn install_claude_hook_shim(shim_dir: &std::path::Path) {
                 cmd("kasaterm-board-context.py", 5000),
             ]}],
             "PostToolUse": [{ "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 10)] }],
-            "Stop": [{ "hooks": [cmd("kasaterm-notify-complete.sh", 5000)] }],
+            "Stop": [{ "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] }],
             "Notification": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5000)] }],
         }
     });
