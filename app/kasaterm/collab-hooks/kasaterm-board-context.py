@@ -175,13 +175,16 @@ def roster_recovery():
 
 def god_section():
     """god 체제 규약. lead 파일로 god 파악 — 내가 god 이면 커밋 책임 + 변경점
-    종합, 워커면 커밋 금지(god 에게 done 보고). god 없으면(혼자/미선출) None."""
+    종합, 워커면 커밋 금지(god 에게 done 보고). god 없으면(혼자/미선출) 복구
+    후보만 주입 — 재시작 직후엔 pane 이 하나뿐이라 god 선출 자체가 안 되는데,
+    바로 그때가 roster 복구가 필요한 순간이다(워커를 부활시켜야 2-pane 이 되어
+    선출이 돈다). 닭-달걀을 복구 주입이 끊는다."""
     try:
         god = open(os.path.join(collab_dir(), "lead")).read().strip()
     except OSError:
-        return None
+        god = ""
     if not god:
-        return None
+        return roster_recovery()
     if god == me:
         base = ("[god 역할] 너 = god. 워커가 'done:' 보고하면 변경을 검토하고 너가 "
                 "단독으로 git add/commit/push 한다(워커는 커밋 안 함). 부하가 많으면 "
