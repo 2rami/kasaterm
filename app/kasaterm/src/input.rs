@@ -1953,13 +1953,20 @@ pub(crate) enum ApprovalPrompt {
 }
 
 /// Bottom-anchored scan for a *pending* approval/question prompt. Mirrors
-/// munder's BLOCK_HINTS with two hard-won exclusions baked in:
+/// munder's BLOCK_HINTS with three hard-won exclusions baked in:
 ///   - never match the bare word "permission" — claude's footer permanently
 ///     shows "bypass permissions on", which would flag every busy pane;
 ///   - "(y/n)" counts only on the LAST non-blank row (the cursor line). An
 ///     answered shell prompt scrolls up but stays on screen ("proceed? (y/n) y"),
-///     so matching it anywhere re-flags long after it was answered. Claude's
-///     own menu self-clears when answered, so Menu may match anywhere in range.
+///     so matching it anywhere re-flags long after it was answered;
+///   - a Menu match is REJECTED if a bare chevron row ("❯" with nothing after
+///     it) sits BELOW it. That bare "❯ " is claude's idle input line; a *live*
+///     approval menu replaces the input line with its options, so a real menu
+///     never has a bare chevron under it. When one does, the "menu" text is
+///     just quoted history in the transcript (e.g. a `peek` dump of another
+///     pane's prompt) — matching it made an idle god pane toast itself and,
+///     worse, a chip click injected Enter into its own input line. (거노
+///     실클릭으로 확인된 false-positive.)
 /// Callers must check `rows_show_working` first — a spinner means the prompt
 /// text still on screen is history, not a question.
 fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<ApprovalPrompt> {
@@ -1968,27 +1975,43 @@ fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<ApprovalPrompt> 
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
     // 메뉴는 옵션 + 안내문으로 working 스캔(10행)보다 길 수 있어 14행까지 본다.
     let start = (last + 1).saturating_sub(14);
+    let mut menu_found = false;
+    let mut bare_chevron_below_menu = false;
     for (i, row) in cells[start..=last].iter().enumerate() {
         let line: String = row
             .iter()
             .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
             .collect();
-        // "❯ 12. …" — 커서가 올라간 번호 옵션. 입력창의 맨 "❯ "(번호 없음)는 제외.
         if let Some(pos) = line.find('❯') {
-            let rest = line[pos + '❯'.len_utf8()..].trim_start();
+            let rest = line[pos + '❯'.len_utf8()..].trim();
+            if rest.is_empty() {
+                // bare "❯ " = claude idle 입력행. 이미 찾은 메뉴 후보 아래에
+                // 있으면 그 메뉴는 인용된 가짜 → 뒤에서 reject.
+                if menu_found {
+                    bare_chevron_below_menu = true;
+                }
+                continue;
+            }
+            // "❯ 12. …" — 커서가 올라간 번호 옵션.
             let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
             if digits > 0 && rest[digits..].starts_with('.') {
-                return Some(ApprovalPrompt::Menu);
+                menu_found = true;
+                continue;
             }
         }
         let lower = line.to_lowercase();
         // claude 승인 메뉴의 헤더 — 메뉴 행이 잘려도(좁은 pane) 이 문구로 Menu 판정.
         if lower.contains("do you want to proceed") {
-            return Some(ApprovalPrompt::Menu);
+            menu_found = true;
+            continue;
         }
+        // YesNo 는 last 행에서만(인라인 셸 질문). 메뉴와 독립이라 즉시 반환.
         if start + i == last && (lower.contains("(y/n)") || lower.contains("[y/n]")) {
             return Some(ApprovalPrompt::YesNo);
         }
+    }
+    if menu_found && !bare_chevron_below_menu {
+        return Some(ApprovalPrompt::Menu);
     }
     None
 }
@@ -2077,6 +2100,37 @@ mod working_scan_tests {
     fn answered_yn_above_prompt_line_is_ignored() {
         // 이미 답한 (y/n) 가 위로 스크롤돼 남아 있어도 마지막 행이 아니면 무시.
         let cells = vec![row("Overwrite? (y/n) y"), row("done."), row("$ ")];
+        assert_eq!(rows_show_approval_prompt(&cells), None);
+    }
+
+    #[test]
+    fn quoted_menu_with_bare_chevron_below_is_rejected() {
+        // god pane 이 `peek %2` 결과를 자기 대화창에 인용 → transcript 에 박제된
+        // 가짜 메뉴. 그 아래에 claude idle 입력행(bare "❯ ")이 있으면 reject.
+        // (거노 실클릭으로 확인: 안 잡으면 idle god 이 자기한테 토스트 쏘고
+        //  칩 클릭 시 자기 입력행에 Enter 가 주입됨.)
+        let cells = vec![
+            row("> peek %2 결과:"),
+            row("  Do you want to proceed?"),
+            row("  ❯ 1. Yes"),
+            row("    2. No"),
+            row("알겠어, 확인했어."),
+            row("❯ "),
+        ];
+        assert_eq!(rows_show_approval_prompt(&cells), None);
+    }
+
+    #[test]
+    fn live_menu_without_bare_chevron_below_is_menu() {
+        // 진짜 활성 메뉴: 입력행이 메뉴 옵션으로 대체돼 아래에 bare "❯ " 가 없다.
+        let cells = vec![row("Do you want to proceed?"), row("❯ 1. Yes"), row("  2. No")];
+        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::Menu));
+    }
+
+    #[test]
+    fn menu_then_blank_padding_then_bare_chevron_is_rejected() {
+        // 인용 메뉴와 입력행 사이에 빈 줄이 끼어도 reject (아래 어디든 bare-❯면).
+        let cells = vec![row("❯ 1. Yes"), row("  2. No"), blank(), row("❯ ")];
         assert_eq!(rows_show_approval_prompt(&cells), None);
     }
 

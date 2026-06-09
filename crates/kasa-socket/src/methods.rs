@@ -467,7 +467,10 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
             )
         }
     };
-    match backend.split_surface(dir) {
+    // 기본 no-focus (자동화 경로): `focus:true` 를 명시할 때만 새 pane 으로 포커스
+    // 이동. CLI 의 `--focus` 플래그가 이 값을 채운다.
+    let focus = params.get("focus").and_then(|v| v.as_bool()).unwrap_or(false);
+    match backend.split_surface(dir, focus) {
         Ok(s) => Response::success(id, json!({"surface": s})),
         Err(e) => backend_err(id, e),
     }
@@ -595,7 +598,7 @@ mod tests {
         fn focus_surface(&self, _surface_id: &str) -> anyhow::Result<()> {
             Ok(())
         }
-        fn split_surface(&self, _direction: SplitDirection) -> anyhow::Result<SurfaceInfo> {
+        fn split_surface(&self, _direction: SplitDirection, _focus: bool) -> anyhow::Result<SurfaceInfo> {
             Ok(SurfaceInfo {
                 id: "surf-2".into(),
                 workspace_id: "ws-1".into(),

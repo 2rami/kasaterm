@@ -2049,9 +2049,14 @@ enum UserEvent {
     /// Split delegated from the socket thread. The `Sender` carries the new
     /// pane's real id back so `split_surface` can return it instead of the old
     /// `"pane-new"` placeholder — without it the teammate launcher targets a
-    /// non-existent pane and its `send-keys` payload is dropped.
-    SocketSplit(kasa_pty::SplitDir, std::sync::mpsc::Sender<String>),
+    /// non-existent pane and its `send-keys` payload is dropped. The `bool` is
+    /// `focus`: false (CLI/automation default) keeps focus on the current pane,
+    /// true follows into the new one.
+    SocketSplit(kasa_pty::SplitDir, bool, std::sync::mpsc::Sender<String>),
     SocketFocus(String),
+    /// `surface.close` delegated from the socket thread → `close_pane`. Local
+    /// PTY mode only; the old tmux/daemon backend left this unsupported.
+    SocketClose(String),
     /// `surface.rename` / `surface.set_color` delegated from the socket thread.
     /// Pane header title / accent band live in `ws.panes` which only the GUI
     /// thread may touch, so the backend routes them here. `(surface_id, title)`
