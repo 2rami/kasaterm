@@ -46,6 +46,13 @@ impl App {
             self.collab_toast_rect = None;
         }
         self.notify_flash.insert(surface_id.to_string(), now);
+        // A pane in a *background* window finished — pulse that window's sidebar
+        // tab until the user switches to it (switch_window clears the entry).
+        if let Some(wi) = self.window_of_pane(surface_id) {
+            if wi != self.active_window {
+                self.window_alert.insert(wi);
+            }
+        }
         self.chrome_dirty = true;
         if !(self.window_focused && is_active_pane) {
             notify_desktop(title, body);
@@ -73,6 +80,12 @@ impl App {
         self.collab_toast = Some((format!("⚠ {name} 권한 대기중{detail}"), now));
         self.collab_toast_rect = None;
         self.notify_flash.insert(surface_id.to_string(), now);
+        // Attention raised in a background window — pulse its sidebar tab too.
+        if let Some(wi) = self.window_of_pane(surface_id) {
+            if wi != self.active_window {
+                self.window_alert.insert(wi);
+            }
+        }
         self.chrome_dirty = true;
         if !(self.window_focused && is_active_pane) {
             notify_desktop("⚠ 권한 필요", &format!("{name}{detail}"));

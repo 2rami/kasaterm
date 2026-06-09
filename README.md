@@ -100,6 +100,20 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 
 `kasaspace_list` · `kasaspace_split` · `kasaspace_close` · `kasaspace_focus` · `kasaspace_swap` · `kasaspace_rename` · `kasaspace_set_color` · `kasaspace_send` · `kasaspace_send_key` · `kasaspace_run_job` · `kasaspace_switch_window` · `kasaspace_workspace_list` · `kasaspace_workspace_current`
 
+## 왜 만들었나
+
+디자이너로 일하다 개발에 입문했다. tmux는 강력하지만 prefix 키 조합을 외우는 일이 늘 벽처럼 느껴졌다 — 터미널 멀티플렉싱을 GUI 버튼과 드래그로, 그리고 Claude Code를 한 번에 띄우는 런처로 다룰 수 있으면 좋겠다는 생각에서 시작했다.
+
+기성 라이브러리에 기대지 않고 직접 만들고 싶었다. GPU 셀 렌더러(P3 색재현), 두벌식 한글 IME(OS IME 비의존), 크로스플랫폼 PTY까지 전부 자체 구현했다. 결과물보다 만들면서 배운 게 더 컸다.
+
+무료로 공개한다. 누군가에게 쓸모가 되거나, 같은 길을 걷는 사람에게 참고가 되면 충분하다.
+
+## 후원
+
+혼자 만드는 프로젝트입니다. 쓸모가 있었다면 후원으로 응원해주세요.
+
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/2rami?label=Sponsor&logo=githubsponsors&color=ff69b4)](https://github.com/sponsors/2rami)
+
 ## 라이선스
 
 MIT

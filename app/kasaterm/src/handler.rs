@@ -2659,6 +2659,9 @@ impl ApplicationHandler<UserEvent> for App {
             || self.pending_capture.is_some()
             || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()
+            // An unseen-notification window tab blinks (synced to the cursor
+            // blink) until the user switches to it — pump frames so it pulses.
+            || !self.window_alert.is_empty()
         {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + std::time::Duration::from_millis(33),
