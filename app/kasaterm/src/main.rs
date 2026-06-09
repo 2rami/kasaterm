@@ -3331,6 +3331,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // reads KASATERM_TMUX_SHIM_DIR we set here (kasaterm-cli/preview/OSC133).
     // best-effort: failures just log and skip, the rest still works.
     install_pane_shims();
+    // 죽은 인스턴스가 남긴 소켓 잔재 청소(재시작·빌드 반복 누적). 살아있는
+    // 소켓은 connect 로 가려 건드리지 않으므로 멀티 인스턴스에서도 안전.
+    #[cfg(unix)]
+    sweep_dead_kasaterm_sockets();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);
@@ -3681,6 +3685,31 @@ fn mcp_panel_port() -> String {
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var("KASASPACE_MCP_PORT").ok())
         .unwrap_or_else(|| "8765".to_string())
+}
+
+/// 부팅 시 temp_dir 의 죽은 `kasaterm-<pid>.sock` 잔재를 청소한다. 소켓 경로가
+/// PID 별이라 인스턴스마다 다른 파일을 만드는데, `Server::bind` 의 stale 정리는
+/// *자기 경로* 만 치워서 죽은 다른 인스턴스 소켓이 영영 남는다(재시작·빌드 반복
+/// 시 누적). 여기서 connect 가 실패하는(=리스너 없는) 소켓 파일만 지운다 —
+/// 살아있는 인스턴스 소켓은 절대 건드리지 않으므로 멀티 인스턴스에서도 안전.
+/// 자기 PID 소켓은 아직 bind 전이라 connect 가 실패할 수 있으니 제외한다.
+#[cfg(unix)]
+fn sweep_dead_kasaterm_sockets() {
+    let own = format!("kasaterm-{}.sock", std::process::id());
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("kasaterm-") || !name.ends_with(".sock") || name == own {
+            continue;
+        }
+        let path = entry.path();
+        if std::os::unix::net::UnixStream::connect(&path).is_err() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 fn resolve_kasaterm_socket_path() -> String {

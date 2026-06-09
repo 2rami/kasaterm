@@ -9,8 +9,13 @@
 - board: `kasaterm-cli board` = 호출 시점 pull. 제목(ai-title)·상태·시킨 일만 간결히.
 - inbox: kasacollab 의 messages.jsonl 에서 to==나·미읽을 띄우고 읽음 처리(본 것).
   답장은 claude 가 `kasacollab msg <상대> "..."` 로.
+- diff 주입: board/god 섹션은 안정 키(pane 구성·제목·시킴·git 변경·god 신원)가 직전
+  주입과 같으면 스킵 — 대화 이력에 이미 있어 매 턴 반복은 토큰 낭비다(munder-difflin
+  의 "additionalContext 는 개입 전용" 절약 차용). status(working/idle)는 매 턴
+  팔랑거려 키에서 제외. 컨텍스트 압축에 유실될 수 있어 30분마다 무조건 재주입.
+  inbox 는 원래 one-shot(미읽만)이라 항상 주입.
 """
-import sys, os, json, subprocess
+import sys, os, json, subprocess, time, hashlib
 
 me = os.environ.get("KASATERM_PANE_ID")
 if not me:
@@ -36,17 +41,18 @@ def collab_dir():
 
 
 def board_section():
-    """다른 pane 활동. 형제 없으면 None."""
+    """다른 pane 활동 (렌더 텍스트, 안정 키). 형제 없으면 (None, "").
+    안정 키는 status 를 뺀 구성·제목·시킴 — diff 주입 판정용."""
     cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
     try:
         out = subprocess.run([cli, "board"], capture_output=True, text=True, timeout=3).stdout
         board = json.loads(out)["result"]["board"]
     except Exception:
-        return None
+        return None, ""
     sibs = [p for p in board if p.get("surface_id") != me]
     if not sibs:
-        return None
-    lines = []
+        return None, ""
+    lines, stable = [], []
     for p in sorted(sibs, key=lambda x: x.get("surface_id", "")):
         sid = p.get("surface_id", "?")
         st = p.get("status", "")
@@ -56,8 +62,9 @@ def board_section():
         if prompt:
             line += f" — 시킴: {prompt[:60]}"
         lines.append(line)
+        stable.append(f"{sid}|{title}|{prompt[:60]}")
     return (f"[협업 보드] 너 = {me}. 같은 레포를 동시에 만지는 다른 pane:\n"
-            + "\n".join(lines))
+            + "\n".join(lines)), "\n".join(stable)
 
 
 def inbox_section():
@@ -130,17 +137,52 @@ def god_section():
             f"보고하면 god 이 검토 후 단독 커밋한다.")
 
 
-parts = [s for s in (god_section(), board_section(), inbox_section()) if s]
+REINJECT_SECS = 1800  # 변화 없어도 30분마다 재주입(컨텍스트 압축 유실 대비)
+
+
+def ctx_cache_path():
+    return os.path.join(collab_dir(), f"ctx-cache-{me.lstrip('%')}")
+
+
+def ambient_changed(stable_key):
+    """board/god 안정 키가 직전 주입과 다르거나 TTL 지났으면 True + 캐시 갱신."""
+    h = hashlib.sha1(stable_key.encode()).hexdigest()
+    p = ctx_cache_path()
+    try:
+        prev = json.load(open(p))
+        if prev.get("hash") == h and time.time() - prev.get("ts", 0) < REINJECT_SECS:
+            return False
+    except Exception:
+        pass
+    try:
+        json.dump({"hash": h, "ts": time.time()}, open(p, "w"))
+    except OSError:
+        pass
+    return True
+
+
+god = god_section()
+board, board_stable = board_section()
+inbox = inbox_section()
+
+# board/god = 상황인지(ambient) — 변화 없으면 스킵. inbox = 신호 — 항상 주입.
+ambient = [s for s in (god, board) if s]
+if ambient and not ambient_changed((god or "") + " " + board_stable):
+    ambient = []
+
+parts = ambient + ([inbox] if inbox else [])
 if not parts:
     sys.exit(0)
 
-ctx = ("\n".join(parts)
-       + f"\n(협업 규약: 너 = {me} 다 — board/inbox 에 뜬 다른 id 가 상대다(자기 자신에겐 "
-       "못 보낸다). ① 대화·조율은 `kasacollab msg %N \"...\"` — 메시지를 상대 inbox 에 쌓고 "
-       "그 즉시 tell 로 깨운다. board·inbox 는 매 턴 자동 주입이라 상대가 자기 턴에 바로 본다"
-       "(모니터링 불필요). ② `kasaterm-cli tell %N \"...\"` 단독은 inbox 없이 그냥 깨우거나 "
-       "즉시 행동시킬 때 — 강제 제출이라 바쁜 상대 입력창엔 누적된다. 겹치면 피하거나 합류. "
-       "자세히: kasaterm-cli transcript %N / peek %N.)")
+ctx = "\n".join(parts)
+if ambient:
+    ctx += (f"\n(협업 규약: 너 = {me} 다 — board/inbox 에 뜬 다른 id 가 상대다(자기 자신에겐 "
+            "못 보낸다). ① 대화·조율은 `kasacollab msg %N \"...\"` — 메시지를 상대 inbox 에 쌓고 "
+            "그 즉시 tell 로 깨운다. board·inbox 는 자동 주입이라 상대가 자기 턴에 바로 본다"
+            "(모니터링 불필요, 변화 없으면 생략될 수 있음 — 최신 확인: kasaterm-cli board). "
+            "② `kasaterm-cli tell %N \"...\"` 단독은 inbox 없이 그냥 깨우거나 "
+            "즉시 행동시킬 때 — 강제 제출이라 바쁜 상대 입력창엔 누적된다. 겹치면 피하거나 합류. "
+            "자세히: kasaterm-cli transcript %N / peek %N.)")
 print(json.dumps({
     "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ctx}
 }))
