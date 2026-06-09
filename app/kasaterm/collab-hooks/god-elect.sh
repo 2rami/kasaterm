@@ -22,6 +22,15 @@ worker_color() {
   echo "${palette[$((num % ${#palette[@]}))]}"
 }
 
+# 헤더 팔레트의 claude /color 근사색 — 같은 인덱스로 1:1 매핑(yellow 는 god 예약).
+worker_claude_color() {
+  local names=("blue" "green" "red" "purple" "orange" "cyan" "pink")
+  local num
+  num=$(printf '%s' "$ME" | tr -dc '0-9')
+  [ -z "$num" ] && num=0
+  echo "${names[$((num % ${#names[@]}))]}"
+}
+
 # god-loop 강제 기동 — claude Monitor 의존 없이 외부 프로세스로 '모니터링 반드시
 # 켜짐'을 보장. pkill 로 옛 god 워처 정리해 항상 정확히 1개만 돈다.
 # mkdir 원자 락: board-context 가 매 턴 god-elect 를 백그라운드로 쏘므로 두 턴이
@@ -50,6 +59,14 @@ ensure_god_look() {
 
 ensure_worker_look() {
   $CLI color "$ME" "$(worker_color)" >/dev/null 2>&1
+  # claude 프롬프트 바도 헤더 근사색으로. 매 턴 재주입하면 강제 제출 스팸이라
+  # pane 당 1회 마커. god-elect 는 claude hook 에서만 돌므로 이 pane 엔 claude
+  # 가 떠 있다는 게 보장된다(셸에 /color 오타칠 일 없음).
+  local marker="/tmp/kasaterm-collab/$slug/claude-colored-${ME//[^A-Za-z0-9]/_}"
+  if [ ! -f "$marker" ]; then
+    touch "$marker"
+    $CLI tell "$ME" "/color $(worker_claude_color)" >/dev/null 2>&1
+  fi
 }
 
 # 살아있는 pane id 목록
