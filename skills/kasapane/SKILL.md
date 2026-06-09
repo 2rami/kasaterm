@@ -278,7 +278,7 @@ kasaterm-cli color  "$NEW" "#d29922"
 ```bash
 TASK=cargo-release      # /tmp/<task>.log 파일명
 kasaterm-cli send --surface "$NEW" \
-  $"cd /Users/kasa/Desktop/momewomo/tmuxify && cargo build --release -p kasaterm 2>&1 | tee /tmp/$TASK.log; echo '---DONE---' >> /tmp/$TASK.log; exit\n"
+  $"cd /path/to/kasaterm && cargo build --release -p kasaterm 2>&1 | tee /tmp/$TASK.log; echo '---DONE---' >> /tmp/$TASK.log; exit\n"
 ```
 
 핵심 4요소(빠뜨리면 사이클 깨짐):
@@ -353,7 +353,7 @@ UI 변경 후 사용자에게 "테스트해보세요" 떠넘기지 말 것. **�
 
 **0) 호스트 보호 — 절대 죽이지 마라**
 
-사용자가 켠 kasaterm은 보통 `.app`(`/Users/kasa/Applications/kasaterm.app/Contents/MacOS/kasaterm`). pkill 패턴은 `target/debug|release/kasaterm`만 매칭하므로 호스트는 살아 있다. 확인:
+사용자가 켠 kasaterm은 보통 `.app`(`~/Applications/kasaterm.app/Contents/MacOS/kasaterm`). pkill 패턴은 `target/debug|release/kasaterm`만 매칭하므로 호스트는 살아 있다. 확인:
 ```bash
 ps aux | grep -iE "kasaterm" | grep -v grep | grep -oE "/[^ ]*kasaterm[^ ]*"
 ```
@@ -361,7 +361,7 @@ ps aux | grep -iE "kasaterm" | grep -v grep | grep -oE "/[^ ]*kasaterm[^ ]*"
 
 **1) 빌드**
 ```bash
-cd /Users/kasa/Desktop/momewomo/tmuxify
+cd /path/to/kasaterm
 pkill -f "target/debug/kasaterm" 2>/dev/null
 pkill -f "target/release/kasaterm" 2>/dev/null
 sleep 1
@@ -665,15 +665,3 @@ kasaterm-cli tell %3 "지금 멈춘 거 같은데 이거 먼저 봐줘"
 2. 자동 사이클(빌드→로그→완료알림)의 일부? → bash
 3. config.json 검사·좀비 제거·jq 파이프? → bash (MCP에 없음)
 4. 그냥 split·rename·color 한두 번? → 둘 다 OK, 흐름에 자연스러운 쪽
-
----
-
-## 메모리 연결
-
-- [[reference_autonomous_testing]] — 모델 직접 빌드→스폰→캡처→자동입력 사이클의 원형
-- [[feedback_tmuxify_rendering_pipeline]] — 렌더 버그 카탈로그(첫 의심 순서)
-- [[reference_kasaterm_design_unification]] — 디자인 토큰·통일 결정 (2026-05-26 배경 BG로 통일)
-- [[feedback_team_lead_role_in_teamcreate]] — 리드는 지시만
-- [[feedback_teamcreate_pane_failure]] — 병렬 Agent spawn race + 좀비 청소 절차 (이 스킬 §좀비 청소 절차)
-- [[feedback_tmux_send_keys_enter_eaten]] — 엔터 씹힘 패턴 (kasaterm-cli send도 같은 함정)
-- [[feedback_background_jobs_in_tmux_pane]] — 백그라운드 잡은 항상 새 pane
