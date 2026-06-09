@@ -9,11 +9,28 @@ use std::process::Command;
 
 use serde_json::{json, Value};
 
+/// `git` invocation with the console window suppressed on Windows. kasaterm
+/// is a GUI (non-console) process, so spawning a console program like git
+/// flashes a fresh console window — and a Defender-throttled call (~5s) leaves
+/// that empty window on screen the whole time. CREATE_NO_WINDOW keeps it
+/// hidden. No-op on other platforms.
+fn git_cmd() -> Command {
+    let c = Command::new("git");
+    #[cfg(windows)]
+    let c = {
+        use std::os::windows::process::CommandExt;
+        let mut c = c;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        c
+    };
+    c
+}
+
 /// Run `git status` in `repo` and return a JSON snapshot the webview can
 /// render directly. On any git failure returns `{ "error": "..." }` so the
 /// caller never has to distinguish process vs. parse errors.
 pub fn git_status(repo: &Path) -> Value {
-    let output = match Command::new("git")
+    let output = match git_cmd()
         .arg("-C")
         .arg(repo)
         .args(["status", "--porcelain=v2", "--branch"])
@@ -212,7 +229,7 @@ fn entry_path(line: &str, renamed: bool) -> String {
 /// status 계열과 달리 diff/commit/push는 출력 텍스트를 그대로 패널에
 /// 돌려줘야 하므로 별도 헬퍼로 묶는다.
 fn run_git(repo: &Path, args: &[&str]) -> (bool, String) {
-    match Command::new("git").arg("-C").arg(repo).args(args).output() {
+    match git_cmd().arg("-C").arg(repo).args(args).output() {
         Ok(o) => {
             let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
             if !o.status.success() {
@@ -422,7 +439,7 @@ pub fn git_ignored(repo: &Path, paths: &[String]) -> std::collections::HashSet<S
     if paths.is_empty() {
         return set;
     }
-    let mut child = match Command::new("git")
+    let mut child = match git_cmd()
         .arg("-C")
         .arg(repo)
         .args(["check-ignore", "--stdin"])

@@ -617,6 +617,48 @@ impl App {
             }
         });
     }
+    /// Spawn the `git check-ignore` worker once. It drains `git_ignore_req`
+    /// (set by `rebuild_file_tree_nodes`), runs the batched ignore check off
+    /// the GUI thread — so Defender's ~5s scan of the spawned git never
+    /// freezes the file-tree toggle — and on a changed result fills
+    /// `file_tree_ignored` + sets `file_tree_fs_dirty` so the next refresh
+    /// re-dims rows. Skips a request identical to the last one it ran, so a
+    /// repeated rebuild can't loop git forever.
+    pub(crate) fn ensure_git_ignore_worker(&mut self) {
+        if self.git_ignore_started {
+            return;
+        }
+        self.git_ignore_started = true;
+        let req = self.git_ignore_req.clone();
+        let cache = self.file_tree_ignored.clone();
+        let dirty = self.file_tree_fs_dirty.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let mut last: Option<(std::path::PathBuf, Vec<String>)> = None;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let job = req.lock().ok().and_then(|mut r| r.take());
+                let Some((root, paths)) = job else { continue };
+                if last.as_ref() == Some(&(root.clone(), paths.clone())) {
+                    continue;
+                }
+                last = Some((root.clone(), paths.clone()));
+                let result = kasa_mcp::git::git_ignored(&root, &paths);
+                let mut guard = match cache.lock() {
+                    Ok(g) => g,
+                    Err(_) => break,
+                };
+                if *guard != result {
+                    *guard = result;
+                    drop(guard);
+                    dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+                    if proxy.send_event(UserEvent::Redraw).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+    }
     /// Open a sidebar file in a fresh split pane (right of the active pane).
     /// Images decode into an `Image` pane; real markdown renders as a laid-out
     /// doc; any other text loads as a fenced code block so the highlighter
@@ -776,11 +818,24 @@ impl App {
                 .iter()
                 .map(|n| n.path.to_string_lossy().into_owned())
                 .collect();
-            let ignored = kasa_mcp::git::git_ignored(&root, &paths);
+            // Dim dotfiles + whatever the background worker last resolved.
+            // `git check-ignore` is NOT run inline — spawning git from the
+            // unsigned exe stalls ~5s under Defender, which would freeze the
+            // toggle. We hand the worker this (root, paths) and apply its
+            // cached result; the worker wakes us when fresh ignores land.
+            let ignored = self
+                .file_tree_ignored
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
             for n in &mut self.file_tree_nodes {
                 n.ignored = n.name.starts_with('.')
                     || ignored.contains(n.path.to_string_lossy().as_ref());
             }
+            if let Ok(mut req) = self.git_ignore_req.lock() {
+                *req = Some((root.clone(), paths));
+            }
+            self.ensure_git_ignore_worker();
         }
         // Hand the FS watcher the dirs currently on screen (root + each expanded
         // folder) so it polls exactly what the user can see change.

@@ -1675,7 +1675,11 @@ impl App {
             // first — click a folder to expand, a file to preview. Rows laid
             // out + hit rects cached here (window-tab pattern); the read_dir
             // build lives in refresh_file_tree, never per-frame.
-            if tree_col_w > 0.0 {
+            // Settings screen covers the work area on top, but chrome glyphs
+            // (the tree's icons/labels) sit above every rect — so a settings
+            // bg can't mask them. Skip the whole column while settings is open
+            // or the file-tree text bleeds through ([[glyph_dim_layer_trap]]).
+            if tree_col_w > 0.0 && !self.settings_open {
                 let col_h = (sb_win_h - TITLE_HEIGHT).max(0.0);
                 // Own background + right hairline so the column reads as a
                 // distinct pane between the tabs and the cell grid.
