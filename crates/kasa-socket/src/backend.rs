@@ -151,6 +151,31 @@ pub struct PaneActivity {
     /// unless `status == "waiting"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<String>,
+    /// P3 — cumulative `message.usage` over the transcript tail window. The god
+    /// reads these to spot an over-budget / runaway pane and steer the fleet.
+    #[serde(default)]
+    pub tokens_in: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
+    #[serde(default)]
+    pub cache_read: u64,
+    #[serde(default)]
+    pub cache_creation: u64,
+    /// Estimated USD cost over the tail window (tokens × per-model rate).
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Tool-use counts over the tail window, e.g. `[("Edit",3),("Bash",5)]`.
+    #[serde(default)]
+    pub tool_counts: Vec<(String, u32)>,
+    /// Every file Edit/Write-touched over the tail window — the god's change-set
+    /// view ("who changed what"). A superset of `files` (the single most-recent
+    /// edit, kept for conflict detection).
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    /// True if this pane is the god (the `lead` file points at it). The board
+    /// panel draws a crown / accent for it. Set by `collab_board`.
+    #[serde(default)]
+    pub is_god: bool,
 }
 
 /// One live session from `claude agents --json` (Claude Code 2.1.162+).

@@ -1,0 +1,77 @@
+#!/bin/bash
+# god 선출 hook. pane 2개+ 이고 god 없으면 kasacollab lead claim(O_EXCL 원자)으로
+# god 자임 → 노랑 #FFD400 + "● god" + god-loop 강제 기동. 패배/워커는 자동 색.
+# board-context.py(UserPromptSubmit)가 매 턴 백그라운드로 호출 → 자가치유한다.
+# pane 밖이면 no-op.
+CLI="${KASATERM_CLI:-kasaterm-cli}"
+ME="${KASATERM_PANE_ID:-}"
+[ -z "$ME" ] && exit 0
+HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+KASACOLLAB="python3 $HOOKS_DIR/kasacollab.py"
+slug=$(pwd | sed 's#[/.]#-#g')
+LEAD="/tmp/kasaterm-collab/$slug/lead"
+GOD_COLOR="#FFD400"
+
+# 워커 색 — pane id 숫자(%5 → 5)로 팔레트에서 안 겹치게(노랑 god 색은 팔레트에
+# 없음). board webview JS 가 같은 식으로 색을 재현해 헤더 색과 카드 색이 일치한다.
+worker_color() {
+  local palette=("#5B9BD5" "#70AD47" "#C00000" "#7030A0" "#ED7D31" "#1F9D8E" "#E84393")
+  local num
+  num=$(printf '%s' "$ME" | tr -dc '0-9')
+  [ -z "$num" ] && num=0
+  echo "${palette[$((num % ${#palette[@]}))]}"
+}
+
+# god-loop 강제 기동 — claude Monitor 의존 없이 외부 프로세스로 '모니터링 반드시
+# 켜짐'을 보장. pkill 로 옛 god 워처 정리해 항상 정확히 1개만 돈다.
+start_god_loop() {
+  pkill -f "god-loop.sh" 2>/dev/null
+  nohup bash "$HOOKS_DIR/god-loop.sh" "$ME" >/dev/null 2>&1 &
+}
+
+ensure_god_look() {
+  $CLI color "$ME" "$GOD_COLOR" >/dev/null 2>&1
+  $CLI rename "$ME" "● god" >/dev/null 2>&1
+  # god 인데 워처가 죽어있으면 조용히 재기동(자가치유) — '반드시 켜짐'.
+  pgrep -f "god-loop.sh $ME" >/dev/null 2>&1 || start_god_loop
+}
+
+ensure_worker_look() {
+  $CLI color "$ME" "$(worker_color)" >/dev/null 2>&1
+}
+
+# 살아있는 pane id 목록
+surfaces=$($CLI list surfaces 2>/dev/null | python3 -c '
+import sys, json
+try:
+    print("\n".join(s["id"] for s in json.load(sys.stdin)["result"]["surfaces"]))
+except Exception:
+    pass
+')
+pane_count=$(printf '%s\n' "$surfaces" | grep -c .)
+
+# 혼자(또는 0)면 god 불필요
+[ "${pane_count:-0}" -lt 2 ] && exit 0
+
+cur_god=""
+[ -f "$LEAD" ] && cur_god=$(cat "$LEAD" 2>/dev/null)
+
+# lead 가 살아있는 pane 을 가리키면: 내가 god 이면 표시 보정, 아니면 워커 색.
+if [ -n "$cur_god" ] && printf '%s\n' "$surfaces" | grep -qx "$cur_god"; then
+  if [ "$cur_god" = "$ME" ]; then
+    ensure_god_look
+  else
+    ensure_worker_look
+  fi
+  exit 0
+fi
+
+# lead 없거나 stale(죽은 god 가리킴) → 정리 후 원자 선점 경쟁.
+[ -n "$cur_god" ] && $KASACOLLAB lead off >/dev/null 2>&1
+if $KASACOLLAB lead claim >/dev/null 2>&1; then
+  ensure_god_look
+  $CLI tell "$ME" "[god] 너가 god 이다. 팀 통솔 시작 — board-watch 로 변경점 감시, 워커 done 보고 받으면 단독 커밋." >/dev/null 2>&1
+else
+  ensure_worker_look
+fi
+exit 0

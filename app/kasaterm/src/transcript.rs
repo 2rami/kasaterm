@@ -75,6 +75,28 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// 도구 이름 카운트 누적(tail 윈도 집계용).
+fn bump(counts: &mut Vec<(String, u32)>, name: &str) {
+    if let Some(e) = counts.iter_mut().find(|(n, _)| n == name) {
+        e.1 += 1;
+    } else {
+        counts.push((name.to_string(), 1));
+    }
+}
+
+/// 한 assistant turn 의 비용($). 모델명 부분일치로 티어 판정 후 per-million
+/// 단가(Claude 4.x) 적용 — 입력/출력/캐시읽기/캐시생성 각각.
+fn turn_cost(model: &str, ti: u64, to: u64, cr: u64, cc: u64) -> f64 {
+    let (pin, pout, pcr, pcc) = if model.contains("opus") {
+        (15.0, 75.0, 1.5, 18.75)
+    } else if model.contains("haiku") {
+        (0.8, 4.0, 0.08, 1.0)
+    } else {
+        (3.0, 15.0, 0.3, 3.75) // sonnet 기본
+    };
+    (ti as f64 * pin + to as f64 * pout + cr as f64 * pcr + cc as f64 * pcc) / 1_000_000.0
+}
+
 /// transcript의 **마지막 부분**(socket.rs가 tail 64KB를 잘라 넘김)을 역순으로
 /// 1패스 훑어 board 한 줄을 만든다. 각 필드는 **처음 만나는(=최신)** 값에서
 /// 채우고, 다 차면 조기 종료한다. `idle`(파일 mtime 기준)은 socket.rs가 판정해
@@ -85,12 +107,18 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     let mut last_reply = String::new();
     let mut intent = String::new();
     let mut files: Vec<String> = Vec::new();
+    // P3 누적 — usage·도구·변경파일은 tail 윈도 전체 합산이라 조기 종료(break)
+    // 없이 끝까지 순회한다. 채움 필드(title/prompt/reply/intent)는 `is_empty`
+    // 가드로 여전히 "처음 만나는(=최신)" 값만 잡는다. tail 은 64KB 라 전체 순회도 싸다.
+    let mut tokens_in = 0u64;
+    let mut tokens_out = 0u64;
+    let mut cache_read = 0u64;
+    let mut cache_creation = 0u64;
+    let mut cost_usd = 0f64;
+    let mut tool_counts: Vec<(String, u32)> = Vec::new();
+    let mut changed_files: Vec<String> = Vec::new();
 
     for line in tail.lines().rev() {
-        if !title.is_empty() && !last_prompt.is_empty() && !last_reply.is_empty() && !intent.is_empty()
-        {
-            break;
-        }
         let v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue, // tail 첫 줄은 잘렸을 수 있다 — 안전하게 무시.
@@ -107,6 +135,19 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                 }
             }
             Some("assistant") => {
+                if let Some(u) = v.pointer("/message/usage") {
+                    let g = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                    let ti = g("input_tokens");
+                    let to = g("output_tokens");
+                    let cr = g("cache_read_input_tokens");
+                    let cc = g("cache_creation_input_tokens");
+                    tokens_in += ti;
+                    tokens_out += to;
+                    cache_read += cr;
+                    cache_creation += cc;
+                    let model = v.pointer("/message/model").and_then(|m| m.as_str()).unwrap_or("");
+                    cost_usd += turn_cost(model, ti, to, cr, cc);
+                }
                 let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) else {
                     continue;
                 };
@@ -117,12 +158,21 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                                 last_reply = clip(t, 120);
                             }
                         }
-                        Some("tool_use") if intent.is_empty() => {
+                        Some("tool_use") => {
                             let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                            bump(&mut tool_counts, name);
                             let ev = tool_event(name, b.get("input"));
-                            intent = ev.label;
-                            if let Some(f) = ev.file {
-                                files.push(f);
+                            if let Some(f) = ev.file.clone() {
+                                if !changed_files.iter().any(|c| c == &f) {
+                                    changed_files.push(f);
+                                }
+                            }
+                            // intent/files 는 기존대로 최신 1개만(충돌 감지용).
+                            if intent.is_empty() {
+                                intent = ev.label;
+                                if let Some(f) = ev.file {
+                                    files.push(f);
+                                }
                             }
                         }
                         _ => {}
@@ -144,6 +194,14 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         screen: None,
         // transcript는 permission 대기를 기록하지 않는다 — 화면 peek로만 보인다.
         waiting_for: None,
+        tokens_in,
+        tokens_out,
+        cache_read,
+        cache_creation,
+        cost_usd,
+        tool_counts,
+        changed_files,
+        is_god: false,
     }
 }
 
@@ -231,5 +289,24 @@ mod tests {
         assert_eq!((u.role.as_str(), u.text.as_str()), ("user", "고쳐줘"));
         let a = parse_turn(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#).unwrap();
         assert_eq!((a.role.as_str(), a.text.as_str()), ("assistant", "ok"));
+    }
+
+    #[test]
+    fn snapshot_accumulates_usage_tools_changed() {
+        // 두 assistant turn 의 usage 합산 + 도구 카운트 + Edit 변경파일 누적 + 비용.
+        let tail = [
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":10,"cache_creation_input_tokens":20},"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/a/x.rs"}}]}}"#,
+            r#"{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":200,"output_tokens":80},"content":[{"type":"tool_use","name":"Bash","input":{"command":"cargo build"}},{"type":"tool_use","name":"Edit","input":{"file_path":"/a/y.rs"}}]}}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!((a.tokens_in, a.tokens_out, a.cache_read, a.cache_creation), (300, 130, 10, 20));
+        assert_eq!(a.tool_counts.iter().find(|(n, _)| n == "Edit").unwrap().1, 2);
+        assert_eq!(a.tool_counts.iter().find(|(n, _)| n == "Bash").unwrap().1, 1);
+        assert!(a.changed_files.contains(&"/a/x.rs".to_string()));
+        assert!(a.changed_files.contains(&"/a/y.rs".to_string()));
+        // sonnet 단가: (300*3 + 130*15 + 10*0.3 + 20*3.75) / 1e6
+        let expect = (300.0 * 3.0 + 130.0 * 15.0 + 10.0 * 0.3 + 20.0 * 3.75) / 1_000_000.0;
+        assert!((a.cost_usd - expect).abs() < 1e-12);
     }
 }

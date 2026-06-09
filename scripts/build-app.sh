@@ -29,17 +29,13 @@ if [[ ! -f assets/AppIcon.icns ]]; then
   exit 1
 fi
 
-# Build the binaries. Besides kasaterm we need the tmux shim ("tmux")
-# and kasaterm-cli: claude code's teammate mode shells out to `tmux
-# split-window` / `send-keys`, which our shim rewrites into kasaterm-cli
-# socket calls. Without bundling these next to kasaterm, a packaged .app
-# can't find them (install_tmux_shim / locate_* look beside the exe) and
-# teammate splits silently fall back to the it2/real-tmux path.
+# Build the binaries. Besides kasaterm we bundle kasaterm-cli so a pane can
+# drive siblings via the socket (install_pane_shims stages it on the pane PATH).
 if [[ "$PROFILE" == "release" ]]; then
-  cargo build --release -p kasaterm -p kasa-shim -p kasa-socket
+  cargo build --release -p kasaterm -p kasa-socket
   BINDIR="target/release"
 else
-  cargo build -p kasaterm -p kasa-shim -p kasa-socket
+  cargo build -p kasaterm -p kasa-socket
   BINDIR="target/debug"
 fi
 
@@ -48,7 +44,6 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$BINDIR/kasaterm" "$APP/Contents/MacOS/kasaterm"
-cp "$BINDIR/tmux" "$APP/Contents/MacOS/tmux"
 cp "$BINDIR/kasaterm-cli" "$APP/Contents/MacOS/kasaterm-cli"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 

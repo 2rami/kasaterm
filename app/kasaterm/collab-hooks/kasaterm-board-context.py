@@ -20,6 +20,15 @@ try:
 except Exception:
     pass
 
+# god 선출/표시 자가치유 — 매 턴 백그라운드 fire-and-forget. 이 hook 의 stdout
+# (board/inbox 주입 JSON)은 건드리지 않는다. god-elect 는 pane 2개+ 일 때만 동작.
+try:
+    _hd = os.path.dirname(os.path.abspath(__file__))
+    subprocess.Popen(["bash", os.path.join(_hd, "god-elect.sh")],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except Exception:
+    pass
+
 
 def collab_dir():
     enc = os.getcwd().replace("/", "-").replace(".", "-")
@@ -77,7 +86,51 @@ def inbox_section():
             + "\n".join(lines))
 
 
-parts = [s for s in (board_section(), inbox_section()) if s]
+def god_fleet_digest():
+    """god 전용 변경점 종합 — 살아있는 pane 수 + 미커밋 변경(git status).
+    god 이 '누가 뭘 바꿨고 아직 커밋 안 됐나'를 매 턴 본다(P2 변경점 추적)."""
+    out = []
+    cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
+    try:
+        r = subprocess.run([cli, "list", "surfaces"], capture_output=True, text=True, timeout=3)
+        n = len(json.loads(r.stdout)["result"]["surfaces"])
+        out.append(f"  pane {n}개(너 god 포함)")
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["git", "status", "--short"], capture_output=True, text=True, timeout=3)
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        if lines:
+            out.append(f"  미커밋 변경 {len(lines)}개 — done 받으면 너가 커밋:")
+            out += [f"    {l}" for l in lines[:12]]
+        else:
+            out.append("  워킹트리 깨끗(미커밋 없음)")
+    except Exception:
+        pass
+    return "\n".join(out) if out else None
+
+
+def god_section():
+    """god 체제 규약. lead 파일로 god 파악 — 내가 god 이면 커밋 책임 + 변경점
+    종합, 워커면 커밋 금지(god 에게 done 보고). god 없으면(혼자/미선출) None."""
+    try:
+        god = open(os.path.join(collab_dir(), "lead")).read().strip()
+    except OSError:
+        return None
+    if not god:
+        return None
+    if god == me:
+        base = ("[god 역할] 너 = god. 워커가 'done:' 보고하면 변경을 검토하고 너가 "
+                "단독으로 git add/commit/push 한다(워커는 커밋 안 함). 부하가 많으면 "
+                "split 로 워커를 더 띄워 위임한다.")
+        digest = god_fleet_digest()
+        return base + (("\n" + digest) if digest else "")
+    return (f"[god 체제] god = {god}. 너는 워커 — 직접 git commit/push 하지 마라. "
+            f"작업이 끝나면 `kasacollab msg {god} \"done: <요약> | files: a,b\"` 로 "
+            f"보고하면 god 이 검토 후 단독 커밋한다.")
+
+
+parts = [s for s in (god_section(), board_section(), inbox_section()) if s]
 if not parts:
     sys.exit(0)
 

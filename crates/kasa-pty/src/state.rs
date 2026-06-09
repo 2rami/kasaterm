@@ -182,12 +182,11 @@ impl PtySession {
         ] {
             cmd.env_remove(k);
         }
-        // tmux-shim hook. When kasaterm has set up a shim directory
-        // and exported KASATERM_TMUX_SHIM_DIR + KASATERM_TMUX_SHIM_TMUX
-        // before spawning us, prepend it to PATH and fake $TMUX so any
-        // tmux call inside this PTY hits our shim instead of the real
-        // binary. That gives the next phase a chance to translate
-        // `tmux split-window` etc into BSP RPC calls.
+        // pane shim 인프라. install_pane_shims 가 shim_dir 를 만들어
+        // KASATERM_TMUX_SHIM_DIR 로 넘기면 PATH 앞에 붙이고 zsh ZDOTDIR 를 그
+        // dir 로 가리킨다 — 자식 셸이 그 안의 kasaterm-cli(협업)·imgopen/mdopen
+        // (preview)·OSC133 prompt-mark(입력줄 감지)를 쓰게 한다. (teammate-mode
+        // tmux 위장은 제거됨 — pane 생성은 god 이 `kasaterm-cli split` 로 한다.)
         if let Ok(shim_dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
             let parent_path = std::env::var("PATH").unwrap_or_default();
             // PATH separator is platform-specific: `:` on Unix,
@@ -195,43 +194,16 @@ impl PtySession {
             // chain into one literal entry and breaks every lookup.
             let sep = if cfg!(windows) { ';' } else { ':' };
             cmd.env("PATH", format!("{shim_dir}{sep}{parent_path}"));
-            // Point zsh at the shim dir's rc files (written by
-            // install_tmux_shim). They source the user's real rc first,
-            // then re-prepend the shim dir to PATH — so it survives
-            // brew's zprofile prepend and `tmux` resolves to our shim.
-            // zsh-only; other shells ignore ZDOTDIR and use the PATH
-            // prepend above.
+            // Point zsh at the shim dir's rc files. They source the user's
+            // real rc first, then re-prepend the shim dir to PATH so our
+            // kasaterm-cli wins over brew. zsh-only; other shells ignore
+            // ZDOTDIR and use the PATH prepend above.
             cmd.env("ZDOTDIR", &shim_dir);
         }
-        // Don't set TMUX in the child env. Claude Code / ink / chalk
-        // treat the presence of TMUX as "I'm inside tmux, which doesn't
-        // pass truecolor through by default" and downgrade their
-        // ANSI escape generation to 256-palette mode. Verified
-        // empirically: removing TMUX is the single change that makes
-        // claude code emit `\e[48;2;220;38;39m` to us instead of the
-        // quantised `\e[48;5;167m`. The KASATERM_TMUX_SHIM_TMUX env
-        // (a path to our shim socket) is still inherited as itself,
-        // so any tool that explicitly reads it for the shim still works;
-        // we just don't masquerade as a tmux-wrapped shell.
-        // Claude Code's teammate-mode (tmux backend) only spawns real split
-        // panes when it believes it's inside tmux — it gates on $TMUX before
-        // issuing `split-window`, otherwise it falls back to an in-process
-        // teammate. So we DO propagate the shim's fake $TMUX here, which makes
-        // teammates land as kasaterm panes via our tmux-shim. COLORTERM=
-        // truecolor (set above) is what keeps chalk emitting 24-bit color
-        // despite the tmux masquerade; CLAUDE_CODE_TEAMMATE_MODE=tmux forces
-        // the split-pane path where auto-detect would otherwise bail (Windows).
-        if let Ok(shim_tmux) = std::env::var("KASATERM_TMUX_SHIM_TMUX") {
-            cmd.env("TMUX", shim_tmux);
-        }
-        cmd.env("CLAUDE_CODE_TEAMMATE_MODE", "tmux");
-        // Real tmux sets TMUX_PANE on every child so an `if [ -n
-        // "$TMUX_PANE" ]` test passes inside a pane. Claude Code's
-        // teammateMode reads this to know which pane it's currently
-        // running in — without it, the `display-message -p` subprocess
-        // never gets called and we get "Could not determine current
-        // tmux pane/window" before our shim sees anything.
-        cmd.env("TMUX_PANE", &opts.pane_id);
+        // TMUX is intentionally NOT set in the child env: Claude Code / ink /
+        // chalk read its presence as "inside tmux" and downgrade truecolor to
+        // a 256-palette. COLORTERM=truecolor (set above) is what drives 24-bit
+        // color now that we no longer masquerade as a tmux-wrapped shell.
         // Cross-pane RPC: each pane needs to know (a) which surface it
         // is and (b) where to reach the host so a script inside one
         // pane can drive another via kasaterm-cli. CommandBuilder
