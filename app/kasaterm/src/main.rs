@@ -567,7 +567,13 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
     -webkit-user-select: none; user-select: none;
   }
   .title { font-weight: 600; font-size: 14px; margin-bottom: 10px; }
-  .pane { background: #22262e; border: 1px solid #2e323b; border-radius: 9px; padding: 10px; margin-bottom: 8px; }
+  .pane { background: #22262e; border: 1px solid #2e323b; border-left: 4px solid #2e323b; border-radius: 9px; padding: 10px; margin-bottom: 8px; }
+  .badges { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 5px; }
+  .badge { font-size: 10px; padding: 2px 6px; border-radius: 5px; background: #2e323b; color: #a0a6b0; }
+  .badge.tok { color: #e3b341; }
+  .badge.cost { color: #70AD47; }
+  .badge.chg { color: #f0883e; }
+  .tools { margin-top: 4px; font-size: 10px; color: #5a5f6b; word-break: break-word; }
   .row1 { display: flex; align-items: center; gap: 8px; }
   .sid { font-weight: 600; color: #5a8ce6; }
   .status { margin-left: auto; font-size: 11px; padding: 2px 8px; border-radius: 6px; background: #2e323b; color: #a0a6b0; }
@@ -599,6 +605,14 @@ const $ = (id) => document.getElementById(id);
 
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function leaf(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
+// 워커 색 — pane id 숫자(%5 → 5) 기반. god-elect.sh worker_color 와 같은 팔레트·
+// 같은 식이라 헤더 색과 board 카드 색이 일치한다.
+function workerColor(sid) {
+  const palette = ['#5B9BD5','#70AD47','#C00000','#7030A0','#ED7D31','#1F9D8E','#E84393'];
+  const num = parseInt((sid || "").replace(/\D/g, "")) || 0;
+  return palette[num % palette.length];
+}
+function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : "" + n; }
 
 function render(board) {
   $("err").style.display = "none";
@@ -620,19 +634,36 @@ function render(board) {
       : esc(p.status || "");
     const d = document.createElement("div");
     d.className = "pane";
+    const isGod = !!p.is_god;
+    d.style.borderLeftColor = isGod ? '#FFD400' : workerColor(p.surface_id);
+    const crown = isGod
+      ? `<svg width="13" height="11" viewBox="0 0 24 20" style="margin-right:5px;vertical-align:-1px"><path d="M2 6l4 4 6-8 6 8 4-4v11H2z" fill="${'#FFD400'}" stroke="${'#1a1d23'}" stroke-width="1.2"/></svg>`
+      : "";
     const title = p.title
       ? `<span class="ptitle">${esc(p.title)}</span>`
       : `<span class="ptitle empty-title">제목 없음</span>`;
     const intent = (p.intent && p.intent !== "active")
       ? `<div class="intent">${esc(p.intent)}</div>` : "";
+    // P3 — tail 윈도 누적: 토큰/비용/변경파일/도구 뱃지.
+    const tot = (p.tokens_in || 0) + (p.tokens_out || 0);
+    const changed = (p.changed_files || []).length;
+    const cost = p.cost_usd || 0;
+    const bg = [];
+    if (tot) bg.push(`<span class="badge tok">${fmtTok(tot)} tok</span>`);
+    if (cost) bg.push(`<span class="badge cost">$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}</span>`);
+    if (changed) bg.push(`<span class="badge chg">변경 ${changed}</span>`);
+    const badges = bg.length ? `<div class="badges">${bg.join("")}</div>` : "";
+    const tools = (p.tool_counts || []).map(t => `${esc(t[0])}×${t[1]}`).join(" · ");
+    const toolsDiv = tools ? `<div class="tools">${tools}</div>` : "";
     d.innerHTML =
-      `<div class="row1"><span class="sid">${esc(p.surface_id)}</span>` +
+      `<div class="row1">${crown}<span class="sid">${esc(p.surface_id)}</span>` +
       title +
       `<span class="status ${esc(st)}">${statusLabel}</span></div>` +
       (p.last_prompt ? `<div class="prompt">${esc(p.last_prompt)}</div>` : "") +
       (p.last_reply ? `<div class="reply">${esc(p.last_reply)}</div>` : "") +
       intent +
-      (files ? `<div class="files">${esc(files)}</div>` : "");
+      (files ? `<div class="files">${esc(files)}</div>` : "") +
+      badges + toolsDiv;
     list.appendChild(d);
   });
 }
@@ -3296,12 +3327,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Apply the persisted theme + accent into the global color slots before any
     // window or pane paints, so the first frame is already in the right palette.
     theme::apply_from_settings();
-    // Wire up the tmux shim before anything spawns a shell — every
-    // PtySession reads the env vars we set here. install_tmux_shim is
-    // best-effort: a missing shim binary just logs and skips, the rest
-    // of the binary still works (tmux calls inside the PTY fall back to
-    // the real tmux on the user's PATH).
-    install_tmux_shim();
+    // Install pane shims before anything spawns a shell — every PtySession
+    // reads KASATERM_TMUX_SHIM_DIR we set here (kasaterm-cli/preview/OSC133).
+    // best-effort: failures just log and skip, the rest still works.
+    install_pane_shims();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);
@@ -3336,34 +3365,18 @@ fn load_capture_config() {
     }
 }
 
-/// Find the bundled tmux shim binary and stage it in a private dir we
-/// prepend to child shells' PATH. Also fakes `$TMUX` so a TUI that
-/// checks "am I inside tmux?" answers yes, which makes Claude Code's
-/// teammateMode route through `tmux split-window` etc — landing every
-/// call on our shim instead of going down its own path-finding logic.
-fn install_tmux_shim() {
-    let shim_src = locate_shim_binary();
-    let Some(shim_src) = shim_src else {
-        eprintln!("[shim] tmux shim binary not found near {:?}; skipping", std::env::current_exe().ok());
-        return;
-    };
+/// pane 자식 셸이 쓸 보조 바이너리/설정을 private dir 에 깔고 그 dir 를
+/// `KASATERM_TMUX_SHIM_DIR` 로 넘긴다(pty-backend 가 PATH/ZDOTDIR 에 반영):
+/// kasaterm-cli(pane 간 협업)·imgopen/mdopen(preview)·zsh OSC133 prompt-mark
+/// (입력줄 감지). teammate-mode tmux 위장은 제거됨 — pane 생성은 god 이
+/// `kasaterm-cli split` 로 한다. best-effort: 실패해도 본체는 동작한다.
+fn install_pane_shims() {
     let shim_dir = std::env::temp_dir().join(format!("kasaterm-shim-{}", std::process::id()));
     if let Err(e) = std::fs::create_dir_all(&shim_dir) {
         eprintln!("[shim] mkdir {shim_dir:?} failed: {e}");
         return;
     }
-    let shim_target_name = if cfg!(windows) { "tmux.exe" } else { "tmux" };
-    let target = shim_dir.join(shim_target_name);
-    let _ = std::fs::remove_file(&target);
-    // Symlink first so we don't pay for a copy each launch and so
-    // updates to the shim binary propagate without a reinstall. On
-    // Windows symlinks need Developer Mode or admin — fall back to a
-    // plain copy so we always end up with a usable shim binary.
-    if let Err(e) = stage_shim(&shim_src, &target) {
-        eprintln!("[shim] stage {shim_src:?} -> {target:?} failed: {e}");
-        return;
-    }
-    // Cross-pane RPC: stage kasaterm-cli next to the tmux shim so it is
+    // Cross-pane RPC: stage kasaterm-cli on the child shell's PATH so it is
     // discoverable on the child shell's PATH. A pane can then run
     // `kasaterm-cli send --surface %1 "..."` to drive a sibling pane
     // without needing to know the absolute target/debug path. Failure
@@ -3431,36 +3444,8 @@ fn install_tmux_shim() {
         ".zlogin",
         "[ -f \"${HOME}/.zlogin\" ] && source \"${HOME}/.zlogin\"\n".to_string(),
     );
-    let trace = std::env::var("KASATERM_TMUX_TRACE").unwrap_or_else(|_| {
-        std::env::temp_dir()
-            .join("kasaterm-tmux-calls.log")
-            .to_string_lossy()
-            .into_owned()
-    });
-    let real = std::env::var("KASATERM_REAL_TMUX").unwrap_or_else(|_| {
-        real_tmux_candidates()
-            .iter()
-            .copied()
-            .find(|p| std::path::Path::new(p).is_file())
-            .unwrap_or("")
-            .to_string()
-    });
-    let fake_tmux = format!(
-        "{},{},0",
-        std::env::temp_dir()
-            .join(format!("kasaterm-tmux-{}.sock", std::process::id()))
-            .display(),
-        std::process::id()
-    );
     std::env::set_var("KASATERM_TMUX_SHIM_DIR", &shim_dir);
-    std::env::set_var("KASATERM_TMUX_SHIM_TMUX", &fake_tmux);
-    std::env::set_var("KASATERM_TMUX_TRACE", &trace);
-    if !real.is_empty() {
-        std::env::set_var("KASATERM_REAL_TMUX", &real);
-    }
-    eprintln!(
-        "[shim] dir={shim_dir:?} trace={trace} real_tmux={real:?} fake_tmux={fake_tmux}"
-    );
+    eprintln!("[shim] pane shim dir={shim_dir:?}");
 }
 
 /// Write `imgopen` and `mdopen` into the shim dir (on the pane PATH). Each
@@ -3508,37 +3493,6 @@ curl -s --get --data-urlencode \"path=$abs\" \
             }
         }
     }
-}
-
-/// Look for the `tmux` shim binary next to our own executable. Covers
-/// both the dev case (target/debug/tmux sibling to target/debug/kasaterm)
-/// and the .app bundle case (Contents/MacOS/tmux sibling to kasaterm).
-fn locate_shim_binary() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("KASATERM_TMUX_SHIM_BIN") {
-        let p = std::path::PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    // Match the bare binary on Unix and the .exe-suffixed binary that
-    // cargo produces on Windows.
-    let candidates = if cfg!(windows) {
-        ["tmux.exe", "tmux"]
-    } else {
-        ["tmux", "tmux"]
-    };
-    for name in candidates {
-        let c = dir.join(name);
-        if c.is_file() {
-            return Some(c);
-        }
-    }
-    // dev fallback: target/debug/tmux when running via `cargo run`
-    // from somewhere odd. current_exe usually already points there
-    // but be defensive.
-    None
 }
 
 /// Pick the shell to spawn inside a PTY. claude code's teammate mode
@@ -3761,9 +3715,8 @@ fn resolve_kasaterm_socket_path() -> String {
     }
 }
 
-/// Locate the kasaterm-cli binary so we can stage it alongside the
-/// tmux shim. Same lookup pattern as `locate_shim_binary` — env
-/// override first, then sibling of the current exe.
+/// Locate the kasaterm-cli binary so we can stage it on the pane PATH
+/// (install_pane_shims). Env override first, then sibling of the current exe.
 fn locate_cmux_compat_binary() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("KASATERM_CMUX_COMPAT_BIN") {
         let p = std::path::PathBuf::from(p);
@@ -3815,20 +3768,6 @@ fn stage_shim(src: &std::path::Path, target: &std::path::Path) -> std::io::Resul
             }
         }
     }
-}
-
-/// Common install locations for the real tmux binary. Used when no
-/// `KASATERM_REAL_TMUX` env override is provided.
-#[cfg(unix)]
-fn real_tmux_candidates() -> &'static [&'static str] {
-    &["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
-}
-
-#[cfg(windows)]
-fn real_tmux_candidates() -> &'static [&'static str] {
-    // Windows has no canonical tmux install path; rely on the env
-    // override when the user has wired up WSL-tmux or a custom build.
-    &[]
 }
 
 /// PrintWindow + GDI capture of our own HWND, encoded as PNG.

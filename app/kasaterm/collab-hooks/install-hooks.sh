@@ -14,7 +14,7 @@ MODE="copy"
 [ "${1:-}" = "--symlink" ] && MODE="symlink"
 
 mkdir -p "$DST"
-for f in "$SRC"/kasaterm-*.sh "$SRC"/kasaterm-*.py "$SRC"/kasacollab.py; do
+for f in "$SRC"/kasaterm-*.sh "$SRC"/kasaterm-*.py "$SRC"/god-*.sh "$SRC"/kasacollab.py; do
   [ -e "$f" ] || continue
   name="$(basename "$f")"
   if [ "$MODE" = "symlink" ]; then

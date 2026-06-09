@@ -160,6 +160,23 @@ def cmd_lead(args):
     # 한 명만(중복 답변 충돌 방지). 워커는 팀장 존재를 몰라도 되고, 팀장이
     # board pull로 멈춘 pane을 능동 감지해 대신 답한다.
     sub = args[0] if args else "set"
+    if sub == "claim":
+        # god 자리 원자적 선점. O_EXCL 이라 동시 경쟁 시 정확히 한 pane만 성공
+        # (exit 0), 나머지는 양보(exit 1). stale lead(죽은 god) 정리는 god-elect.sh
+        # 가 list surfaces 로 판정해 off 후 재호출한다 — 여기선 순수 원자 선점만.
+        try:
+            fd = os.open(lead_path(), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                cur = open(lead_path()).read().strip()
+            except OSError:
+                cur = "?"
+            print(f"이미 god: {cur}")
+            sys.exit(1)
+        with os.fdopen(fd, "w") as f:
+            f.write(me())
+        print(f"god 획득 = {me()}")
+        return
     if sub in ("off", "clear"):
         try:
             os.remove(lead_path())

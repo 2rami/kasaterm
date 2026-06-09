@@ -356,6 +356,18 @@ impl Backend for PtyBackend {
         let agents = self.agents_status();
         let bound = self.bound.lock().unwrap();
         let mut attention = self.attention.lock().unwrap();
+        // god 판정: bound pane 의 transcript path 부모(= cwd slug)로 협업방 lead 를
+        // 읽는다(협업은 같은 cwd 공유). hot-path 에 lsof 없이 파일 1회 read.
+        let god_id: Option<String> = bound
+            .values()
+            .next()
+            .and_then(|p| p.parent())
+            .and_then(|d| d.file_name())
+            .and_then(|s| s.to_str())
+            .map(|slug| format!("/tmp/kasaterm-collab/{slug}/lead"))
+            .and_then(|lead| std::fs::read_to_string(lead).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let mut board: Vec<PaneActivity> = bound
             .iter()
             .filter(|(sid, _)| live.contains(sid.as_str()))
@@ -399,6 +411,7 @@ impl Backend for PtyBackend {
                 } else {
                     attention.remove(sid);
                 }
+                row.is_god = god_id.as_deref() == Some(sid.as_str());
                 row
             })
             .collect();
