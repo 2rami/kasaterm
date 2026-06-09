@@ -7,8 +7,6 @@
 - 입력: 자체 두벌식 한글 IME (OS IME 비의존)
 - 색재현: shader sRGB→DisplayP3 변환 + root CAMetalLayer install (sugarloaf/ghostty 동급)
 
-> 패키지/바이너리 이름은 `kasaterm`. (옛 이름 `tmuxify`)
-
 ## 빌드 & 실행
 
 ```bash

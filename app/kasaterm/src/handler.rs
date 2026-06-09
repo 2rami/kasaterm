@@ -314,7 +314,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.start_pty()
         };
         if let Err(e) = backend_result {
-            eprintln!("[tmuxify] backend start failed: {e}");
+            eprintln!("[kasaterm] backend start failed: {e}");
         }
         self.schedule_autosend();
         self.schedule_autocapture();

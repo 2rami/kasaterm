@@ -1,4 +1,4 @@
-//! Direct-PTY backend for tmuxify. Spawns a shell into a real PTY via
+//! Direct-PTY backend for kasaterm. Spawns a shell into a real PTY via
 //! `portable-pty` (so the same code path lights up macOS/Linux's
 //! BSD-style PTY and Windows' ConPTY), feeds the byte stream through
 //! `alacritty_terminal`'s VT processor, and emits the same

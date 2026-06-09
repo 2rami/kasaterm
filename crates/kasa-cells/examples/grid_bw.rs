@@ -41,7 +41,7 @@ fn build_buffer() -> Vec<String> {
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz 0123456789",
         "Finished `release` profile [optimized] target(s) in 4.21s",
         "running 10 tests ... ok",
-        "+++ tmuxify/crates/cell-renderer/src/pipeline.rs",
+        "+++ kasaterm/crates/cell-renderer/src/pipeline.rs",
         "--- a/src/main.rs",
         "       8c5a9bcf feat(kasaterm): OSC title plumbing",
         "let mut scaler = scale_ctx.builder(font).size(size_px).hint(true).build();",

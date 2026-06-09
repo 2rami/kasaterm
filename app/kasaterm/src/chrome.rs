@@ -866,12 +866,12 @@ impl App {
         match arboard::Clipboard::new() {
             Ok(mut cb) => {
                 if let Err(e) = cb.set_text(text.to_string()) {
-                    eprintln!("[tmuxify] clipboard write failed: {e}");
+                    eprintln!("[kasaterm] clipboard write failed: {e}");
                     return;
                 }
             }
             Err(e) => {
-                eprintln!("[tmuxify] clipboard open failed: {e}");
+                eprintln!("[kasaterm] clipboard open failed: {e}");
                 return;
             }
         }

@@ -120,7 +120,7 @@ fn render_row(cells: &[Cell]) -> String {
 fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions::default();
     eframe::run_native(
-        "tmuxify spike — egui",
+        "kasaterm spike — egui",
         opts,
         Box::new(|_cc| Ok(Box::<App>::default())),
     )
