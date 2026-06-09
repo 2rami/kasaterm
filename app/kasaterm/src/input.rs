@@ -221,6 +221,11 @@ impl App {
     /// grid is the only live signal. A `working → idle` flip fires the
     /// top-right completion toast + a header pulse, same as the old daemon path.
     /// Throttled (the scan walks every pane), so safe to call each frame.
+    /// The claude spinner blanks/scrolls between frames, so the raw glyph scan
+    /// flickers working↔idle — hold `busy` this long past the last sighting.
+    /// Shared by the busy loop and the approval-prompt router below.
+    const BUSY_GRACE: std::time::Duration = std::time::Duration::from_millis(1200);
+
     pub(crate) fn refresh_pane_activity(&mut self) {
         let now = Instant::now();
         if let Some(t) = self.pane_busy_check {
@@ -231,12 +236,25 @@ impl App {
         self.pane_busy_check = Some(now);
 
         // Scan under the lock, then mutate `pane_activity` after dropping it —
-        // the completion-toast path takes no further workspace lock.
-        let busy_now: Vec<(String, bool)> = {
+        // the completion-toast path takes no further workspace lock. The same
+        // pass also looks for a pending approval prompt (munder BLOCK_HINTS):
+        // only meaningful when the spinner is gone, so busy panes skip it.
+        let busy_now: Vec<(String, bool, Option<ApprovalPrompt>)> = {
             let ws = self.ws.lock().unwrap();
             ws.panes
                 .iter()
-                .map(|(id, pane)| (id.clone(), pane.term().map_or(false, term_is_working)))
+                .map(|(id, pane)| match pane.term() {
+                    Some(t) => {
+                        let busy = term_is_working(t);
+                        let prompt = if busy {
+                            None
+                        } else {
+                            rows_show_approval_prompt(&t.cells)
+                        };
+                        (id.clone(), busy, prompt)
+                    }
+                    None => (id.clone(), false, None),
+                })
                 .collect()
         };
 
@@ -244,9 +262,8 @@ impl App {
         // scan flickers working↔idle. Hold `busy` for BUSY_GRACE past the last
         // spinner sighting; only a real stop (grace elapsed with no spinner)
         // counts as completion — otherwise every blink fired a bogus toast.
-        const BUSY_GRACE: std::time::Duration = std::time::Duration::from_millis(1200);
         let mut completed: Vec<String> = Vec::new();
-        for (id, raw_busy) in &busy_now {
+        for (id, raw_busy, _) in &busy_now {
             if *raw_busy {
                 self.pane_last_busy.insert(id.clone(), now);
             }
@@ -254,11 +271,14 @@ impl App {
                 || self
                     .pane_last_busy
                     .get(id)
-                    .map_or(false, |t| now.duration_since(*t) < BUSY_GRACE);
+                    .map_or(false, |t| now.duration_since(*t) < Self::BUSY_GRACE);
+            // Only a real "working" run counts toward the completion toast —
+            // a pane leaving `blocked`/`waiting` (prompt answered) didn't
+            // finish anything, it just got unstuck.
             let was_busy = self
                 .pane_activity
                 .get(id)
-                .map_or(false, |a| a.status != "idle" && !a.status.is_empty());
+                .map_or(false, |a| a.status == "working");
             if was_busy && !busy {
                 completed.push(id.clone());
                 self.pane_last_busy.remove(id);
@@ -274,9 +294,10 @@ impl App {
         }
         // Drop entries for panes that no longer exist (closed/undocked).
         self.pane_activity
-            .retain(|k, _| busy_now.iter().any(|(id, _)| id == k));
+            .retain(|k, _| busy_now.iter().any(|(id, _, _)| id == k));
         self.pane_last_busy
-            .retain(|k, _| busy_now.iter().any(|(id, _)| id == k));
+            .retain(|k, _| busy_now.iter().any(|(id, _, _)| id == k));
+        self.route_approval_prompts(&busy_now, now);
 
         if completed.is_empty() {
             return;
@@ -289,12 +310,121 @@ impl App {
             Some(name) => format!("✓ {name} 작업 완료"),
             None => "✓ 작업 완료".to_string(),
         };
-        self.collab_toast = Some((msg, now));
+        // A sticky approval toast (god waiting on the user) outranks a sibling
+        // completion blip — don't swap its text out from under the chips.
+        if self.collab_toast_action.is_none() {
+            self.collab_toast = Some((msg, now));
+        }
         for id in completed {
             self.notify_flash.insert(id, now);
         }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
+        }
+    }
+
+    /// munder식 승인 프롬프트 라우팅: god(또는 협업방 없는 단독 pane)의 프롬프트만
+    /// 사용자를 부르고 — sticky 토스트 + 승인/거부 칩 + 데스크탑 알림 — 워커의
+    /// 프롬프트는 board `waiting` 으로만 흘려 god 이 처리하게 둔다. 프롬프트가
+    /// 사라지거나(답함) pane 이 다시 일하면 플래그·토스트를 걷는다.
+    fn route_approval_prompts(
+        &mut self,
+        scan: &[(String, bool, Option<ApprovalPrompt>)],
+        now: Instant,
+    ) {
+        let mut changed = false;
+        for (id, raw_busy, prompt) in scan {
+            let busy = *raw_busy
+                || self
+                    .pane_last_busy
+                    .get(id)
+                    .map_or(false, |t| now.duration_since(*t) < Self::BUSY_GRACE);
+            let flagged = self.pane_prompt_wait.contains_key(id);
+            if !busy && prompt.is_some() {
+                if !flagged {
+                    let faces_user = self.pane_faces_user(id);
+                    self.pane_prompt_wait.insert(id.clone(), faces_user);
+                    self.notify_flash.insert(id.clone(), now);
+                    // board 에 waiting 으로 노출 — god 이 board/god-loop 로 본다.
+                    self.collab_attention
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), "승인 대기 (화면 감지)".to_string());
+                    if faces_user {
+                        let name = self.pane_header_label(id);
+                        self.collab_toast = Some((format!("⚠ {name} 승인 대기"), now));
+                        self.collab_toast_action = Some(id.clone());
+                        self.collab_toast_rect = None;
+                        let looking = self.window_focused
+                            && self.ws.lock().unwrap().active_pane.as_deref()
+                                == Some(id.as_str());
+                        if !looking {
+                            crate::chrome::notify_desktop("⚠ 승인 필요", &name);
+                        }
+                    }
+                    changed = true;
+                }
+                let st = if self.pane_prompt_wait.get(id).copied().unwrap_or(false) {
+                    "blocked"
+                } else {
+                    "waiting"
+                };
+                if let Some(a) = self.pane_activity.get_mut(id) {
+                    if a.status != st {
+                        a.status = st.to_string();
+                        changed = true;
+                    }
+                }
+            } else if flagged {
+                self.pane_prompt_wait.remove(id);
+                self.collab_attention.lock().unwrap().remove(id);
+                if self.collab_toast_action.as_deref() == Some(id.as_str()) {
+                    self.clear_approval_toast();
+                }
+                changed = true;
+            }
+        }
+        self.pane_prompt_wait
+            .retain(|k, _| scan.iter().any(|(id, _, _)| id == k));
+        if changed {
+            self.chrome_dirty = true;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Drop the sticky approval toast and its chip hit-rects in one place —
+    /// called when the prompt resolves, a chip is clicked, or it's dismissed.
+    pub(crate) fn clear_approval_toast(&mut self) {
+        self.collab_toast = None;
+        self.collab_toast_action = None;
+        self.collab_toast_rect = None;
+        self.collab_toast_approve_rect = None;
+        self.collab_toast_deny_rect = None;
+    }
+
+    /// 승인 토스트 칩 클릭 → 대상 pane PTY 에 응답 키 직주입 (forward_key 의
+    /// IME/모디파이어 경로를 타지 않는다). 클릭 시점에 그리드를 재스캔해 종류를
+    /// 확정한다 — 메뉴에 'n' 을 보내면 글자는 무시되고 \r 만 남아 Yes 를 골라버리는
+    /// 오발이 있어서, munder처럼 y\r 맹발사하지 않는다.
+    pub(crate) fn respond_approval(&mut self, pane_id: &str, approve: bool) {
+        let kind = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .get(pane_id)
+                .and_then(|p| p.term())
+                .and_then(|t| rows_show_approval_prompt(&t.cells))
+        };
+        let bytes: &[u8] = match (kind, approve) {
+            (Some(ApprovalPrompt::YesNo), true) => b"y\r",
+            (Some(ApprovalPrompt::YesNo), false) => b"n\r",
+            // 메뉴(또는 프롬프트가 막 사라진 경우): Enter=하이라이트(기본 Yes) / Esc=거부.
+            (_, true) => b"\r",
+            (_, false) => b"\x1b",
+        };
+        if let Some(pty) = self.pty_for_pane(pane_id) {
+            let _ = pty.send_bytes(bytes);
         }
     }
 
@@ -1812,6 +1942,57 @@ fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
     })
 }
 
+/// 승인/질문 프롬프트의 종류 — 응답 키 주입이 다르다 (munder-difflin BLOCK_HINTS 이식).
+///   Menu:  claude 의 "❯ 1. Yes" 번호 메뉴(permission/AskUserQuestion). Enter=하이라이트
+///          선택(기본 Yes), Esc=거부. 'y'/'n' 글자는 메뉴에서 무시되므로 못 쓴다.
+///   YesNo: 셸 스크립트의 인라인 "(y/n)" 질문. y\r / n\r.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ApprovalPrompt {
+    Menu,
+    YesNo,
+}
+
+/// Bottom-anchored scan for a *pending* approval/question prompt. Mirrors
+/// munder's BLOCK_HINTS with two hard-won exclusions baked in:
+///   - never match the bare word "permission" — claude's footer permanently
+///     shows "bypass permissions on", which would flag every busy pane;
+///   - "(y/n)" counts only on the LAST non-blank row (the cursor line). An
+///     answered shell prompt scrolls up but stays on screen ("proceed? (y/n) y"),
+///     so matching it anywhere re-flags long after it was answered. Claude's
+///     own menu self-clears when answered, so Menu may match anywhere in range.
+/// Callers must check `rows_show_working` first — a spinner means the prompt
+/// text still on screen is history, not a question.
+fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<ApprovalPrompt> {
+    let last = cells
+        .iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
+    // 메뉴는 옵션 + 안내문으로 working 스캔(10행)보다 길 수 있어 14행까지 본다.
+    let start = (last + 1).saturating_sub(14);
+    for (i, row) in cells[start..=last].iter().enumerate() {
+        let line: String = row
+            .iter()
+            .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+            .collect();
+        // "❯ 12. …" — 커서가 올라간 번호 옵션. 입력창의 맨 "❯ "(번호 없음)는 제외.
+        if let Some(pos) = line.find('❯') {
+            let rest = line[pos + '❯'.len_utf8()..].trim_start();
+            let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+            if digits > 0 && rest[digits..].starts_with('.') {
+                return Some(ApprovalPrompt::Menu);
+            }
+        }
+        let lower = line.to_lowercase();
+        // claude 승인 메뉴의 헤더 — 메뉴 행이 잘려도(좁은 pane) 이 문구로 Menu 판정.
+        if lower.contains("do you want to proceed") {
+            return Some(ApprovalPrompt::Menu);
+        }
+        if start + i == last && (lower.contains("(y/n)") || lower.contains("[y/n]")) {
+            return Some(ApprovalPrompt::YesNo);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod working_scan_tests {
     use super::*;
@@ -1853,5 +2034,57 @@ mod working_scan_tests {
     #[test]
     fn braille_spinner_is_working() {
         assert!(rows_show_working(&[row("⠋ installing")]));
+    }
+
+    #[test]
+    fn numbered_menu_is_menu_prompt() {
+        let cells = vec![
+            row("Do you want to proceed?"),
+            row("❯ 1. Yes"),
+            row("  2. Yes, and don't ask again"),
+            row("  3. No, and tell Claude what to do differently"),
+        ];
+        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::Menu));
+    }
+
+    #[test]
+    fn ask_user_question_menu_without_yes_is_menu_prompt() {
+        // AskUserQuestion 옵션은 Yes/No 가 아닐 수 있다 — 번호+점이면 메뉴.
+        let cells = vec![row("❯ 1. worktree로 격리"), row("  2. 그냥 main에서")];
+        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::Menu));
+    }
+
+    #[test]
+    fn bare_input_chevron_is_not_a_prompt() {
+        // claude 입력창의 맨 "❯ " — 번호가 없으면 메뉴가 아니다.
+        assert_eq!(rows_show_approval_prompt(&[row("❯ ")]), None);
+    }
+
+    #[test]
+    fn permission_footer_alone_is_not_a_prompt() {
+        // 푸터의 "bypass permissions on" 은 항상 떠 있다 — 매칭 금지 (munder 함정).
+        let cells = vec![row("❯ "), row("  bypass permissions on (shift+tab to cycle)")];
+        assert_eq!(rows_show_approval_prompt(&cells), None);
+    }
+
+    #[test]
+    fn yn_on_last_row_is_yesno_prompt() {
+        let cells = vec![row("Overwrite existing file? (y/n)")];
+        assert_eq!(rows_show_approval_prompt(&cells), Some(ApprovalPrompt::YesNo));
+    }
+
+    #[test]
+    fn answered_yn_above_prompt_line_is_ignored() {
+        // 이미 답한 (y/n) 가 위로 스크롤돼 남아 있어도 마지막 행이 아니면 무시.
+        let cells = vec![row("Overwrite? (y/n) y"), row("done."), row("$ ")];
+        assert_eq!(rows_show_approval_prompt(&cells), None);
+    }
+
+    #[test]
+    fn multi_digit_menu_option_is_menu_prompt() {
+        assert_eq!(
+            rows_show_approval_prompt(&[row("❯ 12. 마지막 옵션")]),
+            Some(ApprovalPrompt::Menu)
+        );
     }
 }

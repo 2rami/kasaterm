@@ -77,8 +77,6 @@ impl App {
         } else {
             format!(" — {reason}")
         };
-        self.collab_toast = Some((format!("⚠ {name} 권한 대기중{detail}"), now));
-        self.collab_toast_rect = None;
         self.notify_flash.insert(surface_id.to_string(), now);
         // Attention raised in a background window — pulse its sidebar tab too.
         if let Some(wi) = self.window_of_pane(surface_id) {
@@ -87,8 +85,41 @@ impl App {
             }
         }
         self.chrome_dirty = true;
+        // munder식 라우팅: 사람과 대화하는 건 god 뿐이다. 워커 pane 의 권한/입력
+        // 대기는 토스트·데스크탑 알림 없이 위의 flash + board `waiting`(socket
+        // attention 맵, CLI 경로가 이미 기록)으로만 남기고 god 이 처리하게 둔다.
+        if !self.pane_faces_user(surface_id) {
+            return;
+        }
+        // 이미 sticky 승인 토스트(칩 포함)가 이 pane 으로 떠 있으면 hook 의
+        // 중복 알림으로 텍스트를 덮지 않는다.
+        if self.collab_toast_action.as_deref() != Some(surface_id) {
+            self.collab_toast = Some((format!("⚠ {name} 권한 대기중{detail}"), now));
+            self.collab_toast_rect = None;
+        }
         if !(self.window_focused && is_active_pane) {
             notify_desktop("⚠ 권한 필요", &format!("{name}{detail}"));
+        }
+    }
+
+    /// 이 pane 의 막힘(승인 프롬프트)을 사용자에게 직접 띄울 것인가.
+    /// 협업방(lead 파일)이 있으면 god pane 만 사용자 직행 — 워커는 god 이 처리
+    /// (munder: "only the god agent talks to the human"). 협업방이 없으면(단독
+    /// 사용) 모든 pane 이 사용자 직행 — 기존 동작 그대로. lead 파일은 pane cwd 의
+    /// slug(`/`·`.` → `-`, god-elect.sh/kasacollab 과 동일 규칙)로 찾는다.
+    /// 프롬프트 감지 같은 저빈도 경로 전용 (파일 1회 read).
+    pub(crate) fn pane_faces_user(&self, id: &str) -> bool {
+        let Some(cwd) = self.pane_current_cwd(id) else {
+            return true;
+        };
+        let slug: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '-' } else { c })
+            .collect();
+        match std::fs::read_to_string(format!("/tmp/kasaterm-collab/{slug}/lead")) {
+            Ok(lead) => lead.trim() == id,
+            Err(_) => true,
         }
     }
 
@@ -860,6 +891,11 @@ impl App {
         const HOLD: u128 = 2400;
         const FADE: u128 = 600;
         let Some((_, at)) = self.collab_toast.as_ref() else { return 0.0 };
+        // 승인 토스트(칩 포함)는 사용자가 응답하거나 프롬프트가 풀릴 때까지
+        // 고정 — 시간 페이드 없음. (해제는 route_approval_prompts/클릭 핸들러)
+        if self.collab_toast_action.is_some() {
+            return 1.0;
+        }
         let e = at.elapsed().as_millis();
         if e < HOLD {
             1.0
@@ -1200,7 +1236,7 @@ impl App {
 /// bundle identifier and can't obtain notification authorization, so there we
 /// fall back to `osascript` — which shows the Script Editor icon (dev-only).
 #[cfg(target_os = "macos")]
-fn notify_desktop(title: &str, body: &str) {
+pub(crate) fn notify_desktop(title: &str, body: &str) {
     if is_bundled() {
         notify_native(title, body);
     } else {
@@ -1268,7 +1304,7 @@ fn notify_osascript(title: &str, body: &str) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn notify_desktop(_title: &str, _body: &str) {}
+pub(crate) fn notify_desktop(_title: &str, _body: &str) {}
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn ensure_notification_authorization() {}

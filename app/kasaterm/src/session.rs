@@ -1395,7 +1395,11 @@ impl App {
     /// backed by the GUI's own panes — pane writes/split/focus delegate to the
     /// GUI thread via the proxy (see socket::PtyBackend).
     pub(crate) fn start_socket_pty(&self) {
-        let backend = Arc::new(socket::PtyBackend::new(self.proxy.clone(), self.ws.clone()));
+        let backend = Arc::new(socket::PtyBackend::new(
+            self.proxy.clone(),
+            self.ws.clone(),
+            self.collab_attention.clone(),
+        ));
         self.start_socket_with(backend);
     }
 }

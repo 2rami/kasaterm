@@ -153,12 +153,19 @@ pub struct PtyBackend {
 }
 
 impl PtyBackend {
-    pub fn new(proxy: EventLoopProxy<UserEvent>, ws: Arc<Mutex<Workspace>>) -> Self {
+    /// `attention` is shared with the GUI (`App.collab_attention`): the CLI
+    /// hook path (`kasaterm-cli attention`) and the GUI's grid-scan prompt
+    /// detection both write it, so the board's `waiting` flag reflects either.
+    pub fn new(
+        proxy: EventLoopProxy<UserEvent>,
+        ws: Arc<Mutex<Workspace>>,
+        attention: Arc<Mutex<HashMap<String, String>>>,
+    ) -> Self {
         Self {
             proxy,
             ws,
             bound: Arc::new(Mutex::new(HashMap::new())),
-            attention: Arc::new(Mutex::new(HashMap::new())),
+            attention,
             agents_cache: Arc::new(Mutex::new(None)),
         }
     }

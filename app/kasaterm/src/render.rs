@@ -789,6 +789,7 @@ impl App {
         // the render block below never re-borrows self while g is held.
         let collab_toast_alpha = self.collab_toast_alpha();
         let collab_toast_msg = self.collab_toast.as_ref().map(|(m, _)| m.clone());
+        let collab_toast_action_on = self.collab_toast_action.is_some();
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
             .map(|s| gpu::PaneSlot {
@@ -3352,13 +3353,34 @@ impl App {
             // bottom-center copy pill; longer hold (a sibling finishing is worth
             // a glance). Tap the board button to clear the unread badge.
             self.collab_toast_rect = None;
+            self.collab_toast_approve_rect = None;
+            self.collab_toast_deny_rect = None;
             if collab_toast_alpha > 0.0 {
                 if let Some(msg) = collab_toast_msg.as_ref() {
                     let t_font = 13.0_f32;
                     let win_w = win_px.0 / scale;
                     let text_w = g.measure_chrome_text(msg, t_font, true);
                     let (px, py) = (14.0_f32, 8.0_f32);
-                    let box_w = text_w + px * 2.0;
+                    // 승인 모드(sticky)면 텍스트 뒤에 [승인][거부] 칩이 붙는다 —
+                    // 박스 폭에 미리 반영. (munder 의 god 승인 카드 축소판)
+                    let chip_f = 12.0_f32;
+                    let chip_pad = 10.0_f32;
+                    let chip_gap = 8.0_f32;
+                    let (ok_label, no_label) = ("승인", "거부");
+                    let (ok_w, no_w) = if collab_toast_action_on {
+                        (
+                            g.measure_chrome_text(ok_label, chip_f, true) + chip_pad * 2.0,
+                            g.measure_chrome_text(no_label, chip_f, true) + chip_pad * 2.0,
+                        )
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    let chips_w = if collab_toast_action_on {
+                        chip_gap + ok_w + chip_gap + no_w
+                    } else {
+                        0.0
+                    };
+                    let box_w = text_w + px * 2.0 + chips_w;
                     let box_h = t_font + py * 2.0;
                     let bx = win_w - box_w - 16.0;
                     let by = TITLE_HEIGHT + 12.0;
@@ -3374,17 +3396,73 @@ impl App {
                         theme::with_alpha(theme::surface_active(), a),
                     );
                     let ta = (255.0 * collab_toast_alpha).round() as u8;
+                    // 승인 대기 토스트는 경고 뉘앙스(텍스트가 ⚠로 시작) — 본문은
+                    // 기본 텍스트색, 완료 토스트는 기존 success 색 유지.
+                    let msg_color = if collab_toast_action_on {
+                        theme::with_alpha(theme::text(), ta)
+                    } else {
+                        theme::with_alpha(theme::success(), ta)
+                    };
                     g.draw_text(
                         bx + px,
                         by + py,
                         msg,
                         gpu::DrawOpts {
                             font_size: t_font,
-                            color: theme::with_alpha(theme::success(), ta),
+                            color: msg_color,
                             bold: true,
                             italic: false,
                         },
                     );
+                    if collab_toast_action_on {
+                        let ch = box_h - 8.0;
+                        let cy = by + 4.0;
+                        let ty = cy + (ch - chip_f) / 2.0;
+                        let ox = bx + px + text_w + chip_gap;
+                        round_rect(
+                            g,
+                            ox,
+                            cy,
+                            ok_w,
+                            ch,
+                            theme::RADIUS_SM,
+                            theme::with_alpha(theme::success(), a),
+                        );
+                        g.draw_text(
+                            ox + chip_pad,
+                            ty,
+                            ok_label,
+                            gpu::DrawOpts {
+                                font_size: chip_f,
+                                color: theme::with_alpha(theme::fg(), ta),
+                                bold: true,
+                                italic: false,
+                            },
+                        );
+                        self.collab_toast_approve_rect = Some((ox, cy, ok_w, ch));
+                        let nx = ox + ok_w + chip_gap;
+                        round_rect(
+                            g,
+                            nx,
+                            cy,
+                            no_w,
+                            ch,
+                            theme::RADIUS_SM,
+                            theme::with_alpha(theme::danger(), a),
+                        );
+                        g.draw_text(
+                            nx + chip_pad,
+                            ty,
+                            no_label,
+                            gpu::DrawOpts {
+                                font_size: chip_f,
+                                color: theme::with_alpha(theme::fg(), ta),
+                                bold: true,
+                                italic: false,
+                            },
+                        );
+                        self.collab_toast_deny_rect = Some((nx, cy, no_w, ch));
+                    }
                 }
             }
             // Alt/Option held → tmux "display-panes": each pane shows its %N

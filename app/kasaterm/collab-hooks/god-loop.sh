@@ -34,7 +34,26 @@ echo "[god-loop] started god=$GOD pid=$$" >> "$FLEET"
 # board-watch = pane 상태 변화 polling stream(1 line/change). 받아서 누적만 —
 # god 입력창을 직접 건드리지 않아(god 타이핑 방해 없음) board-context 가 god 턴에
 # fleet.log 를 당겨 보여주는 방식으로 P2 에서 잇는다.
+HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 $CLI board-watch "$INTERVAL" 2>/dev/null | while IFS= read -r line; do
   [ -z "$line" ] && continue
   printf '%s %s\n' "$(date '+%H:%M:%S')" "$line" >> "$FLEET"
+  # 워커가 승인/입력 대기로 막힘 → god 에게 1회 알림(munder: 워커 프롬프트는
+  # 사람이 아니라 god 이 처리). GUI 는 워커 프롬프트에 토스트를 안 띄우므로
+  # 이 알림이 없으면 막힌 워커를 아무도 모른다. 같은 pane 의 대기가 풀리면
+  # 마커를 지워 재무장 — 다음 막힘 때 다시 1회만 알린다.
+  pane="${line%% *}"
+  case "$pane" in %*) ;; *) continue ;; esac
+  case "$line" in
+    *"  waiting"*|*"  blocked"*)
+      if [ "$pane" != "$GOD" ] && [ ! -f "$BASE/god-notified-$pane" ]; then
+        touch "$BASE/god-notified-$pane"
+        python3 "$HOOKS_DIR/kasacollab.py" msg "$GOD" \
+          "$pane 승인/입력 대기로 막힘 — peek $pane 로 프롬프트 확인하고 처리해(직접 키 주입 또는 사용자 에스컬레이션)" \
+          >/dev/null 2>&1 || true
+      fi
+      ;;
+    *) rm -f "$BASE/god-notified-$pane" 2>/dev/null ;;
+  esac
 done
