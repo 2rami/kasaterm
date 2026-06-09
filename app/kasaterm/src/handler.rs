@@ -57,6 +57,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketRename(id, title) => {
+                if let Some(p) = self.ws.lock().unwrap().panes.get_mut(id) {
+                    let at = p.active_tab.min(p.tabs.len() - 1);
+                    // Pin so the inner program's OSC 0/2 titles stop overriding
+                    // the name the user just set (matches surface.rename intent).
+                    p.tabs[at].title = Some(title.clone());
+                    p.tabs[at].title_pinned = true;
+                }
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
+            UserEvent::SocketColor(id, color) => {
+                if let Some(p) = self.ws.lock().unwrap().panes.get_mut(id) {
+                    p.color = Some(*color);
+                }
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::Notify { surface_id, title, body } => {
                 self.handle_notify(surface_id, title, body);
                 self.render_frame();
@@ -326,6 +346,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autotoggle();
         self.arm_autotabs();
         self.arm_autodrag();
+        self.arm_autopanemove();
         self.arm_autoopen();
         self.arm_autoconfirm();
         self.schedule_autoquit();
@@ -1882,6 +1903,30 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
+                        // A double-click anywhere on the header — including the
+                        // tab pill itself — toggles tmux-style zoom. Users aim
+                        // at the tab label when they "double-click the header",
+                        // so the pill must share the header band's zoom gesture
+                        // (otherwise only the empty strip right of the tabs
+                        // zoomed, which felt broken).
+                        let (dx, dy) = self.cursor_px;
+                        let now = Instant::now();
+                        let is_double = matches!(
+                            self.last_left_click,
+                            Some((t, (x, y)))
+                                if now.duration_since(t).as_millis() < 400
+                                    && (x - dx).abs() < 5.0
+                                    && (y - dy).abs() < 5.0
+                        );
+                        self.last_left_click = Some((now, (dx, dy)));
+                        if is_double {
+                            // pane_tab_rects keys off the outer pane id (same
+                            // value we push into active_pane below), which is
+                            // exactly what toggle_pane_zoom wants.
+                            self.toggle_pane_zoom(&pid);
+                            self.last_left_click = None;
+                            return;
+                        }
                         // Focus the pane now; arm a tab drag. A plain press
                         // (no movement) switches to this tab on release; a
                         // drag past the threshold reorders instead.
@@ -2624,6 +2669,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autosplits();
         self.run_pending_autowindows();
         self.run_pending_autodrag();
+        self.run_pending_autopanemove();
         self.run_pending_autotoggle();
         self.run_pending_autotabs();
         self.run_pending_autoopen();

@@ -201,6 +201,8 @@ fn system_capabilities(id: Value) -> Response {
                 "surface.dock",
                 "surface.undock",
                 "surface.move",
+                "surface.rename",
+                "surface.set_color",
                 "surface.resize_divider",
                 "collab.board",
                 "window.layout",

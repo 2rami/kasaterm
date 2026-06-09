@@ -248,6 +248,21 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn rename_surface(&self, surface_id: &str, title: &str) -> Result<()> {
+        let _ = self.proxy.send_event(UserEvent::SocketRename(
+            surface_id.to_string(),
+            title.to_string(),
+        ));
+        Ok(())
+    }
+
+    fn set_color(&self, surface_id: &str, color: [u8; 4]) -> Result<()> {
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketColor(surface_id.to_string(), color));
+        Ok(())
+    }
+
     fn split_surface(&self, direction: SplitDirection) -> Result<SurfaceInfo> {
         let dir = match direction {
             SplitDirection::Right | SplitDirection::Left => kasa_pty::SplitDir::Horizontal,

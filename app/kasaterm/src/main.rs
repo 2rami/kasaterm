@@ -2021,6 +2021,12 @@ enum UserEvent {
     /// non-existent pane and its `send-keys` payload is dropped.
     SocketSplit(kasa_pty::SplitDir, std::sync::mpsc::Sender<String>),
     SocketFocus(String),
+    /// `surface.rename` / `surface.set_color` delegated from the socket thread.
+    /// Pane header title / accent band live in `ws.panes` which only the GUI
+    /// thread may touch, so the backend routes them here. `(surface_id, title)`
+    /// / `(surface_id, rgba)`.
+    SocketRename(String, String),
+    SocketColor(String, [u8; 4]),
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify`). Raise a
     /// desktop alert unless that pane is already the focused one, cmux-style.
     Notify {
@@ -2312,6 +2318,12 @@ struct App {
     /// the cross-pane merge path can be verified without a real mouse.
     autodrag_plan: Option<(String, usize, String)>,
     autodrag_at: Option<Instant>,
+    /// Headless repro for a cross-window pane move (KASATERM_AUTOPANEMOVE=<dst
+    /// window idx>): relocates the active window's first leaf next to that
+    /// window's first leaf via `move_pane`, exercising the sidebar-chip drop
+    /// path without a real drag.
+    autopanemove_dst: Option<usize>,
+    autopanemove_at: Option<Instant>,
     /// Headless repro for the window sidebar: number of extra windows left to
     /// spawn (KASATERM_AUTOWINDOWS) and when the next one fires. 0 disables.
     autowindow_left: usize,
@@ -2919,6 +2931,8 @@ impl App {
             autoconfirm_at: None,
             autodrag_plan: None,
             autodrag_at: None,
+            autopanemove_dst: None,
+            autopanemove_at: None,
             autowindow_left: 0,
             autowindow_at: None,
             autotoggle_sidebar_at: None,

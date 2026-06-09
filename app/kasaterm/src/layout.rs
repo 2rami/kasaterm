@@ -1032,6 +1032,21 @@ impl App {
             // whole-pane move; ignore rather than picking a random edge.
             DropZone::Center => return,
         };
+        // Cross-window relocation: the sidebar chip drop hands us a target leaf
+        // that lives in another (parked) window. The active pty_layout can't
+        // insert beside a leaf it doesn't own, so move the leaf across trees
+        // directly — what the daemon's move_surface used to do.
+        let in_active = self
+            .pty_layout
+            .as_ref()
+            .map(|t| t.leaves().contains(&target))
+            .unwrap_or(false);
+        if !in_active {
+            if let Some(dst_idx) = self.window_of_pane(target) {
+                self.move_pane_cross_window(moving, target, dir, before, dst_idx);
+            }
+            return;
+        }
         if let Some(tree) = self.pty_layout.as_mut() {
             if !tree.remove_leaf(moving) {
                 return;
@@ -1049,6 +1064,80 @@ impl App {
         self.ws.lock().unwrap().active_pane = Some(moving.to_string());
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+    /// Detach `moving` from the active window and graft it beside `target`,
+    /// which lives in window `dst_idx`'s parked tree. The PTY stays alive — only
+    /// the BSP trees are rewired. If the active window held `moving` as its sole
+    /// pane it empties out, so we fold that slot away and follow the pane into
+    /// its new window.
+    fn move_pane_cross_window(
+        &mut self,
+        moving: &str,
+        target: &str,
+        dir: kasa_pty::SplitDir,
+        before: bool,
+        dst_idx: usize,
+    ) {
+        // remove_leaf returns false for a root-level (single) leaf, so detect
+        // the sole-pane case up front instead of relying on its return.
+        let src_only = self
+            .pty_layout
+            .as_ref()
+            .map(|t| {
+                let l = t.leaves();
+                l.len() == 1 && l[0] == moving
+            })
+            .unwrap_or(false);
+        if !src_only {
+            let removed = self
+                .pty_layout
+                .as_mut()
+                .map(|t| t.remove_leaf(moving))
+                .unwrap_or(false);
+            if !removed {
+                return;
+            }
+        }
+        // Graft beside the target in the destination window's tree.
+        let grafted = self
+            .windows
+            .get_mut(dst_idx)
+            .and_then(|w| w.as_mut())
+            .map(|t| t.insert_beside(target, dir, before, moving.to_string()))
+            .unwrap_or(false);
+        if !grafted {
+            return;
+        }
+        if src_only {
+            // The active window is now empty. Its slot is None (the tree lived
+            // in pty_layout, which we discard), so drop it and shift the
+            // destination index down if it sat above the removed slot.
+            self.windows.remove(self.active_window);
+            let dst = if dst_idx > self.active_window {
+                dst_idx - 1
+            } else {
+                dst_idx
+            };
+            self.pty_layout = self.windows[dst].take();
+            self.active_window = dst;
+            self.window_alert.remove(&dst);
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+            self.chrome_dirty = true;
+            self.ws.lock().unwrap().active_pane = Some(moving.to_string());
+            self.publish_pty_layout();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        } else {
+            // Source window keeps other panes — resize it before parking, then
+            // follow the moved pane into its new home (switch_window resizes and
+            // repaints the destination).
+            let (cols, rows) = self.window_cells();
+            self.resize_backend(cols, rows);
+            self.switch_window(dst_idx);
+            self.ws.lock().unwrap().active_pane = Some(moving.to_string());
         }
     }
 }

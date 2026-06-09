@@ -588,8 +588,15 @@ impl App {
                     + y_cells as f32 * self.cell.h
                     + header_shift_logical
                     + PANE_INNER_Y;
-                let base_w = w_cells as f32 * self.cell.w;
-                let full_w = if x_cells + w_cells >= grid_cols {
+                // A single un-split pane reports 0 cells (the layout tree has no
+                // split to divide by). The cell-grid clip above already falls
+                // back to the full window in that case; mirror it here, or the
+                // body box — and the Alt pane-number overlay drawn on it —
+                // collapses to 1px (overlay then skipped by the rw<24 guard).
+                let eff_w_cells = if w_cells == 0 { grid_cols } else { w_cells };
+                let eff_h_cells = if h_cells == 0 { grid_rows } else { h_cells };
+                let base_w = eff_w_cells as f32 * self.cell.w;
+                let full_w = if x_cells + eff_w_cells >= grid_cols {
                     let extra = self.window.as_ref().map_or(0.0, |w| {
                         let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lw = w.inner_size().width as f32 / s;
@@ -608,10 +615,10 @@ impl App {
                 // gets no inner inset on that side — otherwise the right/bottom
                 // edge keeps an inner-pad-width empty strip (the "우측하단 빈칸"
                 // a drag leaves when it puts a pane against the window edge).
-                let right_inset = if x_cells + w_cells >= grid_cols { 0.0 } else { PANE_INNER_X };
+                let right_inset = if x_cells + eff_w_cells >= grid_cols { 0.0 } else { PANE_INNER_X };
                 let bw = (full_w - PANE_INNER_X - right_inset).max(1.0);
-                let base_h = h_cells as f32 * self.cell.h;
-                let full_h = if y_cells + h_cells >= grid_rows {
+                let base_h = eff_h_cells as f32 * self.cell.h;
+                let full_h = if y_cells + eff_h_cells >= grid_rows {
                     let extra = self.window.as_ref().map_or(0.0, |w| {
                         let s = w.scale_factor() as f32 * self.ui_zoom;
                         let raw_lh = w.inner_size().height as f32 / s;
@@ -622,7 +629,7 @@ impl App {
                 } else {
                     base_h
                 };
-                let bottom_inset = if y_cells + h_cells >= grid_rows { 0.0 } else { PANE_INNER_Y };
+                let bottom_inset = if y_cells + eff_h_cells >= grid_rows { 0.0 } else { PANE_INNER_Y };
                 let bh = (full_h - header_shift_logical - PANE_INNER_Y - bottom_inset).max(1.0);
                 body_rects.push((id.clone(), (bx, by, bw, bh)));
                 if let Some(image) = img {
@@ -1317,6 +1324,16 @@ impl App {
                 // for single-pane mode. When the workspace is split, each
                 // pane carries its own header, so the centered title is
                 // redundant but still useful as "which pane has focus".
+                // Active pane's accent (surface.set_color) recolors the centered
+                // title text too, so single-pane mode matches the per-pane tabs.
+                let title_color = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.active_pane
+                        .as_deref()
+                        .and_then(|id| ws.panes.get(id))
+                        .and_then(|p| p.color)
+                        .unwrap_or_else(theme::text)
+                };
                 let title_text: String = {
                     let ws = self.ws.lock().unwrap();
                     let active = ws.active_pane.clone();
@@ -1362,7 +1379,7 @@ impl App {
                         &title_text,
                         gpu::DrawOpts {
                             font_size: chrome_font,
-                            color: theme::text(),
+                            color: title_color,
                             bold: true,
                             italic: false,
                         },
@@ -2663,10 +2680,14 @@ impl App {
                         .unwrap_or(false);
                     let alpha_mul = if being_dragged { 0x55 } else { 0xFF };
                     let combine = |a: u8| ((a as u16 * alpha_mul as u16) / 0xFF) as u8;
+                    // Per-pane accent (set via `surface.set_color`) recolors the
+                    // tab-name text only; None = default chrome text. Brightness
+                    // (active/hover) still rides on the alpha.
+                    let label_fg = h.color.unwrap_or_else(theme::text);
                     let t_fg = if bright {
-                        theme::with_alpha(theme::text(), combine(0xFF))
+                        theme::with_alpha(label_fg, combine(0xFF))
                     } else {
-                        theme::with_alpha(theme::text(), combine(0x82))
+                        theme::with_alpha(label_fg, combine(0x82))
                     };
                     let t_icon = if bright {
                         theme::with_alpha(theme::text_dim(), combine(0xFF))
@@ -3362,13 +3383,24 @@ impl App {
             // (for `tell %N`, focus, etc.) without it crowding the header.
             // Works in single-pane too — body_rects covers every pane.
             if self.show_pane_numbers {
+                // `body_rects` keys on the pane leaf id (== first tab's pid), so a
+                // pane with several tabs would flash the same number on every tab.
+                // Show the *active tab's* real id instead — that's the `%N` its
+                // claude sees in KASATERM_PANE_ID and the one `tell`/`rename`
+                // target. Falls back to the leaf id for image/markdown tabs (no pid).
+                let ws = self.ws.lock().unwrap();
                 for (id, rect) in &body_rects {
                     let (rx, ry, rw, rh) = *rect;
                     if rw < 24.0 || rh < 24.0 {
                         continue;
                     }
+                    let shown: String = ws
+                        .panes
+                        .get(id)
+                        .and_then(|p| p.tabs.get(p.active_tab).and_then(|t| t.pid.clone()))
+                        .unwrap_or_else(|| id.clone());
                     let font = (rh * 0.4).clamp(24.0, 72.0);
-                    let tw = g.measure_chrome_text(id, font, true);
+                    let tw = g.measure_chrome_text(&shown, font, true);
                     let pad = font * 0.4;
                     let box_w = tw + pad * 2.0;
                     let box_h = font + pad * 2.0;
@@ -3386,7 +3418,7 @@ impl App {
                     g.draw_text(
                         bx + pad,
                         by + pad,
-                        id,
+                        &shown,
                         gpu::DrawOpts {
                             font_size: font,
                             color: [0xFF, 0xFF, 0xFF, 0xFF],
