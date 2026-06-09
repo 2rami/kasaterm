@@ -69,7 +69,7 @@ ensure_worker_look() {
   fi
 }
 
-# 살아있는 pane id 목록
+# 살아있는 pane id 목록 (전체 — 아래 lead 생존 확인·room 교집합에 씀)
 surfaces=$($CLI list surfaces 2>/dev/null | python3 -c '
 import sys, json
 try:
@@ -77,10 +77,28 @@ try:
 except Exception:
     pass
 ')
-pane_count=$(printf '%s\n' "$surfaces" | grep -c .)
 
-# 혼자(또는 0)면 god 불필요
-[ "${pane_count:-0}" -lt 2 ] && exit 0
+# 같은 방(slug) claude pane 만 카운트해 선출 게이트로 쓴다. list surfaces 전체는
+# 다른 레포 pane 까지 세서, 다른 경로에서 혼자 작업하는 사람에게도 god 치장이
+# 붙고 세션 이름 "● god" 가 방마다 겹친다(거노 발견). board-context.py 가 매 턴
+# 쓰는 ctx-cache-<N>(pane %N)이 '이 방에서 claude 가 돌았다'는 증거 — surfaces 와
+# 교집합해 닫힌 pane 의 잔존 캐시를 거르고, 자기 자신은 무조건 포함한다(god-elect
+# 실행 자체가 이 방 claude 증거, 첫 턴 전 ctx-cache 부재 보완). 첫 턴 전 동료
+# 누락은 다음 턴 자가치유라 허용. 같은 방 2+ 일 때만 선출 진행.
+BASE="/tmp/kasaterm-collab/$slug"
+room_count=$(
+  {
+    printf '%s\n' "$ME"
+    for f in "$BASE"/ctx-cache-*; do
+      [ -e "$f" ] || continue
+      n="${f##*/ctx-cache-}"
+      printf '%s\n' "$surfaces" | grep -qx "%$n" && printf '%%%s\n' "$n"
+    done
+  } | sort -u | grep -c .
+)
+
+# 같은 방에 혼자(또는 0)면 god 불필요
+[ "${room_count:-0}" -lt 2 ] && exit 0
 
 cur_god=""
 [ -f "$LEAD" ] && cur_god=$(cat "$LEAD" 2>/dev/null)
