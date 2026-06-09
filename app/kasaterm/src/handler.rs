@@ -1121,6 +1121,22 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // Dock chip click. While a pane is zoomed the dock shows the
+                    // hidden siblings — clicking one switches the zoom to it
+                    // (toggle off the current, on the clicked, in one call since
+                    // the clicked id isn't the zoomed one).
+                    if let Some(id) = self
+                        .dock_chip_rects
+                        .iter()
+                        .find(|(_, r)| hit(*r))
+                        .map(|(i, _)| i.clone())
+                    {
+                        if self.zoomed_pane.is_some() {
+                            self.toggle_pane_zoom(&id);
+                        }
+                        window.request_redraw();
+                        return;
+                    }
                     // Settings open: only the main content area (below the title
                     // strip, right of the sidebar) routes to the form. The title
                     // strip toggles and the sidebar stay live so you're never
@@ -2377,13 +2393,35 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(hd) = self.header_drag.take() {
                             window.set_cursor(CursorIcon::Default);
                             if hd.active {
-                                if let Some((target, zone)) =
-                                    self.drop_target_at(self.cursor_px.0, self.cursor_px.1)
+                                let dt = self.drop_target_at(self.cursor_px.0, self.cursor_px.1);
+                                let sw = if dt.is_none() {
+                                    self.sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
+                                } else {
+                                    None
+                                };
+                                // [임시 진단] cross-window 드래그가 안 되는 원인 파악용.
+                                // .app은 stderr가 안 보여 파일에 남긴다. 검증 후 제거.
+                                if let Ok(mut f) = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open("/tmp/kt-drag.log")
                                 {
+                                    use std::io::Write;
+                                    let _ = writeln!(
+                                        f,
+                                        "drop pane={} cursor=({:.0},{:.0}) drop_target={:?} sidebar_win={:?} win_tab_rects={} windows={}",
+                                        hd.pane,
+                                        self.cursor_px.0,
+                                        self.cursor_px.1,
+                                        dt.as_ref().map(|(t, _)| t.as_str()),
+                                        sw.as_deref(),
+                                        self.window_tab_rects.len(),
+                                        self.windows.len(),
+                                    );
+                                }
+                                if let Some((target, zone)) = dt {
                                     self.move_pane(&hd.pane, &target, zone);
-                                } else if let Some(target) = self
-                                    .sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
-                                {
+                                } else if let Some(target) = sw {
                                     // Dropped onto a sidebar window chip: relocate the
                                     // pane into that window. The daemon's move_surface
                                     // does the cross-window detach/insert; the zone is
