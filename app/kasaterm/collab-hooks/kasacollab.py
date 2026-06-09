@@ -108,6 +108,22 @@ def write_msgs(msgs):
             f.write(json.dumps(m, ensure_ascii=False) + "\n")
 
 
+def live_panes():
+    """board 에 살아있는 surface_id 집합. 조회 실패/비활성이면 None(검증 스킵).
+    msg 보낼 때 받는 id 가 실재하는지 즉시 확인하는 데 쓴다 — stale god id
+    (재시작 전 %3 등)나 오타로 죽은 pane 에 보내 좀비 메시지가 쌓이는 걸 막는다."""
+    cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
+    try:
+        r = subprocess.run([cli, "board"], capture_output=True, text=True, timeout=3)
+        if r.returncode != 0:
+            return None
+        board = (json.loads(r.stdout).get("result") or {}).get("board") or []
+        ids = {row.get("surface_id") for row in board if row.get("surface_id")}
+        return ids or None
+    except Exception:
+        return None
+
+
 def cmd_msg(args):
     if len(args) < 2:
         print('msg <pane> "<text>"')
@@ -116,6 +132,15 @@ def cmd_msg(args):
     if to == me():
         print(f"자기 자신({to})에게는 못 보냄 — 내 pane id가 {me()}다. "
               f"받는 상대 id를 board에서 다시 확인해라.")
+        return
+    # 받는 pane 이 board 에 실재하는지 즉시 검증(fail-open: 조회 불가면 통과).
+    # 죽은/없는 id 면 보내지 않고 살아있는 상대 목록을 띄운다 — 좀비 메시지·
+    # "허공에 대고 보고" 방지(사용자가 일일이 알려줄 필요 없음).
+    live = live_panes()
+    if live is not None and to not in live:
+        others = ", ".join(sorted(live - {me()})) or "(다른 pane 없음)"
+        print(f"'{to}' 는 지금 살아있는 pane 이 아니야 — 메시지 안 보냄. "
+              f"board 에 있는 상대: {others}. `kasaterm-cli board` 로 확인해라.")
         return
     m = {"id": short_id(), "from": me(), "to": to, "text": text,
          "ts": time.time(), "read": False}
