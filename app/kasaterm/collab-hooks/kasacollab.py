@@ -150,6 +150,35 @@ def cmd_inbox(args):
     write_msgs(msgs)
 
 
+def cmd_drain_stop(args):
+    # Stop hook 전용 inbox drain (munder drainForStop 이식). claude 가 턴을
+    # 끝내려 할 때 내게 온 미읽 메시지가 있으면 reason 텍스트를 stdout 으로
+    # 내고 exit 10 → Stop hook 스크립트가 {"decision":"block"} 로 멈춤을 막아
+    # claude 가 그 메시지를 처리하게 강제한다. 없으면 exit 0(그냥 멈춤).
+    #
+    # 멱등: surface 하는 즉시 read=True 마킹한다 — munder 의 cursor.json(id>
+    # lastProcessed) 대용. 우리 short_id 는 16비트 충돌+비단조라 id 비교가
+    # 불가능하므로 board-context.py 가 이미 쓰는 'read' 플래그를 멱등 키로
+    # 공유한다. 한 번 surface 된 메시지는 read=True 라 다음 Stop 에 안 잡혀
+    # 무한루프가 안 난다(+ Stop hook 스크립트의 stop_hook_active 가드로 이중).
+    msgs = read_msgs()
+    mine = [m for m in msgs
+            if m.get("to") == me() and m.get("from") != me() and not m.get("read")]
+    if not mine:
+        sys.exit(0)
+    for m in mine:
+        m["read"] = True
+    write_msgs(msgs)
+    lines = "\n".join(f"- {m['from']}: {m['text']}" for m in mine)
+    reason = (f"끝내기 전에 inbox 에 안 읽은 협업 메시지 {len(mine)}건이 있어. "
+              f"각각 확인하고 필요하면 답장(kasacollab msg <상대> \"...\")해라:\n{lines}")
+    # Stop hook 의 stdout JSON 으로 멈춤을 막는다(munder 검증 형식 — command
+    # hook 도 top-level decision:block 을 읽는다). reason 은 다음 턴 지시로 주입.
+    # json.dumps 로 개행·따옴표를 안전 인코딩 → shell 이 JSON 을 안 만져도 됨.
+    print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
+    sys.exit(10)  # 내부 신호: stop-drain.sh 가 complete 알림을 건너뛰게
+
+
 def lead_path():
     return os.path.join(base(), "lead")
 
@@ -201,8 +230,9 @@ def main():
     if not a:
         print("kasacollab task|msg|inbox|lead")
         return
-    {"task": cmd_task, "msg": cmd_msg, "inbox": cmd_inbox, "lead": cmd_lead}.get(
-        a[0], lambda _: print("kasacollab task|msg|inbox|lead")
+    {"task": cmd_task, "msg": cmd_msg, "inbox": cmd_inbox, "lead": cmd_lead,
+     "drain-stop": cmd_drain_stop}.get(
+        a[0], lambda _: print("kasacollab task|msg|inbox|lead|drain-stop")
     )(a[1:])
 
 
