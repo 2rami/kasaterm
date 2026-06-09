@@ -2819,6 +2819,14 @@ struct App {
     file_tree_fs_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
     file_tree_watch: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
     file_tree_watch_started: bool,
+    /// `git check-ignore` runs off-GUI-thread: spawning git from the unsigned
+    /// kasaterm.exe triggers a Defender full-scan (~5s/call on Windows) that
+    /// would freeze the toggle if run inline. The worker reads a (root, paths)
+    /// request, fills `file_tree_ignored`, and wakes the loop so the next
+    /// rebuild dims gitignored rows. Until it lands, rows show un-dimmed.
+    file_tree_ignored: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    git_ignore_req: std::sync::Arc<std::sync::Mutex<Option<(std::path::PathBuf, Vec<String>)>>>,
+    git_ignore_started: bool,
     file_tree_hover: Option<std::path::PathBuf>,
     file_tree_scroll: f32,
     file_tree_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
@@ -3106,6 +3114,9 @@ impl App {
             file_tree_fs_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             file_tree_watch: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             file_tree_watch_started: false,
+            file_tree_ignored: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            git_ignore_req: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            git_ignore_started: false,
             file_tree_expanded: std::collections::HashSet::new(),
             file_tree_nodes: Vec::new(),
             file_tree_hover: None,
