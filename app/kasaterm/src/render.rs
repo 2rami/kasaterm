@@ -1051,6 +1051,13 @@ impl App {
                 })
             })
             .collect();
+        // Per-window "unseen notification" flag: a pane finished / needs
+        // attention while this window sat in the background. The tab pulses
+        // (synced to the cursor blink) until the user switches to it. Unlike
+        // sb_done's brief flash, this persists across the whole alert.
+        let sb_alert: Vec<bool> = (0..sb_labels.len())
+            .map(|i| self.window_alert.contains(&i))
+            .collect();
         // Which tab the cursor is over (for hover affordance + showing × only
         // where the user is pointing, Warp-style).
         let sb_cursor = self.cursor_px;
@@ -1414,6 +1421,14 @@ impl App {
                         round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_MD, theme::surface_active());
                     } else if is_hover {
                         round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_MD, theme::surface_hover());
+                    }
+                    // Unseen-notification pulse: an accent wash over the tab on
+                    // the blink's "on" phase, so a finish/attention in a
+                    // background window blinks until the user switches to it.
+                    if sb_alert.get(*i).copied().unwrap_or(false) && raw_cursor_on {
+                        let mut c = theme::accent();
+                        c[3] = 64;
+                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_MD, c);
                     }
                     // Icon chip: small rounded square with a glyph.
                     let (name, cwd) = sb_labels

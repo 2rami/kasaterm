@@ -240,6 +240,19 @@ impl App {
     /// visible window's layout, swap the target's in. `pty`/`ws` are shared
     /// across the session's windows, so no PTY is touched — only which BSP tree
     /// the renderer draws. Focus lands on the target window's first pane.
+    /// Which window owns `pane` (as one of its leaves). The active window's tree
+    /// lives in `pty_layout` (its `windows` slot is None); the rest carry their
+    /// own layout. Mirrors the sidebar `sb_busy`/`sb_done` lookup.
+    pub(crate) fn window_of_pane(&self, pane: &str) -> Option<usize> {
+        (0..self.windows.len()).find(|&i| {
+            let layout = if i == self.active_window {
+                self.pty_layout.as_ref()
+            } else {
+                self.windows[i].as_ref()
+            };
+            layout.is_some_and(|l| l.leaves().contains(&pane))
+        })
+    }
     pub(crate) fn switch_window(&mut self, idx: usize) {
         if idx == self.active_window || idx >= self.windows.len() {
             return;
@@ -250,6 +263,9 @@ impl App {
         self.windows[self.active_window] = self.pty_layout.take();
         self.pty_layout = self.windows[idx].take();
         self.active_window = idx;
+        // The user is now looking at this window — clear any unseen-notification
+        // pulse on its sidebar tab.
+        self.window_alert.remove(&idx);
         // Swapping in a stashed window produces no new PTY output, so nothing
         // would flip a pane's `dirty` and the damage-tracked render would skip
         // the frame — the screen stays on the old window. Mark every leaf of

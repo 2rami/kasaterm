@@ -2593,6 +2593,11 @@ struct App {
     /// Pane id → instant a completion notification flashed its header, so the
     /// render pass can pulse it for a beat then let it settle.
     notify_flash: HashMap<String, std::time::Instant>,
+    /// Window indices with an *unseen* notification (a pane finished / needs
+    /// attention while that window was in the background). The sidebar tab
+    /// pulses until the user switches to that window, which clears the entry —
+    /// a persistent "you missed this" cue, unlike the brief `notify_flash`.
+    window_alert: std::collections::HashSet<usize>,
     /// Active completion toast (message + start instant) for a sibling pane's
     /// working→idle flip — "✓ %3 완료 · git 패널". Fades like `copy_toast_at`.
     /// Replaced by the newest flip; a brief overlap just shows the latest.
@@ -2989,6 +2994,7 @@ impl App {
             pane_activity: HashMap::new(),
             window_focused: true,
             notify_flash: HashMap::new(),
+            window_alert: std::collections::HashSet::new(),
             collab_toast: None,
             collab_toast_rect: None,
             collab_unread: 0,
