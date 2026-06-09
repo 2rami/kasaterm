@@ -159,6 +159,16 @@ def roster_recovery():
     live_sids = {v.get("session_id") for v in roster.values() if v.get("pane_id") in live}
     dead = [v for v in roster.values()
             if v.get("pane_id") not in live and v.get("session_id") not in live_sids]
+    # board(bind 기반) 사각지대 보완: 방금 `claude --resume <sid>` 로 부활했지만
+    # 아직 프롬프트를 안 받아 bind 가 안 돈 세션은 board 에 없어 '죽음'으로
+    # 오판된다 — 실행 중 claude 프로세스의 cmdline 에 sid 가 보이면 산 것.
+    if dead:
+        try:
+            r = subprocess.run(["pgrep", "-fl", "claude.*--resume"],
+                               capture_output=True, text=True, timeout=3)
+            dead = [v for v in dead if v.get("session_id", "\0") not in r.stdout]
+        except Exception:
+            pass
     if not dead:
         return None
     dead.sort(key=lambda v: v.get("ts", 0), reverse=True)

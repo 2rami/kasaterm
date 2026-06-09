@@ -82,6 +82,11 @@ fi
 [ -n "$cur_god" ] && $KASACOLLAB lead off >/dev/null 2>&1
 if $KASACOLLAB lead claim >/dev/null 2>&1; then
   ensure_god_look
+  # claude 세션 타이틀도 god 으로 — 재시작 후 `claude --resume god` 한 방으로
+  # god 세션을 이어가게(타이틀 resume 은 Claude Code 공식 지원). 선출 순간
+  # 1회만 주입(매 턴 재적용하면 강제 제출 스팸이라 claim 분기에만).
+  $CLI tell "$ME" "/rename god" >/dev/null 2>&1
+  sleep 1
   $CLI tell "$ME" "[god] 너가 god 이다. 팀 통솔 시작 — board-watch 로 변경점 감시, 워커 done 보고 받으면 단독 커밋." >/dev/null 2>&1
 else
   ensure_worker_look
