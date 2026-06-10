@@ -250,6 +250,35 @@ def roster_recovery():
     return "\n".join(lines)
 
 
+def _worker_persona():
+    """워커 캐릭터 persona — 스폰 래퍼의 시스템 프롬프트(스폰 시 1회)를 못 받은
+    기존 pane(solo→god 전환)도 페르소나를 받게 additionalContext 로 주입.
+    god-elect 의 tell 1회 주입(2f7fb67) 대체 — tell 은 강제 제출이라 사용자
+    화면에 노출돼 몰입을 깼고, 110자 컷으로 persona 가 잘렸다. 여기는 ambient
+    diff(안정 키 동일 시 스킵+30분 TTL) 체계라 마커 없이 스팸이 없다.
+    캐릭터 테마 없는 방은 None(현행 무변화)."""
+    try:
+        cname = open(os.path.join(collab_dir(), f"character-{me.lstrip('%')}")).read().strip()
+    except OSError:
+        return None
+    if not cname:
+        return None
+    persona = ""
+    for cj in (os.path.expanduser("~/.config/kasaterm/characters.json"),
+               os.path.join(_HD, "characters.json")):
+        try:
+            d = json.load(open(cj))
+        except Exception:
+            continue
+        ms = [d.get("leader") or {}] + (d.get("members") or [])
+        persona = next((m.get("persona", "") for m in ms if m.get("name") == cname), "")
+        break
+    line = f"[아로나 모드] 너는 {cname}({me}) 워커야."
+    if persona:
+        line += " " + persona.strip()[:300]
+    return line
+
+
 def god_section():
     """협업 규약 — 모드별. 기본 solo(팀장 없음, 거노 직접 오케스트레이션):
     커밋은 각자(자기 작업 파일 명시), 승인은 사용자 직행, 파일 겹침은
@@ -276,9 +305,11 @@ def god_section():
         digest = god_fleet_digest()
         recovery = roster_recovery()
         return base + (("\n" + digest) if digest else "") + (("\n" + recovery) if recovery else "")
-    return (f"[god 체제] god = {god}. 너는 워커 — 직접 git commit/push 하지 마라. "
-            f"작업이 끝나면 `kasacollab msg {god} \"done: <요약> | files: a,b\"` 로 "
-            f"보고하면 god 이 검토 후 단독 커밋한다.")
+    worker = (f"[god 체제] god = {god}. 너는 워커 — 직접 git commit/push 하지 마라. "
+              f"작업이 끝나면 `kasacollab msg {god} \"done: <요약> | files: a,b\"` 로 "
+              f"보고하면 god 이 검토 후 단독 커밋한다.")
+    persona = _worker_persona()
+    return ((persona + "\n") if persona else "") + worker
 
 
 REINJECT_SECS = 1800  # 변화 없어도 30분마다 재주입(컨텍스트 압축 유실 대비)
