@@ -2697,6 +2697,11 @@ struct App {
     /// breadcrumb. Refreshed on a timer off the render path: `pid_cwd` shells
     /// out to `lsof`, so resolving it per pane on every frame would spawn a
     /// burst during a scroll/hover storm. See `refresh_pane_cwds`.
+    /// 아로나 자동 시작(P5): god 모드 && characters 있는 방의 첫 pane 에 띄울
+    /// claude 명령. start_pty 에서 가드 통과 시 세팅, 셸 prompt-end(OSC133) 감지
+    /// 또는 타임아웃 시 1회 주입 후 None. solo·무테마면 애초에 None(무동작).
+    pending_autoleader: Option<String>,
+    pending_autoleader_at: Option<Instant>,
     pane_cwd_cache: HashMap<String, std::path::PathBuf>,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
@@ -3090,6 +3095,8 @@ impl App {
             collab_attention: Arc::new(Mutex::new(HashMap::new())),
             collab_unread: 0,
             last_window_title_check: None,
+            pending_autoleader: None,
+            pending_autoleader_at: None,
             pane_cwd_cache: HashMap::new(),
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -3579,6 +3586,54 @@ fn locate_collab_hooks_dir() -> Option<std::path::PathBuf> {
         return Some(dev);
     }
     None
+}
+
+/// characters.json 의 leader.name (~/.config 우선 → 번들). 아로나 자동 시작·테마
+/// 가드가 쓴다. 파일 없거나 leader 없으면 None(기능 skip).
+pub(crate) fn load_leader_name() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let mut paths = vec![std::path::PathBuf::from(format!(
+        "{home}/.config/kasaterm/characters.json"
+    ))];
+    if let Some(hd) = locate_collab_hooks_dir() {
+        paths.push(hd.join("characters.json"));
+    }
+    for p in &paths {
+        let Ok(s) = std::fs::read_to_string(p) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { continue };
+        if let Some(n) = v
+            .get("leader")
+            .and_then(|l| l.get("name"))
+            .and_then(|x| x.as_str())
+        {
+            if !n.is_empty() {
+                return Some(n.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 아로나 자동 시작(P5) 명령 — god 모드 && characters 있는 방에서만 첫 pane 에
+/// 띄울 `claude --resume <leader> || claude`. solo·무테마·`KASATERM_NO_AUTOLEADER`
+/// 면 None(기존 유저 무영향). cwd slug 로 모드 마커를 본다(kasacollab 과 동일 규칙).
+pub(crate) fn autoleader_command() -> Option<String> {
+    if std::env::var_os("KASATERM_NO_AUTOLEADER").is_some() {
+        return None;
+    }
+    let home = std::env::var("HOME").ok()?;
+    let cwd = std::env::current_dir().ok()?;
+    let slug: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect();
+    let mode = std::fs::read_to_string(format!("{home}/.config/kasaterm/collab-mode/{slug}")).ok()?;
+    if mode.trim() != "god" {
+        return None;
+    }
+    let leader = load_leader_name()?;
+    Some(format!("claude --resume {leader} || claude"))
 }
 
 /// Stage a `claude` wrapper + a session-scoped hook settings file on the pane
