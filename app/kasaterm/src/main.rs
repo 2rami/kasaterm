@@ -2054,6 +2054,11 @@ enum UserEvent {
     /// true follows into the new one.
     SocketSplit(kasa_pty::SplitDir, bool, std::sync::mpsc::Sender<String>),
     SocketFocus(String),
+    /// 활성 pane 의 shell OS pid 질의(socket 스레드 → GUI 동기 RPC,
+    /// SocketSplit 의 Sender 패턴). GET /mode 등 방 판정이 쓰는
+    /// `Backend::active_cwd` 용 — GUI 는 메모리 조회(active_pane→shell_pid)만
+    /// 즉답하고, 느린 lsof(cwd 해석)는 backend 스레드가 한다(GUI 블록 금지).
+    SocketQueryActivePid(std::sync::mpsc::Sender<Option<u32>>),
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),

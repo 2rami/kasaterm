@@ -1054,15 +1054,9 @@ impl App {
         if self.arona_panel_window.is_some() {
             return;
         }
-        // god 모드 방 전용 — solo 방에선 토스트로 안내만 하고 열지 않는다.
-        if crate::current_collab_mode() != "god" {
-            self.collab_toast =
-                Some(("아로나 UI는 god 모드 방에서만 열려요 (kasacollab mode god)".into(), Instant::now()));
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-            return;
-        }
+        // 모드 게이트 없음: solo/미설정 방에서도 창은 연다. 모드 안내·전환은
+        // 웹 쪽 ModePicker 담당(GET /mode 로 분기) — 네이티브가 차단하면
+        // ModePicker 에 도달 자체가 불가한 설계 모순이었다(거노 실측).
         let port = mcp_panel_port();
         let attrs = WindowAttributes::default()
             .with_title("아로나 — 샬레 교실")
