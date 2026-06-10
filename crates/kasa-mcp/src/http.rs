@@ -695,6 +695,34 @@ async fn terminal_reveal_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /peek?surface=%N&lines=40` — a pane's visible screen text
+/// (`Backend::peek`). The arona classroom polls this to show a student's
+/// terminal *inside* the GUI, without summoning the main window (red-pill).
+/// Polling-friendly by design: one lock + visible-text copy, no transcript IO.
+async fn peek_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let surface = params.get("surface").map(String::as_str).unwrap_or("");
+    let body = if surface.is_empty() {
+        serde_json::json!({ "ok": false, "error": "surface=%N required" })
+    } else {
+        let lines = params
+            .get("lines")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(40);
+        match backend.peek(surface, lines) {
+            Ok(text) => serde_json::json!({
+                "ok": true,
+                "surface_id": surface,
+                "text": text,
+            }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// `POST /arona-close` — close the arona classroom window and bring the main
 /// terminal back. The ModePicker's "터미널로" choice calls this; the page
 /// can't close its own host window. No-op (still ok) when it isn't open.
@@ -832,6 +860,7 @@ pub fn spawn_http_server(
                 let panel_info_backend = backend.clone();
                 let terminal_reveal_backend = backend.clone();
                 let arona_close_backend = backend.clone();
+                let peek_backend = backend.clone();
                 let mode_get_backend = backend.clone();
                 let mode_set_backend = backend.clone();
                 let spawn_backend = backend.clone();
@@ -968,6 +997,12 @@ pub fn spawn_http_server(
                     .route(
                         "/arona-close",
                         post(move || arona_close_handler(arona_close_backend.clone())),
+                    )
+                    .route(
+                        "/peek",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            peek_handler(peek_backend.clone(), q)
+                        }),
                     )
                     .route(
                         "/panel-open",
