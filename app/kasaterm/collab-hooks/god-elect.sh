@@ -85,11 +85,19 @@ start_god_loop() {
 }
 
 ensure_god_look() {
-  $CLI color "$ME" "$GOD_COLOR" >/dev/null 2>&1
-  $CLI rename "$ME" "● $GOD_NAME" >/dev/null 2>&1
-  # 사이드바 세션 이름도 god 마킹 — pane 헤더만이 아니라 세션 라벨까지(거노 요청).
-  # 강등 원복은 안 함(단순화 — god 윈도우만 마킹, 재선출 때 갱신).
-  $CLI rename-window "● $GOD_NAME" >/dev/null 2>&1
+  # 치장(리더 이름·색·세션 라벨)은 **진짜 리더 세션**일 때만 — roster 의 god 세션이
+  # 따로 있는데 임시 인계자가 "● 아로나"를 뒤집어쓰면 화면에 아로나가 둘 생긴다
+  # (거노 실측). 임시 인계자는 자기 캐릭터 look 을 유지한 채 역할(커밋·워처)만 수행.
+  # TAKEOVER=1(유예 만료 정식 승계)은 치장 허용.
+  if [ -z "$god_sid" ] || [ "$god_sid" = "$my_sid" ] || [ "$TAKEOVER" = "1" ]; then
+    $CLI color "$ME" "$GOD_COLOR" >/dev/null 2>&1
+    $CLI rename "$ME" "● $GOD_NAME" >/dev/null 2>&1
+    # 사이드바 세션 이름도 god 마킹 — pane 헤더만이 아니라 세션 라벨까지(거노 요청).
+    # 강등 원복은 안 함(단순화 — god 윈도우만 마킹, 재선출 때 갱신).
+    $CLI rename-window "● $GOD_NAME" >/dev/null 2>&1
+  else
+    ensure_worker_look
+  fi
   # god 인데 워처가 죽어있으면 조용히 재기동(자가치유) — '반드시 켜짐'.
   pgrep -f "god-loop.sh $ME" >/dev/null 2>&1 || start_god_loop
 }
@@ -105,6 +113,9 @@ ensure_worker_look() {
   if [ -n "$cname" ]; then
     hc=$(char_field "$cname" header_color)
     cc=$(char_field "$cname" claude_color)
+    # 헤더 이름도 캐릭터로 복원 — 임시 god 인계가 "● 아로나"를 씌웠다 강등되면
+    # rename 이 박제되던 구멍(거노 실측 '아로나 두 개'). idempotent.
+    $CLI rename "$ME" "● $cname" >/dev/null 2>&1
   fi
   [ -z "$hc" ] && hc=$(worker_color)
   [ -z "$cc" ] && cc=$(worker_claude_color)
@@ -165,10 +176,13 @@ god_sid=$($KASACOLLAB roster-god-sid 2>/dev/null)
 if [ -n "$cur_god" ] && printf '%s\n' "$surfaces" | grep -qx "$cur_god"; then
   if [ "$cur_god" = "$ME" ]; then
     ensure_god_look
-    # roster role:god 을 내 세션으로 유지(claim 턴에 마커가 없어 마킹을 놓쳤어도
-    # 여기서 수렴 — 재시작 우선권 기준이 항상 최신 god 세션을 가리키게).
-    [ -n "$my_sid" ] && [ "$god_sid" != "$my_sid" ] && \
+    # roster role:god 수렴은 **마킹이 비어 있을 때만**(claim 턴에 내 마커가 없어
+    # 마킹을 놓친 보정). god_sid 가 딴 세션을 가리키면 나는 임시 인계자 — 여기서
+    # 내 sid 로 덮으면 진짜 god 세션의 우선권이 소멸한다(반환 전제 유지).
+    [ -n "$my_sid" ] && [ -z "$god_sid" ] && \
       $KASACOLLAB roster-mark-god "$my_sid" >/dev/null 2>&1
+    # 진짜 god 이 자리에 있으면 남은 양보 유예 마커는 정리.
+    [ "$god_sid" = "$my_sid" ] && rm -f "$BASE/god-yield-since" 2>/dev/null
   else
     ensure_worker_look
   fi
@@ -178,26 +192,34 @@ fi
 # lead 없거나 stale(죽은 god 가리킴) → 정리 후 원자 선점 경쟁.
 [ -n "$cur_god" ] && $KASACOLLAB lead off >/dev/null 2>&1
 
-# god 세션 우선권: 재선출이 선착순이면 '이전 god 세션'(거노 대면 + god 타이틀)이
+# god 세션 우선권: 재선출이 선착순이면 '이전 god 세션'(거노 대면 + 리더 타이틀)이
 # 늦게 떠도 다른 pane 에 god 을 뺏긴다(거노 발견). 내가 이전 god 세션이면 즉시
-# claim, 아니면 2초 양보해 god 세션이 먼저 claim 하게 둔다(roster 는 lead 와 달리
-# 재시작 청소에 안 지워져 우선권 기준으로 영속한다).
+# claim. 아니면 양보 — 옛 '2초 sleep 양보'는 재시작 직후 god 의 첫 턴이 수십 초
+# 늦는 시나리오에서 항상 만료돼 인계 사고를 냈다(실측: 부활 워커가 자리+아로나
+# 치장 탈취). 새 규칙: ① god 세션이 살아있는 pane 에 bind 돼 있으면 무기한 양보
+# (걔가 곧 claim 한다) ② 안 보이면 부팅 중일 수 있어 60초 유예(sleep 없이 유예
+# 마커 + 매 턴 폴링) ③ 만료에만 정식 승계(TAKEOVER — 치장·roster 마킹 허용).
+TAKEOVER=0
 if [ -n "$god_sid" ] && [ "$god_sid" != "$my_sid" ]; then
-  # 이전 god 세션이 따로 있다(또는 내 sid 불명) → 그 세션이 돌아올 2초를 준다.
-  # mkdir 원자 락으로 한 turn 만 양보(매 턴 fire 되는 god-elect 가 sleep 을
-  # 중첩 누적하는 걸 막는다). 락 못 잡으면 다른 elect 가 이미 양보 중 → 워커.
-  ylock="$BASE/god-yield.lock"
-  if mkdir "$ylock" 2>/dev/null; then
-    sleep 2
-    rmdir "$ylock" 2>/dev/null
-    ng=$(cat "$LEAD" 2>/dev/null)
-    if [ -n "$ng" ] && printf '%s\n' "$surfaces" | grep -qx "$ng"; then
-      ensure_worker_look; exit 0   # god 세션이 그 사이 claim 함 → 워커
+  for bm in /tmp/kasaterm-bound-*; do
+    [ -e "$bm" ] || continue
+    bsid=$(sed 's#.*/##; s#\.jsonl$##' "$bm" 2>/dev/null)
+    [ "$bsid" = "$god_sid" ] || continue
+    bp="${bm##*kasaterm-bound-}"
+    bpane="%${bp#_}"
+    if printf '%s\n' "$surfaces" | grep -qx "$bpane"; then
+      ensure_worker_look; exit 0   # god 세션 생존 — 무기한 양보
     fi
-    # 2초 뒤에도 lead 비었으면 god 세션이 안 떴다고 보고 인계 claim(아래로)
-  else
-    ensure_worker_look; exit 0
+  done
+  since="$BASE/god-yield-since"
+  now=$(date +%s)
+  [ -f "$since" ] || printf '%s' "$now" > "$since"
+  start=$(cat "$since" 2>/dev/null); : "${start:=$now}"
+  if [ $((now - start)) -lt 60 ]; then
+    ensure_worker_look; exit 0     # 부팅 유예 — 아직 인계하지 않는다
   fi
+  rm -f "$since"
+  TAKEOVER=1                        # 유예 만료 — god 세션 사망 판정, 정식 승계
 fi
 
 if $KASACOLLAB lead claim >/dev/null 2>&1; then
@@ -206,15 +228,16 @@ if $KASACOLLAB lead claim >/dev/null 2>&1; then
   # 선착순으로 임시 claim 한 경우(god_sid 가 딴 세션) 타이틀 god 중복을 피해 보류
   # (강등 시 자동 원복은 claude slash 한계로 불가하므로 애초에 안 친다). 타이틀
   # resume(`claude --resume god`)·색은 진짜 god 세션 1회 주입에만.
-  if [ -z "$god_sid" ] || [ "$god_sid" = "$my_sid" ]; then
+  if [ -z "$god_sid" ] || [ "$god_sid" = "$my_sid" ] || [ "$TAKEOVER" = "1" ]; then
     $CLI tell "$ME" "/rename $GOD_NAME" >/dev/null 2>&1
     sleep 1
     $CLI tell "$ME" "/color $GOD_CLAUDE_COLOR" >/dev/null 2>&1
     sleep 1
     $CLI tell "$ME" "$GOD_GREETING" >/dev/null 2>&1
+    # 정당한 승계(첫 god/진짜 god 복귀/유예 만료)만 roster 마킹 — 양보 경로는
+    # claim 에 도달하지 않으므로 여기 도달=항상 정당하지만 의도를 명시한다.
+    [ -n "$my_sid" ] && $KASACOLLAB roster-mark-god "$my_sid" >/dev/null 2>&1
   fi
-  # 내가 god 됐으니 roster 에 인계 마킹 — 다음 재선출의 우선권 기준.
-  [ -n "$my_sid" ] && $KASACOLLAB roster-mark-god "$my_sid" >/dev/null 2>&1
 else
   ensure_worker_look
 fi
