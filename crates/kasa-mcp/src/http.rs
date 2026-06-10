@@ -1006,6 +1006,26 @@ async fn tell_god_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoR
     (cors, Json(resp)).into_response()
 }
 
+/// ~/.config/kasaterm/schale-state.json 경로.
+fn schale_state_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/schale-state.json"))
+}
+
+/// schale-state.json 읽기. 파일 없으면 초기값 반환.
+fn read_schale_state() -> serde_json::Value {
+    let default = serde_json::json!({ "credits": 0, "gold": 0, "affinity_lv": 1, "exp": 0 });
+    let Some(path) = schale_state_path() else { return default };
+    let Ok(s) = std::fs::read_to_string(&path) else { return default };
+    serde_json::from_str::<serde_json::Value>(&s).unwrap_or(default)
+}
+
+/// `GET /schale-state` — SCHALE OS 재화/Exp 영속 스냅샷.
+async fn schale_state_handler() -> impl IntoResponse {
+    let s = read_schale_state();
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(s))
+}
+
 /// `POST /arona-close` — close the arona classroom window and bring the main
 /// terminal back. The ModePicker's "터미널로" choice calls this; the page
 /// can't close its own host window. No-op (still ok) when it isn't open.
@@ -1279,6 +1299,7 @@ pub fn spawn_http_server(
                             terminal_reveal_handler(terminal_reveal_backend.clone(), q)
                         }),
                     )
+                    .route("/schale-state", get(schale_state_handler))
                     .route(
                         "/arona-close",
                         post(move || arona_close_handler(arona_close_backend.clone())),
