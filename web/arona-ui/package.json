@@ -1,0 +1,25 @@
+{
+  "name": "arona-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "kasaterm god(아로나) 모드 UI — munder-difflin renderer 이식, vite 정적 번들",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "pixi.js": "^8.6.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

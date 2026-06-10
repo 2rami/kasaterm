@@ -51,6 +51,22 @@ cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp -R app/kasaterm/collab-hooks "$APP/Contents/Resources/collab-hooks"
 rm -rf "$APP/Contents/Resources/collab-hooks/__pycache__"
 
+# 아로나(god 모드) UI 정적 번들 → Resources/arona-ui. node/npm 없으면 경고+skip
+# (solo 전용 사용자는 영향 0 — god 모드일 때만 이 웹뷰를 띄운다). lock 있으면
+# 재현 빌드(npm ci), 없으면 npm install 폴백.
+if command -v npm >/dev/null 2>&1; then
+  echo "[build-app] arona-ui 번들 중..."
+  if ( cd web/arona-ui && { [ -f package-lock.json ] && npm ci --silent || npm install --silent --no-audit --no-fund; } && npm run build >/dev/null 2>&1 ); then
+    rm -rf "$APP/Contents/Resources/arona-ui"
+    cp -R web/arona-ui/dist "$APP/Contents/Resources/arona-ui"
+    echo "[build-app] arona-ui → Resources/arona-ui"
+  else
+    echo "[build-app] ⚠ arona-ui 빌드 실패 — god 모드 UI 제외하고 계속"
+  fi
+else
+  echo "[build-app] ⚠ npm 없음 — arona-ui 번들 skip(god 모드 UI 제외)"
+fi
+
 # Minimal Info.plist. Bundle id namespaced under the project root so
 # Launchpad / Spotlight key the icon to this binary specifically.
 cat > "$APP/Contents/Info.plist" <<'PLIST'
