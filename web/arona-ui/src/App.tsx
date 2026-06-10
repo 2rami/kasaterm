@@ -4,6 +4,7 @@ import { AgentCard } from './components/AgentCard';
 import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
+import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
 import { PixelButton } from './components/PixelButton';
 import { startBoardPolling, fetchMode, focusPane, revealTerminal } from './lib/mcp';
@@ -19,6 +20,7 @@ export function App() {
   const [view, setView] = useState<ViewMode>('classroom');
   const [showAdd, setShowAdd] = useState(false);
   const [revealing, setRevealing] = useState(false);
+  const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
 
@@ -104,7 +106,7 @@ export function App() {
       </div>
 
       {view === 'classroom' ? (
-        <ClassroomView />
+        <ClassroomView onSelect={(id, title) => setPeek({ id, title })} />
       ) : sorted.length === 0 ? (
         <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
       ) : (
@@ -126,6 +128,14 @@ export function App() {
             />
           ))}
         </div>
+      )}
+
+      {peek && (
+        <TerminalPeekPanel
+          surfaceId={peek.id}
+          title={peek.title}
+          onClose={() => setPeek(null)}
+        />
       )}
 
       {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} />}

@@ -133,3 +133,51 @@ action과 동형) · `last_prompt` · `last_reply` · `status`(working/waiting/b
 - 말풍선: **새 데이터 파이프라인 불필요** — board.intent/last_reply/status로 munder liveActivity를
   그대로 재현. ThoughtBubble(MIT) 포팅 + toAgent 2필드 추가 + sync 1줄이면 교실 학생 위에 "지금
   뭐함" 뜬다.
+
+---
+
+## F. 에이전트 죽음 감지 · 복구 (거노 직접 질문 — munder 대비 우리 체계)
+
+### munder 복구 메커니즘
+1. **죽음/끊김 감지**: ① PTY `onExit`(node-pty, `src/main/pty.ts:179-184`) → `teardownPty`가 자동
+   archive ② 타임아웃 — floor-quiet(hive 파일 mtime + PTY lastOutput 최댓값이 임계 초과,
+   `index.ts:296-312`), stuck(PTY는 idle<15s인데 hive 파일 stale = 출력만 하고 협업 안 함,
+   `index.ts:338-349`). 'gone' 상태값은 정의돼 있으나 실사용은 `archived:boolean` 플래그가 중심.
+2. **상태 저장**: `<hiveRoot>/registry.json` = `{godId, agents{id,name,provider,cwd,status,
+   lastSeen,archived,sessionId}}`(`hive.ts:107-124`). per-agent 디렉토리에 `memory.md`(append),
+   `cursor.json`(inbox 처리 위치), `inbox/`·`outbox/`. fleet.json(8s 스냅샷)·log.jsonl·tasks.json·
+   cost-ledger.jsonl 별도.
+3. **재attach/복구**: `--resume <sessionId>`(claude) — sessionId 는 **hook 페이로드 session_id 에서
+   기록**(`hive.ts:437-450`), respawn 시 resume=true & 기록된 sid 있으면 자동 부착(`index.ts:1058-1070`).
+   세션 못 이으면 새 프로세스 + **컨텍스트 재주입**(identity 재작성·memory 보존·inbox 재연결·
+   `--append-system-prompt`로 protocol/role 주입, `hive.ts:278-407`). **재활성화는 수동**(사용자가
+   탭 열기) — 자동 respawn 없음.
+4. **연속성 범위**: 보존 = memory.md·메시지 히스토리(inbox/.done·outbox/.sent)·tasks·cost·git.
+   손실 = **PTY 스크롤백**·미처리 inbox(이동 안 하면 unread 유지)·breaker 상태(forget).
+   대화 히스토리는 sessionId+resume 있을 때만 보존.
+5. **앱 재시작**: `app.whenReady`→`bootstrapHiveServices`(`index.ts:1604-1666`) = registry **읽기만**,
+   router(1.5s)·hookServer·fleet writer(8s) 재시작. **에이전트 자동 respawn 안 함** — 사용자/
+   scheduler 가 수동 spawn(그때 ensureAgent 가 archived 해제).
+
+### 우리(kasaterm god 체제) 대비
+| 축 | munder | 우리 |
+|---|---|---|
+| 죽음감지 | PTY onExit + floor-quiet/stuck 타임아웃 | pane 종료 마커정리, 복구가드 inode 세대(stale 마커 둔갑 차단). stuck(출력O 협업X) 전용 감지는 **없음** |
+| 상태저장 | registry.json 단일 + per-agent dir | roster(/tmp/kasaterm-collab/<slug>/roster) + character 마커 + pane_record(세션) |
+| 세션복구 | --resume(hook 기록 sessionId) | claude --resume(pane_record 저장) — **같은 결** |
+| 컨텍스트 재주입 | --append-system-prompt(identity/role) | 워커 컨텍스트 주입(persona 요지+규약 tell, god-elect.sh) — **같은 결** |
+| 재활성화 | 수동(탭 열기), 자동 respawn 없음 | **leader 자동시작 + 복구 안내 주입**(board-context.py _recovery_candidates) — 우리가 더 적극적 |
+| 앱 재시작 | registry 읽기만, 수동 respawn | relaunch → roster 복구로 재집결(아로나 자동) |
+| idle 깨우기 | (감지만, 깨움은 사람) | god-loop idle nudge(워커 done→idle god 깨움) |
+
+### 차용 후보
+1. **stuck 감지**(munder `looksStuck`): PTY 출력은 활발(idle<15s)한데 협업 파일(board/inbox/
+   messages)이 stale = "혼자 헛도는" 워커. 우리 god-loop 에 이 판정 추가하면, done 보고 없이
+   막힌 워커를 god 이 nudge 하거나 사용자에 에스컬레이션 가능(지금은 idle 만 깨움).
+2. **archived 보존 모델**: munder 는 죽은 에이전트를 지우지 않고 `archived:true`로 남겨 history·
+   memory 생존. 우리 roster 도 마커 inode 세대로 비슷하나, "죽었지만 기록 보존" 1급 상태가 명시적이지
+   않음 — roster 에 archived 플래그를 두면 복구가드 오판(stale 둔갑) 여지를 더 줄인다.
+3. **sessionId 단일 영속 소스**: munder 는 hook session_id 를 registry 한 곳에 기록→resume 키로.
+   우리도 pane_record 가 그 역할이나, hook 기반 자동 기록 경로를 단일화하면 resume 신뢰도 ↑.
+- **우리가 이미 더 나은 것**: 자동 재집결(leader 자동시작 + 복구 안내)·idle nudge. munder 는 복구가
+  전적으로 수동(사용자가 탭 다시 열어야). 우리 방향(자동 복원)이 거노 "열면 이어가기" 목표에 부합.
