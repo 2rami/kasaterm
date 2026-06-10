@@ -181,3 +181,93 @@ action과 동형) · `last_prompt` · `last_reply` · `status`(working/waiting/b
    우리도 pane_record 가 그 역할이나, hook 기반 자동 기록 경로를 단일화하면 resume 신뢰도 ↑.
 - **우리가 이미 더 나은 것**: 자동 재집결(leader 자동시작 + 복구 안내)·idle nudge. munder 는 복구가
   전적으로 수동(사용자가 탭 다시 열어야). 우리 방향(자동 복원)이 거노 "열면 이어가기" 목표에 부합.
+
+---
+
+## D. steer 제어채널 — munder #7C.2 구조 + kasacollab 적용 설계 ★ done 신뢰성 근본
+
+> 배경: 현재 `kasaterm-cli tell %N` = PTY raw 주입. 에이전트가 tool use 실행 중이면 입력창에
+> 쌓였다가 나중에 처리되거나 씹힘(기존 입력 뒤에 concatenate). 그래서 god-loop nudge 가
+> 씹히면 done 없이 무한 대기. steer 는 이걸 훅 additionalContext 경로로 우회해 근본 해결.
+
+### munder steer 채널 (control.ts + hooks.ts #7C.2)
+
+**ControlRegistry**(`control.ts`):
+- per-agent `steerQueue: string[]` FIFO 큐(10000자 cap).
+- `steer(id, text)`: push. `takeSteer(id)`: shift(1건 소비 후 삭제). `clearSteers(id)`: drain.
+
+**전달 경로**(`hooks.ts:180-188`):
+```
+HookServer.handleHook(event, agentId, payload)
+  └─ if event ∈ {UserPromptSubmit, PostToolUse}
+       steer = control.takeSteer(agentId)   // dequeue 1건
+       if steer → return { hookSpecificOutput: { additionalContext: steer } }
+```
+PTY 타이핑 없이, 다음 훅 경계에서 `additionalContext` 필드로 주입 → 에이전트 컨텍스트에 즉각 편입.
+
+**발동 3경로**:
+1. **UI**: `window.cth.controlSteer(agentId, text)` → IPC `control:steer` → `ControlRegistry.steer()`
+2. **Circuit Breaker** 자동(`index.ts:439`): 루프·과소비 감지 시 steer 메시지로 경고 에스컬레이션
+3. **Closing Time**(`closingTime.ts:138-142`): 종료 버튼 → busy 에이전트에 steer 주입(Stop 훅 대기 없이 다음 tool call에 즉시 전달)
+
+**보장**: idle·busy 모두 다음 `PostToolUse` 또는 `UserPromptSubmit` 경계에서 반드시 1회 읽힘.
+`tell`(PTY 주입)과 달리 Claude Code 훅 프로토콜 내부 경로라 **씹힘 원천 차단**.
+
+### 왜 done 신뢰성 근본인가
+
+| 비교 | `tell`(현재) | `steer`(목표) |
+|---|---|---|
+| 전달 경로 | PTY stdin raw 주입 | hook `additionalContext` 반환 |
+| busy 에이전트 | 입력창 뒤에 쌓임 → 씹히거나 늦음 | 다음 tool call 완료 후 즉시 읽힘 |
+| idle 에이전트 | 즉행(현재 동작) | 다음 UserPromptSubmit 시 읽힘 |
+| 신뢰도 | 낮음(PTY 상태 의존) | 높음(Claude Code 프로토콜 보장) |
+
+현재 god-loop nudge 가 씹히는 근본 = busy 에이전트에 tell 이 PTY 경쟁 상태로 들어감.
+steer 채널이 있으면 nudge 는 훅 경계 도달이 **보장**되므로 done-없이-무한대기 시나리오 제거.
+
+### kasacollab 적용 설계 (구현 안)
+
+**스텝 1 — steer 큐 파일 (소, ~30분)**
+```
+/tmp/kasaterm-collab/<slug>/steer/<pane_id>.txt   # 텍스트 1건, 읽으면 즉시 삭제
+```
+`kasacollab steer %N "text"` 명령: atomic write(`*.tmp` → `rename`). 큐 1건만 유지(덮어쓰기).
+여러 steer 가 필요하면 `<pane_id>.queue` JSONL 로 확장(현재 필요 없을 듯).
+
+**스텝 2 — PostToolUse 훅 확장 (소, ~30분)**
+
+`settings.json` PostToolUse hooks 에 추가(기존 훅 있으면 && 로 연결):
+```json
+{ "hooks": { "PostToolUse": [{ "command": "kasaterm-steer-hook.sh" }] } }
+```
+
+`kasaterm-steer-hook.sh`:
+```bash
+#!/bin/bash
+# 자기 pane steer 파일 있으면 additionalContext 로 반환 후 삭제.
+SLUG=$(python3 -c "import sys; print(sys.stdin.read())" < /tmp/kasaterm-current-slug 2>/dev/null)
+PANE="${KASATERM_PANE_ID:-}"
+[ -z "$PANE" ] || [ -z "$SLUG" ] && exit 0
+STEER="/tmp/kasaterm-collab/$SLUG/steer/$PANE.txt"
+[ -f "$STEER" ] || exit 0
+TEXT=$(cat "$STEER"); rm -f "$STEER"
+python3 -c "import sys,json; print(json.dumps({'additionalContext':sys.argv[1]}))" "$TEXT"
+```
+
+**스텝 3 — god-loop nudge 전환 (중, ~1시간)**
+현재 `god-loop.sh` 의 nudge 경로:
+```bash
+kasaterm-cli tell "$PANE" "$MSG"   # PTY 주입(씹힘 위험)
+```
+→ 병행 발사로 전환:
+```bash
+kasacollab steer "$PANE" "$MSG"    # steer 파일 write
+kasaterm-cli tell "$PANE" ""       # 빈 엔터로 PostToolUse 유도(idle 에이전트 용)
+```
+idle 에이전트는 tell 엔터로 즉행, busy 에이전트는 steer 파일을 다음 훅 경계에서 소비.
+
+**우선순위**: 스텝 1·2 먼저(독립 구현, 회귀 없음). 스텝 3 은 god-loop 수정이라 아로나 검토 후 적용.
+
+### 현재 우리가 이미 가진 것
+- Stop 훅 drain(`kasaterm-stop-drain.sh`): Stop 경계 inbox 읽기 보장 — 이미 munder B절 채택.
+- steer 만 추가하면 **PostToolUse + Stop** 양쪽 경계를 모두 커버 = munder 수준 신뢰도 달성.
