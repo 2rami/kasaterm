@@ -3,10 +3,11 @@ import type { AccentColorName } from '@/design/tokens';
 import type { StatusKind } from '@/components/PixelBadge';
 
 // munder 는 electron IPC(window.cth.*)로 hive 와 통신했지만, 우리는 kasaterm 의
-// kasaspace MCP HTTP(127.0.0.1:8765)를 fetch 로 폴링한다. 1차 화면은 /board 한
-// 엔드포인트만 — 살아있는 pane 의 status/intent/title/tokens/is_god. spawn·
-// characters·mode 등 신규 엔드포인트는 P6c(%3 작업)로 들어오면 여기 붙인다.
-const BASE = 'http://127.0.0.1:8765';
+// kasaspace MCP HTTP 를 fetch 로 폴링한다. dist 는 MCP 가 /arona-ui/ 로 정적
+// 서빙하므로 페이지·API 가 **same-origin** → BASE='' (relative). 8765 가 점유돼
+// 랜덤 포트로 폴백해도 안 끊긴다(유우카 P6c-2차). vite dev 로 띄울 때만 8765
+// 절대주소(개발 서버는 5173, API 는 별도 포트라 same-origin 이 아님).
+const BASE = import.meta.env.DEV ? 'http://127.0.0.1:8765' : '';
 
 // 워커 accent — pane id 숫자 해시(god-elect 워커 팔레트와 같은 결). god 은 lemon.
 const ACCENTS: AccentColorName[] = ['sky', 'mint', 'coral', 'lilac', 'peach'];
