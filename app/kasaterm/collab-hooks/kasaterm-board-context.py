@@ -15,7 +15,7 @@
   팔랑거려 키에서 제외. 컨텍스트 압축에 유실될 수 있어 30분마다 무조건 재주입.
   inbox 는 원래 one-shot(미읽만)이라 항상 주입.
 """
-import sys, os, json, subprocess, time, hashlib
+import sys, os, json, subprocess, time, hashlib, glob
 
 # inbox 읽음 처리는 kasacollab 의 공용 drain_unread()를 쓴다 — 락+atomic 로
 # lost-update 를 막는 단일 임계구역을 두 파일이 공유해야 동작이 일치한다(인라인
@@ -130,6 +130,51 @@ def _live_surface_ids():
         return set()
 
 
+def _surface_pane_ids():
+    """list surfaces 의 pane id 집합 — board(bind+프롬프트 필요)와 달리 pane
+    존재 자체를 보므로 사각지대가 좁다. bound 마커 생존 판정용."""
+    cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
+    try:
+        r = subprocess.run([cli, "list", "surfaces"], capture_output=True, text=True, timeout=3)
+        surfs = (json.loads(r.stdout).get("result") or {}).get("surfaces") or []
+        return {s.get("id") for s in surfs if s.get("id")}
+    except Exception:
+        return set()
+
+
+def _bound_live_sids(surface_ids, marker_glob="/tmp/kasaterm-bound-*"):
+    """bind 마커가 가리키는 sid 중 그 pane 이 지금 살아있는 것 — god-elect.sh 의
+    god 생존 판정과 같은 규칙. 마커는 bind 직후 생기므로 roster upsert·board
+    등록(첫 프롬프트 후)보다 이른 신호다. 마커 파일명 ↔ pane 복원은 bind 쪽
+    치환(% → _)의 역."""
+    sids = set()
+    for bm in glob.glob(marker_glob):
+        bp = os.path.basename(bm).split("kasaterm-bound-", 1)[-1]
+        pane = "%" + (bp[1:] if bp.startswith("_") else bp)
+        if pane not in surface_ids:
+            continue
+        try:
+            tp = open(bm).read().split(":", 1)[-1].strip()
+        except OSError:
+            continue
+        sid = os.path.splitext(os.path.basename(tp))[0]
+        if sid:
+            sids.add(sid)
+    return sids
+
+
+def _recovery_candidates(roster, live, bound_sids):
+    """복구 후보 필터(순수 함수 — 시뮬 검증용으로 IO 와 분리).
+    live pane 이 잡은 sid + bound 마커로 살아있다고 확인된 sid 는 제외 —
+    같은 세션을 pane 두 개에 이중 attach 하는 사고 방지. roster 가드만으로는
+    rebind upsert 전(첫 프롬프트 전)의 산 세션을 못 거른다(06-10 실측:
+    1f2685f3 가 %1 에 떠 있는데 옛 위치 %3 엔트리가 후보로 떠 이중 resume)."""
+    live_sids = {v.get("session_id") for v in roster.values()
+                 if v.get("pane_id") in live} | bound_sids
+    return [v for v in roster.values()
+            if v.get("pane_id") not in live and v.get("session_id") not in live_sids]
+
+
 def _rel_age(ts):
     s = max(0, int(time.time() - ts))
     if s < 3600:
@@ -154,13 +199,7 @@ def roster_recovery():
     if not isinstance(roster, dict) or not roster:
         return None
     live = _live_surface_ids()
-    # 살아있는 pane 이 이미 잡고 있는 session 은 복구 후보에서 제외 — 재시작 후
-    # god 이 옛 pane id 로 남은 '자기 자신의 세션'을 복구하라는 안내를 받아 같은
-    # 세션을 pane 두 개에 이중 attach 하는 사고 방지. rebind upsert 가 새 pane id
-    # 로 같은 sid 를 기록하므로 sid 대조만으로 걸러진다.
-    live_sids = {v.get("session_id") for v in roster.values() if v.get("pane_id") in live}
-    dead = [v for v in roster.values()
-            if v.get("pane_id") not in live and v.get("session_id") not in live_sids]
+    dead = _recovery_candidates(roster, live, _bound_live_sids(_surface_pane_ids()))
     # board(bind 기반) 사각지대 보완: 방금 `claude --resume <sid>` 로 부활했지만
     # 아직 프롬프트를 안 받아 bind 가 안 돈 세션은 board 에 없어 '죽음'으로
     # 오판된다 — 실행 중 claude 프로세스의 cmdline 에 sid 가 보이면 산 것.
