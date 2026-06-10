@@ -716,6 +716,30 @@ impl App {
             w.request_redraw();
         }
     }
+    /// Drop the closed pane's collab markers. A stale /tmp/kasaterm-bound-_N
+    /// can pass a dead session off as live when the pane number is reused
+    /// within the same socket generation — the recovery guard's inode-
+    /// generation check can't see that case, so deleting at close time is
+    /// the root fix. character-/god-nudged- markers likewise leak a roster
+    /// slot and re-arm a suppressed nudge. Pane numbers are unique across
+    /// rooms, so sweeping every room under /tmp/kasaterm-collab is safe and
+    /// avoids a cwd lookup here.
+    pub(crate) fn cleanup_collab_markers(target: &str) {
+        // %3 → _3, mirroring the shell hooks' ${ID//[^A-Za-z0-9]/_}.
+        let safe: String = target
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let _ = std::fs::remove_file(format!("/tmp/kasaterm-bound-{safe}"));
+        let num = target.trim_start_matches('%');
+        if let Ok(rooms) = std::fs::read_dir("/tmp/kasaterm-collab") {
+            for room in rooms.flatten() {
+                let p = room.path();
+                let _ = std::fs::remove_file(p.join(format!("character-{num}")));
+                let _ = std::fs::remove_file(p.join(format!("god-nudged-{target}")));
+            }
+        }
+    }
     /// Internal: drop a pane regardless of whether it's the active one.
     /// Used by both `close_pane` (Cmd+W / header ×) and `reap_dead_panes`
     /// (shell exit). Picks a survivor focus when removing the focused
@@ -753,6 +777,7 @@ impl App {
             self.pty_layout = None;
         }
         self.pty.remove(target);
+        Self::cleanup_collab_markers(target);
         // Free the GPU texture if this was an image pane (no-op otherwise).
         if let Some(g) = self.gpu.as_mut() {
             g.drop_image(target);

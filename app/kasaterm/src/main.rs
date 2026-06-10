@@ -4192,6 +4192,26 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_collab_markers_removes_pane_files() {
+        // %987 keeps the test clear of any real pane's markers in /tmp.
+        let bound = std::path::PathBuf::from("/tmp/kasaterm-bound-_987");
+        let room = std::path::PathBuf::from("/tmp/kasaterm-collab/test-marker-cleanup");
+        std::fs::create_dir_all(&room).unwrap();
+        let character = room.join("character-987");
+        let nudged = room.join("god-nudged-%987");
+        let other = room.join("character-988");
+        for f in [&bound, &character, &nudged, &other] {
+            std::fs::write(f, "x").unwrap();
+        }
+        App::cleanup_collab_markers("%987");
+        assert!(!bound.exists(), "bound marker should be deleted");
+        assert!(!character.exists(), "character marker should be deleted");
+        assert!(!nudged.exists(), "god-nudged marker should be deleted");
+        assert!(other.exists(), "another pane's marker must survive");
+        std::fs::remove_dir_all(&room).unwrap();
+    }
+
+    #[test]
     fn wheel_sub_cell_ticks_accumulate() {
         let mut accum = 0.0;
         let mut last = Instant::now();
