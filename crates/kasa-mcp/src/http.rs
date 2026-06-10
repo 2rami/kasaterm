@@ -695,9 +695,9 @@ async fn terminal_reveal_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `GET /peek?surface=%N&lines=40` — a pane's visible screen text
-/// (`Backend::peek`). The arona classroom polls this to show a student's
-/// terminal *inside* the GUI, without summoning the main window (red-pill).
+/// `GET /peek?surface=%N&lines=40[&ansi=1]` — a pane's visible screen text.
+/// `ansi=1` returns SGR-encoded color/attribute sequences so a viewer can
+/// render terminal colors. Without `ansi`, returns plain text (default).
 /// Polling-friendly by design: one lock + visible-text copy, no transcript IO.
 async fn peek_handler(
     backend: Arc<dyn Backend>,
@@ -711,16 +711,81 @@ async fn peek_handler(
             .get("lines")
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(40);
-        match backend.peek(surface, lines) {
+        let ansi = params.get("ansi").map_or(false, |v| v == "1" || v == "true");
+        let result = if ansi {
+            backend.peek_ansi(surface, lines)
+        } else {
+            backend.peek(surface, lines)
+        };
+        match result {
             Ok(text) => serde_json::json!({
                 "ok": true,
                 "surface_id": surface,
                 "text": text,
+                "ansi": ansi,
             }),
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         }
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// /tmp/kasaterm-collab/ 아래 모든 방을 순회해 lead 파일이 있는 첫 god pane id
+/// 를 반환한다. active_cwd 가 쉘 디렉토리를 따르므로 슬러그 계산 대신 스캔.
+fn find_god_pane() -> Option<String> {
+    let base = std::path::Path::new("/tmp/kasaterm-collab");
+    for entry in std::fs::read_dir(base).ok()?.flatten() {
+        let lead = entry.path().join("lead");
+        if let Ok(g) = std::fs::read_to_string(&lead) {
+            let g = g.trim().to_string();
+            if !g.is_empty() {
+                return Some(g);
+            }
+        }
+    }
+    None
+}
+
+/// `POST /tell-god` — 교실 '새 의뢰 작성': body `{"text":"..."}` or raw text
+/// → lead 마커의 god pane 에 text+\n 제출(send_text). god 부재(lead 없음) 시
+/// `{"ok":false}`. text/plain 본문을 권장(JSON 도 허용).
+async fn tell_god_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let text = if body.trim_start().starts_with('{') {
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(v) => v
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string(),
+            Err(e) => {
+                return (
+                    cors,
+                    Json(serde_json::json!({ "ok": false, "error": format!("bad body: {e}") })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        body.trim().to_string()
+    };
+    if text.is_empty() {
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "text is empty" })))
+            .into_response();
+    }
+    let god_pane = match find_god_pane() {
+        Some(g) => g,
+        None => {
+            return (cors, Json(serde_json::json!({ "ok": false, "error": "god not found" })))
+                .into_response();
+        }
+    };
+    let payload = format!("{text}\n");
+    let resp = match backend.send_text(Some(&god_pane), &payload) {
+        Ok(()) => serde_json::json!({ "ok": true, "to": god_pane }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    (cors, Json(resp)).into_response()
 }
 
 /// `POST /arona-close` — close the arona classroom window and bring the main
@@ -861,6 +926,7 @@ pub fn spawn_http_server(
                 let terminal_reveal_backend = backend.clone();
                 let arona_close_backend = backend.clone();
                 let peek_backend = backend.clone();
+                let tell_god_backend = backend.clone();
                 let mode_get_backend = backend.clone();
                 let mode_set_backend = backend.clone();
                 let spawn_backend = backend.clone();
@@ -1002,6 +1068,12 @@ pub fn spawn_http_server(
                         "/peek",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             peek_handler(peek_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/tell-god",
+                        post(move |body: String| {
+                            tell_god_handler(tell_god_backend.clone(), body)
                         }),
                     )
                     .route(

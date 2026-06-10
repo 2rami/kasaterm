@@ -488,6 +488,12 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("peek not supported")
     }
 
+    /// Same as `peek` but returns the text with ANSI SGR color escape sequences
+    /// so a viewer can reproduce the pane's colors. Default unsupported.
+    fn peek_ansi(&self, _surface_id: &str, _lines: usize) -> Result<String> {
+        anyhow::bail!("peek_ansi not supported")
+    }
+
     /// Register a pane's claude-code transcript file (the
     /// `~/.claude/projects/<cwd>/<session>.jsonl` it streams to) so the
     /// host can tail it and auto-fill that pane's board activity from the

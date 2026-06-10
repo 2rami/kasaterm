@@ -1554,6 +1554,87 @@ impl PaneTab {
         }
         out.join("\n")
     }
+    /// Same as `visible_text` but serializes cell fg/bg/attributes as ANSI SGR
+    /// escape codes so a viewer can reproduce the terminal colors. Each row is
+    /// trimmed to the last non-blank cell before encoding; trailing blank rows
+    /// are dropped. Used by `GET /peek?ansi=1`.
+    pub(crate) fn visible_text_ansi(&self, lines: usize) -> String {
+        use kasa_bridge::screen::Color;
+        let Some(t) = self.term() else { return String::new(); };
+
+        fn render_row(row: &[GridCell]) -> String {
+            let last_vis = row
+                .iter()
+                .rposition(|c| c.ch != ' ' && c.ch != '\0')
+                .map_or(0, |i| i + 1);
+            if last_vis == 0 {
+                return String::new();
+            }
+            let row = &row[..last_vis];
+            let mut s = String::new();
+            let mut any_attr = false;
+            let mut p_fg = Color::Default;
+            let mut p_bg = Color::Default;
+            let mut p_bold = false;
+            let mut p_italic = false;
+            let mut p_under = false;
+            let mut p_dim = false;
+            let mut p_inv = false;
+            for cell in row {
+                let ch = if cell.ch == '\0' { ' ' } else { cell.ch };
+                if cell.fg != p_fg
+                    || cell.bg != p_bg
+                    || cell.bold != p_bold
+                    || cell.italic != p_italic
+                    || cell.underline != p_under
+                    || cell.dim != p_dim
+                    || cell.inverse != p_inv
+                {
+                    s.push_str("\x1b[0m");
+                    if cell.bold { s.push_str("\x1b[1m"); }
+                    if cell.dim { s.push_str("\x1b[2m"); }
+                    if cell.italic { s.push_str("\x1b[3m"); }
+                    if cell.underline { s.push_str("\x1b[4m"); }
+                    if cell.inverse { s.push_str("\x1b[7m"); }
+                    match &cell.fg {
+                        Color::Default => {}
+                        Color::Idx(n) => s.push_str(&format!("\x1b[38;5;{n}m")),
+                        Color::Rgb(r, g, b) => s.push_str(&format!("\x1b[38;2;{r};{g};{b}m")),
+                    }
+                    match &cell.bg {
+                        Color::Default => {}
+                        Color::Idx(n) => s.push_str(&format!("\x1b[48;5;{n}m")),
+                        Color::Rgb(r, g, b) => s.push_str(&format!("\x1b[48;2;{r};{g};{b}m")),
+                    }
+                    p_fg = cell.fg.clone();
+                    p_bg = cell.bg.clone();
+                    p_bold = cell.bold;
+                    p_italic = cell.italic;
+                    p_under = cell.underline;
+                    p_dim = cell.dim;
+                    p_inv = cell.inverse;
+                    any_attr = p_fg != Color::Default
+                        || p_bg != Color::Default
+                        || p_bold || p_italic || p_under || p_dim || p_inv;
+                }
+                s.push(ch);
+            }
+            if any_attr {
+                s.push_str("\x1b[0m");
+            }
+            s
+        }
+
+        let mut rows: Vec<String> = t.cells.iter().map(|r| render_row(r)).collect();
+        while rows.last().map_or(false, |l| l.is_empty()) {
+            rows.pop();
+        }
+        if lines > 0 && rows.len() > lines {
+            rows.drain(0..rows.len() - lines);
+        }
+        rows.join("\n")
+    }
+
     fn markdown(&self) -> Option<&MarkdownPane> {
         if let PaneContent::Markdown(m) = &self.content { Some(m) } else { None }
     }
