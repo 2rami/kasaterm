@@ -5,6 +5,9 @@ import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
 import { ClassroomChatInput } from './components/ClassroomChatInput';
+import { CommandCenter } from './components/CommandCenter';
+import { StudentGrid } from './components/StudentGrid';
+import { Footer } from './components/Footer';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
 import { PixelButton } from './components/PixelButton';
@@ -12,7 +15,7 @@ import { startBoardPolling, fetchMode, focusPane, revealTerminal } from './lib/m
 
 type ViewMode = 'classroom' | 'grid';
 
-// 라우팅: mode 미설정/solo/?picker=1 → 시작 선택. god → 샬레 교실(기본) ↔ 그리드.
+// 라우팅: mode 미설정/solo/?picker=1 → 시작 선택. god → SCHALE OS 교실.
 export function App() {
   const agents = useStore((s) => s.agents);
   const [mode, setModeState] = useState<string | null | undefined>(undefined);
@@ -22,6 +25,7 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
+  const [showChatInput, setShowChatInput] = useState(false);
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
 
@@ -35,7 +39,6 @@ export function App() {
   if (mode === undefined) {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
   }
-  // god 만 교실. 미설정(configured=false, 첫 실행)·solo·강제는 시작 선택 화면으로.
   if (!configured || mode !== 'god' || forcePicker) {
     return (
       <ModePicker
@@ -55,85 +58,129 @@ export function App() {
   };
 
   return (
-    // 하단 입력바(52px)에 가리지 않게 paddingBottom 추가
-    <div style={{ height: '100%', overflow: 'auto', padding: 'var(--cth-space-5)', paddingBottom: 68 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--cth-space-5)', gap: 'var(--cth-space-4)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--cth-space-4)', minWidth: 0 }}>
-          <h1
-            style={{
-              fontFamily: 'var(--cth-font-display)',
-              fontSize: 'var(--cth-text-display-lg)',
-              lineHeight: 'var(--cth-lh-display-lg)',
-              color: 'var(--cth-ink-900)', margin: 0, whiteSpace: 'nowrap'
-            }}
-          >
-            샬레 교실
+    // SCHALE OS 전체 셸: 세로 100% + 가로 100%
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+      {/* 헤더 */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '8px 12px',
+        borderBottom: '2px solid var(--cth-ink-900)',
+        background: 'var(--cth-cream-100)',
+        flexShrink: 0
+      }}>
+        {/* 제목 + 방 칩 */}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
+          <h1 style={{
+            fontFamily: 'var(--cth-font-display)',
+            fontSize: 'var(--cth-text-display-lg)',
+            lineHeight: 'var(--cth-lh-display-lg)',
+            color: 'var(--cth-ink-900)', margin: 0, whiteSpace: 'nowrap'
+          }}>
+            SCHALE Headquarters
           </h1>
-          {/* 교실 ↔ 카드 탭 */}
-          <div style={{ display: 'flex' }}>
-            {(['classroom', 'grid'] as ViewMode[]).map((v) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                style={{
-                  fontFamily: 'var(--cth-font-display)', fontSize: 'var(--cth-text-display-sm)',
-                  padding: '6px 12px', cursor: 'pointer', border: 'none',
-                  background: view === v ? 'var(--cth-sky)' : 'var(--cth-cream-200)',
-                  color: 'var(--cth-ink-900)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
-                }}
-              >
-                {v === 'classroom' ? '교실' : '카드'}
-              </button>
-            ))}
-          </div>
-          {/* 이 방(cwd) 칩 — 어느 폴더를 god 으로 다루는지 표시(엉뚱한 방 god 방지) */}
           <RoomChip cwd={cwd} />
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {/* 빨간약: 교실이 숨긴 메인 터미널을 다시 보이게 */}
-          <button
-            onClick={reveal}
-            title="메인 터미널 다시 보기"
-            style={{
-              fontFamily: 'var(--cth-font-display)', fontSize: 'var(--cth-text-display-sm)',
-              padding: '7px 12px', cursor: 'pointer', border: 'none',
-              background: 'var(--cth-coral)', color: 'var(--cth-cream-50)',
-              boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
-            }}
-          >
-            {revealing ? '여는 중…' : '터미널 보기'}
-          </button>
-          <PixelButton variant="primary" onClick={() => setShowAdd(true)}>학생 부르기</PixelButton>
-        </div>
-      </div>
 
-      {view === 'classroom' ? (
-        <ClassroomView onSelect={(id, title) => setPeek({ id, title })} />
-      ) : sorted.length === 0 ? (
-        <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
-      ) : (
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--cth-space-4)' }}>
-          {sorted.map((a) => (
-            <AgentCard
-              key={a.id}
-              name={a.name}
-              character={a.character}
-              accent={a.accent}
-              status={a.status}
-              project={a.project}
-              action={a.action}
-              progress={a.progress}
-              contextTokens={a.contextTokens}
-              contextLimit={a.contextLimit}
-              isGod={a.isGod}
-              onClick={() => { void focusPane(a.id); }}
-            />
+        {/* 뷰 탭 */}
+        <div style={{ display: 'flex', marginLeft: 8 }}>
+          {(['classroom', 'grid'] as ViewMode[]).map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              style={{
+                fontFamily: 'var(--cth-font-display)', fontSize: 'var(--cth-text-display-sm)',
+                padding: '5px 12px', cursor: 'pointer', border: 'none',
+                background: view === v ? 'var(--cth-sky)' : 'transparent',
+                color: 'var(--cth-ink-900)',
+                boxShadow: view === v ? 'inset 0 0 0 1px var(--cth-ink-900)' : 'none'
+              }}
+            >
+              {v === 'classroom' ? '교실' : '카드'}
+            </button>
           ))}
         </div>
-      )}
 
-      {/* 교실 모드: 하단 고정 입력바 (그리드 뷰에는 숨김) */}
-      {view === 'classroom' && <ClassroomChatInput />}
+        <div style={{ flex: 1 }} />
+
+        {/* 우측 액션 */}
+        <button
+          onClick={reveal}
+          title="메인 터미널 다시 보기"
+          style={{
+            fontFamily: 'var(--cth-font-display)', fontSize: 'var(--cth-text-display-sm)',
+            padding: '5px 10px', cursor: 'pointer', border: 'none',
+            background: 'var(--cth-coral)', color: 'var(--cth-cream-50)',
+            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+          }}
+        >
+          {revealing ? '여는 중…' : '터미널 보기'}
+        </button>
+        <PixelButton variant="primary" onClick={() => setShowAdd(true)}>학생 부르기</PixelButton>
+      </div>
+
+      {/* 바디: 메인 영역 + 우측 CommandCenter */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+
+        {/* 메인 컬럼 */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+          {/* 교실 씬 or 카드 그리드 */}
+          <div style={{ flex: 1, overflow: 'auto', padding: 'var(--cth-space-4)' }}>
+            {view === 'classroom' ? (
+              <ClassroomView onSelect={(id, title) => setPeek({ id, title })} />
+            ) : sorted.length === 0 ? (
+              <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
+            ) : (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--cth-space-4)' }}>
+                {sorted.map((a) => (
+                  <AgentCard
+                    key={a.id}
+                    name={a.name}
+                    character={a.character}
+                    accent={a.accent}
+                    status={a.status}
+                    project={a.project}
+                    action={a.action}
+                    progress={a.progress}
+                    contextTokens={a.contextTokens}
+                    contextLimit={a.contextLimit}
+                    isGod={a.isGod}
+                    onClick={() => { void focusPane(a.id); }}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* 학생 카드 그리드 (아리스 구현) */}
+          <div style={{
+            flexShrink: 0,
+            borderTop: '2px solid var(--cth-ink-900)',
+            background: 'var(--cth-cream-100)'
+          }}>
+            <StudentGrid agents={sorted} onSelect={(id, title) => setPeek({ id, title })} />
+          </div>
+
+          {/* 풋터 (아리스 구현) */}
+          <div style={{
+            flexShrink: 0,
+            borderTop: '1px solid var(--cth-ink-900)',
+            background: 'var(--cth-cream-50)'
+          }}>
+            <Footer
+              onManage={() => setShowAdd(true)}
+              onNewRequest={() => setShowChatInput((v) => !v)}
+            />
+          </div>
+        </div>
+
+        {/* 우측 Command Center */}
+        <CommandCenter />
+      </div>
+
+      {/* 교실 채팅 입력 (Footer CTA 클릭 or 교실 뷰에서 항상 노출) */}
+      {(view === 'classroom' || showChatInput) && <ClassroomChatInput />}
 
       {peek && (
         <TerminalPeekPanel
