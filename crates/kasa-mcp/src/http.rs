@@ -662,6 +662,32 @@ fn query_which(
     }
 }
 
+/// `POST /terminal-reveal?show=0|1[&pane=%N]` — show/hide the main terminal
+/// window. The arona classroom calls this when it opens (hide — the
+/// classroom takes the screen over) and from its red-pill button (show —
+/// back to the terminal). `pane` optionally focuses that pane on reveal so
+/// the classroom can jump the user to a character's seat.
+async fn terminal_reveal_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match params.get("show").map(String::as_str) {
+        Some("0") | Some("1") => {
+            let show = params.get("show").map(String::as_str) == Some("1");
+            let pane = params.get("pane").map(String::as_str).filter(|s| !s.is_empty());
+            match backend.reveal_terminal(show, pane) {
+                Ok(()) => serde_json::json!({ "ok": true, "show": show }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+            }
+        }
+        other => serde_json::json!({
+            "ok": false,
+            "error": format!("bad or missing show={other:?} (expected 0|1)"),
+        }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// `POST /panel-open?which=git|session` — open a panel window.
 async fn panel_open_handler(
     backend: Arc<dyn Backend>,
@@ -786,6 +812,7 @@ pub fn spawn_http_server(
                 let panel_close_backend = backend.clone();
                 let panel_resize_backend = backend.clone();
                 let panel_info_backend = backend.clone();
+                let terminal_reveal_backend = backend.clone();
                 let mode_get_backend = backend.clone();
                 let mode_set_backend = backend.clone();
                 let spawn_backend = backend.clone();
@@ -912,6 +939,12 @@ pub fn spawn_http_server(
                     .route(
                         "/save-markdown",
                         post(move |body: String| save_markdown_handler(body)),
+                    )
+                    .route(
+                        "/terminal-reveal",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            terminal_reveal_handler(terminal_reveal_backend.clone(), q)
+                        }),
                     )
                     .route(
                         "/panel-open",

@@ -257,6 +257,14 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn reveal_terminal(&self, show: bool, focus_pane: Option<&str>) -> Result<()> {
+        let _ = self.proxy.send_event(UserEvent::SocketRevealTerminal(
+            show,
+            focus_pane.map(str::to_string),
+        ));
+        Ok(())
+    }
+
     /// 활성 pane 의 셸 cwd — GET /mode 등 협업방 판정의 기준. trait 디폴트
     /// (None→호스트 cwd 폴백)는 .app 실행 시 cwd 가 `/` 라 항상 solo 로
     /// 오판했다(거노 실측: god 방 토글 차단). GUI 동기 RPC 로 활성 pane 의
