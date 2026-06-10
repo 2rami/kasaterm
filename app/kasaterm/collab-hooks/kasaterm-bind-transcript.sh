@@ -19,6 +19,12 @@ marker="/tmp/kasaterm-bound-${KASATERM_PANE_ID//[^A-Za-z0-9]/_}"
 sock="${KASATERM_SOCKET_PATH:-$HOME/.config/kasaterm/daemon.sock}"
 sig="$(stat -f %i "$sock" 2>/dev/null || stat -c %i "$sock" 2>/dev/null):$tp"
 [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] && exit 0
+# 소켓 birth = 이번 GUI 세대 시작 시각. roster 의 옛 세대 항목(ts < birth) 을
+# archive 하는 기준(아래 python). birth 미지원(Linux %W=0)이면 mtime 으로 폴백 —
+# 소켓은 bind-server 시작 때 한 번 생기므로 mtime≈birth.
+sock_birth="$(stat -f %B "$sock" 2>/dev/null || stat -c %W "$sock" 2>/dev/null)"
+case "$sock_birth" in ''|0) sock_birth="$(stat -f %m "$sock" 2>/dev/null || stat -c %Y "$sock" 2>/dev/null)";; esac
+sock_birth="${sock_birth:-0}"
 if kasaterm-cli bind-transcript "$tp" >/dev/null 2>&1; then
   printf '%s' "$sig" > "$marker"
   # roster upsert — 재시작 후 god 이 워커들을 `claude --resume` 로 부활시킬 수
@@ -26,13 +32,17 @@ if kasaterm-cli bind-transcript "$tp" >/dev/null 2>&1; then
   # **/tmp 아님** (~/.config): 재시작 청소가 /tmp/kasaterm-collab 를 비워도
   # roster 는 살아남아야 복구가 된다. 같은 pane_id 는 갱신(claude --resume 로
   # session 이 바뀌면 최신으로 수렴). 30일 지난 entry 는 prune.
-  python3 - "$KASATERM_PANE_ID" "$tp" "$PWD" <<'PY' 2>/dev/null || true
+  python3 - "$KASATERM_PANE_ID" "$tp" "$PWD" "$sock_birth" <<'PY' 2>/dev/null || true
 import sys, os, json, time
 try:
     import fcntl
 except ImportError:
     fcntl = None
 pane, tp, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    sock_birth = float(sys.argv[4])
+except (IndexError, ValueError):
+    sock_birth = 0.0
 sid = os.path.splitext(os.path.basename(tp))[0]  # transcript 파일명 = session uuid
 slug = cwd.replace('/', '-').replace('.', '-')
 d = os.path.expanduser('~/.config/kasaterm/agent-roster')
@@ -55,10 +65,21 @@ try:
     # (12:52 실측: 부활 워커가 양보 없이 선착 claim+마킹). pane 기준 보존이라
     # --resume 으로 session_id 가 바뀌어도 그 pane 의 god 우선권은 유지된다.
     old = roster.get(pane)
+    # entry 는 archived 없이 새로 만든다 = 이 pane 은 지금 활성. claude --resume
+    # 로 옛 세션을 부활시켜 이 pane 이 다시 bind 하면 옛 archived 가 빠져(=활성)
+    # 자동 복귀한다(munder setArchived 재스폰 false 대응, ④).
     entry = {"pane_id": pane, "session_id": sid, "cwd": cwd, "ts": time.time()}
     if isinstance(old, dict) and old.get("role"):
         entry["role"] = old["role"]
     roster[pane] = entry
+    # 세대 archive(②b·munder 차용): 이 GUI 세대(sock birth) 이전에 기록된 옛
+    # pane 항목은 fresh 시작으로 넘어온 잔재 — archive 해 복구목록에서 뺀다.
+    # SIGKILL relaunch 처럼 close_pane 훅이 못 도는 경로의 안전망. 삭제 아닌
+    # 플래그라 데이터는 남아(resume 가능), 재 bind 시 위에서 해제된다.
+    if sock_birth > 0:
+        for k, v in roster.items():
+            if k != pane and isinstance(v, dict) and v.get("ts", 0) < sock_birth:
+                v["archived"] = True
     cutoff = time.time() - 30 * 86400
     roster = {k: v for k, v in roster.items() if v.get("ts", 0) >= cutoff}
     tmp = p + ".tmp"

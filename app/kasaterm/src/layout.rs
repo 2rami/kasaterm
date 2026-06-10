@@ -739,6 +739,55 @@ impl App {
                 let _ = std::fs::remove_file(p.join(format!("god-nudged-{target}")));
             }
         }
+        Self::archive_roster_pane(target);
+    }
+    /// Mark a closed pane's roster entries `archived=true` (munder 차용, ②a) so
+    /// `roster_recovery` stops offering a deliberately-closed worker for resume.
+    /// Sweeps every cwd roster file (pane numbers are unique across rooms) and
+    /// uses the same `.lock` flock discipline as the bind hook's Python RMW —
+    /// so we reuse that exact path by shelling out (best-effort, detached: close
+    /// is interactive and rare, and archiving is advisory). A resume re-binds
+    /// the pane fresh, which drops `archived` again (④).
+    fn archive_roster_pane(target: &str) {
+        const SCRIPT: &str = r#"
+import sys, os, json, glob
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+pane = sys.argv[1]
+d = os.path.expanduser('~/.config/kasaterm/agent-roster')
+for p in glob.glob(os.path.join(d, '*.json')):
+    lf = open(p + '.lock', 'w')
+    if fcntl is not None:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+    try:
+        try:
+            roster = json.load(open(p))
+            if not isinstance(roster, dict):
+                continue
+        except Exception:
+            continue
+        v = roster.get(pane)
+        if not isinstance(v, dict) or v.get('archived'):
+            continue
+        v['archived'] = True
+        tmp = p + '.tmp'
+        json.dump(roster, open(tmp, 'w'), ensure_ascii=False)
+        os.replace(tmp, p)
+    finally:
+        if fcntl is not None:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+        lf.close()
+"#;
+        let _ = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(SCRIPT)
+            .arg(target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
     /// Internal: drop a pane regardless of whether it's the active one.
     /// Used by both `close_pane` (Cmd+W / header ×) and `reap_dead_panes`
