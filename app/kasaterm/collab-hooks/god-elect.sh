@@ -243,7 +243,15 @@ if $KASACOLLAB lead claim >/dev/null 2>&1; then
     sleep 1
     $CLI tell "$ME" "/color $GOD_CLAUDE_COLOR" >/dev/null 2>&1
     sleep 1
-    $CLI tell "$ME" "$GOD_GREETING" >/dev/null 2>&1
+    # greeting 1회 마커 — sid 8자 기준: 같은 세션 재선출이면 생략, 새 세션만 인사.
+    # lead 만료→재claim 마다 입력창에 인사말이 끼어들던 사고(거노 실측 2회) 방지.
+    _gsid8="${my_sid:0:8}"
+    _greet_marker="$BASE/god-greeted-${_gsid8:-default}"
+    if [ ! -f "$_greet_marker" ]; then
+      mkdir -p "$BASE" 2>/dev/null
+      touch "$_greet_marker" 2>/dev/null
+      $CLI tell "$ME" "$GOD_GREETING" >/dev/null 2>&1
+    fi
     # 정당한 승계(첫 god/진짜 god 복귀/유예 만료)만 roster 마킹 — 양보 경로는
     # claim 에 도달하지 않으므로 여기 도달=항상 정당하지만 의도를 명시한다.
     [ -n "$my_sid" ] && $KASACOLLAB roster-mark-god "$my_sid" >/dev/null 2>&1

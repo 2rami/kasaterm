@@ -115,9 +115,12 @@ SOCK_INODE=""
       kill -TERM $$ 2>/dev/null
       exit 0
     fi
+    RENUDGE_SECS="${KASATERM_RENUDGE_SECS:-180}"
+    now_ts=$(date +%s)
     python3 - "$BASE" "$GOD" <<'PY' 2>/dev/null |
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 base, god = sys.argv[1], sys.argv[2]
+STALE_WAIT_SECS = int(os.environ.get("KASATERM_STALE_WAIT_SECS", "120"))
 cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
 def call(*args):
     r = subprocess.run([cli, *args], capture_output=True, text=True, timeout=3)
@@ -129,13 +132,36 @@ try:
 except Exception:
     sys.exit(0)  # 조회 실패 시 fail-safe — working 오판 nudge 방지
 status = {b.get("surface_id"): b.get("status") for b in board if b.get("surface_id")}
-# god 도 대상 — 제외하면 idle god 이 워커 done 보고를 영영 못 받아 거노가
-# 직접 깨워줘야 했다(실측). working god 은 idle 조건이 자연 제외한다.
+now = int(time.time())
+# idle/bind전 → 즉시 대상. waiting → STALE_WAIT_SECS 초과 시 대상(tell 씹힘 자가 복구).
+# god 도 대상 — 제외하면 idle god 이 워커 done 보고를 영영 못 받는다(실측).
 eligible = set()
 for p in live:
     st = status.get(p)
-    if st is None or st == "idle":  # None = bind 전(첫 턴 전이라 working 불가)
+    if st is None or st == "idle":
         eligible.add(p)
+    elif st == "waiting":
+        since_f = os.path.join(base, f"god-wait-since-{p.lstrip('%')}")
+        if not os.path.exists(since_f):
+            try:
+                open(since_f, "w").write(str(now))
+            except Exception:
+                pass
+            # 첫 관찰: 기록만, 이번엔 skip — 진짜 승인 대기 초반은 보호
+        else:
+            try:
+                since = int(open(since_f).read().strip())
+                if now - since >= STALE_WAIT_SECS:
+                    eligible.add(p)
+            except Exception:
+                eligible.add(p)
+# waiting 아닌 상태로 바뀐 pane 의 wait-since 마커 정리
+for p in live:
+    if status.get(p) != "waiting":
+        try:
+            os.remove(os.path.join(base, f"god-wait-since-{p.lstrip('%')}"))
+        except FileNotFoundError:
+            pass
 if not eligible:
     sys.exit(0)
 unread = {}
@@ -152,17 +178,56 @@ except Exception:
     sys.exit(0)
 for pane, ids in unread.items():
     print(pane + "\t" + str(len(ids)) + "\t" + ",".join(sorted(ids)))
+# compact: 미읽 0 + idle + IDLE_COMPACT_SECS 이상 지속 워커 → /compact tell 1회.
+# god 제외(거노 대화 컨텍스트라 임의 압축 금지).
+# working 관찰 시 compact 마커 삭제 → 재무장(600s idle 후 다시 compact 가능).
+IDLE_COMPACT_SECS = int(os.environ.get("KASATERM_IDLE_COMPACT_SECS", "600"))
+for p in live:
+    if p == god:
+        continue
+    st = status.get(p)
+    compact_f = os.path.join(base, f"god-compacted-{p.lstrip('%')}")
+    idle_f = os.path.join(base, f"god-idle-since-{p.lstrip('%')}")
+    if st == "idle":
+        if not os.path.exists(idle_f):
+            try: open(idle_f, "w").write(str(now))
+            except Exception: pass
+        elif p not in unread:
+            try:
+                since = int(open(idle_f).read().strip())
+                if now - since >= IDLE_COMPACT_SECS and not os.path.exists(compact_f):
+                    subprocess.run([cli, "tell", p, "/compact"],
+                                   capture_output=True, timeout=3)
+                    open(compact_f, "w").write(str(now))
+            except Exception:
+                pass
+    else:
+        if st == "working":
+            try: os.remove(compact_f)
+            except FileNotFoundError: pass
+        try: os.remove(idle_f)
+        except FileNotFoundError: pass
 PY
     while IFS=$'\t' read -r pane n ids; do
       [ -z "$pane" ] && continue
       marker="$BASE/god-nudged-$pane"
-      [ -f "$marker" ] && [ "$(cat "$marker")" = "$ids" ] && continue
+      if [ -f "$marker" ]; then
+        stored=$(cat "$marker" 2>/dev/null)
+        stored_ids="${stored%%:*}"
+        stored_ts="${stored##*:}"
+        if [ "$stored_ids" = "$ids" ]; then
+          if [[ "$stored_ts" =~ ^[0-9]+$ ]]; then
+            age=$((now_ts - stored_ts))
+            [ "$age" -lt "$RENUDGE_SECS" ] && continue
+          fi
+        fi
+      fi
       if [ "$pane" = "$GOD" ]; then
         txt="[inbox] 워커 보고 ${n}건 — kasacollab inbox 확인"
       else
         txt="[inbox] 미읽 ${n}건 — kasacollab inbox 확인"
       fi
-      "$CLI" tell "$pane" "$txt" >/dev/null 2>&1 && echo "$ids" > "$marker"
+      "$CLI" tell "$pane" "$txt" >/dev/null 2>&1 && echo "${ids}:${now_ts}" > "$marker"
     done
   done
 ) &
