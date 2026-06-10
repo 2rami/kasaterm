@@ -50,7 +50,15 @@ try:
             roster = {}
     except Exception:
         roster = {}
-    roster[pane] = {"pane_id": pane, "session_id": sid, "cwd": cwd, "ts": time.time()}
+    # role(god 우선권)은 보존 — 통째 교체는 god 부활 bind 가 자기 role:god 을
+    # 지워 재선출 양보 게이트(roster-god-sid)가 공백이 되는 인계 사고를 냈다
+    # (12:52 실측: 부활 워커가 양보 없이 선착 claim+마킹). pane 기준 보존이라
+    # --resume 으로 session_id 가 바뀌어도 그 pane 의 god 우선권은 유지된다.
+    old = roster.get(pane)
+    entry = {"pane_id": pane, "session_id": sid, "cwd": cwd, "ts": time.time()}
+    if isinstance(old, dict) and old.get("role"):
+        entry["role"] = old["role"]
+    roster[pane] = entry
     cutoff = time.time() - 30 * 86400
     roster = {k: v for k, v in roster.items() if v.get("ts", 0) >= cutoff}
     tmp = p + ".tmp"
