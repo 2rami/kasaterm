@@ -272,6 +272,57 @@ def cmd_drain_stop(args):
     sys.exit(10)  # 내부 신호: stop-drain.sh 가 complete 알림을 건너뛰게
 
 
+def roster_path():
+    """이 cwd 방의 영속 roster(~/.config — /tmp 아님, 재시작 청소에 생존).
+    bind-transcript.sh 가 {pane_id,session_id,cwd,ts} 를 쓰고, god-elect 가
+    role:god 마킹을 얹는다(재시작 후 god 세션 우선권 판정 기준)."""
+    slug = os.getcwd().replace("/", "-").replace(".", "-")
+    d = os.path.expanduser("~/.config/kasaterm/agent-roster")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, slug + ".json")
+
+
+def _write_json_atomic(path, obj):
+    tmp = path + ".tmp"
+    json.dump(obj, open(tmp, "w"), ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _load_roster():
+    try:
+        r = json.load(open(roster_path()))
+        return r if isinstance(r, dict) else {}
+    except Exception:
+        return {}
+
+
+def cmd_roster_god_sid(args):
+    """roster 에서 role:god 인 entry 의 session_id 를 출력(없으면 빈 출력).
+    god-elect 가 '이전 god 세션' 우선권 판정에 쓴다."""
+    for v in _load_roster().values():
+        if isinstance(v, dict) and v.get("role") == "god":
+            print(v.get("session_id", ""))
+            return
+
+
+def cmd_roster_mark_god(args):
+    """args[0]=session_id 를 role:god 으로 마킹하고 나머지 entry 의 god 은 해제.
+    flock+atomic(P10 패턴) — 동시 god-elect 마킹의 lost-update 를 막는다."""
+    sid = args[0] if args else ""
+    if not sid:
+        return
+    p = roster_path()
+    with _locked(p):
+        roster = _load_roster()
+        for v in roster.values():
+            if isinstance(v, dict):
+                if v.get("session_id") == sid:
+                    v["role"] = "god"
+                elif v.get("role") == "god":
+                    v.pop("role", None)
+        _write_json_atomic(p, roster)
+
+
 def lead_path():
     return os.path.join(base(), "lead")
 
@@ -324,8 +375,9 @@ def main():
         print("kasacollab task|msg|inbox|lead")
         return
     {"task": cmd_task, "msg": cmd_msg, "inbox": cmd_inbox, "lead": cmd_lead,
-     "drain-stop": cmd_drain_stop}.get(
-        a[0], lambda _: print("kasacollab task|msg|inbox|lead|drain-stop")
+     "drain-stop": cmd_drain_stop, "roster-god-sid": cmd_roster_god_sid,
+     "roster-mark-god": cmd_roster_mark_god}.get(
+        a[0], lambda _: print("kasacollab task|msg|inbox|lead|drain-stop|roster-god-sid|roster-mark-god")
     )(a[1:])
 
 

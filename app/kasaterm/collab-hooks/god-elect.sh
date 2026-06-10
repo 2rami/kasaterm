@@ -103,10 +103,22 @@ room_count=$(
 cur_god=""
 [ -f "$LEAD" ] && cur_god=$(cat "$LEAD" 2>/dev/null)
 
+# 내 세션 sid = bind 마커(inode:transcript_path)의 uuid. roster 의 role:god
+# session_id 와 비교해 '이전 god 세션' 우선권을 판정한다. 마커 부재(첫 턴 race)면
+# sid 불명 → 양보 경로로 빠져 2초 뒤 마커 생겨 자가수렴(순서 의존 회피).
+marker="/tmp/kasaterm-bound-${ME//[^A-Za-z0-9]/_}"
+my_sid=""
+[ -f "$marker" ] && my_sid=$(sed 's#.*/##; s#\.jsonl$##' "$marker" 2>/dev/null)
+god_sid=$($KASACOLLAB roster-god-sid 2>/dev/null)
+
 # lead 가 살아있는 pane 을 가리키면: 내가 god 이면 표시 보정, 아니면 워커 색.
 if [ -n "$cur_god" ] && printf '%s\n' "$surfaces" | grep -qx "$cur_god"; then
   if [ "$cur_god" = "$ME" ]; then
     ensure_god_look
+    # roster role:god 을 내 세션으로 유지(claim 턴에 마커가 없어 마킹을 놓쳤어도
+    # 여기서 수렴 — 재시작 우선권 기준이 항상 최신 god 세션을 가리키게).
+    [ -n "$my_sid" ] && [ "$god_sid" != "$my_sid" ] && \
+      $KASACOLLAB roster-mark-god "$my_sid" >/dev/null 2>&1
   else
     ensure_worker_look
   fi
@@ -115,17 +127,44 @@ fi
 
 # lead 없거나 stale(죽은 god 가리킴) → 정리 후 원자 선점 경쟁.
 [ -n "$cur_god" ] && $KASACOLLAB lead off >/dev/null 2>&1
+
+# god 세션 우선권: 재선출이 선착순이면 '이전 god 세션'(거노 대면 + god 타이틀)이
+# 늦게 떠도 다른 pane 에 god 을 뺏긴다(거노 발견). 내가 이전 god 세션이면 즉시
+# claim, 아니면 2초 양보해 god 세션이 먼저 claim 하게 둔다(roster 는 lead 와 달리
+# 재시작 청소에 안 지워져 우선권 기준으로 영속한다).
+if [ -n "$god_sid" ] && [ "$god_sid" != "$my_sid" ]; then
+  # 이전 god 세션이 따로 있다(또는 내 sid 불명) → 그 세션이 돌아올 2초를 준다.
+  # mkdir 원자 락으로 한 turn 만 양보(매 턴 fire 되는 god-elect 가 sleep 을
+  # 중첩 누적하는 걸 막는다). 락 못 잡으면 다른 elect 가 이미 양보 중 → 워커.
+  ylock="$BASE/god-yield.lock"
+  if mkdir "$ylock" 2>/dev/null; then
+    sleep 2
+    rmdir "$ylock" 2>/dev/null
+    ng=$(cat "$LEAD" 2>/dev/null)
+    if [ -n "$ng" ] && printf '%s\n' "$surfaces" | grep -qx "$ng"; then
+      ensure_worker_look; exit 0   # god 세션이 그 사이 claim 함 → 워커
+    fi
+    # 2초 뒤에도 lead 비었으면 god 세션이 안 떴다고 보고 인계 claim(아래로)
+  else
+    ensure_worker_look; exit 0
+  fi
+fi
+
 if $KASACOLLAB lead claim >/dev/null 2>&1; then
   ensure_god_look
-  # claude 세션 타이틀도 god 으로 — 재시작 후 `claude --resume god` 한 방으로
-  # god 세션을 이어가게(타이틀 resume 은 Claude Code 공식 지원). 프롬프트 바
-  # 색도 god 노랑으로(헤더 #FFD400 과 짝). 선출 순간 1회만 주입(매 턴
-  # 재적용하면 강제 제출 스팸이라 claim 분기에만).
-  $CLI tell "$ME" "/rename god" >/dev/null 2>&1
-  sleep 1
-  $CLI tell "$ME" "/color yellow" >/dev/null 2>&1
-  sleep 1
-  $CLI tell "$ME" "[god] 너가 god 이다. 팀 통솔 시작 — board-watch 로 변경점 감시, 워커 done 보고 받으면 단독 커밋." >/dev/null 2>&1
+  # claude 세션 타이틀 god 주입은 roster 의 god 세션이 없거나 그게 곧 나일 때만 —
+  # 선착순으로 임시 claim 한 경우(god_sid 가 딴 세션) 타이틀 god 중복을 피해 보류
+  # (강등 시 자동 원복은 claude slash 한계로 불가하므로 애초에 안 친다). 타이틀
+  # resume(`claude --resume god`)·색은 진짜 god 세션 1회 주입에만.
+  if [ -z "$god_sid" ] || [ "$god_sid" = "$my_sid" ]; then
+    $CLI tell "$ME" "/rename god" >/dev/null 2>&1
+    sleep 1
+    $CLI tell "$ME" "/color yellow" >/dev/null 2>&1
+    sleep 1
+    $CLI tell "$ME" "[god] 너가 god 이다. 팀 통솔 시작 — board-watch 로 변경점 감시, 워커 done 보고 받으면 단독 커밋." >/dev/null 2>&1
+  fi
+  # 내가 god 됐으니 roster 에 인계 마킹 — 다음 재선출의 우선권 기준.
+  [ -n "$my_sid" ] && $KASACOLLAB roster-mark-god "$my_sid" >/dev/null 2>&1
 else
   ensure_worker_look
 fi
