@@ -36,10 +36,7 @@ export function ClassroomChatInput() {
   return (
     <div
       style={{
-        position: 'fixed',
-        bottom: 0,
-        left: 0,
-        right: 0,
+        flexShrink: 0,
         height: 52,
         background: 'var(--cth-cream-100)',
         boxShadow: 'inset 0 2px 0 var(--cth-ink-900)',
