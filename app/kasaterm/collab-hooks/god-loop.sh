@@ -180,10 +180,13 @@ except Exception:
     sys.exit(0)
 for pane, ids in unread.items():
     print(pane + "\t" + str(len(ids)) + "\t" + ",".join(sorted(ids)))
-# compact: 미읽 0 + idle + IDLE_COMPACT_SECS 이상 지속 워커 → /compact tell 1회.
-# god 제외(거노 대화 컨텍스트라 임의 압축 금지).
-# working 관찰 시 compact 마커 삭제 → 재무장(600s idle 후 다시 compact 가능).
-IDLE_COMPACT_SECS = int(os.environ.get("KASATERM_IDLE_COMPACT_SECS", "600"))
+# compact: 미읽 0 + idle + IDLE_COMPACT_SECS 이상 지속 + board intent 없음 → /compact 1회.
+# god 제외(거노 대화 컨텍스트 임의 압축 금지).
+# working 관찰 시 compact+idle_since 마커 삭제 → 재무장.
+# idle_since 는 working 거친 후 새 idle 진입 시점부터 카운트 — 막 깨운 워커는
+# working 안 거치면 이전 since 로 카운트되므로 intent 체크가 2차 안전망 역할.
+IDLE_COMPACT_SECS = int(os.environ.get("KASATERM_IDLE_COMPACT_SECS", "1800"))
+intent = {b.get("surface_id"): (b.get("intent") or "") for b in board if b.get("surface_id")}
 for p in live:
     if p == god:
         continue
@@ -197,7 +200,11 @@ for p in live:
         elif p not in unread:
             try:
                 since = int(open(idle_f).read().strip())
-                if now - since >= IDLE_COMPACT_SECS and not os.path.exists(compact_f):
+                # board intent 가 비어있어야 안전 — 진행 중 작업 있으면 compact 보류.
+                has_intent = bool(intent.get(p, "").strip())
+                if (now - since >= IDLE_COMPACT_SECS
+                        and not has_intent
+                        and not os.path.exists(compact_f)):
                     subprocess.run([cli, "tell", p, "/compact"],
                                    capture_output=True, timeout=3)
                     open(compact_f, "w").write(str(now))
