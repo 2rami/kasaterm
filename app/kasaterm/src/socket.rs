@@ -7,13 +7,13 @@
 //! per actually-open pane.
 
 use kasa_socket::backend::{
-    Backend, PaneActivity, SplitDirection, SurfaceInfo, WorkspaceInfo,
+    Backend, PaneActivity, PaneRect, SplitDirection, SurfaceInfo, WorkspaceInfo,
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use kasa_bridge::TmuxSession;
+use kasa_bridge::{Layout, TmuxSession};
 
 use crate::transcript::snapshot_from_tail;
 use crate::{UserEvent, Workspace};
@@ -248,6 +248,57 @@ impl Backend for PtyBackend {
                 title: None,
             })
             .collect())
+    }
+
+    /// Geometry of the visible window's panes as window-relative percentages,
+    /// for `kasaterm-cli layout`'s ASCII diagram. The live tree lives in the
+    /// GUI thread's `pty_layout`, but `publish_pty_layout` mirrors it into
+    /// `ws.layout` (tmux-shape, cell coords) on every split/close/focus — so we
+    /// read that here. `ws.layout` is `None` for a single pane (≤1 leaf), so we
+    /// synthesize a full-window rect for the lone pane rather than report empty.
+    fn window_layout(&self) -> Result<Vec<PaneRect>> {
+        let ws = self.ws.lock().unwrap();
+        if let Some(layout) = ws.layout.as_ref() {
+            let (_, _, tw, th) = layout.rect();
+            if tw == 0 || th == 0 {
+                return Ok(Vec::new());
+            }
+            // round(v/total * 100); total is non-zero (guarded above).
+            let pct = |v: u16, total: u16| -> u16 {
+                ((v as u32 * 100 + total as u32 / 2) / total as u32) as u16
+            };
+            return Ok(layout
+                .leaves()
+                .into_iter()
+                .filter_map(|leaf| {
+                    let Layout::Pane { id, x, y, w, h } = leaf else {
+                        return None; // leaves() yields only Pane nodes
+                    };
+                    Some(PaneRect {
+                        surface_id: format!("%{id}"),
+                        x: pct(*x, tw),
+                        y: pct(*y, th),
+                        w: pct(*w, tw),
+                        h: pct(*h, th),
+                    })
+                })
+                .collect());
+        }
+        // Single pane: one full-window box.
+        Ok(ws
+            .active_pane
+            .clone()
+            .or_else(|| ws.panes.keys().next().cloned())
+            .map(|surface_id| {
+                vec![PaneRect {
+                    surface_id,
+                    x: 0,
+                    y: 0,
+                    w: 100,
+                    h: 100,
+                }]
+            })
+            .unwrap_or_default())
     }
 
     fn focus_surface(&self, surface_id: &str) -> Result<()> {
