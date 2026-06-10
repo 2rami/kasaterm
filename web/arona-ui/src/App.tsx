@@ -8,6 +8,7 @@ import { ClassroomChatInput } from './components/ClassroomChatInput';
 import { CommandCenter } from './components/CommandCenter';
 import { StudentGrid } from './components/StudentGrid';
 import { Footer } from './components/Footer';
+import { TitleBar } from './components/TitleBar';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
 import { PixelButton } from './components/PixelButton';
@@ -68,6 +69,13 @@ export function App() {
   return (
     // SCHALE OS 전체 셸: 세로 100% + 가로 100%
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+      {/* 타이틀바 */}
+      <TitleBar
+        notifications={agents.filter((a) => a.status === 'waiting' || a.status === 'blocked').length}
+        mail={agents.filter((a) => a.status === 'success').length}
+        onSettings={reveal}
+      />
 
       {/* 헤더 */}
       <div style={{
@@ -181,7 +189,8 @@ export function App() {
               onNewRequest={() => setShowChatInput((v) => !v)}
               credits={schaleState?.credits}
               gold={schaleState?.gold}
-              bondBonus={schaleState ? `인연 Lv.${schaleState.affinity_lv}` : undefined}
+              affinityLv={schaleState?.affinity_lv}
+              exp={schaleState?.exp}
             />
           </div>
         </div>
