@@ -221,6 +221,14 @@ def cmd_msg(args):
     m = {"id": short_id(), "from": me(), "to": to, "text": text,
          "ts": time.time(), "read": False}
     append_msg(m)  # 락 안 append — drain 과 같은 임계구역
+    # god 방 = tell 생략(inbox 적재만). 워킹 중인 워커의 입력창에 트리거 문구가
+    # 누적돼 오염되는 걸 막는다 — working 워커는 다음 턴 board-context 주입이나
+    # stop-drain 이 어차피 메시지를 싣고, idle 워커는 god-loop 의 주기 nudge 가
+    # 깨운다(거노 절충 2026-06-10). solo 방은 현행 유지 — 거노가 직접
+    # 오케스트레이션하므로 즉시성이 우선이다.
+    if current_mode() == "god":
+        print(f"→ {to}: {text} · (god 방 — inbox 적재만, idle 이면 god-loop 가 깨움)")
+        return
     # inbox는 상대 '다음 턴'에야 자동 주입돼 working 중이면 한참 뒤에 본다.
     # 보낸 즉시 tell 로 깨워 그 턴의 board-context hook 이 이 메시지를 바로
     # 끌어가게 한다. tell 본문은 트리거일 뿐 — 실제 내용은 inbox 주입이 싣는다.

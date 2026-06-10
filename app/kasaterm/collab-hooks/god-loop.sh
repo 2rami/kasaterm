@@ -27,9 +27,57 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   rm -rf "$LOCK"; mkdir "$LOCK" 2>/dev/null || exit 0
 fi
 echo $$ > "$LOCK/pid"
-trap 'rm -rf "$LOCK"' EXIT
 
 HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# idle nudge — god 방에서 msg 가 tell 을 생략하므로(입력창 오염 방지, kasacollab
+# cmd_msg 참조) idle 인데 미읽 inbox 를 가진 워커는 아무도 안 깨우면 영원히 모른다.
+# 주기마다 board(status==idle, god 제외)와 messages.jsonl(read=false)을 대조해
+# 해당 워커만 조용히 1회 tell. working 워커는 절대 건드리지 않는다 — 다음 턴
+# board-context/stop-drain 이 어차피 싣는다. 같은 미읽 id 세트에는 재nudge 하지
+# 않음(마커 $BASE/god-nudged-<pane> 에 세트 저장, 새 메시지로 세트가 바뀌면 재무장).
+(
+  while sleep "$INTERVAL"; do
+    python3 - "$BASE" "$GOD" <<'PY' 2>/dev/null |
+import json, os, subprocess, sys
+base, god = sys.argv[1], sys.argv[2]
+cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
+try:
+    r = subprocess.run([cli, "board"], capture_output=True, text=True, timeout=3)
+    board = (json.loads(r.stdout).get("result") or {}).get("board") or []
+except Exception:
+    sys.exit(0)
+idle = {b.get("surface_id") for b in board
+        if b.get("status") == "idle" and b.get("surface_id")
+        and b.get("surface_id") != god}
+if not idle:
+    sys.exit(0)
+unread = {}
+try:
+    with open(os.path.join(base, "messages.jsonl")) as f:
+        for line in f:
+            try:
+                m = json.loads(line)
+            except Exception:
+                continue
+            if not m.get("read") and m.get("to") in idle:
+                unread.setdefault(m["to"], []).append(str(m.get("id")))
+except Exception:
+    sys.exit(0)
+for pane, ids in unread.items():
+    print(pane + "\t" + str(len(ids)) + "\t" + ",".join(sorted(ids)))
+PY
+    while IFS=$'\t' read -r pane n ids; do
+      [ -z "$pane" ] && continue
+      marker="$BASE/god-nudged-$pane"
+      [ -f "$marker" ] && [ "$(cat "$marker")" = "$ids" ] && continue
+      "$CLI" tell "$pane" "[inbox] 미읽 ${n}건 — kasacollab inbox 확인" \
+        >/dev/null 2>&1 && echo "$ids" > "$marker"
+    done
+  done
+) &
+NUDGE_PID=$!
+trap 'rm -rf "$LOCK"; kill "$NUDGE_PID" 2>/dev/null' EXIT
 
 # board-watch = pane 상태 변화 polling stream(1 line/change). 워커가 승인/입력
 # 대기로 막히면 god 에게 1회 알림(munder: 워커 프롬프트는 사람이 아니라 god 이
