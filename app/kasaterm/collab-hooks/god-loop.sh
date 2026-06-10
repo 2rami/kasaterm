@@ -236,6 +236,9 @@ PY
       else
         txt="[inbox] 미읽 ${n}건 — kasacollab inbox 확인"
       fi
+      # steer 먼저 push — busy 에이전트는 다음 PostToolUse 경계에서 소비(씹힘 없음).
+      # tell 은 병행 유지 — idle 에이전트 즉시 깨우기 목적(steer 는 push만, 깨우지 않음).
+      python3 "$HOOKS_DIR/kasacollab.py" steer "$pane" "$txt" >/dev/null 2>&1 || true
       "$CLI" tell "$pane" "$txt" >/dev/null 2>&1
       # tell 씹힘 자가복구: 발사 후 화면을 peek — 보낸 텍스트가 입력창에
       # 박혀있으면(메뉴·응답 중 등 제출 실패) enter 를 추가 주입한다.

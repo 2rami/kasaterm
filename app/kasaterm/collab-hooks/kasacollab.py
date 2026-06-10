@@ -337,17 +337,22 @@ def cmd_msg(args):
     append_msg(m)  # 락 안 append — drain 과 같은 임계구역
     if text.startswith("done:"):
         _reward_done()
-    # god 방 = tell 생략(inbox 적재만). 워킹 중인 워커의 입력창에 트리거 문구가
-    # 누적돼 오염되는 걸 막는다 — working 워커는 다음 턴 board-context 주입이나
-    # stop-drain 이 어차피 메시지를 싣고, idle 워커는 god-loop 의 주기 nudge 가
-    # 깨운다(거노 절충 2026-06-10). solo 방은 현행 유지 — 거노가 직접
-    # 오케스트레이션하므로 즉시성이 우선이다.
+    # steer push — 입력창(PTY) 우회. busy 에이전트도 다음 PostToolUse 경계에서
+    # additionalContext로 pull(tell 씹힘 없음, munder 정렬). to_pane = 현 pane id.
+    try:
+        p = steer_path(to)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, p)
+    except Exception:
+        pass
+    # god 방 = tell 생략(steer 적재만). working 워커 입력창 오염 방지.
+    # idle 워커는 god-loop 의 nudge(steer+tell 병용)가 다음 주기에 깨운다.
     if current_mode() == "god":
-        print(f"→ {to}: {text} · (god 방 — inbox 적재만, idle 이면 god-loop 가 깨움)")
+        print(f"→ {to}: {text} · (god 방 — steer+inbox 적재, idle 이면 god-loop 가 깨움)")
         return
-    # inbox는 상대 '다음 턴'에야 자동 주입돼 working 중이면 한참 뒤에 본다.
-    # 보낸 즉시 tell 로 깨워 그 턴의 board-context hook 이 이 메시지를 바로
-    # 끌어가게 한다. tell 본문은 트리거일 뿐 — 실제 내용은 inbox 주입이 싣는다.
+    # solo 방: tell 로 즉시 깨움(steer 는 이미 push됨 — 상대 다음 훅 경계에서 pull).
     cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
     woke = False
     try:
@@ -525,15 +530,61 @@ def cmd_lead(args):
               'description="사람 입력 대기 pane", persistent=true)')
 
 
+def _steer_dir():
+    d = os.path.join(base(), "steer")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _steer_enc(pane):
+    return pane.replace("%", "_pane_")
+
+
+def steer_path(pane):
+    return os.path.join(_steer_dir(), f"{_steer_enc(pane)}.txt")
+
+
+def cmd_steer(args):
+    """steer 큐 — PostToolUse additionalContext 경로로 메시지 전달.
+    tell(PTY 주입)과 달리 훅 경계에서 반드시 소비되므로 busy 에이전트에도 씹히지 않음."""
+    if not args:
+        print("kasacollab steer <pane> <text>  — steer 큐 push (1건 덮어쓰기)")
+        print("kasacollab steer drain           — 내 steer 큐 drain (stdout 후 삭제)")
+        return
+    sub = args[0]
+    if sub == "drain":
+        p = steer_path(me())
+        try:
+            with open(p) as f:
+                text = f.read()
+            os.remove(p)
+            sys.stdout.write(text)
+        except FileNotFoundError:
+            pass
+        return
+    to = sub
+    text = " ".join(args[1:])
+    if not text:
+        print("text 필요")
+        return
+    p = steer_path(to)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, p)
+    print(f"steer → {to}: {text[:80]}")
+
+
 def main():
     a = sys.argv[1:]
     if not a:
-        print("kasacollab task|msg|inbox|lead")
+        print("kasacollab task|msg|inbox|steer|lead")
         return
     {"task": cmd_task, "msg": cmd_msg, "inbox": cmd_inbox, "lead": cmd_lead,
-     "drain-stop": cmd_drain_stop, "roster-god-sid": cmd_roster_god_sid,
+     "steer": cmd_steer, "drain-stop": cmd_drain_stop,
+     "roster-god-sid": cmd_roster_god_sid,
      "roster-mark-god": cmd_roster_mark_god, "mode": cmd_mode}.get(
-        a[0], lambda _: print("kasacollab task|msg|inbox|lead|drain-stop|roster-god-sid|roster-mark-god|mode")
+        a[0], lambda _: print("kasacollab task|msg|inbox|steer|lead|drain-stop|roster-god-sid|roster-mark-god|mode")
     )(a[1:])
 
 
