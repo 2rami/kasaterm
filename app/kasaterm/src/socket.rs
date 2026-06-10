@@ -257,6 +257,24 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    /// 활성 pane 의 셸 cwd — GET /mode 등 협업방 판정의 기준. trait 디폴트
+    /// (None→호스트 cwd 폴백)는 .app 실행 시 cwd 가 `/` 라 항상 solo 로
+    /// 오판했다(거노 실측: god 방 토글 차단). GUI 동기 RPC 로 활성 pane 의
+    /// shell pid 만 받고(메모리 즉답), lsof 해석은 이 backend 스레드서 한다 —
+    /// pane_faces_user 라이브 우회와 같은 철학(캐시·프로세스 cwd 불신).
+    fn active_cwd(&self) -> Option<std::path::PathBuf> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::SocketQueryActivePid(tx))
+            .ok()?;
+        // GUI 가 라이브 리사이즈 등으로 바쁠 수 있으니 짧게 대기, 실패 시
+        // None → 호출부(resolve_cwd)의 기존 폴백 유지.
+        let pid = rx
+            .recv_timeout(std::time::Duration::from_millis(300))
+            .ok()??;
+        pid_cwd(pid)
+    }
+
     fn rename_surface(&self, surface_id: &str, title: &str) -> Result<()> {
         let _ = self.proxy.send_event(UserEvent::SocketRename(
             surface_id.to_string(),

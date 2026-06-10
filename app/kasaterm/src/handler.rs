@@ -69,6 +69,17 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketQueryActivePid(reply) => {
+                let pid = self
+                    .ws
+                    .lock()
+                    .unwrap()
+                    .active_pane
+                    .clone()
+                    .and_then(|id| self.pty.get(&id).and_then(|s| s.shell_pid()));
+                let _ = reply.send(pid);
+                return;
+            }
             UserEvent::SocketClose(id) => {
                 self.close_pane(id);
                 self.chrome_dirty = true;
