@@ -3607,6 +3607,9 @@ fn install_claude_hook_shim(shim_dir: &std::path::Path) {
                 cmd("kasaterm-bind-transcript.sh", 5000),
                 cmd("kasaterm-board-context.py", 5000),
             ]}],
+            // 같은 방 다른 pane 이 같은 파일을 작업 중이면 Edit 직전에 막는다
+            // (transcript 직접 비교, 데몬 무관). solo·god 모드 공통 안전망.
+            "PreToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] }],
             "PostToolUse": [{ "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 10)] }],
             "Stop": [{ "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] }],
             "Notification": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5000)] }],
