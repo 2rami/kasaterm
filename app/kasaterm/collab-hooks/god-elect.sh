@@ -18,6 +18,10 @@ GOD_COLOR="#FFD400"
 # 들이 board 에서 stale god 을 안 보게).
 if [ "$($KASACOLLAB mode show 2>/dev/null)" != "god" ]; then
   [ -f "$LEAD" ] && $KASACOLLAB lead off >/dev/null 2>&1
+  # solo 복귀: 워커 1회 마커(색·컨텍스트)를 정리해 다음 god 전환 때 재주입되게.
+  _s="$ME"; _s="${_s//[^A-Za-z0-9]/_}"
+  rm -f "/tmp/kasaterm-collab/$slug/claude-colored-$_s" \
+        "/tmp/kasaterm-collab/$slug/claude-context-$_s" 2>/dev/null
   exit 0
 fi
 
@@ -127,6 +131,19 @@ ensure_worker_look() {
   if [ ! -f "$marker" ]; then
     touch "$marker"
     $CLI tell "$ME" "/color $cc" >/dev/null 2>&1
+  fi
+  # 워커 컨텍스트 1회 주입 — solo→god 전환 등으로 '이미 떠 있던' claude pane 은
+  # 스폰 래퍼의 persona 를 못 받는다(시스템 프롬프트는 스폰 시점 1회 주입). 캐릭터
+  # persona 요지 + 협업 규약을 tell 로 1회만(claude-context 마커, 스팸 방지).
+  # persona 컷은 python(한글 문자단위) — bash substring 은 로케일 의존이라 회피.
+  local ctxm="/tmp/kasaterm-collab/$slug/claude-context-${ME//[^A-Za-z0-9]/_}"
+  if [ ! -f "$ctxm" ] && [ -n "$cname" ]; then
+    touch "$ctxm"
+    local persona god
+    persona=$(char_field "$cname" persona | python3 -c "import sys;print(sys.stdin.read().strip()[:110])" 2>/dev/null)
+    god=$(cat "$LEAD" 2>/dev/null)
+    sleep 1
+    $CLI tell "$ME" "[아로나 모드] 너는 $cname($ME) 워커야. $persona — git commit/push 는 하지 말고, 작업 끝나면 kasacollab msg ${god:-아로나} \"done: <요약>\" 로 보고해." >/dev/null 2>&1
   fi
 }
 
