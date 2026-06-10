@@ -85,8 +85,15 @@ start_god_loop() {
     rmdir "$lock" 2>/dev/null
   fi
   mkdir "$lock" 2>/dev/null || return 0
+  # lock 잡은 후 pgrep 재확인 — mkdir 성공 찰나에 다른 인스턴스가 이미 떴을 수 있다.
+  if pgrep -f "god-loop.sh $ME" >/dev/null 2>/dev/null; then
+    rmdir "$lock" 2>/dev/null
+    return 0
+  fi
   nohup bash "$HOOKS_DIR/god-loop.sh" "$ME" >/dev/null 2>&1 &
-  rmdir "$lock" 2>/dev/null
+  # 0.3s 유지 후 해제 — 새 god-loop.sh 가 자체 LOCK.d 를 claim 하기 전에
+  # 다른 god-elect 가 재진입해 중복 spawn 하는 race 를 막는다.
+  (sleep 0.3; rmdir "$lock" 2>/dev/null) &
 }
 
 ensure_god_look() {

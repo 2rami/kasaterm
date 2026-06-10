@@ -108,10 +108,12 @@ SOCK_INODE=""
       fi
     fi
     kill -0 $$ 2>/dev/null || exit 0   # 본체 사망 시 고아로 남지 않기
-    # 락 소유 재검증 — 단일 인스턴스의 **최종 보장**. 락 경쟁의 어떤 잔여
-    # race 로 두 가족이 동시에 떠도, 락 pid 는 항상 한 놈이므로 비보유
-    # 가족은 다음 주기에 여기서 전멸한다(시뮬 실측 사고의 안전망).
-    if [ "$(cat "$LOCK/pid" 2>/dev/null)" != "$$" ]; then
+    # 락 소유 재검증 — 단일 인스턴스의 **최종 보장**.
+    # 두 케이스로 자살: ① 락 pid 가 내 부모(본체)가 아님 — 다른 god-loop 가
+    # 탈취했다. ② 본체 자체가 이미 없음(kill 됐는데 cleanup race 로 락이
+    # 아직 살아있는 찰나) — 고아 서브셸로 남지 않게.
+    _lock_pid=$(cat "$LOCK/pid" 2>/dev/null)
+    if [ "$_lock_pid" != "$$" ] || ! kill -0 $$ 2>/dev/null; then
       kill -TERM $$ 2>/dev/null
       exit 0
     fi
@@ -227,7 +229,23 @@ PY
       else
         txt="[inbox] 미읽 ${n}건 — kasacollab inbox 확인"
       fi
-      "$CLI" tell "$pane" "$txt" >/dev/null 2>&1 && echo "${ids}:${now_ts}" > "$marker"
+      "$CLI" tell "$pane" "$txt" >/dev/null 2>&1
+      # tell 씹힘 자가복구: 발사 후 화면을 peek — 보낸 텍스트가 입력창에
+      # 박혀있으면(메뉴·응답 중 등 제출 실패) enter 를 추가 주입한다.
+      sleep 0.4
+      _peek=$("$CLI" peek "$pane" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    t = (d.get('result') or {}).get('text', '') or ''
+    lines = t.rstrip().splitlines()
+    print('\n'.join(lines[-6:]) if lines else '')
+except:
+    pass" 2>/dev/null)
+      if printf '%s' "$_peek" | grep -qF '[inbox]' 2>/dev/null; then
+        "$CLI" key --surface "$pane" enter >/dev/null 2>&1
+      fi
+      echo "${ids}:${now_ts}" > "$marker"
     done
   done
 ) &
