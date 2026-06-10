@@ -12,6 +12,15 @@ slug=$(pwd | sed 's#[/.]#-#g')
 LEAD="/tmp/kasaterm-collab/$slug/lead"
 GOD_COLOR="#FFD400"
 
+# 모드 게이트 — 기본 solo(거노가 직접 오케스트레이션 + conflict-guard 가 파일
+# 겹침 차단). god 은 옵트인(`kasacollab mode god`). solo 면 선출/색/표시 일절
+# 안 하고 조용히 종료한다. god→solo 전환으로 lead 가 남아있으면 제거(다른 pane
+# 들이 board 에서 stale god 을 안 보게).
+if [ "$($KASACOLLAB mode show 2>/dev/null)" != "god" ]; then
+  [ -f "$LEAD" ] && $KASACOLLAB lead off >/dev/null 2>&1
+  exit 0
+fi
+
 # 워커 색 — pane id 숫자(%5 → 5)로 팔레트에서 안 겹치게(노랑 god 색은 팔레트에
 # 없음). board webview JS 가 같은 식으로 색을 재현해 헤더 색과 카드 색이 일치한다.
 worker_color() {

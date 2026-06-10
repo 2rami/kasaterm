@@ -186,11 +186,18 @@ def roster_recovery():
 
 
 def god_section():
-    """god 체제 규약. lead 파일로 god 파악 — 내가 god 이면 커밋 책임 + 변경점
-    종합, 워커면 커밋 금지(god 에게 done 보고). god 없으면(혼자/미선출) 복구
-    후보만 주입 — 재시작 직후엔 pane 이 하나뿐이라 god 선출 자체가 안 되는데,
-    바로 그때가 roster 복구가 필요한 순간이다(워커를 부활시켜야 2-pane 이 되어
-    선출이 돈다). 닭-달걀을 복구 주입이 끊는다."""
+    """협업 규약 — 모드별. 기본 solo(팀장 없음, 거노 직접 오케스트레이션):
+    커밋은 각자(자기 작업 파일 명시), 승인은 사용자 직행, 파일 겹침은
+    conflict-guard 가 차단. god(옵트인): lead 파일로 god 파악 — 내가 god 이면
+    커밋 책임+변경점 종합, 워커면 커밋 금지(god 에게 done). 복구 후보(roster)는
+    **모드 무관 유지** — 재시작 후 워커 부활은 어느 모드든 필요하다."""
+    mode = kasacollab.current_mode() if kasacollab else "solo"
+    if mode != "god":
+        recovery = roster_recovery()
+        solo = ("[solo 모드] 협업방에 팀장 없음. 커밋은 각자 — git add 는 자기 작업 "
+                "파일을 명시 나열한다(-A/-u 금지, 다른 pane WIP 섞임 방지). 막힘/승인은 "
+                "사용자에게 직행. 파일 겹침은 conflict-guard 가 차단한다.")
+        return solo + (("\n" + recovery) if recovery else "")
     try:
         god = open(os.path.join(collab_dir(), "lead")).read().strip()
     except OSError:
