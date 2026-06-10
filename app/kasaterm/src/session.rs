@@ -1071,6 +1071,12 @@ impl App {
         // the board/bind-transcript, while later split panes get it fine.
         self.start_socket_pty();
         self.spawn_session_pane()?;
+        // 아로나 자동 시작(P5): god 모드 && characters 있는 방이면 첫 pane 에
+        // claude 를 자동 기동한다. 셸 init 이 끝나(첫 OSC133 prompt-end) 명령을
+        //받을 수 있을 때 `refresh_pane_activity` 가 1회 주입한다. solo·무테마면
+        // autoleader_command 가 None → 무동작(기존 유저 영향 0).
+        self.pending_autoleader = crate::autoleader_command();
+        self.pending_autoleader_at = self.pending_autoleader.as_ref().map(|_| Instant::now());
         Ok(())
     }
     /// Serialize every session (active + stashed) as a layout tree so the next
