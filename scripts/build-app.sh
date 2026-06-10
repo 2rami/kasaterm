@@ -114,8 +114,16 @@ echo "built $APP ($PROFILE)"
 
 if [[ "$INSTALL" -eq 1 ]]; then
   mkdir -p "$HOME/Applications"
-  rm -rf "$HOME/Applications/kasaterm.app"
-  cp -R "$APP" "$HOME/Applications/kasaterm.app"
+  # 원자 스왑 — rm -rf 후 cp 는 복사되는 수 초간 번들 경로가 비어, 그 창에
+  # 실행 중인 pane 의 hook(Resources/collab-hooks/*)이 돌면 exit 127
+  # ("Stop hook failed, no stderr" 실측). 옆에 다 복사해 두고 mv 두 번으로 교체.
+  rm -rf "$HOME/Applications/kasaterm.app.new" "$HOME/Applications/kasaterm.app.old"
+  cp -R "$APP" "$HOME/Applications/kasaterm.app.new"
+  if [[ -d "$HOME/Applications/kasaterm.app" ]]; then
+    mv "$HOME/Applications/kasaterm.app" "$HOME/Applications/kasaterm.app.old"
+  fi
+  mv "$HOME/Applications/kasaterm.app.new" "$HOME/Applications/kasaterm.app"
+  rm -rf "$HOME/Applications/kasaterm.app.old"
   touch "$HOME/Applications/kasaterm.app"
   echo "installed to ~/Applications/kasaterm.app"
 fi
