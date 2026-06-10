@@ -310,7 +310,9 @@ def god_section():
         return base + (("\n" + digest) if digest else "") + (("\n" + recovery) if recovery else "")
     worker = (f"[god 체제] god = {god}. 너는 워커 — 직접 git commit/push 하지 마라. "
               f"작업이 끝나면 `kasacollab msg {god} \"done: <요약> | files: a,b\"` 로 "
-              f"보고하면 god 이 검토 후 단독 커밋한다.")
+              f"보고하면 god 이 검토 후 단독 커밋한다. "
+              f"⚠ done 보고는 반드시 kasacollab msg(Bash 실행) — "
+              f"MCP send_text/kasaspace_send 금지(제출 안 돼 god 입력창에 박힘).")
     persona = _worker_persona()
     return ((persona + "\n") if persona else "") + worker
 
