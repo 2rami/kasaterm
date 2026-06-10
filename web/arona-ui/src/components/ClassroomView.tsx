@@ -8,6 +8,22 @@ import { useStore, type Agent } from '@/store';
 import { focusPane } from '@/lib/mcp';
 import { accentByName, type AccentColorName } from '@/design/tokens';
 
+// 도트칩 이니셜 충돌 해소: 같은 첫글자를 가진 캐릭터가 둘 이상이면 그 캐릭터들만
+// 2글자(아로나·아리스 → 아로·아리), 첫글자가 유일하면 1글자. 이름 집합 전체를
+// 보고 결정해야 해서 ClassroomView(전 캐릭터 조망) 레벨에서 계산한다.
+function initialResolver(names: string[]): (n: string) => string {
+  const firstCount = new Map<string, number>();
+  for (const n of names) {
+    const f = (n || '?').trim().charAt(0) || '?';
+    firstCount.set(f, (firstCount.get(f) ?? 0) + 1);
+  }
+  return (n: string) => {
+    const t = (n || '?').trim();
+    const f = t.charAt(0) || '?';
+    return (firstCount.get(f) ?? 0) > 1 ? t.slice(0, 2) : f;
+  };
+}
+
 // 생각 구름 첫마디 — 마지막 답변/질문의 첫 문장만(줄바꿈·문장부호 경계). 대기·완료
 // 시 길게 늘어진 last_reply 를 학생 머리 위에 한 줄로 압축한다.
 function firstLine(s?: string): string {
@@ -64,6 +80,7 @@ export function ClassroomView() {
 
       const sync = () => {
         const agents = [...useStore.getState().agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
+        const initialOf = initialResolver(agents.map((a) => a.character || a.name));
         agents.forEach((a, i) => {
           if (i >= DESK_CELLS.length) return;
           let c = chars.get(a.id);
@@ -79,6 +96,7 @@ export function ClassroomView() {
           const desk = DESK_CELLS[i];
           // 의자 칸(책상 위쪽, 칠판 향함) 중앙에 앉힌다.
           c.setPos((desk.x + 0.5) * TS, (desk.y - 1 + 0.5) * TS);
+          c.setInitial(initialOf(a.character || a.name));
           c.setStatus(a.status as CharStatus);
           c.setThought(thoughtFor(a));
         });

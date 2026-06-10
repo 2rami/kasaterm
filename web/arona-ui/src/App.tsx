@@ -15,6 +15,7 @@ export function App() {
   const agents = useStore((s) => s.agents);
   const [mode, setModeState] = useState<string | null | undefined>(undefined);
   const [cwd, setCwd] = useState<string | null>(null);
+  const [configured, setConfigured] = useState(true);
   const [view, setView] = useState<ViewMode>('classroom');
   const [showAdd, setShowAdd] = useState(false);
   const [revealing, setRevealing] = useState(false);
@@ -22,22 +23,31 @@ export function App() {
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
 
   useEffect(() => {
-    fetchMode().then(({ mode, cwd }) => { setModeState(mode); setCwd(cwd); });
+    fetchMode().then(({ mode, cwd, configured }) => {
+      setModeState(mode); setCwd(cwd); setConfigured(configured);
+    });
   }, []);
   useEffect(() => { if (mode === 'god') return startBoardPolling(1000); }, [mode]);
 
   if (mode === undefined) {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
   }
-  if (mode == null || mode === 'solo' || forcePicker) {
-    return <ModePicker cwd={cwd} onPicked={(m) => setModeState(m)} />;
+  // god 만 교실. 미설정(configured=false, 첫 실행)·solo·강제는 시작 선택 화면으로.
+  if (!configured || mode !== 'god' || forcePicker) {
+    return (
+      <ModePicker
+        cwd={cwd}
+        onboarding={!configured}
+        onPicked={(m) => { setModeState(m); setConfigured(true); }}
+      />
+    );
   }
 
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
 
   const reveal = async () => {
     setRevealing(true);
-    await revealTerminal();
+    await revealTerminal(1);
     setTimeout(() => setRevealing(false), 600);
   };
 
