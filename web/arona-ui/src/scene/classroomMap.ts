@@ -37,12 +37,13 @@ export function buildClassroomMap(): TiledMap {
   // 칠판 (상단 중앙)
   for (let x = 4; x <= 9; x++) furniture[at(x, 1)] = TILE.BOARD;
 
-  // 책상 + 의자 + spawn-point
+  // 책상 + 의자 + spawn-point. 의자는 책상 **위쪽**(칠판 쪽, y-1)에 둔다 — 학생이
+  // 책상에 앉아 칠판(상단)을 바라보게(전엔 책상 아래라 칠판을 등졌다, 거노 지적).
   const spawnObjs = DESK_CELLS.map((d, i) => {
     furniture[at(d.x, d.y)] = TILE.DESK;
     collision[at(d.x, d.y)] = TILE.DESK; // 책상은 비통과
-    furniture[at(d.x, d.y + 1)] = TILE.CHAIR;
-    return { name: `desk-${i}`, x: d.x * TS, y: (d.y + 1) * TS };
+    furniture[at(d.x, d.y - 1)] = TILE.CHAIR;
+    return { name: `desk-${i}`, x: d.x * TS, y: (d.y - 1) * TS };
   });
 
   const layers: TiledLayer[] = [

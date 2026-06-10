@@ -20,6 +20,9 @@ interface BoardRow {
   is_god?: boolean;
   tokens_in?: number;
   tokens_out?: number;
+  /** 유우카가 character-<N> 마커를 읽어 노출(후속). 있으면 도트칩 이니셜·이름이
+   *  캐릭터명(아로나/시로코/아리스…)으로, 없으면 title(ai-title) 폴백. */
+  character?: string;
 }
 
 function toStatus(s?: string): StatusKind {
@@ -38,10 +41,13 @@ function accentFor(id: string): AccentColorName {
 
 function toAgent(r: BoardRow): Agent {
   const tokens = (r.tokens_in ?? 0) + (r.tokens_out ?? 0);
+  // character 마커가 노출되면 그걸 우선(도트칩 이니셜=캐릭터 첫 글자), 없으면
+  // title(ai-title) 폴백. name 은 카드 표시용이라 같은 우선순위.
+  const display = r.character || r.title || r.surface_id;
   return {
     id: r.surface_id,
-    name: r.title || r.surface_id,
-    character: r.title || r.surface_id,
+    name: display,
+    character: display,
     accent: r.is_god ? 'lemon' : accentFor(r.surface_id),
     status: toStatus(r.status),
     project: r.intent ?? '',
@@ -107,16 +113,45 @@ export async function fetchCharacters(): Promise<Characters | null> {
   }
 }
 
-/** GET /mode — 'solo' | 'god' | null. 응답이 {mode} 든 평문이든 흡수. */
-export async function fetchMode(): Promise<string | null> {
+export interface ModeInfo { mode: string | null; cwd: string | null; }
+
+/** GET /mode → {mode:'solo'|'god'|null, cwd}. 응답 {mode,cwd}/평문/{result} 흡수.
+ *  cwd 는 '이 방' 경로 칩에 쓴다(어느 방을 god 으로 다루는지 사용자에게 표시). */
+export async function fetchMode(): Promise<ModeInfo> {
   try {
     const r = await fetch(`${BASE}/mode`);
-    if (!r.ok) return null;
+    if (!r.ok) return { mode: null, cwd: null };
     const d = await r.json().catch(() => null);
-    if (typeof d === 'string') return d;
-    return d?.mode ?? d?.result?.mode ?? null;
+    if (typeof d === 'string') return { mode: d, cwd: null };
+    return {
+      mode: d?.mode ?? d?.result?.mode ?? null,
+      cwd: d?.cwd ?? d?.result?.cwd ?? null
+    };
   } catch {
-    return null;
+    return { mode: null, cwd: null };
+  }
+}
+
+/** POST /terminal-reveal — 교실 모드에서 숨긴 메인 터미널을 다시 보이게 한다
+ *  (빨간약). 네이티브 배선(유우카)은 후속이라, 미구현 동안 404 → false 허용. */
+export async function revealTerminal(): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/terminal-reveal`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /arona-close — 아로나 창을 닫고 터미널로 복귀. ModePicker 에서 'solo'
+ *  선택 완료 시 호출(아로나 선택은 교실 진입이라 호출 안 함). 네이티브 미구현
+ *  동안 404 → false 허용. */
+export async function closeArona(): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/arona-close`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
   }
 }
 
