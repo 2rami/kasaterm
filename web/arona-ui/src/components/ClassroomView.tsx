@@ -52,9 +52,17 @@ function thoughtFor(a: Agent): string {
 }
 
 // 샬레 교실 — pixi 로 맵을 그리고, board 의 학생들을 책상에 앉혀 상태대로 움직인다.
-// 배치: isGod(아로나) 먼저, 그 다음 board 순서로 desk-0..N. 클릭 → 그 pane 포커스.
-export function ClassroomView() {
+// 배치: isGod(아로나) 먼저, 그 다음 board 순서로 desk-0..N. 클릭 → 터미널 뷰 패널.
+export interface ClassroomViewProps {
+  onSelect?: (surfaceId: string, title: string) => void;
+}
+
+export function ClassroomView({ onSelect }: ClassroomViewProps) {
   const hostRef = useRef<HTMLDivElement>(null);
+  // pixi useEffect 는 한 번만 돌아 prop 을 클로저로 가두므로, 최신 onSelect 를
+  // ref 로 흘려 stale 콜백을 피한다.
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
 
   useEffect(() => {
     let app: Application | undefined;
@@ -87,7 +95,12 @@ export function ClassroomView() {
           if (!c) {
             const color = accentByName[a.accent as AccentColorName] ?? 0xa899b5;
             c = new ClassroomCharacter(a.id, a.name, color);
-            c.view.on('pointertap', () => { void focusPane(a.id); });
+            const aid = a.id;
+            c.view.on('pointertap', () => {
+              const name = useStore.getState().agents.find((x) => x.id === aid)?.character || aid;
+              if (onSelectRef.current) onSelectRef.current(aid, name);
+              else void focusPane(aid);
+            });
             c.setBounds(MAP_W * TS, MAP_H * TS); // 구름이 맵 밖으로 안 넘치게
             chars.set(a.id, c);
             charLayer.addChild(c.view);

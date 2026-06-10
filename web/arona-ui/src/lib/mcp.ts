@@ -211,3 +211,17 @@ export async function focusPane(surfaceId: string): Promise<boolean> {
     return false;
   }
 }
+
+/** GET /peek?surface=<id>&lines=<n> — 그 pane 의 보이는 화면 텍스트(모노). 교실
+ *  터미널 뷰 패널이 1s 폴링해 학생이 지금 뭘 보고 있는지 그대로 띄운다.
+ *  응답 {ok,surface_id,text}. 실패 시 빈 문자열(fail-soft). */
+export async function fetchPeek(surfaceId: string, lines = 40): Promise<string> {
+  try {
+    const r = await fetch(`${BASE}/peek?surface=${encodeURIComponent(surfaceId)}&lines=${lines}`);
+    if (!r.ok) return '';
+    const d = (await r.json().catch(() => ({}))) as { text?: string };
+    return d?.text ?? '';
+  } catch {
+    return '';
+  }
+}
