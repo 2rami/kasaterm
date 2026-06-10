@@ -208,6 +208,9 @@ if [ -n "$god_sid" ] && [ "$god_sid" != "$my_sid" ]; then
     bp="${bm##*kasaterm-bound-}"
     bpane="%${bp#_}"
     if printf '%s\n' "$surfaces" | grep -qx "$bpane"; then
+      # 생존 확인 턴마다 유예 시계 리셋 — 일시 스캔 실패로 생긴 yield-since
+      # 가 잔존하면 다음 실패 한 번에 즉시 만료(시한폭탄)되는 결함 방어.
+      rm -f "$BASE/god-yield-since" 2>/dev/null
       ensure_worker_look; exit 0   # god 세션 생존 — 무기한 양보
     fi
   done
