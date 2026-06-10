@@ -746,6 +746,60 @@ fn find_god_pane() -> Option<String> {
     None
 }
 
+/// `POST /send?surface=%N` — 학생 pane에 텍스트 주입.
+/// body `{"text":"...","submit":true|false}` or raw text.
+/// `submit` 기본값=true → 끝에 개행 추가(제출). false → 개행 없음(타이핑만).
+/// 없는 surface·빈 text는 ok:false 거부.
+async fn send_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    body: String,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let surface = match params.get("surface").filter(|s| !s.is_empty()) {
+        Some(s) => s.clone(),
+        None => {
+            return (cors, Json(serde_json::json!({ "ok": false, "error": "surface=%N required" })))
+                .into_response();
+        }
+    };
+    let (text, submit) = if body.trim_start().starts_with('{') {
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(v) => (
+                v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                v.get("submit").and_then(|s| s.as_bool()).unwrap_or(true),
+            ),
+            Err(e) => {
+                return (
+                    cors,
+                    Json(serde_json::json!({ "ok": false, "error": format!("bad body: {e}") })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        (body.trim().to_string(), true)
+    };
+    if text.is_empty() {
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "text is empty" })))
+            .into_response();
+    }
+    // peek(lines=0) 로 surface 존재 확인 — 없으면 에러 반환
+    if let Err(e) = backend.peek(&surface, 0) {
+        return (
+            cors,
+            Json(serde_json::json!({ "ok": false, "error": format!("surface not found: {e}") })),
+        )
+            .into_response();
+    }
+    let payload = if submit { format!("{text}\n") } else { text };
+    let resp = match backend.send_text(Some(&surface), &payload) {
+        Ok(()) => serde_json::json!({ "ok": true, "surface": surface, "submit": submit }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    (cors, Json(resp)).into_response()
+}
+
 // ── 협업 콘솔 헬퍼 ─────────────────────────────────────────────────────────
 
 /// 프로세스 cwd slug 우선, 없으면 messages.jsonl 이 있는 첫 collab dir 반환.
@@ -1091,6 +1145,7 @@ pub fn spawn_http_server(
                 let arona_close_backend = backend.clone();
                 let peek_backend = backend.clone();
                 let tell_god_backend = backend.clone();
+                let send_backend = backend.clone();
                 let mode_get_backend = backend.clone();
                 let mode_set_backend = backend.clone();
                 let spawn_backend = backend.clone();
@@ -1239,6 +1294,15 @@ pub fn spawn_http_server(
                         post(move |body: String| {
                             tell_god_handler(tell_god_backend.clone(), body)
                         }),
+                    )
+                    .route(
+                        "/send",
+                        post(
+                            move |q: Query<std::collections::HashMap<String, String>>,
+                                  body: String| {
+                                send_handler(send_backend.clone(), q, body)
+                            },
+                        ),
                     )
                     .route(
                         "/events",
