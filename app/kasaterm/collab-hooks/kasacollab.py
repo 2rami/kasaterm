@@ -272,6 +272,38 @@ def cmd_drain_stop(args):
     sys.exit(10)  # 내부 신호: stop-drain.sh 가 complete 알림을 건너뛰게
 
 
+def mode_path():
+    """이 방의 협업 모드 마커(~/.config — 영속). 내용 = 'solo' | 'god'.
+    기본(마커 없음)=solo: 거노가 직접 오케스트레이션 + conflict-guard 가 파일
+    겹침 차단. god=옵트인: 선출제 팀장(커밋 단독·승인 라우팅·총괄)."""
+    slug = os.getcwd().replace("/", "-").replace(".", "-")
+    d = os.path.expanduser("~/.config/kasaterm/collab-mode")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, slug)
+
+
+def current_mode():
+    try:
+        m = open(mode_path()).read().strip()
+        return m if m in ("solo", "god") else "solo"
+    except Exception:
+        return "solo"
+
+
+def cmd_mode(args):
+    sub = args[0] if args else "show"
+    if sub == "show":
+        print(current_mode())
+    elif sub in ("solo", "god"):
+        p = mode_path()
+        tmp = p + ".tmp"
+        open(tmp, "w").write(sub)
+        os.replace(tmp, p)  # atomic — 읽는 쪽은 완전한 모드명만 본다
+        print(f"모드 = {sub}")
+    else:
+        print("mode solo|god|show")
+
+
 def roster_path():
     """이 cwd 방의 영속 roster(~/.config — /tmp 아님, 재시작 청소에 생존).
     bind-transcript.sh 가 {pane_id,session_id,cwd,ts} 를 쓰고, god-elect 가
@@ -376,8 +408,8 @@ def main():
         return
     {"task": cmd_task, "msg": cmd_msg, "inbox": cmd_inbox, "lead": cmd_lead,
      "drain-stop": cmd_drain_stop, "roster-god-sid": cmd_roster_god_sid,
-     "roster-mark-god": cmd_roster_mark_god}.get(
-        a[0], lambda _: print("kasacollab task|msg|inbox|lead|drain-stop|roster-god-sid|roster-mark-god")
+     "roster-mark-god": cmd_roster_mark_god, "mode": cmd_mode}.get(
+        a[0], lambda _: print("kasacollab task|msg|inbox|lead|drain-stop|roster-god-sid|roster-mark-god|mode")
     )(a[1:])
 
 
