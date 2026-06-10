@@ -212,13 +212,13 @@ export async function focusPane(surfaceId: string): Promise<boolean> {
   }
 }
 
-/** POST /chat-send?surface=<godId> body:{text} — 사용자 지시를 god pane 의
- *  PTY 에 send_text+submit(tell 동작). 유우카 백엔드 발주 중 → 404 fail-soft.
- *  응답 {ok:true} / {ok:false,error}. 반환값=성공 여부. */
-export async function sendToGod(text: string, godId: string): Promise<boolean> {
-  if (!text.trim() || !godId) return false;
+/** POST /tell-god body:{text} — 사용자 지시를 god pane 의 PTY 에 send_text+submit.
+ *  백엔드가 lead 마커로 god pane 을 직접 탐색하므로 surface 파라미터 불필요.
+ *  응답 {ok:true} / {ok:false,error}. fail-soft(false 반환). */
+export async function sendToGod(text: string): Promise<boolean> {
+  if (!text.trim()) return false;
   try {
-    const r = await fetch(`${BASE}/chat-send?surface=${encodeURIComponent(godId)}`, {
+    const r = await fetch(`${BASE}/tell-god`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text: text.trim() })
