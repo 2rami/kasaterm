@@ -1,20 +1,22 @@
 import { useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
-import { setMode, fetchBoard, fetchCharacters, spawnAgent } from '@/lib/mcp';
+import { RoomChip } from './RoomChip';
+import { setMode, fetchBoard, fetchCharacters, spawnAgent, closeArona } from '@/lib/mcp';
 
 // 시작 선택 화면 — mode 미설정(또는 ?picker=1)일 때 풀스크린 2장 픽셀 카드:
 // '터미널로 열기(solo)' vs '아로나와 함께(god)'.
-//   solo → POST /mode?set=solo 후 콜백.
+//   solo → POST /mode?set=solo → /arona-close(창 닫고 터미널 복귀) → 콜백.
 //   god  → POST /mode?set=god → board 가 비어 있으면 leader(아로나) 자동 등판
 //          (solo→god 전환 직후 빈 교실 방지) → 콜백. 스폰 중 로딩, 실패 시 재시도.
 export interface ModePickerProps {
+  cwd: string | null;
   onPicked: (mode: 'solo' | 'god') => void;
 }
 
 type Phase = 'idle' | 'switching' | 'spawning' | 'error';
 
-export function ModePicker({ onPicked }: ModePickerProps) {
+export function ModePicker({ cwd, onPicked }: ModePickerProps) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [picking, setPicking] = useState<'solo' | 'god' | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -23,6 +25,7 @@ export function ModePicker({ onPicked }: ModePickerProps) {
     setPicking('solo');
     setPhase('switching');
     await setMode('solo');
+    await closeArona(); // 창 닫고 터미널 복귀(네이티브 미구현 동안 404 허용)
     onPicked('solo');
   };
 
@@ -63,15 +66,18 @@ export function ModePicker({ onPicked }: ModePickerProps) {
       }}
     >
       <style>{`@keyframes arona-spin { to { transform: rotate(360deg); } }`}</style>
-      <h1
-        style={{
-          fontFamily: 'var(--cth-font-display)',
-          fontSize: 'var(--cth-text-display-lg)',
-          color: 'var(--cth-ink-900)', margin: 0
-        }}
-      >
-        어떻게 시작할까요?
-      </h1>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 'var(--cth-space-3)' }}>
+        <h1
+          style={{
+            fontFamily: 'var(--cth-font-display)',
+            fontSize: 'var(--cth-text-display-lg)',
+            color: 'var(--cth-ink-900)', margin: 0
+          }}
+        >
+          어떻게 시작할까요?
+        </h1>
+        <RoomChip cwd={cwd} />
+      </div>
 
       {phase === 'error' ? (
         <PixelPanel variant="dialog" style={{ width: 320 }}>

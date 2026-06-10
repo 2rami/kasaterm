@@ -17,12 +17,17 @@ export function ClassroomView() {
     let app: Application | undefined;
     let unsub: (() => void) | undefined;
     let destroyed = false;
+    // app.init() 은 async — StrictMode(dev)가 init 완료 전에 cleanup 의 destroy 를
+    // 부르면 pixi 내부 resize plugin 미설정 상태라 `_cancelResize` 크래시. ready 로
+    // 게이트해 init 끝난 인스턴스만 destroy 한다.
+    let ready = false;
     const chars = new Map<string, ClassroomCharacter>();
 
     void (async () => {
       app = new Application();
       await app.init({ background: 0xfcfaf0, width: MAP_W * TS, height: MAP_H * TS, antialias: false });
       if (destroyed || !hostRef.current) { app.destroy(true); return; }
+      ready = true;
       hostRef.current.appendChild(app.canvas);
 
       const renderer = new TiledMapRenderer(buildClassroomMap(), [makePlaceholderTileset()]);
@@ -42,8 +47,8 @@ export function ClassroomView() {
             charLayer.addChild(c.view);
           }
           const desk = DESK_CELLS[i];
-          // 의자 칸(책상 아래) 중앙에 앉힌다.
-          c.setPos((desk.x + 0.5) * TS, (desk.y + 1 + 0.5) * TS);
+          // 의자 칸(책상 위쪽, 칠판 향함) 중앙에 앉힌다.
+          c.setPos((desk.x + 0.5) * TS, (desk.y - 1 + 0.5) * TS);
           c.setStatus(a.status as CharStatus);
         });
         // board 에서 사라진 학생 정리
@@ -65,7 +70,7 @@ export function ClassroomView() {
     return () => {
       destroyed = true;
       unsub?.();
-      app?.destroy(true);
+      if (ready) app?.destroy(true);
     };
   }, []);
 
