@@ -119,17 +119,6 @@ def god_fleet_digest():
     return "\n".join(out) if out else None
 
 
-def _live_surface_ids():
-    """현재 board 에 떠 있는 pane id 집합. roster 의 죽은 세션 판정에 쓴다."""
-    cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
-    try:
-        r = subprocess.run([cli, "board"], capture_output=True, text=True, timeout=3)
-        board = (json.loads(r.stdout).get("result") or {}).get("board") or []
-        return {row.get("surface_id") for row in board if row.get("surface_id")}
-    except Exception:
-        return set()
-
-
 def _surface_pane_ids():
     """list surfaces 의 pane id 집합 — board(bind+프롬프트 필요)와 달리 pane
     존재 자체를 보므로 사각지대가 좁다. bound 마커 생존 판정용."""
@@ -142,37 +131,72 @@ def _surface_pane_ids():
         return set()
 
 
-def _bound_live_sids(surface_ids, marker_glob="/tmp/kasaterm-bound-*"):
-    """bind 마커가 가리키는 sid 중 그 pane 이 지금 살아있는 것 — god-elect.sh 의
-    god 생존 판정과 같은 규칙. 마커는 bind 직후 생기므로 roster upsert·board
-    등록(첫 프롬프트 후)보다 이른 신호다. 마커 파일명 ↔ pane 복원은 bind 쪽
-    치환(% → _)의 역."""
-    sids = set()
+def _sock_meta():
+    """현재 데몬 소켓의 (inode 문자열, 생성시각). inode 는 bind 마커의 세대
+    판정에, 생성시각은 roster ts 의 현/옛 세대 구분에 쓴다. 못 읽으면 (None, 0)."""
+    sock = os.environ.get("KASATERM_SOCKET_PATH") or \
+        os.path.expanduser("~/.config/kasaterm/daemon.sock")
+    try:
+        st = os.stat(sock)
+        return str(st.st_ino), st.st_ctime
+    except OSError:
+        return None, 0
+
+
+def _bound_pane_sids(surface_ids, marker_glob="/tmp/kasaterm-bound-*", sock_inode=None):
+    """살아있는 pane → 현재 bind 된 sid 매핑 — god-elect.sh 의 god 생존 판정과
+    같은 규칙. 마커는 bind 직후 생기므로 roster upsert·board 등록(첫 프롬프트
+    후)보다 이른 신호다. 마커 내용 = '<sock inode>:<transcript>' — inode 가 현
+    데몬과 다르면 옛 세대 잔재(재시작 청소가 마커를 안 지움, 06-10 실측: _2 가
+    옛 inode 로 잔존해 죽은 시로코를 '산 것'으로 둔갑)이므로 무시. 마커 파일명
+    ↔ pane 복원은 bind 쪽 치환(% → _)의 역."""
+    bound = {}
     for bm in glob.glob(marker_glob):
         bp = os.path.basename(bm).split("kasaterm-bound-", 1)[-1]
         pane = "%" + (bp[1:] if bp.startswith("_") else bp)
         if pane not in surface_ids:
             continue
         try:
-            tp = open(bm).read().split(":", 1)[-1].strip()
+            ino, _, tp = open(bm).read().strip().partition(":")
         except OSError:
+            continue
+        if sock_inode is not None and ino != sock_inode:
             continue
         sid = os.path.splitext(os.path.basename(tp))[0]
         if sid:
-            sids.add(sid)
-    return sids
+            bound[pane] = sid
+    return bound
 
 
-def _recovery_candidates(roster, live, bound_sids):
-    """복구 후보 필터(순수 함수 — 시뮬 검증용으로 IO 와 분리).
-    live pane 이 잡은 sid + bound 마커로 살아있다고 확인된 sid 는 제외 —
-    같은 세션을 pane 두 개에 이중 attach 하는 사고 방지. roster 가드만으로는
-    rebind upsert 전(첫 프롬프트 전)의 산 세션을 못 거른다(06-10 실측:
-    1f2685f3 가 %1 에 떠 있는데 옛 위치 %3 엔트리가 후보로 떠 이중 resume)."""
-    live_sids = {v.get("session_id") for v in roster.values()
-                 if v.get("pane_id") in live} | bound_sids
-    return [v for v in roster.values()
-            if v.get("pane_id") not in live and v.get("session_id") not in live_sids]
+BIND_GRACE_SECS = 120  # 현 세대 bind 직후 마커 일시 부재 race 유예
+
+
+def _recovery_candidates(roster, live, bound, now=None, daemon_start=0):
+    """복구 후보 필터(순수 함수 — 시뮬 검증용으로 IO 와 분리). 제외 규칙:
+    ① sid 가 어느 live pane 의 bound sid 와 일치 → 산 세션, 제외(이중 resume
+      방지 — 06-10 실측: 1f2685f3 가 %1 에 떠 있는데 옛 위치 %3 엔트리가 후보).
+    ② pane 이 live 여도 bound sid 가 다르면 pane 재사용 — 후보 유지(06-10 실측:
+      ModePicker spawn 이 죽은 시로코의 %2 를 차지해 793be320 복구 안내 누락.
+      'pane_id in live' 단독 제외가 오판의 근원이라 bound 대조로만 제외한다).
+    ③ pane live + bound 불명(셸만/claude 부팅 전/마커 청소 직후): 현 세대
+      (ts >= daemon_start) 최근(GRACE) bind 면 마커 일시 부재로 보고 제외,
+      그 외(옛 세대 기록 = 재시작 복구 시나리오)는 후보 유지.
+    한계(문서화): 같은 세대 내 pane 닫힘→번호 재사용 시 잔존 same-gen 마커가
+    죽은 sid 를 ①로 가릴 수 있다 — 근본은 pane 종료 시 마커 삭제(Rust, 후속)."""
+    now = time.time() if now is None else now
+    live_sids = set(bound.values())
+    out = []
+    for v in roster.values():
+        sid = v.get("session_id")
+        if sid in live_sids:
+            continue
+        pane = v.get("pane_id")
+        if pane in live and pane not in bound:
+            ts = v.get("ts", 0)
+            if ts >= daemon_start and now - ts < BIND_GRACE_SECS:
+                continue
+        out.append(v)
+    return out
 
 
 def _rel_age(ts):
@@ -198,8 +222,10 @@ def roster_recovery():
         return None
     if not isinstance(roster, dict) or not roster:
         return None
-    live = _live_surface_ids()
-    dead = _recovery_candidates(roster, live, _bound_live_sids(_surface_pane_ids()))
+    live = _surface_pane_ids()
+    ino, boot = _sock_meta()
+    dead = _recovery_candidates(roster, live, _bound_pane_sids(live, sock_inode=ino),
+                                daemon_start=boot)
     # board(bind 기반) 사각지대 보완: 방금 `claude --resume <sid>` 로 부활했지만
     # 아직 프롬프트를 안 받아 bind 가 안 돈 세션은 board 에 없어 '죽음'으로
     # 오판된다 — 실행 중 claude 프로세스의 cmdline 에 sid 가 보이면 산 것.
