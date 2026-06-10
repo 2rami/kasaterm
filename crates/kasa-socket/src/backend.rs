@@ -142,6 +142,12 @@ pub struct PaneActivity {
     /// `surface.peek` per pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<String>,
+    /// 이 pane 에 배정된 캐릭터명(아로나 모드 테마) — assign-character 가 박은
+    /// `/tmp/kasaterm-collab/<slug>/character-<N>` 마커 내용. arona-ui 가 교실
+    /// 도트칩 이름표에 쓴다(title 은 작업 제목이라 캐릭터명이 아니다). 캐릭터
+    /// 테마 없는 방은 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
     /// Why this pane is `status == "waiting"` — the `waitingFor` field from
     /// `claude agents --json` (2.1.162+), e.g. "permission" or "user input".
     /// The transcript watcher can't see this: when claude blocks on a
@@ -425,6 +431,12 @@ pub trait Backend: Send + Sync {
     /// character's pane). Default unsupported.
     fn reveal_terminal(&self, _show: bool, _focus_pane: Option<&str>) -> Result<()> {
         anyhow::bail!("reveal_terminal not supported")
+    }
+    /// Close the arona classroom window (no-op when it isn't open) and bring
+    /// the main terminal back. The ModePicker's "터미널로" choice calls this —
+    /// the web page can't close its own host window. Default unsupported.
+    fn close_arona(&self) -> Result<()> {
+        anyhow::bail!("close_arona not supported")
     }
     /// Resize a panel window to `w`x`h` logical px and re-bound its webview
     /// to match. Errors if the panel isn't open. Default unsupported.

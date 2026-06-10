@@ -265,6 +265,11 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn close_arona(&self) -> Result<()> {
+        let _ = self.proxy.send_event(UserEvent::SocketAronaClose);
+        Ok(())
+    }
+
     /// 활성 pane 의 셸 cwd — GET /mode 등 협업방 판정의 기준. trait 디폴트
     /// (None→호스트 cwd 폴백)는 .app 실행 시 cwd 가 `/` 라 항상 solo 로
     /// 오판했다(거노 실측: god 방 토글 차단). GUI 동기 RPC 로 활성 pane 의
@@ -467,6 +472,21 @@ impl Backend for PtyBackend {
                     attention.remove(sid);
                 }
                 row.is_god = god_id.as_deref() == Some(sid.as_str());
+                // 캐릭터 마커(assign-character) — god 판정과 같은 규칙으로 이
+                // pane 의 transcript 부모(= cwd slug)에서 character-<N> 을 읽는다.
+                row.character = path
+                    .parent()
+                    .and_then(|d| d.file_name())
+                    .and_then(|s| s.to_str())
+                    .map(|slug| {
+                        format!(
+                            "/tmp/kasaterm-collab/{slug}/character-{}",
+                            sid.trim_start_matches('%')
+                        )
+                    })
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
                 row
             })
             .collect();

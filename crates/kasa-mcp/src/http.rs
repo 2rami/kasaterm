@@ -246,7 +246,8 @@ fn mode_slug(cwd: &std::path::Path) -> String {
 }
 
 /// 이 cwd 방의 영속 모드 마커 경로(~/.config/kasaterm/collab-mode/<slug>).
-fn mode_marker_path(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+/// pub: 호스트(kasaterm)의 첫 실행 온보딩이 같은 마커로 '미설정 방'을 판정한다.
+pub fn mode_marker_path(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
     Some(
         std::path::PathBuf::from(home)
@@ -275,15 +276,21 @@ fn write_mode_file(path: &std::path::Path, mode: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// `GET /mode` — 활성 pane cwd 방의 협업 모드 `{ mode, cwd }`.
+/// `GET /mode` — 활성 pane cwd 방의 협업 모드 `{ mode, cwd, configured }`.
+/// `configured=false` = 마커 자체가 없는 미설정 방(첫 실행) — mode 는 solo 로
+/// 뭉개지므로 이 필드 없이는 ModePicker 온보딩 대상을 웹이 구분할 수 없다.
 async fn mode_get_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let cwd = resolve_cwd(&backend);
-    let mode = mode_marker_path(&cwd)
-        .map(|p| read_mode_file(&p))
-        .unwrap_or("solo");
+    let marker = mode_marker_path(&cwd);
+    let configured = marker.as_deref().is_some_and(|p| p.exists());
+    let mode = marker.as_deref().map(read_mode_file).unwrap_or("solo");
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
-        Json(serde_json::json!({ "mode": mode, "cwd": cwd.to_string_lossy() })),
+        Json(serde_json::json!({
+            "mode": mode,
+            "cwd": cwd.to_string_lossy(),
+            "configured": configured,
+        })),
     )
 }
 
@@ -688,6 +695,17 @@ async fn terminal_reveal_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `POST /arona-close` — close the arona classroom window and bring the main
+/// terminal back. The ModePicker's "터미널로" choice calls this; the page
+/// can't close its own host window. No-op (still ok) when it isn't open.
+async fn arona_close_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let body = match backend.close_arona() {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// `POST /panel-open?which=git|session` — open a panel window.
 async fn panel_open_handler(
     backend: Arc<dyn Backend>,
@@ -813,6 +831,7 @@ pub fn spawn_http_server(
                 let panel_resize_backend = backend.clone();
                 let panel_info_backend = backend.clone();
                 let terminal_reveal_backend = backend.clone();
+                let arona_close_backend = backend.clone();
                 let mode_get_backend = backend.clone();
                 let mode_set_backend = backend.clone();
                 let spawn_backend = backend.clone();
@@ -945,6 +964,10 @@ pub fn spawn_http_server(
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             terminal_reveal_handler(terminal_reveal_backend.clone(), q)
                         }),
+                    )
+                    .route(
+                        "/arona-close",
+                        post(move || arona_close_handler(arona_close_backend.clone())),
                     )
                     .route(
                         "/panel-open",

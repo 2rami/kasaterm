@@ -192,6 +192,8 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         status: if idle { "idle".into() } else { "working".into() },
         files,
         screen: None,
+        // 캐릭터는 transcript 가 아니라 collab 마커 소관 — collab_board 가 채운다.
+        character: None,
         // transcript는 permission 대기를 기록하지 않는다 — 화면 peek로만 보인다.
         waiting_for: None,
         tokens_in,
