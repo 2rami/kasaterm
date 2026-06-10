@@ -746,6 +746,170 @@ fn find_god_pane() -> Option<String> {
     None
 }
 
+// ── 협업 콘솔 헬퍼 ─────────────────────────────────────────────────────────
+
+/// 프로세스 cwd slug 우선, 없으면 messages.jsonl 이 있는 첫 collab dir 반환.
+fn find_collab_dir() -> Option<std::path::PathBuf> {
+    let base = std::path::Path::new("/tmp/kasaterm-collab");
+    if let Ok(cwd) = std::env::current_dir() {
+        let slug = mode_slug(&cwd);
+        let candidate = base.join(&slug);
+        if candidate.join("messages.jsonl").exists() {
+            return Some(candidate);
+        }
+    }
+    for entry in std::fs::read_dir(base).ok()?.flatten() {
+        if entry.path().join("messages.jsonl").exists() {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
+/// `%N` → character 마커에서 이름 읽기. 마커 없으면 pane id 그대로.
+fn char_from_pane(pane: &str, collab_dir: &std::path::Path) -> String {
+    let n = pane.trim_start_matches('%');
+    if let Ok(name) = std::fs::read_to_string(collab_dir.join(format!("character-{n}"))) {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    pane.to_string()
+}
+
+#[derive(serde::Serialize)]
+struct Event {
+    ts: f64,
+    kind: String,
+    actor: String,
+    summary: String,
+}
+
+#[derive(serde::Serialize)]
+struct MessageEntry {
+    id: String,
+    ts: f64,
+    from_pane: String,
+    from_name: String,
+    to_pane: String,
+    to_name: String,
+    text: String,
+    read: bool,
+}
+
+/// messages.jsonl 의 done 보고 + git log 를 ts 내림차순으로 합쳐 최근 N 반환.
+fn collab_events(n: usize) -> Vec<Event> {
+    let mut events: Vec<Event> = Vec::new();
+
+    // done 보고
+    if let Some(dir) = find_collab_dir() {
+        if let Ok(content) = std::fs::read_to_string(dir.join("messages.jsonl")) {
+            for line in content.lines() {
+                let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if !text.starts_with("done:") {
+                    continue;
+                }
+                let ts = msg.get("ts").and_then(|t| t.as_f64()).unwrap_or(0.0);
+                let from_pane = msg.get("from_pane").and_then(|t| t.as_str()).unwrap_or("");
+                let actor = char_from_pane(from_pane, &dir);
+                let summary = text
+                    .trim_start_matches("done:")
+                    .split('|')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                events.push(Event { ts, kind: "done".into(), actor, summary });
+            }
+        }
+    }
+
+    // git 커밋 — ts 는 unix epoch(정수)
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(output) = std::process::Command::new("git")
+            .args(["log", &format!("--format=%at\t%s"), &format!("-{}", n)])
+            .current_dir(&cwd)
+            .output()
+        {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let mut parts = line.splitn(2, '\t');
+                let ts = parts.next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let summary = parts.next().unwrap_or("").to_string();
+                if summary.is_empty() { continue; }
+                events.push(Event { ts, kind: "commit".into(), actor: String::new(), summary });
+            }
+        }
+    }
+
+    events.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
+    events.truncate(n);
+    events
+}
+
+/// messages.jsonl 을 캐릭터명 해석 포함해 최근 N 개 반환(ts 내림차순).
+fn collab_messages(n: usize) -> Vec<MessageEntry> {
+    let Some(dir) = find_collab_dir() else {
+        return Vec::new();
+    };
+    let Ok(content) = std::fs::read_to_string(dir.join("messages.jsonl")) else {
+        return Vec::new();
+    };
+
+    let mut entries: Vec<MessageEntry> = content
+        .lines()
+        .filter_map(|line| {
+            let msg = serde_json::from_str::<serde_json::Value>(line).ok()?;
+            let id = msg.get("id").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let ts = msg.get("ts").and_then(|t| t.as_f64()).unwrap_or(0.0);
+            let from_pane =
+                msg.get("from_pane").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let to_pane = msg
+                .get("to_pane")
+                .or_else(|| msg.get("to"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            let text = msg.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let read = msg.get("read").and_then(|t| t.as_bool()).unwrap_or(false);
+            let from_name = char_from_pane(&from_pane, &dir);
+            let to_name = char_from_pane(&to_pane, &dir);
+            Some(MessageEntry { id, ts, from_pane, from_name, to_pane, to_name, text, read })
+        })
+        .collect();
+
+    entries.sort_by(|a, b| b.ts.partial_cmp(&a.ts).unwrap_or(std::cmp::Ordering::Equal));
+    entries.truncate(n);
+    entries
+}
+
+/// `GET /events?n=20` — done 보고 + git 커밋을 합친 행정 로그(ts 내림차순 최근 N).
+async fn events_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let n = params.get("n").and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+    let events = collab_events(n);
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "ok": true, "events": events })),
+    )
+}
+
+/// `GET /messages?n=50` — messages.jsonl 을 캐릭터명 해석 포함 최근 N 개(ts 내림차순).
+async fn messages_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let n = params.get("n").and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
+    let messages = collab_messages(n);
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "ok": true, "messages": messages })),
+    )
+}
+
 /// `POST /tell-god` — 교실 '새 의뢰 작성': body `{"text":"..."}` or raw text
 /// → lead 마커의 god pane 에 text+\n 제출(send_text). god 부재(lead 없음) 시
 /// `{"ok":false}`. text/plain 본문을 권장(JSON 도 허용).
@@ -1074,6 +1238,18 @@ pub fn spawn_http_server(
                         "/tell-god",
                         post(move |body: String| {
                             tell_god_handler(tell_god_backend.clone(), body)
+                        }),
+                    )
+                    .route(
+                        "/events",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            events_handler(q)
+                        }),
+                    )
+                    .route(
+                        "/messages",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            messages_handler(q)
                         }),
                     )
                     .route(
