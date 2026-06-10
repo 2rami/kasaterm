@@ -3628,10 +3628,11 @@ fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             return;
         }
     }
-    let wrapper = "#!/bin/sh\n\
+    let wrapper = format!("#!/bin/sh\n\
 # kasaterm pane-only claude wrapper — injects the collab hooks session-scoped\n\
 # (--settings) so ~/.claude/settings.json stays untouched. Outside a pane this\n\
 # wrapper isn't on PATH and claude runs exactly as the user configured it.\n\
+HOOKS_DIR=\"{hd}\"\n\
 SELF_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
 CLEAN_PATH=$(printf '%s' \"$PATH\" | tr ':' '\\n' | grep -vxF \"$SELF_DIR\" | paste -sd: -)\n\
 REAL=$(PATH=\"$CLEAN_PATH\" command -v claude 2>/dev/null)\n\
@@ -3645,7 +3646,20 @@ for a in \"$@\"; do\n\
   [ \"$a\" = \"--settings\" ] && exec \"$REAL\" \"$@\"\n\
 done\n\
 [ -f \"$SETTINGS\" ] || exec \"$REAL\" \"$@\"\n\
-exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n";
+# god 모드 방 && 사용자가 --append-system-prompt 를 직접 안 줬을 때만 캐릭터\n\
+# persona 를 주입한다. persona 는 세션 고정값이라 프롬프트 캐시를 안 깨고, solo\n\
+# 거나 characters.json 이 없으면 assign 이 빈 출력 → 무주입(현행 그대로).\n\
+HAS_APPEND=\n\
+for a in \"$@\"; do [ \"$a\" = \"--append-system-prompt\" ] && HAS_APPEND=1; done\n\
+PERSONA=\n\
+if [ -z \"$HAS_APPEND\" ] && [ \"$(python3 \"$HOOKS_DIR/kasacollab.py\" mode show 2>/dev/null)\" = god ]; then\n\
+  PERSONA=$(python3 \"$HOOKS_DIR/kasaterm-assign-character.py\" 2>/dev/null)\n\
+fi\n\
+if [ -n \"$PERSONA\" ]; then\n\
+  exec \"$REAL\" --settings \"$SETTINGS\" --append-system-prompt \"$PERSONA\" \"$@\"\n\
+fi\n\
+exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
+        hd = hooks_dir.display());
     let wrapper_path = shim_dir.join("claude");
     if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");
