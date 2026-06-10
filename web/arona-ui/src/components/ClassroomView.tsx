@@ -3,6 +3,7 @@ import { Application } from 'pixi.js';
 import { TiledMapRenderer } from '@/scene/TiledMapRenderer';
 import { buildClassroomMap, DESK_CELLS, MAP_W, MAP_H, TS } from '@/scene/classroomMap';
 import { makePlaceholderTileset } from '@/scene/placeholderTileset';
+import { loadTilesetTexture, loadCharacterSprites } from '@/scene/loadAssets';
 import { ClassroomCharacter, type CharStatus } from '@/scene/ClassroomCharacter';
 import { useStore, type Agent } from '@/store';
 import { focusPane } from '@/lib/mcp';
@@ -81,7 +82,12 @@ export function ClassroomView({ onSelect }: ClassroomViewProps) {
       ready = true;
       hostRef.current.appendChild(app.canvas);
 
-      const renderer = new TiledMapRenderer(buildClassroomMap(), [makePlaceholderTileset()]);
+      // 아트 슬롯: 타일셋 PNG 있으면 그걸로, 없으면 placeholder. 캐릭터 시트는
+      // 이름→텍스처 맵으로 미리 로드(없는 캐릭터는 색블록 폴백). 둘 다 폴백 안전.
+      const [tileTex, spriteMap] = await Promise.all([loadTilesetTexture(), loadCharacterSprites()]);
+      if (destroyed) { app.destroy(true); return; }
+
+      const renderer = new TiledMapRenderer(buildClassroomMap(), [tileTex ?? makePlaceholderTileset()]);
       app.stage.addChild(renderer.getContainer());
       const charLayer = renderer.getCharacterContainer();
       charLayer.sortableChildren = true; // thought.zIndex(100000)가 다른 학생 위로
@@ -94,7 +100,7 @@ export function ClassroomView({ onSelect }: ClassroomViewProps) {
           let c = chars.get(a.id);
           if (!c) {
             const color = accentByName[a.accent as AccentColorName] ?? 0xa899b5;
-            c = new ClassroomCharacter(a.id, a.name, color);
+            c = new ClassroomCharacter(a.id, a.name, color, spriteMap.get(a.character || a.name));
             const aid = a.id;
             c.view.on('pointertap', () => {
               const name = useStore.getState().agents.find((x) => x.id === aid)?.character || aid;
