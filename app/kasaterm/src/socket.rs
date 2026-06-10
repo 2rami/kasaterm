@@ -421,6 +421,15 @@ impl Backend for PtyBackend {
         Ok(pane.visible_text(lines))
     }
 
+    fn peek_ansi(&self, surface_id: &str, lines: usize) -> Result<String> {
+        let ws = self.ws.lock().unwrap();
+        let pane = ws
+            .panes
+            .get(surface_id)
+            .ok_or_else(|| anyhow::anyhow!("no such pane: {surface_id}"))?;
+        Ok(pane.visible_text_ansi(lines))
+    }
+
     fn transcript_tail(
         &self,
         surface_id: &str,
