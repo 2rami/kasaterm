@@ -1,5 +1,4 @@
 import { useRef, useState } from 'react';
-import { useStore } from '@/store';
 import { sendToGod } from '@/lib/mcp';
 
 // 교실 하단 고정 입력바 — 사용자→아로나(god pane) 직접 지시.
@@ -12,13 +11,11 @@ export function ClassroomChatInput() {
   const [pressed, setPressed] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const godId = useStore((s) => s.agents.find((a) => a.isGod)?.id ?? '');
-
   const send = async () => {
     const t = text.trim();
     if (!t || sending) return;
     setSending(true);
-    const ok = await sendToGod(t, godId);
+    const ok = await sendToGod(t);
     setSending(false);
     setText('');
     setFlash(ok ? 'ok' : 'err');
