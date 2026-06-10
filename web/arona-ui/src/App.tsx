@@ -3,31 +3,27 @@ import { useStore } from './store';
 import { AgentCard } from './components/AgentCard';
 import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
+import { ClassroomView } from './components/ClassroomView';
 import { PixelButton } from './components/PixelButton';
 import { startBoardPolling, fetchMode, focusPane } from './lib/mcp';
 
-// 라우팅: mode 미설정(또는 ?picker=1) → 시작 선택 화면. god → 샬레 교실(AgentCard
-// 그리드 + 학생 부르기). solo 면 arona-ui 가 뜰 일이 없지만(터미널이 뜸), 안전하게
-// picker 로 보낸다. 카드 클릭 → 해당 pane 포커스(MCP /focus).
+type ViewMode = 'classroom' | 'grid';
+
+// 라우팅: mode 미설정/solo/?picker=1 → 시작 선택. god → 샬레 교실(기본) ↔ 그리드 토글.
 export function App() {
   const agents = useStore((s) => s.agents);
-  const [mode, setModeState] = useState<string | null | undefined>(undefined); // undefined=로딩
+  const [mode, setModeState] = useState<string | null | undefined>(undefined);
+  const [view, setView] = useState<ViewMode>('classroom');
   const [showAdd, setShowAdd] = useState(false);
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
 
-  useEffect(() => {
-    fetchMode().then(setModeState);
-  }, []);
-
-  useEffect(() => {
-    if (mode === 'god') return startBoardPolling(1000);
-  }, [mode]);
+  useEffect(() => { fetchMode().then(setModeState); }, []);
+  useEffect(() => { if (mode === 'god') return startBoardPolling(1000); }, [mode]);
 
   if (mode === undefined) {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
   }
-
   if (mode == null || mode === 'solo' || forcePicker) {
     return <ModePicker onPicked={(m) => setModeState(m)} />;
   }
@@ -37,23 +33,45 @@ export function App() {
   return (
     <div style={{ height: '100%', overflow: 'auto', padding: 'var(--cth-space-5)' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--cth-space-5)' }}>
-        <h1
-          style={{
-            fontFamily: 'var(--cth-font-display)',
-            fontSize: 'var(--cth-text-display-lg)',
-            lineHeight: 'var(--cth-lh-display-lg)',
-            color: 'var(--cth-ink-900)', margin: 0
-          }}
-        >
-          샬레 교실
-        </h1>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--cth-space-5)' }}>
+          <h1
+            style={{
+              fontFamily: 'var(--cth-font-display)',
+              fontSize: 'var(--cth-text-display-lg)',
+              lineHeight: 'var(--cth-lh-display-lg)',
+              color: 'var(--cth-ink-900)', margin: 0
+            }}
+          >
+            샬레 교실
+          </h1>
+          {/* 픽셀 탭: 교실 ↔ 그리드 */}
+          <div style={{ display: 'flex' }}>
+            {(['classroom', 'grid'] as ViewMode[]).map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                style={{
+                  fontFamily: 'var(--cth-font-display)',
+                  fontSize: 'var(--cth-text-display-sm)',
+                  padding: '6px 12px',
+                  cursor: 'pointer', border: 'none',
+                  background: view === v ? 'var(--cth-sky)' : 'var(--cth-cream-200)',
+                  color: 'var(--cth-ink-900)',
+                  boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+                }}
+              >
+                {v === 'classroom' ? '교실' : '카드'}
+              </button>
+            ))}
+          </div>
+        </div>
         <PixelButton variant="primary" onClick={() => setShowAdd(true)}>학생 부르기</PixelButton>
       </div>
 
-      {sorted.length === 0 ? (
-        <p style={{ color: 'var(--cth-ink-500)' }}>
-          학생들을 기다리는 중… (board 폴링 중 · MCP 8765)
-        </p>
+      {view === 'classroom' ? (
+        <ClassroomView />
+      ) : sorted.length === 0 ? (
+        <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP 8765)</p>
       ) : (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--cth-space-4)' }}>
           {sorted.map((a) => (
