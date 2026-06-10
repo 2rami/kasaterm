@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use kasa_socket::backend::{Backend, PanelKind};
+use kasa_socket::backend::{Backend, PanelKind, SplitDirection};
 use axum::{
     extract::Query, http::header, response::IntoResponse, routing::get, routing::post, Json,
 };
@@ -182,6 +182,291 @@ async fn board_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     )
 }
 
+
+/// characters.json 후보 경로 — kasaterm-assign-character.py 와 같은 우선순위:
+/// ~/.config/kasaterm/characters.json → 번들 collab-hooks (env 오버라이드 →
+/// .app Resources → 레포 소스). 파싱 실패 파일은 건너뛰고 다음 후보로 (py 동일).
+fn characters_candidate_paths() -> Vec<std::path::PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        v.push(std::path::PathBuf::from(home).join(".config/kasaterm/characters.json"));
+    }
+    if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
+        v.push(std::path::PathBuf::from(p).join("characters.json"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        // <bundle>/Contents/MacOS/kasaterm → <bundle>/Contents/Resources/collab-hooks
+        if let Some(res) = exe
+            .parent()
+            .and_then(|m| m.parent())
+            .map(|c| c.join("Resources/collab-hooks/characters.json"))
+        {
+            v.push(res);
+        }
+    }
+    // cargo run (dev): 이 crate 기준 레포 안 정본
+    v.push(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../app/kasaterm/collab-hooks/characters.json"),
+    );
+    v
+}
+
+/// 후보들 중 첫 번째로 읽히고 JSON 으로 파싱되는 파일의 내용.
+fn first_valid_json(paths: &[std::path::PathBuf]) -> Option<serde_json::Value> {
+    for p in paths {
+        let Ok(s) = std::fs::read_to_string(p) else { continue };
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// `GET /characters` — 캐릭터 테마 정의를 그대로 JSON 으로 반환. 없으면 404
+/// (테마 미설치 = 기능 전체 skip 이 규약이라, 프런트가 404 로 분기한다).
+async fn characters_handler() -> impl IntoResponse {
+    let (status, body) = match first_valid_json(&characters_candidate_paths()) {
+        Some(v) => (axum::http::StatusCode::OK, v),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "characters.json not found" }),
+        ),
+    };
+    (status, [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// cwd → 모드 마커 파일명 slug. kasacollab.py `mode_path` 와 동일 규칙
+/// ('/' 와 '.' 을 '-' 로): 두 구현이 같은 마커를 읽고 써야 한다.
+fn mode_slug(cwd: &std::path::Path) -> String {
+    cwd.to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
+}
+
+/// 이 cwd 방의 영속 모드 마커 경로(~/.config/kasaterm/collab-mode/<slug>).
+fn mode_marker_path(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".config/kasaterm/collab-mode")
+            .join(mode_slug(cwd)),
+    )
+}
+
+/// 마커 내용 → 모드. 없거나 알 수 없는 값이면 solo (kasacollab.py 동일).
+fn read_mode_file(path: &std::path::Path) -> &'static str {
+    match std::fs::read_to_string(path) {
+        Ok(s) if s.trim() == "god" => "god",
+        _ => "solo",
+    }
+}
+
+/// 마커 원자 쓰기(tmp + rename) — 읽는 쪽은 완전한 모드명만 본다.
+fn write_mode_file(path: &std::path::Path, mode: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, mode)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// `GET /mode` — 활성 pane cwd 방의 협업 모드 `{ mode, cwd }`.
+async fn mode_get_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let cwd = resolve_cwd(&backend);
+    let mode = mode_marker_path(&cwd)
+        .map(|p| read_mode_file(&p))
+        .unwrap_or("solo");
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "mode": mode, "cwd": cwd.to_string_lossy() })),
+    )
+}
+
+/// `POST /mode?set=solo|god` — 활성 pane cwd 방의 모드 전환. 값이 쿼리로 오는
+/// 이유는 session-switch 와 같다(null-origin webview 의 CORS preflight 회피).
+async fn mode_set_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let set = params.get("set").map(String::as_str).unwrap_or("");
+    let body = if set != "solo" && set != "god" {
+        serde_json::json!({ "ok": false, "error": "set=solo|god required" })
+    } else {
+        let cwd = resolve_cwd(&backend);
+        match mode_marker_path(&cwd) {
+            Some(p) => match write_mode_file(&p, set) {
+                Ok(()) => serde_json::json!({ "ok": true, "mode": set }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+            },
+            None => serde_json::json!({ "ok": false, "error": "HOME unset" }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// Body for `POST /spawn`: 새 워커 pane 스펙. 전부 선택적 — 빈 객체면
+/// "현재 방에 기본 claude 하나 더".
+#[derive(serde::Deserialize)]
+struct SpawnReq {
+    /// characters.json 의 leader/members 이름. 지정 시 캐릭터 마커를 선점해
+    /// claude 래퍼의 assign-character 가 이 캐릭터의 persona 를 입힌다.
+    #[serde(default)]
+    character: Option<String>,
+    /// `claude --model <m>` 로 전달.
+    #[serde(default)]
+    model: Option<String>,
+    /// 새 pane 이 일할 절대경로. 지정 시 `cd <cwd> && claude`.
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// POSIX 셸 single-quote — pane 에 주입하는 cd 경로가 공백·따옴표를 품어도
+/// 한 토큰으로 살아남게.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `claude --model x` 같은 비인용 위치로 가는 값의 allowlist. 모델명/캐릭터명에
+/// 셸 메타문자가 낄 이유가 없으므로 통째로 거부한다.
+fn safe_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// spawn 할 pane 에 보낼 셸 한 줄 조립. `claude` 는 PATH shim(래퍼)이
+/// --settings/persona 를 알아서 얹으므로 맨이름 호출이 정답.
+fn spawn_command(model: Option<&str>, cwd: Option<&str>) -> String {
+    let claude = match model {
+        Some(m) => format!("claude --model {m}"),
+        None => "claude".to_string(),
+    };
+    match cwd {
+        Some(d) => format!("cd {} && {claude}", sh_quote(d)),
+        None => claude,
+    }
+}
+
+/// 캐릭터 마커 경로 — assign-character.py 와 동일 규약:
+/// /tmp/kasaterm-collab/<slug>/character-<pane번호(% 제거)>, 내용 = 이름.
+fn character_marker_path(room_cwd: &std::path::Path, surface_id: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from("/tmp/kasaterm-collab")
+        .join(mode_slug(room_cwd))
+        .join(format!("character-{}", surface_id.trim_start_matches('%')))
+}
+
+/// characters.json 에 이 이름의 캐릭터(leader 또는 member)가 정의돼 있나.
+fn character_defined(chars: &serde_json::Value, name: &str) -> bool {
+    let leader_is = chars
+        .get("leader")
+        .and_then(|l| l.get("name"))
+        .and_then(|n| n.as_str())
+        == Some(name);
+    let member_is = chars
+        .get("members")
+        .and_then(|m| m.as_array())
+        .is_some_and(|ms| {
+            ms.iter()
+                .any(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
+        });
+    leader_is || member_is
+}
+
+/// `POST /spawn` — split(no-focus) + 새 pane 에 claude 기동(munder spawnPty
+/// 대응). body 는 raw JSON 문자열(text/plain) — /git-commit 과 같은 preflight
+/// 회피. 흐름은 run_job 패턴: split → (마커 선점·rename best-effort) → send.
+async fn spawn_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
+    let resp = (|| {
+        let req: SpawnReq = if body.trim().is_empty() {
+            SpawnReq { character: None, model: None, cwd: None }
+        } else {
+            serde_json::from_str(&body)
+                .map_err(|e| format!("bad request body: {e}"))?
+        };
+        if let Some(m) = req.model.as_deref() {
+            if !safe_token(m) {
+                return Err(format!("bad model name: {m:?}"));
+            }
+        }
+        // cwd 는 physical 경로로 정규화(canonicalize). pane 안 도구들이
+        // os.getcwd()(physical) 기준 slug 로 마커를 찾으므로, /tmp 같은
+        // symlink 를 그대로 쓰면 선점 마커가 다른 방에 떨어진다. 존재하지
+        // 않는 경로는 cd 도 실패할 것이므로 여기서 거부.
+        let req_cwd = match req.cwd.as_deref() {
+            Some(d) => {
+                if !std::path::Path::new(d).is_absolute() {
+                    return Err(format!("cwd must be absolute: {d:?}"));
+                }
+                let canon = std::fs::canonicalize(d)
+                    .map_err(|e| format!("cwd not accessible: {d:?} ({e})"))?;
+                Some(canon.to_string_lossy().into_owned())
+            }
+            None => None,
+        };
+        // 캐릭터는 characters.json 에 실제 정의된 이름만 — 오타가 마커만
+        // 선점하고 persona 는 못 찾는 반쪽 상태를 막는다.
+        if let Some(name) = req.character.as_deref() {
+            let chars = first_valid_json(&characters_candidate_paths())
+                .ok_or_else(|| "characters.json not found".to_string())?;
+            if !character_defined(&chars, name) {
+                return Err(format!("unknown character: {name:?}"));
+            }
+        }
+
+        let surf = backend
+            .split_surface(SplitDirection::Down, false)
+            .map_err(|e| format!("split failed: {e}"))?;
+        let surface_id = surf.id;
+
+        // 새 pane 의 방 = cd 후 claude 가 뜰 디렉토리. 마커 slug 기준도 동일.
+        let room: std::path::PathBuf = req_cwd
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| resolve_cwd(&backend));
+        let mut notes = Vec::new();
+        if let Some(name) = req.character.as_deref() {
+            let marker = character_marker_path(&room, &surface_id);
+            let write = || -> std::io::Result<()> {
+                if let Some(dir) = marker.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                let mut tmp = marker.as_os_str().to_owned();
+                tmp.push(".tmp");
+                let tmp = std::path::PathBuf::from(tmp);
+                std::fs::write(&tmp, name)?;
+                std::fs::rename(&tmp, &marker)
+            };
+            match write() {
+                // 마커 선점 = assign 의 newly_assigned 경로를 안 타므로 헤더
+                // rename 은 여기서 직접 (assign 과 같은 '● <이름>' 표기).
+                Ok(()) => match backend.rename_surface(&surface_id, &format!("● {name}")) {
+                    Ok(()) => notes.push(format!("character={name}")),
+                    Err(e) => notes.push(format!("character={name}, rename skipped ({e})")),
+                },
+                Err(e) => notes.push(format!("character marker failed ({e})")),
+            }
+        }
+
+        let mut cmd = spawn_command(req.model.as_deref(), req_cwd.as_deref());
+        cmd.push('\n');
+        backend
+            .send_text(Some(&surface_id), &cmd)
+            .map_err(|e| format!("send failed: {e}"))?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "surface_id": surface_id,
+            "command": cmd.trim_end(),
+            "notes": notes,
+        }))
+    })()
+    .unwrap_or_else(|e: String| serde_json::json!({ "ok": false, "error": e }));
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(resp))
+}
 
 /// Read a required `usize` query param, defaulting to 0 when absent/garbage.
 fn query_idx(params: &std::collections::HashMap<String, String>) -> usize {
@@ -403,6 +688,9 @@ pub fn spawn_http_server(
                 let panel_close_backend = backend.clone();
                 let panel_resize_backend = backend.clone();
                 let panel_info_backend = backend.clone();
+                let mode_get_backend = backend.clone();
+                let mode_set_backend = backend.clone();
+                let spawn_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -442,6 +730,19 @@ pub fn spawn_http_server(
                     .route(
                         "/board",
                         get(move || board_handler(board_backend.clone())),
+                    )
+                    .route("/characters", get(characters_handler))
+                    .route(
+                        "/mode",
+                        get(move || mode_get_handler(mode_get_backend.clone())).post(
+                            move |q: Query<std::collections::HashMap<String, String>>| {
+                                mode_set_handler(mode_set_backend.clone(), q)
+                            },
+                        ),
+                    )
+                    .route(
+                        "/spawn",
+                        post(move |body: String| spawn_handler(spawn_backend.clone(), body)),
                     )
                     .route(
                         "/session-switch",
@@ -523,4 +824,142 @@ pub fn spawn_http_server(
         })?;
 
     Ok(port)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("kasa-mcp-http-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// kasacollab.py mode_path 와 같은 치환이어야 같은 마커를 공유한다.
+    #[test]
+    fn mode_slug_matches_python_rule() {
+        assert_eq!(
+            mode_slug(std::path::Path::new("/Users/kasa/Desktop/momewomo/tmuxify")),
+            "-Users-kasa-Desktop-momewomo-tmuxify"
+        );
+        // '.' 포함 경로 — god slug 엣지케이스
+        assert_eq!(
+            mode_slug(std::path::Path::new("/tmp/app.v1.2/run")),
+            "-tmp-app-v1-2-run"
+        );
+        assert_eq!(mode_slug(std::path::Path::new("/")), "-");
+    }
+
+    #[test]
+    fn read_mode_defaults_to_solo() {
+        let d = temp_dir("read-mode");
+        // 파일 없음 → solo
+        assert_eq!(read_mode_file(&d.join("missing")), "solo");
+        // 쓰레기 값 → solo
+        std::fs::write(d.join("garbage"), "banana\n").unwrap();
+        assert_eq!(read_mode_file(&d.join("garbage")), "solo");
+        // 개행 딸린 god → god (py 의 .strip() 대응)
+        std::fs::write(d.join("god"), "god\n").unwrap();
+        assert_eq!(read_mode_file(&d.join("god")), "god");
+        std::fs::write(d.join("solo"), "solo").unwrap();
+        assert_eq!(read_mode_file(&d.join("solo")), "solo");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn write_mode_atomic_roundtrip() {
+        let d = temp_dir("write-mode");
+        let p = d.join("rooms").join("-some-room");
+        // 부모 디렉토리 없어도 생성
+        write_mode_file(&p, "god").unwrap();
+        assert_eq!(read_mode_file(&p), "god");
+        // tmp 파일이 남지 않는다 (rename 완료)
+        let mut tmp = p.as_os_str().to_owned();
+        tmp.push(".tmp");
+        assert!(!std::path::Path::new(&tmp).exists());
+        // 덮어쓰기 전환
+        write_mode_file(&p, "solo").unwrap();
+        assert_eq!(read_mode_file(&p), "solo");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn spawn_command_assembles_cd_and_model() {
+        assert_eq!(spawn_command(None, None), "claude");
+        assert_eq!(spawn_command(Some("opus"), None), "claude --model opus");
+        assert_eq!(
+            spawn_command(None, Some("/tmp/a b")),
+            "cd '/tmp/a b' && claude"
+        );
+        assert_eq!(
+            spawn_command(Some("claude-fable-5"), Some("/r/x")),
+            "cd '/r/x' && claude --model claude-fable-5"
+        );
+    }
+
+    #[test]
+    fn sh_quote_survives_embedded_quote() {
+        // it's → 'it'\''s' (닫고-이스케이프-다시염)
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+        assert_eq!(sh_quote("plain"), "'plain'");
+    }
+
+    #[test]
+    fn safe_token_rejects_shell_meta() {
+        assert!(safe_token("claude-fable-5"));
+        assert!(safe_token("opus_4.8"));
+        assert!(!safe_token(""));
+        assert!(!safe_token("opus; rm -rf /"));
+        assert!(!safe_token("a b"));
+        assert!(!safe_token("$(boom)"));
+    }
+
+    /// assign-character.py 의 my_marker 와 자리·표기가 일치해야 선점이 먹힌다.
+    #[test]
+    fn character_marker_matches_python_layout() {
+        let p = character_marker_path(
+            std::path::Path::new("/Users/kasa/Desktop/momewomo/tmuxify"),
+            "%7",
+        );
+        assert_eq!(
+            p,
+            std::path::PathBuf::from(
+                "/tmp/kasaterm-collab/-Users-kasa-Desktop-momewomo-tmuxify/character-7"
+            )
+        );
+    }
+
+    #[test]
+    fn character_defined_checks_leader_and_members() {
+        let chars: serde_json::Value = serde_json::from_str(
+            r#"{"leader":{"name":"아로나"},"members":[{"name":"유우카"},{"name":"시로코"}]}"#,
+        )
+        .unwrap();
+        assert!(character_defined(&chars, "아로나"));
+        assert!(character_defined(&chars, "유우카"));
+        assert!(!character_defined(&chars, "프라나"));
+        // members 없는 단독 leader 구성도
+        let solo: serde_json::Value =
+            serde_json::from_str(r#"{"leader":{"name":"아로나"}}"#).unwrap();
+        assert!(character_defined(&solo, "아로나"));
+        assert!(!character_defined(&solo, "유우카"));
+    }
+
+    #[test]
+    fn first_valid_json_skips_broken_files() {
+        let d = temp_dir("char-json");
+        let broken = d.join("broken.json");
+        let valid = d.join("valid.json");
+        let missing = d.join("missing.json");
+        std::fs::write(&broken, "{not json").unwrap();
+        std::fs::write(&valid, r#"{"leader":{"name":"아로나"}}"#).unwrap();
+        // 깨진 파일·없는 파일은 건너뛰고 첫 유효 JSON 을 집는다
+        let got = first_valid_json(&[missing.clone(), broken.clone(), valid.clone()]).unwrap();
+        assert_eq!(got["leader"]["name"], "아로나");
+        // 전부 무효 → None (핸들러는 404)
+        assert!(first_valid_json(&[missing, broken]).is_none());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
