@@ -270,6 +270,45 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn swap_surfaces(&self, a: &str, b: &str) -> Result<()> {
+        // 검증은 여기(backend 스레드, ws 조회 가능)서 — GUI 위임은 fire-and-
+        // forget 이라 저쪽 실패를 CLI 에 돌려줄 수 없다.
+        if a == b {
+            anyhow::bail!("swap needs two distinct panes (got {a} twice)");
+        }
+        {
+            let ws = self.ws.lock().unwrap();
+            for id in [a, b] {
+                if !ws.panes.contains_key(id) {
+                    anyhow::bail!("no such pane: {id}");
+                }
+            }
+        }
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketSwap(a.to_string(), b.to_string()));
+        Ok(())
+    }
+
+    fn set_split_ratio(&self, surface_id: &str, ratio: f32) -> Result<()> {
+        if !(0.05..=0.95).contains(&ratio) {
+            anyhow::bail!("ratio must be within 0.05..0.95 (got {ratio})");
+        }
+        {
+            let ws = self.ws.lock().unwrap();
+            if !ws.panes.contains_key(surface_id) {
+                anyhow::bail!("no such pane: {surface_id}");
+            }
+            if ws.panes.len() < 2 {
+                anyhow::bail!("no split to resize (single pane)");
+            }
+        }
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketSetRatio(surface_id.to_string(), ratio));
+        Ok(())
+    }
+
     /// 활성 pane 의 셸 cwd — GET /mode 등 협업방 판정의 기준. trait 디폴트
     /// (None→호스트 cwd 폴백)는 .app 실행 시 cwd 가 `/` 라 항상 solo 로
     /// 오판했다(거노 실측: god 방 토글 차단). GUI 동기 RPC 로 활성 pane 의

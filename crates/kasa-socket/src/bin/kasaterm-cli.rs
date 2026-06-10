@@ -362,6 +362,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
     eprintln!("  kasaterm-cli split <left|right|up|down> [--focus]  # 기본 no-focus");
     eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
+    eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (god 크게)");
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
     eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
@@ -467,6 +468,17 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .get(1)
                 .ok_or_else(|| anyhow!("swap needs a second surface_id"))?;
             ("surface.swap", json!({ "a": a, "b": b }))
+        }
+        "resize" => {
+            let surface = args
+                .first()
+                .ok_or_else(|| anyhow!("resize needs <surface_id> <ratio>"))?;
+            let ratio: f64 = args
+                .get(1)
+                .ok_or_else(|| anyhow!("resize needs a ratio (0..1)"))?
+                .parse()
+                .map_err(|_| anyhow!("ratio must be a number, e.g. 0.6"))?;
+            ("surface.set_ratio", json!({ "surface_id": surface, "ratio": ratio }))
         }
         "send" => {
             // Two argument shapes:

@@ -2070,6 +2070,13 @@ enum UserEvent {
     /// Close the arona classroom window (`POST /arona-close` — the
     /// ModePicker's "터미널로" choice). No-op when it isn't open.
     SocketAronaClose,
+    /// `surface.swap` delegated from the socket thread — exchange two leaves'
+    /// tree positions (PTYs stay put, ids trade slots). `(a, b)`, both
+    /// pre-validated to exist by the backend.
+    SocketSwap(String, String),
+    /// `surface.set_ratio` delegated from the socket thread — make a pane
+    /// take `ratio` of its immediate split container ("god 크게" 자동화).
+    SocketSetRatio(String, f32),
     /// `surface.rename` / `surface.set_color` delegated from the socket thread.
     /// Pane header title / accent band live in `ws.panes` which only the GUI
     /// thread may touch, so the backend routes them here. `(surface_id, title)`
