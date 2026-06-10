@@ -73,17 +73,18 @@ worker_claude_color() {
 }
 
 # god-loop 강제 기동 — claude Monitor 의존 없이 외부 프로세스로 '모니터링 반드시
-# 켜짐'을 보장. pkill 로 옛 god 워처 정리해 항상 정확히 1개만 돈다.
-# mkdir 원자 락: board-context 가 매 턴 god-elect 를 백그라운드로 쏘므로 두 턴이
-# 겹치면 둘 다 '죽었네' 판정 후 둘 다 기동하는 race 로 loop 가 2개 뜬다(실측).
-# 락 잡은 쪽만 pkill+기동, 진 쪽은 양보. 보유자 사망 대비 60초 지난 락은 회수.
+# 켜짐'을 보장. 옛 워처 정리는 god-loop 자신의 후발 교체 락이 한다(같은 slug
+# 의 선점자만 정확히 죽임) — 여기 있던 전역 pkill -f 는 다른 방의 워처까지
+# 죽이는 오폭이라 제거(2026-06-10). mkdir 락은 board-context 가 매 턴 god-elect
+# 를 백그라운드로 쏠 때 nohup 중복 발사를 줄이는 dedupe 로만 유지(겹쳐 발사돼도
+# god-loop 락이 1개로 수렴시키니 정확성은 거기서 보장). 보유자 사망 대비 60초
+# 지난 락은 회수.
 start_god_loop() {
   local lock="/tmp/kasaterm-collab/$slug/god-loop.lock"
   if [ -d "$lock" ] && [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
     rmdir "$lock" 2>/dev/null
   fi
   mkdir "$lock" 2>/dev/null || return 0
-  pkill -f "god-loop.sh" 2>/dev/null
   nohup bash "$HOOKS_DIR/god-loop.sh" "$ME" >/dev/null 2>&1 &
   rmdir "$lock" 2>/dev/null
 }
