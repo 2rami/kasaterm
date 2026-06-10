@@ -172,15 +172,18 @@ impl ApplicationHandler<UserEvent> for App {
             let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
             let session_item = MenuItem::new("세션 패널 켜기/끄기", true, None);
             let board_item = MenuItem::new("board 패널 켜기/끄기", true, None);
+            let arona_item = MenuItem::new("아로나 켜기/끄기", true, None);
             let _ = view_m.append(&git_item);
             let _ = view_m.append(&session_item);
             let _ = view_m.append(&board_item);
+            let _ = view_m.append(&arona_item);
             let _ = menu.append(&app_m);
             let _ = menu.append(&view_m);
             menu.init_for_nsapp();
             self.git_menu_item = Some(git_item);
             self.session_menu_item = Some(session_item);
             self.board_menu_item = Some(board_item);
+            self.arona_menu_item = Some(arona_item);
             self.menu = Some(menu);
         }
         // WaitUntil so the cursor blink ticks even when no terminal output
@@ -375,6 +378,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autosplit();
         self.arm_autowindows();
         self.arm_autotoggle();
+        self.arm_autoarona();
         self.arm_autotabs();
         self.arm_autodrag();
         self.arm_autopanemove();
@@ -421,6 +425,24 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 WindowEvent::Resized(size) => {
                     if let Some(wv) = self.board_panel_webview.as_ref() {
+                        let _ = wv.set_bounds(wry::Rect {
+                            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
+                            size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.arona_panel_window.as_ref().map(|w| w.id()) == Some(id) {
+            match &event {
+                WindowEvent::CloseRequested => {
+                    self.arona_panel_webview = None;
+                    self.arona_panel_window = None;
+                }
+                WindowEvent::Resized(size) => {
+                    if let Some(wv) = self.arona_panel_webview.as_ref() {
                         let _ = wv.set_bounds(wry::Rect {
                             position: wry::dpi::PhysicalPosition::new(0, 0).into(),
                             size: wry::dpi::PhysicalSize::new(size.width, size.height).into(),
@@ -2703,6 +2725,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.toggle_session_panel(event_loop);
             } else if self.board_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_board_panel(event_loop);
+            } else if self.arona_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+                self.toggle_arona_panel(event_loop);
             }
         }
         // Headless git-panel demo (expand diff / open modal) before the capture.
@@ -2768,6 +2792,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autodrag();
         self.run_pending_autopanemove();
         self.run_pending_autotoggle();
+        self.run_pending_autoarona(event_loop);
         self.run_pending_autotabs();
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
