@@ -129,10 +129,10 @@ try:
 except Exception:
     sys.exit(0)  # 조회 실패 시 fail-safe — working 오판 nudge 방지
 status = {b.get("surface_id"): b.get("status") for b in board if b.get("surface_id")}
+# god 도 대상 — 제외하면 idle god 이 워커 done 보고를 영영 못 받아 거노가
+# 직접 깨워줘야 했다(실측). working god 은 idle 조건이 자연 제외한다.
 eligible = set()
 for p in live:
-    if p == god:
-        continue
     st = status.get(p)
     if st is None or st == "idle":  # None = bind 전(첫 턴 전이라 working 불가)
         eligible.add(p)
@@ -157,8 +157,12 @@ PY
       [ -z "$pane" ] && continue
       marker="$BASE/god-nudged-$pane"
       [ -f "$marker" ] && [ "$(cat "$marker")" = "$ids" ] && continue
-      "$CLI" tell "$pane" "[inbox] 미읽 ${n}건 — kasacollab inbox 확인" \
-        >/dev/null 2>&1 && echo "$ids" > "$marker"
+      if [ "$pane" = "$GOD" ]; then
+        txt="[inbox] 워커 보고 ${n}건 — kasacollab inbox 확인"
+      else
+        txt="[inbox] 미읽 ${n}건 — kasacollab inbox 확인"
+      fi
+      "$CLI" tell "$pane" "$txt" >/dev/null 2>&1 && echo "$ids" > "$marker"
     done
   done
 ) &
