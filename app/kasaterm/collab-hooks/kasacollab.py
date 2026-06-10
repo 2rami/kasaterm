@@ -59,6 +59,44 @@ def _write_lines_atomic(path, lines):
     os.replace(tmp, path)
 
 
+def _schale_state_path():
+    home = os.environ.get("HOME", "")
+    if not home:
+        return None
+    return os.path.join(home, ".config", "kasaterm", "schale-state.json")
+
+
+def _reward_done():
+    """done 보고 1건 → Credit+50, Exp+30. Exp 300마다 Gold+1000."""
+    path = _schale_state_path()
+    if not path:
+        return
+    default = {"credits": 0, "gold": 0, "affinity_lv": 1, "exp": 0}
+    try:
+        with open(path) as f:
+            s = json.load(f)
+    except Exception:
+        s = dict(default)
+    credits = s.get("credits", 0) + 50
+    exp_prev = s.get("exp", 0)
+    gold = s.get("gold", 0)
+    affinity_lv = s.get("affinity_lv", 1)
+    exp_new = exp_prev + 30
+    gained_lv = exp_new // 300 - exp_prev // 300
+    gold += gained_lv * 1000
+    exp = exp_new % 300
+    affinity_lv += gained_lv
+    new_state = {"credits": credits, "gold": gold, "affinity_lv": affinity_lv, "exp": exp}
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(new_state, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 def base():
     enc = os.getcwd().replace("/", "-").replace(".", "-")
     d = os.path.join("/tmp/kasaterm-collab", enc)
@@ -297,6 +335,8 @@ def cmd_msg(args):
          "to": pane_sid(to) or to, "to_pane": to,
          "text": text, "ts": time.time(), "read": False}
     append_msg(m)  # 락 안 append — drain 과 같은 임계구역
+    if text.startswith("done:"):
+        _reward_done()
     # god 방 = tell 생략(inbox 적재만). 워킹 중인 워커의 입력창에 트리거 문구가
     # 누적돼 오염되는 걸 막는다 — working 워커는 다음 턴 board-context 주입이나
     # stop-drain 이 어차피 메시지를 싣고, idle 워커는 god-loop 의 주기 nudge 가

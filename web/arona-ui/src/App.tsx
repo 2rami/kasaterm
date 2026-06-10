@@ -11,7 +11,7 @@ import { Footer } from './components/Footer';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
 import { PixelButton } from './components/PixelButton';
-import { startBoardPolling, fetchMode, focusPane, revealTerminal } from './lib/mcp';
+import { startBoardPolling, fetchMode, focusPane, revealTerminal, fetchSchaleState, type SchaleState } from './lib/mcp';
 
 type ViewMode = 'classroom' | 'grid';
 
@@ -26,6 +26,7 @@ export function App() {
   const [revealing, setRevealing] = useState(false);
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
   const [showChatInput, setShowChatInput] = useState(false);
+  const [schaleState, setSchaleState] = useState<SchaleState | null>(null);
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
 
@@ -35,6 +36,13 @@ export function App() {
     });
   }, []);
   useEffect(() => { if (mode === 'god') return startBoardPolling(1000); }, [mode]);
+  useEffect(() => {
+    if (mode !== 'god') return;
+    const tick = () => { fetchSchaleState().then(setSchaleState); };
+    tick();
+    const iv = setInterval(tick, 5000);
+    return () => clearInterval(iv);
+  }, [mode]);
 
   if (mode === undefined) {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
@@ -171,6 +179,9 @@ export function App() {
             <Footer
               onManage={() => setShowAdd(true)}
               onNewRequest={() => setShowChatInput((v) => !v)}
+              credits={schaleState?.credits}
+              gold={schaleState?.gold}
+              bondBonus={schaleState ? `인연 Lv.${schaleState.affinity_lv}` : undefined}
             />
           </div>
         </div>

@@ -212,6 +212,24 @@ export async function focusPane(surfaceId: string): Promise<boolean> {
   }
 }
 
+/** POST /send?surface=<id> body:{text,submit} — 특정 pane PTY에 텍스트 주입.
+ *  submit=true(기본)이면 개행 추가(제출), false면 타이핑만. fail-soft(false). */
+export async function sendToPane(surfaceId: string, text: string, submit = true): Promise<boolean> {
+  if (!text || !surfaceId) return false;
+  try {
+    const r = await fetch(`${BASE}/send?surface=${encodeURIComponent(surfaceId)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, submit })
+    });
+    if (!r.ok) return false;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
+    return d?.ok !== false;
+  } catch {
+    return false;
+  }
+}
+
 /** POST /tell-god body:{text} — 사용자 지시를 god pane 의 PTY 에 send_text+submit.
  *  백엔드가 lead 마커로 god pane 을 직접 탐색하므로 surface 파라미터 불필요.
  *  응답 {ok:true} / {ok:false,error}. fail-soft(false 반환). */
@@ -228,6 +246,32 @@ export async function sendToGod(text: string): Promise<boolean> {
     return d?.ok !== false;
   } catch {
     return false;
+  }
+}
+
+export interface SchaleState {
+  credits: number;
+  gold: number;
+  affinity_lv: number;
+  exp: number;
+}
+
+/** GET /schale-state — SCHALE OS 재화/Exp 영속 스냅샷. 파일 없으면 초기값 반환. */
+export async function fetchSchaleState(): Promise<SchaleState> {
+  const defaults: SchaleState = { credits: 0, gold: 0, affinity_lv: 1, exp: 0 };
+  try {
+    const r = await fetch(`${BASE}/schale-state`);
+    if (!r.ok) return defaults;
+    const d = (await r.json().catch(() => null)) as Partial<SchaleState> | null;
+    if (!d) return defaults;
+    return {
+      credits: d.credits ?? 0,
+      gold: d.gold ?? 0,
+      affinity_lv: d.affinity_lv ?? 1,
+      exp: d.exp ?? 0,
+    };
+  } catch {
+    return defaults;
   }
 }
 
