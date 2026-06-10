@@ -7,3 +7,4 @@ Cargo.lock
 **/__pycache__/
 .memory
 .claude/scheduled_tasks.lock
+.playwright-mcp/
