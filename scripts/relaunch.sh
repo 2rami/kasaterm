@@ -90,6 +90,37 @@ else
 fi
 
 # 4. Relaunch. A3 restore brings panes/sessions (and claude --resume) back.
+#
+# 빌드(수십 초) 동안 사용자가 Dock 등으로 앱을 직접 열면 그 시점의 *옛* 번들이
+# 실행되고, 아래 open 은 "이미 떠 있음"이라 그 인스턴스를 앞으로 가져올 뿐이라
+# 옛 바이너리가 계속 돈다(2026-06-10 두 차례 실측 — lsof txt 가 .app.old 의
+# 이미 unlink 된 inode). install 완료 후 여기서 다시 떠 있으면 한 번 더 graceful
+# quit 하고 열어, launch 시점 디스크 = 신 번들을 보장한다.
+if app_running; then
+  echo "[relaunch] app re-opened during build (stale binary) — quitting it first…"
+  osascript -e "tell application \"$APP_NAME\" to quit" 2>/dev/null || true
+  deadline=$(( $(date +%s) + 20 ))
+  while app_running; do
+    [[ $(date +%s) -ge $deadline ]] && { echo "[relaunch] ERROR: stale instance won't quit — Cmd+Q it and re-run with --no-build." >&2; exit 1; }
+    sleep 0.5
+  done
+fi
 echo "[relaunch] launching ${INSTALLED}..."
 open "$INSTALLED"
+
+# 5. Verify the running image is the installed binary (not a stale inode).
+disk_ino=$(stat -f %i "$INSTALLED/Contents/MacOS/kasaterm" 2>/dev/null)
+for _ in $(seq 1 20); do
+  sleep 0.5
+  pid=$(ps -Axww -o pid=,command= | while IFS= read -r l; do [[ "$l" == *"$PATTERN"* ]] && { echo "${l%% *}"; break; }; done)
+  [[ -n "$pid" ]] && break
+done
+if [[ -n "${pid:-}" ]]; then
+  run_ino=$(lsof -p "$pid" 2>/dev/null | awk '/MacOS\/kasaterm$/ {print $(NF-1); exit}')
+  if [[ -n "$run_ino" && "$run_ino" != "$disk_ino" ]]; then
+    echo "[relaunch] WARNING: running inode $run_ino != installed $disk_ino — stale binary, investigate." >&2
+  else
+    echo "[relaunch] verified: running image matches installed binary (inode $disk_ino)."
+  fi
+fi
 echo "[relaunch] done."
