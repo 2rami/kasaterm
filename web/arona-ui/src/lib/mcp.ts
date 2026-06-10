@@ -20,6 +20,9 @@ interface BoardRow {
   is_god?: boolean;
   tokens_in?: number;
   tokens_out?: number;
+  /** 마지막 답변/질문 첫마디 — waiting/idle 생각 구름 텍스트 소스. board 에는
+   *  waiting_for 필드가 없어, 대기 시 직전에 던진 질문/제안이 담긴 이 값을 쓴다. */
+  last_reply?: string;
   /** 유우카가 character-<N> 마커를 읽어 노출(후속). 있으면 도트칩 이니셜·이름이
    *  캐릭터명(아로나/시로코/아리스…)으로, 없으면 title(ai-title) 폴백. */
   character?: string;
@@ -52,6 +55,7 @@ function toAgent(r: BoardRow): Agent {
     status: toStatus(r.status),
     project: r.intent ?? '',
     action: r.intent,
+    lastReply: r.last_reply,
     isGod: !!r.is_god,
     contextTokens: tokens > 0 ? tokens : undefined
   };
