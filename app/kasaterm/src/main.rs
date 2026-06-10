@@ -3675,17 +3675,28 @@ curl -s --get --data-urlencode \"path=$abs\" \
 }
 
 /// Locate the canonical collab-hooks directory the generated hook settings
-/// point at. Env override first, then the .app bundle's Resources, then the
-/// repo source next to this crate (cargo run). The scripts resolve their
-/// siblings via `dirname $0`, so pointing at any one complete copy works.
+/// point at. The scripts resolve their siblings via `dirname $0`, so pointing
+/// at any one complete copy works.
 fn locate_collab_hooks_dir() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
-        let p = std::path::PathBuf::from(p);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
+    resolve_collab_hooks_dir(
+        std::env::current_exe().ok().as_deref(),
+        std::env::var("KASATERM_COLLAB_HOOKS_DIR").ok().as_deref(),
+    )
+}
+
+/// Pure resolution (split out so the priority is unit-testable). Priority:
+/// 1. the **.app bundle's own Resources** — a release binary must run the hooks
+///    it shipped with, so this WINS over the env override. Otherwise a leaked
+///    `KASATERM_COLLAB_HOOKS_DIR` (e.g. inherited from a dev shell) would point
+///    a release `.app` at version-skewed repo hooks (the bug this guards).
+/// 2. `KASATERM_COLLAB_HOOKS_DIR` — dev convenience for non-bundle `cargo run`,
+///    where no bundle Resources sits next to `target/{debug,release}/kasaterm`.
+/// 3. the repo source next to this crate (`CARGO_MANIFEST_DIR`) — plain dev run.
+fn resolve_collab_hooks_dir(
+    current_exe: Option<&std::path::Path>,
+    env_dir: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    if let Some(exe) = current_exe {
         // <bundle>/Contents/MacOS/kasaterm → <bundle>/Contents/Resources/collab-hooks
         if let Some(res) = exe
             .parent()
@@ -3695,6 +3706,12 @@ fn locate_collab_hooks_dir() -> Option<std::path::PathBuf> {
             if res.is_dir() {
                 return Some(res);
             }
+        }
+    }
+    if let Some(p) = env_dir {
+        let p = std::path::PathBuf::from(p);
+        if p.is_dir() {
+            return Some(p);
         }
     }
     let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("collab-hooks");
@@ -4288,6 +4305,57 @@ mod tests {
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
+    }
+
+    #[test]
+    fn resolve_collab_hooks_dir_prefers_bundle_over_env() {
+        // Build a throwaway .app-shaped tree + a separate env-pointed dir so the
+        // priority is proven on real filesystem state (is_dir checks).
+        let base = std::env::temp_dir().join(format!("kt-hooks-prio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let exe = base.join("Bundle.app/Contents/MacOS/kasaterm");
+        let bundle_res = base.join("Bundle.app/Contents/Resources/collab-hooks");
+        let env_dir = base.join("repo/collab-hooks");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "x").unwrap();
+        std::fs::create_dir_all(&bundle_res).unwrap();
+        std::fs::create_dir_all(&env_dir).unwrap();
+        let env_str = env_dir.to_str().unwrap();
+
+        // 1. In a bundle, Resources WINS over the env override (the leak guard).
+        assert_eq!(
+            resolve_collab_hooks_dir(Some(&exe), Some(env_str)).as_deref(),
+            Some(bundle_res.as_path()),
+            "bundle Resources must beat a leaked KASATERM_COLLAB_HOOKS_DIR",
+        );
+
+        // 2. No bundle Resources (dev exe under target/) → env override applies.
+        let dev_exe = base.join("target/debug/kasaterm");
+        std::fs::create_dir_all(dev_exe.parent().unwrap()).unwrap();
+        std::fs::write(&dev_exe, "x").unwrap();
+        assert_eq!(
+            resolve_collab_hooks_dir(Some(&dev_exe), Some(env_str)).as_deref(),
+            Some(env_dir.as_path()),
+            "without bundle Resources, the env override should win",
+        );
+
+        // 3. Neither bundle nor env → repo dev fallback (CARGO_MANIFEST_DIR,
+        //    which really exists for this crate).
+        let dev_fallback = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("collab-hooks");
+        assert_eq!(
+            resolve_collab_hooks_dir(Some(&dev_exe), None).as_deref(),
+            Some(dev_fallback.as_path()),
+            "with no bundle and no env, fall back to the repo source",
+        );
+
+        // A bogus env dir that doesn't exist is ignored (falls through to dev).
+        assert_eq!(
+            resolve_collab_hooks_dir(Some(&dev_exe), Some("/nonexistent/kt/hooks")).as_deref(),
+            Some(dev_fallback.as_path()),
+            "a non-existent env dir must not be returned",
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
