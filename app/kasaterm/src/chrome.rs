@@ -1141,22 +1141,23 @@ impl App {
             return;
         }
         self.onboard_check_at = None;
-        let cwd = self
-            .ws
-            .lock()
-            .unwrap()
-            .active_pane
-            .clone()
-            .and_then(|id| self.pane_current_cwd(&id))
-            .or_else(|| std::env::current_dir().ok());
-        let Some(cwd) = cwd else { return };
-        let configured = kasa_mcp::mode_marker_path(&cwd)
-            .map(|p| p.exists())
-            .unwrap_or(true); // 마커 경로 불명(HOME unset)이면 온보딩 안 띄움
-        if configured {
+        // 온보딩은 앱 전역 1회 사건이다. 옛 구현은 active pane 의 cwd 로 per-cwd
+        // collab 마커를 봤는데, 부팅 시 그 cwd 가 임의적이라(데스크탑에서 열면
+        // 데스크탑 온보딩 — 2026-06 실측 사고) + 새 방마다 재온보딩이었다.
+        // 글로벌 플래그 하나로 판정한다.
+        let Some(flag) = kasa_mcp::onboarded_marker_path() else {
+            return; // HOME unset → 마커 경로 불명, 온보딩 안 띄움
+        };
+        if flag.exists() {
             return;
         }
-        eprintln!("[onboard] first run for {} — opening arona ModePicker", cwd.display());
+        // 마이그레이션: 글로벌 플래그 도입 전 이미 방 모드를 정한 적 있는
+        // 사용자는 첫 실행이 아니다 — 플래그만 세우고 조용히 skip.
+        if kasa_mcp::any_collab_mode_marker() {
+            kasa_mcp::mark_onboarded();
+            return;
+        }
+        eprintln!("[onboard] first run — opening arona ModePicker");
         self.open_arona_panel(event_loop);
     }
     /// Effective render scale = DPI scale × whole-UI zoom. Everything that

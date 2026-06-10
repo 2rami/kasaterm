@@ -256,6 +256,35 @@ pub fn mode_marker_path(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     )
 }
 
+/// 앱 전역 1회 온보딩 완료 플래그(~/.config/kasaterm/onboarded). per-cwd
+/// collab-mode 마커와 분리한다 — 온보딩(첫 실행 환영 ModePicker)은 방이 아니라
+/// 앱 단위 1회 사건이다. 부팅 시 active pane cwd 가 임의적이라(데스크탑에서
+/// 열면 데스크탑 온보딩, 실측 사고) 방 기준 판정을 폐기하고 이 플래그로 대체.
+pub fn onboarded_marker_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/onboarded"))
+}
+
+/// 온보딩 완료를 영속 기록(원자 쓰기). 어떤 모드를 고르든 사용자가 첫 실행
+/// 선택을 끝낸 것이므로 모드 set 경로에서 호출한다.
+pub fn mark_onboarded() {
+    if let Some(p) = onboarded_marker_path() {
+        let _ = write_mode_file(&p, "1");
+    }
+}
+
+/// 이전 버전에서 방 하나라도 모드를 정한 적이 있나 — 글로벌 플래그 도입 전
+/// 사용자를 '첫 실행'으로 오인해 재온보딩하지 않으려는 마이그레이션 판정.
+pub fn any_collab_mode_marker() -> bool {
+    let Some(home) = std::env::var("HOME").ok() else {
+        return false;
+    };
+    let dir = std::path::PathBuf::from(home).join(".config/kasaterm/collab-mode");
+    std::fs::read_dir(&dir)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false)
+}
+
 /// 마커 내용 → 모드. 없거나 알 수 없는 값이면 solo (kasacollab.py 동일).
 fn read_mode_file(path: &std::path::Path) -> &'static str {
     match std::fs::read_to_string(path) {
@@ -307,7 +336,12 @@ async fn mode_set_handler(
         let cwd = resolve_cwd(&backend);
         match mode_marker_path(&cwd) {
             Some(p) => match write_mode_file(&p, set) {
-                Ok(()) => serde_json::json!({ "ok": true, "mode": set }),
+                Ok(()) => {
+                    // 모드를 골랐다 = 첫 실행 온보딩을 끝냈다. 전역 플래그를
+                    // 세워 다음 부팅에 ModePicker 가 다시 뜨지 않게 한다.
+                    mark_onboarded();
+                    serde_json::json!({ "ok": true, "mode": set })
+                }
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
             },
             None => serde_json::json!({ "ok": false, "error": "HOME unset" }),
@@ -1506,5 +1540,40 @@ mod tests {
         // 전부 무효 → None (핸들러는 404)
         assert!(first_valid_json(&[missing, broken]).is_none());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 전역 온보딩 플래그: 경로·기록·마이그레이션 판정. HOME 을 temp 로 격리
+    /// (HOME 을 읽는 테스트는 이 하나뿐이라 병렬에서 충돌하지 않는다).
+    #[test]
+    fn onboarded_flag_path_write_and_migration() {
+        let home = temp_dir("onboard-home");
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+
+        // 경로: ~/.config/kasaterm/onboarded
+        let flag = onboarded_marker_path().unwrap();
+        assert_eq!(flag, home.join(".config/kasaterm/onboarded"));
+
+        // 첫 실행: 플래그 없음 + collab 마커 없음 → 온보딩 대상
+        assert!(!flag.exists());
+        assert!(!any_collab_mode_marker());
+
+        // 모드 선택 = mark_onboarded → 플래그 영속(내용 "1")
+        mark_onboarded();
+        assert!(flag.exists());
+        assert_eq!(std::fs::read_to_string(&flag).unwrap(), "1");
+
+        // 마이그레이션: 플래그 지우고 옛 방 마커 하나 심으면 '첫 실행 아님' 판정
+        std::fs::remove_file(&flag).unwrap();
+        assert!(!any_collab_mode_marker());
+        let room = mode_marker_path(std::path::Path::new("/some/project")).unwrap();
+        write_mode_file(&room, "god").unwrap();
+        assert!(any_collab_mode_marker());
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
