@@ -36,7 +36,11 @@ impl ApplicationHandler<UserEvent> for App {
                             let p2 = Arc::clone(p);
                             let submit = submit.to_vec();
                             std::thread::spawn(move || {
-                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                // 140ms: bracketed paste needs this gap so Ink
+                                // finishes processing \x1b[200~…\x1b[201~ before
+                                // the CR arrives (munder pattern). 50ms was enough
+                                // for idle panes but too tight for menu state.
+                                std::thread::sleep(std::time::Duration::from_millis(140));
                                 let _ = p2.send_bytes(&submit);
                             });
                         }

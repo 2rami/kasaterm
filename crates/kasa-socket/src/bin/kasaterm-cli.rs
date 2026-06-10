@@ -558,15 +558,16 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .chars()
                 .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
                 .collect();
-            // Prepend Ctrl+U (0x15): clear any half-typed line already resident
-            // in the target's prompt before our message lands. Without it the
-            // resident text and the tell body merge into one forced submit —
-            // the user's in-progress input is lost and the message is polluted.
-            // Ctrl+U only wipes the input buffer, so it stays safe mid-generation
-            // (esc would interrupt the target claude instead).
+            // Prepend Ctrl+U (0x15): clear any half-typed line resident in the
+            // target prompt. Then wrap in bracketed paste (\x1b[200~…\x1b[201~):
+            // claude's Ink input treats this as a safe paste event even in
+            // menu/special states where a bare CR was eaten (munder pattern,
+            // hiddenClaude.ts). The handler ships body first, then \r 140ms
+            // later so Ink has finished processing the paste before the submit.
             (
                 "surface.send_text",
-                json!({ "surface_id": surface, "text": format!("\x15{}\r", flat.trim()) }),
+                json!({ "surface_id": surface,
+                         "text": format!("\x15\x1b[200~{}\x1b[201~\r", flat.trim()) }),
             )
         }
         "board" => {
