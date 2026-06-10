@@ -4,9 +4,36 @@ import { TiledMapRenderer } from '@/scene/TiledMapRenderer';
 import { buildClassroomMap, DESK_CELLS, MAP_W, MAP_H, TS } from '@/scene/classroomMap';
 import { makePlaceholderTileset } from '@/scene/placeholderTileset';
 import { ClassroomCharacter, type CharStatus } from '@/scene/ClassroomCharacter';
-import { useStore } from '@/store';
+import { useStore, type Agent } from '@/store';
 import { focusPane } from '@/lib/mcp';
 import { accentByName, type AccentColorName } from '@/design/tokens';
+
+// 생각 구름 첫마디 — 마지막 답변/질문의 첫 문장만(줄바꿈·문장부호 경계). 대기·완료
+// 시 길게 늘어진 last_reply 를 학생 머리 위에 한 줄로 압축한다.
+function firstLine(s?: string): string {
+  if (!s) return '';
+  const head = s.trim().split(/[\n。.!?！？]/)[0].trim();
+  return head.length > 40 ? head.slice(0, 39).trimEnd() + '…' : head;
+}
+
+// intent 의 긴 절대경로는 노이즈 — 마지막 세그먼트만 남겨 "…/folder" 로 축약.
+function shortenAction(s?: string): string {
+  if (!s) return '';
+  return s.replace(/\/\S*\/([^\s/]+)/g, '…/$1');
+}
+
+// 상태별 구름 텍스트(아로나 ① 우선순위): working = 행동(intent, 빈값이면 "…"
+// 사고중), waiting/blocked = 직전 질문/제안(뭘 기다리는지 사용자가 봐야 함),
+// idle = 마지막 한마디 or 비표시.
+function thoughtFor(a: Agent): string {
+  switch (a.status) {
+    case 'working': return shortenAction(a.action);
+    case 'waiting':
+    case 'blocked': return firstLine(a.lastReply) || shortenAction(a.action);
+    case 'idle': return firstLine(a.lastReply);
+    default: return '';
+  }
+}
 
 // 샬레 교실 — pixi 로 맵을 그리고, board 의 학생들을 책상에 앉혀 상태대로 움직인다.
 // 배치: isGod(아로나) 먼저, 그 다음 board 순서로 desk-0..N. 클릭 → 그 pane 포커스.
@@ -33,6 +60,7 @@ export function ClassroomView() {
       const renderer = new TiledMapRenderer(buildClassroomMap(), [makePlaceholderTileset()]);
       app.stage.addChild(renderer.getContainer());
       const charLayer = renderer.getCharacterContainer();
+      charLayer.sortableChildren = true; // thought.zIndex(100000)가 다른 학생 위로
 
       const sync = () => {
         const agents = [...useStore.getState().agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
@@ -43,13 +71,16 @@ export function ClassroomView() {
             const color = accentByName[a.accent as AccentColorName] ?? 0xa899b5;
             c = new ClassroomCharacter(a.id, a.name, color);
             c.view.on('pointertap', () => { void focusPane(a.id); });
+            c.setBounds(MAP_W * TS, MAP_H * TS); // 구름이 맵 밖으로 안 넘치게
             chars.set(a.id, c);
             charLayer.addChild(c.view);
+            charLayer.addChild(c.thought.container); // 캐릭터 위 레이어(절대좌표)
           }
           const desk = DESK_CELLS[i];
           // 의자 칸(책상 위쪽, 칠판 향함) 중앙에 앉힌다.
           c.setPos((desk.x + 0.5) * TS, (desk.y - 1 + 0.5) * TS);
           c.setStatus(a.status as CharStatus);
+          c.setThought(thoughtFor(a));
         });
         // board 에서 사라진 학생 정리
         for (const [id, c] of chars) {

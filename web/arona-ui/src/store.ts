@@ -11,7 +11,10 @@ export interface Agent {
   accent: AccentColorName;
   status: StatusKind;
   project: string;
+  /** 현재 행동(board.intent — tool 기반). 생각 구름의 working 텍스트. */
   action?: string;
+  /** 마지막 답변/질문 첫마디(board.last_reply). waiting/idle 구름 텍스트 소스. */
+  lastReply?: string;
   progress?: number;
   contextTokens?: number;
   contextLimit?: number;
