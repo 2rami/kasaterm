@@ -212,6 +212,25 @@ export async function focusPane(surfaceId: string): Promise<boolean> {
   }
 }
 
+/** POST /chat-send?surface=<godId> body:{text} — 사용자 지시를 god pane 의
+ *  PTY 에 send_text+submit(tell 동작). 유우카 백엔드 발주 중 → 404 fail-soft.
+ *  응답 {ok:true} / {ok:false,error}. 반환값=성공 여부. */
+export async function sendToGod(text: string, godId: string): Promise<boolean> {
+  if (!text.trim() || !godId) return false;
+  try {
+    const r = await fetch(`${BASE}/chat-send?surface=${encodeURIComponent(godId)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: text.trim() })
+    });
+    if (!r.ok) return false;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
+    return d?.ok !== false;
+  } catch {
+    return false;
+  }
+}
+
 /** GET /peek?surface=<id>&lines=<n> — 그 pane 의 보이는 화면 텍스트(모노). 교실
  *  터미널 뷰 패널이 1s 폴링해 학생이 지금 뭘 보고 있는지 그대로 띄운다.
  *  응답 {ok,surface_id,text}. 실패 시 빈 문자열(fail-soft). */

@@ -4,6 +4,7 @@ import { AgentCard } from './components/AgentCard';
 import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
+import { ClassroomChatInput } from './components/ClassroomChatInput';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
 import { PixelButton } from './components/PixelButton';
@@ -54,7 +55,8 @@ export function App() {
   };
 
   return (
-    <div style={{ height: '100%', overflow: 'auto', padding: 'var(--cth-space-5)' }}>
+    // 하단 입력바(52px)에 가리지 않게 paddingBottom 추가
+    <div style={{ height: '100%', overflow: 'auto', padding: 'var(--cth-space-5)', paddingBottom: 68 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 'var(--cth-space-5)', gap: 'var(--cth-space-4)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--cth-space-4)', minWidth: 0 }}>
           <h1
@@ -129,6 +131,9 @@ export function App() {
           ))}
         </div>
       )}
+
+      {/* 교실 모드: 하단 고정 입력바 (그리드 뷰에는 숨김) */}
+      {view === 'classroom' && <ClassroomChatInput />}
 
       {peek && (
         <TerminalPeekPanel
