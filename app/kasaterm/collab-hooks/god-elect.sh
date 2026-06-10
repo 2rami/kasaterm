@@ -21,6 +21,34 @@ if [ "$($KASACOLLAB mode show 2>/dev/null)" != "god" ]; then
   exit 0
 fi
 
+# 캐릭터 테마(있으면): god=leader, 워커=member. 헤더색·이름·인사·claude /color 를
+# 캐릭터로 입힌다. ~/.config 우선→번들. 없으면 기본(노랑 #FFD400 / "god").
+CHARS_JSON=""
+for cf in "$HOME/.config/kasaterm/characters.json" "$HOOKS_DIR/characters.json"; do
+  [ -f "$cf" ] && { CHARS_JSON="$cf"; break; }
+done
+GOD_NAME="god"
+GOD_CLAUDE_COLOR="yellow"
+GOD_GREETING="[god] 너가 god 이다. 팀 통솔 시작 — board-watch 로 변경점 감시, 워커 done 보고 받으면 단독 커밋."
+# 캐릭터 JSON 필드 추출 헬퍼: char_field <name> <field> (leader+members 통합 조회).
+char_field() {
+  python3 -c "import json,sys
+try:
+    d=json.load(open(sys.argv[1])); ms=[d.get('leader') or {}]+(d.get('members') or [])
+    print(next((m.get(sys.argv[3],'') for m in ms if m.get('name')==sys.argv[2]),''))
+except Exception: pass" "$CHARS_JSON" "$1" "$2" 2>/dev/null
+}
+if [ -n "$CHARS_JSON" ]; then
+  _ln=$(python3 -c "import json;print((json.load(open('$CHARS_JSON')).get('leader') or {}).get('name',''))" 2>/dev/null)
+  if [ -n "$_ln" ]; then
+    GOD_NAME="$_ln"
+    GOD_COLOR=$(char_field "$_ln" header_color); [ -z "$GOD_COLOR" ] && GOD_COLOR="#FFD400"
+    GOD_CLAUDE_COLOR=$(char_field "$_ln" claude_color); [ -z "$GOD_CLAUDE_COLOR" ] && GOD_CLAUDE_COLOR="yellow"
+    _gr=$(python3 -c "import json;print((json.load(open('$CHARS_JSON')).get('leader') or {}).get('greeting',''))" 2>/dev/null)
+    [ -n "$_gr" ] && GOD_GREETING="$_gr"
+  fi
+fi
+
 # 워커 색 — pane id 숫자(%5 → 5)로 팔레트에서 안 겹치게(노랑 god 색은 팔레트에
 # 없음). board webview JS 가 같은 식으로 색을 재현해 헤더 색과 카드 색이 일치한다.
 worker_color() {
@@ -58,23 +86,36 @@ start_god_loop() {
 
 ensure_god_look() {
   $CLI color "$ME" "$GOD_COLOR" >/dev/null 2>&1
-  $CLI rename "$ME" "● god" >/dev/null 2>&1
+  $CLI rename "$ME" "● $GOD_NAME" >/dev/null 2>&1
   # 사이드바 세션 이름도 god 마킹 — pane 헤더만이 아니라 세션 라벨까지(거노 요청).
   # 강등 원복은 안 함(단순화 — god 윈도우만 마킹, 재선출 때 갱신).
-  $CLI rename-window "● god" >/dev/null 2>&1
+  $CLI rename-window "● $GOD_NAME" >/dev/null 2>&1
   # god 인데 워처가 죽어있으면 조용히 재기동(자가치유) — '반드시 켜짐'.
   pgrep -f "god-loop.sh $ME" >/dev/null 2>&1 || start_god_loop
 }
 
 ensure_worker_look() {
-  $CLI color "$ME" "$(worker_color)" >/dev/null 2>&1
+  # 캐릭터(assign-character 가 박은 character-<N> 마커)가 있으면 그 색, 없으면
+  # pane 숫자 해시 색. 헤더색·claude /color 둘 다 캐릭터 우선.
+  local hc="" cc="" cname=""
+  if [ -n "$CHARS_JSON" ]; then
+    local cm="/tmp/kasaterm-collab/$slug/character-${ME#%}"
+    [ -f "$cm" ] && cname=$(cat "$cm" 2>/dev/null)
+  fi
+  if [ -n "$cname" ]; then
+    hc=$(char_field "$cname" header_color)
+    cc=$(char_field "$cname" claude_color)
+  fi
+  [ -z "$hc" ] && hc=$(worker_color)
+  [ -z "$cc" ] && cc=$(worker_claude_color)
+  $CLI color "$ME" "$hc" >/dev/null 2>&1
   # claude 프롬프트 바도 헤더 근사색으로. 매 턴 재주입하면 강제 제출 스팸이라
   # pane 당 1회 마커. god-elect 는 claude hook 에서만 돌므로 이 pane 엔 claude
   # 가 떠 있다는 게 보장된다(셸에 /color 오타칠 일 없음).
   local marker="/tmp/kasaterm-collab/$slug/claude-colored-${ME//[^A-Za-z0-9]/_}"
   if [ ! -f "$marker" ]; then
     touch "$marker"
-    $CLI tell "$ME" "/color $(worker_claude_color)" >/dev/null 2>&1
+    $CLI tell "$ME" "/color $cc" >/dev/null 2>&1
   fi
 }
 
@@ -166,11 +207,11 @@ if $KASACOLLAB lead claim >/dev/null 2>&1; then
   # (강등 시 자동 원복은 claude slash 한계로 불가하므로 애초에 안 친다). 타이틀
   # resume(`claude --resume god`)·색은 진짜 god 세션 1회 주입에만.
   if [ -z "$god_sid" ] || [ "$god_sid" = "$my_sid" ]; then
-    $CLI tell "$ME" "/rename god" >/dev/null 2>&1
+    $CLI tell "$ME" "/rename $GOD_NAME" >/dev/null 2>&1
     sleep 1
-    $CLI tell "$ME" "/color yellow" >/dev/null 2>&1
+    $CLI tell "$ME" "/color $GOD_CLAUDE_COLOR" >/dev/null 2>&1
     sleep 1
-    $CLI tell "$ME" "[god] 너가 god 이다. 팀 통솔 시작 — board-watch 로 변경점 감시, 워커 done 보고 받으면 단독 커밋." >/dev/null 2>&1
+    $CLI tell "$ME" "$GOD_GREETING" >/dev/null 2>&1
   fi
   # 내가 god 됐으니 roster 에 인계 마킹 — 다음 재선출의 우선권 기준.
   [ -n "$my_sid" ] && $KASACOLLAB roster-mark-god "$my_sid" >/dev/null 2>&1

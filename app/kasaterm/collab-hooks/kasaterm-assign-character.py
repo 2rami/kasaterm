@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""god 모드 방에서 이 pane 에 캐릭터를 할당하고 그 persona 를 stdout 으로 낸다.
+claude 래퍼(shim)가 이 출력을 `--append-system-prompt` 에 실어 말투를 입힌다.
+
+characters.json 우선순위: ~/.config/kasaterm/characters.json → 번들(이 스크립트
+옆) → 둘 다 없으면 빈 출력(기능 전체 skip = 현행 무변화). 번들 기본 파일은 만들지
+않는다 — 오리지널 테마는 사용자가 나중에 채운다.
+
+할당: 방(cwd slug)에 character 마커가 하나도 없으면 leader, 있으면 members 중
+아직 안 쓰인 첫 번째. /tmp/kasaterm-collab/<slug>/character-<pane> 마커(내용=이름).
+동시 스폰 race 는 flock 으로 직렬화. 새로 할당할 때만 헤더를 '● <이름>' 으로 rename
+(재스폰/재호출은 persona 만 반환 — idempotent).
+
+persona 는 세션 생애 고정값이라 --append-system-prompt 에 실어도 프롬프트 캐시를
+깨지 않는다(munder injectedPrompt invariant 와 같은 원리).
+"""
+import sys, os, json, glob, subprocess
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+
+def load_characters():
+    paths = [
+        os.path.expanduser("~/.config/kasaterm/characters.json"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "characters.json"),
+    ]
+    for p in paths:
+        try:
+            return json.load(open(p))
+        except Exception:
+            continue
+    return None
+
+
+def persona_for(chars, name):
+    leader = chars.get("leader") or {}
+    if leader.get("name") == name:
+        return leader.get("persona")
+    for m in chars.get("members") or []:
+        if m.get("name") == name:
+            return m.get("persona")
+    return None
+
+
+def main():
+    pane = os.environ.get("KASATERM_PANE_ID")
+    if not pane:
+        return
+    chars = load_characters()
+    if not chars:
+        return  # characters 없음 → 기능 skip(현행)
+
+    slug = os.getcwd().replace("/", "-").replace(".", "-")
+    base = f"/tmp/kasaterm-collab/{slug}"
+    os.makedirs(base, exist_ok=True)
+    my_marker = os.path.join(base, "character-" + pane.lstrip("%"))
+
+    name = None
+    newly_assigned = False
+    lf = open(os.path.join(base, "character.lock"), "w")
+    if fcntl is not None:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+    try:
+        if os.path.exists(my_marker):
+            name = open(my_marker).read().strip()
+        else:
+            used = set()
+            for m in glob.glob(os.path.join(base, "character-*")):
+                if m.endswith(".lock"):
+                    continue
+                try:
+                    used.add(open(m).read().strip())
+                except Exception:
+                    pass
+            leader = chars.get("leader") or {}
+            if leader.get("name") and leader.get("name") not in used:
+                name = leader.get("name")
+            else:
+                cand = next((m for m in (chars.get("members") or [])
+                             if m.get("name") and m.get("name") not in used), None)
+                name = cand.get("name") if cand else None
+            if name:
+                tmp = my_marker + ".tmp"
+                open(tmp, "w").write(name)
+                os.replace(tmp, my_marker)
+                newly_assigned = True
+    finally:
+        if fcntl is not None:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+        lf.close()
+
+    if not name:
+        return  # 캐릭터가 다 찼음(members 초과) → persona 없이
+
+    # 새 할당일 때만 헤더 rename(재스폰은 이미 붙어 있음 — 강제 제출 스팸 방지).
+    if newly_assigned:
+        cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
+        try:
+            subprocess.run([cli, "rename", pane, f"● {name}"],
+                           timeout=2, capture_output=True)
+        except Exception:
+            pass
+
+    persona = persona_for(chars, name)
+    if persona:
+        sys.stdout.write(persona)
+
+
+if __name__ == "__main__":
+    main()
