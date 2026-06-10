@@ -17,7 +17,7 @@ board(감지)·conflict-guard(차단) 위에 얹는 '분담·대화' 층. 두 �
   kasacollab msg %2 "이 파일 곧 끝나"           # %2에게 메시지
   kasacollab inbox                               # 내게 온 미읽 메시지(읽음 처리)
 """
-import sys, os, json, time, subprocess
+import sys, os, json, time, subprocess, re, glob
 from contextlib import contextmanager
 
 try:
@@ -68,6 +68,72 @@ def base():
 
 def me():
     return os.environ.get("KASATERM_PANE_ID", "?")
+
+
+# ── sid 라우팅 헬퍼 ────────────────────────────────────────────────
+# 메시지 주소를 pane id 가 아니라 session id(sid)에 묶는다 — pane id 는 재시작
+# 재배치마다 주인이 바뀌어 옛 주소 메시지가 엉뚱한 pane 에 오배달됐다(06-10
+# 실측: 시로코 %3→%2 재배치로 발주가 유우카에게). sid 는 claude 세션에 영속.
+# pane↔sid 매핑은 bind 마커(/tmp/kasaterm-bound-<N>, 내용 '<sock inode>:<tp>')
+# — inode 가 현 데몬과 다르면 옛 세대 잔재라 무시(복구가드 v2 와 같은 규칙).
+
+BOUND_GLOB = "/tmp/kasaterm-bound-*"  # 테스트가 임시 디렉터리로 패치한다
+
+_SID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def is_sid(s):
+    return bool(s) and bool(_SID_RE.fullmatch(s))
+
+
+def _sock_inode():
+    sock = os.environ.get("KASATERM_SOCKET_PATH") or \
+        os.path.expanduser("~/.config/kasaterm/daemon.sock")
+    try:
+        return str(os.stat(sock).st_ino)
+    except OSError:
+        return None
+
+
+def pane_sid(pane):
+    """pane 의 현 세대 bound sid. 마커 없음/옛 세대/소켓 불명이면 None —
+    이때 호출처는 레거시 pane id 주소로 폴백한다(fail-open)."""
+    enc = re.sub(r"[^A-Za-z0-9]", "_", pane)
+    base_dir = os.path.dirname(BOUND_GLOB)
+    try:
+        raw = open(os.path.join(base_dir, f"kasaterm-bound-{enc}")).read().strip()
+    except OSError:
+        return None
+    ino, _, tp = raw.partition(":")
+    cur = _sock_inode()
+    if cur is None or ino != cur:
+        return None
+    sid = os.path.splitext(os.path.basename(tp))[0]
+    return sid or None
+
+
+def my_sid():
+    return pane_sid(me())
+
+
+def sid_to_pane(sid):
+    """sid 가 지금 bind 된 pane — 현 세대 마커 첫 매칭. 같은 sid 두 pane(이중
+    attach)은 복구가드가 막는 전제라 첫 매칭으로 충분. 없으면 None."""
+    for bm in sorted(glob.glob(BOUND_GLOB)):
+        enc = os.path.basename(bm).split("kasaterm-bound-", 1)[-1]
+        pane = "%" + (enc[1:] if enc.startswith("_") else enc)
+        if pane_sid(pane) == sid:
+            return pane
+    return None
+
+
+def addr_label(addr):
+    """저장 주소(sid 또는 레거시 %N)를 사람이 읽는 pane 표기로 — 사람과 board
+    는 pane 으로 소통한다. sid 면 현재 bind pane, bind 가 없으면(세션 죽음/
+    재시작 직후) sid 앞 8자로 식별만."""
+    if not is_sid(addr):
+        return addr
+    return sid_to_pane(addr) or addr[:8]
 
 
 def tasks_path():
@@ -171,8 +237,13 @@ def drain_unread():
         return []
     with _locked(p):
         msgs = read_msgs()
+        # 내 주소 = 내 sid(신규 라우팅) + 내 pane id(레거시 메시지 호환).
+        # sid 가 안 잡히면(마커 없음 찰나) pane 기준만 — 다음 턴에 재시도된다.
+        sid = my_sid()
+        mine_addrs = {me()} | ({sid} if sid else set())
         mine = [m for m in msgs
-                if m.get("to") == me() and m.get("from") != me() and not m.get("read")]
+                if m.get("to") in mine_addrs
+                and m.get("from") not in mine_addrs and not m.get("read")]
         if not mine:
             return []
         for m in mine:
@@ -218,8 +289,13 @@ def cmd_msg(args):
         print(f"'{to}' 는 지금 살아있는 pane 이 아니야 — 메시지 안 보냄. "
               f"board 에 있는 상대: {others}. `kasaterm-cli board` 로 확인해라.")
         return
-    m = {"id": short_id(), "from": me(), "to": to, "text": text,
-         "ts": time.time(), "read": False}
+    # 주소는 sid 로 저장(재시작 재배치에도 같은 세션에 닿는다). 전송 시점의
+    # pane 은 *_pane 에 박제 — 표시·디버그용일 뿐 라우팅엔 안 쓴다. bound 가
+    # 없는 상대(셸 pane/claude 부팅 전)는 레거시 pane 주소 폴백.
+    m = {"id": short_id(),
+         "from": my_sid() or me(), "from_pane": me(),
+         "to": pane_sid(to) or to, "to_pane": to,
+         "text": text, "ts": time.time(), "read": False}
     append_msg(m)  # 락 안 append — drain 과 같은 임계구역
     # god 방 = tell 생략(inbox 적재만). 워킹 중인 워커의 입력창에 트리거 문구가
     # 누적돼 오염되는 걸 막는다 — working 워커는 다음 턴 board-context 주입이나
@@ -251,7 +327,7 @@ def cmd_inbox(args):
         print("(새 메시지 없음)")
         return
     for m in mine:
-        print(f"{m['from']}: {m['text']}")
+        print(f"{addr_label(m.get('from', '?'))}: {m['text']}")
 
 
 def cmd_drain_stop(args):
@@ -270,7 +346,7 @@ def cmd_drain_stop(args):
     mine = drain_unread()
     if not mine:
         sys.exit(0)
-    lines = "\n".join(f"- {m['from']}: {m['text']}" for m in mine)
+    lines = "\n".join(f"- {addr_label(m.get('from', '?'))}: {m['text']}" for m in mine)
     reason = (f"끝내기 전에 inbox 에 안 읽은 협업 메시지 {len(mine)}건이 있어. "
               f"각각 확인하고 필요하면 답장(kasacollab msg <상대> \"...\")해라:\n{lines}")
     # Stop hook 의 stdout JSON 으로 멈춤을 막는다(munder 검증 형식 — command
