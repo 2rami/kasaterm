@@ -185,11 +185,16 @@ def _recovery_candidates(roster, live, bound, now=None, daemon_start=0):
       (ts >= daemon_start) 최근(GRACE) bind 면 마커 일시 부재로 보고 제외,
       그 외(옛 세대 기록 = 재시작 복구 시나리오)는 후보 유지.
     한계(문서화): 같은 세대 내 pane 닫힘→번호 재사용 시 잔존 same-gen 마커가
-    죽은 sid 를 ①로 가릴 수 있다 — 근본은 pane 종료 시 마커 삭제(Rust, 후속)."""
+    죽은 sid 를 ①로 가릴 수 있다 — 근본은 pane 종료 시 마커 삭제(Rust, 후속).
+    ④ archived=true(munder 차용): 닫힌 pane(close_pane) 또는 fresh 시작으로
+      세대가 넘어가며 archive 된 옛 항목 — 복구 후보에서 제외. resume bind 가
+      해당 pane 을 fresh 재기록하면 archived 가 빠져(=활성) 자동 복귀."""
     now = time.time() if now is None else now
     live_sids = set(bound.values())
     out = []
     for v in roster.values():
+        if v.get("archived"):
+            continue
         sid = v.get("session_id")
         if sid in live_sids:
             continue
