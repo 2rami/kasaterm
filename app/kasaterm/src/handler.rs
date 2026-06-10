@@ -69,6 +69,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketAronaClose => {
+                self.close_arona_panel();
+                return;
+            }
             UserEvent::SocketRevealTerminal(show, focus_pane) => {
                 if let Some(w) = &self.window {
                     w.set_visible(*show);
@@ -409,6 +413,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autowindows();
         self.arm_autotoggle();
         self.arm_autoarona();
+        self.arm_first_run_onboarding();
         self.arm_autotabs();
         self.arm_autodrag();
         self.arm_autopanemove();
@@ -468,15 +473,9 @@ impl ApplicationHandler<UserEvent> for App {
         if self.arona_panel_window.as_ref().map(|w| w.id()) == Some(id) {
             match &event {
                 WindowEvent::CloseRequested => {
-                    self.arona_panel_webview = None;
-                    self.arona_panel_window = None;
-                    // X 로 닫는 경로도 toggle 과 똑같이 메인 창을 복귀시켜야
-                    // 한다 — 빠지면 터미널이 영영 숨은 채 남는다.
-                    if let Some(w) = &self.window {
-                        w.set_visible(true);
-                        w.focus_window();
-                        w.request_redraw();
-                    }
+                    // 메인 창 복귀까지 포함한 단일 닫기 경로 — 여기서 직접
+                    // 필드를 비우면 reveal 을 빼먹어 터미널이 영영 숨는다.
+                    self.close_arona_panel();
                 }
                 WindowEvent::Resized(size) => {
                     if let Some(wv) = self.arona_panel_webview.as_ref() {
@@ -2830,6 +2829,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autopanemove();
         self.run_pending_autotoggle();
         self.run_pending_autoarona(event_loop);
+        self.run_pending_onboarding(event_loop);
         self.run_pending_autotabs();
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();

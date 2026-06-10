@@ -1093,22 +1093,71 @@ impl App {
             w.set_visible(false);
         }
     }
+    /// Close the arona window and bring the hidden main terminal back. The
+    /// single close path — menu toggle, the window's X button, and
+    /// `POST /arona-close` (ModePicker "터미널로") all route here so none of
+    /// them can forget the reveal and strand the terminal hidden. No-op when
+    /// the window isn't open.
+    pub(crate) fn close_arona_panel(&mut self) {
+        if self.arona_panel_window.is_none() {
+            return;
+        }
+        // Drop the webview before the window it borrows from.
+        self.arona_panel_webview = None;
+        self.arona_panel_window = None;
+        // 교실에서 나옴 — 숨겨둔 메인 터미널 창 복귀(+숨김 동안 못 받은
+        // redraw 직접 청구).
+        if let Some(w) = &self.window {
+            w.set_visible(true);
+            w.focus_window();
+            w.request_redraw();
+        }
+        eprintln!("[arona-panel] closed; terminal revealed");
+    }
     /// Toggle the arona UI window from the menu: close if open, open if not.
     pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
         if self.arona_panel_window.is_some() {
-            // Drop the webview before the window it borrows from.
-            self.arona_panel_webview = None;
-            self.arona_panel_window = None;
-            // 교실에서 나옴 — 숨겨둔 메인 터미널 창 복귀(+숨김 동안 못 받은
-            // redraw 직접 청구).
-            if let Some(w) = &self.window {
-                w.set_visible(true);
-                w.focus_window();
-                w.request_redraw();
-            }
+            self.close_arona_panel();
         } else {
             self.open_arona_panel(event_loop);
         }
+    }
+    /// First-run onboarding: open the arona window (whose ModePicker shows
+    /// the 터미널 vs 아로나 choice) once the boot settles, but only when this
+    /// room has no collab-mode marker yet — picking a mode writes the marker,
+    /// so the next boot skips straight to the terminal. `KASATERM_NO_ONBOARD`
+    /// opts out for headless verification and pre-onboarding user setups.
+    pub(crate) fn arm_first_run_onboarding(&mut self) {
+        if std::env::var_os("KASATERM_NO_ONBOARD").is_some() {
+            return;
+        }
+        // 1.5s: 초기 pane 의 shell 이 spawn 되어 lsof cwd 해석이 안정될 여유.
+        self.onboard_check_at =
+            Some(Instant::now() + std::time::Duration::from_millis(1500));
+    }
+    pub(crate) fn run_pending_onboarding(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(due) = self.onboard_check_at else { return };
+        if Instant::now() < due {
+            return;
+        }
+        self.onboard_check_at = None;
+        let cwd = self
+            .ws
+            .lock()
+            .unwrap()
+            .active_pane
+            .clone()
+            .and_then(|id| self.pane_current_cwd(&id))
+            .or_else(|| std::env::current_dir().ok());
+        let Some(cwd) = cwd else { return };
+        let configured = kasa_mcp::mode_marker_path(&cwd)
+            .map(|p| p.exists())
+            .unwrap_or(true); // 마커 경로 불명(HOME unset)이면 온보딩 안 띄움
+        if configured {
+            return;
+        }
+        eprintln!("[onboard] first run for {} — opening arona ModePicker", cwd.display());
+        self.open_arona_panel(event_loop);
     }
     /// Effective render scale = DPI scale × whole-UI zoom. Everything that
     /// converts logical↔physical (cell metrics, chrome coords, cursor px,

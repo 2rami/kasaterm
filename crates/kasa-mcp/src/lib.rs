@@ -18,6 +18,8 @@ pub mod git;
 mod http;
 mod register;
 pub use http::spawn_http_server;
+// 호스트(kasaterm)의 첫 실행 온보딩이 GET /mode 와 같은 마커로 판정하게 노출.
+pub use http::mode_marker_path;
 pub use register::register_clients;
 
 /// Default header accent for background jobs — calm blue-gray so job
