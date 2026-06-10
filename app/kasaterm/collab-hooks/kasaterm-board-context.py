@@ -90,7 +90,10 @@ def inbox_section():
     mine = kasacollab.drain_unread()
     if not mine:
         return None
-    lines = [f"  {m.get('from', '?')}: {m.get('text', '')}" for m in mine]
+    # from 은 sid 저장(라우팅) — 사람이 읽는 표기는 현재 bind pane(%N)으로
+    # 해석(kasacollab.addr_label). 답장 안내의 상대 id 도 같은 해석을 쓴다.
+    lines = [f"  {kasacollab.addr_label(m.get('from', '?'))}: {m.get('text', '')}"
+             for m in mine]
     return ("[받은 메시지] 나한테 온 말 (답장: kasacollab msg <상대> \"...\"):\n"
             + "\n".join(lines))
 
