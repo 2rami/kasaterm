@@ -76,6 +76,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.swap" => surface_swap(backend, id, &req.params),
         "surface.move" => surface_move(backend, id, &req.params),
         "surface.resize_divider" => surface_resize_divider(backend, id, &req.params),
+        "surface.set_ratio" => surface_set_ratio(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),
         "surface.open_preview" => surface_open_preview(backend, id, &req.params),
         "collab.board" => {
@@ -206,6 +207,7 @@ fn system_capabilities(id: Value) -> Response {
                 "window.rename",
                 "surface.set_color",
                 "surface.resize_divider",
+                "surface.set_ratio",
                 "collab.board",
                 "window.layout",
                 "window.list",
@@ -433,6 +435,21 @@ fn surface_move(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         }
     };
     match backend.move_surface(surface_id, target, dir) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_set_ratio(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.set_ratio requires `surface_id` (string)"),
+    };
+    let ratio = match params.get("ratio").and_then(|v| v.as_f64()) {
+        Some(r) => r as f32,
+        None => return param_err(id, "surface.set_ratio requires `ratio` (number, 0..1)"),
+    };
+    match backend.set_split_ratio(surface_id, ratio) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

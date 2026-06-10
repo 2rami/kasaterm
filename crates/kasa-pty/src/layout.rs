@@ -157,6 +157,30 @@ impl PtyLayout {
         true
     }
 
+    /// Set the split ratio of `pane_id`'s *immediate parent* so the pane
+    /// takes `frac` of that container (its sibling subtree gets `1 - frac`).
+    /// The orchestration knob behind `kasaterm-cli resize` — "make the god
+    /// pane big" after a fleet regroup. Deliberately the direct container
+    /// only, not the pane's share of the whole window: nested splits keep
+    /// their own ratios. Returns false when the pane isn't a direct child
+    /// of any split (single-pane window or id missing).
+    pub fn set_leaf_ratio(&mut self, pane_id: &str, frac: f32) -> bool {
+        match self {
+            PtyLayout::Leaf { .. } => false,
+            PtyLayout::Split { ratio, a, b, .. } => {
+                if matches!(a.as_ref(), PtyLayout::Leaf { pane_id: p } if p == pane_id) {
+                    *ratio = frac;
+                    return true;
+                }
+                if matches!(b.as_ref(), PtyLayout::Leaf { pane_id: p } if p == pane_id) {
+                    *ratio = 1.0 - frac;
+                    return true;
+                }
+                a.set_leaf_ratio(pane_id, frac) || b.set_leaf_ratio(pane_id, frac)
+            }
+        }
+    }
+
     fn swap_ids(&mut self, a: &str, b: &str) {
         match self {
             PtyLayout::Leaf { pane_id } => {
@@ -509,6 +533,53 @@ mod tests {
         t.split_leaf("%0", SplitDir::Horizontal, "%1".into());
         t.split_leaf("%1", SplitDir::Vertical, "%2".into());
         assert_eq!(t.leaves(), vec!["%0", "%1", "%2"]);
+    }
+
+    #[test]
+    fn set_leaf_ratio_direct_child() {
+        let mut t = PtyLayout::single("%0");
+        t.split_leaf("%0", SplitDir::Horizontal, "%1".into());
+        // %0 = child a: frac 그대로.
+        assert!(t.set_leaf_ratio("%0", 0.7));
+        match &t {
+            PtyLayout::Split { ratio, .. } => assert!((ratio - 0.7).abs() < 1e-6),
+            _ => panic!("expected split"),
+        }
+        // %1 = child b: 부모 ratio 는 1 - frac.
+        assert!(t.set_leaf_ratio("%1", 0.6));
+        match &t {
+            PtyLayout::Split { ratio, .. } => assert!((ratio - 0.4).abs() < 1e-6),
+            _ => panic!("expected split"),
+        }
+        let rects = t.leaf_rects(100, 24);
+        assert!(rects[1].3 > rects[0].3, "%1 이 0.6 차지해 더 넓어야");
+    }
+
+    #[test]
+    fn set_leaf_ratio_nested_and_missing() {
+        let mut t = PtyLayout::single("%0");
+        t.split_leaf("%0", SplitDir::Horizontal, "%1".into());
+        t.split_leaf("%1", SplitDir::Vertical, "%2".into());
+        // %2 의 직계 부모(안쪽 Split)만 변해야 — 바깥 ratio 불변.
+        let outer_before = match &t {
+            PtyLayout::Split { ratio, .. } => *ratio,
+            _ => panic!(),
+        };
+        assert!(t.set_leaf_ratio("%2", 0.8));
+        match &t {
+            PtyLayout::Split { ratio, b, .. } => {
+                assert!((ratio - outer_before).abs() < 1e-6, "바깥 ratio 불변");
+                match b.as_ref() {
+                    PtyLayout::Split { ratio, .. } => assert!((ratio - 0.2).abs() < 1e-6),
+                    _ => panic!("expected inner split"),
+                }
+            }
+            _ => panic!(),
+        }
+        // 없는 pane / 단일 leaf → false.
+        assert!(!t.set_leaf_ratio("%9", 0.5));
+        let mut single = PtyLayout::single("%0");
+        assert!(!single.set_leaf_ratio("%0", 0.5));
     }
 
     #[test]

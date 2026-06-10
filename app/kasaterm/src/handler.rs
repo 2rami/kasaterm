@@ -73,6 +73,34 @@ impl ApplicationHandler<UserEvent> for App {
                 self.close_arona_panel();
                 return;
             }
+            UserEvent::SocketSwap(a, b) => {
+                // swap_dir 와 같은 시퀀스: leaf id 교환 → 자리가 바뀐 두 PTY
+                // 의 그리드 크기가 다를 수 있으니 resize 로 SIGWINCH.
+                let swapped = self
+                    .pty_layout
+                    .as_mut()
+                    .is_some_and(|tree| tree.swap_leaves(a, b));
+                if swapped {
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                    self.chrome_dirty = true;
+                    self.render_frame();
+                }
+                return;
+            }
+            UserEvent::SocketSetRatio(id, ratio) => {
+                let changed = self
+                    .pty_layout
+                    .as_mut()
+                    .is_some_and(|tree| tree.set_leaf_ratio(id, *ratio));
+                if changed {
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                    self.chrome_dirty = true;
+                    self.render_frame();
+                }
+                return;
+            }
             UserEvent::SocketRevealTerminal(show, focus_pane) => {
                 if let Some(w) = &self.window {
                     w.set_visible(*show);

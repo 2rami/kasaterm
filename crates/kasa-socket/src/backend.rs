@@ -320,6 +320,14 @@ pub trait Backend: Send + Sync {
     fn resize_divider(&self, _path: &[u8], _ratio: f32) -> Result<()> {
         anyhow::bail!("resize_divider unsupported by this backend")
     }
+    /// Make `surface_id` take `ratio` (0..1) of its *immediate* split
+    /// container — the pane-addressed cousin of `resize_divider` (which
+    /// needs a tree path callers like the CLI don't know). Orchestration
+    /// knob: "make the god pane big" after a fleet regroup. Default:
+    /// unsupported.
+    fn set_split_ratio(&self, _surface_id: &str, _ratio: f32) -> Result<()> {
+        anyhow::bail!("set_split_ratio unsupported by this backend")
+    }
     /// Current working directory of the active pane's shell, if the backend
     /// tracks it. Lets the git panel follow the user's terminal directory.
     /// Default `None` (e.g. the tmux backend doesn't track per-pane cwd).
