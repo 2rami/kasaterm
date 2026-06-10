@@ -69,6 +69,25 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketRevealTerminal(show, focus_pane) => {
+                if let Some(w) = &self.window {
+                    w.set_visible(*show);
+                    if *show {
+                        // 숨김 동안 OS 가 redraw 를 안 줬으니 복귀 프레임을
+                        // 직접 청구해야 마지막 화면 그대로 멈춰 보이지 않는다.
+                        w.focus_window();
+                        w.request_redraw();
+                    }
+                }
+                if *show {
+                    if let Some(id) = focus_pane {
+                        self.ws.lock().unwrap().active_pane = Some(id.clone());
+                        self.chrome_dirty = true;
+                        self.render_frame();
+                    }
+                }
+                return;
+            }
             UserEvent::SocketQueryActivePid(reply) => {
                 let pid = self
                     .ws
@@ -451,6 +470,13 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::CloseRequested => {
                     self.arona_panel_webview = None;
                     self.arona_panel_window = None;
+                    // X 로 닫는 경로도 toggle 과 똑같이 메인 창을 복귀시켜야
+                    // 한다 — 빠지면 터미널이 영영 숨은 채 남는다.
+                    if let Some(w) = &self.window {
+                        w.set_visible(true);
+                        w.focus_window();
+                        w.request_redraw();
+                    }
                 }
                 WindowEvent::Resized(size) => {
                     if let Some(wv) = self.arona_panel_webview.as_ref() {

@@ -418,6 +418,14 @@ pub trait Backend: Send + Sync {
     fn set_panel(&self, _which: PanelKind, _open: bool) -> Result<()> {
         anyhow::bail!("set_panel not supported")
     }
+    /// Show/hide the *main terminal* window. The arona classroom window calls
+    /// this so entering the classroom can take the screen over and its
+    /// red-pill button can bring the terminal back. `focus_pane` additionally
+    /// focuses that pane on reveal (the classroom jumps the user to a
+    /// character's pane). Default unsupported.
+    fn reveal_terminal(&self, _show: bool, _focus_pane: Option<&str>) -> Result<()> {
+        anyhow::bail!("reveal_terminal not supported")
+    }
     /// Resize a panel window to `w`x`h` logical px and re-bound its webview
     /// to match. Errors if the panel isn't open. Default unsupported.
     fn resize_panel(&self, _which: PanelKind, _w: u32, _h: u32) -> Result<()> {

@@ -1087,6 +1087,11 @@ impl App {
         eprintln!("[arona-panel] open; http://127.0.0.1:{port}/arona-ui/");
         self.arona_panel_window = Some(window);
         self.arona_panel_webview = Some(webview);
+        // 교실이 화면을 인수한다 — 메인 터미널 창은 숨김(닫기/빨간약으로 복귀).
+        // 창만 숨고 이벤트 루프·PTY·소켓 스레드는 그대로 돈다.
+        if let Some(w) = &self.window {
+            w.set_visible(false);
+        }
     }
     /// Toggle the arona UI window from the menu: close if open, open if not.
     pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
@@ -1094,6 +1099,13 @@ impl App {
             // Drop the webview before the window it borrows from.
             self.arona_panel_webview = None;
             self.arona_panel_window = None;
+            // 교실에서 나옴 — 숨겨둔 메인 터미널 창 복귀(+숨김 동안 못 받은
+            // redraw 직접 청구).
+            if let Some(w) = &self.window {
+                w.set_visible(true);
+                w.focus_window();
+                w.request_redraw();
+            }
         } else {
             self.open_arona_panel(event_loop);
         }

@@ -2062,6 +2062,11 @@ enum UserEvent {
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
+    /// Show/hide the main terminal window, delegated from the socket thread
+    /// (`POST /terminal-reveal` — the arona classroom's red-pill button).
+    /// `(show, focus_pane)`: a reveal may also focus a specific pane so the
+    /// classroom can jump the user to a character's seat.
+    SocketRevealTerminal(bool, Option<String>),
     /// `surface.rename` / `surface.set_color` delegated from the socket thread.
     /// Pane header title / accent band live in `ws.panes` which only the GUI
     /// thread may touch, so the backend routes them here. `(surface_id, title)`
