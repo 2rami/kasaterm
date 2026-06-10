@@ -15,6 +15,7 @@ export class ClassroomCharacter {
   // setPos 때 머리 위로 동기화한다(munder 패턴 — view 의 모션 흔들림에 안 휩쓸림).
   readonly thought = new ThoughtBubble();
   private body = new Graphics();
+  private initial: Text;
   private bubble: Text;
   private waitDot = new Graphics();
   private t = 0;
@@ -30,6 +31,7 @@ export class ClassroomCharacter {
     });
     initial.anchor.set(0.5);
     initial.y = -3;
+    this.initial = initial;
 
     this.bubble = new Text({ text: '⚠', style: { fontSize: 15, fill: 0xff6b6b } });
     this.bubble.anchor.set(0.5);
@@ -49,6 +51,14 @@ export class ClassroomCharacter {
     this.status = s;
     this.bubble.visible = s === 'blocked';
     this.waitDot.visible = s === 'waiting';
+  }
+
+  /** 도트칩 이니셜 교체 — 같은 첫글자 캐릭터가 공존하면 2글자(아로/아리)로
+   *  구분, 유일하면 1글자. 2글자는 18px 박스에 맞게 폰트를 줄인다. */
+  setInitial(s: string): void {
+    const t = (s || '?').trim() || '?';
+    this.initial.text = t;
+    this.initial.style.fontSize = t.length > 1 ? 8 : 11;
   }
 
   /** 생각 구름 텍스트 갱신. 같은 텍스트면 무시(불필요 redraw 방지). 빈 문자열 →

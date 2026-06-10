@@ -11,12 +11,14 @@ import { setMode, fetchBoard, fetchCharacters, spawnAgent, closeArona } from '@/
 //          (solo→god 전환 직후 빈 교실 방지) → 콜백. 스폰 중 로딩, 실패 시 재시도.
 export interface ModePickerProps {
   cwd: string | null;
+  /** configured=false(마커 없는 첫 실행)면 온보딩 문구 — 미설정 방을 처음 여는 맥락. */
+  onboarding?: boolean;
   onPicked: (mode: 'solo' | 'god') => void;
 }
 
 type Phase = 'idle' | 'switching' | 'spawning' | 'error';
 
-export function ModePicker({ cwd, onPicked }: ModePickerProps) {
+export function ModePicker({ cwd, onboarding, onPicked }: ModePickerProps) {
   const [phase, setPhase] = useState<Phase>('idle');
   const [picking, setPicking] = useState<'solo' | 'god' | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -74,7 +76,7 @@ export function ModePicker({ cwd, onPicked }: ModePickerProps) {
             color: 'var(--cth-ink-900)', margin: 0
           }}
         >
-          어떻게 시작할까요?
+          {onboarding ? '처음 오셨네요! 어떻게 시작할까요?' : '어떻게 시작할까요?'}
         </h1>
         <RoomChip cwd={cwd} />
       </div>

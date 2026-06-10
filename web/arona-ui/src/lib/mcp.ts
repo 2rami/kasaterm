@@ -44,9 +44,9 @@ function accentFor(id: string): AccentColorName {
 
 function toAgent(r: BoardRow): Agent {
   const tokens = (r.tokens_in ?? 0) + (r.tokens_out ?? 0);
-  // character 마커가 노출되면 그걸 우선(도트칩 이니셜=캐릭터 첫 글자), 없으면
-  // title(ai-title) 폴백. name 은 카드 표시용이라 같은 우선순위.
-  const display = r.character || r.title || r.surface_id;
+  // character 마커가 실리면 캐릭터명(아로나/시로코/아리스…)으로, 없으면 필드 자체가
+  // 빠지므로 ?? 로 title(ai-title) 폴백(유우카 권장 — 빈문자 아닌 미존재 분기).
+  const display = r.character ?? (r.title || r.surface_id);
   return {
     id: r.surface_id,
     name: display,
@@ -117,30 +117,36 @@ export async function fetchCharacters(): Promise<Characters | null> {
   }
 }
 
-export interface ModeInfo { mode: string | null; cwd: string | null; }
+export interface ModeInfo { mode: string | null; cwd: string | null; configured: boolean; }
 
-/** GET /mode → {mode:'solo'|'god'|null, cwd}. 응답 {mode,cwd}/평문/{result} 흡수.
- *  cwd 는 '이 방' 경로 칩에 쓴다(어느 방을 god 으로 다루는지 사용자에게 표시). */
+/** GET /mode → {mode:'solo'|'god'|null, cwd, configured}. 응답 {…}/평문/{result} 흡수.
+ *  configured=false = 마커 자체 없는 미설정 방(첫 실행) → ModePicker 온보딩 분기 기준
+ *  (mode 만 보면 미설정이 solo 로 뭉개진다, 유우카). cwd 는 '이 방' 경로 칩. */
 export async function fetchMode(): Promise<ModeInfo> {
   try {
     const r = await fetch(`${BASE}/mode`);
-    if (!r.ok) return { mode: null, cwd: null };
+    if (!r.ok) return { mode: null, cwd: null, configured: false };
     const d = await r.json().catch(() => null);
-    if (typeof d === 'string') return { mode: d, cwd: null };
+    if (typeof d === 'string') return { mode: d, cwd: null, configured: true };
+    const src = d?.result ?? d ?? {};
     return {
-      mode: d?.mode ?? d?.result?.mode ?? null,
-      cwd: d?.cwd ?? d?.result?.cwd ?? null
+      mode: src.mode ?? null,
+      cwd: src.cwd ?? null,
+      // 구 백엔드(필드 부재)는 mode 존재 여부로 추정 — 미존재만 false.
+      configured: src.configured ?? (src.mode != null)
     };
   } catch {
-    return { mode: null, cwd: null };
+    return { mode: null, cwd: null, configured: false };
   }
 }
 
-/** POST /terminal-reveal — 교실 모드에서 숨긴 메인 터미널을 다시 보이게 한다
- *  (빨간약). 네이티브 배선(유우카)은 후속이라, 미구현 동안 404 → false 허용. */
-export async function revealTerminal(): Promise<boolean> {
+/** POST /terminal-reveal?show=0|1[&pane=%N] — 교실의 숨긴 메인 터미널 토글(빨간약).
+ *  show=1 에 pane 을 주면 그 pane 포커스까지(유우카). 미구현 백엔드면 404 → false. */
+export async function revealTerminal(show = 1, pane?: string): Promise<boolean> {
+  const q = new URLSearchParams({ show: show ? '1' : '0' });
+  if (pane) q.set('pane', pane);
   try {
-    const r = await fetch(`${BASE}/terminal-reveal`, { method: 'POST' });
+    const r = await fetch(`${BASE}/terminal-reveal?${q}`, { method: 'POST' });
     return r.ok;
   } catch {
     return false;
