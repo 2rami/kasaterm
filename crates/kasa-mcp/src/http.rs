@@ -309,6 +309,24 @@ async fn mode_set_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `POST /focus?surface=<id>` — pane 포커스(arona-ui 카드 클릭 → 해당 pane).
+/// 쿼리 파라미터인 이유는 session-switch 와 같다(null-origin webview 의 CORS
+/// preflight 회피). surface id 의 '%' 는 %25 인코딩(encodeURIComponent) 권장
+/// — 다만 실측상 미인코딩 '%1' 도 디코더가 literal 로 통과시킨다(curl 검증).
+async fn focus_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match params.get("surface").map(String::as_str) {
+        Some(id) if !id.is_empty() => match backend.focus_surface(id) {
+            Ok(()) => serde_json::json!({ "ok": true, "surface_id": id }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        },
+        _ => serde_json::json!({ "ok": false, "error": "surface query param required" }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// Body for `POST /spawn`: 새 워커 pane 스펙. 전부 선택적 — 빈 객체면
 /// "현재 방에 기본 claude 하나 더".
 #[derive(serde::Deserialize)]
@@ -691,6 +709,7 @@ pub fn spawn_http_server(
                 let mode_get_backend = backend.clone();
                 let mode_set_backend = backend.clone();
                 let spawn_backend = backend.clone();
+                let focus_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -743,6 +762,12 @@ pub fn spawn_http_server(
                     .route(
                         "/spawn",
                         post(move |body: String| spawn_handler(spawn_backend.clone(), body)),
+                    )
+                    .route(
+                        "/focus",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            focus_handler(focus_backend.clone(), q)
+                        }),
                     )
                     .route(
                         "/session-switch",
