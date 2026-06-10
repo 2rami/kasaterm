@@ -239,6 +239,26 @@ impl App {
         eprintln!("[autotoggle] sidebar flip in {ms}ms (repeat={})", self.autotoggle_left);
         self.autotoggle_sidebar_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
     }
+    /// Headless arona-panel verification: open the arona window after
+    /// `KASATERM_AUTOARONA_MS` (god-gate + webview load 포함 전체 경로).
+    pub(crate) fn arm_autoarona(&mut self) {
+        let Ok(ms_str) = std::env::var("KASATERM_AUTOARONA_MS") else { return };
+        let Ok(ms) = ms_str.parse::<u64>() else { return };
+        eprintln!("[autoarona] toggle in {ms}ms");
+        self.autoarona_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+    }
+    pub(crate) fn run_pending_autoarona(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) {
+        let Some(due) = self.autoarona_at else { return };
+        if Instant::now() < due {
+            return;
+        }
+        self.autoarona_at = None;
+        self.toggle_arona_panel(event_loop);
+        eprintln!("[autoarona] toggled → open={}", self.arona_panel_window.is_some());
+    }
     pub(crate) fn arm_autosplit(&mut self) {
         let Ok(plan) = std::env::var("KASATERM_AUTOSPLIT") else { return; };
         let ms: u64 = std::env::var("KASATERM_AUTOSPLIT_MS")

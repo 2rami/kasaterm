@@ -309,6 +309,86 @@ async fn mode_set_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// arona-ui 정적 번들 루트: env 오버라이드 → .app Resources → 레포 dev 빌드.
+/// (characters_candidate_paths 와 같은 3단 resolve 철학.)
+fn arona_ui_root() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_ARONA_UI_DIR") {
+        let p = std::path::PathBuf::from(p);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        // <bundle>/Contents/MacOS/kasaterm → <bundle>/Contents/Resources/arona-ui
+        if let Some(res) = exe
+            .parent()
+            .and_then(|m| m.parent())
+            .map(|c| c.join("Resources/arona-ui"))
+        {
+            if res.is_dir() {
+                return Some(res);
+            }
+        }
+    }
+    let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/arona-ui/dist");
+    if dev.is_dir() {
+        return Some(dev);
+    }
+    None
+}
+
+/// 확장자 → Content-Type. vite dist 가 내는 파일 종류만 커버하면 충분.
+fn static_content_type(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript",
+        Some("css") => "text/css",
+        Some("json") | Some("map") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
+
+/// `GET /arona-ui/` + `GET /arona-ui/{*path}` — arona-ui dist 정적 서빙.
+/// webview 가 http 로 로드하면 MCP 와 same-origin 이 돼 fetch 가 CORS/포트
+/// 문제 없이 붙는다(file:// 로드 대비 이게 선택 이유). canonicalize 비교로
+/// 루트 밖 탈출(../)을 차단한다.
+async fn arona_ui_serve(rel: String) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let not_found = || {
+        (
+            axum::http::StatusCode::NOT_FOUND,
+            [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+            "not found",
+        )
+            .into_response()
+    };
+    let Some(root) = arona_ui_root() else { return not_found() };
+    let rel = if rel.is_empty() { "index.html".to_string() } else { rel };
+    let (Ok(canon_root), Ok(canon)) = (root.canonicalize(), root.join(&rel).canonicalize())
+    else {
+        return not_found();
+    };
+    if !canon.starts_with(&canon_root) {
+        return not_found();
+    }
+    match std::fs::read(&canon) {
+        Ok(bytes) => (
+            axum::http::StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, static_content_type(&canon)),
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => not_found(),
+    }
+}
+
 /// `POST /focus?surface=<id>` — pane 포커스(arona-ui 카드 클릭 → 해당 pane).
 /// 쿼리 파라미터인 이유는 session-switch 와 같다(null-origin webview 의 CORS
 /// preflight 회피). surface id 의 '%' 는 %25 인코딩(encodeURIComponent) 권장
@@ -767,6 +847,22 @@ pub fn spawn_http_server(
                         "/focus",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             focus_handler(focus_backend.clone(), q)
+                        }),
+                    )
+                    // /arona-ui(슬래시 없음)는 /arona-ui/ 로 리다이렉트 —
+                    // index.html 의 상대경로 assets(./assets/*) 가 디렉토리
+                    // 기준으로 풀리려면 trailing slash 가 필요하다.
+                    .route(
+                        "/arona-ui",
+                        get(|| async {
+                            axum::response::Redirect::permanent("/arona-ui/")
+                        }),
+                    )
+                    .route("/arona-ui/", get(|| arona_ui_serve(String::new())))
+                    .route(
+                        "/arona-ui/{*path}",
+                        get(|axum::extract::Path(p): axum::extract::Path<String>| {
+                            arona_ui_serve(p)
                         }),
                     )
                     .route(

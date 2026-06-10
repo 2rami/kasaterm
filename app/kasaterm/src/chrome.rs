@@ -1046,6 +1046,64 @@ impl App {
             self.open_board_panel(event_loop);
         }
     }
+    /// Open the arona (god-mode) full UI in its own OS window. Unlike the
+    /// HTML-string panels this loads the arona-ui dist over the MCP HTTP
+    /// server (`/arona-ui/`) — same-origin with the API the page fetches, and
+    /// the in-window wry embed is off the table anyway (Metal layer conflict).
+    pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if self.arona_panel_window.is_some() {
+            return;
+        }
+        // god 모드 방 전용 — solo 방에선 토스트로 안내만 하고 열지 않는다.
+        if crate::current_collab_mode() != "god" {
+            self.collab_toast =
+                Some(("아로나 UI는 god 모드 방에서만 열려요 (kasacollab mode god)".into(), Instant::now()));
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return;
+        }
+        let port = mcp_panel_port();
+        let attrs = WindowAttributes::default()
+            .with_title("아로나 — 샬레 교실")
+            .with_theme(Some(Theme::Dark))
+            .with_inner_size(LogicalSize::new(1100.0, 720.0));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("[arona-panel] window create failed: {e}");
+                return;
+            }
+        };
+        // build_as_child for the same use-after-free reason as the git panel.
+        let webview = match wry::WebViewBuilder::new()
+            .with_url(format!("http://127.0.0.1:{port}/arona-ui/"))
+            .with_bounds(wry::Rect {
+                position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+                size: wry::dpi::LogicalSize::new(1100.0, 720.0).into(),
+            })
+            .build_as_child(window.as_ref())
+        {
+            Ok(wv) => wv,
+            Err(e) => {
+                eprintln!("[arona-panel] webview build failed: {e}");
+                return;
+            }
+        };
+        eprintln!("[arona-panel] open; http://127.0.0.1:{port}/arona-ui/");
+        self.arona_panel_window = Some(window);
+        self.arona_panel_webview = Some(webview);
+    }
+    /// Toggle the arona UI window from the menu: close if open, open if not.
+    pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
+        if self.arona_panel_window.is_some() {
+            // Drop the webview before the window it borrows from.
+            self.arona_panel_webview = None;
+            self.arona_panel_window = None;
+        } else {
+            self.open_arona_panel(event_loop);
+        }
+    }
     /// Effective render scale = DPI scale × whole-UI zoom. Everything that
     /// converts logical↔physical (cell metrics, chrome coords, cursor px,
     /// window→cols) routes through this so a single `ui_zoom` change scales

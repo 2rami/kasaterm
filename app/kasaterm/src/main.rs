@@ -2372,6 +2372,8 @@ struct App {
     /// flips the sidebar once at this instant so a screenshot can capture the
     /// collapsed-grid state without a human clicking the title-bar button.
     autotoggle_sidebar_at: Option<Instant>,
+    /// Headless arona-panel toggle deadline (KASATERM_AUTOARONA_MS).
+    autoarona_at: Option<Instant>,
     /// Extra sidebar flips queued after the first (KASATERM_AUTOTOGGLE_SIDEBAR_N),
     /// 1.5s apart, to stress hide↔show reflow without a human.
     autotoggle_left: u32,
@@ -2940,6 +2942,9 @@ struct App {
     /// discipline as the git/session panels — webview must outlive its window.
     board_panel_window: Option<Arc<Window>>,
     board_panel_webview: Option<wry::WebView>,
+    /// 아로나(god 모드) 전면 UI — 별도 OS 창 + arona-ui dist 를 MCP HTTP 로 로드.
+    arona_panel_window: Option<Arc<Window>>,
+    arona_panel_webview: Option<wry::WebView>,
     /// Open preview windows (image viewer / markdown editor), each a
     /// separate OS window + webview spawned by `imgopen` / `mdopen` (or the
     /// MCP `/open-image` `/open-markdown` endpoints). A Vec, not a single
@@ -2961,6 +2966,7 @@ struct App {
     /// toggle the git panel from the menu.
     menu: Option<muda::Menu>,
     git_menu_item: Option<muda::MenuItem>,
+    arona_menu_item: Option<muda::MenuItem>,
     /// "세션 패널" menu item id, matched against MenuEvents to toggle the
     /// session panel.
     session_menu_item: Option<muda::MenuItem>,
@@ -3012,6 +3018,7 @@ impl App {
             autowindow_left: 0,
             autowindow_at: None,
             autotoggle_sidebar_at: None,
+            autoarona_at: None,
             autotoggle_left: 0,
             autotabs_n: 0,
             autotabs_at: None,
@@ -3208,11 +3215,14 @@ impl App {
             session_panel_webview: None,
             board_panel_window: None,
             board_panel_webview: None,
+            arona_panel_window: None,
+            arona_panel_webview: None,
             preview_windows: Vec::new(),
             pane_action_hits: Vec::new(),
             version_anim_start: Instant::now(),
             menu: None,
             git_menu_item: None,
+            arona_menu_item: None,
             session_menu_item: None,
             board_menu_item: None,
             autosuggest: autosuggest::History::new(),
@@ -3614,6 +3624,24 @@ pub(crate) fn load_leader_name() -> Option<String> {
     None
 }
 
+/// 현재 프로세스 cwd 방의 협업 모드 — kasacollab `mode_path` 와 동일 slug
+/// ('/'·'.'→'-')·마커(~/.config/kasaterm/collab-mode/<slug>). 기본 solo.
+/// 아로나 자동 시작·아로나 패널 god 게이트가 공유한다.
+pub(crate) fn current_collab_mode() -> &'static str {
+    let (Ok(home), Ok(cwd)) = (std::env::var("HOME"), std::env::current_dir()) else {
+        return "solo";
+    };
+    let slug: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect();
+    match std::fs::read_to_string(format!("{home}/.config/kasaterm/collab-mode/{slug}")) {
+        Ok(m) if m.trim() == "god" => "god",
+        _ => "solo",
+    }
+}
+
 /// 아로나 자동 시작(P5) 명령 — god 모드 && characters 있는 방에서만 첫 pane 에
 /// 띄울 `claude --resume <leader> || claude`. solo·무테마·`KASATERM_NO_AUTOLEADER`
 /// 면 None(기존 유저 무영향). cwd slug 로 모드 마커를 본다(kasacollab 과 동일 규칙).
@@ -3621,15 +3649,7 @@ pub(crate) fn autoleader_command() -> Option<String> {
     if std::env::var_os("KASATERM_NO_AUTOLEADER").is_some() {
         return None;
     }
-    let home = std::env::var("HOME").ok()?;
-    let cwd = std::env::current_dir().ok()?;
-    let slug: String = cwd
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
-        .collect();
-    let mode = std::fs::read_to_string(format!("{home}/.config/kasaterm/collab-mode/{slug}")).ok()?;
-    if mode.trim() != "god" {
+    if current_collab_mode() != "god" {
         return None;
     }
     let leader = load_leader_name()?;
