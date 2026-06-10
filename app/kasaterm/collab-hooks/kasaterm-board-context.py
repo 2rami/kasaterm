@@ -309,7 +309,10 @@ def god_section():
     if god == me:
         base = ("[god 역할] 너 = god. 워커가 'done:' 보고하면 변경을 검토하고 너가 "
                 "단독으로 git add/commit/push 한다(워커는 커밋 안 함). 부하가 많으면 "
-                "split 로 워커를 더 띄워 위임한다.")
+                "split 로 워커를 더 띄워 위임한다. "
+                "컨텍스트가 무거워지면(긴 세션) 핸드오프(MEMORY.md)와 board 를 먼저 "
+                "정리한 뒤 /compact 로 스스로 압축하라 — munder god 자율 compact 정렬"
+                "(워커는 idle 자동 compact, god 은 사용자 대화라 강제 안 함·자율 판단).")
         digest = god_fleet_digest()
         recovery = roster_recovery()
         return base + (("\n" + digest) if digest else "") + (("\n" + recovery) if recovery else "")
