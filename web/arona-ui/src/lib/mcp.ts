@@ -84,6 +84,9 @@ export interface CharacterDef {
   header_color?: string;
   persona?: string;
   greeting?: string;
+  /** 거노 아트 교체 구조 — 스프라이트 시트 경로(옵셔널). 채워지면
+   *  ClassroomCharacter/SpritePortrait 가 placeholder 도트 대신 이 시트를 쓴다. */
+  sprite?: string;
 }
 export interface Characters {
   theme?: string;
