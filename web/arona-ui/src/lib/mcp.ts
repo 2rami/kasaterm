@@ -35,6 +35,8 @@ interface BoardRow {
   model?: string;
   cwd?: string;
   context_limit?: number;
+  /** 컨텍스트 사용량 % — claude TUI 상태바 파싱(robust). */
+  context_pct?: number;
   branch?: string;
   /** 유우카가 character-<N> 마커를 읽어 노출(후속). 있으면 도트칩 이니셜·이름이
    *  캐릭터명(아로나/시로코/아리스…)으로, 없으면 title(ai-title) 폴백. */
@@ -83,6 +85,7 @@ function toAgent(r: BoardRow): Agent {
     model: r.model,
     cwd: r.cwd,
     contextLimit: r.context_limit,
+    contextPct: r.context_pct,
     branch: r.branch
   };
 }

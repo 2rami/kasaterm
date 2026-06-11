@@ -175,7 +175,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
         }}>
           {agent.model && <MetaChip label={shortModel(agent.model)} />}
           {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} />}
-          {agent.contextTokens != null && agent.contextLimit ? (
+          {/* 컨텍스트 % — 상태바 파싱(contextPct) 우선, 없으면 토큰/한도 계산 폴백 */}
+          {agent.contextPct != null && agent.contextPct > 0 ? (
+            <MetaChip label={`컨텍스트 ${agent.contextPct}%`} />
+          ) : agent.contextTokens != null && agent.contextLimit ? (
             <MetaChip label={`컨텍스트 ${Math.round((agent.contextTokens / agent.contextLimit) * 100)}%`} />
           ) : null}
           {agent.cwd && <MetaChip label={shortCwd(agent.cwd)} dim />}

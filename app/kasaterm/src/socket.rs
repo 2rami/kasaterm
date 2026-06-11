@@ -658,11 +658,23 @@ impl Backend for PtyBackend {
         // 하거나(claude 가 jsonl 미기록) cd 직후라도 즉시 반영(2s 캐시). 아래 git
         // 브랜치도 이 라이브 cwd 기준이 되도록 branch 조회 전에 한다.
         let pane_pids: HashMap<String, u32> = self.query_pane_pids().into_iter().collect();
+        // 컨텍스트 % — claude TUI 상태바에서 파싱(transcript 토큰이 0 이어도 robust).
+        // 화면 스냅샷은 in-memory(visible_text)라 싸다 — 락 짧게.
+        let screens: HashMap<String, String> = {
+            let ws = self.ws.lock().unwrap();
+            board
+                .iter()
+                .filter_map(|r| ws.panes.get(&r.surface_id).map(|p| (r.surface_id.clone(), p.visible_text(8))))
+                .collect()
+        };
         for row in &mut board {
             if let Some(&pid) = pane_pids.get(&row.surface_id) {
                 if let Some(cwd) = self.pane_cwd_live(pid) {
                     row.cwd = cwd.to_string_lossy().into_owned();
                 }
+            }
+            if let Some(pct) = screens.get(&row.surface_id).and_then(|s| parse_context_pct(s)) {
+                row.context_pct = pct;
             }
         }
         // git 브랜치 — pane cwd(transcript)에서 rev-parse. distinct cwd 1회씩(같은
@@ -1152,6 +1164,31 @@ fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std:
             fresh.then_some(p)
         })
         .collect()
+}
+
+/// claude TUI 상태바("… ┃ 5% ┃ …")에서 컨텍스트 사용량 % 파싱. ┃ 가 든 줄의
+/// 첫 `(\d+)%` 를 집는다(상태바엔 컨텍스트 % 하나뿐). regex 의존 없이 수동 스캔.
+fn parse_context_pct(screen: &str) -> Option<u8> {
+    for line in screen.lines() {
+        if !line.contains('┃') {
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        for (i, &c) in chars.iter().enumerate() {
+            if c == '%' && i > 0 && chars[i - 1].is_ascii_digit() {
+                let mut j = i;
+                let mut num = String::new();
+                while j > 0 && chars[j - 1].is_ascii_digit() {
+                    j -= 1;
+                    num.insert(0, chars[j]);
+                }
+                if let Ok(n) = num.parse::<u16>() {
+                    return Some(n.min(100) as u8);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
