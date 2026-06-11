@@ -231,6 +231,30 @@ async fn schedule_delete_handler(
     (cors, Json(serde_json::json!({ "ok": true, "removed": before - items.len() })))
 }
 
+/// `POST /open-file?path=<abs>` — OS 기본 뷰어로 파일 열기(대화창 이미지 클릭 →
+/// macOS Preview 등). `~` 확장. macOS=open, Linux=xdg-open, Windows=cmd start.
+async fn open_file_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let raw = params.get("path").cloned().unwrap_or_default();
+    let path = match raw.strip_prefix("~/") {
+        Some(rest) => std::env::var("HOME").map(|h| format!("{h}/{rest}")).unwrap_or(raw),
+        None => raw,
+    };
+    if path.is_empty() {
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "path required" })));
+    }
+    let spawned = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&path).spawn()
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd").args(["/C", "start", "", &path]).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(&path).spawn()
+    };
+    (cors, Json(serde_json::json!({ "ok": spawned.is_ok() })))
+}
+
 /// `GET /image-file?path=<abs>` — 로컬 이미지 파일을 바이트로 서빙(BA GUI 대화창
 /// 인라인 표시용). 이미지 확장자만 허용(임의 파일 노출 방지), 127.0.0.1 한정.
 async fn image_file_handler(
@@ -1773,6 +1797,12 @@ pub fn spawn_http_server(
                     .route(
                         "/image-file",
                         get(image_file_handler),
+                    )
+                    .route(
+                        "/open-file",
+                        post(|q: Query<std::collections::HashMap<String, String>>| {
+                            open_file_handler(q)
+                        }),
                     )
                     .route(
                         "/sent-images",

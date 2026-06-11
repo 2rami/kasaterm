@@ -411,6 +411,16 @@ export function imageFileUrl(path: string): string {
   return `${BASE}/image-file?path=${encodeURIComponent(path)}`;
 }
 
+/** POST /open-file?path — OS 기본 뷰어(macOS Preview 등)로 파일 열기. 대화창 이미지 클릭. */
+export async function openFile(path: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/open-file?path=${encodeURIComponent(path)}`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 export interface DirListing { path: string; parent: string | null; dirs: string[]; }
 
 /** GET /list-dir?path=<path> — 경로의 하위 디렉터리 목록(방 경로 변경 모달). path
