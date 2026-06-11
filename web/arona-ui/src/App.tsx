@@ -10,6 +10,7 @@ import { Footer } from './components/Footer';
 import { TitleBar } from './components/TitleBar';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
+import { RoomPathModal } from './components/RoomPathModal';
 import { PixelButton } from './components/PixelButton';
 import { SegmentedTabs } from './components/GameKit';
 import { startBoardPolling, fetchMode, focusPane, revealTerminal } from './lib/mcp';
@@ -36,6 +37,7 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
+  const [showRoomModal, setShowRoomModal] = useState(false);
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
@@ -116,7 +118,7 @@ export function App() {
           }}>
             SCHALE Headquarters
           </h1>
-          <RoomChip cwd={cwd} />
+          <RoomChip cwd={cwd} onClick={() => setShowRoomModal(true)} />
         </div>
 
         {/* 뷰 탭 */}
@@ -205,6 +207,14 @@ export function App() {
       </div>
 
       {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} />}
+
+      {showRoomModal && cwd && (
+        <RoomPathModal
+          initialPath={cwd}
+          onClose={() => setShowRoomModal(false)}
+          onChanged={(p) => setCwd(p)}
+        />
+      )}
     </div>
   );
 }

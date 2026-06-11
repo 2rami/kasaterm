@@ -72,6 +72,61 @@ async fn git_push_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /list-dir?path=<path>` — 그 경로의 하위 디렉터리 목록(방 경로 변경 모달).
+/// path 없으면 active 방 cwd. 숨김(.) 제외·디렉터리만·이름 정렬. parent 로 상위 이동.
+async fn list_dir_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let path = params
+        .get("path")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| resolve_cwd(&backend));
+    let mut dirs: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&path) {
+        for e in rd.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !name.starts_with('.') {
+                    dirs.push(name);
+                }
+            }
+        }
+    }
+    dirs.sort();
+    let parent = path.parent().map(|p| p.to_string_lossy().into_owned());
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+            "parent": parent,
+            "dirs": dirs,
+        })),
+    )
+}
+
+/// `POST /room-cd?path=<path>` — active pane 셸을 그 경로로 cd(터미널 백엔드).
+/// 셸 명령이라 bracketed paste 가 아니라 `cd '<path>'` + CR. claude 가 도는
+/// pane 이면 셸 cd 가 아니라 claude 입력으로 가니 무해히 무시되거나 사용자가 정리.
+async fn room_cd_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let path = match params.get("path").filter(|s| !s.is_empty()) {
+        Some(p) => p.clone(),
+        None => {
+            return (cors, Json(serde_json::json!({ "ok": false, "error": "path required" })));
+        }
+    };
+    let quoted = path.replace('\'', "'\\''");
+    let payload = format!("cd '{quoted}'\r");
+    let ok = backend.send_text(None, &payload).is_ok();
+    (cors, Json(serde_json::json!({ "ok": ok, "path": path })))
+}
+
 /// Body for `POST /git-ai-commit`: the files the user checked in the panel.
 /// Empty → let the AI decide what to include.
 #[derive(serde::Deserialize)]
@@ -1291,6 +1346,8 @@ pub fn spawn_http_server(
                 let focus_backend = backend.clone();
                 let events_backend = backend.clone();
                 let messages_backend = backend.clone();
+                let list_dir_backend = backend.clone();
+                let room_cd_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -1462,6 +1519,18 @@ pub fn spawn_http_server(
                         "/messages",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             messages_handler(messages_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/list-dir",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            list_dir_handler(list_dir_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/room-cd",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            room_cd_handler(room_cd_backend.clone(), q)
                         }),
                     )
                     .route(

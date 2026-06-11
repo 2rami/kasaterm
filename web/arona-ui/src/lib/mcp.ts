@@ -342,6 +342,39 @@ export async function fetchPeek(surfaceId: string, lines = 40): Promise<string> 
   }
 }
 
+export interface DirListing { path: string; parent: string | null; dirs: string[]; }
+
+/** GET /list-dir?path=<path> — 경로의 하위 디렉터리 목록(방 경로 변경 모달). path
+ *  생략 시 active 방 cwd. parent 로 상위 이동. fail-soft. */
+export async function listDir(path?: string): Promise<DirListing> {
+  const fallback: DirListing = { path: path ?? '', parent: null, dirs: [] };
+  try {
+    const q = path ? `?path=${encodeURIComponent(path)}` : '';
+    const r = await fetch(`${BASE}/list-dir${q}`);
+    if (!r.ok) return fallback;
+    const d = (await r.json().catch(() => ({}))) as Partial<DirListing>;
+    return {
+      path: d.path ?? path ?? '',
+      parent: d.parent ?? null,
+      dirs: Array.isArray(d.dirs) ? d.dirs : [],
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+/** POST /room-cd?path=<path> — active pane 셸을 그 경로로 cd(터미널 백엔드). */
+export async function roomCd(path: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/room-cd?path=${encodeURIComponent(path)}`, { method: 'POST' });
+    if (!r.ok) return false;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
+    return d?.ok !== false;
+  } catch {
+    return false;
+  }
+}
+
 export interface Turn { role: string; text: string; }
 
 /** GET /transcript?surface=<id>&turns=<n> — 구조화된 대화(프롬프트/답변, tool 노이즈
