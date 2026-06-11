@@ -96,6 +96,8 @@ export function App() {
         notifications={agents.filter((a) => a.status === 'waiting' || a.status === 'blocked').length}
         mail={agents.filter((a) => a.status === 'success').length}
         contextTokens={totalContextTokens}
+        onBell={() => { const a = sorted.find((x) => x.status === 'waiting' || x.status === 'blocked'); if (a) setPeek({ id: a.id, title: a.character }); }}
+        onMail={() => { const a = sorted.find((x) => x.status === 'success'); if (a) setPeek({ id: a.id, title: a.character }); }}
         onSettings={reveal}
       />
 
