@@ -342,6 +342,24 @@ export async function fetchPeek(surfaceId: string, lines = 40): Promise<string> 
   }
 }
 
+/** GET /sent-images?surface=<id>&n=N — 이 학생이 SendUserFile 로 보낸 이미지 경로
+ *  최근 N(auto-imgopen 훅 기록). 대화창 인라인 이미지 소스. fail-soft 빈 배열. */
+export async function fetchSentImages(surfaceId: string, n = 12): Promise<string[]> {
+  try {
+    const r = await fetch(`${BASE}/sent-images?surface=${encodeURIComponent(surfaceId)}&n=${n}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { images?: string[] };
+    return Array.isArray(d?.images) ? d.images : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 로컬 이미지 경로 → 백엔드 서빙 URL(/image-file). 대화창 <img src>. */
+export function imageFileUrl(path: string): string {
+  return `${BASE}/image-file?path=${encodeURIComponent(path)}`;
+}
+
 export interface DirListing { path: string; parent: string | null; dirs: string[]; }
 
 /** GET /list-dir?path=<path> — 경로의 하위 디렉터리 목록(방 경로 변경 모달). path

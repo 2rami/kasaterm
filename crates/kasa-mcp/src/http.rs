@@ -72,6 +72,76 @@ async fn git_push_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /image-file?path=<abs>` — 로컬 이미지 파일을 바이트로 서빙(BA GUI 대화창
+/// 인라인 표시용). 이미지 확장자만 허용(임의 파일 노출 방지), 127.0.0.1 한정.
+async fn image_file_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    use axum::http::StatusCode;
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let path = params.get("path").cloned().unwrap_or_default();
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let ctype = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
+        "ico" => "image/x-icon",
+        _ => return (StatusCode::BAD_REQUEST, cors, Vec::new()).into_response(),
+    };
+    match std::fs::read(&path) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                (header::CONTENT_TYPE, ctype),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, cors, Vec::new()).into_response(),
+    }
+}
+
+/// `GET /sent-images?surface=<id>&n=N` — 그 방의 sent-images.jsonl 에서 이 pane 이
+/// SendUserFile 로 보낸 이미지 경로 최근 N 개(auto-imgopen 훅이 기록). BA GUI 대화창
+/// 인라인 이미지 소스. transcript 엔 경로가 안 남아(input:{}) 훅 기록이 유일.
+async fn sent_images_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let surface = params.get("surface").cloned().unwrap_or_default();
+    let n = params.get("n").and_then(|s| s.parse::<usize>().ok()).unwrap_or(12);
+    let cwd = resolve_cwd(&backend);
+    let mut imgs: Vec<String> = Vec::new();
+    if let Some(dir) = find_collab_dir(Some(&cwd)) {
+        if let Ok(content) = std::fs::read_to_string(dir.join("sent-images.jsonl")) {
+            for line in content.lines() {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+                let pane = v.get("pane").and_then(|p| p.as_str()).unwrap_or("");
+                if !surface.is_empty() && pane != surface {
+                    continue;
+                }
+                if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
+                    imgs.push(p.to_string());
+                }
+            }
+        }
+    }
+    if imgs.len() > n {
+        imgs.drain(0..imgs.len() - n);
+    }
+    (cors, Json(serde_json::json!({ "ok": true, "images": imgs })))
+}
+
 /// `GET /list-dir?path=<path>` — 그 경로의 하위 디렉터리 목록(방 경로 변경 모달).
 /// path 없으면 active 방 cwd. 숨김(.) 제외·디렉터리만·이름 정렬. parent 로 상위 이동.
 async fn list_dir_handler(
@@ -1348,6 +1418,7 @@ pub fn spawn_http_server(
                 let messages_backend = backend.clone();
                 let list_dir_backend = backend.clone();
                 let room_cd_backend = backend.clone();
+                let sent_images_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -1519,6 +1590,16 @@ pub fn spawn_http_server(
                         "/messages",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             messages_handler(messages_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/image-file",
+                        get(image_file_handler),
+                    )
+                    .route(
+                        "/sent-images",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            sent_images_handler(sent_images_backend.clone(), q)
                         }),
                     )
                     .route(
