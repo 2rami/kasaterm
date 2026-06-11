@@ -1,5 +1,31 @@
+import { useEffect, useState } from 'react';
 import { useStore, type Agent } from '@/store';
-import { SpritePortrait } from './SpritePortrait';
+import { SpriteWalk } from './SpriteWalk';
+
+// 교실 캐릭터 — idle 이면 워크 애니메이션 + 좌우 페이스(돌아다님), 그 외(working/
+// waiting/blocked)는 자기 자리에 서있음(일하는 중). 거노: "돌아다니다가 일하러가는거".
+function ClassroomCharacter({ agent }: { agent: Agent }) {
+  const walking = agent.status === 'idle';
+  const [pace, setPace] = useState({ x: 0, dir: 1 });
+  useEffect(() => {
+    if (!walking) { setPace({ x: 0, dir: 1 }); return; }
+    const iv = setInterval(() => {
+      setPace((p) => {
+        let x = p.x + p.dir * 4;
+        let dir = p.dir;
+        if (x > 28) { x = 28; dir = -1; }
+        if (x < -28) { x = -28; dir = 1; }
+        return { x, dir };
+      });
+    }, 130);
+    return () => clearInterval(iv);
+  }, [walking]);
+  return (
+    <div style={{ width: 72, height: 100, transform: `translateX(${pace.x}px)`, transition: 'transform 0.13s linear' }}>
+      <SpriteWalk character={agent.character} walking={walking} flip={pace.dir < 0} width={72} height={100} />
+    </div>
+  );
+}
 
 const ROOT = import.meta.env.BASE_URL || '/';
 
@@ -97,9 +123,9 @@ export function ClassroomView({ onSelect }: ClassroomViewProps) {
               </div>
             )}
 
-            {/* 캐릭터 — 네이티브 img(또렷) */}
-            <div style={{ width: 72, height: 100, display: 'flex', alignItems: 'flex-end', justifyContent: 'center', filter: 'drop-shadow(0 4px 6px rgba(21,41,74,0.2))' }}>
-              <SpritePortrait character={a.character} scale={3.4} />
+            {/* 캐릭터 — idle 은 워크 애니메이션으로 돌아다님, 그 외는 자리에 서있음 */}
+            <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+              <ClassroomCharacter agent={a} />
             </div>
 
             {/* 이름표 + 상태 점 */}
