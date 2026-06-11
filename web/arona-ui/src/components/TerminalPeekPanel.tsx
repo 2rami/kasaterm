@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, sendToPane, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
+import { Markdown } from './Markdown';
 import { useStore } from '@/store';
 
 // claude TUI 화면(peek)에서 대화를 파싱 — transcript jsonl 이 비어있을 때 fallback
@@ -99,6 +100,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
   const [flash, setFlash] = useState<'ok' | 'err' | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const atBottomRef = useRef(true); // 사용자가 위로 스크롤했으면 자동 하단고정 멈춤
 
   // 대화 내역: transcript jsonl 우선(정상 학생 — 깔끔). 비어있으면 PTY 화면(peek)
   // 에서 파싱(claude 가 jsonl 라이브 기록 안 해도 화면엔 항상 있음). 학생 바뀌면 초기화.
@@ -131,10 +133,17 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
     return () => { stopped = true; clearInterval(iv); };
   }, [surfaceId]);
 
+  // 새 내용 도착 시, 사용자가 하단에 있을 때만 따라내린다(위로 스크롤 중이면 안 건드림 —
+  // 거노: 스크롤 올리면 자꾸 내려가던 버그).
   useEffect(() => {
     const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [turns]);
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [turns, images]);
+
+  const onBodyScroll = () => {
+    const el = bodyRef.current;
+    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  };
 
   // 실시간 미러: 웹 입력을 칠 때마다 터미널 PTY 라인과 동기화한다(거노 요청 —
   // "웹에 치면 터미널에 실시간으로"). Ctrl-U(\x15)로 줄을 비우고 현재 입력 전체를
@@ -213,7 +222,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
       )}
 
       {/* 대화(채팅 버블) + 보낸 이미지 */}
-      <div ref={bodyRef} style={{ flex: 1, overflow: 'auto', padding: '14px 16px', background: 'var(--cth-cream-100)' }}>
+      <div ref={bodyRef} onScroll={onBodyScroll} style={{ flex: 1, overflow: 'auto', padding: '14px 16px', background: 'var(--cth-cream-100)' }}>
         {turns.length === 0 && images.length === 0 ? (
           <div style={{ color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 13, textAlign: 'center', marginTop: 40 }}>
             {loaded ? '아직 대화가 없어요' : '대화를 불러오는 중…'}
@@ -240,8 +249,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
                     border: mine ? 'none' : '1px solid var(--cth-cream-200)',
                     boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
                     fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
-                    whiteSpace: 'pre-wrap', wordBreak: 'break-word'
-                  }}>{t.text}</div>
+                    wordBreak: 'break-word'
+                  }}><Markdown text={t.text} /></div>
                 </div>
               );
             })}
