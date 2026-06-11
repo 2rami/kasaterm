@@ -301,24 +301,6 @@ export async function fetchSchaleState(): Promise<SchaleState> {
   }
 }
 
-/** GET /peek?surface=<id>&lines=<n> — 그 pane 의 보이는 화면 텍스트(모노). 교실
- *  터미널 뷰 패널이 1s 폴링해 학생이 지금 뭘 보고 있는지 그대로 띄운다.
- *  응답 {ok,surface_id,text}. 실패 시 빈 문자열(fail-soft). */
-/** GET /peek?surface=<id>&lines=<n>[&ansi=1] — pane 화면 텍스트.
- *  ansi=true 면 SGR escape 포함(색 파싱용). fail-soft 빈문자열. */
-export async function fetchPeek(surfaceId: string, lines = 40, ansi = false): Promise<string> {
-  try {
-    const q = new URLSearchParams({ surface: surfaceId, lines: String(lines) });
-    if (ansi) q.set('ansi', '1');
-    const r = await fetch(`${BASE}/peek?${q}`);
-    if (!r.ok) return '';
-    const d = (await r.json().catch(() => ({}))) as { text?: string };
-    return d?.text ?? '';
-  } catch {
-    return '';
-  }
-}
-
 export interface MessageEntry {
   id: string;
   ts: number;

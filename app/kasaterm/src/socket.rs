@@ -1060,14 +1060,34 @@ fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
 fn discover_transcript(shell_pid: u32) -> Option<std::path::PathBuf> {
     claude_child_pid(shell_pid)?; // claude 자식 없으면 아직 claude 아님 — bind 안 함
     let cwd = pid_cwd(shell_pid)?;
-    let session = claude_session_id_from_cmdline(shell_pid)
-        .or_else(|| latest_claude_session_id(&cwd))?;
+    // argv 의 session id 는 정확(exact) — 그 경로를 바로 bind(신선도 게이트 없음).
+    if let Some(id) = claude_session_id_from_cmdline(shell_pid) {
+        return project_jsonl(&cwd, &id).filter(|p| p.exists());
+    }
+    // 폴백: cwd 의 newest jsonl. 단 ancient 파일은 거른다 — fresh claude 가 자기
+    // 세션을 아직 안 썼을 때(부팅 중 등) 어제 세션을 잘못 bind 하던 버그. 최근
+    // 활동(=현 세션)만 허용, 아니면 None → 다음 사이클 재시도(곧 claude 가 자기
+    // 세션을 쓰면 그게 newest 가 되어 정확히 잡힌다).
+    let id = latest_claude_session_id(&cwd)?;
+    let path = project_jsonl(&cwd, &id)?;
+    let fresh = path
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|d| d < std::time::Duration::from_secs(30 * 60));
+    (path.exists() && fresh).then_some(path)
+}
+
+/// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
+fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
-    let path = std::path::PathBuf::from(home)
-        .join(".claude/projects")
-        .join(encoded)
-        .join(format!("{session}.jsonl"));
-    path.exists().then_some(path)
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".claude/projects")
+            .join(encoded)
+            .join(format!("{session}.jsonl")),
+    )
 }
 
