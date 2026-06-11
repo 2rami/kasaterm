@@ -809,6 +809,15 @@ fn find_god_pane() -> Option<String> {
 /// `read=true`: `/send`·`/tell-god` 로 이미 PTY 전달됐으니 학생 inbox drain 은 막고
 /// 기록·표시만 남긴다. god 가시성은 cc 사본이 아니라 board-context 가 이 파일 전체를
 /// god 에게 보여주는 것으로 얻는다(단일 messages.jsonl 이라 사본 불필요).
+/// claude TUI(Ink)에 텍스트를 *제출까지* 보내는 페이로드. 단순 `\n`(LF)은 Ink 가
+/// 입력 내 개행으로 먹어 Enter 제출이 씹힌다(거노 실측: 텍스트만 입력칸에 남음).
+/// cli `tell` 과 동일하게 Ctrl-U(줄 비움) + bracketed paste + `\r`(CR=Enter):
+/// handler 의 `split_trailing_submit` 가 끝 `\r` 을 떼어 140ms 후 보내(Ink 가
+/// paste 처리를 끝낸 뒤) 제출이 확실히 먹는다.
+fn submit_payload(text: &str) -> String {
+    format!("\x15\x1b[200~{}\x1b[201~\r", text)
+}
+
 fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str) {
     // 활성 방 디렉터리에 직접 기록(없으면 생성) — 읽기와 달리 존재 여부로 안 거른다.
     let dir = std::path::Path::new("/tmp/kasaterm-collab").join(mode_slug(room_cwd));
@@ -882,7 +891,7 @@ async fn send_handler(
         )
             .into_response();
     }
-    let payload = if submit { format!("{text}\n") } else { text.clone() };
+    let payload = if submit { submit_payload(&text) } else { text.clone() };
     let resp = match backend.send_text(Some(&surface), &payload) {
         Ok(()) => {
             // 선생님 발신을 messages.jsonl 에 영속(휘발 X) — god/모모톡 가시.
@@ -1103,7 +1112,7 @@ async fn tell_god_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoR
                 .into_response();
         }
     };
-    let payload = format!("{text}\n");
+    let payload = submit_payload(&text);
     let resp = match backend.send_text(Some(&god_pane), &payload) {
         Ok(()) => {
             // 선생님 → god 발신 영속(휘발 X) — 모모톡 단톡방·god 가시.
