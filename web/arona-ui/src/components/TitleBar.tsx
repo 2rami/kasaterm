@@ -1,4 +1,5 @@
 import { CSSProperties, useState } from 'react';
+import { StatPill } from './GameKit';
 
 const APP_VERSION = 'v0.2.4';
 
@@ -23,8 +24,8 @@ function IconBtn({ title, badge, onClick, children }: IconBtnProps) {
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         border: 'none', cursor: 'pointer',
         background: hover ? 'var(--cth-sky-light)' : 'transparent',
-        boxShadow: hover ? 'inset 0 0 0 1px var(--cth-ink-900)' : 'none',
-        color: 'var(--cth-ink-700)',
+        borderRadius: 7,
+        color: 'var(--cth-ink-500)',
       }}
     >
       {children}
@@ -34,10 +35,10 @@ function IconBtn({ title, badge, onClick, children }: IconBtnProps) {
           minWidth: 13, height: 13, padding: '0 2px',
           boxSizing: 'border-box',
           background: 'var(--cth-coral)',
-          color: 'var(--cth-cream-50)',
-          fontFamily: 'var(--cth-font-display)', fontSize: 7,
+          color: '#fff',
+          fontFamily: 'var(--cth-font-ui)', fontSize: 8, fontWeight: 700,
+          borderRadius: 999,
           lineHeight: '13px', textAlign: 'center',
-          boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
         }}>{badge > 9 ? '9+' : badge}</span>
       )}
     </button>
@@ -70,33 +71,42 @@ function GearIcon() {
     </svg>
   );
 }
+function BoltIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
+      <path d="M9.2 1.3 3.3 9.2H7l-.9 5.5 6-8.1H8.4l.8-5.3Z" fill="#FFC83D" stroke="var(--cth-ink-900)" strokeWidth="0.7" strokeLinejoin="round" />
+    </svg>
+  );
+}
+const fmtTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
 
 export interface TitleBarProps {
   notifications?: number;
   mail?: number;
+  /** ⚡ 번개 = 전 학생 총 컨텍스트 토큰(재화 치환). */
+  contextTokens?: number;
   onBell?: () => void;
   onMail?: () => void;
   onSettings?: () => void;
 }
 
-export function TitleBar({ notifications = 0, mail = 0, onBell, onMail, onSettings }: TitleBarProps) {
+export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, onBell, onMail, onSettings }: TitleBarProps) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
-      height: 30, padding: '0 10px', flexShrink: 0, boxSizing: 'border-box',
-      background: 'linear-gradient(var(--cth-sky-light), var(--cth-cream-100))',
-      borderBottom: '2px solid var(--cth-ink-900)',
+      height: 36, padding: '0 12px', flexShrink: 0, boxSizing: 'border-box',
+      background: 'linear-gradient(180deg, var(--cth-sky-light), var(--cth-cream-50))',
+      borderBottom: '1px solid var(--cth-cream-200)',
     }}>
-      {/* 로고 마크 */}
-      <span style={{
-        width: 18, height: 18, flexShrink: 0,
-        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-        background: 'var(--cth-ink-900)', color: 'var(--cth-sky)',
-        fontFamily: 'var(--cth-font-display)', fontSize: 8,
-      }}>A</span>
+      {/* 로고 마크 — SCHALE 삼각 심볼 */}
+      <svg width="20" height="20" viewBox="0 0 20 20" style={{ flexShrink: 0 }}>
+        <path d="M10 2.5 17.5 16H2.5L10 2.5Z" fill="none" stroke="var(--cth-sky)" strokeWidth="1.7" strokeLinejoin="round" />
+        <circle cx="10" cy="11.5" r="2.3" fill="var(--cth-sky)" />
+      </svg>
 
       <span style={{
-        fontFamily: 'var(--cth-font-display)', fontSize: 8,
+        fontFamily: 'var(--cth-font-display)', fontSize: 14, fontWeight: 800,
+        letterSpacing: 0.5,
         color: 'var(--cth-ink-900)', whiteSpace: 'nowrap',
       }}>SCHALE OS</span>
 
@@ -107,6 +117,9 @@ export function TitleBar({ notifications = 0, mail = 0, onBell, onMail, onSettin
 
       <div style={{ flex: 1 }} />
 
+      {contextTokens > 0 && (
+        <StatPill icon={<BoltIcon />} value={fmtTokens(contextTokens)} style={{ marginRight: 4 }} />
+      )}
       <IconBtn title="알림" badge={notifications} onClick={onBell}><BellIcon /></IconBtn>
       <IconBtn title="메일" badge={mail} onClick={onMail}><MailIcon /></IconBtn>
       <IconBtn title="설정" onClick={onSettings}><GearIcon /></IconBtn>

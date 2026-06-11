@@ -1,10 +1,11 @@
 @import './tokens.css';
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; }
 
-/* The app is a fixed cream/light design. Without declaring it, Chromium on a
-   dark-mode OS styles form controls with the DARK UA scheme — most visibly a
-   white (invisible) text caret on our cream textareas. */
+/* Fixed light design — declare so Chromium on dark-mode OS doesn't dark-style
+   form controls (invisible caret on light textareas). */
 :root { color-scheme: light; }
 
 html, body, #root {
@@ -15,17 +16,14 @@ html, body, #root {
   font-family: var(--cth-font-ui);
   font-size: var(--cth-text-body-md);
   line-height: var(--cth-lh-body-md);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
 }
 
 body {
-  /* tiny diagonal cream noise — pure CSS, no images */
-  background-image:
-    repeating-linear-gradient(
-      45deg,
-      rgba(232, 217, 160, 0.20) 0 1px,
-      transparent 1px 6px
-    );
+  /* SCHALE 하늘색 그라데이션(목업) — 위 연하늘 → 아래 화이트 */
+  background: linear-gradient(180deg, #DCEBFA 0%, #EAF3FC 45%, #F5FAFE 100%);
 }
 
 button, input, textarea, select {
@@ -34,54 +32,49 @@ button, input, textarea, select {
   color: inherit;
 }
 
-/* Belt + suspenders for the caret: follow the ink, never the UA scheme. */
 input, textarea { caret-color: var(--cth-ink-900); }
 
-/* The MOUSE text-select pointer (the I-beam) is a different beast from the
-   caret: it comes from the OS cursor scheme, which `color-scheme` can't touch.
-   On Windows several schemes (and HiDPI variants) draw it white with a hairline
-   outline — invisible hovering over our cream inputs. Replace it with our own
-   inked I-beam wearing a cream halo, so it reads on cream AND on the dark
-   terminal. Falls back to the UA `text` cursor if SVG cursors are unavailable. */
+/* MOUSE I-beam — OS cursor scheme can draw it white (invisible on light inputs).
+   Our own: navy ink + white halo, reads on light surfaces AND the dark terminal. */
 input, textarea, [contenteditable='true'] {
-  cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='17' height='18'><g fill='none' stroke='%23fdf6e3' stroke-width='4' stroke-linecap='round'><path d='M5 2.5h7M8.5 3v12M5 15.5h7'/></g><g fill='none' stroke='%23261d31' stroke-width='1.6' stroke-linecap='round'><path d='M5 2.5h7M8.5 3v12M5 15.5h7'/></g></svg>") 8 9, text;
+  cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='17' height='18'><g fill='none' stroke='%23ffffff' stroke-width='4' stroke-linecap='round'><path d='M5 2.5h7M8.5 3v12M5 15.5h7'/></g><g fill='none' stroke='%2315294a' stroke-width='1.6' stroke-linecap='round'><path d='M5 2.5h7M8.5 3v12M5 15.5h7'/></g></svg>") 8 9, text;
 }
 
-/* Command Center tab bar scrolls horizontally when it overflows a narrow
-   sidebar; hide the scrollbar (overlay on mac, hidden elsewhere) — scroll with
-   trackpad / Shift+wheel, like a browser tab strip. */
+/* Command Center tab bar scrolls horizontally; hide the scrollbar (scroll with
+   trackpad / Shift+wheel, like a browser tab strip). */
 .cth-tabbar { scrollbar-width: none; -ms-overflow-style: none; }
 .cth-tabbar::-webkit-scrollbar { height: 0; display: none; }
 
-/* Pixel-snapping for any rasterised content */
-canvas, img, svg { image-rendering: pixelated; image-rendering: crisp-edges; }
+/* Only the raster terminal canvas snaps to pixels; illustrations/images stay smooth. */
+canvas { image-rendering: pixelated; }
 
-/* Focus ring — 2px outer offset, ink */
+/* Focus ring — SCHALE blue */
 :focus-visible {
-  outline: 2px solid var(--cth-ink-900);
+  outline: 2px solid var(--cth-sky);
   outline-offset: 2px;
 }
 
-/* Custom scrollbar — chunky, pixel-feel */
-::-webkit-scrollbar { width: 12px; height: 12px; }
-::-webkit-scrollbar-track {
-  background: var(--cth-cream-200);
-  box-shadow: inset 0 0 0 1px var(--cth-ink-700);
-}
+/* Scrollbar — slim, rounded, soft navy thumb (modern) */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--cth-ink-700);
-  box-shadow: inset 0 0 0 1px var(--cth-ink-900);
+  background: var(--cth-ink-300);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
-::-webkit-scrollbar-thumb:hover { background: var(--cth-ink-900); }
+::-webkit-scrollbar-thumb:hover {
+  background: var(--cth-ink-500);
+  background-clip: padding-box;
+}
 
-/* commit-graph (open-source git visualiser) — harmonise with the pixel theme */
+/* commit-graph (open-source git visualiser) — harmonise with the theme */
 .cth-commit-graph { background: var(--cth-paper-100); }
 .cth-commit-graph,
 .cth-commit-graph * {
   font-family: var(--cth-font-ui) !important;
   color: var(--cth-ink-900);
 }
-/* monospace for hashes / dates so they read like the rest of the app */
 .cth-commit-graph .commit-hash,
 .cth-commit-graph .commitHash,
 .cth-commit-graph time {
@@ -93,27 +86,26 @@ canvas, img, svg { image-rendering: pixelated; image-rendering: crisp-edges; }
 .cth-titlebar-drag { -webkit-app-region: drag; }
 .cth-titlebar-nodrag { -webkit-app-region: no-drag; }
 
-/* Settings (gear) button in the title bar — a clear bordered chip with a
-   neo-brutalist hover (lemon fill + offset shadow) so it reads as a button. */
-.cth-settings-btn { transition: background 80ms steps(2), box-shadow 80ms steps(2), transform 80ms steps(2); }
+/* Settings (gear) button — soft blue hover */
+.cth-settings-btn { transition: background 120ms ease, box-shadow 120ms ease, transform 120ms ease; }
 .cth-settings-btn:hover {
-  background: var(--cth-lemon) !important;
-  box-shadow: inset 0 0 0 1.5px var(--cth-ink-900), 2px 2px 0 0 var(--cth-ink-900) !important;
-  transform: translate(-1px, -1px);
+  background: var(--cth-sky-light) !important;
+  box-shadow: 0 2px 8px rgba(74, 144, 226, 0.30) !important;
+  transform: translateY(-1px);
 }
 .cth-settings-btn:active {
-  transform: translate(0, 0);
-  box-shadow: inset 0 0 0 1.5px var(--cth-ink-900) !important;
+  transform: translateY(0);
+  box-shadow: none !important;
 }
 
-/* Keyframes — pixel-style: step-based, no easing */
+/* Keyframes — smooth (modern) */
 @keyframes cth-blink {
   0%, 49% { opacity: 1; }
   50%, 100% { opacity: 0; }
 }
 @keyframes cth-pulse {
-  0%, 49% { transform: scale(1); }
-  50%, 100% { transform: scale(0.7); }
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(0.85); }
 }
 
 /* Reduce motion */
@@ -121,12 +113,8 @@ canvas, img, svg { image-rendering: pixelated; image-rendering: crisp-edges; }
   * { animation-duration: 0s !important; transition-duration: 0s !important; }
 }
 
-/* xterm: disable font ligatures.
- * Some browsers (e.g. Firefox 130+) treat sequences like "ff"/"ft"/"fi" as
- * ligatures, which breaks xterm's per-char width measuring: an "f" gets measured
- * too narrow and renders with a trailing gap ("f or" instead of "for"). Forcing
- * ligatures off on both the measure container and the rendered rows keeps the
- * monospace grid correct. See xtermjs/xterm.js#5156. */
+/* xterm: disable font ligatures (some browsers ligate "ff"/"fi" and break
+   xterm's per-char width measuring). See xtermjs/xterm.js#5156. */
 .xterm,
 .xterm-rows,
 .xterm-width-cache-measure-container {

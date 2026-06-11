@@ -117,6 +117,10 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     let mut cost_usd = 0f64;
     let mut tool_counts: Vec<(String, u32)> = Vec::new();
     let mut changed_files: Vec<String> = Vec::new();
+    // 서브에이전트 추적: Task/Agent tool_use(id+desc) 와 완료된 tool_result id 를
+    // 따로 모아, 매칭 안 된(=진행 중) 것만 남긴다.
+    let mut subagent_uses: Vec<(String, String)> = Vec::new();
+    let mut completed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for line in tail.lines().rev() {
         let v: serde_json::Value = match serde_json::from_str(line) {
@@ -161,6 +165,15 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                         Some("tool_use") => {
                             let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
                             bump(&mut tool_counts, name);
+                            if name == "Task" || name == "Agent" {
+                                let id = b.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                                let desc = b
+                                    .pointer("/input/description")
+                                    .and_then(|x| x.as_str())
+                                    .or_else(|| b.pointer("/input/subagent_type").and_then(|x| x.as_str()))
+                                    .unwrap_or("subagent");
+                                subagent_uses.push((id.to_string(), clip(desc, 40)));
+                            }
                             let ev = tool_event(name, b.get("input"));
                             if let Some(f) = ev.file.clone() {
                                 if !changed_files.iter().any(|c| c == &f) {
@@ -179,9 +192,29 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                     }
                 }
             }
+            Some("user") => {
+                // tool_result 의 tool_use_id 를 모아 "완료된" 서브에이전트를 가린다
+                // (Task 호출은 assistant turn, 그 결과는 user turn 에 실린다).
+                if let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) {
+                    for b in content {
+                        if b.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
+                            if let Some(id) = b.get("tool_use_id").and_then(|x| x.as_str()) {
+                                completed_ids.insert(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
+
+    let mut subagents: Vec<String> = subagent_uses
+        .into_iter()
+        .filter(|(id, _)| !completed_ids.contains(id))
+        .map(|(_, d)| d)
+        .collect();
+    subagents.dedup();
 
     PaneActivity {
         surface_id: surface_id.to_string(),
@@ -204,6 +237,7 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         tool_counts,
         changed_files,
         is_god: false,
+        subagents,
     }
 }
 

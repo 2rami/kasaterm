@@ -81,14 +81,14 @@ export function CommandCenter() {
       height: '100%',
       display: 'flex',
       flexDirection: 'column',
-      borderLeft: '2px solid var(--cth-ink-900)',
-      background: 'var(--cth-cream-100)',
+      borderLeft: '1px solid var(--cth-cream-200)',
+      background: 'var(--cth-cream-50)',
       overflow: 'hidden'
     }}>
       {/* 헤더 */}
       <div style={{
-        padding: '10px 12px 8px',
-        borderBottom: '1px solid var(--cth-ink-900)',
+        padding: '12px 14px 10px',
+        borderBottom: '1px solid var(--cth-cream-200)',
         display: 'flex',
         alignItems: 'center',
         gap: 8
@@ -103,25 +103,25 @@ export function CommandCenter() {
           <div style={{
             fontFamily: 'var(--cth-font-display)',
             fontSize: 'var(--cth-text-display-md)',
-            color: 'var(--cth-ink-900)',
+            color: 'var(--cth-ink-900)', fontWeight: 700,
             lineHeight: 1.2
           }}>Command Center</div>
         </div>
         <div style={{
-          padding: '3px 8px',
+          padding: '4px 10px',
           background: 'var(--cth-sky)',
-          color: 'var(--cth-ink-900)',
-          fontFamily: 'var(--cth-font-display)',
-          fontSize: 'var(--cth-text-display-sm)',
-          boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+          color: '#fff',
+          fontFamily: 'var(--cth-font-ui)',
+          fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
+          borderRadius: 6
         }}>SCHALE</div>
       </div>
 
       {/* 탭 */}
-      <div style={{
+      <div className="cth-tabbar" style={{
         display: 'flex',
-        borderBottom: '1px solid var(--cth-ink-900)',
-        overflowX: 'auto'
+        borderBottom: '1px solid var(--cth-cream-200)',
+        overflowX: 'auto', gap: 2, padding: '5px 6px'
       }}>
         {(Object.keys(TAB_LABELS) as CenterTab[]).map((t) => (
           <button
@@ -129,15 +129,15 @@ export function CommandCenter() {
             onClick={() => setTab(t)}
             style={{
               flexShrink: 0,
-              padding: '5px 8px',
-              fontFamily: 'var(--cth-font-display)',
-              fontSize: 10,
-              border: 'none',
-              borderRight: '1px solid var(--cth-ink-900)',
-              background: tab === t ? 'var(--cth-ink-900)' : 'transparent',
-              color: tab === t ? 'var(--cth-cream-50)' : 'var(--cth-ink-700)',
+              padding: '6px 12px',
+              fontFamily: 'var(--cth-font-ui)',
+              fontSize: 12, fontWeight: 600,
+              border: 'none', borderRadius: 7,
+              background: tab === t ? 'var(--cth-sky)' : 'transparent',
+              color: tab === t ? '#fff' : 'var(--cth-ink-500)',
               cursor: 'pointer',
-              whiteSpace: 'nowrap'
+              whiteSpace: 'nowrap',
+              transition: 'background 120ms ease, color 120ms ease'
             }}
           >
             {TAB_LABELS[t]}
@@ -156,28 +156,28 @@ export function CommandCenter() {
           }}>
             <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-700)' }}>이벤트 피드</span>
             <span style={{
-              padding: '1px 5px',
+              padding: '2px 7px',
               background: 'var(--cth-coral)',
-              color: 'var(--cth-cream-50)',
-              fontFamily: 'var(--cth-font-display)',
-              fontSize: 9,
-              boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
-            }}>LIVE</span>
+              color: '#fff',
+              fontFamily: 'var(--cth-font-ui)',
+              fontSize: 10, fontWeight: 700, borderRadius: 5,
+              display: 'inline-flex', alignItems: 'center', gap: 4
+            }}>● LIVE</span>
           </div>
           <div
             ref={feedRef}
             style={{
               flex: '0 0 160px',
               overflowY: 'auto',
-              padding: '6px 10px',
-              borderBottom: '1px solid var(--cth-ink-900)',
-              background: 'var(--cth-cream-50)'
+              padding: '8px 10px',
+              borderBottom: '1px solid var(--cth-cream-200)',
+              background: 'var(--cth-ink-900)'
             }}
           >
             {events.length === 0 ? (
-              <span style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--cth-ink-400)' }}>이벤트 없음</span>
+              <span style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--cth-ink-300)' }}>이벤트 없음</span>
             ) : events.slice(-20).map((e, i) => (
-              <div key={i} style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--cth-ink-700)', marginBottom: 2, wordBreak: 'break-all' }}>
+              <div key={i} style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: '#9DC1E8', marginBottom: 3, wordBreak: 'break-all', lineHeight: 1.5 }}>
                 {JSON.stringify(e)}
               </div>
             ))}
@@ -193,14 +193,23 @@ export function CommandCenter() {
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: '6px 10px' }}>
             {messages.length === 0 ? (
-              <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-400)' }}>메시지 없음</span>
+              <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>메시지 없음</span>
             ) : messages.map((m, i) => (
-              <div key={i} style={{ marginBottom: 8 }}>
-                <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 9, color: 'var(--cth-ink-500)', marginBottom: 2 }}>
-                  {m.from ?? '?'} {m.time ? `· ${m.time}` : ''}
-                </div>
-                <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-900)', lineHeight: 1.4 }}>
-                  {m.text}
+              <div key={i} style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
+                <span style={{
+                  width: 28, height: 28, borderRadius: 999, flexShrink: 0,
+                  background: 'var(--cth-sky-light)', color: 'var(--cth-ink-700)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700
+                }}>{(m.from ?? '?').charAt(0)}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, color: 'var(--cth-ink-700)', marginBottom: 3 }}>
+                    {m.from ?? '?'}{m.time ? <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400 }}> · {m.time}</span> : null}
+                  </div>
+                  <div style={{
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)', lineHeight: 1.5,
+                    background: 'var(--cth-cream-100)', padding: '7px 10px', borderRadius: 10
+                  }}>{m.text}</div>
                 </div>
               </div>
             ))}
@@ -213,14 +222,14 @@ export function CommandCenter() {
             의뢰 대기열 {workers.length} / 10
           </div>
           {workers.length === 0 ? (
-            <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-400)' }}>대기 중인 의뢰 없음</span>
+            <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>대기 중인 의뢰 없음</span>
           ) : workers.map((a, i) => (
             <div key={a.id} style={{
               display: 'flex', alignItems: 'center', gap: 6,
               padding: '5px 0',
               borderBottom: '1px solid var(--cth-cream-300)'
             }}>
-              <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-400)', width: 16 }}>{i + 1}</span>
+              <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-300)', width: 16 }}>{i + 1}</span>
               <span style={{ flex: 1, fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {a.project || a.name}
               </span>
@@ -235,7 +244,7 @@ export function CommandCenter() {
         </div>
       ) : (
         <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 11, color: 'var(--cth-ink-400)' }}>준비 중</span>
+          <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 11, color: 'var(--cth-ink-300)' }}>준비 중</span>
         </div>
       )}
     </div>

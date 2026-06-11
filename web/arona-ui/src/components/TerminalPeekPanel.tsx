@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchPeek, sendToPane } from '@/lib/mcp';
+import { fetchPeek, fetchTranscript, sendToPane, type Turn } from '@/lib/mcp';
+import { SegmentedTabs } from './GameKit';
 
 // ── ANSI SGR 파서 ──────────────────────────────────────────────────────────────
 // claude TUI 에서 실제로 쓰는 색 코드만 커버(30-37/90-97 fg, 38;5;n 256색, reset).
@@ -90,32 +91,49 @@ export interface TerminalPeekPanelProps {
 }
 
 const LINES = 40;
+type Tab = 'chat' | 'screen';
 
 export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPanelProps) {
+  const [tab, setTab] = useState<Tab>('chat');
   const [raw, setRaw] = useState('');
+  const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [flash, setFlash] = useState<'ok' | 'err' | null>(null);
-  const bodyRef = useRef<HTMLPreElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // 대화 탭 — 구조화된 transcript 폴링(선생님 ②: 명령어 말고 대화내용).
   useEffect(() => {
+    if (tab !== 'chat') return;
+    let stopped = false;
+    const tick = async () => {
+      const ts = await fetchTranscript(surfaceId, 30);
+      if (!stopped) setTurns(ts);
+    };
+    void tick();
+    const iv = setInterval(tick, 1500);
+    return () => { stopped = true; clearInterval(iv); };
+  }, [surfaceId, tab]);
+
+  // 화면 탭 — raw 터미널(ANSI). 필요할 때만 폴링.
+  useEffect(() => {
+    if (tab !== 'screen') return;
     let stopped = false;
     setRaw('');
     const tick = async () => {
-      if (stopped) return;
-      const t = await fetchPeek(surfaceId, LINES, true); // ansi=1
+      const t = await fetchPeek(surfaceId, LINES, true);
       if (!stopped) setRaw(t);
     };
     void tick();
     const iv = setInterval(tick, 1000);
     return () => { stopped = true; clearInterval(iv); };
-  }, [surfaceId]);
+  }, [surfaceId, tab]);
 
   useEffect(() => {
     const el = bodyRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [raw]);
+  }, [raw, turns]);
 
   const send = async (submit: boolean) => {
     if (!input || sending) return;
@@ -133,92 +151,125 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
     if (e.key === 'c' && e.ctrlKey) { e.preventDefault(); void sendToPane(surfaceId, '\x03', false); }
   };
 
+  const dark = tab === 'screen';
+
   return (
     <div style={{
       position: 'fixed', top: 80, left: 500, right: 16, bottom: 16,
       display: 'flex', flexDirection: 'column',
-      background: '#16121c',
-      boxShadow: '0 0 0 2px var(--cth-ink-900), 0 0 0 4px var(--cth-cream-200)',
+      background: dark ? '#16121c' : 'var(--cth-cream-50)',
+      borderRadius: 16, overflow: 'hidden',
+      border: '1px solid var(--cth-cream-200)',
+      boxShadow: '0 12px 40px rgba(21, 41, 74, 0.20)',
       zIndex: 50
     }}>
-      {/* 헤더 */}
+      {/* 헤더: 캐릭터명 + 대화/화면 탭 + 닫기 */}
       <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        padding: '6px 10px', background: 'var(--cth-cream-200)',
-        boxShadow: 'inset 0 -2px 0 var(--cth-ink-900)'
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '10px 12px',
+        background: 'var(--cth-cream-50)',
+        borderBottom: '1px solid var(--cth-cream-200)'
       }}>
-        <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 'var(--cth-text-display-sm)', color: 'var(--cth-ink-900)' }}>
-          {title} <span style={{ color: 'var(--cth-ink-500)' }}>{surfaceId}</span>
+        <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 15, fontWeight: 700, color: 'var(--cth-ink-900)' }}>
+          {title} <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400, fontSize: 13 }}>{surfaceId}</span>
         </span>
+        <SegmentedTabs<Tab>
+          options={[{ value: 'chat', label: '대화' }, { value: 'screen', label: '화면' }]}
+          value={tab}
+          onChange={setTab}
+          size="sm"
+        />
+        <div style={{ flex: 1 }} />
         <button
           onClick={onClose}
+          title="닫기"
           style={{
-            fontFamily: 'var(--cth-font-display)', fontSize: 'var(--cth-text-display-sm)',
-            border: 'none', cursor: 'pointer', padding: '2px 8px',
-            background: 'var(--cth-coral)', color: 'var(--cth-cream-50)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+            width: 28, height: 28, borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 16, lineHeight: 1,
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center'
           }}
-        >
-          X
-        </button>
+        >×</button>
       </div>
 
-      {/* 본문 — ANSI 색 렌더링 */}
-      <pre
-        ref={bodyRef}
-        style={{
-          flex: 1, margin: 0, padding: '10px 14px', overflow: 'auto',
-          fontFamily: '"JetBrains Mono", "D2Coding", Menlo, ui-monospace, monospace',
-          fontSize: 13, lineHeight: 1.3, letterSpacing: 0,
-          color: '#e6e0ee', whiteSpace: 'pre', tabSize: 4,
-          textRendering: 'optimizeLegibility'
-        }}
-      >
-        {raw ? <AnsiText raw={raw} /> : '화면을 불러오는 중…'}
-      </pre>
+      {/* 본문 — 대화(채팅 버블) or 화면(ANSI) */}
+      {tab === 'chat' ? (
+        <div ref={bodyRef} style={{ flex: 1, overflow: 'auto', padding: '14px 16px', background: 'var(--cth-cream-100)' }}>
+          {turns.length === 0 ? (
+            <div style={{ color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 13, textAlign: 'center', marginTop: 40 }}>
+              대화를 불러오는 중…
+            </div>
+          ) : turns.map((t, i) => {
+            const mine = t.role === 'user';
+            return (
+              <div key={i} style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10 }}>
+                <div style={{
+                  maxWidth: '78%', padding: '8px 12px', borderRadius: 14,
+                  background: mine ? 'linear-gradient(180deg, #6BB0F0, #4A90E2)' : '#fff',
+                  color: mine ? '#fff' : 'var(--cth-ink-900)',
+                  border: mine ? 'none' : '1px solid var(--cth-cream-200)',
+                  boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-word'
+                }}>{t.text}</div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <pre
+          // ANSI 화면은 div 가 아닌 pre 이지만 같은 ref 타입(HTMLElement)로 스크롤 제어.
+          ref={bodyRef as unknown as React.RefObject<HTMLPreElement>}
+          style={{
+            flex: 1, margin: 0, padding: '10px 14px', overflow: 'auto',
+            fontFamily: '"JetBrains Mono", "D2Coding", Menlo, ui-monospace, monospace',
+            fontSize: 13, lineHeight: 1.3, letterSpacing: 0,
+            color: '#e6e0ee', whiteSpace: 'pre', tabSize: 4, background: '#16121c'
+          }}
+        >
+          {raw ? <AnsiText raw={raw} /> : '화면을 불러오는 중…'}
+        </pre>
+      )}
 
-      {/* 입력창 */}
+      {/* 입력창 — 학생에게 직접 전송(양방향) */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 6,
-        padding: '6px 10px',
-        background: '#1e1a28',
-        boxShadow: 'inset 0 2px 0 var(--cth-ink-900)'
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '8px 12px',
+        background: 'var(--cth-cream-50)',
+        borderTop: '1px solid var(--cth-cream-200)'
       }}>
         <span style={{
-          fontFamily: '"JetBrains Mono", monospace', fontSize: 12,
-          color: flash === 'ok' ? '#87d7a8' : flash === 'err' ? '#f28779' : '#6c8ef5',
-          flexShrink: 0, width: 14
-        }}>
-          {flash === 'err' ? '!' : '>'}
-        </span>
+          fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 700,
+          color: flash === 'ok' ? 'var(--cth-mint)' : flash === 'err' ? 'var(--cth-coral)' : 'var(--cth-sky)',
+          flexShrink: 0
+        }}>{flash === 'err' ? '!' : '›'}</span>
         <input
           ref={inputRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKey}
           disabled={sending}
-          placeholder="입력 후 Enter 전송 — Ctrl+C 인터럽트"
+          placeholder="학생에게 지시 — Enter 전송 · Ctrl+C 인터럽트"
           style={{
             flex: 1,
-            fontFamily: '"JetBrains Mono", "D2Coding", Menlo, monospace',
-            fontSize: 12,
-            background: 'transparent', border: 'none', outline: 'none',
-            color: '#e6e0ee', opacity: sending ? 0.5 : 1
+            fontFamily: 'var(--cth-font-ui)', fontSize: 13,
+            background: '#fff', border: '1px solid var(--cth-cream-200)', borderRadius: 9,
+            padding: '7px 11px', outline: 'none',
+            color: 'var(--cth-ink-900)', opacity: sending ? 0.5 : 1
           }}
         />
         <button
           onClick={() => void send(true)}
           disabled={!input || sending}
           style={{
-            fontFamily: '"JetBrains Mono", monospace', fontSize: 11,
-            padding: '2px 8px', border: 'none',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600,
+            padding: '7px 14px', border: 'none', borderRadius: 9,
             cursor: !input || sending ? 'not-allowed' : 'pointer',
-            background: '#6c8ef5', color: '#fff',
+            background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff',
+            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.5)',
             opacity: !input || sending ? 0.4 : 1
           }}
-        >
-          전송
-        </button>
+        >전송</button>
       </div>
     </div>
   );

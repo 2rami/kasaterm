@@ -1087,10 +1087,13 @@ impl App {
         eprintln!("[arona-panel] open; http://127.0.0.1:{port}/arona-ui/");
         self.arona_panel_window = Some(window);
         self.arona_panel_webview = Some(webview);
-        // 교실이 화면을 인수한다 — 메인 터미널 창은 숨김(닫기/빨간약으로 복귀).
-        // 창만 숨고 이벤트 루프·PTY·소켓 스레드는 그대로 돈다.
-        if let Some(w) = &self.window {
-            w.set_visible(false);
+        // 제품 동작: 교실(BA UI)과 터미널을 둘 다 띄워 나란히 연동한다 — BA UI 의
+        // 포커스/입력/상태가 메인 터미널 창과 양방향으로 묶인다. 옛 "교실이 화면을
+        // 인수(터미널 숨김)"는 KASATERM_ARONA_SOLO_VIEW 몰입 옵션으로 강등.
+        if std::env::var_os("KASATERM_ARONA_SOLO_VIEW").is_some() {
+            if let Some(w) = &self.window {
+                w.set_visible(false);
+            }
         }
     }
     /// Close the arona window and bring the hidden main terminal back. The

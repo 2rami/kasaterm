@@ -46,24 +46,24 @@ export function PixelBadge({ status, label, style }: PixelBadgeProps) {
       style={{
         display: 'inline-flex',
         alignItems: 'center',
-        gap: 6,
-        padding: '2px 8px 0',
-        background: 'var(--cth-cream-100)',
-        boxShadow: `inset 0 0 0 1px ${colorByStatus[status]}`,
-        fontFamily: 'var(--cth-font-ui)',
+        gap: 5,
+        padding: '2px 9px',
+        borderRadius: 999,
+        background: `color-mix(in srgb, ${colorByStatus[status]} 14%, #fff)`,
+        fontFamily: 'var(--cth-font-ui)', fontWeight: 600,
         fontSize: 'var(--cth-text-body-sm)',
         lineHeight: '18px',
-        color: 'var(--cth-ink-900)',
+        color: colorByStatus[status],
         userSelect: 'none',
         ...style
       }}
     >
       <span
         style={{
-          width: 8,
-          height: 8,
-          background: colorByStatus[status],
-          boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+          width: 7,
+          height: 7,
+          borderRadius: 999,
+          background: colorByStatus[status]
         }}
       />
       {text}

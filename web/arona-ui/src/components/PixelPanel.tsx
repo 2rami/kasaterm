@@ -40,7 +40,8 @@ export function PixelPanel({
 }: PixelPanelProps) {
   const baseStyle: CSSProperties = {
     background: fillByVariant[variant],
-    boxShadow: borderByVariant[variant],
+    boxShadow: `${borderByVariant[variant]}, 0 2px 10px rgba(21, 41, 74, 0.06)`,
+    borderRadius: 12,
     padding: noPadding ? 0 : 'var(--cth-space-3)',
     position: 'relative',
     ...style
@@ -48,10 +49,7 @@ export function PixelPanel({
 
   // Active variant: paint accent over the middle border slot (3px ring at 1px inset)
   if (variant === 'active' && accent) {
-    baseStyle.boxShadow = `
-      inset 0 0 0 1px var(--cth-ink-700),
-      inset 0 0 0 3px var(--cth-${accent}),
-      inset 0 0 0 5px var(--cth-ink-900)`;
+    baseStyle.boxShadow = `inset 0 0 0 2px var(--cth-${accent}), 0 4px 14px rgba(74, 144, 226, 0.18)`;
   }
 
   return (
@@ -60,13 +58,14 @@ export function PixelPanel({
         <div
           style={{
             margin: noPadding ? 0 : '-12px -12px 12px',
-            padding: '6px 12px 4px',
-            background: accent ? `var(--cth-${accent})` : 'var(--cth-cream-200)',
-            color: 'var(--cth-ink-900)',
-            fontFamily: 'var(--cth-font-display)',
+            padding: '8px 12px 6px',
+            borderTopLeftRadius: 12, borderTopRightRadius: 12,
+            background: accent ? `var(--cth-${accent})` : 'var(--cth-cream-100)',
+            color: accent ? '#fff' : 'var(--cth-ink-700)',
+            fontFamily: 'var(--cth-font-ui)', fontWeight: 700,
             fontSize: 'var(--cth-text-display-md)',
             lineHeight: 'var(--cth-lh-display-md)',
-            boxShadow: 'inset 0 -1px 0 var(--cth-ink-900)'
+            borderBottom: '1px solid var(--cth-cream-200)'
           }}
         >
           {title}

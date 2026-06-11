@@ -23,6 +23,14 @@ interface BoardRow {
   /** 마지막 답변/질문 첫마디 — waiting/idle 생각 구름 텍스트 소스. board 에는
    *  waiting_for 필드가 없어, 대기 시 직전에 던진 질문/제안이 담긴 이 값을 쓴다. */
   last_reply?: string;
+  last_prompt?: string;
+  /** 누적 토큰/비용 — 재화 치환 + 카드 표시(이미 /board 에 직렬화됨, UI 가 안 읽던 값). */
+  cost_usd?: number;
+  cache_read?: number;
+  /** tail 윈도 tool 사용 분포 [["Bash",5],...] — Task 추적/말풍선 tool 이름. */
+  tool_counts?: [string, number][];
+  /** 진행 중 서브에이전트 description 목록(Task/Agent tool_use 미완료). */
+  subagents?: string[];
   /** 유우카가 character-<N> 마커를 읽어 노출(후속). 있으면 도트칩 이니셜·이름이
    *  캐릭터명(아로나/시로코/아리스…)으로, 없으면 title(ai-title) 폴백. */
   character?: string;
@@ -44,9 +52,11 @@ function accentFor(id: string): AccentColorName {
 
 function toAgent(r: BoardRow): Agent {
   const tokens = (r.tokens_in ?? 0) + (r.tokens_out ?? 0);
-  // character 마커가 실리면 캐릭터명(아로나/시로코/아리스…)으로, 없으면 필드 자체가
-  // 빠지므로 ?? 로 title(ai-title) 폴백(유우카 권장 — 빈문자 아닌 미존재 분기).
   const display = r.character ?? (r.title || r.surface_id);
+  // 현재 tool = intent 라벨 첫 토큰("Edit auth.ts"→"Edit"). tool_use 없는 turn 직후의
+  // 'active' 폴백은 tool 이름이 아니므로 버린다(말풍선엔 진짜 tool명만).
+  const head = r.intent ? r.intent.split(' ')[0] : '';
+  const currentTool = head && head !== 'active' ? head : undefined;
   return {
     id: r.surface_id,
     name: display,
@@ -56,8 +66,15 @@ function toAgent(r: BoardRow): Agent {
     project: r.intent ?? '',
     action: r.intent,
     lastReply: r.last_reply,
+    lastPrompt: r.last_prompt,
     isGod: !!r.is_god,
-    contextTokens: tokens > 0 ? tokens : undefined
+    contextTokens: tokens > 0 ? tokens : undefined,
+    currentTool,
+    toolCounts: r.tool_counts,
+    costUsd: r.cost_usd,
+    tokensIn: r.tokens_in,
+    tokensOut: r.tokens_out,
+    subagents: r.subagents
   };
 }
 
@@ -290,5 +307,21 @@ export async function fetchPeek(surfaceId: string, lines = 40, ansi = false): Pr
     return d?.text ?? '';
   } catch {
     return '';
+  }
+}
+
+export interface Turn { role: string; text: string; }
+
+/** GET /transcript?surface=<id>&turns=<n> — 구조화된 대화(프롬프트/답변, tool 노이즈
+ *  제거). 학생 클릭 시 raw 터미널 대신 대화 채팅뷰 소스(선생님 ②). fail-soft 빈 배열. */
+export async function fetchTranscript(surfaceId: string, turns = 20): Promise<Turn[]> {
+  try {
+    const q = new URLSearchParams({ surface: surfaceId, turns: String(turns) });
+    const r = await fetch(`${BASE}/transcript?${q}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { turns?: Turn[] };
+    return Array.isArray(d?.turns) ? d.turns : [];
+  } catch {
+    return [];
   }
 }

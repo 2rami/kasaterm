@@ -764,6 +764,31 @@ async fn peek_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /transcript?surface=%N&turns=20` — a pane's structured dialogue
+/// (user prompts + assistant replies, including off-screen turns). Unlike
+/// `/peek` (raw rendered screen), this is the clean conversation for the
+/// classroom "click a student → see the chat" view; tool_use/tool_result
+/// noise is already stripped by `parse_turn`.
+async fn transcript_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let surface = params.get("surface").map(String::as_str).unwrap_or("");
+    let body = if surface.is_empty() {
+        serde_json::json!({ "ok": false, "error": "surface=%N required" })
+    } else {
+        let turns = params
+            .get("turns")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(20);
+        match backend.transcript_tail(surface, turns) {
+            Ok(ts) => serde_json::json!({ "ok": true, "surface_id": surface, "turns": ts }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// /tmp/kasaterm-collab/ 아래 모든 방을 순회해 lead 파일이 있는 첫 god pane id
 /// 를 반환한다. active_cwd 가 쉘 디렉토리를 따르므로 슬러그 계산 대신 스캔.
 fn find_god_pane() -> Option<String> {
@@ -1198,6 +1223,7 @@ pub fn spawn_http_server(
                 let terminal_reveal_backend = backend.clone();
                 let arona_close_backend = backend.clone();
                 let peek_backend = backend.clone();
+                let transcript_backend = backend.clone();
                 let tell_god_backend = backend.clone();
                 let send_backend = backend.clone();
                 let mode_get_backend = backend.clone();
@@ -1243,6 +1269,12 @@ pub fn spawn_http_server(
                     .route(
                         "/board",
                         get(move || board_handler(board_backend.clone())),
+                    )
+                    .route(
+                        "/transcript",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            transcript_handler(transcript_backend.clone(), q)
+                        }),
                     )
                     .route("/characters", get(characters_handler))
                     .route(

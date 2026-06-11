@@ -1,31 +1,32 @@
 // Design tokens — single source of truth. Mirrors tokens.css for non-styled consumers (Pixi).
 // Any change here must also update tokens.css.
+// SCHALE OS 클린 블루 테마 (목업 기준 2026-06-11). 이름 유지, 값만 블루 재매핑.
 
 export const colors = {
   cream: {
-    50: 0xfffdf5,
-    100: 0xfff8e7,
-    200: 0xf4e9c7,
-    300: 0xe8d9a0
+    50: 0xffffff,
+    100: 0xeaf3fc,
+    200: 0xd6e6f5,
+    300: 0xb9d3ed
   },
   paper: {
-    100: 0xfcfaf0,
-    200: 0xf0ead2
+    100: 0xf5fafe,
+    200: 0xe3effa
   },
   ink: {
-    900: 0x1a1320,
-    700: 0x3d2e4a,
-    500: 0x6b5878,
-    300: 0xa899b5,
-    100: 0xd9cfe0
+    900: 0x15294a,
+    700: 0x25406b,
+    500: 0x4a638f,
+    300: 0x8aa6c8,
+    100: 0xcbdcef
   },
   accent: {
     coral: 0xff6b6b,
     coralLight: 0xffb4b4,
     mint: 0x6bcf7f,
     mintLight: 0xb4e5bd,
-    sky: 0x4ecdc4,
-    skyLight: 0xa8e6e0,
+    sky: 0x4a90e2,
+    skyLight: 0xa9cbf0,
     lemon: 0xffd93d,
     lemonLight: 0xffec99,
     lilac: 0xb197fc,
@@ -34,20 +35,20 @@ export const colors = {
     peachLight: 0xffd0b5
   },
   status: {
-    idle: 0xa899b5,
-    thinking: 0x4ecdc4,
-    working: 0xffd93d,
+    idle: 0x8aa6c8,
+    thinking: 0x4a90e2,
+    working: 0xffc83d,
     blocked: 0xff6b6b,
     success: 0x6bcf7f,
-    ghost: 0xd9cfe0
+    ghost: 0xcbdcef
   },
   world: {
-    grassLight: 0xd4eab0,
-    grassDark: 0xb5d589,
+    grassLight: 0xdce9f5,
+    grassDark: 0xc3d8ee,
     woodLight: 0xe5c896,
     woodDark: 0xc9a66b,
-    path: 0xe8d8b0,
-    wall: 0x8b6f47
+    path: 0xe8f0f8,
+    wall: 0xa9c2de
   }
 } as const;
 
@@ -56,9 +57,9 @@ export const space = {
 } as const;
 
 export const type = {
-  display: '"Press Start 2P", monospace',
-  ui: '"Pixelify Sans", system-ui, sans-serif',
-  mono: '"VT323", "JetBrains Mono", monospace'
+  display: '"Pretendard Variable", Pretendard, "Noto Sans KR", system-ui, sans-serif',
+  ui: '"Pretendard Variable", Pretendard, "Noto Sans KR", system-ui, sans-serif',
+  mono: '"JetBrains Mono", ui-monospace, "SF Mono", monospace'
 } as const;
 
 export const tileSize = 32; // px — the world is built from 32×32 tiles
