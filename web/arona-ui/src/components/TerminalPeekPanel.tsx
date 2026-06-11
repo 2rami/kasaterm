@@ -156,13 +156,11 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
 
   return (
     <div style={{
-      position: 'fixed', top: 80, left: 500, right: 16, bottom: 16,
+      width: 340, flexShrink: 0, height: '100%',
       display: 'flex', flexDirection: 'column',
       background: dark ? '#16121c' : 'var(--cth-cream-50)',
-      borderRadius: 16, overflow: 'hidden',
-      border: '1px solid var(--cth-cream-200)',
-      boxShadow: '0 12px 40px rgba(21, 41, 74, 0.20)',
-      zIndex: 50
+      borderLeft: '1px solid var(--cth-cream-200)',
+      overflow: 'hidden'
     }}>
       {/* 헤더: 캐릭터명 + 대화/화면 탭 + 닫기 */}
       <div style={{
