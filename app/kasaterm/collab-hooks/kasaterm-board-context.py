@@ -304,6 +304,28 @@ def _god_persona():
     return "[아로나 모드] " + persona.strip()[:300]
 
 
+def _msg_log_digest(n=12):
+    """god 전용 전체 가시성 — messages.jsonl 최근 N 건을 'from→to: text' 로 요약.
+    inbox_section(to==god 미읽)과 달리, to 가 god 이 아닌 것(선생님→학생·학생↔학생)까지
+    god 이 본다(orchestrator 가 모든 소통 장악). 단일 messages.jsonl 이라 cc 사본 없이
+    이 한 곳에서 전체를 본다. 관전용 — read 플래그는 안 건드린다."""
+    if not kasacollab:
+        return ""
+    try:
+        msgs = kasacollab.read_msgs()
+    except Exception:
+        return ""
+    if not msgs:
+        return ""
+    lines = []
+    for m in msgs[-n:]:
+        frm = m.get("from_pane") or m.get("from") or "?"
+        to = m.get("to_pane") or m.get("to") or "?"
+        text = (m.get("text") or "").replace("\n", " ")[:60]
+        lines.append(f"  {frm}→{to}: {text}")
+    return "[메시지 로그 — 전체 관전(선생님 지시·학생간 소통)]\n" + "\n".join(lines)
+
+
 def god_section():
     """협업 규약 — 모드별. 기본 solo(팀장 없음, 거노 직접 오케스트레이션):
     커밋은 각자(자기 작업 파일 명시), 승인은 사용자 직행, 파일 겹침은
@@ -332,8 +354,12 @@ def god_section():
                 "(워커는 idle 자동 compact, god 은 사용자 대화라 강제 안 함·자율 판단).")
         digest = god_fleet_digest()
         recovery = roster_recovery()
+        msglog = _msg_log_digest()
         gp = _god_persona()
-        body = base + (("\n" + digest) if digest else "") + (("\n" + recovery) if recovery else "")
+        body = (base
+                + (("\n" + digest) if digest else "")
+                + (("\n" + msglog) if msglog else "")
+                + (("\n" + recovery) if recovery else ""))
         return ((gp + "\n") if gp else "") + body
     worker = (f"[god 체제] god = {god}. 너는 워커 — 직접 git commit/push 하지 마라. "
               f"작업이 끝나면 `kasacollab msg {god} \"done: <요약> | files: a,b\"` 로 "

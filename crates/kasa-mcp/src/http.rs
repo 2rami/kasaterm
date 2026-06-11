@@ -805,6 +805,33 @@ fn find_god_pane() -> Option<String> {
     None
 }
 
+/// 선생님(인간) 발신을 messages.jsonl 에 영속한다 — god/모모톡 단톡방 가시용.
+/// `read=true`: `/send`·`/tell-god` 로 이미 PTY 전달됐으니 학생 inbox drain 은 막고
+/// 기록·표시만 남긴다. god 가시성은 cc 사본이 아니라 board-context 가 이 파일 전체를
+/// god 에게 보여주는 것으로 얻는다(단일 messages.jsonl 이라 사본 불필요).
+fn persist_sensei_msg(surface: &str, text: &str) {
+    let Some(dir) = find_collab_dir() else { return };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let id = format!("{:08x}", (now * 1000.0) as u64 & 0xffff_ffff);
+    let line = serde_json::json!({
+        "id": id, "from": "sensei", "from_pane": "sensei",
+        "to": surface, "to_pane": surface,
+        "text": text, "ts": now, "read": true
+    })
+    .to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("messages.jsonl"))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// `POST /send?surface=%N` — 학생 pane에 텍스트 주입.
 /// body `{"text":"...","submit":true|false}` or raw text.
 /// `submit` 기본값=true → 끝에 개행 추가(제출). false → 개행 없음(타이핑만).
@@ -851,9 +878,13 @@ async fn send_handler(
         )
             .into_response();
     }
-    let payload = if submit { format!("{text}\n") } else { text };
+    let payload = if submit { format!("{text}\n") } else { text.clone() };
     let resp = match backend.send_text(Some(&surface), &payload) {
-        Ok(()) => serde_json::json!({ "ok": true, "surface": surface, "submit": submit }),
+        Ok(()) => {
+            // 선생님 발신을 messages.jsonl 에 영속(휘발 X) — god/모모톡 가시.
+            persist_sensei_msg(&surface, &text);
+            serde_json::json!({ "ok": true, "surface": surface, "submit": submit })
+        }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     (cors, Json(resp)).into_response()
@@ -1059,7 +1090,11 @@ async fn tell_god_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoR
     };
     let payload = format!("{text}\n");
     let resp = match backend.send_text(Some(&god_pane), &payload) {
-        Ok(()) => serde_json::json!({ "ok": true, "to": god_pane }),
+        Ok(()) => {
+            // 선생님 → god 발신 영속(휘발 X) — 모모톡 단톡방·god 가시.
+            persist_sensei_msg(&god_pane, &text);
+            serde_json::json!({ "ok": true, "to": god_pane })
+        }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     (cors, Json(resp)).into_response()
