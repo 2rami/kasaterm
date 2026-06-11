@@ -7,6 +7,22 @@ import { useStore } from '@/store';
 // (일부 claude 는 세션 중 jsonl 을 라이브로 안 써, 우리가 PTY 를 소유하니 화면에서
 // 직접 읽는다). ❯=선생님 프롬프트, ⏺=학생 답변. 하단 ─── 아래(입력창·상태바)와
 // 툴콜(⏺ Bash(…))·박스·상태줄은 버린다. best-effort — 명확한 턴만 추출.
+// 화면 텍스트에서 이미지 경로 추출 — 코덱스/raw SendUserFile 은 진짜 툴 이벤트가
+// 아니라 `<parameter name="files">["…png"]` 와 `› [image] ~/…png (…)` 로 화면에
+// 텍스트로 찍혀 훅이 못 잡는다(거노 실측). 그래서 화면을 직접 파싱한다. 절대(/)·홈(~)
+// 경로 둘 다, basename 으로 dedupe(절대경로 우선).
+function parseImagePaths(screen: string): string[] {
+  const re = /[~/][^\s"'\[\]()]+\.(?:png|jpe?g|gif|webp|bmp|tiff?)/gi;
+  const found = screen.match(re) ?? [];
+  const byBase = new Map<string, string>();
+  for (const p of found) {
+    const base = p.split('/').pop() ?? p;
+    const cur = byBase.get(base);
+    if (!cur || (p.startsWith('/') && !cur.startsWith('/'))) byBase.set(base, p);
+  }
+  return [...byBase.values()];
+}
+
 function parsePtyConversation(screen: string): Turn[] {
   const lines = screen.split('\n');
   // 하단 입력박스(─── / ❯ <라이브 타이핑> / ───)를 대화에서 제외 — 안 그러면
@@ -100,7 +116,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
       ]);
       if (stopped) return;
       setTurns(ts.length ? ts : parsePtyConversation(screen));
-      setImages(imgs);
+      // 훅 기록(진짜 SendUserFile) + 화면 파싱(코덱스/raw) 병합, basename dedupe.
+      const byBase = new Map<string, string>();
+      for (const p of [...imgs, ...parseImagePaths(screen)]) {
+        const base = p.split('/').pop() ?? p;
+        const cur = byBase.get(base);
+        if (!cur || (p.startsWith('/') && !cur.startsWith('/'))) byBase.set(base, p);
+      }
+      setImages([...byBase.values()]);
       setLoaded(true);
     };
     void tick();

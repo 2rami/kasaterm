@@ -79,7 +79,14 @@ async fn image_file_handler(
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
-    let path = params.get("path").cloned().unwrap_or_default();
+    let raw = params.get("path").cloned().unwrap_or_default();
+    // 화면 파싱 경로는 `~/...` 일 수 있다(터미널이 ~ 로 표시) — HOME 으로 확장.
+    let path = match raw.strip_prefix("~/") {
+        Some(rest) => std::env::var("HOME")
+            .map(|h| format!("{h}/{rest}"))
+            .unwrap_or(raw.clone()),
+        None => raw.clone(),
+    };
     let ext = std::path::Path::new(&path)
         .extension()
         .and_then(|e| e.to_str())
