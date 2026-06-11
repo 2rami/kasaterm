@@ -258,19 +258,16 @@ def roster_recovery():
     return "\n".join(lines)
 
 
-def _worker_persona():
-    """워커 캐릭터 persona — 스폰 래퍼의 시스템 프롬프트(스폰 시 1회)를 못 받은
-    기존 pane(solo→god 전환)도 페르소나를 받게 additionalContext 로 주입.
-    god-elect 의 tell 1회 주입(2f7fb67) 대체 — tell 은 강제 제출이라 사용자
-    화면에 노출돼 몰입을 깼고, 110자 컷으로 persona 가 잘렸다. 여기는 ambient
-    diff(안정 키 동일 시 스킵+30분 TTL) 체계라 마커 없이 스팸이 없다.
-    캐릭터 테마 없는 방은 None(현행 무변화)."""
+def _load_persona():
+    """이 pane 캐릭터 이름+persona. character 마커 없으면 (None, None).
+    스폰 래퍼 append 를 못 받은 기존 pane(solo→god 전환)이 여기로 페르소나를
+    받는다 — 'god 토글=아로나 ON, solo=순수 claude' 가 이 단일 경로로 성립한다."""
     try:
         cname = open(os.path.join(collab_dir(), f"character-{me.lstrip('%')}")).read().strip()
     except OSError:
-        return None
+        return None, None
     if not cname:
-        return None
+        return None, None
     persona = ""
     for cj in (os.path.expanduser("~/.config/kasaterm/characters.json"),
                os.path.join(_HD, "characters.json")):
@@ -281,10 +278,30 @@ def _worker_persona():
         ms = [d.get("leader") or {}] + (d.get("members") or [])
         persona = next((m.get("persona", "") for m in ms if m.get("name") == cname), "")
         break
+    return cname, persona
+
+
+def _worker_persona():
+    """워커 캐릭터 persona — additionalContext 로 ambient 주입(안정 키 동일 시
+    스킵+30분 TTL 이라 마커 없이 스팸 없음). god-elect 의 tell 1회 주입(2f7fb67)
+    대체 — tell 은 강제 제출이라 화면 노출로 몰입을 깼고 110자 컷으로 잘렸다."""
+    cname, persona = _load_persona()
+    if not cname:
+        return None
     line = f"[아로나 모드] 너는 {cname}({me}) 워커야."
     if persona:
         line += " " + persona.strip()[:300]
     return line
+
+
+def _god_persona():
+    """god(leader) 본인 persona — leader 는 persona 자체가 정체성을 완결하므로
+    ('너는 아로나 — 선생님의 비서…') 소속 프레이밍 없이 그대로 싣는다. 평소 순수
+    세션을 god 토글했을 때 아로나가 씌워지는 경로(append 는 스폰 시점만 먹는다)."""
+    cname, persona = _load_persona()
+    if not cname or not persona:
+        return None
+    return "[아로나 모드] " + persona.strip()[:300]
 
 
 def god_section():
@@ -315,7 +332,9 @@ def god_section():
                 "(워커는 idle 자동 compact, god 은 사용자 대화라 강제 안 함·자율 판단).")
         digest = god_fleet_digest()
         recovery = roster_recovery()
-        return base + (("\n" + digest) if digest else "") + (("\n" + recovery) if recovery else "")
+        gp = _god_persona()
+        body = base + (("\n" + digest) if digest else "") + (("\n" + recovery) if recovery else "")
+        return ((gp + "\n") if gp else "") + body
     worker = (f"[god 체제] god = {god}. 너는 워커 — 직접 git commit/push 하지 마라. "
               f"작업이 끝나면 `kasacollab msg {god} \"done: <요약> | files: a,b\"` 로 "
               f"보고하면 god 이 검토 후 단독 커밋한다. "

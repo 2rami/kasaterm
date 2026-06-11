@@ -55,11 +55,11 @@ export function AgentCard({
           style={{
             position: 'absolute', right: -4, bottom: -5, zIndex: 2,
             width: 22, height: 20,
-            background: 'var(--cth-sky)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900), 2px 2px 0 rgba(26,19,32,0.25)',
+            background: 'var(--cth-sky)', borderRadius: 6,
+            boxShadow: '0 2px 6px rgba(74, 144, 226, 0.35)',
             transform: 'rotate(4deg)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontFamily: 'var(--cth-font-display)', fontSize: 9, color: 'var(--cth-ink-900)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700, color: '#fff',
             cursor: 'pointer'
           }}
         >
@@ -74,9 +74,9 @@ export function AgentCard({
       >
         <div style={{ display: 'flex', gap: 8, height: '100%' }}>
           <div style={{
-            width: 44, height: 64,
+            width: 44, height: 64, borderRadius: 8,
             background: `var(--cth-${accent}-light)`,
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
+            boxShadow: 'inset 0 0 0 1px var(--cth-cream-300)',
             display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden',
             flexShrink: 0
           }}>
@@ -105,9 +105,9 @@ export function AgentCard({
             }}>
               {isGod && (
                 <span style={{
-                  fontFamily: 'var(--cth-font-display)', fontSize: 8, lineHeight: '12px',
-                  background: `var(--cth-${accent})`, color: 'var(--cth-ink-900)',
-                  padding: '1px 5px 0', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)', flexShrink: 0
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, lineHeight: '14px',
+                  background: `var(--cth-${accent})`, color: '#fff',
+                  padding: '0 6px', borderRadius: 5, flexShrink: 0
                 }}>GOD</span>
               )}
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{project}</span>
@@ -138,11 +138,10 @@ export function AgentCard({
             >
               {Array.from({ length: 8 }).map((_, i) => (
                 <div key={i} style={{
-                  width: 14, height: 6,
+                  width: 14, height: 6, borderRadius: 3,
                   background: i < progress
                     ? (progress >= 7 ? 'var(--cth-coral)' : progress >= 6 ? 'var(--cth-lemon)' : `var(--cth-${accent})`)
-                    : 'var(--cth-cream-200)',
-                  boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+                    : 'var(--cth-cream-200)'
                 }}/>
               ))}
             </div>

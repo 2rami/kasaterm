@@ -182,6 +182,12 @@ pub struct PaneActivity {
     /// panel draws a crown / accent for it. Set by `collab_board`.
     #[serde(default)]
     pub is_god: bool,
+    /// In-flight sub-agents — Task/Agent `tool_use` blocks in the tail window
+    /// with no matching `tool_result` yet, as their short descriptions. The
+    /// classroom surfaces "서브에이전트 N 실행 중" so a student spawning helpers
+    /// is visible. Empty when the pane has launched none (or all completed).
+    #[serde(default)]
+    pub subagents: Vec<String>,
 }
 
 /// One live session from `claude agents --json` (Claude Code 2.1.162+).

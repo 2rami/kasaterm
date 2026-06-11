@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useStore } from './store';
+import { useStore, type Agent } from './store';
 import { AgentCard } from './components/AgentCard';
 import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
@@ -12,9 +12,20 @@ import { TitleBar } from './components/TitleBar';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
 import { PixelButton } from './components/PixelButton';
+import { SegmentedTabs } from './components/GameKit';
 import { startBoardPolling, fetchMode, focusPane, revealTerminal, fetchSchaleState, type SchaleState } from './lib/mcp';
 
 type ViewMode = 'classroom' | 'grid';
+
+// dev 디자인 검증용 목 학생(URL ?mock=1). board 비어도 풀 화면을 본다.
+const MOCK_AGENTS: Agent[] = [
+  { id: '%1', name: '아로나', character: '아로나', accent: 'sky', status: 'idle', project: 'tmuxify', progress: 2, contextTokens: 30000, tokensIn: 24000, tokensOut: 6000, costUsd: 0.18, contextLimit: 200000, isGod: true, lastReply: '선생님, 오늘 의뢰 정리했어요!' },
+  { id: '%2', name: '시로코', character: '시로코', accent: 'coral', status: 'working', currentTool: 'Bash', project: 'API 장애 분석', action: 'log_01.txt 원인 추적 중', progress: 5, contextTokens: 90000, tokensIn: 72000, tokensOut: 18000, costUsd: 0.42, subagents: ['로그 패턴 분석', '메트릭 수집'], contextLimit: 200000 },
+  { id: '%3', name: '유우카', character: '유우카', accent: 'lemon', status: 'working', currentTool: 'Edit', project: '자동화 스크립트', action: '빌드 파이프라인 작성', progress: 4, contextTokens: 64000, tokensIn: 50000, tokensOut: 14000, costUsd: 0.31 },
+  { id: '%4', name: '아리스', character: '아리스', accent: 'lilac', status: 'waiting', project: '일일 보고서', progress: 3, contextTokens: 45000, tokensIn: 38000, tokensOut: 7000, costUsd: 0.15, lastReply: '이 방향이 맞을까요?' },
+  { id: '%5', name: '호시노', character: '호시노', accent: 'peach', status: 'idle', project: '시스템 테스트', progress: 1, contextTokens: 12000, tokensIn: 10000, tokensOut: 2000, costUsd: 0.05 },
+  { id: '%6', name: '코하루', character: '코하루', accent: 'mint', status: 'blocked', currentTool: 'Read', project: '사용자 로그 분석', progress: 6, contextTokens: 110000, tokensIn: 90000, tokensOut: 20000, costUsd: 0.55, lastReply: '접근 권한이 필요해요' },
+];
 
 // 라우팅: mode 미설정/solo/?picker=1 → 시작 선택. god → SCHALE OS 교실.
 export function App() {
@@ -30,13 +41,18 @@ export function App() {
   const [schaleState, setSchaleState] = useState<SchaleState | null>(null);
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
+  const forceMock = new URLSearchParams(location.search).get('mock') === '1';
 
   useEffect(() => {
+    if (forceMock) { setModeState('god'); setCwd('/Users/kasa/Desktop/momewomo/tmuxify'); setConfigured(true); return; }
     fetchMode().then(({ mode, cwd, configured }) => {
       setModeState(mode); setCwd(cwd); setConfigured(configured);
     });
   }, []);
-  useEffect(() => { if (mode === 'god') return startBoardPolling(1000); }, [mode]);
+  useEffect(() => {
+    if (forceMock) { useStore.getState().setAgents(MOCK_AGENTS); return; }
+    if (mode === 'god') return startBoardPolling(1000);
+  }, [mode]);
   useEffect(() => {
     if (mode !== 'god') return;
     const tick = () => { fetchSchaleState().then(setSchaleState); };
@@ -60,6 +76,11 @@ export function App() {
 
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
 
+  // 재화 = claude 토큰 지표(선생님): 💎입력토큰 · 🪙비용$ (전 학생 합산).
+  const totalInputTokens = sorted.reduce((s, a) => s + (a.tokensIn ?? 0), 0);
+  const totalCostUsd = sorted.reduce((s, a) => s + (a.costUsd ?? 0), 0);
+  const totalContextTokens = sorted.reduce((s, a) => s + (a.contextTokens ?? 0), 0);
+
   const reveal = async () => {
     setRevealing(true);
     await revealTerminal(1);
@@ -74,15 +95,17 @@ export function App() {
       <TitleBar
         notifications={agents.filter((a) => a.status === 'waiting' || a.status === 'blocked').length}
         mail={agents.filter((a) => a.status === 'success').length}
+        contextTokens={totalContextTokens}
         onSettings={reveal}
       />
 
       {/* 헤더 */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
-        padding: '8px 12px',
-        borderBottom: '2px solid var(--cth-ink-900)',
-        background: 'var(--cth-cream-100)',
+        padding: '10px 16px',
+        borderBottom: '1px solid var(--cth-cream-200)',
+        background: 'var(--cth-cream-50)',
+        boxShadow: '0 1px 3px rgba(21, 41, 74, 0.04)',
         flexShrink: 0
       }}>
         {/* 제목 + 방 칩 */}
@@ -99,40 +122,21 @@ export function App() {
         </div>
 
         {/* 뷰 탭 */}
-        <div style={{ display: 'flex', marginLeft: 8 }}>
-          {(['classroom', 'grid'] as ViewMode[]).map((v) => (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              style={{
-                fontFamily: 'var(--cth-font-display)', fontSize: 'var(--cth-text-display-sm)',
-                padding: '5px 12px', cursor: 'pointer', border: 'none',
-                background: view === v ? 'var(--cth-sky)' : 'transparent',
-                color: 'var(--cth-ink-900)',
-                boxShadow: view === v ? 'inset 0 0 0 1px var(--cth-ink-900)' : 'none'
-              }}
-            >
-              {v === 'classroom' ? '교실' : '카드'}
-            </button>
-          ))}
-        </div>
+        <SegmentedTabs<ViewMode>
+          options={[{ value: 'classroom', label: '교실' }, { value: 'grid', label: '카드' }]}
+          value={view}
+          onChange={setView}
+          size="sm"
+          style={{ marginLeft: 8 }}
+        />
 
         <div style={{ flex: 1 }} />
 
         {/* 우측 액션 */}
-        <button
-          onClick={reveal}
-          title="메인 터미널 다시 보기"
-          style={{
-            fontFamily: 'var(--cth-font-display)', fontSize: 'var(--cth-text-display-sm)',
-            padding: '5px 10px', cursor: 'pointer', border: 'none',
-            background: 'var(--cth-coral)', color: 'var(--cth-cream-50)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
-          }}
-        >
+        <PixelButton variant="secondary" size="sm" onClick={reveal}>
           {revealing ? '여는 중…' : '터미널 보기'}
-        </button>
-        <PixelButton variant="primary" onClick={() => setShowAdd(true)}>학생 부르기</PixelButton>
+        </PixelButton>
+        <PixelButton variant="primary" size="sm" onClick={() => setShowAdd(true)}>학생 부르기</PixelButton>
       </div>
 
       {/* 바디: 메인 영역 + 우측 CommandCenter */}
@@ -172,8 +176,8 @@ export function App() {
           {/* 학생 카드 그리드 (아리스 구현) */}
           <div style={{
             flexShrink: 0,
-            borderTop: '2px solid var(--cth-ink-900)',
-            background: 'var(--cth-cream-100)'
+            borderTop: '1px solid var(--cth-cream-200)',
+            background: 'var(--cth-cream-50)'
           }}>
             <StudentGrid agents={sorted} onSelect={(id, title) => setPeek({ id, title })} />
           </div>
@@ -181,14 +185,14 @@ export function App() {
           {/* 풋터 (아리스 구현) */}
           <div style={{
             flexShrink: 0,
-            borderTop: '1px solid var(--cth-ink-900)',
+            borderTop: '1px solid var(--cth-cream-200)',
             background: 'var(--cth-cream-50)'
           }}>
             <Footer
               onManage={() => setShowAdd(true)}
               onNewRequest={() => setShowChatInput((v) => !v)}
-              credits={schaleState?.credits}
-              gold={schaleState?.gold}
+              inputTokens={totalInputTokens}
+              costUsd={totalCostUsd}
               affinityLv={schaleState?.affinity_lv}
               exp={schaleState?.exp}
             />

@@ -44,7 +44,13 @@ function shortenAction(s?: string): string {
 // idle = 마지막 한마디 or 비표시.
 function thoughtFor(a: Agent): string {
   switch (a.status) {
-    case 'working': return shortenAction(a.action);
+    // 선생님 ①: 말풍선엔 "무슨 tool 쓰는지"(Bash/Read/Edit)만 — 명령어/인자 없이.
+    // 서브에이전트 돌리는 중이면 "· 서브 N" 을 덧댄다(선생님 ④).
+    case 'working': {
+      const tool = a.currentTool || shortenAction(a.action);
+      const n = a.subagents?.length ?? 0;
+      return n > 0 ? `${tool} · 서브 ${n}` : tool;
+    }
     case 'waiting':
     case 'blocked': return firstLine(a.lastReply) || shortenAction(a.action);
     case 'idle': return firstLine(a.lastReply);
@@ -77,7 +83,7 @@ export function ClassroomView({ onSelect }: ClassroomViewProps) {
 
     void (async () => {
       app = new Application();
-      await app.init({ background: 0xfcfaf0, width: MAP_W * TS, height: MAP_H * TS, antialias: false });
+      await app.init({ background: 0xeaf3fc, width: MAP_W * TS, height: MAP_H * TS, antialias: false });
       if (destroyed || !hostRef.current) { app.destroy(true); return; }
       ready = true;
       hostRef.current.appendChild(app.canvas);
@@ -147,8 +153,9 @@ export function ClassroomView({ onSelect }: ClassroomViewProps) {
       ref={hostRef}
       style={{
         display: 'inline-block',
-        imageRendering: 'pixelated',
-        boxShadow: 'var(--cth-panel-border)',
+        borderRadius: 16,
+        overflow: 'hidden',
+        boxShadow: '0 6px 20px rgba(21, 41, 74, 0.10), inset 0 0 0 1px var(--cth-cream-200)',
         lineHeight: 0
       }}
     />

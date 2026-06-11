@@ -1,19 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { PixelButton } from './PixelButton';
+import { CurrencyChip } from './GameKit';
 
 export interface FooterProps {
   onManage?: () => void;
   onNewRequest?: () => void;
-  credits?: number;
-  gold?: number;
+  /** 💎 크리스탈 = 전 학생 누적 입력 토큰. */
+  inputTokens?: number;
+  /** 🪙 골드 = 전 학생 누적 비용(USD). */
+  costUsd?: number;
   affinityLv?: number;
   exp?: number;
   expToNext?: number;
 }
 
-const PLACEHOLDER_CREDITS = 12_480;
-const PLACEHOLDER_GOLD    = 8_320_100;
-const EXP_PER_LEVEL       = 100;
+const EXP_PER_LEVEL = 100;
 
 function fmt(n: number): string {
   return n.toLocaleString('ko-KR');
@@ -70,25 +71,19 @@ function HeartIcon({ size = 13 }: { size?: number }) {
   );
 }
 
-function Currency({ icon, value }: { icon: React.ReactNode; value: number }) {
-  const shown = useCountUp(value);
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-      {icon}
-      <span style={{
-        fontFamily: 'var(--cth-font-display)', fontSize: 8,
-        color: 'var(--cth-ink-900)', fontVariantNumeric: 'tabular-nums',
-      }}>{fmt(shown)}</span>
-    </div>
-  );
+function Currency({ icon, value, money }: { icon: React.ReactNode; value: number; money?: boolean }) {
+  // 비용($)은 소수라 ×10000 정수로 count-up 후 환산. 토큰은 정수 그대로 굴린다.
+  const shown = useCountUp(money ? Math.round(value * 10000) : value);
+  const text = money ? '$' + (shown / 10000).toFixed(2) : fmt(shown);
+  return <CurrencyChip icon={icon} amount={text} />;
 }
 
 export function Footer({
   onManage,
   onNewRequest,
-  credits = PLACEHOLDER_CREDITS,
-  gold    = PLACEHOLDER_GOLD,
-  affinityLv = 23,
+  inputTokens = 0,
+  costUsd = 0,
+  affinityLv = 1,
   exp = 0,
   expToNext = EXP_PER_LEVEL,
 }: FooterProps) {
@@ -99,34 +94,24 @@ export function Footer({
       padding: '0 12px', height: 48, boxSizing: 'border-box'
     }}>
       {/* 학생 관리 */}
-      <button
-        onClick={onManage}
-        style={{
-          fontFamily: 'var(--cth-font-display)', fontSize: 7,
-          padding: '5px 10px', border: 'none', cursor: 'pointer',
-          background: 'var(--cth-cream-200)', color: 'var(--cth-ink-900)',
-          boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)', whiteSpace: 'nowrap'
-        }}
-      >
-        학생 관리
-      </button>
+      <PixelButton variant="secondary" size="sm" onClick={onManage}>학생 관리</PixelButton>
 
       {/* 인연 레벨 + EXP 진행바 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
         <HeartIcon />
         <span style={{
-          fontFamily: 'var(--cth-font-display)', fontSize: 7,
-          color: 'var(--cth-ink-900)', whiteSpace: 'nowrap',
+          fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
+          color: 'var(--cth-ink-700)', whiteSpace: 'nowrap',
         }}>인연 Lv.{affinityLv}</span>
         <div title={`EXP ${exp} / ${expToNext}`} style={{
-          position: 'relative', width: 96, height: 9,
-          background: 'var(--cth-cream-200)',
-          boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)', flexShrink: 0,
+          position: 'relative', width: 110, height: 10, borderRadius: 999,
+          background: 'var(--cth-cream-200)', overflow: 'hidden', flexShrink: 0,
         }}>
           <div style={{
-            position: 'absolute', inset: '1px',
-            width: `calc(${pct}% - 2px)`,
-            background: 'var(--cth-coral)',
+            position: 'absolute', inset: 0,
+            width: `${pct}%`,
+            background: 'linear-gradient(90deg, #FF8FB1, #FF6B6B)',
+            borderRadius: 999,
             transition: 'width 0.5s cubic-bezier(0.22,1,0.36,1)',
           }} />
         </div>
@@ -138,10 +123,10 @@ export function Footer({
 
       <div style={{ flex: 1 }} />
 
-      {/* 재화 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexShrink: 0 }}>
-        <Currency icon={<GemIcon />} value={credits} />
-        <Currency icon={<CoinIcon />} value={gold} />
+      {/* 재화 = claude 토큰 지표 (💎입력 토큰 · 🪙누적 비용$) */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+        <Currency icon={<GemIcon />} value={inputTokens} />
+        <Currency icon={<CoinIcon />} value={costUsd} money />
       </div>
 
       {/* CTA */}
