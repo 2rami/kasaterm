@@ -1,7 +1,44 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchTranscript, sendToPane, type Turn } from '@/lib/mcp';
+import { fetchTranscript, fetchPeek, sendToPane, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { useStore } from '@/store';
+
+// claude TUI 화면(peek)에서 대화를 파싱 — transcript jsonl 이 비어있을 때 fallback
+// (일부 claude 는 세션 중 jsonl 을 라이브로 안 써, 우리가 PTY 를 소유하니 화면에서
+// 직접 읽는다). ❯=선생님 프롬프트, ⏺=학생 답변. 하단 ─── 아래(입력창·상태바)와
+// 툴콜(⏺ Bash(…))·박스·상태줄은 버린다. best-effort — 명확한 턴만 추출.
+function parsePtyConversation(screen: string): Turn[] {
+  const lines = screen.split('\n');
+  let end = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^[─—-]{10,}\s*$/.test(lines[i].trim())) { end = i; break; }
+  }
+  const skip = (l: string) =>
+    /^[│╰╭├┤┬┴┼╮╯]/.test(l) || /┃/.test(l) ||
+    /^(⏵⏵|⎿|⚠|▎|✻|╰|╭)/.test(l) || /^[─—-]{5,}/.test(l) || /\d+\s*tokens?\s*$/.test(l);
+  const turns: Turn[] = [];
+  let cur: Turn | null = null;
+  for (const raw of lines.slice(0, end)) {
+    const line = raw.replace(/\s+$/, '');
+    if (!line.trim()) continue;
+    const u = line.match(/^[❯>]\s+(.+)$/);
+    const a = line.match(/^⏺\s+(.+)$/);
+    if (u) {
+      cur = { role: 'user', text: u[1].trim() };
+      turns.push(cur);
+    } else if (a) {
+      const body = a[1].trim();
+      if (/^[A-Z]\w*\(/.test(body)) { cur = null; continue; } // 툴콜 — 대화 아님
+      cur = { role: 'assistant', text: body };
+      turns.push(cur);
+    } else if (cur && /^\s{2,}\S/.test(raw) && !skip(line.trim())) {
+      cur.text += '\n' + line.trim(); // 들여쓴 연속줄 이어붙임
+    } else if (skip(line.trim())) {
+      cur = null;
+    }
+  }
+  return turns;
+}
 
 const shortModel = (m?: string) =>
   !m ? '' : m.replace('claude-', '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/^./, (c) => c.toUpperCase());
@@ -37,16 +74,20 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
   const bodyRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // 구조화된 transcript 폴링(명령어/툴 노이즈 제거된 대화 내역). 학생 바뀌면 입력 초기화.
+  // 대화 내역: transcript jsonl 우선(정상 학생 — 깔끔). 비어있으면 PTY 화면(peek)
+  // 에서 파싱(claude 가 jsonl 라이브 기록 안 해도 화면엔 항상 있음). 학생 바뀌면 초기화.
   useEffect(() => {
     let stopped = false;
     setLoaded(false);
     setTurns([]);
     setInput('');
     const tick = async () => {
-      const ts = await fetchTranscript(surfaceId, 30);
+      const [ts, screen] = await Promise.all([
+        fetchTranscript(surfaceId, 30),
+        fetchPeek(surfaceId, 60),
+      ]);
       if (stopped) return;
-      setTurns(ts);
+      setTurns(ts.length ? ts : parsePtyConversation(screen));
       setLoaded(true);
     };
     void tick();

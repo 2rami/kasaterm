@@ -325,6 +325,20 @@ export async function fetchMessages(n = 50): Promise<MessageEntry[]> {
   }
 }
 
+/** GET /peek?surface=<id>&lines=<n> — pane 의 보이는 화면 텍스트(모노). transcript
+ *  jsonl 이 비어있을 때(claude 가 라이브 기록 안 함) 대화를 PTY 화면에서 직접
+ *  파싱하는 fallback 소스. fail-soft 빈 문자열. */
+export async function fetchPeek(surfaceId: string, lines = 40): Promise<string> {
+  try {
+    const r = await fetch(`${BASE}/peek?surface=${encodeURIComponent(surfaceId)}&lines=${lines}`);
+    if (!r.ok) return '';
+    const d = (await r.json().catch(() => ({}))) as { text?: string };
+    return d?.text ?? '';
+  } catch {
+    return '';
+  }
+}
+
 export interface Turn { role: string; text: string; }
 
 /** GET /transcript?surface=<id>&turns=<n> — 구조화된 대화(프롬프트/답변, tool 노이즈
