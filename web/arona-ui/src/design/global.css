@@ -121,3 +121,9 @@ canvas { image-rendering: pixelated; }
   font-variant-ligatures: none !important;
   font-feature-settings: "liga" 0, "clig" 0, "calt" 0 !important;
 }
+
+/* 교실 상태 글리프 펄스(blocked=! / waiting=?) — ClassroomView */
+@keyframes schale-glyph-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50% { transform: scale(1.25); opacity: 1; }
+}
