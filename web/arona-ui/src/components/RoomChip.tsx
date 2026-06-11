@@ -3,6 +3,8 @@
 // 버그(거노 실측)의 UX 보완: 화면에 방 경로를 표시해 오선택을 알아채게.
 export interface RoomChipProps {
   cwd: string | null;
+  /** 클릭 시 방 경로 변경 모달 열기. */
+  onClick?: () => void;
 }
 
 function shortCwd(cwd: string): string {
@@ -11,22 +13,25 @@ function shortCwd(cwd: string): string {
   return '…/' + segs.slice(-2).join('/');
 }
 
-export function RoomChip({ cwd }: RoomChipProps) {
+export function RoomChip({ cwd, onClick }: RoomChipProps) {
   if (!cwd) return null;
   return (
-    <span
-      title={cwd}
+    <button
+      title={`${cwd} — 클릭하면 방 경로 변경`}
+      onClick={onClick}
       style={{
         fontFamily: 'var(--cth-font-ui)',
         fontSize: 'var(--cth-text-body-sm)',
         color: 'var(--cth-ink-700)',
         background: 'var(--cth-cream-200)',
-        padding: '3px 8px',
+        padding: '3px 8px', border: 'none', borderRadius: 6, cursor: 'pointer',
         boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)',
+        display: 'inline-flex', alignItems: 'center', gap: 5,
         whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 260
       }}
     >
       이 방: {shortCwd(cwd)}
-    </span>
+      <span style={{ color: 'var(--cth-ink-300)', fontSize: 10 }}>▾</span>
+    </button>
   );
 }
