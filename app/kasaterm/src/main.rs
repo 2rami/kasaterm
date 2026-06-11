@@ -2146,6 +2146,10 @@ enum UserEvent {
     /// 셸 pid 만 알면 backend 스레드가 claude 자식·cwd·session 을 직접 찾아 bind 한다
     /// (claude 훅에 의존하지 않음). GUI 는 메모리 조회만 즉답, lsof/ps 는 backend.
     SocketQueryPanePids(std::sync::mpsc::Sender<Vec<(String, u32)>>),
+    /// `GET /open-image`·`/open-markdown`(imgopen/mdopen 셰임·SendUserFile 훅)이
+    /// 위임 — 그 경로를 미리보기 pane(이미지/마크다운/텍스트)으로 split. 데몬 제거
+    /// 때 빠졌던 open_preview 의 로컬 재구현. `open_file_split` 이 확장자로 분기한다.
+    SocketOpenPreview(String),
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
