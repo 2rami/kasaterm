@@ -72,6 +72,165 @@ async fn git_push_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+// ── 스케줄러(반복 지시 루프 · 예약 크론 · 타이머/리마인더) ───────────────────
+// 모두 "정해진 시각에 surface 로 text 를 send" 로 통일. loop=interval 마다 반복,
+// cron=at_ts 1회, timer=now+interval 1회. 백그라운드 task 가 10s 마다 발사한다.
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct ScheduleItem {
+    id: String,
+    kind: String, // "loop" | "cron" | "timer"
+    surface: String,
+    text: String,
+    #[serde(default)]
+    interval_sec: u64,
+    #[serde(default)]
+    at_ts: f64,
+    #[serde(default)]
+    next_ts: f64,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    label: String,
+}
+fn default_true() -> bool {
+    true
+}
+
+fn now_unix() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn schedule_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/schedule.json"))
+}
+
+fn read_schedule() -> Vec<ScheduleItem> {
+    let Some(p) = schedule_path() else { return Vec::new() };
+    let Ok(s) = std::fs::read_to_string(&p) else { return Vec::new() };
+    serde_json::from_str(&s).unwrap_or_default()
+}
+
+fn write_schedule(items: &[ScheduleItem]) {
+    let Some(p) = schedule_path() else { return };
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(items) {
+        let _ = std::fs::write(&p, s);
+    }
+}
+
+/// 10초마다 due 항목 발사. loop 는 next_ts 갱신, cron/timer 는 발사 후 disable.
+async fn schedule_loop(backend: Arc<dyn Backend>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let mut items = read_schedule();
+        if items.is_empty() {
+            continue;
+        }
+        let now = now_unix();
+        let mut changed = false;
+        for it in items.iter_mut() {
+            if !it.enabled || it.next_ts <= 0.0 || now < it.next_ts {
+                continue;
+            }
+            // 발사 — 학생 TUI 제출(submit_payload).
+            let _ = backend.send_text(Some(&it.surface), &submit_payload(&it.text));
+            changed = true;
+            match it.kind.as_str() {
+                "loop" if it.interval_sec > 0 => {
+                    it.next_ts = now + it.interval_sec as f64;
+                }
+                _ => {
+                    it.enabled = false; // cron·timer 1회성
+                }
+            }
+        }
+        if changed {
+            write_schedule(&items);
+        }
+    }
+}
+
+/// `GET /schedule` — 스케줄 목록.
+async fn schedule_list_handler() -> impl IntoResponse {
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "ok": true, "items": read_schedule() })),
+    )
+}
+
+/// `POST /schedule` — 항목 추가. body{kind,surface,text,interval_sec?,at_ts?,label?}.
+/// next_ts 는 kind 로 계산(loop/timer=now+interval, cron=at_ts).
+async fn schedule_add_handler(body: String) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (cors, Json(serde_json::json!({ "ok": false, "error": format!("bad body: {e}") })));
+        }
+    };
+    let kind = v.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let surface = v.get("surface").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if !matches!(kind.as_str(), "loop" | "cron" | "timer") || surface.is_empty() || text.is_empty() {
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "kind/surface/text required" })));
+    }
+    let interval_sec = v.get("interval_sec").and_then(|x| x.as_u64()).unwrap_or(0);
+    let at_ts = v.get("at_ts").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let now = now_unix();
+    let next_ts = match kind.as_str() {
+        "cron" => at_ts,
+        _ => now + interval_sec.max(1) as f64, // loop·timer
+    };
+    let id = format!("{:08x}", (now * 1000.0) as u64 & 0xffff_ffff);
+    let item = ScheduleItem {
+        id: id.clone(),
+        label: v.get("label").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        kind,
+        surface,
+        text,
+        interval_sec,
+        at_ts,
+        next_ts,
+        enabled: true,
+    };
+    let mut items = read_schedule();
+    items.push(item);
+    write_schedule(&items);
+    (cors, Json(serde_json::json!({ "ok": true, "id": id })))
+}
+
+/// `POST /schedule-delete?id=<id>` — 항목 삭제(없으면 toggle 용 enabled 도 받음).
+async fn schedule_delete_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let id = params.get("id").cloned().unwrap_or_default();
+    let mut items = read_schedule();
+    let before = items.len();
+    if let Some(toggle) = params.get("toggle") {
+        // toggle=1 → enabled 뒤집기(삭제 대신).
+        if toggle == "1" {
+            for it in items.iter_mut() {
+                if it.id == id {
+                    it.enabled = !it.enabled;
+                }
+            }
+            write_schedule(&items);
+            return (cors, Json(serde_json::json!({ "ok": true })));
+        }
+    }
+    items.retain(|it| it.id != id);
+    write_schedule(&items);
+    (cors, Json(serde_json::json!({ "ok": true, "removed": before - items.len() })))
+}
+
 /// `GET /image-file?path=<abs>` — 로컬 이미지 파일을 바이트로 서빙(BA GUI 대화창
 /// 인라인 표시용). 이미지 확장자만 허용(임의 파일 노출 방지), 127.0.0.1 한정.
 async fn image_file_handler(
@@ -1392,6 +1551,8 @@ pub fn spawn_http_server(
                         return;
                     }
                 };
+                // 스케줄러 백그라운드 타이머 — due 항목을 학생에게 발사(10s 주기).
+                tokio::spawn(schedule_loop(backend.clone()));
                 let git_backend = backend.clone();
                 let diff_backend = backend.clone();
                 let commit_backend = backend.clone();
@@ -1597,6 +1758,16 @@ pub fn spawn_http_server(
                         "/messages",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             messages_handler(messages_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/schedule",
+                        get(schedule_list_handler).post(|body: String| schedule_add_handler(body)),
+                    )
+                    .route(
+                        "/schedule-delete",
+                        post(|q: Query<std::collections::HashMap<String, String>>| {
+                            schedule_delete_handler(q)
                         }),
                     )
                     .route(
