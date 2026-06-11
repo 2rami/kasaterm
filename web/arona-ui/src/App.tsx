@@ -201,20 +201,16 @@ export function App() {
           </div>
         </div>
 
-        {/* 우측 Command Center */}
-        <CommandCenter />
+        {/* 우측: 학생 선택 시 대화(모모톡)가 이 자리에, 없으면 Command Center */}
+        {peek ? (
+          <TerminalPeekPanel surfaceId={peek.id} title={peek.title} onClose={() => setPeek(null)} />
+        ) : (
+          <CommandCenter />
+        )}
       </div>
 
       {/* 교실 채팅 입력 (Footer CTA 클릭 or 교실 뷰에서 항상 노출) */}
       {(view === 'classroom' || showChatInput) && <ClassroomChatInput />}
-
-      {peek && (
-        <TerminalPeekPanel
-          surfaceId={peek.id}
-          title={peek.title}
-          onClose={() => setPeek(null)}
-        />
-      )}
 
       {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} />}
     </div>
