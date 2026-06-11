@@ -809,8 +809,12 @@ fn find_god_pane() -> Option<String> {
 /// `read=true`: `/send`·`/tell-god` 로 이미 PTY 전달됐으니 학생 inbox drain 은 막고
 /// 기록·표시만 남긴다. god 가시성은 cc 사본이 아니라 board-context 가 이 파일 전체를
 /// god 에게 보여주는 것으로 얻는다(단일 messages.jsonl 이라 사본 불필요).
-fn persist_sensei_msg(surface: &str, text: &str) {
-    let Some(dir) = find_collab_dir() else { return };
+fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str) {
+    // 활성 방 디렉터리에 직접 기록(없으면 생성) — 읽기와 달리 존재 여부로 안 거른다.
+    let dir = std::path::Path::new("/tmp/kasaterm-collab").join(mode_slug(room_cwd));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -882,7 +886,7 @@ async fn send_handler(
     let resp = match backend.send_text(Some(&surface), &payload) {
         Ok(()) => {
             // 선생님 발신을 messages.jsonl 에 영속(휘발 X) — god/모모톡 가시.
-            persist_sensei_msg(&surface, &text);
+            persist_sensei_msg(&resolve_cwd(&backend), &surface, &text);
             serde_json::json!({ "ok": true, "surface": surface, "submit": submit })
         }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
@@ -892,12 +896,19 @@ async fn send_handler(
 
 // ── 협업 콘솔 헬퍼 ─────────────────────────────────────────────────────────
 
-/// 프로세스 cwd slug 우선, 없으면 messages.jsonl 이 있는 첫 collab dir 반환.
-fn find_collab_dir() -> Option<std::path::PathBuf> {
+/// 협업방 디렉터리. `room_cwd`(활성 pane cwd — `/mode`·`/git-status` 와 같은
+/// 소스)가 주어지면 **그 방만** 본다: 다른 방의 stale 데이터로 폴백하지 않고,
+/// 없으면 None(빈 결과). 예전엔 MCP 프로세스 cwd(보통 `/`)라 slug 불일치 →
+/// readdir 첫 dir(엉뚱한 방)을 집어 모모톡/기록에 stale 가 떴다. room_cwd 가
+/// 없을 때(헤드리스 등)만 레거시 추정으로 폴백한다.
+fn find_collab_dir(room_cwd: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
     let base = std::path::Path::new("/tmp/kasaterm-collab");
+    if let Some(cwd) = room_cwd {
+        let dir = base.join(mode_slug(cwd));
+        return dir.join("messages.jsonl").exists().then_some(dir);
+    }
     if let Ok(cwd) = std::env::current_dir() {
-        let slug = mode_slug(&cwd);
-        let candidate = base.join(&slug);
+        let candidate = base.join(mode_slug(&cwd));
         if candidate.join("messages.jsonl").exists() {
             return Some(candidate);
         }
@@ -943,11 +954,12 @@ struct MessageEntry {
 }
 
 /// messages.jsonl 의 done 보고 + git log 를 ts 내림차순으로 합쳐 최근 N 반환.
-fn collab_events(n: usize) -> Vec<Event> {
+/// `room_cwd` = 활성 pane cwd(방 해석·git log 기준).
+fn collab_events(room_cwd: &std::path::Path, n: usize) -> Vec<Event> {
     let mut events: Vec<Event> = Vec::new();
 
     // done 보고
-    if let Some(dir) = find_collab_dir() {
+    if let Some(dir) = find_collab_dir(Some(room_cwd)) {
         if let Ok(content) = std::fs::read_to_string(dir.join("messages.jsonl")) {
             for line in content.lines() {
                 let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -972,11 +984,11 @@ fn collab_events(n: usize) -> Vec<Event> {
         }
     }
 
-    // git 커밋 — ts 는 unix epoch(정수)
-    if let Ok(cwd) = std::env::current_dir() {
+    // git 커밋 — ts 는 unix epoch(정수). 활성 방 cwd 기준 로그.
+    {
         if let Ok(output) = std::process::Command::new("git")
             .args(["log", &format!("--format=%at\t%s"), &format!("-{}", n)])
-            .current_dir(&cwd)
+            .current_dir(room_cwd)
             .output()
         {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
@@ -995,8 +1007,9 @@ fn collab_events(n: usize) -> Vec<Event> {
 }
 
 /// messages.jsonl 을 캐릭터명 해석 포함해 최근 N 개 반환(ts 내림차순).
-fn collab_messages(n: usize) -> Vec<MessageEntry> {
-    let Some(dir) = find_collab_dir() else {
+/// `room_cwd` = 활성 pane cwd(방 해석).
+fn collab_messages(room_cwd: &std::path::Path, n: usize) -> Vec<MessageEntry> {
+    let Some(dir) = find_collab_dir(Some(room_cwd)) else {
         return Vec::new();
     };
     let Ok(content) = std::fs::read_to_string(dir.join("messages.jsonl")) else {
@@ -1032,10 +1045,11 @@ fn collab_messages(n: usize) -> Vec<MessageEntry> {
 
 /// `GET /events?n=20` — done 보고 + git 커밋을 합친 행정 로그(ts 내림차순 최근 N).
 async fn events_handler(
+    backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let n = params.get("n").and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
-    let events = collab_events(n);
+    let events = collab_events(&resolve_cwd(&backend), n);
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
         Json(serde_json::json!({ "ok": true, "events": events })),
@@ -1044,10 +1058,11 @@ async fn events_handler(
 
 /// `GET /messages?n=50` — messages.jsonl 을 캐릭터명 해석 포함 최근 N 개(ts 내림차순).
 async fn messages_handler(
+    backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let n = params.get("n").and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
-    let messages = collab_messages(n);
+    let messages = collab_messages(&resolve_cwd(&backend), n);
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
         Json(serde_json::json!({ "ok": true, "messages": messages })),
@@ -1092,7 +1107,7 @@ async fn tell_god_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoR
     let resp = match backend.send_text(Some(&god_pane), &payload) {
         Ok(()) => {
             // 선생님 → god 발신 영속(휘발 X) — 모모톡 단톡방·god 가시.
-            persist_sensei_msg(&god_pane, &text);
+            persist_sensei_msg(&resolve_cwd(&backend), &god_pane, &text);
             serde_json::json!({ "ok": true, "to": god_pane })
         }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
@@ -1265,6 +1280,8 @@ pub fn spawn_http_server(
                 let mode_set_backend = backend.clone();
                 let spawn_backend = backend.clone();
                 let focus_backend = backend.clone();
+                let events_backend = backend.clone();
+                let messages_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -1429,13 +1446,13 @@ pub fn spawn_http_server(
                     .route(
                         "/events",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
-                            events_handler(q)
+                            events_handler(events_backend.clone(), q)
                         }),
                     )
                     .route(
                         "/messages",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
-                            messages_handler(q)
+                            messages_handler(messages_backend.clone(), q)
                         }),
                     )
                     .route(
