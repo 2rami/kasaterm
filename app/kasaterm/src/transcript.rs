@@ -262,17 +262,45 @@ fn context_limit_for(model: &str) -> u64 {
     if model.is_empty() { 0 } else { 200_000 }
 }
 
+/// 하네스/시스템이 user 턴으로 주입하는 합성 메시지(사람이 타이핑한 게 아님) —
+/// task-notification·system-reminder·command 출력·tool 오류 재시도 등. 메신저 뷰
+/// (대화 탭)에선 노이즈라 버린다. isMeta 플래그가 없는 일부 주입(malformed 재시도)도
+/// 잡으려 선두 마커로 한 번 더 거른다.
+fn is_injected_user_text(s: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "<task-notification>",
+        "<system-reminder>",
+        "<command-name>",
+        "<command-message>",
+        "<command-args>",
+        "<local-command-stdout>",
+        "<local-command-stderr>",
+        "<bash-input>",
+        "<bash-stdout>",
+        "<bash-stderr>",
+        "Caveat:",
+        "Your tool call was malformed",
+        "[Request interrupted",
+    ];
+    MARKERS.iter().any(|m| s.starts_with(m))
+}
+
 /// jsonl 한 줄을 대화 turn으로. 모니터링에 의미있는 것만 `Some`:
 /// - `type:"user"` 이고 content가 **문자열**(사람/오케스트레이터가 타이핑한
-///   프롬프트)일 때만. content가 배열이면 tool_result(노이즈)라 버린다.
+///   프롬프트)일 때만. content가 배열이면 tool_result(노이즈)라 버린다. 하네스
+///   합성 턴(isMeta=true)·시스템 주입 문자열(`is_injected_user_text`)도 버린다.
 /// - `type:"assistant"` 의 `text` 블록을 모아 답변으로. tool_use·thinking만
 ///   있는 turn은 텍스트가 비어 `None`.
 pub fn parse_turn(line: &str) -> Option<ConversationTurn> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    // 하네스 합성 턴(isMeta=true: task-notification 등)은 대화가 아니다.
+    if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
+        return None;
+    }
     match v.get("type").and_then(|t| t.as_str())? {
         "user" => {
             let text = v.pointer("/message/content")?.as_str()?.trim();
-            (!text.is_empty()).then(|| ConversationTurn {
+            (!text.is_empty() && !is_injected_user_text(text)).then(|| ConversationTurn {
                 role: "user".into(),
                 text: text.to_string(),
             })
@@ -346,6 +374,26 @@ mod tests {
         assert_eq!((u.role.as_str(), u.text.as_str()), ("user", "고쳐줘"));
         let a = parse_turn(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#).unwrap();
         assert_eq!((a.role.as_str(), a.text.as_str()), ("assistant", "ok"));
+    }
+
+    #[test]
+    fn parse_turn_drops_harness_injected_user_turns() {
+        // isMeta=true(task-notification 등) 는 사람 대화가 아니라 버린다.
+        assert!(parse_turn(
+            r#"{"type":"user","isMeta":true,"message":{"content":"<task-notification>\n<task-id>x</task-id>"}}"#
+        )
+        .is_none());
+        // isMeta 없어도 선두 시스템 마커면 버린다(malformed 재시도 등).
+        assert!(parse_turn(
+            r#"{"type":"user","message":{"content":"Your tool call was malformed and could not be parsed. Please retry."}}"#
+        )
+        .is_none());
+        assert!(parse_turn(
+            r#"{"type":"user","message":{"content":"<system-reminder>\nbe nice\n</system-reminder>"}}"#
+        )
+        .is_none());
+        // 진짜 프롬프트는 통과.
+        assert!(parse_turn(r#"{"type":"user","message":{"content":"링크주면 충전할게"}}"#).is_some());
     }
 
     #[test]
