@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, sendToPane, type Turn } from '@/lib/mcp';
+import { fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { Markdown } from './Markdown';
 import { useStore } from '@/store';
@@ -66,8 +66,11 @@ function parsePtyConversation(screen: string): Turn[] {
   return turns;
 }
 
+// board.model 은 상태바 파싱 표시명("Opus 4.8 (1M context)") 우선 — claude- id 면 포맷,
+// 아니면(이미 표시명) 그대로. 1M context 변형이 그대로 보인다.
 const shortModel = (m?: string) =>
-  !m ? '' : m.replace('claude-', '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/^./, (c) => c.toUpperCase());
+  !m ? '' : !m.startsWith('claude-') ? m
+    : m.replace('claude-', '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/^./, (c) => c.toUpperCase());
 const shortCwd = (p?: string) => (!p ? '' : p.split('/').filter(Boolean).slice(-2).join('/'));
 
 function MetaChip({ label, dim }: { label: string; dim?: boolean }) {
@@ -261,15 +264,15 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
                 <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
                   <SpritePortrait character={title} scale={1.5} />
                 </div>
-                <a href={imageFileUrl(path)} target="_blank" rel="noreferrer" title={path} style={{
-                  maxWidth: '74%', padding: 4, borderRadius: 14, borderTopLeftRadius: 4,
+                <button onClick={() => void openFile(path)} title={`${path}\n클릭 = OS 기본 뷰어로 열기`} style={{
+                  maxWidth: '74%', padding: 4, borderRadius: 14, borderTopLeftRadius: 4, cursor: 'pointer',
                   background: '#fff', border: '1px solid var(--cth-cream-200)',
                   boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)', display: 'block',
                 }}>
                   <img src={imageFileUrl(path)} alt={path.split('/').pop() ?? ''} style={{
                     display: 'block', maxWidth: '100%', maxHeight: 240, borderRadius: 10, objectFit: 'contain',
                   }} />
-                </a>
+                </button>
               </div>
             ))}
           </>

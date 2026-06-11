@@ -683,8 +683,14 @@ impl Backend for PtyBackend {
                     row.cwd = cwd.to_string_lossy().into_owned();
                 }
             }
-            if let Some(pct) = screens.get(&row.surface_id).and_then(|s| parse_context_pct(s)) {
-                row.context_pct = pct;
+            if let Some(screen) = screens.get(&row.surface_id) {
+                if let Some(pct) = parse_context_pct(screen) {
+                    row.context_pct = pct;
+                }
+                // 모델명도 상태바에서 — "Opus 4.8 (1M context)" 처럼 1M 변형까지 정확.
+                if let Some(m) = parse_status_model(screen) {
+                    row.model = m;
+                }
             }
         }
         // git 브랜치 — pane cwd(transcript)에서 rev-parse. distinct cwd 1회씩(같은
@@ -1174,6 +1180,25 @@ fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std:
             fresh.then_some(p)
         })
         .collect()
+}
+
+/// claude TUI 상태바 첫 칸의 모델 표시명. 예 "Opus 4.8 (1M context)" / "Sonnet 4.6".
+/// transcript 의 model id("claude-opus-4-8")로는 1M context 변형을 구분 못 해(둘 다
+/// 같은 id) — 상태바가 유일하게 "(1M context)" 까지 보여준다(거노 지적). 선두 글리프/
+/// 공백 뒤 첫 영문자부터 첫 ┃ 까지.
+fn parse_status_model(screen: &str) -> Option<String> {
+    for line in screen.lines() {
+        if !line.contains('┃') {
+            continue;
+        }
+        let first = line.split('┃').next()?;
+        let start = first.find(|c: char| c.is_ascii_alphabetic())?;
+        let model = first[start..].trim();
+        if !model.is_empty() && model.len() < 60 {
+            return Some(model.to_string());
+        }
+    }
+    None
 }
 
 /// claude TUI 상태바("… ┃ 5% ┃ …")에서 컨텍스트 사용량 % 파싱. ┃ 가 든 줄의
