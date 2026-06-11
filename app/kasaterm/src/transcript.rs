@@ -121,12 +121,20 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     // 따로 모아, 매칭 안 된(=진행 중) 것만 남긴다.
     let mut subagent_uses: Vec<(String, String)> = Vec::new();
     let mut completed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut model = String::new();
+    let mut cwd = String::new();
 
     for line in tail.lines().rev() {
         let v: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue, // tail 첫 줄은 잘렸을 수 있다 — 안전하게 무시.
         };
+        // cwd 는 user/assistant 줄 최상위에 절대경로로 실린다 — 최신(역순 첫) 1개.
+        if cwd.is_empty() {
+            if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
+                cwd = c.to_string();
+            }
+        }
         match v.get("type").and_then(|t| t.as_str()) {
             Some("ai-title") if title.is_empty() => {
                 if let Some(t) = v.get("aiTitle").and_then(|x| x.as_str()) {
@@ -149,8 +157,11 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                     tokens_out += to;
                     cache_read += cr;
                     cache_creation += cc;
-                    let model = v.pointer("/message/model").and_then(|m| m.as_str()).unwrap_or("");
-                    cost_usd += turn_cost(model, ti, to, cr, cc);
+                    let m = v.pointer("/message/model").and_then(|m| m.as_str()).unwrap_or("");
+                    cost_usd += turn_cost(m, ti, to, cr, cc);
+                    if model.is_empty() && !m.is_empty() {
+                        model = m.to_string();
+                    }
                 }
                 let Some(content) = v.pointer("/message/content").and_then(|c| c.as_array()) else {
                     continue;
@@ -238,7 +249,17 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         changed_files,
         is_god: false,
         subagents,
+        model: model.clone(),
+        context_limit: context_limit_for(&model),
+        cwd,
+        branch: None,
     }
+}
+
+/// 모델명 → 컨텍스트 한도(토큰). 현재 전 Claude 모델 200k 공유(Sonnet 4+ 1M 베타는
+/// transcript 가 베타 플래그를 기록 안 해 base 로 본다). 빈 모델 = 0(미상).
+fn context_limit_for(model: &str) -> u64 {
+    if model.is_empty() { 0 } else { 200_000 }
 }
 
 /// jsonl 한 줄을 대화 turn으로. 모니터링에 의미있는 것만 `Some`:

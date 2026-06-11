@@ -30,6 +30,10 @@ export interface Agent {
   tokensOut?: number;
   /** 진행 중 서브에이전트 description 목록 — "서브에이전트 N 실행 중" 표시. */
   subagents?: string[];
+  /** 학생 메타 — 모델명/작업경로/git 브랜치(board PaneActivity). contextLimit 은 위. */
+  model?: string;
+  cwd?: string;
+  branch?: string;
   /** 마지막 사용자 프롬프트 — 대화 미리보기용. */
   lastPrompt?: string;
 }
