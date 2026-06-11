@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useStore } from '@/store';
 import { MomoTalk } from './MomoTalk';
+import { ScheduleTab } from './ScheduleTab';
 
 type CenterTab = 'tasks' | 'momotalk' | 'council' | 'schedule';
 
@@ -141,12 +142,8 @@ export function CommandCenter() {
           ))}
         </div>
       ) : (
-        /* 스케줄/루프 — 실제 루프·예약 기능(설계 확정 후 구현). */
-        <div style={{ flex: 1, overflowY: 'auto', padding: 10, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', textAlign: 'center', lineHeight: 1.6 }}>
-            루프·스케줄 준비 중<br />(반복 지시 / 예약 작업)
-          </span>
-        </div>
+        /* 스케줄/루프 — 반복 지시 루프 · 예약(크론) · 타이머/리마인더. */
+        <ScheduleTab />
       )}
     </div>
   );

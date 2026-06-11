@@ -342,6 +342,57 @@ export async function fetchPeek(surfaceId: string, lines = 40): Promise<string> 
   }
 }
 
+export interface ScheduleItem {
+  id: string;
+  kind: 'loop' | 'cron' | 'timer';
+  surface: string;
+  text: string;
+  interval_sec?: number;
+  at_ts?: number;
+  next_ts?: number;
+  enabled: boolean;
+  label?: string;
+}
+
+/** GET /schedule — 스케줄 목록(반복 루프·예약·타이머). fail-soft 빈 배열. */
+export async function fetchSchedule(): Promise<ScheduleItem[]> {
+  try {
+    const r = await fetch(`${BASE}/schedule`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { items?: ScheduleItem[] };
+    return Array.isArray(d?.items) ? d.items : [];
+  } catch {
+    return [];
+  }
+}
+
+/** POST /schedule — 항목 추가. */
+export async function addSchedule(item: {
+  kind: string; surface: string; text: string; interval_sec?: number; at_ts?: number; label?: string;
+}): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/schedule`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(item),
+    });
+    if (!r.ok) return false;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
+    return d?.ok !== false;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /schedule-delete?id=<id>[&toggle=1] — 삭제 또는 enabled 토글. */
+export async function deleteSchedule(id: string, toggle = false): Promise<boolean> {
+  try {
+    const q = `id=${encodeURIComponent(id)}${toggle ? '&toggle=1' : ''}`;
+    const r = await fetch(`${BASE}/schedule-delete?${q}`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** GET /sent-images?surface=<id>&n=N — 이 학생이 SendUserFile 로 보낸 이미지 경로
  *  최근 N(auto-imgopen 훅 기록). 대화창 인라인 이미지 소스. fail-soft 빈 배열. */
 export async function fetchSentImages(surfaceId: string, n = 12): Promise<string[]> {
