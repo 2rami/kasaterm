@@ -70,9 +70,12 @@ export function App() {
   const totalInputTokens = sorted.reduce((s, a) => s + (a.tokensIn ?? 0), 0);
   const totalCostUsd = sorted.reduce((s, a) => s + (a.costUsd ?? 0), 0);
   const totalContextTokens = sorted.reduce((s, a) => s + (a.contextTokens ?? 0), 0);
-  // 인연(호감도) = 전 학생 컨텍스트 사용량 %.
-  const totalContextLimit = sorted.reduce((s, a) => s + (a.contextLimit ?? 200000), 0);
-  const contextPct = totalContextLimit > 0 ? (totalContextTokens / totalContextLimit) * 100 : 0;
+  // 인연(호감도) = 학생들 컨텍스트 사용량 % 평균(claude TUI 상태바 파싱 — transcript
+  // 토큰이 0 이어도 robust). % 있는 학생만 집계, 없으면 0.
+  const ctxStudents = sorted.filter((a) => (a.contextPct ?? 0) > 0);
+  const contextPct = ctxStudents.length
+    ? ctxStudents.reduce((s, a) => s + (a.contextPct ?? 0), 0) / ctxStudents.length
+    : 0;
 
   const reveal = async () => {
     setRevealing(true);

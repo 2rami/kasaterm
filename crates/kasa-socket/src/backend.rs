@@ -197,6 +197,11 @@ pub struct PaneActivity {
     /// 모델 컨텍스트 한도(토큰). 현재 전 Claude 200k. 0=모델 미상.
     #[serde(default)]
     pub context_limit: u64,
+    /// 컨텍스트 사용량 % — claude TUI 상태바("… ┃ 5% ┃ …")에서 파싱. transcript
+    /// 토큰(tokens_in/out)은 claude 가 jsonl 을 라이브로 안 쓰면 0 이라, PTY 화면을
+    /// 소유한 우리가 상태바에서 직접 읽는다(robust). 0=상태바에 % 없음/미상.
+    #[serde(default)]
+    pub context_pct: u8,
     /// git 브랜치 — pane cwd 에서 rev-parse. None=git repo 아님/미상. collab_board 가 채움.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,

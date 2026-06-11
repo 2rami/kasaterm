@@ -251,6 +251,8 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         subagents,
         model: model.clone(),
         context_limit: context_limit_for(&model),
+        // 컨텍스트 % 는 PTY 상태바에서 — collab_board 가 화면 파싱으로 채운다.
+        context_pct: 0,
         cwd,
         branch: None,
     }
