@@ -151,6 +151,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketOpenPreview(path) => {
+                // imgopen/mdopen·SendUserFile 훅 → 미리보기 pane split(이미지/마크다운).
+                self.open_file_split(std::path::PathBuf::from(path));
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketRename(id, title) => {
                 if let Some(p) = self.ws.lock().unwrap().panes.get_mut(id) {
                     let at = p.active_tab.min(p.tabs.len() - 1);

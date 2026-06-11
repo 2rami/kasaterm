@@ -512,6 +512,16 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn open_preview(&self, _kind: &str, path: &str, _target: Option<&str>) -> Result<()> {
+        // imgopen/mdopen 셰임·SendUserFile 훅 → 미리보기 pane split. 로컬 PTY 모드는
+        // App.pty 를 별도 스레드서 못 만져 GUI 에 위임(open_file_split 이 확장자로
+        // 이미지/마크다운/텍스트 분기·디코드·split 까지 한다). 데몬 제거로 빠졌던 것.
+        let _ = self
+            .proxy
+            .send_event(UserEvent::SocketOpenPreview(path.to_string()));
+        Ok(())
+    }
+
     fn bind_transcript(&self, surface_id: &str, path: &str) -> Result<()> {
         // Record the pane's transcript path; `collab_board`/`transcript_tail`
         // read it on demand. Re-binding (claude --resume swaps the jsonl)
