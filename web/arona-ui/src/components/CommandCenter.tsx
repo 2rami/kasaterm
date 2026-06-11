@@ -1,15 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useStore } from '@/store';
 
 const BASE = import.meta.env.DEV ? 'http://127.0.0.1:8765' : '';
 
-type CenterTab = 'dashboard' | 'tasks' | 'council' | 'schedule' | 'log';
+type CenterTab = 'tasks' | 'council' | 'schedule' | 'log';
 
 const TAB_LABELS: Record<CenterTab, string> = {
-  dashboard: '대시보드',
   tasks: '업무',
-  council: '의회',
-  schedule: '스케줄 관리',
+  council: '의뢰',
+  schedule: '스케줄',
   log: '기록',
 };
 
@@ -21,12 +20,6 @@ interface FeedEvent {
   [key: string]: unknown;
 }
 
-interface ChatMessage {
-  from?: string;
-  text?: string;
-  time?: string;
-}
-
 async function fetchEvents(): Promise<FeedEvent[]> {
   try {
     const r = await fetch(`${BASE}/events`);
@@ -36,42 +29,25 @@ async function fetchEvents(): Promise<FeedEvent[]> {
   } catch { return []; }
 }
 
-async function fetchMessages(): Promise<ChatMessage[]> {
-  try {
-    const r = await fetch(`${BASE}/messages`);
-    if (!r.ok) return [];
-    const d = await r.json().catch(() => null);
-    return Array.isArray(d?.messages) ? d.messages : Array.isArray(d) ? d : [];
-  } catch { return []; }
-}
-
 // SCHALE OS 우측 Command Center 패널.
 // GET /events, GET /messages 1s 폴링(백엔드 없으면 404 → 빈 리스트).
 export function CommandCenter() {
-  const [tab, setTab] = useState<CenterTab>('dashboard');
+  const [tab, setTab] = useState<CenterTab>('tasks');
   const [events, setEvents] = useState<FeedEvent[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const feedRef = useRef<HTMLDivElement>(null);
   const agents = useStore((s) => s.agents);
 
   useEffect(() => {
     let stopped = false;
     const tick = async () => {
       if (stopped) return;
-      const [ev, msg] = await Promise.all([fetchEvents(), fetchMessages()]);
-      if (!stopped) { setEvents(ev); setMessages(msg); }
+      const ev = await fetchEvents();
+      if (!stopped) setEvents(ev);
     };
     void tick();
     const iv = setInterval(tick, 1000);
     return () => { stopped = true; clearInterval(iv); };
   }, []);
 
-  // 이벤트 추가 시 자동 스크롤
-  useEffect(() => {
-    if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
-  }, [events]);
-
-  const god = agents.find((a) => a.isGod);
   const workers = agents.filter((a) => !a.isGod);
 
   return (
@@ -145,77 +121,8 @@ export function CommandCenter() {
         ))}
       </div>
 
-      {/* 본문 */}
-      {tab === 'dashboard' ? (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {/* 이벤트 피드 */}
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 6,
-            padding: '6px 10px 4px',
-            borderBottom: '1px solid var(--cth-cream-300)'
-          }}>
-            <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-700)' }}>이벤트 피드</span>
-            <span style={{
-              padding: '2px 7px',
-              background: 'var(--cth-coral)',
-              color: '#fff',
-              fontFamily: 'var(--cth-font-ui)',
-              fontSize: 10, fontWeight: 700, borderRadius: 5,
-              display: 'inline-flex', alignItems: 'center', gap: 4
-            }}>● LIVE</span>
-          </div>
-          <div
-            ref={feedRef}
-            style={{
-              flex: '0 0 160px',
-              overflowY: 'auto',
-              padding: '8px 10px',
-              borderBottom: '1px solid var(--cth-cream-200)',
-              background: 'var(--cth-ink-900)'
-            }}
-          >
-            {events.length === 0 ? (
-              <span style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--cth-ink-300)' }}>이벤트 없음</span>
-            ) : events.slice(-20).map((e, i) => (
-              <div key={i} style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: '#9DC1E8', marginBottom: 3, wordBreak: 'break-all', lineHeight: 1.5 }}>
-                {JSON.stringify(e)}
-              </div>
-            ))}
-          </div>
-
-          {/* 채팅 메시지 */}
-          <div style={{
-            fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-700)',
-            padding: '6px 10px 4px',
-            borderBottom: '1px solid var(--cth-cream-300)'
-          }}>
-            {god ? `${god.character} 채널` : '대화'}
-          </div>
-          <div style={{ flex: 1, overflowY: 'auto', padding: '6px 10px' }}>
-            {messages.length === 0 ? (
-              <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>메시지 없음</span>
-            ) : messages.map((m, i) => (
-              <div key={i} style={{ marginBottom: 10, display: 'flex', gap: 8 }}>
-                <span style={{
-                  width: 28, height: 28, borderRadius: 999, flexShrink: 0,
-                  background: 'var(--cth-sky-light)', color: 'var(--cth-ink-700)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700
-                }}>{(m.from ?? '?').charAt(0)}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, color: 'var(--cth-ink-700)', marginBottom: 3 }}>
-                    {m.from ?? '?'}{m.time ? <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400 }}> · {m.time}</span> : null}
-                  </div>
-                  <div style={{
-                    fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-900)', lineHeight: 1.5,
-                    background: 'var(--cth-cream-100)', padding: '7px 10px', borderRadius: 10
-                  }}>{m.text}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : tab === 'council' ? (
+      {/* 본문 — 대시보드 탭 제거(대화는 학생 클릭 시 우측 인라인, 이벤트는 기록 탭) */}
+      {tab === 'council' ? (
         /* 의뢰 대기열 — board working 워커들 */
         <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
           <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-500)', marginBottom: 8 }}>
