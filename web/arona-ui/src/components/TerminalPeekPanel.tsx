@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchTranscript, fetchPeek, sendToPane, type Turn } from '@/lib/mcp';
+import { fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, sendToPane, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { useStore } from '@/store';
 
@@ -76,6 +76,7 @@ export interface TerminalPeekPanelProps {
 export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPanelProps) {
   const agent = useStore((s) => s.agents.find((a) => a.id === surfaceId));
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [images, setImages] = useState<string[]>([]); // SendUserFile 로 보낸 이미지
   const [loaded, setLoaded] = useState(false); // 첫 폴 완료 — 빈 상태 문구 분기
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -89,14 +90,17 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
     let stopped = false;
     setLoaded(false);
     setTurns([]);
+    setImages([]);
     setInput('');
     const tick = async () => {
-      const [ts, screen] = await Promise.all([
+      const [ts, screen, imgs] = await Promise.all([
         fetchTranscript(surfaceId, 30),
         fetchPeek(surfaceId, 60),
+        fetchSentImages(surfaceId, 12),
       ]);
       if (stopped) return;
       setTurns(ts.length ? ts : parsePtyConversation(screen));
+      setImages(imgs);
       setLoaded(true);
     };
     void tick();
@@ -185,37 +189,59 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
         </div>
       )}
 
-      {/* 대화(채팅 버블) */}
+      {/* 대화(채팅 버블) + 보낸 이미지 */}
       <div ref={bodyRef} style={{ flex: 1, overflow: 'auto', padding: '14px 16px', background: 'var(--cth-cream-100)' }}>
-        {turns.length === 0 ? (
+        {turns.length === 0 && images.length === 0 ? (
           <div style={{ color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 13, textAlign: 'center', marginTop: 40 }}>
             {loaded ? '아직 대화가 없어요' : '대화를 불러오는 중…'}
           </div>
-        ) : turns.map((t, i) => {
-          const mine = t.role === 'user';
-          // 메신저: 선생님(user)=우측 카톡 노랑, 학생(assistant)=좌측 아바타+흰 말풍선.
-          return (
-            <div key={i} style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
-              {!mine && (
+        ) : (
+          <>
+            {turns.map((t, i) => {
+              const mine = t.role === 'user';
+              // 메신저: 선생님(user)=우측 카톡 노랑, 학생(assistant)=좌측 아바타+흰 말풍선.
+              return (
+                <div key={i} style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
+                  {!mine && (
+                    <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+                      <SpritePortrait character={title} scale={1.5} />
+                    </div>
+                  )}
+                  <div style={{
+                    maxWidth: '72%', padding: '8px 12px',
+                    borderRadius: 14,
+                    borderTopLeftRadius: mine ? 14 : 4,
+                    borderTopRightRadius: mine ? 4 : 14,
+                    background: mine ? '#FEE500' : '#fff',
+                    color: mine ? '#3A2E00' : 'var(--cth-ink-900)',
+                    border: mine ? 'none' : '1px solid var(--cth-cream-200)',
+                    boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
+                    whiteSpace: 'pre-wrap', wordBreak: 'break-word'
+                  }}>{t.text}</div>
+                </div>
+              );
+            })}
+
+            {/* 학생이 SendUserFile 로 보낸 이미지 — 좌측(학생) 이미지 버블. 클릭=원본. */}
+            {images.map((path, i) => (
+              <div key={`img-${path}-${i}`} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
                 <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
                   <SpritePortrait character={title} scale={1.5} />
                 </div>
-              )}
-              <div style={{
-                maxWidth: '72%', padding: '8px 12px',
-                borderRadius: 14,
-                borderTopLeftRadius: mine ? 14 : 4,
-                borderTopRightRadius: mine ? 4 : 14,
-                background: mine ? '#FEE500' : '#fff',
-                color: mine ? '#3A2E00' : 'var(--cth-ink-900)',
-                border: mine ? 'none' : '1px solid var(--cth-cream-200)',
-                boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
-                fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
-                whiteSpace: 'pre-wrap', wordBreak: 'break-word'
-              }}>{t.text}</div>
-            </div>
-          );
-        })}
+                <a href={imageFileUrl(path)} target="_blank" rel="noreferrer" title={path} style={{
+                  maxWidth: '74%', padding: 4, borderRadius: 14, borderTopLeftRadius: 4,
+                  background: '#fff', border: '1px solid var(--cth-cream-200)',
+                  boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)', display: 'block',
+                }}>
+                  <img src={imageFileUrl(path)} alt={path.split('/').pop() ?? ''} style={{
+                    display: 'block', maxWidth: '100%', maxHeight: 240, borderRadius: 10, objectFit: 'contain',
+                  }} />
+                </a>
+              </div>
+            ))}
+          </>
+        )}
       </div>
 
       {/* 입력창 — 학생에게 직접 전송(양방향) */}

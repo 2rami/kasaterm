@@ -141,21 +141,30 @@ export function CommandCenter() {
           ))}
         </div>
       ) : (
-        /* 스케줄 관리 — 학생별 컨텍스트 진척(소진율) */
+        /* 스케줄 — 컨텍스트 예산 관리. 학생을 컨텍스트 사용량(상태바 %) 높은 순으로
+           정렬해 누가 곧 한계라 compact/마무리가 필요한지 한눈에. 75%↑ 주의·90%↑ 임박. */
         <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+          <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-500)', marginBottom: 8 }}>
+            컨텍스트 예산 — 임박 순
+          </div>
           {agents.length === 0 ? (
             <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>학생 없음</span>
-          ) : agents.map((a) => {
-            const ctx = a.contextTokens ?? 0;
-            const pct = Math.min(100, Math.round((ctx / 200000) * 100));
+          ) : [...agents].sort((a, b) => (b.contextPct ?? 0) - (a.contextPct ?? 0)).map((a) => {
+            const pct = Math.min(100, Math.round(a.contextPct ?? 0));
+            const level = pct >= 90 ? { c: 'var(--cth-coral)', t: 'compact 임박' }
+              : pct >= 75 ? { c: 'var(--cth-lemon)', t: '주의' }
+              : { c: 'var(--cth-mint)', t: '여유' };
             return (
               <div key={a.id} style={{ padding: '7px 0', borderBottom: '1px solid var(--cth-cream-200)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)' }}>{a.character}</span>
-                  <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, color: 'var(--cth-ink-300)' }}>{Math.round(ctx / 1000)}k</span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 6 }}>
+                  <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.character}</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                    <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, color: '#fff', background: level.c, padding: '1px 6px', borderRadius: 5 }}>{level.t}</span>
+                    <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, fontWeight: 700, color: 'var(--cth-ink-700)' }}>{pct}%</span>
+                  </span>
                 </div>
                 <div style={{ height: 6, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
-                  <div style={{ height: '100%', width: `${pct}%`, borderRadius: 999, background: pct > 75 ? 'var(--cth-coral)' : 'var(--cth-sky)' }} />
+                  <div style={{ height: '100%', width: `${pct}%`, borderRadius: 999, background: level.c, transition: 'width 0.4s ease' }} />
                 </div>
               </div>
             );
