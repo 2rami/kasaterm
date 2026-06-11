@@ -155,7 +155,7 @@ pub struct PtyBackend {
 }
 
 impl PtyBackend {
-    /// `attention` is shared with the GUI (`App.collab_attention`): the CLI
+    /// `attention` is shared with the GUI (`App.collab.attention`): the CLI
     /// hook path (`kasaterm-cli attention`) and the GUI's grid-scan prompt
     /// detection both write it, so the board's `waiting` flag reflects either.
     pub fn new(

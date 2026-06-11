@@ -1,0 +1,126 @@
+//! Domain sub-structs split out of the mega `struct App` (main.rs).
+//!
+//! Why: `App` carried ~148 flat fields spanning three layers (terminal /
+//! workspace / collab), so two workers touching different features both edited
+//! the same struct definition → guaranteed git conflicts. Grouping a domain's
+//! fields into a sub-struct here means the App definition holds one line
+//! (`statusbar: state::StatusbarState`) and the field-level churn lives in this
+//! file, per CLAUDE.md 병렬 작업 충돌 회피. Fields are `pub(crate)` because the
+//! render/handler/input/chrome modules read them as `self.statusbar.<field>`.
+use super::*;
+use std::collections::HashMap;
+
+/// Per-pane status bar (cwd/branch/diff chips at each pane's foot) plus the
+/// open dropdown's state. `hidden` holds the pane ids whose bar is collapsed
+/// (default shown, so absence = visible). The `*_rects` are per-frame hit
+/// targets rebuilt each paint; `menu*` back the open path/branch dropdown.
+#[derive(Default)]
+pub(crate) struct StatusbarState {
+    pub(crate) hidden: std::collections::HashSet<String>,
+    pub(crate) path_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) branch_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) toggle_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) diff_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) menu: Option<(String, StatusbarMenu)>,
+    pub(crate) menu_dir_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
+    pub(crate) menu_branch_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) menu_dirs: Vec<std::path::PathBuf>,
+    pub(crate) menu_branches: Vec<String>,
+    pub(crate) menu_scroll: f32,
+    pub(crate) menu_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) menu_search: String,
+}
+
+/// Right-hand git column + commit modal + path/branch dropdowns (the in-window
+/// replacement for the old floating webview git panel). `col_*` are the column
+/// (visibility, width, scroll, per-frame file-row/button hit rects, the parsed
+/// diff cache, and the off-thread `git status` snapshot + its cwd). `commit_*`
+/// back the VSCode-style message box + commit modal. `path_*`/`branch_*` are the
+/// header dropdowns; `op` labels the in-flight push/pull for the spinner.
+#[derive(Default)]
+pub(crate) struct GitState {
+    pub(crate) col_visible: bool,
+    pub(crate) col_w_logical: f32,
+    pub(crate) col_resize: Option<(f32, f32)>,
+    pub(crate) col_scroll: f32,
+    pub(crate) col_file_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
+    pub(crate) col_btn_rects: Vec<(GitColBtn, (f32, f32, f32, f32))>,
+    pub(crate) col_expanded: std::collections::HashSet<(bool, String)>,
+    pub(crate) col_diff_cache: HashMap<(bool, String), Vec<kasa_mcp::git::DiffLine>>,
+    pub(crate) col_close_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) col_expand_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) commit_btn_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) commit_caret_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) commit_menu_open: bool,
+    pub(crate) commit_menu_rects: Vec<(GitCommitAction, (f32, f32, f32, f32))>,
+    pub(crate) commit_modal_open: bool,
+    pub(crate) commit_modal_include_unstaged: bool,
+    pub(crate) commit_modal_rects: Vec<(GitModalBtn, (f32, f32, f32, f32))>,
+    pub(crate) col_stage_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
+    pub(crate) col_discard_rects: Vec<(String, bool, (f32, f32, f32, f32))>,
+    pub(crate) col_open_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) commit_msg: String,
+    pub(crate) commit_cursor: usize,
+    pub(crate) commit_focused: bool,
+    pub(crate) commit_input_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) col_data: std::sync::Arc<std::sync::Mutex<GitColView>>,
+    pub(crate) op: Option<&'static str>,
+    pub(crate) col_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+    pub(crate) col_pinned_cwd: Option<std::path::PathBuf>,
+    pub(crate) path_menu_open: bool,
+    pub(crate) branch_menu_open: bool,
+    pub(crate) path_hdr_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) branch_hdr_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) path_menu_rects: Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
+    pub(crate) branch_menu_rects: Vec<(String, (f32, f32, f32, f32))>,
+}
+
+/// Sidebar file-tree column. `root` follows the active pane's cwd; `nodes` is
+/// the flattened expanded tree (rebuilt only on root/expand change). `drag`/
+/// `new`/`selected`/`search_*` carry the in-flight tree interactions; `fs_dirty`
+/// /`watch`/`ignored` are the off-GUI-thread live-refresh + gitignore-dim Arcs.
+/// `visible`/`w_logical`/`resize` are the column chrome. The `*_rect` fields are
+/// per-frame hit targets rebuilt each paint.
+#[derive(Default)]
+pub(crate) struct FileTreeState {
+    pub(crate) drag: Option<FileTreeDrag>,
+    pub(crate) new: Option<(bool, String)>,
+    pub(crate) new_folder_rect: (f32, f32, f32, f32),
+    pub(crate) new_file_rect: (f32, f32, f32, f32),
+    pub(crate) new_row_rect: (f32, f32, f32, f32),
+    pub(crate) selected: Option<std::path::PathBuf>,
+    pub(crate) search_active: bool,
+    pub(crate) search_query: String,
+    pub(crate) search_rect: (f32, f32, f32, f32),
+    pub(crate) root: Option<std::path::PathBuf>,
+    pub(crate) expanded: std::collections::HashSet<std::path::PathBuf>,
+    pub(crate) nodes: Vec<FileNode>,
+    pub(crate) fs_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) watch: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    pub(crate) watch_started: bool,
+    pub(crate) ignored: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    pub(crate) hover: Option<std::path::PathBuf>,
+    pub(crate) scroll: f32,
+    pub(crate) rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
+    pub(crate) visible: bool,
+    pub(crate) w_logical: f32,
+    pub(crate) resize: Option<(f32, f32)>,
+}
+
+/// Collab completion toast + munder-style god approval card. `toast` is the
+/// "✓ %3 완료" message for a sibling pane's working→idle flip (faded by
+/// `collab_toast_alpha`); `toast_action` = Some(pane id) pins it as an
+/// approve/deny card whose chip rects (`toast_approve_rect`/`toast_deny_rect`)
+/// route a response key to that pane. `attention` is the board `waiting` flag
+/// map, shared (Arc) with the socket `PtyBackend`. `unread` badges the board.
+#[derive(Default)]
+pub(crate) struct CollabState {
+    pub(crate) toast: Option<(String, std::time::Instant)>,
+    pub(crate) toast_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) toast_action: Option<String>,
+    pub(crate) toast_approve_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) toast_deny_rect: Option<(f32, f32, f32, f32)>,
+    pub(crate) attention: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
+    #[allow(dead_code)] // board badge count — bumped, render/clear lands with sidebar work
+    pub(crate) unread: u32,
+}

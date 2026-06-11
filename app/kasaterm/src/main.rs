@@ -26,6 +26,7 @@ mod markdown;
 mod input;
 mod settings;
 mod links;
+mod state;
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
@@ -2652,19 +2653,13 @@ struct App {
     image_pan_drag: Option<(String, (f32, f32), (f32, f32))>,
     /// In-flight file-tree → terminal path drag. `Some` while a tree row is
     /// held; releasing over a pane types the path into that shell.
-    file_tree_drag: Option<FileTreeDrag>,
     /// Inline "new file / folder" entry. `Some((is_dir, name_buffer))` while
     /// the user is naming a freshly-requested entry; Enter creates it under
     /// the tree root, Esc cancels. Keystrokes route here like the search box.
-    file_tree_new: Option<(bool, String)>,
     /// Hit rects for the new-folder / new-file buttons beside the search box,
     /// refreshed each frame.
-    file_tree_new_folder_rect: (f32, f32, f32, f32),
-    file_tree_new_file_rect: (f32, f32, f32, f32),
     /// Row rect of the inline new-entry naming box (for the I-beam hit-test).
-    file_tree_new_row_rect: (f32, f32, f32, f32),
     /// Tree row the user last clicked — the Cmd+Delete target.
-    file_tree_selected: Option<std::path::PathBuf>,
     /// Whether the text (I-beam) mouse cursor is currently shown, so we only
     /// flip the OS cursor on the transition in/out of an input box.
     text_cursor_shown: bool,
@@ -2764,36 +2759,13 @@ struct App {
     /// pulses until the user switches to that window, which clears the entry —
     /// a persistent "you missed this" cue, unlike the brief `notify_flash`.
     window_alert: std::collections::HashSet<usize>,
-    /// Active completion toast (message + start instant) for a sibling pane's
-    /// working→idle flip — "✓ %3 완료 · git 패널". Fades like `copy_toast_at`.
-    /// Replaced by the newest flip; a brief overlap just shows the latest.
-    collab_toast: Option<(String, Instant)>,
-    /// The completion toast's logical-px rect while it's visible, so a click
-    /// dismisses it. None when the toast isn't drawn. Set by the render path,
-    /// consumed by the MouseInput handler.
-    collab_toast_rect: Option<(f32, f32, f32, f32)>,
-    /// 승인 토스트 모드(munder식 god 승인 카드): Some(pane id)면 `collab_toast`가
-    /// 페이드 없이 고정되고 승인/거부 칩이 함께 렌더된다. 칩 클릭이 이 pane 의
-    /// PTY 로 응답 키를 보낸다 (`respond_approval`). 프롬프트가 풀리면 해제.
-    collab_toast_action: Option<String>,
-    /// 승인 토스트의 승인/거부 칩 hit-rect (logical px). 렌더 패스가 쓰고
-    /// MouseInput 이 소비 — 일반 토스트 dismiss 보다 먼저 검사해야 한다.
-    collab_toast_approve_rect: Option<(f32, f32, f32, f32)>,
-    collab_toast_deny_rect: Option<(f32, f32, f32, f32)>,
+    /// Collab completion toast + god approval card, grouped into a sub-struct
+    /// (state.rs) so collab-UI work touches one file — CLAUDE.md 병렬 규칙.
+    collab: state::CollabState,
     /// 승인 프롬프트가 떠 있는 pane → "사용자 직행(god/단독)인가". 그리드 스캔
     /// (`route_approval_prompts`)의 edge-trigger 상태: 새로 뜨면 라우팅 1회,
     /// 풀리면 board waiting 플래그까지 함께 걷는다.
     pane_prompt_wait: HashMap<String, bool>,
-    /// 협업 board 의 `waiting` 플래그 — socket `PtyBackend` 와 공유(Arc). hook
-    /// (`kasaterm-cli attention`) 경로와 그리드 감지 경로가 같은 맵에 쓰므로
-    /// god 이 board 어디서 보든 워커 막힘이 보인다.
-    collab_attention: Arc<Mutex<HashMap<String, String>>>,
-    /// Unread completion count, for a badge on the collab board entry. Bumped on
-    /// each completion toast; the badge render + clear land with the sidebar
-    /// work (P3) — the board has no GUI button yet (menu-toggle only), so the
-    /// sidebar window list is its natural home.
-    #[allow(dead_code)]
-    collab_unread: u32,
     /// When we last recomputed the macOS window title. Rate-limits
     /// `maybe_update_window_title` to ~200ms because it locks the
     /// workspace + calls `ps -A` (process-tree lookup) on every hit,
@@ -2820,123 +2792,15 @@ struct App {
     /// cwds the git poller should refresh, set from the current windows' repr
     /// cwd just before the sidebar paints. Shared with the poll thread.
     git_poll_cwds: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
-    /// Right-hand git column (the in-window replacement for the old floating
-    /// webview git panel). Visibility + live width, an in-flight resize drag,
-    /// a scroll offset, and the per-frame file-row + button hit rects — all
-    /// mirroring the file-tree column on the left.
-    git_col_visible: bool,
-    git_col_w_logical: f32,
-    git_col_resize: Option<(f32, f32)>,
-    git_col_scroll: f32,
-    git_col_file_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
-    git_col_btn_rects: Vec<(GitColBtn, (f32, f32, f32, f32))>,
-    /// Files whose inline unified-diff is expanded in the panel, keyed by
-    /// `(staged, path)` so a partially-staged file can expand each side
-    /// independently. `git_col_diff_cache` holds the parsed rows, loaded when a
-    /// row is expanded and cleared whenever the status snapshot changes.
-    git_col_expanded: std::collections::HashSet<(bool, String)>,
-    git_col_diff_cache: HashMap<(bool, String), Vec<kasa_mcp::git::DiffLine>>,
-    /// cursor-style header chrome: panel close/expand buttons, the split Commit
-    /// button + its caret, and the caret's dropdown (Commit / Push / Create PR).
-    /// All rebuilt each paint like the other git-column hit rects.
-    git_col_close_rect: Option<(f32, f32, f32, f32)>,
-    git_col_expand_rect: Option<(f32, f32, f32, f32)>,
-    git_commit_btn_rect: Option<(f32, f32, f32, f32)>,
-    git_commit_caret_rect: Option<(f32, f32, f32, f32)>,
-    git_commit_menu_open: bool,
-    git_commit_menu_rects: Vec<(GitCommitAction, (f32, f32, f32, f32))>,
-    /// Commit modal (screenshot #5): full-panel overlay with branch, an
-    /// include-unstaged toggle, the file list, a message box, and the
-    /// Commit / Commit-and-push + Cancel/Confirm actions.
-    git_commit_modal_open: bool,
-    git_commit_modal_include_unstaged: bool,
-    git_commit_modal_rects: Vec<(GitModalBtn, (f32, f32, f32, f32))>,
-    /// Per-row stage/unstage button hit rects: `(stage, path, rect)` where
-    /// `stage == true` means the + button (git add), `false` the − (unstage).
-    /// Rebuilt each paint; only the hovered row's button is present.
-    git_col_stage_rects: Vec<(bool, String, (f32, f32, f32, f32))>,
-    /// Hovered-row action buttons beside stage: ↩ discard (path, untracked) and
-    /// ⤴ open-in-preview (path). Rebuilt each paint like `git_col_stage_rects`.
-    git_col_discard_rects: Vec<(String, bool, (f32, f32, f32, f32))>,
-    git_col_open_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// VSCode-style commit message input above the action buttons. The buffer
-    /// is single-line (commit subject); `cursor` is a char index into it.
-    /// `focused` routes keystrokes here (see `forward_key`) instead of the PTY.
-    /// `input_rect` is the per-paint hit target for click-to-focus.
-    git_commit_msg: String,
-    git_commit_cursor: usize,
-    git_commit_focused: bool,
-    git_commit_input_rect: Option<(f32, f32, f32, f32)>,
-    /// `git status` snapshot for the active pane's cwd: the poller writes it
-    /// off the main thread, the render reads it. `git_col_cwd` is the cwd the
-    /// poller should refresh (render publishes the active pane's cwd into it).
-    /// Same pattern as `window_git` / `git_poll_cwds`.
-    git_col_data: std::sync::Arc<std::sync::Mutex<GitColView>>,
-    /// Label of the in-flight git op (push/pull/commit…) for the panel spinner,
-    /// or `None` when idle. Set on the GUI thread when the op starts, cleared by
-    /// `UserEvent::GitOpDone` when the worker finishes.
-    git_op: Option<&'static str>,
-    git_col_cwd: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
-    /// User-pinned repo for the column. `Some` = show this repo regardless of
-    /// the focused pane (picked from the path dropdown); `None` = follow the
-    /// active pane's cwd. `publish_git_col_cwd` honours it.
-    git_col_pinned_cwd: Option<std::path::PathBuf>,
-    /// Open dropdowns in the git-column header (path picker / branch switcher).
-    /// Only one is meaningfully open at a time. The per-frame hit rects are
-    /// rebuilt by the render (like `shell_menu_*`).
-    git_path_menu_open: bool,
-    git_branch_menu_open: bool,
-    /// Header click targets + dropdown item rects, rebuilt each paint. The path
-    /// menu's `None` entry is the "자동 추적" toggle; branch items carry the
-    /// branch name to check out.
-    git_path_hdr_rect: Option<(f32, f32, f32, f32)>,
-    git_branch_hdr_rect: Option<(f32, f32, f32, f32)>,
-    git_path_menu_rects: Vec<(Option<std::path::PathBuf>, (f32, f32, f32, f32))>,
-    git_branch_menu_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// Per-pane status bar (cwd / branch / diff chips at the foot of each pane).
-    /// `statusbar_hidden` holds the pane ids whose bar is collapsed — default is
-    /// shown, so absence means visible. A hidden pane reserves no footer rows.
-    statusbar_hidden: std::collections::HashSet<String>,
-    /// Per-frame status-bar hit rects, rebuilt each paint (like the git column's
-    /// header rects). `path`/`branch` carry the pane id so a click resolves the
-    /// repo; `toggle` is the eye button in the pane header that hides the bar.
-    statusbar_path_rects: Vec<(String, (f32, f32, f32, f32))>,
-    statusbar_branch_rects: Vec<(String, (f32, f32, f32, f32))>,
-    statusbar_toggle_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// diff chip hit rects (pane id → rect). Clicking opens the git column for
-    /// that pane's repo.
-    statusbar_diff_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// Open status-bar dropdown: `(pane_id, kind)` where kind picks the path
-    /// picker or branch switcher. The item rects + their backing data are
-    /// rebuilt by the render while the menu is open.
-    statusbar_menu: Option<(String, StatusbarMenu)>,
-    statusbar_menu_dir_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
-    statusbar_menu_branch_rects: Vec<(String, (f32, f32, f32, f32))>,
-    /// Backing data for the open status-bar dropdown, snapshotted when it opens
-    /// (read_dir / git_branches are off the render path). `dirs` is `..` + the
-    /// cwd's child directories; `branches` is the repo's local branches.
-    statusbar_menu_dirs: Vec<std::path::PathBuf>,
-    statusbar_menu_branches: Vec<String>,
-    /// Vertical scroll (logical px) of the open status-bar dropdown. The list
-    /// caps its visible rows, so a cwd with many subdirs needs the wheel to
-    /// reach the rest. Reset to 0 each time a menu opens.
-    statusbar_menu_scroll: f32,
-    /// Full menu rect (logical px) of the open dropdown, cached each frame so
-    /// the wheel handler can tell when the cursor is hovering it.
-    statusbar_menu_rect: Option<(f32, f32, f32, f32)>,
-    /// Live search query for the open path dropdown — typing while it's open
-    /// filters the rows (cursor-style quick-nav). Reset when a menu opens.
-    statusbar_menu_search: String,
-    /// File-tree column search box: active flag + query. When active a search
-    /// field shows atop the tree and the rows are filtered to name matches.
-    file_tree_search_active: bool,
-    file_tree_search_query: String,
-    /// Search-box rect (logical px), cached each frame so the mouse handler can
-    /// tell when a click lands on it (→ focus the file-tree search).
-    file_tree_search_rect: (f32, f32, f32, f32),
-    /// Single-pane Cmd+W in daemon mode sets this to close the GUI window
-    /// (ghostty-style) on the next about_to_wait, instead of killing the pane.
-    /// The daemon keeps the session alive so relaunch restores it.
+    /// Right-hand git column + commit modal + path/branch dropdowns, grouped
+    /// into a sub-struct (state.rs) so git-UI work touches one file, not this
+    /// App definition — CLAUDE.md 병렬 규칙. (badge poller `git_poll_cwds` and
+    /// the file-tree `git_ignore_*` stay separate — different domains.)
+    git: state::GitState,
+    /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) + the
+    /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
+    /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
+    statusbar: state::StatusbarState,
     /// Last `refresh_pane_cwds` sweep — rate-limits the lsof calls.
     pane_cwd_check: Option<Instant>,
     /// Preview panes (image/markdown) already materialized from the daemon's
@@ -2948,38 +2812,16 @@ struct App {
     /// focus without it cluttering the header normally. Toggled in
     /// `ModifiersChanged`.
     show_pane_numbers: bool,
-    /// Sidebar file-tree state. Root = the active pane's cwd (recomputed when
-    /// it changes — follows pane switch + `cd`). `nodes` is the flattened
-    /// expanded tree, rebuilt only on root/expand change (no per-frame
-    /// read_dir). `rects`/`hover` mirror the window-tab hit-test pattern.
-    file_tree_root: Option<std::path::PathBuf>,
-    file_tree_expanded: std::collections::HashSet<std::path::PathBuf>,
-    file_tree_nodes: Vec<FileNode>,
-    /// Live file-tree refresh. A background thread polls the dirs in
-    /// `file_tree_watch` (root + expanded folders) ~800ms apart and, on any
-    /// add/remove/rename/mtime change, sets `file_tree_fs_dirty` + wakes the
-    /// loop. `refresh_file_tree` rebuilds when the flag is set. Off-GUI-thread
-    /// so the event-driven loop stays idle until the FS actually changes.
-    file_tree_fs_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    file_tree_watch: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
-    file_tree_watch_started: bool,
+    /// Sidebar file-tree column + its in-flight interactions, grouped into a
+    /// sub-struct (state.rs) so file-tree work touches one file — CLAUDE.md 병렬.
+    file_tree: state::FileTreeState,
     /// `git check-ignore` runs off-GUI-thread: spawning git from the unsigned
     /// kasaterm.exe triggers a Defender full-scan (~5s/call on Windows) that
     /// would freeze the toggle if run inline. The worker reads a (root, paths)
-    /// request, fills `file_tree_ignored`, and wakes the loop so the next
-    /// rebuild dims gitignored rows. Until it lands, rows show un-dimmed.
-    file_tree_ignored: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// request, fills the file-tree ignored set (`file_tree.ignored`), and wakes
+    /// the loop so the next rebuild dims gitignored rows; until then, un-dimmed.
     git_ignore_req: std::sync::Arc<std::sync::Mutex<Option<(std::path::PathBuf, Vec<String>)>>>,
     git_ignore_started: bool,
-    file_tree_hover: Option<std::path::PathBuf>,
-    file_tree_scroll: f32,
-    file_tree_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
-    /// File-tree column visibility + live width (logical px), independent of
-    /// the session-tab sidebar. `effective_sidebar_w()` adds this when shown.
-    file_tree_visible: bool,
-    file_tree_w_logical: f32,
-    /// In-flight tree-column resize drag — `(start_cursor_x, start_width)`.
-    file_tree_resize: Option<(f32, f32)>,
     /// Settings screen (Warp-style full-view, reached from the sidebar). When
     /// open it replaces the pane grid; the sidebar/titlebar stay live.
     settings_open: bool,
@@ -3171,12 +3013,6 @@ impl App {
             header_drag: None,
             tab_drag: None,
             image_pan_drag: None,
-            file_tree_drag: None,
-            file_tree_new: None,
-            file_tree_new_folder_rect: (0.0, 0.0, 0.0, 0.0),
-            file_tree_new_file_rect: (0.0, 0.0, 0.0, 0.0),
-            file_tree_new_row_rect: (0.0, 0.0, 0.0, 0.0),
-            file_tree_selected: None,
             text_cursor_shown: false,
             confirm_close: None,
             confirm_btn_rects: Vec::new(),
@@ -3199,14 +3035,8 @@ impl App {
             window_focused: true,
             notify_flash: HashMap::new(),
             window_alert: std::collections::HashSet::new(),
-            collab_toast: None,
-            collab_toast_rect: None,
-            collab_toast_action: None,
-            collab_toast_approve_rect: None,
-            collab_toast_deny_rect: None,
+            collab: Default::default(),
             pane_prompt_wait: HashMap::new(),
-            collab_attention: Arc::new(Mutex::new(HashMap::new())),
-            collab_unread: 0,
             last_window_title_check: None,
             pending_autoleader: None,
             pending_autoleader_at: None,
@@ -3214,75 +3044,24 @@ impl App {
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            git_col_visible: std::env::var("KASASPACE_GIT_PANEL")
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false),
-            git_col_w_logical: GIT_COL_W,
-            git_col_resize: None,
-            git_col_scroll: 0.0,
-            git_col_file_rects: Vec::new(),
-            git_col_btn_rects: Vec::new(),
-            git_col_expanded: std::collections::HashSet::new(),
-            git_col_diff_cache: HashMap::new(),
-            git_col_close_rect: None,
-            git_col_expand_rect: None,
-            git_commit_btn_rect: None,
-            git_commit_caret_rect: None,
-            git_commit_menu_open: false,
-            git_commit_menu_rects: Vec::new(),
-            git_commit_modal_open: false,
-            git_commit_modal_include_unstaged: true,
-            git_commit_modal_rects: Vec::new(),
-            git_col_stage_rects: Vec::new(),
-            git_col_discard_rects: Vec::new(),
-            git_col_open_rects: Vec::new(),
-            git_commit_msg: String::new(),
-            git_commit_cursor: 0,
-            git_commit_focused: false,
-            git_commit_input_rect: None,
-            git_col_data: std::sync::Arc::new(std::sync::Mutex::new(GitColView::default())),
-            git_op: None,
-            git_col_cwd: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            git_col_pinned_cwd: None,
-            git_path_menu_open: false,
-            git_branch_menu_open: false,
-            git_path_hdr_rect: None,
-            git_branch_hdr_rect: None,
-            git_path_menu_rects: Vec::new(),
-            git_branch_menu_rects: Vec::new(),
-            statusbar_hidden: std::collections::HashSet::new(),
-            statusbar_path_rects: Vec::new(),
-            statusbar_branch_rects: Vec::new(),
-            statusbar_toggle_rects: Vec::new(),
-            statusbar_diff_rects: Vec::new(),
-            statusbar_menu: None,
-            statusbar_menu_dir_rects: Vec::new(),
-            statusbar_menu_branch_rects: Vec::new(),
-            statusbar_menu_dirs: Vec::new(),
-            statusbar_menu_branches: Vec::new(),
-            statusbar_menu_scroll: 0.0,
-            statusbar_menu_rect: None,
-            statusbar_menu_search: String::new(),
-            file_tree_search_active: false,
-            file_tree_search_query: String::new(),
-            file_tree_search_rect: (0.0, 0.0, 0.0, 0.0),
+            git: state::GitState {
+                col_visible: std::env::var("KASASPACE_GIT_PANEL")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false),
+                col_w_logical: GIT_COL_W,
+                commit_modal_include_unstaged: true,
+                ..Default::default()
+            },
+            statusbar: Default::default(),
             pane_cwd_check: None,
             show_pane_numbers: false,
-            file_tree_root: None,
-            file_tree_fs_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            file_tree_watch: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            file_tree_watch_started: false,
-            file_tree_ignored: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            file_tree: state::FileTreeState {
+                visible: socket::read_file_tree_default(),
+                w_logical: FILE_TREE_W,
+                ..Default::default()
+            },
             git_ignore_req: std::sync::Arc::new(std::sync::Mutex::new(None)),
             git_ignore_started: false,
-            file_tree_expanded: std::collections::HashSet::new(),
-            file_tree_nodes: Vec::new(),
-            file_tree_hover: None,
-            file_tree_scroll: 0.0,
-            file_tree_rects: Vec::new(),
-            file_tree_visible: socket::read_file_tree_default(),
-            file_tree_w_logical: FILE_TREE_W,
-            file_tree_resize: None,
             settings_open: std::env::var("KASATERM_OPEN_SETTINGS").is_ok(),
             settings_cat: match std::env::var("KASATERM_OPEN_SETTINGS").as_deref() {
                 Ok("shell") => SettingsCat::Shell,

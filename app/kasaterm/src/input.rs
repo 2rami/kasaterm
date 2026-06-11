@@ -343,8 +343,8 @@ impl App {
         };
         // A sticky approval toast (god waiting on the user) outranks a sibling
         // completion blip — don't swap its text out from under the chips.
-        if self.collab_toast_action.is_none() {
-            self.collab_toast = Some((msg, now));
+        if self.collab.toast_action.is_none() {
+            self.collab.toast = Some((msg, now));
         }
         for id in completed {
             self.notify_flash.insert(id, now);
@@ -377,15 +377,15 @@ impl App {
                     self.pane_prompt_wait.insert(id.clone(), faces_user);
                     self.notify_flash.insert(id.clone(), now);
                     // board 에 waiting 으로 노출 — god 이 board/god-loop 로 본다.
-                    self.collab_attention
+                    self.collab.attention
                         .lock()
                         .unwrap()
                         .insert(id.clone(), "승인 대기 (화면 감지)".to_string());
                     if faces_user {
                         let name = self.pane_header_label(id);
-                        self.collab_toast = Some((format!("⚠ {name} 승인 대기"), now));
-                        self.collab_toast_action = Some(id.clone());
-                        self.collab_toast_rect = None;
+                        self.collab.toast = Some((format!("⚠ {name} 승인 대기"), now));
+                        self.collab.toast_action = Some(id.clone());
+                        self.collab.toast_rect = None;
                         let looking = self.window_focused
                             && self.ws.lock().unwrap().active_pane.as_deref()
                                 == Some(id.as_str());
@@ -408,8 +408,8 @@ impl App {
                 }
             } else if flagged {
                 self.pane_prompt_wait.remove(id);
-                self.collab_attention.lock().unwrap().remove(id);
-                if self.collab_toast_action.as_deref() == Some(id.as_str()) {
+                self.collab.attention.lock().unwrap().remove(id);
+                if self.collab.toast_action.as_deref() == Some(id.as_str()) {
                     self.clear_approval_toast();
                 }
                 changed = true;
@@ -428,11 +428,11 @@ impl App {
     /// Drop the sticky approval toast and its chip hit-rects in one place —
     /// called when the prompt resolves, a chip is clicked, or it's dismissed.
     pub(crate) fn clear_approval_toast(&mut self) {
-        self.collab_toast = None;
-        self.collab_toast_action = None;
-        self.collab_toast_rect = None;
-        self.collab_toast_approve_rect = None;
-        self.collab_toast_deny_rect = None;
+        self.collab.toast = None;
+        self.collab.toast_action = None;
+        self.collab.toast_rect = None;
+        self.collab.toast_approve_rect = None;
+        self.collab.toast_deny_rect = None;
     }
 
     /// 승인 토스트 칩 클릭 → 대상 pane PTY 에 응답 키 직주입 (forward_key 의
@@ -633,13 +633,13 @@ impl App {
         // Open status-bar dropdown overlays everything, so the wheel scrolls
         // its list first when the pointer is inside it (a cwd with many subdirs
         // overflows the capped viewport). Whole-row steps to match the render.
-        if let Some((mx, my, mw, mh)) = self.statusbar_menu_rect {
+        if let Some((mx, my, mw, mh)) = self.statusbar.menu_rect {
             let (cx, cy) = self.cursor_px;
             if cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh {
                 let item_h = 24.0_f32;
                 // lines>0 = wheel up = toward the top = less scroll.
-                self.statusbar_menu_scroll =
-                    (self.statusbar_menu_scroll - lines as f32 * item_h).max(0.0);
+                self.statusbar.menu_scroll =
+                    (self.statusbar.menu_scroll - lines as f32 * item_h).max(0.0);
                 self.chrome_dirty = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -651,23 +651,23 @@ impl App {
         // scroll the rows instead of delegating to a pane (px_to_pane_cell
         // returns None here and would otherwise fall through to the active
         // pane). Clamp so it can't scroll above the top or past the last row.
-        if self.file_tree_visible
+        if self.file_tree.visible
             && self.cursor_px.1 > TITLE_HEIGHT
             && self.cursor_px.0 >= self.file_tree_col_x()
-            && self.cursor_px.0 < self.file_tree_col_x() + self.file_tree_w_logical
+            && self.cursor_px.0 < self.file_tree_col_x() + self.file_tree.w_logical
         {
             let item_h = 26.0_f32;
             let win_h = self.window.as_ref().map_or(800.0, |w| {
                 w.inner_size().height as f32 / self.effective_scale()
             });
             let start_y = TITLE_HEIGHT + 10.0;
-            let content_h = self.file_tree_nodes.len() as f32 * item_h;
+            let content_h = self.file_tree.nodes.len() as f32 * item_h;
             let max_scroll = (content_h - (win_h - start_y).max(0.0)).max(0.0);
             // lines>0 = wheel up = toward the top = less scroll.
             let delta_px = lines as f32 * item_h;
-            let next = (self.file_tree_scroll - delta_px).clamp(0.0, max_scroll);
-            if (next - self.file_tree_scroll).abs() > 0.01 {
-                self.file_tree_scroll = next;
+            let next = (self.file_tree.scroll - delta_px).clamp(0.0, max_scroll);
+            if (next - self.file_tree.scroll).abs() > 0.01 {
+                self.file_tree.scroll = next;
                 self.chrome_dirty = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -678,13 +678,13 @@ impl App {
         // Git column: scroll the change list when the pointer is over it. Same
         // clamp idea as the file tree; the visible height is the band between
         // the header and the bottom button zone.
-        if self.git_col_visible
+        if self.git.col_visible
             && self.cursor_px.1 > TITLE_HEIGHT
             && self.cursor_px.0 >= self.git_col_x()
         {
             let item_h = 22.0_f32;
             let n = self
-                .git_col_data
+                .git.col_data
                 .lock()
                 .map(|g| g.staged.len() + g.unstaged.len())
                 .unwrap_or(0);
@@ -698,9 +698,9 @@ impl App {
             let content_h = n as f32 * item_h;
             let max_scroll = (content_h - visible_h).max(0.0);
             let delta_px = lines as f32 * item_h;
-            let next = (self.git_col_scroll - delta_px).clamp(0.0, max_scroll);
-            if (next - self.git_col_scroll).abs() > 0.01 {
-                self.git_col_scroll = next;
+            let next = (self.git.col_scroll - delta_px).clamp(0.0, max_scroll);
+            if (next - self.git.col_scroll).abs() > 0.01 {
+                self.git.col_scroll = next;
                 self.chrome_dirty = true;
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -897,10 +897,10 @@ impl App {
         if text.is_empty() {
             return;
         }
-        let col = self.git_commit_cursor.min(self.git_commit_msg.chars().count());
-        let b = char_byte(&self.git_commit_msg, col);
-        self.git_commit_msg.insert_str(b, text);
-        self.git_commit_cursor = col + text.chars().count();
+        let col = self.git.commit_cursor.min(self.git.commit_msg.chars().count());
+        let b = char_byte(&self.git.commit_msg, col);
+        self.git.commit_msg.insert_str(b, text);
+        self.git.commit_cursor = col + text.chars().count();
     }
     /// Commit-input key entry with Hangul composition, mirroring
     /// `md_editor_input` for the single-line git commit field. macOS hands jamo
@@ -943,22 +943,22 @@ impl App {
     /// composed in `git_commit_input` before this runs.
     pub(crate) fn git_commit_key(&mut self, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
-        let len = self.git_commit_msg.chars().count();
-        let mut col = self.git_commit_cursor.min(len);
+        let len = self.git.commit_msg.chars().count();
+        let mut col = self.git.commit_cursor.min(len);
         match &event.logical_key {
             Key::Named(NamedKey::Backspace) => {
                 if col > 0 {
-                    let b0 = char_byte(&self.git_commit_msg, col - 1);
-                    let b1 = char_byte(&self.git_commit_msg, col);
-                    self.git_commit_msg.replace_range(b0..b1, "");
+                    let b0 = char_byte(&self.git.commit_msg, col - 1);
+                    let b1 = char_byte(&self.git.commit_msg, col);
+                    self.git.commit_msg.replace_range(b0..b1, "");
                     col -= 1;
                 }
             }
             Key::Named(NamedKey::Delete) => {
                 if col < len {
-                    let b0 = char_byte(&self.git_commit_msg, col);
-                    let b1 = char_byte(&self.git_commit_msg, col + 1);
-                    self.git_commit_msg.replace_range(b0..b1, "");
+                    let b0 = char_byte(&self.git.commit_msg, col);
+                    let b1 = char_byte(&self.git.commit_msg, col + 1);
+                    self.git.commit_msg.replace_range(b0..b1, "");
                 }
             }
             Key::Named(NamedKey::ArrowLeft) => col = col.saturating_sub(1),
@@ -970,12 +970,12 @@ impl App {
             Key::Named(NamedKey::Home) => col = 0,
             Key::Named(NamedKey::End) => col = len,
             Key::Named(NamedKey::Enter) => {
-                self.git_commit_cursor = col;
+                self.git.commit_cursor = col;
                 self.run_git_col_action(GitColBtn::Commit);
                 return;
             }
             Key::Named(NamedKey::Escape) => {
-                self.git_commit_focused = false;
+                self.git.commit_focused = false;
                 self.preedit.clear();
                 self.in_preedit = false;
                 let _ = self.hangul.flush();
@@ -983,18 +983,18 @@ impl App {
                 return;
             }
             Key::Named(NamedKey::Space) => {
-                let b = char_byte(&self.git_commit_msg, col);
-                self.git_commit_msg.insert(b, ' ');
+                let b = char_byte(&self.git.commit_msg, col);
+                self.git.commit_msg.insert(b, ' ');
                 col += 1;
             }
             Key::Character(txt) => {
-                let b = char_byte(&self.git_commit_msg, col);
-                self.git_commit_msg.insert_str(b, txt);
+                let b = char_byte(&self.git.commit_msg, col);
+                self.git.commit_msg.insert_str(b, txt);
                 col += txt.chars().count();
             }
             _ => {}
         }
-        self.git_commit_cursor = col;
+        self.git.commit_cursor = col;
         self.chrome_dirty = true;
     }
     /// Type-to-search for the open path dropdown. Append-only (no mid-string
@@ -1009,11 +1009,11 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            self.statusbar_menu_search.push_str(&commit);
+                            self.statusbar.menu_search.push_str(&commit);
                         }
                         self.preedit = self.hangul.preedit().unwrap_or_default();
                         self.in_preedit = !self.preedit.is_empty();
-                        self.statusbar_menu_scroll = 0.0;
+                        self.statusbar.menu_scroll = 0.0;
                         self.chrome_dirty = true;
                         return;
                     }
@@ -1022,7 +1022,7 @@ impl App {
         }
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                self.statusbar_menu = None;
+                self.statusbar.menu = None;
                 self.preedit.clear();
                 self.in_preedit = false;
                 let _ = self.hangul.flush();
@@ -1042,25 +1042,25 @@ impl App {
                     self.preedit = self.hangul.preedit().unwrap_or_default();
                     self.in_preedit = !self.preedit.is_empty();
                 } else {
-                    self.statusbar_menu_search.pop();
+                    self.statusbar.menu_search.pop();
                 }
-                self.statusbar_menu_scroll = 0.0;
+                self.statusbar.menu_scroll = 0.0;
                 self.chrome_dirty = true;
                 return;
             }
             _ => {}
         }
         if let Some(flushed) = self.hangul.flush() {
-            self.statusbar_menu_search.push_str(&flushed);
+            self.statusbar.menu_search.push_str(&flushed);
         }
         self.preedit.clear();
         self.in_preedit = false;
         match &event.logical_key {
-            Key::Named(NamedKey::Space) => self.statusbar_menu_search.push(' '),
-            Key::Character(txt) => self.statusbar_menu_search.push_str(txt),
+            Key::Named(NamedKey::Space) => self.statusbar.menu_search.push(' '),
+            Key::Character(txt) => self.statusbar.menu_search.push_str(txt),
             _ => {}
         }
-        self.statusbar_menu_scroll = 0.0;
+        self.statusbar.menu_scroll = 0.0;
         self.chrome_dirty = true;
     }
     /// Same append-only search entry for the file-tree column's search box.
@@ -1074,12 +1074,12 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            self.file_tree_search_query.push_str(&commit);
+                            self.file_tree.search_query.push_str(&commit);
                             self.file_tree_search_collect();
                         }
                         self.preedit = self.hangul.preedit().unwrap_or_default();
                         self.in_preedit = !self.preedit.is_empty();
-                        self.file_tree_scroll = 0.0;
+                        self.file_tree.scroll = 0.0;
                         self.chrome_dirty = true;
                         return;
                     }
@@ -1088,13 +1088,13 @@ impl App {
         }
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                self.file_tree_search_active = false;
-                self.file_tree_search_query.clear();
+                self.file_tree.search_active = false;
+                self.file_tree.search_query.clear();
                 self.preedit.clear();
                 self.in_preedit = false;
                 let _ = self.hangul.flush();
                 self.file_tree_search_collect(); // empty query → restore tree
-                self.file_tree_scroll = 0.0;
+                self.file_tree.scroll = 0.0;
                 self.chrome_dirty = true;
                 return;
             }
@@ -1103,27 +1103,27 @@ impl App {
                     self.preedit = self.hangul.preedit().unwrap_or_default();
                     self.in_preedit = !self.preedit.is_empty();
                 } else {
-                    self.file_tree_search_query.pop();
+                    self.file_tree.search_query.pop();
                 }
                 self.file_tree_search_collect();
-                self.file_tree_scroll = 0.0;
+                self.file_tree.scroll = 0.0;
                 self.chrome_dirty = true;
                 return;
             }
             _ => {}
         }
         if let Some(flushed) = self.hangul.flush() {
-            self.file_tree_search_query.push_str(&flushed);
+            self.file_tree.search_query.push_str(&flushed);
         }
         self.preedit.clear();
         self.in_preedit = false;
         match &event.logical_key {
-            Key::Named(NamedKey::Space) => self.file_tree_search_query.push(' '),
-            Key::Character(txt) => self.file_tree_search_query.push_str(txt),
+            Key::Named(NamedKey::Space) => self.file_tree.search_query.push(' '),
+            Key::Character(txt) => self.file_tree.search_query.push_str(txt),
             _ => {}
         }
         self.file_tree_search_collect();
-        self.file_tree_scroll = 0.0;
+        self.file_tree.scroll = 0.0;
         self.chrome_dirty = true;
     }
     /// Name entry for the inline new-file/folder row. Enter creates the entry,
@@ -1136,7 +1136,7 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                            if let Some((_, buf)) = self.file_tree.new.as_mut() {
                                 buf.push_str(&commit);
                             }
                         }
@@ -1150,7 +1150,7 @@ impl App {
         }
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                self.file_tree_new = None;
+                self.file_tree.new = None;
                 self.preedit.clear();
                 self.in_preedit = false;
                 let _ = self.hangul.flush();
@@ -1159,7 +1159,7 @@ impl App {
             }
             Key::Named(NamedKey::Enter) => {
                 if let Some(f) = self.hangul.flush() {
-                    if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                    if let Some((_, buf)) = self.file_tree.new.as_mut() {
                         buf.push_str(&f);
                     }
                 }
@@ -1173,7 +1173,7 @@ impl App {
                 if self.hangul.backspace() {
                     self.preedit = self.hangul.preedit().unwrap_or_default();
                     self.in_preedit = !self.preedit.is_empty();
-                } else if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                } else if let Some((_, buf)) = self.file_tree.new.as_mut() {
                     buf.pop();
                 }
                 self.chrome_dirty = true;
@@ -1182,7 +1182,7 @@ impl App {
             _ => {}
         }
         if let Some(flushed) = self.hangul.flush() {
-            if let Some((_, buf)) = self.file_tree_new.as_mut() {
+            if let Some((_, buf)) = self.file_tree.new.as_mut() {
                 buf.push_str(&flushed);
             }
         }
@@ -1190,12 +1190,12 @@ impl App {
         self.in_preedit = false;
         match &event.logical_key {
             Key::Named(NamedKey::Space) => {
-                if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                if let Some((_, buf)) = self.file_tree.new.as_mut() {
                     buf.push(' ');
                 }
             }
             Key::Character(txt) => {
-                if let Some((_, buf)) = self.file_tree_new.as_mut() {
+                if let Some((_, buf)) = self.file_tree.new.as_mut() {
                     buf.push_str(txt);
                 }
             }
@@ -1224,7 +1224,7 @@ impl App {
         }
         // Git commit field has focus: keystrokes edit the message, not the PTY.
         // (Click elsewhere blurs it — see the column's mouse handler.)
-        if self.git_commit_focused {
+        if self.git.commit_focused {
             self.git_commit_input(event);
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -1235,7 +1235,7 @@ impl App {
         // PTY. (Branch menu has no search — its lists are short — so it falls
         // through.)
         if self
-            .statusbar_menu
+            .statusbar.menu
             .as_ref()
             .map(|(_, k)| matches!(k, StatusbarMenu::Path))
             .unwrap_or(false)
@@ -1249,11 +1249,11 @@ impl App {
         // Cmd+Delete (= Cmd+Backspace) on a selected tree row → trash it.
         // Gated on no text input having focus so it never eats shell editing
         // keys; the selection clears when a terminal pane is clicked.
-        if !self.git_commit_focused
-            && self.file_tree_new.is_none()
-            && !self.file_tree_search_active
+        if !self.git.commit_focused
+            && self.file_tree.new.is_none()
+            && !self.file_tree.search_active
         {
-            if let Some(sel) = self.file_tree_selected.clone() {
+            if let Some(sel) = self.file_tree.selected.clone() {
                 use winit::keyboard::{Key, NamedKey};
                 let del = matches!(&event.logical_key, Key::Named(NamedKey::Delete))
                     || (self.modifiers.super_key()
@@ -1268,7 +1268,7 @@ impl App {
             }
         }
         // Inline new-file/folder naming row is open: keystrokes name it.
-        if self.file_tree_new.is_some() {
+        if self.file_tree.new.is_some() {
             self.file_tree_new_key(event);
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -1276,7 +1276,7 @@ impl App {
             return;
         }
         // File-tree search box has focus: keystrokes filter the tree.
-        if self.file_tree_search_active {
+        if self.file_tree.search_active {
             self.file_tree_search_key(event);
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -1286,7 +1286,7 @@ impl App {
         // Past here the key is bound for the shell (or an image/raw pane), so
         // drop any tree selection — a later Cmd+Backspace then edits the shell
         // line, not the previously-clicked file.
-        self.file_tree_selected = None;
+        self.file_tree.selected = None;
         // Image panes have no PTY — repurpose keys for view control.
         //   +/=      zoom in     -    zoom out
         //   0        reset       r/R  rotate 90° CW

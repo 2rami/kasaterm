@@ -46,12 +46,12 @@ impl App {
     /// can show the inline diff / commit modal without a real click.
     pub(crate) fn run_autogit(&mut self, action: &str) {
         // The demo actions assume the column is up; open it for headless capture.
-        if !self.git_col_visible {
+        if !self.git.col_visible {
             self.toggle_git_col();
         }
         match action {
             "diff" => {
-                let pick = self.git_col_data.lock().ok().and_then(|g| {
+                let pick = self.git.col_data.lock().ok().and_then(|g| {
                     g.unstaged
                         .first()
                         .map(|(_, p)| (false, p.clone()))
@@ -62,8 +62,8 @@ impl App {
                 }
             }
             "modal" => self.open_commit_modal(),
-            "menu" => self.git_commit_menu_open = true,
-            "spin" => self.git_op = Some("Pushing"),
+            "menu" => self.git.commit_menu_open = true,
+            "spin" => self.git.op = Some("Pushing"),
             "hover" => {
                 // Park the cursor over the first file row so its action cluster
                 // (open / discard / stage) renders for a headless capture.

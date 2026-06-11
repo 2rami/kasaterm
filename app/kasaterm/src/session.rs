@@ -546,7 +546,7 @@ impl App {
         // A background watcher flagged an on-disk change (file added / removed /
         // renamed / modified) — rebuild even if the root is unchanged.
         if self
-            .file_tree_fs_dirty
+            .file_tree.fs_dirty
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
             self.rebuild_file_tree_nodes();
@@ -558,18 +558,18 @@ impl App {
             // Preview panes (markdown/image splits) have no cwd in the cache —
             // keep the current tree root rather than snapping to the process
             // cwd, so opening a file doesn't reshuffle the sidebar root.
-            .or_else(|| self.file_tree_root.clone())
+            .or_else(|| self.file_tree.root.clone())
             .or_else(|| std::env::current_dir().ok());
-        if root == self.file_tree_root {
+        if root == self.file_tree.root {
             return;
         }
         // Open the new root by default so the sidebar shows its contents
         // immediately rather than a single collapsed folder row.
         if let Some(r) = &root {
-            self.file_tree_expanded.insert(r.clone());
+            self.file_tree.expanded.insert(r.clone());
         }
-        self.file_tree_root = root;
-        self.file_tree_scroll = 0.0;
+        self.file_tree.root = root;
+        self.file_tree.scroll = 0.0;
         self.rebuild_file_tree_nodes();
     }
     /// Spawn the file-tree FS poller once. It watches the dirs in
@@ -579,12 +579,12 @@ impl App {
     /// `refresh_file_tree` rebuilds. Polling lives off the GUI thread, so the
     /// event-driven loop stays parked until the disk actually changes.
     pub(crate) fn ensure_file_tree_watcher(&mut self) {
-        if self.file_tree_watch_started {
+        if self.file_tree.watch_started {
             return;
         }
-        self.file_tree_watch_started = true;
-        let watch = self.file_tree_watch.clone();
-        let dirty = self.file_tree_fs_dirty.clone();
+        self.file_tree.watch_started = true;
+        let watch = self.file_tree.watch.clone();
+        let dirty = self.file_tree.fs_dirty.clone();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let mut last: u64 = 0;
@@ -636,8 +636,8 @@ impl App {
         }
         self.git_ignore_started = true;
         let req = self.git_ignore_req.clone();
-        let cache = self.file_tree_ignored.clone();
-        let dirty = self.file_tree_fs_dirty.clone();
+        let cache = self.file_tree.ignored.clone();
+        let dirty = self.file_tree.fs_dirty.clone();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let mut last: Option<(std::path::PathBuf, Vec<String>)> = None;
@@ -797,8 +797,8 @@ impl App {
     }
     /// Walk the root + every expanded folder into the flat `file_tree_nodes`.
     pub(crate) fn rebuild_file_tree_nodes(&mut self) {
-        self.file_tree_nodes.clear();
-        if let Some(root) = self.file_tree_root.clone() {
+        self.file_tree.nodes.clear();
+        if let Some(root) = self.file_tree.root.clone() {
             // Show the project root itself as the first row (depth 0) so the
             // sidebar is anchored on the folder you're in, not a rootless list
             // of its children. Its contents nest under it at depth 1+.
@@ -806,21 +806,21 @@ impl App {
                 .file_name()
                 .map(|n| nfc_hangul(&n.to_string_lossy()))
                 .unwrap_or_else(|| root.to_string_lossy().into_owned());
-            self.file_tree_nodes.push(FileNode {
+            self.file_tree.nodes.push(FileNode {
                 path: root.clone(),
                 name: root_name,
                 is_dir: true,
                 depth: 0,
                 ignored: false,
             });
-            if self.file_tree_expanded.contains(&root) {
-                Self::walk_dir(&root, 1, &self.file_tree_expanded, &mut self.file_tree_nodes);
+            if self.file_tree.expanded.contains(&root) {
+                Self::walk_dir(&root, 1, &self.file_tree.expanded, &mut self.file_tree.nodes);
             }
             // Second pass: one batched `git check-ignore` over every visible
             // path marks the gitignored rows italic+dim. Dotfiles get the same
             // treatment regardless (check-ignore won't flag a tracked dotfile).
             let paths: Vec<String> = self
-                .file_tree_nodes
+                .file_tree.nodes
                 .iter()
                 .map(|n| n.path.to_string_lossy().into_owned())
                 .collect();
@@ -830,11 +830,11 @@ impl App {
             // toggle. We hand the worker this (root, paths) and apply its
             // cached result; the worker wakes us when fresh ignores land.
             let ignored = self
-                .file_tree_ignored
+                .file_tree.ignored
                 .lock()
                 .map(|g| g.clone())
                 .unwrap_or_default();
-            for n in &mut self.file_tree_nodes {
+            for n in &mut self.file_tree.nodes {
                 n.ignored = n.name.starts_with('.')
                     || ignored.contains(n.path.to_string_lossy().as_ref());
             }
@@ -845,15 +845,15 @@ impl App {
         }
         // Hand the FS watcher the dirs currently on screen (root + each expanded
         // folder) so it polls exactly what the user can see change.
-        if let Ok(mut watch) = self.file_tree_watch.lock() {
+        if let Ok(mut watch) = self.file_tree.watch.lock() {
             watch.clear();
-            if let Some(root) = &self.file_tree_root {
+            if let Some(root) = &self.file_tree.root {
                 watch.push(root.clone());
             }
             watch.extend(
-                self.file_tree_nodes
+                self.file_tree.nodes
                     .iter()
-                    .filter(|n| n.is_dir && self.file_tree_expanded.contains(&n.path))
+                    .filter(|n| n.is_dir && self.file_tree.expanded.contains(&n.path))
                     .map(|n| n.path.clone()),
             );
         }
@@ -864,14 +864,14 @@ impl App {
     /// skips heavy/ignored dirs and caps results so a huge repo can't stall the
     /// GUI. Matches are flattened to depth 0 — a hit list, not a tree.
     pub(crate) fn file_tree_search_collect(&mut self) {
-        let q = self.file_tree_search_query.to_lowercase();
+        let q = self.file_tree.search_query.to_lowercase();
         if q.is_empty() {
             self.rebuild_file_tree_nodes();
             return;
         }
-        self.file_tree_nodes.clear();
-        if let Some(root) = self.file_tree_root.clone() {
-            Self::search_walk(&root, &q, 0, &mut self.file_tree_nodes);
+        self.file_tree.nodes.clear();
+        if let Some(root) = self.file_tree.root.clone() {
+            Self::search_walk(&root, &q, 0, &mut self.file_tree.nodes);
         }
     }
     /// Depth-bounded recursive name search. `.git`, deep nests, and the usual
@@ -928,19 +928,19 @@ impl App {
             return;
         }
         // Carry the expanded state across the move and reveal the drop target.
-        if self.file_tree_expanded.remove(src) {
-            self.file_tree_expanded.insert(target.clone());
+        if self.file_tree.expanded.remove(src) {
+            self.file_tree.expanded.insert(target.clone());
         }
-        self.file_tree_expanded.insert(dst_dir.to_path_buf());
+        self.file_tree.expanded.insert(dst_dir.to_path_buf());
         self.rebuild_file_tree_nodes();
     }
     /// Move a tree entry to the OS trash (recoverable), then refresh.
     pub(crate) fn delete_tree_entry(&mut self, path: &std::path::Path) {
         match trash::delete(path) {
             Ok(()) => {
-                self.file_tree_expanded.remove(path);
-                if self.file_tree_selected.as_deref() == Some(path) {
-                    self.file_tree_selected = None;
+                self.file_tree.expanded.remove(path);
+                if self.file_tree.selected.as_deref() == Some(path) {
+                    self.file_tree.selected = None;
                 }
                 let name = path
                     .file_name()
@@ -955,12 +955,12 @@ impl App {
     /// Create the entry the inline "new file/folder" row is naming, under the
     /// current tree root, then clear the entry and refresh the tree.
     pub(crate) fn commit_new_entry(&mut self) {
-        let Some((is_dir, name)) = self.file_tree_new.take() else { return };
+        let Some((is_dir, name)) = self.file_tree.new.take() else { return };
         let name = name.trim().to_string();
         if name.is_empty() {
             return;
         }
-        if let Some(root) = self.file_tree_root.clone() {
+        if let Some(root) = self.file_tree.root.clone() {
             let path = root.join(&name);
             if path.exists() {
                 self.set_toast(format!("이미 있음: {name}"));
@@ -973,9 +973,9 @@ impl App {
             };
             match res {
                 Ok(()) => {
-                    self.file_tree_expanded.insert(root.clone());
+                    self.file_tree.expanded.insert(root.clone());
                     if is_dir {
-                        self.file_tree_expanded.insert(path.clone());
+                        self.file_tree.expanded.insert(path.clone());
                     }
                 }
                 Err(e) => self.set_toast(format!("생성 실패: {e}")),
@@ -1410,7 +1410,7 @@ impl App {
         let backend = Arc::new(socket::PtyBackend::new(
             self.proxy.clone(),
             self.ws.clone(),
-            self.collab_attention.clone(),
+            self.collab.attention.clone(),
         ));
         self.start_socket_with(backend);
     }
