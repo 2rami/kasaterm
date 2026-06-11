@@ -2,6 +2,23 @@ import { useEffect, useRef, useState } from 'react';
 import { fetchPeek, fetchTranscript, sendToPane, type Turn } from '@/lib/mcp';
 import { SegmentedTabs } from './GameKit';
 import { SpritePortrait } from './SpritePortrait';
+import { useStore } from '@/store';
+
+const shortModel = (m?: string) =>
+  !m ? '' : m.replace('claude-', '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/^./, (c) => c.toUpperCase());
+const shortCwd = (p?: string) => (!p ? '' : p.split('/').filter(Boolean).slice(-2).join('/'));
+
+function MetaChip({ label, dim }: { label: string; dim?: boolean }) {
+  return (
+    <span style={{
+      fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600,
+      padding: '2px 8px', borderRadius: 6,
+      background: dim ? 'transparent' : 'var(--cth-cream-100)',
+      color: dim ? 'var(--cth-ink-300)' : 'var(--cth-ink-700)',
+      border: dim ? 'none' : '1px solid var(--cth-cream-200)',
+    }}>{label}</span>
+  );
+}
 
 // ── ANSI SGR 파서 ──────────────────────────────────────────────────────────────
 // claude TUI 에서 실제로 쓰는 색 코드만 커버(30-37/90-97 fg, 38;5;n 256색, reset).
@@ -96,6 +113,7 @@ type Tab = 'chat' | 'screen';
 
 export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPanelProps) {
   const [tab, setTab] = useState<Tab>('chat');
+  const agent = useStore((s) => s.agents.find((a) => a.id === surfaceId));
   const [raw, setRaw] = useState('');
   const [turns, setTurns] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
@@ -190,6 +208,21 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
           }}
         >×</button>
       </div>
+
+      {/* 학생 메타 — 모델·브랜치·컨텍스트%·경로(클로드 실제 지표) */}
+      {agent && (agent.model || agent.branch || agent.cwd) && (
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center',
+          padding: '6px 12px', borderBottom: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
+        }}>
+          {agent.model && <MetaChip label={shortModel(agent.model)} />}
+          {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} />}
+          {agent.contextTokens != null && agent.contextLimit ? (
+            <MetaChip label={`컨텍스트 ${Math.round((agent.contextTokens / agent.contextLimit) * 100)}%`} />
+          ) : null}
+          {agent.cwd && <MetaChip label={shortCwd(agent.cwd)} dim />}
+        </div>
+      )}
 
       {/* 본문 — 대화(채팅 버블) or 화면(ANSI) */}
       {tab === 'chat' ? (

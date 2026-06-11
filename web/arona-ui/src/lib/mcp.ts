@@ -31,6 +31,11 @@ interface BoardRow {
   tool_counts?: [string, number][];
   /** 진행 중 서브에이전트 description 목록(Task/Agent tool_use 미완료). */
   subagents?: string[];
+  /** 학생 메타 — 모델/작업경로/컨텍스트한도/git 브랜치(PaneActivity). */
+  model?: string;
+  cwd?: string;
+  context_limit?: number;
+  branch?: string;
   /** 유우카가 character-<N> 마커를 읽어 노출(후속). 있으면 도트칩 이니셜·이름이
    *  캐릭터명(아로나/시로코/아리스…)으로, 없으면 title(ai-title) 폴백. */
   character?: string;
@@ -74,7 +79,11 @@ function toAgent(r: BoardRow): Agent {
     costUsd: r.cost_usd,
     tokensIn: r.tokens_in,
     tokensOut: r.tokens_out,
-    subagents: r.subagents
+    subagents: r.subagents,
+    model: r.model,
+    cwd: r.cwd,
+    contextLimit: r.context_limit,
+    branch: r.branch
   };
 }
 

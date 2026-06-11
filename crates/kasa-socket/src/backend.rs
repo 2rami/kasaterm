@@ -188,6 +188,18 @@ pub struct PaneActivity {
     /// is visible. Empty when the pane has launched none (or all completed).
     #[serde(default)]
     pub subagents: Vec<String>,
+    /// 학생(claude) 모델명 — transcript `message.model`(예 "claude-opus-4-8"). 빈값=미상.
+    #[serde(default)]
+    pub model: String,
+    /// 작업 경로 — transcript 의 `cwd` 필드(절대경로). 빈값=tail 에 cwd 줄 없음.
+    #[serde(default)]
+    pub cwd: String,
+    /// 모델 컨텍스트 한도(토큰). 현재 전 Claude 200k. 0=모델 미상.
+    #[serde(default)]
+    pub context_limit: u64,
+    /// git 브랜치 — pane cwd 에서 rev-parse. None=git repo 아님/미상. collab_board 가 채움.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// One live session from `claude agents --json` (Claude Code 2.1.162+).

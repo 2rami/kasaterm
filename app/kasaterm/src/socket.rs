@@ -591,6 +591,28 @@ impl Backend for PtyBackend {
             .collect();
         // Drop flags for panes that have closed since they were set.
         attention.retain(|sid, _| live.contains(sid.as_str()));
+        // git 브랜치 — pane cwd(transcript)에서 rev-parse. distinct cwd 1회씩(같은
+        // 방 학생들이 cwd 공유)으로 git 호출을 최소화한다.
+        let mut branch_cache: HashMap<String, Option<String>> = HashMap::new();
+        for row in &mut board {
+            if row.cwd.is_empty() {
+                continue;
+            }
+            let cwd = row.cwd.clone();
+            row.branch = branch_cache
+                .entry(cwd.clone())
+                .or_insert_with(|| {
+                    std::process::Command::new("git")
+                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                        .current_dir(&cwd)
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .filter(|b| !b.is_empty() && b != "HEAD")
+                })
+                .clone();
+        }
         board.sort_by(|a, b| a.surface_id.cmp(&b.surface_id));
         Ok(board)
     }
