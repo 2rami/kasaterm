@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useStore } from '@/store';
+import { MomoTalk } from './MomoTalk';
 
 const BASE = import.meta.env.DEV ? 'http://127.0.0.1:8765' : '';
 
-type CenterTab = 'tasks' | 'council' | 'schedule' | 'log';
+type CenterTab = 'tasks' | 'momotalk' | 'council' | 'schedule' | 'log';
 
 const TAB_LABELS: Record<CenterTab, string> = {
   tasks: '업무',
+  momotalk: '모모톡',
   council: '의뢰',
   schedule: '스케줄',
   log: '기록',
@@ -122,7 +124,10 @@ export function CommandCenter() {
       </div>
 
       {/* 본문 — 대시보드 탭 제거(대화는 학생 클릭 시 우측 인라인, 이벤트는 기록 탭) */}
-      {tab === 'council' ? (
+      {tab === 'momotalk' ? (
+        /* 모모톡 — 선생님·아로나·학생 전체 소통 단톡방(messages.jsonl 단일 피드) */
+        <MomoTalk />
+      ) : tab === 'council' ? (
         /* 의뢰 대기열 — board working 워커들 */
         <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
           <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-500)', marginBottom: 8 }}>

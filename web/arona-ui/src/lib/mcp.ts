@@ -319,6 +319,30 @@ export async function fetchPeek(surfaceId: string, lines = 40, ansi = false): Pr
   }
 }
 
+export interface MessageEntry {
+  id: string;
+  ts: number;
+  from_pane: string;
+  from_name: string;
+  to_pane: string;
+  to_name: string;
+  text: string;
+  read: boolean;
+}
+
+/** GET /messages?n=N — messages.jsonl(선생님 지시 + 학생간 소통)을 캐릭터명 해석
+ *  포함해 최근 N 개(ts 내림차순). 모모톡 단톡방 단일 피드 소스. fail-soft 빈 배열. */
+export async function fetchMessages(n = 50): Promise<MessageEntry[]> {
+  try {
+    const r = await fetch(`${BASE}/messages?n=${n}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { messages?: MessageEntry[] };
+    return Array.isArray(d?.messages) ? d.messages : [];
+  } catch {
+    return [];
+  }
+}
+
 export interface Turn { role: string; text: string; }
 
 /** GET /transcript?surface=<id>&turns=<n> — 구조화된 대화(프롬프트/답변, tool 노이즈
