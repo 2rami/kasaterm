@@ -1,5 +1,16 @@
 # kasaterm
 
+> **AI 에이전트와 함께 일하는 1인 개발자를 위한, 터미널을 코어로 둔 작업 OS.**
+> 한 모노레포에 3층이 쌓여 있다 — 아래층이 위층을 떠받친다.
+>
+> | 층 | 코드네임 | 역할 |
+> |---|---|---|
+> | ① 엔진 | **kasaterm** | 터미널 — wgpu 셀 렌더 · PTY · 한글 IME · multipane |
+> | ② 작업환경 | **kasaspace** | 파일트리 · git 관리 · pane 간 에이전트 연결 |
+> | ③ 오케스트레이션 | **blueclaudearchive** | 여러 Claude를 학생처럼 거느리는 하네스 GUI (아로나 모드) |
+>
+> ①(터미널)은 거의 안정기. 무게중심은 ②③로 올라가는 중이다. 기성 터미널은 ①에서, IDE는 ②에서 멈추지만 — ③까지 올라가 *에이전트 오케스트레이션을 하나의 경험으로* 묶는 자리에 이 프로젝트가 있다.
+
 자체 제작 GUI 터미널 + Claude Code 런처. tmux를 GUI 버튼·드래그·자연어로 다루는 걸 목표로 한 네이티브 Rust 앱.
 
 - 렌더: `winit` + `wgpu` 위에 자체 cell-renderer (swash atlas + GPU instancing)

@@ -1,3 +1,17 @@
+# 정체성 — 3층 작업 OS (모노레포)
+
+이 레포는 **"AI 에이전트와 함께 일하는 1인 개발자를 위한, 터미널을 코어로 둔 작업 OS"** 다. 한 모노레포에 3층이 쌓여 있고, **나누지 않는다** — 세 층이 같이 진화 중이라 레포를 찢으면 cross-repo 오버헤드만 폭발한다(1인 개발). 분리는 경계 정리의 *결과*지 시작이 아니다.
+
+| 층 | 코드네임 | 역할 | 상태 |
+|---|---|---|---|
+| ① 엔진 | **kasaterm** | 터미널 — wgpu 셀 렌더 · PTY · 한글 IME · multipane | 거의 안정기 |
+| ② 작업환경 | **kasaspace** | 파일트리 · git 관리 · pane 간 에이전트 연결 | 진행 중 |
+| ③ 오케스트레이션 | **blueclaudearchive** | 여러 Claude를 학생처럼 거느리는 하네스 GUI (아로나 모드) | 무게중심 |
+
+**새 기능은 자기 층에 둔다** — 렌더/입력=①, 파일·git·에이전트 배선=②, 학생·재화·협업·경험=③. 무게중심은 ②③로 올라가는 중이라 ①은 "③를 떠받칠 만큼만" 만지면 된다. 레포 분리 트리거(미래): 터미널 엔진을 남이 임베드할 라이브러리로 배포 / ③를 터미널 없이 독립 제품으로 팔 때 — 지금은 둘 다 아님.
+
+---
+
 kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자이너→개발 입문). 패키지/바이너리명 = **`kasaterm`**.
 
 [!] 작업 시작 전 반드시 [.memory/MEMORY.md](file://./.memory/MEMORY.md) 를 먼저 읽어라 — 거노님 개발 성향·todos·피드백, 그리고 **맨 위 핸드오프 블록**(직전 세션이 어디서 멈췄는지)부터 파악. 렌더러·색·아키텍처 배경, 렌더버그 카탈로그, 코드 수정 주의점은 전부 거기 토픽 파일에 있다.
@@ -32,6 +46,15 @@ kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 - `testkit.rs` — `schedule_auto*`·`arm_auto*`·`run_pending_auto*` (env 자동테스트 하네스)
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].
+
+## 병렬 작업 충돌 회피 (워커 N명 동시 작업)
+
+근본 병목 = `main.rs` 의 `struct App` — 필드가 ①②③ 3층에 걸쳐 평면으로 뭉쳐 있어, 워커 둘이 각각 다른 기능을 만져도 같은 struct 정의(2800~2990행대)를 건드려 git 충돌이 난다. **State-Sandwich 리팩토링 진행 중**(필드를 도메인 sub-struct 로 묶어 main.rs 정의는 묶음 1줄, 정의 본체는 도메인 파일로). 완료 전까지 규칙:
+
+- **`main.rs` struct App 정의(필드 추가/수정)는 한 번에 한 워커만.** 새 필드는 god 이 조율해 직렬화. 특히 `git_col_*`(2812행대)·`file_tree_*`(2955행대)는 인접+구조 동일 → 파일트리·git 두 작업은 한 워커가 묶거나 순차로.
+- **`chrome.rs`(메서드별 분리), `collab-hooks/`(셸·py), `web/arona-ui/`(TS·React) 는 독립 작업 OK** — 특히 하네스·아로나 UI 는 Rust 코드와 물리 분리라 충돌 0, ③ 작업은 여기서 마음껏.
+- **`handler.rs`·`input.rs`·`render.rs`는 거대하지만 메서드 heavy** — 다른 메서드면 충돌 드묾, 중앙 디스패치라 쪼개지 말 것.
+- 층 매핑: 렌더/입력=① / 파일트리·git=②(아직 app/src) / 하네스·협업=③(분리됨). 충돌 핫스팟은 ②가 app/src 에 박혀서다 → 본격 확장 시 `kasa-workspace`·`kasa-git-badge` crate 추출 ROI 1순위. 상세 [[reference_kasaterm_parallel_work_boundaries]].
 
 ## 로컬 PTY 모드 (데몬 완전 제거 — 2026-06-05)
 
