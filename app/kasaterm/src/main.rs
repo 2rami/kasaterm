@@ -2141,6 +2141,11 @@ enum UserEvent {
     /// `Backend::active_cwd` 용 — GUI 는 메모리 조회(active_pane→shell_pid)만
     /// 즉답하고, 느린 lsof(cwd 해석)는 backend 스레드가 한다(GUI 블록 금지).
     SocketQueryActivePid(std::sync::mpsc::Sender<Option<u32>>),
+    /// 모든 pane 의 `(surface_id, shell_pid)` 질의(SocketQueryActivePid 의 전체판).
+    /// hook-free transcript 발견(`collab_board`)이 쓴다 — 우리는 PTY 를 소유하니
+    /// 셸 pid 만 알면 backend 스레드가 claude 자식·cwd·session 을 직접 찾아 bind 한다
+    /// (claude 훅에 의존하지 않음). GUI 는 메모리 조회만 즉답, lsof/ps 는 backend.
+    SocketQueryPanePids(std::sync::mpsc::Sender<Vec<(String, u32)>>),
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
@@ -3580,6 +3585,10 @@ fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // and timeouts, so in-pane behavior is unchanged.
     let settings = serde_json::json!({
         "hooks": {
+            // 세션 시작/재개 즉시 bind → 첫 프롬프트 전에도 board 에 뜬다(UserPromptSubmit
+            // 만 걸면 학생이 입력받기 전까진 안 보였음). SessionStart 는 startup·resume·
+            // clear 에 모두 발화하므로 relaunch 후 claude --resume 재바인딩도 커버.
+            "SessionStart": [{ "hooks": [cmd("kasaterm-bind-transcript.sh", 5000)] }],
             "UserPromptSubmit": [{ "hooks": [
                 cmd("kasaterm-bind-transcript.sh", 5000),
                 cmd("kasaterm-board-context.py", 5000),
