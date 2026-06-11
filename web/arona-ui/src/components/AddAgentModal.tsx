@@ -12,13 +12,15 @@ const MODELS = ['opus', 'sonnet', 'haiku'] as const;
 export interface AddAgentModalProps {
   onClose: () => void;
   onSpawned?: (surfaceId?: string) => void;
+  /** 현재 방 경로 — cwd 필드 프리필(여기서 바로 편집). 비우면 현재 폴더. */
+  defaultCwd?: string | null;
 }
 
-export function AddAgentModal({ onClose, onSpawned }: AddAgentModalProps) {
+export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalProps) {
   const [members, setMembers] = useState<CharacterDef[]>([]);
   const [character, setCharacter] = useState<string>('');
   const [model, setModel] = useState<string>('sonnet');
-  const [cwd, setCwd] = useState<string>('');
+  const [cwd, setCwd] = useState<string>(defaultCwd ?? '');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 

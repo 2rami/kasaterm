@@ -52,6 +52,15 @@ export function App() {
     if (forceMock) { useStore.getState().setAgents(MOCK_AGENTS); return; }
     if (mode === 'god') return startBoardPolling(1000);
   }, [mode]);
+  // 방 경로 라이브 반영 — 터미널에서 cd 하면 active_cwd(pid_cwd)가 바뀌니 폴링해
+  // RoomChip 을 즉시 갱신(거노: 터미널 경로 변경이 방 경로에 바로 반영되게).
+  useEffect(() => {
+    if (forceMock || mode !== 'god') return;
+    const iv = setInterval(() => {
+      fetchMode().then(({ cwd }) => { if (cwd) setCwd(cwd); });
+    }, 2000);
+    return () => clearInterval(iv);
+  }, [mode]);
 
   if (mode === undefined) {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
@@ -206,7 +215,7 @@ export function App() {
         )}
       </div>
 
-      {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} />}
+      {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} defaultCwd={cwd} />}
 
       {showRoomModal && cwd && (
         <RoomPathModal
