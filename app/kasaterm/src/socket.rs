@@ -155,6 +155,9 @@ pub struct PtyBackend {
     /// hook-free 발견 스로틀 — `discover_unbound` 의 ps/lsof 비용을 board 폴(1/s)
     /// 마다 다 치르지 않도록 2s 에 1회로 제한한 마지막 실행 시각.
     last_discover: Arc<Mutex<Option<std::time::Instant>>>,
+    /// pane 셸 pid → (조회시각, 라이브 cwd). collab_board 가 학생 경로(cd 반영)를
+    /// transcript 가 아닌 PTY pid_cwd 로 채우되, lsof 비용을 2s 캐시로 제한한다.
+    cwd_cache: Arc<Mutex<HashMap<u32, (std::time::Instant, std::path::PathBuf)>>>,
 }
 
 impl PtyBackend {
@@ -173,7 +176,22 @@ impl PtyBackend {
             attention,
             agents_cache: Arc::new(Mutex::new(None)),
             last_discover: Arc::new(Mutex::new(None)),
+            cwd_cache: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// pane 셸 pid 의 라이브 cwd(pid_cwd) — 2s 캐시. cd 하면 곧 반영, lsof 폭주 방지.
+    fn pane_cwd_live(&self, pid: u32) -> Option<std::path::PathBuf> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+        let now = std::time::Instant::now();
+        if let Some((at, cwd)) = self.cwd_cache.lock().unwrap().get(&pid) {
+            if now.duration_since(*at) < TTL {
+                return Some(cwd.clone());
+            }
+        }
+        let cwd = pid_cwd(pid)?;
+        self.cwd_cache.lock().unwrap().insert(pid, (now, cwd.clone()));
+        Some(cwd)
     }
 
     /// 모든 pane 의 `(surface_id, shell_pid)` — GUI 동기 RPC(메모리 즉답).
@@ -636,6 +654,17 @@ impl Backend for PtyBackend {
             .collect();
         // Drop flags for panes that have closed since they were set.
         attention.retain(|sid, _| live.contains(sid.as_str()));
+        // 학생 경로(cwd)를 PTY 셸 pid 의 라이브 cwd 로 덮어쓴다 — transcript 가 stale
+        // 하거나(claude 가 jsonl 미기록) cd 직후라도 즉시 반영(2s 캐시). 아래 git
+        // 브랜치도 이 라이브 cwd 기준이 되도록 branch 조회 전에 한다.
+        let pane_pids: HashMap<String, u32> = self.query_pane_pids().into_iter().collect();
+        for row in &mut board {
+            if let Some(&pid) = pane_pids.get(&row.surface_id) {
+                if let Some(cwd) = self.pane_cwd_live(pid) {
+                    row.cwd = cwd.to_string_lossy().into_owned();
+                }
+            }
+        }
         // git 브랜치 — pane cwd(transcript)에서 rev-parse. distinct cwd 1회씩(같은
         // 방 학생들이 cwd 공유)으로 git 호출을 최소화한다.
         let mut branch_cache: HashMap<String, Option<String>> = HashMap::new();

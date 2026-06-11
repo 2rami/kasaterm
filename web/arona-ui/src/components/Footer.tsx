@@ -9,12 +9,9 @@ export interface FooterProps {
   inputTokens?: number;
   /** 🪙 골드 = 전 학생 누적 비용(USD). */
   costUsd?: number;
-  affinityLv?: number;
-  exp?: number;
-  expToNext?: number;
+  /** 인연(호감도) = 전 학생 컨텍스트 사용량 % (거노: 인연=컨텍스트량). */
+  contextPct?: number;
 }
-
-const EXP_PER_LEVEL = 100;
 
 function fmt(n: number): string {
   return n.toLocaleString('ko-KR');
@@ -83,11 +80,9 @@ export function Footer({
   onNewRequest,
   inputTokens = 0,
   costUsd = 0,
-  affinityLv = 1,
-  exp = 0,
-  expToNext = EXP_PER_LEVEL,
+  contextPct = 0,
 }: FooterProps) {
-  const pct = Math.max(0, Math.min(100, Math.round((exp / Math.max(1, expToNext)) * 100)));
+  const pct = Math.max(0, Math.min(100, Math.round(contextPct)));
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 12,
@@ -96,14 +91,14 @@ export function Footer({
       {/* 학생 관리 */}
       <PixelButton variant="secondary" size="sm" onClick={onManage}>학생 관리</PixelButton>
 
-      {/* 인연 레벨 + EXP 진행바 */}
+      {/* 인연(호감도) = 전 학생 컨텍스트 사용량 % */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
         <HeartIcon />
         <span style={{
           fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
           color: 'var(--cth-ink-700)', whiteSpace: 'nowrap',
-        }}>인연 Lv.{affinityLv}</span>
-        <div title={`EXP ${exp} / ${expToNext}`} style={{
+        }}>인연</span>
+        <div title={`컨텍스트 사용량 ${pct}%`} style={{
           position: 'relative', width: 110, height: 10, borderRadius: 999,
           background: 'var(--cth-cream-200)', overflow: 'hidden', flexShrink: 0,
         }}>

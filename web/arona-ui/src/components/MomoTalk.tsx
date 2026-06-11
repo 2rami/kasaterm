@@ -36,7 +36,7 @@ export function MomoTalk() {
   useEffect(() => {
     let stopped = false;
     const tick = async () => {
-      const list = await fetchMessages(60);
+      const list = await fetchMessages(25);
       if (stopped) return;
       // 백엔드는 ts 내림차순 → 단톡방은 오래된→최신(아래로) 이라 뒤집는다.
       setMsgs(list.slice().reverse());

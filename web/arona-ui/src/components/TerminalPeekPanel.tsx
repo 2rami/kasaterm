@@ -9,9 +9,18 @@ import { useStore } from '@/store';
 // 툴콜(⏺ Bash(…))·박스·상태줄은 버린다. best-effort — 명확한 턴만 추출.
 function parsePtyConversation(screen: string): Turn[] {
   const lines = screen.split('\n');
+  // 하단 입력박스(─── / ❯ <라이브 타이핑> / ───)를 대화에서 제외 — 안 그러면
+  // 전송 전 입력 중인 글자가 노란 말풍선으로 떴다(거노 실측). 입력박스는 마지막
+  // 두 divider 가 가깝게(≤4줄) 붙은 구간이라, 그 위 divider 부터 잘라낸다.
+  const dividers: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^[─—-]{10,}\s*$/.test(lines[i].trim())) dividers.push(i);
+  }
   let end = lines.length;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    if (/^[─—-]{10,}\s*$/.test(lines[i].trim())) { end = i; break; }
+  if (dividers.length >= 2 && dividers[dividers.length - 1] - dividers[dividers.length - 2] <= 4) {
+    end = dividers[dividers.length - 2];
+  } else if (dividers.length >= 1) {
+    end = dividers[dividers.length - 1];
   }
   const skip = (l: string) =>
     /^[│╰╭├┤┬┴┼╮╯]/.test(l) || /┃/.test(l) ||

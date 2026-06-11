@@ -4,7 +4,6 @@ import { AgentCard } from './components/AgentCard';
 import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
-import { ClassroomChatInput } from './components/ClassroomChatInput';
 import { CommandCenter } from './components/CommandCenter';
 import { StudentGrid } from './components/StudentGrid';
 import { Footer } from './components/Footer';
@@ -13,7 +12,7 @@ import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
 import { PixelButton } from './components/PixelButton';
 import { SegmentedTabs } from './components/GameKit';
-import { startBoardPolling, fetchMode, focusPane, revealTerminal, fetchSchaleState, type SchaleState } from './lib/mcp';
+import { startBoardPolling, fetchMode, focusPane, revealTerminal } from './lib/mcp';
 
 type ViewMode = 'classroom' | 'grid';
 
@@ -37,8 +36,6 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
-  const [showChatInput, setShowChatInput] = useState(false);
-  const [schaleState, setSchaleState] = useState<SchaleState | null>(null);
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
@@ -52,13 +49,6 @@ export function App() {
   useEffect(() => {
     if (forceMock) { useStore.getState().setAgents(MOCK_AGENTS); return; }
     if (mode === 'god') return startBoardPolling(1000);
-  }, [mode]);
-  useEffect(() => {
-    if (mode !== 'god') return;
-    const tick = () => { fetchSchaleState().then(setSchaleState); };
-    tick();
-    const iv = setInterval(tick, 5000);
-    return () => clearInterval(iv);
   }, [mode]);
 
   if (mode === undefined) {
@@ -80,6 +70,9 @@ export function App() {
   const totalInputTokens = sorted.reduce((s, a) => s + (a.tokensIn ?? 0), 0);
   const totalCostUsd = sorted.reduce((s, a) => s + (a.costUsd ?? 0), 0);
   const totalContextTokens = sorted.reduce((s, a) => s + (a.contextTokens ?? 0), 0);
+  // 인연(호감도) = 전 학생 컨텍스트 사용량 %.
+  const totalContextLimit = sorted.reduce((s, a) => s + (a.contextLimit ?? 200000), 0);
+  const contextPct = totalContextLimit > 0 ? (totalContextTokens / totalContextLimit) * 100 : 0;
 
   const reveal = async () => {
     setRevealing(true);
@@ -192,11 +185,10 @@ export function App() {
           }}>
             <Footer
               onManage={() => setShowAdd(true)}
-              onNewRequest={() => setShowChatInput((v) => !v)}
+              onNewRequest={() => setShowAdd(true)}
               inputTokens={totalInputTokens}
               costUsd={totalCostUsd}
-              affinityLv={schaleState?.affinity_lv}
-              exp={schaleState?.exp}
+              contextPct={contextPct}
             />
           </div>
         </div>
@@ -208,9 +200,6 @@ export function App() {
           <CommandCenter />
         )}
       </div>
-
-      {/* 교실 채팅 입력 (Footer CTA 클릭 or 교실 뷰에서 항상 노출) */}
-      {(view === 'classroom' || showChatInput) && <ClassroomChatInput />}
 
       {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} />}
     </div>

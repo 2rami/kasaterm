@@ -20,6 +20,12 @@ function shortenAction(s?: string): string {
   if (!s) return '';
   return s.replace(/\/\S*\/([^\s/]+)/g, '…/$1');
 }
+// 학생 경로 표시 — 마지막 1~2 세그먼트만(…/parent/folder).
+function shortCwd(p?: string): string {
+  if (!p) return '';
+  const segs = p.split('/').filter(Boolean);
+  return (segs.length > 2 ? '…/' : '') + segs.slice(-2).join('/');
+}
 function thoughtFor(a: Agent): string {
   switch (a.status) {
     case 'working': {
@@ -107,6 +113,16 @@ export function ClassroomView({ onSelect }: ClassroomViewProps) {
               {a.isGod && <span style={{ fontSize: 9, color: 'var(--cth-lemon)', fontWeight: 800 }}>★</span>}
               {a.character}
             </div>
+
+            {/* 경로(cwd) — 학생이 작업 중인 디렉터리 */}
+            {a.cwd && (
+              <div style={{
+                marginTop: 2, padding: '1px 7px', borderRadius: 7,
+                background: 'rgba(255,255,255,0.82)', boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
+                fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: 'var(--cth-ink-500)',
+                maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{shortCwd(a.cwd)}</div>
+            )}
           </button>
         );
       })}
