@@ -1064,19 +1064,41 @@ fn discover_transcript(shell_pid: u32) -> Option<std::path::PathBuf> {
     if let Some(id) = claude_session_id_from_cmdline(shell_pid) {
         return project_jsonl(&cwd, &id).filter(|p| p.exists());
     }
-    // 폴백: cwd 의 newest jsonl. 단 ancient 파일은 거른다 — fresh claude 가 자기
-    // 세션을 아직 안 썼을 때(부팅 중 등) 어제 세션을 잘못 bind 하던 버그. 최근
-    // 활동(=현 세션)만 허용, 아니면 None → 다음 사이클 재시도(곧 claude 가 자기
-    // 세션을 쓰면 그게 newest 가 되어 정확히 잡힌다).
-    let id = latest_claude_session_id(&cwd)?;
-    let path = project_jsonl(&cwd, &id)?;
-    let fresh = path
-        .metadata()
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|d| d < std::time::Duration::from_secs(30 * 60));
-    (path.exists() && fresh).then_some(path)
+    // 폴백: cwd 의 최근(<30분) 활동 jsonl. 단 **정확히 1개일 때만** bind 한다.
+    // 0개 = fresh claude 가 자기 세션을 아직 안 씀(부팅 중) → None, 다음 사이클
+    // 재시도(곧 쓰면 잡힘). 2+ = 같은 cwd 에 여러 claude(나·god·워커 공유) →
+    // 어느 게 이 pane 인지 latest-mtime 으로는 모름(남의 세션 훔침) → None, hook
+    // (정확 경로 보고)에 맡긴다. 이 모호성 가드가 없을 때 %2 가 남의 세션에 잘못
+    // bind 돼 대화가 안 뜨던 버그(거노 실측).
+    let mut recent = recent_jsonls(&cwd, std::time::Duration::from_secs(30 * 60));
+    if recent.len() == 1 {
+        return recent.pop();
+    }
+    None
+}
+
+/// `cwd` 의 claude 프로젝트 디렉터리에서 `within` 안에 수정된 .jsonl 경로들.
+fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std::path::PathBuf> {
+    let Some(home) = std::env::var("HOME").ok() else { return Vec::new() };
+    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
+    let dir = std::path::PathBuf::from(home).join(".claude/projects").join(encoded);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
+                return None;
+            }
+            let fresh = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|d| d < within);
+            fresh.then_some(p)
+        })
+        .collect()
 }
 
 /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
