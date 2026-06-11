@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchPeek, fetchTranscript, sendToPane, type Turn } from '@/lib/mcp';
 import { SegmentedTabs } from './GameKit';
+import { SpritePortrait } from './SpritePortrait';
 
 // ── ANSI SGR 파서 ──────────────────────────────────────────────────────────────
 // claude TUI 에서 실제로 쓰는 색 코드만 커버(30-37/90-97 fg, 38;5;n 256색, reset).
@@ -201,12 +202,21 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
             </div>
           ) : turns.map((t, i) => {
             const mine = t.role === 'user';
+            // 모모톡 스타일: 학생(assistant)=좌측 아바타+흰 말풍선, 선생님(user)=우측 카톡 노란 말풍선.
             return (
-              <div key={i} style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10 }}>
+              <div key={i} style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
+                {!mine && (
+                  <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+                    <SpritePortrait character={title} scale={1.5} />
+                  </div>
+                )}
                 <div style={{
-                  maxWidth: '78%', padding: '8px 12px', borderRadius: 14,
-                  background: mine ? 'linear-gradient(180deg, #6BB0F0, #4A90E2)' : '#fff',
-                  color: mine ? '#fff' : 'var(--cth-ink-900)',
+                  maxWidth: '72%', padding: '8px 12px',
+                  borderRadius: 14,
+                  borderTopLeftRadius: mine ? 14 : 4,
+                  borderTopRightRadius: mine ? 4 : 14,
+                  background: mine ? '#FEE500' : '#fff',
+                  color: mine ? '#3A2E00' : 'var(--cth-ink-900)',
                   border: mine ? 'none' : '1px solid var(--cth-cream-200)',
                   boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
                   fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
