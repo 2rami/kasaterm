@@ -185,7 +185,7 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::GitOpDone => {
-                self.git_op = None;
+                self.git.op = None;
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
@@ -378,8 +378,8 @@ impl ApplicationHandler<UserEvent> for App {
         // branch/+/- summary.
         {
             let git_proxy = self.proxy.clone();
-            let panel_cwd = self.git_col_cwd.clone();
-            let panel_data = self.git_col_data.clone();
+            let panel_cwd = self.git.col_cwd.clone();
+            let panel_data = self.git.col_data.clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(1200));
                 let cwd = panel_cwd.lock().ok().and_then(|g| g.clone());
@@ -688,12 +688,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // the pane grid — drive their cursor here (I-beam over a text
                 // field, default elsewhere) and skip the pane/column hover below
                 // so it can't override the cursor.
-                if self.git_commit_modal_open || self.settings_open {
+                if self.git.commit_modal_open || self.settings_open {
                     let (cx, cy) = self.cursor_px;
                     let hit = |r: (f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
-                    let want_text = self.git_commit_input_rect.map(hit).unwrap_or(false)
+                    let want_text = self.git.commit_input_rect.map(hit).unwrap_or(false)
                         || (self.settings_open
                             && self.settings_rects.iter().any(|(a, r)| {
                                 matches!(a, SettingsAction::FocusCwdPath | SettingsAction::FocusShell)
@@ -727,12 +727,12 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     let (cx, cy) = self.cursor_px;
                     let new_hover = self
-                        .file_tree_rects
+                        .file_tree.rects
                         .iter()
                         .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(p, _)| p.clone());
-                    if new_hover != self.file_tree_hover {
-                        self.file_tree_hover = new_hover;
+                    if new_hover != self.file_tree.hover {
+                        self.file_tree.hover = new_hover;
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -740,7 +740,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // File-tree path drag: once the cursor leaves the press point,
                 // a held row becomes a drag. Releasing over a terminal pane
                 // types its path into that shell (handled on release).
-                let dragging_tree = if let Some(drag) = self.file_tree_drag.as_mut() {
+                let dragging_tree = if let Some(drag) = self.file_tree.drag.as_mut() {
                     if !drag.active {
                         let (cx, cy) = self.cursor_px;
                         if (cx - drag.start.0).abs() > 4.0 || (cy - drag.start.1).abs() > 4.0 {
@@ -769,8 +769,8 @@ impl ApplicationHandler<UserEvent> for App {
                     // I-beam over the file-tree text inputs (search box / inline
                     // new-entry name). The commit modal + settings screen are
                     // full-window overlays, handled by the earlier branch.
-                    let want_text = (self.file_tree_visible && hit(self.file_tree_search_rect))
-                        || (self.file_tree_new.is_some() && hit(self.file_tree_new_row_rect));
+                    let want_text = (self.file_tree.visible && hit(self.file_tree.search_rect))
+                        || (self.file_tree.new.is_some() && hit(self.file_tree.new_row_rect));
                     if want_text != self.text_cursor_shown {
                         self.text_cursor_shown = want_text;
                         window.set_cursor(if want_text {
@@ -783,7 +783,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // File-tree column hover — repaint while the cursor is over the
                 // column so the hover-only scrollbar thumb appears (and clears
                 // on the way out). The render reads cursor_px live.
-                if self.file_tree_visible {
+                if self.file_tree.visible {
                     let (cx, cy) = self.cursor_px;
                     let tx = self.file_tree_col_x();
                     if cy > TITLE_HEIGHT && cx >= tx && cx < tx + self.file_tree_col_w() {
@@ -795,7 +795,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // track the cursor (the render reads cursor_px live). Only
                 // while the cursor is actually over the column, so it costs
                 // nothing elsewhere.
-                if self.git_col_visible {
+                if self.git.col_visible {
                     let (cx, cy) = self.cursor_px;
                     if cy > TITLE_HEIGHT && cx >= self.git_col_x() {
                         self.chrome_dirty = true;
@@ -816,11 +816,11 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
                 // File-tree column resize drag in progress.
-                if let Some((start_x, start_w)) = self.file_tree_resize {
+                if let Some((start_x, start_w)) = self.file_tree.resize {
                     let new_w = (start_w + (self.cursor_px.0 - start_x))
                         .clamp(FILE_TREE_W_MIN, FILE_TREE_W_MAX);
-                    if (new_w - self.file_tree_w_logical).abs() > 0.5 {
-                        self.file_tree_w_logical = new_w;
+                    if (new_w - self.file_tree.w_logical).abs() > 0.5 {
+                        self.file_tree.w_logical = new_w;
                         let (cols, rows) = self.window_cells();
                         self.resize_backend(cols, rows);
                         self.chrome_dirty = true;
@@ -832,11 +832,11 @@ impl ApplicationHandler<UserEvent> for App {
                 // Git column resize drag in progress. Its grip is the LEFT edge
                 // (flush-right column), so dragging left widens it — hence the
                 // negated delta versus the left-hand columns.
-                if let Some((start_x, start_w)) = self.git_col_resize {
+                if let Some((start_x, start_w)) = self.git.col_resize {
                     let new_w = (start_w - (self.cursor_px.0 - start_x))
                         .clamp(GIT_COL_W_MIN, GIT_COL_W_MAX);
-                    if (new_w - self.git_col_w_logical).abs() > 0.5 {
-                        self.git_col_w_logical = new_w;
+                    if (new_w - self.git.col_w_logical).abs() > 0.5 {
+                        self.git.col_w_logical = new_w;
                         let (cols, rows) = self.window_cells();
                         self.resize_backend(cols, rows);
                         self.chrome_dirty = true;
@@ -1025,10 +1025,10 @@ impl ApplicationHandler<UserEvent> for App {
                     let on_sidebar_edge = self.sidebar_visible
                         && cy > TITLE_HEIGHT
                         && (cx - self.sidebar_w_logical).abs() <= 3.0;
-                    let on_tree_edge = self.file_tree_visible
+                    let on_tree_edge = self.file_tree.visible
                         && cy > TITLE_HEIGHT
-                        && (cx - (self.file_tree_col_x() + self.file_tree_w_logical)).abs() <= 3.0;
-                    let on_git_edge = self.git_col_visible
+                        && (cx - (self.file_tree_col_x() + self.file_tree.w_logical)).abs() <= 3.0;
+                    let on_git_edge = self.git.col_visible
                         && cy > TITLE_HEIGHT
                         && (cx - self.git_col_x()).abs() <= 3.0;
                     let icon = if on_sidebar_edge || on_tree_edge || on_git_edge {
@@ -1110,7 +1110,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // into the shell; otherwise it just disarms — the row's
                 // expand/preview click already fired on press.
                 if matches!(state, ElementState::Released) {
-                    if let Some(drag) = self.file_tree_drag.take() {
+                    if let Some(drag) = self.file_tree.drag.take() {
                         window.set_cursor(CursorIcon::Default);
                         if drag.active {
                             let (cx, cy) = self.cursor_px;
@@ -1119,13 +1119,13 @@ impl ApplicationHandler<UserEvent> for App {
                             // parent, or the root if the drop missed a row).
                             let tree_x = self.file_tree_col_x();
                             let tree_w = self.file_tree_col_w();
-                            let in_tree = self.file_tree_visible
+                            let in_tree = self.file_tree.visible
                                 && cy > TITLE_HEIGHT
                                 && cx >= tree_x
                                 && cx < tree_x + tree_w;
                             if in_tree {
                                 let hit = self
-                                    .file_tree_rects
+                                    .file_tree.rects
                                     .iter()
                                     .find(|(_, r)| {
                                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
@@ -1134,7 +1134,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 let dst_dir = hit
                                     .and_then(|p| {
                                         let is_dir = self
-                                            .file_tree_nodes
+                                            .file_tree.nodes
                                             .iter()
                                             .find(|n| n.path == p)
                                             .map(|n| n.is_dir)
@@ -1145,7 +1145,7 @@ impl ApplicationHandler<UserEvent> for App {
                                             p.parent().map(|x| x.to_path_buf())
                                         }
                                     })
-                                    .or_else(|| self.file_tree_root.clone());
+                                    .or_else(|| self.file_tree.root.clone());
                                 if let Some(dst_dir) = dst_dir {
                                     self.move_tree_entry(&drag.path, &dst_dir);
                                 }
@@ -1193,14 +1193,14 @@ impl ApplicationHandler<UserEvent> for App {
                 // Commit modal is a full-window dialog — handled before the git
                 // column (and everything else) so clicks outside the column
                 // still hit its buttons, and the scrim swallows the rest.
-                if self.git_commit_modal_open {
+                if self.git.commit_modal_open {
                     if matches!(state, ElementState::Pressed) {
                         let (cx, cy) = self.cursor_px;
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
                         if let Some(btn) = self
-                            .git_commit_modal_rects
+                            .git.commit_modal_rects
                             .iter()
                             .find(|(_, r)| inside(r))
                             .map(|(b, _)| *b)
@@ -1208,7 +1208,7 @@ impl ApplicationHandler<UserEvent> for App {
                             match btn {
                                 crate::GitModalBtn::Close | crate::GitModalBtn::Cancel => self.close_commit_modal(),
                                 crate::GitModalBtn::IncludeUnstaged => {
-                                    self.git_commit_modal_include_unstaged = !self.git_commit_modal_include_unstaged;
+                                    self.git.commit_modal_include_unstaged = !self.git.commit_modal_include_unstaged;
                                     window.request_redraw();
                                 }
                                 crate::GitModalBtn::Commit | crate::GitModalBtn::Confirm => self.run_commit_modal(false),
@@ -1216,8 +1216,8 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             return;
                         }
-                        if self.git_commit_input_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            self.git_commit_focused = true;
+                        if self.git.commit_input_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.git.commit_focused = true;
                             window.request_redraw();
                             return;
                         }
@@ -1280,28 +1280,28 @@ impl ApplicationHandler<UserEvent> for App {
                     // A press outside the inline new-entry row + its buttons
                     // cancels the pending creation. Falls through so the click
                     // still does its normal job (focus a pane, etc.).
-                    if self.file_tree_new.is_some() {
+                    if self.file_tree.new.is_some() {
                         let hit = |r: (f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
-                        if !hit(self.file_tree_new_row_rect)
-                            && !hit(self.file_tree_new_folder_rect)
-                            && !hit(self.file_tree_new_file_rect)
+                        if !hit(self.file_tree.new_row_rect)
+                            && !hit(self.file_tree.new_folder_rect)
+                            && !hit(self.file_tree.new_file_rect)
                         {
-                            self.file_tree_new = None;
+                            self.file_tree.new = None;
                             self.chrome_dirty = true;
                         }
                     }
                     // 승인 토스트 칩 — 일반 토스트 dismiss 보다 먼저 검사해야
                     // 칩 클릭이 pane/dismiss 로 새지 않는다 (hit-test 순서 의존).
-                    if let Some(target) = self.collab_toast_action.clone() {
+                    if let Some(target) = self.collab.toast_action.clone() {
                         let hit = |r: Option<(f32, f32, f32, f32)>| {
                             r.map_or(false, |(x, y, w, h)| {
                                 cx >= x && cx <= x + w && cy >= y && cy <= y + h
                             })
                         };
-                        let ok = hit(self.collab_toast_approve_rect);
-                        let no = hit(self.collab_toast_deny_rect);
+                        let ok = hit(self.collab.toast_approve_rect);
+                        let no = hit(self.collab.toast_deny_rect);
                         if ok || no {
                             self.respond_approval(&target, ok);
                             // pane_prompt_wait/attention 은 여기서 걷지 않는다 —
@@ -1319,9 +1319,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // 승인 토스트(칩 비적중)의 본문 클릭은 해당 pane 으로 점프 —
                     // 프롬프트 원문을 읽고 직접 답하라는 의미. 플래그는 유지해
                     // 그리드 스캔이 프롬프트 해소 시점에 board까지 정리한다.
-                    if let Some((tx, ty, tw, th)) = self.collab_toast_rect {
+                    if let Some((tx, ty, tw, th)) = self.collab.toast_rect {
                         if cx >= tx && cx <= tx + tw && cy >= ty && cy <= ty + th {
-                            if let Some(target) = self.collab_toast_action.take() {
+                            if let Some(target) = self.collab.toast_action.take() {
                                 self.ws.lock().unwrap().active_pane = Some(target);
                             }
                             self.clear_approval_toast();
@@ -1333,13 +1333,13 @@ impl ApplicationHandler<UserEvent> for App {
                     // Any press outside the commit input blurs it, so typing
                     // goes back to the PTY. A press on the input keeps focus
                     // (the git-column handler re-asserts it below).
-                    if self.git_commit_focused {
+                    if self.git.commit_focused {
                         let on_input = self
-                            .git_commit_input_rect
+                            .git.commit_input_rect
                             .map(|(x, y, w, h)| cx >= x && cx <= x + w && cy >= y && cy <= y + h)
                             .unwrap_or(false);
                         if !on_input {
-                            self.git_commit_focused = false;
+                            self.git.commit_focused = false;
                             self.chrome_dirty = true;
                         }
                     }
@@ -1463,20 +1463,20 @@ impl ApplicationHandler<UserEvent> for App {
                     // File-tree column resize grip — straddles the tree's right
                     // edge. Caught before the tree click path so dragging the
                     // seam resizes instead of selecting the last row.
-                    if self.file_tree_visible && cy > TITLE_HEIGHT {
-                        let edge = self.file_tree_col_x() + self.file_tree_w_logical;
+                    if self.file_tree.visible && cy > TITLE_HEIGHT {
+                        let edge = self.file_tree_col_x() + self.file_tree.w_logical;
                         if cx >= edge - 3.0 && cx <= edge + 3.0 {
-                            self.file_tree_resize = Some((cx, self.file_tree_w_logical));
+                            self.file_tree.resize = Some((cx, self.file_tree.w_logical));
                             return;
                         }
                     }
                     // Git column resize grip — its LEFT edge (the column is
                     // flush-right, so dragging the seam left widens it). Caught
                     // before the column click path.
-                    if self.git_col_visible && cy > TITLE_HEIGHT {
+                    if self.git.col_visible && cy > TITLE_HEIGHT {
                         let edge = self.git_col_x();
                         if cx >= edge - 3.0 && cx <= edge + 3.0 {
-                            self.git_col_resize = Some((cx, self.git_col_w_logical));
+                            self.git.col_resize = Some((cx, self.git.col_w_logical));
                             return;
                         }
                     }
@@ -1535,64 +1535,64 @@ impl ApplicationHandler<UserEvent> for App {
                     // Click outside the tree column drops search focus — else
                     // keystrokes meant for the clicked terminal pane keep
                     // landing in the filter box.
-                    if self.file_tree_search_active {
-                        let in_col = self.file_tree_visible
+                    if self.file_tree.search_active {
+                        let in_col = self.file_tree.visible
                             && cy > TITLE_HEIGHT
                             && cx >= self.file_tree_col_x()
-                            && cx < self.file_tree_col_x() + self.file_tree_w_logical;
+                            && cx < self.file_tree_col_x() + self.file_tree.w_logical;
                         if !in_col {
-                            self.file_tree_search_active = false;
+                            self.file_tree.search_active = false;
                             self.chrome_dirty = true;
                         }
                     }
                     // File-tree column — its own band, right of the tab strip.
                     // Caught before the cell grid so a row click never falls
                     // through to the terminal underneath.
-                    if self.file_tree_visible
+                    if self.file_tree.visible
                         && cy > TITLE_HEIGHT
                         && cx >= self.file_tree_col_x()
-                        && cx < self.file_tree_col_x() + self.file_tree_w_logical
+                        && cx < self.file_tree_col_x() + self.file_tree.w_logical
                     {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
                         // New-folder / new-file buttons beside the search box:
                         // open an inline naming row (keystrokes route to it).
-                        if inside(&self.file_tree_new_folder_rect) {
-                            self.file_tree_new = Some((true, String::new()));
-                            self.file_tree_search_active = false;
-                            self.file_tree_scroll = 0.0;
+                        if inside(&self.file_tree.new_folder_rect) {
+                            self.file_tree.new = Some((true, String::new()));
+                            self.file_tree.search_active = false;
+                            self.file_tree.scroll = 0.0;
                             self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }
-                        if inside(&self.file_tree_new_file_rect) {
-                            self.file_tree_new = Some((false, String::new()));
-                            self.file_tree_search_active = false;
-                            self.file_tree_scroll = 0.0;
+                        if inside(&self.file_tree.new_file_rect) {
+                            self.file_tree.new = Some((false, String::new()));
+                            self.file_tree.search_active = false;
+                            self.file_tree.scroll = 0.0;
                             self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }
                         // Search box click → focus it (keystrokes now filter the
                         // tree). Clicking it again keeps focus; Esc clears.
-                        if inside(&self.file_tree_search_rect) {
-                            self.file_tree_search_active = true;
+                        if inside(&self.file_tree.search_rect) {
+                            self.file_tree.search_active = true;
                             self.chrome_dirty = true;
                             window.request_redraw();
                             return;
                         }
                         // Row: folder → toggle expand, file → preview.
                         if let Some(path) = self
-                            .file_tree_rects
+                            .file_tree.rects
                             .iter()
                             .find(|(_, r)| inside(r))
                             .map(|(p, _)| p.clone())
                         {
                             // Mark it the Cmd+Delete target.
-                            self.file_tree_selected = Some(path.clone());
+                            self.file_tree.selected = Some(path.clone());
                             let is_dir = self
-                                .file_tree_nodes
+                                .file_tree.nodes
                                 .iter()
                                 .find(|n| n.path == path)
                                 .map(|n| n.is_dir)
@@ -1601,14 +1601,14 @@ impl ApplicationHandler<UserEvent> for App {
                             // click action still fires below; only if the
                             // cursor then travels off the sidebar does this
                             // turn into a path drop (handled on release).
-                            self.file_tree_drag = Some(crate::FileTreeDrag {
+                            self.file_tree.drag = Some(crate::FileTreeDrag {
                                 path: path.clone(),
                                 start: self.cursor_px,
                                 active: false,
                             });
                             if is_dir {
-                                if !self.file_tree_expanded.remove(&path) {
-                                    self.file_tree_expanded.insert(path.clone());
+                                if !self.file_tree.expanded.remove(&path) {
+                                    self.file_tree.expanded.insert(path.clone());
                                 }
                                 self.rebuild_file_tree_nodes();
                                 self.chrome_dirty = true;
@@ -1641,30 +1641,30 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // Git column — right-hand chrome. Caught before the cell
                     // grid so a click never falls through to the terminal.
-                    if self.git_col_visible && cy > TITLE_HEIGHT && cx >= self.git_col_x() {
+                    if self.git.col_visible && cy > TITLE_HEIGHT && cx >= self.git_col_x() {
                         let inside = |r: &(f32, f32, f32, f32)| {
                             cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                         };
                         // Open dropdowns overlay everything — resolve their items
                         // (and the header toggles) before the list/buttons under.
-                        if self.git_path_menu_open {
+                        if self.git.path_menu_open {
                             if let Some(key) = self
-                                .git_path_menu_rects
+                                .git.path_menu_rects
                                 .iter()
                                 .find(|(_, r)| inside(r))
                                 .map(|(k, _)| k.clone())
                             {
                                 // None = "자동 추적" (unpin); Some = pin that repo.
-                                self.git_col_pinned_cwd = key;
-                                self.git_path_menu_open = false;
+                                self.git.col_pinned_cwd = key;
+                                self.git.path_menu_open = false;
                                 self.publish_git_col_cwd();
                                 window.request_redraw();
                                 return;
                             }
                         }
-                        if self.git_branch_menu_open {
+                        if self.git.branch_menu_open {
                             if let Some(b) = self
-                                .git_branch_menu_rects
+                                .git.branch_menu_rects
                                 .iter()
                                 .find(|(_, r)| inside(r))
                                 .map(|(b, _)| b.clone())
@@ -1675,35 +1675,35 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                         // Header rows toggle their dropdowns (mutually exclusive).
-                        if self.git_path_hdr_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            self.git_path_menu_open = !self.git_path_menu_open;
-                            self.git_branch_menu_open = false;
+                        if self.git.path_hdr_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.git.path_menu_open = !self.git.path_menu_open;
+                            self.git.branch_menu_open = false;
                             window.request_redraw();
                             return;
                         }
-                        if self.git_branch_hdr_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            self.git_branch_menu_open = !self.git_branch_menu_open;
-                            self.git_path_menu_open = false;
+                        if self.git.branch_hdr_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.git.branch_menu_open = !self.git.branch_menu_open;
+                            self.git.path_menu_open = false;
                             window.request_redraw();
                             return;
                         }
                         // A click elsewhere in the column dismisses an open menu
                         // (swallowed, so it doesn't also hit the list/buttons).
-                        if self.git_path_menu_open || self.git_branch_menu_open {
-                            self.git_path_menu_open = false;
-                            self.git_branch_menu_open = false;
+                        if self.git.path_menu_open || self.git.branch_menu_open {
+                            self.git.path_menu_open = false;
+                            self.git.branch_menu_open = false;
                             window.request_redraw();
                             return;
                         }
                         // Commit-button dropdown items (overlay) first.
-                        if self.git_commit_menu_open {
+                        if self.git.commit_menu_open {
                             if let Some(act) = self
-                                .git_commit_menu_rects
+                                .git.commit_menu_rects
                                 .iter()
                                 .find(|(_, r)| inside(r))
                                 .map(|(a, _)| *a)
                             {
-                                self.git_commit_menu_open = false;
+                                self.git.commit_menu_open = false;
                                 match act {
                                     crate::GitCommitAction::Commit => self.open_commit_modal(),
                                     crate::GitCommitAction::Push => self.run_git_col_action(crate::GitColBtn::Push),
@@ -1713,26 +1713,26 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
-                            self.git_commit_menu_open = false;
+                            self.git.commit_menu_open = false;
                             window.request_redraw();
                             return;
                         }
                         // Panel header: close / expand.
-                        if self.git_col_close_rect.map(|r| inside(&r)).unwrap_or(false) {
+                        if self.git.col_close_rect.map(|r| inside(&r)).unwrap_or(false) {
                             self.toggle_git_col();
                             return;
                         }
-                        if self.git_col_expand_rect.map(|r| inside(&r)).unwrap_or(false) {
+                        if self.git.col_expand_rect.map(|r| inside(&r)).unwrap_or(false) {
                             self.toggle_git_col_expand();
                             window.request_redraw();
                             return;
                         }
                         // Commit split button: main → modal, caret → dropdown.
-                        if self.git_commit_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
+                        if self.git.commit_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
                             // Matches the render: with no changes but commits to
                             // push, the primary button is Push, not Commit.
                             let push_mode = self
-                                .git_col_data
+                                .git.col_data
                                 .lock()
                                 .ok()
                                 .map(|g| g.staged.is_empty() && g.unstaged.is_empty() && g.ahead > 0)
@@ -1745,8 +1745,8 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        if self.git_commit_caret_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            self.git_commit_menu_open = !self.git_commit_menu_open;
+                        if self.git.commit_caret_rect.map(|r| inside(&r)).unwrap_or(false) {
+                            self.git.commit_menu_open = !self.git.commit_menu_open;
                             window.request_redraw();
                             return;
                         }
@@ -1754,14 +1754,14 @@ impl ApplicationHandler<UserEvent> for App {
                         // before the file-preview path since it sits inside the
                         // row rect. Off-thread; the poller repaints the lists.
                         if let Some((stage, path)) = self
-                            .git_col_stage_rects
+                            .git.col_stage_rects
                             .iter()
                             .find(|(_, _, r)| inside(r))
                             .map(|(s, p, _)| (*s, p.clone()))
                         {
-                            if let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+                            if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
                                 let proxy = self.proxy.clone();
-                                let data = self.git_col_data.clone();
+                                let data = self.git.col_data.clone();
                                 std::thread::spawn(move || {
                                     if stage {
                                         let _ = kasa_mcp::git::git_add_path(&cwd, &path);
@@ -1787,14 +1787,14 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // Row ↩ discard → restore the file (or delete if untracked).
                         if let Some((path, untracked)) = self
-                            .git_col_discard_rects
+                            .git.col_discard_rects
                             .iter()
                             .find(|(_, _, r)| inside(r))
                             .map(|(p, u, _)| (p.clone(), *u))
                         {
-                            if let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+                            if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
                                 let proxy = self.proxy.clone();
-                                let data = self.git_col_data.clone();
+                                let data = self.git.col_data.clone();
                                 std::thread::spawn(move || {
                                     let _ = kasa_mcp::git::git_discard_path(&cwd, &path, untracked);
                                     if let Some(view) = fetch_git_col_view(&cwd) {
@@ -1811,7 +1811,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // Row ⤴ open → preview the file in a pane.
                         if let Some(path) = self
-                            .git_col_open_rects
+                            .git.col_open_rects
                             .iter()
                             .find(|(_, r)| inside(r))
                             .map(|(p, _)| p.clone())
@@ -1821,7 +1821,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         // File row → toggle its inline unified diff.
                         if let Some((staged, path)) = self
-                            .git_col_file_rects
+                            .git.col_file_rects
                             .iter()
                             .find(|(_, _, r)| inside(r))
                             .map(|(s, p, _)| (*s, p.clone()))
@@ -1895,11 +1895,11 @@ impl ApplicationHandler<UserEvent> for App {
                     let sb_hit = |r: &(f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
-                    if let Some((pid, kind)) = self.statusbar_menu.clone() {
+                    if let Some((pid, kind)) = self.statusbar.menu.clone() {
                         match kind {
                             StatusbarMenu::Path => {
                                 if let Some(path) = self
-                                    .statusbar_menu_dir_rects
+                                    .statusbar.menu_dir_rects
                                     .iter()
                                     .find(|(_, r)| sb_hit(r))
                                     .map(|(d, _)| d.clone())
@@ -1910,7 +1910,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     if path.is_dir() {
                                         self.statusbar_cd(&pid, &path);
                                     } else {
-                                        self.statusbar_menu = None;
+                                        self.statusbar.menu = None;
                                         self.open_file_split(path);
                                     }
                                     window.request_redraw();
@@ -1919,7 +1919,7 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             StatusbarMenu::Branch => {
                                 if let Some(b) = self
-                                    .statusbar_menu_branch_rects
+                                    .statusbar.menu_branch_rects
                                     .iter()
                                     .find(|(_, r)| sb_hit(r))
                                     .map(|(b, _)| b.clone())
@@ -1931,12 +1931,12 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                         // Click outside the open menu dismisses it (swallowed).
-                        self.statusbar_menu = None;
+                        self.statusbar.menu = None;
                         window.request_redraw();
                         return;
                     }
                     if let Some(pid) = self
-                        .statusbar_toggle_rects
+                        .statusbar.toggle_rects
                         .iter()
                         .find(|(_, r)| sb_hit(r))
                         .map(|(p, _)| p.clone())
@@ -1946,7 +1946,7 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if let Some(pid) = self
-                        .statusbar_path_rects
+                        .statusbar.path_rects
                         .iter()
                         .find(|(_, r)| sb_hit(r))
                         .map(|(p, _)| p.clone())
@@ -1956,7 +1956,7 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if let Some(pid) = self
-                        .statusbar_branch_rects
+                        .statusbar.branch_rects
                         .iter()
                         .find(|(_, r)| sb_hit(r))
                         .map(|(p, _)| p.clone())
@@ -1966,7 +1966,7 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if let Some(pid) = self
-                        .statusbar_diff_rects
+                        .statusbar.diff_rects
                         .iter()
                         .find(|(_, r)| sb_hit(r))
                         .map(|(p, _)| p.clone())
@@ -2494,12 +2494,12 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                         // End a file-tree column resize drag.
-                        if self.file_tree_resize.take().is_some() {
+                        if self.file_tree.resize.take().is_some() {
                             window.set_cursor(CursorIcon::Default);
                             return;
                         }
                         // End a git-column resize drag.
-                        if self.git_col_resize.take().is_some() {
+                        if self.git.col_resize.take().is_some() {
                             window.set_cursor(CursorIcon::Default);
                             return;
                         }
@@ -2888,7 +2888,7 @@ impl ApplicationHandler<UserEvent> for App {
             // Sticky approval toast doesn't animate — only a *fading* collab
             // toast needs the timer pump. (A blocked pane can sit for minutes;
             // pumping 30fps the whole time would burn battery for nothing.)
-            || (self.collab_toast_alpha() > 0.0 && self.collab_toast_action.is_none())
+            || (self.collab_toast_alpha() > 0.0 && self.collab.toast_action.is_none())
             || self.any_notify_flash()
             // A busy pane's header working bar sweeps every frame — pump ~30fps
             // so the bar animates and the working→idle flip is caught promptly.

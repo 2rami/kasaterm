@@ -42,10 +42,10 @@ impl App {
             });
         // A sticky approval toast (chips waiting on the user) outranks a
         // completion blip — same guard as the grid-scan path in input.rs.
-        if was_working && self.collab_toast_action.is_none() {
+        if was_working && self.collab.toast_action.is_none() {
             let name = self.pane_header_label(surface_id);
-            self.collab_toast = Some((format!("✓ {name} 작업 완료"), now));
-            self.collab_toast_rect = None;
+            self.collab.toast = Some((format!("✓ {name} 작업 완료"), now));
+            self.collab.toast_rect = None;
         }
         self.notify_flash.insert(surface_id.to_string(), now);
         // A pane in a *background* window finished — pulse that window's sidebar
@@ -95,9 +95,9 @@ impl App {
         }
         // 이미 sticky 승인 토스트(칩 포함)가 이 pane 으로 떠 있으면 hook 의
         // 중복 알림으로 텍스트를 덮지 않는다.
-        if self.collab_toast_action.as_deref() != Some(surface_id) {
-            self.collab_toast = Some((format!("⚠ {name} 권한 대기중{detail}"), now));
-            self.collab_toast_rect = None;
+        if self.collab.toast_action.as_deref() != Some(surface_id) {
+            self.collab.toast = Some((format!("⚠ {name} 권한 대기중{detail}"), now));
+            self.collab.toast_rect = None;
         }
         if !(self.window_focused && is_active_pane) {
             notify_desktop("⚠ 권한 필요", &format!("{name}{detail}"));
@@ -181,8 +181,8 @@ impl App {
     }
     /// File-tree column width (0 when hidden). Independent of the tab strip.
     pub(crate) fn file_tree_col_w(&self) -> f32 {
-        if self.file_tree_visible {
-            self.file_tree_w_logical
+        if self.file_tree.visible {
+            self.file_tree.w_logical
         } else {
             0.0
         }
@@ -200,8 +200,8 @@ impl App {
     }
     /// Git-column width (0 when hidden).
     pub(crate) fn git_col_w(&self) -> f32 {
-        if self.git_col_visible {
-            self.git_col_w_logical
+        if self.git.col_visible {
+            self.git.col_w_logical
         } else {
             0.0
         }
@@ -218,7 +218,7 @@ impl App {
     /// Whether `id`'s per-pane status bar is shown (default true — only the
     /// pane ids the user explicitly collapsed sit in `statusbar_hidden`).
     pub(crate) fn statusbar_visible(&self, id: &str) -> bool {
-        !self.statusbar_hidden.contains(id)
+        !self.statusbar.hidden.contains(id)
     }
     /// Logical-px footer band `id` reserves for its status bar — `PANE_FOOTER_HEIGHT`
     /// when shown, 0 when collapsed. Mirrors the header band in `resize_backend`
@@ -269,8 +269,8 @@ impl App {
     /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
     /// active cwd so the poller has something to refresh the moment it opens.
     pub(crate) fn toggle_git_col(&mut self) {
-        self.git_col_visible = !self.git_col_visible;
-        if self.git_col_visible {
+        self.git.col_visible = !self.git.col_visible;
+        if self.git.col_visible {
             self.publish_git_col_cwd();
         }
         let (cols, rows) = self.window_cells();
@@ -285,12 +285,12 @@ impl App {
     /// dismissed. `resize_backend` reads `statusbar_px` per leaf, so the toggle
     /// is all the state it needs.
     pub(crate) fn toggle_statusbar(&mut self, id: &str) {
-        if self.statusbar_hidden.contains(id) {
-            self.statusbar_hidden.remove(id);
+        if self.statusbar.hidden.contains(id) {
+            self.statusbar.hidden.remove(id);
         } else {
-            self.statusbar_hidden.insert(id.to_string());
-            if self.statusbar_menu.as_ref().map(|(p, _)| p == id).unwrap_or(false) {
-                self.statusbar_menu = None;
+            self.statusbar.hidden.insert(id.to_string());
+            if self.statusbar.menu.as_ref().map(|(p, _)| p == id).unwrap_or(false) {
+                self.statusbar.menu = None;
             }
         }
         let (cols, rows) = self.window_cells();
@@ -301,16 +301,16 @@ impl App {
     /// snapshotted now — `read_dir` / `git_branches` block, so they can't run on
     /// the render path. A second click on the same chip closes the menu.
     pub(crate) fn open_statusbar_menu(&mut self, id: &str, kind: StatusbarMenu) {
-        if self.statusbar_menu.as_ref() == Some(&(id.to_string(), kind)) {
-            self.statusbar_menu = None;
+        if self.statusbar.menu.as_ref() == Some(&(id.to_string(), kind)) {
+            self.statusbar.menu = None;
             self.chrome_dirty = true;
             return;
         }
         let cwd = self.pane_cwd_cache.get(id).cloned();
-        self.statusbar_menu_dirs.clear();
-        self.statusbar_menu_branches.clear();
-        self.statusbar_menu_scroll = 0.0;
-        self.statusbar_menu_search.clear();
+        self.statusbar.menu_dirs.clear();
+        self.statusbar.menu_branches.clear();
+        self.statusbar.menu_scroll = 0.0;
+        self.statusbar.menu_search.clear();
         match kind {
             StatusbarMenu::Path => {
                 if let Some(cwd) = cwd.as_ref() {
@@ -318,7 +318,7 @@ impl App {
                     // alpha-sorted) — a quick-nav picker, so files show too, not
                     // just directories. Dotfiles (and `.git`) stay hidden here.
                     if let Some(parent) = cwd.parent() {
-                        self.statusbar_menu_dirs.push(parent.to_path_buf());
+                        self.statusbar.menu_dirs.push(parent.to_path_buf());
                     }
                     if let Ok(rd) = std::fs::read_dir(cwd) {
                         let mut entries: Vec<(bool, std::path::PathBuf)> = rd
@@ -341,25 +341,25 @@ impl App {
                                     .cmp(&b.1.file_name().map(|s| s.to_ascii_lowercase()))
                             })
                         });
-                        self.statusbar_menu_dirs.extend(entries.into_iter().map(|(_, p)| p));
+                        self.statusbar.menu_dirs.extend(entries.into_iter().map(|(_, p)| p));
                     }
                 }
             }
             StatusbarMenu::Branch => {
                 if let Some(cwd) = cwd.as_ref() {
-                    self.statusbar_menu_branches = kasa_mcp::git::git_branches(cwd);
+                    self.statusbar.menu_branches = kasa_mcp::git::git_branches(cwd);
                 }
             }
         }
-        self.statusbar_menu = Some((id.to_string(), kind));
+        self.statusbar.menu = Some((id.to_string(), kind));
         self.chrome_dirty = true;
     }
     /// Indices into `statusbar_menu_dirs` that survive the live search query
     /// (case-insensitive substring on the entry name; the `..` parent row at
     /// index 0 always shows). Drives both the dropdown render and Enter-to-open.
     pub(crate) fn statusbar_menu_filtered(&self) -> Vec<usize> {
-        let q = self.statusbar_menu_search.to_lowercase();
-        self.statusbar_menu_dirs
+        let q = self.statusbar.menu_search.to_lowercase();
+        self.statusbar.menu_dirs
             .iter()
             .enumerate()
             .filter(|(i, p)| {
@@ -378,18 +378,18 @@ impl App {
     /// → preview pane). With an active query the `..` parent is skipped so Enter
     /// commits to a searched entry, not the parent.
     pub(crate) fn statusbar_menu_activate_first(&mut self) {
-        let Some((pid, _)) = self.statusbar_menu.clone() else { return };
+        let Some((pid, _)) = self.statusbar.menu.clone() else { return };
         let idxs = self.statusbar_menu_filtered();
-        let target = if self.statusbar_menu_search.is_empty() {
+        let target = if self.statusbar.menu_search.is_empty() {
             idxs.first().copied()
         } else {
             idxs.iter().find(|&&i| i != 0).or_else(|| idxs.first()).copied()
         };
-        if let Some(path) = target.and_then(|i| self.statusbar_menu_dirs.get(i).cloned()) {
+        if let Some(path) = target.and_then(|i| self.statusbar.menu_dirs.get(i).cloned()) {
             if path.is_dir() {
                 self.statusbar_cd(&pid, &path);
             } else {
-                self.statusbar_menu = None;
+                self.statusbar.menu = None;
                 self.open_file_split(path);
             }
         }
@@ -398,7 +398,7 @@ impl App {
     /// to that pane's PTY — single-quoted so spaces survive — and the dropdown
     /// closes. The cwd sniffer repaints the bar once the shell reports the move.
     pub(crate) fn statusbar_cd(&mut self, id: &str, dir: &std::path::Path) {
-        self.statusbar_menu = None;
+        self.statusbar.menu = None;
         let q = dir.to_string_lossy().replace('\'', "'\\''");
         let cmd = format!("cd '{q}'\r");
         if let Some(pty) = self.pty.get(id) {
@@ -412,7 +412,7 @@ impl App {
     /// surface its message instead of dropping it. We don't stash/force — same
     /// no-surprises stance as the git column.
     pub(crate) fn statusbar_checkout(&mut self, id: &str, branch: String) {
-        self.statusbar_menu = None;
+        self.statusbar.menu = None;
         self.chrome_dirty = true;
         let Some(cwd) = self.pane_cwd_cache.get(id).cloned() else { return };
         let res = kasa_mcp::git::git_checkout(&cwd, &branch);
@@ -429,15 +429,15 @@ impl App {
                 format!("전환 실패: {}", out.lines().next().unwrap_or(""))
             }
         };
-        self.collab_toast = Some((msg, std::time::Instant::now()));
+        self.collab.toast = Some((msg, std::time::Instant::now()));
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
     }
     /// Surface a transient top-right toast (reuses the collab toast slot).
     pub(crate) fn set_toast(&mut self, msg: String) {
-        self.collab_toast = Some((msg, std::time::Instant::now()));
-        self.collab_toast_rect = None;
+        self.collab.toast = Some((msg, std::time::Instant::now()));
+        self.collab.toast_rect = None;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
@@ -447,20 +447,20 @@ impl App {
     /// is cheap but not render-loop cheap, so it must not run per frame.
     pub(crate) fn toggle_git_diff(&mut self, staged: bool, path: String) {
         let key = (staged, path.clone());
-        if self.git_col_expanded.remove(&key) {
+        if self.git.col_expanded.remove(&key) {
             self.chrome_dirty = true;
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
             return;
         }
-        if !self.git_col_diff_cache.contains_key(&key) {
-            if let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+        if !self.git.col_diff_cache.contains_key(&key) {
+            if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
                 let rows = kasa_mcp::git::git_file_diff(&cwd, &path, staged);
-                self.git_col_diff_cache.insert(key.clone(), rows);
+                self.git.col_diff_cache.insert(key.clone(), rows);
             }
         }
-        self.git_col_expanded.insert(key);
+        self.git.col_expanded.insert(key);
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -470,15 +470,15 @@ impl App {
     /// tree — the cached rows (and which side a file lives on) are now stale, so
     /// closing them is the no-surprise reset; the user re-expands for fresh diff.
     pub(crate) fn invalidate_git_diffs(&mut self) {
-        self.git_col_expanded.clear();
-        self.git_col_diff_cache.clear();
+        self.git.col_expanded.clear();
+        self.git.col_diff_cache.clear();
     }
     /// Open the git column for pane `id`'s repo (status-bar diff chip click).
     /// Focuses that pane so the column follows it (auto-track), then opens the
     /// column if it's hidden. A second click on an already-open column for the
     /// same pane closes it (toggle).
     pub(crate) fn open_git_panel_for(&mut self, id: &str) {
-        let already = self.git_col_visible
+        let already = self.git.col_visible
             && self
                 .ws
                 .lock()
@@ -493,8 +493,8 @@ impl App {
         if let Ok(mut w) = self.ws.lock() {
             w.active_pane = Some(id.to_string());
         }
-        self.git_col_pinned_cwd = None;
-        if self.git_col_visible {
+        self.git.col_pinned_cwd = None;
+        if self.git.col_visible {
             self.publish_git_col_cwd();
             self.chrome_dirty = true;
             if let Some(w) = self.window.as_ref() {
@@ -509,7 +509,7 @@ impl App {
     /// one. The poller dedups + rate-limits, so a flat overwrite each frame is
     /// fine. Skipped entirely when no pane shows a bar (nothing to refresh).
     pub(crate) fn publish_pane_git_cwds(&self) {
-        if self.statusbar_hidden.len() >= self.pane_cwd_cache.len() && !self.git_col_visible {
+        if self.statusbar.hidden.len() >= self.pane_cwd_cache.len() && !self.git.col_visible {
             // Every bar collapsed and the git column hidden — no badge consumer.
             return;
         }
@@ -522,13 +522,13 @@ impl App {
     /// poller refreshes the right repo. Cheap string clone; called from the
     /// render right before the column paints (mirrors `git_poll_cwds`).
     pub(crate) fn publish_git_col_cwd(&self) {
-        if !self.git_col_visible {
+        if !self.git.col_visible {
             return;
         }
         // A user-pinned repo (picked from the path dropdown) overrides the
         // active-pane follow — the column stays on that repo until unpinned.
-        if let Some(pinned) = self.git_col_pinned_cwd.clone() {
-            if let Ok(mut guard) = self.git_col_cwd.lock() {
+        if let Some(pinned) = self.git.col_pinned_cwd.clone() {
+            if let Ok(mut guard) = self.git.col_cwd.lock() {
                 *guard = Some(pinned);
             }
             return;
@@ -537,7 +537,7 @@ impl App {
         let resolved = active
             .as_ref()
             .and_then(|id| self.pane_cwd_cache.get(id).cloned());
-        if let Ok(mut guard) = self.git_col_cwd.lock() {
+        if let Ok(mut guard) = self.git.col_cwd.lock() {
             match resolved {
                 // A confidently-resolved pane cwd always wins.
                 Some(cwd) => *guard = Some(cwd),
@@ -557,7 +557,7 @@ impl App {
     /// read the column's repo from the poller's snapshot so the action always
     /// targets what the user sees.
     pub(crate) fn run_git_col_action(&mut self, btn: GitColBtn) {
-        let cwd = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone());
+        let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
         let Some(cwd) = cwd else { return };
         match btn {
             GitColBtn::StageAll => {
@@ -570,7 +570,7 @@ impl App {
                 });
             }
             GitColBtn::Pull => {
-                self.git_op = Some("Pulling");
+                self.git.op = Some("Pulling");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     let _ = kasa_mcp::git::git_pull(&cwd);
@@ -580,7 +580,7 @@ impl App {
                 });
             }
             GitColBtn::Push => {
-                self.git_op = Some("Pushing");
+                self.git.op = Some("Pushing");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     let _ = kasa_mcp::git::git_push(&cwd);
@@ -591,21 +591,21 @@ impl App {
                 // Commit the STAGED changes with the panel's message (VSCode
                 // model — commit -m, no add). Empty message → focus the input
                 // instead of a silent no-op, so the user sees where to type.
-                let msg = self.git_commit_msg.trim().to_string();
+                let msg = self.git.commit_msg.trim().to_string();
                 if msg.is_empty() {
-                    self.git_commit_focused = true;
+                    self.git.commit_focused = true;
                     self.chrome_dirty = true;
                     return;
                 }
-                self.git_op = Some("Committing");
+                self.git.op = Some("Committing");
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     let _ = kasa_mcp::git::git_commit_staged(&cwd, &msg);
                     let _ = proxy.send_event(UserEvent::GitOpDone);
                 });
-                self.git_commit_msg.clear();
-                self.git_commit_cursor = 0;
-                self.git_commit_focused = false;
+                self.git.commit_msg.clear();
+                self.git.commit_cursor = 0;
+                self.git.commit_focused = false;
                 self.chrome_dirty = true;
             }
         }
@@ -613,17 +613,17 @@ impl App {
     /// Open the cursor-style Commit modal: pre-fill nothing, focus the message
     /// box, default to including unstaged changes (the toggle in the modal).
     pub(crate) fn open_commit_modal(&mut self) {
-        self.git_commit_menu_open = false;
-        self.git_commit_modal_open = true;
-        self.git_commit_focused = true;
+        self.git.commit_menu_open = false;
+        self.git.commit_modal_open = true;
+        self.git.commit_focused = true;
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
     }
     pub(crate) fn close_commit_modal(&mut self) {
-        self.git_commit_modal_open = false;
-        self.git_commit_focused = false;
+        self.git.commit_modal_open = false;
+        self.git.commit_focused = false;
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -633,15 +633,15 @@ impl App {
     /// include-unstaged toggle: when on, stage everything first (`git add -A`),
     /// else commit only what's already staged. Empty message is a no-op.
     pub(crate) fn run_commit_modal(&mut self, push: bool) {
-        let msg = self.git_commit_msg.trim().to_string();
+        let msg = self.git.commit_msg.trim().to_string();
         if msg.is_empty() {
-            self.git_commit_focused = true;
+            self.git.commit_focused = true;
             self.chrome_dirty = true;
             return;
         }
-        let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
-        let include = self.git_commit_modal_include_unstaged;
-        self.git_op = Some(if push { "Pushing" } else { "Committing" });
+        let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
+        let include = self.git.commit_modal_include_unstaged;
+        self.git.op = Some(if push { "Pushing" } else { "Committing" });
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             if include {
@@ -655,24 +655,24 @@ impl App {
             }
             let _ = proxy.send_event(UserEvent::GitOpDone);
         });
-        self.git_commit_msg.clear();
-        self.git_commit_cursor = 0;
-        self.git_commit_focused = false;
-        self.git_commit_modal_open = false;
+        self.git.commit_msg.clear();
+        self.git.commit_cursor = 0;
+        self.git.commit_focused = false;
+        self.git.commit_modal_open = false;
         self.invalidate_git_diffs();
         self.chrome_dirty = true;
     }
     /// `gh pr create --web` for the column's repo (Commit-menu → Create PR).
     pub(crate) fn create_git_pr(&mut self) {
-        self.git_commit_menu_open = false;
-        let Some(cwd) = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
+        self.git.commit_menu_open = false;
+        let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
         std::thread::spawn(move || {
             let _ = std::process::Command::new("gh")
                 .args(["pr", "create", "--web"])
                 .current_dir(&cwd)
                 .spawn();
         });
-        self.collab_toast = Some(("gh pr create --web 실행".to_string(), std::time::Instant::now()));
+        self.collab.toast = Some(("gh pr create --web 실행".to_string(), std::time::Instant::now()));
         self.chrome_dirty = true;
     }
     /// Expand/restore the git column width (header ⤢ button). Toggles between a
@@ -680,7 +680,7 @@ impl App {
     pub(crate) fn toggle_git_col_expand(&mut self) {
         let wide = 620.0_f32;
         let normal = 340.0_f32;
-        self.git_col_w_logical = if self.git_col_w_logical >= wide - 1.0 { normal } else { wide };
+        self.git.col_w_logical = if self.git.col_w_logical >= wide - 1.0 { normal } else { wide };
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
@@ -689,8 +689,8 @@ impl App {
     /// git refuse with a clear message — we don't stash/force, just let the
     /// poller repaint whatever git did. Closes the branch dropdown.
     pub(crate) fn run_git_checkout(&mut self, branch: String) {
-        self.git_branch_menu_open = false;
-        let cwd = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone());
+        self.git.branch_menu_open = false;
+        let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
         let Some(cwd) = cwd else { return };
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
@@ -703,7 +703,7 @@ impl App {
     /// is phase 2; opening the file is the useful v1. Daemon-only, like the
     /// file-tree's file-click path.
     pub(crate) fn open_git_file(&mut self, rel: &str) {
-        let cwd = self.git_col_data.lock().ok().and_then(|g| g.cwd.clone());
+        let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
         let Some(cwd) = cwd else { return };
         let abs = cwd.join(rel);
         let ext = abs
@@ -774,8 +774,8 @@ impl App {
     }
     /// Show/hide the file-tree column. Same reflow path as `toggle_sidebar`.
     pub(crate) fn toggle_file_tree(&mut self) {
-        self.file_tree_visible = !self.file_tree_visible;
-        if self.file_tree_visible {
+        self.file_tree.visible = !self.file_tree.visible;
+        if self.file_tree.visible {
             self.refresh_file_tree();
         }
         let (cols, rows) = self.window_cells();
@@ -912,10 +912,10 @@ impl App {
     pub(crate) fn collab_toast_alpha(&self) -> f32 {
         const HOLD: u128 = 2400;
         const FADE: u128 = 600;
-        let Some((_, at)) = self.collab_toast.as_ref() else { return 0.0 };
+        let Some((_, at)) = self.collab.toast.as_ref() else { return 0.0 };
         // 승인 토스트(칩 포함)는 사용자가 응답하거나 프롬프트가 풀릴 때까지
         // 고정 — 시간 페이드 없음. (해제는 route_approval_prompts/클릭 핸들러)
-        if self.collab_toast_action.is_some() {
+        if self.collab.toast_action.is_some() {
             return 1.0;
         }
         let e = at.elapsed().as_millis();
