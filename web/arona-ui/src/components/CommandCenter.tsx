@@ -1,54 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useStore } from '@/store';
 import { MomoTalk } from './MomoTalk';
 
-const BASE = import.meta.env.DEV ? 'http://127.0.0.1:8765' : '';
-
-type CenterTab = 'tasks' | 'momotalk' | 'council' | 'schedule' | 'log';
+type CenterTab = 'tasks' | 'momotalk' | 'council' | 'schedule';
 
 const TAB_LABELS: Record<CenterTab, string> = {
   tasks: '업무',
   momotalk: '모모톡',
   council: '의뢰',
   schedule: '스케줄',
-  log: '기록',
 };
 
-interface FeedEvent {
-  type?: string;
-  surface?: string;
-  status?: string;
-  timestamp?: string;
-  [key: string]: unknown;
-}
-
-async function fetchEvents(): Promise<FeedEvent[]> {
-  try {
-    const r = await fetch(`${BASE}/events`);
-    if (!r.ok) return [];
-    const d = await r.json().catch(() => null);
-    return Array.isArray(d?.events) ? d.events : Array.isArray(d) ? d : [];
-  } catch { return []; }
-}
-
 // SCHALE OS 우측 Command Center 패널.
-// GET /events, GET /messages 1s 폴링(백엔드 없으면 404 → 빈 리스트).
 export function CommandCenter() {
   const [tab, setTab] = useState<CenterTab>('tasks');
-  const [events, setEvents] = useState<FeedEvent[]>([]);
   const agents = useStore((s) => s.agents);
-
-  useEffect(() => {
-    let stopped = false;
-    const tick = async () => {
-      if (stopped) return;
-      const ev = await fetchEvents();
-      if (!stopped) setEvents(ev);
-    };
-    void tick();
-    const iv = setInterval(tick, 1000);
-    return () => { stopped = true; clearInterval(iv); };
-  }, []);
 
   const workers = agents.filter((a) => !a.isGod);
 
@@ -172,15 +138,6 @@ export function CommandCenter() {
                 <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-lilac)', background: 'color-mix(in srgb, var(--cth-lilac) 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}>서브 {a.subagents.length}</span>
               )}
             </div>
-          ))}
-        </div>
-      ) : tab === 'log' ? (
-        /* 기록 — 이벤트 전체 로그(콘솔) */
-        <div style={{ flex: 1, overflowY: 'auto', padding: 10, background: 'var(--cth-ink-900)' }}>
-          {events.length === 0 ? (
-            <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-300)' }}>기록 없음</span>
-          ) : events.map((e, i) => (
-            <div key={i} style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: '#9DC1E8', marginBottom: 4, wordBreak: 'break-all', lineHeight: 1.5 }}>{JSON.stringify(e)}</div>
           ))}
         </div>
       ) : (
