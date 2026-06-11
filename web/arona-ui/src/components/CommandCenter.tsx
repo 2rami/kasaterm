@@ -234,17 +234,63 @@ export function CommandCenter() {
                 {a.project || a.name}
               </span>
               <span style={{
-                padding: '1px 5px', fontSize: 9,
-                fontFamily: 'var(--cth-font-display)',
-                background: a.status === 'working' ? 'var(--cth-mint)' : a.status === 'waiting' ? 'var(--cth-sky)' : 'var(--cth-cream-300)',
-                boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
+                padding: '2px 7px', fontSize: 10, fontWeight: 600, borderRadius: 5,
+                fontFamily: 'var(--cth-font-ui)', color: '#fff',
+                background: a.status === 'working' ? 'var(--cth-mint)' : a.status === 'waiting' ? 'var(--cth-sky)' : 'var(--cth-ink-300)',
               }}>{a.status}</span>
             </div>
           ))}
         </div>
+      ) : tab === 'tasks' ? (
+        /* 업무 — 학생별 현재 작업(현재 tool + 서브에이전트) */
+        <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+          {agents.length === 0 ? (
+            <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>학생 없음</span>
+          ) : agents.map((a) => (
+            <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--cth-cream-200)' }}>
+              <span style={{ width: 8, height: 8, borderRadius: 999, flexShrink: 0, background: a.status === 'working' ? 'var(--cth-mint)' : a.status === 'waiting' || a.status === 'blocked' ? 'var(--cth-coral)' : 'var(--cth-ink-300)' }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)' }}>{a.character}</div>
+                <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project || '대기 중'}</div>
+              </div>
+              {a.currentTool && (
+                <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)', background: 'color-mix(in srgb, var(--cth-sky) 12%, #fff)', padding: '2px 7px', borderRadius: 6 }}>{a.currentTool}</span>
+              )}
+              {!!a.subagents?.length && (
+                <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-lilac)', background: 'color-mix(in srgb, var(--cth-lilac) 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}>서브 {a.subagents.length}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : tab === 'log' ? (
+        /* 기록 — 이벤트 전체 로그(콘솔) */
+        <div style={{ flex: 1, overflowY: 'auto', padding: 10, background: 'var(--cth-ink-900)' }}>
+          {events.length === 0 ? (
+            <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-300)' }}>기록 없음</span>
+          ) : events.map((e, i) => (
+            <div key={i} style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: '#9DC1E8', marginBottom: 4, wordBreak: 'break-all', lineHeight: 1.5 }}>{JSON.stringify(e)}</div>
+          ))}
+        </div>
       ) : (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 11, color: 'var(--cth-ink-300)' }}>준비 중</span>
+        /* 스케줄 관리 — 학생별 컨텍스트 진척(소진율) */
+        <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+          {agents.length === 0 ? (
+            <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>학생 없음</span>
+          ) : agents.map((a) => {
+            const ctx = a.contextTokens ?? 0;
+            const pct = Math.min(100, Math.round((ctx / 200000) * 100));
+            return (
+              <div key={a.id} style={{ padding: '7px 0', borderBottom: '1px solid var(--cth-cream-200)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)' }}>{a.character}</span>
+                  <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, color: 'var(--cth-ink-300)' }}>{Math.round(ctx / 1000)}k</span>
+                </div>
+                <div style={{ height: 6, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${pct}%`, borderRadius: 999, background: pct > 75 ? 'var(--cth-coral)' : 'var(--cth-sky)' }} />
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
