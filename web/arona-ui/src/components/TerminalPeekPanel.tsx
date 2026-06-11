@@ -37,11 +37,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
   const bodyRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // 구조화된 transcript 폴링(명령어/툴 노이즈 제거된 대화만).
+  // 구조화된 transcript 폴링(명령어/툴 노이즈 제거된 대화 내역). 학생 바뀌면 입력 초기화.
   useEffect(() => {
     let stopped = false;
     setLoaded(false);
     setTurns([]);
+    setInput('');
     const tick = async () => {
       const ts = await fetchTranscript(surfaceId, 30);
       if (stopped) return;
@@ -58,11 +59,21 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
     if (el) el.scrollTop = el.scrollHeight;
   }, [turns]);
 
-  const send = async () => {
-    const text = input.trim();
-    if (!text || sending) return;
+  // 실시간 미러: 웹 입력을 칠 때마다 터미널 PTY 라인과 동기화한다(거노 요청 —
+  // "웹에 치면 터미널에 실시간으로"). Ctrl-U(\x15)로 줄을 비우고 현재 입력 전체를
+  // 재전송(submit=false). 매 글자 전체 재전송이라 백스페이스·편집·IME 까지 self-heal.
+  // \x15 가 claude TUI(Ink)에서 줄을 비우는 건 submit 경로에서 검증됨.
+  const mirror = (next: string) => {
+    setInput(next);
+    void sendToPane(surfaceId, '\x15' + next, false);
+  };
+
+  // 제출: 라인은 이미 라이브로 쳐져 있으니 CR 만 보낸다(handler 가 \r 을 140ms 지연
+  // 전송해 Ink 가 paste/입력 처리를 끝낸 뒤 Enter 로 먹는다).
+  const submit = async () => {
+    if (sending) return;
     setSending(true);
-    const ok = await sendToPane(surfaceId, text, true);
+    const ok = await sendToPane(surfaceId, '\r', false);
     setSending(false);
     setFlash(ok ? 'ok' : 'err');
     setTimeout(() => setFlash(null), 1200);
@@ -71,8 +82,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
   };
 
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') { e.preventDefault(); void send(); }
-    if (e.key === 'c' && e.ctrlKey) { e.preventDefault(); void sendToPane(surfaceId, '\x03', false); }
+    if (e.key === 'Enter') { e.preventDefault(); void submit(); }
+    if (e.key === 'c' && e.ctrlKey) { e.preventDefault(); setInput(''); void sendToPane(surfaceId, '\x03', false); }
   };
 
   return (
@@ -169,10 +180,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
         <input
           ref={inputRef}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => mirror(e.target.value)}
           onKeyDown={onKey}
           disabled={sending}
-          placeholder="학생에게 지시 — Enter 전송 · Ctrl+C 인터럽트"
+          placeholder="학생에게 지시 — 치는 대로 터미널에 실시간 · Enter 전송 · Ctrl+C 인터럽트"
           style={{
             flex: 1,
             fontFamily: 'var(--cth-font-ui)', fontSize: 13,
@@ -182,15 +193,15 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
           }}
         />
         <button
-          onClick={() => void send()}
-          disabled={!input.trim() || sending}
+          onClick={() => void submit()}
+          disabled={sending}
           style={{
             fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600,
             padding: '7px 14px', border: 'none', borderRadius: 9,
-            cursor: !input.trim() || sending ? 'not-allowed' : 'pointer',
+            cursor: sending ? 'not-allowed' : 'pointer',
             background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff',
             boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.5)',
-            opacity: !input.trim() || sending ? 0.4 : 1
+            opacity: sending ? 0.4 : 1
           }}
         >전송</button>
       </div>
