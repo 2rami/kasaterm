@@ -208,7 +208,7 @@ impl PtyBackend {
             if !unbound.contains(&id) {
                 continue;
             }
-            if let Some(path) = discover_transcript(shell_pid) {
+            if let Some(path) = discover_transcript(&id, shell_pid) {
                 self.bound.lock().unwrap().insert(id, path);
             }
         }
@@ -1057,10 +1057,16 @@ fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
 /// 미실행이면 None(plain 셸). 같은 cwd 두 claude 는 argv session id 로 구분되고,
 /// argv 에 id 없는 fresh claude 는 cwd 의 newest jsonl 로 폴백한다(pane_record 와
 /// 동일 규칙). 느린 ps/lsof 호출이라 호출부(`discover_unbound`)에서 스로틀한다.
-fn discover_transcript(shell_pid: u32) -> Option<std::path::PathBuf> {
+fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathBuf> {
     claude_child_pid(shell_pid)?; // claude 자식 없으면 아직 claude 아님 — bind 안 함
     let cwd = pid_cwd(shell_pid)?;
-    // argv 의 session id 는 정확(exact) — 그 경로를 바로 bind(신선도 게이트 없음).
+    // 1순위: bind-transcript 훅이 기록한 agent-roster(pane↔session, 정확). 훅이
+    // 자기 transcript_path 를 보고하므로 공유 cwd 추측이 필요 없는 진짜 정답.
+    // 소켓 bind 가 (타이밍 등으로) 씹혀도 이 파일은 남아 자가복구된다.
+    if let Some(path) = roster_transcript(pane_id, &cwd) {
+        return Some(path);
+    }
+    // 2순위: argv 의 session id(exact) — --resume/--session-id claude.
     if let Some(id) = claude_session_id_from_cmdline(shell_pid) {
         return project_jsonl(&cwd, &id).filter(|p| p.exists());
     }
@@ -1075,6 +1081,24 @@ fn discover_transcript(shell_pid: u32) -> Option<std::path::PathBuf> {
         return recent.pop();
     }
     None
+}
+
+/// bind-transcript 훅이 `~/.config/kasaterm/agent-roster/<slug(cwd)>.json` 에
+/// 기록한 pane↔session 매핑에서 이 pane 의 transcript 경로를 읽는다(정확·hook
+/// authoritative). `archived`(죽은 세션) 는 무시, 파일이 실제 존재할 때만 반환.
+fn roster_transcript(pane_id: &str, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let slug = cwd.to_string_lossy().replace(['/', '.'], "-");
+    let roster = std::path::PathBuf::from(&home)
+        .join(".config/kasaterm/agent-roster")
+        .join(format!("{slug}.json"));
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&roster).ok()?).ok()?;
+    let entry = v.get(pane_id)?;
+    if entry.get("archived").and_then(|a| a.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    let session = entry.get("session_id").and_then(|s| s.as_str())?;
+    project_jsonl(cwd, session).filter(|p| p.exists())
 }
 
 /// `cwd` 의 claude 프로젝트 디렉터리에서 `within` 안에 수정된 .jsonl 경로들.
