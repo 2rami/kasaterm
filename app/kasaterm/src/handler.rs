@@ -135,6 +135,16 @@ impl ApplicationHandler<UserEvent> for App {
                 let _ = reply.send(pid);
                 return;
             }
+            UserEvent::SocketQueryPanePids(reply) => {
+                // 메모리 조회만(즉답) — 느린 lsof/ps 발견은 backend 스레드가 한다.
+                let pids: Vec<(String, u32)> = self
+                    .pty
+                    .iter()
+                    .filter_map(|(id, s)| s.shell_pid().map(|p| (id.clone(), p)))
+                    .collect();
+                let _ = reply.send(pids);
+                return;
+            }
             UserEvent::SocketClose(id) => {
                 self.close_pane(id);
                 self.chrome_dirty = true;

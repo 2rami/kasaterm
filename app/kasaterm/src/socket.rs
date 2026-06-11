@@ -152,6 +152,9 @@ pub struct PtyBackend {
     /// often both costs a process spawn and risks racing claude's session
     /// registry, so we refresh at most once every 2s.
     agents_cache: Arc<Mutex<Option<(std::time::Instant, HashMap<String, String>)>>>,
+    /// hook-free 발견 스로틀 — `discover_unbound` 의 ps/lsof 비용을 board 폴(1/s)
+    /// 마다 다 치르지 않도록 2s 에 1회로 제한한 마지막 실행 시각.
+    last_discover: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl PtyBackend {
@@ -169,6 +172,45 @@ impl PtyBackend {
             bound: Arc::new(Mutex::new(HashMap::new())),
             attention,
             agents_cache: Arc::new(Mutex::new(None)),
+            last_discover: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// 모든 pane 의 `(surface_id, shell_pid)` — GUI 동기 RPC(메모리 즉답).
+    fn query_pane_pids(&self) -> Vec<(String, u32)> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.proxy.send_event(UserEvent::SocketQueryPanePids(tx)).is_err() {
+            return Vec::new();
+        }
+        rx.recv_timeout(std::time::Duration::from_millis(300)).unwrap_or_default()
+    }
+
+    /// hook-free 발견: bound 안 된 open pane 중 claude 실행 중인 것을 셸 pid 로
+    /// 추적해 transcript 를 자동 bind 한다(claude 훅 없이도 board 가 학생을 본다).
+    /// 락을 잡은 채 ps/lsof 를 호출하지 않는다(GUI 멈춤 lock-bug 회피) — pid 스냅샷·
+    /// 발견은 락 밖, insert 만 짧게 락. 2s 스로틀로 폴마다 재스캔 안 함.
+    fn discover_unbound(&self, live: &HashSet<String>) {
+        {
+            let mut last = self.last_discover.lock().unwrap();
+            if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2)) {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        let unbound: HashSet<String> = {
+            let bound = self.bound.lock().unwrap();
+            live.iter().filter(|id| !bound.contains_key(*id)).cloned().collect()
+        };
+        if unbound.is_empty() {
+            return;
+        }
+        for (id, shell_pid) in self.query_pane_pids() {
+            if !unbound.contains(&id) {
+                continue;
+            }
+            if let Some(path) = discover_transcript(shell_pid) {
+                self.bound.lock().unwrap().insert(id, path);
+            }
         }
     }
 
@@ -512,6 +554,9 @@ impl Backend for PtyBackend {
         // is exactly as fresh as the moment it's asked for. Panes with no hook
         // bind (no claude / not started) simply don't appear.
         let live: HashSet<String> = self.ws.lock().unwrap().panes.keys().cloned().collect();
+        // hook-free 발견 — claude 훅(bind-transcript)이 안 걸린 pane 도 PTY 소유를
+        // 이용해 직접 추적·bind(스로틀 2s). 훅은 빠른 보조 경로일 뿐, 이게 안전망.
+        self.discover_unbound(&live);
         let agents = self.agents_status();
         let bound = self.bound.lock().unwrap();
         let mut attention = self.attention.lock().unwrap();
@@ -1003,5 +1048,26 @@ fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
         }
     }
     newest.map(|(_, id)| id)
+}
+
+/// hook-free transcript 발견 — 우리는 PTY 를 자체 소유하므로, 셸 pid 만으로
+/// claude 자식·cwd·session 을 직접 추적해 transcript(.jsonl) 경로를 알아낸다.
+/// claude 훅(bind-transcript)이 없어도 board 가 학생을 인지한다(munder 는 claude
+/// 를 감싸기만 해 훅 의존; 우리는 터미널을 소유해 프로세스째 들여다본다). claude
+/// 미실행이면 None(plain 셸). 같은 cwd 두 claude 는 argv session id 로 구분되고,
+/// argv 에 id 없는 fresh claude 는 cwd 의 newest jsonl 로 폴백한다(pane_record 와
+/// 동일 규칙). 느린 ps/lsof 호출이라 호출부(`discover_unbound`)에서 스로틀한다.
+fn discover_transcript(shell_pid: u32) -> Option<std::path::PathBuf> {
+    claude_child_pid(shell_pid)?; // claude 자식 없으면 아직 claude 아님 — bind 안 함
+    let cwd = pid_cwd(shell_pid)?;
+    let session = claude_session_id_from_cmdline(shell_pid)
+        .or_else(|| latest_claude_session_id(&cwd))?;
+    let home = std::env::var("HOME").ok()?;
+    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
+    let path = std::path::PathBuf::from(home)
+        .join(".claude/projects")
+        .join(encoded)
+        .join(format!("{session}.jsonl"));
+    path.exists().then_some(path)
 }
 
