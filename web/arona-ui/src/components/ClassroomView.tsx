@@ -163,11 +163,13 @@ export interface ClassroomViewProps {
   onSelect?: (surfaceId: string, title: string) => void;
   /** 활성 워크스페이스 학생만(장소이동). 없으면 store 전체. */
   agents?: Agent[];
+  /** 장소 배경 파일명(워크스페이스별). 없으면 교실. */
+  background?: string;
 }
 
 // 샬레 교실 — 배경 일러 위에 학생들이 일하러 책상에 가거나(working) 바닥을 돌아다님
 // (idle). munder Office 패턴(상태→위치/애니/말풍선/글리프) 이식. 클릭 → 우측 대화.
-export function ClassroomView({ onSelect, agents: agentsProp }: ClassroomViewProps) {
+export function ClassroomView({ onSelect, agents: agentsProp, background }: ClassroomViewProps) {
   const storeAgents = useStore((s) => s.agents);
   const agents = agentsProp ?? storeAgents;
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
@@ -177,8 +179,9 @@ export function ClassroomView({ onSelect, agents: agentsProp }: ClassroomViewPro
       position: 'relative', width: '100%', maxWidth: 960, margin: '0 auto',
       aspectRatio: '3 / 2',
       borderRadius: 16, overflow: 'hidden',
-      backgroundImage: `url(${ROOT}assets/classroom-bg.png)`,
+      backgroundImage: `url(${ROOT}assets/${background ?? 'classroom-bg.png'})`,
       backgroundSize: 'cover', backgroundPosition: 'center',
+      transition: 'background-image 0.3s ease',
       boxShadow: '0 6px 20px rgba(21, 41, 74, 0.12), inset 0 0 0 1px var(--cth-cream-200)',
     }}>
       {sorted.slice(0, SEATS.length).map((a, i) => (
