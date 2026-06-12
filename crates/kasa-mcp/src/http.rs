@@ -732,11 +732,15 @@ async fn arona_ui_serve(rel: String) -> axum::response::Response {
         return not_found();
     }
     match std::fs::read(&canon) {
+        // no-store: webview(WKWebView)가 옛 index.html+JS 를 통째 캐시해 relaunch 후에도
+        // stale UI 를 띄우던 문제 차단(거노: 모달 z-fix 가 안 보이던 근본). 로컬·소번들
+        // 이라 매 로드 재요청 비용 무시 가능 — 항상 최신.
         Ok(bytes) => (
             axum::http::StatusCode::OK,
             [
                 (header::CONTENT_TYPE, static_content_type(&canon)),
                 (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+                (header::CACHE_CONTROL, "no-store"),
             ],
             bytes,
         )
