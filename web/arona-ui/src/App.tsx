@@ -81,10 +81,12 @@ export function App() {
   // 장소(워크스페이스) — 학생 cwd 별 방. 활성 방 선택 시 그 방 학생만 보인다.
   const workspaces = workspacesFromAgents(sorted);
   const shown = activeWs ? sorted.filter((a) => (a.cwd || '') === activeWs) : sorted;
-  // 장소별 배경 — 워크스페이스 순서대로 교실/카페/작업실 순환(전체=교실).
-  const BACKGROUNDS = ['classroom-bg.png', 'bg-cafe.png', 'bg-office.png'];
+  // 장소별 배경 — 기본 교실은 빈 바닥(가구 따로 배치), 워크스페이스(실 cwd)는
+  // 가구가 박힌 카페/작업실 일러를 그대로. 가구 박힌 배경엔 placed 가구를 끔([]).
+  const BACKGROUNDS = ['bg-cafe.png', 'bg-office.png'];
   const wsIdx = activeWs ? workspaces.findIndex((w) => w.cwd === activeWs) : -1;
-  const roomBg = wsIdx >= 0 ? BACKGROUNDS[wsIdx % BACKGROUNDS.length] : 'classroom-bg.png';
+  const roomBg = wsIdx >= 0 ? BACKGROUNDS[wsIdx % BACKGROUNDS.length] : 'classroom-floor.png';
+  const roomFurniture = wsIdx >= 0 ? [] : undefined; // 기본 교실=기본 가구, 그 외=가구 끔
 
   // 재화 = claude 토큰 지표(선생님): 💎입력토큰 · 🪙비용$ (전 학생 합산).
   const totalInputTokens = sorted.reduce((s, a) => s + (a.tokensIn ?? 0), 0);
@@ -169,7 +171,7 @@ export function App() {
           {/* 교실 씬 or 카드 그리드 */}
           <div style={{ flex: 1, overflow: 'auto', padding: 'var(--cth-space-4)' }}>
             {view === 'classroom' ? (
-              <ClassroomView agents={shown} background={roomBg} onSelect={(id, title) => setPeek({ id, title })} />
+              <ClassroomView agents={shown} background={roomBg} furniture={roomFurniture} onSelect={(id, title) => setPeek({ id, title })} />
             ) : shown.length === 0 ? (
               <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
             ) : (
