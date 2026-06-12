@@ -6,6 +6,7 @@ import {
   type Furniture, type CafeSpot,
 } from './classroomSpace';
 import { pickExchange } from './cafeteriaLines';
+import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon } from './activity';
 
 const ROOT = import.meta.env.BASE_URL || '/';
 const SPEED = 24; // 이동 속도(%/초) — 방 가로지르기 ≈ 3.5초
@@ -191,8 +192,16 @@ function ClassroomCharacter(
           color: 'var(--cth-ink-900)', textAlign: 'center',
           whiteSpace: 'normal', wordBreak: 'break-word',
         }}>
-          {agent.currentTool && agent.status === 'working' ? (
-            <span><b style={{ color: 'var(--cth-sky)' }}>{agent.currentTool}</b>{agent.subagents?.length ? ` · 서브 ${agent.subagents.length}` : ''}</span>
+          {agent.status === 'working' ? (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
+              {isBuildCmd(agent.action) ? (
+                <b style={{ color: BUILD_COLOR, display: 'inline-flex', alignItems: 'center', gap: 3 }}><GearIcon />빌드 중</b>
+              ) : agent.currentTool ? (
+                <b style={{ color: 'var(--cth-sky)' }}>{agent.currentTool}</b>
+              ) : <span>{thought}</span>}
+              {agent.subagents?.length ? <span style={{ color: 'var(--cth-lilac)' }}>· 서브 {agent.subagents.length}</span> : null}
+              {agent.background?.length ? <span style={{ color: BUILD_COLOR, display: 'inline-flex', alignItems: 'center', gap: 2 }}><SpinIcon size={10} />{agent.background.length}</span> : null}
+            </span>
           ) : thought}
         </div>
       )}

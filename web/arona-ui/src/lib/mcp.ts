@@ -31,6 +31,10 @@ interface BoardRow {
   tool_counts?: [string, number][];
   /** 진행 중 서브에이전트 description 목록(Task/Agent tool_use 미완료). */
   subagents?: string[];
+  /** 최근 완료된 서브에이전트(이름) · 진행 중 백그라운드 셸 · 도구 흐름(최신순). */
+  subagents_done?: string[];
+  background?: string[];
+  recent_tools?: string[];
   /** 학생 메타 — 모델/작업경로/컨텍스트한도/git 브랜치(PaneActivity). */
   model?: string;
   cwd?: string;
@@ -82,6 +86,9 @@ function toAgent(r: BoardRow): Agent {
     tokensIn: r.tokens_in,
     tokensOut: r.tokens_out,
     subagents: r.subagents,
+    subagentsDone: r.subagents_done,
+    background: r.background,
+    recentTools: r.recent_tools,
     model: r.model,
     cwd: r.cwd,
     contextLimit: r.context_limit,

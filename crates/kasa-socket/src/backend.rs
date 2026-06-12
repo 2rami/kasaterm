@@ -188,6 +188,19 @@ pub struct PaneActivity {
     /// is visible. Empty when the pane has launched none (or all completed).
     #[serde(default)]
     pub subagents: Vec<String>,
+    /// 최근 완료된 서브에이전트(이름) — tail 윈도 안에서 tool_result 매칭된 Task/Agent.
+    /// 끝나면 즉시 사라지던 걸 잠깐 "✓ 완료"로 남겨 흔적을 보인다.
+    #[serde(default)]
+    pub subagents_done: Vec<String>,
+    /// In-flight 백그라운드 셸 — `run_in_background` Bash 중 완료 통보
+    /// (`<task-notification>`)가 아직 없는 것들의 설명/명령. 백그라운드 지속 작업이
+    /// 최신 tool_use 하나에 덮여 안 보이던 사각지대를 메운다.
+    #[serde(default)]
+    pub background: Vec<String>,
+    /// 최근 도구 사용 흐름(라벨, 최신순) — tail 윈도의 마지막 N개 tool_use. 지금
+    /// "현재 도구 하나"만 보이던 걸 타임라인(Bash→Edit→Bash)으로.
+    #[serde(default)]
+    pub recent_tools: Vec<String>,
     /// 학생(claude) 모델명 — transcript `message.model`(예 "claude-opus-4-8"). 빈값=미상.
     #[serde(default)]
     pub model: String,

@@ -33,6 +33,12 @@ export interface Agent {
   tokensOut?: number;
   /** 진행 중 서브에이전트 description 목록 — "서브에이전트 N 실행 중" 표시. */
   subagents?: string[];
+  /** 최근 완료된 서브에이전트(이름) — 잠깐 "✓ 완료"로 흔적. */
+  subagentsDone?: string[];
+  /** 진행 중 백그라운드 셸(설명/명령) — "백그라운드 N개 실행 중". */
+  background?: string[];
+  /** 최근 도구 사용 흐름(라벨, 최신순) — 도구 활동 타임라인. */
+  recentTools?: string[];
   /** 학생 메타 — 모델명/작업경로/git 브랜치(board PaneActivity). contextLimit 은 위. */
   model?: string;
   cwd?: string;
