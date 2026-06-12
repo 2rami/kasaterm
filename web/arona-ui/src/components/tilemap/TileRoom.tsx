@@ -51,7 +51,7 @@ export function TileRoom() {
       while (host.firstChild) host.removeChild(host.firstChild);
       host.appendChild(app.canvas);
 
-      const mapData = (await fetch(`${ROOT}assets/maps/office.tmj`).then((r) => r.json())) as TiledMap;
+      const mapData = (await fetch(`${ROOT}assets/maps/schale-room.tmj`).then((r) => r.json())) as TiledMap;
       const [t0, t1, t2] = await Promise.all([
         loadTexture(`${ROOT}assets/tilesets/office-tileset.png`),
         loadTexture(`${ROOT}assets/tilesets/a5-office-floors-walls.png`),
