@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
@@ -47,7 +48,9 @@ export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalP
     }
   };
 
-  return (
+  // document.body 로 portal — 교실(가구 z 높음) 등 어떤 중첩 stacking context 도
+  // 벗어나 항상 최상위에 뜬다(거노: 모달 위로 책상이 올라오던 버그 확실 차단).
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -127,6 +130,7 @@ export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalP
           </div>
         </PixelPanel>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

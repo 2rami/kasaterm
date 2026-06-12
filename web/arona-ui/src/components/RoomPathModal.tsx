@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { listDir, roomCd, type DirListing } from '@/lib/mcp';
 
 export interface RoomPathModalProps {
@@ -27,7 +28,8 @@ export function RoomPathModal({ initialPath, onClose, onChanged }: RoomPathModal
     if (ok) { onChanged?.(listing.path); onClose(); }
   };
 
-  return (
+  // document.body 로 portal — 중첩 stacking context 탈출, 항상 최상위.
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -140,6 +142,7 @@ export function RoomPathModal({ initialPath, onClose, onChanged }: RoomPathModal
           >{applying ? '이동 중…' : '이 방으로'}</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
