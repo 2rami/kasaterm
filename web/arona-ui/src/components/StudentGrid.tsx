@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { Agent } from '@/store';
-import { PixelBadge } from './PixelBadge';
 import { SpritePortrait } from './SpritePortrait';
 import { focusPane } from '@/lib/mcp';
+import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon, ForkIcon } from './activity';
 
 export interface StudentGridProps {
   agents: Agent[];
@@ -13,10 +13,17 @@ type SortKey = 'god-first' | 'status' | 'name';
 type ViewKind = 'grid' | 'list';
 
 const STATUS_ORDER: Record<string, number> = {
-  working: 0, thinking: 0, blocked: 1, waiting: 2, idle: 3, ghost: 4
+  working: 0, thinking: 0, blocked: 1, waiting: 2, idle: 3, ghost: 4,
+};
+const STATUS_COLOR: Record<string, string> = {
+  working: 'var(--cth-mint)', thinking: 'var(--cth-mint)', waiting: 'var(--cth-sky)',
+  blocked: 'var(--cth-coral)', success: 'var(--cth-lemon)', idle: 'var(--cth-ink-300)',
+};
+const STATUS_LABEL: Record<string, string> = {
+  working: '작업', thinking: '생각', waiting: '대기', blocked: '막힘', success: '완료', idle: '쉬는 중',
 };
 
-function sorted(agents: Agent[], key: SortKey): Agent[] {
+function sortAgents(agents: Agent[], key: SortKey): Agent[] {
   return [...agents].sort((a, b) => {
     if (key === 'god-first') {
       if (a.isGod !== b.isGod) return Number(b.isGod) - Number(a.isGod);
@@ -27,131 +34,96 @@ function sorted(agents: Agent[], key: SortKey): Agent[] {
   });
 }
 
-function ProgressBar({ agent }: { agent: Agent }) {
-  const { status, progress = 0, contextTokens, contextLimit } = agent;
-
-  if (status === 'working' || status === 'thinking') {
-    if (contextTokens && contextLimit) {
-      const pct = Math.round((contextTokens / contextLimit) * 100);
-      const fill = pct >= 87 ? 'var(--cth-coral)' : pct >= 75 ? 'var(--cth-lemon)' : 'var(--cth-sky)';
-      return (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-          <div style={{
-            flex: 1, height: 5,
-            background: 'var(--cth-cream-200)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
-            position: 'relative', overflow: 'hidden'
-          }}>
-            <div style={{ position: 'absolute', inset: 0, right: `${100 - pct}%`, background: fill }} />
-          </div>
-          <span style={{ fontSize: 7, fontFamily: 'var(--cth-font-display)', color: 'var(--cth-ink-500)', flexShrink: 0 }}>
-            {pct}%
-          </span>
-        </div>
-      );
-    }
-    return (
-      <div style={{
-        height: 5,
-        background: 'var(--cth-cream-200)',
-        boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
-        overflow: 'hidden', position: 'relative'
-      }}>
-        <div className="cth-pulse" style={{
-          position: 'absolute', left: 0, top: 0, bottom: 0, width: '55%',
-          background: 'var(--cth-lemon)'
-        }} />
-      </div>
-    );
-  }
-
-  if (progress > 0) {
-    const filled = Math.min(8, Math.round(progress));
-    return (
-      <div style={{ display: 'flex', gap: 1 }}>
-        {Array.from({ length: 8 }).map((_, i) => (
-          <div key={i} style={{
-            flex: 1, height: 5,
-            background: i < filled ? 'var(--cth-sky)' : 'var(--cth-cream-200)',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
-          }} />
-        ))}
-      </div>
-    );
-  }
-
+function StatusPill({ status }: { status: string }) {
   return (
-    <div style={{
-      height: 5,
-      background: 'var(--cth-cream-200)',
-      boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)'
-    }} />
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700,
+      color: 'var(--cth-ink-700)', whiteSpace: 'nowrap',
+    }}>
+      <span style={{ width: 7, height: 7, borderRadius: 999, background: STATUS_COLOR[status] ?? 'var(--cth-ink-300)' }} />
+      {STATUS_LABEL[status] ?? status}
+    </span>
+  );
+}
+
+// 활동 칩 — 빌드/현재도구 + 백그라운드 + 서브에이전트(가시화 파이프 재사용).
+function ActivityChips({ agent }: { agent: Agent }) {
+  const building = agent.status === 'working' && isBuildCmd(agent.action);
+  const chip = (bg: string, color: string, key: string, body: React.ReactNode) => (
+    <span key={key} style={{
+      display: 'inline-flex', alignItems: 'center', gap: 3,
+      fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, color,
+      background: bg, padding: '1px 6px', borderRadius: 5, whiteSpace: 'nowrap',
+    }}>{body}</span>
+  );
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, minHeight: 16 }}>
+      {building
+        ? chip('color-mix(in srgb, #E5923A 14%, #fff)', BUILD_COLOR, 'b', <><GearIcon size={10} />빌드</>)
+        : agent.currentTool
+          ? chip('color-mix(in srgb, var(--cth-sky) 12%, #fff)', 'var(--cth-sky)', 't', agent.currentTool)
+          : null}
+      {!!agent.background?.length && chip('color-mix(in srgb, #E5923A 14%, #fff)', BUILD_COLOR, 'bg',
+        <><SpinIcon size={9} />bg {agent.background.length}</>)}
+      {!!agent.subagents?.length && chip('color-mix(in srgb, var(--cth-lilac) 14%, #fff)', 'var(--cth-lilac)', 's',
+        <><ForkIcon size={9} />{agent.subagents.length}</>)}
+    </div>
+  );
+}
+
+function ContextBar({ agent }: { agent: Agent }) {
+  const pct = agent.contextPct ?? (agent.contextTokens && agent.contextLimit
+    ? Math.round((agent.contextTokens / agent.contextLimit) * 100) : 0);
+  if (!pct) return <div style={{ height: 6 }} />;
+  const fill = pct >= 87 ? 'var(--cth-coral)' : pct >= 75 ? 'var(--cth-lemon)' : 'var(--cth-sky)';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+      <div style={{ flex: 1, height: 6, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${pct}%`, background: fill, borderRadius: 999, transition: 'width 0.4s ease' }} />
+      </div>
+      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-500)', flexShrink: 0 }}>{pct}%</span>
+    </div>
   );
 }
 
 function StudentCard({ agent, onSelect }: { agent: Agent; onSelect?: (id: string, title: string) => void }) {
+  const accent = `var(--cth-${agent.accent})`;
   return (
     <button
       onClick={() => { void focusPane(agent.id); onSelect?.(agent.id, agent.name); }}
       className="cth-titlebar-nodrag"
       style={{
-        width: 100, minWidth: 100,
-        border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left',
-        padding: 0, flexShrink: 0
+        width: 168, minWidth: 168, flexShrink: 0,
+        border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left',
+        background: '#fff', borderRadius: 12, overflow: 'hidden',
+        boxShadow: agent.isGod
+          ? '0 2px 10px rgba(21,41,74,0.12), inset 0 0 0 2px var(--cth-lemon)'
+          : '0 2px 10px rgba(21,41,74,0.1), inset 0 0 0 1px var(--cth-cream-200)',
+        display: 'flex', flexDirection: 'column',
       }}
     >
-      <div style={{
-        height: '100%',
-        boxShadow: agent.isGod
-          ? 'inset 0 0 0 2px var(--cth-ink-900), 0 0 0 2px var(--cth-lemon)'
-          : 'inset 0 0 0 2px var(--cth-ink-900)',
-        background: 'var(--cth-cream-100)',
-        display: 'flex', flexDirection: 'column'
-      }}>
-        {/* 일러스트 */}
+      <div style={{ height: 4, background: accent, flexShrink: 0 }} />
+      <div style={{ display: 'flex', gap: 8, padding: '8px 9px 0' }}>
         <div style={{
-          height: 68,
+          width: 46, height: 56, flexShrink: 0, borderRadius: 8,
           background: `var(--cth-${agent.accent}-light)`,
-          display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
-          overflow: 'hidden', position: 'relative', flexShrink: 0
+          display: 'flex', alignItems: 'flex-end', justifyContent: 'center', overflow: 'hidden', position: 'relative',
         }}>
           {agent.isGod && (
-            <span style={{
-              position: 'absolute', top: 3, left: 3,
-              fontFamily: 'var(--cth-font-display)', fontSize: 6,
-              background: 'var(--cth-lemon)', color: 'var(--cth-ink-900)',
-              padding: '1px 4px', boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
-              lineHeight: '10px'
-            }}>GOD</span>
+            <span style={{ position: 'absolute', top: 2, left: 2, fontFamily: 'var(--cth-font-display)', fontSize: 7, color: 'var(--cth-lemon)', fontWeight: 800 }}>★</span>
           )}
-          <SpritePortrait character={agent.character} scale={2} />
+          <SpritePortrait character={agent.character} scale={1.8} />
         </div>
-
-        {/* 정보 */}
-        <div style={{ padding: '4px 5px 5px', display: 'flex', flexDirection: 'column', gap: 2, flex: 1 }}>
-          <div style={{
-            fontFamily: 'var(--cth-font-display)', fontSize: 7, lineHeight: '11px',
-            color: 'var(--cth-ink-900)',
-            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-          }}>{agent.name.toUpperCase()}</div>
-
-          <div style={{
-            fontSize: 9, fontFamily: 'var(--cth-font-ui)', lineHeight: '13px',
-            color: 'var(--cth-ink-500)',
-            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-          }}>{agent.project}</div>
-
-          <PixelBadge status={agent.status} style={{ fontSize: 8, padding: '1px 5px 0', lineHeight: '16px' }} />
-
-          <div style={{
-            fontSize: 9, fontFamily: 'var(--cth-font-ui)', lineHeight: '13px',
-            color: 'var(--cth-ink-900)',
-            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-            minHeight: 13
-          }}>{agent.status === 'idle' ? '' : (agent.action ?? '')}</div>
-
-          <ProgressBar agent={agent} />
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{agent.character}</div>
+          <StatusPill status={agent.status} />
+          <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minHeight: 13 }}>{agent.project || '대기 중'}</div>
         </div>
+      </div>
+      <div style={{ padding: '5px 9px 8px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+        <ActivityChips agent={agent} />
+        <ContextBar agent={agent} />
       </div>
     </button>
   );
@@ -164,26 +136,21 @@ function StudentRow({ agent, onSelect }: { agent: Agent; onSelect?: (id: string,
       className="cth-titlebar-nodrag"
       style={{
         width: '100%', border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left',
-        padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 8,
-        boxShadow: 'inset 0 -1px 0 var(--cth-ink-100)'
+        padding: '6px 10px', display: 'flex', alignItems: 'center', gap: 10,
+        borderBottom: '1px solid var(--cth-cream-200)',
       }}
     >
-      <SpritePortrait character={agent.character} scale={1} />
-      <span style={{
-        fontFamily: 'var(--cth-font-display)', fontSize: 8, color: 'var(--cth-ink-900)',
-        minWidth: 80, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-      }}>{agent.name.toUpperCase()}</span>
-      <PixelBadge status={agent.status} style={{ fontSize: 8, flexShrink: 0 }} />
-      <span style={{
-        flex: 1, fontSize: 10, fontFamily: 'var(--cth-font-ui)',
-        color: 'var(--cth-ink-500)',
-        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-      }}>
+      <div style={{ width: 30, height: 36, flexShrink: 0, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+        <SpritePortrait character={agent.character} scale={1.3} />
+      </div>
+      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', minWidth: 70, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {agent.isGod && <span style={{ color: 'var(--cth-lemon)' }}>★ </span>}{agent.character}
+      </span>
+      <div style={{ width: 60, flexShrink: 0 }}><StatusPill status={agent.status} /></div>
+      <span style={{ flex: 1, fontSize: 11, fontFamily: 'var(--cth-font-ui)', color: 'var(--cth-ink-500)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {agent.project}{agent.action ? ` — ${agent.action}` : ''}
       </span>
-      <div style={{ width: 72, flexShrink: 0 }}>
-        <ProgressBar agent={agent} />
-      </div>
+      <div style={{ flexShrink: 0 }}><ActivityChips agent={agent} /></div>
     </button>
   );
 }
@@ -191,99 +158,54 @@ function StudentRow({ agent, onSelect }: { agent: Agent; onSelect?: (id: string,
 export function StudentGrid({ agents, onSelect }: StudentGridProps) {
   const [sort, setSort] = useState<SortKey>('god-first');
   const [view, setView] = useState<ViewKind>('grid');
+  const list = sortAgents(agents, sort);
 
-  useEffect(() => {
-    const id = 'cth-pulse-style';
-    if (!document.getElementById(id)) {
-      const s = document.createElement('style');
-      s.id = id;
-      s.textContent =
-        '@keyframes cth-pulse{0%,100%{opacity:1}50%{opacity:.25}}' +
-        '.cth-pulse{animation:cth-pulse 1.4s ease-in-out infinite}';
-      document.head.appendChild(s);
-    }
-  }, []);
-
-  const list = sorted(agents, sort);
+  const ViewBtn = ({ v, children }: { v: ViewKind; children: React.ReactNode }) => (
+    <button
+      onClick={() => setView(v)}
+      title={v === 'grid' ? '카드' : '리스트'}
+      style={{
+        width: 26, height: 22, padding: 0, border: 'none', cursor: 'pointer', borderRadius: 6,
+        background: view === v ? 'var(--cth-sky)' : 'var(--cth-cream-100)',
+        color: view === v ? '#fff' : 'var(--cth-ink-500)',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      }}
+    >{children}</button>
+  );
 
   return (
     <div>
       {/* 컨트롤 바 */}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '4px 10px',
-        borderBottom: '1px solid var(--cth-ink-900)'
-      }}>
-        <span style={{
-          fontFamily: 'var(--cth-font-display)', fontSize: 7,
-          color: 'var(--cth-ink-500)', whiteSpace: 'nowrap'
-        }}>
-          학생 ({agents.length})
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', borderBottom: '1px solid var(--cth-cream-200)' }}>
+        <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 11, color: 'var(--cth-ink-700)', whiteSpace: 'nowrap' }}>
+          학생 <b style={{ color: 'var(--cth-sky)' }}>{agents.length}</b>
         </span>
-
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value as SortKey)}
           style={{
-            fontFamily: 'var(--cth-font-display)', fontSize: 7,
-            padding: '2px 6px', border: 'none',
-            boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
-            background: 'var(--cth-cream-100)', color: 'var(--cth-ink-900)',
-            cursor: 'pointer'
+            fontFamily: 'var(--cth-font-ui)', fontSize: 11, padding: '3px 8px', borderRadius: 7,
+            border: '1px solid var(--cth-cream-200)', background: '#fff', color: 'var(--cth-ink-700)', cursor: 'pointer',
           }}
         >
           <option value="god-first">God 우선</option>
           <option value="status">상태순</option>
           <option value="name">이름순</option>
         </select>
-
         <div style={{ flex: 1 }} />
-
-        {(['grid', 'list'] as ViewKind[]).map((v) => (
-          <button
-            key={v}
-            onClick={() => setView(v)}
-            title={v === 'grid' ? '그리드' : '리스트'}
-            style={{
-              width: 24, height: 20, padding: 0, border: 'none', cursor: 'pointer',
-              background: view === v ? 'var(--cth-sky)' : 'var(--cth-cream-200)',
-              boxShadow: 'inset 0 0 0 1px var(--cth-ink-900)',
-              fontFamily: 'var(--cth-font-display)', fontSize: 9, color: 'var(--cth-ink-900)'
-            }}
-          >
-            {v === 'grid' ? '▦' : '≡'}
-          </button>
-        ))}
+        <ViewBtn v="grid"><svg width="13" height="13" viewBox="0 0 14 14"><rect x="1" y="1" width="5" height="5" rx="1" fill="currentColor" /><rect x="8" y="1" width="5" height="5" rx="1" fill="currentColor" /><rect x="1" y="8" width="5" height="5" rx="1" fill="currentColor" /><rect x="8" y="8" width="5" height="5" rx="1" fill="currentColor" /></svg></ViewBtn>
+        <ViewBtn v="list"><svg width="13" height="13" viewBox="0 0 14 14"><rect x="1" y="2" width="12" height="2" rx="1" fill="currentColor" /><rect x="1" y="6" width="12" height="2" rx="1" fill="currentColor" /><rect x="1" y="10" width="12" height="2" rx="1" fill="currentColor" /></svg></ViewBtn>
       </div>
 
-      {/* 카드/리스트 */}
-      {view === 'grid' ? (
-        <div style={{
-          display: 'flex', gap: 6, padding: '6px 10px',
-          overflowX: 'auto', overflowY: 'hidden',
-          alignItems: 'stretch'
-        }}>
-          {list.length === 0 ? (
-            <span style={{
-              fontFamily: 'var(--cth-font-ui)', fontSize: 11,
-              color: 'var(--cth-ink-300)', padding: '10px 0'
-            }}>
-              학생 없음 — board 폴링 중
-            </span>
-          ) : list.map((a) => (
-            <StudentCard key={a.id} agent={a} onSelect={onSelect} />
-          ))}
+      {list.length === 0 ? (
+        <div style={{ padding: '14px 12px', fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>학생 없음 — board 폴링 중</div>
+      ) : view === 'grid' ? (
+        <div style={{ display: 'flex', gap: 8, padding: '8px 12px', overflowX: 'auto', overflowY: 'hidden', alignItems: 'stretch' }}>
+          {list.map((a) => <StudentCard key={a.id} agent={a} onSelect={onSelect} />)}
         </div>
       ) : (
-        <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-          {list.length === 0 ? (
-            <div style={{
-              padding: '10px', fontFamily: 'var(--cth-font-ui)',
-              fontSize: 11, color: 'var(--cth-ink-300)'
-            }}>학생 없음</div>
-          ) : list.map((a) => (
-            <StudentRow key={a.id} agent={a} onSelect={onSelect} />
-          ))}
+        <div style={{ maxHeight: 196, overflowY: 'auto' }}>
+          {list.map((a) => <StudentRow key={a.id} agent={a} onSelect={onSelect} />)}
         </div>
       )}
     </div>

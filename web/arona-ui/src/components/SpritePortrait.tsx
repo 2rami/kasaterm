@@ -34,7 +34,7 @@ export function SpritePortrait({ character, scale = 2, background = 'transparent
         style={{
           width: w, height: h,
           objectFit: 'contain', objectPosition: 'center bottom',
-          display: 'block',
+          display: 'block', imageRendering: 'pixelated',
         }}
       />
     );
