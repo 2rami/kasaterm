@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
+import { FolderBrowser } from './FolderBrowser';
 import { fetchCharacters, spawnAgent, type CharacterDef } from '@/lib/mcp';
 
 // 학생(워커) 부르기 — munder AddAgentModal 을 우리 MCP(/characters·/spawn)에 맞게
@@ -102,20 +103,16 @@ export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalP
               </select>
             </label>
 
-            {/* cwd (선택) */}
-            <label style={{ fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-ink-700)' }}>
-              작업 폴더 <span style={{ color: 'var(--cth-ink-300)' }}>(선택 · 절대경로)</span>
-              <input
-                value={cwd}
-                onChange={(e) => setCwd(e.target.value)}
-                placeholder="비우면 현재 폴더"
-                style={{
-                  display: 'block', marginTop: 4, width: '100%', padding: '4px 8px',
-                  background: 'var(--cth-cream-50)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-700)',
-                  border: 'none'
-                }}
-              />
-            </label>
+            {/* 작업 폴더 — 방 경로 변경처럼 폴더 클릭 탐색(상위로/하위 진입) */}
+            <div style={{ fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-ink-700)' }}>
+              <div style={{ marginBottom: 4 }}>
+                작업 폴더 <span style={{ color: 'var(--cth-ink-300)' }}>(탐색해서 선택)</span>
+              </div>
+              <FolderBrowser initialPath={defaultCwd} onPathChange={setCwd} height={150} />
+              <div style={{ marginTop: 4, fontFamily: 'var(--cth-font-mono)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', direction: 'rtl', textAlign: 'left' }} title={cwd}>
+                선택: {cwd || '현재 폴더'}
+              </div>
+            </div>
 
             {err && (
               <div style={{ color: 'var(--cth-coral)', fontSize: 'var(--cth-text-body-sm)' }}>{err}</div>
