@@ -31,7 +31,7 @@ export function RoomPathModal({ initialPath, onClose, onChanged }: RoomPathModal
     <div
       onClick={onClose}
       style={{
-        position: 'fixed', inset: 0, zIndex: 50,
+        position: 'fixed', inset: 0, zIndex: 1000,
         background: 'rgba(21, 41, 74, 0.42)', backdropFilter: 'blur(2px)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}
