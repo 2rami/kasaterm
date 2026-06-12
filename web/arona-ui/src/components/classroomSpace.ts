@@ -27,26 +27,26 @@ export interface CafeSpot {
   facing: Facing;
 }
 
-// 바닥 보행 영역 — 이 사각형 밖(벽/창/위쪽 원경)은 못 감. 빈 바닥 배경 보고 보정.
-export const FLOOR_BOUNDS = { x0: 10, y0: 48, x1: 90, y1: 96 };
+// 바닥 보행 영역 — 이 사각형 밖(상단 벽/창)은 못 감. 픽셀 바닥(상단 ~13% 벽) 기준.
+export const FLOOR_BOUNDS = { x0: 7, y0: 20, x1: 93, y1: 96 };
 
-// 교실 가구 배치(빈 바닥 furn-floor 위). 책상 6개 2열(자리) + 좌하단 카페(소파·커피)
-// + 벽쪽 책장/화분(장식·충돌만). 모든 좌표 % (x=중심, y=발밑).
+// 교실 가구 배치(빈 바닥 classroom-floor 위). 책상 6개 2열(자리) + 좌하단 카페(소파
+// ·커피) + 벽쪽 책장/화분(장식·충돌만). 모든 좌표 % (x=중심, y=발밑).
 export const CLASSROOM_FURNITURE: Furniture[] = [
   // 뒷줄 책상(창가 쪽)
-  deskAt('desk-0', 32, 62),
-  deskAt('desk-1', 52, 62),
-  deskAt('desk-2', 72, 62),
-  // 앞줄 책상(앞쪽 — 더 큼/가까움)
-  deskAt('desk-3', 32, 84),
-  deskAt('desk-4', 52, 84),
-  deskAt('desk-5', 72, 84),
+  deskAt('desk-0', 33, 50),
+  deskAt('desk-1', 53, 50),
+  deskAt('desk-2', 73, 50),
+  // 앞줄 책상(앞쪽)
+  deskAt('desk-3', 33, 82),
+  deskAt('desk-4', 53, 82),
+  deskAt('desk-5', 73, 82),
   // 카페 구역(좌하단) — 소파 + 커피
-  { id: 'sofa', kind: 'sofa', x: 17, y: 93, w: 20, sprite: 'furn-sofa.png', block: [9, 87, 25, 93] },
-  { id: 'coffee', kind: 'coffee', x: 13, y: 66, w: 11, sprite: 'furn-coffee.png', block: [9, 59, 18, 67] },
+  { id: 'sofa', kind: 'sofa', x: 18, y: 94, w: 20, sprite: 'furn-sofa.png', block: [10, 88, 26, 94] },
+  { id: 'coffee', kind: 'coffee', x: 13, y: 64, w: 11, sprite: 'furn-coffee.png', block: [9, 57, 18, 65] },
   // 장식 — 충돌만(자리 없음)
-  { id: 'shelf', kind: 'shelf', x: 87, y: 56, w: 11, sprite: 'furn-shelf.png', block: [83, 49, 92, 57] },
-  { id: 'plant', kind: 'plant', x: 89, y: 90, w: 7, sprite: 'furn-plant.png', block: [86, 86, 92, 91] },
+  { id: 'shelf', kind: 'shelf', x: 88, y: 52, w: 11, sprite: 'furn-shelf.png', block: [84, 45, 93, 53] },
+  { id: 'plant', kind: 'plant', x: 90, y: 92, w: 7, sprite: 'furn-plant.png', block: [87, 88, 93, 93] },
 ];
 
 function deskAt(id: string, x: number, y: number): Furniture {

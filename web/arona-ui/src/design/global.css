@@ -127,3 +127,9 @@ canvas { image-rendering: pixelated; }
   0%, 100% { transform: scale(1); opacity: 0.85; }
   50% { transform: scale(1.25); opacity: 1; }
 }
+
+/* 걷는 느낌 — 픽셀 스프라이트 수직 통통(워크프레임 없이 이동감). */
+@keyframes schale-bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}

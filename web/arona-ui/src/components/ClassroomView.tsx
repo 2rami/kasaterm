@@ -248,6 +248,7 @@ function FurnitureSprite({ f }: { f: Furniture }) {
         position: 'absolute', left: `${f.x}%`, top: `${f.y}%`,
         width: `${f.w}%`, transform: 'translate(-50%, -100%)',
         zIndex: Math.round(f.y * 10), pointerEvents: 'none', userSelect: 'none',
+        imageRendering: 'pixelated',
       }}
     />
   );
@@ -282,6 +283,7 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
       borderRadius: 16, overflow: 'hidden',
       backgroundImage: `url(${ROOT}assets/${background ?? 'classroom-floor.png'})`,
       backgroundSize: 'cover', backgroundPosition: 'center',
+      imageRendering: 'pixelated',
       transition: 'background-image 0.3s ease',
       boxShadow: '0 6px 20px rgba(21, 41, 74, 0.12), inset 0 0 0 1px var(--cth-cream-200)',
     }}>
