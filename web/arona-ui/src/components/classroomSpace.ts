@@ -56,6 +56,45 @@ function deskAt(id: string, x: number, y: number): Furniture {
   return { id, kind: 'desk', x, y, w: 14, sprite: 'furn-desk.png', block: [x - 7, y - 12, x + 7, y - 2], seat };
 }
 
+function sofaAt(id: string, x: number, y: number): Furniture {
+  return { id, kind: 'sofa', x, y, w: 20, sprite: 'furn-sofa.png', block: [x - 8, y - 6, x + 8, y] };
+}
+function coffeeAt(id: string, x: number, y: number): Furniture {
+  return { id, kind: 'coffee', x, y, w: 11, sprite: 'furn-coffee.png', block: [x - 4, y - 7, x + 5, y] };
+}
+function shelfAt(id: string, x: number, y: number): Furniture {
+  return { id, kind: 'shelf', x, y, w: 11, sprite: 'furn-shelf.png', block: [x - 4, y - 7, x + 5, y] };
+}
+function plantAt(id: string, x: number, y: number): Furniture {
+  return { id, kind: 'plant', x, y, w: 7, sprite: 'furn-plant.png', block: [x - 3, y - 4, x + 3, y - 1] };
+}
+
+// 라운지(카페형) — 좌측 휴게(소파2·커피·화분) + 우측 책상3. idle 많은 방.
+export const LOUNGE_FURNITURE: Furniture[] = [
+  deskAt('desk-0', 62, 60),
+  deskAt('desk-1', 80, 60),
+  deskAt('desk-2', 71, 82),
+  sofaAt('sofa-0', 20, 78),
+  sofaAt('sofa-1', 22, 93),
+  coffeeAt('coffee', 13, 62),
+  plantAt('plant-0', 41, 90),
+  plantAt('plant-1', 90, 86),
+  shelfAt('shelf', 89, 60),
+];
+
+// 스튜디오(작업실형) — 책상6 빽빽 2열 + 양쪽 벽 책장. 작업 위주 방.
+export const STUDIO_FURNITURE: Furniture[] = [
+  deskAt('desk-0', 30, 62),
+  deskAt('desk-1', 50, 62),
+  deskAt('desk-2', 70, 62),
+  deskAt('desk-3', 30, 84),
+  deskAt('desk-4', 50, 84),
+  deskAt('desk-5', 70, 84),
+  shelfAt('shelf-0', 88, 58),
+  shelfAt('shelf-1', 12, 58),
+  plantAt('plant', 89, 90),
+];
+
 export function deskSeats(furniture: Furniture[]): Furniture['seat'][] {
   return furniture.filter((f) => f.kind === 'desk' && f.seat).map((f) => f.seat!);
 }
