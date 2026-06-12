@@ -5,6 +5,7 @@ import {
   CLASSROOM_FURNITURE, buildGrid, deskSeats, cafeSpots, findPath,
   type Furniture, type CafeSpot,
 } from './classroomSpace';
+import { pickExchange } from './cafeteriaLines';
 
 const ROOT = import.meta.env.BASE_URL || '/';
 const SPEED = 24; // 이동 속도(%/초) — 방 가로지르기 ≈ 3.5초
@@ -60,12 +61,52 @@ const GLYPH: Record<string, { t: React.ReactNode; c: string; pulse?: boolean }> 
 
 type Pt = { x: number; y: number };
 
+// 카페 잡담 디렉터(munder) — idle 학생 2명+ 모이면 주기적으로 둘이 짝지어 2.6초
+// 간격으로 대사를 주고받는다. 반환 = { agentId: 지금 띄울 대사 }.
+function useCafeChat(agents: Agent[]): Record<string, string> {
+  const [bubbles, setBubbles] = useState<Record<string, string>>({});
+  const idle = agents.filter((a) => a.status === 'idle' && !a.isGod).map((a) => a.id);
+  const key = idle.join(',');
+  const idleRef = useRef(idle);
+  idleRef.current = idle;
+  useEffect(() => {
+    if (idleRef.current.length < 2) { setBubbles({}); return; }
+    let alive = true;
+    let round = 0;
+    const timers: number[] = [];
+    const runExchange = () => {
+      if (!alive) return;
+      const ids = idleRef.current;
+      if (ids.length < 2) { setBubbles({}); timers.push(window.setTimeout(runExchange, 4000)); return; }
+      const shuffled = [...ids].sort(() => Math.random() - 0.5);
+      const a = shuffled[0], b = shuffled[1];
+      const lines = pickExchange(round++ + Math.floor(Math.random() * 7));
+      let i = 0;
+      const beat = () => {
+        if (!alive) return;
+        if (i >= lines.length) {
+          setBubbles({});
+          timers.push(window.setTimeout(runExchange, 4500 + Math.random() * 4000));
+          return;
+        }
+        const ln = lines[i++];
+        setBubbles({ [ln.who === 'a' ? a : b]: ln.text });
+        timers.push(window.setTimeout(beat, 2600));
+      };
+      beat();
+    };
+    timers.push(window.setTimeout(runExchange, 2200));
+    return () => { alive = false; timers.forEach((t) => window.clearTimeout(t)); };
+  }, [key]);
+  return bubbles;
+}
+
 // 교실 캐릭터 — working/waiting/blocked = 자기 책상으로 BFS 경로 이동해 앉음, idle =
 // 카페 구역을 어슬렁(가구 피해 다님). 이동은 waypoint 단위 CSS transition + 워크
 // 애니메이션 + 진행방향 flip. 도착하면 멈춤. 머리 위 말풍선/글리프. 클릭 → 대화.
 function ClassroomCharacter(
-  { agent, seat, grid, cafe, onSelect }:
-  { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; onSelect?: (id: string, title: string) => void },
+  { agent, seat, grid, cafe, chatLine, onSelect }:
+  { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void },
 ) {
   const atDesk = agent.status !== 'idle';
   const home = seat ? { x: seat.x, y: seat.y } : { x: 50, y: 75 };
@@ -116,7 +157,8 @@ function ClassroomCharacter(
     return () => { window.clearInterval(iv); window.clearTimeout(timer.current); };
   }, [atDesk, seat?.x, seat?.y, walkTo, cafe]);
 
-  const thought = thoughtFor(agent);
+  const chatting = chatLine && agent.status === 'idle';
+  const thought = chatting ? chatLine : thoughtFor(agent);
   const glyph = GLYPH[agent.status];
 
   return (
@@ -222,6 +264,7 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
   const grid = useMemo(() => buildGrid(furniture), [furniture]);
   const seats = useMemo(() => deskSeats(furniture), [furniture]);
   const cafe = useMemo(() => cafeSpots(furniture), [furniture]);
+  const chat = useCafeChat(agents);
 
   return (
     <div style={{
@@ -236,7 +279,7 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
       {furniture.map((f) => <FurnitureSprite key={f.id} f={f} />)}
 
       {sorted.slice(0, Math.max(seats.length, 6)).map((a, i) => (
-        <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} onSelect={onSelect} />
+        <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} chatLine={chat[a.id]} onSelect={onSelect} />
       ))}
 
       {sorted.length === 0 && (

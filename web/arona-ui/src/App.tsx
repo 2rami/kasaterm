@@ -4,6 +4,7 @@ import { AgentCard } from './components/AgentCard';
 import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
+import { LOUNGE_FURNITURE, STUDIO_FURNITURE } from './components/classroomSpace';
 import { CommandCenter } from './components/CommandCenter';
 import { StudentGrid } from './components/StudentGrid';
 import { Footer } from './components/Footer';
@@ -81,12 +82,12 @@ export function App() {
   // 장소(워크스페이스) — 학생 cwd 별 방. 활성 방 선택 시 그 방 학생만 보인다.
   const workspaces = workspacesFromAgents(sorted);
   const shown = activeWs ? sorted.filter((a) => (a.cwd || '') === activeWs) : sorted;
-  // 장소별 배경 — 기본 교실은 빈 바닥(가구 따로 배치), 워크스페이스(실 cwd)는
-  // 가구가 박힌 카페/작업실 일러를 그대로. 가구 박힌 배경엔 placed 가구를 끔([]).
-  const BACKGROUNDS = ['bg-cafe.png', 'bg-office.png'];
+  // 장소이동 — 모든 방이 빈 바닥(classroom-floor) + 가구 모델로 통일(충돌·길찾기
+  // 일관, 어느 방이든 책상 안 뚫음). 워크스페이스별 가구 변형으로 분위기만 다르게.
+  const FURNITURE_SETS = [LOUNGE_FURNITURE, STUDIO_FURNITURE];
   const wsIdx = activeWs ? workspaces.findIndex((w) => w.cwd === activeWs) : -1;
-  const roomBg = wsIdx >= 0 ? BACKGROUNDS[wsIdx % BACKGROUNDS.length] : 'classroom-floor.png';
-  const roomFurniture = wsIdx >= 0 ? [] : undefined; // 기본 교실=기본 가구, 그 외=가구 끔
+  const roomBg = 'classroom-floor.png';
+  const roomFurniture = wsIdx >= 0 ? FURNITURE_SETS[wsIdx % FURNITURE_SETS.length] : undefined;
 
   // 재화 = claude 토큰 지표(선생님): 💎입력토큰 · 🪙비용$ (전 학생 합산).
   const totalInputTokens = sorted.reduce((s, a) => s + (a.tokensIn ?? 0), 0);
