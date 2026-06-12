@@ -1,19 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, type Agent } from '@/store';
 import { SpriteWalk } from './SpriteWalk';
+import {
+  CLASSROOM_FURNITURE, buildGrid, deskSeats, cafeSpots, findPath,
+  type Furniture, type CafeSpot,
+} from './classroomSpace';
 
 const ROOT = import.meta.env.BASE_URL || '/';
-
-// classroom-bg(SCHALE 본부) 위 책상 자리 — leader(아로나)→members 0..5. 발밑 앵커.
-const SEATS = [
-  { x: 43, y: 60 }, { x: 63, y: 60 },
-  { x: 50, y: 78 }, { x: 28, y: 74 },
-  { x: 72, y: 74 }, { x: 25, y: 56 },
-];
-// 카페 구역(좌하단 휴게) — idle 학생이 일 안 할 때 여기 모여 어슬렁(거노: 교실/카페
-// 구역 분리). working 은 자기 책상(SEAT). 배경의 카페/소파 영역에 맞춰 미세조정.
-const CAFE = { x0: 16, x1: 44, y0: 76, y1: 88 };
-const MOVE_MS = 2200;
+const SPEED = 24; // 이동 속도(%/초) — 방 가로지르기 ≈ 3.5초
 
 function firstLine(s?: string): string {
   if (!s) return '';
@@ -64,39 +58,63 @@ const GLYPH: Record<string, { t: React.ReactNode; c: string; pulse?: boolean }> 
   success: { t: <SparkleGlyph />, c: 'var(--cth-lemon)' },
 };
 
-// 교실 캐릭터(munder Character 이식) — working/waiting/blocked = 자기 책상으로
-// 이동해 일함, idle = 바닥을 돌아다님(주기적 배회). 이동 중엔 워크 애니메이션 +
-// 진행방향 flip. 머리 위 말풍선(현재 tool/상태) + 상태 글리프. 클릭 → 대화.
-function ClassroomCharacter({ agent, seat, onSelect }: { agent: Agent; seat: { x: number; y: number }; onSelect?: (id: string, title: string) => void }) {
-  const atDesk = agent.status !== 'idle'; // idle 만 배회, 그 외(work/wait/blocked)는 자리
-  const [pos, setPos] = useState(seat);
+type Pt = { x: number; y: number };
+
+// 교실 캐릭터 — working/waiting/blocked = 자기 책상으로 BFS 경로 이동해 앉음, idle =
+// 카페 구역을 어슬렁(가구 피해 다님). 이동은 waypoint 단위 CSS transition + 워크
+// 애니메이션 + 진행방향 flip. 도착하면 멈춤. 머리 위 말풍선/글리프. 클릭 → 대화.
+function ClassroomCharacter(
+  { agent, seat, grid, cafe, onSelect }:
+  { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; onSelect?: (id: string, title: string) => void },
+) {
+  const atDesk = agent.status !== 'idle';
+  const home = seat ? { x: seat.x, y: seat.y } : { x: 50, y: 75 };
+  const [pos, setPos] = useState<Pt>(home);
+  const [segMs, setSegMs] = useState(0);
   const [moving, setMoving] = useState(false);
   const [flip, setFlip] = useState(false);
   const posRef = useRef(pos);
   posRef.current = pos;
+  const pathRef = useRef<Pt[]>([]);
   const timer = useRef<number | undefined>(undefined);
 
-  const goTo = useCallback((t: { x: number; y: number }) => {
+  const step = useCallback(() => {
+    const path = pathRef.current;
+    if (!path.length) { setMoving(false); return; }
+    const next = path.shift()!;
     const cur = posRef.current;
-    if (Math.abs(t.x - cur.x) < 0.6 && Math.abs(t.y - cur.y) < 0.6) return;
-    setFlip(t.x < cur.x);
+    const dist = Math.hypot(next.x - cur.x, next.y - cur.y);
+    if (dist < 0.4) { posRef.current = next; setPos(next); step(); return; }
+    if (next.x < cur.x - 0.3) setFlip(true);
+    else if (next.x > cur.x + 0.3) setFlip(false);
+    const ms = Math.max(140, (dist / SPEED) * 1000);
+    setSegMs(ms);
     setMoving(true);
-    setPos(t);
+    posRef.current = next;
+    setPos(next);
     window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setMoving(false), MOVE_MS);
+    timer.current = window.setTimeout(step, ms);
   }, []);
 
+  const walkTo = useCallback((target: Pt) => {
+    pathRef.current = findPath(grid, posRef.current, target);
+    step();
+  }, [grid, step]);
+
   useEffect(() => {
-    if (atDesk) { goTo(seat); return; }
-    // idle → 카페 구역 안을 어슬렁(쉬는 느낌).
-    const wander = () => goTo({
-      x: CAFE.x0 + Math.random() * (CAFE.x1 - CAFE.x0),
-      y: CAFE.y0 + Math.random() * (CAFE.y1 - CAFE.y0),
-    });
+    if (atDesk && seat) { walkTo({ x: seat.x, y: seat.y }); return; }
+    // idle → 카페 구역 머무름 지점 근처를 어슬렁(가구 피해 BFS).
+    const wander = () => {
+      const spot = cafe.length ? cafe[Math.floor(Math.random() * cafe.length)] : null;
+      const t: Pt = spot
+        ? { x: spot.x + (Math.random() * 6 - 3), y: spot.y + (Math.random() * 4 - 2) }
+        : { x: 20 + Math.random() * 24, y: 78 + Math.random() * 10 };
+      walkTo(t);
+    };
     wander();
-    const iv = window.setInterval(wander, 4200);
+    const iv = window.setInterval(wander, 5200);
     return () => { window.clearInterval(iv); window.clearTimeout(timer.current); };
-  }, [atDesk, seat.x, seat.y, goTo]);
+  }, [atDesk, seat?.x, seat?.y, walkTo, cafe]);
 
   const thought = thoughtFor(agent);
   const glyph = GLYPH[agent.status];
@@ -108,13 +126,12 @@ function ClassroomCharacter({ agent, seat, onSelect }: { agent: Agent; seat: { x
       style={{
         position: 'absolute', left: `${pos.x}%`, top: `${pos.y}%`,
         transform: 'translate(-50%, -100%)',
-        transition: `left ${MOVE_MS}ms ease-in-out, top ${MOVE_MS}ms ease-in-out`,
+        transition: `left ${segMs}ms linear, top ${segMs}ms linear`,
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
         border: 'none', background: 'transparent', cursor: 'pointer', padding: 0,
-        width: 132, zIndex: Math.round(pos.y),
+        width: 132, zIndex: Math.round(pos.y * 10),
       }}
     >
-      {/* 상태 글리프 */}
       {glyph && (
         <div style={{
           fontSize: 14, fontWeight: 900, color: glyph.c, lineHeight: 1, marginBottom: 1,
@@ -123,7 +140,6 @@ function ClassroomCharacter({ agent, seat, onSelect }: { agent: Agent; seat: { x
         }}>{glyph.t}</div>
       )}
 
-      {/* 말풍선 */}
       {thought && (
         <div style={{
           maxWidth: 150, padding: '6px 10px', borderRadius: 12,
@@ -139,12 +155,10 @@ function ClassroomCharacter({ agent, seat, onSelect }: { agent: Agent; seat: { x
         </div>
       )}
 
-      {/* 캐릭터 — 이동 중 워크 애니메이션 */}
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
         <SpriteWalk character={agent.character} walking={moving} flip={flip} width={72} height={100} />
       </div>
 
-      {/* 이름표 + 상태 점 */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 5,
         background: 'rgba(255,255,255,0.9)', borderRadius: 9, padding: '2px 9px',
@@ -156,7 +170,6 @@ function ClassroomCharacter({ agent, seat, onSelect }: { agent: Agent; seat: { x
         {agent.character}
       </div>
 
-      {/* 경로(cwd) */}
       {agent.cwd && (
         <div style={{
           marginTop: 2, padding: '1px 7px', borderRadius: 7,
@@ -169,33 +182,61 @@ function ClassroomCharacter({ agent, seat, onSelect }: { agent: Agent; seat: { x
   );
 }
 
+// 가구 스프라이트 — 개별 img 를 좌표 배치. y-zindex 라 캐릭터와 한 레이어에서 앞뒤가
+// 가려진다(발밑 y 큰 게 앞). 스프라이트 없으면(아직 미생성) 조용히 숨김.
+function FurnitureSprite({ f }: { f: Furniture }) {
+  const [ok, setOk] = useState(true);
+  if (!ok) return null;
+  return (
+    <img
+      src={`${ROOT}assets/${f.sprite}`}
+      alt=""
+      onError={() => setOk(false)}
+      draggable={false}
+      style={{
+        position: 'absolute', left: `${f.x}%`, top: `${f.y}%`,
+        width: `${f.w}%`, transform: 'translate(-50%, -100%)',
+        zIndex: Math.round(f.y * 10), pointerEvents: 'none', userSelect: 'none',
+      }}
+    />
+  );
+}
+
 export interface ClassroomViewProps {
   onSelect?: (surfaceId: string, title: string) => void;
   /** 활성 워크스페이스 학생만(장소이동). 없으면 store 전체. */
   agents?: Agent[];
-  /** 장소 배경 파일명(워크스페이스별). 없으면 교실. */
+  /** 바닥 배경 파일명(워크스페이스별). 없으면 빈 교실 바닥. */
   background?: string;
+  /** 배치 가구. 기본 교실 세트. 가구 그림이 박힌 배경(카페/오피스)이면 [] 로 끔. */
+  furniture?: Furniture[];
 }
 
-// 샬레 교실 — 배경 일러 위에 학생들이 일하러 책상에 가거나(working) 바닥을 돌아다님
-// (idle). munder Office 패턴(상태→위치/애니/말풍선/글리프) 이식. 클릭 → 우측 대화.
-export function ClassroomView({ onSelect, agents: agentsProp, background }: ClassroomViewProps) {
+// 샬레 교실 — 빈 바닥 배경 위에 가구를 개별 배치(munder 식). 학생은 가구를 피해
+// 책상(working)이나 카페(idle)로 BFS 경로 이동. 가구·학생이 한 z-레이어라 앞뒤가림.
+export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE }: ClassroomViewProps) {
   const storeAgents = useStore((s) => s.agents);
   const agents = agentsProp ?? storeAgents;
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
+
+  const grid = useMemo(() => buildGrid(furniture), [furniture]);
+  const seats = useMemo(() => deskSeats(furniture), [furniture]);
+  const cafe = useMemo(() => cafeSpots(furniture), [furniture]);
 
   return (
     <div style={{
       position: 'relative', width: '100%', maxWidth: 960, margin: '0 auto',
       aspectRatio: '3 / 2',
       borderRadius: 16, overflow: 'hidden',
-      backgroundImage: `url(${ROOT}assets/${background ?? 'classroom-bg.png'})`,
+      backgroundImage: `url(${ROOT}assets/${background ?? 'classroom-floor.png'})`,
       backgroundSize: 'cover', backgroundPosition: 'center',
       transition: 'background-image 0.3s ease',
       boxShadow: '0 6px 20px rgba(21, 41, 74, 0.12), inset 0 0 0 1px var(--cth-cream-200)',
     }}>
-      {sorted.slice(0, SEATS.length).map((a, i) => (
-        <ClassroomCharacter key={a.id} agent={a} seat={SEATS[i]} onSelect={onSelect} />
+      {furniture.map((f) => <FurnitureSprite key={f.id} f={f} />)}
+
+      {sorted.slice(0, Math.max(seats.length, 6)).map((a, i) => (
+        <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} onSelect={onSelect} />
       ))}
 
       {sorted.length === 0 && (
