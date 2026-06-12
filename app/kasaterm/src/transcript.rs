@@ -121,6 +121,13 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     // 따로 모아, 매칭 안 된(=진행 중) 것만 남긴다.
     let mut subagent_uses: Vec<(String, String)> = Vec::new();
     let mut completed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 백그라운드 셸: run_in_background Bash(tool_use_id→설명) ↔ 런치 응답 shell id
+    // (tool_use_id→id) ↔ 완료 통보(<task-id>) 로 in-flight 만 남긴다.
+    let mut bg_launch: Vec<(String, String)> = Vec::new();
+    let mut bg_shell: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut done_tasks: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 도구 흐름 타임라인 — tail 윈도 최신순 tool_use 라벨(최대 8).
+    let mut recent_tools: Vec<String> = Vec::new();
     let mut model = String::new();
     let mut cwd = String::new();
 
@@ -129,6 +136,15 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
             Ok(v) => v,
             Err(_) => continue, // tail 첫 줄은 잘렸을 수 있다 — 안전하게 무시.
         };
+        // 백그라운드 셸/서브에이전트 완료 통보(<task-notification>)의 task-id 수집 —
+        // 완료 판정용. 원문 라인을 직접 스캔(어느 메시지 type 에 실리든 잡는다).
+        let mut scan = 0usize;
+        while let Some(i) = line[scan..].find("<task-id>") {
+            let s = scan + i + "<task-id>".len();
+            let Some(j) = line[s..].find("</task-id>") else { break };
+            done_tasks.insert(line[s..s + j].trim().to_string());
+            scan = s + j;
+        }
         // cwd 는 user/assistant 줄 최상위에 절대경로로 실린다 — 최신(역순 첫) 1개.
         if cwd.is_empty() {
             if let Some(c) = v.get("cwd").and_then(|x| x.as_str()) {
@@ -185,7 +201,23 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                                     .unwrap_or("subagent");
                                 subagent_uses.push((id.to_string(), clip(desc, 40)));
                             }
+                            // 백그라운드 런치 — run_in_background Bash(불리언/문자열 "true" 둘 다).
+                            let bg = b.pointer("/input/run_in_background");
+                            let is_bg = bg.and_then(|x| x.as_bool()).unwrap_or(false)
+                                || bg.and_then(|x| x.as_str()).is_some_and(|s| s.eq_ignore_ascii_case("true"));
+                            if name == "Bash" && is_bg {
+                                let id = b.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                                let desc = b
+                                    .pointer("/input/description")
+                                    .and_then(|x| x.as_str())
+                                    .or_else(|| b.pointer("/input/command").and_then(|x| x.as_str()))
+                                    .unwrap_or("백그라운드 작업");
+                                bg_launch.push((id.to_string(), clip(desc, 40)));
+                            }
                             let ev = tool_event(name, b.get("input"));
+                            if recent_tools.len() < 8 {
+                                recent_tools.push(ev.label.clone());
+                            }
                             if let Some(f) = ev.file.clone() {
                                 if !changed_files.iter().any(|c| c == &f) {
                                     changed_files.push(f);
@@ -211,6 +243,25 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                         if b.get("type").and_then(|t| t.as_str()) == Some("tool_result") {
                             if let Some(id) = b.get("tool_use_id").and_then(|x| x.as_str()) {
                                 completed_ids.insert(id.to_string());
+                                // 백그라운드 런치 응답("…running in background with ID: <id>…")
+                                // 에서 shell id 추출 → tool_use_id 와 묶는다.
+                                let txt = match b.get("content") {
+                                    Some(serde_json::Value::String(s)) => s.clone(),
+                                    Some(serde_json::Value::Array(a)) => a
+                                        .iter()
+                                        .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+                                        .collect::<Vec<_>>()
+                                        .join(" "),
+                                    _ => String::new(),
+                                };
+                                if let Some(sid) = txt
+                                    .split("with ID: ")
+                                    .nth(1)
+                                    .and_then(|s| s.split(['.', ' ', '\n']).next())
+                                    .filter(|s| !s.is_empty())
+                                {
+                                    bg_shell.insert(id.to_string(), sid.to_string());
+                                }
                             }
                         }
                     }
@@ -220,12 +271,26 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         }
     }
 
-    let mut subagents: Vec<String> = subagent_uses
-        .into_iter()
-        .filter(|(id, _)| !completed_ids.contains(id))
-        .map(|(_, d)| d)
-        .collect();
+    // 서브에이전트: tool_result 매칭 안 된 건 in-flight, 매칭된 건 최근 완료 흔적.
+    let mut subagents: Vec<String> = Vec::new();
+    let mut subagents_done: Vec<String> = Vec::new();
+    for (id, d) in &subagent_uses {
+        if completed_ids.contains(id) {
+            subagents_done.push(d.clone());
+        } else {
+            subagents.push(d.clone());
+        }
+    }
     subagents.dedup();
+    subagents_done.dedup();
+    subagents_done.truncate(4);
+    // 백그라운드: shell id 가 잡혔고 완료 통보(<task-id>)가 아직 없는 것만 in-flight.
+    let mut background: Vec<String> = bg_launch
+        .iter()
+        .filter(|(tid, _)| bg_shell.get(tid).is_some_and(|sid| !done_tasks.contains(sid)))
+        .map(|(_, d)| d.clone())
+        .collect();
+    background.dedup();
 
     PaneActivity {
         surface_id: surface_id.to_string(),
@@ -249,6 +314,9 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         changed_files,
         is_god: false,
         subagents,
+        subagents_done,
+        background,
+        recent_tools,
         model: model.clone(),
         context_limit: context_limit_for(&model),
         // 컨텍스트 % 는 PTY 상태바에서 — collab_board 가 화면 파싱으로 채운다.
@@ -353,6 +421,29 @@ mod tests {
         assert_eq!(a.intent, "Edit auth.ts");
         assert_eq!(a.files, vec!["/a/auth.ts"]);
         assert_eq!(a.status, "working");
+    }
+
+    #[test]
+    fn snapshot_tracks_background_subagents_and_timeline() {
+        // bg1(sh_aaa) 완료, bg2(sh_bbb) in-flight / 서브 t1 진행·t2 완료 / 타임라인.
+        let tail = [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","id":"toolu_bg1","input":{"command":"cargo build","run_in_background":true}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg1","content":[{"type":"text","text":"Command running in background with ID: sh_aaa. Output is being written to: /tmp/sh_aaa.output."}]}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","id":"toolu_bg2","input":{"command":"npm test","run_in_background":true}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg2","content":[{"type":"text","text":"Command running in background with ID: sh_bbb. Output..."}]}]}}"#,
+            r#"{"type":"user","isMeta":true,"message":{"content":"<task-notification> <task-id>sh_aaa</task-id> completed exit code 0"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Task","id":"toolu_t1","input":{"description":"진행 조사"}}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Task","id":"toolu_t2","input":{"description":"끝난 조사"}}]}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_t2","content":"ok"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/a/x.rs"}}]}}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!(a.background, vec!["npm test"], "sh_bbb 만 in-flight(sh_aaa 완료)");
+        assert_eq!(a.subagents, vec!["진행 조사"], "t1 진행 중");
+        assert_eq!(a.subagents_done, vec!["끝난 조사"], "t2 완료 흔적");
+        assert!(a.recent_tools.contains(&"Edit x.rs".to_string()), "타임라인에 Edit");
+        assert!(a.recent_tools.len() >= 4, "여러 tool_use 가 타임라인에");
     }
 
     #[test]

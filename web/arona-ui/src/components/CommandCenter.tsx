@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useStore } from '@/store';
 import { MomoTalk } from './MomoTalk';
 import { ScheduleTab } from './ScheduleTab';
+import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon, ForkIcon } from './activity';
 
 type CenterTab = 'tasks' | 'momotalk' | 'council' | 'schedule';
 
@@ -121,25 +122,60 @@ export function CommandCenter() {
           ))}
         </div>
       ) : tab === 'tasks' ? (
-        /* 업무 — 학생별 현재 작업(현재 tool + 서브에이전트) */
+        /* 업무 — 학생별 현재 작업(빌드/도구 + 백그라운드 + 서브에이전트 + 도구 흐름) */
         <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
           {agents.length === 0 ? (
             <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>학생 없음</span>
-          ) : agents.map((a) => (
-            <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderBottom: '1px solid var(--cth-cream-200)' }}>
-              <span style={{ width: 8, height: 8, borderRadius: 999, flexShrink: 0, background: a.status === 'working' ? 'var(--cth-mint)' : a.status === 'waiting' || a.status === 'blocked' ? 'var(--cth-coral)' : 'var(--cth-ink-300)' }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)' }}>{a.character}</div>
-                <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project || '대기 중'}</div>
+          ) : agents.map((a) => {
+            const building = a.status === 'working' && isBuildCmd(a.action);
+            return (
+            <div key={a.id} style={{ padding: '7px 0', borderBottom: '1px solid var(--cth-cream-200)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 999, flexShrink: 0, background: a.status === 'working' ? 'var(--cth-mint)' : a.status === 'waiting' || a.status === 'blocked' ? 'var(--cth-coral)' : 'var(--cth-ink-300)' }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)' }}>{a.character}</div>
+                  <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project || '대기 중'}</div>
+                </div>
+                {building ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR, background: 'color-mix(in srgb, #E5923A 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><GearIcon size={11} />빌드 중</span>
+                ) : a.currentTool ? (
+                  <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)', background: 'color-mix(in srgb, var(--cth-sky) 12%, #fff)', padding: '2px 7px', borderRadius: 6 }}>{a.currentTool}</span>
+                ) : null}
+                {!!a.background?.length && (
+                  <span title={a.background.join('\n')} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR, background: 'color-mix(in srgb, #E5923A 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><SpinIcon size={10} />bg {a.background.length}</span>
+                )}
+                {!!a.subagents?.length && (
+                  <span title={a.subagents.join('\n')} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-lilac)', background: 'color-mix(in srgb, var(--cth-lilac) 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><ForkIcon size={10} />{a.subagents.length}</span>
+                )}
               </div>
-              {a.currentTool && (
-                <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)', background: 'color-mix(in srgb, var(--cth-sky) 12%, #fff)', padding: '2px 7px', borderRadius: 6 }}>{a.currentTool}</span>
+              {/* 백그라운드/서브에이전트 이름 + 완료 흔적 */}
+              {(!!a.background?.length || !!a.subagents?.length || !!a.subagentsDone?.length) && (
+                <div style={{ marginLeft: 16, marginTop: 3, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                  {a.background?.map((b, i) => (
+                    <div key={'b' + i} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: BUILD_COLOR, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>⟳ {b}</div>
+                  ))}
+                  {a.subagents?.map((s, i) => (
+                    <div key={'s' + i} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-lilac)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>↳ {s}</div>
+                  ))}
+                  {a.subagentsDone?.map((s, i) => (
+                    <div key={'d' + i} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: 'line-through' }}>✓ {s}</div>
+                  ))}
+                </div>
               )}
-              {!!a.subagents?.length && (
-                <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-lilac)', background: 'color-mix(in srgb, var(--cth-lilac) 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}>서브 {a.subagents.length}</span>
+              {/* 도구 활동 타임라인(오래된→최근) */}
+              {!!a.recentTools?.length && (
+                <div style={{ marginLeft: 16, marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 3, alignItems: 'center' }}>
+                  {[...a.recentTools].reverse().map((t, i, arr) => (
+                    <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                      <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: 'var(--cth-ink-500)', background: 'var(--cth-cream-100)', padding: '1px 5px', borderRadius: 5, whiteSpace: 'nowrap', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.split(' ')[0]}</span>
+                      {i < arr.length - 1 && <span style={{ fontSize: 8, color: 'var(--cth-ink-300)' }}>→</span>}
+                    </span>
+                  ))}
+                </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         /* 스케줄/루프 — 반복 지시 루프 · 예약(크론) · 타이머/리마인더. */
