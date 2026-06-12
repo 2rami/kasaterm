@@ -63,7 +63,11 @@ export function AgentCard({
             cursor: 'pointer'
           }}
         >
-          {doingCount > 1 ? doingCount : '✎'}
+          {doingCount > 1 ? doingCount : (
+            <svg width="11" height="11" viewBox="0 0 16 16" style={{ display: 'block' }}>
+              <path d="M11.5 2.5 13.5 4.5 5 13H3v-2L11.5 2.5Z" fill="none" stroke="#fff" strokeWidth="1.5" strokeLinejoin="round" />
+            </svg>
+          )}
         </span>
       )}
       <PixelPanel

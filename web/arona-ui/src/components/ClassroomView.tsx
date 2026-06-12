@@ -47,11 +47,21 @@ const STATUS_COLOR: Record<string, string> = {
   working: 'var(--cth-mint)', waiting: 'var(--cth-sky)', blocked: 'var(--cth-coral)',
   success: 'var(--cth-lemon)', idle: 'var(--cth-ink-300)',
 };
+// 완료 스파클 — 이모지 대신 SVG(currentColor 로 글리프 색 상속).
+function SparkleGlyph() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" style={{ display: 'block' }}>
+      <path d="M8 1.5 9.3 6 14 7.3 9.3 8.6 8 13.5 6.7 8.6 2 7.3 6.7 6 8 1.5Z" fill="currentColor" />
+      <circle cx="13" cy="2.5" r="1" fill="currentColor" />
+      <circle cx="2.5" cy="12.5" r="0.9" fill="currentColor" />
+    </svg>
+  );
+}
 // munder 식 상태 글리프 — 머리 위 한눈 표시.
-const GLYPH: Record<string, { t: string; c: string; pulse?: boolean }> = {
+const GLYPH: Record<string, { t: React.ReactNode; c: string; pulse?: boolean }> = {
   blocked: { t: '!', c: 'var(--cth-coral)', pulse: true },
   waiting: { t: '?', c: 'var(--cth-sky)', pulse: true },
-  success: { t: '✨', c: 'var(--cth-lemon)' },
+  success: { t: <SparkleGlyph />, c: 'var(--cth-lemon)' },
 };
 
 // 교실 캐릭터(munder Character 이식) — working/waiting/blocked = 자기 책상으로
