@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-"""god 모드 방에서 이 pane 에 캐릭터를 할당하고 그 persona 를 stdout 으로 낸다.
-claude 래퍼(shim)가 이 출력을 `--append-system-prompt` 에 실어 말투를 입힌다.
+"""god 모드 방에서 이 pane 에 캐릭터를 할당한다 — 마커 선점 + 헤더 rename.
+말투(persona)는 board-context.py 가 매 턴 additionalContext 로 단독 주입하므로
+(append-system-prompt 중복 제거 → persona 단일 경로 일원화), 여기선 마커만 박는다.
 
 characters.json 우선순위: ~/.config/kasaterm/characters.json → 번들(이 스크립트
-옆) → 둘 다 없으면 빈 출력(기능 전체 skip = 현행 무변화). 번들 기본 파일은 만들지
+옆) → 둘 다 없으면 no-op(기능 전체 skip = 현행 무변화). 번들 기본 파일은 만들지
 않는다 — 오리지널 테마는 사용자가 나중에 채운다.
 
 할당: 방(cwd slug)에 character 마커가 하나도 없으면 leader, 있으면 members 중
 아직 안 쓰인 첫 번째. /tmp/kasaterm-collab/<slug>/character-<pane> 마커(내용=이름).
 동시 스폰 race 는 flock 으로 직렬화. 새로 할당할 때만 헤더를 '● <이름>' 으로 rename
-(재스폰/재호출은 persona 만 반환 — idempotent).
-
-persona 는 세션 생애 고정값이라 --append-system-prompt 에 실어도 프롬프트 캐시를
-깨지 않는다(munder injectedPrompt invariant 와 같은 원리).
+(재스폰/재호출은 마커 그대로 — idempotent no-op).
 """
-import sys, os, json, glob, subprocess
+import os, json, glob, subprocess
 
 try:
     import fcntl
@@ -32,16 +30,6 @@ def load_characters():
             return json.load(open(p))
         except Exception:
             continue
-    return None
-
-
-def persona_for(chars, name):
-    leader = chars.get("leader") or {}
-    if leader.get("name") == name:
-        return leader.get("persona")
-    for m in chars.get("members") or []:
-        if m.get("name") == name:
-            return m.get("persona")
     return None
 
 
@@ -103,10 +91,6 @@ def main():
                            timeout=2, capture_output=True)
         except Exception:
             pass
-
-    persona = persona_for(chars, name)
-    if persona:
-        sys.stdout.write(persona)
 
 
 if __name__ == "__main__":
