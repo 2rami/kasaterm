@@ -3639,17 +3639,12 @@ for a in \"$@\"; do\n\
   [ \"$a\" = \"--settings\" ] && exec \"$REAL\" \"$@\"\n\
 done\n\
 [ -f \"$SETTINGS\" ] || exec \"$REAL\" \"$@\"\n\
-# god 모드 방 && 사용자가 --append-system-prompt 를 직접 안 줬을 때만 캐릭터\n\
-# persona 를 주입한다. persona 는 세션 고정값이라 프롬프트 캐시를 안 깨고, solo\n\
-# 거나 characters.json 이 없으면 assign 이 빈 출력 → 무주입(현행 그대로).\n\
-HAS_APPEND=\n\
-for a in \"$@\"; do [ \"$a\" = \"--append-system-prompt\" ] && HAS_APPEND=1; done\n\
-PERSONA=\n\
-if [ -z \"$HAS_APPEND\" ] && [ \"$(python3 \"$HOOKS_DIR/kasacollab.py\" mode show 2>/dev/null)\" = god ]; then\n\
-  PERSONA=$(python3 \"$HOOKS_DIR/kasaterm-assign-character.py\" 2>/dev/null)\n\
-fi\n\
-if [ -n \"$PERSONA\" ]; then\n\
-  exec \"$REAL\" --settings \"$SETTINGS\" --append-system-prompt \"$PERSONA\" \"$@\"\n\
+# god 모드 방이면 이 pane 의 캐릭터 마커만 선점한다(헤더 rename 부수효과). 말투\n\
+# (persona)는 board-context.py 가 매 턴 additionalContext 로 단독 주입 —\n\
+# append-system-prompt(스폰 시점만 먹어 solo→god 토글을 못 입힘) 중복을 없애고\n\
+# persona 를 단일 경로로 일원화. solo 거나 characters.json 없으면 assign 이 no-op.\n\
+if [ \"$(python3 \"$HOOKS_DIR/kasacollab.py\" mode show 2>/dev/null)\" = god ]; then\n\
+  python3 \"$HOOKS_DIR/kasaterm-assign-character.py\" >/dev/null 2>&1\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         hd = hooks_dir.display());
