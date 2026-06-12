@@ -1069,9 +1069,15 @@ impl App {
                 return;
             }
         };
+        // launch 별 캐시버스트 — webview 가 옛 index.html 을 캐시해도 새 URL 이라
+        // 무조건 새로 받는다(서버 no-store 와 이중 방어). relaunch 마다 값이 바뀜.
+        let cb = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
         // build_as_child for the same use-after-free reason as the git panel.
         let webview = match wry::WebViewBuilder::new()
-            .with_url(format!("http://127.0.0.1:{port}/arona-ui/"))
+            .with_url(format!("http://127.0.0.1:{port}/arona-ui/?v={cb}"))
             .with_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
                 size: wry::dpi::LogicalSize::new(1100.0, 720.0).into(),
