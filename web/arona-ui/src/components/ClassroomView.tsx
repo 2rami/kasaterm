@@ -10,8 +10,9 @@ const SEATS = [
   { x: 50, y: 78 }, { x: 28, y: 74 },
   { x: 72, y: 74 }, { x: 25, y: 56 },
 ];
-// idle 배회 영역(책상 아래 열린 바닥).
-const FLOOR = { x0: 18, x1: 82, y0: 64, y1: 86 };
+// 카페 구역(좌하단 휴게) — idle 학생이 일 안 할 때 여기 모여 어슬렁(거노: 교실/카페
+// 구역 분리). working 은 자기 책상(SEAT). 배경의 카페/소파 영역에 맞춰 미세조정.
+const CAFE = { x0: 16, x1: 44, y0: 76, y1: 88 };
 const MOVE_MS = 2200;
 
 function firstLine(s?: string): string {
@@ -77,9 +78,10 @@ function ClassroomCharacter({ agent, seat, onSelect }: { agent: Agent; seat: { x
 
   useEffect(() => {
     if (atDesk) { goTo(seat); return; }
+    // idle → 카페 구역 안을 어슬렁(쉬는 느낌).
     const wander = () => goTo({
-      x: FLOOR.x0 + Math.random() * (FLOOR.x1 - FLOOR.x0),
-      y: FLOOR.y0 + Math.random() * (FLOOR.y1 - FLOOR.y0),
+      x: CAFE.x0 + Math.random() * (CAFE.x1 - CAFE.x0),
+      y: CAFE.y0 + Math.random() * (CAFE.y1 - CAFE.y0),
     });
     wander();
     const iv = window.setInterval(wander, 4200);
@@ -159,12 +161,15 @@ function ClassroomCharacter({ agent, seat, onSelect }: { agent: Agent; seat: { x
 
 export interface ClassroomViewProps {
   onSelect?: (surfaceId: string, title: string) => void;
+  /** 활성 워크스페이스 학생만(장소이동). 없으면 store 전체. */
+  agents?: Agent[];
 }
 
 // 샬레 교실 — 배경 일러 위에 학생들이 일하러 책상에 가거나(working) 바닥을 돌아다님
 // (idle). munder Office 패턴(상태→위치/애니/말풍선/글리프) 이식. 클릭 → 우측 대화.
-export function ClassroomView({ onSelect }: ClassroomViewProps) {
-  const agents = useStore((s) => s.agents);
+export function ClassroomView({ onSelect, agents: agentsProp }: ClassroomViewProps) {
+  const storeAgents = useStore((s) => s.agents);
+  const agents = agentsProp ?? storeAgents;
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
 
   return (

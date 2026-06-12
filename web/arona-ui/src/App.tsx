@@ -11,6 +11,7 @@ import { TitleBar } from './components/TitleBar';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
 import { RoomPathModal } from './components/RoomPathModal';
+import { WorkspaceNav, workspacesFromAgents } from './components/WorkspaceNav';
 import { PixelButton } from './components/PixelButton';
 import { SegmentedTabs } from './components/GameKit';
 import { startBoardPolling, fetchMode, focusPane, revealTerminal } from './lib/mcp';
@@ -38,6 +39,7 @@ export function App() {
   const [revealing, setRevealing] = useState(false);
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
   const [showRoomModal, setShowRoomModal] = useState(false);
+  const [activeWs, setActiveWs] = useState<string | null>(null); // 활성 장소(워크스페이스 cwd)
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
@@ -76,6 +78,9 @@ export function App() {
   }
 
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
+  // 장소(워크스페이스) — 학생 cwd 별 방. 활성 방 선택 시 그 방 학생만 보인다.
+  const workspaces = workspacesFromAgents(sorted);
+  const shown = activeWs ? sorted.filter((a) => (a.cwd || '') === activeWs) : sorted;
 
   // 재화 = claude 토큰 지표(선생님): 💎입력토큰 · 🪙비용$ (전 학생 합산).
   const totalInputTokens = sorted.reduce((s, a) => s + (a.tokensIn ?? 0), 0);
@@ -148,8 +153,11 @@ export function App() {
         <PixelButton variant="primary" size="sm" onClick={() => setShowAdd(true)}>학생 부르기</PixelButton>
       </div>
 
-      {/* 바디: 메인 영역 + 우측 CommandCenter */}
+      {/* 바디: 좌측 장소 네비 + 메인 영역 + 우측 CommandCenter */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+
+        {/* 좌측 장소(워크스페이스) 네비 — 방 여러 개일 때만 */}
+        <WorkspaceNav workspaces={workspaces} active={activeWs} onSelect={setActiveWs} />
 
         {/* 메인 컬럼 */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -157,12 +165,12 @@ export function App() {
           {/* 교실 씬 or 카드 그리드 */}
           <div style={{ flex: 1, overflow: 'auto', padding: 'var(--cth-space-4)' }}>
             {view === 'classroom' ? (
-              <ClassroomView onSelect={(id, title) => setPeek({ id, title })} />
-            ) : sorted.length === 0 ? (
+              <ClassroomView agents={shown} onSelect={(id, title) => setPeek({ id, title })} />
+            ) : shown.length === 0 ? (
               <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
             ) : (
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--cth-space-4)' }}>
-                {sorted.map((a) => (
+                {shown.map((a) => (
                   <AgentCard
                     key={a.id}
                     name={a.name}
@@ -188,7 +196,7 @@ export function App() {
             borderTop: '1px solid var(--cth-cream-200)',
             background: 'var(--cth-cream-50)'
           }}>
-            <StudentGrid agents={sorted} onSelect={(id, title) => setPeek({ id, title })} />
+            <StudentGrid agents={shown} onSelect={(id, title) => setPeek({ id, title })} />
           </div>
 
           {/* 풋터 (아리스 구현) */}
