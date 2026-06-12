@@ -281,6 +281,9 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
       position: 'relative', width: '100%', maxWidth: 960, margin: '0 auto',
       aspectRatio: '3 / 2',
       borderRadius: 16, overflow: 'hidden',
+      // 가구/캐릭터 zIndex(발밑 y*10, 최대 ~960)를 교실 안에 가둔다 — 안 그러면
+      // 문서 레벨에서 모달(z 낮음) 위로 책상이 뚫고 올라온다(거노 학생부르기 버그).
+      isolation: 'isolate',
       backgroundImage: `url(${ROOT}assets/${background ?? 'classroom-floor.png'})`,
       backgroundSize: 'cover', backgroundPosition: 'center',
       imageRendering: 'pixelated',

@@ -51,7 +51,7 @@ export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalP
     <div
       onClick={onClose}
       style={{
-        position: 'fixed', inset: 0, zIndex: 20,
+        position: 'fixed', inset: 0, zIndex: 1000,
         background: 'rgba(26,19,32,0.45)',
         display: 'flex', alignItems: 'center', justifyContent: 'center'
       }}
