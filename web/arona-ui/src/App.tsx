@@ -9,7 +9,6 @@ import { CommandCenter } from './components/CommandCenter';
 import { StudentGrid } from './components/StudentGrid';
 import { Footer } from './components/Footer';
 import { TitleBar } from './components/TitleBar';
-import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { RoomChip } from './components/RoomChip';
 import { RoomPathModal } from './components/RoomPathModal';
 import { WorkspaceNav, workspacesFromAgents } from './components/WorkspaceNav';
@@ -134,7 +133,14 @@ export function App() {
         notifications={agents.filter((a) => a.status === 'waiting' || a.status === 'blocked').length}
         mail={agents.filter((a) => a.status === 'success').length}
         contextTokens={totalContextTokens}
-        onBell={() => { const a = sorted.find((x) => x.status === 'waiting' || x.status === 'blocked'); if (a) setPeek({ id: a.id, title: a.character }); }}
+        onBell={() => {
+          // 주의(대기/막힘) 학생 우선, 없으면 작업 중, 그것도 없으면 첫 학생 — 종은
+          // 항상 무언가 연다(거노: 클릭해도 무반응이던 것).
+          const a = sorted.find((x) => x.status === 'waiting' || x.status === 'blocked')
+            || sorted.find((x) => x.status === 'working' || x.status === 'thinking')
+            || sorted[0];
+          if (a) setPeek({ id: a.id, title: a.character });
+        }}
         onMail={() => { const a = sorted.find((x) => x.status === 'success'); if (a) setPeek({ id: a.id, title: a.character }); }}
         onSettings={reveal}
       />
@@ -188,9 +194,9 @@ export function App() {
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
           {/* 교실 씬 or 카드 그리드 */}
-          <div style={{ flex: 1, overflow: 'auto', padding: 'var(--cth-space-4)' }}>
+          <div style={{ flex: 1, overflow: 'auto', padding: view === 'classroom' ? 8 : 'var(--cth-space-4)' }}>
             {view === 'classroom' ? (
-              <ClassroomView agents={shown} background={roomBg} furniture={roomFurniture} onAdd={() => setShowAdd(true)} onSelect={(id, title) => setPeek({ id, title })} />
+              <ClassroomView agents={shown} background={roomBg} furniture={roomFurniture} onAdd={() => setShowAdd(true)} onSelect={(id, title) => setPeek({ id, title })} selectedId={peek?.id} />
             ) : shown.length === 0 ? (
               <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
             ) : (
@@ -240,12 +246,8 @@ export function App() {
           </div>
         </div>
 
-        {/* 우측: 학생 선택 시 대화(모모톡)가 이 자리에, 없으면 Command Center */}
-        {peek ? (
-          <TerminalPeekPanel surfaceId={peek.id} title={peek.title} onClose={() => setPeek(null)} />
-        ) : (
-          <CommandCenter />
-        )}
+        {/* 우측: Command Center 항상 — 학생 클릭 시 '학생별 대화' 탭에 대화 통합(거노). */}
+        <CommandCenter selected={peek} onClearDialog={() => setPeek(null)} />
       </div>
 
       {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} defaultCwd={cwd} />}

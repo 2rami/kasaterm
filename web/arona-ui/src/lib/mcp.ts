@@ -68,12 +68,15 @@ function toAgent(r: BoardRow): Agent {
   // 'active' 폴백은 tool 이름이 아니므로 버린다(말풍선엔 진짜 tool명만).
   const head = r.intent ? r.intent.split(' ')[0] : '';
   const currentTool = head && head !== 'active' ? head : undefined;
+  // working 인데 아직 도구를 안 쓴 turn = 응답 생성 중(거노: active 로딩중 = thinking).
+  let status = toStatus(r.status);
+  if (status === 'working' && !currentTool) status = 'thinking';
   return {
     id: r.surface_id,
     name: display,
     character: display,
     accent: r.is_god ? 'lemon' : accentFor(r.surface_id),
-    status: toStatus(r.status),
+    status,
     project: r.intent ?? '',
     action: r.intent,
     lastReply: r.last_reply,
@@ -243,6 +246,19 @@ export async function focusPane(surfaceId: string): Promise<boolean> {
     if (!r.ok) return false;
     const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
     return d?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /close-pane?surface=<id> — 학생(워커) pane 종료(close_surface→close_pane). */
+export async function closeAgent(surfaceId: string): Promise<boolean> {
+  if (!surfaceId) return false;
+  try {
+    const r = await fetch(`${BASE}/close-pane?surface=${encodeURIComponent(surfaceId)}`, { method: 'POST' });
+    if (!r.ok) return false;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
+    return d?.ok !== false;
   } catch {
     return false;
   }

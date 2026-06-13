@@ -114,10 +114,13 @@ export function cafeSpots(furniture: Furniture[]): CafeSpot[] {
   const spots: CafeSpot[] = [];
   for (const f of furniture) {
     if (f.kind === 'sofa') {
-      spots.push({ x: f.x - 5, y: f.y + 1, facing: 'up' });
-      spots.push({ x: f.x + 5, y: f.y + 1, facing: 'up' });
+      // 소파당 3자리(좌/중/우) — idle 여럿이 한 소파에 겹쳐 앉던 것 분산.
+      spots.push({ x: f.x - 6, y: f.y + 1, facing: 'up' });
+      spots.push({ x: f.x, y: f.y + 1, facing: 'up' });
+      spots.push({ x: f.x + 6, y: f.y + 1, facing: 'up' });
     } else if (f.kind === 'coffee') {
-      spots.push({ x: f.x, y: f.y + 5, facing: 'up' });
+      spots.push({ x: f.x - 4, y: f.y + 5, facing: 'up' });
+      spots.push({ x: f.x + 4, y: f.y + 5, facing: 'up' });
     }
   }
   return spots;

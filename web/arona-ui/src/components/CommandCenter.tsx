@@ -1,24 +1,32 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useStore } from '@/store';
 import { MomoTalk } from './MomoTalk';
 import { ScheduleTab } from './ScheduleTab';
+import { TerminalPeekPanel } from './TerminalPeekPanel';
 import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon, ForkIcon } from './activity';
 
-type CenterTab = 'tasks' | 'momotalk' | 'council' | 'schedule';
+type CenterTab = 'momotalk' | 'dialog' | 'schedule' | 'tasks';
 
 const TAB_LABELS: Record<CenterTab, string> = {
-  tasks: '업무',
   momotalk: '모모톡',
-  council: '의뢰',
+  dialog: '학생별 대화',
   schedule: '스케줄',
+  tasks: '업무',
 };
 
-// SCHALE OS 우측 Command Center 패널.
-export function CommandCenter() {
-  const [tab, setTab] = useState<CenterTab>('tasks');
-  const agents = useStore((s) => s.agents);
+export interface CommandCenterProps {
+  /** 교실/카드에서 클릭한 학생 — '학생별 대화' 탭에 그 대화를 띄운다. */
+  selected?: { id: string; title: string } | null;
+  onClearDialog?: () => void;
+}
 
-  const workers = agents.filter((a) => !a.isGod);
+// SCHALE OS 우측 Command Center — 대화창이 따로 안 뜨고 여기 '학생별 대화' 탭에
+// 통합(거노). 탭: 모모톡 / 학생별 대화 / 스케줄 / 업무(AskQuestion·선택지).
+export function CommandCenter({ selected, onClearDialog }: CommandCenterProps) {
+  const [tab, setTab] = useState<CenterTab>('momotalk');
+  const agents = useStore((s) => s.agents);
+  // 학생을 클릭하면 자동으로 '학생별 대화' 탭으로 전환.
+  useEffect(() => { if (selected) setTab('dialog'); }, [selected?.id]);
 
   return (
     <div style={{
@@ -95,32 +103,15 @@ export function CommandCenter() {
       {tab === 'momotalk' ? (
         /* 모모톡 — 선생님·아로나·학생 전체 소통 단톡방(messages.jsonl 단일 피드) */
         <MomoTalk />
-      ) : tab === 'council' ? (
-        /* 의뢰 대기열 — board working 워커들 */
-        <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
-          <div style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-500)', marginBottom: 8 }}>
-            의뢰 대기열 {workers.length} / 10
+      ) : tab === 'dialog' ? (
+        /* 학생별 대화 — 클릭한 학생 대화를 여기 인라인(옛 우측 peek 패널 통합). */
+        selected ? (
+          <TerminalPeekPanel surfaceId={selected.id} title={selected.title} onClose={onClearDialog ?? (() => {})} embedded />
+        ) : (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, textAlign: 'center', color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, lineHeight: 1.6 }}>
+            교실에서 학생을 클릭하면<br />여기에 대화가 떠요
           </div>
-          {workers.length === 0 ? (
-            <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>대기 중인 의뢰 없음</span>
-          ) : workers.map((a, i) => (
-            <div key={a.id} style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              padding: '5px 0',
-              borderBottom: '1px solid var(--cth-cream-300)'
-            }}>
-              <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-300)', width: 16 }}>{i + 1}</span>
-              <span style={{ flex: 1, fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {a.project || a.name}
-              </span>
-              <span style={{
-                padding: '2px 7px', fontSize: 10, fontWeight: 600, borderRadius: 5,
-                fontFamily: 'var(--cth-font-ui)', color: '#fff',
-                background: a.status === 'working' ? 'var(--cth-mint)' : a.status === 'waiting' ? 'var(--cth-sky)' : 'var(--cth-ink-300)',
-              }}>{a.status}</span>
-            </div>
-          ))}
-        </div>
+        )
       ) : tab === 'tasks' ? (
         /* 업무 — 학생별 현재 작업(빌드/도구 + 백그라운드 + 서브에이전트 + 도구 흐름) */
         <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>

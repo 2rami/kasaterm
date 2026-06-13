@@ -44,7 +44,8 @@ export function SpriteWalk({ character, walking, width = 72, height = 100, flip 
         style={{
           maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', objectPosition: 'center bottom',
           transform: walking && flip ? 'scaleX(-1)' : 'none', display: 'block',
-          filter: 'drop-shadow(0 4px 6px rgba(21,41,74,0.2))',
+          // 흰 외곽선(4방향 drop-shadow) — 밝은 교실 바닥에서 캐릭터를 또렷하게(거노).
+          filter: 'drop-shadow(1px 0 0 rgba(255,255,255,0.95)) drop-shadow(-1px 0 0 rgba(255,255,255,0.95)) drop-shadow(0 1px 0 rgba(255,255,255,0.95)) drop-shadow(0 -1px 0 rgba(255,255,255,0.95)) drop-shadow(0 5px 6px rgba(21,41,74,0.28))',
           imageRendering: 'pixelated',
         }}
       />

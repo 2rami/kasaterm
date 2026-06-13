@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, type Turn } from '@/lib/mcp';
+import { fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { Markdown } from './Markdown';
 import { useStore } from '@/store';
@@ -66,6 +66,30 @@ function parsePtyConversation(screen: string): Turn[] {
   return turns;
 }
 
+// claude 인터랙티브 선택 메뉴(/model · AskUserQuestion 등)를 화면에서 추출 →
+// 채팅창에 선택지 카드로 띄운다(거노: 터미널 메뉴를 UI 로). "❯ 1. label" 패턴,
+// 2개 이상이어야 메뉴로 인정. label 우측 정렬 설명(2+ 공백 뒤)은 버린다.
+function parsePromptMenu(screen: string): { title: string; options: { idx: number; label: string; cur: boolean }[] } | null {
+  const lines = screen.split('\n');
+  const opts: { idx: number; label: string; cur: boolean; line: number }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^\s*([❯>●]?)\s*(\d+)\.\s+(.+?)\s*$/);
+    if (m) {
+      opts.push({ idx: parseInt(m[2], 10), label: m[3].replace(/\s{2,}.*$/, '').trim(), cur: /[❯>]/.test(m[1] ?? ''), line: i });
+    }
+  }
+  if (opts.length < 2) return null;
+  const first = opts[0].line;
+  let title = '';
+  for (let i = first - 1; i >= 0 && i >= first - 6; i--) {
+    const t = lines[i].trim();
+    if (!t || /^[─—\-│╭╰╮╯>❯●]/.test(t)) continue;
+    title = t.length > 60 ? t.slice(0, 59) + '…' : t;
+    break;
+  }
+  return { title, options: opts.map((o) => ({ idx: o.idx, label: o.label, cur: o.cur })) };
+}
+
 // board.model 은 상태바 파싱 표시명("Opus 4.8 (1M context)") 우선 — claude- id 면 포맷,
 // 아니면(이미 표시명) 그대로. 1M context 변형이 그대로 보인다.
 const shortModel = (m?: string) =>
@@ -73,15 +97,19 @@ const shortModel = (m?: string) =>
     : m.replace('claude-', '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/^./, (c) => c.toUpperCase());
 const shortCwd = (p?: string) => (!p ? '' : p.split('/').filter(Boolean).slice(-2).join('/'));
 
-function MetaChip({ label, dim }: { label: string; dim?: boolean }) {
+function MetaChip({ label, dim, onClick }: { label: string; dim?: boolean; onClick?: () => void }) {
   return (
-    <span style={{
-      fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600,
-      padding: '2px 8px', borderRadius: 6,
-      background: dim ? 'transparent' : 'var(--cth-cream-100)',
-      color: dim ? 'var(--cth-ink-300)' : 'var(--cth-ink-700)',
-      border: dim ? 'none' : '1px solid var(--cth-cream-200)',
-    }}>{label}</span>
+    <span
+      onClick={onClick}
+      title={onClick ? '클릭해서 변경' : undefined}
+      style={{
+        fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600,
+        padding: '2px 8px', borderRadius: 6,
+        background: dim ? 'transparent' : 'var(--cth-cream-100)',
+        color: dim ? 'var(--cth-ink-300)' : 'var(--cth-ink-700)',
+        border: dim ? 'none' : '1px solid var(--cth-cream-200)',
+        cursor: onClick ? 'pointer' : undefined,
+      }}>{label}</span>
   );
 }
 
@@ -89,13 +117,16 @@ export interface TerminalPeekPanelProps {
   surfaceId: string;
   title: string;
   onClose: () => void;
+  /** CommandCenter '학생별 대화' 탭에 내장될 때 — 폭을 부모에 맞추고 좌측 보더 제거. */
+  embedded?: boolean;
 }
 
 // 학생 대화 패널 — 메신저처럼 대화만(선생님 프롬프트 오른쪽·학생 답변 왼쪽).
 // 화면(raw 터미널)은 '터미널 보기'로 보면 되므로 여기엔 두지 않는다.
-export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPanelProps) {
+export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: TerminalPeekPanelProps) {
   const agent = useStore((s) => s.agents.find((a) => a.id === surfaceId));
   const [turns, setTurns] = useState<Turn[]>([]);
+  const [menu, setMenu] = useState<{ title: string; options: { idx: number; label: string; cur: boolean }[] } | null>(null);
   const [images, setImages] = useState<string[]>([]); // SendUserFile 로 보낸 이미지
   const [loaded, setLoaded] = useState(false); // 첫 폴 완료 — 빈 상태 문구 분기
   const [input, setInput] = useState('');
@@ -111,6 +142,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
     let stopped = false;
     setLoaded(false);
     setTurns([]);
+    setMenu(null);
     setImages([]);
     setInput('');
     const tick = async () => {
@@ -121,6 +153,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
       ]);
       if (stopped) return;
       setTurns(ts.length ? ts : parsePtyConversation(screen));
+      setMenu(parsePromptMenu(screen));
       // 훅 기록(진짜 SendUserFile) + 화면 파싱(코덱스/raw) 병합, basename dedupe.
       const byBase = new Map<string, string>();
       for (const p of [...imgs, ...parseImagePaths(screen)]) {
@@ -175,12 +208,26 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
     if (e.key === 'c' && e.ctrlKey) { e.preventDefault(); setInput(''); void sendToPane(surfaceId, '\x03', false); }
   };
 
+  // 인터랙티브 메뉴 선택 → 숫자 단축키 전송(claude 가 즉시 선택). 다음 폴에서 갱신.
+  const pickMenu = async (idx: number) => {
+    setMenu(null);
+    await sendToPane(surfaceId, String(idx), false);
+  };
+
+  // 학생 종료 — pane kill(close_surface). 되돌릴 수 없어 확인 후.
+  const onKill = async () => {
+    if (!window.confirm(`${title} 학생을 종료할까요? (pane 닫힘)`)) return;
+    await closeAgent(surfaceId);
+    onClose();
+  };
+
   return (
     <div style={{
-      width: 340, flexShrink: 0, height: '100%',
+      width: embedded ? '100%' : 340, flex: embedded ? 1 : undefined,
+      flexShrink: 0, height: '100%',
       display: 'flex', flexDirection: 'column',
       background: 'var(--cth-cream-50)',
-      borderLeft: '1px solid var(--cth-cream-200)',
+      borderLeft: embedded ? 'none' : '1px solid var(--cth-cream-200)',
       overflow: 'hidden'
     }}>
       {/* 헤더: 캐릭터명 + 닫기 */}
@@ -195,8 +242,18 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
         </span>
         <div style={{ flex: 1 }} />
         <button
+          onClick={() => void onKill()}
+          title="학생 종료 (pane 닫기)"
+          style={{
+            height: 28, padding: '0 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
+            background: 'var(--cth-coral)', color: '#fff',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
+            display: 'inline-flex', alignItems: 'center'
+          }}
+        >종료</button>
+        <button
           onClick={onClose}
-          title="닫기"
+          title="대화 닫기"
           style={{
             width: 28, height: 28, borderRadius: 8, border: 'none', cursor: 'pointer',
             background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)',
@@ -212,7 +269,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
           display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center',
           padding: '6px 12px', borderBottom: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
         }}>
-          {agent.model && <MetaChip label={shortModel(agent.model)} />}
+          {agent.model && <MetaChip label={shortModel(agent.model)} onClick={() => void sendToPane(surfaceId, '/model', true)} />}
           {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} />}
           {/* 컨텍스트 % — 상태바 파싱(contextPct) 우선, 없으면 토큰/한도 계산 폴백 */}
           {agent.contextPct != null && agent.contextPct > 0 ? (
@@ -278,6 +335,27 @@ export function TerminalPeekPanel({ surfaceId, title, onClose }: TerminalPeekPan
           </>
         )}
       </div>
+
+      {/* 인터랙티브 메뉴(/model·AskQuestion) — 화면 파싱 → 선택지 카드. 클릭 전송. */}
+      {menu && (
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-sky-light)', maxHeight: 220, overflowY: 'auto' }}>
+          {menu.title && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: 8 }}>{menu.title}</div>}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {menu.options.map((o) => (
+              <button key={o.idx} onClick={() => void pickMenu(o.idx)} style={{
+                textAlign: 'left', padding: '8px 12px', borderRadius: 9, cursor: 'pointer',
+                border: o.cur ? '2px solid var(--cth-sky)' : '1px solid var(--cth-cream-200)',
+                background: '#fff', fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)',
+                display: 'flex', alignItems: 'center', gap: 8,
+              }}>
+                <span style={{ fontWeight: 800, color: 'var(--cth-sky)', minWidth: 14 }}>{o.idx}</span>
+                <span style={{ flex: 1 }}>{o.label}</span>
+                {o.cur && <span style={{ fontSize: 10, color: 'var(--cth-sky)', fontWeight: 700 }}>현재</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 입력창 — 학생에게 직접 전송(양방향) */}
       <div style={{
