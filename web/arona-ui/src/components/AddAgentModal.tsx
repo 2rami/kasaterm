@@ -5,6 +5,7 @@ import { PixelButton } from './PixelButton';
 import { SpritePortrait } from './SpritePortrait';
 import { FolderBrowser } from './FolderBrowser';
 import { fetchCharacters, spawnAgent, type CharacterDef } from '@/lib/mcp';
+import { useStore } from '@/store';
 
 // 학생(워커) 부르기 — munder AddAgentModal 을 우리 MCP(/characters·/spawn)에 맞게
 // 단순화. provider/command 자유주입은 백엔드가 막았으므로(claude 전용) 캐릭터+모델
@@ -19,6 +20,7 @@ export interface AddAgentModalProps {
 }
 
 export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalProps) {
+  const [leader, setLeader] = useState<CharacterDef | null>(null);
   const [members, setMembers] = useState<CharacterDef[]>([]);
   const [character, setCharacter] = useState<string>('');
   const [model, setModel] = useState<string>('sonnet');
@@ -26,12 +28,18 @@ export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalP
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // 이미 교실에 있는 캐릭터는 빼고(중복 방지), 리더(아로나)는 없을 때만 부를 수 있게.
+  const agents = useStore((s) => s.agents);
+  const taken = new Set(agents.map((a) => a.character));
+  const available = [leader, ...members].filter((c): c is CharacterDef => !!c && !taken.has(c.name));
+  const selected = available.some((c) => c.name === character) ? character : (available[0]?.name ?? '');
+
   useEffect(() => {
     let alive = true;
     fetchCharacters().then((c) => {
-      if (!alive || !c?.members?.length) return;
-      setMembers(c.members);
-      setCharacter(c.members[0].name);
+      if (!alive || !c) return;
+      setLeader(c.leader ?? null);
+      setMembers(c.members ?? []);
     });
     return () => { alive = false; };
   }, []);
@@ -39,7 +47,7 @@ export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalP
   const submit = async () => {
     setBusy(true);
     setErr(null);
-    const res = await spawnAgent({ character, model, cwd });
+    const res = await spawnAgent({ character: selected, model, cwd });
     setBusy(false);
     if (res.ok) {
       onSpawned?.(res.surface_id);
@@ -63,21 +71,31 @@ export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalP
       <div onClick={(e) => e.stopPropagation()} style={{ width: 380 }}>
         <PixelPanel variant="dialog" title="학생 부르기">
           <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--cth-space-4)' }}>
-            {/* 캐릭터 픽커 */}
+            {/* 캐릭터 픽커 — 리더(아로나)는 없을 때만 맨 앞에, ★ 표시 */}
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {members.map((m) => {
-                const picked = m.name === character;
+              {available.length === 0 ? (
+                <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 'var(--cth-text-body-sm)', color: 'var(--cth-ink-500)' }}>
+                  부를 수 있는 캐릭터가 다 차 있어요
+                </span>
+              ) : available.map((m) => {
+                const picked = m.name === selected;
+                const isLeader = m.name === leader?.name;
                 return (
                   <button
                     key={m.name}
                     onClick={() => setCharacter(m.name)}
+                    title={isLeader ? '아로나 — 리더(god)' : m.name}
                     style={{
+                      position: 'relative',
                       display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
                       padding: 6, cursor: 'pointer', border: 'none',
                       background: picked ? `var(--cth-sky-light)` : 'var(--cth-cream-200)',
-                      boxShadow: `inset 0 0 0 ${picked ? 2 : 1}px var(--cth-ink-900)`
+                      boxShadow: `inset 0 0 0 ${picked ? 2 : 1}px ${isLeader ? 'var(--cth-lemon)' : 'var(--cth-ink-900)'}`
                     }}
                   >
+                    {isLeader && (
+                      <span style={{ position: 'absolute', top: 1, right: 2, fontSize: 9, color: 'var(--cth-lemon)', fontWeight: 800 }}>★</span>
+                    )}
                     <SpritePortrait character={m.name} scale={1} />
                     <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 'var(--cth-text-body-sm)' }}>
                       {m.name}
@@ -120,7 +138,7 @@ export function AddAgentModal({ onClose, onSpawned, defaultCwd }: AddAgentModalP
 
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <PixelButton onClick={onClose}>취소</PixelButton>
-              <PixelButton variant="primary" onClick={submit} disabled={busy || !character}>
+              <PixelButton variant="primary" onClick={submit} disabled={busy || !selected}>
                 {busy ? '부르는 중…' : '부르기'}
               </PixelButton>
             </div>
