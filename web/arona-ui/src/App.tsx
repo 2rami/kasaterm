@@ -15,7 +15,7 @@ import { RoomPathModal } from './components/RoomPathModal';
 import { WorkspaceNav, workspacesFromAgents } from './components/WorkspaceNav';
 import { PixelButton } from './components/PixelButton';
 import { SegmentedTabs } from './components/GameKit';
-import { startBoardPolling, fetchMode, focusPane, revealTerminal } from './lib/mcp';
+import { startBoardPolling, fetchMode, focusPane, revealTerminal, setMode, fetchBoard, fetchCharacters, spawnAgent } from './lib/mcp';
 
 type ViewMode = 'classroom' | 'grid';
 
@@ -47,9 +47,26 @@ export function App() {
 
   useEffect(() => {
     if (forceMock) { setModeState('god'); setCwd('/Users/kasa/Desktop/momewomo/tmuxify'); setConfigured(true); return; }
-    fetchMode().then(({ mode, cwd, configured }) => {
-      setModeState(mode); setCwd(cwd); setConfigured(configured);
-    });
+    (async () => {
+      const { mode, cwd, configured } = await fetchMode();
+      setCwd(cwd);
+      // ?picker=1 디버그 진입에서만 선택 화면을 띄운다.
+      if (forcePicker) { setModeState(mode); setConfigured(configured); return; }
+      // 아로나 창을 연 것 자체가 god 의도 — 다시 묻지 않고 바로 진입한다.
+      // 아직 god 이 아니면 모드 마커를 god 으로 쓰고, 교실이 비어 있으면
+      // leader(아로나)를 자동 등판시킨다(옛 ModePicker.pickGod 로직 이관).
+      if (mode !== 'god') {
+        await setMode('god');
+        const board = await fetchBoard();
+        if (board.length === 0) {
+          const chars = await fetchCharacters();
+          const leader = chars?.leader?.name;
+          if (leader) await spawnAgent({ character: leader });
+        }
+      }
+      setConfigured(true);
+      setModeState('god');
+    })();
   }, []);
   useEffect(() => {
     if (forceMock) { useStore.getState().setAgents(MOCK_AGENTS); return; }
@@ -68,7 +85,9 @@ export function App() {
   if (mode === undefined) {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
   }
-  if (!configured || mode !== 'god' || forcePicker) {
+  // 평시엔 ModePicker 없이 god 직행(부트 effect 가 god 으로 만든다). 선택
+  // 화면은 ?picker=1 디버그에서만.
+  if (forcePicker) {
     return (
       <ModePicker
         cwd={cwd}
