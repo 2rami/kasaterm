@@ -1113,6 +1113,8 @@ impl App {
         // `self.gpu` (the header loop can't call `&self` while `g` is live).
         let header_flash: Vec<Option<f32>> =
             headers.iter().map(|h| self.notify_flash_factor(&h.id)).collect();
+        // SCHALE OS(아로나) 패널 열림 여부 — gpu 빌림 전에 스냅샷(타이틀바 ✨ 버튼 active 표시).
+        let arona_open = self.arona_panel_window.is_some();
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -1208,6 +1210,32 @@ impl App {
                     by + (bh - isz) / 2.0,
                     isz,
                     fg,
+                );
+            }
+            // SCHALE OS(아로나) 토글 — ✨ 버튼. 터미널↔SCHALE OS 진입점(메뉴 대신).
+            // accent 틴트로 항상 눈에 띄게, 패널 열려있으면 active.
+            {
+                let (bx, by, bw, bh) = Self::arona_btn_rect();
+                let hover = sb_cursor.0 >= bx
+                    && sb_cursor.0 <= bx + bw
+                    && sb_cursor.1 >= by
+                    && sb_cursor.1 <= by + bh;
+                if arona_open {
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::accent());
+                } else {
+                    let soft = theme::lerp(theme::accent(), theme::bg(), 0.78);
+                    round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, soft);
+                    if hover {
+                        round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, theme::surface_hover());
+                    }
+                }
+                let isz = theme::ICON_SIZE;
+                g.queue_icon(
+                    "sparkles",
+                    bx + (bw - isz) / 2.0,
+                    by + (bh - isz) / 2.0,
+                    isz,
+                    if arona_open { theme::bg() } else { theme::accent() },
                 );
             }
             // Settings toggle, left of the git-column toggle. Always painted so

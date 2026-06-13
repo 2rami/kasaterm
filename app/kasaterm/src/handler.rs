@@ -462,7 +462,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autowindows();
         self.arm_autotoggle();
         self.arm_autoarona();
-        self.arm_first_run_onboarding();
+        // 온보딩 제거(거노) — 강제 ModePicker 자동오픈 안 함. 터미널이 기본,
+        // SCHALE OS 는 타이틀바 ✨ 버튼/단축키(Cmd+Shift+A)로 켠다(progressive disclosure).
         self.arm_autotabs();
         self.arm_autodrag();
         self.arm_autopanemove();
@@ -1422,6 +1423,15 @@ impl ApplicationHandler<UserEvent> for App {
                         let (bx, by, bw, bh) = Self::file_tree_toggle_rect();
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_file_tree();
+                            return;
+                        }
+                    }
+                    // SCHALE OS(아로나) ✨ 버튼 — 터미널↔SCHALE OS 토글(메뉴 대신).
+                    {
+                        let (bx, by, bw, bh) = Self::arona_btn_rect();
+                        if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
+                            self.toggle_arona_panel(event_loop);
+                            window.request_redraw();
                             return;
                         }
                     }
@@ -2710,6 +2720,21 @@ impl ApplicationHandler<UserEvent> for App {
                     if !self.confirm_or_close_window() {
                         event_loop.exit();
                     }
+                    return;
+                }
+                // Cmd+Shift+A (macOS) / Ctrl+Shift+A: SCHALE OS(아로나) 패널 토글 —
+                // 터미널로 작업하다 한 키로 전환(거노). PTY 로는 안 흘린다.
+                if matches!(event.state, ElementState::Pressed)
+                    && !event.repeat
+                    && self.host_mod()
+                    && self.modifiers.shift_key()
+                    && matches!(
+                        event.physical_key,
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyA)
+                    )
+                {
+                    self.toggle_arona_panel(event_loop);
+                    window.request_redraw();
                     return;
                 }
                 self.forward_key(&event);
