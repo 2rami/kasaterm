@@ -767,6 +767,22 @@ async fn focus_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `POST /close-pane?surface=<id>` — 학생(워커) pane 종료. PtyBackend 가
+/// SocketClose 로 GUI 에 위임 → layout.rs close_pane 이 leaf 제거 + 포커스 이동.
+async fn close_pane_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match params.get("surface").map(String::as_str) {
+        Some(id) if !id.is_empty() => match backend.close_surface(id) {
+            Ok(()) => serde_json::json!({ "ok": true, "surface_id": id }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        },
+        _ => serde_json::json!({ "ok": false, "error": "surface query param required" }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// Body for `POST /spawn`: 새 워커 pane 스펙. 전부 선택적 — 빈 객체면
 /// "현재 방에 기본 claude 하나 더".
 #[derive(serde::Deserialize)]
@@ -1610,6 +1626,7 @@ pub fn spawn_http_server(
                 let mode_set_backend = backend.clone();
                 let spawn_backend = backend.clone();
                 let focus_backend = backend.clone();
+                let close_backend = backend.clone();
                 let events_backend = backend.clone();
                 let messages_backend = backend.clone();
                 let list_dir_backend = backend.clone();
@@ -1678,6 +1695,12 @@ pub fn spawn_http_server(
                         "/focus",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             focus_handler(focus_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/close-pane",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            close_pane_handler(close_backend.clone(), q)
                         }),
                     )
                     // /arona-ui(슬래시 없음)는 /arona-ui/ 로 리다이렉트 —

@@ -934,34 +934,62 @@ impl App {
         self.file_tree.expanded.insert(dst_dir.to_path_buf());
         self.rebuild_file_tree_nodes();
     }
-    /// Move a tree entry to the OS trash (recoverable), then refresh.
-    pub(crate) fn delete_tree_entry(&mut self, path: &std::path::Path) {
-        match trash::delete(path) {
-            Ok(()) => {
+    /// Move every selected entry (primary + Cmd/Shift multi-select) to the OS
+    /// trash, clear the selection, refresh. One toast covers the whole batch.
+    pub(crate) fn delete_tree_selection(&mut self) {
+        let mut targets: Vec<std::path::PathBuf> =
+            self.file_tree.selected_more.iter().cloned().collect();
+        if let Some(p) = self.file_tree.selected.clone() {
+            targets.push(p);
+        }
+        targets.sort();
+        targets.dedup();
+        if targets.is_empty() {
+            return;
+        }
+        let total = targets.len();
+        let mut ok = 0usize;
+        let mut last_name = String::new();
+        for path in &targets {
+            if trash::delete(path).is_ok() {
                 self.file_tree.expanded.remove(path);
-                if self.file_tree.selected.as_deref() == Some(path) {
-                    self.file_tree.selected = None;
-                }
-                let name = path
+                ok += 1;
+                last_name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                self.set_toast(format!("휴지통으로 이동: {name}"));
-                self.rebuild_file_tree_nodes();
             }
-            Err(e) => self.set_toast(format!("삭제 실패: {e}")),
         }
+        self.file_tree.selected = None;
+        self.file_tree.selected_more.clear();
+        if ok == 0 {
+            self.set_toast("삭제 실패".to_string());
+        } else if total == 1 {
+            self.set_toast(format!("휴지통으로 이동: {last_name}"));
+        } else if ok == total {
+            self.set_toast(format!("휴지통으로 이동: {total}개"));
+        } else {
+            self.set_toast(format!("휴지통으로 이동: {ok}/{total}개"));
+        }
+        self.rebuild_file_tree_nodes();
     }
     /// Create the entry the inline "new file/folder" row is naming, under the
     /// current tree root, then clear the entry and refresh the tree.
     pub(crate) fn commit_new_entry(&mut self) {
         let Some((is_dir, name)) = self.file_tree.new.take() else { return };
+        // Right-click menu pins a parent folder; the toolbar buttons leave it
+        // None and fall back to the tree root.
+        let parent = self
+            .file_tree
+            .new_parent
+            .take()
+            .or_else(|| self.file_tree.root.clone());
         let name = name.trim().to_string();
         if name.is_empty() {
             return;
         }
-        if let Some(root) = self.file_tree.root.clone() {
-            let path = root.join(&name);
+        if let Some(parent) = parent {
+            let path = parent.join(&name);
             if path.exists() {
                 self.set_toast(format!("이미 있음: {name}"));
                 return;
@@ -973,7 +1001,7 @@ impl App {
             };
             match res {
                 Ok(()) => {
-                    self.file_tree.expanded.insert(root.clone());
+                    self.file_tree.expanded.insert(parent.clone());
                     if is_dir {
                         self.file_tree.expanded.insert(path.clone());
                     }
@@ -982,6 +1010,38 @@ impl App {
             }
         }
         self.rebuild_file_tree_nodes();
+    }
+    /// Apply the inline rename: `fs::rename` the target to the edited name in its
+    /// own parent. Carries expanded/selected state across; no-ops on empty /
+    /// unchanged / name clash.
+    pub(crate) fn commit_rename(&mut self) {
+        let Some((path, name)) = self.file_tree.rename.take() else { return };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        let Some(parent) = path.parent() else { return };
+        let target = parent.join(&name);
+        if target == path {
+            return;
+        }
+        if target.exists() {
+            self.set_toast(format!("이미 있음: {name}"));
+            return;
+        }
+        match std::fs::rename(&path, &target) {
+            Ok(()) => {
+                if self.file_tree.expanded.remove(&path) {
+                    self.file_tree.expanded.insert(target.clone());
+                }
+                if self.file_tree.selected.as_deref() == Some(path.as_path()) {
+                    self.file_tree.selected = Some(target.clone());
+                }
+                self.file_tree.selected_more.remove(&path);
+                self.rebuild_file_tree_nodes();
+            }
+            Err(e) => self.set_toast(format!("이름변경 실패: {e}")),
+        }
     }
     /// Recursive read_dir: folders first then files (case-insensitive), dotfiles
     /// skipped, descending only into expanded folders.

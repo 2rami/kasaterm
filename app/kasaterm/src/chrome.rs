@@ -442,6 +442,90 @@ impl App {
             w.request_redraw();
         }
     }
+    /// Run a file-tree right-click menu item. The target is the primary
+    /// selection the right-click pinned. New*/Rename open an inline input row;
+    /// CopyPath/Reveal/Delete act immediately.
+    pub(crate) fn run_ft_menu_action(&mut self, action: crate::FtMenuAction) {
+        use crate::FtMenuAction as A;
+        let target = self.file_tree.selected.clone();
+        match action {
+            A::NewFile | A::NewFolder => {
+                // Folder → inside it; file → its parent; nothing → tree root.
+                let parent = target.as_ref().and_then(|p| {
+                    if p.is_dir() {
+                        Some(p.clone())
+                    } else {
+                        p.parent().map(|x| x.to_path_buf())
+                    }
+                });
+                if let Some(par) = parent.clone() {
+                    self.file_tree.expanded.insert(par);
+                    self.rebuild_file_tree_nodes();
+                }
+                self.file_tree.new_parent = parent;
+                self.file_tree.new = Some((matches!(action, A::NewFolder), String::new()));
+                self.file_tree.rename = None;
+                self.file_tree.search_active = false;
+                self.file_tree.scroll = 0.0;
+            }
+            A::Rename => {
+                if let Some(p) = target {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.file_tree.rename = Some((p, name));
+                    self.file_tree.new = None;
+                    self.file_tree.search_active = false;
+                }
+            }
+            A::CopyPath => {
+                if let Some(p) = target {
+                    let s = p.to_string_lossy().to_string();
+                    match arboard::Clipboard::new() {
+                        Ok(mut cb) => {
+                            if cb.set_text(s).is_ok() {
+                                self.set_toast("경로 복사됨".to_string());
+                            }
+                        }
+                        Err(e) => eprintln!("[kasaterm] clipboard open failed: {e}"),
+                    }
+                }
+            }
+            A::Reveal => {
+                if let Some(p) = target {
+                    self.reveal_in_file_manager(&p);
+                }
+            }
+            A::Delete => self.delete_tree_selection(),
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// Reveal a path in the OS file manager (macOS Finder reveal · Windows
+    /// Explorer select · Linux opens the parent folder via xdg-open).
+    pub(crate) fn reveal_in_file_manager(&self, path: &std::path::Path) {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
+                .spawn();
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let dir = if path.is_dir() {
+                path
+            } else {
+                path.parent().unwrap_or(path)
+            };
+            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+        }
+    }
     /// Expand/collapse a file's inline unified diff in the git panel. The diff
     /// is parsed once on first expand and cached; `git diff` for a single file
     /// is cheap but not render-loop cheap, so it must not run per frame.
@@ -461,6 +545,49 @@ impl App {
             }
         }
         self.git.col_expanded.insert(key);
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// Double-click on a recent-commit row: expand/collapse its changed-file
+    /// list inline (only one commit open at a time). On expand the file list is
+    /// fetched once and cached.
+    pub(crate) fn toggle_git_commit(&mut self, hash: String) {
+        if self.git.col_commit_expanded.as_deref() == Some(hash.as_str()) {
+            self.git.col_commit_expanded = None;
+        } else {
+            if !self.git.col_commit_files_cache.contains_key(&hash) {
+                if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+                    let files = kasa_mcp::git::git_commit_files(&cwd, &hash);
+                    self.git.col_commit_files_cache.insert(hash.clone(), files);
+                }
+            }
+            self.git.col_commit_expanded = Some(hash);
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// Click a file row inside an expanded commit: expand/collapse that file's
+    /// diff. The diff is fetched once and cached, like `toggle_git_diff`.
+    pub(crate) fn toggle_git_commit_file(&mut self, hash: String, path: String) {
+        let key = (hash.clone(), path.clone());
+        if self.git.col_commit_file_expanded.remove(&key) {
+            self.chrome_dirty = true;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+            return;
+        }
+        if !self.git.col_commit_diff_cache.contains_key(&key) {
+            if let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) {
+                let rows = kasa_mcp::git::git_commit_file_diff(&cwd, &hash, &path);
+                self.git.col_commit_diff_cache.insert(key.clone(), rows);
+            }
+        }
+        self.git.col_commit_file_expanded.insert(key);
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -1124,6 +1251,8 @@ impl App {
         eprintln!("[arona-panel] open; http://127.0.0.1:{port}/arona-ui/");
         self.arona_panel_window = Some(window);
         self.arona_panel_webview = Some(webview);
+        // 그 방에 god 이 없으면 쓰던 활성 pane 을 god 으로 승격(거노 결정).
+        self.promote_active_pane_to_god();
         // 제품 동작: 교실(BA UI)과 터미널을 둘 다 띄워 나란히 연동한다 — BA UI 의
         // 포커스/입력/상태가 메인 터미널 창과 양방향으로 묶인다. 옛 "교실이 화면을
         // 인수(터미널 숨김)"는 KASATERM_ARONA_SOLO_VIEW 몰입 옵션으로 강등.
@@ -1161,6 +1290,35 @@ impl App {
         } else {
             self.open_arona_panel(event_loop);
         }
+    }
+    /// 거노 결정: GUI(아로나 패널)를 켤 때 그 방에 god 이 아직 없으면, 쓰던 활성
+    /// pane 을 god 으로 "승격"한다. 새 pane 을 띄우지 않고 기존 세션에 collab-mode
+    /// god 마커를 세운 뒤 `/compact` 를 보내 — 이미 매 턴 도는 board-context hook
+    /// → god-elect 가 그 pane 을 god 으로 선출(lead claim + `● 이름` rename +
+    /// persona 주입)한다. autoleader 와 동일한 GUI cwd slug 기준이라 god 시스템과
+    /// 일관되고, 실패해도(슬러그 불일치 등) "승격 안 됨"일 뿐 협업은 안 깨진다.
+    pub(crate) fn promote_active_pane_to_god(&self) {
+        let (Ok(home), Ok(cwd)) = (std::env::var("HOME"), std::env::current_dir()) else {
+            return;
+        };
+        let slug: String = cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '-' } else { c })
+            .collect();
+        // 이미 god 이 선출돼 있으면 아무것도 안 한다(중복 /compact 방지).
+        if std::path::Path::new(&format!("/tmp/kasaterm-collab/{slug}/lead")).exists() {
+            return;
+        }
+        // solo → god 전환: collab-mode 마커를 god 으로(god-elect 게이트가 이걸 본다).
+        if crate::current_collab_mode() != "god" {
+            let dir = format!("{home}/.config/kasaterm/collab-mode");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(format!("{dir}/{slug}"), "god");
+        }
+        // 활성 pane 에 /compact — hook(UserPromptSubmit) 발동으로 god-elect 가 깨어나
+        // 이 pane 을 god 으로 만든다. 동시에 컨텍스트도 정리(거노: 승격 + /compact).
+        self.send_bytes(b"/compact\r");
     }
     /// First-run onboarding: open the arona window (whose ModePicker shows
     /// the 터미널 vs 아로나 choice) once the boot settles, but only when this
