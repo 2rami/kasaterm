@@ -1427,8 +1427,7 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     // SCHALE OS(아로나) ✨ 버튼 — 터미널↔SCHALE OS 토글(메뉴 대신).
-                    {
-                        let (bx, by, bw, bh) = Self::arona_btn_rect();
+                    if let Some((bx, by, bw, bh)) = self.arona_btn_rect() {
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_arona_panel(event_loop);
                             window.request_redraw();

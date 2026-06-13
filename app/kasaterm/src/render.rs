@@ -1105,6 +1105,7 @@ impl App {
         self.settings_btn_rect = settings_btn;
         let settings_ctx = self.settings_open.then(|| self.settings_snapshot(win_px, scale));
         let settings_toggle = self.settings_toggle_rect();
+        let arona_btn = self.arona_btn_rect();
         let mut settings_rects_out: Vec<(SettingsAction, (f32, f32, f32, f32))> = Vec::new();
         // Caret blink for the commit-modal message box, computed before `g`
         // borrows `self.gpu` (the blink helper takes `&self`).
@@ -1213,9 +1214,8 @@ impl App {
                 );
             }
             // SCHALE OS(아로나) 토글 — ✨ 버튼. 터미널↔SCHALE OS 진입점(메뉴 대신).
-            // accent 틴트로 항상 눈에 띄게, 패널 열려있으면 active.
-            {
-                let (bx, by, bw, bh) = Self::arona_btn_rect();
+            // accent 틴트로 항상 눈에 띄게, 패널 열려있으면 active. 우측(설정 왼쪽).
+            if let Some((bx, by, bw, bh)) = arona_btn {
                 let hover = sb_cursor.0 >= bx
                     && sb_cursor.0 <= bx + bw
                     && sb_cursor.1 >= by
