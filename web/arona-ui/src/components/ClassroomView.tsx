@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, type Agent } from '@/store';
 import { SpriteWalk } from './SpriteWalk';
 import {
-  CLASSROOM_FURNITURE, buildGrid, deskSeats, cafeSpots, findPath,
+  CLASSROOM_FURNITURE, buildGrid, deskSeats, cafeSpots, findPath, pctToCell,
   type Furniture, type CafeSpot,
 } from './classroomSpace';
 import { pickExchange } from './cafeteriaLines';
@@ -32,6 +32,7 @@ function thoughtFor(a: Agent): string {
       const n = a.subagents?.length ?? 0;
       return n > 0 ? `${tool} · 서브 ${n}` : tool;
     }
+    case 'thinking': return '응답 생성 중…';
     case 'waiting':
     case 'blocked': return firstLine(a.lastReply) || shortenAction(a.action) || '대기 중';
     case 'idle': return firstLine(a.lastReply);
@@ -57,6 +58,7 @@ function SparkleGlyph() {
 const GLYPH: Record<string, { t: React.ReactNode; c: string; pulse?: boolean }> = {
   blocked: { t: '!', c: 'var(--cth-coral)', pulse: true },
   waiting: { t: '?', c: 'var(--cth-sky)', pulse: true },
+  thinking: { t: '…', c: 'var(--cth-status-thinking)', pulse: true },
   success: { t: <SparkleGlyph />, c: 'var(--cth-lemon)' },
 };
 
@@ -106,8 +108,8 @@ function useCafeChat(agents: Agent[]): Record<string, string> {
 // 카페 구역을 어슬렁(가구 피해 다님). 이동은 waypoint 단위 CSS transition + 워크
 // 애니메이션 + 진행방향 flip. 도착하면 멈춤. 머리 위 말풍선/글리프. 클릭 → 대화.
 function ClassroomCharacter(
-  { agent, seat, grid, cafe, chatLine, onSelect }:
-  { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void },
+  { agent, seat, grid, cafe, chatLine, onSelect, index, selected }:
+  { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void; index: number; selected?: boolean },
 ) {
   // working/waiting/blocked = 자기 책상으로. idle 만 카페 배회. 단 god(아로나)은
   // 선생님 비서·오케스트레이터라 idle 이어도 자기 자리 고정(munder god 자리고정 차용).
@@ -146,19 +148,48 @@ function ClassroomCharacter(
   }, [grid, step]);
 
   useEffect(() => {
+    if (selected) return; // 선택 중엔 자동 이동을 멈추고 방향키로 수동 조종.
     if (atDesk && seat) { walkTo({ x: seat.x, y: seat.y }); return; }
     // idle → 카페 구역 머무름 지점 근처를 어슬렁(가구 피해 BFS).
     const wander = () => {
-      const spot = cafe.length ? cafe[Math.floor(Math.random() * cafe.length)] : null;
-      const t: Pt = spot
-        ? { x: spot.x + (Math.random() * 6 - 3), y: spot.y + (Math.random() * 4 - 2) }
+      // idle 거점을 인덱스로 결정적 분배(랜덤이 같은 자리를 골라 겹치던 것 방지).
+      // 자리보다 idle 이 많으면 tier 로 좌우로 더 벌린다.
+      const home = cafe.length ? cafe[index % cafe.length] : null;
+      const tier = cafe.length ? Math.floor(index / cafe.length) : 0;
+      const t: Pt = home
+        ? { x: home.x + (Math.random() * 3 - 1.5) + (tier ? (tier % 2 ? 7 : -7) : 0), y: home.y + (Math.random() * 2.5 - 1.25) }
         : { x: 20 + Math.random() * 24, y: 78 + Math.random() * 10 };
       walkTo(t);
     };
     wander();
-    const iv = window.setInterval(wander, 5200);
+    // 주기에 인덱스별 jitter — 모든 캐릭터가 같은 5.2s 틱에 동시 재배치되던 것 분산.
+    const iv = window.setInterval(wander, 5200 + (index % 5) * 700);
     return () => { window.clearInterval(iv); window.clearTimeout(timer.current); };
-  }, [atDesk, seat?.x, seat?.y, walkTo, cafe]);
+  }, [atDesk, seat?.x, seat?.y, walkTo, cafe, index, selected]);
+
+  // 선택된 학생은 방향키로 직접 이동(자동 배회 멈춤). 벽/가구는 못 지나감.
+  useEffect(() => {
+    if (!selected) return;
+    const onKey = (e: KeyboardEvent) => {
+      const STEP = 2.6;
+      let { x, y } = posRef.current;
+      if (e.key === 'ArrowUp') y -= STEP;
+      else if (e.key === 'ArrowDown') y += STEP;
+      else if (e.key === 'ArrowLeft') { x -= STEP; setFlip(true); }
+      else if (e.key === 'ArrowRight') { x += STEP; setFlip(false); }
+      else return;
+      e.preventDefault();
+      const cell = pctToCell(x, y);
+      if (!grid[cell.r]?.[cell.c]) return; // 벽/가구 막힘
+      const next = { x, y };
+      posRef.current = next;
+      setSegMs(110);
+      setMoving(true);
+      setPos(next);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selected, grid]);
 
   const chatting = chatLine && agent.status === 'idle';
   const thought = chatting ? chatLine : thoughtFor(agent);
@@ -174,7 +205,8 @@ function ClassroomCharacter(
         transition: `left ${segMs}ms linear, top ${segMs}ms linear`,
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
         border: 'none', background: 'transparent', cursor: 'pointer', padding: 0,
-        width: 132, zIndex: Math.round(pos.y * 10),
+        width: 132, zIndex: selected ? 9999 : Math.round(pos.y * 10),
+        filter: selected ? 'drop-shadow(0 0 3px var(--cth-sky)) drop-shadow(0 0 7px var(--cth-sky))' : undefined,
       }}
     >
       {glyph && (
@@ -270,6 +302,8 @@ export interface ClassroomViewProps {
   cafe?: CafeSpot[];
   /** 빈 자리 클릭 시 — 학생 부르기(멀리 있는 버튼 대신 빈 책상에서 바로 소환). */
   onAdd?: () => void;
+  /** 클릭으로 선택된 학생 — 교실에서 글로우 강조 + 방향키로 직접 이동(거노). */
+  selectedId?: string | null;
 }
 
 // 빈 책상 자리 — 학생 없을 때 그 자리에 '+ 부르기' 버튼. 클릭 → 학생 부르기 모달.
@@ -307,7 +341,7 @@ function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: ()
 
 // 샬레 교실 — 빈 바닥 배경 위에 가구를 개별 배치(munder 식). 학생은 가구를 피해
 // 책상(working)이나 카페(idle)로 BFS 경로 이동. 가구·학생이 한 z-레이어라 앞뒤가림.
-export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE, seats: seatsProp, cafe: cafeProp, onAdd }: ClassroomViewProps) {
+export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE, seats: seatsProp, cafe: cafeProp, onAdd, selectedId }: ClassroomViewProps) {
   const storeAgents = useStore((s) => s.agents);
   const agents = agentsProp ?? storeAgents;
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
@@ -319,8 +353,9 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
 
   return (
     <div style={{
-      position: 'relative', width: '100%', maxWidth: 960, margin: '0 auto',
-      aspectRatio: '3 / 2',
+      // 부모(메인 컬럼)를 꽉 채운다 — 옛 maxWidth:960 + aspectRatio 고정이 좌우
+      // 여백을 만들던 것 제거(거노: 꽉차게). 캐릭터는 % 좌표라 비율 따라 분포.
+      position: 'relative', width: '100%', height: '100%',
       borderRadius: 16, overflow: 'hidden',
       // 가구/캐릭터 zIndex(발밑 y*10, 최대 ~960)를 교실 안에 가둔다 — 안 그러면
       // 문서 레벨에서 모달(z 낮음) 위로 책상이 뚫고 올라온다(거노 학생부르기 버그).
@@ -334,7 +369,7 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
       {furniture.map((f) => <FurnitureSprite key={f.id} f={f} />)}
 
       {sorted.slice(0, Math.max(seats.length, 6)).map((a, i) => (
-        <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} chatLine={chat[a.id]} onSelect={onSelect} />
+        <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} chatLine={chat[a.id]} onSelect={onSelect} index={i} selected={!!selectedId && a.id === selectedId} />
       ))}
 
       {/* 빈 자리마다 '부르기' 버튼 — 학생 없는 책상에서 바로 소환(멀리 있는 버튼 대신) */}
