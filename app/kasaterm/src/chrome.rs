@@ -741,6 +741,12 @@ impl App {
         let (sx, sy, sw, sh) = Self::sidebar_toggle_rect();
         (sx + sw + 2.0, sy, sw, sh)
     }
+    /// SCHALE OS(아로나) 토글 버튼 — 파일트리 토글 우측, 약간 띄워 강조. ✨ 아이콘.
+    /// 터미널↔SCHALE OS 진입점(메뉴 대신). 클릭 → toggle_arona_panel.
+    pub(crate) fn arona_btn_rect() -> (f32, f32, f32, f32) {
+        let (fx, fy, fw, fh) = Self::file_tree_toggle_rect();
+        (fx + fw + 8.0, fy, fw, fh)
+    }
     /// Windows-only frameless window controls (minimize / maximize / close),
     /// parked at the right end of the title strip. macOS keeps the native
     /// traffic lights, so this exists only where we drop OS decorations.
@@ -1136,6 +1142,7 @@ impl App {
     /// room has no collab-mode marker yet — picking a mode writes the marker,
     /// so the next boot skips straight to the terminal. `KASATERM_NO_ONBOARD`
     /// opts out for headless verification and pre-onboarding user setups.
+    #[allow(dead_code)] // 온보딩 제거(거노) — 재활성 대비 보존. 호출부 handler.rs 에서 뺌.
     pub(crate) fn arm_first_run_onboarding(&mut self) {
         if std::env::var_os("KASATERM_NO_ONBOARD").is_some() {
             return;
