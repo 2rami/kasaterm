@@ -4,7 +4,7 @@ import { AgentCard } from './components/AgentCard';
 import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
-import { LOUNGE_FURNITURE, STUDIO_FURNITURE, SCHALE_SEATS, SCHALE_CAFE } from './components/classroomSpace';
+import { LOUNGE_FURNITURE, STUDIO_FURNITURE } from './components/classroomSpace';
 import { CommandCenter } from './components/CommandCenter';
 import { StudentGrid } from './components/StudentGrid';
 import { Footer } from './components/Footer';
@@ -86,9 +86,8 @@ export function App() {
   // 일관, 어느 방이든 책상 안 뚫음). 워크스페이스별 가구 변형으로 분위기만 다르게.
   const FURNITURE_SETS = [LOUNGE_FURNITURE, STUDIO_FURNITURE];
   const wsIdx = activeWs ? workspaces.findIndex((w) => w.cwd === activeWs) : -1;
-  const roomBg = 'schale-classroom.png';
-  // 가구는 SCHALE 교실 이미지에 박혀 있으니 placed 가구 끔.
-  const roomFurniture = wsIdx >= 0 ? FURNITURE_SETS[wsIdx % FURNITURE_SETS.length] : [];
+  const roomBg = 'classroom-floor.png';
+  const roomFurniture = wsIdx >= 0 ? FURNITURE_SETS[wsIdx % FURNITURE_SETS.length] : undefined;
 
   // 재화 = claude 토큰 지표(선생님): 💎입력토큰 · 🪙비용$ (전 학생 합산).
   const totalInputTokens = sorted.reduce((s, a) => s + (a.tokensIn ?? 0), 0);
@@ -173,7 +172,7 @@ export function App() {
           {/* 교실 씬 or 카드 그리드 */}
           <div style={{ flex: 1, overflow: 'auto', padding: 'var(--cth-space-4)' }}>
             {view === 'classroom' ? (
-              <ClassroomView agents={shown} background={roomBg} furniture={roomFurniture} seats={wsIdx < 0 ? SCHALE_SEATS : undefined} cafe={wsIdx < 0 ? SCHALE_CAFE : undefined} onSelect={(id, title) => setPeek({ id, title })} />
+              <ClassroomView agents={shown} background={roomBg} furniture={roomFurniture} onSelect={(id, title) => setPeek({ id, title })} />
             ) : shown.length === 0 ? (
               <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
             ) : (
