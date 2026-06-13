@@ -1281,6 +1281,12 @@ impl App {
                 let del = matches!(&event.logical_key, Key::Named(NamedKey::Delete))
                     || (self.modifiers.super_key()
                         && matches!(&event.logical_key, Key::Named(NamedKey::Backspace)));
+                if std::env::var_os("KASATERM_KEY_DEBUG").is_some() {
+                    eprintln!(
+                        "[ftdel] has_sel={} del={} super={} key={:?}",
+                        has_sel, del, self.modifiers.super_key(), event.logical_key
+                    );
+                }
                 if del {
                     self.delete_tree_selection();
                     if let Some(w) = &self.window {
