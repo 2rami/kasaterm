@@ -741,11 +741,21 @@ impl App {
         let (sx, sy, sw, sh) = Self::sidebar_toggle_rect();
         (sx + sw + 2.0, sy, sw, sh)
     }
-    /// SCHALE OS(아로나) 토글 버튼 — 파일트리 토글 우측, 약간 띄워 강조. ✨ 아이콘.
-    /// 터미널↔SCHALE OS 진입점(메뉴 대신). 클릭 → toggle_arona_panel.
-    pub(crate) fn arona_btn_rect() -> (f32, f32, f32, f32) {
-        let (fx, fy, fw, fh) = Self::file_tree_toggle_rect();
-        (fx + fw + 8.0, fy, fw, fh)
+    /// SCHALE OS(아로나) 토글 버튼 — 우측 끝, 설정 토글 왼쪽(git-col·settings 다음).
+    /// 좌측에 두면 경로 브레드크럼과 겹쳐서 우측으로(거노). ✨ 아이콘, 클릭 →
+    /// toggle_arona_panel. win_w 필요해 첫 페인트 전엔 None.
+    pub(crate) fn arona_btn_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        let w = 26.0;
+        let h = 22.0;
+        let win_w = self.window.as_ref().map(|win| {
+            let scale = self.effective_scale();
+            win.inner_size().width as f32 / scale
+        })?;
+        let x = win_w - w - 8.0 - 2.0 * (w + 4.0);
+        #[cfg(windows)]
+        let x = Self::win_control_rects(win_w)[0].0 - 2.0 - w - 2.0 * (w + 4.0);
+        let y = (TITLE_HEIGHT - h) / 2.0;
+        Some((x, y, w, h))
     }
     /// Windows-only frameless window controls (minimize / maximize / close),
     /// parked at the right end of the title strip. macOS keeps the native
