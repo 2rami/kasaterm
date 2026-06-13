@@ -1724,6 +1724,14 @@ impl App {
                 self.send_bytes(b"\x15");
                 return;
             }
+            // Ctrl+Backspace → backward-kill-word (Ctrl+W, 0x17). Windows'
+            // standard word-erase chord; on macOS host_mod is Cmd so plain
+            // Ctrl still lands here. Alt+Backspace does the same via `\e\x7f`.
+            if self.modifiers.control_key() {
+                self.buf_pop_word();
+                self.send_bytes(b"\x17");
+                return;
+            }
             if self.modifiers.alt_key() {
                 self.buf_pop_word();
                 self.send_bytes(b"\x1b\x7f");
@@ -1761,6 +1769,22 @@ impl App {
             }
             Key::Named(NamedKey::Tab) => b"\t".to_vec(),
             Key::Named(NamedKey::Escape) => b"\x1b".to_vec(),
+            // Editing / navigation keys that carry no `event.text`, so without
+            // an explicit arm they fall through and send nothing (the "Delete /
+            // Home / End don't work" report). Delete carries a Ctrl modifier
+            // (CSI mod 5) for forward-word-delete; Home/End use the CSI form
+            // every shell understands.
+            Key::Named(NamedKey::Delete) => {
+                if self.modifiers.control_key() {
+                    b"\x1b[3;5~".to_vec()
+                } else {
+                    b"\x1b[3~".to_vec()
+                }
+            }
+            Key::Named(NamedKey::Home) => b"\x1b[H".to_vec(),
+            Key::Named(NamedKey::End) => b"\x1b[F".to_vec(),
+            Key::Named(NamedKey::PageUp) => b"\x1b[5~".to_vec(),
+            Key::Named(NamedKey::PageDown) => b"\x1b[6~".to_vec(),
             Key::Named(
                 nk @ (NamedKey::ArrowUp
                 | NamedKey::ArrowDown
@@ -1791,6 +1815,11 @@ impl App {
                         'C' => b"\x1b[F".to_vec(),
                         _ => format!("\x1b[{letter}").into_bytes(),
                     }
+                } else if self.modifiers.control_key() {
+                    // Windows / readline word-wise motion: Ctrl+←/→.
+                    // CSI modifier 5 = Ctrl (1 + ctrl-bit 4). zsh, bash
+                    // readline, and Ink all read this as forward/backward-word.
+                    format!("\x1b[1;5{letter}").into_bytes()
                 } else if self.modifiers.alt_key() {
                     format!("\x1b[1;3{letter}").into_bytes()
                 } else {
