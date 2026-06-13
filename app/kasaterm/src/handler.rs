@@ -1670,6 +1670,15 @@ impl ApplicationHandler<UserEvent> for App {
                             .find(|(_, r)| inside(r))
                             .map(|(p, _)| p.clone())
                         {
+                            if std::env::var_os("KASATERM_KEY_DEBUG").is_some() {
+                                eprintln!(
+                                    "[fttree] row-click super={} shift={} sel_some={} more={}",
+                                    self.host_mod(),
+                                    self.modifiers.shift_key(),
+                                    self.file_tree.selected.is_some(),
+                                    self.file_tree.selected_more.len()
+                                );
+                            }
                             // Cmd-click: toggle this row in/out of the selection
                             // (no expand/preview/drag — pure multi-select, VSCode).
                             if self.host_mod() {

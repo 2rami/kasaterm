@@ -3525,6 +3525,22 @@ fn resolve_collab_hooks_dir(
 /// characters.json 의 leader.name (~/.config 우선 → 번들). 아로나 자동 시작·테마
 /// 가드가 쓴다. 파일 없거나 leader 없으면 None(기능 skip).
 pub(crate) fn load_leader_name() -> Option<String> {
+    let slug: String = std::env::current_dir()
+        .ok()
+        .map(|c| {
+            c.to_string_lossy()
+                .chars()
+                .map(|ch| if ch == '/' || ch == '.' { '-' } else { ch })
+                .collect()
+        })
+        .unwrap_or_default();
+    load_leader_name_for(&slug)
+}
+
+/// 방(slug) 의 god 캐릭터 이름 — leaders 풀이 있으면 slug 해시로(방마다 다르게),
+/// 없으면 leader 단일. promote(활성 pane cwd slug) 와 공유 — assign-character.py·
+/// board 와 같은 UTF-8 바이트합 해시라 한 방엔 같은 god 캐릭터가 나온다.
+pub(crate) fn load_leader_name_for(slug: &str) -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let mut paths = vec![std::path::PathBuf::from(format!(
         "{home}/.config/kasaterm/characters.json"
@@ -3532,21 +3548,7 @@ pub(crate) fn load_leader_name() -> Option<String> {
     if let Some(hd) = locate_collab_hooks_dir() {
         paths.push(hd.join("characters.json"));
     }
-    // 방(cwd slug) — leaders 풀이 있으면 해시로 god 선택(방마다 다르게, 거노).
-    // assign-character.py 와 같은 slug·해시(UTF-8 바이트 합)라 두 경로가 일치한다.
-    let slug_sum: usize = std::env::current_dir()
-        .ok()
-        .map(|c| {
-            c.to_string_lossy()
-                .chars()
-                .map(|ch| if ch == '/' || ch == '.' { '-' } else { ch })
-                .collect::<String>()
-                .into_bytes()
-                .iter()
-                .map(|&b| b as usize)
-                .sum()
-        })
-        .unwrap_or(0);
+    let slug_sum: usize = slug.bytes().map(|b| b as usize).sum();
     for p in &paths {
         let Ok(s) = std::fs::read_to_string(p) else { continue };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { continue };
@@ -3598,18 +3600,13 @@ pub(crate) fn current_collab_mode() -> &'static str {
 /// 띄울 `claude --resume <leader> || claude`. solo·무테마·`KASATERM_NO_AUTOLEADER`
 /// 면 None(기존 유저 무영향). cwd slug 로 모드 마커를 본다(kasacollab 과 동일 규칙).
 pub(crate) fn autoleader_command() -> Option<String> {
-    if std::env::var_os("KASATERM_NO_AUTOLEADER").is_some() {
-        return None;
-    }
-    if current_collab_mode() != "god" {
-        return None;
-    }
-    let leader = load_leader_name()?;
-    // 아로나(god/오케스트레이터)는 opus 1M(거노). `[ ]` 셸 glob 회피로 따옴표 필수.
-    // 학생(워커)은 AddAgentModal 기본 sonnet 그대로.
-    Some(format!(
-        "claude --resume {leader} --model 'opus[1m]' || claude --model 'opus[1m]'"
-    ))
+    // 터미널 부팅 시 claude 자동 실행은 제거(거노 06-14: "터미널 켜자마자 claude 가
+    // 켜지는 게 이상"). 이건 "GUI 켤 때 쓰던 세션 승격" 결정 전의 옛 설계라 충돌했고,
+    // collab-mode god 마커가 남으면 매 부팅마다 `claude --resume <이름>` 검색 화면이
+    // 떴다. 이제 터미널 = 평소 셸, god 은 GUI(아로나 패널) 켤 때
+    // promote_active_pane_to_god 가 쓰던 활성 세션을 승격한다.
+    let _ = std::env::var_os("KASATERM_NO_AUTOLEADER");
+    None
 }
 
 /// Stage a `claude` wrapper + a session-scoped hook settings file on the pane

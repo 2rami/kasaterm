@@ -1298,7 +1298,24 @@ impl App {
     /// persona 주입)한다. autoleader 와 동일한 GUI cwd slug 기준이라 god 시스템과
     /// 일관되고, 실패해도(슬러그 불일치 등) "승격 안 됨"일 뿐 협업은 안 깨진다.
     pub(crate) fn promote_active_pane_to_god(&self) {
-        let (Ok(home), Ok(cwd)) = (std::env::var("HOME"), std::env::current_dir()) else {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        // 활성 pane(= 지금 쓰던 세션) id.
+        let Some(sid) = self.ws.lock().ok().and_then(|w| w.active_pane.clone()) else {
+            return;
+        };
+        // 활성 pane 의 실제 cwd(pid_cwd) — board-context/god-elect/kasacollab 이
+        // 보는 slug 와 동일(pane_faces_user 와 같은 경로). GUI 프로세스 current_dir
+        // 은 .app 을 Finder 로 켜면 `/` 라 pane cwd 와 어긋나, kasacollab.current_mode
+        // 가 god 마커를 못 찾아 mode=solo 로 읽혀 persona 가 안 입혀졌다(거노 06-14).
+        let Some(cwd) = self
+            .pty
+            .get(&sid)
+            .and_then(|s| s.shell_pid())
+            .and_then(socket::pid_cwd)
+            .or_else(|| self.pane_cwd_cache.get(&sid).cloned())
+        else {
             return;
         };
         let slug: String = cwd
@@ -1306,18 +1323,33 @@ impl App {
             .chars()
             .map(|c| if c == '/' || c == '.' { '-' } else { c })
             .collect();
-        // 이미 god 이 선출돼 있으면 아무것도 안 한다(중복 /compact 방지).
-        if std::path::Path::new(&format!("/tmp/kasaterm-collab/{slug}/lead")).exists() {
+        let dir = format!("/tmp/kasaterm-collab/{slug}");
+        // 이미 god 이 선출돼 있으면 아무것도 안 한다(중복 방지).
+        if std::path::Path::new(&format!("{dir}/lead")).exists() {
             return;
         }
-        // solo → god 전환: collab-mode 마커를 god 으로(god-elect 게이트가 이걸 본다).
-        if crate::current_collab_mode() != "god" {
-            let dir = format!("{home}/.config/kasaterm/collab-mode");
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(format!("{dir}/{slug}"), "god");
+        // god-elect 는 같은 방 claude pane 이 2개+ 일 때만 선출하고 단일 pane 은
+        // 무시(`room_count<2 → exit 0`, lead 는 안 건드림)하므로, GUI 켜는 시점에
+        // lead·character 마커를 직접 박아 단일 pane 도 즉시 god 이 되게 한다.
+        // board-context(UserPromptSubmit) 가 다음 턴에 lead(=자기) 를 보고
+        // _god_persona 를, character 마커로 페르소나를 싣는다.
+        let _ = std::fs::create_dir_all(&dir);
+        // lead = 자기(surface_id) — board-context god 판정(`me == god`)의 진실원.
+        let _ = std::fs::write(format!("{dir}/lead"), &sid);
+        // character-<N> = leader 이름 — _load_persona 가 이 마커로 페르소나를 찾는다
+        // (방별 leaders 풀이면 같은 slug 해시로 아로나/프라나).
+        if let Some(leader) = crate::load_leader_name_for(&slug) {
+            let n = sid.trim_start_matches('%');
+            let _ = std::fs::write(format!("{dir}/character-{n}"), &leader);
         }
-        // 활성 pane 에 /compact — hook(UserPromptSubmit) 발동으로 god-elect 가 깨어나
-        // 이 pane 을 god 으로 만든다. 동시에 컨텍스트도 정리(거노: 승격 + /compact).
+        // collab-mode god — god-elect 게이트·kasacollab.current_mode 가 본다.
+        let mode_dir = format!("{home}/.config/kasaterm/collab-mode");
+        let _ = std::fs::create_dir_all(&mode_dir);
+        let _ = std::fs::write(format!("{mode_dir}/{slug}"), "god");
+        // 모델 opus 1M 으로(아로나=opus, /model 인자형은 메뉴 없이 직접 전환) + 컨텍스트
+        // 정리. 둘 다 claude 빌트인이라 hook 은 안 깨우지만, persona 는 그 다음 일반
+        // 입력의 UserPromptSubmit hook 에서 위 마커를 보고 입혀진다.
+        self.send_bytes(b"/model opus[1m]\r");
         self.send_bytes(b"/compact\r");
     }
     /// First-run onboarding: open the arona window (whose ModePicker shows
