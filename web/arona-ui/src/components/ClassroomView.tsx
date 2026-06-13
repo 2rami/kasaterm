@@ -109,7 +109,9 @@ function ClassroomCharacter(
   { agent, seat, grid, cafe, chatLine, onSelect }:
   { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void },
 ) {
-  const atDesk = agent.status !== 'idle';
+  // working/waiting/blocked = 자기 책상으로. idle 만 카페 배회. 단 god(아로나)은
+  // 선생님 비서·오케스트레이터라 idle 이어도 자기 자리 고정(munder god 자리고정 차용).
+  const atDesk = agent.status !== 'idle' || !!agent.isGod;
   const home = seat ? { x: seat.x, y: seat.y } : { x: 50, y: 75 };
   const [pos, setPos] = useState<Pt>(home);
   const [segMs, setSegMs] = useState(0);
