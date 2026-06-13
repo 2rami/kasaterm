@@ -3532,9 +3532,37 @@ pub(crate) fn load_leader_name() -> Option<String> {
     if let Some(hd) = locate_collab_hooks_dir() {
         paths.push(hd.join("characters.json"));
     }
+    // 방(cwd slug) — leaders 풀이 있으면 해시로 god 선택(방마다 다르게, 거노).
+    // assign-character.py 와 같은 slug·해시(UTF-8 바이트 합)라 두 경로가 일치한다.
+    let slug_sum: usize = std::env::current_dir()
+        .ok()
+        .map(|c| {
+            c.to_string_lossy()
+                .chars()
+                .map(|ch| if ch == '/' || ch == '.' { '-' } else { ch })
+                .collect::<String>()
+                .into_bytes()
+                .iter()
+                .map(|&b| b as usize)
+                .sum()
+        })
+        .unwrap_or(0);
     for p in &paths {
         let Ok(s) = std::fs::read_to_string(p) else { continue };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { continue };
+        // leaders 배열 우선(방 해시), 없으면 leader 단일(현행 호환).
+        if let Some(arr) = v.get("leaders").and_then(|l| l.as_array()) {
+            if !arr.is_empty() {
+                if let Some(n) = arr[slug_sum % arr.len()]
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                {
+                    if !n.is_empty() {
+                        return Some(n.to_string());
+                    }
+                }
+            }
+        }
         if let Some(n) = v
             .get("leader")
             .and_then(|l| l.get("name"))
@@ -3577,7 +3605,11 @@ pub(crate) fn autoleader_command() -> Option<String> {
         return None;
     }
     let leader = load_leader_name()?;
-    Some(format!("claude --resume {leader} || claude"))
+    // 아로나(god/오케스트레이터)는 opus 1M(거노). `[ ]` 셸 glob 회피로 따옴표 필수.
+    // 학생(워커)은 AddAgentModal 기본 sonnet 그대로.
+    Some(format!(
+        "claude --resume {leader} --model 'opus[1m]' || claude --model 'opus[1m]'"
+    ))
 }
 
 /// Stage a `claude` wrapper + a session-scoped hook settings file on the pane

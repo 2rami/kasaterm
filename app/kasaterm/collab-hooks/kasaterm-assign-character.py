@@ -63,9 +63,12 @@ def main():
                     used.add(open(m).read().strip())
                 except Exception:
                     pass
-            leader = chars.get("leader") or {}
-            if leader.get("name") and leader.get("name") not in used:
-                name = leader.get("name")
+            # god 풀(leaders) 이 있으면 방(slug) 해시로 god 캐릭터 선택 — 방마다
+            # 아로나/프라나 다르게(거노). 없으면 leader 단일(현행 호환).
+            pool = chars.get("leaders") or ([chars["leader"]] if chars.get("leader") else [])
+            god = pool[sum(slug.encode()) % len(pool)] if pool else {}
+            if god.get("name") and god.get("name") not in used:
+                name = god.get("name")
             else:
                 cand = next((m for m in (chars.get("members") or [])
                              if m.get("name") and m.get("name") not in used), None)
