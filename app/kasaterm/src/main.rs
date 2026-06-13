@@ -3785,10 +3785,19 @@ fn resolve_default_shell() -> Option<String> {
     }
     #[cfg(windows)]
     {
+        // PowerShell 7 (pwsh) preferred, then the OS-bundled Windows
+        // PowerShell (always present), then Git Bash. The settings-screen /
+        // env overrides above still win, so this is only the out-of-box pick.
+        let pwsh7 = r"C:\Program Files\PowerShell\7\pwsh.exe";
+        if std::path::Path::new(pwsh7).is_file() {
+            return Some(pwsh7.to_string());
+        }
         if let Some(bash) = git_bash_path() {
             return Some(bash);
         }
+        return Some("powershell.exe".to_string());
     }
+    #[allow(unreachable_code)]
     None
 }
 

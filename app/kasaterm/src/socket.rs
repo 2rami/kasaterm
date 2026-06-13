@@ -818,6 +818,7 @@ fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool) {
 /// Resolve a process's current working directory via lsof. macOS has no
 /// `/proc`; `lsof -d cwd` prints the cwd path. Called ~once/sec by the git
 /// panel poll, so the subprocess cost is acceptable.
+#[cfg(unix)]
 pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
     let out = std::process::Command::new("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
@@ -826,6 +827,99 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .find_map(|l| l.strip_prefix('n').map(std::path::PathBuf::from))
+}
+
+/// Windows has no `lsof`. A process's live cwd lives in its PEB
+/// (`ProcessParameters.CurrentDirectory.DosPath`), so we open the target,
+/// resolve the PEB base via `NtQueryInformationProcess`, then `ReadProcessMemory`
+/// our way down: PEB+0x20 → ProcessParameters pointer, +0x38 → the cwd
+/// `UNICODE_STRING`, then its buffer. Offsets are the stable x64 PEB/
+/// RTL_USER_PROCESS_PARAMETERS layout (windows-sys doesn't expose the fields).
+#[cfg(windows)]
+pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, NTSTATUS};
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+
+    // windows-sys 0.59 dropped the ntdll process-info bindings, so declare the
+    // one call we need. ProcessBasicInformation (class 0) returns the PEB base.
+    #[repr(C)]
+    struct ProcessBasicInfo {
+        exit_status: NTSTATUS,
+        peb_base_address: *mut std::ffi::c_void,
+        affinity_mask: usize,
+        base_priority: i32,
+        unique_process_id: usize,
+        inherited_from_unique_process_id: usize,
+    }
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtQueryInformationProcess(
+            handle: HANDLE,
+            class: i32,
+            info: *mut std::ffi::c_void,
+            len: u32,
+            ret_len: *mut u32,
+        ) -> NTSTATUS;
+    }
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let read_mem = |addr: usize, buf: *mut std::ffi::c_void, len: usize| -> bool {
+            let mut got = 0usize;
+            ReadProcessMemory(handle, addr as *const _, buf, len, &mut got) != 0 && got == len
+        };
+        let result = (|| {
+            let mut pbi: ProcessBasicInfo = std::mem::zeroed();
+            let mut ret_len = 0u32;
+            let status = NtQueryInformationProcess(
+                handle,
+                0, // ProcessBasicInformation
+                &mut pbi as *mut _ as *mut _,
+                std::mem::size_of::<ProcessBasicInfo>() as u32,
+                &mut ret_len,
+            );
+            if status != 0 {
+                return None;
+            }
+            let peb = pbi.peb_base_address as usize;
+            if peb == 0 {
+                return None;
+            }
+            // PEB+0x20 = ProcessParameters pointer (x64).
+            let mut params: usize = 0;
+            if !read_mem(peb + 0x20, &mut params as *mut _ as *mut _, std::mem::size_of::<usize>()) || params == 0 {
+                return None;
+            }
+            // ProcessParameters+0x38 = CurrentDirectory.DosPath UNICODE_STRING
+            // { u16 Length, u16 MaximumLength, u32 _pad, u64 Buffer } (x64).
+            let mut us: [u8; 16] = [0; 16];
+            if !read_mem(params + 0x38, us.as_mut_ptr() as *mut _, 16) {
+                return None;
+            }
+            let length = u16::from_le_bytes([us[0], us[1]]) as usize;
+            let buffer = u64::from_le_bytes([
+                us[8], us[9], us[10], us[11], us[12], us[13], us[14], us[15],
+            ]) as usize;
+            if length == 0 || buffer == 0 {
+                return None;
+            }
+            let mut wide = vec![0u16; length / 2];
+            if !read_mem(buffer, wide.as_mut_ptr() as *mut _, length) {
+                return None;
+            }
+            let s = std::ffi::OsString::from_wide(&wide);
+            Some(std::path::PathBuf::from(s))
+        })();
+        CloseHandle(handle);
+        result
+    }
 }
 
 

@@ -1074,9 +1074,13 @@ impl App {
         // 웹 쪽 ModePicker 담당(GET /mode 로 분기) — 네이티브가 차단하면
         // ModePicker 에 도달 자체가 불가한 설계 모순이었다(거노 실측).
         let port = mcp_panel_port();
+        // 창을 숨긴 채 만든다 — 보이는 채로 띄우면 webview 콘텐츠가 로드되기 전
+        // 빈 창이 깜빡인다. 페이지 로드 완료(PageLoadEvent::Finished) 후에야
+        // set_visible(true) 로 드러낸다(아래 핸들러).
         let attrs = WindowAttributes::default()
             .with_title("아로나 — 샬레 교실")
             .with_theme(Some(Theme::Dark))
+            .with_visible(false)
             .with_inner_size(LogicalSize::new(1100.0, 720.0));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -1091,9 +1095,20 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
+        // 로드 끝나면 창을 드러내는 핸들러. webview2 가 UI(메인) 스레드에서
+        // 콜백하므로 winit set_visible 호출이 안전하다.
+        let win_show = window.clone();
         // build_as_child for the same use-after-free reason as the git panel.
         let webview = match wry::WebViewBuilder::new()
             .with_url(format!("http://127.0.0.1:{port}/arona-ui/?v={cb}"))
+            // 로딩 중 노출되는 빈 배경을 교실 다크톤으로 — 흰 플래시 제거.
+            .with_background_color((20, 22, 28, 255))
+            .with_on_page_load_handler(move |event, _url| {
+                if matches!(event, wry::PageLoadEvent::Finished) {
+                    win_show.set_visible(true);
+                    win_show.focus_window();
+                }
+            })
             .with_bounds(wry::Rect {
                 position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
                 size: wry::dpi::LogicalSize::new(1100.0, 720.0).into(),

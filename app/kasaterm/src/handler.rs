@@ -2657,6 +2657,28 @@ impl ApplicationHandler<UserEvent> for App {
                         self.preedit = text;
                     }
                     Ime::Commit(text) => {
+                        // Remember the committed text at the current cursor so
+                        // the overlay keeps it visible until the PTY echo lands
+                        // and moves the cursor (render_frame retires it then).
+                        // Without this the next syllable's preedit is drawn over
+                        // the not-yet-echoed commit — fast typing looked like
+                        // everything composing in one spot, then appearing at
+                        // once. Consecutive commits at the same (un-echoed) spot
+                        // accumulate so a burst keeps its order.
+                        let before = self.ws.lock().ok().and_then(|ws| {
+                            ws.active_pane.clone().and_then(|id| {
+                                ws.panes
+                                    .get(&id)
+                                    .and_then(|p| p.term())
+                                    .map(|t| (t.cursor_row, t.cursor_col))
+                            })
+                        });
+                        self.commit_overlay = match self.commit_overlay.take() {
+                            Some((prev, pos)) if Some(pos) == before => {
+                                Some((format!("{prev}{text}"), pos))
+                            }
+                            _ => before.map(|b| (text.clone(), b)),
+                        };
                         self.in_preedit = false;
                         self.preedit.clear();
                         self.send_bytes(text.as_bytes());

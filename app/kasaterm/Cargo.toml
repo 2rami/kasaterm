@@ -71,6 +71,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     "Win32_Storage_Xps",
     "Win32_UI_WindowsAndMessaging",
+    # Read a shell process's live cwd (status-bar path picker / breadcrumb):
+    # no lsof on Windows, so walk the target's PEB → ProcessParameters →
+    # CurrentDirectory via NtQueryInformationProcess + ReadProcessMemory.
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
 ] }
 png = "0.17"
 
