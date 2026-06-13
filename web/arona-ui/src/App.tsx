@@ -172,7 +172,7 @@ export function App() {
           {/* 교실 씬 or 카드 그리드 */}
           <div style={{ flex: 1, overflow: 'auto', padding: 'var(--cth-space-4)' }}>
             {view === 'classroom' ? (
-              <ClassroomView agents={shown} background={roomBg} furniture={roomFurniture} onSelect={(id, title) => setPeek({ id, title })} />
+              <ClassroomView agents={shown} background={roomBg} furniture={roomFurniture} onAdd={() => setShowAdd(true)} onSelect={(id, title) => setPeek({ id, title })} />
             ) : shown.length === 0 ? (
               <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
             ) : (
