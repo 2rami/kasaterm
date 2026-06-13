@@ -266,11 +266,46 @@ export interface ClassroomViewProps {
   seats?: { x: number; y: number; facing: string }[];
   /** idle 배회 구역 override. */
   cafe?: CafeSpot[];
+  /** 빈 자리 클릭 시 — 학생 부르기(멀리 있는 버튼 대신 빈 책상에서 바로 소환). */
+  onAdd?: () => void;
+}
+
+// 빈 책상 자리 — 학생 없을 때 그 자리에 '+ 부르기' 버튼. 클릭 → 학생 부르기 모달.
+// 밝은 SCHALE 바닥에서도 보이게 솔리드 하늘색 + 가벼운 펄스.
+function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: () => void }) {
+  return (
+    <button
+      onClick={onAdd}
+      title="이 자리에 학생 부르기"
+      className="cth-emptyseat"
+      style={{
+        position: 'absolute', left: `${seat.x}%`, top: `${seat.y}%`,
+        transform: 'translate(-50%, -100%)', zIndex: Math.round(seat.y * 10) - 1,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
+        border: 'none', background: 'transparent', cursor: 'pointer', padding: 0,
+      }}
+    >
+      <span style={{
+        width: 38, height: 38, borderRadius: 999,
+        background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff',
+        border: '2px solid #fff', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        boxShadow: '0 3px 10px rgba(74,144,226,0.5)',
+        animation: 'schale-glyph-pulse 1.6s ease-in-out infinite',
+      }}>
+        <svg width="18" height="18" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" /></svg>
+      </span>
+      <span style={{
+        fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 800, color: '#fff',
+        background: 'var(--cth-ink-900)', padding: '1px 8px', borderRadius: 7,
+        boxShadow: '0 1px 4px rgba(21,41,74,0.3)',
+      }}>부르기</span>
+    </button>
+  );
 }
 
 // 샬레 교실 — 빈 바닥 배경 위에 가구를 개별 배치(munder 식). 학생은 가구를 피해
 // 책상(working)이나 카페(idle)로 BFS 경로 이동. 가구·학생이 한 z-레이어라 앞뒤가림.
-export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE, seats: seatsProp, cafe: cafeProp }: ClassroomViewProps) {
+export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE, seats: seatsProp, cafe: cafeProp, onAdd }: ClassroomViewProps) {
   const storeAgents = useStore((s) => s.agents);
   const agents = agentsProp ?? storeAgents;
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
@@ -300,11 +335,10 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
         <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} chatLine={chat[a.id]} onSelect={onSelect} />
       ))}
 
-      {sorted.length === 0 && (
-        <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cth-ink-500)', fontFamily: 'var(--cth-font-ui)', fontSize: 14, background: 'rgba(255,255,255,0.4)' }}>
-          학생들을 기다리는 중…
-        </div>
-      )}
+      {/* 빈 자리마다 '부르기' 버튼 — 학생 없는 책상에서 바로 소환(멀리 있는 버튼 대신) */}
+      {onAdd && seats.slice(sorted.length).map((seat, i) => seat && (
+        <EmptySeat key={`empty-${i}`} seat={seat} onAdd={onAdd} />
+      ))}
     </div>
   );
 }
