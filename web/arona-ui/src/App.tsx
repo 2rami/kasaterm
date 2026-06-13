@@ -153,11 +153,10 @@ export function App() {
 
         <div style={{ flex: 1 }} />
 
-        {/* 우측 액션 */}
+        {/* 우측 액션 — 학생 부르기는 교실 빈 자리 버튼으로 이동(거노) */}
         <PixelButton variant="secondary" size="sm" onClick={reveal}>
           {revealing ? '여는 중…' : '터미널 보기'}
         </PixelButton>
-        <PixelButton variant="primary" size="sm" onClick={() => setShowAdd(true)}>학생 부르기</PixelButton>
       </div>
 
       {/* 바디: 좌측 장소 네비 + 메인 영역 + 우측 CommandCenter */}
