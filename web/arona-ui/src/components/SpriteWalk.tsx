@@ -6,6 +6,7 @@ const BASE = import.meta.env.BASE_URL || '/';
 const SLUG: Record<string, string> = {
   '아로나': 'arona', '유우카': 'yuuka', '시로코': 'shiroko',
   '아리스': 'arisu', '호시노': 'hoshino', '코하루': 'koharu',
+  '프라나': 'prana',
 };
 
 export interface SpriteWalkProps {
