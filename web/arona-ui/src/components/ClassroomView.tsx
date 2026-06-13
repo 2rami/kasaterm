@@ -262,18 +262,22 @@ export interface ClassroomViewProps {
   background?: string;
   /** 배치 가구. 기본 교실 세트. 가구 그림이 박힌 배경(카페/오피스)이면 [] 로 끔. */
   furniture?: Furniture[];
+  /** 자리 override — 가구 없이 배경 이미지의 책상에 직접 앉힐 때(SCHALE 교실 이미지). */
+  seats?: { x: number; y: number; facing: string }[];
+  /** idle 배회 구역 override. */
+  cafe?: CafeSpot[];
 }
 
 // 샬레 교실 — 빈 바닥 배경 위에 가구를 개별 배치(munder 식). 학생은 가구를 피해
 // 책상(working)이나 카페(idle)로 BFS 경로 이동. 가구·학생이 한 z-레이어라 앞뒤가림.
-export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE }: ClassroomViewProps) {
+export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE, seats: seatsProp, cafe: cafeProp }: ClassroomViewProps) {
   const storeAgents = useStore((s) => s.agents);
   const agents = agentsProp ?? storeAgents;
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
 
   const grid = useMemo(() => buildGrid(furniture), [furniture]);
-  const seats = useMemo(() => deskSeats(furniture), [furniture]);
-  const cafe = useMemo(() => cafeSpots(furniture), [furniture]);
+  const seats = useMemo(() => seatsProp ?? deskSeats(furniture), [furniture, seatsProp]);
+  const cafe = useMemo(() => cafeProp ?? cafeSpots(furniture), [furniture, cafeProp]);
   const chat = useCafeChat(agents);
 
   return (

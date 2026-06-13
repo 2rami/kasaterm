@@ -49,6 +49,16 @@ export const CLASSROOM_FURNITURE: Furniture[] = [
   { id: 'plant', kind: 'plant', x: 90, y: 92, w: 7, sprite: 'furn-plant.png', block: [87, 88, 93, 93] },
 ];
 
+// SCHALE 교실 이미지(아이소메트릭)의 책상 줄에 맞춘 자리 — 가구 없이 이미지 위에
+// 직접 앉힌다. 좌표는 렌더 보고 보정. idle 은 앞쪽 통로(SCHALE_CAFE)에서 어슬렁.
+export const SCHALE_SEATS = [
+  { x: 40, y: 60, facing: 'up' }, { x: 52, y: 60, facing: 'up' }, { x: 64, y: 60, facing: 'up' },
+  { x: 45, y: 51, facing: 'up' }, { x: 57, y: 51, facing: 'up' }, { x: 69, y: 51, facing: 'up' },
+];
+export const SCHALE_CAFE: CafeSpot[] = [
+  { x: 30, y: 74, facing: 'up' }, { x: 46, y: 78, facing: 'up' }, { x: 62, y: 74, facing: 'up' },
+];
+
 function deskAt(id: string, x: number, y: number): Furniture {
   // 책상 스프라이트는 x 중심, y 발밑. 자리는 책상 바로 앞(아래)에 둬서 캐릭터가
   // 책상에 붙어 앉은 것처럼 보이고(발밑 y 가 더 커 책상 앞에 렌더), 위(책상)를 봄.
