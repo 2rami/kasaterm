@@ -2265,6 +2265,19 @@ struct GitColView {
     recent_commits: Vec<(String, String)>,
 }
 
+/// 파일트리 우클릭 컨텍스트 메뉴 항목. `NewFile`/`NewFolder`/`Rename` 은 인라인
+/// 입력행을 열고, `CopyPath` 는 절대경로를 클립보드로, `Reveal` 은 OS 파일매니저
+/// (Finder/탐색기)에서 보여주고, `Delete` 는 선택 전체를 휴지통으로 보낸다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FtMenuAction {
+    NewFile,
+    NewFolder,
+    Rename,
+    CopyPath,
+    Reveal,
+    Delete,
+}
+
 /// Action buttons at the foot of the git column. `StageAll` runs `git add -A`;
 /// `Commit` hands the commit to the active claude pane; `Pull`/`Push` sync the
 /// current branch with its upstream. All shell out through `kasa_mcp::git` on a

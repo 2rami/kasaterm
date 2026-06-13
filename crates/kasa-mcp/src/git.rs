@@ -359,6 +359,38 @@ pub fn git_log(repo: &Path, n: u32) -> Value {
     json!(commits)
 }
 
+/// 한 커밋이 바꾼 파일들 `[(path, additions, deletions)]`. 커밋 더블클릭 시
+/// 인라인으로 펼치는 변경 파일 목록용. `--format=` 로 커밋 메타를 죽이고
+/// `--numstat` 만 받는다. binary 파일은 numstat 가 `-` 라 (path, 0, 0).
+pub fn git_commit_files(repo: &Path, hash: &str) -> Vec<(String, u32, u32)> {
+    let (ok, out) = run_git(repo, &["show", "--numstat", "--format=", hash]);
+    if !ok {
+        return Vec::new();
+    }
+    out.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let mut parts = line.splitn(3, '\t');
+            let a = parts.next()?;
+            let d = parts.next()?;
+            let path = parts.next()?.to_string();
+            Some((path, a.parse().unwrap_or(0), d.parse().unwrap_or(0)))
+        })
+        .collect()
+}
+
+/// 한 커밋 안 특정 파일의 unified diff. 커밋 펼침 안에서 파일을 다시 펼칠 때의
+/// 인라인 diff — `git_file_diff` 와 같은 `DiffLine`. `parse_unified_diff` 가 파일
+/// 헤더를 버리므로 `git show` 출력을 그대로(선두 공백만 잘라) 넘긴다.
+pub fn git_commit_file_diff(repo: &Path, hash: &str, path: &str) -> Vec<DiffLine> {
+    let (ok, out) = run_git(repo, &["show", "--format=", hash, "--", path]);
+    let _ = ok;
+    parse_unified_diff(out.trim_start())
+}
+
 /// 작업트리의 모든 변경을 stage (`git add -A`) — 패널의 "전체 Stage".
 pub fn git_stage_all(repo: &Path) -> Value {
     let (ok, out) = run_git(repo, &["add", "-A"]);

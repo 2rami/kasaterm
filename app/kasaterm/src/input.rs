@@ -1128,6 +1128,9 @@ impl App {
     }
     /// Name entry for the inline new-file/folder row. Enter creates the entry,
     /// Esc cancels; Hangul composes like the search box.
+    /// 인라인 입력행(새 파일/폴더 또는 이름변경) 한 키. 두 모드의 편집 버퍼는
+    /// `ft_edit_buf` 로 통일 — rename 이 있으면 그쪽, 없으면 new. Enter 는 모드에
+    /// 맞는 commit, Esc 는 둘 다 취소. 한글 조합은 search 행과 동일 경로.
     pub(crate) fn file_tree_new_key(&mut self, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
@@ -1136,7 +1139,7 @@ impl App {
                 if let Some(c) = t.chars().next() {
                     if (0x3130..=0x318F).contains(&(c as u32)) {
                         if let Some(commit) = self.hangul.feed(c) {
-                            if let Some((_, buf)) = self.file_tree.new.as_mut() {
+                            if let Some(buf) = self.ft_edit_buf() {
                                 buf.push_str(&commit);
                             }
                         }
@@ -1151,6 +1154,8 @@ impl App {
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
                 self.file_tree.new = None;
+                self.file_tree.new_parent = None;
+                self.file_tree.rename = None;
                 self.preedit.clear();
                 self.in_preedit = false;
                 let _ = self.hangul.flush();
@@ -1159,13 +1164,17 @@ impl App {
             }
             Key::Named(NamedKey::Enter) => {
                 if let Some(f) = self.hangul.flush() {
-                    if let Some((_, buf)) = self.file_tree.new.as_mut() {
+                    if let Some(buf) = self.ft_edit_buf() {
                         buf.push_str(&f);
                     }
                 }
                 self.preedit.clear();
                 self.in_preedit = false;
-                self.commit_new_entry();
+                if self.file_tree.rename.is_some() {
+                    self.commit_rename();
+                } else {
+                    self.commit_new_entry();
+                }
                 self.chrome_dirty = true;
                 return;
             }
@@ -1173,7 +1182,7 @@ impl App {
                 if self.hangul.backspace() {
                     self.preedit = self.hangul.preedit().unwrap_or_default();
                     self.in_preedit = !self.preedit.is_empty();
-                } else if let Some((_, buf)) = self.file_tree.new.as_mut() {
+                } else if let Some(buf) = self.ft_edit_buf() {
                     buf.pop();
                 }
                 self.chrome_dirty = true;
@@ -1182,7 +1191,7 @@ impl App {
             _ => {}
         }
         if let Some(flushed) = self.hangul.flush() {
-            if let Some((_, buf)) = self.file_tree.new.as_mut() {
+            if let Some(buf) = self.ft_edit_buf() {
                 buf.push_str(&flushed);
             }
         }
@@ -1190,18 +1199,29 @@ impl App {
         self.in_preedit = false;
         match &event.logical_key {
             Key::Named(NamedKey::Space) => {
-                if let Some((_, buf)) = self.file_tree.new.as_mut() {
+                if let Some(buf) = self.ft_edit_buf() {
                     buf.push(' ');
                 }
             }
             Key::Character(txt) => {
-                if let Some((_, buf)) = self.file_tree.new.as_mut() {
+                if let Some(buf) = self.ft_edit_buf() {
                     buf.push_str(txt);
                 }
             }
             _ => {}
         }
         self.chrome_dirty = true;
+    }
+    /// 인라인 입력행의 편집 버퍼 — rename 우선, 없으면 new. 둘 다 마지막 필드가
+    /// 편집 중 텍스트라 키 입력을 한 곳에서 받는다.
+    fn ft_edit_buf(&mut self) -> Option<&mut String> {
+        if let Some((_, b)) = self.file_tree.rename.as_mut() {
+            return Some(b);
+        }
+        if let Some((_, b)) = self.file_tree.new.as_mut() {
+            return Some(b);
+        }
+        None
     }
     pub(crate) fn forward_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
@@ -1251,15 +1271,18 @@ impl App {
         // keys; the selection clears when a terminal pane is clicked.
         if !self.git.commit_focused
             && self.file_tree.new.is_none()
+            && self.file_tree.rename.is_none()
             && !self.file_tree.search_active
         {
-            if let Some(sel) = self.file_tree.selected.clone() {
+            let has_sel = self.file_tree.selected.is_some()
+                || !self.file_tree.selected_more.is_empty();
+            if has_sel {
                 use winit::keyboard::{Key, NamedKey};
                 let del = matches!(&event.logical_key, Key::Named(NamedKey::Delete))
                     || (self.modifiers.super_key()
                         && matches!(&event.logical_key, Key::Named(NamedKey::Backspace)));
                 if del {
-                    self.delete_tree_entry(&sel);
+                    self.delete_tree_selection();
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -1267,8 +1290,8 @@ impl App {
                 }
             }
         }
-        // Inline new-file/folder naming row is open: keystrokes name it.
-        if self.file_tree.new.is_some() {
+        // Inline new-file/folder or rename row is open: keystrokes name it.
+        if self.file_tree.new.is_some() || self.file_tree.rename.is_some() {
             self.file_tree_new_key(event);
             if let Some(w) = &self.window {
                 w.request_redraw();

@@ -47,6 +47,15 @@ pub(crate) struct GitState {
     pub(crate) col_btn_rects: Vec<(GitColBtn, (f32, f32, f32, f32))>,
     pub(crate) col_expanded: std::collections::HashSet<(bool, String)>,
     pub(crate) col_diff_cache: HashMap<(bool, String), Vec<kasa_mcp::git::DiffLine>>,
+    /// 최근 커밋 더블클릭 인라인 펼침(GitLens 그래프식): 펼친 커밋 hash(하나만),
+    /// 그 변경 파일 목록 캐시, 다시 펼친 파일 diff 집합/캐시, 행 hit, 더블클릭 감지.
+    pub(crate) col_commit_expanded: Option<String>,
+    pub(crate) col_commit_files_cache: HashMap<String, Vec<(String, u32, u32)>>,
+    pub(crate) col_commit_file_expanded: std::collections::HashSet<(String, String)>,
+    pub(crate) col_commit_diff_cache: HashMap<(String, String), Vec<kasa_mcp::git::DiffLine>>,
+    pub(crate) col_commit_rects: Vec<(String, (f32, f32, f32, f32))>,
+    pub(crate) col_commit_file_rects: Vec<(String, String, (f32, f32, f32, f32))>,
+    pub(crate) last_commit_click: Option<(std::time::Instant, String)>,
     pub(crate) col_close_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) col_expand_rect: Option<(f32, f32, f32, f32)>,
     pub(crate) commit_btn_rect: Option<(f32, f32, f32, f32)>,
@@ -89,6 +98,17 @@ pub(crate) struct FileTreeState {
     pub(crate) new_file_rect: (f32, f32, f32, f32),
     pub(crate) new_row_rect: (f32, f32, f32, f32),
     pub(crate) selected: Option<std::path::PathBuf>,
+    /// Cmd/Shift-click 다중선택분 — `selected`(primary/anchor)와 합쳐 "현재 선택
+    /// 전체". 일괄 휴지통 삭제·우클릭 메뉴 대상. 일반 클릭이면 clear.
+    pub(crate) selected_more: std::collections::HashSet<std::path::PathBuf>,
+    /// 우클릭 컨텍스트 메뉴 — 열렸으면 메뉴 좌상단(px). `ctx_menu_rects` 는 항목 hit.
+    pub(crate) ctx_menu: Option<(f32, f32)>,
+    pub(crate) ctx_menu_rects: Vec<(FtMenuAction, (f32, f32, f32, f32))>,
+    /// 인라인 이름변경 — (대상 경로, 편집 중 텍스트). `new` 와 상호배타.
+    pub(crate) rename: Option<(std::path::PathBuf, String)>,
+    pub(crate) rename_row_rect: (f32, f32, f32, f32),
+    /// 새 항목 생성 부모(우클릭한 폴더). None 이면 트리 root.
+    pub(crate) new_parent: Option<std::path::PathBuf>,
     pub(crate) search_active: bool,
     pub(crate) search_query: String,
     pub(crate) search_rect: (f32, f32, f32, f32),

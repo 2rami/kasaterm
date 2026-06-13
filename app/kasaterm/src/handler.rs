@@ -1121,6 +1121,42 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                 }
             }
+            // Right-click → file-tree context menu. Over a row: single-select it
+            // (unless it's already in the selection, so a right-click on one of
+            // several keeps the whole batch) and open the menu at the cursor.
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                let (cx, cy) = self.cursor_px;
+                if self.file_tree.visible
+                    && cy > TITLE_HEIGHT
+                    && cx >= self.file_tree_col_x()
+                    && cx < self.file_tree_col_x() + self.file_tree.w_logical
+                {
+                    let inside = |r: &(f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    if let Some(path) = self
+                        .file_tree
+                        .rects
+                        .iter()
+                        .find(|(_, r)| inside(r))
+                        .map(|(p, _)| p.clone())
+                    {
+                        let in_sel = self.file_tree.selected.as_deref() == Some(path.as_path())
+                            || self.file_tree.selected_more.contains(&path);
+                        if !in_sel {
+                            self.file_tree.selected = Some(path.clone());
+                            self.file_tree.selected_more.clear();
+                        }
+                        self.file_tree.ctx_menu = Some((cx, cy));
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                }
+            }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                 // Resolve a file-tree → terminal path drag first, before any
                 // other hit-test, so a release anywhere disarms it. A real drag
@@ -1188,6 +1224,25 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                }
+                // File-tree context menu open: a press resolves a menu item or
+                // dismisses the menu. Above every other hit-test so the overlay
+                // wins the click.
+                if matches!(state, ElementState::Pressed) && self.file_tree.ctx_menu.is_some() {
+                    let (cx, cy) = self.cursor_px;
+                    let action = self
+                        .file_tree
+                        .ctx_menu_rects
+                        .iter()
+                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(a, _)| *a);
+                    self.file_tree.ctx_menu = None;
+                    self.chrome_dirty = true;
+                    if let Some(action) = action {
+                        self.run_ft_menu_action(action);
+                    }
+                    window.request_redraw();
+                    return;
                 }
                 // Confirm-close modal swallows every click while it's up. A hit
                 // on a button acts; a click on the scrim is ignored (Esc/취소
@@ -1615,8 +1670,58 @@ impl ApplicationHandler<UserEvent> for App {
                             .find(|(_, r)| inside(r))
                             .map(|(p, _)| p.clone())
                         {
-                            // Mark it the Cmd+Delete target.
+                            // Cmd-click: toggle this row in/out of the selection
+                            // (no expand/preview/drag — pure multi-select, VSCode).
+                            if self.host_mod() {
+                                if self.file_tree.selected.as_deref() == Some(path.as_path()) {
+                                    // Deselecting the primary — promote one of the
+                                    // extras so a selection still has an anchor.
+                                    let next = self.file_tree.selected_more.iter().next().cloned();
+                                    if let Some(n) = &next {
+                                        self.file_tree.selected_more.remove(n);
+                                    }
+                                    self.file_tree.selected = next;
+                                } else if !self.file_tree.selected_more.remove(&path) {
+                                    // New row: it becomes the primary; the old
+                                    // primary (if any) demotes into the extras.
+                                    if let Some(prev) = self.file_tree.selected.replace(path.clone()) {
+                                        self.file_tree.selected_more.insert(prev);
+                                    }
+                                }
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
+                            // Shift-click: select the contiguous run from the
+                            // anchor (primary) to this row, by visible order.
+                            if self.modifiers.shift_key() {
+                                if let Some(anchor) = self.file_tree.selected.clone() {
+                                    let ai = self.file_tree.nodes.iter().position(|n| n.path == anchor);
+                                    let pi = self.file_tree.nodes.iter().position(|n| n.path == path);
+                                    if let (Some(ai), Some(pi)) = (ai, pi) {
+                                        let (lo, hi) = if ai <= pi { (ai, pi) } else { (pi, ai) };
+                                        let run: Vec<std::path::PathBuf> = self.file_tree.nodes[lo..=hi]
+                                            .iter()
+                                            .map(|n| n.path.clone())
+                                            .collect();
+                                        self.file_tree.selected_more.clear();
+                                        for p in run {
+                                            if p != anchor {
+                                                self.file_tree.selected_more.insert(p);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    self.file_tree.selected = Some(path.clone());
+                                }
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
+                            // Plain click: single-select (drops any multi-select),
+                            // also the Cmd+Delete target.
                             self.file_tree.selected = Some(path.clone());
+                            self.file_tree.selected_more.clear();
                             let is_dir = self
                                 .file_tree.nodes
                                 .iter()
@@ -1853,6 +1958,40 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|(s, p, _)| (*s, p.clone()))
                         {
                             self.toggle_git_diff(staged, path);
+                            return;
+                        }
+                        // Commit-detail file row (inside an expanded commit) →
+                        // toggle that file's diff.
+                        if let Some((hash, path)) = self
+                            .git.col_commit_file_rects
+                            .iter()
+                            .find(|(_, _, r)| inside(r))
+                            .map(|(h, p, _)| (h.clone(), p.clone()))
+                        {
+                            self.toggle_git_commit_file(hash, path);
+                            window.request_redraw();
+                            return;
+                        }
+                        // Recent-commit row → double-click expands its file list
+                        // (single click is just the preview, no action).
+                        if let Some(hash) = self
+                            .git.col_commit_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(h, _)| h.clone())
+                        {
+                            let now = Instant::now();
+                            let is_double = matches!(
+                                self.git.last_commit_click.as_ref(),
+                                Some((t, h)) if *h == hash && now.duration_since(*t).as_millis() < 400
+                            );
+                            if is_double {
+                                self.git.last_commit_click = None;
+                                self.toggle_git_commit(hash);
+                            } else {
+                                self.git.last_commit_click = Some((now, hash));
+                            }
+                            window.request_redraw();
                             return;
                         }
                         // Empty column space — swallow the click.

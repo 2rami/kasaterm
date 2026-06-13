@@ -1829,8 +1829,9 @@ impl App {
                     let expanded =
                         node.is_dir && self.file_tree.expanded.contains(&node.path);
                     let is_open = active_file.as_deref() == Some(node.path.as_path());
-                    let is_selected =
-                        self.file_tree.selected.as_deref() == Some(node.path.as_path());
+                    let is_selected = self.file_tree.selected.as_deref()
+                        == Some(node.path.as_path())
+                        || self.file_tree.selected_more.contains(&node.path);
                     // Row background: hover wins; the open file / Cmd+Delete
                     // selection keeps a solid active tint + accent bar; an open
                     // folder keeps a faint tint so the branch reads as a group.
@@ -1904,12 +1905,44 @@ impl App {
                         s.push('…');
                         s
                     };
-                    g.draw_text(
-                        text_x,
-                        y + (item_h - font) / 2.0,
-                        &label,
-                        gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: node.ignored },
-                    );
+                    // Inline rename: this row's name turns into an edit box with
+                    // a caret instead of the static label (same input path as the
+                    // new-file/folder row).
+                    let editing = self
+                        .file_tree
+                        .rename
+                        .as_ref()
+                        .filter(|(p, _)| p == &node.path)
+                        .map(|(_, n)| n.clone());
+                    if let Some(name) = editing {
+                        let mut shown = name;
+                        if self.in_preedit {
+                            shown.push_str(&self.preedit);
+                        }
+                        let caret_w = g.measure_chrome_text(&shown, font, false);
+                        let (txt, tcol) = if shown.is_empty() {
+                            ("이름…".to_string(), theme::text_mute())
+                        } else {
+                            (shown, theme::text())
+                        };
+                        g.draw_text(
+                            text_x,
+                            y + (item_h - font) / 2.0,
+                            &txt,
+                            gpu::DrawOpts { font_size: font, color: tcol, bold: false, italic: false },
+                        );
+                        if commit_caret_on {
+                            g.rect(text_x + caret_w, y + (item_h - 14.0) / 2.0, 1.5, 14.0, theme::text());
+                        }
+                        self.file_tree.rename_row_rect = (row_x, y, row_w, item_h);
+                    } else {
+                        g.draw_text(
+                            text_x,
+                            y + (item_h - font) / 2.0,
+                            &label,
+                            gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: node.ignored },
+                        );
+                    }
                     rects.push((node.path.clone(), (row_x, y, row_w, item_h)));
                 }
                 self.file_tree.rects = rects;
@@ -1960,6 +1993,74 @@ impl App {
                         let thumb_y =
                             view_top + (viewport_h - thumb_h) * (scroll / overflow).clamp(0.0, 1.0);
                         round_rect(g, tree_col_x + tree_col_w - 6.0, thumb_y, 3.5, thumb_h, 1.75, theme::with_alpha(theme::text(), 0x66));
+                    }
+                }
+                // Right-click context menu — painted last in the column so it
+                // overlays the rows. Items + hit rects build straight into
+                // ctx_menu_rects (g borrows only self.gpu, disjoint from these).
+                self.file_tree.ctx_menu_rects.clear();
+                if let Some((rawx, rawy)) = self.file_tree.ctx_menu {
+                    let sel_n = self.file_tree.selected_more.len()
+                        + self.file_tree.selected.is_some() as usize;
+                    let del_label = if sel_n > 1 {
+                        format!("{sel_n}개 삭제")
+                    } else {
+                        "휴지통으로 삭제".to_string()
+                    };
+                    #[cfg(target_os = "macos")]
+                    let reveal_label = "Finder에서 보기";
+                    #[cfg(not(target_os = "macos"))]
+                    let reveal_label = "탐색기에서 보기";
+                    // (action, label, danger, separator-before)
+                    let items: [(crate::FtMenuAction, &str, bool, bool); 6] = [
+                        (crate::FtMenuAction::NewFile, "새 파일", false, false),
+                        (crate::FtMenuAction::NewFolder, "새 폴더", false, false),
+                        (crate::FtMenuAction::Rename, "이름 변경", false, true),
+                        (crate::FtMenuAction::CopyPath, "경로 복사", false, false),
+                        (crate::FtMenuAction::Reveal, reveal_label, false, false),
+                        (crate::FtMenuAction::Delete, "", true, true),
+                    ];
+                    let mih = 28.0_f32;
+                    let sep = 7.0_f32;
+                    let pad = 6.0_f32;
+                    let menu_w = 200.0_f32;
+                    let nsep = items.iter().filter(|(_, _, _, s)| *s).count() as f32;
+                    let menu_h = pad * 2.0 + items.len() as f32 * mih + nsep * sep;
+                    let win_w = win_px.0 / scale;
+                    let mx = rawx.min(win_w - menu_w - 6.0).max(tree_col_x + 2.0);
+                    let my = rawy.min(win_h - menu_h - 6.0).max(TITLE_HEIGHT + 2.0);
+                    round_rect(g, mx, my, menu_w, menu_h, theme::RADIUS_MD, theme::surface());
+                    // Hairline border so it reads as a floating layer over the rows.
+                    g.rect(mx, my, menu_w, 1.0, theme::with_alpha(theme::border(), 0xCC));
+                    g.rect(mx, my + menu_h - 1.0, menu_w, 1.0, theme::with_alpha(theme::border(), 0xCC));
+                    g.rect(mx, my, 1.0, menu_h, theme::with_alpha(theme::border(), 0xCC));
+                    g.rect(mx + menu_w - 1.0, my, 1.0, menu_h, theme::with_alpha(theme::border(), 0xCC));
+                    let (curx, cury) = self.cursor_px;
+                    let mut iy = my + pad;
+                    for (action, label, danger, sep_before) in items {
+                        if sep_before {
+                            g.rect(mx + pad, iy + sep * 0.5, menu_w - pad * 2.0, 1.0, theme::with_alpha(theme::border(), 0x88));
+                            iy += sep;
+                        }
+                        let r = (mx + 4.0, iy, menu_w - 8.0, mih);
+                        let hov = curx >= r.0 && curx <= r.0 + r.2 && cury >= r.1 && cury <= r.1 + r.3;
+                        if hov {
+                            round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_SM, theme::surface_hover());
+                        }
+                        let lbl = if matches!(action, crate::FtMenuAction::Delete) {
+                            del_label.as_str()
+                        } else {
+                            label
+                        };
+                        let color = if danger { theme::danger() } else { theme::text() };
+                        g.draw_text(
+                            r.0 + 12.0,
+                            r.1 + (mih - 13.0) / 2.0,
+                            lbl,
+                            gpu::DrawOpts { font_size: 13.0, color, bold: false, italic: false },
+                        );
+                        self.file_tree.ctx_menu_rects.push((action, r));
+                        iy += mih;
                     }
                 }
             }
@@ -2065,7 +2166,31 @@ impl App {
                 let commits_h = if git_view.recent_commits.is_empty() {
                     0.0
                 } else {
-                    24.0 + git_view.recent_commits.len() as f32 * 20.0
+                    let mut h = 24.0 + git_view.recent_commits.len() as f32 * 20.0;
+                    // An expanded commit grows the foot by its file list (+ any
+                    // expanded file's diff), pushing the change list up.
+                    if let Some(eh) = self.git.col_commit_expanded.clone() {
+                        if let Some(files) = self.git.col_commit_files_cache.get(&eh) {
+                            h += files.len().max(1) as f32 * 18.0;
+                            for (path, _, _) in files {
+                                if self
+                                    .git
+                                    .col_commit_file_expanded
+                                    .contains(&(eh.clone(), path.clone()))
+                                {
+                                    if let Some(d) = self
+                                        .git
+                                        .col_commit_diff_cache
+                                        .get(&(eh.clone(), path.clone()))
+                                    {
+                                        h += d.len() as f32 * 13.0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Don't let the foot swallow the whole change list.
+                    h.min((bottom - TITLE_HEIGHT) * 0.72)
                 };
                 let input_top = bottom - commits_h;
                 if git_view.no_repo {
@@ -2344,25 +2469,116 @@ impl App {
                         self.git.col_discard_rects = discard_rects;
                         self.git.col_open_rects = open_rects;
                     }
-                    // ── Recent commits preview, pinned to the column foot below
-                    // the change list (input_top already reserved the space).
+                    // ── Recent commits, pinned to the column foot. Double-click a
+                    // commit row to expand its changed-file list inline (GitLens-
+                    // graph style); a file row then expands its diff.
+                    self.git.col_commit_rects.clear();
+                    self.git.col_commit_file_rects.clear();
                     if !git_view.recent_commits.is_empty() {
+                        let (curx, cury) = self.cursor_px;
+                        let foot = bottom - 2.0;
+                        let clip_r = git_col_x + git_col_w - 12.0;
                         let mut cy2 = input_top + 6.0;
                         g.rect(gcx0, cy2 - 2.0, gcw, 1.0, theme::with_alpha(theme::border(), 0x80));
                         g.draw_text(gcx0, cy2 + 4.0, "최근 커밋", gpu::DrawOpts { font_size: 11.0, color: theme::text_mute(), bold: true, italic: false });
                         cy2 += 22.0;
-                        let clip_r = git_col_x + git_col_w - 12.0;
                         for (hash, subj) in &git_view.recent_commits {
-                            let hxc = g.draw_text(gcx0, cy2, hash, gpu::DrawOpts { font_size: 11.0, color: theme::accent(), bold: false, italic: false });
-                            g.draw_text_clipped(
-                                hxc + 8.0,
-                                cy2,
-                                subj,
-                                gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false },
-                                gcx0,
-                                clip_r,
-                            );
+                            if cy2 > foot {
+                                break;
+                            }
+                            let expanded = self.git.col_commit_expanded.as_deref() == Some(hash.as_str());
+                            let rowr = (gcx0 - 5.0, cy2 - 3.0, gcw + 10.0, 19.0);
+                            let hov = curx >= rowr.0 && curx <= rowr.0 + rowr.2 && cury >= rowr.1 && cury <= rowr.1 + rowr.3;
+                            if expanded {
+                                g.rect(rowr.0, rowr.1, rowr.2, rowr.3, theme::with_alpha(theme::accent(), 0x18));
+                            } else if hov {
+                                g.rect(rowr.0, rowr.1, rowr.2, rowr.3, theme::surface_hover());
+                            }
+                            let chev = if expanded { "chevron-down" } else { "chevron-right" };
+                            g.queue_icon(chev, gcx0, cy2 - 1.0, 11.0, theme::text_mute());
+                            let hxc = g.draw_text(gcx0 + 14.0, cy2, hash, gpu::DrawOpts { font_size: 11.0, color: theme::accent(), bold: false, italic: false });
+                            g.draw_text_clipped(hxc + 8.0, cy2, subj, gpu::DrawOpts { font_size: 11.0, color: theme::text_dim(), bold: false, italic: false }, gcx0, clip_r);
+                            self.git.col_commit_rects.push((hash.clone(), rowr));
                             cy2 += 20.0;
+                            if !expanded {
+                                continue;
+                            }
+                            // Changed-file list for the expanded commit.
+                            let files = self.git.col_commit_files_cache.get(hash).cloned().unwrap_or_default();
+                            if files.is_empty() {
+                                g.draw_text(gcx0 + 20.0, cy2, "(변경 없음)", gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: true });
+                                cy2 += 16.0;
+                            }
+                            for (path, add, del) in &files {
+                                if cy2 > foot {
+                                    break;
+                                }
+                                let fexp = self.git.col_commit_file_expanded.contains(&(hash.clone(), path.clone()));
+                                let fr = (gcx0 + 14.0, cy2 - 2.0, gcw - 14.0, 17.0);
+                                let fhov = curx >= fr.0 && curx <= fr.0 + fr.2 && cury >= fr.1 && cury <= fr.1 + fr.3;
+                                if fexp {
+                                    g.rect(fr.0, fr.1, fr.2, fr.3, theme::with_alpha(theme::accent(), 0x10));
+                                } else if fhov {
+                                    g.rect(fr.0, fr.1, fr.2, fr.3, theme::surface_hover());
+                                }
+                                let fname = std::path::Path::new(path.as_str())
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.clone());
+                                let stat = format!("+{add} -{del}");
+                                let sw = g.measure_chrome_text(&stat, 10.0, false);
+                                g.draw_text_clipped(
+                                    gcx0 + 20.0,
+                                    cy2,
+                                    &fname,
+                                    gpu::DrawOpts { font_size: 11.0, color: if fexp { theme::text() } else { theme::text_dim() }, bold: false, italic: false },
+                                    gcx0 + 20.0,
+                                    clip_r - sw - 8.0,
+                                );
+                                g.draw_text(clip_r - sw, cy2, &stat, gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false });
+                                self.git.col_commit_file_rects.push((hash.clone(), path.clone(), fr));
+                                cy2 += 18.0;
+                                if !fexp {
+                                    continue;
+                                }
+                                // Inline diff for the expanded file (tinted +/- bands).
+                                let diff = self
+                                    .git
+                                    .col_commit_diff_cache
+                                    .get(&(hash.clone(), path.clone()))
+                                    .cloned()
+                                    .unwrap_or_default();
+                                use kasa_mcp::git::DiffLineKind as K;
+                                for dl in diff.iter() {
+                                    if cy2 > foot {
+                                        break;
+                                    }
+                                    let (bg, scol) = match dl.kind {
+                                        K::Add => (theme::with_alpha(theme::success(), 0x22), theme::success()),
+                                        K::Del => (theme::with_alpha(theme::danger(), 0x22), theme::danger()),
+                                        K::Hunk => (theme::with_alpha(theme::accent(), 0x14), theme::text_mute()),
+                                        K::Context => ([0, 0, 0, 0], theme::text_mute()),
+                                    };
+                                    if bg[3] > 0 {
+                                        g.rect(gcx0 + 14.0, cy2 - 1.0, gcw - 14.0, 13.0, bg);
+                                    }
+                                    let prefix = match dl.kind {
+                                        K::Add => "+",
+                                        K::Del => "-",
+                                        _ => " ",
+                                    };
+                                    let txt = format!("{prefix}{}", dl.text.trim_end());
+                                    g.draw_text_clipped(
+                                        gcx0 + 20.0,
+                                        cy2,
+                                        &txt,
+                                        gpu::DrawOpts { font_size: 10.0, color: scol, bold: false, italic: false },
+                                        gcx0 + 20.0,
+                                        clip_r,
+                                    );
+                                    cy2 += 13.0;
+                                }
+                            }
                         }
                     }
                 // Dropdowns (path picker / branch switcher) paint last so they
