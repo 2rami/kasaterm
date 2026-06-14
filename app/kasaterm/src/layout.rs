@@ -350,7 +350,7 @@ impl App {
             cwd,
             cols: win_cols,
             rows: win_rows,
-            env: Vec::new(),
+            env: crate::proxy_env(&new_id),
             pane_id: new_id.clone(),
             initial_scrollback: Vec::new(),
         })?;
@@ -395,7 +395,7 @@ impl App {
             cwd,
             cols,
             rows,
-            env: Vec::new(),
+            env: crate::proxy_env(&new_pid),
             pane_id: new_pid.clone(),
             initial_scrollback: Vec::new(),
         })?;
@@ -545,7 +545,7 @@ impl App {
             cwd,
             cols,
             rows,
-            env: Vec::new(),
+            env: crate::proxy_env(&new_id),
             pane_id: new_id.clone(),
             initial_scrollback: Vec::new(),
         })?;

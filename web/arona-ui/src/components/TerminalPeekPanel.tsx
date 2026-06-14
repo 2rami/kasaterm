@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchTranscript, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, type Turn } from '@/lib/mcp';
+import { fetchConversation, fetchTranscript, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { Markdown } from './Markdown';
 import { useStore } from '@/store';
 
-// 대화는 transcript jsonl(깨끗한 구조화 데이터)만 쓴다 — 거노: "peek로 가져오게
-// 하는건 없게해". 화면(peek) 파싱은 TUI 찌꺼기(Jump-to-bottom 오버레이·라이브 입력
-// 줄·번호목록을 메뉴로 오인·스크롤 따라 끊김)가 새서 폐기했다. 인터랙티브 메뉴
-// (AskUserQuestion)는 추후 transcript의 tool_use에서 뽑아 다시 붙인다(peek 아님).
+// 대화 소스 = 캡처 프록시(/conversation)만. claude API 호출을 가로채 messages[] 를
+// 깨끗하게 캡처(ccglass 방식) — peek(화면 스크래핑) 폐기(거노). 프록시 안 탄 pane 만
+// transcript jsonl 폴백. 인터랙티브 메뉴(/model·AskUserQuestion)는 화면에만 떠서
+// peek 와 함께 빠졌다 — 추후 필요하면 프록시 캡처에서 복원.
 
 // board.model 은 상태바 파싱 표시명("Opus 4.8 (1M context)") 우선 — claude- id 면 포맷,
 // 아니면(이미 표시명) 그대로. 1M context 변형이 그대로 보인다.
@@ -55,8 +55,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   const inputRef = useRef<HTMLInputElement>(null);
   const atBottomRef = useRef(true); // 사용자가 위로 스크롤했으면 자동 하단고정 멈춤
 
-  // 대화 내역: transcript jsonl 만(거노: peek 폐기). claude 가 턴 완료 시 jsonl 에
-  // 쓰므로 응답 중엔 약간 지연될 수 있으나, 화면 찌꺼기 없이 깨끗하다. 학생 바뀌면 초기화.
+  // 대화 내역: transcript jsonl 우선(깨끗), 비었으면 PTY 화면(peek) 폴백 — 인터랙티브
+  // claude 가 jsonl 을 라이브로 안 써 진행 중엔 transcript 가 빈다(claude-code-guide
+  // 확인). jsonl 이 flush 되면 자동으로 transcript 우선. 학생 바뀌면 초기화.
   useEffect(() => {
     let stopped = false;
     setLoaded(false);
@@ -65,13 +66,19 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
     setImages([]);
     setInput('');
     const tick = async () => {
-      const [ts, imgs] = await Promise.all([
+      const [conv, ts, imgs] = await Promise.all([
+        fetchConversation(surfaceId),
         fetchTranscript(surfaceId, 30),
         fetchSentImages(surfaceId, 12),
       ]);
       if (stopped) return;
-      setTurns(ts);
-      setImages(imgs);
+      // 캡처 프록시(깨끗·라이브, ccglass 방식) 우선, 안 탄 pane 만 transcript jsonl 폴백.
+      let next: Turn[] = conv.turns.length ? conv.turns : ts;
+      // 진행 중 응답 — 프록시가 SSE 로 라이브 캡처한 어시스턴트 텍스트를 마지막 버블로.
+      if (conv.streaming.trim()) next = [...next, { role: 'assistant', text: conv.streaming }];
+      setTurns(next);
+      setMenu(null); // 메뉴는 peek 기반이라 제거됨
+      setImages(imgs); // 훅 기록(진짜 SendUserFile)만 — 화면 파싱 폐기
       setLoaded(true);
     };
     void tick();

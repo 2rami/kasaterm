@@ -17,3 +17,8 @@ schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "net", "macros", "sync", "time"] }
+# ccglass-style capture proxy: forward claude의 Anthropic API 호출을 가로채 messages[]
+# 를 깨끗하게 캡처(peek/jsonl 없이 라이브 대화). rustls 로 시스템 openssl 의존 회피.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+futures-util = "0.3"
+bytes = "1"

@@ -3640,6 +3640,24 @@ fn demote_all_god_rooms() {
     let _ = std::fs::remove_file("/tmp/kasaterm-collab/.god-roster");
 }
 
+/// 캡처 프록시로 claude API 라우팅 — pane 별 깨끗한 대화 캡처(ccglass 방식). claude 가
+/// 이 base 로 `/v1/messages` 를 보내면 kasa-mcp 프록시가 본문 messages[] 를 캡처(peek·
+/// jsonl 없이 구조화 대화)하고 api.anthropic.com 으로 투명 포워드한다. MCP 서버 포트
+/// (KASASPACE_MCP_PORT, pane spawn 전에 동기 설정)를 쓴다. 포트 미설정이면 빈 env →
+/// claude 가 api.anthropic.com 직행(안전 폴백, 프록시 의존 안 함).
+pub(crate) fn proxy_env(pane_id: &str) -> Vec<(String, String)> {
+    match std::env::var("KASASPACE_MCP_PORT") {
+        Ok(port) if !port.is_empty() => vec![(
+            "ANTHROPIC_BASE_URL".to_string(),
+            format!(
+                "http://127.0.0.1:{port}/p/{}",
+                pane_id.trim_start_matches('%')
+            ),
+        )],
+        _ => Vec::new(),
+    }
+}
+
 /// 방(slug)의 god 캐릭터 순번 — `.god-roster` 에 등록 순서로 적어 메인 방(첫 등록)이
 /// leaders[0](아로나) 고정, 이후 방은 등록 순서대로 순환(거노: 메인 아로나). 새 방
 /// append. promote 와 공유(같은 slug → 같은 god 캐릭터).

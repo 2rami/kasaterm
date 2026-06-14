@@ -202,7 +202,7 @@ impl App {
             cwd,
             cols,
             rows,
-            env: Vec::new(),
+            env: crate::proxy_env(&id),
             pane_id: id.clone(),
             initial_scrollback: Vec::new(),
         })?;
