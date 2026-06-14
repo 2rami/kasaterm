@@ -14,7 +14,7 @@ import { RoomPathModal } from './components/RoomPathModal';
 import { WorkspaceNav, workspacesFromAgents } from './components/WorkspaceNav';
 import { PixelButton } from './components/PixelButton';
 import { SegmentedTabs } from './components/GameKit';
-import { startBoardPolling, fetchMode, focusPane, revealTerminal, setMode, fetchBoard, fetchCharacters, spawnAgent } from './lib/mcp';
+import { startBoardPolling, fetchMode, focusPane, revealTerminal, setMode, fetchBoard, fetchCharacters, spawnAgent, fetchClaudeUsage, type ClaudeUsage } from './lib/mcp';
 
 type ViewMode = 'classroom' | 'grid';
 
@@ -40,6 +40,16 @@ export function App() {
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
   const [showRoomModal, setShowRoomModal] = useState(false);
   const [activeWs, setActiveWs] = useState<string | null>(null); // 활성 장소(워크스페이스 cwd)
+  const [usage, setUsage] = useState<ClaudeUsage | null>(null); // claude oauth 사용량(5h/주간)
+
+  // claude oauth 사용량(5시간/주간 한도·리셋)을 1분마다 폴링 → TitleBar 게이지.
+  useEffect(() => {
+    let stop = false;
+    const tick = async () => { const u = await fetchClaudeUsage(); if (!stop) setUsage(u); };
+    void tick();
+    const iv = setInterval(tick, 60_000);
+    return () => { stop = true; clearInterval(iv); };
+  }, []);
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
@@ -144,6 +154,7 @@ export function App() {
         notifications={agents.filter((a) => a.status === 'waiting' || a.status === 'blocked').length}
         mail={agents.filter((a) => a.status === 'success').length}
         contextTokens={totalContextTokens}
+        usage={usage}
         onBell={() => {
           // 주의(대기/막힘) 학생 우선, 없으면 작업 중, 그것도 없으면 첫 학생 — 종은
           // 항상 무언가 연다(거노: 클릭해도 무반응이던 것).

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchConversation, fetchTranscript, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, type Turn } from '@/lib/mcp';
+import { fetchConversation, fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { Markdown } from './Markdown';
 import { useStore } from '@/store';
@@ -41,13 +41,57 @@ export interface TerminalPeekPanelProps {
 }
 
 // 학생 대화 패널 — 메신저처럼 대화만(선생님 프롬프트 오른쪽·학생 답변 왼쪽).
+// claude 인터랙티브 선택 메뉴(/model · AskUserQuestion · numbered 선택지)를 화면에서
+// 추출 → 채팅창에 선택지 카드로 띄운다(거노: 터미널 메뉴가 GUI 에 안 나옴). 이 메뉴는
+// claude API messages 가 아니라 터미널 렌더에만 있어 캡처 프록시로는 못 잡고 peek 뿐이다.
+// "❯ 1. label" 패턴, 2개 이상이어야 메뉴로 인정. label 우측 정렬 설명(2+ 공백 뒤)은 버린다.
+function parsePromptMenu(screen: string): { title: string; options: { idx: number; label: string; cur: boolean }[] } | null {
+  const lines = screen.split('\n');
+  const opts: { idx: number; label: string; cur: boolean; line: number }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^\s*([❯>●]?)\s*(\d+)\.\s+(.+?)\s*$/);
+    if (m) {
+      opts.push({ idx: parseInt(m[2], 10), label: m[3].replace(/\s{2,}.*$/, '').trim(), cur: /[❯>]/.test(m[1] ?? ''), line: i });
+    }
+  }
+  if (opts.length < 2) return null;
+  const first = opts[0].line;
+  let title = '';
+  for (let i = first - 1; i >= 0 && i >= first - 6; i--) {
+    const t = lines[i].trim();
+    if (!t || /^[─—\-│╭╰╮╯>❯●]/.test(t)) continue;
+    title = t.length > 60 ? t.slice(0, 59) + '…' : t;
+    break;
+  }
+  return { title, options: opts.map((o) => ({ idx: o.idx, label: o.label, cur: o.cur })) };
+}
+
+// claude 라이브 작업 표시(footer)를 화면에서 추출 — board status 는 idle/working 2값뿐이라
+// "무슨 작업·몇 초"를 모른다(거노: "✻ Cogitated for 5s" 같은 표시도 GUI 에). 진행형
+// "✻ Twisting… (23s · ...)" 와 완료형 "✻ Churned for 42s" 둘 다 잡는다. 별기호+신호로만
+// 판정해 한글 verb("…추적 중…")도 커버. 입력창·todo 행은 신호 불일치로 자동 reject.
+function parseSpinner(screen: string): string | null {
+  const lines = screen.split('\n');
+  for (let i = lines.length - 1; i >= 0 && i >= lines.length - 14; i--) {
+    const t = lines[i].trim();
+    // 진행형: 별 + verb… + (경과시간)
+    let m = t.match(/[✠-❏][^\S\n]*(.+?…)\s*\(((?:\d+m\s*)?\d+s)\b/);
+    if (m) return `${m[1]} · ${m[2]}`;
+    // 완료형: 별 + "Verbed for Ns"
+    m = t.match(/[✠-❏][^\S\n]*(\S+\s+for\s+(?:\d+m\s*)?\d+s)\b/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
 // 화면(raw 터미널)은 '터미널 보기'로 보면 되므로 여기엔 두지 않는다.
 export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: TerminalPeekPanelProps) {
   const agent = useStore((s) => s.agents.find((a) => a.id === surfaceId));
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [menu, setMenu] = useState<{ title: string; options: { idx: number; label: string; cur: boolean }[] } | null>(null);
+  const [menu, setMenu] = useState<{ title: string; options: { idx: number; label: string; cur: boolean; description?: string }[] } | null>(null);
   const [images, setImages] = useState<string[]>([]); // SendUserFile 로 보낸 이미지
   const [loaded, setLoaded] = useState(false); // 첫 폴 완료 — 빈 상태 문구 분기
+  const [spinner, setSpinner] = useState<string | null>(null); // claude 라이브 작업 표시(verb·경과초)
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [flash, setFlash] = useState<'ok' | 'err' | null>(null);
@@ -63,13 +107,15 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
     setLoaded(false);
     setTurns([]);
     setMenu(null);
+    setSpinner(null);
     setImages([]);
     setInput('');
     const tick = async () => {
-      const [conv, ts, imgs] = await Promise.all([
+      const [conv, ts, imgs, screen] = await Promise.all([
         fetchConversation(surfaceId),
         fetchTranscript(surfaceId, 30),
         fetchSentImages(surfaceId, 12),
+        fetchPeek(surfaceId, 60),
       ]);
       if (stopped) return;
       // 캡처 프록시(깨끗·라이브, ccglass 방식) 우선, 안 탄 pane 만 transcript jsonl 폴백.
@@ -77,7 +123,21 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
       // 진행 중 응답 — 프록시가 SSE 로 라이브 캡처한 어시스턴트 텍스트를 마지막 버블로.
       if (conv.streaming.trim()) next = [...next, { role: 'assistant', text: conv.streaming }];
       setTurns(next);
-      setMenu(null); // 메뉴는 peek 기반이라 제거됨
+      // 인터랙티브 선택지 — AskUserQuestion 은 캡처 프록시 tool_use 로 질문/선택지가 정확히
+      // 잡힌다(거노: peek 추정 금지). 그게 있으면 그걸 쓰고, 없을 때만 화면 메뉴(/model 등
+      // API 안 타는 것)를 peek 폴백으로 파싱한다.
+      const aq = conv.tool_uses?.find((t) => t.name === 'AskUserQuestion' && t.input.questions?.length);
+      if (aq) {
+        const q = aq.input.questions![0];
+        setMenu({
+          title: q.question,
+          options: q.options.map((o, i) => ({ idx: i + 1, label: o.label, cur: false, description: o.description })),
+        });
+      } else {
+        setMenu(parsePromptMenu(screen));
+      }
+      // claude 라이브 작업 표시(verb·경과초)도 화면에만 — 로딩 인디케이터에 실값으로.
+      setSpinner(parseSpinner(screen));
       setImages(imgs); // 훅 기록(진짜 SendUserFile)만 — 화면 파싱 폐기
       setLoaded(true);
     };
@@ -133,7 +193,11 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   // 인터랙티브 메뉴 선택 → 숫자 단축키 전송(claude 가 즉시 선택). 다음 폴에서 갱신.
   const pickMenu = async (idx: number) => {
     setMenu(null);
-    await sendToPane(surfaceId, String(idx), false);
+    // claude 인터랙티브 선택(AskUserQuestion·/model 등)은 ↑/↓ 이동 + Enter 선택이지 숫자
+    // 직접선택이 아니다(실측: "1" 주입해도 안 골라짐). 기본 커서가 1번이라 idx-1 번
+    // ↓(ESC[B) 이동 후 Enter 로 고른다.
+    const down = '\x1b[B'.repeat(Math.max(0, idx - 1));
+    await sendToPane(surfaceId, down + '\r', false);
   };
 
   // 학생 종료 — pane kill(close_surface). 되돌릴 수 없어 확인 후.
@@ -256,8 +320,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
             ))}
 
             {/* 로딩 인디케이터 — 학생이 working/thinking 이면 타이핑 점(거노: 채팅창에서
-                로딩중인지 모름). transcript 는 턴 완료 시 갱신이라 그 사이 공백을 메운다. */}
-            {(agent?.status === 'working' || agent?.status === 'thinking') && (
+                로딩중인지 모름). transcript 는 턴 완료 시 갱신이라 그 사이 공백을 메운다.
+                단 마지막 버블이 이미 학생 답변(완료·streaming)이면 숨긴다 — claude 가 답변
+                직후 State Classifier nudge 를 도는 동안 status 가 잠깐 thinking 으로 남아
+                "생각 중" 이 답변 아래 계속 떴다(거노). 마지막이 선생님 발화일 때만 표시. */}
+            {(spinner || ((agent?.status === 'working' || agent?.status === 'thinking') &&
+              turns[turns.length - 1]?.role !== 'assistant')) && (
               <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
                 <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
                   <SpritePortrait character={title} scale={1.5} />
@@ -277,7 +345,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                       }} />
                     ))}
                   </span>
-                  {agent?.status === 'thinking' ? '생각 중…' : (agent?.currentTool || '작업 중…')}
+                  {spinner || (agent?.status === 'thinking' ? '생각 중…' : (agent?.currentTool || '작업 중…'))}
                 </div>
               </div>
             )}
@@ -295,10 +363,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                 textAlign: 'left', padding: '8px 12px', borderRadius: 9, cursor: 'pointer',
                 border: o.cur ? '2px solid var(--cth-sky)' : '1px solid var(--cth-cream-200)',
                 background: '#fff', fontFamily: 'var(--cth-font-ui)', fontSize: 13, color: 'var(--cth-ink-900)',
-                display: 'flex', alignItems: 'center', gap: 8,
+                display: 'flex', alignItems: 'flex-start', gap: 8,
               }}>
                 <span style={{ fontWeight: 800, color: 'var(--cth-sky)', minWidth: 14 }}>{o.idx}</span>
-                <span style={{ flex: 1 }}>{o.label}</span>
+                <span style={{ flex: 1 }}>
+                  <span style={{ fontWeight: 600 }}>{o.label}</span>
+                  {o.description && <span style={{ display: 'block', fontSize: 11, color: 'var(--cth-ink-300)', marginTop: 2, lineHeight: 1.4 }}>{o.description}</span>}
+                </span>
                 {o.cur && <span style={{ fontSize: 10, color: 'var(--cth-sky)', fontWeight: 700 }}>현재</span>}
               </button>
             ))}
