@@ -1,5 +1,6 @@
 import { CSSProperties, useState } from 'react';
 import { StatPill } from './GameKit';
+import type { ClaudeUsage } from '@/lib/mcp';
 
 const APP_VERSION = 'v0.2.4';
 
@@ -80,17 +81,51 @@ function BoltIcon() {
 }
 const fmtTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
 
+// 리셋까지 남은 시간 — "2h 15m 후".
+function fmtReset(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return '곧';
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  return h > 0 ? `${h}h ${m}m 후` : `${m}m 후`;
+}
+
+// claude 사용량 미니 게이지 — OpenUsage 메뉴바처럼 5시간/주간 한도를 막대+% 로(거노:
+// ba모드 사용량 내장). 사용률 70%↑ 호박, 90%↑ 산호. 툴팁에 리셋 시각.
+function UsagePill({ label, pct, resetsAt }: { label: string; pct: number; resetsAt: string }) {
+  const color = pct >= 90 ? 'var(--cth-coral)' : pct >= 70 ? '#FFB020' : 'var(--cth-sky)';
+  return (
+    <div
+      title={`claude ${label} 한도 ${pct.toFixed(0)}% · 리셋 ${fmtReset(resetsAt)}`}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 5,
+        padding: '3px 8px', borderRadius: 999, background: 'var(--cth-cream-50)',
+        border: '1px solid var(--cth-cream-200)', marginRight: 4,
+        fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)',
+      }}
+    >
+      <span>{label}</span>
+      <span style={{ width: 30, height: 4, borderRadius: 2, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
+        <span style={{ display: 'block', width: `${Math.min(100, pct)}%`, height: '100%', background: color, borderRadius: 2 }} />
+      </span>
+      <span style={{ color: 'var(--cth-ink-900)' }}>{pct.toFixed(0)}%</span>
+    </div>
+  );
+}
+
 export interface TitleBarProps {
   notifications?: number;
   mail?: number;
   /** ⚡ 번개 = 전 학생 총 컨텍스트 토큰(재화 치환). */
   contextTokens?: number;
+  /** claude oauth usage — 5시간/주간 한도 게이지. */
+  usage?: ClaudeUsage | null;
   onBell?: () => void;
   onMail?: () => void;
   onSettings?: () => void;
 }
 
-export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, onBell, onMail, onSettings }: TitleBarProps) {
+export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, usage, onBell, onMail, onSettings }: TitleBarProps) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
@@ -117,6 +152,8 @@ export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, onBel
 
       <div style={{ flex: 1 }} />
 
+      {usage?.five_hour && <UsagePill label="5h" pct={usage.five_hour.utilization} resetsAt={usage.five_hour.resets_at} />}
+      {usage?.seven_day && <UsagePill label="7d" pct={usage.seven_day.utilization} resetsAt={usage.seven_day.resets_at} />}
       {contextTokens > 0 && (
         <StatPill icon={<BoltIcon />} value={fmtTokens(contextTokens)} style={{ marginRight: 4 }} />
       )}

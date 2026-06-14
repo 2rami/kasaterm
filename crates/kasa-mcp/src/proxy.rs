@@ -24,6 +24,15 @@ pub struct Turn {
     pub text: String,
 }
 
+/// 인터랙티브 도구 호출(AskUserQuestion 등) — SSE tool_use 블록에서 재구성. peek 화면
+/// 추정 없이 질문/선택지를 API 그대로 얻는다(거노: peek 추정 금지). input 은 도구의 원본
+/// JSON(예: AskUserQuestion 의 questions/options).
+#[derive(Clone, serde::Serialize)]
+pub struct ToolUse {
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
 #[derive(Default)]
 pub struct PaneConv {
     /// 직전 요청 messages[] 에서 뽑은 확정 대화(user/assistant).
@@ -32,6 +41,14 @@ pub struct PaneConv {
     pub streaming: String,
     /// SSE 청크가 줄 중간에서 잘려도 안전하게 — 미완성 라인 버퍼.
     sse_buf: String,
+    /// SSE 원시 바이트 버퍼 — 청크가 UTF-8 멀티바이트(한글) 경계에서 잘려도 유효
+    /// prefix 만 디코드하고 불완전 꼬리는 다음 청크와 잇는다. from_utf8 로 청크를 바로
+    /// 디코드하면 잘린 청크를 통째 버려 한글 응답 streaming 이 0 이었다(거노 실측).
+    sse_bytes: Vec<u8>,
+    /// 진행 중 tool_use 누적: content block index → (도구명, partial_json). stop 시 완성.
+    pending_tools: HashMap<i64, (String, String)>,
+    /// 완성된 인터랙티브 도구 호출(AskUserQuestion 등). 새 생성 요청 캡처 시 클리어.
+    pub tool_uses: Vec<ToolUse>,
     pub model: String,
     pub updated: f64,
 }
@@ -107,9 +124,16 @@ fn is_utility_request(body: &serde_json::Value) -> bool {
         }
         _ => {}
     }
-    // 제안 모드는 지시문을 메시지로 넣기도 한다 — 앞 메시지 몇 개도 본다.
+    // 제안/요약 지시문은 보통 첫 메시지(요약·제목) 또는 **마지막 메시지**(프롬프트 제안)에
+    // 들어간다 — 양끝 몇 개만 본다(거대 대화 중간은 스캔 안 함 → 중간에 사용자가 마커를
+    // 인용해도 오탐 없음). 첫 버전이 앞 2개만 봐서 마지막에 붙는 SUGGESTION MODE 를 놓쳐
+    // 전체 시스템프롬프트째로 채팅에 새어나왔다(거노).
     if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
-        for m in msgs.iter().take(2) {
+        let n = msgs.len();
+        for (i, m) in msgs.iter().enumerate() {
+            if i >= 2 && i + 2 < n {
+                continue; // 양끝(앞2·뒤2)만
+            }
             match m.get("content") {
                 Some(serde_json::Value::String(s)) => hay.push_str(s),
                 Some(serde_json::Value::Array(arr)) => {
@@ -121,6 +145,7 @@ fn is_utility_request(body: &serde_json::Value) -> bool {
                 }
                 _ => {}
             }
+            hay.push('\n');
         }
     }
     const MARKERS: &[&str] = &[
@@ -135,6 +160,21 @@ fn is_utility_request(body: &serde_json::Value) -> bool {
     MARKERS.iter().any(|m| hay.contains(m))
 }
 
+/// 캡처할 **메인 대화** 호출인가. claude-code 메인 에이전트 루프는 항상 도구를
+/// `tools[]`(Bash/Read/…)에 실어 보낸다. 반면 `/compact` 요약·프롬프트 제안·제목
+/// 생성 같은 백그라운드 유틸 호출은 도구 없는 순수 생성이라 `tools` 가 비거나 없다.
+/// 마커(`is_utility_request`)는 claude-code 버전 따라 문구가 바뀌어 취약하므로 —
+/// 실제로 `/compact` 호출 하나가 마커를 빠져나가 전체 대화를 "quota" 한 단어로
+/// 덮어썼다(거노) — `tools[]` 유무라는 구조적 시그널로 한 번 더 거른다. 둘 다 통과해야
+/// 캡처: ① 도구를 싣는 메인 루프 호출이고 ② 알려진 유틸 마커가 없을 때만.
+fn is_main_conversation(body: &serde_json::Value) -> bool {
+    let has_tools = body
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .is_some_and(|a| !a.is_empty());
+    has_tools && !is_utility_request(body)
+}
+
 /// 요청 본문 messages[] → 대화 턴(user/assistant, 텍스트 있는 것만).
 fn turns_from_request(body: &serde_json::Value) -> Vec<Turn> {
     body.get("messages")
@@ -143,6 +183,12 @@ fn turns_from_request(body: &serde_json::Value) -> Vec<Turn> {
             msgs.iter()
                 .filter_map(|m| {
                     let role = m.get("role").and_then(|r| r.as_str())?;
+                    // 대화 버블엔 user/assistant 만 — claude-code 가 messages 에 끼우는
+                    // system 프리앰블(agent types 목록·MCP 안내 등)은 사람 발화가 아니라
+                    // 대화창에 노이즈로 떴다(거노 실측) → 제외.
+                    if role != "user" && role != "assistant" {
+                        return None;
+                    }
                     let text = block_text(m.get("content"));
                     let text = text.trim();
                     (!text.is_empty()).then(|| Turn {
@@ -170,10 +216,37 @@ fn accumulate_sse(chunk: &str, conv: &mut PaneConv) {
             continue;
         };
         match v.get("type").and_then(|t| t.as_str()) {
+            Some("content_block_start") => {
+                // tool_use 블록 시작 — AskUserQuestion 등 인터랙티브 도구. input_json_delta
+                // 를 모을 준비(content_block_stop 에서 완성). peek 화면 추정 대체(거노).
+                if let Some("tool_use") = v.pointer("/content_block/type").and_then(|x| x.as_str()) {
+                    let idx = v.get("index").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let name = v
+                        .pointer("/content_block/name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    conv.pending_tools.insert(idx, (name, String::new()));
+                }
+            }
             Some("content_block_delta") => {
                 if let Some(t) = v.pointer("/delta/text").and_then(|x| x.as_str()) {
                     conv.streaming.push_str(t);
                     conv.updated = now();
+                } else if let Some(pj) = v.pointer("/delta/partial_json").and_then(|x| x.as_str()) {
+                    let idx = v.get("index").and_then(|x| x.as_i64()).unwrap_or(0);
+                    if let Some((_, buf)) = conv.pending_tools.get_mut(&idx) {
+                        buf.push_str(pj);
+                    }
+                }
+            }
+            Some("content_block_stop") => {
+                let idx = v.get("index").and_then(|x| x.as_i64()).unwrap_or(0);
+                if let Some((name, buf)) = conv.pending_tools.remove(&idx) {
+                    if let Ok(input) = serde_json::from_str::<serde_json::Value>(&buf) {
+                        conv.tool_uses.push(ToolUse { name, input });
+                        conv.updated = now();
+                    }
                 }
             }
             Some("message_stop") => {
@@ -189,6 +262,21 @@ fn accumulate_sse(chunk: &str, conv: &mut PaneConv) {
             }
             _ => {}
         }
+    }
+}
+
+/// SSE 바이트 청크를 누적해 유효 UTF-8 prefix 만 accumulate_sse 로 넘긴다. 멀티바이트
+/// (한글)가 청크 경계에서 잘려도 안전 — 불완전 꼬리는 버퍼에 남겨 다음 청크와 잇는다.
+fn feed_sse_bytes(conv: &mut PaneConv, bytes: &[u8]) {
+    conv.sse_bytes.extend_from_slice(bytes);
+    let valid = match std::str::from_utf8(&conv.sse_bytes) {
+        Ok(_) => conv.sse_bytes.len(),
+        Err(e) => e.valid_up_to(),
+    };
+    if valid > 0 {
+        let text = String::from_utf8_lossy(&conv.sse_bytes[..valid]).into_owned();
+        conv.sse_bytes.drain(..valid);
+        accumulate_sse(&text, conv);
     }
 }
 
@@ -208,7 +296,23 @@ pub async fn proxy_handler(
     let mut capture = false;
     if method == Method::POST && rest == "v1/messages" {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
-            if !is_utility_request(&v) {
+            // 캡처 판정 진단 — KASATERM_PROXY_DIAG 켜졌을 때만. 메인/보조 오분류
+            // (god nudge·요약 호출이 메인 대화로 새는 케이스)를 raw 로 잡으려 stderr 로.
+            if std::env::var_os("KASATERM_PROXY_DIAG").is_some() {
+                let arr = v.get("messages").and_then(|m| m.as_array());
+                let n_tools = v.get("tools").and_then(|t| t.as_array()).map_or(0, |a| a.len());
+                let n_msgs = arr.map_or(0, |a| a.len());
+                let tail = arr
+                    .and_then(|a| a.last())
+                    .map(|m| block_text(m.get("content")))
+                    .unwrap_or_default();
+                eprintln!(
+                    "[proxy-diag] /{rest} pane={pane} tools={n_tools} msgs={n_msgs} main={} tail={:.100}",
+                    is_main_conversation(&v),
+                    tail.replace('\n', " ")
+                );
+            }
+            if is_main_conversation(&v) {
                 capture = true;
                 let turns = turns_from_request(&v);
                 let model = v.get("model").and_then(|m| m.as_str()).map(str::to_string);
@@ -217,6 +321,9 @@ pub async fn proxy_handler(
                     e.turns = turns;
                     e.streaming.clear();
                     e.sse_buf.clear();
+                    e.sse_bytes.clear();
+                    e.tool_uses.clear();
+                    e.pending_tools.clear();
                     if let Some(m) = model.filter(|m| !m.is_empty()) {
                         e.model = m;
                     }
@@ -230,11 +337,19 @@ pub async fn proxy_handler(
     let url = format!("{ANTHROPIC}/{rest}");
     let mut rb = client.request(method, &url);
     for (k, val) in headers.iter() {
-        if k == axum::http::header::HOST || k == axum::http::header::CONTENT_LENGTH {
+        // accept-encoding 도 빼고 아래서 identity 강제 — Anthropic 이 gzip/br 로 압축하면
+        // reqwest(압축 feature 없음)가 압축 바이트를 그대로 흘려 SSE tee 가 "data:" 를 못
+        // 찾아 streaming 이 0 이었다(거노 실측: 답변이 다음 턴까지 안 뜸). 평문으로 받아야
+        // 라이브 캡처가 되고, claude 로 보내는 응답에도 content-encoding 이 안 붙어 정상.
+        if k == axum::http::header::HOST
+            || k == axum::http::header::CONTENT_LENGTH
+            || k == axum::http::header::ACCEPT_ENCODING
+        {
             continue;
         }
         rb = rb.header(k.as_str(), val.as_bytes());
     }
+    rb = rb.header(axum::http::header::ACCEPT_ENCODING, "identity");
     let upstream = match rb.body(body.to_vec()).send().await {
         Ok(r) => r,
         Err(e) => {
@@ -250,6 +365,12 @@ pub async fn proxy_handler(
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|c| c.to_str().ok())
             .is_some_and(|c| c.contains("event-stream"));
+    if std::env::var_os("KASATERM_PROXY_DIAG").is_some() {
+        eprintln!(
+            "[proxy-diag] resp capture={capture} is_sse={is_sse} status={}",
+            status.as_u16()
+        );
+    }
     let mut out = Response::builder().status(status.as_u16());
     for (k, val) in upstream.headers().iter() {
         let kl = k.as_str().to_ascii_lowercase();
@@ -264,10 +385,8 @@ pub async fn proxy_handler(
     let stream = upstream.bytes_stream().map(move |chunk| {
         if is_sse {
             if let Ok(b) = &chunk {
-                if let Ok(text) = std::str::from_utf8(b) {
-                    if let Ok(mut s) = store2.lock() {
-                        accumulate_sse(text, s.entry(pane.clone()).or_default());
-                    }
+                if let Ok(mut s) = store2.lock() {
+                    feed_sse_bytes(s.entry(pane.clone()).or_default(), b);
                 }
             }
         }
@@ -290,10 +409,11 @@ mod tests {
                 {"role": "user", "content": "하이"},
                 {"role": "assistant", "content": [{"type": "text", "text": "안녕하세요!"}]},
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}]},
+                {"role": "system", "content": "Available agent types for the Agent tool: …"},
             ]
         });
         let turns = turns_from_request(&body);
-        assert_eq!(turns.len(), 2); // tool_result(텍스트 블록 없음) 제외
+        assert_eq!(turns.len(), 2); // tool_result(텍스트 블록 없음)·system 프리앰블 제외
         assert_eq!(turns[0].role, "user");
         assert_eq!(turns[0].text, "하이");
         assert_eq!(turns[1].role, "assistant");
@@ -329,12 +449,90 @@ mod tests {
             "messages": [{"role": "user", "content": "[SUGGESTION MODE: ...]"}]
         });
         assert!(is_utility_request(&sugg2));
+        // 실제 프롬프트 제안 호출 — 지시문이 **마지막** 메시지에 붙는다(앞 2개만 보던
+        // 옛 필터가 놓쳐 채팅에 새어나온 케이스).
+        let sugg_last = serde_json::json!({
+            "system": "You are Claude Code, Anthropic's CLI",
+            "messages": [
+                {"role": "user", "content": "실제 첫 질문"},
+                {"role": "assistant", "content": [{"type": "text", "text": "답"}]},
+                {"role": "user", "content": "두번째 질문"},
+                {"role": "assistant", "content": [{"type": "text", "text": "또 답"}]},
+                {"role": "user", "content": "[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]"}
+            ]
+        });
+        assert!(is_utility_request(&sugg_last));
         // 메인 대화는 통과
         let main = serde_json::json!({
             "system": "You are Claude Code, Anthropic's CLI",
             "messages": [{"role": "user", "content": "하이"}]
         });
         assert!(!is_utility_request(&main));
+        // 중간 메시지에서 사용자가 마커를 인용해도 오탐 없이 통과(양끝만 스캔)
+        let quoted = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "첫 질문"},
+                {"role": "assistant", "content": [{"type": "text", "text": "응"}]},
+                {"role": "user", "content": "로그에 SUGGESTION MODE 라고 떠 있는데 뭐야"},
+                {"role": "assistant", "content": [{"type": "text", "text": "그건…"}]},
+                {"role": "user", "content": "고마워"}
+            ]
+        });
+        assert!(!is_utility_request(&quoted));
+    }
+
+    #[test]
+    fn captures_only_main_conversation() {
+        // 메인 대화 — 도구를 싣고 유틸 마커 없음 → 캡처
+        let main = serde_json::json!({
+            "system": "You are Claude Code",
+            "tools": [{"name": "Bash"}, {"name": "Read"}],
+            "messages": [{"role": "user", "content": "하이"}]
+        });
+        assert!(is_main_conversation(&main));
+
+        // "/compact 할 때 뜨던" quota — 도구 없는 짧은 보조 호출, 알려진 마커도 없음.
+        // 통째 교체되는 turns 를 "quota" 한 단어로 덮어쓴 실제 버그(거노) → 스킵.
+        let quota = serde_json::json!({
+            "messages": [{"role": "user", "content": "quota"}]
+        });
+        assert!(!is_main_conversation(&quota));
+
+        // /compact 요약 — 도구 없음 + summary 마커 → 스킵
+        let summary = serde_json::json!({
+            "system": "Summarize the conversation so far into a detailed summary of the conversation",
+            "messages": [{"role": "user", "content": "(대화 전체)"}]
+        });
+        assert!(!is_main_conversation(&summary));
+
+        // 도구 없으면 마커가 없어도 보조로 보고 스킵 — 미지의 백그라운드 호출이
+        // 전체 대화를 덮어쓰지 못하게(메인 루프는 항상 도구를 싣는다). 놓친 tools-없는
+        // 메인은 다음 메인 턴의 통째 교체로 자가치유되지만, 오캡처는 대화를 날린다.
+        let no_tools = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "짧은 호출"},
+                {"role": "assistant", "content": [{"type": "text", "text": "응"}]}
+            ]
+        });
+        assert!(!is_main_conversation(&no_tools));
+
+        // 빈 tools 배열도 도구 없음으로 취급
+        let empty_tools = serde_json::json!({
+            "tools": [],
+            "messages": [{"role": "user", "content": "x"}]
+        });
+        assert!(!is_main_conversation(&empty_tools));
+
+        // 도구가 있어도 마지막 메시지가 SUGGESTION 마커면 보조 → 스킵(마커 우선)
+        let sugg_with_tools = serde_json::json!({
+            "tools": [{"name": "Bash"}],
+            "messages": [
+                {"role": "user", "content": "실제 질문"},
+                {"role": "assistant", "content": [{"type": "text", "text": "답"}]},
+                {"role": "user", "content": "[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]"}
+            ]
+        });
+        assert!(!is_main_conversation(&sugg_with_tools));
     }
 
     #[test]
@@ -359,6 +557,20 @@ mod tests {
         );
         assert_eq!(c.streaming, "x");
     }
+
+    #[test]
+    fn sse_feed_handles_utf8_split_midchar() {
+        // 한글 응답이 청크 경계에서 멀티바이트 중간으로 잘리는 실측 케이스(거노) —
+        // feed_sse_bytes 가 유효 prefix 만 떼고 불완전 꼬리를 다음 청크와 이어야 한다.
+        let mut c = PaneConv::default();
+        let line = "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"한글\"}}\n";
+        let b = line.as_bytes();
+        let cut = line.find("한글").unwrap() + 1; // "한" 첫 바이트 직후(멀티바이트 중간)
+        feed_sse_bytes(&mut c, &b[..cut]);
+        assert_eq!(c.streaming, ""); // 라인 미완성 + 멀티바이트 잘림 → 아직 누적 0
+        feed_sse_bytes(&mut c, &b[cut..]);
+        assert_eq!(c.streaming, "한글"); // 깨지지 않고 온전히 누적
+    }
 }
 
 /// 저장된 pane 대화를 채팅용 JSON 으로. turns + 진행 중 streaming(라이브 응답).
@@ -369,9 +581,10 @@ pub fn conversation_json(store: &ConvStore, pane: &str) -> serde_json::Value {
         Some(c) => serde_json::json!({
             "turns": c.turns,
             "streaming": c.streaming,
+            "tool_uses": c.tool_uses,
             "model": c.model,
             "updated": c.updated,
         }),
-        None => serde_json::json!({ "turns": [], "streaming": "", "model": "", "updated": 0.0 }),
+        None => serde_json::json!({ "turns": [], "streaming": "", "tool_uses": [], "model": "", "updated": 0.0 }),
     }
 }

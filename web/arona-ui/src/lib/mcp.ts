@@ -365,6 +365,25 @@ export async function fetchPeek(surfaceId: string, lines = 40): Promise<string> 
   }
 }
 
+export interface ClaudeUsageWindow { utilization: number; resets_at: string; }
+export interface ClaudeUsage {
+  five_hour?: ClaudeUsageWindow | null;
+  seven_day?: ClaudeUsageWindow | null;
+  seven_day_opus?: ClaudeUsageWindow | null;
+  seven_day_sonnet?: ClaudeUsageWindow | null;
+}
+/** GET /claude-usage — claude oauth usage(5시간/주간 사용률·리셋). 토큰 없거나 실패면 null. */
+export async function fetchClaudeUsage(): Promise<ClaudeUsage | null> {
+  try {
+    const r = await fetch(`${BASE}/claude-usage`);
+    if (!r.ok) return null;
+    const d = (await r.json()) as { ok?: boolean; usage?: ClaudeUsage };
+    return d?.ok ? (d.usage ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface ScheduleItem {
   id: string;
   kind: 'loop' | 'cron' | 'timer';
@@ -479,7 +498,20 @@ export async function roomCd(path: string): Promise<boolean> {
 
 export interface Turn { role: string; text: string; }
 
-export interface Conversation { turns: Turn[]; streaming: string; model: string; }
+/** 인터랙티브 도구 호출(AskUserQuestion 등) — 캡처 프록시가 SSE tool_use 에서 재구성.
+ *  peek 화면 추정 없이 질문/선택지를 API 그대로(거노). */
+export interface ConvToolUse {
+  name: string;
+  input: {
+    questions?: Array<{
+      question: string;
+      header?: string;
+      multiSelect?: boolean;
+      options: Array<{ label: string; description?: string }>;
+    }>;
+  } & Record<string, unknown>;
+}
+export interface Conversation { turns: Turn[]; streaming: string; tool_uses?: ConvToolUse[]; model: string; }
 
 /** GET /conversation?surface=<id> — 캡처 프록시(ccglass 방식)가 claude 의 Anthropic API
  *  호출에서 가로챈 깨끗한 대화. peek(화면)·jsonl(지연) 없이 구조화·라이브. `streaming`
@@ -492,6 +524,7 @@ export async function fetchConversation(surfaceId: string): Promise<Conversation
     return {
       turns: Array.isArray(d.turns) ? d.turns : [],
       streaming: typeof d.streaming === 'string' ? d.streaming : '',
+      tool_uses: Array.isArray(d.tool_uses) ? d.tool_uses : [],
       model: typeof d.model === 'string' ? d.model : '',
     };
   } catch {

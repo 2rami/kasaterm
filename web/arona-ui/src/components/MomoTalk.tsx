@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { fetchMessages, sendToPane, sendToGod, type MessageEntry } from '@/lib/mcp';
+import { fetchMessages, fetchConversation, sendToPane, sendToGod, type MessageEntry } from '@/lib/mcp';
+import { useStore } from '@/store';
 import { SpritePortrait } from './SpritePortrait';
 
 // from_pane 이 'sensei' 면 선생님(우측 카톡 노랑), 그 외는 학생/아로나(좌측 아바타).
@@ -26,6 +27,7 @@ interface Participant { pane: string; name: string; }
 
 export function MomoTalk() {
   const [msgs, setMsgs] = useState<MessageEntry[]>([]);
+  const agents = useStore((s) => s.agents);
   const [filter, setFilter] = useState<string | null>(null); // pane id 또는 null(전체)
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -37,14 +39,47 @@ export function MomoTalk() {
     let stopped = false;
     const tick = async () => {
       const list = await fetchMessages(25);
+      // messages.jsonl 엔 선생님 발신·학생 done 만 있어 아로나/학생의 실제 답변이 모모톡에
+      // 안 떴다(거노). 캡처 프록시 conversation 의 assistant turn 을 끌어와, 대응하는 선생님
+      // 발신(같은 텍스트의 직전 user turn)이 있으면 그 직후 시각에, 없으면 최신 끝에 끼운다.
+      const replies: MessageEntry[] = [];
+      const convs = await Promise.all(agents.map((a) => fetchConversation(a.id).catch(() => null)));
+      const newest = list[0]?.ts ?? 0;
+      agents.forEach((a, ci) => {
+        const conv = convs[ci];
+        if (!conv) return;
+        conv.turns.forEach((t, i) => {
+          if (t.role !== 'assistant' || !t.text.trim()) return;
+          const prevUser = [...conv.turns.slice(0, i)].reverse().find((x) => x.role === 'user');
+          const senseiMsg = prevUser
+            ? list.find((m) => m.from_pane === SENSEI && m.text.trim() === prevUser.text.trim())
+            : null;
+          const ts = (senseiMsg ? senseiMsg.ts + 0.001 : newest) + i * 1e-6;
+          replies.push({
+            id: `conv-${a.id}-${i}`, ts,
+            from_pane: a.id, from_name: a.character,
+            to_pane: SENSEI, to_name: '선생님',
+            text: t.text, read: true,
+          });
+        });
+        if (conv.streaming.trim()) {
+          replies.push({
+            id: `conv-${a.id}-stream`, ts: newest + 1e3,
+            from_pane: a.id, from_name: a.character,
+            to_pane: SENSEI, to_name: '선생님',
+            text: conv.streaming, read: true,
+          });
+        }
+      });
       if (stopped) return;
       // 백엔드는 ts 내림차순 → 단톡방은 오래된→최신(아래로) 이라 뒤집는다.
-      setMsgs(list.slice().reverse());
+      const merged = [...list, ...replies].sort((x, y) => y.ts - x.ts);
+      setMsgs(merged.reverse());
     };
     void tick();
     const iv = setInterval(tick, 1500);
     return () => { stopped = true; clearInterval(iv); };
-  }, []);
+  }, [agents]);
 
   // 참가자 목록(필터 칩) — sensei 제외하고 등장한 pane 들.
   const participants = useMemo<Participant[]>(() => {

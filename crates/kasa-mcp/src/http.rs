@@ -372,9 +372,10 @@ async fn list_dir_handler(
     )
 }
 
-/// `POST /room-cd?path=<path>` — active pane 셸을 그 경로로 cd(터미널 백엔드).
-/// 셸 명령이라 bracketed paste 가 아니라 `cd '<path>'` + CR. claude 가 도는
-/// pane 이면 셸 cd 가 아니라 claude 입력으로 가니 무해히 무시되거나 사용자가 정리.
+/// `POST /room-cd?path=<path>` — 방(active pane)을 그 경로로 이동.
+/// **셸 pane**: `cd '<path>'` + CR 직접 주입. **claude pane**: claude 실행 중엔 셸
+/// cwd 를 외부에서 못 바꿔 raw `cd` 가 claude 입력칸에 박혔다(거노) → 자연어로
+/// "이 디렉토리로 옮겨서 작업해줘" 를 claude 에게 보내 claude 가 직접 이동하게 한다.
 async fn room_cd_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -386,8 +387,13 @@ async fn room_cd_handler(
             return (cors, Json(serde_json::json!({ "ok": false, "error": "path required" })));
         }
     };
-    let quoted = path.replace('\'', "'\\''");
-    let payload = format!("cd '{quoted}'\r");
+    let proc = backend.active_process_name().unwrap_or_default();
+    let payload = if proc.contains("claude") {
+        format!("방 경로를 '{path}'로 바꿨어. 앞으로 이 디렉토리 기준으로 작업해줘.\n")
+    } else {
+        let quoted = path.replace('\'', "'\\''");
+        format!("cd '{quoted}'\r")
+    };
     let ok = backend.send_text(None, &payload).is_ok();
     (cors, Json(serde_json::json!({ "ok": ok, "path": path })))
 }
@@ -1478,6 +1484,63 @@ async fn events_handler(
     )
 }
 
+/// claude oauth usage API 토큰 — `~/.claude/.credentials.json` 우선, 없으면 macOS
+/// Keychain(`Claude Code-credentials` 서비스). claude Code 가 토큰을 둘 중 하나에 둔다.
+fn read_claude_token() -> Option<String> {
+    let pick = |v: &serde_json::Value| {
+        v.pointer("/claudeAiOauth/accessToken")
+            .and_then(|t| t.as_str())
+            .map(str::to_string)
+    };
+    if let Ok(home) = std::env::var("HOME") {
+        if let Ok(s) = std::fs::read_to_string(format!("{home}/.claude/.credentials.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(t) = pick(&v) {
+                    return Some(t);
+                }
+            }
+        }
+    }
+    let out = std::process::Command::new("security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8(out.stdout).ok()?;
+    serde_json::from_str::<serde_json::Value>(s.trim())
+        .ok()
+        .and_then(|v| pick(&v))
+}
+
+/// `GET /claude-usage` — claude oauth usage API(5시간/주간 한도·사용률·리셋)를 그대로
+/// 프록시한다. rate limit 은 claude CLI 가 안 내보내지만 `/api/oauth/usage` 가 직접 준다
+/// (거노: ba모드 사용량 패널). 토큰 만료/실패는 그 상태를 ok:false 로 전달.
+async fn claude_usage_handler() -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let Some(token) = read_claude_token() else {
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "no claude token" })));
+    };
+    let resp = reqwest::Client::new()
+        .get("https://api.anthropic.com/api/oauth/usage")
+        .header("authorization", format!("Bearer {token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => match r.text().await {
+            Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                Ok(v) => (cors, Json(serde_json::json!({ "ok": true, "usage": v }))),
+                Err(e) => (cors, Json(serde_json::json!({ "ok": false, "error": e.to_string() }))),
+            },
+            Err(e) => (cors, Json(serde_json::json!({ "ok": false, "error": e.to_string() }))),
+        },
+        Ok(r) => (
+            cors,
+            Json(serde_json::json!({ "ok": false, "error": format!("usage api {}", r.status()) })),
+        ),
+        Err(e) => (cors, Json(serde_json::json!({ "ok": false, "error": e.to_string() }))),
+    }
+}
+
 /// `GET /messages?n=50` — messages.jsonl 을 캐릭터명 해석 포함 최근 N 개(ts 내림차순).
 async fn messages_handler(
     backend: Arc<dyn Backend>,
@@ -1893,6 +1956,7 @@ pub fn spawn_http_server(
                             messages_handler(messages_backend.clone(), q)
                         }),
                     )
+                    .route("/claude-usage", get(claude_usage_handler))
                     .route(
                         "/schedule",
                         get(schedule_list_handler).post(|body: String| schedule_add_handler(body)),
