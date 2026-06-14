@@ -813,17 +813,47 @@ fn safe_token(s: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// spawn 할 pane 에 보낼 셸 한 줄 조립. `claude` 는 PATH shim(래퍼)이
-/// --settings/persona 를 알아서 얹으므로 맨이름 호출이 정답.
-fn spawn_command(model: Option<&str>, cwd: Option<&str>) -> String {
-    let claude = match model {
-        Some(m) => format!("claude --model {m}"),
-        None => "claude".to_string(),
-    };
+/// spawn 할 pane 에 보낼 셸 한 줄 조립. per-prompt 훅(board-context.py) 폐기로 persona 는
+/// 여기서 `--append-system-prompt` 로 1회 주입(시스템 프롬프트 prefix → 캐시돼 per-turn
+/// 컨텍스트 누적 0, 거노: 소넷 워커 절감). `--session-id "$(uuidgen)"` 로 transcript
+/// discovery 가 argv 에서 exact 매핑(hook-free, 같은 cwd 여러 워커도). claude 래퍼는
+/// PATH shim 이 --settings(나머지 훅)를 얹는다.
+fn spawn_command(model: Option<&str>, cwd: Option<&str>, append: Option<&str>) -> String {
+    let mut claude = String::from("claude --session-id \"$(uuidgen)\"");
+    if let Some(m) = model {
+        claude.push_str(&format!(" --model {m}"));
+    }
+    if let Some(p) = append {
+        let esc = p.replace('\n', " ");
+        let esc: String = esc.trim().chars().take(1200).collect();
+        let esc = esc.replace('\'', "'\\''");
+        claude.push_str(&format!(" --append-system-prompt '{esc}'"));
+    }
     match cwd {
         Some(d) => format!("cd {} && {claude}", sh_quote(d)),
         None => claude,
     }
+}
+
+/// characters.json Value 에서 캐릭터 이름의 persona 텍스트(leader/leaders/members 통합).
+/// spawn_command 가 --append-system-prompt 로 입힌다. main.rs load_persona_for 의 kasa-mcp
+/// 측 쌍둥이(크레이트 분리라 중복 — 같은 characters.json 스키마).
+fn persona_for(chars: &serde_json::Value, name: &str) -> Option<String> {
+    let mut pool: Vec<&serde_json::Value> = Vec::new();
+    if let Some(l) = chars.get("leader") {
+        pool.push(l);
+    }
+    if let Some(arr) = chars.get("leaders").and_then(|x| x.as_array()) {
+        pool.extend(arr);
+    }
+    if let Some(arr) = chars.get("members").and_then(|x| x.as_array()) {
+        pool.extend(arr);
+    }
+    pool.into_iter()
+        .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
+        .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
 }
 
 /// 캐릭터 마커 경로 — assign-character.py 와 동일 규약:
@@ -882,15 +912,18 @@ async fn spawn_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResp
             }
             None => None,
         };
-        // 캐릭터는 characters.json 에 실제 정의된 이름만 — 오타가 마커만
-        // 선점하고 persona 는 못 찾는 반쪽 상태를 막는다.
-        if let Some(name) = req.character.as_deref() {
+        // 캐릭터는 characters.json 에 실제 정의된 이름만 — 오타가 마커만 선점하고
+        // persona 를 못 찾는 반쪽 상태를 막는다. persona 는 스폰 시 1회 주입(아래).
+        let persona: Option<String> = if let Some(name) = req.character.as_deref() {
             let chars = first_valid_json(&characters_candidate_paths())
                 .ok_or_else(|| "characters.json not found".to_string())?;
             if !character_defined(&chars, name) {
                 return Err(format!("unknown character: {name:?}"));
             }
-        }
+            persona_for(&chars, name)
+        } else {
+            None
+        };
 
         let surf = backend
             .split_surface(SplitDirection::Down, false)
@@ -926,7 +959,37 @@ async fn spawn_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResp
             }
         }
 
-        let mut cmd = spawn_command(req.model.as_deref(), req_cwd.as_deref());
+        // per-prompt 훅(board-context.py) 폐기로 워커 역할(god 보고·직접커밋 금지)도
+        // 스폰 시 1회 시스템 프롬프트에 넣는다(거노: "워커도 워커인 줄 알아야"). persona
+        // (말투) + 역할(god=lead, 본인=surface_id) 합쳐 --append-system-prompt 1회.
+        let append: Option<String> = req.character.as_deref().map(|name| {
+            let god = std::fs::read_to_string(
+                std::path::Path::new("/tmp/kasaterm-collab")
+                    .join(mode_slug(&room))
+                    .join("lead"),
+            )
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+            let role = match god {
+                Some(g) => format!(
+                    "너는 {name}({surface_id}) — SCHALE 워크스페이스의 워커다. 직접 git \
+                     commit/push 하지 말고, 작업이 끝나면 god({g})에게 \
+                     `kasacollab msg {g} \"done: <요약> | files: a,b\"` 로 보고해라. \
+                     god 이 검토 후 단독 커밋한다."
+                ),
+                None => format!(
+                    "너는 {name}({surface_id}) — 이 워크스페이스의 워커다. 직접 커밋하지 \
+                     말고 작업 결과를 선생님(사용자)에게 보고해라."
+                ),
+            };
+            match &persona {
+                Some(p) => format!("{p} {role}"),
+                None => role,
+            }
+        });
+
+        let mut cmd = spawn_command(req.model.as_deref(), req_cwd.as_deref(), append.as_deref());
         cmd.push('\n');
         backend
             .send_text(Some(&surface_id), &cmd)
@@ -1229,8 +1292,18 @@ async fn send_handler(
     let payload = if submit { submit_payload(&text) } else { text.clone() };
     let resp = match backend.send_text(Some(&surface), &payload) {
         Ok(()) => {
-            // 선생님 발신을 messages.jsonl 에 영속(휘발 X) — god/모모톡 가시.
-            persist_sensei_msg(&resolve_cwd(&backend), &surface, &text);
+            // 선생님 발신을 messages.jsonl 에 영속(모모톡 가시) — 단, 실제 제출(submit)
+            // 일 때만. 실시간 미러는 키 한 자마다 `\x15+부분입력`(submit=false)을 쏘는데,
+            // 그걸 다 기록하면 모모톡에 "안녕 너"→"안녕 너 누"→… 한 자씩 쌓이고 `\x15`가
+            // ⊠ 글리프로 보였다(거노 리포트). 메뉴 선택·Ctrl 키도 submit=false → 제외.
+            // 제어문자는 한 번 더 걸러 영속 텍스트를 깨끗이 유지한다.
+            if submit {
+                let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+                let clean = clean.trim();
+                if !clean.is_empty() {
+                    persist_sensei_msg(&resolve_cwd(&backend), &surface, clean);
+                }
+            }
             serde_json::json!({ "ok": true, "surface": surface, "submit": submit })
         }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
@@ -1944,15 +2017,22 @@ mod tests {
 
     #[test]
     fn spawn_command_assembles_cd_and_model() {
-        assert_eq!(spawn_command(None, None), "claude");
-        assert_eq!(spawn_command(Some("opus"), None), "claude --model opus");
+        // 모든 스폰은 --session-id "$(uuidgen)"(hook-free transcript) 로 시작한다.
+        const SID: &str = "claude --session-id \"$(uuidgen)\"";
+        assert_eq!(spawn_command(None, None, None), SID);
+        assert_eq!(spawn_command(Some("opus"), None, None), format!("{SID} --model opus"));
         assert_eq!(
-            spawn_command(None, Some("/tmp/a b")),
-            "cd '/tmp/a b' && claude"
+            spawn_command(None, Some("/tmp/a b"), None),
+            format!("cd '/tmp/a b' && {SID}")
         );
         assert_eq!(
-            spawn_command(Some("claude-fable-5"), Some("/r/x")),
-            "cd '/r/x' && claude --model claude-fable-5"
+            spawn_command(Some("claude-fable-5"), Some("/r/x"), None),
+            format!("cd '/r/x' && {SID} --model claude-fable-5")
+        );
+        // persona 주입 — 작은따옴표 이스케이프 + --append-system-prompt.
+        assert_eq!(
+            spawn_command(Some("sonnet"), None, Some("너는 시로코야")),
+            format!("{SID} --model sonnet --append-system-prompt '너는 시로코야'")
         );
     }
 

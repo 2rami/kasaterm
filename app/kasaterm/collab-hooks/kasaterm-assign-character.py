@@ -33,6 +33,28 @@ def load_characters():
     return None
 
 
+def god_room_index(slug, n):
+    """방(slug)의 god 캐릭터 순번 — .god-roster 등록 순서로 메인 방(첫 등록)=leaders[0]
+    (아로나) 고정, 이후 방은 순환. Rust load_leader_name_for/promote 의 god_room_index 와
+    동일 규칙·동일 roster 파일을 공유해야 한 방에 같은 god 이 나온다(거노: 메인 아로나)."""
+    if n <= 0:
+        return 0
+    roster = "/tmp/kasaterm-collab/.god-roster"
+    try:
+        rooms = [l for l in open(roster).read().splitlines() if l]
+    except OSError:
+        rooms = []
+    if slug in rooms:
+        return rooms.index(slug) % n
+    os.makedirs("/tmp/kasaterm-collab", exist_ok=True)
+    try:
+        with open(roster, "a") as f:
+            f.write(slug + "\n")
+    except OSError:
+        pass
+    return len(rooms) % n
+
+
 def main():
     pane = os.environ.get("KASATERM_PANE_ID")
     if not pane:
@@ -63,10 +85,11 @@ def main():
                     used.add(open(m).read().strip())
                 except Exception:
                     pass
-            # god 풀(leaders) 이 있으면 방(slug) 해시로 god 캐릭터 선택 — 방마다
-            # 아로나/프라나 다르게(거노). 없으면 leader 단일(현행 호환).
+            # god 풀(leaders) 이 있으면 roster 등록 순서로 god 캐릭터 선택 — 메인 방
+            # (첫 등록)=아로나 고정, 이후 방 순환(거노). promote/load_leader_name_for 와
+            # 같은 god_room_index·roster 공유라 한 방엔 같은 god. 없으면 leader 단일.
             pool = chars.get("leaders") or ([chars["leader"]] if chars.get("leader") else [])
-            god = pool[sum(slug.encode()) % len(pool)] if pool else {}
+            god = pool[god_room_index(slug, len(pool))] if pool else {}
             if god.get("name") and god.get("name") not in used:
                 name = god.get("name")
             else:

@@ -38,17 +38,20 @@ GOD_GREETING="[god] 너가 god 이다. 팀 통솔 시작 — board-watch 로 변
 char_field() {
   python3 -c "import json,sys
 try:
-    d=json.load(open(sys.argv[1])); ms=[d.get('leader') or {}]+(d.get('members') or [])
+    d=json.load(open(sys.argv[1])); ms=[d.get('leader') or {}]+(d.get('leaders') or [])+(d.get('members') or [])
     print(next((m.get(sys.argv[3],'') for m in ms if m.get('name')==sys.argv[2]),''))
 except Exception: pass" "$CHARS_JSON" "$1" "$2" 2>/dev/null
 }
 if [ -n "$CHARS_JSON" ]; then
-  _ln=$(python3 -c "import json;print((json.load(open('$CHARS_JSON')).get('leader') or {}).get('name',''))" 2>/dev/null)
+  # 방별 god 캐릭터(promote/assign 이 박은 character-<N> 마커) 우선, 없으면 leader —
+  # leaders 풀(아로나/프라나) 이면 방마다 god 헤더·인사가 다르다(거노).
+  _ln=$(cat "/tmp/kasaterm-collab/$slug/character-${ME#%}" 2>/dev/null)
+  [ -z "$_ln" ] && _ln=$(python3 -c "import json;print((json.load(open('$CHARS_JSON')).get('leader') or {}).get('name',''))" 2>/dev/null)
   if [ -n "$_ln" ]; then
     GOD_NAME="$_ln"
     GOD_COLOR=$(char_field "$_ln" header_color); [ -z "$GOD_COLOR" ] && GOD_COLOR="#FFD400"
     GOD_CLAUDE_COLOR=$(char_field "$_ln" claude_color); [ -z "$GOD_CLAUDE_COLOR" ] && GOD_CLAUDE_COLOR="yellow"
-    _gr=$(python3 -c "import json;print((json.load(open('$CHARS_JSON')).get('leader') or {}).get('greeting',''))" 2>/dev/null)
+    _gr=$(char_field "$_ln" greeting)
     [ -n "$_gr" ] && GOD_GREETING="$_gr"
   fi
 fi

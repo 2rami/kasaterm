@@ -1346,11 +1346,42 @@ impl App {
         let mode_dir = format!("{home}/.config/kasaterm/collab-mode");
         let _ = std::fs::create_dir_all(&mode_dir);
         let _ = std::fs::write(format!("{mode_dir}/{slug}"), "god");
-        // 모델 opus 1M 으로(아로나=opus, /model 인자형은 메뉴 없이 직접 전환) + 컨텍스트
-        // 정리. 둘 다 claude 빌트인이라 hook 은 안 깨우지만, persona 는 그 다음 일반
-        // 입력의 UserPromptSubmit hook 에서 위 마커를 보고 입혀진다.
-        self.send_bytes(b"/model opus[1m]\r");
-        self.send_bytes(b"/compact\r");
+        // 모델 opus 1M + 컨텍스트 정리. 단 `/model`·`/compact` 는 claude TUI 빌트인이라
+        // claude 가 *실행 중*일 때만 유효하다 — bare 셸에 쏘면 `/model opus[1m]` 의 `[1m]`
+        // 을 zsh 가 glob 으로 먹고(no matches found), `/compact` 는 no such file 로 터졌다
+        // (거노 06-14). 활성 프로세스가 claude(node)면 TUI 명령을 직접, 셸(또는 불명)이면
+        // claude 를 opus 1M 으로 시작한다(따옴표로 zsh glob 차단, `--model 'opus[1m]'`
+        // 검증됨). persona 는 둘 다 다음 턴 UserPromptSubmit hook 이 마커 보고 입힌다.
+        let proc = self
+            .pty
+            .get(&sid)
+            .and_then(|s| s.active_process_name())
+            .unwrap_or_default();
+        let base = proc.strip_prefix('-').unwrap_or(&proc);
+        if matches!(base, "node" | "claude" | "claude-code") {
+            // 이미 claude TUI — 모델만 바꾸고 정리. persona 는 per-prompt 훅 폐기로
+            // 못 입히지만, god 은 보통 사용자 메인 세션(Opus 1M)이라 무영향.
+            self.send_bytes(b"/model opus[1m]\r");
+            self.send_bytes(b"/compact\r");
+        } else {
+            // bare 셸 — claude 를 opus 1M 으로 시작. persona(아로나) + god 역할을 스폰 시
+            // --append-system-prompt 로 1회 주입(per-prompt 훅 폐기 대체, 캐시돼 누적 0).
+            // --session-id 로 transcript discovery 가 argv 에서 exact 매핑(hook-free).
+            let persona = crate::load_leader_name_for(&slug).and_then(|n| crate::load_persona_for(&n));
+            let god_role = "너는 이 SCHALE 워크스페이스의 god(오케스트레이터)다. 워커들의 \
+                'done' 보고를 검토하고 너가 단독으로 git add/commit/push 한다(워커는 커밋 안 함). \
+                board/inbox 자동인지는 없으니 `kasaterm-cli board`/`kasacollab` 로 직접 확인·조율하라.";
+            let append = match persona {
+                Some(p) => format!("{} {}", p.trim(), god_role),
+                None => god_role.to_string(),
+            };
+            let esc: String = append.replace('\n', " ").trim().chars().take(1200).collect();
+            let esc = esc.replace('\'', "'\\''");
+            let cmd = format!(
+                "claude --session-id \"$(uuidgen)\" --model 'opus[1m]' --append-system-prompt '{esc}'\r"
+            );
+            self.send_bytes(cmd.as_bytes());
+        }
     }
     /// First-run onboarding: open the arona window (whose ModePicker shows
     /// the 터미널 vs 아로나 choice) once the boot settles, but only when this

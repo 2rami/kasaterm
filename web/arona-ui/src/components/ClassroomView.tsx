@@ -171,6 +171,11 @@ function ClassroomCharacter(
   useEffect(() => {
     if (!selected) return;
     const onKey = (e: KeyboardEvent) => {
+      // 입력창·버튼·메뉴 등 인터랙티브 요소에 포커스가 있으면 방향키는 그쪽(타이핑·
+      // 메뉴 네비)으로 보낸다 — 캐릭터를 움직이지 않는다(거노: 선택지 방향키로 옮기면
+      // 캐릭터가 움직임). 빈 교실을 클릭(아무것도 포커스 안 됨)했을 때만 이동.
+      const el = document.activeElement;
+      if (el && el !== document.body) return;
       const STEP = 2.6;
       let { x, y } = posRef.current;
       if (e.key === 'ArrowUp') y -= STEP;

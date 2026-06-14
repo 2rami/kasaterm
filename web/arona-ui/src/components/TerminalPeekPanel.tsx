@@ -1,94 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, type Turn } from '@/lib/mcp';
+import { fetchTranscript, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { Markdown } from './Markdown';
 import { useStore } from '@/store';
 
-// claude TUI 화면(peek)에서 대화를 파싱 — transcript jsonl 이 비어있을 때 fallback
-// (일부 claude 는 세션 중 jsonl 을 라이브로 안 써, 우리가 PTY 를 소유하니 화면에서
-// 직접 읽는다). ❯=선생님 프롬프트, ⏺=학생 답변. 하단 ─── 아래(입력창·상태바)와
-// 툴콜(⏺ Bash(…))·박스·상태줄은 버린다. best-effort — 명확한 턴만 추출.
-// 화면 텍스트에서 이미지 경로 추출 — 코덱스/raw SendUserFile 은 진짜 툴 이벤트가
-// 아니라 `<parameter name="files">["…png"]` 와 `› [image] ~/…png (…)` 로 화면에
-// 텍스트로 찍혀 훅이 못 잡는다(거노 실측). 그래서 화면을 직접 파싱한다. 절대(/)·홈(~)
-// 경로 둘 다, basename 으로 dedupe(절대경로 우선).
-function parseImagePaths(screen: string): string[] {
-  const re = /[~/][^\s"'\[\]()]+\.(?:png|jpe?g|gif|webp|bmp|tiff?)/gi;
-  const found = screen.match(re) ?? [];
-  const byBase = new Map<string, string>();
-  for (const p of found) {
-    const base = p.split('/').pop() ?? p;
-    const cur = byBase.get(base);
-    if (!cur || (p.startsWith('/') && !cur.startsWith('/'))) byBase.set(base, p);
-  }
-  return [...byBase.values()];
-}
-
-function parsePtyConversation(screen: string): Turn[] {
-  const lines = screen.split('\n');
-  // 하단 입력박스(─── / ❯ <라이브 타이핑> / ───)를 대화에서 제외 — 안 그러면
-  // 전송 전 입력 중인 글자가 노란 말풍선으로 떴다(거노 실측). 입력박스는 마지막
-  // 두 divider 가 가깝게(≤4줄) 붙은 구간이라, 그 위 divider 부터 잘라낸다.
-  const dividers: number[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (/^[─—-]{10,}\s*$/.test(lines[i].trim())) dividers.push(i);
-  }
-  let end = lines.length;
-  if (dividers.length >= 2 && dividers[dividers.length - 1] - dividers[dividers.length - 2] <= 4) {
-    end = dividers[dividers.length - 2];
-  } else if (dividers.length >= 1) {
-    end = dividers[dividers.length - 1];
-  }
-  const skip = (l: string) =>
-    /^[│╰╭├┤┬┴┼╮╯]/.test(l) || /┃/.test(l) ||
-    /^(⏵⏵|⎿|⚠|▎|✻|╰|╭)/.test(l) || /^[─—-]{5,}/.test(l) || /\d+\s*tokens?\s*$/.test(l);
-  const turns: Turn[] = [];
-  let cur: Turn | null = null;
-  for (const raw of lines.slice(0, end)) {
-    const line = raw.replace(/\s+$/, '');
-    if (!line.trim()) continue;
-    const u = line.match(/^[❯>]\s+(.+)$/);
-    const a = line.match(/^⏺\s+(.+)$/);
-    if (u) {
-      cur = { role: 'user', text: u[1].trim() };
-      turns.push(cur);
-    } else if (a) {
-      const body = a[1].trim();
-      if (/^[A-Z]\w*\(/.test(body)) { cur = null; continue; } // 툴콜 — 대화 아님
-      cur = { role: 'assistant', text: body };
-      turns.push(cur);
-    } else if (cur && /^\s{2,}\S/.test(raw) && !skip(line.trim())) {
-      cur.text += '\n' + line.trim(); // 들여쓴 연속줄 이어붙임
-    } else if (skip(line.trim())) {
-      cur = null;
-    }
-  }
-  return turns;
-}
-
-// claude 인터랙티브 선택 메뉴(/model · AskUserQuestion 등)를 화면에서 추출 →
-// 채팅창에 선택지 카드로 띄운다(거노: 터미널 메뉴를 UI 로). "❯ 1. label" 패턴,
-// 2개 이상이어야 메뉴로 인정. label 우측 정렬 설명(2+ 공백 뒤)은 버린다.
-function parsePromptMenu(screen: string): { title: string; options: { idx: number; label: string; cur: boolean }[] } | null {
-  const lines = screen.split('\n');
-  const opts: { idx: number; label: string; cur: boolean; line: number }[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^\s*([❯>●]?)\s*(\d+)\.\s+(.+?)\s*$/);
-    if (m) {
-      opts.push({ idx: parseInt(m[2], 10), label: m[3].replace(/\s{2,}.*$/, '').trim(), cur: /[❯>]/.test(m[1] ?? ''), line: i });
-    }
-  }
-  if (opts.length < 2) return null;
-  const first = opts[0].line;
-  let title = '';
-  for (let i = first - 1; i >= 0 && i >= first - 6; i--) {
-    const t = lines[i].trim();
-    if (!t || /^[─—\-│╭╰╮╯>❯●]/.test(t)) continue;
-    title = t.length > 60 ? t.slice(0, 59) + '…' : t;
-    break;
-  }
-  return { title, options: opts.map((o) => ({ idx: o.idx, label: o.label, cur: o.cur })) };
-}
+// 대화는 transcript jsonl(깨끗한 구조화 데이터)만 쓴다 — 거노: "peek로 가져오게
+// 하는건 없게해". 화면(peek) 파싱은 TUI 찌꺼기(Jump-to-bottom 오버레이·라이브 입력
+// 줄·번호목록을 메뉴로 오인·스크롤 따라 끊김)가 새서 폐기했다. 인터랙티브 메뉴
+// (AskUserQuestion)는 추후 transcript의 tool_use에서 뽑아 다시 붙인다(peek 아님).
 
 // board.model 은 상태바 파싱 표시명("Opus 4.8 (1M context)") 우선 — claude- id 면 포맷,
 // 아니면(이미 표시명) 그대로. 1M context 변형이 그대로 보인다.
@@ -136,8 +55,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   const inputRef = useRef<HTMLInputElement>(null);
   const atBottomRef = useRef(true); // 사용자가 위로 스크롤했으면 자동 하단고정 멈춤
 
-  // 대화 내역: transcript jsonl 우선(정상 학생 — 깔끔). 비어있으면 PTY 화면(peek)
-  // 에서 파싱(claude 가 jsonl 라이브 기록 안 해도 화면엔 항상 있음). 학생 바뀌면 초기화.
+  // 대화 내역: transcript jsonl 만(거노: peek 폐기). claude 가 턴 완료 시 jsonl 에
+  // 쓰므로 응답 중엔 약간 지연될 수 있으나, 화면 찌꺼기 없이 깨끗하다. 학생 바뀌면 초기화.
   useEffect(() => {
     let stopped = false;
     setLoaded(false);
@@ -146,22 +65,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
     setImages([]);
     setInput('');
     const tick = async () => {
-      const [ts, screen, imgs] = await Promise.all([
+      const [ts, imgs] = await Promise.all([
         fetchTranscript(surfaceId, 30),
-        fetchPeek(surfaceId, 60),
         fetchSentImages(surfaceId, 12),
       ]);
       if (stopped) return;
-      setTurns(ts.length ? ts : parsePtyConversation(screen));
-      setMenu(parsePromptMenu(screen));
-      // 훅 기록(진짜 SendUserFile) + 화면 파싱(코덱스/raw) 병합, basename dedupe.
-      const byBase = new Map<string, string>();
-      for (const p of [...imgs, ...parseImagePaths(screen)]) {
-        const base = p.split('/').pop() ?? p;
-        const cur = byBase.get(base);
-        if (!cur || (p.startsWith('/') && !cur.startsWith('/'))) byBase.set(base, p);
-      }
-      setImages([...byBase.values()]);
+      setTurns(ts);
+      setImages(imgs);
       setLoaded(true);
     };
     void tick();
@@ -190,12 +100,17 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
     void sendToPane(surfaceId, '\x15' + next, false);
   };
 
-  // 제출: 라인은 이미 라이브로 쳐져 있으니 CR 만 보낸다(handler 가 \r 을 140ms 지연
-  // 전송해 Ink 가 paste/입력 처리를 끝낸 뒤 Enter 로 먹는다).
+  // 제출: 미러로 이미 친 라인을 submit_payload(\x15 클리어 + 괄호붙여넣기 + CR)로 한
+  // 번에 보낸다(submit=true). 서버가 이때만 messages.jsonl 에 깨끗한 텍스트로 1회 영속
+  // — 미러 partial(submit=false)은 기록 안 돼 모모톡에 한 자씩 쌓이던 버그가 사라진다.
+  // 빈 줄(프롬프트 확인용 Enter)은 영속 없이 bare CR.
   const submit = async () => {
     if (sending) return;
+    const text = input;
     setSending(true);
-    const ok = await sendToPane(surfaceId, '\r', false);
+    const ok = text
+      ? await sendToPane(surfaceId, text, true)
+      : await sendToPane(surfaceId, '\r', false);
     setSending(false);
     setFlash(ok ? 'ok' : 'err');
     setTimeout(() => setFlash(null), 1200);
@@ -283,7 +198,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
 
       {/* 대화(채팅 버블) + 보낸 이미지 */}
       <div ref={bodyRef} onScroll={onBodyScroll} style={{ flex: 1, overflow: 'auto', padding: '14px 16px', background: 'var(--cth-cream-100)' }}>
-        {turns.length === 0 && images.length === 0 ? (
+        {turns.length === 0 && images.length === 0 && agent?.status !== 'working' && agent?.status !== 'thinking' ? (
           <div style={{ color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 13, textAlign: 'center', marginTop: 40 }}>
             {loaded ? '아직 대화가 없어요' : '대화를 불러오는 중…'}
           </div>
@@ -332,6 +247,33 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                 </button>
               </div>
             ))}
+
+            {/* 로딩 인디케이터 — 학생이 working/thinking 이면 타이핑 점(거노: 채팅창에서
+                로딩중인지 모름). transcript 는 턴 완료 시 갱신이라 그 사이 공백을 메운다. */}
+            {(agent?.status === 'working' || agent?.status === 'thinking') && (
+              <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
+                <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+                  <SpritePortrait character={title} scale={1.5} />
+                </div>
+                <div style={{
+                  padding: '10px 14px', borderRadius: 14, borderTopLeftRadius: 4,
+                  background: '#fff', border: '1px solid var(--cth-cream-200)',
+                  boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
+                  display: 'inline-flex', alignItems: 'center', gap: 7,
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-500)',
+                }}>
+                  <span style={{ display: 'inline-flex', gap: 3 }}>
+                    {[0, 1, 2].map((d) => (
+                      <span key={d} style={{
+                        width: 6, height: 6, borderRadius: 999, background: 'var(--cth-sky)',
+                        animation: 'cth-pulse 1s ease-in-out infinite', animationDelay: `${d * 0.15}s`,
+                      }} />
+                    ))}
+                  </span>
+                  {agent?.status === 'thinking' ? '생각 중…' : (agent?.currentTool || '작업 중…')}
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
