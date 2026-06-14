@@ -124,6 +124,17 @@ export function App() {
     setTimeout(() => setRevealing(false), 600);
   };
 
+  // 방(워크스페이스) 전환 — 그 방의 god(없으면 첫 학생) pane 을 포커스하면 터미널이
+  // 해당 윈도우로 전환한다(거노: "gui에서 방바꾸면 터미널 윈도우 바뀌게"). '전체'(null)
+  // 는 특정 윈도우가 없으니 보기만 바꾼다.
+  const selectWorkspace = (wsCwd: string | null) => {
+    setActiveWs(wsCwd);
+    if (!wsCwd) return;
+    const target = sorted.find((a) => (a.cwd || '') === wsCwd && a.isGod)
+      || sorted.find((a) => (a.cwd || '') === wsCwd);
+    if (target) focusPane(target.id);
+  };
+
   return (
     // SCHALE OS 전체 셸: 세로 100% + 가로 100%
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -188,7 +199,7 @@ export function App() {
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
         {/* 좌측 장소(워크스페이스) 네비 — 방 여러 개일 때만 */}
-        <WorkspaceNav workspaces={workspaces} active={activeWs} onSelect={setActiveWs} />
+        <WorkspaceNav workspaces={workspaces} active={activeWs} onSelect={selectWorkspace} />
 
         {/* 메인 컬럼 */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

@@ -411,24 +411,6 @@ impl App {
         self.window_labels = out;
         self.window_labels_at = Some(now);
     }
-    /// Window `i`'s representative-pane cwd (first leaf of its layout). Daemon
-    /// mode reads the broadcast `pane_cwd_cache`; local mode resolves the shell
-    /// pid. Targets the sidebar git-badge poller and the badge lookup at paint.
-    pub(crate) fn window_repr_cwd(&self, i: usize) -> Option<std::path::PathBuf> {
-        let layout = if i == self.active_window {
-            self.pty_layout.as_ref()
-        } else {
-            self.windows.get(i).and_then(|o| o.as_ref())
-        };
-        let id = layout.and_then(|l| l.leaves().first().map(|s| s.to_string()))?;
-        if let Some(p) = self.pane_cwd_cache.get(&id) {
-            return Some(p.clone());
-        }
-        self.pty
-            .get(&id)
-            .and_then(|p| p.shell_pid())
-            .and_then(socket::pid_cwd)
-    }
     /// Compress a cwd for the sidebar: home → `~`, then keep the tail if it
     /// runs past `max` chars so the meaningful (deepest) part stays visible.
     /// 탭/헤더 라벨용. 셸이 idle이면 cwd의 마지막 폴더명, 명령 실행 중이면
@@ -1131,12 +1113,11 @@ impl App {
         // the board/bind-transcript, while later split panes get it fine.
         self.start_socket_pty();
         self.spawn_session_pane()?;
-        // 아로나 자동 시작(P5): god 모드 && characters 있는 방이면 첫 pane 에
-        // claude 를 자동 기동한다. 셸 init 이 끝나(첫 OSC133 prompt-end) 명령을
-        //받을 수 있을 때 `refresh_pane_activity` 가 1회 주입한다. solo·무테마면
-        // autoleader_command 가 None → 무동작(기존 유저 영향 0).
-        self.pending_autoleader = crate::autoleader_command();
-        self.pending_autoleader_at = self.pending_autoleader.as_ref().map(|_| Instant::now());
+        // 터미널 부팅 시 claude 자동 실행은 폐기(거노 06-14: "터미널 켜자마자 claude
+        // 가 켜지는 게 이상"). god 은 GUI(아로나 패널) 켤 때 promote_active_pane_to_god
+        // 가 쓰던 활성 세션을 승격한다. pending_autoleader 는 항상 None.
+        self.pending_autoleader = None;
+        self.pending_autoleader_at = None;
         Ok(())
     }
     /// Serialize every session (active + stashed) as a layout tree so the next

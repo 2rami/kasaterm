@@ -275,7 +275,9 @@ def _load_persona():
             d = json.load(open(cj))
         except Exception:
             continue
-        ms = [d.get("leader") or {}] + (d.get("members") or [])
+        # leaders(god 풀: 아로나/프라나) 도 포함 — 안 그러면 방별 god 프라나의
+        # persona 를 못 찾아 순수 claude 로 떴다(거노 06-14).
+        ms = [d.get("leader") or {}] + (d.get("leaders") or []) + (d.get("members") or [])
         persona = next((m.get("persona", "") for m in ms if m.get("name") == cname), "")
         break
     return cname, persona

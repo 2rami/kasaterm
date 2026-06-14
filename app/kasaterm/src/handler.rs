@@ -68,6 +68,16 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketFocus(id) => {
+                // GUI(SCHALE OS)에서 다른 방(=다른 윈도우)의 학생을 포커스하면 그
+                // 윈도우를 앞으로 가져와야 한다. active_pane 만 바꾸면 보이지 않는
+                // 윈도우의 pane 이 선택돼 화면은 그대로라 "방전환→윈도우전환"이 안 됐다.
+                // switch_window 가 leaves[0] 로 active_pane 을 덮으니 그 뒤에 원하는
+                // pane 으로 다시 지정한다.
+                if let Some(wi) = self.window_of_pane(id) {
+                    if wi != self.active_window {
+                        self.switch_window(wi);
+                    }
+                }
                 self.ws.lock().unwrap().active_pane = Some(id.clone());
                 self.chrome_dirty = true;
                 self.render_frame();

@@ -3308,6 +3308,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 소켓은 connect 로 가려 건드리지 않으므로 멀티 인스턴스에서도 안전.
     #[cfg(unix)]
     sweep_dead_kasaterm_sockets();
+    // 터미널만 켰을 땐 solo(평범한 claude). god/아로나는 GUI(아로나 패널)를 열 때만
+    // promote_active_pane_to_god 가 붙인다(거노: "터미널만 켰는데 아로나면 안된다").
+    // 옛 설계가 god 모드를 ~/.config 에 영구 저장해 GUI 없이 launch 해도 아로나가
+    // 씌워졌다 — launch 마다 god 마커를 쓸어 solo 로 되돌린다(GUI open 이 재승격).
+    demote_all_god_rooms();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let mut app = App::new(proxy);
@@ -3522,21 +3527,6 @@ fn resolve_collab_hooks_dir(
     None
 }
 
-/// characters.json 의 leader.name (~/.config 우선 → 번들). 아로나 자동 시작·테마
-/// 가드가 쓴다. 파일 없거나 leader 없으면 None(기능 skip).
-pub(crate) fn load_leader_name() -> Option<String> {
-    let slug: String = std::env::current_dir()
-        .ok()
-        .map(|c| {
-            c.to_string_lossy()
-                .chars()
-                .map(|ch| if ch == '/' || ch == '.' { '-' } else { ch })
-                .collect()
-        })
-        .unwrap_or_default();
-    load_leader_name_for(&slug)
-}
-
 /// 방(slug) 의 god 캐릭터 이름 — leaders 풀이 있으면 slug 해시로(방마다 다르게),
 /// 없으면 leader 단일. promote(활성 pane cwd slug) 와 공유 — assign-character.py·
 /// board 와 같은 UTF-8 바이트합 해시라 한 방엔 같은 god 캐릭터가 나온다.
@@ -3548,14 +3538,14 @@ pub(crate) fn load_leader_name_for(slug: &str) -> Option<String> {
     if let Some(hd) = locate_collab_hooks_dir() {
         paths.push(hd.join("characters.json"));
     }
-    let slug_sum: usize = slug.bytes().map(|b| b as usize).sum();
     for p in &paths {
         let Ok(s) = std::fs::read_to_string(p) else { continue };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { continue };
-        // leaders 배열 우선(방 해시), 없으면 leader 단일(현행 호환).
+        // leaders 풀: 메인 방(god-roster 첫 등록)=leaders[0](아로나), 이후 방은
+        // 등록 순서대로 순환(거노: 메인 아로나 고정). 없으면 leader 단일(현행 호환).
         if let Some(arr) = v.get("leaders").and_then(|l| l.as_array()) {
             if !arr.is_empty() {
-                if let Some(n) = arr[slug_sum % arr.len()]
+                if let Some(n) = arr[god_room_index(slug, arr.len())]
                     .get("name")
                     .and_then(|x| x.as_str())
                 {
@@ -3578,35 +3568,97 @@ pub(crate) fn load_leader_name_for(slug: &str) -> Option<String> {
     None
 }
 
-/// 현재 프로세스 cwd 방의 협업 모드 — kasacollab `mode_path` 와 동일 slug
-/// ('/'·'.'→'-')·마커(~/.config/kasaterm/collab-mode/<slug>). 기본 solo.
-/// 아로나 자동 시작·아로나 패널 god 게이트가 공유한다.
-pub(crate) fn current_collab_mode() -> &'static str {
-    let (Ok(home), Ok(cwd)) = (std::env::var("HOME"), std::env::current_dir()) else {
-        return "solo";
-    };
-    let slug: String = cwd
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c == '/' || c == '.' { '-' } else { c })
-        .collect();
-    match std::fs::read_to_string(format!("{home}/.config/kasaterm/collab-mode/{slug}")) {
-        Ok(m) if m.trim() == "god" => "god",
-        _ => "solo",
+/// characters.json 에서 캐릭터 이름의 persona 텍스트(leader/leaders/members 통합 검색).
+/// per-prompt 훅(board-context.py) 폐기 후, promote(god)·spawn(워커) 이 claude 기동 시
+/// `--append-system-prompt` 로 1회 입힌다 — 시스템 프롬프트 prefix 라 캐시돼 per-turn
+/// 컨텍스트 누적이 0(거노: 소넷 워커 컨텍스트 절감). 없으면 None(persona 생략).
+pub(crate) fn load_persona_for(name: &str) -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let mut paths = vec![std::path::PathBuf::from(format!(
+        "{home}/.config/kasaterm/characters.json"
+    ))];
+    if let Some(hd) = locate_collab_hooks_dir() {
+        paths.push(hd.join("characters.json"));
     }
+    for p in &paths {
+        let Ok(s) = std::fs::read_to_string(p) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { continue };
+        let mut pool: Vec<&serde_json::Value> = Vec::new();
+        if let Some(l) = v.get("leader") {
+            pool.push(l);
+        }
+        if let Some(arr) = v.get("leaders").and_then(|x| x.as_array()) {
+            pool.extend(arr);
+        }
+        if let Some(arr) = v.get("members").and_then(|x| x.as_array()) {
+            pool.extend(arr);
+        }
+        for m in pool {
+            if m.get("name").and_then(|n| n.as_str()) == Some(name) {
+                if let Some(persona) = m.get("persona").and_then(|x| x.as_str()) {
+                    if !persona.is_empty() {
+                        return Some(persona.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
-/// 아로나 자동 시작(P5) 명령 — god 모드 && characters 있는 방에서만 첫 pane 에
-/// 띄울 `claude --resume <leader> || claude`. solo·무테마·`KASATERM_NO_AUTOLEADER`
-/// 면 None(기존 유저 무영향). cwd slug 로 모드 마커를 본다(kasacollab 과 동일 규칙).
-pub(crate) fn autoleader_command() -> Option<String> {
-    // 터미널 부팅 시 claude 자동 실행은 제거(거노 06-14: "터미널 켜자마자 claude 가
-    // 켜지는 게 이상"). 이건 "GUI 켤 때 쓰던 세션 승격" 결정 전의 옛 설계라 충돌했고,
-    // collab-mode god 마커가 남으면 매 부팅마다 `claude --resume <이름>` 검색 화면이
-    // 떴다. 이제 터미널 = 평소 셸, god 은 GUI(아로나 패널) 켤 때
-    // promote_active_pane_to_god 가 쓰던 활성 세션을 승격한다.
-    let _ = std::env::var_os("KASATERM_NO_AUTOLEADER");
-    None
+/// launch 시 god 상태 sweep — 모든 collab-mode "god" 마커와 그 방의 /tmp god 상태
+/// (lead·character·roster·messages)를 지워 터미널-only 시작을 solo 로 되돌린다. god/
+/// 아로나는 open_arona_panel→promote_active_pane_to_god 가 GUI 열 때만 다시 세운다.
+/// messages.jsonl 도 비운다 — 협업 채널은 휘발성 조율이라(claude 대화 본문은 별도
+/// transcript) 재시작 후 stale 메시지(예: 죽은 %2 에게 보낸 것)가 모모톡에 남던 버그
+/// (거노 06-14). collab-mode 마커 없으면 kasacollab 이 solo 로 친다(기본).
+fn demote_all_god_rooms() {
+    let Ok(home) = std::env::var("HOME") else { return };
+    let mode_dir = std::path::PathBuf::from(format!("{home}/.config/kasaterm/collab-mode"));
+    if let Ok(entries) = std::fs::read_dir(&mode_dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let is_god = std::fs::read_to_string(&p)
+                .map(|s| s.trim() == "god")
+                .unwrap_or(false);
+            if !is_god {
+                continue;
+            }
+            let room = std::path::Path::new("/tmp/kasaterm-collab").join(e.file_name());
+            let _ = std::fs::remove_file(room.join("lead"));
+            let _ = std::fs::remove_file(room.join("messages.jsonl"));
+            if let Ok(cs) = std::fs::read_dir(&room) {
+                for c in cs.flatten() {
+                    if c.file_name().to_string_lossy().starts_with("character-") {
+                        let _ = std::fs::remove_file(c.path());
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+    let _ = std::fs::remove_file("/tmp/kasaterm-collab/.god-roster");
+}
+
+/// 방(slug)의 god 캐릭터 순번 — `.god-roster` 에 등록 순서로 적어 메인 방(첫 등록)이
+/// leaders[0](아로나) 고정, 이후 방은 등록 순서대로 순환(거노: 메인 아로나). 새 방
+/// append. promote 와 공유(같은 slug → 같은 god 캐릭터).
+fn god_room_index(slug: &str, n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let roster = "/tmp/kasaterm-collab/.god-roster";
+    let content = std::fs::read_to_string(roster).unwrap_or_default();
+    let rooms: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+    if let Some(i) = rooms.iter().position(|r| *r == slug) {
+        return i % n;
+    }
+    use std::io::Write;
+    let _ = std::fs::create_dir_all("/tmp/kasaterm-collab");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(roster) {
+        let _ = writeln!(f, "{slug}");
+    }
+    rooms.len() % n
 }
 
 /// Stage a `claude` wrapper + a session-scoped hook settings file on the pane
@@ -3631,14 +3683,15 @@ fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // and timeouts, so in-pane behavior is unchanged.
     let settings = serde_json::json!({
         "hooks": {
-            // 세션 시작/재개 즉시 bind → 첫 프롬프트 전에도 board 에 뜬다(UserPromptSubmit
-            // 만 걸면 학생이 입력받기 전까진 안 보였음). SessionStart 는 startup·resume·
-            // clear 에 모두 발화하므로 relaunch 후 claude --resume 재바인딩도 커버.
+            // 세션 시작/재개 즉시 bind → 첫 프롬프트 전에도 board 에 뜬다. SessionStart 는
+            // startup·resume·clear 에 모두 발화하므로 relaunch 후 claude --resume 재바인딩도
+            // 커버. transcript 자체는 discover_transcript(cwd→projects, --session-id)로
+            // hook-free 라 이 bind 는 roster(복구)·즉시성 보조일 뿐.
             "SessionStart": [{ "hooks": [cmd("kasaterm-bind-transcript.sh", 5000)] }],
-            "UserPromptSubmit": [{ "hooks": [
-                cmd("kasaterm-bind-transcript.sh", 5000),
-                cmd("kasaterm-board-context.py", 5000),
-            ]}],
+            // UserPromptSubmit(board-context.py) 제거 — 프롬프트마다 persona+board+inbox 를
+            // additionalContext 로 주입해 소넷 워커 컨텍스트가 누적·과대했다(거노 06-14).
+            // persona 는 스폰 시 `--append-system-prompt`로 1회(캐시돼 per-turn 0) 대체.
+            // board/inbox 자동인지는 폐기 — 조율은 GUI(SCHALE OS) 와 명시적 kasacollab 으로.
             // 같은 방 다른 pane 이 같은 파일을 작업 중이면 Edit 직전에 막는다
             // (transcript 직접 비교, 데몬 무관). solo·god 모드 공통 안전망.
             "PreToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] }],
