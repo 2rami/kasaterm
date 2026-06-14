@@ -8,7 +8,12 @@ use std::sync::Arc;
 
 use kasa_socket::backend::{Backend, PanelKind, SplitDirection};
 use axum::{
-    extract::Query, http::header, response::IntoResponse, routing::get, routing::post, Json,
+    body::Bytes,
+    extract::{Path as AxPath, Query},
+    http::{header, HeaderMap, Method},
+    response::IntoResponse,
+    routing::{any, get, post},
+    Json,
 };
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpService,
@@ -1670,6 +1675,10 @@ pub fn spawn_http_server(
                 };
                 // 스케줄러 백그라운드 타이머 — due 항목을 학생에게 발사(10s 주기).
                 tokio::spawn(schedule_loop(backend.clone()));
+                // ccglass-style 캡처 프록시 — claude 의 Anthropic API 호출을 가로채
+                // pane 별 대화(messages[]+SSE)를 모은다. /conversation 으로 노출.
+                let conv_store: crate::proxy::ConvStore = Default::default();
+                let http_client = reqwest::Client::new();
                 let git_backend = backend.clone();
                 let diff_backend = backend.clone();
                 let commit_backend = backend.clone();
@@ -1944,6 +1953,46 @@ pub fn spawn_http_server(
                         "/panel-info",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             panel_info_handler(panel_info_backend.clone(), q)
+                        }),
+                    )
+                    // 채팅 소스: 캡처 프록시가 모은 pane 대화(turns + 진행 중 streaming).
+                    .route(
+                        "/conversation",
+                        get({
+                            let store = conv_store.clone();
+                            move |q: Query<std::collections::HashMap<String, String>>| {
+                                let store = store.clone();
+                                async move {
+                                    let pane =
+                                        q.get("surface").map(|s| s.trim_start_matches('%')).unwrap_or("");
+                                    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+                                    (cors, Json(crate::proxy::conversation_json(&store, pane)))
+                                        .into_response()
+                                }
+                            }
+                        }),
+                    )
+                    // 캡처 프록시: claude 가 ANTHROPIC_BASE_URL=…/p/<pane> 로 보낸 모든
+                    // API 호출을 가로채 api.anthropic.com 으로 투명 포워드 + 캡처.
+                    .route(
+                        "/p/{pane}/{*rest}",
+                        any({
+                            let store = conv_store.clone();
+                            let client = http_client.clone();
+                            move |AxPath((pane, rest)): AxPath<(String, String)>,
+                                  method: Method,
+                                  headers: HeaderMap,
+                                  body: Bytes| {
+                                crate::proxy::proxy_handler(
+                                    store.clone(),
+                                    client.clone(),
+                                    pane,
+                                    rest,
+                                    method,
+                                    headers,
+                                    body,
+                                )
+                            }
                         }),
                     )
                     .nest_service("/mcp", service);

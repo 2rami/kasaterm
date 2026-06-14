@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 pub mod git;
 mod http;
+mod proxy;
 mod register;
 pub use http::spawn_http_server;
 // 호스트(kasaterm)의 첫 실행 온보딩이 GET /mode 와 같은 마커로 판정하게 노출.

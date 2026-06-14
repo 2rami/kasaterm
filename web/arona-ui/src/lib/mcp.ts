@@ -479,6 +479,26 @@ export async function roomCd(path: string): Promise<boolean> {
 
 export interface Turn { role: string; text: string; }
 
+export interface Conversation { turns: Turn[]; streaming: string; model: string; }
+
+/** GET /conversation?surface=<id> — 캡처 프록시(ccglass 방식)가 claude 의 Anthropic API
+ *  호출에서 가로챈 깨끗한 대화. peek(화면)·jsonl(지연) 없이 구조화·라이브. `streaming`
+ *  은 진행 중 어시스턴트 응답(SSE 라이브). 프록시 안 탄 pane 은 빈 배열(폴백). */
+export async function fetchConversation(surfaceId: string): Promise<Conversation> {
+  try {
+    const r = await fetch(`${BASE}/conversation?surface=${encodeURIComponent(surfaceId)}`);
+    if (!r.ok) return { turns: [], streaming: '', model: '' };
+    const d = (await r.json().catch(() => ({}))) as Partial<Conversation>;
+    return {
+      turns: Array.isArray(d.turns) ? d.turns : [],
+      streaming: typeof d.streaming === 'string' ? d.streaming : '',
+      model: typeof d.model === 'string' ? d.model : '',
+    };
+  } catch {
+    return { turns: [], streaming: '', model: '' };
+  }
+}
+
 /** GET /transcript?surface=<id>&turns=<n> — 구조화된 대화(프롬프트/답변, tool 노이즈
  *  제거). 학생 클릭 시 raw 터미널 대신 대화 채팅뷰 소스(선생님 ②). fail-soft 빈 배열. */
 export async function fetchTranscript(surfaceId: string, turns = 20): Promise<Turn[]> {
