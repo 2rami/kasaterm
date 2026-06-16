@@ -22,6 +22,49 @@ const ANTHROPIC: &str = "https://api.anthropic.com";
 pub struct Turn {
     pub role: String,
     pub text: String,
+    /// 이 턴에 첨부된 이미지 파일 경로(거노가 붙여넣은 image block → 디코드 저장). 대화창 인라인.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+}
+
+/// base64 디코드(std 만으로 — base64 crate 의존 회피). 표준 알파벳, 패딩·개행 무시.
+fn b64_decode(s: &str) -> Vec<u8> {
+    let mut lut = [255u8; 256];
+    for (i, &c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".iter().enumerate() {
+        lut[c as usize] = i as u8;
+    }
+    let (mut out, mut buf, mut bits) = (Vec::new(), 0u32, 0u32);
+    for &c in s.as_bytes() {
+        let v = lut[c as usize];
+        if v == 255 { continue; }
+        buf = (buf << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 { bits -= 8; out.push((buf >> bits) as u8); }
+    }
+    out
+}
+
+/// content[] 의 image block(base64)을 /tmp/kasaterm-proxy-images/<hash>.<ext> 로 디코드 저장하고
+/// 경로를 반환(거노: 이미지도 대화창에). FNV 해시로 같은 이미지는 1회만 저장(dedup).
+fn extract_images(content: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(arr) = content.and_then(|c| c.as_array()) else { return Vec::new(); };
+    let mut out = Vec::new();
+    for b in arr {
+        if b.get("type").and_then(|t| t.as_str()) != Some("image") { continue; }
+        let Some(data) = b.pointer("/source/data").and_then(|d| d.as_str()) else { continue; };
+        let media = b.pointer("/source/media_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+        let ext = media.rsplit('/').next().unwrap_or("png");
+        let mut h: u64 = 0xcbf29ce484222325;
+        for byte in data.bytes() { h ^= byte as u64; h = h.wrapping_mul(0x100000001b3); }
+        let dir = std::path::Path::new("/tmp/kasaterm-proxy-images");
+        if std::fs::create_dir_all(dir).is_err() { continue; }
+        let path = dir.join(format!("{h:016x}.{ext}"));
+        if !path.exists() {
+            let _ = std::fs::write(&path, b64_decode(data));
+        }
+        out.push(path.to_string_lossy().to_string());
+    }
+    out
 }
 
 /// 인터랙티브 도구 호출(AskUserQuestion 등) — SSE tool_use 블록에서 재구성. peek 화면
@@ -190,10 +233,12 @@ fn turns_from_request(body: &serde_json::Value) -> Vec<Turn> {
                         return None;
                     }
                     let text = block_text(m.get("content"));
+                    let images = extract_images(m.get("content"));
                     let text = text.trim();
-                    (!text.is_empty()).then(|| Turn {
+                    (!text.is_empty() || !images.is_empty()).then(|| Turn {
                         role: role.to_string(),
                         text: text.to_string(),
+                        images,
                     })
                 })
                 .collect()
@@ -255,6 +300,7 @@ fn accumulate_sse(chunk: &str, conv: &mut PaneConv) {
                     conv.turns.push(Turn {
                         role: "assistant".into(),
                         text: txt,
+                        images: Vec::new(),
                     });
                 }
                 conv.streaming.clear();

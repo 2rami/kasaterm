@@ -7,7 +7,7 @@
 //! per actually-open pane.
 
 use kasa_socket::backend::{
-    Backend, PaneActivity, PaneRect, SplitDirection, SurfaceInfo, WorkspaceInfo,
+    Backend, PaneActivity, PaneRect, SessionsInfo, SplitDirection, SurfaceInfo, WorkspaceInfo,
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -295,6 +295,60 @@ impl Backend for PtyBackend {
             id: FIXED_WORKSPACE_ID.into(),
             name: "kasaterm".into(),
         }))
+    }
+
+    /// 로컬 PTY 모드의 '방' = App 윈도우. GUI 스레드에 질의해(별 스레드라 직접 못 봄)
+    /// 윈도우 수·활성 idx·라벨을 받는다. arona-ui 좌측 방 네비가 폴링한다(거노).
+    fn sessions(&self) -> SessionsInfo {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.proxy.send_event(UserEvent::SocketQuerySessions(tx)).is_err() {
+            return SessionsInfo::default();
+        }
+        match rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            Ok((count, active, labels)) => SessionsInfo {
+                count,
+                active,
+                saved: Vec::new(),
+                // 방 이름 = 윈도우 라벨(name). cwd 가 있으면 부가 표기.
+                labels: labels
+                    .into_iter()
+                    .map(|(name, cwd)| if cwd.is_empty() { name } else { format!("{name} · {cwd}") })
+                    .collect(),
+            },
+            Err(_) => SessionsInfo::default(),
+        }
+    }
+
+    /// `POST /session-switch?idx=N` — 방=윈도우 전환을 GUI 스레드에 위임.
+    fn switch_session(&self, idx: usize) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::SocketSwitchSession(idx))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(())
+    }
+
+    /// `POST /session-new?god=<name>` — 새 방(윈도우) + 선택 god 스폰을 GUI 에 위임.
+    fn new_room(&self, god: &str) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::SocketNewRoom(god.to_string()))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(())
+    }
+
+    /// 활성 pane(보이는 방)의 방 식별자 — 모모톡 inbox 등을 방별 격리(거노). ws 공유.
+    fn active_room(&self) -> Option<String> {
+        let ws = self.ws.lock().unwrap();
+        ws.active_pane
+            .as_ref()
+            .and_then(|p| ws.pane_room.get(p).cloned())
+    }
+
+    /// `POST /session-close?idx=N` — 방(윈도우) 닫기를 GUI 스레드에 위임.
+    fn close_session(&self, idx: usize) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::SocketCloseRoom(idx))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(())
     }
 
     fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> {
@@ -586,23 +640,39 @@ impl Backend for PtyBackend {
         // 이용해 직접 추적·bind(스로틀 2s). 훅은 빠른 보조 경로일 뿐, 이게 안전망.
         self.discover_unbound(&live);
         let agents = self.agents_status();
+        // claude 가 실제 생성 중이면 화면 푸터에 스피너+"esc to interrupt" 가 뜬다.
+        // mtime(60s) 휴리스틱이 ESC/완료 후에도 working 으로 stuck 이라(거노), 이 화면
+        // 신호를 mtime-fallback(아래 None 분기)의 진짜 working 기준으로 쓴다.
+        let generating: HashSet<String> = {
+            let ws = self.ws.lock().unwrap();
+            live.iter()
+                .filter(|sid| {
+                    ws.panes
+                        .get(sid.as_str())
+                        .map(|p| screen_shows_working(&p.visible_text(14)))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        };
         let bound = self.bound.lock().unwrap();
         let mut attention = self.attention.lock().unwrap();
-        // god 판정: bound pane 의 transcript path 부모(= cwd slug)로 협업방 lead 를
-        // 읽는다(협업은 같은 cwd 공유). hot-path 에 lsof 없이 파일 1회 read.
-        let god_id: Option<String> = bound
-            .values()
-            .next()
-            .and_then(|p| p.parent())
-            .and_then(|d| d.file_name())
-            .and_then(|s| s.to_str())
-            .map(|slug| format!("/tmp/kasaterm-collab/{slug}/lead"))
-            .and_then(|lead| std::fs::read_to_string(lead).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        // 방별 분리(거노): 각 pane 의 god/character 는 *그 pane 의 방(room)* collab dir
+        // 에서 읽는다 — 같은 cwd 라도 방마다 god 가 다르다(아로나 방/프라나 방). pane_room
+        // 없으면(기본 방) 기존 cwd-slug. ws(공유)에서 복제해 아래 map 클로저서 쓴다.
+        // active_window_panes: 보이는 방(윈도우)의 pane — board 를 활성 방으로 한정
+        // (거노: 아로나 방+프라나 방이 한 교실에 같이 뜸). 비었으면(초기) 필터 안 함.
+        let (pane_room, active_panes) = {
+            let ws = self.ws.lock().unwrap();
+            (ws.pane_room.clone(), ws.active_window_panes.clone())
+        };
         let mut board: Vec<PaneActivity> = bound
             .iter()
-            .filter(|(sid, _)| live.contains(sid.as_str()))
+            // 활성 방 학생만(방별 격리). active_panes 가 비었으면(초기 미발행) live 로 폴백.
+            .filter(|(sid, _)| {
+                live.contains(sid.as_str())
+                    && (active_panes.is_empty() || active_panes.contains(sid.as_str()))
+            })
             .map(|(sid, path)| {
                 let (tail, mtime_idle) = read_tail(path, 64 * 1024);
                 let mut row = snapshot_from_tail(sid, &tail, mtime_idle);
@@ -629,7 +699,18 @@ impl Backend for PtyBackend {
                         row.status = "idle".into();
                         true
                     }
-                    None => mtime_idle,
+                    None => {
+                        // mtime 만 보면 ESC 취소·완료 후 60s 간 working 으로 stuck →
+                        // 화면에 생성중 스피너가 있을 때만 working, 없으면 idle 로 교정
+                        // (거노: ESC 눌러서 취소해도 '생각 중' 으로 남는 문제).
+                        if generating.contains(sid.as_str()) {
+                            row.status = "working".into();
+                            false
+                        } else {
+                            row.status = "idle".into();
+                            true
+                        }
+                    }
                 };
                 // A claude blocked on a permission/input prompt writes nothing
                 // and reports idle, so its Notification hook flag is the only
@@ -643,22 +724,31 @@ impl Backend for PtyBackend {
                 } else {
                     attention.remove(sid);
                 }
-                row.is_god = god_id.as_deref() == Some(sid.as_str());
-                // 캐릭터 마커(assign-character) — god 판정과 같은 규칙으로 이
-                // pane 의 transcript 부모(= cwd slug)에서 character-<N> 을 읽는다.
-                row.character = path
+                // 이 pane 의 방 collab dir = cwd-slug(+ 방이면 __room_<id>). god/character
+                // 둘 다 여기서 읽어 방별로 분리(거노: 프라나 방에 시로코 뜨던 버그).
+                let base_slug = path
                     .parent()
                     .and_then(|d| d.file_name())
                     .and_then(|s| s.to_str())
-                    .map(|slug| {
-                        format!(
-                            "/tmp/kasaterm-collab/{slug}/character-{}",
-                            sid.trim_start_matches('%')
-                        )
-                    })
-                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or("");
+                let rslug = match pane_room.get(sid.as_str()) {
+                    Some(r) => format!("{base_slug}__room_{r}"),
+                    None => base_slug.to_string(),
+                };
+                // god 판정 — 이 방의 lead == 나?
+                let lead = std::fs::read_to_string(format!("/tmp/kasaterm-collab/{rslug}/lead"))
+                    .ok()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
+                row.is_god = lead.as_deref() == Some(sid.as_str());
+                // 캐릭터 마커(assign-character) — 이 방 dir 의 character-<N>.
+                row.character = std::fs::read_to_string(format!(
+                    "/tmp/kasaterm-collab/{rslug}/character-{}",
+                    sid.trim_start_matches('%')
+                ))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
                 row
             })
             .collect();
@@ -795,6 +885,23 @@ pub(crate) fn key_to_bytes(key: &str) -> Vec<u8> {
 /// is the last activity time; no need to parse ISO timestamps). The leading
 /// (possibly mid-line) fragment of a tail read just fails to parse in
 /// `snapshot_from_tail`, so it's harmless. Any IO error → empty + idle.
+/// claude 가 실제로 생성 중이면 라이브 푸터에 "✳ Verbing… (12s · esc to interrupt)"
+/// 가 뜬다. `rows_show_working`(input.rs)의 문자열판 — visible_text 의 마지막 비공백
+/// 행들을 본다. transcript mtime(60s) 휴리스틱은 ESC 취소·완료 후에도 working 으로
+/// stuck 이라(거노: ESC 눌러도 생각 중), 이 화면 신호를 mtime-fallback 의 진짜
+/// working 기준으로 쓴다. 완료 요약("✻ Churned for 42s")은 별은 있어도 말줄임표가
+/// 없어 제외된다.
+fn screen_shows_working(screen: &str) -> bool {
+    screen.lines().rev().take(10).any(|line| {
+        if line.contains("esc to interrupt") {
+            return true;
+        }
+        let has_star = line.chars().any(|c| (0x2720..=0x274F).contains(&(c as u32)));
+        let has_braille = line.chars().any(|c| (0x2800..=0x28FF).contains(&(c as u32)));
+        (has_star && line.contains('…')) || has_braille
+    })
+}
+
 fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool) {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(path) else {

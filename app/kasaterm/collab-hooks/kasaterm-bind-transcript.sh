@@ -44,7 +44,9 @@ try:
 except (IndexError, ValueError):
     sock_birth = 0.0
 sid = os.path.splitext(os.path.basename(tp))[0]  # transcript 파일명 = session uuid
-slug = cwd.replace('/', '-').replace('.', '-')
+# 방별 분리(거노): KASATERM_ROOM 있으면 roster slug 도 방별로(없으면 기존).
+_room = os.environ.get('KASATERM_ROOM', '')
+slug = cwd.replace('/', '-').replace('.', '-') + (f'__room_{_room}' if _room else '')
 d = os.path.expanduser('~/.config/kasaterm/agent-roster')
 os.makedirs(d, exist_ok=True)
 p = os.path.join(d, slug + '.json')

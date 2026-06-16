@@ -4,17 +4,17 @@ import { AgentCard } from './components/AgentCard';
 import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
-import { LOUNGE_FURNITURE, STUDIO_FURNITURE } from './components/classroomSpace';
 import { CommandCenter } from './components/CommandCenter';
 import { StudentGrid } from './components/StudentGrid';
 import { Footer } from './components/Footer';
 import { TitleBar } from './components/TitleBar';
 import { RoomChip } from './components/RoomChip';
 import { RoomPathModal } from './components/RoomPathModal';
-import { WorkspaceNav, workspacesFromAgents } from './components/WorkspaceNav';
+import { RoomMap } from './components/RoomMap';
+import { ResizeHandle } from './components/ResizeHandle';
 import { PixelButton } from './components/PixelButton';
 import { SegmentedTabs } from './components/GameKit';
-import { startBoardPolling, fetchMode, focusPane, revealTerminal, setMode, fetchBoard, fetchCharacters, spawnAgent, fetchClaudeUsage, type ClaudeUsage } from './lib/mcp';
+import { startBoardPolling, fetchMode, focusPane, revealTerminal, setMode, fetchBoard, fetchCharacters, spawnAgent, fetchClaudeUsage, fetchSessions, switchSession, newRoom, closeRoom, type ClaudeUsage, type SessionsInfo } from './lib/mcp';
 
 type ViewMode = 'classroom' | 'grid';
 
@@ -38,9 +38,31 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
+  // 학생 대화를 열면 = 그 학생의 현재 대기('확인 필요')를 '확인'한 것 → 코랄 표시 해제.
+  const openStudent = (id: string, title: string) => { setPeek({ id, title }); useStore.getState().ackStudent(id); };
   const [showRoomModal, setShowRoomModal] = useState(false);
-  const [activeWs, setActiveWs] = useState<string | null>(null); // 활성 장소(워크스페이스 cwd)
+  // 방 = kasaterm 윈도우(거노). GET /sessions 폴링 → 좌측 방 네비. 클릭하면 그 윈도우로.
+  const [sessions, setSessions] = useState<SessionsInfo>({ count: 0, active: 0, labels: [], saved: [] });
+  useEffect(() => {
+    let stop = false;
+    const tick = async () => { const s = await fetchSessions(); if (!stop) setSessions(s); };
+    void tick();
+    const iv = setInterval(tick, 1500);
+    return () => { stop = true; clearInterval(iv); };
+  }, []);
   const [usage, setUsage] = useState<ClaudeUsage | null>(null); // claude oauth 사용량(5h/주간)
+  // 라이트/다크 테마 — 태양 버튼 토글, localStorage 영속(거노). data-theme 로 토큰 재매핑.
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('schale-theme') === 'dark' ? 'dark' : 'light'));
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('schale-theme', theme);
+  }, [theme]);
+  // 우측 Command Center 폭 — 드래그 조절(거노: 각 영역 크기조절), localStorage 영속.
+  const [ccWidth, setCcWidth] = useState(() => Number(localStorage.getItem('schale-cc-width')) || 320);
+  useEffect(() => { localStorage.setItem('schale-cc-width', String(ccWidth)); }, [ccWidth]);
+  // 하단(학생카드+풋터) 영역 높이 — 교실과의 경계 드래그 조절(거노: 나눠진 곳 모두).
+  const [bottomH, setBottomH] = useState(() => Number(localStorage.getItem('schale-bottom-h')) || 200);
+  useEffect(() => { localStorage.setItem('schale-bottom-h', String(bottomH)); }, [bottomH]);
 
   // claude oauth 사용량(5시간/주간 한도·리셋)을 1분마다 폴링 → TitleBar 게이지.
   useEffect(() => {
@@ -107,15 +129,11 @@ export function App() {
   }
 
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
-  // 장소(워크스페이스) — 학생 cwd 별 방. 활성 방 선택 시 그 방 학생만 보인다.
-  const workspaces = workspacesFromAgents(sorted);
-  const shown = activeWs ? sorted.filter((a) => (a.cwd || '') === activeWs) : sorted;
-  // 장소이동 — 모든 방이 빈 바닥(classroom-floor) + 가구 모델로 통일(충돌·길찾기
-  // 일관, 어느 방이든 책상 안 뚫음). 워크스페이스별 가구 변형으로 분위기만 다르게.
-  const FURNITURE_SETS = [LOUNGE_FURNITURE, STUDIO_FURNITURE];
-  const wsIdx = activeWs ? workspaces.findIndex((w) => w.cwd === activeWs) : -1;
+  // 방 = kasaterm 윈도우. board(collab_board)는 활성 윈도우의 panes 만 주므로 보이는
+  // 학생이 곧 그 방 학생 — 클라이언트 cwd 필터 없이 그대로 그린다(거노).
+  const shown = sorted;
+  // 배경 = 기본 교실바닥 하나로(거노: 평면도/방별맵 실험 접고 처음꺼 하나만).
   const roomBg = 'classroom-floor.png';
-  const roomFurniture = wsIdx >= 0 ? FURNITURE_SETS[wsIdx % FURNITURE_SETS.length] : undefined;
 
   // 재화 = claude 토큰 지표(선생님): 💎입력토큰 · 🪙비용$ (전 학생 합산).
   const totalInputTokens = sorted.reduce((s, a) => s + (a.tokensIn ?? 0), 0);
@@ -134,15 +152,12 @@ export function App() {
     setTimeout(() => setRevealing(false), 600);
   };
 
-  // 방(워크스페이스) 전환 — 그 방의 god(없으면 첫 학생) pane 을 포커스하면 터미널이
-  // 해당 윈도우로 전환한다(거노: "gui에서 방바꾸면 터미널 윈도우 바뀌게"). '전체'(null)
-  // 는 특정 윈도우가 없으니 보기만 바꾼다.
-  const selectWorkspace = (wsCwd: string | null) => {
-    setActiveWs(wsCwd);
-    if (!wsCwd) return;
-    const target = sorted.find((a) => (a.cwd || '') === wsCwd && a.isGod)
-      || sorted.find((a) => (a.cwd || '') === wsCwd);
-    if (target) focusPane(target.id);
+  // 방(윈도우) 전환 — POST /session-switch?idx → 그 터미널 윈도우로(거노: "gui에서
+  // 방바꾸면 터미널 윈도우 바뀌게"). board 폴링이 그 윈도우 학생으로 따라온다.
+  const selectRoom = (idx: number) => {
+    void switchSession(idx);
+    setSessions((s) => ({ ...s, active: idx })); // 폴링 전 즉시 하이라이트
+    setPeek(null); // 방 바뀌면 우측 학생별 대화도 초기화 — 다른 방 학생 대화 stale 방지(거노)
   };
 
   return (
@@ -155,6 +170,8 @@ export function App() {
         mail={agents.filter((a) => a.status === 'success').length}
         contextTokens={totalContextTokens}
         usage={usage}
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
         onBell={() => {
           // 주의(대기/막힘) 학생 우선, 없으면 작업 중, 그것도 없으면 첫 학생 — 종은
           // 항상 무언가 연다(거노: 클릭해도 무반응이던 것).
@@ -210,7 +227,7 @@ export function App() {
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
         {/* 좌측 장소(워크스페이스) 네비 — 방 여러 개일 때만 */}
-        <WorkspaceNav workspaces={workspaces} active={activeWs} onSelect={selectWorkspace} />
+        <RoomMap sessions={sessions} onSwitch={selectRoom} onNewRoom={(god) => { void newRoom(god); }} onCloseRoom={(i) => { void closeRoom(i); }} />
 
         {/* 메인 컬럼 */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -218,7 +235,7 @@ export function App() {
           {/* 교실 씬 or 카드 그리드 */}
           <div style={{ flex: 1, overflow: 'auto', padding: view === 'classroom' ? 8 : 'var(--cth-space-4)' }}>
             {view === 'classroom' ? (
-              <ClassroomView agents={shown} background={roomBg} furniture={roomFurniture} onAdd={() => setShowAdd(true)} onSelect={(id, title) => setPeek({ id, title })} selectedId={peek?.id} />
+              <ClassroomView agents={shown} background={roomBg} onAdd={() => setShowAdd(true)} onSelect={openStudent} selectedId={peek?.id} />
             ) : shown.length === 0 ? (
               <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
             ) : (
@@ -243,33 +260,32 @@ export function App() {
             )}
           </div>
 
-          {/* 학생 카드 그리드 (아리스 구현) */}
-          <div style={{
-            flexShrink: 0,
-            borderTop: '1px solid var(--cth-cream-200)',
-            background: 'var(--cth-cream-50)'
-          }}>
-            <StudentGrid agents={shown} onSelect={(id, title) => setPeek({ id, title })} />
-          </div>
+          {/* 교실↔하단 경계 — 세로 드래그로 하단 영역 높이 조절(거노: 나눠진 곳 모두). */}
+          <ResizeHandle dir="row" onDrag={(dy) => setBottomH((h) => Math.min(440, Math.max(110, h - dy)))} />
 
-          {/* 풋터 (아리스 구현) */}
-          <div style={{
-            flexShrink: 0,
-            borderTop: '1px solid var(--cth-cream-200)',
-            background: 'var(--cth-cream-50)'
-          }}>
-            <Footer
-              onManage={() => setShowAdd(true)}
-              onNewRequest={() => setShowAdd(true)}
-              inputTokens={totalInputTokens}
-              costUsd={totalCostUsd}
-              contextPct={contextPct}
-            />
+          {/* 하단(학생카드 + 풋터) — 높이 드래그 조절 */}
+          <div style={{ height: bottomH, flexShrink: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ flexShrink: 0, borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
+              <StudentGrid agents={shown} onSelect={openStudent} />
+            </div>
+            <div style={{ flexShrink: 0, borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
+              <Footer
+                onManage={() => setShowAdd(true)}
+                onNewRequest={() => setShowAdd(true)}
+                inputTokens={totalInputTokens}
+                costUsd={totalCostUsd}
+                contextPct={contextPct}
+              />
+            </div>
           </div>
         </div>
 
-        {/* 우측: Command Center 항상 — 학생 클릭 시 '학생별 대화' 탭에 대화 통합(거노). */}
-        <CommandCenter selected={peek} onClearDialog={() => setPeek(null)} />
+        {/* 우측: Command Center 항상 — 학생 클릭 시 '학생별 대화' 탭에 대화 통합(거노).
+            좌측 핸들 드래그로 폭 조절. */}
+        <ResizeHandle dir="col" onDrag={(dx) => setCcWidth((w) => Math.min(640, Math.max(260, w - dx)))} />
+        <div style={{ width: ccWidth, flexShrink: 0, display: 'flex', minHeight: 0 }}>
+          <CommandCenter selected={peek} onClearDialog={() => setPeek(null)} onPickStudent={openStudent} />
+        </div>
       </div>
 
       {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} defaultCwd={cwd} />}

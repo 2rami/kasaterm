@@ -26,6 +26,11 @@ body {
   background: linear-gradient(180deg, #DCEBFA 0%, #EAF3FC 45%, #F5FAFE 100%);
 }
 
+/* 다크 모드 — 깊은 네이비 그라데이션(태양 버튼 토글). */
+:root[data-theme="dark"] body {
+  background: linear-gradient(180deg, #10172E 0%, #18213D 45%, #20294A 100%);
+}
+
 button, input, textarea, select {
   font-family: inherit;
   font-size: inherit;
@@ -128,8 +133,42 @@ canvas { image-rendering: pixelated; }
   50% { transform: scale(1.25); opacity: 1; }
 }
 
-/* 걷는 느낌 — 픽셀 스프라이트 수직 통통(워크프레임 없이 이동감). */
+/* 걷는 느낌 — 픽셀 스프라이트 수직 통통(워크프레임 없이 이동감, 시트 없을 때 폴백). */
 @keyframes schale-bob {
   0%, 100% { transform: translateY(0); }
   50% { transform: translateY(-3px); }
+}
+
+/* 걷는 모션 — 4프레임 walk-cycle 시트를 가로로 한 칸씩(steps). 한 칸 폭만큼 X 이동을
+   --walk-shift(=-frameW*4px, SpriteWalk 가 시트 종횡비로 계산해 주입)로. */
+@keyframes schale-walk {
+  from { background-position-x: 0; }
+  to { background-position-x: var(--walk-shift, -400%); }
+}
+
+/* 리사이즈 핸들(거노: 각 영역 크기조절) — 항상 가는 그립 막대가 보여 잡을 수 있게,
+   hover/drag 시 SCHALE 블루로 강조. (옛 6px 투명 핸들은 거기 있는지 몰라 못 잡았음) */
+.cth-resize-handle::before {
+  content: ''; border-radius: 3px;
+  background: var(--cth-cream-300);
+  transition: background 120ms ease, height 120ms ease, width 120ms ease;
+}
+.cth-resize-handle-col::before { width: 3px; height: 42px; }
+.cth-resize-handle-row::before { width: 42px; height: 3px; }
+.cth-resize-handle:hover { background: var(--cth-sky-light); }
+.cth-resize-handle:hover::before { background: var(--cth-sky); }
+.cth-resize-handle-col:hover::before { height: 64px; }
+.cth-resize-handle-row:hover::before { width: 64px; }
+.cth-resize-handle:active { background: var(--cth-sky-light); }
+.cth-resize-handle:active::before { background: var(--cth-sky); }
+
+/* 로딩 스피너 — 빈 교실(god 오는 중) dim 오버레이 회전 링. */
+@keyframes schale-spin { to { transform: rotate(360deg); } }
+
+/* 캐릭터 등장 모션(munder 식) — 아래서 통통 튀어오르며 페이드인. 캐릭터 내부 래퍼에 적용
+   (button 의 translate(-50%,-100%) 위치 transform 과 충돌 안 하게 별도 레이어). */
+@keyframes schale-enter {
+  0% { opacity: 0; transform: translateY(20px) scale(0.55); }
+  55% { opacity: 1; transform: translateY(-5px) scale(1.08); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
 }

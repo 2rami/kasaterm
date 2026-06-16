@@ -3,7 +3,7 @@
 # busy 에이전트도 다음 tool call 경계에서 반드시 1회 소비 → tell 씹힘 없음.
 PANE="${KASATERM_PANE_ID:-}"
 [ -z "$PANE" ] && exit 0
-slug=$(pwd | sed 's#[/.]#-#g')
+slug=$(pwd | sed 's#[/.]#-#g')${KASATERM_ROOM:+__room_$KASATERM_ROOM}
 ENC="${PANE//%/_pane_}"
 STEER="/tmp/kasaterm-collab/$slug/steer/${ENC}.txt"
 [ -f "$STEER" ] || exit 0

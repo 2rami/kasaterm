@@ -47,12 +47,38 @@ export interface Agent {
   lastPrompt?: string;
 }
 
+/** 학생이 question/선택지로 막혀 선생님 입력을 기다리는 상태(blocked=권한·입력
+ *  프롬프트, waiting=응답 대기). '확인 대기'·'미확인' 판정의 기준. */
+export function isAwaitingTeacher(a: Agent): boolean {
+  return a.status === 'blocked' || a.status === 'waiting';
+}
+
 interface AppState {
   agents: Agent[];
   setAgents: (a: Agent[]) => void;
+  /** 선생님이 '확인'(대화 열기)한, 현재 대기 에피소드의 학생 id 들. 학생이 대기를
+   *  벗어나면 setAgents 가 자동으로 빼서, 다음 질문 때 다시 '미확인'이 된다. */
+  acked: string[];
+  ackStudent: (id: string) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
   agents: [],
-  setAgents: (agents) => set({ agents })
+  acked: [],
+  setAgents: (agents) =>
+    set((s) => ({
+      agents,
+      // 대기 상태를 벗어난(또는 사라진) 학생은 확인플래그 리셋 — 다음 대기 때 다시 미확인.
+      acked: s.acked.filter((id) => {
+        const a = agents.find((x) => x.id === id);
+        return !!a && isAwaitingTeacher(a);
+      }),
+    })),
+  ackStudent: (id) =>
+    set((s) => (s.acked.includes(id) ? s : { acked: [...s.acked, id] })),
 }));
+
+/** blocked/waiting 인데 선생님이 아직 그 대화를 안 열어봄 = 머리 위 코랄 '확인 필요!'. */
+export function isUnconfirmed(a: Agent, acked: string[]): boolean {
+  return isAwaitingTeacher(a) && !acked.includes(a.id);
+}

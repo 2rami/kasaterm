@@ -562,6 +562,103 @@ async fn characters_handler() -> impl IntoResponse {
     (status, [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// SKILL.md / commands/*.md frontmatter("--- … ---" 사이)의 description 추출.
+fn frontmatter_desc(path: &std::path::Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?;
+    let mut in_fm = false;
+    for line in s.lines() {
+        let t = line.trim();
+        if t == "---" {
+            if in_fm {
+                break;
+            }
+            in_fm = true;
+            continue;
+        }
+        if in_fm {
+            if let Some(rest) = t.strip_prefix("description:") {
+                return Some(rest.trim().trim_matches('"').trim_matches('\'').to_string());
+            }
+        }
+    }
+    None
+}
+
+fn add_cmd(
+    cmds: &mut Vec<serde_json::Value>,
+    seen: &mut std::collections::HashSet<String>,
+    cmd: String,
+    desc: String,
+) {
+    if seen.insert(cmd.clone()) {
+        cmds.push(serde_json::json!({ "cmd": cmd, "desc": desc }));
+    }
+}
+
+/// `GET /slash-commands` — claude 가 `/` 자동완성에 보여주는 동적 명령(스킬·커스텀·플러그인)을
+/// 디스크 스캔(거노: 스킬 이런 거 다). ~/.claude/skills·commands·plugins + 프로젝트 .claude/skills.
+/// MCP 프롬프트는 서버 런타임이라 파일 스캔 불가 — 프런트 정적 목록이 내장 명령을 커버한다.
+async fn slash_commands_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let mut cmds: Vec<serde_json::Value> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let home = std::path::Path::new(&home);
+        // ~/.claude/skills/<name>/SKILL.md → /<name>
+        if let Ok(rd) = std::fs::read_dir(home.join(".claude/skills")) {
+            for e in rd.flatten() {
+                let md = e.path().join("SKILL.md");
+                if md.exists() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    add_cmd(&mut cmds, &mut seen, format!("/{name}"), frontmatter_desc(&md).unwrap_or_default());
+                }
+            }
+        }
+        // ~/.claude/commands/<name>.md → /<name>
+        if let Ok(rd) = std::fs::read_dir(home.join(".claude/commands")) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("md") {
+                    let name = p.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                    add_cmd(&mut cmds, &mut seen, format!("/{name}"), frontmatter_desc(&p).unwrap_or_default());
+                }
+            }
+        }
+        // 플러그인 ~/.claude/plugins/cache/<mk>/<plugin>/<ver>/skills/<name>/SKILL.md → /<plugin>:<name>
+        if let Ok(mks) = std::fs::read_dir(home.join(".claude/plugins/cache")) {
+            for mk in mks.flatten() {
+                let Ok(plugins) = std::fs::read_dir(mk.path()) else { continue };
+                for plugin in plugins.flatten() {
+                    let pname = plugin.file_name().to_string_lossy().to_string();
+                    let Ok(vers) = std::fs::read_dir(plugin.path()) else { continue };
+                    for v in vers.flatten() {
+                        if let Ok(rd) = std::fs::read_dir(v.path().join("skills")) {
+                            for e in rd.flatten() {
+                                let md = e.path().join("SKILL.md");
+                                if md.exists() {
+                                    let name = e.file_name().to_string_lossy().to_string();
+                                    add_cmd(&mut cmds, &mut seen, format!("/{pname}:{name}"), frontmatter_desc(&md).unwrap_or_default());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 프로젝트 .claude/skills/<name>/SKILL.md (활성 방 cwd)
+    if let Ok(rd) = std::fs::read_dir(resolve_cwd(&backend).join(".claude/skills")) {
+        for e in rd.flatten() {
+            let md = e.path().join("SKILL.md");
+            if md.exists() {
+                let name = e.file_name().to_string_lossy().to_string();
+                add_cmd(&mut cmds, &mut seen, format!("/{name}"), frontmatter_desc(&md).unwrap_or_default());
+            }
+        }
+    }
+    (cors, Json(serde_json::json!({ "commands": cmds }))).into_response()
+}
+
 /// cwd → 모드 마커 파일명 slug. kasacollab.py `mode_path` 와 동일 규칙
 /// ('/' 와 '.' 을 '-' 로): 두 구현이 같은 마커를 읽고 써야 한다.
 fn mode_slug(cwd: &std::path::Path) -> String {
@@ -1039,10 +1136,15 @@ async fn session_switch_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `POST /session-new` — create a fresh session and switch to it.
-async fn session_new_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
-    let body = match backend.new_session() {
-        Ok(()) => serde_json::json!({ "ok": true }),
+/// `POST /session-new?god=<name>` — 새 방(윈도우) + 선택 god(아로나/프라나) 스폰
+/// (거노: 방 추가 시 god 선택). god 미지정이면 아로나 기본.
+async fn session_new_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let god = params.get("god").filter(|s| !s.is_empty()).map(|s| s.as_str()).unwrap_or("아로나");
+    let body = match backend.new_room(god) {
+        Ok(()) => serde_json::json!({ "ok": true, "god": god }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
@@ -1227,9 +1329,18 @@ fn submit_payload(text: &str) -> String {
     format!("\x15\x1b[200~{}\x1b[201~\r", text)
 }
 
-fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str) {
+/// 선생님 발신을 messages.jsonl 에 append. `read=true`: 이미 PTY 로 전달돼 표시·
+/// god 가시용만(학생 inbox drain 막음). `read=false`: 모모톡 inbox 발신 — 받는
+/// 에이전트의 drain_unread(to==me·read==false)가 집어 올려 컨텍스트로 받는다.
+/// to/to_pane 은 surface(%N) — drain_unread 가 pane id 도 내 주소로 매칭한다.
+fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str, read: bool, room: Option<&str>) {
     // 활성 방 디렉터리에 직접 기록(없으면 생성) — 읽기와 달리 존재 여부로 안 거른다.
-    let dir = std::path::Path::new("/tmp/kasaterm-collab").join(mode_slug(room_cwd));
+    // 방별 분리(거노): room 있으면 slug 에 `__room_<id>` — 모모톡 inbox 도 방별 격리.
+    let slug = match room {
+        Some(r) => format!("{}__room_{}", mode_slug(room_cwd), r),
+        None => mode_slug(room_cwd),
+    };
+    let dir = std::path::Path::new("/tmp/kasaterm-collab").join(slug);
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -1241,7 +1352,7 @@ fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str) {
     let line = serde_json::json!({
         "id": id, "from": "sensei", "from_pane": "sensei",
         "to": surface, "to_pane": surface,
-        "text": text, "ts": now, "read": true
+        "text": text, "ts": now, "read": read
     })
     .to_string();
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -1300,6 +1411,21 @@ async fn send_handler(
         )
             .into_response();
     }
+    // 모모톡 inbox 발신(`inbox=1`): PTY 에 *주입하지 않고* messages.jsonl 에 read=false
+    // 로만 적는다(거노: 모모톡은 프롬프트가 아니라 에이전트 inbox). 받는 에이전트는
+    // drain_unread 로 컨텍스트에 받고, idle 이면 god-loop nudge 가 4s 내 깨운다.
+    let inbox = params.get("inbox").map(|v| v == "1" || v == "true").unwrap_or(false);
+    if inbox {
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        let clean = clean.trim();
+        if clean.is_empty() {
+            return (cors, Json(serde_json::json!({ "ok": false, "error": "text is empty" })))
+                .into_response();
+        }
+        persist_sensei_msg(&resolve_cwd(&backend), &surface, clean, false, backend.active_room().as_deref());
+        return (cors, Json(serde_json::json!({ "ok": true, "surface": surface, "inbox": true })))
+            .into_response();
+    }
     let payload = if submit { submit_payload(&text) } else { text.clone() };
     let resp = match backend.send_text(Some(&surface), &payload) {
         Ok(()) => {
@@ -1308,11 +1434,15 @@ async fn send_handler(
             // 그걸 다 기록하면 모모톡에 "안녕 너"→"안녕 너 누"→… 한 자씩 쌓이고 `\x15`가
             // ⊠ 글리프로 보였다(거노 리포트). 메뉴 선택·Ctrl 키도 submit=false → 제외.
             // 제어문자는 한 번 더 걸러 영속 텍스트를 깨끗이 유지한다.
-            if submit {
+            // `nopersist=1`: 학생별 대화 패널의 개인 지시는 그 학생 대화(캡처 프록시)에만
+            // 떠야 하는데 persist 하면 모모톡 단톡방에까지 노란버블로 샜다(거노). 모모톡
+            // 발신(/tell-god·모모톡 학생지목)만 persist, 학생별 대화는 nopersist 로 끈다.
+            let nopersist = params.get("nopersist").map(|v| v == "1" || v == "true").unwrap_or(false);
+            if submit && !nopersist {
                 let clean: String = text.chars().filter(|c| !c.is_control()).collect();
                 let clean = clean.trim();
                 if !clean.is_empty() {
-                    persist_sensei_msg(&resolve_cwd(&backend), &surface, clean);
+                    persist_sensei_msg(&resolve_cwd(&backend), &surface, clean, true, backend.active_room().as_deref());
                 }
             }
             serde_json::json!({ "ok": true, "surface": surface, "submit": submit })
@@ -1435,10 +1565,18 @@ fn collab_events(room_cwd: &std::path::Path, n: usize) -> Vec<Event> {
 }
 
 /// messages.jsonl 을 캐릭터명 해석 포함해 최근 N 개 반환(ts 내림차순).
-/// `room_cwd` = 활성 pane cwd(방 해석).
-fn collab_messages(room_cwd: &std::path::Path, n: usize) -> Vec<MessageEntry> {
-    let Some(dir) = find_collab_dir(Some(room_cwd)) else {
-        return Vec::new();
+/// `room_cwd` = 활성 pane cwd(방 해석). `room` 있으면 방별 slug(거노: 방끼리 inbox 격리).
+fn collab_messages(room_cwd: &std::path::Path, n: usize, room: Option<&str>) -> Vec<MessageEntry> {
+    let dir = match room {
+        Some(r) => std::path::PathBuf::from(format!(
+            "/tmp/kasaterm-collab/{}__room_{}",
+            mode_slug(room_cwd),
+            r
+        )),
+        None => match find_collab_dir(Some(room_cwd)) {
+            Some(d) => d,
+            None => return Vec::new(),
+        },
     };
     let Ok(content) = std::fs::read_to_string(dir.join("messages.jsonl")) else {
         return Vec::new();
@@ -1547,7 +1685,8 @@ async fn messages_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let n = params.get("n").and_then(|s| s.parse::<usize>().ok()).unwrap_or(50);
-    let messages = collab_messages(&resolve_cwd(&backend), n);
+    // 방별 분리(거노): 활성 방의 messages.jsonl 만 본다. 다른 방 inbox 는 mcp 로만.
+    let messages = collab_messages(&resolve_cwd(&backend), n, backend.active_room().as_deref());
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
         Json(serde_json::json!({ "ok": true, "messages": messages })),
@@ -1592,7 +1731,7 @@ async fn tell_god_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoR
     let resp = match backend.send_text(Some(&god_pane), &payload) {
         Ok(()) => {
             // 선생님 → god 발신 영속(휘발 X) — 모모톡 단톡방·god 가시.
-            persist_sensei_msg(&resolve_cwd(&backend), &god_pane, &text);
+            persist_sensei_msg(&resolve_cwd(&backend), &god_pane, &text, true, backend.active_room().as_deref());
             serde_json::json!({ "ok": true, "to": god_pane })
         }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
@@ -1752,6 +1891,7 @@ pub fn spawn_http_server(
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let session_close_backend = backend.clone();
+                let slash_backend = backend.clone();
                 let session_restore_backend = backend.clone();
                 let session_rename_backend = backend.clone();
                 let session_reset_backend = backend.clone();
@@ -1872,7 +2012,9 @@ pub fn spawn_http_server(
                     )
                     .route(
                         "/session-new",
-                        post(move || session_new_handler(session_new_backend.clone())),
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            session_new_handler(session_new_backend.clone(), q)
+                        }),
                     )
                     .route(
                         "/session-close",
@@ -1957,6 +2099,10 @@ pub fn spawn_http_server(
                         }),
                     )
                     .route("/claude-usage", get(claude_usage_handler))
+                    .route(
+                        "/slash-commands",
+                        get(move || slash_commands_handler(slash_backend.clone())),
+                    )
                     .route(
                         "/schedule",
                         get(schedule_list_handler).post(|body: String| schedule_add_handler(body)),

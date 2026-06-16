@@ -64,11 +64,15 @@ function MailIcon() {
     </svg>
   );
 }
+// 설정 — 슬라이더 아이콘. 옛 톱니(원+8빛살)는 다크모드 태양 토글과 똑같이 보여
+// "버튼 두개 모드체인지" 혼동(거노). 슬라이더로 바꿔 명확히 구분.
 function GearIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 16 16">
-      <circle style={stroke} cx="8" cy="8" r="2.2" />
-      <path style={stroke} d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" />
+      <path style={stroke} d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" strokeLinecap="round" />
+      <circle cx="6" cy="4.5" r="1.8" fill="var(--cth-cream-50)" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="10.5" cy="8" r="1.8" fill="var(--cth-cream-50)" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="5" cy="11.5" r="1.8" fill="var(--cth-cream-50)" stroke="currentColor" strokeWidth="1.4" />
     </svg>
   );
 }
@@ -76,6 +80,21 @@ function BoltIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
       <path d="M9.2 1.3 3.3 9.2H7l-.9 5.5 6-8.1H8.4l.8-5.3Z" fill="#FFC83D" stroke="var(--cth-ink-900)" strokeWidth="0.7" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function SunIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16">
+      <circle cx="8" cy="8" r="3" fill="currentColor" />
+      <path style={stroke} d="M8 1v1.6M8 13.4V15M1 8h1.6M13.4 8H15M3.05 3.05l1.13 1.13M11.82 11.82l1.13 1.13M12.95 3.05l-1.13 1.13M4.18 11.82l-1.13 1.13" />
+    </svg>
+  );
+}
+function MoonIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16">
+      <path style={stroke} d="M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5Z" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -120,12 +139,15 @@ export interface TitleBarProps {
   contextTokens?: number;
   /** claude oauth usage — 5시간/주간 한도 게이지. */
   usage?: ClaudeUsage | null;
+  /** 현재 테마 — 태양/달 버튼 표시. */
+  theme?: 'light' | 'dark';
+  onToggleTheme?: () => void;
   onBell?: () => void;
   onMail?: () => void;
   onSettings?: () => void;
 }
 
-export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, usage, onBell, onMail, onSettings }: TitleBarProps) {
+export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, usage, theme = 'light', onToggleTheme, onBell, onMail, onSettings }: TitleBarProps) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
@@ -157,6 +179,7 @@ export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, usage
       {contextTokens > 0 && (
         <StatPill icon={<BoltIcon />} value={fmtTokens(contextTokens)} style={{ marginRight: 4 }} />
       )}
+      <IconBtn title={theme === 'dark' ? '라이트 모드로' : '다크 모드로'} onClick={onToggleTheme}>{theme === 'dark' ? <SunIcon /> : <MoonIcon />}</IconBtn>
       <IconBtn title="알림" badge={notifications} onClick={onBell}><BellIcon /></IconBtn>
       <IconBtn title="메일" badge={mail} onClick={onMail}><MailIcon /></IconBtn>
       <IconBtn title="설정" onClick={onSettings}><GearIcon /></IconBtn>

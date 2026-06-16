@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useStore, type Agent } from '@/store';
-import { SpriteWalk } from './SpriteWalk';
+import { useStore, isUnconfirmed, type Agent } from '@/store';
+import { SpriteWalk, type Facing } from './SpriteWalk';
 import {
   CLASSROOM_FURNITURE, buildGrid, deskSeats, cafeSpots, findPath, pctToCell,
   type Furniture, type CafeSpot,
@@ -11,11 +11,6 @@ import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon } from './activity';
 const ROOT = import.meta.env.BASE_URL || '/';
 const SPEED = 24; // 이동 속도(%/초) — 방 가로지르기 ≈ 3.5초
 
-function firstLine(s?: string): string {
-  if (!s) return '';
-  const head = s.trim().split(/[\n。.!?！？]/)[0].trim();
-  return head.length > 36 ? head.slice(0, 35).trimEnd() + '…' : head;
-}
 function shortenAction(s?: string): string {
   if (!s) return '';
   return s.replace(/\/\S*\/([^\s/]+)/g, '…/$1');
@@ -25,17 +20,21 @@ function shortCwd(p?: string): string {
   const segs = p.split('/').filter(Boolean);
   return (segs.length > 2 ? '…/' : '') + segs.slice(-2).join('/');
 }
+// 머리 위 말풍선 = 상태 + 쓰는 툴만(거노). 답변/질문 본문(lastReply)은 안 띄움 —
+// 그건 학생을 클릭해 '학생별 대화'에서 본다. waiting/blocked 는 짧은 상태어만.
 function thoughtFor(a: Agent): string {
   switch (a.status) {
     case 'working': {
-      const tool = a.currentTool || shortenAction(a.action);
+      const tool = a.currentTool || shortenAction(a.action) || '작업 중';
       const n = a.subagents?.length ?? 0;
       return n > 0 ? `${tool} · 서브 ${n}` : tool;
     }
-    case 'thinking': return '응답 생성 중…';
-    case 'waiting':
-    case 'blocked': return firstLine(a.lastReply) || shortenAction(a.action) || '대기 중';
-    case 'idle': return firstLine(a.lastReply);
+    case 'thinking': return '생각 중';
+    case 'waiting': return '입력 대기';
+    case 'blocked': return '확인 필요';
+    // idle = 답변(lastReply) 안 띄움(거노: 답변말고 상태만). 말풍선은 비고, 한가하면
+    // 카페 잡담(chatLine)만 뜬다. 상태는 이름표 점 색으로 표시.
+    case 'idle': return '';
     default: return '';
   }
 }
@@ -108,8 +107,8 @@ function useCafeChat(agents: Agent[]): Record<string, string> {
 // 카페 구역을 어슬렁(가구 피해 다님). 이동은 waypoint 단위 CSS transition + 워크
 // 애니메이션 + 진행방향 flip. 도착하면 멈춤. 머리 위 말풍선/글리프. 클릭 → 대화.
 function ClassroomCharacter(
-  { agent, seat, grid, cafe, chatLine, onSelect, index, selected }:
-  { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void; index: number; selected?: boolean },
+  { agent, seat, grid, cafe, chatLine, onSelect, index, selected, unconfirmed }:
+  { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void; index: number; selected?: boolean; unconfirmed?: boolean },
 ) {
   // working/waiting/blocked = 자기 책상으로. idle 만 카페 배회. 단 god(아로나)은
   // 선생님 비서·오케스트레이터라 idle 이어도 자기 자리 고정(munder god 자리고정 차용).
@@ -119,10 +118,12 @@ function ClassroomCharacter(
   const [segMs, setSegMs] = useState(0);
   const [moving, setMoving] = useState(false);
   const [flip, setFlip] = useState(false);
+  const [facing, setFacing] = useState<Facing>('front'); // 이동 방향 4방향 스프라이트
   const posRef = useRef(pos);
   posRef.current = pos;
   const pathRef = useRef<Pt[]>([]);
   const timer = useRef<number | undefined>(undefined);
+  const stopTimer = useRef<number | undefined>(undefined); // 방향키 이동 멈춤 감지
 
   const step = useCallback(() => {
     const path = pathRef.current;
@@ -131,8 +132,10 @@ function ClassroomCharacter(
     const cur = posRef.current;
     const dist = Math.hypot(next.x - cur.x, next.y - cur.y);
     if (dist < 0.4) { posRef.current = next; setPos(next); step(); return; }
-    if (next.x < cur.x - 0.3) setFlip(true);
-    else if (next.x > cur.x + 0.3) setFlip(false);
+    // 이동 방향으로 4방향 결정 — 세로가 크면 위=back/아래=front, 가로가 크면 side(+flip).
+    const dx = next.x - cur.x, dy = next.y - cur.y;
+    if (Math.abs(dy) > Math.abs(dx)) setFacing(dy < 0 ? 'back' : 'front');
+    else { setFacing('side'); if (dx < -0.3) setFlip(true); else if (dx > 0.3) setFlip(false); }
     const ms = Math.max(140, (dist / SPEED) * 1000);
     setSegMs(ms);
     setMoving(true);
@@ -150,21 +153,15 @@ function ClassroomCharacter(
   useEffect(() => {
     if (selected) return; // 선택 중엔 자동 이동을 멈추고 방향키로 수동 조종.
     if (atDesk && seat) { walkTo({ x: seat.x, y: seat.y }); return; }
-    // idle → 카페 구역 머무름 지점 근처를 어슬렁(가구 피해 BFS).
-    const wander = () => {
-      // idle 거점을 인덱스로 결정적 분배(랜덤이 같은 자리를 골라 겹치던 것 방지).
-      // 자리보다 idle 이 많으면 tier 로 좌우로 더 벌린다.
-      const home = cafe.length ? cafe[index % cafe.length] : null;
-      const tier = cafe.length ? Math.floor(index / cafe.length) : 0;
-      const t: Pt = home
-        ? { x: home.x + (Math.random() * 3 - 1.5) + (tier ? (tier % 2 ? 7 : -7) : 0), y: home.y + (Math.random() * 2.5 - 1.25) }
-        : { x: 20 + Math.random() * 24, y: 78 + Math.random() * 10 };
-      walkTo(t);
-    };
-    wander();
-    // 주기에 인덱스별 jitter — 모든 캐릭터가 같은 5.2s 틱에 동시 재배치되던 것 분산.
-    const iv = window.setInterval(wander, 5200 + (index % 5) * 700);
-    return () => { window.clearInterval(iv); window.clearTimeout(timer.current); };
+    // idle → 카페 거점으로 한 번만 이동하고 정지(거노: 계속 배회하지 말고 가만히 옆으로
+    // 서 있게). 옛 5.2s 주기 wander 가 계속 움직여 산만했음. 거점은 인덱스로 결정적 분배.
+    const home = cafe.length ? cafe[index % cafe.length] : null;
+    const tier = cafe.length ? Math.floor(index / cafe.length) : 0;
+    const t: Pt = home
+      ? { x: home.x + (tier ? (tier % 2 ? 7 : -7) : 0), y: home.y }
+      : { x: 22 + (index % 5) * 13, y: 82 };
+    walkTo(t);
+    return () => { window.clearTimeout(timer.current); };
   }, [atDesk, seat?.x, seat?.y, walkTo, cafe, index, selected]);
 
   // 선택된 학생은 방향키로 직접 이동(자동 배회 멈춤). 벽/가구는 못 지나감.
@@ -178,10 +175,10 @@ function ClassroomCharacter(
       if (el && el !== document.body) return;
       const STEP = 2.6;
       let { x, y } = posRef.current;
-      if (e.key === 'ArrowUp') y -= STEP;
-      else if (e.key === 'ArrowDown') y += STEP;
-      else if (e.key === 'ArrowLeft') { x -= STEP; setFlip(true); }
-      else if (e.key === 'ArrowRight') { x += STEP; setFlip(false); }
+      if (e.key === 'ArrowUp') { y -= STEP; setFacing('back'); }
+      else if (e.key === 'ArrowDown') { y += STEP; setFacing('front'); }
+      else if (e.key === 'ArrowLeft') { x -= STEP; setFlip(true); setFacing('side'); }
+      else if (e.key === 'ArrowRight') { x += STEP; setFlip(false); setFacing('side'); }
       else return;
       e.preventDefault();
       const cell = pctToCell(x, y);
@@ -190,10 +187,13 @@ function ClassroomCharacter(
       posRef.current = next;
       setSegMs(110);
       setMoving(true);
+      // 키 누르는 동안만 걷기 — 떼면 ~180ms 뒤 정지(거노: 멈추면 멈추게, 제자리 걷기 버그).
+      window.clearTimeout(stopTimer.current);
+      stopTimer.current = window.setTimeout(() => setMoving(false), 180);
       setPos(next);
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => { window.removeEventListener('keydown', onKey); window.clearTimeout(stopTimer.current); };
   }, [selected, grid]);
 
   const chatting = chatLine && agent.status === 'idle';
@@ -222,16 +222,22 @@ function ClassroomCharacter(
         }}>{glyph.t}</div>
       )}
 
-      {thought && (
+      {(thought || unconfirmed) && (
         <div style={{
           maxWidth: 150, padding: '6px 10px', borderRadius: 12,
-          background: '#fff', border: '1px solid var(--cth-cream-200)',
-          boxShadow: '0 2px 8px rgba(21, 41, 74, 0.14)',
-          fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 500, lineHeight: 1.4,
-          color: 'var(--cth-ink-900)', textAlign: 'center',
+          // 미확인(선생님 확인 대기) = 코랄 강조 말풍선(거노). 그 외엔 흰 말풍선.
+          background: unconfirmed ? 'var(--cth-coral)' : '#fff',
+          border: unconfirmed ? '1px solid var(--cth-coral)' : '1px solid var(--cth-cream-200)',
+          boxShadow: unconfirmed
+            ? '0 3px 12px color-mix(in srgb, var(--cth-coral) 55%, transparent)'
+            : '0 2px 8px rgba(21, 41, 74, 0.14)',
+          fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: unconfirmed ? 800 : 500, lineHeight: 1.4,
+          // 교실 바닥 위 고정 흰 말풍선 — 다크에서도 흰색이라 텍스트는 고정 어두운색으로.
+          color: unconfirmed ? '#fff' : '#15294A', textAlign: 'center',
           whiteSpace: 'normal', wordBreak: 'break-word',
+          animation: unconfirmed ? 'schale-glyph-pulse 1.1s ease-in-out infinite' : undefined,
         }}>
-          {agent.status === 'working' ? (
+          {unconfirmed ? '확인 필요!' : agent.status === 'working' ? (
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
               {isBuildCmd(agent.action) ? (
                 <b style={{ color: BUILD_COLOR, display: 'inline-flex', alignItems: 'center', gap: 3 }}><GearIcon />빌드 중</b>
@@ -245,15 +251,18 @@ function ClassroomCharacter(
         </div>
       )}
 
-      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-        <SpriteWalk character={agent.character} walking={moving} flip={flip} width={72} height={100} />
+      {/* 등장 모션 — 처음 교실에 나타날 때 아래서 통통 튀어오르며 페이드인(munder식, 거노).
+          mount 1회 재생. button 위치 transform 과 분리된 내부 레이어라 이동 transition 무간섭. */}
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', animation: 'schale-enter 0.5s ease-out both' }}>
+        <SpriteWalk character={agent.character} walking={moving} flip={flip} facing={facing} width={72} height={100} />
       </div>
 
       <div style={{
         display: 'flex', alignItems: 'center', gap: 5,
         background: 'rgba(255,255,255,0.9)', borderRadius: 9, padding: '2px 9px',
         boxShadow: '0 1px 4px rgba(21, 41, 74, 0.12)',
-        fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700, color: 'var(--cth-ink-900)',
+        // 흰 이름표 — 다크에서도 흰 바닥 위라 텍스트는 고정 어두운색.
+        fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700, color: '#15294A',
       }}>
         <span style={{ width: 7, height: 7, borderRadius: 999, background: STATUS_COLOR[agent.status] ?? 'var(--cth-ink-300)' }} />
         {agent.isGod && <span style={{ fontSize: 9, color: 'var(--cth-lemon)', fontWeight: 800 }}>★</span>}
@@ -264,7 +273,8 @@ function ClassroomCharacter(
         <div style={{
           marginTop: 2, padding: '1px 7px', borderRadius: 7,
           background: 'rgba(255,255,255,0.82)', boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
-          fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: 'var(--cth-ink-500)',
+          // 흰 cwd칩 — 다크에서도 흰 바닥 위라 텍스트는 고정 어두운색.
+          fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: '#4A638F',
           maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>{shortCwd(agent.cwd)}</div>
       )}
@@ -348,6 +358,7 @@ function EmptySeat({ seat, onAdd }: { seat: { x: number; y: number }; onAdd?: ()
 // 책상(working)이나 카페(idle)로 BFS 경로 이동. 가구·학생이 한 z-레이어라 앞뒤가림.
 export function ClassroomView({ onSelect, agents: agentsProp, background, furniture = CLASSROOM_FURNITURE, seats: seatsProp, cafe: cafeProp, onAdd, selectedId }: ClassroomViewProps) {
   const storeAgents = useStore((s) => s.agents);
+  const acked = useStore((s) => s.acked);
   const agents = agentsProp ?? storeAgents;
   const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
 
@@ -373,8 +384,26 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
     }}>
       {furniture.map((f) => <FurnitureSprite key={f.id} f={f} />)}
 
+      {/* 빈 교실(첫 부팅, god 자동 스폰 전) — 화면 어두워지며 로딩 스피너만(거노). */}
+      {sorted.length === 0 && (
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 9999,
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 18,
+          background: 'rgba(12, 19, 38, 0.58)', backdropFilter: 'blur(2px)',
+        }}>
+          <div style={{
+            width: 46, height: 46, borderRadius: '50%',
+            border: '4px solid rgba(255,255,255,0.22)', borderTopColor: '#fff',
+            animation: 'schale-spin 0.8s linear infinite',
+          }} />
+          <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 14, fontWeight: 600, color: '#fff', letterSpacing: 0.3 }}>
+            아로나 오는 중…
+          </div>
+        </div>
+      )}
+
       {sorted.slice(0, Math.max(seats.length, 6)).map((a, i) => (
-        <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} chatLine={chat[a.id]} onSelect={onSelect} index={i} selected={!!selectedId && a.id === selectedId} />
+        <ClassroomCharacter key={a.id} agent={a} seat={seats[i] ?? undefined} grid={grid} cafe={cafe} chatLine={chat[a.id]} onSelect={onSelect} index={i} selected={!!selectedId && a.id === selectedId} unconfirmed={isUnconfirmed(a, acked)} />
       ))}
 
       {/* 빈 자리마다 '부르기' 버튼 — 학생 없는 책상에서 바로 소환(멀리 있는 버튼 대신) */}

@@ -97,8 +97,16 @@ def _reward_done():
         pass
 
 
+def _room_suffix():
+    """방별 분리(거노): KASATERM_ROOM env 가 있으면 slug 에 `__room_<id>` 를 붙여
+    같은 cwd 의 다른 방(윈도우)과 collab(god/board/inbox/lead/roster)을 격리한다.
+    env 없으면 빈 문자열 → 기존 동작 그대로(역호환). 모든 slug 계산이 이걸 더한다."""
+    room = os.environ.get("KASATERM_ROOM", "")
+    return f"__room_{room}" if room else ""
+
+
 def base():
-    enc = os.getcwd().replace("/", "-").replace(".", "-")
+    enc = os.getcwd().replace("/", "-").replace(".", "-") + _room_suffix()
     d = os.path.join("/tmp/kasaterm-collab", enc)
     os.makedirs(d, exist_ok=True)
     return d
@@ -405,7 +413,7 @@ def mode_path():
     """이 방의 협업 모드 마커(~/.config — 영속). 내용 = 'solo' | 'god'.
     기본(마커 없음)=solo: 거노가 직접 오케스트레이션 + conflict-guard 가 파일
     겹침 차단. god=옵트인: 선출제 팀장(커밋 단독·승인 라우팅·총괄)."""
-    slug = os.getcwd().replace("/", "-").replace(".", "-")
+    slug = os.getcwd().replace("/", "-").replace(".", "-") + _room_suffix()
     d = os.path.expanduser("~/.config/kasaterm/collab-mode")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, slug)
@@ -437,7 +445,7 @@ def roster_path():
     """이 cwd 방의 영속 roster(~/.config — /tmp 아님, 재시작 청소에 생존).
     bind-transcript.sh 가 {pane_id,session_id,cwd,ts} 를 쓰고, god-elect 가
     role:god 마킹을 얹는다(재시작 후 god 세션 우선권 판정 기준)."""
-    slug = os.getcwd().replace("/", "-").replace(".", "-")
+    slug = os.getcwd().replace("/", "-").replace(".", "-") + _room_suffix()
     d = os.path.expanduser("~/.config/kasaterm/agent-roster")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, slug + ".json")
