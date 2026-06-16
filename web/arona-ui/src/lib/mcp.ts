@@ -192,6 +192,51 @@ export async function revealTerminal(show = 1, pane?: string): Promise<boolean> 
   }
 }
 
+export interface SessionsInfo { count: number; active: number; labels: string[]; saved: string[]; }
+
+/** GET /sessions — 로컬 PTY '방' = kasaterm 윈도우 목록(count/active/labels). 좌측 방 네비용. */
+export async function fetchSessions(): Promise<SessionsInfo> {
+  const empty: SessionsInfo = { count: 0, active: 0, labels: [], saved: [] };
+  try {
+    const r = await fetch(`${BASE}/sessions`);
+    if (!r.ok) return empty;
+    const d = await r.json();
+    return { count: d.count ?? 0, active: d.active ?? 0, labels: d.labels ?? [], saved: d.saved ?? [] };
+  } catch {
+    return empty;
+  }
+}
+
+/** POST /session-switch?idx=N — 그 방(윈도우)으로 터미널 전환(거노: 방=윈도우 클릭). */
+export async function switchSession(idx: number): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/session-switch?idx=${idx}`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /session-new?god=<name> — 새 방(윈도우) + 선택 god(아로나/프라나) 자동 스폰(거노). */
+export async function newRoom(god: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/session-new?god=${encodeURIComponent(god)}`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /session-close?idx=N — 그 방(윈도우) 닫기(거노). 마지막 윈도우는 백엔드가 거부. */
+export async function closeRoom(idx: number): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/session-close?idx=${idx}`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** POST /arona-close — 아로나 창을 닫고 터미널로 복귀. ModePicker 에서 'solo'
  *  선택 완료 시 호출(아로나 선택은 교실 진입이라 호출 안 함). 네이티브 미구현
  *  동안 404 → false 허용. */
@@ -265,14 +310,37 @@ export async function closeAgent(surfaceId: string): Promise<boolean> {
 }
 
 /** POST /send?surface=<id> body:{text,submit} — 특정 pane PTY에 텍스트 주입.
- *  submit=true(기본)이면 개행 추가(제출), false면 타이핑만. fail-soft(false). */
-export async function sendToPane(surfaceId: string, text: string, submit = true): Promise<boolean> {
+ *  submit=true(기본)이면 개행 추가(제출), false면 타이핑만. fail-soft(false).
+ *  persist=false(`&nopersist=1`): 모모톡 단톡방에 안 남긴다 — 학생별 대화 패널의 개인
+ *  지시는 그 학생 대화에만 떠야 하는데 persist 하면 모모톡에까지 노란버블로 샜다(거노). */
+export async function sendToPane(surfaceId: string, text: string, submit = true, persist = true): Promise<boolean> {
   if (!text || !surfaceId) return false;
   try {
-    const r = await fetch(`${BASE}/send?surface=${encodeURIComponent(surfaceId)}`, {
+    const q = persist ? '' : '&nopersist=1';
+    const r = await fetch(`${BASE}/send?surface=${encodeURIComponent(surfaceId)}${q}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text, submit })
+    });
+    if (!r.ok) return false;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
+    return d?.ok !== false;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /send?surface=<id>&inbox=1 — 모모톡 inbox 발신. PTY 에 주입하지 않고
+ *  messages.jsonl 에 read=false 로만 적는다(거노: 모모톡은 프롬프트가 아니라 에이전트
+ *  inbox). 받는 에이전트는 drain_unread 로 컨텍스트에 받고, idle 이면 god-loop nudge
+ *  가 깨운다. fail-soft(false). */
+export async function sendToInbox(surfaceId: string, text: string): Promise<boolean> {
+  if (!text.trim() || !surfaceId) return false;
+  try {
+    const r = await fetch(`${BASE}/send?surface=${encodeURIComponent(surfaceId)}&inbox=1`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: text.trim(), submit: false })
     });
     if (!r.ok) return false;
     const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
@@ -354,9 +422,10 @@ export async function fetchMessages(n = 50): Promise<MessageEntry[]> {
 /** GET /peek?surface=<id>&lines=<n> — pane 의 보이는 화면 텍스트(모노). transcript
  *  jsonl 이 비어있을 때(claude 가 라이브 기록 안 함) 대화를 PTY 화면에서 직접
  *  파싱하는 fallback 소스. fail-soft 빈 문자열. */
-export async function fetchPeek(surfaceId: string, lines = 40): Promise<string> {
+export async function fetchPeek(surfaceId: string, lines = 40, ansi = false): Promise<string> {
   try {
-    const r = await fetch(`${BASE}/peek?surface=${encodeURIComponent(surfaceId)}&lines=${lines}`);
+    const q = ansi ? '&ansi=1' : '';
+    const r = await fetch(`${BASE}/peek?surface=${encodeURIComponent(surfaceId)}&lines=${lines}${q}`);
     if (!r.ok) return '';
     const d = (await r.json().catch(() => ({}))) as { text?: string };
     return d?.text ?? '';
@@ -381,6 +450,18 @@ export async function fetchClaudeUsage(): Promise<ClaudeUsage | null> {
     return d?.ok ? (d.usage ?? null) : null;
   } catch {
     return null;
+  }
+}
+
+/** GET /slash-commands — 디스크 스캔 동적 슬래시(스킬·커스텀·플러그인). 정적 내장 목록과 병합. */
+export async function fetchSlashCommands(): Promise<{ cmd: string; desc: string }[]> {
+  try {
+    const r = await fetch(`${BASE}/slash-commands`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { commands?: { cmd: string; desc: string }[] };
+    return Array.isArray(d?.commands) ? d.commands : [];
+  } catch {
+    return [];
   }
 }
 
@@ -496,7 +577,7 @@ export async function roomCd(path: string): Promise<boolean> {
   }
 }
 
-export interface Turn { role: string; text: string; }
+export interface Turn { role: string; text: string; images?: string[] }
 
 /** 인터랙티브 도구 호출(AskUserQuestion 등) — 캡처 프록시가 SSE tool_use 에서 재구성.
  *  peek 화면 추정 없이 질문/선택지를 API 그대로(거노). */

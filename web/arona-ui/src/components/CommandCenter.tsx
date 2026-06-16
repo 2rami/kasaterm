@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useStore } from '@/store';
+import { useStore, isAwaitingTeacher, isUnconfirmed } from '@/store';
 import { MomoTalk } from './MomoTalk';
 import { ScheduleTab } from './ScheduleTab';
 import { TerminalPeekPanel } from './TerminalPeekPanel';
@@ -18,19 +18,32 @@ export interface CommandCenterProps {
   /** 교실/카드에서 클릭한 학생 — '학생별 대화' 탭에 그 대화를 띄운다. */
   selected?: { id: string; title: string } | null;
   onClearDialog?: () => void;
+  /** 모모톡에서 학생/아로나에게 보냈을 때 — 그 학생 '학생별 대화' 탭으로 전환(거노). */
+  onPickStudent?: (id: string, title: string) => void;
 }
 
 // SCHALE OS 우측 Command Center — 대화창이 따로 안 뜨고 여기 '학생별 대화' 탭에
 // 통합(거노). 탭: 모모톡 / 학생별 대화 / 스케줄 / 업무(AskQuestion·선택지).
-export function CommandCenter({ selected, onClearDialog }: CommandCenterProps) {
+// 확인 대기 알림 종(이모지 금지 → SVG).
+function BellGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" style={{ display: 'block', flexShrink: 0 }}>
+      <path d="M8 1.6a1 1 0 0 1 1 1v.5a4 4 0 0 1 3 3.87V9l1.2 2.2a.6.6 0 0 1-.53.9H3.33a.6.6 0 0 1-.53-.9L4 9V6.97a4 4 0 0 1 3-3.87v-.5a1 1 0 0 1 1-1Z" fill="currentColor" />
+      <path d="M6.4 13.2a1.7 1.7 0 0 0 3.2 0" stroke="currentColor" strokeWidth="1.1" fill="none" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function CommandCenter({ selected, onClearDialog, onPickStudent }: CommandCenterProps) {
   const [tab, setTab] = useState<CenterTab>('momotalk');
   const agents = useStore((s) => s.agents);
+  const acked = useStore((s) => s.acked);
   // 학생을 클릭하면 자동으로 '학생별 대화' 탭으로 전환.
   useEffect(() => { if (selected) setTab('dialog'); }, [selected?.id]);
 
   return (
     <div style={{
-      width: 300,
+      width: '100%', // 폭은 App 의 wrapper(드래그 조절)가 제어
       flexShrink: 0,
       height: '100%',
       display: 'flex',
@@ -115,6 +128,42 @@ export function CommandCenter({ selected, onClearDialog }: CommandCenterProps) {
       ) : tab === 'tasks' ? (
         /* 업무 — 학생별 현재 작업(빌드/도구 + 백그라운드 + 서브에이전트 + 도구 흐름) */
         <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>
+          {/* 확인 대기 — question/선택지로 막혀 선생님 입력을 기다리는 학생(거노: 업무 패널에). */}
+          {(() => {
+            const awaiting = agents.filter(isAwaitingTeacher);
+            if (!awaiting.length) return null;
+            const pending = awaiting.filter((a) => isUnconfirmed(a, acked)).length;
+            return (
+              <div style={{
+                marginBottom: 12, padding: 10, borderRadius: 10,
+                background: pending ? 'color-mix(in srgb, var(--cth-coral) 10%, var(--cth-cream-50))' : 'var(--cth-cream-100)',
+                border: `1px solid ${pending ? 'var(--cth-coral)' : 'var(--cth-cream-200)'}`,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 800, color: pending ? 'var(--cth-coral)' : 'var(--cth-ink-500)' }}>
+                  {pending ? <BellGlyph /> : null}
+                  {pending ? `확인 안 한 게 ${pending}건 있어요, 선생님` : '확인 대기 (모두 확인함)'}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {awaiting.map((a) => {
+                    const un = isUnconfirmed(a, acked);
+                    return (
+                      <button key={a.id} onClick={() => onPickStudent?.(a.id, a.character)} style={{
+                        display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 8,
+                        border: 'none', cursor: 'pointer', textAlign: 'left',
+                        background: un ? 'var(--cth-coral)' : '#fff', color: un ? '#fff' : 'var(--cth-ink-900)',
+                        fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: un ? 800 : 600,
+                        boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
+                      }}>
+                        <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: un ? '#fff' : 'var(--cth-coral)' }} />
+                        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.character}</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.85 }}>{un ? '확인 필요' : '확인함'}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
           {agents.length === 0 ? (
             <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>학생 없음</span>
           ) : agents.map((a) => {

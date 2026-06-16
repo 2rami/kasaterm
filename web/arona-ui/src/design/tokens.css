@@ -81,3 +81,33 @@
   --cth-panel-border-terminal: inset 0 0 0 1px var(--cth-ink-700);
   --cth-panel-border-dialog:   inset 0 0 0 1px var(--cth-cream-300);
 }
+
+/* 다크 모드 — 태양 버튼 토글(거노). 토큰 *이름* 유지·값만 재매핑: cream=어두운 네이비
+   표면, ink=밝은 텍스트(반전), accent 는 유지하되 light 변형만 어두운 톤(hover 배경용).
+   SCHALE 의 클린 블루 정체성을 밤버전으로. */
+:root[data-theme="dark"] {
+  /* Base — 어두운 네이비 표면(밝을수록 위로) */
+  --cth-cream-50:  #1B2541;
+  --cth-cream-100: #222D4D;
+  --cth-cream-200: #32406380;
+  --cth-cream-300: #3E4F76;
+  --cth-paper-100: #1F2A48;
+  --cth-paper-200: #28355A;
+
+  /* Ink — 밝은 텍스트(반전) */
+  --cth-ink-900: #EAF2FF;
+  --cth-ink-700: #C6D6F0;
+  --cth-ink-500: #9DB2D6;
+  --cth-ink-300: #6B82AD;
+  --cth-ink-100: #41547D;
+
+  /* Accent light 변형 = 어두운 배경용(hover/선택 면) */
+  --cth-sky-light:   #2C4368;
+  --cth-coral-light: #4A2E36;
+  --cth-mint-light:  #2A4536;
+  --cth-lemon-light: #4A4326;
+  --cth-lilac-light: #383056;
+  --cth-peach-light: #4A372C;
+
+  color-scheme: dark;
+}

@@ -96,7 +96,7 @@ function StudentCard({ agent, onSelect }: { agent: Agent; onSelect?: (id: string
       style={{
         width: 168, minWidth: 168, flexShrink: 0,
         border: 'none', padding: 0, cursor: 'pointer', textAlign: 'left',
-        background: '#fff', borderRadius: 12, overflow: 'hidden',
+        background: 'var(--cth-cream-50)', borderRadius: 12, overflow: 'hidden',
         boxShadow: agent.isGod
           ? '0 2px 10px rgba(21,41,74,0.12), inset 0 0 0 2px var(--cth-lemon)'
           : '0 2px 10px rgba(21,41,74,0.1), inset 0 0 0 1px var(--cth-cream-200)',
@@ -185,7 +185,7 @@ export function StudentGrid({ agents, onSelect }: StudentGridProps) {
           onChange={(e) => setSort(e.target.value as SortKey)}
           style={{
             fontFamily: 'var(--cth-font-ui)', fontSize: 11, padding: '3px 8px', borderRadius: 7,
-            border: '1px solid var(--cth-cream-200)', background: '#fff', color: 'var(--cth-ink-700)', cursor: 'pointer',
+            border: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)', color: 'var(--cth-ink-700)', cursor: 'pointer',
           }}
         >
           <option value="god-first">God 우선</option>

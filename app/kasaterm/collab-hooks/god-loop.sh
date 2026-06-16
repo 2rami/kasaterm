@@ -11,7 +11,7 @@ GOD="${1:-${KASATERM_PANE_ID:-}}"
 CLI="${KASATERM_CLI:-kasaterm-cli}"
 [ -z "$GOD" ] && exit 0
 INTERVAL="${KASATERM_GOD_LOOP_INTERVAL:-4}"
-slug=$(pwd | sed 's#[/.]#-#g')
+slug=$(pwd | sed 's#[/.]#-#g')${KASATERM_ROOM:+__room_$KASATERM_ROOM}
 BASE="/tmp/kasaterm-collab/$slug"
 mkdir -p "$BASE"
 

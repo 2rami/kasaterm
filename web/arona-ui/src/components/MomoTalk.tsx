@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { fetchMessages, fetchConversation, sendToPane, sendToGod, type MessageEntry } from '@/lib/mcp';
+import { fetchMessages, sendToPane, sendToInbox, sendToGod, type MessageEntry } from '@/lib/mcp';
 import { useStore } from '@/store';
 import { SpritePortrait } from './SpritePortrait';
 
@@ -38,48 +38,25 @@ export function MomoTalk() {
   useEffect(() => {
     let stopped = false;
     const tick = async () => {
+      // 모모톡 = inbox(messages.jsonl)만 보여준다(거노: 캡처 프록시 conversation 의
+      // assistant turn 을 끌어오면, 실제 inbox 에 없는 답변이 유령처럼 떴다 — "답변이
+      // 모모톡에 있는데 실제론 없다"). 에이전트 답장은 kasacollab msg(inbox)로 와야 뜬다.
       const list = await fetchMessages(25);
-      // messages.jsonl 엔 선생님 발신·학생 done 만 있어 아로나/학생의 실제 답변이 모모톡에
-      // 안 떴다(거노). 캡처 프록시 conversation 의 assistant turn 을 끌어와, 대응하는 선생님
-      // 발신(같은 텍스트의 직전 user turn)이 있으면 그 직후 시각에, 없으면 최신 끝에 끼운다.
-      const replies: MessageEntry[] = [];
-      const convs = await Promise.all(agents.map((a) => fetchConversation(a.id).catch(() => null)));
-      const newest = list[0]?.ts ?? 0;
-      agents.forEach((a, ci) => {
-        const conv = convs[ci];
-        if (!conv) return;
-        conv.turns.forEach((t, i) => {
-          if (t.role !== 'assistant' || !t.text.trim()) return;
-          const prevUser = [...conv.turns.slice(0, i)].reverse().find((x) => x.role === 'user');
-          const senseiMsg = prevUser
-            ? list.find((m) => m.from_pane === SENSEI && m.text.trim() === prevUser.text.trim())
-            : null;
-          const ts = (senseiMsg ? senseiMsg.ts + 0.001 : newest) + i * 1e-6;
-          replies.push({
-            id: `conv-${a.id}-${i}`, ts,
-            from_pane: a.id, from_name: a.character,
-            to_pane: SENSEI, to_name: '선생님',
-            text: t.text, read: true,
-          });
-        });
-        if (conv.streaming.trim()) {
-          replies.push({
-            id: `conv-${a.id}-stream`, ts: newest + 1e3,
-            from_pane: a.id, from_name: a.character,
-            to_pane: SENSEI, to_name: '선생님',
-            text: conv.streaming, read: true,
-          });
-        }
-      });
       if (stopped) return;
-      // 백엔드는 ts 내림차순 → 단톡방은 오래된→최신(아래로) 이라 뒤집는다.
-      const merged = [...list, ...replies].sort((x, y) => y.ts - x.ts);
-      setMsgs(merged.reverse());
+      // 백엔드는 ts 내림차순. 같은 발신자 동일 텍스트 중복 제거 후 오래된→최신으로 뒤집어 표시.
+      const seen = new Set<string>();
+      const deduped = list.filter((m) => {
+        const key = `${m.from_pane}|${m.text.trim()}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      setMsgs(deduped.reverse());
     };
     void tick();
     const iv = setInterval(tick, 1500);
     return () => { stopped = true; clearInterval(iv); };
-  }, [agents]);
+  }, []);
 
   // 참가자 목록(필터 칩) — sensei 제외하고 등장한 pane 들.
   const participants = useMemo<Participant[]>(() => {
@@ -114,11 +91,25 @@ export function MomoTalk() {
     const text = input.trim();
     if (!text || sending) return;
     setSending(true);
-    const ok = filter ? await sendToPane(filter, text, true) : await sendToGod(text);
+    // 모모톡 = 에이전트 inbox(거노). 일반 메시지는 PTY 프롬프트로 주입하지 않고
+    // 상대(아로나/학생)의 inbox 에 넣는다(read=false) — 상대가 drain_unread 로 받고,
+    // idle 이면 god-loop nudge 가 깨운다. 슬래시 명령(/context 등)만 예외로 그 학생
+    // PTY 에 직접 주입(그 학생 기능)하고 모모톡엔 안 남긴다(nopersist).
+    const isSlash = text.startsWith('/');
+    const targetId = filter ?? agents.find((a) => a.isGod)?.id;
+    const ok = targetId
+      ? isSlash
+        ? await sendToPane(targetId, text, true, false)
+        : await sendToInbox(targetId, text)
+      : await sendToGod(text);
     setSending(false);
     setFlash(ok ? 'ok' : 'err');
     setTimeout(() => setFlash(null), 1200);
-    if (ok) { setInput(''); atBottomRef.current = true; }
+    if (ok) {
+      // 모모톡은 모모톡에만 남긴다 — 학생별 대화 탭으로 휙 넘어가지 않게(거노: 모모톡에
+      // 쳤는데 대화에 들어가는 문제). 상대 답변은 conversation 폴링으로 이 단톡방에 뜬다.
+      setInput(''); atBottomRef.current = true;
+    }
   };
 
   return (
@@ -182,7 +173,7 @@ export function MomoTalk() {
                     padding: '8px 12px', borderRadius: 14,
                     borderTopLeftRadius: sensei ? 14 : (grouped ? 14 : 4),
                     borderTopRightRadius: sensei ? (grouped ? 14 : 4) : 14,
-                    background: sensei ? '#FEE500' : '#fff',
+                    background: sensei ? '#FEE500' : 'var(--cth-cream-50)',
                     color: sensei ? '#3A2E00' : 'var(--cth-ink-900)',
                     border: sensei ? 'none' : '1px solid var(--cth-cream-200)',
                     boxShadow: '0 1px 2px rgba(21, 41, 74, 0.06)',
@@ -223,7 +214,7 @@ export function MomoTalk() {
           placeholder="모모톡에 글 올리기 — Enter 전송"
           style={{
             flex: 1, fontFamily: 'var(--cth-font-ui)', fontSize: 12,
-            background: '#fff', border: '1px solid var(--cth-cream-200)', borderRadius: 9,
+            background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', borderRadius: 9,
             padding: '7px 11px', outline: 'none', color: 'var(--cth-ink-900)', opacity: sending ? 0.5 : 1
           }}
         />
@@ -251,7 +242,7 @@ function FilterChip({ label, active, onClick }: { label: string; active: boolean
         padding: '4px 11px', borderRadius: 999, cursor: 'pointer',
         fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600,
         border: active ? 'none' : '1px solid var(--cth-cream-200)',
-        background: active ? 'var(--cth-sky)' : '#fff',
+        background: active ? 'var(--cth-sky)' : 'var(--cth-cream-50)',
         color: active ? '#fff' : 'var(--cth-ink-500)',
         transition: 'background 120ms ease, color 120ms ease'
       }}

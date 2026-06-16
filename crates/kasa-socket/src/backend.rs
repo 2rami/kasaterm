@@ -419,6 +419,16 @@ pub trait Backend: Send + Sync {
     fn new_session(&self) -> Result<()> {
         anyhow::bail!("new_session not supported")
     }
+    /// Create a fresh room (window) and spawn the given god character (e.g.
+    /// "아로나"/"프라나") in it. `POST /session-new?god=<name>`. Default unsupported.
+    fn new_room(&self, _god: &str) -> Result<()> {
+        anyhow::bail!("new_room not supported")
+    }
+    /// 활성 pane(보이는 방)의 방 식별자 — 방별 collab(모모톡 inbox 등)을 그 방으로
+    /// 격리한다(거노: 방끼리 inbox 공유 금지). 기본 방(없음)이면 None.
+    fn active_room(&self) -> Option<String> {
+        None
+    }
     /// Create a fresh window in the current session and switch to it. Default
     /// unsupported.
     fn new_window(&self) -> Result<()> {

@@ -2035,6 +2035,14 @@ struct Workspace {
     /// The first tab's pid equals the outer pane id, so single-tab panes
     /// don't need an entry — but secondary tabs always insert/remove here.
     pid_to_pane: HashMap<String, String>,
+    /// 방별 분리(거노): pane → 방(윈도우) 식별자. 새 방 pane 만 들어가고, 기본 방은
+    /// 없음 → cwd-slug 그대로. ws 에 둬서 GUI(spawn)와 PtyBackend(collab_board) 가
+    /// 같은 매핑을 본다(별 스레드라 App 필드는 socket.rs 가 못 봄).
+    pane_room: HashMap<String, String>,
+    /// 활성 윈도우(보이는 방)의 leaf pane id 집합. `publish_pty_layout` 이 갱신한다.
+    /// collab_board 가 이걸로 bound pane 을 필터해 *활성 방 학생만* board 에 올린다
+    /// (거노: 아로나 방 + 프라나 방이 한 교실에 같이 뜨던 문제 — 방별 격리).
+    active_window_panes: std::collections::HashSet<String>,
 }
 
 impl Default for Workspace {
@@ -2044,6 +2052,8 @@ impl Default for Workspace {
             layout: None,
             active_pane: None,
             pid_to_pane: HashMap::new(),
+            pane_room: HashMap::new(),
+            active_window_panes: std::collections::HashSet::new(),
         }
     }
 }
@@ -2146,6 +2156,19 @@ enum UserEvent {
     /// 셸 pid 만 알면 backend 스레드가 claude 자식·cwd·session 을 직접 찾아 bind 한다
     /// (claude 훅에 의존하지 않음). GUI 는 메모리 조회만 즉답, lsof/ps 는 backend.
     SocketQueryPanePids(std::sync::mpsc::Sender<Vec<(String, u32)>>),
+    /// `GET /sessions` 위임 — 로컬 PTY 모드의 '방' = App 윈도우. PtyBackend 는 App
+    /// 상태를 직접 못 봐(별 스레드) `SocketQueryPanePids` 패턴으로 질의: 응답은
+    /// (윈도우 수, 활성 idx, [(name, cwd)] 라벨). arona-ui 좌측 방 네비가 쓴다.
+    SocketQuerySessions(std::sync::mpsc::Sender<(usize, usize, Vec<(String, String)>)>),
+    /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(거노: GUI 에서
+    /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
+    SocketSwitchSession(usize),
+    /// `POST /session-new?god=<name>` 위임 — 새 방(윈도우) + 선택한 god(아로나/프라나)
+    /// 자동 스폰(거노: 방 추가 시 god 선택). `new_room_with_god` 가 처리.
+    SocketNewRoom(String),
+    /// `POST /session-close?idx=N` 위임 — 방(윈도우) 닫기(거노). `close_window` 가
+    /// 마지막 윈도우 가드·pane 정리. 닫기 실패(마지막)는 무시(프론트가 가드).
+    SocketCloseRoom(usize),
     /// `GET /open-image`·`/open-markdown`(imgopen/mdopen 셰임·SendUserFile 훅)이
     /// 위임 — 그 경로를 미리보기 pane(이미지/마크다운/텍스트)으로 split. 데몬 제거
     /// 때 빠졌던 open_preview 의 로컬 재구현. `open_file_split` 이 확장자로 분기한다.
@@ -2804,6 +2827,10 @@ struct App {
     pending_autoleader: Option<String>,
     pending_autoleader_at: Option<Instant>,
     pane_cwd_cache: HashMap<String, std::path::PathBuf>,
+    /// 방별 collab 분리(거노). `pending_room`: 다음 spawn 할 pane 의 방 id(셸 env
+    /// KASATERM_ROOM 주입 + ws.pane_room 기록용). pane→방 매핑은 ws.pane_room(공유).
+    pending_room: Option<String>,
+    next_room_seq: u32,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,
@@ -3063,6 +3090,8 @@ impl App {
             pending_autoleader: None,
             pending_autoleader_at: None,
             pane_cwd_cache: HashMap::new(),
+            pending_room: None,
+            next_room_seq: 1,
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

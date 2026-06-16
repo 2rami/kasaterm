@@ -1283,6 +1283,41 @@ impl App {
         }
         eprintln!("[arona-panel] closed; terminal revealed");
     }
+    /// 거노: "터미널 보기"를 누르면 화면을 2분할 — 터미널(왼쪽)·아로나 교실(오른쪽).
+    /// 두 네이티브 창을 현재 모니터 작업영역의 좌/우 절반에 타일링한다. 둘 다 떠
+    /// 있을 때만 의미가 있어, 아로나 창이 없으면(순수 터미널) no-op.
+    pub(crate) fn tile_terminal_arona_split(&self) {
+        let (Some(term), Some(arona)) = (self.window.as_ref(), self.arona_panel_window.as_ref())
+        else {
+            return;
+        };
+        // 사용자가 보고 있는 화면 기준 — 떠 있는 아로나 창의 모니터.
+        let Some(monitor) = arona.current_monitor().or_else(|| term.current_monitor()) else {
+            return;
+        };
+        let mpos = monitor.position(); // 가상 데스크톱 물리좌표(멀티모니터 오프셋)
+        let msize = monitor.size(); // 모니터 해상도(물리 px)
+        // macOS 상단 메뉴바를 가리지 않게 인셋. 다른 OS는 0.
+        let top_inset: i32 = if cfg!(target_os = "macos") {
+            (28.0 * monitor.scale_factor()) as i32
+        } else {
+            0
+        };
+        let half_w = (msize.width / 2) as i32;
+        let usable_h = ((msize.height as i32 - top_inset).max(200)) as u32;
+        let y = mpos.y + top_inset;
+        // 왼쪽: 터미널(frameless 라 inner≈outer).
+        term.set_outer_position(winit::dpi::PhysicalPosition::new(mpos.x, y));
+        let _ = term.request_inner_size(winit::dpi::PhysicalSize::new(half_w as u32, usable_h));
+        term.set_visible(true);
+        term.request_redraw();
+        // 오른쪽: 아로나 교실(타이틀바 높이만큼 아래로 밀려도 허용).
+        arona.set_outer_position(winit::dpi::PhysicalPosition::new(mpos.x + half_w, y));
+        let _ = arona.request_inner_size(winit::dpi::PhysicalSize::new(
+            msize.width - half_w as u32,
+            usable_h,
+        ));
+    }
     /// Toggle the arona UI window from the menu: close if open, open if not.
     pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
         if self.arona_panel_window.is_some() {
@@ -1324,9 +1359,17 @@ impl App {
             .map(|c| if c == '/' || c == '.' { '-' } else { c })
             .collect();
         let dir = format!("/tmp/kasaterm-collab/{slug}");
-        // 이미 god 이 선출돼 있으면 아무것도 안 한다(중복 방지).
-        if std::path::Path::new(&format!("{dir}/lead")).exists() {
-            return;
+        // 이미 *살아있는* god 이 있으면 중복 방지로 return. 단 lead 가 죽은 pane(종료된
+        // 옛 god)을 가리키면 stale — 지우고 이 pane 을 새 god 으로 승격한다. (거노: 아로나
+        // 종료 후 새 아로나가 워커로 남던 버그 — 옛 lead 가 promote 를 early-return 시켜
+        // 새 아로나에 god 마커가 안 박히고 god-elect 의 60초 양보로 빠졌다.)
+        let lead_path = format!("{dir}/lead");
+        if let Ok(cur) = std::fs::read_to_string(&lead_path) {
+            let cur = cur.trim();
+            if !cur.is_empty() && self.pty.contains_key(cur) {
+                return; // 살아있는 god(나 포함)이 이미 있음
+            }
+            // stale lead(죽은 god) → 아래에서 이 pane 으로 덮어쓴다.
         }
         // god-elect 는 같은 방 claude pane 이 2개+ 일 때만 선출하고 단일 pane 은
         // 무시(`room_count<2 → exit 0`, lead 는 안 건드림)하므로, GUI 켜는 시점에
@@ -1382,6 +1425,81 @@ impl App {
             );
             self.send_bytes(cmd.as_bytes());
         }
+    }
+
+    /// 거노: 평면도 빈 방 클릭 → 새 윈도우 + 프라나 god 자동 스폰(지금 그냥 zsh 만
+    /// 뜨던 것). `new_window` 로 새 윈도우+빈 셸을 띄우고, 셸이 준비되면(OSC133)
+    /// `maybe_autoleader` 가 프라나 페르소나+god 역할로 claude 를 1회 주입하게 예약한다
+    /// (bare 셸에 즉시 쏘면 prompt 전 race). collab 은 cwd slug 키라, 같은 slug 에 이미
+    /// 살아있는 god(아로나)이 있으면 프라나는 그 방의 보조 claude, 없으면 lead 도 박아
+    /// 진짜 god 으로 뜬다(cwd 가 다른 방이면 자연히 각자 god).
+    pub(crate) fn new_room_with_god(&mut self, character: &str) {
+        // 새 방 식별자 — new_window→spawn_session_pane 이 셸 env(KASATERM_ROOM)+pane_room
+        // 으로 주입한다(셸 collab 훅이 방별 slug 를 쓴다). 마커도 같은 방별 slug 에 박는다.
+        let room = format!("room-{}", self.next_room_seq);
+        self.next_room_seq += 1;
+        self.pending_room = Some(room.clone());
+        self.new_window();
+        let Some(sid) = self.ws.lock().ok().and_then(|w| w.active_pane.clone()) else {
+            return;
+        };
+        let cwd = self
+            .pty
+            .get(&sid)
+            .and_then(|s| s.shell_pid())
+            .and_then(socket::pid_cwd)
+            .or_else(|| self.pane_cwd_cache.get(&sid).cloned());
+        let base_slug: String = cwd
+            .as_ref()
+            .map(|c| {
+                c.to_string_lossy()
+                    .chars()
+                    .map(|ch| if ch == '/' || ch == '.' { '-' } else { ch })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // 방별 분리(거노): 셸 훅과 동일 규칙 `__room_<id>` — 같은 cwd 라도 방마다 god/lead 격리.
+        let slug = format!("{base_slug}__room_{room}");
+        let dir = format!("/tmp/kasaterm-collab/{slug}");
+        let _ = std::fs::create_dir_all(&dir);
+        // character 마커 = 선택한 god(아로나/프라나) — board 표시 + 페르소나 매핑(거노).
+        let n = sid.trim_start_matches('%');
+        let _ = std::fs::write(format!("{dir}/character-{n}"), character);
+        // 좌측 방 라벨 = god 이름으로 즉시 박는다. 안 그러면 옛 방(같은 윈도우 idx)이
+        // assign-character 로 박았던 stale 라벨("● 시로코")이 재사용돼 남는다(거노).
+        self.window_name_override.insert(self.active_window, format!("● {character}"));
+        // 살아있는 god 이 없으면 lead 도 박아 프라나 god, mode=god.
+        let lead_path = format!("{dir}/lead");
+        let live_god = std::fs::read_to_string(&lead_path)
+            .ok()
+            .map(|c| {
+                let c = c.trim().to_string();
+                !c.is_empty() && self.pty.contains_key(&c)
+            })
+            .unwrap_or(false);
+        if !live_god {
+            let _ = std::fs::write(&lead_path, &sid);
+            if let Ok(home) = std::env::var("HOME") {
+                let md = format!("{home}/.config/kasaterm/collab-mode");
+                let _ = std::fs::create_dir_all(&md);
+                let _ = std::fs::write(format!("{md}/{slug}"), "god");
+            }
+        }
+        // 선택 god 의 persona + god 역할로 claude(opus 1M) 를 셸 준비 후 1회 주입(autoleader 슬롯).
+        let persona = crate::load_persona_for(character);
+        let god_role = "너는 이 SCHALE 워크스페이스의 god(오케스트레이터)다. 워커들의 \
+            'done' 보고를 검토하고 너가 단독으로 git add/commit/push 한다(워커는 커밋 안 함). \
+            board/inbox 는 `kasaterm-cli board`/`kasacollab` 로 직접 확인·조율하라.";
+        let append = match persona {
+            Some(p) => format!("{} {}", p.trim(), god_role),
+            None => god_role.to_string(),
+        };
+        let esc: String = append.replace('\n', " ").trim().chars().take(1200).collect();
+        let esc = esc.replace('\'', "'\\''");
+        // maybe_autoleader 가 끝에 `\r` 을 붙인다 — 여기선 빼고 명령만.
+        let cmd = format!("claude --session-id \"$(uuidgen)\" --model 'opus[1m]' --append-system-prompt '{esc}'");
+        self.pending_autoleader = Some(cmd);
+        self.pending_autoleader_at = Some(std::time::Instant::now());
     }
     /// First-run onboarding: open the arona window (whose ModePicker shows
     /// the 터미널 vs 아로나 choice) once the boot settles, but only when this

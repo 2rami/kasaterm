@@ -189,6 +189,9 @@ impl App {
             } else {
                 ws.layout = Some(tree.to_tmux_layout(cols, rows));
             }
+            // 활성 방(윈도우)의 leaf pane 집합 — collab_board 가 이걸로 필터해 *활성 방
+            // 학생만* board 에 올린다(거노: 아로나 방+프라나 방이 한 교실에 같이 뜸).
+            ws.active_window_panes = tree.leaves().iter().map(|l| l.to_string()).collect();
         }
         // Keep the socket snapshot in lockstep with the renderer view —
         // every code path that adds/removes panes or moves focus goes
@@ -868,15 +871,23 @@ for p in glob.glob(os.path.join(d, '*.json')):
         }
     }
     /// Close `pid`'s pane: remove it from the BSP tree and drop its PTY.
-    /// Shared by Cmd+W and the header × button. The window's last pane is a
-    /// no-op — the OS close button quits a single-pane window, and a shell
-    /// `exit` cascades through reap_dead_panes.
+    /// Shared by Cmd+W and the header × button. When `pid` is the window's
+    /// last pane we don't leave an empty window — we spawn a fresh shell in
+    /// its place (거노: BA GUI 종료 버튼으로 마지막 claude pane 을 닫으면 빈 창이
+    /// 되어 안 닫히던 것 → 새 tty 셸로 교체). Otherwise just remove it.
     pub(crate) fn close_pane(&mut self, pid: &str) {
         if self.tmux.is_some() {
             return;
         }
         let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
         if leaves <= 1 {
+            // split a fresh shell next to it, then drop the original — the new
+            // shell takes over the whole window, the closed pane (claude) is gone.
+            if let Ok(new_id) = self.split_active_pane(kasa_pty::SplitDir::Horizontal) {
+                if !new_id.is_empty() && new_id != pid {
+                    self.remove_pane(pid);
+                }
+            }
             return;
         }
         self.remove_pane(pid);

@@ -8,7 +8,7 @@ ME="${KASATERM_PANE_ID:-}"
 [ -z "$ME" ] && exit 0
 HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
 KASACOLLAB="python3 $HOOKS_DIR/kasacollab.py"
-slug=$(pwd | sed 's#[/.]#-#g')
+slug=$(pwd | sed 's#[/.]#-#g')${KASATERM_ROOM:+__room_$KASATERM_ROOM}
 LEAD="/tmp/kasaterm-collab/$slug/lead"
 GOD_COLOR="#FFD400"
 

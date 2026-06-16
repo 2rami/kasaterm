@@ -197,12 +197,19 @@ impl App {
         let cwd = resolve_initial_cwd();
         let id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
+        // 방별 분리(거노): 이 pane 이 새 방이면 KASATERM_ROOM 을 셸 env 로 주입해 collab
+        // 훅이 방별 slug 를 쓰게 한다. pane_room 에도 기록(Rust collab slug 계산용).
+        let mut env = crate::proxy_env(&id);
+        if let Some(room) = self.pending_room.take() {
+            env.push(("KASATERM_ROOM".to_string(), room.clone()));
+            self.ws.lock().unwrap().pane_room.insert(id.clone(), room);
+        }
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: self.pending_shell.take().or_else(resolve_default_shell),
             cwd,
             cols,
             rows,
-            env: crate::proxy_env(&id),
+            env,
             pane_id: id.clone(),
             initial_scrollback: Vec::new(),
         })?;

@@ -126,6 +126,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
                 if *show {
+                    // 거노: "터미널 보기"는 화면 2분할(터미널 좌·아로나 우).
+                    // 아로나 창이 떠 있으면 둘을 모니터 좌/우 절반으로 타일링.
+                    self.tile_terminal_arona_split();
                     if let Some(id) = focus_pane {
                         self.ws.lock().unwrap().active_pane = Some(id.clone());
                         self.chrome_dirty = true;
@@ -153,6 +156,30 @@ impl ApplicationHandler<UserEvent> for App {
                     .filter_map(|(id, s)| s.shell_pid().map(|p| (id.clone(), p)))
                     .collect();
                 let _ = reply.send(pids);
+                return;
+            }
+            UserEvent::SocketQuerySessions(reply) => {
+                // 방=윈도우 목록. 라벨(name, cwd)은 refresh_window_labels 가 채운다.
+                self.refresh_window_labels();
+                let _ = reply.send((
+                    self.windows.len(),
+                    self.active_window,
+                    self.window_labels.clone(),
+                ));
+                return;
+            }
+            UserEvent::SocketSwitchSession(idx) => {
+                self.switch_window(*idx);
+                return;
+            }
+            UserEvent::SocketNewRoom(god) => {
+                self.new_room_with_god(god);
+                return;
+            }
+            UserEvent::SocketCloseRoom(idx) => {
+                if let Err(e) = self.close_window(*idx) {
+                    eprintln!("[room] close {idx} failed: {e}");
+                }
                 return;
             }
             UserEvent::SocketClose(id) => {
@@ -270,7 +297,21 @@ impl ApplicationHandler<UserEvent> for App {
             let _ = view_m.append(&session_item);
             let _ = view_m.append(&board_item);
             let _ = view_m.append(&arona_item);
+            // 편집 메뉴 — 표준 Cut/Copy/Paste/SelectAll. macOS 는 이 메뉴(특히 Paste
+            // 의 paste: selector + Cmd+V)가 있어야 아로나 webview 입력창에 붙여넣기가
+            // 먹는다(거노: 프롬프트 붙여넣기 안 됨 — Edit 메뉴가 없어서였음).
+            let edit_m = Submenu::new("편집", true);
+            let _ = edit_m.append_items(&[
+                &PredefinedMenuItem::undo(None),
+                &PredefinedMenuItem::redo(None),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::cut(None),
+                &PredefinedMenuItem::copy(None),
+                &PredefinedMenuItem::paste(None),
+                &PredefinedMenuItem::select_all(None),
+            ]);
             let _ = menu.append(&app_m);
+            let _ = menu.append(&edit_m);
             let _ = menu.append(&view_m);
             menu.init_for_nsapp();
             self.git_menu_item = Some(git_item);
@@ -3121,6 +3162,10 @@ impl ApplicationHandler<UserEvent> for App {
             || self.pending_capture.is_some()
             || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()
+            // 새 방 god 자동 스폰(maybe_autoleader)이 셸 준비/2s 타임아웃을 평가하려면
+            // wake 가 필요 — 새 셸은 프롬프트 출력 후 조용해져 wake 가 멈춘다(거노: 프라나
+            // 안 뜸). pending 동안 30fps 펌프해 maybe_autoleader 가 발화하게 한다.
+            || self.pending_autoleader.is_some()
             // An unseen-notification window tab blinks (synced to the cursor
             // blink) until the user switches to it — pump frames so it pulses.
             || !self.window_alert.is_empty()

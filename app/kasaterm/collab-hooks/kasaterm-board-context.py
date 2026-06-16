@@ -49,8 +49,14 @@ except Exception:
     pass
 
 
+def _room_suffix():
+    # 방별 분리(거노) — KASATERM_ROOM 있으면 slug 에 붙여 방마다 collab 격리. 없으면 기존.
+    room = os.environ.get("KASATERM_ROOM", "")
+    return f"__room_{room}" if room else ""
+
+
 def collab_dir():
-    enc = os.getcwd().replace("/", "-").replace(".", "-")
+    enc = os.getcwd().replace("/", "-").replace(".", "-") + _room_suffix()
     return os.path.join("/tmp/kasaterm-collab", enc)
 
 
@@ -222,7 +228,7 @@ def roster_recovery():
     이 주입을 보고 god 이 `claude --resume` 로 워커들을 부활시킨다.
     pane_id 기준 live 판정(드물게 pane_id 재사용 시 누락 가능 — 정확 매칭은
     board 에 session_id 노출 후속)."""
-    slug = os.getcwd().replace("/", "-").replace(".", "-")
+    slug = os.getcwd().replace("/", "-").replace(".", "-") + _room_suffix()
     p = os.path.expanduser(f"~/.config/kasaterm/agent-roster/{slug}.json")
     try:
         roster = json.load(open(p))

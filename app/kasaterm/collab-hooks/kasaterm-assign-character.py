@@ -63,7 +63,11 @@ def main():
     if not chars:
         return  # characters 없음 → 기능 skip(현행)
 
-    slug = os.getcwd().replace("/", "-").replace(".", "-")
+    # 방별 분리(거노): KASATERM_ROOM 있으면 slug 에 `__room_<id>` — 새 방 claude 가
+    # 자기 방 dir 에서 character 를 보고/할당(없으면 기존). 안 그러면 cwd-slug 에서
+    # '이미 god 있음 → 멤버(시로코)' 로 오할당됐다.
+    _room = os.environ.get("KASATERM_ROOM", "")
+    slug = os.getcwd().replace("/", "-").replace(".", "-") + (f"__room_{_room}" if _room else "")
     base = f"/tmp/kasaterm-collab/{slug}"
     os.makedirs(base, exist_ok=True)
     my_marker = os.path.join(base, "character-" + pane.lstrip("%"))
