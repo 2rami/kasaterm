@@ -462,6 +462,8 @@ fn spawn_flusher(
                 // tmux backend doesn't track OSC 133 prompt marks; the
                 // host falls back to its typed-buffer heuristic there.
                 prompt_end: None,
+                // tmux backend doesn't sniff OSC 777 desktop notifications.
+                notify: None,
             };
             if out.send(update).is_err() {
                 return;

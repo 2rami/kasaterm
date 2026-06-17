@@ -133,6 +133,15 @@ impl App {
                     let _ = proxy.send_event(UserEvent::Redraw);
                     return;
                 }
+                // OSC 777 desktop notification — drain before the coalesce
+                // merge below rebuilds `update` and would drop it.
+                if let Some((title, body)) = update.notify.take() {
+                    let _ = proxy.send_event(UserEvent::Notify {
+                        surface_id: update.pane_id.clone(),
+                        title,
+                        body,
+                    });
+                }
                 // Coalesce: drain every other ScreenUpdate currently sitting
                 // in the channel and merge them into one. Scroll inertia /
                 // bursty Claude Code output can stuff hundreds of frames in
@@ -142,7 +151,16 @@ impl App {
                 // and other late inputs aren't stuck behind a queue.
                 loop {
                     match screens.try_recv() {
-                        Ok(next) if !next.eof => {
+                        Ok(mut next) if !next.eof => {
+                            // OSC 777 from a coalesced frame — fire before the
+                            // merge below drops `next.notify`.
+                            if let Some((title, body)) = next.notify.take() {
+                                let _ = proxy.send_event(UserEvent::Notify {
+                                    surface_id: next.pane_id.clone(),
+                                    title,
+                                    body,
+                                });
+                            }
                             let mut row_map: std::collections::HashMap<u16, Row> =
                                 update.dirty.into_iter().collect();
                             for (r, row) in next.dirty {
@@ -787,6 +805,88 @@ impl App {
         self.publish_pty_layout();
         self.chrome_dirty = true;
         if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+    /// macOS `.md` 더블클릭(odoc Apple Event)/argv → 새 워크스페이스(사이드바 탭)에
+    /// 마크다운 뷰어를 단독 pane(풀스크린)으로 띄운다. `open_file_split`(현재 창
+    /// split)과 달리 기존 워크스페이스를 안 건드리고 새 윈도우 슬롯을 만든다.
+    /// PTY 없는 pane이라 셸 spawn 은 안 한다 — `resize_backend`/키 입력은 PTY miss
+    /// 로 자동 skip(이미지 pane 과 같은 PTY-less 선례).
+    pub(crate) fn open_markdown_window(&mut self, path: std::path::PathBuf) {
+        if self.tmux.is_some() {
+            return;
+        }
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        // 이미 열려 있으면 그 워크스페이스로 전환만(중복 탭 방지).
+        let existing = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes.iter().find_map(|(id, p)| {
+                p.tabs
+                    .iter()
+                    .any(|t| t.preview_path.as_deref() == Some(path.as_path()))
+                    .then(|| id.clone())
+            })
+        };
+        if let Some(pid) = existing {
+            if let Some(wi) = self.window_of_pane(&pid) {
+                self.switch_window(wi);
+            }
+            self.ws.lock().unwrap().active_pane = Some(pid);
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[open-md] 파일 읽기 실패 {}: {e}", path.display());
+                return;
+            }
+        };
+        let new_id = format!("%{}", self.next_pane_id);
+        self.next_pane_id += 1;
+        let doc = Arc::new(build_markdown_doc(&new_id, &path, &raw));
+        let title = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
+        let mut tab = PaneTab::default();
+        // `.md` 는 렌더뷰(raw_mode=false) — 거노 확정. open_file_split 의 .md 분기 동일.
+        tab.content = PaneContent::Markdown(MarkdownPane {
+            doc,
+            is_md_doc: true,
+            raw_mode: false,
+            edit_lines: Vec::new(),
+            cur_line: 0,
+            cur_col: 0,
+            scroll: 0,
+            h_scroll: 0.0,
+        });
+        tab.title = title;
+        tab.title_pinned = true;
+        tab.preview_path = Some(path.clone());
+        let ps = PaneState { tabs: vec![tab], active_tab: 0, color: None, dirty: true };
+
+        // 새 윈도우 슬롯 — new_window 의 슬롯 스왑만 차용(spawn_session_pane 제외).
+        self.windows[self.active_window] = self.pty_layout.take();
+        self.windows.push(None);
+        self.active_window = self.windows.len() - 1;
+
+        // 마크다운 pane = 새 윈도우의 유일한 leaf → ws.layout=None → 풀스크린 fallback.
+        self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
+        self.pty_layout = Some(kasa_pty::PtyLayout::single(new_id.as_str()));
+        self.ws.lock().unwrap().active_pane = Some(new_id);
+
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows); // PTY 없는 leaf 는 self.pty miss → no-op
+        self.publish_pty_layout();
+        self.window_labels_at = None; // 다음 paint 에 사이드바 라벨 재계산(파일명 폴백)
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
     }

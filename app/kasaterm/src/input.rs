@@ -111,6 +111,95 @@ impl App {
             ((raw_h - bh) * 0.5).max(0.0),
         )
     }
+    /// 이미지 pane 의 화면 박스(원점+크기, logical px). `image_pan_bounds` 와 같은
+    /// `effective_leaf_rects` 기반 — 커서기준 줌의 pane 중심 계산에 쓴다.
+    pub(crate) fn image_pane_box(&self, pane_id: &str) -> Option<(f32, f32, f32, f32)> {
+        let (cols, rows) = self.window_cells();
+        let pad = WINDOW_PADDING + self.effective_sidebar_w();
+        self.effective_leaf_rects(cols, rows)
+            .into_iter()
+            .find(|(id, ..)| id == pane_id)
+            .map(|(_, cx, cy, cw, ch)| {
+                (
+                    pad + cx as f32 * self.cell.w,
+                    TITLE_HEIGHT + cy as f32 * self.cell.h,
+                    cw as f32 * self.cell.w,
+                    ch as f32 * self.cell.h,
+                )
+            })
+    }
+    /// 이미지 pane 줌을 `factor` 배(버튼·키보드·핀치·휠 공용). 1.0~8.0 클램프,
+    /// fit(≤1.0) 복귀 시 pan 리셋, 아니면 새 zoom 의 pan 한계로 재클램프. `anchor`
+    /// 가 Some 이면 그 화면 좌표 아래 이미지 점이 고정되도록 pan 을 보정한다(커서
+    /// 기준 줌). 대상이 이미지 pane 이 아니거나 변화가 없으면 false.
+    pub(crate) fn image_zoom_by(
+        &mut self,
+        pane_id: &str,
+        factor: f32,
+        anchor: Option<(f32, f32)>,
+    ) -> bool {
+        let (z0, px0, py0) = {
+            let ws = self.ws.lock().unwrap();
+            match ws.panes.get(pane_id) {
+                Some(p) if p.image().is_some() => {
+                    (p.image_zoom.max(1.0), p.image_pan_x, p.image_pan_y)
+                }
+                _ => return false,
+            }
+        };
+        let z1 = (z0 * factor).clamp(1.0, 8.0);
+        if (z1 - z0).abs() < 1e-4 {
+            return false;
+        }
+        let ratio = z1 / z0;
+        // pan 기본은 비례 스케일. anchor 있으면 커서 밑 이미지 점을 고정:
+        // 화면점 o(=pane 중심 대비 오프셋)에 대해 pan1 = o*(1-ratio) + pan0*ratio.
+        let (mut px1, mut py1) = (px0 * ratio, py0 * ratio);
+        if let Some((ax, ay)) = anchor {
+            if let Some((bx, by, bw, bh)) = self.image_pane_box(pane_id) {
+                let ox = ax - (bx + bw * 0.5);
+                let oy = ay - (by + bh * 0.5);
+                px1 = ox * (1.0 - ratio) + px0 * ratio;
+                py1 = oy * (1.0 - ratio) + py0 * ratio;
+            }
+        }
+        // zoom 을 먼저 반영해야 image_pan_bounds 가 z1 기준으로 한계를 낸다.
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(p) = ws.panes.get_mut(pane_id) {
+                p.image_zoom = z1;
+                p.dirty = true;
+            }
+        }
+        if z1 <= 1.0 {
+            px1 = 0.0;
+            py1 = 0.0;
+        } else {
+            let (mx, my) = self.image_pan_bounds(pane_id);
+            px1 = px1.clamp(-mx, mx);
+            py1 = py1.clamp(-my, my);
+        }
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(p) = ws.panes.get_mut(pane_id) {
+                p.image_pan_x = px1;
+                p.image_pan_y = py1;
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        true
+    }
+    /// 트랙패드 핀치(magnification) → 커서 아래 이미지 pane 을 커서기준 줌. `delta`
+    /// 는 winit 의 배율 증분(누적 아님, 양수=확대). 이미지 pane 이 아니면 no-op.
+    pub(crate) fn handle_pinch(&mut self, delta: f64) {
+        let pid = self
+            .px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
+            .map(|(id, _, _)| id)
+            .or_else(|| self.target_pane());
+        if let Some(pid) = pid {
+            self.image_zoom_by(&pid, (1.0 + delta as f32).max(0.1), Some(self.cursor_px));
+        }
+    }
     /// Arm an image-pane pan drag from the current cursor, snapshotting the
     /// pane's current pan so CursorMoved can apply `base + delta`.
     pub(crate) fn begin_image_pan(&mut self, pane_id: &str) {
@@ -580,26 +669,26 @@ impl App {
                 return;
             }
         };
-        // 클립보드에 비트맵 이미지가 있으면 텍스트(파일 경로)를 붙여넣는 대신
-        // Ctrl+V(0x16)를 그대로 흘려보낸다 — claude code가 osascript로 클립보드
-        // PNG를 직접 읽어 [Image] 칩으로 첨부한다. get_text 만 읽던 옛 경로는
-        // 이미지를 경로 문자열로 박아버려 Ghostty 같은 칩 표시가 안 됐다.
+        // 텍스트가 있으면 무조건 텍스트 우선(bracketed paste). 일부 앱은 텍스트를
+        // 복사해도 TIFF 표현을 같이 올려 get_image()가 Ok를 뱉는데, 이미지를 먼저
+        // 검사하면 멀쩡한 텍스트 paste가 0x16으로 새버린다(거노: 붙여넣기 먹통).
+        // 텍스트가 *없고* 이미지만 있을 때만 0x16을 흘려 claude code가 osascript로
+        // 클립보드 PNG를 [Image] 칩으로 읽게 한다.
+        if let Ok(text) = cb.get_text() {
+            if !text.is_empty() {
+                let mut payload = Vec::with_capacity(text.len() + 12);
+                payload.extend_from_slice(b"\x1b[200~");
+                payload.extend_from_slice(text.as_bytes());
+                payload.extend_from_slice(b"\x1b[201~");
+                self.send_bytes(&payload);
+                return;
+            }
+        }
         if cb.get_image().is_ok() {
             self.send_bytes(&[0x16]);
             return;
         }
-        let text = match cb.get_text() {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[kasaterm] clipboard read failed: {e}");
-                return;
-            }
-        };
-        let mut payload = Vec::with_capacity(text.len() + 12);
-        payload.extend_from_slice(b"\x1b[200~");
-        payload.extend_from_slice(text.as_bytes());
-        payload.extend_from_slice(b"\x1b[201~");
-        self.send_bytes(&payload);
+        eprintln!("[kasaterm] paste: clipboard has neither text nor image");
     }
     pub(crate) fn handle_wheel(&mut self, delta: MouseScrollDelta) {
         let wdbg = std::env::var_os("KASATERM_WHEEL_DEBUG").is_some();
@@ -612,6 +701,48 @@ impl App {
                 "[wheel] delta={delta:?} dy_cells={dy_cells:.4} accum_before={:.4} cursor_px=({:.1},{:.1})",
                 self.wheel_accum_y, self.cursor_px.0, self.cursor_px.1
             );
+        }
+        // Image pane: 트랙패드 두손가락(PixelDelta)=pan, 마우스 휠(LineDelta)=
+        // Preview 식 zoom. wheel_step 양자화 *전* raw delta 로 처리해야 pan 이 안
+        // 끊긴다. 커서가 이미지 pane 위일 때만 가로채고, 아니면 아래로 흘려보낸다.
+        let hover_image = self
+            .px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
+            .map(|(id, _, _)| id)
+            .filter(|id| {
+                self.ws
+                    .lock()
+                    .ok()
+                    .and_then(|w| w.panes.get(id).map(|p| p.image().is_some()))
+                    .unwrap_or(false)
+            });
+        if let Some(pid) = hover_image {
+            match delta {
+                MouseScrollDelta::PixelDelta(p) => {
+                    // 두손가락 grab-pan — zoom>1 일 때만 의미(bounds 0 이면 no-op).
+                    // 자연 스크롤 부호가 grab 과 반대라 빼서 이미지가 손가락을 따라온다.
+                    let (mx, my) = self.image_pan_bounds(&pid);
+                    if mx > 0.0 || my > 0.0 {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.panes.get_mut(&pid) {
+                                pane.image_pan_x =
+                                    (pane.image_pan_x - p.x as f32).clamp(-mx, mx);
+                                pane.image_pan_y =
+                                    (pane.image_pan_y - p.y as f32).clamp(-my, my);
+                                pane.dirty = true;
+                            }
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+                MouseScrollDelta::LineDelta(_, y) => {
+                    // 마우스 휠 = Preview 식 줌(위로 굴리면 확대), 커서 기준.
+                    let factor = if y > 0.0 { 1.25 } else { 1.0 / 1.25 };
+                    self.image_zoom_by(&pid, factor, Some(self.cursor_px));
+                }
+            }
+            return;
         }
         let lines = match wheel_step(
             &mut self.wheel_accum_y,
@@ -1326,28 +1457,18 @@ impl App {
         };
         if is_image {
             let mut changed = false;
+            // 키보드 줌은 active pane 중심(anchor 없음). id 를 먼저 떠서 헬퍼에 넘긴다.
+            let active_id = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
             if let Key::Character(s) = &event.logical_key {
                 match s.as_str() {
                     "+" | "=" => {
-                        if let Ok(mut ws) = self.ws.lock() {
-                            if let Some(pane) = ws.active_mut() {
-                                let z = pane.image_view_zoom();
-                                pane.image_zoom = (z * 1.25).clamp(1.0, 8.0);
-                                changed = true;
-                            }
+                        if let Some(id) = &active_id {
+                            changed = self.image_zoom_by(id, 1.25, None);
                         }
                     }
                     "-" | "_" => {
-                        if let Ok(mut ws) = self.ws.lock() {
-                            if let Some(pane) = ws.active_mut() {
-                                let z = pane.image_view_zoom();
-                                pane.image_zoom = (z / 1.25).max(1.0);
-                                if pane.image_zoom <= 1.0 {
-                                    pane.image_pan_x = 0.0;
-                                    pane.image_pan_y = 0.0;
-                                }
-                                changed = true;
-                            }
+                        if let Some(id) = &active_id {
+                            changed = self.image_zoom_by(id, 1.0 / 1.25, None);
                         }
                     }
                     "0" => {

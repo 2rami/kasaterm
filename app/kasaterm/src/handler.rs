@@ -249,6 +249,20 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::OpenMarkdownWindow(path) => {
+                // macOS `.md` 더블클릭(odoc)/argv → 새 워크스페이스에 마크다운 풀.
+                // cold-launch(앱 꺼진 채)면 window·pty_layout 이 아직 없어 디퍼했다가
+                // start_pty 직후 flush, 켜진 채면 즉시 연다.
+                let p = std::path::PathBuf::from(path);
+                if self.window.is_none() || self.pty_layout.is_none() {
+                    self.pending_open_md.push(p);
+                } else {
+                    self.open_markdown_window(p);
+                }
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketRename(id, title) => {
                 if let Some(p) = self.ws.lock().unwrap().panes.get_mut(id) {
                     let at = p.active_tab.min(p.tabs.len() - 1);
@@ -325,6 +339,14 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
+        // macOS `.md` 더블클릭(odoc) 핸들러 등록 — resumed = applicationDidFinishLaunching
+        // 시점이라, AppKit 이 launch 초기에 건 기본 odoc→`application:openURLs:` 라우팅
+        // (winit 미구현 → "못 연다" 에러)을 여기서 덮어쓴다. NSAppleEventManager 는 같은
+        // (class,id)에 마지막 등록이 이기므로 AppKit '후'인 여기가 정답 — main() 1차는
+        // AppKit 보다 일러 되덮여 무효였다. 큐된 cold-launch odoc 디스패치보다 먼저 걸려야
+        // 첫 파일도 잡으므로 resumed 최상단(window/GPU 생성 전).
+        #[cfg(target_os = "macos")]
+        crate::macos_open::install_open_doc_handler(self.proxy.clone());
         // Ask for desktop-notification permission up front so the prompt
         // appears at launch rather than mid-work on the first completion.
         crate::chrome::ensure_notification_authorization();
@@ -334,6 +356,7 @@ impl ApplicationHandler<UserEvent> for App {
         // on self so the menu outlives this function.
         #[cfg(target_os = "macos")]
         if self.menu.is_none() {
+            use muda::accelerator::Accelerator;
             use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
             let menu = Menu::new();
             let app_m = Submenu::new("kasaterm", true);
@@ -351,17 +374,22 @@ impl ApplicationHandler<UserEvent> for App {
             let _ = view_m.append(&session_item);
             let _ = view_m.append(&board_item);
             let _ = view_m.append(&arona_item);
-            // 편집 메뉴 — 표준 Cut/Copy/Paste/SelectAll. macOS 는 이 메뉴(특히 Paste
-            // 의 paste: selector + Cmd+V)가 있어야 아로나 webview 입력창에 붙여넣기가
-            // 먹는다(거노: 프롬프트 붙여넣기 안 됨 — Edit 메뉴가 없어서였음).
+            // 편집 메뉴 — macOS 는 이 메뉴(Cmd+V/Cmd+C 단축키)가 있어야 아로나
+            // webview 입력창 붙여넣기가 먹는다. 다만 PredefinedMenuItem::paste/copy 는
+            // 그 단축키 keyDown 을 NSMenu 가 가로채 winit 까지 안 내려보내 터미널
+            // paste/copy 가 먹통이었다(거노). 그래서 Copy/Paste 만 *커스텀* 항목으로
+            // 만들어 MenuEvent 로 받고, webview 우선 위임(send_*_action) 후 안 먹으면
+            // 직접 클립보드를 처리한다. Cut/SelectAll(Cmd+X/A)은 터미널이 안 쓰니 predefined 유지.
+            let copy_item = MenuItem::new("복사", true, "CmdOrCtrl+C".parse::<Accelerator>().ok());
+            let paste_item = MenuItem::new("붙여넣기", true, "CmdOrCtrl+V".parse::<Accelerator>().ok());
             let edit_m = Submenu::new("편집", true);
             let _ = edit_m.append_items(&[
                 &PredefinedMenuItem::undo(None),
                 &PredefinedMenuItem::redo(None),
                 &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::cut(None),
-                &PredefinedMenuItem::copy(None),
-                &PredefinedMenuItem::paste(None),
+                &copy_item,
+                &paste_item,
                 &PredefinedMenuItem::select_all(None),
             ]);
             let _ = menu.append(&app_m);
@@ -372,6 +400,8 @@ impl ApplicationHandler<UserEvent> for App {
             self.session_menu_item = Some(session_item);
             self.board_menu_item = Some(board_item);
             self.arona_menu_item = Some(arona_item);
+            self.copy_menu_item = Some(copy_item);
+            self.paste_menu_item = Some(paste_item);
             self.menu = Some(menu);
         }
         // WaitUntil so the cursor blink ticks even when no terminal output
@@ -561,6 +591,11 @@ impl ApplicationHandler<UserEvent> for App {
         if let Err(e) = backend_result {
             eprintln!("[kasaterm] backend start failed: {e}");
         }
+        // cold-launch 로 디퍼됐던 `.md` 오픈을 연다 — 이제 window·pty_layout(%0)
+        // 둘 다 준비됨. 빈손이면 무비용.
+        for p in std::mem::take(&mut self.pending_open_md) {
+            self.open_markdown_window(p);
+        }
         self.schedule_autosend();
         self.schedule_autocapture();
         self.arm_autosplit();
@@ -572,6 +607,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autotabs();
         self.arm_autodrag();
         self.arm_autopanemove();
+        self.arm_force_drag();
         self.arm_autoopen();
         self.arm_autoconfirm();
         self.schedule_autoquit();
@@ -791,6 +827,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 self.handle_wheel(delta);
             }
+            // 트랙패드 핀치(macOS magnification) → 커서 아래 이미지 pane 줌.
+            WindowEvent::PinchGesture { delta, .. } => {
+                self.handle_pinch(delta);
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.effective_scale();
                 if self.autohover.is_none() {
@@ -901,6 +941,29 @@ impl ApplicationHandler<UserEvent> for App {
                         } else {
                             CursorIcon::Default
                         });
+                    }
+                }
+                // ghostty ⋮ 핸들: pane 상단 띠(top_zone) 진입/이탈 시 redraw해
+                // ⋮ 등장·소멸을, ⋮ rect 위(on_handle)면 손모양+진함을 갱신한다
+                // (render는 cursor_px를 live로 읽으니 redraw만 트리거하면 됨).
+                {
+                    let (cx, cy) = self.cursor_px;
+                    let hit = |r: &(f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    let in_zone = self.pane_top_zones.iter().any(|(_, r)| hit(r));
+                    if in_zone != self.handle_zone_hovered {
+                        self.handle_zone_hovered = in_zone;
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                    let on_handle = self.pane_handle_rects.iter().any(|(_, r)| hit(r));
+                    if on_handle != self.handle_hovered {
+                        self.handle_hovered = on_handle;
+                        // 커서 모양은 아래 hover-feedback 블록(매 move 최종 set_cursor)
+                        // 이 ⋮ 까지 보고 결정한다 — 여기서 set 하면 곧 덮어써짐.
+                        self.chrome_dirty = true;
+                        window.request_redraw();
                     }
                 }
                 // File-tree column hover — repaint while the cursor is over the
@@ -1105,6 +1168,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if self.tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
                         window.set_cursor(CursorIcon::Grabbing);
+                        // 단일탭 pane 드래그면 실제 레이아웃을 라이브로 재배치
+                        // (멀티탭은 탭 추출이라 update_live_drag 가 알아서 건너뜀).
+                        self.update_live_drag();
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -1119,8 +1185,11 @@ impl ApplicationHandler<UserEvent> for App {
                     if !hd.active && dx * dx + dy * dy > 25.0 {
                         hd.active = true;
                     }
-                    if hd.active {
+                    let active = hd.active;
+                    if active {
                         window.set_cursor(CursorIcon::Grabbing);
+                        // 프리뷰 박스가 아니라 실제 레이아웃을 라이브로 재배치.
+                        self.update_live_drag();
                         window.request_redraw();
                     }
                     return;
@@ -1213,6 +1282,16 @@ impl ApplicationHandler<UserEvent> for App {
                     // Only when nothing more specific already claimed the cursor.
                     let icon = if matches!(icon, CursorIcon::Default)
                         && self.link_hit(cx, cy).is_some()
+                    {
+                        CursorIcon::Pointer
+                    } else {
+                        icon
+                    };
+                    // ⋮ 핸들 위 → pointer(손모양). 위 단계가 커서를 안 가져갔을 때만.
+                    let icon = if matches!(icon, CursorIcon::Default)
+                        && self.pane_handle_rects.iter().any(|(_, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
                     {
                         CursorIcon::Pointer
                     } else {
@@ -1412,12 +1491,13 @@ impl ApplicationHandler<UserEvent> for App {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
                     if hit(self.settings_btn_rect) {
-                        if self.settings_open {
-                            self.close_settings();
-                        } else {
+                        // 일반 사이드바 탭처럼 동작 — 이미 선택돼 있으면 재클릭은
+                        // no-op(닫으려면 다른 세션 탭을 누른다). 옛날엔 토글이라
+                        // 선택된 상태에서 또 누르면 설정이 꺼져버렸다.
+                        if !self.settings_open {
                             self.open_settings();
+                            window.request_redraw();
                         }
-                        window.request_redraw();
                         return;
                     }
                     // Dock chip click. While a pane is zoomed the dock shows the
@@ -2127,6 +2207,65 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // ── ghostty ⋮ 핸들 메뉴 ─────────────────────────────
+                    // ⋮ 클릭 → 메뉴 토글. 메뉴 열림 상태: 버튼=액션, ⋮ 자기=닫기,
+                    // 밖=닫고 클릭은 흘려보냄. (드래그 이동은 Phase 4)
+                    let handle_hit = self
+                        .pane_handle_rects
+                        .iter()
+                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, _)| id.clone());
+                    if let Some(menu_pid) = self.handle_menu.clone() {
+                        if let Some(action) = self
+                            .handle_menu_hits
+                            .iter()
+                            .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                            .map(|(a, _)| *a)
+                        {
+                            self.ws.lock().unwrap().active_pane = Some(menu_pid.clone());
+                            match action {
+                                ActionKind::SplitV => {
+                                    let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
+                                }
+                                ActionKind::SplitH => {
+                                    let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+                                }
+                                ActionKind::ToggleStatusbar => self.toggle_statusbar(&menu_pid),
+                                ActionKind::NewTab => {
+                                    let _ = self.spawn_new_tab(&menu_pid);
+                                }
+                                ActionKind::Close => self.close_pane(&menu_pid),
+                                _ => {}
+                            }
+                            self.handle_menu = None;
+                            self.chrome_dirty = true;
+                            window.request_redraw();
+                            return;
+                        }
+                        // ⋮ 자기 또는 메뉴 밖 클릭 → 닫기.
+                        self.handle_menu = None;
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                        if handle_hit.is_some() {
+                            return; // ⋮ 자기 클릭은 토글로 소비.
+                        }
+                        // 밖 클릭은 닫기만 하고 계속 흘러간다(pane focus 등).
+                    } else if let Some(pid) = handle_hit {
+                        // ⋮ press → arm a drag instead of opening the menu
+                        // immediately. A release under the threshold toggles
+                        // the menu (release path); past it, the pane relocates
+                        // exactly like a header-bar drag. This is how a
+                        // header-less pane gets dragged at all.
+                        self.ws.lock().unwrap().active_pane = Some(pid.clone());
+                        self.header_drag = Some(HeaderDrag {
+                            pane: pid,
+                            start: self.cursor_px,
+                            active: false,
+                            from_handle: true,
+                        });
+                        window.request_redraw();
+                        return;
+                    }
                     // Terminal-pane right-action cluster (new-terminal /
                     // web / split-v / split-h). Web spawns a separate OS
                     // window with a wry browser; the other variants are
@@ -2162,6 +2301,12 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             ActionKind::MdRaw => {
                                 self.set_md_mode(&pid, true);
+                            }
+                            ActionKind::Close => {
+                                self.close_pane(&pid);
+                            }
+                            ActionKind::NewTab => {
+                                let _ = self.spawn_new_tab(&pid);
                             }
                         }
                         window.request_redraw();
@@ -2263,37 +2408,40 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, k, _)| (id.clone(), *k))
                     {
-                        if let Ok(mut ws) = self.ws.lock() {
-                            if let Some(pane) = ws.panes.get_mut(&pid) {
-                                let z = pane.image_view_zoom();
-                                match kind {
-                                    ImageBtn::ZoomIn => {
-                                        pane.image_zoom = (z * 1.25).clamp(1.0, 8.0);
-                                    }
-                                    ImageBtn::ZoomOut => {
-                                        pane.image_zoom = (z / 1.25).max(1.0);
-                                        // Back at fit → no pan room; recenter.
-                                        if pane.image_zoom <= 1.0 {
-                                            pane.image_pan_x = 0.0;
-                                            pane.image_pan_y = 0.0;
-                                        }
-                                    }
-                                    ImageBtn::Rotate => {
+                        // 줌은 공용 헬퍼(클램프+pan 재클램프)로, 회전/리셋은 view-state
+                        // 직접. 버튼은 pane 중심 줌이라 anchor 없음.
+                        match kind {
+                            ImageBtn::ZoomIn => {
+                                self.image_zoom_by(&pid, 1.25, None);
+                            }
+                            ImageBtn::ZoomOut => {
+                                self.image_zoom_by(&pid, 1.0 / 1.25, None);
+                            }
+                            ImageBtn::Rotate => {
+                                if let Ok(mut ws) = self.ws.lock() {
+                                    if let Some(pane) = ws.panes.get_mut(&pid) {
                                         pane.image_rot = (pane.image_rot + 1) % 4;
                                         // Pan is in screen space; rotating the
                                         // texture invalidates it.
                                         pane.image_pan_x = 0.0;
                                         pane.image_pan_y = 0.0;
+                                        pane.dirty = true;
                                     }
-                                    ImageBtn::Reset => {
+                                }
+                            }
+                            ImageBtn::Reset => {
+                                if let Ok(mut ws) = self.ws.lock() {
+                                    if let Some(pane) = ws.panes.get_mut(&pid) {
                                         pane.image_zoom = 1.0;
                                         pane.image_rot = 0;
                                         pane.image_pan_x = 0.0;
                                         pane.image_pan_y = 0.0;
+                                        pane.dirty = true;
                                     }
                                 }
-                                pane.dirty = true;
                             }
+                        }
+                        if let Ok(mut ws) = self.ws.lock() {
                             ws.active_pane = Some(pid.clone());
                         }
                         self.chrome_dirty = true;
@@ -2418,6 +2566,7 @@ impl ApplicationHandler<UserEvent> for App {
                             pane,
                             start: self.cursor_px,
                             active: false,
+                            from_handle: false,
                         });
                         window.request_redraw();
                         return;
@@ -2588,6 +2737,14 @@ impl ApplicationHandler<UserEvent> for App {
                         // list; a plain press just switches to that tab.
                         if let Some(mut td) = self.tab_drag.take() {
                             window.set_cursor(CursorIcon::Default);
+                            // 단일탭 pane 을 라이브로 통째 옮긴 경우: 이미 실제
+                            // 재배치가 끝났으니 백업만 정리하고 확정한다. 아래의
+                            // split/move 경로를 또 타면 이중 적용된다.
+                            if self.finish_live_drag() {
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
                             // Tab → pane BODY drop: split the target pane in
                             // the quadrant the cursor landed in and place the
                             // moved tab as the new leaf. Eats the old
@@ -2821,41 +2978,32 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(hd) = self.header_drag.take() {
                             window.set_cursor(CursorIcon::Default);
                             if hd.active {
-                                let dt = self.drop_target_at(self.cursor_px.0, self.cursor_px.1);
-                                let sw = if dt.is_none() {
-                                    self.sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
-                                } else {
-                                    None
-                                };
-                                // [임시 진단] cross-window 드래그가 안 되는 원인 파악용.
-                                // .app은 stderr가 안 보여 파일에 남긴다. 검증 후 제거.
-                                if let Ok(mut f) = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open("/tmp/kt-drag.log")
-                                {
-                                    use std::io::Write;
-                                    let _ = writeln!(
-                                        f,
-                                        "drop pane={} cursor=({:.0},{:.0}) drop_target={:?} sidebar_win={:?} win_tab_rects={} windows={}",
-                                        hd.pane,
-                                        self.cursor_px.0,
-                                        self.cursor_px.1,
-                                        dt.as_ref().map(|(t, _)| t.as_str()),
-                                        sw.as_deref(),
-                                        self.window_tab_rects.len(),
-                                        self.windows.len(),
-                                    );
+                                // 드래그 중 이미 라이브로 실제 재배치됨 → 현재
+                                // pty_layout 이 곧 최종. 백업/throttle 만 정리한다.
+                                let applied = self.finish_live_drag();
+                                if !applied {
+                                    // 같은 창 안 유효 드롭이 없었던 경우 — 사이드바
+                                    // 윈도우 칩 위에 떨군 cross-window 이동만 따로.
+                                    // 그 외엔 carried pane 이 이미 원위치로 복귀돼 있다.
+                                    if let Some(target) = self
+                                        .sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
+                                    {
+                                        self.move_pane(&hd.pane, &target, DropZone::Right);
+                                    }
                                 }
-                                if let Some((target, zone)) = dt {
-                                    self.move_pane(&hd.pane, &target, zone);
-                                } else if let Some(target) = sw {
-                                    // Dropped onto a sidebar window chip: relocate the
-                                    // pane into that window. The daemon's move_surface
-                                    // does the cross-window detach/insert; the zone is
-                                    // arbitrary (it lands beside that window's anchor).
-                                    self.move_pane(&hd.pane, &target, DropZone::Right);
-                                }
+                                window.request_redraw();
+                            } else if hd.from_handle {
+                                // ⋮ click (no drag past the threshold): toggle
+                                // that pane's handle menu — the press deferred
+                                // it so a drag could win instead.
+                                self.handle_menu =
+                                    if self.handle_menu.as_deref() == Some(hd.pane.as_str()) {
+                                        None
+                                    } else {
+                                        Some(hd.pane.clone())
+                                    };
+                                self.chrome_dirty = true;
+                                window.request_redraw();
                             }
                             return;
                         }
@@ -3061,6 +3209,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Dock badge tracks unread notifications: opening a pane clears it,
+        // a background notify raises it.
+        self.sync_dock_badge();
         // Live-resize flush: if a Resized arrived while the user was dragging
         // an edge we stashed it and skipped the actual resize work. Once the
         // user lets go, inLiveResize flips false and we replay the final size
@@ -3111,6 +3262,27 @@ impl ApplicationHandler<UserEvent> for App {
                 self.toggle_board_panel(event_loop);
             } else if self.arona_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
                 self.toggle_arona_panel(event_loop);
+            } else if self.paste_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+                // Cmd+V: key 창 first responder(아로나 webview)에 paste: 위임 →
+                // 안 먹으면(터미널 창) 직접 클립보드 붙여넣기.
+                #[cfg(target_os = "macos")]
+                let to_webview = crate::macos_open::send_paste_action();
+                #[cfg(not(target_os = "macos"))]
+                let to_webview = false;
+                if !to_webview {
+                    self.input_buf.clear();
+                    self.current_suggestion = None;
+                    self.paste_clipboard();
+                }
+            } else if self.copy_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+                // Cmd+C: webview 우선 copy: 위임 → 안 먹으면 터미널 선택영역 복사.
+                #[cfg(target_os = "macos")]
+                let to_webview = crate::macos_open::send_copy_action();
+                #[cfg(not(target_os = "macos"))]
+                let to_webview = false;
+                if !to_webview && self.selection.is_some() {
+                    self.copy_selection();
+                }
             }
         }
         // Headless git-panel demo (expand diff / open modal) before the capture.
@@ -3175,6 +3347,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autowindows();
         self.run_pending_autodrag();
         self.run_pending_autopanemove();
+        self.run_pending_force_drag();
         self.run_pending_autotoggle();
         self.run_pending_autoarona(event_loop);
         self.run_pending_onboarding(event_loop);

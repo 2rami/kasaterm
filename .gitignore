@@ -8,3 +8,8 @@ Cargo.lock
 .memory
 .claude/scheduled_tasks.lock
 .playwright-mcp/
+
+# 임시 산출물 (README 미리보기, 임시 캡처)
+/_readme_*
+/schale-light.png
+web/arona-ui/character-src/_*.png

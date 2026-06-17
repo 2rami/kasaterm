@@ -346,6 +346,53 @@ impl App {
             (m, tg) => eprintln!("[autopanemove] skipped: moving={m:?} target={tg:?}"),
         }
     }
+    /// Headless drag-preview repro. KASATERM_FORCE_DRAG="%N" (or empty = first
+    /// leaf) parks that leaf in an active header_drag with the cursor in a
+    /// sibling pane's lower half (Down zone), then stops — so a capture shows
+    /// the floating ghost + vacated-slot scrim mid-drag.
+    pub(crate) fn arm_force_drag(&mut self) {
+        let Ok(env) = std::env::var("KASATERM_FORCE_DRAG") else { return };
+        let ms: u64 = std::env::var("KASATERM_FORCE_DRAG_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4000);
+        self.force_drag_leaf = Some(env);
+        self.force_drag_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
+        eprintln!("[force_drag] armed in {ms}ms");
+    }
+    pub(crate) fn run_pending_force_drag(&mut self) {
+        let Some(t) = self.force_drag_at else { return };
+        if Instant::now() < t { return; }
+        self.force_drag_at = None;
+        let Some(want) = self.force_drag_leaf.take() else { return };
+        let leaves: Vec<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|l| l.leaves().into_iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        if leaves.len() < 2 {
+            eprintln!("[force_drag] need 2+ panes, have {}", leaves.len());
+            return;
+        }
+        let pane = if leaves.iter().any(|s| *s == want) { want } else { leaves[0].clone() };
+        // carried pane 을 제거하면 형제가 창 전체를 채운다 — 라이브 hit-test 는 그
+        // base 기준이므로 커서를 *창 전체*의 가로 중앙·하단(80%)에 둬야 Down 쐐기에
+        // 확실히 떨어진다(거노가 말한 1→2 밑). 형제의 옛 rect 기준으로 두면 정규화
+        // 좌표상 대각선 경계라 Right 로 새기도 했다.
+        let (cols, rows) = self.window_cells();
+        let pad = WINDOW_PADDING + self.effective_sidebar_w();
+        let win_w = cols as f32 * self.cell.w;
+        let win_h = rows as f32 * self.cell.h;
+        self.cursor_px = (pad + win_w / 2.0, TITLE_HEIGHT + win_h * 0.8);
+        self.header_drag = Some(HeaderDrag { pane, start: (0.0, 0.0), active: true, from_handle: false });
+        // 라이브 이동을 실제로 적용 — 실드래그의 mouse-move 가 하는 일을 흉내.
+        self.update_live_drag();
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        eprintln!("[force_drag] parked drag; cursor=({:.0},{:.0})", self.cursor_px.0, self.cursor_px.1);
+    }
     /// Pane header centre in logical px, mirroring `drop_target_at`'s box
     /// expansion. Used by `simulate_tab_merge` to land the synthetic
     /// cursor exactly where a user would aim "drop on header band".

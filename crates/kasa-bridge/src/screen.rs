@@ -80,6 +80,13 @@ pub struct ScreenUpdate {
     /// command line for inline autosuggestion. `None` on frames without a
     /// fresh mark — the host keeps the last known one until it goes stale.
     pub prompt_end: Option<(u16, u16)>,
+    /// OSC 777 `notify;Title;Body` payload captured this frame, if any. The
+    /// host pump drains it into `UserEvent::Notify` (desktop alert + pane
+    /// flash) and clears it. `None` on normal frames. This is the second
+    /// notification entry point alongside the claude-hook → `kasaterm-cli
+    /// notify` path — any shell command can fire one via
+    /// `printf '\e]777;notify;Title;Body\a'`.
+    pub notify: Option<(String, String)>,
 }
 
 pub(crate) fn vt_color(c: vt100::Color) -> Color {

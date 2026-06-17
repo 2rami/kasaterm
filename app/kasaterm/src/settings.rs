@@ -166,6 +166,16 @@ impl App {
             SettingsAction::ToggleFileTree => {
                 self.set_file_tree_default = !self.set_file_tree_default;
                 self.settings_save();
+                // 토글을 라이브 트리에도 즉시 반영 — 안 그러면 설정에선 껐는데
+                // 화면 트리는 그대로라 "안 먹힌다"고 느낀다.
+                if self.file_tree.visible != self.set_file_tree_default {
+                    self.file_tree.visible = self.set_file_tree_default;
+                    if self.file_tree.visible {
+                        self.refresh_file_tree();
+                    }
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                }
             }
             SettingsAction::ShellPreset(s) => {
                 self.set_shell = s;

@@ -829,6 +829,12 @@ fn spawn_reader_thread(
         let mut kitty_chunk_buf: Vec<u8> = Vec::new();
         let mut kitty_payload_buf: Vec<u8> = Vec::new();
         let mut kitty_capturing = false;
+        // OSC 777 desktop-notification capture state (payload can span reads).
+        let mut notify_buf: Vec<u8> = Vec::new();
+        let mut notify_capturing = false;
+        // Keeps a captured notify across frames so a sync-suppressed read
+        // (sync_bytes_count > 0 → no snapshot built) still delivers next frame.
+        let mut pending_notify: Option<(String, String)> = None;
 
         loop {
             // Check for a pending resize before we read more bytes —
@@ -944,6 +950,18 @@ fn spawn_reader_thread(
                     &mut kitty_capturing,
                 );
             }
+            // OSC 777 desktop notification: alacritty drops it unhandled like
+            // OSC 1337/kitty, so sniff the raw batch and stash until a snapshot
+            // frame can carry it to the host pump.
+            if notify_capturing
+                || memchr::memmem::find(processed_bytes, b"\x1b]777").is_some()
+            {
+                if let Some(n) =
+                    scan_osc_notify(processed_bytes, &mut notify_buf, &mut notify_capturing)
+                {
+                    pending_notify = Some(n);
+                }
+            }
 
             let update = {
                 let mut t = term.lock().unwrap();
@@ -979,6 +997,9 @@ fn spawn_reader_thread(
                     if find_subslice(processed_bytes, b"\x1b]133;B").is_some() {
                         snap.prompt_end = Some((snap.cursor_row, snap.cursor_col));
                     }
+                    // Hand off any OSC 777 notify captured this read (or a
+                    // prior sync-suppressed one) to the host pump.
+                    snap.notify = pending_notify.take();
                     if std::env::var_os("KASATERM_PROFILE").is_some() {
                         eprintln!(
                             "[snapshot] {}us {}x{} ({}b in)",
@@ -1160,6 +1181,8 @@ fn snapshot(
         // Filled in by the reader thread when this batch carried an
         // OSC 133 `B` mark — snapshot() itself doesn't parse the stream.
         prompt_end: None,
+        // Likewise stamped by the reader when an OSC 777 notify was sniffed.
+        notify: None,
     }
 }
 
@@ -1282,6 +1305,67 @@ fn scan_inline_image(bytes: &[u8], buf: &mut Vec<u8>, capturing: &mut bool) {
                     data = &data[start + MARKER.len()..];
                 }
                 None => return,
+            }
+        }
+    }
+}
+
+/// Capture an OSC 777 desktop-notification sequence that may span several PTY
+/// reads. Mirror of `scan_inline_image`: marker `ESC ] 777 ; notify ;` …
+/// terminator BEL or ST. alacritty parses the OSC and drops it (unhandled), so
+/// we sniff the raw batch in parallel. Returns the last completed
+/// `(title, body)` in this batch — realistically a single read carries at most
+/// one (a human echoes them one at a time).
+fn scan_osc_notify(
+    bytes: &[u8],
+    buf: &mut Vec<u8>,
+    capturing: &mut bool,
+) -> Option<(String, String)> {
+    const MARKER: &[u8] = b"\x1b]777;notify;";
+    let mut data = bytes;
+    let mut result = None;
+    loop {
+        if *capturing {
+            let bel = data.iter().position(|&b| b == 0x07);
+            let st = find_subslice(data, b"\x1b\\");
+            let end = match (bel, st) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            match end {
+                Some(e) => {
+                    buf.extend_from_slice(&data[..e]);
+                    // Copy out before clearing buf so the borrow is released.
+                    let payload = String::from_utf8_lossy(buf).into_owned();
+                    buf.clear();
+                    result = Some(match payload.split_once(';') {
+                        Some((t, b)) => (t.to_string(), b.to_string()),
+                        None => (payload.clone(), String::new()),
+                    });
+                    *capturing = false;
+                    let term_len = if data.get(e) == Some(&0x07) { 1 } else { 2 };
+                    data = &data[(e + term_len).min(data.len())..];
+                }
+                None => {
+                    // Guard against unbounded growth on a malformed stream.
+                    if buf.len() < 8 * 1024 * 1024 {
+                        buf.extend_from_slice(data);
+                    } else {
+                        buf.clear();
+                        *capturing = false;
+                    }
+                    return result;
+                }
+            }
+        } else {
+            match find_subslice(data, MARKER) {
+                Some(start) => {
+                    *capturing = true;
+                    data = &data[start + MARKER.len()..];
+                }
+                None => return result,
             }
         }
     }
@@ -1463,5 +1547,75 @@ fn convert_color(c: VtColor) -> Color {
         VtColor::Named(n) => Color::Idx(n as u8),
         VtColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
         VtColor::Indexed(i) => Color::Idx(i),
+    }
+}
+
+#[cfg(test)]
+mod osc_notify_tests {
+    use super::*;
+
+    fn scan_all(reads: &[&[u8]]) -> Vec<(String, String)> {
+        let mut buf = Vec::new();
+        let mut cap = false;
+        let mut out = Vec::new();
+        for r in reads {
+            if let Some(n) = scan_osc_notify(r, &mut buf, &mut cap) {
+                out.push(n);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn basic_title_body_bel() {
+        assert_eq!(
+            scan_all(&[b"\x1b]777;notify;Build done;took 3m\x07"]),
+            vec![("Build done".into(), "took 3m".into())]
+        );
+    }
+
+    #[test]
+    fn title_only_no_body() {
+        assert_eq!(
+            scan_all(&[b"\x1b]777;notify;Heads up\x07"]),
+            vec![("Heads up".into(), String::new())]
+        );
+    }
+
+    #[test]
+    fn st_terminator() {
+        assert_eq!(
+            scan_all(&[b"\x1b]777;notify;T;B\x1b\\"]),
+            vec![("T".into(), "B".into())]
+        );
+    }
+
+    #[test]
+    fn body_keeps_extra_semicolons() {
+        assert_eq!(
+            scan_all(&[b"\x1b]777;notify;T;a;b;c\x07"]),
+            vec![("T".into(), "a;b;c".into())]
+        );
+    }
+
+    #[test]
+    fn spans_two_reads() {
+        assert_eq!(
+            scan_all(&[b"\x1b]777;notify;Ti", b"tle;Body\x07"]),
+            vec![("Title".into(), "Body".into())]
+        );
+    }
+
+    #[test]
+    fn ignores_unrelated_osc() {
+        assert!(scan_all(&[b"\x1b]0;just a window title\x07hello"]).is_empty());
+    }
+
+    #[test]
+    fn embedded_in_shell_output() {
+        assert_eq!(
+            scan_all(&[b"done\r\n\x1b]777;notify;X;Y\x07$ "]),
+            vec![("X".into(), "Y".into())]
+        );
     }
 }

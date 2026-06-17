@@ -83,6 +83,7 @@ impl App {
                         display,
                         pane_origin.0,
                         pane_origin.1,
+                        pane.header_px(),
                     )
                 })
             })
@@ -97,24 +98,16 @@ impl App {
             preedit,
             pane_x,
             pane_y,
-        ) = snap.unwrap_or((0, 0, false, 80, 0, 0, preedit_text.clone(), 0, 0));
+            header_shift,
+        ) = snap.unwrap_or((0, 0, false, 80, 0, 0, preedit_text.clone(), 0, 0, 0.0));
         // When split OR any pane is multi-tab, every pane body is pushed
         // down by its header band. The cursor / preedit / selection
         // overlays anchor off the same origin as the cells, so they must
         // apply the identical shift — otherwise the cursor floats up into
         // the header row (which is exactly what made it appear one line
         // above the actual prompt after a cross-pane tab drop).
-        let show_headers = self
-            .pty_layout
-            .as_ref()
-            .is_some_and(|t| t.leaves().len() > 1)
-            || self
-                .ws
-                .lock()
-                .ok()
-                .map(|ws| ws.panes.values().any(|p| p.tabs.len() > 1))
-                .unwrap_or(false);
-        let header_shift = if show_headers { PANE_HEADER_HEIGHT } else { 0.0 };
+        // header_shift = active pane 의 header_px(snap 에서 가져옴). 헤더 있는
+        // pane 은 커서/조합(IME)/선택 오버레이도 셀과 똑같이 헤더만큼 내려간다.
         GpuOverlay {
             cell_w: self.cell.w,
             cell_h: self.cell.h,
@@ -397,17 +390,10 @@ impl App {
             // session reads as a plain terminal; but a lone pane with two or
             // more tabs (after a cross-pane drag, or a +button add) MUST
             // keep its strip so the tabs stay reachable.
-            let any_multitab = leaves
-                .iter()
-                .any(|(id, _, _, _, _)| ws.panes.get(id).map_or(false, |p| p.tabs.len() > 1));
-            // A zoomed pane keeps its header even though it's the only visible
-            // leaf — otherwise there's no double-click target to un-zoom.
-            let show_headers = leaves.len() > 1 || any_multitab || self.zoomed_pane.is_some();
-            let header_shift_px = if show_headers {
-                PANE_HEADER_HEIGHT * scale
-            } else {
-                0.0
-            };
+            // ghostty식: 상시 헤더 띠 폐기 → 셀 시프트 0, 헤더 paint 없음.
+            // 비활성 pane dim(흐림)만 split 여부로 유지. pane 컨트롤은
+            // hover ⋮ 핸들로 이관(Phase 2~4).
+            let is_split = leaves.len() > 1;
             let mut slots = Vec::new();
             let mut headers = Vec::new();
             // Box geometry per leaf (id, x, y, w, h) in logical px — collected
@@ -454,7 +440,7 @@ impl App {
                     let ch = self.cell.h.max(1.0);
                     let scaled_cw = cw * fs;
                     let scaled_ch = ch * fs;
-                    let header_px_now = if show_headers { PANE_HEADER_HEIGHT } else { 0.0 };
+                    let header_px_now = pane.header_px();
                     let footer_px_now = self.statusbar_px(id.as_str());
                     let usable_w = (w_cells as f32 * cw - 2.0 * PANE_INNER_X).max(scaled_cw);
                     let usable_h = (h_cells as f32 * ch
@@ -514,6 +500,7 @@ impl App {
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
+                let header_shift_px = pane.header_px() * scale;
                 let origin_px = (
                     pad_px + x_cells as f32 * cell_w_px + PANE_INNER_X * scale,
                     title_px
@@ -525,11 +512,7 @@ impl App {
                 // boxes (Claude Code code/command blocks) and stash a copy
                 // button at each block's top-right. Logical px so the mouse
                 // handler and the overlay pass agree on the hit area.
-                let header_shift_logical = if show_headers {
-                    PANE_HEADER_HEIGHT
-                } else {
-                    0.0
-                };
+                let header_shift_logical = pane.header_px();
                 let body_left = WINDOW_PADDING
                     + sidebar_w
                     + x_cells as f32 * self.cell.w
@@ -570,7 +553,7 @@ impl App {
                     origin_px,
                     // Unfocused panes dim their text only (no box veil). Single
                     // un-split pane is never dimmed.
-                    dim: show_headers && active_id.as_deref() != Some(id.as_str()),
+                    dim: is_split && active_id.as_deref() != Some(id.as_str()),
                     font_scale: pane_font_scale,
                     links: hover_links,
                 });
@@ -688,7 +671,9 @@ impl App {
                     }
                 };
                 footer_slots.push((id.clone(), box_x, box_y, box_w, box_h));
-                if show_headers {
+                // image/md pane만 헤더 띠 데이터 생성(전용 컨트롤 자리). 일반
+                // 터미널은 hover ⋮ 핸들로 — has_header()가 그 경계를 가른다.
+                if pane.has_header() {
                     // Custom title (rename / OSC) wins; otherwise show the
                     // live foreground process (vim, claude, zsh …); only
                     // fall back to the raw "%N" pane id if both are empty.
@@ -861,7 +846,25 @@ impl App {
         // — without it the user sees no preview when hovering the header,
         // which is exactly the spot most people aim for when intending
         // "merge into this pane".
-        let show_drop_zone = header_drag_active || tab_drag_active;
+        // 라이브 드래그(실제 레이아웃이 재배치되는 케이스): header/handle 드래그는
+        // 항상, tab 드래그는 단일탭 pane 일 때. 진짜 reflow 가 곧 피드백이므로 파란
+        // drop-zone 박스를 띄우지 않는다 — 박스는 라이브가 아닌 tab 드래그(멀티탭
+        // 탭 추출)에만 남긴다.
+        let live_drag = header_drag_active
+            || self
+                .tab_drag
+                .as_ref()
+                .map(|t| {
+                    t.active
+                        && self
+                            .ws
+                            .lock()
+                            .ok()
+                            .and_then(|w| w.panes.get(&t.pane).map(|p| p.tabs.len() <= 1))
+                            .unwrap_or(true)
+                })
+                .unwrap_or(false);
+        let show_drop_zone = tab_drag_active && !live_drag;
         // Indicator policy:
         //   - header band (cursor_on_header) → strip insertion bar only
         //                                       (overlay 안 그림)
@@ -919,15 +922,6 @@ impl App {
                     DropZone::Center => return None,
                 })
             });
-        // Floating drag-ghost data (label + cursor), captured before the gpu
-        // borrow below so the paint pass draws it without re-borrowing self.
-        let drag_ghost: Option<(String, (f32, f32))> = if header_drag_active {
-            self.header_drag
-                .as_ref()
-                .map(|hd| (hd.pane.clone(), self.cursor_px))
-        } else {
-            None
-        };
         // Ghostty-style split seams: one 1px hairline per interior split
         // boundary instead of a 4-side border around every pane (which
         // doubled up into a thick seam between abutting panes). Coords match
@@ -3204,6 +3198,125 @@ impl App {
             for (ax, ay, aw, ac) in &deferred_accents {
                 g.rect(*ax, *ay, *aw, ACTIVE_ACCENT_STROKE, *ac);
             }
+            // ── ghostty식 pane 핸들(⋮) + active 보더 ───────────────────
+            // 헤더 띠를 없앤 대신: ① active pane은 얇은 accent 보더로 강조
+            // (비활성 dim과 함께 focus 단서) ② pane에 마우스를 올리면 우상단에
+            // ⋮ 핸들이 떠서 클릭=메뉴(Phase 3)·드래그=이동(Phase 4) 진입점이 됨.
+            // 설정 화면이 떠 있으면 pane 핸들·보더를 그리지 않는다 — 불투명 설정
+            // backdrop 위로 ⋮ 가 비쳐 보이던 잔상(거노). hit-rect 도 비워 설정 영역
+            // 클릭이 유령 핸들에 안 걸리게 한다.
+            if self.settings_open {
+                self.pane_handle_rects.clear();
+                self.pane_top_zones.clear();
+                self.handle_menu_hits.clear();
+            } else {
+                let (hmx, hmy) = self.cursor_px;
+                let is_split = footer_slots.len() > 1;
+                // active_pane + 헤더 보유 pane 집합을 한 번에 스냅샷 — 루프 안에서
+                // self를 재borrow하면 g(=&mut self.gpu)와 충돌하므로 미리 모은다.
+                let (active_pane, headered): (Option<String>, std::collections::HashSet<String>) =
+                    match self.ws.lock() {
+                        Ok(w) => (
+                            w.active_pane.clone(),
+                            w.panes
+                                .iter()
+                                .filter(|(_, p)| p.has_header())
+                                .map(|(k, _)| k.clone())
+                                .collect(),
+                        ),
+                        Err(_) => (None, Default::default()),
+                    };
+                let accent = theme::accent_color(theme::accent_name());
+                let mut handle_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+                let mut zones: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+                let mut menu_hits: Vec<(ActionKind, (f32, f32, f32, f32))> = Vec::new();
+                const HANDLE: f32 = 22.0;
+                const HMARGIN: f32 = 5.0;
+                for (fid, fx, fy, fw, fbox_h) in &footer_slots {
+                    // active 보더 — split일 때만(단일 pane은 강조 불필요).
+                    if is_split && active_pane.as_deref() == Some(fid.as_str()) {
+                        let t = 1.5_f32;
+                        g.rect(*fx, *fy, *fw, t, accent);
+                        g.rect(*fx, fy + fbox_h - t, *fw, t, accent);
+                        g.rect(*fx, *fy, t, *fbox_h, accent);
+                        g.rect(fx + fw - t, *fy, t, *fbox_h, accent);
+                    }
+                    // 헤더 있는 pane(image/md/탭 2개+)은 헤더에 컨트롤이 다 있으니
+                    // ··· 핸들을 생략한다 — 중복 진입점 제거.
+                    if headered.contains(fid.as_str()) {
+                        continue;
+                    }
+                    // ⋮ 핸들 — 상단 중앙. 평소엔 완전히 숨김. pane 상단 30% 띠에
+                    // 커서가 들어오면 흐릿하게 등장하고, ⋮ 바로 위로 가면 진해진다
+                    // (그때 손모양 커서 — handler 측). 클릭=메뉴·드래그=이동.
+                    let hx = fx + (fw - HANDLE) / 2.0;
+                    let hy = fy + HMARGIN;
+                    let on_handle = hmx >= hx && hmx <= hx + HANDLE
+                        && hmy >= hy && hmy <= hy + HANDLE;
+                    let zone_h = fbox_h * 0.30;
+                    let in_zone = hmx >= *fx && hmx <= fx + fw
+                        && hmy >= *fy && hmy <= fy + zone_h;
+                    let isz = 16.0_f32;
+                    // glow/chip 없이 ⋮ 아이콘 자체만 숨김→흐릿→진함 3단계.
+                    if on_handle || in_zone {
+                        g.queue_icon("ellipsis-horizontal",
+                            hx + (HANDLE - isz) / 2.0, hy + (HANDLE - isz) / 2.0, isz,
+                            if on_handle { theme::text() } else { theme::with_alpha(theme::text(), 0x66) });
+                    }
+                    handle_rects.push((fid.clone(), (hx, hy, HANDLE, HANDLE)));
+                    zones.push((fid.clone(), (*fx, *fy, *fw, zone_h)));
+                    // ⋮ 메뉴 열림 → 이 pane ⋮ 아래 버튼3개(좌우분할·상하분할·닫기).
+                    if self.handle_menu.as_deref() == Some(fid.as_str()) {
+                        // 상태바(footer) 토글 아이콘은 현재 표시 상태를 그대로
+                        // 드러낸다 — 보이면 panel-bottom, 접혀 있으면 dashed.
+                        let sb_icon = if self.statusbar.hidden.contains(fid.as_str()) {
+                            "panel-bottom-dashed"
+                        } else {
+                            "panel-bottom"
+                        };
+                        let items = [
+                            ("plus", ActionKind::NewTab),
+                            // columns-2(세로선=좌우 2칸) → Horizontal(right),
+                            // rows-2(가로선=상하 2칸) → Vertical(bottom). 아이콘이
+                            // 곧 결과 배치다 — SplitDir 이름과는 반대 매핑.
+                            ("columns-2", ActionKind::SplitH),
+                            ("rows-2", ActionKind::SplitV),
+                            (sb_icon, ActionKind::ToggleStatusbar),
+                            ("x", ActionKind::Close),
+                        ];
+                        let bw = 30.0_f32;
+                        let bh = 28.0_f32;
+                        let gap = 2.0_f32;
+                        let pad = 4.0_f32;
+                        let n = items.len() as f32;
+                        let mw = pad * 2.0 + bw * n + gap * (n - 1.0);
+                        let mh = bh + pad * 2.0;
+                        let mut mx = hx + HANDLE / 2.0 - mw / 2.0;
+                        // pane 가장자리 안으로 클램프(좌측/우측 끝 pane).
+                        mx = mx.max(*fx + 2.0).min(*fx + *fw - mw - 2.0);
+                        let my = hy + HANDLE + 3.0;
+                        round_rect(g, mx, my, mw, mh, theme::RADIUS_SM, theme::border());
+                        round_rect(g, mx + 1.0, my + 1.0, mw - 2.0, mh - 2.0,
+                            theme::RADIUS_SM - 1.0, theme::surface_hover());
+                        let mut bx2 = mx + pad;
+                        let by2 = my + pad;
+                        for (icon, act) in items {
+                            let on = hmx >= bx2 && hmx <= bx2 + bw && hmy >= by2 && hmy <= by2 + bh;
+                            if on {
+                                round_rect(g, bx2, by2, bw, bh, theme::RADIUS_SM, theme::surface_active());
+                            }
+                            let bisz = 16.0_f32;
+                            g.queue_icon(icon, bx2 + (bw - bisz) / 2.0, by2 + (bh - bisz) / 2.0, bisz,
+                                if on { theme::text() } else { theme::text_dim() });
+                            menu_hits.push((act, (bx2, by2, bw, bh)));
+                            bx2 += bw + gap;
+                        }
+                    }
+                }
+                self.pane_handle_rects = handle_rects;
+                self.pane_top_zones = zones;
+                self.handle_menu_hits = menu_hits;
+            }
             // Per-pane status bar at the foot of each pane box: cwd + branch
             // chips (click → cd / checkout dropdowns) on the left, ± diff on
             // the right. The gpu borrow rules out &self method calls in here,
@@ -3863,26 +3976,11 @@ impl App {
                 self.dock_chip_rects.clear();
                 self.dock_chip_close_rects.clear();
             }
-            // Drop-zone highlight sits on top of everything during a drag.
+            // 통째 이동(header/handle·단일탭 tab 드래그)은 실제 레이아웃이 라이브로
+            // reflow 되므로 오버레이가 없다 — 진짜 재배치가 곧 프리뷰다. 파란 drop-zone
+            // 박스는 라이브가 아닌 tab 드래그(멀티탭 탭 추출)의 착지 지점 힌트로만 남긴다.
             if let Some((zx, zy, zw, zh)) = drop_zone_rect {
                 g.rect(zx, zy, zw, zh, theme::with_alpha(theme::accent(), 90));
-            }
-            // Floating drag ghost under the cursor: the pane being carried is
-            // visibly "lifted out" so dragging it onto a sidebar window for a
-            // cross-window move reads as physically picking the pane up.
-            if let Some((label, (cgx, cgy))) = &drag_ghost {
-                let gw = 140.0_f32;
-                let gh = 26.0_f32;
-                let gx = *cgx - gw / 2.0;
-                let gy = *cgy - gh / 2.0;
-                g.round_rect_fill(gx, gy, gw, gh, 6.0, theme::with_alpha(theme::surface_active(), 230));
-                g.rect(gx, gy, gw, 2.0, theme::accent());
-                g.draw_text(
-                    gx + 10.0,
-                    gy + (gh - 12.0) / 2.0,
-                    label,
-                    gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: false, italic: false },
-                );
             }
             // Launch build banner, bottom-right, painted last so it sits
             // on top. Faint and short-lived — fades out after a few

@@ -98,6 +98,28 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>NSApplication</string>
     <key>NSRequiresAquaSystemAppearance</key>
     <false/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+      <dict>
+        <key>CFBundleTypeName</key>
+        <string>Markdown Document</string>
+        <key>CFBundleTypeRole</key>
+        <string>Viewer</string>
+        <key>LSHandlerRank</key>
+        <string>Alternate</string>
+        <key>LSItemContentTypes</key>
+        <array>
+          <string>net.daringfireball.markdown</string>
+        </array>
+        <key>CFBundleTypeExtensions</key>
+        <array>
+          <string>md</string>
+          <string>markdown</string>
+          <string>mdown</string>
+          <string>mkd</string>
+        </array>
+      </dict>
+    </array>
 </dict>
 </plist>
 PLIST
@@ -142,4 +164,9 @@ if [[ "$INSTALL" -eq 1 ]]; then
   rm -rf "$HOME/Applications/kasaterm.app.old"
   touch "$HOME/Applications/kasaterm.app"
   echo "installed to ~/Applications/kasaterm.app"
+  # LaunchServices 에 .md 문서 타입(CFBundleDocumentTypes)을 재등록 — 안 하면
+  # 더블클릭이 캐시된 옛 핸들러로 가서 kasaterm 이 "다음으로 열기" 후보에 안 뜬다.
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+  [[ -x "$LSREGISTER" ]] && "$LSREGISTER" -f "$HOME/Applications/kasaterm.app" \
+    && echo "re-registered with LaunchServices (.md handler)"
 fi

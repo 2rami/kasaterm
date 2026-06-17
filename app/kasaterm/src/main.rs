@@ -27,6 +27,10 @@ mod input;
 mod settings;
 mod links;
 mod state;
+// macOS `.md` 더블클릭(odoc Apple Event) 핸들러. 다른 OS 엔 파일오픈 이벤트가
+// 이 경로로 안 와서 macos 전용.
+#[cfg(target_os = "macos")]
+mod macos_open;
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
@@ -1316,6 +1320,10 @@ struct HeaderDrag {
     /// True once the cursor moved far enough to count as a drag rather
     /// than a click.
     active: bool,
+    /// True when the drag began on a ⋮ handle (header-less pane). A release
+    /// under the drag threshold then toggles that pane's handle menu; a
+    /// header-bar drag just focuses.
+    from_handle: bool,
 }
 
 /// Image-pane action button kinds, drawn in place of the terminal-action
@@ -1378,6 +1386,11 @@ enum ActionKind {
     /// (and `MdRender` from Raw writes the buffer back to disk + re-parses).
     MdRender,
     MdRaw,
+    /// ghostty ⋮ 메뉴의 "닫기" — 이 pane을 닫는다.
+    Close,
+    /// ··· 메뉴의 "새 탭" — 이 pane(outer)에 in-pane 탭을 추가한다. 탭이 둘
+    /// 이상이 되면 has_header()가 켜져 탭 스트립이 보인다.
+    NewTab,
 }
 
 /// State for an in-flight in-pane tab reorder drag. A press on a tab arms
@@ -1669,6 +1682,22 @@ struct PaneState {
 impl Default for PaneState {
     fn default() -> Self {
         Self { tabs: vec![PaneTab::default()], active_tab: 0, color: None, dirty: false }
+    }
+}
+
+impl PaneState {
+    /// 탭이 둘 이상이면 탭 스트립을 위해, 이미지·마크다운(.md)이면 전용 컨트롤을
+    /// 위해 헤더 띠를 유지한다. 그 외 일반 터미널은 hover ⋮ 만 쓴다. image()/
+    /// markdown()은 Deref로 active 탭을 본다.
+    fn has_header(&self) -> bool {
+        self.tabs.len() > 1
+            || self.image().is_some()
+            || self.markdown().map_or(false, |m| m.is_md_doc)
+    }
+    /// 셀 그리드를 아래로 미는 헤더 높이(logical px). render/layout 양쪽이
+    /// 같은 값을 써야 PTY 그리드↔셀 클립이 어긋나지 않는다.
+    fn header_px(&self) -> f32 {
+        if self.has_header() { PANE_HEADER_HEIGHT } else { 0.0 }
     }
 }
 
@@ -2228,6 +2257,10 @@ enum UserEvent {
         surface_id: String,
         reason: String,
     },
+    /// macOS `.md` 더블클릭(odoc Apple Event) 또는 argv → 새 워크스페이스에
+    /// 마크다운 풀 뷰어. `SocketOpenPreview`(현재 창 split)와 달리 별도 탭의
+    /// 단독 pane 으로 띄워 기존 작업 워크스페이스를 안 건드린다. 페이로드 = 경로.
+    OpenMarkdownWindow(String),
 }
 
 /// One terminal session: its own pane set, layout, and workspace. The visible
@@ -2522,6 +2555,12 @@ struct App {
     /// path without a real drag.
     autopanemove_dst: Option<usize>,
     autopanemove_at: Option<Instant>,
+    /// Headless repro for the drag *preview* (KASATERM_FORCE_DRAG="%N"): parks
+    /// the named leaf in an active header_drag with the cursor over a sibling,
+    /// then stops — so a capture shows the floating ghost + vacated-slot scrim
+    /// without committing the drop.
+    force_drag_leaf: Option<String>,
+    force_drag_at: Option<Instant>,
     /// Headless repro for the window sidebar: number of extra windows left to
     /// spawn (KASATERM_AUTOWINDOWS) and when the next one fires. 0 disables.
     autowindow_left: usize,
@@ -2601,6 +2640,20 @@ struct App {
     /// by `render_frame` and consumed by the MouseInput handler so a
     /// click on the × button closes that pane.
     pane_header_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// ghostty식 pane 핸들(⋮) hit rect: (pane id, logical rect). 상단 중앙에
+    /// 평소 흐릿하게 상시 표시, 클릭=컨트롤 메뉴(Phase 3)·드래그=pane 이동(Phase 4).
+    pane_handle_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// pane 상단 띠(box 높이 30%) hit rect: (pane id, logical rect). 이 영역에
+    /// 커서가 들어오면 ⋮ 가 흐릿하게 등장한다(평소엔 완전히 숨김).
+    pane_top_zones: Vec<(String, (f32, f32, f32, f32))>,
+    /// ⋮ 핸들 위 커서 여부 — 손모양 커서 transition + ⋮ 강조 redraw 트리거.
+    handle_hovered: bool,
+    /// pane 상단 띠(top_zone) 안에 커서가 있는지 — ⋮ 등장/소멸 redraw 트리거.
+    handle_zone_hovered: bool,
+    /// ghostty ⋮ 메뉴가 열린 pane id(None=닫힘). ⋮ 클릭으로 토글.
+    handle_menu: Option<String>,
+    /// ⋮ 메뉴 버튼 hit rect: (액션, logical rect). render가 매 프레임 채움.
+    handle_menu_hits: Vec<(ActionKind, (f32, f32, f32, f32))>,
     /// (block text, copy-button rect) for every code block detected in the
     /// visible panes this frame. Logical px. Populated by the render path,
     /// consumed by the MouseInput handler so a click on the button copies
@@ -2703,6 +2756,13 @@ struct App {
     /// on a tab; releasing either reorders (if it became a drag) or switches
     /// the active tab (if it stayed a click).
     tab_drag: Option<TabDrag>,
+    /// 라이브 드래그 이동의 원본 레이아웃 백업. active 드래그가 처음 layout을
+    /// 실제로 건드릴 때 캡처되고, 드롭이 무효(빈 곳·Center·자기 자신)일 때 이걸로
+    /// 복원한다. 드래그가 끝나면 None.
+    drag_orig_layout: Option<kasa_pty::PtyLayout>,
+    /// 라이브 드래그가 마지막으로 실제 적용한 `(target, zone)`. 같으면 reshape를
+    /// 건너뛰어(throttle) zone이 바뀔 때만 SIGWINCH가 나가게 한다.
+    drag_live_applied: Option<(String, DropZone)>,
     /// In-flight image-pane pan drag: `(pane_id, start_cursor_px, base_pan)`.
     /// `Some` while dragging a zoomed image's body; CursorMoved updates the
     /// active tab's `image_pan_*` from `base_pan + (cursor - start)`.
@@ -2815,6 +2875,12 @@ struct App {
     /// pulses until the user switches to that window, which clears the entry —
     /// a persistent "you missed this" cue, unlike the brief `notify_flash`.
     window_alert: std::collections::HashSet<usize>,
+    /// Panes that fired a notify/attention while not being looked at and
+    /// haven't been opened since — drives the Dock badge count. Cleared when
+    /// the pane becomes the focused active pane (`sync_dock_badge`).
+    unread_panes: std::collections::HashSet<String>,
+    /// Last value pushed to the Dock badge, so AppKit is only touched on change.
+    dock_badge_n: usize,
     /// Collab completion toast + god approval card, grouped into a sub-struct
     /// (state.rs) so collab-UI work touches one file — CLAUDE.md 병렬 규칙.
     collab: state::CollabState,
@@ -2985,6 +3051,11 @@ struct App {
     /// "board 패널" menu item id, matched against MenuEvents to toggle the
     /// collab board panel.
     board_menu_item: Option<muda::MenuItem>,
+    /// 편집 메뉴 복사/붙여넣기 — 네이티브 PredefinedMenuItem 은 Cmd+C/Cmd+V
+    /// keyDown 을 가로채 터미널까지 안 내려보낸다(먹통). 커스텀 항목으로 만들어
+    /// MenuEvent id 로 매칭, webview 우선 위임 후 폴백으로 직접 클립보드 처리.
+    copy_menu_item: Option<muda::MenuItem>,
+    paste_menu_item: Option<muda::MenuItem>,
     /// History store for inline autosuggestion. See autosuggest.rs.
     autosuggest: autosuggest::History,
     /// What the user has typed at the current shell prompt since the last
@@ -3003,6 +3074,11 @@ struct App {
     /// `effective_sidebar_w()` instead of the `SIDEBAR_W` const directly,
     /// so flipping this is all it takes to collapse the strip.
     sidebar_visible: bool,
+    /// macOS `.md` 더블클릭이 cold-launch(앱 꺼진 채)로 들어오면 odoc 이벤트가
+    /// `resumed()`(window·pty_layout 생성) 전에 도착할 수 있다. 그때 경로를 여기
+    /// 쌓아두고 start_pty 직후 flush 한다(빈손이면 무비용). 앱 켜진 채 더블클릭은
+    /// 디퍼 없이 바로 `open_markdown_window`.
+    pending_open_md: Vec<std::path::PathBuf>,
 }
 
 impl App {
@@ -3027,6 +3103,8 @@ impl App {
             autodrag_at: None,
             autopanemove_dst: None,
             autopanemove_at: None,
+            force_drag_leaf: None,
+            force_drag_at: None,
             autowindow_left: 0,
             autowindow_at: None,
             autotoggle_sidebar_at: None,
@@ -3048,6 +3126,14 @@ impl App {
             ime_active: false,
             hangul: kasa_ime::Composer::new(),
             pane_header_rects: Vec::new(),
+            pane_handle_rects: Vec::new(),
+            pane_top_zones: Vec::new(),
+            handle_hovered: false,
+            handle_zone_hovered: false,
+            // testkit: KASATERM_FORCE_HANDLE_MENU=%N 으로 그 pane ⋮ 메뉴를
+            // 부팅 시 강제로 열어 자동캡처로 메뉴 레이아웃을 검증한다. 미설정이면 None.
+            handle_menu: std::env::var("KASATERM_FORCE_HANDLE_MENU").ok(),
+            handle_menu_hits: Vec::new(),
             copy_btn_rects: Vec::new(),
             md_content_h: HashMap::new(),
             md_body_rects: HashMap::new(),
@@ -3077,6 +3163,8 @@ impl App {
             last_divider_pty_resize: None,
             header_drag: None,
             tab_drag: None,
+            drag_orig_layout: None,
+            drag_live_applied: None,
             image_pan_drag: None,
             text_cursor_shown: false,
             confirm_close: None,
@@ -3100,6 +3188,8 @@ impl App {
             window_focused: true,
             notify_flash: HashMap::new(),
             window_alert: std::collections::HashSet::new(),
+            unread_panes: std::collections::HashSet::new(),
+            dock_badge_n: 0,
             collab: Default::default(),
             pane_prompt_wait: HashMap::new(),
             last_window_title_check: None,
@@ -3178,6 +3268,8 @@ impl App {
             arona_menu_item: None,
             session_menu_item: None,
             board_menu_item: None,
+            copy_menu_item: None,
+            paste_menu_item: None,
             autosuggest: autosuggest::History::new(),
             input_buf: String::new(),
             current_suggestion: None,
@@ -3185,6 +3277,7 @@ impl App {
             // terminal at first launch. User toggles via the title-bar
             // button or the "보기 → 세션 패널" menu item.
             sidebar_visible: false,
+            pending_open_md: Vec::new(),
         }
     }
 
@@ -3361,6 +3454,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     demote_all_god_rooms();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
+    // argv 폴백: `kasaterm file.md` / 커맨드라인. `.md` 인자면 새 워크스페이스
+    // 마크다운으로 위임(resumed 전이면 디퍼됐다 start_pty 후 flush). `open`(1)은
+    // odoc 로만 오므로 둘이 겹쳐도 open_markdown_window 의 dedup 이 흡수한다.
+    for arg in std::env::args().skip(1) {
+        let p = std::path::PathBuf::from(&arg);
+        let is_md = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+            .unwrap_or(false);
+        if is_md && p.is_file() {
+            if let Ok(abs) = std::fs::canonicalize(&p) {
+                let _ = proxy.send_event(UserEvent::OpenMarkdownWindow(
+                    abs.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+    }
     let mut app = App::new(proxy);
     event_loop.run_app(&mut app)?;
     Ok(())

@@ -57,6 +57,7 @@ impl App {
         }
         self.chrome_dirty = true;
         if !(self.window_focused && is_active_pane) {
+            self.unread_panes.insert(surface_id.to_string());
             notify_desktop(title, body);
         }
     }
@@ -100,7 +101,24 @@ impl App {
             self.collab.toast_rect = None;
         }
         if !(self.window_focused && is_active_pane) {
+            self.unread_panes.insert(surface_id.to_string());
             notify_desktop("⚠ 권한 필요", &format!("{name}{detail}"));
+        }
+    }
+
+    /// Drop the focused pane from the unread set (the user is now looking at
+    /// it) and push the count to the Dock badge when it changes. Called every
+    /// tick from `about_to_wait` — cheap unless the count actually moves.
+    pub(crate) fn sync_dock_badge(&mut self) {
+        if self.window_focused {
+            if let Some(active) = self.ws.lock().unwrap().active_pane.clone() {
+                self.unread_panes.remove(&active);
+            }
+        }
+        let n = self.unread_panes.len();
+        if n != self.dock_badge_n {
+            self.dock_badge_n = n;
+            set_dock_badge(n);
         }
     }
 
@@ -229,6 +247,15 @@ impl App {
         } else {
             0.0
         }
+    }
+    /// 헤더 띠 높이(logical px) — image/md pane만 30, 그 외 0. resize_backend
+    /// 처럼 ws 미잠금 지점에서 id로 조회한다(PaneState::header_px 위임).
+    pub(crate) fn pane_header_px(&self, id: &str) -> f32 {
+        self.ws
+            .lock()
+            .ok()
+            .and_then(|w| w.panes.get(id).map(|p| p.header_px()))
+            .unwrap_or(0.0)
     }
     /// Git-column-toggle button rect, parked at the right end of the title
     /// strip (mirrors the file-tree toggle on the left). Needs the window
@@ -1830,6 +1857,20 @@ fn notify_osascript(title: &str, body: &str) {
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn notify_desktop(_title: &str, _body: &str) {}
+
+/// Set (or clear, when 0) the Dock tile badge to the unread-notification count.
+#[cfg(target_os = "macos")]
+fn set_dock_badge(count: usize) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::NSString;
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
+    app.dockTile().setBadgeLabel(label.as_deref());
+}
+#[cfg(not(target_os = "macos"))]
+fn set_dock_badge(_count: usize) {}
 
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn ensure_notification_authorization() {}
