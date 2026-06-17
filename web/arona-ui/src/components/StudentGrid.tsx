@@ -87,7 +87,7 @@ function ContextBar({ agent }: { agent: Agent }) {
   );
 }
 
-function StudentCard({ agent, onSelect }: { agent: Agent; onSelect?: (id: string, title: string) => void }) {
+function StudentCard({ agent, onSelect, bust }: { agent: Agent; onSelect?: (id: string, title: string) => void; bust?: boolean }) {
   const accent = `var(--cth-${agent.accent})`;
   return (
     <button
@@ -113,7 +113,7 @@ function StudentCard({ agent, onSelect }: { agent: Agent; onSelect?: (id: string
           {agent.isGod && (
             <span style={{ position: 'absolute', top: 2, left: 2, fontFamily: 'var(--cth-font-display)', fontSize: 7, color: 'var(--cth-lemon)', fontWeight: 800 }}>★</span>
           )}
-          <SpritePortrait character={agent.character} scale={1.8} />
+          <SpritePortrait character={agent.character} scale={1.8} bust={bust} />
         </div>
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
           <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{agent.character}</div>
@@ -129,7 +129,7 @@ function StudentCard({ agent, onSelect }: { agent: Agent; onSelect?: (id: string
   );
 }
 
-function StudentRow({ agent, onSelect }: { agent: Agent; onSelect?: (id: string, title: string) => void }) {
+function StudentRow({ agent, onSelect, bust }: { agent: Agent; onSelect?: (id: string, title: string) => void; bust?: boolean }) {
   return (
     <button
       onClick={() => { void focusPane(agent.id); onSelect?.(agent.id, agent.name); }}
@@ -141,7 +141,7 @@ function StudentRow({ agent, onSelect }: { agent: Agent; onSelect?: (id: string,
       }}
     >
       <div style={{ width: 30, height: 36, flexShrink: 0, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-        <SpritePortrait character={agent.character} scale={1.3} />
+        <SpritePortrait character={agent.character} scale={1.3} bust={bust} />
       </div>
       <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', minWidth: 70, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
         {agent.isGod && <span style={{ color: 'var(--cth-lemon)' }}>★ </span>}{agent.character}
@@ -158,6 +158,7 @@ function StudentRow({ agent, onSelect }: { agent: Agent; onSelect?: (id: string,
 export function StudentGrid({ agents, onSelect }: StudentGridProps) {
   const [sort, setSort] = useState<SortKey>('god-first');
   const [view, setView] = useState<ViewKind>('grid');
+  const [bust, setBust] = useState(false);
   const list = sortAgents(agents, sort);
 
   const ViewBtn = ({ v, children }: { v: ViewKind; children: React.ReactNode }) => (
@@ -193,6 +194,16 @@ export function StudentGrid({ agents, onSelect }: StudentGridProps) {
           <option value="name">이름순</option>
         </select>
         <div style={{ flex: 1 }} />
+        <button
+          onClick={() => setBust((v) => !v)}
+          title={bust ? '전신' : '상반신'}
+          style={{
+            height: 22, padding: '0 8px', border: 'none', cursor: 'pointer', borderRadius: 6,
+            background: bust ? 'var(--cth-sky)' : 'var(--cth-cream-100)',
+            color: bust ? '#fff' : 'var(--cth-ink-500)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700,
+          }}
+        >{bust ? '상반신' : '전신'}</button>
         <ViewBtn v="grid"><svg width="13" height="13" viewBox="0 0 14 14"><rect x="1" y="1" width="5" height="5" rx="1" fill="currentColor" /><rect x="8" y="1" width="5" height="5" rx="1" fill="currentColor" /><rect x="1" y="8" width="5" height="5" rx="1" fill="currentColor" /><rect x="8" y="8" width="5" height="5" rx="1" fill="currentColor" /></svg></ViewBtn>
         <ViewBtn v="list"><svg width="13" height="13" viewBox="0 0 14 14"><rect x="1" y="2" width="12" height="2" rx="1" fill="currentColor" /><rect x="1" y="6" width="12" height="2" rx="1" fill="currentColor" /><rect x="1" y="10" width="12" height="2" rx="1" fill="currentColor" /></svg></ViewBtn>
       </div>
@@ -201,11 +212,11 @@ export function StudentGrid({ agents, onSelect }: StudentGridProps) {
         <div style={{ padding: '14px 12px', fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)' }}>학생 없음 — board 폴링 중</div>
       ) : view === 'grid' ? (
         <div style={{ display: 'flex', gap: 8, padding: '8px 12px', overflowX: 'auto', overflowY: 'hidden', alignItems: 'stretch' }}>
-          {list.map((a) => <StudentCard key={a.id} agent={a} onSelect={onSelect} />)}
+          {list.map((a) => <StudentCard key={a.id} agent={a} onSelect={onSelect} bust={bust} />)}
         </div>
       ) : (
         <div style={{ maxHeight: 196, overflowY: 'auto' }}>
-          {list.map((a) => <StudentRow key={a.id} agent={a} onSelect={onSelect} />)}
+          {list.map((a) => <StudentRow key={a.id} agent={a} onSelect={onSelect} bust={bust} />)}
         </div>
       )}
     </div>

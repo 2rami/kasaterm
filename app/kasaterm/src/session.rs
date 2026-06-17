@@ -504,6 +504,12 @@ impl App {
                 cache.insert(id.clone(), cwd);
             }
         }
+        // statusLine 보고(override)가 lsof(최상위 셸 cwd)보다 최신·정확 — claude 가 셸
+        // 위에서 돌아 내부 cd 를 lsof 로는 못 따라가므로, claude 가 직접 보고한 값으로
+        // 덮어쓴다(거노: GUI 파일트리/footer 가 claude 작업 디렉토리를 따라가야).
+        for (id, (cwd, _sid)) in &self.pane_cwd_cache_override {
+            cache.insert(id.clone(), cwd.clone());
+        }
         self.pane_cwd_cache = cache;
     }
     /// A pane's current shell cwd — cache first (refreshed ~700ms), else a live

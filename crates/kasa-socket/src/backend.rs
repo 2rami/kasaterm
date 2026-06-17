@@ -370,6 +370,13 @@ pub trait Backend: Send + Sync {
     fn active_cwd(&self) -> Option<std::path::PathBuf> {
         None
     }
+    /// statusLine 훅이 보고한 pane 의 현재 작업 디렉토리. claude 가 셸 위에서 돌아
+    /// lsof(최상위 셸 cwd)로는 내부 `cd` 를 못 따라가므로 claude 가 직접 report 한다.
+    /// `session_id` = claude task store(~/.claude/tasks/session-<id>) 매핑용.
+    /// Default: unsupported.
+    fn report_cwd(&self, _surface_id: &str, _cwd: &str, _session_id: &str) -> Result<()> {
+        anyhow::bail!("report_cwd unsupported by this backend")
+    }
     /// Foreground process name of the active pane (e.g. "claude", "zsh").
     /// Lets the AI-commit button decide whether to delegate the commit to a
     /// running claude or fall back. Default `None`.
@@ -428,6 +435,21 @@ pub trait Backend: Send + Sync {
     /// 격리한다(거노: 방끼리 inbox 공유 금지). 기본 방(없음)이면 None.
     fn active_room(&self) -> Option<String> {
         None
+    }
+    /// 모든 pane 의 `(surface_id, claude session_id)` — claude task store
+    /// (~/.claude/tasks) 매핑용. statusline 이 보고한 session_id 를 GUI 즉답으로
+    /// 가져온다(`/pane-tasks` 가 소비). 기본 빈 벡터(미지원 백엔드).
+    fn pane_session_ids(&self) -> Result<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+    /// 아로나 프롬프트 입력창 이미지 드롭(`POST /paste-image`) → 그 pane claude 에 첨부
+    /// (시스템 클립보드 비트맵 + Ctrl+V). 기본 미지원.
+    fn paste_image(&self, _surface: &str, _bytes: Vec<u8>) -> Result<()> {
+        anyhow::bail!("paste_image not supported")
+    }
+    /// 아로나 타이틀바 버튼(`POST /git-panel`) → 터미널 GUI git 소스컨트롤 패널 토글. 기본 미지원.
+    fn toggle_git_panel(&self) -> Result<()> {
+        anyhow::bail!("toggle_git_panel not supported")
     }
     /// Create a fresh window in the current session and switch to it. Default
     /// unsupported.

@@ -1,17 +1,23 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore, isAwaitingTeacher, isUnconfirmed } from '@/store';
 import { MomoTalk } from './MomoTalk';
 import { ScheduleTab } from './ScheduleTab';
+import { GitTab } from './GitTab';
 import { TerminalPeekPanel } from './TerminalPeekPanel';
 import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon, ForkIcon } from './activity';
+import { fetchPaneTasks, type PaneTask } from '@/lib/mcp';
 
-type CenterTab = 'momotalk' | 'dialog' | 'schedule' | 'tasks';
+type CenterTab = 'momotalk' | 'dialog' | 'schedule' | 'tasks' | 'git';
+
+// 태스크 정렬 순위 — 진행중 먼저, 그다음 대기, 완료는 맨 뒤(거노).
+const taskRank = (s: string) => (s === 'in_progress' ? 0 : s === 'completed' ? 2 : 1);
 
 const TAB_LABELS: Record<CenterTab, string> = {
   momotalk: '모모톡',
-  dialog: '학생별 대화',
+  dialog: '대화',
   schedule: '스케줄',
   tasks: '업무',
+  git: '소스 컨트롤',
 };
 
 export interface CommandCenterProps {
@@ -20,6 +26,8 @@ export interface CommandCenterProps {
   onClearDialog?: () => void;
   /** 모모톡에서 학생/아로나에게 보냈을 때 — 그 학생 '학생별 대화' 탭으로 전환(거노). */
   onPickStudent?: (id: string, title: string) => void;
+  /** 타이틀바 소스컨트롤 버튼 클릭 신호(증가) — git 탭으로 전환(거노). */
+  openGitTab?: number;
 }
 
 // SCHALE OS 우측 Command Center — 대화창이 따로 안 뜨고 여기 '학생별 대화' 탭에
@@ -34,12 +42,46 @@ function BellGlyph() {
   );
 }
 
-export function CommandCenter({ selected, onClearDialog, onPickStudent }: CommandCenterProps) {
-  const [tab, setTab] = useState<CenterTab>('momotalk');
+export function CommandCenter({ selected, onClearDialog, onPickStudent, openGitTab }: CommandCenterProps) {
+  const [tab, setTab] = useState<CenterTab>('dialog'); // 처음 열릴 때 대화 탭(거노)
+  // 탭 순서 — 드래그로 재정렬(거노). 기본 대화/업무/모모톡/스케줄/소스컨트롤.
+  const [tabOrder, setTabOrder] = useState<CenterTab[]>(['dialog', 'tasks', 'momotalk', 'schedule', 'git']);
+  const [dragOverTab, setDragOverTab] = useState<CenterTab | null>(null); // 드래그 중 삽입선 위치
+  const dragTabRef = useRef<CenterTab | null>(null);
+  const reorderTab = (target: CenterTab) => {
+    const from = dragTabRef.current;
+    dragTabRef.current = null;
+    if (!from || from === target) return;
+    setTabOrder((order) => {
+      const next = order.filter((t) => t !== from);
+      next.splice(next.indexOf(target), 0, from);
+      return next;
+    });
+  };
   const agents = useStore((s) => s.agents);
   const acked = useStore((s) => s.acked);
   // 학생을 클릭하면 자동으로 '학생별 대화' 탭으로 전환.
   useEffect(() => { if (selected) setTab('dialog'); }, [selected?.id]);
+  // 타이틀바 소스컨트롤 버튼 → git 탭으로(거노).
+  useEffect(() => { if (openGitTab) setTab('git'); }, [openGitTab]);
+
+  // claude TaskCreate 태스크(~/.claude/tasks) — 업무 탭 볼 때만 폴링, pane 별 그룹.
+  const [paneTasks, setPaneTasks] = useState<Record<string, PaneTask[]>>({});
+  useEffect(() => {
+    if (tab !== 'tasks') return;
+    let stop = false;
+    const tick = () => {
+      void fetchPaneTasks().then((ts) => {
+        if (stop) return;
+        const by: Record<string, PaneTask[]> = {};
+        for (const t of ts) (by[t.pane] ??= []).push(t);
+        setPaneTasks(by);
+      });
+    };
+    tick();
+    const iv = setInterval(tick, 2500);
+    return () => { stop = true; clearInterval(iv); };
+  }, [tab]);
 
   return (
     <div style={{
@@ -90,10 +132,16 @@ export function CommandCenter({ selected, onClearDialog, onPickStudent }: Comman
         borderBottom: '1px solid var(--cth-cream-200)',
         overflowX: 'auto', gap: 2, padding: '5px 6px'
       }}>
-        {(Object.keys(TAB_LABELS) as CenterTab[]).map((t) => (
+        {tabOrder.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
+            draggable
+            onDragStart={(e) => { dragTabRef.current = t; e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', t); }}
+            onDragEnter={(e) => { e.preventDefault(); if (dragTabRef.current && dragTabRef.current !== t) setDragOverTab(t); }}
+            onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+            onDragEnd={() => { dragTabRef.current = null; setDragOverTab(null); }}
+            onDrop={(e) => { e.preventDefault(); reorderTab(t); setDragOverTab(null); }}
             style={{
               flexShrink: 0,
               padding: '6px 12px',
@@ -102,8 +150,10 @@ export function CommandCenter({ selected, onClearDialog, onPickStudent }: Comman
               border: 'none', borderRadius: 7,
               background: tab === t ? 'var(--cth-sky)' : 'transparent',
               color: tab === t ? '#fff' : 'var(--cth-ink-500)',
-              cursor: 'pointer',
+              cursor: 'grab',
               whiteSpace: 'nowrap',
+              // 드래그 삽입선 — 이 탭 앞에 떨굴 위치면 좌측에 파란 선(거노: 위치 선으로).
+              boxShadow: dragOverTab === t ? 'inset 3px 0 0 0 var(--cth-sky)' : 'none',
               transition: 'background 120ms ease, color 120ms ease'
             }}
           >
@@ -170,7 +220,8 @@ export function CommandCenter({ selected, onClearDialog, onPickStudent }: Comman
             const building = a.status === 'working' && isBuildCmd(a.action);
             return (
             <div key={a.id} style={{ padding: '7px 0', borderBottom: '1px solid var(--cth-cream-200)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {/* 헤더 클릭 → 그 학생 '대화' 탭(프롬프트·명령어 흐름)으로(거노). */}
+              <div onClick={() => onPickStudent?.(a.id, a.character)} title="대화 열기" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
                 <span style={{ width: 8, height: 8, borderRadius: 999, flexShrink: 0, background: a.status === 'working' ? 'var(--cth-mint)' : a.status === 'waiting' || a.status === 'blocked' ? 'var(--cth-coral)' : 'var(--cth-ink-300)' }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)' }}>{a.character}</div>
@@ -188,6 +239,23 @@ export function CommandCenter({ selected, onClearDialog, onPickStudent }: Comman
                   <span title={a.subagents.join('\n')} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-lilac)', background: 'color-mix(in srgb, var(--cth-lilac) 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><ForkIcon size={10} />{a.subagents.length}</span>
                 )}
               </div>
+              {/* claude TaskCreate 태스크 — 진행중(◉) 먼저, 학생 작업 진행상황(거노: 맨 위에). */}
+              {!!paneTasks[a.id]?.length && (
+                <div style={{ marginLeft: 16, marginTop: 5, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  {[...paneTasks[a.id]]
+                    .sort((x, y) => taskRank(x.status) - taskRank(y.status))
+                    .map((t) => {
+                      const done = t.status === 'completed';
+                      const active = t.status === 'in_progress';
+                      return (
+                        <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 5, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: active ? 700 : 500, color: done ? 'var(--cth-ink-300)' : active ? 'var(--cth-mint)' : 'var(--cth-ink-700)' }}>
+                          <span style={{ flexShrink: 0, width: 10, textAlign: 'center' }}>{done ? '✓' : active ? '◉' : '○'}</span>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textDecoration: done ? 'line-through' : 'none' }}>{t.subject}</span>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
               {/* 백그라운드/서브에이전트 이름 + 완료 흔적 */}
               {(!!a.background?.length || !!a.subagents?.length || !!a.subagentsDone?.length) && (
                 <div style={{ marginLeft: 16, marginTop: 3, display: 'flex', flexDirection: 'column', gap: 1 }}>
@@ -207,7 +275,7 @@ export function CommandCenter({ selected, onClearDialog, onPickStudent }: Comman
                 <div style={{ marginLeft: 16, marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 3, alignItems: 'center' }}>
                   {[...a.recentTools].reverse().map((t, i, arr) => (
                     <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
-                      <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: 'var(--cth-ink-500)', background: 'var(--cth-cream-100)', padding: '1px 5px', borderRadius: 5, whiteSpace: 'nowrap', maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.split(' ')[0]}</span>
+                      <span title={t} style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: 'var(--cth-ink-500)', background: 'var(--cth-cream-100)', padding: '1px 5px', borderRadius: 5, whiteSpace: 'nowrap', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{t}</span>
                       {i < arr.length - 1 && <span style={{ fontSize: 8, color: 'var(--cth-ink-300)' }}>→</span>}
                     </span>
                   ))}
@@ -217,6 +285,9 @@ export function CommandCenter({ selected, onClearDialog, onPickStudent }: Comman
             );
           })}
         </div>
+      ) : tab === 'git' ? (
+        /* 소스 컨트롤 — 활성 pane cwd 의 git 상태·커밋·푸시(스케줄 옆, 거노). */
+        <GitTab />
       ) : (
         /* 스케줄/루프 — 반복 지시 루프 · 예약(크론) · 타이머/리마인더. */
         <ScheduleTab />

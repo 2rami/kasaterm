@@ -40,7 +40,9 @@ export function ScheduleTab() {
   }, [agents, surface]);
 
   const submit = async () => {
-    if (!surface || !text.trim() || busy) return;
+    if (busy) return;
+    if (!surface) { alert('보낼 학생(에이전트)이 없어요. 학생 pane을 먼저 띄워주세요.'); return; }
+    if (!text.trim()) return;
     setBusy(true);
     const payload: { kind: string; surface: string; text: string; interval_sec?: number; at_ts?: number } = {
       kind, surface, text: text.trim(),
@@ -93,10 +95,15 @@ export function ScheduleTab() {
               <input type="number" min={1} value={minutes} onChange={(e) => setMinutes(Number(e.target.value))} style={{ ...inStyle, width: 64 }} /> 분
             </label>
           )}
-          <button onClick={() => void submit()} disabled={busy || !text.trim()} style={{
-            padding: '7px 0', borderRadius: 8, border: 'none', cursor: busy || !text.trim() ? 'not-allowed' : 'pointer',
+          {agents.length === 0 && (
+            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-coral)' }}>
+              살아있는 학생이 없어 예약을 보낼 대상이 없습니다.
+            </div>
+          )}
+          <button onClick={() => void submit()} disabled={busy || !text.trim() || !surface} style={{
+            padding: '7px 0', borderRadius: 8, border: 'none', cursor: busy || !text.trim() || !surface ? 'not-allowed' : 'pointer',
             background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
-            opacity: busy || !text.trim() ? 0.5 : 1,
+            opacity: busy || !text.trim() || !surface ? 0.5 : 1,
           }}>{busy ? '등록 중…' : '등록'}</button>
         </div>
       )}

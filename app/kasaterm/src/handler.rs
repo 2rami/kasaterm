@@ -137,6 +137,20 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::SocketToggleGit => {
+                // 아로나 타이틀바 버튼 → 터미널 GUI git 소스컨트롤 패널. 메인 창을 띄우고
+                // (숨겨져 있으면) 둘을 타일링한 뒤 git 컬럼 토글(거노).
+                if let Some(w) = &self.window {
+                    w.set_visible(true);
+                    w.focus_window();
+                    w.request_redraw();
+                }
+                self.tile_terminal_arona_split();
+                self.toggle_git_col();
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketQueryActivePid(reply) => {
                 let pid = self
                     .ws
@@ -183,9 +197,49 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketClose(id) => {
+                self.pane_cwd_cache_override.remove(id.as_str());
                 self.close_pane(id);
                 self.chrome_dirty = true;
                 self.render_frame();
+                return;
+            }
+            UserEvent::SocketReportCwd(id, cwd, session_id) => {
+                // claude statusLine 보고 — lsof 보다 최신(내부 cd 반영). override 에 저장하고
+                // pane_cwd_cache 도 즉시 갱신해 footer/파일트리가 바로 따라간다. cwd 가
+                // 안 바뀌었으면 redraw 생략(statusLine 은 매 렌더 보고 → 과다 redraw 방지).
+                let changed = self.pane_cwd_cache.get(id.as_str()).map(|c| c != cwd).unwrap_or(true);
+                self.pane_cwd_cache_override
+                    .insert(id.clone(), (cwd.clone(), session_id.clone()));
+                self.pane_cwd_cache.insert(id.clone(), cwd.clone());
+                if changed {
+                    self.chrome_dirty = true;
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+                return;
+            }
+            UserEvent::SocketPasteImage(surface, bytes) => {
+                // 아로나 프롬프트 입력창 이미지 드롭(webview) → 그 pane claude 에 첨부.
+                // 시스템 클립보드에 비트맵으로 싣고 그 pane 에 Ctrl+V(0x16) — claude 가
+                // paste 시 osascript 로 클립보드 PNG 를 읽어 [Image] 칩으로 단다(터미널
+                // DroppedFile 과 같은 경로, 포커스 무관: 클립보드는 시스템 전역).
+                if let Ok(img) = image::load_from_memory(&bytes) {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let data = arboard::ImageData {
+                        width: w as usize,
+                        height: h as usize,
+                        bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+                    };
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if cb.set_image(data).is_ok() {
+                            if let Some(p) = self.pty_for_pane(&surface) {
+                                let _ = p.send_bytes(&[0x16]);
+                            }
+                        }
+                    }
+                }
                 return;
             }
             UserEvent::SocketOpenPreview(path) => {

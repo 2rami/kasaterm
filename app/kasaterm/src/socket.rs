@@ -158,6 +158,11 @@ pub struct PtyBackend {
     /// pane 셸 pid → (조회시각, 라이브 cwd). collab_board 가 학생 경로(cd 반영)를
     /// transcript 가 아닌 PTY pid_cwd 로 채우되, lsof 비용을 2s 캐시로 제한한다.
     cwd_cache: Arc<Mutex<HashMap<u32, (std::time::Instant, std::path::PathBuf)>>>,
+    /// pane(%N) → claude **canonical session_id**(statusline 이 report_cwd 로 보고).
+    /// `/pane-tasks` 가 ~/.claude/tasks/session-<id> 매핑에 쓴다. transcript 파일명·argv·
+    /// 프록시 요청 어디에도 이 id 가 없어(실측: task id 9e615f67 ↔ transcript FF708E8C
+    /// 별개) statusline 만이 유일 소스 — report_cwd 가 backend 로 직접 흘려준다.
+    pane_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl PtyBackend {
@@ -177,6 +182,7 @@ impl PtyBackend {
             agents_cache: Arc::new(Mutex::new(None)),
             last_discover: Arc::new(Mutex::new(None)),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
+            pane_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -343,6 +349,45 @@ impl Backend for PtyBackend {
             .and_then(|p| ws.pane_room.get(p).cloned())
     }
 
+    /// 활성 pane 의 포그라운드 프로세스 이름("zsh"·"node"(=claude)·"vim"…). room_cd 가
+    /// **셸일 때만** raw `cd` 를 보내고 claude 등엔 안 보내도록(거노: BA GUI 가 돌아가는
+    /// claude 입력칸에 cd 를 박지 않게) 판단 근거로 쓴다.
+    fn active_process_name(&self) -> Option<String> {
+        let active = self.ws.lock().unwrap().active_pane.clone()?;
+        let pid = self
+            .query_pane_pids()
+            .into_iter()
+            .find(|(id, _)| *id == active)
+            .map(|(_, p)| p)?;
+        foreground_proc_name(pid)
+    }
+
+    /// pane → claude **canonical session_id**(`/pane-tasks` 용). 1순위 = statusline 이
+    /// report_cwd 로 보고한 session_id(`pane_sessions`) — 이게 task store dir
+    /// `session-<id 첫8hex>` 와 일치하는 **유일** 소스(transcript 파일명/내용·argv·프록시
+    /// 요청 어디에도 이 id 없음, 실측 확정). 2순위 = bound transcript 파일명 stem(normal
+    /// claude 는 transcript==session 이라 폴백으로 유효, statusline 아직 미보고한 pane 커버).
+    fn pane_session_ids(&self) -> Result<Vec<(String, String)>> {
+        let live: std::collections::HashSet<String> =
+            self.ws.lock().unwrap().panes.keys().cloned().collect();
+        self.discover_unbound(&live);
+        let reported = self.pane_sessions.lock().unwrap().clone();
+        let bound = self.bound.lock().unwrap();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for pane in &live {
+            if let Some(sid) = reported.get(pane).filter(|s| !s.is_empty()) {
+                out.push((pane.clone(), sid.clone()));
+            } else if let Some(stem) = bound
+                .get(pane)
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+            {
+                out.push((pane.clone(), stem.to_string()));
+            }
+        }
+        Ok(out)
+    }
+
     /// `POST /session-close?idx=N` — 방(윈도우) 닫기를 GUI 스레드에 위임.
     fn close_session(&self, idx: usize) -> Result<()> {
         self.proxy
@@ -419,6 +464,37 @@ impl Backend for PtyBackend {
         let _ = self
             .proxy
             .send_event(UserEvent::SocketFocus(surface_id.to_string()));
+        Ok(())
+    }
+
+    fn paste_image(&self, surface: &str, bytes: Vec<u8>) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::SocketPasteImage(surface.to_string(), bytes))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(())
+    }
+
+    fn toggle_git_panel(&self) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::SocketToggleGit)
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(())
+    }
+
+    fn report_cwd(&self, surface_id: &str, cwd: &str, session_id: &str) -> Result<()> {
+        // canonical session_id 를 backend 맵에 직접 저장 → /pane-tasks 가 task store 매핑에
+        // 쓴다(transcript/argv/proxy 어디에도 없는 유일 소스). 빈 값·"unknown" 은 제외.
+        if !session_id.is_empty() && session_id != "unknown" {
+            self.pane_sessions
+                .lock()
+                .unwrap()
+                .insert(surface_id.to_string(), session_id.to_string());
+        }
+        let _ = self.proxy.send_event(UserEvent::SocketReportCwd(
+            surface_id.to_string(),
+            std::path::PathBuf::from(cwd),
+            session_id.to_string(),
+        ));
         Ok(())
     }
 
@@ -920,6 +996,43 @@ fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool) {
     let mut buf = Vec::new();
     let _ = f.read_to_end(&mut buf);
     (String::from_utf8_lossy(&buf).into_owned(), idle)
+}
+
+/// Foreground process name under a pane's shell pid — the youngest direct child
+/// (a running `claude`/`vim`/build), else the shell itself at a bare prompt. One
+/// `ps` scan (Windows has no `ps` → None, degrades to "not a shell"). Lets
+/// `room_cd` send raw `cd` only at a shell, never into a live claude (거노).
+pub(crate) fn foreground_proc_name(shell_pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,comm="])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let basename = |comm: &str| -> String {
+        std::path::Path::new(comm)
+            .file_name()
+            .and_then(|x| x.to_str())
+            .unwrap_or(comm)
+            .to_string()
+    };
+    let mut best_child: Option<(u32, String)> = None;
+    let mut shell_comm: Option<String> = None;
+    for line in s.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (
+            it.next().and_then(|x| x.parse::<u32>().ok()),
+            it.next().and_then(|x| x.parse::<u32>().ok()),
+        ) else {
+            continue;
+        };
+        let comm = it.collect::<Vec<_>>().join(" ");
+        if pid == shell_pid {
+            shell_comm = Some(basename(&comm));
+        } else if ppid == shell_pid && best_child.as_ref().is_none_or(|(p, _)| *p < pid) {
+            best_child = Some((pid, basename(&comm)));
+        }
+    }
+    best_child.map(|(_, n)| n).or(shell_comm)
 }
 
 /// Resolve a process's current working directory via lsof. macOS has no

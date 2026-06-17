@@ -148,9 +148,9 @@ export function MomoTalk() {
                     <div style={{
                       width: 32, height: 32, borderRadius: 10, overflow: 'hidden',
                       background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)',
-                      display: 'flex', alignItems: 'flex-end', justifyContent: 'center'
+                      display: 'flex', alignItems: 'center', justifyContent: 'center'
                     }}>
-                      <SpritePortrait character={m.from_name} scale={1.4} />
+                      <SpritePortrait character={m.from_name} scale={1.4} bust />
                     </div>
                   )}
                 </div>

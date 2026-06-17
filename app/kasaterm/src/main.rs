@@ -2176,6 +2176,17 @@ enum UserEvent {
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
+    /// statusLine 훅(statusline.py) → cwd 보고. claude 가 셸 위에서 돌아 lsof 로는
+    /// 내부 `cd` 를 못 따라가므로 claude 가 직접 보고한다. `(pane_id, cwd, session_id)` —
+    /// session_id 로 claude task store(~/.claude/tasks/session-<id>) 를 매핑한다.
+    SocketReportCwd(String, std::path::PathBuf, String),
+    /// `POST /paste-image?surface=%N` — 아로나 프롬프트 입력창에 이미지 드롭(webview).
+    /// 이미지 바이트를 시스템 클립보드에 비트맵으로 싣고 그 pane 에 Ctrl+V(0x16)를 보내
+    /// claude 가 [Image] 칩으로 첨부하게 한다(터미널 DroppedFile 과 같은 경로). `(surface, bytes)`.
+    SocketPasteImage(String, Vec<u8>),
+    /// `POST /git-panel` — 아로나 타이틀바 버튼 → 터미널 GUI 의 git 소스컨트롤 패널 열기.
+    /// 메인 터미널 창을 띄우고(숨겨져 있으면) git 컬럼을 토글한다(거노: 그 버튼=소스컨트롤).
+    SocketToggleGit,
     /// Show/hide the main terminal window, delegated from the socket thread
     /// (`POST /terminal-reveal` — the arona classroom's red-pill button).
     /// `(show, focus_pane)`: a reveal may also focus a specific pane so the
@@ -2827,6 +2838,11 @@ struct App {
     pending_autoleader: Option<String>,
     pending_autoleader_at: Option<Instant>,
     pane_cwd_cache: HashMap<String, std::path::PathBuf>,
+    /// statusLine 보고 cwd(claude 내부 cd, lsof 보다 정확·최신). `refresh_pane_cwds`
+    /// 가 매 lsof sweep 후 이걸로 `pane_cwd_cache` 를 덮어, footer/파일트리가 claude 의
+    /// `cd` 를 따라간다. 값 = (cwd, claude session_id). session_id 는 task store
+    /// (~/.claude/tasks/session-<id>) 매핑용. pane 종료(SocketClose) 시 제거.
+    pane_cwd_cache_override: HashMap<String, (std::path::PathBuf, String)>,
     /// 방별 collab 분리(거노). `pending_room`: 다음 spawn 할 pane 의 방 id(셸 env
     /// KASATERM_ROOM 주입 + ws.pane_room 기록용). pane→방 매핑은 ws.pane_room(공유).
     pending_room: Option<String>,
@@ -3090,6 +3106,7 @@ impl App {
             pending_autoleader: None,
             pending_autoleader_at: None,
             pane_cwd_cache: HashMap::new(),
+            pane_cwd_cache_override: HashMap::new(),
             pending_room: None,
             next_room_seq: 1,
             pane_tty_cache: HashMap::new(),

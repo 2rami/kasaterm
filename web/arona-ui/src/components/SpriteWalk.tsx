@@ -4,9 +4,9 @@ import { SpritePortrait } from './SpritePortrait';
 const BASE = import.meta.env.BASE_URL || '/';
 // 방향별 시트: walk-<slug>(측면 워크)·front-<slug>·back-<slug>(걷기) + idle-<facing>-<slug>(정적 정지).
 const SLUG: Record<string, string> = {
-  '아로나': 'arona', '유우카': 'yuuka', '시로코': 'shiroko',
-  '아리스': 'arisu', '호시노': 'hoshino', '코하루': 'koharu',
-  '프라나': 'prana',
+  '아로나': 'arona', '프라나': 'prana',
+  '미도리': 'midori', '모모이': 'momoi', '유즈': 'yuzu', '아리스': 'arisu',
+  '유우카': 'yuuka', '시로코': 'shiroko', '호시노': 'hoshino', '코하루': 'koharu',
 };
 
 // 흰 외곽선(4방향) — 밝은 교실 바닥에서 캐릭터를 또렷하게(거노).
