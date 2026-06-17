@@ -59,10 +59,12 @@ trash = "5"
 # ghostty's trick — same gravity, no presentsWithTransaction needed.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSBundle", "NSError", "NSDictionary"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSBundle", "NSError", "NSDictionary", "NSAppleEventManager", "NSAppleEventDescriptor", "NSURL", "objc2-core-services"] }
 # Native desktop notifications (UNUserNotificationCenter) so the alert carries
 # kasaterm's own .app icon; block2 builds the authorization completion handler.
 objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationResponse"] }
+# Dock tile badge (unread-notification count) via NSApplication.dockTile.
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSDockTile"] }
 block2 = "0.6"
 
 [target.'cfg(windows)'.dependencies]

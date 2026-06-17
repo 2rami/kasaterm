@@ -1075,7 +1075,8 @@ async fn close_pane_handler(
 #[derive(serde::Deserialize)]
 struct SpawnReq {
     /// characters.json 의 leader/members 이름. 지정 시 캐릭터 마커를 선점하고
-    /// board-context.py 가 매 턴 그 persona 를 additionalContext 로 입힌다.
+    /// persona 는 spawn 시 `--append-system-prompt` 로 1회 주입한다
+    /// (board-context.py per-prompt 훅은 폐기 — `spawn_command` 참조).
     #[serde(default)]
     character: Option<String>,
     /// `claude --model <m>` 로 전달.

@@ -12,8 +12,8 @@ impl App {
         let sb = self.effective_sidebar_w();
         let ws = self.ws.lock().unwrap();
         if let Some(layout) = ws.layout.as_ref() {
-            let split = layout.leaves().len() > 1;
-            let header_h = if split { PANE_HEADER_HEIGHT } else { 0.0 };
+            // ghostty식: 헤더 띠 폐기 → 헤더만큼 셀을 밀던 보정 제거.
+            let header_h = 0.0_f32;
             // Box hit-test runs in whole-grid cells (header included, no
             // inset) so a click anywhere in the pane box selects it.
             let gcol = ((px - sb - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as i32;
@@ -43,9 +43,13 @@ impl App {
                             .max(0.1);
                         let box_left = sb + WINDOW_PADDING + bx as f32 * self.cell.w;
                         let box_top = TITLE_HEIGHT + by as f32 * self.cell.h;
+                        // 본문(셀)은 헤더 띠 아래에서 시작 — 헤더 있는 pane은 그만큼
+                        // 빼야 마우스가 실제 그려진 행에 맞는다(render origin과 동일).
+                        // grow(박스 hit-test)는 헤더 포함 박스라 header_h=0 그대로.
+                        let hdr = ws.panes.get(&pid).map(|p| p.header_px()).unwrap_or(0.0);
                         let lc = ((px - box_left - PANE_INNER_X).max(0.0) / (self.cell.w * fs))
                             .floor() as u16;
-                        let lr = ((py - box_top - header_h - PANE_INNER_Y).max(0.0)
+                        let lr = ((py - box_top - hdr - PANE_INNER_Y).max(0.0)
                             / (self.cell.h * fs))
                             .floor() as u16;
                         let (mc, mr) = ws
@@ -72,10 +76,13 @@ impl App {
             return None;
         }
         let fs = self.pane_font_scales.get(&id).copied().unwrap_or(1.0).max(0.1);
+        // 단일 pane(layout 없음)도 이미지/마크다운/2탭이면 헤더 띠가 있다 —
+        // 본문 셀은 그 아래에서 시작하므로 multi-pane 경로와 동일하게 보정.
+        let hdr = pane.header_px();
         let lc = ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0) / (self.cell.w * fs))
             .floor() as u16;
-        let lr =
-            ((py - TITLE_HEIGHT - PANE_INNER_Y).max(0.0) / (self.cell.h * fs)).floor() as u16;
+        let lr = ((py - TITLE_HEIGHT - hdr - PANE_INNER_Y).max(0.0) / (self.cell.h * fs))
+            .floor() as u16;
         Some((id, lc.min(t.cols - 1), lr.min(t.rows - 1)))
     }
     /// Convenience wrapper that returns only the active pane's local
@@ -211,15 +218,11 @@ impl App {
         // sizes to whoever owns the PTY — the daemon over RPC, or local
         // sessions. Panes themselves only carry BSP ratios, never absolute
         // rows/cols, so this one computation feeds both backends.
-        let Some(tree) = self.pty_layout.as_ref() else {
+        let Some(_tree) = self.pty_layout.as_ref() else {
             return;
         };
-        // When the workspace is split, every pane wears a per-pane header
-        // strip that eats a few cell rows off the top of its box, so the
-        // PTY's usable grid shrinks by the same amount — otherwise claude
-        // code paints its statusline / `bypass…` row off the bottom edge.
-        let leaves = tree.leaves().len();
-        let header_px = if leaves > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
+        // image/md pane만 헤더 띠를 가지므로(pane_header_px) 그 pane의 usable
+        // 높이에서만 헤더를 차감한다 — 루프 안에서 id별로 조회. 일반 터미널은 0.
         // Per-pane font scale shrinks/grows that pane's usable cells: bigger
         // glyphs ⇒ fewer cols/rows in the same box. 1.0 panes keep the exact
         // integer-cell math; scaled panes divide the base cell span by the
@@ -246,6 +249,7 @@ impl App {
             // loses the same footer band off its usable height — otherwise the
             // shell paints its last rows behind the bar.
             let footer_px = self.statusbar_px(&id);
+            let header_px = self.pane_header_px(&id);
             let usable_w = (box_w_px - 2.0 * PANE_INNER_X).max(scaled_cw);
             let usable_h = (box_h_px - header_px - footer_px - 2.0 * PANE_INNER_Y).max(scaled_ch);
             let pcols = (usable_w / scaled_cw).floor().max(1.0) as u16;
@@ -1028,53 +1032,49 @@ for p in glob.glob(os.path.join(d, '*.json')):
         let leaves_count = tree.leaves().len();
         let (cols, rows) = self.window_cells();
         let rects = self.effective_leaf_rects(cols, rows);
+        self.drop_zone_in_rects(&rects, leaves_count, x, y)
+    }
+    /// Geometry core of `drop_target_at`, split out so a live drag can hit-test
+    /// against an arbitrary tree's rects (e.g. the base tree with the carried
+    /// pane removed) instead of the current `pty_layout`. `leaves_count` drives
+    /// the header band (single-leaf panes have none).
+    pub(crate) fn drop_zone_in_rects(
+        &self,
+        rects: &[(String, u16, u16, u16, u16)],
+        leaves_count: usize,
+        x: f32,
+        y: f32,
+    ) -> Option<(String, DropZone)> {
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
-        // Per-pane tab-strip top: where the pill row starts. Combined
-        // with the header-band height below, this gives the full
-        // pane-header region (even when a single-tab pane has a tiny
-        // strip).
-        let mut strip_top: HashMap<String, f32> = HashMap::new();
-        for (pid, _, (_, ry, _, _)) in &self.pane_tab_rects {
-            strip_top
-                .entry(pid.clone())
-                .and_modify(|t| { if *ry < *t { *t = *ry; } })
-                .or_insert(*ry);
-        }
-        // When the layout has >1 leaf every pane gets a 30 logical-px
-        // header band — including single-tab panes — so the box must
-        // extend up by at least that amount or a drop onto a single-tab
-        // header falls into the body's Up zone (split-up) instead of
-        // Center (tab-merge), which was the "drag→merge gives split"
-        // bug.
+        // When the layout has >1 leaf every pane gets a header band — including
+        // single-tab panes — so a drop onto a single-tab header reads as Center
+        // (tab-merge), not the body's Up zone (the "drag→merge gives split" bug).
         let header_band = if leaves_count > 1 { PANE_HEADER_HEIGHT } else { 0.0 };
         for (id, cx, cy, cw, ch) in rects {
-            let bx = pad + cx as f32 * self.cell.w;
-            // pane_top = pane 시작 (헤더 띠 시작, chrome 포함). 기존엔
-            // 이걸 본문 시작으로 잘못 가정해 box_top을 한 칸 위로
-            // 잡았고 그래서 hit-test가 전부 30px 위로 shift됨 — 헤더 띠
-            // 안 마우스가 본문 판정, 헤더 위(title bar 영역)가 헤더 판정.
-            let pane_top = TITLE_HEIGHT + cy as f32 * self.cell.h;
-            let bw = (cw as f32 * self.cell.w).max(1.0);
-            let bh = (ch as f32 * self.cell.h).max(1.0);
+            let bx = pad + *cx as f32 * self.cell.w;
+            let pane_top = TITLE_HEIGHT + *cy as f32 * self.cell.h;
+            let bw = (*cw as f32 * self.cell.w).max(1.0);
+            let bh = (*ch as f32 * self.cell.h).max(1.0);
             let body_top = pane_top + header_band;
             if x >= bx && x <= bx + bw && y >= pane_top && y <= pane_top + bh {
-                // 헤더 띠 (pane_top ~ body_top) = Center (tab merge).
-                // 본문 (body_top ~ pane_top+bh) = 4방향 split.
                 if y < body_top {
-                    return Some((id, DropZone::Center));
+                    return Some((id.clone(), DropZone::Center));
                 }
-                let dist_left = x - bx;
-                let dist_right = bx + bw - x;
-                let dist_top = y - body_top;
-                let dist_bottom = (pane_top + bh) - y;
-                let zone = if dist_left.min(dist_right) < dist_top.min(dist_bottom) {
-                    if dist_left < dist_right { DropZone::Left } else { DropZone::Right }
-                } else if dist_top < dist_bottom {
+                // 4방향 판정은 pane 중심 기준 *정규화* offset 으로 한다. raw 픽셀
+                // 거리(dist_left vs dist_top)를 비교하면 가로로 넓은 pane은 Up/Down
+                // 쐐기가 좁아져 "끝까지 가야" 방향이 나왔다 — half-w/half-h 로 나눠
+                // 정사각형 공간에서 비교하면 네 방향이 공평한 90° 쐐기를 받는다.
+                let body_h = (pane_top + bh - body_top).max(1.0);
+                let nx = (x - (bx + bw / 2.0)) / (bw / 2.0);
+                let ny = (y - (body_top + body_h / 2.0)) / (body_h / 2.0);
+                let zone = if nx.abs() > ny.abs() {
+                    if nx < 0.0 { DropZone::Left } else { DropZone::Right }
+                } else if ny < 0.0 {
                     DropZone::Up
                 } else {
                     DropZone::Down
                 };
-                return Some((id, zone));
+                return Some((id.clone(), zone));
             }
         }
         None
@@ -1150,6 +1150,90 @@ for p in glob.glob(os.path.join(d, '*.json')):
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+    /// 라이브 드래그 이동: 드래그 중인 pane 을 커서가 가리키는 target/zone 으로
+    /// **실제 `pty_layout` 에 재배치**하고 PTY 를 reshape 한다 — 가짜 프리뷰 박스가
+    /// 아니라 진짜 터미널 내용이 옮겨진 자리에서 reflow 된다. 매 mouse-move 마다
+    /// 불려도 zone 이 바뀔 때만 reshape(throttle).
+    ///
+    /// 모델: 드롭 무효(빈 곳·Center·자기 자신)일 땐 carried pane 을 원위치로
+    /// 되돌린다. hit-test 는 carried pane 을 *제거한* base 트리 기준으로 해서
+    /// (라이브로 옮겨진 트리가 아니라) 커서→target 매핑이 흔들리지 않게 한다.
+    /// 드래그 시작 시 `drag_orig_layout` 에 원본을 박제하고, 드롭/취소 때 정리한다.
+    pub(crate) fn update_live_drag(&mut self) {
+        // 어떤 pane 을 옮기는 중인가 — header/handle 드래그는 통째로, tab 드래그는
+        // 단일탭 pane 일 때만 통째 이동(멀티탭은 탭 추출이라 라이브 미적용).
+        let moving = if let Some(hd) = self.header_drag.as_ref() {
+            hd.active.then(|| hd.pane.clone())
+        } else if let Some(td) = self.tab_drag.as_ref() {
+            let single = self
+                .ws
+                .lock()
+                .ok()
+                .and_then(|w| w.panes.get(&td.pane).map(|p| p.tabs.len() <= 1))
+                .unwrap_or(true);
+            (td.active && single).then(|| td.pane.clone())
+        } else {
+            None
+        };
+        let Some(moving) = moving else { return };
+        // 첫 라이브 적용 — 원본 박제. base = 원본에서 carried pane 제거.
+        if self.drag_orig_layout.is_none() {
+            self.drag_orig_layout = self.pty_layout.clone();
+        }
+        let Some(orig) = self.drag_orig_layout.clone() else { return };
+        let mut base = orig.clone();
+        if !base.remove_leaf(&moving) {
+            // 단일 pane(형제 없음) → 라이브로 가를 게 없다. 드롭 때 split_opposite
+            // 같은 기존 경로가 처리하므로 여기선 손대지 않는다.
+            return;
+        }
+        let (cols, rows) = self.window_cells();
+        let base_rects = base.leaf_rects(cols, rows);
+        let hit = self.drop_zone_in_rects(&base_rects, base.leaves().len(), self.cursor_px.0, self.cursor_px.1);
+        // 유효 드롭이면 base 에 끼워 넣은 live 트리, 아니면 원본(원위치 복귀).
+        let (next_layout, applied) = match hit {
+            Some((ref target, zone))
+                if zone != DropZone::Center && *target != moving =>
+            {
+                let (dir, before) = match zone {
+                    DropZone::Left => (kasa_pty::SplitDir::Horizontal, true),
+                    DropZone::Right => (kasa_pty::SplitDir::Horizontal, false),
+                    DropZone::Up => (kasa_pty::SplitDir::Vertical, true),
+                    DropZone::Down => (kasa_pty::SplitDir::Vertical, false),
+                    DropZone::Center => unreachable!(),
+                };
+                let mut live = base.clone();
+                if live.insert_beside(target, dir, before, moving.clone()) {
+                    (live, Some((target.clone(), zone)))
+                } else {
+                    (orig.clone(), None)
+                }
+            }
+            _ => (orig.clone(), None),
+        };
+        // zone 안 바뀌었으면 reshape 생략(SIGWINCH throttle).
+        if applied == self.drag_live_applied {
+            return;
+        }
+        self.drag_live_applied = applied;
+        self.pty_layout = Some(next_layout);
+        self.resize_backend(cols, rows);
+        if let Ok(mut ws) = self.ws.lock() {
+            ws.active_pane = Some(moving.clone());
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// 라이브 드래그 종료: 현재 `pty_layout`(=마지막으로 라이브 적용된 상태)을 그대로
+    /// 확정하고 백업/throttle 상태를 비운다. 유효 드롭이 한 번도 없었으면 원본이
+    /// 이미 복원돼 있으니 정리만 한다. 반환값 = 라이브로 실제 이동이 적용됐는지.
+    pub(crate) fn finish_live_drag(&mut self) -> bool {
+        let applied = self.drag_live_applied.is_some();
+        self.drag_orig_layout = None;
+        self.drag_live_applied = None;
+        applied
     }
     /// Detach `moving` from the active window and graft it beside `target`,
     /// which lives in window `dst_idx`'s parked tree. The PTY stays alive — only
