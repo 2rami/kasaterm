@@ -182,7 +182,7 @@ export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, usage
       <IconBtn title={theme === 'dark' ? '라이트 모드로' : '다크 모드로'} onClick={onToggleTheme}>{theme === 'dark' ? <SunIcon /> : <MoonIcon />}</IconBtn>
       <IconBtn title="알림" badge={notifications} onClick={onBell}><BellIcon /></IconBtn>
       <IconBtn title="메일" badge={mail} onClick={onMail}><MailIcon /></IconBtn>
-      <IconBtn title="설정" onClick={onSettings}><GearIcon /></IconBtn>
+      <IconBtn title="소스 컨트롤" onClick={onSettings}><GearIcon /></IconBtn>
     </div>
   );
 }

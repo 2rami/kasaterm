@@ -146,6 +146,15 @@ async fn schedule_loop(backend: Arc<dyn Backend>) {
             }
             // 발사 — 학생 TUI 제출(submit_payload).
             let _ = backend.send_text(Some(&it.surface), &submit_payload(&it.text));
+            // 모모톡에도 노란 버블로 — send_text 는 PTY 주입만 하고 messages.jsonl 에 안 남겨
+            // 예약/타이머 발신이 대화창에 안 떴다(거노). read=false 로 inbox(미확인) 기록.
+            persist_sensei_msg(
+                &resolve_cwd(&backend),
+                &it.surface,
+                &it.text,
+                false,
+                backend.active_room().as_deref(),
+            );
             changed = true;
             match it.kind.as_str() {
                 "loop" if it.interval_sec > 0 => {
@@ -316,18 +325,26 @@ async fn sent_images_handler(
     let surface = params.get("surface").cloned().unwrap_or_default();
     let n = params.get("n").and_then(|s| s.parse::<usize>().ok()).unwrap_or(12);
     let cwd = resolve_cwd(&backend);
+    // sent-images.jsonl 은 messages.jsonl 과 독립이라 find_collab_dir 의 messages.jsonl
+    // 존재 게이트를 거치면 안 된다 — 터미널서 이미지만 보내고 모모톡 발신이 0이면
+    // messages.jsonl 이 없어 게이트가 실패해 영영 빈 배열이었다. collab_messages 와
+    // 똑같이 방-인지 dir 을 직접 계산(방 모드면 `{slug}__room_{r}`, 훅 기록 경로와 일치).
+    let dir = match backend.active_room().as_deref() {
+        Some(r) if !r.is_empty() => {
+            std::path::PathBuf::from(format!("/tmp/kasaterm-collab/{}__room_{}", mode_slug(&cwd), r))
+        }
+        _ => std::path::Path::new("/tmp/kasaterm-collab").join(mode_slug(&cwd)),
+    };
     let mut imgs: Vec<String> = Vec::new();
-    if let Some(dir) = find_collab_dir(Some(&cwd)) {
-        if let Ok(content) = std::fs::read_to_string(dir.join("sent-images.jsonl")) {
-            for line in content.lines() {
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-                let pane = v.get("pane").and_then(|p| p.as_str()).unwrap_or("");
-                if !surface.is_empty() && pane != surface {
-                    continue;
-                }
-                if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
-                    imgs.push(p.to_string());
-                }
+    if let Ok(content) = std::fs::read_to_string(dir.join("sent-images.jsonl")) {
+        for line in content.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            let pane = v.get("pane").and_then(|p| p.as_str()).unwrap_or("");
+            if !surface.is_empty() && pane != surface {
+                continue;
+            }
+            if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
+                imgs.push(p.to_string());
             }
         }
     }
@@ -335,6 +352,167 @@ async fn sent_images_handler(
         imgs.drain(0..imgs.len() - n);
     }
     (cors, Json(serde_json::json!({ "ok": true, "images": imgs })))
+}
+
+/// task 디렉토리에서 `[(id, subject, status)]` 파싱. id(숫자) 오름차순. 비-json 제외.
+fn read_tasks_in_dir(dir: &std::path::Path) -> Vec<(String, String, String)> {
+    let mut tasks: Vec<(u64, String, String, String)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+            let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let subject = v.get("subject").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("pending").to_string();
+            if subject.is_empty() {
+                continue;
+            }
+            let ord = id.parse::<u64>().unwrap_or(u64::MAX);
+            tasks.push((ord, id, subject, status));
+        }
+    }
+    tasks.sort_by_key(|t| t.0);
+    tasks.into_iter().map(|(_, id, s, st)| (id, s, st)).collect()
+}
+
+/// session_id → task. 신형 `session-<8hex>` 우선·구형 full-uuid 폴백(solo claude 용).
+fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String)> {
+    if session_id.is_empty() {
+        return Vec::new();
+    }
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Vec::new();
+    };
+    let base = home.join(".claude/tasks");
+    let prefix: String = session_id.chars().take(8).collect();
+    let dir = {
+        let new = base.join(format!("session-{prefix}"));
+        if new.is_dir() { new } else { base.join(session_id) }
+    };
+    read_tasks_in_dir(&dir)
+}
+
+/// pane cwd → 그 cwd 의 **팀(TeamCreate) 세션** task 디렉토리. claude 가 팀 컨텍스트에서
+/// TaskCreate 하면 task store 가 개별 대화 세션이 아니라 **팀 세션 id**(`~/.claude/teams/
+/// session-<id>` = `~/.claude/tasks/session-<id>`)로 keying 된다(실측: 아로나 task=팀
+/// session-4c79638c, 그 팀 cwd=/Users/kasa/Desktop). statusline session 으로 못 잡힐 때
+/// (팀 lead≠메인 대화·statusline 미보고) cwd 로 팀을 찾는 폴백. 같은 cwd 팀 여럿이면 mtime 최신.
+fn team_task_dir_for_cwd(cwd: &str) -> Option<std::path::PathBuf> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    let teams = home.join(".claude/teams");
+    let tasks_base = home.join(".claude/tasks");
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(&teams).ok()?.flatten() {
+        let Ok(content) = std::fs::read_to_string(entry.path().join("config.json")) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+        let matches = v
+            .get("members")
+            .and_then(|m| m.as_array())
+            .map(|arr| arr.iter().any(|mem| mem.get("cwd").and_then(|c| c.as_str()) == Some(cwd)))
+            .unwrap_or(false);
+        if !matches {
+            continue;
+        }
+        let task_dir = tasks_base.join(entry.file_name());
+        if !task_dir.is_dir() {
+            continue;
+        }
+        // 같은 cwd 에 팀 여럿(매 세션 새 팀) — 빈 팀(task 0개)은 건너뛰고, 실제 task 가
+        // 있는 팀 중 가장 최근 task 가 쓰인 것을 고른다(빈 새 팀이 옛 task 팀을 가리지 않게).
+        let mut latest_task: Option<std::time::SystemTime> = None;
+        if let Ok(rd) = std::fs::read_dir(&task_dir) {
+            for f in rd.flatten() {
+                if f.path().extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(mt) = f.metadata().and_then(|m| m.modified()) {
+                    if latest_task.map(|b| mt > b).unwrap_or(true) {
+                        latest_task = Some(mt);
+                    }
+                }
+            }
+        }
+        if let Some(mt) = latest_task {
+            if best.as_ref().map(|(b, _)| mt > *b).unwrap_or(true) {
+                best = Some((mt, task_dir));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// `GET /pane-tasks?surface=<id>` — claude TaskCreate 태스크를 pane 별로(arona 업무 탭).
+/// 1순위 statusline 보고 session(`pane_session_ids`) → 없으면 board cwd 로 팀 task 디렉토리.
+async fn pane_tasks_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let surface = params.get("surface").cloned().unwrap_or_default();
+    let board = backend.collab_board().unwrap_or_default();
+    let reported: std::collections::HashMap<String, String> =
+        backend.pane_session_ids().unwrap_or_default().into_iter().collect();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut debug: Vec<serde_json::Value> = Vec::new();
+    for row in &board {
+        if !surface.is_empty() && row.surface_id != surface {
+            continue;
+        }
+        // 1) statusline 이 보고한 session(solo claude — session==task), 2) 팀(cwd) 폴백.
+        let reported_sid = reported.get(&row.surface_id).cloned().unwrap_or_default();
+        let mut tasks = read_claude_tasks(&reported_sid);
+        let team = team_task_dir_for_cwd(&row.cwd);
+        if tasks.is_empty() {
+            if let Some(dir) = &team {
+                tasks = read_tasks_in_dir(dir);
+            }
+        }
+        debug.push(serde_json::json!({
+            "pane": row.surface_id, "cwd": row.cwd, "reported_session": reported_sid,
+            "team_dir": team.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            "n": tasks.len(),
+        }));
+        for (id, subject, status) in tasks {
+            out.push(serde_json::json!({
+                "pane": row.surface_id, "id": id, "subject": subject, "status": status,
+            }));
+        }
+    }
+    (cors, Json(serde_json::json!({ "ok": true, "tasks": out, "debug": debug })))
+}
+
+/// `POST /paste-image?surface=%N` (body=이미지 raw 바이트) — 아로나 프롬프트 입력창에
+/// 이미지 드롭. 그 pane claude 에 시스템 클립보드 비트맵+Ctrl+V 로 첨부(GUI 위임).
+async fn paste_image_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    body: Bytes,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let surface = params.get("surface").cloned().unwrap_or_default();
+    if surface.is_empty() || body.is_empty() {
+        return (cors, Json(serde_json::json!({ "ok": false })));
+    }
+    // 클립보드+Ctrl+V 로 claude 입력에 [Image] 첨부만. 아로나 대화창엔 send 후 프록시가
+    // 캡처한 user 메시지(텍스트+이미지)로 말풍선에 뜬다 — sent-images 큰 박스 write 안 함(거노).
+    let ok = backend.paste_image(&surface, body.to_vec()).is_ok();
+    (cors, Json(serde_json::json!({ "ok": ok })))
+}
+
+/// `POST /git-panel` — 아로나 타이틀바 버튼 → 터미널 GUI git 소스컨트롤 패널 토글(거노).
+async fn git_panel_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let ok = backend.toggle_git_panel().is_ok();
+    (cors, Json(serde_json::json!({ "ok": ok })))
 }
 
 /// `GET /list-dir?path=<path>` — 그 경로의 하위 디렉터리 목록(방 경로 변경 모달).
@@ -373,9 +551,9 @@ async fn list_dir_handler(
 }
 
 /// `POST /room-cd?path=<path>` — 방(active pane)을 그 경로로 이동.
-/// **셸 pane**: `cd '<path>'` + CR 직접 주입. **claude pane**: claude 실행 중엔 셸
-/// cwd 를 외부에서 못 바꿔 raw `cd` 가 claude 입력칸에 박혔다(거노) → 자연어로
-/// "이 디렉토리로 옮겨서 작업해줘" 를 claude 에게 보내 claude 가 직접 이동하게 한다.
+/// **셸 pane 일 때만** `cd '<path>'` + CR 을 주입한다. claude 등 다른 포그라운드가
+/// 떠 있으면 raw `cd` 가 그 프로그램 입력칸에 박히므로(거노: "프롬프트에 cd~~가 입력돼")
+/// 아무것도 보내지 않고 현재 cwd 를 유지한다 — BA GUI 는 돌아가는 세션을 건드리지 않는다.
 async fn room_cd_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -388,13 +566,14 @@ async fn room_cd_handler(
         }
     };
     let proc = backend.active_process_name().unwrap_or_default();
-    let payload = if proc.contains("claude") {
-        format!("방 경로를 '{path}'로 바꿨어. 앞으로 이 디렉토리 기준으로 작업해줘.\n")
-    } else {
-        let quoted = path.replace('\'', "'\\''");
-        format!("cd '{quoted}'\r")
-    };
-    let ok = backend.send_text(None, &payload).is_ok();
+    let base = proc.strip_prefix('-').unwrap_or(&proc);
+    let is_shell = matches!(base, "zsh" | "bash" | "fish" | "sh" | "dash" | "tcsh" | "ksh");
+    if !is_shell {
+        // 셸이 아님(claude/vim/build…) → cd 미주입, 세션 무접촉.
+        return (cors, Json(serde_json::json!({ "ok": true, "path": path, "skipped": proc })));
+    }
+    let quoted = path.replace('\'', "'\\''");
+    let ok = backend.send_text(None, &format!("cd '{quoted}'\r")).is_ok();
     (cors, Json(serde_json::json!({ "ok": ok, "path": path })))
 }
 
@@ -1917,6 +2096,9 @@ pub fn spawn_http_server(
                 let list_dir_backend = backend.clone();
                 let room_cd_backend = backend.clone();
                 let sent_images_backend = backend.clone();
+                let pane_tasks_backend = backend.clone();
+                let paste_image_backend = backend.clone();
+                let git_panel_backend = backend.clone();
                 let service = StreamableHttpService::new(
                     move || Ok(KasaspaceTools::new(backend.clone())),
                     Arc::new(LocalSessionManager::default()),
@@ -2128,6 +2310,22 @@ pub fn spawn_http_server(
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             sent_images_handler(sent_images_backend.clone(), q)
                         }),
+                    )
+                    .route(
+                        "/pane-tasks",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            pane_tasks_handler(pane_tasks_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/paste-image",
+                        post(move |q: Query<std::collections::HashMap<String, String>>, b: Bytes| {
+                            paste_image_handler(paste_image_backend.clone(), q, b)
+                        }),
+                    )
+                    .route(
+                        "/git-panel",
+                        post(move || git_panel_handler(git_panel_backend.clone())),
                     )
                     .route(
                         "/list-dir",

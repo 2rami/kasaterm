@@ -1225,6 +1225,10 @@ impl App {
         // 로드 끝나면 창을 드러내는 핸들러. webview2 가 UI(메인) 스레드에서
         // 콜백하므로 winit set_visible 호출이 안전하다.
         let win_show = window.clone();
+        // 이미지 드롭은 HTML5 onDrop(입력창/패널)이 처리한다 — dragover preventDefault 로
+        // WKWebView 가 드롭을 웹콘텐츠에 넘겨 ondrop+files 가 뜬다. wry 네이티브
+        // drag_drop_handler 를 설치하면 그게 드롭을 가로채(active_pty 로 오배송) HTML 경로를
+        // 막아 첨부가 안 됐다(거노 실측) → 설치 안 함.
         // build_as_child for the same use-after-free reason as the git panel.
         let webview = match wry::WebViewBuilder::new()
             .with_url(format!("http://127.0.0.1:{port}/arona-ui/?v={cb}"))
@@ -1251,8 +1255,11 @@ impl App {
         eprintln!("[arona-panel] open; http://127.0.0.1:{port}/arona-ui/");
         self.arona_panel_window = Some(window);
         self.arona_panel_webview = Some(webview);
-        // 그 방에 god 이 없으면 쓰던 활성 pane 을 god 으로 승격(거노 결정).
-        self.promote_active_pane_to_god();
+        // BA GUI 는 세션을 건드리지 않는다(거노 06-17 방향전환: "시각 레이어"). 패널 열 때
+        // 활성 pane 을 god 으로 승격(claude 선실행·/compact·persona 주입)하던 호출을 뗐다 —
+        // "클로드 먼저 켜지고 compact·페르소나" 버그. god 셋업은 웹 온보딩(폴더 확정 후
+        // enterGod→setMode('god')+leader 스폰)이 담당. promote_active_pane_to_god 는 BA GUI
+        // 재설계 때 다시 쓸 수 있어 남겨둠.
         // 제품 동작: 교실(BA UI)과 터미널을 둘 다 띄워 나란히 연동한다 — BA UI 의
         // 포커스/입력/상태가 메인 터미널 창과 양방향으로 묶인다. 옛 "교실이 화면을
         // 인수(터미널 숨김)"는 KASATERM_ARONA_SOLO_VIEW 몰입 옵션으로 강등.
@@ -1332,6 +1339,8 @@ impl App {
     /// → god-elect 가 그 pane 을 god 으로 선출(lead claim + `● 이름` rename +
     /// persona 주입)한다. autoleader 와 동일한 GUI cwd slug 기준이라 god 시스템과
     /// 일관되고, 실패해도(슬러그 불일치 등) "승격 안 됨"일 뿐 협업은 안 깨진다.
+    // BA GUI 재설계(시각 레이어) 전까지 미사용 — open_arona_panel 에서 호출 제거(거노 06-17).
+    #[allow(dead_code)]
     pub(crate) fn promote_active_pane_to_god(&self) {
         let Ok(home) = std::env::var("HOME") else {
             return;

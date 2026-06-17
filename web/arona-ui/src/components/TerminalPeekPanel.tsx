@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchConversation, fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, fetchSlashCommands, type Turn } from '@/lib/mcp';
+import { fetchConversation, fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, fetchSlashCommands, pasteImageToPane, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { Markdown } from './Markdown';
 import { useStore } from '@/store';
@@ -292,6 +292,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   const [loaded, setLoaded] = useState(false); // 첫 폴 완료 — 빈 상태 문구 분기
   const [spinner, setSpinner] = useState<string | null>(null); // claude 라이브 작업 표시(verb·경과초)
   const [effort, setEffort] = useState<string | null>(null); // effort level(상태바 파싱) — 모델 옆 칩
+  const [convModel, setConvModel] = useState(''); // 캡처 프록시가 요청에서 잡은 model(거노: 화면스크랩 대신 프록시 소스)
+  const [dragOver, setDragOver] = useState(false); // 이미지 드래그 오버 — 점선 드롭존 오버레이
+  const [pendingPreviews, setPendingPreviews] = useState<string[]>([]); // staged 이미지 미리보기 data URL(여러 개)
+  const hasPending = pendingPreviews.length > 0;
   const [effortMenu, setEffortMenu] = useState<number | null>(null); // /effort 슬라이더 현재 idx(뜬 동안)
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -313,6 +317,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   // ESC/Enter 로 메뉴를 닫은 직후 ~700ms 는 화면 재파싱으로 카드를 다시 띄우지 않는다
   // (거노: GUI 에서 esc 눌러도 안 멈춤 — tick 이 stale 화면에서 메뉴를 재감지해 재등장).
   const menuSuppressRef = useRef(0);
+  // ESC 로 닫은 AskUserQuestion 질문(title) — tool_use 가 응답 전까지 캡처 프록시에 남아
+  // tick 마다 카드가 부활하던 것(거노: esc 눌러도 취소 안 됨). 같은 질문이면 다시 안 띄운다.
+  const dismissedQRef = useRef<string | null>(null);
+  // 카드에서 내가 고른 선택 — AskUserQuestion 답은 conv.turns 로 안 새므로(시스템 주입 필터)
+  // 직접 user 버블로 남긴다(거노: 뭐 선택했는지 대화창에 떠야). surface 바뀌면 리셋.
+  const [myChoices, setMyChoices] = useState<Turn[]>([]);
+  useEffect(() => { setMyChoices([]); dismissedQRef.current = null; }, [surfaceId]);
 
   // 대화 내역: transcript jsonl 우선(깨끗), 비었으면 PTY 화면(peek) 폴백 — 인터랙티브
   // claude 가 jsonl 을 라이브로 안 써 진행 중엔 transcript 가 빈다(claude-code-guide
@@ -335,7 +346,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
       if (stopped) return;
       // 캡처 프록시(깨끗·라이브, ccglass 방식) 우선, 안 탄 pane 만 transcript jsonl 폴백.
       // 슬래시 결과·시스템 주입 user turn 은 선생님 발신으로 새므로 제거(거노).
-      let next: Turn[] = (conv.turns.length ? conv.turns : ts).filter((t) => !isSystemInjection(t));
+      // conv.turns(캡처 프록시)는 이미 strip_meta·is_main_conversation 으로 정제됨 — 재필터하면
+      // 터미널 직접 입력 user 발화가 isSystemInjection 가양성에 걸려 노란 말풍선이 누락된다(거노).
+      // 화면파싱 폴백(ts)만 필터.
+      let next: Turn[] = conv.turns.length ? conv.turns : ts.filter((t) => !isSystemInjection(t));
       // 진행 중 응답 — 프록시가 SSE 로 라이브 캡처한 어시스턴트 텍스트를 마지막 버블로.
       if (conv.streaming.trim()) next = [...next, { role: 'assistant', text: conv.streaming }];
       setTurns(next);
@@ -347,17 +361,25 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
       const suppressed = Date.now() < menuSuppressRef.current;
       if (aq) {
         const q = aq.input.questions![0];
-        setMenu({
-          title: q.question,
-          options: q.options.map((o, i) => ({ idx: i + 1, label: o.label, cur: false, description: o.description })),
-          multi: !!q.multiSelect,
-        });
-      } else if (!suppressed) {
-        setMenu(parsePromptMenu(screen));
+        // ESC 로 닫은 질문이면 카드 부활 금지(거노: esc 취소). 다른 질문이면 dismiss 해제 후 표시.
+        if (q.question === dismissedQRef.current) {
+          setMenu(null);
+        } else {
+          dismissedQRef.current = null;
+          setMenu({
+            title: q.question,
+            options: q.options.map((o, i) => ({ idx: i + 1, label: o.label, cur: false, description: o.description })),
+            multi: !!q.multiSelect,
+          });
+        }
+      } else {
+        dismissedQRef.current = null; // aq 사라짐 = 응답/취소됨 → 다음 질문 위해 해제
+        if (!suppressed) setMenu(parsePromptMenu(screen));
       }
       // claude 라이브 작업 표시(verb·경과초)도 화면에만 — 로딩 인디케이터에 실값으로.
       setSpinner(parseSpinner(screen));
-      setEffort(parseEffort(screen));
+      setEffort(conv.effort || parseEffort(screen)); // 캡처 프록시 effort(output_config.effort) 우선, 폴백 화면파싱
+      setConvModel(conv.model || ''); // 프록시가 요청에서 잡은 model — /model 전환 시 다음 요청에 반영(실시간 소스)
       if (!suppressed) setEffortMenu(parseEffortMenu(screen)); // /effort 슬라이더 뜨면 GUI 카드로
       // /context 출력이 화면에 보이면 자동으로 컨텍스트 패널 활성(거노: 어디서 /context 보내든
       // 떠야 함 — 모모톡/학생별/터미널 무관). null 일 때만 켜고, 색 갱신은 peek_ansi 폴링이 담당.
@@ -409,6 +431,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   const mirror = (next: string) => {
     setInput(next);
     setSlashIdx(0);
+    // 이미지 staged 동안엔 \x15 미러를 끈다 — claude 입력에 붙은 [Image] 가 지워지면 안 됨.
+    // 텍스트는 제출 때 한꺼번에 보낸다(거노: 첨부 중엔 라이브 미러 잠시 off).
+    if (hasPending) return;
     void sendToPane(surfaceId, '\x15' + next, false);
   };
 
@@ -428,15 +453,56 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
       return;
     }
     setSending(true);
-    const ok = text
-      ? await sendToPane(surfaceId, text, true, false) // 학생별 대화 — 모모톡에 안 남김
-      : await sendToPane(surfaceId, '\r', false);
+    let ok: boolean;
+    if (hasPending) {
+      // 이미지들은 drop 때 이미 claude 에 paste 됨(미러 off 라 보존). 텍스트가 있으면 그
+      // [Image] 뒤에 append(미러 안 탔으니 \x15 없이) 후 bare CR 로 제출. 전송된 user
+      // 메시지(텍스트+이미지)는 프록시가 캡처해 말풍선에 뜬다(거노).
+      if (text.trim()) await sendToPane(surfaceId, text, false);
+      await new Promise((r) => setTimeout(r, 80));
+      ok = await sendToPane(surfaceId, '\r', false);
+      setPendingPreviews([]);
+    } else {
+      ok = text
+        ? await sendToPane(surfaceId, text, true, false) // 학생별 대화 — 모모톡에 안 남김
+        : await sendToPane(surfaceId, '\r', false);
+    }
     setSending(false);
     setFlash(ok ? 'ok' : 'err');
     setTimeout(() => setFlash(null), 1200);
     if (ok) setInput('');
     inputRef.current?.focus();
   };
+
+  // 이미지 드롭(아로나 대화창 어디든) → 그 학생 claude 에 첨부. dataTransfer 의 첫
+  // 이미지 파일을 raw 바이트로 POST /paste-image → kasaterm 이 시스템 클립보드+Ctrl+V 로
+  // 그 pane 에 [Image] 칩 첨부(webview 라 경로가 없어 바이트 전송).
+  const onDropImage = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    // WKWebView(wry) 가 떨군 File 은 .type 이 빈 문자열일 때가 많아 type 필터로 걸러지면
+    // 첨부가 안 됐다(거노 실측). type 또는 확장자로 보고, 둘 다 애매하면 첫 파일.
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    const file =
+      files.find((f) => f.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) ??
+      files[0];
+    // 드롭한 이미지 전부 처리(여러 개 다 보이게 — 거노). 각각 claude 에 순차 paste 해
+    // 터미널에 [Image #1][Image #2]… 로 다 뜨고, 입력창엔 썸네일이 줄지어 쌓인다.
+    const list = files.filter((f) => f.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name));
+    const imgs = list.length ? list : (file ? [file] : []);
+    if (!imgs.length) return;
+    for (const f of imgs) {
+      const reader = new FileReader();
+      reader.onload = () => setPendingPreviews((prev) => [...prev, typeof reader.result === 'string' ? reader.result : '']);
+      reader.readAsDataURL(f);
+      await pasteImageToPane(surfaceId, f); // drop 즉시 claude 에 append(터미널 표시)
+      await new Promise((r) => setTimeout(r, 200)); // 클립보드 덮어쓰기 race 방지 — 순차 paste
+    }
+    inputRef.current?.focus();
+  };
+  // 드래그가 파일을 싣고 있을 때만 드롭존 표시(텍스트 드래그·셀렉션 무시).
+  const dragHasFile = (e: React.DragEvent) =>
+    Array.from(e.dataTransfer?.types ?? []).includes('Files');
 
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
     // 슬래시 드롭다운 열림 — ↑↓ 후보 이동, Tab/Enter 완성, Esc 닫기(우선 처리).
@@ -451,12 +517,22 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
       }
       if (e.key === 'Escape') { e.preventDefault(); setInput(''); void sendToPane(surfaceId, '\x15', false); return; }
     }
+    // 평소 ESC = claude 작업중지(인터럽트). 슬래시 드롭다운 아닐 때만. staged 이미지 있으면
+    // 먼저 첨부 취소(\x15 로 입력 비움). 그 외엔 ESC(\x1b) 를 pane 에 보내 생성 중단(거노).
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (hasPending) { setPendingPreviews([]); void sendToPane(surfaceId, '\x15', false); return; }
+      void sendToPane(surfaceId, '\x1b', false);
+      return;
+    }
     if (e.key === 'Enter') { e.preventDefault(); void submit(); }
     if (e.key === 'c' && e.ctrlKey) { e.preventDefault(); setInput(''); void sendToPane(surfaceId, '\x03', false); }
   };
 
   // 인터랙티브 메뉴 선택 → 숫자 단축키 전송(claude 가 즉시 선택). 다음 폴에서 갱신.
   const pickMenu = async (oi: number) => {
+    const label = menu?.options[oi]?.label;
+    if (label) setMyChoices((p) => [...p, { role: 'user', text: label }]); // 대화창에 내 선택 남김(거노)
     setMenu(null);
     // 단일 선택 — navIdx(=터미널 커서)에서 oi(0-based)로 ↑↓ 이동 후 Enter. peek 안 쓰고
     // GUI 커서와 터미널 커서를 같이 움직여 일치(거노: 완전 연동).
@@ -477,6 +553,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
 
   // multiSelect 제출 — 체크는 toggleCheck 가 이미 터미널에 미러함. Submit 영역으로 Tab + Enter.
   const submitMulti = async () => {
+    const labels = menu ? [...checked].sort((a, b) => a - b).map((i) => menu.options[i]?.label).filter(Boolean) : [];
+    if (labels.length) setMyChoices((p) => [...p, { role: 'user', text: labels.join(', ') }]); // 내 선택 남김(거노)
     setMenu(null);
     setChecked(new Set());
     await sendToPane(surfaceId, '\t\r', false);
@@ -510,6 +588,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
       } else if (e.key === 'Escape') {
         e.preventDefault();
         menuSuppressRef.current = Date.now() + 700; // 닫은 뒤 재감지 보류
+        if (menu) dismissedQRef.current = menu.title; // aq 부활 방지(거노: esc 눌러도 취소 안 되던 것)
         setMenu(null); setChecked(new Set());
         void sendToPane(surfaceId, '\x1b', false); // 터미널 메뉴도 취소
       }
@@ -549,7 +628,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   const slashOpen = slashMatches.length > 0 && slashQuery !== null && slashQuery !== slashMatches[0]?.cmd;
 
   return (
-    <div style={{
+    <div
+      onDragEnter={(e) => { if (dragHasFile(e)) { e.preventDefault(); setDragOver(true); } }}
+      onDragOver={(e) => { if (dragHasFile(e)) { e.preventDefault(); setDragOver(true); } }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false); }}
+      onDrop={onDropImage}
+      style={{
       width: embedded ? '100%' : 340, flex: embedded ? 1 : undefined,
       flexShrink: 0, height: '100%', position: 'relative', // 확인 모달 기준
       display: 'flex', flexDirection: 'column',
@@ -557,6 +641,16 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
       borderLeft: embedded ? 'none' : '1px solid var(--cth-cream-200)',
       overflow: 'hidden'
     }}>
+      {/* 이미지 드래그 드롭존 — 파일 드래그 중에만 점선 오버레이(거노: 점선 뜨고 거기 드롭). */}
+      {dragOver && (
+        <div style={{
+          position: 'absolute', inset: 8, zIndex: 50, pointerEvents: 'none',
+          border: '2px dashed var(--cth-sky)', borderRadius: 14,
+          background: 'color-mix(in srgb, var(--cth-sky) 12%, var(--cth-cream-50))',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontFamily: 'var(--cth-font-ui)', fontSize: 14, fontWeight: 800, color: 'var(--cth-sky)',
+        }}>이미지를 놓으면 첨부돼요</div>
+      )}
       {/* 헤더: 캐릭터명 + 닫기 */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 10,
@@ -591,15 +685,15 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
       </div>
 
       {/* 학생 메타 — 모델·브랜치·컨텍스트%·경로(클로드 실제 지표) */}
-      {agent && (agent.model || agent.branch || agent.cwd) && (
+      {agent && (convModel || agent.model || agent.branch || agent.cwd) && (
         <div style={{
           display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center',
           padding: '6px 12px', borderBottom: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
         }}>
-          {agent.model && <MetaChip label={shortModel(agent.model)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
+          {(convModel || agent.model) && <MetaChip label={shortModel(convModel || agent.model)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
           {/* effort — 모델 옆(거노). 항상 표시(상태바 값 있으면 같이), 클릭 → /effort 메뉴
               카드(방향키 선택). 입력창에 "/effort max" 타이핑(슬래시 자동완성)도 가능. */}
-          {agent.model && <MetaChip label={effort ? `effort: ${effort}` : 'effort'} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
+          {(convModel || agent.model) && <MetaChip label={effort ? `effort: ${effort}` : 'effort'} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
           {/* 브랜치 칩 클릭 → 미커밋 변경사항(/diff) 확인(거노: 브랜치 버튼). */}
           {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
             msg: '변경사항을 볼까요?',
@@ -622,13 +716,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
 
       {/* 대화(채팅 버블) + 보낸 이미지 */}
       <div ref={bodyRef} onScroll={onBodyScroll} style={{ flex: 1, overflow: 'auto', padding: '14px 16px', background: 'var(--cth-cream-100)' }}>
-        {turns.length === 0 && images.length === 0 && agent?.status !== 'working' && agent?.status !== 'thinking' ? (
+        {turns.length === 0 && myChoices.length === 0 && images.length === 0 && agent?.status !== 'working' && agent?.status !== 'thinking' ? (
           <div style={{ color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 13, textAlign: 'center', marginTop: 40 }}>
             {loaded ? '아직 대화가 없어요' : '대화를 불러오는 중…'}
           </div>
         ) : (
           <>
-            {turns.map((t, i) => {
+            {[...turns, ...myChoices].map((t, i) => {
               const mine = t.role === 'user';
               // 메신저: 선생님(user)=우측 카톡 노랑, 학생(assistant)=좌측 아바타+흰 말풍선.
               return (
@@ -831,6 +925,21 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
           ))}
         </div>
       )}
+      {/* staged 이미지들 — 입력창 위 작은 썸네일이 줄지어(여러 개 다 보임, 안 덮임). X=전체
+          취소(claude 입력의 [Image] 들도 \x15 로 비움). Enter 로 텍스트와 함께 전송. */}
+      {hasPending && (
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, padding: '8px 12px 0', background: 'var(--cth-cream-50)' }}>
+          {pendingPreviews.map((src, i) => (
+            <img key={i} src={src} alt="" style={{ width: 42, height: 42, objectFit: 'cover', borderRadius: 8, border: '1px solid var(--cth-cream-200)', display: 'block', flexShrink: 0 }} />
+          ))}
+          <button onClick={() => { setPendingPreviews([]); void sendToPane(surfaceId, '\x15', false); }} title="첨부 전체 취소" style={{
+            width: 20, height: 20, borderRadius: 999, border: 'none', cursor: 'pointer',
+            background: 'var(--cth-coral)', color: '#fff', fontSize: 13, lineHeight: 1,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, flexShrink: 0,
+          }}>×</button>
+          <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)' }}>{pendingPreviews.length}장 첨부 · Enter로 전송</span>
+        </div>
+      )}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
         padding: '8px 12px',
@@ -847,8 +956,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
           value={input}
           onChange={(e) => mirror(e.target.value)}
           onKeyDown={onKey}
+          onDragOver={(e) => { e.preventDefault(); }}
+          onDrop={onDropImage}
           disabled={sending}
-          placeholder="학생에게 지시 — 치는 대로 터미널에 실시간 · Enter 전송 · Ctrl+C 인터럽트"
+          placeholder="학생에게 지시 — 치는 대로 터미널에 실시간 · 이미지 드롭 첨부 · Enter 전송"
           style={{
             flex: 1,
             fontFamily: 'var(--cth-font-ui)', fontSize: 13,

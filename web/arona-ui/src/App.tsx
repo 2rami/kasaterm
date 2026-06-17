@@ -8,24 +8,21 @@ import { CommandCenter } from './components/CommandCenter';
 import { StudentGrid } from './components/StudentGrid';
 import { Footer } from './components/Footer';
 import { TitleBar } from './components/TitleBar';
-import { RoomChip } from './components/RoomChip';
-import { RoomPathModal } from './components/RoomPathModal';
 import { RoomMap } from './components/RoomMap';
 import { ResizeHandle } from './components/ResizeHandle';
 import { PixelButton } from './components/PixelButton';
 import { SegmentedTabs } from './components/GameKit';
-import { startBoardPolling, fetchMode, focusPane, revealTerminal, setMode, fetchBoard, fetchCharacters, spawnAgent, fetchClaudeUsage, fetchSessions, switchSession, newRoom, closeRoom, type ClaudeUsage, type SessionsInfo } from './lib/mcp';
+import { startBoardPolling, fetchMode, focusPane, revealTerminal, fetchClaudeUsage, fetchSessions, switchSession, newRoom, closeRoom, type ClaudeUsage, type SessionsInfo } from './lib/mcp';
 
 type ViewMode = 'classroom' | 'grid';
 
 // dev 디자인 검증용 목 학생(URL ?mock=1). board 비어도 풀 화면을 본다.
 const MOCK_AGENTS: Agent[] = [
   { id: '%1', name: '아로나', character: '아로나', accent: 'sky', status: 'idle', project: 'tmuxify', progress: 2, contextTokens: 30000, tokensIn: 24000, tokensOut: 6000, costUsd: 0.18, contextLimit: 200000, model: 'claude-opus-4-8', cwd: '/Users/kasa/Desktop/momewomo/tmuxify', branch: 'main', isGod: true, lastReply: '선생님, 오늘 의뢰 정리했어요!' },
-  { id: '%2', name: '시로코', character: '시로코', accent: 'coral', status: 'working', currentTool: 'Bash', project: 'API 장애 분석', action: 'log_01.txt 원인 추적 중', progress: 5, contextTokens: 90000, tokensIn: 72000, tokensOut: 18000, costUsd: 0.42, subagents: ['로그 패턴 분석', '메트릭 수집'], contextLimit: 200000 },
-  { id: '%3', name: '유우카', character: '유우카', accent: 'lemon', status: 'working', currentTool: 'Edit', project: '자동화 스크립트', action: '빌드 파이프라인 작성', progress: 4, contextTokens: 64000, tokensIn: 50000, tokensOut: 14000, costUsd: 0.31 },
+  { id: '%2', name: '모모이', character: '모모이', accent: 'coral', status: 'working', currentTool: 'Bash', project: 'API 장애 분석', action: 'log_01.txt 원인 추적 중', progress: 5, contextTokens: 90000, tokensIn: 72000, tokensOut: 18000, costUsd: 0.42, subagents: ['로그 패턴 분석', '메트릭 수집'], contextLimit: 200000 },
+  { id: '%3', name: '유즈', character: '유즈', accent: 'lemon', status: 'working', currentTool: 'Edit', project: '자동화 스크립트', action: '빌드 파이프라인 작성', progress: 4, contextTokens: 64000, tokensIn: 50000, tokensOut: 14000, costUsd: 0.31 },
   { id: '%4', name: '아리스', character: '아리스', accent: 'lilac', status: 'waiting', project: '일일 보고서', progress: 3, contextTokens: 45000, tokensIn: 38000, tokensOut: 7000, costUsd: 0.15, lastReply: '이 방향이 맞을까요?' },
-  { id: '%5', name: '호시노', character: '호시노', accent: 'peach', status: 'idle', project: '시스템 테스트', progress: 1, contextTokens: 12000, tokensIn: 10000, tokensOut: 2000, costUsd: 0.05 },
-  { id: '%6', name: '코하루', character: '코하루', accent: 'mint', status: 'blocked', currentTool: 'Read', project: '사용자 로그 분석', progress: 6, contextTokens: 110000, tokensIn: 90000, tokensOut: 20000, costUsd: 0.55, lastReply: '접근 권한이 필요해요' },
+  { id: '%5', name: '미도리', character: '미도리', accent: 'mint', status: 'idle', project: '시스템 테스트', progress: 1, contextTokens: 12000, tokensIn: 10000, tokensOut: 2000, costUsd: 0.05 },
 ];
 
 // 라우팅: mode 미설정/solo/?picker=1 → 시작 선택. god → SCHALE OS 교실.
@@ -38,9 +35,9 @@ export function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
+  const [gitNonce, setGitNonce] = useState(0); // 타이틀바 소스컨트롤 버튼 → CommandCenter git 탭 전환 신호
   // 학생 대화를 열면 = 그 학생의 현재 대기('확인 필요')를 '확인'한 것 → 코랄 표시 해제.
   const openStudent = (id: string, title: string) => { setPeek({ id, title }); useStore.getState().ackStudent(id); };
-  const [showRoomModal, setShowRoomModal] = useState(false);
   // 방 = kasaterm 윈도우(거노). GET /sessions 폴링 → 좌측 방 네비. 클릭하면 그 윈도우로.
   const [sessions, setSessions] = useState<SessionsInfo>({ count: 0, active: 0, labels: [], saved: [] });
   useEffect(() => {
@@ -75,28 +72,18 @@ export function App() {
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
+  // BA GUI 진입 온보딩 통과 여부 — 켤 때마다 작업 폴더를 먼저 고른 뒤 교실로(거노).
+  const [onboarded, setOnboarded] = useState(false);
 
   useEffect(() => {
-    if (forceMock) { setModeState('god'); setCwd('/Users/kasa/Desktop/momewomo/tmuxify'); setConfigured(true); return; }
+    if (forceMock) { setModeState('god'); setCwd('/Users/kasa/Desktop/momewomo/tmuxify'); setConfigured(true); setOnboarded(true); return; }
     (async () => {
       const { mode, cwd, configured } = await fetchMode();
       setCwd(cwd);
-      // ?picker=1 디버그 진입에서만 선택 화면을 띄운다.
-      if (forcePicker) { setModeState(mode); setConfigured(configured); return; }
-      // 아로나 창을 연 것 자체가 god 의도 — 다시 묻지 않고 바로 진입한다.
-      // 아직 god 이 아니면 모드 마커를 god 으로 쓰고, 교실이 비어 있으면
-      // leader(아로나)를 자동 등판시킨다(옛 ModePicker.pickGod 로직 이관).
-      if (mode !== 'god') {
-        await setMode('god');
-        const board = await fetchBoard();
-        if (board.length === 0) {
-          const chars = await fetchCharacters();
-          const leader = chars?.leader?.name;
-          if (leader) await spawnAgent({ character: leader });
-        }
-      }
-      setConfigured(true);
-      setModeState('god');
+      setConfigured(configured);
+      setModeState(mode);
+      // god 자동진입·leader 스폰은 더 이상 부트에서 안 한다 — 경로 온보딩
+      // (ModePicker pathOnly)의 enterGod 가 폴더 확정 후 setMode('god')+스폰까지 담당.
     })();
   }, []);
   useEffect(() => {
@@ -116,14 +103,25 @@ export function App() {
   if (mode === undefined) {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
   }
-  // 평시엔 ModePicker 없이 god 직행(부트 effect 가 god 으로 만든다). 선택
-  // 화면은 ?picker=1 디버그에서만.
+  // ?picker=1 디버그 — solo/god 선택 화면 전체.
   if (forcePicker) {
     return (
       <ModePicker
         cwd={cwd}
         onboarding={!configured}
-        onPicked={(m) => { setModeState(m); setConfigured(true); }}
+        onPicked={(m) => { setModeState(m); setConfigured(true); setOnboarded(true); }}
+      />
+    );
+  }
+  // BA GUI 켤 때 경로 온보딩 — 작업 폴더부터 고르고(거노) 교실 진입. pathOnly 라
+  // solo/god 카드 없이 폴더 선택만, enterGod 가 roomCd→setMode('god')→leader 스폰.
+  if (!onboarded) {
+    return (
+      <ModePicker
+        cwd={cwd}
+        pathOnly
+        onboarding={!configured}
+        onPicked={() => { setModeState('god'); setConfigured(true); setOnboarded(true); }}
       />
     );
   }
@@ -181,7 +179,7 @@ export function App() {
           if (a) setPeek({ id: a.id, title: a.character });
         }}
         onMail={() => { const a = sorted.find((x) => x.status === 'success'); if (a) setPeek({ id: a.id, title: a.character }); }}
-        onSettings={reveal}
+        onSettings={() => setGitNonce((n) => n + 1)}
       />
 
       {/* 헤더 */}
@@ -203,7 +201,7 @@ export function App() {
           }}>
             SCHALE Headquarters
           </h1>
-          <RoomChip cwd={cwd} onClick={() => setShowRoomModal(true)} />
+          {/* 경로는 BA GUI 에서 바꾸지 않는다 — 터미널에서 그 방(pane) 켤 때의 cwd 로 고정(거노). */}
         </div>
 
         {/* 뷰 탭 */}
@@ -284,19 +282,12 @@ export function App() {
             좌측 핸들 드래그로 폭 조절. */}
         <ResizeHandle dir="col" onDrag={(dx) => setCcWidth((w) => Math.min(640, Math.max(260, w - dx)))} />
         <div style={{ width: ccWidth, flexShrink: 0, display: 'flex', minHeight: 0 }}>
-          <CommandCenter selected={peek} onClearDialog={() => setPeek(null)} onPickStudent={openStudent} />
+          <CommandCenter selected={peek} onClearDialog={() => setPeek(null)} onPickStudent={openStudent} openGitTab={gitNonce} />
         </div>
       </div>
 
       {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} defaultCwd={cwd} />}
 
-      {showRoomModal && cwd && (
-        <RoomPathModal
-          initialPath={cwd}
-          onClose={() => setShowRoomModal(false)}
-          onChanged={(p) => setCwd(p)}
-        />
-      )}
     </div>
   );
 }

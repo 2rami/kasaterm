@@ -192,6 +192,57 @@ export async function revealTerminal(show = 1, pane?: string): Promise<boolean> 
   }
 }
 
+/** POST /git-panel — 터미널 GUI git 소스컨트롤 패널 토글(아로나 타이틀바 버튼). */
+export async function openGitPanel(): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/git-panel`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ── git 소스컨트롤(아로나 탭) — 활성 pane cwd 기준 ──────────────────────────
+export interface GitStatus {
+  branch?: string; ahead?: number; behind?: number;
+  staged?: string[]; modified?: string[]; untracked?: string[];
+  clean?: boolean; insertions?: number; deletions?: number;
+  no_repo?: boolean; error?: string; path?: string;
+}
+/** GET /git-status — 활성 pane cwd 의 git 상태(브랜치·변경파일). */
+export async function fetchGitStatus(): Promise<GitStatus> {
+  try {
+    const r = await fetch(`${BASE}/git-status`);
+    if (!r.ok) return {};
+    return (await r.json()) as GitStatus;
+  } catch {
+    return {};
+  }
+}
+/** POST /git-commit — 지정 파일 stage 후 commit. */
+export async function gitCommit(files: string[], message: string): Promise<{ ok: boolean; output: string }> {
+  try {
+    const r = await fetch(`${BASE}/git-commit`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ files, message }),
+    });
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean; output?: string };
+    return { ok: !!d.ok, output: d.output ?? '' };
+  } catch {
+    return { ok: false, output: '네트워크 오류' };
+  }
+}
+/** POST /git-push — 현재 브랜치 push. */
+export async function gitPush(): Promise<{ ok: boolean; output: string }> {
+  try {
+    const r = await fetch(`${BASE}/git-push`, { method: 'POST' });
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean; output?: string };
+    return { ok: !!d.ok, output: d.output ?? '' };
+  } catch {
+    return { ok: false, output: '네트워크 오류' };
+  }
+}
+
 export interface SessionsInfo { count: number; active: number; labels: string[]; saved: string[]; }
 
 /** GET /sessions — 로컬 PTY '방' = kasaterm 윈도우 목록(count/active/labels). 좌측 방 네비용. */
@@ -529,6 +580,37 @@ export async function fetchSentImages(surfaceId: string, n = 12): Promise<string
   }
 }
 
+/** GET /pane-tasks — claude TaskCreate 태스크(~/.claude/tasks/<session>/<n>.json)를
+ *  pane 별로. surface 주면 그 pane 만. arona 업무 탭이 학생별 진행을 보여준다. fail-soft. */
+export interface PaneTask { pane: string; id: string; subject: string; status: string }
+export async function fetchPaneTasks(surface?: string): Promise<PaneTask[]> {
+  try {
+    const q = surface ? `?surface=${encodeURIComponent(surface)}` : '';
+    const r = await fetch(`${BASE}/pane-tasks${q}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { tasks?: PaneTask[] };
+    return Array.isArray(d?.tasks) ? d.tasks : [];
+  } catch {
+    return [];
+  }
+}
+
+/** POST /paste-image?surface=<id> (body=이미지 raw 바이트) — 아로나 프롬프트 입력창에
+ *  드롭한 이미지를 그 학생 claude 에 첨부(kasaterm 이 시스템 클립보드 비트맵+Ctrl+V). 성공 bool. */
+export async function pasteImageToPane(surface: string, file: Blob): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/paste-image?surface=${encodeURIComponent(surface)}`, {
+      method: 'POST',
+      body: file,
+    });
+    if (!r.ok) return false;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
+    return !!d?.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** 로컬 이미지 경로 → 백엔드 서빙 URL(/image-file). 대화창 <img src>. */
 export function imageFileUrl(path: string): string {
   return `${BASE}/image-file?path=${encodeURIComponent(path)}`;
@@ -592,7 +674,7 @@ export interface ConvToolUse {
     }>;
   } & Record<string, unknown>;
 }
-export interface Conversation { turns: Turn[]; streaming: string; tool_uses?: ConvToolUse[]; model: string; }
+export interface Conversation { turns: Turn[]; streaming: string; tool_uses?: ConvToolUse[]; model: string; effort?: string; }
 
 /** GET /conversation?surface=<id> — 캡처 프록시(ccglass 방식)가 claude 의 Anthropic API
  *  호출에서 가로챈 깨끗한 대화. peek(화면)·jsonl(지연) 없이 구조화·라이브. `streaming`
@@ -607,6 +689,7 @@ export async function fetchConversation(surfaceId: string): Promise<Conversation
       streaming: typeof d.streaming === 'string' ? d.streaming : '',
       tool_uses: Array.isArray(d.tool_uses) ? d.tool_uses : [],
       model: typeof d.model === 'string' ? d.model : '',
+      effort: typeof d.effort === 'string' ? d.effort : '',
     };
   } catch {
     return { turns: [], streaming: '', model: '' };
