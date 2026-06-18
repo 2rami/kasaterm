@@ -88,12 +88,6 @@ impl App {
             }
         }
         self.chrome_dirty = true;
-        // munder식 라우팅: 사람과 대화하는 건 god 뿐이다. 워커 pane 의 권한/입력
-        // 대기는 토스트·데스크탑 알림 없이 위의 flash + board `waiting`(socket
-        // attention 맵, CLI 경로가 이미 기록)으로만 남기고 god 이 처리하게 둔다.
-        if !self.pane_faces_user(surface_id) {
-            return;
-        }
         // 이미 sticky 승인 토스트(칩 포함)가 이 pane 으로 떠 있으면 hook 의
         // 중복 알림으로 텍스트를 덮지 않는다.
         if self.collab.toast_action.as_deref() != Some(surface_id) {
@@ -119,47 +113,6 @@ impl App {
         if n != self.dock_badge_n {
             self.dock_badge_n = n;
             set_dock_badge(n);
-        }
-    }
-
-    /// 이 pane 의 막힘(승인 프롬프트)을 사용자에게 직접 띄울 것인가.
-    /// 협업방(lead 파일)이 있으면 god pane 만 사용자 직행 — 워커는 god 이 처리
-    /// (munder: "only the god agent talks to the human"). 협업방이 없으면(단독
-    /// 사용) 모든 pane 이 사용자 직행 — 기존 동작 그대로. lead 파일은 pane cwd 의
-    /// slug(`/`·`.` → `-`, god-elect.sh/kasacollab 과 동일 규칙)로 찾는다.
-    ///
-    /// cwd 는 **캐시(pane_cwd_cache)를 우회하고 라이브 lsof** 로 푼다. 캐시는
-    /// split 시점값이 박제될 수 있어(refresh 타이밍·키 불일치) cd 후 옛 방 lead
-    /// 를 읽어 god/워커를 오판했다(거노 실측: %4 가 cd /tmp 후 권한 메뉴 떴는데
-    /// 레포 방 lead 로 워커 취급→토스트 미발화). claude pane 은 claude 가 cd 를
-    /// 못 하므로 shell cwd = claude 시작 cwd = 협업방 slug 가 항상 일치 →
-    /// 라이브 pid_cwd 가 정확하다(collab_board god 판정과 같은 결과). 승인 프롬프트
-    /// 는 저빈도라 lsof 1회 비용은 무시 가능. 라이브 실패 시에만 캐시 폴백.
-    pub(crate) fn pane_faces_user(&self, id: &str) -> bool {
-        let cwd = self
-            .pty
-            .get(id)
-            .and_then(|s| s.shell_pid())
-            .and_then(socket::pid_cwd)
-            .or_else(|| self.pane_cwd_cache.get(id).cloned());
-        let Some(cwd) = cwd else {
-            return true; // cwd 를 못 풀면 보수적으로 사용자 직행(기존 동작)
-        };
-        Self::pane_faces_user_for(&cwd, id)
-    }
-
-    /// `pane_faces_user` 의 순수 판정부 — cwd + pane id 로 협업방 lead 를 읽어
-    /// 이 pane 이 god(또는 협업방 없음)이라 사용자 직행인지 본다. cwd 조회(lsof)와
-    /// 분리해 단위테스트가 가능하다.
-    pub(crate) fn pane_faces_user_for(cwd: &std::path::Path, id: &str) -> bool {
-        let slug: String = cwd
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c == '/' || c == '.' { '-' } else { c })
-            .collect();
-        match std::fs::read_to_string(format!("/tmp/kasaterm-collab/{slug}/lead")) {
-            Ok(lead) => lead.trim() == id,
-            Err(_) => true, // 협업방 없음(단독) → 사용자 직행
         }
     }
 
@@ -1282,11 +1235,9 @@ impl App {
         eprintln!("[arona-panel] open; http://127.0.0.1:{port}/arona-ui/");
         self.arona_panel_window = Some(window);
         self.arona_panel_webview = Some(webview);
-        // BA GUI 는 세션을 건드리지 않는다(거노 06-17 방향전환: "시각 레이어"). 패널 열 때
-        // 활성 pane 을 god 으로 승격(claude 선실행·/compact·persona 주입)하던 호출을 뗐다 —
-        // "클로드 먼저 켜지고 compact·페르소나" 버그. god 셋업은 웹 온보딩(폴더 확정 후
-        // enterGod→setMode('god')+leader 스폰)이 담당. promote_active_pane_to_god 는 BA GUI
-        // 재설계 때 다시 쓸 수 있어 남겨둠.
+        // BA GUI 는 세션을 건드리지 않는다(거노 06-17 방향전환: "시각 레이어"). god 통솔
+        // 자체가 폐기됐다(솔로 확정 06-18) — 아로나/SCHALE OS 는 관찰·시각 레이어일 뿐
+        // 세션을 통솔하지 않는다(활성 pane god 승격 호출 제거).
         // 제품 동작: 교실(BA UI)과 터미널을 둘 다 띄워 나란히 연동한다 — BA UI 의
         // 포커스/입력/상태가 메인 터미널 창과 양방향으로 묶인다. 옛 "교실이 화면을
         // 인수(터미널 숨김)"는 KASATERM_ARONA_SOLO_VIEW 몰입 옵션으로 강등.
@@ -1360,182 +1311,19 @@ impl App {
             self.open_arona_panel(event_loop);
         }
     }
-    /// 거노 결정: GUI(아로나 패널)를 켤 때 그 방에 god 이 아직 없으면, 쓰던 활성
-    /// pane 을 god 으로 "승격"한다. 새 pane 을 띄우지 않고 기존 세션에 collab-mode
-    /// god 마커를 세운 뒤 `/compact` 를 보내 — 이미 매 턴 도는 board-context hook
-    /// → god-elect 가 그 pane 을 god 으로 선출(lead claim + `● 이름` rename +
-    /// persona 주입)한다. autoleader 와 동일한 GUI cwd slug 기준이라 god 시스템과
-    /// 일관되고, 실패해도(슬러그 불일치 등) "승격 안 됨"일 뿐 협업은 안 깨진다.
-    // BA GUI 재설계(시각 레이어) 전까지 미사용 — open_arona_panel 에서 호출 제거(거노 06-17).
-    #[allow(dead_code)]
-    pub(crate) fn promote_active_pane_to_god(&self) {
-        let Ok(home) = std::env::var("HOME") else {
-            return;
-        };
-        // 활성 pane(= 지금 쓰던 세션) id.
-        let Some(sid) = self.ws.lock().ok().and_then(|w| w.active_pane.clone()) else {
-            return;
-        };
-        // 활성 pane 의 실제 cwd(pid_cwd) — board-context/god-elect/kasacollab 이
-        // 보는 slug 와 동일(pane_faces_user 와 같은 경로). GUI 프로세스 current_dir
-        // 은 .app 을 Finder 로 켜면 `/` 라 pane cwd 와 어긋나, kasacollab.current_mode
-        // 가 god 마커를 못 찾아 mode=solo 로 읽혀 persona 가 안 입혀졌다(거노 06-14).
-        let Some(cwd) = self
-            .pty
-            .get(&sid)
-            .and_then(|s| s.shell_pid())
-            .and_then(socket::pid_cwd)
-            .or_else(|| self.pane_cwd_cache.get(&sid).cloned())
-        else {
-            return;
-        };
-        let slug: String = cwd
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c == '/' || c == '.' { '-' } else { c })
-            .collect();
-        let dir = format!("/tmp/kasaterm-collab/{slug}");
-        // 이미 *살아있는* god 이 있으면 중복 방지로 return. 단 lead 가 죽은 pane(종료된
-        // 옛 god)을 가리키면 stale — 지우고 이 pane 을 새 god 으로 승격한다. (거노: 아로나
-        // 종료 후 새 아로나가 워커로 남던 버그 — 옛 lead 가 promote 를 early-return 시켜
-        // 새 아로나에 god 마커가 안 박히고 god-elect 의 60초 양보로 빠졌다.)
-        let lead_path = format!("{dir}/lead");
-        if let Ok(cur) = std::fs::read_to_string(&lead_path) {
-            let cur = cur.trim();
-            if !cur.is_empty() && self.pty.contains_key(cur) {
-                return; // 살아있는 god(나 포함)이 이미 있음
-            }
-            // stale lead(죽은 god) → 아래에서 이 pane 으로 덮어쓴다.
-        }
-        // god-elect 는 같은 방 claude pane 이 2개+ 일 때만 선출하고 단일 pane 은
-        // 무시(`room_count<2 → exit 0`, lead 는 안 건드림)하므로, GUI 켜는 시점에
-        // lead·character 마커를 직접 박아 단일 pane 도 즉시 god 이 되게 한다.
-        // board-context(UserPromptSubmit) 가 다음 턴에 lead(=자기) 를 보고
-        // _god_persona 를, character 마커로 페르소나를 싣는다.
-        let _ = std::fs::create_dir_all(&dir);
-        // lead = 자기(surface_id) — board-context god 판정(`me == god`)의 진실원.
-        let _ = std::fs::write(format!("{dir}/lead"), &sid);
-        // character-<N> = leader 이름 — _load_persona 가 이 마커로 페르소나를 찾는다
-        // (방별 leaders 풀이면 같은 slug 해시로 아로나/프라나).
-        if let Some(leader) = crate::load_leader_name_for(&slug) {
-            let n = sid.trim_start_matches('%');
-            let _ = std::fs::write(format!("{dir}/character-{n}"), &leader);
-        }
-        // collab-mode god — god-elect 게이트·kasacollab.current_mode 가 본다.
-        let mode_dir = format!("{home}/.config/kasaterm/collab-mode");
-        let _ = std::fs::create_dir_all(&mode_dir);
-        let _ = std::fs::write(format!("{mode_dir}/{slug}"), "god");
-        // 모델 opus 1M + 컨텍스트 정리. 단 `/model`·`/compact` 는 claude TUI 빌트인이라
-        // claude 가 *실행 중*일 때만 유효하다 — bare 셸에 쏘면 `/model opus[1m]` 의 `[1m]`
-        // 을 zsh 가 glob 으로 먹고(no matches found), `/compact` 는 no such file 로 터졌다
-        // (거노 06-14). 활성 프로세스가 claude(node)면 TUI 명령을 직접, 셸(또는 불명)이면
-        // claude 를 opus 1M 으로 시작한다(따옴표로 zsh glob 차단, `--model 'opus[1m]'`
-        // 검증됨). persona 는 둘 다 다음 턴 UserPromptSubmit hook 이 마커 보고 입힌다.
-        let proc = self
-            .pty
-            .get(&sid)
-            .and_then(|s| s.active_process_name())
-            .unwrap_or_default();
-        let base = proc.strip_prefix('-').unwrap_or(&proc);
-        if matches!(base, "node" | "claude" | "claude-code") {
-            // 이미 claude TUI — 모델만 바꾸고 정리. persona 는 per-prompt 훅 폐기로
-            // 못 입히지만, god 은 보통 사용자 메인 세션(Opus 1M)이라 무영향.
-            self.send_bytes(b"/model opus[1m]\r");
-            self.send_bytes(b"/compact\r");
-        } else {
-            // bare 셸 — claude 를 opus 1M 으로 시작. persona(아로나) + god 역할을 스폰 시
-            // --append-system-prompt 로 1회 주입(per-prompt 훅 폐기 대체, 캐시돼 누적 0).
-            // --session-id 로 transcript discovery 가 argv 에서 exact 매핑(hook-free).
-            let persona = crate::load_leader_name_for(&slug).and_then(|n| crate::load_persona_for(&n));
-            let god_role = "너는 이 SCHALE 워크스페이스의 god(오케스트레이터)다. 워커들의 \
-                'done' 보고를 검토하고 너가 단독으로 git add/commit/push 한다(워커는 커밋 안 함). \
-                board/inbox 자동인지는 없으니 `kasaterm-cli board`/`kasacollab` 로 직접 확인·조율하라.";
-            let append = match persona {
-                Some(p) => format!("{} {}", p.trim(), god_role),
-                None => god_role.to_string(),
-            };
-            let esc: String = append.replace('\n', " ").trim().chars().take(1200).collect();
-            let esc = esc.replace('\'', "'\\''");
-            let cmd = format!(
-                "claude --session-id \"$(uuidgen)\" --model 'opus[1m]' --append-system-prompt '{esc}'\r"
-            );
-            self.send_bytes(cmd.as_bytes());
-        }
-    }
 
-    /// 거노: 평면도 빈 방 클릭 → 새 윈도우 + 프라나 god 자동 스폰(지금 그냥 zsh 만
-    /// 뜨던 것). `new_window` 로 새 윈도우+빈 셸을 띄우고, 셸이 준비되면(OSC133)
-    /// `maybe_autoleader` 가 프라나 페르소나+god 역할로 claude 를 1회 주입하게 예약한다
-    /// (bare 셸에 즉시 쏘면 prompt 전 race). collab 은 cwd slug 키라, 같은 slug 에 이미
-    /// 살아있는 god(아로나)이 있으면 프라나는 그 방의 보조 claude, 없으면 lead 도 박아
-    /// 진짜 god 으로 뜬다(cwd 가 다른 방이면 자연히 각자 god).
+    /// 거노: 평면도 빈 방 클릭 → 새 윈도우(빈 셸). 방별 collab 격리를 위해 room slug
+    /// 를 셸 env(KASATERM_ROOM)로 주입한다(spawn_session_pane 이 pending_room 을 읽음).
+    /// claude 자동 스폰·persona 주입 없음 — 솔로(god 폐기 06-18)라 사용자가 직접 친다.
+    /// `character` 는 좌측 방 라벨용(SCHALE 시각 구분).
     pub(crate) fn new_room_with_god(&mut self, character: &str) {
-        // 새 방 식별자 — new_window→spawn_session_pane 이 셸 env(KASATERM_ROOM)+pane_room
-        // 으로 주입한다(셸 collab 훅이 방별 slug 를 쓴다). 마커도 같은 방별 slug 에 박는다.
         let room = format!("room-{}", self.next_room_seq);
         self.next_room_seq += 1;
-        self.pending_room = Some(room.clone());
+        self.pending_room = Some(room);
         self.new_window();
-        let Some(sid) = self.ws.lock().ok().and_then(|w| w.active_pane.clone()) else {
-            return;
-        };
-        let cwd = self
-            .pty
-            .get(&sid)
-            .and_then(|s| s.shell_pid())
-            .and_then(socket::pid_cwd)
-            .or_else(|| self.pane_cwd_cache.get(&sid).cloned());
-        let base_slug: String = cwd
-            .as_ref()
-            .map(|c| {
-                c.to_string_lossy()
-                    .chars()
-                    .map(|ch| if ch == '/' || ch == '.' { '-' } else { ch })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // 방별 분리(거노): 셸 훅과 동일 규칙 `__room_<id>` — 같은 cwd 라도 방마다 god/lead 격리.
-        let slug = format!("{base_slug}__room_{room}");
-        let dir = format!("/tmp/kasaterm-collab/{slug}");
-        let _ = std::fs::create_dir_all(&dir);
-        // character 마커 = 선택한 god(아로나/프라나) — board 표시 + 페르소나 매핑(거노).
-        let n = sid.trim_start_matches('%');
-        let _ = std::fs::write(format!("{dir}/character-{n}"), character);
-        // 좌측 방 라벨 = god 이름으로 즉시 박는다. 안 그러면 옛 방(같은 윈도우 idx)이
-        // assign-character 로 박았던 stale 라벨("● 시로코")이 재사용돼 남는다(거노).
-        self.window_name_override.insert(self.active_window, format!("● {character}"));
-        // 살아있는 god 이 없으면 lead 도 박아 프라나 god, mode=god.
-        let lead_path = format!("{dir}/lead");
-        let live_god = std::fs::read_to_string(&lead_path)
-            .ok()
-            .map(|c| {
-                let c = c.trim().to_string();
-                !c.is_empty() && self.pty.contains_key(&c)
-            })
-            .unwrap_or(false);
-        if !live_god {
-            let _ = std::fs::write(&lead_path, &sid);
-            if let Ok(home) = std::env::var("HOME") {
-                let md = format!("{home}/.config/kasaterm/collab-mode");
-                let _ = std::fs::create_dir_all(&md);
-                let _ = std::fs::write(format!("{md}/{slug}"), "god");
-            }
-        }
-        // 선택 god 의 persona + god 역할로 claude(opus 1M) 를 셸 준비 후 1회 주입(autoleader 슬롯).
-        let persona = crate::load_persona_for(character);
-        let god_role = "너는 이 SCHALE 워크스페이스의 god(오케스트레이터)다. 워커들의 \
-            'done' 보고를 검토하고 너가 단독으로 git add/commit/push 한다(워커는 커밋 안 함). \
-            board/inbox 는 `kasaterm-cli board`/`kasacollab` 로 직접 확인·조율하라.";
-        let append = match persona {
-            Some(p) => format!("{} {}", p.trim(), god_role),
-            None => god_role.to_string(),
-        };
-        let esc: String = append.replace('\n', " ").trim().chars().take(1200).collect();
-        let esc = esc.replace('\'', "'\\''");
-        // maybe_autoleader 가 끝에 `\r` 을 붙인다 — 여기선 빼고 명령만.
-        let cmd = format!("claude --session-id \"$(uuidgen)\" --model 'opus[1m]' --append-system-prompt '{esc}'");
-        self.pending_autoleader = Some(cmd);
-        self.pending_autoleader_at = Some(std::time::Instant::now());
+        // 좌측 방 라벨 = 선택 캐릭터 이름(방 구분 시각 라벨).
+        self.window_name_override
+            .insert(self.active_window, format!("● {character}"));
     }
     /// First-run onboarding: open the arona window (whose ModePicker shows
     /// the 터미널 vs 아로나 choice) once the boot settles, but only when this
@@ -1891,46 +1679,3 @@ fn applescript_quote(s: &str) -> String {
     out
 }
 
-#[cfg(test)]
-mod faces_user_tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    // 실제 협업방 루트(/tmp/kasaterm-collab)를 오염 안 시키게 pid+태그로 유니크한
-    // cwd 를 만들어 그 slug 경로에 lead 를 깐다. pane_faces_user_for 는 cwd→slug
-    // 변환 후 그 lead 를 읽으므로 cwd 만 유니크하면 격리된다.
-    fn room(tag: &str) -> (PathBuf, String) {
-        let cwd = PathBuf::from(format!("/tmp/kt-faces-test-{}-{tag}", std::process::id()));
-        let slug: String = cwd
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c == '/' || c == '.' { '-' } else { c })
-            .collect();
-        let dir = format!("/tmp/kasaterm-collab/{slug}");
-        std::fs::create_dir_all(&dir).unwrap();
-        (cwd, dir)
-    }
-
-    #[test]
-    fn god_pane_faces_user() {
-        let (cwd, dir) = room("god");
-        std::fs::write(format!("{dir}/lead"), "%1\n").unwrap();
-        assert!(App::pane_faces_user_for(&cwd, "%1")); // god 본인 → 직행
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn worker_pane_does_not_face_user() {
-        let (cwd, dir) = room("worker");
-        std::fs::write(format!("{dir}/lead"), "%1\n").unwrap();
-        assert!(!App::pane_faces_user_for(&cwd, "%2")); // 워커 → god 이 처리
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn no_lead_means_solo_faces_user() {
-        let (cwd, dir) = room("solo"); // dir 만들되 lead 안 씀
-        assert!(App::pane_faces_user_for(&cwd, "%7")); // 협업방 없음(단독) → 직행
-        std::fs::remove_dir_all(&dir).ok();
-    }
-}

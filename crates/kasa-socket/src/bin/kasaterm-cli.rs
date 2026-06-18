@@ -412,20 +412,6 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .ok_or_else(|| anyhow!("close needs a surface_id"))?;
             ("surface.close", json!({ "surface_id": surface }))
         }
-        "report-cwd" => {
-            // statusLine 훅(statusline.py) → claude 내부 cd 를 GUI 에 보고.
-            let surface = args
-                .first()
-                .ok_or_else(|| anyhow!("report-cwd needs <surface_id> <cwd> [session_id]"))?;
-            let cwd = args
-                .get(1)
-                .ok_or_else(|| anyhow!("report-cwd needs a cwd path"))?;
-            let sid = args.get(2).map(String::as_str).unwrap_or("");
-            (
-                "surface.report_cwd",
-                json!({ "surface_id": surface, "cwd": cwd, "session_id": sid }),
-            )
-        }
         "rename" => {
             let surface = args
                 .first()

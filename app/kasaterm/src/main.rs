@@ -2192,8 +2192,8 @@ enum UserEvent {
     /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(거노: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),
-    /// `POST /session-new?god=<name>` 위임 — 새 방(윈도우) + 선택한 god(아로나/프라나)
-    /// 자동 스폰(거노: 방 추가 시 god 선택). `new_room_with_god` 가 처리.
+    /// `POST /session-new?god=<name>` 위임 — 새 방(윈도우, 빈 셸) + 선택 캐릭터 라벨.
+    /// god 통솔 폐기(06-18)로 claude 자동 스폰 없음. `new_room_with_god` 가 처리.
     SocketNewRoom(String),
     /// `POST /session-close?idx=N` 위임 — 방(윈도우) 닫기(거노). `close_window` 가
     /// 마지막 윈도우 가드·pane 정리. 닫기 실패(마지막)는 무시(프론트가 가드).
@@ -2205,10 +2205,6 @@ enum UserEvent {
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
-    /// statusLine 훅(statusline.py) → cwd 보고. claude 가 셸 위에서 돌아 lsof 로는
-    /// 내부 `cd` 를 못 따라가므로 claude 가 직접 보고한다. `(pane_id, cwd, session_id)` —
-    /// session_id 로 claude task store(~/.claude/tasks/session-<id>) 를 매핑한다.
-    SocketReportCwd(String, std::path::PathBuf, String),
     /// `POST /paste-image?surface=%N` — 아로나 프롬프트 입력창에 이미지 드롭(webview).
     /// 이미지 바이트를 시스템 클립보드에 비트맵으로 싣고 그 pane 에 Ctrl+V(0x16)를 보내
     /// claude 가 [Image] 칩으로 첨부하게 한다(터미널 DroppedFile 과 같은 경로). `(surface, bytes)`.
@@ -2901,14 +2897,7 @@ struct App {
     /// 아로나 자동 시작(P5): god 모드 && characters 있는 방의 첫 pane 에 띄울
     /// claude 명령. start_pty 에서 가드 통과 시 세팅, 셸 prompt-end(OSC133) 감지
     /// 또는 타임아웃 시 1회 주입 후 None. solo·무테마면 애초에 None(무동작).
-    pending_autoleader: Option<String>,
-    pending_autoleader_at: Option<Instant>,
     pane_cwd_cache: HashMap<String, std::path::PathBuf>,
-    /// statusLine 보고 cwd(claude 내부 cd, lsof 보다 정확·최신). `refresh_pane_cwds`
-    /// 가 매 lsof sweep 후 이걸로 `pane_cwd_cache` 를 덮어, footer/파일트리가 claude 의
-    /// `cd` 를 따라간다. 값 = (cwd, claude session_id). session_id 는 task store
-    /// (~/.claude/tasks/session-<id>) 매핑용. pane 종료(SocketClose) 시 제거.
-    pane_cwd_cache_override: HashMap<String, (std::path::PathBuf, String)>,
     /// 방별 collab 분리(거노). `pending_room`: 다음 spawn 할 pane 의 방 id(셸 env
     /// KASATERM_ROOM 주입 + ws.pane_room 기록용). pane→방 매핑은 ws.pane_room(공유).
     pending_room: Option<String>,
@@ -3193,10 +3182,7 @@ impl App {
             collab: Default::default(),
             pane_prompt_wait: HashMap::new(),
             last_window_title_check: None,
-            pending_autoleader: None,
-            pending_autoleader_at: None,
             pane_cwd_cache: HashMap::new(),
-            pane_cwd_cache_override: HashMap::new(),
             pending_room: None,
             next_room_seq: 1,
             pane_tty_cache: HashMap::new(),
@@ -3447,11 +3433,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 소켓은 connect 로 가려 건드리지 않으므로 멀티 인스턴스에서도 안전.
     #[cfg(unix)]
     sweep_dead_kasaterm_sockets();
-    // 터미널만 켰을 땐 solo(평범한 claude). god/아로나는 GUI(아로나 패널)를 열 때만
-    // promote_active_pane_to_god 가 붙인다(거노: "터미널만 켰는데 아로나면 안된다").
-    // 옛 설계가 god 모드를 ~/.config 에 영구 저장해 GUI 없이 launch 해도 아로나가
-    // 씌워졌다 — launch 마다 god 마커를 쓸어 solo 로 되돌린다(GUI open 이 재승격).
-    demote_all_god_rooms();
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     // argv 폴백: `kasaterm file.md` / 커맨드라인. `.md` 인자면 새 워크스페이스
@@ -3684,119 +3665,6 @@ fn resolve_collab_hooks_dir(
     None
 }
 
-/// 방(slug) 의 god 캐릭터 이름 — leaders 풀이 있으면 slug 해시로(방마다 다르게),
-/// 없으면 leader 단일. promote(활성 pane cwd slug) 와 공유 — assign-character.py·
-/// board 와 같은 UTF-8 바이트합 해시라 한 방엔 같은 god 캐릭터가 나온다.
-pub(crate) fn load_leader_name_for(slug: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let mut paths = vec![std::path::PathBuf::from(format!(
-        "{home}/.config/kasaterm/characters.json"
-    ))];
-    if let Some(hd) = locate_collab_hooks_dir() {
-        paths.push(hd.join("characters.json"));
-    }
-    for p in &paths {
-        let Ok(s) = std::fs::read_to_string(p) else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { continue };
-        // leaders 풀: 메인 방(god-roster 첫 등록)=leaders[0](아로나), 이후 방은
-        // 등록 순서대로 순환(거노: 메인 아로나 고정). 없으면 leader 단일(현행 호환).
-        if let Some(arr) = v.get("leaders").and_then(|l| l.as_array()) {
-            if !arr.is_empty() {
-                if let Some(n) = arr[god_room_index(slug, arr.len())]
-                    .get("name")
-                    .and_then(|x| x.as_str())
-                {
-                    if !n.is_empty() {
-                        return Some(n.to_string());
-                    }
-                }
-            }
-        }
-        if let Some(n) = v
-            .get("leader")
-            .and_then(|l| l.get("name"))
-            .and_then(|x| x.as_str())
-        {
-            if !n.is_empty() {
-                return Some(n.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// characters.json 에서 캐릭터 이름의 persona 텍스트(leader/leaders/members 통합 검색).
-/// per-prompt 훅(board-context.py) 폐기 후, promote(god)·spawn(워커) 이 claude 기동 시
-/// `--append-system-prompt` 로 1회 입힌다 — 시스템 프롬프트 prefix 라 캐시돼 per-turn
-/// 컨텍스트 누적이 0(거노: 소넷 워커 컨텍스트 절감). 없으면 None(persona 생략).
-pub(crate) fn load_persona_for(name: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let mut paths = vec![std::path::PathBuf::from(format!(
-        "{home}/.config/kasaterm/characters.json"
-    ))];
-    if let Some(hd) = locate_collab_hooks_dir() {
-        paths.push(hd.join("characters.json"));
-    }
-    for p in &paths {
-        let Ok(s) = std::fs::read_to_string(p) else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else { continue };
-        let mut pool: Vec<&serde_json::Value> = Vec::new();
-        if let Some(l) = v.get("leader") {
-            pool.push(l);
-        }
-        if let Some(arr) = v.get("leaders").and_then(|x| x.as_array()) {
-            pool.extend(arr);
-        }
-        if let Some(arr) = v.get("members").and_then(|x| x.as_array()) {
-            pool.extend(arr);
-        }
-        for m in pool {
-            if m.get("name").and_then(|n| n.as_str()) == Some(name) {
-                if let Some(persona) = m.get("persona").and_then(|x| x.as_str()) {
-                    if !persona.is_empty() {
-                        return Some(persona.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// launch 시 god 상태 sweep — 모든 collab-mode "god" 마커와 그 방의 /tmp god 상태
-/// (lead·character·roster·messages)를 지워 터미널-only 시작을 solo 로 되돌린다. god/
-/// 아로나는 open_arona_panel→promote_active_pane_to_god 가 GUI 열 때만 다시 세운다.
-/// messages.jsonl 도 비운다 — 협업 채널은 휘발성 조율이라(claude 대화 본문은 별도
-/// transcript) 재시작 후 stale 메시지(예: 죽은 %2 에게 보낸 것)가 모모톡에 남던 버그
-/// (거노 06-14). collab-mode 마커 없으면 kasacollab 이 solo 로 친다(기본).
-fn demote_all_god_rooms() {
-    let Ok(home) = std::env::var("HOME") else { return };
-    let mode_dir = std::path::PathBuf::from(format!("{home}/.config/kasaterm/collab-mode"));
-    if let Ok(entries) = std::fs::read_dir(&mode_dir) {
-        for e in entries.flatten() {
-            let p = e.path();
-            let is_god = std::fs::read_to_string(&p)
-                .map(|s| s.trim() == "god")
-                .unwrap_or(false);
-            if !is_god {
-                continue;
-            }
-            let room = std::path::Path::new("/tmp/kasaterm-collab").join(e.file_name());
-            let _ = std::fs::remove_file(room.join("lead"));
-            let _ = std::fs::remove_file(room.join("messages.jsonl"));
-            if let Ok(cs) = std::fs::read_dir(&room) {
-                for c in cs.flatten() {
-                    if c.file_name().to_string_lossy().starts_with("character-") {
-                        let _ = std::fs::remove_file(c.path());
-                    }
-                }
-            }
-            let _ = std::fs::remove_file(&p);
-        }
-    }
-    let _ = std::fs::remove_file("/tmp/kasaterm-collab/.god-roster");
-}
-
 /// 캡처 프록시로 claude API 라우팅 — pane 별 깨끗한 대화 캡처(ccglass 방식). claude 가
 /// 이 base 로 `/v1/messages` 를 보내면 kasa-mcp 프록시가 본문 messages[] 를 캡처(peek·
 /// jsonl 없이 구조화 대화)하고 api.anthropic.com 으로 투명 포워드한다. MCP 서버 포트
@@ -3813,27 +3681,6 @@ pub(crate) fn proxy_env(pane_id: &str) -> Vec<(String, String)> {
         )],
         _ => Vec::new(),
     }
-}
-
-/// 방(slug)의 god 캐릭터 순번 — `.god-roster` 에 등록 순서로 적어 메인 방(첫 등록)이
-/// leaders[0](아로나) 고정, 이후 방은 등록 순서대로 순환(거노: 메인 아로나). 새 방
-/// append. promote 와 공유(같은 slug → 같은 god 캐릭터).
-fn god_room_index(slug: &str, n: usize) -> usize {
-    if n == 0 {
-        return 0;
-    }
-    let roster = "/tmp/kasaterm-collab/.god-roster";
-    let content = std::fs::read_to_string(roster).unwrap_or_default();
-    let rooms: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-    if let Some(i) = rooms.iter().position(|r| *r == slug) {
-        return i % n;
-    }
-    use std::io::Write;
-    let _ = std::fs::create_dir_all("/tmp/kasaterm-collab");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(roster) {
-        let _ = writeln!(f, "{slug}");
-    }
-    rooms.len() % n
 }
 
 /// Stage a `claude` wrapper + a session-scoped hook settings file on the pane
@@ -3909,13 +3756,6 @@ for a in \"$@\"; do\n\
   [ \"$a\" = \"--settings\" ] && exec \"$REAL\" \"$@\"\n\
 done\n\
 [ -f \"$SETTINGS\" ] || exec \"$REAL\" \"$@\"\n\
-# god 모드 방이면 이 pane 의 캐릭터 마커만 선점한다(헤더 rename 부수효과). 말투\n\
-# (persona)는 board-context.py 가 매 턴 additionalContext 로 단독 주입 —\n\
-# append-system-prompt(스폰 시점만 먹어 solo→god 토글을 못 입힘) 중복을 없애고\n\
-# persona 를 단일 경로로 일원화. solo 거나 characters.json 없으면 assign 이 no-op.\n\
-if [ \"$(python3 \"$HOOKS_DIR/kasacollab.py\" mode show 2>/dev/null)\" = god ]; then\n\
-  python3 \"$HOOKS_DIR/kasaterm-assign-character.py\" >/dev/null 2>&1\n\
-fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         hd = hooks_dir.display());
     let wrapper_path = shim_dir.join("claude");

@@ -441,103 +441,6 @@ def cmd_mode(args):
         print("mode solo|god|show")
 
 
-def roster_path():
-    """이 cwd 방의 영속 roster(~/.config — /tmp 아님, 재시작 청소에 생존).
-    bind-transcript.sh 가 {pane_id,session_id,cwd,ts} 를 쓰고, god-elect 가
-    role:god 마킹을 얹는다(재시작 후 god 세션 우선권 판정 기준)."""
-    slug = os.getcwd().replace("/", "-").replace(".", "-") + _room_suffix()
-    d = os.path.expanduser("~/.config/kasaterm/agent-roster")
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, slug + ".json")
-
-
-def _write_json_atomic(path, obj):
-    tmp = path + ".tmp"
-    json.dump(obj, open(tmp, "w"), ensure_ascii=False)
-    os.replace(tmp, path)
-
-
-def _load_roster():
-    try:
-        r = json.load(open(roster_path()))
-        return r if isinstance(r, dict) else {}
-    except Exception:
-        return {}
-
-
-def cmd_roster_god_sid(args):
-    """roster 에서 role:god 인 entry 의 session_id 를 출력(없으면 빈 출력).
-    god-elect 가 '이전 god 세션' 우선권 판정에 쓴다."""
-    for v in _load_roster().values():
-        if isinstance(v, dict) and v.get("role") == "god":
-            print(v.get("session_id", ""))
-            return
-
-
-def cmd_roster_mark_god(args):
-    """args[0]=session_id 를 role:god 으로 마킹하고 나머지 entry 의 god 은 해제.
-    flock+atomic(P10 패턴) — 동시 god-elect 마킹의 lost-update 를 막는다."""
-    sid = args[0] if args else ""
-    if not sid:
-        return
-    p = roster_path()
-    with _locked(p):
-        roster = _load_roster()
-        for v in roster.values():
-            if isinstance(v, dict):
-                if v.get("session_id") == sid:
-                    v["role"] = "god"
-                elif v.get("role") == "god":
-                    v.pop("role", None)
-        _write_json_atomic(p, roster)
-
-
-def lead_path():
-    return os.path.join(base(), "lead")
-
-
-def cmd_lead(args):
-    # 이 cwd 협업방의 '팀장' 마커. 팀장 = lead-watch를 Monitor에 걸고 다른
-    # pane이 사람 입력 대기로 멈추면 대신 답하는 오케스트레이터. 한 방에
-    # 한 명만(중복 답변 충돌 방지). 워커는 팀장 존재를 몰라도 되고, 팀장이
-    # board pull로 멈춘 pane을 능동 감지해 대신 답한다.
-    sub = args[0] if args else "set"
-    if sub == "claim":
-        # god 자리 원자적 선점. O_EXCL 이라 동시 경쟁 시 정확히 한 pane만 성공
-        # (exit 0), 나머지는 양보(exit 1). stale lead(죽은 god) 정리는 god-elect.sh
-        # 가 list surfaces 로 판정해 off 후 재호출한다 — 여기선 순수 원자 선점만.
-        try:
-            fd = os.open(lead_path(), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            try:
-                cur = open(lead_path()).read().strip()
-            except OSError:
-                cur = "?"
-            print(f"이미 god: {cur}")
-            sys.exit(1)
-        with os.fdopen(fd, "w") as f:
-            f.write(me())
-        print(f"god 획득 = {me()}")
-        return
-    if sub in ("off", "clear"):
-        try:
-            os.remove(lead_path())
-        except OSError:
-            pass
-        print("팀장 해제")
-    elif sub == "who":
-        try:
-            print("팀장:", open(lead_path()).read().strip())
-        except OSError:
-            print("(팀장 없음)")
-    else:  # set (default): 실행한 pane이 팀장이 된다
-        with open(lead_path(), "w") as f:
-            f.write(me())
-        print(f"팀장 = {me()}. lead-watch 를 Monitor 에 persistent 로 걸어 통솔 시작:")
-        print('  Monitor(command="bash ~/.claude/hooks/kasaterm-lead-watch.sh", '
-              'description="사람 입력 대기 pane", persistent=true)')
-
-
 def _steer_dir():
     d = os.path.join(base(), "steer")
     os.makedirs(d, exist_ok=True)
@@ -586,13 +489,11 @@ def cmd_steer(args):
 def main():
     a = sys.argv[1:]
     if not a:
-        print("kasacollab task|msg|inbox|steer|lead")
+        print("kasacollab task|msg|inbox|steer|drain-stop|mode")
         return
-    {"task": cmd_task, "msg": cmd_msg, "inbox": cmd_inbox, "lead": cmd_lead,
-     "steer": cmd_steer, "drain-stop": cmd_drain_stop,
-     "roster-god-sid": cmd_roster_god_sid,
-     "roster-mark-god": cmd_roster_mark_god, "mode": cmd_mode}.get(
-        a[0], lambda _: print("kasacollab task|msg|inbox|steer|lead|drain-stop|roster-god-sid|roster-mark-god|mode")
+    {"task": cmd_task, "msg": cmd_msg, "inbox": cmd_inbox,
+     "steer": cmd_steer, "drain-stop": cmd_drain_stop, "mode": cmd_mode}.get(
+        a[0], lambda _: print("kasacollab task|msg|inbox|steer|drain-stop|mode")
     )(a[1:])
 
 
