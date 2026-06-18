@@ -47,7 +47,6 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             Err(e) => backend_err(id, e),
         },
         "surface.focus" => surface_focus(backend, id, &req.params),
-        "surface.report_cwd" => surface_report_cwd(backend, id, &req.params),
         "surface.split" => surface_split(backend, id, &req.params),
         "surface.send_text" => surface_send_text(backend, id, &req.params),
         "surface.send_key" => surface_send_key(backend, id, &req.params),
@@ -319,25 +318,6 @@ fn surface_focus(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         None => return param_err(id, "surface.focus requires `surface_id` (string)"),
     };
     match backend.focus_surface(surface_id) {
-        Ok(()) => Response::success(id, json!({"ok": true})),
-        Err(e) => backend_err(id, e),
-    }
-}
-
-fn surface_report_cwd(backend: &dyn Backend, id: Value, params: &Value) -> Response {
-    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return param_err(id, "surface.report_cwd requires `surface_id` (string)"),
-    };
-    let cwd = match params.get("cwd").and_then(|v| v.as_str()) {
-        Some(s) => s,
-        None => return param_err(id, "surface.report_cwd requires `cwd` (string)"),
-    };
-    let session_id = params
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    match backend.report_cwd(surface_id, cwd, session_id) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

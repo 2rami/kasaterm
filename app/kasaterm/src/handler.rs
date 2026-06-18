@@ -197,26 +197,9 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
             UserEvent::SocketClose(id) => {
-                self.pane_cwd_cache_override.remove(id.as_str());
                 self.close_pane(id);
                 self.chrome_dirty = true;
                 self.render_frame();
-                return;
-            }
-            UserEvent::SocketReportCwd(id, cwd, session_id) => {
-                // claude statusLine 보고 — lsof 보다 최신(내부 cd 반영). override 에 저장하고
-                // pane_cwd_cache 도 즉시 갱신해 footer/파일트리가 바로 따라간다. cwd 가
-                // 안 바뀌었으면 redraw 생략(statusLine 은 매 렌더 보고 → 과다 redraw 방지).
-                let changed = self.pane_cwd_cache.get(id.as_str()).map(|c| c != cwd).unwrap_or(true);
-                self.pane_cwd_cache_override
-                    .insert(id.clone(), (cwd.clone(), session_id.clone()));
-                self.pane_cwd_cache.insert(id.clone(), cwd.clone());
-                if changed {
-                    self.chrome_dirty = true;
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
                 return;
             }
             UserEvent::SocketPasteImage(surface, bytes) => {
@@ -3389,10 +3372,6 @@ impl ApplicationHandler<UserEvent> for App {
             || self.pending_capture.is_some()
             || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()
-            // 새 방 god 자동 스폰(maybe_autoleader)이 셸 준비/2s 타임아웃을 평가하려면
-            // wake 가 필요 — 새 셸은 프롬프트 출력 후 조용해져 wake 가 멈춘다(거노: 프라나
-            // 안 뜸). pending 동안 30fps 펌프해 maybe_autoleader 가 발화하게 한다.
-            || self.pending_autoleader.is_some()
             // An unseen-notification window tab blinks (synced to the cursor
             // blink) until the user switches to it — pump frames so it pulses.
             || !self.window_alert.is_empty()

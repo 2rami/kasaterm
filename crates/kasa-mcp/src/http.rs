@@ -451,7 +451,7 @@ fn team_task_dir_for_cwd(cwd: &str) -> Option<std::path::PathBuf> {
 }
 
 /// `GET /pane-tasks?surface=<id>` — claude TaskCreate 태스크를 pane 별로(arona 업무 탭).
-/// 1순위 statusline 보고 session(`pane_session_ids`) → 없으면 board cwd 로 팀 task 디렉토리.
+/// `pane_session_ids`(bound transcript stem) → 없으면 board cwd 로 팀 task 디렉토리 폴백.
 async fn pane_tasks_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -467,7 +467,7 @@ async fn pane_tasks_handler(
         if !surface.is_empty() && row.surface_id != surface {
             continue;
         }
-        // 1) statusline 이 보고한 session(solo claude — session==task), 2) 팀(cwd) 폴백.
+        // 1) bound transcript session(solo claude — session==task), 2) 팀(cwd) 폴백.
         let reported_sid = reported.get(&row.surface_id).cloned().unwrap_or_default();
         let mut tasks = read_claude_tasks(&reported_sid);
         let team = team_task_dir_for_cwd(&row.cwd);
@@ -1124,8 +1124,7 @@ fn spawn_command(model: Option<&str>, cwd: Option<&str>, append: Option<&str>) -
 }
 
 /// characters.json Value 에서 캐릭터 이름의 persona 텍스트(leader/leaders/members 통합).
-/// spawn_command 가 --append-system-prompt 로 입힌다. main.rs load_persona_for 의 kasa-mcp
-/// 측 쌍둥이(크레이트 분리라 중복 — 같은 characters.json 스키마).
+/// spawn_command 가 --append-system-prompt 로 입힌다(같은 characters.json 스키마).
 fn persona_for(chars: &serde_json::Value, name: &str) -> Option<String> {
     let mut pool: Vec<&serde_json::Value> = Vec::new();
     if let Some(l) = chars.get("leader") {
@@ -1247,30 +1246,14 @@ async fn spawn_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResp
             }
         }
 
-        // per-prompt 훅(board-context.py) 폐기로 워커 역할(god 보고·직접커밋 금지)도
-        // 스폰 시 1회 시스템 프롬프트에 넣는다(거노: "워커도 워커인 줄 알아야"). persona
-        // (말투) + 역할(god=lead, 본인=surface_id) 합쳐 --append-system-prompt 1회.
+        // per-prompt 훅(board-context.py) 폐기로 워커 역할(직접커밋 금지)도 스폰 시 1회
+        // 시스템 프롬프트에 넣는다(거노: "워커도 워커인 줄 알아야"). persona(말투) + 역할
+        // 합쳐 --append-system-prompt 1회. god 통솔 폐기(06-18)라 보고 대상은 항상 사용자.
         let append: Option<String> = req.character.as_deref().map(|name| {
-            let god = std::fs::read_to_string(
-                std::path::Path::new("/tmp/kasaterm-collab")
-                    .join(mode_slug(&room))
-                    .join("lead"),
-            )
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-            let role = match god {
-                Some(g) => format!(
-                    "너는 {name}({surface_id}) — SCHALE 워크스페이스의 워커다. 직접 git \
-                     commit/push 하지 말고, 작업이 끝나면 god({g})에게 \
-                     `kasacollab msg {g} \"done: <요약> | files: a,b\"` 로 보고해라. \
-                     god 이 검토 후 단독 커밋한다."
-                ),
-                None => format!(
-                    "너는 {name}({surface_id}) — 이 워크스페이스의 워커다. 직접 커밋하지 \
-                     말고 작업 결과를 선생님(사용자)에게 보고해라."
-                ),
-            };
+            let role = format!(
+                "너는 {name}({surface_id}) — 이 워크스페이스의 워커다. 직접 커밋하지 \
+                 말고 작업 결과를 선생님(사용자)에게 보고해라."
+            );
             match &persona {
                 Some(p) => format!("{p} {role}"),
                 None => role,

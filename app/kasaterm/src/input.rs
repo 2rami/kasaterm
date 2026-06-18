@@ -315,38 +315,7 @@ impl App {
     /// Shared by the busy loop and the approval-prompt router below.
     const BUSY_GRACE: std::time::Duration = std::time::Duration::from_millis(1200);
 
-    /// 아로나 자동 시작(P5): start_pty 가 god 모드+characters 방에서 세팅한
-    /// `pending_autoleader` 명령을, 첫 pane 셸이 준비되면(OSC133 prompt-end) 또는
-    /// 2초 타임아웃에 1회 주입한다. solo·무테마면 pending 이 None 이라 무동작.
-    fn maybe_autoleader(&mut self) {
-        let Some(cmd) = self.pending_autoleader.clone() else { return };
-        let pane = {
-            let ws = self.ws.lock().unwrap();
-            ws.active_pane.clone()
-        };
-        let Some(id) = pane else { return };
-        let ready = {
-            let ws = self.ws.lock().unwrap();
-            ws.panes
-                .get(&id)
-                .and_then(|p| p.term())
-                .map_or(false, |t| t.prompt_end.is_some())
-        };
-        let timed_out = self
-            .pending_autoleader_at
-            .map_or(false, |t| t.elapsed() >= std::time::Duration::from_secs(2));
-        if !ready && !timed_out {
-            return;
-        }
-        if let Some(pty) = self.pty_for_pane(&id) {
-            let _ = pty.send_bytes(format!("{cmd}\r").as_bytes());
-        }
-        self.pending_autoleader = None;
-        self.pending_autoleader_at = None;
-    }
-
     pub(crate) fn refresh_pane_activity(&mut self) {
-        self.maybe_autoleader();
         let now = Instant::now();
         if let Some(t) = self.pane_busy_check {
             if now.duration_since(t).as_millis() < 300 {
@@ -462,7 +431,8 @@ impl App {
             let flagged = self.pane_prompt_wait.contains_key(id);
             if !busy && prompt.is_some() {
                 if !flagged {
-                    let faces_user = self.pane_faces_user(id);
+                    // 솔로(god 폐기 06-18) — 모든 pane 이 사용자 직행.
+                    let faces_user = true;
                     self.pane_prompt_wait.insert(id.clone(), faces_user);
                     self.notify_flash.insert(id.clone(), now);
                     // board 에 waiting 으로 노출 — god 이 board/god-loop 로 본다.

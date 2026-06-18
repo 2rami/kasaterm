@@ -158,11 +158,6 @@ pub struct PtyBackend {
     /// pane 셸 pid → (조회시각, 라이브 cwd). collab_board 가 학생 경로(cd 반영)를
     /// transcript 가 아닌 PTY pid_cwd 로 채우되, lsof 비용을 2s 캐시로 제한한다.
     cwd_cache: Arc<Mutex<HashMap<u32, (std::time::Instant, std::path::PathBuf)>>>,
-    /// pane(%N) → claude **canonical session_id**(statusline 이 report_cwd 로 보고).
-    /// `/pane-tasks` 가 ~/.claude/tasks/session-<id> 매핑에 쓴다. transcript 파일명·argv·
-    /// 프록시 요청 어디에도 이 id 가 없어(실측: task id 9e615f67 ↔ transcript FF708E8C
-    /// 별개) statusline 만이 유일 소스 — report_cwd 가 backend 로 직접 흘려준다.
-    pane_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl PtyBackend {
@@ -182,7 +177,6 @@ impl PtyBackend {
             agents_cache: Arc::new(Mutex::new(None)),
             last_discover: Arc::new(Mutex::new(None)),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
-            pane_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -362,22 +356,17 @@ impl Backend for PtyBackend {
         foreground_proc_name(pid)
     }
 
-    /// pane → claude **canonical session_id**(`/pane-tasks` 용). 1순위 = statusline 이
-    /// report_cwd 로 보고한 session_id(`pane_sessions`) — 이게 task store dir
-    /// `session-<id 첫8hex>` 와 일치하는 **유일** 소스(transcript 파일명/내용·argv·프록시
-    /// 요청 어디에도 이 id 없음, 실측 확정). 2순위 = bound transcript 파일명 stem(normal
-    /// claude 는 transcript==session 이라 폴백으로 유효, statusline 아직 미보고한 pane 커버).
+    /// pane → claude session_id(`/pane-tasks` 용) = bound transcript 파일명 stem.
+    /// normal claude 는 transcript==session 이라 task store dir(`session-<id 첫8hex>`)
+    /// 매핑에 폴백으로 쓴다.
     fn pane_session_ids(&self) -> Result<Vec<(String, String)>> {
         let live: std::collections::HashSet<String> =
             self.ws.lock().unwrap().panes.keys().cloned().collect();
         self.discover_unbound(&live);
-        let reported = self.pane_sessions.lock().unwrap().clone();
         let bound = self.bound.lock().unwrap();
         let mut out: Vec<(String, String)> = Vec::new();
         for pane in &live {
-            if let Some(sid) = reported.get(pane).filter(|s| !s.is_empty()) {
-                out.push((pane.clone(), sid.clone()));
-            } else if let Some(stem) = bound
+            if let Some(stem) = bound
                 .get(pane)
                 .and_then(|p| p.file_stem())
                 .and_then(|s| s.to_str())
@@ -481,23 +470,6 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn report_cwd(&self, surface_id: &str, cwd: &str, session_id: &str) -> Result<()> {
-        // canonical session_id 를 backend 맵에 직접 저장 → /pane-tasks 가 task store 매핑에
-        // 쓴다(transcript/argv/proxy 어디에도 없는 유일 소스). 빈 값·"unknown" 은 제외.
-        if !session_id.is_empty() && session_id != "unknown" {
-            self.pane_sessions
-                .lock()
-                .unwrap()
-                .insert(surface_id.to_string(), session_id.to_string());
-        }
-        let _ = self.proxy.send_event(UserEvent::SocketReportCwd(
-            surface_id.to_string(),
-            std::path::PathBuf::from(cwd),
-            session_id.to_string(),
-        ));
-        Ok(())
-    }
-
     fn reveal_terminal(&self, show: bool, focus_pane: Option<&str>) -> Result<()> {
         let _ = self.proxy.send_event(UserEvent::SocketRevealTerminal(
             show,
@@ -554,7 +526,7 @@ impl Backend for PtyBackend {
     /// (None→호스트 cwd 폴백)는 .app 실행 시 cwd 가 `/` 라 항상 solo 로
     /// 오판했다(거노 실측: god 방 토글 차단). GUI 동기 RPC 로 활성 pane 의
     /// shell pid 만 받고(메모리 즉답), lsof 해석은 이 backend 스레드서 한다 —
-    /// pane_faces_user 라이브 우회와 같은 철학(캐시·프로세스 cwd 불신).
+    /// 라이브 lsof 가 정확(split 시점 박제 캐시·프로세스 cwd 불신).
     fn active_cwd(&self) -> Option<std::path::PathBuf> {
         let (tx, rx) = std::sync::mpsc::channel();
         self.proxy

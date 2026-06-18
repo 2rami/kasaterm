@@ -370,13 +370,6 @@ pub trait Backend: Send + Sync {
     fn active_cwd(&self) -> Option<std::path::PathBuf> {
         None
     }
-    /// statusLine 훅이 보고한 pane 의 현재 작업 디렉토리. claude 가 셸 위에서 돌아
-    /// lsof(최상위 셸 cwd)로는 내부 `cd` 를 못 따라가므로 claude 가 직접 report 한다.
-    /// `session_id` = claude task store(~/.claude/tasks/session-<id>) 매핑용.
-    /// Default: unsupported.
-    fn report_cwd(&self, _surface_id: &str, _cwd: &str, _session_id: &str) -> Result<()> {
-        anyhow::bail!("report_cwd unsupported by this backend")
-    }
     /// Foreground process name of the active pane (e.g. "claude", "zsh").
     /// Lets the AI-commit button decide whether to delegate the commit to a
     /// running claude or fall back. Default `None`.
