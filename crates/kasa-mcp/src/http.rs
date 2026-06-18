@@ -1463,6 +1463,36 @@ async fn transcript_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /transcript-raw?surface=%N` — a pane's bound transcript jsonl, raw and
+/// unparsed (every line). The BA GUI parses tool_use/tool_result/structuredPatch
+/// client-side (ccsv 렌더러) — unlike `/transcript` which strips to text turns.
+async fn transcript_raw_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let surface = params.get("surface").map(String::as_str).unwrap_or("");
+    let body = if surface.is_empty() {
+        serde_json::json!({ "ok": false, "error": "surface=%N required" })
+    } else {
+        match backend.transcript_raw(surface) {
+            Ok(raw) => serde_json::json!({ "ok": true, "surface_id": surface, "raw": raw }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `GET /layout` — 현재 윈도우의 pane split 배치(% rect 배열, window_layout 재활용).
+/// BA GUI 가 이걸로 터미널 분할을 그대로 미러한 그리드를 그린다(각 pane = 세션 뷰어 칸).
+/// rect 가 이미 % 좌표라 프론트는 position:absolute 로 배치만 하면 된다.
+async fn layout_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
+    let body = match backend.window_layout() {
+        Ok(panes) => serde_json::json!({ "ok": true, "panes": panes }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// /tmp/kasaterm-collab/ 아래 모든 방을 순회해 lead 파일이 있는 첫 god pane id
 /// 를 반환한다. active_cwd 가 쉘 디렉토리를 따르므로 슬러그 계산 대신 스캔.
 fn find_god_pane() -> Option<String> {
@@ -2068,6 +2098,8 @@ pub fn spawn_http_server(
                 let arona_close_backend = backend.clone();
                 let peek_backend = backend.clone();
                 let transcript_backend = backend.clone();
+                let transcript_raw_backend = backend.clone();
+                let layout_backend = backend.clone();
                 let tell_god_backend = backend.clone();
                 let send_backend = backend.clone();
                 let mode_get_backend = backend.clone();
@@ -2128,6 +2160,16 @@ pub fn spawn_http_server(
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             transcript_handler(transcript_backend.clone(), q)
                         }),
+                    )
+                    .route(
+                        "/transcript-raw",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            transcript_raw_handler(transcript_raw_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/layout",
+                        get(move || layout_handler(layout_backend.clone())),
                     )
                     .route("/characters", get(characters_handler))
                     .route(

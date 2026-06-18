@@ -2399,6 +2399,7 @@ pub(crate) enum SettingsAction {
     CwdMode(&'static str),
     FocusCwdPath,
     ToggleFileTree,
+    ToggleFooter,
     ShellPreset(String),
     FocusShell,
     ThemeMode(&'static str),
@@ -2950,6 +2951,7 @@ struct App {
     /// change so the next launch (and `resolve_*`) pick it up.
     set_cwd_mode: String,
     set_file_tree_default: bool,
+    set_footer_default: bool,
     set_shell: String,
     /// True when opening settings auto-expanded a collapsed sidebar, so closing
     /// can restore it (but leaves a sidebar the user opened themselves alone).
@@ -3214,6 +3216,7 @@ impl App {
             },
             set_cwd_mode: socket::read_default_cwd_mode(),
             set_file_tree_default: socket::read_file_tree_default(),
+            set_footer_default: socket::read_footer_default(),
             set_shell: socket::read_default_shell().unwrap_or_default(),
             settings_expanded_sidebar: false,
             settings_input: None,

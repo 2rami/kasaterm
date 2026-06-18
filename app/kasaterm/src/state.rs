@@ -11,12 +11,16 @@ use super::*;
 use std::collections::HashMap;
 
 /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) plus the
-/// open dropdown's state. `hidden` holds the pane ids whose bar is collapsed
-/// (default shown, so absence = visible). The `*_rects` are per-frame hit
-/// targets rebuilt each paint; `menu*` back the open path/branch dropdown.
+/// open dropdown's state. Visibility = the global `set_footer_default` default,
+/// flipped per pane by two exception sets: `hidden` (ids explicitly collapsed
+/// while the default is on) and `shown` (ids explicitly opened while the default
+/// is off). Toggling the global default clears both so panes re-unify. The
+/// `*_rects` are per-frame hit targets rebuilt each paint; `menu*` back the open
+/// path/branch dropdown.
 #[derive(Default)]
 pub(crate) struct StatusbarState {
     pub(crate) hidden: std::collections::HashSet<String>,
+    pub(crate) shown: std::collections::HashSet<String>,
     pub(crate) path_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) branch_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) toggle_rects: Vec<(String, (f32, f32, f32, f32))>,

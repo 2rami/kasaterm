@@ -1,13 +1,18 @@
 import { useStore, type Agent } from '@/store';
 import type { AccentColorName } from '@/design/tokens';
 import type { StatusKind } from '@/components/PixelBadge';
+import type { SessionEvent } from './types';
+import { parseJsonlSync } from './jsonl';
 
 // munder 는 electron IPC(window.cth.*)로 hive 와 통신했지만, 우리는 kasaterm 의
 // kasaspace MCP HTTP 를 fetch 로 폴링한다. dist 는 MCP 가 /arona-ui/ 로 정적
 // 서빙하므로 페이지·API 가 **same-origin** → BASE='' (relative). 8765 가 점유돼
-// 랜덤 포트로 폴백해도 안 끊긴다(유우카 P6c-2차). vite dev 로 띄울 때만 8765
-// 절대주소(개발 서버는 5173, API 는 별도 포트라 same-origin 이 아님).
-const BASE = import.meta.env.DEV ? 'http://127.0.0.1:8765' : '';
+// 랜덤 포트로 폴백해도 안 끊긴다(유우카 P6c-2차). vite dev 로 띄울 때만 절대주소
+// (개발 서버는 5173, API 는 별도 포트라 same-origin 이 아님). 기본 8765 지만
+// `VITE_MCP_PORT` 로 덮어쓸 수 있다 — 8765 점유돼 폴백 포트로 뜬 인스턴스에 붙어
+// 검증할 때 쓴다.
+const MCP_PORT = import.meta.env.VITE_MCP_PORT || '8765';
+const BASE = import.meta.env.DEV ? `http://127.0.0.1:${MCP_PORT}` : '';
 
 // 워커 accent — pane id 숫자 해시(god-elect 워커 팔레트와 같은 결). god 은 lemon.
 const ACCENTS: AccentColorName[] = ['sky', 'mint', 'coral', 'lilac', 'peach'];
@@ -705,6 +710,35 @@ export async function fetchTranscript(surfaceId: string, turns = 20): Promise<Tu
     if (!r.ok) return [];
     const d = (await r.json().catch(() => ({}))) as { turns?: Turn[] };
     return Array.isArray(d?.turns) ? d.turns : [];
+  } catch {
+    return [];
+  }
+}
+
+/** GET /transcript-raw?surface=<id> — pane 의 bound jsonl 을 raw 로 받아 SessionEvent[]
+ *  로 파싱. tool_use/tool_result/structuredPatch 가 다 살아있어 ccsv per-tool 렌더가
+ *  먹는다(/transcript 는 텍스트만 남김). fail-soft 빈 배열. */
+export async function fetchTranscriptRaw(surfaceId: string): Promise<SessionEvent[]> {
+  try {
+    const r = await fetch(`${BASE}/transcript-raw?surface=${encodeURIComponent(surfaceId)}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { raw?: string };
+    if (typeof d?.raw !== 'string' || !d.raw) return [];
+    return parseJsonlSync(d.raw);
+  } catch {
+    return [];
+  }
+}
+
+/** 터미널 pane 의 % 배치(window_layout). BA GUI 중앙 그리드가 이걸로 터미널 split 을
+ *  그대로 미러한다(position:absolute left/top/w/h %). 단일 pane 은 전체(0,0,100,100). */
+export interface PaneRect { surface_id: string; x: number; y: number; w: number; h: number }
+export async function fetchLayout(): Promise<PaneRect[]> {
+  try {
+    const r = await fetch(`${BASE}/layout`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { panes?: PaneRect[] };
+    return Array.isArray(d?.panes) ? d.panes : [];
   } catch {
     return [];
   }

@@ -678,6 +678,21 @@ impl Backend for PtyBackend {
         Ok(all)
     }
 
+    fn transcript_raw(&self, surface_id: &str) -> Result<String> {
+        // Same bound→jsonl mapping as transcript_tail, but hand back the raw
+        // jsonl untouched. The BA GUI parses tool_use/tool_result/structuredPatch
+        // itself (ccsv 렌더러) instead of the text-only parse_turn path.
+        let path = self
+            .bound
+            .lock()
+            .unwrap()
+            .get(surface_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("pane {surface_id} has no bound transcript"))?;
+        std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("read transcript {path:?}: {e}"))
+    }
+
     fn collab_board(&self) -> Result<Vec<PaneActivity>> {
         // Pull, not push: read each open & bound pane's transcript tail right
         // now and derive its row. No background watcher, no cache — the board
@@ -1249,6 +1264,15 @@ pub fn read_file_tree_default() -> bool {
         .get("file_tree_default")
         .and_then(|x| x.as_bool())
         .unwrap_or(false)
+}
+
+/// 새 pane 의 하단 상태바(cwd/branch/diff)를 기본으로 보일지. 키 없으면 true —
+/// footer 는 원래 기본 표시였으니 기존 사용자 동작을 유지한다.
+pub fn read_footer_default() -> bool {
+    read_settings()
+        .get("pane_footer_default")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true)
 }
 
 /// User's preferred shell override (`default_shell` key). Empty/missing → None,

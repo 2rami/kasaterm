@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+/* arona 는 :root[data-theme="dark"] 토글, ccsv 렌더러는 dark: 변형을 쓴다.
+   data-theme 에 dark: 를 매핑해 ccsv 클래스의 다크 변형이 그대로 먹게 한다. */
+@custom-variant dark (&:where([data-theme="dark"] *));
+
+/* ccsv 렌더러가 쓰는 색 토큰을 arona --cth-* (SCHALE 클린 블루 톤)에 1:1 매핑.
+   --cth-* 는 data-theme=dark 에서 이미 반전되므로 다크모드는 자동으로 따라간다
+   (ccsv 처럼 :root/.dark 두 벌을 손으로 관리할 필요 없음). brand 주황(#D97757)은
+   SCHALE 정체성색 sky 로 치환. */
+@theme {
+  --color-background: var(--cth-cream-50);
+  --color-foreground: var(--cth-ink-900);
+  --color-card: var(--cth-paper-100);
+  --color-card-foreground: var(--cth-ink-900);
+  --color-popover: var(--cth-cream-50);
+  --color-popover-foreground: var(--cth-ink-900);
+  --color-muted: var(--cth-cream-100);
+  --color-muted-foreground: var(--cth-ink-500);
+  --color-border: var(--cth-cream-200);
+  --color-input: var(--cth-cream-200);
+  --color-ring: var(--cth-sky);
+  --color-accent: var(--cth-sky-light);
+  --color-accent-foreground: var(--cth-ink-900);
+  --color-brand: var(--cth-sky);
+  --color-brand-fg: #ffffff;
+  --color-role-user: var(--cth-sky);
+  --color-role-assistant: var(--cth-ink-700);
+  --color-role-system: var(--cth-lilac);
+  --color-role-tool: var(--cth-mint);
+  --color-role-attachment: var(--cth-peach);
+  --font-sans: var(--cth-font-ui);
+  --font-mono: var(--cth-font-mono);
+}

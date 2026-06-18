@@ -12,9 +12,11 @@ import { RoomMap } from './components/RoomMap';
 import { ResizeHandle } from './components/ResizeHandle';
 import { PixelButton } from './components/PixelButton';
 import { SegmentedTabs } from './components/GameKit';
-import { startBoardPolling, fetchMode, focusPane, revealTerminal, fetchClaudeUsage, fetchSessions, switchSession, newRoom, closeRoom, type ClaudeUsage, type SessionsInfo } from './lib/mcp';
+import { startBoardPolling, fetchMode, focusPane, revealTerminal, fetchClaudeUsage, fetchSessions, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type PaneRect } from './lib/mcp';
+import { PaneGrid } from './components/PaneGrid';
+import { StudentNav } from './components/StudentNav';
 
-type ViewMode = 'classroom' | 'grid';
+type ViewMode = 'terminal' | 'classroom' | 'grid';
 
 // dev 디자인 검증용 목 학생(URL ?mock=1). board 비어도 풀 화면을 본다.
 const MOCK_AGENTS: Agent[] = [
@@ -31,7 +33,9 @@ export function App() {
   const [mode, setModeState] = useState<string | null | undefined>(undefined);
   const [cwd, setCwd] = useState<string | null>(null);
   const [configured, setConfigured] = useState(true);
-  const [view, setView] = useState<ViewMode>('classroom');
+  // 기본 뷰 = 터미널 pane 그리드(세션 뷰어). 교실(캐릭터)·카드는 토글로.
+  const [view, setView] = useState<ViewMode>('terminal');
+  const [layout, setLayout] = useState<PaneRect[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
@@ -43,6 +47,15 @@ export function App() {
   useEffect(() => {
     let stop = false;
     const tick = async () => { const s = await fetchSessions(); if (!stop) setSessions(s); };
+    void tick();
+    const iv = setInterval(tick, 1500);
+    return () => { stop = true; clearInterval(iv); };
+  }, []);
+  // 터미널 pane 배치(window_layout) 폴링 → 중앙 그리드가 터미널 split 을 미러.
+  useEffect(() => {
+    if (forceMock) return;
+    let stop = false;
+    const tick = async () => { const l = await fetchLayout(); if (!stop) setLayout(l); };
     void tick();
     const iv = setInterval(tick, 1500);
     return () => { stop = true; clearInterval(iv); };
@@ -72,18 +85,16 @@ export function App() {
 
   const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
-  // BA GUI 진입 온보딩 통과 여부 — 켤 때마다 작업 폴더를 먼저 고른 뒤 교실로(거노).
-  const [onboarded, setOnboarded] = useState(false);
-
   useEffect(() => {
-    if (forceMock) { setModeState('god'); setCwd('/Users/kasa/Desktop/momewomo/tmuxify'); setConfigured(true); setOnboarded(true); return; }
+    if (forceMock) { setModeState('god'); setCwd('/Users/kasa/Desktop/momewomo/tmuxify'); setConfigured(true); return; }
     (async () => {
-      const { mode, cwd, configured } = await fetchMode();
+      const { cwd } = await fetchMode();
       setCwd(cwd);
-      setConfigured(configured);
-      setModeState(mode);
-      // god 자동진입·leader 스폰은 더 이상 부트에서 안 한다 — 경로 온보딩
-      // (ModePicker pathOnly)의 enterGod 가 폴더 확정 후 setMode('god')+스폰까지 담당.
+      setConfigured(true);
+      // BA GUI = 세션 무접촉 시각 레이어 → 켜면 바로 교실(현재 터미널 cwd 그대로).
+      // 폴더 온보딩(ModePicker pathOnly) 폐기: god 자율통솔 청산으로 leader 스폰이
+      // 사라져 "폴더 골라 god 스폰" 단계가 무의미해졌다(거노). 교실로 직진.
+      setModeState('god');
     })();
   }, []);
   useEffect(() => {
@@ -109,19 +120,7 @@ export function App() {
       <ModePicker
         cwd={cwd}
         onboarding={!configured}
-        onPicked={(m) => { setModeState(m); setConfigured(true); setOnboarded(true); }}
-      />
-    );
-  }
-  // BA GUI 켤 때 경로 온보딩 — 작업 폴더부터 고르고(거노) 교실 진입. pathOnly 라
-  // solo/god 카드 없이 폴더 선택만, enterGod 가 roomCd→setMode('god')→leader 스폰.
-  if (!onboarded) {
-    return (
-      <ModePicker
-        cwd={cwd}
-        pathOnly
-        onboarding={!configured}
-        onPicked={() => { setModeState('god'); setConfigured(true); setOnboarded(true); }}
+        onPicked={(m) => { setModeState(m); setConfigured(true); }}
       />
     );
   }
@@ -206,7 +205,7 @@ export function App() {
 
         {/* 뷰 탭 */}
         <SegmentedTabs<ViewMode>
-          options={[{ value: 'classroom', label: '교실' }, { value: 'grid', label: '카드' }]}
+          options={[{ value: 'terminal', label: '터미널' }, { value: 'classroom', label: '교실' }, { value: 'grid', label: '카드' }]}
           value={view}
           onChange={setView}
           size="sm"
@@ -227,12 +226,20 @@ export function App() {
         {/* 좌측 장소(워크스페이스) 네비 — 방 여러 개일 때만 */}
         <RoomMap sessions={sessions} onSwitch={selectRoom} onNewRoom={(god) => { void newRoom(god); }} onCloseRoom={(i) => { void closeRoom(i); }} />
 
+        {/* 좌측 학생 네비 — 터미널/카드 뷰의 ccsv식 사이드 리스트(교실 뷰는 캐릭터가
+            중앙이라 중복이라 숨김). 클릭 → pane 포커스 + 우측 디테일. */}
+        {view !== 'classroom' && (
+          <StudentNav agents={shown} selectedId={peek?.id} onSelect={openStudent} />
+        )}
+
         {/* 메인 컬럼 */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-          {/* 교실 씬 or 카드 그리드 */}
-          <div style={{ flex: 1, overflow: 'auto', padding: view === 'classroom' ? 8 : 'var(--cth-space-4)' }}>
-            {view === 'classroom' ? (
+          {/* 중앙: 터미널 pane 그리드(기본 뷰어) / 교실(캐릭터) / 카드 */}
+          <div style={{ flex: 1, overflow: view === 'terminal' ? 'hidden' : 'auto', padding: view === 'terminal' ? 0 : view === 'classroom' ? 8 : 'var(--cth-space-4)' }}>
+            {view === 'terminal' ? (
+              <PaneGrid panes={layout} agents={shown} selectedId={peek?.id} onSelect={openStudent} />
+            ) : view === 'classroom' ? (
               <ClassroomView agents={shown} background={roomBg} onAdd={() => setShowAdd(true)} onSelect={openStudent} selectedId={peek?.id} />
             ) : shown.length === 0 ? (
               <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
@@ -258,23 +265,27 @@ export function App() {
             )}
           </div>
 
-          {/* 교실↔하단 경계 — 세로 드래그로 하단 영역 높이 조절(거노: 나눠진 곳 모두). */}
-          <ResizeHandle dir="row" onDrag={(dy) => setBottomH((h) => Math.min(440, Math.max(110, h - dy)))} />
+          {/* 학생 카드 그리드 — 터미널 뷰는 좌측 StudentNav 로 학생을 대체하므로 접어
+              중앙 PaneGrid 를 풀높이로(거노: 뷰어 비율 ↑·캐릭터 ↓). 교실/카드 뷰는
+              기존대로 카드 그리드 + 높이 드래그. */}
+          {view !== 'terminal' && (
+            <>
+              <ResizeHandle dir="row" onDrag={(dy) => setBottomH((h) => Math.min(440, Math.max(110, h - dy)))} />
+              <div style={{ height: bottomH, flexShrink: 0, overflowY: 'auto', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
+                <StudentGrid agents={shown} onSelect={openStudent} />
+              </div>
+            </>
+          )}
 
-          {/* 하단(학생카드 + 풋터) — 높이 드래그 조절 */}
-          <div style={{ height: bottomH, flexShrink: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ flexShrink: 0, borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
-              <StudentGrid agents={shown} onSelect={openStudent} />
-            </div>
-            <div style={{ flexShrink: 0, borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
-              <Footer
-                onManage={() => setShowAdd(true)}
-                onNewRequest={() => setShowAdd(true)}
-                inputTokens={totalInputTokens}
-                costUsd={totalCostUsd}
-                contextPct={contextPct}
-              />
-            </div>
+          {/* 재화 풋터 — 항상(얇은 바): 입력토큰·비용·인연 게이지. */}
+          <div style={{ flexShrink: 0, borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
+            <Footer
+              onManage={() => setShowAdd(true)}
+              onNewRequest={() => setShowAdd(true)}
+              inputTokens={totalInputTokens}
+              costUsd={totalCostUsd}
+              contextPct={contextPct}
+            />
           </div>
         </div>
 
