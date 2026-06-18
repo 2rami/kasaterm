@@ -1,13 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
-import { fetchConversation, fetchTranscript, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, fetchSlashCommands, pasteImageToPane, type Turn } from '@/lib/mcp';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { fetchConversation, fetchTranscriptRaw, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, fetchSlashCommands, pasteImageToPane, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { Markdown } from './Markdown';
+import { ToolUseCard } from './tool-use-card';
+import { ThinkingBlock } from './thinking-block';
+import { buildToolMap, type ToolMap } from '@/lib/build-tool-map';
+import type { SessionEvent } from '@/lib/types';
 import { useStore } from '@/store';
 
-// 대화 소스 = 캡처 프록시(/conversation)만. claude API 호출을 가로채 messages[] 를
-// 깨끗하게 캡처(ccglass 방식) — peek(화면 스크래핑) 폐기(거노). 프록시 안 탄 pane 만
-// transcript jsonl 폴백. 인터랙티브 메뉴(/model·AskUserQuestion)는 화면에만 떠서
-// peek 와 함께 빠졌다 — 추후 필요하면 프록시 캡처에서 복원.
+// 대화 본문 = transcript jsonl(/transcript-raw, raw SessionEvent[]). ccsv 파서·per-tool
+// 렌더를 이식해 Bash/Edit/Read 도구 호출이 카톡 버블 사이에 카드로 인터리브된다(거노:
+// 데스크탑 앱처럼 보기좋게). 캡처 프록시(/conversation)는 AskUserQuestion 선택지·라이브
+// streaming·effort/model 표시의 보너스 소스로만 — 프록시 꺼지면 그 부분만 비활성(본문은
+// jsonl 로 멀쩡). /model·권한 프롬프트는 화면(peek) 폴백.
 
 // board.model 은 상태바 파싱 표시명("Opus 4.8 (1M context)") 우선 — claude- id 면 포맷,
 // 아니면(이미 표시명) 그대로. 1M context 변형이 그대로 보인다.
@@ -137,9 +142,43 @@ function extractContext(screen: string): string | null {
 // 슬래시 명령 결과(## Context Usage 등)·시스템 주입([Request interrupted], <command-*>,
 // Caveat, local-command)은 claude 가 user 메시지로 넣어 대화창에 선생님 발신(노란 버블)로
 // 샌다(거노: 내가 안 보낸 스크립트가 뜸). 진짜 사용자 발화가 아니므로 숨긴다.
-function isSystemInjection(t: Turn): boolean {
-  if (t.role !== 'user') return false;
-  return /\[Request interrupted|<command-(name|args|message)>|<local-command|^\s*##\s*Context Usage|^\s*Caveat:\s/i.test(t.text);
+function isSystemInjectionText(role: string, text: string): boolean {
+  if (role !== 'user') return false;
+  return /\[Request interrupted|<command-(name|args|message)>|<local-command|^\s*##\s*Context Usage|^\s*Caveat:\s/i.test(text);
+}
+
+// jsonl SessionEvent[] → 카톡 렌더 아이템 평탄화. user/assistant content[] 를 순회:
+// text→버블, thinking→ThinkingBlock, tool_use→ToolUseCard(페어된 tool_result 포함).
+// AskUserQuestion 은 기존 선택지 menu 카드가 전담하므로 제외. tool_result 블록은
+// buildToolMap 이 페어링해 카드 안에서 표시되니 별도 버블로 안 만든다.
+type RenderItem =
+  | { kind: 'bubble'; role: string; text: string }
+  | { kind: 'tool'; toolUse: { id?: string; name?: string; input?: unknown }; pair: ReturnType<ToolMap['get']> }
+  | { kind: 'thinking'; text: string };
+
+function eventsToItems(events: SessionEvent[], toolMap: ToolMap): RenderItem[] {
+  const items: RenderItem[] = [];
+  for (const ev of events) {
+    if (ev.type !== 'user' && ev.type !== 'assistant') continue;
+    const role = ev.type;
+    const content = (ev as { message?: { content?: unknown } }).message?.content;
+    if (typeof content === 'string') {
+      if (content.trim() && !isSystemInjectionText(role, content)) items.push({ kind: 'bubble', role, text: content });
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== 'object') continue;
+        const b = block as { type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown };
+        if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+          if (!isSystemInjectionText(role, b.text)) items.push({ kind: 'bubble', role, text: b.text });
+        } else if (b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.trim()) {
+          items.push({ kind: 'thinking', text: b.thinking });
+        } else if (b.type === 'tool_use' && b.name !== 'AskUserQuestion') {
+          items.push({ kind: 'tool', toolUse: { id: b.id, name: b.name, input: b.input }, pair: b.id ? toolMap.get(b.id) : undefined });
+        }
+      }
+    }
+  }
+  return items;
 }
 
 // ANSI 색 — /context peek_ansi 의 SGR(\x1b[…m)을 색 span 으로(거노: 동전 색까지 똑같이).
@@ -285,7 +324,12 @@ function parseEffortMenu(screen: string): number | null {
 // 화면(raw 터미널)은 '터미널 보기'로 보면 되므로 여기엔 두지 않는다.
 export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: TerminalPeekPanelProps) {
   const agent = useStore((s) => s.agents.find((a) => a.id === surfaceId));
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [events, setEvents] = useState<SessionEvent[]>([]);
+  const [streaming, setStreaming] = useState('');
+  // 하이브리드 폴백: jsonl(events)이 아직 안 써진 진행 중 구간엔 캡처 프록시의 텍스트
+  // 대화(conv.turns)를 라이브로 띄운다. jsonl 이 flush 되면 events 가 우선해 per-tool
+  // 카드로 자동 승격. claude 가 jsonl 을 라이브로 안 써(2.1.x) 진행 중엔 프록시가 메운다.
+  const [convTurns, setConvTurns] = useState<Turn[]>([]);
   const [menu, setMenu] = useState<{ title: string; options: { idx: number; label: string; cur: boolean; description?: string }[]; multi?: boolean } | null>(null);
   const [checked, setChecked] = useState<Set<number>>(new Set()); // multiSelect 체크된 인덱스
   const [images, setImages] = useState<string[]>([]); // SendUserFile 로 보낸 이미지
@@ -331,28 +375,27 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   useEffect(() => {
     let stopped = false;
     setLoaded(false);
-    setTurns([]);
+    setEvents([]);
+    setStreaming('');
+    setConvTurns([]);
     setMenu(null);
     setSpinner(null);
     setImages([]);
     setInput('');
     const tick = async () => {
-      const [conv, ts, imgs, screen] = await Promise.all([
+      const [conv, evts, imgs, screen] = await Promise.all([
         fetchConversation(surfaceId),
-        fetchTranscript(surfaceId, 30),
+        fetchTranscriptRaw(surfaceId),
         fetchSentImages(surfaceId, 12),
         fetchPeek(surfaceId, 60),
       ]);
       if (stopped) return;
-      // 캡처 프록시(깨끗·라이브, ccglass 방식) 우선, 안 탄 pane 만 transcript jsonl 폴백.
-      // 슬래시 결과·시스템 주입 user turn 은 선생님 발신으로 새므로 제거(거노).
-      // conv.turns(캡처 프록시)는 이미 strip_meta·is_main_conversation 으로 정제됨 — 재필터하면
-      // 터미널 직접 입력 user 발화가 isSystemInjection 가양성에 걸려 노란 말풍선이 누락된다(거노).
-      // 화면파싱 폴백(ts)만 필터.
-      let next: Turn[] = conv.turns.length ? conv.turns : ts.filter((t) => !isSystemInjection(t));
-      // 진행 중 응답 — 프록시가 SSE 로 라이브 캡처한 어시스턴트 텍스트를 마지막 버블로.
-      if (conv.streaming.trim()) next = [...next, { role: 'assistant', text: conv.streaming }];
-      setTurns(next);
+      // 본문은 jsonl(raw SessionEvent[]) — text/tool_use/tool_result/thinking 전부 보존해
+      // per-tool 카드로 렌더. 프록시 streaming(진행 중 어시스턴트 응답)은 jsonl 이 아직
+      // 안 써진 구간을 메우는 라이브 보너스(프록시 꺼지면 빈 문자열).
+      setEvents(evts);
+      setStreaming(conv.streaming.trim() ? conv.streaming : '');
+      setConvTurns(conv.turns); // 프록시 텍스트 대화 — jsonl 비었을 때 라이브 폴백
       // 인터랙티브 선택지 — AskUserQuestion 은 캡처 프록시 tool_use 로 질문/선택지가 정확히
       // 잡힌다(거노: peek 추정 금지). 그게 있으면 그걸 쓰고, 없을 때만 화면 메뉴(/model 등
       // API 안 타는 것)를 peek 폴백으로 파싱한다.
@@ -398,7 +441,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   useEffect(() => {
     const el = bodyRef.current;
     if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [turns, images]);
+  }, [events, streaming, images]);
 
   // 새 질문(title 변경) 시 체크·네비 초기화(메뉴 열릴 때 터미널 커서는 ❯1=navIdx 0).
   useEffect(() => { setChecked(new Set()); setNavIdx(0); }, [menu?.title]);
@@ -627,6 +670,21 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   const slashMatches = slashQuery ? allSlash.filter((c) => c.cmd.toLowerCase().startsWith(slashQuery)) : [];
   const slashOpen = slashMatches.length > 0 && slashQuery !== null && slashQuery !== slashMatches[0]?.cmd;
 
+  // jsonl events → 카톡 렌더 아이템(text 버블 + per-tool 카드 + thinking). tool_use_id
+  // 페어링(buildToolMap)으로 카드가 결과/diff/stats 까지 그린다.
+  const toolMap = useMemo(() => buildToolMap(events), [events]);
+  const items = useMemo(() => {
+    if (events.length) return eventsToItems(events, toolMap);
+    // jsonl 이 아직 안 써진 진행 중 구간 — 캡처 프록시 텍스트 대화로 라이브 폴백.
+    // conv.turns 는 프록시가 이미 strip_meta·is_main_conversation 으로 정제 → 재필터 안 함.
+    return convTurns.map((t) => ({ kind: 'bubble', role: t.role, text: t.text }) as RenderItem);
+  }, [events, toolMap, convTurns]);
+  // 로딩 점 판정용 — 마지막 말풍선이 선생님(user)이면 학생이 아직 답하기 전.
+  const lastBubbleRole = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].kind === 'bubble') return (items[i] as { role: string }).role;
+    return undefined;
+  }, [items]);
+
   return (
     <div
       onDragEnter={(e) => { if (dragHasFile(e)) { e.preventDefault(); setDragOver(true); } }}
@@ -716,14 +774,38 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
 
       {/* 대화(채팅 버블) + 보낸 이미지 */}
       <div ref={bodyRef} onScroll={onBodyScroll} style={{ flex: 1, overflow: 'auto', padding: '14px 16px', background: 'var(--cth-cream-100)' }}>
-        {turns.length === 0 && myChoices.length === 0 && images.length === 0 && agent?.status !== 'working' && agent?.status !== 'thinking' ? (
+        {events.length === 0 && convTurns.length === 0 && !streaming.trim() && myChoices.length === 0 && images.length === 0 && agent?.status !== 'working' && agent?.status !== 'thinking' ? (
           <div style={{ color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 13, textAlign: 'center', marginTop: 40 }}>
             {loaded ? '아직 대화가 없어요' : '대화를 불러오는 중…'}
           </div>
         ) : (
           <>
-            {[...turns, ...myChoices].map((t, i) => {
-              const mine = t.role === 'user';
+            {[
+              ...items,
+              ...(streaming.trim() ? [{ kind: 'bubble', role: 'assistant', text: streaming } as RenderItem] : []),
+              ...myChoices.map((t) => ({ kind: 'bubble', role: t.role, text: t.text } as RenderItem)),
+            ].map((it, i) => {
+              // 도구 호출(Bash/Edit/Read…) — 학생(좌측)에 per-tool 카드로 인터리브.
+              if (it.kind === 'tool') {
+                return (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
+                    <div style={{ maxWidth: '90%', width: '100%' }}>
+                      <ToolUseCard toolUse={it.toolUse} pair={it.pair} />
+                    </div>
+                  </div>
+                );
+              }
+              // 사고(thinking) 블록 — 좌측 접이식.
+              if (it.kind === 'thinking') {
+                return (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
+                    <div style={{ maxWidth: '90%', width: '100%' }}>
+                      <ThinkingBlock thinking={it.text} />
+                    </div>
+                  </div>
+                );
+              }
+              const mine = it.role === 'user';
               // 메신저: 선생님(user)=우측 카톡 노랑, 학생(assistant)=좌측 아바타+흰 말풍선.
               return (
                 <div key={i} style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
@@ -744,12 +826,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                     fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
                     wordBreak: 'break-word'
                   }}>
-                    {t.text && <Markdown text={t.text} />}
-                    {t.images?.map((p, j) => (
-                      <button key={j} onClick={() => void openFile(p)} title="클릭 = 원본 보기" style={{ display: 'block', padding: 0, border: 'none', background: 'none', cursor: 'pointer', marginTop: t.text ? 6 : 0 }}>
-                        <img src={imageFileUrl(p)} alt="" style={{ maxWidth: '100%', maxHeight: 240, borderRadius: 8, display: 'block' }} />
-                      </button>
-                    ))}
+                    {it.text && <Markdown text={it.text} />}
                   </div>
                 </div>
               );
@@ -797,7 +874,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                 직후 State Classifier nudge 를 도는 동안 status 가 잠깐 thinking 으로 남아
                 "생각 중" 이 답변 아래 계속 떴다(거노). 마지막이 선생님 발화일 때만 표시. */}
             {(spinner || ((agent?.status === 'working' || agent?.status === 'thinking') &&
-              turns.length > 0 && turns[turns.length - 1]?.role !== 'assistant')) && (
+              !streaming.trim() && lastBubbleRole === 'user')) && (
               <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
                 <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
                   <SpritePortrait character={title} scale={1.5} />

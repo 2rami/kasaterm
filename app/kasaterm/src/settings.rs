@@ -22,6 +22,7 @@ pub(crate) struct SettingsCtx {
     pub cat: SettingsCat,
     pub cwd_mode: String,
     pub file_tree_default: bool,
+    pub footer_default: bool,
     pub shell: String,
     pub input: Option<SettingsInput>,
     pub cursor: (f32, f32),
@@ -88,6 +89,7 @@ impl App {
     fn settings_save(&self) {
         socket::write_setting("default_cwd", serde_json::Value::String(self.set_cwd_mode.clone()));
         socket::write_setting("file_tree_default", serde_json::Value::Bool(self.set_file_tree_default));
+        socket::write_setting("pane_footer_default", serde_json::Value::Bool(self.set_footer_default));
         socket::write_setting("default_shell", serde_json::Value::String(self.set_shell.clone()));
     }
 
@@ -104,6 +106,7 @@ impl App {
             cat: self.settings_cat,
             cwd_mode: self.set_cwd_mode.clone(),
             file_tree_default: self.set_file_tree_default,
+            footer_default: self.set_footer_default,
             shell: self.set_shell.clone(),
             input: self.settings_input,
             cursor: self.cursor_px,
@@ -176,6 +179,17 @@ impl App {
                     let (cols, rows) = self.window_cells();
                     self.resize_backend(cols, rows);
                 }
+            }
+            SettingsAction::ToggleFooter => {
+                self.set_footer_default = !self.set_footer_default;
+                self.settings_save();
+                // 전역 기본을 뒤집으면 per-pane 예외(⋮로 끄거나 켠 pane)는 리셋해
+                // 모든 pane 이 새 기본으로 통일된다. footer 표시 여부는 셀 그리드
+                // 높이(statusbar_px)에 들어가므로 PTY 도 reshape.
+                self.statusbar.hidden.clear();
+                self.statusbar.shown.clear();
+                let (cols, rows) = self.window_cells();
+                self.resize_backend(cols, rows);
             }
             SettingsAction::ShellPreset(s) => {
                 self.set_shell = s;
@@ -347,6 +361,15 @@ pub(crate) fn paint_settings(
             let tr = (fx, y, 52.0, 30.0);
             toggle(g, tr, ctx.file_tree_default, ctx.cursor);
             rects.push((SettingsAction::ToggleFileTree, tr));
+            y += 30.0 + ROW_GAP;
+            // pane 하단바 기본 표시
+            section_label(g, fx, y, "pane 하단바 기본 표시");
+            y += 24.0;
+            help_text(g, fx, y, "각 pane 아래에 경로·브랜치·diff 상태바를 기본으로 표시");
+            y += 28.0;
+            let fr = (fx, y, 52.0, 30.0);
+            toggle(g, fr, ctx.footer_default, ctx.cursor);
+            rects.push((SettingsAction::ToggleFooter, fr));
         }
         SettingsCat::Appearance => {
             let mut y = fy;

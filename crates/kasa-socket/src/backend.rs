@@ -576,6 +576,14 @@ pub trait Backend: Send + Sync {
     fn transcript_tail(&self, _surface_id: &str, _turns: usize) -> Result<Vec<ConversationTurn>> {
         Ok(Vec::new())
     }
+
+    /// Read a pane's bound transcript jsonl as raw text (every line, unparsed).
+    /// Where `transcript_tail` strips to text-only turns, this hands back the
+    /// full jsonl so the client parses tool_use/tool_result/structuredPatch
+    /// itself — the BA GUI per-tool 렌더 path. Default: empty.
+    fn transcript_raw(&self, _surface_id: &str) -> Result<String> {
+        Ok(String::new())
+    }
 }
 
 /// One turn of a pane's claude conversation, extracted from its transcript

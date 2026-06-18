@@ -186,10 +186,17 @@ impl App {
             win.inner_size().width as f32 / scale - w
         })
     }
-    /// Whether `id`'s per-pane status bar is shown (default true — only the
-    /// pane ids the user explicitly collapsed sit in `statusbar_hidden`).
+    /// Whether `id`'s per-pane status bar is shown. The global default
+    /// (`set_footer_default`) decides it unless this pane sits in an exception
+    /// set: `shown` forces it on, `hidden` forces it off.
     pub(crate) fn statusbar_visible(&self, id: &str) -> bool {
-        !self.statusbar.hidden.contains(id)
+        if self.statusbar.shown.contains(id) {
+            true
+        } else if self.statusbar.hidden.contains(id) {
+            false
+        } else {
+            self.set_footer_default
+        }
     }
     /// Logical-px footer band `id` reserves for its status bar — `PANE_FOOTER_HEIGHT`
     /// when shown, 0 when collapsed. Mirrors the header band in `resize_backend`
@@ -265,13 +272,19 @@ impl App {
     /// dismissed. `resize_backend` reads `statusbar_px` per leaf, so the toggle
     /// is all the state it needs.
     pub(crate) fn toggle_statusbar(&mut self, id: &str) {
-        if self.statusbar.hidden.contains(id) {
-            self.statusbar.hidden.remove(id);
-        } else {
+        // Record this pane as an exception to the global default — drop any
+        // stale membership first, then file it under the set opposite to its
+        // new state (off → hidden, on → shown).
+        let was_visible = self.statusbar_visible(id);
+        self.statusbar.hidden.remove(id);
+        self.statusbar.shown.remove(id);
+        if was_visible {
             self.statusbar.hidden.insert(id.to_string());
             if self.statusbar.menu.as_ref().map(|(p, _)| p == id).unwrap_or(false) {
                 self.statusbar.menu = None;
             }
+        } else {
+            self.statusbar.shown.insert(id.to_string());
         }
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
@@ -616,7 +629,8 @@ impl App {
     /// one. The poller dedups + rate-limits, so a flat overwrite each frame is
     /// fine. Skipped entirely when no pane shows a bar (nothing to refresh).
     pub(crate) fn publish_pane_git_cwds(&self) {
-        if self.statusbar.hidden.len() >= self.pane_cwd_cache.len() && !self.git.col_visible {
+        let any_bar = self.pane_cwd_cache.keys().any(|id| self.statusbar_visible(id));
+        if !any_bar && !self.git.col_visible {
             // Every bar collapsed and the git column hidden — no badge consumer.
             return;
         }

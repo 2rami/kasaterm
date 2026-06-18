@@ -3111,12 +3111,12 @@ impl App {
                 } else {
                     // The status-bar toggle reads "filled" (panel-bottom) when the
                     // bar is shown and "dashed" when it's collapsed, so the icon
-                    // itself signals the current state.
-                    let sb_icon = if self.statusbar.hidden.contains(&h.id) {
-                        "panel-bottom-dashed"
-                    } else {
-                        "panel-bottom"
-                    };
+                    // itself signals the current state. Visibility = global
+                    // default flipped by the shown/hidden exception sets (mirrors
+                    // `statusbar_visible`, inlined here under the gpu borrow).
+                    let fvis = self.statusbar.shown.contains(&h.id)
+                        || (!self.statusbar.hidden.contains(&h.id) && self.set_footer_default);
+                    let sb_icon = if fvis { "panel-bottom" } else { "panel-bottom-dashed" };
                     vec![
                         (sb_icon, None, Some(ActionKind::ToggleStatusbar)),
                         ("columns-2", None, Some(ActionKind::SplitV)),
@@ -3205,27 +3205,29 @@ impl App {
             // 설정 화면이 떠 있으면 pane 핸들·보더를 그리지 않는다 — 불투명 설정
             // backdrop 위로 ⋮ 가 비쳐 보이던 잔상(거노). hit-rect 도 비워 설정 영역
             // 클릭이 유령 핸들에 안 걸리게 한다.
+            // active_pane + is_split + 헤더 보유 pane 집합을 한 번에 스냅샷 —
+            // 루프 안에서 self를 재borrow하면 g(=&mut self.gpu)와 충돌하므로 미리
+            // 모은다. statusbar 루프(아래)도 active 보더 inset 계산에 active_pane/
+            // is_split을 쓰므로 settings 분기 밖, 더 넓은 스코프에 둔다.
+            let is_split = footer_slots.len() > 1;
+            let (active_pane, headered): (Option<String>, std::collections::HashSet<String>) =
+                match self.ws.lock() {
+                    Ok(w) => (
+                        w.active_pane.clone(),
+                        w.panes
+                            .iter()
+                            .filter(|(_, p)| p.has_header())
+                            .map(|(k, _)| k.clone())
+                            .collect(),
+                    ),
+                    Err(_) => (None, Default::default()),
+                };
             if self.settings_open {
                 self.pane_handle_rects.clear();
                 self.pane_top_zones.clear();
                 self.handle_menu_hits.clear();
             } else {
                 let (hmx, hmy) = self.cursor_px;
-                let is_split = footer_slots.len() > 1;
-                // active_pane + 헤더 보유 pane 집합을 한 번에 스냅샷 — 루프 안에서
-                // self를 재borrow하면 g(=&mut self.gpu)와 충돌하므로 미리 모은다.
-                let (active_pane, headered): (Option<String>, std::collections::HashSet<String>) =
-                    match self.ws.lock() {
-                        Ok(w) => (
-                            w.active_pane.clone(),
-                            w.panes
-                                .iter()
-                                .filter(|(_, p)| p.has_header())
-                                .map(|(k, _)| k.clone())
-                                .collect(),
-                        ),
-                        Err(_) => (None, Default::default()),
-                    };
                 let accent = theme::accent_color(theme::accent_name());
                 let mut handle_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
                 let mut zones: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
@@ -3269,11 +3271,9 @@ impl App {
                     if self.handle_menu.as_deref() == Some(fid.as_str()) {
                         // 상태바(footer) 토글 아이콘은 현재 표시 상태를 그대로
                         // 드러낸다 — 보이면 panel-bottom, 접혀 있으면 dashed.
-                        let sb_icon = if self.statusbar.hidden.contains(fid.as_str()) {
-                            "panel-bottom-dashed"
-                        } else {
-                            "panel-bottom"
-                        };
+                        let fvis = self.statusbar.shown.contains(fid.as_str())
+                            || (!self.statusbar.hidden.contains(fid.as_str()) && self.set_footer_default);
+                        let sb_icon = if fvis { "panel-bottom" } else { "panel-bottom-dashed" };
                         let items = [
                             ("plus", ActionKind::NewTab),
                             // columns-2(세로선=좌우 2칸) → Horizontal(right),
@@ -3328,12 +3328,19 @@ impl App {
             let (sb_mx, sb_my) = self.cursor_px;
             let sb_home = std::env::var("HOME").ok();
             for (fid, fx, fy, fw, fbox_h) in &footer_slots {
-                if self.statusbar.hidden.contains(fid) || *fbox_h < PANE_FOOTER_HEIGHT + 4.0 {
+                let fvis = self.statusbar.shown.contains(fid)
+                    || (!self.statusbar.hidden.contains(fid) && self.set_footer_default);
+                if !fvis || *fbox_h < PANE_FOOTER_HEIGHT + 4.0 {
                     continue;
                 }
                 let bar_y = fy + fbox_h - PANE_FOOTER_HEIGHT;
-                g.rect(*fx, bar_y, *fw, PANE_FOOTER_HEIGHT, theme::bg());
-                g.rect(*fx, bar_y, *fw, 1.0, theme::border());
+                // active pane 파란 보더(1.5px)를 footer 배경이 덮지 않게 좌우·하단을
+                // 보더 두께만큼 안쪽으로 그린다 — 안 그러면 나중에 그려지는 footer bg 가
+                // 보더의 하단·좌우 끝을 덮어 "파란선이 하단바를 제외하고 감싸는"것처럼
+                // 보인다(거노). active 가 아니면 inset 0.
+                let bt = if is_split && active_pane.as_deref() == Some(fid.as_str()) { 1.5_f32 } else { 0.0 };
+                g.rect(fx + bt, bar_y, fw - 2.0 * bt, PANE_FOOTER_HEIGHT - bt, theme::bg());
+                g.rect(fx + bt, bar_y, fw - 2.0 * bt, 1.0, theme::border());
                 // Pill metrics shared by every chip.
                 let pill_h = 18.0_f32;
                 let pill_y = bar_y + (PANE_FOOTER_HEIGHT - pill_h) / 2.0;
