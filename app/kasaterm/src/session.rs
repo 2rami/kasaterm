@@ -207,6 +207,47 @@ impl App {
     /// renderer expects. Single-pane MVP — the workspace holds one
     /// PaneState keyed "%0" and the layout is `None` (the render path
     /// falls back to single-pane when no layout has arrived).
+    /// pane 생성 시 캐릭터 자동 배정 — /tmp 마커·session-id 기록 후 셸 env 를 반환.
+    /// pending_character(god, new_room_with_god 이 세팅) 우선, 없으면 그 방 빈 슬롯
+    /// 순환(미도리→모모이→유즈→아리스). characters.json 없으면 빈 vec(무테마 = skip).
+    /// board(socket.rs)는 같은 /tmp 마커를 읽어 row.character 를 채운다.
+    pub(crate) fn assign_character_env(
+        &mut self,
+        id: &str,
+        cwd: Option<&str>,
+        room: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let Some(cwd) = cwd else { return Vec::new() };
+        let Some(chars) = kasa_mcp::character::characters_json() else {
+            return Vec::new();
+        };
+        let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
+        let name = match self.pending_character.take() {
+            Some(n) => n,
+            None => {
+                let members = kasa_mcp::character::member_names(&chars);
+                match kasa_mcp::character::assign_next(&rslug, &members) {
+                    Some(n) => n,
+                    None => return Vec::new(),
+                }
+            }
+        };
+        let sid = kasa_mcp::character::new_session_id();
+        let _ = kasa_mcp::character::write_marker(&rslug, id, &name);
+        if kasa_mcp::character::is_god(&chars, &name) {
+            let _ = kasa_mcp::character::write_lead(&rslug, id);
+        }
+        self.pane_session_id.insert(id.to_string(), sid.clone());
+        let mut env = vec![
+            ("KASATERM_CHARACTER".to_string(), name.clone()),
+            ("KASATERM_SESSION_ID".to_string(), sid),
+        ];
+        if let Some(p) = kasa_mcp::character::persona_for(&chars, &name) {
+            env.push(("KASATERM_PERSONA".to_string(), p));
+        }
+        env
+    }
+
     /// Spawn the first shell pane for the *current* (already-cleared) session.
     /// Mirrors start_pty's pane bring-up with a fresh pane id and no socket
     /// (re)init — used by new_session.
@@ -218,10 +259,14 @@ impl App {
         // 방별 분리(거노): 이 pane 이 새 방이면 KASATERM_ROOM 을 셸 env 로 주입해 collab
         // 훅이 방별 slug 를 쓰게 한다. pane_room 에도 기록(Rust collab slug 계산용).
         let mut env = crate::proxy_env(&id);
-        if let Some(room) = self.pending_room.take() {
+        let room = self.pending_room.take();
+        if let Some(ref room) = room {
             env.push(("KASATERM_ROOM".to_string(), room.clone()));
-            self.ws.lock().unwrap().pane_room.insert(id.clone(), room);
+            self.ws.lock().unwrap().pane_room.insert(id.clone(), room.clone());
         }
+        // 캐릭터 자동 배정(거노): pending(god) 우선, 없으면 빈 슬롯 순환. 마커·session-id
+        // 기록 후 KASATERM_CHARACTER/SESSION_ID/PERSONA env 를 더한다(claude shim 적용).
+        env.extend(self.assign_character_env(&id, cwd.as_deref(), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: self.pending_shell.take().or_else(resolve_default_shell),
             cwd,

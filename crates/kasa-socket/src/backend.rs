@@ -68,6 +68,22 @@ pub struct SurfaceInfo {
     pub title: Option<String>,
 }
 
+/// A past Claude session discoverable for `claude --resume`, built from the
+/// transcript jsonl files under `~/.claude/projects/<encoded-cwd>/`. The
+/// arona-ui lists these so the user can pick one to continue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentSession {
+    /// Claude session uuid (the jsonl file stem) — pass to `claude --resume`.
+    pub id: String,
+    /// Human-readable label: the session's aiTitle, else its first user
+    /// message, else the short id.
+    pub label: String,
+    /// Last-modified unix seconds — for "n minutes ago" + newest-first sort.
+    pub mtime: u64,
+    /// Absolute cwd the session ran in.
+    pub cwd: String,
+}
+
 /// Multi-session (tmux-style tab) state for the session panel. `count`
 /// is the total number of live sessions; `active` is the index of the
 /// currently visible one. Default is a single session.
@@ -283,6 +299,19 @@ pub trait Backend: Send + Sync {
     fn list_workspaces(&self) -> Result<Vec<WorkspaceInfo>>;
     fn current_workspace(&self) -> Result<Option<WorkspaceInfo>>;
     fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>>;
+    /// List recent Claude sessions under `cwd` (or the backend's current cwd
+    /// when None) so the user can pick one to `claude --resume`. Newest first.
+    /// Default: none (backends without transcript access).
+    fn recent_sessions(&self, _cwd: Option<&str>) -> Result<Vec<RecentSession>> {
+        Ok(Vec::new())
+    }
+    /// Open a pane and resume the Claude session `id` in it: `newroom=true`
+    /// opens a fresh window, otherwise it splits the active one; the pane is
+    /// spawned in `cwd` when given. The actual `claude --resume <id>` is
+    /// injected once the new pane's shell prompt is up. Default: unsupported.
+    fn resume_session(&self, _id: &str, _cwd: Option<&str>, _newroom: bool) -> Result<()> {
+        anyhow::bail!("resume_session unsupported by this backend")
+    }
     fn focus_surface(&self, surface_id: &str) -> Result<()>;
     /// Split the focused surface. `focus` decides whether the *new* pane
     /// becomes active: CLI/automation callers pass `false` so a scripted split

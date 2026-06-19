@@ -1717,13 +1717,59 @@ impl std::ops::DerefMut for PaneState {
     }
 }
 
-/// A decoded image bound to a pane. `rgba` is tightly-packed RGBA8
-/// (`w * h * 4` bytes), uploaded once into a wgpu texture keyed by pane
-/// id the first frame the pane is drawn.
-struct ImagePane {
+/// One frame of an image pane. `rgba` is tightly-packed RGBA8 (`w * h * 4`).
+/// Static images (png/jpg/…) are a single frame with zero delay; animated
+/// gifs carry one entry per frame with its inter-frame delay.
+struct ImageFrame {
     rgba: Vec<u8>,
+    delay: std::time::Duration,
+}
+
+/// A decoded image bound to a pane. Each frame is uploaded once into a wgpu
+/// texture keyed by `(pane, rotation, frame)`. `cur`/`last` drive gif playback
+/// (advanced in `about_to_wait`); they stay put for single-frame images.
+struct ImagePane {
+    frames: Vec<ImageFrame>,
     w: u32,
     h: u32,
+    cur: std::sync::atomic::AtomicUsize,
+    last: std::sync::Mutex<std::time::Instant>,
+}
+
+impl ImagePane {
+    fn cur_idx(&self) -> usize {
+        self.cur
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .min(self.frames.len().saturating_sub(1))
+    }
+    fn cur_rgba(&self) -> &[u8] {
+        &self.frames[self.cur_idx()].rgba
+    }
+    /// Advance to the next frame when the current one's delay has elapsed.
+    /// Returns true when the frame changed (caller requests a redraw).
+    fn tick(&self, now: std::time::Instant) -> bool {
+        if self.frames.len() < 2 {
+            return false;
+        }
+        let cur = self.cur_idx();
+        let mut last = self.last.lock().unwrap();
+        if now.duration_since(*last) >= self.frames[cur].delay {
+            self.cur
+                .store((cur + 1) % self.frames.len(), std::sync::atomic::Ordering::Relaxed);
+            *last = now;
+            true
+        } else {
+            false
+        }
+    }
+    /// When the current frame is due to flip — feeds the loop's WaitUntil so
+    /// playback ticks without busy-waiting. None for single-frame images.
+    fn next_deadline(&self) -> Option<std::time::Instant> {
+        if self.frames.len() < 2 {
+            return None;
+        }
+        Some(*self.last.lock().unwrap() + self.frames[self.cur_idx()].delay)
+    }
 }
 
 /// Largest texture edge we upload. Comfortably under every backend's
@@ -1735,6 +1781,45 @@ const MAX_IMAGE_EDGE: u32 = 4096;
 /// `MAX_IMAGE_EDGE`. Returns an error the `imgopen` caller surfaces on a
 /// path that isn't a decodable image.
 fn decode_image_rgba(path: &std::path::Path) -> anyhow::Result<ImagePane> {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    // Animated gif: decode every frame + delay so about_to_wait can cycle them.
+    // A single-frame gif falls through to the static path below.
+    let is_gif = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("gif"))
+        .unwrap_or(false);
+    if is_gif {
+        use image::AnimationDecoder;
+        let file = std::fs::File::open(path)?;
+        let dec = image::codecs::gif::GifDecoder::new(std::io::BufReader::new(file))?;
+        let raw = dec.into_frames().collect_frames()?;
+        if raw.len() > 1 {
+            let mut frames = Vec::with_capacity(raw.len());
+            let (mut w, mut h) = (0u32, 0u32);
+            for f in raw {
+                let delay: Duration = f.delay().into();
+                let buf = f.into_buffer();
+                w = buf.width();
+                h = buf.height();
+                frames.push(ImageFrame {
+                    rgba: buf.into_raw(),
+                    // Floor near-zero delays to ~100ms (as browsers do) so a
+                    // 0-delay frame doesn't spin the loop.
+                    delay: if delay.is_zero() { Duration::from_millis(100) } else { delay },
+                });
+            }
+            return Ok(ImagePane {
+                frames,
+                w,
+                h,
+                cur: AtomicUsize::new(0),
+                last: Mutex::new(Instant::now()),
+            });
+        }
+    }
     let img = image::open(path).map_err(|e| anyhow::anyhow!("decode failed: {e}"))?;
     let (w0, h0) = (img.width(), img.height());
     let img = if w0 > MAX_IMAGE_EDGE || h0 > MAX_IMAGE_EDGE {
@@ -1749,9 +1834,14 @@ fn decode_image_rgba(path: &std::path::Path) -> anyhow::Result<ImagePane> {
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     Ok(ImagePane {
-        rgba: rgba.into_raw(),
+        frames: vec![ImageFrame {
+            rgba: rgba.into_raw(),
+            delay: Duration::ZERO,
+        }],
         w,
         h,
+        cur: AtomicUsize::new(0),
+        last: Mutex::new(Instant::now()),
     })
 }
 
@@ -2038,7 +2128,7 @@ fn build_markdown_doc(key_prefix: &str, p: &std::path::Path, text: &str) -> Mark
                 *key = k.clone();
                 *w = img.w;
                 *h = img.h;
-                images.push(MdDocImage { key: k, rgba: img.rgba, w: img.w, h: img.h });
+                images.push(MdDocImage { key: k, rgba: img.cur_rgba().to_vec(), w: img.w, h: img.h });
             }
         }
     }
@@ -2237,6 +2327,15 @@ enum UserEvent {
     /// pane header. Used by the god marker.
     SocketRenameWindow(String, String),
     SocketColor(String, [u8; 4]),
+    /// `POST /session-resume` from arona-ui — open a pane and queue
+    /// `claude --resume <id>` once its shell prompt is up. `newroom` opens a
+    /// fresh window; otherwise it splits the active one. `cwd` (when set) is the
+    /// session's project dir so resume lands in the right place.
+    ResumeSession {
+        id: String,
+        cwd: Option<String>,
+        newroom: bool,
+    },
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify`). Raise a
     /// desktop alert unless that pane is already the focused one, cmux-style.
     Notify {
@@ -2903,6 +3002,12 @@ struct App {
     /// KASATERM_ROOM 주입 + ws.pane_room 기록용). pane→방 매핑은 ws.pane_room(공유).
     pending_room: Option<String>,
     next_room_seq: u32,
+    /// 다음 spawn 할 pane 에 강제할 캐릭터(god 방 = new_room_with_god 이 세팅). None 이면
+    /// 빈 슬롯 순환 배정(미도리→모모이→…). 배정 결과는 KASATERM_CHARACTER env + /tmp 마커.
+    pending_character: Option<String>,
+    /// pane id → claude --session-id(백엔드가 spawn 시 생성). shim 이 env 로 받아 고정,
+    /// transcript jsonl 파일명 안정화 → resume 시 같은 대화 복원.
+    pane_session_id: HashMap<String, String>,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,
@@ -3187,6 +3292,8 @@ impl App {
             pane_cwd_cache: HashMap::new(),
             pending_room: None,
             next_room_seq: 1,
+            pending_character: None,
+            pane_session_id: HashMap::new(),
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -3754,11 +3861,17 @@ if [ -z \"$REAL\" ]; then\n\
   exit 127\n\
 fi\n\
 SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
-# A user-supplied --settings wins; ours is skipped to avoid a duplicate flag.\n\
-for a in \"$@\"; do\n\
-  [ \"$a\" = \"--settings\" ] && exec \"$REAL\" \"$@\"\n\
-done\n\
-[ -f \"$SETTINGS\" ] || exec \"$REAL\" \"$@\"\n\
+# 백엔드가 이 pane 에 심은 캐릭터 정체성 적용(거노): persona = 시스템프롬프트 prefix(캐시,\n\
+# per-turn 0), session-id = transcript 파일명 고정. 사용자가 --session-id/--resume 를\n\
+# 직접 주면 그게 우선(우리 건 생략). --settings 도 사용자 지정이면 우리 걸 안 얹는다.\n\
+USER_SETTINGS=0\n\
+for a in \"$@\"; do [ \"$a\" = \"--settings\" ] && USER_SETTINGS=1 && break; done\n\
+case \" $* \" in *\" --session-id \"*|*\" --resume \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
+[ -n \"$KASATERM_PERSONA\" ] && set -- --append-system-prompt \"$KASATERM_PERSONA\" \"$@\"\n\
+[ -n \"$SID\" ] && set -- --session-id \"$SID\" \"$@\"\n\
+if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
+  exec \"$REAL\" \"$@\"\n\
+fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
         hd = hooks_dir.display());
     let wrapper_path = shim_dir.join("claude");
@@ -3982,16 +4095,23 @@ pub(crate) fn mcp_port_file_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kasaterm-mcp-port"))
 }
 
-/// Port the panel webviews should poll: the actual bound port recorded in
-/// `mcp_port_file_path` if present, else the env hint, else the 8765 default.
-/// The file beats the env so a daemon that fell back off its preferred port
-/// still lines up with the panels.
+/// Port the panel webviews should poll. This process's own bound port
+/// (`KASASPACE_MCP_PORT`, set by `start_socket_with` right after the server
+/// binds) wins — env is per-process, so each instance's panels always reach
+/// their own server. `mcp_port_file_path` is a single global file that any
+/// concurrent instance overwrites; trusting it first stranded a second
+/// instance's panel webview on a dead/foreign port (the panel window stays
+/// hidden forever waiting for a load that never finishes). So the file is
+/// only a fallback for callers without the env, else the 8765 default.
 fn mcp_panel_port() -> String {
-    std::fs::read_to_string(mcp_port_file_path())
+    let trimmed_nonempty = |s: String| {
+        let s = s.trim().to_string();
+        (!s.is_empty()).then_some(s)
+    };
+    std::env::var("KASASPACE_MCP_PORT")
         .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("KASASPACE_MCP_PORT").ok())
+        .and_then(trimmed_nonempty)
+        .or_else(|| std::fs::read_to_string(mcp_port_file_path()).ok().and_then(trimmed_nonempty))
         .unwrap_or_else(|| "8765".to_string())
 }
 

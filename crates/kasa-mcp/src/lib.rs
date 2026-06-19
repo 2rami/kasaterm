@@ -14,6 +14,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 
+pub mod character;
 pub mod git;
 mod http;
 mod proxy;
@@ -48,6 +49,20 @@ struct PanelArgs {
     w: Option<u32>,
     /// Height in logical px. Required for "resize".
     h: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct RenameArgs {
+    /// New pane title (header tab label). Keep it short — a task name like
+    /// "auth refactor" or "fixing tests" so the user can tell panes apart at
+    /// a glance.
+    title: String,
+    /// Surface id to rename (e.g. "%3"). Defaults to your own pane
+    /// ($KASATERM_PANE_ID), so usually you can omit it and just pass `title`.
+    surface_id: Option<String>,
+    /// If true, also rename the window/session sidebar label, not just the
+    /// pane header. Default false.
+    window: Option<bool>,
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -140,6 +155,32 @@ impl KasaspaceTools {
             Ok(None) => ok("null"),
             Err(e) => fail(format!("workspace_current failed: {e}")),
         }
+    }
+
+    #[tool(
+        description = "Rename your kasaterm pane so the user can tell panes apart by what each is doing. Call this when your task focus is clear or changes — e.g. \"auth refactor\", \"fixing tests\". surface_id defaults to your own pane ($KASATERM_PANE_ID); set window=true to also rename the window/session sidebar label."
+    )]
+    async fn kasaspace_rename(
+        &self,
+        Parameters(args): Parameters<RenameArgs>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let id = match args
+            .surface_id
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()))
+        {
+            Some(id) => id,
+            None => return fail("no surface_id given and KASATERM_PANE_ID is unset"),
+        };
+        if let Err(e) = self.backend.rename_surface(&id, &args.title) {
+            return fail(format!("rename failed: {e}"));
+        }
+        if args.window.unwrap_or(false) {
+            if let Err(e) = self.backend.rename_window(&id, &args.title) {
+                return fail(format!("pane renamed but window rename failed: {e}"));
+            }
+        }
+        ok(format!("renamed {id} → {:?}", args.title))
     }
 
 }

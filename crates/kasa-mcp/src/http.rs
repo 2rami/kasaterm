@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use kasa_socket::backend::{Backend, PanelKind, SplitDirection};
+use kasa_socket::backend::{Backend, PanelKind};
 use axum::{
     body::Bytes,
     extract::{Path as AxPath, Query},
@@ -335,6 +335,10 @@ async fn sent_images_handler(
         }
         _ => std::path::Path::new("/tmp/kasaterm-collab").join(mode_slug(&cwd)),
     };
+    // 세션 경계: since(현재 세션 첫 이벤트 ts, unix sec) 이전 이미지는 이전 대화 잔류물 —
+    // 제외(거노: 이전 pane 이미지가 새 대화에 남던 것). sent-images.jsonl 은 방단위 append-only
+    // 라 /clear·세션전환 후에도 옛 경로가 누적된다. since 없으면(transcript 빈 경우) 전체.
+    let since = params.get("since").and_then(|s| s.parse::<f64>().ok());
     let mut imgs: Vec<String> = Vec::new();
     if let Ok(content) = std::fs::read_to_string(dir.join("sent-images.jsonl")) {
         for line in content.lines() {
@@ -342,6 +346,12 @@ async fn sent_images_handler(
             let pane = v.get("pane").and_then(|p| p.as_str()).unwrap_or("");
             if !surface.is_empty() && pane != surface {
                 continue;
+            }
+            if let Some(s) = since {
+                let ts = v.get("ts").and_then(|t| t.as_f64()).unwrap_or(0.0);
+                if ts < s {
+                    continue;
+                }
             }
             if let Some(p) = v.get("path").and_then(|p| p.as_str()) {
                 imgs.push(p.to_string());
@@ -1070,211 +1080,6 @@ async fn close_pane_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// Body for `POST /spawn`: 새 워커 pane 스펙. 전부 선택적 — 빈 객체면
-/// "현재 방에 기본 claude 하나 더".
-#[derive(serde::Deserialize)]
-struct SpawnReq {
-    /// characters.json 의 leader/members 이름. 지정 시 캐릭터 마커를 선점하고
-    /// persona 는 spawn 시 `--append-system-prompt` 로 1회 주입한다
-    /// (board-context.py per-prompt 훅은 폐기 — `spawn_command` 참조).
-    #[serde(default)]
-    character: Option<String>,
-    /// `claude --model <m>` 로 전달.
-    #[serde(default)]
-    model: Option<String>,
-    /// 새 pane 이 일할 절대경로. 지정 시 `cd <cwd> && claude`.
-    #[serde(default)]
-    cwd: Option<String>,
-}
-
-/// POSIX 셸 single-quote — pane 에 주입하는 cd 경로가 공백·따옴표를 품어도
-/// 한 토큰으로 살아남게.
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// `claude --model x` 같은 비인용 위치로 가는 값의 allowlist. 모델명/캐릭터명에
-/// 셸 메타문자가 낄 이유가 없으므로 통째로 거부한다.
-fn safe_token(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
-/// spawn 할 pane 에 보낼 셸 한 줄 조립. per-prompt 훅(board-context.py) 폐기로 persona 는
-/// 여기서 `--append-system-prompt` 로 1회 주입(시스템 프롬프트 prefix → 캐시돼 per-turn
-/// 컨텍스트 누적 0, 거노: 소넷 워커 절감). `--session-id "$(uuidgen)"` 로 transcript
-/// discovery 가 argv 에서 exact 매핑(hook-free, 같은 cwd 여러 워커도). claude 래퍼는
-/// PATH shim 이 --settings(나머지 훅)를 얹는다.
-fn spawn_command(model: Option<&str>, cwd: Option<&str>, append: Option<&str>) -> String {
-    let mut claude = String::from("claude --session-id \"$(uuidgen)\"");
-    if let Some(m) = model {
-        claude.push_str(&format!(" --model {m}"));
-    }
-    if let Some(p) = append {
-        let esc = p.replace('\n', " ");
-        let esc: String = esc.trim().chars().take(1200).collect();
-        let esc = esc.replace('\'', "'\\''");
-        claude.push_str(&format!(" --append-system-prompt '{esc}'"));
-    }
-    match cwd {
-        Some(d) => format!("cd {} && {claude}", sh_quote(d)),
-        None => claude,
-    }
-}
-
-/// characters.json Value 에서 캐릭터 이름의 persona 텍스트(leader/leaders/members 통합).
-/// spawn_command 가 --append-system-prompt 로 입힌다(같은 characters.json 스키마).
-fn persona_for(chars: &serde_json::Value, name: &str) -> Option<String> {
-    let mut pool: Vec<&serde_json::Value> = Vec::new();
-    if let Some(l) = chars.get("leader") {
-        pool.push(l);
-    }
-    if let Some(arr) = chars.get("leaders").and_then(|x| x.as_array()) {
-        pool.extend(arr);
-    }
-    if let Some(arr) = chars.get("members").and_then(|x| x.as_array()) {
-        pool.extend(arr);
-    }
-    pool.into_iter()
-        .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
-        .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
-        .filter(|p| !p.is_empty())
-        .map(|p| p.to_string())
-}
-
-/// 캐릭터 마커 경로 — assign-character.py 와 동일 규약:
-/// /tmp/kasaterm-collab/<slug>/character-<pane번호(% 제거)>, 내용 = 이름.
-fn character_marker_path(room_cwd: &std::path::Path, surface_id: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from("/tmp/kasaterm-collab")
-        .join(mode_slug(room_cwd))
-        .join(format!("character-{}", surface_id.trim_start_matches('%')))
-}
-
-/// characters.json 에 이 이름의 캐릭터(leader 또는 member)가 정의돼 있나.
-fn character_defined(chars: &serde_json::Value, name: &str) -> bool {
-    let leader_is = chars
-        .get("leader")
-        .and_then(|l| l.get("name"))
-        .and_then(|n| n.as_str())
-        == Some(name);
-    let member_is = chars
-        .get("members")
-        .and_then(|m| m.as_array())
-        .is_some_and(|ms| {
-            ms.iter()
-                .any(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
-        });
-    leader_is || member_is
-}
-
-/// `POST /spawn` — split(no-focus) + 새 pane 에 claude 기동(munder spawnPty
-/// 대응). body 는 raw JSON 문자열(text/plain) — /git-commit 과 같은 preflight
-/// 회피. 흐름은 run_job 패턴: split → (마커 선점·rename best-effort) → send.
-async fn spawn_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
-    let resp = (|| {
-        let req: SpawnReq = if body.trim().is_empty() {
-            SpawnReq { character: None, model: None, cwd: None }
-        } else {
-            serde_json::from_str(&body)
-                .map_err(|e| format!("bad request body: {e}"))?
-        };
-        if let Some(m) = req.model.as_deref() {
-            if !safe_token(m) {
-                return Err(format!("bad model name: {m:?}"));
-            }
-        }
-        // cwd 는 physical 경로로 정규화(canonicalize). pane 안 도구들이
-        // os.getcwd()(physical) 기준 slug 로 마커를 찾으므로, /tmp 같은
-        // symlink 를 그대로 쓰면 선점 마커가 다른 방에 떨어진다. 존재하지
-        // 않는 경로는 cd 도 실패할 것이므로 여기서 거부.
-        let req_cwd = match req.cwd.as_deref() {
-            Some(d) => {
-                if !std::path::Path::new(d).is_absolute() {
-                    return Err(format!("cwd must be absolute: {d:?}"));
-                }
-                let canon = std::fs::canonicalize(d)
-                    .map_err(|e| format!("cwd not accessible: {d:?} ({e})"))?;
-                Some(canon.to_string_lossy().into_owned())
-            }
-            None => None,
-        };
-        // 캐릭터는 characters.json 에 실제 정의된 이름만 — 오타가 마커만 선점하고
-        // persona 를 못 찾는 반쪽 상태를 막는다. persona 는 스폰 시 1회 주입(아래).
-        let persona: Option<String> = if let Some(name) = req.character.as_deref() {
-            let chars = first_valid_json(&characters_candidate_paths())
-                .ok_or_else(|| "characters.json not found".to_string())?;
-            if !character_defined(&chars, name) {
-                return Err(format!("unknown character: {name:?}"));
-            }
-            persona_for(&chars, name)
-        } else {
-            None
-        };
-
-        let surf = backend
-            .split_surface(SplitDirection::Down, false)
-            .map_err(|e| format!("split failed: {e}"))?;
-        let surface_id = surf.id;
-
-        // 새 pane 의 방 = cd 후 claude 가 뜰 디렉토리. 마커 slug 기준도 동일.
-        let room: std::path::PathBuf = req_cwd
-            .as_deref()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| resolve_cwd(&backend));
-        let mut notes = Vec::new();
-        if let Some(name) = req.character.as_deref() {
-            let marker = character_marker_path(&room, &surface_id);
-            let write = || -> std::io::Result<()> {
-                if let Some(dir) = marker.parent() {
-                    std::fs::create_dir_all(dir)?;
-                }
-                let mut tmp = marker.as_os_str().to_owned();
-                tmp.push(".tmp");
-                let tmp = std::path::PathBuf::from(tmp);
-                std::fs::write(&tmp, name)?;
-                std::fs::rename(&tmp, &marker)
-            };
-            match write() {
-                // 마커 선점 = assign 의 newly_assigned 경로를 안 타므로 헤더
-                // rename 은 여기서 직접 (assign 과 같은 '● <이름>' 표기).
-                Ok(()) => match backend.rename_surface(&surface_id, &format!("● {name}")) {
-                    Ok(()) => notes.push(format!("character={name}")),
-                    Err(e) => notes.push(format!("character={name}, rename skipped ({e})")),
-                },
-                Err(e) => notes.push(format!("character marker failed ({e})")),
-            }
-        }
-
-        // per-prompt 훅(board-context.py) 폐기로 워커 역할(직접커밋 금지)도 스폰 시 1회
-        // 시스템 프롬프트에 넣는다(거노: "워커도 워커인 줄 알아야"). persona(말투) + 역할
-        // 합쳐 --append-system-prompt 1회. god 통솔 폐기(06-18)라 보고 대상은 항상 사용자.
-        let append: Option<String> = req.character.as_deref().map(|name| {
-            let role = format!(
-                "너는 {name}({surface_id}) — 이 워크스페이스의 워커다. 직접 커밋하지 \
-                 말고 작업 결과를 선생님(사용자)에게 보고해라."
-            );
-            match &persona {
-                Some(p) => format!("{p} {role}"),
-                None => role,
-            }
-        });
-
-        let mut cmd = spawn_command(req.model.as_deref(), req_cwd.as_deref(), append.as_deref());
-        cmd.push('\n');
-        backend
-            .send_text(Some(&surface_id), &cmd)
-            .map_err(|e| format!("send failed: {e}"))?;
-        Ok(serde_json::json!({
-            "ok": true,
-            "surface_id": surface_id,
-            "command": cmd.trim_end(),
-            "notes": notes,
-        }))
-    })()
-    .unwrap_or_else(|e: String| serde_json::json!({ "ok": false, "error": e }));
-    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(resp))
-}
 
 /// Read a required `usize` query param, defaulting to 0 when absent/garbage.
 fn query_idx(params: &std::collections::HashMap<String, String>) -> usize {
@@ -1351,6 +1156,46 @@ async fn session_rename_handler(
     let body = match backend.rename_session(query_idx(&params), &name) {
         Ok(()) => serde_json::json!({ "ok": true }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `GET /recent-sessions?cwd=<abs>` — recent Claude sessions under `cwd` (or
+/// the active pane's cwd when omitted) for the arona-ui resume picker. Newest
+/// first: `{ ok, sessions: [{id, label, mtime, cwd}] }`.
+async fn recent_sessions_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cwd = params.get("cwd").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    let body = match backend.recent_sessions(cwd) {
+        Ok(sessions) => serde_json::json!({ "ok": true, "sessions": sessions }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool>` — open a pane and
+/// inject `claude --resume <id>` once its shell prompt is up. `newroom=true`
+/// opens a fresh window; otherwise it splits the active one. Query params for
+/// the same no-preflight reason as session-switch.
+async fn session_resume_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let id = params.get("id").cloned().unwrap_or_default();
+    let cwd = params.get("cwd").filter(|s| !s.is_empty()).cloned();
+    let newroom = params
+        .get("newroom")
+        .map(|s| s == "true" || s == "1")
+        .unwrap_or(false);
+    let body = if id.is_empty() {
+        serde_json::json!({ "ok": false, "error": "missing id" })
+    } else {
+        match backend.resume_session(&id, cwd.as_deref(), newroom) {
+            Ok(()) => serde_json::json!({ "ok": true, "id": id }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
@@ -2087,6 +1932,8 @@ pub fn spawn_http_server(
                 let slash_backend = backend.clone();
                 let session_restore_backend = backend.clone();
                 let session_rename_backend = backend.clone();
+                let recent_sessions_backend = backend.clone();
+                let session_resume_backend = backend.clone();
                 let session_reset_backend = backend.clone();
                 let open_image_backend = backend.clone();
                 let open_markdown_backend = backend.clone();
@@ -2104,7 +1951,6 @@ pub fn spawn_http_server(
                 let send_backend = backend.clone();
                 let mode_get_backend = backend.clone();
                 let mode_set_backend = backend.clone();
-                let spawn_backend = backend.clone();
                 let focus_backend = backend.clone();
                 let close_backend = backend.clone();
                 let events_backend = backend.clone();
@@ -2181,10 +2027,6 @@ pub fn spawn_http_server(
                         ),
                     )
                     .route(
-                        "/spawn",
-                        post(move |body: String| spawn_handler(spawn_backend.clone(), body)),
-                    )
-                    .route(
                         "/focus",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             focus_handler(focus_backend.clone(), q)
@@ -2240,6 +2082,18 @@ pub fn spawn_http_server(
                         "/session-rename",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             session_rename_handler(session_rename_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/recent-sessions",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            recent_sessions_handler(recent_sessions_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/session-resume",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            session_resume_handler(session_resume_backend.clone(), q)
                         }),
                     )
                     .route(
@@ -2496,75 +2350,6 @@ mod tests {
         write_mode_file(&p, "solo").unwrap();
         assert_eq!(read_mode_file(&p), "solo");
         let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn spawn_command_assembles_cd_and_model() {
-        // 모든 스폰은 --session-id "$(uuidgen)"(hook-free transcript) 로 시작한다.
-        const SID: &str = "claude --session-id \"$(uuidgen)\"";
-        assert_eq!(spawn_command(None, None, None), SID);
-        assert_eq!(spawn_command(Some("opus"), None, None), format!("{SID} --model opus"));
-        assert_eq!(
-            spawn_command(None, Some("/tmp/a b"), None),
-            format!("cd '/tmp/a b' && {SID}")
-        );
-        assert_eq!(
-            spawn_command(Some("claude-fable-5"), Some("/r/x"), None),
-            format!("cd '/r/x' && {SID} --model claude-fable-5")
-        );
-        // persona 주입 — 작은따옴표 이스케이프 + --append-system-prompt.
-        assert_eq!(
-            spawn_command(Some("sonnet"), None, Some("너는 시로코야")),
-            format!("{SID} --model sonnet --append-system-prompt '너는 시로코야'")
-        );
-    }
-
-    #[test]
-    fn sh_quote_survives_embedded_quote() {
-        // it's → 'it'\''s' (닫고-이스케이프-다시염)
-        assert_eq!(sh_quote("it's"), "'it'\\''s'");
-        assert_eq!(sh_quote("plain"), "'plain'");
-    }
-
-    #[test]
-    fn safe_token_rejects_shell_meta() {
-        assert!(safe_token("claude-fable-5"));
-        assert!(safe_token("opus_4.8"));
-        assert!(!safe_token(""));
-        assert!(!safe_token("opus; rm -rf /"));
-        assert!(!safe_token("a b"));
-        assert!(!safe_token("$(boom)"));
-    }
-
-    /// assign-character.py 의 my_marker 와 자리·표기가 일치해야 선점이 먹힌다.
-    #[test]
-    fn character_marker_matches_python_layout() {
-        let p = character_marker_path(
-            std::path::Path::new("/Users/kasa/Desktop/momewomo/tmuxify"),
-            "%7",
-        );
-        assert_eq!(
-            p,
-            std::path::PathBuf::from(
-                "/tmp/kasaterm-collab/-Users-kasa-Desktop-momewomo-tmuxify/character-7"
-            )
-        );
-    }
-
-    #[test]
-    fn character_defined_checks_leader_and_members() {
-        let chars: serde_json::Value = serde_json::from_str(
-            r#"{"leader":{"name":"아로나"},"members":[{"name":"유우카"},{"name":"시로코"}]}"#,
-        )
-        .unwrap();
-        assert!(character_defined(&chars, "아로나"));
-        assert!(character_defined(&chars, "유우카"));
-        assert!(!character_defined(&chars, "프라나"));
-        // members 없는 단독 leader 구성도
-        let solo: serde_json::Value =
-            serde_json::from_str(r#"{"leader":{"name":"아로나"}}"#).unwrap();
-        assert!(character_defined(&solo, "아로나"));
-        assert!(!character_defined(&solo, "유우카"));
     }
 
     #[test]

@@ -1116,18 +1116,19 @@ impl App {
             // frame. The image pass (in g.render) paints under the chrome so
             // pane headers / focus ring / dim overlay land on top.
             for (id, image, _, _, rot, _) in &image_slots {
-                // Per-rotation cache key — rotated pixels uploaded once per
-                // (pane, rotation) pair so toggling between rotations doesn't
-                // re-rotate every frame.
-                let key = format!("{id}-r{rot}");
+                // Per-(rotation, frame) cache key — rotated pixels uploaded once
+                // per (pane, rotation, gif frame). Static images have one frame
+                // so this collapses to the old (pane, rotation) behaviour.
+                let cur = image.cur_idx();
+                let key = format!("{id}-r{rot}-f{cur}");
                 if !g.has_image(&key) {
-                    let (rgba, w, h) = rotate_rgba_cw(&image.rgba, image.w, image.h, *rot);
+                    let (rgba, w, h) = rotate_rgba_cw(image.cur_rgba(), image.w, image.h, *rot);
                     g.upload_image(&key, &rgba, w, h);
                 }
             }
             g.draw_cells(&slot_views);
-            for (id, _, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {
-                let key = format!("{id}-r{rot}");
+            for (id, image, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {
+                let key = format!("{id}-r{rot}-f{}", image.cur_idx());
                 g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
             }
             // Markdown is laid out into chrome glyphs/rects here — after the

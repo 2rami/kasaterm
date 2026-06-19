@@ -352,12 +352,21 @@ impl App {
         // first bytes the shell prints before SIGWINCH lands.
         let (win_cols, win_rows) = self.window_cells();
         let cwd = self.spawn_cwd_from(Some(&active));
+        // split = 같은 방의 새 학생: room 상속 + 캐릭터 자동 배정(빈 슬롯 순환). 사용자가
+        // 이 pane 에서 claude 를 치면 shim 이 KASATERM_* env 로 persona·session-id 를 입힌다.
+        let room = self.ws.lock().unwrap().pane_room.get(&active).cloned();
+        let mut env = crate::proxy_env(&new_id);
+        if let Some(ref r) = room {
+            env.push(("KASATERM_ROOM".to_string(), r.clone()));
+            self.ws.lock().unwrap().pane_room.insert(new_id.clone(), r.clone());
+        }
+        env.extend(self.assign_character_env(&new_id, cwd.as_deref(), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
             cols: win_cols,
             rows: win_rows,
-            env: crate::proxy_env(&new_id),
+            env,
             pane_id: new_id.clone(),
             initial_scrollback: Vec::new(),
         })?;
