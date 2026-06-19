@@ -16,8 +16,15 @@ export interface ToolRenderer {
   body?: (input: unknown, result: string, isError: boolean) => React.ReactNode;
   /** Optional input view override. */
   inputView?: (input: unknown) => React.ReactNode;
-  /** Optional result view override. */
-  resultView?: (result: string, isError: boolean) => React.ReactNode;
+  /**
+   * Optional result view override. The 3rd arg is the structured top-level
+   * toolUseResult (e.g. Edit's structuredPatch with real line numbers + context).
+   */
+  resultView?: (
+    result: string,
+    isError: boolean,
+    toolUseResult?: unknown,
+  ) => React.ReactNode;
   /** Chips derived from the structured toolUseResult — shown in the card header. */
   stats?: (input: unknown, toolUseResult: unknown) => ToolStat[];
   /** Optional structured-result expanded section. */
@@ -79,6 +86,7 @@ import { GlobRenderer } from "./glob";
 import { TaskRenderer } from "./task";
 import { TodoWriteRenderer } from "./todo";
 import { WebFetchRenderer, WebSearchRenderer } from "./web";
+import { ExitPlanRenderer } from "./exitplan";
 
 const REGISTRY: Record<string, ToolRenderer> = {
   Bash: BashRenderer,
@@ -94,6 +102,7 @@ const REGISTRY: Record<string, ToolRenderer> = {
   TodoWrite: TodoWriteRenderer,
   WebFetch: WebFetchRenderer,
   WebSearch: WebSearchRenderer,
+  ExitPlanMode: ExitPlanRenderer,
   // Codex tools — borrow Claude renderers; real name shown on the card.
   exec_command: BashRenderer,
   write_stdin: BashRenderer,

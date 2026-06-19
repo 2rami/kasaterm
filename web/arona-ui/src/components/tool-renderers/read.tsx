@@ -2,6 +2,7 @@
 
 import type { ToolRenderer, ToolStat } from "./index";
 import { CopyButton } from "../copy-button";
+import { AnsiText } from "../AnsiText";
 
 export const ReadRenderer: ToolRenderer = {
   stats(_input, tur) {
@@ -73,7 +74,7 @@ export const ReadRenderer: ToolRenderer = {
             isError ? "text-red-700 dark:text-red-300" : "text-foreground/85",
           ].join(" ")}
         >
-          {text || "(empty)"}
+          {text ? <AnsiText text={text} /> : "(empty)"}
         </pre>
         {text && (
           <CopyButton

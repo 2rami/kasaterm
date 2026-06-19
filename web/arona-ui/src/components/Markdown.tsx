@@ -1,12 +1,15 @@
 import React from 'react';
+import { CodeBlock } from './CodeBlock';
 
 // 대화 버블용 경량 마크다운 렌더러 — 라이브러리 없이 claude 답변에 흔한 것만:
 // GFM 표(비교용, 거노 요청)·코드블록·인라인 코드·볼드·헤딩·불릿. 과하지 않게.
 
-// 인라인: **볼드**, `코드`. (링크/이탤릭 등은 평문 처리 — 대화엔 충분.)
+// 인라인: **볼드**, `코드`, ~~취소선~~, [링크](url), *이탤릭*/_이탤릭_. ccsv 의
+// react-markdown+remark-gfm 인라인을 자작 정규식으로 이식(거노: 답변 속 URL 클릭·이탤릭).
+// 순서 주의 — 볼드(**)/코드를 이탤릭(*) 보다 먼저 매칭해 **를 * 가 안 먹게.
 function inline(text: string, keyBase: string): React.ReactNode[] {
   const out: React.ReactNode[] = [];
-  const re = /(\*\*([^*]+)\*\*|`([^`]+)`)/g;
+  const re = /(\*\*([^*]+)\*\*|`([^`]+)`|~~([^~]+)~~|\[([^\]]+)\]\(([^)\s]+)\)|\*([^*\n]+)\*|_([^_\n]+)_)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let i = 0;
@@ -16,6 +19,12 @@ function inline(text: string, keyBase: string): React.ReactNode[] {
     else if (m[3] != null) out.push(
       <code key={`${keyBase}-c${i}`} style={{ fontFamily: 'var(--cth-font-mono, monospace)', fontSize: '0.92em', background: 'var(--cth-cream-100)', padding: '1px 4px', borderRadius: 4 }}>{m[3]}</code>
     );
+    else if (m[4] != null) out.push(<del key={`${keyBase}-s${i}`}>{m[4]}</del>);
+    else if (m[5] != null) out.push(
+      <a key={`${keyBase}-l${i}`} href={m[6]} target="_blank" rel="noreferrer" style={{ color: 'var(--cth-sky)', textDecoration: 'underline' }}>{m[5]}</a>
+    );
+    else if (m[7] != null) out.push(<em key={`${keyBase}-i${i}`}>{m[7]}</em>);
+    else if (m[8] != null) out.push(<em key={`${keyBase}-u${i}`}>{m[8]}</em>);
     last = m.index + m[0].length;
     i++;
   }
@@ -35,17 +44,14 @@ export function Markdown({ text }: { text: string }) {
   while (i < lines.length) {
     const line = lines[i];
 
-    // 코드 블록 ``` … ```
+    // 코드 블록 ``` … ``` — fence info(```ts)로 언어 잡아 구문강조(CodeBlock=prism).
     if (/^\s*```/.test(line)) {
+      const lang = line.replace(/^\s*```/, '').trim().split(/\s+/)[0] || undefined;
       const buf: string[] = [];
       i++;
       while (i < lines.length && !/^\s*```/.test(lines[i])) { buf.push(lines[i]); i++; }
       i++; // 닫는 ```
-      blocks.push(
-        <pre key={key++} style={{ margin: '6px 0', padding: '8px 10px', background: 'var(--cth-ink-900)', color: '#cfe3ff', borderRadius: 8, overflowX: 'auto', fontFamily: 'var(--cth-font-mono, monospace)', fontSize: 12, lineHeight: 1.5 }}>
-          {buf.join('\n')}
-        </pre>
-      );
+      blocks.push(<CodeBlock key={key++} code={buf.join('\n')} lang={lang} />);
       continue;
     }
 
@@ -95,6 +101,31 @@ export function Markdown({ text }: { text: string }) {
       continue;
     }
 
+    // 번호 리스트 1. 2. — start 보존(ccsv: 답변 속 단계 목록).
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const items: string[] = [];
+      const start = parseInt(line.match(/^\s*(\d+)\./)?.[1] ?? '1', 10);
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*\d+\.\s+/, '')); i++; }
+      blocks.push(
+        <ol key={key++} start={start} style={{ margin: '4px 0', paddingLeft: 22 }}>
+          {items.map((it, ii) => <li key={ii} style={{ margin: '2px 0' }}>{inline(it, `ol${key}-${ii}`)}</li>)}
+        </ol>
+      );
+      continue;
+    }
+
+    // 인용 > — 좌측 보더 + 흐린 글씨.
+    if (/^\s*>\s?/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) { items.push(lines[i].replace(/^\s*>\s?/, '')); i++; }
+      blocks.push(
+        <blockquote key={key++} style={{ margin: '4px 0', paddingLeft: 10, borderLeft: '3px solid var(--cth-cream-200)', color: 'var(--cth-ink-500)' }}>
+          {inline(items.join('\n'), `bq${key}`)}
+        </blockquote>
+      );
+      continue;
+    }
+
     // 빈 줄
     if (!line.trim()) { i++; continue; }
 
@@ -103,6 +134,7 @@ export function Markdown({ text }: { text: string }) {
     while (
       i < lines.length && lines[i].trim() &&
       !/^\s*```/.test(lines[i]) && !/^(#{1,4})\s+/.test(lines[i]) && !/^\s*[-*]\s+/.test(lines[i]) &&
+      !/^\s*\d+\.\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i]) &&
       !(lines[i].includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1]))
     ) { para.push(lines[i]); i++; }
     blocks.push(<div key={key++} style={{ margin: '2px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{inline(para.join('\n'), `p${key}`)}</div>);
