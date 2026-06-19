@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStore, isUnconfirmed, type Agent } from '@/store';
 import { SpriteWalk, type Facing } from './SpriteWalk';
 import {
-  CLASSROOM_FURNITURE, buildGrid, deskSeats, cafeSpots, findPath, pctToCell,
+  CLASSROOM_FURNITURE, buildGrid, deskSeats, cafeSpots, findPath,
   type Furniture, type CafeSpot,
 } from './classroomSpace';
 import { pickExchange } from './cafeteriaLines';
@@ -123,7 +123,6 @@ function ClassroomCharacter(
   posRef.current = pos;
   const pathRef = useRef<Pt[]>([]);
   const timer = useRef<number | undefined>(undefined);
-  const stopTimer = useRef<number | undefined>(undefined); // 방향키 이동 멈춤 감지
 
   const step = useCallback(() => {
     const path = pathRef.current;
@@ -151,10 +150,10 @@ function ClassroomCharacter(
   }, [grid, step]);
 
   useEffect(() => {
-    if (selected) return; // 선택 중엔 자동 이동을 멈추고 방향키로 수동 조종.
+    // 자율 이동(거노: 방향키 수동조종 폐기) — 일하면 자기 책상, 쉬면 소파/카페 거점으로
+    // 스스로 걸어가 정착. 상태(atDesk)가 바뀌면 책상↔소파 자동 전환. 도착하면 멈춤
+    // (계속 배회하던 옛 wander 는 산만해서 폐기 — 거점은 인덱스로 결정적 분배).
     if (atDesk && seat) { walkTo({ x: seat.x, y: seat.y }); return; }
-    // idle → 카페 거점으로 한 번만 이동하고 정지(거노: 계속 배회하지 말고 가만히 옆으로
-    // 서 있게). 옛 5.2s 주기 wander 가 계속 움직여 산만했음. 거점은 인덱스로 결정적 분배.
     const home = cafe.length ? cafe[index % cafe.length] : null;
     const tier = cafe.length ? Math.floor(index / cafe.length) : 0;
     const t: Pt = home
@@ -162,39 +161,7 @@ function ClassroomCharacter(
       : { x: 22 + (index % 5) * 13, y: 82 };
     walkTo(t);
     return () => { window.clearTimeout(timer.current); };
-  }, [atDesk, seat?.x, seat?.y, walkTo, cafe, index, selected]);
-
-  // 선택된 학생은 방향키로 직접 이동(자동 배회 멈춤). 벽/가구는 못 지나감.
-  useEffect(() => {
-    if (!selected) return;
-    const onKey = (e: KeyboardEvent) => {
-      // 입력창·버튼·메뉴 등 인터랙티브 요소에 포커스가 있으면 방향키는 그쪽(타이핑·
-      // 메뉴 네비)으로 보낸다 — 캐릭터를 움직이지 않는다(거노: 선택지 방향키로 옮기면
-      // 캐릭터가 움직임). 빈 교실을 클릭(아무것도 포커스 안 됨)했을 때만 이동.
-      const el = document.activeElement;
-      if (el && el !== document.body) return;
-      const STEP = 2.6;
-      let { x, y } = posRef.current;
-      if (e.key === 'ArrowUp') { y -= STEP; setFacing('back'); }
-      else if (e.key === 'ArrowDown') { y += STEP; setFacing('front'); }
-      else if (e.key === 'ArrowLeft') { x -= STEP; setFlip(true); setFacing('side'); }
-      else if (e.key === 'ArrowRight') { x += STEP; setFlip(false); setFacing('side'); }
-      else return;
-      e.preventDefault();
-      const cell = pctToCell(x, y);
-      if (!grid[cell.r]?.[cell.c]) return; // 벽/가구 막힘
-      const next = { x, y };
-      posRef.current = next;
-      setSegMs(110);
-      setMoving(true);
-      // 키 누르는 동안만 걷기 — 떼면 ~180ms 뒤 정지(거노: 멈추면 멈추게, 제자리 걷기 버그).
-      window.clearTimeout(stopTimer.current);
-      stopTimer.current = window.setTimeout(() => setMoving(false), 180);
-      setPos(next);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => { window.removeEventListener('keydown', onKey); window.clearTimeout(stopTimer.current); };
-  }, [selected, grid]);
+  }, [atDesk, seat?.x, seat?.y, walkTo, cafe, index]);
 
   const chatting = chatLine && agent.status === 'idle';
   const thought = chatting ? chatLine : thoughtFor(agent);
@@ -254,7 +221,7 @@ function ClassroomCharacter(
       {/* 등장 모션 — 처음 교실에 나타날 때 아래서 통통 튀어오르며 페이드인(munder식, 거노).
           mount 1회 재생. button 위치 transform 과 분리된 내부 레이어라 이동 transition 무간섭. */}
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'center', animation: 'schale-enter 0.5s ease-out both' }}>
-        <SpriteWalk character={agent.character} walking={moving} flip={flip} facing={facing} width={72} height={100} />
+        <SpriteWalk character={agent.spriteChar ?? agent.character} walking={moving} flip={flip} facing={facing} width={72} height={100} />
       </div>
 
       <div style={{
