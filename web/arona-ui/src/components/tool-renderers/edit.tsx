@@ -17,6 +17,36 @@ interface EditInput {
   }>;
 }
 
+interface PatchHunk {
+  oldStart?: number;
+  newStart?: number;
+  lines?: string[];
+}
+
+type HunkLine = {
+  sign: "+" | "-" | " ";
+  oldNo?: number;
+  newNo?: number;
+  content: string;
+};
+
+// ccsv convertPatchToHunks: walk a structuredPatch hunk assigning real old/new
+// line numbers per sign so the gutter matches the actual file, unlike a
+// recomputed diffLines that always starts at 1.
+function convertPatch(hunks: PatchHunk[]): HunkLine[][] {
+  return hunks.map((hunk) => {
+    let oldLine = hunk.oldStart ?? 1;
+    let newLine = hunk.newStart ?? 1;
+    return (hunk.lines ?? []).map((line): HunkLine => {
+      const sign = line[0];
+      const content = line.slice(1);
+      if (sign === "-") return { sign: "-", oldNo: oldLine++, content };
+      if (sign === "+") return { sign: "+", newNo: newLine++, content };
+      return { sign: " ", oldNo: oldLine++, newNo: newLine++, content };
+    });
+  });
+}
+
 export const EditRenderer: ToolRenderer = {
   stats(_input, tur) {
     const r = tur as
@@ -98,7 +128,112 @@ export const EditRenderer: ToolRenderer = {
       </div>
     );
   },
+  resultView(result, isError, tur) {
+    const patch = (tur as { structuredPatch?: PatchHunk[] } | null)
+      ?.structuredPatch;
+    // Real applied patch carries file line numbers + context — prefer it over
+    // the input-side diffLines fallback (which only knows the changed slice).
+    if (!isError && Array.isArray(patch) && patch.length > 0) {
+      const filePath = (tur as { filePath?: string }).filePath;
+      const hunks = convertPatch(patch);
+      return <HunkDiffView filePath={filePath} hunks={hunks} />;
+    }
+    if (!result) {
+      return (
+        <div className="px-3 py-2 text-xs italic text-muted-foreground">
+          (no result)
+        </div>
+      );
+    }
+    return (
+      <pre
+        className={[
+          "max-h-[400px] overflow-auto rounded bg-background p-3 font-mono text-[11px] leading-relaxed",
+          isError ? "text-red-700 dark:text-red-300" : "text-foreground/85",
+        ].join(" ")}
+      >
+        {result}
+      </pre>
+    );
+  },
 };
+
+function HunkDiffView({
+  filePath,
+  hunks,
+}: {
+  filePath?: string;
+  hunks: HunkLine[][];
+}) {
+  let added = 0,
+    deleted = 0;
+  for (const h of hunks)
+    for (const l of h) {
+      if (l.sign === "+") added++;
+      else if (l.sign === "-") deleted++;
+    }
+  return (
+    <div className="overflow-hidden rounded border border-border/40 bg-background">
+      <div className="flex items-center gap-3 border-b border-border/40 bg-muted/30 px-3 py-1 font-mono text-[10px]">
+        <span className="min-w-0 flex-1 truncate text-muted-foreground" title={filePath}>
+          {filePath ?? "patch"}
+        </span>
+        {added > 0 && <span className="text-emerald-700 dark:text-emerald-400">+{added}</span>}
+        {deleted > 0 && <span className="text-red-700 dark:text-red-400">−{deleted}</span>}
+      </div>
+      <div className="max-h-[400px] overflow-auto font-mono text-[11px] leading-relaxed">
+        {hunks.map((lines, hi) => (
+          <div key={hi} className={hi > 0 ? "border-t border-border/30" : undefined}>
+            {lines.map((l, li) => (
+              <div
+                key={li}
+                className={[
+                  "flex",
+                  l.sign === "+"
+                    ? "bg-emerald-500/10"
+                    : l.sign === "-"
+                      ? "bg-red-500/10"
+                      : "",
+                ].join(" ")}
+              >
+                <span className="w-10 shrink-0 select-none border-r border-border/30 px-1 text-right text-muted-foreground/40 tabular-nums">
+                  {l.oldNo ?? " "}
+                </span>
+                <span className="w-10 shrink-0 select-none border-r border-border/30 px-1 text-right text-muted-foreground/40 tabular-nums">
+                  {l.newNo ?? " "}
+                </span>
+                <span
+                  className={[
+                    "w-4 shrink-0 select-none text-center",
+                    l.sign === "+"
+                      ? "text-emerald-700 dark:text-emerald-400"
+                      : l.sign === "-"
+                        ? "text-red-700 dark:text-red-400"
+                        : "text-muted-foreground/40",
+                  ].join(" ")}
+                >
+                  {l.sign === " " ? " " : l.sign}
+                </span>
+                <span
+                  className={[
+                    "min-w-0 flex-1 whitespace-pre px-1",
+                    l.sign === "+"
+                      ? "text-emerald-800 dark:text-emerald-300"
+                      : l.sign === "-"
+                        ? "text-red-800 dark:text-red-300"
+                        : "text-foreground/80",
+                  ].join(" ")}
+                >
+                  {l.content || " "}
+                </span>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function DiffView({
   oldStr,

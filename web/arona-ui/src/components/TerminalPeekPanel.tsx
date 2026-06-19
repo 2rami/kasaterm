@@ -6,6 +6,7 @@ import { ToolUseCard } from './tool-use-card';
 import { ThinkingBlock } from './thinking-block';
 import { buildToolMap, type ToolMap } from '@/lib/build-tool-map';
 import type { SessionEvent } from '@/lib/types';
+import { AnsiText } from './AnsiText';
 import { useStore } from '@/store';
 
 // 대화 본문 = transcript jsonl(/transcript-raw, raw SessionEvent[]). ccsv 파서·per-tool
@@ -139,12 +140,105 @@ function extractContext(screen: string): string | null {
   return cleaned.length >= 2 ? cleaned.join('\n') : null;
 }
 
-// 슬래시 명령 결과(## Context Usage 등)·시스템 주입([Request interrupted], <command-*>,
-// Caveat, local-command)은 claude 가 user 메시지로 넣어 대화창에 선생님 발신(노란 버블)로
-// 샌다(거노: 내가 안 보낸 스크립트가 뜸). 진짜 사용자 발화가 아니므로 숨긴다.
+// 시스템 주입 잔여([Request interrupted], Caveat, ## Context Usage)는 진짜 발화가 아니라
+// 숨긴다. <command-*>·<local-command-stdout> 는 더는 통째로 숨기지 않고 parseSlashCommand 가
+// 슬래시 카드/로컬출력 버블로 승격한다(아래 eventsToItems). 여기엔 그 외 케이스만 남긴다.
 function isSystemInjectionText(role: string, text: string): boolean {
   if (role !== 'user') return false;
-  return /\[Request interrupted|<command-(name|args|message)>|<local-command|^\s*##\s*Context Usage|^\s*Caveat:\s/i.test(text);
+  return /\[Request interrupted|^\s*##\s*Context Usage|^\s*Caveat:\s/i.test(text);
+}
+
+// ccsv parseUserMessage 발췌 — user 텍스트의 <command-name>/<command-args>/<command-message>
+// 또는 <local-command-stdout> 태그를 파싱. command 면 슬래시 명령 카드(우측, green),
+// local-command 면 로컬 출력 버블(좌측). 태그 없으면 null(일반 텍스트로 처리).
+type ParsedUserMessage =
+  | { kind: 'command'; commandName: string; commandArgs?: string; commandMessage?: string }
+  | { kind: 'local-command'; stdout: string };
+function parseSlashCommand(content: string): ParsedUserMessage | null {
+  const tag = (name: string) => {
+    const m = content.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`));
+    return m ? m[1] : undefined;
+  };
+  const commandName = tag('command-name');
+  if (commandName !== undefined) {
+    return { kind: 'command', commandName: commandName.trim(), commandArgs: tag('command-args'), commandMessage: tag('command-message') };
+  }
+  const stdout = tag('local-command-stdout');
+  if (stdout !== undefined) return { kind: 'local-command', stdout };
+  return null;
+}
+
+// ccsv formatDuration — ms → "12.3s" / "1m 23s" / "1h 5m". 푸터엔 초만 쓰지만 분/시 케이스 보존.
+function formatDuration(durationMs: number): string {
+  if (durationMs < 0) return '0s';
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours === 0 && minutes === 0) return `${(durationMs / 1000).toFixed(1)}s`;
+  if (hours === 0) return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+// ccsv ConversationList turnDurationMap 이식 — 각 턴(실유저 메시지 = sidechain 아닌 user 중
+// content[0] 가 tool_result 가 아닌 것)에서 다음 실유저 직전까지 마지막 assistant 의 uuid →
+// (해당 턴 시작 ts ~ 그 assistant ts) 소요 ms 를 매핑. 그 assistant 버블 아래 시계 푸터로 표시.
+function turnDurations(events: SessionEvent[]): Map<string, number> {
+  const map = new Map<string, number>();
+  const isRealUser = (ev: SessionEvent): boolean => {
+    if (ev.type !== 'user' || (ev as { isSidechain?: boolean }).isSidechain) return false;
+    const content = (ev as { message?: { content?: unknown } }).message?.content;
+    if (Array.isArray(content)) {
+      const first = content[0] as { type?: string } | undefined;
+      if (first && typeof first === 'object' && first.type === 'tool_result') return false;
+    }
+    return true;
+  };
+  const starts: number[] = [];
+  for (let i = 0; i < events.length; i++) if (isRealUser(events[i])) starts.push(i);
+  for (let t = 0; t < starts.length; t++) {
+    const startIdx = starts[t];
+    const endIdx = starts[t + 1] ?? events.length;
+    const startTs = (events[startIdx] as { timestamp?: string }).timestamp;
+    let lastAsst: SessionEvent | undefined;
+    for (let i = startIdx + 1; i < endIdx; i++) {
+      const ev = events[i];
+      if (ev.type === 'assistant' && !(ev as { isSidechain?: boolean }).isSidechain) lastAsst = ev;
+    }
+    const endTs = (lastAsst as { timestamp?: string } | undefined)?.timestamp;
+    const uuid = (lastAsst as { uuid?: string } | undefined)?.uuid;
+    if (startTs && endTs && uuid) {
+      const dur = Date.parse(endTs) - Date.parse(startTs);
+      if (!Number.isNaN(dur) && dur >= 0) map.set(uuid, dur);
+    }
+  }
+  return map;
+}
+
+// ccsv formatSystemMessage 발췌 — system 이벤트(api_error/compact_boundary)를 한 줄씩 평탄화한
+// 텍스트로. 접이식 'System' 버블 본문에 들어간다.
+function flattenSystem(ev: SessionEvent): string | null {
+  const e = ev as {
+    subtype?: string; level?: string;
+    error?: { status?: number; requestID?: string | null; error?: { message?: string; error?: { message?: string } } };
+    retryAttempt?: number; maxRetries?: number; retryInMs?: number;
+    compactMetadata?: { trigger?: string; preTokens?: number };
+  };
+  const lines: string[] = [];
+  if (e.subtype === 'api_error') {
+    if (e.error?.status !== undefined) lines.push(`Status: ${e.error.status}`);
+    if (e.error?.requestID) lines.push(`Request ID: ${e.error.requestID}`);
+    const msg = e.error?.error?.error?.message ?? e.error?.error?.message ?? (e.error?.error ? JSON.stringify(e.error.error, null, 2) : null);
+    if (msg) lines.push(`Error: ${msg}`);
+    if (e.retryAttempt !== undefined) lines.push(`Retry: ${e.retryAttempt}/${e.maxRetries}`);
+    if (e.retryInMs !== undefined) lines.push(`Retry In: ${(e.retryInMs / 1000).toFixed(2)}s`);
+  } else if (e.subtype === 'compact_boundary') {
+    if (e.compactMetadata?.trigger) lines.push(`Trigger: ${e.compactMetadata.trigger}`);
+    if (e.compactMetadata?.preTokens !== undefined) lines.push(`Pre-Tokens: ${e.compactMetadata.preTokens}`);
+  } else {
+    return null;
+  }
+  return lines.length ? lines.join('\n') : null;
 }
 
 // jsonl SessionEvent[] → 카톡 렌더 아이템 평탄화. user/assistant content[] 를 순회:
@@ -152,24 +246,50 @@ function isSystemInjectionText(role: string, text: string): boolean {
 // AskUserQuestion 은 기존 선택지 menu 카드가 전담하므로 제외. tool_result 블록은
 // buildToolMap 이 페어링해 카드 안에서 표시되니 별도 버블로 안 만든다.
 type RenderItem =
-  | { kind: 'bubble'; role: string; text: string }
+  | { kind: 'bubble'; role: string; text: string; uuid?: string }
   | { kind: 'tool'; toolUse: { id?: string; name?: string; input?: unknown }; pair: ReturnType<ToolMap['get']> }
-  | { kind: 'thinking'; text: string };
+  | { kind: 'thinking'; text: string }
+  | { kind: 'command'; commandName: string; commandArgs?: string; commandMessage?: string }
+  | { kind: 'local-command'; stdout: string }
+  | { kind: 'system'; text: string };
+
+// 한 user 텍스트가 슬래시 명령/로컬 출력 태그를 품으면 카드/버블 아이템으로, 아니면 일반
+// 버블로 푸시. 시스템 주입 잔여는 isSystemInjectionText 로 계속 숨긴다.
+function pushUserText(items: RenderItem[], text: string): void {
+  const parsed = parseSlashCommand(text);
+  if (parsed?.kind === 'command') {
+    items.push({ kind: 'command', commandName: parsed.commandName, commandArgs: parsed.commandArgs, commandMessage: parsed.commandMessage });
+  } else if (parsed?.kind === 'local-command') {
+    if (parsed.stdout.trim()) items.push({ kind: 'local-command', stdout: parsed.stdout });
+  } else if (text.trim() && !isSystemInjectionText('user', text)) {
+    items.push({ kind: 'bubble', role: 'user', text });
+  }
+}
 
 function eventsToItems(events: SessionEvent[], toolMap: ToolMap): RenderItem[] {
   const items: RenderItem[] = [];
   for (const ev of events) {
+    // 서브에이전트 분기(sidechain)는 메인 대화에 섞이는 노이즈라 제외.
+    if ((ev as { isSidechain?: boolean }).isSidechain) continue;
+    if (ev.type === 'system') {
+      const text = flattenSystem(ev);
+      if (text) items.push({ kind: 'system', text });
+      continue;
+    }
     if (ev.type !== 'user' && ev.type !== 'assistant') continue;
     const role = ev.type;
+    const uuid = (ev as { uuid?: string }).uuid;
     const content = (ev as { message?: { content?: unknown } }).message?.content;
     if (typeof content === 'string') {
-      if (content.trim() && !isSystemInjectionText(role, content)) items.push({ kind: 'bubble', role, text: content });
+      if (role === 'user') pushUserText(items, content);
+      else if (content.trim()) items.push({ kind: 'bubble', role, text: content, uuid });
     } else if (Array.isArray(content)) {
       for (const block of content) {
         if (!block || typeof block !== 'object') continue;
         const b = block as { type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown };
         if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-          if (!isSystemInjectionText(role, b.text)) items.push({ kind: 'bubble', role, text: b.text });
+          if (role === 'user') pushUserText(items, b.text);
+          else items.push({ kind: 'bubble', role, text: b.text, uuid });
         } else if (b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.trim()) {
           items.push({ kind: 'thinking', text: b.thinking });
         } else if (b.type === 'tool_use' && b.name !== 'AskUserQuestion') {
@@ -181,39 +301,7 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap): RenderItem[] {
   return items;
 }
 
-// ANSI 색 — /context peek_ansi 의 SGR(\x1b[…m)을 색 span 으로(거노: 동전 색까지 똑같이).
-const ANSI16 = ['#3b4252', '#bf616a', '#a3be8c', '#ebcb8b', '#5e81ac', '#b48ead', '#88c0d0', '#e5e9f0', '#4c566a', '#d08770', '#a3be8c', '#ebcb8b', '#81a1c1', '#b48ead', '#8fbcbb', '#eceff4'];
-function ansi256(n: number): string {
-  if (n < 16) return ANSI16[n] ?? '#ccc';
-  if (n < 232) { const i = n - 16, r = Math.floor(i / 36), g = Math.floor((i % 36) / 6), b = i % 6; const v = (c: number) => (c ? 55 + c * 40 : 0); return `rgb(${v(r)},${v(g)},${v(b)})`; }
-  const v = 8 + (n - 232) * 10; return `rgb(${v},${v},${v})`;
-}
-function AnsiText({ text }: { text: string }) {
-  const nodes: React.ReactNode[] = [];
-  let color: string | undefined;
-  let key = 0;
-  const re = /\x1b\[([0-9;]*)m/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  const seg = (t: string, c?: string) => { if (t) nodes.push(<span key={key++} style={c ? { color: c } : undefined}>{t}</span>); };
-  while ((m = re.exec(text))) {
-    seg(text.slice(last, m.index), color);
-    const codes = m[1].split(';').filter((s) => s !== '').map(Number);
-    for (let i = 0; i < codes.length; i++) {
-      const c = codes[i];
-      if (c === 0 || c === 39) color = undefined;
-      else if (c >= 30 && c <= 37) color = ANSI16[c - 30];
-      else if (c >= 90 && c <= 97) color = ANSI16[c - 90 + 8];
-      else if (c === 38) {
-        if (codes[i + 1] === 2) { color = `rgb(${codes[i + 2]},${codes[i + 3]},${codes[i + 4]})`; i += 4; }
-        else if (codes[i + 1] === 5) { color = ansi256(codes[i + 2]); i += 2; }
-      }
-    }
-    last = re.lastIndex;
-  }
-  seg(text.slice(last), color);
-  return <>{nodes}</>;
-}
+// ANSI 색(SGR) 렌더는 ./AnsiText 모듈로 분리 — bash/read 카드 resultView 와 공용.
 
 function MetaChip({ label, dim, onClick }: { label: string; dim?: boolean; onClick?: () => void }) {
   return (
@@ -228,6 +316,39 @@ function MetaChip({ label, dim, onClick }: { label: string; dim?: boolean; onCli
         border: dim ? 'none' : '1px solid var(--cth-cream-200)',
         cursor: onClick ? 'pointer' : undefined,
       }}>{label}</span>
+  );
+}
+
+// system 이벤트(api_error/compact_boundary) — 좌측 작은 회색 접이식 'System' 버블.
+// 클릭하면 평탄화된 상세(Status/Request ID/Error/Pre-Tokens…)가 펼쳐진다.
+function SystemBubble({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
+      <div style={{ maxWidth: '85%', width: '100%' }}>
+        <button
+          onClick={() => setOpen((o) => !o)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6, width: '100%', textAlign: 'left',
+            padding: '6px 10px', borderRadius: 9, cursor: 'pointer',
+            background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, color: 'var(--cth-ink-300)',
+          }}>
+          <svg width="11" height="11" viewBox="0 0 16 16" style={{ transform: open ? 'rotate(180deg)' : undefined, transition: 'transform .15s', flexShrink: 0 }}>
+            <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          System
+        </button>
+        {open && (
+          <pre style={{
+            margin: '6px 0 0', padding: '8px 10px', borderRadius: 9, overflowX: 'auto',
+            background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)',
+            fontFamily: 'var(--cth-font-mono)', fontSize: 10, lineHeight: 1.4, whiteSpace: 'pre-wrap',
+            color: 'var(--cth-ink-500)',
+          }}>{text}</pre>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -383,10 +504,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
     setImages([]);
     setInput('');
     const tick = async () => {
-      const [conv, evts, imgs, screen] = await Promise.all([
+      // 세션 경계: transcript 첫 이벤트 ts = 현재 세션 시작. 이전 세션 이미지(sent-images.jsonl
+      // 방단위 누적) 잔류를 백엔드 since 로 컷(거노: 이전 pane 이미지가 새 대화에 남던 것).
+      const evts = await fetchTranscriptRaw(surfaceId);
+      const ts0 = (evts[0] as { timestamp?: string } | undefined)?.timestamp;
+      const since = ts0 ? Date.parse(ts0) / 1000 : undefined;
+      const [conv, imgs, screen] = await Promise.all([
         fetchConversation(surfaceId),
-        fetchTranscriptRaw(surfaceId),
-        fetchSentImages(surfaceId, 12),
+        fetchSentImages(surfaceId, 12, since),
         fetchPeek(surfaceId, 60),
       ]);
       if (stopped) return;
@@ -673,6 +798,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   // jsonl events → 카톡 렌더 아이템(text 버블 + per-tool 카드 + thinking). tool_use_id
   // 페어링(buildToolMap)으로 카드가 결과/diff/stats 까지 그린다.
   const toolMap = useMemo(() => buildToolMap(events), [events]);
+  // 턴별 소요시간 — 마지막 assistant uuid → ms. 그 버블 아래 시계 푸터.
+  const durationMap = useMemo(() => turnDurations(events), [events]);
   const items = useMemo(() => {
     if (events.length) return eventsToItems(events, toolMap);
     // jsonl 이 아직 안 써진 진행 중 구간 — 캡처 프록시 텍스트 대화로 라이브 폴백.
@@ -805,7 +932,69 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                   </div>
                 );
               }
+              // system 이벤트(api_error/compact_boundary) — 좌측 접이식 회색 'System' 버블.
+              if (it.kind === 'system') return <SystemBubble key={i} text={it.text} />;
+              // 슬래시 명령(<command-*>) — 우측(선생님측) green 'Claude Code Command' 카드.
+              if (it.kind === 'command') {
+                const hasArgs = !!it.commandArgs && it.commandArgs.trim() !== '';
+                const hasMsg = !!it.commandMessage && it.commandMessage.trim() !== '';
+                return (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+                    <div style={{
+                      maxWidth: '85%', padding: '8px 12px', borderRadius: 14, borderTopRightRadius: 4,
+                      background: 'color-mix(in srgb, var(--cth-mint) 14%, var(--cth-cream-50))',
+                      border: '1px solid color-mix(in srgb, var(--cth-mint) 40%, var(--cth-cream-200))',
+                      boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--cth-mint)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                          <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
+                        </svg>
+                        <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-700)' }}>Claude Code Command</span>
+                        <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 11, fontWeight: 700, padding: '1px 7px', borderRadius: 6, color: 'var(--cth-mint)', border: '1px solid color-mix(in srgb, var(--cth-mint) 45%, transparent)' }}>{it.commandName}</span>
+                      </div>
+                      {(hasArgs || hasMsg) && (
+                        <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {hasArgs && (
+                            <div>
+                              <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 600, color: 'var(--cth-ink-300)' }}>Arguments</span>
+                              <pre style={{ margin: '2px 0 0', padding: '5px 8px', borderRadius: 6, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', fontFamily: 'var(--cth-font-mono)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--cth-ink-700)' }}>{it.commandArgs}</pre>
+                            </div>
+                          )}
+                          {hasMsg && (
+                            <div>
+                              <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 600, color: 'var(--cth-ink-300)' }}>Message</span>
+                              <pre style={{ margin: '2px 0 0', padding: '5px 8px', borderRadius: 6, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', fontFamily: 'var(--cth-font-mono)', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--cth-ink-700)' }}>{it.commandMessage}</pre>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              }
+              // <local-command-stdout> — 좌측(학생측) 'Local Command' 출력 버블.
+              if (it.kind === 'local-command') {
+                return (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
+                    <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+                      <SpritePortrait character={title} scale={1.5} />
+                    </div>
+                    <div style={{ maxWidth: '80%', padding: '8px 12px', borderRadius: 14, borderTopLeftRadius: 4, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)', overflowX: 'auto' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--cth-ink-300)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                          <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
+                        </svg>
+                        <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700, color: 'var(--cth-ink-500)' }}>Local Command</span>
+                      </div>
+                      <pre style={{ margin: 0, fontFamily: 'var(--cth-font-mono)', fontSize: 11, lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--cth-ink-700)' }}>{it.stdout}</pre>
+                    </div>
+                  </div>
+                );
+              }
               const mine = it.role === 'user';
+              // 턴 소요시간 — assistant 버블이 그 턴의 마지막이면 시계 푸터(거노 데스크탑 앱풍).
+              const durMs = !mine && it.uuid ? durationMap.get(it.uuid) : undefined;
               // 메신저: 선생님(user)=우측 카톡 노랑, 학생(assistant)=좌측 아바타+흰 말풍선.
               return (
                 <div key={i} style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
@@ -814,19 +1003,31 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                       <SpritePortrait character={title} scale={1.5} />
                     </div>
                   )}
-                  <div style={{
-                    maxWidth: '72%', padding: '8px 12px',
-                    borderRadius: 14,
-                    borderTopLeftRadius: mine ? 14 : 4,
-                    borderTopRightRadius: mine ? 4 : 14,
-                    background: mine ? '#FEE500' : 'var(--cth-cream-50)',
-                    color: mine ? '#3A2E00' : 'var(--cth-ink-900)',
-                    border: mine ? 'none' : '1px solid var(--cth-cream-200)',
-                    boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
-                    fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
-                    wordBreak: 'break-word'
-                  }}>
-                    {it.text && <Markdown text={it.text} />}
+                  <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                    <div style={{
+                      padding: '8px 12px',
+                      borderRadius: 14,
+                      borderTopLeftRadius: mine ? 14 : 4,
+                      borderTopRightRadius: mine ? 4 : 14,
+                      background: mine ? '#FEE500' : 'var(--cth-cream-50)',
+                      color: mine ? '#3A2E00' : 'var(--cth-ink-900)',
+                      border: mine ? 'none' : '1px solid var(--cth-cream-200)',
+                      boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
+                      fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
+                      wordBreak: 'break-word', maxWidth: '100%',
+                    }}>
+                      {it.text && (mine
+                        ? <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{it.text}</span>
+                        : <Markdown text={it.text} />)}
+                    </div>
+                    {durMs != null && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 4, paddingLeft: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}>
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                          <circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 14" />
+                        </svg>
+                        <span>{formatDuration(durMs)}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
               );

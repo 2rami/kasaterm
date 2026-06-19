@@ -3,18 +3,16 @@ import { useStore, isAwaitingTeacher, isUnconfirmed } from '@/store';
 import { MomoTalk } from './MomoTalk';
 import { ScheduleTab } from './ScheduleTab';
 import { GitTab } from './GitTab';
-import { TerminalPeekPanel } from './TerminalPeekPanel';
 import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon, ForkIcon } from './activity';
 import { fetchPaneTasks, type PaneTask } from '@/lib/mcp';
 
-type CenterTab = 'momotalk' | 'dialog' | 'schedule' | 'tasks' | 'git';
+type CenterTab = 'momotalk' | 'schedule' | 'tasks' | 'git';
 
 // 태스크 정렬 순위 — 진행중 먼저, 그다음 대기, 완료는 맨 뒤(거노).
 const taskRank = (s: string) => (s === 'in_progress' ? 0 : s === 'completed' ? 2 : 1);
 
 const TAB_LABELS: Record<CenterTab, string> = {
   momotalk: '모모톡',
-  dialog: '대화',
   schedule: '스케줄',
   tasks: '업무',
   git: '소스 컨트롤',
@@ -42,10 +40,10 @@ function BellGlyph() {
   );
 }
 
-export function CommandCenter({ selected, onClearDialog, onPickStudent, openGitTab }: CommandCenterProps) {
-  const [tab, setTab] = useState<CenterTab>('dialog'); // 처음 열릴 때 대화 탭(거노)
-  // 탭 순서 — 드래그로 재정렬(거노). 기본 대화/업무/모모톡/스케줄/소스컨트롤.
-  const [tabOrder, setTabOrder] = useState<CenterTab[]>(['dialog', 'tasks', 'momotalk', 'schedule', 'git']);
+export function CommandCenter({ onPickStudent, openGitTab }: CommandCenterProps) {
+  const [tab, setTab] = useState<CenterTab>('tasks'); // 대화는 중앙(A안) — 우측 기본은 업무
+  // 탭 순서 — 드래그로 재정렬(거노). 기본 업무/모모톡/스케줄/소스컨트롤.
+  const [tabOrder, setTabOrder] = useState<CenterTab[]>(['tasks', 'momotalk', 'schedule', 'git']);
   const [dragOverTab, setDragOverTab] = useState<CenterTab | null>(null); // 드래그 중 삽입선 위치
   const dragTabRef = useRef<CenterTab | null>(null);
   const reorderTab = (target: CenterTab) => {
@@ -60,8 +58,6 @@ export function CommandCenter({ selected, onClearDialog, onPickStudent, openGitT
   };
   const agents = useStore((s) => s.agents);
   const acked = useStore((s) => s.acked);
-  // 학생을 클릭하면 자동으로 '학생별 대화' 탭으로 전환.
-  useEffect(() => { if (selected) setTab('dialog'); }, [selected?.id]);
   // 타이틀바 소스컨트롤 버튼 → git 탭으로(거노).
   useEffect(() => { if (openGitTab) setTab('git'); }, [openGitTab]);
 
@@ -166,15 +162,6 @@ export function CommandCenter({ selected, onClearDialog, onPickStudent, openGitT
       {tab === 'momotalk' ? (
         /* 모모톡 — 선생님·아로나·학생 전체 소통 단톡방(messages.jsonl 단일 피드) */
         <MomoTalk />
-      ) : tab === 'dialog' ? (
-        /* 학생별 대화 — 클릭한 학생 대화를 여기 인라인(옛 우측 peek 패널 통합). */
-        selected ? (
-          <TerminalPeekPanel surfaceId={selected.id} title={selected.title} onClose={onClearDialog ?? (() => {})} embedded />
-        ) : (
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, textAlign: 'center', color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, lineHeight: 1.6 }}>
-            교실에서 학생을 클릭하면<br />여기에 대화가 떠요
-          </div>
-        )
       ) : tab === 'tasks' ? (
         /* 업무 — 학생별 현재 작업(빌드/도구 + 백그라운드 + 서브에이전트 + 도구 흐름) */
         <div style={{ flex: 1, overflowY: 'auto', padding: 10 }}>

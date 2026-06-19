@@ -4,6 +4,7 @@ import type { ToolRenderer } from "./index";
 import { parseBackgroundRef, truncate } from "@/lib/utils";
 import { CopyButton } from "../copy-button";
 import { BackgroundOutput } from "../background-output";
+import { AnsiText } from "../AnsiText";
 
 export const BashRenderer: ToolRenderer = {
   summary(input) {
@@ -60,7 +61,7 @@ export const BashRenderer: ToolRenderer = {
               : "text-emerald-800 dark:text-emerald-200/90",
           ].join(" ")}
         >
-          {text || "(no output)"}
+          {text ? <AnsiText text={text} /> : "(no output)"}
         </pre>
         {text && (
           <CopyButton

@@ -8,7 +8,7 @@ import { CopyButton } from "./copy-button";
 import { useSettings } from "@/lib/settings";
 
 export function ThinkingBlock({ thinking }: { thinking: string }) {
-  const { expandThinking } = useSettings();
+  const { expandThinking, setExpandThinking } = useSettings();
   const [open, setOpen] = useState(expandThinking);
   // Sync with the global toggle so flipping the setting immediately
   // applies to every already-rendered block. User per-block clicks set
@@ -18,6 +18,29 @@ export function ThinkingBlock({ thinking }: { thinking: string }) {
   }, [expandThinking]);
   return (
     <div className="my-2 rounded-md border border-border/40 bg-muted/20">
+      {/* 전역 토글: 한 블록에서 켜면 store 가 모든 ThinkingBlock 을 펼친다. */}
+      <label
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          justifyContent: "flex-end",
+          padding: "3px 8px 0",
+          fontSize: 10,
+          fontFamily: "var(--cth-font-ui)",
+          color: "var(--cth-ink-300)",
+          cursor: "pointer",
+          userSelect: "none",
+        }}
+      >
+        <input
+          type="checkbox"
+          checked={expandThinking}
+          onChange={(e) => setExpandThinking(e.target.checked)}
+          style={{ accentColor: "var(--cth-sky)", width: 11, height: 11 }}
+        />
+        모두 펼침
+      </label>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}

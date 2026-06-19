@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStore, type Agent } from './store';
 import { AgentCard } from './components/AgentCard';
-import { AddAgentModal } from './components/AddAgentModal';
 import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
 import { CommandCenter } from './components/CommandCenter';
@@ -12,9 +11,10 @@ import { RoomMap } from './components/RoomMap';
 import { ResizeHandle } from './components/ResizeHandle';
 import { PixelButton } from './components/PixelButton';
 import { SegmentedTabs } from './components/GameKit';
-import { startBoardPolling, fetchMode, focusPane, revealTerminal, fetchClaudeUsage, fetchSessions, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type PaneRect } from './lib/mcp';
-import { PaneGrid } from './components/PaneGrid';
+import { startBoardPolling, fetchMode, focusPane, revealTerminal, fetchClaudeUsage, fetchSessions, switchSession, newRoom, closeRoom, type ClaudeUsage, type SessionsInfo } from './lib/mcp';
+import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { StudentNav } from './components/StudentNav';
+import { assignSprites } from './lib/sprites';
 
 type ViewMode = 'terminal' | 'classroom' | 'grid';
 
@@ -35,8 +35,6 @@ export function App() {
   const [configured, setConfigured] = useState(true);
   // 기본 뷰 = 터미널 pane 그리드(세션 뷰어). 교실(캐릭터)·카드는 토글로.
   const [view, setView] = useState<ViewMode>('terminal');
-  const [layout, setLayout] = useState<PaneRect[]>([]);
-  const [showAdd, setShowAdd] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [peek, setPeek] = useState<{ id: string; title: string } | null>(null);
   const [gitNonce, setGitNonce] = useState(0); // 타이틀바 소스컨트롤 버튼 → CommandCenter git 탭 전환 신호
@@ -47,15 +45,6 @@ export function App() {
   useEffect(() => {
     let stop = false;
     const tick = async () => { const s = await fetchSessions(); if (!stop) setSessions(s); };
-    void tick();
-    const iv = setInterval(tick, 1500);
-    return () => { stop = true; clearInterval(iv); };
-  }, []);
-  // 터미널 pane 배치(window_layout) 폴링 → 중앙 그리드가 터미널 split 을 미러.
-  useEffect(() => {
-    if (forceMock) return;
-    let stop = false;
-    const tick = async () => { const l = await fetchLayout(); if (!stop) setLayout(l); };
     void tick();
     const iv = setInterval(tick, 1500);
     return () => { stop = true; clearInterval(iv); };
@@ -111,6 +100,14 @@ export function App() {
     return () => clearInterval(iv);
   }, [mode]);
 
+  // 터미널 뷰 기본(A안: 중앙 단일 대화) — 선택된 학생이 없으면 god(아로나)·첫 학생을
+  // 자동으로 띄워 중앙이 비지 않게. peek 있으면 그대로 둔다(거노).
+  useEffect(() => {
+    if (peek || view !== 'terminal' || !agents.length) return;
+    const first = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod))[0];
+    if (first) setPeek({ id: first.id, title: first.character });
+  }, [agents, view, peek]);
+
   if (mode === undefined) {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
   }
@@ -125,7 +122,8 @@ export function App() {
     );
   }
 
-  const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
+  // god 먼저 정렬 + 작업명 학생에게 게임개발부 외형(spriteChar) 폴백 배정(교실 스프라이트용).
+  const sorted = assignSprites([...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod)));
   // 방 = kasaterm 윈도우. board(collab_board)는 활성 윈도우의 panes 만 주므로 보이는
   // 학생이 곧 그 방 학생 — 클라이언트 cwd 필터 없이 그대로 그린다(거노).
   const shown = sorted;
@@ -238,9 +236,15 @@ export function App() {
           {/* 중앙: 터미널 pane 그리드(기본 뷰어) / 교실(캐릭터) / 카드 */}
           <div style={{ flex: 1, overflow: view === 'terminal' ? 'hidden' : 'auto', padding: view === 'terminal' ? 0 : view === 'classroom' ? 8 : 'var(--cth-space-4)' }}>
             {view === 'terminal' ? (
-              <PaneGrid panes={layout} agents={shown} selectedId={peek?.id} onSelect={openStudent} />
+              peek ? (
+                <TerminalPeekPanel surfaceId={peek.id} title={peek.title} onClose={() => setPeek(null)} embedded />
+              ) : (
+                <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 13 }}>
+                  좌측에서 학생을 선택하면 대화가 떠요
+                </div>
+              )
             ) : view === 'classroom' ? (
-              <ClassroomView agents={shown} background={roomBg} onAdd={() => setShowAdd(true)} onSelect={openStudent} selectedId={peek?.id} />
+              <ClassroomView agents={shown} background={roomBg} onSelect={openStudent} selectedId={peek?.id} />
             ) : shown.length === 0 ? (
               <p style={{ color: 'var(--cth-ink-500)' }}>학생들을 기다리는 중… (board 폴링 · MCP)</p>
             ) : (
@@ -280,8 +284,6 @@ export function App() {
           {/* 재화 풋터 — 항상(얇은 바): 입력토큰·비용·인연 게이지. */}
           <div style={{ flexShrink: 0, borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
             <Footer
-              onManage={() => setShowAdd(true)}
-              onNewRequest={() => setShowAdd(true)}
               inputTokens={totalInputTokens}
               costUsd={totalCostUsd}
               contextPct={contextPct}
@@ -297,7 +299,6 @@ export function App() {
         </div>
       </div>
 
-      {showAdd && <AddAgentModal onClose={() => setShowAdd(false)} defaultCwd={cwd} />}
 
     </div>
   );

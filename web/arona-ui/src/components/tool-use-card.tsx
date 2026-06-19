@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { AlertTriangle, ChevronRight, Users, Wrench } from "lucide-react";
+import { AlertTriangle, ChevronRight, Code2, Users, Wrench } from "lucide-react";
 import type { SessionEvent } from "@/lib/types";
 import { cn, extractText, truncate } from "@/lib/utils";
 import {
@@ -27,7 +27,9 @@ export function ToolUseCard({
   };
 }) {
   const [open, setOpen] = useState(false);
+  const [raw, setRaw] = useState(false);
   const renderer = getRenderer(toolUse.name);
+  const hasVisual = !!(renderer.inputView || renderer.resultView);
   const summary = renderer.summary(toolUse.input);
   const isError = pair?.toolResult?.is_error || false;
   const resultText = pair?.toolResult
@@ -132,16 +134,38 @@ export function ToolUseCard({
 
       {open && (
         <div id={toggleId} className="border-t border-border/40 bg-background/30">
+          {hasVisual && (
+            <div className="flex items-center justify-end px-3 pt-2">
+              <button
+                type="button"
+                aria-pressed={raw}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRaw((r) => !r);
+                }}
+                className={cn(
+                  "flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] transition-colors",
+                  raw
+                    ? "border-sky-400/50 bg-sky-500/15 text-sky-700 dark:text-sky-300"
+                    : "border-border/50 text-muted-foreground hover:bg-muted",
+                )}
+              >
+                <Code2 aria-hidden="true" className="h-3 w-3" />
+                Raw
+              </button>
+            </div>
+          )}
+
           <SectionLabel>Input</SectionLabel>
-          {renderer.inputView
+          {!raw && renderer.inputView
             ? renderer.inputView(toolUse.input)
             : defaultInputView(toolUse.input)}
 
           {pair?.toolResult && (
             <>
               <SectionLabel>{isError ? "Error" : "Result"}</SectionLabel>
-              {renderer.resultView
-                ? renderer.resultView(resultText, isError)
+              {!raw && renderer.resultView
+                ? renderer.resultView(resultText, isError, pair?.toolUseResult)
                 : defaultResultView(resultText, isError)}
             </>
           )}
