@@ -1,10 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { PixelButton } from './PixelButton';
 import { CurrencyChip } from './GameKit';
 
 export interface FooterProps {
-  onManage?: () => void;
-  onNewRequest?: () => void;
   /** 💎 크리스탈 = 전 학생 누적 입력 토큰. */
   inputTokens?: number;
   /** 🪙 골드 = 전 학생 누적 비용(USD). */
@@ -76,8 +73,6 @@ function Currency({ icon, value, money }: { icon: React.ReactNode; value: number
 }
 
 export function Footer({
-  onManage,
-  onNewRequest,
   inputTokens = 0,
   costUsd = 0,
   contextPct = 0,
@@ -88,9 +83,6 @@ export function Footer({
       display: 'flex', alignItems: 'center', gap: 12,
       padding: '0 12px', height: 48, boxSizing: 'border-box'
     }}>
-      {/* 학생 관리 */}
-      <PixelButton variant="secondary" size="sm" onClick={onManage}>학생 관리</PixelButton>
-
       {/* 인연(호감도) = 전 학생 컨텍스트 사용량 % */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
         <HeartIcon />
@@ -123,11 +115,6 @@ export function Footer({
         <Currency icon={<GemIcon />} value={inputTokens} />
         <Currency icon={<CoinIcon />} value={costUsd} money />
       </div>
-
-      {/* CTA */}
-      <PixelButton variant="primary" size="sm" onClick={onNewRequest}>
-        + 새 의뢰 작성
-      </PixelButton>
     </div>
   );
 }

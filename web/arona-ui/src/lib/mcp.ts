@@ -283,6 +283,39 @@ export async function newRoom(god: string): Promise<boolean> {
   }
 }
 
+export interface RecentSession { id: string; label: string; mtime: number; cwd: string; }
+
+/** GET /recent-sessions?cwd=<abs> — 최근 claude 세션 목록(이어가기 후보, 최신순).
+ *  cwd 생략 시 active 방 cwd. fail-soft 빈 배열. */
+export async function fetchRecentSessions(cwd?: string): Promise<RecentSession[]> {
+  try {
+    const q = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
+    const r = await fetch(`${BASE}/recent-sessions${q}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { sessions?: RecentSession[] };
+    return Array.isArray(d?.sessions) ? d.sessions : [];
+  } catch {
+    return [];
+  }
+}
+
+/** POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool> — 새 pane 을 열고 셸
+ *  프롬프트가 뜨면 `claude --resume <id>` 주입(이어가기). newroom=true 면 새 방. */
+export async function resumeSession(id: string, cwd?: string, newroom = false): Promise<boolean> {
+  if (!id) return false;
+  try {
+    const q = new URLSearchParams({ id });
+    if (cwd) q.set('cwd', cwd);
+    if (newroom) q.set('newroom', '1');
+    const r = await fetch(`${BASE}/session-resume?${q}`, { method: 'POST' });
+    if (!r.ok) return false;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
+    return d?.ok !== false;
+  } catch {
+    return false;
+  }
+}
+
 /** POST /session-close?idx=N — 그 방(윈도우) 닫기(거노). 마지막 윈도우는 백엔드가 거부. */
 export async function closeRoom(idx: number): Promise<boolean> {
   try {
@@ -315,28 +348,8 @@ export async function setMode(mode: 'solo' | 'god'): Promise<boolean> {
   }
 }
 
-export interface SpawnReq { character?: string; model?: string; cwd?: string; }
-export interface SpawnRes { ok: boolean; surface_id?: string; command?: string; notes?: string; }
-
-/** POST /spawn{character?,model?,cwd?} — 학생(워커) 기동. cwd 빈 문자열은 키 자체
- *  omit(유우카: cwd:"" 는 절대경로 검증에서 거부). 응답 {ok,surface_id,command,notes}. */
-export async function spawnAgent(req: SpawnReq): Promise<SpawnRes> {
-  const body: SpawnReq = {};
-  if (req.character) body.character = req.character;
-  if (req.model) body.model = req.model;
-  if (req.cwd && req.cwd.trim()) body.cwd = req.cwd.trim();
-  try {
-    const r = await fetch(`${BASE}/spawn`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    const d = (await r.json().catch(() => ({}))) as SpawnRes;
-    return { ok: r.ok && d.ok !== false, surface_id: d.surface_id, command: d.command, notes: d.notes };
-  } catch (e) {
-    return { ok: false, notes: String(e) };
-  }
-}
+// 학생 생성은 백엔드(kasaterm)가 pane 생성 시 캐릭터/session-id/persona 를 직접 박는다
+// (거노: /spawn 폐기, 솔로 일관). arona-ui 는 board 폴링으로 표시만 한다 — spawnAgent 제거.
 
 /** POST /focus?surface=<id> — 카드 클릭 시 해당 pane 포커스. 유우카: 쿼리 파라미터
  *  (body 아님 — 다른 POST 와 같은 preflight 회피). encodeURIComponent 가 표준 경로.
@@ -574,9 +587,10 @@ export async function deleteSchedule(id: string, toggle = false): Promise<boolea
 
 /** GET /sent-images?surface=<id>&n=N — 이 학생이 SendUserFile 로 보낸 이미지 경로
  *  최근 N(auto-imgopen 훅 기록). 대화창 인라인 이미지 소스. fail-soft 빈 배열. */
-export async function fetchSentImages(surfaceId: string, n = 12): Promise<string[]> {
+export async function fetchSentImages(surfaceId: string, n = 12, since?: number): Promise<string[]> {
   try {
-    const r = await fetch(`${BASE}/sent-images?surface=${encodeURIComponent(surfaceId)}&n=${n}`);
+    const sq = since ? `&since=${since}` : '';
+    const r = await fetch(`${BASE}/sent-images?surface=${encodeURIComponent(surfaceId)}&n=${n}${sq}`);
     if (!r.ok) return [];
     const d = (await r.json().catch(() => ({}))) as { images?: string[] };
     return Array.isArray(d?.images) ? d.images : [];

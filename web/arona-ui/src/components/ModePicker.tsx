@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { PixelPanel } from './PixelPanel';
 import { PixelButton } from './PixelButton';
 import { FolderBrowser } from './FolderBrowser';
-import { setMode, fetchBoard, fetchCharacters, spawnAgent, closeArona } from '@/lib/mcp';
+import { setMode, fetchBoard, fetchCharacters, newRoom, closeArona } from '@/lib/mcp';
 
 // 시작 선택 화면 — mode 미설정(또는 ?picker=1)일 때 풀스크린 2장 픽셀 카드:
 // '터미널로 열기(solo)' vs '아로나와 함께(god)'.
@@ -59,9 +59,11 @@ export function ModePicker({ cwd, onboarding, pathOnly, onPicked }: ModePickerPr
       const chars = await fetchCharacters();
       const leader = chars?.leader?.name;
       if (leader) {
-        const res = await spawnAgent({ character: leader, cwd: pickedPath || undefined });
-        if (!res.ok) {
-          setErr(res.notes ?? '아로나를 부르지 못했어요.');
+        // /spawn 폐기(거노) — god 방을 새로 만들면 첫 pane 이 leader 로 자동 배정된다
+        // (백엔드 new_room_with_god). cwd(pickedPath) 반영은 후속(newRoom 이 아직 미지원).
+        const ok2 = await newRoom(leader);
+        if (!ok2) {
+          setErr('아로나를 부르지 못했어요.');
           setPhase('error');
           return;
         }

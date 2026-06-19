@@ -1195,13 +1195,14 @@ impl App {
         // 웹 쪽 ModePicker 담당(GET /mode 로 분기) — 네이티브가 차단하면
         // ModePicker 에 도달 자체가 불가한 설계 모순이었다(거노 실측).
         let port = mcp_panel_port();
-        // 창을 숨긴 채 만든다 — 보이는 채로 띄우면 webview 콘텐츠가 로드되기 전
-        // 빈 창이 깜빡인다. 페이지 로드 완료(PageLoadEvent::Finished) 후에야
-        // set_visible(true) 로 드러낸다(아래 핸들러).
+        // 처음부터 보이게 띄운다 — 배경을 교실 다크톤으로 칠해(아래 with_background_color)
+        // 흰 플래시가 없고, 무엇보다 webview 로드가 실패해도(포트 stale 등) 창이 영영
+        // 숨겨지는 단일 실패점을 없앤다. 옛 "Finished 후에만 set_visible(true)"는 로드가
+        // 안 끝나면 "버튼 눌러도 안 열림"이 됐다(멀티 인스턴스 포트 race). 완료 시 focus 만.
         let attrs = WindowAttributes::default()
             .with_title("아로나 — 샬레 교실")
             .with_theme(Some(Theme::Dark))
-            .with_visible(false)
+            .with_visible(true)
             .with_inner_size(LogicalSize::new(1100.0, 720.0));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -1216,8 +1217,8 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        // 로드 끝나면 창을 드러내는 핸들러. webview2 가 UI(메인) 스레드에서
-        // 콜백하므로 winit set_visible 호출이 안전하다.
+        // 로드 끝나면 포커스를 주는 핸들러(창은 이미 보임). webview2 가 UI(메인)
+        // 스레드에서 콜백하므로 winit 호출이 안전하다.
         let win_show = window.clone();
         // 이미지 드롭은 HTML5 onDrop(입력창/패널)이 처리한다 — dragover preventDefault 로
         // WKWebView 가 드롭을 웹콘텐츠에 넘겨 ondrop+files 가 뜬다. wry 네이티브
@@ -1230,7 +1231,6 @@ impl App {
             .with_background_color((20, 22, 28, 255))
             .with_on_page_load_handler(move |event, _url| {
                 if matches!(event, wry::PageLoadEvent::Finished) {
-                    win_show.set_visible(true);
                     win_show.focus_window();
                 }
             })
@@ -1326,14 +1326,15 @@ impl App {
         }
     }
 
-    /// 거노: 평면도 빈 방 클릭 → 새 윈도우(빈 셸). 방별 collab 격리를 위해 room slug
-    /// 를 셸 env(KASATERM_ROOM)로 주입한다(spawn_session_pane 이 pending_room 을 읽음).
-    /// claude 자동 스폰·persona 주입 없음 — 솔로(god 폐기 06-18)라 사용자가 직접 친다.
-    /// `character` 는 좌측 방 라벨용(SCHALE 시각 구분).
+    /// 거노: 새 방(윈도우) + god(아로나/프라나) 배정. 방별 collab 격리로 room slug 를
+    /// 셸 env(KASATERM_ROOM)로 주입하고(spawn_session_pane 이 pending_room 을 읽음),
+    /// 첫 pane 캐릭터를 god 으로 강제한다(pending_character). 사용자가 그 pane 에서 claude
+    /// 를 치면 shim 이 god persona·session-id 를 입히고, 추가 split pane 은 학생(빈 슬롯 순환).
     pub(crate) fn new_room_with_god(&mut self, character: &str) {
         let room = format!("room-{}", self.next_room_seq);
         self.next_room_seq += 1;
         self.pending_room = Some(room);
+        self.pending_character = Some(character.to_string()); // 첫 pane = 이 god(lead 마커)
         self.new_window();
         // 좌측 방 라벨 = 선택 캐릭터 이름(방 구분 시각 라벨).
         self.window_name_override

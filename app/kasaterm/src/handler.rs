@@ -190,6 +190,35 @@ impl ApplicationHandler<UserEvent> for App {
                 self.new_room_with_god(god);
                 return;
             }
+            UserEvent::ResumeSession { id, cwd, newroom } => {
+                // 새 pane 을 띄우고, 그 셸 프롬프트가 뜰 즈음 `claude --resume <id>` 를
+                // 주입한다(주입 자체는 pending_restores drain 이 시간 기반으로 처리).
+                // 세션 cwd 가 있으면 cd 를 앞에 붙여 어느 방에서 열어도 올바른 프로젝트
+                // 세션을 잇는다(claude --resume 는 cwd 의 프로젝트 기준).
+                let new_id = if *newroom {
+                    self.new_window();
+                    self.ws.lock().unwrap().active_pane.clone()
+                } else {
+                    self.split_active_pane(kasa_pty::SplitDir::Horizontal).ok()
+                };
+                if let Some(new_id) = new_id {
+                    if let Some(sess) = self.pty.get(&new_id).cloned() {
+                        let cmd = match cwd {
+                            Some(c) if !c.is_empty() => {
+                                let q = c.replace('\'', "'\\''");
+                                format!("cd '{q}' && claude --resume {id}\r")
+                            }
+                            _ => format!("claude --resume {id}\r"),
+                        };
+                        let at = std::time::Instant::now()
+                            + std::time::Duration::from_millis(900);
+                        self.pending_restores.push((sess, cmd, at));
+                    }
+                }
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketCloseRoom(idx) => {
                 if let Err(e) = self.close_window(*idx) {
                     eprintln!("[room] close {idx} failed: {e}");
@@ -3127,6 +3156,20 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Cmd+W (macOS) / Ctrl+Shift+W: 활성 pane/탭 닫기. close_active_tab 이
+                // tab-vs-pane 판정 + job 실행 중 확인 모달까지 처리(거노: 커맨드 W 로도 닫기).
+                if matches!(event.state, ElementState::Pressed)
+                    && !event.repeat
+                    && self.host_mod()
+                    && matches!(
+                        event.physical_key,
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyW)
+                    )
+                {
+                    self.close_active_tab();
+                    window.request_redraw();
+                    return;
+                }
                 // Cmd+Shift+A (macOS) / Ctrl+Shift+A: SCHALE OS(아로나) 패널 토글 —
                 // 터미널로 작업하다 한 키로 전환(거노). PTY 로는 안 흘린다.
                 if matches!(event.state, ElementState::Pressed)
@@ -3195,6 +3238,38 @@ impl ApplicationHandler<UserEvent> for App {
         // Dock badge tracks unread notifications: opening a pane clears it,
         // a background notify raises it.
         self.sync_dock_badge();
+        // gif 애니: 멀티프레임 이미지 pane 의 현재 프레임이 delay 를 넘겼으면 다음 프레임으로
+        // 넘기고 redraw. gif 가 있을 때만 WaitUntil(다음 전환 시각)로 타이머를 잡아 부드럽게
+        // 돈다(거노: 이미지 pane gif 도 재생). 정지 이미지(frames==1)엔 영향 없음.
+        {
+            let now = std::time::Instant::now();
+            let mut gif_advanced = false;
+            let mut gif_next: Option<std::time::Instant> = None;
+            {
+                let ws = self.ws.lock().unwrap();
+                for pane in ws.panes.values() {
+                    if let Some(img) = pane.image() {
+                        if img.frames.len() < 2 {
+                            continue;
+                        }
+                        if img.tick(now) {
+                            gif_advanced = true;
+                        }
+                        if let Some(dl) = img.next_deadline() {
+                            gif_next = Some(gif_next.map_or(dl, |n| n.min(dl)));
+                        }
+                    }
+                }
+            }
+            if gif_advanced {
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            if let Some(dl) = gif_next {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(dl));
+            }
+        }
         // Live-resize flush: if a Resized arrived while the user was dragging
         // an edge we stashed it and skipped the actual resize work. Once the
         // user lets go, inLiveResize flips false and we replay the final size

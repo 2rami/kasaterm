@@ -1,8 +1,17 @@
-import { useState } from 'react';
-import type { SessionsInfo } from '@/lib/mcp';
+import { useEffect, useState } from 'react';
+import { fetchRecentSessions, resumeSession, type RecentSession, type SessionsInfo } from '@/lib/mcp';
 
 // 방 추가 시 고를 god(거노: 처음은 아로나 고정, 새 방은 선택). leaders 풀과 일치.
 const GODS = ['아로나', '프라나'];
+
+/** unix secs → "방금/N분 전/N시간 전/N일 전". */
+function relativeTime(secs: number): string {
+  const diff = Math.max(0, Date.now() / 1000 - secs);
+  if (diff < 60) return '방금';
+  if (diff < 3600) return `${Math.floor(diff / 60)}분 전`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}시간 전`;
+  return `${Math.floor(diff / 86400)}일 전`;
+}
 
 export interface RoomMapProps {
   sessions: SessionsInfo;
@@ -29,6 +38,28 @@ export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom }: RoomMapP
   const n = sessions.count;
   const [adding, setAdding] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [showRecent, setShowRecent] = useState(false);
+  const [recent, setRecent] = useState<RecentSession[]>([]);
+  const [resuming, setResuming] = useState<string | null>(null);
+
+  // 최근 세션 패널을 펼칠 때(또는 펼친 채로 10초마다) 목록을 가져온다 — 항상
+  // 폴링하면 닫혀있을 때도 낭비라, 펼침 상태에서만 새로고침.
+  useEffect(() => {
+    if (!showRecent) return;
+    let alive = true;
+    const load = () => { void fetchRecentSessions().then((s) => { if (alive) setRecent(s); }); };
+    load();
+    const iv = setInterval(load, 10000);
+    return () => { alive = false; clearInterval(iv); };
+  }, [showRecent]);
+
+  const onResume = async (s: RecentSession) => {
+    setResuming(s.id);
+    await resumeSession(s.id, s.cwd, false);
+    setResuming(null);
+    setShowRecent(false);
+  };
+
   if (n < 1) return null;
   // 접힌 상태 — 얇은 띠 + 펼치기 버튼(거노: 좌측 패널 접기).
   if (collapsed) {
@@ -115,6 +146,41 @@ export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom }: RoomMapP
             방 추가
           </button>
         )
+      )}
+
+      {/* 최근 세션 이어가기 — 펼치면 ~/.claude/projects 의 최근 claude 세션 목록.
+          클릭하면 새 pane 에 claude --resume <id> 가 주입돼 그 대화를 잇는다. */}
+      <button onClick={() => setShowRecent((v) => !v)} style={{
+        marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, padding: '7px 9px', borderRadius: 8,
+        border: 'none', cursor: 'pointer', background: 'transparent', color: 'var(--cth-ink-500)',
+        fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700,
+      }}>
+        <svg width="13" height="13" viewBox="0 0 16 16" style={{ transform: showRecent ? 'rotate(90deg)' : 'none', transition: 'transform .12s' }}>
+          <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        최근 세션 이어가기
+      </button>
+      {showRecent && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: '2px 2px 4px' }}>
+          {recent.length === 0 ? (
+            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', padding: '4px 6px' }}>최근 세션 없음</div>
+          ) : (
+            recent.map((s) => (
+              <button key={s.id} onClick={() => onResume(s)} disabled={resuming === s.id} title={`${s.label}\n${s.cwd}`} style={{
+                display: 'flex', flexDirection: 'column', gap: 2, padding: '6px 8px', borderRadius: 7, border: 'none',
+                cursor: resuming === s.id ? 'default' : 'pointer', textAlign: 'left',
+                background: 'var(--cth-cream-100)', color: 'var(--cth-ink-700)', opacity: resuming === s.id ? 0.5 : 1,
+              }}>
+                <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {s.label}
+                </span>
+                <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-300)' }}>
+                  {resuming === s.id ? '여는 중…' : relativeTime(s.mtime)}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
       )}
     </div>
   );
