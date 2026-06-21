@@ -238,6 +238,7 @@ impl App {
             let _ = kasa_mcp::character::write_lead(&rslug, id);
         }
         self.pane_session_id.insert(id.to_string(), sid.clone());
+        self.pane_character.insert(id.to_string(), name.clone());
         let mut env = vec![
             ("KASATERM_CHARACTER".to_string(), name.clone()),
             ("KASATERM_SESSION_ID".to_string(), sid),
@@ -512,6 +513,14 @@ impl App {
                 .and_then(|p| p.title.clone())
                 .filter(|t| !t.is_empty())
         };
+        // BA GUI(board)와 라벨 통일: 캐릭터 배정 pane 은 "미도리 · 작업명"(작업명=OSC
+        // title). 작업명 없으면 캐릭터 단독. board mcp.ts 의 character/title 합성과 동일.
+        if let Some(c) = self.pane_character.get(id) {
+            return match title {
+                Some(t) => format!("{c} · {t}"),
+                None => c.clone(),
+            };
+        }
         title
             .or_else(|| self.pty.get(id).and_then(|p| Self::smart_pane_label(p)))
             .unwrap_or_else(|| id.to_string())

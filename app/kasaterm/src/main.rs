@@ -3008,6 +3008,9 @@ struct App {
     /// pane id → claude --session-id(백엔드가 spawn 시 생성). shim 이 env 로 받아 고정,
     /// transcript jsonl 파일명 안정화 → resume 시 같은 대화 복원.
     pane_session_id: HashMap<String, String>,
+    /// pane id → 배정된 캐릭터명(미도리 등). assign_character_env 가 spawn 시 캡처.
+    /// pane 탭 라벨을 "미도리 · 작업명"으로 합쳐 BA GUI(board)와 통일하는 데 쓴다.
+    pane_character: HashMap<String, String>,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,
@@ -3294,6 +3297,7 @@ impl App {
             next_room_seq: 1,
             pending_character: None,
             pane_session_id: HashMap::new(),
+            pane_character: HashMap::new(),
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

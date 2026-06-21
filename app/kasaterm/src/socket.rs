@@ -832,6 +832,19 @@ impl Backend for PtyBackend {
                 .ok()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
+                // 마커 없는 pane(claude --resume 복원·spawn 의 assign_character_env 를 못 탄
+                // 경로)도 board 빌드 때 빈 슬롯 캐릭터를 lazy 배정한다 — 안 하면 board
+                // char=None → 프사/이름이 안 떴다(거노: %1 프사 None). god 은 lead 로 별도라
+                // 제외. write_marker(atomic) 후 다음 폴링부턴 위 read 로 잡혀 1회만 배정된다.
+                if row.character.is_none() && !row.is_god {
+                    if let Some(chars) = kasa_mcp::character::characters_json() {
+                        let members = kasa_mcp::character::member_names(&chars);
+                        if let Some(name) = kasa_mcp::character::assign_next(&rslug, &members) {
+                            let _ = kasa_mcp::character::write_marker(&rslug, sid.as_str(), &name);
+                            row.character = Some(name);
+                        }
+                    }
+                }
                 row
             })
             .collect();
@@ -843,14 +856,24 @@ impl Backend for PtyBackend {
         let pane_pids: HashMap<String, u32> = self.query_pane_pids().into_iter().collect();
         // 컨텍스트 % — claude TUI 상태바에서 파싱(transcript 토큰이 0 이어도 robust).
         // 화면 스냅샷은 in-memory(visible_text)라 싸다 — 락 짧게.
-        let screens: HashMap<String, String> = {
+        // 화면 스냅샷 + OSC title 을 한 락에서. title 은 board row 라벨을 터미널 탭
+        // (pane_header_label)과 같은 소스(OSC title)로 통일 — 양쪽 "미도리 · 작업명".
+        let (screens, osc_titles): (HashMap<String, String>, HashMap<String, String>) = {
             let ws = self.ws.lock().unwrap();
-            board
-                .iter()
-                .filter_map(|r| ws.panes.get(&r.surface_id).map(|p| (r.surface_id.clone(), p.visible_text(8))))
-                .collect()
+            let mut screens = HashMap::new();
+            let mut osc_titles = HashMap::new();
+            for r in &board {
+                if let Some(p) = ws.panes.get(&r.surface_id) {
+                    screens.insert(r.surface_id.clone(), p.visible_text(8));
+                    if let Some(t) = p.title.clone().filter(|t| !t.is_empty()) {
+                        osc_titles.insert(r.surface_id.clone(), t);
+                    }
+                }
+            }
+            (screens, osc_titles)
         };
         for row in &mut board {
+            row.title = osc_titles.get(&row.surface_id).cloned().unwrap_or_default();
             if let Some(&pid) = pane_pids.get(&row.surface_id) {
                 if let Some(cwd) = self.pane_cwd_live(pid) {
                     row.cwd = cwd.to_string_lossy().into_owned();
