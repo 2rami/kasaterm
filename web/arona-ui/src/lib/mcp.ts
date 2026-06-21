@@ -68,7 +68,11 @@ function accentFor(id: string): AccentColorName {
 
 function toAgent(r: BoardRow): Agent {
   const tokens = (r.tokens_in ?? 0) + (r.tokens_out ?? 0);
-  const display = r.character ?? (r.title || r.surface_id);
+  // 터미널 pane 탭(pane_header_label)과 통일: "미도리 · 작업명". 작업명(ai-title)
+  // 없으면 캐릭터 단독(A안). 캐릭터 없으면 title/surface_id 폴백.
+  const display = r.character
+    ? (r.title ? `${r.character} · ${r.title}` : r.character)
+    : (r.title || r.surface_id);
   // 현재 tool = intent 라벨 첫 토큰("Edit auth.ts"→"Edit"). tool_use 없는 turn 직후의
   // 'active' 폴백은 tool 이름이 아니므로 버린다(말풍선엔 진짜 tool명만).
   const head = r.intent ? r.intent.split(' ')[0] : '';
