@@ -336,6 +336,24 @@ impl App {
     /// Splits the active pane and returns the new pane's id. The socket
     /// backend forwards this id back to the teammate launcher; an empty
     /// string means no pane was created (tmux backend / no active pane).
+    /// 현재 방에 캐릭터 지정 학생 추가(StudentNav '+ 학생'). pending_character 를 세팅하고
+    /// split — assign_character_env 가 그 캐릭터로 마커·persona env 를 입힌다(아로나/프라나
+    /// 포함). 자동 빈슬롯 순환 대신 사용자가 고른 캐릭터.
+    pub(crate) fn spawn_student(&mut self, character: &str) {
+        self.pending_character = Some(character.to_string());
+        if let Err(e) = self.split_active_pane(kasa_pty::SplitDir::Horizontal) {
+            eprintln!("[spawn_student] split failed: {e:#}");
+            self.pending_character = None;
+            return;
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
         if self.tmux.is_some() {
             return Ok(String::new());
@@ -737,10 +755,14 @@ impl App {
     /// within the same socket generation — the recovery guard's inode-
     /// generation check can't see that case, so deleting at close time is
     /// the root fix. character-/god-nudged- markers likewise leak a roster
-    /// slot and re-arm a suppressed nudge. Pane numbers are unique across
-    /// rooms, so sweeping every room under /tmp/kasaterm-collab is safe and
-    /// avoids a cwd lookup here.
-    pub(crate) fn cleanup_collab_markers(target: &str) {
+    /// slot and re-arm a suppressed nudge.
+    ///
+    /// `character-<N>` 는 **이 pane 의 방(cwd slug)에서만** 지운다 — pane 번호는 방 간
+    /// 유니크가 아니다(윈도우마다 %1 재사용). 모든 방을 쓸면 다른 방의 *살아있는* 같은
+    /// 번호 pane 의 캐릭터 마커까지 삭제돼, board 가 char=None 으로 떠 프사가 사라지고
+    /// 그 캐릭터가 "미사용"으로 재배정됐다(거노: 캐릭터 주입 안 됨). cwd 를 모르면(캐시
+    /// 미스) 폴백으로 전체를 쓴다 — 닫힌 pane 마커가 새는 것보단 낫다.
+    pub(crate) fn cleanup_collab_markers(target: &str, cwd: Option<&std::path::Path>) {
         // %3 → _3, mirroring the shell hooks' ${ID//[^A-Za-z0-9]/_}.
         let safe: String = target
             .chars()
@@ -748,8 +770,17 @@ impl App {
             .collect();
         let _ = std::fs::remove_file(format!("/tmp/kasaterm-bound-{safe}"));
         let num = target.trim_start_matches('%');
+        let slug = cwd.map(kasa_mcp::character::mode_slug);
         if let Ok(rooms) = std::fs::read_dir("/tmp/kasaterm-collab") {
             for room in rooms.flatten() {
+                // slug 를 알면 그 cwd 의 방(정확히 그 slug, 또는 __room_<id> 변형)만.
+                if let Some(s) = &slug {
+                    let name = room.file_name();
+                    let Some(rn) = name.to_str() else { continue };
+                    if rn != s.as_str() && !rn.starts_with(&format!("{s}__room_")) {
+                        continue;
+                    }
+                }
                 let p = room.path();
                 let _ = std::fs::remove_file(p.join(format!("character-{num}")));
                 let _ = std::fs::remove_file(p.join(format!("god-nudged-{target}")));
@@ -841,8 +872,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
             // fallback re-engages if a future split repopulates it.
             self.pty_layout = None;
         }
+        let closed_cwd = self.pane_cwd_cache.get(target).cloned();
         self.pty.remove(target);
-        Self::cleanup_collab_markers(target);
+        Self::cleanup_collab_markers(target, closed_cwd.as_deref());
         // Free the GPU texture if this was an image pane (no-op otherwise).
         if let Some(g) = self.gpu.as_mut() {
             g.drop_image(target);

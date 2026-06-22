@@ -91,8 +91,16 @@ pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
         .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
         .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
         .filter(|p| !p.is_empty())
-        .map(String::from)
+        // 캐릭터 정체성 뒤에 공통 협업 규약을 붙여 모든 학생·god 에 1회 주입(캐시).
+        .map(|p| format!("{p}{COLLAB_PROTOCOL}"))
 }
+
+/// 모든 캐릭터 persona 끝에 붙는 협업 규약 — 동료를 기다릴 땐 tell 로 깨우지 말고
+/// wake-watch 를 background 로 띄워 자동 재개(거노: task-notification wake 활용).
+const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
+다른 학생(동료 pane)의 작업이 끝나길 기다려야 할 때는, tell 로 깨우거나 board 를 반복해서 확인하지 말고 아래를 background 로 띄워라(Bash 도구의 run_in_background, 또는 명령 끝에 &):\n\
+  kasaterm-cli wake-watch <동료 surface_id>\n\
+동료의 surface_id 는 `kasaterm-cli board` 로 확인한다. 동료가 한 턴을 끝내면 이 명령이 스스로 종료되고, 시스템이 너를 자동으로 깨운다(task-notification). 깨어나면 그 출력(\"<동료> 작업 끝남\")을 보고 이어서 진행해라. 이렇게 하면 네 입력창을 더럽히지 않고 동료 완료 즉시 이어받는다.";
 
 /// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
 pub fn mode_slug(cwd: &Path) -> String {
@@ -143,6 +151,16 @@ pub fn assigned(rslug: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// 한 pane(surface)의 character-<N> 마커 내용. 없거나 비면 None.
+/// resume 복원처럼 ws.pane_character 엔 없지만 마커엔 있는 캐릭터를 중복 배정에서
+/// 피하려 쓴다(assign_character_env).
+pub fn read_marker(rslug: &str, surface_id: &str) -> Option<String> {
+    std::fs::read_to_string(character_marker(rslug, surface_id))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// 빈 슬롯 순환 — members 중 아직 안 쓰인 첫째. 다 차면 배정 수 기준으로 순환.

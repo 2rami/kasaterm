@@ -1317,12 +1317,28 @@ impl App {
             usable_h,
         ));
     }
-    /// Toggle the arona UI window from the menu: close if open, open if not.
+    /// BA GUI 버튼: 없으면 열고, 뒤/최소화 상태면 앞으로 가져오고, 이미 맨 앞이면 닫는다.
+    /// 순수 토글이던 시절엔 창이 다른 창 뒤로 내려가 있어도 버튼이 "있음→닫기"라 두 번
+    /// 눌러야 다시 떴다(거노: 내려간 창 다시 누르면 꺼져 불편). has_focus 로 분기.
     pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
-        if self.arona_panel_window.is_some() {
-            self.close_arona_panel();
-        } else {
+        if self.arona_panel_window.is_none() {
             self.open_arona_panel(event_loop);
+            return;
+        }
+        // 떠 있음: 맨 앞이면 닫고, 뒤/숨김/최소화면 앞으로(raise+focus). borrow 를 블록에
+        // 가둬 self.close_arona_panel(&mut self) 와 충돌하지 않게 focus 여부만 빼낸다.
+        let focused = {
+            let w = self.arona_panel_window.as_ref().unwrap();
+            let f = w.has_focus();
+            if !f {
+                w.set_minimized(false);
+                w.set_visible(true);
+                w.focus_window();
+            }
+            f
+        };
+        if focused {
+            self.close_arona_panel();
         }
     }
 

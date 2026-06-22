@@ -63,6 +63,32 @@ fn run() -> Result<Option<Response>> {
         run_board_watch(&socket_path, interval)?;
         return Ok(None);
     }
+    // `wake-watch <surface>` blocks until ONE teammate finishes a turn, then
+    // exits — the inverse of board-watch (which streams forever). Meant to run
+    // as a Claude Code background task: its exit auto-re-invokes the idle pane
+    // that launched it, so a worker waiting on a teammate wakes the instant the
+    // teammate is done, without the input-line pollution `tell` causes.
+    if cmd == "wake-watch" {
+        let target = args
+            .iter()
+            .find(|a| a.starts_with('%'))
+            .cloned()
+            .ok_or_else(|| anyhow!("wake-watch needs <surface_id> (e.g. wake-watch %3)"))?;
+        let interval = args
+            .iter()
+            .skip(1)
+            .find_map(|s| s.parse::<u64>().ok())
+            .unwrap_or(3);
+        let timeout = args
+            .iter()
+            .position(|a| a == "--timeout")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1800);
+        let socket_path = resolve_socket_path()?;
+        run_wake_watch(&socket_path, &target, interval, timeout)?;
+        return Ok(None);
+    }
     let request = build_request(&cmd, &args)?;
     let socket_path = resolve_socket_path()?;
     let response = roundtrip(&socket_path, &request)?;
@@ -171,6 +197,90 @@ fn run_board_watch(socket_path: &str, interval_secs: u64) -> Result<()> {
         }
         first = false;
         std::thread::sleep(std::time::Duration::from_secs(interval_secs.max(1)));
+    }
+}
+
+/// Poll `collab.board` until `target` finishes one turn, then print a single
+/// line and RETURN (board-watch streams forever; this exits). Run as a Claude
+/// Code background task so its exit auto-wakes the launching pane.
+///
+/// "Finished" = we saw `target` go working/busy/waiting at least once (armed),
+/// then settle back to idle/success — or vanish from the board. If it never
+/// starts within `timeout_secs`, exit with a timeout line so the waiter still
+/// wakes and can decide. Transient socket failures are swallowed (keep polling).
+fn run_wake_watch(
+    socket_path: &str,
+    target: &str,
+    interval_secs: u64,
+    timeout_secs: u64,
+) -> Result<()> {
+    let req = Request {
+        id: "wake-watch".into(),
+        method: "collab.board".into(),
+        params: json!({}),
+    };
+    let interval = interval_secs.max(1);
+    let max_ticks = (timeout_secs / interval).max(1);
+    let mut armed = false;
+    let mut ticks = 0u64;
+    loop {
+        let mut seen = false;
+        if let Ok(resp) = roundtrip(socket_path, &req) {
+            if let Some(board) = resp
+                .result
+                .as_ref()
+                .and_then(|v| v.get("board"))
+                .and_then(|v| v.as_array())
+            {
+                for e in board {
+                    if e.get("surface_id").and_then(|v| v.as_str()) != Some(target) {
+                        continue;
+                    }
+                    seen = true;
+                    let status = e.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let intent = e.get("intent").and_then(|v| v.as_str()).unwrap_or("");
+                    let character = e.get("character").and_then(|v| v.as_str()).unwrap_or("");
+                    let who = if character.is_empty() {
+                        target.to_string()
+                    } else {
+                        format!("{character}({target})")
+                    };
+                    match status {
+                        "working" | "busy" | "waiting" => armed = true,
+                        "idle" | "success" if armed => {
+                            let tail = if intent.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" — {intent}")
+                            };
+                            let mut out = std::io::stdout().lock();
+                            let _ = writeln!(out, "{who} 작업 끝남{tail}");
+                            let _ = out.flush();
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Vanished after we saw it run → closed/done. Wake the waiter.
+        if armed && !seen {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{target} 사라짐 (pane closed) — 끝난 걸로 본다");
+            let _ = out.flush();
+            return Ok(());
+        }
+        ticks += 1;
+        if ticks >= max_ticks {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(
+                out,
+                "{target} wake-watch {timeout_secs}s 타임아웃 — 아직 시작/완료 안 됨, 직접 확인 필요"
+            );
+            let _ = out.flush();
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval));
     }
 }
 
@@ -369,6 +479,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli tell  <surface_id> <text>     # send + submit (wake an idle claude)");
     eprintln!("  kasaterm-cli board [screen_lines]         # what every pane is doing (+ screen tail if N given)");
     eprintln!("  kasaterm-cli board-watch [interval_s]     # stream changed pane status (1 line/change) — feed a Claude Code Monitor");
+    eprintln!("  kasaterm-cli wake-watch <surface_id> [interval_s] [--timeout s]  # block until a teammate finishes one turn, then exit (run as a background task → auto-wakes you)");
     eprintln!("  kasaterm-cli layout                       # where each pane sits (active window, %)");
     eprintln!("  kasaterm-cli windows                      # every window (sidebar order) + its panes");
     eprintln!("  kasaterm-cli peek  [surface_id] [lines]   # read a pane's visible screen");

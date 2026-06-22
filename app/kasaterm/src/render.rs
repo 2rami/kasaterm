@@ -674,23 +674,28 @@ impl App {
                 // image/md pane만 헤더 띠 데이터 생성(전용 컨트롤 자리). 일반
                 // 터미널은 hover ⋮ 핸들로 — has_header()가 그 경계를 가른다.
                 if pane.has_header() {
-                    // Custom title (rename / OSC) wins; otherwise show the
-                    // live foreground process (vim, claude, zsh …); only
-                    // fall back to the raw "%N" pane id if both are empty.
-                    let smart = self.pty.get(&id).and_then(|p| Self::smart_pane_label(p));
-                    let label = pane
-                        .title
-                        .clone()
-                        .filter(|t| !t.is_empty())
-                        .or(smart)
-                        .unwrap_or_else(|| id.clone());
-                    // Prefix the pane id so the user can always see which pane
-                    // is which (for `tell %N`, etc.). Skip when the label has
-                    // already fallen back to the id — no "%18 · %18".
-                    let label = if label == id {
-                        label
+                    // 캐릭터 배정 pane(학생)은 헤더에도 이름을 — "미도리 · 작업명"(작업명
+                    // =OSC title). BA GUI board 라벨과 통일(거노: 터미널 탭도 학생 이름).
+                    // 비배정 pane 만 기존 "%N · 프로세스" 폴백.
+                    let label = if let Some(c) = pane.character.as_ref() {
+                        match pane.title.clone().filter(|t| !t.is_empty()) {
+                            Some(t) => format!("{c} · {t}"),
+                            None => c.clone(),
+                        }
                     } else {
-                        format!("{id} · {label}")
+                        // Custom title (rename / OSC) wins; otherwise the live
+                        // foreground process (vim, claude, zsh …); fall back to
+                        // the raw "%N" id only if both are empty.
+                        let smart = self.pty.get(&id).and_then(|p| Self::smart_pane_label(p));
+                        let base = pane
+                            .title
+                            .clone()
+                            .filter(|t| !t.is_empty())
+                            .or(smart)
+                            .unwrap_or_else(|| id.clone());
+                        // Prefix the pane id (for `tell %N`, etc.); skip when the
+                        // label already fell back to the id — no "%18 · %18".
+                        if base == id { base } else { format!("{id} · {base}") }
                     };
                     // Append the pane's real OS tty (ghostty-style) — daemon
                     // cache first (the daemon owns the PTY), else local pty.
@@ -722,26 +727,35 @@ impl App {
                         is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
                         md_raw_mode: pane.markdown().map_or(false, |m| m.raw_mode),
                         is_image: pane.image().is_some(),
-                        tabs: pane
-                            .tabs
-                            .iter()
-                            .enumerate()
-                            .map(|(i, t)| {
-                                t.title
-                                    .clone()
-                                    .filter(|s| !s.is_empty())
-                                    .or_else(|| {
-                                        // 각 탭의 pid로 스마트 라벨(셸=cwd, 명령=프로세스).
-                                        t.pid
-                                            .as_deref()
-                                            .and_then(|p| self.pty.get(p))
-                                            .and_then(|s| Self::smart_pane_label(s))
-                                    })
-                                    .unwrap_or_else(|| {
-                                        if i == 0 { id.clone() } else { format!("탭 {}", i + 1) }
-                                    })
-                            })
-                            .collect(),
+                        // 단일 탭 + 배정된 학생이면 탭 제목을 비운다 — render 의 tab_list
+                        // 폴백(h.tabs.is_empty → h.label)이 character label("미도리 · 작업명")
+                        // 을 헤더에 그리게(거노: 탭 제목이 학생 이름을 덮어쓰던 버그). 멀티탭/
+                        // 비배정 pane 은 기존대로 탭별 제목.
+                        tabs: if pane.tabs.len() <= 1
+                            && pane.character.as_deref().is_some_and(|c| !c.is_empty())
+                        {
+                            Vec::new()
+                        } else {
+                            pane.tabs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| {
+                                    t.title
+                                        .clone()
+                                        .filter(|s| !s.is_empty())
+                                        .or_else(|| {
+                                            // 각 탭의 pid로 스마트 라벨(셸=cwd, 명령=프로세스).
+                                            t.pid
+                                                .as_deref()
+                                                .and_then(|p| self.pty.get(p))
+                                                .and_then(|s| Self::smart_pane_label(s))
+                                        })
+                                        .unwrap_or_else(|| {
+                                            if i == 0 { id.clone() } else { format!("탭 {}", i + 1) }
+                                        })
+                                })
+                                .collect()
+                        },
                         active_tab: pane.active_tab,
                     });
                 }
@@ -1366,31 +1380,56 @@ impl App {
                 let title_text: String = {
                     let ws = self.ws.lock().unwrap();
                     let active = ws.active_pane.clone();
-                    let title = active
+                    // claude code 가 이 pane 의 foreground 프로세스면 타이틀바에
+                    // "학생 이름 · 작업명"(거노: claude code 일 때만 학생 이름). zsh 등
+                    // 일반 셸은 기존 process · tty 폴백. session-id 매칭은 /resume 시
+                    // 실제 sessionId 가 주입값과 어긋나 깨졌다(거노) → foreground 프로세스명
+                    // ("claude")으로 판정해 resume·--session-id 무관하게 견고하다.
+                    let claude_char = active
                         .as_deref()
-                        .and_then(|id| ws.panes.get(id).map(|p| (id.to_string(), p.title.clone())))
-                        .and_then(|(id, osc)| {
-                            osc.filter(|s| !s.is_empty()).or_else(|| {
-                                self.pty
-                                    .get(&id)
-                                    .and_then(|p| p.active_process_name())
-                                    .filter(|s| !s.is_empty())
-                            })
+                        .filter(|id| {
+                            self.pty
+                                .get(*id)
+                                .and_then(|p| p.active_process_name())
+                                .is_some_and(|n| n == "claude")
                         })
-                        .unwrap_or_default();
-                    // Append the pane's real OS tty (ghostty-style) — daemon
-                    // cache first (the daemon owns the PTY in daemon mode), else
-                    // the local pty session.
-                    let tty = active.as_deref().and_then(|id| {
-                        self.pane_tty_cache
-                            .get(id)
-                            .cloned()
-                            .or_else(|| self.pty.get(id).and_then(|p| p.tty().map(str::to_string)))
-                    });
-                    match (title.is_empty(), tty) {
-                        (false, Some(t)) => format!("{title}  ·  {t}"),
-                        (true, Some(t)) => t,
-                        (_, None) => title,
+                        .and_then(|id| ws.pane_character.get(id))
+                        .filter(|c| !c.is_empty())
+                        .cloned();
+                    if let Some(c) = claude_char {
+                        let work = active
+                            .as_deref()
+                            .and_then(|id| ws.panes.get(id).and_then(|p| p.title.clone()))
+                            .filter(|s| !s.is_empty());
+                        match work {
+                            Some(w) => format!("{c}  ·  {w}"),
+                            None => c,
+                        }
+                    } else {
+                        let title = active
+                            .as_deref()
+                            .and_then(|id| ws.panes.get(id).map(|p| (id.to_string(), p.title.clone())))
+                            .and_then(|(id, osc)| {
+                                osc.filter(|s| !s.is_empty()).or_else(|| {
+                                    self.pty
+                                        .get(&id)
+                                        .and_then(|p| p.active_process_name())
+                                        .filter(|s| !s.is_empty())
+                                })
+                            })
+                            .unwrap_or_default();
+                        // Append the pane's real OS tty (ghostty-style).
+                        let tty = active.as_deref().and_then(|id| {
+                            self.pane_tty_cache
+                                .get(id)
+                                .cloned()
+                                .or_else(|| self.pty.get(id).and_then(|p| p.tty().map(str::to_string)))
+                        });
+                        match (title.is_empty(), tty) {
+                            (false, Some(t)) => format!("{title}  ·  {t}"),
+                            (true, Some(t)) => t,
+                            (_, None) => title,
+                        }
                     }
                 };
                 if !title_text.is_empty() {
@@ -3230,6 +3269,11 @@ impl App {
             } else {
                 let (hmx, hmy) = self.cursor_px;
                 let accent = theme::accent_color(theme::accent_name());
+                // 로딩바 스윕 위상 — 프로세스 시작 기준 단조증가 초. working pane 이
+                // 있으면 about_to_wait 가 ~30fps 펌프하므로 매 프레임 갱신된다.
+                static ANIM_EPOCH: std::sync::LazyLock<Instant> =
+                    std::sync::LazyLock::new(Instant::now);
+                let anim_phase = ANIM_EPOCH.elapsed().as_secs_f32();
                 let mut handle_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
                 let mut zones: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
                 let mut menu_hits: Vec<(ActionKind, (f32, f32, f32, f32))> = Vec::new();
@@ -3243,6 +3287,26 @@ impl App {
                         g.rect(*fx, fy + fbox_h - t, *fw, t, accent);
                         g.rect(*fx, *fy, t, *fbox_h, accent);
                         g.rect(fx + fw - t, *fy, t, *fbox_h, accent);
+                    }
+                    // 로딩바 — claude 작업 중(pane_activity working)일 때 box 상단
+                    // 얇은 스윕바. 헤더 띠 폐기 후 일반 pane 의 유일한 진행 표시(거노).
+                    // 학생이름은 타이틀바(claude 실행 시), 로딩바는 working 시 — 역할 분리.
+                    if !headered.contains(fid.as_str())
+                        && self
+                            .pane_activity
+                            .get(fid)
+                            .map_or(false, |a| a.status == "working")
+                    {
+                        const BAR_H: f32 = 2.5;
+                        g.rect(*fx, *fy, *fw, BAR_H, theme::with_alpha(accent, 0x2e));
+                        let seg = (fw * 0.32).clamp(36.0, 160.0);
+                        let span = fw + seg;
+                        let off = (anim_phase * 0.5).fract() * span - seg;
+                        let sx = (fx + off).max(*fx);
+                        let ex = (fx + off + seg).min(fx + fw);
+                        if ex > sx {
+                            g.rect(sx, *fy, ex - sx, BAR_H, accent);
+                        }
                     }
                     // 헤더 있는 pane(image/md/탭 2개+)은 헤더에 컨트롤이 다 있으니
                     // ··· 핸들을 생략한다 — 중복 진입점 제거.

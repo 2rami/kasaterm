@@ -16,6 +16,9 @@ impl App {
         if ws.active_pane.is_none() {
             ws.active_pane = Some(update.pane_id.clone());
         }
+        // 배정 캐릭터를 PaneState 에 동기 — has_header 가 이걸 보고 단일 pane 도 헤더 띠를
+        // 띄운다(거노: 터미널에도 학생 이름). 매 업데이트라 교체 시 다음 프레임에 반영.
+        let pane_char = ws.pane_character.get(&update.pane_id).cloned();
         // Route the update to the *tab* whose pid matches this stream.
         // Single-tab panes round-trip through the outer id; secondary
         // tabs spawned via the in-pane + button route through
@@ -35,6 +38,7 @@ impl App {
                 (pane, 0usize)
             }
         };
+        pane.character = pane_char;
         let tab = &mut pane.tabs[tab_idx];
         let tp = tab.term_mut().expect("pty pane must be terminal");
         let resized = tp.cols != update.cols
@@ -222,15 +226,33 @@ impl App {
             return Vec::new();
         };
         let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
-        let name = match self.pending_character.take() {
+        let members = kasa_mcp::character::member_names(&chars);
+        // 같은 방에서 이미 살아있는 pane 이 쓰는 캐릭터는 피한다(거노: 모모이 둘 — resume/
+        // 배정 경로가 살아있는 학생을 안 피해 중복됐다). ws.pane_character(배정됨) + 그 surface
+        // 마커(resume 복원처럼 ws 엔 없는 것)를 합친다. 죽은 pane 마커는 무시(live 만 본다).
+        let taken: std::collections::HashSet<String> = {
+            let ws = self.ws.lock().unwrap();
+            ws.panes
+                .keys()
+                .filter(|p| p.as_str() != id)
+                .filter_map(|p| {
+                    ws.pane_character
+                        .get(p)
+                        .cloned()
+                        .or_else(|| kasa_mcp::character::read_marker(&rslug, p))
+                })
+                .collect()
+        };
+        // pending(사용자 지정) 우선 — 단 이미 살아있으면 버리고 빈 슬롯. 다 차면 첫째로 순환.
+        let name = match self
+            .pending_character
+            .take()
+            .filter(|n| !taken.contains(n))
+            .or_else(|| members.iter().find(|m| !taken.contains(m.as_str())).cloned())
+            .or_else(|| members.first().cloned())
+        {
             Some(n) => n,
-            None => {
-                let members = kasa_mcp::character::member_names(&chars);
-                match kasa_mcp::character::assign_next(&rslug, &members) {
-                    Some(n) => n,
-                    None => return Vec::new(),
-                }
-            }
+            None => return Vec::new(),
         };
         let sid = kasa_mcp::character::new_session_id();
         let _ = kasa_mcp::character::write_marker(&rslug, id, &name);
@@ -238,7 +260,7 @@ impl App {
             let _ = kasa_mcp::character::write_lead(&rslug, id);
         }
         self.pane_session_id.insert(id.to_string(), sid.clone());
-        self.pane_character.insert(id.to_string(), name.clone());
+        self.ws.lock().unwrap().pane_character.insert(id.to_string(), name.clone());
         let mut env = vec![
             ("KASATERM_CHARACTER".to_string(), name.clone()),
             ("KASATERM_SESSION_ID".to_string(), sid),
@@ -282,6 +304,44 @@ impl App {
         self.pty_layout = Some(kasa_pty::PtyLayout::single(&id));
         self.ws.lock().unwrap().active_pane = Some(id);
         Ok(())
+    }
+    /// pane 캐릭터 교체 — persona 는 셸 spawn 시 고정이라 PTY 를 새 persona 로 respawn
+    /// 한다(대화 리셋, 거노 확인 후). 같은 pane id·leaf 유지라 레이아웃·자리 그대로,
+    /// 헤더/board 캐릭터만 다음 화면에 갱신(assign_character_env 가 ws.pane_character·마커
+    /// 를 덮음).
+    pub(crate) fn swap_character(&mut self, pane: &str, character: &str) {
+        let cwd = self.pane_cwd_cache.get(pane).map(|p| p.to_string_lossy().into_owned());
+        let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
+        let (cols, rows) = self.window_cells();
+        // old PTY 종료(셸·claude 죽음). pump 스레드는 EOF 로 빠진다.
+        self.pty.remove(pane);
+        // 새 persona 강제 — assign_character_env 가 pending 우선 사용해 마커·env 갱신.
+        self.pending_character = Some(character.to_string());
+        let mut env = crate::proxy_env(pane);
+        if let Some(ref r) = room {
+            env.push(("KASATERM_ROOM".to_string(), r.clone()));
+        }
+        env.extend(self.assign_character_env(pane, cwd.as_deref(), room.as_deref()));
+        match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+            shell: resolve_default_shell(),
+            cwd,
+            cols,
+            rows,
+            env,
+            pane_id: pane.to_string(),
+            initial_scrollback: Vec::new(),
+        }) {
+            Ok(session) => {
+                self.pump_pty_screens(session.screens.clone(), pane.to_string());
+                self.pty.insert(pane.to_string(), Arc::new(session));
+                self.resize_backend(cols, rows);
+                self.publish_pty_layout();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            Err(e) => eprintln!("[swap_character] respawn failed: {e:#}"),
+        }
     }
     /// Create a new window inside the *current* session: stash the visible
     /// window's layout, then bring up a fresh window with a single new pane.
@@ -506,19 +566,18 @@ impl App {
     /// path (render.rs) so the completion toast names a pane the same way the
     /// user sees it in the tab strip.
     pub(crate) fn pane_header_label(&self, id: &str) -> String {
-        let title = {
+        let (title, character) = {
             let ws = self.ws.lock().unwrap();
-            ws.panes
-                .get(id)
-                .and_then(|p| p.title.clone())
-                .filter(|t| !t.is_empty())
+            let title = ws.panes.get(id).and_then(|p| p.title.clone()).filter(|t| !t.is_empty());
+            let character = ws.pane_character.get(id).cloned();
+            (title, character)
         };
         // BA GUI(board)와 라벨 통일: 캐릭터 배정 pane 은 "미도리 · 작업명"(작업명=OSC
         // title). 작업명 없으면 캐릭터 단독. board mcp.ts 의 character/title 합성과 동일.
-        if let Some(c) = self.pane_character.get(id) {
+        if let Some(c) = character {
             return match title {
                 Some(t) => format!("{c} · {t}"),
-                None => c.clone(),
+                None => c,
             };
         }
         title
@@ -837,7 +896,7 @@ impl App {
                 tab.image_pan_y = py;
             }
         }
-        let ps = PaneState { tabs: vec![tab], active_tab: 0, color: None, dirty: true };
+        let ps = PaneState { tabs: vec![tab], active_tab: 0, color: None, character: None, dirty: true };
         self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
 
         let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
@@ -917,7 +976,7 @@ impl App {
         tab.title = title;
         tab.title_pinned = true;
         tab.preview_path = Some(path.clone());
-        let ps = PaneState { tabs: vec![tab], active_tab: 0, color: None, dirty: true };
+        let ps = PaneState { tabs: vec![tab], active_tab: 0, color: None, character: None, dirty: true };
 
         // 새 윈도우 슬롯 — new_window 의 슬롯 스왑만 차용(spawn_session_pane 제외).
         self.windows[self.active_window] = self.pty_layout.take();

@@ -1674,6 +1674,10 @@ struct PaneState {
     /// Accent color for this pane's header band (RGBA). None = default.
     /// Pane-level, not per-tab — the band is shared above all tabs.
     color: Option<[u8; 4]>,
+    /// 배정된 캐릭터명(미도리 등). 진실 소스는 Workspace.pane_character,
+    /// apply_screen_update 가 매 업데이트 동기. 타이틀바(render)가 claude 실행 중
+    /// (agents --json)일 때만 이 이름을 그린다 — 작업 중 표시는 pane_activity 로딩바.
+    character: Option<String>,
     /// Frame-dirty flag; cleared after the next render. When every pane is
     /// clean and no chrome anim is pending, the render loop skips the GPU pass.
     dirty: bool,
@@ -1681,7 +1685,7 @@ struct PaneState {
 
 impl Default for PaneState {
     fn default() -> Self {
-        Self { tabs: vec![PaneTab::default()], active_tab: 0, color: None, dirty: false }
+        Self { tabs: vec![PaneTab::default()], active_tab: 0, color: None, character: None, dirty: false }
     }
 }
 
@@ -1690,6 +1694,8 @@ impl PaneState {
     /// 위해 헤더 띠를 유지한다. 그 외 일반 터미널은 hover ⋮ 만 쓴다. image()/
     /// markdown()은 Deref로 active 탭을 본다.
     fn has_header(&self) -> bool {
+        // 학생 헤더 띠 폐기(거노) — 학생 이름은 상단 타이틀바(claude 실행 시),
+        // 로딩바는 pane 위 별도. 헤더 띠는 멀티탭·이미지·md 전용 컨트롤만 남긴다.
         self.tabs.len() > 1
             || self.image().is_some()
             || self.markdown().map_or(false, |m| m.is_md_doc)
@@ -2158,6 +2164,10 @@ struct Workspace {
     /// 없음 → cwd-slug 그대로. ws 에 둬서 GUI(spawn)와 PtyBackend(collab_board) 가
     /// 같은 매핑을 본다(별 스레드라 App 필드는 socket.rs 가 못 봄).
     pane_room: HashMap<String, String>,
+    /// pane → 배정 캐릭터명(미도리 등). pane_room 과 같은 이유로 ws 에 둔다 —
+    /// pump 스레드(apply_screen_update)가 PaneState.character 를 동기하고, GUI·
+    /// pane_header_label 이 같은 매핑을 본다. assign_character_env 가 spawn 시 채운다.
+    pane_character: HashMap<String, String>,
     /// 활성 윈도우(보이는 방)의 leaf pane id 집합. `publish_pty_layout` 이 갱신한다.
     /// collab_board 가 이걸로 bound pane 을 필터해 *활성 방 학생만* board 에 올린다
     /// (거노: 아로나 방 + 프라나 방이 한 교실에 같이 뜨던 문제 — 방별 격리).
@@ -2172,6 +2182,7 @@ impl Default for Workspace {
             active_pane: None,
             pid_to_pane: HashMap::new(),
             pane_room: HashMap::new(),
+            pane_character: HashMap::new(),
             active_window_panes: std::collections::HashSet::new(),
         }
     }
@@ -2285,6 +2296,12 @@ enum UserEvent {
     /// `POST /session-new?god=<name>` 위임 — 새 방(윈도우, 빈 셸) + 선택 캐릭터 라벨.
     /// god 통솔 폐기(06-18)로 claude 자동 스폰 없음. `new_room_with_god` 가 처리.
     SocketNewRoom(String),
+    /// `POST /spawn-student?character=<name>` 위임 — 현재 방에 캐릭터 지정 학생 추가
+    /// (split + pending_character). 아로나/프라나도 학생처럼 고를 수 있다(거노).
+    SocketSpawnStudent(String),
+    /// `POST /swap-character?surface=<id>&character=<name>` 위임 — (pane, 캐릭터).
+    /// 그 pane PTY 를 새 persona 로 respawn(대화 리셋, persona 는 셸 spawn 시 고정).
+    SocketSwapCharacter(String, String),
     /// `POST /session-close?idx=N` 위임 — 방(윈도우) 닫기(거노). `close_window` 가
     /// 마지막 윈도우 가드·pane 정리. 닫기 실패(마지막)는 무시(프론트가 가드).
     SocketCloseRoom(usize),
@@ -3008,9 +3025,6 @@ struct App {
     /// pane id → claude --session-id(백엔드가 spawn 시 생성). shim 이 env 로 받아 고정,
     /// transcript jsonl 파일명 안정화 → resume 시 같은 대화 복원.
     pane_session_id: HashMap<String, String>,
-    /// pane id → 배정된 캐릭터명(미도리 등). assign_character_env 가 spawn 시 캡처.
-    /// pane 탭 라벨을 "미도리 · 작업명"으로 합쳐 BA GUI(board)와 통일하는 데 쓴다.
-    pane_character: HashMap<String, String>,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,
@@ -3297,7 +3311,6 @@ impl App {
             next_room_seq: 1,
             pending_character: None,
             pane_session_id: HashMap::new(),
-            pane_character: HashMap::new(),
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -4403,12 +4416,31 @@ mod tests {
         for f in [&bound, &character, &nudged, &other] {
             std::fs::write(f, "x").unwrap();
         }
-        App::cleanup_collab_markers("%987");
+        // cwd=None → 폴백(전체 방 순회). 같은 번호 마커는 지우고 다른 번호는 보존.
+        App::cleanup_collab_markers("%987", None);
         assert!(!bound.exists(), "bound marker should be deleted");
         assert!(!character.exists(), "character marker should be deleted");
         assert!(!nudged.exists(), "god-nudged marker should be deleted");
         assert!(other.exists(), "another pane's marker must survive");
         std::fs::remove_dir_all(&room).unwrap();
+    }
+
+    #[test]
+    fn cleanup_collab_markers_spares_other_rooms() {
+        // 같은 pane 번호라도 *다른 방*의 마커는 살아남아야 한다(거노: 캐릭터 유실 근본).
+        let mine = std::path::PathBuf::from("/tmp/kasaterm-collab/-tmp-room-mine");
+        let other = std::path::PathBuf::from("/tmp/kasaterm-collab/-tmp-room-other");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let my_char = mine.join("character-1");
+        let other_char = other.join("character-1");
+        std::fs::write(&my_char, "미도리").unwrap();
+        std::fs::write(&other_char, "아리스").unwrap();
+        App::cleanup_collab_markers("%1", Some(std::path::Path::new("/tmp/room/mine")));
+        assert!(!my_char.exists(), "내 방의 닫힌 pane 마커는 삭제");
+        assert!(other_char.exists(), "다른 방의 같은 번호 마커는 보존");
+        std::fs::remove_dir_all(&mine).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
     }
 
     #[test]
