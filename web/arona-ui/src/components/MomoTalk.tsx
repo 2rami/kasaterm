@@ -5,7 +5,8 @@ import { SpritePortrait } from './SpritePortrait';
 
 // from_pane 이 'sensei' 면 선생님(우측 카톡 노랑), 그 외는 학생/아로나(좌측 아바타).
 const SENSEI = 'sensei';
-const nameOf = (pane: string, name: string) => (pane === SENSEI ? '선생님' : name || pane);
+// 백엔드 캐릭터명 해석 실패 시 from_name 에 pane id('%3')가 박힌다(거노: 프사 %).
+const looksLikePaneId = (s: string) => /^%?\d+$/.test(s.trim());
 
 const hhmm = (ts: number) => {
   const d = new Date(ts * 1000);
@@ -34,6 +35,21 @@ export function MomoTalk() {
   const [flash, setFlash] = useState<'ok' | 'err' | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
+
+  // 아바타·이름표는 board(라이브 폴링) 캐릭터명을 우선한다 — messages 의 from_name 은
+  // 기록 시점 마커 상태로 고정돼 자주 pane id 로 깨져 프사가 안 떴다(거노: 대화창에도
+  // 교실처럼 프사 넣어줘). board 도 pane id 면 from_name 폴백, 그것도 id 면 SpritePortrait 가 막음.
+  const byPane = useMemo(() => new Map(agents.map((a) => [a.id, a.character])), [agents]);
+  const charOf = (pane: string, fallback: string) => {
+    const c = byPane.get(pane);
+    if (c && !looksLikePaneId(c)) return c;
+    return fallback;
+  };
+  const labelOf = (pane: string, fallback: string) => {
+    if (pane === SENSEI) return '선생님';
+    const c = charOf(pane, fallback);
+    return looksLikePaneId(c) ? pane : (c || pane);
+  };
 
   useEffect(() => {
     let stopped = false;
@@ -86,7 +102,7 @@ export function MomoTalk() {
 
   // 선생님 발신 — 받는 사람 = 활성 필터(전체→아로나=god, 특정 학생→그 학생).
   // 두 경로 모두 백엔드가 persist_sensei_msg 로 messages.jsonl 에 기록 → 다음 폴링에 노란 버블.
-  const targetName = filter ? (participants.find((p) => p.pane === filter)?.name ?? filter) : '아로나';
+  const targetName = filter ? labelOf(filter, participants.find((p) => p.pane === filter)?.name ?? filter) : '아로나';
   const send = async () => {
     const text = input.trim();
     if (!text || sending) return;
@@ -121,7 +137,7 @@ export function MomoTalk() {
       }}>
         <FilterChip label="전체" active={filter === null} onClick={() => setFilter(null)} />
         {participants.map((p) => (
-          <FilterChip key={p.pane} label={p.name} active={filter === p.pane} onClick={() => setFilter(p.pane)} />
+          <FilterChip key={p.pane} label={labelOf(p.pane, p.name)} active={filter === p.pane} onClick={() => setFilter(p.pane)} />
         ))}
       </div>
 
@@ -150,7 +166,7 @@ export function MomoTalk() {
                       background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)',
                       display: 'flex', alignItems: 'center', justifyContent: 'center'
                     }}>
-                      <SpritePortrait character={m.from_name} scale={1.4} bust />
+                      <SpritePortrait character={charOf(m.from_pane, m.from_name)} scale={1.4} bust />
                     </div>
                   )}
                 </div>
@@ -163,9 +179,9 @@ export function MomoTalk() {
                     color: 'var(--cth-ink-500)', marginBottom: 3, padding: '0 2px',
                     display: 'flex', gap: 4, alignItems: 'center'
                   }}>
-                    <span>{nameOf(m.from_pane, m.from_name)}</span>
+                    <span>{labelOf(m.from_pane, m.from_name)}</span>
                     <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400 }}>→</span>
-                    <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400 }}>{nameOf(m.to_pane, m.to_name)}</span>
+                    <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400 }}>{labelOf(m.to_pane, m.to_name)}</span>
                   </div>
                 )}
                 <div style={{ display: 'flex', alignItems: 'flex-end', gap: 5, flexDirection: sensei ? 'row-reverse' : 'row' }}>

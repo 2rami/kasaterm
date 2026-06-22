@@ -68,11 +68,14 @@ function accentFor(id: string): AccentColorName {
 
 function toAgent(r: BoardRow): Agent {
   const tokens = (r.tokens_in ?? 0) + (r.tokens_out ?? 0);
-  // 터미널 pane 탭(pane_header_label)과 통일: "미도리 · 작업명". 작업명(ai-title)
-  // 없으면 캐릭터 단독(A안). 캐릭터 없으면 title/surface_id 폴백.
-  const display = r.character
+  // 이름표(name)는 터미널 pane 탭과 통일한 "미도리 · 작업명" 라벨. 단 character 에는
+  // 합성 라벨을 넣지 않는다(거노: 프사 안 뜸) — SpritePortrait 의 SLUG 매칭은 순수
+  // 캐릭터명이 필요한데, 라벨이 character 로 새면 SLUG 미스 → 프사 대신 이니셜('모')이
+  // 떴다. 그래서 name=라벨 / character=순수 캐릭터명(없으면 작업명·surface_id 폴백)으로 분리.
+  const label = r.character
     ? (r.title ? `${r.character} · ${r.title}` : r.character)
     : (r.title || r.surface_id);
+  const pureCharacter = r.character || r.title || r.surface_id;
   // 현재 tool = intent 라벨 첫 토큰("Edit auth.ts"→"Edit"). tool_use 없는 turn 직후의
   // 'active' 폴백은 tool 이름이 아니므로 버린다(말풍선엔 진짜 tool명만).
   const head = r.intent ? r.intent.split(' ')[0] : '';
@@ -82,8 +85,8 @@ function toAgent(r: BoardRow): Agent {
   if (status === 'working' && !currentTool) status = 'thinking';
   return {
     id: r.surface_id,
-    name: display,
-    character: display,
+    name: label,
+    character: pureCharacter,
     accent: r.is_god ? 'lemon' : accentFor(r.surface_id),
     status,
     project: r.intent ?? '',
@@ -151,7 +154,17 @@ export interface Characters {
   theme?: string;
   user_title?: string;
   leader: CharacterDef;
+  /** 리더 풀(아로나·프라나) — 학생 추가/교체 시 god 도 고를 수 있게(거노). */
+  leaders?: CharacterDef[];
   members: CharacterDef[];
+}
+
+/** 캐릭터 선택 풀 — leaders(아로나·프라나) + members(미도리~아리스), 이름 중복 제거. */
+export function characterPool(c: Characters | null): CharacterDef[] {
+  if (!c) return [];
+  const pool = [...(c.leaders ?? (c.leader ? [c.leader] : [])), ...(c.members ?? [])];
+  const seen = new Set<string>();
+  return pool.filter((m) => m && m.name && !seen.has(m.name) && seen.add(m.name));
 }
 
 /** GET /characters — ~/.config 우선→번들, 없으면 404(null). */
@@ -281,6 +294,28 @@ export async function switchSession(idx: number): Promise<boolean> {
 export async function newRoom(god: string): Promise<boolean> {
   try {
     const r = await fetch(`${BASE}/session-new?god=${encodeURIComponent(god)}`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /spawn-student?character=<name> — 현재 방에 캐릭터 지정 학생 추가(아로나/프라나
+ *  포함). 자동 빈슬롯 배정 대신 고른 캐릭터로 split. */
+export async function spawnStudent(character: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/spawn-student?character=${encodeURIComponent(character)}`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** POST /swap-character?surface=<id>&character=<name> — pane 캐릭터 교체(PTY respawn,
+ *  대화 리셋). persona 가 셸 spawn 시 고정이라 그 pane 을 새 persona 로 다시 띄운다. */
+export async function swapCharacter(surface: string, character: string): Promise<boolean> {
+  try {
+    const r = await fetch(`${BASE}/swap-character?surface=${encodeURIComponent(surface)}&character=${encodeURIComponent(character)}`, { method: 'POST' });
     return r.ok;
   } catch {
     return false;
@@ -697,7 +732,7 @@ export interface ConvToolUse {
     }>;
   } & Record<string, unknown>;
 }
-export interface Conversation { turns: Turn[]; streaming: string; tool_uses?: ConvToolUse[]; model: string; effort?: string; }
+export interface Conversation { turns: Turn[]; streaming: string; tool_uses?: ConvToolUse[]; model: string; effort?: string; tokens_out?: number; }
 
 /** GET /conversation?surface=<id> — 캡처 프록시(ccglass 방식)가 claude 의 Anthropic API
  *  호출에서 가로챈 깨끗한 대화. peek(화면)·jsonl(지연) 없이 구조화·라이브. `streaming`
@@ -713,6 +748,7 @@ export async function fetchConversation(surfaceId: string): Promise<Conversation
       tool_uses: Array.isArray(d.tool_uses) ? d.tool_uses : [],
       model: typeof d.model === 'string' ? d.model : '',
       effort: typeof d.effort === 'string' ? d.effort : '',
+      tokens_out: typeof d.tokens_out === 'number' ? d.tokens_out : 0,
     };
   } catch {
     return { turns: [], streaming: '', model: '' };
@@ -745,6 +781,44 @@ export async function fetchTranscriptRaw(surfaceId: string): Promise<SessionEven
     return parseJsonlSync(d.raw);
   } catch {
     return [];
+  }
+}
+
+/** GET /session-transcript-raw?id=<uuid>&cwd=<abs> — 과거(오프라인) 세션의 jsonl 을
+ *  uuid+cwd 로 직접 읽어 SessionEvent[] 로 파싱(라이브 pane 불필요). 최근 세션 이어가기
+ *  뷰어가 죽은 세션을 읽기 전용으로 미리보는 경로. fail-soft 빈 배열. */
+export async function fetchSessionTranscriptRaw(id: string, cwd?: string): Promise<SessionEvent[]> {
+  if (!id) return [];
+  try {
+    const q = new URLSearchParams({ id });
+    if (cwd) q.set('cwd', cwd);
+    const r = await fetch(`${BASE}/session-transcript-raw?${q}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { raw?: string };
+    if (typeof d?.raw !== 'string' || !d.raw) return [];
+    return parseJsonlSync(d.raw);
+  } catch {
+    return [];
+  }
+}
+
+/** POST /paste-active body:{text,submit} — 활성(포커스) 터미널 pane 에 텍스트 주입.
+ *  surface 지정 없이 현재 pane 으로 간다. submit=false(기본)면 개행 없이 타이핑만 —
+ *  사용자가 직접 엔터. 오프라인 세션 '현재 터미널에 입력' 버튼이 쓴다. fail-soft.
+ *  body 는 raw JSON 문자열로 보내되 content-type 헤더를 안 붙인다 — application/json 은
+ *  CORS preflight(OPTIONS)를 유발하고 axum post() 가 405 로 답해 죽는다(git_commit 동일 패턴). */
+export async function pasteToActiveTerminal(text: string, submit = false): Promise<boolean> {
+  if (!text) return false;
+  try {
+    const r = await fetch(`${BASE}/paste-active`, {
+      method: 'POST',
+      body: JSON.stringify({ text, submit }),
+    });
+    if (!r.ok) return false;
+    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
+    return d?.ok !== false;
+  } catch {
+    return false;
   }
 }
 

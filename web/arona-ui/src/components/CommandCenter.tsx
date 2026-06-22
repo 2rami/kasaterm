@@ -5,6 +5,7 @@ import { ScheduleTab } from './ScheduleTab';
 import { GitTab } from './GitTab';
 import { isBuildCmd, BUILD_COLOR, GearIcon, SpinIcon, ForkIcon } from './activity';
 import { fetchPaneTasks, type PaneTask } from '@/lib/mcp';
+import { PaneToolTimeline } from './PaneToolTimeline';
 
 type CenterTab = 'momotalk' | 'schedule' | 'tasks' | 'git';
 
@@ -26,6 +27,8 @@ export interface CommandCenterProps {
   onPickStudent?: (id: string, title: string) => void;
   /** 타이틀바 소스컨트롤 버튼 클릭 신호(증가) — git 탭으로 전환(거노). */
   openGitTab?: number;
+  /** 우측 패널 접기 — 부모(App)가 rightHidden 으로 레일 전환(거노: 가장자리 접기). */
+  onCollapse?: () => void;
 }
 
 // SCHALE OS 우측 Command Center — 대화창이 따로 안 뜨고 여기 '학생별 대화' 탭에
@@ -40,7 +43,7 @@ function BellGlyph() {
   );
 }
 
-export function CommandCenter({ onPickStudent, openGitTab }: CommandCenterProps) {
+export function CommandCenter({ onPickStudent, openGitTab, onCollapse }: CommandCenterProps) {
   const [tab, setTab] = useState<CenterTab>('tasks'); // 대화는 중앙(A안) — 우측 기본은 업무
   // 탭 순서 — 드래그로 재정렬(거노). 기본 업무/모모톡/스케줄/소스컨트롤.
   const [tabOrder, setTabOrder] = useState<CenterTab[]>(['tasks', 'momotalk', 'schedule', 'git']);
@@ -61,6 +64,8 @@ export function CommandCenter({ onPickStudent, openGitTab }: CommandCenterProps)
   // 타이틀바 소스컨트롤 버튼 → git 탭으로(거노).
   useEffect(() => { if (openGitTab) setTab('git'); }, [openGitTab]);
 
+  // 도구 상세를 펼친 학생(한 번에 하나) — 펼친 학생만 transcript 폴링(비용 최소).
+  const [expandedPane, setExpandedPane] = useState<string | null>(null);
   // claude TaskCreate 태스크(~/.claude/tasks) — 업무 탭 볼 때만 폴링, pane 별 그룹.
   const [paneTasks, setPaneTasks] = useState<Record<string, PaneTask[]>>({});
   useEffect(() => {
@@ -98,6 +103,13 @@ export function CommandCenter({ onPickStudent, openGitTab }: CommandCenterProps)
         alignItems: 'center',
         gap: 8
       }}>
+        {/* 우측 패널 접기 — 가장자리 접기 일원화(거노). ▶ = 오른쪽으로 접어 레일로. */}
+        <button onClick={() => onCollapse?.()} title="우측 패널 접기" style={{
+          width: 18, height: 18, borderRadius: 5, border: 'none', cursor: 'pointer', background: 'transparent',
+          color: 'var(--cth-ink-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+        }}>
+          <svg width="12" height="12" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        </button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{
             fontFamily: 'var(--cth-font-display)',
@@ -192,7 +204,7 @@ export function CommandCenter({ onPickStudent, openGitTab }: CommandCenterProps)
                         boxShadow: '0 1px 3px rgba(21,41,74,0.1)',
                       }}>
                         <span style={{ width: 7, height: 7, borderRadius: 999, flexShrink: 0, background: un ? '#fff' : 'var(--cth-coral)' }} />
-                        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.character}</span>
+                        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
                         <span style={{ fontSize: 11, fontWeight: 600, opacity: 0.85 }}>{un ? '확인 필요' : '확인함'}</span>
                       </button>
                     );
@@ -208,16 +220,16 @@ export function CommandCenter({ onPickStudent, openGitTab }: CommandCenterProps)
             return (
             <div key={a.id} style={{ padding: '7px 0', borderBottom: '1px solid var(--cth-cream-200)' }}>
               {/* 헤더 클릭 → 그 학생 '대화' 탭(프롬프트·명령어 흐름)으로(거노). */}
-              <div onClick={() => onPickStudent?.(a.id, a.character)} title="대화 열기" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+              <div onClick={() => onPickStudent?.(a.id, a.name)} title="대화 열기" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
                 <span style={{ width: 8, height: 8, borderRadius: 999, flexShrink: 0, background: a.status === 'working' ? 'var(--cth-mint)' : a.status === 'waiting' || a.status === 'blocked' ? 'var(--cth-coral)' : 'var(--cth-ink-300)' }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)' }}>{a.character}</div>
+                  <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</div>
                   <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project || '대기 중'}</div>
                 </div>
                 {building ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR, background: 'color-mix(in srgb, #E5923A 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><GearIcon size={11} />빌드 중</span>
                 ) : a.currentTool ? (
-                  <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)', background: 'color-mix(in srgb, var(--cth-sky) 12%, #fff)', padding: '2px 7px', borderRadius: 6 }}>{a.currentTool}</span>
+                  <span style={{ flexShrink: 0, maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'var(--cth-font-mono)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)', background: 'color-mix(in srgb, var(--cth-sky) 12%, #fff)', padding: '2px 7px', borderRadius: 6 }}>{a.currentTool}</span>
                 ) : null}
                 {!!a.background?.length && (
                   <span title={a.background.join('\n')} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR, background: 'color-mix(in srgb, #E5923A 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><SpinIcon size={10} />bg {a.background.length}</span>
@@ -257,10 +269,18 @@ export function CommandCenter({ onPickStudent, openGitTab }: CommandCenterProps)
                   ))}
                 </div>
               )}
-              {/* 도구 활동 타임라인(오래된→최근) */}
+              {/* 도구 활동(오래된→최근) — 접힘: 이름 칩 요약, 펼침: 채팅방처럼 input/output
+                  카드(PaneToolTimeline). 펼치면 칩 요약은 숨겨 같은 도구가 겹쳐 보이지 않게(거노). */}
               {!!a.recentTools?.length && (
-                <div style={{ marginLeft: 16, marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 3, alignItems: 'center' }}>
-                  {[...a.recentTools].reverse().map((t, i, arr) => (
+                <div
+                  onClick={() => setExpandedPane((p) => (p === a.id ? null : a.id))}
+                  title={expandedPane === a.id ? '접기' : '도구·서브에이전트 상세 펼치기'}
+                  style={{ marginLeft: 16, marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 3, alignItems: 'center', cursor: 'pointer' }}
+                >
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--cth-ink-300)', flexShrink: 0, transform: expandedPane === a.id ? 'rotate(90deg)' : 'none', transition: 'transform .1s' }}><polyline points="9 6 15 12 9 18" /></svg>
+                  {expandedPane === a.id ? (
+                    <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)' }}>도구 상세 · 접기</span>
+                  ) : [...a.recentTools].reverse().map((t, i, arr) => (
                     <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                       <span title={t} style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 9, color: 'var(--cth-ink-500)', background: 'var(--cth-cream-100)', padding: '1px 5px', borderRadius: 5, whiteSpace: 'nowrap', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{t}</span>
                       {i < arr.length - 1 && <span style={{ fontSize: 8, color: 'var(--cth-ink-300)' }}>→</span>}
@@ -268,6 +288,7 @@ export function CommandCenter({ onPickStudent, openGitTab }: CommandCenterProps)
                   ))}
                 </div>
               )}
+              {expandedPane === a.id && <PaneToolTimeline paneId={a.id} />}
             </div>
             );
           })}

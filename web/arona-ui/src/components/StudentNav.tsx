@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import type { Agent } from '@/store';
 import { SpritePortrait } from './SpritePortrait';
-import { focusPane } from '@/lib/mcp';
+import { focusPane, spawnStudent, swapCharacter } from '@/lib/mcp';
+import { CharacterPicker } from './CharacterPicker';
 
 // 좌측 세로 학생 네비 — 터미널 뷰가 메인이 되면서(거노: "애들 돌아다니는 비율을
 // 줄이자") 교실/하단 카드 대신 좁은 사이드 리스트로 학생을 건다. 작은 상반신 아바타
@@ -23,6 +25,8 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 export function StudentNav({ agents, selectedId, onSelect }: StudentNavProps) {
+  // 학생 추가('+ 학생')·교체(우클릭) 캐릭터 선택 팝업 상태.
+  const [picker, setPicker] = useState<null | { mode: 'add' } | { mode: 'swap'; id: string; name: string }>(null);
   const list = [...agents].sort((a, b) => {
     if (a.isGod !== b.isGod) return Number(b.isGod) - Number(a.isGod);
     return (STATUS_ORDER[a.status] ?? 6) - (STATUS_ORDER[b.status] ?? 6);
@@ -46,6 +50,8 @@ export function StudentNav({ agents, selectedId, onSelect }: StudentNavProps) {
           <button
             key={a.id}
             onClick={() => { void focusPane(a.id); onSelect?.(a.id, a.character); }}
+            onContextMenu={(e) => { e.preventDefault(); setPicker({ mode: 'swap', id: a.id, name: a.character }); }}
+            title="클릭=대화 열기 · 우클릭=캐릭터 변경"
             className="cth-titlebar-nodrag"
             style={{
               width: '100%', border: 'none', cursor: 'pointer', textAlign: 'left',
@@ -68,7 +74,7 @@ export function StudentNav({ agents, selectedId, onSelect }: StudentNavProps) {
               <div style={{
                 fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)',
                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-              }}>{a.character}</div>
+              }}>{a.name}</div>
               <span style={{
                 display: 'inline-flex', alignItems: 'center', gap: 4,
                 fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, color: 'var(--cth-ink-500)',
@@ -80,6 +86,27 @@ export function StudentNav({ agents, selectedId, onSelect }: StudentNavProps) {
           </button>
         );
       })}
+      <button
+        onClick={() => setPicker({ mode: 'add' })}
+        className="cth-titlebar-nodrag"
+        style={{
+          marginTop: 4, width: '100%', cursor: 'pointer', borderRadius: 9, padding: '8px 7px',
+          border: '1px dashed var(--cth-cream-200)', background: 'transparent',
+          fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700, color: 'var(--cth-ink-500)',
+        }}
+      >+ 학생 추가</button>
+      {picker && (
+        <CharacterPicker
+          title={picker.mode === 'add' ? '학생 추가' : '캐릭터 변경'}
+          note={picker.mode === 'swap' ? `${picker.name} → 바꾸면 이 학생의 claude 대화가 리셋돼요.` : undefined}
+          onPick={(name) => {
+            if (picker.mode === 'add') void spawnStudent(name);
+            else void swapCharacter(picker.id, name);
+            setPicker(null);
+          }}
+          onClose={() => setPicker(null)}
+        />
+      )}
     </div>
   );
 }

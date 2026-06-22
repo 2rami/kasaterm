@@ -26,7 +26,11 @@ const SLUG: Record<string, string> = {
 export function SpritePortrait({ character, scale = 2, background = 'transparent', bust = false }: SpritePortraitProps) {
   const [failed, setFailed] = useState(false);
   useEffect(() => setFailed(false), [character, bust]); // 캐릭터/모드 바뀌면 다시 시도
-  const initial = (character || '?').trim().charAt(0).toUpperCase() || '?';
+  const raw = (character || '').trim();
+  // 캐릭터명 해석 실패 시 백엔드가 pane id('%3')·숫자를 넘긴다 → 이니셜이 '%'/숫자로 떠
+  // 깨져 보였다(거노: 프사에 %). 그런 값은 사람 실루엣으로 폴백.
+  const isPaneId = raw === '' || /^%?\d+$/.test(raw);
+  const initial = isPaneId ? '' : raw.charAt(0).toUpperCase();
   const slug = SLUG[character];
   const w = 20 * scale;
   // 대화창(bust)은 프로필 사진처럼 정사각 상반신, 교실/워크는 전신 도트(거노).
@@ -67,7 +71,12 @@ export function SpritePortrait({ character, scale = 2, background = 'transparent
         color: 'var(--cth-ink-700)', imageRendering: 'pixelated', userSelect: 'none',
       }}
     >
-      {initial}
+      {initial || (
+        <svg width={12 * scale} height={12 * scale} viewBox="0 0 24 24" fill="var(--cth-ink-300)" aria-hidden style={{ opacity: 0.55 }}>
+          <circle cx="12" cy="8.5" r="4.2" />
+          <path d="M3.5 21c0-4.7 3.8-8.5 8.5-8.5s8.5 3.8 8.5 8.5z" />
+        </svg>
+      )}
     </div>
   );
 }
