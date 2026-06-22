@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { fetchConversation, fetchTranscriptRaw, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, closeAgent, fetchSlashCommands, pasteImageToPane, type Turn } from '@/lib/mcp';
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
+import { fetchConversation, fetchTranscriptRaw, fetchSessionTranscriptRaw, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, pasteToActiveTerminal, revealTerminal, closeAgent, fetchSlashCommands, pasteImageToPane, swapCharacter, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
+import { CharacterPicker } from './CharacterPicker';
 import { Markdown } from './Markdown';
 import { ToolUseCard } from './tool-use-card';
 import { ThinkingBlock } from './thinking-block';
@@ -215,6 +216,38 @@ function turnDurations(events: SessionEvent[]): Map<string, number> {
   return map;
 }
 
+// 턴별 assistant 의 출력 토큰(message.usage.output_tokens) — 완료 응답 버블 푸터 "↓N".
+// transcript usage 라 정확(ccsv 식). 진행 중 라이브 토큰은 캡처 프록시 spinner 가 따로 담당.
+function turnTokens(events: SessionEvent[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const ev of events) {
+    if (ev.type !== 'assistant' || (ev as { isSidechain?: boolean }).isSidechain) continue;
+    const uuid = (ev as { uuid?: string }).uuid;
+    const usage = (ev as { message?: { usage?: Record<string, unknown> } }).message?.usage;
+    if (!uuid || !usage) continue;
+    const out = typeof usage.output_tokens === 'number' ? usage.output_tokens : 0;
+    if (out > 0) map.set(uuid, out);
+  }
+  return map;
+}
+
+// 토큰 수 → "5.5k" / "1.2M" 짧은 표기(터미널 상태바 ↓5.5k 와 동형).
+function fmtTok(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+// transcript user 이벤트(또는 permission-mode 이벤트)에 박힌 현재 권한 모드를 역순으로
+// 찾는다. peek 화면 추정 없이 정확(거노: ccsv 방식). default(normal)는 칩 미표시 위해 null.
+function latestPermissionMode(events: SessionEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const m = (events[i] as { permissionMode?: string }).permissionMode;
+    if (m) return m;
+  }
+  return null;
+}
+
 // ccsv formatSystemMessage 발췌 — system 이벤트(api_error/compact_boundary)를 한 줄씩 평탄화한
 // 텍스트로. 접이식 'System' 버블 본문에 들어간다.
 function flattenSystem(ev: SessionEvent): string | null {
@@ -303,20 +336,39 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap): RenderItem[] {
 
 // ANSI 색(SGR) 렌더는 ./AnsiText 모듈로 분리 — bash/read 카드 resultView 와 공용.
 
-function MetaChip({ label, dim, onClick }: { label: string; dim?: boolean; onClick?: () => void }) {
+// 채팅방 맨위/맨아래 점프 버튼 공용 스타일(거노: 긴 대화 스크롤).
+const SCROLL_BTN: CSSProperties = {
+  width: 30, height: 30, borderRadius: 999, cursor: 'pointer',
+  border: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
+  color: 'var(--cth-ink-500)', boxShadow: '0 1px 4px rgba(21,41,74,0.12)',
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+};
+
+function MetaChip({ label, dim, onClick, tone, title }: { label: string; dim?: boolean; onClick?: () => void; tone?: 'danger'; title?: string }) {
+  const danger = tone === 'danger';
   return (
     <span
       onClick={onClick}
-      title={onClick ? '클릭해서 변경' : undefined}
+      title={title ?? (onClick ? '클릭해서 변경' : undefined)}
       style={{
-        fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600,
+        fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: danger ? 700 : 600,
         padding: '2px 8px', borderRadius: 6,
-        background: dim ? 'transparent' : 'var(--cth-cream-100)',
-        color: dim ? 'var(--cth-ink-300)' : 'var(--cth-ink-700)',
-        border: dim ? 'none' : '1px solid var(--cth-cream-200)',
+        background: danger ? 'color-mix(in srgb, var(--cth-coral) 16%, #fff)' : dim ? 'transparent' : 'var(--cth-cream-100)',
+        color: danger ? 'var(--cth-coral)' : dim ? 'var(--cth-ink-300)' : 'var(--cth-ink-700)',
+        border: danger ? '1px solid var(--cth-coral)' : dim ? 'none' : '1px solid var(--cth-cream-200)',
         cursor: onClick ? 'pointer' : undefined,
       }}>{label}</span>
   );
+}
+
+// 권한 모드(transcript permissionMode) → 칩 라벨. default/normal 은 일반 상태라 미표시(null).
+function modeLabel(m: string | null): string | null {
+  switch (m) {
+    case 'plan': return 'plan';
+    case 'acceptEdits': return 'accept edits';
+    case 'bypassPermissions': return 'bypass';
+    default: return null;
+  }
 }
 
 // system 이벤트(api_error/compact_boundary) — 좌측 작은 회색 접이식 'System' 버블.
@@ -358,6 +410,10 @@ export interface TerminalPeekPanelProps {
   onClose: () => void;
   /** CommandCenter '학생별 대화' 탭에 내장될 때 — 폭을 부모에 맞추고 좌측 보더 제거. */
   embedded?: boolean;
+  /** 오프라인(과거) 세션 읽기 전용 미리보기 — 라이브 pane 없이 uuid+cwd 로 jsonl 을 1회
+   *  읽어 대화만 렌더. 입력창·라이브 폴링·학생 액션은 끄고, 하단에 '현재 터미널에 입력'
+   *  이어가기 액션바를 띄운다. 있으면 surfaceId 는 빈 값('')으로 들어온다. */
+  session?: { id: string; cwd: string; label: string };
 }
 
 // 학생 대화 패널 — 메신저처럼 대화만(선생님 프롬프트 오른쪽·학생 답변 왼쪽).
@@ -443,8 +499,12 @@ function parseEffortMenu(screen: string): number | null {
 }
 
 // 화면(raw 터미널)은 '터미널 보기'로 보면 되므로 여기엔 두지 않는다.
-export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: TerminalPeekPanelProps) {
+export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session }: TerminalPeekPanelProps) {
+  const offline = !!session;
   const agent = useStore((s) => s.agents.find((a) => a.id === surfaceId));
+  // 아바타는 board(라이브) 캐릭터명 우선 — title(클릭 시점 고정)이 pane id('%3')로 깨졌을 때
+  // 보강(거노: 프사 %). board 도 id 면 SpritePortrait 가 사람 실루엣으로 막는다.
+  const avatarChar = agent?.character && !/^%?\d+$/.test(agent.character) ? agent.character : title;
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [streaming, setStreaming] = useState('');
   // 하이브리드 폴백: jsonl(events)이 아직 안 써진 진행 중 구간엔 캡처 프록시의 텍스트
@@ -457,6 +517,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   const [loaded, setLoaded] = useState(false); // 첫 폴 완료 — 빈 상태 문구 분기
   const [spinner, setSpinner] = useState<string | null>(null); // claude 라이브 작업 표시(verb·경과초)
   const [effort, setEffort] = useState<string | null>(null); // effort level(상태바 파싱) — 모델 옆 칩
+  const [convTokensOut, setConvTokensOut] = useState(0); // 진행 중 응답 누적 출력 토큰(프록시 SSE 라이브) — spinner ↓N
+  const [mode, setMode] = useState<string | null>(null); // 권한 모드(transcript permissionMode) — 헤더 칩
   const [convModel, setConvModel] = useState(''); // 캡처 프록시가 요청에서 잡은 model(거노: 화면스크랩 대신 프록시 소스)
   const [dragOver, setDragOver] = useState(false); // 이미지 드래그 오버 — 점선 드롭존 오버레이
   const [pendingPreviews, setPendingPreviews] = useState<string[]>([]); // staged 이미지 미리보기 data URL(여러 개)
@@ -467,6 +529,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   const [flash, setFlash] = useState<'ok' | 'err' | null>(null);
   // window.confirm 은 wry webview(macOS)에서 무반응 — 자체 확인 모달로 종료·compact 확인(거노).
   const [confirm, setConfirm] = useState<{ msg: string; sub?: string; danger?: boolean; yes: string; onYes: () => void } | null>(null);
+  const [charPicker, setCharPicker] = useState(false); // 캐릭터 변경 팝업(헤더 버튼)
+  const [atTop, setAtTop] = useState(true); // 스크롤 맨위 — true 면 ↑ 버튼 숨김
+  const [atBottom, setAtBottom] = useState(true); // 스크롤 맨아래 — true 면 ↓ 버튼 숨김
   // 슬래시 자동완성 — 입력이 '/' 로 시작하면 claude-code 명령 드롭다운(↑↓ 선택·Tab/Enter 완성).
   const [slashIdx, setSlashIdx] = useState(0);
   const [navIdx, setNavIdx] = useState(0); // 선택지 카드 키보드 네비(↑↓) 하이라이트
@@ -482,6 +547,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   // ESC/Enter 로 메뉴를 닫은 직후 ~700ms 는 화면 재파싱으로 카드를 다시 띄우지 않는다
   // (거노: GUI 에서 esc 눌러도 안 멈춤 — tick 이 stale 화면에서 메뉴를 재감지해 재등장).
   const menuSuppressRef = useRef(0);
+  // 마지막으로 화면에서 진행형 verb 를 본 시각(ms) — 폴링 사이 verb 가 잠깐 안 보여도
+  // 4초간 직전 spinner 를 유지해 깜빡임(있었다 없었다)을 흡수. board status 폴링 노이즈에
+  // 안 흔들리게 시간 기반(거노: 똑같이 깜빡임).
+  const lastSpinnerRef = useRef(0);
   // ESC 로 닫은 AskUserQuestion 질문(title) — tool_use 가 응답 전까지 캡처 프록시에 남아
   // tick 마다 카드가 부활하던 것(거노: esc 눌러도 취소 안 됨). 같은 질문이면 다시 안 띄운다.
   const dismissedQRef = useRef<string | null>(null);
@@ -501,8 +570,21 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
     setConvTurns([]);
     setMenu(null);
     setSpinner(null);
+    lastSpinnerRef.current = 0;
+    setConvTokensOut(0);
+    setMode(null);
     setImages([]);
     setInput('');
+    // 오프라인(과거) 세션: jsonl 은 더 이상 안 변하니 1회만 읽고 폴링 안 한다. 라이브
+    // 소스(conversation/peek/sent-images/menu/spinner)는 죽은 세션엔 없어 전부 skip.
+    if (offline && session) {
+      void fetchSessionTranscriptRaw(session.id, session.cwd).then((evts) => {
+        if (stopped) return;
+        setEvents(evts);
+        setLoaded(true);
+      });
+      return () => { stopped = true; };
+    }
     const tick = async () => {
       // 세션 경계: transcript 첫 이벤트 ts = 현재 세션 시작. 이전 세션 이미지(sent-images.jsonl
       // 방단위 누적) 잔류를 백엔드 since 로 컷(거노: 이전 pane 이미지가 새 대화에 남던 것).
@@ -511,7 +593,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
       const since = ts0 ? Date.parse(ts0) / 1000 : undefined;
       const [conv, imgs, screen] = await Promise.all([
         fetchConversation(surfaceId),
-        fetchSentImages(surfaceId, 12, since),
+        // since(현재 세션 시작 ts) 없으면 백엔드가 sent-images.jsonl(방 누적)을 통째로 줘
+        // 이전 세션 이미지가 새 대화에 떴다(거노: 아무것도 안 쳤는데 이미지들). 세션 경계가
+        // 잡힐 때(transcript 첫 이벤트)까지 보류 — 새/조용한 학생에 잔류 이미지가 안 뜨게.
+        since ? fetchSentImages(surfaceId, 12, since) : Promise.resolve<string[]>([]),
         fetchPeek(surfaceId, 60),
       ]);
       if (stopped) return;
@@ -545,7 +630,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
         if (!suppressed) setMenu(parsePromptMenu(screen));
       }
       // claude 라이브 작업 표시(verb·경과초)도 화면에만 — 로딩 인디케이터에 실값으로.
-      setSpinner(parseSpinner(screen));
+      // 화면에 진행형 verb 가 잠깐 안 보이는 프레임마다 null 로 깜빡이던 것(거노)을 막는다:
+      // 4초 grace — verb 를 본 지 4초 안이면 직전값 유지, 넘으면(작업 끝남) 클리어.
+      const sp = parseSpinner(screen);
+      if (sp) lastSpinnerRef.current = Date.now();
+      setSpinner((prev) => sp ?? (Date.now() - lastSpinnerRef.current < 4000 ? prev : null));
+      setConvTokensOut(conv.tokens_out ?? 0); // 진행 중 응답 누적 출력 토큰(프록시 SSE 라이브)
+      setMode(latestPermissionMode(evts)); // 권한 모드 — transcript permissionMode(peek 추정 안 함)
       setEffort(conv.effort || parseEffort(screen)); // 캡처 프록시 effort(output_config.effort) 우선, 폴백 화면파싱
       setConvModel(conv.model || ''); // 프록시가 요청에서 잡은 model — /model 전환 시 다음 요청에 반영(실시간 소스)
       if (!suppressed) setEffortMenu(parseEffortMenu(screen)); // /effort 슬라이더 뜨면 GUI 카드로
@@ -559,7 +650,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
     void tick();
     const iv = setInterval(tick, 1500);
     return () => { stopped = true; clearInterval(iv); };
-  }, [surfaceId]);
+  }, [surfaceId, offline, session?.id, session?.cwd]);
 
   // 새 내용 도착 시, 사용자가 하단에 있을 때만 따라내린다(위로 스크롤 중이면 안 건드림 —
   // 거노: 스크롤 올리면 자꾸 내려가던 버그).
@@ -589,7 +680,10 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
 
   const onBodyScroll = () => {
     const el = bodyRef.current;
-    if (el) atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    if (!el) return;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+    setAtBottom(atBottomRef.current);
+    setAtTop(el.scrollTop < 48);
   };
 
   // 실시간 미러: 웹 입력을 칠 때마다 터미널 PTY 라인과 동기화한다(거노 요청 —
@@ -638,7 +732,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
     setSending(false);
     setFlash(ok ? 'ok' : 'err');
     setTimeout(() => setFlash(null), 1200);
-    if (ok) setInput('');
+    if (ok) {
+      setInput('');
+      // 작업 중 미리 보낸 메시지도 즉시 말풍선으로(거노) — 다음 폴에서 transcript 에 같은
+      // 텍스트가 뜨면 pendingChoices 가 중복 제거한다.
+      if (text.trim()) setMyChoices((p) => [...p, { role: 'user', text: text.trim() }]);
+    }
     inputRef.current?.focus();
   };
 
@@ -800,12 +899,23 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
   const toolMap = useMemo(() => buildToolMap(events), [events]);
   // 턴별 소요시간 — 마지막 assistant uuid → ms. 그 버블 아래 시계 푸터.
   const durationMap = useMemo(() => turnDurations(events), [events]);
+  // 턴별 출력 토큰 — assistant uuid → output_tokens. 시계 푸터 옆 "↓N"(완료 응답·정확).
+  const tokenMap = useMemo(() => turnTokens(events), [events]);
   const items = useMemo(() => {
     if (events.length) return eventsToItems(events, toolMap);
     // jsonl 이 아직 안 써진 진행 중 구간 — 캡처 프록시 텍스트 대화로 라이브 폴백.
     // conv.turns 는 프록시가 이미 strip_meta·is_main_conversation 으로 정제 → 재필터 안 함.
     return convTurns.map((t) => ({ kind: 'bubble', role: t.role, text: t.text }) as RenderItem);
   }, [events, toolMap, convTurns]);
+  // optimistic 으로 남긴 내 발화(myChoices) 중 transcript(items)에 아직 안 잡힌 것만 — 작업
+  // 중 미리 보낸 메시지를 즉시 띄우되(거노), 다음 폴에서 transcript 에 같은 텍스트가 뜨면
+  // 중복 제거. 메뉴 선택(label)은 transcript 에 raw 키로 들어가 매칭 안 돼 계속 남는다(의도).
+  const pendingChoices = useMemo(
+    () => myChoices.filter((c) => !items.some((it) =>
+      it.kind === 'bubble' && (it as { role: string }).role === c.role
+        && (it as { text: string }).text.trim() === c.text.trim())),
+    [myChoices, items],
+  );
   // 로딩 점 판정용 — 마지막 말풍선이 선생님(user)이면 학생이 아직 답하기 전.
   const lastBubbleRole = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i--) if (items[i].kind === 'bubble') return (items[i] as { role: string }).role;
@@ -844,9 +954,24 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
         borderBottom: '1px solid var(--cth-cream-200)'
       }}>
         <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 15, fontWeight: 700, color: 'var(--cth-ink-900)' }}>
-          {title} <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400, fontSize: 13 }}>{surfaceId}</span>
+          {title} {offline ? (
+            <span style={{ marginLeft: 2, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-cream-200)', color: 'var(--cth-ink-500)', fontWeight: 700, fontSize: 10 }}>오프라인 · 읽기 전용</span>
+          ) : (
+            <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400, fontSize: 13 }}>{surfaceId}</span>
+          )}
         </span>
         <div style={{ flex: 1 }} />
+        {!offline && (<>
+        <button
+          onClick={() => setCharPicker(true)}
+          title="캐릭터 변경 (대화 리셋)"
+          style={{
+            height: 28, padding: '0 10px', borderRadius: 8, border: '1px solid var(--cth-cream-200)', cursor: 'pointer',
+            background: 'var(--cth-cream-100)', color: 'var(--cth-ink-700)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
+            display: 'inline-flex', alignItems: 'center'
+          }}
+        >캐릭터</button>
         <button
           onClick={() => void onKill()}
           title="학생 종료 (pane 닫기)"
@@ -857,6 +982,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
             display: 'inline-flex', alignItems: 'center'
           }}
         >종료</button>
+        </>)}
         <button
           onClick={onClose}
           title="대화 닫기"
@@ -869,37 +995,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
         >×</button>
       </div>
 
-      {/* 학생 메타 — 모델·브랜치·컨텍스트%·경로(클로드 실제 지표) */}
-      {agent && (convModel || agent.model || agent.branch || agent.cwd) && (
-        <div style={{
-          display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center',
-          padding: '6px 12px', borderBottom: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
-        }}>
-          {(convModel || agent.model) && <MetaChip label={shortModel(convModel || agent.model)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
-          {/* effort — 모델 옆(거노). 항상 표시(상태바 값 있으면 같이), 클릭 → /effort 메뉴
-              카드(방향키 선택). 입력창에 "/effort max" 타이핑(슬래시 자동완성)도 가능. */}
-          {(convModel || agent.model) && <MetaChip label={effort ? `effort: ${effort}` : 'effort'} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
-          {/* 브랜치 칩 클릭 → 미커밋 변경사항(/diff) 확인(거노: 브랜치 버튼). */}
-          {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
-            msg: '변경사항을 볼까요?',
-            sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 학생에게 띄워요.`,
-            yes: '변경 보기',
-            onYes: () => { void sendToPane(surfaceId, '/diff', true, false); },
-          })} />}
-          {/* 컨텍스트 % 칩 클릭 → /compact 할지 확인(거노: 컨텍스트 버튼 누르면 컴팩트 물어보는 UX).
-              상태바 파싱(contextPct) 우선, 없으면 토큰/한도 계산 폴백. */}
-          {(() => {
-            const pct = agent.contextPct != null && agent.contextPct > 0 ? agent.contextPct
-              : agent.contextTokens != null && agent.contextLimit ? Math.round((agent.contextTokens / agent.contextLimit) * 100)
-              : null;
-            if (pct == null) return null;
-            return <MetaChip label={`컨텍스트 ${pct}%`} onClick={() => { void sendToPane(surfaceId, '/context', true, false); setCtxView('컨텍스트 불러오는 중…'); }} />;
-          })()}
-          {agent.cwd && <MetaChip label={shortCwd(agent.cwd)} dim />}
-        </div>
-      )}
-
-      {/* 대화(채팅 버블) + 보낸 이미지 */}
+      {/* 대화(채팅 버블) + 보낸 이미지 — relative 래퍼로 감싸 맨위/맨아래 스크롤 버튼을 띄운다(거노). */}
+      <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
       <div ref={bodyRef} onScroll={onBodyScroll} style={{ flex: 1, overflow: 'auto', padding: '14px 16px', background: 'var(--cth-cream-100)' }}>
         {events.length === 0 && convTurns.length === 0 && !streaming.trim() && myChoices.length === 0 && images.length === 0 && agent?.status !== 'working' && agent?.status !== 'thinking' ? (
           <div style={{ color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 13, textAlign: 'center', marginTop: 40 }}>
@@ -910,7 +1007,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
             {[
               ...items,
               ...(streaming.trim() ? [{ kind: 'bubble', role: 'assistant', text: streaming } as RenderItem] : []),
-              ...myChoices.map((t) => ({ kind: 'bubble', role: t.role, text: t.text } as RenderItem)),
+              ...pendingChoices.map((t) => ({ kind: 'bubble', role: t.role, text: t.text } as RenderItem)),
             ].map((it, i) => {
               // 도구 호출(Bash/Edit/Read…) — 학생(좌측)에 per-tool 카드로 인터리브.
               if (it.kind === 'tool') {
@@ -978,7 +1075,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                 return (
                   <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
                     <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                      <SpritePortrait character={title} scale={1.5} />
+                      <SpritePortrait character={avatarChar} scale={1.5} bust />
                     </div>
                     <div style={{ maxWidth: '80%', padding: '8px 12px', borderRadius: 14, borderTopLeftRadius: 4, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)', overflowX: 'auto' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
@@ -995,12 +1092,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
               const mine = it.role === 'user';
               // 턴 소요시간 — assistant 버블이 그 턴의 마지막이면 시계 푸터(거노 데스크탑 앱풍).
               const durMs = !mine && it.uuid ? durationMap.get(it.uuid) : undefined;
+              const tokOut = !mine && it.uuid ? tokenMap.get(it.uuid) : undefined; // 완료 응답 출력 토큰(transcript usage)
               // 메신저: 선생님(user)=우측 카톡 노랑, 학생(assistant)=좌측 아바타+흰 말풍선.
               return (
                 <div key={i} style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
                   {!mine && (
                     <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                      <SpritePortrait character={title} scale={1.5} />
+                      <SpritePortrait character={avatarChar} scale={1.5} bust />
                     </div>
                   )}
                   <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
@@ -1020,12 +1118,17 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                         ? <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{it.text}</span>
                         : <Markdown text={it.text} />)}
                     </div>
-                    {durMs != null && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 4, paddingLeft: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}>
-                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                          <circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 14" />
-                        </svg>
-                        <span>{formatDuration(durMs)}</span>
+                    {(durMs != null || tokOut != null) && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, paddingLeft: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}>
+                        {durMs != null && (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                              <circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 14" />
+                            </svg>
+                            {formatDuration(durMs)}
+                          </span>
+                        )}
+                        {tokOut != null && <span title={`출력 ${tokOut.toLocaleString()} 토큰`}>↓ {fmtTok(tokOut)}</span>}
                       </div>
                     )}
                   </div>
@@ -1037,7 +1140,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
             {images.map((path, i) => (
               <div key={`img-${path}-${i}`} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
                 <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                  <SpritePortrait character={title} scale={1.5} />
+                  <SpritePortrait character={avatarChar} scale={1.5} bust />
                 </div>
                 <button onClick={() => void openFile(path)} title={`${path}\n클릭 = OS 기본 뷰어로 열기`} style={{
                   maxWidth: '74%', padding: 4, borderRadius: 14, borderTopLeftRadius: 4, cursor: 'pointer',
@@ -1060,7 +1163,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
                   <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                    <SpritePortrait character={title} scale={1.5} />
+                    <SpritePortrait character={avatarChar} scale={1.5} bust />
                   </div>
                   <div style={{ maxWidth: '85%', padding: '8px 12px', borderRadius: 14, borderTopLeftRadius: 4, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', boxShadow: '0 1px 3px rgba(21,41,74,0.08)', overflowX: 'auto' }}>
                     <pre style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, lineHeight: 1.35, whiteSpace: 'pre', margin: 0, color: 'var(--cth-ink-700)' }}><AnsiText text={ctxView} /></pre>
@@ -1078,7 +1181,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
               !streaming.trim() && lastBubbleRole === 'user')) && (
               <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
                 <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                  <SpritePortrait character={title} scale={1.5} />
+                  <SpritePortrait character={avatarChar} scale={1.5} bust />
                 </div>
                 <div style={{
                   padding: '10px 14px', borderRadius: 14, borderTopLeftRadius: 4,
@@ -1096,11 +1199,28 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
                     ))}
                   </span>
                   {spinner || (agent?.status === 'thinking' ? '생각 중…' : (agent?.currentTool || '작업 중…'))}
+                  {convTokensOut > 0 && (
+                    <span style={{ color: 'var(--cth-ink-300)', fontVariantNumeric: 'tabular-nums' }} title={`출력 ${convTokensOut.toLocaleString()} 토큰`}>↓ {fmtTok(convTokensOut)}</span>
+                  )}
                 </div>
               </div>
             )}
           </>
         )}
+      </div>
+      {/* 맨 위·맨 아래 점프 — 긴 대화에서 빠르게(거노). 이미 끝이면 해당 버튼 숨김. */}
+      <div style={{ position: 'absolute', right: 14, bottom: 12, display: 'flex', flexDirection: 'column', gap: 6, zIndex: 20 }}>
+        {!atTop && (
+          <button onClick={() => bodyRef.current?.scrollTo({ top: 0, behavior: 'smooth' })} title="맨 위로" style={SCROLL_BTN}>
+            <svg width="15" height="15" viewBox="0 0 16 16" style={{ display: 'block' }}><path d="M8 12V4M4.5 7.5 8 4l3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          </button>
+        )}
+        {!atBottom && (
+          <button onClick={() => { const el = bodyRef.current; if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }); }} title="맨 아래로" style={SCROLL_BTN}>
+            <svg width="15" height="15" viewBox="0 0 16 16" style={{ display: 'block' }}><path d="M8 4v8M4.5 8.5 8 12l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          </button>
+        )}
+      </div>
       </div>
 
       {/* 인터랙티브 메뉴(/model·AskUserQuestion) — 선택지 카드. 단일=클릭 즉시 선택,
@@ -1157,6 +1277,26 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
         </div>
       )}
 
+      {/* 학생 메타(하단) — 모델·effort·권한모드·브랜치·경로. 헤더 아래(상단)에서 입력창 위로
+          내렸다(거노: 하단 통합). 컨텍스트%는 Footer '인연'으로 일원화해 여기선 뺐다. */}
+      {!offline && agent && (convModel || agent.model || agent.branch || agent.cwd) && (
+        <div style={{
+          display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center',
+          padding: '6px 12px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
+        }}>
+          {(convModel || agent.model) && <MetaChip label={shortModel(convModel || agent.model)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
+          {(convModel || agent.model) && <MetaChip label={effort ? `effort: ${effort}` : 'effort'} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
+          {modeLabel(mode) && <MetaChip label={modeLabel(mode)!} tone={mode === 'bypassPermissions' ? 'danger' : undefined} title="claude 권한 모드 (shift+tab 로 전환)" />}
+          {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
+            msg: '변경사항을 볼까요?',
+            sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 학생에게 띄워요.`,
+            yes: '변경 보기',
+            onYes: () => { void sendToPane(surfaceId, '/diff', true, false); },
+          })} />}
+          {agent.cwd && <MetaChip label={shortCwd(agent.cwd)} dim />}
+        </div>
+      )}
+
       {/* /effort 슬라이더 — 터미널 슬라이더(←/→)를 GUI 카드로(거노: effort 연동). 현재 강조,
           클릭/←→ → 터미널 ←/→ + Enter. */}
       {effortMenu != null && (
@@ -1178,7 +1318,40 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
         </div>
       )}
 
-      {/* 입력창 + 슬래시 자동완성 드롭다운 — '/' 치면 claude 명령 후보(거노). */}
+      {/* 입력창 + 슬래시 자동완성 드롭다운 — '/' 치면 claude 명령 후보(거노). 오프라인
+          세션은 입력창 대신 '현재 터미널에 입력' 이어가기 액션바를 띄운다(읽기 전용). */}
+      {offline ? (
+        <div style={{
+          padding: '10px 12px', background: 'var(--cth-cream-50)',
+          borderTop: '1px solid var(--cth-cream-200)', display: 'flex', flexDirection: 'column', gap: 8,
+        }}>
+          <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)' }}>
+            이어가려면 터미널에 입력 후 직접 엔터로 실행하세요
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <code style={{
+              flex: 1, fontFamily: 'var(--cth-font-mono)', fontSize: 12, color: 'var(--cth-ink-700)',
+              background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', borderRadius: 8,
+              padding: '7px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>claude --resume {session!.id}</code>
+            <button
+              onClick={async () => {
+                const ok = await pasteToActiveTerminal(`claude --resume ${session!.id}`, false);
+                if (ok) { void revealTerminal(1); setFlash('ok'); } else { setFlash('err'); }
+                setTimeout(() => setFlash(null), 2200);
+              }}
+              style={{
+                flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600,
+                padding: '7px 14px', border: 'none', borderRadius: 9, cursor: 'pointer',
+                background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff',
+                boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.5)',
+              }}
+            >현재 터미널에 입력</button>
+          </div>
+          {flash === 'ok' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-mint)' }}>터미널에 입력했어요 — 엔터로 실행하세요</div>}
+          {flash === 'err' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-coral)' }}>입력 실패 — 터미널 pane 을 확인하세요</div>}
+        </div>
+      ) : (
       <div style={{ position: 'relative' }}>
       {slashOpen && (
         <div style={{
@@ -1260,6 +1433,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
         >전송</button>
       </div>
       </div>
+      )}
 
       {/* 확인 모달 — window.confirm 대체(wry webview 무반응). 종료·compact·diff 공통. */}
       {confirm && (
@@ -1276,6 +1450,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded }: Termi
             </div>
           </div>
         </div>
+      )}
+      {charPicker && (
+        <CharacterPicker
+          title="캐릭터 변경"
+          note={`${avatarChar} → 바꾸면 이 학생의 claude 대화가 리셋돼요.`}
+          onPick={(name) => { void swapCharacter(surfaceId, name); setCharPicker(false); }}
+          onClose={() => setCharPicker(false)}
+        />
       )}
 
     </div>

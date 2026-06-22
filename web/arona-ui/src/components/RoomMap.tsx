@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { fetchRecentSessions, resumeSession, type RecentSession, type SessionsInfo } from '@/lib/mcp';
+import { fetchRecentSessions, type RecentSession, type SessionsInfo } from '@/lib/mcp';
 
 // 방 추가 시 고를 god(거노: 처음은 아로나 고정, 새 방은 선택). leaders 풀과 일치.
 const GODS = ['아로나', '프라나'];
@@ -20,6 +20,10 @@ export interface RoomMapProps {
   onNewRoom?: (god: string) => void;
   /** 방(윈도우) 닫기. 윈도우 2개+ 일 때만. */
   onCloseRoom?: (idx: number) => void;
+  /** 최근 세션 클릭 — 바로 resume 하지 않고 오프라인(읽기 전용) 뷰어로 띄운다. */
+  onOpenSession?: (s: RecentSession) => void;
+  /** 좌측 존 접기 — 부모(App)가 leftHidden 으로 레일 전환(거노: 가장자리 접기 일원화). */
+  onCollapse?: () => void;
 }
 
 function RoomIcon({ active }: { active: boolean }) {
@@ -34,13 +38,11 @@ function RoomIcon({ active }: { active: boolean }) {
 
 // 좌측 방 네비 — 방 = kasaterm 윈도우(거노). 목록 + "+ 방 추가"(god 선택). 첫 방은
 // 아로나 고정, 새 방은 아로나/프라나 선택해 그 god 으로 스폰. × 로 방 닫기.
-export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom }: RoomMapProps) {
+export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom, onOpenSession, onCollapse }: RoomMapProps) {
   const n = sessions.count;
   const [adding, setAdding] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const [showRecent, setShowRecent] = useState(false);
   const [recent, setRecent] = useState<RecentSession[]>([]);
-  const [resuming, setResuming] = useState<string | null>(null);
 
   // 최근 세션 패널을 펼칠 때(또는 펼친 채로 10초마다) 목록을 가져온다 — 항상
   // 폴링하면 닫혀있을 때도 낭비라, 펼침 상태에서만 새로고침.
@@ -53,30 +55,12 @@ export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom }: RoomMapP
     return () => { alive = false; clearInterval(iv); };
   }, [showRecent]);
 
-  const onResume = async (s: RecentSession) => {
-    setResuming(s.id);
-    await resumeSession(s.id, s.cwd, false);
-    setResuming(null);
+  const onPick = (s: RecentSession) => {
+    onOpenSession?.(s);
     setShowRecent(false);
   };
 
   if (n < 1) return null;
-  // 접힌 상태 — 얇은 띠 + 펼치기 버튼(거노: 좌측 패널 접기).
-  if (collapsed) {
-    return (
-      <div style={{
-        width: 30, flexShrink: 0, height: '100%', borderRight: '1px solid var(--cth-cream-200)',
-        background: 'var(--cth-cream-50)', padding: '10px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
-      }}>
-        <button onClick={() => setCollapsed(false)} title="방 패널 펼치기" style={{
-          width: 22, height: 22, borderRadius: 6, border: 'none', cursor: 'pointer', background: 'var(--cth-cream-100)',
-          color: 'var(--cth-ink-500)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <svg width="12" height="12" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
-        </button>
-      </div>
-    );
-  }
   return (
     <div style={{
       width: 184, flexShrink: 0, height: '100%', overflowY: 'auto',
@@ -85,7 +69,7 @@ export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom }: RoomMapP
     }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 2px 4px' }}>
         <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 10, color: 'var(--cth-ink-500)' }}>방 (터미널 윈도우)</span>
-        <button onClick={() => setCollapsed(true)} title="방 패널 접기" style={{
+        <button onClick={() => onCollapse?.()} title="좌측 패널 접기" style={{
           width: 18, height: 18, borderRadius: 5, border: 'none', cursor: 'pointer', background: 'transparent', color: 'var(--cth-ink-300)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
         }}>
@@ -148,8 +132,9 @@ export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom }: RoomMapP
         )
       )}
 
-      {/* 최근 세션 이어가기 — 펼치면 ~/.claude/projects 의 최근 claude 세션 목록.
-          클릭하면 새 pane 에 claude --resume <id> 가 주입돼 그 대화를 잇는다. */}
+      {/* 최근 세션 보기 — 펼치면 ~/.claude/projects 의 최근 claude 세션 목록. 클릭하면
+          바로 열지 않고 그 대화를 오프라인(읽기 전용) 뷰어로 띄운다. 이어가기는 뷰어
+          하단 '현재 터미널에 입력' 버튼(거노: 먼저 보고 직접 이어가기). */}
       <button onClick={() => setShowRecent((v) => !v)} style={{
         marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, padding: '7px 9px', borderRadius: 8,
         border: 'none', cursor: 'pointer', background: 'transparent', color: 'var(--cth-ink-500)',
@@ -158,7 +143,7 @@ export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom }: RoomMapP
         <svg width="13" height="13" viewBox="0 0 16 16" style={{ transform: showRecent ? 'rotate(90deg)' : 'none', transition: 'transform .12s' }}>
           <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        최근 세션 이어가기
+        최근 세션 보기
       </button>
       {showRecent && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3, padding: '2px 2px 4px' }}>
@@ -166,16 +151,16 @@ export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom }: RoomMapP
             <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', padding: '4px 6px' }}>최근 세션 없음</div>
           ) : (
             recent.map((s) => (
-              <button key={s.id} onClick={() => onResume(s)} disabled={resuming === s.id} title={`${s.label}\n${s.cwd}`} style={{
+              <button key={s.id} onClick={() => onPick(s)} title={`${s.label}\n${s.cwd}`} style={{
                 display: 'flex', flexDirection: 'column', gap: 2, padding: '6px 8px', borderRadius: 7, border: 'none',
-                cursor: resuming === s.id ? 'default' : 'pointer', textAlign: 'left',
-                background: 'var(--cth-cream-100)', color: 'var(--cth-ink-700)', opacity: resuming === s.id ? 0.5 : 1,
+                cursor: 'pointer', textAlign: 'left',
+                background: 'var(--cth-cream-100)', color: 'var(--cth-ink-700)',
               }}>
                 <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {s.label}
                 </span>
                 <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-300)' }}>
-                  {resuming === s.id ? '여는 중…' : relativeTime(s.mtime)}
+                  {relativeTime(s.mtime)}
                 </span>
               </button>
             ))

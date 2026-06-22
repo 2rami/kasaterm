@@ -116,7 +116,7 @@ function StudentCard({ agent, onSelect, bust }: { agent: Agent; onSelect?: (id: 
           <SpritePortrait character={agent.character} scale={1.8} bust={bust} />
         </div>
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{agent.character}</div>
+          <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{agent.name}</div>
           <StatusPill status={agent.status} />
           <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minHeight: 13 }}>{agent.project || '대기 중'}</div>
         </div>
@@ -144,7 +144,7 @@ function StudentRow({ agent, onSelect, bust }: { agent: Agent; onSelect?: (id: s
         <SpritePortrait character={agent.character} scale={1.3} bust={bust} />
       </div>
       <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', minWidth: 70, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-        {agent.isGod && <span style={{ color: 'var(--cth-lemon)' }}>★ </span>}{agent.character}
+        {agent.isGod && <span style={{ color: 'var(--cth-lemon)' }}>★ </span>}{agent.name}
       </span>
       <div style={{ width: 60, flexShrink: 0 }}><StatusPill status={agent.status} /></div>
       <span style={{ flex: 1, fontSize: 11, fontFamily: 'var(--cth-font-ui)', color: 'var(--cth-ink-500)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
