@@ -355,6 +355,17 @@ pub trait Backend: Send + Sync {
     fn rename_surface(&self, _surface_id: &str, _title: &str) -> Result<()> {
         anyhow::bail!("rename_surface unsupported by this backend")
     }
+    /// Add a new student pane to the active room with an explicit character
+    /// (members or leaders — 아로나/프라나 included). Default: unsupported.
+    fn spawn_student(&self, _character: &str) -> Result<()> {
+        anyhow::bail!("spawn_student unsupported by this backend")
+    }
+    /// Swap a pane's character: respawn its PTY with the new persona (the live
+    /// claude conversation resets — persona is fixed at shell spawn). Default:
+    /// unsupported.
+    fn swap_character(&self, _surface_id: &str, _character: &str) -> Result<()> {
+        anyhow::bail!("swap_character unsupported by this backend")
+    }
     /// Rename the *window/session* that `surface_id` belongs to (sidebar
     /// session label), independent of the pane header. The god marker uses this
     /// so the session reads "● god" even when the god pane isn't the window's
@@ -612,6 +623,16 @@ pub trait Backend: Send + Sync {
     /// itself — the BA GUI per-tool 렌더 path. Default: empty.
     fn transcript_raw(&self, _surface_id: &str) -> Result<String> {
         Ok(String::new())
+    }
+
+    /// Read a *past* (offline) Claude session's transcript jsonl as raw text,
+    /// addressed by its session uuid + the cwd it ran in — no live pane needed.
+    /// Where `transcript_raw` reads the jsonl bound to a running surface, this
+    /// resolves `~/.claude/projects/<encoded-cwd>/<id>.jsonl` directly so the BA
+    /// GUI can preview a recent session read-only before deciding to resume it.
+    /// Default: unsupported.
+    fn session_transcript_raw(&self, _id: &str, _cwd: Option<&str>) -> Result<String> {
+        anyhow::bail!("session_transcript_raw unsupported by this backend")
     }
 }
 

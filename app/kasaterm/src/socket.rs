@@ -13,7 +13,7 @@ use kasa_socket::backend::{
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use kasa_bridge::{Layout, TmuxSession};
 
 use crate::transcript::snapshot_from_tail;
@@ -148,17 +148,57 @@ pub struct PtyBackend {
     /// of `waiting`: a blocked claude writes nothing, so the transcript tail
     /// can't tell `collab_board` the pane is stuck — this map can.
     attention: Arc<Mutex<HashMap<String, String>>>,
-    /// Cached `claude agents --json` output (sessionId → official status:
-    /// idle/busy/waiting). The board polls ~1/s; shelling out to `claude` that
-    /// often both costs a process spawn and risks racing claude's session
-    /// registry, so we refresh at most once every 2s.
-    agents_cache: Arc<Mutex<Option<(std::time::Instant, HashMap<String, String>)>>>,
     /// hook-free 발견 스로틀 — `discover_unbound` 의 ps/lsof 비용을 board 폴(1/s)
     /// 마다 다 치르지 않도록 2s 에 1회로 제한한 마지막 실행 시각.
     last_discover: Arc<Mutex<Option<std::time::Instant>>>,
     /// pane 셸 pid → (조회시각, 라이브 cwd). collab_board 가 학생 경로(cd 반영)를
     /// transcript 가 아닌 PTY pid_cwd 로 채우되, lsof 비용을 2s 캐시로 제한한다.
     cwd_cache: Arc<Mutex<HashMap<u32, (std::time::Instant, std::path::PathBuf)>>>,
+}
+
+/// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
+/// agents_status)와 터미널 타이틀바(render)가 같은 데이터로 claude 실행/working 판정을
+/// 일치시킨다(거노: gui 동기화). 전역이라 PtyBackend 인스턴스 없이 App 도 호출.
+static AGENTS_CACHE: LazyLock<Mutex<Option<(std::time::Instant, HashMap<String, String>)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+pub(crate) fn agents_status_cached() -> HashMap<String, String> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    let now = std::time::Instant::now();
+    if let Some((at, map)) = AGENTS_CACHE.lock().unwrap().as_ref() {
+        if now.duration_since(*at) < TTL {
+            return map.clone();
+        }
+    }
+    let mut map: HashMap<String, String> = HashMap::new();
+    if let Ok(out) = std::process::Command::new("claude")
+        .args(["agents", "--json"])
+        .output()
+    {
+        if out.status.success() {
+            if let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
+                let rank = |s: &str| match s {
+                    "busy" => 3,
+                    "waiting" => 2,
+                    _ => 1,
+                };
+                for it in &items {
+                    let (Some(sid), Some(st)) = (
+                        it.get("sessionId").and_then(|v| v.as_str()),
+                        it.get("status").and_then(|v| v.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    let e = map.entry(sid.to_string()).or_insert_with(|| st.to_string());
+                    if rank(st) > rank(e) {
+                        *e = st.to_string();
+                    }
+                }
+            }
+        }
+    }
+    *AGENTS_CACHE.lock().unwrap() = Some((now, map.clone()));
+    map
 }
 
 impl PtyBackend {
@@ -175,7 +215,6 @@ impl PtyBackend {
             ws,
             bound: Arc::new(Mutex::new(HashMap::new())),
             attention,
-            agents_cache: Arc::new(Mutex::new(None)),
             last_discover: Arc::new(Mutex::new(None)),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -239,47 +278,8 @@ impl PtyBackend {
     /// claude doesn't report. One sessionId can span several processes (shells
     /// inherit the parent's session id), so we collapse to the most-active
     /// state (busy > waiting > idle).
-    fn agents_status(&self) -> HashMap<String, String> {
-        const TTL: std::time::Duration = std::time::Duration::from_secs(2);
-        let now = std::time::Instant::now();
-        if let Some((at, map)) = self.agents_cache.lock().unwrap().as_ref() {
-            if now.duration_since(*at) < TTL {
-                return map.clone();
-            }
-        }
-        let mut map: HashMap<String, String> = HashMap::new();
-        if let Ok(out) = std::process::Command::new("claude")
-            .args(["agents", "--json"])
-            .output()
-        {
-            if out.status.success() {
-                if let Ok(items) =
-                    serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout)
-                {
-                    let rank = |s: &str| match s {
-                        "busy" => 3,
-                        "waiting" => 2,
-                        _ => 1,
-                    };
-                    for it in &items {
-                        let (Some(sid), Some(st)) = (
-                            it.get("sessionId").and_then(|v| v.as_str()),
-                            it.get("status").and_then(|v| v.as_str()),
-                        ) else {
-                            continue;
-                        };
-                        let e = map
-                            .entry(sid.to_string())
-                            .or_insert_with(|| st.to_string());
-                        if rank(st) > rank(e) {
-                            *e = st.to_string();
-                        }
-                    }
-                }
-            }
-        }
-        *self.agents_cache.lock().unwrap() = Some((now, map.clone()));
-        map
+    pub(crate) fn agents_status(&self) -> HashMap<String, String> {
+        agents_status_cached()
     }
 }
 
@@ -332,6 +332,25 @@ impl Backend for PtyBackend {
     fn new_room(&self, god: &str) -> Result<()> {
         self.proxy
             .send_event(UserEvent::SocketNewRoom(god.to_string()))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(())
+    }
+
+    /// `POST /spawn-student?character=<name>` — 현재 방에 캐릭터 지정 학생 추가.
+    fn spawn_student(&self, character: &str) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::SocketSpawnStudent(character.to_string()))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(())
+    }
+
+    /// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(respawn).
+    fn swap_character(&self, surface_id: &str, character: &str) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::SocketSwapCharacter(
+                surface_id.to_string(),
+                character.to_string(),
+            ))
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
         Ok(())
     }
@@ -713,6 +732,23 @@ impl Backend for PtyBackend {
             .map_err(|e| anyhow::anyhow!("read transcript {path:?}: {e}"))
     }
 
+    fn session_transcript_raw(&self, id: &str, cwd: Option<&str>) -> Result<String> {
+        // Offline read by uuid — no bound surface. Resolve the jsonl path the
+        // same way recent_sessions_for discovers candidates, so the BA GUI can
+        // preview a past session before deciding to resume it.
+        if !is_uuid(id) {
+            anyhow::bail!("invalid session id: {id}");
+        }
+        let base = cwd
+            .map(std::path::PathBuf::from)
+            .or_else(|| self.active_cwd())
+            .ok_or_else(|| anyhow::anyhow!("no cwd for session {id}"))?;
+        let path = session_jsonl_path(&base, id)
+            .ok_or_else(|| anyhow::anyhow!("no HOME — cannot locate session {id}"))?;
+        std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("read session transcript {path:?}: {e}"))
+    }
+
     fn collab_board(&self) -> Result<Vec<PaneActivity>> {
         // Pull, not push: read each open & bound pane's transcript tail right
         // now and derive its row. No background watcher, no cache — the board
@@ -745,10 +781,14 @@ impl Backend for PtyBackend {
         // 없으면(기본 방) 기존 cwd-slug. ws(공유)에서 복제해 아래 map 클로저서 쓴다.
         // active_window_panes: 보이는 방(윈도우)의 pane — board 를 활성 방으로 한정
         // (거노: 아로나 방+프라나 방이 한 교실에 같이 뜸). 비었으면(초기) 필터 안 함.
-        let (pane_room, active_panes) = {
+        let (pane_room, active_panes, pane_character) = {
             let ws = self.ws.lock().unwrap();
-            (ws.pane_room.clone(), ws.active_window_panes.clone())
+            (ws.pane_room.clone(), ws.active_window_panes.clone(), ws.pane_character.clone())
         };
+        // board 빌드 한 폴링 안에서 lazy 배정된 캐릭터 — 같은 폴링에 처음 등장한 두 pane 이
+        // 둘 다 같은 빈 슬롯(예: 미도리)을 고르는 걸 막는다(pane_character 클론은 빌드 중
+        // 안 바뀌므로 별도 누적). 다음 폴링부턴 ws.pane_character 로 잡혀 불필요.
+        let mut lazy_assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut board: Vec<PaneActivity> = bound
             .iter()
             // 활성 방 학생만(방별 격리). active_panes 가 비었으면(초기 미발행) live 로 폴백.
@@ -824,14 +864,18 @@ impl Backend for PtyBackend {
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty());
                 row.is_god = lead.as_deref() == Some(sid.as_str());
-                // 캐릭터 마커(assign-character) — 이 방 dir 의 character-<N>.
-                row.character = std::fs::read_to_string(format!(
-                    "/tmp/kasaterm-collab/{rslug}/character-{}",
-                    sid.trim_start_matches('%')
-                ))
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
+                // GUI 가 spawn/swap 시 배정한 ws.pane_character 우선 — 터미널 헤더
+                // (pane_header_label)와 같은 소스라 board·탭 캐릭터가 항상 일치(거노:
+                // board 미도리 둘 / 헤더 모모이 불일치). 없으면 방 dir 의 character-<N> 마커.
+                row.character = pane_character.get(sid.as_str()).cloned().or_else(|| {
+                    std::fs::read_to_string(format!(
+                        "/tmp/kasaterm-collab/{rslug}/character-{}",
+                        sid.trim_start_matches('%')
+                    ))
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                });
                 // 마커 없는 pane(claude --resume 복원·spawn 의 assign_character_env 를 못 탄
                 // 경로)도 board 빌드 때 빈 슬롯 캐릭터를 lazy 배정한다 — 안 하면 board
                 // char=None → 프사/이름이 안 떴다(거노: %1 프사 None). god 은 lead 로 별도라
@@ -839,8 +883,22 @@ impl Backend for PtyBackend {
                 if row.character.is_none() && !row.is_god {
                     if let Some(chars) = kasa_mcp::character::characters_json() {
                         let members = kasa_mcp::character::member_names(&chars);
-                        if let Some(name) = kasa_mcp::character::assign_next(&rslug, &members) {
+                        // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
+                        // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(거노: 모모이 둘).
+                        let taken: std::collections::HashSet<&String> =
+                            pane_character.values().chain(lazy_assigned.iter()).collect();
+                        let name = members
+                            .iter()
+                            .find(|m| !taken.contains(m))
+                            .cloned()
+                            .or_else(|| members.first().cloned());
+                        if let Some(name) = name {
                             let _ = kasa_mcp::character::write_marker(&rslug, sid.as_str(), &name);
+                            // 단일 진실 ws.pane_character 에도 기록 — 다음 폴링·session 배정이
+                            // 이 캐릭터를 중복하지 않게. 같은 폴링 내 다른 lazy 가 또 같은 캐릭터를
+                            // 안 고르게 lazy_assigned 에도 누적(클론 스냅샷은 빌드 중 안 바뀜).
+                            self.ws.lock().unwrap().pane_character.insert(sid.clone(), name.clone());
+                            lazy_assigned.insert(name.clone());
                             row.character = Some(name);
                         }
                     }
@@ -1538,10 +1596,23 @@ fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std:
 /// 최근 claude 세션 목록(`claude --resume` 후보) — `cwd` 의 projects 디렉터리에서
 /// 모든 .jsonl 을 mtime 내림차순으로 모아 상위 `limit` 개만 라벨까지 파싱한다.
 /// 287개씩 쌓인 디렉터리도 라벨 파싱은 최신 N개에만 들어 비용이 작다.
-pub(crate) fn recent_sessions_for(cwd: &std::path::Path, limit: usize) -> Vec<RecentSession> {
-    let Some(home) = std::env::var("HOME").ok() else { return Vec::new() };
+/// `~/.claude/projects/<encoded-cwd>/` — the transcript dir claude writes a
+/// `cwd`'s session jsonls into. Encoding matches claude code: every `/` and `.`
+/// in the absolute cwd becomes `-`. None when `$HOME` is unset.
+pub(crate) fn claude_project_dir(cwd: &std::path::Path) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
     let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
-    let dir = std::path::PathBuf::from(home).join(".claude/projects").join(encoded);
+    Some(PathBuf::from(home).join(".claude/projects").join(encoded))
+}
+
+/// Full jsonl path for session `id` (a uuid) under `cwd`. Used both to list
+/// recent sessions and to read one offline by uuid (no live pane needed).
+pub(crate) fn session_jsonl_path(cwd: &std::path::Path, id: &str) -> Option<PathBuf> {
+    Some(claude_project_dir(cwd)?.join(format!("{id}.jsonl")))
+}
+
+pub(crate) fn recent_sessions_for(cwd: &std::path::Path, limit: usize) -> Vec<RecentSession> {
+    let Some(dir) = claude_project_dir(cwd) else { return Vec::new() };
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
         .flatten()

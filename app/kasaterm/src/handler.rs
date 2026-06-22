@@ -190,6 +190,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.new_room_with_god(god);
                 return;
             }
+            UserEvent::SocketSpawnStudent(character) => {
+                self.spawn_student(character);
+                return;
+            }
+            UserEvent::SocketSwapCharacter(pane, character) => {
+                self.swap_character(pane, character);
+                return;
+            }
             UserEvent::ResumeSession { id, cwd, newroom } => {
                 // 새 pane 을 띄우고, 그 셸 프롬프트가 뜰 즈음 `claude --resume <id>` 를
                 // 주입한다(주입 자체는 pending_restores drain 이 시간 기반으로 처리).

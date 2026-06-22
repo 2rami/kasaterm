@@ -473,6 +473,11 @@ async fn pane_tasks_handler(
         backend.pane_session_ids().unwrap_or_default().into_iter().collect();
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut debug: Vec<serde_json::Value> = Vec::new();
+    // cwd 팀 폴백은 한 pane 에만 매긴다 — 같은 cwd 의 여러 pane 이 같은 옛 팀(TeamCreate)
+    // 디렉토리를 공유해, 매핑 못 잡은 pane 마다 똑같은 태스크가 중복으로 떴다(거노: 두
+    // 미도리가 같은 태스크). 처음 그 팀을 가져간 pane 만 표시(surface 명시 단일 요청은
+    // board 가 1행이라 영향 없음).
+    let mut claimed_team: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     for row in &board {
         if !surface.is_empty() && row.surface_id != surface {
             continue;
@@ -483,7 +488,9 @@ async fn pane_tasks_handler(
         let team = team_task_dir_for_cwd(&row.cwd);
         if tasks.is_empty() {
             if let Some(dir) = &team {
-                tasks = read_tasks_in_dir(dir);
+                if claimed_team.insert(dir.clone()) {
+                    tasks = read_tasks_in_dir(dir);
+                }
             }
         }
         debug.push(serde_json::json!({
@@ -1118,6 +1125,43 @@ async fn session_new_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `POST /spawn-student?character=<name>` — 현재 방에 캐릭터 지정 학생 추가(아로나/
+/// 프라나 포함). 자동 빈슬롯 배정 대신 사용자가 고른 캐릭터로 split.
+async fn spawn_student_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let character = params.get("character").map(|s| s.as_str()).unwrap_or("");
+    let body = if character.is_empty() {
+        serde_json::json!({ "ok": false, "error": "character required" })
+    } else {
+        match backend.spawn_student(character) {
+            Ok(()) => serde_json::json!({ "ok": true, "character": character }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(PTY respawn,
+/// 대화 리셋). persona 가 셸 spawn 시 고정이라 그 pane 을 새 persona 로 다시 띄운다.
+async fn swap_character_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let surface = params.get("surface").map(|s| s.as_str()).unwrap_or("");
+    let character = params.get("character").map(|s| s.as_str()).unwrap_or("");
+    let body = if surface.is_empty() || character.is_empty() {
+        serde_json::json!({ "ok": false, "error": "surface and character required" })
+    } else {
+        match backend.swap_character(surface, character) {
+            Ok(()) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// `POST /session-close?idx=<n>` — close the session at `idx`. Query param for
 /// the same no-preflight reason as session-switch.
 async fn session_close_handler(
@@ -1325,6 +1369,61 @@ async fn transcript_raw_handler(
         }
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `GET /session-transcript-raw?id=<uuid>&cwd=<abs>` — a *past* (offline)
+/// session's transcript jsonl, raw and unparsed, addressed by its session uuid
+/// + the cwd it ran in (no live pane needed). The BA GUI's resume picker reads
+/// this to preview a recent session read-only before the user decides to resume.
+async fn session_transcript_raw_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let id = params.get("id").map(String::as_str).unwrap_or("");
+    let cwd = params.get("cwd").filter(|s| !s.is_empty()).map(String::as_str);
+    let body = if id.is_empty() {
+        serde_json::json!({ "ok": false, "error": "id=<uuid> required" })
+    } else {
+        match backend.session_transcript_raw(id, cwd) {
+            Ok(raw) => serde_json::json!({ "ok": true, "id": id, "raw": raw }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `POST /paste-active` body:`{text, submit}` — inject `text` into the active
+/// pane's PTY (no `surface` — uses whatever pane is focused). `submit=false`
+/// (default) types the text without a trailing newline so the user reviews and
+/// presses Enter themselves; `submit=true` appends a newline to run it. The BA
+/// GUI's offline-session "resume in current terminal" button uses this.
+async fn paste_active_handler(
+    backend: Arc<dyn Backend>,
+    body: String,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let (text, submit) = if body.trim_start().starts_with('{') {
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(v) => (
+                v.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                v.get("submit").and_then(|s| s.as_bool()).unwrap_or(false),
+            ),
+            Err(e) => {
+                return (cors, Json(serde_json::json!({ "ok": false, "error": format!("bad body: {e}") })));
+            }
+        }
+    } else {
+        (body.trim().to_string(), false)
+    };
+    if text.is_empty() {
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "text is empty" })));
+    }
+    let payload = if submit { format!("{text}\n") } else { text };
+    let body = match backend.send_text(None, &payload) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    (cors, Json(body))
 }
 
 /// `GET /layout` — 현재 윈도우의 pane split 배치(% rect 배열, window_layout 재활용).
@@ -1928,6 +2027,8 @@ pub fn spawn_http_server(
                 let board_backend = backend.clone();
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
+                let spawn_student_backend = backend.clone();
+                let swap_character_backend = backend.clone();
                 let session_close_backend = backend.clone();
                 let slash_backend = backend.clone();
                 let session_restore_backend = backend.clone();
@@ -1946,6 +2047,8 @@ pub fn spawn_http_server(
                 let peek_backend = backend.clone();
                 let transcript_backend = backend.clone();
                 let transcript_raw_backend = backend.clone();
+                let session_transcript_raw_backend = backend.clone();
+                let paste_active_backend = backend.clone();
                 let layout_backend = backend.clone();
                 let tell_god_backend = backend.clone();
                 let send_backend = backend.clone();
@@ -2014,6 +2117,18 @@ pub fn spawn_http_server(
                         }),
                     )
                     .route(
+                        "/session-transcript-raw",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            session_transcript_raw_handler(session_transcript_raw_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/paste-active",
+                        post(move |body: String| {
+                            paste_active_handler(paste_active_backend.clone(), body)
+                        }),
+                    )
+                    .route(
                         "/layout",
                         get(move || layout_handler(layout_backend.clone())),
                     )
@@ -2070,6 +2185,18 @@ pub fn spawn_http_server(
                         "/session-close",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             session_close_handler(session_close_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/spawn-student",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            spawn_student_handler(spawn_student_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/swap-character",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            swap_character_handler(swap_character_backend.clone(), q)
                         }),
                     )
                     .route(
