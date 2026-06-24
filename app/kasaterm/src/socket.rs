@@ -7,8 +7,8 @@
 //! per actually-open pane.
 
 use kasa_socket::backend::{
-    Backend, PaneActivity, PaneRect, RecentSession, SessionsInfo, SplitDirection, SurfaceInfo,
-    WorkspaceInfo,
+    Backend, PaneActivity, PaneRect, RecentSession, SessionsInfo, SplitDirection, SubagentInfo,
+    SurfaceInfo, WorkspaceInfo,
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -749,6 +749,70 @@ impl Backend for PtyBackend {
             .map_err(|e| anyhow::anyhow!("read session transcript {path:?}: {e}"))
     }
 
+    fn subagents(&self, surface_id: &str) -> Result<Vec<SubagentInfo>> {
+        // Claude Code writes subagent dialogues next to the main transcript:
+        // <session-dir>/subagents/agent-<id>.jsonl (+ .meta.json). The session
+        // dir is the bound jsonl path with its `.jsonl` extension stripped.
+        let path = self
+            .bound
+            .lock()
+            .unwrap()
+            .get(surface_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("pane {surface_id} has no bound transcript"))?;
+        let dir = path.with_extension("").join("subagents");
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(Vec::new()) };
+        let mut out: Vec<SubagentInfo> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            // Pivot on the transcript file so we only list agents we can open.
+            let Some(id) = name.strip_prefix("agent-").and_then(|s| s.strip_suffix(".jsonl")) else {
+                continue;
+            };
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let (agent_type, description) = std::fs::read_to_string(dir.join(format!("agent-{id}.meta.json")))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .map(|v| {
+                    let at = v.get("agentType").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    let de = v.get("description").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                    (at, de)
+                })
+                .unwrap_or_default();
+            out.push(SubagentInfo { agent_id: id.to_string(), agent_type, description, mtime });
+        }
+        out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        Ok(out)
+    }
+
+    fn subagent_transcript_raw(&self, surface_id: &str, agent_id: &str) -> Result<String> {
+        // agent_id is interpolated into a path — allow only the hex-ish ids Claude
+        // emits so a crafted `surface`/`agentId` can't traverse out of subagents/.
+        if agent_id.is_empty() || !agent_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            anyhow::bail!("invalid agent id: {agent_id}");
+        }
+        let path = self
+            .bound
+            .lock()
+            .unwrap()
+            .get(surface_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("pane {surface_id} has no bound transcript"))?;
+        let file = path
+            .with_extension("")
+            .join("subagents")
+            .join(format!("agent-{agent_id}.jsonl"));
+        std::fs::read_to_string(&file)
+            .map_err(|e| anyhow::anyhow!("read subagent transcript {file:?}: {e}"))
+    }
+
     fn collab_board(&self) -> Result<Vec<PaneActivity>> {
         // Pull, not push: read each open & bound pane's transcript tail right
         // now and derive its row. No background watcher, no cache — the board
@@ -781,9 +845,12 @@ impl Backend for PtyBackend {
         // 없으면(기본 방) 기존 cwd-slug. ws(공유)에서 복제해 아래 map 클로저서 쓴다.
         // active_window_panes: 보이는 방(윈도우)의 pane — board 를 활성 방으로 한정
         // (거노: 아로나 방+프라나 방이 한 교실에 같이 뜸). 비었으면(초기) 필터 안 함.
-        let (pane_room, active_panes, pane_character) = {
+        // 전 윈도우(방) pane → window_idx — board 를 활성 방으로 한정하지 않고 모든 방의 학생을
+        // 실어 arona-ui 좌측이 방별 학생 트리를 영속한다(거노: 좌측 통합·전 방 영속). 이 맵은
+        // GUI(App)의 publish_pty_layout 이 ws 로 미러한다 — PtyBackend 는 App.windows 를 못 본다.
+        let (pane_room, pane_character, pane_window) = {
             let ws = self.ws.lock().unwrap();
-            (ws.pane_room.clone(), ws.active_window_panes.clone(), ws.pane_character.clone())
+            (ws.pane_room.clone(), ws.pane_character.clone(), ws.pane_window.clone())
         };
         // board 빌드 한 폴링 안에서 lazy 배정된 캐릭터 — 같은 폴링에 처음 등장한 두 pane 이
         // 둘 다 같은 빈 슬롯(예: 미도리)을 고르는 걸 막는다(pane_character 클론은 빌드 중
@@ -791,14 +858,12 @@ impl Backend for PtyBackend {
         let mut lazy_assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut board: Vec<PaneActivity> = bound
             .iter()
-            // 활성 방 학생만(방별 격리). active_panes 가 비었으면(초기 미발행) live 로 폴백.
-            .filter(|(sid, _)| {
-                live.contains(sid.as_str())
-                    && (active_panes.is_empty() || active_panes.contains(sid.as_str()))
-            })
+            // 전 방(윈도우) 학생 — 활성 방 한정 폐기(거노: 전 방 영속). live = 모든 윈도우 pane.
+            .filter(|(sid, _)| live.contains(sid.as_str()))
             .map(|(sid, path)| {
                 let (tail, mtime_idle) = read_tail(path, 64 * 1024);
                 let mut row = snapshot_from_tail(sid, &tail, mtime_idle);
+                row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
                 // Prefer claude's official status when it reports this session
                 // (matched by transcript filename stem == sessionId). The
                 // mtime heuristic above is only a fallback for sessions claude
@@ -938,13 +1003,25 @@ impl Backend for PtyBackend {
                 }
             }
             if let Some(screen) = screens.get(&row.surface_id) {
-                if let Some(pct) = parse_context_pct(screen) {
-                    row.context_pct = pct;
-                }
                 // 모델명도 상태바에서 — "Opus 4.8 (1M context)" 처럼 1M 변형까지 정확.
                 if let Some(m) = parse_status_model(screen) {
                     row.model = m;
                 }
+                // transcript usage(정확)가 우선. tail 에 usage 가 없어 0 일 때만 상태바 %로 폴백
+                // (거노: 화면에 %가 없으면 arona 도 빈칸이던 문제 — transcript 가 1순위 소스).
+                if row.context_tokens == 0 {
+                    if let Some(pct) = parse_context_pct(screen) {
+                        row.context_pct = pct;
+                    }
+                }
+            }
+            // 1M 보정 — 상태바 모델이 "1M context" 면 한도를 1M 로 확정하고 pct 재계산. transcript
+            // 모델엔 [1m] 태그가 안 실려 토큰<200k 인 1M 세션이 200k 한도로 잘못 잡히던 걸 교정.
+            if row.model.to_ascii_lowercase().contains("1m") && row.context_limit < 1_000_000 {
+                row.context_limit = 1_000_000;
+            }
+            if row.context_tokens > 0 && row.context_limit > 0 {
+                row.context_pct = (((row.context_tokens as f64 / row.context_limit as f64) * 100.0).round() as u64).min(100) as u8;
             }
         }
         // git 브랜치 — pane cwd(transcript)에서 rev-parse. distinct cwd 1회씩(같은

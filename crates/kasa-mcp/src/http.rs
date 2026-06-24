@@ -1392,6 +1392,45 @@ async fn session_transcript_raw_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /subagents?surface=%N` — the subagents (Task/Agent) a pane's claude has
+/// spawned, newest first, from its `subagents/agent-*.meta.json` sidecars. The
+/// BA GUI lists these so the user can drill into a subagent's full dialogue.
+async fn subagents_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let surface = params.get("surface").map(String::as_str).unwrap_or("");
+    let body = if surface.is_empty() {
+        serde_json::json!({ "ok": false, "error": "surface=%N required" })
+    } else {
+        match backend.subagents(surface) {
+            Ok(list) => serde_json::json!({ "ok": true, "surface_id": surface, "subagents": list }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `GET /subagent-transcript-raw?surface=%N&agentId=<id>` — one subagent's
+/// transcript jsonl, raw and unparsed. Same `{ raw }` shape as `/transcript-raw`;
+/// the BA GUI renders it with the same per-tool path.
+async fn subagent_transcript_raw_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let surface = params.get("surface").map(String::as_str).unwrap_or("");
+    let agent_id = params.get("agentId").map(String::as_str).unwrap_or("");
+    let body = if surface.is_empty() || agent_id.is_empty() {
+        serde_json::json!({ "ok": false, "error": "surface=%N and agentId=<id> required" })
+    } else {
+        match backend.subagent_transcript_raw(surface, agent_id) {
+            Ok(raw) => serde_json::json!({ "ok": true, "surface_id": surface, "agent_id": agent_id, "raw": raw }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// `POST /paste-active` body:`{text, submit}` — inject `text` into the active
 /// pane's PTY (no `surface` — uses whatever pane is focused). `submit=false`
 /// (default) types the text without a trailing newline so the user reviews and
@@ -2048,6 +2087,8 @@ pub fn spawn_http_server(
                 let transcript_backend = backend.clone();
                 let transcript_raw_backend = backend.clone();
                 let session_transcript_raw_backend = backend.clone();
+                let subagents_backend = backend.clone();
+                let subagent_transcript_raw_backend = backend.clone();
                 let paste_active_backend = backend.clone();
                 let layout_backend = backend.clone();
                 let tell_god_backend = backend.clone();
@@ -2120,6 +2161,18 @@ pub fn spawn_http_server(
                         "/session-transcript-raw",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             session_transcript_raw_handler(session_transcript_raw_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/subagents",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            subagents_handler(subagents_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/subagent-transcript-raw",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            subagent_transcript_raw_handler(subagent_transcript_raw_backend.clone(), q)
                         }),
                     )
                     .route(

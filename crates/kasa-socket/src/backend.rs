@@ -231,9 +231,18 @@ pub struct PaneActivity {
     /// 소유한 우리가 상태바에서 직접 읽는다(robust). 0=상태바에 % 없음/미상.
     #[serde(default)]
     pub context_pct: u8,
+    /// 최신 assistant 턴의 컨텍스트 점유 토큰(input+cache_read+cache_creation). context_pct
+    /// 의 원자료 — socket.rs 가 상태바 모델로 1M 한도를 확정하면 이 값으로 pct 를 재계산한다.
+    #[serde(default)]
+    pub context_tokens: u64,
     /// git 브랜치 — pane cwd 에서 rev-parse. None=git repo 아님/미상. collab_board 가 채움.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// 이 pane 이 속한 kasaterm 윈도우(=방) 인덱스. board 가 활성 윈도우뿐 아니라 전
+    /// 윈도우 pane 을 실으면서 arona-ui 가 방별로 학생을 그룹핑하게 한다(거노: 좌측 통합).
+    /// 0 기본 — board 빌더(socket.rs)가 윈도우별로 채운다.
+    #[serde(default)]
+    pub window_idx: usize,
 }
 
 /// One live session from `claude agents --json` (Claude Code 2.1.162+).
@@ -634,6 +643,36 @@ pub trait Backend: Send + Sync {
     fn session_transcript_raw(&self, _id: &str, _cwd: Option<&str>) -> Result<String> {
         anyhow::bail!("session_transcript_raw unsupported by this backend")
     }
+
+    /// List the subagents (Task/Agent) a pane's claude has spawned, newest first.
+    /// Claude Code writes each subagent's full conversation to a sidecar file
+    /// `<session-dir>/subagents/agent-<id>.jsonl` (same jsonl format as the main
+    /// transcript) plus an `agent-<id>.meta.json` carrying agentType/description.
+    /// The BA GUI lists these to let the user drill into a subagent's dialogue.
+    /// Default: empty.
+    fn subagents(&self, _surface_id: &str) -> Result<Vec<SubagentInfo>> {
+        Ok(Vec::new())
+    }
+
+    /// Read one subagent's transcript jsonl as raw text (every line, unparsed) —
+    /// `<session-dir>/subagents/agent-<agent_id>.jsonl`. Same shape as
+    /// `transcript_raw`; the BA GUI renders it with the same per-tool path.
+    /// Default: empty.
+    fn subagent_transcript_raw(&self, _surface_id: &str, _agent_id: &str) -> Result<String> {
+        Ok(String::new())
+    }
+}
+
+/// One subagent (Task/Agent) spawned by a pane's claude, surfaced from its
+/// `subagents/agent-<id>.meta.json` sidecar. `agent_id` is the file stem (used
+/// to fetch its transcript), `mtime` is the transcript's last-modified unix secs
+/// (recency / activity ordering). Returned by `subagents`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentInfo {
+    pub agent_id: String,
+    pub agent_type: String,
+    pub description: String,
+    pub mtime: u64,
 }
 
 /// One turn of a pane's claude conversation, extracted from its transcript

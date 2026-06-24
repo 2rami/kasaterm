@@ -1,5 +1,5 @@
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchConversation, fetchTranscriptRaw, fetchSessionTranscriptRaw, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, pasteToActiveTerminal, revealTerminal, closeAgent, fetchSlashCommands, pasteImageToPane, swapCharacter, type Turn } from '@/lib/mcp';
+import { fetchConversation, fetchTranscriptRaw, fetchSessionTranscriptRaw, fetchSubagents, fetchSubagentTranscriptRaw, fetchPeek, fetchSentImages, imageFileUrl, openFile, sendToPane, pasteToActiveTerminal, revealTerminal, closeAgent, swapCharacter, type Turn } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { CharacterPicker } from './CharacterPicker';
 import { Markdown } from './Markdown';
@@ -8,7 +8,7 @@ import { ThinkingBlock } from './thinking-block';
 import { buildToolMap, type ToolMap } from '@/lib/build-tool-map';
 import type { SessionEvent } from '@/lib/types';
 import { AnsiText } from './AnsiText';
-import { useStore } from '@/store';
+import { useStore, type SubagentInfo } from '@/store';
 
 // 대화 본문 = transcript jsonl(/transcript-raw, raw SessionEvent[]). ccsv 파서·per-tool
 // 렌더를 이식해 Bash/Edit/Read 도구 호출이 카톡 버블 사이에 카드로 인터리브된다(거노:
@@ -17,99 +17,20 @@ import { useStore } from '@/store';
 // jsonl 로 멀쩡). /model·권한 프롬프트는 화면(peek) 폴백.
 
 // board.model 은 상태바 파싱 표시명("Opus 4.8 (1M context)") 우선 — claude- id 면 포맷,
-// 아니면(이미 표시명) 그대로. 1M context 변형이 그대로 보인다.
-const shortModel = (m?: string) =>
-  !m ? '' : !m.startsWith('claude-') ? m
-    : m.replace('claude-', '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/^./, (c) => c.toUpperCase());
+// 아니면(이미 표시명) 그대로. id 의 `[1m]` 마커(1M 컨텍스트 변형)는 떼고 " (1M)" 로 표기 —
+// 안 떼면 `-(\d+)-(\d+)$` 버전 포맷이 [1m] 접미사 때문에 안 먹어 "Opus-4-8[1m]" 로 깨졌다.
+const shortModel = (m?: string) => {
+  if (!m) return '';
+  if (!m.startsWith('claude-')) return m;
+  const has1m = /\[1m\]/i.test(m);
+  const base = m.replace(/\[1m\]/i, '').replace('claude-', '').replace(/-(\d+)-(\d+)$/, ' $1.$2').replace(/^./, (c) => c.toUpperCase());
+  return has1m ? `${base} (1M)` : base;
+};
 const shortCwd = (p?: string) => (!p ? '' : p.split('/').filter(Boolean).slice(-2).join('/'));
+// effort 표시 — ultracode 는 xhigh 와 thinking budget 이 같아 모델칩처럼 구분이 필요(거노). 프록시가
+// output_config.effort 로 "ultracode" 를 그대로 주므로, 그 값일 때만 풀어서 표기한다.
+const shortEffort = (e?: string | null) => (!e ? '' : e === 'ultracode' ? 'ultracode (xhigh+workflows)' : e);
 
-// 슬래시 자동완성 — claude-code 가 보여주는 내장 명령 전부(거노). 입력 '/co' →
-// /compact·/context·/cost·/config 필터. label=명령, desc=한 줄 설명(드롭다운 표시).
-const SLASH_COMMANDS: { cmd: string; desc: string }[] = [
-  // 세션
-  { cmd: '/help', desc: '도움말·명령 목록' },
-  { cmd: '/clear', desc: '새 대화 시작' },
-  { cmd: '/resume', desc: '이전 대화 복구·세션 선택' },
-  { cmd: '/branch', desc: '현 지점에서 대화 분기' },
-  { cmd: '/fork', desc: '백그라운드 서브에이전트로 분기 실행' },
-  { cmd: '/teleport', desc: '웹 세션을 터미널로 가져오기' },
-  { cmd: '/rename', desc: '세션 이름 설정' },
-  { cmd: '/recap', desc: '현 세션 1줄 요약' },
-  // 컨텍스트·메모리
-  { cmd: '/context', desc: '컨텍스트 사용량 시각화' },
-  { cmd: '/compact', desc: '대화 요약해 컨텍스트 확보' },
-  { cmd: '/memory', desc: 'CLAUDE.md 메모리 편집' },
-  { cmd: '/btw', desc: '히스토리 없이 빠른 질문' },
-  // 모델·설정
-  { cmd: '/model', desc: 'AI 모델 전환' },
-  { cmd: '/effort', desc: 'effort level 설정' },
-  { cmd: '/fast', desc: '빠른 모드 토글' },
-  { cmd: '/config', desc: '설정 인터페이스' },
-  { cmd: '/theme', desc: '색 테마 변경' },
-  { cmd: '/keybindings', desc: '키 단축키 편집' },
-  { cmd: '/advisor', desc: 'advisor(2차 모델 조언) 토글' },
-  { cmd: '/tui', desc: '터미널 UI 렌더러 설정' },
-  { cmd: '/voice', desc: '음성 받아쓰기 토글' },
-  // 코드 작업
-  { cmd: '/diff', desc: '미커밋 변경·per-turn diff' },
-  { cmd: '/code-review', desc: 'diff 검토(버그·개선점)' },
-  { cmd: '/simplify', desc: '코드 정리·개선' },
-  { cmd: '/review', desc: 'PR 로컬 검토' },
-  { cmd: '/security-review', desc: '보안 취약점 분석' },
-  { cmd: '/rewind', desc: '이전 지점으로 복구' },
-  { cmd: '/plan', desc: 'plan mode 진입' },
-  { cmd: '/ultraplan', desc: '클라우드 plan 세션' },
-  // 실행·검증
-  { cmd: '/run', desc: '앱 실행 후 변경 확인' },
-  { cmd: '/verify', desc: '변경 실제 동작 검증' },
-  // 병렬 작업
-  { cmd: '/agents', desc: '서브에이전트 매니저' },
-  { cmd: '/background', desc: '세션을 백그라운드로 detach' },
-  { cmd: '/tasks', desc: '백그라운드 작업 목록' },
-  { cmd: '/batch', desc: '대규모 변경 병렬 실행' },
-  { cmd: '/goal', desc: '조건 충족까지 자동 진행' },
-  { cmd: '/loop', desc: '프롬프트 반복 실행' },
-  { cmd: '/schedule', desc: '클라우드 routine 생성' },
-  // 협업·배포
-  { cmd: '/remote-control', desc: 'claude.ai 원격 제어' },
-  { cmd: '/desktop', desc: '데스크탑 앱에서 계속' },
-  { cmd: '/autofix-pr', desc: 'PR CI 실패 자동 수정' },
-  { cmd: '/workflows', desc: '워크플로우 진행 보기' },
-  // 권한·디렉터리
-  { cmd: '/permissions', desc: '도구 권한 규칙 관리' },
-  { cmd: '/cd', desc: 'working directory 이동' },
-  { cmd: '/add-dir', desc: 'working directory 추가' },
-  // 데이터·문서
-  { cmd: '/copy', desc: '마지막 응답 복사' },
-  { cmd: '/export', desc: '대화 내보내기' },
-  { cmd: '/feedback', desc: '버그 리포트·피드백' },
-  // MCP·통합
-  { cmd: '/mcp', desc: 'MCP 서버 관리·인증' },
-  { cmd: '/chrome', desc: 'Chrome의 Claude 설정' },
-  { cmd: '/install-github-app', desc: 'GitHub Actions 앱 설정' },
-  { cmd: '/hooks', desc: 'tool event 훅 설정' },
-  // 정보·진단
-  { cmd: '/status', desc: '버전·모델·계정 상태' },
-  { cmd: '/usage', desc: '비용·plan 사용량·통계' },
-  { cmd: '/cost', desc: '비용·사용량(=/usage)' },
-  { cmd: '/doctor', desc: '설치·설정 진단' },
-  { cmd: '/debug', desc: '디버그 로깅·문제 분석' },
-  { cmd: '/insights', desc: '세션 분석 리포트' },
-  { cmd: '/changelog', desc: '변경사항 버전 선택' },
-  // 프로젝트·초기화
-  { cmd: '/init', desc: 'CLAUDE.md 프로젝트 초기화' },
-  { cmd: '/skills', desc: '사용 가능 skills 목록' },
-  { cmd: '/plugin', desc: 'plugins 관리' },
-  { cmd: '/ide', desc: 'IDE 통합 관리' },
-  { cmd: '/terminal-setup', desc: '터미널 keybinding 설정' },
-  { cmd: '/statusline', desc: 'status line 설정' },
-  // 계정·플랫폼
-  { cmd: '/login', desc: 'Anthropic 로그인' },
-  { cmd: '/logout', desc: 'Anthropic 로그아웃' },
-  { cmd: '/upgrade', desc: 'plan 업그레이드' },
-  { cmd: '/privacy-settings', desc: '개인정보 설정' },
-  { cmd: '/mobile', desc: '모바일 앱 QR' },
-];
 
 // /context 터미널 화면에서 의미있는 라인만 추출(거노: GUI 새로 만들지 말고 터미널에 보이는
 // 거 잘 정리해서). 실측 포맷: "⛁ Custom agents: 602 tokens (0.1%)"·"⛶ Free space: 835.2k
@@ -146,7 +67,41 @@ function extractContext(screen: string): string | null {
 // 슬래시 카드/로컬출력 버블로 승격한다(아래 eventsToItems). 여기엔 그 외 케이스만 남긴다.
 function isSystemInjectionText(role: string, text: string): boolean {
   if (role !== 'user') return false;
-  return /\[Request interrupted|^\s*##\s*Context Usage|^\s*Caveat:\s/i.test(text);
+  // compact 직후 들어오는 요약 이어가기 메시지("This session is being continued…")는 user 턴이지만
+  // isMeta 가 없어 선생님 노란 버블로 통째로 샜다(거노: 엄청 길게 내가 보냈다고 뜸). 시작 문구로 격리.
+  return /\[Request interrupted|^\s*##\s*Context Usage|^\s*Caveat:\s|^\s*This session is being continued from a previous conversation/i.test(text);
+}
+
+// 프록시 strip_meta(proxy.rs)의 TS 미러 — transcript 경로(events)는 프록시를 안 거치니 여기서
+// 같은 격리를 한다. 시스템이 user 턴에 주입하는 메타 블록(task-notification·system-reminder·
+// caveat 등)을 통째로 제거. 다 지우고 빈 문자열이면 호출부가 그 버블을 스킵(거노: 서브에이전트
+// /background 알림이 내 노란 말풍선으로 샜다). command 태그는 parseSlashCommand 가 카드로 승격.
+const META_BLOCKS: [string, string][] = [
+  ['<system-reminder>', '</system-reminder>'],
+  ['<command-message>', '</command-message>'],
+  ['<command-name>', '</command-name>'],
+  ['<command-args>', '</command-args>'],
+  ['<local-command-stdout>', '</local-command-stdout>'],
+  ['<task-notification>', '</task-notification>'],
+  ['<local-command-caveat>', '</local-command-caveat>'],
+];
+function stripMeta(text: string): string {
+  let s = text;
+  for (const [open, close] of META_BLOCKS) {
+    for (;;) {
+      const start = s.indexOf(open);
+      if (start < 0) break;
+      const rel = s.indexOf(close, start + open.length);
+      if (rel < 0) { s = s.slice(0, start); break; } // 닫힘 없으면 이후 전부 버림(잘린 래퍼)
+      s = s.slice(0, start) + s.slice(rel + close.length);
+    }
+  }
+  // 이미지 플레이스홀더 줄 제거 — 실제 이미지는 image 블록으로 따로 렌더.
+  s = s.split('\n').filter((l) => {
+    const t = l.trim();
+    return !(t.startsWith('[Image: source:') || t.startsWith('[Image: original ') || (t.startsWith('[Image #') && t.endsWith(']')));
+  }).join('\n');
+  return s.trim();
 }
 
 // ccsv parseUserMessage 발췌 — user 텍스트의 <command-name>/<command-args>/<command-message>
@@ -238,6 +193,17 @@ function fmtTok(n: number): string {
   return String(n);
 }
 
+// ISO timestamp → "오후 2:47"(카톡식 메시지 시각). 파싱 실패면 빈 문자열.
+function fmtClock(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  let h = d.getHours();
+  const ampm = h < 12 ? '오전' : '오후';
+  h = h % 12; if (h === 0) h = 12;
+  return `${ampm} ${h}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 // transcript user 이벤트(또는 permission-mode 이벤트)에 박힌 현재 권한 모드를 역순으로
 // 찾는다. peek 화면 추정 없이 정확(거노: ccsv 방식). default(normal)는 칩 미표시 위해 null.
 function latestPermissionMode(events: SessionEvent[]): string | null {
@@ -279,31 +245,51 @@ function flattenSystem(ev: SessionEvent): string | null {
 // AskUserQuestion 은 기존 선택지 menu 카드가 전담하므로 제외. tool_result 블록은
 // buildToolMap 이 페어링해 카드 안에서 표시되니 별도 버블로 안 만든다.
 type RenderItem =
-  | { kind: 'bubble'; role: string; text: string; uuid?: string }
+  | { kind: 'bubble'; role: string; text: string; uuid?: string; ts?: string; cancelled?: boolean }
   | { kind: 'tool'; toolUse: { id?: string; name?: string; input?: unknown }; pair: ReturnType<ToolMap['get']> }
   | { kind: 'thinking'; text: string }
   | { kind: 'command'; commandName: string; commandArgs?: string; commandMessage?: string }
   | { kind: 'local-command'; stdout: string }
+  | { kind: 'qa'; qa: { q: string; a: string }[] }
+  | { kind: 'launch'; subagentType?: string; description?: string }
   | { kind: 'system'; text: string };
+
+// AskUserQuestion tool_result content("...answered: \"질문\"=\"답\". ...")에서 질문↔답 쌍 추출.
+// multiSelect 답은 한 쌍 안에 콤마로 묶여 온다. content 가 배열이면 text 블록을 잇는다.
+function parseAnsweredPairs(content: unknown): Map<string, string> {
+  const m = new Map<string, string>();
+  const s = typeof content === 'string'
+    ? content
+    : Array.isArray(content) ? content.map((x) => (x as { text?: string })?.text ?? '').join('') : '';
+  const re = /"([^"]+)"\s*=\s*"([^"]*)"/g;
+  let mm: RegExpExecArray | null;
+  while ((mm = re.exec(s))) m.set(mm[1], mm[2]);
+  return m;
+}
 
 // 한 user 텍스트가 슬래시 명령/로컬 출력 태그를 품으면 카드/버블 아이템으로, 아니면 일반
 // 버블로 푸시. 시스템 주입 잔여는 isSystemInjectionText 로 계속 숨긴다.
-function pushUserText(items: RenderItem[], text: string): void {
+function pushUserText(items: RenderItem[], text: string, ts?: string): void {
   const parsed = parseSlashCommand(text);
   if (parsed?.kind === 'command') {
     items.push({ kind: 'command', commandName: parsed.commandName, commandArgs: parsed.commandArgs, commandMessage: parsed.commandMessage });
   } else if (parsed?.kind === 'local-command') {
     if (parsed.stdout.trim()) items.push({ kind: 'local-command', stdout: parsed.stdout });
-  } else if (text.trim() && !isSystemInjectionText('user', text)) {
-    items.push({ kind: 'bubble', role: 'user', text });
+  } else {
+    // 메타 블록(task-notification 등) 제거 후 남는 게 있고 시스템 주입 잔여가 아닐 때만 버블로.
+    const clean = stripMeta(text);
+    if (clean && !isSystemInjectionText('user', clean)) {
+      items.push({ kind: 'bubble', role: 'user', text: clean, ts });
+    }
   }
 }
 
-function eventsToItems(events: SessionEvent[], toolMap: ToolMap): RenderItem[] {
+// keepSidechain: 서브에이전트 단독 뷰는 jsonl 전체가 isSidechain:true 이므로 살려야 한다.
+// 메인 대화에선 sidechain(소환된 서브에이전트 줄)이 노이즈라 기본 제외.
+function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain = false): RenderItem[] {
   const items: RenderItem[] = [];
   for (const ev of events) {
-    // 서브에이전트 분기(sidechain)는 메인 대화에 섞이는 노이즈라 제외.
-    if ((ev as { isSidechain?: boolean }).isSidechain) continue;
+    if (!keepSidechain && (ev as { isSidechain?: boolean }).isSidechain) continue;
     if (ev.type === 'system') {
       const text = flattenSystem(ev);
       if (text) items.push({ kind: 'system', text });
@@ -312,26 +298,112 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap): RenderItem[] {
     if (ev.type !== 'user' && ev.type !== 'assistant') continue;
     const role = ev.type;
     const uuid = (ev as { uuid?: string }).uuid;
+    const ts = (ev as { timestamp?: string }).timestamp; // 카톡식 메시지 시각
     const content = (ev as { message?: { content?: unknown } }).message?.content;
+    // esc 취소 — content 가 "[Request interrupted by user]" 마커인 user 이벤트. interruptedMessageId 는
+    // 대부분 null 이라 그걸로는 판정 못 했다(거노: 취소 표시가 안 됨) → 마커 텍스트로 판정한다. 직전으로
+    // 거슬러 assistant 텍스트 응답을 만나면 답이 나온 것(취소 아님), 그 전에 user 버블을 만나면 끊긴
+    // 프롬프트 → 취소 표시(노란색 말고 회색). thinking/tool/마커는 건너뛴다. 마커 자체는 안 띄운다.
+    if (role === 'user') {
+      const flat = typeof content === 'string' ? content
+        : Array.isArray(content) ? content.map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: string }).text ?? '') : '')).join(' ') : '';
+      if (/^\s*\[Request interrupted by user/.test(flat)) {
+        for (let k = items.length - 1; k >= 0; k--) {
+          const prev = items[k];
+          if (prev.kind === 'bubble' && prev.role === 'assistant') break;
+          if (prev.kind === 'bubble' && prev.role === 'user') { prev.cancelled = true; break; }
+        }
+        continue;
+      }
+    }
     if (typeof content === 'string') {
-      if (role === 'user') pushUserText(items, content);
-      else if (content.trim()) items.push({ kind: 'bubble', role, text: content, uuid });
+      if (role === 'user') pushUserText(items, content, ts);
+      else if (content.trim()) items.push({ kind: 'bubble', role, text: content, uuid, ts });
     } else if (Array.isArray(content)) {
       for (const block of content) {
         if (!block || typeof block !== 'object') continue;
         const b = block as { type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown };
         if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
-          if (role === 'user') pushUserText(items, b.text);
-          else items.push({ kind: 'bubble', role, text: b.text, uuid });
+          if (role === 'user') pushUserText(items, b.text, ts);
+          else items.push({ kind: 'bubble', role, text: b.text, uuid, ts });
         } else if (b.type === 'thinking' && typeof b.thinking === 'string' && b.thinking.trim()) {
           items.push({ kind: 'thinking', text: b.thinking });
-        } else if (b.type === 'tool_use' && b.name !== 'AskUserQuestion') {
+        } else if (b.type === 'tool_use' && b.name === 'AskUserQuestion') {
+          // 답변 완료된 질문만 "선생님이 답함" 카드로(진행 중 미답은 라이브 menu 카드가 전담).
+          const pair = b.id ? toolMap.get(b.id) : undefined;
+          const answered = pair?.toolResult?.content;
+          if (answered != null) {
+            const ans = parseAnsweredPairs(answered);
+            const qsRaw = (b.input as { questions?: unknown })?.questions;
+            const qs = Array.isArray(qsRaw) ? (qsRaw as { question?: string; header?: string }[]) : [];
+            const qa = qs.map((q) => ({ q: q.question ?? q.header ?? '질문', a: ans.get(q.question ?? '') ?? ans.get(q.header ?? '') ?? '—' }));
+            if (qa.length) items.push({ kind: 'qa', qa });
+          }
+        } else if (b.type === 'tool_use' && b.name === 'Agent') {
+          // 서브에이전트 소환 — 전체 카드(프롬프트/결과) 대신 마커 한 줄(상세는 ↳ 드릴인).
+          const inp = b.input as { subagent_type?: string; description?: string };
+          items.push({ kind: 'launch', subagentType: inp?.subagent_type, description: inp?.description });
+        } else if (b.type === 'tool_use') {
           items.push({ kind: 'tool', toolUse: { id: b.id, name: b.name, input: b.input }, pair: b.id ? toolMap.get(b.id) : undefined });
         }
       }
     }
   }
   return items;
+}
+
+// 작업 중 큐(예약)된 메시지 — claude 가 enqueue/remove 를 transcript 의 `queue-operation`
+// 이벤트로 기록한다(거노: 작업 중 보낸 예약 메시지가 GUI 에 안 떴다). FIFO 로 enqueue push /
+// remove shift → 남은 게 현재 대기 중. task-notification 등 시스템 주입도 enqueue 되니
+// stripMeta 후 빈 건 제외하고, 사람이 친 진짜 텍스트만 "예약" 버블로 띄운다.
+function queuedMessages(events: SessionEvent[]): { text: string; ts?: string }[] {
+  const q: { text: string; ts?: string }[] = [];
+  for (const ev of events) {
+    if ((ev as { type?: string }).type !== 'queue-operation') continue;
+    const op = (ev as { operation?: string }).operation;
+    if (op === 'enqueue') q.push({ text: typeof (ev as { content?: unknown }).content === 'string' ? (ev as { content: string }).content : '', ts: (ev as { timestamp?: string }).timestamp });
+    else if (op === 'remove') q.shift();
+  }
+  // compact 이어가기 요약("This session is being continued…")도 큐로 들어와 노란 예약 버블로
+  // 샜다(거노: 엄청 길게 내가 보냈다고 뜸) → stripMeta 후 시스템 주입 격리까지 적용.
+  return q.map((e) => ({ text: stripMeta(e.text), ts: e.ts })).filter((e) => e.text && !isSystemInjectionText('user', e.text));
+}
+
+// 예약(큐) 메시지가 "보낸 시각" — clean 텍스트 → 첫 enqueue timestamp. 큐가 나중에 처리돼 본문
+// user 버블로 들어가면 표시 시각이 "처리 시각"이라, 재시작 후 큐가 한꺼번에 처리되면 다 끝에 몰려
+// 보였다(거노: 대화 사이에 안 껴있다). 이 맵으로 본문 버블 시각을 보낸(enqueue) 시각으로 되돌린다.
+function enqueueTimes(events: SessionEvent[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const ev of events) {
+    if ((ev as { type?: string }).type !== 'queue-operation') continue;
+    if ((ev as { operation?: string }).operation !== 'enqueue') continue;
+    const raw = typeof (ev as { content?: unknown }).content === 'string' ? (ev as { content: string }).content : '';
+    const clean = stripMeta(raw).trim();
+    const ts = (ev as { timestamp?: string }).timestamp;
+    if (clean && ts && !m.has(clean)) m.set(clean, ts);
+  }
+  return m;
+}
+
+// 큐↔본문 매칭용 정규화 — 처리된 예약이 큐에서 안 빠져 맨 아래 우르르 남았다(거노). 공백 collapse +
+// 이미지 토큰([Image #N]) 제거로 본문 user 버블과 느슨하게 비교한다(재시작 시 remove 누락·텍스트
+// 분리로 정확 일치가 안 됐다). 정규화 후 빈 문자열이면 매칭하지 않는다(false positive 방지).
+function normForMatch(t: string): string {
+  return t.replace(/\[Image #\d+\]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// 마지막 /effort 설정값 — ultracode 는 API 에 xhigh 로 실려(공식: ultracode 라는 effort 값은 없음,
+// 최대 xhigh + 워크플로 오케스트레이션은 CLI 측) 프록시로는 xhigh 와 구분 불가다. 대신 /effort 실행
+// stdout("Set effort level to ultracode")이 transcript 에 남으니 그걸 역순으로 찾아 최신값을 잡는다.
+function lastSetEffort(events: SessionEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const c = (events[i] as { message?: { content?: unknown } }).message?.content;
+    const flat = typeof c === 'string' ? c
+      : Array.isArray(c) ? c.map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: string }).text ?? '') : '')).join(' ') : '';
+    const m = flat.match(/Set effort level to (\w+)/);
+    if (m) return m[1].toLowerCase();
+  }
+  return null;
 }
 
 // ANSI 색(SGR) 렌더는 ./AnsiText 모듈로 분리 — bash/read 카드 resultView 와 공용.
@@ -414,6 +486,15 @@ export interface TerminalPeekPanelProps {
    *  읽어 대화만 렌더. 입력창·라이브 폴링·학생 액션은 끄고, 하단에 '현재 터미널에 입력'
    *  이어가기 액션바를 띄운다. 있으면 surfaceId 는 빈 값('')으로 들어온다. */
   session?: { id: string; cwd: string; label: string };
+  /** 서브에이전트 드릴인 — 부모 pane(parentSurface)이 소환한 서브에이전트(agentId)의
+   *  대화를 따로 보는 모드. 읽기 전용(입력 없음). 있으면 surfaceId 는 빈 값('')으로 들어온다. */
+  subagent?: { parentSurface: string; agentId: string; agentType: string; label: string };
+  /** 메타칸 서브에이전트 칩 클릭 → 부모가 별도 타일로 그 서브에이전트 대화를 연다. */
+  onOpenSubagent?: (parentSurface: string, agentId: string, agentType: string, label: string) => void;
+  /** 제목 더블클릭 → 이 타일을 임시 전체화면(터미널 toggle_pane_zoom 의 arona 판). */
+  onToggleZoom?: () => void;
+  /** 현재 이 타일이 줌(전체화면) 상태 — 헤더 아이콘 표시용. */
+  zoomed?: boolean;
 }
 
 // 학생 대화 패널 — 메신저처럼 대화만(선생님 프롬프트 오른쪽·학생 답변 왼쪽).
@@ -464,7 +545,7 @@ function parseSpinner(screen: string): string | null {
 
 // effort level — claude 상태바 "high · /effort" 파싱(거노: effort 도 모델 옆에). 없으면 null.
 function parseEffort(screen: string): string | null {
-  const m = screen.match(/\b(low|medium|high|xhigh|max)\b\s*·\s*\/effort/i);
+  const m = screen.match(/\b(low|medium|high|xhigh|max|ultracode)\b\s*·\s*\/effort/i);
   return m ? m[1].toLowerCase() : null;
 }
 
@@ -498,13 +579,190 @@ function parseEffortMenu(screen: string): number | null {
   return current;
 }
 
+// 말풍선 본문 — 텍스트 + 첨부 이미지. claude 가 붙여넣은 이미지는 transcript 에
+// "[Image: source: <abs-path>]" 텍스트로 남는다 → 그 토큰을 실제 <img> 로 치환(거노:
+// 이미지가 텍스트로 보이던 것). 이미지 토큰이 없으면 기존 렌더(user=span / assistant=md).
+// 경로는 실제 이미지 확장자로 끝나고 따옴표·꺾쇠·개행이 없어야 한다 — transcript 가
+// 이 토큰 포맷을 다루는 소스코드/문서를 담을 때 "[Image: source: ..."] 문자열이 코드
+// 한복판에서 잡혀 가짜 경로로 로드되던 오탐(400) 차단.
+const IMG_TOKEN = /\[Image:\s*source:\s*([^\]\n"'`<>]+\.(?:png|jpe?g|gif|webp|bmp))\s*\]/gi;
+function BubbleBody({ text, mine }: { text: string; mine: boolean }) {
+  const plain = (t: string, key: string) => mine
+    ? <span key={key} style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{t}</span>
+    : <Markdown key={key} text={t} />;
+  if (!IMG_TOKEN.test(text)) return plain(text, 't');
+  IMG_TOKEN.lastIndex = 0;
+  const parts: React.ReactNode[] = [];
+  let last = 0, m: RegExpExecArray | null, k = 0;
+  while ((m = IMG_TOKEN.exec(text)) !== null) {
+    const before = text.slice(last, m.index);
+    if (before.trim()) parts.push(plain(before, `t${k}`));
+    parts.push(
+      <img key={`i${k}`} src={imageFileUrl(m[1].trim())} alt="" style={{
+        display: 'block', maxWidth: '100%', maxHeight: 240, borderRadius: 10,
+        objectFit: 'contain', marginTop: parts.length ? 6 : 0,
+      }} />
+    );
+    last = m.index + m[0].length; k++;
+  }
+  const tail = text.slice(last);
+  if (tail.trim()) parts.push(plain(tail, 'tt'));
+  return <>{parts}</>;
+}
+
+// 입력창 폐기 자리에 그 학생의 현재 작업(TaskCreate)을 고정 — 터미널 상단 task 트리와 동형.
+// 진행중(채운 원) → 대기(빈 원) → 완료(체크) 순. 소스는 transcript tool_use(TaskCreate/Update):
+// /pane-tasks 는 task store 디렉토리 id 가 transcript uuid 와 달라 매핑이 깨져 빈값이 됐다(거노).
+interface StripTask { id: string; subject: string; status: string }
+const TASK_ORDER: Record<string, number> = { in_progress: 0, pending: 1, completed: 2 };
+// transcript 의 TaskCreate("Task #N created…" result 로 id) + TaskUpdate(taskId/status)를 누적 재구성.
+function tasksFromEvents(events: SessionEvent[], toolMap: ToolMap): StripTask[] {
+  // compact 이어가기 경계 이후만 — Task #N 번호가 compact 마다 리셋돼 충돌하고, 옛 세대의 완료
+  // 태스크가 계속 끌려와 stale 했다(거노: 업무탭엔 없는데 하단엔 옛 태스크가 떴다). 마지막 경계부터.
+  let start = 0;
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    if ((ev as { isCompactSummary?: boolean }).isCompactSummary) { start = i + 1; continue; }
+    const c = (ev as { message?: { content?: unknown } }).message?.content;
+    const flat = typeof c === 'string' ? c : Array.isArray(c) ? c.map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: string }).text ?? '') : '')).join(' ') : '';
+    if (/^\s*This session is being continued from a previous conversation/.test(flat)) start = i + 1;
+  }
+  const tasks = new Map<string, StripTask>();
+  const resultText = (id?: string): string => {
+    if (!id) return '';
+    const c = toolMap.get(id)?.toolResult?.content;
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) return c.map((x) => (x && typeof x === 'object' && 'text' in x ? String((x as { text?: string }).text ?? '') : '')).join(' ');
+    return '';
+  };
+  for (const ev of events.slice(start)) {
+    const content = (ev as { message?: { content?: unknown } }).message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      const b = block as { type?: string; id?: string; name?: string; input?: unknown };
+      if (b.type !== 'tool_use') continue;
+      if (b.name === 'TaskCreate') {
+        const subject = (b.input as { subject?: string })?.subject ?? '';
+        const m = resultText(b.id).match(/Task #(\d+)/);
+        if (m) tasks.set(m[1], { id: m[1], subject, status: 'pending' });
+      } else if (b.name === 'TaskUpdate') {
+        const inp = b.input as { taskId?: string; status?: string; subject?: string };
+        const t = inp?.taskId != null ? tasks.get(String(inp.taskId)) : undefined;
+        if (t) { if (inp.status) t.status = inp.status; if (inp.subject) t.subject = inp.subject; }
+      }
+    }
+  }
+  return [...tasks.values()];
+}
+function TaskStrip({ tasks }: { tasks: StripTask[] }) {
+  const [collapsed, setCollapsed] = useState(false); // 헤더 클릭으로 목록 접기/펼치기(거노)
+  const active = useMemo(
+    () => tasks
+      .filter((t) => t.status !== 'deleted')
+      .sort((a, b) => (TASK_ORDER[a.status] ?? 3) - (TASK_ORDER[b.status] ?? 3)),
+    [tasks],
+  );
+  // 진행/대기 작업이 하나도 없으면(다 완료거나 비었으면) 목록 대신 안내만 — 끝난 태스크가 계속
+  // 떠 "지금 할 게 없는데 태스크가 있다"는 혼란을 막는다(거노).
+  const hasLive = active.some((t) => t.status === 'in_progress' || t.status === 'pending');
+  if (!hasLive) return (
+    <div style={{
+      padding: '9px 12px', background: 'var(--cth-cream-50)', borderTop: '1px solid var(--cth-cream-200)',
+      fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', textAlign: 'center',
+    }}>읽기 전용 뷰어 · 입력은 터미널에서</div>
+  );
+  const done = active.filter((t) => t.status === 'completed').length;
+  return (
+    <div style={{
+      borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
+      maxHeight: 168, display: 'flex', flexDirection: 'column',
+    }}>
+      <button onClick={() => setCollapsed((c) => !c)} title={collapsed ? '작업 펼치기' : '작업 접기'} style={{
+        padding: '7px 12px 4px', fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700,
+        letterSpacing: 0.3, color: 'var(--cth-ink-300)', textTransform: 'uppercase',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        border: 'none', background: 'transparent', cursor: 'pointer', width: '100%',
+      }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+          <svg width="9" height="9" viewBox="0 0 16 16" style={{ transform: collapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 120ms ease' }}><path d="M3 6l5 5 5-5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          현재 작업
+        </span>
+        <span style={{ fontWeight: 600 }}>{done}/{active.length}</span>
+      </button>
+      {!collapsed && (
+      <div style={{ overflowY: 'auto', padding: '0 12px 8px', display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {active.map((t) => {
+          const ip = t.status === 'in_progress';
+          const cp = t.status === 'completed';
+          return (
+            <div key={t.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 7, lineHeight: 1.35 }}>
+              <span style={{ flexShrink: 0, marginTop: 2, width: 13, height: 13, display: 'inline-flex' }}>
+                {cp ? (
+                  <svg width="13" height="13" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--cth-mint)" /><path d="M4.5 8.2l2.2 2.2 4.8-4.8" stroke="#fff" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                ) : ip ? (
+                  <svg width="13" height="13" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="var(--cth-sky)" /><circle cx="8" cy="8" r="2.6" fill="#fff" /></svg>
+                ) : (
+                  <svg width="13" height="13" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="var(--cth-ink-300)" strokeWidth="1.6" /></svg>
+                )}
+              </span>
+              <span style={{
+                fontFamily: 'var(--cth-font-ui)', fontSize: 12,
+                fontWeight: ip ? 700 : 500,
+                color: cp ? 'var(--cth-ink-300)' : ip ? 'var(--cth-ink-900)' : 'var(--cth-ink-700)',
+              }}>{t.subject}</span>
+            </div>
+          );
+        })}
+      </div>
+      )}
+    </div>
+  );
+}
+
+// 학생별 인연·재화 strip — 전역 Footer 합계 대신 그 학생 값을 채팅방 하단에(거노: 통합).
+// 인연 = 컨텍스트 사용량%, 재화 = 누적 입력토큰(💎)·비용$(🪙).
+function StudentStats({ contextPct = 0, tokensIn = 0, costUsd = 0 }: { contextPct?: number; tokensIn?: number; costUsd?: number }) {
+  const pct = Math.max(0, Math.min(100, Math.round(contextPct)));
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
+      <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
+        <path d="M8 13.5 2.5 8a3 3 0 0 1 4.2-4.2L8 5l1.3-1.2A3 3 0 0 1 13.5 8L8 13.5Z" fill="var(--cth-coral)" stroke="var(--cth-ink-900)" strokeWidth="1.2" strokeLinejoin="round" />
+      </svg>
+      <div title={`컨텍스트 사용량 ${pct}%`} style={{ position: 'relative', flex: 1, minWidth: 36, maxWidth: 130, height: 8, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', inset: 0, width: `${pct}%`, background: 'linear-gradient(90deg,#FF8FB1,#FF6B6B)', borderRadius: 999, transition: 'width .5s cubic-bezier(0.22,1,0.36,1)' }} />
+      </div>
+      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)', whiteSpace: 'nowrap' }}>{pct}%</span>
+      <div style={{ flex: 1 }} />
+      <span title={`누적 입력 ${tokensIn.toLocaleString()} 토큰`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, color: 'var(--cth-ink-700)' }}>
+        <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}><path d="M5 2h6l3 4-6 8-6-8 3-4Z" fill="var(--cth-sky)" stroke="var(--cth-ink-900)" strokeWidth="1.2" strokeLinejoin="round" /></svg>
+        {fmtTok(tokensIn)}
+      </span>
+      <span title={`누적 비용 $${costUsd.toFixed(4)}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, color: 'var(--cth-ink-700)' }}>
+        <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}><circle cx="8" cy="8" r="6.2" fill="var(--cth-lemon)" stroke="var(--cth-ink-900)" strokeWidth="1.2" /><path d="M8 5.5v5M6.5 8h3" stroke="var(--cth-ink-900)" strokeWidth="1.1" opacity="0.7" /></svg>
+        ${costUsd.toFixed(2)}
+      </span>
+    </div>
+  );
+}
+
 // 화면(raw 터미널)은 '터미널 보기'로 보면 되므로 여기엔 두지 않는다.
-export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session }: TerminalPeekPanelProps) {
+export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session, subagent, onOpenSubagent, onToggleZoom, zoomed }: TerminalPeekPanelProps) {
   const offline = !!session;
+  const isSub = !!subagent;
+  const [subList, setSubList] = useState<SubagentInfo[]>([]);
   const agent = useStore((s) => s.agents.find((a) => a.id === surfaceId));
+  // 서브 모드: 부모(오케스트레이터) 학생을 board 에서 조회 — user 턴 아바타로 쓴다.
+  const parentAgent = useStore((s) => s.agents.find((a) => a.id === (subagent?.parentSurface ?? '__none__')));
   // 아바타는 board(라이브) 캐릭터명 우선 — title(클릭 시점 고정)이 pane id('%3')로 깨졌을 때
   // 보강(거노: 프사 %). board 도 id 면 SpritePortrait 가 사람 실루엣으로 막는다.
-  const avatarChar = agent?.character && !/^%?\d+$/.test(agent.character) ? agent.character : title;
+  // 서브 모드의 assistant 턴은 학생이 아닌 서브에이전트라 agentType 으로(미도리와 구분 = 실루엣).
+  const avatarChar = isSub
+    ? (subagent!.agentType || subagent!.label || 'agent')
+    : (agent?.character && !/^%?\d+$/.test(agent.character) ? agent.character : title);
+  // 서브 모드 user(부모 지시) 턴 아바타 — 부모 학생 스프라이트. 없으면 title 의 prefix(부모명).
+  const parentAvatarChar = parentAgent?.character && !/^%?\d+$/.test(parentAgent.character)
+    ? parentAgent.character
+    : (title.split('↳')[0].trim() || title);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [streaming, setStreaming] = useState('');
   // 하이브리드 폴백: jsonl(events)이 아직 안 써진 진행 중 구간엔 캡처 프록시의 텍스트
@@ -517,32 +775,23 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   const [loaded, setLoaded] = useState(false); // 첫 폴 완료 — 빈 상태 문구 분기
   const [spinner, setSpinner] = useState<string | null>(null); // claude 라이브 작업 표시(verb·경과초)
   const [effort, setEffort] = useState<string | null>(null); // effort level(상태바 파싱) — 모델 옆 칩
-  const [convTokensOut, setConvTokensOut] = useState(0); // 진행 중 응답 누적 출력 토큰(프록시 SSE 라이브) — spinner ↓N
   const [mode, setMode] = useState<string | null>(null); // 권한 모드(transcript permissionMode) — 헤더 칩
   const [convModel, setConvModel] = useState(''); // 캡처 프록시가 요청에서 잡은 model(거노: 화면스크랩 대신 프록시 소스)
-  const [dragOver, setDragOver] = useState(false); // 이미지 드래그 오버 — 점선 드롭존 오버레이
-  const [pendingPreviews, setPendingPreviews] = useState<string[]>([]); // staged 이미지 미리보기 data URL(여러 개)
-  const hasPending = pendingPreviews.length > 0;
   const [effortMenu, setEffortMenu] = useState<number | null>(null); // /effort 슬라이더 현재 idx(뜬 동안)
-  const [input, setInput] = useState('');
-  const [sending, setSending] = useState(false);
+  const [metaOpen, setMetaOpen] = useState(false); // 하단 메타 칸 펼침 — 평소 접힘, 누르면 모델·effort·권한·브랜치·cwd·서브에이전트(거노)
   const [flash, setFlash] = useState<'ok' | 'err' | null>(null);
   // window.confirm 은 wry webview(macOS)에서 무반응 — 자체 확인 모달로 종료·compact 확인(거노).
   const [confirm, setConfirm] = useState<{ msg: string; sub?: string; danger?: boolean; yes: string; onYes: () => void } | null>(null);
   const [charPicker, setCharPicker] = useState(false); // 캐릭터 변경 팝업(헤더 버튼)
+  const [titleHover, setTitleHover] = useState(false); // 제목 더블클릭 줌 — hover 시 인터랙션 힌트
   const [atTop, setAtTop] = useState(true); // 스크롤 맨위 — true 면 ↑ 버튼 숨김
   const [atBottom, setAtBottom] = useState(true); // 스크롤 맨아래 — true 면 ↓ 버튼 숨김
   // 슬래시 자동완성 — 입력이 '/' 로 시작하면 claude-code 명령 드롭다운(↑↓ 선택·Tab/Enter 완성).
-  const [slashIdx, setSlashIdx] = useState(0);
   const [navIdx, setNavIdx] = useState(0); // 선택지 카드 키보드 네비(↑↓) 하이라이트
-  // 동적 슬래시(스킬·커스텀·플러그인) — 디스크 스캔. 정적 내장 목록과 병합(거노: 스킬 다).
-  const [dynamicSlash, setDynamicSlash] = useState<{ cmd: string; desc: string }[]>([]);
-  useEffect(() => { void fetchSlashCommands().then(setDynamicSlash); }, []);
   // /context 출력 정리본 — GUI 모달 새로 만들지 말고(거노) 터미널 /context 화면(peek)을
   // 정리해 대화창 안에 보여준다. null=비활성, 그 외=정리된 그리드 텍스트.
   const [ctxView, setCtxView] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
   const atBottomRef = useRef(true); // 사용자가 위로 스크롤했으면 자동 하단고정 멈춤
   // ESC/Enter 로 메뉴를 닫은 직후 ~700ms 는 화면 재파싱으로 카드를 다시 띄우지 않는다
   // (거노: GUI 에서 esc 눌러도 안 멈춤 — tick 이 stale 화면에서 메뉴를 재감지해 재등장).
@@ -571,10 +820,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     setMenu(null);
     setSpinner(null);
     lastSpinnerRef.current = 0;
-    setConvTokensOut(0);
     setMode(null);
     setImages([]);
-    setInput('');
     // 오프라인(과거) 세션: jsonl 은 더 이상 안 변하니 1회만 읽고 폴링 안 한다. 라이브
     // 소스(conversation/peek/sent-images/menu/spinner)는 죽은 세션엔 없어 전부 skip.
     if (offline && session) {
@@ -584,6 +831,19 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         setLoaded(true);
       });
       return () => { stopped = true; };
+    }
+    // 서브에이전트 드릴인: 부모 pane 의 subagents/agent-<id>.jsonl 을 폴링(진행 중이면
+    // 계속 append 되므로). 라이브 소스(conv/peek/menu)는 이 surface 엔 없어 skip.
+    if (subagent) {
+      const tickSub = async () => {
+        const evts = await fetchSubagentTranscriptRaw(subagent.parentSurface, subagent.agentId);
+        if (stopped) return;
+        setEvents(evts);
+        setLoaded(true);
+      };
+      void tickSub();
+      const ivSub = setInterval(tickSub, 1500);
+      return () => { stopped = true; clearInterval(ivSub); };
     }
     const tick = async () => {
       // 세션 경계: transcript 첫 이벤트 ts = 현재 세션 시작. 이전 세션 이미지(sent-images.jsonl
@@ -635,7 +895,6 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       const sp = parseSpinner(screen);
       if (sp) lastSpinnerRef.current = Date.now();
       setSpinner((prev) => sp ?? (Date.now() - lastSpinnerRef.current < 4000 ? prev : null));
-      setConvTokensOut(conv.tokens_out ?? 0); // 진행 중 응답 누적 출력 토큰(프록시 SSE 라이브)
       setMode(latestPermissionMode(evts)); // 권한 모드 — transcript permissionMode(peek 추정 안 함)
       setEffort(conv.effort || parseEffort(screen)); // 캡처 프록시 effort(output_config.effort) 우선, 폴백 화면파싱
       setConvModel(conv.model || ''); // 프록시가 요청에서 잡은 model — /model 전환 시 다음 요청에 반영(실시간 소스)
@@ -650,7 +909,18 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     void tick();
     const iv = setInterval(tick, 1500);
     return () => { stopped = true; clearInterval(iv); };
-  }, [surfaceId, offline, session?.id, session?.cwd]);
+  }, [surfaceId, offline, session?.id, session?.cwd, subagent?.parentSurface, subagent?.agentId]);
+
+  // 메타칸 드릴인 목록 — 라이브 부모 pane 일 때만 그 pane 의 서브에이전트(완료분 포함)를
+  // 폴링. subagents/ 디렉토리 읽기라 가볍다. 오프라인/서브에이전트 모드엔 불필요.
+  useEffect(() => {
+    if (offline || isSub || !surfaceId) { setSubList([]); return; }
+    let stopped = false;
+    const load = () => { void fetchSubagents(surfaceId).then((s) => { if (!stopped) setSubList(s); }); };
+    load();
+    const iv = setInterval(load, 3000);
+    return () => { stopped = true; clearInterval(iv); };
+  }, [offline, isSub, surfaceId]);
 
   // 새 내용 도착 시, 사용자가 하단에 있을 때만 따라내린다(위로 스크롤 중이면 안 건드림 —
   // 거노: 스크롤 올리면 자꾸 내려가던 버그).
@@ -686,116 +956,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     setAtTop(el.scrollTop < 48);
   };
 
-  // 실시간 미러: 웹 입력을 칠 때마다 터미널 PTY 라인과 동기화한다(거노 요청 —
-  // "웹에 치면 터미널에 실시간으로"). Ctrl-U(\x15)로 줄을 비우고 현재 입력 전체를
-  // 재전송(submit=false). 매 글자 전체 재전송이라 백스페이스·편집·IME 까지 self-heal.
-  // \x15 가 claude TUI(Ink)에서 줄을 비우는 건 submit 경로에서 검증됨.
-  const mirror = (next: string) => {
-    setInput(next);
-    setSlashIdx(0);
-    // 이미지 staged 동안엔 \x15 미러를 끈다 — claude 입력에 붙은 [Image] 가 지워지면 안 됨.
-    // 텍스트는 제출 때 한꺼번에 보낸다(거노: 첨부 중엔 라이브 미러 잠시 off).
-    if (hasPending) return;
-    void sendToPane(surfaceId, '\x15' + next, false);
-  };
-
-  // 제출: 미러로 이미 친 라인을 submit_payload(\x15 클리어 + 괄호붙여넣기 + CR)로 한
-  // 번에 보낸다(submit=true). 서버가 이때만 messages.jsonl 에 깨끗한 텍스트로 1회 영속
-  // — 미러 partial(submit=false)은 기록 안 돼 모모톡에 한 자씩 쌓이던 버그가 사라진다.
-  // 빈 줄(프롬프트 확인용 Enter)은 영속 없이 bare CR.
-  const submit = async () => {
-    if (sending) return;
-    const text = input;
-    // GUI 가 네이티브로 처리하는 인터랙티브 명령 — 터미널에 보내면 그리드가 대화창에 안
-    // 잡히고 다음 프롬프트에서 깨져 보였다(거노). 미러 라인(\x15)을 비우고 GUI 패널로.
-    if (text.trim() === '/context') {
-      setInput('');
-      void sendToPane(surfaceId, '/context', true, false); // 터미널에 /context → peek 정리해 대화창에
-      setCtxView('컨텍스트 불러오는 중…');
-      return;
-    }
-    setSending(true);
-    let ok: boolean;
-    if (hasPending) {
-      // 이미지들은 drop 때 이미 claude 에 paste 됨(미러 off 라 보존). 텍스트가 있으면 그
-      // [Image] 뒤에 append(미러 안 탔으니 \x15 없이) 후 bare CR 로 제출. 전송된 user
-      // 메시지(텍스트+이미지)는 프록시가 캡처해 말풍선에 뜬다(거노).
-      if (text.trim()) await sendToPane(surfaceId, text, false);
-      await new Promise((r) => setTimeout(r, 80));
-      ok = await sendToPane(surfaceId, '\r', false);
-      setPendingPreviews([]);
-    } else {
-      ok = text
-        ? await sendToPane(surfaceId, text, true, false) // 학생별 대화 — 모모톡에 안 남김
-        : await sendToPane(surfaceId, '\r', false);
-    }
-    setSending(false);
-    setFlash(ok ? 'ok' : 'err');
-    setTimeout(() => setFlash(null), 1200);
-    if (ok) {
-      setInput('');
-      // 작업 중 미리 보낸 메시지도 즉시 말풍선으로(거노) — 다음 폴에서 transcript 에 같은
-      // 텍스트가 뜨면 pendingChoices 가 중복 제거한다.
-      if (text.trim()) setMyChoices((p) => [...p, { role: 'user', text: text.trim() }]);
-    }
-    inputRef.current?.focus();
-  };
-
   // 이미지 드롭(아로나 대화창 어디든) → 그 학생 claude 에 첨부. dataTransfer 의 첫
-  // 이미지 파일을 raw 바이트로 POST /paste-image → kasaterm 이 시스템 클립보드+Ctrl+V 로
-  // 그 pane 에 [Image] 칩 첨부(webview 라 경로가 없어 바이트 전송).
-  const onDropImage = async (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    // WKWebView(wry) 가 떨군 File 은 .type 이 빈 문자열일 때가 많아 type 필터로 걸러지면
-    // 첨부가 안 됐다(거노 실측). type 또는 확장자로 보고, 둘 다 애매하면 첫 파일.
-    const files = Array.from(e.dataTransfer?.files ?? []);
-    const file =
-      files.find((f) => f.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name)) ??
-      files[0];
-    // 드롭한 이미지 전부 처리(여러 개 다 보이게 — 거노). 각각 claude 에 순차 paste 해
-    // 터미널에 [Image #1][Image #2]… 로 다 뜨고, 입력창엔 썸네일이 줄지어 쌓인다.
-    const list = files.filter((f) => f.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(f.name));
-    const imgs = list.length ? list : (file ? [file] : []);
-    if (!imgs.length) return;
-    for (const f of imgs) {
-      const reader = new FileReader();
-      reader.onload = () => setPendingPreviews((prev) => [...prev, typeof reader.result === 'string' ? reader.result : '']);
-      reader.readAsDataURL(f);
-      await pasteImageToPane(surfaceId, f); // drop 즉시 claude 에 append(터미널 표시)
-      await new Promise((r) => setTimeout(r, 200)); // 클립보드 덮어쓰기 race 방지 — 순차 paste
-    }
-    inputRef.current?.focus();
-  };
-  // 드래그가 파일을 싣고 있을 때만 드롭존 표시(텍스트 드래그·셀렉션 무시).
-  const dragHasFile = (e: React.DragEvent) =>
-    Array.from(e.dataTransfer?.types ?? []).includes('Files');
-
-  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    // 슬래시 드롭다운 열림 — ↑↓ 후보 이동, Tab/Enter 완성, Esc 닫기(우선 처리).
-    if (slashOpen) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIdx((i) => Math.min(slashMatches.length - 1, i + 1)); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIdx((i) => Math.max(0, i - 1)); return; }
-      if (e.key === 'Tab' || e.key === 'Enter') {
-        e.preventDefault();
-        const pick = slashMatches[Math.min(slashIdx, slashMatches.length - 1)];
-        if (pick) mirror(pick.cmd + ' '); // 완성 후 인자 입력 or Enter 한 번 더로 제출
-        return;
-      }
-      if (e.key === 'Escape') { e.preventDefault(); setInput(''); void sendToPane(surfaceId, '\x15', false); return; }
-    }
-    // 평소 ESC = claude 작업중지(인터럽트). 슬래시 드롭다운 아닐 때만. staged 이미지 있으면
-    // 먼저 첨부 취소(\x15 로 입력 비움). 그 외엔 ESC(\x1b) 를 pane 에 보내 생성 중단(거노).
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      if (hasPending) { setPendingPreviews([]); void sendToPane(surfaceId, '\x15', false); return; }
-      void sendToPane(surfaceId, '\x1b', false);
-      return;
-    }
-    if (e.key === 'Enter') { e.preventDefault(); void submit(); }
-    if (e.key === 'c' && e.ctrlKey) { e.preventDefault(); setInput(''); void sendToPane(surfaceId, '\x03', false); }
-  };
-
   // 인터랙티브 메뉴 선택 → 숫자 단축키 전송(claude 가 즉시 선택). 다음 폴에서 갱신.
   const pickMenu = async (oi: number) => {
     const label = menu?.options[oi]?.label;
@@ -888,25 +1049,46 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     });
   };
 
-  // 슬래시 자동완성 후보 — 입력이 '/' 로 시작하고 아직 인자(공백) 전이면 매칭. 첫 후보로 reset.
-  const slashQuery = input.startsWith('/') && !input.includes(' ') ? input.toLowerCase() : null;
-  const allSlash = [...SLASH_COMMANDS, ...dynamicSlash.filter((d) => !SLASH_COMMANDS.some((s) => s.cmd === d.cmd))];
-  const slashMatches = slashQuery ? allSlash.filter((c) => c.cmd.toLowerCase().startsWith(slashQuery)) : [];
-  const slashOpen = slashMatches.length > 0 && slashQuery !== null && slashQuery !== slashMatches[0]?.cmd;
-
   // jsonl events → 카톡 렌더 아이템(text 버블 + per-tool 카드 + thinking). tool_use_id
   // 페어링(buildToolMap)으로 카드가 결과/diff/stats 까지 그린다.
   const toolMap = useMemo(() => buildToolMap(events), [events]);
+  // 입력창 자리 task 고정 — transcript 의 TaskCreate/Update 로 현재 작업 목록 재구성.
+  const taskList = useMemo(() => tasksFromEvents(events, toolMap), [events, toolMap]);
   // 턴별 소요시간 — 마지막 assistant uuid → ms. 그 버블 아래 시계 푸터.
   const durationMap = useMemo(() => turnDurations(events), [events]);
   // 턴별 출력 토큰 — assistant uuid → output_tokens. 시계 푸터 옆 "↓N"(완료 응답·정확).
   const tokenMap = useMemo(() => turnTokens(events), [events]);
   const items = useMemo(() => {
-    if (events.length) return eventsToItems(events, toolMap);
-    // jsonl 이 아직 안 써진 진행 중 구간 — 캡처 프록시 텍스트 대화로 라이브 폴백.
-    // conv.turns 는 프록시가 이미 strip_meta·is_main_conversation 으로 정제 → 재필터 안 함.
-    return convTurns.map((t) => ({ kind: 'bubble', role: t.role, text: t.text }) as RenderItem);
-  }, [events, toolMap, convTurns]);
+    if (events.length) {
+      const list = eventsToItems(events, toolMap, isSub);
+      // 큐를 거쳐 처리된 user 버블은 표시 시각을 보낸(enqueue) 시각으로(거노: 재시작 후 몰림).
+      const qts = enqueueTimes(events);
+      if (qts.size) for (const it of list) {
+        if (it.kind === 'bubble' && it.role === 'user') {
+          const t = qts.get(it.text.trim());
+          if (t) it.ts = t;
+        }
+      }
+      // 보낸 시각순 정렬 — 큐를 거친 메시지는 위에서 ts 를 보낸(enqueue) 시각으로 되돌렸지만 위치는
+      // 처리 시각 순(맨 아래)이라 시각만 맞고 몰려 보였다(거노: 시간별로 정렬하면 될 듯). ts 로 stable
+      // sort 하고, ts 없는 아이템(thinking/tool/qa/launch)은 직전 ts 를 상속해 같은 턴에 붙어 따라간다.
+      let prevTs = 0;
+      const keyed = list.map((it, i) => {
+        const raw = (it as { ts?: string }).ts;
+        const t = raw ? Date.parse(raw) : NaN;
+        const eff = Number.isNaN(t) ? prevTs : (prevTs = t);
+        return { it, eff, i };
+      });
+      keyed.sort((a, b) => a.eff - b.eff || a.i - b.i);
+      return keyed.map((k) => k.it);
+    }
+    // jsonl 이 아직 안 써진 진행 중 구간 — 캡처 프록시 텍스트 대화로 라이브 폴백. conv.turns 는
+    // 프록시가 strip_meta 로 정제하지만, user 턴은 한 번 더 격리해(이중 안전) 남는 게 있을 때만.
+    return convTurns
+      .map((t) => ({ role: t.role, text: t.role === 'user' ? stripMeta(t.text) : t.text }))
+      .filter((t) => t.text.trim() && !isSystemInjectionText(t.role, t.text))
+      .map((t) => ({ kind: 'bubble', role: t.role, text: t.text }) as RenderItem);
+  }, [events, toolMap, convTurns, isSub]);
   // optimistic 으로 남긴 내 발화(myChoices) 중 transcript(items)에 아직 안 잡힌 것만 — 작업
   // 중 미리 보낸 메시지를 즉시 띄우되(거노), 다음 폴에서 transcript 에 같은 텍스트가 뜨면
   // 중복 제거. 메뉴 선택(label)은 transcript 에 raw 키로 들어가 매칭 안 돼 계속 남는다(의도).
@@ -916,18 +1098,61 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         && (it as { text: string }).text.trim() === c.text.trim())),
     [myChoices, items],
   );
+  // 현재 큐(예약) 대기 중인 사용자 메시지 — transcript queue-operation 기반. 작업 중 보낸 게
+  // 처리되기 전까지 "예약" 버블로(거노). 이미 본문(items)에 같은 텍스트가 떴으면(=처리됨) 제외.
+  const queued = useMemo(() => {
+    const userTexts = items
+      .filter((it) => it.kind === 'bubble' && (it as { role: string }).role === 'user')
+      .map((it) => normForMatch((it as { text: string }).text))
+      .filter(Boolean);
+    // 작업 중 보낸 큐 메시지는 처리해도 transcript 에 깨끗한 user 턴으로 안 남는다(queue-operation +
+    // system-reminder 로만 기록) → 텍스트 매칭으로는 영영 못 뺀다(거노: 처리됐는데 밑에 다 남음).
+    // 그래서 시각으로 판정: 마지막 학생(assistant) 응답보다 이전에 보낸 예약 = 내가 받아 처리한 것.
+    let lastRespTs = 0;
+    for (const it of items) {
+      if (it.kind === 'bubble' && (it as { role: string }).role === 'assistant') {
+        const raw = (it as { ts?: string }).ts;
+        const t = raw ? Date.parse(raw) : NaN;
+        if (!Number.isNaN(t) && t > lastRespTs) lastRespTs = t;
+      }
+    }
+    return queuedMessages(events).filter((q) => {
+      const n = normForMatch(q.text);
+      if (!n) return false; // 정규화 후 빈(이미지/메타만) — 큐로 안 띄움
+      // ① 본문 user 턴과 부분포함되면(idle 때 보낸 정식 발화) 처리됨 → 제외
+      const matched = userTexts.some((u) =>
+        u === n || (n.length >= 8 && u.includes(n)) || (u.length >= 8 && n.includes(u)));
+      if (matched) return false;
+      // ② 마지막 응답보다 이전 enqueue = 내가 받아 처리한 작업 중 메시지 → 제외. 응답 이후 보낸 것만 대기.
+      const qt = q.ts ? Date.parse(q.ts) : NaN;
+      if (lastRespTs && !Number.isNaN(qt) && qt < lastRespTs) return false;
+      return true;
+    });
+  }, [events, items]);
+  // 표시용 effort — 프록시(effort)는 ultracode 를 xhigh 로만 보므로, transcript 의 마지막 /effort 가
+  // ultracode 이고 프록시도 xhigh(또는 미관측)면 ultracode 로 표기(거노: xhigh↔ultracode 구분).
+  const displayEffort = useMemo(() => {
+    const cmd = lastSetEffort(events);
+    if (cmd === 'ultracode' && (effort === 'xhigh' || !effort)) return 'ultracode';
+    return effort;
+  }, [events, effort]);
   // 로딩 점 판정용 — 마지막 말풍선이 선생님(user)이면 학생이 아직 답하기 전.
   const lastBubbleRole = useMemo(() => {
     for (let i = items.length - 1; i >= 0; i--) if (items[i].kind === 'bubble') return (items[i] as { role: string }).role;
     return undefined;
   }, [items]);
 
+  // 메타칸엔 진행 중 서브에이전트만(거노: 완료된 게 다 떠서 범람). async 서브는 board 가
+  // '진행 중'을 못 잡으니, board 매칭 OR transcript 최근수정(60초)으로 진행을 추정한다.
+  // 한번 연 타일은 완료돼도 유지되니(별도 타일), 끝난 건 목록에서만 빠진다.
+  const runningSubs = useMemo(() => {
+    const now = Date.now() / 1000;
+    const live = new Set(agent?.subagents ?? []);
+    return subList.filter((s) => live.has(s.description) || now - s.mtime < 60);
+  }, [subList, agent?.subagents]);
+
   return (
     <div
-      onDragEnter={(e) => { if (dragHasFile(e)) { e.preventDefault(); setDragOver(true); } }}
-      onDragOver={(e) => { if (dragHasFile(e)) { e.preventDefault(); setDragOver(true); } }}
-      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false); }}
-      onDrop={onDropImage}
       style={{
       width: embedded ? '100%' : 340, flex: embedded ? 1 : undefined,
       flexShrink: 0, height: '100%', position: 'relative', // 확인 모달 기준
@@ -936,16 +1161,6 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       borderLeft: embedded ? 'none' : '1px solid var(--cth-cream-200)',
       overflow: 'hidden'
     }}>
-      {/* 이미지 드래그 드롭존 — 파일 드래그 중에만 점선 오버레이(거노: 점선 뜨고 거기 드롭). */}
-      {dragOver && (
-        <div style={{
-          position: 'absolute', inset: 8, zIndex: 50, pointerEvents: 'none',
-          border: '2px dashed var(--cth-sky)', borderRadius: 14,
-          background: 'color-mix(in srgb, var(--cth-sky) 12%, var(--cth-cream-50))',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontFamily: 'var(--cth-font-ui)', fontSize: 14, fontWeight: 800, color: 'var(--cth-sky)',
-        }}>이미지를 놓으면 첨부돼요</div>
-      )}
       {/* 헤더: 캐릭터명 + 닫기 */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 10,
@@ -953,15 +1168,29 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         background: 'var(--cth-cream-50)',
         borderBottom: '1px solid var(--cth-cream-200)'
       }}>
-        <span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 15, fontWeight: 700, color: 'var(--cth-ink-900)' }}>
+        <span
+          onDoubleClick={onToggleZoom}
+          onMouseEnter={() => { if (onToggleZoom) setTitleHover(true); }}
+          onMouseLeave={() => setTitleHover(false)}
+          title={onToggleZoom ? (zoomed ? '더블클릭 — 전체화면 해제' : '더블클릭 — 임시 전체화면') : undefined}
+          style={{ fontFamily: 'var(--cth-font-display)', fontSize: 15, fontWeight: 700, color: titleHover ? 'var(--cth-sky)' : 'var(--cth-ink-900)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', userSelect: 'none', cursor: onToggleZoom ? 'pointer' : 'default', padding: '2px 6px', margin: '-2px -6px', borderRadius: 7, background: titleHover ? 'var(--cth-sky-light)' : 'transparent', transition: 'background .12s, color .12s' }}>
+          {onToggleZoom && titleHover && (
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4, verticalAlign: '-1px' }}>
+              {zoomed
+                ? <path d="M9 3h4v4M13 3l-4 4M7 13H3V9M3 13l4-4" />
+                : <path d="M3 7V3h4M13 9v4H9M3 3l4 4M13 13l-4-4" />}
+            </svg>
+          )}
           {title} {offline ? (
             <span style={{ marginLeft: 2, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-cream-200)', color: 'var(--cth-ink-500)', fontWeight: 700, fontSize: 10 }}>오프라인 · 읽기 전용</span>
+          ) : isSub ? (
+            <span style={{ marginLeft: 2, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-sky-light)', color: 'var(--cth-sky)', fontWeight: 700, fontSize: 10 }}>서브에이전트 · 읽기 전용</span>
           ) : (
             <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400, fontSize: 13 }}>{surfaceId}</span>
           )}
         </span>
         <div style={{ flex: 1 }} />
-        {!offline && (<>
+        {!offline && !isSub && (<>
         <button
           onClick={() => setCharPicker(true)}
           title="캐릭터 변경 (대화 리셋)"
@@ -969,7 +1198,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             height: 28, padding: '0 10px', borderRadius: 8, border: '1px solid var(--cth-cream-200)', cursor: 'pointer',
             background: 'var(--cth-cream-100)', color: 'var(--cth-ink-700)',
             fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
-            display: 'inline-flex', alignItems: 'center'
+            display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap', flexShrink: 0
           }}
         >캐릭터</button>
         <button
@@ -979,7 +1208,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             height: 28, padding: '0 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
             background: 'var(--cth-coral)', color: '#fff',
             fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
-            display: 'inline-flex', alignItems: 'center'
+            display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap', flexShrink: 0
           }}
         >종료</button>
         </>)}
@@ -990,7 +1219,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             width: 28, height: 28, borderRadius: 8, border: 'none', cursor: 'pointer',
             background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)',
             fontFamily: 'var(--cth-font-ui)', fontSize: 16, lineHeight: 1,
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center'
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
           }}
         >×</button>
       </div>
@@ -1089,34 +1318,81 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                   </div>
                 );
               }
-              const mine = it.role === 'user';
+              // 선생님이 claude 의 질문(AskUserQuestion)에 답한 기록 — 중앙 카드(질문 muted + 선택 답 칩).
+              if (it.kind === 'qa') {
+                return (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'center', marginBottom: 10 }}>
+                    <div style={{ maxWidth: '88%', width: '100%', padding: '8px 12px', borderRadius: 12, background: 'color-mix(in srgb, #FEE500 14%, var(--cth-cream-50))', border: '1px solid color-mix(in srgb, #FEE500 50%, var(--cth-cream-200))' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700, color: 'var(--cth-ink-500)' }}>
+                        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                          <path d="M6 6a2 2 0 1 1 2.7 1.9c-.5.2-.7.5-.7 1V10" /><circle cx="8" cy="12.5" r="0.6" fill="currentColor" stroke="none" />
+                        </svg>
+                        선생님이 질문에 답함
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {it.qa.map((p, qi) => (
+                          <div key={qi} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                            <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-500)' }}>{p.q}</span>
+                            <span style={{ alignSelf: 'flex-start', padding: '2px 9px', borderRadius: 999, background: '#FEE500', color: '#3A2E00', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700 }}>{p.a}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+              // 서브에이전트 소환 마커 — 중앙 한 줄(상세는 메타칸 ↳ 드릴인).
+              if (it.kind === 'launch') {
+                return (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'center', marginBottom: 10 }}>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 7, maxWidth: '88%', padding: '5px 12px', borderRadius: 999, background: 'var(--cth-sky-light)', border: '1px solid var(--cth-sky)', fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-sky)' }}>
+                      <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}><path d="M4 3v6a3 3 0 0 0 3 3h6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                      <span style={{ fontWeight: 700 }}>서브에이전트 시작</span>
+                      {it.subagentType && <span style={{ fontWeight: 600, color: 'var(--cth-ink-700)' }}>· {it.subagentType}</span>}
+                      {it.description && <span style={{ color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>· {it.description}</span>}
+                    </div>
+                  </div>
+                );
+              }
+              // 서브 모드는 "선생님↔학생"이 아니라 "부모(미도리)↔서브에이전트" 대화 — 노란 우측
+              // 버블(mine) 없이 둘 다 좌측 아바타로. user 턴=부모 지시, assistant 턴=서브 응답(거노).
+              const mine = !isSub && it.role === 'user';
+              const cancelled = !!it.cancelled; // esc 로 취소한 프롬프트 — 노란색 대신 회색
+              const bubbleChar = isSub && it.role === 'user' ? parentAvatarChar : avatarChar;
               // 턴 소요시간 — assistant 버블이 그 턴의 마지막이면 시계 푸터(거노 데스크탑 앱풍).
               const durMs = !mine && it.uuid ? durationMap.get(it.uuid) : undefined;
               const tokOut = !mine && it.uuid ? tokenMap.get(it.uuid) : undefined; // 완료 응답 출력 토큰(transcript usage)
-              // 메신저: 선생님(user)=우측 카톡 노랑, 학생(assistant)=좌측 아바타+흰 말풍선.
+              const clock = fmtClock(it.ts); // 카톡식 메시지 시각(오후 2:47)
+              const timeEl = clock ? <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', flexShrink: 0, whiteSpace: 'nowrap', paddingBottom: 2 }}>{clock}</span> : null;
+              // 메신저: 선생님(user)=우측 카톡 노랑, 학생(assistant)=좌측 아바타+흰 말풍선. 시각은 카톡처럼
+              // 버블 옆 바닥에(선생님=왼쪽, 학생=오른쪽). 취소된 프롬프트는 회색+취소선 점선 테두리.
               return (
                 <div key={i} style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
                   {!mine && (
                     <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                      <SpritePortrait character={avatarChar} scale={1.5} bust />
+                      <SpritePortrait character={bubbleChar} scale={1.5} bust />
                     </div>
                   )}
+                  {mine && timeEl}
                   <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
+                    {mine && cancelled && (
+                      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-300)', marginBottom: 3, alignSelf: 'flex-end' }}>취소된 프롬프트</span>
+                    )}
                     <div style={{
                       padding: '8px 12px',
                       borderRadius: 14,
                       borderTopLeftRadius: mine ? 14 : 4,
                       borderTopRightRadius: mine ? 4 : 14,
-                      background: mine ? '#FEE500' : 'var(--cth-cream-50)',
-                      color: mine ? '#3A2E00' : 'var(--cth-ink-900)',
-                      border: mine ? 'none' : '1px solid var(--cth-cream-200)',
-                      boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
+                      background: cancelled ? 'var(--cth-cream-100)' : mine ? '#FEE500' : (isSub && it.role === 'user') ? 'var(--cth-sky-light)' : 'var(--cth-cream-50)',
+                      color: cancelled ? 'var(--cth-ink-500)' : mine ? '#3A2E00' : 'var(--cth-ink-900)',
+                      border: cancelled ? '1px dashed var(--cth-ink-300)' : mine ? 'none' : (isSub && it.role === 'user') ? '1px solid var(--cth-sky)' : '1px solid var(--cth-cream-200)',
+                      boxShadow: cancelled ? 'none' : '0 1px 3px rgba(21, 41, 74, 0.08)',
                       fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
                       wordBreak: 'break-word', maxWidth: '100%',
+                      textDecoration: cancelled ? 'line-through' : 'none',
+                      opacity: cancelled ? 0.8 : 1,
                     }}>
-                      {it.text && (mine
-                        ? <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{it.text}</span>
-                        : <Markdown text={it.text} />)}
+                      {it.text && <BubbleBody text={it.text} mine={mine && !cancelled} />}
                     </div>
                     {(durMs != null || tokOut != null) && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, paddingLeft: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}>
@@ -1132,6 +1408,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                       </div>
                     )}
                   </div>
+                  {!mine && timeEl}
                 </div>
               );
             })}
@@ -1172,6 +1449,30 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               </>
             )}
 
+            {/* 예약(큐) 메시지 — 작업 중 보내 아직 처리 전인 내 메시지. 점선+"예약" 배지로 대기 중
+                표시(거노). 처리된 건 위 부분포함 매칭으로 빠지고, 진짜 미처리만 시각순으로 남는다. */}
+            {queued.map((q, i) => {
+              const qclock = fmtClock(q.ts); // 보낸(enqueue) 시각 — 언제 보낸 예약인지(거노)
+              return (
+              <div key={`queued-${i}`} style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+                <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-300)' }}>
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><circle cx="8" cy="8" r="6.3" /><path d="M8 4.7V8l2.2 1.3" /></svg>
+                    예약 · 대기 중{qclock && ` · ${qclock}`}
+                  </span>
+                  <div style={{
+                    padding: '8px 12px', borderRadius: 14, borderTopRightRadius: 4,
+                    background: 'color-mix(in srgb, #FEE500 35%, var(--cth-cream-50))',
+                    color: '#3A2E00', border: '1px dashed #E0C200',
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55, wordBreak: 'break-word',
+                  }}>
+                    <BubbleBody text={q.text} mine />
+                  </div>
+                </div>
+              </div>
+              );
+            })}
+
             {/* 로딩 인디케이터 — 학생이 working/thinking 이면 타이핑 점(거노: 채팅창에서
                 로딩중인지 모름). transcript 는 턴 완료 시 갱신이라 그 사이 공백을 메운다.
                 단 마지막 버블이 이미 학생 답변(완료·streaming)이면 숨긴다 — claude 가 답변
@@ -1199,9 +1500,6 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                     ))}
                   </span>
                   {spinner || (agent?.status === 'thinking' ? '생각 중…' : (agent?.currentTool || '작업 중…'))}
-                  {convTokensOut > 0 && (
-                    <span style={{ color: 'var(--cth-ink-300)', fontVariantNumeric: 'tabular-nums' }} title={`출력 ${convTokensOut.toLocaleString()} 토큰`}>↓ {fmtTok(convTokensOut)}</span>
-                  )}
                 </div>
               </div>
             )}
@@ -1277,23 +1575,69 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         </div>
       )}
 
-      {/* 학생 메타(하단) — 모델·effort·권한모드·브랜치·경로. 헤더 아래(상단)에서 입력창 위로
-          내렸다(거노: 하단 통합). 컨텍스트%는 Footer '인연'으로 일원화해 여기선 뺐다. */}
-      {!offline && agent && (convModel || agent.model || agent.branch || agent.cwd) && (
-        <div style={{
-          display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center',
-          padding: '6px 12px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
-        }}>
-          {(convModel || agent.model) && <MetaChip label={shortModel(convModel || agent.model)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
-          {(convModel || agent.model) && <MetaChip label={effort ? `effort: ${effort}` : 'effort'} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
-          {modeLabel(mode) && <MetaChip label={modeLabel(mode)!} tone={mode === 'bypassPermissions' ? 'danger' : undefined} title="claude 권한 모드 (shift+tab 로 전환)" />}
-          {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
-            msg: '변경사항을 볼까요?',
-            sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 학생에게 띄워요.`,
-            yes: '변경 보기',
-            onYes: () => { void sendToPane(surfaceId, '/diff', true, false); },
-          })} />}
-          {agent.cwd && <MetaChip label={shortCwd(agent.cwd)} dim />}
+      {/* 학생별 인연·재화 — 전역 Footer 대신 채팅방 하단에 통합(거노). 라이브 학생만. */}
+      {!offline && !isSub && agent && (
+        <StudentStats contextPct={agent.contextPct} tokensIn={agent.tokensIn} costUsd={agent.costUsd} />
+      )}
+
+      {/* 학생 메타(하단) — 평소엔 접힌 요약 칸 한 줄, 누르면 모델·effort·권한·브랜치·cwd·
+          서브에이전트 펼침(거노: 칸 하나 만들어 누르면 나오게). 인연·재화는 위 strip 으로. */}
+      {!offline && agent && (convModel || agent.model || agent.branch || agent.cwd || runningSubs.length > 0) && (
+        <div style={{ borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
+          <button onClick={() => setMetaOpen((v) => !v)} title={metaOpen ? '세부정보 접기' : '세부정보 펼치기'}
+            onKeyDown={(e) => {
+              // 보조 ↓ — 메타칸 포커스 시에만. 접혀있으면 펼치고, 펼친 채면 첫 서브에이전트로 진입.
+              if (e.key === 'ArrowDown' && runningSubs.length > 0) {
+                e.preventDefault();
+                if (!metaOpen) setMetaOpen(true);
+                else { const s = runningSubs[0]; onOpenSubagent?.(surfaceId, s.agentId, s.agentType, s.description || s.agentType); }
+              }
+            }}
+            style={{
+            width: '100%', display: 'flex', alignItems: 'center', gap: 6,
+            padding: '6px 12px', border: 'none', background: 'transparent', cursor: 'pointer',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', textAlign: 'left',
+          }}>
+            <svg width="11" height="11" viewBox="0 0 16 16" style={{ flexShrink: 0, transform: metaOpen ? 'rotate(90deg)' : 'none', transition: 'transform .12s' }}>
+              <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {[shortModel(agent.model || convModel), displayEffort && `effort: ${shortEffort(displayEffort)}`, modeLabel(mode), agent.branch && `⎇ ${agent.branch}`].filter(Boolean).join('  ·  ') || '세부정보'}
+            </span>
+            {runningSubs.length > 0 && (
+              <span style={{
+                flexShrink: 0, padding: '1px 7px', borderRadius: 999, background: 'var(--cth-sky-light)',
+                color: 'var(--cth-sky)', fontSize: 10, fontWeight: 700,
+              }}>서브 {runningSubs.length}</span>
+            )}
+          </button>
+          {metaOpen && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', padding: '0 12px 8px' }}>
+              {(convModel || agent.model) && <MetaChip label={shortModel(agent.model || convModel)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
+              {(convModel || agent.model) && <MetaChip label={displayEffort ? `effort: ${shortEffort(displayEffort)}` : 'effort'} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
+              {modeLabel(mode) && <MetaChip label={modeLabel(mode)!} tone={mode === 'bypassPermissions' ? 'danger' : undefined} title="claude 권한 모드 (shift+tab 로 전환)" />}
+              {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
+                msg: '변경사항을 볼까요?',
+                sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 학생에게 띄워요.`,
+                yes: '변경 보기',
+                onYes: () => { void sendToPane(surfaceId, '/diff', true, false); },
+              })} />}
+              {agent.cwd && <MetaChip label={shortCwd(agent.cwd)} dim />}
+              {/* 진행 중 서브에이전트만(완료는 숨김 — 거노). 클릭하면 부모가 별도 타일로
+                  그 대화를 연다. 한번 열면 완료돼도 타일은 유지. */}
+              {runningSubs.map((s) => {
+                const text = s.description || s.agentType || s.agentId;
+                return (
+                  <MetaChip
+                    key={s.agentId}
+                    label={`↳ ● ${text}`}
+                    title={`${s.agentType} · 클릭하면 이 서브에이전트 대화를 따로 열어요`}
+                    onClick={() => onOpenSubagent?.(surfaceId, s.agentId, s.agentType, text)}
+                  />
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -1351,88 +1695,15 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           {flash === 'ok' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-mint)' }}>터미널에 입력했어요 — 엔터로 실행하세요</div>}
           {flash === 'err' && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-coral)' }}>입력 실패 — 터미널 pane 을 확인하세요</div>}
         </div>
-      ) : (
-      <div style={{ position: 'relative' }}>
-      {slashOpen && (
+      ) : isSub ? (
+        // 서브에이전트 대화는 읽기 전용.
         <div style={{
-          position: 'absolute', left: 12, right: 12, bottom: '100%', marginBottom: 6,
-          background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', borderRadius: 10,
-          boxShadow: '0 4px 16px rgba(21,41,74,0.16)', overflow: 'hidden auto', maxHeight: 240, zIndex: 20,
-        }}>
-          {slashMatches.map((c, i) => (
-            <button
-              key={c.cmd}
-              onMouseDown={(e) => { e.preventDefault(); mirror(c.cmd + ' '); inputRef.current?.focus(); }}
-              onMouseEnter={() => setSlashIdx(i)}
-              style={{
-                display: 'flex', alignItems: 'baseline', gap: 8, width: '100%', textAlign: 'left',
-                padding: '7px 12px', border: 'none', cursor: 'pointer',
-                background: i === slashIdx ? 'var(--cth-sky-light)' : 'transparent',
-              }}
-            >
-              <span style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 12, fontWeight: 700, color: 'var(--cth-sky)', flexShrink: 0 }}>{c.cmd}</span>
-              <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.desc}</span>
-            </button>
-          ))}
-        </div>
-      )}
-      {/* staged 이미지들 — 입력창 위 작은 썸네일이 줄지어(여러 개 다 보임, 안 덮임). X=전체
-          취소(claude 입력의 [Image] 들도 \x15 로 비움). Enter 로 텍스트와 함께 전송. */}
-      {hasPending && (
-        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6, padding: '8px 12px 0', background: 'var(--cth-cream-50)' }}>
-          {pendingPreviews.map((src, i) => (
-            <img key={i} src={src} alt="" style={{ width: 42, height: 42, objectFit: 'cover', borderRadius: 8, border: '1px solid var(--cth-cream-200)', display: 'block', flexShrink: 0 }} />
-          ))}
-          <button onClick={() => { setPendingPreviews([]); void sendToPane(surfaceId, '\x15', false); }} title="첨부 전체 취소" style={{
-            width: 20, height: 20, borderRadius: 999, border: 'none', cursor: 'pointer',
-            background: 'var(--cth-coral)', color: '#fff', fontSize: 13, lineHeight: 1,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, flexShrink: 0,
-          }}>×</button>
-          <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)' }}>{pendingPreviews.length}장 첨부 · Enter로 전송</span>
-        </div>
-      )}
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '8px 12px',
-        background: 'var(--cth-cream-50)',
-        borderTop: '1px solid var(--cth-cream-200)'
-      }}>
-        <span style={{
-          fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 700,
-          color: flash === 'ok' ? 'var(--cth-mint)' : flash === 'err' ? 'var(--cth-coral)' : 'var(--cth-sky)',
-          flexShrink: 0
-        }}>{flash === 'err' ? '!' : '›'}</span>
-        <input
-          ref={inputRef}
-          value={input}
-          onChange={(e) => mirror(e.target.value)}
-          onKeyDown={onKey}
-          onDragOver={(e) => { e.preventDefault(); }}
-          onDrop={onDropImage}
-          disabled={sending}
-          placeholder="학생에게 지시 — 치는 대로 터미널에 실시간 · 이미지 드롭 첨부 · Enter 전송"
-          style={{
-            flex: 1,
-            fontFamily: 'var(--cth-font-ui)', fontSize: 13,
-            background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', borderRadius: 9,
-            padding: '7px 11px', outline: 'none',
-            color: 'var(--cth-ink-900)', opacity: sending ? 0.5 : 1
-          }}
-        />
-        <button
-          onClick={() => void submit()}
-          disabled={sending}
-          style={{
-            fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600,
-            padding: '7px 14px', border: 'none', borderRadius: 9,
-            cursor: sending ? 'not-allowed' : 'pointer',
-            background: 'linear-gradient(180deg, #6BB0F0, #4A90E2)', color: '#fff',
-            boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.5)',
-            opacity: sending ? 0.4 : 1
-          }}
-        >전송</button>
-      </div>
-      </div>
+          padding: '9px 12px', background: 'var(--cth-cream-50)', borderTop: '1px solid var(--cth-cream-200)',
+          fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', textAlign: 'center',
+        }}>서브에이전트 대화 · 읽기 전용</div>
+      ) : (
+        // 입력창 폐기(거노: 어차피 뷰어) — 그 자리에 이 학생의 현재 작업(TaskCreate) 고정.
+        <TaskStrip tasks={taskList} />
       )}
 
       {/* 확인 모달 — window.confirm 대체(wry webview 무반응). 종료·compact·diff 공통. */}

@@ -47,8 +47,20 @@ export interface Agent {
   model?: string;
   cwd?: string;
   branch?: string;
+  /** 속한 윈도우(방) 인덱스 — 좌측 방별 학생 트리 그룹핑. board window_idx. */
+  windowIdx?: number;
   /** 마지막 사용자 프롬프트 — 대화 미리보기용. */
   lastPrompt?: string;
+}
+
+/** 한 학생(pane)이 소환한 서브에이전트(Task/Agent) — 백엔드 /subagents 가
+ *  subagents/agent-<id>.meta.json 에서 모아 준다. agentId 로 그 서브에이전트
+ *  대화(jsonl)를 따로 불러온다. mtime = 마지막 활동(unix secs). */
+export interface SubagentInfo {
+  agentId: string;
+  agentType: string;
+  description: string;
+  mtime: number;
 }
 
 /** 학생이 question/선택지로 막혀 선생님 입력을 기다리는 상태(blocked=권한·입력
