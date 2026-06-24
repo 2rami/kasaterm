@@ -802,21 +802,41 @@ impl App {
     /// instead of stacking duplicate splits. PTY-less — `resize_backend` skips
     /// leaves with no `self.pty` entry, so the new pane never spawns a shell.
     pub(crate) fn open_file_split(&mut self, path: std::path::PathBuf) {
+        self.open_file(path, None, false);
+    }
+
+    /// 파일 미리보기를 연다. `as_tab`이면 `target`(=요청자 pid, `$KASATERM_PANE_ID`)
+    /// 이 가리키는 pane 의 보조 탭으로 붙인다 — BSP 트리를 안 바꿔(크롬 탭) arona
+    /// 멀티뷰가 빈 pane 으로 미러하던 문제를 피한다. `as_tab=false`(파일트리 더블클릭·
+    /// 드롭)면 종전처럼 active pane 옆으로 split. target pane 을 못 찾으면 split 폴백.
+    pub(crate) fn open_file(
+        &mut self,
+        path: std::path::PathBuf,
+        target: Option<String>,
+        as_tab: bool,
+    ) {
         if self.tmux.is_some() {
             return;
         }
-        // Already open? Focus that pane rather than spawning a duplicate.
+        // Already open? Focus that pane + tab rather than spawning a duplicate.
         let existing = {
             let ws = self.ws.lock().unwrap();
             ws.panes.iter().find_map(|(id, p)| {
                 p.tabs
                     .iter()
-                    .any(|t| t.preview_path.as_deref() == Some(path.as_path()))
-                    .then(|| id.clone())
+                    .position(|t| t.preview_path.as_deref() == Some(path.as_path()))
+                    .map(|tab_idx| (id.clone(), tab_idx))
             })
         };
-        if let Some(id) = existing {
-            self.ws.lock().unwrap().active_pane = Some(id);
+        if let Some((id, tab_idx)) = existing {
+            {
+                let mut ws = self.ws.lock().unwrap();
+                if let Some(p) = ws.panes.get_mut(&id) {
+                    p.active_tab = tab_idx.min(p.tabs.len().saturating_sub(1));
+                    p.dirty = true;
+                }
+                ws.active_pane = Some(id);
+            }
             self.chrome_dirty = true;
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -906,6 +926,36 @@ impl App {
                 tab.image_pan_y = py;
             }
         }
+        // 탭 모드: 요청 pane(target=pid → outer_for_pty, 없으면 active)의 보조 탭으로
+        // push. 트리를 안 바꾸므로 split 과 달리 resize_backend/publish 가 필요 없다
+        // (image/markdown 은 PTY-less, pane_cells 기반 렌더라 redraw 면 충분). 대상 pane
+        // 이 panes 에 실재할 때만(contains_key) 탭 경로; 아니면 아래 split 폴백(tab 재사용).
+        let tab_outer: Option<String> = if as_tab {
+            let ws = self.ws.lock().unwrap();
+            target
+                .as_deref()
+                .and_then(|t| ws.outer_for_pty(t))
+                .filter(|o| ws.panes.contains_key(o))
+                .or_else(|| ws.panes.contains_key(&active).then(|| active.clone()))
+        } else {
+            None
+        };
+        if let Some(outer) = tab_outer {
+            let mut ws = self.ws.lock().unwrap();
+            if let Some(pane) = ws.panes.get_mut(&outer) {
+                pane.tabs.push(tab);
+                pane.active_tab = pane.tabs.len() - 1;
+                pane.dirty = true;
+            }
+            ws.active_pane = Some(outer);
+            drop(ws);
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
         let ps = PaneState { tabs: vec![tab], active_tab: 0, color: None, character: None, dirty: true };
         self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
 

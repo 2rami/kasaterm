@@ -2313,9 +2313,11 @@ enum UserEvent {
     /// 마지막 윈도우 가드·pane 정리. 닫기 실패(마지막)는 무시(프론트가 가드).
     SocketCloseRoom(usize),
     /// `GET /open-image`·`/open-markdown`(imgopen/mdopen 셰임·SendUserFile 훅)이
-    /// 위임 — 그 경로를 미리보기 pane(이미지/마크다운/텍스트)으로 split. 데몬 제거
-    /// 때 빠졌던 open_preview 의 로컬 재구현. `open_file_split` 이 확장자로 분기한다.
-    SocketOpenPreview(String),
+    /// 위임 — 그 경로를 미리보기(이미지/마크다운/텍스트)로 연다. `(path, target)`:
+    /// `target` = 요청자 pane id(=pid, `$KASATERM_PANE_ID`). 있으면 그 pane 의 보조
+    /// 탭으로(크롬 탭, 멀티뷰 빈-pane 회피), 없으면 active pane split 으로 폴백.
+    /// 데몬 제거 때 빠졌던 open_preview 의 로컬 재구현. `open_file` 이 확장자로 분기.
+    SocketOpenPreview(String, Option<String>),
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
