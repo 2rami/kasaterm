@@ -341,6 +341,8 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         context_pct,
         context_tokens: observed_ctx,
         cwd,
+        view_cwd: String::new(), // collab_board 가 statusLine report_cwd 보고값으로 채운다.
+        effort_default: String::new(), // collab_board 가 settings.json effortLevel 로 채운다.
         branch: None,
         window_idx: 0,
     }

@@ -8,7 +8,7 @@
 
 use kasa_socket::backend::{
     Backend, PaneActivity, PaneRect, RecentSession, SessionsInfo, SplitDirection, SubagentInfo,
-    SurfaceInfo, WorkspaceInfo,
+    SurfaceInfo, TranscriptChunk, WorkspaceInfo,
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -154,6 +154,9 @@ pub struct PtyBackend {
     /// pane 셸 pid → (조회시각, 라이브 cwd). collab_board 가 학생 경로(cd 반영)를
     /// transcript 가 아닌 PTY pid_cwd 로 채우되, lsof 비용을 2s 캐시로 제한한다.
     cwd_cache: Arc<Mutex<HashMap<u32, (std::time::Instant, std::path::PathBuf)>>>,
+    /// surface_id → statusLine 이 보고한 "현재 보는 경로"(report_cwd). claude 내부 cd 는
+    /// lsof(cwd_cache)로 안 보여, statusline.py 가 매 렌더 직접 push 한다.
+    reported_cwd: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
@@ -217,6 +220,7 @@ impl PtyBackend {
             attention,
             last_discover: Arc::new(Mutex::new(None)),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
+            reported_cwd: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -602,6 +606,14 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn report_cwd(&self, surface_id: &str, cwd: &str, _session_id: &str) -> Result<()> {
+        self.reported_cwd
+            .lock()
+            .unwrap()
+            .insert(surface_id.to_string(), cwd.to_string());
+        Ok(())
+    }
+
     fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo> {
         let dir = match direction {
             SplitDirection::Right | SplitDirection::Left => kasa_pty::SplitDir::Horizontal,
@@ -717,10 +729,10 @@ impl Backend for PtyBackend {
         Ok(all)
     }
 
-    fn transcript_raw(&self, surface_id: &str) -> Result<String> {
-        // Same bound→jsonl mapping as transcript_tail, but hand back the raw
-        // jsonl untouched. The BA GUI parses tool_use/tool_result/structuredPatch
-        // itself (ccsv 렌더러) instead of the text-only parse_turn path.
+    fn transcript_raw(&self, surface_id: &str, offset: u64) -> Result<TranscriptChunk> {
+        // Same bound→jsonl mapping as transcript_tail, but hand back raw jsonl
+        // incrementally (tail on first load, appended lines after) so the BA GUI
+        // doesn't re-read & re-parse the whole multi-MB file every 1.5s poll.
         let path = self
             .bound
             .lock()
@@ -728,7 +740,7 @@ impl Backend for PtyBackend {
             .get(surface_id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("pane {surface_id} has no bound transcript"))?;
-        std::fs::read_to_string(&path)
+        read_incremental(&path, offset)
             .map_err(|e| anyhow::anyhow!("read transcript {path:?}: {e}"))
     }
 
@@ -995,12 +1007,20 @@ impl Backend for PtyBackend {
             }
             (screens, osc_titles)
         };
+        // claude saved default effort(settings.json) — resume 직후 effort 카드 폴백(거노). 작은 파일
+        // 1회 읽어 모든 행에 동일 적용(글로벌 설정이라 pane 무관).
+        let saved_effort = claude_saved_effort();
         for row in &mut board {
             row.title = osc_titles.get(&row.surface_id).cloned().unwrap_or_default();
+            row.effort_default = saved_effort.clone();
             if let Some(&pid) = pane_pids.get(&row.surface_id) {
                 if let Some(cwd) = self.pane_cwd_live(pid) {
                     row.cwd = cwd.to_string_lossy().into_owned();
                 }
+            }
+            // statusLine 이 보고한 "현재 보는 경로"(claude 내부 cd). 없으면 빈값(=cwd 만 표시).
+            if let Some(vc) = self.reported_cwd.lock().unwrap().get(&row.surface_id) {
+                row.view_cwd = vc.clone();
             }
             if let Some(screen) = screens.get(&row.surface_id) {
                 // 모델명도 상태바에서 — "Opus 4.8 (1M context)" 처럼 1M 변형까지 정확.
@@ -1161,6 +1181,44 @@ fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool) {
     let mut buf = Vec::new();
     let _ = f.read_to_end(&mut buf);
     (String::from_utf8_lossy(&buf).into_owned(), idle)
+}
+
+/// 채팅뷰 증분 읽기 — `offset` 이후 append 된 **완전한 줄**만 돌려준다. offset==0
+/// (첫 로드)이거나 파일이 줄었으면(세션 교체) 마지막 `TRANSCRIPT_TAIL` 바이트 윈도를
+/// `reset` 으로 준다(첫 불완전 줄은 버림). 끝의 쓰다 만 줄은 다음 호출로 미뤄, 반환
+/// `offset` 은 항상 마지막 개행 직후 — 멀티바이트/JSON 라인 경계가 안 깨진다. 안 바뀌면
+/// raw="" 라 프론트 재파싱·리렌더가 0.
+const TRANSCRIPT_TAIL: u64 = 512 * 1024;
+
+fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::Result<TranscriptChunk> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    // offset==0 = 첫 로드, offset>len = 파일이 줄어듦(세션 교체) → 둘 다 tail 재로드.
+    let reset = offset == 0 || offset > len;
+    let start = if reset { len.saturating_sub(TRANSCRIPT_TAIL) } else { offset };
+    if start >= len {
+        // 변화 없음(또는 빈 파일) — 재파싱 0.
+        return Ok(TranscriptChunk { raw: String::new(), offset: len, reset: false });
+    }
+    f.seek(SeekFrom::Start(start))?;
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    f.take(len - start).read_to_end(&mut buf)?;
+    // 끝의 쓰다 만 줄(마지막 \n 이후)은 잘라 다음 호출로. next offset = 마지막 \n+1.
+    let end = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+    let next_offset = start + end as u64;
+    let mut slice = &buf[..end];
+    // tail(reset)일 땐 중간부터 시작해 깨진 앞 첫 줄도 버린다.
+    if reset {
+        if let Some(i) = slice.iter().position(|&b| b == b'\n') {
+            slice = &slice[i + 1..];
+        }
+    }
+    Ok(TranscriptChunk {
+        raw: String::from_utf8_lossy(slice).into_owned(),
+        offset: next_offset,
+        reset,
+    })
 }
 
 /// Foreground process name under a pane's shell pid — the youngest direct child
@@ -1492,6 +1550,18 @@ pub fn read_window_size() -> Option<(f64, f64)> {
     }
 }
 
+
+/// claude 의 saved default effort(~/.claude/settings.json `effortLevel`). resume 직후 GUI effort
+/// 카드 폴백값(거노). 파일/키 없으면 빈 문자열. ultracode 는 session-only 라 여기 안 저장된다.
+fn claude_saved_effort() -> String {
+    let Some(home) = std::env::var_os("HOME") else { return String::new() };
+    let path = std::path::Path::new(&home).join(".claude/settings.json");
+    let Ok(text) = std::fs::read_to_string(&path) else { return String::new() };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("effortLevel").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or_default()
+}
 
 /// Pull the claude session id straight off the running claude process's argv
 /// (`--resume <uuid>` / `--session-id <uuid>`, `=`-joined or space-separated).

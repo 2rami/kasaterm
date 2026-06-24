@@ -332,12 +332,18 @@ impl App {
             initial_scrollback: Vec::new(),
         }) {
             Ok(session) => {
-                self.pump_pty_screens(session.screens.clone(), pane.to_string());
-                self.pty.insert(pane.to_string(), Arc::new(session));
+                let sess = Arc::new(session);
+                self.pump_pty_screens(sess.screens.clone(), pane.to_string());
+                self.pty.insert(pane.to_string(), sess.clone());
                 // old PTY 의 EOF 가 이 pane id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
                 // respawn 했으니 그 stale 죽음표시를 지워 reap 이 새 pane 을 닫지 않게(거노:
                 // 캐릭터 변경하면 pane 이 닫히던 버그). reap 에 contains_key 가드도 있지만 명시.
                 self.dead_panes.lock().unwrap().retain(|x| x != pane);
+                // 새 PTY 는 셸 프롬프트만 — 교체는 돌던 claude 를 죽이므로, 프롬프트가 뜰 즈음
+                // claude 를 직접 주입해 새 persona 로 다시 시작한다(거노: 캐릭터 교체 = claude 새로.
+                // 초기 부팅은 셸만 띄워도 됐지만, 교체는 claude 가 꺼진 채 셸만 남던 게 버그였다).
+                let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+                self.pending_restores.push((sess, "claude\r".to_string(), at));
                 self.resize_backend(cols, rows);
                 self.publish_pty_layout();
                 if let Some(w) = self.window.as_ref() {

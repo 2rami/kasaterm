@@ -45,7 +45,12 @@ export interface Agent {
   recentTools?: string[];
   /** 학생 메타 — 모델명/작업경로/git 브랜치(board PaneActivity). contextLimit 은 위. */
   model?: string;
+  /** claude 프로세스 실행 경로 — pid_cwd 라이브(내부 cd 안 보임). */
   cwd?: string;
+  /** statusLine 이 보고한 "현재 보는 경로"(report-cwd, 내부 cd 반영). 푸터 "현재 보는 경로". */
+  viewCwd?: string;
+  /** claude saved default effort(settings.json) — resume 직후 effort 카드 폴백값. */
+  savedEffort?: string;
   branch?: string;
   /** 속한 윈도우(방) 인덱스 — 좌측 방별 학생 트리 그룹핑. board window_idx. */
   windowIdx?: number;

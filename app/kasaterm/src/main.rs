@@ -3178,6 +3178,8 @@ struct App {
     paste_menu_item: Option<muda::MenuItem>,
     /// "업데이트 확인" 메뉴 — MenuEvent id 로 매칭해 Sparkle checkForUpdates 를 부른다.
     update_menu_item: Option<muda::MenuItem>,
+    /// "kasaterm 종료"(⌘Q) 메뉴 — MenuEvent id 로 매칭해 종료 확인 NSAlert 를 띄운다.
+    quit_menu_item: Option<muda::MenuItem>,
     /// Sparkle SPUStandardUpdaterController — 보관해야 백그라운드 자동 체크가 유지된다(드롭=정지).
     #[cfg(target_os = "macos")]
     sparkle_updater: Option<objc2::rc::Retained<objc2::runtime::AnyObject>>,
@@ -3396,6 +3398,7 @@ impl App {
             copy_menu_item: None,
             paste_menu_item: None,
             update_menu_item: None,
+            quit_menu_item: None,
             #[cfg(target_os = "macos")]
             sparkle_updater: None,
             autosuggest: autosuggest::History::new(),

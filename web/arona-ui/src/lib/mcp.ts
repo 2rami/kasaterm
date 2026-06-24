@@ -42,7 +42,14 @@ interface BoardRow {
   recent_tools?: string[];
   /** 학생 메타 — 모델/작업경로/컨텍스트한도/git 브랜치(PaneActivity). */
   model?: string;
+  /** claude 프로세스 실행 경로 — pid_cwd(lsof) 라이브. 내부 cd 는 안 보인다. */
   cwd?: string;
+  /** statusLine 이 보고한 "현재 보는 경로"(report-cwd) — claude 내부 cd 반영.
+   *  cwd(실행 경로)와 함께 푸터에 "실행/현재 보는" 두 경로로 표시(거노). */
+  view_cwd?: string;
+  /** claude saved default effort(~/.claude/settings.json effortLevel) — resume 직후 effort 카드
+   *  폴백값. ultracode 는 session-only 라 여기 안 들어온다. */
+  effort_default?: string;
   context_limit?: number;
   /** 컨텍스트 사용량 % — claude TUI 상태바 파싱(robust). */
   context_pct?: number;
@@ -108,6 +115,8 @@ function toAgent(r: BoardRow): Agent {
     recentTools: r.recent_tools,
     model: r.model,
     cwd: r.cwd,
+    viewCwd: r.view_cwd,
+    savedEffort: r.effort_default,
     contextLimit: r.context_limit,
     contextPct: r.context_pct,
     branch: r.branch,
@@ -784,6 +793,31 @@ export async function fetchTranscriptRaw(surfaceId: string): Promise<SessionEven
     return parseJsonlSync(d.raw);
   } catch {
     return [];
+  }
+}
+
+export interface TranscriptChunk { events: SessionEvent[]; offset: number; reset: boolean }
+
+/** GET /transcript-raw?surface=<id>&offset=<n> — 증분 읽기(라이브 채팅뷰용). offset=0
+ *  → tail 윈도(reset=true, 버퍼 통째 교체), >0 → 그 바이트 이후 append 된 **완전한 줄만**
+ *  (reset=false, 뒤에 append). 안 바뀌면 events=[]·offset 그대로라 프론트가 재파싱·리렌더를
+ *  통째로 건너뛴다. offset 을 누적해, 매 폴마다 수십 MB 전체를 다시 읽고 파싱하던 걸 없앤다.
+ *  (offset 무시·전체 tail 1회면 기존 fetchTranscriptRaw 를 그대로 쓰면 된다.) */
+export async function fetchTranscriptChunk(surfaceId: string, offset = 0): Promise<TranscriptChunk> {
+  if (!surfaceId) return { events: [], offset, reset: false };
+  try {
+    const q = new URLSearchParams({ surface: surfaceId, offset: String(offset) });
+    const r = await fetch(`${BASE}/transcript-raw?${q}`);
+    if (!r.ok) return { events: [], offset, reset: false };
+    const d = (await r.json().catch(() => ({}))) as { raw?: string; offset?: number; reset?: boolean };
+    const raw = typeof d?.raw === 'string' ? d.raw : '';
+    return {
+      events: raw ? parseJsonlSync(raw) : [],
+      offset: typeof d?.offset === 'number' ? d.offset : offset,
+      reset: !!d?.reset,
+    };
+  } catch {
+    return { events: [], offset, reset: false };
   }
 }
 
