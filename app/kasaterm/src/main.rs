@@ -31,6 +31,8 @@ mod state;
 // 이 경로로 안 와서 macos 전용.
 #[cfg(target_os = "macos")]
 mod macos_open;
+#[cfg(target_os = "macos")]
+mod macos_sparkle;
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
@@ -3174,6 +3176,11 @@ struct App {
     /// MenuEvent id 로 매칭, webview 우선 위임 후 폴백으로 직접 클립보드 처리.
     copy_menu_item: Option<muda::MenuItem>,
     paste_menu_item: Option<muda::MenuItem>,
+    /// "업데이트 확인" 메뉴 — MenuEvent id 로 매칭해 Sparkle checkForUpdates 를 부른다.
+    update_menu_item: Option<muda::MenuItem>,
+    /// Sparkle SPUStandardUpdaterController — 보관해야 백그라운드 자동 체크가 유지된다(드롭=정지).
+    #[cfg(target_os = "macos")]
+    sparkle_updater: Option<objc2::rc::Retained<objc2::runtime::AnyObject>>,
     /// History store for inline autosuggestion. See autosuggest.rs.
     autosuggest: autosuggest::History,
     /// What the user has typed at the current shell prompt since the last
@@ -3388,6 +3395,9 @@ impl App {
             board_menu_item: None,
             copy_menu_item: None,
             paste_menu_item: None,
+            update_menu_item: None,
+            #[cfg(target_os = "macos")]
+            sparkle_updater: None,
             autosuggest: autosuggest::History::new(),
             input_buf: String::new(),
             current_suggestion: None,

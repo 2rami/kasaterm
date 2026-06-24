@@ -66,6 +66,8 @@ objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCen
 # Dock tile badge (unread-notification count) via NSApplication.dockTile.
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSDockTile"] }
 block2 = "0.6"
+# Sparkle.framework 를 런타임 dlopen 하기 위한 libc::dlopen/RTLD_NOW (macos_sparkle.rs).
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

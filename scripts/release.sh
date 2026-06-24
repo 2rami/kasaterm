@@ -60,3 +60,21 @@ gh release create "$VERSION" "$DMG" \
   --title "kasaterm $VERSION" \
   --notes "$NOTES"
 echo "published: $(gh release view "$VERSION" --json url -q .url)"
+
+# 5. Sparkle appcast — dmg 를 EdDSA 서명(Keychain 개인키)해 appcast.xml 생성하고
+#    docs/ 로 커밋·push 한다. docs = GitHub Pages(SUFeedURL). 설치된 앱들이 이 feed 를
+#    보고 자동 업데이트한다. enclosure URL 은 방금 만든 GitHub release 자산을 가리킨다.
+APPCAST_DIR="$(mktemp -d)"
+cp "$DMG" "$APPCAST_DIR/"
+"$ROOT/vendor/Sparkle/bin/generate_appcast" \
+  --download-url-prefix "https://github.com/2rami/kasaterm/releases/download/$VERSION/" \
+  --link "https://github.com/2rami/kasaterm" \
+  "$APPCAST_DIR"
+mkdir -p docs
+cp "$APPCAST_DIR/appcast.xml" docs/appcast.xml
+touch docs/.nojekyll  # Jekyll 이 .xml 을 건드리지 않게
+rm -rf "$APPCAST_DIR"
+git add docs/appcast.xml docs/.nojekyll
+git commit -m "chore(release): appcast $VERSION" >/dev/null 2>&1 || true
+git push
+echo "appcast → docs/appcast.xml (Pages: https://2rami.github.io/kasaterm/appcast.xml)"

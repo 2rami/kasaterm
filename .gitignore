@@ -9,6 +9,9 @@ Cargo.lock
 .claude/scheduled_tasks.lock
 .playwright-mcp/
 
+# Sparkle vendored framework·bin (build-app.sh 가 없으면 재다운로드)
+/vendor/
+
 # 임시 산출물 (README 미리보기, 임시 캡처)
 /_readme_*
 /schale-light.png
