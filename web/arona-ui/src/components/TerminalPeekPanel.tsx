@@ -300,17 +300,17 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
     const uuid = (ev as { uuid?: string }).uuid;
     const ts = (ev as { timestamp?: string }).timestamp; // 카톡식 메시지 시각
     const content = (ev as { message?: { content?: unknown } }).message?.content;
-    // esc 취소 — content 가 "[Request interrupted by user]" 마커인 user 이벤트. interruptedMessageId 는
-    // 대부분 null 이라 그걸로는 판정 못 했다(거노: 취소 표시가 안 됨) → 마커 텍스트로 판정한다. 직전으로
-    // 거슬러 assistant 텍스트 응답을 만나면 답이 나온 것(취소 아님), 그 전에 user 버블을 만나면 끊긴
-    // 프롬프트 → 취소 표시(노란색 말고 회색). thinking/tool/마커는 건너뛴다. 마커 자체는 안 띄운다.
+    // esc 취소 — content 가 "[Request interrupted by user]" 마커인 user 이벤트. esc 는 학생이 답하던
+    // 도중에 누르므로 마커 직전엔 거의 항상 (중단된) assistant 턴이 있다. 예전엔 그 assistant 버블에서
+    // break 해 "답 나옴=취소 아님"으로 처리했는데, 그 탓에 진짜 취소가 안 잡혔다(거노: 취소 표시 안 됨).
+    // → assistant/thinking/tool 은 건너뛰고, 가장 가까운 user 버블을 끊긴 프롬프트로 표시(회색+취소선).
+    // 마커 자체는 안 띄운다.
     if (role === 'user') {
       const flat = typeof content === 'string' ? content
         : Array.isArray(content) ? content.map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: string }).text ?? '') : '')).join(' ') : '';
       if (/^\s*\[Request interrupted by user/.test(flat)) {
         for (let k = items.length - 1; k >= 0; k--) {
           const prev = items[k];
-          if (prev.kind === 'bubble' && prev.role === 'assistant') break;
           if (prev.kind === 'bubble' && prev.role === 'user') { prev.cancelled = true; break; }
         }
         continue;
