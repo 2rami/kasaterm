@@ -1352,19 +1352,26 @@ async fn transcript_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `GET /transcript-raw?surface=%N` — a pane's bound transcript jsonl, raw and
-/// unparsed (every line). The BA GUI parses tool_use/tool_result/structuredPatch
-/// client-side (ccsv 렌더러) — unlike `/transcript` which strips to text turns.
+/// `GET /transcript-raw?surface=%N&offset=<n>` — a pane's bound transcript jsonl,
+/// raw and *incremental*. `offset=0` (or omitted) returns the tail window with
+/// `reset:true`; `offset>0` returns only whole lines appended since that byte
+/// (`reset:false`, empty when unchanged). The BA GUI accumulates `offset` and
+/// appends, instead of re-parsing the whole (multi-MB) file every poll. Response
+/// `{ ok, surface_id, raw, offset, reset }`.
 async fn transcript_raw_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let surface = params.get("surface").map(String::as_str).unwrap_or("");
+    let offset = params.get("offset").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
     let body = if surface.is_empty() {
         serde_json::json!({ "ok": false, "error": "surface=%N required" })
     } else {
-        match backend.transcript_raw(surface) {
-            Ok(raw) => serde_json::json!({ "ok": true, "surface_id": surface, "raw": raw }),
+        match backend.transcript_raw(surface, offset) {
+            Ok(c) => serde_json::json!({
+                "ok": true, "surface_id": surface,
+                "raw": c.raw, "offset": c.offset, "reset": c.reset,
+            }),
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         }
     };

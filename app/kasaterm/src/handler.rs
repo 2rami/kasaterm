@@ -384,11 +384,14 @@ impl ApplicationHandler<UserEvent> for App {
             let menu = Menu::new();
             let app_m = Submenu::new("kasaterm", true);
             let update_item = MenuItem::new("업데이트 확인…", true, None);
+            // ⌘Q 를 가로채 종료 확인(ghostty 식)을 띄우려면 PredefinedMenuItem::quit(OS 가
+            // 직접 terminate 라 가로채기 불가) 대신 커스텀 항목으로 — MenuEvent 로 받아 NSAlert.
+            let quit_item = MenuItem::new("kasaterm 종료", true, "CmdOrCtrl+Q".parse::<Accelerator>().ok());
             let _ = app_m.append_items(&[
                 &PredefinedMenuItem::about(None, None),
                 &update_item,
                 &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::quit(None),
+                &quit_item,
             ]);
             let view_m = Submenu::new("보기", true);
             let git_item = MenuItem::new("Git 패널 켜기/끄기", true, None);
@@ -428,6 +431,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.copy_menu_item = Some(copy_item);
             self.paste_menu_item = Some(paste_item);
             self.update_menu_item = Some(update_item);
+            self.quit_menu_item = Some(quit_item);
             self.menu = Some(menu);
             // Sparkle 자동 업데이트 시작(.app 빌드에서만 — dev 는 framework 없어 no-op).
             self.sparkle_updater = crate::macos_sparkle::init();
@@ -3362,6 +3366,17 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(target_os = "macos")]
                 if let Some(c) = self.sparkle_updater.as_ref() {
                     crate::macos_sparkle::check_for_updates(c);
+                }
+            } else if self.quit_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+                // ⌘Q → 종료 확인(ghostty 식). 확인 시 event_loop.exit() 로 정상 종료
+                // (exiting() 콜백이 window.json·세션 저장). 취소면 무시.
+                #[cfg(target_os = "macos")]
+                let ok = crate::macos_open::confirm_quit();
+                #[cfg(not(target_os = "macos"))]
+                let ok = true;
+                if ok {
+                    event_loop.exit();
+                    return;
                 }
             }
         }

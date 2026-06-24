@@ -300,6 +300,37 @@ fn collab_messages_path() -> std::path::PathBuf {
         .join("messages.jsonl")
 }
 
+/// `tell` 발신을 messages.jsonl 에 기록한다 — http `persist_sensei_msg` 와 같은 파일·
+/// 형식이되 `from_pane` 은 발신 pane($KASATERM_PANE_ID). 채팅뷰(TerminalPeekPanel)가
+/// 이걸 대조해 학생→학생 tell 을 거노 직접 입력과 구분, 발신자 프사+색 좌측 버블로
+/// 그린다(거노 #5/#7). PANE_ID 없으면(사람이 터미널서 직접 친 cli) 거노 발신이라 기록
+/// 안 한다 — 그건 우측 노란 버블로 남아야 한다.
+fn log_tell_to_messages(to_pane: &str, text: &str) {
+    let Some(from_pane) = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let path = collab_messages_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let id = format!("{:08x}", (now * 1000.0) as u64 & 0xffff_ffff);
+    let line = serde_json::json!({
+        "id": id,
+        "from": from_pane, "from_pane": from_pane,
+        "to": to_pane, "to_pane": to_pane,
+        "text": text, "ts": now, "read": true,
+    })
+    .to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// Render `window.list`'s windows as a labelled stack of box diagrams, one
 /// per window, with the active one marked.
 fn render_windows(resp: &Response) -> String {
@@ -562,6 +593,19 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 json!({ "surface_id": surface, "color": color }),
             )
         }
+        "report-cwd" => {
+            // statusline.py 가 매 렌더 호출: report-cwd <surface_id> <cwd> [session_id].
+            // claude 내부 cd 를 GUI 푸터 "현재 보는 경로"로 노출.
+            let surface = args
+                .first()
+                .ok_or_else(|| anyhow!("report-cwd needs <surface_id> <cwd> [session_id]"))?;
+            let cwd = args.get(1).ok_or_else(|| anyhow!("report-cwd needs a cwd"))?;
+            let session_id = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            (
+                "surface.report_cwd",
+                json!({ "surface_id": surface, "cwd": cwd, "session_id": session_id }),
+            )
+        }
         "split" => {
             // 기본 no-focus(자동화: tell 처럼 포커스 안 뺏음). --focus 로 옵트인.
             let focus = args.iter().any(|a| a == "--focus");
@@ -669,6 +713,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .chars()
                 .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
                 .collect();
+            // 발신자(이 pane)를 messages.jsonl 에 기록 — 채팅뷰가 학생→학생 tell 을 거노
+            // 직접 입력과 구분해 발신자 프사+색 좌측 버블로 그리게(거노 #5/#7).
+            log_tell_to_messages(&surface, flat.trim());
             // Prepend Ctrl+U (0x15): clear any half-typed line resident in the
             // target prompt. Then wrap in bracketed paste (\x1b[200~…\x1b[201~):
             // claude's Ink input treats this as a safe paste event even in

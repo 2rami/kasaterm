@@ -137,3 +137,34 @@ pub(crate) fn send_paste_action() -> bool {
 pub(crate) fn send_copy_action() -> bool {
     send_app_edit_action(objc2::sel!(copy:))
 }
+
+/// ⌘Q 종료 확인 — ghostty 식 NSAlert("종료"/"취소"). "종료"(첫 버튼)면 true.
+/// PredefinedMenuItem::quit(OS 가 곧장 terminate) 대신 커스텀 ⌘Q 메뉴가 이걸 띄워,
+/// 확인 시에만 호출측이 event_loop.exit()로 정상 종료(세션·window.json 저장)한다.
+/// alert 를 못 띄우면(클래스 없음 등) 막지 않고 true 를 돌려 종료를 진행한다.
+#[cfg(target_os = "macos")]
+pub(crate) fn confirm_quit() -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+    unsafe {
+        let Some(cls) = objc2::runtime::AnyClass::get(c"NSAlert") else {
+            return true;
+        };
+        let alert: *mut AnyObject = msg_send![cls, new];
+        if alert.is_null() {
+            return true;
+        }
+        let title = NSString::from_str("kasaterm 을 종료할까요?");
+        let info = NSString::from_str("실행 중인 모든 터미널 세션이 종료됩니다.");
+        let quit_btn = NSString::from_str("종료");
+        let cancel_btn = NSString::from_str("취소");
+        let _: () = msg_send![alert, setMessageText: &*title];
+        let _: () = msg_send![alert, setInformativeText: &*info];
+        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*quit_btn];
+        let _: *mut AnyObject = msg_send![alert, addButtonWithTitle: &*cancel_btn];
+        // NSAlertFirstButtonReturn = 1000 ("종료"), Second = 1001 ("취소").
+        let resp: isize = msg_send![alert, runModal];
+        resp == 1000
+    }
+}

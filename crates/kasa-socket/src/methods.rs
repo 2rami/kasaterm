@@ -73,6 +73,7 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.rename" => surface_rename(backend, id, &req.params),
         "window.rename" => window_rename(backend, id, &req.params),
         "surface.set_color" => surface_set_color(backend, id, &req.params),
+        "surface.report_cwd" => surface_report_cwd(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
         "surface.move" => surface_move(backend, id, &req.params),
         "surface.resize_divider" => surface_resize_divider(backend, id, &req.params),
@@ -396,6 +397,22 @@ fn surface_set_color(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         None => return param_err(id, "surface.set_color requires `color` as #rrggbb"),
     };
     match backend.set_color(surface_id, color) {
+        Ok(()) => Response::success(id, json!({"ok": true})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn surface_report_cwd(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let surface_id = match params.get("surface_id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.report_cwd requires `surface_id` (string)"),
+    };
+    let cwd = match params.get("cwd").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "surface.report_cwd requires `cwd` (string)"),
+    };
+    let session_id = params.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+    match backend.report_cwd(surface_id, cwd, session_id) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }

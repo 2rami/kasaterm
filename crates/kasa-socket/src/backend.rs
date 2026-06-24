@@ -223,6 +223,16 @@ pub struct PaneActivity {
     /// 작업 경로 — transcript 의 `cwd` 필드(절대경로). 빈값=tail 에 cwd 줄 없음.
     #[serde(default)]
     pub cwd: String,
+    /// statusLine 이 보고한 "현재 보는 경로" — claude 는 셸 위에서 돌아 lsof(cwd)로는
+    /// 내부 cd 가 안 보여, statusline.py 가 매 렌더 `report-cwd` 로 직접 보고한다.
+    /// cwd(=claude 프로세스 실행 경로, 고정)와 함께 푸터 "실행/현재 보는" 두 경로(거노).
+    #[serde(default)]
+    pub view_cwd: String,
+    /// claude saved default effort(~/.claude/settings.json `effortLevel`) — resume 직후엔 현재
+    /// 세션의 /effort stdout 이 jsonl 에 없어 GUI effort 카드가 빈값이 됐다(거노: resume 후 effort
+    /// 만 뜸). 그 폴백값. ultracode 는 "this session only"라 여기 안 들어와 잔존하지 않는다.
+    #[serde(default)]
+    pub effort_default: String,
     /// 모델 컨텍스트 한도(토큰). 현재 전 Claude 200k. 0=모델 미상.
     #[serde(default)]
     pub context_limit: u64,
@@ -386,6 +396,12 @@ pub trait Backend: Send + Sync {
     /// Default: unsupported.
     fn set_color(&self, _surface_id: &str, _color: [u8; 4]) -> Result<()> {
         anyhow::bail!("set_color unsupported by this backend")
+    }
+    /// statusLine 이 매 렌더 보고하는 "현재 보는 경로". claude 가 셸 위에서 cd 해도
+    /// lsof(최상위 셸 cwd)로는 안 보여, statusline.py 가 직접 push 한다. board 의
+    /// `view_cwd` 로 노출(GUI 푸터 "현재 보는 경로"). 기본: 무동작(저장 안 함).
+    fn report_cwd(&self, _surface_id: &str, _cwd: &str, _session_id: &str) -> Result<()> {
+        Ok(())
     }
     /// Swap two surfaces' positions in the layout. Default: unsupported.
     fn swap_surfaces(&self, _a: &str, _b: &str) -> Result<()> {
@@ -626,12 +642,16 @@ pub trait Backend: Send + Sync {
         Ok(Vec::new())
     }
 
-    /// Read a pane's bound transcript jsonl as raw text (every line, unparsed).
-    /// Where `transcript_tail` strips to text-only turns, this hands back the
-    /// full jsonl so the client parses tool_use/tool_result/structuredPatch
-    /// itself — the BA GUI per-tool 렌더 path. Default: empty.
-    fn transcript_raw(&self, _surface_id: &str) -> Result<String> {
-        Ok(String::new())
+    /// Read a pane's bound transcript jsonl *incrementally*. `offset` is the byte
+    /// position the client already holds: `0` (first load) returns the **tail**
+    /// window (`reset: true`, first partial line dropped); `>0` returns only the
+    /// whole lines appended since, `reset: false`. A still-being-written trailing
+    /// line is held back until the next call completes it, so the returned
+    /// `offset` always lands on a line boundary. Lets the BA GUI append new lines
+    /// instead of re-reading & re-parsing the whole (multi-MB) jsonl every poll.
+    /// Default: empty.
+    fn transcript_raw(&self, _surface_id: &str, _offset: u64) -> Result<TranscriptChunk> {
+        Ok(TranscriptChunk::default())
     }
 
     /// Read a *past* (offline) Claude session's transcript jsonl as raw text,
@@ -673,6 +693,18 @@ pub struct SubagentInfo {
     pub agent_type: String,
     pub description: String,
     pub mtime: u64,
+}
+
+/// An incremental slice of a transcript jsonl, returned by `transcript_raw`.
+/// `raw` is zero or more whole jsonl lines (empty when nothing changed since the
+/// client's `offset`), `offset` is the byte position the client should send on
+/// its next poll, and `reset` means replace the buffer (a tail (re)load) rather
+/// than append.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TranscriptChunk {
+    pub raw: String,
+    pub offset: u64,
+    pub reset: bool,
 }
 
 /// One turn of a pane's claude conversation, extracted from its transcript
