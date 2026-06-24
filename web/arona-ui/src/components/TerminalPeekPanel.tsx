@@ -431,20 +431,22 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
       }
     }
   }
-  // 고아 user 버블 제거 — 단 마지막 user 버블은 방금 보낸 라이브(아직 자식 미부착=가짜 고아)라 보호.
+  // 취소(미처리) user 버블 제거 — uuid 고아(어떤 row 도 parent 로 참조 안 함)인데, 바로 다음 user
+  // 발화가 이 내용으로 시작(취소→재전송·미완성→완성·중복)일 때만 "보내자마자 esc"로 버려진 것이라 숨긴다.
+  // 단순 고아만으로 숨기면 거노의 빠른 연속/중복 발화나 background task-notification 이 체인을 가로채
+  // 만든 고아(정상 발화)까지 사라졌다(거노: 정상 '어근데 취소메시지 안사라진다' 가 사라짐). superset
+  // 재전송 시그니처로 좁혀 그 오탐을 없앤다. 다음 user 가 없는 마지막 발화는 자동 유지(라이브).
   // 서브에이전트 단독뷰(keepSidechain)는 체인 구조가 달라 적용하지 않는다.
   if (!keepSidechain) {
-    let lastUserIdx = -1;
-    for (let i = items.length - 1; i >= 0; i--) {
-      if (items[i].kind === 'bubble' && (items[i] as { role: string }).role === 'user') { lastUserIdx = i; break; }
-    }
+    const uIdx: number[] = [];
     for (let i = 0; i < items.length; i++) {
-      if (i === lastUserIdx) continue;
-      const it = items[i];
-      if (it.kind === 'bubble' && (it as { role: string }).role === 'user') {
-        const u = (it as { uuid?: string }).uuid;
-        if (u && !referenced.has(u)) droppedQ.add(it);
-      }
+      if (items[i].kind === 'bubble' && (items[i] as { role: string }).role === 'user') uIdx.push(i);
+    }
+    for (let k = 0; k < uIdx.length - 1; k++) {
+      const it = items[uIdx[k]] as { uuid?: string; text: string };
+      if (!it.uuid || referenced.has(it.uuid)) continue;
+      const next = items[uIdx[k + 1]] as { text: string };
+      if (it.text.trim() && next.text.startsWith(it.text.trim())) droppedQ.add(items[uIdx[k]]);
     }
   }
   return droppedQ.size ? items.filter((it) => !droppedQ.has(it)) : items;
