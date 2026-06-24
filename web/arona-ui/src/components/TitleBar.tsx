@@ -135,8 +135,10 @@ function UsagePill({ label, pct, resetsAt }: { label: string; pct: number; reset
 export interface TitleBarProps {
   notifications?: number;
   mail?: number;
-  /** ⚡ 번개 = 전 학생 총 컨텍스트 토큰(재화 치환). */
+  /** ⚡ 번개 = 전 학생 총 컨텍스트 토큰. */
   contextTokens?: number;
+  /** 컨텍스트 한도 — 번개 칩 분모('25k / 200k'). */
+  contextLimit?: number;
   /** claude oauth usage — 5시간/주간 한도 게이지. */
   usage?: ClaudeUsage | null;
   /** 현재 테마 — 태양/달 버튼 표시. */
@@ -145,13 +147,18 @@ export interface TitleBarProps {
   onBell?: () => void;
   onMail?: () => void;
   onSettings?: () => void;
+  /** 제목 옆 가운데 슬롯 — 터미널/교실 토글 등(옛 헤더 줄2 통합). */
+  centerSlot?: React.ReactNode;
+  /** 우측 끝 액션 — 집중모드·브라우저로·터미널보기(옛 헤더 줄2 통합). */
+  actions?: React.ReactNode;
 }
 
-export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, usage, theme = 'light', onToggleTheme, onBell, onMail, onSettings }: TitleBarProps) {
+export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, contextLimit = 0, usage, theme = 'light', onToggleTheme, onBell, onMail, onSettings, centerSlot, actions }: TitleBarProps) {
+  const divider = <div style={{ width: 1, height: 18, background: 'var(--cth-cream-200)', flexShrink: 0, margin: '0 2px' }} />;
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8,
-      height: 36, padding: '0 12px', flexShrink: 0, boxSizing: 'border-box',
+      height: 40, padding: '0 12px', flexShrink: 0, boxSizing: 'border-box',
       background: 'linear-gradient(180deg, var(--cth-sky-light), var(--cth-cream-50))',
       borderBottom: '1px solid var(--cth-cream-200)',
     }}>
@@ -172,17 +179,24 @@ export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, usage
         color: 'var(--cth-ink-500)', whiteSpace: 'nowrap',
       }}>{APP_VERSION} · Sensei Mode</span>
 
+      {centerSlot && <>{divider}{centerSlot}</>}
+
       <div style={{ flex: 1 }} />
 
       {usage?.five_hour && <UsagePill label="5h" pct={usage.five_hour.utilization} resetsAt={usage.five_hour.resets_at} />}
       {usage?.seven_day && <UsagePill label="7d" pct={usage.seven_day.utilization} resetsAt={usage.seven_day.resets_at} />}
       {contextTokens > 0 && (
-        <StatPill icon={<BoltIcon />} value={fmtTokens(contextTokens)} style={{ marginRight: 4 }} />
+        <StatPill
+          icon={<BoltIcon />}
+          value={contextLimit > 0 ? `${fmtTokens(contextTokens)} / ${fmtTokens(contextLimit)}` : fmtTokens(contextTokens)}
+          style={{ marginRight: 4 }}
+        />
       )}
       <IconBtn title={theme === 'dark' ? '라이트 모드로' : '다크 모드로'} onClick={onToggleTheme}>{theme === 'dark' ? <SunIcon /> : <MoonIcon />}</IconBtn>
       <IconBtn title="알림" badge={notifications} onClick={onBell}><BellIcon /></IconBtn>
       <IconBtn title="메일" badge={mail} onClick={onMail}><MailIcon /></IconBtn>
       <IconBtn title="소스 컨트롤" onClick={onSettings}><GearIcon /></IconBtn>
+      {actions && <>{divider}{actions}</>}
     </div>
   );
 }

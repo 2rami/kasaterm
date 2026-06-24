@@ -236,6 +236,10 @@ export function App() {
 
   // 타이틀바 컨텍스트 게이지용 — 전 학생 컨텍스트 토큰 합. (재화·인연은 학생별 채팅방으로 이관)
   const totalContextTokens = sorted.reduce((s, a) => s + (a.contextTokens ?? 0), 0);
+  // 번개 칩 분모(한도) — active 학생 컨텍스트 한도, 없으면 최대 한도, 그래도 없으면 200k 기본(거노:
+  // 한도가 안 떴다 = 분모가 없었다). 1M 모델이면 학생 contextLimit 이 1M 로 와 자동 반영.
+  const ctxLimit = (sorted.find((a) => a.id === activeId)?.contextLimit)
+    ?? (Math.max(0, ...sorted.map((a) => a.contextLimit ?? 0)) || 200_000);
   // 우측 CommandCenter·교실 강조에 넘길 active 학생(과거 세션 보기 중이면 그걸 우선).
   const activeSelected: PeekItem | null = offlinePeek
     ?? (activeId ? { id: activeId, title: sorted.find((x) => x.id === activeId)?.name ?? activeId } : null);
@@ -263,11 +267,12 @@ export function App() {
     // SCHALE OS 전체 셸: 세로 100% + 가로 100%
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-      {/* 타이틀바 — 집중 모드면 숨김 */}
+      {/* 통합 타이틀바(옛 줄1+줄2 합침) — 집중 모드면 숨김. 토글은 centerSlot, 우측 버튼은 actions. */}
       {!focusMode && (<TitleBar
         notifications={agents.filter((a) => a.status === 'waiting' || a.status === 'blocked').length}
         mail={agents.filter((a) => a.status === 'success').length}
         contextTokens={totalContextTokens}
+        contextLimit={ctxLimit}
         usage={usage}
         theme={theme}
         onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
@@ -281,57 +286,29 @@ export function App() {
         }}
         onMail={() => { const a = sorted.find((x) => x.status === 'success'); if (a) { void focusPane(a.id); setActiveId(a.id); setOfflinePeek(null); } }}
         onSettings={() => setGitNonce((n) => n + 1)}
+        centerSlot={
+          <SegmentedTabs<ViewMode>
+            options={[{ value: 'terminal', label: '터미널' }, { value: 'classroom', label: '교실' }]}
+            value={view}
+            onChange={setView}
+            size="sm"
+          />
+        }
+        actions={<>
+          {/* 집중 모드 — 헤더·타이틀바·풋터까지 한 번에 닫는 단일 컨트롤(거노). */}
+          <button onClick={() => setFocusMode(true)} title="패널 전부 숨기기 (⌘\)"
+            style={{ width: 26, height: 26, borderRadius: 7, cursor: 'pointer', border: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <svg width="15" height="15" viewBox="0 0 16 16"><path d="M6 2.5H3.5V5M10 2.5h2.5V5M6 13.5H3.5V11M10 13.5h2.5V11" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          </button>
+          {/* 브라우저로 — webview 말고 OS 기본 브라우저에서 같은 뷰어 열기(open-file 이 URL 도 open). */}
+          <PixelButton variant="secondary" size="sm" onClick={() => void openFile('http://127.0.0.1:8765/arona-ui/')}>
+            브라우저로
+          </PixelButton>
+          <PixelButton variant="secondary" size="sm" onClick={reveal}>
+            {revealing ? '여는 중…' : '터미널 보기'}
+          </PixelButton>
+        </>}
       />)}
-
-      {/* 헤더 — 집중 모드면 숨김 */}
-      {!focusMode && (<div style={{
-        display: 'flex', alignItems: 'center', gap: 8,
-        padding: '10px 16px',
-        borderBottom: '1px solid var(--cth-cream-200)',
-        background: 'var(--cth-cream-50)',
-        boxShadow: '0 1px 3px rgba(21, 41, 74, 0.04)',
-        flexShrink: 0
-      }}>
-        {/* 제목 + 방 칩 */}
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, minWidth: 0 }}>
-          <h1 style={{
-            fontFamily: 'var(--cth-font-display)',
-            fontSize: 'var(--cth-text-display-lg)',
-            lineHeight: 'var(--cth-lh-display-lg)',
-            color: 'var(--cth-ink-900)', margin: 0, whiteSpace: 'nowrap'
-          }}>
-            SCHALE Headquarters
-          </h1>
-          {/* 경로는 BA GUI 에서 바꾸지 않는다 — 터미널에서 그 방(pane) 켤 때의 cwd 로 고정(거노). */}
-        </div>
-
-        {/* 뷰 탭 */}
-        <SegmentedTabs<ViewMode>
-          options={[{ value: 'terminal', label: '터미널' }, { value: 'classroom', label: '교실' }]}
-          value={view}
-          onChange={setView}
-          size="sm"
-          style={{ marginLeft: 8 }}
-        />
-
-        <div style={{ flex: 1 }} />
-
-        {/* 집중 모드 — 패널 가장자리 접기와 별개로, 헤더·타이틀바·풋터까지 전부 한 번에
-            닫는 단일 컨트롤(거노: 평소에도 다 닫기). 좌/우 개별 접기는 각 패널 가장자리에서. */}
-        <button onClick={() => setFocusMode(true)} title="패널 전부 숨기기 (⌘\)"
-          style={{ width: 28, height: 28, borderRadius: 8, cursor: 'pointer', border: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-          <svg width="15" height="15" viewBox="0 0 16 16"><path d="M6 2.5H3.5V5M10 2.5h2.5V5M6 13.5H3.5V11M10 13.5h2.5V11" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
-        </button>
-
-        {/* 우측 액션 — 학생 부르기는 교실 빈 자리 버튼으로 이동(거노) */}
-        {/* 브라우저로 — webview 말고 OS 기본 브라우저에서 같은 뷰어 열기(open-file 이 URL 도 open). */}
-        <PixelButton variant="secondary" size="sm" onClick={() => void openFile('http://127.0.0.1:8765/arona-ui/')}>
-          브라우저로
-        </PixelButton>
-        <PixelButton variant="secondary" size="sm" onClick={reveal}>
-          {revealing ? '여는 중…' : '터미널 보기'}
-        </PixelButton>
-      </div>)}
 
       {/* 바디: 좌측 장소 네비 + 메인 영역 + 우측 CommandCenter */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
