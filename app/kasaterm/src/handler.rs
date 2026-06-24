@@ -265,9 +265,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::SocketOpenPreview(path) => {
-                // imgopen/mdopen·SendUserFile 훅 → 미리보기 pane split(이미지/마크다운).
-                self.open_file_split(std::path::PathBuf::from(path));
+            UserEvent::SocketOpenPreview(path, target) => {
+                // imgopen/mdopen·SendUserFile 훅 → 요청 pane 의 보조 탭으로(크롬 탭).
+                // target = 요청자 pid($KASATERM_PANE_ID); open_file 이 그 pane 을 찾아
+                // 탭으로 붙인다(못 찾으면 active split 폴백).
+                self.open_file(std::path::PathBuf::from(path), target.clone(), true);
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
