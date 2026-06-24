@@ -29,6 +29,20 @@ if [[ ! -f assets/AppIcon.icns ]]; then
   exit 1
 fi
 
+# 버전 = workspace Cargo.toml 단일 소스. Sparkle 은 CFBundleVersion 증가로 새 버전을
+# 판정하므로 Info.plist 버전을 여기서 동적 주입한다(예전엔 0.1.0 하드코딩).
+VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+
+# Sparkle.framework — vendor 에 없으면 release tarball 받아 추출(캐시, .gitignore).
+SPARKLE_VER="2.9.3"
+SPARKLE_FW="vendor/Sparkle/Sparkle.framework"
+if [[ ! -d "$SPARKLE_FW" ]]; then
+  echo "[build-app] Sparkle $SPARKLE_VER 받는 중..."
+  mkdir -p vendor/Sparkle
+  gh release download "$SPARKLE_VER" --repo sparkle-project/Sparkle -p "Sparkle-$SPARKLE_VER.tar.xz" -D vendor --clobber
+  tar -xJf "vendor/Sparkle-$SPARKLE_VER.tar.xz" -C vendor/Sparkle/
+fi
+
 # Build the binaries. Besides kasaterm we bundle kasaterm-cli so a pane can
 # drive siblings via the socket (install_pane_shims stages it on the pane PATH).
 if [[ "$PROFILE" == "release" ]]; then
@@ -51,6 +65,11 @@ cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp -R app/kasaterm/collab-hooks "$APP/Contents/Resources/collab-hooks"
 rm -rf "$APP/Contents/Resources/collab-hooks/__pycache__"
 
+# Sparkle.framework → Contents/Frameworks (ditto 로 symlink·권한 보존). 자동 업데이트용.
+# macos_sparkle.rs 가 런타임에 Versions/B/Sparkle 를 dlopen 한다.
+mkdir -p "$APP/Contents/Frameworks"
+ditto "$SPARKLE_FW" "$APP/Contents/Frameworks/Sparkle.framework"
+
 # 아로나(god 모드) UI 정적 번들 → Resources/arona-ui. node/npm 없으면 경고+skip
 # (solo 전용 사용자는 영향 0 — god 모드일 때만 이 웹뷰를 띄운다). lock 있으면
 # 재현 빌드(npm ci), 없으면 npm install 폴백.
@@ -69,7 +88,7 @@ fi
 
 # Minimal Info.plist. Bundle id namespaced under the project root so
 # Launchpad / Spotlight key the icon to this binary specifically.
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -81,9 +100,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleIdentifier</key>
     <string>com.kasa.kasaterm</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>$VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>$VERSION</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
@@ -98,6 +117,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <string>NSApplication</string>
     <key>NSRequiresAquaSystemAppearance</key>
     <false/>
+    <key>SUFeedURL</key>
+    <string>https://2rami.github.io/kasaterm/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>E4tFAb2UND+0QhgTSv2pFYKIC3ReT/dLia20KHfZxKw=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
     <key>CFBundleDocumentTypes</key>
     <array>
       <dict>
@@ -135,14 +162,31 @@ SIGN_ID="kasaterm-dev"
 # which -v filters out. codesign still signs with it, and TCC keys
 # permissions off the signing identity, so untrusted is fine for local use.
 if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_ID"; then
-  codesign --force --sign "$SIGN_ID" --deep "$APP" 2>/dev/null \
-    && echo "signed with '$SIGN_ID' — TCC permissions persist across rebuilds" \
-    || echo "warning: signing with '$SIGN_ID' failed; app left unsigned"
+  SIGN="$SIGN_ID"
+  SIGN_MSG="signed with '$SIGN_ID' — TCC permissions persist across rebuilds"
 else
-  # Fall back to ad-hoc so Gatekeeper still accepts a Finder launch.
-  codesign --force --sign - --deep "$APP" 2>/dev/null || true
-  echo "signed ad-hoc — create a '$SIGN_ID' code-signing cert to stop the permission re-prompts"
+  SIGN="-"  # ad-hoc
+  SIGN_MSG="signed ad-hoc — create a '$SIGN_ID' code-signing cert to stop the permission re-prompts"
 fi
+# Sparkle.framework 는 nested(XPC·Updater·Autoupdate·dylib)부터 → framework → 마지막
+# app 순으로 서명한다. `--deep` 한 방은 nested XPC 의 서명 일관성을 보장 못 해 실행 시
+# XPC 로드가 실패하고 자동 업데이트가 깨질 수 있다(안쪽→바깥쪽이 정석).
+FW="$APP/Contents/Frameworks/Sparkle.framework"
+if [[ -d "$FW" ]]; then
+  for nested in \
+    "$FW/Versions/B/XPCServices/Downloader.xpc" \
+    "$FW/Versions/B/XPCServices/Installer.xpc" \
+    "$FW/Versions/B/Updater.app" \
+    "$FW/Versions/B/Autoupdate"; do
+    [[ -e "$nested" ]] && codesign --force --sign "$SIGN" "$nested" 2>/dev/null || true
+  done
+  codesign --force --sign "$SIGN" "$FW" 2>/dev/null || true
+fi
+# kasaterm-cli 는 별도 실행 바이너리 — app 서명(--deep 제거)이 안 덮으므로 개별 서명.
+codesign --force --sign "$SIGN" "$APP/Contents/MacOS/kasaterm-cli" 2>/dev/null || true
+codesign --force --sign "$SIGN" "$APP" 2>/dev/null \
+  && echo "$SIGN_MSG" \
+  || echo "warning: signing '$APP' failed; app left unsigned"
 
 # Bust the icon cache so the new .icns shows immediately in Finder /
 # Dock instead of waiting for macOS to notice on its own.

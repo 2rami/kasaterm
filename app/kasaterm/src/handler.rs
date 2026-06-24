@@ -383,8 +383,10 @@ impl ApplicationHandler<UserEvent> for App {
             use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
             let menu = Menu::new();
             let app_m = Submenu::new("kasaterm", true);
+            let update_item = MenuItem::new("업데이트 확인…", true, None);
             let _ = app_m.append_items(&[
                 &PredefinedMenuItem::about(None, None),
+                &update_item,
                 &PredefinedMenuItem::separator(),
                 &PredefinedMenuItem::quit(None),
             ]);
@@ -425,7 +427,10 @@ impl ApplicationHandler<UserEvent> for App {
             self.arona_menu_item = Some(arona_item);
             self.copy_menu_item = Some(copy_item);
             self.paste_menu_item = Some(paste_item);
+            self.update_menu_item = Some(update_item);
             self.menu = Some(menu);
+            // Sparkle 자동 업데이트 시작(.app 빌드에서만 — dev 는 framework 없어 no-op).
+            self.sparkle_updater = crate::macos_sparkle::init();
         }
         // WaitUntil so the cursor blink ticks even when no terminal output
         // is arriving — the redraw inside RedrawRequested re-arms the
@@ -3351,6 +3356,12 @@ impl ApplicationHandler<UserEvent> for App {
                 let to_webview = false;
                 if !to_webview && self.selection.is_some() {
                     self.copy_selection();
+                }
+            } else if self.update_menu_item.as_ref().map(|m| m.id()) == Some(&ev.id) {
+                // "업데이트 확인" → Sparkle 표준 다이얼로그(.app 빌드에서만 active).
+                #[cfg(target_os = "macos")]
+                if let Some(c) = self.sparkle_updater.as_ref() {
+                    crate::macos_sparkle::check_for_updates(c);
                 }
             }
         }
