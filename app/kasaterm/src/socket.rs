@@ -1235,11 +1235,51 @@ fn read_incremental(path: &std::path::Path, offset: u64) -> std::io::Result<Tran
             slice = &slice[i + 1..];
         }
     }
-    Ok(TranscriptChunk {
-        raw: String::from_utf8_lossy(slice).into_owned(),
-        offset: next_offset,
-        reset,
-    })
+    let mut raw = String::from_utf8_lossy(slice).into_owned();
+    // tail 윈도 밖으로 밀린 미처리 예약(queue-operation)도 채팅에 살린다 — 작업 turn 이
+    // 512KB 넘게 쌓이면 오래된 enqueue 가 윈도 밖이라 큐 버블이 안 뜨던 것(거노). 큐 op
+    // 라인은 작아(텍스트) 전부 prepend 해도 가볍고, 프론트가 enqueue/dequeue/remove 를
+    // FIFO 매칭해 미처리만 큐 버블로 그린다(처리된 예약은 droppedQ 로 제거).
+    if reset && start > 0 {
+        let head = scan_queue_ops_before(path, start);
+        if !head.is_empty() {
+            raw = format!("{head}\n{raw}");
+        }
+    }
+    Ok(TranscriptChunk { raw, offset: next_offset, reset })
+}
+
+/// `[0, start)` 구간에서 queue-operation(예약 enqueue/dequeue/remove/popAll) 줄만 모은다.
+/// reset(tail) 로드 때 윈도 밖으로 밀린 미처리 예약 큐 버블을 복원하려는 것. enqueue 만이
+/// 아니라 처리 op 까지 다 모아야 프론트 FIFO 매칭에서 이미 처리된 예약이 영구 잔존하지 않는다.
+fn scan_queue_ops_before(path: &std::path::Path, start: u64) -> String {
+    use std::io::{BufRead, BufReader};
+    let Ok(f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let mut reader = BufReader::new(f);
+    let mut out = String::new();
+    let mut pos: u64 = 0;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(n) => {
+                pos += n as u64;
+                if pos > start {
+                    break; // tail 윈도 진입 — 이후 줄은 tail 이 담당
+                }
+                if line.contains("\"type\":\"queue-operation\"") {
+                    out.push_str(line.trim_end_matches('\n'));
+                    out.push('\n');
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    out.truncate(out.trim_end().len());
+    out
 }
 
 /// Foreground process name under a pane's shell pid — the youngest direct child
