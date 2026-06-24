@@ -1092,8 +1092,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       if (stopped) return;
       offsetRef.current = chunk.offset;
       if (chunk.reset) {
-        // tail (재)로드 — 버퍼 교체. 윈도 첫 이벤트 ts 를 세션 경계(sent-images 컷)로 고정.
-        firstTsRef.current = (chunk.events[0] as { timestamp?: string } | undefined)?.timestamp;
+        // tail (재)로드 — 버퍼 교체. 세션 경계(sent-images 컷)는 첫 "실제" 이벤트 ts —
+        // 백엔드가 윈도 밖 미처리 예약(queue-operation)을 앞에 prepend 하므로, 그 과거 ts 가
+        // 경계로 잡히지 않게 queue-operation 은 건너뛴다(안 그러면 이전 이미지 컷이 느슨해짐).
+        firstTsRef.current = (chunk.events.find(
+          (e) => (e as { type?: string }).type !== 'queue-operation',
+        ) as { timestamp?: string } | undefined)?.timestamp;
         setEvents(chunk.events);
       } else if (chunk.events.length) {
         setEvents((prev) => [...prev, ...chunk.events]);
