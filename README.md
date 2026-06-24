@@ -4,16 +4,17 @@
 
 # kasaterm
 
-**AI 에이전트와 함께 일하는, 터미널을 코어로 둔 작업 OS**
+**Rust로 바닥부터 만든 크로스플랫폼 GPU 터미널.**
 
-기성 터미널은 *터미널*에서 멈추고, IDE는 *편집기*에서 멈춘다.<br/>
-kasaterm은 그 위로 한 층 더 올라가 — **여러 Claude를 거느리고, 작업이 굴러가는 걸 눈으로 보는** 자리에 있다.
+셀 렌더러 · 한글 IME · PTY를 기성 라이브러리 없이 자체 crate로 구현했고,<br/>
+그 위에 **여러 Claude를 학생처럼 거느리는 GUI**를 얹었다.
 
-[데모](#데모) · [이게 뭐야](#이게-뭐야) · [설치](#설치--실행) · [단축키](#단축키) · [로드맵](#로드맵)
+[데모](#데모) · [강점](#강점--전부-자체-구현했다) · [crate](#재사용-가능한-crate) · [설치](#설치--실행) · [단축키](#단축키) · [구조](#구조)
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)
+![Renderer](https://img.shields.io/badge/renderer-wgpu-purple)
 [![GitHub stars](https://img.shields.io/github/stars/2rami/kasaterm?style=social)](https://github.com/2rami/kasaterm/stargazers)
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/2rami?label=Sponsor&logo=githubsponsors&color=ff69b4)](https://github.com/sponsors/2rami)
 
@@ -23,25 +24,69 @@ kasaterm은 그 위로 한 층 더 올라가 — **여러 Claude를 거느리고
 
 ## 데모
 
-<!-- README의 심장. pane에서 굴러가는 작업이 BA GUI로 실시간으로 보이는 장면을 GIF로.
-     BA GUI 완성도가 더 올라간 뒤 kasaterm 자체 캡처로 녹화해서 이 자리에 교체한다. -->
-
-> 데모 영상 준비 중 — *pane에서 굴러가는 작업이 BA GUI로 한눈에 보이고, pane끼리 연동되는* 장면.
-
 <div align="center">
-  <img src="schale-light.png" width="720" alt="kasaterm — SCHALE OS / 아로나 모드" />
+  <img src="assets/shot-terminal.png" width="820" alt="kasaterm — GUI 버튼·드래그로 나눈 멀티페인. 한글 커밋 로그와 색재현이 그대로." />
+  <br/>
+  <sub>GUI 버튼·드래그로 나눈 멀티페인. tmux prefix 키 없이 분할하고, 한글·색·box-drawing이 자체 렌더러로 그려진다.</sub>
 </div>
 
 ---
 
 ## 이게 뭐야
 
-자체 제작 GUI 터미널 + Claude Code 런처. tmux를 prefix 키 대신 **GUI 버튼·드래그·자연어**로 다루는 네이티브 Rust 앱이다. 기성 라이브러리에 기대지 않고 렌더러·한글 IME·PTY까지 전부 직접 만들었다.
+자체 제작 GUI 터미널이다. tmux를 prefix 키 대신 **GUI 버튼·드래그·자연어**로 다루는 네이티브 Rust 앱이고, 렌더러·한글 IME·PTY까지 **기성 터미널 라이브러리에 기대지 않고 전부 직접 만들었다.**
 
-다른 터미널과 다른 점은 두 가지다:
+두 축으로 읽으면 된다:
 
-- **작업이 굴러가는 걸 본다** — pane에서 Claude가 하는 일이 BA GUI(아로나 모드)로 실시간으로 보인다. 로그를 읽는 게 아니라 작업을 *지켜본다*.
-- **pane끼리 연동된다** — pane이 서로 격리된 창이 아니라, 에이전트가 pane을 넘나들며 협업하는 하나의 작업 공간이다.
+- **아래 — 터미널 엔진.** wgpu 셀 렌더러, 두벌식 한글 IME, 크로스플랫폼 PTY를 각각 **독립 crate**로 깎았다. 터미널을 만들려는 사람이 부품만 가져다 쓸 수 있게 설계했다.
+- **위 — AI 오케스트레이션.** 그 엔진 위에서, pane마다 도는 Claude의 작업이 BA GUI(아로나 모드)로 실시간으로 보인다. 로그를 읽는 게 아니라 작업을 *지켜본다.*
+
+---
+
+## 강점 — 전부 자체 구현했다
+
+기성 라이브러리를 붙인 게 아니라, 터미널의 핵심 부품을 바닥부터 만들었다.
+
+| | 무엇 | crate |
+|---|---|---|
+| **GPU 셀 렌더** | swash atlas에 글리프를 한 번 굽고 셀당 인스턴스 1개로 그린다. box-drawing은 wgpu quad, CJK·이모지 fallback 내장 | `kasa-cells` |
+| **한글 IME** | OS IME에 의존하지 않는 두벌식 입력 오토마타. 복합 종성까지 자체 조합 | `kasa-ime` |
+| **크로스플랫폼 PTY** | `portable-pty` + `alacritty_terminal`. macOS·Linux BSD PTY와 Windows ConPTY가 **동일 코드 경로** | `kasa-pty` |
+| **색재현** | shader sRGB→DisplayP3 변환 + root `CAMetalLayer`. 터미널 색이 디자인 의도대로 (sugarloaf/ghostty 동급) | `kasa-cells` |
+
+### 크로스플랫폼
+
+macOS·Windows·Linux를 같은 코드로 굴린다. PTY는 `portable-pty`로 추상화해 Windows에서는 ConPTY, 그 외에서는 BSD PTY로 자동 분기한다 — 플랫폼별 백엔드 분기 없이 동일 경로. macOS `.app`, Windows `.msi` 번들을 빌드 스크립트로 굽는다.
+
+### 재사용 가능한 crate
+
+워크스페이스가 곧 부품 카탈로그다. 각 crate는 kasaterm 없이도 독립적으로 쓸 수 있게 경계를 잡았다 — 특히 `kasa-cells`는 프레임워크 중립이라 `alacritty_terminal`·`wezterm-term` 같은 터미널 상태머신과 짝지어 **다른 터미널을 만드는 데 그대로 가져다 쓸 수 있다.**
+
+| crate | 한 줄 | 독립 사용 |
+|---|---|---|
+| **`kasa-cells`** | 프레임워크 중립 GPU 셀 렌더러 (wgpu). swash atlas·sRGB→P3·box-drawing·Nerd 폰트 번들 | 터미널/그리드 UI 제작용 |
+| **`kasa-pty`** | PTY + `alacritty_terminal` 백엔드. 크로스플랫폼(ConPTY 포함) | 헤드리스 PTY 호스트 |
+| **`kasa-ime`** | 두벌식 한글 입력 오토마타. OS IME 비의존 | 한글 입력이 필요한 Rust 앱 |
+| **`kasa-socket`** | cmux 호환 Unix-socket JSON-RPC 서버. `kasaterm-cli` 포함 | pane 제어 프로토콜 |
+| **`kasa-mcp`** | pane 제어를 모델 도구로 노출하는 streamable-HTTP MCP 서버 | Claude/Antigravity 연동 |
+| `app/kasaterm` | 메인 바이너리 — winit+wgpu 윈도우, chrome UI, 입력·단축키 라우팅 | — |
+
+---
+
+## 그 위 — 여러 Claude를 거느린다
+
+엔진이 안정될수록 그 위에 쌓는 게 본 게임이다. pane마다 Claude Code를 띄우고, 각 학생(pane)이 무슨 작업을 하는지 BA GUI로 한눈에 본다.
+
+<div align="center">
+  <img src="assets/shot-arona.png" width="780" alt="kasaterm BA GUI — 여러 Claude의 작업이 학생별 채팅·작업 트리로 실시간 표시" />
+  <br/>
+  <sub>왼쪽 교실에 학생(pane)들이, 가운데 각 학생의 대화·작업이, 오른쪽 Command Center에 현재 작업이 실시간으로.</sub>
+</div>
+
+다른 터미널과 다른 점:
+
+- **작업이 굴러가는 걸 본다** — pane에서 Claude가 하는 일이 채팅·작업 트리로 실시간 표시된다.
+- **pane끼리 연동된다** — pane이 격리된 창이 아니라, 에이전트가 pane을 넘나들며 협업하는 하나의 작업 공간이다.
 
 한 모노레포에 세 층이 쌓여 있고, 아래층이 위층을 떠받친다:
 
@@ -50,15 +95,6 @@ kasaterm은 그 위로 한 층 더 올라가 — **여러 Claude를 거느리고
 | ① 엔진 | **kasaterm** | 터미널 — wgpu 셀 렌더 · PTY · 한글 IME · multipane | 거의 안정 |
 | ② 작업환경 | **kasaspace** | 파일트리 · git 관리 · pane 간 에이전트 연결 | 진행 중 |
 | ③ 오케스트레이션 | **blueclaudearchive** | 여러 Claude를 학생처럼 거느리는 하네스 GUI (아로나 모드) | 무게중심 |
-
-①(터미널)은 거의 안정기, 무게중심은 ②③로 올라가는 중이다.
-
-### 기술 스택
-
-- **렌더** — `winit` + `wgpu` 위에 자체 cell-renderer (swash atlas + GPU instancing)
-- **백엔드** — `portable-pty` + `alacritty_terminal` (macOS/Linux BSD PTY, Windows ConPTY 동일 코드 경로)
-- **입력** — 자체 두벌식 한글 IME (OS IME 비의존, 복합 종성 지원)
-- **색재현** — shader sRGB→DisplayP3 변환 + root CAMetalLayer (sugarloaf/ghostty 동급)
 
 ---
 
@@ -72,7 +108,7 @@ cargo run -p kasaterm
 cargo run --release -p kasaterm
 ```
 
-macOS `.app` 번들은 별도 스크립트로 빌드한다(.icns/codesign/설치 포함). 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)와 MCP 서버가 함께 뜨고, MCP는 Claude Code/Antigravity 설정에 자동 등록된다.
+macOS `.app` / Windows `.msi` 번들은 별도 스크립트로 빌드한다(아이콘·codesign·설치 포함). 앱을 실행하면 pane 제어 CLI(`kasaterm-cli`)와 MCP 서버가 함께 뜨고, MCP는 Claude Code/Antigravity 설정에 자동 등록된다.
 
 ### Claude Code 플러그인 (kasapane 스킬)
 
@@ -131,21 +167,9 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 ## 구조
 
 <details>
-<summary><b>워크스페이스 멤버 · 렌더러 env · MCP 도구 (펼치기)</b></summary>
+<summary><b>렌더러 env · MCP 도구 (펼치기)</b></summary>
 
-### 워크스페이스 멤버 (`Cargo.toml`)
-
-| 경로 | 역할 |
-|---|---|
-| `app/kasaterm` | 메인 바이너리. winit+wgpu 윈도우, chrome UI(탭·사이드바·이미지 pane 등), 입력·단축키 라우팅 |
-| `crates/kasa-cells` | **기본 렌더러**. retained-mode GPU 셀 렌더러 (swash atlas + wgpu instance). P3 색재현 통합 |
-| `crates/kasa-pty` | **기본 백엔드**. portable-pty + alacritty_terminal. 크로스플랫폼(ConPTY 포함) |
-| `crates/kasa-ime` | 자체 두벌식 한글 입력 오토마타. OS IME 비의존, 복합 종성 지원 |
-| `crates/kasa-socket` | cmux 호환 Unix-socket JSON-RPC 서버. Claude Code teammateMode 연동용. `kasaterm-cli` 바이너리 포함 |
-| `crates/kasa-mcp` | kasaterm pane 제어를 모델 도구로 노출하는 streamable-HTTP MCP 서버 |
-| `crates/kasa-shim` | kasaterm이 띄운 셸의 `tmux` 호출을 가로채 trace 후 진짜 tmux로 위임 |
-| `crates/kasa-bridge` | tmux `-C`(control mode) 브리지. 레거시 백엔드 (현재 비기본) |
-| `spikes/*` | iced/egui/gpui/warpui 등 GUI 프레임워크 PoC. 채택 안 된 실험 |
+워크스페이스 멤버는 [강점 — 재사용 가능한 crate](#재사용-가능한-crate) 표 참고. `spikes/*`는 iced/egui/gpui/warpui 등 채택 안 된 GUI 프레임워크 PoC다.
 
 ### 렌더러 / 환경 변수
 
@@ -154,8 +178,8 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 | 변수 | 효과 |
 |---|---|
 | `KASATERM_P3_ROOT=0` | P3 root-layer 경로 끄고 옛 sRGB sublayer 폴백 |
-| `KASATERM_RENDERER=sugarloaf` | 참조용 sugarloaf 경로 (현재는 제거됨 — historical) |
 | `KASATERM_TEXT_GAMMA` / `_CONTRAST` / `_COLOR_SAT` | 텍스트 감마·대비·채도 노브 |
+| `KASATERM_AUTOSPLIT` / `_MS` | N초 후 자동 분할 (`"vh"` 등, 헤드리스 검증용) |
 | `KASATERM_AUTOCAPTURE_MS` / `_PATH` | N초 후 자동 스크린샷 (자체 테스트용) |
 | `KASATERM_AUTOSEND` / `_MS` | N초 후 키 자동 전송 (자체 테스트용) |
 
@@ -181,7 +205,6 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 | ① 엔진 | `claude --resume` 세션 복원 | 예정 |
 | ② 작업환경 | 파일트리 · git 패널 | 진행 중 |
 | ② 작업환경 | pane 간 에이전트 연결 | 진행 중 |
-| ② 작업환경 | 마크다운 기본 앱 연결 | 예정 |
 | ③ 오케스트레이션 | BA GUI — 작업 실시간 시각화 | 진행 중 |
 | ③ 오케스트레이션 | 여러 Claude 협업 (아로나 모드) | 진행 중 |
 
@@ -191,7 +214,7 @@ pane 사이 비율 조절은 **경계선(divider) 마우스 드래그**, pane을
 
 디자이너로 일하다 개발에 입문했다. tmux는 강력하지만 prefix 키 조합을 외우는 일이 늘 벽처럼 느껴졌다 — 터미널 멀티플렉싱을 GUI 버튼과 드래그로, 그리고 Claude Code를 한 번에 띄우는 런처로 다룰 수 있으면 좋겠다는 생각에서 시작했다.
 
-기성 라이브러리에 기대지 않고 직접 만들고 싶었다. GPU 셀 렌더러(P3 색재현), 두벌식 한글 IME(OS IME 비의존), 크로스플랫폼 PTY까지 전부 자체 구현했다. 결과물보다 만들면서 배운 게 더 컸다.
+기성 라이브러리에 기대지 않고 직접 만들고 싶었다. GPU 셀 렌더러(P3 색재현), 두벌식 한글 IME(OS IME 비의존), 크로스플랫폼 PTY까지 전부 자체 구현했고, 그 과정에서 깎인 부품들을 누구나 가져다 쓸 수 있는 crate로 남겼다. 결과물보다 만들면서 배운 게 더 컸다.
 
 무료로 공개한다. 누군가에게 쓸모가 되거나, 같은 길을 걷는 사람에게 참고가 되면 충분하다.
 
