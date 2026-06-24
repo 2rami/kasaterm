@@ -114,6 +114,10 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     let mut tokens_out = 0u64;
     let mut cache_read = 0u64;
     let mut cache_creation = 0u64;
+    // context_pct 용 — 합산(throughput)이 아니라 "가장 최근(역순 첫) assistant 턴"의 컨텍스트
+    // 점유량. input+cache_read+cache_creation = 그 요청이 실제로 끌어온 컨텍스트 크기(거노:
+    // peek 화면 대신 정확한 소스). None = tail 에 usage 있는 assistant 턴이 아직 없음.
+    let mut latest_ctx: Option<u64> = None;
     let mut cost_usd = 0f64;
     let mut tool_counts: Vec<(String, u32)> = Vec::new();
     let mut changed_files: Vec<String> = Vec::new();
@@ -173,6 +177,9 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                     tokens_out += to;
                     cache_read += cr;
                     cache_creation += cc;
+                    if latest_ctx.is_none() {
+                        latest_ctx = Some(ti + cr + cc);
+                    }
                     let m = v.pointer("/message/model").and_then(|m| m.as_str()).unwrap_or("");
                     cost_usd += turn_cost(m, ti, to, cr, cc);
                     if model.is_empty() && !m.is_empty() {
@@ -292,6 +299,16 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         .collect();
     background.dedup();
 
+    // 컨텍스트 한도·% — K-한도: model 의 [1m] 태그 또는 관측 컨텍스트>200k 면 1M 세션(200k
+    // 한도면 그 전에 compact 됨). G: 최신 턴 컨텍스트/한도(>100% 클램프).
+    let observed_ctx = latest_ctx.unwrap_or(0);
+    let context_limit = context_limit_for(&model, observed_ctx);
+    let context_pct = if context_limit > 0 {
+        (((observed_ctx as f64 / context_limit as f64) * 100.0).round() as u64).min(100) as u8
+    } else {
+        0
+    };
+
     PaneActivity {
         surface_id: surface_id.to_string(),
         title,
@@ -318,18 +335,27 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         background,
         recent_tools,
         model: model.clone(),
-        context_limit: context_limit_for(&model),
-        // 컨텍스트 % 는 PTY 상태바에서 — collab_board 가 화면 파싱으로 채운다.
-        context_pct: 0,
+        context_limit,
+        // 컨텍스트 % = 최신 assistant 턴 컨텍스트 / 한도(거노: 화면 peek 대신 정확한 transcript
+        // 소스). tail 에 usage 가 아직 없으면 0 → socket.rs 가 상태바 파싱으로 폴백.
+        context_pct,
+        context_tokens: observed_ctx,
         cwd,
         branch: None,
+        window_idx: 0,
     }
 }
 
-/// 모델명 → 컨텍스트 한도(토큰). 현재 전 Claude 모델 200k 공유(Sonnet 4+ 1M 베타는
-/// transcript 가 베타 플래그를 기록 안 해 base 로 본다). 빈 모델 = 0(미상).
-fn context_limit_for(model: &str) -> u64 {
-    if model.is_empty() { 0 } else { 200_000 }
+/// 모델명+관측 컨텍스트 → 컨텍스트 한도(토큰). transcript 가 1M 베타 플래그를 기록 안 하고
+/// model 도 보통 `[1m]` 태그 없이 와서(예 "claude-opus-4-8"), 두 신호로 1M 을 추정한다:
+/// ① model 에 `[1m]` 포함 ② 관측 컨텍스트가 200k 초과(200k 한도면 그 전에 compact 됨).
+/// 둘 다 아니면 200k. model 미상 + 관측 0 이면 0(미상).
+fn context_limit_for(model: &str, observed_ctx: u64) -> u64 {
+    if model.is_empty() && observed_ctx == 0 {
+        return 0;
+    }
+    let one_m = model.to_ascii_lowercase().contains("[1m]") || observed_ctx > 200_000;
+    if one_m { 1_000_000 } else { 200_000 }
 }
 
 /// 하네스/시스템이 user 턴으로 주입하는 합성 메시지(사람이 타이핑한 게 아님) —

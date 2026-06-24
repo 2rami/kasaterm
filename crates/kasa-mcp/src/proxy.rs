@@ -279,6 +279,9 @@ fn is_subagent_request(body: &serde_json::Value) -> bool {
 /// 항상 None 이라 effort 칩이 빈칸이었다. 신형은 문자열 그대로, 구형(Sonnet 4.5 등)만
 /// budget 역산으로 폴백. effort 미지정(기본 high) 요청은 None.
 fn effort_from_request(body: &serde_json::Value) -> Option<String> {
+    // [정정 06-23] ultracode 는 API 에 안 실린다 — 공식: effort 최댓값은 xhigh, ultracode 는 CLI 측
+    // workflow orchestration 이라 output_config.effort 엔 xhigh 로만 온다(실측 확인). 그래서 여기선
+    // low~xhigh 만 잡히고, ultracode↔xhigh 구분은 arona 가 transcript 의 /effort stdout 으로 한다.
     if let Some(effort) = body.pointer("/output_config/effort").and_then(|e| e.as_str()) {
         let e = effort.trim();
         if !e.is_empty() {

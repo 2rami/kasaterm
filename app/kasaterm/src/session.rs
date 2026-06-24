@@ -334,6 +334,10 @@ impl App {
             Ok(session) => {
                 self.pump_pty_screens(session.screens.clone(), pane.to_string());
                 self.pty.insert(pane.to_string(), Arc::new(session));
+                // old PTY 의 EOF 가 이 pane id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
+                // respawn 했으니 그 stale 죽음표시를 지워 reap 이 새 pane 을 닫지 않게(거노:
+                // 캐릭터 변경하면 pane 이 닫히던 버그). reap 에 contains_key 가드도 있지만 명시.
+                self.dead_panes.lock().unwrap().retain(|x| x != pane);
                 self.resize_backend(cols, rows);
                 self.publish_pty_layout();
                 if let Some(w) = self.window.as_ref() {

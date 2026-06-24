@@ -2172,6 +2172,10 @@ struct Workspace {
     /// collab_board 가 이걸로 bound pane 을 필터해 *활성 방 학생만* board 에 올린다
     /// (거노: 아로나 방 + 프라나 방이 한 교실에 같이 뜨던 문제 — 방별 격리).
     active_window_panes: std::collections::HashSet<String>,
+    /// pane → 속한 윈도우(방) 인덱스. 전 윈도우 leaf 를 `publish_pty_layout` 이 채운다.
+    /// collab_board(PtyBackend, 별 스레드)가 App 의 windows/pty_layout 을 못 봐서 ws 로
+    /// 미러 — board 가 전 방 학생을 window_idx 와 함께 실어 arona 좌측 방별 트리를 영속한다.
+    pane_window: HashMap<String, usize>,
 }
 
 impl Default for Workspace {
@@ -2184,6 +2188,7 @@ impl Default for Workspace {
             pane_room: HashMap::new(),
             pane_character: HashMap::new(),
             active_window_panes: std::collections::HashSet::new(),
+            pane_window: HashMap::new(),
         }
     }
 }

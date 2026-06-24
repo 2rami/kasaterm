@@ -196,9 +196,25 @@ impl App {
             } else {
                 ws.layout = Some(tree.to_tmux_layout(cols, rows));
             }
-            // 활성 방(윈도우)의 leaf pane 집합 — collab_board 가 이걸로 필터해 *활성 방
-            // 학생만* board 에 올린다(거노: 아로나 방+프라나 방이 한 교실에 같이 뜸).
+            // 활성 방(윈도우)의 leaf pane 집합 — 일부 경로가 아직 참조.
             ws.active_window_panes = tree.leaves().iter().map(|l| l.to_string()).collect();
+            // 전 윈도우(방) pane → window_idx — collab_board 가 전 방 학생을 방별로 그룹핑.
+            // window_of_pane 과 같은 패턴(활성=pty_layout, 그 외=windows[i]). PtyBackend 가
+            // App 의 windows 를 못 봐서 ws 로 미러한다(거노: 좌측 통합·전 방 영속).
+            let mut pw: HashMap<String, usize> = HashMap::new();
+            for i in 0..self.windows.len() {
+                let layout = if i == self.active_window {
+                    self.pty_layout.as_ref()
+                } else {
+                    self.windows[i].as_ref()
+                };
+                if let Some(l) = layout {
+                    for leaf in l.leaves() {
+                        pw.insert(leaf.to_string(), i);
+                    }
+                }
+            }
+            ws.pane_window = pw;
         }
         // Keep the socket snapshot in lockstep with the renderer view —
         // every code path that adds/removes panes or moves focus goes

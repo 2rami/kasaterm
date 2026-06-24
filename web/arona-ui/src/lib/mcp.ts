@@ -1,4 +1,4 @@
-import { useStore, type Agent } from '@/store';
+import { useStore, type Agent, type SubagentInfo } from '@/store';
 import type { AccentColorName } from '@/design/tokens';
 import type { StatusKind } from '@/components/PixelBadge';
 import type { SessionEvent } from './types';
@@ -47,6 +47,8 @@ interface BoardRow {
   /** 컨텍스트 사용량 % — claude TUI 상태바 파싱(robust). */
   context_pct?: number;
   branch?: string;
+  /** 이 pane 이 속한 윈도우(방) 인덱스 — sessions.labels 인덱스와 정렬. 좌측 방별 트리. */
+  window_idx?: number;
   /** 유우카가 character-<N> 마커를 읽어 노출(후속). 있으면 도트칩 이니셜·이름이
    *  캐릭터명(아로나/시로코/아리스…)으로, 없으면 title(ai-title) 폴백. */
   character?: string;
@@ -108,7 +110,8 @@ function toAgent(r: BoardRow): Agent {
     cwd: r.cwd,
     contextLimit: r.context_limit,
     contextPct: r.context_pct,
-    branch: r.branch
+    branch: r.branch,
+    windowIdx: r.window_idx ?? 0
   };
 }
 
@@ -793,6 +796,43 @@ export async function fetchSessionTranscriptRaw(id: string, cwd?: string): Promi
     const q = new URLSearchParams({ id });
     if (cwd) q.set('cwd', cwd);
     const r = await fetch(`${BASE}/session-transcript-raw?${q}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { raw?: string };
+    if (typeof d?.raw !== 'string' || !d.raw) return [];
+    return parseJsonlSync(d.raw);
+  } catch {
+    return [];
+  }
+}
+
+/** GET /subagents?surface=<id> — 그 pane 의 claude 가 소환한 서브에이전트 목록(최신순).
+ *  subagents/agent-*.meta.json 에서 모은다. 메타칸 드릴인 진입 목록 소스. fail-soft. */
+export async function fetchSubagents(surfaceId: string): Promise<SubagentInfo[]> {
+  if (!surfaceId) return [];
+  try {
+    const r = await fetch(`${BASE}/subagents?surface=${encodeURIComponent(surfaceId)}`);
+    if (!r.ok) return [];
+    // 백엔드는 snake_case(agent_id/agent_type)로 직렬화 — camelCase 로 정규화(양쪽 키 방어).
+    const d = (await r.json().catch(() => ({}))) as { subagents?: Record<string, unknown>[] };
+    const arr = Array.isArray(d?.subagents) ? d.subagents : [];
+    return arr.map((s) => ({
+      agentId: String(s.agentId ?? s.agent_id ?? ''),
+      agentType: String(s.agentType ?? s.agent_type ?? ''),
+      description: String(s.description ?? ''),
+      mtime: Number(s.mtime ?? 0),
+    })).filter((s) => s.agentId);
+  } catch {
+    return [];
+  }
+}
+
+/** GET /subagent-transcript-raw?surface=<id>&agentId=<id> — 한 서브에이전트의 jsonl 을
+ *  raw 로 받아 SessionEvent[] 로 파싱(메인 transcript 와 동일 포맷·렌더). fail-soft. */
+export async function fetchSubagentTranscriptRaw(surfaceId: string, agentId: string): Promise<SessionEvent[]> {
+  if (!surfaceId || !agentId) return [];
+  try {
+    const q = new URLSearchParams({ surface: surfaceId, agentId });
+    const r = await fetch(`${BASE}/subagent-transcript-raw?${q}`);
     if (!r.ok) return [];
     const d = (await r.json().catch(() => ({}))) as { raw?: string };
     if (typeof d?.raw !== 'string' || !d.raw) return [];

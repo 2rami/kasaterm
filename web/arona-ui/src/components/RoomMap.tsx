@@ -1,10 +1,30 @@
 import { useEffect, useState } from 'react';
 import { fetchRecentSessions, type RecentSession, type SessionsInfo } from '@/lib/mcp';
+import type { Agent } from '@/store';
+import { SpritePortrait } from './SpritePortrait';
+
+// 학생 상태 → 작은 점 색(좌측 트리). working/thinking=하늘, waiting=산호, blocked=노랑, idle=회색.
+function statusDot(status: Agent['status']): string {
+  switch (status) {
+    case 'working':
+    case 'thinking': return 'var(--cth-sky)';
+    case 'waiting': return 'var(--cth-coral)';
+    case 'blocked': return '#FFB020';
+    default: return 'var(--cth-ink-300)';
+  }
+}
 
 // 방 추가 시 고를 god(거노: 처음은 아로나 고정, 새 방은 선택). leaders 풀과 일치.
 const GODS = ['아로나', '프라나'];
 
 /** unix secs → "방금/N분 전/N시간 전/N일 전". */
+// 작업폴더 경로 축약 — 홈은 ~, 깊으면 마지막 2 세그먼트만(거노: 최근 세션을 폴더로 구분).
+function shortPath(p?: string): string {
+  if (!p) return '';
+  const h = p.replace(/^\/(?:Users|home)\/[^/]+/, '~');
+  const segs = h.split('/').filter(Boolean);
+  return segs.length > 3 ? `…/${segs.slice(-2).join('/')}` : h;
+}
 function relativeTime(secs: number): string {
   const diff = Math.max(0, Date.now() / 1000 - secs);
   if (diff < 60) return '방금';
@@ -16,6 +36,12 @@ function relativeTime(secs: number): string {
 export interface RoomMapProps {
   sessions: SessionsInfo;
   onSwitch: (idx: number) => void;
+  /** 전 방 학생(board) — windowIdx 로 방별 그룹핑해 각 방 아래 중첩(거노: 방안 학생 영속). */
+  agents: Agent[];
+  /** 현재 선택된 학생 — 트리 하이라이트. */
+  selectedId?: string;
+  /** 학생 클릭 — 그 pane 포커스(다른 방이면 윈도우 전환). */
+  onSelectStudent?: (id: string, name: string) => void;
   /** 새 방 + 선택 god 스폰. */
   onNewRoom?: (god: string) => void;
   /** 방(윈도우) 닫기. 윈도우 2개+ 일 때만. */
@@ -38,8 +64,18 @@ function RoomIcon({ active }: { active: boolean }) {
 
 // 좌측 방 네비 — 방 = kasaterm 윈도우(거노). 목록 + "+ 방 추가"(god 선택). 첫 방은
 // 아로나 고정, 새 방은 아로나/프라나 선택해 그 god 으로 스폰. × 로 방 닫기.
-export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom, onOpenSession, onCollapse }: RoomMapProps) {
+export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStudent, onNewRoom, onCloseRoom, onOpenSession, onCollapse }: RoomMapProps) {
   const n = sessions.count;
+  // 방별 학생 — god(아로나/프라나) 먼저, 그다음 일반 학생. 같은 방 안에서 안정적 순서.
+  const byRoom = new Map<number, Agent[]>();
+  for (const a of agents) {
+    const w = a.windowIdx ?? 0;
+    if (!byRoom.has(w)) byRoom.set(w, []);
+    byRoom.get(w)!.push(a);
+  }
+  for (const list of byRoom.values()) {
+    list.sort((x, y) => Number(y.isGod) - Number(x.isGod) || x.id.localeCompare(y.id));
+  }
   const [adding, setAdding] = useState(false);
   const [showRecent, setShowRecent] = useState(false);
   const [recent, setRecent] = useState<RecentSession[]>([]);
@@ -78,27 +114,50 @@ export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom, onOpenSess
       </div>
       {Array.from({ length: n }, (_, i) => {
         const on = i === sessions.active;
+        const students = byRoom.get(i) ?? [];
         return (
-          <div key={i} style={{
-            display: 'flex', alignItems: 'center', gap: 4, borderRadius: 8,
-            background: on ? 'var(--cth-sky)' : 'transparent', color: on ? '#fff' : 'var(--cth-ink-700)',
-          }}>
-            <button onClick={() => { if (!on) onSwitch(i); }} style={{
-              flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '7px 9px', borderRadius: 8,
-              border: 'none', cursor: on ? 'default' : 'pointer', textAlign: 'left', background: 'transparent', color: 'inherit',
-              fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
+          <div key={i} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 4, borderRadius: 8,
+              background: on ? 'var(--cth-sky)' : 'transparent', color: on ? '#fff' : 'var(--cth-ink-700)',
             }}>
-              <RoomIcon active={on} />
-              <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sessions.labels[i] || `방 ${i + 1}`}</span>
-              {on && <span style={{ fontSize: 9, fontWeight: 800 }}>●</span>}
-            </button>
-            {n > 1 && onCloseRoom && (
-              <button onClick={(e) => { e.stopPropagation(); onCloseRoom(i); }} title="방 닫기" style={{
-                flexShrink: 0, width: 18, height: 18, marginRight: 5, borderRadius: 5, border: 'none', cursor: 'pointer',
-                background: on ? 'rgba(255,255,255,0.25)' : 'var(--cth-cream-100)', color: on ? '#fff' : 'var(--cth-ink-500)',
-                fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 800, lineHeight: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>×</button>
-            )}
+              <button onClick={() => { if (!on) onSwitch(i); }} style={{
+                flex: 1, display: 'flex', alignItems: 'center', gap: 7, padding: '7px 9px', borderRadius: 8,
+                border: 'none', cursor: on ? 'default' : 'pointer', textAlign: 'left', background: 'transparent', color: 'inherit',
+                fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
+              }}>
+                <RoomIcon active={on} />
+                <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sessions.labels[i] || `방 ${i + 1}`}</span>
+                {on && <span style={{ fontSize: 9, fontWeight: 800 }}>●</span>}
+              </button>
+              {n > 1 && onCloseRoom && (
+                <button onClick={(e) => { e.stopPropagation(); onCloseRoom(i); }} title="방 닫기" style={{
+                  flexShrink: 0, width: 18, height: 18, marginRight: 5, borderRadius: 5, border: 'none', cursor: 'pointer',
+                  background: on ? 'rgba(255,255,255,0.25)' : 'var(--cth-cream-100)', color: on ? '#fff' : 'var(--cth-ink-500)',
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 800, lineHeight: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>×</button>
+              )}
+            </div>
+            {/* 방 안 학생 — windowIdx 로 그룹핑. 활성 방뿐 아니라 전 방 학생이 영속(거노). 클릭=
+                그 pane 포커스(다른 방이면 윈도우 전환). 프사+이름+상태점. */}
+            {students.map((a) => {
+              const sel = a.id === selectedId;
+              const pure = a.character && !/^%?\d+$/.test(a.character) ? a.character : a.name;
+              return (
+                <button key={a.id} onClick={() => onSelectStudent?.(a.id, a.name)} title={a.name} style={{
+                  display: 'flex', alignItems: 'center', gap: 6, margin: '0 0 0 12px', padding: '4px 7px', borderRadius: 7,
+                  border: 'none', cursor: 'pointer', textAlign: 'left',
+                  background: sel ? 'var(--cth-sky-light)' : 'transparent', color: 'var(--cth-ink-700)',
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: sel ? 700 : 500,
+                }}>
+                  <span style={{ width: 20, height: 20, borderRadius: 6, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+                    <SpritePortrait character={pure} scale={0.9} bust />
+                  </span>
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: a.isGod ? 'var(--cth-sky)' : undefined, fontWeight: a.isGod ? 700 : (sel ? 700 : 500) }}>{pure}</span>
+                  <span style={{ flexShrink: 0, width: 6, height: 6, borderRadius: 999, background: statusDot(a.status) }} />
+                </button>
+              );
+            })}
           </div>
         );
       })}
@@ -159,6 +218,12 @@ export function RoomMap({ sessions, onSwitch, onNewRoom, onCloseRoom, onOpenSess
                 <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {s.label}
                 </span>
+                {s.cwd && (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-500)', overflow: 'hidden' }}>
+                    <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ flexShrink: 0 }}><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5v5A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" strokeLinejoin="round" /></svg>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{shortPath(s.cwd)}</span>
+                  </span>
+                )}
                 <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-300)' }}>
                   {relativeTime(s.mtime)}
                 </span>

@@ -73,14 +73,17 @@ impl ApplicationHandler<UserEvent> for App {
                 // 윈도우의 pane 이 선택돼 화면은 그대로라 "방전환→윈도우전환"이 안 됐다.
                 // switch_window 가 leaves[0] 로 active_pane 을 덮으니 그 뒤에 원하는
                 // pane 으로 다시 지정한다.
+                // board id 가 실제 leaf 인 윈도우가 있을 때만 포커스한다 — god/작업명/async
+                // 같은 비-leaf 집계 id 로 active_pane 을 덮으면 다음 /layout 폴에서 그 타일이
+                // 빠져 "pane 이 닫힌 것처럼" 보였다(거노: 캐릭터 클릭→학생 선택하면 닫힘).
                 if let Some(wi) = self.window_of_pane(id) {
                     if wi != self.active_window {
                         self.switch_window(wi);
                     }
+                    self.ws.lock().unwrap().active_pane = Some(id.clone());
+                    self.chrome_dirty = true;
+                    self.render_frame();
                 }
-                self.ws.lock().unwrap().active_pane = Some(id.clone());
-                self.chrome_dirty = true;
-                self.render_frame();
                 return;
             }
             UserEvent::SocketAronaClose => {
