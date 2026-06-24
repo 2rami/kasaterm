@@ -728,6 +728,23 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                          "text": format!("\x15\x1b[200~{}\x1b[201~\r", flat.trim()) }),
             )
         }
+        "resume" => {
+            // resume <session_id> [cwd] — 사라진(재시작·종료) 학생 세션을 새 pane 에 claude
+            // --resume 으로 이어 띄운다(거노: tell 오발송 대신 이어가기). cwd 생략 시 활성 방 cwd.
+            let sid = args
+                .first()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .ok_or_else(|| anyhow!("resume needs <session_id> [cwd]"))?;
+            let cwd = args.get(1).filter(|s| !s.is_empty()).cloned();
+            ("session.resume", json!({ "id": sid, "cwd": cwd, "newroom": false }))
+        }
+        "recent-sessions" => {
+            // recent-sessions [cwd] — 이어갈 후보 세션 목록(최신순, id/label/mtime/cwd). tell
+            // 오발송(없는 학생) 시 사라진 학생 세션을 찾아 resume 하는 데 쓴다(거노: 내가 자동).
+            let cwd = args.first().filter(|s| !s.is_empty()).cloned();
+            ("session.recent", json!({ "cwd": cwd }))
+        }
         "board" => {
             // Bare `board` = metadata only. `board <N>` folds each pane's
             // visible last N rows in — what an orchestrator pane reads to see

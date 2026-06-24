@@ -157,6 +157,10 @@ pub struct PtyBackend {
     /// surface_id → statusLine 이 보고한 "현재 보는 경로"(report_cwd). claude 내부 cd 는
     /// lsof(cwd_cache)로 안 보여, statusline.py 가 매 렌더 직접 push 한다.
     reported_cwd: Arc<Mutex<HashMap<String, String>>>,
+    /// surface_id → 마지막 유효 (context_tokens, context_limit). transcript usage 가 tail
+    /// 윈도에 없어 0 으로 떨어질 때 직전 값을 유지해 컨텍스트량·인연%가 0 으로 깜빡이지
+    /// 않게 한다(거노: statusline 잘려도 화면파싱 말고 정확 추적 — 정확 소스만 신뢰).
+    last_ctx: Arc<Mutex<HashMap<String, (u64, u64)>>>,
 }
 
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
@@ -221,6 +225,7 @@ impl PtyBackend {
             last_discover: Arc::new(Mutex::new(None)),
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
+            last_ctx: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -650,6 +655,14 @@ impl Backend for PtyBackend {
     }
 
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
+        // 대상 surface 가 지정됐는데 현재 없는 pane 이면 거부 — 재시작·종료로 사라진 학생에게
+        // tell 이 검증 없이 ok 만 받고 조용히 사라지던 오발송을 막는다(거노). 보낸 쪽이 ok:false
+        // 로 즉시 알아 떠맡기/--resume 을 결정한다. None(focused)은 항상 통과.
+        if let Some(sid) = surface_id {
+            if !self.ws.lock().unwrap().panes.contains_key(sid) {
+                anyhow::bail!("surface {sid} 없음 — 재시작·종료로 사라진 pane (오발송 방지)");
+            }
+        }
         let _ = self.proxy.send_event(UserEvent::SocketBytes(
             surface_id.map(|s| s.to_string()),
             text.as_bytes().to_vec(),
@@ -1023,22 +1036,30 @@ impl Backend for PtyBackend {
                 row.view_cwd = vc.clone();
             }
             if let Some(screen) = screens.get(&row.surface_id) {
-                // 모델명도 상태바에서 — "Opus 4.8 (1M context)" 처럼 1M 변형까지 정확.
+                // 모델명만 상태바에서 — "Opus 4.8 (1M context)" 처럼 1M 변형까지 정확.
+                // 컨텍스트 %는 상태바를 안 쓴다: 터미널이 좁아 statusline 이 잘리면 % 가 화면 밖이라
+                // 0 으로 떨어진다(거노: 화면파싱 말고 정확 추적). transcript usage 만 정확 소스.
                 if let Some(m) = parse_status_model(screen) {
                     row.model = m;
                 }
-                // transcript usage(정확)가 우선. tail 에 usage 가 없어 0 일 때만 상태바 %로 폴백
-                // (거노: 화면에 %가 없으면 arona 도 빈칸이던 문제 — transcript 가 1순위 소스).
-                if row.context_tokens == 0 {
-                    if let Some(pct) = parse_context_pct(screen) {
-                        row.context_pct = pct;
-                    }
-                }
             }
-            // 1M 보정 — 상태바 모델이 "1M context" 면 한도를 1M 로 확정하고 pct 재계산. transcript
-            // 모델엔 [1m] 태그가 안 실려 토큰<200k 인 1M 세션이 200k 한도로 잘못 잡히던 걸 교정.
+            // 1M 보정 — 상태바 모델이 "1M context" 면 한도를 1M 로 확정. transcript 모델엔 [1m]
+            // 태그가 안 실려 토큰<200k 인 1M 세션이 200k 한도로 잘못 잡히던 걸 교정.
             if row.model.to_ascii_lowercase().contains("1m") && row.context_limit < 1_000_000 {
                 row.context_limit = 1_000_000;
+            }
+            // 정확 소스(transcript usage)가 tail 윈도에 없어 0 이면 직전 유효값을 유지 — 컨텍스트량·
+            // 인연%가 0 으로 깜빡이지 않게(거노: statusline 잘려도 0 안 됨). 0 이상이면 캐시 갱신.
+            {
+                let mut cache = self.last_ctx.lock().unwrap();
+                if row.context_tokens > 0 {
+                    cache.insert(row.surface_id.clone(), (row.context_tokens, row.context_limit));
+                } else if let Some(&(t, l)) = cache.get(&row.surface_id) {
+                    row.context_tokens = t;
+                    if row.context_limit == 0 {
+                        row.context_limit = l;
+                    }
+                }
             }
             if row.context_tokens > 0 && row.context_limit > 0 {
                 row.context_pct = (((row.context_tokens as f64 / row.context_limit as f64) * 100.0).round() as u64).min(100) as u8;
@@ -1876,31 +1897,6 @@ fn parse_status_model(screen: &str) -> Option<String> {
         let model = first[start..].trim();
         if !model.is_empty() && model.len() < 60 {
             return Some(model.to_string());
-        }
-    }
-    None
-}
-
-/// claude TUI 상태바("… ┃ 5% ┃ …")에서 컨텍스트 사용량 % 파싱. ┃ 가 든 줄의
-/// 첫 `(\d+)%` 를 집는다(상태바엔 컨텍스트 % 하나뿐). regex 의존 없이 수동 스캔.
-fn parse_context_pct(screen: &str) -> Option<u8> {
-    for line in screen.lines() {
-        if !line.contains('┃') {
-            continue;
-        }
-        let chars: Vec<char> = line.chars().collect();
-        for (i, &c) in chars.iter().enumerate() {
-            if c == '%' && i > 0 && chars[i - 1].is_ascii_digit() {
-                let mut j = i;
-                let mut num = String::new();
-                while j > 0 && chars[j - 1].is_ascii_digit() {
-                    j -= 1;
-                    num.insert(0, chars[j]);
-                }
-                if let Ok(n) = num.parse::<u16>() {
-                    return Some(n.min(100) as u8);
-                }
-            }
         }
     }
     None

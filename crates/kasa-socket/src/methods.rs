@@ -67,6 +67,8 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
             }
         }
         "session.close" => switch_by_idx(id, &req.params, |i| backend.close_session(i)),
+        "session.resume" => session_resume(backend, id, &req.params),
+        "session.recent" => session_recent(backend, id, &req.params),
         "surface.close" => surface_close(backend, id, &req.params),
         "surface.dock" => surface_dock(backend, id, &req.params),
         "surface.undock" => surface_undock(backend, id, &req.params),
@@ -523,6 +525,24 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     let focus = params.get("focus").and_then(|v| v.as_bool()).unwrap_or(false);
     match backend.split_surface(dir, focus) {
         Ok(s) => Response::success(id, json!({"surface": s})),
+        Err(e) => backend_err(id, e),
+    }
+}
+
+fn session_resume(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let sid = match params.get("id").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return param_err(id, "session.resume requires `id` (session uuid)"),
+    };
+    let cwd = params.get("cwd").and_then(|v| v.as_str());
+    let newroom = params.get("newroom").and_then(|v| v.as_bool()).unwrap_or(false);
+    simple(id, backend.resume_session(sid, cwd, newroom))
+}
+
+fn session_recent(backend: &dyn Backend, id: Value, params: &Value) -> Response {
+    let cwd = params.get("cwd").and_then(|v| v.as_str());
+    match backend.recent_sessions(cwd) {
+        Ok(list) => Response::success(id, json!({ "sessions": list })),
         Err(e) => backend_err(id, e),
     }
 }

@@ -31,6 +31,11 @@ const shortCwd = (p?: string) => (!p ? '' : p.split('/').filter(Boolean).slice(-
 // effort 표시 — ultracode 는 xhigh 와 thinking budget 이 같아 모델칩처럼 구분이 필요(거노). 프록시가
 // output_config.effort 로 "ultracode" 를 그대로 주므로, 그 값일 때만 풀어서 표기한다.
 const shortEffort = (e?: string | null) => (!e ? '' : e === 'ultracode' ? 'ultracode (xhigh+workflows)' : e);
+// effort 단계별 색 — low(약)→ultracode(강) 순으로 진하게(거노: 단계별 색상). effort 칩 앞 점 색.
+const EFFORT_COLOR: Record<string, string> = {
+  low: '#9aa7b8', medium: '#4a86e8', high: '#16a766', xhigh: '#e0a020', max: '#fb4c2f', ultracode: '#a479e2',
+};
+const effortColor = (e?: string | null): string | undefined => (e ? EFFORT_COLOR[e.toLowerCase()] : undefined);
 
 
 // /context 터미널 화면에서 의미있는 라인만 추출(거노: GUI 새로 만들지 말고 터미널에 보이는
@@ -362,7 +367,7 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
         const raw = typeof (ev as { content?: unknown }).content === 'string' ? (ev as { content: string }).content : '';
         const clean = stripMeta(raw);
         if (clean && !isSystemInjectionText('user', clean)) {
-          const b: Extract<RenderItem, { kind: 'bubble' }> = { kind: 'bubble', role: 'user', text: clean, ts: (ev as { timestamp?: string }).timestamp, queued: true };
+          const b: Extract<RenderItem, { kind: 'bubble' }> = { kind: 'bubble', role: 'user', text: clean, ts: (ev as { timestamp?: string }).timestamp, queued: true, sender: senderOf?.(clean) };
           if (pendingQImg.length) { b.images = pendingQImg; pendingQImg = []; }
           items.push(b);
           pendingQ.push(b);
@@ -540,7 +545,10 @@ function resolveEffort(events: SessionEvent[], proxyEffort: string | null, saved
   // 경계 이후 /effort 입력 없음 → 라이브 프록시(ultracode 도 API 엔 xhigh 로 실려 구분 못 함)나
   // settings.json saved default(board.effort_default) 로 폴백 — 카드가 "effort"(빈값) 대신 실제
   // 복원값(xhigh 등)을 보인다. ultracode 는 여기 잔존하지 않는다.
-  return proxyEffort ?? (savedEffort || null);
+  // proxyEffort 가 빈 문자열('')이면 ?? 는 폴백을 안 한다(null/undefined 만 넘기고 '' 는 통과) —
+  // 처음 시작 시 effort 칩이 빈칸이던 원인. || null 로 빈 문자열을 null 화해 saved default 로 확실히
+  // 폴백한다(거노: 처음 시작해도 정확 표기).
+  return (proxyEffort || null) ?? (savedEffort || null);
 }
 
 // ANSI 색(SGR) 렌더는 ./AnsiText 모듈로 분리 — bash/read 카드 resultView 와 공용.
@@ -553,7 +561,7 @@ const SCROLL_BTN: CSSProperties = {
   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
 };
 
-function MetaChip({ label, dim, onClick, tone, title }: { label: string; dim?: boolean; onClick?: () => void; tone?: 'danger' | 'sky'; title?: string }) {
+function MetaChip({ label, dim, onClick, tone, title, dot }: { label: string; dim?: boolean; onClick?: () => void; tone?: 'danger' | 'sky'; title?: string; dot?: string }) {
   const danger = tone === 'danger';
   const sky = tone === 'sky'; // 서브에이전트 칩 — launch 마커·WorkflowCard 와 색 통일(거노)
   return (
@@ -567,7 +575,10 @@ function MetaChip({ label, dim, onClick, tone, title }: { label: string; dim?: b
         color: danger ? 'var(--cth-coral)' : sky ? 'var(--cth-sky)' : dim ? 'var(--cth-ink-300)' : 'var(--cth-ink-700)',
         border: danger ? '1px solid var(--cth-coral)' : sky ? '1px solid var(--cth-sky)' : dim ? 'none' : '1px solid var(--cth-cream-200)',
         cursor: onClick ? 'pointer' : undefined,
-      }}>{label}</span>
+      }}>
+      {dot && <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: 999, background: dot, marginRight: 5, verticalAlign: 'middle' }} />}
+      {label}
+    </span>
   );
 }
 
@@ -1323,7 +1334,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       if (!t) return undefined;
       for (let k = messages.length - 1; k >= 0; k--) {
         const m = messages[k];
-        if (m.from_pane && m.from_pane !== 'sensei' && m.text.trim() === t) {
+        if (m.from_pane && m.from_pane !== 'sensei' && stripMeta(m.text).trim() === t) {
           const a = agents.find((x) => x.id === m.from_pane);
           const name = a?.character && !/^%?\d+$/.test(a.character) ? a.character : (m.from_name || m.from_pane);
           return { pane: m.from_pane, name, accent: a?.accent };
@@ -1340,7 +1351,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       const keyed = list.map((it, i) => {
         const raw = (it as { ts?: string }).ts;
         const t = raw ? Date.parse(raw) : NaN;
-        const eff = Number.isNaN(t) ? prevTs : (prevTs = t);
+        // 대기 중 예약(queued)은 아직 안 보내진 거라 enqueue 시각(작업 중간)이 아니라 맨 아래로
+        // 내린다(거노: 예약이 작업 로그 사이에 끼던 걸 처리 위치=하단으로). 처리된 예약은 이미
+        // 정식 user 턴(처리 ts)으로 대체돼 여기 해당 없음. 여러 예약은 i(enqueue 순)로 안정 정렬.
+        const eff = (it as { queued?: boolean }).queued
+          ? Number.MAX_SAFE_INTEGER
+          : (Number.isNaN(t) ? prevTs : (prevTs = t));
         return { it, eff, i };
       });
       keyed.sort((a, b) => a.eff - b.eff || a.i - b.i);
@@ -1846,7 +1862,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', padding: '8px 12px',
         }}>
           {(convModel || agent.model) && <MetaChip label={shortModel(agent.model || convModel)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
-          {(convModel || agent.model) && <MetaChip label={displayEffort ? `effort: ${shortEffort(displayEffort)}` : 'effort'} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
+          {(convModel || agent.model) && <MetaChip label={displayEffort ? `effort: ${shortEffort(displayEffort)}` : 'effort'} dot={effortColor(displayEffort)} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
           {modeLabel(mode) && <MetaChip label={modeLabel(mode)!} tone={mode === 'bypassPermissions' ? 'danger' : undefined} title="claude 권한 모드 (shift+tab 로 전환)" />}
           {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
             msg: '변경사항을 볼까요?',
