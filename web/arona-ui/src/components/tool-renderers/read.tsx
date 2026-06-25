@@ -3,6 +3,11 @@
 import type { ToolRenderer, ToolStat } from "./index";
 import { CopyButton } from "../copy-button";
 import { AnsiText } from "../AnsiText";
+import { imageFileUrl, openFile } from "@/lib/mcp";
+
+// Read 로 이미지 파일을 읽으면 결과는 base64 라 텍스트 result 엔 안 뜬다(경로만). 확장자로
+// 판별해 input 경로 아래에 실제 이미지를 백엔드 /image-file 로 미리보기(거노: 펼치면 이미지 뜨게).
+const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i;
 
 export const ReadRenderer: ToolRenderer = {
   stats(_input, tur) {
@@ -29,6 +34,7 @@ export const ReadRenderer: ToolRenderer = {
   },
   inputView(input) {
     const i = input as { file_path?: string; offset?: number; limit?: number; pages?: string };
+    const isImg = !!i.file_path && IMG_EXT.test(i.file_path);
     return (
       <div className="space-y-1 px-3 py-2 font-mono text-[11px]">
         <div className="group/cb flex items-center gap-1">
@@ -43,6 +49,16 @@ export const ReadRenderer: ToolRenderer = {
             />
           )}
         </div>
+        {isImg && i.file_path && (
+          <img
+            src={imageFileUrl(i.file_path)}
+            alt={i.file_path}
+            onClick={() => void openFile(i.file_path!)}
+            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+            className="mt-1.5 max-h-[360px] max-w-full cursor-zoom-in rounded border border-border/50"
+            title="클릭하면 원본 뷰어로 열기"
+          />
+        )}
         {i.offset != null && (
           <div>
             <span className="text-muted-foreground">offset: </span>
