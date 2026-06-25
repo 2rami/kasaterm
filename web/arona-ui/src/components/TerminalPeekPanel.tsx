@@ -948,32 +948,6 @@ function TaskStrip({ tasks }: { tasks: StripTask[] }) {
   );
 }
 
-// 학생별 인연·재화 strip — 전역 Footer 합계 대신 그 학생 값을 채팅방 하단에(거노: 통합).
-// 인연 = 컨텍스트 사용량%, 재화 = 누적 입력토큰(💎)·비용$(🪙).
-function StudentStats({ contextPct = 0, tokensIn = 0, costUsd = 0 }: { contextPct?: number; tokensIn?: number; costUsd?: number }) {
-  const pct = Math.max(0, Math.min(100, Math.round(contextPct)));
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
-      <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
-        <path d="M8 13.5 2.5 8a3 3 0 0 1 4.2-4.2L8 5l1.3-1.2A3 3 0 0 1 13.5 8L8 13.5Z" fill="var(--cth-coral)" stroke="var(--cth-ink-900)" strokeWidth="1.2" strokeLinejoin="round" />
-      </svg>
-      <div title={`컨텍스트 사용량 ${pct}%`} style={{ position: 'relative', flex: 1, minWidth: 36, maxWidth: 130, height: 8, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
-        <div style={{ position: 'absolute', inset: 0, width: `${pct}%`, background: 'linear-gradient(90deg,#FF8FB1,#FF6B6B)', borderRadius: 999, transition: 'width .5s cubic-bezier(0.22,1,0.36,1)' }} />
-      </div>
-      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)', whiteSpace: 'nowrap' }}>{pct}%</span>
-      <div style={{ flex: 1 }} />
-      <span title={`누적 입력 ${tokensIn.toLocaleString()} 토큰`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, color: 'var(--cth-ink-700)' }}>
-        <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}><path d="M5 2h6l3 4-6 8-6-8 3-4Z" fill="var(--cth-sky)" stroke="var(--cth-ink-900)" strokeWidth="1.2" strokeLinejoin="round" /></svg>
-        {fmtTok(tokensIn)}
-      </span>
-      <span title={`누적 비용 $${costUsd.toFixed(4)}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, color: 'var(--cth-ink-700)' }}>
-        <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}><circle cx="8" cy="8" r="6.2" fill="var(--cth-lemon)" stroke="var(--cth-ink-900)" strokeWidth="1.2" /><path d="M8 5.5v5M6.5 8h3" stroke="var(--cth-ink-900)" strokeWidth="1.1" opacity="0.7" /></svg>
-        ${costUsd.toFixed(2)}
-      </span>
-    </div>
-  );
-}
-
 // 화면(raw 터미널)은 '터미널 보기'로 보면 되므로 여기엔 두지 않는다.
 export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session, subagent, onOpenSubagent, onToggleZoom, zoomed }: TerminalPeekPanelProps) {
   const offline = !!session;
@@ -1019,6 +993,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 위로 스크롤하면 상단에 붙는 "지금 보고 있는 내 프롬프트" 헤더 — 그 아래로 무슨 작업·답을
   // 했는지 보게(거노). 클릭하면 그 프롬프트 위치로 점프. null=맨 위라 헤더 불필요.
   const [stickyP, setStickyP] = useState<{ idx: number; text: string } | null>(null);
+  const [footerOpen, setFooterOpen] = useState(false); // 인연도 줄 아래 서브에이전트·백그라운드·작업 묶음 펼침(거노: 평소엔 인연도 줄만)
   // 슬래시 자동완성 — 입력이 '/' 로 시작하면 claude-code 명령 드롭다운(↑↓ 선택·Tab/Enter 완성).
   const [navIdx, setNavIdx] = useState(0); // 선택지 카드 키보드 네비(↑↓) 하이라이트
   // /context 출력 정리본 — GUI 모달 새로 만들지 말고(거노) 터미널 /context 화면(peek)을
@@ -1770,8 +1745,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         )}
       </div>
       {/* 위로 스크롤하면 상단에 붙는 "지금 보는 내 프롬프트" — 그 아래로 무슨 작업·답을 했는지
-          보게. 클릭하면 그 프롬프트로 점프(거노). 맨 위(atTop)면 굳이 안 띄운다. */}
-      {stickyP && !atTop && (
+          보게. 클릭하면 그 프롬프트로 점프(거노). 맨 위면 굳이 안 띄우고, 맨 아래(최신)로 다
+          내려가 있으면 숨긴다(거노: 조금 올려야 보이게, 다 내리면 안 보이게). */}
+      {stickyP && !atTop && !atBottom && (
         <button onClick={() => jumpToPrompt(stickyP.idx)} title="이 프롬프트로 이동" style={{
           position: 'absolute', top: 8, left: 14, right: 14, zIndex: 15,
           display: 'flex', alignItems: 'center', gap: 7, textAlign: 'left', cursor: 'pointer',
@@ -1853,53 +1829,85 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         </div>
       )}
 
-      {/* 학생별 인연·재화 — 전역 Footer 대신 채팅방 하단에 통합(거노). 라이브 학생만. */}
-      {!offline && !isSub && agent && (
-        <StudentStats contextPct={agent.contextPct} tokensIn={agent.tokensIn} costUsd={agent.costUsd} />
-      )}
-
-      {/* 학생 메타(하단) — 모델·effort·권한·브랜치·경로·서브에이전트를 항상 칩으로(거노: 접기 없앰).
-          인연·재화는 위 strip 으로. */}
-      {!offline && agent && (convModel || agent.model || agent.branch || agent.cwd || runningSubs.length > 0 || (agent.background?.length ?? 0) > 0) && (
-        <div style={{
-          borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
-          display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', padding: '8px 12px',
-        }}>
-          {(convModel || agent.model) && <MetaChip label={shortModel(agent.model || convModel)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
-          {(convModel || agent.model) && <MetaChip label={displayEffort ? `effort: ${shortEffort(displayEffort)}` : 'effort'} dot={effortColor(displayEffort)} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
-          {modeLabel(mode) && <MetaChip label={modeLabel(mode)!} tone={mode === 'bypassPermissions' ? 'danger' : undefined} title="claude 권한 모드 (shift+tab 로 전환)" />}
-          {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
-            msg: '변경사항을 볼까요?',
-            sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 학생에게 띄워요.`,
-            yes: '변경 보기',
-            onYes: () => { void sendToPane(surfaceId, '/diff', true, false); },
-          })} />}
-          {agent.cwd && <MetaChip label={shortCwd(agent.cwd)} dim title={`실행 경로 (claude 프로세스)\n${agent.cwd}`} />}
-          {agent.viewCwd && agent.viewCwd !== agent.cwd && <MetaChip label={shortCwd(agent.viewCwd)} tone="sky" title={`현재 보는 경로 (statusLine)\n${agent.viewCwd}`} />}
-          {/* 진행 중 서브에이전트 — sky 로 launch·WorkflowCard 와 색 통일(거노). 클릭하면 따로 연다. */}
-          {runningSubs.map((s) => {
-            const text = s.description || s.agentType || s.agentId;
-            return (
-              <MetaChip
-                key={s.agentId}
-                tone="sky"
-                label={`↳ ● ${text}`}
-                title={`${s.agentType} · 클릭하면 이 서브에이전트 대화를 따로 열어요`}
-                onClick={() => onOpenSubagent?.(surfaceId, s.agentId, s.agentType, text)}
-              />
-            );
-          })}
-          {/* 진행 중 백그라운드 셸(run_in_background Bash) — 서브에이전트 칩과 같은 ● 마커지만
-              cream 톤으로 구분(서브=sky). 거노: 돌고 있는 백그라운드 셸도 보이게. */}
-          {(agent.background ?? []).map((cmd, i) => (
-            <MetaChip
-              key={`bg-${i}`}
-              label={`● $ ${cmd.length > 40 ? cmd.slice(0, 40) + '…' : cmd}`}
-              title={`백그라운드 셸 실행 중\n${cmd}`}
-            />
-          ))}
-        </div>
-      )}
+      {/* 통합 하단 줄(항상 노출) — 인연도 게이지·재화·모델·effort·권한·브랜치·경로를 한 줄에
+          (거노: 인연도 있는 곳에 다 넣음). 서브에이전트·백그라운드·작업은 우측 토글로 접는다 —
+          평소엔 이 줄만 보여 화면을 안 가린다. 라이브 학생만(offline/서브 제외). */}
+      {!offline && !isSub && agent && (() => {
+        const hasFold = runningSubs.length > 0 || (agent.background?.length ?? 0) > 0 || taskList.length > 0;
+        const foldCount = runningSubs.length + (agent.background?.length ?? 0) + taskList.length;
+        const pct = Math.max(0, Math.min(100, Math.round(agent.contextPct ?? 0)));
+        return (
+        <>
+          <div style={{
+            borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
+            display: 'flex', flexWrap: 'wrap', gap: 7, alignItems: 'center', padding: '6px 12px',
+          }}>
+            {/* 인연도(컨텍스트 사용량) 게이지 */}
+            <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
+              <path d="M8 13.5 2.5 8a3 3 0 0 1 4.2-4.2L8 5l1.3-1.2A3 3 0 0 1 13.5 8L8 13.5Z" fill="var(--cth-coral)" stroke="var(--cth-ink-900)" strokeWidth="1.2" strokeLinejoin="round" />
+            </svg>
+            <div title={`컨텍스트 사용량 ${pct}%`} style={{ position: 'relative', minWidth: 40, maxWidth: 96, flex: '0 1 96px', height: 8, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
+              <div style={{ position: 'absolute', inset: 0, width: `${pct}%`, background: 'linear-gradient(90deg,#FF8FB1,#FF6B6B)', borderRadius: 999, transition: 'width .5s cubic-bezier(0.22,1,0.36,1)' }} />
+            </div>
+            <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)', whiteSpace: 'nowrap' }}>{pct}%</span>
+            {/* 재화 — 누적 입력토큰·비용 */}
+            <span title={`누적 입력 ${(agent.tokensIn ?? 0).toLocaleString()} 토큰`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, color: 'var(--cth-ink-700)' }}>
+              <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}><path d="M5 2h6l3 4-6 8-6-8 3-4Z" fill="var(--cth-sky)" stroke="var(--cth-ink-900)" strokeWidth="1.2" strokeLinejoin="round" /></svg>
+              {fmtTok(agent.tokensIn ?? 0)}
+            </span>
+            <span title={`누적 비용 $${(agent.costUsd ?? 0).toFixed(4)}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, color: 'var(--cth-ink-700)' }}>
+              <svg width="13" height="13" viewBox="0 0 16 16" style={{ flexShrink: 0 }}><circle cx="8" cy="8" r="6.2" fill="var(--cth-lemon)" stroke="var(--cth-ink-900)" strokeWidth="1.2" /><path d="M8 5.5v5M6.5 8h3" stroke="var(--cth-ink-900)" strokeWidth="1.1" opacity="0.7" /></svg>
+              ${(agent.costUsd ?? 0).toFixed(2)}
+            </span>
+            {/* 모델·effort·권한·브랜치·경로 */}
+            {(convModel || agent.model) && <MetaChip label={shortModel(agent.model || convModel)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
+            {(convModel || agent.model) && <MetaChip label={displayEffort ? `effort: ${shortEffort(displayEffort)}` : 'effort'} dot={effortColor(displayEffort)} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
+            {modeLabel(mode) && <MetaChip label={modeLabel(mode)!} tone={mode === 'bypassPermissions' ? 'danger' : undefined} title="claude 권한 모드 (shift+tab 로 전환)" />}
+            {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
+              msg: '변경사항을 볼까요?',
+              sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 학생에게 띄워요.`,
+              yes: '변경 보기',
+              onYes: () => { void sendToPane(surfaceId, '/diff', true, false); },
+            })} />}
+            {agent.cwd && <MetaChip label={shortCwd(agent.cwd)} dim title={`실행 경로 (claude 프로세스)\n${agent.cwd}`} />}
+            {agent.viewCwd && agent.viewCwd !== agent.cwd && <MetaChip label={shortCwd(agent.viewCwd)} tone="sky" title={`현재 보는 경로 (statusLine)\n${agent.viewCwd}`} />}
+            {/* 우측 토글 — 접을 내용(서브에이전트·백그라운드·작업) 있을 때만 */}
+            {hasFold && (
+              <button onClick={() => setFooterOpen((o) => !o)} title={footerOpen ? '접기' : '서브에이전트·백그라운드·작업 보기'} style={{
+                marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer',
+                border: '1px solid var(--cth-cream-200)', borderRadius: 7, padding: '2px 7px',
+                background: footerOpen ? 'var(--cth-cream-100)' : 'var(--cth-cream-50)',
+                fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)',
+              }}>
+                <span>{foldCount}</span>
+                <svg width="11" height="11" viewBox="0 0 16 16" style={{ transform: footerOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </button>
+            )}
+          </div>
+          {/* 접이식 묶음 — 서브에이전트·백그라운드 칩 + 현재 작업(TaskStrip). 평소 숨김(거노). */}
+          {footerOpen && hasFold && (
+            <div style={{ borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
+              {(runningSubs.length > 0 || (agent.background?.length ?? 0) > 0) && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', padding: '8px 12px' }}>
+                  {/* 진행 중 서브에이전트 — sky(launch·WorkflowCard 색 통일). 클릭하면 따로 연다. */}
+                  {runningSubs.map((s) => {
+                    const text = s.description || s.agentType || s.agentId;
+                    return (
+                      <MetaChip key={s.agentId} tone="sky" label={`↳ ● ${text}`} title={`${s.agentType} · 클릭하면 이 서브에이전트 대화를 따로 열어요`} onClick={() => onOpenSubagent?.(surfaceId, s.agentId, s.agentType, text)} />
+                    );
+                  })}
+                  {/* 진행 중 백그라운드 셸(run_in_background Bash) — ● 마커, cream 톤(서브=sky 와 구분). */}
+                  {(agent.background ?? []).map((cmd, i) => (
+                    <MetaChip key={`bg-${i}`} label={`● $ ${cmd.length > 40 ? cmd.slice(0, 40) + '…' : cmd}`} title={`백그라운드 셸 실행 중\n${cmd}`} />
+                  ))}
+                </div>
+              )}
+              {taskList.length > 0 && <TaskStrip tasks={taskList} />}
+            </div>
+          )}
+        </>
+        );
+      })()}
 
       {/* /effort 슬라이더 — 터미널 슬라이더(←/→)를 GUI 카드로(거노: effort 연동). 현재 강조,
           클릭/←→ → 터미널 ←/→ + Enter. */}
@@ -1961,10 +1969,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           padding: '9px 12px', background: 'var(--cth-cream-50)', borderTop: '1px solid var(--cth-cream-200)',
           fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', textAlign: 'center',
         }}>서브에이전트 대화 · 읽기 전용</div>
-      ) : (
-        // 입력창 폐기(거노: 어차피 뷰어) — 그 자리에 이 학생의 현재 작업(TaskCreate) 고정.
-        <TaskStrip tasks={taskList} />
-      )}
+      ) : null /* 라이브 학생 입력은 터미널에서 — 현재 작업(TaskStrip)은 위 통합 줄의 접이식 묶음으로 이관(거노). */}
 
       {/* 확인 모달 — window.confirm 대체(wry webview 무반응). 종료·compact·diff 공통. */}
       {confirm && (
