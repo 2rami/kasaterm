@@ -2619,6 +2619,21 @@ fn code_lang_for_path(p: &std::path::Path) -> &'static str {
     }
 }
 
+/// A pane's cwd + git badge, published by the GUI for the socket thread's
+/// `/layout` so the BA GUI can draw a Warp-style status bar on plain terminal
+/// tiles. Both fields come from caches the GUI already maintains off the
+/// lsof/git hot path (`pane_cwd_cache` / `window_git`).
+#[derive(Clone, Debug)]
+pub(crate) struct PaneStatus {
+    pub(crate) cwd: std::path::PathBuf,
+    pub(crate) badge: Option<kasa_mcp::git::GitBadge>,
+    /// Shared handle to the pane's OSC 133 command blocks. The socket `/blocks`
+    /// reads it directly — no clone, no `App.pty` access. None for non-terminal
+    /// tiles or panes whose PTY isn't tracked.
+    pub(crate) blocks:
+        Option<std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<kasa_pty::CommandBlock>>>>,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
@@ -3044,6 +3059,13 @@ struct App {
     /// cwds the git poller should refresh, set from the current windows' repr
     /// cwd just before the sidebar paints. Shared with the poll thread.
     git_poll_cwds: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>>,
+    /// surface_id → {cwd, git badge} snapshot for the BA GUI's `/layout` (read
+    /// off-thread by `socket::PtyBackend::window_layout`). The GUI fills it each
+    /// frame from `pane_cwd_cache` + `window_git` (both already off the lsof/git
+    /// hot path), so the socket thread never shells out — it lets the BA GUI
+    /// draw a Warp-style cwd/branch/diff bar on plain (non-claude) terminal
+    /// tiles, which carry no board row to read cwd from. CLAUDE.md 병렬 규칙.
+    pane_status_pub: std::sync::Arc<std::sync::Mutex<HashMap<String, PaneStatus>>>,
     /// Right-hand git column + commit modal + path/branch dropdowns, grouped
     /// into a sub-struct (state.rs) so git-UI work touches one file, not this
     /// App definition — CLAUDE.md 병렬 규칙. (badge poller `git_poll_cwds` and
@@ -3330,6 +3352,7 @@ impl App {
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            pane_status_pub: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git: state::GitState {
                 col_visible: std::env::var("KASASPACE_GIT_PANEL")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -3690,23 +3713,32 @@ fn install_pane_shims() {
         "[ -f \"${HOME}/.zprofile\" ] && source \"${HOME}/.zprofile\"\n".to_string(),
     );
     // After sourcing the user's real .zshrc we (1) re-prepend our shim
-    // dir to PATH so it wins over brew, and (2) install an OSC 133
-    // prompt-mark hook for inline autosuggestion. The hook wraps PS1 with
-    // zero-width (`%{..%}`) `A` (prompt start) / `B` (input start) marks;
-    // the `B` mark is what pty-backend sniffs to locate the editable
-    // command line. The guard skips re-wrapping a static PS1 (no
-    // accumulation) while still re-wrapping themes that rebuild PS1 each
-    // precmd (powerlevel10k / starship). zsh-only — other shells ignore
+    // dir to PATH so it wins over brew, and (2) install the full OSC 133
+    // prompt-mark protocol (A prompt-start / B input-start / C output-start
+    // / D;exit command-end). A/B wrap PS1 with zero-width (`%{..%}`) marks;
+    // the `B` mark is what pty-backend sniffs to locate the editable command
+    // line. C/D delimit a command block (Warp-style): preexec emits C right
+    // before a command runs and marks `_kasaterm_ran`; the next precmd emits
+    // D with that command's exit code and clears the mark. Gating D on the
+    // preexec mark keeps a bare Enter (no preexec) from leaking a C-less D,
+    // so every D pairs with a real C. `$?` is captured on precmd's FIRST line
+    // — any command after it (even `[[ ]]`) clobbers it. The PS1 guard skips
+    // re-wrapping a static PS1 while still re-wrapping themes that rebuild it
+    // each precmd (powerlevel10k / starship). zsh-only — other shells ignore
     // ZDOTDIR and just get the PATH prepend.
     write_rc(
         ".zshrc",
         format!(
             "[ -f \"${{HOME}}/.zshrc\" ] && source \"${{HOME}}/.zshrc\"\n\
              export PATH=\"{}:${{PATH}}\"\n\
-             _kasaterm_osc133(){{ [[ \"$PS1\" == *$'\\e]133;B'* ]] && return; \
+             _kasaterm_osc133(){{ local __ec=$?; \
+             [[ -n $_kasaterm_ran ]] && {{ printf $'\\e]133;D;%d\\a' \"$__ec\"; _kasaterm_ran=; }}; \
+             [[ \"$PS1\" == *$'\\e]133;B'* ]] && return; \
              PS1=$'%{{\\e]133;A\\a%}}'\"$PS1\"$'%{{\\e]133;B\\a%}}'; }}\n\
-             autoload -Uz add-zsh-hook 2>/dev/null && \
-             add-zsh-hook precmd _kasaterm_osc133 2>/dev/null\n",
+             _kasaterm_preexec133(){{ printf $'\\e]133;C\\a'; _kasaterm_ran=1; }}\n\
+             autoload -Uz add-zsh-hook 2>/dev/null && {{ \
+             add-zsh-hook precmd _kasaterm_osc133 2>/dev/null; \
+             add-zsh-hook preexec _kasaterm_preexec133 2>/dev/null; }}\n",
             shim_dir.display()
         ),
     );
@@ -3906,6 +3938,10 @@ for a in \"$@\"; do [ \"$a\" = \"--settings\" ] && USER_SETTINGS=1 && break; don
 case \" $* \" in *\" --session-id \"*|*\" --resume \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
 [ -n \"$KASATERM_PERSONA\" ] && set -- --append-system-prompt \"$KASATERM_PERSONA\" \"$@\"\n\
 [ -n \"$SID\" ] && set -- --session-id \"$SID\" \"$@\"\n\
+# task store(~/.claude/tasks/<id>)를 transcript session 과 같은 키로 묶는다 — 없으면 claude\n\
+# 가 매 실행 임의 session-<hex8> 로 task 를 저장해 pane↔task 매핑이 끊긴다(거노: 유즈\n\
+# 업무탭 빔). SID 비면(사용자 --resume) claude 기본.\n\
+[ -n \"$SID\" ] && export CLAUDE_TASK_LIST_ID=\"$SID\"\n\
 if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
 fi\n\

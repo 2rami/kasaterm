@@ -25,9 +25,32 @@ use alacritty_terminal::Term;
 use anyhow::{Context, Result};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use kasa_bridge::screen::{Cell, Color, Row, ScreenUpdate};
+
+/// One shell command's lifecycle, delimited by OSC 133 `C` (output start)
+/// and `D;<exit>` (command end). Accumulated by the reader thread off the
+/// raw byte stream — vte drops OSC 133, so we sniff it like OSC 777/1337.
+/// Exposed over the `/blocks` HTTP endpoint to render Warp-style command
+/// blocks in the arona GUI. `output` is the raw C..D byte run (ANSI kept).
+#[derive(Clone, Debug)]
+pub struct CommandBlock {
+    pub id: u64,
+    pub command: String,
+    pub output: String,
+    /// None while the command is still running (C seen, D not yet).
+    pub exit_code: Option<i32>,
+    /// Epoch milliseconds at C (command start) — drives the HISTORY panel's
+    /// relative timestamps ("just now" / "3 hours ago").
+    pub started_ms: u64,
+    /// Wall-clock C→D duration; None while running.
+    pub duration_ms: Option<u64>,
+    /// The command entered an alt-screen (vim/htop/less) — its raw output is
+    /// not a clean block, so the GUI falls back to a live peek for it.
+    pub is_tui: bool,
+}
 
 /// What to spawn in the PTY. Sticks close to portable-pty's
 /// CommandBuilder so the user can override env / cwd without us
@@ -100,6 +123,10 @@ pub struct PtySession {
     /// the PTY master at spawn — what ghostty / Terminal.app surface. Immutable
     /// for the pane's life; None on Windows. Shown in the pane header.
     tty_short: Option<String>,
+    /// Warp-style command blocks the reader thread accumulates from the raw
+    /// OSC 133 C/D stream. Shared Arc so the socket/HTTP backend reads them
+    /// without routing through the GUI. Bounded (~50), newest last.
+    blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
 }
 
 impl PtySession {
@@ -249,6 +276,7 @@ impl PtySession {
         let (tx, rx) = bounded::<ScreenUpdate>(256);
         let size = Arc::new(Mutex::new((opts.cols, opts.rows)));
         let writer_arc: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
+        let blocks: Arc<Mutex<VecDeque<CommandBlock>>> = Arc::new(Mutex::new(VecDeque::new()));
 
         // Spin up the VT processor loop. Owns the Term, drains the
         // reader, and emits a ScreenUpdate after each batch. Bounded
@@ -294,6 +322,7 @@ impl PtySession {
             opts.pane_id.clone(),
             Arc::clone(&title_handle),
             Arc::clone(&term),
+            Arc::clone(&blocks),
         );
 
         Ok(Self {
@@ -313,7 +342,15 @@ impl PtySession {
             title_handle,
             pane_id: opts.pane_id.clone(),
             tty_short,
+            blocks,
         })
+    }
+
+    /// Shared handle to this pane's command-block store. The GUI hands this Arc
+    /// to the socket backend (via `pane_status_pub`) so `/blocks` can read the
+    /// blocks without touching `App.pty` — no per-frame snapshot/clone.
+    pub fn blocks_arc(&self) -> Arc<Mutex<VecDeque<CommandBlock>>> {
+        Arc::clone(&self.blocks)
     }
 
     /// Best-effort label for what's running in this PTY *right now*.
@@ -793,6 +830,7 @@ fn spawn_reader_thread(
     pane_id: String,
     title_handle: Arc<Mutex<Option<String>>>,
     term: Arc<Mutex<Term<PtyEventForwarder>>>,
+    blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use unicode_normalization::UnicodeNormalization;
@@ -835,6 +873,14 @@ fn spawn_reader_thread(
         // Keeps a captured notify across frames so a sync-suppressed read
         // (sync_bytes_count > 0 → no snapshot built) still delivers next frame.
         let mut pending_notify: Option<(String, String)> = None;
+        // OSC 133 C/D command-block state. C (output start) opens a block, the
+        // raw bytes until D (command end) are its output, D;<exit> closes it.
+        // `blk_prompt` = the B-mark cursor, where the command line begins —
+        // captured from the grid at C time before output overwrites it.
+        let mut blk_capturing = false;
+        let mut blk_seq: u64 = 0;
+        let mut blk_start: Option<Instant> = None;
+        let mut blk_prompt: Option<(u16, u16)> = None;
 
         loop {
             // Check for a pending resize before we read more bytes —
@@ -996,6 +1042,9 @@ fn spawn_reader_thread(
                     // is what emits it. Terminator-agnostic (BEL or ST).
                     if find_subslice(processed_bytes, b"\x1b]133;B").is_some() {
                         snap.prompt_end = Some((snap.cursor_row, snap.cursor_col));
+                        // Same mark drives the command-block command extraction:
+                        // the cursor here is where the typed command begins.
+                        blk_prompt = Some((snap.cursor_row, snap.cursor_col));
                     }
                     // Hand off any OSC 777 notify captured this read (or a
                     // prior sync-suppressed one) to the host pump.
@@ -1012,6 +1061,19 @@ fn spawn_reader_thread(
                     Some(snap)
                 }
             };
+            // OSC 133 C/D command-block parsing — independent of the snapshot
+            // (still runs when sync output suppressed it). Command text is read
+            // from the grid at C time, before output overwrites the prompt line.
+            parse_command_blocks(
+                processed_bytes,
+                &term,
+                current_size,
+                &blocks,
+                &mut blk_capturing,
+                &mut blk_seq,
+                &mut blk_start,
+                blk_prompt,
+            );
             if let Some(upd) = update {
                 // try_send (not send) so the reader is NEVER paced by the
                 // pump/render side. If the consumer is behind (slow GPU
@@ -1196,6 +1258,207 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|w| w == needle)
+}
+
+/// Max command blocks retained per pane, and max output bytes per block —
+/// bounds memory against `yes`-style floods / long sessions.
+const BLOCK_CAP: usize = 50;
+const BLOCK_OUTPUT_CAP: usize = 256 * 1024;
+
+/// Walk a PTY read batch for OSC 133 C/D command-block marks and accumulate
+/// blocks into the shared store. vte drops OSC 133, so — like OSC 777/1337 —
+/// we sniff the raw stream. `C` opens a block (command text read from the grid
+/// at `prompt`, the B mark), the bytes until `D` are its output, `D;<exit>`
+/// closes it. A new `C` while still capturing closes the prior block (no D).
+#[allow(clippy::too_many_arguments)]
+fn parse_command_blocks(
+    bytes: &[u8],
+    term: &Arc<Mutex<Term<PtyEventForwarder>>>,
+    size: (u16, u16),
+    blocks: &Arc<Mutex<VecDeque<CommandBlock>>>,
+    capturing: &mut bool,
+    seq: &mut u64,
+    start: &mut Option<Instant>,
+    prompt: Option<(u16, u16)>,
+) {
+    const PREFIX: &[u8] = b"\x1b]133;";
+    // Fast path: nothing to do unless we're mid-block or a mark is present.
+    if !*capturing && find_subslice(bytes, PREFIX).is_none() {
+        return;
+    }
+    let mut data = bytes;
+    loop {
+        match find_subslice(data, PREFIX) {
+            None => {
+                if *capturing {
+                    block_append_output(blocks, data);
+                }
+                return;
+            }
+            Some(p) => {
+                // Bytes before this mark are command output (when capturing).
+                if *capturing {
+                    block_append_output(blocks, &data[..p]);
+                }
+                let kind_idx = p + PREFIX.len();
+                let kind = data.get(kind_idx).copied();
+                let mut rest = &data[(kind_idx + 1).min(data.len())..];
+                match kind {
+                    Some(b'C') => {
+                        // A C while still capturing means the prior block never
+                        // got a D (e.g. Ctrl-C at the prompt) — close it first.
+                        if *capturing {
+                            block_finalize(blocks, None, start);
+                        }
+                        let command = extract_command(term, size, prompt);
+                        block_begin(blocks, seq, command);
+                        *start = Some(Instant::now());
+                        *capturing = true;
+                        rest = &rest[skip_terminator(rest)..];
+                    }
+                    Some(b'D') => {
+                        let (exit, consumed) = parse_d_payload(rest);
+                        if *capturing {
+                            block_finalize(blocks, exit, start);
+                            *capturing = false;
+                        }
+                        rest = &rest[consumed.min(rest.len())..];
+                    }
+                    // A / B (handled in the snapshot path) and any split mark:
+                    // skip the terminator and keep walking.
+                    _ => {
+                        rest = &rest[skip_terminator(rest)..];
+                    }
+                }
+                data = rest;
+            }
+        }
+    }
+}
+
+/// Length of an OSC terminator at the slice head: BEL (1) or ST `ESC \` (2).
+fn skip_terminator(data: &[u8]) -> usize {
+    match data.first() {
+        Some(&0x07) => 1,
+        _ if data.starts_with(b"\x1b\\") => 2,
+        _ => 0,
+    }
+}
+
+/// Parse a D mark payload (bytes after the `D`): `;<exit><term>` or `<term>`.
+/// Returns (exit_code, bytes_consumed_including_terminator).
+fn parse_d_payload(data: &[u8]) -> (Option<i32>, usize) {
+    let bel = data.iter().position(|&b| b == 0x07);
+    let st = find_subslice(data, b"\x1b\\");
+    let end = match (bel, st) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => return (None, data.len()), // terminator split across reads
+    };
+    let exit = data[..end]
+        .strip_prefix(b";")
+        .and_then(|p| std::str::from_utf8(p).ok())
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    let term_len = if data.get(end) == Some(&0x07) { 1 } else { 2 };
+    (exit, end + term_len)
+}
+
+fn block_begin(blocks: &Arc<Mutex<VecDeque<CommandBlock>>>, seq: &mut u64, command: String) {
+    *seq += 1;
+    let started_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let mut b = blocks.lock().unwrap();
+    b.push_back(CommandBlock {
+        id: *seq,
+        command,
+        output: String::new(),
+        exit_code: None,
+        started_ms,
+        duration_ms: None,
+        is_tui: false,
+    });
+    while b.len() > BLOCK_CAP {
+        b.pop_front();
+    }
+}
+
+fn block_append_output(blocks: &Arc<Mutex<VecDeque<CommandBlock>>>, chunk: &[u8]) {
+    if chunk.is_empty() {
+        return;
+    }
+    // Alt-screen enter ⇒ a TUI (vim/htop/less); its raw run isn't a clean block.
+    let is_tui = find_subslice(chunk, b"\x1b[?1049h").is_some();
+    let mut b = blocks.lock().unwrap();
+    if let Some(last) = b.back_mut() {
+        if is_tui {
+            last.is_tui = true;
+        }
+        if last.output.len() < BLOCK_OUTPUT_CAP {
+            last.output.push_str(&String::from_utf8_lossy(chunk));
+        }
+    }
+}
+
+fn block_finalize(
+    blocks: &Arc<Mutex<VecDeque<CommandBlock>>>,
+    exit: Option<i32>,
+    start: &mut Option<Instant>,
+) {
+    let dur = start.take().map(|s| s.elapsed().as_millis() as u64);
+    let mut b = blocks.lock().unwrap();
+    if let Some(last) = b.back_mut() {
+        // zsh PROMPT_SP draws a reverse-video '%' + filler ending in "\r \r"
+        // right before the next prompt; it leaks into the C..D capture. Drop
+        // that trailing marker line so the block output stays clean (Warp-like).
+        if last.output.ends_with("\r \r") {
+            match last.output.rfind('\n') {
+                Some(nl) => last.output.truncate(nl + 1),
+                None => last.output.clear(),
+            }
+        }
+        if last.exit_code.is_none() {
+            last.exit_code = exit;
+        }
+        if last.duration_ms.is_none() {
+            last.duration_ms = dur;
+        }
+    }
+}
+
+/// Read the typed command out of the grid at C time: the `prompt` row (the B
+/// mark) from its column to line end. Single-line commands only (wrapped
+/// multi-line input is a follow-up). display_offset is 0 here (the reader
+/// snaps to the live tail on output), so the visual row is the grid line.
+fn extract_command(
+    term: &Arc<Mutex<Term<PtyEventForwarder>>>,
+    size: (u16, u16),
+    prompt: Option<(u16, u16)>,
+) -> String {
+    let Some((prow, pcol)) = prompt else {
+        return String::new();
+    };
+    let (cols, _rows) = size;
+    let t = term.lock().unwrap();
+    let grid = t.grid();
+    let glines = grid.screen_lines();
+    let gcols = grid.columns();
+    let line = prow as usize;
+    if line >= glines {
+        return String::new();
+    }
+    let end_col = (cols as usize).min(gcols);
+    let mut s = String::new();
+    for c in (pcol as usize)..end_col {
+        let point = Point::new(
+            alacritty_terminal::index::Line(line as i32),
+            alacritty_terminal::index::Column(c),
+        );
+        s.push(grid[point].c);
+    }
+    s.trim_end().to_string()
 }
 
 /// Standard base64 decode (no external crate). Ignores non-alphabet bytes

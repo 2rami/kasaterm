@@ -221,7 +221,8 @@ export function CommandCenter({ onPickStudent, openGitTab, onCollapse }: Command
             <div key={a.id} style={{ padding: '7px 0', borderBottom: '1px solid var(--cth-cream-200)' }}>
               {/* 헤더 클릭 → 그 학생 '대화' 탭(프롬프트·명령어 흐름)으로(거노). */}
               <div onClick={() => onPickStudent?.(a.id, a.name)} title="대화 열기" style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                <span style={{ width: 8, height: 8, borderRadius: 999, flexShrink: 0, background: a.status === 'working' ? 'var(--cth-mint)' : a.status === 'waiting' || a.status === 'blocked' ? 'var(--cth-coral)' : 'var(--cth-ink-300)' }} />
+                {/* 3구분(거노): 작업중=sky(호흡 펄스) / 선택지대기=빨강(깜빡 주의) / 노는중·완료=초록(정적). */}
+                <span style={{ width: 8, height: 8, borderRadius: 999, flexShrink: 0, background: (a.status === 'waiting' || a.status === 'blocked') ? 'var(--cth-coral)' : (a.status === 'working' || a.status === 'thinking') ? 'var(--cth-sky)' : 'var(--cth-status-success)', animation: (a.status === 'working' || a.status === 'thinking') ? 'cth-dot-pulse 1.3s ease-in-out infinite' : (a.status === 'waiting' || a.status === 'blocked') ? 'cth-blink 0.9s ease-in-out infinite' : undefined }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</div>
                   <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project || '대기 중'}</div>

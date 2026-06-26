@@ -8,6 +8,8 @@ export interface Agent {
   id: string;
   name: string;
   character: string;
+  /** 작업제목(board.title, ai-title) — 헤더에 캐릭터명과 분리해 표시(name 은 합본 라벨). */
+  title?: string;
   /** 외형 전용 캐릭터명 — 교실 스프라이트가 char/슬러그를 이걸로 찾는다(이름표는
    *  character 그대로). 백엔드 character 마커가 BA 학생명이면 동일, 작업명이면
    *  게임개발부 학생(미도리/모모이/유즈/아리스)을 폴백 배정. assignSprites 가 채움. */

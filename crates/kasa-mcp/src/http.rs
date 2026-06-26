@@ -399,11 +399,17 @@ fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String)> {
     };
     let base = home.join(".claude/tasks");
     let prefix: String = session_id.chars().take(8).collect();
-    let dir = {
-        let new = base.join(format!("session-{prefix}"));
-        if new.is_dir() { new } else { base.join(session_id) }
-    };
-    read_tasks_in_dir(&dir)
+    // shim 이 CLAUDE_TASK_LIST_ID=<full session> 를 주입하면 store dir 이 full-uuid 또는
+    // session-<full> 형태일 수 있다. 신형 session-<8hex> → full-uuid → session-<full> 순.
+    let candidates = [
+        base.join(format!("session-{prefix}")),
+        base.join(session_id),
+        base.join(format!("session-{session_id}")),
+    ];
+    match candidates.iter().find(|p| p.is_dir()) {
+        Some(dir) => read_tasks_in_dir(dir),
+        None => Vec::new(),
+    }
 }
 
 /// pane cwd → 그 cwd 의 **팀(TeamCreate) 세션** task 디렉토리. claude 가 팀 컨텍스트에서
@@ -1327,6 +1333,33 @@ async fn peek_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /blocks?surface=%N&limit=50` — a plain terminal pane's Warp-style
+/// command blocks (OSC 133 C/D delimited: command, output, exit code,
+/// duration). Newest last. Backs the BA GUI's command-block stack.
+async fn blocks_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let surface = params.get("surface").map(String::as_str).unwrap_or("");
+    let body = if surface.is_empty() {
+        serde_json::json!({ "ok": false, "error": "surface=%N required" })
+    } else {
+        let limit = params
+            .get("limit")
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(50);
+        match backend.pane_blocks(surface, limit) {
+            Ok(blocks) => serde_json::json!({
+                "ok": true,
+                "surface_id": surface,
+                "blocks": blocks,
+            }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// `GET /transcript?surface=%N&turns=20` — a pane's structured dialogue
 /// (user prompts + assistant replies, including off-screen turns). Unlike
 /// `/peek` (raw rendered screen), this is the clean conversation for the
@@ -2091,6 +2124,7 @@ pub fn spawn_http_server(
                 let terminal_reveal_backend = backend.clone();
                 let arona_close_backend = backend.clone();
                 let peek_backend = backend.clone();
+                let blocks_backend = backend.clone();
                 let transcript_backend = backend.clone();
                 let transcript_raw_backend = backend.clone();
                 let session_transcript_raw_backend = backend.clone();
@@ -2318,6 +2352,12 @@ pub fn spawn_http_server(
                         "/peek",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             peek_handler(peek_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/blocks",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            blocks_handler(blocks_backend.clone(), q)
                         }),
                     )
                     .route(

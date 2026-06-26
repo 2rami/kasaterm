@@ -629,14 +629,40 @@ impl App {
     /// one. The poller dedups + rate-limits, so a flat overwrite each frame is
     /// fine. Skipped entirely when no pane shows a bar (nothing to refresh).
     pub(crate) fn publish_pane_git_cwds(&self) {
-        let any_bar = self.pane_cwd_cache.keys().any(|id| self.statusbar_visible(id));
-        if !any_bar && !self.git.col_visible {
-            // Every bar collapsed and the git column hidden — no badge consumer.
-            return;
-        }
+        // Always feed every pane's cwd. Besides the native status bars, the BA
+        // GUI — now opened in an external browser tab — consumes per-pane badges
+        // through `/layout`, and the GUI can't tell whether that tab is open. The
+        // poller dedups by cwd and only wakes on a change, so an idle feed is one
+        // cheap git call per distinct repo per interval (no repaint).
         let cwds: Vec<std::path::PathBuf> = self.pane_cwd_cache.values().cloned().collect();
         if let Ok(mut guard) = self.git_poll_cwds.lock() {
             *guard = cwds;
+        }
+    }
+    /// Publish each pane's cwd + git badge into `pane_status_pub` so the socket
+    /// thread's `/layout` can stamp them onto every `PaneRect` — the BA GUI draws
+    /// a Warp-style cwd/branch/diff bar on plain (non-claude) terminal tiles from
+    /// it. Reads only the already-resolved `pane_cwd_cache` + `window_git` caches,
+    /// so nothing here touches the lsof/git hot path.
+    pub(crate) fn publish_pane_status(&self) {
+        let badges = self.window_git.lock().ok();
+        let mut map: HashMap<String, PaneStatus> = HashMap::new();
+        for (id, cwd) in &self.pane_cwd_cache {
+            let badge = badges.as_ref().and_then(|g| g.get(cwd).cloned());
+            // Share the PTY's OSC 133 block store (cheap Arc clone) so the
+            // socket `/blocks` can read it without reaching into App.pty.
+            let blocks = self.pty.get(id).map(|p| p.blocks_arc());
+            map.insert(
+                id.clone(),
+                PaneStatus {
+                    cwd: cwd.clone(),
+                    badge,
+                    blocks,
+                },
+            );
+        }
+        if let Ok(mut guard) = self.pane_status_pub.lock() {
+            *guard = map;
         }
     }
     /// Push the active pane's cwd into the shared `git_col_cwd` so the git
@@ -1321,6 +1347,13 @@ impl App {
     /// 순수 토글이던 시절엔 창이 다른 창 뒤로 내려가 있어도 버튼이 "있음→닫기"라 두 번
     /// 눌러야 다시 떴다(거노: 내려간 창 다시 누르면 꺼져 불편). has_focus 로 분기.
     pub(crate) fn toggle_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
+        // 기본: arona-ui 를 기본 웹브라우저 탭으로 연다(거노 06-26). wry 임베드(별도 OS
+        // 창)는 Metal layer 충돌을 피하려던 우회였고 지금은 비활성 — KASATERM_ARONA_WRY=1
+        // 로만 복귀한다. 버튼·메뉴·키보드 3경로가 다 이 함수를 거치므로 여기서만 분기.
+        if std::env::var_os("KASATERM_ARONA_WRY").is_none() {
+            self.open_arona_in_browser();
+            return;
+        }
         if self.arona_panel_window.is_none() {
             self.open_arona_panel(event_loop);
             return;
@@ -1340,6 +1373,16 @@ impl App {
         if focused {
             self.close_arona_panel();
         }
+    }
+
+    /// arona-ui 를 기본 브라우저 탭으로 연다. MCP HTTP 서버가 같은 포트로 `/arona-ui/`
+    /// 와 API 를 동일 origin 서빙하므로 페이지 fetch 가 그대로 동작한다. 캐시버스트(`?v=`)는
+    /// 안 붙인다 — 같은 URL 이면 브라우저가 기존 탭을 재사용할 수 있다(중복 탭 방지).
+    pub(crate) fn open_arona_in_browser(&self) {
+        let port = mcp_panel_port();
+        let url = format!("http://127.0.0.1:{port}/arona-ui/");
+        open_url_in_browser(&url);
+        eprintln!("[arona-browser] open {url}");
     }
 
     /// 거노: 새 방(윈도우) + god(아로나/프라나) 배정. 방별 collab 격리로 room slug 를
@@ -1708,5 +1751,18 @@ fn applescript_quote(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// 기본 브라우저로 URL 열기 — macOS `open`, Windows `cmd /C start`, 그 외 `xdg-open`.
+/// BA GUI 버튼이 arona-ui 를 외부 탭으로 띄울 때 쓴다(wry 임베드 비활성 대체).
+pub(crate) fn open_url_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 

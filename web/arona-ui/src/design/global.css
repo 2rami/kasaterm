@@ -112,6 +112,16 @@ canvas { image-rendering: pixelated; }
   0%, 100% { transform: scale(1); }
   50% { transform: scale(0.85); }
 }
+/* 로딩 버블 점 — 통통 튀는 bounce(거노: 로딩되는 애니메이션이 약함). */
+@keyframes cth-loading-bounce {
+  0%, 70%, 100% { transform: translateY(0) scale(0.72); opacity: 0.4; }
+  35% { transform: translateY(-5px) scale(1.1); opacity: 1; }
+}
+/* 상태 점 호흡 — 작업중 학생(부드러운 opacity 펄스로 "지금 일하는 중"을 명확히). */
+@keyframes cth-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.28; }
+}
 
 /* Reduce motion */
 @media (prefers-reduced-motion: reduce) {

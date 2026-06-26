@@ -288,13 +288,51 @@ pub fn parse_agents_json(stdout: &str) -> std::collections::HashMap<String, Agen
 /// (claude deciding where to open a result pane, say) can reason about
 /// "right half / top third" without knowing the pixel size. `x,y` is the
 /// top-left corner; `w,h` the size. Returned by `window.layout`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PaneRect {
     pub surface_id: String,
     pub x: u16,
     pub y: u16,
     pub w: u16,
     pub h: u16,
+    /// Shell cwd of the pane (host-resolved), for the BA GUI to render a
+    /// Warp-style status bar on plain (non-claude) terminal tiles. `None` for
+    /// callers/backends that don't track per-pane cwd (e.g. ASCII `layout`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// git badge of `cwd` — branch + tree diff summary. `None` outside a repo
+    /// or before the badge poller has run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insertions: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u32>,
+}
+
+/// One shell command block of a pane (Warp-style), delimited by OSC 133 C/D
+/// shell-integration marks. The GUI renders a stack of these for plain
+/// (non-claude) terminal tiles. Mirrors `kasa_pty::CommandBlock` over the
+/// wire. Returned by `/blocks`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PaneBlock {
+    pub id: u64,
+    pub command: String,
+    pub output: String,
+    /// None while the command is still running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Epoch milliseconds at command start (HISTORY relative time).
+    pub started_ms: u64,
+    /// Wall-clock command duration; None while running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// The command entered an alt-screen (vim/htop) — GUI falls back to a live
+    /// peek instead of the raw block output.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_tui: bool,
 }
 
 /// One window in the active session, with its panes and their rects.
@@ -618,6 +656,12 @@ pub trait Backend: Send + Sync {
     /// so a viewer can reproduce the pane's colors. Default unsupported.
     fn peek_ansi(&self, _surface_id: &str, _lines: usize) -> Result<String> {
         anyhow::bail!("peek_ansi not supported")
+    }
+
+    /// The accumulated OSC 133 command blocks of a pane (newest last, capped at
+    /// `limit`), so the GUI can render a Warp-style block stack. Default: none.
+    fn pane_blocks(&self, _surface_id: &str, _limit: usize) -> Result<Vec<PaneBlock>> {
+        Ok(Vec::new())
     }
 
     /// Register a pane's claude-code transcript file (the

@@ -205,6 +205,9 @@ impl App {
         // Every pane's status bar wants its own repo badge — feed all pane cwds
         // to the same poller.
         self.publish_pane_git_cwds();
+        // Mirror each pane's cwd+badge for the BA GUI's `/layout` (Warp bar on
+        // plain terminal tiles). Reads the caches above; no extra git/lsof.
+        self.publish_pane_status();
         let Some(window) = self.window.as_ref() else { return };
         // Snapshot for the launch banner before the &mut self.gpu borrow
         // below (which rules out re-borrowing &self inside that block).
@@ -3250,18 +3253,13 @@ impl App {
             // 모은다. statusbar 루프(아래)도 active 보더 inset 계산에 active_pane/
             // is_split을 쓰므로 settings 분기 밖, 더 넓은 스코프에 둔다.
             let is_split = footer_slots.len() > 1;
-            let (active_pane, headered): (Option<String>, std::collections::HashSet<String>) =
-                match self.ws.lock() {
-                    Ok(w) => (
-                        w.active_pane.clone(),
-                        w.panes
-                            .iter()
-                            .filter(|(_, p)| p.has_header())
-                            .map(|(k, _)| k.clone())
-                            .collect(),
-                    ),
-                    Err(_) => (None, Default::default()),
-                };
+            let active_pane = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+            // 헤더를 실제로 그린 pane 집합 — 헤더 working bar 가 거기 뜨므로 footer 로딩바는
+            // 이 pane 들을 건너뛴다. `ws.panes.has_header()` 가 아니라 방금 그린 `headers`
+            // (pty_layout 기반)에서 뽑아야 ws.panes↔pty_layout 데싱크로 한 pane 에 헤더(위)·
+            // footer(아래) 스윕바가 동시에 뜨는 "로딩바 두개" 버그가 안 난다(거노).
+            let headered: std::collections::HashSet<String> =
+                headers.iter().map(|h| h.id.clone()).collect();
             if self.settings_open {
                 self.pane_handle_rects.clear();
                 self.pane_top_zones.clear();
