@@ -210,14 +210,31 @@ function fmtClock(iso?: string): string {
   return `${ampm} ${h}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
-// transcript user 이벤트(또는 permission-mode 이벤트)에 박힌 현재 권한 모드를 역순으로
-// 찾는다. peek 화면 추정 없이 정확(거노: ccsv 방식). default(normal)는 칩 미표시 위해 null.
+// transcript 의 권한 모드 판정. permission-mode/user 이벤트의 permissionMode 가 1차 소스지만
+// claude 는 이걸 *turn 시작 시점* 에 찍어서, EnterPlanMode(turn 중간 plan 진입)를 한 턴 늦게
+// 잡는다 — 게다가 --dangerously-skip-permissions 세션은 기저값 bypass 가 계속 찍혀 plan 이
+// 묻힌다(거노: plan 작업 중인데 칩이 bypass). 그래서 EnterPlanMode/ExitPlanMode 도구 호출을
+// 정순 추적해 plan 진입을 즉시 반영하고, ExitPlanMode 또는 plan 이 아닌 permission-mode 명시
+// 기록으로 해제한다. default(normal)는 칩 미표시 위해 null.
 function latestPermissionMode(events: SessionEvent[]): string | null {
-  for (let i = events.length - 1; i >= 0; i--) {
-    const m = (events[i] as { permissionMode?: string }).permissionMode;
-    if (m) return m;
+  let base: string | null = null;
+  let planActive = false;
+  for (const ev of events) {
+    const e = ev as { permissionMode?: string; message?: { content?: unknown } };
+    if (e.permissionMode) {
+      base = e.permissionMode;
+      if (e.permissionMode !== 'plan') planActive = false;
+    }
+    const content = e.message?.content;
+    if (Array.isArray(content)) {
+      for (const c of content as Array<{ type?: string; name?: string }>) {
+        if (c?.type !== 'tool_use') continue;
+        if (c.name === 'EnterPlanMode') planActive = true;
+        else if (c.name === 'ExitPlanMode') planActive = false;
+      }
+    }
   }
-  return null;
+  return planActive ? 'plan' : base;
 }
 
 // ccsv formatSystemMessage 발췌 — system 이벤트(api_error/compact_boundary)를 한 줄씩 평탄화한
@@ -262,7 +279,8 @@ type RenderItem =
   | { kind: 'qa'; qa: { q: string; a: string }[] }
   | { kind: 'launch'; subagentType?: string; description?: string }
   | { kind: 'workflow'; name?: string; description?: string; phases: string[]; agents: string[]; agentCount: number }
-  | { kind: 'system'; text: string };
+  | { kind: 'system'; text: string }
+  | { kind: 'interrupted' };
 
 // AskUserQuestion tool_result content("...answered: \"질문\"=\"답\". ...")에서 질문↔답 쌍 추출.
 // multiSelect 답은 한 쌍 안에 콤마로 묶여 온다. content 가 배열이면 text 블록을 잇는다.
@@ -427,19 +445,15 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
     const uuid = (ev as { uuid?: string }).uuid;
     const ts = (ev as { timestamp?: string }).timestamp; // 카톡식 메시지 시각
     const content = (ev as { message?: { content?: unknown } }).message?.content;
-    // esc 취소 — content 가 "[Request interrupted by user]" 마커인 user 이벤트. esc 는 학생이 답하던
-    // 도중에 누르므로 마커 직전엔 거의 항상 (중단된) assistant 턴이 있다. 예전엔 그 assistant 버블에서
-    // break 해 "답 나옴=취소 아님"으로 처리했는데, 그 탓에 진짜 취소가 안 잡혔다(거노: 취소 표시 안 됨).
-    // → assistant/thinking/tool 은 건너뛰고, 가장 가까운 user 버블을 끊긴 프롬프트로 표시(회색+취소선).
-    // 마커 자체는 안 띄운다.
+    // "[Request interrupted by user]" 마커 — 그 직전 프롬프트는 이미 transcript 에 정식 user 턴으로
+    // 기록된(=전송된) 것이라 취소가 아니다(거노: 입력된 프롬프트가 취소로 뜨면 안 됨). 프롬프트는
+    // 그대로 두되, 중단이 일어난 그 자리에 "작업 중단" 마커를 흐름에 넣어 정확한 위치에 표시한다
+    // (거노). 연속 중단은 1개로 합친다. 전송 전 esc 로 안 들어간 발화는 superset/orphan 정리가 따로 숨긴다.
     if (role === 'user') {
       const flat = typeof content === 'string' ? content
         : Array.isArray(content) ? content.map((b) => (b && typeof b === 'object' && 'text' in b ? String((b as { text?: string }).text ?? '') : '')).join(' ') : '';
       if (/^\s*\[Request interrupted by user/.test(flat)) {
-        for (let k = items.length - 1; k >= 0; k--) {
-          const prev = items[k];
-          if (prev.kind === 'bubble' && prev.role === 'user') { prev.cancelled = true; break; }
-        }
+        if (items[items.length - 1]?.kind !== 'interrupted') items.push({ kind: 'interrupted' });
         continue;
       }
     }
@@ -592,6 +606,44 @@ function modeLabel(m: string | null): string | null {
   }
 }
 
+// 권한 모드 칩 색 — plan=인디고(계획만·안전), acceptEdits=민트(자동수락), bypass=coral(위험).
+function modeStyle(m: string | null): { bg: string; fg: string; border: string } | null {
+  switch (m) {
+    case 'plan': return { bg: '#EEEBFF', fg: '#6B4EE6', border: '#B6A8F5' };
+    case 'acceptEdits': return { bg: 'color-mix(in srgb, var(--cth-mint) 16%, #fff)', fg: 'var(--cth-mint)', border: 'var(--cth-mint)' };
+    case 'bypassPermissions': return { bg: 'color-mix(in srgb, var(--cth-coral) 16%, #fff)', fg: 'var(--cth-coral)', border: 'var(--cth-coral)' };
+    default: return null;
+  }
+}
+
+// 권한 모드 아이콘 — plan=실드+체크, acceptEdits=체크, bypass=경고삼각.
+function ModeIcon({ mode }: { mode: string | null }) {
+  const s: CSSProperties = { marginRight: 4, verticalAlign: -1, flexShrink: 0 };
+  if (mode === 'plan') return <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={s}><path d="M8 1.5l5.5 2v4c0 3.2-2.3 5.4-5.5 6.5C4.8 12.9 2.5 10.7 2.5 7.5v-4l5.5-2Z" /><path d="M5.9 7.8l1.5 1.5 2.7-3" /></svg>;
+  if (mode === 'acceptEdits') return <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" style={s}><path d="M3 8.5l3 3 7-7" /></svg>;
+  if (mode === 'bypassPermissions') return <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={s}><path d="M8 2 1.5 13.5h13L8 2Z" /><path d="M8 6.4v3.3M8 11.6v.1" /></svg>;
+  return null;
+}
+
+// 헤더 우측 액션 드롭다운 항목 — 좁은 멀티뷰 타일에서 버튼이 정보를 밀어내, 눈·캐릭터·종료·닫기를
+// "⋯ 더보기" 메뉴로 접는다(거노: pane 여러개일 때 제목탭 버튼 겹침).
+function MenuItem({ label, danger, onClick }: { label: string; danger?: boolean; onClick: () => void }) {
+  const [h, setH] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setH(true)}
+      onMouseLeave={() => setH(false)}
+      style={{
+        textAlign: 'left', padding: '7px 10px', borderRadius: 7, border: 'none', cursor: 'pointer',
+        background: h ? (danger ? 'color-mix(in srgb, var(--cth-coral) 12%, #fff)' : 'var(--cth-sky-light)') : 'transparent',
+        color: danger ? 'var(--cth-coral)' : 'var(--cth-ink-700)',
+        fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
+      }}
+    >{label}</button>
+  );
+}
+
 // system 이벤트(api_error/compact_boundary) — 좌측 작은 회색 접이식 'System' 버블.
 // 클릭하면 평탄화된 상세(Status/Request ID/Error/Pre-Tokens…)가 펼쳐진다.
 function SystemBubble({ text }: { text: string }) {
@@ -685,9 +737,23 @@ function parseSpinner(screen: string): string | null {
   const lines = screen.split('\n');
   for (let i = lines.length - 1; i >= 0 && i >= lines.length - 14; i--) {
     const t = lines[i].trim();
-    // 진행형: 별 + verb… + (경과시간). 완료형("for Ns")은 의도적으로 무시.
-    const m = t.match(/[✠-❏][^\S\n]*(.+?…)\s*\(((?:\d+m\s*)?\d+s)\b/);
+    // 진행형: 스피너글리프 + verb… + (경과시간). 완료형("for Ns")은 의도적으로 무시.
+    // 글리프는 회전 프레임마다 다르다(· ✻ ✳ ✶ … 브라유 ⠋⠙) — claude 가 가운뎃점(·)이나
+    // 브라유로 돌 때 옛 [✠-❏] 만으론 verb 를 놓쳐 로딩이 안 떴다(거노: 빨간 스피너 안 뜸).
+    const m = t.match(/[·*∗⋆✠-➿⠀-⣿][^\S\n]*(.+?…)\s*\(((?:\d+m\s*)?\d+s)\b/);
     if (m) return `${m[1]} · ${m[2]}`;
+  }
+  return null;
+}
+
+// 컴팩트 등 긴 작업의 진행바 — 터미널 "▰▰▰☐☐ 9%" 막대를 GUI 로딩에도 똑같이(거노: 컴팩트할 때
+// 로딩바도). 진행바 글리프(▰▱☐■□…)가 있는 줄의 N% 를 0~100 으로. 없으면 null(일반 작업은 진행률 X).
+function parseProgress(screen: string): number | null {
+  const lines = screen.split('\n');
+  for (let i = lines.length - 1; i >= 0 && i >= lines.length - 14; i--) {
+    if (!/[▰▱☐☑■□▮▯]/.test(lines[i])) continue;
+    const m = lines[i].match(/(\d{1,3})\s*%/);
+    if (m) { const n = +m[1]; if (n >= 0 && n <= 100) return n; }
   }
   return null;
 }
@@ -967,6 +1033,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   const parentAvatarChar = parentAgent?.character && !/^%?\d+$/.test(parentAgent.character)
     ? parentAgent.character
     : (title.split('↳')[0].trim() || title);
+  // 헤더 제목 = 캐릭터명(avatarChar) + 작업제목만. 작업제목 앞 status 글리프(⠐/✳…)와
+  // surfaceId 는 떼어 중복 제거(거노: 타이틀 중복 많아 복잡, 간단하게).
+  const liveTask = (agent?.title || '').replace(/^[^\p{L}\p{N}]+/u, '').trim();
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [streaming, setStreaming] = useState('');
   // 하이브리드 폴백: jsonl(events)이 아직 안 써진 진행 중 구간엔 캡처 프록시의 텍스트
@@ -979,6 +1048,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   const [messages, setMessages] = useState<MessageEntry[]>([]); // tell 발신자 대조용(학생→학생 좌측 버블)
   const [loaded, setLoaded] = useState(false); // 첫 폴 완료 — 빈 상태 문구 분기
   const [spinner, setSpinner] = useState<string | null>(null); // claude 라이브 작업 표시(verb·경과초)
+  const [progress, setProgress] = useState<number | null>(null); // 컴팩트 등 진행률 % (터미널 진행바 미러)
   const [effort, setEffort] = useState<string | null>(null); // effort level(상태바 파싱) — 모델 옆 칩
   const [mode, setMode] = useState<string | null>(null); // 권한 모드(transcript permissionMode) — 헤더 칩
   const [convModel, setConvModel] = useState(''); // 캡처 프록시가 요청에서 잡은 model(거노: 화면스크랩 대신 프록시 소스)
@@ -987,13 +1057,18 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // window.confirm 은 wry webview(macOS)에서 무반응 — 자체 확인 모달로 종료·compact 확인(거노).
   const [confirm, setConfirm] = useState<{ msg: string; sub?: string; danger?: boolean; yes: string; onYes: () => void } | null>(null);
   const [charPicker, setCharPicker] = useState(false); // 캐릭터 변경 팝업(헤더 버튼)
+  const [actionMenu, setActionMenu] = useState(false); // 헤더 우측 ⋯ 더보기(눈·캐릭터·종료·닫기 통합)
   const [titleHover, setTitleHover] = useState(false); // 제목 더블클릭 줌 — hover 시 인터랙션 힌트
   const [atTop, setAtTop] = useState(true); // 스크롤 맨위 — true 면 ↑ 버튼 숨김
   const [atBottom, setAtBottom] = useState(true); // 스크롤 맨아래 — true 면 ↓ 버튼 숨김
   // 위로 스크롤하면 상단에 붙는 "지금 보고 있는 내 프롬프트" 헤더 — 그 아래로 무슨 작업·답을
   // 했는지 보게(거노). 클릭하면 그 프롬프트 위치로 점프. null=맨 위라 헤더 불필요.
   const [stickyP, setStickyP] = useState<{ idx: number; text: string } | null>(null);
+  // 위로 스크롤해 옛 대화 보는 중(맨 밑 아님) 새 대화가 도착하면 하단 가운데 "새 대화 ↓" sticky
+  // 배너 — 상단 프롬프트 헤더의 하단 대칭(거노: 새 대화 오면 하단 sticky로 밑으로 이동, 맨밑 아닐때).
+  const [newMsg, setNewMsg] = useState(false);
   const [footerOpen, setFooterOpen] = useState(false); // 인연도 줄 아래 서브에이전트·백그라운드·작업 묶음 펼침(거노: 평소엔 인연도 줄만)
+  const [footerHidden, setFooterHidden] = useState(() => { try { return localStorage.getItem('schale-footer-hidden') === '1'; } catch { return false; } }); // 하단바 통째 숨김(거노: pane별 하단바 숨기기)
   // 슬래시 자동완성 — 입력이 '/' 로 시작하면 claude-code 명령 드롭다운(↑↓ 선택·Tab/Enter 완성).
   const [navIdx, setNavIdx] = useState(0); // 선택지 카드 키보드 네비(↑↓) 하이라이트
   // /context 출력 정리본 — GUI 모달 새로 만들지 말고(거노) 터미널 /context 화면(peek)을
@@ -1001,6 +1076,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   const [ctxView, setCtxView] = useState<string | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true); // 사용자가 위로 스크롤했으면 자동 하단고정 멈춤
+  const evtLenRef = useRef(0); // 직전 events 길이 — 위로 올려둔 중 증가하면 newMsg(새 대화 도착)
   // ESC/Enter 로 메뉴를 닫은 직후 ~700ms 는 화면 재파싱으로 카드를 다시 띄우지 않는다
   // (거노: GUI 에서 esc 눌러도 안 멈춤 — tick 이 stale 화면에서 메뉴를 재감지해 재등장).
   const menuSuppressRef = useRef(0);
@@ -1125,6 +1201,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       const sp = parseSpinner(screen);
       if (sp) lastSpinnerRef.current = Date.now();
       setSpinner((prev) => sp ?? (Date.now() - lastSpinnerRef.current < 7000 ? prev : null));
+      setProgress(parseProgress(screen)); // 컴팩트 진행바 — 화면에 있으면 %, 없으면 null
+
       setEffort(conv.effort || parseEffort(screen)); // 캡처 프록시 effort(output_config.effort) 우선, 폴백 화면파싱
       setConvModel(conv.model || ''); // 프록시가 요청에서 잡은 model — /model 전환 시 다음 요청에 반영(실시간 소스)
       if (!suppressed) setEffortMenu(parseEffortMenu(screen)); // /effort 슬라이더 뜨면 GUI 카드로
@@ -1160,7 +1238,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 거노: 스크롤 올리면 자꾸 내려가던 버그).
   useEffect(() => {
     const el = bodyRef.current;
-    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+    if (el && atBottomRef.current) { el.scrollTop = el.scrollHeight; setNewMsg(false); }
+    else if (events.length > evtLenRef.current) setNewMsg(true); // 위로 올려둔 중 새 대화 도착
+    evtLenRef.current = events.length;
   }, [events, streaming, images]);
 
   // 새 질문(title 변경) 시 체크·네비 초기화(메뉴 열릴 때 터미널 커서는 ❯1=navIdx 0).
@@ -1187,6 +1267,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     if (!el) return;
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
     setAtBottom(atBottomRef.current);
+    if (atBottomRef.current) setNewMsg(false); // 맨 밑 도달 → 배너 해제
     setAtTop(el.scrollTop < 48);
     // 컨테이너 상단을 지난(스크롤로 위로 올라간) 마지막 내 프롬프트 → sticky 헤더. 버블은 DOM
     // 순서대로라 처음 "아직 상단 아래"를 만나면 멈춘다(거노: 올린 만큼 위 프롬프트가 붙게).
@@ -1384,67 +1465,103 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       borderLeft: embedded ? 'none' : '1px solid var(--cth-cream-200)',
       overflow: 'hidden'
     }}>
-      {/* 헤더: 캐릭터명 + 닫기 */}
+      {/* 헤더(슬림) — 제목 · 경로(cwd) · 권한(plan)칩 · 하단바숨김·캐릭터·종료·닫기.
+          거노: 얇게, 경로·plan칩을 상단으로, 하단바 숨기기 토글. */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 10,
-        padding: '10px 12px',
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '6px 10px',
         background: 'var(--cth-cream-50)',
         borderBottom: '1px solid var(--cth-cream-200)'
       }}>
         <span
-          onDoubleClick={onToggleZoom}
+          onClick={onToggleZoom}
           onMouseEnter={() => { if (onToggleZoom) setTitleHover(true); }}
           onMouseLeave={() => setTitleHover(false)}
-          title={onToggleZoom ? (zoomed ? '더블클릭 — 전체화면 해제' : '더블클릭 — 임시 전체화면') : undefined}
-          style={{ fontFamily: 'var(--cth-font-display)', fontSize: 15, fontWeight: 700, color: titleHover ? 'var(--cth-sky)' : 'var(--cth-ink-900)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', userSelect: 'none', cursor: onToggleZoom ? 'pointer' : 'default', padding: '2px 6px', margin: '-2px -6px', borderRadius: 7, background: titleHover ? 'var(--cth-sky-light)' : 'transparent', transition: 'background .12s, color .12s' }}>
+          title={onToggleZoom ? (zoomed ? '클릭 — 전체화면 해제' : '클릭 — 임시 전체화면') : undefined}
+          style={{ display: 'inline-flex', alignItems: 'baseline', gap: 7, minWidth: 0, overflow: 'hidden', userSelect: 'none', cursor: onToggleZoom ? 'pointer' : 'default', padding: '2px 6px', margin: '-2px -6px', borderRadius: 7, background: titleHover ? 'var(--cth-sky-light)' : 'transparent', transition: 'background .12s', flexShrink: 1 }}>
           {onToggleZoom && titleHover && (
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4, verticalAlign: '-1px' }}>
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, alignSelf: 'center', color: 'var(--cth-sky)' }}>
               {zoomed
                 ? <path d="M9 3h4v4M13 3l-4 4M7 13H3V9M3 13l4-4" />
                 : <path d="M3 7V3h4M13 9v4H9M3 3l4 4M13 13l-4-4" />}
             </svg>
           )}
-          {title} {offline ? (
-            <span style={{ marginLeft: 2, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-cream-200)', color: 'var(--cth-ink-500)', fontWeight: 700, fontSize: 10 }}>오프라인 · 읽기 전용</span>
+          {/* 라이브 = 캐릭터명(굵게) + 작업제목(dim). offline/sub 는 합본 라벨 + 배지 그대로. */}
+          {offline ? (
+            <><span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 13, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title}</span>
+            <span style={{ flexShrink: 0, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-cream-200)', color: 'var(--cth-ink-500)', fontWeight: 700, fontSize: 10 }}>오프라인</span></>
           ) : isSub ? (
-            <span style={{ marginLeft: 2, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-sky-light)', color: 'var(--cth-sky)', fontWeight: 700, fontSize: 10 }}>서브에이전트 · 읽기 전용</span>
+            <><span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 13, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title}</span>
+            <span style={{ flexShrink: 0, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-sky-light)', color: 'var(--cth-sky)', fontWeight: 700, fontSize: 10 }}>서브에이전트</span></>
           ) : (
-            <span style={{ color: 'var(--cth-ink-300)', fontWeight: 400, fontSize: 13 }}>{surfaceId}</span>
+            <><span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 13, fontWeight: 700, color: titleHover ? 'var(--cth-sky)' : 'var(--cth-ink-900)', whiteSpace: 'nowrap', flexShrink: 0 }}>{avatarChar}</span>
+            {liveTask && <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 400, color: 'var(--cth-ink-300)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, maxWidth: 220 }}>{liveTask}</span>}</>
           )}
         </span>
+        {/* 경로(cwd) — 거노: 경로를 상단바로. viewCwd(현재 보는 경로) 우선, 없으면 실행 cwd */}
+        {!offline && !isSub && agent?.cwd && (
+          <span title={`경로\n${agent.viewCwd && agent.viewCwd !== agent.cwd ? agent.viewCwd : agent.cwd}`} style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 170, minWidth: 0, flexShrink: 1 }}>
+            {shortCwd(agent.viewCwd && agent.viewCwd !== agent.cwd ? agent.viewCwd : agent.cwd)}
+          </span>
+        )}
+        {/* 권한(plan/acceptEdits/bypass) 칩 — 색+아이콘 (거노: planmode칩 색·아이콘) */}
+        {!offline && !isSub && modeLabel(mode) && (() => {
+          const st = modeStyle(mode)!;
+          return (
+            <span title="claude 권한 모드 (shift+tab 전환)" style={{ display: 'inline-flex', alignItems: 'center', fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 6, background: st.bg, color: st.fg, border: `1px solid ${st.border}`, flexShrink: 0, whiteSpace: 'nowrap' }}>
+              <ModeIcon mode={mode} />{modeLabel(mode)}
+            </span>
+          );
+        })()}
+        {/* 진행 중 백그라운드·서브에이전트 — 하단바를 접거나 숨겨도 헤더엔 항상(거노: 모니터링 안 보임).
+            클릭하면 하단바를 펴서 상세를 본다. */}
+        {!offline && !isSub && ((agent?.background?.length ?? 0) + (agent?.subagents?.length ?? 0) > 0) && (
+          <button
+            onClick={() => { setFooterHidden(false); try { localStorage.setItem('schale-footer-hidden', '0'); } catch { /* sandbox */ } setFooterOpen(true); }}
+            title={`진행 중 — 클릭하면 하단바를 펼쳐요\n${[...(agent?.background ?? []), ...(agent?.subagents ?? [])].join('\n')}`}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0, cursor: 'pointer', fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 6, background: 'color-mix(in srgb, var(--cth-sky) 14%, #fff)', color: 'var(--cth-sky)', border: '1px solid color-mix(in srgb, var(--cth-sky) 38%, #fff)' }}
+          >
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ animation: 'cth-pulse 1.6s ease-in-out infinite' }}><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.2v2.6h-2.6" /></svg>
+            {(agent?.background?.length ?? 0) + (agent?.subagents?.length ?? 0)}
+          </button>
+        )}
         <div style={{ flex: 1 }} />
-        {!offline && !isSub && (<>
-        <button
-          onClick={() => setCharPicker(true)}
-          title="캐릭터 변경 (대화 리셋)"
-          style={{
-            height: 28, padding: '0 10px', borderRadius: 8, border: '1px solid var(--cth-cream-200)', cursor: 'pointer',
-            background: 'var(--cth-cream-100)', color: 'var(--cth-ink-700)',
-            fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
-            display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap', flexShrink: 0
-          }}
-        >캐릭터</button>
-        <button
-          onClick={() => void onKill()}
-          title="학생 종료 (pane 닫기)"
-          style={{
-            height: 28, padding: '0 10px', borderRadius: 8, border: 'none', cursor: 'pointer',
-            background: 'var(--cth-coral)', color: '#fff',
-            fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600,
-            display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap', flexShrink: 0
-          }}
-        >종료</button>
-        </>)}
-        <button
-          onClick={onClose}
-          title="대화 닫기"
-          style={{
-            width: 28, height: 28, borderRadius: 8, border: 'none', cursor: 'pointer',
-            background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)',
-            fontFamily: 'var(--cth-font-ui)', fontSize: 16, lineHeight: 1,
-            display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
-          }}
-        >×</button>
+        {/* 액션 통합 — 좁은 멀티뷰 타일에서 버튼이 정보를 밀어내지 않게 ⋯ 메뉴 하나로(거노).
+            offline/sub 는 액션이 닫기뿐이라 × 그대로. */}
+        {!offline && !isSub ? (
+          <div style={{ position: 'relative', flexShrink: 0 }}>
+            <button
+              onClick={() => setActionMenu((o) => !o)}
+              title="더보기"
+              style={{ width: 24, height: 24, borderRadius: 7, border: '1px solid var(--cth-cream-200)', cursor: 'pointer', background: actionMenu ? 'var(--cth-sky-light)' : 'var(--cth-cream-100)', color: actionMenu ? 'var(--cth-sky)' : 'var(--cth-ink-500)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+            >
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="3.3" r="1.35" /><circle cx="8" cy="8" r="1.35" /><circle cx="8" cy="12.7" r="1.35" /></svg>
+            </button>
+            {actionMenu && (
+              <>
+                <div onClick={() => setActionMenu(false)} style={{ position: 'fixed', inset: 0, zIndex: 40 }} />
+                <div style={{ position: 'absolute', top: 'calc(100% + 5px)', right: 0, zIndex: 41, minWidth: 158, padding: 4, borderRadius: 10, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', boxShadow: '0 6px 20px rgba(21,41,74,0.18)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+                  <MenuItem label={footerHidden ? '하단바 보이기' : '하단바 숨기기'} onClick={() => { setFooterHidden((h) => { const n = !h; try { localStorage.setItem('schale-footer-hidden', n ? '1' : '0'); } catch { /* sandbox */ } return n; }); setActionMenu(false); }} />
+                  <MenuItem label="캐릭터 변경" onClick={() => { setCharPicker(true); setActionMenu(false); }} />
+                  <MenuItem label="대화 닫기" onClick={() => { onClose(); setActionMenu(false); }} />
+                  <div style={{ height: 1, background: 'var(--cth-cream-200)', margin: '2px 4px' }} />
+                  <MenuItem label="학생 종료" danger onClick={() => { void onKill(); setActionMenu(false); }} />
+                </div>
+              </>
+            )}
+          </div>
+        ) : (
+          <button
+            onClick={onClose}
+            title="대화 닫기"
+            style={{
+              width: 24, height: 24, borderRadius: 7, border: 'none', cursor: 'pointer',
+              background: 'var(--cth-cream-100)', color: 'var(--cth-ink-500)',
+              fontFamily: 'var(--cth-font-ui)', fontSize: 15, lineHeight: 1,
+              display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
+            }}
+          >×</button>
+        )}
       </div>
 
       {/* 대화(채팅 버블) + 보낸 이미지 — relative 래퍼로 감싸 맨위/맨아래 스크롤 버튼을 띄운다(거노). */}
@@ -1461,6 +1578,20 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               ...(streaming.trim() ? [{ kind: 'bubble', role: 'assistant', text: streaming } as RenderItem] : []),
               ...pendingChoices.map((t) => ({ kind: 'bubble', role: t.role, text: t.text } as RenderItem)),
             ].map((it, i) => {
+              // esc 중단 — 프롬프트(취소 아님)는 그대로 두고, 중단이 일어난 그 자리에 가는 구분선 +
+              // "작업 중단" 라벨을 넣어 어디서 끊겼는지 흐름에서 바로 보이게(거노: 정확한 위치).
+              if (it.kind === 'interrupted') {
+                return (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '2px 0 12px', color: 'var(--cth-ink-300)' }}>
+                    <span style={{ flex: 1, height: 1, background: 'var(--cth-cream-200)' }} />
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                      <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6"><circle cx="8" cy="8" r="6" /><path d="M5.2 5.2l5.6 5.6" strokeLinecap="round" /></svg>
+                      여기서 작업이 중단됐어요
+                    </span>
+                    <span style={{ flex: 1, height: 1, background: 'var(--cth-cream-200)' }} />
+                  </div>
+                );
+              }
               // 도구 호출(Bash/Edit/Read…) — 학생(좌측)에 per-tool 카드로 인터리브.
               if (it.kind === 'tool') {
                 return (
@@ -1707,7 +1838,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                 직후 nudge thinking 잔류(마지막이 학생 답변)는 빼서 "생각 중"이 답 아래 계속 뜨던 것 방지. */}
             {(spinner != null || ((agent?.status === 'working' || agent?.status === 'thinking')
               && lastBubbleRole === 'user')) && !streaming.trim() && (
-              <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
+              // sticky 바닥 고정(거노) — 위로 스크롤해 옛 대화를 봐도 로딩이 바닥에 남는다. 풀폭
+              // 그라데 배경(컨테이너 좌우 padding 16 을 음수 margin 으로 상쇄)으로 그 위 새 메시지가
+              // 자연스럽게 페이드되며 가려져 겹쳐 보이지 않는다.
+              <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 8, alignItems: 'flex-end',
+                position: 'sticky', bottom: 0, zIndex: 6, marginLeft: -16, marginRight: -16, marginBottom: 0,
+                padding: '8px 16px 4px', background: 'linear-gradient(to top, var(--cth-cream-100) 72%, transparent)' }}>
                 <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
                   <SpritePortrait character={avatarChar} scale={1.5} bust />
                 </div>
@@ -1719,11 +1855,11 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                   fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-500)', maxWidth: '82%',
                 }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                    <span style={{ display: 'inline-flex', gap: 3, flexShrink: 0 }}>
+                    <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0, alignItems: 'center', height: 14 }}>
                       {[0, 1, 2].map((d) => (
                         <span key={d} style={{
-                          width: 6, height: 6, borderRadius: 999, background: 'var(--cth-sky)',
-                          animation: 'cth-pulse 1s ease-in-out infinite', animationDelay: `${d * 0.15}s`,
+                          width: 7, height: 7, borderRadius: 999, background: 'var(--cth-sky)',
+                          animation: 'cth-loading-bounce 1.1s ease-in-out infinite', animationDelay: `${d * 0.16}s`,
                         }} />
                       ))}
                     </span>
@@ -1731,6 +1867,15 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                         추상 표시 대신 지금 뭘 하는지 보이게(거노). */}
                     {spinner || (agent?.status === 'thinking' ? '생각 중…' : (agent?.action || agent?.currentTool || '작업 중…'))}
                   </span>
+                  {/* 컴팩트 등 진행률 막대 — 터미널 "▰▰☐ 9%" 를 GUI 에도 똑같이(거노). 있을 때만. */}
+                  {progress != null && (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7, width: '100%', minWidth: 140 }}>
+                      <span style={{ position: 'relative', flex: 1, height: 6, borderRadius: 999, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
+                        <span style={{ position: 'absolute', inset: 0, width: `${progress}%`, background: 'linear-gradient(90deg, var(--cth-sky-light), var(--cth-sky))', borderRadius: 999, transition: 'width .4s cubic-bezier(0.22,1,0.36,1)' }} />
+                      </span>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', flexShrink: 0 }}>{progress}%</span>
+                    </span>
+                  )}
                   {/* 최근 도구 흐름 — working 중 세부 진행이 안 보이고 로딩바만 떴다(거노: 작업 중 사항을
                       봐야 하는데). 도구 이력을 한 줄로 깔아 "방금 무엇을 했는지" 흐름이 보이게. */}
                   {agent?.recentTools && agent.recentTools.length > 0 && (
@@ -1767,12 +1912,28 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             <svg width="15" height="15" viewBox="0 0 16 16" style={{ display: 'block' }}><path d="M8 12V4M4.5 7.5 8 4l3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
           </button>
         )}
-        {!atBottom && (
+        {!atBottom && !newMsg && (
           <button onClick={() => { const el = bodyRef.current; if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }); }} title="맨 아래로" style={SCROLL_BTN}>
             <svg width="15" height="15" viewBox="0 0 16 16" style={{ display: 'block' }}><path d="M8 4v8M4.5 8.5 8 12l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
           </button>
         )}
       </div>
+      {/* 새 대화 도착 — 위로 올려둔 동안만(맨 밑이면 안 띄움). 클릭하면 최신으로 내려가며 해제(거노).
+          가운데 pill 이라 우하단 ↑ 점프 버튼과 안 겹친다. wrapper 는 클릭 통과(스크롤 방해 X). */}
+      {newMsg && !atBottom && (
+        <div style={{ position: 'absolute', bottom: 12, left: 0, right: 0, zIndex: 20, display: 'flex', justifyContent: 'center', pointerEvents: 'none' }}>
+          <button onClick={() => { const el = bodyRef.current; if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' }); setNewMsg(false); }} style={{
+            pointerEvents: 'auto', display: 'inline-flex', alignItems: 'center', gap: 7, cursor: 'pointer',
+            padding: '7px 14px', borderRadius: 999,
+            background: 'var(--cth-sky)', color: '#fff', border: 'none',
+            boxShadow: '0 3px 12px rgba(21, 41, 74, 0.22)',
+            fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,
+          }}>
+            <span>새 대화가 도착했어요</span>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><path d="M8 4v8M4.5 8.5 8 12l3.5-3.5" /></svg>
+          </button>
+        </div>
+      )}
       </div>
 
       {/* 인터랙티브 메뉴(/model·AskUserQuestion) — 선택지 카드. 단일=클릭 즉시 선택,
@@ -1832,14 +1993,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       {/* 통합 하단 줄(항상 노출) — 인연도 게이지·재화·모델·effort·권한·브랜치·경로를 한 줄에
           (거노: 인연도 있는 곳에 다 넣음). 서브에이전트·백그라운드·작업은 우측 토글로 접는다 —
           평소엔 이 줄만 보여 화면을 안 가린다. 라이브 학생만(offline/서브 제외). */}
-      {!offline && !isSub && agent && (() => {
+      {!offline && !isSub && !footerHidden && agent && (() => {
         const hasFold = runningSubs.length > 0 || (agent.background?.length ?? 0) > 0 || taskList.length > 0;
         const foldCount = runningSubs.length + (agent.background?.length ?? 0) + taskList.length;
         const pct = Math.max(0, Math.min(100, Math.round(agent.contextPct ?? 0)));
         return (
         <>
           <div style={{
-            borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)',
+            borderTop: '2px solid var(--cth-cream-200)', background: 'var(--cth-cream-100)',
             display: 'flex', flexWrap: 'wrap', gap: 7, alignItems: 'center', padding: '6px 12px',
           }}>
             {/* 인연도(컨텍스트 사용량) 게이지 */}
@@ -1862,31 +2023,52 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
             {/* 모델·effort·권한·브랜치·경로 */}
             {(convModel || agent.model) && <MetaChip label={shortModel(agent.model || convModel)} onClick={() => void sendToPane(surfaceId, '/model', true, false)} />}
             {(convModel || agent.model) && <MetaChip label={displayEffort ? `effort: ${shortEffort(displayEffort)}` : 'effort'} dot={effortColor(displayEffort)} onClick={() => void sendToPane(surfaceId, '/effort', true, false)} />}
-            {modeLabel(mode) && <MetaChip label={modeLabel(mode)!} tone={mode === 'bypassPermissions' ? 'danger' : undefined} title="claude 권한 모드 (shift+tab 로 전환)" />}
             {agent.branch && <MetaChip label={`⎇ ${agent.branch}`} onClick={() => setConfirm({
               msg: '변경사항을 볼까요?',
               sub: `${agent.branch} 브랜치의 미커밋 변경(/diff)을 학생에게 띄워요.`,
               yes: '변경 보기',
               onYes: () => { void sendToPane(surfaceId, '/diff', true, false); },
             })} />}
-            {agent.cwd && <MetaChip label={shortCwd(agent.cwd)} dim title={`실행 경로 (claude 프로세스)\n${agent.cwd}`} />}
-            {agent.viewCwd && agent.viewCwd !== agent.cwd && <MetaChip label={shortCwd(agent.viewCwd)} tone="sky" title={`현재 보는 경로 (statusLine)\n${agent.viewCwd}`} />}
-            {/* 우측 토글 — 접을 내용(서브에이전트·백그라운드·작업) 있을 때만 */}
+            {/* 우측 — 작업중이면(서브에이전트·백그라운드·모니터) 펼치지 않아도 칩으로 표시(거노:
+                밑에 칩에도 둘 다). 칩 클릭=펼침. 그 뒤 접기 토글(전체 개수). */}
             {hasFold && (
-              <button onClick={() => setFooterOpen((o) => !o)} title={footerOpen ? '접기' : '서브에이전트·백그라운드·작업 보기'} style={{
-                marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer',
-                border: '1px solid var(--cth-cream-200)', borderRadius: 7, padding: '2px 7px',
-                background: footerOpen ? 'var(--cth-cream-100)' : 'var(--cth-cream-50)',
-                fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)',
-              }}>
-                <span>{foldCount}</span>
-                <svg width="11" height="11" viewBox="0 0 16 16" style={{ transform: footerOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
-              </button>
+              <div style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                {runningSubs.length > 0 && (
+                  <span onClick={() => setFooterOpen(true)} title="진행 중 서브에이전트 — 클릭하면 펼쳐요" style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer',
+                    padding: '2px 7px', borderRadius: 6, background: 'var(--cth-sky-light)',
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-sky)',
+                  }}>
+                    <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--cth-sky)', animation: 'cth-dot-pulse 1.3s ease-in-out infinite' }} />
+                    <svg width="10" height="10" viewBox="0 0 16 16"><path d="M4 3v6a3 3 0 0 0 3 3h6" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                    {runningSubs.length}
+                  </span>
+                )}
+                {(agent.background?.length ?? 0) > 0 && (
+                  <span onClick={() => setFooterOpen(true)} title={`진행 중 백그라운드·모니터\n${(agent.background ?? []).join('\n')}`} style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer',
+                    padding: '2px 7px', borderRadius: 6, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)',
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-700)',
+                  }}>
+                    <span style={{ width: 6, height: 6, borderRadius: 999, background: 'var(--cth-status-success)', animation: 'cth-dot-pulse 1.3s ease-in-out infinite' }} />
+                    {agent.background?.length ?? 0}
+                  </span>
+                )}
+                <button onClick={() => setFooterOpen((o) => !o)} title={footerOpen ? '접기' : '서브에이전트·백그라운드·작업 보기'} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer',
+                  border: '1px solid var(--cth-cream-200)', borderRadius: 7, padding: '2px 7px',
+                  background: footerOpen ? 'var(--cth-cream-100)' : 'var(--cth-cream-50)',
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)',
+                }}>
+                  <span>{foldCount}</span>
+                  <svg width="11" height="11" viewBox="0 0 16 16" style={{ transform: footerOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                </button>
+              </div>
             )}
           </div>
           {/* 접이식 묶음 — 서브에이전트·백그라운드 칩 + 현재 작업(TaskStrip). 평소 숨김(거노). */}
           {footerOpen && hasFold && (
-            <div style={{ borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)' }}>
+            <div style={{ borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-100)' }}>
               {(runningSubs.length > 0 || (agent.background?.length ?? 0) > 0) && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', padding: '8px 12px' }}>
                   {/* 진행 중 서브에이전트 — sky(launch·WorkflowCard 색 통일). 클릭하면 따로 연다. */}

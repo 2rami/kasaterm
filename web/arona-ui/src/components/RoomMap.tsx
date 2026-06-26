@@ -3,15 +3,22 @@ import { fetchRecentSessions, type RecentSession, type SessionsInfo } from '@/li
 import type { Agent } from '@/store';
 import { SpritePortrait } from './SpritePortrait';
 
-// 학생 상태 → 작은 점 색(좌측 트리). working/thinking=하늘, waiting=산호, blocked=노랑, idle=회색.
+// 학생 상태 → 작은 점 색(좌측 트리). 3구분(거노: 작업중·노는중·선택지대기 구분 강화):
+// 작업중(working/thinking)=하늘, 선택지대기(waiting/blocked)=빨강, 노는중·완료=초록.
 function statusDot(status: Agent['status']): string {
   switch (status) {
     case 'working':
     case 'thinking': return 'var(--cth-sky)';
-    case 'waiting': return 'var(--cth-coral)';
-    case 'blocked': return '#FFB020';
-    default: return 'var(--cth-ink-300)';
+    case 'waiting':
+    case 'blocked': return 'var(--cth-coral)';
+    default: return 'var(--cth-status-success)';
   }
+}
+// 색만으론 약해(거노) 움직임을 더함: 작업중=부드러운 호흡 펄스, 대기=깜빡(주의), 그 외=정적.
+function statusAnim(status: Agent['status']): string | undefined {
+  if (status === 'working' || status === 'thinking') return 'cth-dot-pulse 1.3s ease-in-out infinite';
+  if (status === 'waiting' || status === 'blocked') return 'cth-blink 0.9s ease-in-out infinite';
+  return undefined;
 }
 
 // 방 추가 시 고를 god(거노: 처음은 아로나 고정, 새 방은 선택). leaders 풀과 일치.
@@ -154,7 +161,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
                     <SpritePortrait character={pure} scale={0.9} bust />
                   </span>
                   <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: a.isGod ? 'var(--cth-sky)' : undefined, fontWeight: a.isGod ? 700 : (sel ? 700 : 500) }}>{pure}</span>
-                  <span style={{ flexShrink: 0, width: 6, height: 6, borderRadius: 999, background: statusDot(a.status) }} />
+                  <span style={{ flexShrink: 0, width: 6, height: 6, borderRadius: 999, background: statusDot(a.status), animation: statusAnim(a.status) }} />
                 </button>
               );
             })}

@@ -221,6 +221,22 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                                     .unwrap_or("백그라운드 작업");
                                 bg_launch.push((id.to_string(), clip(desc, 40)));
                             }
+                            // Monitor 도구도 백그라운드 작업(거노: 유즈 "2 monitors" 누락) — 단
+                            // board-watch/wake-watch 는 협업 상시 감시(작업 아님)라 제외.
+                            if name == "Monitor" {
+                                let cmd = b
+                                    .pointer("/input/command")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("");
+                                if !cmd.contains("kasaterm-board-watch") && !cmd.contains("wake-watch") {
+                                    let id = b.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                                    let desc = b
+                                        .pointer("/input/description")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("모니터");
+                                    bg_launch.push((id.to_string(), clip(desc, 40)));
+                                }
+                            }
                             let ev = tool_event(name, b.get("input"));
                             if recent_tools.len() < 8 {
                                 recent_tools.push(ev.label.clone());
@@ -261,10 +277,13 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
                                         .join(" "),
                                     _ => String::new(),
                                 };
+                                // run_in_background Bash("…with ID: <id>.") + Monitor("Monitor
+                                // started (task <id>, persistent…") 둘 다에서 런치 id 추출.
                                 if let Some(sid) = txt
                                     .split("with ID: ")
                                     .nth(1)
-                                    .and_then(|s| s.split(['.', ' ', '\n']).next())
+                                    .or_else(|| txt.split("Monitor started (task ").nth(1))
+                                    .and_then(|s| s.split(['.', ' ', '\n', ',', ')']).next())
                                     .filter(|s| !s.is_empty())
                                 {
                                     bg_shell.insert(id.to_string(), sid.to_string());

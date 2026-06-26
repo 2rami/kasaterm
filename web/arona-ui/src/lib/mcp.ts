@@ -96,6 +96,7 @@ function toAgent(r: BoardRow): Agent {
     id: r.surface_id,
     name: label,
     character: pureCharacter,
+    title: r.title,
     accent: r.is_god ? 'lemon' : accentFor(r.surface_id),
     status,
     project: r.intent ?? '',
@@ -898,13 +899,39 @@ export async function pasteToActiveTerminal(text: string, submit = false): Promi
 
 /** 터미널 pane 의 % 배치(window_layout). BA GUI 중앙 그리드가 이걸로 터미널 split 을
  *  그대로 미러한다(position:absolute left/top/w/h %). 단일 pane 은 전체(0,0,100,100). */
-export interface PaneRect { surface_id: string; x: number; y: number; w: number; h: number }
+export interface PaneRect {
+  surface_id: string; x: number; y: number; w: number; h: number;
+  /** plain(비-claude) 터미널 타일의 Warp 상태바용 — 백엔드 window_layout 이 채움. */
+  cwd?: string; branch?: string; files?: number; insertions?: number; deletions?: number;
+}
 export async function fetchLayout(): Promise<PaneRect[]> {
   try {
     const r = await fetch(`${BASE}/layout`);
     if (!r.ok) return [];
     const d = (await r.json().catch(() => ({}))) as { panes?: PaneRect[] };
     return Array.isArray(d?.panes) ? d.panes : [];
+  } catch {
+    return [];
+  }
+}
+
+/** /blocks 의 한 명령 블록(OSC 133 C/D 경계). plain 터미널 타일을 Warp 처럼 명령
+ *  블록 스택으로 그린다. exit_code/duration_ms 없으면 실행 중. */
+export interface PaneBlock {
+  id: number;
+  command: string;
+  output: string;
+  exit_code?: number;
+  started_ms: number;
+  duration_ms?: number;
+  is_tui?: boolean;
+}
+export async function fetchBlocks(surfaceId: string, limit = 50): Promise<PaneBlock[]> {
+  try {
+    const r = await fetch(`${BASE}/blocks?surface=${encodeURIComponent(surfaceId)}&limit=${limit}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { blocks?: PaneBlock[] };
+    return Array.isArray(d?.blocks) ? d.blocks : [];
   } catch {
     return [];
   }

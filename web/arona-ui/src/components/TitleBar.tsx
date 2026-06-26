@@ -1,18 +1,21 @@
 import { CSSProperties, useState } from 'react';
-import { StatPill } from './GameKit';
 import type { ClaudeUsage } from '@/lib/mcp';
 
-const APP_VERSION = 'v0.2.4';
+// 슬림 아이콘 바 — 모든 버튼을 IconBtn 으로 통일(거노: 디자인 통일), 로고·기어 제거.
+// 좌측엔 방 하나, 나머지(업무·교실·집중)는 전부 우측에 모았다(거노: task 아이콘 우측으로).
+// 전역 바라 옅은 sky 틴트+그림자로 pane 하단바(plain cream)와 시각 구분.
 
 interface IconBtnProps {
   title: string;
   badge?: number;
+  active?: boolean;
   onClick?: () => void;
   children: React.ReactNode;
 }
 
-function IconBtn({ title, badge, onClick, children }: IconBtnProps) {
+function IconBtn({ title, badge, active, onClick, children }: IconBtnProps) {
   const [hover, setHover] = useState(false);
+  const lit = active || hover;
   return (
     <button
       title={title}
@@ -24,9 +27,9 @@ function IconBtn({ title, badge, onClick, children }: IconBtnProps) {
         width: 26, height: 26,
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         border: 'none', cursor: 'pointer',
-        background: hover ? 'var(--cth-sky-light)' : 'transparent',
+        background: lit ? 'var(--cth-sky-light)' : 'transparent',
         borderRadius: 7,
-        color: 'var(--cth-ink-500)',
+        color: active ? 'var(--cth-sky)' : 'var(--cth-ink-500)',
       }}
     >
       {children}
@@ -48,38 +51,29 @@ function IconBtn({ title, badge, onClick, children }: IconBtnProps) {
 
 const stroke: CSSProperties = { fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 } as CSSProperties;
 
-function BellIcon() {
+// 방(좌 패널) — 집. 업무(우 패널) — 체크리스트.
+function RoomIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 16 16">
-      <path style={stroke} d="M4 7a4 4 0 0 1 8 0c0 3 1 4 1 4H3s1-1 1-4Z" />
-      <path style={stroke} d="M6.5 13a1.5 1.5 0 0 0 3 0" />
+      <path style={stroke} d="M2.5 7.5 8 3l5.5 4.5M4 6.8V13h8V6.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
-function MailIcon() {
+function TasksIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 16 16">
-      <rect style={stroke} x="2.5" y="3.5" width="11" height="9" />
-      <path style={stroke} d="m2.5 4.5 5.5 4 5.5-4" />
+      <path style={stroke} d="M6 4.5h7M6 8h7M6 11.5h7" strokeLinecap="round" />
+      <path style={stroke} d="m2.5 4 1 1 1.2-1.6M2.5 7.6l1 1 1.2-1.6M2.5 11.1l1 1 1.2-1.6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
-// 설정 — 슬라이더 아이콘. 옛 톱니(원+8빛살)는 다크모드 태양 토글과 똑같이 보여
-// "버튼 두개 모드체인지" 혼동(거노). 슬라이더로 바꿔 명확히 구분.
-function GearIcon() {
+// 교실(캐릭터) 보기 — 액자 속 그림(산·해). 거노: 터미널 아이콘 자리에 그림 아이콘=교실 기능.
+function ClassroomIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 16 16">
-      <path style={stroke} d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" strokeLinecap="round" />
-      <circle cx="6" cy="4.5" r="1.8" fill="var(--cth-cream-50)" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="10.5" cy="8" r="1.8" fill="var(--cth-cream-50)" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="5" cy="11.5" r="1.8" fill="var(--cth-cream-50)" stroke="currentColor" strokeWidth="1.4" />
-    </svg>
-  );
-}
-function BoltIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" style={{ flexShrink: 0 }}>
-      <path d="M9.2 1.3 3.3 9.2H7l-.9 5.5 6-8.1H8.4l.8-5.3Z" fill="#FFC83D" stroke="var(--cth-ink-900)" strokeWidth="0.7" strokeLinejoin="round" />
+      <rect style={stroke} x="2" y="3" width="12" height="10" rx="1.5" />
+      <circle style={stroke} cx="5.6" cy="6.4" r="1.1" />
+      <path style={stroke} d="M2.6 11.2 6 8.4l2.4 1.9 2-1.5 3 2.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -98,7 +92,14 @@ function MoonIcon() {
     </svg>
   );
 }
-const fmtTokens = (n: number) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
+// 집중 모드(패널 전부 숨기기) — 네 모서리 안쪽 화살표.
+function FocusIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16">
+      <path style={stroke} d="M6 2.5H3.5V5M10 2.5h2.5V5M6 13.5H3.5V11M10 13.5h2.5V11" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 // 리셋까지 남은 시간 — "2h 15m 후".
 function fmtReset(iso: string): string {
@@ -109,8 +110,7 @@ function fmtReset(iso: string): string {
   return h > 0 ? `${h}h ${m}m 후` : `${m}m 후`;
 }
 
-// claude 사용량 미니 게이지 — OpenUsage 메뉴바처럼 5시간/주간 한도를 막대+% 로(거노:
-// ba모드 사용량 내장). 사용률 70%↑ 호박, 90%↑ 산호. 툴팁에 리셋 시각.
+// claude 사용량 미니 게이지 — 5시간/주간 한도를 막대+%로. 70%↑ 호박, 90%↑ 산호.
 function UsagePill({ label, pct, resetsAt }: { label: string; pct: number; resetsAt: string }) {
   const color = pct >= 90 ? 'var(--cth-coral)' : pct >= 70 ? '#FFB020' : 'var(--cth-sky)';
   return (
@@ -133,70 +133,49 @@ function UsagePill({ label, pct, resetsAt }: { label: string; pct: number; reset
 }
 
 export interface TitleBarProps {
-  notifications?: number;
-  mail?: number;
-  /** ⚡ 번개 = 전 학생 총 컨텍스트 토큰. */
-  contextTokens?: number;
-  /** 컨텍스트 한도 — 번개 칩 분모('25k / 200k'). */
-  contextLimit?: number;
   /** claude oauth usage — 5시간/주간 한도 게이지. */
   usage?: ClaudeUsage | null;
   /** 현재 테마 — 태양/달 버튼 표시. */
   theme?: 'light' | 'dark';
   onToggleTheme?: () => void;
-  onBell?: () => void;
-  onMail?: () => void;
-  onSettings?: () => void;
-  /** 제목 옆 가운데 슬롯 — 터미널/교실 토글 등(옛 헤더 줄2 통합). */
-  centerSlot?: React.ReactNode;
-  /** 우측 끝 액션 — 집중모드·브라우저로·터미널보기(옛 헤더 줄2 통합). */
-  actions?: React.ReactNode;
+  /** 좌측 방·학생 / 우측 업무 패널 팝오버 토글. */
+  onToggleLeft?: () => void;
+  onToggleRight?: () => void;
+  leftOpen?: boolean;
+  rightOpen?: boolean;
+  /** 좌 패널 아이콘 배지 — 주의(대기/막힘) 학생 수. */
+  leftBadge?: number;
+  /** 교실(캐릭터) 뷰 토글 — classroom 이면 active. */
+  classroom?: boolean;
+  onToggleClassroom?: () => void;
+  /** 집중 모드 진입(패널 전부 숨김). */
+  onFocus?: () => void;
 }
 
-export function TitleBar({ notifications = 0, mail = 0, contextTokens = 0, contextLimit = 0, usage, theme = 'light', onToggleTheme, onBell, onMail, onSettings, centerSlot, actions }: TitleBarProps) {
-  const divider = <div style={{ width: 1, height: 18, background: 'var(--cth-cream-200)', flexShrink: 0, margin: '0 2px' }} />;
+export function TitleBar({ usage, theme = 'light', onToggleTheme, onToggleLeft, onToggleRight, leftOpen, rightOpen, leftBadge = 0, classroom, onToggleClassroom, onFocus }: TitleBarProps) {
+  const divider = <div style={{ width: 1, height: 16, background: 'var(--cth-cream-200)', flexShrink: 0, margin: '0 2px' }} />;
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 8,
-      height: 40, padding: '0 12px', flexShrink: 0, boxSizing: 'border-box',
+      display: 'flex', alignItems: 'center', gap: 7,
+      height: 34, padding: '0 10px', flexShrink: 0, boxSizing: 'border-box',
+      // 전역 바 — 옅은 sky 그라데이션 + 아래 그림자로 pane 하단바(plain cream)와 구분(거노).
       background: 'linear-gradient(180deg, var(--cth-sky-light), var(--cth-cream-50))',
       borderBottom: '1px solid var(--cth-cream-200)',
+      boxShadow: '0 1px 4px rgba(21,41,74,0.06)', zIndex: 5,
     }}>
-      {/* 로고 마크 — SCHALE 삼각 심볼 */}
-      <svg width="20" height="20" viewBox="0 0 20 20" style={{ flexShrink: 0 }}>
-        <path d="M10 2.5 17.5 16H2.5L10 2.5Z" fill="none" stroke="var(--cth-sky)" strokeWidth="1.7" strokeLinejoin="round" />
-        <circle cx="10" cy="11.5" r="2.3" fill="var(--cth-sky)" />
-      </svg>
-
-      <span style={{
-        fontFamily: 'var(--cth-font-display)', fontSize: 14, fontWeight: 800,
-        letterSpacing: 0.5,
-        color: 'var(--cth-ink-900)', whiteSpace: 'nowrap',
-      }}>SCHALE OS</span>
-
-      <span style={{
-        fontFamily: 'var(--cth-font-ui)', fontSize: 11,
-        color: 'var(--cth-ink-500)', whiteSpace: 'nowrap',
-      }}>{APP_VERSION} · Sensei Mode</span>
-
-      {centerSlot && <>{divider}{centerSlot}</>}
+      {/* 좌측 — 방·학생 팝오버 진입 하나만 */}
+      <IconBtn title="방·학생" active={leftOpen} badge={leftBadge} onClick={onToggleLeft}><RoomIcon /></IconBtn>
 
       <div style={{ flex: 1 }} />
 
+      {/* 우측 — 사용량·테마·업무·교실·집중 */}
       {usage?.five_hour && <UsagePill label="5h" pct={usage.five_hour.utilization} resetsAt={usage.five_hour.resets_at} />}
       {usage?.seven_day && <UsagePill label="7d" pct={usage.seven_day.utilization} resetsAt={usage.seven_day.resets_at} />}
-      {contextTokens > 0 && (
-        <StatPill
-          icon={<BoltIcon />}
-          value={contextLimit > 0 ? `${fmtTokens(contextTokens)} / ${fmtTokens(contextLimit)}` : fmtTokens(contextTokens)}
-          style={{ marginRight: 4 }}
-        />
-      )}
       <IconBtn title={theme === 'dark' ? '라이트 모드로' : '다크 모드로'} onClick={onToggleTheme}>{theme === 'dark' ? <SunIcon /> : <MoonIcon />}</IconBtn>
-      <IconBtn title="알림" badge={notifications} onClick={onBell}><BellIcon /></IconBtn>
-      <IconBtn title="메일" badge={mail} onClick={onMail}><MailIcon /></IconBtn>
-      <IconBtn title="소스 컨트롤" onClick={onSettings}><GearIcon /></IconBtn>
-      {actions && <>{divider}{actions}</>}
+      <IconBtn title="업무·소스 컨트롤·스케줄" active={rightOpen} onClick={onToggleRight}><TasksIcon /></IconBtn>
+      <IconBtn title={classroom ? '대화 보기로' : '교실(캐릭터) 보기'} active={classroom} onClick={onToggleClassroom}><ClassroomIcon /></IconBtn>
+      {divider}
+      <IconBtn title="패널 전부 숨기기 (⌘\)" onClick={onFocus}><FocusIcon /></IconBtn>
     </div>
   );
 }

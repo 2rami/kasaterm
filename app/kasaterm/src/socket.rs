@@ -7,8 +7,8 @@
 //! per actually-open pane.
 
 use kasa_socket::backend::{
-    Backend, PaneActivity, PaneRect, RecentSession, SessionsInfo, SplitDirection, SubagentInfo,
-    SurfaceInfo, TranscriptChunk, WorkspaceInfo,
+    Backend, PaneActivity, PaneBlock, PaneRect, RecentSession, SessionsInfo, SplitDirection,
+    SubagentInfo, SurfaceInfo, TranscriptChunk, WorkspaceInfo,
 };
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -17,7 +17,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use kasa_bridge::{Layout, TmuxSession};
 
 use crate::transcript::snapshot_from_tail;
-use crate::{UserEvent, Workspace};
+use crate::{PaneStatus, UserEvent, Workspace};
 use winit::event_loop::EventLoopProxy;
 
 const FIXED_WORKSPACE_ID: &str = "local-0";
@@ -161,6 +161,11 @@ pub struct PtyBackend {
     /// 윈도에 없어 0 으로 떨어질 때 직전 값을 유지해 컨텍스트량·인연%가 0 으로 깜빡이지
     /// 않게 한다(거노: statusline 잘려도 화면파싱 말고 정확 추적 — 정확 소스만 신뢰).
     last_ctx: Arc<Mutex<HashMap<String, (u64, u64)>>>,
+    /// surface_id → {cwd, git badge}, filled by the GUI each frame (shared Arc).
+    /// `window_layout` reads it to stamp cwd/branch/diff onto each `PaneRect` so
+    /// the BA GUI can draw a Warp-style bar without this thread shelling out to
+    /// lsof/git. Empty until the GUI's `publish_pane_status` runs.
+    pane_status_pub: Arc<Mutex<HashMap<String, PaneStatus>>>,
 }
 
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
@@ -216,6 +221,7 @@ impl PtyBackend {
         proxy: EventLoopProxy<UserEvent>,
         ws: Arc<Mutex<Workspace>>,
         attention: Arc<Mutex<HashMap<String, String>>>,
+        pane_status_pub: Arc<Mutex<HashMap<String, PaneStatus>>>,
     ) -> Self {
         Self {
             proxy,
@@ -226,6 +232,7 @@ impl PtyBackend {
             cwd_cache: Arc::new(Mutex::new(HashMap::new())),
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
             last_ctx: Arc::new(Mutex::new(HashMap::new())),
+            pane_status_pub,
         }
     }
 
@@ -434,6 +441,21 @@ impl Backend for PtyBackend {
     /// read that here. `ws.layout` is `None` for a single pane (≤1 leaf), so we
     /// synthesize a full-window rect for the lone pane rather than report empty.
     fn window_layout(&self) -> Result<Vec<PaneRect>> {
+        // Snapshot the GUI-published cwd/git map once so each pane below is a
+        // cheap lookup — no lsof/git on this (per-second polled) path.
+        let status = self.pane_status_pub.lock().unwrap().clone();
+        let stamp = |mut rect: PaneRect| -> PaneRect {
+            if let Some(s) = status.get(&rect.surface_id) {
+                rect.cwd = Some(s.cwd.to_string_lossy().into_owned());
+                if let Some(b) = &s.badge {
+                    rect.branch = Some(b.branch.clone());
+                    rect.files = Some(b.files);
+                    rect.insertions = Some(b.insertions);
+                    rect.deletions = Some(b.deletions);
+                }
+            }
+            rect
+        };
         let ws = self.ws.lock().unwrap();
         if let Some(layout) = ws.layout.as_ref() {
             let (_, _, tw, th) = layout.rect();
@@ -451,13 +473,14 @@ impl Backend for PtyBackend {
                     let Layout::Pane { id, x, y, w, h } = leaf else {
                         return None; // leaves() yields only Pane nodes
                     };
-                    Some(PaneRect {
+                    Some(stamp(PaneRect {
                         surface_id: format!("%{id}"),
                         x: pct(*x, tw),
                         y: pct(*y, th),
                         w: pct(*w, tw),
                         h: pct(*h, th),
-                    })
+                        ..Default::default()
+                    }))
                 })
                 .collect());
         }
@@ -467,13 +490,14 @@ impl Backend for PtyBackend {
             .clone()
             .or_else(|| ws.panes.keys().next().cloned())
             .map(|surface_id| {
-                vec![PaneRect {
+                vec![stamp(PaneRect {
                     surface_id,
                     x: 0,
                     y: 0,
                     w: 100,
                     h: 100,
-                }]
+                    ..Default::default()
+                })]
             })
             .unwrap_or_default())
     }
@@ -721,6 +745,32 @@ impl Backend for PtyBackend {
         Ok(pane.visible_text_ansi(lines))
     }
 
+    fn pane_blocks(&self, surface_id: &str, limit: usize) -> Result<Vec<PaneBlock>> {
+        // The GUI shares each PTY's block store through `pane_status_pub`
+        // (a cheap Arc), so we read it here without touching App.pty.
+        let store = {
+            let g = self.pane_status_pub.lock().unwrap();
+            g.get(surface_id).and_then(|s| s.blocks.clone())
+        };
+        let store = store
+            .ok_or_else(|| anyhow::anyhow!("no command blocks for pane: {surface_id}"))?;
+        let blocks = store.lock().unwrap();
+        let start = blocks.len().saturating_sub(limit);
+        Ok(blocks
+            .iter()
+            .skip(start)
+            .map(|b| PaneBlock {
+                id: b.id,
+                command: b.command.clone(),
+                output: b.output.clone(),
+                exit_code: b.exit_code,
+                started_ms: b.started_ms,
+                duration_ms: b.duration_ms,
+                is_tui: b.is_tui,
+            })
+            .collect())
+    }
+
     fn transcript_tail(
         &self,
         surface_id: &str,
@@ -890,7 +940,10 @@ impl Backend for PtyBackend {
             // 전 방(윈도우) 학생 — 활성 방 한정 폐기(거노: 전 방 영속). live = 모든 윈도우 pane.
             .filter(|(sid, _)| live.contains(sid.as_str()))
             .map(|(sid, path)| {
-                let (tail, mtime_idle) = read_tail(path, 64 * 1024);
+                // 512KB: 64KB 윈도는 background/subagent 런치(run_in_background·Monitor·Task)가
+                // 그 뒤 대량 출력에 밀려나 윈도 밖이면 못 잡았다(거노: 유즈 background 빔 —
+                // 최근 런치가 파일 끝에서 ~269KB 지점). 작은 transcript 는 전체라 부담 없음.
+                let (tail, mtime_idle) = read_tail(path, 512 * 1024);
                 let mut row = snapshot_from_tail(sid, &tail, mtime_idle);
                 row.window_idx = pane_window.get(sid.as_str()).copied().unwrap_or(0);
                 // Prefer claude's official status when it reports this session
@@ -1332,9 +1385,46 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
         .ok()?;
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find_map(|l| l.strip_prefix('n').map(std::path::PathBuf::from))
+    out.stdout
+        .split(|&b| b == b'\n')
+        .find_map(|line| line.strip_prefix(b"n").map(unescape_lsof_path))
+}
+
+/// `lsof -F` escapes non-ASCII / non-printable bytes as `\xHH` (and a literal
+/// backslash as `\\`) when it runs under a non-UTF-8 locale — exactly what
+/// happens when kasaterm is launched from Finder/Dock with no `LANG` set, which
+/// otherwise renders a 한글 cwd as `\xec\xa7\x80`. Reverse the escaping on the raw
+/// bytes so the path survives; already-plain output passes through untouched.
+#[cfg(unix)]
+fn unescape_lsof_path(line: &[u8]) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    let mut bytes = Vec::with_capacity(line.len());
+    let mut i = 0;
+    while i < line.len() {
+        if line[i] == b'\\' && i + 1 < line.len() {
+            match line[i + 1] {
+                b'x' if i + 4 <= line.len() => {
+                    if let Some(b) = std::str::from_utf8(&line[i + 2..i + 4])
+                        .ok()
+                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                    {
+                        bytes.push(b);
+                        i += 4;
+                        continue;
+                    }
+                }
+                b'\\' => {
+                    bytes.push(b'\\');
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        bytes.push(line[i]);
+        i += 1;
+    }
+    std::path::PathBuf::from(std::ffi::OsString::from_vec(bytes))
 }
 
 /// Windows has no `lsof`. A process's live cwd lives in its PEB

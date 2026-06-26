@@ -1727,6 +1727,7 @@ impl App {
             self.proxy.clone(),
             self.ws.clone(),
             self.collab.attention.clone(),
+            self.pane_status_pub.clone(),
         ));
         self.start_socket_with(backend);
     }
