@@ -1,18 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { MomoTalk } from './MomoTalk';
 import { BoardPanel } from './BoardPanel';
 import { ScheduleTab } from './ScheduleTab';
 import { GitTab } from './GitTab';
-import { AgentsTab } from './AgentsTab';
 
-type CenterTab = 'board' | 'momotalk' | 'schedule' | 'git' | 'agents';
+type CenterTab = 'board' | 'schedule' | 'git';
 
 const TAB_LABELS: Record<CenterTab, string> = {
   board: '보드',
-  momotalk: '모모톡',
   schedule: '스케줄',
   git: '소스 컨트롤',
-  agents: '에이전트',
 };
 
 export interface CommandCenterProps {
@@ -32,7 +28,7 @@ export interface CommandCenterProps {
 export function CommandCenter({ onPickStudent, openGitTab, onCollapse }: CommandCenterProps) {
   const [tab, setTab] = useState<CenterTab>('board'); // 우측 기본 = 보드(현황·소통)
   // 탭 순서 — 드래그로 재정렬(거노). 기본 보드/모모톡/스케줄/소스컨트롤.
-  const [tabOrder, setTabOrder] = useState<CenterTab[]>(['board', 'momotalk', 'schedule', 'git', 'agents']);
+  const [tabOrder, setTabOrder] = useState<CenterTab[]>(['board', 'schedule', 'git']);
   const [dragOverTab, setDragOverTab] = useState<CenterTab | null>(null); // 드래그 중 삽입선 위치
   const dragTabRef = useRef<CenterTab | null>(null);
   const reorderTab = (target: CenterTab) => {
@@ -136,17 +132,11 @@ export function CommandCenter({ onPickStudent, openGitTab, onCollapse }: Command
 
       {/* 본문 — 대시보드 탭 제거(대화는 학생 클릭 시 우측 인라인, 이벤트는 기록 탭) */}
       {tab === 'board' ? (
-        /* 보드 — pane 작업 현황·상세 + tell 소통(업무·모모톡·inbox 대체) */
+        /* 보드 — pane 작업 현황·상세 + 백그라운드 에이전트 + tell 소통(업무·모모톡·agents 흡수) */
         <BoardPanel onPickStudent={onPickStudent} />
-      ) : tab === 'momotalk' ? (
-        /* 모모톡 — 선생님·아로나·학생 전체 소통 단톡방(messages.jsonl 단일 피드) */
-        <MomoTalk />
       ) : tab === 'git' ? (
         /* 소스 컨트롤 — 활성 pane cwd 의 git 상태·커밋·푸시(스케줄 옆, 거노). */
         <GitTab />
-      ) : tab === 'agents' ? (
-        /* 에이전트 — claude agents 가 보고하는 pane 밖 background 세션·이어받기. */
-        <AgentsTab />
       ) : (
         /* 스케줄/루프 — 반복 지시 루프 · 예약(크론) · 타이머/리마인더. */
         <ScheduleTab />

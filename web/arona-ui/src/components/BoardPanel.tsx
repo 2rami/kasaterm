@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStore, isAwaitingTeacher, isUnconfirmed } from '@/store';
+import { AgentRow } from './AgentsTab';
 import { SpritePortrait } from './SpritePortrait';
 import { assignSprites } from '@/lib/sprites';
 import { fetchPaneTasks, type PaneTask } from '@/lib/mcp';
@@ -30,6 +31,7 @@ const SectionLabel = ({ children }: { children: string }) => (
 export function BoardPanel({ onPickStudent }: { onPickStudent?: (id: string, title: string) => void }) {
   const agents = useStore((s) => s.agents);
   const acked = useStore((s) => s.acked);
+  const backgroundAgents = useStore((s) => s.backgroundAgents);
   const sprited = assignSprites(agents);
   const spriteOf = new Map(sprited.map((a) => [a.id, a.spriteChar || a.character]));
   const [paneTasks, setPaneTasks] = useState<Record<string, PaneTask[]>>({});
@@ -176,6 +178,16 @@ export function BoardPanel({ onPickStudent }: { onPickStudent?: (id: string, tit
             </div>
           );
         })}
+
+        {/* 백그라운드 에이전트 — claude agents (pane 밖 daemon 세션). 이어받기로 foreground 승격. */}
+        {backgroundAgents.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <SectionLabel>백그라운드 에이전트</SectionLabel>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+              {backgroundAgents.map((a) => <AgentRow key={a.sessionId} a={a} />)}
+            </div>
+          </div>
+        )}
 
         {/* 소통 — tell 로그 연결 후 채워진다(모모이 버그 후 Rust 로그 작업). */}
         <div style={{ marginTop: 16 }}>
