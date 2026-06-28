@@ -27,7 +27,7 @@ function fmtAgo(ts: number): string {
   return `${Math.floor(h / 24)}일 전`;
 }
 
-export function AgentRow({ a }: { a: BackgroundAgent }) {
+export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: BackgroundAgent) => void }) {
   const st = STATE_STYLE[a.state] ?? STATE_STYLE[a.status] ?? {
     bg: 'var(--cth-ink-500)', label: a.state || a.status || '?',
   };
@@ -38,7 +38,7 @@ export function AgentRow({ a }: { a: BackgroundAgent }) {
       background: 'var(--cth-cream-100, rgba(255,255,255,0.5))',
       boxShadow: 'inset 0 0 0 1px var(--cth-cream-200, rgba(21,41,74,0.08))',
     }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div onClick={() => onView?.(a)} title="대화 보기" style={{ flex: 1, minWidth: 0, cursor: onView ? 'pointer' : 'default' }}>
         <div style={{
           fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900, #1c2b4a)',
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',

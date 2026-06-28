@@ -5,7 +5,7 @@ import { ClassroomView } from './components/ClassroomView';
 import { CommandCenter } from './components/CommandCenter';
 import { TitleBar } from './components/TitleBar';
 import { RoomMap } from './components/RoomMap';
-import { startBoardPolling, fetchMode, focusPane, fetchClaudeUsage, fetchSessions, fetchBackgroundAgents, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect } from './lib/mcp';
+import { startBoardPolling, fetchMode, focusPane, fetchClaudeUsage, fetchSessions, fetchBackgroundAgents, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect, type BackgroundAgent } from './lib/mcp';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { TerminalBlockCard } from './components/TerminalBlockCard';
 import { assignSprites } from './lib/sprites';
@@ -65,6 +65,12 @@ export function App() {
   // 메인에 단독 띄운다(layout 미러와 별개). 이어가기는 뷰어 하단 '현재 터미널에 입력'.
   const openOfflineSession = (s: RecentSession) => {
     setOfflinePeek({ id: s.id, title: s.label, offline: true, cwd: s.cwd });
+    setView('terminal');
+  };
+  // 보드의 background daemon 세션 클릭 → 그 session_id 의 transcript 를 중앙에 읽기 전용으로
+  // 띄운다(offlinePeek). resume(pane spawn) 과 별개라 daemon 세션을 안전하게 들여다보기.
+  const openBackgroundSession = (a: BackgroundAgent) => {
+    setOfflinePeek({ id: a.sessionId, title: a.name || a.id, offline: true, cwd: a.cwd });
     setView('terminal');
   };
   // 서브에이전트 드릴인 — 학생 메타칸의 ↳ 칩 클릭 → 그 서브에이전트 대화를 부모 옆 별도
@@ -361,7 +367,7 @@ export function App() {
           <>
             <div onClick={() => setRightOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 30, background: 'rgba(21,41,74,0.16)' }} />
             <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, zIndex: 31, width: 340, display: 'flex', minHeight: 0, boxShadow: '-3px 0 16px rgba(21,41,74,0.20)' }}>
-              <CommandCenter selected={activeSelected} onClearDialog={() => setOfflinePeek(null)} onPickStudent={openStudent} openGitTab={0} onCollapse={() => setRightOpen(false)} />
+              <CommandCenter selected={activeSelected} onClearDialog={() => setOfflinePeek(null)} onPickStudent={openStudent} onOpenBackground={openBackgroundSession} openGitTab={0} onCollapse={() => setRightOpen(false)} />
             </div>
           </>
         )}
