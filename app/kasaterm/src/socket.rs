@@ -1577,6 +1577,16 @@ pub fn write_session_state(state: &serde_json::Value) {
     }
 }
 
+/// Read the restore state written by `write_session_state` — `start_pty`'s
+/// `load_local_session` walks it to resume the last claude session on relaunch.
+/// `None` on first run (no file yet) or a parse error; callers fall back to a
+/// fresh pane.
+pub fn read_session_state() -> Option<serde_json::Value> {
+    let path = session_file_path()?;
+    let s = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
 pub fn session_file_path() -> Option<std::path::PathBuf> {
     // Override lets a debug instance keep its restore state out of the daily
     // app's shared file (and lets users relocate it).
