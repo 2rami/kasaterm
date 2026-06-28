@@ -382,6 +382,17 @@ export async function fetchBackgroundAgents(cwd?: string): Promise<BackgroundAge
   }
 }
 
+/** POST /background-kill?pid=<pid> — background daemon 세션 종료(SIGTERM). 패널 정리용. */
+export async function killBackgroundAgent(pid: number): Promise<boolean> {
+  if (!pid) return false;
+  try {
+    const r = await fetch(`${BASE}/background-kill?pid=${pid}`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool> — 새 pane 을 열고 셸
  *  프롬프트가 뜨면 `claude --resume <id>` 주입(이어가기). newroom=true 면 새 방. */
 export async function resumeSession(id: string, cwd?: string, newroom = false, attach = false): Promise<boolean> {

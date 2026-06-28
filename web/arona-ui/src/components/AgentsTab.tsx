@@ -1,4 +1,4 @@
-import { resumeSession, type BackgroundAgent } from '@/lib/mcp';
+import { resumeSession, killBackgroundAgent, type BackgroundAgent } from '@/lib/mcp';
 
 // claude agents (pane 밖에서 도는 daemon 세션) 한 행 — Board 의 '백그라운드' 섹션이 쓴다.
 // 데이터/폴링은 App 이 store.backgroundAgents 로 채운다(3s). '이어받기'→resumeSession
@@ -56,6 +56,17 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
           fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 600, color: '#fff', background: 'var(--cth-sky)',
           border: 'none', borderRadius: 7, padding: '4px 9px', cursor: 'pointer', whiteSpace: 'nowrap',
         }}>이어받기</button>
+      )}
+      {isBg && (
+        <button
+          onClick={() => { if (confirm(`'${a.name || a.id}' 세션을 종료할까요?`)) void killBackgroundAgent(a.pid); }}
+          title="세션 종료(정리)"
+          style={{
+            fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, lineHeight: 1, color: 'var(--cth-ink-500)',
+            background: 'transparent', border: '1px solid var(--cth-cream-200, rgba(21,41,74,0.14))',
+            borderRadius: 7, padding: '4px 7px', cursor: 'pointer', whiteSpace: 'nowrap',
+          }}
+        >×</button>
       )}
     </div>
   );
