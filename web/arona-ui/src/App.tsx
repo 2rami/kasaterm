@@ -26,6 +26,7 @@ const MOCK_AGENTS: Agent[] = [
 // 라우팅: mode 미설정/solo/?picker=1 → 시작 선택. god → SCHALE OS 교실.
 export function App() {
   const agents = useStore((s) => s.agents);
+  const backgroundAgents = useStore((s) => s.backgroundAgents);
   const [mode, setModeState] = useState<string | null | undefined>(undefined);
   const [cwd, setCwd] = useState<string | null>(null);
   const [configured, setConfigured] = useState(true);
@@ -171,6 +172,15 @@ export function App() {
     const first = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod))[0];
     if (first) setActiveId(first.id);
   }, [agents, activeId]);
+  // foreground 학생이 없고(claude pane 이 안 떠 있음) background daemon 세션만 있으면 — 첫
+  // background 를 중앙에 자동 표시(offlinePeek 버블). 터미널이 꺼져도/claude 가 안 떠도 웹뷰가
+  // "아로나 오는 중…" 빈 교실 스피너 대신 daemon claude 대화를 바로 보여준다(거노 핵심).
+  useEffect(() => {
+    if (activeId || offlinePeek || agents.length > 0 || backgroundAgents.length === 0) return;
+    const bg = backgroundAgents.find((a) => a.kind === 'background') ?? backgroundAgents[0];
+    if (bg) openBackgroundSession(bg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agents.length, backgroundAgents, activeId, offlinePeek]);
   // 터미널 layout(% 배치) 폴링 → 중앙 멀티뷰가 터미널 split 을 그대로 미러(거노: pane 위치
   // 동기화). 과거 세션 단독 보기 중이거나 터미널 뷰가 아니면 폴링 불필요.
   useEffect(() => {
