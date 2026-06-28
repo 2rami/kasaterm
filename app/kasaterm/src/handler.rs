@@ -201,7 +201,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.swap_character(pane, character);
                 return;
             }
-            UserEvent::ResumeSession { id, cwd, newroom } => {
+            UserEvent::ResumeSession { id, cwd, newroom, attach } => {
                 // 새 pane 을 띄우고, 그 셸 프롬프트가 뜰 즈음 `claude --resume <id>` 를
                 // 주입한다(주입 자체는 pending_restores drain 이 시간 기반으로 처리).
                 // 세션 cwd 가 있으면 cd 를 앞에 붙여 어느 방에서 열어도 올바른 프로젝트
@@ -214,12 +214,18 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 if let Some(new_id) = new_id {
                     if let Some(sess) = self.pty.get(&new_id).cloned() {
-                        let cmd = match cwd {
-                            Some(c) if !c.is_empty() => {
-                                let q = c.replace('\'', "'\\''");
-                                format!("cd '{q}' && claude --resume {id}\r")
+                        let cmd = if *attach {
+                            // daemon background 세션 연결(claude attach) — 세션은 background
+                            // 유지, detach 해도 안 죽음. id 로 daemon 직접이라 cwd 불필요.
+                            format!("claude attach {id}\r")
+                        } else {
+                            match cwd {
+                                Some(c) if !c.is_empty() => {
+                                    let q = c.replace('\'', "'\\''");
+                                    format!("cd '{q}' && claude --resume {id}\r")
+                                }
+                                _ => format!("claude --resume {id}\r"),
                             }
-                            _ => format!("claude --resume {id}\r"),
                         };
                         let at = std::time::Instant::now()
                             + std::time::Duration::from_millis(900);

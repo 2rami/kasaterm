@@ -52,7 +52,7 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
         background: isBg ? st.bg : 'var(--cth-lilac)', padding: '2px 6px', borderRadius: 999, whiteSpace: 'nowrap',
       }}>{isBg ? st.label : '활성'}</span>
       {isBg && (
-        <button onClick={() => void resumeSession(a.sessionId, a.cwd)} style={{
+        <button onClick={() => void resumeSession(a.sessionId, a.cwd, false, true)} style={{
           fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 600, color: '#fff', background: 'var(--cth-sky)',
           border: 'none', borderRadius: 7, padding: '4px 9px', cursor: 'pointer', whiteSpace: 'nowrap',
         }}>이어받기</button>

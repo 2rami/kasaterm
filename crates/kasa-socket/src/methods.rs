@@ -536,7 +536,8 @@ fn session_resume(backend: &dyn Backend, id: Value, params: &Value) -> Response 
     };
     let cwd = params.get("cwd").and_then(|v| v.as_str());
     let newroom = params.get("newroom").and_then(|v| v.as_bool()).unwrap_or(false);
-    simple(id, backend.resume_session(sid, cwd, newroom))
+    let attach = params.get("attach").and_then(|v| v.as_bool()).unwrap_or(false);
+    simple(id, backend.resume_session(sid, cwd, newroom, attach))
 }
 
 fn session_recent(backend: &dyn Backend, id: Value, params: &Value) -> Response {
