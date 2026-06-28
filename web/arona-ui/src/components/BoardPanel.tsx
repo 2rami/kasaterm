@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useStore, isAwaitingTeacher, isUnconfirmed } from '@/store';
 import { AgentRow } from './AgentsTab';
+import type { BackgroundAgent } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { assignSprites } from '@/lib/sprites';
 import { fetchPaneTasks, type PaneTask } from '@/lib/mcp';
@@ -28,7 +29,7 @@ const SectionLabel = ({ children }: { children: string }) => (
 
 // board = 모든 pane 작업 현황·상세(업무 흡수) + pane 간 tell 소통 피드. 모모톡·inbox 대체(거노).
 // 빨강 '확인 필요'는 waiting_for(AskUserQuestion·권한) 있는 것만 — isAwaitingTeacher 가 그 판정.
-export function BoardPanel({ onPickStudent }: { onPickStudent?: (id: string, title: string) => void }) {
+export function BoardPanel({ onPickStudent, onOpenBackground }: { onPickStudent?: (id: string, title: string) => void; onOpenBackground?: (a: BackgroundAgent) => void }) {
   const agents = useStore((s) => s.agents);
   const acked = useStore((s) => s.acked);
   const backgroundAgents = useStore((s) => s.backgroundAgents);
@@ -184,7 +185,7 @@ export function BoardPanel({ onPickStudent }: { onPickStudent?: (id: string, tit
           <div style={{ marginTop: 16 }}>
             <SectionLabel>백그라운드 에이전트</SectionLabel>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
-              {backgroundAgents.map((a) => <AgentRow key={a.sessionId} a={a} />)}
+              {backgroundAgents.map((a) => <AgentRow key={a.sessionId} a={a} onView={onOpenBackground} />)}
             </div>
           </div>
         )}

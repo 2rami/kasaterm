@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BoardPanel } from './BoardPanel';
 import { ScheduleTab } from './ScheduleTab';
 import { GitTab } from './GitTab';
+import type { BackgroundAgent } from '@/lib/mcp';
 
 type CenterTab = 'board' | 'schedule' | 'git';
 
@@ -17,6 +18,7 @@ export interface CommandCenterProps {
   onClearDialog?: () => void;
   /** 모모톡에서 학생/아로나에게 보냈을 때 — 그 학생 '학생별 대화' 탭으로 전환(거노). */
   onPickStudent?: (id: string, title: string) => void;
+  onOpenBackground?: (a: BackgroundAgent) => void;
   /** 타이틀바 소스컨트롤 버튼 클릭 신호(증가) — git 탭으로 전환(거노). */
   openGitTab?: number;
   /** 우측 패널 접기 — 부모(App)가 rightHidden 으로 레일 전환(거노: 가장자리 접기). */
@@ -25,7 +27,7 @@ export interface CommandCenterProps {
 
 // SCHALE OS 우측 Command Center — 대화창이 따로 안 뜨고 여기 '학생별 대화' 탭에 통합(거노).
 
-export function CommandCenter({ onPickStudent, openGitTab, onCollapse }: CommandCenterProps) {
+export function CommandCenter({ onPickStudent, onOpenBackground, openGitTab, onCollapse }: CommandCenterProps) {
   const [tab, setTab] = useState<CenterTab>('board'); // 우측 기본 = 보드(현황·소통)
   // 탭 순서 — 드래그로 재정렬(거노). 기본 보드/모모톡/스케줄/소스컨트롤.
   const [tabOrder, setTabOrder] = useState<CenterTab[]>(['board', 'schedule', 'git']);
@@ -133,7 +135,7 @@ export function CommandCenter({ onPickStudent, openGitTab, onCollapse }: Command
       {/* 본문 — 대시보드 탭 제거(대화는 학생 클릭 시 우측 인라인, 이벤트는 기록 탭) */}
       {tab === 'board' ? (
         /* 보드 — pane 작업 현황·상세 + 백그라운드 에이전트 + tell 소통(업무·모모톡·agents 흡수) */
-        <BoardPanel onPickStudent={onPickStudent} />
+        <BoardPanel onPickStudent={onPickStudent} onOpenBackground={onOpenBackground} />
       ) : tab === 'git' ? (
         /* 소스 컨트롤 — 활성 pane cwd 의 git 상태·커밋·푸시(스케줄 옆, 거노). */
         <GitTab />
