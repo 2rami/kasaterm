@@ -37,6 +37,16 @@ const EFFORT_COLOR: Record<string, string> = {
 };
 const effortColor = (e?: string | null): string | undefined => (e ? EFFORT_COLOR[e.toLowerCase()] : undefined);
 
+// AskUserQuestion 옵션에 학생 이름이 박혀 있으면 그 도트를 곁들인다(거노: 목업의 학생을 진짜
+// 도트로). SLUG 로스터와 동일 — label·description·preview 어디에 있든 첫 매치 반환.
+const AQ_STUDENTS = ['아로나', '프라나', '미도리', '모모이', '유즈', '아리스'];
+const detectStudent = (...texts: (string | undefined)[]): string | null => {
+  for (const t of texts) {
+    if (t) { const hit = AQ_STUDENTS.find((s) => t.includes(s)); if (hit) return hit; }
+  }
+  return null;
+};
+
 
 // /context 터미널 화면에서 의미있는 라인만 추출(거노: GUI 새로 만들지 말고 터미널에 보이는
 // 거 잘 정리해서). 실측 포맷: "⛁ Custom agents: 602 tokens (0.1%)"·"⛶ Free space: 835.2k
@@ -1042,7 +1052,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 대화(conv.turns)를 라이브로 띄운다. jsonl 이 flush 되면 events 가 우선해 per-tool
   // 카드로 자동 승격. claude 가 jsonl 을 라이브로 안 써(2.1.x) 진행 중엔 프록시가 메운다.
   const [convTurns, setConvTurns] = useState<Turn[]>([]);
-  const [menu, setMenu] = useState<{ title: string; options: { idx: number; label: string; cur: boolean; description?: string }[]; multi?: boolean } | null>(null);
+  const [menu, setMenu] = useState<{ header?: string; title: string; options: { idx: number; label: string; cur: boolean; description?: string; preview?: string }[]; multi?: boolean } | null>(null);
   const [checked, setChecked] = useState<Set<number>>(new Set()); // multiSelect 체크된 인덱스
   const [images, setImages] = useState<string[]>([]); // SendUserFile 로 보낸 이미지
   const [messages, setMessages] = useState<MessageEntry[]>([]); // tell 발신자 대조용(학생→학생 좌측 버블)
@@ -1185,8 +1195,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         } else {
           dismissedQRef.current = null;
           setMenu({
+            header: q.header,
             title: q.question,
-            options: q.options.map((o, i) => ({ idx: i + 1, label: o.label, cur: false, description: o.description })),
+            options: q.options.map((o, i) => ({ idx: i + 1, label: o.label, cur: false, description: o.description, preview: o.preview })),
             multi: !!q.multiSelect,
           });
         }
@@ -1940,6 +1951,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           multiSelect=체크박스 여러개 토글 후 제출(거노: 중복선택 GUI). */}
       {menu && (
         <div style={{ padding: '10px 14px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-sky-light)', maxHeight: 260, overflowY: 'auto' }}>
+          {menu.header && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--cth-sky)', marginBottom: 4 }}>{menu.header}</div>}
           {menu.title && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: menu.multi ? 4 : 8 }}>{menu.title}</div>}
           {menu.multi && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', marginBottom: 8 }}>여러 개 선택 가능 — 체크하고 제출</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1965,6 +1977,11 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                   ) : (
                     <span style={{ fontWeight: 800, color: 'var(--cth-sky)', minWidth: 14 }}>{o.idx}</span>
                   )}
+                  {(() => { const c = detectStudent(o.label, o.preview, o.description); return c ? (
+                    <span style={{ flexShrink: 0, width: 28, height: 28, borderRadius: 7, overflow: 'hidden', background: 'var(--cth-cream-100)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
+                      <SpritePortrait character={c} scale={1.3} bust />
+                    </span>
+                  ) : null; })()}
                   <span style={{ flex: 1 }}>
                     <span style={{ fontWeight: 600 }}>{o.label}</span>
                     {o.description && <span style={{ display: 'block', fontSize: 11, color: 'var(--cth-ink-300)', marginTop: 2, lineHeight: 1.4 }}>{o.description}</span>}
@@ -1974,6 +1991,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               );
             })}
           </div>
+          {!menu.multi && menu.options[navIdx]?.preview && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9.5, color: 'var(--cth-ink-300)', marginBottom: 3 }}>미리보기</div>
+              <pre style={{ margin: 0, fontFamily: 'var(--cth-font-mono)', fontSize: 9.5, lineHeight: 1.4, whiteSpace: 'pre', overflowX: 'auto', color: 'var(--cth-ink-500)', background: 'var(--cth-paper-100)', border: '1px solid var(--cth-cream-200)', padding: 8, borderRadius: 8 }}>{menu.options[navIdx].preview}</pre>
+            </div>
+          )}
           {menu.multi && (
             <button
               onClick={() => void submitMulti()}

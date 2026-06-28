@@ -94,7 +94,7 @@ export function Markdown({ text }: { text: string }) {
       const items: string[] = [];
       while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*[-*]\s+/, '')); i++; }
       blocks.push(
-        <ul key={key++} style={{ margin: '4px 0', paddingLeft: 18 }}>
+        <ul key={key++} style={{ margin: '4px 0', paddingLeft: 18, listStyleType: 'disc', listStylePosition: 'outside' }}>
           {items.map((it, ii) => <li key={ii} style={{ margin: '2px 0' }}>{inline(it, `li${key}-${ii}`)}</li>)}
         </ul>
       );
@@ -107,7 +107,7 @@ export function Markdown({ text }: { text: string }) {
       const start = parseInt(line.match(/^\s*(\d+)\./)?.[1] ?? '1', 10);
       while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*\d+\.\s+/, '')); i++; }
       blocks.push(
-        <ol key={key++} start={start} style={{ margin: '4px 0', paddingLeft: 22 }}>
+        <ol key={key++} start={start} style={{ margin: '4px 0', paddingLeft: 22, listStyleType: 'decimal', listStylePosition: 'outside' }}>
           {items.map((it, ii) => <li key={ii} style={{ margin: '2px 0' }}>{inline(it, `ol${key}-${ii}`)}</li>)}
         </ol>
       );

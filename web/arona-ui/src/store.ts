@@ -58,6 +58,9 @@ export interface Agent {
   windowIdx?: number;
   /** 마지막 사용자 프롬프트 — 대화 미리보기용. */
   lastPrompt?: string;
+  /** 선생님 입력을 기다리는 진짜 이유(AskUserQuestion·권한). 있을 때만 '확인 필요'(빨강).
+   *  단순 waiting(완료 보고·응답 대기)은 이게 없다(거노: 빨강 남발 방지). */
+  waitingFor?: string;
 }
 
 /** 한 학생(pane)이 소환한 서브에이전트(Task/Agent) — 백엔드 /subagents 가
@@ -70,10 +73,10 @@ export interface SubagentInfo {
   mtime: number;
 }
 
-/** 학생이 question/선택지로 막혀 선생님 입력을 기다리는 상태(blocked=권한·입력
- *  프롬프트, waiting=응답 대기). '확인 대기'·'미확인' 판정의 기준. */
+/** 빨강 '확인 필요' 판정 — AskUserQuestion·권한 선택지처럼 waiting_for(질문 내용)가
+ *  있는 것만. 단순 waiting(완료 보고·응답 대기)은 제외한다(거노: 빨강이 위험하게 느껴짐). */
 export function isAwaitingTeacher(a: Agent): boolean {
-  return a.status === 'blocked' || a.status === 'waiting';
+  return !!a.waitingFor || a.status === 'blocked';
 }
 
 interface AppState {
