@@ -1313,6 +1313,27 @@ async fn background_agents_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `POST /background-kill?pid=<pid>` — claude agents background 세션을 종료(SIGTERM).
+/// claude agents 에 공식 kill 명령이 없어 pid 로 직접 보낸다. pid 는 `/background-agents`
+/// 가 준 것(claude 워커 프로세스). 거노: 백그라운드 패널에서 세션을 쉽게 정리.
+async fn background_kill_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let body = match params.get("pid").and_then(|s| s.parse::<u32>().ok()) {
+        Some(pid) => match std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .output()
+        {
+            Ok(o) if o.status.success() => serde_json::json!({ "ok": true, "pid": pid }),
+            Ok(o) => serde_json::json!({ "ok": false, "error": String::from_utf8_lossy(&o.stderr).trim().to_string() }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        },
+        None => serde_json::json!({ "ok": false, "error": "missing/invalid pid" }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// `POST /session-reset` — tear down every session/pane and leave one fresh
 /// empty session.
 async fn session_reset_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
@@ -2384,6 +2405,12 @@ pub fn spawn_http_server(
                         "/background-agents",
                         get(|q: Query<std::collections::HashMap<String, String>>| {
                             background_agents_handler(q)
+                        }),
+                    )
+                    .route(
+                        "/background-kill",
+                        post(|q: Query<std::collections::HashMap<String, String>>| {
+                            background_kill_handler(q)
                         }),
                     )
                     .route(

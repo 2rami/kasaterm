@@ -3938,8 +3938,11 @@ SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
 # 직접 주면 그게 우선(우리 건 생략). --settings 도 사용자 지정이면 우리 걸 안 얹는다.\n\
 USER_SETTINGS=0\n\
 for a in \"$@\"; do [ \"$a\" = \"--settings\" ] && USER_SETTINGS=1 && break; done\n\
-case \" $* \" in *\" --session-id \"*|*\" --resume \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
-[ -n \"$KASATERM_PERSONA\" ] && set -- --append-system-prompt \"$KASATERM_PERSONA\" \"$@\"\n\
+PERSONA_OK=1\n\
+# attach/agents 는 서브커맨드 — persona·session-id 를 얹으면 깨진다(거노: 이어받기 안 붙던 원인).\n\
+# --bg 는 session-id 를 자기가 관리(경고)하지만 persona(시스템프롬프트)는 새 세션이라 붙인다(거노 #2).\n\
+case \" $* \" in *\" attach \"*|*\" agents \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\" --bg \"*|*\" --background \"*) SID=\"\" ;; *\" --session-id \"*|*\" --resume \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
+[ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PERSONA\" ] && set -- --append-system-prompt \"$KASATERM_PERSONA\" \"$@\"\n\
 [ -n \"$SID\" ] && set -- --session-id \"$SID\" \"$@\"\n\
 # task store(~/.claude/tasks/<id>)를 transcript session 과 같은 키로 묶는다 — 없으면 claude\n\
 # 가 매 실행 임의 session-<hex8> 로 task 를 저장해 pane↔task 매핑이 끊긴다(거노: 유즈\n\
