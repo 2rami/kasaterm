@@ -1393,7 +1393,70 @@ impl App {
         // the board/bind-transcript, while later split panes get it fine.
         self.start_socket_pty();
         self.spawn_session_pane()?;
+        self.load_local_session();
         Ok(())
+    }
+    /// 재시작 후 "열면 이어가기" — session.json(직전 활성 pane)의 claude session_id 를
+    /// 찾아, 방금 spawn 한 부팅 pane 에 `claude --resume <id>` 를 주입한다. fork 가 아닌
+    /// resume 라 shim 을 거쳐 transcript·persona 가 자연히 붙고, ResumeSession(웹뷰 resume
+    /// 버튼)이 이미 검증한 것과 같은 주입 경로다([[reference_kasaterm_claude_session_fork]]).
+    /// 멀티 pane layout 복원은 후속 — 1차는 단일 활성 세션 reattach 로 핵심을 켠다.
+    /// session.json 이 없거나(첫 실행) claude leaf 가 없으면 조용히 빠져 빈 셸 부팅을 유지.
+    fn load_local_session(&mut self) {
+        // 레이아웃 트리(leaf/split)를 a→b 우선 walk — was_claude 이고 session_id 있는 첫 leaf.
+        fn find_claude(node: &serde_json::Value) -> Option<(String, Option<String>)> {
+            if let Some(leaf) = node.get("leaf") {
+                if leaf.get("was_claude").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if let Some(sid) = leaf.get("session_id").and_then(|v| v.as_str()) {
+                        let cwd = leaf.get("cwd").and_then(|v| v.as_str()).map(String::from);
+                        return Some((sid.to_string(), cwd));
+                    }
+                }
+                return None;
+            }
+            if let Some(split) = node.get("split") {
+                if let Some(r) = split.get("a").and_then(find_claude) {
+                    return Some(r);
+                }
+                if let Some(r) = split.get("b").and_then(find_claude) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+        let Some(state) = socket::read_session_state() else {
+            return;
+        };
+        let active = state.get("active_session").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let leaf = state
+            .get("sessions")
+            .and_then(|s| s.as_array())
+            .and_then(|arr| arr.get(active).or_else(|| arr.first()))
+            .and_then(|sess| {
+                let aw = sess.get("active_window").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                sess.get("windows")
+                    .and_then(|w| w.as_array())
+                    .and_then(|ws| ws.get(aw).or_else(|| ws.first()))
+            })
+            .and_then(find_claude);
+        let Some((session_id, cwd)) = leaf else {
+            return;
+        };
+        let Some(pane) = self.ws.lock().unwrap().active_pane.clone() else {
+            return;
+        };
+        let Some(sess) = self.pty.get(&pane).cloned() else {
+            return;
+        };
+        let cmd = match cwd.as_deref() {
+            Some(c) if !c.is_empty() => {
+                let q = c.replace('\'', "'\\''");
+                format!("cd '{q}' && claude --resume {session_id}\r")
+            }
+            _ => format!("claude --resume {session_id}\r"),
+        };
+        let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+        self.pending_restores.push((sess, cmd, at));
     }
     /// Serialize every session (active + stashed) as a layout tree so the next
     /// launch can restore the full multi-pane, multi-session workspace. Written

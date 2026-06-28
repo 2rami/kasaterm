@@ -5,7 +5,7 @@ import { ClassroomView } from './components/ClassroomView';
 import { CommandCenter } from './components/CommandCenter';
 import { TitleBar } from './components/TitleBar';
 import { RoomMap } from './components/RoomMap';
-import { startBoardPolling, fetchMode, focusPane, fetchClaudeUsage, fetchSessions, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect } from './lib/mcp';
+import { startBoardPolling, fetchMode, focusPane, fetchClaudeUsage, fetchSessions, fetchBackgroundAgents, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect } from './lib/mcp';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { TerminalBlockCard } from './components/TerminalBlockCard';
 import { assignSprites } from './lib/sprites';
@@ -137,6 +137,16 @@ export function App() {
   useEffect(() => {
     if (forceMock) { useStore.getState().setAgents(MOCK_AGENTS); return; }
     if (mode === 'god') return startBoardPolling(1000);
+  }, [mode]);
+  // claude agents(pane 밖 background 학생) 폴링 → 교실에 별도 표시. claude 프로세스
+  // spawn 비용이 있어 3초로 느슨하게(background 세션은 자주 안 바뀜).
+  useEffect(() => {
+    if (forceMock || mode !== 'god') return;
+    let stop = false;
+    const tick = async () => { const a = await fetchBackgroundAgents(); if (!stop) useStore.getState().setBackgroundAgents(a); };
+    void tick();
+    const iv = setInterval(tick, 3000);
+    return () => { stop = true; clearInterval(iv); };
   }, [mode]);
   // 방 경로 라이브 반영 — 터미널에서 cd 하면 active_cwd(pid_cwd)가 바뀌니 폴링해
   // RoomChip 을 즉시 갱신(거노: 터미널 경로 변경이 방 경로에 바로 반영되게).

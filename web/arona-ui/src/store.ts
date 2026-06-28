@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { AccentColorName } from '@/design/tokens';
 import type { StatusKind } from '@/components/PixelBadge';
+import type { BackgroundAgent } from './lib/mcp';
 
 /** 화면이 그리는 에이전트 = kasaterm board 한 행을 UI 모델로 정규화한 것.
  *  munder 의 거대한 Agent 타입에서 AgentCard 가 실제로 쓰는 필드만 추렸다. */
@@ -82,6 +83,9 @@ export function isAwaitingTeacher(a: Agent): boolean {
 interface AppState {
   agents: Agent[];
   setAgents: (a: Agent[]) => void;
+  /** `claude agents` 가 보고하는 pane 밖 background 세션(+interactive). 교실에 별도 표시. */
+  backgroundAgents: BackgroundAgent[];
+  setBackgroundAgents: (a: BackgroundAgent[]) => void;
   /** 선생님이 '확인'(대화 열기)한, 현재 대기 에피소드의 학생 id 들. 학생이 대기를
    *  벗어나면 setAgents 가 자동으로 빼서, 다음 질문 때 다시 '미확인'이 된다. */
   acked: string[];
@@ -90,6 +94,8 @@ interface AppState {
 
 export const useStore = create<AppState>((set) => ({
   agents: [],
+  backgroundAgents: [],
+  setBackgroundAgents: (backgroundAgents) => set({ backgroundAgents }),
   acked: [],
   setAgents: (agents) =>
     set((s) => ({

@@ -354,6 +354,34 @@ export async function fetchRecentSessions(cwd?: string): Promise<RecentSession[]
   }
 }
 
+/** `claude agents --json` 한 행 — Claude 자체 supervisor 가 호스팅하는 세션.
+ *  kind=background 는 pane 없이 도는 위임 학생, interactive 는 현재 떠 있는 세션. */
+export interface BackgroundAgent {
+  pid: number;
+  id: string;
+  cwd: string;
+  kind: 'background' | 'interactive';
+  startedAt: number;
+  sessionId: string;
+  name: string;
+  status: string;
+  state: string;
+}
+
+/** GET /background-agents?cwd=<abs> — `claude agents --json --all` 뷰. pane 밖에서
+ *  도는 background 학생들(+interactive 세션). cwd 생략 시 전체 방. fail-soft 빈 배열. */
+export async function fetchBackgroundAgents(cwd?: string): Promise<BackgroundAgent[]> {
+  try {
+    const q = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
+    const r = await fetch(`${BASE}/background-agents${q}`);
+    if (!r.ok) return [];
+    const d = (await r.json().catch(() => ({}))) as { agents?: BackgroundAgent[] };
+    return Array.isArray(d?.agents) ? d.agents : [];
+  } catch {
+    return [];
+  }
+}
+
 /** POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool> — 새 pane 을 열고 셸
  *  프롬프트가 뜨면 `claude --resume <id>` 주입(이어가기). newroom=true 면 새 방. */
 export async function resumeSession(id: string, cwd?: string, newroom = false): Promise<boolean> {

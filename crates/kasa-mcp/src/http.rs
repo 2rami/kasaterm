@@ -1250,6 +1250,65 @@ async fn session_resume_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// Locate the `claude` binary. A GUI app's PATH is minimal (launchd, not the
+/// login shell), so PATH lookup alone misses npm-global/local installs — probe
+/// the common locations, honoring `CLAUDE_BIN` for an explicit override, and
+/// fall back to bare `claude` (PATH) as a last resort.
+fn claude_bin() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("CLAUDE_BIN") {
+        if !p.is_empty() {
+            return p.into();
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidates = [
+        format!("{home}/.claude/local/claude"),
+        format!("{home}/.npm-global/bin/claude"),
+        format!("{home}/.local/bin/claude"),
+        "/opt/homebrew/bin/claude".to_string(),
+        "/usr/local/bin/claude".to_string(),
+    ];
+    for c in candidates {
+        if std::path::Path::new(&c).exists() {
+            return c.into();
+        }
+    }
+    "claude".into()
+}
+
+/// `GET /background-agents?cwd=<abs>` — the `claude agents --json --all` view:
+/// the background/interactive sessions Claude's own supervisor hosts, as
+/// `{ ok, agents: [{pid,id,cwd,kind,startedAt,sessionId,name,status,state}] }`.
+/// The arona classroom polls this to render off-pane "students" (background
+/// agents) alongside the local-pane ones; a card click resumes its `sessionId`
+/// via `/session-resume`, promoting it back to a foreground pane. `cwd` filters
+/// to sessions started under that path (`--cwd`); omitted shows all rooms.
+/// Runs the binary directly so the shell `claude` alias/shim is bypassed; the
+/// `agents` view is read-only, so no permission flags are involved.
+async fn background_agents_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let mut cmd = std::process::Command::new(claude_bin());
+    cmd.args(["agents", "--json", "--all"]);
+    if let Some(cwd) = params.get("cwd").filter(|s| !s.is_empty()) {
+        cmd.args(["--cwd", cwd]);
+    }
+    let body = match cmd.output() {
+        Ok(out) if out.status.success() => {
+            match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                Ok(agents) => serde_json::json!({ "ok": true, "agents": agents }),
+                Err(e) => serde_json::json!({ "ok": false, "error": format!("parse: {e}") }),
+            }
+        }
+        Ok(out) => serde_json::json!({
+            "ok": false,
+            "error": String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// `POST /session-reset` — tear down every session/pane and leave one fresh
 /// empty session.
 async fn session_reset_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
@@ -2315,6 +2374,12 @@ pub fn spawn_http_server(
                         "/session-resume",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             session_resume_handler(session_resume_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/background-agents",
+                        get(|q: Query<std::collections::HashMap<String, String>>| {
+                            background_agents_handler(q)
                         }),
                     )
                     .route(
