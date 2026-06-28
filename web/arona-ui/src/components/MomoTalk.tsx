@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { fetchMessages, sendToPane, sendToInbox, sendToGod, type MessageEntry } from '@/lib/mcp';
 import { useStore } from '@/store';
 import { SpritePortrait } from './SpritePortrait';
+import { assignSprites } from '@/lib/sprites';
 
 // from_pane 이 'sensei' 면 선생님(우측 카톡 노랑), 그 외는 학생/아로나(좌측 아바타).
 const SENSEI = 'sensei';
@@ -14,6 +15,16 @@ const hhmm = (ts: number) => {
   const m = d.getMinutes().toString().padStart(2, '0');
   return `${h}:${m}`;
 };
+
+// 시간대별 첫인사 — 빈 모모톡(아직 메시지 0)에서 배정 학생이 선생님을 맞이한다.
+function timeGreeting(): string {
+  const h = new Date().getHours();
+  if (h < 6) return '늦은 시간이에요 선생님, 무리하지 마세요';
+  if (h < 11) return '좋은 아침이에요 선생님';
+  if (h < 17) return '좋은 오후예요 선생님';
+  if (h < 21) return '좋은 저녁이에요 선생님';
+  return '오늘도 고생 많으셨어요 선생님';
+}
 
 // done:summary|meta → {tag:'완료', body:summary}. 그 외는 그대로.
 function parseText(raw: string): { tag?: string; body: string } {
@@ -88,6 +99,14 @@ export function MomoTalk() {
     ? msgs.filter((m) => m.from_pane === filter || m.to_pane === filter)
     : msgs;
 
+  // 빈 화면(메시지 0)에서 맞이할 학생 — assignSprites 로 외형(spriteChar) 확보(작업명 학생도
+  // 게임개발부 도트로). god 강조는 빼고(거노) 배정 학생만. 특정 학생 탭이면 그 학생만.
+  const sprited = useMemo(() => assignSprites(agents), [agents]);
+  const emptyStudents = useMemo(
+    () => (filter ? sprited.filter((a) => a.id === filter) : sprited.filter((a) => !a.isGod)),
+    [sprited, filter],
+  );
+
   // 새 메시지 도착 시 바닥이었으면 자동 스크롤.
   useEffect(() => {
     const el = bodyRef.current;
@@ -144,8 +163,23 @@ export function MomoTalk() {
       {/* 단톡방 피드 */}
       <div ref={bodyRef} onScroll={onScroll} style={{ flex: 1, overflowY: 'auto', padding: '12px 12px 16px', minHeight: 0 }}>
         {shown.length === 0 ? (
-          <div style={{ color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, textAlign: 'center', marginTop: 40 }}>
-            아직 오간 메시지가 없어요
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '72%', gap: 16, padding: '24px 16px' }}>
+            {emptyStudents.length > 0 && (
+              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 300 }}>
+                {emptyStudents.map((s) => (
+                  <div key={s.id} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
+                    <div style={{ width: 52, height: 52, borderRadius: 14, overflow: 'hidden', background: 'var(--cth-cream-100)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+                      <SpritePortrait character={s.spriteChar || s.character} scale={2.4} bust />
+                    </div>
+                    <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-500)', fontWeight: 600 }}>{s.spriteChar || s.character}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 700, color: 'var(--cth-ink-700)', textAlign: 'center' }}>{timeGreeting()}</div>
+            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-300)', textAlign: 'center' }}>
+              {emptyStudents.length > 0 ? '아래에 첫 메시지를 보내보세요' : '아직 배정된 학생이 없어요'}
+            </div>
           </div>
         ) : shown.map((m, i) => {
           const sensei = m.from_pane === SENSEI;

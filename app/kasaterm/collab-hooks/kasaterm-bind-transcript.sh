@@ -8,6 +8,11 @@
 # hit the socket when the transcript path actually changes (e.g. claude --resume
 # swaps it) instead of on every tool call.
 [ -z "$KASATERM_PANE_ID" ] && exit 0
+# bg job(claude Task/background)은 부모 pane 의 KASATERM_PANE_ID 를 그대로 물려받는다
+# — 여기서 bind 하면 부모 pane 의 transcript 를 bg job 의 jsonl 로 덮어써(=부모 오염)
+# 미도리 같은 멀쩡한 pane 까지 board 에서 깨진다. bg job 은 $CLAUDE_JOB_DIR 로 식별되니
+# 건너뛴다(자기 surface 는 host 쪽에서 따로 bind 한다).
+[ -n "$CLAUDE_JOB_DIR" ] && exit 0
 input=$(cat)
 tp=$(printf '%s' "$input" | python3 -c "import sys,json;print(json.load(sys.stdin).get('transcript_path',''))" 2>/dev/null)
 [ -z "$tp" ] && exit 0

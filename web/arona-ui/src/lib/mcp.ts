@@ -25,8 +25,10 @@ interface BoardRow {
   is_god?: boolean;
   tokens_in?: number;
   tokens_out?: number;
-  /** 마지막 답변/질문 첫마디 — waiting/idle 생각 구름 텍스트 소스. board 에는
-   *  waiting_for 필드가 없어, 대기 시 직전에 던진 질문/제안이 담긴 이 값을 쓴다. */
+  /** 학생이 선생님 입력을 기다리는 진짜 이유(AskUserQuestion 질문·권한 'permission').
+   *  이게 있을 때만 '확인 필요'(빨강). 없는 waiting 은 단순 응답 대기·완료 보고다(거노). */
+  waiting_for?: string;
+  /** 마지막 답변/질문 첫마디 — waiting/idle 생각 구름 텍스트 소스. */
   last_reply?: string;
   last_prompt?: string;
   /** 누적 토큰/비용 — 재화 치환 + 카드 표시(이미 /board 에 직렬화됨, UI 가 안 읽던 값). */
@@ -103,6 +105,7 @@ function toAgent(r: BoardRow): Agent {
     action: r.intent,
     lastReply: r.last_reply,
     lastPrompt: r.last_prompt,
+    waitingFor: r.waiting_for,
     isGod: !!r.is_god,
     contextTokens: tokens > 0 ? tokens : undefined,
     currentTool,
@@ -741,7 +744,7 @@ export interface ConvToolUse {
       question: string;
       header?: string;
       multiSelect?: boolean;
-      options: Array<{ label: string; description?: string }>;
+      options: Array<{ label: string; description?: string; preview?: string }>;
     }>;
   } & Record<string, unknown>;
 }

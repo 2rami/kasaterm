@@ -586,16 +586,16 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 §4 팀 모드가 **TeamCreate 위계**라면 이건 **위계 없는 peer 협업**. 세 축이다:
 
-- **board** — 누가 뭘 하나. `UserPromptSubmit` hook(`kasaterm-board-context.py`)이 **매 턴 자동 주입** → 따로 조회·Monitor 불필요. 즉시 최신이 필요할 때만 `kasaterm-cli board`.
+- **board** — 누가 뭘 하나. `kasaterm-cli board`로 **직접 조회**한다(옛 `kasaterm-board-context.py` 자동주입은 폐기 — settings 미등록). 충돌 회피·합류 판단에 쓴다.
 - **inbox** — pane끼리 **대화·조율**. `kasacollab msg %N "..."`. 상대가 working/선택지 대기 중이어도 **100% 전달되고 상대 입력창을 안 건드린다** → 협업 대화의 기본 채널.
 - **tell** — idle 상대를 **급히 깨워 즉시 행동**시킬 때만. 강제 제출이라 바쁜 상대에겐 입력창에 누적된다.
 
-### board — 각 pane이 뭘 하는지 (매 턴 자동 주입)
+### board — 각 pane이 뭘 하는지 (직접 조회)
 
-`kasaterm-bind-transcript.sh`(SessionStart/UserPromptSubmit hook)가 각 pane의 transcript를 소켓에 등록하고, `kasaterm-board-context.py`(UserPromptSubmit hook)가 매 턴 **board(형제 활동) + inbox(내게 온 메시지)를 프롬프트에 자동 주입**한다. 평소처럼 작업하면 저절로 등록·표시 — 보고·조회·Monitor 다 불필요.
+`kasaterm-bind-transcript.sh`(SessionStart hook)가 각 pane의 transcript를 소켓에 등록한다. board(형제 활동)는 `kasaterm-cli board`로 **직접 조회**한다 — 옛 `kasaterm-board-context.py` 자동주입(매 턴 프롬프트 주입)은 폐기됐다(settings 미등록). 충돌 회피가 필요할 때 명시적으로 부른다.
 
 - **사용자(거노)**: 상단 **보기 메뉴 → "board 패널"** 로 전 pane 현황을 본다(읽기 전용).
-- **claude(너)**: 매 턴 자동 주입되는 board를 그냥 읽으면 된다. 내가 만질 파일을 다른 pane이 잡고 있으면 충돌 회피(같은 문제면 합류, 빌드 중이면 `peek %N`로 보고 대기).
+- **claude(너)**: `kasaterm-cli board`로 현황을 조회한다. 내가 만질 파일을 다른 pane이 잡고 있으면 충돌 회피(같은 문제면 합류, 빌드 중이면 `peek %N`로 보고 대기).
 
 ### inbox — pane끼리 대화·조율 (kasacollab)
 

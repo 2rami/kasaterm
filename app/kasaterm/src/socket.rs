@@ -271,9 +271,19 @@ impl PtyBackend {
             }
             *last = Some(std::time::Instant::now());
         }
+        // bound 경로가 사라졌으면(세션 종료·`--resume`/fork 로 jsonl stem 교체) 그
+        // stale bind 는 死 경로를 가리켜 transcript 가 영영 안 뜬다 — 한 번 bound 된
+        // pane 은 재discover 대상에서 빠지기 때문. 파일이 없으면 unbound 로 취급해
+        // 폴백(cmdline·recent jsonl)이 살아있는 실제 대화를 다시 묶게 한다.
         let unbound: HashSet<String> = {
             let bound = self.bound.lock().unwrap();
-            live.iter().filter(|id| !bound.contains_key(*id)).cloned().collect()
+            live.iter()
+                .filter(|id| match bound.get(*id) {
+                    None => true,
+                    Some(p) => !p.exists(),
+                })
+                .cloned()
+                .collect()
         };
         if unbound.is_empty() {
             return;
@@ -1751,16 +1761,19 @@ fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
     None
 }
 
-/// The pid of the claude child of a shell pane, if any. Picks the most-recent
-/// (highest-pid) `claude`-named direct child of `shell_pid`. Returns None when
-/// no claude is running under the shell.
+/// The pid of the claude process tied to a shell pane, if any. Normal panes run
+/// `zsh → claude` (claude is a child). Background sessions (claude daemon) invert
+/// it — `claude --session-id … → zsh`, so claude is the shell's *parent*. We try
+/// the direct child first; if there's none, walk the shell's parent chain and take
+/// the first claude. Returns None only when no claude is involved at all.
 fn claude_child_pid(shell_pid: u32) -> Option<u32> {
     let out = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,comm="])
         .output()
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
-    let mut best: Option<u32> = None;
+    // pid -> (ppid, is_claude). One ps pass feeds both the child and parent walk.
+    let mut procs: std::collections::HashMap<u32, (u32, bool)> = std::collections::HashMap::new();
     for line in s.lines() {
         let mut parts = line.split_whitespace();
         let (pid, ppid) = match (
@@ -1770,19 +1783,36 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
             (Some(a), Some(b)) => (a, b),
             _ => continue,
         };
-        if ppid != shell_pid {
-            continue;
-        }
         let comm = parts.collect::<Vec<_>>().join(" ");
         let is_claude = std::path::Path::new(&comm)
             .file_name()
             .and_then(|x| x.to_str())
             .map_or(false, |n| n.contains("claude"));
-        if is_claude && best.map_or(true, |p| pid > p) {
-            best = Some(pid);
-        }
+        procs.insert(pid, (ppid, is_claude));
     }
-    best
+    // 1) Normal pane: most-recent (highest-pid) claude child of the shell.
+    if let Some(p) = procs
+        .iter()
+        .filter(|(_, (ppid, claude))| *ppid == shell_pid && *claude)
+        .map(|(pid, _)| *pid)
+        .max()
+    {
+        return Some(p);
+    }
+    // 2) Background (claude daemon): claude wraps the shell. Walk the parent chain
+    //    and take the first claude (`claude --session-id … → zsh`).
+    let mut cur = shell_pid;
+    for _ in 0..8 {
+        let ppid = procs.get(&cur)?.0;
+        if procs.get(&ppid).map_or(false, |(_, claude)| *claude) {
+            return Some(ppid);
+        }
+        if ppid <= 1 {
+            break;
+        }
+        cur = ppid;
+    }
+    None
 }
 
 /// claude session ids are canonical UUIDs (8-4-4-4-12 hex). Validating guards
