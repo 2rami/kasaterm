@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useStore, isAwaitingTeacher, isUnconfirmed } from '@/store';
 import { AgentRow } from './AgentsTab';
+import { saveSession } from '@/lib/mcp';
 import type { BackgroundAgent } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { assignSprites } from '@/lib/sprites';
@@ -114,6 +115,11 @@ export function BoardPanel({ onPickStudent, onOpenBackground }: { onPickStudent?
                   <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, color: 'var(--cth-ink-900)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</div>
                   <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project || '대기 중'}</div>
                 </div>
+                <button
+                  onClick={(e) => { e.stopPropagation(); void saveSession(a.id); }}
+                  title="대화 저장 — background daemon 으로 보내 터미널이 꺼져도 유지(←← detach)"
+                  style={{ flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', background: 'transparent', border: '1px solid var(--cth-cream-200)', borderRadius: 6, padding: '2px 7px', cursor: 'pointer' }}
+                >저장</button>
                 {building ? (
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: BUILD_COLOR, background: 'color-mix(in srgb, #E5923A 14%, #fff)', padding: '2px 7px', borderRadius: 6 }}><GearIcon size={11} />빌드 중</span>
                 ) : a.currentTool ? (

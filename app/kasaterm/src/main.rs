@@ -2365,6 +2365,12 @@ enum UserEvent {
         /// false → `claude --resume <id>`(jsonl 새 프로세스, 과거 세션 이어가기).
         attach: bool,
     },
+    /// "대화 저장하기" — surface pane 의 foreground claude 를 ←←(agents view = bg-detach)
+    /// 주입으로 background daemon 으로 detach. surface 없으면 active pane. 터미널이 꺼져도
+    /// daemon 이 세션을 들고 살아남아 웹뷰에서 계속 보인다(거노 핵심).
+    SaveSession {
+        surface: Option<String>,
+    },
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify`). Raise a
     /// desktop alert unless that pane is already the focused one, cmux-style.
     Notify {

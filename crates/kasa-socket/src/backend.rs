@@ -369,6 +369,11 @@ pub trait Backend: Send + Sync {
     fn resume_session(&self, _id: &str, _cwd: Option<&str>, _newroom: bool, _attach: bool) -> Result<()> {
         anyhow::bail!("resume_session unsupported by this backend")
     }
+    /// "대화 저장하기" — foreground claude 를 ←← 주입으로 background daemon 으로 detach.
+    /// `surface` 없으면 active pane. Default: unsupported.
+    fn save_session(&self, _surface: Option<&str>) -> Result<()> {
+        anyhow::bail!("save_session unsupported by this backend")
+    }
     fn focus_surface(&self, surface_id: &str) -> Result<()>;
     /// Split the focused surface. `focus` decides whether the *new* pane
     /// becomes active: CLI/automation callers pass `false` so a scripted split

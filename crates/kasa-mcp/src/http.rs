@@ -1254,6 +1254,21 @@ async fn session_resume_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `POST /session-save?surface=%N` — foreground claude 를 background daemon 으로
+/// detach(←← agents-view 주입). surface 없으면 active pane. "대화 저장하기" — 터미널이
+/// 꺼져도 daemon 이 세션을 들고 살아남아 웹뷰에서 계속 보인다(거노 핵심).
+async fn session_save_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let surface = params.get("surface").filter(|s| !s.is_empty()).map(|s| s.as_str());
+    let body = match backend.save_session(surface) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
 /// Locate the `claude` binary. A GUI app's PATH is minimal (launchd, not the
 /// login shell), so PATH lookup alone misses npm-global/local installs — probe
 /// the common locations, honoring `CLAUDE_BIN` for an explicit override, and
@@ -2198,6 +2213,7 @@ pub fn spawn_http_server(
                 let session_rename_backend = backend.clone();
                 let recent_sessions_backend = backend.clone();
                 let session_resume_backend = backend.clone();
+                let session_save_backend = backend.clone();
                 let session_reset_backend = backend.clone();
                 let open_image_backend = backend.clone();
                 let open_markdown_backend = backend.clone();
@@ -2399,6 +2415,12 @@ pub fn spawn_http_server(
                         "/session-resume",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
                             session_resume_handler(session_resume_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/session-save",
+                        post(move |q: Query<std::collections::HashMap<String, String>>| {
+                            session_save_handler(session_save_backend.clone(), q)
                         }),
                     )
                     .route(
