@@ -623,6 +623,15 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
+    fn save_session(&self, surface: Option<&str>) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::SaveSession {
+                surface: surface.map(str::to_string),
+            })
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(())
+    }
+
     fn rename_surface(&self, surface_id: &str, title: &str) -> Result<()> {
         let _ = self.proxy.send_event(UserEvent::SocketRename(
             surface_id.to_string(),

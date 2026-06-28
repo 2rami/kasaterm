@@ -411,6 +411,19 @@ export async function resumeSession(id: string, cwd?: string, newroom = false, a
   }
 }
 
+/** POST /session-save?surface=%N — foreground claude 를 background daemon 으로 detach
+ *  (←← agents-view 주입). surface 없으면 active pane. "대화 저장하기" — 터미널이 꺼져도
+ *  daemon 이 세션을 들고 살아남아 웹뷰에서 계속 보인다. */
+export async function saveSession(surface?: string): Promise<boolean> {
+  try {
+    const q = surface ? `?surface=${encodeURIComponent(surface)}` : '';
+    const r = await fetch(`${BASE}/session-save${q}`, { method: 'POST' });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** POST /session-close?idx=N — 그 방(윈도우) 닫기(거노). 마지막 윈도우는 백엔드가 거부. */
 export async function closeRoom(idx: number): Promise<boolean> {
   try {

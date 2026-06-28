@@ -236,6 +236,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SaveSession { surface } => {
+                // foreground claude 를 background daemon 으로 detach: 입력칸 비우고(Ctrl-U)
+                // ←←(agents view = "bg-detach") 를 gap 두고 주입한다. claude TUI 의
+                // leftArrowOpensAgents(기본 ON) confirm-on-second-press 를 태운다 — 첫 ←
+                // 무장("← again for agents"), 두 번째 ← 가 실제 detach. 입력칸이 비어야
+                // ← 가 커서이동이 아니라 agents 로 먹힌다(그래서 Ctrl-U 선행).
+                let pane = surface
+                    .clone()
+                    .or_else(|| self.ws.lock().unwrap().active_pane.clone());
+                if let Some(pane) = pane {
+                    if let Some(sess) = self.pty.get(&pane).cloned() {
+                        let now = std::time::Instant::now();
+                        let at = |n| now + std::time::Duration::from_millis(n);
+                        self.pending_restores.push((sess.clone(), "\u{15}".to_string(), at(0)));
+                        self.pending_restores.push((sess.clone(), "\u{1b}[D".to_string(), at(80)));
+                        self.pending_restores.push((sess, "\u{1b}[D".to_string(), at(160)));
+                    }
+                }
+                return;
+            }
             UserEvent::SocketCloseRoom(idx) => {
                 if let Err(e) = self.close_window(*idx) {
                     eprintln!("[room] close {idx} failed: {e}");
