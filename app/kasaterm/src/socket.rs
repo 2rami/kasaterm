@@ -611,12 +611,13 @@ impl Backend for PtyBackend {
         Ok(recent_sessions_for(&base, 20))
     }
 
-    fn resume_session(&self, id: &str, cwd: Option<&str>, newroom: bool) -> Result<()> {
+    fn resume_session(&self, id: &str, cwd: Option<&str>, newroom: bool, attach: bool) -> Result<()> {
         self.proxy
             .send_event(UserEvent::ResumeSession {
                 id: id.to_string(),
                 cwd: cwd.map(str::to_string),
                 newroom,
+                attach,
             })
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
         Ok(())

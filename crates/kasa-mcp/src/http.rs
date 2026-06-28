@@ -1239,10 +1239,14 @@ async fn session_resume_handler(
         .get("newroom")
         .map(|s| s == "true" || s == "1")
         .unwrap_or(false);
+    let attach = params
+        .get("attach")
+        .map(|s| s == "true" || s == "1")
+        .unwrap_or(false);
     let body = if id.is_empty() {
         serde_json::json!({ "ok": false, "error": "missing id" })
     } else {
-        match backend.resume_session(&id, cwd.as_deref(), newroom) {
+        match backend.resume_session(&id, cwd.as_deref(), newroom, attach) {
             Ok(()) => serde_json::json!({ "ok": true, "id": id }),
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         }

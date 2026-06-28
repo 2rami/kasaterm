@@ -366,7 +366,7 @@ pub trait Backend: Send + Sync {
     /// opens a fresh window, otherwise it splits the active one; the pane is
     /// spawned in `cwd` when given. The actual `claude --resume <id>` is
     /// injected once the new pane's shell prompt is up. Default: unsupported.
-    fn resume_session(&self, _id: &str, _cwd: Option<&str>, _newroom: bool) -> Result<()> {
+    fn resume_session(&self, _id: &str, _cwd: Option<&str>, _newroom: bool, _attach: bool) -> Result<()> {
         anyhow::bail!("resume_session unsupported by this backend")
     }
     fn focus_surface(&self, surface_id: &str) -> Result<()>;

@@ -2361,6 +2361,9 @@ enum UserEvent {
         id: String,
         cwd: Option<String>,
         newroom: bool,
+        /// true → `claude attach <id>`(daemon background 세션 연결, 세션 background 유지).
+        /// false → `claude --resume <id>`(jsonl 새 프로세스, 과거 세션 이어가기).
+        attach: bool,
     },
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify`). Raise a
     /// desktop alert unless that pane is already the focused one, cmux-style.

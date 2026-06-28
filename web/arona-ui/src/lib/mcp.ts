@@ -384,12 +384,13 @@ export async function fetchBackgroundAgents(cwd?: string): Promise<BackgroundAge
 
 /** POST /session-resume?id=<uuid>&cwd=<abs>&newroom=<bool> — 새 pane 을 열고 셸
  *  프롬프트가 뜨면 `claude --resume <id>` 주입(이어가기). newroom=true 면 새 방. */
-export async function resumeSession(id: string, cwd?: string, newroom = false): Promise<boolean> {
+export async function resumeSession(id: string, cwd?: string, newroom = false, attach = false): Promise<boolean> {
   if (!id) return false;
   try {
     const q = new URLSearchParams({ id });
     if (cwd) q.set('cwd', cwd);
     if (newroom) q.set('newroom', '1');
+    if (attach) q.set('attach', '1');
     const r = await fetch(`${BASE}/session-resume?${q}`, { method: 'POST' });
     if (!r.ok) return false;
     const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
