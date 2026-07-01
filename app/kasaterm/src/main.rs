@@ -2515,6 +2515,7 @@ pub(crate) enum SettingsCat {
     General,
     Appearance,
     Shell,
+    Claude,
 }
 
 /// The two free-text fields in the settings form. Tracks which one (if any)
@@ -2523,6 +2524,7 @@ pub(crate) enum SettingsCat {
 pub(crate) enum SettingsInput {
     CwdPath,
     Shell,
+    ClaudeExtra,
 }
 
 /// Clickable targets painted into the settings screen, collected each frame for
@@ -2538,6 +2540,10 @@ pub(crate) enum SettingsAction {
     FocusShell,
     ThemeMode(&'static str),
     Accent(String),
+    ToggleClaudePersona,
+    ClaudeModel(String),
+    ClaudeEffort(String),
+    FocusClaudeExtra,
 }
 
 /// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
@@ -3115,6 +3121,13 @@ struct App {
     set_file_tree_default: bool,
     set_footer_default: bool,
     set_shell: String,
+    /// Per-pane claude wrapper injection (the shim reads these): persona on/off,
+    /// model/effort overrides, and free-form extra args. Invariants
+    /// (session-id/settings/task-list) stay hardcoded and are never exposed here.
+    set_claude_persona: bool,
+    set_claude_model: String,
+    set_claude_effort: String,
+    set_claude_extra: String,
     /// True when opening settings auto-expanded a collapsed sidebar, so closing
     /// can restore it (but leaves a sidebar the user opened themselves alone).
     settings_expanded_sidebar: bool,
@@ -3383,6 +3396,7 @@ impl App {
             settings_open: std::env::var("KASATERM_OPEN_SETTINGS").is_ok(),
             settings_cat: match std::env::var("KASATERM_OPEN_SETTINGS").as_deref() {
                 Ok("shell") => SettingsCat::Shell,
+                Ok("claude") => SettingsCat::Claude,
                 Ok("appearance") => SettingsCat::Appearance,
                 _ => SettingsCat::General,
             },
@@ -3390,6 +3404,10 @@ impl App {
             set_file_tree_default: socket::read_file_tree_default(),
             set_footer_default: socket::read_footer_default(),
             set_shell: socket::read_default_shell().unwrap_or_default(),
+            set_claude_persona: socket::read_claude_persona(),
+            set_claude_model: socket::read_claude_model(),
+            set_claude_effort: socket::read_claude_effort(),
+            set_claude_extra: socket::read_claude_extra(),
             settings_expanded_sidebar: false,
             settings_input: None,
             settings_rects: Vec::new(),
@@ -3876,7 +3894,7 @@ pub(crate) fn proxy_env(pane_id: &str) -> Vec<(String, String)> {
 /// instead of edits to ~/.claude/settings.json, so claude outside a kasaterm
 /// pane runs exactly as the user configured it and install-hooks.sh is no
 /// longer needed.
-fn install_claude_hook_shim(shim_dir: &std::path::Path) {
+pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     // The wrapper is a POSIX sh script; the Windows pane PATH has no sh.
     if cfg!(windows) {
         return;
@@ -3926,6 +3944,36 @@ fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             return;
         }
     }
+    // 설정창 "클로드" 탭 노브를 shim 에 인라인 — 파싱은 여기 Rust 가 하고 shim 은 순수 sh 로
+    // 남긴다(hot path 가벼움). 아래 라인들은 전부 PERSONA_OK 게이트를 공유하므로
+    // attach/agents/subcommand(case 가 PERSONA_OK 를 비움)엔 안 붙어 서브커맨드를 오염 안
+    // 시킨다. 불변식(session-id/--settings/task-list)은 노브가 아니라 계속 하드코딩.
+    let persona_on = socket::read_claude_persona();
+    let model = socket::read_claude_model();
+    let effort = socket::read_claude_effort();
+    let extra = socket::read_claude_extra();
+    let extra = extra.trim();
+    let persona_line = if persona_on {
+        "[ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PERSONA\" ] && set -- --append-system-prompt \"$KASATERM_PERSONA\" \"$@\"\n".to_string()
+    } else {
+        String::new()
+    };
+    let model_line = if model.is_empty() {
+        String::new()
+    } else {
+        format!("[ -n \"$PERSONA_OK\" ] && set -- --model {model} \"$@\"\n")
+    };
+    let effort_line = if effort.is_empty() {
+        String::new()
+    } else {
+        format!("[ -n \"$PERSONA_OK\" ] && export CLAUDE_EFFORT={effort}\n")
+    };
+    let extra_line = if extra.is_empty() {
+        String::new()
+    } else {
+        format!("[ -n \"$PERSONA_OK\" ] && set -- {extra} \"$@\"\n")
+    };
+    let persona_block = format!("{persona_line}{model_line}{effort_line}{extra_line}");
     let wrapper = format!("#!/bin/sh\n\
 # kasaterm pane-only claude wrapper — injects the collab hooks session-scoped\n\
 # (--settings) so ~/.claude/settings.json stays untouched. Outside a pane this\n\
@@ -3947,8 +3995,8 @@ for a in \"$@\"; do [ \"$a\" = \"--settings\" ] && USER_SETTINGS=1 && break; don
 PERSONA_OK=1\n\
 # attach/agents 는 서브커맨드 — persona·session-id 를 얹으면 깨진다(거노: 이어받기 안 붙던 원인).\n\
 # --bg 는 session-id 를 자기가 관리(경고)하지만 persona(시스템프롬프트)는 새 세션이라 붙인다(거노 #2).\n\
-case \" $* \" in *\" attach \"*|*\" agents \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\" --bg \"*|*\" --background \"*) SID=\"\" ;; *\" --session-id \"*|*\" --resume \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
-[ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PERSONA\" ] && set -- --append-system-prompt \"$KASATERM_PERSONA\" \"$@\"\n\
+case \" $* \" in *\" attach \"*|*\" agents \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\" --bg \"*|*\" --background \"*) SID=\"\" ;; *\" --session-id \"*|*\" --resume \"*|*\" --continue \"*|*\" -c \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
+{pblk}\
 [ -n \"$SID\" ] && set -- --session-id \"$SID\" \"$@\"\n\
 # task store(~/.claude/tasks/<id>)를 transcript session 과 같은 키로 묶는다 — 없으면 claude\n\
 # 가 매 실행 임의 session-<hex8> 로 task 를 저장해 pane↔task 매핑이 끊긴다(거노: 유즈\n\
@@ -3958,7 +4006,7 @@ if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
-        hd = hooks_dir.display());
+        hd = hooks_dir.display(), pblk = persona_block);
     let wrapper_path = shim_dir.join("claude");
     if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");
