@@ -696,7 +696,7 @@ export interface TerminalPeekPanelProps {
   /** 오프라인(과거) 세션 읽기 전용 미리보기 — 라이브 pane 없이 uuid+cwd 로 jsonl 을 1회
    *  읽어 대화만 렌더. 입력창·라이브 폴링·학생 액션은 끄고, 하단에 '현재 터미널에 입력'
    *  이어가기 액션바를 띄운다. 있으면 surfaceId 는 빈 값('')으로 들어온다. */
-  session?: { id: string; cwd: string; label: string };
+  session?: { id: string; cwd: string; label: string; transferred?: boolean };
   /** 서브에이전트 드릴인 — 부모 pane(parentSurface)이 소환한 서브에이전트(agentId)의
    *  대화를 따로 보는 모드. 읽기 전용(입력 없음). 있으면 surfaceId 는 빈 값('')으로 들어온다. */
   subagent?: { parentSurface: string; agentId: string; agentType: string; label: string };
@@ -1188,8 +1188,27 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       // ESC/Enter 직후 suppress 창 동안은 메뉴 재감지 보류(닫은 카드가 stale 화면으로 재등장 방지).
       const suppressed = Date.now() < menuSuppressRef.current;
       if (aq) {
-        const q = aq.input.questions![0];
-        // ESC 로 닫은 질문이면 카드 부활 금지(거노: esc 취소). 다른 질문이면 dismiss 해제 후 표시.
+        const qs = aq.input.questions!;
+        // AskUserQuestion 이 질문을 여러 개 담아도 claude TUI 는 하나씩 순차로 띄운다(질문1 답
+        // → 질문2 표시). 무조건 [0]이면 2번째 질문부터 화면과 어긋나 카드가 안 맞거나 안 뜬다
+        // (거노: 질문 2개↑ 안 보임). 화면에 지금 뜬 옵션 라벨을 각 질문 옵션과 대조해 현재 질문을
+        // 고른다 — 옵션 텍스트(preview/desc)는 정확한 aq 것을 쓰고, 인덱스만 화면으로 결정.
+        const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+        let q = qs[0];
+        if (qs.length > 1) {
+          const scr = parsePromptMenu(screen);
+          const scrLabels = scr ? scr.options.map((o) => norm(o.label)).filter(Boolean) : [];
+          const matched = scrLabels.length
+            ? qs.find((x) =>
+                x.options.some((o) => {
+                  const ql = norm(o.label);
+                  return ql && scrLabels.some((sl) => ql.startsWith(sl) || sl.startsWith(ql));
+                }),
+              )
+            : undefined;
+          if (matched) q = matched;
+        }
+        // ESC 로 닫은/숨긴 질문이면 카드 부활 금지(거노: esc 취소). 다른 질문이면 dismiss 해제 후 표시.
         if (q.question === dismissedQRef.current) {
           setMenu(null);
         } else {
@@ -1500,7 +1519,14 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           {/* 라이브 = 캐릭터명(굵게) + 작업제목(dim). offline/sub 는 합본 라벨 + 배지 그대로. */}
           {offline ? (
             <><span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 13, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title}</span>
-            <span style={{ flexShrink: 0, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-cream-200)', color: 'var(--cth-ink-500)', fontWeight: 700, fontSize: 10 }}>오프라인</span></>
+            {session?.transferred ? (
+              // ←← detach 로 방금 background 로 넘어온 세션 — 일반 오프라인과 구분(앰버 번개).
+              <span style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 7px', borderRadius: 6, background: 'color-mix(in srgb, #E5923A 16%, #fff)', color: '#B5701F', border: '1px solid color-mix(in srgb, #E5923A 40%, #fff)', fontWeight: 700, fontSize: 10, whiteSpace: 'nowrap' }}>
+                <svg width="9" height="9" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M9 2 3.5 9H8l-1 5 5.5-7H8l1-5Z" /></svg>백그라운드로 넘어감
+              </span>
+            ) : (
+              <span style={{ flexShrink: 0, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-cream-200)', color: 'var(--cth-ink-500)', fontWeight: 700, fontSize: 10 }}>오프라인</span>
+            )}</>
           ) : isSub ? (
             <><span style={{ fontFamily: 'var(--cth-font-display)', fontSize: 13, fontWeight: 700, color: 'var(--cth-ink-900)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{title}</span>
             <span style={{ flexShrink: 0, padding: '1px 7px', borderRadius: 6, background: 'var(--cth-sky-light)', color: 'var(--cth-sky)', fontWeight: 700, fontSize: 10 }}>서브에이전트</span></>
@@ -1950,9 +1976,23 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       {/* 인터랙티브 메뉴(/model·AskUserQuestion) — 선택지 카드. 단일=클릭 즉시 선택,
           multiSelect=체크박스 여러개 토글 후 제출(거노: 중복선택 GUI). */}
       {menu && (
-        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-sky-light)', maxHeight: 260, overflowY: 'auto' }}>
-          {menu.header && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--cth-sky)', marginBottom: 4 }}>{menu.header}</div>}
-          {menu.title && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: menu.multi ? 4 : 8 }}>{menu.title}</div>}
+        <div style={{ padding: '10px 14px', borderTop: '1px solid var(--cth-cream-200)', background: 'var(--cth-sky-light)', maxHeight: 260, overflowY: 'auto', position: 'relative' }}>
+          {/* 숨기기 — 카드만 치운다(터미널엔 키 안 보내 답은 유지). 같은 질문 부활 방지로
+              계속 숨김. ESC(취소, 터미널에 \x1b)와 구분(거노: 선택지 나올 때 숨기기). */}
+          <button
+            onClick={() => {
+              menuSuppressRef.current = Date.now() + 700;
+              dismissedQRef.current = menu.title;
+              setMenu(null);
+              setChecked(new Set());
+            }}
+            title="선택지 숨기기 — 카드만 치워요(터미널에서 직접 답할 수 있어요)"
+            style={{ position: 'absolute', top: 6, right: 8, width: 22, height: 22, border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--cth-ink-300)', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 6, zIndex: 1 }}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>
+          </button>
+          {menu.header && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 9.5, fontWeight: 800, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--cth-sky)', marginBottom: 4, paddingRight: 22 }}>{menu.header}</div>}
+          {menu.title && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700, color: 'var(--cth-ink-900)', marginBottom: menu.multi ? 4 : 8, paddingRight: 22 }}>{menu.title}</div>}
           {menu.multi && <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', marginBottom: 8 }}>여러 개 선택 가능 — 체크하고 제출</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {menu.options.map((o, oi) => {
