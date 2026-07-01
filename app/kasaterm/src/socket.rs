@@ -1696,6 +1696,22 @@ pub fn read_default_shell() -> Option<String> {
         .map(String::from)
 }
 
+/// Per-pane claude wrapper knobs, read by the shim installer and the settings
+/// "클로드" tab. Invariants (session-id / --settings / task-list) are never
+/// keyed here — they stay hardcoded in the wrapper.
+pub fn read_claude_persona() -> bool {
+    read_settings().get("claude_persona").and_then(|x| x.as_bool()).unwrap_or(true)
+}
+pub fn read_claude_model() -> String {
+    read_settings().get("claude_model").and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+pub fn read_claude_effort() -> String {
+    read_settings().get("claude_effort").and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+pub fn read_claude_extra() -> String {
+    read_settings().get("claude_extra").and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
 /// Persist the last logical window size so the next launch restores it instead
 /// of the hardcoded default. Logical (DPI-independent) so moving between a
 /// Retina and an external display restores the same on-screen size.

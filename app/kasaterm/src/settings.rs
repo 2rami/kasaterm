@@ -29,6 +29,10 @@ pub(crate) struct SettingsCtx {
     pub caret_on: bool,
     pub theme_light: bool,
     pub accent: String,
+    pub claude_persona: bool,
+    pub claude_model: String,
+    pub claude_effort: String,
+    pub claude_extra: String,
 }
 
 fn inside(r: Rect, p: (f32, f32)) -> bool {
@@ -84,6 +88,15 @@ impl App {
         }
     }
 
+    /// Re-emit the claude wrapper into the live shim dir so an already-open pane
+    /// picks up a knob change on its next `claude` run (the shim path is stable
+    /// for the process lifetime, so overwriting the file is enough — no relaunch).
+    fn regen_claude_shim(&self) {
+        if let Ok(dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
+            install_claude_hook_shim(std::path::Path::new(&dir));
+        }
+    }
+
     /// Persist the current in-memory settings to `settings.json`. Called after
     /// every control change so the choice survives a relaunch.
     fn settings_save(&self) {
@@ -91,6 +104,11 @@ impl App {
         socket::write_setting("file_tree_default", serde_json::Value::Bool(self.set_file_tree_default));
         socket::write_setting("pane_footer_default", serde_json::Value::Bool(self.set_footer_default));
         socket::write_setting("default_shell", serde_json::Value::String(self.set_shell.clone()));
+        socket::write_setting("claude_persona", serde_json::Value::Bool(self.set_claude_persona));
+        socket::write_setting("claude_model", serde_json::Value::String(self.set_claude_model.clone()));
+        socket::write_setting("claude_effort", serde_json::Value::String(self.set_claude_effort.clone()));
+        socket::write_setting("claude_extra", serde_json::Value::String(self.set_claude_extra.clone()));
+        self.regen_claude_shim();
     }
 
     /// Build the render snapshot. Caller is responsible for being outside the
@@ -113,6 +131,10 @@ impl App {
             caret_on: self.last_blink_on,
             theme_light: theme::is_light(),
             accent: theme::accent_name().to_string(),
+            claude_persona: self.set_claude_persona,
+            claude_model: self.set_claude_model.clone(),
+            claude_effort: self.set_claude_effort.clone(),
+            claude_extra: self.set_claude_extra.clone(),
         }
     }
 
@@ -209,6 +231,23 @@ impl App {
                 socket::write_setting("accent", serde_json::Value::String(name));
                 self.repaint_all();
             }
+            SettingsAction::ToggleClaudePersona => {
+                self.set_claude_persona = !self.set_claude_persona;
+                self.settings_save();
+            }
+            SettingsAction::ClaudeModel(m) => {
+                self.set_claude_model = m;
+                self.settings_input = None;
+                self.settings_save();
+            }
+            SettingsAction::ClaudeEffort(e) => {
+                self.set_claude_effort = e;
+                self.settings_input = None;
+                self.settings_save();
+            }
+            SettingsAction::FocusClaudeExtra => {
+                self.settings_input = Some(SettingsInput::ClaudeExtra);
+            }
         }
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
@@ -225,6 +264,7 @@ impl App {
         let buf = match field {
             SettingsInput::CwdPath => &mut self.set_cwd_mode,
             SettingsInput::Shell => &mut self.set_shell,
+            SettingsInput::ClaudeExtra => &mut self.set_claude_extra,
         };
         match &event.logical_key {
             Key::Named(NamedKey::Backspace) => {
@@ -270,6 +310,7 @@ pub(crate) fn paint_settings(
         (SettingsCat::General, "일반"),
         (SettingsCat::Appearance, "모양"),
         (SettingsCat::Shell, "셸"),
+        (SettingsCat::Claude, "클로드"),
     ];
     let mut cy = ay + 52.0;
     for (cat, label) in cats {
@@ -488,6 +529,77 @@ pub(crate) fn paint_settings(
                 text_field(g, r, &ctx.shell, focused, ctx.caret_on, ctx.cursor);
                 rects.push((SettingsAction::FocusShell, r));
             }
+        }
+        SettingsCat::Claude => {
+            let mut y = fy;
+            // 페르소나 주입 (토글)
+            section_label(g, fx, y, "페르소나 주입");
+            y += 24.0;
+            help_text(g, fx, y, "이 pane의 캐릭터 정체성을 claude 시스템 프롬프트에 붙임");
+            y += 28.0;
+            let pr = (fx, y, 52.0, 30.0);
+            toggle(g, pr, ctx.claude_persona, ctx.cursor);
+            rects.push((SettingsAction::ToggleClaudePersona, pr));
+            y += 30.0 + ROW_GAP;
+            // 모델 (세그먼트)
+            section_label(g, fx, y, "모델");
+            y += 24.0;
+            help_text(g, fx, y, "claude 기본을 덮어쓸 모델 (기본 = 사용자 설정 그대로)");
+            y += 26.0;
+            let models: [(&str, &str); 4] =
+                [("", "기본"), ("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")];
+            let mut sx = fx;
+            for (val, label) in models {
+                let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
+                let r = (sx, y, tw, 32.0);
+                let sel = ctx.claude_model == val;
+                let hover = inside(r, ctx.cursor);
+                round_rect(
+                    g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
+                    if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
+                );
+                g.draw_text(
+                    r.0 + 14.0, r.1 + 8.0, label,
+                    gpu::DrawOpts { font_size: 13.0, color: if sel { theme::bg() } else { theme::text_dim() }, bold: sel, italic: false },
+                );
+                rects.push((SettingsAction::ClaudeModel(val.to_string()), r));
+                sx += tw + 8.0;
+            }
+            y += 44.0 + ROW_GAP;
+            // Effort (세그먼트) — CLAUDE_EFFORT env
+            section_label(g, fx, y, "Effort");
+            y += 24.0;
+            help_text(g, fx, y, "추론 강도(CLAUDE_EFFORT). 기본 = 건드리지 않음");
+            y += 26.0;
+            let efforts: [(&str, &str); 5] =
+                [("", "기본"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh")];
+            let mut sx = fx;
+            for (val, label) in efforts {
+                let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
+                let r = (sx, y, tw, 32.0);
+                let sel = ctx.claude_effort == val;
+                let hover = inside(r, ctx.cursor);
+                round_rect(
+                    g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
+                    if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
+                );
+                g.draw_text(
+                    r.0 + 14.0, r.1 + 8.0, label,
+                    gpu::DrawOpts { font_size: 13.0, color: if sel { theme::bg() } else { theme::text_dim() }, bold: sel, italic: false },
+                );
+                rects.push((SettingsAction::ClaudeEffort(val.to_string()), r));
+                sx += tw + 8.0;
+            }
+            y += 44.0 + ROW_GAP;
+            // 추가 인자 (텍스트) — 매 실행 덧붙이는 자유 플래그
+            section_label(g, fx, y, "추가 인자");
+            y += 24.0;
+            help_text(g, fx, y, "claude 실행에 항상 덧붙일 플래그 (예: --verbose)");
+            y += 28.0;
+            let r = (fx, y, fw.min(420.0), 34.0);
+            let focused = ctx.input == Some(SettingsInput::ClaudeExtra);
+            text_field(g, r, &ctx.claude_extra, focused, ctx.caret_on, ctx.cursor);
+            rects.push((SettingsAction::FocusClaudeExtra, r));
         }
     }
 
