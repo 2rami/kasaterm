@@ -696,7 +696,7 @@ export interface TerminalPeekPanelProps {
   /** 오프라인(과거) 세션 읽기 전용 미리보기 — 라이브 pane 없이 uuid+cwd 로 jsonl 을 1회
    *  읽어 대화만 렌더. 입력창·라이브 폴링·학생 액션은 끄고, 하단에 '현재 터미널에 입력'
    *  이어가기 액션바를 띄운다. 있으면 surfaceId 는 빈 값('')으로 들어온다. */
-  session?: { id: string; cwd: string; label: string; transferred?: boolean };
+  session?: { id: string; cwd: string; label: string; transferred?: boolean; daemonShort?: string };
   /** 서브에이전트 드릴인 — 부모 pane(parentSurface)이 소환한 서브에이전트(agentId)의
    *  대화를 따로 보는 모드. 읽기 전용(입력 없음). 있으면 surfaceId 는 빈 값('')으로 들어온다. */
   subagent?: { parentSurface: string; agentId: string; agentType: string; label: string };
@@ -2190,10 +2190,11 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               flex: 1, fontFamily: 'var(--cth-font-mono)', fontSize: 12, color: 'var(--cth-ink-700)',
               background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', borderRadius: 8,
               padding: '7px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            }}>claude --resume {session!.id}</code>
+            }}>{session!.daemonShort ? `claude attach ${session!.daemonShort}` : `claude --resume ${session!.id}`}</code>
             <button
               onClick={async () => {
-                const ok = await pasteToActiveTerminal(`claude --resume ${session!.id}`, false);
+                const cmd = session!.daemonShort ? `claude attach ${session!.daemonShort}` : `claude --resume ${session!.id}`;
+                const ok = await pasteToActiveTerminal(cmd, false);
                 if (ok) { void revealTerminal(1); setFlash('ok'); } else { setFlash('err'); }
                 setTimeout(() => setFlash(null), 2200);
               }}
