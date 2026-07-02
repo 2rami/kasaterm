@@ -14,7 +14,9 @@ type ViewMode = 'terminal' | 'classroom';
 // 중앙 멀티뷰 한 칸 = 살아있는 학생(surface id) 또는 오프라인 과거 세션(offline=true).
 // transferred = ←← detach(또는 저장 버튼)로 방금 background 로 넘어간 세션 — 헤더에
 // "오프라인" 대신 "백그라운드로 넘어감" 배지를 띄운다.
-type PeekItem = { id: string; title: string; offline?: boolean; cwd?: string; transferred?: boolean };
+// daemonShort = background(claude agents) 세션의 short id(8자). 있으면 이어가기 명령을
+// `claude attach <short>` 로 — background 세션은 `--resume` 불가("use claude agents to attach").
+type PeekItem = { id: string; title: string; offline?: boolean; cwd?: string; transferred?: boolean; daemonShort?: string };
 
 // dev 디자인 검증용 목 학생(URL ?mock=1). board 비어도 풀 화면을 본다.
 const MOCK_AGENTS: Agent[] = [
@@ -87,7 +89,7 @@ export function App() {
   // 보드의 background daemon 세션 클릭 → 그 session_id 의 transcript 를 중앙에 읽기 전용으로
   // 띄운다(offlinePeek). resume(pane spawn) 과 별개라 daemon 세션을 안전하게 들여다보기.
   const openBackgroundSession = (a: BackgroundAgent, transferred = false) => {
-    setOfflinePeek({ id: a.sessionId, title: a.name || a.id, offline: true, cwd: a.cwd, transferred });
+    setOfflinePeek({ id: a.sessionId, title: a.name || a.id, offline: true, cwd: a.cwd, transferred, daemonShort: a.kind === 'background' ? a.id : undefined });
     setView('terminal');
   };
   // 저장 버튼 = 그 surface 를 background 로 detach 요청. 부모=그 surface 인 background 가
@@ -352,7 +354,7 @@ export function App() {
                   title={offlinePeek.title}
                   onClose={() => setOfflinePeek(null)}
                   embedded
-                  session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred }}
+                  session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred, daemonShort: offlinePeek.daemonShort }}
                 />
               ) : (
                 // bg peek(좌, 있으면) + layout 미러(중, flex) + 서브에이전트 드릴인(우) — fg pane
@@ -365,7 +367,7 @@ export function App() {
                         title={offlinePeek.title}
                         onClose={() => setOfflinePeek(null)}
                         embedded
-                        session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred }}
+                        session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred, daemonShort: offlinePeek.daemonShort }}
                       />
                     </div>
                   )}
