@@ -25,6 +25,7 @@ pub mod backend;
 pub mod methods;
 pub mod protocol;
 pub mod server;
+pub mod sessions;
 pub mod transport;
 
 pub use backend::{Backend, SplitDirection};

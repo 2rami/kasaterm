@@ -1,6 +1,7 @@
+import { useStore } from '@/store';
 import { resumeSession, killBackgroundAgent, type BackgroundAgent } from '@/lib/mcp';
 
-// claude agents (pane 밖에서 도는 daemon 세션) 한 행 — Board 의 '백그라운드' 섹션이 쓴다.
+// claude agents (pane 밖에서 도는 daemon 세션) 한 행 — '에이전트' 탭이 쓴다.
 // 데이터/폴링은 App 이 store.backgroundAgents 로 채운다(3s). '이어받기'→resumeSession
 // 으로 그 세션을 새 pane 의 foreground 로 승격(거느리던 학생 호출).
 
@@ -47,12 +48,31 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
           {fmtAgo(a.startedAt)} · {shortCwd(a.cwd)}
         </div>
       </div>
+      {isBg && (
+        // 돌아갈 pane 이 살아있나(parentSurface) vs 터미널과 분리돼 떠도나(orphan). 터미널이
+        // 꺼지거나 다른 kasaterm 이면 parentSurface 가 비어 '독립' — shim 도 dangling 상태.
+        <span title={a.parentSurface
+          ? `이 터미널의 pane ${a.parentSurface} 에서 넘어옴 — 이어받기 가능`
+          : '터미널과 분리돼 도는 세션 — 새 pane 으로만 이어받기'}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 3, fontFamily: 'var(--cth-font-ui)',
+            fontSize: 9, fontWeight: 700, whiteSpace: 'nowrap', padding: '2px 6px', borderRadius: 999,
+            color: a.parentSurface ? 'var(--cth-mint)' : 'var(--cth-ink-500)',
+            background: a.parentSurface ? 'color-mix(in srgb, var(--cth-mint) 16%, #fff)' : 'var(--cth-cream-200)',
+          }}>
+          <span style={{ width: 5, height: 5, borderRadius: 999, flexShrink: 0, background: a.parentSurface ? 'var(--cth-mint)' : 'var(--cth-ink-300)' }} />
+          {a.parentSurface ? `연결 ${a.parentSurface}` : '독립'}
+        </span>
+      )}
       <span style={{
         fontFamily: 'var(--cth-font-ui)', fontSize: 9, fontWeight: 700, color: '#fff',
         background: isBg ? st.bg : 'var(--cth-lilac)', padding: '2px 6px', borderRadius: 999, whiteSpace: 'nowrap',
       }}>{isBg ? st.label : '활성'}</span>
       {isBg && (
-        <button onClick={() => void resumeSession(a.sessionId, a.cwd, false, true)} style={{
+        // attach 는 daemon 이 부여한 short-id(a.id, 8자)를 받는다 — full sessionId(UUID)를
+        // 넘기면 claude 가 'attach' 를 프롬프트로 먹어 재진입 실패(2.1.197 실측). --resume 은
+        // background 세션에 아예 불가("running as background agent, use claude agents to attach").
+        <button onClick={() => void resumeSession(a.id, a.cwd, false, true)} style={{
           fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 600, color: '#fff', background: 'var(--cth-sky)',
           border: 'none', borderRadius: 7, padding: '4px 9px', cursor: 'pointer', whiteSpace: 'nowrap',
         }}>이어받기</button>
@@ -68,6 +88,28 @@ export function AgentRow({ a, onView }: { a: BackgroundAgent; onView?: (a: Backg
           }}
         >×</button>
       )}
+    </div>
+  );
+}
+
+// '에이전트' 탭 본문 — pane 밖에서 도는 daemon claude 세션 목록(거노: 보드 현황에서
+// 분리해 별도 탭으로). 데이터는 App 이 store.backgroundAgents 로 채운다(3s 폴링).
+// 모모이처럼 다른 방·detach 된 세션도 cwd 무관 전체가 여기 모인다(claude agents --all).
+export function AgentsPanel({ onOpenBackground }: { onOpenBackground?: (a: BackgroundAgent) => void }) {
+  const backgroundAgents = useStore((s) => s.backgroundAgents);
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--cth-cream-100)' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: 10, minHeight: 0 }}>
+        {backgroundAgents.length === 0 ? (
+          <div style={{ color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 11, textAlign: 'center', padding: '28px 0', lineHeight: 1.7 }}>
+            pane 밖에서 도는<br />백그라운드 세션이 없어요
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {backgroundAgents.map((a) => <AgentRow key={a.sessionId} a={a} onView={onOpenBackground} />)}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,8 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useStore, isAwaitingTeacher, isUnconfirmed } from '@/store';
-import { AgentRow } from './AgentsTab';
 import { saveSession } from '@/lib/mcp';
-import type { BackgroundAgent } from '@/lib/mcp';
 import { SpritePortrait } from './SpritePortrait';
 import { assignSprites } from '@/lib/sprites';
 import { fetchPaneTasks, type PaneTask } from '@/lib/mcp';
@@ -30,10 +28,9 @@ const SectionLabel = ({ children }: { children: string }) => (
 
 // board = 모든 pane 작업 현황·상세(업무 흡수) + pane 간 tell 소통 피드. 모모톡·inbox 대체(거노).
 // 빨강 '확인 필요'는 waiting_for(AskUserQuestion·권한) 있는 것만 — isAwaitingTeacher 가 그 판정.
-export function BoardPanel({ onPickStudent, onOpenBackground }: { onPickStudent?: (id: string, title: string) => void; onOpenBackground?: (a: BackgroundAgent) => void }) {
+export function BoardPanel({ onPickStudent, onSaved }: { onPickStudent?: (id: string, title: string) => void; onSaved?: (surface: string) => void }) {
   const agents = useStore((s) => s.agents);
   const acked = useStore((s) => s.acked);
-  const backgroundAgents = useStore((s) => s.backgroundAgents);
   const sprited = assignSprites(agents);
   const spriteOf = new Map(sprited.map((a) => [a.id, a.spriteChar || a.character]));
   const [paneTasks, setPaneTasks] = useState<Record<string, PaneTask[]>>({});
@@ -116,7 +113,7 @@ export function BoardPanel({ onPickStudent, onOpenBackground }: { onPickStudent?
                   <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.project || '대기 중'}</div>
                 </div>
                 <button
-                  onClick={(e) => { e.stopPropagation(); void saveSession(a.id); }}
+                  onClick={async (e) => { e.stopPropagation(); const ok = await saveSession(a.id); if (ok) onSaved?.(a.id); }}
                   title="대화 저장 — background daemon 으로 보내 터미널이 꺼져도 유지(←← detach)"
                   style={{ flexShrink: 0, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', background: 'transparent', border: '1px solid var(--cth-cream-200)', borderRadius: 6, padding: '2px 7px', cursor: 'pointer' }}
                 >저장</button>
@@ -185,16 +182,6 @@ export function BoardPanel({ onPickStudent, onOpenBackground }: { onPickStudent?
             </div>
           );
         })}
-
-        {/* 백그라운드 에이전트 — claude agents (pane 밖 daemon 세션). 이어받기로 foreground 승격. */}
-        {backgroundAgents.length > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <SectionLabel>백그라운드 에이전트</SectionLabel>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
-              {backgroundAgents.map((a) => <AgentRow key={a.sessionId} a={a} onView={onOpenBackground} />)}
-            </div>
-          </div>
-        )}
 
         {/* 소통 — tell 로그 연결 후 채워진다(모모이 버그 후 Rust 로그 작업). */}
         <div style={{ marginTop: 16 }}>
