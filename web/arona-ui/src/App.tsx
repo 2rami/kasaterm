@@ -262,13 +262,16 @@ export function App() {
   // 터미널 layout(% 배치) 폴링 → 중앙 멀티뷰가 터미널 split 을 그대로 미러(거노: pane 위치
   // 동기화). 과거 세션 단독 보기 중이거나 터미널 뷰가 아니면 폴링 불필요.
   useEffect(() => {
-    if (forceMock || mode !== 'god' || view !== 'terminal' || offlinePeek) return;
+    // offlinePeek(bg 대화) 중에도 layout 은 계속 폴링한다 — fg pane 이 살아있으면 bg 를 왼쪽
+    // 타일로 두고 그 옆에 fg 그리드를 나란히 그려야 하고, fg 가 없으면 fetchLayout 이 빈 배열이라
+    // 자연히 bg 단독 전체가 된다(렌더의 layoutRects.length===0 분기).
+    if (forceMock || mode !== 'god' || view !== 'terminal') return;
     let stop = false;
     const tick = async () => { const r = await fetchLayout(); if (!stop) setLayoutRects(r); };
     void tick();
     const iv = setInterval(tick, 1500);
     return () => { stop = true; clearInterval(iv); };
-  }, [mode, view, offlinePeek]);
+  }, [mode, view]);
   // 줌된 pane 이 split/close 로 layout 에서 사라지면 전체화면 자동 해제(유령 줌 방지).
   useEffect(() => {
     if (zoomedSurface && !layoutRects.some((r) => r.surface_id === zoomedSurface)) setZoomedSurface(null);
@@ -342,8 +345,8 @@ export function App() {
           {/* 중앙: 터미널 pane 그리드(기본 뷰어) / 교실(캐릭터) / 카드 */}
           <div style={{ flex: 1, overflow: view === 'terminal' ? 'hidden' : 'auto', padding: view === 'terminal' ? 0 : view === 'classroom' ? 8 : 'var(--cth-space-4)' }}>
             {view === 'terminal' ? (
-              offlinePeek ? (
-                // 과거 세션 단독 보기(읽기 전용) — layout 미러와 별개로 전체를 덮는다.
+              offlinePeek && layoutRects.length === 0 ? (
+                // fg pane 이 하나도 없음(터미널 꺼짐/claude 안 뜸) → bg 대화 단독 전체.
                 <TerminalPeekPanel
                   surfaceId=""
                   title={offlinePeek.title}
@@ -352,9 +355,20 @@ export function App() {
                   session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred }}
                 />
               ) : (
-                // layout 미러(좌, flex) + 서브에이전트 드릴인 타일(우, 별도 열) — 부모 옆에
-                // 서브에이전트 대화를 동시에(거노: "따로 볼수있게").
+                // bg peek(좌, 있으면) + layout 미러(중, flex) + 서브에이전트 드릴인(우) — fg pane
+                // 이 살아있으면 bg 대화가 전체를 덮지 않고 왼쪽 타일로 나란히(거노: 왼 bg·오 fg).
                 <div style={{ height: '100%', display: 'flex' }}>
+                  {offlinePeek && (
+                    <div style={{ width: 360, flexShrink: 0, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-100)' }}>
+                      <TerminalPeekPanel
+                        surfaceId=""
+                        title={offlinePeek.title}
+                        onClose={() => setOfflinePeek(null)}
+                        embedded
+                        session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred }}
+                      />
+                    </div>
+                  )}
                   <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
                     {layoutRects.length ? (
                       <div style={{ position: 'relative', height: '100%', background: 'var(--cth-cream-100)' }}>
