@@ -57,22 +57,56 @@ impl Backend for StandaloneBackend {
         anyhow::bail!("standalone webview server has no live panes")
     }
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {
-        // tell — 라이브 pane 이 없으니 대상은 background claude 세션. sessionId 의 bg-pty-host
-        // 소켓(claude 가 background 세션의 pty 를 노출)에 텍스트+CR 을 써 stdin 으로 주입한다.
-        // 실험적: claude 내부 소켓 프로토콜에 의존해 버전이 바뀌면 깨질 수 있다.
+        // tell — background claude 세션에 텍스트 주입. bg-pty-host pty 소켓에 raw write 는
+        // 안 먹는다: 실제 진입은 control.sock 의 nudge→attach(op) 핸드셰이크 + 세션 고정 auth
+        // 토큰이 필요하다(인터포저로 프로토콜 해독). auth 출처가 불투명하므로 그 핸드셰이크를
+        // 직접 재현하는 대신, `claude attach <sid>` 를 forkpty 로 띄운다 — claude 가 nudge/
+        // attach/auth 를 다 처리하니 우리는 pty stdin 에 텍스트+CR 을 쓰고 잠시 뒤 SIGTERM 으로
+        // detach 하면 된다. (실환경 idle 세션 검증 필요 — blocked/working 세션엔 즉시 안 먹음.)
         let sid = surface_id
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("standalone tell requires a session id (surface)"))?;
-        let short = &sid[..sid.len().min(8)];
-        let sock = find_bg_pty_sock(short).ok_or_else(|| {
-            anyhow::anyhow!("no bg-pty-host socket for session {sid} — 라이브 터미널 세션이거나 종료됨")
-        })?;
-        use std::io::Write;
-        let mut stream = std::os::unix::net::UnixStream::connect(&sock)
-            .map_err(|e| anyhow::anyhow!("connect {sock:?}: {e}"))?;
-        stream.write_all(text.as_bytes())?;
-        stream.write_all(b"\r")?;
-        stream.flush()?;
+        let short: String = sid.chars().take(8).collect();
+        let claude = crate::http::claude_bin();
+        let claude_c = std::ffi::CString::new(claude.to_string_lossy().as_bytes())
+            .map_err(|_| anyhow::anyhow!("bad claude path"))?;
+        let attach_c = std::ffi::CString::new("attach").unwrap();
+        let short_c =
+            std::ffi::CString::new(short).map_err(|_| anyhow::anyhow!("bad session id"))?;
+        unsafe {
+            let mut master: libc::c_int = 0;
+            let pid = libc::forkpty(
+                &mut master,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            if pid < 0 {
+                anyhow::bail!("forkpty failed");
+            }
+            if pid == 0 {
+                // child: exec `claude attach <short>` on the pty.
+                let argv = [claude_c.as_ptr(), attach_c.as_ptr(), short_c.as_ptr(), std::ptr::null()];
+                libc::execv(claude_c.as_ptr(), argv.as_ptr());
+                libc::_exit(127);
+            }
+            // parent: attach 화면이 뜰 시간을 준 뒤(pty output drain) 텍스트 주입, claude 가
+            // user 메시지로 처리할 시간을 두고 SIGTERM 으로 detach(세션은 daemon 에 유지).
+            libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+            let mut buf = [0u8; 4096];
+            let drain_until = std::time::Instant::now() + std::time::Duration::from_millis(2500);
+            while std::time::Instant::now() < drain_until {
+                libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let payload = format!("{text}\r");
+            let _ = libc::write(master, payload.as_ptr() as *const libc::c_void, payload.len());
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+            libc::kill(pid, libc::SIGTERM);
+            let mut status = 0;
+            libc::waitpid(pid, &mut status, 0);
+            libc::close(master);
+        }
         Ok(())
     }
     fn send_key(&self, _surface_id: Option<&str>, _key: &str) -> Result<()> {
@@ -151,32 +185,4 @@ impl Backend for StandaloneBackend {
         transcript_tail_text(&self.root, surface_id, turns)
             .ok_or_else(|| anyhow::anyhow!("no transcript for session {surface_id}"))
     }
-}
-
-/// background claude 세션의 stdin 소켓을 찾는다. claude 는 `--bg-pty-host <sock>` 로 각
-/// background 세션의 pty 를 `<tmp>/cc-daemon-<uid>/<daemon>/pty/<sessionId-8>.sock` 에 노출한다.
-/// macOS 는 /tmp, 그 외는 $TMPDIR 도 훑는다.
-fn find_bg_pty_sock(short: &str) -> Option<PathBuf> {
-    let mut roots = vec![PathBuf::from("/tmp")];
-    if let Ok(t) = std::env::var("TMPDIR") {
-        if !t.is_empty() {
-            roots.push(PathBuf::from(t));
-        }
-    }
-    for root in roots {
-        let Ok(rd) = std::fs::read_dir(&root) else { continue };
-        for entry in rd.flatten() {
-            if !entry.file_name().to_string_lossy().starts_with("cc-daemon-") {
-                continue;
-            }
-            let Ok(daemons) = std::fs::read_dir(entry.path()) else { continue };
-            for d in daemons.flatten() {
-                let sock = d.path().join("pty").join(format!("{short}.sock"));
-                if sock.exists() {
-                    return Some(sock);
-                }
-            }
-        }
-    }
-    None
 }
