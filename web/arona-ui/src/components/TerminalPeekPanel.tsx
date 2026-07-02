@@ -2183,17 +2183,21 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           borderTop: '1px solid var(--cth-cream-200)', display: 'flex', flexDirection: 'column', gap: 8,
         }}>
           <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, color: 'var(--cth-ink-500)' }}>
-            이어가려면 터미널에 입력 후 직접 엔터로 실행하세요
+            {session!.daemonShort
+              ? `아래 실행 → 목록에서 '${session!.label}' 선택(enter)`
+              : '이어가려면 터미널에 입력 후 직접 엔터로 실행하세요'}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <code style={{
               flex: 1, fontFamily: 'var(--cth-font-mono)', fontSize: 12, color: 'var(--cth-ink-700)',
               background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', borderRadius: 8,
               padding: '7px 10px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            }}>{session!.daemonShort ? `claude attach ${session!.daemonShort}` : `claude --resume ${session!.id}`}</code>
+            }}>{session!.daemonShort ? 'claude agents' : `claude --resume ${session!.id}`}</code>
             <button
               onClick={async () => {
-                const cmd = session!.daemonShort ? `claude attach ${session!.daemonShort}` : `claude --resume ${session!.id}`;
+                // background(claude agents) 세션: `attach` 서브커맨드는 없다. `claude agents`
+                // 로 목록 TUI 를 열고(enter to open) 그 세션을 골라 이어간다. 과거 세션만 --resume.
+                const cmd = session!.daemonShort ? 'claude agents' : `claude --resume ${session!.id}`;
                 const ok = await pasteToActiveTerminal(cmd, false);
                 if (ok) { void revealTerminal(1); setFlash('ok'); } else { setFlash('err'); }
                 setTimeout(() => setFlash(null), 2200);
