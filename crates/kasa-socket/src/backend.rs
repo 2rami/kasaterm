@@ -121,7 +121,7 @@ impl Default for SessionsInfo {
 /// two panes are chasing the same problem and join forces. Pure
 /// metadata — nothing here touches terminal I/O. Returned by
 /// `collab.board`, filled by the transcript watcher.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PaneActivity {
     pub surface_id: String,
     /// The pane session's auto-generated title (`ai-title` line in the

@@ -1273,7 +1273,7 @@ async fn session_save_handler(
 /// login shell), so PATH lookup alone misses npm-global/local installs — probe
 /// the common locations, honoring `CLAUDE_BIN` for an explicit override, and
 /// fall back to bare `claude` (PATH) as a last resort.
-fn claude_bin() -> std::path::PathBuf {
+pub(crate) fn claude_bin() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("CLAUDE_BIN") {
         if !p.is_empty() {
             return p.into();
