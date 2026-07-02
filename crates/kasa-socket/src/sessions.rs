@@ -141,4 +141,93 @@ fn user_message_text(v: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// board 용 — 세션 jsonl 에서 (title, 마지막 user 발화). title 은 parse_session_label
+/// 과 동일(aiTitle→첫 user), last_prompt 는 가장 최근 비메타 user 텍스트. 라이브 pane 이
+/// 없는 standalone 이 background 세션들의 현황을 board 로 만들 때 쓴다.
+pub fn session_board_meta(cwd: &Path, id: &str) -> Option<(String, String)> {
+    let path = session_jsonl_path(cwd, id)?;
+    let title = parse_session_label(&path).unwrap_or_default();
+    let last_prompt = last_user_text(&path).unwrap_or_default();
+    Some((title, last_prompt))
+}
+
+/// 세션 jsonl 의 가장 최근 비메타 user 발화(앞 200자).
+fn last_user_text(path: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let f = std::fs::File::open(path).ok()?;
+    let mut last: Option<String> = None;
+    for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
+            continue;
+        }
+        if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        if let Some(t) = user_message_text(&v) {
+            let t = t.trim();
+            if !t.is_empty() && !is_meta_user_text(t) {
+                last = Some(t.chars().take(200).collect());
+            }
+        }
+    }
+    last
+}
+
+/// peek 용 — 세션 jsonl 마지막 `turns` 개 user/assistant 텍스트를 사람이 읽을 형태로.
+/// 라이브 pane 화면이 없는 standalone 에서 background 세션 '엿보기'를 대신한다.
+pub fn transcript_tail_text(cwd: &Path, id: &str, turns: usize) -> Option<String> {
+    let path = session_jsonl_path(cwd, id)?;
+    use std::io::BufRead;
+    let f = std::fs::File::open(&path).ok()?;
+    let mut msgs: Vec<String> = Vec::new();
+    for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("user") => {
+                if v.get("isMeta").and_then(|m| m.as_bool()).unwrap_or(false) {
+                    continue;
+                }
+                if let Some(t) = user_message_text(&v) {
+                    let t = t.trim();
+                    if !t.is_empty() && !is_meta_user_text(t) {
+                        msgs.push(format!("[사용자] {}", t.chars().take(500).collect::<String>()));
+                    }
+                }
+            }
+            Some("assistant") => {
+                if let Some(t) = assistant_message_text(&v) {
+                    let t = t.trim();
+                    if !t.is_empty() {
+                        msgs.push(format!("[claude] {}", t.chars().take(500).collect::<String>()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let start = msgs.len().saturating_sub(turns.max(1));
+    Some(msgs[start..].join("\n\n"))
+}
+
+/// assistant transcript 라인의 본문 텍스트 — content 블록 배열의 text 블록들을 이어붙인다.
+fn assistant_message_text(v: &serde_json::Value) -> Option<String> {
+    let content = v.get("message")?.get("content")?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    let mut out = String::new();
+    for block in content.as_array()? {
+        if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+            if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(t);
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 use crate::backend::RecentSession;
