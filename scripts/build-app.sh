@@ -115,6 +115,14 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <!-- 이게 없으면 macOS 가 Desktop/Documents/Downloads 접근 시 재승인 프롬프트를
+         띄우지 못해 조용히 EPERM 으로 막는다(자식 셸의 ls/git/brew 가 cwd 를 못 읽음). -->
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>kasaterm 이 데스크톱의 파일에 접근해 명령을 실행하고 프로젝트를 엽니다.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>kasaterm 이 문서 폴더의 파일에 접근해 명령을 실행하고 프로젝트를 엽니다.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>kasaterm 이 다운로드 폴더의 파일에 접근해 명령을 실행하고 프로젝트를 엽니다.</string>
     <key>NSRequiresAquaSystemAppearance</key>
     <false/>
     <key>SUFeedURL</key>

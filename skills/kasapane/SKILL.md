@@ -61,7 +61,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 | `kasaterm-cli rename <id> <제목>` | 헤더 제목 |
 | `kasaterm-cli color <id> <#rrggbb>` | 헤더 accent 색상 |
 | `kasaterm-cli swap <a> <b>` | 두 pane 위치 교환(내용 유지) |
-| `kasaterm-cli send --surface <id> <텍스트>` | 특정 pane에 텍스트 입력(제출 안 함) |
+| `kasaterm-cli send --surface <id> <텍스트>` | 특정 pane에 텍스트 **입력만**(Enter 안 눌림 → 입력창에 걸린 채 안 감). **셸 명령 주입 전용**(뒤에 `\n` 직접 붙일 때). 사람·claude 에게 말/통지 보낼 땐 절대 쓰지 말 것 → `tell` |
 | `kasaterm-cli tell <id> <텍스트>` | 특정 pane에 보내기+제출 — idle claude 깨움 (협업, §5) |
 | `kasaterm-cli key <id> …` | 특정 pane에 키 전송 |
 | `kasaterm-cli board` | 모든 pane이 뭘 왜 하는지 (협업, §5) |
@@ -618,7 +618,7 @@ kasaterm-cli tell %3 "지금 멈춘 거 같은데 이거 먼저 봐줘"
 `tell`은 대상 PTY에 텍스트 주입 후 `\r`로 제출 — idle claude를 새 user turn으로 깨운다. focus는 안 바뀐다.
 
 - **상대가 working/선택지 대기면 입력창에 누적**되고 즉시 처리 안 된다(claude가 입력을 큐잉). 그래서 **대화는 inbox, tell은 "지금 깨워야 한다" 싶을 때만.**
-- `send`(=`surface.send_text`)는 `\r` 없이 글자만 남는다. 깨우려면 `tell`.
+- `send`(=`surface.send_text`)는 `\r` 없이 글자만 남는다 — 입력창에 텍스트만 걸린 채 **제출 안 됨**(실측 2026-07-01: 통지를 `send`로 보냈다 미제출 → `key enter`로 뒤늦게 밀어야 했다). **동료에게 대화·통지·공유 등 어떤 텍스트든 보낼 땐 무조건 `tell`**(=send+submit). `send`는 오직 셸 명령 주입(개행 직접 포함)용이다.
 
 ### 함정
 

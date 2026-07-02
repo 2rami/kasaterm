@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { BoardPanel } from './BoardPanel';
+import { AgentsPanel } from './AgentsTab';
 import { ScheduleTab } from './ScheduleTab';
 import { GitTab } from './GitTab';
 import type { BackgroundAgent } from '@/lib/mcp';
 
-type CenterTab = 'board' | 'schedule' | 'git';
+type CenterTab = 'board' | 'agents' | 'schedule' | 'git';
 
 const TAB_LABELS: Record<CenterTab, string> = {
   board: '보드',
+  agents: '에이전트',
   schedule: '스케줄',
   git: '소스 컨트롤',
 };
@@ -19,6 +21,8 @@ export interface CommandCenterProps {
   /** 모모톡에서 학생/아로나에게 보냈을 때 — 그 학생 '학생별 대화' 탭으로 전환(거노). */
   onPickStudent?: (id: string, title: string) => void;
   onOpenBackground?: (a: BackgroundAgent) => void;
+  /** 보드 '저장' 버튼으로 그 surface 를 background 로 detach 했을 때 — App 이 넘어감 감지·토스트. */
+  onSaved?: (surface: string) => void;
   /** 타이틀바 소스컨트롤 버튼 클릭 신호(증가) — git 탭으로 전환(거노). */
   openGitTab?: number;
   /** 우측 패널 접기 — 부모(App)가 rightHidden 으로 레일 전환(거노: 가장자리 접기). */
@@ -27,10 +31,10 @@ export interface CommandCenterProps {
 
 // SCHALE OS 우측 Command Center — 대화창이 따로 안 뜨고 여기 '학생별 대화' 탭에 통합(거노).
 
-export function CommandCenter({ onPickStudent, onOpenBackground, openGitTab, onCollapse }: CommandCenterProps) {
+export function CommandCenter({ onPickStudent, onOpenBackground, onSaved, openGitTab, onCollapse }: CommandCenterProps) {
   const [tab, setTab] = useState<CenterTab>('board'); // 우측 기본 = 보드(현황·소통)
-  // 탭 순서 — 드래그로 재정렬(거노). 기본 보드/모모톡/스케줄/소스컨트롤.
-  const [tabOrder, setTabOrder] = useState<CenterTab[]>(['board', 'schedule', 'git']);
+  // 탭 순서 — 드래그로 재정렬(거노). 기본 보드/에이전트/스케줄/소스컨트롤.
+  const [tabOrder, setTabOrder] = useState<CenterTab[]>(['board', 'agents', 'schedule', 'git']);
   const [dragOverTab, setDragOverTab] = useState<CenterTab | null>(null); // 드래그 중 삽입선 위치
   const dragTabRef = useRef<CenterTab | null>(null);
   const reorderTab = (target: CenterTab) => {
@@ -134,8 +138,11 @@ export function CommandCenter({ onPickStudent, onOpenBackground, openGitTab, onC
 
       {/* 본문 — 대시보드 탭 제거(대화는 학생 클릭 시 우측 인라인, 이벤트는 기록 탭) */}
       {tab === 'board' ? (
-        /* 보드 — pane 작업 현황·상세 + 백그라운드 에이전트 + tell 소통(업무·모모톡·agents 흡수) */
-        <BoardPanel onPickStudent={onPickStudent} onOpenBackground={onOpenBackground} />
+        /* 보드 — pane 작업 현황·상세 + tell 소통(업무·모모톡 흡수). 백그라운드는 에이전트 탭으로 분리. */
+        <BoardPanel onPickStudent={onPickStudent} onSaved={onSaved} />
+      ) : tab === 'agents' ? (
+        /* 에이전트 — pane 밖 daemon claude 세션 목록(claude agents). 클릭 → 중앙에 그 세션 필터링 표시. */
+        <AgentsPanel onOpenBackground={onOpenBackground} />
       ) : tab === 'git' ? (
         /* 소스 컨트롤 — 활성 pane cwd 의 git 상태·커밋·푸시(스케줄 옆, 거노). */
         <GitTab />

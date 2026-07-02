@@ -1295,6 +1295,31 @@ fn claude_bin() -> std::path::PathBuf {
     "claude".into()
 }
 
+/// pid 프로세스 argv 의 `--resume <경로>` basename(부모 세션 uuid). ←← detach 는 부모
+/// 대화를 fork 해 새 sessionId 로 잇는데, jsonl 엔 부모 정보가 전혀 없어 이 argv 가
+/// A(원본 foreground)→B(background) 를 잇는 유일한 끈이다. macOS/Linux(ps); 그 외 None.
+fn parent_session_from_pid(pid: u64) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let cmd = String::from_utf8_lossy(&out.stdout);
+    let mut it = cmd.split_whitespace();
+    while let Some(tok) = it.next() {
+        if tok == "--resume" {
+            let path = it.next()?;
+            return std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string);
+        }
+    }
+    None
+}
+
 /// `GET /background-agents?cwd=<abs>` — the `claude agents --json --all` view:
 /// the background/interactive sessions Claude's own supervisor hosts, as
 /// `{ ok, agents: [{pid,id,cwd,kind,startedAt,sessionId,name,status,state}] }`.
@@ -1305,6 +1330,7 @@ fn claude_bin() -> std::path::PathBuf {
 /// Runs the binary directly so the shell `claude` alias/shim is bypassed; the
 /// `agents` view is read-only, so no permission flags are involved.
 async fn background_agents_handler(
+    backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let mut cmd = std::process::Command::new(claude_bin());
@@ -1315,7 +1341,35 @@ async fn background_agents_handler(
     let body = match cmd.output() {
         Ok(out) if out.status.success() => {
             match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                Ok(agents) => serde_json::json!({ "ok": true, "agents": agents }),
+                Ok(mut agents) => {
+                    // background 세션마다 부모(넘어오기 전) surface/sessionId 를 얹는다 —
+                    // 웹뷰가 "지금 보던 pane 이 background 로 넘어갔다"를 판정하는 유일한 근거.
+                    let pane_sids = backend.pane_session_ids().unwrap_or_default();
+                    if let Some(arr) = agents.as_array_mut() {
+                        for a in arr.iter_mut() {
+                            if a.get("kind").and_then(|k| k.as_str()) != Some("background") {
+                                continue;
+                            }
+                            let Some(pid) = a.get("pid").and_then(|p| p.as_u64()) else {
+                                continue;
+                            };
+                            if let Some(parent_sid) = parent_session_from_pid(pid) {
+                                if let Some(obj) = a.as_object_mut() {
+                                    if let Some((pane, _)) =
+                                        pane_sids.iter().find(|(_, sid)| *sid == parent_sid)
+                                    {
+                                        obj.insert("parentSurface".into(), serde_json::json!(pane));
+                                    }
+                                    obj.insert(
+                                        "parentSessionId".into(),
+                                        serde_json::json!(parent_sid),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    serde_json::json!({ "ok": true, "agents": agents })
+                }
                 Err(e) => serde_json::json!({ "ok": false, "error": format!("parse: {e}") }),
             }
         }
@@ -2162,6 +2216,21 @@ pub fn spawn_http_server(
     backend: Arc<dyn Backend>,
     preferred_port: u16,
 ) -> std::io::Result<u16> {
+    spawn_http_server_opts(backend, preferred_port, true)
+}
+
+/// Like [`spawn_http_server`] but lets the caller disable the schedule loop.
+/// The standalone webview server (`kasa-serve-web`) passes `run_scheduler=false`:
+/// a headless backend can't deliver a due reminder (`send_text` bails), yet the
+/// loop would still persist the item as consumed in the SHARED
+/// `~/.config/kasaterm/schedule.json` (silent reminder loss), append phantom
+/// "sensei" bubbles, and race kasaterm's own loop on the same file. Firing and
+/// consuming schedules is kasaterm's job alone.
+pub fn spawn_http_server_opts(
+    backend: Arc<dyn Backend>,
+    preferred_port: u16,
+    run_scheduler: bool,
+) -> std::io::Result<u16> {
     // Bind synchronously so we can learn (and return) the real port before
     // handing the socket to tokio.
     let listener = std::net::TcpListener::bind(("127.0.0.1", preferred_port))
@@ -2190,8 +2259,11 @@ pub fn spawn_http_server(
                         return;
                     }
                 };
-                // 스케줄러 백그라운드 타이머 — due 항목을 학생에게 발사(10s 주기).
-                tokio::spawn(schedule_loop(backend.clone()));
+                // 스케줄러 백그라운드 타이머 — due 항목을 학생에게 발사(10s 주기). standalone
+                // (run_scheduler=false)은 공유 schedule.json 을 소비/영속하면 안 됨(유령버블·유실·레이스).
+                if run_scheduler {
+                    tokio::spawn(schedule_loop(backend.clone()));
+                }
                 // ccglass-style 캡처 프록시 — claude 의 Anthropic API 호출을 가로채
                 // pane 별 대화(messages[]+SSE)를 모은다. /conversation 으로 노출.
                 let conv_store: crate::proxy::ConvStore = Default::default();
@@ -2214,6 +2286,7 @@ pub fn spawn_http_server(
                 let recent_sessions_backend = backend.clone();
                 let session_resume_backend = backend.clone();
                 let session_save_backend = backend.clone();
+                let background_agents_backend = backend.clone();
                 let session_reset_backend = backend.clone();
                 let open_image_backend = backend.clone();
                 let open_markdown_backend = backend.clone();
@@ -2425,8 +2498,8 @@ pub fn spawn_http_server(
                     )
                     .route(
                         "/background-agents",
-                        get(|q: Query<std::collections::HashMap<String, String>>| {
-                            background_agents_handler(q)
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            background_agents_handler(background_agents_backend.clone(), q)
                         }),
                     )
                     .route(

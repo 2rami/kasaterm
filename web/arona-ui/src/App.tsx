@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore, type Agent } from './store';
 import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
@@ -12,7 +12,9 @@ import { assignSprites } from './lib/sprites';
 
 type ViewMode = 'terminal' | 'classroom';
 // 중앙 멀티뷰 한 칸 = 살아있는 학생(surface id) 또는 오프라인 과거 세션(offline=true).
-type PeekItem = { id: string; title: string; offline?: boolean; cwd?: string };
+// transferred = ←← detach(또는 저장 버튼)로 방금 background 로 넘어간 세션 — 헤더에
+// "오프라인" 대신 "백그라운드로 넘어감" 배지를 띄운다.
+type PeekItem = { id: string; title: string; offline?: boolean; cwd?: string; transferred?: boolean };
 
 // dev 디자인 검증용 목 학생(URL ?mock=1). board 비어도 풀 화면을 본다.
 const MOCK_AGENTS: Agent[] = [
@@ -41,6 +43,20 @@ export function App() {
   // 그 surface 하나만 풀커버로, 나머지는 가린다. 방 전환·layout 에서 사라지면 자동 해제.
   const [zoomedSurface, setZoomedSurface] = useState<string | null>(null);
   const [offlinePeek, setOfflinePeek] = useState<PeekItem | null>(null);
+  // ←← detach(또는 저장 버튼)로 "지금 보던 세션이 background daemon 으로 넘어갔다"를 감지해
+  // 그 후신 대화로 자동 전환하기 위한 상태. handledDetach = 이미 전환한 sessionId(사용자가
+  // 닫은 뒤 재강탈 방지), pendingDetach = 저장 버튼을 누른 surface(그 부모를 가진 bg 가 뜨면
+  // 전환), toast = 우하단 알림 pill.
+  const handledDetach = useRef<Set<string>>(new Set());
+  // 폴링 tick 사이 background sessionId 집합 — "방금 새로 등장한" 세션 감지용(터미널 ←← detach).
+  const prevBgIds = useRef<Set<string> | null>(null);
+  const [pendingDetach, setPendingDetach] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    if (!toast) return;
+    const t = window.setTimeout(() => setToast(null), 3200);
+    return () => window.clearTimeout(t);
+  }, [toast]);
   // wry webview(WKWebView)는 브라우저와 달리 ⌘R/F5 기본 새로고침이 없다(거노: webview도
   // 새로고침되게). dev 서버(5173) 브라우저 기본과 겹쳐도 무해.
   useEffect(() => {
@@ -70,9 +86,17 @@ export function App() {
   };
   // 보드의 background daemon 세션 클릭 → 그 session_id 의 transcript 를 중앙에 읽기 전용으로
   // 띄운다(offlinePeek). resume(pane spawn) 과 별개라 daemon 세션을 안전하게 들여다보기.
-  const openBackgroundSession = (a: BackgroundAgent) => {
-    setOfflinePeek({ id: a.sessionId, title: a.name || a.id, offline: true, cwd: a.cwd });
+  const openBackgroundSession = (a: BackgroundAgent, transferred = false) => {
+    setOfflinePeek({ id: a.sessionId, title: a.name || a.id, offline: true, cwd: a.cwd, transferred });
     setView('terminal');
+  };
+  // 저장 버튼 = 그 surface 를 background 로 detach 요청. 부모=그 surface 인 background 가
+  // 뜨면 아래 감지 useEffect 가 자동 전환한다. 여기선 토스트 + 그 surface 를 pendingDetach 로
+  // 표시(6초 후 자동 해제 — 매칭 실패 시 활성 pane 오작동 방지).
+  const handleSaved = (surface: string) => {
+    setPendingDetach(surface);
+    setToast('백그라운드로 저장했어요 · 넘어간 대화로 이어가는 중…');
+    window.setTimeout(() => setPendingDetach((s) => (s === surface ? null : s)), 6000);
   };
   // 서브에이전트 드릴인 — 학생 메타칸의 ↳ 칩 클릭 → 그 서브에이전트 대화를 부모 옆 별도
   // 타일로(거노: "따로 볼수있게"). layout 미러엔 없는 가상 타일이라 별도 배열로 관리.
@@ -177,10 +201,64 @@ export function App() {
   // "아로나 오는 중…" 빈 교실 스피너 대신 daemon claude 대화를 바로 보여준다(거노 핵심).
   useEffect(() => {
     if (activeId || offlinePeek || agents.length > 0 || backgroundAgents.length === 0) return;
-    const bg = backgroundAgents.find((a) => a.kind === 'background') ?? backgroundAgents[0];
+    // 활성(working) background 를 우선 — 목록 첫 거(옛 done 세션)가 아니라 지금 도는 대화를
+    // 보여줘야 한다(거노: 대화 안 맞던 버그). working 없으면 background, 그것도 없으면 첫 거.
+    const bg = backgroundAgents.find((a) => a.kind === 'background' && (a.state === 'working' || a.status === 'working'))
+      ?? backgroundAgents.find((a) => a.kind === 'background')
+      ?? backgroundAgents[0];
     if (bg) openBackgroundSession(bg);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agents.length, backgroundAgents, activeId, offlinePeek]);
+  // "지금 보던 세션이 background daemon 으로 넘어감" 감지 → 후신 자동 전환 + 넘어감 배지.
+  // 여기선 **명시적 신호만** 처리한다: (1) '저장' 버튼을 누른 surface(pendingDetach)의 후신,
+  // (2) 수동으로 보던 과거 offline 세션(viewedSid)이 background 로 승격. activeId(로드 직후
+  // 자동 선택되는 pane)로는 매칭하지 않는다 — 저장 안 했는데 그 pane 의 과거 fork 세션으로
+  // 튕기던 버그(handledDetach 는 리로드마다 리셋돼 로드 직후 강탈을 못 막음) 방지. 터미널에서
+  // 직접 ←← 한 경우는 아래 "새로 등장" effect 가 부모 pane 생존으로 판정해 커버한다.
+  useEffect(() => {
+    const viewedSid = offlinePeek && !offlinePeek.transferred ? offlinePeek.id : null;
+    if (!pendingDetach && !viewedSid) return;
+    const hit = backgroundAgents.find((a) =>
+      a.kind === 'background'
+      && !handledDetach.current.has(a.sessionId)
+      && offlinePeek?.id !== a.sessionId
+      && (
+        (!!pendingDetach && a.parentSurface === pendingDetach)
+        || (!!viewedSid && (a.parentSessionId === viewedSid || a.sessionId === viewedSid))
+      ));
+    if (hit) {
+      handledDetach.current.add(hit.sessionId);
+      setPendingDetach(null);
+      openBackgroundSession(hit, true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backgroundAgents, offlinePeek, pendingDetach]);
+  // 터미널에서 직접 ←← 로 detach 한 경우 — 저장버튼도, 웹뷰에서 선택한 activeId 매칭도 안
+  // 걸린다(웹뷰가 그 pane 을 활성 선택 안 했을 수 있음). 그래서 폴링에서 "직전 tick 엔 없던,
+  // 방금 새로 등장한 working background" 를 감지해 그 대화로 전환한다. 단 fetchBackgroundAgents
+  // 는 --all(다른 방·위임 세션 포함)이라, **부모 pane 이 지금 이 창에 살아있는**(parentSurface
+  // 가 라이브 agents 에 있는) 세션만 잡는다 — 무관한 다른 방 세션이 중앙뷰를 강탈하지 않게.
+  // 첫 tick(prevBgIds=null)은 기준선만 세우고, 수동 열람 중(offlinePeek non-transferred)엔 안 뺏는다.
+  useEffect(() => {
+    const cur = new Set(backgroundAgents.filter((a) => a.kind === 'background').map((a) => a.sessionId));
+    const prev = prevBgIds.current;
+    prevBgIds.current = cur;
+    if (prev === null) return;
+    if (offlinePeek && !offlinePeek.transferred) return;
+    const fresh = backgroundAgents.find((a) =>
+      a.kind === 'background'
+      && !prev.has(a.sessionId)
+      && !handledDetach.current.has(a.sessionId)
+      && (a.state === 'working' || a.status === 'working')
+      && !!a.parentSurface
+      && agents.some((ag) => ag.id === a.parentSurface));
+    if (fresh) {
+      handledDetach.current.add(fresh.sessionId);
+      setPendingDetach(null);
+      openBackgroundSession(fresh, true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backgroundAgents, offlinePeek, agents]);
   // 터미널 layout(% 배치) 폴링 → 중앙 멀티뷰가 터미널 split 을 그대로 미러(거노: pane 위치
   // 동기화). 과거 세션 단독 보기 중이거나 터미널 뷰가 아니면 폴링 불필요.
   useEffect(() => {
@@ -271,7 +349,7 @@ export function App() {
                   title={offlinePeek.title}
                   onClose={() => setOfflinePeek(null)}
                   embedded
-                  session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title }}
+                  session={{ id: offlinePeek.id, cwd: offlinePeek.cwd ?? '', label: offlinePeek.title, transferred: offlinePeek.transferred }}
                 />
               ) : (
                 // layout 미러(좌, flex) + 서브에이전트 드릴인 타일(우, 별도 열) — 부모 옆에
@@ -377,7 +455,7 @@ export function App() {
           <>
             <div onClick={() => setRightOpen(false)} style={{ position: 'absolute', inset: 0, zIndex: 30, background: 'rgba(21,41,74,0.16)' }} />
             <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, zIndex: 31, width: 340, display: 'flex', minHeight: 0, boxShadow: '-3px 0 16px rgba(21,41,74,0.20)' }}>
-              <CommandCenter selected={activeSelected} onClearDialog={() => setOfflinePeek(null)} onPickStudent={openStudent} onOpenBackground={openBackgroundSession} openGitTab={0} onCollapse={() => setRightOpen(false)} />
+              <CommandCenter selected={activeSelected} onClearDialog={() => setOfflinePeek(null)} onPickStudent={openStudent} onOpenBackground={openBackgroundSession} onSaved={handleSaved} openGitTab={0} onCollapse={() => setRightOpen(false)} />
             </div>
           </>
         )}
@@ -389,6 +467,14 @@ export function App() {
           style={{ position: 'fixed', top: 8, right: 8, zIndex: 50, width: 30, height: 30, borderRadius: 9, cursor: 'pointer', border: '1px solid var(--cth-cream-200)', background: 'var(--cth-cream-50)', color: 'var(--cth-ink-500)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 8px rgba(21,41,74,0.16)' }}>
           <svg width="16" height="16" viewBox="0 0 16 16"><path d="M2.5 6V2.5H6M14 6V2.5h-3.5M2.5 10v3.5H6M14 10v3.5h-3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>
+      )}
+
+      {/* 넘어감/저장 알림 — 우하단 pill, 3.2초 자동 소멸(위 useEffect). */}
+      {toast && (
+        <div style={{ position: 'fixed', right: 16, bottom: 16, zIndex: 60, display: 'inline-flex', alignItems: 'center', gap: 8, maxWidth: 360, padding: '10px 14px', borderRadius: 12, background: 'var(--cth-ink-900)', color: 'var(--cth-cream-50)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 600, boxShadow: '0 6px 20px rgba(21,41,74,0.28)' }}>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, color: '#F0B45A' }}><path d="M9 2 3.5 9H8l-1 5 5.5-7H8l1-5Z" /></svg>
+          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{toast}</span>
+        </div>
       )}
 
     </div>

@@ -12,7 +12,39 @@ import { parseJsonlSync } from './jsonl';
 // `VITE_MCP_PORT` 로 덮어쓸 수 있다 — 8765 점유돼 폴백 포트로 뜬 인스턴스에 붙어
 // 검증할 때 쓴다.
 const MCP_PORT = import.meta.env.VITE_MCP_PORT || '8765';
-const BASE = import.meta.env.DEV ? `http://127.0.0.1:${MCP_PORT}` : '';
+// 웹뷰 백엔드 후보. 프로덕션은 same-origin(페이지를 서빙한 kasaterm 8765) 우선, 그게
+// 죽으면 standalone serve-web(8766)으로 폴백 — 터미널이 꺼져도 daemon 세션을 계속 본다.
+// dev(vite 5173)는 kasaterm 8765 절대주소만(cross-origin, 폴백 없음).
+const FALLBACK_PORT = import.meta.env.VITE_MCP_FALLBACK_PORT || '8766';
+const CANDIDATES: string[] = import.meta.env.DEV
+  ? [`http://127.0.0.1:${MCP_PORT}`]
+  : ['', `http://127.0.0.1:${FALLBACK_PORT}`];
+// 호출부(약 50곳)가 전부 `${BASE}` 를 호출 시점 lazy read 하므로, let 재대입 하나로 전
+// 사이트에 폴백이 전파된다(호출부 수정 0).
+let BASE = CANDIDATES[0];
+
+let resolving: Promise<void> | null = null;
+let lastProbeMs = -Infinity;
+
+/** BASE 를 CANDIDATES 상위(프로덕션 same-origin '')부터 다시 프로브해 재해결한다. **항상
+ *  상위 우선**이라, 폴백(8766)으로 내려갔다가 primary(8765)가 살아나면 도로 올라온다 — 한 번
+ *  폴백하면 영구 고정되던 편도 래칫 방지. in-flight 공유 + 3s 쓰로틀로 폭주를 막는다(force 는
+ *  쓰로틀만 무시 — 백엔드 죽음 감지 즉시 재해결용). */
+export async function resolveBase(force = false): Promise<void> {
+  if (resolving) return resolving;
+  const now = typeof performance !== 'undefined' ? performance.now() : 0;
+  if (!force && now - lastProbeMs < 3000) return;
+  lastProbeMs = now;
+  resolving = (async () => {
+    for (const c of CANDIDATES) {
+      try {
+        const r = await fetch(`${c}/mode`);
+        if (r.ok) { BASE = c; return; }
+      } catch { /* 다음 후보 */ }
+    }
+  })().finally(() => { resolving = null; });
+  return resolving;
+}
 
 // 워커 accent — pane id 숫자 해시(god-elect 워커 팔레트와 같은 결). god 은 lemon.
 const ACCENTS: AccentColorName[] = ['sky', 'mint', 'coral', 'lilac', 'peach'];
@@ -366,6 +398,11 @@ export interface BackgroundAgent {
   name: string;
   status: string;
   state: string;
+  /** ←← detach 로 넘어온 세션의 부모(넘어오기 전) 정보 — 백엔드가 argv `--resume`
+   *  basename + pane_session_ids 역매핑으로 얹어준다. 웹뷰가 "지금 보던 pane 이
+   *  background 로 넘어갔다"를 판정하는 근거. background 세션에만 채워진다. */
+  parentSessionId?: string;
+  parentSurface?: string;
 }
 
 /** GET /background-agents?cwd=<abs> — `claude agents --json --all` 뷰. pane 밖에서
@@ -376,8 +413,14 @@ export async function fetchBackgroundAgents(cwd?: string): Promise<BackgroundAge
     const r = await fetch(`${BASE}/background-agents${q}`);
     if (!r.ok) return [];
     const d = (await r.json().catch(() => ({}))) as { agents?: BackgroundAgent[] };
+    // 폴백(8766) 중이면 상위 후보(primary same-origin/8765)가 살아났는지 재확인해 복귀한다 —
+    // 8765 복구 후에도 8766 에 영구 고정되던 편도 래칫 방지(resolveBase 3s 쓰로틀 내장).
+    if (BASE !== CANDIDATES[0]) void resolveBase();
     return Array.isArray(d?.agents) ? d.agents : [];
   } catch {
+    // 백엔드가 죽음(연결 거부) — 다음 후보(standalone 8766)로 전환 시도. 3초 폴링이라
+    // 전환 후 다음 tick 부터 그 포트에서 데이터가 다시 흐른다.
+    void resolveBase(true);
     return [];
   }
 }
