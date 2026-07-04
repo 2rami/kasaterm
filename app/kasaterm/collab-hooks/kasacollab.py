@@ -355,12 +355,7 @@ def cmd_msg(args):
         os.replace(tmp, p)
     except Exception:
         pass
-    # god 방 = tell 생략(steer 적재만). working 워커 입력창 오염 방지.
-    # idle 워커는 god-loop 의 nudge(steer+tell 병용)가 다음 주기에 깨운다.
-    if current_mode() == "god":
-        print(f"→ {to}: {text} · (god 방 — steer+inbox 적재, idle 이면 god-loop 가 깨움)")
-        return
-    # solo 방: tell 로 즉시 깨움(steer 는 이미 push됨 — 상대 다음 훅 경계에서 pull).
+    # steer 는 이미 push됨(상대 다음 훅 경계에서 pull). tell 로 즉시 깨운다.
     cli = os.environ.get("KASATERM_CLI", "kasaterm-cli")
     woke = False
     try:
@@ -407,38 +402,6 @@ def cmd_drain_stop(args):
     # json.dumps 로 개행·따옴표를 안전 인코딩 → shell 이 JSON 을 안 만져도 됨.
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
     sys.exit(10)  # 내부 신호: stop-drain.sh 가 complete 알림을 건너뛰게
-
-
-def mode_path():
-    """이 방의 협업 모드 마커(~/.config — 영속). 내용 = 'solo' | 'god'.
-    기본(마커 없음)=solo: 거노가 직접 오케스트레이션 + conflict-guard 가 파일
-    겹침 차단. god=옵트인: 선출제 팀장(커밋 단독·승인 라우팅·총괄)."""
-    slug = os.getcwd().replace("/", "-").replace(".", "-") + _room_suffix()
-    d = os.path.expanduser("~/.config/kasaterm/collab-mode")
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, slug)
-
-
-def current_mode():
-    try:
-        m = open(mode_path()).read().strip()
-        return m if m in ("solo", "god") else "solo"
-    except Exception:
-        return "solo"
-
-
-def cmd_mode(args):
-    sub = args[0] if args else "show"
-    if sub == "show":
-        print(current_mode())
-    elif sub in ("solo", "god"):
-        p = mode_path()
-        tmp = p + ".tmp"
-        open(tmp, "w").write(sub)
-        os.replace(tmp, p)  # atomic — 읽는 쪽은 완전한 모드명만 본다
-        print(f"모드 = {sub}")
-    else:
-        print("mode solo|god|show")
 
 
 def _steer_dir():
@@ -489,11 +452,11 @@ def cmd_steer(args):
 def main():
     a = sys.argv[1:]
     if not a:
-        print("kasacollab task|msg|inbox|steer|drain-stop|mode")
+        print("kasacollab task|msg|inbox|steer|drain-stop")
         return
     {"task": cmd_task, "msg": cmd_msg, "inbox": cmd_inbox,
-     "steer": cmd_steer, "drain-stop": cmd_drain_stop, "mode": cmd_mode}.get(
-        a[0], lambda _: print("kasacollab task|msg|inbox|steer|drain-stop|mode")
+     "steer": cmd_steer, "drain-stop": cmd_drain_stop}.get(
+        a[0], lambda _: print("kasacollab task|msg|inbox|steer|drain-stop")
     )(a[1:])
 
 

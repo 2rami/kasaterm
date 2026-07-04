@@ -3473,7 +3473,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_force_drag();
         self.run_pending_autotoggle();
         self.run_pending_autoarona(event_loop);
-        self.run_pending_onboarding(event_loop);
         self.run_pending_autotabs();
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
