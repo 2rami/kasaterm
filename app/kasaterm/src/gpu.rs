@@ -1598,6 +1598,7 @@ impl GpuRenderer {
             "github" => include_str!("../assets/icons/github.svg"),
             "undo-2" => include_str!("../assets/icons/undo-2.svg"),
             "external-link" => include_str!("../assets/icons/external-link.svg"),
+            "claude" => include_str!("../assets/icons/claude.svg"),
             _ => return None,
         })
     }
