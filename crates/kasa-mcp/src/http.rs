@@ -911,7 +911,9 @@ pub fn any_collab_mode_marker() -> bool {
 }
 
 /// 마커 내용 → 모드. 없거나 알 수 없는 값이면 solo (kasacollab.py 동일).
-fn read_mode_file(path: &std::path::Path) -> &'static str {
+/// pub: 호스트가 pane spawn 시 방 mode 를 계산해 `KASATERM_ROOM_MODE` 로 박는다
+/// (같은 판정 규칙 단일 진실 — sh 에서 재구현 금지).
+pub fn read_mode_file(path: &std::path::Path) -> &'static str {
     match std::fs::read_to_string(path) {
         Ok(s) if s.trim() == "god" => "god",
         _ => "solo",

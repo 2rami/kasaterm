@@ -9,6 +9,7 @@ import { startBoardPolling, fetchMode, focusPane, fetchClaudeUsage, fetchSession
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { TerminalBlockCard } from './components/TerminalBlockCard';
 import { assignSprites } from './lib/sprites';
+import { accentByName, hex } from './design/tokens';
 
 type ViewMode = 'terminal' | 'classroom';
 // 중앙 멀티뷰 한 칸 = 살아있는 학생(surface id) 또는 오프라인 과거 세션(offline=true).
@@ -378,11 +379,14 @@ export function App() {
                           const a = agents.find((x) => x.id === r.surface_id);
                           const isZoom = zoomedSurface === r.surface_id;
                           const hidden = zoomedSurface != null && !isZoom; // 다른 타일이 줌이면 가린다
+                          const active = activeId === r.surface_id;
+                          // 학생별 accent 색 테두리 — 늘 얇게 둘러 구별하고, active/zoom 은 굵게 강조.
+                          const accentHex = a?.accent ? hex(accentByName[a.accent]) : 'var(--cth-cream-200)';
                           return (
                             <div key={r.surface_id} onMouseDownCapture={() => setActiveId(r.surface_id)}
                               style={isZoom
-                                ? { position: 'absolute', left: 0, top: 0, width: '100%', height: '100%', padding: 1, boxSizing: 'border-box', zIndex: 10, outline: '2px solid var(--cth-sky)', outlineOffset: -2 }
-                                : { position: 'absolute', left: `${r.x}%`, top: `${r.y}%`, width: `${r.w}%`, height: `${r.h}%`, padding: 1, boxSizing: 'border-box', display: hidden ? 'none' : undefined, outline: activeId === r.surface_id ? '2px solid var(--cth-sky)' : 'none', outlineOffset: -2 }}>
+                                ? { position: 'absolute', left: 0, top: 0, width: '100%', height: '100%', padding: 1, boxSizing: 'border-box', zIndex: 10, outline: `2.5px solid ${accentHex}`, outlineOffset: -2 }
+                                : { position: 'absolute', left: `${r.x}%`, top: `${r.y}%`, width: `${r.w}%`, height: `${r.h}%`, padding: 1, boxSizing: 'border-box', display: hidden ? 'none' : undefined, outline: `${active ? 2.5 : 1.5}px solid ${accentHex}`, outlineOffset: -2 }}>
                               {a ? (
                                 <TerminalPeekPanel
                                   surfaceId={r.surface_id}
@@ -409,8 +413,12 @@ export function App() {
                         })}
                       </div>
                     ) : (
-                      <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)', fontSize: 13 }}>
-                        터미널 pane 을 기다리는 중…
+                      <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', color: 'var(--cth-ink-300)', fontFamily: 'var(--cth-font-ui)' }}>
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--cth-ink-300)" strokeWidth={1.4} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7 }}>
+                          <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+                        </svg>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--cth-ink-500)' }}>아직 열린 대화가 없어요</div>
+                        <div style={{ fontSize: 12, lineHeight: 1.7 }}>터미널에서 <span style={{ fontFamily: 'var(--cth-font-mono)', color: 'var(--cth-ink-500)' }}>claude</span> 를 켜면<br />여기에 대화가 떠요</div>
                       </div>
                     )}
                   </div>
