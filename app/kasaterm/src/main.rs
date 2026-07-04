@@ -3688,6 +3688,14 @@ fn load_capture_config() {
 /// (입력줄 감지). teammate-mode tmux 위장은 제거됨 — pane 생성은 god 이
 /// `kasaterm-cli split` 로 한다. best-effort: 실패해도 본체는 동작한다.
 fn install_pane_shims() {
+    // 전역 shim 스위치 OFF → shim dir 자체를 안 만든다. KASATERM_TMUX_SHIM_DIR 이 미설정
+    // 이면 pty-backend(state.rs)가 PATH prepend·ZDOTDIR 를 건드리지 않아 자식 셸이 순정
+    // 이 된다 — claude wrapper·imgopen·훅·프록시 배선 전무(진짜 독립). 기본 ON(하위호환).
+    // install 은 부팅 1회라 이 스위치 변경은 재시작 후 적용된다.
+    if !socket::read_shim_inject() {
+        eprintln!("[shim] shim_inject=off — 순정 모드, pane shim 미설치");
+        return;
+    }
     let shim_dir = std::env::temp_dir().join(format!("kasaterm-shim-{}", std::process::id()));
     if let Err(e) = std::fs::create_dir_all(&shim_dir) {
         eprintln!("[shim] mkdir {shim_dir:?} failed: {e}");
@@ -3889,22 +3897,6 @@ pub(crate) fn proxy_env(pane_id: &str) -> Vec<(String, String)> {
     }
 }
 
-/// spawn 시점에 이 pane 이 속한 방의 협업 모드를 자식 셸에 고정 주입한다. claude
-/// wrapper 가 실행 시 `$PWD` 로 slug 를 재계산하면 사용자 `cd` 로 드리프트하므로
-/// (선례 steer-hook), Rust 가 마커를 단일 진실로 판정해 env 로 넘긴다. god 일 때만
-/// `KASATERM_ROOM_MODE=god` — solo/미설정이면 빈 vec 라 wrapper 기본값(순정 solo)이
-/// 적용된다. cwd 없으면(판정 불가) solo 로 뭉갠다.
-pub(crate) fn room_mode_env(cwd: Option<&str>) -> Vec<(String, String)> {
-    let Some(cwd) = cwd else { return Vec::new() };
-    match kasa_mcp::mode_marker_path(std::path::Path::new(cwd))
-        .as_deref()
-        .map(kasa_mcp::read_mode_file)
-    {
-        Some("god") => vec![("KASATERM_ROOM_MODE".to_string(), "god".to_string())],
-        _ => Vec::new(),
-    }
-}
-
 /// Stage a `claude` wrapper + a session-scoped hook settings file on the pane
 /// PATH (munder-difflin pattern). Collab hooks ride in via `claude --settings`
 /// instead of edits to ~/.claude/settings.json, so claude outside a kasaterm
@@ -3960,24 +3952,6 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             return;
         }
     }
-    // solo(순정) 모드용 축소 훅 — 파일보호(conflict-guard)와 board/웹뷰 미러
-    // (bind-transcript)만 남기고 persona·협업(steer/stop/notify)·auto-imgopen 은
-    // 뺀다. wrapper 가 KASATERM_ROOM_MODE != god 일 때 이 파일을 --settings 로 쓴다.
-    // full 은 위 claude-hooks-settings.json 그대로(god 방).
-    let solo_settings = serde_json::json!({
-        "hooks": {
-            "SessionStart": [{ "hooks": [cmd("kasaterm-bind-transcript.sh", 5000)] }],
-            "PreToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] }],
-        }
-    });
-    match serde_json::to_string_pretty(&solo_settings) {
-        Ok(s) => {
-            if let Err(e) = std::fs::write(shim_dir.join("claude-hooks-settings-solo.json"), s) {
-                eprintln!("[shim] write claude-hooks-settings-solo.json failed: {e}");
-            }
-        }
-        Err(e) => eprintln!("[shim] serialize solo hook settings failed: {e}"),
-    }
     // 설정창 "클로드" 탭 노브를 shim 에 인라인 — 파싱은 여기 Rust 가 하고 shim 은 순수 sh 로
     // 남긴다(hot path 가벼움). 아래 라인들은 전부 PERSONA_OK 게이트를 공유하므로
     // attach/agents/subcommand(case 가 PERSONA_OK 를 비움)엔 안 붙어 서브커맨드를 오염 안
@@ -4030,11 +4004,6 @@ PERSONA_OK=1\n\
 # attach/agents 는 서브커맨드 — persona·session-id 를 얹으면 깨진다(거노: 이어받기 안 붙던 원인).\n\
 # --bg 는 session-id 를 자기가 관리(경고)하지만 persona(시스템프롬프트)는 새 세션이라 붙인다(거노 #2).\n\
 case \" $* \" in *\" attach \"*|*\" agents \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\" --bg \"*|*\" --background \"*) SID=\"\" ;; *\" --session-id \"*|*\" --resume \"*|*\" --continue \"*|*\" -c \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
-# 방이 solo(KASATERM_ROOM_MODE != god)면 순정 claude: persona/강제인자 소비 안 함\n\
-# (PERSONA_OK 비움 → 아래 블록 전부 스킵) + 프록시 우회(API 직행) + 축소 훅(파일보호·\n\
-# board 미러만). 관찰·안전은 유지(거노 (1)관찰유지). god 이면 전부 기존대로.\n\
-if [ \"$KASATERM_ROOM_MODE\" != god ]; then PERSONA_OK=\"\"; unset ANTHROPIC_BASE_URL; \
-[ -f \"$SELF_DIR/claude-hooks-settings-solo.json\" ] && SETTINGS=\"$SELF_DIR/claude-hooks-settings-solo.json\"; fi\n\
 {pblk}\
 [ -n \"$SID\" ] && set -- --session-id \"$SID\" \"$@\"\n\
 # task store(~/.claude/tasks/<id>)를 transcript session 과 같은 키로 묶는다 — 없으면 claude\n\

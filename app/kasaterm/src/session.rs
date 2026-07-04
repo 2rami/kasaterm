@@ -290,7 +290,6 @@ impl App {
         // 캐릭터 자동 배정(거노): pending(god) 우선, 없으면 빈 슬롯 순환. 마커·session-id
         // 기록 후 KASATERM_CHARACTER/SESSION_ID/PERSONA env 를 더한다(claude shim 적용).
         env.extend(self.assign_character_env(&id, cwd.as_deref(), room.as_deref()));
-        env.extend(crate::room_mode_env(cwd.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: self.pending_shell.take().or_else(resolve_default_shell),
             cwd,
@@ -323,7 +322,6 @@ impl App {
             env.push(("KASATERM_ROOM".to_string(), r.clone()));
         }
         env.extend(self.assign_character_env(pane, cwd.as_deref(), room.as_deref()));
-        env.extend(crate::room_mode_env(cwd.as_deref()));
         match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,

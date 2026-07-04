@@ -1713,6 +1713,13 @@ pub fn read_claude_extra() -> String {
     read_settings().get("claude_extra").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+/// shim 주입 전역 스위치(설정 "shim_inject"). false 면 install_pane_shims 가 shim dir 를
+/// 아예 안 만들어 PATH/ZDOTDIR 무접촉 → 순정 claude(캐릭터·프록시·훅·board 전무 진짜 독립).
+/// 기본 true(하위호환 — 지금 풀 경험 유지). install 은 부팅 1회라 변경은 재시작 후 적용.
+pub fn read_shim_inject() -> bool {
+    read_settings().get("shim_inject").and_then(|x| x.as_bool()).unwrap_or(true)
+}
+
 /// Persist the last logical window size so the next launch restores it instead
 /// of the hardcoded default. Logical (DPI-independent) so moving between a
 /// Retina and an external display restores the same on-screen size.
