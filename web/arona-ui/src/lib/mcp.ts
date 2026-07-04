@@ -226,29 +226,6 @@ export async function fetchCharacters(): Promise<Characters | null> {
   }
 }
 
-export interface ModeInfo { mode: string | null; cwd: string | null; configured: boolean; }
-
-/** GET /mode → {mode:'solo'|'god'|null, cwd, configured}. 응답 {…}/평문/{result} 흡수.
- *  configured=false = 마커 자체 없는 미설정 방(첫 실행) → ModePicker 온보딩 분기 기준
- *  (mode 만 보면 미설정이 solo 로 뭉개진다, 유우카). cwd 는 '이 방' 경로 칩. */
-export async function fetchMode(): Promise<ModeInfo> {
-  try {
-    const r = await fetch(`${BASE}/mode`);
-    if (!r.ok) return { mode: null, cwd: null, configured: false };
-    const d = await r.json().catch(() => null);
-    if (typeof d === 'string') return { mode: d, cwd: null, configured: true };
-    const src = d?.result ?? d ?? {};
-    return {
-      mode: src.mode ?? null,
-      cwd: src.cwd ?? null,
-      // 구 백엔드(필드 부재)는 mode 존재 여부로 추정 — 미존재만 false.
-      configured: src.configured ?? (src.mode != null)
-    };
-  } catch {
-    return { mode: null, cwd: null, configured: false };
-  }
-}
-
 /** POST /terminal-reveal?show=0|1[&pane=%N] — 교실의 숨긴 메인 터미널 토글(빨간약).
  *  show=1 에 pane 을 주면 그 pane 포커스까지(유우카). 미구현 백엔드면 404 → false. */
 export async function revealTerminal(show = 1, pane?: string): Promise<boolean> {
@@ -471,28 +448,6 @@ export async function saveSession(surface?: string): Promise<boolean> {
 export async function closeRoom(idx: number): Promise<boolean> {
   try {
     const r = await fetch(`${BASE}/session-close?idx=${idx}`, { method: 'POST' });
-    return r.ok;
-  } catch {
-    return false;
-  }
-}
-
-/** POST /arona-close — 아로나 창을 닫고 터미널로 복귀. ModePicker 에서 'solo'
- *  선택 완료 시 호출(아로나 선택은 교실 진입이라 호출 안 함). 네이티브 미구현
- *  동안 404 → false 허용. */
-export async function closeArona(): Promise<boolean> {
-  try {
-    const r = await fetch(`${BASE}/arona-close`, { method: 'POST' });
-    return r.ok;
-  } catch {
-    return false;
-  }
-}
-
-/** POST /mode?set=solo|god — 시작 선택 화면에서 호출. */
-export async function setMode(mode: 'solo' | 'god'): Promise<boolean> {
-  try {
-    const r = await fetch(`${BASE}/mode?set=${mode}`, { method: 'POST' });
     return r.ok;
   } catch {
     return false;
