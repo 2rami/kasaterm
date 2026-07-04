@@ -892,6 +892,11 @@ impl App {
     /// 좌측에 두면 경로 브레드크럼과 겹쳐서 우측으로(거노). ✨ 아이콘, 클릭 →
     /// toggle_arona_panel. win_w 필요해 첫 페인트 전엔 None.
     pub(crate) fn arona_btn_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        // shim OFF(순정 모드)면 아로나 진입점 자체를 숨긴다 — 버튼이 없어야
+        // open_arona_panel 차단과 일관되고 빈 웹뷰로 들어갈 길이 원천 차단된다.
+        if !crate::socket::read_shim_inject() {
+            return None;
+        }
         let w = 26.0;
         let h = 22.0;
         let win_w = self.window.as_ref().map(|win| {
@@ -1214,10 +1219,16 @@ impl App {
     /// server (`/arona-ui/`) — same-origin with the API the page fetches, and
     /// the in-window wry embed is off the table anyway (Metal layer conflict).
     pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
+        // shim OFF(순정 모드)면 아로나 GUI 자체를 안 띄운다 — board/미러 hook 이 전무해
+        // 빈 웹뷰가 뜨는 어색함 방지(arona_btn_rect 도 None 이라 버튼부터 숨겨진다).
+        // 이건 전역 shim 축 — 아래 solo/god 방 모드 게이트 부재와는 다른 결이다.
+        if !crate::socket::read_shim_inject() {
+            return;
+        }
         if self.arona_panel_window.is_some() {
             return;
         }
-        // 모드 게이트 없음: solo/미설정 방에서도 창은 연다. 모드 안내·전환은
+        // (방) 모드 게이트 없음: solo/미설정 방에서도 창은 연다. 모드 안내·전환은
         // 웹 쪽 ModePicker 담당(GET /mode 로 분기) — 네이티브가 차단하면
         // ModePicker 에 도달 자체가 불가한 설계 모순이었다(거노 실측).
         let port = mcp_panel_port();
