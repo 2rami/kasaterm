@@ -2541,6 +2541,7 @@ pub(crate) enum SettingsAction {
     ThemeMode(&'static str),
     Accent(String),
     ToggleClaudePersona,
+    ToggleShimInject,
     ClaudeModel(String),
     ClaudeEffort(String),
     FocusClaudeExtra,
@@ -3125,6 +3126,7 @@ struct App {
     /// model/effort overrides, and free-form extra args. Invariants
     /// (session-id/settings/task-list) stay hardcoded and are never exposed here.
     set_claude_persona: bool,
+    set_shim_inject: bool,
     set_claude_model: String,
     set_claude_effort: String,
     set_claude_extra: String,
@@ -3405,6 +3407,7 @@ impl App {
             set_footer_default: socket::read_footer_default(),
             set_shell: socket::read_default_shell().unwrap_or_default(),
             set_claude_persona: socket::read_claude_persona(),
+            set_shim_inject: socket::read_shim_inject(),
             set_claude_model: socket::read_claude_model(),
             set_claude_effort: socket::read_claude_effort(),
             set_claude_extra: socket::read_claude_extra(),

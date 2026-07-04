@@ -30,6 +30,7 @@ pub(crate) struct SettingsCtx {
     pub theme_light: bool,
     pub accent: String,
     pub claude_persona: bool,
+    pub shim_inject: bool,
     pub claude_model: String,
     pub claude_effort: String,
     pub claude_extra: String,
@@ -105,6 +106,7 @@ impl App {
         socket::write_setting("pane_footer_default", serde_json::Value::Bool(self.set_footer_default));
         socket::write_setting("default_shell", serde_json::Value::String(self.set_shell.clone()));
         socket::write_setting("claude_persona", serde_json::Value::Bool(self.set_claude_persona));
+        socket::write_setting("shim_inject", serde_json::Value::Bool(self.set_shim_inject));
         socket::write_setting("claude_model", serde_json::Value::String(self.set_claude_model.clone()));
         socket::write_setting("claude_effort", serde_json::Value::String(self.set_claude_effort.clone()));
         socket::write_setting("claude_extra", serde_json::Value::String(self.set_claude_extra.clone()));
@@ -132,6 +134,7 @@ impl App {
             theme_light: theme::is_light(),
             accent: theme::accent_name().to_string(),
             claude_persona: self.set_claude_persona,
+            shim_inject: self.set_shim_inject,
             claude_model: self.set_claude_model.clone(),
             claude_effort: self.set_claude_effort.clone(),
             claude_extra: self.set_claude_extra.clone(),
@@ -235,6 +238,10 @@ impl App {
                 self.set_claude_persona = !self.set_claude_persona;
                 self.settings_save();
             }
+            SettingsAction::ToggleShimInject => {
+                self.set_shim_inject = !self.set_shim_inject;
+                self.settings_save();
+            }
             SettingsAction::ClaudeModel(m) => {
                 self.set_claude_model = m;
                 self.settings_input = None;
@@ -307,10 +314,10 @@ pub(crate) fn paint_settings(
         gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: true, italic: false },
     );
     let cats = [
-        (SettingsCat::General, "일반"),
-        (SettingsCat::Appearance, "모양"),
-        (SettingsCat::Shell, "셸"),
-        (SettingsCat::Claude, "클로드"),
+        (SettingsCat::General, "General"),
+        (SettingsCat::Appearance, "Appearance"),
+        (SettingsCat::Shell, "Shell"),
+        (SettingsCat::Claude, "Claude"),
     ];
     let mut cy = ay + 52.0;
     for (cat, label) in cats {
@@ -345,9 +352,9 @@ pub(crate) fn paint_settings(
         SettingsCat::General => {
             let mut y = fy;
             // 시작 작업 폴더
-            section_label(g, fx, y, "시작 작업 폴더");
+            section_label(g, fx, y, "Startup folder");
             y += 24.0;
-            help_text(g, fx, y, "새 창·탭의 셸이 시작할 위치");
+            help_text(g, fx, y, "새 창과 탭이 열리는 위치");
             y += 26.0;
             let cwd_is = |m: &str| {
                 if m == "last" {
@@ -359,7 +366,7 @@ pub(crate) fn paint_settings(
                 }
             };
             let segs: [(&'static str, &str); 3] =
-                [("last", "마지막 폴더"), ("home", "홈"), ("custom", "직접 지정")];
+                [("last", "Last folder"), ("home", "Home"), ("custom", "Custom")];
             let mut sx = fx;
             for (val, label) in segs {
                 let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
@@ -395,18 +402,18 @@ pub(crate) fn paint_settings(
             }
             y += ROW_GAP;
             // 파일트리 기본 표시
-            section_label(g, fx, y, "파일트리 기본 표시");
+            section_label(g, fx, y, "File tree by default");
             y += 24.0;
-            help_text(g, fx, y, "켜면 실행할 때 파일트리 사이드바가 열린 채로 시작");
+            help_text(g, fx, y, "시작할 때 파일 트리 사이드바 열기");
             y += 28.0;
             let tr = (fx, y, 52.0, 30.0);
             toggle(g, tr, ctx.file_tree_default, ctx.cursor);
             rects.push((SettingsAction::ToggleFileTree, tr));
             y += 30.0 + ROW_GAP;
             // pane 하단바 기본 표시
-            section_label(g, fx, y, "pane 하단바 기본 표시");
+            section_label(g, fx, y, "Pane status bar by default");
             y += 24.0;
-            help_text(g, fx, y, "각 pane 아래에 경로·브랜치·diff 상태바를 기본으로 표시");
+            help_text(g, fx, y, "각 pane 아래 경로 · 브랜치 · diff 바 표시");
             y += 28.0;
             let fr = (fx, y, 52.0, 30.0);
             toggle(g, fr, ctx.footer_default, ctx.cursor);
@@ -415,11 +422,11 @@ pub(crate) fn paint_settings(
         SettingsCat::Appearance => {
             let mut y = fy;
             // 테마 모드
-            section_label(g, fx, y, "테마");
+            section_label(g, fx, y, "Theme");
             y += 24.0;
             help_text(g, fx, y, "전체 색 모드");
             y += 26.0;
-            let modes: [(&'static str, &str); 2] = [("dark", "다크"), ("light", "라이트")];
+            let modes: [(&'static str, &str); 2] = [("dark", "Dark"), ("light", "Light")];
             let mut sx = fx;
             for (val, label) in modes {
                 let sel = (val == "light") == ctx.theme_light;
@@ -446,9 +453,9 @@ pub(crate) fn paint_settings(
             }
             y += 44.0 + ROW_GAP;
             // 강조색
-            section_label(g, fx, y, "강조색");
+            section_label(g, fx, y, "Accent color");
             y += 24.0;
-            help_text(g, fx, y, "선택·커서·링크에 쓰이는 색");
+            help_text(g, fx, y, "선택 영역 · 커서 · 링크 색");
             y += 32.0;
             let mut cxp = fx;
             for (name, col) in theme::ACCENT_PRESETS {
@@ -467,12 +474,12 @@ pub(crate) fn paint_settings(
         }
         SettingsCat::Shell => {
             let mut y = fy;
-            section_label(g, fx, y, "기본 셸");
+            section_label(g, fx, y, "Default shell");
             y += 24.0;
-            help_text(g, fx, y, "새 pane이 띄울 셸 (비우면 시스템 기본 $SHELL)");
+            help_text(g, fx, y, "새 pane 의 셸 (비우면 시스템 $SHELL)");
             y += 26.0;
             let presets: [(&str, &str); 3] =
-                [("", "시스템 기본"), ("/bin/zsh", "zsh"), ("/bin/bash", "bash")];
+                [("", "System default"), ("/bin/zsh", "zsh"), ("/bin/bash", "bash")];
             let shell_is_preset = presets.iter().any(|(v, _)| *v == ctx.shell);
             let mut sx = fx;
             for (val, label) in presets {
@@ -500,7 +507,7 @@ pub(crate) fn paint_settings(
             }
             // "직접" chip → focuses the free-text field below.
             {
-                let label = "직접";
+                let label = "Custom";
                 let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
                 let r = (sx, y, tw, 32.0);
                 let sel = !shell_is_preset;
@@ -531,23 +538,37 @@ pub(crate) fn paint_settings(
             }
         }
         SettingsCat::Claude => {
-            let mut y = fy;
-            // 페르소나 주입 (토글)
-            section_label(g, fx, y, "페르소나 주입");
+            // Brand logo above the form — set by paint's Claude header block.
+            let mut y = fy + claude_logo(g, fx, fy);
+            // Shim injection — global. off = install_pane_shims never makes the shim
+            // dir, so claude runs vanilla (no persona/proxy/hooks). Read once at boot,
+            // so a change needs a restart.
+            section_label(g, fx, y, "Shim injection");
             y += 24.0;
-            help_text(g, fx, y, "이 pane의 캐릭터 정체성을 claude 시스템 프롬프트에 붙임");
+            help_text(g, fx, y, "끄면 순정 Claude — 페르소나 · 캡처 프록시 · 훅 전부 없음");
+            y += 19.0;
+            help_text(g, fx, y, "재시작해야 적용돼요 — 시작할 때 한 번만 설치돼서");
+            y += 27.0;
+            let sr = (fx, y, 52.0, 30.0);
+            toggle(g, sr, ctx.shim_inject, ctx.cursor);
+            rects.push((SettingsAction::ToggleShimInject, sr));
+            y += 30.0 + ROW_GAP;
+            // Persona injection (toggle)
+            section_label(g, fx, y, "Persona injection");
+            y += 24.0;
+            help_text(g, fx, y, "이 pane 의 캐릭터를 Claude 시스템 프롬프트에 붙여요");
             y += 28.0;
             let pr = (fx, y, 52.0, 30.0);
             toggle(g, pr, ctx.claude_persona, ctx.cursor);
             rects.push((SettingsAction::ToggleClaudePersona, pr));
             y += 30.0 + ROW_GAP;
             // 모델 (세그먼트)
-            section_label(g, fx, y, "모델");
+            section_label(g, fx, y, "Model");
             y += 24.0;
-            help_text(g, fx, y, "claude 기본을 덮어쓸 모델 (기본 = 사용자 설정 그대로)");
+            help_text(g, fx, y, "Claude 모델 덮어쓰기 (Default = 원래대로 유지)");
             y += 26.0;
             let models: [(&str, &str); 4] =
-                [("", "기본"), ("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")];
+                [("", "Default"), ("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")];
             let mut sx = fx;
             for (val, label) in models {
                 let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
@@ -569,10 +590,10 @@ pub(crate) fn paint_settings(
             // Effort (세그먼트) — CLAUDE_EFFORT env
             section_label(g, fx, y, "Effort");
             y += 24.0;
-            help_text(g, fx, y, "추론 강도(CLAUDE_EFFORT). 기본 = 건드리지 않음");
+            help_text(g, fx, y, "추론 강도 (CLAUDE_EFFORT). Default = 그대로 둠");
             y += 26.0;
             let efforts: [(&str, &str); 5] =
-                [("", "기본"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh")];
+                [("", "Default"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh")];
             let mut sx = fx;
             for (val, label) in efforts {
                 let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
@@ -592,9 +613,9 @@ pub(crate) fn paint_settings(
             }
             y += 44.0 + ROW_GAP;
             // 추가 인자 (텍스트) — 매 실행 덧붙이는 자유 플래그
-            section_label(g, fx, y, "추가 인자");
+            section_label(g, fx, y, "Extra args");
             y += 24.0;
-            help_text(g, fx, y, "claude 실행에 항상 덧붙일 플래그 (예: --verbose)");
+            help_text(g, fx, y, "claude 실행에 항상 붙는 플래그 (예: --verbose)");
             y += 28.0;
             let r = (fx, y, fw.min(420.0), 34.0);
             let focused = ctx.input == Some(SettingsInput::ClaudeExtra);
@@ -604,6 +625,24 @@ pub(crate) fn paint_settings(
     }
 
     rects
+}
+
+/// Claude brand header for the Claude settings tab — sunburst mark + wordmark.
+/// Drawn through the chrome icon layer (queue_icon) so it sits over the panel.
+/// Returns the vertical space consumed so the caller can offset the first
+/// section below it.
+fn claude_logo(g: &mut gpu::GpuRenderer, x: f32, y: f32) -> f32 {
+    // queue_icon draws through the chrome icon layer (over the settings panel);
+    // queue_image would paint beneath it and get covered. Tinted Claude orange.
+    let size = 30.0;
+    g.queue_icon("claude", x, y, size, [217, 119, 87, 255]);
+    g.draw_text(
+        x + size + 12.0,
+        y + (size - 22.0) / 2.0,
+        "Claude",
+        gpu::DrawOpts { font_size: 22.0, color: theme::text(), bold: true, italic: false },
+    );
+    size + 20.0
 }
 
 fn section_label(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
