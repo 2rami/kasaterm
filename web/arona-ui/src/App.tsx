@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore, type Agent } from './store';
-import { ModePicker } from './components/ModePicker';
 import { ClassroomView } from './components/ClassroomView';
 import { CommandCenter } from './components/CommandCenter';
 import { TitleBar } from './components/TitleBar';
 import { RoomMap } from './components/RoomMap';
-import { startBoardPolling, fetchMode, focusPane, fetchClaudeUsage, fetchSessions, fetchBackgroundAgents, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect, type BackgroundAgent } from './lib/mcp';
+import { startBoardPolling, focusPane, fetchClaudeUsage, fetchSessions, fetchBackgroundAgents, switchSession, newRoom, closeRoom, fetchLayout, type ClaudeUsage, type SessionsInfo, type RecentSession, type PaneRect, type BackgroundAgent } from './lib/mcp';
 import { TerminalPeekPanel } from './components/TerminalPeekPanel';
 import { TerminalBlockCard } from './components/TerminalBlockCard';
 import { assignSprites } from './lib/sprites';
@@ -28,13 +27,11 @@ const MOCK_AGENTS: Agent[] = [
   { id: '%5', name: '미도리', character: '미도리', accent: 'mint', status: 'idle', project: '시스템 테스트', progress: 1, contextTokens: 12000, tokensIn: 10000, tokensOut: 2000, costUsd: 0.05 },
 ];
 
-// 라우팅: mode 미설정/solo/?picker=1 → 시작 선택. god → SCHALE OS 교실.
+// 웹뷰는 항상 SCHALE OS 교실 — solo/god 모드 마커 폐기(잔재 정리). ready 로 초기 로딩만 게이트.
 export function App() {
   const agents = useStore((s) => s.agents);
   const backgroundAgents = useStore((s) => s.backgroundAgents);
-  const [mode, setModeState] = useState<string | null | undefined>(undefined);
-  const [cwd, setCwd] = useState<string | null>(null);
-  const [configured, setConfigured] = useState(true);
+  const [ready, setReady] = useState(false);
   // 기본 뷰 = 터미널 pane 그리드(세션 뷰어). 교실(캐릭터)·카드는 토글로.
   const [view, setView] = useState<ViewMode>('terminal');
   // 중앙 멀티뷰 = 터미널 layout 미러(거노: 터미널이랑 pane 위치 동기화). fetchLayout 의
@@ -154,43 +151,25 @@ export function App() {
     return () => { stop = true; clearInterval(iv); };
   }, []);
 
-  const forcePicker = new URLSearchParams(location.search).get('picker') === '1';
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
   useEffect(() => {
-    if (forceMock) { setModeState('god'); setCwd('/Users/kasa/Desktop/momewomo/tmuxify'); setConfigured(true); return; }
-    (async () => {
-      const { cwd } = await fetchMode();
-      setCwd(cwd);
-      setConfigured(true);
-      // BA GUI = 세션 무접촉 시각 레이어 → 켜면 바로 교실(현재 터미널 cwd 그대로).
-      // 폴더 온보딩(ModePicker pathOnly) 폐기: god 자율통솔 청산으로 leader 스폰이
-      // 사라져 "폴더 골라 god 스폰" 단계가 무의미해졌다(거노). 교실로 직진.
-      setModeState('god');
-    })();
+    // solo/god 모드 마커 폐기(잔재 정리) — 웹뷰는 항상 SCHALE OS 교실. 초기 1회 ready 만.
+    setReady(true);
   }, []);
   useEffect(() => {
     if (forceMock) { useStore.getState().setAgents(MOCK_AGENTS); return; }
-    if (mode === 'god') return startBoardPolling(1000);
-  }, [mode]);
+    if (ready) return startBoardPolling(1000);
+  }, [ready]);
   // claude agents(pane 밖 background 학생) 폴링 → 교실에 별도 표시. claude 프로세스
   // spawn 비용이 있어 3초로 느슨하게(background 세션은 자주 안 바뀜).
   useEffect(() => {
-    if (forceMock || mode !== 'god') return;
+    if (forceMock || !ready) return;
     let stop = false;
     const tick = async () => { const a = await fetchBackgroundAgents(); if (!stop) useStore.getState().setBackgroundAgents(a); };
     void tick();
     const iv = setInterval(tick, 3000);
     return () => { stop = true; clearInterval(iv); };
-  }, [mode]);
-  // 방 경로 라이브 반영 — 터미널에서 cd 하면 active_cwd(pid_cwd)가 바뀌니 폴링해
-  // RoomChip 을 즉시 갱신(거노: 터미널 경로 변경이 방 경로에 바로 반영되게).
-  useEffect(() => {
-    if (forceMock || mode !== 'god') return;
-    const iv = setInterval(() => {
-      fetchMode().then(({ cwd }) => { if (cwd) setCwd(cwd); });
-    }, 2000);
-    return () => clearInterval(iv);
-  }, [mode]);
+  }, [ready]);
 
   // 터미널 뷰 기본(A안: 중앙 단일 대화) — 선택된 학생이 없으면 god(아로나)·첫 학생을
   // 자동으로 띄워 중앙이 비지 않게. peek 있으면 그대로 둔다(거노).
@@ -268,30 +247,20 @@ export function App() {
     // offlinePeek(bg 대화) 중에도 layout 은 계속 폴링한다 — fg pane 이 살아있으면 bg 를 왼쪽
     // 타일로 두고 그 옆에 fg 그리드를 나란히 그려야 하고, fg 가 없으면 fetchLayout 이 빈 배열이라
     // 자연히 bg 단독 전체가 된다(렌더의 layoutRects.length===0 분기).
-    if (forceMock || mode !== 'god' || view !== 'terminal') return;
+    if (forceMock || !ready || view !== 'terminal') return;
     let stop = false;
     const tick = async () => { const r = await fetchLayout(); if (!stop) setLayoutRects(r); };
     void tick();
     const iv = setInterval(tick, 1500);
     return () => { stop = true; clearInterval(iv); };
-  }, [mode, view]);
+  }, [ready, view]);
   // 줌된 pane 이 split/close 로 layout 에서 사라지면 전체화면 자동 해제(유령 줌 방지).
   useEffect(() => {
     if (zoomedSurface && !layoutRects.some((r) => r.surface_id === zoomedSurface)) setZoomedSurface(null);
   }, [layoutRects, zoomedSurface]);
 
-  if (mode === undefined) {
+  if (!ready) {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
-  }
-  // ?picker=1 디버그 — solo/god 선택 화면 전체.
-  if (forcePicker) {
-    return (
-      <ModePicker
-        cwd={cwd}
-        onboarding={!configured}
-        onPicked={(m) => { setModeState(m); setConfigured(true); }}
-      />
-    );
   }
 
   // god 먼저 정렬 + 작업명 학생에게 게임개발부 외형(spriteChar) 폴백 배정(교실 스프라이트용).
