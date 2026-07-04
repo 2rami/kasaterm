@@ -1410,45 +1410,6 @@ impl App {
         self.window_name_override
             .insert(self.active_window, format!("● {character}"));
     }
-    /// First-run onboarding: open the arona window (whose ModePicker shows
-    /// the 터미널 vs 아로나 choice) once the boot settles, but only when this
-    /// room has no collab-mode marker yet — picking a mode writes the marker,
-    /// so the next boot skips straight to the terminal. `KASATERM_NO_ONBOARD`
-    /// opts out for headless verification and pre-onboarding user setups.
-    #[allow(dead_code)] // 온보딩 제거(거노) — 재활성 대비 보존. 호출부 handler.rs 에서 뺌.
-    pub(crate) fn arm_first_run_onboarding(&mut self) {
-        if std::env::var_os("KASATERM_NO_ONBOARD").is_some() {
-            return;
-        }
-        // 1.5s: 초기 pane 의 shell 이 spawn 되어 lsof cwd 해석이 안정될 여유.
-        self.onboard_check_at =
-            Some(Instant::now() + std::time::Duration::from_millis(1500));
-    }
-    pub(crate) fn run_pending_onboarding(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(due) = self.onboard_check_at else { return };
-        if Instant::now() < due {
-            return;
-        }
-        self.onboard_check_at = None;
-        // 온보딩은 앱 전역 1회 사건이다. 옛 구현은 active pane 의 cwd 로 per-cwd
-        // collab 마커를 봤는데, 부팅 시 그 cwd 가 임의적이라(데스크탑에서 열면
-        // 데스크탑 온보딩 — 2026-06 실측 사고) + 새 방마다 재온보딩이었다.
-        // 글로벌 플래그 하나로 판정한다.
-        let Some(flag) = kasa_mcp::onboarded_marker_path() else {
-            return; // HOME unset → 마커 경로 불명, 온보딩 안 띄움
-        };
-        if flag.exists() {
-            return;
-        }
-        // 마이그레이션: 글로벌 플래그 도입 전 이미 방 모드를 정한 적 있는
-        // 사용자는 첫 실행이 아니다 — 플래그만 세우고 조용히 skip.
-        if kasa_mcp::any_collab_mode_marker() {
-            kasa_mcp::mark_onboarded();
-            return;
-        }
-        eprintln!("[onboard] first run — opening arona ModePicker");
-        self.open_arona_panel(event_loop);
-    }
     /// Effective render scale = DPI scale × whole-UI zoom. Everything that
     /// converts logical↔physical (cell metrics, chrome coords, cursor px,
     /// window→cols) routes through this so a single `ui_zoom` change scales

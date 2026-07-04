@@ -870,109 +870,17 @@ fn mode_slug(cwd: &std::path::Path) -> String {
         .collect()
 }
 
-/// 이 cwd 방의 영속 모드 마커 경로(~/.config/kasaterm/collab-mode/<slug>).
-/// pub: 호스트(kasaterm)의 첫 실행 온보딩이 같은 마커로 '미설정 방'을 판정한다.
-pub fn mode_marker_path(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        std::path::PathBuf::from(home)
-            .join(".config/kasaterm/collab-mode")
-            .join(mode_slug(cwd)),
-    )
-}
-
-/// 앱 전역 1회 온보딩 완료 플래그(~/.config/kasaterm/onboarded). per-cwd
-/// collab-mode 마커와 분리한다 — 온보딩(첫 실행 환영 ModePicker)은 방이 아니라
-/// 앱 단위 1회 사건이다. 부팅 시 active pane cwd 가 임의적이라(데스크탑에서
-/// 열면 데스크탑 온보딩, 실측 사고) 방 기준 판정을 폐기하고 이 플래그로 대체.
-pub fn onboarded_marker_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/kasaterm/onboarded"))
-}
-
-/// 온보딩 완료를 영속 기록(원자 쓰기). 어떤 모드를 고르든 사용자가 첫 실행
-/// 선택을 끝낸 것이므로 모드 set 경로에서 호출한다.
-pub fn mark_onboarded() {
-    if let Some(p) = onboarded_marker_path() {
-        let _ = write_mode_file(&p, "1");
-    }
-}
-
-/// 이전 버전에서 방 하나라도 모드를 정한 적이 있나 — 글로벌 플래그 도입 전
-/// 사용자를 '첫 실행'으로 오인해 재온보딩하지 않으려는 마이그레이션 판정.
-pub fn any_collab_mode_marker() -> bool {
-    let Some(home) = std::env::var("HOME").ok() else {
-        return false;
-    };
-    let dir = std::path::PathBuf::from(home).join(".config/kasaterm/collab-mode");
-    std::fs::read_dir(&dir)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false)
-}
-
-/// 마커 내용 → 모드. 없거나 알 수 없는 값이면 solo (kasacollab.py 동일).
-fn read_mode_file(path: &std::path::Path) -> &'static str {
-    match std::fs::read_to_string(path) {
-        Ok(s) if s.trim() == "god" => "god",
-        _ => "solo",
-    }
-}
-
-/// 마커 원자 쓰기(tmp + rename) — 읽는 쪽은 완전한 모드명만 본다.
-fn write_mode_file(path: &std::path::Path, mode: &str) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
-    std::fs::write(&tmp, mode)?;
-    std::fs::rename(&tmp, path)
-}
-
-/// `GET /mode` — 활성 pane cwd 방의 협업 모드 `{ mode, cwd, configured }`.
-/// `configured=false` = 마커 자체가 없는 미설정 방(첫 실행) — mode 는 solo 로
-/// 뭉개지므로 이 필드 없이는 ModePicker 온보딩 대상을 웹이 구분할 수 없다.
+/// `GET /mode` — 활성 pane 의 `{ cwd }`. 옛 solo/god 모드 필드(mode·configured)는
+/// 제거됐다(shim_inject 가 대체). 라우트 자체는 resolveBase 헬스 프로브 + cwd 소스
+/// (터미널 cd 반영)로 살아있어 경로명은 유지한다.
 async fn mode_get_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     let cwd = resolve_cwd(&backend);
-    let marker = mode_marker_path(&cwd);
-    let configured = marker.as_deref().is_some_and(|p| p.exists());
-    let mode = marker.as_deref().map(read_mode_file).unwrap_or("solo");
     (
         [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
         Json(serde_json::json!({
-            "mode": mode,
             "cwd": cwd.to_string_lossy(),
-            "configured": configured,
         })),
     )
-}
-
-/// `POST /mode?set=solo|god` — 활성 pane cwd 방의 모드 전환. 값이 쿼리로 오는
-/// 이유는 session-switch 와 같다(null-origin webview 의 CORS preflight 회피).
-async fn mode_set_handler(
-    backend: Arc<dyn Backend>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    let set = params.get("set").map(String::as_str).unwrap_or("");
-    let body = if set != "solo" && set != "god" {
-        serde_json::json!({ "ok": false, "error": "set=solo|god required" })
-    } else {
-        let cwd = resolve_cwd(&backend);
-        match mode_marker_path(&cwd) {
-            Some(p) => match write_mode_file(&p, set) {
-                Ok(()) => {
-                    // 모드를 골랐다 = 첫 실행 온보딩을 끝냈다. 전역 플래그를
-                    // 세워 다음 부팅에 ModePicker 가 다시 뜨지 않게 한다.
-                    mark_onboarded();
-                    serde_json::json!({ "ok": true, "mode": set })
-                }
-                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-            },
-            None => serde_json::json!({ "ok": false, "error": "HOME unset" }),
-        }
-    };
-    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
 /// arona-ui 정적 번들 루트: env 오버라이드 → .app Resources → 레포 dev 빌드.
@@ -2128,17 +2036,6 @@ async fn schale_state_handler() -> impl IntoResponse {
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(s))
 }
 
-/// `POST /arona-close` — close the arona classroom window and bring the main
-/// terminal back. The ModePicker's "터미널로" choice calls this; the page
-/// can't close its own host window. No-op (still ok) when it isn't open.
-async fn arona_close_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
-    let body = match backend.close_arona() {
-        Ok(()) => serde_json::json!({ "ok": true }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    };
-    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
-}
-
 /// `POST /panel-open?which=git|session` — open a panel window.
 async fn panel_open_handler(
     backend: Arc<dyn Backend>,
@@ -2295,7 +2192,6 @@ pub fn spawn_http_server_opts(
                 let panel_resize_backend = backend.clone();
                 let panel_info_backend = backend.clone();
                 let terminal_reveal_backend = backend.clone();
-                let arona_close_backend = backend.clone();
                 let peek_backend = backend.clone();
                 let blocks_backend = backend.clone();
                 let transcript_backend = backend.clone();
@@ -2308,7 +2204,6 @@ pub fn spawn_http_server_opts(
                 let tell_god_backend = backend.clone();
                 let send_backend = backend.clone();
                 let mode_get_backend = backend.clone();
-                let mode_set_backend = backend.clone();
                 let focus_backend = backend.clone();
                 let close_backend = backend.clone();
                 let events_backend = backend.clone();
@@ -2402,11 +2297,7 @@ pub fn spawn_http_server_opts(
                     .route("/characters", get(characters_handler))
                     .route(
                         "/mode",
-                        get(move || mode_get_handler(mode_get_backend.clone())).post(
-                            move |q: Query<std::collections::HashMap<String, String>>| {
-                                mode_set_handler(mode_set_backend.clone(), q)
-                            },
-                        ),
+                        get(move || mode_get_handler(mode_get_backend.clone())),
                     )
                     .route(
                         "/focus",
@@ -2535,10 +2426,6 @@ pub fn spawn_http_server_opts(
                         }),
                     )
                     .route("/schale-state", get(schale_state_handler))
-                    .route(
-                        "/arona-close",
-                        post(move || arona_close_handler(arona_close_backend.clone())),
-                    )
                     .route(
                         "/peek",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
@@ -2738,39 +2625,6 @@ mod tests {
     }
 
     #[test]
-    fn read_mode_defaults_to_solo() {
-        let d = temp_dir("read-mode");
-        // 파일 없음 → solo
-        assert_eq!(read_mode_file(&d.join("missing")), "solo");
-        // 쓰레기 값 → solo
-        std::fs::write(d.join("garbage"), "banana\n").unwrap();
-        assert_eq!(read_mode_file(&d.join("garbage")), "solo");
-        // 개행 딸린 god → god (py 의 .strip() 대응)
-        std::fs::write(d.join("god"), "god\n").unwrap();
-        assert_eq!(read_mode_file(&d.join("god")), "god");
-        std::fs::write(d.join("solo"), "solo").unwrap();
-        assert_eq!(read_mode_file(&d.join("solo")), "solo");
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn write_mode_atomic_roundtrip() {
-        let d = temp_dir("write-mode");
-        let p = d.join("rooms").join("-some-room");
-        // 부모 디렉토리 없어도 생성
-        write_mode_file(&p, "god").unwrap();
-        assert_eq!(read_mode_file(&p), "god");
-        // tmp 파일이 남지 않는다 (rename 완료)
-        let mut tmp = p.as_os_str().to_owned();
-        tmp.push(".tmp");
-        assert!(!std::path::Path::new(&tmp).exists());
-        // 덮어쓰기 전환
-        write_mode_file(&p, "solo").unwrap();
-        assert_eq!(read_mode_file(&p), "solo");
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
     fn first_valid_json_skips_broken_files() {
         let d = temp_dir("char-json");
         let broken = d.join("broken.json");
@@ -2786,38 +2640,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// 전역 온보딩 플래그: 경로·기록·마이그레이션 판정. HOME 을 temp 로 격리
-    /// (HOME 을 읽는 테스트는 이 하나뿐이라 병렬에서 충돌하지 않는다).
-    #[test]
-    fn onboarded_flag_path_write_and_migration() {
-        let home = temp_dir("onboard-home");
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
-
-        // 경로: ~/.config/kasaterm/onboarded
-        let flag = onboarded_marker_path().unwrap();
-        assert_eq!(flag, home.join(".config/kasaterm/onboarded"));
-
-        // 첫 실행: 플래그 없음 + collab 마커 없음 → 온보딩 대상
-        assert!(!flag.exists());
-        assert!(!any_collab_mode_marker());
-
-        // 모드 선택 = mark_onboarded → 플래그 영속(내용 "1")
-        mark_onboarded();
-        assert!(flag.exists());
-        assert_eq!(std::fs::read_to_string(&flag).unwrap(), "1");
-
-        // 마이그레이션: 플래그 지우고 옛 방 마커 하나 심으면 '첫 실행 아님' 판정
-        std::fs::remove_file(&flag).unwrap();
-        assert!(!any_collab_mode_marker());
-        let room = mode_marker_path(std::path::Path::new("/some/project")).unwrap();
-        write_mode_file(&room, "god").unwrap();
-        assert!(any_collab_mode_marker());
-
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&home);
-    }
 }

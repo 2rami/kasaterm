@@ -2724,10 +2724,6 @@ struct App {
     autotoggle_sidebar_at: Option<Instant>,
     /// Headless arona-panel toggle deadline (KASATERM_AUTOARONA_MS).
     autoarona_at: Option<Instant>,
-    /// First-run onboarding check deadline — set at boot, fires once after
-    /// the shell settles; opens the arona ModePicker when this room has no
-    /// collab-mode marker yet (KASATERM_NO_ONBOARD opts out).
-    onboard_check_at: Option<Instant>,
     /// Extra sidebar flips queued after the first (KASATERM_AUTOTOGGLE_SIDEBAR_N),
     /// 1.5s apart, to stress hide↔show reflow without a human.
     autotoggle_left: u32,
@@ -3284,7 +3280,6 @@ impl App {
             autowindow_at: None,
             autotoggle_sidebar_at: None,
             autoarona_at: None,
-            onboard_check_at: None,
             autotoggle_left: 0,
             autotabs_n: 0,
             autotabs_at: None,

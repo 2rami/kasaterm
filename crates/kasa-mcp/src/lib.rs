@@ -21,10 +21,6 @@ mod proxy;
 mod register;
 pub mod standalone;
 pub use http::{spawn_http_server, spawn_http_server_opts};
-// 호스트(kasaterm)의 첫 실행 온보딩이 GET /mode 와 같은 마커로 판정하게 노출.
-pub use http::mode_marker_path;
-// 온보딩(앱 전역 1회) 플래그 — per-cwd 마커와 분리. 호스트가 판정·마이그레이션.
-pub use http::{any_collab_mode_marker, mark_onboarded, onboarded_marker_path};
 pub use register::register_clients;
 
 #[derive(Clone)]
