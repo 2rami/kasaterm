@@ -137,7 +137,9 @@ export function Markdown({ text }: { text: string }) {
       !/^\s*\d+\.\s+/.test(lines[i]) && !/^\s*>\s?/.test(lines[i]) &&
       !(lines[i].includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1]))
     ) { para.push(lines[i]); i++; }
-    blocks.push(<div key={key++} style={{ margin: '2px 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{inline(para.join('\n'), `p${key}`)}</div>);
+    // 문단 사이 여백 — 터미널은 빈 줄이 통째로 들어가 확 띄워지는데 웹뷰는 2px라 문단이
+    // 뭉쳐 보였다(거노: 유즈 자소서). 문단답게 띄운다.
+    blocks.push(<div key={key++} style={{ margin: '0.7em 0', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{inline(para.join('\n'), `p${key}`)}</div>);
   }
 
   return <>{blocks}</>;

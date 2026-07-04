@@ -395,6 +395,7 @@ impl App {
             self.ws.lock().unwrap().pane_room.insert(new_id.clone(), r.clone());
         }
         env.extend(self.assign_character_env(&new_id, cwd.as_deref(), room.as_deref()));
+        env.extend(crate::room_mode_env(cwd.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
@@ -440,12 +441,14 @@ impl App {
         let cwd = self.spawn_cwd_from(Some(outer));
         let new_pid = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
+        let mut env = crate::proxy_env(&new_pid);
+        env.extend(crate::room_mode_env(cwd.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
             cols,
             rows,
-            env: crate::proxy_env(&new_pid),
+            env,
             pane_id: new_pid.clone(),
             initial_scrollback: Vec::new(),
         })?;
@@ -590,12 +593,14 @@ impl App {
         let cwd = self.spawn_cwd_from(Some(source));
         let new_id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
+        let mut env = crate::proxy_env(&new_id);
+        env.extend(crate::room_mode_env(cwd.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
             cols,
             rows,
-            env: crate::proxy_env(&new_id),
+            env,
             pane_id: new_id.clone(),
             initial_scrollback: Vec::new(),
         })?;
