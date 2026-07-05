@@ -3253,7 +3253,29 @@ impl App {
             // 모은다. statusbar 루프(아래)도 active 보더 inset 계산에 active_pane/
             // is_split을 쓰므로 settings 분기 밖, 더 넓은 스코프에 둔다.
             let is_split = footer_slots.len() > 1;
-            let active_pane = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+            // active_pane + pane 별 캐릭터명을 한 lock 으로 스냅샷 — 아래 pane 테두리
+            // 루프가 g(=&mut self.gpu) 안이라 self 재borrow 불가. character_accent 폴백용.
+            let (active_pane, pane_chars) = self
+                .ws
+                .lock()
+                .ok()
+                .map(|w| (w.active_pane.clone(), w.pane_character.clone()))
+                .unwrap_or_default();
+            // claude 가 foreground 인 pane 집합 — 테두리 게이트. 캐릭터는 pane spawn 시
+            // 배정되지만(assign_character_env) 순수 셸엔 색을 안 씌우려면 타이틀바 학생
+            // 이름과 동일 조건(active_process_name=="claude")을 써야 한다(거노: 클로드
+            // 아니면 무테두리). active_process_name 은 500ms 캐시라 매 프레임 다중 pane
+            // 호출도 가볍다. self.pty 접근이라 g(=&mut self.gpu) 잡은 루프 밖에서 스냅샷.
+            let claude_panes: std::collections::HashSet<String> = footer_slots
+                .iter()
+                .filter(|(id, ..)| {
+                    self.pty
+                        .get(id.as_str())
+                        .and_then(|p| p.active_process_name())
+                        .is_some_and(|n| n == "claude")
+                })
+                .map(|(id, ..)| id.clone())
+                .collect();
             // 헤더를 실제로 그린 pane 집합 — 헤더 working bar 가 거기 뜨므로 footer 로딩바는
             // 이 pane 들을 건너뛴다. `ws.panes.has_header()` 가 아니라 방금 그린 `headers`
             // (pty_layout 기반)에서 뽑아야 ws.panes↔pty_layout 데싱크로 한 pane 에 헤더(위)·
@@ -3278,13 +3300,19 @@ impl App {
                 const HANDLE: f32 = 22.0;
                 const HMARGIN: f32 = 5.0;
                 for (fid, fx, fy, fw, fbox_h) in &footer_slots {
-                    // active 보더 — split일 때만(단일 pane은 강조 불필요).
-                    if is_split && active_pane.as_deref() == Some(fid.as_str()) {
-                        let t = 1.5_f32;
-                        g.rect(*fx, *fy, *fw, t, accent);
-                        g.rect(*fx, fy + fbox_h - t, *fw, t, accent);
-                        g.rect(*fx, *fy, t, *fbox_h, accent);
-                        g.rect(fx + fw - t, *fy, t, *fbox_h, accent);
+                    // pane 테두리 — claude 실행 중인 pane 만 자기 학생 고정색 테두리(누가
+                    // 어느 pane 인지 한눈에). 순수 셸은 무테두리(claude_panes 밖). active 는
+                    // 굵게(1.5px)·비활성은 얇게(0.75px).
+                    if is_split && claude_panes.contains(fid.as_str()) {
+                        if let Some(col) =
+                            pane_chars.get(fid.as_str()).and_then(|n| theme::character_accent(n))
+                        {
+                            let t = if active_pane.as_deref() == Some(fid.as_str()) { 1.5_f32 } else { 0.75_f32 };
+                            g.rect(*fx, *fy, *fw, t, col);
+                            g.rect(*fx, fy + fbox_h - t, *fw, t, col);
+                            g.rect(*fx, *fy, t, *fbox_h, col);
+                            g.rect(fx + fw - t, *fy, t, *fbox_h, col);
+                        }
                     }
                     // 로딩바 — claude 작업 중(pane_activity working)일 때 box 상단
                     // 얇은 스윕바. 헤더 띠 폐기 후 일반 pane 의 유일한 진행 표시(거노).

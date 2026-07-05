@@ -204,3 +204,18 @@ pub fn lerp(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
     let mix = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t).round() as u8;
     [mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2]), 255]
 }
+
+/// 캐릭터명 → 고정 accent (pane 번호와 무관하게 학생=색 고정). god(아로나)=골드,
+/// 프라나=틸. 유즈는 레몬 대신 하늘 — 레몬이 god 골드와 겹쳐서다. 6색 서로 구분.
+/// 미배정(순수 셸)은 None → 호출부가 테두리를 안 그린다.
+pub fn character_accent(name: &str) -> Option<[u8; 4]> {
+    Some(unpack(match name {
+        "아로나" => 0xffd93d_ff, // god, gold
+        "프라나" => 0x4ecdc4_ff, // god, teal
+        "미도리" => 0x6bcf7f_ff, // mint
+        "모모이" => 0xff6b6b_ff, // coral
+        "유즈" => 0x4a90e2_ff,   // sky
+        "아리스" => 0xb197fc_ff, // lilac
+        _ => return None,
+    }))
+}
