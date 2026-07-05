@@ -132,10 +132,10 @@ fn lead_marker(rslug: &str) -> PathBuf {
     collab_dir(rslug).join("lead")
 }
 
-/// 이 방에서 이미 배정된 캐릭터 이름들(character-* 마커 내용).
-pub fn assigned(rslug: &str) -> Vec<String> {
+/// 한 collab 디렉토리의 character-* 마커 내용들.
+fn assigned_in(dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(collab_dir(rslug)) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let name = e.file_name();
             let Some(n) = name.to_str() else { continue };
@@ -153,6 +153,25 @@ pub fn assigned(rslug: &str) -> Vec<String> {
     out
 }
 
+/// 이 방에서 이미 배정된 캐릭터 이름들(character-* 마커 내용).
+pub fn assigned(rslug: &str) -> Vec<String> {
+    assigned_in(&collab_dir(rslug))
+}
+
+/// 모든 방(rslug)의 배정 캐릭터 — 전역 유일 배정용. /tmp/kasaterm-collab/ 아래 각
+/// 방 디렉토리의 character-* 마커를 합친다. 닫힌 pane 마커는 cleanup_collab_markers
+/// (layout.rs)가 지우므로 대체로 live 만 남는다 → 프로젝트(방)를 넘어 같은 학생이
+/// 중복 배정되는 걸 막는다(거노: 미도리 둘).
+pub fn assigned_global() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rooms) = std::fs::read_dir("/tmp/kasaterm-collab") {
+        for room in rooms.flatten() {
+            out.extend(assigned_in(&room.path()));
+        }
+    }
+    out
+}
+
 /// 한 pane(surface)의 character-<N> 마커 내용. 없거나 비면 None.
 /// resume 복원처럼 ws.pane_character 엔 없지만 마커엔 있는 캐릭터를 중복 배정에서
 /// 피하려 쓴다(assign_character_env).
@@ -163,18 +182,22 @@ pub fn read_marker(rslug: &str, surface_id: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// 빈 슬롯 순환 — members 중 아직 안 쓰인 첫째. 다 차면 배정 수 기준으로 순환.
-pub fn assign_next(rslug: &str, members: &[String]) -> Option<String> {
-    if members.is_empty() {
+/// 후보 중 하나를 유사난수로 고른다 — 순서 고정(늘 미도리부터) 대신 랜덤 배정용
+/// (거노: 완전 랜덤). 시드 = SystemTime nanos ^ pid ^ salt(pane id) 해시라, 같은
+/// 순간 spawn 된 여러 pane 도 서로 갈린다. rand 크레이트 없이 std 만.
+pub fn pick_random(candidates: &[String], salt: &str) -> Option<String> {
+    if candidates.is_empty() {
         return None;
     }
-    let used = assigned(rslug);
-    for m in members {
-        if !used.contains(m) {
-            return Some(m.clone());
-        }
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    seed ^= std::process::id() as u128;
+    for b in salt.bytes() {
+        seed = seed.wrapping_mul(131).wrapping_add(b as u128);
     }
-    Some(members[used.len() % members.len()].clone())
+    Some(candidates[(seed % candidates.len() as u128) as usize].clone())
 }
 
 /// character-<N> 마커를 원자적으로 쓴다(tmp → rename). board 가 즉시 읽는다.

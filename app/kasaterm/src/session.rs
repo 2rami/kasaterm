@@ -227,12 +227,18 @@ impl App {
         };
         let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
         let members = kasa_mcp::character::member_names(&chars);
-        // 같은 방에서 이미 살아있는 pane 이 쓰는 캐릭터는 피한다(거노: 모모이 둘 — resume/
-        // 배정 경로가 살아있는 학생을 안 피해 중복됐다). ws.pane_character(배정됨) + 그 surface
-        // 마커(resume 복원처럼 ws 엔 없는 것)를 합친다. 죽은 pane 마커는 무시(live 만 본다).
+        // god(아로나·프라나)도 배정 풀에 그냥 포함 — 대타가 아니라 학생과 동등하게 랜덤
+        // (거노: 아로나·프라나도 그냥 랜덤으로 나오게, 대타 말고). 명시 배정(pending)만
+        // 통솔(lead) 마커를 단다.
+        let leaders = kasa_mcp::character::god_names(&chars);
+        // 프로젝트(방)를 넘어 같은 학생이 겹치지 않게, 이 방 live pane + 전 방 마커를 모두
+        // taken 으로 본다(거노: 미도리 둘 — 방-로컬 배정이라 다른 방 미도리를 못 봤다).
+        // ws.pane_character/read_marker(이 방 live) + assigned_global(전 방). 닫힌 pane
+        // 마커는 cleanup_collab_markers 가 지우므로 대체로 live 만 남는다.
         let taken: std::collections::HashSet<String> = {
             let ws = self.ws.lock().unwrap();
-            ws.panes
+            let mut t: std::collections::HashSet<String> = ws
+                .panes
                 .keys()
                 .filter(|p| p.as_str() != id)
                 .filter_map(|p| {
@@ -241,22 +247,34 @@ impl App {
                         .cloned()
                         .or_else(|| kasa_mcp::character::read_marker(&rslug, p))
                 })
-                .collect()
+                .collect();
+            t.extend(kasa_mcp::character::assigned_global());
+            t
         };
-        // pending(사용자 지정) 우선 — 단 이미 살아있으면 버리고 빈 슬롯. 다 차면 첫째로 순환.
-        let name = match self
-            .pending_character
-            .take()
-            .filter(|n| !taken.contains(n))
-            .or_else(|| members.iter().find(|m| !taken.contains(m.as_str())).cloned())
-            .or_else(|| members.first().cloned())
-        {
-            Some(n) => n,
-            None => return Vec::new(),
-        };
+        // pending(사용자 지정 god) 우선. 없으면 학생+god 6명 통짜에서 안 겹친 것 중 랜덤
+        // (거노: 아로나·프라나도 대타가 아니라 그냥 랜덤 풀). 다 차면 전체에서 랜덤 폴백.
+        // explicit_god = 방 통솔용으로 명시 배정된 god 인지(자동 배정 god 과 구분 — lead
+        // 마커는 명시 배정만).
+        let (name, explicit_god) =
+            match self.pending_character.take().filter(|n| !taken.contains(n)) {
+                Some(n) => (n, true),
+                None => {
+                    let pool: Vec<String> = members.iter().chain(leaders.iter()).cloned().collect();
+                    let free: Vec<String> =
+                        pool.iter().filter(|n| !taken.contains(n.as_str())).cloned().collect();
+                    let pick = kasa_mcp::character::pick_random(&free, id)
+                        .or_else(|| kasa_mcp::character::pick_random(&pool, id));
+                    match pick {
+                        Some(n) => (n, false),
+                        None => return Vec::new(),
+                    }
+                }
+            };
         let sid = kasa_mcp::character::new_session_id();
         let _ = kasa_mcp::character::write_marker(&rslug, id, &name);
-        if kasa_mcp::character::is_god(&chars, &name) {
+        // god 은 방 통솔용으로 명시 배정됐을 때만 lead 마커. 자동 랜덤으로 나온 god 은 일반
+        // 워커라 통솔 표시를 안 한다(거노: 랜덤 god 이 방 리더로 오인되지 않게).
+        if explicit_god && kasa_mcp::character::is_god(&chars, &name) {
             let _ = kasa_mcp::character::write_lead(&rslug, id);
         }
         self.pane_session_id.insert(id.to_string(), sid.clone());
