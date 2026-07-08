@@ -56,9 +56,15 @@ kasaterm $VERSION — 한글 특화 GUI 터미널 + Claude 런처
 EOF
 )"
 
-gh release create "$VERSION" "$DMG" \
-  --title "kasaterm $VERSION" \
-  --notes "$NOTES"
+# 릴리스가 이미 있으면(예: Windows .msi 를 굽는 CI 가 태그 push 로 먼저 생성) dmg 만
+# 첨부하고, 없으면 새로 만든다 — Windows .msi(CI) + mac .dmg(로컬)를 한 릴리스에 모은다.
+if gh release view "$VERSION" >/dev/null 2>&1; then
+  gh release upload "$VERSION" "$DMG" --clobber
+else
+  gh release create "$VERSION" "$DMG" \
+    --title "kasaterm $VERSION" \
+    --notes "$NOTES"
+fi
 echo "published: $(gh release view "$VERSION" --json url -q .url)"
 
 # 5. Sparkle appcast — dmg 를 EdDSA 서명(Keychain 개인키)해 appcast.xml 생성하고
