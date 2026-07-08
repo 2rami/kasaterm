@@ -3300,14 +3300,17 @@ impl App {
                 const HANDLE: f32 = 22.0;
                 const HMARGIN: f32 = 5.0;
                 for (fid, fx, fy, fw, fbox_h) in &footer_slots {
-                    // pane 테두리 — claude 실행 중인 pane 만 자기 학생 고정색 테두리(누가
-                    // 어느 pane 인지 한눈에). 순수 셸은 무테두리(claude_panes 밖). active 는
-                    // 굵게(1.5px)·비활성은 얇게(0.75px).
-                    if is_split && claude_panes.contains(fid.as_str()) {
+                    // pane 테두리 — 포커스된(active) claude pane 만 자기 학생 고정색
+                    // 테두리(지금 어느 pane 을 보고 있는지 한눈에). 비활성·순수 셸은
+                    // 무테두리 — 여러 pane 이 동시에 테두리를 둘러 지저분하던 걸 정리(거노).
+                    if is_split
+                        && active_pane.as_deref() == Some(fid.as_str())
+                        && claude_panes.contains(fid.as_str())
+                    {
                         if let Some(col) =
                             pane_chars.get(fid.as_str()).and_then(|n| theme::character_accent(n))
                         {
-                            let t = if active_pane.as_deref() == Some(fid.as_str()) { 1.5_f32 } else { 0.75_f32 };
+                            let t = 1.5_f32;
                             g.rect(*fx, *fy, *fw, t, col);
                             g.rect(*fx, fy + fbox_h - t, *fw, t, col);
                             g.rect(*fx, *fy, t, *fbox_h, col);
