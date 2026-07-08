@@ -33,6 +33,9 @@ mod state;
 mod macos_open;
 #[cfg(target_os = "macos")]
 mod macos_sparkle;
+// Windows 자동 업데이트 — WinSparkle.dll 런타임 로드(macos_sparkle 대칭).
+#[cfg(windows)]
+mod win_sparkle;
 
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};

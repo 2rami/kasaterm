@@ -80,6 +80,8 @@ windows-sys = { version = "0.59", features = [
     # CurrentDirectory via NtQueryInformationProcess + ReadProcessMemory.
     "Win32_System_Threading",
     "Win32_System_Diagnostics_Debug",
+    # LoadLibraryW/GetProcAddress — WinSparkle.dll 런타임 로드(win_sparkle.rs).
+    "Win32_System_LibraryLoader",
 ] }
 png = "0.17"
 
