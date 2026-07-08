@@ -1,0 +1,15 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>kasaterm (Windows)</title>
+        <item>
+            <title>0.1.6</title>
+            <pubDate>Wed, 08 Jul 2026 18:17:28 +0900</pubDate>
+            <link>https://github.com/2rami/kasaterm</link>
+            <sparkle:version>0.1.6</sparkle:version>
+            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
+            <enclosure url="https://github.com/2rami/kasaterm/releases/download/v0.1.6/kasaterm-0.1.6-x86_64.msi"
+                       sparkle:os="windows" type="application/octet-stream" sparkle:edSignature="l2lsvsPCOo4x0TpCbr/5G7p9ru/R6jzW/7VShvkR1q1hf94oCHeA422MfJLrapmb9V/+ApUjNGPrKmIHkKL8Dw==" length="14118912" />
+        </item>
+    </channel>
+</rss>
