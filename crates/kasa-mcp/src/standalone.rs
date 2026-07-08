@@ -66,48 +66,63 @@ impl Backend for StandaloneBackend {
         let sid = surface_id
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("standalone tell requires a session id (surface)"))?;
-        let short: String = sid.chars().take(8).collect();
-        let claude = crate::http::claude_bin();
-        let claude_c = std::ffi::CString::new(claude.to_string_lossy().as_bytes())
-            .map_err(|_| anyhow::anyhow!("bad claude path"))?;
-        let attach_c = std::ffi::CString::new("attach").unwrap();
-        let short_c =
-            std::ffi::CString::new(short).map_err(|_| anyhow::anyhow!("bad session id"))?;
-        unsafe {
-            let mut master: libc::c_int = 0;
-            let pid = libc::forkpty(
-                &mut master,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            );
-            if pid < 0 {
-                anyhow::bail!("forkpty failed");
-            }
-            if pid == 0 {
-                // child: exec `claude attach <short>` on the pty.
-                let argv = [claude_c.as_ptr(), attach_c.as_ptr(), short_c.as_ptr(), std::ptr::null()];
-                libc::execv(claude_c.as_ptr(), argv.as_ptr());
-                libc::_exit(127);
-            }
-            // parent: attach 화면이 뜰 시간을 준 뒤(pty output drain) 텍스트 주입, claude 가
-            // user 메시지로 처리할 시간을 두고 SIGTERM 으로 detach(세션은 daemon 에 유지).
-            libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
-            let mut buf = [0u8; 4096];
-            let drain_until = std::time::Instant::now() + std::time::Duration::from_millis(2500);
-            while std::time::Instant::now() < drain_until {
-                libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            let payload = format!("{text}\r");
-            let _ = libc::write(master, payload.as_ptr() as *const libc::c_void, payload.len());
-            std::thread::sleep(std::time::Duration::from_millis(2500));
-            libc::kill(pid, libc::SIGTERM);
-            let mut status = 0;
-            libc::waitpid(pid, &mut status, 0);
-            libc::close(master);
+        // forkpty 기반 `claude attach` 주입은 Unix 전용 — Windows 엔 forkpty 가 없다.
+        // Windows standalone 서버는 아직 tell 을 지원하지 않으므로 명시적으로 bail.
+        #[cfg(not(unix))]
+        {
+            let _ = (sid, text);
+            return Err(anyhow::anyhow!(
+                "standalone tell (forkpty attach) is not supported on Windows yet"
+            ));
         }
-        Ok(())
+        #[cfg(unix)]
+        {
+            let short: String = sid.chars().take(8).collect();
+            let claude = crate::http::claude_bin();
+            let claude_c = std::ffi::CString::new(claude.to_string_lossy().as_bytes())
+                .map_err(|_| anyhow::anyhow!("bad claude path"))?;
+            let attach_c = std::ffi::CString::new("attach").unwrap();
+            let short_c =
+                std::ffi::CString::new(short).map_err(|_| anyhow::anyhow!("bad session id"))?;
+            unsafe {
+                let mut master: libc::c_int = 0;
+                let pid = libc::forkpty(
+                    &mut master,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+                if pid < 0 {
+                    anyhow::bail!("forkpty failed");
+                }
+                if pid == 0 {
+                    // child: exec `claude attach <short>` on the pty.
+                    let argv =
+                        [claude_c.as_ptr(), attach_c.as_ptr(), short_c.as_ptr(), std::ptr::null()];
+                    libc::execv(claude_c.as_ptr(), argv.as_ptr());
+                    libc::_exit(127);
+                }
+                // parent: attach 화면이 뜰 시간을 준 뒤(pty output drain) 텍스트 주입, claude 가
+                // user 메시지로 처리할 시간을 두고 SIGTERM 으로 detach(세션은 daemon 에 유지).
+                libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+                let mut buf = [0u8; 4096];
+                let drain_until =
+                    std::time::Instant::now() + std::time::Duration::from_millis(2500);
+                while std::time::Instant::now() < drain_until {
+                    libc::read(master, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                let payload = format!("{text}\r");
+                let _ =
+                    libc::write(master, payload.as_ptr() as *const libc::c_void, payload.len());
+                std::thread::sleep(std::time::Duration::from_millis(2500));
+                libc::kill(pid, libc::SIGTERM);
+                let mut status = 0;
+                libc::waitpid(pid, &mut status, 0);
+                libc::close(master);
+            }
+            return Ok(());
+        }
     }
     fn send_key(&self, _surface_id: Option<&str>, _key: &str) -> Result<()> {
         anyhow::bail!("standalone webview server has no live panes")
