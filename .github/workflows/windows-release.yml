@@ -32,6 +32,18 @@ jobs:
       - name: Build kasaterm (release)
         run: cargo build --release -p kasaterm
 
+      # WinSparkle(자동 업데이트) prebuilt x64 DLL 을 빌드 산출물 옆에 둔다 —
+      # main.wxs 의 $(var.CargoTargetBinDir)\WinSparkle.dll 이 여기(target\release)를
+      # 가리키고, 런타임엔 win_sparkle.rs 의 LoadLibrary 가 exe 옆에서 찾는다.
+      - name: Bundle WinSparkle.dll
+        shell: pwsh
+        run: |
+          $ver = "0.9.3"
+          Invoke-WebRequest "https://github.com/vslavik/winsparkle/releases/download/v$ver/WinSparkle-$ver.zip" -OutFile ws.zip
+          Expand-Archive ws.zip -DestinationPath ws -Force
+          Copy-Item "ws\WinSparkle-$ver\x64\Release\WinSparkle.dll" "target\release\WinSparkle.dll"
+          Write-Host "bundled WinSparkle.dll ($((Get-Item target\release\WinSparkle.dll).Length) bytes)"
+
       # windows-latest 러너엔 WiX 3.14.1(Legacy, candle/light)이 이미 깔려 있고
       # WIX 환경변수까지 잡혀 있다(2026-04 기준). main.wxs 도 v3 Legacy 스키마라
       # WiX 별도 설치는 불필요. cargo-wix 서브커맨드만 있으면 된다.

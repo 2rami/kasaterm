@@ -401,6 +401,10 @@ impl ApplicationHandler<UserEvent> for App {
         // Ask for desktop-notification permission up front so the prompt
         // appears at launch rather than mid-work on the first completion.
         crate::chrome::ensure_notification_authorization();
+        // Windows 자동 업데이트 시작 — WinSparkle.dll 이 있을 때만(없으면 no-op).
+        // mac 메뉴 블록은 cfg(macos) 라, 여기(메뉴 밖)서 별도로 건다.
+        #[cfg(windows)]
+        crate::win_sparkle::init();
         // macOS menu bar: app submenu (About/Quit) + a "보기" submenu with
         // the "Git 패널" toggle. Built once (NSApp exists by resumed). Clicks
         // arrive on muda's global channel, drained in about_to_wait. Stored
