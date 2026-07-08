@@ -80,7 +80,47 @@ mkdir -p docs
 cp "$APPCAST_DIR/appcast.xml" docs/appcast.xml
 touch docs/.nojekyll  # Jekyll 이 .xml 을 건드리지 않게
 rm -rf "$APPCAST_DIR"
+
+# 6. Windows appcast — Windows CI(windows-release.yml)가 태그 push 시 릴리스에 올린
+#    .msi 를 같은 EdDSA 키(Keychain)로 서명해 appcast-win.xml 을 만든다. WinSparkle 이
+#    이 피드를 본다(win_sparkle.rs 의 APPCAST_URL). .msi 가 아직 릴리스에 없으면(Windows
+#    CI 미완료) 건너뛰고 경고만 — CI 완료 후 release.sh 를 재실행하면 갱신된다.
+WIN_APPCAST=""
+MSI_TMP="$(mktemp -d)/win.msi"
+if gh release download "$VERSION" -p '*.msi' -O "$MSI_TMP" --clobber 2>/dev/null && [[ -s "$MSI_TMP" ]]; then
+  MSI_NAME="$(gh release view "$VERSION" --json assets -q '.assets[].name' | grep -E '\.msi$' | head -1)"
+  # sign_update 출력이 그대로 enclosure 속성: sparkle:edSignature="..." length="..."
+  SIG_LINE="$("$ROOT/vendor/Sparkle/bin/sign_update" "$MSI_TMP")"
+  VER="${VERSION#v}"
+  cat > docs/appcast-win.xml <<XML
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>kasaterm (Windows)</title>
+        <item>
+            <title>$VER</title>
+            <pubDate>$(date -R)</pubDate>
+            <link>https://github.com/2rami/kasaterm</link>
+            <sparkle:version>$VER</sparkle:version>
+            <sparkle:shortVersionString>$VER</sparkle:shortVersionString>
+            <enclosure url="https://github.com/2rami/kasaterm/releases/download/$VERSION/$MSI_NAME"
+                       sparkle:os="windows" type="application/octet-stream" $SIG_LINE />
+        </item>
+    </channel>
+</rss>
+XML
+  WIN_APPCAST="docs/appcast-win.xml"
+  echo "appcast-win → docs/appcast-win.xml ($MSI_NAME)"
+else
+  echo "⚠ .msi 아직 릴리스에 없음 — Windows CI 완료 후 release.sh 재실행하면 appcast-win 갱신"
+fi
+rm -rf "$(dirname "$MSI_TMP")"
+
 git add docs/appcast.xml docs/.nojekyll
+[[ -n "$WIN_APPCAST" ]] && git add "$WIN_APPCAST"
 git commit -m "chore(release): appcast $VERSION" >/dev/null 2>&1 || true
 git push
 echo "appcast → docs/appcast.xml (Pages: https://2rami.github.io/kasaterm/appcast.xml)"
+if [[ -n "$WIN_APPCAST" ]]; then
+  echo "appcast-win → https://2rami.github.io/kasaterm/appcast-win.xml"
+fi
