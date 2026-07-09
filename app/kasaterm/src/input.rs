@@ -663,7 +663,12 @@ impl App {
     pub(crate) fn handle_wheel(&mut self, delta: MouseScrollDelta) {
         let wdbg = std::env::var_os("KASATERM_WHEEL_DEBUG").is_some();
         let dy_cells = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y * 0.3,
+            // Mouse wheel: winit normalises one notch to y=±1.0. At 0.3 cells a
+            // notch it took ~4 notches to move a single row (wheel_step only
+            // emits once |accum| ≥ 1). 3 cells/notch matches the 3-line default
+            // most GUI terminals use, so a notch scrolls immediately.
+            MouseScrollDelta::LineDelta(_, y) => y * 3.0,
+            // Trackpad: pixel-precise, already smooth — keep the gentle factor.
             MouseScrollDelta::PixelDelta(p) => (p.y as f32) / self.cell.h.max(1.0) * 0.3,
         };
         if wdbg {
