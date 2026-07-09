@@ -15,15 +15,7 @@ use serde_json::{json, Value};
 /// that empty window on screen the whole time. CREATE_NO_WINDOW keeps it
 /// hidden. No-op on other platforms.
 fn git_cmd() -> Command {
-    let c = Command::new("git");
-    #[cfg(windows)]
-    let c = {
-        use std::os::windows::process::CommandExt;
-        let mut c = c;
-        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        c
-    };
-    c
+    crate::no_window_command("git")
 }
 
 /// Run `git status` in `repo` and return a JSON snapshot the webview can

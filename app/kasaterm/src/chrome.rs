@@ -392,8 +392,15 @@ impl App {
     /// closes. The cwd sniffer repaints the bar once the shell reports the move.
     pub(crate) fn statusbar_cd(&mut self, id: &str, dir: &std::path::Path) {
         self.statusbar.menu = None;
-        let q = dir.to_string_lossy().replace('\'', "'\\''");
-        let cmd = format!("cd '{q}'\r");
+        // 현재 추적 중인 cwd의 부모로 가는 경우엔 셸 상대경로 `cd ..` 를 쓴다.
+        // (PowerShell 등에서 kasaterm이 잡은 절대경로가 부정확해도 한 칸 위로는 항상 정확.)
+        let is_parent = self.pane_cwd_cache.get(id).and_then(|c| c.parent()) == Some(dir);
+        let cmd = if is_parent {
+            "cd ..\r".to_string()
+        } else {
+            let q = dir.to_string_lossy().replace('\'', "'\\''");
+            format!("cd '{q}'\r")
+        };
         if let Some(pty) = self.pty.get(id) {
             let _ = pty.send_bytes(cmd.as_bytes());
         }
@@ -501,11 +508,11 @@ impl App {
     pub(crate) fn reveal_in_file_manager(&self, path: &std::path::Path) {
         #[cfg(target_os = "macos")]
         {
-            let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+            let _ = crate::proc::command("open").arg("-R").arg(path).spawn();
         }
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("explorer")
+            let _ = crate::proc::command("explorer")
                 .arg(format!("/select,{}", path.display()))
                 .spawn();
         }
@@ -516,7 +523,7 @@ impl App {
             } else {
                 path.parent().unwrap_or(path)
             };
-            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+            let _ = crate::proc::command("xdg-open").arg(dir).spawn();
         }
     }
     /// Expand/collapse a file's inline unified diff in the git panel. The diff
@@ -814,7 +821,7 @@ impl App {
         self.git.commit_menu_open = false;
         let Some(cwd) = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone()) else { return };
         std::thread::spawn(move || {
-            let _ = std::process::Command::new("gh")
+            let _ = crate::proc::command("gh")
                 .args(["pr", "create", "--web"])
                 .current_dir(&cwd)
                 .spawn();
@@ -1277,15 +1284,19 @@ impl App {
             })
             .build_as_child(window.as_ref())
         {
-            Ok(wv) => wv,
+            Ok(wv) => Some(wv),
             Err(e) => {
+                // webview 생성 실패해도 window 는 살려둔다(아래 항상 저장) — 옛 `return`
+                // 은 로컬 window 를 drop 해 "검은창 떴다 사라짐"을 냈다. 실패 원인이
+                // 보이게 창 제목을 에러로 바꾸고 webview 는 None 으로 둔다.
                 eprintln!("[arona-panel] webview build failed: {e}");
-                return;
+                window.set_title(&format!("아로나 — 웹뷰 로드 실패: {e}"));
+                None
             }
         };
         eprintln!("[arona-panel] open; http://127.0.0.1:{port}/arona-ui/");
         self.arona_panel_window = Some(window);
-        self.arona_panel_webview = Some(webview);
+        self.arona_panel_webview = webview;
         // BA GUI 는 세션을 건드리지 않는다(거노 06-17 방향전환: "시각 레이어"). god 통솔
         // 자체가 폐기됐다(솔로 확정 06-18) — 아로나/SCHALE OS 는 관찰·시각 레이어일 뿐
         // 세션을 통솔하지 않는다(활성 pane god 승격 호출 제거).
@@ -1683,7 +1694,7 @@ fn notify_osascript(title: &str, body: &str) {
         applescript_quote(body),
         applescript_quote(title),
     );
-    let _ = std::process::Command::new("osascript")
+    let _ = crate::proc::command("osascript")
         .arg("-e")
         .arg(script)
         .spawn();
@@ -1729,12 +1740,12 @@ fn applescript_quote(s: &str) -> String {
 /// BA GUI 버튼이 arona-ui 를 외부 탭으로 띄울 때 쓴다(wry 임베드 비활성 대체).
 pub(crate) fn open_url_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    let _ = crate::proc::command("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
+    let _ = crate::proc::command("cmd")
         .args(["/C", "start", "", url])
         .spawn();
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    let _ = crate::proc::command("xdg-open").arg(url).spawn();
 }
 

@@ -28,3 +28,11 @@ unicode-normalization = "0.1"
 # Fast SIMD substring search — used in the reader hot path to short-circuit
 # the OSC 1337 / kitty graphics scans when neither prefix is present.
 memchr = "2"
+
+# Windows has no `ps`: enumerate the process table (pid/ppid/exe name) via a
+# Toolhelp snapshot so active_process_name / has_active_job work natively.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

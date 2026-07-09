@@ -264,7 +264,7 @@ impl App {
             || dest.starts_with("https://")
             || dest.starts_with("mailto:")
         {
-            let _ = std::process::Command::new("open").arg(dest).spawn();
+            let _ = crate::proc::command("open").arg(dest).spawn();
             return;
         }
         let raw = dest.strip_prefix("file://").unwrap_or(dest);
@@ -275,10 +275,10 @@ impl App {
             }
         }
         if path.exists() {
-            let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
+            let _ = crate::proc::command("open").arg("-R").arg(&path).spawn();
         } else {
             // Unknown scheme or missing file — let the OS try to interpret it.
-            let _ = std::process::Command::new("open").arg(dest).spawn();
+            let _ = crate::proc::command("open").arg(dest).spawn();
         }
     }
 }

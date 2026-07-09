@@ -184,7 +184,7 @@ pub(crate) fn agents_status_cached() -> HashMap<String, String> {
         }
     }
     let mut map: HashMap<String, String> = HashMap::new();
-    if let Ok(out) = std::process::Command::new("claude")
+    if let Ok(out) = crate::proc::command("claude")
         .args(["agents", "--json"])
         .output()
     {
@@ -1154,7 +1154,7 @@ impl Backend for PtyBackend {
             row.branch = branch_cache
                 .entry(cwd.clone())
                 .or_insert_with(|| {
-                    std::process::Command::new("git")
+                    crate::proc::command("git")
                         .args(["rev-parse", "--abbrev-ref", "HEAD"])
                         .current_dir(&cwd)
                         .output()
@@ -1365,7 +1365,7 @@ fn scan_queue_ops_before(path: &std::path::Path, start: u64) -> String {
 /// `ps` scan (Windows has no `ps` → None, degrades to "not a shell"). Lets
 /// `room_cd` send raw `cd` only at a shell, never into a live claude (거노).
 pub(crate) fn foreground_proc_name(shell_pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps")
+    let out = crate::proc::command("ps")
         .args(["-A", "-o", "pid=,ppid=,comm="])
         .output()
         .ok()?;
@@ -1402,7 +1402,7 @@ pub(crate) fn foreground_proc_name(shell_pid: u32) -> Option<String> {
 /// panel poll, so the subprocess cost is acceptable.
 #[cfg(unix)]
 pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
-    let out = std::process::Command::new("lsof")
+    let out = crate::proc::command("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
         .ok()?;
@@ -1770,7 +1770,7 @@ fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
     // Most-recently-spawned claude child of this shell — shared with the
     // transcript watcher's self-map path.
     let pid = claude_child_pid(shell_pid)?;
-    let args_out = std::process::Command::new("ps")
+    let args_out = crate::proc::command("ps")
         .args(["-p", &pid.to_string(), "-o", "args="])
         .output()
         .ok()?;
@@ -1801,27 +1801,13 @@ fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
 /// the direct child first; if there's none, walk the shell's parent chain and take
 /// the first claude. Returns None only when no claude is involved at all.
 fn claude_child_pid(shell_pid: u32) -> Option<u32> {
-    let out = std::process::Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid=,comm="])
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    // pid -> (ppid, is_claude). One ps pass feeds both the child and parent walk.
+    // pid -> (ppid, is_claude). One process_table() pass feeds both the child
+    // and parent walk. process_table() is cross-platform and returns the bare
+    // exe name ("claude.exe" on Windows, "claude" on Unix), so a substring
+    // match is enough.
     let mut procs: std::collections::HashMap<u32, (u32, bool)> = std::collections::HashMap::new();
-    for line in s.lines() {
-        let mut parts = line.split_whitespace();
-        let (pid, ppid) = match (
-            parts.next().and_then(|x| x.parse::<u32>().ok()),
-            parts.next().and_then(|x| x.parse::<u32>().ok()),
-        ) {
-            (Some(a), Some(b)) => (a, b),
-            _ => continue,
-        };
-        let comm = parts.collect::<Vec<_>>().join(" ");
-        let is_claude = std::path::Path::new(&comm)
-            .file_name()
-            .and_then(|x| x.to_str())
-            .map_or(false, |n| n.contains("claude"));
+    for (pid, ppid, name) in kasa_pty::process_table() {
+        let is_claude = name.contains("claude");
         procs.insert(pid, (ppid, is_claude));
     }
     // 1) Normal pane: most-recent (highest-pid) claude child of the shell.

@@ -15,4 +15,4 @@ mod state;
 
 pub use crossbeam_channel::Receiver as ScreenReceiver;
 pub use layout::{Divider, PtyLayout, SplitDir};
-pub use state::{CommandBlock, PtyOptions, PtySession};
+pub use state::{process_table, CommandBlock, PtyOptions, PtySession};
