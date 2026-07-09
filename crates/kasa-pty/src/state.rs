@@ -127,6 +127,12 @@ pub struct PtySession {
     /// OSC 133 C/D stream. Shared Arc so the socket/HTTP backend reads them
     /// without routing through the GUI. Bounded (~50), newest last.
     blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
+    /// Shell cwd reported via OSC 9;9 (`ESC]9;9;<path>ST`) — the path-only
+    /// working-directory hint Windows Terminal / ConEmu use. The reader stashes
+    /// it here so the header breadcrumb tracks PowerShell `cd`, which (unlike
+    /// zsh/bash) never updates the process's real cwd. None until the injected
+    /// shell integration emits its first prompt.
+    cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 impl PtySession {
@@ -158,6 +164,17 @@ impl PtySession {
                 .to_ascii_lowercase();
             if matches!(stem.as_str(), "bash" | "zsh" | "sh" | "dash" | "ksh") {
                 c.arg("-il");
+            } else if matches!(stem.as_str(), "pwsh" | "powershell") {
+                // PowerShell freezes the OS-level process cwd at launch (`cd`
+                // only moves its internal $PWD), so the breadcrumb can't read it
+                // off the process. Inject a prompt wrapper that emits
+                // OSC 9;9;<path> every line; the reader sniffs it (scan_osc_cwd)
+                // and the header follows `cd`. -Command runs after the user
+                // profile loads, so $function:prompt captures the profile's
+                // prompt and we chain it rather than clobber it.
+                c.arg("-NoExit");
+                c.arg("-Command");
+                c.arg(PWSH_CWD_SHIM);
             }
             c
         } else {
@@ -283,6 +300,7 @@ impl PtySession {
         // channel + drop-on-full keeps us from buffering frames the
         // renderer is too slow to consume.
         let title_handle = Arc::new(Mutex::new(None));
+        let cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
         let listener = PtyEventForwarder {
             writer: Arc::clone(&writer_arc),
             size: Arc::clone(&size),
@@ -323,6 +341,7 @@ impl PtySession {
             Arc::clone(&title_handle),
             Arc::clone(&term),
             Arc::clone(&blocks),
+            Arc::clone(&cwd_handle),
         );
 
         Ok(Self {
@@ -343,6 +362,7 @@ impl PtySession {
             pane_id: opts.pane_id.clone(),
             tty_short,
             blocks,
+            cwd_handle,
         })
     }
 
@@ -376,6 +396,12 @@ impl PtySession {
     /// show the same name the header does.
     pub fn osc_title(&self) -> Option<String> {
         self.title_handle.lock().ok().and_then(|t| t.clone())
+    }
+    /// The shell's last OSC 9;9-reported cwd, if shell integration is emitting
+    /// it (injected PowerShell prompt). None for shells that don't — callers
+    /// then fall back to reading the process cwd directly.
+    pub fn reported_cwd(&self) -> Option<std::path::PathBuf> {
+        self.cwd_handle.lock().ok().and_then(|c| c.clone())
     }
 
     pub fn active_process_name(&self) -> Option<String> {
@@ -804,6 +830,7 @@ fn spawn_reader_thread(
     title_handle: Arc<Mutex<Option<String>>>,
     term: Arc<Mutex<Term<PtyEventForwarder>>>,
     blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
+    cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use unicode_normalization::UnicodeNormalization;
@@ -979,6 +1006,18 @@ fn spawn_reader_thread(
                     scan_osc_notify(processed_bytes, &mut notify_buf, &mut notify_capturing)
                 {
                     pending_notify = Some(n);
+                }
+            }
+            // OSC 9;9;<path> working-directory report. Our injected PowerShell
+            // prompt emits it every line so the header breadcrumb can follow
+            // `cd` — PowerShell freezes the process cwd at launch, so pid_cwd
+            // alone shows the wrong folder. Short + self-contained, so no
+            // cross-read capture state; prefix-check keeps the hot path cheap.
+            if memchr::memmem::find(processed_bytes, b"\x1b]9;9;").is_some() {
+                if let Some(p) = scan_osc_cwd(processed_bytes) {
+                    if let Ok(mut c) = cwd_handle.lock() {
+                        *c = Some(p);
+                    }
                 }
             }
 
@@ -1496,6 +1535,36 @@ fn emit_inline_image(body: &[u8]) {
         .status();
 }
 
+/// Injected into PowerShell (`pwsh` / `powershell`) via `-Command` so it reports
+/// its cwd over OSC 9;9 on every prompt, wrapping any profile-defined prompt.
+/// Single-quoted throughout (no `"`) so Windows argv quoting stays trivial; the
+/// `\` inside `'\'` is the literal ST terminator byte that closes the OSC.
+const PWSH_CWD_SHIM: &str = "$__ktp=$function:prompt; function global:prompt { $l=$ExecutionContext.SessionState.Path.CurrentLocation; if($l -and $l.Provider.Name -eq 'FileSystem'){[Console]::Write([char]27+']9;9;'+$l.ProviderPath+[char]27+'\\')}; if($__ktp){& $__ktp}else{'PS '+$PWD.Path+'> '} }";
+
+/// Extract the path from an OSC 9;9 working-directory report
+/// (`ESC ] 9 ; 9 ; <path> ST|BEL`). Terminator-agnostic. Returns the last match
+/// in the batch — the freshest cwd if several prompts arrived in one read.
+fn scan_osc_cwd(bytes: &[u8]) -> Option<std::path::PathBuf> {
+    const MARKER: &[u8] = b"\x1b]9;9;";
+    let mut best: Option<std::path::PathBuf> = None;
+    let mut from = 0;
+    while let Some(rel) = memchr::memmem::find(&bytes[from..], MARKER) {
+        let start = from + rel + MARKER.len();
+        let rest = &bytes[start..];
+        let end = rest
+            .iter()
+            .position(|&b| b == 0x07 || b == 0x1b)
+            .unwrap_or(rest.len());
+        let s = String::from_utf8_lossy(&rest[..end]);
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            best = Some(std::path::PathBuf::from(trimmed));
+        }
+        from = start;
+    }
+    best
+}
+
 /// Capture an iTerm OSC 1337 inline-image sequence that may span several
 /// PTY reads. `buf`/`capturing` persist across calls. Marker
 /// `ESC ] 1337 ; File=` … terminator BEL or ST. alacritty parses the OSC
@@ -1862,6 +1931,31 @@ mod osc_notify_tests {
     fn cmdline_of_self_nonempty() {
         let cmd = super::process_cmdline(std::process::id());
         assert!(cmd.is_some_and(|c| !c.trim().is_empty()));
+    }
+
+    fn cwd_of(bytes: &[u8]) -> Option<String> {
+        super::scan_osc_cwd(bytes).map(|p| p.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn osc_cwd_reads_st_and_bel_terminators() {
+        // What the injected PowerShell prompt actually emits: OSC 9;9, path, ST,
+        // then the chained prompt text.
+        let st = b"\x1b]9;9;C:\\Users\\x\x1b\\PS C:\\Users\\x> ";
+        assert_eq!(cwd_of(st), Some("C:\\Users\\x".to_string()));
+        let bel = b"\x1b]9;9;/home/u\x07$ ";
+        assert_eq!(cwd_of(bel), Some("/home/u".to_string()));
+    }
+
+    #[test]
+    fn osc_cwd_takes_last_report_in_batch() {
+        // Two prompts landed in one read — the freshest cwd must win.
+        assert_eq!(cwd_of(b"\x1b]9;9;/a\x07\x1b]9;9;/b\x07"), Some("/b".to_string()));
+    }
+
+    #[test]
+    fn osc_cwd_ignores_unrelated_output() {
+        assert_eq!(cwd_of(b"hello\x1b]0;title\x07"), None);
     }
 }
 

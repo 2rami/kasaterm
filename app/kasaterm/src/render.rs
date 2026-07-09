@@ -1342,14 +1342,29 @@ impl App {
                 g.queue_icon("folder", px0, iy, isz, theme::text_dim());
                 let after = px0 + isz;
                 // Title-bar cwd chip follows the FOCUSED pane's shell cwd —
-                // resolved via the shell's pid + /proc-style lookup. Falls
-                // back to kasaterm's own cwd when the pane has no PTY (image
-                // / markdown) or the pid couldn't be sniffed.
+                // resolved through pane_current_cwd: the ~700ms cwd cache first
+                // (which prefers the shell's OSC 9;9 report — the only accurate
+                // source under PowerShell, whose process cwd never moves), then
+                // the shell pid's real cwd. Falls back to kasaterm's own cwd
+                // when the pane has no PTY (image / markdown) or nothing
+                // resolved. Reading the cache also keeps this off the
+                // per-frame lsof / ReadProcessMemory path it used to take.
                 let cwd_str = {
                     let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
+                    // Borrow the two fields explicitly rather than calling
+                    // `self.pane_current_cwd()` — `self.gpu` is already mutably
+                    // borrowed above, so only a disjoint field borrow compiles.
+                    let cache = &self.pane_cwd_cache;
+                    let pty = &self.pty;
                     active
-                        .and_then(|id| self.pty.get(&id).and_then(|p| p.shell_pid()))
-                        .and_then(socket::pid_cwd)
+                        .and_then(|id| {
+                            cache.get(&id).cloned().or_else(|| {
+                                pty.get(&id).and_then(|p| {
+                                    p.reported_cwd()
+                                        .or_else(|| p.shell_pid().and_then(socket::pid_cwd))
+                                })
+                            })
+                        })
                         .or_else(|| std::env::current_dir().ok())
                         .map(|p| Self::shorten_cwd(&p))
                         .unwrap_or_default()

@@ -559,9 +559,7 @@ impl App {
                 .unwrap_or_else(|| format!("win {}", i + 1));
             let cwd = repr
                 .as_ref()
-                .and_then(|id| self.pty.get(id))
-                .and_then(|p| p.shell_pid())
-                .and_then(socket::pid_cwd)
+                .and_then(|id| self.pane_current_cwd(id))
                 .map(|p| Self::shorten_cwd(&p))
                 .unwrap_or_default();
             out.push((name, cwd));
@@ -659,7 +657,14 @@ impl App {
         self.pane_cwd_check = Some(Instant::now());
         let mut cache = HashMap::new();
         for (id, sess) in &self.pty {
-            if let Some(cwd) = sess.shell_pid().and_then(socket::pid_cwd) {
+            // OSC 9;9 shell-integration report wins — it's accurate under
+            // PowerShell, whose process cwd stays frozen at launch. Shells that
+            // don't emit it (zsh/bash) fall back to the pid's real cwd (lsof /
+            // PEB), which for them is correct because `cd` moves it.
+            let cwd = sess
+                .reported_cwd()
+                .or_else(|| sess.shell_pid().and_then(socket::pid_cwd));
+            if let Some(cwd) = cwd {
                 cache.insert(id.clone(), cwd);
             }
         }
@@ -672,10 +677,9 @@ impl App {
         if let Some(p) = self.pane_cwd_cache.get(id) {
             return Some(p.clone());
         }
-        self.pty
-            .get(id)
-            .and_then(|s| s.shell_pid())
-            .and_then(socket::pid_cwd)
+        let sess = self.pty.get(id)?;
+        sess.reported_cwd()
+            .or_else(|| sess.shell_pid().and_then(socket::pid_cwd))
     }
     /// cwd for a shell about to be spawned off `prev_pane` (the pane being split
     /// or tabbed). Threads the spawning pane's live cwd into `resolve_spawn_cwd`
