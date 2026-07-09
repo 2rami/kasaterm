@@ -30,9 +30,15 @@ unicode-normalization = "0.1"
 memchr = "2"
 
 # Windows has no `ps`: enumerate the process table (pid/ppid/exe name) via a
-# Toolhelp snapshot so active_process_name / has_active_job work natively.
+# Toolhelp snapshot, and read a single process's argv out of its PEB over
+# ReadProcessMemory — so active_process_name / has_active_job / claude session
+# id detection work natively.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Threading",
+    "Win32_System_Kernel",
+    "Wdk_System_Threading",
 ] }
