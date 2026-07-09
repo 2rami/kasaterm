@@ -1854,6 +1854,15 @@ mod osc_notify_tests {
             vec![("X".into(), "Y".into())]
         );
     }
+
+    // process_cmdline over the test binary's own pid must recover a non-empty
+    // command line — exercises the Windows PEB/ReadProcessMemory chain (and the
+    // Unix `ps` path) on a process we control.
+    #[test]
+    fn cmdline_of_self_nonempty() {
+        let cmd = super::process_cmdline(std::process::id());
+        assert!(cmd.is_some_and(|c| !c.trim().is_empty()));
+    }
 }
 
 /// `(pid, ppid, exe_name)` for every running process — the cross-platform
@@ -1922,4 +1931,103 @@ pub fn process_table() -> Vec<(u32, u32, String)> {
         out.push((pid, ppid, name));
     }
     out
+}
+
+/// The full command line (argv, space-joined) of a single process, or None if
+/// it can't be read. The cross-platform stand-in for `ps -p PID -o args=`.
+/// Windows has no `ps`, so it walks the target's PEB →
+/// RTL_USER_PROCESS_PARAMETERS.CommandLine over ReadProcessMemory (needs
+/// PROCESS_VM_READ, i.e. same-user / same-integrity processes — enough for the
+/// claude panes we spawn). Unix shells out to `ps`.
+#[cfg(windows)]
+pub fn process_cmdline(pid: u32) -> Option<String> {
+    use std::ffi::c_void;
+    use windows_sys::Wdk::System::Threading::{
+        NtQueryInformationProcess, ProcessBasicInformation,
+    };
+    use windows_sys::Win32::Foundation::{CloseHandle, UNICODE_STRING};
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PEB, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        RTL_USER_PROCESS_PARAMETERS,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        // Wrap the chained reads so CloseHandle always runs on any early exit.
+        let read = || -> Option<String> {
+            let mut pbi: PROCESS_BASIC_INFORMATION = std::mem::zeroed();
+            let mut ret_len = 0u32;
+            if NtQueryInformationProcess(
+                handle,
+                ProcessBasicInformation,
+                &mut pbi as *mut _ as *mut c_void,
+                std::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32,
+                &mut ret_len,
+            ) != 0
+            {
+                return None;
+            }
+            if pbi.PebBaseAddress.is_null() {
+                return None;
+            }
+            let mut peb: PEB = std::mem::zeroed();
+            if ReadProcessMemory(
+                handle,
+                pbi.PebBaseAddress as *const c_void,
+                &mut peb as *mut _ as *mut c_void,
+                std::mem::size_of::<PEB>(),
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                return None;
+            }
+            let mut params: RTL_USER_PROCESS_PARAMETERS = std::mem::zeroed();
+            if ReadProcessMemory(
+                handle,
+                peb.ProcessParameters as *const c_void,
+                &mut params as *mut _ as *mut c_void,
+                std::mem::size_of::<RTL_USER_PROCESS_PARAMETERS>(),
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                return None;
+            }
+            let cmd: UNICODE_STRING = params.CommandLine;
+            if cmd.Buffer.is_null() || cmd.Length == 0 {
+                return None;
+            }
+            let mut buf = vec![0u16; (cmd.Length / 2) as usize];
+            if ReadProcessMemory(
+                handle,
+                cmd.Buffer as *const c_void,
+                buf.as_mut_ptr() as *mut c_void,
+                cmd.Length as usize,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                return None;
+            }
+            Some(String::from_utf16_lossy(&buf))
+        };
+        let result = read();
+        CloseHandle(handle);
+        result
+    }
+}
+
+#[cfg(unix)]
+pub fn process_cmdline(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }

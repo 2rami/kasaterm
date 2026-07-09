@@ -1770,11 +1770,7 @@ fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
     // Most-recently-spawned claude child of this shell — shared with the
     // transcript watcher's self-map path.
     let pid = claude_child_pid(shell_pid)?;
-    let args_out = crate::proc::command("ps")
-        .args(["-p", &pid.to_string(), "-o", "args="])
-        .output()
-        .ok()?;
-    let argv = String::from_utf8_lossy(&args_out.stdout);
+    let argv = kasa_pty::process_cmdline(pid)?;
     let tokens: Vec<&str> = argv.split_whitespace().collect();
     for (i, tok) in tokens.iter().enumerate() {
         for flag in ["--resume=", "--session-id="] {
