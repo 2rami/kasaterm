@@ -92,8 +92,12 @@ impl App {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(ms));
             let mut payload = text.clone();
-            if !payload.ends_with('\n') {
-                payload.push('\n');
+            // Enter is CR on Windows' ConPTY — PowerShell reads a bare LF as
+            // "line unfinished" and parks on its `>>` continuation prompt, so
+            // the autosent command never runs. POSIX shells want LF.
+            let eol = if cfg!(windows) { '\r' } else { '\n' };
+            if !payload.ends_with(eol) {
+                payload.push(eol);
             }
             if let Some(t) = tmux.as_ref() {
                 let hex: String = payload
