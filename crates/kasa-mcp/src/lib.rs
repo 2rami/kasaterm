@@ -23,6 +23,20 @@ pub mod standalone;
 pub use http::{spawn_http_server, spawn_http_server_opts};
 pub use register::register_clients;
 
+/// `Command` with the console window suppressed on Windows. kasaterm is a GUI
+/// (non-console) process, so spawning a console program (git, etc.) flashes a
+/// fresh console window each call — and a polled spawn flashes it on a loop.
+/// CREATE_NO_WINDOW keeps it hidden. No-op on other platforms.
+pub(crate) fn no_window_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    let mut c = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    c
+}
+
 #[derive(Clone)]
 pub struct KasaspaceTools {
     backend: Arc<dyn Backend>,

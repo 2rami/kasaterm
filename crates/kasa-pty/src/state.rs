@@ -386,34 +386,15 @@ impl PtySession {
             return cache.1.clone();
         }
         cache.0 = now;
-        let output = std::process::Command::new("ps")
-            .args(["-A", "-o", "pid=,ppid=,comm="])
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&output.stdout);
+        // process_table() already returns bare exe names (no path), so the
+        // shell row and the newest direct child are matched on pid/ppid alone.
         let mut best_child: Option<(u32, String)> = None;
         let mut shell_comm: Option<String> = None;
-        for line in s.lines() {
-            let mut parts = line.split_whitespace();
-            let row_pid = parts.next().and_then(|s| s.parse::<u32>().ok())?;
-            let row_ppid = parts.next().and_then(|s| s.parse::<u32>().ok())?;
-            let comm = parts.collect::<Vec<_>>().join(" ");
+        for (row_pid, row_ppid, name) in process_table() {
             if row_pid == pid {
-                let name = std::path::Path::new(&comm)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&comm)
-                    .to_string();
                 shell_comm = Some(name);
-            } else if row_ppid == pid {
-                let name = std::path::Path::new(&comm)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&comm)
-                    .to_string();
-                if best_child.as_ref().is_none_or(|(p, _)| *p < row_pid) {
-                    best_child = Some((row_pid, name));
-                }
+            } else if row_ppid == pid && best_child.as_ref().is_none_or(|(p, _)| *p < row_pid) {
+                best_child = Some((row_pid, name));
             }
         }
         let resolved = best_child.map(|(_, n)| n).or(shell_comm);
@@ -429,15 +410,7 @@ impl PtySession {
         let Some(pid) = self.shell_pid else {
             return false;
         };
-        let Ok(output) = std::process::Command::new("ps")
-            .args(["-A", "-o", "ppid="])
-            .output()
-        else {
-            return false;
-        };
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|line| line.trim().parse::<u32>().ok() == Some(pid))
+        process_table().iter().any(|(_, ppid, _)| *ppid == pid)
     }
 
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
@@ -1881,4 +1854,72 @@ mod osc_notify_tests {
             vec![("X".into(), "Y".into())]
         );
     }
+}
+
+/// `(pid, ppid, exe_name)` for every running process — the cross-platform
+/// stand-in for `ps -A -o pid=,ppid=,comm=`. `exe_name` is the bare file name
+/// (no directory; e.g. "claude.exe", "pwsh"). Windows walks a Toolhelp snapshot
+/// because it has no `ps`; Unix shells out to `ps`. Callers match on pid/ppid
+/// and substring the name (e.g. `.contains("claude")`).
+#[cfg(windows)]
+pub fn process_table() -> Vec<(u32, u32, String)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    let mut out = Vec::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut entry) != 0 {
+            loop {
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+                out.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+                if Process32NextW(snap, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
+#[cfg(unix)]
+pub fn process_table() -> Vec<(u32, u32, String)> {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,comm="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let s = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in s.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (
+            parts.next().and_then(|x| x.parse::<u32>().ok()),
+            parts.next().and_then(|x| x.parse::<u32>().ok()),
+        ) else {
+            continue;
+        };
+        let comm = parts.collect::<Vec<_>>().join(" ");
+        let name = std::path::Path::new(&comm)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&comm)
+            .to_string();
+        out.push((pid, ppid, name));
+    }
+    out
 }

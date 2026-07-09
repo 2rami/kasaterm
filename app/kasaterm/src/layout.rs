@@ -843,7 +843,7 @@ for p in glob.glob(os.path.join(d, '*.json')):
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
         lf.close()
 "#;
-        let _ = std::process::Command::new("python3")
+        let _ = crate::proc::command("python3")
             .arg("-c")
             .arg(SCRIPT)
             .arg(target)

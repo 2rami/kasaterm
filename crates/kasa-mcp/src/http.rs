@@ -260,11 +260,11 @@ async fn open_file_handler(
         return (cors, Json(serde_json::json!({ "ok": false, "error": "path required" })));
     }
     let spawned = if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(&path).spawn()
+        crate::no_window_command("open").arg(&path).spawn()
     } else if cfg!(target_os = "windows") {
-        std::process::Command::new("cmd").args(["/C", "start", "", &path]).spawn()
+        crate::no_window_command("cmd").args(["/C", "start", "", &path]).spawn()
     } else {
-        std::process::Command::new("xdg-open").arg(&path).spawn()
+        crate::no_window_command("xdg-open").arg(&path).spawn()
     };
     (cors, Json(serde_json::json!({ "ok": spawned.is_ok() })))
 }
@@ -1821,7 +1821,7 @@ fn collab_events(room_cwd: &std::path::Path, n: usize) -> Vec<Event> {
 
     // git 커밋 — ts 는 unix epoch(정수). 활성 방 cwd 기준 로그.
     {
-        if let Ok(output) = std::process::Command::new("git")
+        if let Ok(output) = crate::no_window_command("git")
             .args(["log", &format!("--format=%at\t%s"), &format!("-{}", n)])
             .current_dir(room_cwd)
             .output()
@@ -1916,7 +1916,7 @@ fn read_claude_token() -> Option<String> {
             }
         }
     }
-    let out = std::process::Command::new("security")
+    let out = crate::no_window_command("security")
         .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
         .output()
         .ok()?;

@@ -2784,7 +2784,7 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some((url, (px, py))) = self.link_armed.take() {
                             let (cx, cy) = self.cursor_px;
                             if (cx - px).abs() < 4.0 && (cy - py).abs() < 4.0 {
-                                let _ = std::process::Command::new("open")
+                                let _ = crate::proc::command("open")
                                     .arg(&url)
                                     .spawn();
                                 window.request_redraw();

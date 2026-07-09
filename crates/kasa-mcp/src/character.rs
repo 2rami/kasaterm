@@ -223,7 +223,7 @@ pub fn write_lead(rslug: &str, surface_id: &str) -> std::io::Result<()> {
 /// 새 `claude --session-id` 용 uuid. transcript jsonl 파일명이 되므로 파일명 안전 문자만.
 /// uuidgen(macOS/Linux 공통) → 실패 시 시간+pid 폴백.
 pub fn new_session_id() -> String {
-    if let Ok(out) = std::process::Command::new("uuidgen").output() {
+    if let Ok(out) = crate::no_window_command("uuidgen").output() {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
             if !s.is_empty() {
