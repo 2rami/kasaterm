@@ -48,32 +48,78 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 ---
 
-## 1) Pane 제어 — kasaterm-cli 명령 레퍼런스
+## 1) Pane 제어 — kasaterm-cli 완전 명령 레퍼런스
 
-모든 명령은 JSON으로 응답한다(`{"ok":true,...}`). pane id는 `%0`, `%1` … 형식.
+> **`kasaterm-cli --help` / `<cmd> --help`를 실행하지 마라.** 아래가 모든 서브명령·인자·반환을 그대로 담는다. help는 컨텍스트만 태운다. 이 표에 없는 걸 만나면 그때만 `--help`.
 
-| 명령 | 동작 |
+**공통 규약** (한 번만 외우면 됨):
+- 모든 명령은 **한 줄 JSON**으로 응답. 성공 `{"ok":true,"result":{…}}`, 실패 `{"ok":false,"error":{"code":-32603,"message":"no such pane: %9"}}` — 성공 판정은 최상위 `.ok`.
+- `layout`·`windows`만 예외로 **plain text**(JSON 아님) 출력.
+- pane id(=surface_id)는 `%0`,`%1`… 형식. split/close로 바뀌니 연속작업 전 `list surfaces`로 재확인.
+- socket은 `$KASATERM_SOCKET_PATH`(없으면 `$CMUX_SOCKET_PATH`)로 **자동 선택** — 인자로 넘기지 않는다.
+
+### 명령 전수
+
+**pane 조작 (mutation)** — 대부분 `result`가 `{"ok":true}` 뿐. 예외만 표기.
+
+| 명령 | 인자·동작 | 특이 반환 |
+|---|---|---|
+| `split <left\|right\|up\|down> [--focus]` | 현재(또는 focus된) pane을 방향 분할. `--focus` 없으면 포커스 유지(기본 no-focus) | `result.surface.id` = 새 pane id |
+| `focus <id>` | 포커스 이동 | — |
+| `close <id>` | pane 닫기(셸 종료) | — |
+| `rename <id> <title>` | 헤더 제목 | — |
+| `rename-window <title>` | **이 pane의 세션(윈도우) 이름.** id 안 받음 — 자기 세션 대상 | — |
+| `color <id> <#rrggbb>` | 헤더 accent 색 | — |
+| `swap <a> <b>` | 두 pane 위치 교환(내용 유지) | — |
+| `resize <id> <ratio>` | 직계 split에서 차지 비중 `0..1`(god 크게). **split 직후 새 pane엔 즉시 안 먹힘**(`no such pane`) → 기존 pane에만 | — |
+| `send [--surface <id>] <text>` | **입력만, 제출 X.** 셸 명령 주입 전용 — 개행은 `$'cmd\n'`로 직접. 사람·claude엔 절대 쓰지 마라 → `tell` | — |
+| `key [--surface <id>] <name>` | 키 1개 전송. name: `enter tab escape up down left right home end pageup pagedown backspace delete` | — |
+| `tell <id> <text>` | send+제출(`\r`). idle claude를 새 턴으로 깨움 (§5) | — |
+
+**배치·현황 조회 (read-only, 부작용 없음)**
+
+| 명령 | 반환 |
 |---|---|
-| `kasaterm-cli list surfaces` | 현재 pane 목록 + id |
-| `kasaterm-cli split <left\|right\|up\|down>` | 현재 pane을 해당 방향으로 분할. 새 pane id 반환 |
-| `kasaterm-cli focus <id>` | 포커스 이동 |
-| `kasaterm-cli close <id>` | pane 닫기 (셸 종료) |
-| `kasaterm-cli rename <id> <제목>` | 헤더 제목 |
-| `kasaterm-cli color <id> <#rrggbb>` | 헤더 accent 색상 |
-| `kasaterm-cli swap <a> <b>` | 두 pane 위치 교환(내용 유지) |
-| `kasaterm-cli send --surface <id> <텍스트>` | 특정 pane에 텍스트 **입력만**(Enter 안 눌림 → 입력창에 걸린 채 안 감). **셸 명령 주입 전용**(뒤에 `\n` 직접 붙일 때). 사람·claude 에게 말/통지 보낼 땐 절대 쓰지 말 것 → `tell` |
-| `kasaterm-cli tell <id> <텍스트>` | 특정 pane에 보내기+제출 — idle claude 깨움 (협업, §5) |
-| `kasaterm-cli key <id> …` | 특정 pane에 키 전송 |
-| `kasaterm-cli board` | 모든 pane이 뭘 왜 하는지 (협업, §5) |
-| `kasaterm-cli peek <id> [lines]` | 다른 pane 화면 텍스트 읽기 (협업, §5) |
-| `imgopen <파일.png>` | 이미지를 새 pane으로 띄움 (맞춤↔원본 토글) |
-| `mdopen <파일.md>` | 마크다운을 노션풍 렌더 pane (Render/Raw) |
+| `list surfaces` | `result.surfaces` = `[{"id":"%1","workspace_id":"local-0"},…]` |
+| `list workspaces` | `result.workspaces` = `[{"id":"local-0","name":"kasaterm"}]` |
+| `identify` | `result.surface.id` = **지금 내가 어느 pane인지**(`$KASATERM_PANE_ID`와 동일) |
+| `layout` | ASCII 박스 아트 — 활성 윈도우의 pane 배치 (**plain text**) |
+| `windows` | 윈도우별 pane 목록, 사이드바 순서 (**plain text**). 단일 윈도우면 `(윈도우 없음)` |
+| `peek [<id>] [lines]` | `result.text` = 그 pane 화면 tail(문자열). id 생략=자기 자신 (§5) |
+| `transcript [<id>] [N]` | `result.turns` = `[{"role":"user\|assistant","text":"…"},…]` 마지막 N턴 (§5) |
+| `board [screen_lines]` | `result.board` = pane별 상태 배열(필드는 아래). N 주면 각 항목에 `screen`(화면 tail N줄) 추가 (§5) |
+| `ping` | `result.pong=true` — 소켓 살아있나 |
+| `capabilities` | `result.methods` = RPC 메서드 전수(디버깅용) |
 
-split이 반환하는 JSON의 `result.surface.id`가 새 pane id다.
+**`board` 항목 필드** — 협업 판단엔 이것만 보면 된다(원소당 필드가 20+개지만 나머지는 노이즈):
+
+`surface_id` · `character`(학생 이름) · `status`(`idle`\|`working`) · `is_god` · `intent`(지금 하려는 것) · `last_prompt` · `last_reply` · `cwd`(셸 위치) · `view_cwd`(파일트리 위치) · `changed_files`(수정한 파일 절대경로) · `recent_tools` · `model` · `context_pct` · `window_idx` · `title`.
+→ **충돌 회피는 `status`+`changed_files`+`intent` 세 개면 충분.**
+
+**hook 전용 (Claude Code hook이 자동 호출 — 에이전트가 수동으로 부를 일 없음)**
+
+`bind-transcript <path>`(SessionStart) · `notify [--surface <id>] <title> [body]`(Stop) · `attention [--surface <id>] [reason]`(Notification).
+
+**협업 스트림 (blocking — 반드시 background로)**
+
+`board-watch [interval_s]`(변경된 pane 상태를 1줄/변경으로 스트림 → Claude Code Monitor에 먹임) · `wake-watch <id> [interval_s] [--timeout s]`(동료가 한 턴 끝낼 때까지 block 후 스스로 종료 → background task로 띄우면 완료 즉시 자동 wake). 둘 다 §5.
+
+**결과물 띄우기 헬퍼** (CLI 서브명령 아님 — 별도 실행파일. 상세 패턴 D):
+`imgopen <절대경로.png>`(이미지 → 새 pane, 맞춤↔원본) · `mdopen <절대경로.md>`(마크다운 → 노션풍 렌더 pane).
+
+### 자주 쓰는 파싱 one-liner
 
 ```bash
+# 새 pane id 추출 (split 반환)
 NEW=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
-echo "$NEW"   # 예: %1
+
+# 지금 내가 어느 pane인지 (env가 더 빠름)
+ME=${KASATERM_PANE_ID:-$(kasaterm-cli identify | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')}
+
+# working 중인 형제 pane만 뽑기 (충돌 회피)
+kasaterm-cli board | python3 -c 'import sys,json
+for p in json.load(sys.stdin)["result"]["board"]:
+    if p["status"]=="working": print(p["surface_id"], p["character"], "→", p["intent"])'
 ```
 
 ### 패턴 A — 모니터 pane (백그라운드 로그)
@@ -582,13 +628,12 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 ## 5) pane 협업 — board(자동 현황) + inbox(대화) + tell(깨우기)
 
-§4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용.
-
-§4 팀 모드가 **TeamCreate 위계**라면 이건 **위계 없는 peer 협업**. 세 축이다:
+§4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용. 네 축이다:
 
 - **board** — 누가 뭘 하나. `kasaterm-cli board`로 **직접 조회**한다(옛 `kasaterm-board-context.py` 자동주입은 폐기 — settings 미등록). 충돌 회피·합류 판단에 쓴다.
 - **inbox** — pane끼리 **대화·조율**. `kasacollab msg %N "..."`. 상대가 working/선택지 대기 중이어도 **100% 전달되고 상대 입력창을 안 건드린다** → 협업 대화의 기본 채널.
 - **tell** — idle 상대를 **급히 깨워 즉시 행동**시킬 때만. 강제 제출이라 바쁜 상대에겐 입력창에 누적된다.
+- **wait** — 동료 작업이 끝나길 기다릴 때. `tell`로 깨우거나 `board`를 반복 조회하지 말고 `wake-watch`를 background로 띄운다(아래).
 
 ### board — 각 pane이 뭘 하는지 (직접 조회)
 
@@ -596,6 +641,20 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 - **사용자(거노)**: 상단 **보기 메뉴 → "board 패널"** 로 전 pane 현황을 본다(읽기 전용).
 - **claude(너)**: `kasaterm-cli board`로 현황을 조회한다. 내가 만질 파일을 다른 pane이 잡고 있으면 충돌 회피(같은 문제면 합류, 빌드 중이면 `peek %N`로 보고 대기).
+
+### wait — 동료 완료 기다리기 (wake-watch, background)
+
+동료 pane의 한 턴이 끝나길 기다려야 할 때(예: 내 작업이 그 결과에 의존), **`tell`로 반복해 깨우거나 `board`를 폴링하지 마라** — 입력창을 더럽히고 컨텍스트만 태운다. `wake-watch`를 background task로 띄운다:
+
+```bash
+kasaterm-cli wake-watch %3          # %3이 한 턴 끝내면 스스로 종료
+```
+
+- Bash 도구의 `run_in_background: true`로 실행(또는 명령 끝에 `&`). 동료가 한 턴을 마치면 이 명령이 종료되고 시스템이 너를 자동으로 wake(task-notification)한다.
+- 깨어나면 `board`/`peek %3`/`transcript %3`로 결과를 확인하고 이어간다.
+- 상대 surface_id는 `kasaterm-cli board`로 확인. `[interval_s]`(폴링 주기)·`--timeout <s>`(최대 대기) 선택.
+
+여러 pane 상태 변화를 실시간으로 흘려보고 싶으면(특정 완료 대기가 아니라) `board-watch [interval_s]`를 Monitor에 먹인다 — 변경된 pane 상태를 1줄/변경으로 스트림.
 
 ### inbox — pane끼리 대화·조율 (kasacollab)
 
