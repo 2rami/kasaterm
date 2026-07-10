@@ -2,6 +2,9 @@
 # Build a signed .app, wrap it in a drag-to-install .dmg, and (optionally)
 # publish it as a GitHub release.
 #
+# ⚠ 정식 릴리스는 scripts/tag-release.sh (태그 push → CI release.yml 이 msi+dmg+
+#   appcast 전부 자동). 이 스크립트는 CI 없이 로컬에서 굽는 수동 폴백이다.
+#
 # Usage:
 #   scripts/release.sh v0.1.0            # build dist/kasaterm-v0.1.0.dmg only
 #   scripts/release.sh v0.1.0 --publish  # also create the GitHub release

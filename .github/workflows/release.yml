@@ -1,0 +1,269 @@
+name: Release
+
+# 태그(vX.Y.Z) push 하나로 릴리스 전체 자동화:
+#   msi(Windows 러너) + dmg(macOS 러너) 빌드 → GitHub 릴리스 첨부 →
+#   둘 다 끝나면 appcast 2종(EdDSA 서명)을 docs/ 에 커밋 → Pages 로 서빙.
+# 로컬은 scripts/tag-release.sh 로 버전 bump + 태그 push 만 하면 된다.
+# (scripts/release.sh 는 로컬 수동 폴백으로 유지.)
+#
+# 수동 실행(workflow_dispatch) → msi/dmg 빌드만 하고 artifact 로 올린다
+# (태그·릴리스·appcast 불변, CI 검증용).
+#
+# Secrets:
+#   SPARKLE_ED_PRIVATE_KEY — Sparkle EdDSA 개인키(appcast 서명, mac/win 공용)
+#   MAC_SIGN_P12 / MAC_SIGN_P12_PASSWORD — kasaterm-ci self-signed codesign 인증서
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # kasa-mcp 는 루트 Cargo.toml 에서 opt-level=0 으로 pin 돼 있다 —
+      # Windows rustc/LLVM 이 이 크레이트 최적화 시 STATUS_ACCESS_VIOLATION 으로 죽어서.
+      - name: Build kasaterm (release)
+        run: cargo build --release -p kasaterm
+
+      # WinSparkle(자동 업데이트) prebuilt x64 DLL 을 빌드 산출물 옆에 둔다 —
+      # main.wxs 의 $(var.CargoTargetBinDir)\WinSparkle.dll 이 여기(target\release)를
+      # 가리키고, 런타임엔 win_sparkle.rs 의 LoadLibrary 가 exe 옆에서 찾는다.
+      - name: Bundle WinSparkle.dll
+        shell: pwsh
+        run: |
+          $ver = "0.9.3"
+          Invoke-WebRequest "https://github.com/vslavik/winsparkle/releases/download/v$ver/WinSparkle-$ver.zip" -OutFile ws.zip
+          Expand-Archive ws.zip -DestinationPath ws -Force
+          Copy-Item "ws\WinSparkle-$ver\x64\Release\WinSparkle.dll" "target\release\WinSparkle.dll"
+          Write-Host "bundled WinSparkle.dll ($((Get-Item target\release\WinSparkle.dll).Length) bytes)"
+
+      # windows-latest 러너엔 WiX 3.14.1(Legacy, candle/light)이 이미 깔려 있고
+      # WIX 환경변수까지 잡혀 있다(2026-04 기준). main.wxs 도 v3 Legacy 스키마라
+      # WiX 별도 설치는 불필요. cargo-wix 서브커맨드만 있으면 된다.
+      - name: Install cargo-wix
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-wix
+
+      # main.wxs 의 Source 경로가 워크스페이스 루트 기준(app\kasaterm\wix\...)이라
+      # 반드시 루트에서 실행한다. --no-build 로 위에서 만든 target\release\kasaterm.exe 재사용.
+      - name: Build MSI
+        run: cargo wix -p kasaterm --no-build --nocapture
+
+      - name: Locate MSI
+        id: msi
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Path target\wix -Filter *.msi | Select-Object -First 1
+          if (-not $msi) { throw "no .msi produced in target\wix" }
+          "path=$($msi.FullName)" >> $env:GITHUB_OUTPUT
+          "name=$($msi.Name)" >> $env:GITHUB_OUTPUT
+          Write-Host "built $($msi.Name) ($([math]::Round($msi.Length/1MB,1)) MB)"
+
+      # 태그 push → 해당 릴리스에 MSI 첨부(릴리스 없으면 생성. 노트는 dmg job 이 채운다).
+      - name: Attach MSI to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.msi.outputs.path }}
+          fail_on_unmatched_files: true
+
+      # 수동 실행 → artifact 로만(릴리스 불변, 빌드 검증용).
+      - name: Upload MSI artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.msi.outputs.name }}
+          path: ${{ steps.msi.outputs.path }}
+
+  build-dmg:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      # 태그와 Cargo.toml 버전이 어긋나면 CFBundleVersion 이 어긋나 Sparkle 의
+      # 새 버전 판정이 꼬인다 — 빌드 전에 즉시 실패시킨다.
+      - name: Verify tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          CARGO_VER="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          if [[ "v$CARGO_VER" != "$GITHUB_REF_NAME" ]]; then
+            echo "::error::Cargo.toml version($CARGO_VER) != tag($GITHUB_REF_NAME) — scripts/tag-release.sh 로 릴리스할 것"
+            exit 1
+          fi
+
+      # kasaterm-ci self-signed 인증서를 임시 키체인에 임포트 — build-app.sh 가
+      # KASATERM_SIGN_ID 로 이 identity 를 찾아 서명한다. 고정 인증서라 업데이트를
+      # 거듭해도 macOS TCC 권한이 유지된다(ad-hoc 은 빌드마다 재승인).
+      - name: Import codesign certificate
+        env:
+          P12_B64: ${{ secrets.MAC_SIGN_P12 }}
+          P12_PASS: ${{ secrets.MAC_SIGN_P12_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p ci "$KC"
+          security default-keychain -s "$KC"
+          security unlock-keychain -p ci "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          echo "$P12_B64" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$P12_PASS" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$KC" >/dev/null
+
+      # .app 번들(코드사인 + Sparkle.framework + arona-ui 포함) → dmg 스테이징.
+      # Sparkle tarball 다운로드(build-app.sh 내부)가 gh 를 쓰므로 GH_TOKEN 필요.
+      - name: Build .app + .dmg
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KASATERM_SIGN_ID: kasaterm-ci
+        run: |
+          bash scripts/build-app.sh
+          VERSION="${GITHUB_REF_NAME}"
+          [[ "$VERSION" == v* ]] || VERSION="v$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')-dev"
+          DMG="dist/kasaterm-$VERSION.dmg"
+          STAGE="$(mktemp -d)"
+          cp -R dist/kasaterm.app "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "kasaterm" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+          rm -rf "$STAGE"
+          echo "built $DMG ($(du -h "$DMG" | cut -f1))"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+          echo "DMG_NAME=$(basename "$DMG")" >> "$GITHUB_ENV"
+
+      # 태그 push → 릴리스에 dmg 첨부 + 설치 안내 노트(없으면 생성, msi job 과 선착순).
+      - name: Attach DMG to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          NOTES="$(cat <<EOF
+          kasaterm $VERSION — 한글 특화 GUI 터미널 + Claude 런처
+
+          ## 설치 (macOS)
+          1. \`kasaterm-$VERSION.dmg\` 다운로드 → 열기
+          2. kasaterm을 Applications 폴더로 드래그
+          3. **처음 실행만**: Applications에서 kasaterm **우클릭 → 열기** → "열기" 확인
+             (직접 만든 앱이라 macOS가 한 번 확인받아요. 이후엔 그냥 더블클릭)
+          4. 첫 실행 때 화면 녹화/접근 권한 물으면 허용
+
+          ## 설치 (Windows)
+          \`.msi\` 다운로드 → 실행 (SmartScreen 경고 시 "추가 정보 → 실행")
+
+          ## 쓰는 법
+          앱 열면 바로 터미널. \`claude\` 치면 Claude Code 실행돼요.
+          EOF
+          )"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" "$DMG" --clobber
+            gh release edit "$VERSION" --title "kasaterm $VERSION" --notes "$NOTES"
+          else
+            gh release create "$VERSION" "$DMG" --title "kasaterm $VERSION" --notes "$NOTES"
+          fi
+
+      # 수동 실행 → artifact 로만(릴리스 불변, 빌드 검증용).
+      - name: Upload DMG artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DMG_NAME }}
+          path: ${{ env.DMG }}
+
+  # msi + dmg 가 모두 릴리스에 올라온 뒤 appcast 2종을 서명·생성해 docs/ 로 커밋.
+  # 설치된 앱들의 Sparkle(mac)/WinSparkle(win)이 이 Pages 피드를 보고 자동 업데이트한다.
+  appcast:
+    needs: [build-msi, build-dmg]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    steps:
+      # docs/ 커밋은 main 에 올라가야 Pages 가 서빙한다(태그 detached 체크아웃 금지).
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Sparkle signing tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SPARKLE_VER="2.9.3"
+          mkdir -p vendor/Sparkle
+          gh release download "$SPARKLE_VER" --repo sparkle-project/Sparkle -p "Sparkle-$SPARKLE_VER.tar.xz" -D vendor --clobber
+          tar -xJf "vendor/Sparkle-$SPARKLE_VER.tar.xz" -C vendor/Sparkle/
+
+      - name: Generate + commit appcasts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ED_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          VER="${VERSION#v}"
+          KEYFILE="$RUNNER_TEMP/ed.key"
+          printf '%s' "$ED_KEY" > "$KEYFILE"
+
+          # mac appcast — 릴리스의 dmg 를 받아 generate_appcast 로 서명·생성.
+          ASSETS="$(mktemp -d)"
+          gh release download "$VERSION" -p '*.dmg' -D "$ASSETS"
+          vendor/Sparkle/bin/generate_appcast \
+            --ed-key-file "$KEYFILE" \
+            --download-url-prefix "https://github.com/2rami/kasaterm/releases/download/$VERSION/" \
+            --link "https://github.com/2rami/kasaterm" \
+            "$ASSETS"
+          mkdir -p docs
+          cp "$ASSETS/appcast.xml" docs/appcast.xml
+          touch docs/.nojekyll
+
+          # Windows appcast — 같은 EdDSA 키로 msi 서명. sign_update 출력이 그대로
+          # enclosure 속성: sparkle:edSignature="..." length="..."
+          gh release download "$VERSION" -p '*.msi' -O "$RUNNER_TEMP/win.msi"
+          MSI_NAME="$(gh release view "$VERSION" --json assets -q '.assets[].name' | grep -E '\.msi$' | head -1)"
+          SIG_LINE="$(vendor/Sparkle/bin/sign_update --ed-key-file "$KEYFILE" "$RUNNER_TEMP/win.msi")"
+          cat > docs/appcast-win.xml <<XML
+          <?xml version="1.0" standalone="yes"?>
+          <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+              <channel>
+                  <title>kasaterm (Windows)</title>
+                  <item>
+                      <title>$VER</title>
+                      <pubDate>$(date -R)</pubDate>
+                      <link>https://github.com/2rami/kasaterm</link>
+                      <sparkle:version>$VER</sparkle:version>
+                      <sparkle:shortVersionString>$VER</sparkle:shortVersionString>
+                      <enclosure url="https://github.com/2rami/kasaterm/releases/download/$VERSION/$MSI_NAME"
+                                 sparkle:os="windows" type="application/octet-stream" $SIG_LINE />
+                  </item>
+              </channel>
+          </rss>
+          XML
+          rm -f "$KEYFILE" "$RUNNER_TEMP/win.msi"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/appcast.xml docs/appcast-win.xml docs/.nojekyll
+          git commit -m "chore(release): appcast $VERSION"
+          # 태그 이후 main 이 움직였을 수 있다 — rebase 후 push.
+          git pull --rebase origin main
+          git push origin main
+          echo "appcast → https://2rami.github.io/kasaterm/appcast.xml"
+          echo "appcast-win → https://2rami.github.io/kasaterm/appcast-win.xml"
