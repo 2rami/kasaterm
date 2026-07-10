@@ -2108,7 +2108,7 @@ fn term_is_working(t: &TerminalPane) -> bool {
 ///     the star but DROPS the ellipsis, so requiring both rejects it. (The old
 ///     bare-star check pinned the bar on forever after a turn.)
 ///   - braille spinner (other CLIs) — animation-only, safe on its own.
-fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
+pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
     let Some(last) = cells
         .iter()
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))
@@ -2154,7 +2154,7 @@ pub(crate) enum ApprovalPrompt {
 ///     실클릭으로 확인된 false-positive.)
 /// Callers must check `rows_show_working` first — a spinner means the prompt
 /// text still on screen is history, not a question.
-fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<ApprovalPrompt> {
+pub(crate) fn rows_show_approval_prompt(cells: &[Vec<GridCell>]) -> Option<ApprovalPrompt> {
     let last = cells
         .iter()
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;

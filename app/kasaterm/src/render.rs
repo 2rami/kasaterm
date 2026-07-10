@@ -321,6 +321,10 @@ impl App {
         // Claude Code 시작 배너의 Clawd 아트 자리에 그릴 학생 도트:
         // (에셋 슬러그, 배너 박스 LOGICAL px). 셀 스냅샷에서 감지·수집.
         let mut banner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // working 스피너(✻/braille) 자리 학생 도트(제자리 걸음): 같은 형태.
+        let mut spinner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // 승인 대기(approval prompt) 학생 도트(폴짝 바운스): 같은 형태.
+        let mut waiting_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
         // cursor, h_scroll px, syntax lang). Render mode draws blocks; Raw mode
         // draws the editor buffer.
@@ -537,10 +541,10 @@ impl App {
                     .get(&id)
                     .and_then(|n| theme::character_slug(n))
                 {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let scw = self.cell.w * fs;
+                    let sch = self.cell.h * fs;
                     for (br, bc) in find_clawd_banners(&composed) {
-                        let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
-                        let scw = self.cell.w * fs;
-                        let sch = self.cell.h * fs;
                         banner_slots.push((
                             slug,
                             (
@@ -554,6 +558,35 @@ impl App {
                             for cell in row.iter_mut().skip(bc).take(CLAWD_COLS) {
                                 *cell = GridCell::blank();
                             }
+                        }
+                    }
+                    // working 스피너 자리 → 학생이 제자리 걸음으로 "작업 중".
+                    // 스피너 글리프 셀은 스냅샷에서 비우고, 그 자리(스피너 행
+                    // 바닥 정렬, 2행 높이)에 walk 도트를 icon 패스로 얹는다.
+                    // 스피너가 없고 승인 프롬프트가 떠 있으면 → 질문 행 텍스트
+                    // 끝 옆에서 폴짝 바운스("선생님, 승인 기다려요!"). pane
+                    // 우상단은 collab 승인 토스트(윈도우 우상단)와 겹친다.
+                    if let Some((sr, sc)) = find_claude_spinner(&composed) {
+                        composed[sr][sc] = GridCell::blank();
+                        let top_r = sr.saturating_sub(1);
+                        spinner_slots.push((
+                            slug,
+                            (
+                                body_left + sc as f32 * scw,
+                                body_top + top_r as f32 * sch,
+                                2.0 * scw,
+                                (sr - top_r + 1) as f32 * sch,
+                            ),
+                        ));
+                    } else if !crate::input::rows_show_working(&composed)
+                        && crate::input::rows_show_approval_prompt(&composed).is_some()
+                    {
+                        if let Some((ar, ac)) = approval_anchor(&composed) {
+                            const DOT: f32 = 40.0;
+                            let x = (body_left + (ac + 2) as f32 * scw)
+                                .min(body_left + cols_now as f32 * scw - DOT);
+                            let y = (body_top + (ar + 1) as f32 * sch - DOT).max(body_top);
+                            waiting_slots.push((slug, (x, y, DOT, DOT)));
                         }
                     }
                 }
@@ -1163,8 +1196,10 @@ impl App {
         // 학생 도트 배너 가시 상태 → 애니 타이머(handler.rs)와 damage 게이트
         // (render_frame)가 참조. 배너가 사라진 프레임에 false로 떨어져
         // 애니 redraw 펌프가 저절로 멈춘다.
-        STUDENT_BANNER_VISIBLE.store(
-            !banner_slots.is_empty(),
+        STUDENT_SPRITE_ANIMATING.store(
+            // waiting(승인 대기)은 렌더 펌프가 없는 정적 상태라 바운스 애니도
+            // 이 타이머에 의존한다. 스피너 도트는 working 30fps 펌프가 있어 불필요.
+            !banner_slots.is_empty() || !waiting_slots.is_empty(),
             std::sync::atomic::Ordering::Relaxed,
         );
         if let Some(g) = self.gpu.as_mut() {
@@ -1192,10 +1227,10 @@ impl App {
             // 업로드해 모든 pane이 공유하고, 매 프레임 시간 기반으로 현재
             // 프레임만 queue한다(재렌더는 배너 애니 타이머가 깨워줌).
             // 디코딩 실패 시 queue_image가 조용히 skip.
-            let anim_idx = (self.version_anim_start.elapsed().as_millis() as u64
-                / STUDENT_ANIM_FRAME_MS) as usize
-                % STUDENT_IDLE_FRAMES;
-            for (slug, (bx, by, bw, bh)) in &banner_slots {
+            let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
+            let anim_idx = (anim_ms / STUDENT_ANIM_FRAME_MS) as usize % STUDENT_IDLE_FRAMES;
+            // idle 프레임을 (캐릭터당 1회) 업로드 — 배너와 승인대기 도트가 공유.
+            let ensure_idle = |g: &mut gpu::GpuRenderer, slug: &str| {
                 if !g.has_image(&format!("student:{slug}:f0")) {
                     if let Some(frames) = student_sprite_frames(slug, "idle") {
                         for (i, (rgba, w, h)) in frames.iter().enumerate() {
@@ -1203,8 +1238,39 @@ impl App {
                         }
                     }
                 }
+            };
+            for (slug, (bx, by, bw, bh)) in &banner_slots {
+                ensure_idle(g, slug);
                 let key = format!("student:{slug}:f{anim_idx}");
                 g.queue_image(&key, *bx, *by, *bw, *bh, 1.0, 0.0, 0.0);
+            }
+            // working 스피너 자리 — walk 프레임 제자리 걸음(분주하게 일하는 중).
+            // 셀 위 icon 패스라 blank 처리한 스피너 자리 위에 또렷하게 뜬다.
+            let walk_idx =
+                (anim_ms as f32 / STUDENT_WALK_FRAME_MS) as usize % STUDENT_WALK_FRAMES;
+            for (slug, (bx, by, bw, bh)) in &spinner_slots {
+                if !g.has_image(&format!("student:{slug}:walk0")) {
+                    if let Some(frames) = student_sprite_frames(slug, "walk") {
+                        for (i, (rgba, w, h)) in frames.iter().enumerate() {
+                            g.upload_image(&format!("student:{slug}:walk{i}"), rgba, *w, *h);
+                        }
+                    }
+                }
+                g.queue_image_above(
+                    &format!("student:{slug}:walk{walk_idx}"),
+                    *bx, *by, *bw, *bh,
+                );
+            }
+            // 승인 대기 — pane 우상단에서 idle 도트가 폴짝폴짝("봐주세요!").
+            // 바닥 정렬이므로 박스 y 를 사인 바운스만큼 올렸다 내린다.
+            for (slug, (bx, by, bw, bh)) in &waiting_slots {
+                ensure_idle(g, slug);
+                let bounce =
+                    (anim_ms as f32 / 1000.0 * std::f32::consts::TAU * 1.2).sin().abs() * 7.0;
+                g.queue_image_above(
+                    &format!("student:{slug}:f{anim_idx}"),
+                    *bx, by - bounce, *bw, *bh,
+                );
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
@@ -3409,44 +3475,6 @@ impl App {
                         if ex > sx {
                             g.rect(sx, *fy, ex - sx, BAR_H, accent);
                         }
-                        // 학생 걷기 — 이 pane 학생 도트가 스윕 세그먼트 선두를
-                        // 끌고 pane 을 횡단한다. icon 패스(queue_image_above)라
-                        // 셀 글리프 위에 뜨고, 선두가 pane 안일 때만 그려 옆
-                        // pane 침범이 없다. working 중엔 30fps 펌프가 도니
-                        // 프레임 전환(140ms)은 공짜.
-                        // 포커스 pane 만 — split 에서 working pane 마다 도트가
-                        // 돌아다니면 산만하다(테두리의 active-only 정책과 동일,
-                        // 거노). 비포커스는 기존 얇은 스윕바만.
-                        if let Some(slug) = pane_chars
-                            .get(fid.as_str())
-                            .filter(|_| active_pane.as_deref() == Some(fid.as_str()))
-                            .and_then(|n| theme::character_slug(n))
-                        {
-                            const DOT: f32 = 40.0;
-                            let head = fx + off + seg;
-                            if head > fx + DOT && head < fx + fw {
-                                if !g.has_image(&format!("student:{slug}:walk0")) {
-                                    if let Some(frames) = student_sprite_frames(slug, "walk") {
-                                        for (i, (rgba, w, h)) in frames.iter().enumerate() {
-                                            g.upload_image(
-                                                &format!("student:{slug}:walk{i}"),
-                                                rgba, *w, *h,
-                                            );
-                                        }
-                                    }
-                                }
-                                let fi = (anim_phase * 1000.0 / STUDENT_WALK_FRAME_MS)
-                                    as usize
-                                    % STUDENT_WALK_FRAMES;
-                                g.queue_image_above(
-                                    &format!("student:{slug}:walk{fi}"),
-                                    head - DOT,
-                                    fy + BAR_H + 1.0,
-                                    DOT,
-                                    DOT,
-                                );
-                            }
-                        }
                     }
                     // 헤더 있는 pane(image/md/탭 2개+)은 헤더에 컨트롤이 다 있으니
                     // ··· 핸들을 생략한다 — 중복 진입점 제거.
@@ -4428,7 +4456,7 @@ impl App {
         // 바꾼다 — 전용 타이머(handler.rs)가 깨운 redraw 를 여기서
         // 통과시켜야 프레임이 넘어간다.
         let banner_animating =
-            STUDENT_BANNER_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
+            STUDENT_SPRITE_ANIMATING.load(std::sync::atomic::Ordering::Relaxed);
         let rebuild = pty_dirty
             || self.chrome_dirty
             || blink_changed
@@ -4494,7 +4522,7 @@ const STUDENT_WALK_FRAME_MS: f32 = 140.0;
 /// 직전 프레임에 학생 도트 배너가 화면에 있었는지. 배너 애니 타이머
 /// 스레드(handler.rs)가 이걸 보고 배너가 보일 때만 redraw를 깨운다 —
 /// 배너가 없으면 sleep 루프만 돌아 idle 비용이 0에 수렴한다.
-pub(crate) static STUDENT_BANNER_VISIBLE: std::sync::atomic::AtomicBool =
+pub(crate) static STUDENT_SPRITE_ANIMATING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// 캐릭터 슬러그 + 모션 → 컴파일타임 내장 도트 프레임(arona-ui walk
@@ -4612,4 +4640,60 @@ fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+/// Claude Code 라이브 스피너("✻ Verbing…" 별 dingbat, 또는 braille) 위치 감지 —
+/// `rows_show_working`(input.rs)과 같은 신호를 행·열 좌표로 돌려준다. 마지막
+/// non-blank 10행, 행 앞머리(col<8)만 본다(본문 인용 별표 오탐 방지). 스피너
+/// 셀은 blank 처리하고 그 자리에 학생 working 도트를 얹는 용도.
+fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
+    let last = rows
+        .iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
+    let start = (last + 1).saturating_sub(10);
+    for r in (start..=last).rev() {
+        let row = &rows[r];
+        let line: String = row.iter().map(|cell| cell.ch).collect();
+        for (c, cell) in row.iter().enumerate().take(8) {
+            let cp = cell.ch as u32;
+            let star = (0x2720..=0x274F).contains(&cp) && line.contains('…');
+            let braille = (0x2800..=0x28FF).contains(&cp);
+            if star || braille {
+                return Some((r, c));
+            }
+        }
+    }
+    None
+}
+
+/// 승인 대기 도트가 설 자리 — 질문 헤더 행("Do you want to proceed", 없으면 첫
+/// ❯ 행, 그것도 없으면 마지막 non-blank 행)과 그 행의 텍스트 끝 col. pane
+/// 우상단 고정은 윈도우 우상단의 collab 승인 토스트와 겹쳐서(거부 버튼 가림)
+/// 프롬프트 자체에 앵커한다. 스캔 범위는 `rows_show_approval_prompt` 와 동일.
+fn approval_anchor(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
+    let last = rows
+        .iter()
+        .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
+    let start = (last + 1).saturating_sub(14);
+    let end_col = |r: usize| {
+        rows[r]
+            .iter()
+            .rposition(|cell| !matches!(cell.ch, ' ' | '\0'))
+            .unwrap_or(0)
+    };
+    let mut chevron: Option<usize> = None;
+    for r in start..=last {
+        let line: String = rows[r]
+            .iter()
+            .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
+            .collect();
+        if line.to_lowercase().contains("do you want to proceed") {
+            return Some((r, end_col(r)));
+        }
+        if chevron.is_none() && line.contains('❯') {
+            chevron = Some(r);
+        }
+    }
+    let r = chevron.unwrap_or(last);
+    Some((r, end_col(r)))
 }
