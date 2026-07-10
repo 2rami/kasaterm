@@ -549,6 +549,23 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        // 학생 도트 배너 애니 타이머. Clawd 배너 자리에 학생 도트가 보이는
+        // 동안만 프레임 주기로 redraw를 깨운다(blink 스레드와 같은 proxy
+        // 패턴). 배너가 없으면 sleep+load만 도는 무비용 루프.
+        {
+            let anim_proxy = self.proxy.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::render::STUDENT_ANIM_FRAME_MS,
+                ));
+                if crate::render::STUDENT_BANNER_VISIBLE
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    && anim_proxy.send_event(UserEvent::Redraw).is_err()
+                {
+                    break;
+                }
+            });
+        }
         // Sidebar git-badge poller. The sidebar paint publishes each window's
         // repr cwd into `git_poll_cwds`; this thread shells out to `git_badge`
         // off the main thread and wakes the loop only when a badge actually
@@ -3424,15 +3441,19 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // Headless verification: arm a GPU frame-readback capture once its
         // deadline passes (before autoquit, so the capture lands first).
-        if let Some((at, path)) = self.pending_capture.clone() {
-            if std::time::Instant::now() >= at {
-                if let Some(g) = self.gpu.as_mut() {
-                    g.capture_next = Some(path);
-                }
-                self.pending_capture = None;
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+        // capture_next 는 프레임당 하나만 받으므로 due 인 것 중 첫 건만 —
+        // 나머지는 다음 tick 에서 이어서 처리된다.
+        if let Some(pos) = self
+            .pending_capture
+            .iter()
+            .position(|(at, _)| std::time::Instant::now() >= *at)
+        {
+            let (_, path) = self.pending_capture.remove(pos);
+            if let Some(g) = self.gpu.as_mut() {
+                g.capture_next = Some(path);
+            }
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
             }
         }
         // Headless verification: clean-exit once the autoquit deadline passes
@@ -3512,7 +3533,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .pane_activity
                 .values()
                 .any(|a| a.status == "working")
-            || self.pending_capture.is_some()
+            || !self.pending_capture.is_empty()
             || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()
             // An unseen-notification window tab blinks (synced to the cursor

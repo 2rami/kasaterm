@@ -13,7 +13,15 @@ impl App {
     }
     pub(crate) fn schedule_autocapture(&mut self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOCAPTURE_MS") else { return; };
-        let Ok(ms) = ms_str.parse::<u64>() else { return; };
+        // 콤마로 여러 시각 지정 가능("14000,14300") — 애니메이션처럼 시간에
+        // 따라 그림이 바뀌는 기능을 프레임 비교로 검증할 때 쓴다.
+        let deadlines: Vec<u64> = ms_str
+            .split(',')
+            .filter_map(|s| s.trim().parse::<u64>().ok())
+            .collect();
+        if deadlines.is_empty() {
+            return;
+        }
         let path = std::env::var("KASATERM_AUTOCAPTURE_PATH").unwrap_or_else(|_| {
             std::env::temp_dir()
                 .join("kasaterm.png")
@@ -26,21 +34,33 @@ impl App {
             let gms: u64 = std::env::var("KASATERM_AUTOGIT_MS")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(ms.saturating_sub(1500));
+                .unwrap_or(deadlines[0].saturating_sub(1500));
             self.pending_autogit = Some((
                 std::time::Instant::now() + std::time::Duration::from_millis(gms),
                 action,
             ));
         }
-        eprintln!("[autocapture] in {ms}ms → {path} (gpu readback)");
         // GPU frame readback (gpu::render → save_rgba_png) needs no OS
         // screen-record permission, so it works headless on every platform —
         // replacing the old screencapture (macOS, permission-blocked) and
         // PrintWindow (Windows, can't grab the Vulkan/Metal surface) paths.
-        self.pending_capture = Some((
-            std::time::Instant::now() + std::time::Duration::from_millis(ms),
-            path,
-        ));
+        let multi = deadlines.len() > 1;
+        for (i, ms) in deadlines.into_iter().enumerate() {
+            // 단일 캡처는 기존 경로 그대로, 다중이면 "-1", "-2" suffix.
+            let p = if multi {
+                match path.rsplit_once('.') {
+                    Some((stem, ext)) => format!("{stem}-{}.{ext}", i + 1),
+                    None => format!("{path}-{}", i + 1),
+                }
+            } else {
+                path.clone()
+            };
+            eprintln!("[autocapture] in {ms}ms → {p} (gpu readback)");
+            self.pending_capture.push((
+                std::time::Instant::now() + std::time::Duration::from_millis(ms),
+                p,
+            ));
+        }
     }
     /// Run a queued git-panel demo action (KASATERM_AUTOGIT) so headless capture
     /// can show the inline diff / commit modal without a real click.
