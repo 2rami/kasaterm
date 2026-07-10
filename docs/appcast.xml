@@ -3,14 +3,14 @@
     <channel>
         <title>kasaterm</title>
         <item>
-            <title>0.1.6</title>
-            <pubDate>Wed, 08 Jul 2026 18:15:34 +0900</pubDate>
+            <title>0.1.7</title>
+            <pubDate>Fri, 10 Jul 2026 12:58:53 +0000</pubDate>
             <link>https://github.com/2rami/kasaterm</link>
-            <sparkle:version>0.1.6</sparkle:version>
-            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
+            <sparkle:version>0.1.7</sparkle:version>
+            <sparkle:shortVersionString>0.1.7</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>11.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/2rami/kasaterm/releases/download/v0.1.6/kasaterm-v0.1.6.dmg" length="35061381" type="application/octet-stream" sparkle:edSignature="VTySHrE1Wh4ZbT4XuJUoQiZosa2xb0S4zxtkwJhyFXB2nXeLIjYhuNUthept1Axb/ulmrFYXvQNj1ZP8aMFiCA=="/>
+            <enclosure url="https://github.com/2rami/kasaterm/releases/download/v0.1.7/kasaterm-v0.1.7.dmg" length="34771656" type="application/octet-stream" sparkle:edSignature="xqlSJ9PguT45xYGxfxHp12jvaFtFa7BBk+YjVA2aP7ak85dzcR1lsHuQlHTT2dM6/t9mdkAg8/O4UrnJMdLsDg=="/>
         </item>
     </channel>
 </rss>
