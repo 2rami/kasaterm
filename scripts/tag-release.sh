@@ -20,11 +20,14 @@ git tag -l "$VERSION" | grep -q . && { echo "error: 태그 $VERSION 이미 존�
 
 # workspace 버전 단일 소스([workspace.package] version) bump. 첫 매치만 치환.
 perl -0pi -e "s/^version = \"[^\"]*\"/version = \"$VER\"/m" Cargo.toml
-# Cargo.lock 의 워크스페이스 멤버 버전 동기화(의존성은 안 건드림).
+# Cargo.lock(이 레포는 gitignore, 로컬 전용) 워크스페이스 멤버 버전 동기화.
 cargo metadata --format-version 1 >/dev/null
 
-git add Cargo.toml Cargo.lock
-git commit -m "chore(release): v$VER"
+# 이미 그 버전이면(중단된 실행 재시도 등) bump 커밋 없이 태그만 — 멱등.
+if [[ -n "$(git status --porcelain Cargo.toml)" ]]; then
+  git add Cargo.toml
+  git commit -m "chore(release): v$VER"
+fi
 git tag "$VERSION"
 git push origin main "$VERSION"
 
