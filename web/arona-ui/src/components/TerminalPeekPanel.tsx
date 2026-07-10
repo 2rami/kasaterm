@@ -81,6 +81,13 @@ function extractContext(screen: string): string | null {
 // 시스템 주입 잔여([Request interrupted], Caveat, ## Context Usage)는 진짜 발화가 아니라
 // 숨긴다. <command-*>·<local-command-stdout> 는 더는 통째로 숨기지 않고 parseSlashCommand 가
 // 슬래시 카드/로컬출력 버블로 승격한다(아래 eventsToItems). 여기엔 그 외 케이스만 남긴다.
+// 병합 매칭용 정규화 — CRLF·공백런을 접어 events(jsonl raw) 와 convTurns(proxy strip_meta)
+// 텍스트를 비교한다. 대소문자는 보존(오탐 축소): assistant 는 API 응답 1:1 정렬이라 exact 가
+// 대부분 성립하고, user 만 prefix 폴백을 쓴다.
+function normText(s: string): string {
+  return s.replace(/\r\n/g, '\n').replace(/\s+/g, ' ').trim();
+}
+
 function isSystemInjectionText(role: string, text: string): boolean {
   if (role !== 'user') return false;
   // compact 직후 들어오는 요약 이어가기 메시지("This session is being continued…")는 user 턴이지만
@@ -1410,6 +1417,17 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // jsonl events → 카톡 렌더 아이템(text 버블 + per-tool 카드 + thinking). tool_use_id
   // 페어링(buildToolMap)으로 카드가 결과/diff/stats 까지 그린다.
   const toolMap = useMemo(() => buildToolMap(events), [events]);
+  // 서브에이전트 in-flight 감지 — proxy 가 ANTHROPIC_BASE_URL=/p/N 을 서브 프로세스에 상속시켜
+  // 서브 API 호출이 메인 conversation(convTurns/streaming)에 섞인다. 미페어 서브소환 tool_use
+  // (결과 없음 = 실행 중)가 있으면 라이브 append 를 통째로 끈다 — 서브 대화가 메인 채팅에 새는 것
+  // 방지. 동기 서브 도는 동안 메인은 멈춰 있어 잃는 것 없고, 완료되면 jsonl 로 정상 복원.
+  const subInFlight = useMemo(() => {
+    for (const v of toolMap.values()) {
+      const n = v.toolUse?.name;
+      if ((n === 'Task' || n === 'Agent' || n === 'Workflow') && !v.toolResult && v.toolUseResult == null) return true;
+    }
+    return false;
+  }, [toolMap]);
   // 입력창 자리 task 고정 — transcript 의 TaskCreate/Update 로 현재 작업 목록 재구성.
   const taskList = useMemo(() => tasksFromEvents(events, toolMap), [events, toolMap]);
   // 턴별 소요시간 — 마지막 assistant uuid → ms. 그 버블 아래 시계 푸터.
@@ -1450,15 +1468,61 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         return { it, eff, i };
       });
       keyed.sort((a, b) => a.eff - b.eff || a.i - b.i);
-      return keyed.map((k) => k.it);
+      const base = keyed.map((k) => k.it);
+      // === convTurns 병합 ===
+      // 인터랙티브 claude 는 assistant 를 message 완료 시점에만 jsonl 에 flush 한다 → 재오픈 시
+      // tail 에 user 만 있거나(assistant 소실), 완료 직후 다음 flush 전 짧은 공백이 생긴다. 그 구간을
+      // 캡처 프록시(convTurns, 완료 즉시 정확)로 메운다. anchor(events 마지막 대화 턴) 이후의 연속
+      // assistant 런만 붙이고 첫 진짜 user 에서 중단 → 서브에이전트 오염 블록(항상 user 프롬프트로
+      // 시작)이 자동 배제된다. Defense 2(subInFlight)와 이중.
+      if (subInFlight || !convTurns.length) return base;
+      let anchor: { role: string; text: string } | null = null;
+      for (let k = base.length - 1; k >= 0; k--) {
+        const b = base[k] as { kind: string; role?: string; text?: string; queued?: boolean };
+        if (b.kind === 'bubble' && (b.role === 'user' || b.role === 'assistant') && !b.queued && b.text?.trim()) {
+          anchor = { role: b.role, text: b.text }; break;
+        }
+      }
+      const aNorm = anchor ? normText(anchor.role === 'user' ? stripMeta(anchor.text) : anchor.text) : '';
+      if (!anchor || aNorm.length < 8) return base; // anchor 없음/모호(짧은 텍스트 오탐) → 안전(과소 append)
+      // convTurns 역순으로 anchor 매칭되는 마지막 인덱스 j(반복 발화 시 진짜 위치=최후 등장).
+      let j = -1;
+      for (let k = convTurns.length - 1; k >= 0; k--) {
+        const t = convTurns[k];
+        if (t.role !== anchor.role) continue;
+        const tn = normText(t.role === 'user' ? stripMeta(t.text) : t.text);
+        // assistant 는 API 응답 1:1 정렬이라 exact. user 는 Rust↔TS strip 차이로 길이가드 prefix 폴백.
+        if (tn === aNorm || (anchor.role === 'user' && aNorm.length >= 16 && (tn.startsWith(aNorm) || aNorm.startsWith(tn)))) { j = k; break; }
+      }
+      if (j < 0) return base; // 매칭 실패 → 안전
+      // Defense 1: j+1 부터 연속 assistant 런만. 진짜 user(서브 프롬프트/다음 메인 발화) 만나면 중단.
+      const sNorm = normText(streaming);
+      const extra: RenderItem[] = [];
+      for (let k = j + 1; k < convTurns.length; k++) {
+        const t = convTurns[k];
+        if (t.role === 'user') {
+          const cleaned = stripMeta(t.text);
+          if (!cleaned.trim() || isSystemInjectionText('user', cleaned)) continue; // 주입성 user(task-notification 등)는 런 유지
+          break; // 진짜 user → 중단
+        }
+        const txt = t.text.trim();
+        if (!txt) continue;
+        if (sNorm && normText(txt) === sNorm) continue; // streaming 버블과 중복 방지(한 스냅샷 내 겹침 흡수)
+        extra.push({ kind: 'bubble', role: 'assistant', text: txt } as RenderItem);
+      }
+      if (!extra.length) return base;
+      // extra 를 queued 버블 앞(마지막 non-queued item 뒤)에 삽입 — 예약은 최하단 유지(라이브 응답 밑에 안 깔리게).
+      let insertAt = base.length;
+      while (insertAt > 0 && (base[insertAt - 1] as { queued?: boolean }).queued) insertAt--;
+      return [...base.slice(0, insertAt), ...extra, ...base.slice(insertAt)];
     }
-    // jsonl 이 아직 안 써진 진행 중 구간 — 캡처 프록시 텍스트 대화로 라이브 폴백. conv.turns 는
+    // events 완전 공백(빈 새 세션/재오픈 극초기) — 캡처 프록시 텍스트 대화로 폴백. conv.turns 는
     // 프록시가 strip_meta 로 정제하지만, user 턴은 한 번 더 격리해(이중 안전) 남는 게 있을 때만.
     return convTurns
       .map((t) => ({ role: t.role, text: t.role === 'user' ? stripMeta(t.text) : t.text }))
       .filter((t) => t.text.trim() && !isSystemInjectionText(t.role, t.text))
       .map((t) => ({ kind: 'bubble', role: t.role, text: t.text }) as RenderItem);
-  }, [events, toolMap, convTurns, isSub, messages, agents]);
+  }, [events, toolMap, convTurns, isSub, messages, agents, subInFlight, streaming]);
   // optimistic 으로 남긴 내 발화(myChoices) 중 transcript(items)에 아직 안 잡힌 것만 — 작업
   // 중 미리 보낸 메시지를 즉시 띄우되(거노), 다음 폴에서 transcript 에 같은 텍스트가 뜨면
   // 중복 제거. 메뉴 선택(label)은 transcript 에 raw 키로 들어가 매칭 안 돼 계속 남는다(의도).
@@ -1612,7 +1676,8 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           <>
             {[
               ...items,
-              ...(streaming.trim() ? [{ kind: 'bubble', role: 'assistant', text: streaming } as RenderItem] : []),
+              // 서브 in-flight 면 /p/N SSE 가 서브 것일 수 있어 streaming 버블도 억제(메인 채팅 누수 방지).
+              ...(streaming.trim() && !subInFlight ? [{ kind: 'bubble', role: 'assistant', text: streaming } as RenderItem] : []),
               ...pendingChoices.map((t) => ({ kind: 'bubble', role: t.role, text: t.text } as RenderItem)),
             ].map((it, i) => {
               // esc 중단 — 프롬프트(취소 아님)는 그대로 두고, 중단이 일어난 그 자리에 가는 구분선 +
