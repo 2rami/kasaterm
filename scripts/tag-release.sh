@@ -15,7 +15,10 @@ VER="${VERSION#v}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-[[ -z "$(git status --porcelain)" ]] || { echo "error: 워킹트리가 깨끗하지 않음 — 먼저 커밋/스태시" >&2; exit 1; }
+# Cargo.toml(버전 bump 자체, 중단된 실행의 잔여 허용) 외의 변경이 있으면 거부 —
+# 릴리스 커밋에 무관한 작업이 섞이는 것을 막는다.
+DIRTY="$(git status --porcelain | grep -v ' Cargo.toml$' || true)"
+[[ -z "$DIRTY" ]] || { echo "error: 워킹트리에 Cargo.toml 외 변경 있음 — 먼저 커밋/스태시:" >&2; echo "$DIRTY" >&2; exit 1; }
 git tag -l "$VERSION" | grep -q . && { echo "error: 태그 $VERSION 이미 존재" >&2; exit 1; }
 
 # workspace 버전 단일 소스([workspace.package] version) bump. 첫 매치만 치환.
