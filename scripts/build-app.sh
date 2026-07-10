@@ -165,7 +165,8 @@ PLIST
 # build, which macOS treats as a brand-new app. Create the identity once:
 #   Keychain Access → Certificate Assistant → Create a Certificate
 #   Name: kasaterm-dev, Type: Self-Signed Root, Certificate Type: Code Signing
-SIGN_ID="kasaterm-dev"
+# CI(release.yml)는 Secrets 의 kasaterm-ci 인증서를 임포트하고 이 env 로 지정한다.
+SIGN_ID="${KASATERM_SIGN_ID:-kasaterm-dev}"
 # No -v: a self-signed cert is valid-but-untrusted (CSSMERR_TP_NOT_TRUSTED),
 # which -v filters out. codesign still signs with it, and TCC keys
 # permissions off the signing identity, so untrusted is fine for local use.
