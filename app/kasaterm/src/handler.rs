@@ -558,7 +558,7 @@ impl ApplicationHandler<UserEvent> for App {
                 std::thread::sleep(std::time::Duration::from_millis(
                     crate::render::STUDENT_ANIM_FRAME_MS,
                 ));
-                if crate::render::STUDENT_BANNER_VISIBLE
+                if crate::render::STUDENT_SPRITE_ANIMATING
                     .load(std::sync::atomic::Ordering::Relaxed)
                     && anim_proxy.send_event(UserEvent::Redraw).is_err()
                 {
