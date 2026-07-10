@@ -3414,8 +3414,12 @@ impl App {
                         // 셀 글리프 위에 뜨고, 선두가 pane 안일 때만 그려 옆
                         // pane 침범이 없다. working 중엔 30fps 펌프가 도니
                         // 프레임 전환(140ms)은 공짜.
+                        // 포커스 pane 만 — split 에서 working pane 마다 도트가
+                        // 돌아다니면 산만하다(테두리의 active-only 정책과 동일,
+                        // 거노). 비포커스는 기존 얇은 스윕바만.
                         if let Some(slug) = pane_chars
                             .get(fid.as_str())
+                            .filter(|_| active_pane.as_deref() == Some(fid.as_str()))
                             .and_then(|n| theme::character_slug(n))
                         {
                             const DOT: f32 = 40.0;
