@@ -1197,7 +1197,7 @@ impl App {
                 % STUDENT_IDLE_FRAMES;
             for (slug, (bx, by, bw, bh)) in &banner_slots {
                 if !g.has_image(&format!("student:{slug}:f0")) {
-                    if let Some(frames) = student_sprite_frames(slug) {
+                    if let Some(frames) = student_sprite_frames(slug, "idle") {
                         for (i, (rgba, w, h)) in frames.iter().enumerate() {
                             g.upload_image(&format!("student:{slug}:f{i}"), rgba, *w, *h);
                         }
@@ -3409,6 +3409,40 @@ impl App {
                         if ex > sx {
                             g.rect(sx, *fy, ex - sx, BAR_H, accent);
                         }
+                        // 학생 걷기 — 이 pane 학생 도트가 스윕 세그먼트 선두를
+                        // 끌고 pane 을 횡단한다. icon 패스(queue_image_above)라
+                        // 셀 글리프 위에 뜨고, 선두가 pane 안일 때만 그려 옆
+                        // pane 침범이 없다. working 중엔 30fps 펌프가 도니
+                        // 프레임 전환(140ms)은 공짜.
+                        if let Some(slug) = pane_chars
+                            .get(fid.as_str())
+                            .and_then(|n| theme::character_slug(n))
+                        {
+                            const DOT: f32 = 40.0;
+                            let head = fx + off + seg;
+                            if head > fx + DOT && head < fx + fw {
+                                if !g.has_image(&format!("student:{slug}:walk0")) {
+                                    if let Some(frames) = student_sprite_frames(slug, "walk") {
+                                        for (i, (rgba, w, h)) in frames.iter().enumerate() {
+                                            g.upload_image(
+                                                &format!("student:{slug}:walk{i}"),
+                                                rgba, *w, *h,
+                                            );
+                                        }
+                                    }
+                                }
+                                let fi = (anim_phase * 1000.0 / STUDENT_WALK_FRAME_MS)
+                                    as usize
+                                    % STUDENT_WALK_FRAMES;
+                                g.queue_image_above(
+                                    &format!("student:{slug}:walk{fi}"),
+                                    head - DOT,
+                                    fy + BAR_H + 1.0,
+                                    DOT,
+                                    DOT,
+                                );
+                            }
+                        }
                     }
                     // 헤더 있는 pane(image/md/탭 2개+)은 헤더에 컨트롤이 다 있으니
                     // ··· 핸들을 생략한다 — 중복 진입점 제거.
@@ -4447,9 +4481,11 @@ impl App {
 const CLAWD_COLS: usize = 9;
 const CLAWD_ROWS: usize = 3;
 
-/// 학생 도트 idle 애니메이션 프레임 수와 프레임당 지속시간.
+/// 학생 도트 애니메이션 — idle(배너)·walk(로딩바) 모션별 프레임 수·주기.
 const STUDENT_IDLE_FRAMES: usize = 4;
 pub(crate) const STUDENT_ANIM_FRAME_MS: u64 = 200;
+const STUDENT_WALK_FRAMES: usize = 6;
+const STUDENT_WALK_FRAME_MS: f32 = 140.0;
 
 /// 직전 프레임에 학생 도트 배너가 화면에 있었는지. 배너 애니 타이머
 /// 스레드(handler.rs)가 이걸 보고 배너가 보일 때만 redraw를 깨운다 —
@@ -4457,41 +4493,61 @@ pub(crate) const STUDENT_ANIM_FRAME_MS: u64 = 200;
 pub(crate) static STUDENT_BANNER_VISIBLE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 캐릭터 슬러그 → 컴파일타임 내장 idle 도트 프레임(arona-ui walk
-/// 스프라이트 idle 0..3).
-fn student_sprite_png(slug: &str) -> Option<[&'static [u8]; STUDENT_IDLE_FRAMES]> {
-    macro_rules! frames {
-        ($n:literal) => {
-            [
+/// 캐릭터 슬러그 + 모션 → 컴파일타임 내장 도트 프레임(arona-ui walk
+/// 스프라이트의 idle 0..3 / walk-east 0..5).
+fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8]]> {
+    macro_rules! idle {
+        ($n:literal) => {{
+            const F: [&[u8]; STUDENT_IDLE_FRAMES] = [
                 include_bytes!(concat!("../assets/students/", $n, "-0.png")),
                 include_bytes!(concat!("../assets/students/", $n, "-1.png")),
                 include_bytes!(concat!("../assets/students/", $n, "-2.png")),
                 include_bytes!(concat!("../assets/students/", $n, "-3.png")),
-            ]
-        };
+            ];
+            &F
+        }};
     }
-    Some(match slug {
-        "arona" => frames!("arona"),
-        "prana" => frames!("prana"),
-        "midori" => frames!("midori"),
-        "momoi" => frames!("momoi"),
-        "yuzu" => frames!("yuzu"),
-        "arisu" => frames!("arisu"),
+    macro_rules! walk {
+        ($n:literal) => {{
+            const F: [&[u8]; STUDENT_WALK_FRAMES] = [
+                include_bytes!(concat!("../assets/students/", $n, "-walk-0.png")),
+                include_bytes!(concat!("../assets/students/", $n, "-walk-1.png")),
+                include_bytes!(concat!("../assets/students/", $n, "-walk-2.png")),
+                include_bytes!(concat!("../assets/students/", $n, "-walk-3.png")),
+                include_bytes!(concat!("../assets/students/", $n, "-walk-4.png")),
+                include_bytes!(concat!("../assets/students/", $n, "-walk-5.png")),
+            ];
+            &F
+        }};
+    }
+    Some(match (slug, motion) {
+        ("arona", "idle") => idle!("arona"),
+        ("prana", "idle") => idle!("prana"),
+        ("midori", "idle") => idle!("midori"),
+        ("momoi", "idle") => idle!("momoi"),
+        ("yuzu", "idle") => idle!("yuzu"),
+        ("arisu", "idle") => idle!("arisu"),
+        ("arona", "walk") => walk!("arona"),
+        ("prana", "walk") => walk!("prana"),
+        ("midori", "walk") => walk!("midori"),
+        ("momoi", "walk") => walk!("momoi"),
+        ("yuzu", "walk") => walk!("yuzu"),
+        ("arisu", "walk") => walk!("arisu"),
         _ => return None,
     })
 }
 
-/// idle 4프레임을 RGBA로 디코딩하고 투명 여백을 잘라낸다. 크롭은 4프레임
-/// **합집합** 알파 bbox 하나로 — 프레임별 bbox로 자르면 숨쉬기 애니의
-/// 미세한 키 차이가 contain-fit 배율 차이로 증폭돼 캐릭터가 들썩인다.
-/// GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로 캐릭터당 1회.
-fn student_sprite_frames(slug: &str) -> Option<Vec<(Vec<u8>, u32, u32)>> {
-    let frames = student_sprite_png(slug)?;
+/// 모션 프레임들을 RGBA로 디코딩하고 투명 여백을 잘라낸다. 크롭은 전 프레임
+/// **합집합** 알파 bbox 하나로 — 프레임별 bbox로 자르면 애니의 미세한
+/// 키 차이가 contain-fit 배율 차이로 증폭돼 캐릭터가 들썩인다.
+/// GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로 (캐릭터,모션)당 1회.
+fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, u32)>> {
+    let frames = student_sprite_png(slug, motion)?;
     let decoded: Vec<_> = frames
         .iter()
         .filter_map(|b| image::load_from_memory(b).ok().map(|i| i.to_rgba8()))
         .collect();
-    if decoded.len() != STUDENT_IDLE_FRAMES {
+    if decoded.len() != frames.len() {
         return None;
     }
     let (w, h) = decoded[0].dimensions();

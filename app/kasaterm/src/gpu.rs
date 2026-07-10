@@ -1723,6 +1723,33 @@ impl GpuRenderer {
         ));
     }
 
+    /// `queue_image` 의 전경(chrome 위) 버전 — icon 패스로 그려져 셀 글리프·
+    /// rect 위에 뜬다(학생 걷기 도트 등 장식 스프라이트용). 박스 안 contain-fit
+    /// 후 가로 중앙·**바닥 정렬**(발이 박스 바닥에 닿게). 좌표는 LOGICAL px.
+    pub fn queue_image_above(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32) {
+        let Some(entry) = self.images.get(id) else { return };
+        let s = self.scale;
+        let (bx, by, bw, bh) = (x * s, y * s, w * s, h * s);
+        if bw <= 0.0 || bh <= 0.0 {
+            return;
+        }
+        let (iw, ih) = (entry.w as f32, entry.h as f32);
+        let fit = (bw / iw).min(bh / ih);
+        let dw = iw * fit;
+        let dh = ih * fit;
+        self.icon_quads.push((
+            id.to_string(),
+            CellInstance {
+                cell_px: [bx + (bw - dw) * 0.5, by + (bh - dh), dw, dh],
+                uv_min: [0.0, 0.0],
+                uv_max: [1.0, 1.0],
+                fg_rgba: [1.0, 1.0, 1.0, 1.0],
+                flags: CellInstance::FLAG_COLOR,
+                ..Default::default()
+            },
+        ));
+    }
+
     pub fn resize(&mut self, w: u32, h: u32) {
         self.config.width = w.max(1);
         self.config.height = h.max(1);
