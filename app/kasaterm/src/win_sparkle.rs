@@ -66,6 +66,7 @@ pub(crate) fn init() {
         let set_auto_check = load!("win_sparkle_set_automatic_check_for_updates", CSetInt);
         let set_interval = load!("win_sparkle_set_update_check_interval", CSetInt);
         let start = load!("win_sparkle_init", CVoid);
+        let check_now = load!("win_sparkle_check_update_without_ui", CVoid);
 
         // 모든 set_* 는 win_sparkle_init() 전에 호출해야 한다(winsparkle.h 규약).
         let url = utf8z(APPCAST_URL);
@@ -79,5 +80,10 @@ pub(crate) fn init() {
         set_auto_check(1);
         set_interval(86_400); // 하루(최소 3600초). mac SUScheduledCheckInterval 과 동일.
         start();
+        // 시작 시 즉시 조용한 체크 — interval 은 레지스트리의 마지막 체크 시각
+        // 기준이라, 하루 안에 재시작하면 자동 체크가 한 번도 안 나가 "왜 업데이트
+        // 안 뜨지"가 된다. 매 시작 1회 백그라운드 체크(진행 UI 없음, 업데이트
+        // 발견 시에만 다이얼로그)로 릴리스 직후에도 바로 잡히게 한다.
+        check_now();
     }
 }
