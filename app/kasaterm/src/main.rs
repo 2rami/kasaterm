@@ -2682,10 +2682,11 @@ struct App {
     /// Headless verification: clean-exit (runs `exiting` → save_session_state)
     /// at this instant when KASATERM_AUTOQUIT_MS is set. None disables it.
     autoquit_at: Option<std::time::Instant>,
-    /// Pending GPU self-capture `(deadline, png path)` from KASATERM_AUTOCAPTURE_MS.
-    /// `about_to_wait` arms `gpu.capture_next` once the deadline passes so the
+    /// Pending GPU self-captures `(deadline, png path)` from KASATERM_AUTOCAPTURE_MS
+    /// (콤마로 여러 시각 지정 가능 — 애니메이션 프레임 비교 검증용).
+    /// `about_to_wait` arms `gpu.capture_next` once a deadline passes so the
     /// next render reads the frame back to a PNG — no screen-record permission.
-    pending_capture: Option<(std::time::Instant, String)>,
+    pending_capture: Vec<(std::time::Instant, String)>,
     /// Headless git-panel demo `(deadline, action)` from KASATERM_AUTOGIT —
     /// "diff" expands the first changed file's inline diff, "modal" opens the
     /// commit modal, so those states can be self-captured without clicking.
@@ -3267,7 +3268,7 @@ impl App {
             next_pane_id: 1, // %0 is the initial pane created in start_pty
             pending_restores: Vec::new(),
             autoquit_at: None,
-            pending_capture: None,
+            pending_capture: Vec::new(),
             pending_autogit: None,
             autosplit_plan: Vec::new(),
             autosplit_at: None,

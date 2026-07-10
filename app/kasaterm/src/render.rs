@@ -318,6 +318,9 @@ impl App {
         // (pid, image_data, body_box, zoom, rotation_quarters, pan_xy)
         let mut image_slots: Vec<(String, Arc<ImagePane>, (f32, f32, f32, f32), f32, u8, (f32, f32))> =
             Vec::new();
+        // Claude Code 시작 배너의 Clawd 아트 자리에 그릴 학생 도트:
+        // (에셋 슬러그, 배너 박스 LOGICAL px). 셀 스냅샷에서 감지·수집.
+        let mut banner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
         // cursor, h_scroll px, syntax lang). Render mode draws blocks; Raw mode
         // draws the editor buffer.
@@ -496,7 +499,7 @@ impl App {
                         code_lang_for_path(std::path::Path::new(&m.doc.path)),
                     )
                 });
-                let composed: Vec<Vec<GridCell>> = match pane.term() {
+                let mut composed: Vec<Vec<GridCell>> = match pane.term() {
                     Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
                     None => Vec::new(),
                 };
@@ -524,6 +527,36 @@ impl App {
                     + y_cells as f32 * self.cell.h
                     + header_shift_logical
                     + PANE_INNER_Y;
+                // Claude Code 시작 배너의 Clawd 아트 → 이 pane 학생의 도트로.
+                // 학생 배정 pane(=claude 용도로 spawn된 pane)만 스캔한다.
+                // 감지된 셀은 스냅샷에서 blank 처리해 자리를 비우고, 그
+                // 자리에 도트 이미지를 queue한다 — 이미지 패스는 셀/chrome
+                // 보다 먼저 그려지므로 비워진 셀 밑으로 도트가 보인다.
+                if let Some(slug) = ws
+                    .pane_character
+                    .get(&id)
+                    .and_then(|n| theme::character_slug(n))
+                {
+                    for (br, bc) in find_clawd_banners(&composed) {
+                        let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                        let scw = self.cell.w * fs;
+                        let sch = self.cell.h * fs;
+                        banner_slots.push((
+                            slug,
+                            (
+                                body_left + bc as f32 * scw,
+                                body_top + br as f32 * sch,
+                                CLAWD_COLS as f32 * scw,
+                                CLAWD_ROWS as f32 * sch,
+                            ),
+                        ));
+                        for row in composed[br..br + CLAWD_ROWS].iter_mut() {
+                            for cell in row.iter_mut().skip(bc).take(CLAWD_COLS) {
+                                *cell = GridCell::blank();
+                            }
+                        }
+                    }
+                }
                 // Code-block scan is O(cells × distinct-colours) and walks
                 // the whole grid twice per frame. It only makes sense on the
                 // normal screen — TUIs in alt-screen (claude code TUI mode,
@@ -1127,6 +1160,13 @@ impl App {
             headers.iter().map(|h| self.notify_flash_factor(&h.id)).collect();
         // SCHALE OS(아로나) 패널 열림 여부 — gpu 빌림 전에 스냅샷(타이틀바 ✨ 버튼 active 표시).
         let arona_open = self.arona_panel_window.is_some();
+        // 학생 도트 배너 가시 상태 → 애니 타이머(handler.rs)와 damage 게이트
+        // (render_frame)가 참조. 배너가 사라진 프레임에 false로 떨어져
+        // 애니 redraw 펌프가 저절로 멈춘다.
+        STUDENT_BANNER_VISIBLE.store(
+            !banner_slots.is_empty(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         if let Some(g) = self.gpu.as_mut() {
             g.clear_chrome();
             // Upload any image pane's pixels once, then queue each for this
@@ -1147,6 +1187,24 @@ impl App {
             for (id, image, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {
                 let key = format!("{id}-r{rot}-f{}", image.cur_idx());
                 g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
+            }
+            // 학생 도트 — Clawd 배너 자리. idle 4프레임을 캐릭터당 1회 일괄
+            // 업로드해 모든 pane이 공유하고, 매 프레임 시간 기반으로 현재
+            // 프레임만 queue한다(재렌더는 배너 애니 타이머가 깨워줌).
+            // 디코딩 실패 시 queue_image가 조용히 skip.
+            let anim_idx = (self.version_anim_start.elapsed().as_millis() as u64
+                / STUDENT_ANIM_FRAME_MS) as usize
+                % STUDENT_IDLE_FRAMES;
+            for (slug, (bx, by, bw, bh)) in &banner_slots {
+                if !g.has_image(&format!("student:{slug}:f0")) {
+                    if let Some(frames) = student_sprite_frames(slug) {
+                        for (i, (rgba, w, h)) in frames.iter().enumerate() {
+                            g.upload_image(&format!("student:{slug}:f{i}"), rgba, *w, *h);
+                        }
+                    }
+                }
+                let key = format!("student:{slug}:f{anim_idx}");
+                g.queue_image(&key, *bx, *by, *bw, *bh, 1.0, 0.0, 0.0);
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
@@ -4328,12 +4386,18 @@ impl App {
         // list rebuild — so a busy pane no longer pins the CPU at 30fps.
         // A running git op spins a button spinner every frame.
         let git_op_animating = self.git.op.is_some();
+        // 학생 도트 배너(Clawd 자리)가 보이는 동안은 idle 애니가 그림을
+        // 바꾼다 — 전용 타이머(handler.rs)가 깨운 redraw 를 여기서
+        // 통과시켜야 프레임이 넘어간다.
+        let banner_animating =
+            STUDENT_BANNER_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
         let rebuild = pty_dirty
             || self.chrome_dirty
             || blink_changed
             || version_animating
             || toast_animating
-            || git_op_animating;
+            || git_op_animating
+            || banner_animating;
         if !rebuild && !bar_animating {
             return;
         }
@@ -4372,4 +4436,120 @@ impl App {
             return;
         }
     }
+}
+
+// ── Clawd 시작 배너 → 학생 도트 교체 헬퍼 ──────────────────────────────
+// Claude Code 웰컴 박스의 Clawd 아트(블록문자 3행)를 감지해, 그 자리에
+// 이 pane에 배정된 학생의 idle 도트(arona-ui walk 스프라이트 frame-00)를
+// 그리기 위한 자유함수들. 감지는 캐릭터 배정 pane에 한정된다.
+
+/// Clawd 아트가 차지하는 셀 박스 크기 (cols × rows).
+const CLAWD_COLS: usize = 9;
+const CLAWD_ROWS: usize = 3;
+
+/// 학생 도트 idle 애니메이션 프레임 수와 프레임당 지속시간.
+const STUDENT_IDLE_FRAMES: usize = 4;
+pub(crate) const STUDENT_ANIM_FRAME_MS: u64 = 200;
+
+/// 직전 프레임에 학생 도트 배너가 화면에 있었는지. 배너 애니 타이머
+/// 스레드(handler.rs)가 이걸 보고 배너가 보일 때만 redraw를 깨운다 —
+/// 배너가 없으면 sleep 루프만 돌아 idle 비용이 0에 수렴한다.
+pub(crate) static STUDENT_BANNER_VISIBLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 캐릭터 슬러그 → 컴파일타임 내장 idle 도트 프레임(arona-ui walk
+/// 스프라이트 idle 0..3).
+fn student_sprite_png(slug: &str) -> Option<[&'static [u8]; STUDENT_IDLE_FRAMES]> {
+    macro_rules! frames {
+        ($n:literal) => {
+            [
+                include_bytes!(concat!("../assets/students/", $n, "-0.png")),
+                include_bytes!(concat!("../assets/students/", $n, "-1.png")),
+                include_bytes!(concat!("../assets/students/", $n, "-2.png")),
+                include_bytes!(concat!("../assets/students/", $n, "-3.png")),
+            ]
+        };
+    }
+    Some(match slug {
+        "arona" => frames!("arona"),
+        "prana" => frames!("prana"),
+        "midori" => frames!("midori"),
+        "momoi" => frames!("momoi"),
+        "yuzu" => frames!("yuzu"),
+        "arisu" => frames!("arisu"),
+        _ => return None,
+    })
+}
+
+/// idle 4프레임을 RGBA로 디코딩하고 투명 여백을 잘라낸다. 크롭은 4프레임
+/// **합집합** 알파 bbox 하나로 — 프레임별 bbox로 자르면 숨쉬기 애니의
+/// 미세한 키 차이가 contain-fit 배율 차이로 증폭돼 캐릭터가 들썩인다.
+/// GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로 캐릭터당 1회.
+fn student_sprite_frames(slug: &str) -> Option<Vec<(Vec<u8>, u32, u32)>> {
+    let frames = student_sprite_png(slug)?;
+    let decoded: Vec<_> = frames
+        .iter()
+        .filter_map(|b| image::load_from_memory(b).ok().map(|i| i.to_rgba8()))
+        .collect();
+    if decoded.len() != STUDENT_IDLE_FRAMES {
+        return None;
+    }
+    let (w, h) = decoded[0].dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    for img in &decoded {
+        if img.dimensions() != (w, h) {
+            return None;
+        }
+        for (x, y, p) in img.enumerate_pixels() {
+            if p[3] > 0 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x0 > x1 || y0 > y1 {
+        return None; // 전부 투명한 이미지
+    }
+    Some(
+        decoded
+            .iter()
+            .map(|img| {
+                let c = image::imageops::crop_imm(img, x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+                    .to_image();
+                let (cw, ch) = c.dimensions();
+                (c.into_raw(), cw, ch)
+            })
+            .collect(),
+    )
+}
+
+/// Clawd 시작 배너 감지. 결정행(몸통 2행째)의 9글리프 시퀀스를 찾고 바로
+/// 윗행의 머리 7글리프로 확정한다 — 이 조합은 일반 텍스트에서 사실상
+/// 나올 수 없다. 반환: 배너 박스의 (top_row, left_col) 목록.
+/// 행 스캔은 첫 글리프('▝') 비교로 즉시 탈락하므로 프레임당 비용 미미.
+fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(usize, usize)> {
+    const BODY: [char; 9] = ['▝', '▜', '█', '█', '█', '█', '█', '▛', '▘'];
+    const HEAD: [char; 7] = ['▐', '▛', '█', '█', '█', '▜', '▌'];
+    let mut out = Vec::new();
+    // 배너 3행이 전부 스냅샷 안에 있어야 한다: 몸통행 r 기준 머리 r-1,
+    // 발 r+1 — 스크롤로 잘린 배너는 원본 글리프를 그대로 둔다.
+    for r in 1..rows.len().saturating_sub(1) {
+        let row = &rows[r];
+        let mut c = 0usize;
+        while c + BODY.len() <= row.len() {
+            if row[c].ch == BODY[0]
+                && (1..BODY.len()).all(|i| row[c + i].ch == BODY[i])
+                && rows[r - 1].len() >= c + 1 + HEAD.len()
+                && (0..HEAD.len()).all(|i| rows[r - 1][c + 1 + i].ch == HEAD[i])
+            {
+                out.push((r - 1, c));
+                c += BODY.len();
+            } else {
+                c += 1;
+            }
+        }
+    }
+    out
 }
