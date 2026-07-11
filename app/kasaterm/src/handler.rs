@@ -1642,7 +1642,15 @@ impl ApplicationHandler<UserEvent> for App {
                         let ok = hit(self.collab.toast_approve_rect);
                         let no = hit(self.collab.toast_deny_rect);
                         if ok || no {
-                            self.respond_approval(&target, ok);
+                            if target == crate::win_sparkle::UPDATE_TOAST_ACTION {
+                                // 업데이트 토스트: [설치] → WinSparkle 다운로드·
+                                // 설치 위임, [나중에] → 그냥 접음(다음 실행 재체크).
+                                if ok {
+                                    crate::win_sparkle::install();
+                                }
+                            } else {
+                                self.respond_approval(&target, ok);
+                            }
                             // pane_prompt_wait/attention 은 여기서 걷지 않는다 —
                             // 주입한 키로 프롬프트가 실제로 사라질 때
                             // route_approval_prompts 가 board 까지 함께 정리.
@@ -1661,7 +1669,11 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some((tx, ty, tw, th)) = self.collab.toast_rect {
                         if cx >= tx && cx <= tx + tw && cy >= ty && cy <= ty + th {
                             if let Some(target) = self.collab.toast_action.take() {
-                                self.ws.lock().unwrap().active_pane = Some(target);
+                                // 업데이트 토스트 본문 클릭은 dismiss 만 — 센티널을
+                                // active_pane 에 넣으면 존재하지 않는 pane 을 가리킨다.
+                                if target != crate::win_sparkle::UPDATE_TOAST_ACTION {
+                                    self.ws.lock().unwrap().active_pane = Some(target);
+                                }
                             }
                             self.clear_approval_toast();
                             self.chrome_dirty = true;
@@ -3307,6 +3319,22 @@ impl ApplicationHandler<UserEvent> for App {
         // Dock badge tracks unread notifications: opening a pane clears it,
         // a background notify raises it.
         self.sync_dock_badge();
+        // Windows 업데이트 체커 결과 → sticky 토스트([설치][나중에] 칩).
+        // 승인 토스트 배관을 센티널 action 으로 재사용(win_sparkle.rs 참고).
+        // 승인 토스트가 점유 중이면 take 하지 않고 다음 틱으로 미룬다.
+        if self.collab.toast_action.is_none() {
+            if let Some(v) = crate::win_sparkle::take_found() {
+                self.collab.toast =
+                    Some((format!("↑ 새 버전 v{v}"), std::time::Instant::now()));
+                self.collab.toast_action =
+                    Some(crate::win_sparkle::UPDATE_TOAST_ACTION.to_string());
+                self.collab.toast_rect = None;
+                self.chrome_dirty = true;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+        }
         // gif 애니: 멀티프레임 이미지 pane 의 현재 프레임이 delay 를 넘겼으면 다음 프레임으로
         // 넘기고 redraw. gif 가 있을 때만 WaitUntil(다음 전환 시각)로 타이머를 잡아 부드럽게
         // 돈다(거노: 이미지 pane gif 도 재생). 정지 이미지(frames==1)엔 영향 없음.

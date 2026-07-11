@@ -943,6 +943,9 @@ impl App {
         let collab_toast_alpha = self.collab_toast_alpha();
         let collab_toast_msg = self.collab.toast.as_ref().map(|(m, _)| m.clone());
         let collab_toast_action_on = self.collab.toast_action.is_some();
+        // 업데이트 토스트(win_sparkle 센티널)면 칩 라벨이 승인/거부 대신 설치/나중에.
+        let update_toast_on = self.collab.toast_action.as_deref()
+            == Some(crate::win_sparkle::UPDATE_TOAST_ACTION);
         let slot_views: Vec<gpu::PaneSlot<'_>> = slots
             .iter()
             .map(|s| gpu::PaneSlot {
@@ -4059,7 +4062,8 @@ impl App {
                     let chip_f = 12.0_f32;
                     let chip_pad = 10.0_f32;
                     let chip_gap = 8.0_f32;
-                    let (ok_label, no_label) = ("승인", "거부");
+                    let (ok_label, no_label) =
+                        if update_toast_on { ("설치", "나중에") } else { ("승인", "거부") };
                     let (ok_w, no_w) = if collab_toast_action_on {
                         (
                             g.measure_chrome_text(ok_label, chip_f, true) + chip_pad * 2.0,

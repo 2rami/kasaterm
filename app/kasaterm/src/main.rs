@@ -35,7 +35,8 @@ mod macos_open;
 #[cfg(target_os = "macos")]
 mod macos_sparkle;
 // Windows 자동 업데이트 — WinSparkle.dll 런타임 로드(macos_sparkle 대칭).
-#[cfg(windows)]
+// 모듈 자체는 전 플랫폼 컴파일: 토스트 센티널·버전 파서(+테스트)·no-op 스텁은
+// 공용이고 FFI/체커 스레드만 cfg(windows) 게이트 — mac 에서도 헬퍼 테스트가 돈다.
 mod win_sparkle;
 
 use anyhow::Result;
