@@ -325,6 +325,8 @@ impl App {
         let mut spinner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // 승인 대기(approval prompt) 학생 도트(폴짝 바운스): 같은 형태.
         let mut waiting_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // statusline 자리표시자(U+FFFC) → 학생 프로필 얼굴(정적 1프레임).
+        let mut profile_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
         // cursor, h_scroll px, syntax lang). Render mode draws blocks; Raw mode
         // draws the editor buffer.
@@ -640,11 +642,16 @@ impl App {
                             waiting_slots.push((slug, (x, y, DOT, DOT)));
                         }
                     }
-                    // statusline 학생 스프라이트: statusline.py 가 kasaterm 안에서
-                    // 학생 이름 대신 U+FFFC 자리표시자(2칸)를 내보낸다. 그 셀을 비우고
-                    // 그 자리에 배정 학생 idle 도트를 얹는다(배너와 같은 idle 애니 재사용).
+                    // statusline 학생 프로필: statusline.py 가 kasaterm 안에서
+                    // 학생 이름 대신 U+FFFC 자리표시자(3칸)를 내보낸다. 그 셀을
+                    // 비우고 그 자리에 배정 학생 프로필 얼굴(아로나 웹뷰 프사와
+                    // 같은 초상 크롭)을 얹는다. 정적 1프레임이라 애니 펌프
+                    // 게이트(STUDENT_SPRITE_ANIMATING)에는 안 들어간다.
+                    // 아래→위 스캔: statusline 은 항상 화면 바닥 쪽이고, 대화
+                    // 출력에 U+FFFC 원문이 섞이면(statusline 디버그 출력 등)
+                    // 위쪽 행이 앵커를 가로채 얼굴이 엉뚱한 데 붙는다(실사고).
                     if let Some((sr, sc, len)) =
-                        composed.iter().enumerate().find_map(|(r, row)| {
+                        composed.iter().enumerate().rev().find_map(|(r, row)| {
                             row.iter().position(|c| c.ch == '\u{fffc}').map(|c0| {
                                 let n = row[c0..]
                                     .iter()
@@ -657,7 +664,7 @@ impl App {
                         for cell in composed[sr].iter_mut().skip(sc).take(len) {
                             *cell = GridCell::blank();
                         }
-                        banner_slots.push((
+                        profile_slots.push((
                             slug,
                             (
                                 body_left + sc as f32 * scw,
@@ -1349,6 +1356,17 @@ impl App {
                     &format!("student:{slug}:f{anim_idx}"),
                     *bx, by - bounce, *bw, *bh,
                 );
+            }
+            // statusline 프로필 얼굴 — 정적 1프레임, 캐릭터당 1회 업로드.
+            // 셀은 스냅샷에서 이미 비워졌으니 이미지 패스(셀 아래)로 충분.
+            for (slug, (bx, by, bw, bh)) in &profile_slots {
+                let key = format!("student:{slug}:profile");
+                if !g.has_image(&key) {
+                    if let Some((rgba, w, h)) = student_profile_rgba(slug) {
+                        g.upload_image(&key, &rgba, w, h);
+                    }
+                }
+                g.queue_image(&key, *bx, *by, *bw, *bh, 1.0, 0.0, 0.0);
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
@@ -4691,6 +4709,28 @@ fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, 
     )
 }
 
+/// 캐릭터 슬러그 → statusline 프로필 얼굴 PNG(아로나 웹뷰 프사 초상의
+/// 96×96 얼굴 크롭, 컴파일타임 내장).
+fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
+    Some(match slug {
+        "arona" => include_bytes!("../assets/students/arona-profile.png"),
+        "prana" => include_bytes!("../assets/students/prana-profile.png"),
+        "midori" => include_bytes!("../assets/students/midori-profile.png"),
+        "momoi" => include_bytes!("../assets/students/momoi-profile.png"),
+        "yuzu" => include_bytes!("../assets/students/yuzu-profile.png"),
+        "arisu" => include_bytes!("../assets/students/arisu-profile.png"),
+        _ => return None,
+    })
+}
+
+/// 프로필 PNG → RGBA. GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로
+/// 캐릭터당 1회 디코딩. 이미 얼굴에 맞춰 잘린 에셋이라 bbox 크롭은 불필요.
+fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let img = image::load_from_memory(student_profile_png(slug)?).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    Some((img.into_raw(), w, h))
+}
+
 /// Clawd 시작 배너 감지. 결정행(몸통 2행째)의 9글리프 시퀀스를 찾고 바로
 /// 윗행의 머리 7글리프로 확정한다 — 이 조합은 일반 텍스트에서 사실상
 /// 나올 수 없다. 반환: 배너 박스의 (top_row, left_col) 목록.
@@ -4748,7 +4788,11 @@ fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
             .iter()
             .take(8)
             .any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
-        let working_row = (has_star && line.contains('…'))
+        // 최근 claude code(2.1.207 실측)는 스피너 행에 "esc to interrupt" 를
+        // 안 넣는다("· Verbing… (3m · ↓ 9k tokens)") — 점(·) 프레임을 문맥
+        // 폴백이 못 받아 감지가 프레임마다 끊겼다. 점도 앞머리 글리프로 인정.
+        let has_dot = row.iter().take(8).any(|cell| cell.ch == '·');
+        let working_row = ((has_star || has_dot) && line.contains('…'))
             || has_braille
             || line.contains("esc to interrupt");
         if working_row {
@@ -4819,6 +4863,14 @@ mod spinner_tests {
             row_from("· Cerebrating… (esc to interrupt)"),
         ];
         assert_eq!(find_claude_spinner(&rows), Some((1, 0)));
+    }
+
+    // 라이브 실측(claude code 2.1.207): 스피너 행에 "esc to interrupt" 힌트가
+    // 없다 — 점 프레임은 점+… 문맥만으로 잡혀야 한다.
+    #[test]
+    fn spinner_detects_dot_frame_without_esc_hint() {
+        let rows = vec![row_from("· Caramelizing… (3m 39s · ↓ 9.7k tokens)")];
+        assert_eq!(find_claude_spinner(&rows), Some((0, 0)));
     }
 
     #[test]
