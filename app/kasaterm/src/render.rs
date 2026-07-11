@@ -536,11 +536,12 @@ impl App {
                 // 감지된 셀은 스냅샷에서 blank 처리해 자리를 비우고, 그
                 // 자리에 도트 이미지를 queue한다 — 이미지 패스는 셀/chrome
                 // 보다 먼저 그려지므로 비워진 셀 밑으로 도트가 보인다.
-                if let Some(slug) = ws
+                if let Some((name, slug)) = ws
                     .pane_character
                     .get(&id)
-                    .and_then(|n| theme::character_slug(n))
+                    .and_then(|n| theme::character_slug(n).map(|s| (n, s)))
                 {
+                    let accent = theme::character_accent(name);
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
@@ -567,6 +568,56 @@ impl App {
                     // 끝 옆에서 폴짝 바운스("선생님, 승인 기다려요!"). pane
                     // 우상단은 collab 승인 토스트(윈도우 우상단)와 겹친다.
                     if let Some((sr, sc)) = find_claude_spinner(&composed) {
+                        // 스피너 행 텍스트("Cerebrating… · esc to interrupt")를
+                        // 학생 accent 색으로 — walk 도트 + 텍스트색이 함께
+                        // "이 학생이 작업 중"임을 말한다. 여기에 glow shimmer:
+                        // accent 위로 밝은 밴드가 좌→우로 흐른다(claude code 의
+                        // 반짝이는 텍스트). 밴드 중심은 시간에 따라 이동하고 각
+                        // 셀은 중심과의 거리(가우시안)만큼 흰색에 lerp 된다.
+                        // working 중엔 walk 애니 33ms 펌프가 재렌더를 이미 돌려
+                        // 애니 비용이 추가로 들지 않는다.
+                        if let Some(a) = accent {
+                            use kasa_bridge::screen::Color;
+                            let t = self.version_anim_start.elapsed().as_secs_f32();
+                            let row = &composed[sr];
+                            // glow/색은 동사 문구("Cerebrating…")까지만 — 뒤의
+                            // "(esc to interrupt · N tokens)" 는 원래 dim 색을 둔다
+                            // (거노: 문구만 glow). 줄임표(…) 다음을 경계로, 없으면
+                            // "(" 앞, 그것도 없으면 행 끝.
+                            let end = row
+                                .iter()
+                                .position(|c| c.ch == '…')
+                                .map(|p| p + 1)
+                                .or_else(|| row.iter().position(|c| c.ch == '('))
+                                .unwrap_or(row.len());
+                            let first = row
+                                .iter()
+                                .take(end)
+                                .position(|c| !matches!(c.ch, ' ' | '\0'))
+                                .unwrap_or(0);
+                            let lastc = row
+                                .iter()
+                                .take(end)
+                                .rposition(|c| !matches!(c.ch, ' ' | '\0'))
+                                .unwrap_or(first);
+                            let span = lastc.saturating_sub(first).max(1) as f32;
+                            const PERIOD: f32 = 2.0; // 한 번 스윕(초)
+                            const SIGMA: f32 = 2.0; // 밴드 폭(셀)
+                            const GLOW: f32 = 0.9; // 밴드 중심 밝기(흰색 비율)
+                            // 밴드가 문구 왼쪽 밖에서 오른쪽 밖으로 완전히 지나가게.
+                            let sweep = (t / PERIOD).fract();
+                            let center =
+                                first as f32 - SIGMA * 2.0 + sweep * (span + SIGMA * 4.0);
+                            for (idx, cell) in composed[sr].iter_mut().enumerate().take(end) {
+                                if matches!(cell.ch, ' ' | '\0') {
+                                    continue;
+                                }
+                                let d = idx as f32 - center;
+                                let g = (-(d * d) / (2.0 * SIGMA * SIGMA)).exp() * GLOW;
+                                let mix = |b: u8| (b as f32 + (255.0 - b as f32) * g).round() as u8;
+                                cell.fg = Color::Rgb(mix(a[0]), mix(a[1]), mix(a[2]));
+                            }
+                        }
                         composed[sr][sc] = GridCell::blank();
                         let top_r = sr.saturating_sub(1);
                         spinner_slots.push((
@@ -588,6 +639,33 @@ impl App {
                             let y = (body_top + (ar + 1) as f32 * sch - DOT).max(body_top);
                             waiting_slots.push((slug, (x, y, DOT, DOT)));
                         }
+                    }
+                    // statusline 학생 스프라이트: statusline.py 가 kasaterm 안에서
+                    // 학생 이름 대신 U+FFFC 자리표시자(2칸)를 내보낸다. 그 셀을 비우고
+                    // 그 자리에 배정 학생 idle 도트를 얹는다(배너와 같은 idle 애니 재사용).
+                    if let Some((sr, sc, len)) =
+                        composed.iter().enumerate().find_map(|(r, row)| {
+                            row.iter().position(|c| c.ch == '\u{fffc}').map(|c0| {
+                                let n = row[c0..]
+                                    .iter()
+                                    .take_while(|c| c.ch == '\u{fffc}')
+                                    .count();
+                                (r, c0, n)
+                            })
+                        })
+                    {
+                        for cell in composed[sr].iter_mut().skip(sc).take(len) {
+                            *cell = GridCell::blank();
+                        }
+                        banner_slots.push((
+                            slug,
+                            (
+                                body_left + sc as f32 * scw,
+                                body_top + sr as f32 * sch,
+                                len as f32 * scw,
+                                sch,
+                            ),
+                        ));
                     }
                 }
                 // Code-block scan is O(cells × distinct-colours) and walks
@@ -4651,14 +4729,34 @@ fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
         .iter()
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
     let start = (last + 1).saturating_sub(10);
+    // 스피너 애니메이션은 별(U+2720~274F)·점자(U+2800~28FF)·가운뎃점(·) 등
+    // 여러 글리프를 순환한다. 특정 글리프만 잡으면 점 프레임에서 감지가 끊겨
+    // 학생 도트가 프레임마다 깜빡인다 → `rows_show_working` 과 같은 문맥 기준
+    // (별+…/점자/"esc to interrupt")으로 working 행을 찾고, 그 행 첫 글리프
+    // (=스피너 자리) col 을 돌려준다. 스피너가 어떤 프레임이든 위치가 고정된다.
     for r in (start..=last).rev() {
         let row = &rows[r];
-        let line: String = row.iter().map(|cell| cell.ch).collect();
-        for (c, cell) in row.iter().enumerate().take(8) {
-            let cp = cell.ch as u32;
-            let star = (0x2720..=0x274F).contains(&cp) && line.contains('…');
-            let braille = (0x2800..=0x28FF).contains(&cp);
-            if star || braille {
+        let line: String = row
+            .iter()
+            .map(|cell| if cell.ch == '\0' { ' ' } else { cell.ch })
+            .collect();
+        let has_star = row
+            .iter()
+            .take(8)
+            .any(|cell| (0x2720..=0x274F).contains(&(cell.ch as u32)));
+        let has_braille = row
+            .iter()
+            .take(8)
+            .any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
+        let working_row = (has_star && line.contains('…'))
+            || has_braille
+            || line.contains("esc to interrupt");
+        if working_row {
+            if let Some(c) = row
+                .iter()
+                .take(8)
+                .position(|cell| !matches!(cell.ch, ' ' | '\0'))
+            {
                 return Some((r, c));
             }
         }
@@ -4696,4 +4794,44 @@ fn approval_anchor(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
     }
     let r = chevron.unwrap_or(last);
     Some((r, end_col(r)))
+}
+
+#[cfg(test)]
+mod spinner_tests {
+    use super::*;
+
+    fn row_from(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|c| {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                cell
+            })
+            .collect()
+    }
+
+    // 점(·) 프레임 회귀 방지: 예전엔 별/점자 글리프만 잡아 점 프레임에서
+    // None 을 반환 → 학생 도트가 프레임마다 깜빡였다.
+    #[test]
+    fn spinner_detects_dot_frame() {
+        let rows = vec![
+            row_from(""),
+            row_from("· Cerebrating… (esc to interrupt)"),
+        ];
+        assert_eq!(find_claude_spinner(&rows), Some((1, 0)));
+    }
+
+    #[test]
+    fn spinner_detects_star_and_braille() {
+        let star = vec![row_from("✻ Working… (esc to interrupt)")];
+        assert!(find_claude_spinner(&star).is_some());
+        let braille = vec![row_from("⠹ Loading")];
+        assert!(find_claude_spinner(&braille).is_some());
+    }
+
+    #[test]
+    fn spinner_ignores_plain_text() {
+        let rows = vec![row_from("just some normal output line")];
+        assert_eq!(find_claude_spinner(&rows), None);
+    }
 }
