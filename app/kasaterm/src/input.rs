@@ -1892,7 +1892,16 @@ impl App {
                 self.input_buf.pop();
                 b"\x7f".to_vec()
             }
-            Key::Named(NamedKey::Tab) => b"\t".to_vec(),
+            Key::Named(NamedKey::Tab) => {
+                // Shift+Tab = CSI Z (backtab). 표준 시퀀스라 claude code 의 permission
+                // 모드 순환·역방향 포커스 등이 이걸 기대한다. Shift 무시하고 \t 만
+                // 보내면 backtab 이 영영 안 닿음.
+                if self.modifiers.shift_key() {
+                    b"\x1b[Z".to_vec()
+                } else {
+                    b"\t".to_vec()
+                }
+            }
             Key::Named(NamedKey::Escape) => b"\x1b".to_vec(),
             // Editing / navigation keys that carry no `event.text`, so without
             // an explicit arm they fall through and send nothing (the "Delete /
