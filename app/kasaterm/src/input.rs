@@ -2132,7 +2132,12 @@ pub(crate) fn rows_show_working(cells: &[Vec<GridCell>]) -> bool {
         }
         let has_star = row.iter().any(|cell| (0x2720..=0x274F).contains(&(cell.ch as u32)));
         let has_braille = row.iter().any(|cell| (0x2800..=0x28FF).contains(&(cell.ch as u32)));
-        (has_star && line.contains('…')) || has_braille
+        // 스피너는 가운뎃점(·) 프레임도 순환하는데, 최근 claude code 는 스피너
+        // 행에 "esc to interrupt" 힌트를 안 넣는다("· Verbing… (3m · ↓ 9k tokens)")
+        // — 점 프레임에서 working 판정이 프레임마다 풀리지 않게 점도 잡는다.
+        // 점은 본문에 흔해 행 앞머리(col<8)로만 제한한다.
+        let has_dot = row.iter().take(8).any(|cell| cell.ch == '·');
+        ((has_star || has_dot) && line.contains('…')) || has_braille
     })
 }
 
@@ -2235,6 +2240,13 @@ mod working_scan_tests {
     #[test]
     fn all_blank_is_idle() {
         assert!(!rows_show_working(&vec![blank(); 20]));
+    }
+
+    #[test]
+    fn dot_frame_without_esc_hint_is_working() {
+        // 라이브 실측(claude code 2.1.207): 점 프레임 스피너 행에 "esc to
+        // interrupt" 힌트가 없다 — 점+… 문맥만으로 working 이어야 한다.
+        assert!(rows_show_working(&[row("· Caramelizing… (3m 39s · ↓ 9.7k tokens)")]));
     }
 
     #[test]
