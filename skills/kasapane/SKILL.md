@@ -297,6 +297,27 @@ echo '{"tool_name":"SendUserFile","tool_input":{"files":["/tmp/foo.png"]}}' \
 - hook watcher가 세션 시작 시점에 `.claude/` 디렉토리를 안 보고 있었으면 새 hook이 즉시 활성화 안 됨. `/hooks` 한 번 열거나 Claude Code 재시작.
 - SendUserFile 외의 다른 이미지 출력 경로(예: tool result에 image 첨부)는 hook이 못 잡음 — 그건 직접 `imgopen` 호출.
 
+### 패턴 F — 학생 pane 스폰 (오케스트레이터: 이름·색·모델·effort 지정 claude)
+
+god(오케스트레이터)이 작업을 병렬 배분할 때 학생 claude pane을 만드는 표준 레시피. teammate 플래그로 이름·색이 **부팅 시점에 네이티브 표시**된다(입력박스 상단 `@이름` — v2.1.207 실측).
+
+```bash
+S=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
+kasaterm-cli rename "$S" "<작업명>"
+kasaterm-cli color  "$S" "#58a6ff"
+# split 직후 send는 "surface 없음" 가드 오발동이 잦다(id 재사용, 실측 2회) → 실패 시 sleep 2 후 재시도
+kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --agent-id <slug>@<방이름> --agent-name <학생이름> --team-name <방이름> --agent-color pink --model claude-fable-5 --effort xhigh\n'
+sleep 9                                  # 부팅 대기 — peek 로 ❯ 프롬프트 확인 후 진행
+kasaterm-cli tell "$S" "<브리프 — 자기완결 한 줄: 배경·파일 포인터·검증 기준·커밋 금지(커밋은 god)>"
+kasaterm-cli wake-watch "$S" 30          # Bash run_in_background 로 — 턴 종료 시 auto-wake
+```
+
+- `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `~/.claude/teams/` 부작용 없음(표시 전용).
+- `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan — /color 팔레트와 동일). `--model`·`--effort`는 공개 플래그.
+- teammate 플래그는 숨은 인터페이스 — Claude Code 업데이트 후 안 먹으면 플래그 없이 부팅하고 `/rename`·`/color`(v2.1.205+)로 대체.
+- 배분 전 `board`로 형제 pane의 `changed_files`를 확인해 **파일 경계를 사전 분리**(같은 파일을 두 학생이 만지면 같은 작업트리라 git 이전에 물리 충돌). 검수·커밋은 god 단독.
+- wake-watch가 울려도 board idle은 오판일 수 있다 — `peek`로 실화면(스피너/보고문) 확인 후 판단(§5 함정 표).
+
 ---
 
 ## 2) 긴 잡 사이클 — kasaterm pane에서 빌드·dev server·배포
@@ -626,13 +647,12 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 
 ---
 
-## 5) pane 협업 — board(자동 현황) + inbox(대화) + tell(깨우기)
+## 5) pane 협업 — board(현황) + tell(소통) + wake-watch(대기)
 
-§4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용. 네 축이다:
+§4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용. 세 축이다:
 
 - **board** — 누가 뭘 하나. `kasaterm-cli board`로 **직접 조회**한다(옛 `kasaterm-board-context.py` 자동주입은 폐기 — settings 미등록). 충돌 회피·합류 판단에 쓴다.
-- **inbox** — pane끼리 **대화·조율**. `kasacollab msg %N "..."`. 상대가 working/선택지 대기 중이어도 **100% 전달되고 상대 입력창을 안 건드린다** → 협업 대화의 기본 채널.
-- **tell** — idle 상대를 **급히 깨워 즉시 행동**시킬 때만. 강제 제출이라 바쁜 상대에겐 입력창에 누적된다.
+- **tell** — pane 간 **소통의 기본 채널**. 대화·통지·브리프 전부 tell로(2026-07-12, 모모톡/inbox UI는 board tell-피드로 대체 — 거노 확정). 서버가 방 기준으로 발신자를 기록해 웹뷰 대화에 발신 학생 이름으로 뜬다.
 - **wait** — 동료 작업이 끝나길 기다릴 때. `tell`로 깨우거나 `board`를 반복 조회하지 말고 `wake-watch`를 background로 띄운다(아래).
 
 ### board — 각 pane이 뭘 하는지 (직접 조회)
@@ -656,38 +676,29 @@ kasaterm-cli wake-watch %3          # %3이 한 턴 끝내면 스스로 종료
 
 여러 pane 상태 변화를 실시간으로 흘려보고 싶으면(특정 완료 대기가 아니라) `board-watch [interval_s]`를 Monitor에 먹인다 — 변경된 pane 상태를 1줄/변경으로 스트림.
 
-### inbox — pane끼리 대화·조율 (kasacollab)
+### tell — pane 간 소통 기본 채널 (send+제출)
 
 ```bash
-kasacollab msg %3 "auth.ts 곧 끝나, 5분만"   # %3에게 메시지
-kasacollab inbox                               # 내게 온 미읽(읽음 처리) — board-context가 매 턴 자동으로도 보여줌
-kasacollab task add "BSP 리팩터"               # 작업 분담 선언(중복 방지)
-kasacollab task list
+kasaterm-cli tell %3 "socket.rs 동결 해제 — 이어서 진행해"
 ```
 
-- 메시지는 `/tmp/kasaterm-collab/<cwd>/messages.jsonl`에 쌓이고 상대가 **자기 다음 턴에** board-context로 자동으로 본다. 상대 상태(working/idle/선택지) 무관 — 누적·엉킴·선택지 오염 없음.
-- **대화는 전부 inbox로.** tell은 깨울 때만. (kasacollab은 `~/.local/bin/kasacollab` PATH 래퍼 + hashlib 의존 제거로 어느 python3에서도 즉시 돈다 — 2026-06-08.)
+`tell`은 대상 PTY에 텍스트 주입 후 `\r`로 제출 — idle claude를 새 user turn으로 깨운다. focus는 안 바뀐다. **대화·통지·브리프 전부 tell로** — kasaterm-cli가 발신 메타(from_pane+plain)를 동봉하고 서버가 방 기준 `messages.jsonl`에 기록해, 웹뷰 대화에 발신 학생 이름 버블로 뜬다(2026-07-12).
 
-### tell — idle 상대 급히 깨우기 (강제 제출)
-
-```bash
-kasaterm-cli tell %3 "지금 멈춘 거 같은데 이거 먼저 봐줘"
-```
-
-`tell`은 대상 PTY에 텍스트 주입 후 `\r`로 제출 — idle claude를 새 user turn으로 깨운다. focus는 안 바뀐다.
-
-- **상대가 working/선택지 대기면 입력창에 누적**되고 즉시 처리 안 된다(claude가 입력을 큐잉). 그래서 **대화는 inbox, tell은 "지금 깨워야 한다" 싶을 때만.**
-- `send`(=`surface.send_text`)는 `\r` 없이 글자만 남는다 — 입력창에 텍스트만 걸린 채 **제출 안 됨**(실측 2026-07-01: 통지를 `send`로 보냈다 미제출 → `key enter`로 뒤늦게 밀어야 했다). **동료에게 대화·통지·공유 등 어떤 텍스트든 보낼 땐 무조건 `tell`**(=send+submit). `send`는 오직 셸 명령 주입(개행 직접 포함)용이다.
+- **상대가 working/선택지 대기면 입력창에 큐잉**되고 즉시 처리 안 된다. 급한 게 아니면 `wake-watch`로 idle을 기다렸다 tell — 브리프 여러 건을 working 상대에게 연달아 쏘지 말 것.
+- tell 텍스트는 **개행 없는 한 줄**로(개행=조기 제출).
+- `send`(=`surface.send_text`)는 `\r` 없이 글자만 남는다 — 입력창에 텍스트만 걸린 채 **제출 안 됨**(실측 2026-07-01). `send`는 오직 셸 명령 주입(개행 직접 포함)용, 동료에게 보내는 텍스트는 무조건 `tell`.
+- (구)`kasacollab msg`는 내부에서 tell을 타는 별칭이 됐다(2026-07-12) — 새 자동화엔 tell을 직접 써라. `kasacollab task add/list`(작업 분담 선언)는 별개 기능으로 유지.
 
 ### 함정
 
 | 안 됨 | 왜 |
 |---|---|
-| working/선택지 상대에게 tell로 대화 | 입력창 누적·선택지 오염. **대화는 `kasacollab msg`(inbox)** |
-| `kasacollab`이 행/없음 | PATH 래퍼 + hashlib 제거로 해결됨(2026-06-08). framework python 3.14에서 hashlib import가 행하던 게 원인 |
+| working 상대에게 브리프 연발 tell | 입력창 큐잉·선택지 오염. 급한 게 아니면 wake-watch로 idle 기다렸다 tell |
+| inbox(`kasacollab inbox`)를 소통 채널로 설계 | 모모톡/inbox UI는 폐기(2026-07-12, board tell-피드로 대체). msg는 tell 별칭일 뿐 |
 | `send`로 깨우려 함 | `\r` 없음 → 글자만. idle 깨우기는 `tell` |
 | `tell`에 surface_id 생략 | 항상 `<surface_id> <text>`. 자기 자신엔 안 씀 |
 | board가 비어 보임 | 미bind이거나, **소켓 탈취**(claude pane에서 `cargo run`이 메인 .app 소켓 가로챔 — 2026-06-08 수정). 인스턴스 난립 의심 |
+| board status 단독 신뢰 | `agents --json` 2s 캐시 지연으로 생성 중이 idle로 뜰 수 있음 — wake-watch 헛울림 포함, 판단 전 `peek`로 실화면 확인 |
 
 ---
 
