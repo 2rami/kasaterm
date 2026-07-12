@@ -306,13 +306,14 @@ S=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.s
 kasaterm-cli rename "$S" "<작업명>"
 kasaterm-cli color  "$S" "#58a6ff"
 # split 직후 send는 "surface 없음" 가드 오발동이 잦다(id 재사용, 실측 2회) → 실패 시 sleep 2 후 재시도
-kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --agent-id <slug>@<방이름> --agent-name <학생이름> --team-name <방이름> --agent-color pink --model claude-fable-5 --effort xhigh\n'
+kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --agent-id <slug>@<방이름> --agent-name <작업명> --team-name <방이름> --agent-color pink --model claude-fable-5 --effort xhigh\n'
 sleep 9                                  # 부팅 대기 — peek 로 ❯ 프롬프트 확인 후 진행
 kasaterm-cli tell "$S" "<브리프 — 자기완결 한 줄: 배경·파일 포인터·검증 기준·커밋 금지(커밋은 god)>"
 kasaterm-cli wake-watch "$S" 30          # Bash run_in_background 로 — 턴 종료 시 auto-wake
 ```
 
 - `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan). `--model`·`--effort`·`--session-id`·`--resume`은 공개 플래그.
+- **agent-name은 학생 캐릭터명이 아니라 목표 작업명으로**(거노 확정, 예: `native-wiring-backend`) — 캐릭터는 kasaterm이 pane에 자동 배정하니 이름 중복이 불필요하고, ASCII 작업명이면 inbox 슬러그 유일성도 자연 해결.
 - teammate 플래그는 숨은 인터페이스 — Claude Code 업데이트 후 안 먹으면 플래그 없이 부팅하고 `/rename`·`/color`(v2.1.205+)로 대체.
 - 배분 전 `board`로 형제 pane의 `changed_files`를 확인해 **파일 경계를 사전 분리**(같은 파일을 두 학생이 만지면 같은 작업트리라 git 이전에 물리 충돌). 검수·커밋은 god 단독.
 - wake-watch가 울려도 board idle은 오판일 수 있다 — `peek`로 실화면(스피너/보고문) 확인 후 판단(§5 함정 표).
@@ -344,7 +345,9 @@ PY
 #    → 컨텍스트 유지 + 수신·발신 모두 활성 (실측: 재부팅 전 기억을 정확히 회신)
 ```
 
-함정: ①**inbox 파일명은 슬러그** — `[^a-zA-Z0-9_-] → "-"`라 한글 이름 "수신생"→`---.json`, 같은 팀의 같은 길이 한글 이름은 충돌 → agent-name에 ASCII 꼬리표(예: "유즈-yz") 권장 ②teammate 세션 id는 팀+에이전트 조합 결정론 파생 — 같은 조합 재부팅 시 "Session ID already in use"(옛 세션 jsonl 이동으로 해제) ③스키마 불일치 항목은 조용히 drop — 위 필드 구성 유지 ④`--parent-session-id`는 붙이지 마라(그 세션에 idle 알림이 새어감) ⑤전부 v2.1.207 바이너리 실측 — 버전 업 시 재검증.
+규칙: **메시지 `from` 필드는 발신 세션의 배정 학생 캐릭터명**(god가 보내면 "프라나" 등 — 거노 확정, 수신 화면에 그 이름으로 표시). 단 config의 리더 멤버 엔트리 명칭은 `team-lead` 유지 — 하네스에 team-lead 하드코딩 경로(비대화형 드레인 등)가 있다.
+
+함정: ①**inbox 파일명은 슬러그** — `[^a-zA-Z0-9_-] → "-"`라 한글 이름 "수신생"→`---.json`, 같은 팀의 같은 길이 한글 이름은 충돌 → agent-name은 ASCII 작업명 권장 ②teammate 세션 id는 팀+에이전트 조합 결정론 파생 — 같은 조합 재부팅 시 "Session ID already in use"(옛 세션 jsonl 이동으로 해제) ③스키마 불일치 항목은 조용히 drop — 위 필드 구성 유지 ④`--parent-session-id`는 붙이지 마라(그 세션에 idle 알림이 새어감) ⑤전부 v2.1.207 바이너리 실측 — 버전 업 시 재검증.
 
 ---
 
