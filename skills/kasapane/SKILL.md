@@ -349,6 +349,23 @@ PY
 
 함정: ①**inbox 파일명은 슬러그** — `[^a-zA-Z0-9_-] → "-"`라 한글 이름 "수신생"→`---.json`, 같은 팀의 같은 길이 한글 이름은 충돌 → agent-name은 ASCII 작업명 권장 ②teammate 세션 id는 팀+에이전트 조합 결정론 파생 — 같은 조합 재부팅 시 "Session ID already in use"(옛 세션 jsonl 이동으로 해제) ③스키마 불일치 항목은 조용히 drop — 위 필드 구성 유지 ④`--parent-session-id`는 붙이지 마라(그 세션에 idle 알림이 새어감) ⑤전부 v2.1.207 바이너리 실측 — 버전 업 시 재검증.
 
+컬러: 발신 하네스가 부팅 `--agent-color`를 발신 메시지의 `color` 필드에 **자동 스탬프**하고, 수신 렌더는 그 필드 기준(실측: pink 부팅 학생의 요청이 color:pink로 도착). 수동 파일 append 때만 `color`를 직접 넣으면 된다.
+
+#### 패턴 F-3 — 학생 권한 라우팅 (AskUserQuestion은 pane에 안 뜬다)
+
+teammate 학생의 `AskUserQuestion`(및 승인 필요 도구)은 자기 pane에 선택 UI를 그리지 않고 **team-lead에게 permission_request로 라우팅되고 학생은 블록**된다 — bypass permissions여도 마찬가지. 즉 학생은 pane 사용자에게 직접 질문할 수 없다.
+
+리더(스폰한 세션)의 응답: 학생 inbox에 `type:"message"` 엔트리로, `text`에 아래 JSON을 담아 append. **`from`은 반드시 `"team-lead"`** — 다른 발신자의 permission_response는 폴러가 무시한다.
+
+```json
+{"type":"permission_response","request_id":"<요청의 request_id>","subtype":"success"}
+```
+
+- 답 내용까지 전달하려면 `"response":{"updated_input":{...원래 input + answers 채움...}}` 포함. 거부는 `subtype:"rejected"` + `"error":"<사유>"`.
+- **함정: 학생이 요청을 재시도하면 request_id가 새로 발급** — 항상 team-lead 인박스의 최신 permission_request id로 응답할 것(옛 id는 조용히 무시됨).
+
+운영 정책(거노 확정): **사소한 판단이면 리더가 알아서** 승인/답변하고 진행시켜라. **중요한 결정이면 리더가 자기 AskUserQuestion으로 거노에게 물어본 뒤** 그 답을 permission_response(또는 후속 메시지)로 relay한다. 학생에게는 애초에 "중요 결정은 리더에게 메시지로 물어라"라고 브리핑하는 게 깔끔하다.
+
 ---
 
 ## 2) 긴 잡 사이클 — kasaterm pane에서 빌드·dev server·배포
