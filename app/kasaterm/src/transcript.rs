@@ -367,15 +367,19 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
     }
 }
 
-/// 모델명+관측 컨텍스트 → 컨텍스트 한도(토큰). transcript 가 1M 베타 플래그를 기록 안 하고
-/// model 도 보통 `[1m]` 태그 없이 와서(예 "claude-opus-4-8"), 두 신호로 1M 을 추정한다:
+/// 모델명+관측 컨텍스트 → 컨텍스트 한도(토큰). fable/mythos 계열은 API 기본이 1M(최대=기본)
+/// 이라 모델명만으로 확정 — [1m] 태그·관측치 추정에 기대면 토큰<200k 인 세션이 200k 로 잘못
+/// 잡힌다(실측: fable-5 pane 이 200000 표시). 그 외 모델은 transcript 가 1M 베타 플래그를
+/// 기록 안 하고 model 도 보통 `[1m]` 태그 없이 와서(예 "claude-opus-4-8") 두 신호로 추정:
 /// ① model 에 `[1m]` 포함 ② 관측 컨텍스트가 200k 초과(200k 한도면 그 전에 compact 됨).
 /// 둘 다 아니면 200k. model 미상 + 관측 0 이면 0(미상).
 fn context_limit_for(model: &str, observed_ctx: u64) -> u64 {
     if model.is_empty() && observed_ctx == 0 {
         return 0;
     }
-    let one_m = model.to_ascii_lowercase().contains("[1m]") || observed_ctx > 200_000;
+    let m = model.to_ascii_lowercase();
+    let one_m = m.contains("fable") || m.contains("mythos") || m.contains("[1m]")
+        || observed_ctx > 200_000;
     if one_m { 1_000_000 } else { 200_000 }
 }
 

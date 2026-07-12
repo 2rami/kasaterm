@@ -233,7 +233,7 @@ pub struct PaneActivity {
     /// 만 뜸). 그 폴백값. ultracode 는 "this session only"라 여기 안 들어와 잔존하지 않는다.
     #[serde(default)]
     pub effort_default: String,
-    /// 모델 컨텍스트 한도(토큰). 현재 전 Claude 200k. 0=모델 미상.
+    /// 모델 컨텍스트 한도(토큰). 200k 또는 1M(fable/mythos·[1m] 변형·관측 초과). 0=모델 미상.
     #[serde(default)]
     pub context_limit: u64,
     /// 컨텍스트 사용량 % — claude TUI 상태바("… ┃ 5% ┃ …")에서 파싱. transcript
