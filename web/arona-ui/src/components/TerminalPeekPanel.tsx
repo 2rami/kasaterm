@@ -127,6 +127,19 @@ function stripMeta(text: string): string {
   return s.trim();
 }
 
+// 네이티브 teammate 메시지(SendMessage) — user 턴에 <teammate-message teammate_id="발신자"
+// ...>본문</teammate-message> 래퍼로 박힌다. tell(messages.jsonl 대조)과 달리 발신자명이
+// 태그 속성에 직접 있어 그대로 쓴다. 래퍼가 턴 전체일 때만 인정 — 부분 포함·중첩 래퍼는
+// 일반 텍스트로 폴백해 본문에 태그가 새는 걸 막는다.
+function parseTeammateMessage(text: string): { name: string; body: string } | null {
+  const m = text.match(/^\s*<teammate-message\b([^>]*)>([\s\S]*?)<\/teammate-message>\s*$/);
+  if (!m) return null;
+  const name = /teammate_id="([^"]+)"/.exec(m[1])?.[1]?.trim();
+  const body = m[2].trim();
+  if (!name || !body || body.includes('<teammate-message')) return null;
+  return { name, body };
+}
+
 // ccsv parseUserMessage 발췌 — user 텍스트의 <command-name>/<command-args>/<command-message>
 // 또는 <local-command-stdout> 태그를 파싱. command 면 슬래시 명령 카드(우측, green),
 // local-command 면 로컬 출력 버블(좌측). 태그 없으면 null(일반 텍스트로 처리).
@@ -348,7 +361,7 @@ function parseWorkflowScript(input: unknown): { name?: string; description?: str
 
 // 한 user 텍스트가 슬래시 명령/로컬 출력 태그를 품으면 카드/버블 아이템으로, 아니면 일반
 // 버블로 푸시. 시스템 주입 잔여는 isSystemInjectionText 로 계속 숨긴다.
-function pushUserText(items: RenderItem[], text: string, ts?: string, uuid?: string, senderOf?: (t: string, ts?: string) => BubbleSender | undefined): void {
+function pushUserText(items: RenderItem[], text: string, ts?: string, uuid?: string, senderOf?: (t: string, ts?: string, fromName?: string) => BubbleSender | undefined): void {
   const parsed = parseSlashCommand(text);
   if (parsed?.kind === 'command') {
     items.push({ kind: 'command', commandName: parsed.commandName, commandArgs: parsed.commandArgs, commandMessage: parsed.commandMessage });
@@ -360,14 +373,19 @@ function pushUserText(items: RenderItem[], text: string, ts?: string, uuid?: str
     const clean = stripMeta(text);
     if (clean && !isSystemInjectionText('user', clean)) {
       // tell 발신자 대조 — 학생→학생이면 sender 부착(좌측 버블), 거노 직접 입력이면 undefined.
-      items.push({ kind: 'bubble', role: 'user', text: clean, ts, uuid, sender: senderOf?.(clean, ts) });
+      // 네이티브 teammate 래퍼는 발신자명이 태그에 있으니 대조 없이 이름으로 직접 해석하고,
+      // 본문은 래퍼를 벗긴 알맹이만 렌더한다.
+      const tm = parseTeammateMessage(clean);
+      items.push(tm
+        ? { kind: 'bubble', role: 'user', text: tm.body, ts, uuid, sender: senderOf?.(tm.body, ts, tm.name) ?? { pane: '', name: tm.name } }
+        : { kind: 'bubble', role: 'user', text: clean, ts, uuid, sender: senderOf?.(clean, ts) });
     }
   }
 }
 
 // keepSidechain: 서브에이전트 단독 뷰는 jsonl 전체가 isSidechain:true 이므로 살려야 한다.
 // 메인 대화에선 sidechain(소환된 서브에이전트 줄)이 노이즈라 기본 제외.
-function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain = false, senderOf?: (t: string, ts?: string) => BubbleSender | undefined): RenderItem[] {
+function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain = false, senderOf?: (t: string, ts?: string, fromName?: string) => BubbleSender | undefined): RenderItem[] {
   const items: RenderItem[] = [];
   // 작업 중 보낸 예약(큐) 메시지는 transcript 에 깨끗한 user 턴으로 안 남고 queue-operation
   // (enqueue/remove)으로만 기록된다(거노: 예약·취소·이미지가 GUI 에 안 떴다). enqueue 를 본문
@@ -1480,7 +1498,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     // 기록은 다른 발화로 배제하고, 남은 것 중 최신(배열이 ts 내림차순)을 취해 반복 발화
     // 오탐을 막는다. normText 비교라 tell 의 개행→공백 평탄화 차이도 흡수. 거노 직접
     // 입력(from_pane=sensei 또는 매칭 없음)은 undefined → 우측 노랑 유지.
-    const senderOf = (text: string, tsIso?: string): BubbleSender | undefined => {
+    const senderOf = (text: string, tsIso?: string, fromName?: string): BubbleSender | undefined => {
+      // 네이티브 teammate-message — 발신자명이 래퍼 속성에 직접 있어 messages.jsonl 대조를
+      // 생략하고 agents 에서 accent 만 해석한다(못 찾으면 이름만, 색 없이).
+      if (fromName) {
+        const a = agents.find((x) => x.character === fromName);
+        return { pane: a?.id ?? '', name: fromName, accent: a?.accent };
+      }
       const t = normText(text);
       if (!t) return undefined;
       const turnTs = tsIso ? Date.parse(tsIso) / 1000 : NaN;
@@ -1536,7 +1560,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       for (let k = convTurns.length - 1; k >= 0; k--) {
         const t = convTurns[k];
         if (t.role !== anchor.role) continue;
-        const tn = normText(t.role === 'user' ? stripMeta(t.text) : t.text);
+        // 아이템 쪽 teammate 턴은 래퍼를 벗긴 본문이므로(anchor.text) conv 쪽도 벗겨 비교.
+        const cleaned = t.role === 'user' ? stripMeta(t.text) : t.text;
+        const tn = normText(t.role === 'user' ? (parseTeammateMessage(cleaned)?.body ?? cleaned) : cleaned);
         // assistant 는 API 응답 1:1 정렬이라 exact. user 는 Rust↔TS strip 차이로 길이가드 prefix 폴백.
         if (tn === aNorm || (anchor.role === 'user' && aNorm.length >= 16 && (tn.startsWith(aNorm) || aNorm.startsWith(tn)))) { j = k; break; }
       }
@@ -1565,9 +1591,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     // events 완전 공백(빈 새 세션/재오픈 극초기) — 캡처 프록시 텍스트 대화로 폴백. conv.turns 는
     // 프록시가 strip_meta 로 정제하지만, user 턴은 한 번 더 격리해(이중 안전) 남는 게 있을 때만.
     return convTurns
-      .map((t) => ({ role: t.role, text: t.role === 'user' ? stripMeta(t.text) : t.text }))
+      .map((t) => {
+        const cleaned = t.role === 'user' ? stripMeta(t.text) : t.text;
+        const tm = t.role === 'user' ? parseTeammateMessage(cleaned) : null;
+        return { role: t.role, text: tm ? tm.body : cleaned, sender: tm ? senderOf(tm.body, undefined, tm.name) : undefined };
+      })
       .filter((t) => t.text.trim() && !isSystemInjectionText(t.role, t.text))
-      .map((t) => ({ kind: 'bubble', role: t.role, text: t.text }) as RenderItem);
+      .map((t) => ({ kind: 'bubble', role: t.role, text: t.text, sender: t.sender }) as RenderItem);
   }, [events, toolMap, convTurns, isSub, messages, agents, subInFlight, streaming]);
   // optimistic 으로 남긴 내 발화(myChoices) 중 transcript(items)에 아직 안 잡힌 것만 — 작업
   // 중 미리 보낸 메시지를 즉시 띄우되(거노), 다음 폴에서 transcript 에 같은 텍스트가 뜨면
@@ -1908,7 +1938,12 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                   </TurnHead>
                   <div style={{
                     fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.6,
-                    color: cancelled ? 'var(--cth-ink-500)' : queued ? '#8A7500' : 'var(--cth-ink-900)',
+                    // 발신 학생 턴은 본문도 발신자 accent 로(거노) — 원색은 lemon 등이 본문
+                    // 분량에선 눈부셔 ink-900 과 섞어 톤 조절. color-mix 라 라이트 테마(ink=남색)
+                    // 에선 어두워지고 다크 테마(ink=밝음)에선 밝아지는 테마 적응형.
+                    color: cancelled ? 'var(--cth-ink-500)' : queued ? '#8A7500'
+                      : sender?.accent ? `color-mix(in srgb, ${hex(accentByName[sender.accent])} 70%, var(--cth-ink-900))`
+                      : 'var(--cth-ink-900)',
                     textDecoration: cancelled ? 'line-through' : 'none',
                     opacity: cancelled ? 0.8 : 1,
                     wordBreak: 'break-word',
