@@ -300,37 +300,6 @@ fn collab_messages_path() -> std::path::PathBuf {
         .join("messages.jsonl")
 }
 
-/// `tell` 발신을 messages.jsonl 에 기록한다 — http `persist_sensei_msg` 와 같은 파일·
-/// 형식이되 `from_pane` 은 발신 pane($KASATERM_PANE_ID). 채팅뷰(TerminalPeekPanel)가
-/// 이걸 대조해 학생→학생 tell 을 거노 직접 입력과 구분, 발신자 프사+색 좌측 버블로
-/// 그린다(거노 #5/#7). PANE_ID 없으면(사람이 터미널서 직접 친 cli) 거노 발신이라 기록
-/// 안 한다 — 그건 우측 노란 버블로 남아야 한다.
-fn log_tell_to_messages(to_pane: &str, text: &str) {
-    let Some(from_pane) = std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()) else {
-        return;
-    };
-    let path = collab_messages_path();
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
-    let id = format!("{:08x}", (now * 1000.0) as u64 & 0xffff_ffff);
-    let line = serde_json::json!({
-        "id": id,
-        "from": from_pane, "from_pane": from_pane,
-        "to": to_pane, "to_pane": to_pane,
-        "text": text, "ts": now, "read": true,
-    })
-    .to_string();
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        use std::io::Write;
-        let _ = writeln!(f, "{line}");
-    }
-}
-
 /// Render `window.list`'s windows as a labelled stack of box diagrams, one
 /// per window, with the active one marked.
 fn render_windows(resp: &Response) -> String {
@@ -713,20 +682,25 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 .chars()
                 .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
                 .collect();
-            // 발신자(이 pane)를 messages.jsonl 에 기록 — 채팅뷰가 학생→학생 tell 을 거노
-            // 직접 입력과 구분해 발신자 프사+색 좌측 버블로 그리게(거노 #5/#7).
-            log_tell_to_messages(&surface, flat.trim());
             // Prepend Ctrl+U (0x15): clear any half-typed line resident in the
             // target prompt. Then wrap in bracketed paste (\x1b[200~…\x1b[201~):
             // claude's Ink input treats this as a safe paste event even in
             // menu/special states where a bare CR was eaten (munder pattern,
             // hiddenClaude.ts). The handler ships body first, then \r 140ms
             // later so Ink has finished processing the paste before the submit.
-            (
-                "surface.send_text",
-                json!({ "surface_id": surface,
-                         "text": format!("\x15\x1b[200~{}\x1b[201~\r", flat.trim()) }),
-            )
+            let mut params = json!({ "surface_id": surface,
+                "text": format!("\x15\x1b[200~{}\x1b[201~\r", flat.trim()) });
+            // 발신 메타 동봉 — 서버가 방 기준 slug 의 messages.jsonl 에 기록해 채팅뷰가
+            // 학생→학생 tell 을 발신자 좌측 버블로 그린다(거노 #5/#7). CLI 자체 기록은
+            // 발신 셸의 cwd 기준 slug 라 cd 상태에 따라 파일이 갈라져 매칭이 새던 것을
+            // 서버 기록으로 일원화. PANE_ID 없으면(사람이 직접 친 cli) 거노 발신 = 미기록.
+            if let Some(fp) =
+                std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty())
+            {
+                params["from_pane"] = json!(fp);
+                params["plain"] = json!(flat.trim());
+            }
+            ("surface.send_text", params)
         }
         "resume" => {
             // resume <session_id> [cwd] — 사라진(재시작·종료) 학생 세션을 새 pane 에 claude

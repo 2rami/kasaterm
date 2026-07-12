@@ -348,7 +348,7 @@ function parseWorkflowScript(input: unknown): { name?: string; description?: str
 
 // 한 user 텍스트가 슬래시 명령/로컬 출력 태그를 품으면 카드/버블 아이템으로, 아니면 일반
 // 버블로 푸시. 시스템 주입 잔여는 isSystemInjectionText 로 계속 숨긴다.
-function pushUserText(items: RenderItem[], text: string, ts?: string, uuid?: string, senderOf?: (t: string) => BubbleSender | undefined): void {
+function pushUserText(items: RenderItem[], text: string, ts?: string, uuid?: string, senderOf?: (t: string, ts?: string) => BubbleSender | undefined): void {
   const parsed = parseSlashCommand(text);
   if (parsed?.kind === 'command') {
     items.push({ kind: 'command', commandName: parsed.commandName, commandArgs: parsed.commandArgs, commandMessage: parsed.commandMessage });
@@ -360,14 +360,14 @@ function pushUserText(items: RenderItem[], text: string, ts?: string, uuid?: str
     const clean = stripMeta(text);
     if (clean && !isSystemInjectionText('user', clean)) {
       // tell 발신자 대조 — 학생→학생이면 sender 부착(좌측 버블), 거노 직접 입력이면 undefined.
-      items.push({ kind: 'bubble', role: 'user', text: clean, ts, uuid, sender: senderOf?.(clean) });
+      items.push({ kind: 'bubble', role: 'user', text: clean, ts, uuid, sender: senderOf?.(clean, ts) });
     }
   }
 }
 
 // keepSidechain: 서브에이전트 단독 뷰는 jsonl 전체가 isSidechain:true 이므로 살려야 한다.
 // 메인 대화에선 sidechain(소환된 서브에이전트 줄)이 노이즈라 기본 제외.
-function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain = false, senderOf?: (t: string) => BubbleSender | undefined): RenderItem[] {
+function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain = false, senderOf?: (t: string, ts?: string) => BubbleSender | undefined): RenderItem[] {
   const items: RenderItem[] = [];
   // 작업 중 보낸 예약(큐) 메시지는 transcript 에 깨끗한 user 턴으로 안 남고 queue-operation
   // (enqueue/remove)으로만 기록된다(거노: 예약·취소·이미지가 GUI 에 안 떴다). enqueue 를 본문
@@ -402,7 +402,7 @@ function eventsToItems(events: SessionEvent[], toolMap: ToolMap, keepSidechain =
         const raw = typeof (ev as { content?: unknown }).content === 'string' ? (ev as { content: string }).content : '';
         const clean = stripMeta(raw);
         if (clean && !isSystemInjectionText('user', clean)) {
-          const b: Extract<RenderItem, { kind: 'bubble' }> = { kind: 'bubble', role: 'user', text: clean, ts: (ev as { timestamp?: string }).timestamp, queued: true, sender: senderOf?.(clean) };
+          const b: Extract<RenderItem, { kind: 'bubble' }> = { kind: 'bubble', role: 'user', text: clean, ts: (ev as { timestamp?: string }).timestamp, queued: true, sender: senderOf?.(clean, (ev as { timestamp?: string }).timestamp) };
           if (pendingQImg.length) { b.images = pendingQImg; pendingQImg = []; }
           items.push(b);
           pendingQ.push(b);
@@ -1475,14 +1475,20 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 턴별 출력 토큰 — assistant uuid → output_tokens. 시계 푸터 옆 "↓N"(완료 응답·정확).
   const tokenMap = useMemo(() => turnTokens(events), [events]);
   const items = useMemo(() => {
-    // tell 로 온 학생→학생 메시지의 발신자 — messages.jsonl(from_pane) 에서 같은 텍스트를 역순
-    // 매칭. 거노 직접 입력(from_pane=sensei 또는 매칭 없음)은 undefined → 우측 노랑 유지.
-    const senderOf = (text: string): BubbleSender | undefined => {
-      const t = text.trim();
+    // tell 로 온 학생→학생 메시지의 발신자 — messages.jsonl(from_pane) 을 ts+normText 로
+    // 대조. 발신 기록 ts 는 항상 수신 턴 ts(처리 시각)보다 앞이므로 턴보다 미래(+슬랙)의
+    // 기록은 다른 발화로 배제하고, 남은 것 중 최신(배열이 ts 내림차순)을 취해 반복 발화
+    // 오탐을 막는다. normText 비교라 tell 의 개행→공백 평탄화 차이도 흡수. 거노 직접
+    // 입력(from_pane=sensei 또는 매칭 없음)은 undefined → 우측 노랑 유지.
+    const senderOf = (text: string, tsIso?: string): BubbleSender | undefined => {
+      const t = normText(text);
       if (!t) return undefined;
-      for (let k = messages.length - 1; k >= 0; k--) {
+      const turnTs = tsIso ? Date.parse(tsIso) / 1000 : NaN;
+      for (let k = 0; k < messages.length; k++) {
         const m = messages[k];
-        if (m.from_pane && m.from_pane !== 'sensei' && stripMeta(m.text).trim() === t) {
+        if (!m.from_pane || m.from_pane === 'sensei') continue;
+        if (!Number.isNaN(turnTs) && m.ts > turnTs + 60) continue;
+        if (normText(stripMeta(m.text)) === t) {
           const a = agents.find((x) => x.id === m.from_pane);
           const name = a?.character && !/^%?\d+$/.test(a.character) ? a.character : (m.from_name || m.from_pane);
           return { pane: m.from_pane, name, accent: a?.accent };

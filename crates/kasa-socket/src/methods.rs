@@ -554,9 +554,64 @@ fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Respon
         None => return param_err(id, "surface.send_text requires `text` (string)"),
     };
     let target = params.get("surface_id").and_then(|v| v.as_str());
+    // 학생→학생 tell 발신 기록 — CLI(tell)가 `from_pane`(발신 pane)+`plain`(제어시퀀스
+    // 없는 본문)을 동봉하면 서버가 방 기준 slug 의 messages.jsonl 에 남긴다. 채팅뷰가
+    // 이걸 ts+텍스트로 대조해 수신 transcript 의 user 턴을 발신 학생 버블로 그린다.
+    // 발신 프로세스의 cwd 가 아닌 서버(방) 기준이라 cd 상태에 따라 기록 파일이 갈라지지
+    // 않는다. 메타 없는 send_text(웹뷰 send 등)는 기존 그대로.
+    if let (Some(from), Some(plain)) = (
+        params.get("from_pane").and_then(|v| v.as_str()),
+        params.get("plain").and_then(|v| v.as_str()),
+    ) {
+        if let Some(to) = target {
+            log_agent_tell(backend, from, to, plain);
+        }
+    }
     match backend.send_text(target, text) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
+    }
+}
+
+/// tell 발신 이벤트를 messages.jsonl 에 append — http `persist_sensei_msg` 와 같은
+/// 파일·형식(방이면 slug 에 `__room_<id>`)이되 from 은 발신 pane. 파일 IO 실패는
+/// 조용히 삼킨다(기록은 표시용 부가 기능, tell 전달을 막으면 안 된다).
+fn log_agent_tell(backend: &dyn Backend, from_pane: &str, to_pane: &str, text: &str) {
+    let cwd = backend
+        .active_cwd()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let base: String = cwd
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect();
+    let slug = match backend.active_room() {
+        Some(r) => format!("{base}__room_{r}"),
+        None => base,
+    };
+    let dir = std::path::Path::new("/tmp/kasaterm-collab").join(slug);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let id = format!("{:08x}", (now * 1000.0) as u64 & 0xffff_ffff);
+    let line = json!({
+        "id": id,
+        "from": from_pane, "from_pane": from_pane,
+        "to": to_pane, "to_pane": to_pane,
+        "text": text, "ts": now, "read": true,
+    })
+    .to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("messages.jsonl"))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
     }
 }
 
@@ -645,9 +700,15 @@ mod tests {
         sent_text: Mutex<Vec<(Option<String>, String)>>,
         sent_keys: Mutex<Vec<(Option<String>, String)>>,
         resized: Mutex<Vec<(Vec<u8>, f32)>>,
+        // tell 기록(log_agent_tell)의 slug 소스 — 테스트가 스크래치 경로를 지정해
+        // 실제 방 slug 를 오염시키지 않게 한다. None 이면 trait 기본(None)과 동일.
+        cwd: Option<std::path::PathBuf>,
     }
 
     impl Backend for FakeBackend {
+        fn active_cwd(&self) -> Option<std::path::PathBuf> {
+            self.cwd.clone()
+        }
         fn list_workspaces(&self) -> anyhow::Result<Vec<WorkspaceInfo>> {
             Ok(vec![WorkspaceInfo {
                 id: "ws-1".into(),
@@ -803,6 +864,57 @@ mod tests {
         let r = dispatch(&backend, req("surface.send_text", json!({})));
         assert!(!r.ok);
         assert_eq!(r.error.unwrap().code, codes::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn send_text_with_tell_meta_logs_to_room_messages() {
+        // slug 는 cwd 문자열 변환이라 유니크 cwd 로 실제 방 파일과 격리.
+        let fake_cwd =
+            std::env::temp_dir().join(format!("kasa-tell-test-{}", std::process::id()));
+        let backend = FakeBackend { cwd: Some(fake_cwd.clone()), ..Default::default() };
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-1", "from_pane": "%9",
+                       "plain": "안녕 유즈", "text": "\u{15}\u{1b}[200~안녕 유즈\u{1b}[201~\r"}),
+            ),
+        );
+        assert!(r.ok);
+        // PTY 로는 wrapper 포함 원문이 그대로 간다 — 기록이 전달을 바꾸면 안 된다.
+        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
+        let slug: String = fake_cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '-' } else { c })
+            .collect();
+        let path = std::path::Path::new("/tmp/kasaterm-collab").join(&slug).join("messages.jsonl");
+        let content = std::fs::read_to_string(&path).expect("tell meta must be logged");
+        let entry: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
+        assert_eq!(entry["from_pane"], "%9");
+        assert_eq!(entry["to_pane"], "surf-1");
+        assert_eq!(entry["text"], "안녕 유즈", "제어시퀀스 없는 plain 본문만 기록");
+        assert!(entry["ts"].as_f64().unwrap() > 0.0);
+        let _ = std::fs::remove_dir_all(std::path::Path::new("/tmp/kasaterm-collab").join(&slug));
+    }
+
+    #[test]
+    fn send_text_without_tell_meta_logs_nothing() {
+        let fake_cwd =
+            std::env::temp_dir().join(format!("kasa-tell-none-{}", std::process::id()));
+        let backend = FakeBackend { cwd: Some(fake_cwd.clone()), ..Default::default() };
+        let r = dispatch(
+            &backend,
+            req("surface.send_text", json!({"surface_id": "surf-1", "text": "plain send"})),
+        );
+        assert!(r.ok);
+        let slug: String = fake_cwd
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c == '/' || c == '.' { '-' } else { c })
+            .collect();
+        let path = std::path::Path::new("/tmp/kasaterm-collab").join(&slug).join("messages.jsonl");
+        assert!(!path.exists(), "메타 없는 send_text 는 기록을 남기지 않는다");
     }
 
     #[test]
