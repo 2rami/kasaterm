@@ -232,6 +232,9 @@ impl App {
             /// drawn as a blue hover underline. Empty otherwise (links only
             /// show on hover, not always-on).
             links: Vec<crate::links::LinkSpan>,
+            /// pane 기본 전경색(tmux window-style fg 등가) — 학생 pane 은 accent
+            /// 틴트, god·무배정은 테마 default fg. slot 빌드 시 pane 당 1회 결정.
+            default_fg: [u8; 4],
         }
         // Header chrome carried in LOGICAL px — gpu.rect/draw_text
         // promote to physical internally, matching the cell pass.
@@ -710,6 +713,13 @@ impl App {
                     dim: is_split && active_id.as_deref() != Some(id.as_str()),
                     font_scale: pane_font_scale,
                     links: hover_links,
+                    // 학생 pane 본문 틴트(거노, tmux window-style fg 등가) — 배정
+                    // 캐릭터의 accent RGB 원본. god·무배정 pane 은 테마 default fg.
+                    default_fg: pane
+                        .character
+                        .as_deref()
+                        .and_then(theme::student_tint)
+                        .unwrap_or_else(cells::default_fg),
                 });
                 // Body box (header band excluded, inset by the same
                 // PANE_INNER margins the cell grid uses) in logical px.
@@ -954,6 +964,7 @@ impl App {
                 dim: s.dim,
                 font_scale: s.font_scale,
                 links: s.links.clone(),
+                default_fg: s.default_fg,
             })
             .collect();
         // Recompute the inline suggestion against the freshly-applied

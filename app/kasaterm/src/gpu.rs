@@ -113,6 +113,10 @@ pub struct PaneSlot<'a> {
     /// Clickable URL ranges in this pane's visible rows. Drawn as accent
     /// underlines (always-on hyperlink affordance) after the glyph pass.
     pub links: Vec<crate::links::LinkSpan>,
+    /// 이 pane 의 "기본 전경색" — tmux `window-style fg=<색>` 등가 pane 틴트.
+    /// 테마 default fg 를 쓰는 셀만 이 색으로 풀리고 명시 색(ANSI/truecolor)은
+    /// 그대로다. 무틴트 pane 은 `cells::default_fg()` 를 넣는다(셀당 추가 분기 0).
+    pub default_fg: [u8; 4],
 }
 
 /// Pending chrome instances accumulated between `clear()` and the
@@ -1922,7 +1926,7 @@ impl GpuRenderer {
                 for (col, cell) in row.iter().enumerate() {
                     let want_bg = !matches!(cell.bg, kasa_bridge::screen::Color::Default)
                         || cell.inverse;
-                    let bg = cell_bg_rgba(cell);
+                    let bg = cell_bg_rgba(cell, pane.default_fg);
                     if want_bg && bg[3] > 0 {
                         let cx = pane.origin_px.0 + col as f32 * cell_w_px;
                         let cy = pane.origin_px.1 + r as f32 * cell_h_px;
@@ -1958,7 +1962,7 @@ impl GpuRenderer {
                     // exact regions seamlessly.
                     {
                         if let Some(rects) = crate::cells::block_rects(ch) {
-                            let mut fg = cell_fg_rgba(cell);
+                            let mut fg = cell_fg_rgba(cell, pane.default_fg);
                             if pane.dim {
                                 fg[3] = (fg[3] as f32 * DIM_TEXT_ALPHA) as u8;
                             }
@@ -1986,7 +1990,7 @@ impl GpuRenderer {
                     }
                     let cell_x = pane.origin_px.0 + col as f32 * cell_w_px;
                     let cell_y = pane.origin_px.1 + r as f32 * cell_h_px;
-                    let mut fg = cell_fg_rgba(cell);
+                    let mut fg = cell_fg_rgba(cell, pane.default_fg);
                     if pane.links.iter().any(|l| {
                         l.row as usize == r
                             && (col as u16) >= l.col_start
@@ -2559,12 +2563,12 @@ fn is_icon_codepoint(cp: u32) -> bool {
         || (0x100000..=0x10FFFD).contains(&cp) // Supplementary PUA-B
 }
 
-fn cell_fg_rgba(cell: &Cell) -> [u8; 4] {
-    crate::cells::cell_fg(cell)
+fn cell_fg_rgba(cell: &Cell, default_fg: [u8; 4]) -> [u8; 4] {
+    crate::cells::cell_fg_with(cell, default_fg)
 }
 
-fn cell_bg_rgba(cell: &Cell) -> [u8; 4] {
-    crate::cells::cell_bg(cell)
+fn cell_bg_rgba(cell: &Cell, default_fg: [u8; 4]) -> [u8; 4] {
+    crate::cells::cell_bg_with(cell, default_fg)
 }
 
 /// Normalize u8 RGBA to 0..1 with NO colour-space conversion. The

@@ -80,8 +80,13 @@ fn color_to_rgba(c: &Color, default: [u8; 4]) -> [u8; 4] {
 }
 
 
-pub fn cell_fg(cell: &Cell) -> [u8; 4] {
-    let mut fg = color_to_rgba(&cell.fg, default_fg());
+/// 셀 전경색 — tmux `window-style fg=<색>` 등가 pane 틴트 지원. `dfg` 가 이 pane 의
+/// "기본 전경색": 테마 default fg 를 쓰는 셀만 이 색이 되고, 명시 색(ANSI 16/256/
+/// truecolor) 셀은 그대로다(`color_to_rgba` 의 Default 분기만 타므로). inverse 셀의
+/// dim 혼합에 쓰이는 fg 참조도 같은 규칙 — tmux 와 동일하게 reverse 도 틴트를 따른다.
+/// 무틴트 pane 은 `default_fg()` 를 넘긴다.
+pub fn cell_fg_with(cell: &Cell, dfg: [u8; 4]) -> [u8; 4] {
+    let mut fg = color_to_rgba(&cell.fg, dfg);
     if cell.inverse {
         fg = color_to_rgba(&cell.bg, default_bg());
     }
@@ -90,7 +95,7 @@ pub fn cell_fg(cell: &Cell) -> [u8; 4] {
     // ~55% so the glyph stays legible but visibly secondary.
     if cell.dim {
         let bg = if cell.inverse {
-            color_to_rgba(&cell.fg, default_fg())
+            color_to_rgba(&cell.fg, dfg)
         } else {
             color_to_rgba(&cell.bg, default_bg())
         };
@@ -102,10 +107,12 @@ pub fn cell_fg(cell: &Cell) -> [u8; 4] {
     fg
 }
 
-pub fn cell_bg(cell: &Cell) -> [u8; 4] {
+/// 셀 배경색 — bg 자체는 무틴트(스펙)지만, inverse 셀의 배경 채움은 정의상 fg 색이므로
+/// default-fg 셀이면 pane 틴트 `dfg` 를 따른다(claude 블록커서 = inverse 공백).
+pub fn cell_bg_with(cell: &Cell, dfg: [u8; 4]) -> [u8; 4] {
     let mut bg = color_to_rgba(&cell.bg, default_bg());
     if cell.inverse {
-        bg = color_to_rgba(&cell.fg, default_fg());
+        bg = color_to_rgba(&cell.fg, dfg);
     }
     bg
 }
