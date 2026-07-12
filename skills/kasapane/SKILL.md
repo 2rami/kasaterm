@@ -352,7 +352,9 @@ PY
 
 함정: ①**inbox 파일명은 슬러그** — `[^a-zA-Z0-9_-] → "-"`라 한글 이름 "수신생"→`---.json`, 같은 팀의 같은 길이 한글 이름은 충돌 → agent-name은 ASCII 작업명 권장 ②teammate 세션 id는 팀+에이전트 조합 결정론 파생 — 같은 조합 재부팅 시 "Session ID already in use"(옛 세션 jsonl 이동으로 해제) ③스키마 불일치 항목은 조용히 drop — 위 필드 구성 유지 ④`--parent-session-id`는 붙이지 마라(그 세션에 idle 알림이 새어감) ⑤전부 v2.1.207 바이너리 실측 — 버전 업 시 재검증.
 
-컬러: 발신 하네스가 부팅 `--agent-color`를 발신 메시지의 `color` 필드에 **자동 스탬프**하고, 수신 렌더는 그 필드 기준(실측: pink 부팅 학생의 요청이 color:pink로 도착). 수동 파일 append 때만 `color`를 직접 넣으면 된다.
+컬러: 발신 하네스가 부팅 `--agent-color`를 발신 메시지의 `color` 필드에 **자동 스탬프**하고, 수신 렌더는 그 필드 기준(실측: pink 부팅 학생의 요청이 color:pink, red 부팅 학생의 SendMessage가 color:red로 도착). 수동 파일 append 때만 `color`를 직접 넣으면 된다.
+
+리더가 학생 상태를 아는 법: 학생이 턴을 끝내면 하네스가 team-lead 인박스에 `{"type":"idle_notification","from":"<이름>","timestamp":…,"idleReason":…}`를 자동 발신한다(실측 2026-07-13) — god이 team-lead 플래그로 부팅돼 있으면 네이티브로 받고, 아니면 파일에서 읽는다. wake-watch 없이도 이걸로 완료 감지가 가능.
 
 #### 패턴 F-3 — 학생 권한 라우팅 (AskUserQuestion은 pane에 안 뜬다)
 
