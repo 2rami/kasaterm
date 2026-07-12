@@ -12,11 +12,8 @@ impl App {
         let sb = self.effective_sidebar_w();
         let ws = self.ws.lock().unwrap();
         if let Some(layout) = ws.layout.as_ref() {
-            // 박스 hit-test(gcol/grow)는 헤더 포함 전체 박스 기준이라 헤더 보정은 0.
-            // 본문 셀 로컬 변환(hdr, 아래)만 분할 헤더 띠를 반영해 render origin 과
-            // 정합시킨다 — 분할이면 단일탭 터미널도 제목 띠 30px 를 갖는다.
+            // ghostty식: 헤더 띠 폐기 → 헤더만큼 셀을 밀던 보정 제거.
             let header_h = 0.0_f32;
-            let split_band = if self.layout_is_split() { PANE_HEADER_HEIGHT } else { 0.0 };
             // Box hit-test runs in whole-grid cells (header included, no
             // inset) so a click anywhere in the pane box selects it.
             let gcol = ((px - sb - WINDOW_PADDING).max(0.0) / self.cell.w).floor() as i32;
@@ -49,7 +46,7 @@ impl App {
                         // 본문(셀)은 헤더 띠 아래에서 시작 — 헤더 있는 pane은 그만큼
                         // 빼야 마우스가 실제 그려진 행에 맞는다(render origin과 동일).
                         // grow(박스 hit-test)는 헤더 포함 박스라 header_h=0 그대로.
-                        let hdr = ws.panes.get(&pid).map(|p| p.header_px()).unwrap_or(0.0).max(split_band);
+                        let hdr = ws.panes.get(&pid).map(|p| p.header_px()).unwrap_or(0.0);
                         let lc = ((px - box_left - PANE_INNER_X).max(0.0) / (self.cell.w * fs))
                             .floor() as u16;
                         let lr = ((py - box_top - hdr - PANE_INNER_Y).max(0.0)
