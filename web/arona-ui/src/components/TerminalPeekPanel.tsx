@@ -8,8 +8,8 @@ import { ThinkingBlock } from './thinking-block';
 import { buildToolMap, type ToolMap } from '@/lib/build-tool-map';
 import type { SessionEvent } from '@/lib/types';
 import { AnsiText } from './AnsiText';
-import { useStore, type SubagentInfo } from '@/store';
-import { accentByName, accentLightByName, hex, type AccentColorName } from '@/design/tokens';
+import { useStore, isAwaitingTeacher, type SubagentInfo } from '@/store';
+import { accentByName, hex, type AccentColorName } from '@/design/tokens';
 
 // 대화 본문 = transcript jsonl(/transcript-raw, raw SessionEvent[]). ccsv 파서·per-tool
 // 렌더를 이식해 Bash/Edit/Read 도구 호출이 카톡 버블 사이에 카드로 인터리브된다(거노:
@@ -694,6 +694,24 @@ function SystemBubble({ text }: { text: string }) {
   );
 }
 
+// 대화 턴 헤더 — 말풍선 폐기 후 역할 구분자(거노: 버블이 좁아 배경에 넓게). 학생=미니
+// 아바타, 선생님=노랑 점. 이름+시각+상태 라벨(children)이 한 줄, 본문은 그 아래 풀폭.
+function TurnHead({ char, name, color, children }: { char?: string; name: string; color?: string; children?: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+      {char ? (
+        <span style={{ width: 22, height: 22, borderRadius: 7, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+          <SpritePortrait character={char} scale={1.0} bust />
+        </span>
+      ) : (
+        <span style={{ width: 9, height: 9, borderRadius: 999, background: '#FEE500', border: '1px solid #E0C200', flexShrink: 0, margin: '0 6px 0 7px' }} />
+      )}
+      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 800, color: color ?? 'var(--cth-ink-900)', whiteSpace: 'nowrap' }}>{name}</span>
+      {children}
+    </div>
+  );
+}
+
 export interface TerminalPeekPanelProps {
   surfaceId: string;
   title: string;
@@ -715,8 +733,10 @@ export interface TerminalPeekPanelProps {
   zoomed?: boolean;
 }
 
-// 학생 대화 패널 — 메신저처럼 대화만(선생님 프롬프트 오른쪽·학생 답변 왼쪽).
+// 학생 대화 패널 — 대화를 말풍선 없이 배경에 넓게 깐다(거노: 버블이 좁다). 턴마다
+// TurnHead(선생님=노랑점/학생=아바타) + 풀폭 본문.
 // claude 인터랙티브 선택 메뉴(/model 등 API 안 타는 것)를 화면에서 추출 → 선택지 카드.
+// 단 권한 승인(Yes/No) 프롬프트는 카드 대신 헤더 상태점(빨강 '입력 필요')으로만 — isPermissionMenu.
 // AskUserQuestion 은 캡처 프록시 tool_use 로 정확히 잡으니(거노: 추정 금지) 이 화면 파싱은
 // 그 외(/model·권한 프롬프트) 폴백 전용. **❯ 커서가 실제로 찍힌 줄이 있어야만** 메뉴로
 // 인정한다 — 일반 출력의 "1. 2. 3." 번호목록·todo·코드엔 ❯ 가 없어 false-positive(거노:
@@ -744,6 +764,16 @@ function parsePromptMenu(screen: string): { title: string; options: { idx: numbe
     break;
   }
   return { title, options: opts.map((o) => ({ idx: o.idx, label: o.label, cur: o.cur })) };
+}
+
+// 권한 승인(Yes/No) 프롬프트 판정 — 승인 확인대기는 선택지 카드로 안 띄우고 헤더 상태점
+// (빨강 '입력 필요')으로만 알린다(거노: 클로드 데몬 세션 목록의 needs-input/completed 점
+// 체계처럼). Yes…/No… 옵션 조합 또는 "Do you want…" 제목이면 승인 프롬프트. AskUserQuestion
+// 은 프록시 tool_use 경로(aq)라 여길 안 타고, /model 등 일반 메뉴는 카드 유지.
+function isPermissionMenu(m: { title: string; options: { label: string }[] }): boolean {
+  const yes = m.options.some((o) => /^yes\b/i.test(o.label));
+  const no = m.options.some((o) => /^no\b/i.test(o.label));
+  return (yes && no) || /^do you want/i.test(m.title);
 }
 
 // claude 라이브 작업 표시(footer)를 화면에서 추출 — board status 는 idle/working 2값뿐이라
@@ -1060,6 +1090,9 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 카드로 자동 승격. claude 가 jsonl 을 라이브로 안 써(2.1.x) 진행 중엔 프록시가 메운다.
   const [convTurns, setConvTurns] = useState<Turn[]>([]);
   const [menu, setMenu] = useState<{ header?: string; title: string; options: { idx: number; label: string; cur: boolean; description?: string; preview?: string }[]; multi?: boolean } | null>(null);
+  // 권한 승인(Yes/No) 프롬프트가 화면에 떠 있음 — 카드 대신 헤더 상태점을 빨강으로(거노:
+  // 데몬 needs-input 점 체계). board attention 훅보다 화면 파싱이 즉각적이라 보조 신호로 든다.
+  const [permPrompt, setPermPrompt] = useState(false);
   const [checked, setChecked] = useState<Set<number>>(new Set()); // multiSelect 체크된 인덱스
   const [images, setImages] = useState<string[]>([]); // SendUserFile 로 보낸 이미지
   const [messages, setMessages] = useState<MessageEntry[]>([]); // tell 발신자 대조용(학생→학생 좌측 버블)
@@ -1112,7 +1145,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
   // 카드에서 내가 고른 선택 — AskUserQuestion 답은 conv.turns 로 안 새므로(시스템 주입 필터)
   // 직접 user 버블로 남긴다(거노: 뭐 선택했는지 대화창에 떠야). surface 바뀌면 리셋.
   const [myChoices, setMyChoices] = useState<Turn[]>([]);
-  useEffect(() => { setMyChoices([]); dismissedQRef.current = null; }, [surfaceId]);
+  useEffect(() => { setMyChoices([]); setPermPrompt(false); dismissedQRef.current = null; }, [surfaceId]);
 
   // 대화 내역: transcript jsonl 우선(깨끗), 비었으면 PTY 화면(peek) 폴백 — 인터랙티브
   // claude 가 jsonl 을 라이브로 안 써 진행 중엔 transcript 가 빈다(claude-code-guide
@@ -1216,6 +1249,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           if (matched) q = matched;
         }
         // ESC 로 닫은/숨긴 질문이면 카드 부활 금지(거노: esc 취소). 다른 질문이면 dismiss 해제 후 표시.
+        setPermPrompt(false);
         if (q.question === dismissedQRef.current) {
           setMenu(null);
         } else {
@@ -1229,7 +1263,13 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         }
       } else {
         dismissedQRef.current = null; // aq 사라짐 = 응답/취소됨 → 다음 질문 위해 해제
-        if (!suppressed) setMenu(parsePromptMenu(screen));
+        // 권한 승인(Yes/No) 프롬프트는 선택지 카드로 안 띄운다 — 헤더 상태점(빨강)으로만
+        // 알리고 답변은 터미널/카드 외 경로로(거노: 데몬 needs-input 점 체계). suppress 창과
+        // 무관하게 화면 존재 여부로 permPrompt 를 갱신해 점이 즉시 따라오게.
+        const pm = parsePromptMenu(screen);
+        const isPerm = !!pm && isPermissionMenu(pm);
+        setPermPrompt(isPerm);
+        if (!suppressed) setMenu(isPerm ? null : pm);
       }
       // claude 라이브 작업 표시(verb·경과초)도 화면에만 — 로딩 인디케이터에 실값으로.
       // 화면에 진행형 verb 가 잠깐 안 보이는 프레임마다 null 로 깜빡이던 것(거노)을 막는다:
@@ -1567,6 +1607,22 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         background: 'var(--cth-cream-50)',
         borderBottom: '1px solid var(--cth-cream-200)'
       }}>
+        {/* 상태점 — 클로드 데몬 세션 목록 점 체계(거노): 입력 필요(승인·질문 대기)=빨강 깜빡,
+            작업 중=하늘 펄스, 완료·유휴=초록 정적. 승인 프롬프트는 선택지 카드 대신 이 점이 알린다. */}
+        {!offline && !isSub && agent && (() => {
+          const needsInput = isAwaitingTeacher(agent) || agent.status === 'waiting' || permPrompt;
+          const busy = !needsInput && (agent.status === 'working' || agent.status === 'thinking');
+          return (
+            <span
+              title={needsInput ? '입력 필요 — 승인/답변 대기' : busy ? '작업 중' : '완료 · 유휴'}
+              style={{
+                width: 8, height: 8, borderRadius: 999, flexShrink: 0,
+                background: needsInput ? 'var(--cth-coral)' : busy ? 'var(--cth-sky)' : 'var(--cth-status-success)',
+                animation: needsInput ? 'cth-blink 0.9s ease-in-out infinite' : busy ? 'cth-dot-pulse 1.3s ease-in-out infinite' : undefined,
+              }}
+            />
+          );
+        })()}
         <span
           onClick={onToggleZoom}
           onMouseEnter={() => { if (onToggleZoom) setTitleHover(true); }}
@@ -1694,36 +1750,32 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                   </div>
                 );
               }
-              // 도구 호출(Bash/Edit/Read…) — 학생(좌측)에 per-tool 카드로 인터리브.
+              // 도구 호출(Bash/Edit/Read…) — per-tool 카드로 인터리브. 풀폭(말풍선 폐기와 정렬).
               if (it.kind === 'tool') {
                 return (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
-                    <div style={{ maxWidth: '90%', width: '100%' }}>
-                      <ToolUseCard toolUse={it.toolUse} pair={it.pair} />
-                    </div>
+                  <div key={i} style={{ marginBottom: 10 }}>
+                    <ToolUseCard toolUse={it.toolUse} pair={it.pair} />
                   </div>
                 );
               }
-              // 사고(thinking) 블록 — 좌측 접이식.
+              // 사고(thinking) 블록 — 접이식. 풀폭.
               if (it.kind === 'thinking') {
                 return (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
-                    <div style={{ maxWidth: '90%', width: '100%' }}>
-                      <ThinkingBlock thinking={it.text} />
-                    </div>
+                  <div key={i} style={{ marginBottom: 10 }}>
+                    <ThinkingBlock thinking={it.text} />
                   </div>
                 );
               }
               // system 이벤트(api_error/compact_boundary) — 좌측 접이식 회색 'System' 버블.
               if (it.kind === 'system') return <SystemBubble key={i} text={it.text} />;
-              // 슬래시 명령(<command-*>) — 우측(선생님측) green 'Claude Code Command' 카드.
+              // 슬래시 명령(<command-*>) — 선생님측 green 'Claude Code Command' 카드. 풀폭 흐름.
               if (it.kind === 'command') {
                 const hasArgs = !!it.commandArgs && it.commandArgs.trim() !== '';
                 const hasMsg = !!it.commandMessage && it.commandMessage.trim() !== '';
                 return (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
+                  <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10 }}>
                     <div style={{
-                      maxWidth: '85%', padding: '8px 12px', borderRadius: 14, borderTopRightRadius: 4,
+                      width: '100%', boxSizing: 'border-box', padding: '8px 12px', borderRadius: 12,
                       background: 'color-mix(in srgb, var(--cth-mint) 14%, var(--cth-cream-50))',
                       border: '1px solid color-mix(in srgb, var(--cth-mint) 40%, var(--cth-cream-200))',
                       boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
@@ -1755,14 +1807,11 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                   </div>
                 );
               }
-              // <local-command-stdout> — 좌측(학생측) 'Local Command' 출력 버블.
+              // <local-command-stdout> — 'Local Command' 출력 카드. 풀폭(도구 카드와 동급 취급).
               if (it.kind === 'local-command') {
                 return (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
-                    <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                      <SpritePortrait character={avatarChar} scale={1.5} bust />
-                    </div>
-                    <div style={{ maxWidth: '80%', padding: '8px 12px', borderRadius: 14, borderTopLeftRadius: 4, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)', overflowX: 'auto' }}>
+                  <div key={i} style={{ marginBottom: 10 }}>
+                    <div style={{ width: '100%', boxSizing: 'border-box', padding: '8px 12px', borderRadius: 12, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)', overflowX: 'auto' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--cth-ink-300)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                           <polyline points="4 17 10 11 4 5" /><line x1="12" y1="19" x2="20" y2="19" />
@@ -1814,120 +1863,101 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                   </div>
                 );
               }
-              // 서브 모드는 "선생님↔학생"이 아니라 "부모(미도리)↔서브에이전트" 대화 — 노란 우측
-              // 버블(mine) 없이 둘 다 좌측 아바타로. user 턴=부모 지시, assistant 턴=서브 응답(거노).
+              // 서브 모드는 "선생님↔학생"이 아니라 "부모(미도리)↔서브에이전트" 대화 —
+              // user 턴=부모 지시(부모 아바타·하늘 이름), assistant 턴=서브 응답.
               const sender = it.kind === 'bubble' ? it.sender : undefined;
-              // sender(tell 발신 학생) 있으면 거노 우측 노랑이 아니라 그 학생 좌측 프사+색 버블(#5/#7).
               const mine = !isSub && it.role === 'user' && !sender;
-              const cancelled = !!it.cancelled; // esc 로 취소한 프롬프트 — 노란색 대신 회색
-              const queued = !!it.queued && !cancelled; // 작업 중 보내 아직 처리 전 — 연노랑 점선 대기중
-              const bubbleChar = sender ? sender.name : (isSub && it.role === 'user' ? parentAvatarChar : avatarChar);
-              // 턴 소요시간 — assistant 버블이 그 턴의 마지막이면 시계 푸터(거노 데스크탑 앱풍).
+              const cancelled = !!it.cancelled; // esc 로 취소한 프롬프트 — 회색 취소선
+              const queued = !!it.queued && !cancelled; // 작업 중 보내 아직 처리 전 — 예약 라벨
+              const turnChar = sender ? sender.name : (isSub && it.role === 'user' ? parentAvatarChar : avatarChar);
+              // 턴 소요시간 — assistant 턴이 그 턴의 마지막이면 시계 푸터(거노 데스크탑 앱풍).
               const durMs = !mine && it.uuid ? durationMap.get(it.uuid) : undefined;
               const tokOut = !mine && it.uuid ? tokenMap.get(it.uuid) : undefined; // 완료 응답 출력 토큰(transcript usage)
-              const clock = fmtClock(it.ts); // 카톡식 메시지 시각(오후 2:47)
-              const timeEl = clock ? <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', flexShrink: 0, whiteSpace: 'nowrap', paddingBottom: 2 }}>{clock}</span> : null;
-              // 메신저: 선생님(user)=우측 카톡 노랑, 학생(assistant)=좌측 아바타+흰 말풍선. 시각은 카톡처럼
-              // 버블 옆 바닥에(선생님=왼쪽, 학생=오른쪽). 취소된 프롬프트는 회색+취소선 점선 테두리.
+              const clock = fmtClock(it.ts); // 메시지 시각(오후 2:47)
+              const timeEl = clock ? <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', flexShrink: 0, whiteSpace: 'nowrap' }}>{clock}</span> : null;
+              // 말풍선(카톡 버블) 폐기 — 대화가 버블 안에 갇혀 좁아서 배경에 넓게 깐다(거노).
+              // 턴 = TurnHead 한 줄(아바타/노랑점+이름+시각+상태 라벨) + 풀폭 본문. 역할 구분은
+              // 좌우 정렬이 아니라 헤더: 선생님=노랑 점, 학생/발신학생=아바타(+액센트색 이름).
               const isPrompt = mine && !cancelled && !queued && !!it.text;
               return (
                 <div key={i}
                   data-uidx={isPrompt ? i : undefined}
                   data-uprompt={isPrompt ? it.text : undefined}
-                  style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
-                  {!mine && (
-                    <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                      <SpritePortrait character={bubbleChar} scale={1.5} bust />
-                    </div>
-                  )}
-                  {mine && timeEl}
-                  <div style={{ maxWidth: '72%', display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}>
-                    {sender && (
-                      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: sender.accent ? hex(accentByName[sender.accent]) : 'var(--cth-ink-500)', marginBottom: 3, alignSelf: 'flex-start' }}>{sender.name}</span>
-                    )}
+                  style={{ marginBottom: 14 }}>
+                  <TurnHead
+                    char={mine ? undefined : turnChar}
+                    name={mine ? '선생님' : (sender ? sender.name : turnChar)}
+                    color={mine ? 'var(--cth-ink-700)' : sender?.accent ? hex(accentByName[sender.accent]) : (isSub && it.role === 'user') ? 'var(--cth-sky)' : undefined}
+                  >
+                    {timeEl}
                     {mine && cancelled && (
-                      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-300)', marginBottom: 3, alignSelf: 'flex-end' }}>취소된 프롬프트</span>
+                      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-300)' }}>취소된 프롬프트</span>
                     )}
                     {mine && queued && (
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-300)', marginBottom: 3, alignSelf: 'flex-end' }}>
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: '#B58A00' }}>
                         <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><circle cx="8" cy="8" r="6.3" /><path d="M8 4.7V8l2.2 1.3" /></svg>
                         예약 · 대기 중
                       </span>
                     )}
-                    <div style={{
-                      padding: '8px 12px',
-                      borderRadius: 14,
-                      borderTopLeftRadius: mine ? 14 : 4,
-                      borderTopRightRadius: mine ? 4 : 14,
-                      background: cancelled ? 'var(--cth-cream-100)' : queued ? 'color-mix(in srgb, #FEE500 35%, var(--cth-cream-50))' : mine ? '#FEE500' : sender?.accent ? hex(accentLightByName[sender.accent]) : (isSub && it.role === 'user') ? 'var(--cth-sky-light)' : 'var(--cth-cream-50)',
-                      color: cancelled ? 'var(--cth-ink-500)' : queued ? '#3A2E00' : mine ? '#3A2E00' : 'var(--cth-ink-900)',
-                      border: cancelled ? '1px dashed var(--cth-ink-300)' : queued ? '1px dashed #E0C200' : mine ? 'none' : sender?.accent ? `1px solid ${hex(accentByName[sender.accent])}` : (isSub && it.role === 'user') ? '1px solid var(--cth-sky)' : '1px solid var(--cth-cream-200)',
-                      boxShadow: (cancelled || queued) ? 'none' : '0 1px 3px rgba(21, 41, 74, 0.08)',
-                      fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.55,
-                      wordBreak: 'break-word', maxWidth: '100%',
-                      textDecoration: cancelled ? 'line-through' : 'none',
-                      opacity: cancelled ? 0.8 : 1,
-                    }}>
-                      {it.text && <BubbleBody text={it.text} mine={mine && !cancelled} />}
-                      {it.images && it.images.length > 0 && (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: it.text ? 6 : 0 }}>
-                          {it.images.map((src, ii) => (
-                            <img key={ii} src={src} alt="" style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, display: 'block' }} />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    {(durMs != null || tokOut != null) && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, paddingLeft: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}>
-                        {durMs != null && (
-                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                              <circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 14" />
-                            </svg>
-                            {formatDuration(durMs)}
-                          </span>
-                        )}
-                        {tokOut != null && <span title={`출력 ${tokOut.toLocaleString()} 토큰`}>↓ {fmtTok(tokOut)}</span>}
+                  </TurnHead>
+                  <div style={{
+                    fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.6,
+                    color: cancelled ? 'var(--cth-ink-500)' : queued ? '#8A7500' : 'var(--cth-ink-900)',
+                    textDecoration: cancelled ? 'line-through' : 'none',
+                    opacity: cancelled ? 0.8 : 1,
+                    wordBreak: 'break-word',
+                  }}>
+                    {it.text && <BubbleBody text={it.text} mine={mine && !cancelled} />}
+                    {it.images && it.images.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: it.text ? 6 : 0 }}>
+                        {it.images.map((src, ii) => (
+                          <img key={ii} src={src} alt="" style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, border: '1px solid var(--cth-cream-200)', display: 'block' }} />
+                        ))}
                       </div>
                     )}
                   </div>
-                  {!mine && timeEl}
+                  {(durMs != null || tokOut != null) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}>
+                      {durMs != null && (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                            <circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 14" />
+                          </svg>
+                          {formatDuration(durMs)}
+                        </span>
+                      )}
+                      {tokOut != null && <span title={`출력 ${tokOut.toLocaleString()} 토큰`}>↓ {fmtTok(tokOut)}</span>}
+                    </div>
+                  )}
                 </div>
               );
             })}
 
-            {/* 학생이 SendUserFile 로 보낸 이미지 — 좌측(학생) 이미지 버블. 클릭=원본. */}
+            {/* 학생이 SendUserFile 로 보낸 이미지 — 풀폭 턴(헤더+이미지). 클릭=원본. */}
             {images.map((path, i) => (
-              <div key={`img-${path}-${i}`} style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
-                <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                  <SpritePortrait character={avatarChar} scale={1.5} bust />
-                </div>
+              <div key={`img-${path}-${i}`} style={{ marginBottom: 14 }}>
+                <TurnHead char={avatarChar} name={avatarChar} />
                 <button onClick={() => void openFile(path)} title={`${path}\n클릭 = OS 기본 뷰어로 열기`} style={{
-                  maxWidth: '74%', padding: 4, borderRadius: 14, borderTopLeftRadius: 4, cursor: 'pointer',
-                  background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)',
-                  boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)', display: 'block',
+                  maxWidth: '100%', padding: 0, cursor: 'pointer', background: 'transparent', border: 'none', display: 'block', textAlign: 'left',
                 }}>
                   <img src={imageFileUrl(path)} alt={path.split('/').pop() ?? ''} style={{
-                    display: 'block', maxWidth: '100%', maxHeight: 240, borderRadius: 10, objectFit: 'contain',
+                    display: 'block', maxWidth: '100%', maxHeight: 240, borderRadius: 10, border: '1px solid var(--cth-cream-200)', objectFit: 'contain',
                   }} />
                 </button>
               </div>
             ))}
 
-            {/* /context 결과 — 별도 패널(x 안 닫히던) 대신 채팅 버블로(거노: 채팅창 안에 입력되게).
-                선생님 "/context" 친 기록(우측) + 아로나 컨텍스트 결과(좌측, 색 그리드). */}
+            {/* /context 결과 — 별도 패널(x 안 닫히던) 대신 채팅 흐름에(거노: 채팅창 안에 입력되게).
+                선생님 "/context" 친 기록 + 학생 컨텍스트 결과(코드 카드). 풀폭. */}
             {ctxView && (
               <>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 10 }}>
-                  <div style={{ maxWidth: '72%', padding: '8px 12px', borderRadius: 14, borderTopRightRadius: 4, background: '#FEE500', color: '#3A2E00', fontFamily: 'var(--cth-font-ui)', fontSize: 13, fontWeight: 600 }}>/context</div>
+                <div style={{ marginBottom: 14 }}>
+                  <TurnHead name="선생님" color="var(--cth-ink-700)" />
+                  <div style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 13, fontWeight: 600, color: 'var(--cth-ink-900)' }}>/context</div>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: 10, gap: 8, alignItems: 'flex-end' }}>
-                  <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                    <SpritePortrait character={avatarChar} scale={1.5} bust />
-                  </div>
-                  <div style={{ maxWidth: '85%', padding: '8px 12px', borderRadius: 14, borderTopLeftRadius: 4, background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', boxShadow: '0 1px 3px rgba(21,41,74,0.08)', overflowX: 'auto' }}>
-                    <pre style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, lineHeight: 1.35, whiteSpace: 'pre', margin: 0, color: 'var(--cth-ink-700)' }}><AnsiText text={ctxView} /></pre>
-                  </div>
+                <div style={{ marginBottom: 14 }}>
+                  <TurnHead char={avatarChar} name={avatarChar} />
+                  <pre style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, lineHeight: 1.35, whiteSpace: 'pre', margin: 0, padding: '8px 10px', borderRadius: 9, overflowX: 'auto', background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', color: 'var(--cth-ink-700)' }}><AnsiText text={ctxView} /></pre>
                 </div>
               </>
             )}
@@ -1943,18 +1973,15 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               // sticky 바닥 고정(거노) — 위로 스크롤해 옛 대화를 봐도 로딩이 바닥에 남는다. 풀폭
               // 그라데 배경(컨테이너 좌우 padding 16 을 음수 margin 으로 상쇄)으로 그 위 새 메시지가
               // 자연스럽게 페이드되며 가려져 겹쳐 보이지 않는다.
-              <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 8, alignItems: 'flex-end',
+              <div style={{ display: 'flex', justifyContent: 'flex-start', gap: 8, alignItems: 'flex-start',
                 position: 'sticky', bottom: 0, zIndex: 6, marginLeft: -16, marginRight: -16, marginBottom: 0,
-                padding: '8px 16px 4px', background: 'linear-gradient(to top, var(--cth-cream-100) 72%, transparent)' }}>
-                <div style={{ width: 34, height: 34, borderRadius: 11, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-                  <SpritePortrait character={avatarChar} scale={1.5} bust />
+                padding: '10px 16px 6px', background: 'linear-gradient(to top, var(--cth-cream-100) 72%, transparent)' }}>
+                <div style={{ width: 22, height: 22, borderRadius: 7, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+                  <SpritePortrait character={avatarChar} scale={1.0} bust />
                 </div>
                 <div style={{
-                  padding: '10px 14px', borderRadius: 14, borderTopLeftRadius: 4,
-                  background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)',
-                  boxShadow: '0 1px 3px rgba(21, 41, 74, 0.08)',
                   display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 4,
-                  fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-500)', maxWidth: '82%',
+                  fontFamily: 'var(--cth-font-ui)', fontSize: 12, color: 'var(--cth-ink-500)', minWidth: 0, flex: 1,
                 }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
                     <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0, alignItems: 'center', height: 14 }}>
