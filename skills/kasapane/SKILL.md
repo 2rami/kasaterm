@@ -333,7 +333,7 @@ python3 - <<'PY'
 import json,uuid,datetime
 p='/Users/kasa/.claude/teams/<팀>/inboxes/<슬러그>.json'
 m=json.load(open(p))
-m.append({"from":"team-lead","text":"<지시>","summary":"<요약>","timestamp":datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00","Z"),"msgV":1,"msg_id":str(uuid.uuid4()),"type":"message","read":False})
+m.append({"from":"<발신 캐릭터명>","color":"<발신자 색(8색)>","text":"<지시>","summary":"<요약>","timestamp":datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00","Z"),"msgV":1,"msg_id":str(uuid.uuid4()),"type":"message","read":False})
 json.dump(m,open(p,'w'),ensure_ascii=False)
 PY
 
