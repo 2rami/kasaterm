@@ -278,6 +278,9 @@ impl App {
             let _ = kasa_mcp::character::write_lead(&rslug, id);
         }
         self.pane_session_id.insert(id.to_string(), sid.clone());
+        // 세션→캐릭터 영속 바인딩(거노 ④): 같은 세션이 --resume 등으로 다시 붙으면 같은
+        // 캐릭터를 재사용하도록 스폰 시점에 기록(apply_session_character 가 조회).
+        let _ = kasa_mcp::character::bind_session_character(&sid, &name);
         self.ws.lock().unwrap().pane_character.insert(id.to_string(), name.clone());
         let mut env = vec![
             ("KASATERM_CHARACTER".to_string(), name.clone()),
@@ -308,20 +311,131 @@ impl App {
         // 캐릭터 자동 배정(거노): pending(god) 우선, 없으면 빈 슬롯 순환. 마커·session-id
         // 기록 후 KASATERM_CHARACTER/SESSION_ID/PERSONA env 를 더한다(claude shim 적용).
         env.extend(self.assign_character_env(&id, cwd.as_deref(), room.as_deref()));
-        let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+        let claude_student = std::mem::take(&mut self.pending_claude_student);
+        let session = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: self.pending_shell.take().or_else(resolve_default_shell),
-            cwd,
+            cwd: cwd.clone(),
             cols,
             rows,
             env,
             pane_id: id.clone(),
             initial_scrollback: Vec::new(),
-        })?;
+        })?);
         self.pump_pty_screens(session.screens.clone(), id.clone());
-        self.pty.insert(id.clone(), Arc::new(session));
+        self.pty.insert(id.clone(), session.clone());
+        // "+" 피커 'Claude 학생': 팀 config 를 부팅 전에 깔고(폴러는 부팅 시점에만 arm —
+        // 패턴 F-2) 셸 프롬프트 뜰 즈음 teammate 플래그 claude 를 주입한다(swap_character
+        // 의 900ms 주입 관례). shim 이 --settings·--session-id·persona 를 마저 입힌다.
+        if claude_student {
+            if let Some(cmd) = self.claude_student_boot_cmd(&id, cwd.as_deref(), room.as_deref()) {
+                let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+                self.pending_restores.push((session, format!("{cmd}\r"), at));
+            }
+        }
         self.pty_layout = Some(kasa_pty::PtyLayout::single(&id));
         self.ws.lock().unwrap().active_pane = Some(id);
         Ok(())
+    }
+
+    /// 'Claude 학생' pane 의 teammate 부팅 준비 — 방 rslug 기반 팀 config 를 보장하고 이
+    /// pane 에 배정된 캐릭터를 멤버 등록한 뒤 스폰 한 줄을 돌려준다. 실패는 로그만 남기고
+    /// None(pane 은 순정 셸로 남아 사용자가 수동 진행 가능).
+    fn claude_student_boot_cmd(
+        &mut self,
+        id: &str,
+        cwd: Option<&str>,
+        room: Option<&str>,
+    ) -> Option<String> {
+        let cwd = cwd?;
+        // assign_character_env 가 방금 기록한 이 pane 의 캐릭터(테마 미설치면 None → skip).
+        let name = self.ws.lock().unwrap().pane_character.get(id).cloned()?;
+        // --agent-color 는 배지가 아니라 teammate TUI 전체 테마(거노 스크린샷 실측) —
+        // pane 테두리 accent(theme.rs)를 8색 최근접으로 매핑해 한 화면에서 색을 일치시킨다.
+        // accent 미정의 캐릭터만 characters.json claude_color 폴백.
+        let color = theme::character_accent(&name)
+            .map(|a| kasa_mcp::team::nearest_agent_color([a[0], a[1], a[2]]).to_string())
+            .or_else(|| {
+                kasa_mcp::character::characters_json()
+                    .and_then(|c| kasa_mcp::character::claude_color_for(&c, &name))
+            })
+            .unwrap_or_else(|| "blue".to_string());
+        let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
+        let team = kasa_mcp::team::team_name_for(&rslug);
+        // agent-name = 목표 작업명(거노 네이밍 규칙 — 캐릭터명 아님). 피커 경로는 아직
+        // 다이얼로그(작업명 입력)가 없어 pane 기반 자리표시 작업명을 쓴다. ASCII 라
+        // inbox 슬러그 유일성도 자연 확보.
+        let agent = kasa_mcp::team::unique_agent_name(&format!(
+            "student-p{}",
+            id.trim_start_matches('%')
+        ));
+        let root = kasa_mcp::team::teams_root();
+        if let Err(e) = kasa_mcp::team::ensure_team(&root, &team, None, cwd) {
+            eprintln!("[claude-student] ensure_team {team} failed: {e}");
+            return None;
+        }
+        // 설정 노브의 모델은 명부 기록용으로만 — 스폰 플래그는 shim(model_line)이 이미
+        // 얹으므로 여기서도 넣으면 --model 이 중복된다.
+        let model = socket::read_claude_model();
+        let spec = kasa_mcp::team::StudentSpec {
+            agent_name: &agent,
+            color: &color,
+            model: (!model.is_empty()).then_some(model.as_str()),
+            cwd,
+            pane_id: Some(id),
+        };
+        if let Err(e) = kasa_mcp::team::add_member(&root, &team, &spec) {
+            eprintln!("[claude-student] add_member {agent}@{team} failed: {e}");
+            return None;
+        }
+        // pane 제목 = agent-name(작업명) — 실제 팀모드가 pane명=에이전트명(거노 스크린샷).
+        // PaneState 는 원래 첫 ScreenUpdate 가 만들므로 pane_mut 로 선생성하고, brand-new
+        // 분기와 같은 상태(pid 시드+pid_to_pane)로 맞춘 뒤 title 을 pin(SocketRename 의미
+        // — 내부 프로그램 OSC 타이틀이 못 덮게)한다.
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let p = ws.pane_mut(id);
+            p.tabs[0].pid = Some(id.to_string());
+            p.tabs[0].title = Some(agent.clone());
+            p.tabs[0].title_pinned = true;
+            ws.pid_to_pane.insert(id.to_string(), id.to_string());
+        }
+        Some(kasa_mcp::team::spawn_command_line(&team, &agent, &color, None, None))
+    }
+
+    /// bind-transcript 로 pane 의 실제 세션 id 를 인지한 시점의 캐릭터 영속화(거노 ④):
+    /// 매핑이 있으면 그 캐릭터로 이름표를 교정하고(respawn 없음 — persona 는 스폰 시
+    /// 고정이라 label·마커만 갱신, --resume 둔갑 방지), 없으면 현재 배정을 저장해 다음
+    /// resume 이 재사용하게 한다. 신규 세션만 랜덤 배정이 남는다.
+    pub(crate) fn apply_session_character(&mut self, pane: &str, sid: &str) {
+        let cur = self.ws.lock().unwrap().pane_character.get(pane).cloned();
+        match kasa_mcp::character::session_character(sid) {
+            Some(mapped) => {
+                if cur.as_deref() == Some(mapped.as_str()) {
+                    return;
+                }
+                // 실존 pane 만 relabel(훅 오호출·죽은 pane 가드).
+                if !self.ws.lock().unwrap().panes.contains_key(pane) {
+                    return;
+                }
+                self.ws.lock().unwrap().pane_character.insert(pane.to_string(), mapped.clone());
+                // board 도 같은 이름을 보게 /tmp 마커 동기(swap_character 의 cwd/room 관례).
+                if let Some(cwd) = self.pane_cwd_cache.get(pane).cloned() {
+                    let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
+                    let rslug = kasa_mcp::character::rslug(&cwd, room.as_deref());
+                    let _ = kasa_mcp::character::write_marker(&rslug, pane, &mapped);
+                }
+                self.chrome_dirty = true;
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            None => {
+                // 첫 인지 — 이 세션의 정본 캐릭터로 현재 배정을 영속화.
+                if let Some(cur) = cur.filter(|c| !c.is_empty()) {
+                    let _ = kasa_mcp::character::bind_session_character(sid, &cur);
+                }
+            }
+        }
     }
     /// pane 캐릭터 교체 — persona 는 셸 spawn 시 고정이라 PTY 를 새 persona 로 respawn
     /// 한다(대화 리셋, 거노 확인 후). 같은 pane id·leaf 유지라 레이아웃·자리 그대로,

@@ -2390,6 +2390,10 @@ enum UserEvent {
     /// 탭으로(크롬 탭, 멀티뷰 빈-pane 회피), 없으면 active pane split 으로 폴백.
     /// 데몬 제거 때 빠졌던 open_preview 의 로컬 재구현. `open_file` 이 확장자로 분기.
     SocketOpenPreview(String, Option<String>),
+    /// `collab.bind_transcript`(SessionStart 훅) 위임 — (pane, 세션 id). transcript
+    /// 파일명(stem) = claude 세션 id. 세션→캐릭터 영속 매핑을 조회/저장해 --resume 시
+    /// 캐릭터 둔갑을 막는다(거노: 재시작하면 프라나가 미도리로). `apply_session_character`.
+    SocketSessionBound(String, String),
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
@@ -2943,6 +2947,9 @@ struct App {
     /// Shell command the next `spawn_session_pane` should launch instead of
     /// the default. Set by a shell-picker selection, consumed (taken) once.
     pending_shell: Option<String>,
+    /// "+" 피커 'Claude 학생' 선택 — 다음 `spawn_session_pane` 첫 pane 을 teammate 플래그
+    /// claude 로 부팅한다(팀 config 를 스폰 전에 깔고 프롬프트 즈음 커맨드 주입). 1회 소비.
+    pending_claude_student: bool,
     /// Per-window (name, cwd) tab labels, by window index. Refreshed on a
     /// throttle (cwd resolution shells out to lsof, so never per-frame).
     window_labels: Vec<(String, String)>,
@@ -3404,6 +3411,7 @@ impl App {
             shell_menu_open: false,
             shell_menu_hits: Vec::new(),
             pending_shell: None,
+            pending_claude_student: false,
             window_labels: Vec::new(),
             window_labels_at: None,
             window_name_override: HashMap::new(),
@@ -4268,27 +4276,36 @@ fn git_bash_path() -> Option<String> {
     None
 }
 
-/// Shells offered by the sidebar "+" picker: `(label, nerd-font icon,
-/// shell command)`. Only installed shells are listed, so WSL / PowerShell 7
-/// quietly drop off machines that lack them. Windows-only content for now;
-/// returns empty elsewhere so the render path stays cfg-free.
+/// Sidebar "+" 피커 sentinel — cmd 자리에 넣는 특수 값. NUL 접두라 실제 실행파일
+/// 경로와 절대 충돌하지 않는다. 기본 셸 = pending_shell 없이 새 윈도우.
+pub(crate) const PICKER_DEFAULT_SHELL: &str = "\u{0}default-shell";
+/// Claude 학생 = teammate 플래그 claude 부팅(spawn_session_pane 이 팀 config 작성 후 주입).
+pub(crate) const PICKER_CLAUDE_STUDENT: &str = "\u{0}claude-student";
+
+/// Shells offered by the sidebar "+" picker: `(label, icon_svg name,
+/// shell command or picker sentinel)`. 기본 셸·Claude 학생 두 항목은 전 플랫폼 공통 —
+/// 그래서 macOS 도 이제 "+" 가 메뉴를 연다(예전엔 목록이 비어 즉시 기본 셸 스폰).
+/// Windows 는 설치된 셸(PowerShell/CMD/Git Bash/WSL)이 뒤에 붙고, 없는 셸은 조용히 빠진다.
 fn available_shells() -> Vec<(&'static str, &'static str, String)> {
     #[allow(unused_mut)]
-    let mut out: Vec<(&'static str, &'static str, String)> = Vec::new();
+    let mut out: Vec<(&'static str, &'static str, String)> = vec![
+        ("기본 셸", "terminal", PICKER_DEFAULT_SHELL.to_string()),
+        ("Claude 학생", "claude", PICKER_CLAUDE_STUDENT.to_string()),
+    ];
     #[cfg(windows)]
     {
         let pwsh7 = r"C:\Program Files\PowerShell\7\pwsh.exe";
         if std::path::Path::new(pwsh7).is_file() {
-            out.push(("PowerShell 7", "\u{ebc7}", pwsh7.to_string()));
+            out.push(("PowerShell 7", "terminal", pwsh7.to_string()));
         }
         // Windows PowerShell ships with the OS — always present.
-        out.push(("Windows PowerShell", "\u{ebc7}", "powershell.exe".to_string()));
-        out.push(("Command Prompt", "\u{ebc4}", "cmd.exe".to_string()));
+        out.push(("Windows PowerShell", "terminal", "powershell.exe".to_string()));
+        out.push(("Command Prompt", "terminal", "cmd.exe".to_string()));
         if let Some(bash) = git_bash_path() {
-            out.push(("Git Bash", "\u{f489}", bash));
+            out.push(("Git Bash", "terminal", bash));
         }
         if std::path::Path::new(r"C:\Windows\System32\wsl.exe").is_file() {
-            out.push(("WSL", "\u{f17c}", "wsl.exe".to_string()));
+            out.push(("WSL", "terminal", "wsl.exe".to_string()));
         }
     }
     out

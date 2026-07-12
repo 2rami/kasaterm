@@ -76,8 +76,8 @@ pub fn is_god(chars: &Value, name: &str) -> bool {
     god_names(chars).iter().any(|g| g == name)
 }
 
-/// 캐릭터의 persona 텍스트(leader/leaders/members 통합 풀에서 이름 매칭).
-pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
+/// leader/leaders/members 통합 풀에서 이름 매칭 — persona·claude_color 조회 공용.
+fn find_character<'a>(chars: &'a Value, name: &str) -> Option<&'a Value> {
     let mut pool: Vec<&Value> = Vec::new();
     if let Some(l) = chars.get("leader") {
         pool.push(l);
@@ -87,12 +87,25 @@ pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
             pool.extend(arr);
         }
     }
-    pool.into_iter()
-        .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
+    pool.into_iter().find(|m| m.get("name").and_then(|n| n.as_str()) == Some(name))
+}
+
+/// 캐릭터의 persona 텍스트(leader/leaders/members 통합 풀에서 이름 매칭).
+pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
         .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
         .filter(|p| !p.is_empty())
         // 캐릭터 정체성 뒤에 공통 협업 규약을 붙여 모든 학생·god 에 1회 주입(캐시).
         .map(|p| format!("{p}{COLLAB_PROTOCOL}"))
+}
+
+/// 캐릭터의 claude_color(characters.json) — teammate 스폰 `--agent-color` 용. 팔레트 밖
+/// 값(프라나=magenta)이 실재하므로 8색 정규화는 team::normalize_agent_color 가 맡는다.
+pub fn claude_color_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("claude_color").and_then(|x| x.as_str()))
+        .filter(|c| !c.is_empty())
+        .map(String::from)
 }
 
 /// 모든 캐릭터 persona 끝에 붙는 협업 규약 — 동료를 기다릴 땐 tell 로 깨우지 말고
@@ -220,6 +233,58 @@ pub fn write_lead(rslug: &str, surface_id: &str) -> std::io::Result<()> {
     std::fs::write(path, surface_id)
 }
 
+/// 세션id→캐릭터 영속 매핑 파일 — `~/.config/kasaterm/session_characters.json`
+/// (window.json 등 기존 상태 저장과 같은 config 디렉토리). 같은 세션을 --resume 등으로
+/// 이어가면 같은 캐릭터를 재사용하기 위한 저장소(거노: 재시작하면 프라나가 미도리로 둔갑).
+fn session_char_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".config/kasaterm/session_characters.json")
+}
+
+fn load_session_chars(path: &Path) -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// 세션 id 의 영속 배정 캐릭터 — 있으면 재사용, 없으면(None) 신규 세션이라 랜덤 배정.
+pub fn session_character(sid: &str) -> Option<String> {
+    session_character_in(&session_char_path(), sid)
+}
+
+fn session_character_in(path: &Path, sid: &str) -> Option<String> {
+    load_session_chars(path)
+        .get(sid)
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .filter(|s| !s.is_empty())
+}
+
+/// 세션id→캐릭터 매핑 저장(같은 값이면 무쓰기). 원자 쓰기(tmp→rename, write_marker 관례).
+pub fn bind_session_character(sid: &str, name: &str) -> std::io::Result<()> {
+    bind_session_character_in(&session_char_path(), sid, name)
+}
+
+fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Result<()> {
+    if sid.is_empty() || name.is_empty() {
+        return Ok(());
+    }
+    let mut map = load_session_chars(path);
+    if map.get(sid).and_then(|v| v.as_str()) == Some(name) {
+        return Ok(());
+    }
+    map.insert(sid.to_string(), Value::String(name.to_string()));
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_string_pretty(&Value::Object(map)).map_err(std::io::Error::other)?;
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)
+}
+
 /// 새 `claude --session-id` 용 uuid. transcript jsonl 파일명이 되므로 파일명 안전 문자만.
 /// uuidgen(macOS/Linux 공통) → 실패 시 시간+pid 폴백.
 pub fn new_session_id() -> String {
@@ -236,4 +301,35 @@ pub fn new_session_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("kt-{:x}-{}", t, std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_character_roundtrip() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir()
+            .join(format!("kasaterm-sesschar-{}-{n}", std::process::id()))
+            .join("session_characters.json");
+        // 미매핑 세션 = None → 랜덤 배정 대상.
+        assert_eq!(session_character_in(&path, "sid-1"), None);
+        bind_session_character_in(&path, "sid-1", "프라나").unwrap();
+        bind_session_character_in(&path, "sid-2", "미도리").unwrap();
+        assert_eq!(session_character_in(&path, "sid-1").as_deref(), Some("프라나"));
+        assert_eq!(session_character_in(&path, "sid-2").as_deref(), Some("미도리"));
+        // 재바인딩은 덮어쓴다(마지막 배정이 정본) — 다른 sid 는 불변.
+        bind_session_character_in(&path, "sid-1", "모모이").unwrap();
+        assert_eq!(session_character_in(&path, "sid-1").as_deref(), Some("모모이"));
+        assert_eq!(session_character_in(&path, "sid-2").as_deref(), Some("미도리"));
+        // 빈 sid/이름은 무시(파일 오염 방지).
+        bind_session_character_in(&path, "", "유즈").unwrap();
+        bind_session_character_in(&path, "sid-3", "").unwrap();
+        assert_eq!(session_character_in(&path, "sid-3"), None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }
