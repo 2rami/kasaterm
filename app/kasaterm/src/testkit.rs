@@ -148,6 +148,38 @@ impl App {
         let raised = self.confirm_or_close_window();
         eprintln!("[autoconfirm] confirm_or_close_window -> raised={raised}");
     }
+    /// Headless settings-screen repro: open the settings overlay after
+    /// `KASATERM_AUTOSETTINGS_MS`, on the category named in
+    /// `KASATERM_AUTOSETTINGS` ("appearance" / "shell" / "claude", default
+    /// General), so a background run can screenshot it without a click. State
+    /// is function-local statics — deliberately no App field (parallel-work
+    /// rule: struct App stays untouched).
+    pub(crate) fn run_pending_autosettings(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOSETTINGS_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let cat = std::env::var("KASATERM_AUTOSETTINGS").unwrap_or_default();
+        self.settings_cat = match cat.as_str() {
+            "appearance" => SettingsCat::Appearance,
+            "shell" => SettingsCat::Shell,
+            "claude" => SettingsCat::Claude,
+            _ => SettingsCat::General,
+        };
+        eprintln!("[autosettings] open_settings cat={cat}");
+        self.open_settings();
+    }
     /// Headless file-open repro: schedule `open_file_split` on the path in
     /// `KASATERM_AUTOOPEN` after `KASATERM_AUTOOPEN_MS` (default 4000ms), so a
     /// background run can prove the preview pane + file-tree highlight without

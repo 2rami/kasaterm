@@ -987,8 +987,16 @@ impl Backend for PtyBackend {
                         false
                     }
                     Some(_) => {
-                        row.status = "idle".into();
-                        true
+                        // official 이 idle 이어도 화면에 생성 스피너("esc to interrupt")가
+                        // 떠 있으면 working — agents --json 은 2s 캐시+데몬 보고라 TUI 보다
+                        // 늦어, Generating 중인데 board 가 idle 로 새던 실측(프라나) 교정.
+                        if generating.contains(sid.as_str()) {
+                            row.status = "working".into();
+                            false
+                        } else {
+                            row.status = "idle".into();
+                            true
+                        }
                     }
                     None => {
                         // mtime 만 보면 ESC 취소·완료 후 60s 간 working 으로 stuck →
@@ -1667,6 +1675,26 @@ pub fn write_setting(key: &str, value: serde_json::Value) {
             let _ = f.write_all(txt.as_bytes());
         }
     }
+}
+
+/// Where window tabs live: "top" (Windows Terminal-style horizontal tabs in
+/// the title strip, the default) or "side" (the original Warp-style vertical
+/// sidebar list).
+pub fn read_tab_position() -> String {
+    match read_settings().get("tab_position").and_then(|x| x.as_str()) {
+        Some("side") => "side".to_string(),
+        _ => "top".to_string(),
+    }
+}
+
+/// Base cell font size (logical px) from settings. Missing/invalid → the
+/// built-in default (16). Clamped to the same sane range the stepper offers.
+pub fn read_font_size() -> f32 {
+    read_settings()
+        .get("font_size")
+        .and_then(|x| x.as_f64())
+        .map(|v| (v as f32).clamp(9.0, 32.0))
+        .unwrap_or(16.0)
 }
 
 /// Whether the file-tree sidebar starts open on launch. Default `false`

@@ -27,8 +27,13 @@ pub(crate) struct SettingsCtx {
     pub input: Option<SettingsInput>,
     pub cursor: (f32, f32),
     pub caret_on: bool,
-    pub theme_light: bool,
+    /// Active theme key ("dark", "catppuccin-mocha", "custom"…).
+    pub theme: String,
+    /// settings.json has a `custom_theme` object → show the Custom card.
+    pub has_custom_theme: bool,
     pub accent: String,
+    pub font_size: f32,
+    pub tabs_on_top: bool,
     pub claude_persona: bool,
     pub shim_inject: bool,
     pub claude_model: String,
@@ -61,8 +66,9 @@ impl App {
         self.settings_input = None;
         // Auto-expand a collapsed sidebar so Settings reads as the selected
         // entry in the tab list (Warp-style). Remember we did it so closing can
-        // undo it; a sidebar the user opened themselves stays put.
-        if !self.sidebar_visible {
+        // undo it; a sidebar the user opened themselves stays put. With tabs on
+        // top there is no side strip to expand.
+        if !self.tabs_on_top && !self.sidebar_visible {
             self.sidebar_visible = true;
             self.settings_expanded_sidebar = true;
             let (cols, rows) = self.window_cells();
@@ -131,8 +137,11 @@ impl App {
             input: self.settings_input,
             cursor: self.cursor_px,
             caret_on: self.last_blink_on,
-            theme_light: theme::is_light(),
+            theme: theme::theme_name().to_string(),
+            has_custom_theme: socket::read_settings().get("custom_theme").is_some(),
             accent: theme::accent_name().to_string(),
+            font_size: self.font_size,
+            tabs_on_top: self.tabs_on_top,
             claude_persona: self.set_claude_persona,
             shim_inject: self.set_shim_inject,
             claude_model: self.set_claude_model.clone(),
@@ -234,6 +243,26 @@ impl App {
                 socket::write_setting("accent", serde_json::Value::String(name));
                 self.repaint_all();
             }
+            SettingsAction::TabPosition(pos) => {
+                let want_top = pos == "top";
+                if self.tabs_on_top != want_top {
+                    self.tabs_on_top = want_top;
+                    socket::write_setting("tab_position", serde_json::Value::String(pos.to_string()));
+                    // The side strip appearing/disappearing changes usable cols.
+                    let (cols, rows) = self.window_cells();
+                    self.resize_backend(cols, rows);
+                }
+            }
+            SettingsAction::FontSizeDelta(d) => {
+                let new = (self.font_size + d as f32).clamp(9.0, 32.0);
+                if (new - self.font_size).abs() > 0.01 {
+                    self.font_size = new;
+                    socket::write_setting("font_size", serde_json::json!(new));
+                    // Live-apply: same reflow path Cmd+/- zoom uses, so the
+                    // grid + PTY resize immediately.
+                    self.apply_effective_scale();
+                }
+            }
             SettingsAction::ToggleClaudePersona => {
                 self.set_claude_persona = !self.set_claude_persona;
                 self.settings_save();
@@ -314,23 +343,29 @@ pub(crate) fn paint_settings(
         gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: true, italic: false },
     );
     let cats = [
-        (SettingsCat::General, "General"),
-        (SettingsCat::Appearance, "Appearance"),
-        (SettingsCat::Shell, "Shell"),
-        (SettingsCat::Claude, "Claude"),
+        (SettingsCat::General, "General", "settings-2"),
+        (SettingsCat::Appearance, "Appearance", "sparkles"),
+        (SettingsCat::Shell, "Shell", "terminal"),
+        (SettingsCat::Claude, "Claude", "claude"),
     ];
     let mut cy = ay + 52.0;
-    for (cat, label) in cats {
+    let mut active_label = "General";
+    for (cat, label, icon) in cats {
         let r = (ax + 10.0, cy, CAT_W - 20.0, 36.0);
         let selected = cat == ctx.cat;
+        if selected {
+            active_label = label;
+        }
         let hover = inside(r, ctx.cursor);
         if selected {
             round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD, theme::surface_active());
         } else if hover {
             round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD, theme::surface_hover());
         }
+        let icon_c = if selected { theme::text() } else { theme::text_mute() };
+        g.queue_icon(icon, r.0 + 12.0, r.1 + (r.3 - 15.0) / 2.0, 15.0, icon_c);
         g.draw_text(
-            r.0 + 14.0,
+            r.0 + 36.0,
             r.1 + 10.0,
             label,
             gpu::DrawOpts {
@@ -345,9 +380,16 @@ pub(crate) fn paint_settings(
     }
 
     // ── Right form pane ──────────────────────────────────────────────────
+    // Page header: the active category as a title + hairline, so the form
+    // reads as its own page instead of floating controls.
     let fx = ax + CAT_W + 40.0;
-    let fy = ay + 36.0;
     let fw = (aw - CAT_W - 80.0).max(120.0);
+    g.draw_text(
+        fx, ay + 28.0, active_label,
+        gpu::DrawOpts { font_size: 20.0, color: theme::text(), bold: true, italic: false },
+    );
+    g.rect(fx, ay + 62.0, fw, 1.0, theme::border());
+    let fy = ay + 84.0;
     match ctx.cat {
         SettingsCat::General => {
             let mut y = fy;
@@ -418,20 +460,18 @@ pub(crate) fn paint_settings(
             let fr = (fx, y, 52.0, 30.0);
             toggle(g, fr, ctx.footer_default, ctx.cursor);
             rects.push((SettingsAction::ToggleFooter, fr));
-        }
-        SettingsCat::Appearance => {
-            let mut y = fy;
-            // 테마 모드
-            section_label(g, fx, y, "Theme");
+            y += 30.0 + ROW_GAP;
+            // 윈도우 탭 위치
+            section_label(g, fx, y, "Tab position");
             y += 24.0;
-            help_text(g, fx, y, "전체 색 모드");
+            help_text(g, fx, y, "윈도우 탭을 상단 타이틀바 또는 좌측 사이드바에 표시");
             y += 26.0;
-            let modes: [(&'static str, &str); 2] = [("dark", "Dark"), ("light", "Light")];
+            let tab_segs: [(&'static str, &str); 2] = [("top", "Top"), ("side", "Side")];
             let mut sx = fx;
-            for (val, label) in modes {
-                let sel = (val == "light") == ctx.theme_light;
+            for (val, label) in tab_segs {
                 let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
                 let r = (sx, y, tw, 32.0);
+                let sel = (val == "top") == ctx.tabs_on_top;
                 let hover = inside(r, ctx.cursor);
                 round_rect(
                     g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
@@ -448,10 +488,82 @@ pub(crate) fn paint_settings(
                         italic: false,
                     },
                 );
-                rects.push((SettingsAction::ThemeMode(val), r));
+                rects.push((SettingsAction::TabPosition(val), r));
                 sx += tw + 8.0;
             }
-            y += 44.0 + ROW_GAP;
+        }
+        SettingsCat::Appearance => {
+            let mut y = fy;
+            // 테마 — 프리셋 카드 그리드. 카드 하나 = 그 팔레트의 미니 프리뷰
+            // (bg 칠 + 프롬프트 샘플 + ANSI 도트 + 라벨)라서 고르기 전에 색이
+            // 보인다. UI 토큰과 터미널 ANSI 16색이 함께 바뀐다.
+            section_label(g, fx, y, "Theme");
+            y += 24.0;
+            help_text(g, fx, y, "UI + 터미널 ANSI 팔레트가 함께 바뀌어요");
+            y += 30.0;
+            let (card_w, card_h, gap) = (158.0_f32, 96.0_f32, 12.0_f32);
+            let per_row = (((fw + gap) / (card_w + gap)).floor() as usize).max(1);
+            let mut idx = 0usize;
+            let mut card = |g: &mut gpu::GpuRenderer,
+                            rects: &mut Vec<(SettingsAction, Rect)>,
+                            key: &'static str,
+                            label: &str,
+                            pal: Option<&theme::Palette>| {
+                let col = idx % per_row;
+                let row = idx / per_row;
+                let x = fx + col as f32 * (card_w + gap);
+                let cy = y + row as f32 * (card_h + gap);
+                let r = (x, cy, card_w, card_h);
+                let sel = ctx.theme == key;
+                let hover = inside(r, ctx.cursor);
+                // Selection / hover ring — a slightly larger plate behind the
+                // card (same halo trick as the accent swatches).
+                if sel {
+                    round_rect(g, x - 2.0, cy - 2.0, card_w + 4.0, card_h + 4.0, theme::RADIUS_MD + 2.0, theme::accent());
+                } else if hover {
+                    round_rect(g, x - 2.0, cy - 2.0, card_w + 4.0, card_h + 4.0, theme::RADIUS_MD + 2.0, theme::surface_hover());
+                }
+                // Custom card has no static palette — preview with the live
+                // colors instead (it IS the applied palette when selected).
+                let (bg, text, dim, ansi) = match pal {
+                    Some(p) => (p.bg, p.text, p.text_mute, p.ansi),
+                    None => {
+                        let mut a = [[0u8; 3]; 16];
+                        for (i, s) in a.iter_mut().enumerate() {
+                            *s = theme::ansi16(i);
+                        }
+                        (theme::bg(), theme::text(), theme::text_mute(), a)
+                    }
+                };
+                round_rect(g, x, cy, card_w, card_h, theme::RADIUS_MD, bg);
+                // Prompt sample in the theme's own text color.
+                g.draw_text(
+                    x + 12.0, cy + 12.0, "❯ ls -la",
+                    gpu::DrawOpts { font_size: 12.0, color: text, bold: false, italic: false },
+                );
+                // ANSI 1..=6 dots (red green yellow blue magenta cyan).
+                for i in 0..6 {
+                    let c = ansi[i + 1];
+                    round_rect(
+                        g, x + 12.0 + i as f32 * 16.0, cy + 36.0, 10.0, 10.0, 5.0,
+                        [c[0], c[1], c[2], 255],
+                    );
+                }
+                g.draw_text(
+                    x + 12.0, cy + card_h - 26.0, label,
+                    gpu::DrawOpts { font_size: 12.0, color: dim, bold: sel, italic: false },
+                );
+                rects.push((SettingsAction::ThemeMode(key), r));
+                idx += 1;
+            };
+            for (key, label, pal) in theme::THEME_PRESETS {
+                card(g, &mut rects, key, label, Some(pal));
+            }
+            if ctx.has_custom_theme {
+                card(g, &mut rects, "custom", "Custom (settings.json)", None);
+            }
+            let rows = idx.div_ceil(per_row);
+            y += rows as f32 * (card_h + gap) + ROW_GAP;
             // 강조색
             section_label(g, fx, y, "Accent color");
             y += 24.0;
@@ -471,6 +583,29 @@ pub(crate) fn paint_settings(
                 rects.push((SettingsAction::Accent(name.to_string()), r));
                 cxp += sz + 14.0;
             }
+            y += 30.0 + ROW_GAP;
+            // 폰트 크기 스테퍼 — 값은 즉시 적용(그리드 리플로우)되고
+            // settings.json 에 저장돼 재시작에도 유지된다.
+            section_label(g, fx, y, "Font size");
+            y += 24.0;
+            help_text(g, fx, y, "터미널 셀 폰트 크기 (기본 16 · Cmd+/- 줌과 별개인 기준값)");
+            y += 28.0;
+            let bs = 30.0_f32;
+            let minus = (fx, y, bs, bs);
+            stepper_btn(g, minus, "minus", ctx.cursor);
+            rects.push((SettingsAction::FontSizeDelta(-1), minus));
+            let num = format!("{:.0}", ctx.font_size);
+            let num_w = g.measure_chrome_text(&num, 15.0, true);
+            let num_span = 52.0_f32;
+            g.draw_text(
+                fx + bs + (num_span - num_w) / 2.0,
+                y + (bs - 15.0) / 2.0,
+                &num,
+                gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
+            );
+            let plus = (fx + bs + num_span, y, bs, bs);
+            stepper_btn(g, plus, "plus", ctx.cursor);
+            rects.push((SettingsAction::FontSizeDelta(1), plus));
         }
         SettingsCat::Shell => {
             let mut y = fy;
@@ -660,6 +795,23 @@ fn help_text(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
         y,
         text,
         gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+    );
+}
+
+/// Square icon button for the font-size stepper (− / +).
+fn stepper_btn(g: &mut gpu::GpuRenderer, r: Rect, glyph: &str, cursor: (f32, f32)) {
+    let hover = inside(r, cursor);
+    round_rect(
+        g, r.0, r.1, r.2, r.3, theme::RADIUS_SM,
+        if hover { theme::surface_hover() } else { theme::surface_active() },
+    );
+    let isz = 14.0;
+    g.queue_icon(
+        glyph,
+        r.0 + (r.2 - isz) / 2.0,
+        r.1 + (r.3 - isz) / 2.0,
+        isz,
+        if hover { theme::text() } else { theme::text_dim() },
     );
 }
 

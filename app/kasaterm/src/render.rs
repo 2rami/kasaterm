@@ -1159,10 +1159,11 @@ impl App {
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
         let (sb_tabs, sb_closes, sb_plus) = self.sidebar_layout(sb_win_h);
-        // Only register hit-rects when the tab strip is actually painted. A
+        // Only register hit-rects when tabs are actually painted (side strip
+        // open, or top-tabs mode where they always live in the title bar). A
         // hidden sidebar (file-tree-only / collapsed) must not leave stale tab
         // rects that a header-drag would false-hit as a cross-window drop.
-        let sidebar_shown = self.tab_strip_w() > 0.0;
+        let sidebar_shown = self.tabs_on_top || self.tab_strip_w() > 0.0;
         self.window_tab_rects = if sidebar_shown { sb_tabs.clone() } else { Vec::new() };
         self.window_tab_close_rects = if sidebar_shown { sb_closes.clone() } else { Vec::new() };
         self.new_window_btn_rect = Some(sb_plus);
@@ -1270,6 +1271,7 @@ impl App {
         self.settings_btn_rect = settings_btn;
         let settings_ctx = self.settings_open.then(|| self.settings_snapshot(win_px, scale));
         let settings_toggle = self.settings_toggle_rect();
+        let file_tree_toggle = self.file_tree_toggle_rect();
         let arona_btn = self.arona_btn_rect();
         let mut settings_rects_out: Vec<(SettingsAction, (f32, f32, f32, f32))> = Vec::new();
         // Caret blink for the commit-modal message box, computed before `g`
@@ -1404,7 +1406,8 @@ impl App {
             // Sidebar-toggle button, just right of the traffic lights.
             // VSCode / Warp-style glyph: an outlined panel with its left
             // column filled when the sidebar is shown, hollow when hidden.
-            {
+            // With tabs on top there is no side strip to toggle, so skip it.
+            if !self.tabs_on_top {
                 let (bx, by, bw, bh) = Self::sidebar_toggle_rect();
                 let hover = sb_cursor.0 >= bx
                     && sb_cursor.0 <= bx + bw
@@ -1429,7 +1432,7 @@ impl App {
             // File-tree toggle, just right of the sidebar toggle. Same chip
             // treatment; lit when the tree column is shown.
             {
-                let (bx, by, bw, bh) = Self::file_tree_toggle_rect();
+                let (bx, by, bw, bh) = file_tree_toggle;
                 let hover = sb_cursor.0 >= bx
                     && sb_cursor.0 <= bx + bw
                     && sb_cursor.1 >= by
@@ -1555,9 +1558,11 @@ impl App {
                 }
             }
             // Top bar: folder icon + current working directory, just right of
-            // the file-tree toggle (Warp-style location chip).
-            {
-                let (tbx, _, tbw, _) = Self::file_tree_toggle_rect();
+            // the file-tree toggle (Warp-style location chip). Side-tabs mode
+            // only — with top tabs the tabs themselves own this strip space
+            // (the cwd still shows on each pane's footer).
+            if !self.tabs_on_top {
+                let (tbx, _, tbw, _) = file_tree_toggle;
                 let px0 = tbx + tbw + 12.0;
                 let isz = theme::ICON_SIZE;
                 let iy = (TITLE_HEIGHT - isz) / 2.0;
@@ -1695,6 +1700,148 @@ impl App {
                     );
                 }
             }
+            // Shell picker popup painter — stacked under the "+" button
+            // (sb_plus) in either tab mode, so the side strip and the top-tab
+            // bar share one popup. Layout + hit rects were computed before the
+            // GPU borrow so clicks land on the same boxes we paint.
+            let paint_shell_menu = |g: &mut gpu::GpuRenderer| {
+                if !menu_open || shell_menu_layout.is_empty() {
+                    return;
+                }
+                let (px, py, _, ph) = sb_plus;
+                let backdrop_h = shell_menu_layout.len() as f32 * SHELL_ITEM_H + 8.0;
+                round_rect(
+                    g,
+                    px - 4.0,
+                    py + ph,
+                    menu_w_for_paint + 8.0,
+                    backdrop_h,
+                    theme::RADIUS_MD,
+                    theme::surface_active(),
+                );
+                for (_, label, _icon, (ix, iy, iw, ih)) in &shell_menu_layout {
+                    let hov = sb_cursor.0 >= *ix
+                        && sb_cursor.0 <= *ix + *iw
+                        && sb_cursor.1 >= *iy
+                        && sb_cursor.1 <= *iy + *ih;
+                    if hov {
+                        round_rect(g, *ix, *iy, *iw, *ih, theme::RADIUS_MD, theme::surface_hover());
+                    }
+                    g.queue_icon(
+                        "terminal",
+                        *ix + 12.0,
+                        *iy + (*ih - theme::ICON_SIZE) / 2.0,
+                        theme::ICON_SIZE,
+                        theme::text_dim(),
+                    );
+                    g.draw_text(
+                        *ix + 38.0,
+                        *iy + (*ih - 14.0) / 2.0,
+                        label,
+                        gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: false, italic: false },
+                    );
+                }
+            };
+            // Horizontal window tabs in the title strip (Windows Terminal-
+            // style). Same rects + per-window state as the side strip — only
+            // the paint differs: compact one-line pills, active cue = box +
+            // top accent stroke, status dots on the leading glyph.
+            if self.tabs_on_top {
+                for (i, (tx, ty, tw, th)) in &sb_tabs {
+                    let is_active = *i == sb_active;
+                    let is_hover = sb_hover == Some(*i);
+                    if is_active {
+                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_SM, theme::surface_active());
+                        g.rect(*tx + 5.0, *ty, *tw - 10.0, ACTIVE_ACCENT_STROKE, theme::accent());
+                    } else if is_hover {
+                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_SM, theme::surface_hover());
+                    } else {
+                        // Faint resting fill so background tabs still read as
+                        // tabs (Windows Terminal-style), not floating labels.
+                        let resting = theme::lerp(theme::surface_hover(), theme::bg(), 0.55);
+                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_SM, resting);
+                    }
+                    // Unseen-notification pulse, same cadence as the side strip.
+                    if sb_alert.get(*i).copied().unwrap_or(false) && raw_cursor_on {
+                        let mut c = theme::accent();
+                        c[3] = 64;
+                        round_rect(g, *tx, *ty, *tw, *th, theme::RADIUS_SM, c);
+                    }
+                    let (name, _cwd) = sb_labels
+                        .get(*i)
+                        .cloned()
+                        .unwrap_or_else(|| (format!("win {}", i + 1), String::new()));
+                    let isz = 14.0_f32;
+                    let icon_x = *tx + 8.0;
+                    let icon_y = *ty + (*th - isz) / 2.0;
+                    g.queue_icon(
+                        tab_icon_glyph(&name),
+                        icon_x,
+                        icon_y,
+                        isz,
+                        if is_active { theme::text_dim() } else { theme::text_mute() },
+                    );
+                    // Working / done dots on the glyph's corners (same meaning
+                    // as the side strip's chip dots).
+                    if sb_busy.get(*i).copied().unwrap_or(false) {
+                        round_rect(g, icon_x + isz - 3.0, icon_y - 3.0, 6.0, 6.0, 3.0, theme::accent());
+                    }
+                    if sb_done.get(*i).copied().unwrap_or(false) {
+                        round_rect(g, icon_x + isz - 3.0, icon_y + isz - 3.0, 6.0, 6.0, 3.0, theme::success());
+                    }
+                    let show_close = sb_tabs.len() > 1 && (is_active || is_hover);
+                    let text_x = icon_x + isz + 6.0;
+                    let avail = (*tx + *tw - text_x - if show_close { 24.0 } else { 8.0 }).max(0.0);
+                    let budget = (avail / 7.8).floor().max(2.0) as usize;
+                    g.draw_text(
+                        text_x,
+                        *ty + (*th - 12.5) / 2.0,
+                        &clip_display_width(&name, budget),
+                        gpu::DrawOpts {
+                            font_size: 12.5,
+                            color: if is_active { theme::text() } else { theme::text_dim() },
+                            bold: is_active,
+                            italic: false,
+                        },
+                    );
+                    if show_close {
+                        if let Some((_, (cx, cy, cw, ch))) = sb_closes.iter().find(|(ci, _)| ci == i) {
+                            let x_hover = sb_cursor.0 >= *cx
+                                && sb_cursor.0 <= *cx + *cw
+                                && sb_cursor.1 >= *cy
+                                && sb_cursor.1 <= *cy + *ch;
+                            if x_hover {
+                                round_rect(g, *cx, *cy, *cw, *ch, theme::RADIUS_SM, theme::with_alpha(theme::text(), 0x22));
+                            }
+                            let xcol = if x_hover { theme::text() } else { theme::text_mute() };
+                            g.queue_icon(
+                                "x",
+                                *cx + (*cw - 12.0) / 2.0,
+                                *cy + (*ch - 12.0) / 2.0,
+                                12.0,
+                                xcol,
+                            );
+                        }
+                    }
+                }
+                // "+" new-tab button after the last tab.
+                let (px, py, pw, ph) = sb_plus;
+                let plus_hover = sb_cursor.0 >= px
+                    && sb_cursor.0 <= px + pw
+                    && sb_cursor.1 >= py
+                    && sb_cursor.1 <= py + ph;
+                if plus_hover {
+                    round_rect(g, px, py, pw, ph, theme::RADIUS_SM, theme::surface_hover());
+                }
+                g.queue_icon(
+                    "plus",
+                    px + (pw - theme::ICON_SIZE) / 2.0,
+                    py + (ph - theme::ICON_SIZE) / 2.0,
+                    theme::ICON_SIZE,
+                    theme::text_mute(),
+                );
+                paint_shell_menu(g);
+            }
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
             if tab_strip_w > 0.0 {
@@ -1715,27 +1862,6 @@ impl App {
                     (sb_win_h - TITLE_HEIGHT).max(0.0),
                     theme::border(),
                 );
-                // Truncate a label to a *display-width* budget (CJK glyphs are
-                // double-width) with a trailing ellipsis, so long Hangul/CJK
-                // titles never bleed past the tab into the cell grid.
-                let clip = |s: &str, budget: usize| -> String {
-                    let total: usize = s.chars().map(cjk_display_w).sum();
-                    if total <= budget {
-                        return s.to_string();
-                    }
-                    let mut used = 0usize;
-                    let mut out = String::new();
-                    for c in s.chars() {
-                        let w = cjk_display_w(c);
-                        if used + w > budget.saturating_sub(1) {
-                            break;
-                        }
-                        used += w;
-                        out.push(c);
-                    }
-                    out.push('…');
-                    out
-                };
                 let multi = sb_tabs.len() > 1;
                 for (i, (tx, ty, tw, th)) in &sb_tabs {
                     let is_active = *i == sb_active;
@@ -1831,7 +1957,7 @@ impl App {
                     g.draw_text(
                         text_x,
                         *ty + 11.0,
-                        &clip(&name, name_max),
+                        &clip_display_width(&name, name_max),
                         gpu::DrawOpts {
                             font_size: 13.5,
                             color: name_fg,
@@ -1843,7 +1969,7 @@ impl App {
                         g.draw_text(
                             text_x,
                             *ty + 30.0,
-                            &clip(&cwd, ((self.sidebar_w_logical - 60.0).max(0.0) / 6.5).floor().max(4.0) as usize),
+                            &clip_display_width(&cwd, ((self.sidebar_w_logical - 60.0).max(0.0) / 6.5).floor().max(4.0) as usize),
                             gpu::DrawOpts {
                                 font_size: 11.0,
                                 color: cwd_fg,
@@ -1896,43 +2022,7 @@ impl App {
                     theme::ICON_SIZE,
                     theme::text_mute(),
                 );
-                // Shell picker popup, stacked under the "+" button. Layout
-                // (shell_menu_layout) and hit rects were computed before the
-                // GPU borrow so clicks land on the same boxes we paint.
-                if menu_open && !shell_menu_layout.is_empty() {
-                    let backdrop_h = shell_menu_layout.len() as f32 * SHELL_ITEM_H + 8.0;
-                    round_rect(
-                        g,
-                        px - 4.0,
-                        py + ph,
-                        menu_w_for_paint + 8.0,
-                        backdrop_h,
-                        theme::RADIUS_MD,
-                        theme::surface_active(),
-                    );
-                    for (_, label, _icon, (ix, iy, iw, ih)) in &shell_menu_layout {
-                        let hov = sb_cursor.0 >= *ix
-                            && sb_cursor.0 <= *ix + *iw
-                            && sb_cursor.1 >= *iy
-                            && sb_cursor.1 <= *iy + *ih;
-                        if hov {
-                            round_rect(g, *ix, *iy, *iw, *ih, theme::RADIUS_MD, theme::surface_hover());
-                        }
-                        g.queue_icon(
-                            "terminal",
-                            *ix + 12.0,
-                            *iy + (*ih - theme::ICON_SIZE) / 2.0,
-                            theme::ICON_SIZE,
-                            theme::text_dim(),
-                        );
-                        g.draw_text(
-                            *ix + 38.0,
-                            *iy + (*ih - 14.0) / 2.0,
-                            label,
-                            gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: false, italic: false },
-                        );
-                    }
-                }
+                paint_shell_menu(g);
                 // Settings entry — same tab-box style as the session tabs, so it
                 // reads as the last item in the list. Active (selected) box
                 // while the screen is open, faint hover box otherwise.
@@ -2138,10 +2228,11 @@ impl App {
                         g.queue_icon(chev, base_x + 2.0, y + (item_h - 12.0) / 2.0, 12.0, cc);
                     }
                     let icon_x = base_x + 18.0;
-                    // Single-color outline icon (cursor/VSCode style): a plain
-                    // folder or file glyph, tinted by row state. Ignored/dotfile
-                    // rows render dim + italic so build output (target, dist) and
-                    // config (.git, .claude) recede from real source.
+                    // Folders keep the single-color outline glyph (row-state
+                    // tint); files get the branded file-type icon (ft/*, full
+                    // color via FLAG_COLOR) with alpha carrying the ignored /
+                    // idle / hover states instead of a tint. Unknown types fall
+                    // back to the monochrome "file" glyph.
                     let icon_color = if node.ignored {
                         theme::with_alpha(theme::text_dim(), 0x99)
                     } else if hovered || is_open {
@@ -2149,7 +2240,20 @@ impl App {
                     } else {
                         theme::text_dim()
                     };
-                    g.queue_icon(if node.is_dir { "folder" } else { "file" }, icon_x, iy, isz, icon_color);
+                    if node.is_dir {
+                        g.queue_icon("folder", icon_x, iy, isz, icon_color);
+                    } else if let Some(ft) = file_icon(&node.name) {
+                        let alpha = if node.ignored {
+                            0.35
+                        } else if hovered || is_open {
+                            1.0
+                        } else {
+                            0.85
+                        };
+                        g.queue_icon_colored(ft, icon_x, iy, isz, alpha);
+                    } else {
+                        g.queue_icon("file", icon_x, iy, isz, icon_color);
+                    }
                     // Folders read brighter than files (soft hierarchy); ignored
                     // rows are muted; hover/open lift to full strength.
                     let fg = if node.ignored {
@@ -4842,6 +4946,28 @@ fn approval_anchor(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
     }
     let r = chevron.unwrap_or(last);
     Some((r, end_col(r)))
+}
+
+/// Truncate a label to a *display-width* budget (CJK glyphs are double-width)
+/// with a trailing ellipsis, so long Hangul/CJK titles never bleed past the
+/// tab into neighboring chrome. Shared by the side strip and the top tab bar.
+fn clip_display_width(s: &str, budget: usize) -> String {
+    let total: usize = s.chars().map(cjk_display_w).sum();
+    if total <= budget {
+        return s.to_string();
+    }
+    let mut used = 0usize;
+    let mut out = String::new();
+    for c in s.chars() {
+        let w = cjk_display_w(c);
+        if used + w > budget.saturating_sub(1) {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out.push('…');
+    out
 }
 
 #[cfg(test)]
