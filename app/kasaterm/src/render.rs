@@ -1719,7 +1719,7 @@ impl App {
                     theme::RADIUS_MD,
                     theme::surface_active(),
                 );
-                for (_, label, _icon, (ix, iy, iw, ih)) in &shell_menu_layout {
+                for (_, label, icon, (ix, iy, iw, ih)) in &shell_menu_layout {
                     let hov = sb_cursor.0 >= *ix
                         && sb_cursor.0 <= *ix + *iw
                         && sb_cursor.1 >= *iy
@@ -1728,7 +1728,7 @@ impl App {
                         round_rect(g, *ix, *iy, *iw, *ih, theme::RADIUS_MD, theme::surface_hover());
                     }
                     g.queue_icon(
-                        "terminal",
+                        icon,
                         *ix + 12.0,
                         *iy + (*ih - theme::ICON_SIZE) / 2.0,
                         theme::ICON_SIZE,
@@ -1840,7 +1840,6 @@ impl App {
                     theme::ICON_SIZE,
                     theme::text_mute(),
                 );
-                paint_shell_menu(g);
             }
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
@@ -2022,11 +2021,13 @@ impl App {
                     theme::ICON_SIZE,
                     theme::text_mute(),
                 );
-                paint_shell_menu(g);
                 // Settings entry — same tab-box style as the session tabs, so it
                 // reads as the last item in the list. Active (selected) box
                 // while the screen is open, faint hover box otherwise.
-                {
+                // "+" 피커가 열려 있으면 스킵 — 팝업이 이 자리를 덮는데 아이콘 글리프는
+                // rect 위 레이어라 비쳐 올라온다([[glyph_dim_layer_trap]] 관례: 가려지는
+                // chrome 은 안 그린다).
+                if !menu_open {
                     let (bx, by, bw, bh) = settings_btn;
                     let active = self.settings_open;
                     let hover = sb_cursor.0 >= bx
@@ -2443,6 +2444,9 @@ impl App {
                     }
                 }
             }
+            // "+" 피커 팝업 — 사이드바 Settings 행·파일트리 위로 뜨는 오버레이라 그 뒤에
+            // 한 번만 그린다(먼저 그리면 나중에 그린 chrome 텍스트가 팝업 위로 비친다).
+            paint_shell_menu(g);
             // ── Git column ── right-hand chrome mirroring the file-tree column
             // on the left, but native instead of the old floating webview: the
             // poller fills `git_view` off-thread and this paints branch +

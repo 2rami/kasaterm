@@ -745,6 +745,15 @@ impl Backend for PtyBackend {
             .lock()
             .unwrap()
             .insert(surface_id.to_string(), PathBuf::from(path));
+        // transcript 파일명(stem) = claude 세션 id — GUI 에 위임해 세션→캐릭터 영속
+        // 매핑을 조회/저장한다(거노 ④: resume 시 캐릭터 재사용). App 상태는 GUI 스레드
+        // 소유라 proxy 로 넘긴다(SocketBytes 관례).
+        if let Some(sid) = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()) {
+            let _ = self.proxy.send_event(UserEvent::SocketSessionBound(
+                surface_id.to_string(),
+                sid.to_string(),
+            ));
+        }
         Ok(())
     }
 

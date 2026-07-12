@@ -180,6 +180,32 @@ impl App {
         eprintln!("[autosettings] open_settings cat={cat}");
         self.open_settings();
     }
+    /// Headless "+" 셸 피커 repro: `KASATERM_AUTOSHELLMENU_MS` 후 피커 팝업을 연다 —
+    /// 항목(기본 셸·Claude 학생 등)을 클릭 없이 캡처. autosettings 처럼 함수-로컬
+    /// static(병렬 작업 규칙: struct App 무접촉).
+    pub(crate) fn run_pending_autoshellmenu(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOSHELLMENU_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        eprintln!("[autoshellmenu] open shell picker");
+        self.shell_menu_open = true;
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
     /// Headless file-open repro: schedule `open_file_split` on the path in
     /// `KASATERM_AUTOOPEN` after `KASATERM_AUTOOPEN_MS` (default 4000ms), so a
     /// background run can prove the preview pane + file-tree highlight without

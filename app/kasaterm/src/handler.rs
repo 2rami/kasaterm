@@ -201,11 +201,20 @@ impl ApplicationHandler<UserEvent> for App {
                 self.swap_character(pane, character);
                 return;
             }
+            UserEvent::SocketSessionBound(pane, sid) => {
+                self.apply_session_character(pane, sid);
+                return;
+            }
             UserEvent::ResumeSession { id, cwd, newroom, attach } => {
                 // 새 pane 을 띄우고, 그 셸 프롬프트가 뜰 즈음 `claude --resume <id>` 를
                 // 주입한다(주입 자체는 pending_restores drain 이 시간 기반으로 처리).
                 // 세션 cwd 가 있으면 cd 를 앞에 붙여 어느 방에서 열어도 올바른 프로젝트
                 // 세션을 잇는다(claude --resume 는 cwd 의 프로젝트 기준).
+                // 세션→캐릭터 매핑이 있으면 스폰 전에 pending 배정(거노 ④) — 랜덤 둔갑을
+                // 시점부터 차단하고 persona 까지 그 캐릭터로 맞춘다. 없으면 기존 랜덤.
+                if let Some(ch) = kasa_mcp::character::session_character(id) {
+                    self.pending_character = Some(ch);
+                }
                 let new_id = if *newroom {
                     self.new_window();
                     self.ws.lock().unwrap().active_pane.clone()
@@ -1736,7 +1745,13 @@ impl ApplicationHandler<UserEvent> for App {
                         self.shell_menu_open = false;
                         self.chrome_dirty = true;
                         if let Some(shell) = pick {
-                            self.pending_shell = Some(shell);
+                            // 피커 sentinel 라우팅: 기본 셸 = 그냥 새 윈도우, Claude 학생 =
+                            // teammate 부팅 예약. 실제 셸 경로만 pending_shell 로 넘긴다.
+                            if shell == crate::PICKER_CLAUDE_STUDENT {
+                                self.pending_claude_student = true;
+                            } else if shell != crate::PICKER_DEFAULT_SHELL {
+                                self.pending_shell = Some(shell);
+                            }
                             self.new_window();
                         }
                         return;
@@ -1876,16 +1891,9 @@ impl ApplicationHandler<UserEvent> for App {
                             if self.settings_open {
                                 self.close_settings();
                             }
-                            // The shell picker only has entries on Windows
-                            // (PowerShell/CMD/Git Bash/WSL). On macOS/Linux
-                            // `available_shells()` is empty, so toggling the
-                            // menu would just swallow the click and never open
-                            // a tab — spawn a default window directly instead.
-                            if available_shells().is_empty() {
-                                self.new_window();
-                            } else {
-                                self.shell_menu_open = !self.shell_menu_open;
-                            }
+                            // 피커는 전 플랫폼에 항목이 있다(기본 셸·Claude 학생 공통 +
+                            // Windows 설치 셸) — "+" 는 항상 메뉴 토글.
+                            self.shell_menu_open = !self.shell_menu_open;
                             self.chrome_dirty = true;
                             return;
                         }
@@ -3531,6 +3539,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
         self.run_pending_autosettings();
+        self.run_pending_autoshellmenu();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was
