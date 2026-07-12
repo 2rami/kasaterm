@@ -3540,6 +3540,8 @@ impl App {
             // terminal at first launch. User toggles via the title-bar
             // button or the "보기 → 세션 패널" menu item.
             sidebar_visible: false,
+            // 기본은 side(사이드바 탭) — read_tab_position 이 "top" 만 top 으로,
+            // 그 외/키없음은 side 로 폴백한다.
             tabs_on_top: socket::read_tab_position() == "top",
             pending_open_md: Vec::new(),
         }

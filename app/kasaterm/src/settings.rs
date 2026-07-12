@@ -50,6 +50,15 @@ impl App {
     /// just below the "+" new-window button so it reads as the last item in the
     /// tab list (Warp-style). Logical px; mirrors `sidebar_layout`'s geometry.
     pub(crate) fn settings_btn_rect(&self, _win_h_logical: f32) -> Rect {
+        // 이 버튼은 세션 사이드바 탭 리스트의 마지막 항목이라, 사이드바가 없으면
+        // (top 모드 또는 사이드바 접힘) 그려지지도 않는다. 그런데 rect 는 매 프레임
+        // 저장돼(render) 클릭 hit-test 에 남는다 — top 모드에서 이 유령 rect 가
+        // 설정 화면 좌측 카테고리 nav(같은 좌상단 영역)의 Appearance·Shell 클릭을
+        // 가로채 페이지 전환이 안 됐다(거노). 안 그려질 땐 hit 대상도 없어야 하므로
+        // 무효 rect 를 돌려준다. 설정 진입점은 타이틀바 톱니(settings_toggle)가 담당.
+        if self.tabs_on_top || !self.sidebar_visible {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
         let n = self.windows.len();
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
