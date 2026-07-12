@@ -1677,13 +1677,14 @@ pub fn write_setting(key: &str, value: serde_json::Value) {
     }
 }
 
-/// Where window tabs live: "top" (Windows Terminal-style horizontal tabs in
-/// the title strip, the default) or "side" (the original Warp-style vertical
-/// sidebar list).
+/// Where window tabs live: "side" (Warp-style vertical sidebar list, the
+/// default) or "top" (Windows Terminal-style horizontal tabs in the title
+/// strip). Only an explicit "top" opts into the title-strip tabs; anything
+/// else — including a missing key — falls back to the side strip.
 pub fn read_tab_position() -> String {
     match read_settings().get("tab_position").and_then(|x| x.as_str()) {
-        Some("side") => "side".to_string(),
-        _ => "top".to_string(),
+        Some("top") => "top".to_string(),
+        _ => "side".to_string(),
     }
 }
 

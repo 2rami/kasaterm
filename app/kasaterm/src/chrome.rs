@@ -209,14 +209,33 @@ impl App {
             0.0
         }
     }
-    /// 헤더 띠 높이(logical px) — image/md pane만 30, 그 외 0. resize_backend
-    /// 처럼 ws 미잠금 지점에서 id로 조회한다(PaneState::header_px 위임).
+    /// 레이아웃이 분할 상태(리프 2개 이상)인가. 분할이면 단일탭 터미널 pane 도
+    /// 제목 헤더 띠를 얻는다 — 어느 pane 이 뭔지 제목으로 구분하려고(거노). 헤더
+    /// 높이를 계산하는 render/layout/input 이 이 판정을 공유해야 셀↔마우스가 안
+    /// 어긋난다. zoom 중엔 한 pane 만 풀그리드로 그려(render 의 zoom_leaves) 헤더가
+    /// 없으므로 분할 아님으로 친다 — 안 그러면 zoom pane 셀이 30px 어긋난다.
+    /// ws 를 잠그지 않아 ws guard 를 든 호출자(px_to_pane_cell 등)에서도 안전.
+    pub(crate) fn layout_is_split(&self) -> bool {
+        if self.zoomed_pane.is_some() {
+            return false;
+        }
+        self.pty_layout.as_ref().map_or(false, |t| t.leaves().len() > 1)
+    }
+    /// 헤더 띠 높이(logical px) — image/md/멀티탭 pane 은 30, 그 외 0. 단, 분할
+    /// 상태면 단일탭 터미널도 제목 띠 30 을 얻는다. resize_backend 처럼 ws 미잠금
+    /// 지점에서 id로 조회한다(PaneState::header_px 위임 + 분할 보정).
     pub(crate) fn pane_header_px(&self, id: &str) -> f32 {
-        self.ws
+        let base = self
+            .ws
             .lock()
             .ok()
             .and_then(|w| w.panes.get(id).map(|p| p.header_px()))
-            .unwrap_or(0.0)
+            .unwrap_or(0.0);
+        if self.layout_is_split() {
+            base.max(PANE_HEADER_HEIGHT)
+        } else {
+            base
+        }
     }
     /// Git-column-toggle button rect, parked at the right end of the title
     /// strip (mirrors the file-tree toggle on the left). Needs the window

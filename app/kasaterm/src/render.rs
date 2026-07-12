@@ -23,6 +23,9 @@ impl App {
             .target_pane()
             .and_then(|id| self.pane_font_scales.get(&id).copied())
             .unwrap_or(1.0);
+        // 분할이면 active pane 셀이 제목 헤더 띠만큼 아래로 밀리므로(render origin)
+        // preedit(한글 조합) 오버레이도 같은 band 를 더해 실제 커서 행에 얹는다.
+        let preedit_band = if self.layout_is_split() { PANE_HEADER_HEIGHT } else { 0.0 };
         let snap = {
             let ws = self.ws.lock().unwrap();
             // Active pane's top-left in cell units. When the workspace is
@@ -83,7 +86,7 @@ impl App {
                         display,
                         pane_origin.0,
                         pane_origin.1,
-                        pane.header_px(),
+                        pane.header_px().max(preedit_band),
                     )
                 })
             })
@@ -406,6 +409,10 @@ impl App {
             // 비활성 pane dim(흐림)만 split 여부로 유지. pane 컨트롤은
             // hover ⋮ 핸들로 이관(Phase 2~4).
             let is_split = leaves.len() > 1;
+            // 분할이면 단일탭 터미널 pane 도 제목 헤더 띠(30px)를 얻는다 — 어느
+            // pane 인지 제목으로 구분(거노). pane.header_px()(이미지/md/멀티탭=30,
+            // 그 외 0)와 max 해 셀 시프트·클립·마우스가 같은 값을 쓰게 한다.
+            let split_band = if is_split { PANE_HEADER_HEIGHT } else { 0.0 };
             let mut slots = Vec::new();
             let mut headers = Vec::new();
             // Box geometry per leaf (id, x, y, w, h) in logical px — collected
@@ -452,7 +459,7 @@ impl App {
                     let ch = self.cell.h.max(1.0);
                     let scaled_cw = cw * fs;
                     let scaled_ch = ch * fs;
-                    let header_px_now = pane.header_px();
+                    let header_px_now = pane.header_px().max(split_band);
                     let footer_px_now = self.statusbar_px(id.as_str());
                     let usable_w = (w_cells as f32 * cw - 2.0 * PANE_INNER_X).max(scaled_cw);
                     let usable_h = (h_cells as f32 * ch
@@ -512,7 +519,7 @@ impl App {
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
-                let header_shift_px = pane.header_px() * scale;
+                let header_shift_px = pane.header_px().max(split_band) * scale;
                 let origin_px = (
                     pad_px + x_cells as f32 * cell_w_px + PANE_INNER_X * scale,
                     title_px
@@ -524,7 +531,7 @@ impl App {
                 // boxes (Claude Code code/command blocks) and stash a copy
                 // button at each block's top-right. Logical px so the mouse
                 // handler and the overlay pass agree on the hit area.
-                let header_shift_logical = pane.header_px();
+                let header_shift_logical = pane.header_px().max(split_band);
                 let body_left = WINDOW_PADDING
                     + sidebar_w
                     + x_cells as f32 * self.cell.w
@@ -825,9 +832,10 @@ impl App {
                     }
                 };
                 footer_slots.push((id.clone(), box_x, box_y, box_w, box_h));
-                // image/md pane만 헤더 띠 데이터 생성(전용 컨트롤 자리). 일반
-                // 터미널은 hover ⋮ 핸들로 — has_header()가 그 경계를 가른다.
-                if pane.has_header() {
+                // image/md/멀티탭 pane 은 헤더 띠(전용 컨트롤·탭). 게다가 분할이면
+                // 단일탭 터미널도 제목 띠를 얻어 어느 pane 인지 구분한다(거노). 분할
+                // 없는 단일 터미널만 헤더 없이 hover ⋮ 핸들로 간다.
+                if pane.has_header() || is_split {
                     // 캐릭터 배정 pane(학생)은 헤더에도 이름을 — "미도리 · 작업명"(작업명
                     // =OSC title). BA GUI board 라벨과 통일(거노: 터미널 탭도 학생 이름).
                     // 비배정 pane 만 기존 "%N · 프로세스" 폴백.
