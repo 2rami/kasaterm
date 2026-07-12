@@ -201,6 +201,73 @@ fn tab_icon_glyph(name: &str) -> &'static str {
     }
 }
 
+/// File-type icon (assets/icons/ft, 브랜드컬러 filled)를 파일명에서 고른다.
+/// 특수 파일명(README, Dockerfile, tsconfig…)이 확장자보다 우선. `None` 이면
+/// 매핑이 없다는 뜻 — 호출부는 기존 모노크롬 "file" 글리프로 폴백한다.
+fn file_icon(name: &str) -> Option<&'static str> {
+    let l = name.to_ascii_lowercase();
+    // Well-known file names first — these outrank their extension.
+    let by_name = match l.as_str() {
+        "readme" | "readme.md" | "readme.txt" => Some("ft/readme"),
+        "license" | "license.md" | "license.txt" | "licence" => Some("ft/license"),
+        "todo" | "todo.md" => Some("ft/todo"),
+        "dockerfile" | ".dockerignore" | "docker-compose.yml" | "docker-compose.yaml" => {
+            Some("ft/docker")
+        }
+        "tsconfig.json" => Some("ft/tsconfig"),
+        "package.json" | "package-lock.json" => Some("ft/nodejs"),
+        ".gitignore" | ".gitattributes" | ".gitmodules" | ".gitconfig" => Some("ft/git"),
+        _ => None,
+    };
+    if by_name.is_some() {
+        return by_name;
+    }
+    if l.starts_with(".env") {
+        return Some("ft/settings");
+    }
+    let ext = l.rsplit_once('.').map(|(_, e)| e)?;
+    Some(match ext {
+        "rs" => "ft/rust",
+        "ts" | "mts" | "cts" => "ft/typescript",
+        "tsx" | "jsx" => "ft/react",
+        "js" | "mjs" | "cjs" => "ft/javascript",
+        "json" | "jsonc" => "ft/json",
+        "md" | "markdown" | "mdx" => "ft/markdown",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "bmp" | "avif" | "heic" => "ft/image",
+        "svg" => "ft/svg",
+        "toml" | "ini" | "conf" | "cfg" | "plist" | "properties" => "ft/settings",
+        "yaml" | "yml" => "ft/yaml",
+        "sh" | "bash" | "zsh" | "fish" | "bat" | "cmd" => "ft/console",
+        "ps1" | "psm1" => "ft/powershell",
+        "py" | "pyi" => "ft/python",
+        "c" | "h" => "ft/c",
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" => "ft/cpp",
+        "cs" => "ft/csharp",
+        "css" => "ft/css",
+        "scss" | "sass" | "less" => "ft/sass",
+        "html" | "htm" | "xhtml" => "ft/html",
+        "go" => "ft/go",
+        "java" => "ft/java",
+        "kt" | "kts" => "ft/kotlin",
+        "lua" => "ft/lua",
+        "php" => "ft/php",
+        "rb" | "erb" => "ft/ruby",
+        "swift" => "ft/swift",
+        "vue" => "ft/vue",
+        "graphql" | "gql" => "ft/graphql",
+        "prisma" => "ft/prisma",
+        "sql" | "db" | "sqlite" | "sqlite3" => "ft/database",
+        "pdf" => "ft/pdf",
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "tgz" => "ft/zip",
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" => "ft/audio",
+        "mp4" | "mov" | "mkv" | "avi" | "webm" => "ft/video",
+        "ttf" | "otf" | "woff" | "woff2" => "ft/font",
+        "lock" => "ft/lock",
+        "txt" | "rtf" | "log" => "ft/document",
+        _ => return None,
+    })
+}
+
 /// Draw a chrome icon glyph centered inside a square chip whose top-left is
 /// (`chip_x`, `chip_y`). One place owns icon sizing / centering / hover so every
 /// icon button (title bar, sidebar, pane header, image controls) reads
@@ -2545,6 +2612,10 @@ pub(crate) enum SettingsAction {
     FocusShell,
     ThemeMode(&'static str),
     Accent(String),
+    /// Font-size stepper: −1 / +1 logical px on the base cell font.
+    FontSizeDelta(i8),
+    /// Window-tab placement: "top" (title-strip tabs) or "side" (Warp strip).
+    TabPosition(&'static str),
     ToggleClaudePersona,
     ToggleShimInject,
     ClaudeModel(String),
@@ -3251,6 +3322,11 @@ struct App {
     /// `effective_sidebar_w()` instead of the `SIDEBAR_W` const directly,
     /// so flipping this is all it takes to collapse the strip.
     sidebar_visible: bool,
+    /// Window tabs live in the title strip (Windows Terminal-style horizontal
+    /// tabs) instead of the left sidebar. `sidebar_layout` swaps its rect math
+    /// and `tab_strip_w()` pins the side strip to 0, so render + click routing
+    /// follow automatically. Persisted as settings.json `tab_position`.
+    tabs_on_top: bool,
     /// macOS `.md` 더블클릭이 cold-launch(앱 꺼진 채)로 들어오면 odoc 이벤트가
     /// `resumed()`(window·pty_layout 생성) 전에 도착할 수 있다. 그때 경로를 여기
     /// 쌓아두고 start_pty 직후 flush 한다(빈손이면 무비용). 앱 켜진 채 더블클릭은
@@ -3433,7 +3509,7 @@ impl App {
             wheel_accum_y: 0.0,
             last_wheel_emit: Instant::now() - std::time::Duration::from_secs(1),
             last_input_at: Instant::now(),
-            font_size: FONT_SIZE,
+            font_size: socket::read_font_size(),
             ui_zoom: 1.0,
             pane_font_scales: std::collections::HashMap::new(),
             proxy,
@@ -3464,6 +3540,7 @@ impl App {
             // terminal at first launch. User toggles via the title-bar
             // button or the "보기 → 세션 패널" menu item.
             sidebar_visible: false,
+            tabs_on_top: socket::read_tab_position() == "top",
             pending_open_md: Vec::new(),
         }
     }

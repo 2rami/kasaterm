@@ -1599,6 +1599,63 @@ impl GpuRenderer {
             "undo-2" => include_str!("../assets/icons/undo-2.svg"),
             "external-link" => include_str!("../assets/icons/external-link.svg"),
             "claude" => include_str!("../assets/icons/claude.svg"),
+            // File-type set (assets/icons/ft): VSCode Material 계열의 브랜드컬러
+            // filled SVG — 모노크롬 틴트가 아닌 `queue_icon_colored` 로 그린다.
+            "ft/audio" => include_str!("../assets/icons/ft/audio.svg"),
+            "ft/c" => include_str!("../assets/icons/ft/c.svg"),
+            "ft/console" => include_str!("../assets/icons/ft/console.svg"),
+            "ft/cpp" => include_str!("../assets/icons/ft/cpp.svg"),
+            "ft/csharp" => include_str!("../assets/icons/ft/csharp.svg"),
+            "ft/css" => include_str!("../assets/icons/ft/css.svg"),
+            "ft/database" => include_str!("../assets/icons/ft/database.svg"),
+            "ft/docker" => include_str!("../assets/icons/ft/docker.svg"),
+            "ft/document" => include_str!("../assets/icons/ft/document.svg"),
+            "ft/font" => include_str!("../assets/icons/ft/font.svg"),
+            "ft/git" => include_str!("../assets/icons/ft/git.svg"),
+            "ft/go" => include_str!("../assets/icons/ft/go.svg"),
+            "ft/graphql" => include_str!("../assets/icons/ft/graphql.svg"),
+            "ft/html" => include_str!("../assets/icons/ft/html.svg"),
+            "ft/image" => include_str!("../assets/icons/ft/image.svg"),
+            "ft/java" => include_str!("../assets/icons/ft/java.svg"),
+            "ft/javascript" => include_str!("../assets/icons/ft/javascript.svg"),
+            "ft/json" => include_str!("../assets/icons/ft/json.svg"),
+            "ft/kotlin" => include_str!("../assets/icons/ft/kotlin.svg"),
+            "ft/license" => include_str!("../assets/icons/ft/license.svg"),
+            "ft/lock" => include_str!("../assets/icons/ft/lock.svg"),
+            "ft/lua" => include_str!("../assets/icons/ft/lua.svg"),
+            "ft/markdown" => include_str!("../assets/icons/ft/markdown.svg"),
+            "ft/nodejs" => include_str!("../assets/icons/ft/nodejs.svg"),
+            "ft/pdf" => include_str!("../assets/icons/ft/pdf.svg"),
+            "ft/php" => include_str!("../assets/icons/ft/php.svg"),
+            "ft/powershell" => include_str!("../assets/icons/ft/powershell.svg"),
+            "ft/prisma" => include_str!("../assets/icons/ft/prisma.svg"),
+            "ft/python" => include_str!("../assets/icons/ft/python.svg"),
+            "ft/react" => include_str!("../assets/icons/ft/react.svg"),
+            "ft/readme" => include_str!("../assets/icons/ft/readme.svg"),
+            "ft/ruby" => include_str!("../assets/icons/ft/ruby.svg"),
+            "ft/rust" => include_str!("../assets/icons/ft/rust.svg"),
+            "ft/sass" => include_str!("../assets/icons/ft/sass.svg"),
+            "ft/settings" => include_str!("../assets/icons/ft/settings.svg"),
+            "ft/svg" => include_str!("../assets/icons/ft/svg.svg"),
+            "ft/swift" => include_str!("../assets/icons/ft/swift.svg"),
+            "ft/todo" => include_str!("../assets/icons/ft/todo.svg"),
+            "ft/tsconfig" => include_str!("../assets/icons/ft/tsconfig.svg"),
+            "ft/typescript" => include_str!("../assets/icons/ft/typescript.svg"),
+            "ft/video" => include_str!("../assets/icons/ft/video.svg"),
+            "ft/vue" => include_str!("../assets/icons/ft/vue.svg"),
+            "ft/yaml" => include_str!("../assets/icons/ft/yaml.svg"),
+            "ft/zip" => include_str!("../assets/icons/ft/zip.svg"),
+            "ft/folder-base" => include_str!("../assets/icons/ft/folder-base.svg"),
+            "ft/folder-config" => include_str!("../assets/icons/ft/folder-config.svg"),
+            "ft/folder-dist" => include_str!("../assets/icons/ft/folder-dist.svg"),
+            "ft/folder-docs" => include_str!("../assets/icons/ft/folder-docs.svg"),
+            "ft/folder-github" => include_str!("../assets/icons/ft/folder-github.svg"),
+            "ft/folder-images" => include_str!("../assets/icons/ft/folder-images.svg"),
+            "ft/folder-node" => include_str!("../assets/icons/ft/folder-node.svg"),
+            "ft/folder-public" => include_str!("../assets/icons/ft/folder-public.svg"),
+            "ft/folder-src" => include_str!("../assets/icons/ft/folder-src.svg"),
+            "ft/folder-target" => include_str!("../assets/icons/ft/folder-target.svg"),
+            "ft/folder-test" => include_str!("../assets/icons/ft/folder-test.svg"),
             _ => return None,
         })
     }
@@ -1617,6 +1674,30 @@ impl GpuRenderer {
         let tf = resvg::tiny_skia::Transform::from_scale(scale, scale);
         resvg::render(&tree, tf, &mut pixmap.as_mut());
         Some(pixmap.data().to_vec())
+    }
+
+    /// `rasterize_icon` 의 풀컬러 버전 — SVG 자체 fill 색을 보존한다.
+    /// FLAG_COLOR 경로는 texel.rgb 를 그대로 샘플하므로 tiny_skia 의
+    /// premultiplied 출력을 straight alpha 로 되돌려야 반투명 가장자리가
+    /// 어두워지지 않는다.
+    fn rasterize_icon_color(svg: &str, px: u32) -> Option<Vec<u8>> {
+        let opt = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_str(svg, &opt).ok()?;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(px, px)?;
+        let size = tree.size();
+        let scale = px as f32 / size.width().max(size.height());
+        let tf = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        resvg::render(&tree, tf, &mut pixmap.as_mut());
+        let mut data = pixmap.take();
+        for p in data.chunks_exact_mut(4) {
+            let a = p[3] as u32;
+            if a > 0 && a < 255 {
+                p[0] = ((p[0] as u32 * 255) / a).min(255) as u8;
+                p[1] = ((p[1] as u32 * 255) / a).min(255) as u8;
+                p[2] = ((p[2] as u32 * 255) / a).min(255) as u8;
+            }
+        }
+        Some(data)
     }
 
     /// Queue a chrome icon at `(x, y)` (logical px), `size`-side square, tinted
@@ -1651,6 +1732,38 @@ impl GpuRenderer {
                 uv_max: [1.0, 1.0],
                 fg_rgba: srgb_rgba_to_linear(color),
                 flags: CellInstance::FLAG_ICON,
+                ..Default::default()
+            },
+        ));
+    }
+
+    /// `queue_icon` 의 풀컬러 버전 — 파일타입 아이콘(ft/*)처럼 SVG 자체 색을
+    /// 가진 글리프용. FLAG_COLOR(이모지 경로)로 그려 texel 색을 그대로 쓰고,
+    /// `alpha` 만 전역 불투명도로 곱한다(ignored/dim 행 표현).
+    pub fn queue_icon_colored(&mut self, name: &str, x: f32, y: f32, size: f32, alpha: f32) {
+        let px = (size * self.scale).round() as u32;
+        if px == 0 {
+            return;
+        }
+        let key = format!("__iconc:{name}:{px}");
+        if !self.images.contains_key(&key) {
+            let Some(svg) = Self::icon_svg(name) else { return };
+            let Some(rgba) = Self::rasterize_icon_color(svg, px) else { return };
+            self.upload_image(&key, &rgba, px, px);
+        }
+        if !self.images.contains_key(&key) {
+            return;
+        }
+        let (dx, dy) = ((x * self.scale).round(), (y * self.scale).round());
+        let dpx = px as f32;
+        self.icon_quads.push((
+            key,
+            CellInstance {
+                cell_px: [dx, dy, dpx, dpx],
+                uv_min: [0.0, 0.0],
+                uv_max: [1.0, 1.0],
+                fg_rgba: [1.0, 1.0, 1.0, alpha],
+                flags: CellInstance::FLAG_COLOR,
                 ..Default::default()
             },
         ));

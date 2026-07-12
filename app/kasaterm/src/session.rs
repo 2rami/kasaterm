@@ -1384,6 +1384,39 @@ impl App {
         (f32, f32, f32, f32),
     ) {
         let n = self.windows.len();
+        if self.tabs_on_top {
+            // Horizontal tabs in the title strip (Windows Terminal-style).
+            // Same return shape as the vertical layout so the paint loop and
+            // every click/drag hit-test keep working off the cached rects.
+            let win_w = self
+                .window
+                .as_ref()
+                .map(|w| w.inner_size().width as f32 / self.effective_scale())
+                .unwrap_or(1200.0);
+            let (tbx, _, tbw, _) = self.file_tree_toggle_rect();
+            let x0 = tbx + tbw + 10.0;
+            // Right-side chip cluster (arona + settings + git-col) stays clear.
+            let right_reserved = 110.0;
+            let plus_w = 26.0;
+            let gap = 4.0;
+            let avail = (win_w - right_reserved - x0 - plus_w - 6.0).max(60.0);
+            let tab_w = ((avail - gap * n.saturating_sub(1) as f32) / n.max(1) as f32)
+                .clamp(72.0, 170.0);
+            let tab_h = 26.0;
+            let y = (TITLE_HEIGHT - tab_h) / 2.0;
+            let mut tabs = Vec::with_capacity(n);
+            let mut closes = Vec::new();
+            for i in 0..n {
+                let x = x0 + i as f32 * (tab_w + gap);
+                tabs.push((i, (x, y, tab_w, tab_h)));
+                if n > 1 {
+                    let cs = 14.0;
+                    closes.push((i, (x + tab_w - cs - 5.0, y + (tab_h - cs) / 2.0, cs, cs)));
+                }
+            }
+            let plus = (x0 + n as f32 * (tab_w + gap), y, plus_w, tab_h);
+            return (tabs, closes, plus);
+        }
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
         let top = TITLE_HEIGHT + 8.0;

@@ -1743,8 +1743,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // Sidebar-toggle button in the title strip (right of the
                     // traffic lights). Caught before the title-bar drag path
-                    // so the click toggles instead of moving the window.
-                    {
+                    // so the click toggles instead of moving the window. Not
+                    // painted with tabs on top, so don't eat the click either.
+                    if !self.tabs_on_top {
                         let (bx, by, bw, bh) = Self::sidebar_toggle_rect();
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_sidebar();
@@ -1753,7 +1754,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // File-tree toggle, just right of the sidebar toggle.
                     {
-                        let (bx, by, bw, bh) = Self::file_tree_toggle_rect();
+                        let (bx, by, bw, bh) = self.file_tree_toggle_rect();
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_file_tree();
                             return;
@@ -3529,6 +3530,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autotabs();
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
+        self.run_pending_autosettings();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was

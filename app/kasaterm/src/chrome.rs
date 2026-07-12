@@ -142,9 +142,10 @@ impl App {
     pub(crate) fn effective_sidebar_w(&self) -> f32 {
         self.tab_strip_w() + self.file_tree_col_w()
     }
-    /// Width of the session-tab strip alone (0 when collapsed).
+    /// Width of the session-tab strip alone (0 when collapsed). With top tabs
+    /// the strip never opens — the tabs live in the title bar instead.
     pub(crate) fn tab_strip_w(&self) -> f32 {
-        if self.sidebar_visible {
+        if self.sidebar_visible && !self.tabs_on_top {
             self.sidebar_w_logical
         } else {
             0.0
@@ -891,8 +892,13 @@ impl App {
         (x, y, w, h)
     }
     /// File-tree-toggle button rect, parked just right of the sidebar toggle.
-    pub(crate) fn file_tree_toggle_rect() -> (f32, f32, f32, f32) {
+    /// With tabs on top the sidebar toggle isn't painted, so this takes its
+    /// slot instead of leaving a gap next to the traffic lights.
+    pub(crate) fn file_tree_toggle_rect(&self) -> (f32, f32, f32, f32) {
         let (sx, sy, sw, sh) = Self::sidebar_toggle_rect();
+        if self.tabs_on_top {
+            return (sx, sy, sw, sh);
+        }
         (sx + sw + 2.0, sy, sw, sh)
     }
     /// SCHALE OS(아로나) 토글 버튼 — 우측 끝, 설정 토글 왼쪽(git-col·settings 다음).

@@ -13,59 +13,30 @@
 
 use kasa_bridge::screen::{Cell, Color};
 
-/// macOS Terminal.app "GitHub Dark Dimmed" — the user's active
-/// Default Window Settings. Decoded from
-/// `~/Library/Preferences/com.apple.Terminal.plist` (the colors are
-/// `NSKeyedArchiver` bytes there; the values below are the sRGB
-/// 8-bit triples after unarchiving). The 6×6×6 cube + 24-step
-/// grayscale ramp follow xterm's standard 256-color extension.
-fn ansi_palette() -> [[u8; 3]; 256] {
-    let mut p = [[0u8; 3]; 256];
-    // Ghostty default palette (Tomorrow Night Bright tone) — lifted
-    // verbatim from ghostty-org/ghostty src/terminal/color.zig Name.default.
-    // Combined with the cell-renderer's sRGB→DisplayP3 shader matrix,
-    // this is what produces the same colour byte values the user sees
-    // in ghostty itself.
-    let base: [[u8; 3]; 16] = [
-        [0x1D, 0x1F, 0x21], // 0  black
-        [0xCC, 0x66, 0x66], // 1  red
-        [0xB5, 0xBD, 0x68], // 2  green
-        [0xF0, 0xC6, 0x74], // 3  yellow
-        [0x81, 0xA2, 0xBE], // 4  blue
-        [0xB2, 0x94, 0xBB], // 5  magenta
-        [0x8A, 0xBE, 0xB7], // 6  cyan
-        [0xC5, 0xC8, 0xC6], // 7  white
-        [0x66, 0x66, 0x66], // 8  br black
-        [0xD5, 0x4E, 0x53], // 9  br red
-        [0xB9, 0xCA, 0x4A], // 10 br green
-        [0xE7, 0xC5, 0x47], // 11 br yellow
-        [0x7A, 0xA6, 0xDA], // 12 br blue
-        [0xC3, 0x97, 0xD8], // 13 br magenta
-        [0x70, 0xC0, 0xB1], // 14 br cyan
-        [0xEA, 0xEA, 0xEA], // 15 br white
-    ];
-    p[..16].copy_from_slice(&base);
-    // 216-color cube: 16..231
-    let steps = [0u8, 95, 135, 175, 215, 255];
-    for r in 0..6 {
-        for g in 0..6 {
-            for b in 0..6 {
-                p[16 + r * 36 + g * 6 + b] = [steps[r], steps[g], steps[b]];
-            }
+/// ANSI 256-color lookup. 0-15 come from the active theme (see
+/// `theme::ansi16` — runtime-swappable so a theme switch recolors the
+/// terminal body); 16-231 is the standard xterm 6×6×6 cube and 232-255
+/// the 24-step grayscale ramp, both computed. O(1), no table build.
+///
+/// (Earlier we hardcoded a handful of 256-palette overrides to
+///  reverse claude code's nearest-cube quantisation. Once we found
+///  that the real cause was `TMUX` being set in the child env —
+///  which made chalk fall back to ANSI-256 mode — and removed it,
+///  claude code emits truecolor escapes directly and the standard
+///  xterm 6×6×6 cube is correct again.)
+fn ansi_color(i: u8) -> [u8; 3] {
+    match i {
+        0..=15 => crate::theme::ansi16(i as usize),
+        16..=231 => {
+            let steps = [0u8, 95, 135, 175, 215, 255];
+            let n = i as usize - 16;
+            [steps[n / 36], steps[(n / 6) % 6], steps[n % 6]]
+        }
+        _ => {
+            let v = 8 + (i - 232) * 10;
+            [v, v, v]
         }
     }
-    // (Earlier we hardcoded a handful of 256-palette overrides to
-    //  reverse claude code's nearest-cube quantisation. Once we found
-    //  that the real cause was `TMUX` being set in the child env —
-    //  which made chalk fall back to ANSI-256 mode — and removed it,
-    //  claude code emits truecolor escapes directly and the standard
-    //  xterm 6×6×6 cube is correct again.)
-    // 24-step grayscale ramp: 232..255
-    for i in 0..24 {
-        let v = 8 + (i as u8) * 10;
-        p[232 + i] = [v, v, v];
-    }
-    p
 }
 
 /// Default foreground / background when a cell has `Color::Default`.
@@ -101,7 +72,7 @@ fn color_to_rgba(c: &Color, default: [u8; 4]) -> [u8; 4] {
     match c {
         Color::Default => default,
         Color::Idx(i) => {
-            let p = ansi_palette()[*i as usize];
+            let p = ansi_color(*i);
             [p[0], p[1], p[2], 0xff]
         }
         Color::Rgb(r, g, b) => [*r, *g, *b, 0xff],
