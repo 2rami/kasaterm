@@ -464,6 +464,16 @@ pub fn character_accent(name: &str) -> Option<[u8; 4]> {
     }))
 }
 
+/// pane 본문 기본 전경색 틴트 — tmux `window-style fg=<색>` 등가(거노). 학생 pane 만
+/// accent 로 물들이고 god(아로나/프라나)은 None = 무틴트(실제 팀모드도 리더는 안 물듦).
+/// 8색 근사가 아니라 accent RGB 원본을 그대로 쓴다.
+pub fn student_tint(name: &str) -> Option<[u8; 4]> {
+    match name {
+        "아로나" | "프라나" => None,
+        _ => character_accent(name),
+    }
+}
+
 /// 캐릭터명 → 에셋 슬러그 (assets/students/<slug>.png, arona-ui 디렉토리명과 동일).
 pub fn character_slug(name: &str) -> Option<&'static str> {
     Some(match name {
