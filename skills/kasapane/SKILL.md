@@ -312,11 +312,39 @@ kasaterm-cli tell "$S" "<브리프 — 자기완결 한 줄: 배경·파일 포�
 kasaterm-cli wake-watch "$S" 30          # Bash run_in_background 로 — 턴 종료 시 auto-wake
 ```
 
-- `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `~/.claude/teams/` 부작용 없음(표시 전용).
-- `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan — /color 팔레트와 동일). `--model`·`--effort`는 공개 플래그.
+- `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan). `--model`·`--effort`·`--session-id`·`--resume`은 공개 플래그.
 - teammate 플래그는 숨은 인터페이스 — Claude Code 업데이트 후 안 먹으면 플래그 없이 부팅하고 `/rename`·`/color`(v2.1.205+)로 대체.
 - 배분 전 `board`로 형제 pane의 `changed_files`를 확인해 **파일 경계를 사전 분리**(같은 파일을 두 학생이 만지면 같은 작업트리라 git 이전에 물리 충돌). 검수·커밋은 god 단독.
 - wake-watch가 울려도 board idle은 오판일 수 있다 — `peek`로 실화면(스피너/보고문) 확인 후 판단(§5 함정 표).
+
+#### 패턴 F-2 — 네이티브 팀 배선 (SendMessage = inbox 파일, 2026-07-13 실측 확정)
+
+teammate 플래그로 부팅된 세션은 **`~/.claude/teams/<팀>/inboxes/<슬러그(agent-name)>.json`을 스스로 폴링**해서, 새 항목을 `<teammate-message>` user 턴으로 즉시 주입받는다(미드런 OK·발신자 이름·색·summary 표시). SendMessage 도구의 실체가 이 파일 append다 — 즉 **파일만 쓰면 누구든(god·kasaterm·스크립트) 네이티브로 메시지를 꽂을 수 있다.**
+
+```bash
+# 0) 스폰 전에 팀 config 작성 (부팅 후 등록은 무효 — 폴러가 부팅 시점에만 arm)
+mkdir -p ~/.claude/teams/<팀>/inboxes
+# config.json: {"name":"<팀>","leadAgentId":"team-lead@<팀>","leadSessionId":"<god세션id>","members":[{team-lead 엔트리},{학생 엔트리(agentId·name·color·model)}]}
+# inboxes/: team-lead.json 과 학생별 <슬러그>.json 을 '[]' 로 초기화
+
+# 1) 학생에게 메시지 (파일 append = SendMessage와 동일)
+python3 - <<'PY'
+import json,uuid,datetime
+p='/Users/kasa/.claude/teams/<팀>/inboxes/<슬러그>.json'
+m=json.load(open(p))
+m.append({"from":"team-lead","text":"<지시>","summary":"<요약>","timestamp":datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00","Z"),"msgV":1,"msg_id":str(uuid.uuid4()),"type":"message","read":False})
+json.dump(m,open(p,'w'),ensure_ascii=False)
+PY
+
+# 2) 학생 보고 수신: 학생이 SendMessage 하면 inboxes/team-lead.json 에 쌓임
+#    god 가 team-lead 플래그(--agent-id team-lead@<팀> --agent-name team-lead --team-name <팀>)로
+#    부팅돼 있으면 네이티브 주입으로 받고, 아니면 파일을 직접 읽는다(읽은 항목 read:true 마킹).
+
+# 3) 기존 일반 세션의 팀원화: /exit 후 --resume <세션id> + teammate 플래그로 재부팅
+#    → 컨텍스트 유지 + 수신·발신 모두 활성 (실측: 재부팅 전 기억을 정확히 회신)
+```
+
+함정: ①**inbox 파일명은 슬러그** — `[^a-zA-Z0-9_-] → "-"`라 한글 이름 "수신생"→`---.json`, 같은 팀의 같은 길이 한글 이름은 충돌 → agent-name에 ASCII 꼬리표(예: "유즈-yz") 권장 ②teammate 세션 id는 팀+에이전트 조합 결정론 파생 — 같은 조합 재부팅 시 "Session ID already in use"(옛 세션 jsonl 이동으로 해제) ③스키마 불일치 항목은 조용히 drop — 위 필드 구성 유지 ④`--parent-session-id`는 붙이지 마라(그 세션에 idle 알림이 새어감) ⑤전부 v2.1.207 바이너리 실측 — 버전 업 시 재검증.
 
 ---
 
