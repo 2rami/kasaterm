@@ -274,7 +274,8 @@ impl App {
         let _ = kasa_mcp::character::write_marker(&rslug, id, &name);
         // god 은 방 통솔용으로 명시 배정됐을 때만 lead 마커. 자동 랜덤으로 나온 god 은 일반
         // 워커라 통솔 표시를 안 한다(거노: 랜덤 god 이 방 리더로 오인되지 않게).
-        if explicit_god && kasa_mcp::character::is_god(&chars, &name) {
+        let lead = explicit_god && kasa_mcp::character::is_god(&chars, &name);
+        if lead {
             let _ = kasa_mcp::character::write_lead(&rslug, id);
         }
         self.pane_session_id.insert(id.to_string(), sid.clone());
@@ -284,10 +285,25 @@ impl App {
         self.ws.lock().unwrap().pane_character.insert(id.to_string(), name.clone());
         let mut env = vec![
             ("KASATERM_CHARACTER".to_string(), name.clone()),
-            ("KASATERM_SESSION_ID".to_string(), sid),
+            ("KASATERM_SESSION_ID".to_string(), sid.clone()),
         ];
         if let Some(p) = kasa_mcp::character::persona_for(&chars, &name) {
             env.push(("KASATERM_PERSONA".to_string(), p));
+        }
+        // god(통솔) pane 네이티브 팀 수신 준비 — teammate 폴러는 부팅 시점에만 arm 되므로
+        // (패턴 F-2) 팀 config 를 스폰 시점에 미리 깔고, shim 이 읽을 team-lead env 를
+        // 심는다. shim 은 이 env 로 `claude` 에 team-lead 트리플을 얹어 부팅한다(수신 arm).
+        // ensure_team 은 기존 config 불변이라 학생이 먼저 스폰된 팀에도 안전.
+        if lead {
+            let team = kasa_mcp::team::team_name_for(&rslug);
+            match kasa_mcp::team::ensure_team(&kasa_mcp::team::teams_root(), &team, Some(&sid), cwd)
+            {
+                Ok(()) => {
+                    env.push(("KASATERM_TEAM".to_string(), team));
+                    env.push(("KASATERM_TEAM_LEAD".to_string(), "1".to_string()));
+                }
+                Err(e) => eprintln!("[team] ensure_team {team} failed: {e}"),
+            }
         }
         env
     }
