@@ -4096,6 +4096,12 @@ PERSONA_OK=1\n\
 # --bg 는 session-id 를 자기가 관리(경고)하지만 persona(시스템프롬프트)는 새 세션이라 붙인다(거노 #2).\n\
 case \" $* \" in *\" attach \"*|*\" agents \"*) SID=\"\"; PERSONA_OK=\"\" ;; *\" --bg \"*|*\" --background \"*) SID=\"\" ;; *\" --session-id \"*|*\" --resume \"*|*\" --continue \"*|*\" -c \"*) SID=\"\" ;; *) SID=\"$KASATERM_SESSION_ID\" ;; esac\n\
 {pblk}\
+# god(방 통솔) pane 네이티브 팀 수신 — KASATERM_TEAM_LEAD(스폰 시 Rust 가 ensure_team 과\n\
+# 함께 심음)면 team-lead 트리플로 부팅해 inbox 폴러를 arm 한다. 명시적 --session-id 가\n\
+# teammate 세션id 결정론 파생을 이기므로(실측) 신선 부팅(SID 有)에만 얹는다 — 사용자\n\
+# --resume/--session-id·서브커맨드는 SID 가 비어 자동 제외. 사용자가 teammate 플래그를\n\
+# 직접 줬으면(학생 스폰 커맨드 포함) 그대로 둔다.\n\
+case \" $* \" in *\" --agent-id \"*|*\" --team-name \"*) ;; *) [ -n \"$SID\" ] && [ -n \"$KASATERM_TEAM_LEAD\" ] && [ -n \"$KASATERM_TEAM\" ] && set -- --agent-id \"team-lead@$KASATERM_TEAM\" --agent-name team-lead --team-name \"$KASATERM_TEAM\" \"$@\" ;; esac\n\
 [ -n \"$SID\" ] && set -- --session-id \"$SID\" \"$@\"\n\
 # task store(~/.claude/tasks/<id>)를 transcript session 과 같은 키로 묶는다 — 없으면 claude\n\
 # 가 매 실행 임의 session-<hex8> 로 task 를 저장해 pane↔task 매핑이 끊긴다(거노: 유즈\n\
