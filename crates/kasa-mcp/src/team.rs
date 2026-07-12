@@ -234,6 +234,20 @@ pub fn ensure_team(
     init_inbox(root, team, "team-lead")
 }
 
+/// 명부 리더 세션id 갱신 — god pane 이 재스폰/스왑으로 새 세션id 를 받아 부팅할 때, 부팅
+/// 플래그(--session-id)와 config 의 leadSessionId 가 같은 세션을 가리키게 맞춘다.
+/// ensure_team 은 기존 config 불변(첫 생성만 sid 기록)이라 이후 갱신은 이 함수가 진다.
+/// 같은 값이면 무쓰기(폴러가 읽는 파일이라 불필요한 rewrite 회피).
+pub fn set_lead_session(root: &Path, team: &str, sid: &str) -> io::Result<()> {
+    let mut cfg = read_config(root, team)
+        .ok_or_else(|| io::Error::other(format!("no team config: {team} (ensure_team 먼저)")))?;
+    if cfg.get("leadSessionId").and_then(|v| v.as_str()) == Some(sid) {
+        return Ok(());
+    }
+    cfg["leadSessionId"] = json!(sid);
+    write_config(root, team, &cfg)
+}
+
 /// 학생 멤버 스펙 — add_member 입력.
 pub struct StudentSpec<'a> {
     /// --agent-name 에 들어갈 **목표 작업명**(거노: 캐릭터명 아님, 예: "native-wiring-backend").
@@ -495,6 +509,11 @@ mod tests {
         // 재호출은 기존 config 를 덮지 않는다.
         ensure_team(&root, team, Some("other-sid"), "/tmp/other").unwrap();
         assert_eq!(read_config(&root, team).unwrap()["leadSessionId"], "lead-sid-1");
+        // god 재스폰/스왑: set_lead_session 이 리더 세션id 만 갱신, 명부는 불변.
+        set_lead_session(&root, team, "lead-sid-2").unwrap();
+        let cfg = read_config(&root, team).unwrap();
+        assert_eq!(cfg["leadSessionId"], "lead-sid-2");
+        assert_eq!(cfg["members"].as_array().unwrap().len(), 1);
 
         let agent = unique_agent_name("모모이");
         let spec = StudentSpec {

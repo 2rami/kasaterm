@@ -296,9 +296,14 @@ impl App {
         // ensure_team 은 기존 config 불변이라 학생이 먼저 스폰된 팀에도 안전.
         if lead {
             let team = kasa_mcp::team::team_name_for(&rslug);
-            match kasa_mcp::team::ensure_team(&kasa_mcp::team::teams_root(), &team, Some(&sid), cwd)
-            {
+            let root = kasa_mcp::team::teams_root();
+            match kasa_mcp::team::ensure_team(&root, &team, Some(&sid), cwd) {
                 Ok(()) => {
+                    // god 재스폰/스왑은 새 sid 로 부팅 — 명부 리더도 따라 갱신해 부팅
+                    // 플래그(--session-id)와 config 가 같은 세션을 가리키게 한다.
+                    if let Err(e) = kasa_mcp::team::set_lead_session(&root, &team, &sid) {
+                        eprintln!("[team] set_lead_session {team} failed: {e}");
+                    }
                     env.push(("KASATERM_TEAM".to_string(), team));
                     env.push(("KASATERM_TEAM_LEAD".to_string(), "1".to_string()));
                 }
