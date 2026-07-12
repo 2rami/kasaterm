@@ -350,7 +350,9 @@ PY
 
 규칙: **메시지 `from` 필드는 발신 세션의 배정 학생 캐릭터명**(god가 보내면 "프라나" 등 — 거노 확정, 수신 화면에 그 이름으로 표시). 단 config의 리더 멤버 엔트리 명칭은 `team-lead` 유지 — 하네스에 team-lead 하드코딩 경로(비대화형 드레인 등)가 있다.
 
-함정: ①**inbox 파일명은 슬러그** — `[^a-zA-Z0-9_-] → "-"`라 한글 이름 "수신생"→`---.json`, 같은 팀의 같은 길이 한글 이름은 충돌 → agent-name은 ASCII 작업명 권장 ②teammate 세션 id는 팀+에이전트 조합 결정론 파생 — 같은 조합 재부팅 시 "Session ID already in use"(옛 세션 jsonl 이동으로 해제) ③스키마 불일치 항목은 조용히 drop — 위 필드 구성 유지 ④`--parent-session-id`는 붙이지 마라(그 세션에 idle 알림이 새어감) ⑤전부 v2.1.207 바이너리 실측 — 버전 업 시 재검증.
+함정: ①**inbox 파일명은 슬러그** — `[^a-zA-Z0-9_-] → "-"`라 한글 이름 "수신생"→`---.json`, 같은 팀의 같은 길이 한글 이름은 충돌 → agent-name은 ASCII 작업명 권장 ②teammate 세션 id는 팀+에이전트 조합 결정론 파생 — 같은 조합 재부팅 시 "Session ID already in use". **단 명시적 `--session-id <uuid>`가 파생을 이긴다(실측 2026-07-13: 지정 uuid로 jsonl 생성·폴러 정상 arm·발신 정상)** — kasaterm shim처럼 세션 id를 직접 주면 충돌 클래스 소멸 ③스키마 불일치 항목은 조용히 drop — 위 필드 구성 유지 ④`--parent-session-id`는 붙이지 마라(그 세션에 idle 알림이 새어감) ⑤전부 v2.1.207 바이너리 실측 — 버전 업 시 재검증.
+
+역할 무관 풀 메시(거노 확정 방향): 인박스는 원래 에이전트별 분리라 발신은 누구나(파일 append), **수신만 "teammate 플래그 부팅" 게이트**다. 따라서 god도 `--agent-id team-lead@<팀> --agent-name team-lead --team-name <팀>`(+명시 --session-id)로 부팅하면 리더/팀메이트 구분 없이 전원 양방향 네이티브 — 학생↔학생도 같은 config 등재면 SendMessage로 서로 지목 가능. god이 플래그 없이 떠 있는 동안은 team-lead.json을 직접 읽거나 파일 감시(Monitor)로 보완.
 
 컬러: 발신 하네스가 부팅 `--agent-color`를 발신 메시지의 `color` 필드에 **자동 스탬프**하고, 수신 렌더는 그 필드 기준(실측: pink 부팅 학생의 요청이 color:pink, red 부팅 학생의 SendMessage가 color:red로 도착). 수동 파일 append 때만 `color`를 직접 넣으면 된다.
 
