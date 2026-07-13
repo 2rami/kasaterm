@@ -450,7 +450,8 @@ pub fn lerp(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
 }
 
 /// 캐릭터명 → 고정 accent (pane 번호와 무관하게 학생=색 고정). god(아로나)=골드,
-/// 프라나=틸. 유즈는 레몬 대신 하늘 — 레몬이 god 골드와 겹쳐서다. 6색 서로 구분.
+/// 프라나=틸. 유즈는 원작(분홍머리·빨간 리본)대로 핑크레드 — sky 였던 걸 거노가
+/// "유즈는 빨간색인데"로 교정. 모모이 coral 과는 마젠타 쪽 hue+명도로 구분.
 /// 미배정(순수 셸)은 None → 호출부가 테두리를 안 그린다.
 pub fn character_accent(name: &str) -> Option<[u8; 4]> {
     Some(unpack(match name {
@@ -458,7 +459,7 @@ pub fn character_accent(name: &str) -> Option<[u8; 4]> {
         "프라나" => 0x4ecdc4_ff, // god, teal
         "미도리" => 0x6bcf7f_ff, // mint
         "모모이" => 0xff6b6b_ff, // coral
-        "유즈" => 0x4a90e2_ff,   // sky
+        "유즈" => 0xe64980_ff,   // pink-red
         "아리스" => 0xb197fc_ff, // lilac
         _ => return None,
     }))
