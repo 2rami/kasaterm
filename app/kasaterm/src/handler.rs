@@ -1745,13 +1745,7 @@ impl ApplicationHandler<UserEvent> for App {
                         self.shell_menu_open = false;
                         self.chrome_dirty = true;
                         if let Some(shell) = pick {
-                            // 피커 sentinel 라우팅: 기본 셸 = 그냥 새 윈도우, Claude 학생 =
-                            // teammate 부팅 예약. 실제 셸 경로만 pending_shell 로 넘긴다.
-                            if shell == crate::PICKER_CLAUDE_STUDENT {
-                                self.pending_claude_student = true;
-                            } else if shell != crate::PICKER_DEFAULT_SHELL {
-                                self.pending_shell = Some(shell);
-                            }
+                            self.pending_shell = Some(shell);
                             self.new_window();
                         }
                         return;
@@ -1891,9 +1885,14 @@ impl ApplicationHandler<UserEvent> for App {
                             if self.settings_open {
                                 self.close_settings();
                             }
-                            // 피커는 전 플랫폼에 항목이 있다(기본 셸·Claude 학생 공통 +
-                            // Windows 설치 셸) — "+" 는 항상 메뉴 토글.
-                            self.shell_menu_open = !self.shell_menu_open;
+                            // 피커 항목은 Windows 설치 셸뿐 — macOS/Linux 는 목록이
+                            // 비므로 메뉴 대신 즉시 기본 셸 새 윈도우("Claude 학생"
+                            // 항목은 폐기 — split+claude 수동 부팅으로 충분, 거노).
+                            if crate::available_shells().is_empty() {
+                                self.new_window();
+                            } else {
+                                self.shell_menu_open = !self.shell_menu_open;
+                            }
                             self.chrome_dirty = true;
                             return;
                         }
