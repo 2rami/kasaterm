@@ -2947,9 +2947,6 @@ struct App {
     /// Shell command the next `spawn_session_pane` should launch instead of
     /// the default. Set by a shell-picker selection, consumed (taken) once.
     pending_shell: Option<String>,
-    /// "+" 피커 'Claude 학생' 선택 — 다음 `spawn_session_pane` 첫 pane 을 teammate 플래그
-    /// claude 로 부팅한다(팀 config 를 스폰 전에 깔고 프롬프트 즈음 커맨드 주입). 1회 소비.
-    pending_claude_student: bool,
     /// Per-window (name, cwd) tab labels, by window index. Refreshed on a
     /// throttle (cwd resolution shells out to lsof, so never per-frame).
     window_labels: Vec<(String, String)>,
@@ -3411,7 +3408,6 @@ impl App {
             shell_menu_open: false,
             shell_menu_hits: Vec::new(),
             pending_shell: None,
-            pending_claude_student: false,
             window_labels: Vec::new(),
             window_labels_at: None,
             window_name_override: HashMap::new(),
@@ -4282,22 +4278,12 @@ fn git_bash_path() -> Option<String> {
     None
 }
 
-/// Sidebar "+" 피커 sentinel — cmd 자리에 넣는 특수 값. NUL 접두라 실제 실행파일
-/// 경로와 절대 충돌하지 않는다. 기본 셸 = pending_shell 없이 새 윈도우.
-pub(crate) const PICKER_DEFAULT_SHELL: &str = "\u{0}default-shell";
-/// Claude 학생 = teammate 플래그 claude 부팅(spawn_session_pane 이 팀 config 작성 후 주입).
-pub(crate) const PICKER_CLAUDE_STUDENT: &str = "\u{0}claude-student";
-
 /// Shells offered by the sidebar "+" picker: `(label, icon_svg name,
-/// shell command or picker sentinel)`. 기본 셸·Claude 학생 두 항목은 전 플랫폼 공통 —
-/// 그래서 macOS 도 이제 "+" 가 메뉴를 연다(예전엔 목록이 비어 즉시 기본 셸 스폰).
-/// Windows 는 설치된 셸(PowerShell/CMD/Git Bash/WSL)이 뒤에 붙고, 없는 셸은 조용히 빠진다.
-fn available_shells() -> Vec<(&'static str, &'static str, String)> {
+/// shell command)`. Windows 전용 — 설치된 셸(PowerShell/CMD/Git Bash/WSL)만 나열,
+/// 없는 셸은 조용히 빠진다. macOS/Linux 는 빈 목록 → "+" 가 즉시 기본 셸 스폰.
+pub(crate) fn available_shells() -> Vec<(&'static str, &'static str, String)> {
     #[allow(unused_mut)]
-    let mut out: Vec<(&'static str, &'static str, String)> = vec![
-        ("기본 셸", "terminal", PICKER_DEFAULT_SHELL.to_string()),
-        ("Claude 학생", "claude", PICKER_CLAUDE_STUDENT.to_string()),
-    ];
+    let mut out: Vec<(&'static str, &'static str, String)> = Vec::new();
     #[cfg(windows)]
     {
         let pwsh7 = r"C:\Program Files\PowerShell\7\pwsh.exe";
