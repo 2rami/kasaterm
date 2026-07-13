@@ -449,18 +449,18 @@ pub fn lerp(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
     [mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2]), 255]
 }
 
-/// 캐릭터명 → 고정 accent (pane 번호와 무관하게 학생=색 고정). god(아로나)=골드,
-/// 프라나=틸. 유즈는 원작(분홍머리·빨간 리본)대로 핑크레드 — sky 였던 걸 거노가
-/// "유즈는 빨간색인데"로 교정. 모모이 coral 과는 마젠타 쪽 hue+명도로 구분.
+/// 캐릭터명 → 고정 accent (pane 번호와 무관하게 학생=색 고정). 전원 원작색
+/// 기준으로 교정(거노): 아로나=하늘, 프라나=은백(흰 계열), 유즈=핑크레드(분홍
+/// 머리·빨간 리본), 아리스=남색. 미도리 민트·모모이 코랄은 원작과 이미 일치.
 /// 미배정(순수 셸)은 None → 호출부가 테두리를 안 그린다.
 pub fn character_accent(name: &str) -> Option<[u8; 4]> {
     Some(unpack(match name {
-        "아로나" => 0xffd93d_ff, // god, gold
-        "프라나" => 0x4ecdc4_ff, // god, teal
+        "아로나" => 0x4a90e2_ff, // god, sky
+        "프라나" => 0xe6e9f0_ff, // god, silver-white
         "미도리" => 0x6bcf7f_ff, // mint
         "모모이" => 0xff6b6b_ff, // coral
         "유즈" => 0xe64980_ff,   // pink-red
-        "아리스" => 0xb197fc_ff, // lilac
+        "아리스" => 0x4c6ef5_ff, // navy-indigo
         _ => return None,
     }))
 }

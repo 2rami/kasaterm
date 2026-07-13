@@ -569,12 +569,13 @@ mod tests {
     #[test]
     fn nearest_color_matches_student_accents() {
         // theme.rs character_accent 6종 — pane 테두리와 TUI 테마가 일치해야 하는 실값.
-        assert_eq!(nearest_agent_color([0xff, 0xd9, 0x3d]), "yellow"); // 아로나 gold
-        assert_eq!(nearest_agent_color([0x4e, 0xcd, 0xc4]), "cyan"); // 프라나 teal
+        // (2026-07-13 원작색 교정: 아로나 sky·프라나 은백·유즈 핑크레드·아리스 남색)
+        assert_eq!(nearest_agent_color([0x4a, 0x90, 0xe2]), "blue"); // 아로나 sky
+        assert_eq!(nearest_agent_color([0xe6, 0xe9, 0xf0]), "blue"); // 프라나 silver-white(무채 폴백)
         assert_eq!(nearest_agent_color([0x6b, 0xcf, 0x7f]), "green"); // 미도리 mint
         assert_eq!(nearest_agent_color([0xff, 0x6b, 0x6b]), "red"); // 모모이 coral
-        assert_eq!(nearest_agent_color([0x4a, 0x90, 0xe2]), "blue"); // 유즈 sky
-        assert_eq!(nearest_agent_color([0xb1, 0x97, 0xfc]), "purple"); // 아리스 lilac
+        assert_eq!(nearest_agent_color([0xe6, 0x49, 0x80]), "pink"); // 유즈 pink-red
+        assert_eq!(nearest_agent_color([0x4c, 0x6e, 0xf5]), "blue"); // 아리스 navy-indigo
         // 회색(무채도)은 hue 판정 불가 — blue 폴백.
         assert_eq!(nearest_agent_color([0x80, 0x80, 0x80]), "blue");
         // 경계 확인: 주황·핑크 계열.
