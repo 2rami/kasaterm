@@ -715,10 +715,20 @@ impl App {
                     links: hover_links,
                     // 학생 pane 본문 틴트(거노, tmux window-style fg 등가) — 배정
                     // 캐릭터의 accent RGB 원본. god·무배정 pane 은 테마 default fg.
+                    // 캐릭터는 spawn 시 모든 pane 에 선배정되므로(assign_character_env)
+                    // 그것만으론 순정 셸까지 물든다(거노 실사고) — pane 테두리 게이트와
+                    // 동일하게 claude 가 foreground 일 때만(active_process_name=="claude",
+                    // 500ms 캐시) 틴트. claude 종료 시 다음 캐시 갱신에 자동 해제.
                     default_fg: pane
                         .character
                         .as_deref()
                         .and_then(theme::student_tint)
+                        .filter(|_| {
+                            self.pty
+                                .get(id.as_str())
+                                .and_then(|p| p.active_process_name())
+                                .is_some_and(|n| n == "claude")
+                        })
                         .unwrap_or_else(cells::default_fg),
                 });
                 // Body box (header band excluded, inset by the same
