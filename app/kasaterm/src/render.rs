@@ -233,7 +233,7 @@ impl App {
             /// show on hover, not always-on).
             links: Vec<crate::links::LinkSpan>,
             /// pane 기본 전경색(tmux window-style fg 등가) — 학생 pane 은 accent
-            /// 틴트, god·무배정은 테마 default fg. slot 빌드 시 pane 당 1회 결정.
+            /// 틴트, 무배정은 테마 default fg. slot 빌드 시 pane 당 1회 결정.
             default_fg: [u8; 4],
         }
         // Header chrome carried in LOGICAL px — gpu.rect/draw_text
@@ -328,8 +328,10 @@ impl App {
         let mut spinner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // 승인 대기(approval prompt) 학생 도트(폴짝 바운스): 같은 형태.
         let mut waiting_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
-        // statusline 자리표시자(U+FFFC) → 학생 프로필 얼굴(정적 1프레임).
+        // statusline 자리표시자(U+FFFC) → 학생 프사(bust, 정적 1프레임).
         let mut profile_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // 입력박스 위 스페이서 행(effort 칩 자리)에 서 있는 학생(idle 전신 애니).
+        let mut standing_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
         // cursor, h_scroll px, syntax lang). Render mode draws blocks; Raw mode
         // draws the editor buffer.
@@ -572,7 +574,11 @@ impl App {
                     // 스피너가 없고 승인 프롬프트가 떠 있으면 → 질문 행 텍스트
                     // 끝 옆에서 폴짝 바운스("선생님, 승인 기다려요!"). pane
                     // 우상단은 collab 승인 토스트(윈도우 우상단)와 겹친다.
+                    // 스피너 walk·승인대기 바운스가 뜨는 동안은 standing 도트를
+                    // 숨긴다 — 같은 학생이 화면에 두 명 서 있으면 버그로 보인다.
+                    let mut pet_busy = false;
                     if let Some((sr, sc)) = find_claude_spinner(&composed) {
+                        pet_busy = true;
                         // 스피너 행 텍스트("Cerebrating… · esc to interrupt")를
                         // 학생 accent 색으로 — walk 도트 + 텍스트색이 함께
                         // "이 학생이 작업 중"임을 말한다. 여기에 glow shimmer:
@@ -638,6 +644,7 @@ impl App {
                         && crate::input::rows_show_approval_prompt(&composed).is_some()
                     {
                         if let Some((ar, ac)) = approval_anchor(&composed) {
+                            pet_busy = true;
                             const DOT: f32 = 40.0;
                             let x = (body_left + (ac + 2) as f32 * scw)
                                 .min(body_left + cols_now as f32 * scw - DOT);
@@ -645,11 +652,12 @@ impl App {
                             waiting_slots.push((slug, (x, y, DOT, DOT)));
                         }
                     }
-                    // statusline 학생 프로필: statusline.py 가 kasaterm 안에서
-                    // 학생 이름 대신 U+FFFC 자리표시자(3칸)를 내보낸다. 그 셀을
-                    // 비우고 그 자리에 배정 학생 프로필 얼굴(아로나 웹뷰 프사와
-                    // 같은 초상 크롭)을 얹는다. 정적 1프레임이라 애니 펌프
-                    // 게이트(STUDENT_SPRITE_ANIMATING)에는 안 들어간다.
+                    // statusline 학생 프사: statusline.py 가 kasaterm 안에서
+                    // 학생 이름 대신 U+FFFC 자리표시자를 내보낸다. 그 셀을
+                    // 비우고 그 자리에 프사(bust 96×96)를 statusline 행 바닥
+                    // 정렬·STATUSLINE_FACE_ROWS 행 키로 얹는다 — 1행짜리는
+                    // 너무 작았다(거노). icon 패스라 아래 테두리 줄 위에
+                    // 스티커처럼 얹힌다.
                     // 아래→위 스캔: statusline 은 항상 화면 바닥 쪽이고, 대화
                     // 출력에 U+FFFC 원문이 섞이면(statusline 디버그 출력 등)
                     // 위쪽 행이 앵커를 가로채 얼굴이 엉뚱한 데 붙는다(실사고).
@@ -667,15 +675,66 @@ impl App {
                         for cell in composed[sr].iter_mut().skip(sc).take(len) {
                             *cell = GridCell::blank();
                         }
+                        let face_h = STATUSLINE_FACE_ROWS as f32 * sch;
                         profile_slots.push((
                             slug,
                             (
                                 body_left + sc as f32 * scw,
-                                body_top + sr as f32 * sch,
+                                (body_top + (sr + 1) as f32 * sch - face_h).max(body_top),
                                 len as f32 * scw,
-                                sch,
+                                face_h,
                             ),
                         ));
+                        // 입력박스 위에 서 있는 학생(전신 idle) — 프롬프트 위
+                        // 스페이서 행(effort 칩·context 경고가 뜨는 자리) 우측.
+                        // statusline 바로 위 행이 아래 테두리(전폭 '─')면 그
+                        // 위로 첫 '─' 행이 입력박스 윗 테두리다 — ❯ 영역이
+                        // 여러 줄로 자라도 스캔이라 따라간다. 발은 윗 테두리
+                        // 줄에 닿고, 칩이 떠 있으면 그 왼쪽으로 비켜 선다.
+                        // working/승인대기 중엔 스피너 walk·바운스 도트가 이미
+                        // 학생을 그리므로(pet_busy) 세우지 않는다.
+                        let is_rule = |row: &[GridCell]| {
+                            let mut dashes = 0usize;
+                            for c in row {
+                                match c.ch {
+                                    '─' => dashes += 1,
+                                    ' ' | '\0' => {}
+                                    _ => return false,
+                                }
+                            }
+                            dashes > row.len() / 2
+                        };
+                        if !pet_busy && sr >= 4 && is_rule(&composed[sr - 1]) {
+                            if let Some(tr) = (sr.saturating_sub(16)..sr - 1)
+                                .rev()
+                                .find(|&r| is_rule(&composed[r]))
+                                .filter(|&tr| tr >= 1)
+                            {
+                                let anchor = tr - 1;
+                                let first = composed[anchor]
+                                    .iter()
+                                    .position(|c| !matches!(c.ch, ' ' | '\0'));
+                                let right_c = match first {
+                                    Some(f) => f as f32 - 1.5,
+                                    None => cols_now as f32 - 1.0,
+                                };
+                                const STAND_CELLS: f32 = 4.0;
+                                let left_c = right_c - STAND_CELLS;
+                                let h = INPUT_STANDING_ROWS as f32 * sch;
+                                if left_c > 2.0 {
+                                    standing_slots.push((
+                                        slug,
+                                        (
+                                            body_left + left_c * scw,
+                                            (body_top + (anchor + 1) as f32 * sch - h)
+                                                .max(body_top),
+                                            STAND_CELLS * scw,
+                                            h,
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
                 // Code-block scan is O(cells × distinct-colours) and walks
@@ -705,6 +764,29 @@ impl App {
                     .filter(|(pid, _, _)| pid.as_str() == id.as_str())
                     .map(|(_, span, _)| vec![span.clone()])
                     .unwrap_or_default();
+                // 학생 pane 본문 틴트(거노, tmux window-style fg 등가) — 배정
+                // 캐릭터의 accent RGB 원본. 무배정 pane 은 테마 default fg.
+                // 캐릭터는 spawn 시 모든 pane 에 선배정되므로(assign_character_env)
+                // 그것만으론 순정 셸까지 물든다(거노 실사고) — pane 테두리 게이트와
+                // 동일하게 claude 가 foreground 일 때만(active_process_name=="claude",
+                // 500ms 캐시) 틴트. claude 종료 시 다음 캐시 갱신에 자동 해제.
+                let tint_fg = pane
+                    .character
+                    .as_deref()
+                    .and_then(theme::student_tint)
+                    .filter(|_| {
+                        self.pty
+                            .get(id.as_str())
+                            .and_then(|p| p.active_process_name())
+                            .is_some_and(|n| n == "claude")
+                    });
+                // 입력박스(❯ 프롬프트)는 글자 틴트 제외 + 보더 줄은 학생 accent
+                // 강제(거노) — 치는 글자는 기본 fg, 줄·@배지는 /color 무시하고
+                // pane 정체성 색. 셀 fg 를 명시 색으로 고정하는 방식이라 draw 쪽
+                // 셀당 분기는 그대로 0.
+                if let Some(accent) = tint_fg {
+                    style_prompt_box(&mut composed, accent);
+                }
                 slots.push(PaneSlot {
                     rows: composed,
                     origin_px,
@@ -713,23 +795,7 @@ impl App {
                     dim: is_split && active_id.as_deref() != Some(id.as_str()),
                     font_scale: pane_font_scale,
                     links: hover_links,
-                    // 학생 pane 본문 틴트(거노, tmux window-style fg 등가) — 배정
-                    // 캐릭터의 accent RGB 원본. god·무배정 pane 은 테마 default fg.
-                    // 캐릭터는 spawn 시 모든 pane 에 선배정되므로(assign_character_env)
-                    // 그것만으론 순정 셸까지 물든다(거노 실사고) — pane 테두리 게이트와
-                    // 동일하게 claude 가 foreground 일 때만(active_process_name=="claude",
-                    // 500ms 캐시) 틴트. claude 종료 시 다음 캐시 갱신에 자동 해제.
-                    default_fg: pane
-                        .character
-                        .as_deref()
-                        .and_then(theme::student_tint)
-                        .filter(|_| {
-                            self.pty
-                                .get(id.as_str())
-                                .and_then(|p| p.active_process_name())
-                                .is_some_and(|n| n == "claude")
-                        })
-                        .unwrap_or_else(cells::default_fg),
+                    default_fg: tint_fg.unwrap_or_else(cells::default_fg),
                 });
                 // Body box (header band excluded, inset by the same
                 // PANE_INNER margins the cell grid uses) in logical px.
@@ -1308,9 +1374,10 @@ impl App {
         // (render_frame)가 참조. 배너가 사라진 프레임에 false로 떨어져
         // 애니 redraw 펌프가 저절로 멈춘다.
         STUDENT_SPRITE_ANIMATING.store(
-            // waiting(승인 대기)은 렌더 펌프가 없는 정적 상태라 바운스 애니도
-            // 이 타이머에 의존한다. 스피너 도트는 working 30fps 펌프가 있어 불필요.
-            !banner_slots.is_empty() || !waiting_slots.is_empty(),
+            // waiting(승인 대기)·standing(입력박스 위)은 렌더 펌프가 없는 정적
+            // 상태에서도 idle 애니가 돌아야 해서 이 타이머에 의존한다. 스피너
+            // 도트는 working 30fps 펌프가 있고, statusline 프사는 정적이라 불필요.
+            !banner_slots.is_empty() || !waiting_slots.is_empty() || !standing_slots.is_empty(),
             std::sync::atomic::Ordering::Relaxed,
         );
         if let Some(g) = self.gpu.as_mut() {
@@ -1383,8 +1450,15 @@ impl App {
                     *bx, by - bounce, *bw, *bh,
                 );
             }
-            // statusline 프로필 얼굴 — 정적 1프레임, 캐릭터당 1회 업로드.
-            // 셀은 스냅샷에서 이미 비워졌으니 이미지 패스(셀 아래)로 충분.
+            // 입력박스 위 standing — 전신 idle 애니, 발이 윗 테두리 줄에 닿게
+            // 바닥 정렬. 스크롤백 꼬리 행 위에 뜨므로 icon 패스.
+            for (slug, (bx, by, bw, bh)) in &standing_slots {
+                ensure_idle(g, slug);
+                g.queue_image_above(&format!("student:{slug}:f{anim_idx}"), *bx, *by, *bw, *bh);
+            }
+            // statusline 프사 — bust 96×96 정적 1프레임, 캐릭터당 1회 업로드.
+            // 박스가 아래 테두리 행을 침범하는 2행 키라 icon 패스(셀 위) —
+            // 이미지 패스(셀 아래)면 테두리 글리프가 얼굴을 가로지른다.
             for (slug, (bx, by, bw, bh)) in &profile_slots {
                 let key = format!("student:{slug}:profile");
                 if !g.has_image(&key) {
@@ -1392,7 +1466,7 @@ impl App {
                         g.upload_image(&key, &rgba, w, h);
                     }
                 }
-                g.queue_image(&key, *bx, *by, *bw, *bh, 1.0, 0.0, 0.0);
+                g.queue_image_above(&key, *bx, *by, *bw, *bh);
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
@@ -4187,7 +4261,7 @@ impl App {
                     let text_w = g.measure_chrome_text(msg, t_font, true);
                     let (px, py) = (14.0_f32, 8.0_f32);
                     // 승인 모드(sticky)면 텍스트 뒤에 [승인][거부] 칩이 붙는다 —
-                    // 박스 폭에 미리 반영. (munder 의 god 승인 카드 축소판)
+                    // 박스 폭에 미리 반영. (munder 승인 카드 축소판)
                     let chip_f = 12.0_f32;
                     let chip_pad = 10.0_f32;
                     let chip_gap = 8.0_f32;
@@ -4747,12 +4821,72 @@ const STUDENT_IDLE_FRAMES: usize = 4;
 pub(crate) const STUDENT_ANIM_FRAME_MS: u64 = 200;
 const STUDENT_WALK_FRAMES: usize = 6;
 const STUDENT_WALK_FRAME_MS: f32 = 140.0;
+/// statusline 프사 높이(행). statusline 행에 바닥 정렬하고 위로 이만큼
+/// 침범한다 — 1행짜리 얼굴은 너무 작았다(거노). 2행 = statusline + 바로 위
+/// 입력박스 아래 테두리 행까지. 3행이면 `❯` 입력행에 걸려 타이핑을 가린다.
+pub(crate) const STATUSLINE_FACE_ROWS: usize = 2;
+/// 입력박스 위 스페이서 행에 서 있는 학생(전신 idle)의 키(행). 발은 입력박스
+/// 윗 테두리에 닿고 위는 스크롤백 꼬리라 몇 행 덮여도 무해 — 배너와 같은 키.
+pub(crate) const INPUT_STANDING_ROWS: usize = 3;
 
 /// 직전 프레임에 학생 도트 배너가 화면에 있었는지. 배너 애니 타이머
 /// 스레드(handler.rs)가 이걸 보고 배너가 보일 때만 redraw를 깨운다 —
 /// 배너가 없으면 sleep 루프만 돌아 idle 비용이 0에 수렴한다.
 pub(crate) static STUDENT_SPRITE_ANIMATING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// claude TUI 입력박스 행 탐지 — 화면 하단에서 위로 ─ 보더 두 줄을 찾아 그
+/// 사이 행 범위를 돌려준다(양끝 보더 행 번호는 range.start-1 / range.end).
+/// 사이에 ❯ 프롬프트 마커 행이 있어야 입력박스로 인정한다(권한 메뉴 등
+/// 다른 풀폭 박스 오인 방지).
+fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
+    fn is_border(r: &[GridCell]) -> bool {
+        let (mut dash, mut glyph) = (0usize, 0usize);
+        for c in r {
+            if c.ch == '\0' || c.ch == ' ' {
+                continue;
+            }
+            glyph += 1;
+            if c.ch == '─' {
+                dash += 1;
+            }
+        }
+        dash >= 10 && dash * 2 >= glyph
+    }
+    let b2 = rows.iter().rposition(|r| is_border(r))?;
+    let b1 = rows[..b2].iter().rposition(|r| is_border(r))?;
+    let range = (b1 + 1)..b2;
+    let has_marker = rows[range.clone()].iter().any(|r| {
+        r.iter()
+            .find(|c| c.ch != ' ' && c.ch != '\0')
+            .is_some_and(|c| matches!(c.ch, '❯' | '›' | '>'))
+    });
+    (has_marker && !range.is_empty()).then_some(range)
+}
+
+/// 학생 틴트 pane 의 입력박스 스타일링(거노) — ①사이 행(입력 글자)의 Default
+/// fg 를 명시 테마 fg 로 고정해 PaneSlot.default_fg(틴트) 치환을 비켜가게 하고
+/// ②양끝 보더 행(─ 줄 + @배지)은 claude 가 /color·--agent-color 로 그린 명시색을
+/// **무시하고** 학생 accent 로 강제 도색한다 — pane 정체성 색과 항상 일치.
+fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
+    let Some(range) = prompt_box_rows(rows) else { return };
+    let fg = cells::default_fg();
+    let (b1, b2) = (range.start - 1, range.end);
+    for r in &mut rows[range.clone()] {
+        for c in r.iter_mut() {
+            if matches!(c.fg, kasa_bridge::screen::Color::Default) {
+                c.fg = kasa_bridge::screen::Color::Rgb(fg[0], fg[1], fg[2]);
+            }
+        }
+    }
+    for i in [b1, b2] {
+        for c in rows[i].iter_mut() {
+            if c.ch != ' ' && c.ch != '\0' {
+                c.fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
+            }
+        }
+    }
+}
 
 /// 캐릭터 슬러그 + 모션 → 컴파일타임 내장 도트 프레임(arona-ui walk
 /// 스프라이트의 idle 0..3 / walk-east 0..5).
@@ -4788,12 +4922,24 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
         ("momoi", "idle") => idle!("momoi"),
         ("yuzu", "idle") => idle!("yuzu"),
         ("arisu", "idle") => idle!("arisu"),
+        ("yuuka", "idle") => idle!("yuuka"),
+        ("shiroko", "idle") => idle!("shiroko"),
+        ("hoshino", "idle") => idle!("hoshino"),
+        ("koharu", "idle") => idle!("koharu"),
+        ("himari", "idle") => idle!("himari"),
+        ("aru", "idle") => idle!("aru"),
         ("arona", "walk") => walk!("arona"),
         ("prana", "walk") => walk!("prana"),
         ("midori", "walk") => walk!("midori"),
         ("momoi", "walk") => walk!("momoi"),
         ("yuzu", "walk") => walk!("yuzu"),
         ("arisu", "walk") => walk!("arisu"),
+        ("yuuka", "walk") => walk!("yuuka"),
+        ("shiroko", "walk") => walk!("shiroko"),
+        ("hoshino", "walk") => walk!("hoshino"),
+        ("koharu", "walk") => walk!("koharu"),
+        ("himari", "walk") => walk!("himari"),
+        ("aru", "walk") => walk!("aru"),
         _ => return None,
     })
 }
@@ -4842,8 +4988,8 @@ fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, 
     )
 }
 
-/// 캐릭터 슬러그 → statusline 프로필 얼굴 PNG(아로나 웹뷰 프사 초상의
-/// 96×96 얼굴 크롭, 컴파일타임 내장).
+/// 캐릭터 슬러그 → statusline 프사 PNG(웹뷰 bust 를 96×96 contain-리사이즈한
+/// 정사각 상반신, 컴파일타임 내장).
 fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
     Some(match slug {
         "arona" => include_bytes!("../assets/students/arona-profile.png"),
@@ -4852,11 +4998,17 @@ fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
         "momoi" => include_bytes!("../assets/students/momoi-profile.png"),
         "yuzu" => include_bytes!("../assets/students/yuzu-profile.png"),
         "arisu" => include_bytes!("../assets/students/arisu-profile.png"),
+        "yuuka" => include_bytes!("../assets/students/yuuka-profile.png"),
+        "shiroko" => include_bytes!("../assets/students/shiroko-profile.png"),
+        "hoshino" => include_bytes!("../assets/students/hoshino-profile.png"),
+        "koharu" => include_bytes!("../assets/students/koharu-profile.png"),
+        "himari" => include_bytes!("../assets/students/himari-profile.png"),
+        "aru" => include_bytes!("../assets/students/aru-profile.png"),
         _ => return None,
     })
 }
 
-/// 프로필 PNG → RGBA. GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로
+/// 프사 PNG → RGBA. GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로
 /// 캐릭터당 1회 디코딩. 이미 얼굴에 맞춰 잘린 에셋이라 bbox 크롭은 불필요.
 fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     let img = image::load_from_memory(student_profile_png(slug)?).ok()?.to_rgba8();
