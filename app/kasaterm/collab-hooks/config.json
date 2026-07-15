@@ -1,0 +1,39 @@
+{
+  "icon_set": "nerd-font",
+  "icons": {
+    "model": "\uf233",
+    "git": "\ue0a0",
+    "folder": "\uf07b",
+    "context": "\uf0e4",
+    "prompt": {
+      "command": "\uf120",
+      "question": "\uf128",
+      "delete": "\uf1f8",
+      "edit": "\uf040",
+      "create": "\uf067",
+      "search": "\uf002",
+      "chat": "\uf075",
+      "idle": "\uf10c"
+    }
+  },
+  "colors": {
+    "model": "#7aa2f7",
+    "git": "#73daca",
+    "folder": "#bb9af7",
+    "context": "#ff9e64",
+    "session_name": "#9ece6a",
+    "separator": "#9aa5ce",
+    "prompt": {
+      "command": "#e0af68",
+      "question": "#7aa2f7",
+      "delete": "#f7768e",
+      "edit": "#e0af68",
+      "create": "#73daca",
+      "search": "#bb9af7",
+      "chat": "#c0caf5",
+      "idle": "#565f89"
+    }
+  },
+  "separator": "\u2503",
+  "prompt_max_length": 5
+}
