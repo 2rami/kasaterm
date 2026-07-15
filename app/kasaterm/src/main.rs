@@ -4024,7 +4024,11 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             ],
             "Stop": [{ "hooks": [cmd("kasaterm-stop-drain.sh", 5000)] }],
             "Notification": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5000)] }],
-        }
+        },
+        // statusLine 도 세션 스코프 --settings 로 주입 — 배정 학생 프사(U+FFFC)·model·git·
+        // ctx%·effort + 내부 cd 보고(report-cwd). pane 안에서만 우리 것, 밖 claude 는
+        // 사용자 ~/.claude/settings.json statusLine 그대로(--settings 는 pane PATH 한정).
+        "statusLine": { "type": "command", "command": format!("\"{hd}/statusline.py\""), "padding": 0 },
     });
     let settings_path = shim_dir.join("claude-hooks-settings.json");
     match serde_json::to_string_pretty(&settings) {
