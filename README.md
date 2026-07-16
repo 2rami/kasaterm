@@ -102,9 +102,9 @@ pane에서 `claude`를 실행하면 그 pane에 블루 아카이브 학생 한 �
 로그를 읽는 게 아니라 학생이 옆에서 같이 일하는 것처럼 보인다.
 
 <div align="center">
-  <img src="assets/shot-sprite.png" width="820" alt="claude 실행 직후 — 배정된 유즈가 시작 배너·statusline·입력창 위에 도트로 나타난다" />
+  <img src="assets/shot-sprite.png" width="820" alt="claude 로 대화하는 중 — 배정된 아루가 시작 배너·작업 스피너 옆·statusline 에 도트로 나타난다" />
   <br/>
-  <sub><code>claude</code> 실행 직후 — 배정된 유즈가 <b>시작 배너</b>(좌상) · <b>statusline 프로필</b>(좌하) · <b>입력창 위 전신</b>(우하)에 동시에 나타난다. effort 칩이 뜨면 옆으로 비켜선다.</sub>
+  <sub><code>claude</code> 로 대화하는 중 — 배정된 <b>아루</b>가 <b>시작 배너</b>(좌상) · <b>작업 스피너 옆 전신</b>(좌하) · <b>statusline 프로필</b>(최하단)에 동시에 나타난다. 작업 중일 땐 effort 칩을 피해 옆으로 비켜선다.</sub>
 </div>
 
 한 모노레포에 세 층이 쌓여 있고, 아래층이 위층을 떠받친다:
