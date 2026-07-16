@@ -2,8 +2,10 @@
 //!
 //! Claude Code(v2.1.207 실측)는 teammate 플래그(--agent-id/--agent-name/--team-name 트리플)로
 //! 부팅된 세션이 `teams/<팀>/inboxes/<슬러그(agent-name)>.json` 을 스스로 폴링해 새 항목을
-//! `<teammate-message>` user 턴으로 주입받는다(SendMessage 의 실체 = 이 파일 append). 폴러는
-//! **부팅 시점에만 arm** 되므로 팀 config 는 스폰 전에 디스크에 있어야 한다(kasapane 패턴 F-2).
+//! `<teammate-message>` user 턴으로 주입받는다(SendMessage 의 실체 = 이 파일 append). 폴러
+//! arm 은 **트리플 플래그만으로 켜진다** — config.json 이 아예 없어도 수신 주입·SendMessage
+//! 발신·명시적 --session-id 공존까지 전부 동작(v2.1.211 재실측, 미도리 07-16). config 는
+//! `claude agents` 표시·명부용이지 폴러 전제가 아니다.
 //! 슬러그 규칙·config 스키마는 비공개 내부 실측이라 Claude Code 버전 업 시 재검증 대상.
 //!
 //! 네이밍 규칙(거노 확정, 2026-07-13):
@@ -114,6 +116,17 @@ pub fn unique_agent_name(name: &str) -> String {
     format!("{name}-{:04x}", fnv1a(name) & 0xffff)
 }
 
+/// 순수 ASCII 식별자 보장 — 안전 문자면 그대로, 아니면(한글 등) 해시 축약("s1a2b").
+/// unique_agent_name 과 달리 원문을 남기지 않는다 — 셸 case 대입값·플래그 인자로 쓰여
+/// 슬러그 붕괴("---1a2b")나 선두 '-'(플래그 오인)가 허용되지 않는 자리용.
+pub fn ascii_ident(name: &str) -> String {
+    let ok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    if !name.is_empty() && name.chars().all(ok) && !name.starts_with('-') {
+        return name.to_string();
+    }
+    format!("s{:04x}", fnv1a(name) & 0xffff)
+}
+
 /// 방 rslug → 팀명(팀 디렉토리명 겸 --team-name). rslug 꼬리(프로젝트명+방)를 남겨 읽히게
 /// 하고, 전체 rslug 의 해시 꼬리표가 비ASCII 붕괴·길이 절단의 유일성을 함께 보장한다.
 /// 선두 '-' 는 뗀다 — 절대경로 슬러그가 늘 '-' 로 시작해 셸에서 플래그로 오인되는
@@ -199,7 +212,7 @@ pub fn agent_id(team: &str, agent_name: &str) -> String {
     format!("{}@{}", claude_slug(agent_name), team)
 }
 
-/// 팀 config 보장 — 없으면 god(team-lead) 단독 명부로 생성하고 team-lead inbox 를
+/// 팀 config 보장 — 없으면 리더(team-lead) 단독 명부로 생성하고 team-lead inbox 를
 /// 초기화한다. 있으면 그대로 둔다(멤버·leadSessionId 를 덮지 않음). 스키마는 TeamCreate
 /// 산출물 실측 미러 — 폴러가 어느 필드를 검증하는지 비공개라 관측 스키마를 그대로 따른다.
 pub fn ensure_team(
@@ -234,7 +247,7 @@ pub fn ensure_team(
     init_inbox(root, team, "team-lead")
 }
 
-/// 명부 리더 세션id 갱신 — god pane 이 재스폰/스왑으로 새 세션id 를 받아 부팅할 때, 부팅
+/// 명부 리더 세션id 갱신 — 리더 pane 이 재스폰/스왑으로 새 세션id 를 받아 부팅할 때, 부팅
 /// 플래그(--session-id)와 config 의 leadSessionId 가 같은 세션을 가리키게 맞춘다.
 /// ensure_team 은 기존 config 불변(첫 생성만 sid 기록)이라 이후 갱신은 이 함수가 진다.
 /// 같은 값이면 무쓰기(폴러가 읽는 파일이라 불필요한 rewrite 회피).
@@ -262,7 +275,7 @@ pub struct StudentSpec<'a> {
 }
 
 /// 학생 멤버 추가(같은 agentId 면 교체) + inbox 초기화. config 가 없으면 에러 —
-/// ensure_team 을 먼저 불러 god 명부가 잡힌 상태를 강제한다(폴러 arm 전제).
+/// ensure_team 을 먼저 불러 리더 명부가 잡힌 상태를 강제한다(폴러 arm 전제).
 pub fn add_member(root: &Path, team: &str, spec: &StudentSpec) -> io::Result<()> {
     let mut cfg = read_config(root, team)
         .ok_or_else(|| io::Error::other(format!("no team config: {team} (ensure_team 먼저)")))?;
@@ -480,6 +493,19 @@ mod tests {
     }
 
     #[test]
+    fn ascii_ident_is_pure_ascii_and_deterministic() {
+        // 안전 이름은 통과, 한글은 원문 없이 해시 축약 — 슬러그 붕괴·플래그 오인 불가.
+        assert_eq!(ascii_ident("midori"), "midori");
+        let a = ascii_ident("유즈");
+        let b = ascii_ident("아리스");
+        assert_ne!(a, b);
+        assert_eq!(a, ascii_ident("유즈"));
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric()));
+        // 선두 '-' 는 플래그로 오인되므로 해시로 도피.
+        assert!(!ascii_ident("-x").starts_with('-'));
+    }
+
+    #[test]
     fn team_name_is_slug_safe_and_unique() {
         let t1 = team_name_for("-Users-kasa-Desktop-momewomo-tmuxify__room_room-1");
         let t2 = team_name_for("-Users-kasa-Desktop-momewomo-tmuxify__room_room-2");
@@ -497,7 +523,7 @@ mod tests {
         let root = tmp_root("roundtrip");
         let team = "kt-test-0001";
         ensure_team(&root, team, Some("lead-sid-1"), "/tmp/proj").unwrap();
-        // god 단독 명부 + team-lead inbox '[]'.
+        // 리더 단독 명부 + team-lead inbox '[]'.
         let cfg = read_config(&root, team).unwrap();
         assert_eq!(cfg["leadAgentId"], format!("team-lead@{team}"));
         assert_eq!(cfg["leadSessionId"], "lead-sid-1");
@@ -509,7 +535,7 @@ mod tests {
         // 재호출은 기존 config 를 덮지 않는다.
         ensure_team(&root, team, Some("other-sid"), "/tmp/other").unwrap();
         assert_eq!(read_config(&root, team).unwrap()["leadSessionId"], "lead-sid-1");
-        // god 재스폰/스왑: set_lead_session 이 리더 세션id 만 갱신, 명부는 불변.
+        // 리더 재스폰/스왑: set_lead_session 이 리더 세션id 만 갱신, 명부는 불변.
         set_lead_session(&root, team, "lead-sid-2").unwrap();
         let cfg = read_config(&root, team).unwrap();
         assert_eq!(cfg["leadSessionId"], "lead-sid-2");

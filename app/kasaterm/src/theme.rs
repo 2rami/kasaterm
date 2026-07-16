@@ -484,6 +484,12 @@ pub fn character_slug(name: &str) -> Option<&'static str> {
         "모모이" => "momoi",
         "유즈" => "yuzu",
         "아리스" => "arisu",
+        "유우카" => "yuuka",
+        "시로코" => "shiroko",
+        "호시노" => "hoshino",
+        "코하루" => "koharu",
+        "히마리" => "himari",
+        "아루" => "aru",
         _ => return None,
     })
 }
