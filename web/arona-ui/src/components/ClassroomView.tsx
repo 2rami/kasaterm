@@ -67,7 +67,7 @@ type Pt = { x: number; y: number };
 // 간격으로 대사를 주고받는다. 반환 = { agentId: 지금 띄울 대사 }.
 function useCafeChat(agents: Agent[]): Record<string, string> {
   const [bubbles, setBubbles] = useState<Record<string, string>>({});
-  const idle = agents.filter((a) => a.status === 'idle' && !a.isGod).map((a) => a.id);
+  const idle = agents.filter((a) => a.status === 'idle').map((a) => a.id);
   const key = idle.join(',');
   const idleRef = useRef(idle);
   idleRef.current = idle;
@@ -110,9 +110,9 @@ function ClassroomCharacter(
   { agent, seat, grid, cafe, chatLine, onSelect, index, selected, unconfirmed }:
   { agent: Agent; seat?: { x: number; y: number; facing: string }; grid: boolean[][]; cafe: CafeSpot[]; chatLine?: string; onSelect?: (id: string, title: string) => void; index: number; selected?: boolean; unconfirmed?: boolean },
 ) {
-  // working/waiting/blocked = 자기 책상으로. idle 만 카페 배회. 단 god(아로나)은
-  // 선생님 비서·오케스트레이터라 idle 이어도 자기 자리 고정(munder god 자리고정 차용).
-  const atDesk = agent.status !== 'idle' || !!agent.isGod;
+  // working/waiting/blocked = 자기 책상으로. idle 은 카페 배회 — god 개념 폐기
+  // (거노 2026-07-13)로 전원 동일 규칙.
+  const atDesk = agent.status !== 'idle';
   const home = seat ? { x: seat.x, y: seat.y } : { x: 50, y: 75 };
   const [pos, setPos] = useState<Pt>(home);
   const [segMs, setSegMs] = useState(0);
@@ -232,7 +232,6 @@ function ClassroomCharacter(
         fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 700, color: '#15294A',
       }}>
         <span style={{ width: 7, height: 7, borderRadius: 999, background: STATUS_COLOR[agent.status] ?? 'var(--cth-ink-300)' }} />
-        {agent.isGod && <span style={{ fontSize: 9, color: 'var(--cth-lemon)', fontWeight: 800 }}>★</span>}
         {agent.character}
       </div>
 
@@ -327,7 +326,7 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
   const storeAgents = useStore((s) => s.agents);
   const acked = useStore((s) => s.acked);
   const agents = agentsProp ?? storeAgents;
-  const sorted = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod));
+  const sorted = [...agents];
 
   const grid = useMemo(() => buildGrid(furniture), [furniture]);
   const seats = useMemo(() => seatsProp ?? deskSeats(furniture), [furniture, seatsProp]);
@@ -351,7 +350,7 @@ export function ClassroomView({ onSelect, agents: agentsProp, background, furnit
     }}>
       {furniture.map((f) => <FurnitureSprite key={f.id} f={f} />)}
 
-      {/* 빈 교실(첫 부팅, god 자동 스폰 전) — 화면 어두워지며 로딩 스피너만(거노). */}
+      {/* 빈 교실(첫 부팅, 첫 학생 자동 스폰 전) — 화면 어두워지며 로딩 스피너만(거노). */}
       {sorted.length === 0 && (
         <div style={{
           position: 'absolute', inset: 0, zIndex: 9999,

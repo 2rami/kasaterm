@@ -16,11 +16,12 @@ const BASE = import.meta.env.BASE_URL || '/';
 
 // 한글 파일명은 Rust 정적 서빙(percent-decode 미지원)에서 404 → ASCII 슬러그로.
 const SLUG: Record<string, string> = {
-  // god: 아로나·프라나. 학생(밀레니엄 게임개발부): 미도리·모모이·유즈·아리스(거노 2026-06-17).
+  // 아로나·프라나 + 밀레니엄 게임개발부: 미도리·모모이·유즈·아리스(거노 2026-06-17).
   '아로나': 'arona', '프라나': 'prana',
   '미도리': 'midori', '모모이': 'momoi', '유즈': 'yuzu', '아리스': 'arisu',
-  // 구 로스터(호환) — 에셋 남아 있으면 계속 표시.
+  // 확장 로스터(거노 2026-07-13 확정 6명).
   '유우카': 'yuuka', '시로코': 'shiroko', '호시노': 'hoshino', '코하루': 'koharu',
+  '히마리': 'himari', '아루': 'aru',
 };
 
 export function SpritePortrait({ character, scale = 2, background = 'transparent', bust = false }: SpritePortraitProps) {

@@ -125,10 +125,34 @@ def main():
     session_id = d.get("session_id", "")
     report_cwd_to_kasaterm(cwd, session_id)
 
+    # 세션 id 마커 — SGR8(conceal)로 숨겨 statusline 끝에 싣는다. kasaterm 은 그리드
+    # 텍스트에서 `⟦sid8⟧` 를 읽어 "이 pane 이 지금 어느 세션을 표시 중인지"를 진입
+    # 즉시 안다(agents 피커 attach 는 이벤트·argv 흔적이 없어 이게 유일한 실시간 채널).
+    # 렌더러가 conceal 을 지원한다고 공표(caps.json)한 경우에만 — 아니면 글자가 보인다.
+    sid_marker = ""
+    if session_id and os.environ.get("KASATERM_PANE_ID"):
+        try:
+            with open(os.path.expanduser("~/.config/kasaterm/caps.json"), encoding="utf-8") as f:
+                if json.load(f).get("sgr_conceal"):
+                    sid_marker = f"\033[8m⟦{session_id[:8]}⟧\033[28m"
+        except Exception:
+            pass
+
     sep = f" {DIM}{ansi(C_SEP)}{sep_char}{RESET} "
     parts = []
 
     name = os.environ.get("KASATERM_CHARACTER")
+    # 포크/attach 로 세션 id 가 env anchor(KASATERM_SESSION_ID)와 갈라진 백그라운드
+    # 세션은 env 캐릭터가 출생 pane 의 동결값이라 오표기(거노: bg 뷰 프사가 딴 학생).
+    # 그때만 kasaterm 의 세션→캐릭터 영속 바인딩을 정본으로 읽는다 — 일반 pane 과
+    # repersona(학생 명령) 경로는 env 가 최신이므로 건드리지 않는다.
+    forked_view = bool(session_id) and session_id != os.environ.get("KASATERM_SESSION_ID")
+    if forked_view:
+        try:
+            with open(os.path.expanduser("~/.config/kasaterm/session_characters.json"), encoding="utf-8") as f:
+                name = json.load(f).get(session_id) or name
+        except Exception:
+            pass
     if name:
         c = ansi(STUDENT_HEX.get(name, C_FALLBACK))
         if os.environ.get("KASATERM_PANE_ID"):
@@ -136,10 +160,12 @@ def main():
         else:
             parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
 
-    # 포크/백그라운드 세션 배지 — ←← detach 로 갈라진 세션은 CLAUDE_CODE_CHILD_SESSION
-    # 을 물려받는다(claude 프로세스 env 를 statusline 이 그대로 봄). 메인 대화만
-    # statusline 을 그리므로 서브에이전트 오탐 없음. ⑂ = 분기 기호(이모지 아님).
-    if os.environ.get("CLAUDE_CODE_CHILD_SESSION") == "1":
+    # 포크/백그라운드 세션 배지. CLAUDE_CODE_CHILD_SESSION 판별은 폐기 — claude 가
+    # 모든 세션의 훅/statusline 자식 env 에 무조건 "1"을 심어(2.1.209+ 실측) 전 pane
+    # 오발화였다(거노 07-16). 위 캐릭터 바인딩과 같은 anchor 불일치 조건을 쓴다:
+    # 세션 id ≠ pane anchor = 포크/attach 뷰. detach 포크는 env 가 출생 pane 동결이라
+    # 자기 새 id 와 반드시 갈라지고, 일반 pane·repersona 는 일치라 안 뜬다.
+    if forked_view and os.environ.get("KASATERM_PANE_ID"):
         parts.append(f"{DIM}{ansi(C_FALLBACK)}⑂ bg{RESET}")
 
     model = (d.get("model") or {}).get("display_name")
@@ -178,7 +204,8 @@ def main():
     if lvl:
         parts.append(f"{ansi(EFFORT_HEX.get(lvl, '7aa2f7'))}{ic['effort']} {lvl}{RESET}")
 
-    print(sep.join(parts))
+    # 마커는 세그먼트 뒤 끝자락 — 좁은 pane 에서 잘리면 폴백(argv·타이틀·3s 폴)이 줍는다.
+    print(sep.join(parts) + sid_marker)
 
 
 if __name__ == "__main__":

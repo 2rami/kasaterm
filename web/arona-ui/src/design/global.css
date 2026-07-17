@@ -172,7 +172,7 @@ canvas { image-rendering: pixelated; }
 .cth-resize-handle:active { background: var(--cth-sky-light); }
 .cth-resize-handle:active::before { background: var(--cth-sky); }
 
-/* 로딩 스피너 — 빈 교실(god 오는 중) dim 오버레이 회전 링. */
+/* 로딩 스피너 — 빈 교실(첫 학생 오는 중) dim 오버레이 회전 링. */
 @keyframes schale-spin { to { transform: rotate(360deg); } }
 
 /* 캐릭터 등장 모션(munder 식) — 아래서 통통 튀어오르며 페이드인. 캐릭터 내부 래퍼에 적용

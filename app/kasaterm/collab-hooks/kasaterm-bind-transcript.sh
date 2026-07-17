@@ -16,6 +16,41 @@
 input=$(cat)
 tp=$(printf '%s' "$input" | python3 -c "import sys,json;print(json.load(sys.stdin).get('transcript_path',''))" 2>/dev/null)
 [ -z "$tp" ] && exit 0
+# detach 포크 페르소나 복원(거노: 백그라운드 가면 페르소나 풀림): 데몬이 포크 argv 를
+# 재구성하며 --append-system-prompt 가 유실된다. env KASATERM_PERSONA 는 데몬 env(데몬을
+# 낳은 옛 pane 고정)라 계보가 틀려 못 쓴다 — 물려받은 transcript stem(포크 첫 부팅 =
+# 부모 세션 id)의 캐릭터 바인딩을 kasaterm 에 조회해 SessionStart 문맥으로 재주입한다.
+# 정상 pane 부팅은 조상 argv 에 --append-system-prompt 가 있어 중복 주입하지 않는다.
+pp=$PPID; has_persona=""; parent_sid=""
+i=0
+while [ "$i" -lt 4 ] && [ -n "$pp" ] && [ "$pp" != "0" ] && [ "$pp" != "1" ]; do
+  cmd="$(ps -ww -o command= -p "$pp" 2>/dev/null)"
+  case "$cmd" in *--append-system-prompt*) has_persona=1; break ;; esac
+  # 포크 계보: 조상 argv 의 `--resume <부모 jsonl>` — 포크 첫 부팅은 자기 sid 가
+  # 아직 미바인딩이라 부모 stem 폴백이 있어야 persona 가 잡힌다.
+  case "$cmd" in
+    *" --resume "*)
+      rp="${cmd#* --resume }"; rp="${rp%% *}"
+      [ -n "$rp" ] && parent_sid="$(basename "$rp" .jsonl)"
+      ;;
+  esac
+  pp=$(ps -o ppid= -p "$pp" 2>/dev/null | tr -d ' ')
+  i=$((i + 1))
+done
+if [ -z "$has_persona" ]; then
+  psid="$(basename "$tp" .jsonl)"
+  # 포트는 env(스테일 가능)가 아니라 현 인스턴스가 쓰는 mcp_port 파일에서 — 소켓과
+  # 같은 TMPDIR 라 인스턴스가 갈려도 최신 것을 읽는다.
+  portf="$(dirname "${KASATERM_SOCKET_PATH:-/tmp/nosock}")/mcp_port"
+  port="$(cat "$portf" 2>/dev/null)"
+  persona="$(curl -s --max-time 2 --get --data-urlencode "sid=$psid" \
+    "http://127.0.0.1:${port:-8765}/persona" 2>/dev/null)"
+  if [ -z "$persona" ] && [ -n "$parent_sid" ]; then
+    persona="$(curl -s --max-time 2 --get --data-urlencode "sid=$parent_sid" \
+      "http://127.0.0.1:${port:-8765}/persona" 2>/dev/null)"
+  fi
+  [ -n "$persona" ] && printf '%s\n' "$persona"
+fi
 marker="/tmp/kasaterm-bound-${KASATERM_PANE_ID//[^A-Za-z0-9]/_}"
 # bind는 데몬 메모리에만 산다(재시작하면 소실). marker는 /tmp에 영속이라, sock
 # inode를 dedup 키에 섞지 않으면 데몬 재시작 후에도 "이미 bind함"으로 오판해 영영

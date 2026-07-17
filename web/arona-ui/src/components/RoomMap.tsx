@@ -21,8 +21,8 @@ function statusAnim(status: Agent['status']): string | undefined {
   return undefined;
 }
 
-// 방 추가 시 고를 god(거노: 처음은 아로나 고정, 새 방은 선택). leaders 풀과 일치.
-const GODS = ['아로나', '프라나'];
+// 방 추가 시 고를 첫 학생(거노: 처음은 아로나 고정, 새 방은 선택). leaders 풀과 일치.
+const STARTERS = ['아로나', '프라나'];
 
 /** unix secs → "방금/N분 전/N시간 전/N일 전". */
 // 작업폴더 경로 축약 — 홈은 ~, 깊으면 마지막 2 세그먼트만(거노: 최근 세션을 폴더로 구분).
@@ -49,8 +49,8 @@ export interface RoomMapProps {
   selectedId?: string;
   /** 학생 클릭 — 그 pane 포커스(다른 방이면 윈도우 전환). */
   onSelectStudent?: (id: string, name: string) => void;
-  /** 새 방 + 선택 god 스폰. */
-  onNewRoom?: (god: string) => void;
+  /** 새 방 + 선택 학생 스폰. */
+  onNewRoom?: (character: string) => void;
   /** 방(윈도우) 닫기. 윈도우 2개+ 일 때만. */
   onCloseRoom?: (idx: number) => void;
   /** 최근 세션 클릭 — 바로 resume 하지 않고 오프라인(읽기 전용) 뷰어로 띄운다. */
@@ -69,11 +69,11 @@ function RoomIcon({ active }: { active: boolean }) {
   );
 }
 
-// 좌측 방 네비 — 방 = kasaterm 윈도우(거노). 목록 + "+ 방 추가"(god 선택). 첫 방은
-// 아로나 고정, 새 방은 아로나/프라나 선택해 그 god 으로 스폰. × 로 방 닫기.
+// 좌측 방 네비 — 방 = kasaterm 윈도우(거노). 목록 + "+ 방 추가"(첫 학생 선택). 첫 방은
+// 아로나 고정, 새 방은 아로나/프라나 중 골라 그 학생으로 스폰. × 로 방 닫기.
 export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStudent, onNewRoom, onCloseRoom, onOpenSession, onCollapse }: RoomMapProps) {
   const n = sessions.count;
-  // 방별 학생 — god(아로나/프라나) 먼저, 그다음 일반 학생. 같은 방 안에서 안정적 순서.
+  // 방별 학생 — pane id 순 안정 정렬.
   const byRoom = new Map<number, Agent[]>();
   for (const a of agents) {
     const w = a.windowIdx ?? 0;
@@ -81,7 +81,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
     byRoom.get(w)!.push(a);
   }
   for (const list of byRoom.values()) {
-    list.sort((x, y) => Number(y.isGod) - Number(x.isGod) || x.id.localeCompare(y.id));
+    list.sort((x, y) => x.id.localeCompare(y.id));
   }
   const [adding, setAdding] = useState(false);
   const [showRecent, setShowRecent] = useState(false);
@@ -160,7 +160,7 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
                   <span style={{ width: 20, height: 20, borderRadius: 6, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
                     <SpritePortrait character={pure} scale={0.9} bust />
                   </span>
-                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: a.isGod ? 'var(--cth-sky)' : undefined, fontWeight: a.isGod ? 700 : (sel ? 700 : 500) }}>{pure}</span>
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: sel ? 700 : 500 }}>{pure}</span>
                   <span style={{ flexShrink: 0, width: 6, height: 6, borderRadius: 999, background: statusDot(a.status), animation: statusAnim(a.status) }} />
                 </button>
               );
@@ -169,12 +169,12 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
         );
       })}
 
-      {/* 방 추가 — 누르면 god(아로나/프라나) 선택 펼침 */}
+      {/* 방 추가 — 누르면 첫 학생(아로나/프라나) 선택 펼침 */}
       {onNewRoom && (
         adding ? (
           <div style={{ marginTop: 4, padding: 7, borderRadius: 8, background: 'var(--cth-cream-100)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', padding: '0 2px 2px' }}>god 선택</div>
-            {GODS.map((g) => (
+            <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)', padding: '0 2px 2px' }}>첫 학생 선택</div>
+            {STARTERS.map((g) => (
               <button key={g} onClick={() => { onNewRoom(g); setAdding(false); }} style={{
                 display: 'flex', alignItems: 'center', gap: 6, padding: '7px 9px', borderRadius: 7, border: 'none', cursor: 'pointer',
                 background: '#fff', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-ui)', fontSize: 12, fontWeight: 700,

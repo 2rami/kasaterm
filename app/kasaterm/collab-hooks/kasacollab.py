@@ -99,7 +99,7 @@ def _reward_done():
 
 def _room_suffix():
     """방별 분리(거노): KASATERM_ROOM env 가 있으면 slug 에 `__room_<id>` 를 붙여
-    같은 cwd 의 다른 방(윈도우)과 collab(god/board/inbox/lead/roster)을 격리한다.
+    같은 cwd 의 다른 방(윈도우)과 collab(board/inbox/roster)을 격리한다.
     env 없으면 빈 문자열 → 기존 동작 그대로(역호환). 모든 slug 계산이 이걸 더한다."""
     room = os.environ.get("KASATERM_ROOM", "")
     return f"__room_{room}" if room else ""
@@ -300,7 +300,7 @@ def drain_unread():
 
 def live_panes():
     """실재하는 surface_id 집합(`list surfaces`). 조회 실패면 None(검증 스킵).
-    msg 보낼 때 받는 id 가 실재하는지 즉시 확인하는 데 쓴다 — stale god id
+    msg 보낼 때 받는 id 가 실재하는지 즉시 확인하는 데 쓴다 — stale pane id
     (재시작 전 %3 등)나 오타로 죽은 pane 에 보내 좀비 메시지가 쌓이는 걸 막는다.
     board(bind 기반)를 쓰면 resume 직후 아직 프롬프트를 안 받아 bind 안 된
     claude pane 을 '죽음'으로 거부하는 닭-달걀(깨워야 bind 되는데 msg 가 막힘)
