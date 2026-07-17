@@ -7,6 +7,7 @@ const SLUG: Record<string, string> = {
   '아로나': 'arona', '프라나': 'prana',
   '미도리': 'midori', '모모이': 'momoi', '유즈': 'yuzu', '아리스': 'arisu',
   '유우카': 'yuuka', '시로코': 'shiroko', '호시노': 'hoshino', '코하루': 'koharu',
+  '히마리': 'himari', '아루': 'aru',
 };
 
 // 흰 외곽선(4방향) — 밝은 교실 바닥에서 캐릭터를 또렷하게(거노).

@@ -24,8 +24,8 @@ const colorByStatus: Record<StatusKind, string> = {
   looping:    'var(--cth-status-looping)'
 };
 
-// Human-readable labels. "blocked" is reserved for the god agent waiting on YOU,
-// so it reads as "needs you"; sub-agents waiting on god/another agent are
+// Human-readable labels. "blocked" is reserved for an agent waiting on YOU,
+// so it reads as "needs you"; sub-agents waiting on another agent are
 // "waiting", which is honest about who they're actually stalled on.
 const labelByStatus: Record<StatusKind, string> = {
   idle:     'idle',

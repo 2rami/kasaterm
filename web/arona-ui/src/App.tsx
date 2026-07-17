@@ -20,14 +20,14 @@ type PeekItem = { id: string; title: string; offline?: boolean; cwd?: string; tr
 
 // dev 디자인 검증용 목 학생(URL ?mock=1). board 비어도 풀 화면을 본다.
 const MOCK_AGENTS: Agent[] = [
-  { id: '%1', name: '아로나', character: '아로나', accent: 'sky', status: 'idle', project: 'tmuxify', progress: 2, contextTokens: 30000, tokensIn: 24000, tokensOut: 6000, costUsd: 0.18, contextLimit: 200000, model: 'claude-opus-4-8', cwd: '/Users/kasa/Desktop/momewomo/tmuxify', branch: 'main', isGod: true, lastReply: '선생님, 오늘 의뢰 정리했어요!' },
+  { id: '%1', name: '아로나', character: '아로나', accent: 'sky', status: 'idle', project: 'tmuxify', progress: 2, contextTokens: 30000, tokensIn: 24000, tokensOut: 6000, costUsd: 0.18, contextLimit: 200000, model: 'claude-opus-4-8', cwd: '/Users/kasa/Desktop/momewomo/tmuxify', branch: 'main', lastReply: '선생님, 오늘 의뢰 정리했어요!' },
   { id: '%2', name: '모모이', character: '모모이', accent: 'coral', status: 'working', currentTool: 'Bash', project: 'API 장애 분석', action: 'log_01.txt 원인 추적 중', progress: 5, contextTokens: 90000, tokensIn: 72000, tokensOut: 18000, costUsd: 0.42, subagents: ['로그 패턴 분석', '메트릭 수집'], contextLimit: 200000 },
   { id: '%3', name: '유즈', character: '유즈', accent: 'lemon', status: 'working', currentTool: 'Edit', project: '자동화 스크립트', action: '빌드 파이프라인 작성', progress: 4, contextTokens: 64000, tokensIn: 50000, tokensOut: 14000, costUsd: 0.31 },
   { id: '%4', name: '아리스', character: '아리스', accent: 'lilac', status: 'waiting', project: '일일 보고서', progress: 3, contextTokens: 45000, tokensIn: 38000, tokensOut: 7000, costUsd: 0.15, lastReply: '이 방향이 맞을까요?' },
   { id: '%5', name: '미도리', character: '미도리', accent: 'mint', status: 'idle', project: '시스템 테스트', progress: 1, contextTokens: 12000, tokensIn: 10000, tokensOut: 2000, costUsd: 0.05 },
 ];
 
-// 웹뷰는 항상 SCHALE OS 교실 — solo/god 모드 마커 폐기(잔재 정리). ready 로 초기 로딩만 게이트.
+// 웹뷰는 항상 SCHALE OS 교실 — solo 모드 마커 폐기(잔재 정리). ready 로 초기 로딩만 게이트.
 export function App() {
   const agents = useStore((s) => s.agents);
   const backgroundAgents = useStore((s) => s.backgroundAgents);
@@ -153,7 +153,7 @@ export function App() {
 
   const forceMock = new URLSearchParams(location.search).get('mock') === '1';
   useEffect(() => {
-    // solo/god 모드 마커 폐기(잔재 정리) — 웹뷰는 항상 SCHALE OS 교실. 초기 1회 ready 만.
+    // solo 모드 마커 폐기(잔재 정리) — 웹뷰는 항상 SCHALE OS 교실. 초기 1회 ready 만.
     setReady(true);
   }, []);
   useEffect(() => {
@@ -171,12 +171,11 @@ export function App() {
     return () => { stop = true; clearInterval(iv); };
   }, [ready]);
 
-  // 터미널 뷰 기본(A안: 중앙 단일 대화) — 선택된 학생이 없으면 god(아로나)·첫 학생을
+  // 터미널 뷰 기본(A안: 중앙 단일 대화) — 선택된 학생이 없으면 첫 학생을
   // 자동으로 띄워 중앙이 비지 않게. peek 있으면 그대로 둔다(거노).
   useEffect(() => {
     if (activeId || !agents.length) return;
-    const first = [...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod))[0];
-    if (first) setActiveId(first.id);
+    setActiveId(agents[0].id);
   }, [agents, activeId]);
   // foreground 학생이 없고(claude pane 이 안 떠 있음) background daemon 세션만 있으면 — 첫
   // background 를 중앙에 자동 표시(offlinePeek 버블). 터미널이 꺼져도/claude 가 안 떠도 웹뷰가
@@ -263,8 +262,8 @@ export function App() {
     return <div style={{ padding: 24, color: 'var(--cth-ink-500)' }}>로딩…</div>;
   }
 
-  // god 먼저 정렬 + 작업명 학생에게 게임개발부 외형(spriteChar) 폴백 배정(교실 스프라이트용).
-  const sorted = assignSprites([...agents].sort((a, b) => Number(b.isGod) - Number(a.isGod)));
+  // 작업명 학생에게 게임개발부 외형(spriteChar) 폴백 배정(교실 스프라이트용).
+  const sorted = assignSprites([...agents]);
   // 방 = kasaterm 윈도우. board(collab_board)는 활성 윈도우의 panes 만 주므로 보이는
   // 학생이 곧 그 방 학생 — 클라이언트 cwd 필터 없이 그대로 그린다(거노).
   const shown = sorted;
@@ -434,7 +433,7 @@ export function App() {
                 agents={shown}
                 selectedId={activeId ?? undefined}
                 onSelectStudent={(id, t) => { openStudent(id, t); setLeftOpen(false); }}
-                onNewRoom={(god) => { void newRoom(god); }}
+                onNewRoom={(character) => { void newRoom(character); }}
                 onCloseRoom={(i) => { void closeRoom(i); }}
                 onOpenSession={(s) => { openOfflineSession(s); setLeftOpen(false); }}
                 onCollapse={() => setLeftOpen(false)}

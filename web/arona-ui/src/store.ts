@@ -28,7 +28,6 @@ export interface Agent {
   /** 컨텍스트 사용량 % — claude TUI 상태바 파싱(board.context_pct). transcript
    *  토큰이 0 이어도 robust. 인연 바·메타에 사용. */
   contextPct?: number;
-  isGod?: boolean;
   /** 현재(최신) 사용 중인 tool 이름 — board.intent 첫 토큰(Bash/Read/Edit). 말풍선용. */
   currentTool?: string;
   /** tail 윈도 tool 사용 분포 — [["Bash",5],["Edit",3]]. 카드 tool 칩 / Task 추적용. */

@@ -46,7 +46,7 @@ export async function resolveBase(force = false): Promise<void> {
   return resolving;
 }
 
-// 워커 accent — pane id 숫자 해시(god-elect 워커 팔레트와 같은 결). god 은 lemon.
+// 워커 accent — pane id 숫자 해시로 고정 팔레트 순환.
 const ACCENTS: AccentColorName[] = ['sky', 'mint', 'coral', 'lilac', 'peach'];
 
 interface BoardRow {
@@ -54,7 +54,6 @@ interface BoardRow {
   status?: string;
   intent?: string;
   title?: string;
-  is_god?: boolean;
   tokens_in?: number;
   tokens_out?: number;
   /** 학생이 선생님 입력을 기다리는 진짜 이유(AskUserQuestion 질문·권한 'permission').
@@ -131,14 +130,13 @@ function toAgent(r: BoardRow): Agent {
     name: label,
     character: pureCharacter,
     title: r.title,
-    accent: r.is_god ? 'lemon' : accentFor(r.surface_id),
+    accent: accentFor(r.surface_id),
     status,
     project: r.intent ?? '',
     action: r.intent,
     lastReply: r.last_reply,
     lastPrompt: r.last_prompt,
     waitingFor: r.waiting_for,
-    isGod: !!r.is_god,
     contextTokens: tokens > 0 ? tokens : undefined,
     currentTool,
     toolCounts: r.tool_counts,
@@ -202,7 +200,7 @@ export interface Characters {
   theme?: string;
   user_title?: string;
   leader: CharacterDef;
-  /** 리더 풀(아로나·프라나) — 학생 추가/교체 시 god 도 고를 수 있게(거노). */
+  /** 리더 풀(아로나·프라나) — 학생 추가/교체 시 이들도 고를 수 있게(거노). */
   leaders?: CharacterDef[];
   members: CharacterDef[];
 }
@@ -315,10 +313,10 @@ export async function switchSession(idx: number): Promise<boolean> {
   }
 }
 
-/** POST /session-new?god=<name> — 새 방(윈도우) + 선택 god(아로나/프라나) 자동 스폰(거노). */
-export async function newRoom(god: string): Promise<boolean> {
+/** POST /session-new?character=<name> — 새 방(윈도우) + 첫 pane 캐릭터 지정 스폰(거노). */
+export async function newRoom(character: string): Promise<boolean> {
   try {
-    const r = await fetch(`${BASE}/session-new?god=${encodeURIComponent(god)}`, { method: 'POST' });
+    const r = await fetch(`${BASE}/session-new?character=${encodeURIComponent(character)}`, { method: 'POST' });
     return r.ok;
   } catch {
     return false;
@@ -507,7 +505,7 @@ export async function sendToPane(surfaceId: string, text: string, submit = true,
 
 /** POST /send?surface=<id>&inbox=1 — 모모톡 inbox 발신. PTY 에 주입하지 않고
  *  messages.jsonl 에 read=false 로만 적는다(거노: 모모톡은 프롬프트가 아니라 에이전트
- *  inbox). 받는 에이전트는 drain_unread 로 컨텍스트에 받고, idle 이면 god-loop nudge
+ *  inbox). 받는 에이전트는 drain_unread 로 컨텍스트에 받고, idle 이면 nudge
  *  가 깨운다. fail-soft(false). */
 export async function sendToInbox(surfaceId: string, text: string): Promise<boolean> {
   if (!text.trim() || !surfaceId) return false;
@@ -516,25 +514,6 @@ export async function sendToInbox(surfaceId: string, text: string): Promise<bool
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text: text.trim(), submit: false })
-    });
-    if (!r.ok) return false;
-    const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
-    return d?.ok !== false;
-  } catch {
-    return false;
-  }
-}
-
-/** POST /tell-god body:{text} — 사용자 지시를 god pane 의 PTY 에 send_text+submit.
- *  백엔드가 lead 마커로 god pane 을 직접 탐색하므로 surface 파라미터 불필요.
- *  응답 {ok:true} / {ok:false,error}. fail-soft(false 반환). */
-export async function sendToGod(text: string): Promise<boolean> {
-  if (!text.trim()) return false;
-  try {
-    const r = await fetch(`${BASE}/tell-god`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: text.trim() })
     });
     if (!r.ok) return false;
     const d = (await r.json().catch(() => ({}))) as { ok?: boolean };
