@@ -71,7 +71,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 | `rename-window <title>` | **이 pane의 세션(윈도우) 이름.** id 안 받음 — 자기 세션 대상 | — |
 | `color <id> <#rrggbb>` | 헤더 accent 색 | — |
 | `swap <a> <b>` | 두 pane 위치 교환(내용 유지) | — |
-| `resize <id> <ratio>` | 직계 split에서 차지 비중 `0..1`(god 크게). **split 직후 새 pane엔 즉시 안 먹힘**(`no such pane`) → 기존 pane에만 | — |
+| `resize <id> <ratio>` | 직계 split에서 차지 비중 `0..1`(오케스트레이터 pane 크게). **split 직후 새 pane엔 즉시 안 먹힘**(`no such pane`) → 기존 pane에만 | — |
 | `send [--surface <id>] <text>` | **입력만, 제출 X.** 셸 명령 주입 전용 — 개행은 `$'cmd\n'`로 직접. 사람·claude엔 절대 쓰지 마라 → `tell` | — |
 | `key [--surface <id>] <name>` | 키 1개 전송. name: `enter tab escape up down left right home end pageup pagedown backspace delete` | — |
 | `tell <id> <text>` | send+제출(`\r`). idle claude를 새 턴으로 깨움 (§5) | — |
@@ -93,7 +93,7 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 **`board` 항목 필드** — 협업 판단엔 이것만 보면 된다(원소당 필드가 20+개지만 나머지는 노이즈):
 
-`surface_id` · `character`(학생 이름) · `status`(`idle`\|`working`) · `is_god` · `intent`(지금 하려는 것) · `last_prompt` · `last_reply` · `cwd`(셸 위치) · `view_cwd`(파일트리 위치) · `changed_files`(수정한 파일 절대경로) · `recent_tools` · `model` · `context_pct` · `window_idx` · `title`.
+`surface_id` · `character`(학생 이름) · `status`(`idle`\|`working`) · `intent`(지금 하려는 것) · `last_prompt` · `last_reply` · `cwd`(셸 위치) · `view_cwd`(파일트리 위치) · `changed_files`(수정한 파일 절대경로) · `recent_tools` · `model` · `context_pct` · `window_idx` · `title`.
 → **충돌 회피는 `status`+`changed_files`+`intent` 세 개면 충분.**
 
 **hook 전용 (Claude Code hook이 자동 호출 — 에이전트가 수동으로 부를 일 없음)**
@@ -299,36 +299,42 @@ echo '{"tool_name":"SendUserFile","tool_input":{"files":["/tmp/foo.png"]}}' \
 
 ### 패턴 F — 학생 pane 스폰 (오케스트레이터: 이름·색·모델·effort 지정 claude)
 
-god(오케스트레이터)이 작업을 병렬 배분할 때 학생 claude pane을 만드는 표준 레시피. teammate 플래그로 이름·색이 **부팅 시점에 네이티브 표시**된다(입력박스 상단 `@이름` — v2.1.207 실측).
+오케스트레이터(작업 배분하는 pane — 아무 학생이나 가능)가 작업을 병렬 배분할 때 학생 claude pane을 만드는 표준 레시피. teammate 플래그로 이름·색이 **부팅 시점에 네이티브 표시**된다(입력박스 상단 `@이름` — v2.1.207 실측).
 
 ```bash
 S=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
 kasaterm-cli rename "$S" "<작업명>"
 kasaterm-cli color  "$S" "#58a6ff"
 # split 직후 send는 "surface 없음" 가드 오발동이 잦다(id 재사용, 실측 2회) → 실패 시 sleep 2 후 재시도
-kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --agent-id <slug>@<방이름> --agent-name <작업명> --team-name <방이름> --agent-color pink --model claude-fable-5 --effort xhigh\n'
+kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --agent-id <slug>@<방이름> --agent-name <작업명> --team-name <방이름> --agent-color pink --model 'sonnet[1m]' --effort xhigh\n'
 sleep 9                                  # 부팅 대기 — peek 로 ❯ 프롬프트 확인 후 진행
-kasaterm-cli tell "$S" "<브리프 — 자기완결 한 줄: 배경·파일 포인터·검증 기준·커밋 금지(커밋은 god)>"
+kasaterm-cli tell "$S" "<브리프 — 자기완결 한 줄: 배경·파일 포인터·검증 기준·커밋 금지(커밋은 오케스트레이터)>"
 kasaterm-cli wake-watch "$S" 30          # Bash run_in_background 로 — 턴 종료 시 auto-wake
 ```
 
 - `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan). `--model`·`--effort`·`--session-id`·`--resume`은 공개 플래그.
+- **학생 기본 모델 = `'sonnet[1m]'`**(거노 확정 2026-07-13, Sonnet 5 + 1M 컨텍스트 — statusline `Sonnet 5 ┃ 0%·1M` 실측). 대괄호가 zsh glob이라 **따옴표 필수**(안 감싸면 "no matches found"). 모델의 자기보고("200K 표준")는 훈련지식이라 믿지 말 것 — 하네스 statusline이 진실.
 - **agent-name은 학생 캐릭터명이 아니라 목표 작업명으로**(거노 확정, 예: `native-wiring-backend`) — 캐릭터는 kasaterm이 pane에 자동 배정하니 이름 중복이 불필요하고, ASCII 작업명이면 inbox 슬러그 유일성도 자연 해결.
 - **표시 매핑(실제 팀모드 스크린샷 실측, 2026-07-13)**: `--agent-color`는 배지(`@이름`)뿐 아니라 teammate TUI 전체 톤을 그 색으로 테마한다. tmux pane 제목 = 에이전트 이름, TUI 상단 `✳ 헤더` = 역할(`--agent-type`, 예: Explore). → kasaterm 스폰도 `rename`을 agent-name(작업명)과 일치시키고, `--agent-color`는 배정 학생 accent에 가장 가까운 8색으로 골라 pane 테두리색과 TUI 색을 맞춘다.
 - `--agent-type`은 역할 표시용으로 보이지만 **그 agent 정의(도구 제한 포함)를 실제 로드**한다 — Explore는 read-only라 작업 학생에 부적합. 임의 문자열 동작은 미검증 → 학생 스폰엔 생략.
 - 실제 팀모드 자식 세션의 판별 마커: env `CLAUDE_CODE_TEAMMATE_MODE=tmux`·`CLAUDE_CODE_CHILD_SESSION=1`·`CLAUDE_CODE_FORK_SUBAGENT=1`, transcript에 `bridge-session` 레코드. 우리 수동 스폰엔 이 env가 없어도 inbox 송수신은 동작(F-2) — kasaterm이 "진짜 팀모드 자식" 여부를 구분해야 할 때 이 마커를 쓴다.
 - teammate 플래그는 숨은 인터페이스 — Claude Code 업데이트 후 안 먹으면 플래그 없이 부팅하고 `/rename`·`/color`(v2.1.205+)로 대체.
-- 배분 전 `board`로 형제 pane의 `changed_files`를 확인해 **파일 경계를 사전 분리**(같은 파일을 두 학생이 만지면 같은 작업트리라 git 이전에 물리 충돌). 검수·커밋은 god 단독.
+- 배분 전 `board`로 형제 pane의 `changed_files`를 확인해 **파일 경계를 사전 분리**(같은 파일을 두 학생이 만지면 같은 작업트리라 git 이전에 물리 충돌). 검수·커밋은 오케스트레이터 단독.
 - wake-watch가 울려도 board idle은 오판일 수 있다 — `peek`로 실화면(스피너/보고문) 확인 후 판단(§5 함정 표).
 
-#### 패턴 F-2 — 네이티브 팀 배선 (SendMessage = inbox 파일, 2026-07-13 실측 확정)
+#### 패턴 F-2 — 네이티브 팀 배선 (SendMessage = inbox 파일, 2026-07-13 실측 확정 · 같은 날 풀 왕복 재검증)
 
-teammate 플래그로 부팅된 세션은 **`~/.claude/teams/<팀>/inboxes/<슬러그(agent-name)>.json`을 스스로 폴링**해서, 새 항목을 `<teammate-message>` user 턴으로 즉시 주입받는다(미드런 OK·발신자 이름·색·summary 표시). SendMessage 도구의 실체가 이 파일 append다 — 즉 **파일만 쓰면 누구든(god·kasaterm·스크립트) 네이티브로 메시지를 꽂을 수 있다.**
+teammate 플래그로 부팅된 세션은 **`~/.claude/teams/<팀>/inboxes/<슬러그(agent-name)>.json`을 스스로 폴링**해서, 새 항목을 `<teammate-message>` user 턴으로 즉시 주입받는다(미드런 OK·발신자 이름·색·summary 표시). SendMessage 도구의 실체가 이 파일 append다 — 즉 **파일만 쓰면 누구든(오케스트레이터·kasaterm·스크립트) 네이티브로 메시지를 꽂을 수 있다.** 전 경로 왕복 재검증 완료(2026-07-13, collab-native 실측): 리더→학생(파일 append) / 학생↔학생(SendMessage 상호 지목) / 학생→리더(team-lead inbox) / idle 자동 알림 — 순서만 지키면(분할→config 선작성→부팅) 수동 스폰으로 완전한 네이티브 팀이 된다.
+
+**⚡ 2026-07-16부터 kasaterm 기본 내장(자동)**: kasaterm pane에서 뜨는 모든 claude는 shim이 teammate 트리플을 자동 부착한다 — agent 이름 = `<캐릭터 로마자>-<세션id 앞4자>`(예: `midori-2535`), 팀 = 방(cwd) 단위(`/teamname` 엔드포인트가 계산, `kt-…-<해시>` 형태), `--agent-color` = 캐릭터 색. 자기 정체는 env `KASATERM_TEAM`/`KASATERM_AGENT`, 같은 방 명단은 `ls ~/.claude/teams/$KASATERM_TEAM/inboxes/`(파일명 = agent 이름). 자동 부착 제외: `agents`/`attach` 서브커맨드, `--bg`·`--continue`(세션 id 미상), 사용자가 `--agent-*`를 직접 준 경우(존중). **config.json 없이도 수신 주입·SendMessage 발신이 전부 동작한다(v2.1.211 재실측)** — 아래 config 선작성은 idle 자동보고·`claude agents` 명부가 필요한 오케스트레이션용이고, 단순 채팅엔 불필요.
+
+**⚠️ detach(←←) 포크는 팀에서 이탈한다(2026-07-16 실측)**: detach는 같은 프로세스 유지가 아니라 **데몬이 argv를 재구성한 새 포크 프로세스**다 — teammate 트리플·`--append-system-prompt`(persona)·`--model`이 전부 유실되고 인박스 폴러가 안 돈다(인박스에 써도 미소비 실측). env도 원 pane이 아니라 **데몬을 낳은 옛 pane의 env**를 물려받아 계보가 틀리다. 백그라운드 포크에 SendMessage는 닿지 않는다 — 그 세션을 pane에서 `claude --resume <포크 sid>`로 재부팅하면(shim이 트리플 재부착) 다시 팀원이 된다. persona는 kasaterm SessionStart 훅이 세션 바인딩(/persona 엔드포인트)으로 자동 재주입한다.
 
 ```bash
-# 0) 스폰 전에 팀 config 작성 (부팅 후 등록은 무효 — 폴러가 부팅 시점에만 arm)
+# 0) (선택) 오케스트레이션용 팀 config — 채팅만이면 생략(폴러는 트리플 플래그만으로 arm,
+#    v2.1.211 실측). idle 자동보고·명부가 필요할 때만 스폰 전에 작성(부팅 후 등록은 idle 보고에 무효)
 mkdir -p ~/.claude/teams/<팀>/inboxes
-# config.json: {"name":"<팀>","leadAgentId":"team-lead@<팀>","leadSessionId":"<god세션id>","members":[{team-lead 엔트리},{학생 엔트리(agentId·name·color·model)}]}
+# config.json: {"name":"<팀>","leadAgentId":"team-lead@<팀>","leadSessionId":"<오케스트레이터 세션id>","members":[{team-lead 엔트리},{학생 엔트리(agentId·name·color·model)}]}
 # inboxes/: team-lead.json 과 학생별 <슬러그>.json 을 '[]' 로 초기화
 
 # 1) 학생에게 메시지 (파일 append = SendMessage와 동일)
@@ -341,22 +347,24 @@ json.dump(m,open(p,'w'),ensure_ascii=False)
 PY
 
 # 2) 학생 보고 수신: 학생이 SendMessage 하면 inboxes/team-lead.json 에 쌓임
-#    god 가 team-lead 플래그(--agent-id team-lead@<팀> --agent-name team-lead --team-name <팀>)로
-#    부팅돼 있으면 네이티브 주입으로 받고, 아니면 파일을 직접 읽는다(읽은 항목 read:true 마킹).
+#    오케스트레이터가 team-lead 플래그(--agent-id team-lead@<팀> --agent-name team-lead --team-name <팀>)로
+#    부팅돼 있으면 네이티브 주입으로 받고, 아니면 파일을 직접 읽는다.
+#    ⚠️ inbox는 로그가 아니라 큐 — 수신 폴러가 소비한 엔트리는 파일에서 삭제된다(실측:
+#    주입 직후 학생 inbox가 []). 감사추적이 필요하면 리더가 읽는 즉시 별도 보관할 것.
 
 # 3) 기존 일반 세션의 팀원화: /exit 후 --resume <세션id> + teammate 플래그로 재부팅
 #    → 컨텍스트 유지 + 수신·발신 모두 활성 (실측: 재부팅 전 기억을 정확히 회신)
 ```
 
-규칙: **메시지 `from` 필드는 발신 세션의 배정 학생 캐릭터명**(god가 보내면 "프라나" 등 — 거노 확정, 수신 화면에 그 이름으로 표시). 단 config의 리더 멤버 엔트리 명칭은 `team-lead` 유지 — 하네스에 team-lead 하드코딩 경로(비대화형 드레인 등)가 있다.
+규칙: **메시지 `from` 필드는 발신 세션의 배정 학생 캐릭터명**(오케스트레이터가 보내면 그 pane 의 배정 캐릭터명 — 거노 확정, 수신 화면에 그 이름으로 표시). 단 config의 리더 멤버 엔트리 명칭은 `team-lead` 유지 — 하네스에 team-lead 하드코딩 경로(비대화형 드레인 등)가 있다.
 
 함정: ①**inbox 파일명은 슬러그** — `[^a-zA-Z0-9_-] → "-"`라 한글 이름 "수신생"→`---.json`, 같은 팀의 같은 길이 한글 이름은 충돌 → agent-name은 ASCII 작업명 권장 ②teammate 세션 id는 팀+에이전트 조합 결정론 파생 — 같은 조합 재부팅 시 "Session ID already in use". **단 명시적 `--session-id <uuid>`가 파생을 이긴다(실측 2026-07-13: 지정 uuid로 jsonl 생성·폴러 정상 arm·발신 정상)** — kasaterm shim처럼 세션 id를 직접 주면 충돌 클래스 소멸 ③스키마 불일치 항목은 조용히 drop — 위 필드 구성 유지 ④`--parent-session-id`는 붙이지 마라(그 세션에 idle 알림이 새어감) ⑤전부 v2.1.207 바이너리 실측 — 버전 업 시 재검증.
 
-역할 무관 풀 메시(거노 확정 방향): 인박스는 원래 에이전트별 분리라 발신은 누구나(파일 append), **수신만 "teammate 플래그 부팅" 게이트**다. 따라서 god도 `--agent-id team-lead@<팀> --agent-name team-lead --team-name <팀>`(+명시 --session-id)로 부팅하면 리더/팀메이트 구분 없이 전원 양방향 네이티브 — 학생↔학생도 같은 config 등재면 SendMessage로 서로 지목 가능. god이 플래그 없이 떠 있는 동안은 team-lead.json을 직접 읽거나 파일 감시(Monitor)로 보완.
+역할 무관 풀 메시(거노 확정 방향): 인박스는 원래 에이전트별 분리라 발신은 누구나(파일 append), **수신만 "teammate 플래그 부팅" 게이트**다. 따라서 오케스트레이터도 `--agent-id team-lead@<팀> --agent-name team-lead --team-name <팀>`(+명시 --session-id)로 부팅하면 리더/팀메이트 구분 없이 전원 양방향 네이티브 — 학생↔학생도 같은 config 등재면 SendMessage로 서로 지목 가능. 오케스트레이터가 플래그 없이 떠 있는 동안은 team-lead.json을 직접 읽거나 파일 감시(Monitor)로 보완.
 
 컬러: 발신 하네스가 부팅 `--agent-color`를 발신 메시지의 `color` 필드에 **자동 스탬프**하고, 수신 렌더는 그 필드 기준(실측: pink 부팅 학생의 요청이 color:pink, red 부팅 학생의 SendMessage가 color:red로 도착). 수동 파일 append 때만 `color`를 직접 넣으면 된다.
 
-리더가 학생 상태를 아는 법: 학생이 턴을 끝내면 하네스가 team-lead 인박스에 `{"type":"idle_notification","from":"<이름>","timestamp":…,"idleReason":…}`를 자동 발신한다(실측 2026-07-13) — god이 team-lead 플래그로 부팅돼 있으면 네이티브로 받고, 아니면 파일에서 읽는다. wake-watch 없이도 이걸로 완료 감지가 가능.
+리더가 학생 상태를 아는 법: 학생이 턴을 끝내면 하네스가 team-lead 인박스에 idle 알림을 자동 발신한다(실측 2026-07-13) — 오케스트레이터가 team-lead 플래그로 부팅돼 있으면 네이티브로 받고, 아니면 파일에서 읽는다. wake-watch 없이도 이걸로 완료 감지가 가능. **포장 스키마 주의(같은 날 raw 실측)**: 겉 엔트리는 일반 메시지와 같은 `type:"message"`이고, `text` 필드에 `{"type":"idle_notification","from":…,"idleReason":"available","summary":"<그 턴 요약>"}` JSON **문자열**이 담겨 온다 — 파일을 직접 읽는 소비자는 `text`를 파싱해서 idle/실메시지를 구분해야 한다(겉 type만 보면 전부 message). 진짜 보고 메시지는 `text`가 평문이고 `summary`가 겉 레벨에 있다.
 
 #### 패턴 F-3 — 학생 권한 라우팅 (AskUserQuestion은 pane에 안 뜬다)
 

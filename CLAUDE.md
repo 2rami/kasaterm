@@ -51,7 +51,7 @@ kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 
 근본 병목 = `main.rs` 의 `struct App` — 필드가 ①②③ 3층에 걸쳐 평면으로 뭉쳐 있어, 워커 둘이 각각 다른 기능을 만져도 같은 struct 정의(2800~2990행대)를 건드려 git 충돌이 난다. **State-Sandwich 리팩토링 진행 중**(필드를 도메인 sub-struct 로 묶어 main.rs 정의는 묶음 1줄, 정의 본체는 도메인 파일로). 완료 전까지 규칙:
 
-- **`main.rs` struct App 정의(필드 추가/수정)는 한 번에 한 워커만.** 새 필드는 god 이 조율해 직렬화. 특히 `git_col_*`(2812행대)·`file_tree_*`(2955행대)는 인접+구조 동일 → 파일트리·git 두 작업은 한 워커가 묶거나 순차로.
+- **`main.rs` struct App 정의(필드 추가/수정)는 한 번에 한 워커만.** 새 필드는 오케스트레이터가 조율해 직렬화. 특히 `git_col_*`(2812행대)·`file_tree_*`(2955행대)는 인접+구조 동일 → 파일트리·git 두 작업은 한 워커가 묶거나 순차로.
 - **`chrome.rs`(메서드별 분리), `collab-hooks/`(셸·py), `web/arona-ui/`(TS·React) 는 독립 작업 OK** — 특히 하네스·아로나 UI 는 Rust 코드와 물리 분리라 충돌 0, ③ 작업은 여기서 마음껏.
 - **`handler.rs`·`input.rs`·`render.rs`는 거대하지만 메서드 heavy** — 다른 메서드면 충돌 드묾, 중앙 디스패치라 쪼개지 말 것.
 - 층 매핑: 렌더/입력=① / 파일트리·git=②(아직 app/src) / 하네스·협업=③(분리됨). 충돌 핫스팟은 ②가 app/src 에 박혀서다 → 본격 확장 시 `kasa-workspace`·`kasa-git-badge` crate 추출 ROI 1순위. 상세 [[reference_kasaterm_parallel_work_boundaries]].
