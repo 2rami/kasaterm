@@ -173,7 +173,7 @@ pub struct PaneActivity {
     /// unless `status == "waiting"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<String>,
-    /// P3 — cumulative `message.usage` over the transcript tail window. The god
+    /// P3 — cumulative `message.usage` over the transcript tail window. The orchestrator
     /// reads these to spot an over-budget / runaway pane and steer the fleet.
     #[serde(default)]
     pub tokens_in: u64,
@@ -189,15 +189,11 @@ pub struct PaneActivity {
     /// Tool-use counts over the tail window, e.g. `[("Edit",3),("Bash",5)]`.
     #[serde(default)]
     pub tool_counts: Vec<(String, u32)>,
-    /// Every file Edit/Write-touched over the tail window — the god's change-set
-    /// view ("who changed what"). A superset of `files` (the single most-recent
-    /// edit, kept for conflict detection).
+    /// Every file Edit/Write-touched over the tail window — the orchestrator's
+    /// change-set view ("who changed what"). A superset of `files` (the single
+    /// most-recent edit, kept for conflict detection).
     #[serde(default)]
     pub changed_files: Vec<String>,
-    /// True if this pane is the god (the `lead` file points at it). The board
-    /// panel draws a crown / accent for it. Set by `collab_board`.
-    #[serde(default)]
-    pub is_god: bool,
     /// In-flight sub-agents — Task/Agent `tool_use` blocks in the tail window
     /// with no matching `tool_result` yet, as their short descriptions. The
     /// classroom surfaces "서브에이전트 N 실행 중" so a student spawning helpers
@@ -428,9 +424,16 @@ pub trait Backend: Send + Sync {
     fn swap_character(&self, _surface_id: &str, _character: &str) -> Result<()> {
         anyhow::bail!("swap_character unsupported by this backend")
     }
+    /// Reassign a pane's character *without* respawning its PTY — updates the
+    /// header/board/marker/session binding only. The per-student launcher shims
+    /// (`시로코`) call this right before starting claude; the persona itself
+    /// travels via the shim's override file. Default: unsupported.
+    fn repersona(&self, _surface_id: &str, _character: &str) -> Result<()> {
+        anyhow::bail!("repersona unsupported by this backend")
+    }
     /// Rename the *window/session* that `surface_id` belongs to (sidebar
-    /// session label), independent of the pane header. The god marker uses this
-    /// so the session reads "● god" even when the god pane isn't the window's
+    /// session label), independent of the pane header. The rename override uses this
+    /// so the session label holds even when that pane isn't the window's
     /// representative (first-leaf) pane. Default: unsupported.
     fn rename_window(&self, _surface_id: &str, _title: &str) -> Result<()> {
         anyhow::bail!("rename_window unsupported by this backend")
@@ -467,7 +470,7 @@ pub trait Backend: Send + Sync {
     /// Make `surface_id` take `ratio` (0..1) of its *immediate* split
     /// container — the pane-addressed cousin of `resize_divider` (which
     /// needs a tree path callers like the CLI don't know). Orchestration
-    /// knob: "make the god pane big" after a fleet regroup. Default:
+    /// knob: "make the orchestrator pane big" after a fleet regroup. Default:
     /// unsupported.
     fn set_split_ratio(&self, _surface_id: &str, _ratio: f32) -> Result<()> {
         anyhow::bail!("set_split_ratio unsupported by this backend")
@@ -527,9 +530,9 @@ pub trait Backend: Send + Sync {
     fn new_session(&self) -> Result<()> {
         anyhow::bail!("new_session not supported")
     }
-    /// Create a fresh room (window) and spawn the given god character (e.g.
-    /// "아로나"/"프라나") in it. `POST /session-new?god=<name>`. Default unsupported.
-    fn new_room(&self, _god: &str) -> Result<()> {
+    /// Create a fresh room (window) whose first pane is assigned the given
+    /// character. `POST /session-new?character=<name>`. Default unsupported.
+    fn new_room(&self, _character: &str) -> Result<()> {
         anyhow::bail!("new_room not supported")
     }
     /// 활성 pane(보이는 방)의 방 식별자 — 방별 collab(모모톡 inbox 등)을 그 방으로

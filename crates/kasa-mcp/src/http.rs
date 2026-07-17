@@ -870,7 +870,7 @@ fn mode_slug(cwd: &std::path::Path) -> String {
         .collect()
 }
 
-/// `GET /mode` — 활성 pane 의 `{ cwd }`. 옛 solo/god 모드 필드(mode·configured)는
+/// `GET /mode` — 활성 pane 의 `{ cwd }`. 옛 solo 모드 필드(mode·configured)는
 /// 제거됐다(shim_inject 가 대체). 라우트 자체는 resolveBase 헬스 프로브 + cwd 소스
 /// (터미널 cd 반영)로 살아있어 경로명은 유지한다.
 async fn mode_get_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
@@ -1025,15 +1025,21 @@ async fn session_switch_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// `POST /session-new?god=<name>` — 새 방(윈도우) + 선택 god(아로나/프라나) 스폰
-/// (거노: 방 추가 시 god 선택). god 미지정이면 아로나 기본.
+/// `POST /session-new?character=<name>` — 새 방(윈도우) + 첫 pane 캐릭터 지정 스폰
+/// (거노: 방 추가 시 캐릭터 선택). 미지정이면 아로나 기본. 구 클라이언트의
+/// `?god=` 파라미터도 당분간 수용(god 개념 폐기 후 하위호환).
 async fn session_new_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let god = params.get("god").filter(|s| !s.is_empty()).map(|s| s.as_str()).unwrap_or("아로나");
-    let body = match backend.new_room(god) {
-        Ok(()) => serde_json::json!({ "ok": true, "god": god }),
+    let character = params
+        .get("character")
+        .or_else(|| params.get("god"))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.as_str())
+        .unwrap_or("아로나");
+    let body = match backend.new_room(character) {
+        Ok(()) => serde_json::json!({ "ok": true, "character": character }),
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
@@ -1069,6 +1075,28 @@ async fn swap_character_handler(
         serde_json::json!({ "ok": false, "error": "surface and character required" })
     } else {
         match backend.swap_character(surface, character) {
+            Ok(()) => serde_json::json!({ "ok": true }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        }
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
+}
+
+/// `GET /repersona?surface=<id>&character=<name>` — pane 캐릭터 재배정(respawn
+/// 없음, 대화·셸 유지). 학생 명령 셰임(`시로코`)이 claude 실행 직전에 호출 —
+/// persona 는 셰임의 override 파일이 싣고 GUI 는 헤더·마커·세션바인딩만 갱신.
+/// GET 인 이유: 순수 sh 셰임이 한글 캐릭터명을 percent-encode 할 방법이 없어
+/// `curl --get --data-urlencode` 를 쓴다(imgopen 과 동일 관례).
+async fn repersona_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let surface = params.get("surface").map(|s| s.as_str()).unwrap_or("");
+    let character = params.get("character").map(|s| s.as_str()).unwrap_or("");
+    let body = if surface.is_empty() || character.is_empty() {
+        serde_json::json!({ "ok": false, "error": "surface and character required" })
+    } else {
+        match backend.repersona(surface, character) {
             Ok(()) => serde_json::json!({ "ok": true }),
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         }
@@ -1236,7 +1264,7 @@ async fn session_save_handler(
 /// login shell), so PATH lookup alone misses npm-global/local installs — probe
 /// the common locations, honoring `CLAUDE_BIN` for an explicit override, and
 /// fall back to bare `claude` (PATH) as a last resort.
-pub(crate) fn claude_bin() -> std::path::PathBuf {
+pub fn claude_bin() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("CLAUDE_BIN") {
         if !p.is_empty() {
             return p.into();
@@ -1659,26 +1687,9 @@ async fn layout_handler(backend: Arc<dyn Backend>) -> impl IntoResponse {
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
-/// /tmp/kasaterm-collab/ 아래 모든 방을 순회해 lead 파일이 있는 첫 god pane id
-/// 를 반환한다. active_cwd 가 쉘 디렉토리를 따르므로 슬러그 계산 대신 스캔.
-fn find_god_pane() -> Option<String> {
-    let base = std::path::Path::new("/tmp/kasaterm-collab");
-    for entry in std::fs::read_dir(base).ok()?.flatten() {
-        let lead = entry.path().join("lead");
-        if let Ok(g) = std::fs::read_to_string(&lead) {
-            let g = g.trim().to_string();
-            if !g.is_empty() {
-                return Some(g);
-            }
-        }
-    }
-    None
-}
-
-/// 선생님(인간) 발신을 messages.jsonl 에 영속한다 — god/모모톡 단톡방 가시용.
-/// `read=true`: `/send`·`/tell-god` 로 이미 PTY 전달됐으니 학생 inbox drain 은 막고
-/// 기록·표시만 남긴다. god 가시성은 cc 사본이 아니라 board-context 가 이 파일 전체를
-/// god 에게 보여주는 것으로 얻는다(단일 messages.jsonl 이라 사본 불필요).
+/// 선생님(인간) 발신을 messages.jsonl 에 영속한다 — 모모톡 단톡방 가시용.
+/// `read=true`: `/send` 로 이미 PTY 전달됐으니 학생 inbox drain 은 막고
+/// 기록·표시만 남긴다.
 /// claude TUI(Ink)에 텍스트를 *제출까지* 보내는 페이로드. 단순 `\n`(LF)은 Ink 가
 /// 입력 내 개행으로 먹어 Enter 제출이 씹힌다(거노 실측: 텍스트만 입력칸에 남음).
 /// cli `tell` 과 동일하게 Ctrl-U(줄 비움) + bracketed paste + `\r`(CR=Enter):
@@ -1689,7 +1700,7 @@ fn submit_payload(text: &str) -> String {
 }
 
 /// 선생님 발신을 messages.jsonl 에 append. `read=true`: 이미 PTY 로 전달돼 표시·
-/// god 가시용만(학생 inbox drain 막음). `read=false`: 모모톡 inbox 발신 — 받는
+/// 오케스트레이터 가시용만(학생 inbox drain 막음). `read=false`: 모모톡 inbox 발신 — 받는
 /// 에이전트의 drain_unread(to==me·read==false)가 집어 올려 컨텍스트로 받는다.
 /// to/to_pane 은 surface(%N) — drain_unread 가 pane id 도 내 주소로 매칭한다.
 fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str, read: bool, room: Option<&str>) {
@@ -1772,7 +1783,7 @@ async fn send_handler(
     }
     // 모모톡 inbox 발신(`inbox=1`): PTY 에 *주입하지 않고* messages.jsonl 에 read=false
     // 로만 적는다(거노: 모모톡은 프롬프트가 아니라 에이전트 inbox). 받는 에이전트는
-    // drain_unread 로 컨텍스트에 받고, idle 이면 god-loop nudge 가 4s 내 깨운다.
+    // drain_unread 로 컨텍스트에 받고, idle 이면 nudge 가 4s 내 깨운다.
     let inbox = params.get("inbox").map(|v| v == "1" || v == "true").unwrap_or(false);
     if inbox {
         let clean: String = text.chars().filter(|c| !c.is_control()).collect();
@@ -1795,7 +1806,7 @@ async fn send_handler(
             // 제어문자는 한 번 더 걸러 영속 텍스트를 깨끗이 유지한다.
             // `nopersist=1`: 학생별 대화 패널의 개인 지시는 그 학생 대화(캡처 프록시)에만
             // 떠야 하는데 persist 하면 모모톡 단톡방에까지 노란버블로 샜다(거노). 모모톡
-            // 발신(/tell-god·모모톡 학생지목)만 persist, 학생별 대화는 nopersist 로 끈다.
+            // 발신(모모톡 학생지목)만 persist, 학생별 대화는 nopersist 로 끈다.
             let nopersist = params.get("nopersist").map(|v| v == "1" || v == "true").unwrap_or(false);
             if submit && !nopersist {
                 let clean: String = text.chars().filter(|c| !c.is_control()).collect();
@@ -2052,52 +2063,6 @@ async fn messages_handler(
     )
 }
 
-/// `POST /tell-god` — 교실 '새 의뢰 작성': body `{"text":"..."}` or raw text
-/// → lead 마커의 god pane 에 text+\n 제출(send_text). god 부재(lead 없음) 시
-/// `{"ok":false}`. text/plain 본문을 권장(JSON 도 허용).
-async fn tell_god_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
-    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
-    let text = if body.trim_start().starts_with('{') {
-        match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(v) => v
-                .get("text")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string(),
-            Err(e) => {
-                return (
-                    cors,
-                    Json(serde_json::json!({ "ok": false, "error": format!("bad body: {e}") })),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        body.trim().to_string()
-    };
-    if text.is_empty() {
-        return (cors, Json(serde_json::json!({ "ok": false, "error": "text is empty" })))
-            .into_response();
-    }
-    let god_pane = match find_god_pane() {
-        Some(g) => g,
-        None => {
-            return (cors, Json(serde_json::json!({ "ok": false, "error": "god not found" })))
-                .into_response();
-        }
-    };
-    let payload = submit_payload(&text);
-    let resp = match backend.send_text(Some(&god_pane), &payload) {
-        Ok(()) => {
-            // 선생님 → god 발신 영속(휘발 X) — 모모톡 단톡방·god 가시.
-            persist_sensei_msg(&resolve_cwd(&backend), &god_pane, &text, true, backend.active_room().as_deref());
-            serde_json::json!({ "ok": true, "to": god_pane })
-        }
-        Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-    };
-    (cors, Json(resp)).into_response()
-}
-
 /// ~/.config/kasaterm/schale-state.json 경로.
 fn schale_state_path() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
@@ -2258,6 +2223,7 @@ pub fn spawn_http_server_opts(
                 let session_new_backend = backend.clone();
                 let spawn_student_backend = backend.clone();
                 let swap_character_backend = backend.clone();
+                let repersona_backend = backend.clone();
                 let session_close_backend = backend.clone();
                 let slash_backend = backend.clone();
                 let session_restore_backend = backend.clone();
@@ -2283,7 +2249,6 @@ pub fn spawn_http_server_opts(
                 let subagent_transcript_raw_backend = backend.clone();
                 let paste_active_backend = backend.clone();
                 let layout_backend = backend.clone();
-                let tell_god_backend = backend.clone();
                 let send_backend = backend.clone();
                 let mode_get_backend = backend.clone();
                 let focus_backend = backend.clone();
@@ -2439,6 +2404,13 @@ pub fn spawn_http_server_opts(
                             swap_character_handler(swap_character_backend.clone(), q)
                         }),
                     )
+                    .route(
+                        "/repersona",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            repersona_handler(repersona_backend.clone(), q)
+                        }),
+                    )
+                    .route("/teamname", get(teamname_handler))
                     .route("/persona", get(persona_handler))
                     .route("/character", get(character_binding_handler))
                     .route(
@@ -2520,12 +2492,6 @@ pub fn spawn_http_server_opts(
                         "/blocks",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             blocks_handler(blocks_backend.clone(), q)
-                        }),
-                    )
-                    .route(
-                        "/tell-god",
-                        post(move |body: String| {
-                            tell_god_handler(tell_god_backend.clone(), body)
                         }),
                     )
                     .route(
@@ -2700,7 +2666,7 @@ mod tests {
             mode_slug(std::path::Path::new("/Users/kasa/Desktop/momewomo/tmuxify")),
             "-Users-kasa-Desktop-momewomo-tmuxify"
         );
-        // '.' 포함 경로 — god slug 엣지케이스
+        // '.' 포함 경로 — slug 엣지케이스
         assert_eq!(
             mode_slug(std::path::Path::new("/tmp/app.v1.2/run")),
             "-tmp-app-v1-2-run"

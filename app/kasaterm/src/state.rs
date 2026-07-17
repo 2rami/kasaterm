@@ -131,7 +131,7 @@ pub(crate) struct FileTreeState {
     pub(crate) resize: Option<(f32, f32)>,
 }
 
-/// Collab completion toast + munder-style god approval card. `toast` is the
+/// Collab completion toast + munder-style approval card. `toast` is the
 /// "✓ %3 완료" message for a sibling pane's working→idle flip (faded by
 /// `collab_toast_alpha`); `toast_action` = Some(pane id) pins it as an
 /// approve/deny card whose chip rects (`toast_approve_rect`/`toast_deny_rect`)

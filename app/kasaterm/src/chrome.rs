@@ -5,6 +5,26 @@ use super::*;
 const NOTIFY_FLASH_MS: u128 = 1800;
 
 impl App {
+    /// pane 의 표시용 학생 — "터미널은 파싱만"(거노): claude sessionId 바인딩이 정본,
+    /// agents/attach 뷰 pane 은 파싱 전 스폰 랜덤(ws.pane_character)을 보여주지 않는다
+    /// (거노: 세션 진입 직후 다른 학생으로 보임 — 뷰 pane 의 로컬 배정은 무의미한 잔재
+    /// 라 None 으로 두면 학생 시각 요소가 중립으로 남는다). 일반 pane 은 스폰 배정
+    /// 폴백 유지(첫 프레임부터 학생 표시). render 의 프사·타이틀바·테두리가 공유한다.
+    pub(crate) fn display_pane_char(&self, ws: &Workspace, id: &str) -> Option<String> {
+        self.pane_claude_sid
+            .get(id)
+            .and_then(|sid| kasa_mcp::character::session_character(sid))
+            .or_else(|| {
+                let view =
+                    self.pty.get(id).map(|p| p.is_claude_agents()).unwrap_or(false);
+                if view {
+                    None
+                } else {
+                    ws.pane_character.get(id).cloned()
+                }
+            })
+    }
+
     /// A pane's claude finished (Stop hook → `kasaterm-cli notify` → socket →
     /// `UserEvent::Notify`). Flash the pane's header and, unless the user is
     /// already looking at that exact pane (our window focused + it's the
@@ -1227,14 +1247,14 @@ impl App {
             self.open_board_panel(event_loop);
         }
     }
-    /// Open the arona (god-mode) full UI in its own OS window. Unlike the
+    /// Open the arona full UI in its own OS window. Unlike the
     /// HTML-string panels this loads the arona-ui dist over the MCP HTTP
     /// server (`/arona-ui/`) — same-origin with the API the page fetches, and
     /// the in-window wry embed is off the table anyway (Metal layer conflict).
     pub(crate) fn open_arona_panel(&mut self, event_loop: &ActiveEventLoop) {
         // shim OFF(순정 모드)면 아로나 GUI 자체를 안 띄운다 — board/미러 hook 이 전무해
         // 빈 웹뷰가 뜨는 어색함 방지(arona_btn_rect 도 None 이라 버튼부터 숨겨진다).
-        // 이건 전역 shim 축 — 아래 solo/god 방 모드 게이트 부재와는 다른 결이다.
+        // 이건 전역 shim 축 — 아래 방 모드 게이트 부재와는 다른 결이다.
         if !crate::socket::read_shim_inject() {
             return;
         }
@@ -1303,9 +1323,9 @@ impl App {
         eprintln!("[arona-panel] open; http://127.0.0.1:{port}/arona-ui/");
         self.arona_panel_window = Some(window);
         self.arona_panel_webview = webview;
-        // BA GUI 는 세션을 건드리지 않는다(거노 06-17 방향전환: "시각 레이어"). god 통솔
+        // BA GUI 는 세션을 건드리지 않는다(거노 06-17 방향전환: "시각 레이어"). 자동 통솔
         // 자체가 폐기됐다(솔로 확정 06-18) — 아로나/SCHALE OS 는 관찰·시각 레이어일 뿐
-        // 세션을 통솔하지 않는다(활성 pane god 승격 호출 제거).
+        // 세션을 통솔하지 않는다(활성 pane 승격 호출 제거).
         // 제품 동작: 교실(BA UI)과 터미널을 둘 다 띄워 나란히 연동한다 — BA UI 의
         // 포커스/입력/상태가 메인 터미널 창과 양방향으로 묶인다. 옛 "교실이 화면을
         // 인수(터미널 숨김)"는 KASATERM_ARONA_SOLO_VIEW 몰입 옵션으로 강등.
@@ -1413,15 +1433,15 @@ impl App {
         eprintln!("[arona-browser] open {url}");
     }
 
-    /// 거노: 새 방(윈도우) + god(아로나/프라나) 배정. 방별 collab 격리로 room slug 를
+    /// 거노: 새 방(윈도우) + 첫 pane 캐릭터 지정. 방별 collab 격리로 room slug 를
     /// 셸 env(KASATERM_ROOM)로 주입하고(spawn_session_pane 이 pending_room 을 읽음),
-    /// 첫 pane 캐릭터를 god 으로 강제한다(pending_character). 사용자가 그 pane 에서 claude
-    /// 를 치면 shim 이 god persona·session-id 를 입히고, 추가 split pane 은 학생(빈 슬롯 순환).
-    pub(crate) fn new_room_with_god(&mut self, character: &str) {
+    /// 첫 pane 캐릭터를 지정값으로 강제한다(pending_character). 사용자가 그 pane 에서
+    /// claude 를 치면 shim 이 persona·session-id 를 입히고, 추가 split pane 은 랜덤 배정.
+    pub(crate) fn new_room_with_character(&mut self, character: &str) {
         let room = format!("room-{}", self.next_room_seq);
         self.next_room_seq += 1;
         self.pending_room = Some(room);
-        self.pending_character = Some(character.to_string()); // 첫 pane = 이 god(lead 마커)
+        self.pending_character = Some(character.to_string()); // 첫 pane = 지정 캐릭터
         self.new_window();
         // 좌측 방 라벨 = 선택 캐릭터 이름(방 구분 시각 라벨).
         self.window_name_override

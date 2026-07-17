@@ -472,7 +472,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
     eprintln!("  kasaterm-cli split <left|right|up|down> [--focus]  # 기본 no-focus");
     eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
-    eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (god 크게)");
+    eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (오케스트레이터 크게)");
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
     eprintln!("  kasaterm-cli key   [--surface <id>] <enter|tab|escape|up|down|left|right|...>  # 특정 pane에 키/선택");
@@ -538,7 +538,7 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         "rename-window" => {
             // 윈도우/세션 이름 변경. surface.rename 과 달리 surface_id 를 받지 않고
             // 호출한 pane($KASATERM_PANE_ID)이 속한 윈도우를 대상으로 한다 —
-            // god-elect.sh 가 god pane 에서 `rename-window "● god"` 로 부른다.
+            // 오케스트레이터 pane 이 윈도우 라벨을 덮어쓸 때 부른다.
             let title = args
                 .first()
                 .ok_or_else(|| anyhow!("rename-window needs <title>"))?;

@@ -110,6 +110,10 @@ impl App {
         let win_screens = self.window.clone();
         let dead = self.dead_panes.clone();
         let proxy = self.proxy.clone();
+        let marker_backend = self.socket_backend.clone();
+        // statusline 세션 id 마커(⟦sid8⟧)의 마지막 관측값 — 값이 바뀔 때만 rebind 를
+        // 태워 같은 마커의 재렌더(매 프레임)를 무시한다.
+        let mut last_marker: Option<String> = None;
         std::thread::spawn(move || {
             // winit's `request_redraw` is itself idempotent — repeated
             // calls within one frame coalesce into a single
@@ -186,6 +190,18 @@ impl App {
                         Err(_) => break,
                     }
                 }
+                // 세션 진입 즉시 감지(거노): dirty 행에 statusline 세션 id 마커가 있으면
+                // 그 자리에서 rebind — 3s 폴러를 기다리지 않는다. 마커는 세션 화면의
+                // 일부라 agents 피커로 진입한 첫 리드로우에 반드시 실려 온다. '⟦' 스캔은
+                // 문자 비교뿐이라 스트리밍 버스트에도 공짜에 가깝다. rebind 는 apply
+                // "후"에 태운다 — 그리드를 다시 읽으므로 마커가 반영된 뒤여야 한다.
+                let marker = update.dirty.iter().rev().find_map(|(_, row)| {
+                    row.iter().any(|c| c.ch == '⟦').then(|| {
+                        let s: String = row.iter().map(|c| c.ch).collect();
+                        crate::socket::screen_marker_sid8(&s)
+                    })?
+                });
+                let pane_for_marker = update.pane_id.clone();
                 let mut ws = ws_screens.lock().unwrap();
                 Self::apply_screen_update(&mut ws, update);
                 drop(ws);
@@ -195,6 +211,12 @@ impl App {
                 // Wake the loop even if it's parked on a WaitUntil —
                 // request_redraw alone doesn't do that reliably on macOS.
                 let _ = proxy.send_event(UserEvent::Redraw);
+                if let (Some(m), Some(be)) = (marker, marker_backend.as_ref()) {
+                    if last_marker.as_deref() != Some(m.as_str()) {
+                        be.rebind_pane_marker(&pane_for_marker, &m);
+                        last_marker = Some(m);
+                    }
+                }
             }
             // Channel disconnected — the reader thread exited because
             // the PTY hit EOF (shell quit) or errored. Flag this pane
@@ -212,8 +234,8 @@ impl App {
     /// PaneState keyed "%0" and the layout is `None` (the render path
     /// falls back to single-pane when no layout has arrived).
     /// pane 생성 시 캐릭터 자동 배정 — /tmp 마커·session-id 기록 후 셸 env 를 반환.
-    /// pending_character(god, new_room_with_god 이 세팅) 우선, 없으면 그 방 빈 슬롯
-    /// 순환(미도리→모모이→유즈→아리스). characters.json 없으면 빈 vec(무테마 = skip).
+    /// pending_character(new_room_with_character 가 세팅) 우선, 없으면 통합 풀에서
+    /// 안 겹친 캐릭터 랜덤. characters.json 없으면 빈 vec(무테마 = skip).
     /// board(socket.rs)는 같은 /tmp 마커를 읽어 row.character 를 채운다.
     pub(crate) fn assign_character_env(
         &mut self,
@@ -226,11 +248,9 @@ impl App {
             return Vec::new();
         };
         let rslug = kasa_mcp::character::rslug(std::path::Path::new(cwd), room);
+        // 통합 풀(member_names = leader/leaders/members 병합) — god 개념 폐기(거노
+        // 2026-07-13): 아로나·프라나도 특별 클래스 없이 동등하게 랜덤 배정.
         let members = kasa_mcp::character::member_names(&chars);
-        // god(아로나·프라나)도 배정 풀에 그냥 포함 — 대타가 아니라 학생과 동등하게 랜덤
-        // (거노: 아로나·프라나도 그냥 랜덤으로 나오게, 대타 말고). 명시 배정(pending)만
-        // 통솔(lead) 마커를 단다.
-        let leaders = kasa_mcp::character::god_names(&chars);
         // 프로젝트(방)를 넘어 같은 학생이 겹치지 않게, 이 방 live pane + 전 방 마커를 모두
         // taken 으로 본다(거노: 미도리 둘 — 방-로컬 배정이라 다른 방 미도리를 못 봤다).
         // ws.pane_character/read_marker(이 방 live) + assigned_global(전 방). 닫힌 pane
@@ -251,33 +271,32 @@ impl App {
             t.extend(kasa_mcp::character::assigned_global());
             t
         };
-        // pending(사용자 지정 god) 우선. 없으면 학생+god 6명 통짜에서 안 겹친 것 중 랜덤
-        // (거노: 아로나·프라나도 대타가 아니라 그냥 랜덤 풀). 다 차면 전체에서 랜덤 폴백.
-        // explicit_god = 방 통솔용으로 명시 배정된 god 인지(자동 배정 god 과 구분 — lead
-        // 마커는 명시 배정만).
-        let (name, explicit_god) =
-            match self.pending_character.take().filter(|n| !taken.contains(n)) {
-                Some(n) => (n, true),
-                None => {
-                    let pool: Vec<String> = members.iter().chain(leaders.iter()).cloned().collect();
-                    let free: Vec<String> =
-                        pool.iter().filter(|n| !taken.contains(n.as_str())).cloned().collect();
-                    let pick = kasa_mcp::character::pick_random(&free, id)
-                        .or_else(|| kasa_mcp::character::pick_random(&pool, id));
-                    match pick {
-                        Some(n) => (n, false),
-                        None => return Vec::new(),
-                    }
+        // pending(사용자 지정 캐릭터)은 중복이어도 존중 — 같은 학생 허용, 색은
+        // character_ordinal 변주로 구분(거노). 랜덤 배정만 taken 을 피한다.
+        let name = match self.pending_character.take() {
+            Some(n) => n,
+            None => {
+                let free: Vec<String> =
+                    members.iter().filter(|n| !taken.contains(n.as_str())).cloned().collect();
+                let pick = kasa_mcp::character::pick_random(&free, id)
+                    .or_else(|| kasa_mcp::character::pick_random(&members, id));
+                match pick {
+                    Some(n) => n,
+                    None => return Vec::new(),
                 }
-            };
+            }
+        };
+        // 학생 명령(`시로코`)이 남긴 persona override 는 이 spawn 의 fresh env 보다
+        // 오래된 정체성 — 지워서 이 pane 의 다음 claude 가 env 기준으로 돌아가게.
+        if let Ok(shim) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
+            for ext in ["character", "persona"] {
+                let _ = std::fs::remove_file(
+                    std::path::Path::new(&shim).join(format!("repersona-{id}.{ext}")),
+                );
+            }
+        }
         let sid = kasa_mcp::character::new_session_id();
         let _ = kasa_mcp::character::write_marker(&rslug, id, &name);
-        // god 은 방 통솔용으로 명시 배정됐을 때만 lead 마커. 자동 랜덤으로 나온 god 은 일반
-        // 워커라 통솔 표시를 안 한다(거노: 랜덤 god 이 방 리더로 오인되지 않게).
-        let lead = explicit_god && kasa_mcp::character::is_god(&chars, &name);
-        if lead {
-            let _ = kasa_mcp::character::write_lead(&rslug, id);
-        }
         self.pane_session_id.insert(id.to_string(), sid.clone());
         // 세션→캐릭터 영속 바인딩(거노 ④): 같은 세션이 --resume 등으로 다시 붙으면 같은
         // 캐릭터를 재사용하도록 스폰 시점에 기록(apply_session_character 가 조회).
@@ -289,26 +308,6 @@ impl App {
         ];
         if let Some(p) = kasa_mcp::character::persona_for(&chars, &name) {
             env.push(("KASATERM_PERSONA".to_string(), p));
-        }
-        // god(통솔) pane 네이티브 팀 수신 준비 — teammate 폴러는 부팅 시점에만 arm 되므로
-        // (패턴 F-2) 팀 config 를 스폰 시점에 미리 깔고, shim 이 읽을 team-lead env 를
-        // 심는다. shim 은 이 env 로 `claude` 에 team-lead 트리플을 얹어 부팅한다(수신 arm).
-        // ensure_team 은 기존 config 불변이라 학생이 먼저 스폰된 팀에도 안전.
-        if lead {
-            let team = kasa_mcp::team::team_name_for(&rslug);
-            let root = kasa_mcp::team::teams_root();
-            match kasa_mcp::team::ensure_team(&root, &team, Some(&sid), cwd) {
-                Ok(()) => {
-                    // god 재스폰/스왑은 새 sid 로 부팅 — 명부 리더도 따라 갱신해 부팅
-                    // 플래그(--session-id)와 config 가 같은 세션을 가리키게 한다.
-                    if let Err(e) = kasa_mcp::team::set_lead_session(&root, &team, &sid) {
-                        eprintln!("[team] set_lead_session {team} failed: {e}");
-                    }
-                    env.push(("KASATERM_TEAM".to_string(), team));
-                    env.push(("KASATERM_TEAM_LEAD".to_string(), "1".to_string()));
-                }
-                Err(e) => eprintln!("[team] ensure_team {team} failed: {e}"),
-            }
         }
         env
     }
@@ -329,8 +328,8 @@ impl App {
             env.push(("KASATERM_ROOM".to_string(), room.clone()));
             self.ws.lock().unwrap().pane_room.insert(id.clone(), room.clone());
         }
-        // 캐릭터 자동 배정(거노): pending(god) 우선, 없으면 빈 슬롯 순환. 마커·session-id
-        // 기록 후 KASATERM_CHARACTER/SESSION_ID/PERSONA env 를 더한다(claude shim 적용).
+        // 캐릭터 자동 배정(거노): pending(사용자 지정) 우선, 없으면 통합 풀 랜덤. 마커·
+        // session-id 기록 후 KASATERM_CHARACTER/SESSION_ID/PERSONA env 를 더한다(claude shim 적용).
         env.extend(self.assign_character_env(&id, cwd.as_deref(), room.as_deref()));
         let session = Arc::new(kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: self.pending_shell.take().or_else(resolve_default_shell),
@@ -349,38 +348,125 @@ impl App {
     }
 
     /// bind-transcript 로 pane 의 실제 세션 id 를 인지한 시점의 캐릭터 영속화(거노 ④):
-    /// 매핑이 있으면 그 캐릭터로 이름표를 교정하고(respawn 없음 — persona 는 스폰 시
-    /// 고정이라 label·마커만 갱신, --resume 둔갑 방지), 없으면 현재 배정을 저장해 다음
-    /// resume 이 재사용하게 한다. 신규 세션만 랜덤 배정이 남는다.
+    /// 부모(포크/백그라운드)가 있으면 그 학생을 우선 상속하고, 없으면 세션 매핑으로
+    /// 이름표를 교정(respawn 없음 — persona 는 스폰 시 고정, label·마커만 갱신,
+    /// --resume 둔갑 방지), 그것도 없으면 현재 배정을 저장해 다음 resume 이 재사용한다.
     pub(crate) fn apply_session_character(&mut self, pane: &str, sid: &str) {
         let cur = self.ws.lock().unwrap().pane_character.get(pane).cloned();
+        // 우선순위: 세션 자신의 바인딩 > 부모 상속 > env anchor. 예전엔 부모가 바인딩을
+        // 덮었지만("첫 호출에 박힌 랜덤 바인딩 교정"용) — 지금 바인딩은 전부 의도적
+        // 기록(ResumeSession 해석/신선 배정, lazy own, 여기 None-arm 영속화)이라 부모가
+        // 이기면 오히려 진실이 뒤집힌다: 미도리로 확정된 포크 세션(2535079b)의 부모
+        // (b18e41d2)가 히마리라서, BgAgentsChanged 재적용마다 미도리→히마리로 둔갑+
+        // 재바인딩되는 지뢰였다(거노 07-16). 부모는 자기 바인딩이 없을 때만.
         match kasa_mcp::character::session_character(sid) {
             Some(mapped) => {
-                if cur.as_deref() == Some(mapped.as_str()) {
-                    return;
+                if cur.as_deref() != Some(mapped.as_str()) {
+                    self.relabel_pane(pane, &mapped);
                 }
-                // 실존 pane 만 relabel(훅 오호출·죽은 pane 가드).
-                if !self.ws.lock().unwrap().panes.contains_key(pane) {
-                    return;
+                return;
+            }
+            None => {}
+        }
+        // 포크/백그라운드 세션은 부모 대화의 연장 — 자기 바인딩이 없으면 부모 학생을
+        // 상속하고 sid 에 영속화한다. 첫 호출 때 bg_agents 가 비어(폴러 3초 주기) 이
+        // 분기를 놓쳐도, 폴러의 BgAgentsChanged 재적용이 뒤늦게 부모를 물려준다.
+        let parent_char = self
+            .bg_agents
+            .lock()
+            .ok()
+            .and_then(|m| m.get(sid).cloned())
+            .flatten()
+            .and_then(|parent| kasa_mcp::character::session_character(&parent));
+        match parent_char {
+            Some(pc) => {
+                if cur.as_deref() != Some(pc.as_str()) {
+                    self.relabel_pane(pane, &pc);
                 }
-                self.ws.lock().unwrap().pane_character.insert(pane.to_string(), mapped.clone());
-                // board 도 같은 이름을 보게 /tmp 마커 동기(swap_character 의 cwd/room 관례).
-                if let Some(cwd) = self.pane_cwd_cache.get(pane).cloned() {
-                    let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
-                    let rslug = kasa_mcp::character::rslug(&cwd, room.as_deref());
-                    let _ = kasa_mcp::character::write_marker(&rslug, pane, &mapped);
-                }
-                self.chrome_dirty = true;
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                let _ = kasa_mcp::character::bind_session_character(sid, &pc);
             }
             None => {
-                // 첫 인지 — 이 세션의 정본 캐릭터로 현재 배정을 영속화.
-                if let Some(cur) = cur.filter(|c| !c.is_empty()) {
-                    let _ = kasa_mcp::character::bind_session_character(sid, &cur);
+                // stem 매핑도 부모도 없는 포크/재접속(claude 가 transcript id 를 새로 발급,
+                // parentSessionId 부재) — 랜덤 cur 를 정본으로 굳히기 전에 pane 프로세스 env 의
+                // KASATERM_SESSION_ID(스폰 때 학생에 바인딩된 원본 anchor, env 상속으로 보존)로
+                // 진짜 학생을 복원한다(거노: 백그라운드 재접속에서 미도리→유우카 둔갑).
+                let anchored = self
+                    .pty
+                    .get(pane)
+                    .and_then(|p| p.shell_pid())
+                    .and_then(|pid| kasa_pty::process_env_var(pid, "KASATERM_SESSION_ID"))
+                    .filter(|env_sid| env_sid.as_str() != sid)
+                    .and_then(|env_sid| kasa_mcp::character::session_character(&env_sid));
+                match anchored {
+                    Some(true_char) => {
+                        if cur.as_deref() != Some(true_char.as_str()) {
+                            self.relabel_pane(pane, &true_char);
+                        }
+                        // stem 으로도 바로 잡히게 영속화 — 다음 board 폴링·재접속 안정화.
+                        let _ = kasa_mcp::character::bind_session_character(sid, &true_char);
+                    }
+                    None => {
+                        // 첫 인지 — 이 세션의 정본 캐릭터로 현재 배정을 영속화.
+                        if let Some(cur) = cur.filter(|c| !c.is_empty()) {
+                            let _ = kasa_mcp::character::bind_session_character(sid, &cur);
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    /// pane 캐릭터 이름표 교정 — pane_character + board /tmp 마커 + redraw. 부모
+    /// 상속·세션 매핑 두 경로가 공유한다. 실존 pane 만(훅 오호출·죽은 pane 가드).
+    fn relabel_pane(&mut self, pane: &str, character: &str) {
+        if !self.ws.lock().unwrap().panes.contains_key(pane) {
+            return;
+        }
+        self.ws
+            .lock()
+            .unwrap()
+            .pane_character
+            .insert(pane.to_string(), character.to_string());
+        // board 도 같은 이름을 보게 /tmp 마커 동기(swap_character 의 cwd/room 관례).
+        if let Some(cwd) = self.pane_cwd_cache.get(pane).cloned() {
+            let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
+            let rslug = kasa_mcp::character::rslug(&cwd, room.as_deref());
+            let _ = kasa_mcp::character::write_marker(&rslug, pane, character);
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// pane 캐릭터 재배정, respawn 없음 — 학생 명령(`시로코`)이 claude 실행 직전에
+    /// `/repersona` 로 호출한다. persona 는 래퍼가 override 파일로 직접 싣고 여기선
+    /// GUI 상태(헤더·테두리·board 마커·세션 바인딩)만 새 캐릭터로 맞춘다. 중복 허용
+    /// — 같은 학생 pane 은 색 변주(character_ordinal)로 구분(거노).
+    pub(crate) fn repersona_pane(&mut self, pane: &str, character: &str) {
+        if !self.ws.lock().unwrap().panes.contains_key(pane) {
+            return;
+        }
+        // 로스터 밖 이름 가드 — 엔드포인트로 들어오는 자유 문자열이 헤더/마커를
+        // 오염하지 않게. 래퍼는 characters.json 기준으로만 설치되니 정상 경로는 통과.
+        let Some(chars) = kasa_mcp::character::characters_json() else { return };
+        if !kasa_mcp::character::member_names(&chars).iter().any(|n| n == character) {
+            eprintln!("[repersona] unknown character '{character}' — ignored");
+            return;
+        }
+        self.ws.lock().unwrap().pane_character.insert(pane.to_string(), character.to_string());
+        if let Some(cwd) = self.pane_cwd_cache.get(pane).cloned() {
+            let room = self.ws.lock().unwrap().pane_room.get(pane).cloned();
+            let rslug = kasa_mcp::character::rslug(&cwd, room.as_deref());
+            let _ = kasa_mcp::character::write_marker(&rslug, pane, character);
+        }
+        // --resume 가 같은 캐릭터로 돌아오게 세션 바인딩도 갱신.
+        if let Some(sid) = self.pane_session_id.get(pane) {
+            let _ = kasa_mcp::character::bind_session_character(sid, character);
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
     /// pane 캐릭터 교체 — persona 는 셸 spawn 시 고정이라 PTY 를 새 persona 로 respawn
@@ -596,8 +682,8 @@ impl App {
                 };
                 layout.and_then(|l| l.leaves().first().map(|s| s.to_string()))
             };
-            // window.rename override (god marker) wins over the derived name —
-            // it must hold even when the god pane isn't the representative leaf.
+            // window.rename override 가 파생 이름보다 우선한다 —
+            // 지정 pane 이 대표 leaf 가 아니어도 유지돼야 한다.
             let name = self
                 .window_name_override
                 .get(&i)
@@ -1837,13 +1923,17 @@ impl App {
     /// Local PTY-mode socket server. Same cmux/MCP surface as tmux mode but
     /// backed by the GUI's own panes — pane writes/split/focus delegate to the
     /// GUI thread via the proxy (see socket::PtyBackend).
-    pub(crate) fn start_socket_pty(&self) {
+    pub(crate) fn start_socket_pty(&mut self) {
         let backend = Arc::new(socket::PtyBackend::new(
             self.proxy.clone(),
             self.ws.clone(),
             self.collab.attention.clone(),
             self.pane_status_pub.clone(),
+            self.bg_agents.clone(),
         ));
+        // GUI 쪽에도 핸들 보관 — ResumeSession 이 attach/재개 pane 의 transcript 를
+        // bind hook 없이 즉석 확정(bind_transcript)할 때 쓴다.
+        self.socket_backend = Some(backend.clone());
         self.start_socket_with(backend);
     }
 }

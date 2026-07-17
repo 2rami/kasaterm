@@ -108,6 +108,10 @@ pub struct PtySession {
     /// (last_query_at, cached_name). Throttle the ps(1) shellout to
     /// ~500ms so a 60Hz render loop doesn't fork-exec on every frame.
     proc_cache: Arc<Mutex<(Instant, Option<String>)>>,
+    /// (last_query_at, is_agents_view). `claude agents`(에이전트 목록 뷰) 여부를
+    /// argv 로 판정한 캐시 — process_cmdline(ps) 비용을 proc_cache 와 같은 500ms
+    /// 로 스로틀. agents 뷰면 render 가 학생 대신 샬레 로고를 그린다.
+    agents_cache: Arc<Mutex<(Instant, bool)>>,
     /// Shared Term so `scroll()` can drive alacritty's own scrollback
     /// (display_offset) from the main thread and re-snapshot. Using
     /// alacritty's scrollback — instead of a hand-rolled shift
@@ -230,7 +234,7 @@ impl PtySession {
         // KASATERM_TMUX_SHIM_DIR 로 넘기면 PATH 앞에 붙이고 zsh ZDOTDIR 를 그
         // dir 로 가리킨다 — 자식 셸이 그 안의 kasaterm-cli(협업)·imgopen/mdopen
         // (preview)·OSC133 prompt-mark(입력줄 감지)를 쓰게 한다. (teammate-mode
-        // tmux 위장은 제거됨 — pane 생성은 god 이 `kasaterm-cli split` 로 한다.)
+        // tmux 위장은 제거됨 — pane 생성은 오케스트레이터가 `kasaterm-cli split` 로 한다.)
         if let Ok(shim_dir) = std::env::var("KASATERM_TMUX_SHIM_DIR") {
             let parent_path = std::env::var("PATH").unwrap_or_default();
             // PATH separator is platform-specific: `:` on Unix,
@@ -356,6 +360,10 @@ impl PtySession {
                 Instant::now() - std::time::Duration::from_secs(1),
                 None,
             ))),
+            agents_cache: Arc::new(Mutex::new((
+                Instant::now() - std::time::Duration::from_secs(1),
+                false,
+            ))),
             term,
             screens_tx: tx,
             title_handle,
@@ -426,6 +434,27 @@ impl PtySession {
         let resolved = best_child.map(|(_, n)| n).or(shell_comm);
         cache.1 = resolved.clone();
         resolved
+    }
+
+    /// `claude agents`(에이전트 목록 뷰)로 도는 pane 인지 — argv 서브커맨드로 판정.
+    /// render 가 이 pane 에 개별 학생 대신 샬레 로고를 그릴지 결정한다. process_cmdline
+    /// (ps) 은 비싸 active_process_name 과 같은 500ms 캐시. 대화(일반 claude/--resume)
+    /// 는 argv 에 `agents` 가 없어 false → render 가 배정 학생을 그린다(실시간 전환).
+    pub fn is_claude_agents(&self) -> bool {
+        let Some(pid) = self.shell_pid else {
+            return false;
+        };
+        let now = Instant::now();
+        let Ok(mut cache) = self.agents_cache.lock() else {
+            return false;
+        };
+        if now.duration_since(cache.0).as_millis() < 500 {
+            return cache.1;
+        }
+        cache.0 = now;
+        let val = claude_agents_argv(pid);
+        cache.1 = val;
+        val
     }
 
     /// True when the shell has a child process (a command/claude/build/editor is
@@ -1841,6 +1870,9 @@ fn convert_cell(cell: &alacritty_terminal::term::cell::Cell) -> Cell {
         dim: cell
             .flags
             .contains(alacritty_terminal::term::cell::Flags::DIM),
+        hidden: cell
+            .flags
+            .contains(alacritty_terminal::term::cell::Flags::HIDDEN),
     }
 }
 
@@ -2027,6 +2059,28 @@ pub fn process_table() -> Vec<(u32, u32, String)> {
     out
 }
 
+/// shell 의 직계 claude 자식이 `claude agents`(에이전트 목록 뷰) 서브커맨드로
+/// 도는지. agents 뷰는 shell→claude 직계라 부모 체인 walk 불필요(background
+/// --resume 은 실제 대화라 여기 해당 없음). argv 에 독립 토큰 `agents` 가 있으면
+/// true — 일반 대화 argv 엔 없다.
+fn claude_agents_argv(shell_pid: u32) -> bool {
+    let claude_pid = process_table()
+        .into_iter()
+        .filter(|(_, ppid, name)| *ppid == shell_pid && name.contains("claude"))
+        .map(|(pid, _, _)| pid)
+        .max();
+    let Some(pid) = claude_pid else {
+        return false;
+    };
+    let Some(argv) = process_cmdline(pid) else {
+        return false;
+    };
+    // attach 도 뷰 — agents 목록과 마찬가지로 "남의 세션을 보는 pane"이라, 학생 표시를
+    // 파싱 결과로만 하는 게이트(display_pane_char)가 같은 판정을 공유한다. 일반 세션
+    // 부팅은 --session-id/--resume/persona 가 붙어 이 토큰이 나올 일이 없다.
+    argv.split_whitespace().any(|t| t == "agents" || t == "attach")
+}
+
 /// The full command line (argv, space-joined) of a single process, or None if
 /// it can't be read. The cross-platform stand-in for `ps -p PID -o args=`.
 /// Windows has no `ps`, so it walks the target's PEB →
@@ -2124,4 +2178,29 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
     } else {
         Some(s)
     }
+}
+
+/// pane 프로세스 env 의 한 변수 값 — 세션 캐릭터 anchor(`KASATERM_SESSION_ID`) 복원용.
+/// 포크·`--resume`·`agents`·`--bg` 는 claude 가 transcript id 를 새로 발급해 stem ≠ 원본
+/// anchor 라, stem 매핑도 부모 상속(parentSessionId)도 실패한다(거노: 백그라운드 재접속에서
+/// 학생이 유우카로 둔갑). env 의 KASATERM_SESSION_ID 는 스폰 때 캐릭터에 바인딩된 원본이라
+/// (env 상속으로 포크/재접속 너머 보존) 유일하게 진짜 학생을 가리킨다. 값은 uuid(공백 없음)라
+/// 공백 split 파싱이 안전하다. `ps eww` = env 를 command 열 뒤에 붙여 출력(macOS/BSD).
+#[cfg(unix)]
+pub fn process_env_var(pid: u32, key: &str) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["eww", "-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let needle = format!("{key}=");
+    s.split_whitespace()
+        .find_map(|tok| tok.strip_prefix(&needle))
+        .filter(|v| !v.is_empty())
+        .map(String::from)
+}
+
+#[cfg(not(unix))]
+pub fn process_env_var(_pid: u32, _key: &str) -> Option<String> {
+    None
 }
