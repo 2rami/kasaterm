@@ -386,8 +386,12 @@ impl App {
         // first bytes the shell prints before SIGWINCH lands.
         let (win_cols, win_rows) = self.window_cells();
         let cwd = self.spawn_cwd_from(Some(&active));
-        // split = 같은 방의 새 학생: room 상속 + 캐릭터 자동 배정(빈 슬롯 순환). 사용자가
-        // 이 pane 에서 claude 를 치면 shim 이 KASATERM_* env 로 persona·session-id 를 입힌다.
+        // split = room 만 상속, 학생은 새로 랜덤 배정(전역 유일). 07-13 의 "소스 학생 상속"
+        // 설계는 모든 pane 이 루트 학생 하나로 수렴하는 부작용(거노 07-17: pane 열면 다
+        // 프라나)으로 폐기 — 상속이 막으려던 "둔갑"(랜덤으로 떴다 뒤늦게 교정)은 배정이
+        // spawn 시점 즉시(assign_character_env)가 된 지금은 재발하지 않는다. resume 은
+        // shim 의 /character 교정이 세션 정본 캐릭터로 되돌리고, 사용자가 '+ 학생'·학생
+        // 명령으로 명시 지정한 pending 은 그대로 존중(중복 허용, 색 변주로 구분).
         let room = self.ws.lock().unwrap().pane_room.get(&active).cloned();
         let mut env = crate::proxy_env(&new_id);
         if let Some(ref r) = room {
@@ -770,7 +774,7 @@ impl App {
     /// can pass a dead session off as live when the pane number is reused
     /// within the same socket generation — the recovery guard's inode-
     /// generation check can't see that case, so deleting at close time is
-    /// the root fix. character-/god-nudged- markers likewise leak a roster
+    /// the root fix. character-/god-nudged-(레거시) markers likewise leak a roster
     /// slot and re-arm a suppressed nudge.
     ///
     /// `character-<N>` 는 **이 pane 의 방(cwd slug)에서만** 지운다 — pane 번호는 방 간
