@@ -16,3 +16,4 @@ Cargo.lock
 /_readme_*
 /schale-light.png
 web/arona-ui/character-src/_*.png
+web/arona-ui/character-src/.walklog-*.log
