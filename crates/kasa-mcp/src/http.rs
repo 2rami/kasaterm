@@ -1076,6 +1076,61 @@ async fn swap_character_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }
 
+/// `GET /teamname?cwd=<abs>` — 그 cwd 방의 팀명(플레인 텍스트, sh 파싱 프리). claude shim
+/// 이 teammate 트리플을 조립하기 직전에 호출한다 — 팀명의 fnv 해시 꼬리를 순수 sh 로 재현할
+/// 수 없어 여기가 유일한 계산처다. 빈 cwd·미지정은 빈 응답 — shim 은 빈 팀명이면 플래그를
+/// 통째 생략(순정 부팅 폴백). 방(room) 세분화는 안 탄다(cwd 단위): pane 의 room 은 GUI
+/// 상태라 shim 이 모르고, 같은 프로젝트 방끼리 채팅이 막히는 것보다 permissive 가 낫다.
+async fn teamname_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let cwd = params.get("cwd").map(|s| s.as_str()).unwrap_or("");
+    let body = if cwd.is_empty() {
+        String::new()
+    } else {
+        crate::team::team_name_for(&crate::character::mode_slug(std::path::Path::new(cwd)))
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], body)
+}
+
+/// `GET /persona?sid=<uuid>` — 그 세션에 바인딩된 학생의 persona(플레인 텍스트).
+/// detach 포크는 데몬이 argv 를 재구성하며 --append-system-prompt 가 유실되고, env
+/// persona 는 데몬 env(데몬을 낳은 옛 pane 고정)라 계보가 틀리다 — SessionStart 훅이
+/// 물려받은 transcript stem(포크 첫 부팅 = 부모 세션 id)으로 여기서 바인딩을 조회해
+/// 문맥으로 재주입한다(kasaterm-bind-transcript.sh). 미바인딩·미지정은 빈 응답.
+async fn persona_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let sid = params.get("sid").map(|s| s.as_str()).unwrap_or("");
+    let body = if sid.is_empty() {
+        String::new()
+    } else {
+        crate::character::session_character(sid)
+            .and_then(|name| {
+                crate::character::characters_json()
+                    .and_then(|c| crate::character::persona_for(&c, &name))
+            })
+            .map(|p| format!("[페르소나 유지] {p}"))
+            .unwrap_or_default()
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], body)
+}
+
+/// `GET /character?sid=<sid>` — 세션→캐릭터 바인딩의 정본 캐릭터명(없으면 빈 응답).
+/// claude shim 이 --resume/--session-id 부팅 때 pane 상속 캐릭터 대신 이걸로
+/// teammate 트리플·persona 를 짓는다(거노: 모모이 세션이 프라나 배지로 부팅).
+async fn character_binding_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let sid = params.get("sid").map(|s| s.as_str()).unwrap_or("");
+    let body = if sid.is_empty() {
+        String::new()
+    } else {
+        crate::character::session_character(sid).unwrap_or_default()
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], body)
+}
+
 /// `POST /session-close?idx=<n>` — close the session at `idx`. Query param for
 /// the same no-preflight reason as session-switch.
 async fn session_close_handler(
@@ -1261,17 +1316,44 @@ async fn background_agents_handler(
                             let Some(pid) = a.get("pid").and_then(|p| p.as_u64()) else {
                                 continue;
                             };
-                            if let Some(parent_sid) = parent_session_from_pid(pid) {
-                                if let Some(obj) = a.as_object_mut() {
-                                    if let Some((pane, _)) =
-                                        pane_sids.iter().find(|(_, sid)| *sid == parent_sid)
-                                    {
-                                        obj.insert("parentSurface".into(), serde_json::json!(pane));
-                                    }
-                                    obj.insert(
-                                        "parentSessionId".into(),
-                                        serde_json::json!(parent_sid),
-                                    );
+                            let parent_sid = parent_session_from_pid(pid);
+                            if let (Some(parent_sid), Some(obj)) =
+                                (parent_sid.as_deref(), a.as_object_mut())
+                            {
+                                if let Some((pane, _)) =
+                                    pane_sids.iter().find(|(_, sid)| sid == parent_sid)
+                                {
+                                    obj.insert("parentSurface".into(), serde_json::json!(pane));
+                                }
+                                obj.insert("parentSessionId".into(), serde_json::json!(parent_sid));
+                            }
+                            // detach 포크는 --agent-name 유실로 이름 없이(name=sid 프리픽스)
+                            // 등록된다 — claude 자체 목록은 upstream 한계라, 표시층(웹뷰·
+                            // classroom)이 쓰도록 세션→캐릭터 바인딩(자기 sid → 없으면 부모
+                            // sid)으로 학생 이름을 복원해 얹는다(거노: ←← 하면 이름 사라짐).
+                            let own_sid = a
+                                .get("sessionId")
+                                .and_then(|s| s.as_str())
+                                .map(str::to_string);
+                            let bound = own_sid
+                                .as_deref()
+                                .and_then(crate::character::session_character)
+                                .or_else(|| {
+                                    parent_sid
+                                        .as_deref()
+                                        .and_then(crate::character::session_character)
+                                });
+                            if let (Some(ch), Some(obj)) = (bound, a.as_object_mut()) {
+                                obj.insert("character".into(), serde_json::json!(ch));
+                                let nameless =
+                                    obj.get("name").and_then(|n| n.as_str()).is_none_or(|n| {
+                                        n.is_empty()
+                                            || own_sid
+                                                .as_deref()
+                                                .is_some_and(|s| s.starts_with(n) || n == s)
+                                    });
+                                if nameless {
+                                    obj.insert("name".into(), serde_json::json!(ch));
                                 }
                             }
                         }
@@ -2357,6 +2439,8 @@ pub fn spawn_http_server_opts(
                             swap_character_handler(swap_character_backend.clone(), q)
                         }),
                     )
+                    .route("/persona", get(persona_handler))
+                    .route("/character", get(character_binding_handler))
                     .route(
                         "/session-restore",
                         post(move |q: Query<std::collections::HashMap<String, String>>| {
