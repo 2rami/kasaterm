@@ -399,7 +399,7 @@ impl App {
             Some(name) => format!("✓ {name} 작업 완료"),
             None => "✓ 작업 완료".to_string(),
         };
-        // A sticky approval toast (god waiting on the user) outranks a sibling
+        // A sticky approval toast (a pane waiting on the user) outranks a sibling
         // completion blip — don't swap its text out from under the chips.
         if self.collab.toast_action.is_none() {
             self.collab.toast = Some((msg, now));
@@ -412,9 +412,9 @@ impl App {
         }
     }
 
-    /// munder식 승인 프롬프트 라우팅: god(또는 협업방 없는 단독 pane)의 프롬프트만
+    /// munder식 승인 프롬프트 라우팅: 오케스트레이터(또는 협업방 없는 단독 pane)의 프롬프트만
     /// 사용자를 부르고 — sticky 토스트 + 승인/거부 칩 + 데스크탑 알림 — 워커의
-    /// 프롬프트는 board `waiting` 으로만 흘려 god 이 처리하게 둔다. 프롬프트가
+    /// 프롬프트는 board `waiting` 으로만 흘려 오케스트레이터가 처리하게 둔다. 프롬프트가
     /// 사라지거나(답함) pane 이 다시 일하면 플래그·토스트를 걷는다.
     fn route_approval_prompts(
         &mut self,
@@ -431,11 +431,11 @@ impl App {
             let flagged = self.pane_prompt_wait.contains_key(id);
             if !busy && prompt.is_some() {
                 if !flagged {
-                    // 솔로(god 폐기 06-18) — 모든 pane 이 사용자 직행.
+                    // 솔로(자동통솔 폐기 06-18) — 모든 pane 이 사용자 직행.
                     let faces_user = true;
                     self.pane_prompt_wait.insert(id.clone(), faces_user);
                     self.notify_flash.insert(id.clone(), now);
-                    // board 에 waiting 으로 노출 — god 이 board/god-loop 로 본다.
+                    // board 에 waiting 으로 노출 — 오케스트레이터가 board 로 본다.
                     self.collab.attention
                         .lock()
                         .unwrap()
@@ -2163,7 +2163,7 @@ pub(crate) enum ApprovalPrompt {
 ///     approval menu replaces the input line with its options, so a real menu
 ///     never has a bare chevron under it. When one does, the "menu" text is
 ///     just quoted history in the transcript (e.g. a `peek` dump of another
-///     pane's prompt) — matching it made an idle god pane toast itself and,
+///     pane's prompt) — matching it made an idle orchestrator pane toast itself and,
 ///     worse, a chip click injected Enter into its own input line. (거노
 ///     실클릭으로 확인된 false-positive.)
 /// Callers must check `rows_show_working` first — a spinner means the prompt
@@ -2311,9 +2311,9 @@ mod working_scan_tests {
 
     #[test]
     fn quoted_menu_with_bare_chevron_below_is_rejected() {
-        // god pane 이 `peek %2` 결과를 자기 대화창에 인용 → transcript 에 박제된
+        // 오케스트레이터 pane 이 `peek %2` 결과를 자기 대화창에 인용 → transcript 에 박제된
         // 가짜 메뉴. 그 아래에 claude idle 입력행(bare "❯ ")이 있으면 reject.
-        // (거노 실클릭으로 확인: 안 잡으면 idle god 이 자기한테 토스트 쏘고
+        // (거노 실클릭으로 확인: 안 잡으면 idle pane 이 자기한테 토스트 쏘고
         //  칩 클릭 시 자기 입력행에 Enter 가 주입됨.)
         let cells = vec![
             row("> peek %2 결과:"),

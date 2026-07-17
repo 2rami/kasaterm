@@ -348,7 +348,6 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         cost_usd,
         tool_counts,
         changed_files,
-        is_god: false,
         subagents,
         subagents_done,
         background,

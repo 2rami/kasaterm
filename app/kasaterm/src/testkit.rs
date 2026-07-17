@@ -322,7 +322,7 @@ impl App {
         self.autotoggle_sidebar_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
     }
     /// Headless arona-panel verification: open the arona window after
-    /// `KASATERM_AUTOARONA_MS` (god-gate + webview load 포함 전체 경로).
+    /// `KASATERM_AUTOARONA_MS` (아로나 게이트 + webview load 포함 전체 경로).
     pub(crate) fn arm_autoarona(&mut self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOARONA_MS") else { return };
         let Ok(ms) = ms_str.parse::<u64>() else { return };

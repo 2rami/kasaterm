@@ -73,7 +73,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // 윈도우의 pane 이 선택돼 화면은 그대로라 "방전환→윈도우전환"이 안 됐다.
                 // switch_window 가 leaves[0] 로 active_pane 을 덮으니 그 뒤에 원하는
                 // pane 으로 다시 지정한다.
-                // board id 가 실제 leaf 인 윈도우가 있을 때만 포커스한다 — god/작업명/async
+                // board id 가 실제 leaf 인 윈도우가 있을 때만 포커스한다 — 캐릭터/작업명/async
                 // 같은 비-leaf 집계 id 로 active_pane 을 덮으면 다음 /layout 폴에서 그 타일이
                 // 빠져 "pane 이 닫힌 것처럼" 보였다(거노: 캐릭터 클릭→학생 선택하면 닫힘).
                 if let Some(wi) = self.window_of_pane(id) {
@@ -189,8 +189,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.switch_window(*idx);
                 return;
             }
-            UserEvent::SocketNewRoom(god) => {
-                self.new_room_with_god(god);
+            UserEvent::SocketNewRoom(character) => {
+                self.new_room_with_character(character);
                 return;
             }
             UserEvent::SocketSpawnStudent(character) => {
@@ -201,8 +201,41 @@ impl ApplicationHandler<UserEvent> for App {
                 self.swap_character(pane, character);
                 return;
             }
+            UserEvent::SocketRepersona(pane, character) => {
+                self.repersona_pane(&pane, &character);
+                return;
+            }
             UserEvent::SocketSessionBound(pane, sid) => {
+                // 배지 판정용: pane → claude 실제 sessionId(fork 시 갈라진 진짜 세션).
+                self.pane_claude_sid.insert(pane.clone(), sid.clone());
                 self.apply_session_character(pane, sid);
+                // 즉시 redraw — 없으면 idle 세션 attach 는 화면 업데이트가 안 흘러
+                // 다음 리드로우가 영영 없고, 교정된 학생(테두리·명찰·프사)이 사용자가
+                // 스크롤 등으로 리드로우를 강제할 때까지 옛 모습으로 남았다(거노:
+                // 스크롤 살짝 올렸다 내려야 바뀜 — 바인딩은 즉시, 픽셀만 지연).
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
+            UserEvent::NudgePaneResize(pane) => {
+                // 1행 지글 — 줄이고 120ms 뒤 원복(pending_unjiggle drain). 크기가
+                // 변해야 SIGWINCH 재레이아웃이 돌아 statusline 이 재실행된다(같은
+                // 크기 resize 는 no-op). 원 크기는 그리드 스냅샷에서 취한다.
+                let size = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.panes.get(pane).and_then(|p| p.term()).map(|t| (t.cols, t.rows))
+                };
+                if let (Some((cols, rows)), Some(sess)) = (size, self.pty.get(pane)) {
+                    if rows > 4 {
+                        let _ = sess.resize(cols, rows - 1);
+                        self.pending_unjiggle.push((
+                            pane.clone(),
+                            cols,
+                            rows,
+                            std::time::Instant::now() + std::time::Duration::from_millis(120),
+                        ));
+                    }
+                }
                 return;
             }
             UserEvent::ResumeSession { id, cwd, newroom, attach } => {
@@ -212,7 +245,62 @@ impl ApplicationHandler<UserEvent> for App {
                 // 세션을 잇는다(claude --resume 는 cwd 의 프로젝트 기준).
                 // 세션→캐릭터 매핑이 있으면 스폰 전에 pending 배정(거노 ④) — 랜덤 둔갑을
                 // 시점부터 차단하고 persona 까지 그 캐릭터로 맞춘다. 없으면 기존 랜덤.
-                if let Some(ch) = kasa_mcp::character::session_character(id) {
+                // background 세션은 detach 때 fork 로 id 가 갈려(id=fork sessionId) 직접
+                // 매핑이 없을 수 있어, bg_agents 의 부모 체인을 따라 원본 학생을 찾는다.
+                // 진입 시점에 확정해야 attach 로 foreground 가 되며 폴러(kind=background)에서
+                // 빠져 상속이 끊기기 전에 고정된다(거노: 백그라운드 재진입 학생 바뀜).
+                let direct = kasa_mcp::character::session_character(id);
+                let resolved = direct.clone().or_else(|| {
+                    let mut cur = id.to_string();
+                    for _ in 0..8 {
+                        let parent = self
+                            .bg_agents
+                            .lock()
+                            .ok()
+                            .and_then(|m| m.get(&cur).cloned())
+                            .flatten();
+                        match parent {
+                            Some(p) => {
+                                if let Some(c) = kasa_mcp::character::session_character(&p) {
+                                    return Some(c);
+                                }
+                                cur = p;
+                            }
+                            None => break,
+                        }
+                    }
+                    None
+                });
+                // 바인딩도 부모도 없는 세션(포크 parentSessionId 미상) — pending 을 비워두면
+                // split 상속(layout.rs, 같은 맥락 이어보기용)이 소스 pane 의 학생을 물려줘
+                // 무관한 세션이 그 학생으로 둔갑했다(거노: 왼쪽 pane 둘 다 프라나). 여기서
+                // 빈 슬롯 학생을 뽑아 확정한다 — 매핑 없는 pane 없게, 이후엔 파싱만(거노).
+                let resolved = resolved.or_else(|| {
+                    let members = kasa_mcp::character::characters_json()
+                        .map(|c| kasa_mcp::character::member_names(&c))
+                        .unwrap_or_default();
+                    let taken: std::collections::HashSet<String> = {
+                        let ws = self.ws.lock().unwrap();
+                        let mut t: std::collections::HashSet<String> =
+                            ws.pane_character.values().cloned().collect();
+                        t.extend(kasa_mcp::character::assigned_global());
+                        t
+                    };
+                    let free: Vec<String> = members
+                        .iter()
+                        .filter(|n| !taken.contains(n.as_str()))
+                        .cloned()
+                        .collect();
+                    kasa_mcp::character::pick_random(&free, id)
+                        .or_else(|| kasa_mcp::character::pick_random(&members, id))
+                });
+                if let Some(ch) = resolved {
+                    // 부모 체인/신선 배정으로 온 학생은 세션 id 에 영속 — 재진입·board
+                    // retained 가 체인 재탐색 없이(부모가 bg_agents 에서 밀려나도) 같은
+                    // 학생을 파싱한다. direct 면 이미 같은 값이라 무쓰기.
+                    if direct.is_none() {
+                        let _ = kasa_mcp::character::bind_session_character(id, &ch);
+                    }
                     self.pending_character = Some(ch);
                 }
                 let new_id = if *newroom {
@@ -222,6 +310,22 @@ impl ApplicationHandler<UserEvent> for App {
                     self.split_active_pane(kasa_pty::SplitDir::Horizontal).ok()
                 };
                 if let Some(new_id) = new_id {
+                    // pane↔세션 transcript 즉석 확정(파싱 우선): attach 뷰는 bind hook 이
+                    // 안 떠서 board discovery 의 recent-jsonl 추측이 같은 cwd 의 남의 활성
+                    // 세션에 오귀속됐다(거노: 왼쪽 pane 둘 다 프라나 + board 내용 뒤섞임).
+                    // 세션 id 를 아는 유일한 시점인 여기서 bind_transcript 한 호출로
+                    // bound(board)·SocketSessionBound(render pane_claude_sid + 캐릭터)를
+                    // 정렬한다. jsonl 미존재(막 포크돼 첫 기록 전)면 기존 discovery 폴백.
+                    if let (Some(be), Some(tp)) = (
+                        self.socket_backend.clone(),
+                        socket::transcript_path_for_session(id),
+                    ) {
+                        let _ = kasa_socket::Backend::bind_transcript(
+                            be.as_ref(),
+                            &new_id,
+                            &tp.to_string_lossy(),
+                        );
+                    }
                     if let Some(sess) = self.pty.get(&new_id).cloned() {
                         let cmd = if *attach {
                             // daemon background 세션 연결(claude attach) — 세션은 background
@@ -338,7 +442,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::SocketRenameWindow(id, title) => {
                 // Mark the window/session the pane belongs to. window_of_pane
                 // resolves the index; the override wins in refresh_window_labels
-                // so the sidebar session reads the god marker even when this
+                // so the sidebar session reads the rename override even when this
                 // pane isn't the window's representative leaf.
                 if let Some(wi) = self.window_of_pane(id) {
                     self.window_name_override.insert(wi, title.clone());
@@ -368,6 +472,51 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::GitOpDone => {
                 self.git.op = None;
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
+            UserEvent::BgAgentsChanged => {
+                // agents/attach 뷰 pane 재바인딩을 board 폴링에만 맡기지 않는다 — 웹뷰/
+                // CLI 가 board 를 안 부르는 세션에선 rebind 가 영영 안 돌아 pane 이 스폰
+                // 로컬 랜덤에 머물렀다(거노: 이번엔 유우카로 떠). 3s 폴러에 편승해 항상
+                // 돈다. bind_transcript 는 proxy 이벤트(SocketSessionBound)라 다음 루프에
+                // apply_session_character 로 이어진다.
+                if let Some(be) = self.socket_backend.clone() {
+                    let live: std::collections::HashSet<String> =
+                        self.ws.lock().unwrap().panes.keys().cloned().collect();
+                    be.rebind_agents_panes(&live);
+                }
+                // 포크 사전 바인딩: 새 bg 세션이 미바인딩이고 부모(argv --resume 계보)
+                // 가 바인딩돼 있으면 즉시 영속 — 포크 SessionStart 의 persona 조회
+                // (/persona)·board retained·attach 해석이 다음 폴부터 부모 학생을 잡는다.
+                let fork_pairs: Vec<(String, String)> = self
+                    .bg_agents
+                    .lock()
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(s, p)| p.clone().map(|p| (s.clone(), p)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for (sid, parent) in fork_pairs {
+                    if kasa_mcp::character::session_character(&sid).is_none() {
+                        if let Some(c) = kasa_mcp::character::session_character(&parent) {
+                            let _ = kasa_mcp::character::bind_session_character(&sid, &c);
+                        }
+                    }
+                }
+                // 폴러가 부모 맵을 갱신 → 이미 바인딩된 pane 들에 부모 학생 상속
+                // 재적용(바인딩 시점엔 맵이 비어 놓쳤을 수 있음). 배지 판정도 이 맵을
+                // 읽으므로 재적용 후 render 로 타이틀바 배지·이름을 함께 갱신한다.
+                let pairs: Vec<(String, String)> = self
+                    .pane_claude_sid
+                    .iter()
+                    .map(|(p, s)| (p.clone(), s.clone()))
+                    .collect();
+                for (pane, sid) in pairs {
+                    self.apply_session_character(&pane, &sid);
+                }
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;
@@ -644,6 +793,95 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        // bg-agents 폴러. `claude agents --json --all` 로 claude 자체 supervisor 의
+        // background 세션(←← detach 로 fork 된 것)을 3초마다 조회해 sessionId→
+        // parentSessionId 맵을 채운다. 타이틀바 배지·학생 유지(부모 캐릭터 상속)가
+        // 이 맵을 읽는다. raw 출력엔 parentSessionId 가 없어(kind/pid 만) pid argv 의
+        // `--resume` 로 부모를 잇는다(background_agents_handler 와 동일 방식).
+        {
+            let bg_proxy = self.proxy.clone();
+            let bg_cache = self.bg_agents.clone();
+            std::thread::spawn(move || {
+                let bin = kasa_mcp::claude_bin();
+                // pid argv 의 `--resume <path>` basename = 부모 세션 uuid. ←← detach 는
+                // 부모 대화를 fork 해 새 sessionId 로 잇는데 raw json 엔 부모가 없어,
+                // 이 argv 가 원본→background 를 잇는 유일한 끈이다(macOS/Linux ps).
+                let parent_of = |pid: u64| -> Option<String> {
+                    let out = std::process::Command::new("ps")
+                        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+                        .output()
+                        .ok()?;
+                    if !out.status.success() {
+                        return None;
+                    }
+                    let cmd = String::from_utf8_lossy(&out.stdout);
+                    let mut it = cmd.split_whitespace();
+                    while let Some(tok) = it.next() {
+                        if tok == "--resume" {
+                            return std::path::Path::new(it.next()?)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .map(str::to_string);
+                        }
+                    }
+                    None
+                };
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    let mut next: HashMap<String, Option<String>> = HashMap::new();
+                    if let Ok(out) = std::process::Command::new(&bin)
+                        .args(["agents", "--json", "--all"])
+                        .output()
+                    {
+                        if out.status.success() {
+                            if let Ok(v) =
+                                serde_json::from_slice::<serde_json::Value>(&out.stdout)
+                            {
+                                let arr = v
+                                    .as_array()
+                                    .cloned()
+                                    .or_else(|| v.get("agents").and_then(|a| a.as_array().cloned()))
+                                    .unwrap_or_default();
+                                for a in &arr {
+                                    if a.get("kind").and_then(|k| k.as_str()) != Some("background") {
+                                        continue;
+                                    }
+                                    let Some(sid) = a.get("sessionId").and_then(|s| s.as_str())
+                                    else {
+                                        continue;
+                                    };
+                                    let parent = a
+                                        .get("parentSessionId")
+                                        .and_then(|s| s.as_str())
+                                        .map(str::to_string)
+                                        .or_else(|| {
+                                            a.get("pid").and_then(|p| p.as_u64()).and_then(parent_of)
+                                        });
+                                    next.insert(sid.to_string(), parent);
+                                }
+                            }
+                        }
+                    }
+                    let mut guard = match bg_cache.lock() {
+                        Ok(g) => g,
+                        Err(_) => break,
+                    };
+                    if *guard != next {
+                        *guard = next;
+                        drop(guard);
+                        // 배지 redraw + 부모 학생 상속 재적용(BgAgentsChanged 가 둘 다).
+                        if bg_proxy.send_event(UserEvent::BgAgentsChanged).is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        // bg SendMessage 브리지 — detach 포크(teammate 플래그 유실)에게 kt-* 팀
+        // 인박스 미읽음을 attach pty 주입으로 배달. bg-agents 폴러가 채우는 맵을
+        // 읽기 전용으로 공유받는다.
+        #[cfg(unix)]
+        crate::bridge::spawn_inbox_bridge(self.bg_agents.clone());
         // cell-renderer GPU path is the only path. The old sugarloaf
         // opt-in branch (KASATERM_RENDERER=sugarloaf) was removed once
         // cell-renderer absorbed P3 colour reproduction (shader
@@ -3513,6 +3751,22 @@ impl ApplicationHandler<UserEvent> for App {
                     true
                 }
             });
+        }
+        // 지글 원복 — NudgePaneResize 가 1행 줄인 pane 을 원 크기로 되돌린다.
+        if !self.pending_unjiggle.is_empty() {
+            let now = std::time::Instant::now();
+            let due: Vec<(String, u16, u16)> = self
+                .pending_unjiggle
+                .iter()
+                .filter(|(_, _, _, at)| now >= *at)
+                .map(|(p, c, r, _)| (p.clone(), *c, *r))
+                .collect();
+            self.pending_unjiggle.retain(|(_, _, _, at)| now < *at);
+            for (pane, cols, rows) in due {
+                if let Some(sess) = self.pty.get(&pane) {
+                    let _ = sess.resize(cols, rows);
+                }
+            }
         }
         // Reap dead pty sessions before anything else — a closed shell
         // should disappear from the layout on the very next loop turn

@@ -15,6 +15,8 @@ mod gpu;
 mod render;
 mod handler;
 mod socket;
+#[cfg(unix)]
+mod bridge;
 mod stream;
 mod theme;
 mod transcript;
@@ -198,6 +200,24 @@ fn tab_icon_glyph(name: &str) -> &'static str {
         "file-text"
     } else {
         "terminal"
+    }
+}
+
+/// claude Code 가 OSC 제목에 붙이는 선행 활동 글리프(✳/✶/✻/✽ … dingbat 별표류
+/// + ∗ ＊ *)와 뒤 공백을 벗긴다. 타이틀바·헤더가 "아로나 · ✳ 요약" 대신
+/// "아로나 · 요약" 을 보이게(거노). 별표로 시작 안 하면 원문 그대로.
+pub(crate) fn strip_activity_prefix(s: &str) -> &str {
+    let t = s.trim_start();
+    match t.chars().next() {
+        Some(c)
+            if matches!(c,
+                '*' | '\u{2217}' | '\u{FF0A}'   // ASCII * / ∗ / ＊
+                | '\u{2731}'..='\u{2749}'        // ✱..❉ dingbat asterisks·stars
+            ) =>
+        {
+            t[c.len_utf8()..].trim_start()
+        }
+        _ => t,
     }
 }
 
@@ -684,7 +704,7 @@ const $ = (id) => document.getElementById(id);
 
 function esc(s) { return (s || "").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function leaf(p) { const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i + 1) : p; }
-// 워커 색 — pane id 숫자(%5 → 5) 기반. god-elect.sh worker_color 와 같은 팔레트·
+// 워커 색 — pane id 숫자(%5 → 5) 기반. 고정 팔레트·
 // 같은 식이라 헤더 색과 board 카드 색이 일치한다.
 function workerColor(sid) {
   const palette = ['#5B9BD5','#70AD47','#C00000','#7030A0','#ED7D31','#1F9D8E','#E84393'];
@@ -713,11 +733,7 @@ function render(board) {
       : esc(p.status || "");
     const d = document.createElement("div");
     d.className = "pane";
-    const isGod = !!p.is_god;
-    d.style.borderLeftColor = isGod ? '#FFD400' : workerColor(p.surface_id);
-    const crown = isGod
-      ? `<svg width="13" height="11" viewBox="0 0 24 20" style="margin-right:5px;vertical-align:-1px"><path d="M2 6l4 4 6-8 6 8 4-4v11H2z" fill="${'#FFD400'}" stroke="${'#1a1d23'}" stroke-width="1.2"/></svg>`
-      : "";
+    d.style.borderLeftColor = workerColor(p.surface_id);
     const title = p.title
       ? `<span class="ptitle">${esc(p.title)}</span>`
       : `<span class="ptitle empty-title">제목 없음</span>`;
@@ -735,7 +751,7 @@ function render(board) {
     const tools = (p.tool_counts || []).map(t => `${esc(t[0])}×${t[1]}`).join(" · ");
     const toolsDiv = tools ? `<div class="tools">${tools}</div>` : "";
     d.innerHTML =
-      `<div class="row1">${crown}<span class="sid">${esc(p.surface_id)}</span>` +
+      `<div class="row1"><span class="sid">${esc(p.surface_id)}</span>` +
       title +
       `<span class="status ${esc(st)}">${statusLabel}</span></div>` +
       (p.last_prompt ? `<div class="prompt">${esc(p.last_prompt)}</div>` : "") +
@@ -2339,6 +2355,11 @@ impl Workspace {
 #[derive(Debug, Clone)]
 enum UserEvent {
     Redraw,
+    /// bg-agents 폴러가 `sessionId→parentSessionId` 맵을 갱신했다 — 포크/백그라운드
+    /// 세션의 부모 학생 상속을 재적용하라는 신호. 폴러는 3초 주기라 세션 바인딩
+    /// (SocketSessionBound) 시점엔 맵이 비어 상속을 놓친다 → 맵이 채워지면 이
+    /// 이벤트로 pane_claude_sid 를 다시 훑어 뒤늦게 부모를 물려준다.
+    BgAgentsChanged,
     /// A background git op (push/pull/commit) finished — clears the panel's
     /// spinner. Carries nothing: only one git op runs at a time.
     GitOpDone,
@@ -2372,8 +2393,8 @@ enum UserEvent {
     /// `POST /session-switch?idx=N` 위임 — 보이는 윈도우를 idx 로 전환(거노: GUI 에서
     /// 방=윈도우 클릭 시 그 터미널 윈도우로). `switch_window` 가 resize·redraw 자체 처리.
     SocketSwitchSession(usize),
-    /// `POST /session-new?god=<name>` 위임 — 새 방(윈도우, 빈 셸) + 선택 캐릭터 라벨.
-    /// god 통솔 폐기(06-18)로 claude 자동 스폰 없음. `new_room_with_god` 가 처리.
+    /// `POST /session-new?character=<name>` 위임 — 새 방(윈도우, 빈 셸) + 선택 캐릭터 라벨.
+    /// 자동통솔 폐기(06-18)로 claude 자동 스폰 없음. `new_room_with_character` 가 처리.
     SocketNewRoom(String),
     /// `POST /spawn-student?character=<name>` 위임 — 현재 방에 캐릭터 지정 학생 추가
     /// (split + pending_character). 아로나/프라나도 학생처럼 고를 수 있다(거노).
@@ -2381,6 +2402,10 @@ enum UserEvent {
     /// `POST /swap-character?surface=<id>&character=<name>` 위임 — (pane, 캐릭터).
     /// 그 pane PTY 를 새 persona 로 respawn(대화 리셋, persona 는 셸 spawn 시 고정).
     SocketSwapCharacter(String, String),
+    /// `GET /repersona?surface=<id>&character=<name>` 위임 — (pane, 캐릭터).
+    /// respawn 없는 재배정: 학생 명령(`시로코`)이 claude 실행 직전에 호출, persona
+    /// 는 래퍼의 override 파일이 싣고 GUI 는 헤더·마커·세션바인딩만 갱신.
+    SocketRepersona(String, String),
     /// `POST /session-close?idx=N` 위임 — 방(윈도우) 닫기(거노). `close_window` 가
     /// 마지막 윈도우 가드·pane 정리. 닫기 실패(마지막)는 무시(프론트가 가드).
     SocketCloseRoom(usize),
@@ -2394,6 +2419,11 @@ enum UserEvent {
     /// 파일명(stem) = claude 세션 id. 세션→캐릭터 영속 매핑을 조회/저장해 --resume 시
     /// 캐릭터 둔갑을 막는다(거노: 재시작하면 프라나가 미도리로). `apply_session_character`.
     SocketSessionBound(String, String),
+    /// stale statusline 재실행 강제 — 구버전 claude(≤2.1.209 실측)는 attach 에서
+    /// statusline 을 재실행하지 않아 세션 id 마커가 프롬프트 전까지 안 흐른다(거노:
+    /// 들어오자마자 바뀌게). PTY 1행 지글(줄였다 원복)로 SIGWINCH 재레이아웃을 유도.
+    /// 발동 게이트·rate-limit 은 backend(rebind_agents_panes)가 진다.
+    NudgePaneResize(String),
     /// `surface.close` delegated from the socket thread → `close_pane`. Local
     /// PTY mode only; the old tmux/daemon backend left this unsupported.
     SocketClose(String),
@@ -2417,7 +2447,7 @@ enum UserEvent {
     /// pre-validated to exist by the backend.
     SocketSwap(String, String),
     /// `surface.set_ratio` delegated from the socket thread — make a pane
-    /// take `ratio` of its immediate split container ("god 크게" 자동화).
+    /// take `ratio` of its immediate split container ("오케스트레이터 pane 크게" 자동화).
     SocketSetRatio(String, f32),
     /// `surface.rename` / `surface.set_color` delegated from the socket thread.
     /// Pane header title / accent band live in `ws.panes` which only the GUI
@@ -2426,7 +2456,7 @@ enum UserEvent {
     SocketRename(String, String),
     /// `window.rename` delegated from the socket thread. `(surface_id, title)`:
     /// rename the window/session the pane belongs to (sidebar label), not the
-    /// pane header. Used by the god marker.
+    /// pane header. Used by the rename override.
     SocketRenameWindow(String, String),
     SocketColor(String, [u8; 4]),
     /// `POST /session-resume` from arona-ui — open a pane and queue
@@ -2755,6 +2785,9 @@ struct App {
     /// PtySession Arc directly so it works for panes in any session (active or
     /// stashed background). (session, command, time-to-send).
     pending_restores: Vec<(Arc<kasa_pty::PtySession>, String, std::time::Instant)>,
+    /// 지글 원복 큐 — NudgePaneResize 가 1행 줄인 pane 을 (원 cols, 원 rows)로 되돌릴
+    /// 시각. pending_restores 와 같은 drain 사이클에서 시간 도달분만 발사.
+    pending_unjiggle: Vec<(String, u16, u16, std::time::Instant)>,
     /// Headless verification: clean-exit (runs `exiting` → save_session_state)
     /// at this instant when KASATERM_AUTOQUIT_MS is set. None disables it.
     autoquit_at: Option<std::time::Instant>,
@@ -2953,10 +2986,10 @@ struct App {
     window_labels_at: Option<Instant>,
     /// Explicit window/session name overrides by window index (`window.rename`).
     /// `refresh_window_labels` derives labels from the representative pane, but
-    /// the god marker needs the session to read "● god" regardless of which
+    /// rename override 는 세션 라벨이 어떤 leaf 가 대표든 유지돼야 한다
     /// pane is the representative — this map wins over the derived name. Not
-    /// persisted: god-elect.sh re-applies it every turn, so a restart that
-    /// re-elects a god re-marks the window.
+    /// persisted: 호출자가 매번 재적용하므로, 재시작 후
+    /// 재지정되면 윈도우가 다시 마킹된다.
     window_name_override: HashMap<usize, String>,
     selection: Option<Selection>,
     drag_anchor: Option<(u16, u16)>,
@@ -3111,10 +3144,10 @@ struct App {
     unread_panes: std::collections::HashSet<String>,
     /// Last value pushed to the Dock badge, so AppKit is only touched on change.
     dock_badge_n: usize,
-    /// Collab completion toast + god approval card, grouped into a sub-struct
+    /// Collab completion toast + approval card, grouped into a sub-struct
     /// (state.rs) so collab-UI work touches one file — CLAUDE.md 병렬 규칙.
     collab: state::CollabState,
-    /// 승인 프롬프트가 떠 있는 pane → "사용자 직행(god/단독)인가". 그리드 스캔
+    /// 승인 프롬프트가 떠 있는 pane → "사용자 직행(단독)인가". 그리드 스캔
     /// (`route_approval_prompts`)의 edge-trigger 상태: 새로 뜨면 라우팅 1회,
     /// 풀리면 board waiting 플래그까지 함께 걷는다.
     pane_prompt_wait: HashMap<String, bool>,
@@ -3128,7 +3161,7 @@ struct App {
     /// breadcrumb. Refreshed on a timer off the render path: `pid_cwd` shells
     /// out to `lsof`, so resolving it per pane on every frame would spawn a
     /// burst during a scroll/hover storm. See `refresh_pane_cwds`.
-    /// 아로나 자동 시작(P5): god 모드 && characters 있는 방의 첫 pane 에 띄울
+    /// 아로나 자동 시작(P5): characters 있는 방의 첫 pane 에 띄울
     /// claude 명령. start_pty 에서 가드 통과 시 세팅, 셸 prompt-end(OSC133) 감지
     /// 또는 타임아웃 시 1회 주입 후 None. solo·무테마면 애초에 None(무동작).
     pane_cwd_cache: HashMap<String, std::path::PathBuf>,
@@ -3136,12 +3169,25 @@ struct App {
     /// KASATERM_ROOM 주입 + ws.pane_room 기록용). pane→방 매핑은 ws.pane_room(공유).
     pending_room: Option<String>,
     next_room_seq: u32,
-    /// 다음 spawn 할 pane 에 강제할 캐릭터(god 방 = new_room_with_god 이 세팅). None 이면
+    /// 다음 spawn 할 pane 에 강제할 캐릭터(new_room_with_character 가 세팅). None 이면
     /// 빈 슬롯 순환 배정(미도리→모모이→…). 배정 결과는 KASATERM_CHARACTER env + /tmp 마커.
     pending_character: Option<String>,
     /// pane id → claude --session-id(백엔드가 spawn 시 생성). shim 이 env 로 받아 고정,
     /// transcript jsonl 파일명 안정화 → resume 시 같은 대화 복원.
     pane_session_id: HashMap<String, String>,
+    /// pane id → claude 실제 sessionId(transcript stem, `SocketSessionBound` 로 도착).
+    /// pane_session_id(백엔드 발급)와 달리 fork/detach 시 갈라진 진짜 세션이라, 이걸로
+    /// bg_agents 를 조회해 포크/백그라운드 배지를 판정한다.
+    pane_claude_sid: HashMap<String, String>,
+    /// cmux socket backend 핸들 — ResumeSession(attach/재개)이 세션 id 를 아는 유일한
+    /// 시점에 pane↔transcript 를 bind_transcript 로 즉석 확정하기 위해 보관. attach 뷰는
+    /// bind hook 이 안 떠서 board discovery 의 recent-jsonl 추측이 남의 활성 세션에
+    /// 오귀속됐다(거노: 왼쪽 pane 둘 다 프라나).
+    socket_backend: Option<std::sync::Arc<socket::PtyBackend>>,
+    /// claude sessionId → parentSessionId(background kind 세션만). `claude agents
+    /// --json --all` 폴러(handler.rs resumed)가 3초마다 갱신. 타이틀바 배지·학생 유지
+    /// (부모 캐릭터 상속)가 읽는다. 백그라운드 세션이 아니면 키 없음.
+    bg_agents: std::sync::Arc<std::sync::Mutex<HashMap<String, Option<String>>>>,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,
@@ -3265,7 +3311,7 @@ struct App {
     /// discipline as the git/session panels — webview must outlive its window.
     board_panel_window: Option<Arc<Window>>,
     board_panel_webview: Option<wry::WebView>,
-    /// 아로나(god 모드) 전면 UI — 별도 OS 창 + arona-ui dist 를 MCP HTTP 로 로드.
+    /// 아로나 전면 UI — 별도 OS 창 + arona-ui dist 를 MCP HTTP 로 로드.
     arona_panel_window: Option<Arc<Window>>,
     arona_panel_webview: Option<wry::WebView>,
     /// Open preview windows (image viewer / markdown editor), each a
@@ -3348,6 +3394,7 @@ impl App {
             pty_layout: None,
             next_pane_id: 1, // %0 is the initial pane created in start_pty
             pending_restores: Vec::new(),
+            pending_unjiggle: Vec::new(),
             autoquit_at: None,
             pending_capture: Vec::new(),
             pending_autogit: None,
@@ -3454,6 +3501,9 @@ impl App {
             next_room_seq: 1,
             pending_character: None,
             pane_session_id: HashMap::new(),
+            pane_claude_sid: HashMap::new(),
+            socket_backend: None,
+            bg_agents: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -3775,7 +3825,7 @@ fn load_capture_config() {
 /// pane 자식 셸이 쓸 보조 바이너리/설정을 private dir 에 깔고 그 dir 를
 /// `KASATERM_TMUX_SHIM_DIR` 로 넘긴다(pty-backend 가 PATH/ZDOTDIR 에 반영):
 /// kasaterm-cli(pane 간 협업)·imgopen/mdopen(preview)·zsh OSC133 prompt-mark
-/// (입력줄 감지). teammate-mode tmux 위장은 제거됨 — pane 생성은 god 이
+/// (입력줄 감지). teammate-mode tmux 위장은 제거됨 — pane 생성은 오케스트레이터가
 /// `kasaterm-cli split` 로 한다. best-effort: 실패해도 본체는 동작한다.
 fn install_pane_shims() {
     // 전역 shim 스위치 OFF → shim dir 자체를 안 만든다. KASATERM_TMUX_SHIM_DIR 이 미설정
@@ -3785,6 +3835,17 @@ fn install_pane_shims() {
     if !socket::read_shim_inject() {
         eprintln!("[shim] shim_inject=off — 순정 모드, pane shim 미설치");
         return;
+    }
+    // 렌더러 capability 공표 — statusline.py 가 이걸 보고서만 SGR8(conceal) 세션 id
+    // 마커를 내보낸다. 게이트가 없으면 .app 설치 직후(재시작 전) 구버전 렌더러가
+    // 마커를 그대로 그려 화면에 `⟦a1b2c3d4⟧` 가 노출된다(conceal 미지원).
+    {
+        let caps = std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
+            .join(".config/kasaterm/caps.json");
+        if let Some(d) = caps.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = std::fs::write(&caps, "{\"sgr_conceal\":true}\n");
     }
     let shim_dir = std::env::temp_dir().join(format!("kasaterm-shim-{}", std::process::id()));
     if let Err(e) = std::fs::create_dir_all(&shim_dir) {
@@ -3815,6 +3876,9 @@ fn install_pane_shims() {
     // Stage a `claude` wrapper that injects the collab hooks session-scoped
     // (`--settings`) so ~/.claude/settings.json is never modified.
     install_claude_hook_shim(&shim_dir);
+    // 학생 이름 자체를 명령으로(`시로코`/`shiroko`) — 이 pane 을 그 학생으로
+    // 재배정하고 claude 를 띄운다. characters.json 기준 부팅 1회 생성.
+    install_student_shims(&shim_dir);
     // Force our shim dir to the FRONT of PATH even after the user's rc
     // files run. A login+interactive zsh sources brew's zprofile, which
     // prepends /opt/homebrew/bin (the real tmux) ahead of the PATH we
@@ -4019,7 +4083,7 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             // persona 는 스폰 시 `--append-system-prompt`로 1회(캐시돼 per-turn 0) 대체.
             // board/inbox 자동인지는 폐기 — 조율은 GUI(SCHALE OS) 와 명시적 kasacollab 으로.
             // 같은 방 다른 pane 이 같은 파일을 작업 중이면 Edit 직전에 막는다
-            // (transcript 직접 비교, 데몬 무관). solo·god 모드 공통 안전망.
+            // (transcript 직접 비교, 데몬 무관). 모든 pane 공통 안전망.
             "PreToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5000)] }],
             "PostToolUse": [
                 { "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 10)] },
@@ -4800,6 +4864,18 @@ mod tests {
                 "non-ascii agent ident in arm: {line}"
             );
         }
+    }
+
+    #[test]
+    fn strip_activity_prefix_removes_claude_glyphs() {
+        // claude OSC 제목 "✳ 요약" → "요약"; 별표류·∗·＊·* 접두 + 공백 제거.
+        assert_eq!(strip_activity_prefix("✳ 학생 프사 개선"), "학생 프사 개선");
+        assert_eq!(strip_activity_prefix("✻  Brewed for 5s"), "Brewed for 5s");
+        assert_eq!(strip_activity_prefix("* build"), "build");
+        assert_eq!(strip_activity_prefix("＊작업"), "작업");
+        // 별표로 시작 안 하면 원문 그대로(rename 사용자 값 보호).
+        assert_eq!(strip_activity_prefix("학생 프사 개선"), "학생 프사 개선");
+        assert_eq!(strip_activity_prefix("main.rs · vim"), "main.rs · vim");
     }
 
     #[test]

@@ -21,7 +21,7 @@ mod proxy;
 mod register;
 pub mod standalone;
 pub mod team;
-pub use http::{spawn_http_server, spawn_http_server_opts};
+pub use http::{claude_bin, spawn_http_server, spawn_http_server_opts};
 pub use register::register_clients;
 
 /// `Command` with the console window suppressed on Windows. kasaterm is a GUI

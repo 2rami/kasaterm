@@ -1953,6 +1953,11 @@ impl GpuRenderer {
                     if ch == ' ' || ch == '\0' {
                         continue;
                     }
+                    // SGR 8(conceal) — 배경은 위 패스에서 칠했고 글리프만 생략.
+                    // statusline 의 세션 id 마커가 이 플래그로 화면에서 숨는다.
+                    if cell.hidden {
+                        continue;
+                    }
                     // Block Elements (U+2580..259F) — paint as GPU
                     // quads instead of font glyphs. Monospace fonts
                     // render these with seams/gaps, so claude code's

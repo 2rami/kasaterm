@@ -460,7 +460,7 @@ pub async fn proxy_handler(
     if method == Method::POST && rest == "v1/messages" {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
             // 캡처 판정 진단 — KASATERM_PROXY_DIAG 켜졌을 때만. 메인/보조 오분류
-            // (god nudge·요약 호출이 메인 대화로 새는 케이스)를 raw 로 잡으려 stderr 로.
+            // (nudge·요약 호출이 메인 대화로 새는 케이스)를 raw 로 잡으려 stderr 로.
             if std::env::var_os("KASATERM_PROXY_DIAG").is_some() {
                 let arr = v.get("messages").and_then(|m| m.as_array());
                 let n_tools = v.get("tools").and_then(|t| t.as_array()).map_or(0, |a| a.len());

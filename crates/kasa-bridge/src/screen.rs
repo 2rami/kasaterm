@@ -23,6 +23,11 @@ pub struct Cell {
     pub underline: bool,
     pub inverse: bool,
     pub dim: bool,
+    /// SGR 8 (conceal) — 글리프를 그리지 않되 텍스트 추출(visible_text 등)에는 남는다.
+    /// statusline 이 세션 id 마커(`⟦sid8⟧`)를 화면에 안 보이게 실어 보내는 채널:
+    /// kasaterm 은 그리드에서 읽고, 사용자는 못 본다. 구버전 스냅샷 호환 위해 default.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 impl Cell {
@@ -36,6 +41,7 @@ impl Cell {
             underline: false,
             inverse: false,
             dim: false,
+            hidden: false,
         }
     }
 }
@@ -111,5 +117,7 @@ pub(crate) fn vt_cell(c: &vt100::Cell) -> Cell {
         underline: c.underline(),
         inverse: c.inverse(),
         dim: false,
+        // vt100 crate 는 conceal 미노출 — 이 경로(레거시 브리지)는 마커 채널 없음.
+        hidden: false,
     }
 }

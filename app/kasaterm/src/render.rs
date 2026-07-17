@@ -324,6 +324,10 @@ impl App {
         // Claude Code 시작 배너의 Clawd 아트 자리에 그릴 학생 도트:
         // (에셋 슬러그, 배너 박스 LOGICAL px). 셀 스냅샷에서 감지·수집.
         let mut banner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // agents 뷰 SCHALE 로고 자리(Clawd 마스코트 위치 / 헤더 왼쪽 여백) — 위치만.
+        let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
+        // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
+        let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
         // working 스피너(✻/braille) 자리 학생 도트(제자리 걸음): 같은 형태.
         let mut spinner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // 승인 대기(approval prompt) 학생 도트(폴짝 바운스): 같은 형태.
@@ -351,10 +355,11 @@ impl App {
         // every pane so in-pane WebViews and other overlays can be snapped
         // to their pane after the borrow scope ends.
         let mut body_rects: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
-        let (slots, headers, footer_slots): (
+        let (slots, headers, footer_slots, agents_view_panes): (
             Vec<PaneSlot>,
             Vec<HeaderInfo>,
             Vec<(String, f32, f32, f32, f32)>,
+            std::collections::HashSet<String>,
         ) = {
             let ws = self.ws.lock().unwrap();
             let active_id = ws.active_pane.clone();
@@ -417,6 +422,12 @@ impl App {
             // for EVERY pane, headered or not, so the per-pane status bar can
             // anchor to the box bottom even on a lone unsplit pane.
             let mut footer_slots: Vec<(String, f32, f32, f32, f32)> = Vec::new();
+            // claude agents(에이전트 목록 뷰)로 판정된 pane 집합 — 개별 학생 대신
+            // SCHALE 조직 정체성(타이틀·테두리)으로 표시한다. 판정은 루프 안에서
+            // argv(is_claude_agents) + statusline 프사 슬롯(U+FFFC) 부재로 하고,
+            // 루프 뒤 타이틀바·테두리 패스가 이 집합을 읽는다.
+            let mut agents_view_panes: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for (id, x_cells, y_cells, w_cells, h_cells) in leaves {
                 let Some(pane) = ws.panes.get(&id) else { continue };
                 // pane.cells already holds the correct view: the PTY
@@ -514,6 +525,30 @@ impl App {
                     Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
                     None => Vec::new(),
                 };
+                // statusline 세션 id 마커(⟦8hex⟧) 은닉 — SGR8(conceal)은 claude 의
+                // statusline 파이프라인이 속성을 벗겨 텍스트만 남긴다(실측: 마커가
+                // 그대로 보임, 거노). 렌더 그리드에서 패턴으로 지운다 — visible_text
+                // (백엔드 세션 파싱)는 원본 grid 를 읽으므로 영향 없다. 스캔 창은
+                // 하단 8행 — 입력힌트·여백 행이 statusline 을 4행 밖으로 밀어낼 수
+                // 있어(백엔드 rebind 스캔창을 3→8 넓힌 것과 같은 이유) 폭을 맞춘다.
+                for row in composed.iter_mut().rev().take(8) {
+                    let n = row.len();
+                    let mut i = 0;
+                    while i < n {
+                        if row[i].ch == '⟦'
+                            && i + 9 < n
+                            && (1..=8).all(|k| row[i + k].ch.is_ascii_hexdigit())
+                            && row[i + 9].ch == '⟧'
+                        {
+                            for c in row[i..=i + 9].iter_mut() {
+                                c.ch = ' ';
+                            }
+                            i += 10;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
@@ -538,17 +573,73 @@ impl App {
                     + y_cells as f32 * self.cell.h
                     + header_shift_logical
                     + PANE_INNER_Y;
+                // agents 목록 뷰 판정 — statusline 프사 슬롯(U+FFFC)이 있으면 실제
+                // 대화 세션, 없고 argv 가 claude agents 면 관리 화면(목록 뷰). 세션에
+                // 진입하면 statusline 이 붙어 자동으로 학생 표시로 넘어간다(argv 는
+                // 진입해도 그대로 agents 라 단독으론 못 가름). 목록 뷰면 아래 학생
+                // 스프라이트(배너·스피너·standing)·본문 틴트를 모두 건너뛰고 SCHALE
+                // 조직 정체성(타이틀·테두리)만 준다.
+                let has_profile_slot = composed
+                    .iter()
+                    .any(|row| row.iter().any(|c| c.ch == '\u{fffc}'));
+                let agents_view = !has_profile_slot
+                    && (self
+                        .pty
+                        .get(id.as_str())
+                        .map(|p| p.is_claude_agents())
+                        .unwrap_or(false)
+                        || screen_is_agents_list(&composed));
+                if agents_view {
+                    agents_view_panes.insert(id.clone());
+                    // 관리 화면 = SCHALE 조직 정체성. claude 캐릭터(Clawd) 자리에 SCHALE
+                    // 로고를 얹는다(거노: 그 자리가 비어 보임). Clawd 블록아트가 있으면 그
+                    // 자리를 지우고 동일 위치에, 없으면(agents 목록) "Claude Code" 헤더
+                    // 왼쪽 여백에 앵커한다. 로고는 정사각이라 폭을 셀 비율로 맞춘다.
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let scw = self.cell.w * fs;
+                    let sch = self.cell.h * fs;
+                    let logo_rows = CLAWD_ROWS;
+                    let logo_cols =
+                        ((logo_rows as f32 * sch / scw).round() as usize).max(3);
+                    let clawd = find_clawd_banners(&composed);
+                    let anchor = if let Some(&(br, bc)) = clawd.first() {
+                        let r_end = (br + CLAWD_ROWS).min(composed.len());
+                        for row in composed[br..r_end].iter_mut() {
+                            for cell in row.iter_mut().skip(bc).take(CLAWD_COLS) {
+                                *cell = GridCell::blank();
+                            }
+                        }
+                        Some((br, bc))
+                    } else {
+                        find_agents_header_anchor(&composed, logo_cols)
+                    };
+                    if let Some((br, bc)) = anchor {
+                        schale_logo_slots.push((
+                            body_left + bc as f32 * scw,
+                            body_top + br as f32 * sch,
+                            logo_cols as f32 * scw,
+                            logo_rows as f32 * sch,
+                        ));
+                    }
+                }
                 // Claude Code 시작 배너의 Clawd 아트 → 이 pane 학생의 도트로.
                 // 학생 배정 pane(=claude 용도로 spawn된 pane)만 스캔한다.
                 // 감지된 셀은 스냅샷에서 blank 처리해 자리를 비우고, 그
                 // 자리에 도트 이미지를 queue한다 — 이미지 패스는 셀/chrome
                 // 보다 먼저 그려지므로 비워진 셀 밑으로 도트가 보인다.
-                if let Some((name, slug)) = ws
-                    .pane_character
-                    .get(&id)
+                // "터미널은 파싱만"(거노): claude sessionId 바인딩 우선, 뷰 pane 은
+                // 파싱 전 스폰 랜덤 미표시 — display_pane_char(chrome.rs)가 규칙 정본.
+                let true_char = self.display_pane_char(&ws, &id);
+                if let Some((name, slug)) = true_char
+                    .as_deref()
+                    .filter(|_| !agents_view)
                     .and_then(|n| theme::character_slug(n).map(|s| (n, s)))
                 {
-                    let accent = theme::character_accent(name);
+                    // 같은 학생 pane 이 여럿이면(지정 스폰 중복 허용) 순번 변주색.
+                    let accent = theme::character_accent_n(
+                        name,
+                        theme::character_ordinal(&ws.pane_character, &id),
+                    );
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
@@ -693,21 +784,32 @@ impl App {
                         // 줄에 닿고, 칩이 떠 있으면 그 왼쪽으로 비켜 선다.
                         // working/승인대기 중엔 스피너 walk·바운스 도트가 이미
                         // 학생을 그리므로(pet_busy) 세우지 않는다.
-                        let is_rule = |row: &[GridCell]| {
+                        // max_label: 테두리 줄에 허용하는 비-대시 글자 수.
+                        // 아래 테두리는 항상 순수 '─'(0), 윗 테두리는 /rename
+                        // 세션명이 "── 학생 ──" 로 박힐 수 있어 짧은 텍스트
+                        // 섬을 인정한다 — 순수 rule 만 보면 이름 지은 세션에서
+                        // standing 도트가 통째로 사라진다(거노 실사고).
+                        let is_rule = |row: &[GridCell], max_label: usize| {
                             let mut dashes = 0usize;
+                            let mut label = 0usize;
                             for c in row {
                                 match c.ch {
                                     '─' => dashes += 1,
                                     ' ' | '\0' => {}
-                                    _ => return false,
+                                    _ => {
+                                        label += 1;
+                                        if label > max_label {
+                                            return false;
+                                        }
+                                    }
                                 }
                             }
                             dashes > row.len() / 2
                         };
-                        if !pet_busy && sr >= 4 && is_rule(&composed[sr - 1]) {
+                        if !pet_busy && sr >= 4 && is_rule(&composed[sr - 1], 0) {
                             if let Some(tr) = (sr.saturating_sub(16)..sr - 1)
                                 .rev()
-                                .find(|&r| is_rule(&composed[r]))
+                                .find(|&r| is_rule(&composed[r], 24))
                                 .filter(|&tr| tr >= 1)
                             {
                                 let anchor = tr - 1;
@@ -758,6 +860,36 @@ impl App {
                         copy_btns.push((text, (bx, by, COPY_BTN_W, COPY_BTN_H)));
                     }
                 }
+                // /rename 세션명 아웃라인 — claude 입력박스 위 "── 세션명 ──" 구분선의
+                // 이름 텍스트 섬을 찾아 그 셀 범위를 rename/학생 색 사각 테두리로 두른다
+                // (거노). 순수 '─' rule·statusline·입력행은 걸러진다. 테두리 패스에서 소비.
+                if let Some((tr, c0, c1)) = find_titled_rule(&composed) {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let scw = self.cell.w * fs;
+                    let sch = self.cell.h * fs;
+                    // 가로는 셀 경계 딱 맞게(대시와 안 겹침, 이름 양옆 공백이 패딩 역할),
+                    // 세로만 살짝 여백.
+                    let pad_x = 0.0;
+                    let pad_y = 2.0;
+                    let col = pane
+                        .color
+                        .or_else(|| {
+                            pane.character.as_deref().and_then(|n| {
+                                theme::character_accent_n(
+                                    n,
+                                    theme::character_ordinal(&ws.pane_character, &id),
+                                )
+                            })
+                        })
+                        .unwrap_or_else(theme::border);
+                    title_outline_slots.push((
+                        body_left + c0 as f32 * scw - pad_x,
+                        body_top + tr as f32 * sch - pad_y,
+                        (c1 - c0 + 1) as f32 * scw + pad_x * 2.0,
+                        sch + pad_y * 2.0,
+                        col,
+                    ));
+                }
                 let pane_font_scale = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                 let hover_links = hovered_link
                     .as_ref()
@@ -770,16 +902,26 @@ impl App {
                 // 그것만으론 순정 셸까지 물든다(거노 실사고) — pane 테두리 게이트와
                 // 동일하게 claude 가 foreground 일 때만(active_process_name=="claude",
                 // 500ms 캐시) 틴트. claude 종료 시 다음 캐시 갱신에 자동 해제.
-                let tint_fg = pane
-                    .character
-                    .as_deref()
-                    .and_then(theme::student_tint)
-                    .filter(|_| {
-                        self.pty
-                            .get(id.as_str())
-                            .and_then(|p| p.active_process_name())
-                            .is_some_and(|n| n == "claude")
-                    });
+                // agents 목록 뷰는 중립 — 학생색으로 물들이지 않는다(정체성은
+                // 타이틀바 이름·테두리 SCHALE 블루로만).
+                let tint_fg = if agents_view {
+                    None
+                } else {
+                    pane.character
+                        .as_deref()
+                        .and_then(|n| {
+                            theme::character_accent_n(
+                                n,
+                                theme::character_ordinal(&ws.pane_character, &id),
+                            )
+                        })
+                        .filter(|_| {
+                            self.pty
+                                .get(id.as_str())
+                                .and_then(|p| p.active_process_name())
+                                .is_some_and(|n| n == "claude")
+                        })
+                };
                 // 입력박스(❯ 프롬프트)는 글자 틴트 제외 + 보더 줄은 학생 accent
                 // 강제(거노) — 치는 글자는 기본 fg, 줄·@배지는 /color 무시하고
                 // pane 정체성 색. 셀 fg 를 명시 색으로 고정하는 방식이라 draw 쪽
@@ -917,8 +1059,24 @@ impl App {
                     // 캐릭터 배정 pane(학생)은 헤더에도 이름을 — "미도리 · 작업명"(작업명
                     // =OSC title). BA GUI board 라벨과 통일(거노: 터미널 탭도 학생 이름).
                     // 비배정 pane 만 기존 "%N · 프로세스" 폴백.
-                    let label = if let Some(c) = pane.character.as_ref() {
-                        match pane.title.clone().filter(|t| !t.is_empty()) {
+                    let label = if agents_view {
+                        // 관리 화면 — 개별 학생 대신 SCHALE. 작업명(OSC title)은 유지.
+                        match pane
+                            .title
+                            .clone()
+                            .map(|t| crate::strip_activity_prefix(&t).to_string())
+                            .filter(|t| !t.is_empty())
+                        {
+                            Some(t) => format!("샬레 · {t}"),
+                            None => "샬레".to_string(),
+                        }
+                    } else if let Some(c) = pane.character.as_ref() {
+                        match pane
+                            .title
+                            .clone()
+                            .map(|t| crate::strip_activity_prefix(&t).to_string())
+                            .filter(|t| !t.is_empty())
+                        {
                             Some(t) => format!("{c} · {t}"),
                             None => c.clone(),
                         }
@@ -1006,7 +1164,7 @@ impl App {
             if !headers.is_empty() && !headers.iter().any(|h| h.is_active) {
                 headers[0].is_active = true;
             }
-            (slots, headers, footer_slots)
+            (slots, headers, footer_slots, agents_view_panes)
         };
         // Publish copy-button hit rects for the mouse handler; snapshot the
         // bare rects (+ hover state) for the overlay draw below. Both read
@@ -1422,6 +1580,25 @@ impl App {
                 let key = format!("student:{slug}:f{anim_idx}");
                 g.queue_image(&key, *bx, *by, *bw, *bh, 1.0, 0.0, 0.0);
             }
+            // agents 뷰 SCHALE 로고 — Clawd 자리(또는 헤더 왼쪽 여백)에 정적 1프레임.
+            if !schale_logo_slots.is_empty() {
+                if !g.has_image("schale:logo") {
+                    if let Some((rgba, w, h)) = schale_logo_rgba() {
+                        g.upload_image("schale:logo", &rgba, w, h);
+                    }
+                }
+                for (bx, by, bw, bh) in &schale_logo_slots {
+                    g.queue_image_above("schale:logo", *bx, *by, *bw, *bh);
+                }
+            }
+            // /rename 세션명 아웃라인 — 입력박스 위 구분선 이름을 사각 테두리로(4변).
+            for (x, y, w, h, col) in &title_outline_slots {
+                let t = 1.5_f32;
+                g.rect(*x, *y, *w, t, *col);
+                g.rect(*x, *y + *h - t, *w, t, *col);
+                g.rect(*x, *y, t, *h, *col);
+                g.rect(*x + *w - t, *y, t, *h, *col);
+            }
             // working 스피너 자리 — walk 프레임 제자리 걸음(분주하게 일하는 중).
             // 셀 위 icon 패스라 blank 처리한 스피너 자리 위에 또렷하게 뜬다.
             let walk_idx =
@@ -1718,6 +1895,17 @@ impl App {
                         .and_then(|p| p.color)
                         .unwrap_or_else(theme::text)
                 };
+                // active pane 의 claude 세션이 bg_agents(background kind)에 있으면
+                // 포크/백그라운드 배지. pane_claude_sid = 실제 세션(fork 시 갈라진 것).
+                let title_is_bg = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .and_then(|w| w.active_pane.clone())
+                    .and_then(|id| self.pane_claude_sid.get(&id).cloned())
+                    .is_some_and(|sid| {
+                        self.bg_agents.lock().map(|m| m.contains_key(&sid)).unwrap_or(false)
+                    });
                 let title_text: String = {
                     let ws = self.ws.lock().unwrap();
                     let active = ws.active_pane.clone();
@@ -1734,13 +1922,46 @@ impl App {
                                 .and_then(|p| p.active_process_name())
                                 .is_some_and(|n| n == "claude")
                         })
-                        .and_then(|id| ws.pane_character.get(id))
-                        .filter(|c| !c.is_empty())
-                        .cloned();
-                    if let Some(c) = claude_char {
+                        .and_then(|id| {
+                            // 프사와 동일 규칙(display_pane_char 인라인 — gpu 가변 차용
+                            // 중이라 메서드 호출 불가, 필드 접근은 분리 캡처로 허용):
+                            // 뷰 pane 은 파싱 전 스폰 랜덤을 타이틀바에도 안 올린다.
+                            self.pane_claude_sid
+                                .get(id)
+                                .and_then(|sid| kasa_mcp::character::session_character(sid))
+                                .or_else(|| {
+                                    let view = self
+                                        .pty
+                                        .get(id)
+                                        .map(|p| p.is_claude_agents())
+                                        .unwrap_or(false);
+                                    if view {
+                                        None
+                                    } else {
+                                        ws.pane_character.get(id).cloned()
+                                    }
+                                })
+                        })
+                        .filter(|c| !c.is_empty());
+                    // active pane 이 claude agents 목록 뷰면 타이틀바도 SCHALE(작업명 유지).
+                    let agents_active = active
+                        .as_deref()
+                        .map_or(false, |id| agents_view_panes.contains(id));
+                    if agents_active {
                         let work = active
                             .as_deref()
                             .and_then(|id| ws.panes.get(id).and_then(|p| p.title.clone()))
+                            .map(|t| crate::strip_activity_prefix(&t).to_string())
+                            .filter(|s| !s.is_empty());
+                        match work {
+                            Some(w) => format!("샬레  ·  {w}"),
+                            None => "샬레".to_string(),
+                        }
+                    } else if let Some(c) = claude_char {
+                        let work = active
+                            .as_deref()
+                            .and_then(|id| ws.panes.get(id).and_then(|p| p.title.clone()))
+                            .map(|t| crate::strip_activity_prefix(&t).to_string())
                             .filter(|s| !s.is_empty());
                         match work {
                             Some(w) => format!("{c}  ·  {w}"),
@@ -1774,9 +1995,18 @@ impl App {
                     }
                 };
                 if !title_text.is_empty() {
+                    // 포크/백그라운드 세션이면 세션명 뒤에 dim 배지(⑂ = 분기 기호).
+                    // 배지 폭까지 포함해 (제목+배지)를 창 중앙 정렬 → 제목만 그릴 때와
+                    // 시각적 중심이 유지된다.
+                    const BG_BADGE: &str = "  ⑂ bg";
                     let tw = g.measure_chrome_text(&title_text, chrome_font, true);
+                    let bw = if title_is_bg {
+                        g.measure_chrome_text(BG_BADGE, chrome_font, false)
+                    } else {
+                        0.0
+                    };
                     let win_w_logical = win_px.0 / scale;
-                    let center_x = (win_w_logical / 2.0) - tw / 2.0;
+                    let center_x = (win_w_logical / 2.0) - (tw + bw) / 2.0;
                     // Don't collide with the left chip cluster.
                     let left_edge = after + 6.0
                         + g.measure_chrome_text(&cwd_str, chrome_font, false)
@@ -1793,6 +2023,19 @@ impl App {
                             italic: false,
                         },
                     );
+                    if title_is_bg {
+                        g.draw_text(
+                            tx + tw,
+                            ty,
+                            BG_BADGE,
+                            gpu::DrawOpts {
+                                font_size: chrome_font,
+                                color: theme::text_mute(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
                 }
             }
             // Shell picker popup painter — stacked under the "+" button
@@ -3700,7 +3943,36 @@ impl App {
                 .ws
                 .lock()
                 .ok()
-                .map(|w| (w.active_pane.clone(), w.pane_character.clone()))
+                .map(|w| {
+                    // 테두리 accent 도 표시 규칙(display_pane_char 인라인 — gpu 가변
+                    // 차용 중) 공유 — 뷰 pane 은 파싱 전 스폰 랜덤 색을 두르지 않는다
+                    // (거노: 진입 직후 다른 학생색).
+                    let chars: HashMap<String, String> = w
+                        .panes
+                        .keys()
+                        .filter_map(|id| {
+                            self.pane_claude_sid
+                                .get(id)
+                                .and_then(|sid| {
+                                    kasa_mcp::character::session_character(sid)
+                                })
+                                .or_else(|| {
+                                    let view = self
+                                        .pty
+                                        .get(id)
+                                        .map(|p| p.is_claude_agents())
+                                        .unwrap_or(false);
+                                    if view {
+                                        None
+                                    } else {
+                                        w.pane_character.get(id).cloned()
+                                    }
+                                })
+                                .map(|c| (id.clone(), c))
+                        })
+                        .collect();
+                    (w.active_pane.clone(), chars)
+                })
                 .unwrap_or_default();
             // claude 가 foreground 인 pane 집합 — 테두리 게이트. 캐릭터는 pane spawn 시
             // 배정되지만(assign_character_env) 순수 셸엔 색을 안 씌우려면 타이틀바 학생
@@ -3748,9 +4020,18 @@ impl App {
                         && active_pane.as_deref() == Some(fid.as_str())
                         && claude_panes.contains(fid.as_str())
                     {
-                        if let Some(col) =
-                            pane_chars.get(fid.as_str()).and_then(|n| theme::character_accent(n))
-                        {
+                        // agents 목록 뷰는 SCHALE 블루 고정, 그 외엔 배정 학생색.
+                        let border_col = if agents_view_panes.contains(fid.as_str()) {
+                            theme::character_accent("샬레")
+                        } else {
+                            pane_chars.get(fid.as_str()).and_then(|n| {
+                                theme::character_accent_n(
+                                    n,
+                                    theme::character_ordinal(&pane_chars, fid),
+                                )
+                            })
+                        };
+                        if let Some(col) = border_col {
                             let t = 1.5_f32;
                             g.rect(*fx, *fy, *fw, t, col);
                             g.rect(*fx, fy + fbox_h - t, *fw, t, col);
@@ -4881,11 +5162,70 @@ fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
     }
     for i in [b1, b2] {
         for c in rows[i].iter_mut() {
+            // 세션명/테두리 줄 배경(claude --agent-color 로 채운 accent 밴드)을
+            // 터미널색으로 되돌린다 — 아웃라인(─ 대시·세션명 글자)만 accent 로
+            // 두고 배경은 안 칠한다(거노: 배경까지 채우면 글자가 묻힌다).
+            c.bg = kasa_bridge::screen::Color::Default;
             if c.ch != ' ' && c.ch != '\0' {
                 c.fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
             }
         }
     }
+}
+
+/// 사용자 override 학생 애셋의 최대 변 길이. 렌더가 슬롯에 contain-fit 하므로
+/// 정확한 규격 강제는 불필요 — 사용자가 넣은 초고해상도 원본이 VRAM 을 잡아먹는
+/// 것만 방어적으로 막는다(번들 기본 도트는 이미 이 아래라 무영향).
+const MAX_STUDENT_EDGE: u32 = 512;
+
+/// 과대 이미지만 contain 다운스케일(종횡비 유지). 그 외엔 원본 그대로.
+fn downscale_student(img: image::DynamicImage) -> image::DynamicImage {
+    if img.width() > MAX_STUDENT_EDGE || img.height() > MAX_STUDENT_EDGE {
+        img.resize(
+            MAX_STUDENT_EDGE,
+            MAX_STUDENT_EDGE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        img
+    }
+}
+
+/// `~/.config/kasaterm/students/<filename>` 을 RGBA 로 읽는다(프사·로고처럼
+/// 단일 이미지용). 파일/디렉토리가 없으면 None → 호출측이 번들 기본으로 폴백.
+fn user_asset_rgba(filename: &str) -> Option<(Vec<u8>, u32, u32)> {
+    user_asset_rgba_in(&crate::socket::students_dir()?, filename)
+}
+
+/// dir 주입 버전(테스트용) — students_dir 해석과 분리해 env 없이 검증한다.
+fn user_asset_rgba_in(dir: &std::path::Path, filename: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let img = downscale_student(image::open(dir.join(filename)).ok()?);
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Some((rgba.into_raw(), w, h))
+}
+
+/// 한 캐릭터·모션의 사용자 override 스프라이트 프레임 전부를 RgbaImage 로 연다.
+/// 프레임이 **하나라도** 없으면 None — 부분 교체(일부만 사용자·일부는 번들)는
+/// 애니가 튀므로 all-or-nothing 으로 전체 폴백시킨다.
+fn user_sprite_images(slug: &str, motion: &str) -> Option<Vec<image::RgbaImage>> {
+    let dir = crate::socket::students_dir()?;
+    let n = if motion == "walk" {
+        STUDENT_WALK_FRAMES
+    } else {
+        STUDENT_IDLE_FRAMES
+    };
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let fname = if motion == "walk" {
+            format!("{slug}-walk-{i}.png")
+        } else {
+            format!("{slug}-{i}.png")
+        };
+        let img = downscale_student(image::open(dir.join(&fname)).ok()?);
+        out.push(img.to_rgba8());
+    }
+    Some(out)
 }
 
 /// 캐릭터 슬러그 + 모션 → 컴파일타임 내장 도트 프레임(arona-ui walk
@@ -4949,14 +5289,21 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
 /// 키 차이가 contain-fit 배율 차이로 증폭돼 캐릭터가 들썩인다.
 /// GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로 (캐릭터,모션)당 1회.
 fn student_sprite_frames(slug: &str, motion: &str) -> Option<Vec<(Vec<u8>, u32, u32)>> {
-    let frames = student_sprite_png(slug, motion)?;
-    let decoded: Vec<_> = frames
-        .iter()
-        .filter_map(|b| image::load_from_memory(b).ok().map(|i| i.to_rgba8()))
-        .collect();
-    if decoded.len() != frames.len() {
-        return None;
-    }
+    // 사용자 override(students_dir) 전 프레임이 있으면 그걸, 없으면 번들 내장.
+    let decoded: Vec<image::RgbaImage> = match user_sprite_images(slug, motion) {
+        Some(imgs) => imgs,
+        None => {
+            let frames = student_sprite_png(slug, motion)?;
+            let d: Vec<_> = frames
+                .iter()
+                .filter_map(|b| image::load_from_memory(b).ok().map(|i| i.to_rgba8()))
+                .collect();
+            if d.len() != frames.len() {
+                return None;
+            }
+            d
+        }
+    };
     let (w, h) = decoded[0].dimensions();
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
     for img in &decoded {
@@ -5011,9 +5358,68 @@ fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
 /// 프사 PNG → RGBA. GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로
 /// 캐릭터당 1회 디코딩. 이미 얼굴에 맞춰 잘린 에셋이라 bbox 크롭은 불필요.
 fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
+    if let Some(r) = user_asset_rgba(&format!("{slug}-profile.png")) {
+        return Some(r);
+    }
     let img = image::load_from_memory(student_profile_png(slug)?).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
     Some((img.into_raw(), w, h))
+}
+
+/// SCHALE 로고 PNG → RGBA. agents 뷰 캐시 미스 시 1회 디코딩. 사용자
+/// override(students_dir/schale-logo.png) 우선, 없으면 include_bytes 번들.
+fn schale_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    if let Some(r) = user_asset_rgba("schale-logo.png") {
+        return Some(r);
+    }
+    let img = image::load_from_memory(include_bytes!("../assets/students/schale-logo.png"))
+        .ok()?
+        .to_rgba8();
+    let (w, h) = img.dimensions();
+    Some((img.into_raw(), w, h))
+}
+
+/// agents 목록 뷰에서 SCHALE 로고를 얹을 위치 — "Claude Code" 헤더 행을 찾아 그
+/// 왼쪽 여백(logo_cols + 2칸 갭 앞)의 top-left (row, col)을 돌려준다. Clawd 블록아트가
+/// 없는 목록 뷰에서 startup 배너의 Clawd 자리와 같은 쪽(헤더 왼쪽)에 앵커한다.
+fn find_agents_header_anchor(rows: &[Vec<GridCell>], logo_cols: usize) -> Option<(usize, usize)> {
+    for (r, row) in rows.iter().enumerate() {
+        let line: String = row.iter().map(|c| c.ch).collect();
+        if let Some(idx) = line.find("Claude Code") {
+            return Some((r, idx.saturating_sub(logo_cols + 2)));
+        }
+    }
+    None
+}
+
+/// claude 입력박스 위 "── 세션명 ──" 구분선의 이름 구간 위치(거노: rename 아웃라인).
+/// 하단 10행에서 대시가 지배적이고 비-대시 텍스트 섬이 있는 rule 행을 찾아, **좌우 대시
+/// 런 사이**(양옆 공백 포함)의 (row, c0, c1)을 돌려준다. 이름 글자 셀이 아니라 대시 경계로
+/// 잡아야 한글 같은 와이드(2셀) 문자의 둘째 셀까지 박스 안에 정확히 들어온다(거노: 칸 안맞음).
+/// 순수 '─' rule·statusline·입력행은 걸러진다.
+fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
+    let n = rows.len();
+    for r in (n.saturating_sub(10)..n).rev() {
+        let row = &rows[r];
+        let dashes = row.iter().filter(|c| c.ch == '─').count();
+        if dashes < row.len() / 2 {
+            continue;
+        }
+        // 이름 섬이 없는 순수 '─' rule(입력박스 바닥 테두리 등)은 건너뛴다 — `?` 로 함수를
+        // 끝내면 그 아래 순수 rule 이 세션명 줄보다 먼저 걸려 아웃라인이 통째 사라진다(거노).
+        let is_name = |c: &GridCell| !matches!(c.ch, '─' | ' ' | '\0');
+        let Some(first) = row.iter().position(&is_name) else { continue };
+        let Some(last) = row.iter().rposition(&is_name) else { continue };
+        // 이름 왼쪽의 마지막 '─' 다음 셀 = c0(선행 공백 포함), 오른쪽 첫 '─' 이전 셀 = c1
+        // (와이드 문자 둘째 셀·후행 공백 포함). 대시 런이 없으면 이름 셀로 폴백.
+        let c0 = row[..first].iter().rposition(|c| c.ch == '─').map_or(first, |i| i + 1);
+        let c1 = row[last + 1..]
+            .iter()
+            .position(|c| c.ch == '─')
+            .map_or(last, |i| (last + 1 + i).saturating_sub(1));
+        return Some((r, c0, c1));
+    }
+    None
 }
 
 /// Clawd 시작 배너 감지. 결정행(몸통 2행째)의 9글리프 시퀀스를 찾고 바로
@@ -5043,6 +5449,16 @@ fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+/// claude agents 목록 화면인지 화면 텍스트로 감지. argv(`is_claude_agents`)는 `claude
+/// agents` **명령**만 잡고, 세션 안에서 "← for agents"로 여는 목록 뷰는 같은 프로세스라
+/// argv 가 안 바뀌어 못 잡는다(거노: agents view 로고 안 뜸). 목록 상단 통계줄
+/// "N awaiting input · N working · N completed" 의 고유 문구를 신호로 쓴다 — 일반
+/// 대화엔 statusline(U+FFFC)이 있어 호출부에서 `!has_profile_slot` 로 이미 걸러진다.
+fn screen_is_agents_list(rows: &[Vec<GridCell>]) -> bool {
+    let full: String = rows.iter().flat_map(|r| r.iter().map(|c| c.ch)).collect();
+    full.contains("awaiting input") && full.contains("completed")
 }
 
 /// Claude Code 라이브 스피너("✻ Verbing…" 별 dingbat, 또는 braille) 위치 감지 —
@@ -5192,5 +5608,55 @@ mod spinner_tests {
     fn spinner_ignores_plain_text() {
         let rows = vec![row_from("just some normal output line")];
         assert_eq!(find_claude_spinner(&rows), None);
+    }
+}
+
+#[cfg(test)]
+mod student_asset_tests {
+    use super::*;
+
+    // 사용자 override 파일이 없으면 None → 호출측이 번들 include_bytes 로 폴백.
+    #[test]
+    fn user_asset_missing_falls_back() {
+        let dir = std::env::temp_dir().join(format!("kt-noassets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(user_asset_rgba_in(&dir, "yuuka-profile.png").is_none());
+    }
+
+    // override 파일이 있으면 그걸 읽고, 과대 이미지는 MAX_STUDENT_EDGE 로 종횡비
+    // 유지 다운스케일(640×480 → 512×384).
+    #[test]
+    fn user_asset_read_and_downscale() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("kt-assets-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        image::RgbaImage::from_pixel(640, 480, image::Rgba([10, 20, 30, 255]))
+            .save(dir.join("yuuka-profile.png"))
+            .unwrap();
+        let (rgba, w, h) =
+            user_asset_rgba_in(&dir, "yuuka-profile.png").expect("override read");
+        assert_eq!((w, h), (MAX_STUDENT_EDGE, 384));
+        assert_eq!(rgba.len() as u32, w * h * 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // 규격 이하 이미지는 원본 크기 그대로(불필요한 리샘플 방지).
+    #[test]
+    fn user_asset_small_kept_verbatim() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("kt-small-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        image::RgbaImage::from_pixel(96, 96, image::Rgba([1, 2, 3, 255]))
+            .save(dir.join("schale-logo.png"))
+            .unwrap();
+        let (_, w, h) = user_asset_rgba_in(&dir, "schale-logo.png").expect("override read");
+        assert_eq!((w, h), (96, 96));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

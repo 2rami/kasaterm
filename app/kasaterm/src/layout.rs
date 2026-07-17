@@ -774,7 +774,7 @@ impl App {
     /// can pass a dead session off as live when the pane number is reused
     /// within the same socket generation — the recovery guard's inode-
     /// generation check can't see that case, so deleting at close time is
-    /// the root fix. character-/god-nudged- markers likewise leak a roster
+    /// the root fix. character-/god-nudged-(레거시) markers likewise leak a roster
     /// slot and re-arm a suppressed nudge.
     ///
     /// `character-<N>` 는 **이 pane 의 방(cwd slug)에서만** 지운다 — pane 번호는 방 간

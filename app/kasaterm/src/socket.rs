@@ -167,24 +167,40 @@ pub struct PtyBackend {
     /// the BA GUI can draw a Warp-style bar without this thread shelling out to
     /// lsof/git. Empty until the GUI's `publish_pane_status` runs.
     pane_status_pub: Arc<Mutex<HashMap<String, PaneStatus>>>,
+    /// claude sessionId → parentSessionId(background/fork 세션만). `App.bg_agents`
+    /// 와 공유 — board lazy 배정이 포크 세션에 부모 학생을 상속하는 데 쓴다.
+    bg_agents: Arc<Mutex<HashMap<String, Option<String>>>>,
+    /// surface_id → 마지막 지글(NudgePaneResize) 발동 시각 — stale statusline pane 을
+    /// 10s 에 1회만 흔들어 재실행 강제가 리사이즈 폭주가 되지 않게 한다.
+    nudged: Arc<Mutex<HashMap<String, std::time::Instant>>>,
 }
 
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
 /// agents_status)와 터미널 타이틀바(render)가 같은 데이터로 claude 실행/working 판정을
 /// 일치시킨다(거노: gui 동기화). 전역이라 PtyBackend 인스턴스 없이 App 도 호출.
-static AGENTS_CACHE: LazyLock<Mutex<Option<(std::time::Instant, HashMap<String, String>)>>> =
-    LazyLock::new(|| Mutex::new(None));
+static AGENTS_CACHE: LazyLock<
+    Mutex<Option<(std::time::Instant, HashMap<String, String>, HashMap<String, String>)>>,
+> = LazyLock::new(|| Mutex::new(None));
 
-pub(crate) fn agents_status_cached() -> HashMap<String, String> {
+fn agents_cached() -> (HashMap<String, String>, HashMap<String, String>) {
     const TTL: std::time::Duration = std::time::Duration::from_secs(2);
     let now = std::time::Instant::now();
-    if let Some((at, map)) = AGENTS_CACHE.lock().unwrap().as_ref() {
+    if let Some((at, status, names)) = AGENTS_CACHE.lock().unwrap().as_ref() {
         if now.duration_since(*at) < TTL {
-            return map.clone();
+            return (status.clone(), names.clone());
         }
     }
     let mut map: HashMap<String, String> = HashMap::new();
-    if let Ok(out) = crate::proc::command("claude")
+    // 세션 name → sessionId. agents 피커로 attach 한 pane 은 kasaterm 이 어느 세션인지
+    // 알 길이 없어(피커는 이벤트도 argv 흔적도 없음), pane OSC 타이틀(=세션 name)로
+    // 역추적한다(rebind_agents_panes). 같은 이름 둘이면 모호 — 매핑에서 뺀다.
+    let mut names: HashMap<String, String> = HashMap::new();
+    let mut dup_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // "claude" 이름 호출 금지 — .app 실행 시 kasaterm PATH 는 시스템 기본
+    // (/usr/bin:/bin:…)뿐이라 ~/.local/bin 의 claude 가 안 잡혀, 이 캐시가 조용히
+    // 늘 빈 값이었다(status 폴백 항상 mtime 휴리스틱 + agents 뷰 이름 매칭 불발 —
+    // 거노: 이번엔 유우카로 떠). GUI 폴러와 같은 claude_bin() 리졸버를 쓴다.
+    if let Ok(out) = crate::proc::command(kasa_mcp::claude_bin())
         .args(["agents", "--json"])
         .output()
     {
@@ -206,12 +222,38 @@ pub(crate) fn agents_status_cached() -> HashMap<String, String> {
                     if rank(st) > rank(e) {
                         *e = st.to_string();
                     }
+                    if let Some(n) = it.get("name").and_then(|v| v.as_str()).map(str::trim) {
+                        if !n.is_empty() {
+                            match names.entry(n.to_string()) {
+                                std::collections::hash_map::Entry::Occupied(o) => {
+                                    if o.get() != sid {
+                                        dup_names.insert(n.to_string());
+                                    }
+                                }
+                                std::collections::hash_map::Entry::Vacant(v) => {
+                                    v.insert(sid.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
-    *AGENTS_CACHE.lock().unwrap() = Some((now, map.clone()));
-    map
+    for n in &dup_names {
+        names.remove(n);
+    }
+    *AGENTS_CACHE.lock().unwrap() = Some((now, map.clone(), names.clone()));
+    (map, names)
+}
+
+pub(crate) fn agents_status_cached() -> HashMap<String, String> {
+    agents_cached().0
+}
+
+/// 세션 name → sessionId(모호 이름 제외, 2s 캐시 공유).
+fn agents_name_sids_cached() -> HashMap<String, String> {
+    agents_cached().1
 }
 
 impl PtyBackend {
@@ -223,6 +265,7 @@ impl PtyBackend {
         ws: Arc<Mutex<Workspace>>,
         attention: Arc<Mutex<HashMap<String, String>>>,
         pane_status_pub: Arc<Mutex<HashMap<String, PaneStatus>>>,
+        bg_agents: Arc<Mutex<HashMap<String, Option<String>>>>,
     ) -> Self {
         Self {
             proxy,
@@ -234,6 +277,8 @@ impl PtyBackend {
             reported_cwd: Arc::new(Mutex::new(HashMap::new())),
             last_ctx: Arc::new(Mutex::new(HashMap::new())),
             pane_status_pub,
+            bg_agents,
+            nudged: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -299,6 +344,98 @@ impl PtyBackend {
         }
     }
 
+    /// pump(스크린 diff)가 이미 파싱한 마커 sid8 로 한 pane 을 직접 재바인딩 — 그리드
+    /// 재스캔(행 창·타이밍)에 기대지 않는 진입-즉시 경로. 뷰 pane 게이트는 동일.
+    pub(crate) fn rebind_pane_marker(&self, pane: &str, sid8: &str) {
+        let Some((_, shell_pid)) =
+            self.query_pane_pids().into_iter().find(|(id, _)| id == pane)
+        else {
+            return;
+        };
+        if claude_view_subcommand(shell_pid).is_none() {
+            return;
+        }
+        let Some(sid) = resolve_sid8(sid8) else { return };
+        let Some(path) = transcript_path_for_session(&sid) else { return };
+        let cur = self.bound.lock().unwrap().get(pane).cloned();
+        if cur.as_ref() != Some(&path) {
+            let _ = self.bind_transcript(pane, &path.to_string_lossy());
+        }
+    }
+
+    /// agents/attach 뷰 pane 의 pane↔세션 재바인딩 — 매 board 빌드마다 돈다(피커에서
+    /// 다른 세션으로 갈아타면 bound 가 낡으므로 unbound 게이트를 못 탄다). 대상 세션은
+    /// attach 는 argv 위치 인자, agents 피커는 pane OSC 타이틀(=세션 name)↔`claude
+    /// agents --json` name 의 유일 매칭으로 알아낸다 — kasaterm 은 피커 선택을 이벤트로
+    /// 못 받아 이 역추적이 유일한 파싱 경로다(거노: 백그라운드는 터미널이 파싱만).
+    /// 바인딩은 bind_transcript 로 — bound(board)+SocketSessionBound(render 캐릭터)가
+    /// 한 호출로 정렬된다. 매칭 실패(피커 화면·중복 이름)면 건드리지 않는다.
+    pub(crate) fn rebind_agents_panes(&self, live: &HashSet<String>) {
+        let mut name_sids: Option<HashMap<String, String>> = None;
+        for (id, shell_pid) in self.query_pane_pids() {
+            if !live.contains(&id) {
+                continue;
+            }
+            let Some(sub) = claude_view_subcommand(shell_pid) else { continue };
+            let sid = match sub {
+                "attach" => attach_target_from_cmdline(shell_pid),
+                _ => {
+                    // 1순위: 화면의 statusline 세션 id 마커(진입 즉시·정확). 8행 —
+                    // statusline 아래 입력힌트·여백 행이 붙어 3행 창은 마커를 놓친다.
+                    // 2순위: OSC 타이틀↔세션 name 매칭(구 statusline·마커 잘림 폴백).
+                    let (screen, title) = {
+                        let ws = self.ws.lock().unwrap();
+                        match ws.panes.get(&id) {
+                            Some(p) => (p.visible_text(8), p.title.clone()),
+                            None => continue,
+                        }
+                    };
+                    let resolved = screen_marker_sid8(&screen)
+                        .and_then(|s8| resolve_sid8(&s8))
+                        .or_else(|| {
+                            title.and_then(|t| {
+                                let t = title_session_name(&t);
+                                if t.is_empty() {
+                                    return None;
+                                }
+                                name_sids
+                                    .get_or_insert_with(agents_name_sids_cached)
+                                    .get(t)
+                                    .cloned()
+                            })
+                        });
+                    // stale statusline: 우리 statusline(프사 슬롯 U+FFFC)은 떠 있는데
+                    // 마커도 타이틀 매칭도 없다 — 구버전 claude(≤2.1.209 실측)는 attach
+                    // 에서 statusline 을 재실행하지 않아, 사용자가 뭔가 치기 전까지
+                    // 마커가 영영 안 흐른다(거노). 1행 지글로 재실행을 강제(10s
+                    // rate-limit). 피커/셸 화면은 FFFC 가 없어 안 탄다.
+                    if resolved.is_none()
+                        && screen.contains('\u{fffc}')
+                        && !screen.contains('⟦')
+                    {
+                        let mut nudged = self.nudged.lock().unwrap();
+                        let due = nudged
+                            .get(&id)
+                            .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(10));
+                        if due {
+                            nudged.insert(id.clone(), std::time::Instant::now());
+                            let _ = self
+                                .proxy
+                                .send_event(UserEvent::NudgePaneResize(id.clone()));
+                        }
+                    }
+                    resolved
+                }
+            };
+            let Some(sid) = sid else { continue };
+            let Some(path) = transcript_path_for_session(&sid) else { continue };
+            let cur = self.bound.lock().unwrap().get(&id).cloned();
+            if cur.as_ref() != Some(&path) {
+                let _ = self.bind_transcript(&id, &path.to_string_lossy());
+            }
+        }
+    }
+
     /// sessionId → official claude status (idle/busy/waiting), cached 2s.
     /// `claude agents --json` is authoritative; the transcript-mtime heuristic
     /// in `read_tail`/`snapshot_from_tail` is only a fallback for sessions
@@ -355,10 +492,10 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    /// `POST /session-new?god=<name>` — 새 방(윈도우) + 선택 god 스폰을 GUI 에 위임.
-    fn new_room(&self, god: &str) -> Result<()> {
+    /// `POST /session-new?character=<name>` — 새 방(윈도우) + 캐릭터 지정 스폰을 GUI 에 위임.
+    fn new_room(&self, character: &str) -> Result<()> {
         self.proxy
-            .send_event(UserEvent::SocketNewRoom(god.to_string()))
+            .send_event(UserEvent::SocketNewRoom(character.to_string()))
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
         Ok(())
     }
@@ -375,6 +512,18 @@ impl Backend for PtyBackend {
     fn swap_character(&self, surface_id: &str, character: &str) -> Result<()> {
         self.proxy
             .send_event(UserEvent::SocketSwapCharacter(
+                surface_id.to_string(),
+                character.to_string(),
+            ))
+            .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
+        Ok(())
+    }
+
+    /// `GET /repersona?surface=<id>&character=<name>` — respawn 없는 캐릭터 재배정.
+    /// 학생 명령(`시로코`)이 claude 실행 직전에 호출한다.
+    fn repersona(&self, surface_id: &str, character: &str) -> Result<()> {
+        self.proxy
+            .send_event(UserEvent::SocketRepersona(
                 surface_id.to_string(),
                 character.to_string(),
             ))
@@ -588,7 +737,7 @@ impl Backend for PtyBackend {
 
     /// 활성 pane 의 셸 cwd — GET /mode 등 협업방 판정의 기준. trait 디폴트
     /// (None→호스트 cwd 폴백)는 .app 실행 시 cwd 가 `/` 라 항상 solo 로
-    /// 오판했다(거노 실측: god 방 토글 차단). GUI 동기 RPC 로 활성 pane 의
+    /// 오판했다(거노 실측: 방 토글 차단). GUI 동기 RPC 로 활성 pane 의
     /// shell pid 만 받고(메모리 즉답), lsof 해석은 이 backend 스레드서 한다 —
     /// 라이브 lsof 가 정확(split 시점 박제 캐시·프로세스 cwd 불신).
     fn active_cwd(&self) -> Option<std::path::PathBuf> {
@@ -931,6 +1080,9 @@ impl Backend for PtyBackend {
         // hook-free 발견 — claude 훅(bind-transcript)이 안 걸린 pane 도 PTY 소유를
         // 이용해 직접 추적·bind(스로틀 2s). 훅은 빠른 보조 경로일 뿐, 이게 안전망.
         self.discover_unbound(&live);
+        // agents/attach 뷰 pane 은 discovery 대신 여기서 세션을 역추적해 (재)바인딩 —
+        // 피커에서 세션을 갈아타면 bound 가 낡아 unbound 게이트로는 못 잡는다.
+        self.rebind_agents_panes(&live);
         let agents = self.agents_status();
         // claude 가 실제 생성 중이면 화면 푸터에 스피너+"esc to interrupt" 가 뜬다.
         // mtime(60s) 휴리스틱이 ESC/완료 후에도 working 으로 stuck 이라(거노), 이 화면
@@ -949,8 +1101,8 @@ impl Backend for PtyBackend {
         };
         let bound = self.bound.lock().unwrap();
         let mut attention = self.attention.lock().unwrap();
-        // 방별 분리(거노): 각 pane 의 god/character 는 *그 pane 의 방(room)* collab dir
-        // 에서 읽는다 — 같은 cwd 라도 방마다 god 가 다르다(아로나 방/프라나 방). pane_room
+        // 방별 분리(거노): 각 pane 의 character 는 *그 pane 의 방(room)* collab dir
+        // 에서 읽는다 — 같은 cwd 라도 방마다 캐릭터가 다르다. pane_room
         // 없으면(기본 방) 기존 cwd-slug. ws(공유)에서 복제해 아래 map 클로저서 쓴다.
         // active_window_panes: 보이는 방(윈도우)의 pane — board 를 활성 방으로 한정
         // (거노: 아로나 방+프라나 방이 한 교실에 같이 뜸). 비었으면(초기) 필터 안 함.
@@ -961,6 +1113,20 @@ impl Backend for PtyBackend {
             let ws = self.ws.lock().unwrap();
             (ws.pane_room.clone(), ws.pane_character.clone(), ws.pane_window.clone())
         };
+        // pane 셸 프로세스 env 의 KASATERM_CHARACTER — 데몬이 영속하는 세션 정체성.
+        // bg/포크 세션은 re-attach 마다 claude 가 transcript id 를 새로 발급해 세션id 키
+        // persistence 가 어긋나고 board 가 랜덤 둔갑한다. 게다가 ws.pane_character 는
+        // 세션 저장파일로 복원돼 오염된 랜덤값이 marker 를 덮는다(거노: 데몬 영속 학생이
+        // board 와 따로 논다). env 는 스폰 때 박혀 fork/재접속/재시작 너머 안 바뀌므로
+        // 최우선으로 읽어 복원된 ws·marker·랜덤보다 먼저 정체성을 고정한다. 로스터 밖
+        // 값은 무시(오염 방지). ps 는 폴당 pane 수만큼(1/s)이라 부담 없음.
+        let pane_shell_pid: HashMap<String, u32> = self.query_pane_pids().into_iter().collect();
+        let valid_members: HashSet<String> = kasa_mcp::character::characters_json()
+            .map(|c| kasa_mcp::character::member_names(&c).into_iter().collect())
+            .unwrap_or_default();
+        // 세션 → 포크 부모 세션 id(argv --resume). detach 포크로 세션 id 가 갈려도 이 사슬
+        // 끝의 원본 바인딩(session_characters.json)이 retained 학생이다(거노: bg 재진입 둔갑).
+        let daemon_parents = daemon_session_parents();
         // board 빌드 한 폴링 안에서 lazy 배정된 캐릭터 — 같은 폴링에 처음 등장한 두 pane 이
         // 둘 다 같은 빈 슬롯(예: 미도리)을 고르는 걸 막는다(pane_character 클론은 빌드 중
         // 안 바뀌므로 별도 누적). 다음 폴링부턴 ws.pane_character 로 잡혀 불필요.
@@ -1032,8 +1198,8 @@ impl Backend for PtyBackend {
                 } else {
                     attention.remove(sid);
                 }
-                // 이 pane 의 방 collab dir = cwd-slug(+ 방이면 __room_<id>). god/character
-                // 둘 다 여기서 읽어 방별로 분리(거노: 프라나 방에 시로코 뜨던 버그).
+                // 이 pane 의 방 collab dir = cwd-slug(+ 방이면 __room_<id>). character
+                // 마커를 여기서 읽어 방별로 분리(거노: 프라나 방에 시로코 뜨던 버그).
                 let base_slug = path
                     .parent()
                     .and_then(|d| d.file_name())
@@ -1043,42 +1209,102 @@ impl Backend for PtyBackend {
                     Some(r) => format!("{base_slug}__room_{r}"),
                     None => base_slug.to_string(),
                 };
-                // god 판정 — 이 방의 lead == 나?
-                let lead = std::fs::read_to_string(format!("/tmp/kasaterm-collab/{rslug}/lead"))
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty());
-                row.is_god = lead.as_deref() == Some(sid.as_str());
                 // GUI 가 spawn/swap 시 배정한 ws.pane_character 우선 — 터미널 헤더
                 // (pane_header_label)와 같은 소스라 board·탭 캐릭터가 항상 일치(거노:
                 // board 미도리 둘 / 헤더 모모이 불일치). 없으면 방 dir 의 character-<N> 마커.
-                row.character = pane_character.get(sid.as_str()).cloned().or_else(|| {
-                    std::fs::read_to_string(format!(
-                        "/tmp/kasaterm-collab/{rslug}/character-{}",
-                        sid.trim_start_matches('%')
-                    ))
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                });
+                // 세션 자신의 바인딩 → 없으면 포크 부모 사슬을 따라 원본 학생을 찾는다.
+                // detach 포크로 세션 id 가 갈려도 --resume 부모 끝의 바인딩이 retained 진실
+                // (per-세션이라 "다 같은 학생" 아님, 거노). stem = transcript 파일명 = 세션 id.
+                let stem = path.file_stem().and_then(|s| s.to_str());
+                let retained = stem
+                    .and_then(|s| {
+                        let mut cur = s.to_string();
+                        for _ in 0..8 {
+                            if let Some(c) = kasa_mcp::character::session_character(&cur) {
+                                return Some(c);
+                            }
+                            match daemon_parents.get(&cur) {
+                                Some(p) => cur = p.clone(),
+                                None => break,
+                            }
+                        }
+                        None
+                    })
+                    .filter(|c| valid_members.contains(c));
+                // 셸 env 폴백(foreground 순정 경로) — bg 셸엔 대개 없다.
+                let env_char = pane_shell_pid
+                    .get(sid.as_str())
+                    .and_then(|&pid| kasa_pty::process_env_var(pid, "KASATERM_CHARACTER"))
+                    .filter(|c| valid_members.contains(c));
+                row.character = retained
+                    .clone()
+                    .or(env_char)
+                    .or_else(|| pane_character.get(sid.as_str()).cloned())
+                    .or_else(|| {
+                        std::fs::read_to_string(format!(
+                            "/tmp/kasaterm-collab/{rslug}/character-{}",
+                            sid.trim_start_matches('%')
+                        ))
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                    });
+                // retained 진실이 ws·marker 와 어긋나면 교정 — render(statusline·테두리·타이틀)는
+                // ws.pane_character 를 보므로 복원된 오염 랜덤을 원본으로 되돌린다.
+                if let Some(rc) = retained {
+                    if pane_character.get(sid.as_str()) != Some(&rc) {
+                        let _ = kasa_mcp::character::write_marker(&rslug, sid.as_str(), &rc);
+                        self.ws.lock().unwrap().pane_character.insert(sid.clone(), rc);
+                    }
+                }
                 // 마커 없는 pane(claude --resume 복원·spawn 의 assign_character_env 를 못 탄
                 // 경로)도 board 빌드 때 빈 슬롯 캐릭터를 lazy 배정한다 — 안 하면 board
-                // char=None → 프사/이름이 안 떴다(거노: %1 프사 None). god 은 lead 로 별도라
-                // 제외. write_marker(atomic) 후 다음 폴링부턴 위 read 로 잡혀 1회만 배정된다.
-                if row.character.is_none() && !row.is_god {
-                    if let Some(chars) = kasa_mcp::character::characters_json() {
-                        let members = kasa_mcp::character::member_names(&chars);
-                        // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
-                        // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(거노: 모모이 둘).
-                        let taken: std::collections::HashSet<&String> =
-                            pane_character.values().chain(lazy_assigned.iter()).collect();
-                        let name = members
-                            .iter()
-                            .find(|m| !taken.contains(m))
-                            .cloned()
-                            .or_else(|| members.first().cloned());
+                // char=None → 프사/이름이 안 떴다(거노: %1 프사 None).
+                // write_marker(atomic) 후 다음 폴링부턴 위 read 로 잡혀 1회만 배정된다.
+                if row.character.is_none() {
+                    // 포크(background/--resume) 세션은 부모 대화의 학생을 상속한다 —
+                    // 랜덤 둔갑 방지(거노: 백그라운드에서 학생이 또 바뀜). claude sid =
+                    // transcript stem → bg_agents(claude sessionId→parentSessionId) →
+                    // 부모 학생. 부모가 없으면(순수 새 세션) 기존 빈 슬롯 랜덤.
+                    let stem = path.file_stem().and_then(|s| s.to_str());
+                    let inherited = stem
+                        .and_then(|stem| {
+                            self.bg_agents
+                                .lock()
+                                .ok()
+                                .and_then(|m| m.get(stem).cloned())
+                                .flatten()
+                        })
+                        .and_then(|parent| kasa_mcp::character::session_character(&parent));
+                    // 세션 자신이 이미 배정받은 적 있으면(재시작·resume 이 같은 transcript id 로
+                    // 복귀) 그 학생을 재사용 — board 첫 폴링부터 랜덤 둔갑 차단(거노). 부모
+                    // 상속 다음, 빈 슬롯 랜덤 앞.
+                    let own = stem.and_then(kasa_mcp::character::session_character);
+                    let name = inherited.or(own).or_else(|| {
+                        kasa_mcp::character::characters_json().and_then(|chars| {
+                            let members = kasa_mcp::character::member_names(&chars);
+                            // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
+                            // 죽은 pane 마커는 무시. 빈 슬롯 없으면 첫째로 순환(거노: 모모이 둘).
+                            let taken: std::collections::HashSet<&String> =
+                                pane_character.values().chain(lazy_assigned.iter()).collect();
+                            members
+                                .iter()
+                                .find(|m| !taken.contains(m))
+                                .cloned()
+                                .or_else(|| members.first().cloned())
+                        })
+                    });
+                    {
                         if let Some(name) = name {
                             let _ = kasa_mcp::character::write_marker(&rslug, sid.as_str(), &name);
+                            // claude sid(transcript stem)에도 영속 — 재진입·재시작이 같은
+                            // transcript id 로 돌아오면 own(session_character(stem))으로 잡혀
+                            // 랜덤 재배정(둔갑) 없이 같은 학생을 유지한다(거노: 어느새 미도리로
+                            // 바뀜). write_marker/pane_character 만으론 session_characters.json 에
+                            // 안 남아 다음 폴링·재진입의 stem 조회가 계속 None → 매번 재랜덤이었다.
+                            if let Some(stem) = stem {
+                                let _ = kasa_mcp::character::bind_session_character(stem, &name);
+                            }
                             // 단일 진실 ws.pane_character 에도 기록 — 다음 폴링·session 배정이
                             // 이 캐릭터를 중복하지 않게. 같은 폴링 내 다른 lazy 가 또 같은 캐릭터를
                             // 안 고르게 lazy_assigned 에도 누적(클론 스냅샷은 빌드 중 안 바뀜).
@@ -1637,6 +1863,21 @@ fn settings_file_path() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(home).join(".config/kasaterm/settings.json"))
 }
 
+/// User's per-character image override dir — `~/.config/kasaterm/students/`.
+/// Drop `<slug>-profile.png` / `<slug>-<i>.png` / `<slug>-walk-<i>.png` /
+/// `schale-logo.png` here to replace the bundled default dots (see
+/// render.rs loaders). Missing dir/file → the loader falls back to the
+/// compiled-in `include_bytes!` asset, so an empty dir changes nothing.
+pub fn students_dir() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("KASATERM_STUDENTS_DIR") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/students"))
+}
+
 /// User's `default_cwd` preference for where new shells start — mirrors the
 /// "working directory" setting every other terminal exposes. Returns the raw
 /// string: `"last"` (inherit the spawning pane's cwd, the standard default),
@@ -1800,6 +2041,46 @@ fn claude_saved_effort() -> String {
         .unwrap_or_default()
 }
 
+/// 살아있는 claude 프로세스 argv 에서 session_id → 포크 부모 session_id 맵. detach 는 세션을
+/// 포크(`--fork-session --resume <부모>.jsonl --session-id <포크>`)해 새 id 를 발급하므로
+/// session_characters.json 의 원본 바인딩 키가 어긋나 재진입 시 랜덤 둔갑한다(거노: bg 재진입
+/// 학생 바뀜, foreground 는 원래 유지). 데몬 프로세스 env(KASATERM_CHARACTER)는 세션별이
+/// 아니라 데몬 띄운 셸값을 전 세션이 공유해 못 쓴다(거노: 한 뷰 다 같은 학생). 대신 argv 의
+/// `--resume <부모>` 사슬을 따라 원본 세션의 바인딩까지 되짚는다. `ps`(env 불필요) 1회/프로세스,
+/// 2s 캐시. parent = --resume 값의 파일명 stem(=uuid) 또는 값 그대로.
+fn daemon_session_parents() -> HashMap<String, String> {
+    static CACHE: std::sync::LazyLock<
+        std::sync::Mutex<Option<(std::time::Instant, HashMap<String, String>)>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+    if let Some((t, m)) = CACHE.lock().unwrap().as_ref() {
+        if t.elapsed() < std::time::Duration::from_secs(2) {
+            return m.clone();
+        }
+    }
+    let mut map = HashMap::new();
+    for (pid, _ppid, name) in kasa_pty::process_table() {
+        if !name.contains("claude") {
+            continue;
+        }
+        let Some(cmd) = kasa_pty::process_cmdline(pid) else { continue };
+        let toks: Vec<&str> = cmd.split_whitespace().collect();
+        let val_after = |flag: &str| {
+            toks.iter().position(|t| *t == flag).and_then(|i| toks.get(i + 1)).copied()
+        };
+        if let (Some(sid), Some(resume)) = (val_after("--session-id"), val_after("--resume")) {
+            let parent = std::path::Path::new(resume)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(resume);
+            if !sid.is_empty() && !parent.is_empty() && sid != parent {
+                map.entry(sid.to_string()).or_insert_with(|| parent.to_string());
+            }
+        }
+    }
+    *CACHE.lock().unwrap() = Some((std::time::Instant::now(), map.clone()));
+    map
+}
+
 /// Pull the claude session id straight off the running claude process's argv
 /// (`--resume <uuid>` / `--session-id <uuid>`, `=`-joined or space-separated).
 /// Exact per-pane — unlike the cwd-mtime guess, two claudes in the same cwd
@@ -1824,6 +2105,108 @@ fn claude_session_id_from_cmdline(shell_pid: u32) -> Option<String> {
                     return Some((*v).to_string());
                 }
             }
+        }
+    }
+    None
+}
+
+/// pane 의 claude 가 `agents`/`attach` 뷰인지 — argv 토큰 검사. 값 플래그(persona 텍스트
+/// 등)가 argv 에 섞이는 일반 세션을 오탐하지 않게, 세션형 플래그(--session-id/--resume/
+/// --append-system-prompt)가 하나라도 있으면 뷰가 아니라고 본다(shim 이 일반 부팅엔
+/// 항상 그중 하나를 얹고, agents/attach 엔 PERSONA_OK 게이트로 하나도 안 얹는다).
+fn claude_view_subcommand(shell_pid: u32) -> Option<&'static str> {
+    let pid = claude_child_pid(shell_pid)?;
+    let argv = kasa_pty::process_cmdline(pid)?;
+    let tokens: Vec<&str> = argv.split_whitespace().collect();
+    if tokens
+        .iter()
+        .any(|t| matches!(*t, "--session-id" | "--resume" | "-r" | "--append-system-prompt"))
+    {
+        return None;
+    }
+    for tok in &tokens {
+        if *tok == "agents" {
+            return Some("agents");
+        }
+        if *tok == "attach" {
+            return Some("attach");
+        }
+    }
+    None
+}
+
+/// 화면 텍스트에서 statusline 이 실어 보낸 세션 id 마커(`⟦sid8⟧`, SGR8 로 은닉)를
+/// 찾는다 — 마지막(최하단) 것을 취해 이 pane 이 "지금" 표시 중인 세션을 얻는다.
+/// agents 피커 attach 는 이벤트·argv 흔적이 없어 이 채널이 유일한 진입-즉시 신호다.
+pub(crate) fn screen_marker_sid8(text: &str) -> Option<String> {
+    let mut found = None;
+    let mut rest = text;
+    while let Some(i) = rest.find('⟦') {
+        let after = &rest[i + '⟦'.len_utf8()..];
+        let cand: String = after.chars().take(8).collect();
+        let close = after.chars().nth(8);
+        if cand.len() == 8
+            && cand.chars().all(|c| c.is_ascii_hexdigit())
+            && close == Some('⟧')
+        {
+            found = Some(cand.to_ascii_lowercase());
+        }
+        rest = after;
+    }
+    found
+}
+
+/// sid 앞 8자 → 풀 세션 id. 라이브 agents 세션에서 프리픽스 유일 매칭, 없으면
+/// transcript 파일명(projects 전수)에서 유일 매칭. 모호(2+)하면 None — 오귀속 금지.
+fn resolve_sid8(sid8: &str) -> Option<String> {
+    let agents = agents_cached().0;
+    let mut hits: Vec<&String> = agents.keys().filter(|k| k.starts_with(sid8)).collect();
+    if hits.len() == 1 {
+        return Some(hits.pop().unwrap().clone());
+    }
+    if hits.len() > 1 {
+        return None;
+    }
+    let home = std::env::var("HOME").ok()?;
+    let projects = std::path::Path::new(&home).join(".claude").join("projects");
+    let mut found: Option<String> = None;
+    for d in std::fs::read_dir(projects).ok()?.flatten() {
+        for f in std::fs::read_dir(d.path()).ok()?.flatten() {
+            let name = f.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with(sid8) && name.ends_with(".jsonl") {
+                let sid = name.trim_end_matches(".jsonl").to_string();
+                if found.as_ref().is_some_and(|p| p != &sid) {
+                    return None;
+                }
+                found = Some(sid);
+            }
+        }
+    }
+    found
+}
+
+/// agents 뷰 pane 의 OSC 타이틀 → 세션 name. 타이틀은 "<스피너 글리프> <세션 name>"
+/// 꼴이라 선행 브라유 스피너(⠐… U+2800 블록)·별표류·공백을 벗겨 name 만 남긴다 —
+/// `claude agents --json` 의 name 과 정확 일치해야 rebind_agents_panes 가 매칭한다.
+fn title_session_name(t: &str) -> &str {
+    t.trim_start_matches(|c: char| {
+        ('\u{2800}'..='\u{28FF}').contains(&c)
+            || matches!(c, '✳' | '✻' | '✢' | '✽' | '*' | '＊' | '∗')
+            || c.is_whitespace()
+    })
+    .trim()
+}
+
+/// `claude attach <sid>` 의 대상 세션 id — attach 는 위치 인자라 기존
+/// claude_session_id_from_cmdline(--resume/--session-id 전용)이 못 잡는다.
+fn attach_target_from_cmdline(shell_pid: u32) -> Option<String> {
+    let pid = claude_child_pid(shell_pid)?;
+    let argv = kasa_pty::process_cmdline(pid)?;
+    let tokens: Vec<&str> = argv.split_whitespace().collect();
+    for (i, tok) in tokens.iter().enumerate() {
+        if *tok == "attach" {
+            return tokens.get(i + 1).filter(|v| is_uuid(v)).map(|v| (*v).to_string());
         }
     }
     None
@@ -1900,6 +2283,26 @@ fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
 /// 미실행이면 None(plain 셸). 같은 cwd 두 claude 는 argv session id 로 구분되고,
 /// argv 에 id 없는 fresh claude 는 cwd 의 newest jsonl 로 폴백한다(pane_record 와
 /// 동일 규칙). 느린 ps/lsof 호출이라 호출부(`discover_unbound`)에서 스로틀한다.
+/// 세션 id → transcript jsonl 경로(`~/.claude/projects/*/<sid>.jsonl` 전수 스캔).
+/// ResumeSession(attach/재개)이 세션 id 만 아는 시점에 bind_transcript 로 pane↔세션을
+/// 즉석 확정할 때 쓴다 — cwd 로 프로젝트 dir 슬러그를 재현하는 대신 실재 파일을 찾아
+/// claude 의 슬러그 규칙 드리프트에 무해하다. 세션 id 는 uuid 라 전역 유일.
+pub(crate) fn transcript_path_for_session(sid: &str) -> Option<std::path::PathBuf> {
+    if sid.is_empty() || sid.contains('/') {
+        return None;
+    }
+    let home = std::env::var("HOME").ok()?;
+    let projects = std::path::Path::new(&home).join(".claude").join("projects");
+    let want = format!("{sid}.jsonl");
+    for d in std::fs::read_dir(projects).ok()?.flatten() {
+        let p = d.path().join(&want);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathBuf> {
     claude_child_pid(shell_pid)?; // claude 자식 없으면 아직 claude 아님 — bind 안 함
     let cwd = pid_cwd(shell_pid)?;
@@ -1913,9 +2316,16 @@ fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathB
     if let Some(id) = claude_session_id_from_cmdline(shell_pid) {
         return project_jsonl(&cwd, &id).filter(|p| p.exists());
     }
+    // agents/attach 뷰 pane 은 여기서 절대 추측하지 않는다 — 어느 세션을 보는지 cwd 로
+    // 알 수 없어, recent-jsonl 폴백이 같은 cwd 의 남의 활성 세션을 훔쳤다(거노: bg 뷰
+    // pane 들이 전부 첫 세션 학생으로 쏠림). 이 pane 의 바인딩은 rebind_agents_panes
+    // (attach 인자·타이틀↔세션명 매칭)가 전담한다.
+    if claude_view_subcommand(shell_pid).is_some() {
+        return None;
+    }
     // 폴백: cwd 의 최근(<30분) 활동 jsonl. 단 **정확히 1개일 때만** bind 한다.
     // 0개 = fresh claude 가 자기 세션을 아직 안 씀(부팅 중) → None, 다음 사이클
-    // 재시도(곧 쓰면 잡힘). 2+ = 같은 cwd 에 여러 claude(나·god·워커 공유) →
+    // 재시도(곧 쓰면 잡힘). 2+ = 같은 cwd 에 여러 claude(여러 pane 공유) →
     // 어느 게 이 pane 인지 latest-mtime 으로는 모름(남의 세션 훔침) → None, hook
     // (정확 경로 보고)에 맡긴다. 이 모호성 가드가 없을 때 %2 가 남의 세션에 잘못
     // bind 돼 대화가 안 뜨던 버그(거노 실측).
@@ -1999,3 +2409,35 @@ fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std::path::Path
     )
 }
 
+
+#[cfg(test)]
+mod agents_view_tests {
+    use super::*;
+
+    #[test]
+    fn screen_marker_sid8_finds_last_valid_marker() {
+        // statusline 끝자락의 은닉 마커 — 8자리 hex 만, 마지막(최하단) 것을 취한다.
+        assert_eq!(
+            screen_marker_sid8("… xhigh ⟦2535079b⟧\n❯"),
+            Some("2535079b".to_string())
+        );
+        assert_eq!(
+            screen_marker_sid8("⟦11111111⟧ 이전 프레임\n새 프레임 ⟦8bed8dfc⟧"),
+            Some("8bed8dfc".to_string())
+        );
+        // 8자 미만·비hex·닫힘 없음은 무시.
+        assert_eq!(screen_marker_sid8("⟦abc⟧ ⟦zzzzzzzz⟧ ⟦12345678"), None);
+        assert_eq!(screen_marker_sid8("마커 없음"), None);
+    }
+
+    #[test]
+    fn title_session_name_strips_spinner_glyphs() {
+        // 실측 타이틀: 브라유 스피너 + 공백 + 세션 name (agents 뷰 pane).
+        assert_eq!(title_session_name("⠐ 대시보드 로그인 env 문제 해결"), "대시보드 로그인 env 문제 해결");
+        assert_eq!(title_session_name("✻ 학생 프사 크기와 전신 모션 개선"), "학생 프사 크기와 전신 모션 개선");
+        // 스피너 없는 생 타이틀·앞뒤 공백도 name 으로 수렴.
+        assert_eq!(title_session_name("  tmuxify-58 "), "tmuxify-58");
+        // 전부 글리프면 빈 문자열(매칭 스킵 신호).
+        assert_eq!(title_session_name("⠐⠑ "), "");
+    }
+}

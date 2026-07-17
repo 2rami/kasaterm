@@ -1,6 +1,6 @@
 //! 캐릭터 배정 — characters.json persona + /tmp 마커 + 빈 슬롯 순환.
 //!
-//! god 자율통솔·MCP `/spawn` 폐기(거노) 후, 학생 정체성을 백엔드(kasaterm)가
+//! 자율통솔·MCP `/spawn` 폐기(거노) 후, 학생 정체성을 백엔드(kasaterm)가
 //! pane 생성 시점에 직접 박는다. 사용자가 그 pane 에서 `claude` 를 치면 shim 이
 //! 여기서 심은 env(KASATERM_CHARACTER/SESSION_ID/PERSONA)를 --session-id·
 //! --append-system-prompt 로 적용한다. board(socket.rs)는 같은 /tmp 마커를 읽어
@@ -53,27 +53,22 @@ fn names_of(arr: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// 학생(워커) 풀 — members[].name 순서. 빈 슬롯 순환 배정에 쓴다.
+/// 캐릭터 풀 — leader/leaders/members 통합, 이름 중복 제거. god 개념 폐기(거노
+/// 2026-07-13): 아로나·프라나도 특별 클래스가 아니라 동등한 배정 대상이라
+/// 풀 구분 없이 전원 한 목록이다(config 의 leader/leaders 필드는 하위호환 파싱만).
 pub fn member_names(chars: &Value) -> Vec<String> {
-    names_of(chars.get("members"))
-}
-
-/// god 이름들 — leader + leaders. 배정 풀 제외·is_god 판정에 쓴다.
-pub fn god_names(chars: &Value) -> Vec<String> {
     let mut v = Vec::new();
     if let Some(n) = chars.get("leader").and_then(|l| l.get("name")).and_then(|n| n.as_str()) {
         v.push(n.to_string());
     }
-    for n in names_of(chars.get("leaders")) {
-        if !v.contains(&n) {
-            v.push(n);
+    for key in ["leaders", "members"] {
+        for n in names_of(chars.get(key)) {
+            if !v.contains(&n) {
+                v.push(n);
+            }
         }
     }
     v
-}
-
-pub fn is_god(chars: &Value, name: &str) -> bool {
-    god_names(chars).iter().any(|g| g == name)
 }
 
 /// leader/leaders/members 통합 풀에서 이름 매칭 — persona·claude_color 조회 공용.
@@ -95,7 +90,7 @@ pub fn persona_for(chars: &Value, name: &str) -> Option<String> {
     find_character(chars, name)
         .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
         .filter(|p| !p.is_empty())
-        // 캐릭터 정체성 뒤에 공통 협업 규약을 붙여 모든 학생·god 에 1회 주입(캐시).
+        // 캐릭터 정체성 뒤에 공통 협업 규약을 붙여 모든 학생에 1회 주입(캐시).
         .map(|p| format!("{p}{COLLAB_PROTOCOL}"))
 }
 
@@ -113,7 +108,10 @@ pub fn claude_color_for(chars: &Value, name: &str) -> Option<String> {
 const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
 다른 학생(동료 pane)의 작업이 끝나길 기다려야 할 때는, tell 로 깨우거나 board 를 반복해서 확인하지 말고 아래를 background 로 띄워라(Bash 도구의 run_in_background, 또는 명령 끝에 &):\n\
   kasaterm-cli wake-watch <동료 surface_id>\n\
-동료의 surface_id 는 `kasaterm-cli board` 로 확인한다. 동료가 한 턴을 끝내면 이 명령이 스스로 종료되고, 시스템이 너를 자동으로 깨운다(task-notification). 깨어나면 그 출력(\"<동료> 작업 끝남\")을 보고 이어서 진행해라. 이렇게 하면 네 입력창을 더럽히지 않고 동료 완료 즉시 이어받는다.";
+동료의 surface_id 는 `kasaterm-cli board` 로 확인한다. 동료가 한 턴을 끝내면 이 명령이 스스로 종료되고, 시스템이 너를 자동으로 깨운다(task-notification). 깨어나면 그 출력(\"<동료> 작업 끝남\")을 보고 이어서 진행해라. 이렇게 하면 네 입력창을 더럽히지 않고 동료 완료 즉시 이어받는다.\n\
+\n\
+[협업 — 학생 채팅]\n\
+같은 방 학생(다른 pane 이나 백그라운드 세션)에게 직접 말을 걸 땐 SendMessage 도구를 써라(to: 상대 agent 이름, 예: \"shiroko-1a2b\"). 자기 agent 이름은 env $KASATERM_AGENT, 같은 방 명단은 `ls ~/.claude/teams/$KASATERM_TEAM/inboxes/` 로 확인한다(파일명 = agent 이름). 답장은 teammate-message 로 자동 도착하니 따로 폴링하지 마라. $KASATERM_AGENT 가 비어 있으면 이 채널이 없는 세션이니 tell 로 폴백해라.";
 
 /// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
 pub fn mode_slug(cwd: &Path) -> String {
@@ -139,10 +137,6 @@ fn collab_dir(rslug: &str) -> PathBuf {
 /// `/tmp/kasaterm-collab/<rslug>/character-<N>` — board 가 row.character 로 읽는 마커.
 pub fn character_marker(rslug: &str, surface_id: &str) -> PathBuf {
     collab_dir(rslug).join(format!("character-{}", surface_id.trim_start_matches('%')))
-}
-
-fn lead_marker(rslug: &str) -> PathBuf {
-    collab_dir(rslug).join("lead")
 }
 
 /// 한 collab 디렉토리의 character-* 마커 내용들.
@@ -222,15 +216,6 @@ pub fn write_marker(rslug: &str, surface_id: &str, name: &str) -> std::io::Resul
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, name)?;
     std::fs::rename(&tmp, &path)
-}
-
-/// lead 마커 — 이 pane 이 god(is_god) 임을 표시.
-pub fn write_lead(rslug: &str, surface_id: &str) -> std::io::Result<()> {
-    let path = lead_marker(rslug);
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
-    }
-    std::fs::write(path, surface_id)
 }
 
 /// 세션id→캐릭터 영속 매핑 파일 — `~/.config/kasaterm/session_characters.json`

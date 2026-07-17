@@ -159,7 +159,7 @@ impl PtyLayout {
 
     /// Set the split ratio of `pane_id`'s *immediate parent* so the pane
     /// takes `frac` of that container (its sibling subtree gets `1 - frac`).
-    /// The orchestration knob behind `kasaterm-cli resize` — "make the god
+    /// The orchestration knob behind `kasaterm-cli resize` — "make the orchestrator
     /// pane big" after a fleet regroup. Deliberately the direct container
     /// only, not the pane's share of the whole window: nested splits keep
     /// their own ratios. Returns false when the pane isn't a direct child

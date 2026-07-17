@@ -455,24 +455,73 @@ pub fn lerp(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
 /// 미배정(순수 셸)은 None → 호출부가 테두리를 안 그린다.
 pub fn character_accent(name: &str) -> Option<[u8; 4]> {
     Some(unpack(match name {
-        "아로나" => 0x4a90e2_ff, // god, sky
-        "프라나" => 0xe6e9f0_ff, // god, silver-white
+        "아로나" => 0x4a90e2_ff, // sky
+        "프라나" => 0xe6e9f0_ff, // silver-white
         "미도리" => 0x6bcf7f_ff, // mint
         "모모이" => 0xff6b6b_ff, // coral
         "유즈" => 0xe64980_ff,   // pink-red
         "아리스" => 0x4c6ef5_ff, // navy-indigo
+        // 확장 로스터(거노 2026-07-13 확정 6명) — 원작 외형 기준.
+        "유우카" => 0x7a5fd4_ff, // violet (청보라 머리)
+        "시로코" => 0x8fb8d8_ff, // gray-blue (회색머리·하늘 스카프)
+        "호시노" => 0xf2a0c0_ff, // soft pink (분홍 머리)
+        "코하루" => 0xf27b9b_ff, // rose (핑크 트윈테일·핑크 헤일로)
+        "히마리" => 0xa88be0_ff, // lavender (은보라 머리)
+        "아루" => 0xe85d4a_ff,   // red-orange (붉은 머리·주황 헤일로)
+        // 학생 아님 — claude agents(에이전트 목록 뷰)의 SCHALE 조직 정체성 색.
+        // render 가 argv(is_claude_agents)+프사 슬롯 부재로 목록 뷰를 판정해
+        // 타이틀바 이름·테두리에만 쓴다(pane_character 엔 저장 안 함, 세션 진입
+        // 시 배정 학생을 가리지 않게). 로스터엔 없어 랜덤 배정 후보 아님.
+        "샬레" => 0x3a6eb4_ff,
         _ => return None,
     }))
 }
 
-/// pane 본문 기본 전경색 틴트 — tmux `window-style fg=<색>` 등가(거노). 학생 pane 만
-/// accent 로 물들이고 god(아로나/프라나)은 None = 무틴트(실제 팀모드도 리더는 안 물듦).
-/// 8색 근사가 아니라 accent RGB 원본을 그대로 쓴다.
-pub fn student_tint(name: &str) -> Option<[u8; 4]> {
-    match name {
-        "아로나" | "프라나" => None,
-        _ => character_accent(name),
+/// 같은 학생이 여러 pane 에 떠 있을 때 n번째(0-기준) 인스턴스의 accent 변주 —
+/// 학생 지정 스폰이 중복을 허용하므로 색으로 인스턴스를 구분한다(거노).
+/// 0=원색, 이후 파스텔↔딥톤 교대 사다리. hue 는 유지해 학생 정체성과 타 학생
+/// 색 충돌을 피하고, 단차는 한눈에 갈리게 크게(거노: 첫 판 20%는 미묘했음).
+/// 프라나처럼 원색이 흰 계열이면 밝히는 쪽이 안 보여 딥톤 사다리만 탄다.
+pub fn accent_variant(base: [u8; 4], ordinal: usize) -> [u8; 4] {
+    if ordinal == 0 {
+        return base;
     }
+    let lum = 0.299 * base[0] as f32 + 0.587 * base[1] as f32 + 0.114 * base[2] as f32;
+    let dark = [24, 26, 34, 255];
+    let light = [255, 255, 255, 255];
+    if lum > 170.0 {
+        // 밝은 원색: 딥톤 단독 사다리 — 1번째 35%, 이후 25%p 씩 진하게.
+        lerp(base, dark, (0.35 + 0.25 * (ordinal - 1) as f32).min(0.75))
+    } else if ordinal % 2 == 1 {
+        // 홀수 순번: 파스텔 — 45% 부터 시작해 회차마다 20%p 연하게.
+        lerp(base, light, (0.45 + 0.20 * ((ordinal - 1) / 2) as f32).min(0.8))
+    } else {
+        // 짝수 순번: 딥톤 — 40% 부터 시작해 회차마다 20%p 진하게.
+        lerp(base, dark, (0.40 + 0.20 * (ordinal / 2 - 1) as f32).min(0.8))
+    }
+}
+
+/// pane 의 같은-학생 인스턴스 순번(0-기준) — pane_character 맵에서 같은 이름인
+/// pane 들을 id 숫자순으로 세워 이 pane 의 위치를 돌려준다(accent_variant 의
+/// ordinal). pane 이 닫히면 뒷 순번이 앞으로 당겨져 색도 원색 쪽으로 이동한다.
+pub fn character_ordinal(
+    chars: &std::collections::HashMap<String, String>,
+    pane: &str,
+) -> usize {
+    let Some(name) = chars.get(pane) else { return 0 };
+    let mut ids: Vec<&str> = chars
+        .iter()
+        .filter(|(_, n)| *n == name)
+        .map(|(p, _)| p.as_str())
+        .collect();
+    ids.sort_by_key(|p| p.trim_start_matches('%').parse::<u64>().unwrap_or(u64::MAX));
+    ids.iter().position(|p| *p == pane).unwrap_or(0)
+}
+
+/// character_accent 에 같은-학생 순번 변주를 얹은 판 — 테두리·본문 틴트·배너가
+/// 공통으로 쓴다(tmux `window-style fg=<색>` 등가 틴트 포함, 거노).
+pub fn character_accent_n(name: &str, ordinal: usize) -> Option<[u8; 4]> {
+    character_accent(name).map(|c| accent_variant(c, ordinal))
 }
 
 /// 캐릭터명 → 에셋 슬러그 (assets/students/<slug>.png, arona-ui 디렉토리명과 동일).
@@ -492,4 +541,40 @@ pub fn character_slug(name: &str) -> Option<&'static str> {
         "아루" => "aru",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod accent_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn ordinal_orders_same_character_panes_by_pane_id() {
+        let mut m = HashMap::new();
+        m.insert("%7".to_string(), "시로코".to_string());
+        m.insert("%2".to_string(), "시로코".to_string());
+        m.insert("%3".to_string(), "유즈".to_string());
+        assert_eq!(character_ordinal(&m, "%2"), 0);
+        assert_eq!(character_ordinal(&m, "%7"), 1);
+        assert_eq!(character_ordinal(&m, "%3"), 0);
+        assert_eq!(character_ordinal(&m, "%99"), 0); // 미배정 pane
+    }
+
+    #[test]
+    fn variant_distinguishes_duplicates_including_light_bases() {
+        // 어떤 로스터 색이든 0·1·2번째가 서로 달라야 중복 pane 이 구분된다 —
+        // 특히 프라나(흰 계열)는 밝히는 변주가 안 보이므로 사다리 방향 검증.
+        for name in [
+            "아로나", "프라나", "미도리", "모모이", "유즈", "아리스", "유우카", "시로코",
+            "호시노", "코하루", "히마리", "아루",
+        ] {
+            let base = character_accent(name).unwrap();
+            let v1 = accent_variant(base, 1);
+            let v2 = accent_variant(base, 2);
+            assert_eq!(accent_variant(base, 0), base, "{name}: 0번째는 원색");
+            assert_ne!(v1, base, "{name}: 1번째 변주가 원색과 같음");
+            assert_ne!(v2, base, "{name}: 2번째 변주가 원색과 같음");
+            assert_ne!(v1, v2, "{name}: 1·2번째 변주가 서로 같음");
+        }
+    }
 }
