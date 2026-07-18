@@ -370,6 +370,8 @@ PY
 
 teammate 학생의 `AskUserQuestion`(및 승인 필요 도구)은 자기 pane에 선택 UI를 그리지 않고 **team-lead에게 permission_request로 라우팅되고 학생은 블록**된다 — bypass permissions여도 마찬가지. 즉 학생은 pane 사용자에게 직접 질문할 수 없다.
 
+**단 이 라우팅은 agent-id 로 꺼진다(07-17 실측, v2.1.212)**: claude 의 포워딩 게이트가 **agent-id가 정확히 `"team-lead"`면 리더로 판정**해 포워딩을 끄고, AskUserQuestion 을 그 pane 에 네이티브 렌더한다(수신 폴러·인박스는 agent-name 기준이라 id 중복 무해 — 로컬 피커+선택+수신 E2E 확인). **kasaterm shim 이 자동 부착하는 트리플은 전원 이 방식**(`--agent-id team-lead --agent-name <이름> --team-name <팀>`)이라 일반 pane 학생의 질문은 거노에게 pane 에서 직접 뜬다. 아래 permission_request 라우팅·응답 절차는 **`<slug>@<팀>` 꼴 id 로 명시 스폰한 학생**(패턴 F — 오케스트레이터가 승인을 대신 처리하고 싶을 때)에만 해당한다. 반대로 수동 스폰 학생도 질문이 pane 에 뜨길 원하면 id 만 `team-lead` 로 주면 된다.
+
 리더(스폰한 세션)의 응답: 학생 inbox에 `type:"message"` 엔트리로, `text`에 아래 JSON을 담아 append. **`from`은 반드시 `"team-lead"`** — 다른 발신자의 permission_response는 폴러가 무시한다.
 
 ```json

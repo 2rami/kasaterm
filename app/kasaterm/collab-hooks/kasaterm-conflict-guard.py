@@ -73,6 +73,25 @@ def scan(jf, fp):
     return last_file, last_any
 
 
+def teammate_name(sid):
+    """충돌 상대 세션 id → 같은 방 팀의 SendMessage 주소(agent 이름).
+
+    shim 이름 규칙 = <로마자>-<sid 앞4자> 라서 인박스 파일명 꼬리로 역추적한다
+    (bridge.rs 와 같은 매칭). 꼬리 충돌(스테일 인박스 누적)로 후보가 2개 이상이면
+    오배달 대신 None — 호출부가 tell 안내로 폴백한다."""
+    team = os.environ.get("KASATERM_TEAM")
+    if not team or not sid:
+        return None
+    tail = "-" + sid[:4]
+    d = os.path.expanduser("~/.claude/teams/" + team + "/inboxes")
+    try:
+        names = [f[:-5] for f in os.listdir(d) if f.endswith(".json")]
+    except OSError:
+        return None
+    hits = [n for n in names if n.endswith(tail)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def pane_doing(fp):
     """board에서 이 파일(fp)을 만지는 중인 pane의 (surface_id, intent).
 
@@ -134,14 +153,26 @@ def main():
         name = os.path.basename(fp)
         secs = int(now - last_file)
         pane, intent = pane_doing(fp)
-        who = pane or f"다른 pane({os.path.basename(jf).split('.')[0][:8]}…)"
+        sid = os.path.basename(jf).split(".")[0]
+        who = pane or f"다른 pane({sid[:8]}…)"
         doing = f" (지금: {intent[:70]})" if intent else ""
-        tellref = pane or "<pane>"
+        # 조율 채널은 SendMessage 우선(거노 07-17) — tell 은 상대가 작업 중이면 턴이
+        # 끝나야 읽지만 teammate-message 는 작업 중에도 도착해 실시간 조율이 된다.
+        # 주소 역추적이 안 되는 상대(비팀원 pane·detach 포크·꼬리 충돌)만 tell 폴백.
+        addr = teammate_name(sid)
+        if addr:
+            coord = (
+                f"① 같은 문제면 합류/분담 — SendMessage 도구로 to:\"{addr}\" 에게 "
+                f"\"나도 {name} 작업 필요, 조율하자\" 처럼 의도를 보내세요(상대가 작업 중이어도 도착). "
+            )
+        else:
+            tellref = pane or "<pane>"
+            coord = f"① 같은 문제면 합류 → kasaterm-cli tell {tellref} \"나도 {name} 보는 중, 합칠까?\" "
         reason = (
             f"{who}이 {secs}초 전부터 '{name}'을(를) 작업 중이에요{doing}. "
             f"같은 파일 겹침을 막았어요. 조율하세요: "
-            f"① 같은 문제면 합류 → kasaterm-cli tell {tellref} \"나도 {name} 보는 중, 합칠까?\" "
-            f"② 독립 작업이면 다른 파일부터. "
+            + coord
+            + f"② 독립 작업이면 다른 파일부터. "
             f"③ 그 pane이 손 뗄 때까지(~{IDLE}초 조용 또는 다른 작업) 기다렸다 재시도."
         )
         print(
