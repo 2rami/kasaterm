@@ -963,15 +963,13 @@ impl App {
                     .filter(|(pid, _, _)| pid.as_str() == id.as_str())
                     .map(|(_, span, _)| vec![span.clone()])
                     .unwrap_or_default();
-                // 학생 pane 본문 틴트(거노, tmux window-style fg 등가) — 배정
-                // 캐릭터의 accent RGB 원본. 무배정 pane 은 테마 default fg.
-                // 캐릭터는 spawn 시 모든 pane 에 선배정되므로(assign_character_env)
-                // 그것만으론 순정 셸까지 물든다(거노 실사고) — pane 테두리 게이트와
-                // 동일하게 claude 가 foreground 일 때만(active_process_name=="claude",
-                // 500ms 캐시) 틴트. claude 종료 시 다음 캐시 갱신에 자동 해제.
-                // agents 목록 뷰는 중립 — 학생색으로 물들이지 않는다(정체성은
-                // 타이틀바 이름·테두리 SCHALE 블루로만).
-                let tint_fg = if agents_view {
+                // 학생 accent 는 입력박스 보더·@배지 도색에만(거노 2026-07-18:
+                // 응답 본문·"Reading 1 file" 상태줄까지 학생색이면 헷갈린다 —
+                // 출력 글자는 테마 기본 fg. 옛 본문 틴트 폐기). 게이트는 pane
+                // 테두리와 동일: 배정 캐릭터 + claude 가 foreground 일 때만
+                // (active_process_name=="claude", 500ms 캐시 — 순정 셸 오염
+                // 방지, 거노 실사고). agents 목록 뷰는 중립.
+                let prompt_accent = if agents_view {
                     None
                 } else {
                     pane.character
@@ -989,11 +987,7 @@ impl App {
                                 .is_some_and(|n| n == "claude")
                         })
                 };
-                // 입력박스(❯ 프롬프트)는 글자 틴트 제외 + 보더 줄은 학생 accent
-                // 강제(거노) — 치는 글자는 기본 fg, 줄·@배지는 /color 무시하고
-                // pane 정체성 색. 셀 fg 를 명시 색으로 고정하는 방식이라 draw 쪽
-                // 셀당 분기는 그대로 0.
-                if let Some(accent) = tint_fg {
+                if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
                 }
                 slots.push(PaneSlot {
@@ -1004,7 +998,7 @@ impl App {
                     dim: is_split && active_id.as_deref() != Some(id.as_str()),
                     font_scale: pane_font_scale,
                     links: hover_links,
-                    default_fg: tint_fg.unwrap_or_else(cells::default_fg),
+                    default_fg: cells::default_fg(),
                 });
                 // Body box (header band excluded, inset by the same
                 // PANE_INNER margins the cell grid uses) in logical px.
@@ -5344,21 +5338,13 @@ fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
     (has_marker && !range.is_empty()).then_some(range)
 }
 
-/// 학생 틴트 pane 의 입력박스 스타일링(거노) — ①사이 행(입력 글자)의 Default
-/// fg 를 명시 테마 fg 로 고정해 PaneSlot.default_fg(틴트) 치환을 비켜가게 하고
-/// ②양끝 보더 행(─ 줄 + @배지)은 claude 가 /color·--agent-color 로 그린 명시색을
-/// **무시하고** 학생 accent 로 강제 도색한다 — pane 정체성 색과 항상 일치.
+/// 학생 pane 입력박스의 양끝 보더 행(─ 줄 + @배지)을 claude 가 /color·
+/// --agent-color 로 그린 명시색을 **무시하고** 학생 accent 로 강제 도색한다 —
+/// pane 정체성 색과 항상 일치. (본문 틴트가 있던 시절엔 사이 행의 입력 글자를
+/// 틴트에서 빼는 처리도 여기 있었는데, 본문이 테마 기본 fg 로 돌아가며 폐기.)
 fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
     let Some(range) = prompt_box_rows(rows) else { return };
-    let fg = cells::default_fg();
     let (b1, b2) = (range.start - 1, range.end);
-    for r in &mut rows[range.clone()] {
-        for c in r.iter_mut() {
-            if matches!(c.fg, kasa_bridge::screen::Color::Default) {
-                c.fg = kasa_bridge::screen::Color::Rgb(fg[0], fg[1], fg[2]);
-            }
-        }
-    }
     for i in [b1, b2] {
         for c in rows[i].iter_mut() {
             // 세션명/테두리 줄 배경(claude --agent-color 로 채운 accent 밴드)을
