@@ -102,7 +102,9 @@ fn run() -> Result<Option<Response>> {
     // 트리플로 뜬 pane 세션 전부)에서 차단되지만, 실체는 transcript jsonl 에
     // custom-title 레코드 한 줄 append 라 디스크에 직접 쓰면 같은 효과다.
     // 피커 라벨(parse_session_label)이 custom-title 을 최우선으로 읽는다.
-    if cmd == "rename" {
+    // 첫 인자가 %surface 면 기존 pane 개명(소켓 rename <surface_id> <title>)
+    // 경로로 넘긴다 — 같은 이름의 선주민 명령을 가로채면 안 된다.
+    if cmd == "rename" && args.first().is_none_or(|a| !a.starts_with('%')) {
         run_session_rename(&args)?;
         return Ok(None);
     }

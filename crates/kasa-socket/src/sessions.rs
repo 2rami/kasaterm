@@ -121,6 +121,13 @@ fn parse_session_label(path: &Path) -> Option<String> {
     first_user
 }
 
+/// 피커 라벨 규칙(custom-title > aiTitle > 첫 user)을 transcript 경로에 직접
+/// 적용하는 pub 래퍼 — GUI 입력박스 제목 인레이(render.rs) 등 목록 밖에서
+/// 한 세션의 라벨만 필요할 때 쓴다.
+pub fn session_label_for(path: &Path) -> Option<String> {
+    parse_session_label(path)
+}
+
 /// jsonl 꼬리 64KB 에서 가장 마지막 `custom-title` 레코드의 제목. 여러 번
 /// rename 하면 마지막 것이 이긴다(claude `/rename` 동일 규칙). 파일이 64KB 를
 /// 넘고 rename 이후 대화가 그만큼 더 쌓인 극단 케이스만 놓치는데, 그땐
