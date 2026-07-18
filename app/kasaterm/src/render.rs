@@ -342,6 +342,8 @@ impl App {
         let mut waiting_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // statusline 자리표시자(U+FFFC) → 학생 프사(bust, 정적 1프레임).
         let mut profile_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // 접힌 팀메시지 줄 hover 시 전문 말풍선 — 커서는 한 곳이라 최대 1개.
+        let mut teammate_bubble: Option<TeammateBubbleSlot> = None;
         // 입력박스 위 스페이서 행(effort 칩 자리)에 서 있는 학생(idle 전신 애니).
         let mut standing_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
@@ -955,6 +957,72 @@ impl App {
                         let y = (body_top + (r + 1) as f32 * sch - face_h).max(body_top);
                         profile_slots.push((tag_slug, (x, y, face_w, face_h)));
                         faces += 1;
+                    }
+                }
+                // 접힌 팀메시지("› Message from @이름", verbose OFF) — 보낸 학생
+                // 색으로 "@ 이름❯ 본문…" 인라인 전개(거노: verbose 안 켜고도
+                // 읽고 싶다. 클로드코드에 팀메시지만 펼치는 설정은 없음 —
+                // verbosity 카테고리는 bash/agent/todo 뿐이라 그리드 재작성으로).
+                // 본문은 이 pane transcript tail 의 <teammate-message> 태그에서.
+                // 그리드는 reflow 가 안 되니 여러 줄 전개 대신 인라인 한 줄 +
+                // 줄에 마우스를 올리면 전문 말풍선(TeammateBubbleSlot).
+                {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let scw = self.cell.w * fs;
+                    let sch = self.cell.h * fs;
+                    let msg_path = self.pane_claude_sid.get(id.as_str()).and_then(|sid| {
+                        let cwd = self
+                            .pane_view_cwd
+                            .get(id.as_str())
+                            .or_else(|| self.pane_cwd_cache.get(id.as_str()))?;
+                        crate::socket::project_jsonl(cwd, sid)
+                    });
+                    for r in 0..composed.len() {
+                        let Some((c0, sender)) = teammate_collapsed_line(&composed[r])
+                        else {
+                            continue;
+                        };
+                        let msg = msg_path
+                            .as_deref()
+                            .and_then(|p| latest_teammate_msg(p, &sender));
+                        let accent = teammate_sender_accent(
+                            &sender,
+                            msg.as_ref().and_then(|m| m.color.as_deref()),
+                        );
+                        if let Some(m) = &msg {
+                            let (cx, cy) = self.cursor_px;
+                            let (ry0, ry1) = (
+                                body_top + r as f32 * sch,
+                                body_top + (r + 1) as f32 * sch,
+                            );
+                            let row_w = composed[r].len() as f32 * scw;
+                            if cy >= ry0
+                                && cy < ry1
+                                && cx >= body_left
+                                && cx < body_left + row_w
+                            {
+                                teammate_bubble = Some(TeammateBubbleSlot {
+                                    sender: sender.clone(),
+                                    summary: m.summary.clone(),
+                                    body: m.body.clone(),
+                                    accent,
+                                    anchor: (body_left + c0 as f32 * scw, ry0, ry1),
+                                    pane: (
+                                        body_left,
+                                        body_top,
+                                        row_w,
+                                        composed.len() as f32 * sch,
+                                    ),
+                                });
+                            }
+                        }
+                        restyle_teammate_line(
+                            &mut composed[r],
+                            c0,
+                            &sender,
+                            msg.as_ref().map(|m| m.body.as_str()),
+                            accent,
+                        );
                     }
                 }
                 let pane_font_scale = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
@@ -4486,6 +4554,57 @@ impl App {
                 g.rect(r2x, r2y, t, s, fg);
                 g.rect(r2x + s - t, r2y, t, s, fg);
             }
+            // 접힌 팀메시지 hover 말풍선 — 전문을 보낸 학생색 링의 박스로.
+            // 그리드는 reflow 불가라 항시 전개 대신 hover 전개(인라인 한 줄로
+            // 못 다 보여준 본문을 여기서). pane 아래 공간이 모자라면 줄 위로.
+            if let Some(b) = &teammate_bubble {
+                let font = 12.5_f32;
+                let lh = 18.0_f32;
+                let pad = 12.0_f32;
+                let max_w = (b.pane.2 - 40.0).clamp(160.0, 620.0);
+                let header = if b.summary.is_empty() {
+                    format!("@ {}", b.sender)
+                } else {
+                    format!("@ {}  {}", b.sender, b.summary)
+                };
+                let mut lines = wrap_chrome_text(g, &b.body, max_w, font);
+                const MAX_LINES: usize = 18;
+                if lines.len() > MAX_LINES {
+                    lines.truncate(MAX_LINES);
+                    if let Some(last) = lines.last_mut() {
+                        last.push('…');
+                    }
+                }
+                let hw = g.measure_chrome_text(&header, font, true);
+                let text_w = lines
+                    .iter()
+                    .map(|l| g.measure_chrome_text(l, font, false))
+                    .fold(hw, f32::max)
+                    .min(max_w);
+                let w = text_w + pad * 2.0;
+                let h = pad * 2.0 + lh * (lines.len() as f32 + 1.0) + 6.0;
+                let (ax, ay0, ay1) = b.anchor;
+                let x = ax.min(b.pane.0 + b.pane.2 - w).max(b.pane.0);
+                let mut y = ay1 + 4.0;
+                if y + h > b.pane.1 + b.pane.3 {
+                    y = (ay0 - 4.0 - h).max(b.pane.1);
+                }
+                round_rect(
+                    g, x - 1.5, y - 1.5, w + 3.0, h + 3.0, theme::RADIUS_MD + 1.5,
+                    [b.accent[0], b.accent[1], b.accent[2], 230],
+                );
+                round_rect(g, x, y, w, h, theme::RADIUS_MD, theme::surface());
+                g.draw_text(
+                    x + pad, y + pad, &header,
+                    gpu::DrawOpts { font_size: font, color: b.accent, bold: true, italic: false },
+                );
+                for (i, l) in lines.iter().enumerate() {
+                    g.draw_text(
+                        x + pad, y + pad + 6.0 + lh * (i as f32 + 1.0), l,
+                        gpu::DrawOpts { font_size: font, color: theme::text(), bold: false, italic: false },
+                    );
+                }
+            }
             // Status-bar dropdown (directory picker / branch switcher), drawn
             // last so it overlays the cell grid + every bar. Anchored to the
             // chip that opened it and expanded UPWARD — the bar lives at the
@@ -5358,6 +5477,268 @@ fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
     }
 }
 
+/// verbose OFF 에서 접힌 팀메시지 행("› Message from @<이름>") 탐지 —
+/// (첫 글리프 col, 보낸이 agent 이름). 이름 뒤에 다른 글자가 있으면(본문 안
+/// 인용 등) 접힌 줄이 아니라고 본다 — 오탐이 실제 출력 텍스트를 덮어쓰면 안 된다.
+fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, String)> {
+    let chars: Vec<char> = row
+        .iter()
+        .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+        .collect();
+    let first = chars.iter().position(|&c| c != ' ')?;
+    if !matches!(chars[first], '›' | '>') {
+        return None;
+    }
+    const LABEL: &[char] = &[
+        ' ', 'M', 'e', 's', 's', 'a', 'g', 'e', ' ', 'f', 'r', 'o', 'm', ' ', '@',
+    ];
+    let ls = first + 1;
+    if chars.len() < ls + LABEL.len() || chars[ls..ls + LABEL.len()] != *LABEL {
+        return None;
+    }
+    let ns = ls + LABEL.len();
+    let name: String = chars[ns..]
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric() || **c == '-' || **c == '_')
+        .collect();
+    if name.is_empty() {
+        return None;
+    }
+    chars[ns + name.len()..]
+        .iter()
+        .all(|&c| c == ' ')
+        .then_some((first, name))
+}
+
+/// 팀원 agent 이름("aru-9c88")의 보낸 학생 accent — 로마자 앞부분(마지막 '-'
+/// 앞)을 로스터로 역매핑. 로스터 밖(team-lead 등)은 transcript 태그의 color
+/// 명 → 그것도 없으면 테마 accent.
+fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
+    let slug = name.rsplit_once('-').map(|(a, _)| a).unwrap_or(name);
+    if let Some(c) = theme::slug_character(slug).and_then(theme::character_accent) {
+        return c;
+    }
+    match tag_color {
+        Some("red") => [224, 88, 78, 255],
+        Some("orange") => [228, 140, 60, 255],
+        Some("yellow") => [212, 180, 60, 255],
+        Some("green") => [63, 170, 90, 255],
+        Some("cyan") => [70, 180, 200, 255],
+        Some("blue") => [90, 140, 230, 255],
+        Some("purple") => [168, 118, 228, 255],
+        Some("pink") => [228, 100, 160, 255],
+        _ => theme::accent(),
+    }
+}
+
+/// transcript 에서 회수한 팀메시지 원문(접힌 줄 전개·말풍선용).
+#[derive(Clone)]
+struct TeammateMsg {
+    summary: String,
+    body: String,
+    color: Option<String>,
+}
+
+/// `<teammate-message …>본문</teammate-message>` 파싱 — teammate_id 가 sender 와
+/// 일치하는 첫 태그. 속성은 key="value" 나열(순서 무관).
+fn extract_teammate_msg(text: &str, sender: &str) -> Option<TeammateMsg> {
+    let mut rest = text;
+    loop {
+        let s = rest.find("<teammate-message")?;
+        let after = &rest[s + "<teammate-message".len()..];
+        let close = after.find('>')?;
+        let attrs = &after[..close];
+        let tail = &after[close + 1..];
+        let attr = |key: &str| -> Option<String> {
+            let pat = format!("{key}=\"");
+            let a = attrs.find(&pat)? + pat.len();
+            let e = attrs[a..].find('"')?;
+            Some(attrs[a..a + e].to_string())
+        };
+        if attr("teammate_id").as_deref() == Some(sender) {
+            let end = tail.find("</teammate-message>").unwrap_or(tail.len());
+            return Some(TeammateMsg {
+                summary: attr("summary").unwrap_or_default(),
+                body: tail[..end].trim().to_string(),
+                color: attr("color"),
+            });
+        }
+        rest = tail;
+    }
+}
+
+/// jsonl 한 줄의 user 턴 텍스트 — content 가 문자열이면 그대로, 배열이면
+/// text 블록들을 이어붙인다(팀메시지는 둘 다로 도착할 수 있다).
+fn jsonl_user_text(v: &serde_json::Value) -> Option<String> {
+    let c = v.pointer("/message/content")?;
+    if let Some(s) = c.as_str() {
+        return Some(s.to_string());
+    }
+    let mut out = String::new();
+    for b in c.as_array()? {
+        if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
+            out.push_str(t);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// pane transcript tail 에서 sender 의 최신 팀메시지 — 파일 길이가 그대로면
+/// 캐시 반환(프레임당 stat 1회), 대화가 자라 길이가 변했을 때만 재스캔.
+fn latest_teammate_msg(path: &std::path::Path, sender: &str) -> Option<TeammateMsg> {
+    type Cache =
+        std::collections::HashMap<(std::path::PathBuf, String), (u64, Option<TeammateMsg>)>;
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<Cache>> =
+        std::sync::LazyLock::new(Default::default);
+    let len = std::fs::metadata(path).ok()?.len();
+    let key = (path.to_path_buf(), sender.to_string());
+    let mut map = CACHE.lock().ok()?;
+    if let Some((l, m)) = map.get(&key) {
+        if *l == len {
+            return m.clone();
+        }
+    }
+    let (tail, _) = crate::socket::read_tail(path, 256 * 1024);
+    let found = tail.lines().rev().find_map(|l| {
+        if !l.contains("<teammate-message") || !l.contains(sender) {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(l).ok()?;
+        extract_teammate_msg(&jsonl_user_text(&v)?, sender)
+    });
+    map.insert(key, (len, found.clone()));
+    found
+}
+
+/// 접힌 팀메시지 행을 학생색 인라인으로 재작성(스냅샷 전용, 원본 그리드
+/// 무손상) — 본문이 있으면 "@ 이름❯ 본문…"(헤더 bold)으로 갈아끼우고, 없으면
+/// 원문 글자에 색만 입힌다. 와이드 글리프는 글자 + ' ' 스페이서 2칸(배너
+/// 타이틀 치환과 같은 composed 경로 실측).
+fn restyle_teammate_line(
+    row: &mut [GridCell],
+    start: usize,
+    sender: &str,
+    body: Option<&str>,
+    accent: [u8; 4],
+) {
+    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
+    let Some(body) = body else {
+        for c in row.iter_mut() {
+            if c.ch != ' ' && c.ch != '\0' {
+                c.fg = fg.clone();
+            }
+        }
+        return;
+    };
+    if start >= row.len() {
+        return;
+    }
+    let style = row[start].clone();
+    let old_end = row
+        .iter()
+        .rposition(|c| c.ch != ' ' && c.ch != '\0')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let mut w = start;
+    let put = |row: &mut [GridCell], w: &mut usize, ch: char, bold: bool| -> bool {
+        use unicode_width::UnicodeWidthChar;
+        let cw = ch.width().unwrap_or(1).max(1);
+        if *w + cw > row.len() {
+            return false;
+        }
+        let mut cell = style.clone();
+        cell.ch = ch;
+        cell.fg = fg.clone();
+        cell.bold = bold;
+        row[*w] = cell;
+        if cw == 2 {
+            let mut sp = style.clone();
+            sp.ch = ' ';
+            sp.fg = fg.clone();
+            sp.bold = bold;
+            row[*w + 1] = sp;
+        }
+        *w += cw;
+        true
+    };
+    for ch in format!("@ {sender}❯ ").chars() {
+        if !put(row, &mut w, ch, true) {
+            return;
+        }
+    }
+    // 본문은 개행·연속 공백을 한 칸으로 접은 인라인 — 넘치면 말줄임.
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut truncated = false;
+    for ch in flat.chars() {
+        if !put(row, &mut w, ch, false) {
+            truncated = true;
+            break;
+        }
+    }
+    if truncated {
+        let p = w.min(row.len() - 1);
+        let mut cell = style.clone();
+        cell.ch = '…';
+        cell.fg = fg.clone();
+        row[p] = cell;
+        w = p + 1;
+    }
+    // 새 텍스트가 원문("› Message from @…")보다 짧으면 잔재를 지운다.
+    for c in row[w..old_end.max(w)].iter_mut() {
+        *c = GridCell::blank();
+    }
+}
+
+/// 접힌 팀메시지 hover 말풍선 페이로드 — pane 루프에서 채워 overlay 패스가
+/// 그린다(copy 버튼과 같은 슬롯 관례).
+struct TeammateBubbleSlot {
+    sender: String,
+    summary: String,
+    body: String,
+    accent: [u8; 4],
+    /// 접힌 줄의 (x, top, bottom) — 말풍선 앵커.
+    anchor: (f32, f32, f32),
+    /// pane 본문 rect (x, y, w, h) — 말풍선을 이 안으로 클램프.
+    pane: (f32, f32, f32, f32),
+}
+
+/// 말풍선 본문 word-wrap — measure 기반, '\n' 존중, 공백 우선 분할(없으면
+/// 글자 단위). 빈 문단은 빈 줄로 남아 문단 간격 역할을 한다.
+fn wrap_chrome_text(
+    g: &mut gpu::GpuRenderer,
+    text: &str,
+    max_w: f32,
+    font: f32,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for para in text.split('\n') {
+        let mut cur = String::new();
+        let mut cur_w = 0.0f32;
+        let mut sp: Option<usize> = None; // 마지막 공백 '뒤' byte 오프셋
+        for ch in para.chars() {
+            let cw = g.measure_chrome_text(&ch.to_string(), font, false);
+            if cur_w + cw > max_w && !cur.is_empty() {
+                if let Some(b) = sp.filter(|b| *b < cur.len()) {
+                    let tail = cur.split_off(b);
+                    out.push(std::mem::take(&mut cur).trim_end().to_string());
+                    cur = tail;
+                } else {
+                    out.push(std::mem::take(&mut cur));
+                }
+                cur_w = g.measure_chrome_text(&cur, font, false);
+                sp = None;
+            }
+            cur.push(ch);
+            cur_w += cw;
+            if ch == ' ' {
+                sp = Some(cur.len());
+            }
+        }
+        out.push(cur.trim_end().to_string());
+    }
+    out
+}
+
 /// 사용자 override 학생 애셋의 최대 변 길이. 렌더가 슬롯에 contain-fit 하므로
 /// 정확한 규격 강제는 불필요 — 사용자가 넣은 초고해상도 원본이 VRAM 을 잡아먹는
 /// 것만 방어적으로 막는다(번들 기본 도트는 이미 이 아래라 무영향).
@@ -6143,6 +6524,104 @@ mod spinner_tests {
 }
 
 #[cfg(test)]
+mod teammate_msg_tests {
+    use super::*;
+
+    fn row_from(s: &str, cols: usize) -> Vec<GridCell> {
+        let mut row = vec![GridCell::blank(); cols];
+        for (i, c) in s.chars().enumerate() {
+            row[i].ch = c;
+        }
+        row
+    }
+
+    fn row_text(row: &[GridCell]) -> String {
+        row.iter()
+            .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn detects_collapsed_line() {
+        let row = row_from("  › Message from @aru-9c88", 80);
+        assert_eq!(
+            teammate_collapsed_line(&row),
+            Some((2, "aru-9c88".to_string()))
+        );
+    }
+
+    // 이름 뒤에 다른 글자가 있으면 본문 안 인용 — 실출력 덮어쓰기 오탐 방지.
+    #[test]
+    fn rejects_trailing_text_and_plain_lines() {
+        let quoted = row_from("› Message from @aru-9c88 라고 떴다", 80);
+        assert_eq!(teammate_collapsed_line(&quoted), None);
+        let plain = row_from("Message from @aru-9c88", 80);
+        assert_eq!(teammate_collapsed_line(&plain), None);
+    }
+
+    #[test]
+    fn extract_tag_attrs_and_body() {
+        let text = "<teammate-message teammate_id=\"aru-9c88\" color=\"orange\" \
+                    summary=\"확인 통지\">아루다. 확인했다.</teammate-message>";
+        let m = extract_teammate_msg(text, "aru-9c88").unwrap();
+        assert_eq!(m.summary, "확인 통지");
+        assert_eq!(m.body, "아루다. 확인했다.");
+        assert_eq!(m.color.as_deref(), Some("orange"));
+        // 다른 보낸이의 태그는 건너뛰고 일치하는 태그만.
+        assert!(extract_teammate_msg(text, "yuzu-1ba1").is_none());
+    }
+
+    // 인라인 재작성: 헤더 + 본문(한글 와이드 = 글자+스페이서), 원문 잔재 제거.
+    #[test]
+    fn restyle_writes_inline_body_with_wide_spacers() {
+        let mut row = row_from("› Message from @aru-9c88", 60);
+        restyle_teammate_line(&mut row, 0, "aru-9c88", Some("아루다 확인"), [255, 128, 0, 255]);
+        assert_eq!(row_text(&row), "@ aru-9c88❯ 아 루 다  확 인");
+        assert!(row[0].bold, "헤더는 bold");
+        assert_eq!(
+            row[0].fg,
+            kasa_bridge::screen::Color::Rgb(255, 128, 0),
+            "학생 accent 로 도색"
+        );
+    }
+
+    // 폭이 모자라면 말줄임으로 끝난다 — 다음 줄 침범 없음.
+    #[test]
+    fn restyle_truncates_with_ellipsis() {
+        let mut row = row_from("› Message from @aru-9c88", 24);
+        restyle_teammate_line(&mut row, 0, "aru-9c88", Some("긴 본문이 들어간다"), [255, 0, 0, 255]);
+        let text = row_text(&row);
+        assert!(text.starts_with("@ aru-9c88❯"), "{text}");
+        assert!(text.ends_with('…'), "{text}");
+    }
+
+    // 본문 회수 실패 시엔 원문 유지 + 색만.
+    #[test]
+    fn restyle_without_body_recolors_only() {
+        let mut row = row_from("› Message from @aru-9c88", 40);
+        restyle_teammate_line(&mut row, 0, "aru-9c88", None, [0, 255, 0, 255]);
+        assert_eq!(row_text(&row), "› Message from @aru-9c88");
+        assert_eq!(row[0].fg, kasa_bridge::screen::Color::Rgb(0, 255, 0));
+    }
+
+    // agent 이름 로마자 → 로스터 역매핑, 로스터 밖은 태그 color 폴백.
+    #[test]
+    fn sender_accent_roster_and_fallback() {
+        assert_eq!(theme::slug_character("aru"), Some("아루"));
+        assert_eq!(
+            teammate_sender_accent("aru-9c88", None),
+            theme::character_accent("아루").unwrap()
+        );
+        assert_eq!(
+            teammate_sender_accent("team-lead", Some("orange")),
+            [228, 140, 60, 255]
+        );
+    }
+}
+
+#[cfg(test)]
 mod student_asset_tests {
     use super::*;
 
@@ -6191,3 +6670,4 @@ mod student_asset_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

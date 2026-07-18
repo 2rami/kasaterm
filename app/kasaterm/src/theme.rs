@@ -585,23 +585,38 @@ pub fn character_accent_n(name: &str, ordinal: usize) -> Option<[u8; 4]> {
     character_accent(name).map(|c| accent_variant(c, ordinal))
 }
 
-/// 캐릭터명 → 에셋 슬러그 (assets/students/<slug>.png, arona-ui 디렉토리명과 동일).
+/// 캐릭터명 ↔ 에셋 슬러그 대응표 (assets/students/<slug>.png, arona-ui
+/// 디렉토리명·shim 팀원 로마자 이름과 동일). 정/역방향이 같은 표를 읽는다.
+const CHARACTER_SLUGS: &[(&str, &str)] = &[
+    ("아로나", "arona"),
+    ("프라나", "prana"),
+    ("미도리", "midori"),
+    ("모모이", "momoi"),
+    ("유즈", "yuzu"),
+    ("아리스", "arisu"),
+    ("유우카", "yuuka"),
+    ("시로코", "shiroko"),
+    ("호시노", "hoshino"),
+    ("코하루", "koharu"),
+    ("히마리", "himari"),
+    ("아루", "aru"),
+];
+
+/// 캐릭터명 → 에셋 슬러그.
 pub fn character_slug(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "아로나" => "arona",
-        "프라나" => "prana",
-        "미도리" => "midori",
-        "모모이" => "momoi",
-        "유즈" => "yuzu",
-        "아리스" => "arisu",
-        "유우카" => "yuuka",
-        "시로코" => "shiroko",
-        "호시노" => "hoshino",
-        "코하루" => "koharu",
-        "히마리" => "himari",
-        "아루" => "aru",
-        _ => return None,
-    })
+    CHARACTER_SLUGS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, s)| *s)
+}
+
+/// 슬러그 → 캐릭터명 — 팀원 agent 이름("aru-9c88")의 로마자 앞부분에서 보낸
+/// 학생을 역추적할 때 쓴다(접힌 팀메시지 줄 학생색).
+pub fn slug_character(slug: &str) -> Option<&'static str> {
+    CHARACTER_SLUGS
+        .iter()
+        .find(|(_, s)| *s == slug)
+        .map(|(n, _)| *n)
 }
 
 #[cfg(test)]

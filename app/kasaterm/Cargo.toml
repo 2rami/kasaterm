@@ -29,6 +29,9 @@ serde_json = "1"
 bincode.workspace = true
 pollster = "0.4"
 arboard = "3"
+# 접힌 팀메시지 인라인 전개 — 그리드 셀에 한글(와이드) 본문을 써넣을 때
+# 글리프 폭 판정(와이드 = 셀 2칸: 글자 + 스페이서).
+unicode-width = "0.2"
 kasa-mcp = { version = "0.1.0", path = "../../crates/kasa-mcp" }
 # Git-status panel webview. Separate OS window so it can't touch the wgpu
 # surface the terminal renders into — wry runs WKWebView/WebView2/WebKitGTK

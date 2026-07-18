@@ -1532,7 +1532,7 @@ fn screen_shows_working(screen: &str) -> bool {
     })
 }
 
-fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool) {
+pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> (String, bool) {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(path) else {
         return (String::new(), true);
@@ -2443,7 +2443,7 @@ fn parse_status_model(screen: &str) -> Option<String> {
 }
 
 /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
-fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
     Some(
