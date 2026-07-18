@@ -89,6 +89,15 @@ fn run() -> Result<Option<Response>> {
         run_wake_watch(&socket_path, &target, interval, timeout)?;
         return Ok(None);
     }
+    // `sessions`/`resume` — 터미널 안 세션 피커. claude 자체 /resume 은 teamName 이
+    // 기록된 세션(=팀 트리플로 뜨는 kasaterm pane 세션 전부)을 무조건 숨기므로,
+    // jsonl 직스캔으로 팀 세션까지 전부 보여주고 학생색·학생명으로 구분한다.
+    // 디스크만 읽어 GUI 가 죽어 있어도 동작. `resume` 은 번호를 받아 그 자리에서
+    // `claude --resume` 을 실행한다(pane 이면 shim 이 트리플·페르소나 재부착).
+    if cmd == "sessions" || cmd == "resume" {
+        run_sessions_picker(cmd == "resume", &args)?;
+        return Ok(None);
+    }
     let request = build_request(&cmd, &args)?;
     let socket_path = resolve_socket_path()?;
     let response = roundtrip(&socket_path, &request)?;
@@ -487,6 +496,8 @@ fn print_help() {
     eprintln!("  kasaterm-cli bind-transcript <path>       # register THIS pane's claude transcript (hook)");
     eprintln!("  kasaterm-cli notify [--surface <id>] <title> [body]  # fire a work-complete notification (Stop hook)");
     eprintln!("  kasaterm-cli attention [--surface <id>] [reason]     # flag a pane blocked on a permission/input prompt (Notification hook)");
+    eprintln!("  kasaterm-cli sessions [N]                 # 최근 claude 세션 목록(학생색·학생명, /resume 이 숨기는 팀 세션 포함)");
+    eprintln!("  kasaterm-cli resume [N]                   # 위 목록에서 번호로 골라 그 자리에서 claude --resume");
     eprintln!();
     eprintln!(
         "Socket: $KASATERM_SOCKET_PATH > $CMUX_SOCKET_PATH > platform default (Unix /tmp/cmux.sock, Windows \\\\.\\pipe\\cmux)"
@@ -867,4 +878,235 @@ fn roundtrip(socket_path: &str, request: &Request) -> Result<Response> {
     let resp: Response =
         serde_json::from_str(line.trim()).context("parse response JSON")?;
     Ok(resp)
+}
+
+// ---------------------------------------------------------------- sessions --
+
+/// 터미널 세션 피커 본체. `interactive=false`(sessions)면 목록만, `true`(resume)면
+/// 번호 입력을 받아 그 세션을 `claude --resume` 으로 이어간다. 목록은
+/// `recent_sessions_for`(jsonl 직스캔)라 claude /resume 의 teamName 필터를 안 탄다.
+fn run_sessions_picker(interactive: bool, args: &[String]) -> Result<()> {
+    let limit = args
+        .iter()
+        .find_map(|s| s.parse::<usize>().ok())
+        .unwrap_or(20);
+    let cwd = std::env::current_dir().context("cwd")?;
+    let list = kasa_socket::sessions::recent_sessions_for(&cwd, limit);
+    if list.is_empty() {
+        println!("최근 세션 없음 ({})", cwd.display());
+        return Ok(());
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let bindings =
+        read_string_map(&Path::new(&home).join(".config/kasaterm/session_characters.json"));
+    let colors = student_colors(&Path::new(&home).join(".config/kasaterm/characters.json"));
+    let live = live_session_ids();
+    const RESET: &str = "\x1b[0m";
+    const DIM: &str = "\x1b[2m";
+    for (i, s) in list.iter().enumerate() {
+        let student = bindings.get(&s.id).cloned().unwrap_or_default();
+        let color = colors.get(&student).map(|h| ansi_fg(h)).unwrap_or_default();
+        let dot = if student.is_empty() { format!("{DIM}·{RESET}") } else { format!("{color}●{RESET}") };
+        let name_cell = pad_display(&student, 8);
+        let label_cell = pad_display(&clip_display(&s.label, 44), 44);
+        let live_mark = if live.contains(&s.id) { " \x1b[31m[실행중]\x1b[0m" } else { "" };
+        println!(
+            "{:>3}  {dot} {color}{name_cell}{RESET} {label_cell} {DIM}{:>7} · {}{RESET}{live_mark}",
+            i + 1,
+            rel_time(s.mtime),
+            &s.id[..8.min(s.id.len())],
+        );
+    }
+    if !interactive {
+        return Ok(());
+    }
+    print!("\n번호 입력 (Enter=취소): ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).context("stdin")?;
+    let Ok(n) = line.trim().parse::<usize>() else {
+        println!("취소");
+        return Ok(());
+    };
+    let Some(sel) = n.checked_sub(1).and_then(|i| list.get(i)) else {
+        return Err(anyhow!("{n}번 세션이 없어요 (1..{})", list.len()));
+    };
+    if live.contains(&sel.id) {
+        return Err(anyhow!(
+            "이미 실행 중인 세션이에요 ({}) — 그 pane 을 쓰거나 `claude agents` 로 attach 하세요. \
+             중복 --resume 은 프로세스가 갈라져요.",
+            &sel.id[..8]
+        ));
+    }
+    // 사용자 셸(-i)로 실행 — zshrc 의 claude() 래퍼(권한 플래그 등)와 pane PATH 의
+    // kasaterm shim(트리플·페르소나)을 사람이 직접 친 것과 똑같이 태운다.
+    // id 는 recent_sessions_for 가 uuid 검증을 마친 값이라 인터폴레이션 안전.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let err = std::process::Command::new(shell)
+            .arg("-ic")
+            .arg(format!("claude --resume {}", sel.id))
+            .exec();
+        Err(anyhow!("claude 실행 실패: {err}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", &format!("claude --resume {}", sel.id)])
+            .status()
+            .context("claude 실행")?;
+        if status.success() { Ok(()) } else { Err(anyhow!("claude exit {status}")) }
+    }
+}
+
+/// `{sid: 학생명}` 평면 JSON(session_characters.json). 없거나 깨지면 빈 맵.
+fn read_string_map(path: &Path) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .map(|m| {
+            m.into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// characters.json → 학생명 → header_color(#rrggbb). leader/leaders/members 전부.
+fn student_colors(path: &Path) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Some(v) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    else {
+        return out;
+    };
+    let mut pool: Vec<&Value> = Vec::new();
+    if let Some(l) = v.get("leader") {
+        pool.push(l);
+    }
+    for key in ["leaders", "members"] {
+        if let Some(arr) = v.get(key).and_then(|a| a.as_array()) {
+            pool.extend(arr.iter());
+        }
+    }
+    for m in pool {
+        if let (Some(name), Some(color)) = (
+            m.get("name").and_then(|n| n.as_str()),
+            m.get("header_color").and_then(|c| c.as_str()),
+        ) {
+            out.insert(name.to_string(), color.to_string());
+        }
+    }
+    out
+}
+
+/// `#rrggbb` → 24bit ANSI fg 시퀀스. 파싱 실패면 빈 문자열(무색).
+fn ansi_fg(hex: &str) -> String {
+    let h = hex.trim_start_matches('#');
+    if h.len() != 6 {
+        return String::new();
+    }
+    match (
+        u8::from_str_radix(&h[0..2], 16),
+        u8::from_str_radix(&h[2..4], 16),
+        u8::from_str_radix(&h[4..6], 16),
+    ) {
+        (Ok(r), Ok(g), Ok(b)) => format!("\x1b[38;2;{r};{g};{b}m"),
+        _ => String::new(),
+    }
+}
+
+/// 지금 살아있는 claude 세션 id 들 — ~/.claude/sessions/<pid>.json 레지스트리에서
+/// pid 생존(kill -0) 확인. 중복 --resume(프로세스 갈라짐) 방지용.
+fn live_session_ids() -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = Path::new(&home).join(".claude/sessions");
+    let Ok(entries) = std::fs::read_dir(&dir) else { return out };
+    for e in entries.flatten() {
+        let Some(v) = std::fs::read_to_string(e.path())
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        else {
+            continue;
+        };
+        let Some(sid) = v.get("sessionId").and_then(|s| s.as_str()) else { continue };
+        let alive = match v.get("pid").and_then(|p| p.as_u64()) {
+            #[cfg(unix)]
+            Some(pid) => std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false),
+            #[cfg(not(unix))]
+            Some(_) => true,
+            None => false,
+        };
+        if alive {
+            out.insert(sid.to_string());
+        }
+    }
+    out
+}
+
+/// unix secs → "방금/N분 전/N시간 전/N일 전" (arona 웹뷰 피커와 동일 규칙).
+fn rel_time(mtime: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let diff = now.saturating_sub(mtime);
+    if diff < 60 {
+        "방금".into()
+    } else if diff < 3600 {
+        format!("{}분 전", diff / 60)
+    } else if diff < 86400 {
+        format!("{}시간 전", diff / 3600)
+    } else {
+        format!("{}일 전", diff / 86400)
+    }
+}
+
+/// 터미널 표시폭 — 한글 등 넓은 문자 2칸. 정렬용 근사(동아시아 Wide 전부는 아님).
+fn display_width(s: &str) -> usize {
+    s.chars()
+        .map(|c| if ('\u{1100}'..='\u{FFDC}').contains(&c) { 2 } else { 1 })
+        .sum()
+}
+
+/// 표시폭 기준으로 자르기(넘치면 … 붙임).
+fn clip_display(s: &str, max: usize) -> String {
+    let flat: String = s
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    if display_width(&flat) <= max {
+        return flat;
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for c in flat.chars() {
+        let cw = if ('\u{1100}'..='\u{FFDC}').contains(&c) { 2 } else { 1 };
+        if w + cw > max.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// 표시폭 기준 우측 공백 패딩.
+fn pad_display(s: &str, width: usize) -> String {
+    let w = display_width(s);
+    let mut out = s.to_string();
+    for _ in w..width {
+        out.push(' ');
+    }
+    out
 }

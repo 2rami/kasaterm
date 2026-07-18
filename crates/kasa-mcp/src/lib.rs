@@ -19,6 +19,7 @@ pub mod git;
 mod http;
 mod proxy;
 mod register;
+mod resume_visibility;
 pub mod standalone;
 pub mod team;
 pub use http::{claude_bin, spawn_http_server, spawn_http_server_opts};

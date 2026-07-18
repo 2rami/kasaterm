@@ -27,6 +27,7 @@ mod layout;
 mod markdown;
 mod input;
 mod settings;
+mod syntax;
 mod links;
 mod proc;
 mod state;
@@ -1566,6 +1567,38 @@ struct MarkdownPane {
     /// URLs) overflow the pane — this pans the text under a fixed line-number
     /// gutter. 0 = flush left. Render mode ignores it (markdown wraps).
     h_scroll: f32,
+    /// Buffer has edits not yet written to `doc.path`. Cleared by Cmd+S and
+    /// the .md Raw→Render save; drives the ● unsaved dot on the tab label.
+    modified: bool,
+    /// Selection anchor as (line, col) in chars; the cursor is the head, so
+    /// anchor..cursor is the selection either direction. None = no selection.
+    sel_anchor: Option<(usize, usize)>,
+    /// Undo/redo: whole-buffer snapshots pushed at edit-run boundaries (start
+    /// of a typing run / delete run, Enter, paste, selection replace). Whole
+    /// snapshots are fine at this editor's file sizes and can't drift the way
+    /// operation logs do. Capped at `markdown::UNDO_CAP`.
+    undo_stack: Vec<EditSnapshot>,
+    redo_stack: Vec<EditSnapshot>,
+    /// Kind of the last mutation — consecutive same-kind edits (a typing run,
+    /// a backspace run) coalesce into one undo unit; any caret move breaks it.
+    last_edit: EditKind,
+}
+
+/// One undo/redo unit for the raw editor: the full buffer + cursor.
+#[derive(Clone)]
+struct EditSnapshot {
+    lines: Vec<String>,
+    cur: (usize, usize),
+}
+
+/// Coalescing class for `MarkdownPane::last_edit`. `Break` = no run in
+/// progress (cursor moved, undo happened, pane just opened).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum EditKind {
+    Break,
+    Typing,
+    Deleting,
+    Other,
 }
 
 /// What a pane shows. Terminal panes drive a PTY + cell grid; image/markdown
@@ -1764,6 +1797,16 @@ struct PaneState {
     /// Accent color for this pane's header band (RGBA). None = default.
     /// Pane-level, not per-tab — the band is shared above all tabs.
     color: Option<[u8; 4]>,
+    /// Tab-strip overflow windowing: index of the first tab drawn in this
+    /// pane's header (whole-tab run, no partial clipping). Stepped by the
+    /// wheel; the render pass clamps and writes the effective value back.
+    tab_first: usize,
+    /// How many tabs the strip fit last frame — render-written, wheel-read.
+    tab_vis: usize,
+    /// `active_tab` as of the last frame. The render pass compares to spot
+    /// a tab switch (from any of its many call sites) and auto-reveals the
+    /// newly active tab, without touching free wheel scrolling.
+    tab_last_active: usize,
     /// 배정된 캐릭터명(미도리 등). 진실 소스는 Workspace.pane_character,
     /// apply_screen_update 가 매 업데이트 동기. 타이틀바(render)가 claude 실행 중
     /// (agents --json)일 때만 이 이름을 그린다 — 작업 중 표시는 pane_activity 로딩바.
@@ -1775,7 +1818,16 @@ struct PaneState {
 
 impl Default for PaneState {
     fn default() -> Self {
-        Self { tabs: vec![PaneTab::default()], active_tab: 0, color: None, character: None, dirty: false }
+        Self {
+            tabs: vec![PaneTab::default()],
+            active_tab: 0,
+            color: None,
+            tab_first: 0,
+            tab_vis: usize::MAX,
+            tab_last_active: 0,
+            character: None,
+            dirty: false,
+        }
     }
 }
 
@@ -1786,9 +1838,10 @@ impl PaneState {
     fn has_header(&self) -> bool {
         // 학생 헤더 띠 폐기(거노) — 학생 이름은 상단 타이틀바(claude 실행 시),
         // 로딩바는 pane 위 별도. 헤더 띠는 멀티탭·이미지·md 전용 컨트롤만 남긴다.
+        // 코드/텍스트 raw 편집기도 헤더를 가진다 — 파일명 + ● 미저장 도트의 자리.
         self.tabs.len() > 1
             || self.image().is_some()
-            || self.markdown().map_or(false, |m| m.is_md_doc)
+            || self.markdown().is_some()
     }
     /// 셀 그리드를 아래로 미는 헤더 높이(logical px). render/layout 양쪽이
     /// 같은 값을 써야 PTY 그리드↔셀 클립이 어긋나지 않는다.
@@ -2622,6 +2675,7 @@ pub(crate) enum SettingsCat {
     Appearance,
     Shell,
     Claude,
+    Students,
 }
 
 /// The two free-text fields in the settings form. Tracks which one (if any)
@@ -2631,6 +2685,8 @@ pub(crate) enum SettingsInput {
     CwdPath,
     Shell,
     ClaudeExtra,
+    /// Students 카테고리 persona 멀티라인 편집 필드가 포커스됨.
+    StudentPersona,
 }
 
 /// Clickable targets painted into the settings screen, collected each frame for
@@ -2655,6 +2711,19 @@ pub(crate) enum SettingsAction {
     ClaudeModel(String),
     ClaudeEffort(String),
     FocusClaudeExtra,
+    /// Open `~/.config/kasaterm/students/` in the OS file manager so the user
+    /// can drop replacement character images there.
+    OpenStudentsDir,
+    /// Open `~/.config/kasaterm/characters.json` in the default editor to edit
+    /// names / colors / persona text.
+    OpenCharactersJson,
+    /// Evict cached character textures so edited images reload on next paint.
+    RefreshStudentAssets,
+    /// Select a character in the Students list → load its persona into the edit
+    /// buffer. Carries the character's display name.
+    SelectStudent(String),
+    /// Focus the persona multiline editor for the selected character.
+    FocusStudentPersona,
 }
 
 /// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
@@ -2969,6 +3038,16 @@ struct App {
     /// (window index, close-× rect) for each window tab. Only present when
     /// there's more than one window (the last window can't be closed).
     window_tab_close_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// Window-tab overflow windowing: index of the first tab shown in the
+    /// strip. The strip shows a contiguous run of whole tabs (no partial
+    /// clipping — the renderer has no scissor); the wheel steps this, and
+    /// switch/new reveal the active tab via `win_tab_reveal`.
+    win_tab_first: usize,
+    /// How many window tabs the strip fit last frame. Written by the render
+    /// pass (sidebar_layout output), read by the wheel handler for clamping.
+    win_tab_vis: usize,
+    /// Sub-step wheel accumulator for the tab strip (px; one tab per 48).
+    win_tab_wheel_accum: f32,
     /// Sidebar "+" new-window button rect, logical px. None before first paint.
     new_window_btn_rect: Option<(f32, f32, f32, f32)>,
     /// Whether the "+" shell picker popup is open. Toggled by clicking the
@@ -3260,6 +3339,26 @@ struct App {
     settings_input: Option<SettingsInput>,
     /// Clickable targets collected during the settings paint, for hit-testing.
     settings_rects: Vec<(SettingsAction, (f32, f32, f32, f32))>,
+    /// Students 카테고리 인라인 편집: 선택된 캐릭터(이름) + persona 편집 버퍼 +
+    /// 캐럿(문자 인덱스). 선택 시 raw_persona 를 버퍼로 로드하고, blur/선택변경 시
+    /// characters.json 에 flush 한다.
+    students_selected: Option<String>,
+    students_persona: String,
+    students_caret: usize,
+    /// Debounced window-frame save deadline: set 1s after every Moved/Resized,
+    /// written by about_to_wait. Exit-only persistence lost the frame on a
+    /// crash/force-quit.
+    window_frame_save_due: Option<std::time::Instant>,
+    /// Raw-editor mouse selection in progress: the pane id whose editor owns
+    /// the drag (armed on body press, released on mouse-up).
+    md_select_drag: Option<String>,
+    /// Settings form wheel-scroll offset (logical px). Reset on open and on
+    /// category switch.
+    settings_scroll: f32,
+    /// Max scroll for the current category — content height minus the visible
+    /// form area, computed by the render pass (paint_settings returns the
+    /// content height). The wheel handler clamps against this.
+    settings_scroll_max: f32,
     /// Sidebar "Settings" entry rect (bottom-anchored), for hit-testing.
     settings_btn_rect: (f32, f32, f32, f32),
     /// Cursor-blink phase captured at the last successful render.
@@ -3451,6 +3550,9 @@ impl App {
             pane_last_busy: HashMap::new(),
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
+            win_tab_first: 0,
+            win_tab_vis: usize::MAX,
+            win_tab_wheel_accum: 0.0,
             new_window_btn_rect: None,
             shell_menu_open: false,
             shell_menu_hits: Vec::new(),
@@ -3531,6 +3633,7 @@ impl App {
                 Ok("shell") => SettingsCat::Shell,
                 Ok("claude") => SettingsCat::Claude,
                 Ok("appearance") => SettingsCat::Appearance,
+                Ok("students") => SettingsCat::Students,
                 _ => SettingsCat::General,
             },
             set_cwd_mode: socket::read_default_cwd_mode(),
@@ -3545,6 +3648,27 @@ impl App {
             settings_expanded_sidebar: false,
             settings_input: None,
             settings_rects: Vec::new(),
+            // KASATERM_TEST_STUDENT=<이름> 이면 그 캐릭터를 선택 상태로 시드해
+            // persona 편집기 렌더를 헤드리스로 캡처할 수 있게 한다(테스트 전용).
+            students_selected: std::env::var("KASATERM_TEST_STUDENT").ok().filter(|s| !s.is_empty()),
+            students_persona: std::env::var("KASATERM_TEST_STUDENT")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .and_then(|n| {
+                    kasa_mcp::character::characters_json()
+                        .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &n))
+                })
+                .unwrap_or_default(),
+            students_caret: 0,
+            window_frame_save_due: None,
+            md_select_drag: None,
+            // KASATERM_TEST_SETTINGS_SCROLL: 헤드리스 스크린샷으로 폼 스크롤을
+            // 검증하는 시드(휠 주입 불가) — 렌더 패스가 max 로 클램프해 준다.
+            settings_scroll: std::env::var("KASATERM_TEST_SETTINGS_SCROLL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0),
+            settings_scroll_max: 0.0,
             settings_btn_rect: (0.0, 0.0, 0.0, 0.0),
             last_blink_on: false,
             chrome_dirty: true,
@@ -4159,6 +4283,12 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     //   --continue 는 여전히 제외(id 미상 + 랜덤 이름은 연속성만 깨뜨림).
     // - agent-name=목표작업명 규칙(team.rs, 다이얼로그 스폰용)과 공존: 사용자가 --agent-*
     //   를 직접 주면 우리 트리플은 통째 생략된다.
+    // - agent-id 는 전원 고정 문자열 "team-lead"(07-17 실측, v2.1.212): claude 의 승인
+    //   포워딩 게이트가 agent-id=="team-lead" 를 리더로 판정해 꺼지므로, AskUserQuestion·
+    //   권한 요청이 "Waiting for team lead approval"(존재하지 않는 리더 무한대기 + 요청
+    //   유실)로 새지 않고 그 pane 에 네이티브 렌더된다. 수신 폴러·인박스 파일명·SendMessage
+    //   주소는 전부 agent-name 기준이라 id 중복 무해(로컬 피커+선택+인박스 수신 E2E 확인).
+    //   비공개 인터페이스 문자열 비교라 claude 버전 업 시 재검증 필요.
     let team_arms = teammate_case_arms();
     let team_block = if team_arms.is_empty() {
         String::new()
@@ -4166,6 +4296,17 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         format!(
             "AGENT=\"\"; ACOLOR=\"\"; TSID=\"$SID\"; prev=\"\"\n\
 for a in \"$@\"; do case \"$prev\" in --session-id|--resume) case \"$a\" in -*) ;; *) TSID=\"$a\" ;; esac ;; esac; prev=\"$a\"; done\n\
+# id 없는 --resume(피커 모드)도 트리플 부착 — 종전엔 TSID 부재로 무팀 부팅이라 피커에서\n\
+# 팀 세션을 골라도 팀모드가 풀렸다(거노 실사고, /resume 가시성 복원 후 표면화). --bg 와\n\
+# 같은 비-hex 랜덤 접미사(bridge 4hex 매칭 오배달 회피)로 이름만 유일화. --continue 는\n\
+# 종전 제외 유지.\n\
+case \" $* \" in *\" --resume \"*) [ -z \"$TSID\" ] && BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz') ;; esac\n\
+# 사용자 주도 resume 마커 — statusline 의 ⑂bg 배지가 anchor 불일치 휴리스틱이라\n\
+# resume 세션 전부에 오발화한다(거노). id 있으면 그 sid 를, 피커/continue 는 플래그를\n\
+# export 해 statusline 이 포크/attach 뷰(마커 없음)와 구분하게 한다. anchor\n\
+# (KASATERM_SESSION_ID) 자체는 state.rs 캐릭터 복원이 원본을 요구해 안 덮는다.\n\
+[ -n \"$TSID\" ] && export KASATERM_RESUMED_SID=\"$TSID\"\n\
+case \" $* \" in *\" --resume \"*|*\" --continue \"*|*\" -c \"*) [ -z \"$TSID\" ] && export KASATERM_RESUME_PICKER=1 ;; esac\n\
 # resume/명시 sid 부팅 — pane 상속 캐릭터 대신 그 세션의 정본(바인딩) 캐릭터로 정체성 교정\n\
 # (거노: 모모이 세션이 프라나 배지·persona 로 부팅). 서버 죽으면 빈 응답 → pane env 폴백.\n\
 if [ -n \"$PERSONA_OK\" ] && [ -z \"$SID\" ] && [ -n \"$TSID\" ]; then\n\
@@ -4190,7 +4331,7 @@ if [ -n \"$AGENT\" ]; then\n\
     mkdir -p \"${{IB%/*}}\" 2>/dev/null\n\
     [ -f \"$IB\" ] || printf '[]' > \"$IB\"\n\
     export KASATERM_TEAM=\"$TEAM\" KASATERM_AGENT=\"$AGENT\"\n\
-    set -- --agent-id \"$AGENT@$TEAM\" --agent-name \"$AGENT\" --team-name \"$TEAM\" \"$@\"\n\
+    set -- --agent-id team-lead --agent-name \"$AGENT\" --team-name \"$TEAM\" \"$@\"\n\
     [ -n \"$ACOLOR\" ] && set -- --agent-color \"$ACOLOR\" \"$@\"\n\
   fi\n\
 fi\n"
@@ -4839,7 +4980,9 @@ mod tests {
             .unwrap_or(false);
         assert!(ok, "generated claude wrapper failed sh -n");
         if body.contains("AGENT=") {
-            assert!(body.contains("--agent-id"), "teammate triple missing");
+            // 고정 id "team-lead" = claude 승인 포워딩(존재하지 않는 리더 무한대기) 차단 스위치.
+            // <이름>@<팀> 꼴로 되돌아가면 AskUserQuestion 이 pane 에 안 뜨는 회귀.
+            assert!(body.contains("--agent-id team-lead"), "teammate triple missing lead id");
             assert!(body.contains("/teamname"), "teamname endpoint call missing");
         }
         let _ = std::fs::remove_dir_all(&dir);

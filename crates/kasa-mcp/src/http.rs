@@ -1203,14 +1203,32 @@ async fn session_rename_handler(
 
 /// `GET /recent-sessions?cwd=<abs>` — recent Claude sessions under `cwd` (or
 /// the active pane's cwd when omitted) for the arona-ui resume picker. Newest
-/// first: `{ ok, sessions: [{id, label, mtime, cwd}] }`.
+/// first: `{ ok, sessions: [{id, label, mtime, cwd, character?}] }`.
+/// `character` 는 세션→학생 영속 바인딩(session_characters.json) — teamName 기록
+/// 세션이 claude 자체 /resume 에서 숨겨지는 탓에 이 피커가 사실상 유일한 복원
+/// 입구라, 어느 학생의 세션인지 프사·학생색으로 즉시 구분하게 얹는다(거노).
+/// 미바인딩 세션은 필드 생략(웹뷰가 실루엣 폴백).
 async fn recent_sessions_handler(
     backend: Arc<dyn Backend>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let cwd = params.get("cwd").filter(|s| !s.is_empty()).map(|s| s.as_str());
     let body = match backend.recent_sessions(cwd) {
-        Ok(sessions) => serde_json::json!({ "ok": true, "sessions": sessions }),
+        Ok(sessions) => {
+            let mut arr = serde_json::to_value(&sessions).unwrap_or_default();
+            if let Some(list) = arr.as_array_mut() {
+                for s in list.iter_mut() {
+                    let bound = s
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .and_then(crate::character::session_character);
+                    if let (Some(ch), Some(obj)) = (bound, s.as_object_mut()) {
+                        obj.insert("character".into(), serde_json::json!(ch));
+                    }
+                }
+            }
+            serde_json::json!({ "ok": true, "sessions": arr })
+        }
         Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
@@ -2207,6 +2225,11 @@ pub fn spawn_http_server_opts(
                 // (run_scheduler=false)은 공유 schedule.json 을 소비/영속하면 안 됨(유령버블·유실·레이스).
                 if run_scheduler {
                     tokio::spawn(schedule_loop(backend.clone()));
+                    // /resume 가시성 스위퍼 — 팀 세션 transcript 의 teamName 마커를
+                    // 같은 길이 키로 중화해 claude /resume 피커에 되살리고, 학생
+                    // 바인딩은 #태그로 스탬프한다(부팅 직후 + 60초 주기). standalone
+                    // 제외 이유는 scheduler 와 동일(공유 파일 뮤테이터는 본체 1곳만).
+                    tokio::spawn(crate::resume_visibility::sweep_loop());
                 }
                 // ccglass-style 캡처 프록시 — claude 의 Anthropic API 호출을 가로채
                 // pane 별 대화(messages[]+SSE)를 모은다. /conversation 으로 노출.

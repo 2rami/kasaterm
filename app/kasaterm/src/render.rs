@@ -260,6 +260,11 @@ impl App {
             tabs: Vec<String>,
             /// Active tab index into `tabs`.
             active_tab: usize,
+            /// Overflow windowing: first tab drawn (pane.tab_first snapshot).
+            tab_first: usize,
+            /// `active_tab` at the previous frame — a mismatch means a tab
+            /// switch happened and the strip must reveal the new active tab.
+            tab_last_active: usize,
             /// True while this pane is working (daemon transcript watcher sees a
             /// running tool, cross-window). Draws the flowing bar along the
             /// header bottom; idle panes draw nothing.
@@ -323,7 +328,10 @@ impl App {
             Vec::new();
         // Claude Code 시작 배너의 Clawd 아트 자리에 그릴 학생 도트:
         // (에셋 슬러그, 배너 박스 LOGICAL px). 셀 스냅샷에서 감지·수집.
-        let mut banner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // (slug, 배너 박스 rect, pane 세로 클립(y0, y1)) — 박스는 스크롤로
+        // pane 밖까지 이어질 수 있고, 그리기는 클립 범위 안만.
+        let mut banner_slots: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))> =
+            Vec::new();
         // agents 뷰 SCHALE 로고 자리(Clawd 마스코트 위치 / 헤더 왼쪽 여백) — 위치만.
         let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
@@ -337,8 +345,8 @@ impl App {
         // 입력박스 위 스페이서 행(effort 칩 자리)에 서 있는 학생(idle 전신 애니).
         let mut standing_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
-        // cursor, h_scroll px, syntax lang). Render mode draws blocks; Raw mode
-        // draws the editor buffer.
+        // cursor, selection, h_scroll px, syntax lang). Render mode draws
+        // blocks; Raw mode draws the editor buffer.
         #[allow(clippy::type_complexity)]
         let mut md_slots: Vec<(
             String,
@@ -348,6 +356,7 @@ impl App {
             bool,
             Option<Vec<String>>,
             (usize, usize),
+            Option<((usize, usize), (usize, usize))>,
             f32,
             &'static str,
         )> = Vec::new();
@@ -497,12 +506,14 @@ impl App {
                 let img_rot = pane.image_rot % 4;
                 let img_pan = (pane.image_pan_x, pane.image_pan_y);
                 // Snapshot markdown render data: (doc, raw_mode, edit lines if
-                // raw, cursor, scroll px, h_scroll px, syntax lang).
+                // raw, cursor, normalized selection, scroll px, h_scroll px,
+                // syntax lang).
                 let md: Option<(
                     Arc<MarkdownDoc>,
                     bool,
                     Option<Vec<String>>,
                     (usize, usize),
+                    Option<((usize, usize), (usize, usize))>,
                     f32,
                     f32,
                     &'static str,
@@ -516,6 +527,7 @@ impl App {
                             None
                         },
                         (m.cur_line, m.cur_col),
+                        m.sel_range(),
                         m.scroll as f32,
                         m.h_scroll,
                         code_lang_for_path(std::path::Path::new(&m.doc.path)),
@@ -601,10 +613,17 @@ impl App {
                     let logo_rows = CLAWD_ROWS;
                     let logo_cols =
                         ((logo_rows as f32 * sch / scw).round() as usize).max(3);
+                    // SCHALE 로고는 클립 경로가 없어 완전 노출 배너만 쓴다 —
+                    // 스크롤로 잘린 배너는 헤더 앵커 폴백(원본 글리프 유지).
                     let clawd = find_clawd_banners(&composed);
-                    let anchor = if let Some(&(br, bc)) = clawd.first() {
-                        let r_end = (br + CLAWD_ROWS).min(composed.len());
-                        for row in composed[br..r_end].iter_mut() {
+                    let anchor = clawd
+                        .iter()
+                        .find(|&&(br, _)| {
+                            br >= 0 && br as usize + CLAWD_ROWS <= composed.len()
+                        })
+                        .map(|&(br, bc)| (br as usize, bc));
+                    let anchor = if let Some((br, bc)) = anchor {
+                        for row in composed[br..br + CLAWD_ROWS].iter_mut() {
                             for cell in row.iter_mut().skip(bc).take(CLAWD_COLS) {
                                 *cell = GridCell::blank();
                             }
@@ -644,6 +663,9 @@ impl App {
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
                     for (br, bc) in find_clawd_banners(&composed) {
+                        // br 은 스크롤로 위가 잘리면 음수, 아래가 잘리면 박스가
+                        // 그리드 밖까지 이어진다 — 스프라이트는 pane 세로 범위로
+                        // 클립해 셀 스크롤과 함께 자연스럽게 잘려 나가게 한다.
                         banner_slots.push((
                             slug,
                             (
@@ -652,8 +674,13 @@ impl App {
                                 CLAWD_COLS as f32 * scw,
                                 CLAWD_ROWS as f32 * sch,
                             ),
+                            (body_top, body_top + composed.len() as f32 * sch),
                         ));
-                        for row in composed[br..br + CLAWD_ROWS].iter_mut() {
+                        let r0 = br.max(0) as usize;
+                        let r1 = (br + CLAWD_ROWS as isize)
+                            .clamp(0, composed.len() as isize)
+                            as usize;
+                        for row in composed[r0..r1].iter_mut() {
                             for cell in row.iter_mut().skip(bc).take(CLAWD_COLS) {
                                 *cell = GridCell::blank();
                             }
@@ -890,6 +917,43 @@ impl App {
                         col,
                     ));
                 }
+                // /resume 피커 학생 프사 — 스위퍼(resume_visibility)가 세션 행
+                // 설명줄 끝에 스탬프한 ` · #학생이름` 태그를 지우고 그 자리에
+                // 프사(bust)를 얹는다(거노: 이름 말고 프사). 세션 행 아래는
+                // 구분 빈 줄이라 2행 키로 아래로 내려 그린다. pane 학생과
+                // 무관하게 행마다 태그된 학생의 얼굴 — profile_slots(statusline
+                // 프사와 같은 이미지 패스)로 소비된다.
+                {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let scw = self.cell.w * fs;
+                    let sch = self.cell.h * fs;
+                    let rows_n = composed.len();
+                    let mut faces = 0usize;
+                    for r in 0..rows_n {
+                        if faces >= 40 {
+                            break; // 폭주 방어 — 화면에 이보다 많을 수 없다
+                        }
+                        let Some((c0, end, tag_slug)) = picker_student_tag(&composed[r])
+                        else {
+                            continue;
+                        };
+                        for cell in composed[r][c0..=end].iter_mut() {
+                            *cell = GridCell::blank();
+                        }
+                        let row_w = composed[r].len() as f32 * scw;
+                        let face_w = 4.0 * scw;
+                        let face_h = 2.0 * sch;
+                        let x = (body_left + c0 as f32 * scw)
+                            .min(body_left + row_w - face_w)
+                            .max(body_left);
+                        // 바닥 정렬(statusline 프사 공식) — 얼굴 발을 설명줄
+                        // 바닥에 붙이고 위(제목행 끝자락)로 서게. 아래로 내리면
+                        // 구분 빈 줄에 매달려 다음 세션 것처럼 보인다(거노).
+                        let y = (body_top + (r + 1) as f32 * sch - face_h).max(body_top);
+                        profile_slots.push((tag_slug, (x, y, face_w, face_h)));
+                        faces += 1;
+                    }
+                }
                 let pane_font_scale = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                 let hover_links = hovered_link
                     .as_ref()
@@ -1000,7 +1064,7 @@ impl App {
                 if let Some(image) = img {
                     image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot, img_pan));
                 }
-                if let Some((doc, raw_mode, lines, cursor, scroll, h_scroll, lang)) = md {
+                if let Some((doc, raw_mode, lines, cursor, sel, scroll, h_scroll, lang)) = md {
                     md_slots.push((
                         id.clone(),
                         doc,
@@ -1009,6 +1073,7 @@ impl App {
                         raw_mode,
                         lines,
                         cursor,
+                        sel,
                         h_scroll,
                         lang,
                     ));
@@ -1112,7 +1177,13 @@ impl App {
                         y: box_y,
                         w: box_w,
                         box_h,
-                        label,
+                        // ● = 미저장 편집(raw 편집기). 단일탭 폴백 라벨에도 붙어야
+                        // 헤더 어디로 그려지든 저장 안 된 게 보인다.
+                        label: if pane.markdown().map_or(false, |m| m.modified) {
+                            format!("● {label}")
+                        } else {
+                            label
+                        },
                         is_active: active_id.as_deref() == Some(id.as_str()),
                         // Busy = the daemon's transcript watcher sees this pane
                         // working (cross-window). Drives the header working bar.
@@ -1138,7 +1209,8 @@ impl App {
                                 .iter()
                                 .enumerate()
                                 .map(|(i, t)| {
-                                    t.title
+                                    let name = t
+                                        .title
                                         .clone()
                                         .filter(|s| !s.is_empty())
                                         .or_else(|| {
@@ -1150,11 +1222,20 @@ impl App {
                                         })
                                         .unwrap_or_else(|| {
                                             if i == 0 { id.clone() } else { format!("탭 {}", i + 1) }
-                                        })
+                                        });
+                                    // 탭별 ● 미저장 도트 — 멀티탭 pane 에서 어느
+                                    // 파일이 저장 안 됐는지 탭 단위로 보이게.
+                                    if t.markdown().map_or(false, |m| m.modified) {
+                                        format!("● {name}")
+                                    } else {
+                                        name
+                                    }
                                 })
                                 .collect()
                         },
                         active_tab: pane.active_tab,
+                        tab_first: pane.tab_first,
+                        tab_last_active: pane.tab_last_active,
                     });
                 }
             }
@@ -1404,6 +1485,15 @@ impl App {
         self.refresh_window_labels();
         let sb_labels = self.window_labels.clone();
         let (sb_tabs, sb_closes, sb_plus) = self.sidebar_layout(sb_win_h);
+        // Windowed strip: publish the effective first/visible-count for the
+        // wheel handler's clamp, and note per-side overflow for the chevron
+        // hints painted with the tabs below.
+        self.win_tab_first = sb_tabs.first().map_or(0, |(i, _)| *i);
+        self.win_tab_vis = sb_tabs.len().max(1);
+        let sb_over_before = self.win_tab_first > 0;
+        let sb_over_after = sb_tabs
+            .last()
+            .is_some_and(|(i, _)| i + 1 < self.windows.len());
         // Only register hit-rects when tabs are actually painted (side strip
         // open, or top-tabs mode where they always live in the title bar). A
         // hidden sidebar (file-tree-only / collapsed) must not leave stale tab
@@ -1503,6 +1593,11 @@ impl App {
         let mut tab_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         let mut tab_close_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         let mut plus_hits: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
+        // Tab-overflow windowing per pane: (id, effective first, visible
+        // count, active tab this frame) — written back to ws.panes after the
+        // gpu borrow so the wheel handler and next frame's reveal check see
+        // the clamped values.
+        let mut pane_tab_windowing: Vec<(String, usize, usize, usize)> = Vec::new();
         let mut image_btn_hits: Vec<(String, ImageBtn, (f32, f32, f32, f32))> = Vec::new();
         // Terminal-pane right-action cluster hit rects. Rebuilt every frame
         // so a stale rect can't outlive its glyph after a layout change.
@@ -1519,6 +1614,7 @@ impl App {
         let file_tree_toggle = self.file_tree_toggle_rect();
         let arona_btn = self.arona_btn_rect();
         let mut settings_rects_out: Vec<(SettingsAction, (f32, f32, f32, f32))> = Vec::new();
+        let mut settings_content_h_out: f32 = 0.0;
         // Caret blink for the commit-modal message box, computed before `g`
         // borrows `self.gpu` (the blink helper takes `&self`).
         let commit_caret_on = self.cursor_blink_on(std::time::Instant::now());
@@ -1575,10 +1671,10 @@ impl App {
                     }
                 }
             };
-            for (slug, (bx, by, bw, bh)) in &banner_slots {
+            for (slug, (bx, by, bw, bh), (clip_y0, clip_y1)) in &banner_slots {
                 ensure_idle(g, slug);
                 let key = format!("student:{slug}:f{anim_idx}");
-                g.queue_image(&key, *bx, *by, *bw, *bh, 1.0, 0.0, 0.0);
+                g.queue_image_clipped(&key, *bx, *by, *bw, *bh, *clip_y0, *clip_y1);
             }
             // agents 뷰 SCHALE 로고 — Clawd 자리(또는 헤더 왼쪽 여백)에 정적 1프레임.
             if !schale_logo_slots.is_empty() {
@@ -1651,15 +1747,17 @@ impl App {
             // Rebuilt fresh each frame so a pane toggled out of raw mode (or
             // closed) drops its caret hit box.
             self.md_body_rects.clear();
-            for (id, doc, (bx, by, bw, bh), scroll, raw_mode, lines, cursor, h_scroll, lang) in &md_slots {
+            for (id, doc, (bx, by, bw, bh), scroll, raw_mode, lines, cursor, sel, h_scroll, lang) in
+                &md_slots
+            {
                 let content_h = if *raw_mode {
                     let lines = lines.as_deref().unwrap_or(&[]);
                     // Stash the body box so a mouse click can hit-test to a caret
                     // position (md_click_caret reads this).
                     self.md_body_rects.insert(id.clone(), (*bx, *by, *bw, *bh));
                     g.draw_raw_editor(
-                        lines, *cursor, *bx, *by, *bw, *bh, *scroll, *h_scroll, lang, &md_preedit,
-                        raw_cursor_on,
+                        lines, *cursor, *sel, *bx, *by, *bw, *bh, *scroll, *h_scroll, lang,
+                        &md_preedit, raw_cursor_on,
                     )
                 } else {
                     // Upload this doc's inline images once (keyed per block).
@@ -2178,6 +2276,18 @@ impl App {
                     theme::ICON_SIZE,
                     theme::text_mute(),
                 );
+                // Overflow chevrons in the strip's reserved 14px end slots —
+                // more tabs exist past this edge, wheel over the strip scrolls.
+                if let Some((_, (fx, fy, _, fh))) = sb_tabs.first() {
+                    let cis = 12.0_f32;
+                    let cy = fy + (fh - cis) / 2.0;
+                    if sb_over_before {
+                        g.queue_icon("chevron-left", fx - 14.0, cy, cis, theme::text_mute());
+                    }
+                    if sb_over_after {
+                        g.queue_icon("chevron-right", px + pw + 3.0, cy, cis, theme::text_mute());
+                    }
+                }
             }
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
@@ -2359,6 +2469,19 @@ impl App {
                     theme::ICON_SIZE,
                     theme::text_mute(),
                 );
+                // Overflow chevrons: up in the slot above the first tab, down
+                // under the "+" — more windows exist past that edge, wheel
+                // over the strip scrolls the run.
+                if let Some((_, (ftx, _, ftw, _))) = sb_tabs.first() {
+                    let cis = 12.0_f32;
+                    let ccx = ftx + (ftw - cis) / 2.0;
+                    if sb_over_before {
+                        g.queue_icon("chevron-up", ccx, TITLE_HEIGHT + 3.0, cis, theme::text_mute());
+                    }
+                    if sb_over_after {
+                        g.queue_icon("chevron-down", ccx, py + ph + 4.0, cis, theme::text_mute());
+                    }
+                }
                 // Settings entry — same tab-box style as the session tabs, so it
                 // reads as the last item in the list. Active (selected) box
                 // while the screen is open, faint hover box otherwise.
@@ -3618,21 +3741,48 @@ impl App {
                 let plus_w = icon_size;
                 // Each tab's title gets an equal share of the leftover width.
                 let tabs_area = (h.w - 8.0 - btn_cluster - plus_w - 16.0).max(0.0);
-                let per_tab = if tab_list.len() == 1 {
-                    tabs_area
+                let gap = 6.0_f32;
+                // Overflow windowing: whole tabs only (no scissor to clip a
+                // partial pill). When they can't all fit at the 56px minimum,
+                // show a contiguous run from `tab_first` and reserve 12px at
+                // each end for the overflow chevrons; the wheel over the strip
+                // steps the run.
+                let n_tabs = tab_list.len();
+                let fits = |area: f32| (((area + gap) / (56.0 + gap)) as usize).max(1);
+                let overflowing = n_tabs > fits(tabs_area);
+                let (strip_pad, area_eff) = if overflowing {
+                    (12.0_f32, (tabs_area - 24.0).max(56.0))
                 } else {
-                    (tabs_area / tab_list.len() as f32).clamp(56.0, 320.0)
+                    (0.0, tabs_area)
                 };
-                // Left edge of each tab's pill, for the drag insertion bar.
-                let mut tab_edges: Vec<f32> = Vec::with_capacity(tab_list.len());
+                let n_vis = n_tabs.min(fits(area_eff));
+                let mut first = h.tab_first.min(n_tabs - n_vis);
+                // A tab switch since the last frame (click, close, shortcut —
+                // whichever of the many sites) reveals the newly active tab;
+                // plain wheel scrolling is left where the user put it.
+                if h.active_tab != h.tab_last_active {
+                    if h.active_tab < first {
+                        first = h.active_tab;
+                    } else if h.active_tab >= first + n_vis {
+                        first = h.active_tab + 1 - n_vis;
+                    }
+                }
+                pane_tab_windowing.push((h.id.clone(), first, n_vis, h.active_tab));
+                let per_tab = if n_vis == 1 {
+                    area_eff
+                } else {
+                    ((area_eff - gap * n_vis.saturating_sub(1) as f32) / n_vis as f32)
+                        .clamp(56.0, 320.0)
+                };
+                // Left edge of each visible tab's pill, for the drag insertion bar.
+                let mut tab_edges: Vec<f32> = Vec::with_capacity(n_vis);
                 // Geometry for the post-loop structural border pass.
                 let mut tabs_left: Option<f32> = None;
                 let mut tabs_right_edge: f32 = 0.0;
                 let mut inter_boundaries: Vec<f32> = Vec::new();
                 let mut active_tab_box: Option<(f32, f32)> = None;
-                let gap = 6.0_f32;
-                let mut tx = h.x + 8.0;
-                for (i, tab) in tab_list.iter().enumerate() {
+                let mut tx = h.x + 8.0 + strip_pad;
+                for (i, tab) in tab_list.iter().enumerate().skip(first).take(n_vis) {
                     let tab_x0 = tx;
                     // This pane's active tab — gets the pill + focus strip + ×.
                     let active = tab_list.len() == 1 || i == h.active_tab;
@@ -3692,8 +3842,9 @@ impl App {
                     let content_w = lw + x_reserve;
                     // First tab sits flush with the pane's left edge so the
                     // active tab's accent strip joins the pane divider with
-                    // no visible gap.
-                    let box_x = if i == 0 { h.x } else { tab_x0 - 6.0 };
+                    // no visible gap — only while nothing is windowed off
+                    // (the overflow chevron owns that sliver otherwise).
+                    let box_x = if i == 0 && !overflowing { h.x } else { tab_x0 - 6.0 };
                     let box_right = tab_x0 + content_w + 6.0;
                     let tw = (box_right - box_x).max(0.0);
                     tab_edges.push(box_x);
@@ -3789,7 +3940,11 @@ impl App {
                 // 옛 2px는 Retina+at-speed drag에서 사실상 안 보였음.
                 if let Some((ref dpane, target)) = tab_drag_info {
                     if *dpane == h.id {
-                        let bar_x = tab_edges.get(target).copied().unwrap_or(tx - gap);
+                        // tab_edges holds visible tabs only — offset by `first`.
+                        let bar_x = tab_edges
+                            .get(target.saturating_sub(first))
+                            .copied()
+                            .unwrap_or(tx - gap);
                         g.rect(bar_x - 3.0, h.y + 1.0, 6.0, PANE_HEADER_HEIGHT - 2.0, theme::accent());
                     }
                 }
@@ -3816,6 +3971,24 @@ impl App {
                 if !dragging_tab {
                     g.queue_icon("plus", tx, icon_y, icon_size, plus_color);
                     plus_hits.push((h.id.clone(), plus_rect));
+                }
+                // Overflow chevrons in the reserved end slots — more tabs
+                // exist past this edge; the wheel over the strip scrolls.
+                if overflowing {
+                    let cis = 12.0_f32;
+                    let ccy = h.y + (PANE_HEADER_HEIGHT - cis) / 2.0;
+                    if first > 0 {
+                        g.queue_icon("chevron-left", h.x + 4.0, ccy, cis, theme::text_mute());
+                    }
+                    if first + n_vis < n_tabs {
+                        g.queue_icon(
+                            "chevron-right",
+                            tx + plus_iw + 8.0,
+                            ccy,
+                            cis,
+                            theme::text_mute(),
+                        );
+                    }
                 }
                 // ── Right action buttons ── per-kind cluster: terminal panes
                 // get new-terminal/web/split-v/split-h; image panes get
@@ -4953,17 +5126,40 @@ impl App {
             // Settings screen on top of everything (covers the pane grid; the
             // sidebar to its left stays visible).
             if let Some(ctx) = &settings_ctx {
-                settings_rects_out = settings::paint_settings(g, ctx);
+                (settings_rects_out, settings_content_h_out) = settings::paint_settings(g, ctx);
             }
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }
         }
         self.settings_rects = settings_rects_out;
+        // Scroll clamp for the wheel handler: content minus the visible form
+        // band (area minus the 84px page header), plus a little bottom pad.
+        // Re-clamp the live offset too — a window grow or category shrink can
+        // strand it past the new max.
+        if let Some(ctx) = &settings_ctx {
+            let view_h = (ctx.area.3 - 84.0).max(0.0);
+            self.settings_scroll_max = (settings_content_h_out - view_h + 24.0).max(0.0);
+            if self.settings_scroll > self.settings_scroll_max {
+                self.settings_scroll = self.settings_scroll_max;
+            }
+        }
         self.confirm_btn_rects = confirm_btn_hits;
         self.pane_tab_rects = tab_hits;
         self.pane_tab_close_rects = tab_close_hits;
         self.pane_plus_rects = plus_hits;
+        // Tab-windowing write-back: clamped first + fit count for the wheel
+        // handler, and this frame's active tab for the next reveal check.
+        // No dirty flip — this must not schedule another frame.
+        if let Ok(mut ws) = self.ws.lock() {
+            for (id, first, vis, act) in &pane_tab_windowing {
+                if let Some(p) = ws.panes.get_mut(id) {
+                    p.tab_first = *first;
+                    p.tab_vis = *vis;
+                    p.tab_last_active = *act;
+                }
+            }
+        }
         self.image_btn_rects = image_btn_hits;
         self.pane_action_hits = pane_action_hits;
         // body_rects collected per pane in case future overlays need them.
@@ -5392,6 +5588,51 @@ fn find_agents_header_anchor(rows: &[Vec<GridCell>], logo_cols: usize) -> Option
     None
 }
 
+/// claude /resume 피커 행의 학생 태그(` · #학생이름`) 탐지 — (태그 '#' col,
+/// 이름 끝 col, 학생 slug). resume_visibility 스위퍼가 세션 설명줄 끝에 스탬프한
+/// 태그가 앵커다. 요건 3중: ① '#' 바로 앞이 " ·"(피커 구분자) ② 그 앞 어딘가
+/// 또 다른 '·'(설명줄은 "날짜 · 크기 · #태그" 꼴로 '·' 2개 이상) ③ '#' 뒤 연속
+/// 텍스트가 로스터 이름 — 이라 일반 터미널 출력 오탐은 사실상 없다. PR 번호
+/// (`repo#12`) 같은 다른 '#' 는 이름 검증에서 떨어지므로 행의 모든 '#' 후보를
+/// 순서대로 시도한다.
+fn picker_student_tag(row: &[GridCell]) -> Option<(usize, usize, &'static str)> {
+    for (c0, _) in row.iter().enumerate().filter(|(_, c)| c.ch == '#') {
+        if c0 < 2 || row[c0 - 1].ch != ' ' || row[c0 - 2].ch != '·' {
+            continue;
+        }
+        if !row[..c0 - 2].iter().any(|c| c.ch == '·') {
+            continue;
+        }
+        let mut name = String::new();
+        let mut end = c0;
+        // 와이드 문자(한글) 다음 한 칸은 스페이서 셀 — 그리드 경로에 따라 '\0'
+        // 또는 ' ' 로 온다(alacritty composed 는 ' ', 실측). 직전 문자가 와이드일
+        // 때만 스페이서로 소비하고, 그 외 공백은 이름 종료.
+        let mut spacer_pending = false;
+        for (i, cell) in row.iter().enumerate().skip(c0 + 1) {
+            match cell.ch {
+                ' ' | '\0' if spacer_pending => {
+                    end = i;
+                    spacer_pending = false;
+                }
+                ' ' | '\0' => break,
+                ch => {
+                    name.push(ch);
+                    end = i;
+                    spacer_pending = (ch as u32) >= 0x1100;
+                    if name.chars().count() > 6 {
+                        break; // 로스터 이름은 최장 3자 — 과도하면 태그 아님
+                    }
+                }
+            }
+        }
+        if let Some(slug) = theme::character_slug(&name) {
+            return Some((c0, end, slug));
+        }
+    }
+    None
+}
+
 /// claude 입력박스 위 "── 세션명 ──" 구분선의 이름 구간 위치(거노: rename 아웃라인).
 /// 하단 10행에서 대시가 지배적이고 비-대시 텍스트 섬이 있는 rule 행을 찾아, **좌우 대시
 /// 런 사이**(양옆 공백 포함)의 (row, c0, c1)을 돌려준다. 이름 글자 셀이 아니라 대시 경계로
@@ -5424,27 +5665,74 @@ fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
 
 /// Clawd 시작 배너 감지. 결정행(몸통 2행째)의 9글리프 시퀀스를 찾고 바로
 /// 윗행의 머리 7글리프로 확정한다 — 이 조합은 일반 텍스트에서 사실상
-/// 나올 수 없다. 반환: 배너 박스의 (top_row, left_col) 목록.
-/// 행 스캔은 첫 글리프('▝') 비교로 즉시 탈락하므로 프레임당 비용 미미.
-fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(usize, usize)> {
+/// 나올 수 없다. 스크롤로 배너가 뷰포트 가장자리에 걸치면 보이는 행만으로
+/// 감지한다(거노: 스크롤 살짝 내리면 Clawd 원본이 노출) — 위로 잘리면
+/// top_row 가 음수, 아래로 잘리면 박스가 화면 밖까지 이어진다. 호출측은
+/// blank 범위를 스냅샷 안으로 클램프하고 스프라이트를 pane 세로로 클립할 것.
+/// 반환: 배너 박스의 (top_row, left_col) 목록.
+/// 행 스캔은 첫 글리프 비교로 즉시 탈락하므로 프레임당 비용 미미.
+fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
     const BODY: [char; 9] = ['▝', '▜', '█', '█', '█', '█', '█', '▛', '▘'];
     const HEAD: [char; 7] = ['▐', '▛', '█', '█', '█', '▜', '▌'];
+    // 발 행: 배너 좌단 기준 2칸 들여쓰기 `▘▘ ▝▝`, 양옆은 공백(2.1.212 실측).
+    const FEET: [char; 5] = ['▘', '▘', ' ', '▝', '▝'];
+    let blank = |cell: &GridCell| matches!(cell.ch, ' ' | '\0');
+    let matches_at = |row: &[GridCell], at: usize, pat: &[char]| {
+        at + pat.len() <= row.len()
+            && pat.iter().enumerate().all(|(i, &p)| row[at + i].ch == p)
+    };
     let mut out = Vec::new();
-    // 배너 3행이 전부 스냅샷 안에 있어야 한다: 몸통행 r 기준 머리 r-1,
-    // 발 r+1 — 스크롤로 잘린 배너는 원본 글리프를 그대로 둔다.
-    for r in 1..rows.len().saturating_sub(1) {
+    let n = rows.len();
+    for r in 0..n {
         let row = &rows[r];
         let mut c = 0usize;
         while c + BODY.len() <= row.len() {
-            if row[c].ch == BODY[0]
-                && (1..BODY.len()).all(|i| row[c + i].ch == BODY[i])
-                && rows[r - 1].len() >= c + 1 + HEAD.len()
-                && (0..HEAD.len()).all(|i| rows[r - 1][c + 1 + i].ch == HEAD[i])
+            if matches_at(row, c, &BODY) {
+                if r == 0 {
+                    // 몸통이 최상단 행 = 머리가 위로 잘림. 몸통 9글리프
+                    // 단독으로도 일반 텍스트 오탐 여지가 사실상 없다.
+                    out.push((-1, c));
+                    c += BODY.len();
+                    continue;
+                }
+                if matches_at(&rows[r - 1], c + 1, &HEAD) {
+                    out.push((r as isize - 1, c));
+                    c += BODY.len();
+                    continue;
+                }
+            }
+            c += 1;
+        }
+    }
+    // 위로 2행 잘림: 최상단에 발만 남은 경우. 발 글리프는 짧아 양옆
+    // 공백(배너 폭 9칸 확보)까지 요구해 오탐을 줄인다.
+    if let Some(row) = rows.first() {
+        let mut p = 2usize;
+        while p + FEET.len() + 2 <= row.len() {
+            if matches_at(row, p, &FEET)
+                && blank(&row[p - 2])
+                && blank(&row[p - 1])
+                && blank(&row[p + 5])
+                && blank(&row[p + 6])
             {
-                out.push((r - 1, c));
-                c += BODY.len();
+                out.push((-2, p - 2));
+                p += FEET.len();
             } else {
-                c += 1;
+                p += 1;
+            }
+        }
+    }
+    // 아래에서 진입: 최하단에 머리만 보이는 경우(몸통·발은 화면 밖).
+    // 머리 7글리프 + 양옆 공백. 몸통행이 화면 안에 있으면 위 몸통 스캔이
+    // 이미 잡으므로 마지막 행만 본다.
+    if let Some(row) = rows.last().filter(|_| n >= 2) {
+        let mut p = 1usize;
+        while p + HEAD.len() + 1 <= row.len() {
+            if matches_at(row, p, &HEAD) && blank(&row[p - 1]) && blank(&row[p + 7]) {
+                out.push((n as isize - 1, p - 1));
+                p += HEAD.len();
+            } else {
+                p += 1;
             }
         }
     }
@@ -5561,6 +5849,146 @@ fn clip_display_width(s: &str, budget: usize) -> String {
     }
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod picker_tag_tests {
+    use super::*;
+
+    fn row_from(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|c| {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                cell
+            })
+            .collect()
+    }
+
+    /// 실제 그리드처럼 한글(와이드) 문자 뒤에 스페이서 셀을 끼운 행 — alacritty
+    /// composed 경로는 ' '(실측), kasa-bridge 경로는 '\0' 이라 둘 다 만든다.
+    fn row_wide(s: &str, spacer: char) -> Vec<GridCell> {
+        let mut out = Vec::new();
+        for c in s.chars() {
+            let mut cell = GridCell::blank();
+            cell.ch = c;
+            out.push(cell);
+            if (c as u32) >= 0x1100 {
+                let mut sp = GridCell::blank();
+                sp.ch = spacer;
+                out.push(sp);
+            }
+        }
+        out
+    }
+
+    // 실측 /resume 피커 설명줄: "    14 minutes ago · main · 23KB · #프라나"
+    #[test]
+    fn picker_row_detected_plain_and_wide() {
+        for row in [
+            row_from("    14 minutes ago · main · 23KB · #프라나"),
+            row_wide("    14 minutes ago · main · 23KB · #프라나", ' '),
+            row_wide("    14 minutes ago · main · 23KB · #프라나", '\0'),
+        ] {
+            let (c0, end, slug) = picker_student_tag(&row).expect("tag");
+            assert_eq!(slug, "prana");
+            assert_eq!(row[c0].ch, '#');
+            assert!(end > c0 && end < row.len());
+            // 이름 마지막 셀까지 범위에 포함(블랭크 처리 범위).
+            assert!(row[c0..=end].iter().any(|c| c.ch == '나'));
+        }
+    }
+
+    // PR 번호(`repo#12`)의 '#' 는 이름 검증에서 떨어지고, 뒤의 진짜 태그가 잡힌다.
+    #[test]
+    fn pr_number_hash_skipped() {
+        let row = row_from("    2 days ago · main · 1MB · repo#12 · #시로코");
+        let (_, _, slug) = picker_student_tag(&row).expect("tag");
+        assert_eq!(slug, "shiroko");
+    }
+
+    // 오탐 방어: '·' 1개뿐(태그 구분자만) / 구분자 없는 해시태그 / 로스터 밖 이름.
+    #[test]
+    fn non_picker_rows_ignored() {
+        assert!(picker_student_tag(&row_from(" · #시로코")).is_none());
+        assert!(picker_student_tag(&row_from("echo #시로코 · done")).is_none());
+        assert!(picker_student_tag(&row_from("  1 day ago · main · 2KB · #낯선이")).is_none());
+        assert!(picker_student_tag(&row_from("plain text without tags")).is_none());
+    }
+}
+
+#[cfg(test)]
+mod clawd_banner_tests {
+    use super::*;
+
+    fn row_from(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|c| {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                cell
+            })
+            .collect()
+    }
+
+    // 실측 배너(claude code 2.1.212): 머리 1칸·발 2칸 들여쓰기.
+    const HEAD: &str = " ▐▛███▜▌  Claude Code v2.1.212";
+    const BODY: &str = "▝▜█████▛▘ Fable 5 · ~/Desktop";
+    const FEET: &str = "  ▘▘ ▝▝   0 awaiting input";
+
+    #[test]
+    fn full_banner_detected() {
+        let rows = vec![row_from(""), row_from(HEAD), row_from(BODY), row_from(FEET)];
+        assert_eq!(find_clawd_banners(&rows), vec![(1, 0)]);
+    }
+
+    // 스크롤로 머리 행이 위로 잘림 — 몸통이 최상단 행. top_row = -1 로
+    // 잡혀야 몸통·발이 blank 되고 스프라이트가 클립돼 그려진다(거노:
+    // 스크롤 살짝 내리면 Clawd 원본 노출 회귀 방지).
+    #[test]
+    fn body_at_top_row_detected_as_cropped() {
+        let rows = vec![row_from(BODY), row_from(FEET), row_from("")];
+        assert_eq!(find_clawd_banners(&rows), vec![(-1, 0)]);
+    }
+
+    // 머리·몸통까지 잘리고 발만 최상단에 남은 경우.
+    #[test]
+    fn feet_only_at_top_row_detected() {
+        let rows = vec![row_from(FEET), row_from(""), row_from("")];
+        assert_eq!(find_clawd_banners(&rows), vec![(-2, 0)]);
+    }
+
+    // 아래에서 진입: 최하단 행에 머리만 보임 — top_row = 마지막 행.
+    #[test]
+    fn head_only_at_bottom_row_detected() {
+        let rows = vec![row_from(""), row_from(""), row_from(HEAD)];
+        assert_eq!(find_clawd_banners(&rows), vec![(2, 0)]);
+    }
+
+    // 몸통이 최하단 행(발만 화면 밖) — 머리+몸통 조합으로 잡힌다.
+    #[test]
+    fn body_at_bottom_row_detected() {
+        let rows = vec![row_from(""), row_from(HEAD), row_from(BODY)];
+        assert_eq!(find_clawd_banners(&rows), vec![(1, 0)]);
+    }
+
+    // 일반 텍스트·비슷한 블록 글리프는 오탐하지 않는다.
+    #[test]
+    fn plain_text_not_detected() {
+        let rows = vec![
+            row_from("normal output line"),
+            row_from("▝▜███▛▘ short art"),
+            row_from("▘▘▝▝ no gap feet"),
+        ];
+        assert_eq!(find_clawd_banners(&rows), Vec::<(isize, usize)>::new());
+    }
+
+    // 발 패턴이 최상단이라도 양옆에 다른 글자가 붙어 있으면 배너가 아니다.
+    #[test]
+    fn feet_without_flanking_blanks_not_detected() {
+        let rows = vec![row_from("ab▘▘ ▝▝cd"), row_from("")];
+        assert_eq!(find_clawd_banners(&rows), Vec::<(isize, usize)>::new());
+    }
 }
 
 #[cfg(test)]

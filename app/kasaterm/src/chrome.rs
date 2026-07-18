@@ -171,6 +171,18 @@ impl App {
             0.0
         }
     }
+    /// Shift the windowed tab strip so window `idx` is visible. Called on
+    /// window switch/create — a keyboard- or click-driven switch must never
+    /// land on a tab scrolled out of the strip. Free wheel-scrolling is left
+    /// alone otherwise (sidebar_layout only clamps, never follows).
+    pub(crate) fn win_tab_reveal(&mut self, idx: usize) {
+        let vis = self.win_tab_vis.max(1);
+        if idx < self.win_tab_first {
+            self.win_tab_first = idx;
+        } else if idx >= self.win_tab_first.saturating_add(vis) {
+            self.win_tab_first = idx + 1 - vis;
+        }
+    }
     /// File-tree column width (0 when hidden). Independent of the tab strip.
     pub(crate) fn file_tree_col_w(&self) -> f32 {
         if self.file_tree.visible {
@@ -873,28 +885,84 @@ impl App {
             let _ = proxy.send_event(UserEvent::Redraw);
         });
     }
-    /// Preview a changed file from the git column (image/code/markdown by
-    /// extension), resolved against the column's repo cwd. A native diff view
-    /// is phase 2; opening the file is the useful v1. Daemon-only, like the
-    /// file-tree's file-click path.
+    /// Persist the current window frame (logical size + physical position).
+    /// Called from `exiting` and from the Moved/Resized debounce in
+    /// `about_to_wait` — the debounce keeps the frame safe across a crash.
+    pub(crate) fn save_window_frame(&self) {
+        let Some(win) = self.window.as_ref() else { return };
+        let scale = win.scale_factor().max(0.5);
+        let sz = win.inner_size();
+        let pos = win
+            .outer_position()
+            .ok()
+            .map(|p| (p.x as f64, p.y as f64));
+        crate::socket::write_window_frame(
+            sz.width as f64 / scale,
+            sz.height as f64 / scale,
+            pos,
+        );
+    }
+
+    /// Hit-test a press against the window-tab strip controls, in paint order:
+    /// close-× (sits on top of a tab) → tab → "+" new-window button. Shared by
+    /// the side sidebar strip and the top-tabs title strip — the top strip
+    /// previously had no click gate at all, so its tabs painted but never
+    /// switched/closed. Returns true when the click was handled.
+    pub(crate) fn window_strip_click(&mut self, cx: f32, cy: f32) -> bool {
+        let inside =
+            |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
+        if let Some(idx) = self
+            .window_tab_close_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(i, _)| *i)
+        {
+            if let Err(e) = self.close_window(idx) {
+                eprintln!("[window] close failed: {e:#}");
+            }
+            return true;
+        }
+        if let Some(idx) = self
+            .window_tab_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(i, _)| *i)
+        {
+            // Picking a session tab means you want to see it, so leave the
+            // settings screen first.
+            if self.settings_open {
+                self.close_settings();
+            }
+            self.switch_window(idx);
+            return true;
+        }
+        if self.new_window_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
+            if self.settings_open {
+                self.close_settings();
+            }
+            // 피커 항목은 Windows 설치 셸뿐 — macOS/Linux 는 목록이 비므로
+            // 메뉴 대신 즉시 기본 셸 새 윈도우("Claude 학생" 항목은 폐기 —
+            // split+claude 수동 부팅으로 충분, 거노).
+            if crate::available_shells().is_empty() {
+                self.new_window();
+            } else {
+                self.shell_menu_open = !self.shell_menu_open;
+            }
+            self.chrome_dirty = true;
+            return true;
+        }
+        false
+    }
+
+    /// Preview a changed file from the git column, resolved against the
+    /// column's repo cwd. `open_file` does its own extension branching
+    /// (image viewer / md render / raw code editor) and focuses an existing
+    /// pane instead of duplicating — same path as a file-tree double-click.
+    /// A native diff view is still phase 2; opening the file is the useful v1.
     pub(crate) fn open_git_file(&mut self, rel: &str) {
         let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
         let Some(cwd) = cwd else { return };
-        let abs = cwd.join(rel);
-        let ext = abs
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let kind = match ext.as_str() {
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico" => "image",
-            "md" | "markdown" | "txt" | "log" | "" => "markdown",
-            _ => "code",
-        };
-        let ps = abs.to_string_lossy().into_owned();
-        let _ = (kind, ps);
-        // TODO(local-mode): 파일 미리보기를 로컬에서 직접 spawn
-        // (split_image_pane / split_markdown_pane). 데몬 open_preview RPC 제거됨.
+        self.open_file(cwd.join(rel), None, false);
     }
     /// Title-bar sidebar-toggle button rect (logical px), parked just
     /// right of the macOS traffic lights. Fixed position (doesn't depend

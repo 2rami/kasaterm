@@ -677,6 +677,24 @@ impl App {
                 self.wheel_accum_y, self.cursor_px.0, self.cursor_px.1
             );
         }
+        // Settings overlay: the wheel scrolls the form. The screen covers the
+        // pane grid, so nothing may leak through to the cells underneath —
+        // consume the event either way. Max is computed by the render pass.
+        if self.settings_open {
+            let dy_px = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y * 40.0,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            let next = (self.settings_scroll - dy_px).clamp(0.0, self.settings_scroll_max);
+            if (next - self.settings_scroll).abs() > 0.1 {
+                self.settings_scroll = next;
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
         // Image pane: 트랙패드 두손가락(PixelDelta)=pan, 마우스 휠(LineDelta)=
         // Preview 식 zoom. wheel_step 양자화 *전* raw delta 로 처리해야 pan 이 안
         // 끊긴다. 커서가 이미지 pane 위일 때만 가로채고, 아니면 아래로 흘려보낸다.
@@ -718,6 +736,108 @@ impl App {
                 }
             }
             return;
+        }
+        // Window-tab strip overflow: the wheel steps the windowed run of
+        // whole tabs (win_tab_first). Top mode scrolls in the title strip,
+        // side mode over the sidebar tab column. Raw deltas (pre wheel_step)
+        // so trackpads stay smooth; consumed only while tabs actually
+        // overflow, so a fitting strip changes nothing.
+        {
+            let n = self.windows.len();
+            let vis = self.win_tab_vis.max(1);
+            let (cx, cy) = self.cursor_px;
+            let in_status_menu = self.statusbar.menu_rect.is_some_and(|(mx, my, mw, mh)| {
+                cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh
+            });
+            let over_strip = if self.tabs_on_top {
+                cy < TITLE_HEIGHT
+            } else {
+                self.tab_strip_w() > 0.0 && cx < self.tab_strip_w() && cy > TITLE_HEIGHT
+            };
+            if n > vis && over_strip && !in_status_menu {
+                // One tab per 48px of gesture; horizontal axis drives in top
+                // mode when the swipe is decisively sideways.
+                let d = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => {
+                        if self.tabs_on_top && x.abs() > y.abs() { x * 48.0 } else { y * 48.0 }
+                    }
+                    MouseScrollDelta::PixelDelta(p) => {
+                        let (px, py) = (p.x as f32, p.y as f32);
+                        if self.tabs_on_top && px.abs() > py.abs() { px } else { py }
+                    }
+                };
+                self.win_tab_wheel_accum += d;
+                let steps = (self.win_tab_wheel_accum / 48.0).trunc() as i64;
+                if steps != 0 {
+                    self.win_tab_wheel_accum -= steps as f32 * 48.0;
+                    // steps>0 = wheel up/left = toward the first tab.
+                    let max_first = (n - vis) as i64;
+                    let next = (self.win_tab_first as i64 - steps).clamp(0, max_first) as usize;
+                    if next != self.win_tab_first {
+                        self.win_tab_first = next;
+                        self.chrome_dirty = true;
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        // In-pane tab strip: the wheel over a pane's tab band steps that
+        // pane's windowed run — only when its tabs overflow, so a fitting
+        // strip falls through to the normal per-pane scroll.
+        {
+            let (cx, cy) = self.cursor_px;
+            let target = self
+                .pane_tab_rects
+                .iter()
+                .find(|(_, _, r)| {
+                    cx >= r.0 - 6.0 && cx <= r.0 + r.2 + 6.0 && cy >= r.1 && cy <= r.1 + r.3
+                })
+                .map(|(pid, _, _)| pid.clone());
+            if let Some(pid) = target {
+                let overflow = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.panes
+                        .get(&pid)
+                        .map(|p| (p.tabs.len(), p.tab_first, p.tab_vis))
+                        .filter(|(n, _, vis)| *n > *vis)
+                };
+                if let Some((n, first, vis)) = overflow {
+                    let d = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => {
+                            if x.abs() > y.abs() { x * 48.0 } else { y * 48.0 }
+                        }
+                        MouseScrollDelta::PixelDelta(p) => {
+                            let (px, py) = (p.x as f32, p.y as f32);
+                            if px.abs() > py.abs() { px } else { py }
+                        }
+                    };
+                    // Same 48px-per-tab accumulator as the window strip — a
+                    // gesture only ever drives one strip at a time.
+                    self.win_tab_wheel_accum += d;
+                    let steps = (self.win_tab_wheel_accum / 48.0).trunc() as i64;
+                    if steps != 0 {
+                        self.win_tab_wheel_accum -= steps as f32 * 48.0;
+                        let next =
+                            (first as i64 - steps).clamp(0, (n - vis) as i64) as usize;
+                        if next != first {
+                            if let Ok(mut ws) = self.ws.lock() {
+                                if let Some(p) = ws.panes.get_mut(&pid) {
+                                    p.tab_first = next;
+                                    p.dirty = true;
+                                }
+                            }
+                            self.chrome_dirty = true;
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
         }
         let lines = match wheel_step(
             &mut self.wheel_accum_y,
@@ -1478,8 +1598,11 @@ impl App {
             }
             return;
         }
-        // Markdown panes have no PTY. In Raw mode keys edit the buffer; in
-        // Render mode they're swallowed (scrolling is wheel-driven).
+        // Markdown panes have no PTY. In Raw mode plain keys edit the buffer;
+        // in Render mode they're swallowed (scrolling is wheel-driven).
+        // Cmd/Ctrl combos first get an editor-shortcut shot (save/paste), then
+        // FALL THROUGH to the global block below — the old early-return made
+        // Cmd+W type a 'w' into the buffer instead of closing the tab.
         let (is_md, is_raw) = {
             let ws = self.ws.lock().unwrap();
             ws.active().map_or((false, false), |p| match p.markdown() {
@@ -1488,13 +1611,24 @@ impl App {
             })
         };
         if is_md {
-            if is_raw {
-                self.md_editor_input(event);
-                if let Some(w) = &self.window {
-                    w.request_redraw();
+            if self.host_mod() || self.modifiers.control_key() {
+                if is_raw && self.md_editor_shortcut(event) {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
                 }
+                // 터미널용 잔재 제안이 아래 Ctrl+E 수락 경로에 낚이지 않게 비운다.
+                self.current_suggestion = None;
+            } else {
+                if is_raw {
+                    self.md_editor_input(event);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+                return;
             }
-            return;
         }
         // Typing snaps the active pane back to live tail. Other panes'
         // scroll offsets are left alone — switching focus by clicking

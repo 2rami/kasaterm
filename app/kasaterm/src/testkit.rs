@@ -175,10 +175,59 @@ impl App {
             "appearance" => SettingsCat::Appearance,
             "shell" => SettingsCat::Shell,
             "claude" => SettingsCat::Claude,
+            "students" => SettingsCat::Students,
             _ => SettingsCat::General,
         };
         eprintln!("[autosettings] open_settings cat={cat}");
         self.open_settings();
+    }
+    /// Headless raw-editor selection seed: KASATERM_TEST_MD_SELECT="al,ac,cl,cc"
+    /// plants a selection (anchor line/col → cursor line/col) on the active
+    /// raw editor after KASATERM_TEST_MD_SELECT_MS (default 6000 — pair with
+    /// KASATERM_AUTOOPEN so the editor exists first). Mouse drags aren't
+    /// injectable headlessly; this lets a capture prove the selection band.
+    /// Function-local statics — no App field (parallel-work rule).
+    pub(crate) fn run_pending_automdselect(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_TEST_MD_SELECT").ok().map(|_| {
+                let ms: u64 = std::env::var("KASATERM_TEST_MD_SELECT_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(6000);
+                Instant::now() + std::time::Duration::from_millis(ms)
+            })
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let spec = std::env::var("KASATERM_TEST_MD_SELECT").unwrap_or_default();
+        let nums: Vec<usize> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let [al, ac, cl, cc] = nums[..] else {
+            eprintln!("[automdselect] expected al,ac,cl,cc — got {spec:?}");
+            return;
+        };
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let Some(pane) = ws.active_mut() else { return };
+            pane.dirty = true;
+            if let Some(m) = pane.markdown_mut() {
+                m.sel_anchor = Some((al, ac));
+                m.cur_line = cl;
+                m.cur_col = cc;
+            }
+        }
+        self.md_ensure_caret_visible();
+        eprintln!("[automdselect] anchor=({al},{ac}) cursor=({cl},{cc})");
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
     /// Headless "+" 셸 피커 repro: `KASATERM_AUTOSHELLMENU_MS` 후 피커 팝업을 연다 —
     /// 항목(기본 셸·Claude 학생 등)을 클릭 없이 캡처. autosettings 처럼 함수-로컬
