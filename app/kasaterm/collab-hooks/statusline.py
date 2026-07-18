@@ -165,7 +165,14 @@ def main():
     # 오발화였다(거노 07-16). 위 캐릭터 바인딩과 같은 anchor 불일치 조건을 쓴다:
     # 세션 id ≠ pane anchor = 포크/attach 뷰. detach 포크는 env 가 출생 pane 동결이라
     # 자기 새 id 와 반드시 갈라지고, 일반 pane·repersona 는 일치라 안 뜬다.
-    if forked_view and os.environ.get("KASATERM_PANE_ID"):
+    # 단 사용자 주도 resume(/resume 피커·claude --resume <id>)도 anchor 와 갈라지므로
+    # shim 이 export 한 마커(KASATERM_RESUMED_SID=그 sid / KASATERM_RESUME_PICKER)로
+    # 걸러낸다(거노: 일반 세션에 bg 오표기). 포크/attach 는 마커가 없어 배지 유지.
+    user_resume = bool(session_id) and (
+        session_id == os.environ.get("KASATERM_RESUMED_SID")
+        or bool(os.environ.get("KASATERM_RESUME_PICKER"))
+    )
+    if forked_view and not user_resume and os.environ.get("KASATERM_PANE_ID"):
         parts.append(f"{DIM}{ansi(C_FALLBACK)}⑂ bg{RESET}")
 
     model = (d.get("model") or {}).get("display_name")
