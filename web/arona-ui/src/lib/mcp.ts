@@ -345,7 +345,9 @@ export async function swapCharacter(surface: string, character: string): Promise
   }
 }
 
-export interface RecentSession { id: string; label: string; mtime: number; cwd: string; }
+/** `character` = 세션→학생 영속 바인딩(백엔드가 session_characters.json 에서 얹음).
+ *  미바인딩 세션은 undefined — 피커가 실루엣/무색 폴백. */
+export interface RecentSession { id: string; label: string; mtime: number; cwd: string; character?: string; }
 
 /** GET /recent-sessions?cwd=<abs> — 최근 claude 세션 목록(이어가기 후보, 최신순).
  *  cwd 생략 시 active 방 cwd. fail-soft 빈 배열. */
