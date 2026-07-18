@@ -73,12 +73,19 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
         .collect()
 }
 
-/// transcript jsonl 에서 사람이 읽을 라벨을 뽑는다 — claude 가 붙인 `aiTitle`
-/// 우선, 없으면 첫 user 텍스트 메시지(앞 80자), 둘 다 없으면 None(호출부가 short
-/// id 폴백). summary 라인은 최근 세션엔 거의 없어 안 쓴다(거노 실측). 큰 파일
-/// 방어로 앞 600줄만 스캔한다.
+/// transcript jsonl 에서 사람이 읽을 라벨을 뽑는다 — `/rename` 이 남기는
+/// `custom-title`(사용자 지정, 마지막 것 우선) 최우선, 다음 claude 가 붙인
+/// `aiTitle`, 없으면 첫 user 텍스트 메시지(앞 80자), 전부 없으면 None(호출부가
+/// short id 폴백). summary 라인은 최근 세션엔 거의 없어 안 쓴다(거노 실측).
+/// 큰 파일 방어로 앞 600줄만 스캔한다. custom-title 은 rename 시점에 파일
+/// 말미로 append 되므로 앞 스캔으론 못 보고 꼬리 64KB 역스캔으로 잡는다 —
+/// teammate 세션은 claude `/rename` 이 막혀 있어 외부 append 가 유일한
+/// 개명 경로라 이 우회를 피커가 반드시 읽어줘야 한다.
 fn parse_session_label(path: &Path) -> Option<String> {
     use std::io::BufRead;
+    if let Some(t) = last_custom_title(path) {
+        return Some(t);
+    }
     let f = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(f);
     let mut first_user: Option<String> = None;
@@ -112,6 +119,39 @@ fn parse_session_label(path: &Path) -> Option<String> {
         }
     }
     first_user
+}
+
+/// jsonl 꼬리 64KB 에서 가장 마지막 `custom-title` 레코드의 제목. 여러 번
+/// rename 하면 마지막 것이 이긴다(claude `/rename` 동일 규칙). 파일이 64KB 를
+/// 넘고 rename 이후 대화가 그만큼 더 쌓인 극단 케이스만 놓치는데, 그땐
+/// ai-title 폴백이라 라벨이 비지는 않는다.
+fn last_custom_title(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(64 * 1024);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    // seek 이 줄/멀티바이트 중간에 떨어질 수 있어 lossy + 첫 부분줄 스킵.
+    let text = String::from_utf8_lossy(&buf);
+    let mut last: Option<String> = None;
+    for line in text.lines().skip(usize::from(start > 0)) {
+        if !line.contains("\"custom-title\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if v.get("type").and_then(|t| t.as_str()) != Some("custom-title") {
+            continue;
+        }
+        if let Some(t) = v.get("customTitle").and_then(|t| t.as_str()) {
+            let t = t.trim();
+            if !t.is_empty() {
+                last = Some(t.chars().take(80).collect());
+            }
+        }
+    }
+    last
 }
 
 /// 라벨로 부적합한 메타성 user 텍스트(슬래시 명령·시스템 주입·bash 출력 래퍼).
