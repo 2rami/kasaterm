@@ -217,6 +217,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketViewCwd(pane, cwd) => {
+                // 파일트리 루트 오버라이드 — "pane 이 보는 경로"(statusline report /
+                // transcript bind). 활성 pane 이면 다음 프레임 refresh_file_tree 가
+                // 새 루트를 집도록 리드로우만 청한다.
+                let is_active = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .and_then(|w| w.active_pane.clone())
+                    .as_deref()
+                    == Some(pane.as_str());
+                let prev = self.pane_view_cwd.insert(pane.clone(), cwd.clone());
+                if is_active && prev.as_ref() != Some(cwd) {
+                    self.chrome_dirty = true;
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+                return;
+            }
             UserEvent::NudgePaneResize(pane) => {
                 // 1행 지글 — 줄이고 120ms 뒤 원복(pending_unjiggle drain). 크기가
                 // 변해야 SIGWINCH 재레이아웃이 돌아 statusline 이 재실행된다(같은
