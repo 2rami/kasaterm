@@ -1057,6 +1057,25 @@ impl App {
                 };
                 if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
+                    // 입력박스 상단 보더 왼쪽 '─' 구간에 세션 제목 인레이(거노:
+                    // @이름칩만으론 이 pane 이 뭘 하는 중인지 안 보임). 라벨
+                    // 규칙은 피커와 동일(custom-title > aiTitle > 첫 user) —
+                    // Stop hook(title-sync)이 턴마다 custom-title 을 최신
+                    // 프롬프트로 갱신해 "지금 하는 작업"이 이 자리에 흐른다.
+                    let title = self
+                        .pane_claude_sid
+                        .get(id.as_str())
+                        .and_then(|sid| {
+                            let cwd = self
+                                .pane_view_cwd
+                                .get(id.as_str())
+                                .or_else(|| self.pane_cwd_cache.get(id.as_str()))?;
+                            crate::socket::project_jsonl(cwd, sid)
+                        })
+                        .and_then(|p| pane_session_label(&p));
+                    if let Some(t) = title.as_deref() {
+                        inlay_prompt_box_title(&mut composed, t);
+                    }
                 }
                 slots.push(PaneSlot {
                     rows: composed,
@@ -5477,6 +5496,74 @@ fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
     }
 }
 
+/// pane transcript 의 세션 라벨(피커와 동일 규칙: custom-title > aiTitle > 첫
+/// user 프롬프트) — 파일 길이가 그대로면 캐시 반환(프레임당 stat 1회), 대화가
+/// 자라 길이가 변했을 때만 재파싱(latest_teammate_msg 와 같은 전략).
+fn pane_session_label(path: &std::path::Path) -> Option<String> {
+    type Cache = std::collections::HashMap<std::path::PathBuf, (u64, Option<String>)>;
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<Cache>> =
+        std::sync::LazyLock::new(Default::default);
+    let len = std::fs::metadata(path).ok()?.len();
+    let mut map = CACHE.lock().ok()?;
+    if let Some((l, t)) = map.get(path) {
+        if *l == len {
+            return t.clone();
+        }
+    }
+    let found = kasa_socket::sessions::session_label_for(path);
+    map.insert(path.to_path_buf(), (len, found.clone()));
+    found
+}
+
+/// 입력박스 상단 보더의 왼쪽 '─' 연속 구간에 세션 제목을 인레이 — 스냅샷 전용,
+/// 원본 그리드 무손상(배너 타이틀 치환과 같은 원칙). 오른쪽 @이름칩은 왼쪽
+/// run 안에서만 쓰므로 건드리지 않는다. 스타일은 보더 셀 승계 —
+/// style_prompt_box 가 학생 accent 로 칠한 뒤 호출되어 칩·보더와 색 언어가
+/// 같다. 폭이 모자라면 '…' 말줄임, 대시 여유(양끝 대시+양옆 공백 4칸)조차
+/// 없는 극단 폭은 그냥 포기한다.
+fn inlay_prompt_box_title(rows: &mut [Vec<GridCell>], title: &str) {
+    use unicode_width::UnicodeWidthChar;
+    let Some(range) = prompt_box_rows(rows) else { return };
+    let row = &mut rows[range.start - 1];
+    let Some(l0) = row.iter().position(|c| c.ch == '─') else { return };
+    let run = row[l0..].iter().take_while(|c| c.ch == '─').count();
+    let Some(avail) = run.checked_sub(4).filter(|a| *a >= 2) else { return };
+    let style = row[l0].clone();
+    let mk = |ch: char| {
+        let mut c = style.clone();
+        c.ch = ch;
+        c
+    };
+    let total: usize = title.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
+    let mut cells: Vec<GridCell> = Vec::with_capacity(avail.min(total));
+    for ch in title.chars() {
+        let w = ch.width().unwrap_or(1).max(1);
+        if total > avail && cells.len() + w + 1 > avail {
+            cells.push(mk('…'));
+            break;
+        }
+        if cells.len() + w > avail {
+            break;
+        }
+        cells.push(mk(ch));
+        // 와이드 글리프 다음 칸은 스페이서(composed 경로 실측은 ' ').
+        if w == 2 {
+            cells.push(mk(' '));
+        }
+    }
+    if cells.is_empty() {
+        return;
+    }
+    let mut w = l0 + 1;
+    row[w] = mk(' ');
+    w += 1;
+    for cell in cells {
+        row[w] = cell;
+        w += 1;
+    }
+    row[w] = mk(' ');
+}
+
 /// verbose OFF 에서 접힌 팀메시지 행("› Message from @<이름>") 탐지 —
 /// (첫 글리프 col, 보낸이 agent 이름). 이름 뒤에 다른 글자가 있으면(본문 안
 /// 인용 등) 접힌 줄이 아니라고 본다 — 오탐이 실제 출력 텍스트를 덮어쓰면 안 된다.
@@ -6671,3 +6758,79 @@ mod student_asset_tests {
     }
 }
 
+// 입력박스 상단 보더 세션 제목 인레이 — 왼쪽 '─' run 에만 쓰고 @이름칩은
+// 무손상, 좁으면 '…', 극단 폭은 원문 유지.
+#[cfg(test)]
+mod prompt_title_inlay_tests {
+    use super::*;
+
+    fn row_from(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|c| {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                cell
+            })
+            .collect()
+    }
+
+    fn box_rows(width: usize) -> Vec<Vec<GridCell>> {
+        vec![
+            row_from(&"─".repeat(width)),
+            row_from(&format!("❯{}", " ".repeat(width - 1))),
+            row_from(&"─".repeat(width)),
+        ]
+    }
+
+    fn row_text(row: &[GridCell]) -> String {
+        row.iter().map(|c| c.ch).collect()
+    }
+
+    #[test]
+    fn title_inlaid_left_of_border() {
+        let mut rows = box_rows(30);
+        inlay_prompt_box_title(&mut rows, "제목");
+        // 대시 1칸 유지 후 " 제(sp)목(sp) " — 나머지는 보더 그대로.
+        assert_eq!(row_text(&rows[0]), format!("─ 제 목  {}", "─".repeat(23)));
+        // 아래 보더·본문은 무손상.
+        assert!(rows[2].iter().all(|c| c.ch == '─'));
+    }
+
+    #[test]
+    fn long_title_truncated_with_ellipsis() {
+        let mut rows = box_rows(14); // avail = 10
+        inlay_prompt_box_title(&mut rows, "가나다라마바사");
+        let text = row_text(&rows[0]);
+        assert!(text.starts_with("─ 가 나 다 라 …"), "{text}");
+        // 오른쪽 끝 대시는 남는다(칩 영역 침범 금지 원칙의 최소 보증).
+        assert_eq!(rows[0].last().unwrap().ch, '─');
+    }
+
+    #[test]
+    fn narrow_border_left_untouched() {
+        let mut rows = box_rows(11); // run=11 → avail=7 이지만 최소폭 실험은 5로
+        let mut tiny = vec![
+            row_from(&"─".repeat(5)),
+            row_from("❯    "),
+            row_from(&"─".repeat(5)),
+        ];
+        inlay_prompt_box_title(&mut tiny, "제목");
+        // run 5 는 prompt_box_rows 의 dash>=10 미달 — 인식 자체가 안 돼 원문 유지.
+        assert!(tiny[0].iter().all(|c| c.ch == '─'));
+        // 정상 인식되는 11칸: avail=7, "제목"(4칸)은 들어간다.
+        inlay_prompt_box_title(&mut rows, "제목");
+        assert!(row_text(&rows[0]).starts_with("─ 제 목 "));
+    }
+
+    #[test]
+    fn non_input_box_untouched() {
+        // ❯ 마커 없는 풀폭 박스(권한 메뉴 등)는 건드리지 않는다.
+        let mut rows = vec![
+            row_from(&"─".repeat(30)),
+            row_from(&format!("no marker{}", " ".repeat(21))),
+            row_from(&"─".repeat(30)),
+        ];
+        inlay_prompt_box_title(&mut rows, "제목");
+        assert!(rows[0].iter().all(|c| c.ch == '─'));
+    }
+}
