@@ -103,6 +103,70 @@ pub fn claude_color_for(chars: &Value, name: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// 편집용 원본 persona — persona_for 와 달리 COLLAB_PROTOCOL 을 붙이지 않는다.
+/// 설정 폼은 사용자가 실제로 쓴 텍스트만 로드/저장해야 하므로(규약은 주입 시 자동
+/// 부착), 편집 왕복에서 규약이 중복 누적되지 않게 한다.
+pub fn raw_persona_for(chars: &Value, name: &str) -> Option<String> {
+    find_character(chars, name)
+        .and_then(|m| m.get("persona").and_then(|x| x.as_str()))
+        .map(String::from)
+}
+
+/// 사용자 override characters.json 경로 — `~/.config/kasaterm/characters.json`
+/// (candidate_paths 의 최우선 슬롯). 설정 폼 저장 대상.
+pub fn user_characters_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".config/kasaterm/characters.json"))
+}
+
+/// 사용자 override characters.json 에서 `name` 캐릭터의 `key` 필드를 갱신한다
+/// (persona·claude_color 인라인 편집용). 파일이 없으면 현재 활성 정본을 seed 로
+/// 로드해 편집하므로 첫 저장이 다른 캐릭터를 지우지 않는다. 원자 write
+/// (tmp→rename). 이름을 못 찾으면 조용히 무시(파일 오염 방지).
+pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()> {
+    let path = user_characters_path().ok_or_else(|| std::io::Error::other("no HOME"))?;
+    let mut root = if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    } else {
+        characters_json()
+    }
+    .unwrap_or_else(|| Value::Object(Default::default()));
+
+    let mut applied = false;
+    if let Some(l) = root.get_mut("leader") {
+        if l.get("name").and_then(|n| n.as_str()) == Some(name) {
+            l[key] = value.clone();
+            applied = true;
+        }
+    }
+    for arr_key in ["leaders", "members"] {
+        if applied {
+            break;
+        }
+        if let Some(arr) = root.get_mut(arr_key).and_then(|x| x.as_array_mut()) {
+            for m in arr.iter_mut() {
+                if m.get("name").and_then(|n| n.as_str()) == Some(name) {
+                    m[key] = value.clone();
+                    applied = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !applied {
+        return Ok(());
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let body = serde_json::to_string_pretty(&root).map_err(std::io::Error::other)?;
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &path)
+}
+
 /// 모든 캐릭터 persona 끝에 붙는 협업 규약 — 동료를 기다릴 땐 tell 로 깨우지 말고
 /// wake-watch 를 background 로 띄워 자동 재개(거노: task-notification wake 활용).
 const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\

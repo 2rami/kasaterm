@@ -92,6 +92,18 @@ pub struct GpuRenderer {
     /// code). main.rs hit-tests a click and copies `code`. Rebuilt each
     /// `draw_markdown` like `md_link_rects`.
     pub md_copy_rects: Vec<(f32, f32, f32, f32, String)>,
+    /// Tree-sitter span cache for raw-editor buffers, content-addressed by a
+    /// hash of (lang, lines) — no pane id needed, and a tiny LRU keeps a few
+    /// split editors from thrashing each other's entries.
+    raw_hl: Vec<RawHlEntry>,
+}
+
+/// One cached tree-sitter highlight: the buffer hash it was computed from and
+/// the per-line (token, kind) runs, shared with the draw loop via Rc so the
+/// cache lookup doesn't fight the `&mut self` draw calls.
+struct RawHlEntry {
+    hash: u64,
+    spans: std::rc::Rc<Vec<Vec<(String, crate::syntax::SynKind)>>>,
 }
 
 /// One pane's slot in `render_frame`. Mirrors the data the existing
@@ -435,6 +447,7 @@ impl GpuRenderer {
             icon_quads: Vec::new(),
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
+            raw_hl: Vec::new(),
         })
     }
 
@@ -1358,10 +1371,87 @@ impl GpuRenderer {
         (line, best_col)
     }
 
+    /// Raw-editor line box height in logical px — the one number
+    /// `draw_raw_editor`, hit-testing and scroll math must all agree on.
+    pub fn raw_editor_line_h(&mut self) -> f32 {
+        let base = self.font_size_px as f32 / self.scale;
+        (self.shaper.line_height(base * self.scale).ceil() / self.scale) * 1.25
+    }
+
+    /// Compute the scroll pan that keeps the caret visible inside a raw-editor
+    /// body box of `w`×`h`. Mirrors `draw_raw_editor`'s metrics. `prefix` is
+    /// the caret line's text up to the caret column. Returns the corrected
+    /// (scroll, h_scroll); unchanged values mean the caret was already in view.
+    pub fn raw_editor_ensure_visible(
+        &mut self,
+        line_count: usize,
+        cur_line: usize,
+        prefix: &str,
+        w: f32,
+        h: f32,
+        scroll: f32,
+        h_scroll: f32,
+    ) -> (f32, f32) {
+        let base = self.font_size_px as f32 / self.scale;
+        let pad = base * 0.6;
+        let lh = self.raw_editor_line_h();
+        let digits = ((line_count.max(1)) as f32).log10().floor() as usize + 1;
+        let gutter_w = base * 0.62 * digits as f32 + base * 1.0;
+        // Vertical: line top on screen is y + pad + li*lh - scroll, so the box
+        // stays fully visible while scroll ∈ [pad+(li+1)*lh - h, pad + li*lh].
+        let hi = pad + cur_line as f32 * lh;
+        let lo = (pad + (cur_line as f32 + 1.0) * lh - h).max(0.0);
+        let ns = scroll.clamp(lo, hi.max(lo));
+        // Horizontal: the caret pen-x must stay inside the text viewport
+        // (right of the gutter, left of the pane edge), with a small margin so
+        // the next glyph is already visible while typing at the edge.
+        let view_w = (w - pad * 2.0 - gutter_w).max(base);
+        let margin = (base * 2.0).min(view_w * 0.25);
+        let caret_x = self.measure_run(prefix, base, false, false, true, false);
+        let mut nh = h_scroll;
+        if caret_x < nh + margin {
+            nh = (caret_x - margin).max(0.0);
+        } else if caret_x > nh + view_w - margin {
+            nh = caret_x - view_w + margin;
+        }
+        (ns, nh)
+    }
+
+    /// Content-addressed lookup of tree-sitter spans for a raw-editor buffer.
+    /// Recomputes only when the buffer (or lang) actually changed; None for
+    /// unsupported or oversized files → the caller uses the line lexer.
+    fn raw_editor_ts_spans(
+        &mut self,
+        lines: &[String],
+        lang: &str,
+    ) -> Option<std::rc::Rc<Vec<Vec<(String, crate::syntax::SynKind)>>>> {
+        crate::syntax::canon_lang(lang)?;
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        lang.hash(&mut h);
+        lines.len().hash(&mut h);
+        for l in lines {
+            l.hash(&mut h);
+        }
+        let hash = h.finish();
+        if let Some(i) = self.raw_hl.iter().position(|e| e.hash == hash) {
+            let e = self.raw_hl.remove(i);
+            let spans = e.spans.clone();
+            self.raw_hl.insert(0, e);
+            return Some(spans);
+        }
+        let spans = std::rc::Rc::new(crate::syntax::highlight_lines(lang, lines)?);
+        self.raw_hl.insert(0, RawHlEntry { hash, spans: spans.clone() });
+        self.raw_hl.truncate(4);
+        Some(spans)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_raw_editor(
         &mut self,
         lines: &[String],
         cursor: (usize, usize),
+        sel: Option<((usize, usize), (usize, usize))>,
         x: f32,
         y: f32,
         w: f32,
@@ -1391,6 +1481,10 @@ impl GpuRenderer {
         let clip_top = y;
         let clip_bot = y + h;
         let top0 = (y - scroll) + pad;
+        // Tree-sitter spans for the whole buffer (cached across frames, Rc so
+        // the borrow doesn't block the &mut draw calls below). None → the
+        // per-line lexer fallback inside the loop.
+        let ts_spans = self.raw_editor_ts_spans(lines, lang);
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
             if pen_y + lh > clip_top && pen_y < clip_bot {
@@ -1400,18 +1494,69 @@ impl GpuRenderer {
                 if li == cursor.0 {
                     self.rect(x, pen_y, w, lh, crate::theme::surface_hover());
                 }
-                // Code line, syntax-highlighted (single TEXT color when `lang`
-                // is empty, e.g. plain text), panned by h_scroll.
+                // Selection band for this line's slice of the (normalized)
+                // range: full width on interior lines (plus a small nub for
+                // the newline), prefix-measured ends on the boundary lines.
+                // Drawn before the text so glyphs stay crisp on top.
+                if let Some((s, e)) = sel {
+                    if li >= s.0 && li <= e.0 {
+                        let n = line.chars().count();
+                        let c0 = if li == s.0 { s.1.min(n) } else { 0 };
+                        let c1 = if li == e.0 { e.1.min(n) } else { n };
+                        let p0: String = line.chars().take(c0).collect();
+                        let p1: String = line.chars().take(c1).collect();
+                        let sx0 = tx0 + self.measure_run(&p0, base, false, false, true, false);
+                        let mut sx1 = tx0 + self.measure_run(&p1, base, false, false, true, false);
+                        if li < e.0 {
+                            sx1 += base * 0.45;
+                        }
+                        let rx0 = sx0.max(cx0);
+                        let rx1 = sx1.min(clip_right);
+                        if rx1 > rx0 {
+                            self.rect(
+                                rx0,
+                                pen_y,
+                                rx1 - rx0,
+                                lh,
+                                crate::theme::with_alpha(crate::theme::accent(), 0x4A),
+                            );
+                        }
+                    }
+                }
+                // Code line: tree-sitter spans when the grammar is supported,
+                // else the stateless line lexer (single TEXT color when `lang`
+                // is empty, e.g. plain text). Panned by h_scroll.
                 let mut tx = tx0;
-                for (tok, col) in highlight_code_line(line, lang, crate::theme::text()) {
-                    tx = self.draw_text_clipped(
-                        tx,
-                        pen_y + glyph_voff,
-                        &tok,
-                        DrawOpts { font_size: base, color: col, bold: false, italic: false },
-                        cx0,
-                        clip_right,
-                    );
+                match ts_spans.as_ref().and_then(|s| s.get(li)) {
+                    Some(spans) => {
+                        for (tok, kind) in spans {
+                            tx = self.draw_text_clipped(
+                                tx,
+                                pen_y + glyph_voff,
+                                tok,
+                                DrawOpts {
+                                    font_size: base,
+                                    color: kind.color(crate::theme::text()),
+                                    bold: false,
+                                    italic: false,
+                                },
+                                cx0,
+                                clip_right,
+                            );
+                        }
+                    }
+                    None => {
+                        for (tok, col) in highlight_code_line(line, lang, crate::theme::text()) {
+                            tx = self.draw_text_clipped(
+                                tx,
+                                pen_y + glyph_voff,
+                                &tok,
+                                DrawOpts { font_size: base, color: col, bold: false, italic: false },
+                                cx0,
+                                clip_right,
+                            );
+                        }
+                    }
                 }
                 // Cursor (drawn before the gutter mask so one panned under the
                 // gutter gets clipped away cleanly).
@@ -1562,6 +1707,13 @@ impl GpuRenderer {
         self.images.remove(id);
     }
 
+    /// Evict every cached texture whose id starts with `prefix`. Used to force a
+    /// reload after the user swaps character images — `upload_image` no-ops on an
+    /// existing key, so the stale texture must be dropped first.
+    pub fn drop_images_with_prefix(&mut self, prefix: &str) {
+        self.images.retain(|k, _| !k.starts_with(prefix));
+    }
+
     /// Bundled Lucide SVG source for a chrome icon name. Compiled in so the
     /// .app needs no external asset dir.
     fn icon_svg(name: &str) -> Option<&'static str> {
@@ -1577,6 +1729,8 @@ impl GpuRenderer {
             "file-plus" => include_str!("../assets/icons/file-plus.svg"),
             "chevron-right" => include_str!("../assets/icons/chevron-right.svg"),
             "chevron-down" => include_str!("../assets/icons/chevron-down.svg"),
+            "chevron-left" => include_str!("../assets/icons/chevron-left.svg"),
+            "chevron-up" => include_str!("../assets/icons/chevron-up.svg"),
             "file" => include_str!("../assets/icons/file.svg"),
             "file-code" => include_str!("../assets/icons/file-code.svg"),
             "image" => include_str!("../assets/icons/image.svg"),
@@ -1833,6 +1987,50 @@ impl GpuRenderer {
                 cell_px: [dx, dy, dw, dh],
                 uv_min: [uv_x0, uv_y0],
                 uv_max: [uv_x1, uv_y1],
+                fg_rgba: [1.0, 1.0, 1.0, 1.0],
+                flags: CellInstance::FLAG_COLOR,
+                ..Default::default()
+            },
+        ));
+    }
+
+    /// `queue_image` 의 세로 클립 버전 — 박스가 pane 밖까지 이어질 때(스크롤로
+    /// 잘린 학생 배너) contain-fit 결과를 클립 범위와 교차시키고 UV 를 같은
+    /// 비율로 잘라, 스프라이트가 셀 스크롤과 함께 자연스럽게 잘려 나가게
+    /// 한다. 클립이 박스를 다 덮으면 `queue_image(zoom=1)` 와 동일. LOGICAL px.
+    pub fn queue_image_clipped(
+        &mut self,
+        id: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        clip_y0: f32,
+        clip_y1: f32,
+    ) {
+        let Some(entry) = self.images.get(id) else { return };
+        let s = self.scale;
+        let (bx, by, bw, bh) = (x * s, y * s, w * s, h * s);
+        if bw <= 0.0 || bh <= 0.0 {
+            return;
+        }
+        let (iw, ih) = (entry.w as f32, entry.h as f32);
+        let fit = (bw / iw).min(bh / ih).min(1.0);
+        let (dw, dh) = (iw * fit, ih * fit);
+        let dx = bx + (bw - dw) * 0.5;
+        let dy = by + (bh - dh) * 0.5;
+        let top = dy.max(clip_y0 * s);
+        let bot = (dy + dh).min(clip_y1 * s);
+        if bot <= top {
+            return;
+        }
+        let (uv_y0, uv_y1) = ((top - dy) / dh, (bot - dy) / dh);
+        self.image_quads.push((
+            id.to_string(),
+            CellInstance {
+                cell_px: [dx, top, dw, bot - top],
+                uv_min: [0.0, uv_y0],
+                uv_max: [1.0, uv_y1],
                 fg_rgba: [1.0, 1.0, 1.0, 1.0],
                 flags: CellInstance::FLAG_COLOR,
                 ..Default::default()
@@ -3378,3 +3576,38 @@ pub fn toggle_maximize_no_anim(window: &Window, saved: &mut Option<(f64, f64, f6
 pub fn toggle_maximize_no_anim(window: &Window, _saved: &mut Option<(f64, f64, f64, f64)>) {
     window.set_maximized(!window.is_maximized());
 }
+
+/// While the window is NOT zoomed, remember its frame as the un-zoom restore
+/// target. The green traffic-light zoom never passes through
+/// `toggle_maximize_no_anim`, so without this a title double-click after a
+/// green-button zoom had no frame to restore to (`saved == None` → stayed
+/// maximized, read as a dead click). Called from Moved/Resized — two
+/// msg_sends, cheap enough for live-resize spam.
+#[cfg(target_os = "macos")]
+pub fn remember_unzoomed_frame(window: &Window, saved: &mut Option<(f64, f64, f64, f64)>) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSRect;
+    use raw_window_handle::RawWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let is_zoomed: bool = msg_send![ns_window, isZoomed];
+        if !is_zoomed {
+            let cur: NSRect = msg_send![ns_window, frame];
+            *saved = Some((cur.origin.x, cur.origin.y, cur.size.width, cur.size.height));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn remember_unzoomed_frame(_window: &Window, _saved: &mut Option<(f64, f64, f64, f64)>) {}

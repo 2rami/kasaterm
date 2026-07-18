@@ -535,13 +535,9 @@ impl ApplicationHandler<UserEvent> for App {
         // Persist every session's layout + pane cwds + claude sessions so the
         // next launch restores the full workspace (A3).
         self.save_session_state();
-        // Persist the window size so the next launch restores it instead of the
-        // hardcoded default (껐던 크기 복원).
-        if let Some(win) = self.window.as_ref() {
-            let scale = win.scale_factor().max(0.5);
-            let sz = win.inner_size();
-            crate::socket::write_window_size(sz.width as f64 / scale, sz.height as f64 / scale);
-        }
+        // Persist the window size + position so the next launch restores the
+        // frame instead of the hardcoded default (껐던 크기·위치 복원).
+        self.save_window_frame();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -668,6 +664,22 @@ impl ApplicationHandler<UserEvent> for App {
                 .create_window(attrs)
                 .expect("create window"),
         );
+        // Restore the saved window position (physical px). Only when the saved
+        // point still lands on a live monitor — the monitor may have been
+        // unplugged since, and an off-screen restore would strand the window.
+        if let Some((px, py)) = crate::socket::read_window_pos() {
+            let on_screen = window.available_monitors().any(|m| {
+                let mp = m.position();
+                let ms = m.size();
+                px >= mp.x as f64
+                    && px < (mp.x as f64 + ms.width as f64 - 60.0)
+                    && py >= mp.y as f64
+                    && py < (mp.y as f64 + ms.height as f64 - 60.0)
+            });
+            if on_screen {
+                window.set_outer_position(winit::dpi::PhysicalPosition::new(px, py));
+            }
+        }
         // Start the launch banner clock when the window actually appears,
         // not at struct construction (which can precede the first frame).
         self.version_anim_start = Instant::now();
@@ -1069,7 +1081,19 @@ impl ApplicationHandler<UserEvent> for App {
                     self.render_frame();
                 });
             }
+            // 창 이동은 렌더에 영향 없음 — 프레임 저장 디바운스만 재장전.
+            WindowEvent::Moved(_) => {
+                self.window_frame_save_due =
+                    Some(Instant::now() + std::time::Duration::from_millis(1000));
+                // Track the last un-zoomed frame so a green-button zoom (which
+                // bypasses toggle_maximize_no_anim) still restores on the next
+                // title double-click.
+                gpu::remember_unzoomed_frame(&window, &mut self.saved_window_frame);
+            }
             WindowEvent::Resized(size) => {
+                self.window_frame_save_due =
+                    Some(Instant::now() + std::time::Duration::from_millis(1000));
+                gpu::remember_unzoomed_frame(&window, &mut self.saved_window_frame);
                 if std::env::var_os("KASATERM_RESIZE_DEBUG").is_some() {
                     eprintln!(
                         "[rsz {}ms] Resized {}x{} live={}",
@@ -1408,6 +1432,15 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // Raw-editor selection drag: the caret follows the cursor
+                // while the anchor stays at the press. Caret-follow scrolling
+                // makes dragging past the edge extend the selection.
+                if let Some(id) = self.md_select_drag.clone() {
+                    self.md_click_caret(&id, self.cursor_px.0, self.cursor_px.1);
+                    self.md_ensure_caret_visible();
+                    window.request_redraw();
+                    return;
+                }
                 // Image pan drag: slide the zoomed image by the cursor delta,
                 // clamped to the slack so it can't be dragged off the texture.
                 if let Some((pane_id, start, base)) = self.image_pan_drag.clone() {
@@ -1666,6 +1699,42 @@ impl ApplicationHandler<UserEvent> for App {
                         self.file_tree.ctx_menu = Some((cx, cy));
                         self.chrome_dirty = true;
                         window.request_redraw();
+                    }
+                }
+            }
+            // Middle-click → close the tab under the cursor: in-pane tab pill
+            // first, then a window tab (side sidebar or top title strip). The
+            // browser/터미널들 공통 관례라 kasaterm 도 따른다.
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                let (cx, cy) = self.cursor_px;
+                let inside = |r: &(f32, f32, f32, f32)| {
+                    cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                };
+                let pane_tab = self
+                    .pane_tab_rects
+                    .iter()
+                    .find(|(_, _, r)| inside(r))
+                    .map(|(id, idx, _)| (id.clone(), *idx));
+                if let Some((id, idx)) = pane_tab {
+                    self.close_tab(&id, idx);
+                    return;
+                }
+                let in_strip = (self.sidebar_visible && cx < self.sidebar_w_logical)
+                    || (self.tabs_on_top && cy < TITLE_HEIGHT);
+                if in_strip {
+                    if let Some(idx) = self
+                        .window_tab_rects
+                        .iter()
+                        .find(|(_, r)| inside(r))
+                        .map(|(i, _)| *i)
+                    {
+                        if let Err(e) = self.close_window(idx) {
+                            eprintln!("[window] close failed: {e:#}");
+                        }
                     }
                 }
             }
@@ -2089,52 +2158,20 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // Left window-tab sidebar. Caught first — it owns the whole
                     // left strip, so a click there never falls through to the
-                    // cell grid. Order: close-× (sits on top of a tab) → tab →
-                    // "+" new-window button.
+                    // cell grid. Hit order lives in `window_strip_click`.
                     if self.sidebar_visible && cx < self.sidebar_w_logical {
-                        let inside =
-                            |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
-                        if let Some(idx) = self
-                            .window_tab_close_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(i, _)| *i)
-                        {
-                            if let Err(e) = self.close_window(idx) {
-                                eprintln!("[window] close failed: {e:#}");
-                            }
-                            return;
-                        }
-                        if let Some(idx) = self
-                            .window_tab_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(i, _)| *i)
-                        {
-                            // Picking a session tab means you want to see it, so
-                            // leave the settings screen first.
-                            if self.settings_open {
-                                self.close_settings();
-                            }
-                            self.switch_window(idx);
-                            return;
-                        }
-                        if self.new_window_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
-                            if self.settings_open {
-                                self.close_settings();
-                            }
-                            // 피커 항목은 Windows 설치 셸뿐 — macOS/Linux 는 목록이
-                            // 비므로 메뉴 대신 즉시 기본 셸 새 윈도우("Claude 학생"
-                            // 항목은 폐기 — split+claude 수동 부팅으로 충분, 거노).
-                            if crate::available_shells().is_empty() {
-                                self.new_window();
-                            } else {
-                                self.shell_menu_open = !self.shell_menu_open;
-                            }
-                            self.chrome_dirty = true;
+                        if self.window_strip_click(cx, cy) {
                             return;
                         }
                         // Empty sidebar space — swallow the click.
+                        return;
+                    }
+                    // Top-tabs mode: the window tabs live in the title strip,
+                    // not the sidebar, so they need their own gate — without it
+                    // the click fell through to the title-bar drag below and
+                    // the tabs were dead (switch/close/+ all no-ops). A miss is
+                    // NOT swallowed: empty strip space still drags the window.
+                    if self.tabs_on_top && cy < TITLE_HEIGHT && self.window_strip_click(cx, cy) {
                         return;
                     }
                     // Click outside the tree column drops search focus — else
@@ -3031,6 +3068,22 @@ impl ApplicationHandler<UserEvent> for App {
                                             self.cursor_px.0,
                                             self.cursor_px.1,
                                         );
+                                        // Arm a selection drag: anchor at the
+                                        // pressed caret; the drag moves the
+                                        // caret while the anchor stays. A
+                                        // plain click resolves on Released
+                                        // (anchor == caret → cleared).
+                                        if let Ok(mut ws) = self.ws.lock() {
+                                            if let Some(m) = ws
+                                                .panes
+                                                .get_mut(&pane_id)
+                                                .and_then(|p| p.markdown_mut())
+                                            {
+                                                m.sel_anchor =
+                                                    Some((m.cur_line, m.cur_col));
+                                            }
+                                        }
+                                        self.md_select_drag = Some(pane_id.clone());
                                     } else {
                                         self.try_open_md_link();
                                     }
@@ -3065,6 +3118,26 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
+                        }
+                        // End a raw-editor selection drag; a plain click (no
+                        // movement) leaves anchor == caret, which reads as
+                        // "no selection" — drop the anchor entirely.
+                        if let Some(id) = self.md_select_drag.take() {
+                            if let Ok(mut ws) = self.ws.lock() {
+                                if let Some(pane) = ws.panes.get_mut(&id) {
+                                    let empty = pane.markdown().map_or(false, |m| {
+                                        m.sel_anchor == Some((m.cur_line, m.cur_col))
+                                    });
+                                    if empty {
+                                        if let Some(m) = pane.markdown_mut() {
+                                            m.sel_anchor = None;
+                                        }
+                                    }
+                                    pane.dirty = true;
+                                }
+                            }
+                            window.request_redraw();
+                            return;
                         }
                         // End an image pan drag.
                         if self.image_pan_drag.take().is_some() {
@@ -3562,6 +3635,15 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // 창 이동/리사이즈 1초 뒤 프레임 저장(디바운스) — exit 훅에만 맡기면
+        // 크래시·강제종료 때 크기·위치가 유실된다. about_to_wait 는 블링크
+        // 타이머(WaitUntil)로 주기 호출되니 별도 타이머가 필요 없다.
+        if let Some(due) = self.window_frame_save_due {
+            if Instant::now() >= due {
+                self.window_frame_save_due = None;
+                self.save_window_frame();
+            }
+        }
         // Dock badge tracks unread notifications: opening a pane clears it,
         // a background notify raises it.
         self.sync_dock_badge();
@@ -3793,6 +3875,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoconfirm();
         self.run_pending_autosettings();
         self.run_pending_autoshellmenu();
+        self.run_pending_automdselect();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was

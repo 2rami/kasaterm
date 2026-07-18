@@ -2002,15 +2002,33 @@ pub fn read_shim_inject() -> bool {
 /// Persist the last logical window size so the next launch restores it instead
 /// of the hardcoded default. Logical (DPI-independent) so moving between a
 /// Retina and an external display restores the same on-screen size.
-pub fn write_window_size(w: f64, h: f64) {
+/// Persist the window frame: logical size + (optionally) the outer position in
+/// physical px. `pos: None` keeps whatever position the file already has — the
+/// size-only callers must not erase a previously saved position.
+pub fn write_window_frame(w: f64, h: f64, pos: Option<(f64, f64)>) {
     use std::io::Write;
     let Some(path) = window_size_path() else { return };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    let pos = pos.or_else(read_window_pos);
+    let body = match pos {
+        Some((x, y)) => format!("{{\"w\":{w},\"h\":{h},\"x\":{x},\"y\":{y}}}"),
+        None => format!("{{\"w\":{w},\"h\":{h}}}"),
+    };
     if let Ok(mut f) = std::fs::File::create(&path) {
-        let _ = f.write_all(format!("{{\"w\":{w},\"h\":{h}}}").as_bytes());
+        let _ = f.write_all(body.as_bytes());
     }
+}
+
+/// Read the persisted outer window position (physical px), if one was saved.
+/// No range validation here — the caller checks the point against the live
+/// monitor set (a saved monitor may be unplugged by now).
+pub fn read_window_pos() -> Option<(f64, f64)> {
+    let path = window_size_path()?;
+    let txt = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+    Some((v.get("x")?.as_f64()?, v.get("y")?.as_f64()?))
 }
 
 /// Read the persisted logical window size. Rejects degenerate sizes (a window

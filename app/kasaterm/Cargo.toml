@@ -53,6 +53,18 @@ resvg = "0.45"
 # Move deleted file-tree entries to the OS trash (recoverable) instead of a
 # hard unlink, cross-platform.
 trash = "5"
+tree-sitter = "0.26.11"
+tree-sitter-highlight = "0.26.11"
+tree-sitter-rust = "0.24.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-json = "0.24.8"
+tree-sitter-bash = "0.25.1"
+tree-sitter-css = "0.25.0"
+tree-sitter-html = "0.23.2"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-yaml = "0.7.2"
 
 # macOS-only: patch the wgpu CAMetalLayer's contentsGravity to topLeft so
 # AppKit doesn't stretch stale layer contents during live window resize.

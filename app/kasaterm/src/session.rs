@@ -529,6 +529,7 @@ impl App {
         self.windows[self.active_window] = self.pty_layout.take();
         self.windows.push(None);
         self.active_window = self.windows.len() - 1;
+        self.win_tab_reveal(self.active_window);
         // spawn_session_pane sets pty_layout to a fresh single-pane tree,
         // inserts the PTY into the shared map, and points ws.active_pane at it.
         if let Err(e) = self.spawn_session_pane() {
@@ -568,6 +569,7 @@ impl App {
         self.windows[self.active_window] = self.pty_layout.take();
         self.pty_layout = self.windows[idx].take();
         self.active_window = idx;
+        self.win_tab_reveal(idx);
         // The user is now looking at this window — clear any unseen-notification
         // pulse on its sidebar tab.
         self.window_alert.remove(&idx);
@@ -647,6 +649,12 @@ impl App {
                 self.active_window -= 1;
             }
         }
+        // Keep the same tabs in view when one before the strip window closes;
+        // out-of-range values are clamped by sidebar_layout either way.
+        if idx < self.win_tab_first {
+            self.win_tab_first -= 1;
+        }
+        self.win_tab_reveal(self.active_window);
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
@@ -1058,6 +1066,11 @@ impl App {
                 cur_col: 0,
                 scroll: 0,
                 h_scroll: 0.0,
+                modified: false,
+                sel_anchor: None,
+                undo_stack: Vec::new(),
+                redo_stack: Vec::new(),
+                last_edit: EditKind::Break,
             })
         };
 
@@ -1124,7 +1137,7 @@ impl App {
             return;
         }
 
-        let ps = PaneState { tabs: vec![tab], active_tab: 0, color: None, character: None, dirty: true };
+        let ps = PaneState { tabs: vec![tab], dirty: true, ..Default::default() };
         self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
 
         let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
@@ -1200,16 +1213,22 @@ impl App {
             cur_col: 0,
             scroll: 0,
             h_scroll: 0.0,
+            modified: false,
+            sel_anchor: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_edit: EditKind::Break,
         });
         tab.title = title;
         tab.title_pinned = true;
         tab.preview_path = Some(path.clone());
-        let ps = PaneState { tabs: vec![tab], active_tab: 0, color: None, character: None, dirty: true };
+        let ps = PaneState { tabs: vec![tab], dirty: true, ..Default::default() };
 
         // 새 윈도우 슬롯 — new_window 의 슬롯 스왑만 차용(spawn_session_pane 제외).
         self.windows[self.active_window] = self.pty_layout.take();
         self.windows.push(None);
         self.active_window = self.windows.len() - 1;
+        self.win_tab_reveal(self.active_window);
 
         // 마크다운 pane = 새 윈도우의 유일한 leaf → ws.layout=None → 풀스크린 fallback.
         self.ws.lock().unwrap().panes.insert(new_id.clone(), ps);
@@ -1519,11 +1538,14 @@ impl App {
     ///     window exists (the last window can't be closed),
     ///   - the "+" new-window button rect under the last tab.
     /// Pure read of `windows.len()` so the render path and the mouse
-    /// hit-test agree on every rect. `win_h` is the logical window height
-    /// (unused today but kept so a future scroll/overflow clamp has it).
+    /// hit-test agree on every rect. Overflow: the strip shows a contiguous
+    /// run of whole tabs starting at `win_tab_first` (no partial clipping —
+    /// the renderer has no scissor). This only clamps `first` into range;
+    /// keeping the *active* tab in view is `win_tab_reveal`'s job at
+    /// switch/create time, so a free wheel-scroll is never yanked back.
     pub(crate) fn sidebar_layout(
         &self,
-        _win_h: f32,
+        win_h: f32,
     ) -> (
         Vec<(usize, (f32, f32, f32, f32))>,
         Vec<(usize, (f32, f32, f32, f32))>,
@@ -1540,44 +1562,59 @@ impl App {
                 .map(|w| w.inner_size().width as f32 / self.effective_scale())
                 .unwrap_or(1200.0);
             let (tbx, _, tbw, _) = self.file_tree_toggle_rect();
-            let x0 = tbx + tbw + 10.0;
+            // 14px slots at both ends host the overflow chevrons — reserved
+            // unconditionally so geometry doesn't depend on overflow state.
+            let x0 = tbx + tbw + 10.0 + 14.0;
             // Right-side chip cluster (arona + settings + git-col) stays clear.
-            let right_reserved = 110.0;
+            let right_reserved = 110.0 + 14.0;
             let plus_w = 26.0;
             let gap = 4.0;
             let avail = (win_w - right_reserved - x0 - plus_w - 6.0).max(60.0);
-            let tab_w = ((avail - gap * n.saturating_sub(1) as f32) / n.max(1) as f32)
+            // Whole tabs that fit at the 72px minimum width; hidden rest is
+            // reachable by wheel (win_tab_first) and stays out of the rects.
+            let n_vis = n.min((((avail + gap) / (72.0 + gap)) as usize).max(1));
+            let first = self.win_tab_first.min(n.saturating_sub(n_vis));
+            let tab_w = ((avail - gap * n_vis.saturating_sub(1) as f32) / n_vis.max(1) as f32)
                 .clamp(72.0, 170.0);
             let tab_h = 26.0;
             let y = (TITLE_HEIGHT - tab_h) / 2.0;
-            let mut tabs = Vec::with_capacity(n);
+            let mut tabs = Vec::with_capacity(n_vis);
             let mut closes = Vec::new();
-            for i in 0..n {
-                let x = x0 + i as f32 * (tab_w + gap);
+            for (vi, i) in (first..n.min(first + n_vis)).enumerate() {
+                let x = x0 + vi as f32 * (tab_w + gap);
                 tabs.push((i, (x, y, tab_w, tab_h)));
                 if n > 1 {
                     let cs = 14.0;
                     closes.push((i, (x + tab_w - cs - 5.0, y + (tab_h - cs) / 2.0, cs, cs)));
                 }
             }
-            let plus = (x0 + n as f32 * (tab_w + gap), y, plus_w, tab_h);
+            let plus = (x0 + tabs.len() as f32 * (tab_w + gap), y, plus_w, tab_h);
             return (tabs, closes, plus);
         }
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
-        let top = TITLE_HEIGHT + 8.0;
+        // 10px slot above the first tab hosts the overflow chevron-up.
+        let top = TITLE_HEIGHT + 18.0;
         let stride = SIDEBAR_TAB_H + SIDEBAR_TAB_GAP;
-        let mut tabs = Vec::with_capacity(n);
+        // Rows that fit above the "+" button; the dock strip eats the bottom
+        // of the column, and 24px stays free for "+"-adjacent chrome + the
+        // chevron-down overflow hint.
+        let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+        let avail_h = (win_h - dock_h - top - 28.0 - 24.0).max(stride);
+        let n_vis = n
+            .min((((avail_h + SIDEBAR_TAB_GAP) / stride) as usize).max(1));
+        let first = self.win_tab_first.min(n.saturating_sub(n_vis));
+        let mut tabs = Vec::with_capacity(n_vis);
         let mut closes = Vec::new();
-        for i in 0..n {
-            let y = top + i as f32 * stride;
+        for (vi, i) in (first..n.min(first + n_vis)).enumerate() {
+            let y = top + vi as f32 * stride;
             tabs.push((i, (tab_x, y, tab_w, SIDEBAR_TAB_H)));
             if n > 1 {
                 let cs = 14.0;
                 closes.push((i, (tab_x + tab_w - cs - 3.0, y + 3.0, cs, cs)));
             }
         }
-        let plus_y = top + n as f32 * stride;
+        let plus_y = top + tabs.len() as f32 * stride;
         let plus = (tab_x, plus_y, tab_w, 28.0);
         (tabs, closes, plus)
     }
