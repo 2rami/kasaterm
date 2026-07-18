@@ -1016,8 +1016,9 @@ impl App {
                                 });
                             }
                         }
-                        restyle_teammate_line(
-                            &mut composed[r],
+                        expand_teammate_message(
+                            &mut composed,
+                            r,
                             c0,
                             &sender,
                             msg.as_ref().map(|m| m.body.as_str()),
@@ -5697,12 +5698,101 @@ fn latest_teammate_msg(path: &std::path::Path, sender: &str) -> Option<TeammateM
     found
 }
 
-/// 접힌 팀메시지 행을 학생색 인라인으로 재작성(스냅샷 전용, 원본 그리드
-/// 무손상) — 본문이 있으면 "@ 이름❯ 본문…"(헤더 bold)으로 갈아끼우고, 없으면
-/// 원문 글자에 색만 입힌다. 와이드 글리프는 글자 + ' ' 스페이서 2칸(배너
-/// 타이틀 치환과 같은 composed 경로 실측).
-fn restyle_teammate_line(
-    row: &mut [GridCell],
+/// 행 전체가 공백/blank 인가 — 팀메시지 줄바꿈 전개가 이어 쓸 수 있는 행.
+fn row_is_blank(row: &[GridCell]) -> bool {
+    row.iter().all(|c| matches!(c.ch, ' ' | '\0'))
+}
+
+/// 문자열의 셀 폭 합(와이드 글리프 2칸).
+fn cell_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    s.chars().map(|c| c.width().unwrap_or(1).max(1)).sum()
+}
+
+/// 셀 폭 기준 word-wrap — 첫 줄은 first_w, 이후 줄은 cont_w 폭, 최대
+/// max_lines 줄. 공백 경계 우선, 줄보다 긴 단어는 글자 단위 분할.
+/// 반환 = (줄들, 본문이 남아 잘렸는지).
+fn wrap_body_cells(
+    text: &str,
+    first_w: usize,
+    cont_w: usize,
+    max_lines: usize,
+) -> (Vec<String>, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for word in text.split(' ') {
+        let ww = cell_width(word);
+        let limit = if lines.is_empty() { first_w } else { cont_w };
+        let need = if cur.is_empty() { ww } else { cur_w + 1 + ww };
+        if need <= limit {
+            if !cur.is_empty() {
+                cur.push(' ');
+                cur_w += 1;
+            }
+            cur.push_str(word);
+            cur_w += ww;
+            continue;
+        }
+        if !cur.is_empty() {
+            let full = lines.len() + 1 >= max_lines;
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+            if full {
+                return (lines, true);
+            }
+        }
+        // 단어가 다음 줄에도 통째로 안 들어가면 글자 단위로 쪼갠다.
+        let mut rest = word;
+        loop {
+            let limit = if lines.is_empty() { first_w } else { cont_w };
+            if cell_width(rest) <= limit {
+                cur = rest.to_string();
+                cur_w = cell_width(&cur);
+                break;
+            }
+            let mut take_b = 0usize;
+            let mut tw = 0usize;
+            for ch in rest.chars() {
+                use unicode_width::UnicodeWidthChar;
+                let cw = ch.width().unwrap_or(1).max(1);
+                if tw + cw > limit {
+                    break;
+                }
+                tw += cw;
+                take_b += ch.len_utf8();
+            }
+            if take_b == 0 {
+                // 폭 0/극단 — 무한루프 방지로 최소 한 글자는 넘긴다.
+                take_b = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                if take_b == 0 {
+                    break;
+                }
+            }
+            let full = lines.len() + 1 >= max_lines;
+            lines.push(rest[..take_b].to_string());
+            rest = &rest[take_b..];
+            if full {
+                return (lines, true);
+            }
+        }
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    (lines, false)
+}
+
+/// 접힌 팀메시지를 학생색으로 전개(스냅샷 전용, 원본 그리드 무손상) — 본문이
+/// 있으면 그 행을 "@ 이름❯ 본문"으로 갈아끼우고, **아래 blank 행이 있는 만큼
+/// 줄바꿈으로 이어 쓴다**(거노: 한 줄 말줄임 말고 펼쳐서). 그리드는 reflow 가
+/// 안 되니 빈 행 너머로 남는 본문은 '…' — 전문은 hover 말풍선이 담당. 다음
+/// 항목과의 구분 blank 1행은 남기고, 뷰포트 바닥까지 전부 빈 경우엔 끝까지
+/// 쓴다. 본문이 없으면 원문 글자에 색만. 와이드 글리프는 글자 + ' ' 스페이서
+/// 2칸(배너 타이틀 치환과 같은 composed 경로 실측).
+fn expand_teammate_message(
+    rows: &mut [Vec<GridCell>],
+    r: usize,
     start: usize,
     sender: &str,
     body: Option<&str>,
@@ -5710,69 +5800,87 @@ fn restyle_teammate_line(
 ) {
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let Some(body) = body else {
-        for c in row.iter_mut() {
+        for c in rows[r].iter_mut() {
             if c.ch != ' ' && c.ch != '\0' {
                 c.fg = fg.clone();
             }
         }
         return;
     };
-    if start >= row.len() {
+    let cols = rows[r].len();
+    if start >= cols || cols == 0 {
         return;
     }
-    let style = row[start].clone();
-    let old_end = row
-        .iter()
-        .rposition(|c| c.ch != ' ' && c.ch != '\0')
-        .map(|p| p + 1)
-        .unwrap_or(0);
-    let mut w = start;
-    let put = |row: &mut [GridCell], w: &mut usize, ch: char, bold: bool| -> bool {
-        use unicode_width::UnicodeWidthChar;
-        let cw = ch.width().unwrap_or(1).max(1);
-        if *w + cw > row.len() {
-            return false;
-        }
-        let mut cell = style.clone();
-        cell.ch = ch;
-        cell.fg = fg.clone();
-        cell.bold = bold;
-        row[*w] = cell;
-        if cw == 2 {
-            let mut sp = style.clone();
-            sp.ch = ' ';
-            sp.fg = fg.clone();
-            sp.bold = bold;
-            row[*w + 1] = sp;
-        }
-        *w += cw;
-        true
+    let style = rows[r][start].clone();
+    let blank_run = rows[r + 1..].iter().take_while(|w| row_is_blank(w)).count();
+    let usable = if r + 1 + blank_run >= rows.len() {
+        blank_run
+    } else {
+        blank_run.saturating_sub(1)
     };
-    for ch in format!("@ {sender}❯ ").chars() {
-        if !put(row, &mut w, ch, true) {
-            return;
-        }
-    }
-    // 본문은 개행·연속 공백을 한 칸으로 접은 인라인 — 넘치면 말줄임.
+    let header = format!("@ {sender}❯ ");
+    let indent = start + 2;
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut truncated = false;
-    for ch in flat.chars() {
-        if !put(row, &mut w, ch, false) {
-            truncated = true;
-            break;
+    let (lines, truncated) = wrap_body_cells(
+        &flat,
+        cols.saturating_sub(start + cell_width(&header)),
+        cols.saturating_sub(indent),
+        1 + usable,
+    );
+    // 행 하나에 텍스트를 칠하는 공용 페인터 — 다음 칸 index 를 돌려준다.
+    let put_line = |row: &mut [GridCell], mut w: usize, text: &str, bold: bool| -> usize {
+        use unicode_width::UnicodeWidthChar;
+        for ch in text.chars() {
+            let cw = ch.width().unwrap_or(1).max(1);
+            if w + cw > row.len() {
+                break;
+            }
+            let mut cell = style.clone();
+            cell.ch = ch;
+            cell.fg = fg.clone();
+            cell.bold = bold;
+            row[w] = cell;
+            if cw == 2 {
+                let mut sp = style.clone();
+                sp.ch = ' ';
+                sp.fg = fg.clone();
+                sp.bold = bold;
+                row[w + 1] = sp;
+            }
+            w += cw;
         }
-    }
-    if truncated {
+        w
+    };
+    let ellipsis = |row: &mut [GridCell], w: usize| {
         let p = w.min(row.len() - 1);
         let mut cell = style.clone();
         cell.ch = '…';
         cell.fg = fg.clone();
         row[p] = cell;
-        w = p + 1;
+        p + 1
+    };
+    let old_end = rows[r]
+        .iter()
+        .rposition(|c| c.ch != ' ' && c.ch != '\0')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let mut w = put_line(&mut rows[r], start, &header, true);
+    if let Some(first) = lines.first() {
+        w = put_line(&mut rows[r], w, first, false);
+    }
+    if lines.len() == 1 && truncated {
+        w = ellipsis(&mut rows[r], w);
     }
     // 새 텍스트가 원문("› Message from @…")보다 짧으면 잔재를 지운다.
-    for c in row[w..old_end.max(w)].iter_mut() {
+    for c in rows[r][w..old_end.max(w)].iter_mut() {
         *c = GridCell::blank();
+    }
+    for (i, line) in lines.iter().enumerate().skip(1) {
+        let row = &mut rows[r + i];
+        let w = put_line(row, indent, line, false);
+        if i == lines.len() - 1 && truncated {
+            ellipsis(row, w);
+        }
     }
 }
 
@@ -6663,34 +6771,99 @@ mod teammate_msg_tests {
     // 인라인 재작성: 헤더 + 본문(한글 와이드 = 글자+스페이서), 원문 잔재 제거.
     #[test]
     fn restyle_writes_inline_body_with_wide_spacers() {
-        let mut row = row_from("› Message from @aru-9c88", 60);
-        restyle_teammate_line(&mut row, 0, "aru-9c88", Some("아루다 확인"), [255, 128, 0, 255]);
-        assert_eq!(row_text(&row), "@ aru-9c88❯ 아 루 다  확 인");
-        assert!(row[0].bold, "헤더는 bold");
+        let mut rows = vec![row_from("› Message from @aru-9c88", 60)];
+        expand_teammate_message(&mut rows, 0, 0, "aru-9c88", Some("아루다 확인"), [255, 128, 0, 255]);
+        assert_eq!(row_text(&rows[0]), "@ aru-9c88❯ 아 루 다  확 인");
+        assert!(rows[0][0].bold, "헤더는 bold");
         assert_eq!(
-            row[0].fg,
+            rows[0][0].fg,
             kasa_bridge::screen::Color::Rgb(255, 128, 0),
             "학생 accent 로 도색"
         );
     }
 
-    // 폭이 모자라면 말줄임으로 끝난다 — 다음 줄 침범 없음.
+    // 이어 쓸 blank 행이 없으면 말줄임으로 끝난다 — 다음 항목 침범 없음.
     #[test]
     fn restyle_truncates_with_ellipsis() {
-        let mut row = row_from("› Message from @aru-9c88", 24);
-        restyle_teammate_line(&mut row, 0, "aru-9c88", Some("긴 본문이 들어간다"), [255, 0, 0, 255]);
-        let text = row_text(&row);
+        let mut rows = vec![
+            row_from("› Message from @aru-9c88", 24),
+            row_from("다음 항목", 24),
+        ];
+        expand_teammate_message(&mut rows, 0, 0, "aru-9c88", Some("긴 본문이 들어간다"), [255, 0, 0, 255]);
+        let text = row_text(&rows[0]);
         assert!(text.starts_with("@ aru-9c88❯"), "{text}");
         assert!(text.ends_with('…'), "{text}");
+        assert_eq!(row_text(&rows[1]), "다음 항목", "다음 항목 무손상");
+    }
+
+    // 아래 blank 행이 있으면 줄바꿈으로 이어 쓴다(거노) — 다음 항목과의
+    // 구분 blank 1행은 남긴다.
+    #[test]
+    fn expands_into_blank_rows_keeping_separator() {
+        let mut rows = vec![
+            row_from("› Message from @aru-9c88", 24),
+            row_from("", 24),
+            row_from("", 24),
+            row_from("", 24),
+            row_from("다음 항목", 24),
+        ];
+        expand_teammate_message(
+            &mut rows, 0, 0, "aru-9c88",
+            Some("긴 본문이 여러 줄에 걸쳐 이어진다"),
+            [255, 0, 0, 255],
+        );
+        assert!(row_text(&rows[0]).starts_with("@ aru-9c88❯ 긴"), "{}", row_text(&rows[0]));
+        // 이어 쓴 줄은 2칸 들여쓰기 + 학생색.
+        assert!(row_text(&rows[1]).starts_with("  "), "{}", row_text(&rows[1]));
+        assert!(!row_is_blank(&rows[1]));
+        assert_eq!(
+            rows[1].iter().find(|c| c.ch != ' ').unwrap().fg,
+            kasa_bridge::screen::Color::Rgb(255, 0, 0)
+        );
+        // usable = blank_run(3) - 1 → 마지막 blank 는 구분용으로 남는다.
+        assert!(row_is_blank(&rows[3]), "구분 blank 유지");
+        assert_eq!(row_text(&rows[4]), "다음 항목", "다음 항목 무손상");
+    }
+
+    // 뷰포트 바닥까지 전부 빈 경우엔 구분행 없이 끝까지 쓴다.
+    #[test]
+    fn expands_to_viewport_bottom_without_separator() {
+        let mut rows = vec![
+            row_from("› Message from @aru-9c88", 24),
+            row_from("", 24),
+            row_from("", 24),
+        ];
+        expand_teammate_message(
+            &mut rows, 0, 0, "aru-9c88",
+            Some("본문이 바닥까지 이어져 내려간다 아주 길게 계속"),
+            [255, 0, 0, 255],
+        );
+        assert!(!row_is_blank(&rows[1]));
+        assert!(!row_is_blank(&rows[2]), "바닥 행까지 사용");
     }
 
     // 본문 회수 실패 시엔 원문 유지 + 색만.
     #[test]
     fn restyle_without_body_recolors_only() {
-        let mut row = row_from("› Message from @aru-9c88", 40);
-        restyle_teammate_line(&mut row, 0, "aru-9c88", None, [0, 255, 0, 255]);
-        assert_eq!(row_text(&row), "› Message from @aru-9c88");
-        assert_eq!(row[0].fg, kasa_bridge::screen::Color::Rgb(0, 255, 0));
+        let mut rows = vec![row_from("› Message from @aru-9c88", 40)];
+        expand_teammate_message(&mut rows, 0, 0, "aru-9c88", None, [0, 255, 0, 255]);
+        assert_eq!(row_text(&rows[0]), "› Message from @aru-9c88");
+        assert_eq!(rows[0][0].fg, kasa_bridge::screen::Color::Rgb(0, 255, 0));
+    }
+
+    // 셀 폭 word-wrap: 첫 줄/이후 줄 폭 분리, 와이드 2칸, 긴 단어 글자 분할.
+    #[test]
+    fn wrap_body_cells_widths_and_split() {
+        let (lines, trunc) = wrap_body_cells("가나 다라 마바", 6, 6, 10);
+        // "가나"(4)+" "+"다라" = 9 > 6 → 줄마다 한 단어.
+        assert_eq!(lines, vec!["가나", "다라", "마바"]);
+        assert!(!trunc);
+        let (lines, trunc) = wrap_body_cells("가나다라", 4, 4, 10);
+        assert_eq!(lines, vec!["가나", "다라"], "긴 단어 글자 분할");
+        assert!(!trunc);
+        let (lines, trunc) = wrap_body_cells("하나 둘 셋 넷", 4, 4, 2);
+        assert_eq!(lines.len(), 2);
+        assert!(trunc, "max_lines 초과분은 잘림 표시");
     }
 
     // agent 이름 로마자 → 로스터 역매핑, 로스터 밖은 태그 color 폴백.
