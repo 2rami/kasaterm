@@ -712,20 +712,88 @@ function SystemBubble({ text }: { text: string }) {
   );
 }
 
-// 대화 턴 헤더 — 말풍선 폐기 후 역할 구분자(거노: 버블이 좁아 배경에 넓게). 학생=미니
-// 아바타, 선생님=노랑 점. 이름+시각+상태 라벨(children)이 한 줄, 본문은 그 아래 풀폭.
-function TurnHead({ char, name, color, children }: { char?: string; name: string; color?: string; children?: React.ReactNode }) {
+// 모모톡풍 원형 아바타 — SpritePortrait bust 를 원형으로 크롭(거노: momotalk 참조 리디자인).
+function ChatAvatar({ character, size = 32 }: { character: string; size?: number }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-      {char ? (
-        <span style={{ width: 22, height: 22, borderRadius: 7, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
-          <SpritePortrait character={char} scale={1.0} bust />
-        </span>
-      ) : (
-        <span style={{ width: 9, height: 9, borderRadius: 999, background: '#FEE500', border: '1px solid #E0C200', flexShrink: 0, margin: '0 6px 0 7px' }} />
+    <span style={{
+      width: size, height: size, borderRadius: '50%', overflow: 'hidden', flexShrink: 0,
+      background: 'var(--cth-cream-100)', border: '1px solid var(--cth-cream-200)',
+      display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+    }}>
+      <SpritePortrait character={character} scale={size / 20} bust />
+    </span>
+  );
+}
+
+// momotalk 실측 선생님 버블 블루 — 다크모드에서도 항상 또렷하게 고정색(프라나 추출본).
+// 나머지(학생 버블 배경·보더·텍스트)는 기존 SCHALE 토큰을 그대로 써 다크모드 자동 반전 유지.
+const MOMO_TEACHER_BUBBLE = '#3493F9';
+
+// 채팅 버블(모모톡풍) — 학생=좌측 아바타+이름+흰 버블, 선생님=우측 파랑 버블(거노 리디자인).
+// showHead=false 면 연속 동일 발신자 그룹의 두 번째 이후라 아바타·이름을 생략, grouped=true 면
+// 다음 버블도 같은 그룹이라 간격을 좁힌다.
+function ChatBubble({
+  mine, char, name, nameColor, showHead = true, grouped = false,
+  cancelled, queued, clock, durMs, tokOut, children,
+}: {
+  mine: boolean; char?: string; name?: string; nameColor?: string;
+  showHead?: boolean; grouped?: boolean;
+  cancelled?: boolean; queued?: boolean; clock?: string | null;
+  durMs?: number; tokOut?: number; children: React.ReactNode;
+}) {
+  const bg = mine
+    ? (cancelled ? 'var(--cth-cream-200)' : queued ? '#FFF3D6' : MOMO_TEACHER_BUBBLE)
+    : 'var(--cth-cream-50)';
+  const fg = mine
+    ? (cancelled ? 'var(--cth-ink-500)' : queued ? '#8A7500' : '#FFFFFF')
+    : 'var(--cth-ink-900)';
+  return (
+    <div style={{ display: 'flex', justifyContent: mine ? 'flex-end' : 'flex-start', marginBottom: grouped ? 3 : 12 }}>
+      {!mine && (
+        <div style={{ width: 32, flexShrink: 0, marginRight: 8, alignSelf: 'flex-end' }}>
+          {showHead && <ChatAvatar character={char ?? name ?? ''} />}
+        </div>
       )}
-      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 800, color: color ?? 'var(--cth-ink-900)', whiteSpace: 'nowrap' }}>{name}</span>
-      {children}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: mine ? 'flex-end' : 'flex-start', maxWidth: '78%', minWidth: 0 }}>
+        {!mine && showHead && (
+          <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 800, color: nameColor ?? 'var(--cth-ink-700)', marginBottom: 3, marginLeft: 3 }}>{name}</span>
+        )}
+        {mine && cancelled && (
+          <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-300)', marginBottom: 3, marginRight: 3 }}>취소된 프롬프트</span>
+        )}
+        {mine && queued && (
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: '#B58A00', marginBottom: 3, marginRight: 3 }}>
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><circle cx="8" cy="8" r="6.3" /><path d="M8 4.7V8l2.2 1.3" /></svg>
+            예약 · 대기 중
+          </span>
+        )}
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 5, flexDirection: mine ? 'row-reverse' : 'row', minWidth: 0 }}>
+          <div style={{
+            background: bg, color: fg, border: mine ? 'none' : '1px solid var(--cth-cream-200)',
+            borderRadius: mine ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
+            padding: '8px 12px', fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.6,
+            textDecoration: cancelled ? 'line-through' : 'none', opacity: cancelled ? 0.85 : 1,
+            wordBreak: 'break-word', boxShadow: mine ? '0 1px 3px rgba(52,147,249,0.28)' : '0 1px 2px rgba(21,41,74,0.06)',
+            minWidth: 0,
+          }}>
+            {children}
+          </div>
+          {clock && <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', flexShrink: 0, whiteSpace: 'nowrap' }}>{clock}</span>}
+        </div>
+        {(durMs != null || tokOut != null) && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3, marginLeft: mine ? 0 : 3, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}>
+            {durMs != null && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 14" />
+                </svg>
+                {formatDuration(durMs)}
+              </span>
+            )}
+            {tokOut != null && <span title={`출력 ${tokOut.toLocaleString()} 토큰`}>↓ {fmtTok(tokOut)}</span>}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -751,8 +819,7 @@ export interface TerminalPeekPanelProps {
   zoomed?: boolean;
 }
 
-// 학생 대화 패널 — 대화를 말풍선 없이 배경에 넓게 깐다(거노: 버블이 좁다). 턴마다
-// TurnHead(선생님=노랑점/학생=아바타) + 풀폭 본문.
+// 학생 대화 패널 — 모모톡풍 좌/우 버블(학생=좌측 아바타+이름+버블, 선생님=우측 파랑 버블).
 // claude 인터랙티브 선택 메뉴(/model 등 API 안 타는 것)를 화면에서 추출 → 선택지 카드.
 // 단 권한 승인(Yes/No) 프롬프트는 카드 대신 헤더 상태점(빨강 '입력 필요')으로만 — isPermissionMenu.
 // AskUserQuestion 은 캡처 프록시 tool_use 로 정확히 잡으니(거노: 추정 금지) 이 화면 파싱은
@@ -1625,6 +1692,32 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     return subList.filter((s) => live.has(s.description) || now - s.mtime < 60);
   }, [subList, agent?.subagents]);
 
+  // 모모톡풍 연속 발신자 그룹핑 — 같은 발신자(선생님/학생/발신 학생/부모지시)의 버블이
+  // 연달으면 첫 버블에서만 아바타·이름을 보여주고 간격을 좁힌다. 버블 아닌 항목(도구카드 등)이
+  // 끼면 그룹이 끊긴다(거노: momotalk 참조 리디자인).
+  const chatFeed = useMemo(() => {
+    const list: RenderItem[] = [
+      ...items,
+      ...(streaming.trim() && !subInFlight ? [{ kind: 'bubble', role: 'assistant', text: streaming } as RenderItem] : []),
+      ...pendingChoices.map((t) => ({ kind: 'bubble', role: t.role, text: t.text } as RenderItem)),
+    ];
+    let prevKey: string | null = null;
+    const out = list.map((it) => {
+      if (it.kind !== 'bubble') { prevKey = null; return { it, showHead: true, grouped: false }; }
+      const sender = it.sender;
+      const mine = !isSub && it.role === 'user' && !sender;
+      const turnChar = sender ? sender.name : (isSub && it.role === 'user' ? parentAvatarChar : avatarChar);
+      const key = mine ? 'mine' : `${sender?.pane ?? ''}|${turnChar}`;
+      const showHead = key !== prevKey;
+      prevKey = key;
+      return { it, showHead, grouped: false };
+    });
+    for (let i = 0; i < out.length - 1; i++) {
+      if (out[i].it.kind === 'bubble' && out[i + 1].it.kind === 'bubble' && !out[i + 1].showHead) out[i].grouped = true;
+    }
+    return out;
+  }, [items, streaming, subInFlight, pendingChoices, isSub, parentAvatarChar, avatarChar]);
+
   return (
     <div
       style={{
@@ -1766,12 +1859,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
           </div>
         ) : (
           <>
-            {[
-              ...items,
-              // 서브 in-flight 면 /p/N SSE 가 서브 것일 수 있어 streaming 버블도 억제(메인 채팅 누수 방지).
-              ...(streaming.trim() && !subInFlight ? [{ kind: 'bubble', role: 'assistant', text: streaming } as RenderItem] : []),
-              ...pendingChoices.map((t) => ({ kind: 'bubble', role: t.role, text: t.text } as RenderItem)),
-            ].map((it, i) => {
+            {chatFeed.map(({ it, showHead, grouped }, i) => {
               // esc 중단 — 프롬프트(취소 아님)는 그대로 두고, 중단이 일어난 그 자리에 가는 구분선 +
               // "작업 중단" 라벨을 넣어 어디서 끊겼는지 흐름에서 바로 보이게(거노: 정확한 위치).
               if (it.kind === 'interrupted') {
@@ -1910,96 +1998,60 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
               const durMs = !mine && it.uuid ? durationMap.get(it.uuid) : undefined;
               const tokOut = !mine && it.uuid ? tokenMap.get(it.uuid) : undefined; // 완료 응답 출력 토큰(transcript usage)
               const clock = fmtClock(it.ts); // 메시지 시각(오후 2:47)
-              const timeEl = clock ? <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', flexShrink: 0, whiteSpace: 'nowrap' }}>{clock}</span> : null;
-              // 말풍선(카톡 버블) 폐기 — 대화가 버블 안에 갇혀 좁아서 배경에 넓게 깐다(거노).
-              // 턴 = TurnHead 한 줄(아바타/노랑점+이름+시각+상태 라벨) + 풀폭 본문. 역할 구분은
-              // 좌우 정렬이 아니라 헤더: 선생님=노랑 점, 학생/발신학생=아바타(+액센트색 이름).
               const isPrompt = mine && !cancelled && !queued && !!it.text;
               return (
                 <div key={i}
                   data-uidx={isPrompt ? i : undefined}
-                  data-uprompt={isPrompt ? it.text : undefined}
-                  style={{ marginBottom: 14 }}>
-                  <TurnHead
-                    char={mine ? undefined : turnChar}
-                    name={mine ? '선생님' : (sender ? sender.name : turnChar)}
-                    color={mine ? 'var(--cth-ink-700)' : sender?.accent ? hex(accentByName[sender.accent]) : (isSub && it.role === 'user') ? 'var(--cth-sky)' : undefined}
+                  data-uprompt={isPrompt ? it.text : undefined}>
+                  <ChatBubble
+                    mine={mine}
+                    char={turnChar}
+                    name={sender ? sender.name : turnChar}
+                    nameColor={sender?.accent ? hex(accentByName[sender.accent]) : (isSub && it.role === 'user') ? 'var(--cth-sky)' : undefined}
+                    showHead={showHead}
+                    grouped={grouped}
+                    cancelled={cancelled}
+                    queued={queued}
+                    clock={clock}
+                    durMs={durMs}
+                    tokOut={tokOut}
                   >
-                    {timeEl}
-                    {mine && cancelled && (
-                      <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-300)' }}>취소된 프롬프트</span>
-                    )}
-                    {mine && queued && (
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: '#B58A00' }}>
-                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><circle cx="8" cy="8" r="6.3" /><path d="M8 4.7V8l2.2 1.3" /></svg>
-                        예약 · 대기 중
-                      </span>
-                    )}
-                  </TurnHead>
-                  <div style={{
-                    fontFamily: 'var(--cth-font-ui)', fontSize: 13, lineHeight: 1.6,
-                    // 발신 학생 턴은 본문도 발신자 accent 로(거노) — 원색은 lemon 등이 본문
-                    // 분량에선 눈부셔 ink-900 과 섞어 톤 조절. color-mix 라 라이트 테마(ink=남색)
-                    // 에선 어두워지고 다크 테마(ink=밝음)에선 밝아지는 테마 적응형.
-                    color: cancelled ? 'var(--cth-ink-500)' : queued ? '#8A7500'
-                      : sender?.accent ? `color-mix(in srgb, ${hex(accentByName[sender.accent])} 70%, var(--cth-ink-900))`
-                      : 'var(--cth-ink-900)',
-                    textDecoration: cancelled ? 'line-through' : 'none',
-                    opacity: cancelled ? 0.8 : 1,
-                    wordBreak: 'break-word',
-                  }}>
                     {it.text && <BubbleBody text={it.text} mine={mine && !cancelled} />}
                     {it.images && it.images.length > 0 && (
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: it.text ? 6 : 0 }}>
                         {it.images.map((src, ii) => (
-                          <img key={ii} src={src} alt="" style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, border: '1px solid var(--cth-cream-200)', display: 'block' }} />
+                          <img key={ii} src={src} alt="" style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, border: '1px solid rgba(0,0,0,0.12)', display: 'block' }} />
                         ))}
                       </div>
                     )}
-                  </div>
-                  {(durMs != null || tokOut != null) && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)' }}>
-                      {durMs != null && (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                            <circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 14" />
-                          </svg>
-                          {formatDuration(durMs)}
-                        </span>
-                      )}
-                      {tokOut != null && <span title={`출력 ${tokOut.toLocaleString()} 토큰`}>↓ {fmtTok(tokOut)}</span>}
-                    </div>
-                  )}
+                  </ChatBubble>
                 </div>
               );
             })}
 
-            {/* 학생이 SendUserFile 로 보낸 이미지 — 풀폭 턴(헤더+이미지). 클릭=원본. */}
+            {/* 학생이 SendUserFile 로 보낸 이미지 — 학생측 버블(아바타+이름)+이미지. 클릭=원본. */}
             {images.map((path, i) => (
-              <div key={`img-${path}-${i}`} style={{ marginBottom: 14 }}>
-                <TurnHead char={avatarChar} name={avatarChar} />
+              <ChatBubble key={`img-${path}-${i}`} mine={false} char={avatarChar} name={avatarChar}>
                 <button onClick={() => void openFile(path)} title={`${path}\n클릭 = OS 기본 뷰어로 열기`} style={{
                   maxWidth: '100%', padding: 0, cursor: 'pointer', background: 'transparent', border: 'none', display: 'block', textAlign: 'left',
                 }}>
                   <img src={imageFileUrl(path)} alt={path.split('/').pop() ?? ''} style={{
-                    display: 'block', maxWidth: '100%', maxHeight: 240, borderRadius: 10, border: '1px solid var(--cth-cream-200)', objectFit: 'contain',
+                    display: 'block', maxWidth: '100%', maxHeight: 240, borderRadius: 8, objectFit: 'contain',
                   }} />
                 </button>
-              </div>
+              </ChatBubble>
             ))}
 
             {/* /context 결과 — 별도 패널(x 안 닫히던) 대신 채팅 흐름에(거노: 채팅창 안에 입력되게).
-                선생님 "/context" 친 기록 + 학생 컨텍스트 결과(코드 카드). 풀폭. */}
+                선생님 "/context" 친 기록(우측 버블) + 학생 컨텍스트 결과(좌측, 코드 카드). */}
             {ctxView && (
               <>
-                <div style={{ marginBottom: 14 }}>
-                  <TurnHead name="선생님" color="var(--cth-ink-700)" />
-                  <div style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 13, fontWeight: 600, color: 'var(--cth-ink-900)' }}>/context</div>
-                </div>
-                <div style={{ marginBottom: 14 }}>
-                  <TurnHead char={avatarChar} name={avatarChar} />
-                  <pre style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, lineHeight: 1.35, whiteSpace: 'pre', margin: 0, padding: '8px 10px', borderRadius: 9, overflowX: 'auto', background: 'var(--cth-cream-50)', border: '1px solid var(--cth-cream-200)', color: 'var(--cth-ink-700)' }}><AnsiText text={ctxView} /></pre>
-                </div>
+                <ChatBubble mine>
+                  <div style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 13, fontWeight: 600 }}>/context</div>
+                </ChatBubble>
+                <ChatBubble mine={false} char={avatarChar} name={avatarChar}>
+                  <pre style={{ fontFamily: 'var(--cth-font-mono)', fontSize: 10, lineHeight: 1.35, whiteSpace: 'pre', margin: 0, overflowX: 'auto', color: 'var(--cth-ink-700)' }}><AnsiText text={ctxView} /></pre>
+                </ChatBubble>
               </>
             )}
 

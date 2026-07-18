@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { fetchRecentSessions, type RecentSession, type SessionsInfo } from '@/lib/mcp';
+import { characterPool, fetchCharacters, fetchRecentSessions, type RecentSession, type SessionsInfo } from '@/lib/mcp';
 import type { Agent } from '@/store';
 import { SpritePortrait } from './SpritePortrait';
 
@@ -86,6 +86,9 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
   const [adding, setAdding] = useState(false);
   const [showRecent, setShowRecent] = useState(false);
   const [recent, setRecent] = useState<RecentSession[]>([]);
+  // 학생 이름 → header_color(학생색). 최근 세션 행의 색 바에 쓴다 — 어느 학생의
+  // 세션인지 이름 읽기 전에 색으로 먼저 구분(거노). 펼칠 때 1회 로드.
+  const [charColor, setCharColor] = useState<Record<string, string>>({});
 
   // 최근 세션 패널을 펼칠 때(또는 펼친 채로 10초마다) 목록을 가져온다 — 항상
   // 폴링하면 닫혀있을 때도 낭비라, 펼침 상태에서만 새로고침.
@@ -94,6 +97,14 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
     let alive = true;
     const load = () => { void fetchRecentSessions().then((s) => { if (alive) setRecent(s); }); };
     load();
+    void fetchCharacters().then((c) => {
+      if (!alive || !c) return;
+      const map: Record<string, string> = {};
+      for (const m of characterPool(c)) {
+        if (m.header_color) map[m.name] = m.header_color;
+      }
+      setCharColor(map);
+    });
     const iv = setInterval(load, 10000);
     return () => { alive = false; clearInterval(iv); };
   }, [showRecent]);
@@ -217,13 +228,23 @@ export function RoomMap({ sessions, onSwitch, agents, selectedId, onSelectStuden
             <div style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 10, color: 'var(--cth-ink-300)', padding: '4px 6px' }}>최근 세션 없음</div>
           ) : (
             recent.map((s) => (
-              <button key={s.id} onClick={() => onPick(s)} title={`${s.label}\n${s.cwd}`} style={{
+              // 학생색 좌측 바 + 세션 이름 뒤 프사 — 어느 학생의 세션인지 즉시 구분
+              // (거노). 미바인딩 세션은 색 바 없이(투명) 이름만.
+              <button key={s.id} onClick={() => onPick(s)} title={`${s.label}${s.character ? `\n${s.character}` : ''}\n${s.cwd}`} style={{
                 display: 'flex', flexDirection: 'column', gap: 2, padding: '6px 8px', borderRadius: 7, border: 'none',
+                borderLeft: `3px solid ${(s.character && charColor[s.character]) || 'transparent'}`,
                 cursor: 'pointer', textAlign: 'left',
                 background: 'var(--cth-cream-100)', color: 'var(--cth-ink-700)',
               }}>
-                <span style={{ fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {s.label}
+                <span style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                  <span style={{ flex: 1, fontFamily: 'var(--cth-font-ui)', fontSize: 11, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {s.label}
+                  </span>
+                  {s.character && (
+                    <span style={{ width: 18, height: 18, borderRadius: 5, overflow: 'hidden', flexShrink: 0, background: 'var(--cth-cream-50)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+                      <SpritePortrait character={s.character} scale={0.9} bust />
+                    </span>
+                  )}
                 </span>
                 {s.cwd && (
                   <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'var(--cth-font-ui)', fontSize: 9, color: 'var(--cth-ink-500)', overflow: 'hidden' }}>
