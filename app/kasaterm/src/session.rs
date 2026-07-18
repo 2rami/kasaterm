@@ -822,6 +822,14 @@ impl App {
                 cache.insert(id.clone(), cwd);
             }
         }
+        // 셸이 실제로 cd 로 움직였으면 그 pane 의 view-cwd 오버라이드를 버린다 —
+        // attach 종료 후 셸 조작 시 파일트리가 옛 프로젝트에 고착되는 것 방지
+        // (claude 가 살아 있으면 statusline 이 곧 재보고해 오버라이드가 돌아온다).
+        for (id, cwd) in &cache {
+            if self.pane_cwd_cache.get(id).is_some_and(|old| old != cwd) {
+                self.pane_view_cwd.remove(id);
+            }
+        }
         self.pane_cwd_cache = cache;
     }
     /// A pane's current shell cwd — cache first (refreshed ~700ms), else a live
@@ -860,7 +868,15 @@ impl App {
         let active = self.ws.lock().ok().and_then(|w| w.active_pane.clone());
         let root = active
             .as_ref()
-            .and_then(|id| self.pane_cwd_cache.get(id).cloned())
+            // "pane 이 보는 경로"(statusline report / transcript bind)가 셸 cwd 보다
+            // 우선 — bg-attach 뷰 pane 은 셸이 spawn 디렉토리(~/Desktop)에 머물러
+            // 파일트리가 pane 내용과 다른 프로젝트를 보여줬다(거노).
+            .and_then(|id| self.pane_view_cwd.get(id).cloned())
+            .or_else(|| {
+                active
+                    .as_ref()
+                    .and_then(|id| self.pane_cwd_cache.get(id).cloned())
+            })
             // Preview panes (markdown/image splits) have no cwd in the cache —
             // keep the current tree root rather than snapping to the process
             // cwd, so opening a file doesn't reshuffle the sidebar root.

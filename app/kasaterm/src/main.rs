@@ -2472,6 +2472,11 @@ enum UserEvent {
     /// 파일명(stem) = claude 세션 id. 세션→캐릭터 영속 매핑을 조회/저장해 --resume 시
     /// 캐릭터 둔갑을 막는다(거노: 재시작하면 프라나가 미도리로). `apply_session_character`.
     SocketSessionBound(String, String),
+    /// pane 이 "보고 있는" 경로 — statusline report-cwd(claude 내부 cd 포함) 또는
+    /// transcript bind 시 jsonl tail 의 cwd. 셸 pid cwd 와 달리 pane **내용**의
+    /// 프로젝트를 가리켜, 파일트리 루트가 이걸 우선한다(bg-attach pane 은 셸이
+    /// ~/Desktop 이라 파일트리가 pane 과 달랐던 것). `(pane, cwd)`.
+    SocketViewCwd(String, std::path::PathBuf),
     /// stale statusline 재실행 강제 — 구버전 claude(≤2.1.209 실측)는 attach 에서
     /// statusline 을 재실행하지 않아 세션 id 마커가 프롬프트 전까지 안 흐른다(거노:
     /// 들어오자마자 바뀌게). PTY 1행 지글(줄였다 원복)로 SIGWINCH 재레이아웃을 유도.
@@ -3244,6 +3249,11 @@ struct App {
     /// claude 명령. start_pty 에서 가드 통과 시 세팅, 셸 prompt-end(OSC133) 감지
     /// 또는 타임아웃 시 1회 주입 후 None. solo·무테마면 애초에 None(무동작).
     pane_cwd_cache: HashMap<String, std::path::PathBuf>,
+    /// pane 이 "보고 있는" 경로 오버라이드(SocketViewCwd 로 도착) — 파일트리 루트가
+    /// 셸 cwd 보다 우선한다. 셸이 cd 로 움직이면(refresh_pane_cwds 에서 감지) 해당
+    /// pane 의 오버라이드를 버려 stale 고착을 막는다(claude 살아 있으면 statusline
+    /// 이 곧 재보고).
+    pane_view_cwd: HashMap<String, std::path::PathBuf>,
     /// 방별 collab 분리(거노). `pending_room`: 다음 spawn 할 pane 의 방 id(셸 env
     /// KASATERM_ROOM 주입 + ws.pane_room 기록용). pane→방 매핑은 ws.pane_room(공유).
     pending_room: Option<String>,
@@ -3599,6 +3609,7 @@ impl App {
             pane_prompt_wait: HashMap::new(),
             last_window_title_check: None,
             pane_cwd_cache: HashMap::new(),
+            pane_view_cwd: HashMap::new(),
             pending_room: None,
             next_room_seq: 1,
             pending_character: None,

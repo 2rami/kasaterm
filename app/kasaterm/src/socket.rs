@@ -339,8 +339,29 @@ impl PtyBackend {
                 continue;
             }
             if let Some(path) = discover_transcript(&id, shell_pid) {
+                self.publish_transcript_cwd(&id, &path);
                 self.bound.lock().unwrap().insert(id, path);
             }
+        }
+    }
+
+    /// bind 된 transcript 의 tail 에서 그 세션의 cwd 를 뽑아 GUI 파일트리 오버라이드로
+    /// 위임. bg-attach 뷰 pane 은 statusline report-cwd 가 pane 밖(bg 프로세스)에서
+    /// 돌아 안 오므로, 이 경로가 "pane 이 보는 프로젝트"를 아는 유일한 소스다.
+    fn publish_transcript_cwd(&self, surface_id: &str, path: &std::path::Path) {
+        let (tail, _) = read_tail(path, 64 * 1024);
+        let cwd = tail.lines().rev().find_map(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()?
+                .get("cwd")?
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(std::path::PathBuf::from)
+        });
+        if let Some(cwd) = cwd {
+            let _ = self
+                .proxy
+                .send_event(UserEvent::SocketViewCwd(surface_id.to_string(), cwd));
         }
     }
 
@@ -810,6 +831,11 @@ impl Backend for PtyBackend {
             .lock()
             .unwrap()
             .insert(surface_id.to_string(), cwd.to_string());
+        // GUI 파일트리가 "pane 이 보는 경로"를 셸 cwd 보다 우선하도록 위임.
+        let _ = self.proxy.send_event(UserEvent::SocketViewCwd(
+            surface_id.to_string(),
+            std::path::PathBuf::from(cwd),
+        ));
         Ok(())
     }
 
@@ -894,6 +920,7 @@ impl Backend for PtyBackend {
             .lock()
             .unwrap()
             .insert(surface_id.to_string(), PathBuf::from(path));
+        self.publish_transcript_cwd(surface_id, std::path::Path::new(path));
         // transcript 파일명(stem) = claude 세션 id — GUI 에 위임해 세션→캐릭터 영속
         // 매핑을 조회/저장한다(거노 ④: resume 시 캐릭터 재사용). App 상태는 GUI 스레드
         // 소유라 proxy 로 넘긴다(SocketBytes 관례).
