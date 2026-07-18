@@ -20,6 +20,13 @@ try: print('1' if json.load(sys.stdin).get('stop_hook_active') else '')
 except Exception: pass" 2>/dev/null)
 
 HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# 세션 제목을 마지막 사용자 프롬프트로 자동 갱신(best-effort) — 피커/board 라벨이
+# 첫 프롬프트에 멈춰 뭘 하는 세션인지 헷갈리는 문제. 수동 개명(/rename·
+# kasaterm-cli rename, auto 마커 없음)은 건드리지 않는다. 재진입 Stop 은 dedup
+# 으로 no-op 이라 위치 무관하게 안전.
+printf '%s' "$input" | python3 "$HOOKS_DIR/kasaterm-title-sync.py" >/dev/null 2>&1 || true
+
 complete() {
   dir="${PWD##*/}"
   kasaterm-cli notify "✓ ${dir} — claude 완료" "작업을 마쳤어" >/dev/null 2>&1 || true
