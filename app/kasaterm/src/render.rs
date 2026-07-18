@@ -685,6 +685,9 @@ impl App {
                                 *cell = GridCell::blank();
                             }
                         }
+                        // 배너 타이틀 "Claude Code" 도 학생 이름으로 — 도트만
+                        // 바뀌면 학생이 남의 이름표를 달고 서 있는 꼴(거노).
+                        replace_banner_title(&mut composed, br, bc, name, accent);
                     }
                     // working 스피너 자리 → 학생이 제자리 걸음으로 "작업 중".
                     // 스피너 글리프 셀은 스냅샷에서 비우고, 그 자리(스피너 행
@@ -5739,6 +5742,76 @@ fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
     out
 }
 
+/// Clawd 배너 옆 타이틀의 "Claude Code" → pane 학생 이름 — 스냅샷 전용, 원본
+/// 그리드 무손상(도트 교체와 같은 원칙). 배너 세로 범위에서 art 오른쪽의
+/// "Claude Code" 글자 시퀀스를 찾아 한글 이름(와이드 글리프 + ' ' 스페이서)으로
+/// 갈아끼우고, 뒤따르는 버전 텍스트를 이름 바로 뒤로 당긴다. 당겨서 남는 칸은
+/// blank — 연속 공백 2칸 너머는 박스형 웰컴 변형의 오른쪽 테두리 영역이라
+/// 건드리지 않는다(테두리 열이 밀리면 박스가 깨진다).
+fn replace_banner_title(
+    rows: &mut [Vec<GridCell>],
+    br: isize,
+    bc: usize,
+    name: &str,
+    accent: Option<[u8; 4]>,
+) {
+    const TITLE: [char; 11] = ['C', 'l', 'a', 'u', 'd', 'e', ' ', 'C', 'o', 'd', 'e'];
+    let r0 = br.max(0) as usize;
+    let r1 = (br + CLAWD_ROWS as isize).clamp(0, rows.len() as isize) as usize;
+    for row in rows[r0..r1].iter_mut() {
+        let start = bc + CLAWD_COLS;
+        if start >= row.len() {
+            continue;
+        }
+        let Some(tc) = (start..row.len().saturating_sub(TITLE.len() - 1))
+            .find(|&c| TITLE.iter().enumerate().all(|(i, &p)| row[c + i].ch == p))
+        else {
+            continue;
+        };
+        // 이름 셀: 원 타이틀 스타일(bold 등) 승계, 색만 학생 accent 로 —
+        // 테두리·스피너 텍스트와 같은 "이 pane 의 학생" 색 언어.
+        let mut style = row[tc].clone();
+        if let Some([r, g, b, _]) = accent {
+            style.fg = kasa_bridge::screen::Color::Rgb(r, g, b);
+        }
+        let mut repl: Vec<GridCell> = Vec::with_capacity(TITLE.len());
+        for ch in name.chars() {
+            let mut cell = style.clone();
+            cell.ch = ch;
+            repl.push(cell);
+            // 와이드 글리프 다음 칸은 스페이서 — composed 경로 실측은 ' '.
+            let mut sp = style.clone();
+            sp.ch = ' ';
+            repl.push(sp);
+        }
+        if repl.len() > TITLE.len() {
+            return; // 로스터 이름은 최대 3자(6칸) — 넘치면 원문 유지
+        }
+        let mut end = tc + TITLE.len();
+        let mut probe = end;
+        while probe < row.len() {
+            if matches!(row[probe].ch, ' ' | '\0') {
+                if probe + 1 >= row.len() || matches!(row[probe + 1].ch, ' ' | '\0') {
+                    break;
+                }
+            } else {
+                end = probe + 1;
+            }
+            probe += 1;
+        }
+        let tail: Vec<GridCell> = row[tc + TITLE.len()..end].to_vec();
+        let mut w = tc;
+        for cell in repl.into_iter().chain(tail) {
+            row[w] = cell;
+            w += 1;
+        }
+        for cell in row[w..end].iter_mut() {
+            *cell = GridCell::blank();
+        }
+        return; // 타이틀은 배너당 한 줄
+    }
+}
+
 /// claude agents 목록 화면인지 화면 텍스트로 감지. argv(`is_claude_agents`)는 `claude
 /// agents` **명령**만 잡고, 세션 안에서 "← for agents"로 여는 목록 뷰는 같은 프로세스라
 /// argv 가 안 바뀌어 못 잡는다(거노: agents view 로고 안 뜸). 목록 상단 통계줄
@@ -5988,6 +6061,50 @@ mod clawd_banner_tests {
     fn feet_without_flanking_blanks_not_detected() {
         let rows = vec![row_from("ab▘▘ ▝▝cd"), row_from("")];
         assert_eq!(find_clawd_banners(&rows), Vec::<(isize, usize)>::new());
+    }
+
+    // 타이틀 치환: "Claude Code" → 학생 이름(와이드+스페이서 셀), 버전 텍스트는
+    // 이름 바로 뒤로 당겨지고 남는 칸은 blank, 행 길이는 불변.
+    #[test]
+    fn banner_title_replaced_with_student_name() {
+        let mut rows = vec![row_from(""), row_from(HEAD), row_from(BODY), row_from(FEET)];
+        replace_banner_title(&mut rows, 1, 0, "아루", Some([255, 128, 0, 255]));
+        // HEAD 에서 "Claude Code" 는 col 10 부터 — 이름이 그 자리에 앉는다.
+        assert_eq!(rows[1][10].ch, '아');
+        assert_eq!(rows[1][11].ch, ' '); // 와이드 스페이서
+        assert_eq!(rows[1][12].ch, '루');
+        assert_eq!(
+            rows[1][10].fg,
+            kasa_bridge::screen::Color::Rgb(255, 128, 0)
+        );
+        let tail: String = rows[1][14..23].iter().map(|c| c.ch).collect();
+        assert_eq!(tail, " v2.1.212");
+        assert!(rows[1][23..].iter().all(|c| c.ch == ' '));
+        assert_eq!(rows[1].len(), row_from(HEAD).len());
+        // 몸통·발 행은 그대로.
+        assert_eq!(rows[2], row_from(BODY));
+    }
+
+    // 박스형 웰컴 변형: 버전 뒤 연속 공백 너머의 오른쪽 테두리는 밀리지 않는다.
+    #[test]
+    fn boxed_variant_right_border_untouched() {
+        let head_box = "│  ▐▛███▜▌  Claude Code v2.1.212    │";
+        let mut rows = vec![row_from(""), row_from(head_box), row_from(""), row_from("")];
+        let border = head_box.chars().count() - 1;
+        replace_banner_title(&mut rows, 1, 1, "시로코", None);
+        assert_eq!(rows[1][border].ch, '│');
+        assert_eq!(rows[1][12].ch, '시');
+        // accent 없으면 원 타이틀 fg(blank 기본 = Default) 유지.
+        assert_eq!(rows[1][12].fg, kasa_bridge::screen::Color::Default);
+    }
+
+    // 머리 행이 스크롤로 잘려 타이틀이 화면 밖이면 아무것도 안 바꾼다.
+    #[test]
+    fn cropped_banner_leaves_rows_unchanged() {
+        let mut rows = vec![row_from(BODY), row_from(FEET), row_from("")];
+        let before = rows.clone();
+        replace_banner_title(&mut rows, -1, 0, "아루", None);
+        assert_eq!(rows, before);
     }
 }
 
