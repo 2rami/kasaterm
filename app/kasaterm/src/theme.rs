@@ -578,8 +578,9 @@ pub fn character_ordinal(
     ids.iter().position(|p| *p == pane).unwrap_or(0)
 }
 
-/// character_accent 에 같은-학생 순번 변주를 얹은 판 — 테두리·본문 틴트·배너가
-/// 공통으로 쓴다(tmux `window-style fg=<색>` 등가 틴트 포함, 거노).
+/// character_accent 에 같은-학생 순번 변주를 얹은 판 — pane 테두리·입력박스
+/// 보더(@배지)·배너가 공통으로 쓴다. (본문 틴트도 썼었으나 폐기 — 출력 글자는
+/// 테마 기본 fg, 거노 2026-07-18.)
 pub fn character_accent_n(name: &str, ordinal: usize) -> Option<[u8; 4]> {
     character_accent(name).map(|c| accent_variant(c, ordinal))
 }
