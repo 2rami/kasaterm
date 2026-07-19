@@ -422,16 +422,18 @@ impl PtySession {
         cache.0 = now;
         // process_table() already returns bare exe names (no path), so the
         // shell row and the newest direct child are matched on pid/ppid alone.
+        let table = process_table();
+        let pid = effective_shell_pid(&table, pid);
         let mut best_child: Option<(u32, String)> = None;
         let mut shell_comm: Option<String> = None;
-        for (row_pid, row_ppid, name) in process_table() {
+        for (row_pid, row_ppid, name) in table {
             if row_pid == pid {
                 shell_comm = Some(name);
             } else if row_ppid == pid && best_child.as_ref().is_none_or(|(p, _)| *p < row_pid) {
                 best_child = Some((row_pid, name));
             }
         }
-        let resolved = best_child.map(|(_, n)| n).or(shell_comm);
+        let resolved = best_child.map(|(_, n)| n).or(shell_comm).map(strip_exe_suffix);
         cache.1 = resolved.clone();
         resolved
     }
@@ -465,7 +467,9 @@ impl PtySession {
         let Some(pid) = self.shell_pid else {
             return false;
         };
-        process_table().iter().any(|(_, ppid, _)| *ppid == pid)
+        let table = process_table();
+        let pid = effective_shell_pid(&table, pid);
+        table.iter().any(|(_, ppid, _)| *ppid == pid)
     }
 
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
@@ -1988,6 +1992,62 @@ mod osc_notify_tests {
     #[test]
     fn osc_cwd_ignores_unrelated_output() {
         assert_eq!(cwd_of(b"hello\x1b]0;title\x07"), None);
+    }
+}
+
+/// Windows Git bash 는 런처(bin\bash.exe)가 실셸(usr\bin\bash.exe)을 자식으로
+/// 한 번 더 스폰하고, sh wrapper 스크립트도 셸을 한 단 더 끼운다 — 직계 자식만
+/// 보면 항상 "bash.exe"라 claude 탐지(색·프사 게이트)와 busy 판정이 전부 죽는다.
+/// 유일한 자식이 셸일 때만 그쪽을 셸로 보고 내려간다(명령 실행 중이면 자식이
+/// 비셸이라 그 자리에서 멈춰 기존 의미 유지). Unix 는 no-op.
+fn effective_shell_pid(table: &[(u32, u32, String)], pid: u32) -> u32 {
+    #[cfg(not(windows))]
+    {
+        let _ = table;
+        pid
+    }
+    #[cfg(windows)]
+    {
+        let mut pid = pid;
+        for _ in 0..3 {
+            let mut kids = table.iter().filter(|(_, pp, _)| *pp == pid);
+            let (Some(only), None) = (kids.next(), kids.next()) else {
+                break;
+            };
+            if !is_shell_exe(&only.2) {
+                break;
+            }
+            pid = only.0;
+        }
+        pid
+    }
+}
+
+#[cfg(windows)]
+fn is_shell_exe(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let base = lower.strip_suffix(".exe").unwrap_or(&lower);
+    matches!(
+        base,
+        "bash" | "sh" | "zsh" | "dash" | "fish" | "tcsh" | "ksh" | "cmd" | "pwsh" | "powershell"
+    )
+}
+
+/// Windows 프로세스명은 "claude.exe" — active_process_name 호출자들은 "claude" /
+/// "bash" 같은 bare 이름과 정확 일치 비교하므로 여기서 확장자를 벗겨 플랫폼
+/// 균질화한다. Unix 는 no-op.
+fn strip_exe_suffix(name: String) -> String {
+    #[cfg(not(windows))]
+    {
+        name
+    }
+    #[cfg(windows)]
+    {
+        if name.to_ascii_lowercase().ends_with(".exe") {
+            name[..name.len() - 4].to_string()
+        } else {
+            name
+        }
     }
 }
 
