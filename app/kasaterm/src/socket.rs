@@ -1866,8 +1866,8 @@ pub fn session_file_path() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(p));
         }
     }
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/kasaterm/session.json"))
+    // HOME 직참조 금지 — Windows GUI(Explorer 실행)는 HOME 부재라 영속이 통째로 죽는다.
+    Some(kasa_socket::home_dir()?.join(".config/kasaterm/session.json"))
 }
 
 fn window_size_path() -> Option<std::path::PathBuf> {
@@ -1876,8 +1876,7 @@ fn window_size_path() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(p));
         }
     }
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/kasaterm/window.json"))
+    Some(kasa_socket::home_dir()?.join(".config/kasaterm/window.json"))
 }
 
 fn settings_file_path() -> Option<std::path::PathBuf> {
@@ -1886,8 +1885,7 @@ fn settings_file_path() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(p));
         }
     }
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/kasaterm/settings.json"))
+    Some(kasa_socket::home_dir()?.join(".config/kasaterm/settings.json"))
 }
 
 /// User's per-character image override dir — `~/.config/kasaterm/students/`.
@@ -1901,8 +1899,7 @@ pub fn students_dir() -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(p));
         }
     }
-    let home = std::env::var("HOME").ok()?;
-    Some(std::path::PathBuf::from(home).join(".config/kasaterm/students"))
+    Some(kasa_socket::home_dir()?.join(".config/kasaterm/students"))
 }
 
 /// User's `default_cwd` preference for where new shells start — mirrors the
@@ -2077,8 +2074,8 @@ pub fn read_window_size() -> Option<(f64, f64)> {
 /// claude 의 saved default effort(~/.claude/settings.json `effortLevel`). resume 직후 GUI effort
 /// 카드 폴백값(거노). 파일/키 없으면 빈 문자열. ultracode 는 session-only 라 여기 안 저장된다.
 fn claude_saved_effort() -> String {
-    let Some(home) = std::env::var_os("HOME") else { return String::new() };
-    let path = std::path::Path::new(&home).join(".claude/settings.json");
+    let Some(home) = kasa_socket::home_dir() else { return String::new() };
+    let path = home.join(".claude/settings.json");
     let Ok(text) = std::fs::read_to_string(&path) else { return String::new() };
     serde_json::from_str::<serde_json::Value>(&text)
         .ok()
@@ -2212,8 +2209,7 @@ fn resolve_sid8(sid8: &str) -> Option<String> {
     if hits.len() > 1 {
         return None;
     }
-    let home = std::env::var("HOME").ok()?;
-    let projects = std::path::Path::new(&home).join(".claude").join("projects");
+    let projects = kasa_socket::home_dir()?.join(".claude").join("projects");
     let mut found: Option<String> = None;
     for d in std::fs::read_dir(projects).ok()?.flatten() {
         for f in std::fs::read_dir(d.path()).ok()?.flatten() {
@@ -2301,9 +2297,8 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
 /// where the abs cwd is encoded by replacing `/` and `.` with `-`. The newest
 /// .jsonl there is the session the pane was last on.
 fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
     let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
-    let dir = std::path::PathBuf::from(home)
+    let dir = kasa_socket::home_dir()?
         .join(".claude/projects")
         .join(encoded);
     let mut newest: Option<(std::time::SystemTime, String)> = None;
@@ -2336,8 +2331,7 @@ pub(crate) fn transcript_path_for_session(sid: &str) -> Option<std::path::PathBu
     if sid.is_empty() || sid.contains('/') {
         return None;
     }
-    let home = std::env::var("HOME").ok()?;
-    let projects = std::path::Path::new(&home).join(".claude").join("projects");
+    let projects = kasa_socket::home_dir()?.join(".claude").join("projects");
     let want = format!("{sid}.jsonl");
     for d in std::fs::read_dir(projects).ok()?.flatten() {
         let p = d.path().join(&want);
@@ -2385,9 +2379,8 @@ fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathB
 /// 기록한 pane↔session 매핑에서 이 pane 의 transcript 경로를 읽는다(정확·hook
 /// authoritative). `archived`(죽은 세션) 는 무시, 파일이 실제 존재할 때만 반환.
 fn roster_transcript(pane_id: &str, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
     let slug = cwd.to_string_lossy().replace(['/', '.'], "-");
-    let roster = std::path::PathBuf::from(&home)
+    let roster = kasa_socket::home_dir()?
         .join(".config/kasaterm/agent-roster")
         .join(format!("{slug}.json"));
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&roster).ok()?).ok()?;
@@ -2401,9 +2394,9 @@ fn roster_transcript(pane_id: &str, cwd: &std::path::Path) -> Option<std::path::
 
 /// `cwd` 의 claude 프로젝트 디렉터리에서 `within` 안에 수정된 .jsonl 경로들.
 fn recent_jsonls(cwd: &std::path::Path, within: std::time::Duration) -> Vec<std::path::PathBuf> {
-    let Some(home) = std::env::var("HOME").ok() else { return Vec::new() };
+    let Some(home) = kasa_socket::home_dir() else { return Vec::new() };
     let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
-    let dir = std::path::PathBuf::from(home).join(".claude/projects").join(encoded);
+    let dir = home.join(".claude/projects").join(encoded);
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
     entries
         .flatten()
@@ -2444,10 +2437,9 @@ fn parse_status_model(screen: &str) -> Option<String> {
 
 /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
 pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
     let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
     Some(
-        std::path::PathBuf::from(home)
+        kasa_socket::home_dir()?
             .join(".claude/projects")
             .join(encoded)
             .join(format!("{session}.jsonl")),
