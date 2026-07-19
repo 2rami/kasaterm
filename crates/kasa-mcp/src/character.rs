@@ -10,10 +10,13 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// characters.json 후보 경로 — kasaterm-assign-character.py 와 동일 우선순위:
-/// ~/.config → env override → .app Resources → 레포 소스.
+/// ~/.config → env override → .app Resources(mac)/exe 옆(win MSI) → 레포 소스.
 fn candidate_paths() -> Vec<PathBuf> {
     let mut v = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
+    // Windows GUI 프로세스엔 HOME 이 없다 — USERPROFILE 이 그 자리.
+    if let Some(home) =
+        std::env::var("HOME").ok().or_else(|| std::env::var("USERPROFILE").ok())
+    {
         v.push(PathBuf::from(home).join(".config/kasaterm/characters.json"));
     }
     if let Ok(p) = std::env::var("KASATERM_COLLAB_HOOKS_DIR") {
@@ -26,6 +29,10 @@ fn candidate_paths() -> Vec<PathBuf> {
             .map(|c| c.join("Resources/collab-hooks/characters.json"))
         {
             v.push(res);
+        }
+        // Windows MSI: bin\collab-hooks\ (exe 와 나란히 — arona-ui 번들과 같은 자리)
+        if let Some(adj) = exe.parent().map(|d| d.join("collab-hooks/characters.json")) {
+            v.push(adj);
         }
     }
     v.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/kasaterm/collab-hooks/characters.json"));
@@ -195,7 +202,7 @@ pub fn rslug(cwd: &Path, room: Option<&str>) -> String {
 }
 
 fn collab_dir(rslug: &str) -> PathBuf {
-    PathBuf::from("/tmp/kasaterm-collab").join(rslug)
+    kasa_socket::collab_root().join(rslug)
 }
 
 /// `/tmp/kasaterm-collab/<rslug>/character-<N>` — board 가 row.character 로 읽는 마커.

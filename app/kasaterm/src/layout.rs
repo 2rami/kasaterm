@@ -791,7 +791,7 @@ impl App {
         let _ = std::fs::remove_file(format!("/tmp/kasaterm-bound-{safe}"));
         let num = target.trim_start_matches('%');
         let slug = cwd.map(kasa_mcp::character::mode_slug);
-        if let Ok(rooms) = std::fs::read_dir("/tmp/kasaterm-collab") {
+        if let Ok(rooms) = std::fs::read_dir(kasa_socket::collab_root()) {
             for room in rooms.flatten() {
                 // slug 를 알면 그 cwd 의 방(정확히 그 slug, 또는 __room_<id> 변형)만.
                 if let Some(s) = &slug {

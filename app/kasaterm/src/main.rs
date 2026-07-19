@@ -4136,6 +4136,8 @@ fn locate_collab_hooks_dir() -> Option<std::path::PathBuf> {
 ///    it shipped with, so this WINS over the env override. Otherwise a leaked
 ///    `KASATERM_COLLAB_HOOKS_DIR` (e.g. inherited from a dev shell) would point
 ///    a release `.app` at version-skewed repo hooks (the bug this guards).
+///    Windows MSI 는 exe 옆 `bin\collab-hooks\` — arona-ui 번들과 같은 자리,
+///    같은 이유로 env 보다 우선.
 /// 2. `KASATERM_COLLAB_HOOKS_DIR` — dev convenience for non-bundle `cargo run`,
 ///    where no bundle Resources sits next to `target/{debug,release}/kasaterm`.
 /// 3. the repo source next to this crate (`CARGO_MANIFEST_DIR`) — plain dev run.
@@ -4152,6 +4154,12 @@ fn resolve_collab_hooks_dir(
         {
             if res.is_dir() {
                 return Some(res);
+            }
+        }
+        // Windows MSI: <bin>\kasaterm.exe → <bin>\collab-hooks\
+        if let Some(adj) = exe.parent().map(|d| d.join("collab-hooks")) {
+            if adj.is_dir() {
+                return Some(adj);
             }
         }
     }
@@ -4192,15 +4200,17 @@ pub(crate) fn proxy_env(pane_id: &str) -> Vec<(String, String)> {
 /// pane runs exactly as the user configured it and install-hooks.sh is no
 /// longer needed.
 pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
-    // The wrapper is a POSIX sh script; the Windows pane PATH has no sh.
-    if cfg!(windows) {
-        return;
-    }
     let Some(hooks_dir) = locate_collab_hooks_dir() else {
         eprintln!("[shim] collab-hooks dir not found — claude hook shim skipped");
         return;
     };
-    let hd = hooks_dir.display();
+    // Windows pane 셸은 Git bash(sh 있음) — wrapper 는 그대로 쓴다. sh 더블쿼트 안
+    // 백슬래시는 케이스별로 씹히므로 경로는 슬래시로 통일(Git bash 는 C:/ 혼용 허용).
+    let hd = if cfg!(windows) {
+        hooks_dir.display().to_string().replace('\\', "/")
+    } else {
+        hooks_dir.display().to_string()
+    };
     let cmd = |script: &str, timeout: u64| {
         serde_json::json!({ "type": "command", "command": format!("\"{hd}/{script}\""), "timeout": timeout })
     };
@@ -4233,16 +4243,23 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         "statusLine": { "type": "command", "command": format!("\"{hd}/statusline.py\""), "padding": 0 },
     });
     let settings_path = shim_dir.join("claude-hooks-settings.json");
-    match serde_json::to_string_pretty(&settings) {
-        Ok(s) => {
-            if let Err(e) = std::fs::write(&settings_path, s) {
-                eprintln!("[shim] write claude-hooks-settings.json failed: {e}");
+    if cfg!(windows) {
+        // 훅·statusline 은 python3 의존+Windows 훅 실행 경로 미검증이라 1차에서 제외 —
+        // settings 파일이 없으면 wrapper 가 --settings 없이 순정 exec 폴백한다(페르소나·
+        // 세션고정·팀 트리플은 argv 주입이라 그대로 산다).
+        let _ = std::fs::remove_file(&settings_path);
+    } else {
+        match serde_json::to_string_pretty(&settings) {
+            Ok(s) => {
+                if let Err(e) = std::fs::write(&settings_path, s) {
+                    eprintln!("[shim] write claude-hooks-settings.json failed: {e}");
+                    return;
+                }
+            }
+            Err(e) => {
+                eprintln!("[shim] serialize claude hook settings failed: {e}");
                 return;
             }
-        }
-        Err(e) => {
-            eprintln!("[shim] serialize claude hook settings failed: {e}");
-            return;
         }
     }
     // 설정창 "클로드" 탭 노브를 shim 에 인라인 — 파싱은 여기 Rust 가 하고 shim 은 순수 sh 로
@@ -4396,7 +4413,7 @@ if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
-        hd = hooks_dir.display(), tblk = team_block, pblk = persona_block);
+        hd = hd, tblk = team_block, pblk = persona_block);
     let wrapper_path = shim_dir.join("claude");
     if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");
@@ -4415,8 +4432,7 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     // 직접 부르는 명령이라 settings 주입으로는 못 싣는다. 예전엔 ~/.local/bin
     // 수동 설치(개인 설정 오염 + 정본 이동 시 무음 고장)였다.
     let collab = format!(
-        "#!/bin/sh\nexec python3 \"{}/kasacollab.py\" \"$@\"\n",
-        hooks_dir.display()
+        "#!/bin/sh\nexec python3 \"{hd}/kasacollab.py\" \"$@\"\n"
     );
     let collab_path = shim_dir.join("kasacollab");
     if let Err(e) = std::fs::write(&collab_path, collab) {
@@ -4469,10 +4485,7 @@ fn teammate_case_arms() -> String {
 /// (theme::accent_variant)로 구분. characters.json 기준 부팅 1회 생성(다른 shim
 /// 노브와 동일하게 변경은 재시작 후 적용).
 fn install_student_shims(shim_dir: &std::path::Path) {
-    // 래퍼는 POSIX sh — Windows pane PATH 엔 sh 가 없다(claude shim 과 동일 skip).
-    if cfg!(windows) {
-        return;
-    }
+    // POSIX sh 스크립트 — Windows pane 셸도 Git bash 라 그대로 동작(curl 포함).
     let Some(chars) = kasa_mcp::character::characters_json() else {
         return;
     };
@@ -5052,6 +5065,18 @@ mod tests {
             resolve_collab_hooks_dir(Some(&exe), Some(env_str)).as_deref(),
             Some(bundle_res.as_path()),
             "bundle Resources must beat a leaked KASATERM_COLLAB_HOOKS_DIR",
+        );
+
+        // 1b. Windows MSI 모양(bin\kasaterm.exe + bin\collab-hooks\) — exe 옆
+        //     번들이 env 를 이긴다(Resources 와 같은 leak 가드).
+        let msi_exe = base.join("bin/kasaterm");
+        let msi_adj = base.join("bin/collab-hooks");
+        std::fs::create_dir_all(&msi_adj).unwrap();
+        std::fs::write(&msi_exe, "x").unwrap();
+        assert_eq!(
+            resolve_collab_hooks_dir(Some(&msi_exe), Some(env_str)).as_deref(),
+            Some(msi_adj.as_path()),
+            "exe-adjacent collab-hooks must beat the env override",
         );
 
         // 2. No bundle Resources (dev exe under target/) → env override applies.

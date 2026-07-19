@@ -137,6 +137,11 @@
                              하베스트한 aronaui.wxs (cargo wix -I) 에서 온다. 수동 빌드 시에도
                              heat 하베스트 + -I 없이는 링크가 실패한다(의도된 loud failure). -->
                         <Directory Id='AronaUiDir' Name='arona-ui'/>
+                        <!-- collab-hooks 번들(bin\collab-hooks\) — characters.json(학생
+                             로스터·페르소나)을 characters_json()/locate_collab_hooks_dir()
+                             가 exe 옆에서 찾는다(mac .app Resources 대칭). 내용물은 CI 가
+                             heat.exe 로 하베스트한 collabhooks.wxs 에서 온다. -->
+                        <Directory Id='CollabHooksDir' Name='collab-hooks'/>
                     </Directory>
                 </Directory>
             </Directory>
@@ -183,6 +188,7 @@
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
             <ComponentGroupRef Id='AronaUiGroup'/>
+            <ComponentGroupRef Id='CollabHooksGroup'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='DesktopShortcut'/>
 
