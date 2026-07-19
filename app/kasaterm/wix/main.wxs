@@ -135,7 +135,7 @@
                         <!-- 크로스-pane RPC + statusline. locate_cmux_compat_binary 가
                              exe 옆에서 찾아 pane PATH(shim dir)에 스테이징하고, claude
                              statusLine 커맨드(kasaterm-cli statusline)가 이를 실행한다.
-                             CI 가 kasa-socket --bin kasaterm-cli 를 함께 빌드한다. -->
+                             CI 가 kasa-socket 의 kasaterm-cli bin 을 함께 빌드한다. -->
                         <Component Id='binary2' Guid='*'>
                             <File
                                 Id='kasatermcli'
