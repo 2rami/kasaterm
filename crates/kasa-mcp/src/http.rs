@@ -903,6 +903,12 @@ fn arona_ui_root() -> Option<std::path::PathBuf> {
                 return Some(res);
             }
         }
+        // Windows MSI 는 bundle Resources 가 없다 — exe 옆 bin\arona-ui\ 에 번들.
+        if let Some(adj) = exe.parent().map(|d| d.join("arona-ui")) {
+            if adj.is_dir() {
+                return Some(adj);
+            }
+        }
     }
     let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/arona-ui/dist");
     if dev.is_dir() {

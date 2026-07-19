@@ -34,6 +34,20 @@ jobs:
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 아로나 웹뷰 정적 번들 — MSI 의 bin\arona-ui\ 로 들어간다.
+      # (mac 은 build-app.sh 가 .app Resources 에 넣는 것과 대칭.)
+      - name: Build arona-ui
+        shell: pwsh
+        run: |
+          cd web/arona-ui
+          npm ci
+          npm run build
+
       # kasa-mcp 는 루트 Cargo.toml 에서 opt-level=0 으로 pin 돼 있다 —
       # Windows rustc/LLVM 이 이 크레이트 최적화 시 STATUS_ACCESS_VIOLATION 으로 죽어서.
       - name: Build kasaterm (release)
@@ -59,10 +73,19 @@ jobs:
         with:
           tool: cargo-wix
 
+      # arona-ui dist 를 WiX Component 로 하베스트 — main.wxs 의 AronaUiDir 아래에
+      # 붙는다(-dr, ComponentGroupRef Id=AronaUiGroup). -gg GUID 재생성은
+      # MajorUpgrade(전체 재설치) 라 릴리스 간 churn 무해.
+      - name: Harvest arona-ui (heat)
+        shell: pwsh
+        run: |
+          & "$env:WIX\bin\heat.exe" dir web\arona-ui\dist -cg AronaUiGroup -dr AronaUiDir -var var.AronaUiDir -srd -sfrag -gg -g1 -sreg -scom -nologo -out aronaui.wxs
+          if (-not (Test-Path aronaui.wxs)) { throw "heat produced no aronaui.wxs" }
+
       # main.wxs 의 Source 경로가 워크스페이스 루트 기준(app\kasaterm\wix\...)이라
       # 반드시 루트에서 실행한다. --no-build 로 위에서 만든 target\release\kasaterm.exe 재사용.
       - name: Build MSI
-        run: cargo wix -p kasaterm --no-build --nocapture
+        run: cargo wix -p kasaterm --no-build --nocapture -I aronaui.wxs -C "-dAronaUiDir=web\arona-ui\dist"
 
       - name: Locate MSI
         id: msi
