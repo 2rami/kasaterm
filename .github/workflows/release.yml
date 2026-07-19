@@ -82,10 +82,21 @@ jobs:
           & "$env:WIX\bin\heat.exe" dir web\arona-ui\dist -cg AronaUiGroup -dr AronaUiDir -var var.AronaUiDir -srd -sfrag -gg -g1 -sreg -scom -nologo -out aronaui.wxs
           if (-not (Test-Path aronaui.wxs)) { throw "heat produced no aronaui.wxs" }
 
+      # collab-hooks 번들(bin\collab-hooks\) — characters.json 로스터가 없으면
+      # Windows 에서 학생 배정이 통째로 꺼진다(테마 미설치 판정). 스크립트까지 같이
+      # 실어 mac .app Resources 와 내용 동형으로. __pycache__/문서류만 제외.
+      - name: Harvest collab-hooks (heat)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force collab-stage | Out-Null
+          Get-ChildItem app\kasaterm\collab-hooks -File | Where-Object { $_.Extension -ne '.md' } | Copy-Item -Destination collab-stage
+          & "$env:WIX\bin\heat.exe" dir collab-stage -cg CollabHooksGroup -dr CollabHooksDir -var var.CollabHooksDir -srd -sfrag -gg -g1 -sreg -scom -nologo -out collabhooks.wxs
+          if (-not (Test-Path collabhooks.wxs)) { throw "heat produced no collabhooks.wxs" }
+
       # main.wxs 의 Source 경로가 워크스페이스 루트 기준(app\kasaterm\wix\...)이라
       # 반드시 루트에서 실행한다. --no-build 로 위에서 만든 target\release\kasaterm.exe 재사용.
       - name: Build MSI
-        run: cargo wix -p kasaterm --no-build --nocapture -I aronaui.wxs -C "-dAronaUiDir=web\arona-ui\dist"
+        run: cargo wix -p kasaterm --no-build --nocapture -I aronaui.wxs -I collabhooks.wxs -C "-dAronaUiDir=web\arona-ui\dist" -C "-dCollabHooksDir=collab-stage"
 
       - name: Locate MSI
         id: msi

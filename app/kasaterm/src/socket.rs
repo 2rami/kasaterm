@@ -1268,10 +1268,10 @@ impl Backend for PtyBackend {
                     .or(env_char)
                     .or_else(|| pane_character.get(sid.as_str()).cloned())
                     .or_else(|| {
-                        std::fs::read_to_string(format!(
-                            "/tmp/kasaterm-collab/{rslug}/character-{}",
+                        std::fs::read_to_string(kasa_socket::collab_root().join(format!(
+                            "{rslug}/character-{}",
                             sid.trim_start_matches('%')
-                        ))
+                        )))
                         .ok()
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())

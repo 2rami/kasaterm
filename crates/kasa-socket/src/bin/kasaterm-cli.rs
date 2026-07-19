@@ -314,7 +314,7 @@ fn collab_messages_path() -> std::path::PathBuf {
         .chars()
         .map(|c| if c == '/' || c == '.' { '-' } else { c })
         .collect();
-    std::path::Path::new("/tmp/kasaterm-collab")
+    kasa_socket::collab_root()
         .join(enc)
         .join("messages.jsonl")
 }

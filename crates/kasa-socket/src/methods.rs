@@ -589,7 +589,7 @@ fn log_agent_tell(backend: &dyn Backend, from_pane: &str, to_pane: &str, text: &
         Some(r) => format!("{base}__room_{r}"),
         None => base,
     };
-    let dir = std::path::Path::new("/tmp/kasaterm-collab").join(slug);
+    let dir = crate::collab_root().join(slug);
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -888,14 +888,14 @@ mod tests {
             .chars()
             .map(|c| if c == '/' || c == '.' { '-' } else { c })
             .collect();
-        let path = std::path::Path::new("/tmp/kasaterm-collab").join(&slug).join("messages.jsonl");
+        let path = crate::collab_root().join(&slug).join("messages.jsonl");
         let content = std::fs::read_to_string(&path).expect("tell meta must be logged");
         let entry: Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
         assert_eq!(entry["from_pane"], "%9");
         assert_eq!(entry["to_pane"], "surf-1");
         assert_eq!(entry["text"], "안녕 유즈", "제어시퀀스 없는 plain 본문만 기록");
         assert!(entry["ts"].as_f64().unwrap() > 0.0);
-        let _ = std::fs::remove_dir_all(std::path::Path::new("/tmp/kasaterm-collab").join(&slug));
+        let _ = std::fs::remove_dir_all(crate::collab_root().join(&slug));
     }
 
     #[test]
@@ -913,7 +913,7 @@ mod tests {
             .chars()
             .map(|c| if c == '/' || c == '.' { '-' } else { c })
             .collect();
-        let path = std::path::Path::new("/tmp/kasaterm-collab").join(&slug).join("messages.jsonl");
+        let path = crate::collab_root().join(&slug).join("messages.jsonl");
         assert!(!path.exists(), "메타 없는 send_text 는 기록을 남기지 않는다");
     }
 

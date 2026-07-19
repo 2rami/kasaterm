@@ -1,0 +1,5 @@
+# Windows CI 러너는 git core.autocrlf=true 라 체크아웃 시 텍스트가 CRLF 로 변환된다.
+# collab-hooks 의 sh/py 는 MSI 로 번들돼 Git bash 에서 실행되므로 CRLF 면 shebang 부터
+# 깨진다("\r: command not found") — LF 강제.
+*.sh text eol=lf
+*.py text eol=lf

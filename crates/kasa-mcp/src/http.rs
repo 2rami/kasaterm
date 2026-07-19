@@ -331,9 +331,9 @@ async fn sent_images_handler(
     // 똑같이 방-인지 dir 을 직접 계산(방 모드면 `{slug}__room_{r}`, 훅 기록 경로와 일치).
     let dir = match backend.active_room().as_deref() {
         Some(r) if !r.is_empty() => {
-            std::path::PathBuf::from(format!("/tmp/kasaterm-collab/{}__room_{}", mode_slug(&cwd), r))
+            kasa_socket::collab_root().join(format!("{}__room_{}", mode_slug(&cwd), r))
         }
-        _ => std::path::Path::new("/tmp/kasaterm-collab").join(mode_slug(&cwd)),
+        _ => kasa_socket::collab_root().join(mode_slug(&cwd)),
     };
     // 세션 경계: since(현재 세션 첫 이벤트 ts, unix sec) 이전 이미지는 이전 대화 잔류물 —
     // 제외(거노: 이전 pane 이미지가 새 대화에 남던 것). sent-images.jsonl 은 방단위 append-only
@@ -1734,7 +1734,7 @@ fn persist_sensei_msg(room_cwd: &std::path::Path, surface: &str, text: &str, rea
         Some(r) => format!("{}__room_{}", mode_slug(room_cwd), r),
         None => mode_slug(room_cwd),
     };
-    let dir = std::path::Path::new("/tmp/kasaterm-collab").join(slug);
+    let dir = kasa_socket::collab_root().join(slug);
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -1854,7 +1854,8 @@ async fn send_handler(
 /// readdir 첫 dir(엉뚱한 방)을 집어 모모톡/기록에 stale 가 떴다. room_cwd 가
 /// 없을 때(헤드리스 등)만 레거시 추정으로 폴백한다.
 fn find_collab_dir(room_cwd: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
-    let base = std::path::Path::new("/tmp/kasaterm-collab");
+    let base = kasa_socket::collab_root();
+    let base = base.as_path();
     if let Some(cwd) = room_cwd {
         let dir = base.join(mode_slug(cwd));
         return dir.join("messages.jsonl").exists().then_some(dir);
@@ -1962,11 +1963,8 @@ fn collab_events(room_cwd: &std::path::Path, n: usize) -> Vec<Event> {
 /// `room_cwd` = 활성 pane cwd(방 해석). `room` 있으면 방별 slug(거노: 방끼리 inbox 격리).
 fn collab_messages(room_cwd: &std::path::Path, n: usize, room: Option<&str>) -> Vec<MessageEntry> {
     let dir = match room {
-        Some(r) => std::path::PathBuf::from(format!(
-            "/tmp/kasaterm-collab/{}__room_{}",
-            mode_slug(room_cwd),
-            r
-        )),
+        Some(r) => kasa_socket::collab_root()
+            .join(format!("{}__room_{}", mode_slug(room_cwd), r)),
         None => match find_collab_dir(Some(room_cwd)) {
             Some(d) => d,
             None => return Vec::new(),
