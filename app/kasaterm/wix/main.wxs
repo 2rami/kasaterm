@@ -199,6 +199,7 @@
             
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
+            <ComponentRef Id='binary2'/>
             <ComponentGroupRef Id='AronaUiGroup'/>
             <ComponentGroupRef Id='CollabHooksGroup'/>
             <ComponentRef Id='StartMenuShortcut'/>
