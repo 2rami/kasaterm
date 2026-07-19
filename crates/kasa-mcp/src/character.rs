@@ -341,22 +341,10 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
     std::fs::rename(&tmp, path)
 }
 
-/// 새 `claude --session-id` 용 uuid. transcript jsonl 파일명이 되므로 파일명 안전 문자만.
-/// uuidgen(macOS/Linux 공통) → 실패 시 시간+pid 폴백.
+/// 새 `claude --session-id` 용 uuid. claude 가 엄격한 UUID 형식을 요구하므로
+/// 외부 uuidgen(Windows 부재 → kt- 폴백이 "Invalid session ID" 유발) 대신 crate 생성.
 pub fn new_session_id() -> String {
-    if let Ok(out) = crate::no_window_command("uuidgen").output() {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
-            if !s.is_empty() {
-                return s;
-            }
-        }
-    }
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("kt-{:x}-{}", t, std::process::id())
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[cfg(test)]
