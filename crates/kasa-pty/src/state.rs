@@ -426,14 +426,30 @@ impl PtySession {
         let pid = effective_shell_pid(&table, pid);
         let mut best_child: Option<(u32, String)> = None;
         let mut shell_comm: Option<String> = None;
-        for (row_pid, row_ppid, name) in table {
-            if row_pid == pid {
-                shell_comm = Some(name);
-            } else if row_ppid == pid && best_child.as_ref().is_none_or(|(p, _)| *p < row_pid) {
-                best_child = Some((row_pid, name));
+        for (row_pid, row_ppid, name) in &table {
+            if *row_pid == pid {
+                shell_comm = Some(name.clone());
+            } else if *row_ppid == pid && best_child.as_ref().is_none_or(|(p, _)| *p < *row_pid) {
+                best_child = Some((*row_pid, name.clone()));
             }
         }
         let resolved = best_child.map(|(_, n)| n).or(shell_comm).map(strip_exe_suffix);
+        // Git bash 는 스크립트 실행 시 중간 프로세스가 죽어 부모 사슬이 영구
+        // 단절된다(bash → [dead] → sh.exe → claude.exe, VM 실측) — ppid 하강
+        // 으로는 못 잇는다. 사슬이 셸에서 끊겼으면 이 GUI 가 띄운 claude
+        // (argv 의 --settings 경로에 kasaterm-shim-<GUI pid> 가 박힘)를 전역
+        // 스캔하는 최후 폴백. pane 여러 개 중 일부만 claude 인 경우 셸-only
+        // pane 도 claude 로 오판하는 알려진 한계 — 입력박스 색은 화면 패턴
+        // (prompt_box_rows)이 걸러주고 pane 테두리만 드물게 오색.
+        #[cfg(windows)]
+        let resolved = {
+            let shellish = resolved.as_deref().is_none_or(is_shell_exe);
+            if shellish && orphan_claude_of_this_gui(&table) {
+                Some("claude".to_string())
+            } else {
+                resolved
+            }
+        };
         cache.1 = resolved.clone();
         resolved
     }
@@ -469,7 +485,16 @@ impl PtySession {
         };
         let table = process_table();
         let pid = effective_shell_pid(&table, pid);
-        table.iter().any(|(_, ppid, _)| *ppid == pid)
+        if table.iter().any(|(_, ppid, _)| *ppid == pid) {
+            return true;
+        }
+        // 고아 사슬로 claude 가 트리에서 끊긴 pane 은 자식-없음=idle 로 오판돼
+        // confirm 없이 닫힌다 — active_process_name 과 같은 폴백으로 방어.
+        #[cfg(windows)]
+        if orphan_claude_of_this_gui(&table) {
+            return true;
+        }
+        false
     }
 
     pub fn send_bytes(&self, bytes: &[u8]) -> Result<()> {
@@ -2031,6 +2056,19 @@ fn is_shell_exe(name: &str) -> bool {
         base,
         "bash" | "sh" | "zsh" | "dash" | "fish" | "tcsh" | "ksh" | "cmd" | "pwsh" | "powershell"
     )
+}
+
+/// 이 GUI 프로세스가 스폰한 claude 가 어딘가 살아있는가 — shim wrapper 가 붙인
+/// `--settings %TEMP%\kasaterm-shim-<GUI pid>\...` argv 마커로 판정한다. 남의
+/// 터미널(VS Code 등)에서 도는 claude 는 마커가 없어 배제된다. 호출측 500ms
+/// 캐시 안에서만 돌고, cmdline 조회는 이름이 claude 인 프로세스로 한정.
+#[cfg(windows)]
+fn orphan_claude_of_this_gui(table: &[(u32, u32, String)]) -> bool {
+    let marker = format!("kasaterm-shim-{}", std::process::id());
+    table
+        .iter()
+        .filter(|(_, _, name)| name.to_ascii_lowercase().contains("claude"))
+        .any(|(pid, _, _)| process_cmdline(*pid).is_some_and(|cl| cl.contains(&marker)))
 }
 
 /// Windows 프로세스명은 "claude.exe" — active_process_name 호출자들은 "claude" /
