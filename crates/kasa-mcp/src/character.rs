@@ -293,8 +293,9 @@ pub fn write_marker(rslug: &str, surface_id: &str, name: &str) -> std::io::Resul
 /// (window.json 등 기존 상태 저장과 같은 config 디렉토리). 같은 세션을 --resume 등으로
 /// 이어가면 같은 캐릭터를 재사용하기 위한 저장소(거노: 재시작하면 프라나가 미도리로 둔갑).
 fn session_char_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".config/kasaterm/session_characters.json")
+    kasa_socket::home_dir()
+        .unwrap_or_default()
+        .join(".config/kasaterm/session_characters.json")
 }
 
 fn load_session_chars(path: &Path) -> serde_json::Map<String, Value> {
