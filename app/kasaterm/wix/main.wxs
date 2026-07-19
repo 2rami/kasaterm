@@ -132,6 +132,18 @@
                                 Source='$(var.CargoTargetBinDir)\WinSparkle.dll'
                                 KeyPath='yes'/>
                         </Component>
+                        <!-- 크로스-pane RPC + statusline. locate_cmux_compat_binary 가
+                             exe 옆에서 찾아 pane PATH(shim dir)에 스테이징하고, claude
+                             statusLine 커맨드(kasaterm-cli statusline)가 이를 실행한다.
+                             CI 가 kasa-socket --bin kasaterm-cli 를 함께 빌드한다. -->
+                        <Component Id='binary2' Guid='*'>
+                            <File
+                                Id='kasatermcli'
+                                Name='kasaterm-cli.exe'
+                                DiskId='1'
+                                Source='$(var.CargoTargetBinDir)\kasaterm-cli.exe'
+                                KeyPath='yes'/>
+                        </Component>
                         <!-- 아로나 웹뷰 정적 번들(bin\arona-ui\) — arona_ui_root() 가
                              exe 옆에서 찾는다. 내용물 Component 들은 CI 가 heat.exe 로
                              하베스트한 aronaui.wxs (cargo wix -I) 에서 온다. 수동 빌드 시에도

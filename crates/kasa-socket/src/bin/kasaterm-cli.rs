@@ -108,6 +108,13 @@ fn run() -> Result<Option<Response>> {
         run_session_rename(&args)?;
         return Ok(None);
     }
+    // `statusline` — claude statusLine 커맨드(stdin JSON → 한 줄 출력). collab-hooks
+    // statusline.py 의 Rust 이식 — Windows 는 python3 가 없어 py 를 못 돌리므로 이
+    // 서브커맨드가 pane statusline 을 담당한다(mac 은 검증된 py 경로 유지).
+    if cmd == "statusline" {
+        run_statusline();
+        return Ok(None);
+    }
     let request = build_request(&cmd, &args)?;
     let socket_path = resolve_socket_path()?;
     let response = roundtrip(&socket_path, &request)?;
@@ -1177,4 +1184,250 @@ fn pad_display(s: &str, width: usize) -> String {
         out.push(' ');
     }
     out
+}
+
+// ── statusline ──────────────────────────────────────────────────────────────
+// collab-hooks/statusline.py 의 충실 이식. 출력 바이트 동형이 목표 — 세그먼트
+// 순서·색·서식·마커를 py 와 같게 유지한다(골든 diff 로 검증). py 를 고치면
+// 여기도 같이 고칠 것.
+
+const SL_RESET: &str = "\x1b[0m";
+const SL_BOLD: &str = "\x1b[1m";
+const SL_DIM: &str = "\x1b[2m";
+
+// 학생명 → accent hex (kasaterm theme.rs character_accent 와 동일 값)
+const SL_STUDENT_HEX: &[(&str, &str)] = &[
+    ("아로나", "4a90e2"),
+    ("프라나", "e6e9f0"),
+    ("미도리", "6bcf7f"),
+    ("모모이", "ff6b6b"),
+    ("유즈", "e64980"),
+    ("아리스", "4c6ef5"),
+    ("유우카", "7a5fd4"),
+    ("시로코", "8fb8d8"),
+    ("호시노", "f2a0c0"),
+    ("코하루", "f27b9b"),
+    ("히마리", "a88be0"),
+    ("아루", "e85d4a"),
+];
+const SL_EFFORT_HEX: &[(&str, &str)] = &[
+    ("low", "565f89"),
+    ("medium", "7aa2f7"),
+    ("high", "e0af68"),
+    ("xhigh", "f7768e"),
+    ("max", "bb9af7"),
+];
+const SL_C_MODEL: &str = "7aa2f7";
+const SL_C_GIT: &str = "73daca";
+const SL_C_DIR: &str = "bb9af7";
+const SL_C_CTX: &str = "ff9e64";
+const SL_C_SEP: &str = "565f89";
+const SL_C_FALLBACK: &str = "a0a6b0";
+
+// 학생 프사 자리표시자 — kasaterm 이 U+FFFC 연속을 프사(bust)로 대체. 5칸 고정.
+const SL_SPRITE: &str = "\u{fffc}\u{fffc}\u{fffc}\u{fffc}\u{fffc}";
+
+struct SlIcons {
+    model: &'static str,
+    git: &'static str,
+    folder: &'static str,
+    effort: &'static str,
+}
+
+fn sl_icons(set: &str) -> SlIcons {
+    match set {
+        "unicode" => SlIcons { model: ">", git: "⎇", folder: "▸", effort: "↯" },
+        "plain" => SlIcons { model: "M", git: "git", folder: "dir", effort: "E" },
+        _ => SlIcons {
+            model: "\u{f233}",
+            git: "\u{e0a0}",
+            folder: "\u{f07b}",
+            effort: "\u{f0e7}",
+        },
+    }
+}
+
+fn sl_env(name: &str) -> Option<String> {
+    // py os.environ.get + truthiness — 빈 문자열은 미설정 취급.
+    std::env::var(name).ok().filter(|s| !s.is_empty())
+}
+
+fn sl_home() -> std::path::PathBuf {
+    kasa_socket::home_dir().unwrap_or_default()
+}
+
+fn sl_read_json(path: &std::path::Path) -> Option<Value> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn sl_git_branch(cwd: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+fn run_statusline() {
+    use std::io::Read;
+    let mut buf = String::new();
+    let d: Value = match std::io::stdin().read_to_string(&mut buf) {
+        Ok(_) => match serde_json::from_str(&buf) {
+            Ok(v) => v,
+            Err(_) => {
+                println!("{} err{SL_RESET}", ansi_fg("f7768e"));
+                return;
+            }
+        },
+        Err(_) => {
+            println!("{} err{SL_RESET}", ansi_fg("f7768e"));
+            return;
+        }
+    };
+
+    let cfg = sl_read_json(&sl_home().join(".claude/statusline-config.json")).unwrap_or(Value::Null);
+    let ic = sl_icons(cfg.get("icon_set").and_then(|v| v.as_str()).unwrap_or("nerd-font"));
+    let sep_char = cfg.get("separator").and_then(|v| v.as_str()).unwrap_or("┃");
+
+    let cwd = d
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| std::env::current_dir().ok().map(|p| p.display().to_string()))
+        .unwrap_or_default();
+    let session_id = d.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+
+    // claude 내부 cd 를 GUI 에 보고 — 자기 자신을 report-cwd 로 재실행(비동기,
+    // statusline 출력을 지연시키지 않는다). pane 밖에선 무동작.
+    if let Some(pane) = sl_env("KASATERM_PANE_ID") {
+        if !cwd.is_empty() {
+            if let Ok(me) = std::env::current_exe() {
+                let _ = std::process::Command::new(me)
+                    .args(["report-cwd", &pane, &cwd, session_id])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
+        }
+    }
+
+    // 세션 id 마커 — 렌더러가 conceal 지원을 공표(caps.json)한 경우에만 SGR8 로 싣는다.
+    let mut sid_marker = String::new();
+    if !session_id.is_empty() && sl_env("KASATERM_PANE_ID").is_some() {
+        if let Some(caps) = sl_read_json(&sl_home().join(".config/kasaterm/caps.json")) {
+            if caps.get("sgr_conceal").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let sid8: String = session_id.chars().take(8).collect();
+                sid_marker = format!("\x1b[8m⟦{sid8}⟧\x1b[28m");
+            }
+        }
+    }
+
+    let sep = format!(" {SL_DIM}{}{sep_char}{SL_RESET} ", ansi_fg(SL_C_SEP));
+    let mut parts: Vec<String> = Vec::new();
+
+    let mut name = sl_env("KASATERM_CHARACTER");
+    // 포크/attach 뷰(세션 id ≠ env anchor)만 세션→캐릭터 영속 바인딩을 정본으로.
+    let forked_view = !session_id.is_empty()
+        && std::env::var("KASATERM_SESSION_ID").ok().as_deref() != Some(session_id);
+    if forked_view {
+        if let Some(map) = sl_read_json(&sl_home().join(".config/kasaterm/session_characters.json"))
+        {
+            if let Some(bound) = map.get(session_id).and_then(|v| v.as_str()) {
+                if !bound.is_empty() {
+                    name = Some(bound.to_string());
+                }
+            }
+        }
+    }
+    if let Some(ref name) = name {
+        let hex = SL_STUDENT_HEX
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| *v)
+            .unwrap_or(SL_C_FALLBACK);
+        let c = ansi_fg(hex);
+        if sl_env("KASATERM_PANE_ID").is_some() {
+            parts.push(format!("{c}{SL_SPRITE}{SL_RESET}"));
+        } else {
+            parts.push(format!("{c}●{SL_RESET} {c}{SL_BOLD}{name}{SL_RESET}"));
+        }
+    }
+
+    // ⑂ bg 배지 — anchor 불일치이되 사용자 주도 resume(shim 마커)은 제외.
+    let user_resume = !session_id.is_empty()
+        && (std::env::var("KASATERM_RESUMED_SID").ok().as_deref() == Some(session_id)
+            || sl_env("KASATERM_RESUME_PICKER").is_some());
+    if forked_view && !user_resume && sl_env("KASATERM_PANE_ID").is_some() {
+        parts.push(format!("{SL_DIM}{}⑂ bg{SL_RESET}", ansi_fg(SL_C_FALLBACK)));
+    }
+
+    if let Some(model) = d
+        .get("model")
+        .and_then(|m| m.get("display_name"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        // "(1M context)" 등 괄호 꼬리는 ctx% 의 "·1M" 과 중복 — 잘라 truncate 방지.
+        let model = model.split(" (").next().unwrap_or(model);
+        parts.push(format!("{}{SL_BOLD}{} {model}{SL_RESET}", ansi_fg(SL_C_MODEL), ic.model));
+    }
+
+    if let Some(branch) = sl_git_branch(&cwd).filter(|s| !s.is_empty()) {
+        parts.push(format!("{}{} {branch}{SL_RESET}", ansi_fg(SL_C_GIT), ic.git));
+    }
+
+    let dir_name = std::path::Path::new(&cwd)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    parts.push(format!("{}{} {dir_name}{SL_RESET}", ansi_fg(SL_C_DIR), ic.folder));
+
+    // ctx% — Fable 5 창 오보고(200k) 보정: 알려진 진짜 창(1M)이 더 크면 재계산.
+    let ctx = d.get("context_window").cloned().unwrap_or(Value::Null);
+    let mut pct = ctx.get("used_percentage").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let mut win = ctx.get("context_window_size").and_then(|v| v.as_u64()).unwrap_or(0);
+    let mid_owned = d
+        .get("model")
+        .and_then(|m| m.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mid = mid_owned.split('[').next().unwrap_or("");
+    let known: u64 = if mid == "claude-fable-5" { 1_000_000 } else { 0 };
+    if known > win {
+        win = known;
+        let tot = ctx.get("total_input_tokens").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        pct = (tot / win as f64 * 100.0).min(100.0);
+    }
+    let win_s = if win >= 1_000_000 {
+        format!("·{}M", win / 1_000_000)
+    } else if win > 0 {
+        format!("·{}k", win / 1_000)
+    } else {
+        String::new()
+    };
+    let c_ctx = if pct >= 90.0 { ansi_fg("f7768e") } else { ansi_fg(SL_C_CTX) };
+    parts.push(format!("{c_ctx}{pct:.0}%{SL_DIM}{win_s}{SL_RESET}"));
+
+    if let Some(lvl) = d
+        .get("effort")
+        .and_then(|e| e.get("level"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let hex = SL_EFFORT_HEX
+            .iter()
+            .find(|(k, _)| *k == lvl)
+            .map(|(_, v)| *v)
+            .unwrap_or("7aa2f7");
+        parts.push(format!("{}{} {lvl}{SL_RESET}", ansi_fg(hex), ic.effort));
+    }
+
+    println!("{}{sid_marker}", parts.join(&sep));
 }

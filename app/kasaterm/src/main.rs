@@ -3975,8 +3975,7 @@ fn install_pane_shims() {
     // 마커를 내보낸다. 게이트가 없으면 .app 설치 직후(재시작 전) 구버전 렌더러가
     // 마커를 그대로 그려 화면에 `⟦a1b2c3d4⟧` 가 노출된다(conceal 미지원).
     {
-        let caps = std::path::Path::new(&std::env::var("HOME").unwrap_or_default())
-            .join(".config/kasaterm/caps.json");
+        let caps = kasa_socket::home_dir().unwrap_or_default().join(".config/kasaterm/caps.json");
         if let Some(d) = caps.parent() {
             let _ = std::fs::create_dir_all(d);
         }
@@ -4211,12 +4210,28 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     } else {
         hooks_dir.display().to_string()
     };
+    // Windows 는 claude 가 훅/statusLine 커맨드를 cmd 로 돌리므로 .sh 직접 exec 이
+    // 안 된다 — `sh "<경로>"` 로 명시 실행(pane env PATH 에 Git usr/bin 의 sh.exe 가
+    // 있다). unix 는 종전대로 직접 exec.
     let cmd = |script: &str, timeout: u64| {
-        serde_json::json!({ "type": "command", "command": format!("\"{hd}/{script}\""), "timeout": timeout })
+        let run = if cfg!(windows) {
+            format!("sh \"{hd}/{script}\"")
+        } else {
+            format!("\"{hd}/{script}\"")
+        };
+        serde_json::json!({ "type": "command", "command": run, "timeout": timeout })
+    };
+    // statusline: unix 는 검증된 py(uv/python3 존재), Windows 는 python3 부재라
+    // kasaterm-cli 서브커맨드(같은 출력, 골든 diff 검증)를 쓴다 — shim dir 에
+    // 스테이징된 exe 가 pane PATH 로 잡힌다.
+    let statusline_cmd = if cfg!(windows) {
+        "kasaterm-cli statusline".to_string()
+    } else {
+        format!("\"{hd}/statusline.py\"")
     };
     // Mirrors what install-hooks.sh used to register globally — same matcher
     // and timeouts, so in-pane behavior is unchanged.
-    let settings = serde_json::json!({
+    let mut settings = serde_json::json!({
         "hooks": {
             // 세션 시작/재개 즉시 bind → 첫 프롬프트 전에도 board 에 뜬다. SessionStart 는
             // startup·resume·clear 에 모두 발화하므로 relaunch 후 claude --resume 재바인딩도
@@ -4240,15 +4255,24 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         // statusLine 도 세션 스코프 --settings 로 주입 — 배정 학생 프사(U+FFFC)·model·git·
         // ctx%·effort + 내부 cd 보고(report-cwd). pane 안에서만 우리 것, 밖 claude 는
         // 사용자 ~/.claude/settings.json statusLine 그대로(--settings 는 pane PATH 한정).
-        "statusLine": { "type": "command", "command": format!("\"{hd}/statusline.py\""), "padding": 0 },
+        "statusLine": { "type": "command", "command": statusline_cmd, "padding": 0 },
     });
-    let settings_path = shim_dir.join("claude-hooks-settings.json");
     if cfg!(windows) {
-        // 훅·statusline 은 python3 의존+Windows 훅 실행 경로 미검증이라 1차에서 제외 —
-        // settings 파일이 없으면 wrapper 가 --settings 없이 순정 exec 폴백한다(페르소나·
-        // 세션고정·팀 트리플은 argv 주입이라 그대로 산다).
-        let _ = std::fs::remove_file(&settings_path);
-    } else {
+        // conflict-guard 는 python3 의존 — 기본 Windows 엔 python3 가 없어 훅이 매
+        // Edit 마다 실패 노이즈를 낸다. python3 가 PATH 에 있을 때만 유지.
+        let has_py3 = proc::command("python3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !has_py3 {
+            settings["hooks"].as_object_mut().unwrap().remove("PreToolUse");
+        }
+    }
+    let settings_path = shim_dir.join("claude-hooks-settings.json");
+    {
         match serde_json::to_string_pretty(&settings) {
             Ok(s) => {
                 if let Err(e) = std::fs::write(&settings_path, s) {

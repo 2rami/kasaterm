@@ -32,6 +32,16 @@ pub use backend::{Backend, SplitDirection};
 pub use protocol::{ErrorObj, Request, Response};
 pub use server::Server;
 
+/// 홈 디렉토리 — HOME(unix·Git bash) → USERPROFILE(Windows GUI 프로세스는 HOME
+/// 미설정) 순. 둘 다 없으면 None — 호출부가 빈 PathBuf 로 폴백하면 종전 동작과 동일.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()))
+        .map(std::path::PathBuf::from)
+}
+
 /// collab 마커·메시지 루트. unix 는 `/tmp/kasaterm-collab` 리터럴 유지 — sh 훅·
 /// statusline 등 스크립트가 같은 리터럴을 참조한다. Windows 는 `%TEMP%` 기준 —
 /// Git bash 가 `/tmp` 를 `%TEMP%` 로 마운트하므로 스크립트와 같은 디렉토리로 만난다.

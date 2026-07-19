@@ -50,8 +50,12 @@ jobs:
 
       # kasa-mcp 는 루트 Cargo.toml 에서 opt-level=0 으로 pin 돼 있다 —
       # Windows rustc/LLVM 이 이 크레이트 최적화 시 STATUS_ACCESS_VIOLATION 으로 죽어서.
+      # kasaterm-cli 는 MSI 의 bin\ 에 exe 옆으로 실린다(main.wxs binary2) — pane
+      # 협업 RPC + statusline 담당.
       - name: Build kasaterm (release)
-        run: cargo build --release -p kasaterm
+        run: |
+          cargo build --release -p kasaterm
+          cargo build --release -p kasa-socket --bin kasaterm-cli
 
       # WinSparkle(자동 업데이트) prebuilt x64 DLL 을 빌드 산출물 옆에 둔다 —
       # main.wxs 의 $(var.CargoTargetBinDir)\WinSparkle.dll 이 여기(target\release)를
