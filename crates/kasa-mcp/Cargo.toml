@@ -24,6 +24,8 @@ futures-util = "0.3"
 bytes = "1"
 # tell(standalone): forkpty 로 `claude attach` 를 띄워 background 세션 stdin 에 주입.
 libc = "0.2"
+# pane session id: claude --session-id 가 엄격 UUID 요구(Windows 엔 uuidgen 없음).
+uuid = { version = "1", features = ["v4"] }
 
 # Standalone webview backend: serves the arona-ui daemon view off a second
 # port so the webview survives kasaterm exiting.
