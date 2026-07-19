@@ -132,6 +132,11 @@
                                 Source='$(var.CargoTargetBinDir)\WinSparkle.dll'
                                 KeyPath='yes'/>
                         </Component>
+                        <!-- 아로나 웹뷰 정적 번들(bin\arona-ui\) — arona_ui_root() 가
+                             exe 옆에서 찾는다. 내용물 Component 들은 CI 가 heat.exe 로
+                             하베스트한 aronaui.wxs (cargo wix -I) 에서 온다. 수동 빌드 시에도
+                             heat 하베스트 + -I 없이는 링크가 실패한다(의도된 loud failure). -->
+                        <Directory Id='AronaUiDir' Name='arona-ui'/>
                     </Directory>
                 </Directory>
             </Directory>
@@ -177,6 +182,7 @@
             
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='binary1'/>
+            <ComponentGroupRef Id='AronaUiGroup'/>
             <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='DesktopShortcut'/>
 
