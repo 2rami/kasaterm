@@ -47,8 +47,16 @@ pub(crate) fn take_found() -> Option<String> {
 
 /// appcast XML 에서 최신 항목의 `sparkle:version` 을 뽑는다. CI 가 최신 1건만
 /// 쓰는 단순 피드(docs/appcast-win.xml)라 첫 매치가 곧 최신이다.
+/// 실피드(release.sh/release.yml)는 `<sparkle:version>x</sparkle:version>`
+/// 엘리먼트형 — 속성형(`sparkle:version="x"`)은 Sparkle 호환 폴백.
 #[cfg_attr(not(windows), allow(dead_code))] // 비 Windows 에선 테스트만 사용
 fn parse_appcast_version(xml: &str) -> Option<String> {
+    const ELEM: &str = "<sparkle:version>";
+    if let Some(i) = xml.find(ELEM) {
+        let rest = &xml[i + ELEM.len()..];
+        let v = rest[..rest.find('<')?].trim();
+        return (!v.is_empty()).then(|| v.to_string());
+    }
     const ATTR: &str = "sparkle:version=\"";
     let i = xml.find(ATTR)? + ATTR.len();
     let rest = &xml[i..];
@@ -203,11 +211,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_version_from_appcast_enclosure() {
+    fn parses_version_from_real_feed_element_form() {
+        // release.sh/release.yml 이 실제로 뿜는 형식 — 0.1.11 까지 이 형식을
+        // 속성형 파서가 못 읽어 업데이트 토스트가 영영 안 떴다(실기 확인).
+        let xml = r#"<item><title>0.1.12</title>
+            <sparkle:version>0.1.12</sparkle:version>
+            <enclosure url="https://x/kasaterm-0.1.12-x86_64.msi"
+                sparkle:os="windows" length="123"/></item>"#;
+        assert_eq!(parse_appcast_version(xml).as_deref(), Some("0.1.12"));
+        assert_eq!(parse_appcast_version("<rss></rss>"), None);
+    }
+
+    #[test]
+    fn parses_version_from_appcast_enclosure_attr_fallback() {
         let xml = r#"<item><enclosure url="https://x/kasaterm-0.1.9-x86_64.msi"
             sparkle:version="0.1.9" sparkle:os="windows" length="123"/></item>"#;
         assert_eq!(parse_appcast_version(xml).as_deref(), Some("0.1.9"));
-        assert_eq!(parse_appcast_version("<rss></rss>"), None);
     }
 
     #[test]
