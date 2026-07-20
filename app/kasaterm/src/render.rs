@@ -1797,11 +1797,13 @@ impl App {
             // frame. The image pass (in g.render) paints under the chrome so
             // pane headers / focus ring / dim overlay land on top.
             for (id, image, _, _, rot, _) in &image_slots {
-                // Per-(rotation, frame) cache key — rotated pixels uploaded once
-                // per (pane, rotation, gif frame). Static images have one frame
-                // so this collapses to the old (pane, rotation) behaviour.
+                // Per-(image, rotation, frame) cache key. The image pointer is in
+                // the key because one pane can hold several image tabs — keying on
+                // pane id alone made the 2nd image tab collide with the 1st's
+                // texture (has_image hit → 2nd/switched image showed the 1st's
+                // pixels, 거노: 같은 pane에 이미지 띄우면 이전 게 덮어써짐).
                 let cur = image.cur_idx();
-                let key = format!("{id}-r{rot}-f{cur}");
+                let key = format!("{id}-p{:x}-r{rot}-f{cur}", Arc::as_ptr(image) as usize);
                 if !g.has_image(&key) {
                     let (rgba, w, h) = rotate_rgba_cw(image.cur_rgba(), image.w, image.h, *rot);
                     g.upload_image(&key, &rgba, w, h);
@@ -1809,7 +1811,7 @@ impl App {
             }
             g.draw_cells(&slot_views);
             for (id, image, (bx, by, bw, bh), zoom, rot, (pan_x, pan_y)) in &image_slots {
-                let key = format!("{id}-r{rot}-f{}", image.cur_idx());
+                let key = format!("{id}-p{:x}-r{rot}-f{}", Arc::as_ptr(image) as usize, image.cur_idx());
                 g.queue_image(&key, *bx, *by, *bw, *bh, *zoom, *pan_x, *pan_y);
             }
             // 학생 도트 — Clawd 배너 자리. idle 4프레임을 캐릭터당 1회 일괄
