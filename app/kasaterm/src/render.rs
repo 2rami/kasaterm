@@ -870,10 +870,19 @@ impl App {
                                 let left_c = right_c - STAND_CELLS;
                                 let h = INPUT_STANDING_ROWS as f32 * sch;
                                 if left_c > 2.0 {
-                                    // 턴 완료 후 다음 입력 전까지 학생이 양팔 만세
-                                    // (cheer), 사용자가 이 pane 에 타이핑하면 idle 로.
+                                    // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세
+                                    // cheer, 그 뒤로 계속 대기하면 손 흔들며 기다리는
+                                    // wave("선생님, 다음 지시 기다려요"). 학생 pane 은
+                                    // bypass 모드라 승인 프롬프트가 안 떠 우상단 wave
+                                    // 트리거가 사실상 죽어 있다 — wave 를 standing 순환에
+                                    // 넣어야 "입력 기다림"이 보인다. 사용자가 이 pane 에
+                                    // 타이핑하면 idle 로.
                                     let motion = if self.turn_done_panes.contains(&id) {
-                                        "cheer"
+                                        if self.notify_flash_factor(&id).is_some() {
+                                            "cheer"
+                                        } else {
+                                            "wave"
+                                        }
                                     } else {
                                         "idle"
                                     };
