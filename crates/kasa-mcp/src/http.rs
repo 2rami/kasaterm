@@ -1127,6 +1127,31 @@ async fn teamname_handler(
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], body)
 }
 
+/// `GET /pane-session?pane=<id>` — 그 pane 이 현재 foreground 로 소유한 claude 세션
+/// id(bound transcript stem, 플레인 텍스트). statusline 이 `⑂ bg` 배지를 정밀
+/// 판별하는 데 쓴다: 자기 session_id 와 이 응답이 같으면 foreground(복원·재부팅
+/// 포함), 다르면 진짜 백그라운드 포크. anchor(KASATERM_SESSION_ID) 휴리스틱은
+/// 앱 재시작 복원에서 세션↔anchor 가 갈라져 오발화했다(거노) — 런타임 bound 조회가
+/// 정본. 미바인딩·미지정은 빈 응답(statusline 은 빈 응답이면 배지 생략).
+async fn pane_session_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let pane = params.get("pane").map(|s| s.as_str()).unwrap_or("");
+    let body = if pane.is_empty() {
+        String::new()
+    } else {
+        backend
+            .pane_session_ids()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(p, _)| p == pane)
+            .map(|(_, sid)| sid)
+            .unwrap_or_default()
+    };
+    ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], body)
+}
+
 /// `GET /persona?sid=<uuid>` — 그 세션에 바인딩된 학생의 persona(플레인 텍스트).
 /// detach 포크는 데몬이 argv 를 재구성하며 --append-system-prompt 가 유실되고, env
 /// persona 는 데몬 env(데몬을 낳은 옛 pane 고정)라 계보가 틀리다 — SessionStart 훅이
@@ -2286,6 +2311,7 @@ pub fn spawn_http_server_opts(
                 let room_cd_backend = backend.clone();
                 let sent_images_backend = backend.clone();
                 let pane_tasks_backend = backend.clone();
+                let pane_session_backend = backend.clone();
                 let paste_image_backend = backend.clone();
                 let git_panel_backend = backend.clone();
                 let service = StreamableHttpService::new(
@@ -2577,6 +2603,12 @@ pub fn spawn_http_server_opts(
                         "/pane-tasks",
                         get(move |q: Query<std::collections::HashMap<String, String>>| {
                             pane_tasks_handler(pane_tasks_backend.clone(), q)
+                        }),
+                    )
+                    .route(
+                        "/pane-session",
+                        get(move |q: Query<std::collections::HashMap<String, String>>| {
+                            pane_session_handler(pane_session_backend.clone(), q)
                         }),
                     )
                     .route(

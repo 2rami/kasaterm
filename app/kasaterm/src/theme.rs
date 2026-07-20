@@ -619,6 +619,32 @@ pub fn slug_character(slug: &str) -> Option<&'static str> {
         .map(|(n, _)| *n)
 }
 
+/// claude 시작 배너의 "Welcome back <user>!" 를 대체할 배정 학생 인사말 —
+/// 각 캐릭터 페르소나 말투로. `user` 는 원 배너에서 추출한 사용자 이름(하드코딩
+/// 금지, characters.json 의 user_title="선생님" 을 뒤에 붙인다). 로스터 밖 이름은
+/// None → 호출부가 배너 원문을 유지한다. 배정 학생(character_slug 有)에만 불리므로
+/// `_` 분기는 방어용.
+pub fn character_welcome(name: &str, user: &str) -> Option<String> {
+    // 인사말은 원 배너("Welcome back <user>!") 폭에 맞춘 한 문장 — 2컬럼 배너의
+    // 왼쪽 컬럼을 넘기면 호출부가 "…"로 자른다(거노 실사고: 긴 인사말 잘림).
+    let g = match name {
+        "아로나" => format!("어서 오세요 {user} 선생님!"),
+        "프라나" => format!("{user} 선생님, 오셨군요."),
+        "미도리" => format!("{user} 선생님, 오셨어요."),
+        "모모이" => format!("{user} 선생님, 어서 오세요!"),
+        "유즈" => format!("{user} 선생님… 오셨네요."),
+        "아리스" => format!("{user} 선생님, 돌아왔구나!"),
+        "유우카" => format!("{user} 선생님, 오셨네요."),
+        "시로코" => format!("{user} 선생님, 오셨어요."),
+        "호시노" => format!("{user} 선생님~ 왔구나~"),
+        "코하루" => format!("어, 어서오세요 {user} 선생님…!"),
+        "히마리" => format!("{user} 선생님, 어서 오세요."),
+        "아루" => format!("훗, 왔군 {user} 선생님!"),
+        _ => return None,
+    };
+    Some(g)
+}
+
 #[cfg(test)]
 mod accent_tests {
     use super::*;

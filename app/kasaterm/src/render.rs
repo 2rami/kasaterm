@@ -258,6 +258,12 @@ impl App {
             is_image: bool,
             /// In-pane tab labels (empty = single-tab; header shows `label`).
             tabs: Vec<String>,
+            /// Per-tab "is this a file tab (markdown/text editor, not a shell)"
+            /// — drives the hover pop-out icon. Same length/order as `tabs`;
+            /// empty when `tabs` is (single-tab fallback uses `single_is_file`).
+            tab_is_file: Vec<bool>,
+            /// Single-tab fallback: whether the lone tab is a file editor.
+            single_is_file: bool,
             /// Active tab index into `tabs`.
             active_tab: usize,
             /// Overflow windowing: first tab drawn (pane.tab_first snapshot).
@@ -342,10 +348,16 @@ impl App {
         let mut waiting_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // statusline 자리표시자(U+FFFC) → 학생 프사(bust, 정적 1프레임).
         let mut profile_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // statusline 프사의 hover 확대·클릭용 (학생이름, slug, rect). profile_slots
+        // 와 달리 학생 이름을 들고 있어(hover 큰 bust·클릭→학생설정 딥링크) — /resume
+        // 피커 프사는 이름을 모르므로 여기 안 담고 statusline 프사만.
+        let mut profile_face_hits: Vec<(String, &'static str, (f32, f32, f32, f32))> = Vec::new();
         // 접힌 팀메시지 줄 hover 시 전문 말풍선 — 커서는 한 곳이라 최대 1개.
         let mut teammate_bubble: Option<TeammateBubbleSlot> = None;
-        // 입력박스 위 스페이서 행(effort 칩 자리)에 서 있는 학생(idle 전신 애니).
-        let mut standing_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
+        // 입력박스 위 스페이서 행(effort 칩 자리)에 서 있는 학생(전신 애니).
+        // 두 번째 필드 = 모션: "cheer"(턴 완료 직후) 또는 "idle"(대기).
+        let mut standing_slots: Vec<(&'static str, &'static str, (f32, f32, f32, f32))> =
+            Vec::new();
         // Markdown panes: (id, doc, body box, scroll px, raw_mode, edit lines,
         // cursor, selection, h_scroll px, syntax lang). Render mode draws
         // blocks; Raw mode draws the editor buffer.
@@ -690,6 +702,9 @@ impl App {
                         // 배너 타이틀 "Claude Code" 도 학생 이름으로 — 도트만
                         // 바뀌면 학생이 남의 이름표를 달고 서 있는 꼴(거노).
                         replace_banner_title(&mut composed, br, bc, name, accent);
+                        // 웰컴 배너("Welcome back <user>!")면 도트 위 인사말 행을
+                        // 배정 학생 페르소나 인사말로 — launcher 화면에선 no-op.
+                        replace_welcome_greeting(&mut composed, br, name, accent);
                     }
                     // working 스피너 자리 → 학생이 제자리 걸음으로 "작업 중".
                     // 스피너 글리프 셀은 스냅샷에서 비우고, 그 자리(스피너 행
@@ -799,15 +814,14 @@ impl App {
                             *cell = GridCell::blank();
                         }
                         let face_h = STATUSLINE_FACE_ROWS as f32 * sch;
-                        profile_slots.push((
-                            slug,
-                            (
-                                body_left + sc as f32 * scw,
-                                (body_top + (sr + 1) as f32 * sch - face_h).max(body_top),
-                                len as f32 * scw,
-                                face_h,
-                            ),
-                        ));
+                        let face_rect = (
+                            body_left + sc as f32 * scw,
+                            (body_top + (sr + 1) as f32 * sch - face_h).max(body_top),
+                            len as f32 * scw,
+                            face_h,
+                        );
+                        profile_slots.push((slug, face_rect));
+                        profile_face_hits.push((name.to_string(), slug, face_rect));
                         // 입력박스 위에 서 있는 학생(전신 idle) — 프롬프트 위
                         // 스페이서 행(effort 칩·context 경고가 뜨는 자리) 우측.
                         // statusline 바로 위 행이 아래 테두리(전폭 '─')면 그
@@ -856,8 +870,16 @@ impl App {
                                 let left_c = right_c - STAND_CELLS;
                                 let h = INPUT_STANDING_ROWS as f32 * sch;
                                 if left_c > 2.0 {
+                                    // 턴 완료 후 다음 입력 전까지 학생이 양팔 만세
+                                    // (cheer), 사용자가 이 pane 에 타이핑하면 idle 로.
+                                    let motion = if self.turn_done_panes.contains(&id) {
+                                        "cheer"
+                                    } else {
+                                        "idle"
+                                    };
                                     standing_slots.push((
                                         slug,
+                                        motion,
                                         (
                                             body_left + left_c * scw,
                                             (body_top + (anchor + 1) as f32 * sch - h)
@@ -978,7 +1000,7 @@ impl App {
                         crate::socket::project_jsonl(cwd, sid)
                     });
                     for r in 0..composed.len() {
-                        let Some((c0, sender)) = teammate_collapsed_line(&composed[r])
+                        let Some((c0, count, sender)) = teammate_collapsed_line(&composed[r])
                         else {
                             continue;
                         };
@@ -1001,10 +1023,32 @@ impl App {
                                 && cx >= body_left
                                 && cx < body_left + row_w
                             {
+                                // 복수("N messages from")면 마지막 N통을 시간순으로
+                                // 합쳐 말풍선에(호버 시에만 회수). 단수면 최신 1통.
+                                let (summary, body) = if count > 1 {
+                                    let msgs = msg_path
+                                        .as_deref()
+                                        .map(|p| last_teammate_msgs(p, &sender, count))
+                                        .unwrap_or_default();
+                                    let joined = msgs
+                                        .iter()
+                                        .map(|mm| {
+                                            if mm.summary.is_empty() {
+                                                mm.body.clone()
+                                            } else {
+                                                format!("{}\n{}", mm.summary, mm.body)
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n───\n");
+                                    (format!("{count} messages"), joined)
+                                } else {
+                                    (m.summary.clone(), m.body.clone())
+                                };
                                 teammate_bubble = Some(TeammateBubbleSlot {
                                     sender: sender.clone(),
-                                    summary: m.summary.clone(),
-                                    body: m.body.clone(),
+                                    summary,
+                                    body,
                                     accent,
                                     anchor: (body_left + c0 as f32 * scw, ry0, ry1),
                                     pane: (
@@ -1318,6 +1362,23 @@ impl App {
                                 })
                                 .collect()
                         },
+                        // 팝아웃 아이콘 대상 판정: 마크다운/텍스트 편집 탭만(터미널 제외).
+                        // tabs 라벨을 비운 학생 pane 폴백과 길이를 맞추려 같은 조건으로 계산.
+                        tab_is_file: if pane.tabs.len() <= 1
+                            && pane.character.as_deref().is_some_and(|c| !c.is_empty())
+                        {
+                            Vec::new()
+                        } else {
+                            pane.tabs
+                                .iter()
+                                .map(|t| matches!(t.content, PaneContent::Markdown(_)))
+                                .collect()
+                        },
+                        single_is_file: pane
+                            .tabs
+                            .first()
+                            .map(|t| matches!(t.content, PaneContent::Markdown(_)))
+                            .unwrap_or(false),
                         active_tab: pane.active_tab,
                         tab_first: pane.tab_first,
                         tab_last_active: pane.tab_last_active,
@@ -1677,6 +1738,8 @@ impl App {
         // measured tab widths) and published to self after the gpu borrow.
         let mut tab_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         let mut tab_close_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
+        // 파일 탭 hover 시 뜨는 팝아웃(별도창) 아이콘 hit rect: (pane id, 탭 idx, rect).
+        let mut tab_popout_hits: Vec<(String, usize, (f32, f32, f32, f32))> = Vec::new();
         let mut plus_hits: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         // Tab-overflow windowing per pane: (id, effective first, visible
         // count, active tab this frame) — written back to ws.panes after the
@@ -1688,18 +1751,15 @@ impl App {
         // so a stale rect can't outlive its glyph after a layout change.
         let mut pane_action_hits: Vec<(String, ActionKind, (f32, f32, f32, f32))> = Vec::new();
         let mut confirm_btn_hits: Vec<(ConfirmBtn, (f32, f32, f32, f32))> = Vec::new();
-        // Settings screen: sidebar entry rect + (when open) the full-view paint
-        // snapshot, both captured before the gpu borrow. The screen's clickable
-        // rects come back from paint_settings inside the borrow.
+        let mut restore_btn_hits: Vec<(RestoreBtn, (f32, f32, f32, f32))> = Vec::new();
+        // Settings entry lives in its own wgpu window now (auxwin.rs); the main
+        // frame only draws the sidebar "Settings" entry rect for hit-testing.
         let win_h_logical = win_px.1 / scale;
         let settings_btn = self.settings_btn_rect(win_h_logical);
         self.settings_btn_rect = settings_btn;
-        let settings_ctx = self.settings_open.then(|| self.settings_snapshot(win_px, scale));
         let settings_toggle = self.settings_toggle_rect();
         let file_tree_toggle = self.file_tree_toggle_rect();
         let arona_btn = self.arona_btn_rect();
-        let mut settings_rects_out: Vec<(SettingsAction, (f32, f32, f32, f32))> = Vec::new();
-        let mut settings_content_h_out: f32 = 0.0;
         // Caret blink for the commit-modal message box, computed before `g`
         // borrows `self.gpu` (the blink helper takes `&self`).
         let commit_caret_on = self.cursor_blink_on(std::time::Instant::now());
@@ -1709,6 +1769,9 @@ impl App {
             headers.iter().map(|h| self.notify_flash_factor(&h.id)).collect();
         // SCHALE OS(아로나) 패널 열림 여부 — gpu 빌림 전에 스냅샷(타이틀바 ✨ 버튼 active 표시).
         let arona_open = self.arona_panel_window.is_some();
+        // "빠른 파일" 목록 — &self 메서드라 아래 &mut self.gpu 빌림 안에서는 못 부른다.
+        // 빌림 전에 스냅샷(파일트리 렌더에서 로컬로 소비).
+        let quick_files_list = self.quick_files();
         // 학생 도트 배너 가시 상태 → 애니 타이머(handler.rs)와 damage 게이트
         // (render_frame)가 참조. 배너가 사라진 프레임에 false로 떨어져
         // 애니 redraw 펌프가 저절로 멈춘다.
@@ -1746,18 +1809,20 @@ impl App {
             // 디코딩 실패 시 queue_image가 조용히 skip.
             let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
             let anim_idx = (anim_ms / STUDENT_ANIM_FRAME_MS) as usize % STUDENT_IDLE_FRAMES;
-            // idle 프레임을 (캐릭터당 1회) 업로드 — 배너와 승인대기 도트가 공유.
-            let ensure_idle = |g: &mut gpu::GpuRenderer, slug: &str| {
-                if !g.has_image(&format!("student:{slug}:f0")) {
-                    if let Some(frames) = student_sprite_frames(slug, "idle") {
+            // 모션 프레임을 (캐릭터×모션당 1회) 업로드 — 배너·승인대기·standing
+            // 이 공유. idle 키는 "f"(기존 호환), 나머지는 모션 이름 그대로.
+            let ensure_anim = |g: &mut gpu::GpuRenderer, slug: &str, motion: &str| {
+                let pfx = sprite_key_prefix(motion);
+                if !g.has_image(&format!("student:{slug}:{pfx}0")) {
+                    if let Some(frames) = student_sprite_frames(slug, motion) {
                         for (i, (rgba, w, h)) in frames.iter().enumerate() {
-                            g.upload_image(&format!("student:{slug}:f{i}"), rgba, *w, *h);
+                            g.upload_image(&format!("student:{slug}:{pfx}{i}"), rgba, *w, *h);
                         }
                     }
                 }
             };
             for (slug, (bx, by, bw, bh), (clip_y0, clip_y1)) in &banner_slots {
-                ensure_idle(g, slug);
+                ensure_anim(g, slug, "idle");
                 let key = format!("student:{slug}:f{anim_idx}");
                 g.queue_image_clipped(&key, *bx, *by, *bw, *bh, *clip_y0, *clip_y1);
             }
@@ -1797,22 +1862,24 @@ impl App {
                     *bx, *by, *bw, *bh,
                 );
             }
-            // 승인 대기 — pane 우상단에서 idle 도트가 폴짝폴짝("봐주세요!").
-            // 바닥 정렬이므로 박스 y 를 사인 바운스만큼 올렸다 내린다.
+            // 승인 대기 — pane 우상단에서 학생이 한 팔 인사(wave, "봐주세요!").
+            // wave 는 발 고정·팔만 움직이는 모션이라 바운스는 얹지 않는다.
             for (slug, (bx, by, bw, bh)) in &waiting_slots {
-                ensure_idle(g, slug);
-                let bounce =
-                    (anim_ms as f32 / 1000.0 * std::f32::consts::TAU * 1.2).sin().abs() * 7.0;
+                ensure_anim(g, slug, "wave");
                 g.queue_image_above(
-                    &format!("student:{slug}:f{anim_idx}"),
-                    *bx, by - bounce, *bw, *bh,
+                    &format!("student:{slug}:wave{anim_idx}"),
+                    *bx, *by, *bw, *bh,
                 );
             }
-            // 입력박스 위 standing — 전신 idle 애니, 발이 윗 테두리 줄에 닿게
-            // 바닥 정렬. 스크롤백 꼬리 행 위에 뜨므로 icon 패스.
-            for (slug, (bx, by, bw, bh)) in &standing_slots {
-                ensure_idle(g, slug);
-                g.queue_image_above(&format!("student:{slug}:f{anim_idx}"), *bx, *by, *bw, *bh);
+            // 입력박스 위 standing — 전신 애니(완료 직후 cheer 만세 · 그 외 idle),
+            // 발이 윗 테두리 줄에 닿게 바닥 정렬. 꼬리 행 위라 icon 패스.
+            for (slug, motion, (bx, by, bw, bh)) in &standing_slots {
+                ensure_anim(g, slug, motion);
+                let pfx = sprite_key_prefix(motion);
+                g.queue_image_above(
+                    &format!("student:{slug}:{pfx}{anim_idx}"),
+                    *bx, *by, *bw, *bh,
+                );
             }
             // statusline 프사 — bust 96×96 정적 1프레임, 캐릭터당 1회 업로드.
             // 박스가 아래 테두리 행을 침범하는 2행 키라 icon 패스(셀 위) —
@@ -1825,6 +1892,43 @@ impl App {
                     }
                 }
                 g.queue_image_above(&key, *bx, *by, *bw, *bh);
+            }
+            // 프사 hover 확대 — 커서가 statusline 프사 위면 큰 bust 를 그 위쪽에
+            // 팝업(창 경계 클램프). statusline 은 창 하단이라 위로 띄운다. 매
+            // 프레임 hover 재판정이라 커서가 벗어나면 저절로 사라진다(애니 없음).
+            let (fmx, fmy) = self.cursor_px;
+            if let Some((cname, slug, r)) = profile_face_hits
+                .iter()
+                .find(|(_, _, r)| fmx >= r.0 && fmx <= r.0 + r.2 && fmy >= r.1 && fmy <= r.1 + r.3)
+            {
+                let cname = cname.clone();
+                let slug = *slug;
+                let (fx, fy, fw, _) = *r;
+                let key = format!("student:{slug}:profile");
+                if !g.has_image(&key) {
+                    if let Some((rgba, w, h)) = student_profile_rgba(slug) {
+                        g.upload_image(&key, &rgba, w, h);
+                    }
+                }
+                let pop = 8.0 * self.cell.h;
+                let win_w = win_px.0 / scale;
+                let (px, py) = face_popup_pos(fx, fw, fy, pop, win_w, TITLE_HEIGHT);
+                // bust 는 누끼(투명 배경)라 캐릭터만 뜨고 뒤가 비친다 — 배경 박스
+                // 제거(거노: "배경색 아예 없애고"). 이름표만 얇은 pill 로 가독성 확보.
+                g.queue_image_above(&key, px, py, pop, pop);
+                let accent = theme::character_accent(&cname).unwrap_or_else(theme::accent);
+                let fs = 13.0;
+                let tw = g.measure_chrome_text(&cname, fs, true);
+                let tx = px + (pop - tw) / 2.0;
+                let ty = py + pop + 4.0;
+                round_rect(
+                    g, tx - 7.0, ty - 3.0, tw + 14.0, fs + 8.0,
+                    theme::RADIUS_SM, theme::with_alpha(theme::bg(), 0xE6),
+                );
+                g.draw_text(
+                    tx, ty, &cname,
+                    gpu::DrawOpts { font_size: fs, color: accent, bold: true, italic: false },
+                );
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
@@ -2615,12 +2719,9 @@ impl App {
             // right of it (VSCode explorer). Root = active pane's cwd; folders
             // first — click a folder to expand, a file to preview. Rows laid
             // out + hit rects cached here (window-tab pattern); the read_dir
-            // build lives in refresh_file_tree, never per-frame.
-            // Settings screen covers the work area on top, but chrome glyphs
-            // (the tree's icons/labels) sit above every rect — so a settings
-            // bg can't mask them. Skip the whole column while settings is open
-            // or the file-tree text bleeds through ([[glyph_dim_layer_trap]]).
-            if tree_col_w > 0.0 && !self.settings_open {
+            // build lives in refresh_file_tree, never per-frame. (Settings is
+            // its own window now, so it no longer masks this column.)
+            if tree_col_w > 0.0 {
                 let col_h = (sb_win_h - TITLE_HEIGHT).max(0.0);
                 // Own background + right hairline so the column reads as a
                 // distinct pane between the tabs and the cell grid.
@@ -2713,14 +2814,6 @@ impl App {
                 } else {
                     self.file_tree.new_row_rect = (0.0, 0.0, 0.0, 0.0);
                 }
-                let start_y = tree_top;
-                let win_h = win_px.1 / scale;
-                let step = 14.0_f32; // per-depth indent width
-                let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
-                // `file_tree_nodes` already holds the right set: a query swaps it
-                // for whole-tree search hits (file_tree_search_collect), empty
-                // restores the expanded tree. So just render it as-is.
-                let vis_nodes: Vec<&FileNode> = self.file_tree.nodes.iter().collect();
                 // File the focused pane is currently showing — its row gets an
                 // active tint + accent bar so the sidebar tracks the open file.
                 // Inlined (not the `active_preview_path` helper) so it borrows
@@ -2730,6 +2823,58 @@ impl App {
                         .as_ref()
                         .and_then(|id| ws.panes.get(id).and_then(|p| p.preview_path.clone()))
                 });
+                // ── 빠른 파일 고정 섹션 ── 트리 최상단(스크롤 무관)에 개인/프로젝트
+                // CLAUDE.md·프로젝트 MEMORY.md 원클릭 행. 클릭=보조탭, Opt+클릭=별도창.
+                self.file_tree.quick_rects.clear();
+                let quick = &quick_files_list;
+                if !quick.is_empty() {
+                    g.draw_text(
+                        row_x + 6.0,
+                        tree_top + 3.0,
+                        "빠른 파일",
+                        gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
+                    );
+                    tree_top += 19.0;
+                    let (qmx, qmy) = self.cursor_px;
+                    for (label, path, icon) in quick {
+                        let y = tree_top;
+                        let hovered = qmx >= row_x && qmx <= row_x + row_w && qmy >= y && qmy <= y + item_h;
+                        let is_open = active_file.as_deref() == Some(path.as_path());
+                        if hovered {
+                            round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::surface_hover());
+                        } else if is_open {
+                            round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::surface_active());
+                        }
+                        if is_open {
+                            g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::accent());
+                        }
+                        let isz = 16.0_f32;
+                        let iy = y + (item_h - isz) / 2.0;
+                        let icon_x = row_x + 18.0;
+                        let col = if hovered || is_open { theme::text() } else { theme::text_dim() };
+                        g.queue_icon(icon, icon_x, iy, isz, col);
+                        g.draw_text(
+                            icon_x + isz + 8.0,
+                            y + (item_h - 13.0) / 2.0,
+                            label,
+                            gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false },
+                        );
+                        self.file_tree.quick_rects.push((path.clone(), (row_x, y, row_w, item_h)));
+                        tree_top += item_h;
+                    }
+                    // 구분선 — 빠른 파일과 트리 본문 사이 하이라인.
+                    tree_top += 4.0;
+                    g.rect(row_x, tree_top, row_w, 1.0, theme::with_alpha(theme::border(), 0x88));
+                    tree_top += 7.0;
+                }
+                let start_y = tree_top;
+                let win_h = win_px.1 / scale;
+                let step = 14.0_f32; // per-depth indent width
+                let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
+                // `file_tree_nodes` already holds the right set: a query swaps it
+                // for whole-tree search hits (file_tree_search_collect), empty
+                // restores the expanded tree. So just render it as-is.
+                let vis_nodes: Vec<&FileNode> = self.file_tree.nodes.iter().collect();
                 for (idx, node) in vis_nodes.iter().enumerate() {
                     let node = *node;
                     let y = start_y - self.file_tree.scroll + idx as f32 * item_h;
@@ -3904,11 +4049,21 @@ impl App {
                     } else {
                         theme::with_alpha(theme::text_dim(), combine(0x82))
                     };
+                    // Is this a file (markdown/text editor) tab? Those get a
+                    // hover pop-out icon that tears the tab off into its own
+                    // wgpu editor window (auxwin.rs).
+                    let is_file_tab = if h.tabs.is_empty() {
+                        h.single_is_file
+                    } else {
+                        h.tab_is_file.get(i).copied().unwrap_or(false)
+                    };
                     // Truncate this tab's title to its share of the bar.
                     // × space is reserved on every tab — see `reserve_x`.
                     // No per-tab terminal glyph: the +button already signals
                     // "new shell"; doubling that icon on every tab was noise.
-                    let x_reserve = if reserve_x { close_w + 8.0 } else { 0.0 };
+                    // File tabs reserve an extra icon slot (pop-out), left of ×.
+                    let popout_reserve = if is_file_tab { close_w + 4.0 } else { 0.0 };
+                    let x_reserve = if reserve_x { close_w + 8.0 + popout_reserve } else { 0.0 };
                     let budget = (per_tab - x_reserve - 14.0).max(0.0);
                     let mut label = tab.to_string();
                     let mut lw = g.measure_chrome_text(&label, chrome_font, active);
@@ -3955,8 +4110,28 @@ impl App {
                         &label,
                         gpu::DrawOpts { font_size: chrome_font, color: t_fg, bold: active, italic: false },
                     );
+                    // Pop-out icon (external-link): file tabs only, shown on the
+                    // active or hovered tab. Sits left of the ×; clicking it
+                    // moves the tab's editor into its own OS window.
+                    let mut action_x = cx + 8.0;
+                    if is_file_tab && show_x {
+                        let po_x = action_x;
+                        let chip = icon_size + 6.0;
+                        let chip_x = po_x + (icon_size - chip) / 2.0;
+                        let chip_y = h.y + (PANE_HEADER_HEIGHT - chip) / 2.0;
+                        let (mx, my) = self.cursor_px;
+                        let po_hover =
+                            mx >= chip_x && mx <= chip_x + chip && my >= chip_y && my <= chip_y + chip;
+                        if po_hover {
+                            round_rect(g, chip_x, chip_y, chip, chip, theme::RADIUS_SM, theme::with_alpha(theme::text(), 0x22));
+                        }
+                        let pocol = if po_hover { theme::text() } else { t_icon };
+                        g.queue_icon("external-link", po_x, icon_y, icon_size, pocol);
+                        tab_popout_hits.push((h.id.clone(), i, (po_x - 2.0, h.y, icon_size + 4.0, PANE_HEADER_HEIGHT)));
+                        action_x = po_x + close_w + 4.0;
+                    }
                     if show_x {
-                        let close_x = cx + 8.0;
+                        let close_x = action_x;
                         // Hover chip behind the × — same lift the +button gets,
                         // so the close target reads as clickable on hover.
                         let chip = icon_size + 6.0;
@@ -4253,11 +4428,7 @@ impl App {
             // footer(아래) 스윕바가 동시에 뜨는 "로딩바 두개" 버그가 안 난다(거노).
             let headered: std::collections::HashSet<String> =
                 headers.iter().map(|h| h.id.clone()).collect();
-            if self.settings_open {
-                self.pane_handle_rects.clear();
-                self.pane_top_zones.clear();
-                self.handle_menu_hits.clear();
-            } else {
+            {
                 let (hmx, hmy) = self.cursor_px;
                 let accent = theme::accent_color(theme::accent_name());
                 // 로딩바 스윕 위상 — 프로세스 시작 기준 단조증가 초. working pane 이
@@ -5228,6 +5399,86 @@ impl App {
                 );
                 confirm_btn_hits.push((crate::ConfirmBtn::Cancel, (cancel_x, btn_y, cancel_w, btn_h)));
             }
+            // Chrome-style restore prompt: dim scrim + centered card offering to
+            // reopen the last session's panes. Queued after the confirm modal so
+            // it sits over everything at launch. [복원] rebuilds the workspace,
+            // [새로 시작] keeps the fresh session.
+            if let Some(state) = self.restore_prompt.clone() {
+                g.clear_icons();
+                let win_w = win_px.0 / scale;
+                let win_h = win_px.1 / scale;
+                g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
+                let n = crate::App::count_claude_panes(&state);
+                let card_w = 448.0_f32;
+                let card_h = 176.0_f32;
+                let cx0 = ((win_w - card_w) / 2.0).round();
+                let cy0 = ((win_h - card_h) / 2.0).round();
+                round_rect(g, cx0, cy0, card_w, card_h, theme::RADIUS_MD, theme::surface_active());
+                g.draw_text(
+                    cx0 + 24.0,
+                    cy0 + 30.0,
+                    "이전 세션을 복원할까요?",
+                    gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
+                );
+                let subtitle = format!("claude 세션 {n}개를 마지막 레이아웃 그대로 이어서 켭니다");
+                g.draw_text(
+                    cx0 + 24.0,
+                    cy0 + 60.0,
+                    &subtitle,
+                    gpu::DrawOpts { font_size: 13.0, color: theme::text_dim(), bold: false, italic: false },
+                );
+                let (mx, my) = self.cursor_px;
+                let bf = 13.0_f32;
+                let bpad = 18.0_f32;
+                let btn_h = 34.0_f32;
+                let btn_y = cy0 + card_h - 20.0 - btn_h;
+                // 복원 (primary/accent), flush to the card's right edge.
+                let restore_w = "복원".chars().count() as f32 * bf + bpad * 2.0;
+                let restore_x = cx0 + card_w - 24.0 - restore_w;
+                let restore_hover = mx >= restore_x
+                    && mx <= restore_x + restore_w
+                    && my >= btn_y
+                    && my <= btn_y + btn_h;
+                round_rect(
+                    g,
+                    restore_x,
+                    btn_y,
+                    restore_w,
+                    btn_h,
+                    theme::RADIUS_SM,
+                    theme::with_alpha(theme::accent(), if restore_hover { 0xFF } else { 0xDD }),
+                );
+                g.draw_text(
+                    restore_x + bpad,
+                    btn_y + (btn_h - bf) / 2.0,
+                    "복원",
+                    gpu::DrawOpts { font_size: bf, color: theme::fg(), bold: true, italic: false },
+                );
+                restore_btn_hits.push((crate::RestoreBtn::Restore, (restore_x, btn_y, restore_w, btn_h)));
+                // 새로 시작, to its left.
+                let fresh_w = "새로 시작".chars().count() as f32 * bf + bpad * 2.0;
+                let fresh_x = restore_x - 10.0 - fresh_w;
+                let fresh_hover = mx >= fresh_x
+                    && mx <= fresh_x + fresh_w
+                    && my >= btn_y
+                    && my <= btn_y + btn_h;
+                round_rect(
+                    g,
+                    fresh_x,
+                    btn_y,
+                    fresh_w,
+                    btn_h,
+                    theme::RADIUS_SM,
+                    if fresh_hover { theme::surface_hover() } else { theme::surface() },
+                );
+                g.draw_text(
+                    fresh_x + bpad,
+                    btn_y + (btn_h - bf) / 2.0,
+                    "새로 시작",
+                    gpu::DrawOpts { font_size: bf, color: theme::text(), bold: false, italic: false },
+                );
+                restore_btn_hits.push((crate::RestoreBtn::Fresh, (fresh_x, btn_y, fresh_w, btn_h)));
+            }
             // File-tree drag ghost — a small pill trailing the cursor with the
             // dragged item's name, drawn last so it floats over everything.
             if let Some(drag) = self.file_tree.drag.as_ref() {
@@ -5259,30 +5510,21 @@ impl App {
                         gpu::DrawOpts { font_size: gf, color: theme::text(), bold: false, italic: false });
                 }
             }
-            // Settings screen on top of everything (covers the pane grid; the
-            // sidebar to its left stays visible).
-            if let Some(ctx) = &settings_ctx {
-                (settings_rects_out, settings_content_h_out) = settings::paint_settings(g, ctx);
-            }
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }
         }
-        self.settings_rects = settings_rects_out;
-        // Scroll clamp for the wheel handler: content minus the visible form
-        // band (area minus the 84px page header), plus a little bottom pad.
-        // Re-clamp the live offset too — a window grow or category shrink can
-        // strand it past the new max.
-        if let Some(ctx) = &settings_ctx {
-            let view_h = (ctx.area.3 - 84.0).max(0.0);
-            self.settings_scroll_max = (settings_content_h_out - view_h + 24.0).max(0.0);
-            if self.settings_scroll > self.settings_scroll_max {
-                self.settings_scroll = self.settings_scroll_max;
-            }
-        }
         self.confirm_btn_rects = confirm_btn_hits;
+        self.restore_btn_rects = restore_btn_hits;
+        // statusline 프사 클릭 hit-test (학생이름, rect) — 프사 클릭 시 학생 설정
+        // 별도창 딥링크. 매 프레임 재구축이라 stale rect 가 남지 않는다.
+        self.face_hit_rects = profile_face_hits
+            .iter()
+            .map(|(n, _, r)| (n.clone(), *r))
+            .collect();
         self.pane_tab_rects = tab_hits;
         self.pane_tab_close_rects = tab_close_hits;
+        self.pane_tab_popout_rects = tab_popout_hits;
         self.pane_plus_rects = plus_hits;
         // Tab-windowing write-back: clamped first + fit count for the wheel
         // handler, and this frame's active tab for the next reveal check.
@@ -5565,10 +5807,11 @@ fn inlay_prompt_box_title(rows: &mut [Vec<GridCell>], title: &str) {
     row[w] = mk(' ');
 }
 
-/// verbose OFF 에서 접힌 팀메시지 행("› Message from @<이름>") 탐지 —
-/// (첫 글리프 col, 보낸이 agent 이름). 이름 뒤에 다른 글자가 있으면(본문 안
-/// 인용 등) 접힌 줄이 아니라고 본다 — 오탐이 실제 출력 텍스트를 덮어쓰면 안 된다.
-fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, String)> {
+/// verbose OFF 에서 접힌 팀메시지 행 탐지 — 단수 "› Message from @<이름>" 또는
+/// 복수 "› <N> messages from @<이름>". 반환은 (첫 글리프 col, 메시지 수, 보낸이
+/// agent 이름). 이름 뒤에 다른 글자가 있으면(본문 안 인용 등) 접힌 줄이 아니라고
+/// 본다 — 오탐이 실제 출력 텍스트를 덮어쓰면 안 된다.
+fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, usize, String)> {
     let chars: Vec<char> = row
         .iter()
         .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
@@ -5577,25 +5820,32 @@ fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, String)> {
     if !matches!(chars[first], '›' | '>') {
         return None;
     }
-    const LABEL: &[char] = &[
-        ' ', 'M', 'e', 's', 's', 'a', 'g', 'e', ' ', 'f', 'r', 'o', 'm', ' ', '@',
-    ];
-    let ls = first + 1;
-    if chars.len() < ls + LABEL.len() || chars[ls..ls + LABEL.len()] != *LABEL {
-        return None;
-    }
-    let ns = ls + LABEL.len();
-    let name: String = chars[ns..]
-        .iter()
-        .take_while(|c| c.is_ascii_alphanumeric() || **c == '-' || **c == '_')
+    // '›' 뒤: 단수 " Message from @<이름>" 또는 복수 " <N> messages from @<이름>".
+    let rest: String = chars[first + 1..].iter().collect();
+    let (count, after) = if let Some(a) = rest.strip_prefix(" Message from @") {
+        (1usize, a.to_string())
+    } else {
+        let a = rest.strip_prefix(' ')?;
+        let digits = a.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        let n: usize = a[..digits].parse().ok()?;
+        let a2 = a[digits..].strip_prefix(" messages from @")?;
+        (n, a2.to_string())
+    };
+    let name: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     if name.is_empty() {
         return None;
     }
-    chars[ns + name.len()..]
-        .iter()
-        .all(|&c| c == ' ')
-        .then_some((first, name))
+    // 이름 뒤는 전부 공백이어야(본문 인용 오탐 방지).
+    if !after[name.len()..].chars().all(|c| c == ' ') {
+        return None;
+    }
+    Some((first, count, name))
 }
 
 /// 팀원 agent 이름("aru-9c88")의 보낸 학생 accent — 로마자 앞부분(마지막 '-'
@@ -5696,6 +5946,35 @@ fn latest_teammate_msg(path: &std::path::Path, sender: &str) -> Option<TeammateM
     });
     map.insert(key, (len, found.clone()));
     found
+}
+
+/// sender 의 마지막 n 통(오래된→최신 순) — 접힌 "N messages from @이름"의 호버
+/// 말풍선용. latest_teammate_msg 와 달리 호버 시에만 불려 캐시 없이 tail 재스캔.
+fn last_teammate_msgs(path: &std::path::Path, sender: &str, n: usize) -> Vec<TeammateMsg> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let (tail, _) = crate::socket::read_tail(path, 256 * 1024);
+    let mut out: Vec<TeammateMsg> = Vec::new();
+    for l in tail.lines().rev() {
+        if out.len() >= n {
+            break;
+        }
+        if !l.contains("<teammate-message") || !l.contains(sender) {
+            continue;
+        }
+        let Some(v) = serde_json::from_str::<serde_json::Value>(l).ok() else {
+            continue;
+        };
+        let Some(t) = jsonl_user_text(&v) else {
+            continue;
+        };
+        if let Some(m) = extract_teammate_msg(&t, sender) {
+            out.push(m);
+        }
+    }
+    out.reverse();
+    out
 }
 
 /// 행 전체가 공백/blank 인가 — 팀메시지 줄바꿈 전개가 이어 쓸 수 있는 행.
@@ -5989,18 +6268,32 @@ fn user_sprite_images(slug: &str, motion: &str) -> Option<Vec<image::RgbaImage>>
     Some(out)
 }
 
-/// 캐릭터 슬러그 + 모션 → 컴파일타임 내장 도트 프레임(arona-ui walk
-/// 스프라이트의 idle 0..3 / walk-east 0..5).
+/// 모션 이름 → GPU 텍스처 캐시 키 접두. idle 은 "f"(기존 배너 캐시와 호환),
+/// 나머지는 모션 이름 그대로. 프레임 세트는 캐릭터×접두당 1회만 업로드된다.
+fn sprite_key_prefix(motion: &str) -> &'static str {
+    match motion {
+        "idle" => "f",
+        "wave" => "wave",
+        "cheer" => "cheer",
+        "walk" => "walk",
+        _ => "f",
+    }
+}
+
+/// 캐릭터 슬러그 + 모션 → 컴파일타임 내장 도트 프레임(arona-ui 스프라이트의
+/// idle/wave/cheer 0..3 · walk-east 0..5). idle=대기, wave=승인 대기(한 팔
+/// 인사), cheer=턴 완료(양팔 만세), walk=working(제자리 걸음).
 fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8]]> {
-    macro_rules! idle {
-        ($n:literal) => {{
+    // idle/wave/cheer 공통 4프레임 — 파일명 접미사(""·"-wave"·"-cheer")만 다르다.
+    macro_rules! frames4 {
+        ($n:literal, $m:literal) => {{
             const F: [&[u8]; STUDENT_IDLE_FRAMES] = [
-                include_bytes!(concat!("../assets/students/", $n, "-0.png")),
-                include_bytes!(concat!("../assets/students/", $n, "-1.png")),
-                include_bytes!(concat!("../assets/students/", $n, "-2.png")),
-                include_bytes!(concat!("../assets/students/", $n, "-3.png")),
+                include_bytes!(concat!("../assets/students/", $n, $m, "-0.png")),
+                include_bytes!(concat!("../assets/students/", $n, $m, "-1.png")),
+                include_bytes!(concat!("../assets/students/", $n, $m, "-2.png")),
+                include_bytes!(concat!("../assets/students/", $n, $m, "-3.png")),
             ];
-            &F
+            &F[..]
         }};
     }
     macro_rules! walk {
@@ -6013,34 +6306,33 @@ fn student_sprite_png(slug: &str, motion: &str) -> Option<&'static [&'static [u8
                 include_bytes!(concat!("../assets/students/", $n, "-walk-4.png")),
                 include_bytes!(concat!("../assets/students/", $n, "-walk-5.png")),
             ];
-            &F
+            &F[..]
         }};
     }
-    Some(match (slug, motion) {
-        ("arona", "idle") => idle!("arona"),
-        ("prana", "idle") => idle!("prana"),
-        ("midori", "idle") => idle!("midori"),
-        ("momoi", "idle") => idle!("momoi"),
-        ("yuzu", "idle") => idle!("yuzu"),
-        ("arisu", "idle") => idle!("arisu"),
-        ("yuuka", "idle") => idle!("yuuka"),
-        ("shiroko", "idle") => idle!("shiroko"),
-        ("hoshino", "idle") => idle!("hoshino"),
-        ("koharu", "idle") => idle!("koharu"),
-        ("himari", "idle") => idle!("himari"),
-        ("aru", "idle") => idle!("aru"),
-        ("arona", "walk") => walk!("arona"),
-        ("prana", "walk") => walk!("prana"),
-        ("midori", "walk") => walk!("midori"),
-        ("momoi", "walk") => walk!("momoi"),
-        ("yuzu", "walk") => walk!("yuzu"),
-        ("arisu", "walk") => walk!("arisu"),
-        ("yuuka", "walk") => walk!("yuuka"),
-        ("shiroko", "walk") => walk!("shiroko"),
-        ("hoshino", "walk") => walk!("hoshino"),
-        ("koharu", "walk") => walk!("koharu"),
-        ("himari", "walk") => walk!("himari"),
-        ("aru", "walk") => walk!("aru"),
+    macro_rules! student {
+        ($n:literal) => {
+            match motion {
+                "idle" => frames4!($n, ""),
+                "wave" => frames4!($n, "-wave"),
+                "cheer" => frames4!($n, "-cheer"),
+                "walk" => walk!($n),
+                _ => return None,
+            }
+        };
+    }
+    Some(match slug {
+        "arona" => student!("arona"),
+        "prana" => student!("prana"),
+        "midori" => student!("midori"),
+        "momoi" => student!("momoi"),
+        "yuzu" => student!("yuzu"),
+        "arisu" => student!("arisu"),
+        "yuuka" => student!("yuuka"),
+        "shiroko" => student!("shiroko"),
+        "hoshino" => student!("hoshino"),
+        "koharu" => student!("koharu"),
+        "himari" => student!("himari"),
+        "aru" => student!("aru"),
         _ => return None,
     })
 }
@@ -6118,6 +6410,15 @@ fn student_profile_png(slug: &str) -> Option<&'static [u8]> {
 
 /// 프사 PNG → RGBA. GPU 텍스처 캐시(`has_image`) 미스 시에만 호출되므로
 /// 캐릭터당 1회 디코딩. 이미 얼굴에 맞춰 잘린 에셋이라 bbox 크롭은 불필요.
+/// 프사 hover 확대 팝업의 좌상단 위치 — 프사 가로 중심 위로 띄우되 창 좌우/상단
+/// 경계 안으로 클램프한다. statusline 프사는 창 하단이라 팝업을 위로(음의 y) 낸다.
+/// 좁은 창(팝업 변보다 폭이 작을 때)에서도 x 가 6px 밑으로 안 내려가게 한다.
+fn face_popup_pos(fx: f32, fw: f32, fy: f32, pop: f32, win_w: f32, title_h: f32) -> (f32, f32) {
+    let px = (fx + fw / 2.0 - pop / 2.0).clamp(6.0, (win_w - pop - 6.0).max(6.0));
+    let py = (fy - pop - 8.0).max(title_h + 6.0);
+    (px, py)
+}
+
 fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     if let Some(r) = user_asset_rgba(&format!("{slug}-profile.png")) {
         return Some(r);
@@ -6371,6 +6672,147 @@ fn replace_banner_title(
             *cell = GridCell::blank();
         }
         return; // 타이틀은 배너당 한 줄
+    }
+}
+
+/// claude 웰컴 배너("Welcome back <user>!") → 배정 학생 인사말. Clawd 아트(=학생
+/// 도트로 치환된 자리) 위쪽 박스 안의 "Welcome back " 행을 찾아, 사용자 이름을
+/// 추출하고 그 행을 페르소나 인사말로 갈아끼운다(원 볼드 스타일 승계 + 학생 accent
+/// 색, 박스 우측 보더 전까지 클립·초과 시 말줄임). async agents launcher 등 웰컴
+/// 행이 없는 화면에선 자연 no-op(패시브). 스냅샷 전용 — 원본 그리드 무손상.
+fn replace_welcome_greeting(
+    rows: &mut [Vec<GridCell>],
+    br: isize,
+    name: &str,
+    accent: Option<[u8; 4]>,
+) {
+    const PREFIX: [char; 13] =
+        ['W', 'e', 'l', 'c', 'o', 'm', 'e', ' ', 'b', 'a', 'c', 'k', ' '];
+    // "Welcome back" 은 아트(도트) 바로 위 박스 안, 중앙정렬. 아트 top(br) 기준
+    // 위로 최대 4행만 본다. 아트가 위로 잘려(br<0) 웰컴 행이 화면 밖이면 자연 skip.
+    let hi = br.clamp(0, rows.len() as isize) as usize;
+    let lo = (br - 4).max(0) as usize;
+    for r in lo..hi {
+        // 불변 스캔: "Welcome back " 위치·이름·박스 우측 한계·원 스타일을 값으로.
+        let (wc, excl, user, limit, mut style) = {
+            let row = &rows[r];
+            let Some(wc) = (0..row.len().saturating_sub(PREFIX.len()))
+                .find(|&c| PREFIX.iter().enumerate().all(|(i, &p)| row[c + i].ch == p))
+            else {
+                continue;
+            };
+            let name_start = wc + PREFIX.len();
+            let Some(excl_rel) = row[name_start..].iter().position(|c| c.ch == '!')
+            else {
+                continue;
+            };
+            let excl = name_start + excl_rel;
+            if excl <= name_start {
+                continue; // 빈 이름("Welcome back !") — 원문 유지
+            }
+            // 이름 추출: 와이드 글리프 바로 뒤 스페이서(' '/'\0') 셀 1칸을 흡수한다
+            // — 단 실제 composed 는 스페이서가 있지만, 스페이서 없이 붙은 그리드
+            // (테스트·비정상)에서도 다음 글자를 삼키지 않도록 "다음이 스페이서일
+            // 때만" 건너뛴다.
+            let mut user = String::new();
+            let mut i = name_start;
+            while i < excl {
+                let ch = row[i].ch;
+                if ch != '\0' {
+                    user.push(ch);
+                }
+                i += 1;
+                if crate::gpu::is_wide_char(ch)
+                    && i < excl
+                    && matches!(row[i].ch, ' ' | '\0')
+                {
+                    i += 1;
+                }
+            }
+            // 우측 한계 = "!" 뒤 공백 구간이 끝나는 지점(=오른쪽 Tips 컬럼 또는 박스
+            // 세로 보더의 시작). 2컬럼 배너는 같은 행 오른쪽에 Tips 가 있으므로 첫
+            // 보더만 찾으면 그 사이 Tips 를 덮는다 — 다음 non-blank 전까지만 그린다.
+            let limit = (excl + 1..row.len())
+                .find(|&c| !matches!(row[c].ch, ' ' | '\0'))
+                .unwrap_or(row.len());
+            (wc, excl, user.trim().to_string(), limit, row[wc].clone())
+        };
+        let Some(greet) = crate::theme::character_welcome(name, &user) else {
+            return; // 로스터 밖 이름 — 배너당 한 번, 원문 유지
+        };
+        if let Some([rr, gg, bb, _]) = accent {
+            style.fg = kasa_bridge::screen::Color::Rgb(rr, gg, bb);
+        }
+        // 인사말 → 셀(한글은 글리프+스페이서 2칸).
+        let mut cells: Vec<GridCell> = Vec::new();
+        for ch in greet.chars() {
+            let mut cell = style.clone();
+            cell.ch = ch;
+            cells.push(cell);
+            if crate::gpu::is_wide_char(ch) {
+                let mut sp = style.clone();
+                sp.ch = ' ';
+                cells.push(sp);
+            }
+        }
+        let avail = limit.saturating_sub(wc);
+        if avail == 0 {
+            return;
+        }
+        if cells.len() > avail {
+            cells.truncate(avail);
+            if let Some(last) = cells.last_mut() {
+                last.ch = '…';
+            }
+        }
+        // 가변 쓰기: 인사말 그린 뒤 원문 잔여("!"까지)를 blank.
+        {
+            let row = &mut rows[r];
+            for (k, cell) in cells.iter().enumerate() {
+                row[wc + k] = cell.clone();
+            }
+            let written = wc + cells.len();
+            let tail_end = excl.min(row.len().saturating_sub(1));
+            for c in written..=tail_end {
+                row[c] = GridCell::blank();
+            }
+        }
+        // 배너 박스 보더(╭─╮│╰╯)도 학생색 — 타이틀·인사말과 색 언어 통일
+        // (거노: "색상도 학생색상으로", 배너 전체가 학생색인 게 의도).
+        if let Some(acc) = accent {
+            let art_bottom = (br + CLAWD_ROWS as isize).max(0) as usize;
+            tint_welcome_box(rows, r, art_bottom, acc);
+        }
+        return; // 웰컴 인사말은 배너당 한 줄
+    }
+}
+
+/// 웰컴 배너 박스의 보더 문자(box-drawing U+2500~257F) fg 를 학생 accent 로 —
+/// "Welcome back" 행 위 상단 코너(╭╮/┌┐)부터 아트 아래 하단 코너(╰╯/└┘)까지의
+/// 박스에 한해서만 칠한다(다른 박스 오염 방지 — 코너로 이 배너 박스 범위 특정).
+fn tint_welcome_box(
+    rows: &mut [Vec<GridCell>],
+    welcome_row: usize,
+    art_bottom: usize,
+    accent: [u8; 4],
+) {
+    let is_box = |ch: char| (0x2500u32..=0x257F).contains(&(ch as u32));
+    let top = (0..welcome_row)
+        .rev()
+        .find(|&rr| rows[rr].iter().any(|c| matches!(c.ch, '╭' | '╮' | '┌' | '┐')));
+    let bottom = (art_bottom.min(rows.len())..rows.len())
+        .find(|&rr| rows[rr].iter().any(|c| matches!(c.ch, '╰' | '╯' | '└' | '┘')));
+    let (Some(top), Some(bottom)) = (top, bottom) else {
+        return;
+    };
+    let [r, g, b, _] = accent;
+    let col = kasa_bridge::screen::Color::Rgb(r, g, b);
+    for row in rows[top..=bottom].iter_mut() {
+        for cell in row.iter_mut() {
+            if is_box(cell.ch) {
+                cell.fg = col.clone();
+            }
+        }
     }
 }
 
@@ -6668,6 +7110,180 @@ mod clawd_banner_tests {
         replace_banner_title(&mut rows, -1, 0, "아루", None);
         assert_eq!(rows, before);
     }
+
+    const ALL_SLUGS: [&str; 12] = [
+        "arona", "prana", "midori", "momoi", "yuzu", "arisu", "yuuka", "shiroko", "hoshino",
+        "koharu", "himari", "aru",
+    ];
+
+    // 상태 모션 3종(idle/wave/cheer)이 12명 전원에 배선돼 있고 프레임 수가 맞다.
+    // (include_bytes 라 파일 부재면 컴파일 실패 — 여긴 arm 매칭 오타를 잡는다.)
+    #[test]
+    fn every_student_has_state_motions() {
+        for slug in ALL_SLUGS {
+            for motion in ["idle", "wave", "cheer"] {
+                let f = student_sprite_png(slug, motion)
+                    .unwrap_or_else(|| panic!("{slug} {motion} 프레임 미배선"));
+                assert_eq!(f.len(), STUDENT_IDLE_FRAMES, "{slug} {motion} 프레임 수");
+            }
+            assert_eq!(
+                student_sprite_png(slug, "walk").map(|f| f.len()),
+                Some(STUDENT_WALK_FRAMES),
+                "{slug} walk 프레임 수",
+            );
+        }
+    }
+
+    // 로스터 밖 슬러그·미지원 모션은 None.
+    #[test]
+    fn unknown_slug_or_motion_is_none() {
+        assert!(student_sprite_png("nobody", "idle").is_none());
+        assert!(student_sprite_png("koharu", "sob").is_none());
+    }
+
+    // 텍스처 캐시 키 접두: idle 만 "f"(기존 배너 캐시 호환), 나머지는 이름 그대로.
+    #[test]
+    fn motion_key_prefixes() {
+        assert_eq!(sprite_key_prefix("idle"), "f");
+        assert_eq!(sprite_key_prefix("wave"), "wave");
+        assert_eq!(sprite_key_prefix("cheer"), "cheer");
+        assert_eq!(sprite_key_prefix("walk"), "walk");
+        // 미지의 모션은 idle 프레임 접두로 폴백(빈 화면보다 낫다).
+        assert_eq!(sprite_key_prefix("???"), "f");
+    }
+
+    // 한글은 실제 composed 처럼 글리프+스페이서 2칸으로 배치하는 헬퍼.
+    fn wide_row(s: &str) -> Vec<GridCell> {
+        let mut row = Vec::new();
+        for c in s.chars() {
+            let mut cell = GridCell::blank();
+            cell.ch = c;
+            row.push(cell);
+            if crate::gpu::is_wide_char(c) {
+                let mut sp = GridCell::blank();
+                sp.ch = ' ';
+                row.push(sp);
+            }
+        }
+        row
+    }
+
+    // 셀 행 → 텍스트(와이드 스페이서 제거) — 검증용.
+    fn row_text(row: &[GridCell]) -> String {
+        let mut s = String::new();
+        let mut i = 0;
+        while i < row.len() {
+            let ch = row[i].ch;
+            if ch != '\0' {
+                s.push(ch);
+            }
+            i += 1;
+            if crate::gpu::is_wide_char(ch) && i < row.len() && matches!(row[i].ch, ' ' | '\0') {
+                i += 1;
+            }
+        }
+        s
+    }
+
+    // 1컬럼(좁은 폭): 도트 위 "Welcome back 건호!" → 학생 인사말 + accent 색,
+    // 이름("건호")은 그리드에서 추출해 인사말에 삽입된다. 폭은 넉넉히(클립 없음).
+    #[test]
+    fn welcome_greeting_single_column() {
+        let pad = " ".repeat(50);
+        let mut rows = vec![
+            wide_row(&format!("  Welcome back 건호!{pad}")),
+            row_from("   ▐▛███▜▌"),
+            row_from("  ▝▜█████▛▘"),
+            row_from("    ▘▘ ▝▝"),
+        ];
+        replace_welcome_greeting(&mut rows, 1, "코하루", Some([200, 50, 50, 255]));
+        let line = row_text(&rows[0]);
+        assert!(line.contains("어서오세요"), "인사말 치환됨: {line}");
+        assert!(line.contains("건호"), "이름 추출·삽입: {line}");
+        assert!(!line.contains("Welcome back"), "원문 제거: {line}");
+        let first = rows[0].iter().find(|c| !matches!(c.ch, ' ' | '\0')).unwrap();
+        assert_eq!(first.fg, kasa_bridge::screen::Color::Rgb(200, 50, 50));
+    }
+
+    // 2컬럼(넓은 폭): "Welcome back" 뒤 박스 세로 보더 │ 는 인사말이 길어도 안 밀린다.
+    #[test]
+    fn welcome_greeting_clipped_at_border() {
+        let mut rows = vec![
+            wide_row("│  Welcome back 건호!    │"),
+            row_from(" ▐▛███▜▌"),
+            row_from("▝▜█████▛▘"),
+            row_from("  ▘▘ ▝▝"),
+        ];
+        let border = rows[0].iter().rposition(|c| c.ch == '│').unwrap();
+        replace_welcome_greeting(&mut rows, 1, "아루", None); // 아루 인사말 = 긴 편
+        assert_eq!(rows[0][border].ch, '│', "우측 보더 보존");
+        assert!(
+            rows[0][border + 1..].iter().all(|c| matches!(c.ch, ' ' | '\0')),
+            "보더 너머 무변화",
+        );
+    }
+
+    // 2컬럼: 같은 행 오른쪽 Tips 컬럼은 인사말이 길어도 침범하지 않는다.
+    #[test]
+    fn welcome_greeting_preserves_right_column() {
+        let mut rows = vec![
+            wide_row("  Welcome back 건호!      Tips for getting started"),
+            row_from(" ▐▛███▜▌"),
+            row_from("▝▜█████▛▘"),
+        ];
+        let tips_col = rows[0].iter().position(|c| c.ch == 'T').unwrap();
+        let tips_before: Vec<char> = rows[0][tips_col..].iter().map(|c| c.ch).collect();
+        replace_welcome_greeting(&mut rows, 1, "아루", None);
+        let tips_after: Vec<char> = rows[0][tips_col..].iter().map(|c| c.ch).collect();
+        assert_eq!(tips_before, tips_after, "오른쪽 Tips 컬럼 보존");
+    }
+
+    // launcher 등 "Welcome back" 행이 없으면 no-op(원본 그리드 무변경).
+    #[test]
+    fn welcome_greeting_noop_without_welcome() {
+        let mut rows = vec![
+            row_from("Claude Code v2.1.215"),
+            row_from(" ▐▛███▜▌"),
+            row_from("▝▜█████▛▘"),
+        ];
+        let before = rows.clone();
+        replace_welcome_greeting(&mut rows, 1, "코하루", None);
+        assert_eq!(rows, before, "웰컴 행 없으면 무변경");
+    }
+
+    // 로스터 밖 이름이면 배너 원문 유지.
+    #[test]
+    fn welcome_greeting_unknown_character_noop() {
+        let mut rows = vec![wide_row("Welcome back 건호!"), row_from(" ▐▛███▜▌")];
+        let before = rows.clone();
+        replace_welcome_greeting(&mut rows, 1, "없는이름", None);
+        assert_eq!(rows, before);
+    }
+
+    // 배너 박스 보더가 학생 accent 로 틴트되고, 범위 밖 다른 박스는 오염 안 된다.
+    #[test]
+    fn welcome_box_border_tinted() {
+        let acc = [80, 160, 240, 255];
+        let mut rows = vec![
+            row_from("╭─ Claude Code ─╮"),
+            wide_row("│ Welcome back 건호! │"),
+            row_from("│   ▐▛███▜▌   │"),
+            row_from("│  ▝▜█████▛▘  │"),
+            row_from("│    ▘▘ ▝▝    │"),
+            row_from("╰───────────────╯"),
+            row_from("╭─ other box ─╮"),
+        ];
+        replace_welcome_greeting(&mut rows, 2, "코하루", Some(acc));
+        let want = kasa_bridge::screen::Color::Rgb(80, 160, 240);
+        assert_eq!(rows[0][0].fg, want, "상단 보더 ╭ 틴트");
+        assert_eq!(rows[5][0].fg, want, "하단 보더 ╰ 틴트");
+        assert_eq!(rows[1][0].fg, want, "welcome 행 좌 │ 틴트");
+        assert_eq!(
+            rows[6][0].fg,
+            kasa_bridge::screen::Color::Default,
+            "범위 밖 다른 박스 미오염",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6743,17 +7359,36 @@ mod teammate_msg_tests {
         let row = row_from("  › Message from @aru-9c88", 80);
         assert_eq!(
             teammate_collapsed_line(&row),
-            Some((2, "aru-9c88".to_string()))
+            Some((2, 1, "aru-9c88".to_string()))
+        );
+    }
+
+    // 복수형 "› N messages from @이름" → count=N, 이름 추출(여러 자릿수 포함).
+    #[test]
+    fn detects_plural_collapsed_line() {
+        let row = row_from("  › 3 messages from @aru-9c88", 80);
+        assert_eq!(
+            teammate_collapsed_line(&row),
+            Some((2, 3, "aru-9c88".to_string()))
+        );
+        let row2 = row_from("› 12 messages from @yuzu-1ba1", 80);
+        assert_eq!(
+            teammate_collapsed_line(&row2),
+            Some((0, 12, "yuzu-1ba1".to_string()))
         );
     }
 
     // 이름 뒤에 다른 글자가 있으면 본문 안 인용 — 실출력 덮어쓰기 오탐 방지.
+    // 단수·복수 양쪽 다.
     #[test]
     fn rejects_trailing_text_and_plain_lines() {
         let quoted = row_from("› Message from @aru-9c88 라고 떴다", 80);
         assert_eq!(teammate_collapsed_line(&quoted), None);
         let plain = row_from("Message from @aru-9c88", 80);
         assert_eq!(teammate_collapsed_line(&plain), None);
+        // 복수형도 이름 뒤 텍스트면 거부.
+        let plural_quoted = row_from("› 3 messages from @aru-9c88 이라고", 80);
+        assert_eq!(teammate_collapsed_line(&plural_quoted), None);
     }
 
     #[test]
@@ -7005,5 +7640,40 @@ mod prompt_title_inlay_tests {
         ];
         inlay_prompt_box_title(&mut rows, "제목");
         assert!(rows[0].iter().all(|c| c.ch == '─'));
+    }
+}
+
+#[cfg(test)]
+mod face_popup_tests {
+    use super::face_popup_pos;
+
+    #[test]
+    fn clamps_within_window() {
+        let pop = 160.0;
+        let (win_w, title_h) = (1440.0, 30.0);
+        // 창 오른쪽 끝 프사 → 팝업이 오른쪽 밖으로 넘치지 않는다.
+        let (px, _) = face_popup_pos(1400.0, 40.0, 1200.0, pop, win_w, title_h);
+        assert!(px + pop <= win_w - 6.0 + 0.01, "px={px} overflows right edge");
+        // 창 왼쪽 끝 프사 → 팝업 x 가 6px 밑으로 안 내려간다.
+        let (px, _) = face_popup_pos(0.0, 40.0, 1200.0, pop, win_w, title_h);
+        assert!(px >= 6.0 - 0.01, "px={px} underflows left edge");
+    }
+
+    #[test]
+    fn floats_above_and_clamps_to_titlebar() {
+        let pop = 160.0;
+        // 프사가 창 상단 근처면 팝업 top 이 타이틀바 아래로 클램프된다.
+        let (_, py) = face_popup_pos(100.0, 40.0, 40.0, pop, 1440.0, 30.0);
+        assert!(py >= 30.0 + 6.0 - 0.01, "py={py} intrudes into titlebar");
+        // 프사가 창 하단이면 팝업은 그 위로(음의 방향) 뜬다 = 프사 top 보다 위.
+        let (_, py) = face_popup_pos(100.0, 40.0, 1200.0, pop, 1440.0, 30.0);
+        assert!(py < 1200.0, "py={py} should float above the face");
+    }
+
+    #[test]
+    fn narrow_window_never_goes_negative() {
+        // 팝업 변보다 좁은 창에서도 x 가 6px 아래로 안 간다(max 방어).
+        let (px, _) = face_popup_pos(10.0, 20.0, 200.0, 160.0, 100.0, 30.0);
+        assert!(px >= 6.0 - 0.01, "px={px} negative on narrow window");
     }
 }

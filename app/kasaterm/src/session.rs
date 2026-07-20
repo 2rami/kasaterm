@@ -1753,6 +1753,226 @@ impl App {
             }
         }
     }
+    /// Count leaves that were running claude across the whole saved state — the
+    /// number the restore prompt shows ("claude 세션 N개"). A zero count means
+    /// nothing worth restoring, so resumed() skips the prompt entirely.
+    pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
+        fn walk(node: &serde_json::Value, n: &mut usize) {
+            if let Some(leaf) = node.get("leaf") {
+                if leaf
+                    .get("was_claude")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false)
+                {
+                    *n += 1;
+                }
+            } else if let Some(split) = node.get("split") {
+                if let Some(a) = split.get("a") {
+                    walk(a, n);
+                }
+                if let Some(b) = split.get("b") {
+                    walk(b, n);
+                }
+            }
+        }
+        let mut n = 0;
+        if let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) {
+            for s in sessions {
+                if let Some(windows) = s.get("windows").and_then(|w| w.as_array()) {
+                    for w in windows {
+                        walk(w, &mut n);
+                    }
+                }
+            }
+        }
+        n
+    }
+    /// Rebuild the workspace saved by `save_session_state` (user chose 복원):
+    /// recreate each window's split layout, spawn a pane per leaf seeded with
+    /// its saved scrollback, and queue `claude --resume <id>` for panes that
+    /// were running claude so the conversation — and, via the shim, the student
+    /// identity — comes back.
+    ///
+    /// Only the active session's windows are restored into the live fields;
+    /// detached sessions aren't wired up (`self.sessions` is always `[None]`),
+    /// so the saved `sessions` array carries exactly one entry in practice.
+    pub(crate) fn restore_session_state(&mut self, state: &serde_json::Value) {
+        let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) else {
+            return;
+        };
+        let active = state
+            .get("active_session")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as usize;
+        let Some(session) = sessions.get(active).or_else(|| sessions.first()) else {
+            return;
+        };
+        let Some(windows) = session.get("windows").and_then(|w| w.as_array()) else {
+            return;
+        };
+        let active_window = session
+            .get("active_window")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as usize;
+        // Tear down the blank session start_pty just spawned: drop its PTY and
+        // clear its pane state so the rebuilt layout starts from an empty slate.
+        // The socket server (start_socket_pty) stays up — only panes are rebuilt.
+        self.pty.clear();
+        {
+            let mut ws = self.ws.lock().unwrap();
+            ws.panes.clear();
+            ws.active_pane = None;
+        }
+        self.pty_layout = None;
+        self.windows.clear();
+        let (cols, rows) = self.window_cells();
+        for (j, w) in windows.iter().enumerate() {
+            let tree = self.restore_window_layout(w, cols, rows);
+            if j == active_window {
+                self.pty_layout = tree;
+                self.windows.push(None);
+            } else {
+                self.windows.push(tree);
+            }
+        }
+        self.active_window = active_window.min(self.windows.len().saturating_sub(1));
+        // Never leave the user staring at a blank window: if every leaf in the
+        // active window failed to spawn (or a corrupt index left no live slot),
+        // reset to a single fresh pane so the invariant (active slot == None)
+        // holds and something is on screen.
+        if self.pty_layout.is_none() {
+            self.windows = vec![None];
+            self.active_window = 0;
+            let _ = self.spawn_session_pane();
+        }
+        if let Some(first) = self
+            .pty_layout
+            .as_ref()
+            .and_then(|l| l.leaves().first().map(|s| s.to_string()))
+        {
+            self.ws.lock().unwrap().active_pane = Some(first);
+        }
+        self.chrome_dirty = true;
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(win) = self.window.as_ref() {
+            win.request_redraw();
+        }
+    }
+    /// Recursively rebuild one window's BSP tree from its saved JSON, spawning a
+    /// pane per surviving leaf. A leaf whose record is null (cwd/pid unresolved
+    /// at save) or whose PTY fails to spawn is dropped, and a split with one
+    /// dead child collapses to the survivor so the tree never carries an empty
+    /// half.
+    fn restore_window_layout(
+        &mut self,
+        node: &serde_json::Value,
+        cols: u16,
+        rows: u16,
+    ) -> Option<kasa_pty::PtyLayout> {
+        if let Some(leaf) = node.get("leaf") {
+            if leaf.is_null() {
+                return None;
+            }
+            let id = self.restore_leaf(leaf, cols, rows)?;
+            return Some(kasa_pty::PtyLayout::Leaf { pane_id: id });
+        }
+        if let Some(split) = node.get("split") {
+            let dir = match split.get("dir").and_then(|d| d.as_str()) {
+                Some("v") => kasa_pty::SplitDir::Vertical,
+                _ => kasa_pty::SplitDir::Horizontal,
+            };
+            let ratio = split.get("ratio").and_then(|r| r.as_f64()).unwrap_or(0.5) as f32;
+            let a = split
+                .get("a")
+                .and_then(|a| self.restore_window_layout(a, cols, rows));
+            let b = split
+                .get("b")
+                .and_then(|b| self.restore_window_layout(b, cols, rows));
+            return match (a, b) {
+                (Some(a), Some(b)) => Some(kasa_pty::PtyLayout::Split {
+                    dir,
+                    ratio,
+                    a: Box::new(a),
+                    b: Box::new(b),
+                }),
+                (Some(only), None) | (None, Some(only)) => Some(only),
+                (None, None) => None,
+            };
+        }
+        None
+    }
+    /// Spawn one restored pane from its saved record and, when it was running
+    /// claude, queue the resume command. Returns the new pane id, or None if the
+    /// PTY failed to start (caller then collapses the split).
+    fn restore_leaf(
+        &mut self,
+        rec: &serde_json::Value,
+        cols: u16,
+        rows: u16,
+    ) -> Option<String> {
+        let id = format!("%{}", self.next_pane_id);
+        self.next_pane_id += 1;
+        let cwd = rec
+            .get("cwd")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+            .or_else(resolve_initial_cwd);
+        let was_claude = rec
+            .get("was_claude")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+        let session_id = rec
+            .get("session_id")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let scrollback: Vec<String> = rec
+            .get("scrollback")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut env = crate::proxy_env(&id);
+        env.extend(self.assign_character_env(&id, cwd.as_deref(), None));
+        let session = match kasa_pty::PtySession::start(kasa_pty::PtyOptions {
+            shell: resolve_default_shell(),
+            cwd: cwd.clone(),
+            cols,
+            rows,
+            env,
+            pane_id: id.clone(),
+            initial_scrollback: scrollback,
+        }) {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                eprintln!("[restore] pane {id} spawn failed: {e:#}");
+                return None;
+            }
+        };
+        self.pump_pty_screens(session.screens.clone(), id.clone());
+        if let Some(ref c) = cwd {
+            self.pane_cwd_cache
+                .insert(id.clone(), std::path::PathBuf::from(c));
+        }
+        self.pty.insert(id.clone(), session.clone());
+        // Bring claude back: --resume the saved conversation (the shim
+        // re-attaches team/persona/character from the session id), or a fresh
+        // claude when the pane ran claude but no session id was captured.
+        // Plain-shell panes restore to just their shell + scrollback. 900ms
+        // mirrors swap_character's wait for the shell prompt before injection.
+        if was_claude {
+            let cmd = match session_id {
+                Some(sid) => format!("claude --resume {sid}\r"),
+                None => "claude\r".to_string(),
+            };
+            let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+            self.pending_restores.push((session, cmd, at));
+        }
+        Some(id)
+    }
     pub(crate) fn start_tmux(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before tmux");
         let (cols, rows) = self.window_cells();

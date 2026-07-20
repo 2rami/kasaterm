@@ -110,6 +110,21 @@ def report_cwd_to_kasaterm(cwd, session_id):
         pass
 
 
+def pane_foreground_session(pane_id):
+    """kasaterm 에 이 pane 이 지금 foreground 로 띄운 세션 id(bound transcript stem)를
+    묻는다. forked_view(세션≠anchor) 판정 뒤에만 불려 anchor 불일치 pane 만 1회
+    왕복한다 — 일반 pane 은 조회 없이 통과. 실패·미바인딩은 None."""
+    port = os.environ.get("KASASPACE_MCP_PORT", "8765")
+    try:
+        import urllib.parse
+        import urllib.request
+        url = f"http://127.0.0.1:{port}/pane-session?pane={urllib.parse.quote(pane_id)}"
+        with urllib.request.urlopen(url, timeout=0.3) as r:
+            return r.read().decode("utf-8", "replace").strip() or None
+    except Exception:
+        return None
+
+
 def main():
     try:
         d = json.loads(sys.stdin.read())
@@ -160,20 +175,19 @@ def main():
         else:
             parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
 
-    # 포크/백그라운드 세션 배지. CLAUDE_CODE_CHILD_SESSION 판별은 폐기 — claude 가
-    # 모든 세션의 훅/statusline 자식 env 에 무조건 "1"을 심어(2.1.209+ 실측) 전 pane
-    # 오발화였다(거노 07-16). 위 캐릭터 바인딩과 같은 anchor 불일치 조건을 쓴다:
-    # 세션 id ≠ pane anchor = 포크/attach 뷰. detach 포크는 env 가 출생 pane 동결이라
-    # 자기 새 id 와 반드시 갈라지고, 일반 pane·repersona 는 일치라 안 뜬다.
-    # 단 사용자 주도 resume(/resume 피커·claude --resume <id>)도 anchor 와 갈라지므로
-    # shim 이 export 한 마커(KASATERM_RESUMED_SID=그 sid / KASATERM_RESUME_PICKER)로
-    # 걸러낸다(거노: 일반 세션에 bg 오표기). 포크/attach 는 마커가 없어 배지 유지.
-    user_resume = bool(session_id) and (
-        session_id == os.environ.get("KASATERM_RESUMED_SID")
-        or bool(os.environ.get("KASATERM_RESUME_PICKER"))
-    )
-    if forked_view and not user_resume and os.environ.get("KASATERM_PANE_ID"):
-        parts.append(f"{DIM}{ansi(C_FALLBACK)}⑂ bg{RESET}")
+    # 포크/백그라운드 세션 배지. anchor(KASATERM_SESSION_ID) 불일치만으로는 detach
+    # 포크·앱 재시작 복원·continuation 이 구분 안 돼 오발화했다(거노: 복원 세션에
+    # ⑂bg). shim env 마커(RESUMED_SID/RESUME_PICKER)도 continuation 처럼 claude 가
+    # anchor 와 다른 세션을 이어가는 케이스는 못 잡는다 — 부팅 전 shim 이 실제 세션
+    # id 를 모르기 때문. 그래서 anchor 불일치 pane 만 kasaterm 에 실제 foreground
+    # 세션을 물어 정밀 판별한다: bound==내세션 = 복원/재부팅(배지 없음),
+    # bound≠내세션 = 진짜 포크(배지). 조회 실패·미바인딩은 보수적으로 생략(오발화
+    # 방지 우선). anchor 일치 pane 은 HTTP 왕복 없이 즉시 통과.
+    pane_id = os.environ.get("KASATERM_PANE_ID")
+    if forked_view and pane_id and session_id:
+        bound = pane_foreground_session(pane_id)
+        if bound and bound != session_id:
+            parts.append(f"{DIM}{ansi(C_FALLBACK)}⑂ bg{RESET}")
 
     model = (d.get("model") or {}).get("display_name")
     if model:

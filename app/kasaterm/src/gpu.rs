@@ -1734,6 +1734,7 @@ impl GpuRenderer {
             "file" => include_str!("../assets/icons/file.svg"),
             "file-code" => include_str!("../assets/icons/file-code.svg"),
             "image" => include_str!("../assets/icons/image.svg"),
+            "users" => include_str!("../assets/icons/users.svg"),
             "braces" => include_str!("../assets/icons/braces.svg"),
             "settings-2" => include_str!("../assets/icons/settings-2.svg"),
             "columns-2" => include_str!("../assets/icons/columns-2.svg"),

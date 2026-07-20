@@ -1,13 +1,19 @@
-//! Settings screen — Warp-style full view reached from the sidebar's bottom
-//! "Settings" entry. Replaces the pane grid while open; the session sidebar and
-//! titlebar stay live. Left category nav (General / Appearance / Shell) + a
-//! right-hand form. Each control writes through to `settings.json` immediately
-//! and mirrors into the in-memory `set_*` fields so `resolve_*`/`App::new`
-//! pick the value up on the next spawn/launch.
+//! Settings screen — Warp-style full view reached from the titlebar gear (and,
+//! in side-tab mode, the sidebar's "Settings" entry). Replaces the pane grid
+//! while open; the session sidebar and titlebar stay live. Left category nav
+//! (General / Appearance / Shell / Claude / Students) + a right-hand form laid
+//! out on a shared spacing rhythm. Each control writes through to
+//! `settings.json` immediately and mirrors into the in-memory `set_*` fields so
+//! `resolve_*`/`App::new` pick the value up on the next spawn/launch.
 //!
 //! Rendering runs inside `render_frame_gpu`'s `self.gpu.as_mut()` block where
 //! `&self` is off-limits, so the paint is a free function fed a snapshot
 //! (`SettingsCtx`) and returns the frame's clickable rects for hit-testing.
+//!
+//! Segmented controls (`segmented`), field titles (`field_header`) and the
+//! single-line text fields (`text_field`, char-index caret) are shared helpers
+//! so every page reads consistently. Single-line fields borrow `students_caret`
+//! as their caret store since only one field is focused at a time.
 
 use super::*;
 
@@ -44,11 +50,22 @@ pub(crate) struct SettingsCtx {
     /// (표시명, 에셋 슬러그) — Students 카테고리 목록·프사 썸네일용. slug 가
     /// None 이면 아직 도트 에셋이 없는 캐릭터(썸네일 자리표시).
     pub characters: Vec<(String, Option<&'static str>)>,
-    /// Students 인라인 편집 — 선택 캐릭터·persona 버퍼·캐럿(문자 인덱스).
+    /// 단일라인 텍스트 필드(경로·셸·claude extra)의 캐럿(문자 인덱스).
+    /// persona 멀티라인 캐럿(`student_caret`)과 분리 — 한 번에 한 필드만
+    /// 포커스되지만, 저장소를 나눠 포커스 이동 시 캐럿이 튀지 않게 한다.
+    pub settings_caret: usize,
+    /// Students 인라인 편집 — 선택 캐릭터·persona 버퍼·persona 캐럿(문자 인덱스).
     pub student_selected: Option<String>,
     pub student_persona: String,
     pub student_caret: usize,
+    /// 설정 화면 위에 덮어 그릴 토스트 (메시지, 알파). 설정 오버레이가 chrome
+    /// 토스트를 가리므로 여기서 다시 그린다 — 출처는 동일한 collab.toast 슬롯.
+    pub toast: Option<(String, f32)>,
 }
+
+/// 폼 컨트롤이 퍼지는 최대 가로폭. 넓은 창에서 컨트롤이 오른쪽 허공으로
+/// 흩어지지 않게 왼쪽 열로 모은다(페이지 헤더 밑줄·설명 줄 기준폭).
+const CONTENT_W: f32 = 600.0;
 
 fn inside(r: Rect, p: (f32, f32)) -> bool {
     p.0 >= r.0 && p.0 <= r.0 + r.2 && p.1 >= r.1 && p.1 <= r.1 + r.3
@@ -202,42 +219,6 @@ impl App {
         (tab_x, y, tab_w, SIDEBAR_TAB_H)
     }
 
-    pub(crate) fn open_settings(&mut self) {
-        self.settings_open = true;
-        self.settings_input = None;
-        self.settings_scroll = 0.0;
-        // Auto-expand a collapsed sidebar so Settings reads as the selected
-        // entry in the tab list (Warp-style). Remember we did it so closing can
-        // undo it; a sidebar the user opened themselves stays put. With tabs on
-        // top there is no side strip to expand.
-        if !self.tabs_on_top && !self.sidebar_visible {
-            self.sidebar_visible = true;
-            self.settings_expanded_sidebar = true;
-            let (cols, rows) = self.window_cells();
-            self.resize_backend(cols, rows);
-        }
-        self.chrome_dirty = true;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-
-    pub(crate) fn close_settings(&mut self) {
-        self.flush_student_persona();
-        self.settings_open = false;
-        self.settings_input = None;
-        if self.settings_expanded_sidebar {
-            self.sidebar_visible = false;
-            self.settings_expanded_sidebar = false;
-            let (cols, rows) = self.window_cells();
-            self.resize_backend(cols, rows);
-        }
-        self.chrome_dirty = true;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
-    }
-
     /// Re-emit the claude wrapper into the live shim dir so an already-open pane
     /// picks up a knob change on its next `claude` run (the shim path is stable
     /// for the process lifetime, so overwriting the file is enough — no relaunch).
@@ -300,23 +281,20 @@ impl App {
         self.repaint_all();
     }
 
-    /// Build the render snapshot. Caller is responsible for being outside the
-    /// gpu borrow.
-    pub(crate) fn settings_snapshot(&self, win_px: (f32, f32), scale: f32) -> SettingsCtx {
-        let sidebar_w = self.tab_strip_w();
-        let x0 = sidebar_w;
-        let y0 = TITLE_HEIGHT;
-        let w = (win_px.0 / scale - x0).max(0.0);
-        let h = (win_px.1 / scale - y0).max(0.0);
+    /// Build the render snapshot for the settings paint. `area` is the logical
+    /// rect the form draws into (the whole aux settings-window client area) and
+    /// `cursor` is that window's local cursor — both supplied by the caller so
+    /// this stays a pure `&self` snapshot taken outside any gpu borrow.
+    pub(crate) fn settings_snapshot(&self, area: Rect, cursor: (f32, f32)) -> SettingsCtx {
         SettingsCtx {
-            area: (x0, y0, w, h),
+            area,
             cat: self.settings_cat,
             cwd_mode: self.set_cwd_mode.clone(),
             file_tree_default: self.set_file_tree_default,
             footer_default: self.set_footer_default,
             shell: self.set_shell.clone(),
             input: self.settings_input,
-            cursor: self.cursor_px,
+            cursor,
             caret_on: self.last_blink_on,
             scroll: self.settings_scroll,
             theme: theme::theme_name().to_string(),
@@ -340,9 +318,18 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default(),
+            settings_caret: self.settings_caret,
             student_selected: self.students_selected.clone(),
             student_persona: self.students_persona.clone(),
             student_caret: self.students_caret,
+            toast: {
+                let a = self.collab_toast_alpha();
+                if a > 0.0 {
+                    self.collab.toast.as_ref().map(|(m, _)| (m.clone(), a))
+                } else {
+                    None
+                }
+            },
         }
     }
 
@@ -390,6 +377,7 @@ impl App {
                         self.set_cwd_mode =
                             std::env::var("HOME").unwrap_or_default();
                     }
+                    self.settings_caret = self.set_cwd_mode.chars().count();
                     self.settings_input = Some(SettingsInput::CwdPath);
                 } else {
                     self.set_cwd_mode = m.to_string();
@@ -398,6 +386,7 @@ impl App {
                 self.settings_save();
             }
             SettingsAction::FocusCwdPath => {
+                self.settings_caret = self.set_cwd_mode.chars().count();
                 self.settings_input = Some(SettingsInput::CwdPath);
             }
             SettingsAction::ToggleFileTree => {
@@ -431,6 +420,7 @@ impl App {
                 self.settings_save();
             }
             SettingsAction::FocusShell => {
+                self.settings_caret = self.set_shell.chars().count();
                 self.settings_input = Some(SettingsInput::Shell);
             }
             SettingsAction::ThemeMode(m) => {
@@ -470,6 +460,8 @@ impl App {
             SettingsAction::ToggleShimInject => {
                 self.set_shim_inject = !self.set_shim_inject;
                 self.settings_save();
+                // 시작할 때 한 번만 설치되는 shim 이라 라이브 pane 엔 안 먹는다.
+                self.set_toast("재시작하면 적용돼요".to_string());
             }
             SettingsAction::ClaudeModel(m) => {
                 self.set_claude_model = m;
@@ -482,24 +474,17 @@ impl App {
                 self.settings_save();
             }
             SettingsAction::FocusClaudeExtra => {
+                self.settings_caret = self.set_claude_extra.chars().count();
                 self.settings_input = Some(SettingsInput::ClaudeExtra);
             }
             SettingsAction::OpenStudentsDir => self.open_students_dir(),
             SettingsAction::OpenCharactersJson => self.open_characters_json(),
             SettingsAction::RefreshStudentAssets => self.refresh_student_assets(),
-            SettingsAction::SelectStudent(name) => {
-                // 다른 캐릭터를 편집 중이었으면 먼저 저장하고, 새 캐릭터의 원본
-                // persona 를 버퍼로 로드. 캐럿은 끝으로.
-                self.flush_student_persona();
-                let persona = kasa_mcp::character::characters_json()
-                    .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &name))
-                    .unwrap_or_default();
-                self.students_caret = persona.chars().count();
-                self.students_persona = persona;
-                self.students_selected = Some(name);
-                self.settings_input = Some(SettingsInput::StudentPersona);
-            }
+            SettingsAction::SelectStudent(name) => self.select_student_for_edit(name),
             SettingsAction::FocusStudentPersona => {
+                // 캐럿 저장소를 단일라인 필드와 공유하므로, 다른 필드가 만졌을 수
+                // 있는 캐럿을 persona 끝으로 되돌린다.
+                self.students_caret = self.students_persona.chars().count();
                 self.settings_input = Some(SettingsInput::StudentPersona);
             }
         }
@@ -510,33 +495,92 @@ impl App {
         true
     }
 
-    /// Route a keystroke into the focused settings text field. Returns true if
-    /// it was consumed. Backspace/char/Esc only; Enter just blurs.
+    /// Route a keystroke into the focused single-line settings text field.
+    /// Returns true if consumed. Full char-index caret: ←→ 이동, 중간
+    /// 삽입/삭제, Home/End, host+V 붙여넣기. Enter=커밋(blur+저장 토스트),
+    /// Esc=blur. persona 멀티라인은 별도 경로.
     pub(crate) fn settings_key(&mut self, event: &winit::event::KeyEvent) -> bool {
-        use winit::keyboard::{Key, NamedKey};
+        use winit::event::ElementState;
+        use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
         let Some(field) = self.settings_input else { return false };
-        // persona 는 캐럿·개행이 있는 멀티라인이라 단일라인 append 경로와 분리.
         if field == SettingsInput::StudentPersona {
             return self.student_persona_key(event);
         }
-        let buf = match field {
-            SettingsInput::CwdPath => &mut self.set_cwd_mode,
-            SettingsInput::Shell => &mut self.set_shell,
-            SettingsInput::ClaudeExtra => &mut self.set_claude_extra,
-            SettingsInput::StudentPersona => unreachable!("handled above"),
-        };
-        match &event.logical_key {
-            Key::Named(NamedKey::Backspace) => {
-                buf.pop();
-            }
-            Key::Named(NamedKey::Escape) | Key::Named(NamedKey::Enter) => {
-                self.settings_input = None;
-            }
-            Key::Named(NamedKey::Space) => buf.push(' '),
-            Key::Character(t) => buf.push_str(t),
-            _ => return true,
+        if event.state != ElementState::Pressed {
+            return true;
         }
-        self.settings_save();
+        // host+V 붙여넣기 — 글자 삽입 분기보다 먼저 걸러 "v"가 찍히지 않게 한다.
+        // 단일라인이라 개행은 공백으로 눕힌다. 다른 host 단축키는 소비만 하고 무시.
+        let host = self.host_mod();
+        let paste = if host && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyV)) {
+            arboard::Clipboard::new()
+                .ok()
+                .and_then(|mut c| c.get_text().ok())
+                .map(|t| t.replace(['\n', '\r'], " "))
+        } else if host {
+            return true;
+        } else {
+            None
+        };
+        let mut changed = false;
+        let mut blur = false;
+        let mut commit = false;
+        {
+            // buf 와 caret 은 서로 다른 App 필드라 동시 &mut 가 허용된다(메서드
+            // 경유가 아니라 직접 필드 접근이라 disjoint borrow).
+            let caret = &mut self.settings_caret;
+            let buf = match field {
+                SettingsInput::CwdPath => &mut self.set_cwd_mode,
+                SettingsInput::Shell => &mut self.set_shell,
+                SettingsInput::ClaudeExtra => &mut self.set_claude_extra,
+                SettingsInput::StudentPersona => unreachable!("handled above"),
+            };
+            if *caret > buf.chars().count() {
+                *caret = buf.chars().count();
+            }
+            if let Some(p) = &paste {
+                for ch in p.chars() {
+                    textedit::insert(buf, caret, ch);
+                }
+                changed = true;
+            } else {
+                match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => {
+                        textedit::backspace(buf, caret);
+                        changed = true;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        blur = true;
+                        commit = true;
+                    }
+                    Key::Named(NamedKey::Escape) => blur = true,
+                    Key::Named(NamedKey::ArrowLeft) => textedit::left(caret),
+                    Key::Named(NamedKey::ArrowRight) => textedit::right(buf, caret),
+                    Key::Named(NamedKey::Home) => *caret = 0,
+                    Key::Named(NamedKey::End) => *caret = buf.chars().count(),
+                    Key::Named(NamedKey::Space) => {
+                        textedit::insert(buf, caret, ' ');
+                        changed = true;
+                    }
+                    Key::Character(t) => {
+                        for ch in t.chars() {
+                            textedit::insert(buf, caret, ch);
+                        }
+                        changed = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if blur {
+            self.settings_input = None;
+        }
+        if changed {
+            self.settings_save();
+        }
+        if commit {
+            self.set_toast("저장됐어요".to_string());
+        }
         self.chrome_dirty = true;
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -585,10 +629,52 @@ impl App {
         true
     }
 
+    /// 다른 캐릭터를 편집 중이었으면 먼저 저장하고, 새 캐릭터의 원본 persona 를
+    /// 버퍼로 로드(캐럿은 끝으로). settings_click 의 학생 행 클릭과 별도창 딥링크
+    /// (프사 클릭 → Students 페이지 + 해당 학생 선택)가 공유한다.
+    pub(crate) fn select_student_for_edit(&mut self, name: String) {
+        self.flush_student_persona();
+        let persona = kasa_mcp::character::characters_json()
+            .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &name))
+            .unwrap_or_default();
+        self.students_caret = persona.chars().count();
+        self.students_persona = persona;
+        self.students_selected = Some(name);
+        self.settings_input = Some(SettingsInput::StudentPersona);
+    }
+
+    /// 현재 포커스된 설정 필드에 텍스트를 삽입(IME commit·한글 조합 완성 경로 공용).
+    /// persona 는 students_caret, 단일라인 필드는 settings_caret 를 캐럿으로 쓴다.
+    pub(crate) fn settings_insert_text(&mut self, text: &str) {
+        let Some(field) = self.settings_input else { return };
+        if field == SettingsInput::StudentPersona {
+            for ch in text.chars() {
+                textedit::insert(&mut self.students_persona, &mut self.students_caret, ch);
+            }
+            self.chrome_dirty = true;
+            return;
+        }
+        let caret = &mut self.settings_caret;
+        let buf = match field {
+            SettingsInput::CwdPath => &mut self.set_cwd_mode,
+            SettingsInput::Shell => &mut self.set_shell,
+            SettingsInput::ClaudeExtra => &mut self.set_claude_extra,
+            SettingsInput::StudentPersona => unreachable!("handled above"),
+        };
+        if *caret > buf.chars().count() {
+            *caret = buf.chars().count();
+        }
+        for ch in text.chars() {
+            textedit::insert(buf, caret, ch);
+        }
+        self.settings_save();
+        self.chrome_dirty = true;
+    }
+
     /// persona 편집 버퍼를 characters.json 에 저장(선택 캐릭터가 있고 실제로
     /// 바뀌었을 때만). blur·선택 변경·설정 닫기 시 호출. 저장 후 shim 을 재생성해
     /// 그 캐릭터 pane 의 다음 claude 실행이 새 persona 를 집게 한다.
-    fn flush_student_persona(&mut self) {
+    pub(crate) fn flush_student_persona(&mut self) {
         let Some(name) = self.students_selected.clone() else { return };
         let cur = kasa_mcp::character::characters_json()
             .and_then(|c| kasa_mcp::character::raw_persona_for(&c, &name))
@@ -668,7 +754,7 @@ pub(crate) fn paint_settings(
     // Page header: the active category as a title + hairline, so the form
     // reads as its own page instead of floating controls.
     let fx = ax + CAT_W + 40.0;
-    let fw = (aw - CAT_W - 80.0).max(120.0);
+    let fw = (aw - CAT_W - 80.0).max(120.0).min(CONTENT_W);
     g.draw_text(
         fx, ay + 28.0, active_label,
         gpu::DrawOpts { font_size: 20.0, color: theme::text(), bold: true, italic: false },
@@ -689,15 +775,6 @@ pub(crate) fn paint_settings(
     match ctx.cat {
         SettingsCat::General => {
             let mut y = fy;
-            // 시작 작업 폴더
-            if y > clip {
-                section_label(g, fx, y, "Startup folder");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "새 창과 탭이 열리는 위치");
-            }
-            y += 26.0;
             let cwd_is = |m: &str| {
                 if m == "last" {
                     ctx.cwd_mode == "last"
@@ -707,127 +784,58 @@ pub(crate) fn paint_settings(
                     ctx.cwd_mode != "last" && ctx.cwd_mode != "home"
                 }
             };
-            let segs: [(&'static str, &str); 3] =
-                [("last", "Last folder"), ("home", "Home"), ("custom", "Custom")];
+            y = field_header(g, fx, y, clip, "Startup folder", &["새 창과 탭이 열리는 위치"]);
             if y > clip {
-                let mut sx = fx;
-                for (val, label) in segs {
-                    let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
-                    let r = (sx, y, tw, 32.0);
-                    let sel = cwd_is(val);
-                    let hover = inside(r, ctx.cursor);
-                    round_rect(
-                        g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
-                        if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
-                    );
-                    g.draw_text(
-                        r.0 + 14.0,
-                        r.1 + 8.0,
-                        label,
-                        gpu::DrawOpts {
-                            font_size: 13.0,
-                            color: if sel { theme::bg() } else { theme::text_dim() },
-                            bold: sel,
-                            italic: false,
-                        },
-                    );
-                    rects.push((SettingsAction::CwdMode(val), r));
-                    sx += tw + 8.0;
-                }
+                let cells = [
+                    ("Last folder", cwd_is("last"), SettingsAction::CwdMode("last")),
+                    ("Home", cwd_is("home"), SettingsAction::CwdMode("home")),
+                    ("Custom", cwd_is("custom"), SettingsAction::CwdMode("custom")),
+                ];
+                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
             }
-            y += 44.0;
-            // Custom path field, only when "직접 지정" is active.
+            y += SEG_H;
+            // Custom path field, only when "Custom" is active.
             if cwd_is("custom") {
+                y += 10.0;
                 if y > clip {
                     let r = (fx, y, fw.min(420.0), 34.0);
                     let focused = ctx.input == Some(SettingsInput::CwdPath);
-                    text_field(g, r, &ctx.cwd_mode, focused, ctx.caret_on, ctx.cursor);
+                    text_field(g, r, &ctx.cwd_mode, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
                     rects.push((SettingsAction::FocusCwdPath, r));
                 }
                 y += 34.0;
             }
             y += ROW_GAP;
-            // 파일트리 기본 표시
-            if y > clip {
-                section_label(g, fx, y, "File tree by default");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "시작할 때 파일 트리 사이드바 열기");
-            }
-            y += 28.0;
+            y = field_header(g, fx, y, clip, "File tree by default", &["시작할 때 파일 트리 사이드바 열기"]);
             if y > clip {
                 let tr = (fx, y, 52.0, 30.0);
                 toggle(g, tr, ctx.file_tree_default, ctx.cursor);
                 rects.push((SettingsAction::ToggleFileTree, tr));
             }
             y += 30.0 + ROW_GAP;
-            // pane 하단바 기본 표시
-            if y > clip {
-                section_label(g, fx, y, "Pane status bar by default");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "각 pane 아래 경로 · 브랜치 · diff 바 표시");
-            }
-            y += 28.0;
+            y = field_header(g, fx, y, clip, "Pane status bar by default", &["각 pane 아래 경로 · 브랜치 · diff 바 표시"]);
             if y > clip {
                 let fr = (fx, y, 52.0, 30.0);
                 toggle(g, fr, ctx.footer_default, ctx.cursor);
                 rects.push((SettingsAction::ToggleFooter, fr));
             }
             y += 30.0 + ROW_GAP;
-            // 윈도우 탭 위치
+            y = field_header(g, fx, y, clip, "Tab position", &["윈도우 탭을 상단 타이틀바 또는 좌측 사이드바에 표시"]);
             if y > clip {
-                section_label(g, fx, y, "Tab position");
+                let cells = [
+                    ("Top", ctx.tabs_on_top, SettingsAction::TabPosition("top")),
+                    ("Side", !ctx.tabs_on_top, SettingsAction::TabPosition("side")),
+                ];
+                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
             }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "윈도우 탭을 상단 타이틀바 또는 좌측 사이드바에 표시");
-            }
-            y += 26.0;
-            let tab_segs: [(&'static str, &str); 2] = [("top", "Top"), ("side", "Side")];
-            if y > clip {
-                let mut sx = fx;
-                for (val, label) in tab_segs {
-                    let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
-                    let r = (sx, y, tw, 32.0);
-                    let sel = (val == "top") == ctx.tabs_on_top;
-                    let hover = inside(r, ctx.cursor);
-                    round_rect(
-                        g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
-                        if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
-                    );
-                    g.draw_text(
-                        r.0 + 14.0,
-                        r.1 + 8.0,
-                        label,
-                        gpu::DrawOpts {
-                            font_size: 13.0,
-                            color: if sel { theme::bg() } else { theme::text_dim() },
-                            bold: sel,
-                            italic: false,
-                        },
-                    );
-                    rects.push((SettingsAction::TabPosition(val), r));
-                    sx += tw + 8.0;
-                }
-            }
-            content_bottom = y + 32.0;
+            content_bottom = y + SEG_H;
         }
         SettingsCat::Appearance => {
             let mut y = fy;
             // 테마 — 프리셋 카드 그리드. 카드 하나 = 그 팔레트의 미니 프리뷰
             // (bg 칠 + 프롬프트 샘플 + ANSI 도트 + 라벨)라서 고르기 전에 색이
             // 보인다. UI 토큰과 터미널 ANSI 16색이 함께 바뀐다.
-            if y > clip {
-                section_label(g, fx, y, "Theme");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "UI + 터미널 ANSI 팔레트가 함께 바뀌어요");
-            }
-            y += 30.0;
+            y = field_header(g, fx, y, clip, "Theme", &["UI + 터미널 ANSI 팔레트가 함께 바뀌어요"]);
             let (card_w, card_h, gap) = (158.0_f32, 96.0_f32, 12.0_f32);
             let per_row = (((fw + gap) / (card_w + gap)).floor() as usize).max(1);
             let mut idx = 0usize;
@@ -896,25 +904,20 @@ pub(crate) fn paint_settings(
             }
             let rows = idx.div_ceil(per_row);
             y += rows as f32 * (card_h + gap) + ROW_GAP;
-            // 강조색
-            if y > clip {
-                section_label(g, fx, y, "Accent color");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "선택 영역 · 커서 · 링크 색");
-            }
-            y += 32.0;
+            y = field_header(g, fx, y, clip, "Accent color", &["선택 영역 · 커서 · 링크 색"]);
             if y > clip {
                 let mut cxp = fx;
                 for (name, col) in theme::ACCENT_PRESETS {
                     let sz = 30.0_f32;
                     let r = (cxp, y, sz, sz);
                     let sel = *name == ctx.accent;
-                    // Selected ring: a slightly larger text-colored disc behind the
-                    // swatch reads as a halo.
+                    let hover = inside(r, ctx.cursor);
+                    // Halo behind the swatch: text-colored disc when selected,
+                    // muted disc on hover — same feedback the other controls give.
                     if sel {
                         round_rect(g, r.0 - 3.0, r.1 - 3.0, sz + 6.0, sz + 6.0, (sz + 6.0) / 2.0, theme::text());
+                    } else if hover {
+                        round_rect(g, r.0 - 3.0, r.1 - 3.0, sz + 6.0, sz + 6.0, (sz + 6.0) / 2.0, theme::text_mute());
                     }
                     round_rect(g, r.0, r.1, sz, sz, sz / 2.0, *col);
                     rects.push((SettingsAction::Accent(name.to_string()), r));
@@ -924,14 +927,7 @@ pub(crate) fn paint_settings(
             y += 30.0 + ROW_GAP;
             // 폰트 크기 스테퍼 — 값은 즉시 적용(그리드 리플로우)되고
             // settings.json 에 저장돼 재시작에도 유지된다.
-            if y > clip {
-                section_label(g, fx, y, "Font size");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "터미널 셀 폰트 크기 (기본 16 · Cmd+/- 줌과 별개인 기준값)");
-            }
-            y += 28.0;
+            y = field_header(g, fx, y, clip, "Font size", &["터미널 셀 폰트 크기 (기본 16 · Cmd+/- 줌과 별개인 기준값)"]);
             if y > clip {
                 let bs = 30.0_f32;
                 let minus = (fx, y, bs, bs);
@@ -954,217 +950,93 @@ pub(crate) fn paint_settings(
         }
         SettingsCat::Shell => {
             let mut y = fy;
-            if y > clip {
-                section_label(g, fx, y, "Default shell");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "새 pane 의 셸 (비우면 시스템 $SHELL)");
-            }
-            y += 26.0;
+            y = field_header(g, fx, y, clip, "Default shell", &["새 pane 의 셸 (비우면 시스템 $SHELL)"]);
             let presets: [(&str, &str); 3] =
                 [("", "System default"), ("/bin/zsh", "zsh"), ("/bin/bash", "bash")];
             let shell_is_preset = presets.iter().any(|(v, _)| *v == ctx.shell);
             if y > clip {
-                let mut sx = fx;
-                for (val, label) in presets {
-                    let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
-                    let r = (sx, y, tw, 32.0);
-                    let sel = ctx.shell == val;
-                    let hover = inside(r, ctx.cursor);
-                    round_rect(
-                        g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
-                        if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
-                    );
-                    g.draw_text(
-                        r.0 + 14.0,
-                        r.1 + 8.0,
-                        label,
-                        gpu::DrawOpts {
-                            font_size: 13.0,
-                            color: if sel { theme::bg() } else { theme::text_dim() },
-                            bold: sel,
-                            italic: false,
-                        },
-                    );
-                    rects.push((SettingsAction::ShellPreset(val.to_string()), r));
-                    sx += tw + 8.0;
-                }
-                // "직접" chip → focuses the free-text field below.
-                {
-                    let label = "Custom";
-                    let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
-                    let r = (sx, y, tw, 32.0);
-                    let sel = !shell_is_preset;
-                    let hover = inside(r, ctx.cursor);
-                    round_rect(
-                        g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
-                        if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
-                    );
-                    g.draw_text(
-                        r.0 + 14.0,
-                        r.1 + 8.0,
-                        label,
-                        gpu::DrawOpts {
-                            font_size: 13.0,
-                            color: if sel { theme::bg() } else { theme::text_dim() },
-                            bold: sel,
-                            italic: false,
-                        },
-                    );
-                    rects.push((SettingsAction::FocusShell, r));
-                }
+                // Preset 칸들 + 자유입력 필드로 포커스를 주는 "Custom" 칸.
+                let cells = [
+                    ("System default", ctx.shell.is_empty(), SettingsAction::ShellPreset(String::new())),
+                    ("zsh", ctx.shell == "/bin/zsh", SettingsAction::ShellPreset("/bin/zsh".to_string())),
+                    ("bash", ctx.shell == "/bin/bash", SettingsAction::ShellPreset("/bin/bash".to_string())),
+                    ("Custom", !shell_is_preset, SettingsAction::FocusShell),
+                ];
+                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
             }
-            y += 44.0;
+            y += SEG_H;
             if !shell_is_preset {
+                y += 10.0;
                 if y > clip {
                     let r = (fx, y, fw.min(420.0), 34.0);
                     let focused = ctx.input == Some(SettingsInput::Shell);
-                    text_field(g, r, &ctx.shell, focused, ctx.caret_on, ctx.cursor);
+                    text_field(g, r, &ctx.shell, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
                     rects.push((SettingsAction::FocusShell, r));
                 }
                 y += 34.0;
             }
-            content_bottom = y;
+            content_bottom = y + ROW_GAP;
         }
         SettingsCat::Claude => {
-            // Brand logo above the form — fixed 50px tall (size 30 + 20 gap),
-            // so the hidden branch advances y by the same amount.
-            let mut y = fy
-                + if fy > clip {
-                    claude_logo(g, fx, fy)
-                } else {
-                    50.0
-                };
+            // Page 헤더가 이미 "Claude" 를 크게 쓰므로 별도 브랜드 워드마크는
+            // 중복이라 뺐다 — 좌측 nav 에도 claude 아이콘이 있다.
+            let mut y = fy;
             // Shim injection — global. off = install_pane_shims never makes the shim
             // dir, so claude runs vanilla (no persona/proxy/hooks). Read once at boot,
             // so a change needs a restart.
-            if y > clip {
-                section_label(g, fx, y, "Shim injection");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "끄면 순정 Claude — 페르소나 · 캡처 프록시 · 훅 전부 없음");
-            }
-            y += 19.0;
-            if y > clip {
-                help_text(g, fx, y, "재시작해야 적용돼요 — 시작할 때 한 번만 설치돼서");
-            }
-            y += 27.0;
+            y = field_header(g, fx, y, clip, "Shim injection",
+                &["끄면 순정 Claude — 페르소나 · 캡처 프록시 · 훅 전부 없음",
+                  "재시작해야 적용돼요 — 시작할 때 한 번만 설치돼서"]);
             if y > clip {
                 let sr = (fx, y, 52.0, 30.0);
                 toggle(g, sr, ctx.shim_inject, ctx.cursor);
                 rects.push((SettingsAction::ToggleShimInject, sr));
             }
             y += 30.0 + ROW_GAP;
-            // Persona injection (toggle)
-            if y > clip {
-                section_label(g, fx, y, "Persona injection");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "이 pane 의 캐릭터를 Claude 시스템 프롬프트에 붙여요");
-            }
-            y += 28.0;
+            y = field_header(g, fx, y, clip, "Persona injection", &["이 pane 의 캐릭터를 Claude 시스템 프롬프트에 붙여요"]);
             if y > clip {
                 let pr = (fx, y, 52.0, 30.0);
                 toggle(g, pr, ctx.claude_persona, ctx.cursor);
                 rects.push((SettingsAction::ToggleClaudePersona, pr));
             }
             y += 30.0 + ROW_GAP;
-            // 모델 (세그먼트)
+            y = field_header(g, fx, y, clip, "Model", &["Claude 모델 덮어쓰기 (Default = 원래대로 유지)"]);
             if y > clip {
-                section_label(g, fx, y, "Model");
+                let cells = [
+                    ("Default", ctx.claude_model.is_empty(), SettingsAction::ClaudeModel(String::new())),
+                    ("opus", ctx.claude_model == "opus", SettingsAction::ClaudeModel("opus".to_string())),
+                    ("sonnet", ctx.claude_model == "sonnet", SettingsAction::ClaudeModel("sonnet".to_string())),
+                    ("haiku", ctx.claude_model == "haiku", SettingsAction::ClaudeModel("haiku".to_string())),
+                ];
+                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
             }
-            y += 24.0;
+            y += SEG_H + ROW_GAP;
+            y = field_header(g, fx, y, clip, "Effort", &["추론 강도 (CLAUDE_EFFORT). Default = 그대로 둠"]);
             if y > clip {
-                help_text(g, fx, y, "Claude 모델 덮어쓰기 (Default = 원래대로 유지)");
+                let cells = [
+                    ("Default", ctx.claude_effort.is_empty(), SettingsAction::ClaudeEffort(String::new())),
+                    ("low", ctx.claude_effort == "low", SettingsAction::ClaudeEffort("low".to_string())),
+                    ("medium", ctx.claude_effort == "medium", SettingsAction::ClaudeEffort("medium".to_string())),
+                    ("high", ctx.claude_effort == "high", SettingsAction::ClaudeEffort("high".to_string())),
+                    ("xhigh", ctx.claude_effort == "xhigh", SettingsAction::ClaudeEffort("xhigh".to_string())),
+                ];
+                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
             }
-            y += 26.0;
-            let models: [(&str, &str); 4] =
-                [("", "Default"), ("opus", "opus"), ("sonnet", "sonnet"), ("haiku", "haiku")];
-            if y > clip {
-                let mut sx = fx;
-                for (val, label) in models {
-                    let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
-                    let r = (sx, y, tw, 32.0);
-                    let sel = ctx.claude_model == val;
-                    let hover = inside(r, ctx.cursor);
-                    round_rect(
-                        g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
-                        if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
-                    );
-                    g.draw_text(
-                        r.0 + 14.0, r.1 + 8.0, label,
-                        gpu::DrawOpts { font_size: 13.0, color: if sel { theme::bg() } else { theme::text_dim() }, bold: sel, italic: false },
-                    );
-                    rects.push((SettingsAction::ClaudeModel(val.to_string()), r));
-                    sx += tw + 8.0;
-                }
-            }
-            y += 44.0 + ROW_GAP;
-            // Effort (세그먼트) — CLAUDE_EFFORT env
-            if y > clip {
-                section_label(g, fx, y, "Effort");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "추론 강도 (CLAUDE_EFFORT). Default = 그대로 둠");
-            }
-            y += 26.0;
-            let efforts: [(&str, &str); 5] =
-                [("", "Default"), ("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh")];
-            if y > clip {
-                let mut sx = fx;
-                for (val, label) in efforts {
-                    let tw = g.measure_chrome_text(label, 13.0, false) + 28.0;
-                    let r = (sx, y, tw, 32.0);
-                    let sel = ctx.claude_effort == val;
-                    let hover = inside(r, ctx.cursor);
-                    round_rect(
-                        g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
-                        if sel { theme::accent() } else if hover { theme::surface_hover() } else { theme::surface_active() },
-                    );
-                    g.draw_text(
-                        r.0 + 14.0, r.1 + 8.0, label,
-                        gpu::DrawOpts { font_size: 13.0, color: if sel { theme::bg() } else { theme::text_dim() }, bold: sel, italic: false },
-                    );
-                    rects.push((SettingsAction::ClaudeEffort(val.to_string()), r));
-                    sx += tw + 8.0;
-                }
-            }
-            y += 44.0 + ROW_GAP;
-            // 추가 인자 (텍스트) — 매 실행 덧붙이는 자유 플래그
-            if y > clip {
-                section_label(g, fx, y, "Extra args");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "claude 실행에 항상 붙는 플래그 (예: --verbose)");
-            }
-            y += 28.0;
+            y += SEG_H + ROW_GAP;
+            y = field_header(g, fx, y, clip, "Extra args", &["claude 실행에 항상 붙는 플래그 (예: --verbose)"]);
             if y > clip {
                 let r = (fx, y, fw.min(420.0), 34.0);
                 let focused = ctx.input == Some(SettingsInput::ClaudeExtra);
-                text_field(g, r, &ctx.claude_extra, focused, ctx.caret_on, ctx.cursor);
+                text_field(g, r, &ctx.claude_extra, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
                 rects.push((SettingsAction::FocusClaudeExtra, r));
             }
             content_bottom = y + 34.0;
         }
         SettingsCat::Students => {
             let mut y = fy;
-            if y > clip {
-                section_label(g, fx, y, "Character images");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "~/.config/kasaterm/students/ 에 이미지를 넣으면 학생 그림이 바뀌어요");
-            }
-            y += 22.0;
-            if y > clip {
-                help_text(g, fx, y, "파일명: <slug>-profile.png · <slug>-0..3.png · <slug>-walk-0..5.png · schale-logo.png");
-            }
-            y += 32.0;
+            y = field_header(g, fx, y, clip, "Character images",
+                &["~/.config/kasaterm/students/ 에 이미지를 넣으면 학생 그림이 바뀌어요",
+                  "파일명: <slug>-profile.png · <slug>-0..3.png · <slug>-walk-0..5.png · schale-logo.png"]);
             // 액션 버튼 3개 — 폴더 열기 / json 열기 / 새로고침(텍스처 재로드).
             if y > clip {
                 let mut bx = fx;
@@ -1189,14 +1061,7 @@ pub(crate) fn paint_settings(
                 }
             }
             y += 34.0 + ROW_GAP;
-            if y > clip {
-                section_label(g, fx, y, "Characters");
-            }
-            y += 24.0;
-            if y > clip {
-                help_text(g, fx, y, "캐릭터를 눌러 성격(persona)을 바로 편집하세요");
-            }
-            y += 30.0;
+            y = field_header(g, fx, y, clip, "Characters", &["캐릭터를 눌러 성격(persona)을 바로 편집하세요"]);
             // 색 점 + 이름 + slug 한 줄, 행 전체가 클릭 대상(→ persona 편집). 실제
             // 프사·전신은 statusline·배너에서 보인다(설정 오버레이는 배경 rect 가
             // 이미지 z-order 를 가려 인라인 썸네일이 안 뜸). 스크롤로 전 인원 도달.
@@ -1229,14 +1094,8 @@ pub(crate) fn paint_settings(
             // 선택된 캐릭터의 persona 멀티라인 편집기 — 줄 단위 클립.
             if let Some(sel) = &ctx.student_selected {
                 y += ROW_GAP;
-                if y > clip {
-                    section_label(g, fx, y, &format!("{sel} · persona"));
-                }
-                y += 24.0;
-                if y > clip {
-                    help_text(g, fx, y, "성격·말투를 평문으로. Enter=줄바꿈, 바깥 클릭·Esc=저장");
-                }
-                y += 26.0;
+                y = field_header(g, fx, y, clip, &format!("{sel} · persona"),
+                    &["성격·말투를 평문으로. Enter=줄바꿈, 바깥 클릭·Esc=저장"]);
                 let box_w = fw.min(560.0);
                 let line_h = 18.0_f32;
                 let vis = wrap_persona(g, &ctx.student_persona, box_w - 24.0, 13.0);
@@ -1269,25 +1128,98 @@ pub(crate) fn paint_settings(
         }
     }
 
+    // Toast inside the settings window (top-right of the form). The chrome toast
+    // lives on the main window; this redraws the same source slot here so
+    // save/restart feedback stays visible while the settings window has focus.
+    if let Some((msg, alpha)) = &ctx.toast {
+        let t_font = 13.0_f32;
+        let (px, py) = (14.0_f32, 8.0_f32);
+        let box_w = g.measure_chrome_text(msg, t_font, true) + px * 2.0;
+        let box_h = t_font + py * 2.0;
+        let bx = ax + aw - box_w - 16.0;
+        let by = ay + 12.0;
+        let a = (235.0 * alpha).round() as u8;
+        round_rect(g, bx, by, box_w, box_h, theme::RADIUS_MD, theme::with_alpha(theme::surface_active(), a));
+        let ta = (255.0 * alpha).round() as u8;
+        g.draw_text(
+            bx + px, by + py, msg,
+            gpu::DrawOpts { font_size: t_font, color: theme::with_alpha(theme::text(), ta), bold: true, italic: false },
+        );
+    }
+
     (rects, content_bottom - fy)
 }
 
-/// Claude brand header for the Claude settings tab — sunburst mark + wordmark.
-/// Drawn through the chrome icon layer (queue_icon) so it sits over the panel.
-/// Returns the vertical space consumed so the caller can offset the first
-/// section below it.
-fn claude_logo(g: &mut gpu::GpuRenderer, x: f32, y: f32) -> f32 {
-    // queue_icon draws through the chrome icon layer (over the settings panel);
-    // queue_image would paint beneath it and get covered. Tinted Claude orange.
-    let size = 30.0;
-    g.queue_icon("claude", x, y, size, [217, 119, 87, 255]);
-    g.draw_text(
-        x + size + 12.0,
-        y + (size - 22.0) / 2.0,
-        "Claude",
-        gpu::DrawOpts { font_size: 22.0, color: theme::text(), bold: true, italic: false },
-    );
-    size + 20.0
+/// 세그먼트 컨트롤의 고정 높이(트랙 + 내부 패딩).
+const SEG_H: f32 = 34.0;
+
+/// 설정 항목의 제목과 (있으면) 설명 줄들을 그리고, 컨트롤이 놓일 y 를 돌려준다.
+/// 스크롤로 clip 위로 올라간 줄은 그리지 않되 자리(y 전진)는 유지한다 — 렌더러에
+/// scissor 가 없어 헤더/타이틀바를 침범하지 않으려면 통째로 스킵해야 한다.
+fn field_header(g: &mut gpu::GpuRenderer, x: f32, y: f32, clip: f32, title: &str, help: &[&str]) -> f32 {
+    if y > clip {
+        section_label(g, x, y, title);
+    }
+    if help.is_empty() {
+        return y + 32.0;
+    }
+    let mut hy = y + 24.0;
+    for line in help {
+        if hy > clip {
+            help_text(g, x, hy, line);
+        }
+        hy += 18.0;
+    }
+    hy + 10.0
+}
+
+/// 세그먼트 컨트롤 — 하나의 트랙(pill) 안에 옵션 칸들이 붙어 있는 형태. 선택된
+/// 칸만 accent 로 채우고, hover 칸은 옅게 밝힌다. 칸 폭은 라벨을 **bold** 로 재서
+/// (선택 시 bold 라 더 넓어짐) 글자가 칸 밖으로 넘치지 않게 한다 — 예전엔 non-bold
+/// 로 재고 bold 로 그려 선택 칸 글자가 잘렸다. 각 칸이 클릭 rect 로 등록된다.
+fn segmented(
+    g: &mut gpu::GpuRenderer,
+    rects: &mut Vec<(SettingsAction, Rect)>,
+    x: f32,
+    y: f32,
+    cells: &[(&str, bool, SettingsAction)],
+    cursor: (f32, f32),
+) {
+    let pad = 4.0_f32; // 트랙 안쪽 여백 (칸이 트랙 테두리에 붙지 않게)
+    let cell_pad = 16.0_f32; // 칸 좌우 텍스트 여백
+    let widths: Vec<f32> = cells
+        .iter()
+        .map(|(label, _, _)| g.measure_chrome_text(label, 13.0, true) + cell_pad * 2.0)
+        .collect();
+    let total: f32 = pad * 2.0 + widths.iter().sum::<f32>();
+    round_rect(g, x, y, total, SEG_H, theme::RADIUS_MD, theme::surface_active());
+    let mut cxp = x + pad;
+    let cell_h = SEG_H - pad * 2.0;
+    for (i, (label, sel, action)) in cells.iter().enumerate() {
+        let cw = widths[i];
+        let cell = (cxp, y + pad, cw, cell_h);
+        let hover = inside(cell, cursor);
+        if *sel {
+            round_rect(g, cell.0, cell.1, cell.2, cell.3, theme::RADIUS_SM, theme::accent());
+        } else if hover {
+            round_rect(g, cell.0, cell.1, cell.2, cell.3, theme::RADIUS_SM, theme::surface_hover());
+        }
+        let tw = g.measure_chrome_text(label, 13.0, *sel);
+        g.draw_text(
+            cxp + (cw - tw) / 2.0,
+            y + (SEG_H - 13.0) / 2.0 - 1.0,
+            label,
+            gpu::DrawOpts {
+                font_size: 13.0,
+                color: if *sel { theme::bg() } else { theme::text_dim() },
+                bold: *sel,
+                italic: false,
+            },
+        );
+        // Hit rect = full track height so the whole cell is clickable.
+        rects.push((action.clone(), (cxp, y, cw, SEG_H)));
+        cxp += cw;
+    }
 }
 
 fn section_label(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
@@ -1340,10 +1272,13 @@ fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, f32)) {
     round_rect(g, kx, r.1 + 4.0, knob, knob, knob / 2.0, theme::text());
 }
 
+/// 단일라인 텍스트 필드. `caret` 는 문자(char) 인덱스라 문자열 중간에도 캐럿을
+/// 그린다 — 캐럿 앞 부분 폭을 재서 그 x 에 1.5px 세로 막대를 세운다.
 fn text_field(
     g: &mut gpu::GpuRenderer,
     r: Rect,
     text: &str,
+    caret: usize,
     focused: bool,
     caret_on: bool,
     cursor: (f32, f32),
@@ -1364,14 +1299,16 @@ fn text_field(
     g.rect(r.0 + r.2 - 1.0, r.1, 1.0, r.3, border);
     let tx = r.0 + 12.0;
     let ty = r.1 + (r.3 - 13.0) / 2.0;
-    let adv = g.draw_text(
+    g.draw_text(
         tx,
         ty,
         text,
         gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
     );
     if focused && caret_on {
-        g.rect(tx + adv + 1.0, r.1 + 7.0, 1.5, r.3 - 14.0, theme::text());
+        let pre: String = text.chars().take(caret).collect();
+        let cx = tx + g.measure_chrome_text(&pre, 13.0, false);
+        g.rect(cx, r.1 + 7.0, 1.5, r.3 - 14.0, theme::text());
     }
 }
 
@@ -1405,6 +1342,22 @@ mod textedit_tests {
             left(&mut c); // 0 밑으로 안 감
         }
         assert_eq!(c, 0);
+    }
+
+    #[test]
+    fn mid_string_paste_and_delete() {
+        // 캐럿을 중간에 두고 여러 글자(붙여넣기)를 순서대로 삽입 → 캐럿이 삽입
+        // 문자열 끝으로 따라간다. 이어서 Backspace 로 중간 글자만 지운다.
+        let (mut s, mut c) = ("ac".to_string(), 1usize); // a|c
+        for ch in "-경로-".chars() {
+            insert(&mut s, &mut c, ch);
+        }
+        assert_eq!((s.as_str(), c), ("a-경로-c", 5));
+        backspace(&mut s, &mut c); // '-' 삭제 → a-경로|c
+        assert_eq!((s.as_str(), c), ("a-경로c", 4));
+        left(&mut c); // a-경|로c
+        backspace(&mut s, &mut c); // '경' 삭제 → a-|로c
+        assert_eq!((s.as_str(), c), ("a-로c", 2));
     }
 
     #[test]
