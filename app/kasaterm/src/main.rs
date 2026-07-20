@@ -5139,6 +5139,17 @@ mod tests {
             App::count_claude_panes(&serde_json::json!({ "sessions": [] })),
             0
         );
+        // 캐릭터가 있으면 was_claude 감지가 실패(순수 셸로 오인)해도 복원 대상으로
+        // 카운트한다 — 오케스트레이터 pane 이 저장 순간 claude 미감지돼도 되살린다.
+        let char_only = serde_json::json!({ "sessions": [{ "windows": [{
+            "leaf": { "cwd": "/repo", "was_claude": false, "session_id": null, "character": "아루" }
+        }]}]});
+        assert_eq!(App::count_claude_panes(&char_only), 1);
+        // 빈 문자열 character 는 캐릭터 미배정이라 카운트하지 않는다.
+        let empty_char = serde_json::json!({ "sessions": [{ "windows": [{
+            "leaf": { "cwd": "/repo", "was_claude": false, "character": "" }
+        }]}]});
+        assert_eq!(App::count_claude_panes(&empty_char), 0);
     }
 
     #[test]

@@ -1736,6 +1736,25 @@ impl App {
                         .map(scrollback_lines)
                         .unwrap_or_default();
                     obj.insert("scrollback".to_string(), serde_json::json!(sb));
+                    // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
+                    // claude 프로세스 감지(was_claude)와 무관하게 살아있으므로, 감지가
+                    // 실패해도 캐릭터는 여기서 확실히 저장한다. 캐릭터가 있으면 이 pane 은
+                    // claude 학생이었다는 확증이라, session_id 가 감지 실패로 비어 있으면
+                    // cwd 최신 jsonl 로 폴백해 --resume 대상(대화)까지 살린다.
+                    if let Some(name) = ws.pane_character.get(pane_id) {
+                        obj.insert("character".to_string(), serde_json::json!(name));
+                        if obj.get("session_id").map_or(true, |v| v.is_null()) {
+                            if let Some(sid) = obj
+                                .get("cwd")
+                                .and_then(|c| c.as_str())
+                                .and_then(|c| {
+                                    socket::latest_claude_session_id(std::path::Path::new(c))
+                                })
+                            {
+                                obj.insert("session_id".to_string(), serde_json::json!(sid));
+                            }
+                        }
+                    }
                 }
                 serde_json::json!({ "leaf": rec })
             }
@@ -1759,11 +1778,17 @@ impl App {
     pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
             if let Some(leaf) = node.get("leaf") {
-                if leaf
+                let was_claude = leaf
                     .get("was_claude")
                     .and_then(|b| b.as_bool())
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(false);
+                // 캐릭터가 있으면 claude 학생 pane 이었다는 확증 — was_claude 감지가
+                // 실패(순수 셸로 오인)해도 복원 대상으로 카운트해 프롬프트를 띄운다.
+                let has_char = leaf
+                    .get("character")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                if was_claude || has_char {
                     *n += 1;
                 }
             } else if let Some(split) = node.get("split") {
@@ -1926,6 +1951,20 @@ impl App {
             .get("session_id")
             .and_then(|s| s.as_str())
             .map(|s| s.to_string());
+        // 저장된 캐릭터를 되살린다(거노: 재시작하면 랜덤 둔갑). pending 으로 세팅하면
+        // assign_character_env 가 랜덤 대신 이걸 재사용하고, 저장 세션 id 가 있으면 그
+        // 원본 sid 에 캐릭터를 다시 bind 해 --resume 후 shim 교정·다음 재시작까지 영속화한다.
+        let saved_char = rec
+            .get("character")
+            .and_then(|c| c.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        if let Some(ref c) = saved_char {
+            self.pending_character = Some(c.clone());
+            if let Some(ref sid) = session_id {
+                let _ = kasa_mcp::character::bind_session_character(sid, c);
+            }
+        }
         let scrollback: Vec<String> = rec
             .get("scrollback")
             .and_then(|v| v.as_array())
@@ -1963,7 +2002,9 @@ impl App {
         // claude when the pane ran claude but no session id was captured.
         // Plain-shell panes restore to just their shell + scrollback. 900ms
         // mirrors swap_character's wait for the shell prompt before injection.
-        if was_claude {
+        // was_claude 감지가 실패했어도 캐릭터+저장 sid 가 있으면 claude 학생 pane 이었던
+        // 것이라 --resume 으로 대화를 복원한다(감지 실패 시 셸만 뜨던 회귀 차단).
+        if was_claude || (saved_char.is_some() && session_id.is_some()) {
             let cmd = match session_id {
                 Some(sid) => format!("claude --resume {sid}\r"),
                 None => "claude\r".to_string(),

@@ -2313,7 +2313,7 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
 /// claude stores sessions under ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl,
 /// where the abs cwd is encoded by replacing `/` and `.` with `-`. The newest
 /// .jsonl there is the session the pane was last on.
-fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
+pub(crate) fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
     let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
     let dir = kasa_socket::home_dir()?
         .join(".claude/projects")
