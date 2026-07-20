@@ -1858,6 +1858,23 @@ pub fn write_session_state(state: &serde_json::Value) {
     }
 }
 
+/// Read the restore state written by `write_session_state`. `None` when the
+/// file is absent or unparseable — the caller then boots a fresh session with
+/// no restore prompt.
+pub fn read_session_state() -> Option<serde_json::Value> {
+    let path = session_file_path()?;
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Discard the saved restore state (user chose "새로 시작"). Best-effort — a
+/// missing file is already the desired end state.
+pub fn clear_session_state() {
+    if let Some(path) = session_file_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 pub fn session_file_path() -> Option<std::path::PathBuf> {
     // Override lets a debug instance keep its restore state out of the daily
     // app's shared file (and lets users relocate it).

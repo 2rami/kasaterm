@@ -126,6 +126,10 @@ pub(crate) struct FileTreeState {
     pub(crate) hover: Option<std::path::PathBuf>,
     pub(crate) scroll: f32,
     pub(crate) rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
+    /// "빠른 파일" 고정 섹션(트리 최상단)의 행 hit rect: (파일 경로, 논리 rect).
+    /// 개인/프로젝트 CLAUDE.md·프로젝트 MEMORY.md 로의 원클릭. 스크롤과 무관하게
+    /// 고정 위치라 별도 벡터로 둔다(스크롤하는 `rects` 와 분리). 매 paint 재생성.
+    pub(crate) quick_rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))>,
     pub(crate) visible: bool,
     pub(crate) w_logical: f32,
     pub(crate) resize: Option<(f32, f32)>,

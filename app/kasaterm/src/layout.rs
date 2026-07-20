@@ -1296,6 +1296,54 @@ for p in glob.glob(os.path.join(d, '*.json')):
         self.drag_live_applied = None;
         applied
     }
+
+    // ── Phase 3 tear-off ─────────────────────────────────────────────────────
+
+    /// tab-drag 를 창(콘텐츠 사각형) 밖에서 놓았는가 — 파일 탭이면 별도창으로 뜯어내는
+    /// 트리거. 창 안(패널 body 포함)에서 놓으면 기존 split/dock 경로가 처리하므로,
+    /// 여기서 true 는 오직 커서가 창 밖으로 나갔을 때뿐이다. 순수 함수(단위테스트 대상).
+    pub(crate) fn drag_left_window(px: f32, py: f32, win_w: f32, win_h: f32) -> bool {
+        px < 0.0 || py < 0.0 || px > win_w || py > win_h
+    }
+
+    /// 메인 창 client 영역의 논리 크기(px). tear-off 판정용.
+    pub(crate) fn logical_win_size(&self) -> (f32, f32) {
+        let scale = self.effective_scale();
+        self.window
+            .as_ref()
+            .map(|w| {
+                let s = w.inner_size();
+                (s.width as f32 / scale, s.height as f32 / scale)
+            })
+            .unwrap_or((0.0, 0.0))
+    }
+
+    /// 현재 커서(창-로컬 논리좌표)를 스크린 물리좌표로 환산 — tear-off 별도창을 커서
+    /// 밑에 띄우기 위한 위치. client 영역 원점 + 커서*scale, 살짝 위/왼쪽으로 올려
+    /// 뜯긴 탭 제목이 포인터 바로 밑에 오게 한다.
+    pub(crate) fn cursor_screen_phys(&self) -> Option<winit::dpi::PhysicalPosition<i32>> {
+        let w = self.window.as_ref()?;
+        let scale = self.effective_scale() as f64;
+        let origin = w.inner_position().or_else(|_| w.outer_position()).ok()?;
+        let x = origin.x + (self.cursor_px.0 as f64 * scale) as i32 - 40;
+        let y = origin.y + (self.cursor_px.1 as f64 * scale) as i32 - 12;
+        Some(winit::dpi::PhysicalPosition::new(x, y))
+    }
+
+    /// 이 pane 의 tab_idx 탭이 파일(Markdown) 탭인가 — tear-off 는 파일 탭만(터미널
+    /// PTY pane 은 범위 밖).
+    pub(crate) fn tab_is_file(&self, pane: &str, tab_idx: usize) -> bool {
+        self.ws
+            .lock()
+            .ok()
+            .and_then(|w| {
+                w.panes
+                    .get(pane)
+                    .and_then(|p| p.tabs.get(tab_idx))
+                    .map(|t| matches!(t.content, PaneContent::Markdown(_)))
+            })
+            .unwrap_or(false)
+    }
     /// Detach `moving` from the active window and graft it beside `target`,
     /// which lives in window `dst_idx`'s parked tree. The PTY stays alive — only
     /// the BSP trees are rewired. If the active window held `moving` as its sole

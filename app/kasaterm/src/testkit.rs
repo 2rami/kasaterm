@@ -148,13 +148,13 @@ impl App {
         let raised = self.confirm_or_close_window();
         eprintln!("[autoconfirm] confirm_or_close_window -> raised={raised}");
     }
-    /// Headless settings-screen repro: open the settings overlay after
-    /// `KASATERM_AUTOSETTINGS_MS`, on the category named in
-    /// `KASATERM_AUTOSETTINGS` ("appearance" / "shell" / "claude", default
-    /// General), so a background run can screenshot it without a click. State
-    /// is function-local statics — deliberately no App field (parallel-work
-    /// rule: struct App stays untouched).
-    pub(crate) fn run_pending_autosettings(&mut self) {
+    /// Headless settings-window repro: open the settings *window* (auxwin) after
+    /// `KASATERM_AUTOSETTINGS_MS`, on the category named in `KASATERM_AUTOSETTINGS`
+    /// ("appearance" / "shell" / "claude" / "students", default General), then arm
+    /// a self-capture of that aux surface at +1500ms (path `KASATERM_AUTOSETTINGS_CAP`,
+    /// default scratchpad `settings-window.png`). Function-local statics — no App
+    /// field (parallel-work rule: struct App stays untouched).
+    pub(crate) fn run_pending_autosettings(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;
         static DUE: OnceLock<Option<Instant>> = OnceLock::new();
@@ -170,16 +170,33 @@ impl App {
             return;
         }
         FIRED.store(true, Ordering::Relaxed);
-        let cat = std::env::var("KASATERM_AUTOSETTINGS").unwrap_or_default();
-        self.settings_cat = match cat.as_str() {
+        let cat_env = std::env::var("KASATERM_AUTOSETTINGS").unwrap_or_default();
+        let cat = match cat_env.as_str() {
             "appearance" => SettingsCat::Appearance,
             "shell" => SettingsCat::Shell,
             "claude" => SettingsCat::Claude,
             "students" => SettingsCat::Students,
             _ => SettingsCat::General,
         };
-        eprintln!("[autosettings] open_settings cat={cat}");
-        self.open_settings();
+        // 딥링크 검증: KASATERM_AUTOSETTINGS_STUDENT 로 특정 학생 선택 상태(=프사
+        // 클릭 결과)를 헤드리스로 재현 — persona 편집기가 뜬 화면을 캡처한다.
+        let student = std::env::var("KASATERM_AUTOSETTINGS_STUDENT")
+            .ok()
+            .filter(|s| !s.is_empty());
+        eprintln!("[autosettings] open settings window cat={cat_env} student={student:?}");
+        self.open_settings_window(event_loop, Some(cat), student);
+        // Aux capture (main autocapture only reaches the main window). +1500ms so
+        // the new window renders a full frame first.
+        let cap = std::env::var("KASATERM_AUTOSETTINGS_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("settings-window.png")
+                .to_string_lossy()
+                .into_owned()
+        });
+        if let Some(a) = self.settings_window_idx().and_then(|i| self.aux_windows.get_mut(i)) {
+            a.pending_capture =
+                Some((Instant::now() + std::time::Duration::from_millis(1500), cap));
+        }
     }
     /// Headless raw-editor selection seed: KASATERM_TEST_MD_SELECT="al,ac,cl,cc"
     /// plants a selection (anchor line/col → cursor line/col) on the active
@@ -639,5 +656,63 @@ impl App {
         self.autotabs_n = 0;
         self.autotabs_at = None;
         self.chrome_dirty = true;
+    }
+
+    /// Headless pop-out editor repro: `KASATERM_TEST_POPOUT=<file path>` opens
+    /// that file in a separate wgpu editor window after `KASATERM_TEST_POPOUT_MS`
+    /// (default 6000), then arms a self-capture of the *aux* surface at +1500ms
+    /// (path `KASATERM_TEST_POPOUT_CAP`, default scratchpad `auxwin-popout.png`).
+    /// Function-local statics — no App field (parallel-work rule).
+    pub(crate) fn run_pending_auxpopout(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_TEST_POPOUT").ok().map(|_| {
+                let ms: u64 = std::env::var("KASATERM_TEST_POPOUT_MS")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(6000);
+                Instant::now() + std::time::Duration::from_millis(ms)
+            })
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let path = std::env::var("KASATERM_TEST_POPOUT").unwrap_or_default();
+        eprintln!("[auxpopout] pop out {path}");
+        self.popout_file_window(std::path::PathBuf::from(path), event_loop);
+        // Arm the aux surface capture (main autocapture only reaches the main
+        // window). +1500ms so the new window has rendered a full frame first.
+        let cap = std::env::var("KASATERM_TEST_POPOUT_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("auxwin-popout.png")
+                .to_string_lossy()
+                .into_owned()
+        });
+        if let Some(a) = self.aux_windows.last_mut() {
+            a.pending_capture =
+                Some((Instant::now() + std::time::Duration::from_millis(1500), cap));
+        }
+    }
+
+    /// Arm any due aux-window self-capture: set its gpu `capture_next` and wake
+    /// the window so the next frame reads it back. Mirrors the main
+    /// `pending_capture` drain but per aux window (each owns its own surface).
+    pub(crate) fn drain_aux_captures(&mut self) {
+        let now = Instant::now();
+        for a in self.aux_windows.iter_mut() {
+            if let Some((at, _)) = a.pending_capture.as_ref() {
+                if now >= *at {
+                    let (_, path) = a.pending_capture.take().unwrap();
+                    eprintln!("[auxpopout] capture → {path}");
+                    a.gpu.capture_next = Some(path);
+                    a.window.request_redraw();
+                }
+            }
+        }
     }
 }

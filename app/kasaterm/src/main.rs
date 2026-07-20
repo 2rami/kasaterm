@@ -25,6 +25,7 @@ mod testkit;
 mod session;
 mod layout;
 mod markdown;
+mod auxwin;
 mod input;
 mod settings;
 mod syntax;
@@ -1452,6 +1453,16 @@ struct ConfirmClose {
 enum ConfirmBtn {
     Cancel,
     Close,
+}
+
+/// The two buttons in the Chrome-style session-restore prompt shown at launch
+/// when a saved layout is found.
+#[derive(Clone, Copy, PartialEq)]
+enum RestoreBtn {
+    /// Rebuild the saved layout and resume each pane's claude session.
+    Restore,
+    /// Discard the saved state and keep the fresh single-pane session.
+    Fresh,
 }
 
 /// A login shell (vs. a real foreground job like claude / vim / a build).
@@ -3009,6 +3020,10 @@ struct App {
     pane_tab_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
     /// Per-tab × close hit rects: (pane id, tab index, logical rect).
     pane_tab_close_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
+    /// Per-tab pop-out (external-link) hit rects for file tabs: (pane id, tab
+    /// index, logical rect). Click moves that tab's editor into its own wgpu
+    /// window (auxwin.rs). Rebuilt each header paint.
+    pane_tab_popout_rects: Vec<(String, usize, (f32, f32, f32, f32))>,
     /// "+" new-tab button hit rect per pane: (pane id, logical rect).
     pane_plus_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// Panes folded into the active session's dock (bottom-bar chips). Mirror of
@@ -3132,6 +3147,12 @@ struct App {
     confirm_close: Option<ConfirmClose>,
     /// Confirm-modal button hit rects, refreshed each frame: `(btn, rect)`.
     confirm_btn_rects: Vec<(ConfirmBtn, (f32, f32, f32, f32))>,
+    /// Chrome-style restore prompt shown at launch: the saved session state
+    /// awaiting the user's 복원/새로 시작 decision. While `Some`, a modal is
+    /// painted over the fresh session and swallows input.
+    restore_prompt: Option<serde_json::Value>,
+    /// Restore-prompt button hit rects, refreshed each frame: `(btn, rect)`.
+    restore_btn_rects: Vec<(RestoreBtn, (f32, f32, f32, f32))>,
     /// Currently hovered in-pane tab `(pane_id, tab_idx)`. Drives the
     /// hover-only × and brighter text on inactive tabs.
     pane_tab_hover: Option<(String, usize)>,
@@ -3217,6 +3238,11 @@ struct App {
     /// Pane id → instant a completion notification flashed its header, so the
     /// render pass can pulse it for a beat then let it settle.
     notify_flash: HashMap<String, std::time::Instant>,
+    /// Panes whose last turn finished and the user hasn't typed into since —
+    /// drives the student's cheer (arms-up) standing pose. Set on turn
+    /// completion, cleared on the next `forward_key` into that pane, so the
+    /// cheer persists until the user re-engages (not a brief flash).
+    turn_done_panes: std::collections::HashSet<String>,
     /// Window indices with an *unseen* notification (a pane finished / needs
     /// attention while that window was in the background). The sidebar tab
     /// pulses until the user switches to that window, which clears the entry —
@@ -3342,13 +3368,23 @@ struct App {
     set_claude_model: String,
     set_claude_effort: String,
     set_claude_extra: String,
-    /// True when opening settings auto-expanded a collapsed sidebar, so closing
-    /// can restore it (but leaves a sidebar the user opened themselves alone).
-    settings_expanded_sidebar: bool,
     /// Which form text field has focus (cwd custom path / shell), if any.
     settings_input: Option<SettingsInput>,
+    /// Caret (char index) for the focused single-line settings field
+    /// (cwd path / shell / claude extra). Kept apart from `students_caret`
+    /// (the persona multiline caret): only one is ever focused at a time, but
+    /// sharing one store made the caret jump when focus crossed between a
+    /// single-line field and the persona box.
+    settings_caret: usize,
     /// Clickable targets collected during the settings paint, for hit-testing.
     settings_rects: Vec<(SettingsAction, (f32, f32, f32, f32))>,
+    /// statusline 학생 프사 클릭 hit-test: (학생 이름, rect). 렌더가 매 프레임
+    /// 재구축 → 프사 클릭 시 학생 설정 별도창(Students 카테고리 + 그 학생 선택)을
+    /// 연다. 프사 hover 확대와 같은 slot(profile_face_hits)에서 나온다.
+    face_hit_rects: Vec<(String, (f32, f32, f32, f32))>,
+    /// 커서가 statusline 프사 위인지 — 진입/이탈 시에만 재페인트해 hover 확대
+    /// 팝업이 뜨고 사라지게 한다(이벤트 기반 루프라 이동만으론 재렌더 안 됨).
+    face_hover: bool,
     /// Students 카테고리 인라인 편집: 선택된 캐릭터(이름) + persona 편집 버퍼 +
     /// 캐럿(문자 인덱스). 선택 시 raw_persona 를 버퍼로 로드하고, blur/선택변경 시
     /// characters.json 에 flush 한다.
@@ -3491,6 +3527,9 @@ struct App {
     /// 쌓아두고 start_pty 직후 flush 한다(빈손이면 무비용). 앱 켜진 채 더블클릭은
     /// 디퍼 없이 바로 `open_markdown_window`.
     pending_open_md: Vec<std::path::PathBuf>,
+    /// 편집기/파일뷰를 떼어낸 별도 OS 창들(각자 자체 wgpu GpuRenderer). 메인 창과
+    /// 독립적으로 렌더/입력 라우팅되며 window id 로 handler 가 분기한다(auxwin.rs).
+    aux_windows: Vec<auxwin::AuxWindow>,
 }
 
 impl App {
@@ -3551,6 +3590,7 @@ impl App {
             md_body_rects: HashMap::new(),
             pane_tab_rects: Vec::new(),
             pane_tab_close_rects: Vec::new(),
+            pane_tab_popout_rects: Vec::new(),
             pane_plus_rects: Vec::new(),
             docked: Vec::new(),
             dock_chip_rects: Vec::new(),
@@ -3584,6 +3624,8 @@ impl App {
             text_cursor_shown: false,
             confirm_close: None,
             confirm_btn_rects: Vec::new(),
+            restore_prompt: None,
+            restore_btn_rects: Vec::new(),
             pane_tab_hover: None,
             image_btn_rects: Vec::new(),
             sidebar_w_logical: SIDEBAR_W,
@@ -3602,6 +3644,7 @@ impl App {
             pane_activity: HashMap::new(),
             window_focused: true,
             notify_flash: HashMap::new(),
+            turn_done_panes: std::collections::HashSet::new(),
             window_alert: std::collections::HashSet::new(),
             unread_panes: std::collections::HashSet::new(),
             dock_badge_n: 0,
@@ -3633,20 +3676,21 @@ impl App {
             pane_cwd_check: None,
             show_pane_numbers: false,
             file_tree: state::FileTreeState {
-                visible: socket::read_file_tree_default(),
+                // Headless test override (KASATERM_TEST_FILETREE) forces the
+                // sidebar open at launch so quick-files/tree captures render
+                // without needing a chrome click the PTY-only autosend can't do.
+                visible: socket::read_file_tree_default()
+                    || std::env::var("KASATERM_TEST_FILETREE").is_ok(),
                 w_logical: FILE_TREE_W,
                 ..Default::default()
             },
             git_ignore_req: std::sync::Arc::new(std::sync::Mutex::new(None)),
             git_ignore_started: false,
-            settings_open: std::env::var("KASATERM_OPEN_SETTINGS").is_ok(),
-            settings_cat: match std::env::var("KASATERM_OPEN_SETTINGS").as_deref() {
-                Ok("shell") => SettingsCat::Shell,
-                Ok("claude") => SettingsCat::Claude,
-                Ok("appearance") => SettingsCat::Appearance,
-                Ok("students") => SettingsCat::Students,
-                _ => SettingsCat::General,
-            },
+            // 설정은 별도창(auxwin)이라 부팅 시엔 항상 닫힘 — settings_open 은
+            // 그 창의 존재와 동기화되는 플래그. 헤드리스 초기 열림은 이제
+            // KASATERM_AUTOSETTINGS(testkit)가 event_loop 위에서 담당한다.
+            settings_open: false,
+            settings_cat: SettingsCat::General,
             set_cwd_mode: socket::read_default_cwd_mode(),
             set_file_tree_default: socket::read_file_tree_default(),
             set_footer_default: socket::read_footer_default(),
@@ -3656,7 +3700,6 @@ impl App {
             set_claude_model: socket::read_claude_model(),
             set_claude_effort: socket::read_claude_effort(),
             set_claude_extra: socket::read_claude_extra(),
-            settings_expanded_sidebar: false,
             settings_input: None,
             settings_rects: Vec::new(),
             // KASATERM_TEST_STUDENT=<이름> 이면 그 캐릭터를 선택 상태로 시드해
@@ -3671,6 +3714,9 @@ impl App {
                 })
                 .unwrap_or_default(),
             students_caret: 0,
+            settings_caret: 0,
+            face_hit_rects: Vec::new(),
+            face_hover: false,
             window_frame_save_due: None,
             md_select_drag: None,
             // KASATERM_TEST_SETTINGS_SCROLL: 헤드리스 스크린샷으로 폼 스크롤을
@@ -3733,6 +3779,7 @@ impl App {
             // 그 외/키없음은 side 로 폴백한다.
             tabs_on_top: socket::read_tab_position() == "top",
             pending_open_md: Vec::new(),
+            aux_windows: Vec::new(),
         }
     }
 
@@ -4348,11 +4395,22 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         format!(
             "AGENT=\"\"; ACOLOR=\"\"; TSID=\"$SID\"; prev=\"\"\n\
 for a in \"$@\"; do case \"$prev\" in --session-id|--resume) case \"$a\" in -*) ;; *) TSID=\"$a\" ;; esac ;; esac; prev=\"$a\"; done\n\
-# id 없는 --resume(피커 모드)도 트리플 부착 — 종전엔 TSID 부재로 무팀 부팅이라 피커에서\n\
-# 팀 세션을 골라도 팀모드가 풀렸다(거노 실사고, /resume 가시성 복원 후 표면화). --bg 와\n\
-# 같은 비-hex 랜덤 접미사(bridge 4hex 매칭 오배달 회피)로 이름만 유일화. --continue 는\n\
-# 종전 제외 유지.\n\
-case \" $* \" in *\" --resume \"*) [ -z \"$TSID\" ] && BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz') ;; esac\n\
+# id 없는 --resume(피커 모드)·--continue 도 트리플 부착 — TSID 부재로 무팀 부팅되면\n\
+# SendMessage 송수신이 통째로 단절된다(피커: /resume 가시성 복원 후 표면화, --continue:\n\
+# 07-19 앱 재시작 복원 실사고). 피커는 --bg 와 같은 비-hex 랜덤 접미사(bridge 4hex 매칭\n\
+# 오배달 회피)로 이름만 유일화. --continue 는 claude 와 같은 기준(cwd 프로젝트 최신\n\
+# transcript)으로 sid 를 추론해 이름(캐릭터-sid4)·캐릭터 정합 교정까지 연속 유지하고,\n\
+# 추론 실패(파일 없음/비 uuid)만 랜덤 접미사 폴백.\n\
+case \" $* \" in\n\
+*\" --continue \"*|*\" -c \"*) if [ -z \"$TSID\" ]; then\n\
+  RSLUG=$(printf %s \"$PWD\" | sed 's![/.]!-!g')\n\
+  LATEST=$(ls -t \"$HOME/.claude/projects/$RSLUG\"/*.jsonl 2>/dev/null | head -1)\n\
+  [ -n \"$LATEST\" ] && TSID=$(basename \"$LATEST\" .jsonl)\n\
+  case \"$TSID\" in ????????-????-????-????-????????????) ;; *) TSID=\"\" ;; esac\n\
+  [ -z \"$TSID\" ] && BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz')\n\
+fi ;;\n\
+*\" --resume \"*) [ -z \"$TSID\" ] && BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz') ;;\n\
+esac\n\
 # 사용자 주도 resume 마커 — statusline 의 ⑂bg 배지가 anchor 불일치 휴리스틱이라\n\
 # resume 세션 전부에 오발화한다(거노). id 있으면 그 sid 를, 피커/continue 는 플래그를\n\
 # export 해 statusline 이 포크/attach 뷰(마커 없음)와 구분하게 한다. anchor\n\
@@ -5037,6 +5095,52 @@ mod tests {
     }
 
     #[test]
+    fn count_claude_panes_walks_nested_splits_and_windows() {
+        // Mirrors save_session_state's schema: nested split leaves + a second
+        // window, mixed was_claude. Only claude leaves count; a null leaf
+        // (unresolved pane at save) and a plain shell are ignored.
+        let leaf = |claude: bool| {
+            serde_json::json!({ "leaf": {
+                "cwd": "/repo",
+                "was_claude": claude,
+                "session_id": if claude { Some("abcd-1234") } else { None },
+                "scrollback": ["$ claude", "hello"],
+            }})
+        };
+        let state = serde_json::json!({
+            "active_session": 0,
+            "sessions": [{
+                "active_window": 0,
+                "windows": [
+                    // Window 0: split( claude , split( shell , claude ) ) = 2 claude
+                    { "split": {
+                        "dir": "h", "ratio": 0.5,
+                        "a": leaf(true),
+                        "b": { "split": {
+                            "dir": "v", "ratio": 0.4,
+                            "a": leaf(false),
+                            "b": leaf(true),
+                        }},
+                    }},
+                    // Window 1: a lone claude leaf + a null leaf (dropped)
+                    { "split": {
+                        "dir": "h", "ratio": 0.5,
+                        "a": leaf(true),
+                        "b": { "leaf": serde_json::Value::Null },
+                    }},
+                ],
+            }],
+        });
+        assert_eq!(App::count_claude_panes(&state), 3);
+        // Degenerate inputs never panic and count zero.
+        assert_eq!(App::count_claude_panes(&serde_json::json!({})), 0);
+        assert_eq!(
+            App::count_claude_panes(&serde_json::json!({ "sessions": [] })),
+            0
+        );
+    }
+
+    #[test]
     fn teammate_case_arms_maps_characters_to_ascii_idents() {
         // 레포의 characters.json 기준 — 없으면(외부 빌드 환경) 스킵.
         let arms = teammate_case_arms();
@@ -5250,5 +5354,20 @@ mod tests {
         // block = (start, end, left, right) inclusive, full CJK run is cols 0..=7.
         let out = extract_block(&[row], (0, 0, 0, 7));
         assert_eq!(out, "코드복사");
+    }
+
+    #[test]
+    fn tear_off_only_fires_outside_the_window() {
+        // Phase 3: 파일 탭 tear-off 트리거는 커서가 창 콘텐츠 사각형 밖일 때만.
+        // 창 안(패널 body·탭 스트립 포함) 어디에 놓든 false → 기존 split/dock 경로가 처리.
+        let (w, h) = (1200.0_f32, 800.0_f32);
+        assert!(!App::drag_left_window(0.0, 0.0, w, h)); // 좌상단 모서리 = 안
+        assert!(!App::drag_left_window(600.0, 400.0, w, h)); // 정중앙 = 안
+        assert!(!App::drag_left_window(w, h, w, h)); // 우하단 모서리(경계) = 안
+        // 네 방향 밖 — 각각 tear-off.
+        assert!(App::drag_left_window(-1.0, 400.0, w, h)); // 왼쪽 밖
+        assert!(App::drag_left_window(w + 1.0, 400.0, w, h)); // 오른쪽 밖
+        assert!(App::drag_left_window(600.0, -1.0, w, h)); // 위쪽 밖(탭바 위로 뜯음)
+        assert!(App::drag_left_window(600.0, h + 1.0, w, h)); // 아래쪽 밖
     }
 }

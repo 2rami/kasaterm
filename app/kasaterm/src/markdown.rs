@@ -141,6 +141,368 @@ impl MarkdownPane {
         self.last_edit = EditKind::Break;
         self.modified = true;
     }
+
+    // ── Pure buffer-mutation core (shared by the active-pane path in `impl App`
+    // below and the pop-out editor window in auxwin.rs). These operate only on
+    // the pane's own fields — no `App`/`ws` — so both drivers reuse identical
+    // edit semantics; the driver owns undo/caret-scroll wiring around them.
+
+    /// Force raw-editor mode and seed the edit buffer from the doc source if it
+    /// isn't populated yet (a `.md` opened in Render mode carries no lines). A
+    /// pop-out window always edits raw, so this runs on the way out.
+    pub(crate) fn ensure_raw_seeded(&mut self) {
+        if !self.raw_mode {
+            self.raw_mode = true;
+        }
+        if self.edit_lines.is_empty() {
+            self.edit_lines = self.doc.raw.split('\n').map(String::from).collect();
+            if self.edit_lines.is_empty() {
+                self.edit_lines.push(String::new());
+            }
+        }
+    }
+
+    /// Insert `text` (a committed Hangul syllable or a single typed segment) at
+    /// the caret as one typing run — replacing any active selection. No-op on
+    /// empty text.
+    pub(crate) fn insert_at_caret(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.edit_lines.is_empty() {
+            self.edit_lines.push(String::new());
+        }
+        // Typing over a selection replaces it — delete + insert as one undo
+        // unit (the Other snapshot covers both).
+        if self.sel_range().is_some() {
+            self.push_undo(EditKind::Other);
+            self.delete_selection();
+        } else {
+            self.push_undo(EditKind::Typing);
+        }
+        let line = self.cur_line.min(self.edit_lines.len() - 1);
+        let col = self.cur_col.min(self.edit_lines[line].chars().count());
+        let s = &mut self.edit_lines[line];
+        let b = char_byte(s, col);
+        s.insert_str(b, text);
+        self.cur_line = line;
+        self.cur_col = col + text.chars().count();
+        self.modified = true;
+    }
+
+    /// Apply one editing/motion key to the buffer. `shift`/`alt` are the live
+    /// modifier state; `page_lines` is the pre-computed PageUp/Down step (the
+    /// driver measures it against its own renderer). Selection, undo runs, and
+    /// caret math match the terminal-window editor exactly.
+    pub(crate) fn apply_edit_key(
+        &mut self,
+        event: &KeyEvent,
+        shift: bool,
+        alt: bool,
+        page_lines: usize,
+    ) {
+        use winit::keyboard::{Key, NamedKey};
+        if self.edit_lines.is_empty() {
+            self.edit_lines.push(String::new());
+        }
+        let is_motion = matches!(
+            &event.logical_key,
+            Key::Named(
+                NamedKey::ArrowLeft
+                    | NamedKey::ArrowRight
+                    | NamedKey::ArrowUp
+                    | NamedKey::ArrowDown
+                    | NamedKey::Home
+                    | NamedKey::End
+                    | NamedKey::PageUp
+                    | NamedKey::PageDown
+            )
+        );
+        // Shift+motion grows a selection from the current caret; plain motion
+        // drops it (Left/Right collapse to its edges first).
+        if is_motion && shift && self.sel_anchor.is_none() {
+            self.sel_anchor = Some((self.cur_line, self.cur_col));
+        }
+        let sel = self.sel_range();
+        let mut line = self.cur_line.min(self.edit_lines.len() - 1);
+        let mut col = self.cur_col.min(self.edit_lines[line].chars().count());
+        // 버퍼를 실제로 바꾼 키만 modified 로 기록 — 방향키는 저장할 게 없다.
+        let mut edited = false;
+        match &event.logical_key {
+            Key::Named(NamedKey::Backspace) => {
+                if sel.is_some() {
+                    self.push_undo(EditKind::Other);
+                    self.delete_selection();
+                    line = self.cur_line;
+                    col = self.cur_col;
+                    edited = true;
+                } else if col > 0 {
+                    self.push_undo(EditKind::Deleting);
+                    let s = &mut self.edit_lines[line];
+                    let b0 = char_byte(s, col - 1);
+                    let b1 = char_byte(s, col);
+                    s.replace_range(b0..b1, "");
+                    col -= 1;
+                    edited = true;
+                } else if line > 0 {
+                    self.push_undo(EditKind::Other);
+                    let cur = self.edit_lines.remove(line);
+                    line -= 1;
+                    col = self.edit_lines[line].chars().count();
+                    self.edit_lines[line].push_str(&cur);
+                    edited = true;
+                }
+            }
+            Key::Named(NamedKey::Delete) => {
+                if sel.is_some() {
+                    self.push_undo(EditKind::Other);
+                    self.delete_selection();
+                    line = self.cur_line;
+                    col = self.cur_col;
+                    edited = true;
+                } else if col < self.edit_lines[line].chars().count() {
+                    self.push_undo(EditKind::Deleting);
+                    let s = &mut self.edit_lines[line];
+                    let b0 = char_byte(s, col);
+                    let b1 = char_byte(s, col + 1);
+                    s.replace_range(b0..b1, "");
+                    edited = true;
+                } else if line + 1 < self.edit_lines.len() {
+                    self.push_undo(EditKind::Other);
+                    let next = self.edit_lines.remove(line + 1);
+                    self.edit_lines[line].push_str(&next);
+                    edited = true;
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.push_undo(EditKind::Other);
+                if self.delete_selection() {
+                    line = self.cur_line;
+                    col = self.cur_col;
+                }
+                let s = &mut self.edit_lines[line];
+                let b = char_byte(s, col);
+                let rest = s.split_off(b);
+                self.edit_lines.insert(line + 1, rest);
+                line += 1;
+                col = 0;
+                edited = true;
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                if !shift && sel.is_some() {
+                    (line, col) = sel.unwrap().0;
+                } else if alt {
+                    if col == 0 && line > 0 {
+                        line -= 1;
+                        col = self.edit_lines[line].chars().count();
+                    } else {
+                        let chars: Vec<char> = self.edit_lines[line].chars().collect();
+                        col = prev_word_col(&chars, col);
+                    }
+                } else if col > 0 {
+                    col -= 1;
+                } else if line > 0 {
+                    line -= 1;
+                    col = self.edit_lines[line].chars().count();
+                }
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                let len = self.edit_lines[line].chars().count();
+                if !shift && sel.is_some() {
+                    (line, col) = sel.unwrap().1;
+                } else if alt {
+                    if col >= len && line + 1 < self.edit_lines.len() {
+                        line += 1;
+                        col = 0;
+                    } else {
+                        let chars: Vec<char> = self.edit_lines[line].chars().collect();
+                        col = next_word_col(&chars, col);
+                    }
+                } else if col < len {
+                    col += 1;
+                } else if line + 1 < self.edit_lines.len() {
+                    line += 1;
+                    col = 0;
+                }
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if line > 0 {
+                    line -= 1;
+                    col = col.min(self.edit_lines[line].chars().count());
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if line + 1 < self.edit_lines.len() {
+                    line += 1;
+                    col = col.min(self.edit_lines[line].chars().count());
+                }
+            }
+            Key::Named(NamedKey::Home) => {
+                col = 0;
+            }
+            Key::Named(NamedKey::End) => {
+                col = self.edit_lines[line].chars().count();
+            }
+            Key::Named(NamedKey::PageUp) => {
+                line = line.saturating_sub(page_lines);
+                col = col.min(self.edit_lines[line].chars().count());
+            }
+            Key::Named(NamedKey::PageDown) => {
+                line = (line + page_lines).min(self.edit_lines.len() - 1);
+                col = col.min(self.edit_lines[line].chars().count());
+            }
+            Key::Named(NamedKey::Space) => {
+                if sel.is_some() {
+                    self.push_undo(EditKind::Other);
+                    self.delete_selection();
+                    line = self.cur_line;
+                    col = self.cur_col;
+                } else {
+                    self.push_undo(EditKind::Typing);
+                }
+                let s = &mut self.edit_lines[line];
+                let b = char_byte(s, col);
+                s.insert(b, ' ');
+                col += 1;
+                edited = true;
+            }
+            Key::Character(txt) => {
+                if sel.is_some() {
+                    self.push_undo(EditKind::Other);
+                    self.delete_selection();
+                    line = self.cur_line;
+                    col = self.cur_col;
+                } else {
+                    self.push_undo(EditKind::Typing);
+                }
+                let s = &mut self.edit_lines[line];
+                let b = char_byte(s, col);
+                s.insert_str(b, txt);
+                col += txt.chars().count();
+                edited = true;
+            }
+            _ => {}
+        }
+        self.cur_line = line;
+        self.cur_col = col;
+        if edited {
+            self.modified = true;
+        }
+        if is_motion {
+            if !shift {
+                self.sel_anchor = None;
+            }
+            self.last_edit = EditKind::Break;
+        }
+    }
+
+    /// Cmd+arrow jumps (line start/end, doc start/end). Shift extends the
+    /// selection like the plain motions.
+    pub(crate) fn apply_cmd_arrow(&mut self, code: winit::keyboard::KeyCode, shift: bool) {
+        use winit::keyboard::KeyCode;
+        if self.edit_lines.is_empty() {
+            self.edit_lines.push(String::new());
+        }
+        if shift {
+            if self.sel_anchor.is_none() {
+                self.sel_anchor = Some((self.cur_line, self.cur_col));
+            }
+        } else {
+            self.sel_anchor = None;
+        }
+        let line = self.cur_line.min(self.edit_lines.len() - 1);
+        match code {
+            KeyCode::ArrowLeft => {
+                self.cur_line = line;
+                self.cur_col = 0;
+            }
+            KeyCode::ArrowRight => {
+                self.cur_line = line;
+                self.cur_col = self.edit_lines[line].chars().count();
+            }
+            KeyCode::ArrowUp => {
+                self.cur_line = 0;
+                self.cur_col = 0;
+            }
+            KeyCode::ArrowDown => {
+                self.cur_line = self.edit_lines.len() - 1;
+                self.cur_col = self.edit_lines[self.cur_line].chars().count();
+            }
+            _ => {}
+        }
+        self.last_edit = EditKind::Break;
+    }
+
+    /// Undo: pop the undo stack, stashing the present on redo. Returns whether
+    /// anything moved.
+    pub(crate) fn do_undo(&mut self) -> bool {
+        let Some(snap) = self.undo_stack.pop() else { return false };
+        let now = self.snapshot();
+        self.redo_stack.push(now);
+        self.apply_snapshot(snap);
+        true
+    }
+
+    /// Redo: inverse of `do_undo`.
+    pub(crate) fn do_redo(&mut self) -> bool {
+        let Some(snap) = self.redo_stack.pop() else { return false };
+        let now = self.snapshot();
+        self.undo_stack.push(now);
+        if self.undo_stack.len() > UNDO_CAP {
+            self.undo_stack.remove(0);
+        }
+        self.apply_snapshot(snap);
+        true
+    }
+
+    /// Cmd+A: anchor at the top, caret at the very end.
+    pub(crate) fn select_all_buf(&mut self) {
+        if self.edit_lines.is_empty() {
+            self.edit_lines.push(String::new());
+        }
+        self.sel_anchor = Some((0, 0));
+        self.cur_line = self.edit_lines.len() - 1;
+        self.cur_col = self.edit_lines[self.cur_line].chars().count();
+        self.last_edit = EditKind::Break;
+    }
+
+    /// Splice already-normalized (`\n`-only) clipboard text at the caret as one
+    /// undo unit, replacing any selection.
+    pub(crate) fn paste_at_caret(&mut self, text: &str) {
+        if self.edit_lines.is_empty() {
+            self.edit_lines.push(String::new());
+        }
+        self.push_undo(EditKind::Other);
+        self.delete_selection();
+        let line = self.cur_line.min(self.edit_lines.len() - 1);
+        let col = self.cur_col.min(self.edit_lines[line].chars().count());
+        let b = char_byte(&self.edit_lines[line], col);
+        let tail = self.edit_lines[line].split_off(b);
+        let mut segs = text.split('\n');
+        if let Some(first) = segs.next() {
+            self.edit_lines[line].push_str(first);
+        }
+        let mut cur = line;
+        for seg in segs {
+            cur += 1;
+            self.edit_lines.insert(cur, seg.to_string());
+        }
+        self.cur_line = cur;
+        self.cur_col = self.edit_lines[cur].chars().count();
+        self.edit_lines[cur].push_str(&tail);
+        self.modified = true;
+    }
+
+    /// Copy (or cut) the selection, returning its text. Cut deletes the range
+    /// under its own undo unit. None when there's no selection.
+    pub(crate) fn take_copy(&mut self, cut: bool) -> Option<String> {
+        let text = self.selected_text()?;
+        if cut {
+            self.push_undo(EditKind::Other);
+            self.delete_selection();
+        }
+        Some(text)
+    }
 }
 
 impl App {
@@ -155,25 +517,7 @@ impl App {
             let Some(pane) = ws.active_mut() else { return };
             pane.dirty = true;
             let Some(m) = pane.markdown_mut() else { return };
-            if m.edit_lines.is_empty() {
-                m.edit_lines.push(String::new());
-            }
-            // Typing over a selection replaces it — delete + insert as one
-            // undo unit (the Other snapshot covers both).
-            if m.sel_range().is_some() {
-                m.push_undo(EditKind::Other);
-                m.delete_selection();
-            } else {
-                m.push_undo(EditKind::Typing);
-            }
-            let line = m.cur_line.min(m.edit_lines.len() - 1);
-            let col = m.cur_col.min(m.edit_lines[line].chars().count());
-            let s = &mut m.edit_lines[line];
-            let b = char_byte(s, col);
-            s.insert_str(b, text);
-            m.cur_line = line;
-            m.cur_col = col + text.chars().count();
-            m.modified = true;
+            m.insert_at_caret(text);
         }
         self.md_ensure_caret_visible();
     }
@@ -236,202 +580,7 @@ impl App {
             let Some(pane) = ws.active_mut() else { return };
             pane.dirty = true;
             let Some(m) = pane.markdown_mut() else { return };
-            if m.edit_lines.is_empty() {
-                m.edit_lines.push(String::new());
-            }
-            let is_motion = matches!(
-                &event.logical_key,
-                Key::Named(
-                    NamedKey::ArrowLeft
-                        | NamedKey::ArrowRight
-                        | NamedKey::ArrowUp
-                        | NamedKey::ArrowDown
-                        | NamedKey::Home
-                        | NamedKey::End
-                        | NamedKey::PageUp
-                        | NamedKey::PageDown
-                )
-            );
-            // Shift+motion grows a selection from the current caret; plain
-            // motion drops it (Left/Right collapse to its edges first).
-            if is_motion && shift && m.sel_anchor.is_none() {
-                m.sel_anchor = Some((m.cur_line, m.cur_col));
-            }
-            let sel = m.sel_range();
-            let mut line = m.cur_line.min(m.edit_lines.len() - 1);
-            let mut col = m.cur_col.min(m.edit_lines[line].chars().count());
-            // 버퍼를 실제로 바꾼 키만 modified 로 기록 — 방향키는 저장할 게 없다.
-            let mut edited = false;
-            match &event.logical_key {
-                Key::Named(NamedKey::Backspace) => {
-                    if sel.is_some() {
-                        m.push_undo(EditKind::Other);
-                        m.delete_selection();
-                        line = m.cur_line;
-                        col = m.cur_col;
-                        edited = true;
-                    } else if col > 0 {
-                        m.push_undo(EditKind::Deleting);
-                        let s = &mut m.edit_lines[line];
-                        let b0 = char_byte(s, col - 1);
-                        let b1 = char_byte(s, col);
-                        s.replace_range(b0..b1, "");
-                        col -= 1;
-                        edited = true;
-                    } else if line > 0 {
-                        // Line join is its own undo unit — a backspace run
-                        // crossing lines shouldn't swallow the join too.
-                        m.push_undo(EditKind::Other);
-                        let cur = m.edit_lines.remove(line);
-                        line -= 1;
-                        col = m.edit_lines[line].chars().count();
-                        m.edit_lines[line].push_str(&cur);
-                        edited = true;
-                    }
-                }
-                Key::Named(NamedKey::Delete) => {
-                    // Forward delete (fn+Backspace on mac keyboards).
-                    if sel.is_some() {
-                        m.push_undo(EditKind::Other);
-                        m.delete_selection();
-                        line = m.cur_line;
-                        col = m.cur_col;
-                        edited = true;
-                    } else if col < m.edit_lines[line].chars().count() {
-                        m.push_undo(EditKind::Deleting);
-                        let s = &mut m.edit_lines[line];
-                        let b0 = char_byte(s, col);
-                        let b1 = char_byte(s, col + 1);
-                        s.replace_range(b0..b1, "");
-                        edited = true;
-                    } else if line + 1 < m.edit_lines.len() {
-                        m.push_undo(EditKind::Other);
-                        let next = m.edit_lines.remove(line + 1);
-                        m.edit_lines[line].push_str(&next);
-                        edited = true;
-                    }
-                }
-                Key::Named(NamedKey::Enter) => {
-                    m.push_undo(EditKind::Other);
-                    if m.delete_selection() {
-                        line = m.cur_line;
-                        col = m.cur_col;
-                    }
-                    let s = &mut m.edit_lines[line];
-                    let b = char_byte(s, col);
-                    let rest = s.split_off(b);
-                    m.edit_lines.insert(line + 1, rest);
-                    line += 1;
-                    col = 0;
-                    edited = true;
-                }
-                Key::Named(NamedKey::ArrowLeft) => {
-                    if !shift && sel.is_some() {
-                        (line, col) = sel.unwrap().0;
-                    } else if alt {
-                        // Opt+Left: previous word; at col 0 hop to the line above.
-                        if col == 0 && line > 0 {
-                            line -= 1;
-                            col = m.edit_lines[line].chars().count();
-                        } else {
-                            let chars: Vec<char> = m.edit_lines[line].chars().collect();
-                            col = prev_word_col(&chars, col);
-                        }
-                    } else if col > 0 {
-                        col -= 1;
-                    } else if line > 0 {
-                        line -= 1;
-                        col = m.edit_lines[line].chars().count();
-                    }
-                }
-                Key::Named(NamedKey::ArrowRight) => {
-                    let len = m.edit_lines[line].chars().count();
-                    if !shift && sel.is_some() {
-                        (line, col) = sel.unwrap().1;
-                    } else if alt {
-                        if col >= len && line + 1 < m.edit_lines.len() {
-                            line += 1;
-                            col = 0;
-                        } else {
-                            let chars: Vec<char> = m.edit_lines[line].chars().collect();
-                            col = next_word_col(&chars, col);
-                        }
-                    } else if col < len {
-                        col += 1;
-                    } else if line + 1 < m.edit_lines.len() {
-                        line += 1;
-                        col = 0;
-                    }
-                }
-                Key::Named(NamedKey::ArrowUp) => {
-                    if line > 0 {
-                        line -= 1;
-                        col = col.min(m.edit_lines[line].chars().count());
-                    }
-                }
-                Key::Named(NamedKey::ArrowDown) => {
-                    if line + 1 < m.edit_lines.len() {
-                        line += 1;
-                        col = col.min(m.edit_lines[line].chars().count());
-                    }
-                }
-                Key::Named(NamedKey::Home) => {
-                    col = 0;
-                }
-                Key::Named(NamedKey::End) => {
-                    col = m.edit_lines[line].chars().count();
-                }
-                Key::Named(NamedKey::PageUp) => {
-                    line = line.saturating_sub(page_lines);
-                    col = col.min(m.edit_lines[line].chars().count());
-                }
-                Key::Named(NamedKey::PageDown) => {
-                    line = (line + page_lines).min(m.edit_lines.len() - 1);
-                    col = col.min(m.edit_lines[line].chars().count());
-                }
-                Key::Named(NamedKey::Space) => {
-                    if sel.is_some() {
-                        m.push_undo(EditKind::Other);
-                        m.delete_selection();
-                        line = m.cur_line;
-                        col = m.cur_col;
-                    } else {
-                        m.push_undo(EditKind::Typing);
-                    }
-                    let s = &mut m.edit_lines[line];
-                    let b = char_byte(s, col);
-                    s.insert(b, ' ');
-                    col += 1;
-                    edited = true;
-                }
-                Key::Character(txt) => {
-                    if sel.is_some() {
-                        m.push_undo(EditKind::Other);
-                        m.delete_selection();
-                        line = m.cur_line;
-                        col = m.cur_col;
-                    } else {
-                        m.push_undo(EditKind::Typing);
-                    }
-                    let s = &mut m.edit_lines[line];
-                    let b = char_byte(s, col);
-                    s.insert_str(b, txt);
-                    col += txt.chars().count();
-                    edited = true;
-                }
-                _ => {}
-            }
-            m.cur_line = line;
-            m.cur_col = col;
-            if edited {
-                m.modified = true;
-            }
-            if is_motion {
-                if !shift {
-                    m.sel_anchor = None;
-                }
-                m.last_edit = EditKind::Break;
-            }
+            m.apply_edit_key(event, shift, alt, page_lines);
         }
         self.md_ensure_caret_visible();
     }
@@ -524,44 +673,13 @@ impl App {
     }
     /// Cmd+arrow jumps for the raw editor (see `md_editor_shortcut`).
     fn md_cmd_arrow(&mut self, code: winit::keyboard::KeyCode) {
-        use winit::keyboard::KeyCode;
         let shift = self.modifiers.shift_key();
         {
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.active_mut() else { return };
             pane.dirty = true;
             let Some(m) = pane.markdown_mut() else { return };
-            if m.edit_lines.is_empty() {
-                m.edit_lines.push(String::new());
-            }
-            if shift {
-                if m.sel_anchor.is_none() {
-                    m.sel_anchor = Some((m.cur_line, m.cur_col));
-                }
-            } else {
-                m.sel_anchor = None;
-            }
-            let line = m.cur_line.min(m.edit_lines.len() - 1);
-            match code {
-                KeyCode::ArrowLeft => {
-                    m.cur_line = line;
-                    m.cur_col = 0;
-                }
-                KeyCode::ArrowRight => {
-                    m.cur_line = line;
-                    m.cur_col = m.edit_lines[line].chars().count();
-                }
-                KeyCode::ArrowUp => {
-                    m.cur_line = 0;
-                    m.cur_col = 0;
-                }
-                KeyCode::ArrowDown => {
-                    m.cur_line = m.edit_lines.len() - 1;
-                    m.cur_col = m.edit_lines[m.cur_line].chars().count();
-                }
-                _ => {}
-            }
-            m.last_edit = EditKind::Break;
+            m.apply_cmd_arrow(code, shift);
         }
         self.md_ensure_caret_visible();
     }
@@ -572,10 +690,8 @@ impl App {
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.active_mut() else { return };
             let Some(m) = pane.markdown_mut() else { return };
-            let Some(text) = m.selected_text() else { return };
+            let Some(text) = m.take_copy(cut) else { return };
             if cut {
-                m.push_undo(EditKind::Other);
-                m.delete_selection();
                 pane.dirty = true;
             }
             text
@@ -596,13 +712,7 @@ impl App {
         let Some(pane) = ws.active_mut() else { return };
         pane.dirty = true;
         let Some(m) = pane.markdown_mut() else { return };
-        if m.edit_lines.is_empty() {
-            m.edit_lines.push(String::new());
-        }
-        m.sel_anchor = Some((0, 0));
-        m.cur_line = m.edit_lines.len() - 1;
-        m.cur_col = m.edit_lines[m.cur_line].chars().count();
-        m.last_edit = EditKind::Break;
+        m.select_all_buf();
     }
     /// Cmd+Z: pop the undo stack, stashing the present on the redo stack.
     pub(crate) fn md_undo(&mut self) {
@@ -610,11 +720,9 @@ impl App {
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.active_mut() else { return };
             let Some(m) = pane.markdown_mut() else { return };
-            let Some(snap) = m.undo_stack.pop() else { return };
-            let now = m.snapshot();
-            m.redo_stack.push(now);
-            m.apply_snapshot(snap);
-            pane.dirty = true;
+            if m.do_undo() {
+                pane.dirty = true;
+            }
         }
         self.md_ensure_caret_visible();
     }
@@ -624,14 +732,9 @@ impl App {
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.active_mut() else { return };
             let Some(m) = pane.markdown_mut() else { return };
-            let Some(snap) = m.redo_stack.pop() else { return };
-            let now = m.snapshot();
-            m.undo_stack.push(now);
-            if m.undo_stack.len() > UNDO_CAP {
-                m.undo_stack.remove(0);
+            if m.do_redo() {
+                pane.dirty = true;
             }
-            m.apply_snapshot(snap);
-            pane.dirty = true;
         }
         self.md_ensure_caret_visible();
     }
@@ -736,30 +839,7 @@ impl App {
             let Some(pane) = ws.active_mut() else { return };
             pane.dirty = true;
             let Some(m) = pane.markdown_mut() else { return };
-            if m.edit_lines.is_empty() {
-                m.edit_lines.push(String::new());
-            }
-            // Paste is always its own undo unit; over a selection it replaces
-            // (delete + splice under the one snapshot).
-            m.push_undo(EditKind::Other);
-            m.delete_selection();
-            let line = m.cur_line.min(m.edit_lines.len() - 1);
-            let col = m.cur_col.min(m.edit_lines[line].chars().count());
-            let b = char_byte(&m.edit_lines[line], col);
-            let tail = m.edit_lines[line].split_off(b);
-            let mut segs = text.split('\n');
-            if let Some(first) = segs.next() {
-                m.edit_lines[line].push_str(first);
-            }
-            let mut cur = line;
-            for seg in segs {
-                cur += 1;
-                m.edit_lines.insert(cur, seg.to_string());
-            }
-            m.cur_line = cur;
-            m.cur_col = m.edit_lines[cur].chars().count();
-            m.edit_lines[cur].push_str(&tail);
-            m.modified = true;
+            m.paste_at_caret(&text);
         }
         self.md_ensure_caret_visible();
     }
@@ -1044,5 +1124,96 @@ mod tests {
         assert_eq!(m.undo_stack.len(), UNDO_CAP);
         // Oldest entries fell off the bottom — the floor moved up by 20.
         assert_eq!(m.undo_stack[0].lines[0], "19");
+    }
+
+    // ── Pure-core methods shared with the pop-out editor window (auxwin.rs) ──
+
+    #[test]
+    fn insert_at_caret_advances_and_replaces_selection() {
+        let mut m = pane(&["hello"]);
+        m.cur_col = 5;
+        m.insert_at_caret("!");
+        assert_eq!(m.edit_lines, vec!["hello!".to_string()]);
+        assert_eq!(m.cur_col, 6);
+        assert!(m.modified);
+        // Insert over a selection replaces the range.
+        let mut m = pane(&["hello world"]);
+        m.sel_anchor = Some((0, 0));
+        m.cur_col = 5; // select "hello"
+        m.insert_at_caret("bye");
+        assert_eq!(m.edit_lines, vec!["bye world".to_string()]);
+        assert_eq!((m.cur_line, m.cur_col), (0, 3));
+    }
+
+    #[test]
+    fn paste_at_caret_splices_multiline() {
+        let mut m = pane(&["abcd"]);
+        m.cur_col = 2; // caret between b and c
+        m.paste_at_caret("X\nY");
+        assert_eq!(m.edit_lines, vec!["abX".to_string(), "Ycd".to_string()]);
+        assert_eq!((m.cur_line, m.cur_col), (1, 1));
+    }
+
+    #[test]
+    fn do_undo_redo_roundtrip() {
+        let mut m = pane(&["a"]);
+        m.cur_col = 1;
+        m.insert_at_caret("b"); // "ab"
+        assert_eq!(m.edit_lines, vec!["ab".to_string()]);
+        assert!(m.do_undo());
+        assert_eq!(m.edit_lines, vec!["a".to_string()]);
+        assert!(m.do_redo());
+        assert_eq!(m.edit_lines, vec!["ab".to_string()]);
+        // Empty stacks return false.
+        assert!(m.do_undo());
+        assert!(!m.do_undo());
+    }
+
+    #[test]
+    fn select_all_and_take_copy_cut() {
+        let mut m = pane(&["one", "two"]);
+        m.select_all_buf();
+        assert_eq!(m.sel_anchor, Some((0, 0)));
+        assert_eq!((m.cur_line, m.cur_col), (1, 3));
+        // Copy leaves the buffer; cut removes the selection.
+        assert_eq!(m.take_copy(false).as_deref(), Some("one\ntwo"));
+        assert_eq!(m.edit_lines, vec!["one".to_string(), "two".to_string()]);
+        m.select_all_buf();
+        assert_eq!(m.take_copy(true).as_deref(), Some("one\ntwo"));
+        assert_eq!(m.edit_lines, vec![String::new()]);
+        // No selection = None.
+        assert_eq!(m.take_copy(false), None);
+    }
+
+    #[test]
+    fn ensure_raw_seeded_from_doc_source() {
+        // A render-mode .md pane (empty edit buffer) seeds from doc.raw on pop-out.
+        let doc = Arc::new(build_markdown_doc(
+            "%t",
+            std::path::Path::new("/tmp/t.md"),
+            "line1\nline2",
+        ));
+        let mut m = MarkdownPane {
+            doc,
+            is_md_doc: true,
+            raw_mode: false,
+            edit_lines: Vec::new(),
+            cur_line: 0,
+            cur_col: 0,
+            scroll: 0,
+            h_scroll: 0.0,
+            modified: false,
+            sel_anchor: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            last_edit: EditKind::Break,
+        };
+        m.ensure_raw_seeded();
+        assert!(m.raw_mode);
+        assert_eq!(m.edit_lines, vec!["line1".to_string(), "line2".to_string()]);
+        // Already-seeded buffers are left untouched.
+        let mut m2 = pane(&["kept"]);
+        m2.ensure_raw_seeded();
+        assert_eq!(m2.edit_lines, vec!["kept".to_string()]);
     }
 }

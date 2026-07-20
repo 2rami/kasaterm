@@ -128,37 +128,53 @@ pub fn session_label_for(path: &Path) -> Option<String> {
     parse_session_label(path)
 }
 
-/// jsonl 꼬리 64KB 에서 가장 마지막 `custom-title` 레코드의 제목. 여러 번
-/// rename 하면 마지막 것이 이긴다(claude `/rename` 동일 규칙). 파일이 64KB 를
-/// 넘고 rename 이후 대화가 그만큼 더 쌓인 극단 케이스만 놓치는데, 그땐
-/// ai-title 폴백이라 라벨이 비지는 않는다.
+/// jsonl 꼬리에서 가장 마지막 `custom-title` 레코드의 제목. 여러 번 rename 하면
+/// 마지막 것이 이긴다(claude `/rename` 동일 규칙). 에이전트 세션은 한 턴에 툴
+/// 결과가 수백 KB 씩 append 돼 마지막 스탬프가 금세 꼬리 64KB 밖으로 밀린다
+/// (실측 594KB — title-sync 가 스탬프를 박아도 제목이 옛것으로 보이던 원인).
+/// 그래서 64KB 청크를 뒤에서 앞으로 역스캔하고, 청크 경계에 걸친 레코드는
+/// 겹침 4KB 로 잡는다. 발견 즉시 중단이라 정상 세션(스탬프가 꼬리 근처)은
+/// 종전과 같은 1청크 비용, 스탬프가 전무한 세션만 상한 8MB 까지 읽고 폴백한다.
 fn last_custom_title(path: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
+    const CHUNK: u64 = 64 * 1024;
+    const OVERLAP: u64 = 4 * 1024;
+    const MAX_SCAN: u64 = 8 * 1024 * 1024;
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
-    let start = len.saturating_sub(64 * 1024);
-    f.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    // seek 이 줄/멀티바이트 중간에 떨어질 수 있어 lossy + 첫 부분줄 스킵.
-    let text = String::from_utf8_lossy(&buf);
-    let mut last: Option<String> = None;
-    for line in text.lines().skip(usize::from(start > 0)) {
-        if !line.contains("\"custom-title\"") {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        if v.get("type").and_then(|t| t.as_str()) != Some("custom-title") {
-            continue;
-        }
-        if let Some(t) = v.get("customTitle").and_then(|t| t.as_str()) {
-            let t = t.trim();
-            if !t.is_empty() {
-                last = Some(t.chars().take(80).collect());
+    let floor = len.saturating_sub(MAX_SCAN);
+    let mut end = len;
+    while end > floor {
+        let start = end.saturating_sub(CHUNK).max(floor);
+        let read_end = (end + OVERLAP).min(len);
+        f.seek(SeekFrom::Start(start)).ok()?;
+        let mut buf = vec![0u8; (read_end - start) as usize];
+        f.read_exact(&mut buf).ok()?;
+        // seek 이 줄/멀티바이트 중간에 떨어질 수 있어 lossy + 첫 부분줄 스킵.
+        // 스킵으로 놓친 경계 레코드는 다음(더 앞) 청크가 겹침으로 다시 본다.
+        let text = String::from_utf8_lossy(&buf);
+        let mut last: Option<String> = None;
+        for line in text.lines().skip(usize::from(start > 0)) {
+            if !line.contains("\"custom-title\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+            if v.get("type").and_then(|t| t.as_str()) != Some("custom-title") {
+                continue;
+            }
+            if let Some(t) = v.get("customTitle").and_then(|t| t.as_str()) {
+                let t = t.trim();
+                if !t.is_empty() {
+                    last = Some(t.chars().take(80).collect());
+                }
             }
         }
+        if last.is_some() {
+            return last;
+        }
+        end = start;
     }
-    last
+    None
 }
 
 /// 라벨로 부적합한 메타성 user 텍스트(슬래시 명령·시스템 주입·bash 출력 래퍼).
@@ -278,3 +294,52 @@ fn assistant_message_text(v: &serde_json::Value) -> Option<String> {
 }
 
 use crate::backend::RecentSession;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn tmp_jsonl(name: &str, body: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("kasa-sessions-test-{name}-{}.jsonl", std::process::id()));
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        p
+    }
+
+    fn title_rec(t: &str) -> String {
+        format!(r#"{{"type": "custom-title", "customTitle": "{t}", "nameSource": "auto"}}"#) + "\n"
+    }
+
+    // 실사고 재현: 스탬프 뒤에 대형 에이전트 턴(수백 KB 툴 결과)이 쌓여
+    // 마지막 custom-title 이 꼬리 64KB 밖으로 밀려도 역스캔이 찾아야 한다.
+    #[test]
+    fn stamp_beyond_64k_tail_is_found() {
+        let filler_line = format!(r#"{{"type": "assistant", "pad": "{}"}}"#, "x".repeat(400)) + "\n";
+        let mut body = title_rec("옛 제목");
+        body.push_str(&title_rec("최신 제목"));
+        for _ in 0..1600 {
+            body.push_str(&filler_line); // ~650KB — 종전 64KB 창을 한참 벗어난다
+        }
+        let p = tmp_jsonl("beyond64k", &body);
+        assert_eq!(last_custom_title(&p).as_deref(), Some("최신 제목"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn last_stamp_wins_within_tail() {
+        let mut body = title_rec("첫 제목");
+        body.push_str(&title_rec("마지막 제목"));
+        let p = tmp_jsonl("lastwins", &body);
+        assert_eq!(last_custom_title(&p).as_deref(), Some("마지막 제목"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn no_stamp_returns_none() {
+        let filler_line = format!(r#"{{"type": "assistant", "pad": "{}"}}"#, "y".repeat(400)) + "\n";
+        let p = tmp_jsonl("nostamp", &filler_line.repeat(300));
+        assert_eq!(last_custom_title(&p), None);
+        let _ = std::fs::remove_file(&p);
+    }
+}

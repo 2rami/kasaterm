@@ -391,12 +391,12 @@ impl App {
         if completed.is_empty() {
             return;
         }
-        // A sibling finished: top-right toast + header pulse. Label the toast
-        // with the pane's tab-header name (custom title / foreground process),
-        // matching what the user reads in the tab strip — not the cwd basename.
-        let name = completed.first().map(|id| self.pane_header_label(id));
-        let msg = match name {
-            Some(name) => format!("✓ {name} 작업 완료"),
+        // A sibling finished: top-right toast + header pulse. 캐릭터명(pane 고정,
+        // stale 없음)만 라벨로 — OSC 작업명 실시간 조회는 stale 원천이라 뺀다. 이
+        // 경로는 glyph 스캔 완료라 hook title 이 없어 "작업 완료" 고정 문구.
+        let character = completed.first().and_then(|id| self.pane_character_if_known(id));
+        let msg = match character {
+            Some(c) => format!("✓ {c} 작업 완료"),
             None => "✓ 작업 완료".to_string(),
         };
         // A sticky approval toast (a pane waiting on the user) outranks a sibling
@@ -405,7 +405,9 @@ impl App {
             self.collab.toast = Some((msg, now));
         }
         for id in completed {
-            self.notify_flash.insert(id, now);
+            self.notify_flash.insert(id.clone(), now);
+            // 턴 완료 → 학생 cheer 시작. 사용자가 이 pane 에 입력할 때까지 유지.
+            self.turn_done_panes.insert(id);
         }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -441,15 +443,16 @@ impl App {
                         .unwrap()
                         .insert(id.clone(), "승인 대기 (화면 감지)".to_string());
                     if faces_user {
-                        let name = self.pane_header_label(id);
-                        self.collab.toast = Some((format!("⚠ {name} 승인 대기"), now));
+                        let label = self.pane_character_if_known(id);
+                        let who = label.as_deref().unwrap_or("pane");
+                        self.collab.toast = Some((format!("⚠ {who} 승인 대기"), now));
                         self.collab.toast_action = Some(id.clone());
                         self.collab.toast_rect = None;
                         let looking = self.window_focused
                             && self.ws.lock().unwrap().active_pane.as_deref()
                                 == Some(id.as_str());
                         if !looking {
-                            crate::chrome::notify_desktop("⚠ 승인 필요", &name);
+                            crate::chrome::notify_desktop("⚠ 승인 필요", who);
                         }
                     }
                     changed = true;
@@ -676,24 +679,6 @@ impl App {
                 "[wheel] delta={delta:?} dy_cells={dy_cells:.4} accum_before={:.4} cursor_px=({:.1},{:.1})",
                 self.wheel_accum_y, self.cursor_px.0, self.cursor_px.1
             );
-        }
-        // Settings overlay: the wheel scrolls the form. The screen covers the
-        // pane grid, so nothing may leak through to the cells underneath —
-        // consume the event either way. Max is computed by the render pass.
-        if self.settings_open {
-            let dy_px = match delta {
-                MouseScrollDelta::LineDelta(_, y) => y * 40.0,
-                MouseScrollDelta::PixelDelta(p) => p.y as f32,
-            };
-            let next = (self.settings_scroll - dy_px).clamp(0.0, self.settings_scroll_max);
-            if (next - self.settings_scroll).abs() > 0.1 {
-                self.settings_scroll = next;
-                self.chrome_dirty = true;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            return;
         }
         // Image pane: 트랙패드 두손가락(PixelDelta)=pan, 마우스 휠(LineDelta)=
         // Preview 식 zoom. wheel_step 양자화 *전* raw delta 로 처리해야 pan 이 안
@@ -1456,17 +1441,10 @@ impl App {
         // Touch the input timer so the cursor stays solid for a beat and
         // the blink phase re-starts from "on" once it kicks in.
         self.last_input_at = Instant::now();
-        // Settings screen swallows all keys (never leaks to the PTY). A focused
-        // text field consumes them; Esc with no field open closes the screen.
-        if self.settings_open {
-            use winit::keyboard::{Key, NamedKey};
-            if self.settings_key(event) {
-                return;
-            }
-            if matches!(&event.logical_key, Key::Named(NamedKey::Escape)) {
-                self.close_settings();
-            }
-            return;
+        // 사용자가 이 pane 에 키를 치면 turn-done cheer 를 걷는다(만세 → idle) —
+        // 완료 직후~다음 입력 전까지만 학생이 양팔 만세로 서 있는다.
+        if let Some(id) = self.target_surface() {
+            self.turn_done_panes.remove(&id);
         }
         // Git commit field has focus: keystrokes edit the message, not the PTY.
         // (Click elsewhere blurs it — see the column's mouse handler.)

@@ -549,6 +549,14 @@ impl ApplicationHandler<UserEvent> for App {
         // another winit cycle of latency. Painting inline gets the echo
         // on screen this turn.
         self.render_frame();
+        // A focused pop-out editor window blinks its caret off the same wake
+        // (blink thread / timer). request_redraw coalesces, and only the
+        // focused aux window repaints — unfocused ones stay idle (no GPU burn).
+        for a in &self.aux_windows {
+            if a.focused {
+                a.window.request_redraw();
+            }
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -951,6 +959,19 @@ impl ApplicationHandler<UserEvent> for App {
         if let Err(e) = backend_result {
             eprintln!("[kasaterm] backend start failed: {e}");
         }
+        // Chrome-style session restore: if the last run left a saved layout with
+        // at least one claude pane, offer to reopen it (크롬 "복원하시겠습니까?")
+        // instead of silently starting fresh. The blank session start_pty just
+        // spawned is the "새로 시작" fallback that stays if the user declines;
+        // 복원 tears it down and rebuilds. Tmux backend manages its own restore,
+        // so only the direct-PTY path prompts.
+        if !want_tmux {
+            if let Some(state) = crate::socket::read_session_state() {
+                if App::count_claude_panes(&state) > 0 {
+                    self.restore_prompt = Some(state);
+                }
+            }
+        }
         // cold-launch 로 디퍼됐던 `.md` 오픈을 연다 — 이제 window·pty_layout(%0)
         // 둘 다 준비됨. 빈손이면 무비용.
         for p in std::mem::take(&mut self.pending_open_md) {
@@ -1052,6 +1073,12 @@ impl ApplicationHandler<UserEvent> for App {
             if matches!(event, WindowEvent::CloseRequested) {
                 self.preview_windows.remove(pos);
             }
+            return;
+        }
+        // 별도 wgpu 편집기/파일뷰 창(auxwin.rs). 자체 GpuRenderer 를 가지므로 메인
+        // 창의 surface·터미널 로직과 완전히 격리 — 이벤트를 kind 별 라우팅에 위임한다.
+        if let Some(pos) = self.aux_windows.iter().position(|a| a.window.id() == id) {
+            self.aux_window_event(pos, event, event_loop);
             return;
         }
         let Some(window) = self.window.clone() else { return; };
@@ -1219,21 +1246,16 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 }
-                // Commit modal / settings screen are full-window overlays over
-                // the pane grid — drive their cursor here (I-beam over a text
-                // field, default elsewhere) and skip the pane/column hover below
-                // so it can't override the cursor.
-                if self.git.commit_modal_open || self.settings_open {
+                // Commit modal is a full-window overlay over the pane grid —
+                // drive its cursor here (I-beam over the message field, default
+                // elsewhere) and skip the pane/column hover below so it can't
+                // override the cursor. (Settings is now its own window.)
+                if self.git.commit_modal_open {
                     let (cx, cy) = self.cursor_px;
                     let hit = |r: (f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
-                    let want_text = self.git.commit_input_rect.map(hit).unwrap_or(false)
-                        || (self.settings_open
-                            && self.settings_rects.iter().any(|(a, r)| {
-                                matches!(a, SettingsAction::FocusCwdPath | SettingsAction::FocusShell)
-                                    && hit(*r)
-                            }));
+                    let want_text = self.git.commit_input_rect.map(hit).unwrap_or(false);
                     if want_text != self.text_cursor_shown {
                         self.text_cursor_shown = want_text;
                         window.set_cursor(if want_text { CursorIcon::Text } else { CursorIcon::Default });
@@ -1254,6 +1276,19 @@ impl ApplicationHandler<UserEvent> for App {
                         .map(|(id, idx, _)| (id.clone(), *idx));
                     if new_hover != self.pane_tab_hover {
                         self.pane_tab_hover = new_hover;
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                }
+                // 학생 프사 hover — 큰 bust 확대 팝업을 뜨고 지우려면 진입/이탈에
+                // 재페인트(이벤트 기반 루프라 커서 이동만으론 프레임이 안 돈다).
+                {
+                    let (cx, cy) = self.cursor_px;
+                    let new_face = self.face_hit_rects.iter().any(|(_, r)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    });
+                    if new_face != self.face_hover {
+                        self.face_hover = new_face;
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -1678,6 +1713,16 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         icon
                     };
+                    // 학생 프사 위 → pointer(클릭하면 학생 설정이 열린다는 암시).
+                    let icon = if matches!(icon, CursorIcon::Default)
+                        && self.face_hit_rects.iter().any(|(_, r)| {
+                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                        })
+                    {
+                        CursorIcon::Pointer
+                    } else {
+                        icon
+                    };
                     window.set_cursor(icon);
                     // Hover glow on chrome buttons (+ / action cluster) needs
                     // a redraw on every move — paint reads self.cursor_px to
@@ -1864,6 +1909,25 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Chrome-style restore prompt: same swallow-every-click modal as
+                // confirm-close. [복원] rebuilds the saved workspace, [새로 시작]
+                // discards it; the scrim ignores stray clicks. Checked early so
+                // the fresh session behind the dim never leaks a press.
+                if self.restore_prompt.is_some() {
+                    if matches!(state, ElementState::Pressed) {
+                        let (cx, cy) = self.cursor_px;
+                        if let Some(btn) = self
+                            .restore_btn_rects
+                            .iter()
+                            .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                            .map(|(b, _)| *b)
+                        {
+                            self.restore_dialog_pick(btn);
+                            window.request_redraw();
+                        }
+                    }
+                    return;
+                }
                 // Commit modal is a full-window dialog — handled before the git
                 // column (and everything else) so clicks outside the column
                 // still hit its buttons, and the scrim swallows the rest.
@@ -1908,13 +1972,24 @@ impl ApplicationHandler<UserEvent> for App {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
                     if hit(self.settings_btn_rect) {
-                        // 일반 사이드바 탭처럼 동작 — 이미 선택돼 있으면 재클릭은
-                        // no-op(닫으려면 다른 세션 탭을 누른다). 옛날엔 토글이라
-                        // 선택된 상태에서 또 누르면 설정이 꺼져버렸다.
-                        if !self.settings_open {
-                            self.open_settings();
-                            window.request_redraw();
-                        }
+                        // 사이드바 "Settings" 항목 — 설정 별도창을 열거나(이미
+                        // 열려 있으면) 그 창을 포커스한다.
+                        self.open_settings_window(event_loop, None, None);
+                        window.request_redraw();
+                        return;
+                    }
+                    // 학생 프사(statusline) 클릭 → 학생 설정 별도창을 Students
+                    // 카테고리 + 그 학생 선택 상태로 연다(딥링크). pane 포커스
+                    // 클릭보다 먼저 잡아 프사를 눌러도 pane 이 안 튀게.
+                    if let Some((name, _)) =
+                        self.face_hit_rects.iter().find(|(_, r)| hit(*r)).cloned()
+                    {
+                        self.open_settings_window(
+                            event_loop,
+                            Some(SettingsCat::Students),
+                            Some(name),
+                        );
+                        window.request_redraw();
                         return;
                     }
                     // Dock chip click. While a pane is zoomed the dock shows the
@@ -1930,18 +2005,6 @@ impl ApplicationHandler<UserEvent> for App {
                         if self.zoomed_pane.is_some() {
                             self.toggle_pane_zoom(&id);
                         }
-                        window.request_redraw();
-                        return;
-                    }
-                    // Settings open: only the main content area (below the title
-                    // strip, right of the sidebar) routes to the form. The title
-                    // strip toggles and the sidebar stay live so you're never
-                    // trapped in the screen.
-                    if self.settings_open
-                        && cy > TITLE_HEIGHT
-                        && cx >= self.tab_strip_w()
-                    {
-                        self.settings_click(cx, cy);
                         window.request_redraw();
                         return;
                     }
@@ -2104,14 +2167,11 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
-                    // Settings toggle, left of the git-column toggle.
+                    // Settings gear — opens the settings window (or focuses it if
+                    // already open). Closing is via the window's own controls.
                     if let Some((bx, by, bw, bh)) = self.settings_toggle_rect() {
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
-                            if self.settings_open {
-                                self.close_settings();
-                            } else {
-                                self.open_settings();
-                            }
+                            self.open_settings_window(event_loop, None, None);
                             return;
                         }
                     }
@@ -2244,6 +2304,21 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        // "빠른 파일" 고정 섹션 행: 클릭=보조탭, Opt+클릭=별도 편집기 창.
+                        if let Some(path) = self
+                            .file_tree.quick_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(p, _)| p.clone())
+                        {
+                            if self.modifiers.alt_key() {
+                                self.popout_file_window(path, event_loop);
+                            } else {
+                                self.open_file(path, None, true);
+                            }
+                            window.request_redraw();
+                            return;
+                        }
                         // Row: folder → toggle expand, file → preview.
                         if let Some(path) = self
                             .file_tree.rects
@@ -2350,7 +2425,12 @@ impl ApplicationHandler<UserEvent> for App {
                                 );
                                 if is_double {
                                     self.last_tree_click = None;
-                                    self.open_file_split(path.clone());
+                                    // Opt+더블클릭 = 별도 편집기 창으로 바로 열기.
+                                    if self.modifiers.alt_key() {
+                                        self.popout_file_window(path.clone(), event_loop);
+                                    } else {
+                                        self.open_file_split(path.clone());
+                                    }
                                 } else {
                                     self.last_tree_click = Some((now, path.clone()));
                                 }
@@ -2862,6 +2942,18 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // Pop-out icon (file tabs): tear the tab's editor into its
+                    // own wgpu window. Checked before × since it sits left of it.
+                    if let Some((pid, idx)) = self
+                        .pane_tab_popout_rects
+                        .iter()
+                        .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(id, i, _)| (id.clone(), *i))
+                    {
+                        self.popout_pane_tab(&pid, idx, event_loop, None);
+                        window.request_redraw();
+                        return;
+                    }
                     if let Some((pid, idx)) = self
                         .pane_tab_close_rects
                         .iter()
@@ -3169,6 +3261,34 @@ impl ApplicationHandler<UserEvent> for App {
                         // list; a plain press just switches to that tab.
                         if let Some(mut td) = self.tab_drag.take() {
                             window.set_cursor(CursorIcon::Default);
+                            // Phase 3 tear-off: 파일 탭을 창 밖에서 놓으면 별도
+                            // 편집기 창으로 뜯어낸다. 창 안(패널 body 포함)에
+                            // 놓으면 아래 split/dock 경로가 그대로 처리 —
+                            // 여기선 커서가 창 밖으로 나갔을 때만 가로챈다.
+                            if td.active {
+                                let (win_w, win_h) = self.logical_win_size();
+                                if Self::drag_left_window(
+                                    self.cursor_px.0,
+                                    self.cursor_px.1,
+                                    win_w,
+                                    win_h,
+                                ) && self.tab_is_file(&td.pane, td.from)
+                                {
+                                    // 단일탭 파일 pane 이면 라이브 백업이 남아
+                                    // 있을 수 있으니 먼저 정리(원위치 복귀 상태).
+                                    self.finish_live_drag();
+                                    let near = self.cursor_screen_phys();
+                                    self.popout_pane_tab(
+                                        &td.pane,
+                                        td.from,
+                                        event_loop,
+                                        near,
+                                    );
+                                    self.chrome_dirty = true;
+                                    window.request_redraw();
+                                    return;
+                                }
+                            }
                             // 단일탭 pane 을 라이브로 통째 옮긴 경우: 이미 실제
                             // 재배치가 끝났으니 백업만 정리하고 확정한다. 아래의
                             // split/move 경로를 또 타면 이중 적용된다.
@@ -3541,6 +3661,24 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
+                // Restore prompt: Enter = 복원, Esc = 새로 시작. Swallow all
+                // other keys so nothing reaches the fresh session behind the dim.
+                if self.restore_prompt.is_some() {
+                    if matches!(event.state, ElementState::Pressed) {
+                        use winit::keyboard::{Key, NamedKey};
+                        match event.logical_key {
+                            Key::Named(NamedKey::Enter) => {
+                                self.restore_dialog_pick(RestoreBtn::Restore);
+                            }
+                            Key::Named(NamedKey::Escape) => {
+                                self.restore_dialog_pick(RestoreBtn::Fresh);
+                            }
+                            _ => {}
+                        }
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // KASATERM_KEY_DEBUG=1 → dump every key event with its
                 // modifier snapshot. Used to debug "Cmd+= doesn't zoom"
                 // class issues where it's unclear whether the OS even
@@ -3832,6 +3970,28 @@ impl ApplicationHandler<UserEvent> for App {
                 w.request_redraw();
             }
         }
+        // Headless verification: auto-resolve the launch restore prompt so a
+        // capture can exercise the full 복원 rebuild (or 새로 시작 discard)
+        // without a click. KASATERM_AUTORESTORE=restore|fresh. No-op unless a
+        // prompt is actually up, so it never fires on a normal (no saved state)
+        // launch.
+        if self.restore_prompt.is_some() {
+            match std::env::var("KASATERM_AUTORESTORE").as_deref() {
+                Ok("restore") => {
+                    self.restore_dialog_pick(RestoreBtn::Restore);
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+                Ok("fresh") => {
+                    self.restore_dialog_pick(RestoreBtn::Fresh);
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+                _ => {}
+            }
+        }
         // Headless verification: clean-exit once the autoquit deadline passes
         // so save-on-exit (and the next launch's restore) can be tested.
         if let Some(at) = self.autoquit_at {
@@ -3893,9 +4053,11 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autotabs();
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
-        self.run_pending_autosettings();
+        self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
         self.run_pending_automdselect();
+        self.run_pending_auxpopout(event_loop);
+        self.drain_aux_captures();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was
@@ -3929,6 +4091,8 @@ impl ApplicationHandler<UserEvent> for App {
                 .values()
                 .any(|a| a.status == "working")
             || !self.pending_capture.is_empty()
+            // 별도창 캡처가 대기 중이면 그 deadline 까지 깨어 있어야 arming 이 발화한다.
+            || self.aux_windows.iter().any(|a| a.pending_capture.is_some())
             || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()
             // An unseen-notification window tab blinks (synced to the cursor
@@ -3976,6 +4140,19 @@ impl App {
         match dlg.action {
             PendingClose::Window => event_loop.exit(),
             other => self.do_close(other),
+        }
+    }
+    /// Resolve the Chrome-style restore prompt: 복원 rebuilds the saved
+    /// workspace, 새로 시작 discards the saved state and keeps the fresh session
+    /// start_pty already spawned. Either way the prompt clears.
+    pub(crate) fn restore_dialog_pick(&mut self, btn: RestoreBtn) {
+        let Some(state) = self.restore_prompt.take() else {
+            return;
+        };
+        self.chrome_dirty = true;
+        match btn {
+            RestoreBtn::Restore => self.restore_session_state(&state),
+            RestoreBtn::Fresh => crate::socket::clear_session_state(),
         }
     }
 }

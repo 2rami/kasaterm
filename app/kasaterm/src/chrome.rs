@@ -4,6 +4,30 @@ use super::*;
 /// How long a completion notification pulses a pane header / sidebar done-dot.
 const NOTIFY_FLASH_MS: u128 = 1800;
 
+/// 완료 토스트 문구 — "누가(캐릭터, pane 고정값) + 무엇(hook title, 완료 순간
+/// 캡처)". OSC 작업명(가변·stale 원천)은 안 쓰고 캐릭터명만 결합하므로 stale 이
+/// 없다. 캐릭터 미배정·미현존 pane 이면 hook title 만(정보 보존 폴백). title 앞
+/// "✓ " 는 중복이라 벗겨낸다.
+fn format_completion_toast(character: Option<&str>, title: &str) -> String {
+    let gist = title.trim().trim_start_matches('✓').trim();
+    match character {
+        Some(c) => format!("✓ {c} — {gist}"),
+        None => format!("✓ {gist}"),
+    }
+}
+
+/// 권한 대기 토스트 — 완료 토스트와 같은 원칙(캐릭터 고정값 + hook reason,
+/// 미현존이면 reason 만). Notification hook 경로.
+fn format_attention_toast(character: Option<&str>, reason: &str) -> String {
+    let reason = reason.trim();
+    match (character, reason.is_empty()) {
+        (Some(c), true) => format!("⚠ {c} — 권한 대기중"),
+        (Some(c), false) => format!("⚠ {c} — {reason}"),
+        (None, true) => "⚠ 권한 대기중".to_string(),
+        (None, false) => format!("⚠ 권한 대기중 — {reason}"),
+    }
+}
+
 impl App {
     /// pane 의 표시용 학생 — "터미널은 파싱만"(거노): claude sessionId 바인딩이 정본,
     /// agents/attach 뷰 pane 은 파싱 전 스폰 랜덤(ws.pane_character)을 보여주지 않는다
@@ -63,8 +87,11 @@ impl App {
         // A sticky approval toast (chips waiting on the user) outranks a
         // completion blip — same guard as the grid-scan path in input.rs.
         if was_working && self.collab.toast_action.is_none() {
-            let name = self.pane_header_label(surface_id);
-            self.collab.toast = Some((format!("✓ {name} 작업 완료"), now));
+            // 토스트 = 캐릭터명(pane 고정, stale 없음) + hook title(완료 순간 캡처).
+            // surface_id 가 미현존(resume/재사용 stale)이면 캐릭터 없이 title 만.
+            let character = self.pane_character_if_known(surface_id);
+            self.collab.toast =
+                Some((format_completion_toast(character.as_deref(), title), now));
             self.collab.toast_rect = None;
         }
         self.notify_flash.insert(surface_id.to_string(), now);
@@ -93,13 +120,9 @@ impl App {
     pub(crate) fn handle_attention(&mut self, surface_id: &str, reason: &str) {
         let now = std::time::Instant::now();
         let is_active_pane = self.ws.lock().unwrap().active_pane.as_deref() == Some(surface_id);
-        let name = self.pane_header_label(surface_id);
+        // 캐릭터명(pane 고정) + hook reason(완료 순간). OSC 작업명은 안 쓴다.
+        let character = self.pane_character_if_known(surface_id);
         let reason = reason.trim();
-        let detail = if reason.is_empty() {
-            String::new()
-        } else {
-            format!(" — {reason}")
-        };
         self.notify_flash.insert(surface_id.to_string(), now);
         // Attention raised in a background window — pulse its sidebar tab too.
         if let Some(wi) = self.window_of_pane(surface_id) {
@@ -111,13 +134,29 @@ impl App {
         // 이미 sticky 승인 토스트(칩 포함)가 이 pane 으로 떠 있으면 hook 의
         // 중복 알림으로 텍스트를 덮지 않는다.
         if self.collab.toast_action.as_deref() != Some(surface_id) {
-            self.collab.toast = Some((format!("⚠ {name} 권한 대기중{detail}"), now));
+            self.collab.toast =
+                Some((format_attention_toast(character.as_deref(), reason), now));
             self.collab.toast_rect = None;
         }
         if !(self.window_focused && is_active_pane) {
             self.unread_panes.insert(surface_id.to_string());
-            notify_desktop("⚠ 권한 필요", &format!("{name}{detail}"));
+            let who = character.as_deref().unwrap_or("pane");
+            let body = if reason.is_empty() {
+                who.to_string()
+            } else {
+                format!("{who} — {reason}")
+            };
+            notify_desktop("⚠ 권한 필요", &body);
         }
+    }
+
+    /// pane 이 현존하고 캐릭터가 배정됐으면 그 이름(고정값) — 토스트 "누가" 소스.
+    /// 미현존(resume/재사용으로 surface_id 가 stale)이거나 순정 pane 이면 None →
+    /// 호출부는 hook 정보만으로 폴백(토스트를 드롭하지 않는다).
+    pub(crate) fn pane_character_if_known(&self, id: &str) -> Option<String> {
+        let ws = self.ws.lock().unwrap();
+        let known = ws.panes.contains_key(id) || self.pty.contains_key(id);
+        known.then(|| ws.pane_character.get(id).cloned()).flatten()
     }
 
     /// Drop the focused pane from the unread set (the user is now looking at
@@ -928,18 +967,10 @@ impl App {
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)
         {
-            // Picking a session tab means you want to see it, so leave the
-            // settings screen first.
-            if self.settings_open {
-                self.close_settings();
-            }
             self.switch_window(idx);
             return true;
         }
         if self.new_window_btn_rect.map(|r| inside(&r)).unwrap_or(false) {
-            if self.settings_open {
-                self.close_settings();
-            }
             // 피커 항목은 Windows 설치 셸뿐 — macOS/Linux 는 목록이 비므로
             // 메뉴 대신 즉시 기본 셸 새 윈도우("Claude 학생" 항목은 폐기 —
             // split+claude 수동 부팅으로 충분, 거노).
@@ -1527,6 +1558,30 @@ impl App {
             .unwrap_or(1.0);
         dpi * self.ui_zoom
     }
+    /// "빠른 파일" 고정 섹션 목록: (라벨, 경로, 아이콘 이름). ① 개인 CLAUDE.md
+    /// (~/.claude/CLAUDE.md) 는 항상, ② 프로젝트 CLAUDE.md(트리 root/CLAUDE.md)·
+    /// ③ 프로젝트 메모리(root/.memory/MEMORY.md, symlink 허용→exists) 는 있을 때만.
+    pub(crate) fn quick_files(&self) -> Vec<(&'static str, std::path::PathBuf, &'static str)> {
+        let mut out: Vec<(&'static str, std::path::PathBuf, &'static str)> = Vec::new();
+        if let Ok(home) = std::env::var("HOME") {
+            out.push((
+                "개인 CLAUDE.md",
+                std::path::PathBuf::from(home).join(".claude/CLAUDE.md"),
+                "claude",
+            ));
+        }
+        if let Some(root) = self.file_tree.root.as_ref() {
+            let proj = root.join("CLAUDE.md");
+            if proj.exists() {
+                out.push(("프로젝트 CLAUDE.md", proj, "claude"));
+            }
+            let mem = root.join(".memory/MEMORY.md");
+            if mem.exists() {
+                out.push(("프로젝트 메모리", mem, "braces"));
+            }
+        }
+        out
+    }
     /// Adjust the whole-UI zoom by `delta` (additive on the multiplier).
     /// Clamped to a sane range; chrome + sidebar + every pane scale together.
     pub(crate) fn change_ui_zoom(&mut self, delta: f32) {
@@ -1841,5 +1896,43 @@ pub(crate) fn open_url_in_browser(url: &str) {
         .spawn();
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let _ = crate::proc::command("xdg-open").arg(url).spawn();
+}
+
+#[cfg(test)]
+mod toast_tests {
+    use super::*;
+
+    // 완료 토스트 = 캐릭터(pane 고정) + hook title(완료 순간). title 앞 "✓ " 중복 제거.
+    #[test]
+    fn completion_toast_combines_character_and_title() {
+        assert_eq!(
+            format_completion_toast(Some("미도리"), "✓ ai-art-지원 — claude 완료"),
+            "✓ 미도리 — ai-art-지원 — claude 완료"
+        );
+    }
+
+    // 미현존/미배정 pane → 캐릭터 없이 hook title 만(정보 보존, 드롭 안 함).
+    #[test]
+    fn completion_toast_falls_back_to_title_when_no_character() {
+        assert_eq!(
+            format_completion_toast(None, "✓ ai-art-지원 — claude 완료"),
+            "✓ ai-art-지원 — claude 완료"
+        );
+    }
+
+    // 권한 대기 토스트 — 캐릭터·reason 유무 4갈래.
+    #[test]
+    fn attention_toast_variants() {
+        assert_eq!(
+            format_attention_toast(Some("아루"), "Bash 실행 권한"),
+            "⚠ 아루 — Bash 실행 권한"
+        );
+        assert_eq!(format_attention_toast(Some("아루"), ""), "⚠ 아루 — 권한 대기중");
+        assert_eq!(
+            format_attention_toast(None, "Bash 실행 권한"),
+            "⚠ 권한 대기중 — Bash 실행 권한"
+        );
+        assert_eq!(format_attention_toast(None, ""), "⚠ 권한 대기중");
+    }
 }
 
