@@ -16,6 +16,11 @@
 input=$(cat)
 tp=$(printf '%s' "$input" | python3 -c "import sys,json;print(json.load(sys.stdin).get('transcript_path',''))" 2>/dev/null)
 [ -z "$tp" ] && exit 0
+# title-sync 가 띄운 headless claude(및 그 내부 제목생성 서브세션)는 부모 pane 의
+# KASATERM_PANE_ID 를 물려받는다 — 여기서 bind 하면 pane_claude_sid 가 이 title-gen
+# 세션으로 덮여 입력박스 인레이에 "아래 대화의 주제를…" 메타프롬프트가 샌다. 전용
+# junk cwd(kasaterm-title-gen)로 식별해 건너뛴다(title-sync env 정리의 이중 안전망).
+case "$tp$PWD" in *kasaterm-title-gen*) exit 0 ;; esac
 # detach 포크 페르소나 복원(거노: 백그라운드 가면 페르소나 풀림): 데몬이 포크 argv 를
 # 재구성하며 --append-system-prompt 가 유실된다. env KASATERM_PERSONA 는 데몬 env(데몬을
 # 낳은 옛 pane 고정)라 계보가 틀려 못 쓴다 — 물려받은 transcript stem(포크 첫 부팅 =

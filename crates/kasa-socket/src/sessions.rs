@@ -84,6 +84,12 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
 fn parse_session_label(path: &Path) -> Option<String> {
     use std::io::BufRead;
     if let Some(t) = last_custom_title(path) {
+        // "세션제목생성" = claude 내부 제목생성(title-gen) 서브세션이 자기 세션에
+        // 다는 마커 제목. 이 세션의 첫 user 는 "아래 대화의 주제를…" 메타프롬프트라
+        // 폴백도 오염된다 — 라벨 자체를 포기해 인레이/피커에서 지운다.
+        if t == "세션제목생성" {
+            return None;
+        }
         return Some(t);
     }
     let f = std::fs::File::open(path).ok()?;
@@ -185,6 +191,9 @@ fn is_meta_user_text(t: &str) -> bool {
         || t.starts_with("<system-reminder")
         || t.starts_with("<bash-")
         || t.starts_with("Caveat:")
+        // claude 내부 title-gen 서브세션의 첫 user 프롬프트 — custom-title 스탬프
+        // 전 찰나에 이게 첫 user 폴백으로 새어 인레이에 유출됐다(거노 실측).
+        || t.starts_with("아래 대화의 주제를 나타내는")
 }
 
 /// user transcript 라인의 본문 텍스트 — content 가 문자열이면 그대로, 블록 배열이면
@@ -341,5 +350,44 @@ mod tests {
         let p = tmp_jsonl("nostamp", &filler_line.repeat(300));
         assert_eq!(last_custom_title(&p), None);
         let _ = std::fs::remove_file(&p);
+    }
+
+    fn user_rec(t: &str) -> String {
+        format!(r#"{{"type": "user", "message": {{"content": "{t}"}}}}"#) + "\n"
+    }
+
+    // title-gen 세션(custom-title="세션제목생성")은 라벨을 포기한다 — 스탬프가
+    // 있어도 첫 user(메타프롬프트)로 폴백하지 않고 None.
+    #[test]
+    fn titlegen_marker_yields_no_label() {
+        let mut body = user_rec("아래 대화의 주제를 나타내는 한국어 제목을 딱 하나 출력해");
+        body.push_str(&title_rec("세션제목생성"));
+        let p = tmp_jsonl("titlegenmarker", &body);
+        assert_eq!(parse_session_label(&p), None);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // custom-title 스탬프 전 찰나: 첫 user 가 메타프롬프트뿐이면 라벨 없음
+    // (is_meta_user_text 가 걸러 first_user 가 안 잡힌다).
+    #[test]
+    fn titlegen_metaprompt_first_user_skipped() {
+        let body = user_rec("아래 대화의 주제를 나타내는 한국어 제목을 딱 하나 출력해");
+        let p = tmp_jsonl("metaonly", &body);
+        assert_eq!(parse_session_label(&p), None);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // 회귀 방지: 정상 세션 제목·첫 user 폴백은 그대로 살아있어야 한다.
+    #[test]
+    fn normal_session_label_unaffected() {
+        let mut custom = user_rec("간단히 인사만 해줘");
+        custom.push_str(&title_rec("한 문장 인사"));
+        let p1 = tmp_jsonl("normalcustom", &custom);
+        assert_eq!(parse_session_label(&p1).as_deref(), Some("한 문장 인사"));
+        let _ = std::fs::remove_file(&p1);
+
+        let p2 = tmp_jsonl("normaluser", &user_rec("파일트리 버그 고쳐줘"));
+        assert_eq!(parse_session_label(&p2).as_deref(), Some("파일트리 버그 고쳐줘"));
+        let _ = std::fs::remove_file(&p2);
     }
 }
