@@ -206,21 +206,18 @@ fn tab_icon_glyph(name: &str) -> &'static str {
 }
 
 /// claude Code 가 OSC 제목에 붙이는 선행 활동 글리프(✳/✶/✻/✽ … dingbat 별표류
-/// + ∗ ＊ *)와 뒤 공백을 벗긴다. 타이틀바·헤더가 "아로나 · ✳ 요약" 대신
-/// "아로나 · 요약" 을 보이게(거노). 별표로 시작 안 하면 원문 그대로.
+/// + ∗ ＊ * + 브라유 스피너 ⠂⠐… U+2800 블록)와 공백 run 을 벗긴다. 타이틀바·
+/// 헤더·board 라벨이 "아로나 · ⠂ 요약" 대신 "아로나 · 요약" 을 보이게(거노).
+/// 활동 글리프로 시작 안 하면 원문 그대로(rename 사용자 값 보호).
 pub(crate) fn strip_activity_prefix(s: &str) -> &str {
-    let t = s.trim_start();
-    match t.chars().next() {
-        Some(c)
-            if matches!(c,
+    s.trim_start_matches(|c: char| {
+        c.is_whitespace()
+            || matches!(c,
                 '*' | '\u{2217}' | '\u{FF0A}'   // ASCII * / ∗ / ＊
-                | '\u{2731}'..='\u{2749}'        // ✱..❉ dingbat asterisks·stars
-            ) =>
-        {
-            t[c.len_utf8()..].trim_start()
-        }
-        _ => t,
-    }
+                | '\u{2721}'..='\u{2749}'        // ✢..❉ dingbat asterisks·stars
+                | '\u{2800}'..='\u{28FF}'        // braille 스피너 프레임
+            )
+    })
 }
 
 /// File-type icon (assets/icons/ft, 브랜드컬러 filled)를 파일명에서 고른다.
@@ -5180,6 +5177,9 @@ mod tests {
         assert_eq!(strip_activity_prefix("✻  Brewed for 5s"), "Brewed for 5s");
         assert_eq!(strip_activity_prefix("* build"), "build");
         assert_eq!(strip_activity_prefix("＊작업"), "작업");
+        // 브라유 스피너(U+2800 블록) 접두 — 연속 run 도 한 번에.
+        assert_eq!(strip_activity_prefix("⠂ 세션 요약 디버깅"), "세션 요약 디버깅");
+        assert_eq!(strip_activity_prefix("⠐⠑ 이름"), "이름");
         // 별표로 시작 안 하면 원문 그대로(rename 사용자 값 보호).
         assert_eq!(strip_activity_prefix("학생 프사 개선"), "학생 프사 개선");
         assert_eq!(strip_activity_prefix("main.rs · vim"), "main.rs · vim");

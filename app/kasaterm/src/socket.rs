@@ -1372,7 +1372,12 @@ impl Backend for PtyBackend {
         // 1회 읽어 모든 행에 동일 적용(글로벌 설정이라 pane 무관).
         let saved_effort = claude_saved_effort();
         for row in &mut board {
-            row.title = osc_titles.get(&row.surface_id).cloned().unwrap_or_default();
+            // OSC title 은 claude 작업 중 "⠂ 제목" 꼴로 스피너 글리프가 붙는다 —
+            // board 라벨(웹뷰 "학생 · 작업명")에 새지 않게 벗겨서 싣는다.
+            row.title = osc_titles
+                .get(&row.surface_id)
+                .map(|t| crate::strip_activity_prefix(t).to_string())
+                .unwrap_or_default();
             row.effort_default = saved_effort.clone();
             if let Some(&pid) = pane_pids.get(&row.surface_id) {
                 if let Some(cwd) = self.pane_cwd_live(pid) {
@@ -2248,12 +2253,7 @@ fn resolve_sid8(sid8: &str) -> Option<String> {
 /// 꼴이라 선행 브라유 스피너(⠐… U+2800 블록)·별표류·공백을 벗겨 name 만 남긴다 —
 /// `claude agents --json` 의 name 과 정확 일치해야 rebind_agents_panes 가 매칭한다.
 fn title_session_name(t: &str) -> &str {
-    t.trim_start_matches(|c: char| {
-        ('\u{2800}'..='\u{28FF}').contains(&c)
-            || matches!(c, '✳' | '✻' | '✢' | '✽' | '*' | '＊' | '∗')
-            || c.is_whitespace()
-    })
-    .trim()
+    crate::strip_activity_prefix(t).trim_end()
 }
 
 /// `claude attach <sid>` 의 대상 세션 id — attach 는 위치 인자라 기존

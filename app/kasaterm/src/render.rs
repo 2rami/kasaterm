@@ -5797,6 +5797,7 @@ fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
 fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
     let Some(range) = prompt_box_rows(rows) else { return };
     let (b1, b2) = (range.start - 1, range.end);
+    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     for i in [b1, b2] {
         for c in rows[i].iter_mut() {
             // 세션명/테두리 줄 배경(claude --agent-color 로 채운 accent 밴드)을
@@ -5804,8 +5805,20 @@ fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
             // 두고 배경은 안 칠한다(거노: 배경까지 채우면 글자가 묻힌다).
             c.bg = kasa_bridge::screen::Color::Default;
             if c.ch != ' ' && c.ch != '\0' {
-                c.fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
+                c.fg = fg.clone();
             }
+        }
+    }
+    // 입력행 왼쪽 ❯ 프롬프트 마커도 학생 accent 로 — claude --agent-color(8색
+    // 근사)가 남으면 보더와 화살표 색이 어긋난다(거노). 마커 글리프 한 칸만
+    // 칠하고 입력 글자는 테마 기본 fg 유지.
+    for r in range {
+        if let Some(c) = rows[r]
+            .iter_mut()
+            .find(|c| c.ch != ' ' && c.ch != '\0')
+            .filter(|c| matches!(c.ch, '❯' | '›' | '>'))
+        {
+            c.fg = fg.clone();
         }
     }
 }
@@ -5912,8 +5925,11 @@ fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, usize, String)> {
     if name.is_empty() {
         return None;
     }
-    // 이름 뒤는 전부 공백이어야(본문 인용 오탐 방지).
-    if !after[name.len()..].chars().all(|c| c == ' ') {
+    // 이름 뒤는 공백, 또는 "(ctrl+o to expand)" 꼴 단축키 힌트 하나만 허용 —
+    // claude v2.1.216+ 가 접힌 줄 끝에 힌트를 붙인다(chord 는 키바인딩 따라
+    // 변주라 "to expand)" 종결로 판정). 그 외 텍스트는 본문 인용 오탐 방지.
+    let tail = after[name.len()..].trim_matches(' ');
+    if !tail.is_empty() && !(tail.starts_with('(') && tail.ends_with("to expand)")) {
         return None;
     }
     Some((first, count, name))
@@ -7579,6 +7595,17 @@ mod teammate_msg_tests {
             teammate_collapsed_line(&row),
             Some((2, 1, "aru-9c88".to_string()))
         );
+        // v2.1.216+: 이름 뒤 "(ctrl+o to expand)" 단축키 힌트가 붙어도 접힌 줄.
+        let hinted = row_from("  › Message from @aru-9c88 (ctrl+o to expand)", 80);
+        assert_eq!(
+            teammate_collapsed_line(&hinted),
+            Some((2, 1, "aru-9c88".to_string()))
+        );
+        let plural_hinted = row_from("› 3 messages from @yuzu-1ba1 (ctrl+o to expand)", 80);
+        assert_eq!(
+            teammate_collapsed_line(&plural_hinted),
+            Some((0, 3, "yuzu-1ba1".to_string()))
+        );
     }
 
     // 복수형 "› N messages from @이름" → count=N, 이름 추출(여러 자릿수 포함).
@@ -7858,6 +7885,24 @@ mod prompt_title_inlay_tests {
         ];
         inlay_prompt_box_title(&mut rows, "제목");
         assert!(rows[0].iter().all(|c| c.ch == '─'));
+    }
+
+    // 보더 두 줄 + 입력행 ❯ 마커까지 학생 accent — 입력 글자는 무도색.
+    #[test]
+    fn prompt_box_paints_borders_and_marker() {
+        let accent = [143u8, 184, 216, 255]; // 시로코
+        let expect = kasa_bridge::screen::Color::Rgb(143, 184, 216);
+        let mut rows = vec![
+            row_from(&"─".repeat(30)),
+            row_from(&format!("❯ hello{}", " ".repeat(23))),
+            row_from(&"─".repeat(30)),
+        ];
+        style_prompt_box(&mut rows, accent);
+        assert_eq!(rows[0][0].fg, expect, "위 보더");
+        assert_eq!(rows[2][0].fg, expect, "아래 보더");
+        assert_eq!(rows[1][0].fg, expect, "❯ 마커");
+        // 입력 텍스트('h')는 테마 기본 fg 유지.
+        assert_ne!(rows[1][2].fg, expect, "입력 글자는 무도색");
     }
 }
 
