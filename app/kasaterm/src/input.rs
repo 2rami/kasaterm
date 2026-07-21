@@ -232,6 +232,17 @@ impl App {
             let _ = pty.send_bytes(payload.as_bytes());
         }
     }
+    /// sticky 클릭 seek 한 틱: 다음 노치가 필요하면 wheel-up SGR 을 그 pane 에
+    /// 쏘고 redraw 를 건다. 종료·대기 판정은 전부 render::sticky_seek_step 안에서.
+    /// about_to_wait 가 매 틱 호출한다.
+    pub(crate) fn run_pending_sticky_seek(&mut self) {
+        if let Some((pane, col, row)) = crate::render::sticky_seek_step() {
+            self.send_mouse_sgr(&pane, 64, col, row, true);
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
+    }
     /// Resolve the user-visible label for a pane: OSC 0/2 title set
     /// by the shell or a TUI → foreground process comm → cwd. Used by
     /// both the per-pane header strip and the single-pane native
