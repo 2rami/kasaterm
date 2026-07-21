@@ -83,6 +83,14 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
 /// 개명 경로라 이 우회를 피커가 반드시 읽어줘야 한다.
 fn parse_session_label(path: &Path) -> Option<String> {
     use std::io::BufRead;
+    // title-gen junk 세션(title-sync 가 haiku 제목 생성용으로 스폰하는 `claude -p`
+    // 의 cwd=kasaterm-title-gen)은 사용자 세션이 아니다 — 첫 user 가 "다음 대화
+    // 발췌를 보고…" 메타프롬프트고 assistant 는 빈 발췌 거부문("대화 발췌가 제공되지
+    // 않았어요…")이라 라벨·custom-title 이 전부 오염된다. 경로로 통째 제외해
+    // 인레이/피커에 절대 안 뜨게 한다(거노 실측).
+    if path.to_str().is_some_and(|s| s.contains("kasaterm-title-gen")) {
+        return None;
+    }
     if let Some(t) = last_custom_title(path) {
         // "세션제목생성" = claude 내부 제목생성(title-gen) 서브세션이 자기 세션에
         // 다는 마커 제목. 이 세션의 첫 user 는 "아래 대화의 주제를…" 메타프롬프트라
@@ -194,6 +202,7 @@ fn is_meta_user_text(t: &str) -> bool {
         // claude 내부 title-gen 서브세션의 첫 user 프롬프트 — custom-title 스탬프
         // 전 찰나에 이게 첫 user 폴백으로 새어 인레이에 유출됐다(거노 실측).
         || t.starts_with("아래 대화의 주제를 나타내는")
+        || t.starts_with("다음 대화 발췌를 보고")
 }
 
 /// user transcript 라인의 본문 텍스트 — content 가 문자열이면 그대로, 블록 배열이면

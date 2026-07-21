@@ -110,21 +110,6 @@ def report_cwd_to_kasaterm(cwd, session_id):
         pass
 
 
-def pane_foreground_session(pane_id):
-    """kasaterm 에 이 pane 이 지금 foreground 로 띄운 세션 id(bound transcript stem)를
-    묻는다. forked_view(세션≠anchor) 판정 뒤에만 불려 anchor 불일치 pane 만 1회
-    왕복한다 — 일반 pane 은 조회 없이 통과. 실패·미바인딩은 None."""
-    port = os.environ.get("KASASPACE_MCP_PORT", "8765")
-    try:
-        import urllib.parse
-        import urllib.request
-        url = f"http://127.0.0.1:{port}/pane-session?pane={urllib.parse.quote(pane_id)}"
-        with urllib.request.urlopen(url, timeout=0.3) as r:
-            return r.read().decode("utf-8", "replace").strip() or None
-    except Exception:
-        return None
-
-
 def main():
     try:
         d = json.loads(sys.stdin.read())
@@ -139,19 +124,6 @@ def main():
     cwd = d.get("cwd") or os.getcwd()
     session_id = d.get("session_id", "")
     report_cwd_to_kasaterm(cwd, session_id)
-
-    # 세션 id 마커 — SGR8(conceal)로 숨겨 statusline 끝에 싣는다. kasaterm 은 그리드
-    # 텍스트에서 `⟦sid8⟧` 를 읽어 "이 pane 이 지금 어느 세션을 표시 중인지"를 진입
-    # 즉시 안다(agents 피커 attach 는 이벤트·argv 흔적이 없어 이게 유일한 실시간 채널).
-    # 렌더러가 conceal 을 지원한다고 공표(caps.json)한 경우에만 — 아니면 글자가 보인다.
-    sid_marker = ""
-    if session_id and os.environ.get("KASATERM_PANE_ID"):
-        try:
-            with open(os.path.expanduser("~/.config/kasaterm/caps.json"), encoding="utf-8") as f:
-                if json.load(f).get("sgr_conceal"):
-                    sid_marker = f"\033[8m⟦{session_id[:8]}⟧\033[28m"
-        except Exception:
-            pass
 
     sep = f" {DIM}{ansi(C_SEP)}{sep_char}{RESET} "
     parts = []
@@ -175,19 +147,11 @@ def main():
         else:
             parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
 
-    # 포크/백그라운드 세션 배지. anchor(KASATERM_SESSION_ID) 불일치만으로는 detach
-    # 포크·앱 재시작 복원·continuation 이 구분 안 돼 오발화했다(거노: 복원 세션에
-    # ⑂bg). shim env 마커(RESUMED_SID/RESUME_PICKER)도 continuation 처럼 claude 가
-    # anchor 와 다른 세션을 이어가는 케이스는 못 잡는다 — 부팅 전 shim 이 실제 세션
-    # id 를 모르기 때문. 그래서 anchor 불일치 pane 만 kasaterm 에 실제 foreground
-    # 세션을 물어 정밀 판별한다: bound==내세션 = 복원/재부팅(배지 없음),
-    # bound≠내세션 = 진짜 포크(배지). 조회 실패·미바인딩은 보수적으로 생략(오발화
-    # 방지 우선). anchor 일치 pane 은 HTTP 왕복 없이 즉시 통과.
-    pane_id = os.environ.get("KASATERM_PANE_ID")
-    if forked_view and pane_id and session_id:
-        bound = pane_foreground_session(pane_id)
-        if bound and bound != session_id:
-            parts.append(f"{DIM}{ansi(C_FALLBACK)}⑂ bg{RESET}")
+    # ⑂bg 백그라운드 배지 제거(거노: 복원 세션에 자꾸 백그라운드로 떠 짜증). anchor
+    # (KASATERM_SESSION_ID) 불일치 판정은 detach 포크·앱 재시작 복원·continuation 을
+    # 구분 못 해 오발화가 잦았고, pane_foreground_session HTTP 왕복 정밀 판별도
+    # --resume 복원 경로에선 여전히 오판했다. pane→세션 바인딩이 복원까지 정확해진
+    # 뒤에 정밀 재도입할 것. forked_view 는 위 프사 이름 교정에만 쓴다.
 
     model = (d.get("model") or {}).get("display_name")
     if model:
@@ -226,7 +190,7 @@ def main():
         parts.append(f"{ansi(EFFORT_HEX.get(lvl, '7aa2f7'))}{ic['effort']} {lvl}{RESET}")
 
     # 마커는 세그먼트 뒤 끝자락 — 좁은 pane 에서 잘리면 폴백(argv·타이틀·3s 폴)이 줍는다.
-    print(sep.join(parts) + sid_marker)
+    print(sep.join(parts))
 
 
 if __name__ == "__main__":

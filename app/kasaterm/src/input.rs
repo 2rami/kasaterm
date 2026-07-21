@@ -237,7 +237,13 @@ impl App {
     /// about_to_wait 가 매 틱 호출한다.
     pub(crate) fn run_pending_sticky_seek(&mut self) {
         if let Some((pane, col, row)) = crate::render::sticky_seek_step() {
-            self.send_mouse_sgr(&pane, 64, col, row, true);
+            // 노치당 여러 줄 스크롤 — 1줄씩이라 너무 느렸다(거노). wheel-up 을
+            // 여러 번 쏴 체감 속도를 올린다. sticky_seek_step 의 reached 판정이
+            // 매 틱 화면을 확인하므로 목표가 뷰에 들면 즉시 멈춘다(약간의
+            // overshoot 는 허용 — 한 화면 위로 지나가도 프롬프트는 보인다).
+            for _ in 0..4 {
+                self.send_mouse_sgr(&pane, 64, col, row, true);
+            }
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }

@@ -1258,10 +1258,19 @@ impl Backend for PtyBackend {
                         None
                     })
                     .filter(|c| valid_members.contains(c));
-                // 셸 env 폴백(foreground 순정 경로) — bg 셸엔 대개 없다.
+                // 셸 env 폴백(foreground 순정 경로) — bg 셸엔 대개 없다. 단 spawn 시
+                // 동결된 KASATERM_CHARACTER 는 --resume/재배정 후 stale 하다(거노: 복원
+                // 후 board 가 전부 미도리 — env CHARACTER 는 미도리로 굳었지만 pane env 의
+                // SESSION_ID 가 가리키는 실제 세션 bind 는 각자 아루·히마리·아리스였다).
+                // 그래서 SESSION_ID 의 세션 bind 를 먼저(신선) 조회하고, 없을 때만 동결
+                // CHARACTER 로 폴백한다.
                 let env_char = pane_shell_pid
                     .get(sid.as_str())
-                    .and_then(|&pid| kasa_pty::process_env_var(pid, "KASATERM_CHARACTER"))
+                    .and_then(|&pid| {
+                        kasa_pty::process_env_var(pid, "KASATERM_SESSION_ID")
+                            .and_then(|s| kasa_mcp::character::session_character(&s))
+                            .or_else(|| kasa_pty::process_env_var(pid, "KASATERM_CHARACTER"))
+                    })
                     .filter(|c| valid_members.contains(c));
                 row.character = retained
                     .clone()
@@ -1307,7 +1316,17 @@ impl Backend for PtyBackend {
                     // 복귀) 그 학생을 재사용 — board 첫 폴링부터 랜덤 둔갑 차단(거노). 부모
                     // 상속 다음, 빈 슬롯 랜덤 앞.
                     let own = stem.and_then(kasa_mcp::character::session_character);
-                    let name = inherited.or(own).or_else(|| {
+                    // respawn/새 세션(claude 가 --resume 없이 새 sid 발급)은 pane 셸 env 의
+                    // SESSION_ID(스폰·swap 이 박은 원본 anchor)가 가리키는 학생을 상속한다 —
+                    // 안 하면 lazy 빈슬롯 배정이 미도리로 오배정돼 retained 가 오염됐다(거노:
+                    // swap 후 %3 이 매 턴 새 세션을 발급하며 계속 미도리로 뭉침). apply_session_
+                    // character 의 anchored 경로와 동일 규칙.
+                    let anchored = pane_shell_pid
+                        .get(sid.as_str())
+                        .and_then(|&pid| kasa_pty::process_env_var(pid, "KASATERM_SESSION_ID"))
+                        .and_then(|es| kasa_mcp::character::session_character(&es))
+                        .filter(|c| valid_members.contains(c));
+                    let name = anchored.or(inherited).or(own).or_else(|| {
                         kasa_mcp::character::characters_json().and_then(|chars| {
                             let members = kasa_mcp::character::member_names(&chars);
                             // 살아있는 다른 pane 이 쓰는 캐릭터(이번 폴링 누적 스냅샷)는 피한다 —
@@ -1827,18 +1846,15 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     let was_claude = sess
         .active_process_name()
         .map_or(false, |p| p.contains("claude"));
-    // Only record a session id for panes actually running claude. Prefer the
-    // id straight off the running claude's argv (exact per-pane); two claudes
-    // in the same cwd no longer collapse onto one id the way the cwd-mtime
-    // guess does. Fall back to the mtime guess for a fresh `claude` whose argv
-    // carries no id. Crucially the mtime fallback is INSIDE the was_claude
-    // guard — otherwise a plain shell pane (no claude) would still get the
-    // cwd's newest session id stapled on, so every pane sharing a cwd collapsed
-    // onto one id and `claude --resume` restored the wrong/duplicate session.
+    // Only record a session id for panes actually running claude, straight off
+    // the running claude's argv (exact per-pane). The cwd-mtime fallback that
+    // used to fill argv-less `claude` panes is gone — it collapsed every pane
+    // sharing a cwd onto one session id (거노: 재시작 시 여러 pane 이 다 같은 대화+
+    // 캐릭터로 뭉침). layout_to_json 이 pane_claude_sid(SocketSessionBound)로 정확한
+    // per-pane 세션을 채우므로, pane_record 는 argv id 만 보고하고 없으면 None 을 둔다
+    // (restore_leaf 가 fresh claude 로 복원).
     let session_id = if was_claude {
-        shell_pid
-            .and_then(claude_session_id_from_cmdline)
-            .or_else(|| cwd.as_ref().and_then(|c| latest_claude_session_id(c)))
+        shell_pid.and_then(claude_session_id_from_cmdline)
     } else {
         None
     };
@@ -2308,29 +2324,6 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
         cur = ppid;
     }
     None
-}
-
-/// claude stores sessions under ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl,
-/// where the abs cwd is encoded by replacing `/` and `.` with `-`. The newest
-/// .jsonl there is the session the pane was last on.
-pub(crate) fn latest_claude_session_id(cwd: &std::path::Path) -> Option<String> {
-    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
-    let dir = kasa_socket::home_dir()?
-        .join(".claude/projects")
-        .join(encoded);
-    let mut newest: Option<(std::time::SystemTime, String)> = None;
-    for entry in std::fs::read_dir(&dir).ok()?.flatten() {
-        let p = entry.path();
-        if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else { continue };
-        let Some(id) = p.file_stem().and_then(|x| x.to_str()) else { continue };
-        if newest.as_ref().map_or(true, |(t, _)| mtime > *t) {
-            newest = Some((mtime, id.to_string()));
-        }
-    }
-    newest.map(|(_, id)| id)
 }
 
 /// hook-free transcript 발견 — 우리는 PTY 를 자체 소유하므로, 셸 pid 만으로

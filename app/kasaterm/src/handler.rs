@@ -2996,6 +2996,27 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some((path, dir)) =
                         self.divider_at_px(self.cursor_px.0, self.cursor_px.1)
                     {
+                        // Ctrl+세로선 드래그: 상하 관통하던 세로선을 상/하 독립
+                        // 경계로 영구 분리(트리를 상하먼저로 재구조화)한 뒤, 새
+                        // 하단 경계만 드래그한다. 정렬 안 됨/단일 pane 이면
+                        // split_htov_at 이 None → 아래 일반 드래그로 폴백.
+                        if self.modifiers.control_key()
+                            && dir == kasa_pty::SplitDir::Horizontal
+                        {
+                            if let Some(bot) = self
+                                .pty_layout
+                                .as_mut()
+                                .and_then(|t| t.split_htov_at(&path))
+                            {
+                                self.resize_drag =
+                                    Some((bot, kasa_pty::SplitDir::Horizontal));
+                                self.publish_pty_layout();
+                                let (cols, rows) = self.window_cells();
+                                self.resize_backend(cols, rows);
+                                window.request_redraw();
+                                return;
+                            }
+                        }
                         self.resize_drag = Some((path, dir));
                         return;
                     }
