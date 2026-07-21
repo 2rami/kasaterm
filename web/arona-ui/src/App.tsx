@@ -349,7 +349,8 @@ export function App() {
                           const hidden = zoomedSurface != null && !isZoom; // 다른 타일이 줌이면 가린다
                           const active = activeId === r.surface_id;
                           // 학생별 accent 색 테두리 — 늘 얇게 둘러 구별하고, active/zoom 은 굵게 강조.
-                          const accentHex = a?.accent ? hex(accentByName[a.accent]) : 'var(--cth-cream-200)';
+                          // 캐릭터 고정색(accentHex)이 pane 번호 순환색보다 우선(네이티브와 일치).
+                          const accentHex = a?.accentHex ?? (a?.accent ? hex(accentByName[a.accent]) : 'var(--cth-cream-200)');
                           return (
                             <div key={r.surface_id} onMouseDownCapture={() => setActiveId(r.surface_id)}
                               style={isZoom

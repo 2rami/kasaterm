@@ -16,6 +16,9 @@ export interface Agent {
    *  게임개발부 학생(미도리/모모이/유즈/아리스)을 폴백 배정. assignSprites 가 채움. */
   spriteChar?: string;
   accent: AccentColorName;
+  /** 캐릭터 고정 accent(hex, kasaterm theme.rs 와 동일) — 있으면 순환색(accent)을
+   *  이긴다. 테두리·버블 이름색이 네이티브 pane 색과 일치하게. */
+  accentHex?: string;
   status: StatusKind;
   project: string;
   /** 현재 행동(board.intent — tool 기반). 생각 구름의 working 텍스트. */
