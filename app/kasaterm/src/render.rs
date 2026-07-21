@@ -6328,10 +6328,13 @@ fn user_sprite_images(slug: &str, motion: &str) -> Option<Vec<image::RgbaImage>>
     };
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let fname = if motion == "walk" {
-            format!("{slug}-walk-{i}.png")
-        } else {
+        // 번들 파일명 규약과 동일: idle 만 무접미(`slug-N`), 나머지 모션은
+        // `slug-<motion>-N`. walk 외 모션이 idle 파일명으로 새면 override 시
+        // wave/cheer 가 idle 프레임으로 둔갑한다.
+        let fname = if motion == "idle" {
             format!("{slug}-{i}.png")
+        } else {
+            format!("{slug}-{motion}-{i}.png")
         };
         let img = downscale_student(image::open(dir.join(&fname)).ok()?);
         out.push(img.to_rgba8());
