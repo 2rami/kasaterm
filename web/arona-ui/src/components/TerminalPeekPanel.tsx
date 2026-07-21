@@ -299,7 +299,7 @@ function flattenSystem(ev: SessionEvent): string | null {
 // buildToolMap 이 페어링해 카드 안에서 표시되니 별도 버블로 안 만든다.
 // tell 로 온 학생→학생 메시지의 발신자 — messages.jsonl from_pane 대조로 채운다. 있으면
 // 거노 직접 입력(우측 노랑)이 아니라 발신자 프사+accent 색 좌측 버블로(거노 #5/#7).
-type BubbleSender = { pane: string; name: string; accent?: AccentColorName };
+type BubbleSender = { pane: string; name: string; accent?: AccentColorName; accentHex?: string };
 type RenderItem =
   | { kind: 'bubble'; role: string; text: string; uuid?: string; ts?: string; cancelled?: boolean; queued?: boolean; images?: string[]; sender?: BubbleSender }
   | { kind: 'tool'; toolUse: { id?: string; name?: string; input?: unknown }; pair: ReturnType<ToolMap['get']> }
@@ -1570,7 +1570,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
       // 생략하고 agents 에서 accent 만 해석한다(못 찾으면 이름만, 색 없이).
       if (fromName) {
         const a = agents.find((x) => x.character === fromName);
-        return { pane: a?.id ?? '', name: fromName, accent: a?.accent };
+        return { pane: a?.id ?? '', name: fromName, accent: a?.accent, accentHex: a?.accentHex };
       }
       const t = normText(text);
       if (!t) return undefined;
@@ -1582,7 +1582,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
         if (normText(stripMeta(m.text)) === t) {
           const a = agents.find((x) => x.id === m.from_pane);
           const name = a?.character && !/^%?\d+$/.test(a.character) ? a.character : (m.from_name || m.from_pane);
-          return { pane: m.from_pane, name, accent: a?.accent };
+          return { pane: m.from_pane, name, accent: a?.accent, accentHex: a?.accentHex };
         }
       }
       return undefined;
@@ -2007,7 +2007,7 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
                     mine={mine}
                     char={turnChar}
                     name={sender ? sender.name : turnChar}
-                    nameColor={sender?.accent ? hex(accentByName[sender.accent]) : (isSub && it.role === 'user') ? 'var(--cth-sky)' : undefined}
+                    nameColor={sender?.accentHex ?? (sender?.accent ? hex(accentByName[sender.accent]) : (isSub && it.role === 'user') ? 'var(--cth-sky)' : undefined)}
                     showHead={showHead}
                     grouped={grouped}
                     cancelled={cancelled}

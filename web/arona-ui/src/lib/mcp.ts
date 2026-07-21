@@ -49,6 +49,25 @@ export async function resolveBase(force = false): Promise<void> {
 // 워커 accent — pane id 숫자 해시로 고정 팔레트 순환.
 const ACCENTS: AccentColorName[] = ['sky', 'mint', 'coral', 'lilac', 'peach'];
 
+// 학생 캐릭터 고정 accent(hex) — kasaterm 네이티브(theme.rs character_accent)와
+// 동일 값. pane 번호 순환색(accentFor)은 캐릭터와 무관해 시로코가 mint 로 뜨는
+// 식의 불일치가 났다 — 캐릭터 배정 pane 은 이 색이 테두리·버블 이름색을 이긴다.
+const CHARACTER_ACCENT: Record<string, string> = {
+  '아로나': '#4A90E2',
+  '프라나': '#E6E9F0',
+  '미도리': '#6BCF7F',
+  '모모이': '#FF6B6B',
+  '유즈': '#E64980',
+  '아리스': '#4C6EF5',
+  '유우카': '#7A5FD4',
+  '시로코': '#8FB8D8',
+  '호시노': '#F2A0C0',
+  '코하루': '#F27B9B',
+  '히마리': '#A88BE0',
+  '아루': '#E85D4A',
+  '샬레': '#3A6EB4',
+};
+
 interface BoardRow {
   surface_id: string;
   status?: string;
@@ -131,6 +150,8 @@ function toAgent(r: BoardRow): Agent {
     character: pureCharacter,
     title: r.title,
     accent: accentFor(r.surface_id),
+    // character 마커가 로스터 학생일 때만 — 작업명/surface_id 폴백엔 순환색 유지.
+    accentHex: r.character ? CHARACTER_ACCENT[r.character] : undefined,
     status,
     project: r.intent ?? '',
     action: r.intent,
