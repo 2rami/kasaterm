@@ -1992,6 +1992,25 @@ impl ApplicationHandler<UserEvent> for App {
                         window.request_redraw();
                         return;
                     }
+                    // Claude Code 스크롤 sticky prompt pill 클릭 → 그 프롬프트 쪽으로
+                    // 위로 스크롤. mouse-tracking TUI 라 정확한 위치를 몰라, 휠 up 을 한
+                    // 뭉치 보내 근사한다(아래 pane_takes_mouse SGR 전달보다 먼저 잡아
+                    // 클릭이 Claude Code 로 새지 않게).
+                    if let Some(pane_id) = crate::render::STICKY_PILLS
+                        .with(|s| s.borrow().iter().find(|(_, r)| hit(*r)).map(|(id, _)| id.clone()))
+                    {
+                        // 한 페이지(화면 높이)만큼 위로 — 15줄 고정은 부족했다. Claude
+                        // Code 스크롤 위치를 몰라 "그 프롬프트에 딱"은 아니지만, 한 판
+                        // 올리면 그 프롬프트가 화면 안으로 확실히 들어온다.
+                        let (_, rows) = self.window_cells();
+                        let n = (rows as usize).saturating_sub(3).max(15);
+                        let (col, row) = self.px_to_cell_active(cx, cy).unwrap_or((1, 1));
+                        for _ in 0..n {
+                            self.send_mouse_sgr(&pane_id, 64, col, row, true);
+                        }
+                        window.request_redraw();
+                        return;
+                    }
                     // Dock chip click. While a pane is zoomed the dock shows the
                     // hidden siblings — clicking one switches the zoom to it
                     // (toggle off the current, on the clicked, in one call since
@@ -4048,6 +4067,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autodrag();
         self.run_pending_autopanemove();
         self.run_pending_force_drag();
+        self.run_pending_autowheel();
         self.run_pending_autotoggle();
         self.run_pending_autoarona(event_loop);
         self.run_pending_autotabs();

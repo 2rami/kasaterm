@@ -342,6 +342,9 @@ impl App {
         let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
+        // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
+        // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
+        let mut sticky_pill_slots: Vec<(f32, f32, f32, f32, String, String)> = Vec::new();
         // working 스피너(✻/braille) 자리 학생 도트(제자리 걸음): 같은 형태.
         let mut spinner_slots: Vec<(&'static str, (f32, f32, f32, f32))> = Vec::new();
         // 승인 대기(approval prompt) 학생 도트(폴짝 바운스): 같은 형태.
@@ -599,6 +602,35 @@ impl App {
                     + y_cells as f32 * self.cell.h
                     + header_shift_logical
                     + PANE_INNER_Y;
+                // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill. mouse-tracking
+                // 중이라 뷰포트 스크롤 여부를 직접 못 안다 — "Jump to bottom" 힌트로
+                // 게이트한다(find_sticky_prompt). 감지 행 셀은 스냅샷에서 blank 처리해
+                // 원본 흐릿한 텍스트를 지우고, 그 자리에 pill 을 얹는다. 클릭 rect 는
+                // 아래 chrome 패스에서 STICKY_PILLS 로 mouse handler 에 넘긴다.
+                if let Some(sticky) = find_sticky_prompt(&composed) {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let scw = self.cell.w * fs;
+                    let sch = self.cell.h * fs;
+                    let end = sticky
+                        .col_end
+                        .min(composed.get(sticky.row).map_or(0, |r| r.len()));
+                    let cols = end.saturating_sub(sticky.col_start).max(1);
+                    let px = body_left + sticky.col_start as f32 * scw;
+                    let py = body_top + sticky.row as f32 * sch;
+                    sticky_pill_slots.push((
+                        px,
+                        py,
+                        cols as f32 * scw,
+                        sch,
+                        sticky.text.clone(),
+                        id.clone(),
+                    ));
+                    if let Some(row) = composed.get_mut(sticky.row) {
+                        for cell in row[sticky.col_start..end].iter_mut() {
+                            *cell = GridCell::blank();
+                        }
+                    }
+                }
                 // agents 목록 뷰 판정 — statusline 프사 슬롯(U+FFFC)이 있으면 실제
                 // 대화 세션, 없고 argv 가 claude agents 면 관리 화면(목록 뷰). 세션에
                 // 진입하면 statusline 이 붙어 자동으로 학생 표시로 넘어간다(argv 는
@@ -1836,6 +1868,34 @@ impl App {
                 ensure_anim(g, slug, "idle");
                 let key = format!("student:{slug}:f{anim_idx}");
                 g.queue_image_clipped(&key, *bx, *by, *bw, *bh, *clip_y0, *clip_y1);
+            }
+            // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill. 원본 흐릿한 행은
+            // 스캔에서 blank 처리됨 — 여기서 알약 배경 + 선명 텍스트를 셀 위에
+            // 얹고, 클릭 rect 를 STICKY_PILLS 로 mouse handler 에 넘긴다(클릭 =
+            // "위로 스크롤"). 다크 기준 고정색(테마 연동은 폴리싱).
+            const STICKY_PILL_BG: [u8; 4] = [30, 33, 42, 242];
+            const STICKY_PILL_FG: [u8; 4] = [235, 237, 243, 255];
+            STICKY_PILLS.with(|s| s.borrow_mut().clear());
+            for (px, py, pw, ph, text, pane_id) in &sticky_pill_slots {
+                let pad_x = ph * 0.55;
+                let pad_y = ph * 0.16;
+                let rx = px - pad_x;
+                let ry = py - pad_y;
+                let rw = pw + pad_x * 2.0;
+                let rh = ph + pad_y * 2.0;
+                g.round_rect_fill(rx, ry, rw, rh, rh * 0.5, STICKY_PILL_BG);
+                g.draw_text(
+                    *px,
+                    *py,
+                    text,
+                    gpu::DrawOpts {
+                        font_size: ph * 0.78,
+                        color: STICKY_PILL_FG,
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                STICKY_PILLS.with(|s| s.borrow_mut().push((pane_id.clone(), (rx, ry, rw, rh))));
             }
             // agents 뷰 SCHALE 로고 — Clawd 자리(또는 헤더 왼쪽 여백)에 정적 1프레임.
             if !schale_logo_slots.is_empty() {
@@ -6548,6 +6608,106 @@ fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
 /// blank 범위를 스냅샷 안으로 클램프하고 스프라이트를 pane 세로로 클립할 것.
 /// 반환: 배너 박스의 (top_row, left_col) 목록.
 /// 행 스캔은 첫 글리프 비교로 즉시 탈락하므로 프레임당 비용 미미.
+/// 감지된 Claude Code 스크롤 sticky prompt 한 건(셀 좌표 + 보이는 텍스트).
+pub(crate) struct StickyPrompt {
+    pub row: usize,
+    pub col_start: usize,
+    pub col_end: usize, // exclusive
+    pub text: String,
+}
+
+thread_local! {
+    /// 이번 프레임에 그린 sticky pill 들의 클릭 히트 rect(logical px) + 소속
+    /// pane id. render 가 매 프레임 새로 채우고, mouse handler 가 읽어 클릭을
+    /// "위로 스크롤" 신호로 바꾼다. struct App 무접촉(병렬 작업 규칙) — GUI 단일
+    /// 스레드라 thread_local 로 충분(testkit 의 함수-로컬 static 과 같은 원칙).
+    pub(crate) static STICKY_PILLS: std::cell::RefCell<Vec<(String, (f32, f32, f32, f32))>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+/// 저채도·중간 밝기 = "흐릿한 회색" fg. Claude Code 가 dim SGR(2) 대신 회색
+/// 전경색으로 sticky 를 흐리게 줄 때를 위한 폴백 판정(dim 플래그와 OR).
+fn is_grayish_fg(fg: &kasa_bridge::screen::Color) -> bool {
+    use kasa_bridge::screen::Color;
+    match fg {
+        Color::Idx(8) | Color::Idx(7) => true, // bright black / white-gray
+        Color::Rgb(r, g, b) => {
+            let (r, g, b) = (*r as i32, *g as i32, *b as i32);
+            let mx = r.max(g).max(b);
+            let mn = r.min(g).min(b);
+            (mx - mn) < 36 && (56..=190).contains(&mx) // 저채도 + 중간 밝기
+        }
+        _ => false,
+    }
+}
+
+/// 한 행의 보이는 텍스트 구간 요약: (text, first_col, last_col_excl, 글자수,
+/// 흐릿한 글자수). 후행 공백은 텍스트에서 트림한다.
+fn sticky_row_span(row: &[GridCell]) -> (String, usize, usize, usize, usize) {
+    let mut text = String::new();
+    let mut first: Option<usize> = None;
+    let mut last = 0usize;
+    let mut glyphs = 0usize;
+    let mut dim = 0usize;
+    for (i, c) in row.iter().enumerate() {
+        let visible = c.ch != ' ' && c.ch != '\0';
+        if visible {
+            if first.is_none() {
+                first = Some(i);
+            }
+            last = i + 1;
+            glyphs += 1;
+            if c.dim || is_grayish_fg(&c.fg) {
+                dim += 1;
+            }
+        }
+        if first.is_some() {
+            text.push(if c.ch == '\0' { ' ' } else { c.ch });
+        }
+    }
+    let first = first.unwrap_or(0);
+    (text.trim_end().to_string(), first, last, glyphs, dim)
+}
+
+/// Claude Code 의 스크롤 sticky prompt 감지. mouse-tracking TUI 라 kasaterm 은
+/// 뷰포트 스크롤 여부를 직접 못 안다 — 화면에 "Jump to bottom" 힌트(=위로
+/// 스크롤된 상태)가 있을 때만, 최상단의 흐릿한 프롬프트 행을 sticky 로 본다.
+/// 이 게이트가 평상시(맨 아래) 오탐을 막는다. `KASATERM_STICKY_DEBUG=1` 이면
+/// 게이트 결과와 상단 행 스캔을 stderr 로 흘려 실측 튜닝을 돕는다.
+pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt> {
+    let dbg = std::env::var_os("KASATERM_STICKY_DEBUG").is_some();
+    // 스크롤 게이트: "jump to bottom" / ("bottom" & "click") 관대 매치.
+    let scrolled = rows.iter().any(|r| {
+        let s: String = r.iter().map(|c| c.ch).collect::<String>().to_lowercase();
+        s.contains("jump to bottom") || (s.contains("bottom") && s.contains("click"))
+    });
+    if dbg {
+        eprintln!("[sticky] scrolled_gate={scrolled} rows={}", rows.len());
+    }
+    if !scrolled {
+        return None;
+    }
+    // 최상단 몇 행에서 "흐릿한 글자가 우세하고 실제 텍스트가 있는" 행.
+    for ri in 0..rows.len().min(3) {
+        let (text, first, last, glyphs, dim) = sticky_row_span(&rows[ri]);
+        if dbg {
+            eprintln!(
+                "[sticky] row{ri} glyphs={glyphs} dim={dim} cols={first}..{last} text={:?}",
+                text.chars().take(48).collect::<String>()
+            );
+        }
+        if glyphs >= 2 && dim * 2 >= glyphs {
+            return Some(StickyPrompt {
+                row: ri,
+                col_start: first,
+                col_end: last,
+                text,
+            });
+        }
+    }
+    None
+}
+
 fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
     const BODY: [char; 9] = ['▝', '▜', '█', '█', '█', '█', '█', '▛', '▘'];
     const HEAD: [char; 7] = ['▐', '▛', '█', '█', '█', '▜', '▌'];
@@ -7076,6 +7236,50 @@ mod clawd_banner_tests {
     fn feet_without_flanking_blanks_not_detected() {
         let rows = vec![row_from("ab▘▘ ▝▝cd"), row_from("")];
         assert_eq!(find_clawd_banners(&rows), Vec::<(isize, usize)>::new());
+    }
+
+    fn dim_row(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|c| {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                cell.dim = true;
+                cell
+            })
+            .collect()
+    }
+
+    // 스크롤 게이트("Jump to bottom") 가 없으면 상단이 흐릿해도 sticky 아님 —
+    // 평상시(맨 아래) 오탐 방지의 핵심.
+    #[test]
+    fn sticky_needs_scroll_gate() {
+        let rows = vec![dim_row("> 이전 프롬프트"), row_from("본문 라인")];
+        assert!(find_sticky_prompt(&rows).is_none());
+    }
+
+    // 게이트 + 최상단 흐릿한 프롬프트 → 그 행·텍스트로 감지.
+    #[test]
+    fn sticky_gated_dim_top_detected() {
+        let rows = vec![
+            dim_row("> 이전 프롬프트 미리보기"),
+            row_from("작업 결과 라인"),
+            row_from("  Jump to bottom (click) ↓"),
+        ];
+        let s = find_sticky_prompt(&rows).expect("sticky detected");
+        assert_eq!(s.row, 0);
+        assert!(s.text.contains("이전 프롬프트"));
+        assert_eq!(s.col_start, 0);
+    }
+
+    // 게이트가 있어도 상단이 흐릿하지 않으면(일반 밝은 텍스트) 감지 안 함.
+    #[test]
+    fn sticky_gated_but_bright_ignored() {
+        let rows = vec![
+            row_from("밝은 일반 출력 라인"),
+            row_from("more output"),
+            row_from("Jump to bottom (click)"),
+        ];
+        assert!(find_sticky_prompt(&rows).is_none());
     }
 
     // 타이틀 치환: "Claude Code" → 학생 이름(와이드+스페이서 셀), 버전 텍스트는
