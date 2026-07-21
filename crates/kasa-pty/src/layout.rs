@@ -435,6 +435,70 @@ impl PtyLayout {
         }
     }
 
+    /// Ctrl+드래그: `path`의 Horizontal split을 상하먼저로 재구조화해, 상하를
+    /// 관통하던 세로선을 상/하 독립 경계로 쪼갠다. 대상 H split의 두 자식이 같은
+    /// 비율(±0.02)의 Vertical split(=상단 정렬)일 때만 성공하고, 그 외엔 트리를
+    /// 건드리지 않고 None(호출부가 일반 드래그로 폴백). 성공 시 새로 생긴 하단
+    /// Horizontal split의 절대 path(= `path` + [1])를 돌려줘, 이어지는 드래그가
+    /// 하단 경계만 움직이게 한다.
+    ///
+    /// ```text
+    /// Split(H, r, Split(V,s,aT,aB), Split(V,s,bT,bB))
+    ///   → Split(V, s, Split(H, r, aT, bT),   // 상단 좌우 (고정)
+    ///                 Split(H, r, aB, bB))    // 하단 좌우 (독립)
+    /// ```
+    pub fn split_htov_at(&mut self, path: &[u8]) -> Option<Vec<u8>> {
+        match path.split_first() {
+            Some((head, tail)) => {
+                let PtyLayout::Split { a, b, .. } = self else {
+                    return None;
+                };
+                let child = if *head == 0 { a } else { b };
+                let mut sub = child.split_htov_at(tail)?;
+                sub.insert(0, *head);
+                Some(sub)
+            }
+            None => {
+                let PtyLayout::Split { dir: SplitDir::Horizontal, ratio, a, b } = self else {
+                    return None;
+                };
+                let r = *ratio;
+                let (sa, a_top, a_bot) = match a.as_ref() {
+                    PtyLayout::Split { dir: SplitDir::Vertical, ratio, a, b } => {
+                        (*ratio, a.clone(), b.clone())
+                    }
+                    _ => return None,
+                };
+                let (sb, b_top, b_bot) = match b.as_ref() {
+                    PtyLayout::Split { dir: SplitDir::Vertical, ratio, a, b } => {
+                        (*ratio, a.clone(), b.clone())
+                    }
+                    _ => return None,
+                };
+                if (sa - sb).abs() > 0.02 {
+                    return None; // 상단 높이가 안 맞으면 재구조화 시 어긋난다
+                }
+                *self = PtyLayout::Split {
+                    dir: SplitDir::Vertical,
+                    ratio: sa,
+                    a: Box::new(PtyLayout::Split {
+                        dir: SplitDir::Horizontal,
+                        ratio: r,
+                        a: a_top,
+                        b: b_top,
+                    }),
+                    b: Box::new(PtyLayout::Split {
+                        dir: SplitDir::Horizontal,
+                        ratio: r,
+                        a: a_bot,
+                        b: b_bot,
+                    }),
+                };
+                Some(vec![1])
+            }
+        }
+    }
+
     fn resize_at(&mut self, path: &[u8], pos: u16, x: u16, y: u16, w: u16, h: u16) -> bool {
         let PtyLayout::Split { dir, ratio, a, b } = self else {
             return false;
@@ -717,5 +781,86 @@ mod tests {
             }
             _ => panic!("expected HSplit"),
         }
+    }
+
+    // 좌우먼저: 각 컬럼 = 상단 leaf + 하단 좌우2, 상단 정렬(0.4).
+    fn aligned_columns() -> PtyLayout {
+        let col = |top: &str, bl: &str, br: &str| PtyLayout::Split {
+            dir: SplitDir::Vertical,
+            ratio: 0.4,
+            a: Box::new(PtyLayout::single(top)),
+            b: Box::new(PtyLayout::Split {
+                dir: SplitDir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(PtyLayout::single(bl)),
+                b: Box::new(PtyLayout::single(br)),
+            }),
+        };
+        PtyLayout::Split {
+            dir: SplitDir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(col("%1", "%5", "%4")),
+            b: Box::new(col("%2", "%3", "%6")),
+        }
+    }
+
+    #[test]
+    fn split_htov_reparents_aligned_columns() {
+        let mut t = aligned_columns();
+        let xw = |t: &PtyLayout, id: &str| {
+            let r = t.leaf_rects(100, 100).into_iter().find(|r| r.0 == id).unwrap();
+            (r.1, r.3) // (x, w)
+        };
+        let top1 = xw(&t, "%1");
+        let top2 = xw(&t, "%2");
+        let bl_before = xw(&t, "%5");
+
+        let bot = t.split_htov_at(&[]).expect("정렬된 컬럼 → 재구조화 성공");
+        assert_eq!(bot, vec![1], "하단 Horizontal split 의 path");
+        // 최상위가 Vertical(상하먼저)로 뒤바뀜, 상단 비율은 옛 컬럼 비율 승계.
+        match &t {
+            PtyLayout::Split { dir: SplitDir::Vertical, ratio, .. } => {
+                assert!((ratio - 0.4).abs() < 1e-6)
+            }
+            _ => panic!("상하먼저로 재구조화돼야"),
+        }
+        assert_eq!(t.leaves(), vec!["%1", "%2", "%5", "%4", "%3", "%6"]);
+
+        // 반환된 하단 path 로 경계만 이동 → 상단 %1,%2 가로 불변, 하단만 변함.
+        t.set_ratio_at(&bot, 0.75);
+        assert_eq!(xw(&t, "%1"), top1, "상단 %1 가로 불변");
+        assert_eq!(xw(&t, "%2"), top2, "상단 %2 가로 불변");
+        assert_ne!(xw(&t, "%5"), bl_before, "하단 경계는 이동");
+    }
+
+    #[test]
+    fn split_htov_rejects_unaligned_or_leaf() {
+        // 한쪽이 leaf(상하 분할 없음) → 재구조화 불가, 트리 무변경.
+        let mut t = PtyLayout::Split {
+            dir: SplitDir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(PtyLayout::single("%0")),
+            b: Box::new(PtyLayout::single("%1")),
+        };
+        assert_eq!(t.split_htov_at(&[]), None);
+        assert!(
+            matches!(t, PtyLayout::Split { dir: SplitDir::Horizontal, .. }),
+            "거부 시 원본 유지"
+        );
+
+        // 상단 비율 불일치(0.3 vs 0.6) → 정렬 안 됨 → 거부.
+        let col = |s: f32, top: &str, bot: &str| PtyLayout::Split {
+            dir: SplitDir::Vertical,
+            ratio: s,
+            a: Box::new(PtyLayout::single(top)),
+            b: Box::new(PtyLayout::single(bot)),
+        };
+        let mut t2 = PtyLayout::Split {
+            dir: SplitDir::Horizontal,
+            ratio: 0.5,
+            a: Box::new(col(0.3, "%1", "%3")),
+            b: Box::new(col(0.6, "%2", "%4")),
+        };
+        assert_eq!(t2.split_htov_at(&[]), None, "상단 정렬 안 됨 → 거부");
     }
 }

@@ -6,6 +6,7 @@ import { Markdown } from './Markdown';
 import { ToolUseCard } from './tool-use-card';
 import { ThinkingBlock } from './thinking-block';
 import { buildToolMap, type ToolMap } from '@/lib/build-tool-map';
+import { SLUG_TO_CHARACTER } from '@/lib/sprites';
 import type { SessionEvent } from '@/lib/types';
 import { AnsiText } from './AnsiText';
 import { useStore, isAwaitingTeacher, type SubagentInfo } from '@/store';
@@ -1566,11 +1567,15 @@ export function TerminalPeekPanel({ surfaceId, title, onClose, embedded, session
     // 오탐을 막는다. normText 비교라 tell 의 개행→공백 평탄화 차이도 흡수. 거노 직접
     // 입력(from_pane=sensei 또는 매칭 없음)은 undefined → 우측 노랑 유지.
     const senderOf = (text: string, tsIso?: string, fromName?: string): BubbleSender | undefined => {
-      // 네이티브 teammate-message — 발신자명이 래퍼 속성에 직접 있어 messages.jsonl 대조를
-      // 생략하고 agents 에서 accent 만 해석한다(못 찾으면 이름만, 색 없이).
+      // 네이티브 teammate-message — 발신자명이 래퍼 속성에 직접 있어 messages.jsonl
+      // 대조를 생략하고 agents 에서 accent 만 해석한다. fromName = teammate_id =
+      // "<로마자 slug>-<sid4>"(kasaterm shim 자동 부착)라 slug 를 한글 캐릭터로 역매핑
+      // 해야 agents(character=한글)와 매칭된다 — 직접 비교하면 항상 어긋나 색·이름이
+      // raw agent-name 으로 샜다(거노: 아리스에 시로코 칩). 못 찾으면 이름만, 색 없이.
       if (fromName) {
-        const a = agents.find((x) => x.character === fromName);
-        return { pane: a?.id ?? '', name: fromName, accent: a?.accent, accentHex: a?.accentHex };
+        const ko = SLUG_TO_CHARACTER[fromName.split('-')[0]] ?? fromName;
+        const a = agents.find((x) => x.character === ko);
+        return { pane: a?.id ?? '', name: a?.character ?? ko, accent: a?.accent, accentHex: a?.accentHex };
       }
       const t = normText(text);
       if (!t) return undefined;

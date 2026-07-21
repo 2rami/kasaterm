@@ -554,30 +554,6 @@ impl App {
                     Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
                     None => Vec::new(),
                 };
-                // statusline 세션 id 마커(⟦8hex⟧) 은닉 — SGR8(conceal)은 claude 의
-                // statusline 파이프라인이 속성을 벗겨 텍스트만 남긴다(실측: 마커가
-                // 그대로 보임, 거노). 렌더 그리드에서 패턴으로 지운다 — visible_text
-                // (백엔드 세션 파싱)는 원본 grid 를 읽으므로 영향 없다. 스캔 창은
-                // 하단 8행 — 입력힌트·여백 행이 statusline 을 4행 밖으로 밀어낼 수
-                // 있어(백엔드 rebind 스캔창을 3→8 넓힌 것과 같은 이유) 폭을 맞춘다.
-                for row in composed.iter_mut().rev().take(8) {
-                    let n = row.len();
-                    let mut i = 0;
-                    while i < n {
-                        if row[i].ch == '⟦'
-                            && i + 9 < n
-                            && (1..=8).all(|k| row[i + k].ch.is_ascii_hexdigit())
-                            && row[i + 9].ch == '⟧'
-                        {
-                            for c in row[i..=i + 9].iter_mut() {
-                                c.ch = ' ';
-                            }
-                            i += 10;
-                        } else {
-                            i += 1;
-                        }
-                    }
-                }
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
@@ -611,23 +587,37 @@ impl App {
                     let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                     let scw = self.cell.w * fs;
                     let sch = self.cell.h * fs;
-                    let end = sticky
-                        .col_end
-                        .min(composed.get(sticky.row).map_or(0, |r| r.len()));
-                    let cols = end.saturating_sub(sticky.col_start).max(1);
-                    let px = body_left + sticky.col_start as f32 * scw;
+                    let ncols = composed.get(sticky.row).map_or(0, |r| r.len());
+                    let end = sticky.col_end.min(ncols);
+                    // 흰 배경 pill 을 pane 양끝(col 0..ncols)까지 채운다(거노: "흰색
+                    // 바탕 pane 양끝으로 다 채워"). 클릭 rect 도 행 전체 폭 — 흰 바탕
+                    // 어디를 눌러도 seek(begin_sticky_seek)가 걸린다.
+                    let px = body_left;
                     let py = body_top + sticky.row as f32 * sch;
                     sticky_pill_slots.push((
                         px,
                         py,
-                        cols as f32 * scw,
+                        ncols as f32 * scw,
                         sch,
                         sticky.text.clone(),
                         id.clone(),
                     ));
                     if let Some(row) = composed.get_mut(sticky.row) {
-                        for cell in row[sticky.col_start..end].iter_mut() {
-                            *cell = GridCell::blank();
+                        // 원본 셀(등폭 그리드)을 지우지 않고 그 자리에서 선명화만
+                        // 한다 — 흐릿(dim) 제거 + 흰 배경·검정 글자. draw_text
+                        // (proportional)로 다시 그리던 옛 방식은 한글 wide glyph 를
+                        // ink 폭으로 tighten 해 자간이 어긋나고 배경 폭도 텍스트와
+                        // 안 맞았다(거노: "딱 안 맞아 자간 이상"). 그리드 셀은 등폭
+                        // 이라 폭·자간이 원본과 정확히 일치한다. 텍스트 밖 셀은 흰
+                        // 배경만 깔고 글자 잔재를 지워 pill 을 pane 양끝까지 연장한다.
+                        for (i, cell) in row.iter_mut().enumerate() {
+                            cell.dim = false;
+                            cell.inverse = false;
+                            cell.fg = kasa_bridge::screen::Color::Rgb(20, 22, 28);
+                            cell.bg = kasa_bridge::screen::Color::Rgb(248, 249, 251);
+                            if i < sticky.col_start || i >= end {
+                                cell.ch = ' ';
+                            }
                         }
                     }
                 }
@@ -1123,7 +1113,11 @@ impl App {
                 // 테두리와 동일: 배정 캐릭터 + claude 가 foreground 일 때만
                 // (active_process_name=="claude", 500ms 캐시 — 순정 셸 오염
                 // 방지, 거노 실사고). agents 목록 뷰는 중립.
-                let prompt_accent = if agents_view {
+                // resume 피커(claude 시스템 UI)는 `╭─╮ Search ╰─╯` 박스가 pane
+                // 입력박스로 오인돼 학생 accent 후처리가 오발동한다(거노: 빈 초록
+                // 사각형). agents 목록 뷰처럼 학생 accent·세션 제목 인레이를 끈다.
+                let resume_picker = !has_profile_slot && screen_is_resume_picker(&composed);
+                let prompt_accent = if agents_view || resume_picker {
                     None
                 } else {
                     pane.character
@@ -1869,46 +1863,15 @@ impl App {
                 let key = format!("student:{slug}:f{anim_idx}");
                 g.queue_image_clipped(&key, *bx, *by, *bw, *bh, *clip_y0, *clip_y1);
             }
-            // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill. 원본 흐릿한 행은
-            // 스캔에서 blank 처리됨 — 여기서 알약 배경 + 선명 텍스트를 셀 위에
-            // 얹고, (rect, text) 를 STICKY_PILLS 로 mouse handler·seek 에 넘긴다.
-            // 클릭 = "그 프롬프트가 화면에 들어올 때까지 위로 스크롤"(begin_sticky_seek).
-            // 흰 알약 + 검정 글자(거노) — 다크 본문 위에서 눈에 띄고 클릭 유도.
-            const STICKY_PILL_BORDER: [u8; 4] = [148, 154, 166, 255];
-            const STICKY_PILL_BG: [u8; 4] = [248, 249, 251, 252];
-            const STICKY_PILL_FG: [u8; 4] = [20, 22, 28, 255];
+            // Claude Code 스크롤 sticky prompt: 텍스트·흰 배경은 위 스캔에서 원본
+            // 셀을 선명화(등폭 유지)해 이미 그려졌다. 여기선 클릭 rect(셀 영역)만
+            // STICKY_PILLS 로 mouse handler·seek 에 넘긴다 — 클릭 = "그 프롬프트가
+            // 화면에 들어올 때까지 위로 스크롤"(begin_sticky_seek).
             STICKY_PILLS.with(|s| s.borrow_mut().clear());
             for (px, py, pw, ph, text, pane_id) in &sticky_pill_slots {
-                let pad_x = ph * 0.55;
-                let pad_y = ph * 0.16;
-                let rx = px - pad_x;
-                let ry = py - pad_y;
-                let rw = pw + pad_x * 2.0;
-                let rh = ph + pad_y * 2.0;
-                // 흰 알약 뒤에 살짝 큰 회색 사각형을 깔아 1px 테두리 느낌(stroke 미구현).
-                let bw = (ph * 0.09).clamp(1.0, 2.0);
-                g.round_rect_fill(
-                    rx - bw,
-                    ry - bw,
-                    rw + bw * 2.0,
-                    rh + bw * 2.0,
-                    (rh + bw * 2.0) * 0.5,
-                    STICKY_PILL_BORDER,
-                );
-                g.round_rect_fill(rx, ry, rw, rh, rh * 0.5, STICKY_PILL_BG);
-                g.draw_text(
-                    *px,
-                    *py,
-                    text,
-                    gpu::DrawOpts {
-                        font_size: ph * 0.78,
-                        color: STICKY_PILL_FG,
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                STICKY_PILLS
-                    .with(|s| s.borrow_mut().push((pane_id.clone(), (rx, ry, rw, rh), text.clone())));
+                STICKY_PILLS.with(|s| {
+                    s.borrow_mut().push((pane_id.clone(), (*px, *py, *pw, *ph), text.clone()))
+                });
             }
             // agents 뷰 SCHALE 로고 — Clawd 자리(또는 헤더 왼쪽 여백)에 정적 1프레임.
             if !schale_logo_slots.is_empty() {
@@ -7106,6 +7069,16 @@ fn tint_welcome_box(
 fn screen_is_agents_list(rows: &[Vec<GridCell>]) -> bool {
     let full: String = rows.iter().flat_map(|r| r.iter().map(|c| c.ch)).collect();
     full.contains("awaiting input") && full.contains("completed")
+}
+
+/// claude `--resume` 세션 피커 화면인지 감지. "Resume session (N of M)" 헤더가
+/// 뜨는 시스템 UI라, 학생 pane 후처리(prompt box accent·세션 제목 인레이)를 여기서
+/// 오발동하면 안 된다 — Search 박스(`╭─╮ ⌕ Search… ╰─╯`)가 pane 입력박스로 오인돼
+/// 빈 초록 사각형이 그려졌다(거노). 일반 대화엔 statusline(U+FFFC)이 있어 호출부에서
+/// !has_profile_slot 로 이미 걸러진다.
+fn screen_is_resume_picker(rows: &[Vec<GridCell>]) -> bool {
+    let full: String = rows.iter().flat_map(|r| r.iter().map(|c| c.ch)).collect();
+    full.contains("Resume session")
 }
 
 /// Claude Code 라이브 스피너("✻ Verbing…" 별 dingbat, 또는 braille) 위치 감지 —

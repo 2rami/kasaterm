@@ -88,6 +88,32 @@ import { TodoWriteRenderer } from "./todo";
 import { WebFetchRenderer, WebSearchRenderer } from "./web";
 import { ExitPlanRenderer } from "./exitplan";
 
+// SendMessage(팀메이트 발신) — 접힌 카드에도 수신자·요약이 보이게 한다. 없으면
+// FALLBACK 이 "SendMessage {…}" JSON 만 접어 보여 뭘 보냈는지 안 보였다(거노:
+// "접혀보여"). 펼치면 message 전문.
+const SendMessageRenderer: ToolRenderer = {
+  summary: (input) => {
+    const i = (input ?? {}) as { to?: string; summary?: string; message?: unknown };
+    const to = i.to || "?";
+    const s =
+      i.summary ||
+      (typeof i.message === "string"
+        ? truncate(i.message.replace(/\s+/g, " "), 60)
+        : "");
+    return `→ ${to}${s ? ": " + s : ""}`;
+  },
+  body: (input) => {
+    const i = (input ?? {}) as { message?: unknown };
+    const msg =
+      typeof i.message === "string" ? i.message : stringifyToolInput(i.message);
+    return (
+      <div className="whitespace-pre-wrap px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground/85">
+        {msg}
+      </div>
+    );
+  },
+};
+
 const REGISTRY: Record<string, ToolRenderer> = {
   Bash: BashRenderer,
   Read: ReadRenderer,
@@ -103,6 +129,7 @@ const REGISTRY: Record<string, ToolRenderer> = {
   WebFetch: WebFetchRenderer,
   WebSearch: WebSearchRenderer,
   ExitPlanMode: ExitPlanRenderer,
+  SendMessage: SendMessageRenderer,
   // Codex tools — borrow Claude renderers; real name shown on the card.
   exec_command: BashRenderer,
   write_stdin: BashRenderer,

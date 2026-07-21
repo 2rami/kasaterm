@@ -1695,7 +1695,7 @@ impl App {
                 if j == active_window {
                     new_active = windows_json.len();
                 }
-                windows_json.push(Self::layout_to_json(layout, pty, &ws_guard));
+                windows_json.push(Self::layout_to_json(layout, pty, &ws_guard, &self.pane_claude_sid));
             }
             if windows_json.is_empty() {
                 continue;
@@ -1720,6 +1720,7 @@ impl App {
         layout: &kasa_pty::PtyLayout,
         pty: &HashMap<String, Arc<kasa_pty::PtySession>>,
         ws: &Workspace,
+        pane_claude_sid: &HashMap<String, String>,
     ) -> serde_json::Value {
         match layout {
             kasa_pty::PtyLayout::Leaf { pane_id } => {
@@ -1738,22 +1739,19 @@ impl App {
                     obj.insert("scrollback".to_string(), serde_json::json!(sb));
                     // 캐릭터 영속(거노: 재시작하면 미도리로 둔갑): pane_character 는
                     // claude 프로세스 감지(was_claude)와 무관하게 살아있으므로, 감지가
-                    // 실패해도 캐릭터는 여기서 확실히 저장한다. 캐릭터가 있으면 이 pane 은
-                    // claude 학생이었다는 확증이라, session_id 가 감지 실패로 비어 있으면
-                    // cwd 최신 jsonl 로 폴백해 --resume 대상(대화)까지 살린다.
+                    // 실패해도 캐릭터는 여기서 확실히 저장한다.
                     if let Some(name) = ws.pane_character.get(pane_id) {
                         obj.insert("character".to_string(), serde_json::json!(name));
-                        if obj.get("session_id").map_or(true, |v| v.is_null()) {
-                            if let Some(sid) = obj
-                                .get("cwd")
-                                .and_then(|c| c.as_str())
-                                .and_then(|c| {
-                                    socket::latest_claude_session_id(std::path::Path::new(c))
-                                })
-                            {
-                                obj.insert("session_id".to_string(), serde_json::json!(sid));
-                            }
-                        }
+                    }
+                    // per-pane 실제 세션은 SocketSessionBound 로 채워진 pane_claude_sid
+                    // (정본)로 최우선 확정한다. 예전엔 argv(pane_record)·cwd 최신 jsonl 로
+                    // 폴백했는데, argv 없는 fresh `claude` 여럿이 같은 cwd 면 전부 cwd 최신
+                    // 세션 하나로 뭉쳐 재시작 시 여러 pane 이 다 같은 대화+캐릭터(미도리)로
+                    // 복원됐다(거노: 다른 세션이 다 미도리로 뭉침). cwd 최신 폴백을 제거하고
+                    // pane_claude_sid 로만 session_id 를 확정한다 — 없으면 pane_record 의
+                    // argv sid, 그것도 없으면 restore_leaf 가 fresh claude 로 복원.
+                    if let Some(sid) = pane_claude_sid.get(pane_id) {
+                        obj.insert("session_id".to_string(), serde_json::json!(sid));
                     }
                 }
                 serde_json::json!({ "leaf": rec })
@@ -1766,8 +1764,8 @@ impl App {
                 serde_json::json!({ "split": {
                     "dir": dir,
                     "ratio": ratio,
-                    "a": Self::layout_to_json(a, pty, ws),
-                    "b": Self::layout_to_json(b, pty, ws),
+                    "a": Self::layout_to_json(a, pty, ws, pane_claude_sid),
+                    "b": Self::layout_to_json(b, pty, ws, pane_claude_sid),
                 }})
             }
         }
@@ -2005,9 +2003,19 @@ impl App {
         // was_claude 감지가 실패했어도 캐릭터+저장 sid 가 있으면 claude 학생 pane 이었던
         // 것이라 --resume 으로 대화를 복원한다(감지 실패 시 셸만 뜨던 회귀 차단).
         if was_claude || (saved_char.is_some() && session_id.is_some()) {
-            let cmd = match session_id {
-                Some(sid) => format!("claude --resume {sid}\r"),
-                None => "claude\r".to_string(),
+            // --resume 대상 대화가 실재할 때만 resume 한다. 저장된 sid 의 jsonl 이
+            // 사라졌으면 claude 가 "No conversation found" 를 뱉고 빈 셸만 남아 학생
+            // pane 이 통째 죽는다(거노: %3 시로코 복원 실패 — claude 세션이 없어 board
+            // 순회에서 빠졌다). 그땐 fresh claude 로 폴백해 최소한 학생 pane(캐릭터는
+            // env/marker 로 유지)은 살린다 — 대화는 잃지만 pane 이 통째 죽는 것보다 낫다.
+            let resumable = session_id
+                .as_deref()
+                .and_then(socket::transcript_path_for_session)
+                .map(|p| p.exists())
+                .unwrap_or(false);
+            let cmd = match &session_id {
+                Some(sid) if resumable => format!("claude --resume {sid}\r"),
+                _ => "claude\r".to_string(),
             };
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));

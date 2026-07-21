@@ -206,6 +206,10 @@ def generate(tp, sid, srclen):
     new = " ".join(out.split()).strip("\"'“”‘’ ").rstrip(".")
     if not new or len(new) > CLIP or "\n" in out.strip():
         return  # 형식 밖 출력(거부·수다)은 버린다 — 다음 턴에 재시도
+    # 발췌가 부실하면 haiku 가 제목 대신 거부/설명을 뱉는다("대화 발췌가 제공되지
+    # 않았어요…"). CLIP 을 통과하는 짧은 거부문도 있어 시그니처로 한 번 더 거른다.
+    if new.startswith("대화 발췌") or "제공되지 않" in new:
+        return
     if title is not None and (title.get("customTitle") or "") == new:
         return
     rec = json.dumps(
