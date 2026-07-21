@@ -699,6 +699,43 @@ impl App {
         }
     }
 
+    /// [임시·검증용] Headless 스크롤 주입: `KASATERM_AUTOWHEEL_MS` 후 active pane
+    /// 본문 중앙에 커서를 놓고 휠 up 을 `KASATERM_AUTOWHEEL`(기본 10) 노치 보낸다.
+    /// mouse-tracking TUI(claude)면 SGR 로 그 pane 에 전달돼 실제 스크롤 경로를 밟아
+    /// sticky prompt 를 재현한다 — sticky pill 감지/표시를 헤드리스로 확인하려는 용도.
+    pub(crate) fn run_pending_autowheel(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOWHEEL_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let n: usize = std::env::var("KASATERM_AUTOWHEEL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let (cols, rows) = self.window_cells();
+        let pad = WINDOW_PADDING + self.effective_sidebar_w();
+        self.cursor_px = (
+            pad + cols as f32 * self.cell.w / 2.0,
+            TITLE_HEIGHT + rows as f32 * self.cell.h / 2.0,
+        );
+        eprintln!("[autowheel] scroll up {n} notches, cursor=({:.0},{:.0})",
+            self.cursor_px.0, self.cursor_px.1);
+        for _ in 0..n {
+            self.handle_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0));
+        }
+    }
+
     /// Arm any due aux-window self-capture: set its gpu `capture_next` and wake
     /// the window so the next frame reads it back. Mirrors the main
     /// `pending_capture` drain but per aux window (each owns its own surface).
