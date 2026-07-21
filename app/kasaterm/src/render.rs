@@ -1871,10 +1871,12 @@ impl App {
             }
             // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill. 원본 흐릿한 행은
             // 스캔에서 blank 처리됨 — 여기서 알약 배경 + 선명 텍스트를 셀 위에
-            // 얹고, 클릭 rect 를 STICKY_PILLS 로 mouse handler 에 넘긴다(클릭 =
-            // "위로 스크롤"). 다크 기준 고정색(테마 연동은 폴리싱).
-            const STICKY_PILL_BG: [u8; 4] = [30, 33, 42, 242];
-            const STICKY_PILL_FG: [u8; 4] = [235, 237, 243, 255];
+            // 얹고, (rect, text) 를 STICKY_PILLS 로 mouse handler·seek 에 넘긴다.
+            // 클릭 = "그 프롬프트가 화면에 들어올 때까지 위로 스크롤"(begin_sticky_seek).
+            // 흰 알약 + 검정 글자(거노) — 다크 본문 위에서 눈에 띄고 클릭 유도.
+            const STICKY_PILL_BORDER: [u8; 4] = [148, 154, 166, 255];
+            const STICKY_PILL_BG: [u8; 4] = [248, 249, 251, 252];
+            const STICKY_PILL_FG: [u8; 4] = [20, 22, 28, 255];
             STICKY_PILLS.with(|s| s.borrow_mut().clear());
             for (px, py, pw, ph, text, pane_id) in &sticky_pill_slots {
                 let pad_x = ph * 0.55;
@@ -1883,6 +1885,16 @@ impl App {
                 let ry = py - pad_y;
                 let rw = pw + pad_x * 2.0;
                 let rh = ph + pad_y * 2.0;
+                // 흰 알약 뒤에 살짝 큰 회색 사각형을 깔아 1px 테두리 느낌(stroke 미구현).
+                let bw = (ph * 0.09).clamp(1.0, 2.0);
+                g.round_rect_fill(
+                    rx - bw,
+                    ry - bw,
+                    rw + bw * 2.0,
+                    rh + bw * 2.0,
+                    (rh + bw * 2.0) * 0.5,
+                    STICKY_PILL_BORDER,
+                );
                 g.round_rect_fill(rx, ry, rw, rh, rh * 0.5, STICKY_PILL_BG);
                 g.draw_text(
                     *px,
@@ -1895,7 +1907,8 @@ impl App {
                         italic: false,
                     },
                 );
-                STICKY_PILLS.with(|s| s.borrow_mut().push((pane_id.clone(), (rx, ry, rw, rh))));
+                STICKY_PILLS
+                    .with(|s| s.borrow_mut().push((pane_id.clone(), (rx, ry, rw, rh), text.clone())));
             }
             // agents 뷰 SCHALE 로고 — Clawd 자리(또는 헤더 왼쪽 여백)에 정적 1프레임.
             if !schale_logo_slots.is_empty() {
@@ -6636,12 +6649,91 @@ pub(crate) struct StickyPrompt {
 }
 
 thread_local! {
-    /// 이번 프레임에 그린 sticky pill 들의 클릭 히트 rect(logical px) + 소속
-    /// pane id. render 가 매 프레임 새로 채우고, mouse handler 가 읽어 클릭을
-    /// "위로 스크롤" 신호로 바꾼다. struct App 무접촉(병렬 작업 규칙) — GUI 단일
-    /// 스레드라 thread_local 로 충분(testkit 의 함수-로컬 static 과 같은 원칙).
-    pub(crate) static STICKY_PILLS: std::cell::RefCell<Vec<(String, (f32, f32, f32, f32))>> =
+    /// 이번 프레임에 그린 sticky pill 들의 (소속 pane id, 클릭 히트 rect(logical
+    /// px), 보이는 텍스트). render 가 매 프레임 새로 채우고, mouse handler 는
+    /// 클릭 판정에, seek 진행은 "지금 그 pane 의 sticky 텍스트"를 읽는 데 쓴다.
+    /// struct App 무접촉(병렬 작업 규칙) — GUI 단일 스레드라 thread_local 로 충분.
+    pub(crate) static STICKY_PILLS:
+        std::cell::RefCell<Vec<(String, (f32, f32, f32, f32), String)>> =
         std::cell::RefCell::new(Vec::new());
+
+    /// 진행 중인 sticky 클릭 seek. 클릭이 target(그 프롬프트 첫 줄 텍스트)을 잡고,
+    /// about_to_wait 가 매 틱 wheel-up 한 노치씩 보내 화면을 관찰한다 — target 이
+    /// 뷰포트로 들어와 sticky 텍스트가 바뀌거나(또는 최상단 도달로 사라지면) 멈춘다.
+    pub(crate) static STICKY_SEEK: std::cell::RefCell<Option<StickySeek>> =
+        std::cell::RefCell::new(None);
+}
+
+/// 클릭한 sticky 프롬프트를 화면으로 끌어오는 seek 상태(struct App 밖 — 무접촉).
+pub(crate) struct StickySeek {
+    pub pane_id: String,
+    pub target: String,
+    /// wheel SGR 를 쏠 pane-local 셀(클릭 지점) — 노치마다 재사용.
+    pub cell: (u16, u16),
+    pub last_send: std::time::Instant,
+    pub sent: u32,
+}
+
+/// 노치 간 최소 간격 — 33ms 펌프 틱보다 짧게 잡아 틱마다 한 노치가 나가되,
+/// PTY 리페인트가 반영될 시간은 준다(로컬 리페인트는 보통 이보다 빠름).
+const STICKY_SEEK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+/// 폭주 방지 상한(정상 종료가 먼저 걸린다). 500 노치면 어떤 화면이든 최상단 도달.
+const STICKY_SEEK_MAX: u32 = 500;
+
+/// seek 이 진행 중인가 — about_to_wait 의 30fps 펌프 게이트.
+pub(crate) fn sticky_seek_active() -> bool {
+    STICKY_SEEK.with(|s| s.borrow().is_some())
+}
+
+/// 이번 프레임 그 pane 에 그려진 sticky pill 텍스트(없으면 None = sticky 사라짐).
+fn sticky_text_for(pane_id: &str) -> Option<String> {
+    STICKY_PILLS.with(|s| {
+        s.borrow()
+            .iter()
+            .find(|(id, _, _)| id == pane_id)
+            .map(|(_, _, t)| t.clone())
+    })
+}
+
+/// sticky 클릭 → seek 시작. target 은 클릭한 pill 텍스트, cell 은 wheel 을 쏠 위치.
+pub(crate) fn begin_sticky_seek(pane_id: String, target: String, cell: (u16, u16)) {
+    let now = std::time::Instant::now();
+    STICKY_SEEK.with(|s| {
+        *s.borrow_mut() = Some(StickySeek {
+            pane_id,
+            target,
+            cell,
+            // 첫 틱에 바로 한 노치 나가게 간격만큼 과거로.
+            last_send: now.checked_sub(STICKY_SEEK_INTERVAL).unwrap_or(now),
+            sent: 0,
+        });
+    });
+}
+
+/// seek 한 스텝. 다음 노치를 보내야 하면 (pane_id, col, row) 반환, 아니면 None
+/// (대기 중이거나 종료). 종료 판정: 현재 sticky 텍스트가 target 과 다르면(타깃이
+/// 뷰포트로 들어옴) 또는 없으면(최상단) 완료로 보고 상태를 지운다.
+pub(crate) fn sticky_seek_step() -> Option<(String, u16, u16)> {
+    let now = std::time::Instant::now();
+    STICKY_SEEK.with(|s| {
+        let mut b = s.borrow_mut();
+        let seek = b.as_mut()?;
+        let reached = match sticky_text_for(&seek.pane_id) {
+            None => true,
+            Some(t) => t != seek.target,
+        };
+        if reached || seek.sent >= STICKY_SEEK_MAX {
+            *b = None;
+            return None;
+        }
+        if now.duration_since(seek.last_send) < STICKY_SEEK_INTERVAL {
+            return None; // 직전 노치의 리페인트 대기
+        }
+        seek.last_send = now;
+        seek.sent += 1;
+        let (col, row) = seek.cell;
+        Some((seek.pane_id.clone(), col, row))
+    })
 }
 
 /// 저채도·중간 밝기 = "흐릿한 회색" fg. Claude Code 가 dim SGR(2) 대신 회색
@@ -7938,5 +8030,59 @@ mod face_popup_tests {
         // 팝업 변보다 좁은 창에서도 x 가 6px 아래로 안 간다(max 방어).
         let (px, _) = face_popup_pos(10.0, 20.0, 200.0, 160.0, 100.0, 30.0);
         assert!(px >= 6.0 - 0.01, "px={px} negative on narrow window");
+    }
+}
+
+#[cfg(test)]
+mod sticky_seek_tests {
+    use super::*;
+
+    fn set_pills(entries: &[(&str, &str)]) {
+        STICKY_PILLS.with(|s| {
+            *s.borrow_mut() = entries
+                .iter()
+                .map(|(id, text)| (id.to_string(), (0.0, 0.0, 10.0, 10.0), text.to_string()))
+                .collect();
+        });
+    }
+
+    // 클릭 → seek 시작, 첫 스텝은 그 pane 에 wheel-up 노치(클릭 셀)를 쏜다.
+    #[test]
+    fn first_step_emits_notch() {
+        set_pills(&[("%1", "이전 프롬프트")]);
+        begin_sticky_seek("%1".into(), "이전 프롬프트".into(), (5, 7));
+        assert!(sticky_seek_active());
+        assert_eq!(sticky_seek_step(), Some(("%1".to_string(), 5, 7)));
+        assert!(sticky_seek_active()); // 아직 진행 중
+    }
+
+    // 스로틀: 방금 노치 직후 재호출은 대기(None)하되 seek 은 살아있다(리페인트 대기).
+    #[test]
+    fn throttled_between_notches() {
+        set_pills(&[("%1", "T")]);
+        begin_sticky_seek("%1".into(), "T".into(), (1, 1));
+        assert!(sticky_seek_step().is_some()); // 첫 노치
+        assert_eq!(sticky_seek_step(), None); // 간격 내 재호출 → 대기
+        assert!(sticky_seek_active());
+    }
+
+    // sticky 텍스트가 target 과 달라지면(타깃이 뷰포트로 들어옴) 종료·상태 클리어.
+    #[test]
+    fn stops_when_target_enters_view() {
+        set_pills(&[("%1", "타깃")]);
+        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1));
+        set_pills(&[("%1", "더 이전 프롬프트")]); // sticky 가 이전 프롬프트로 교체됨
+        assert_eq!(sticky_seek_step(), None);
+        assert!(!sticky_seek_active());
+    }
+
+    // sticky 가 사라지면(최상단 도달) 종료.
+    #[test]
+    fn stops_when_sticky_gone() {
+        set_pills(&[("%1", "타깃")]);
+        begin_sticky_seek("%1".into(), "타깃".into(), (1, 1));
+        set_pills(&[]); // 최상단 — pill 없음
+        assert_eq!(sticky_seek_step(), None);
+        assert!(!sticky_seek_active());
     }
 }
