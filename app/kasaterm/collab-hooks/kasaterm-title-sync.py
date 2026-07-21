@@ -186,6 +186,12 @@ def generate(tp, sid, srclen):
         "다음 대화 발췌를 보고 이 세션이 지금 하고 있는 작업을 한국어 6~16자 "
         "제목으로 지어줘. 제목만 한 줄로 출력, 따옴표·마침표 없이.\n\n" + ctx_s
     )
+    # KASATERM_* 를 제거한 env 로 실행 — 안 그러면 이 headless claude(및 그 내부
+    # 제목생성 서브세션)가 부모 pane 의 KASATERM_PANE_ID 를 물려받아 SessionStart
+    # bind-transcript hook 이 발화, pane_claude_sid 를 이 title-gen 세션으로 덮어써
+    # 입력박스 인레이에 "아래 대화의 주제를…" 메타프롬프트가 유출된다(거노 실측).
+    # PANE_ID 가 없으면 hook 이 첫 줄에서 즉시 no-op.
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith("KASATERM_")}
     try:
         out = subprocess.run(
             [claude, "-p", "--model", "haiku", prompt],
@@ -193,6 +199,7 @@ def generate(tp, sid, srclen):
             text=True,
             timeout=120,
             cwd=lockdir,  # -p 가 남기는 세션 파일을 junk 프로젝트로 격리
+            env=clean_env,
         ).stdout.strip()
     except Exception:
         return
