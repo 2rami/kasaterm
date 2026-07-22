@@ -499,6 +499,67 @@ impl PtyLayout {
         }
     }
 
+    /// `split_htov_at` 의 역 — Ctrl+드래그로 상하 분리한 하단 세로선이 상단 세로선과
+    /// 위치(ratio)가 맞춰지면 관통 세로선으로 재병합해 다시 같이 움직이게 한다(거노:
+    /// 위에랑 맞춰지면 같이 움직이게). `path` = 분리된 상하 V split. 상단 H(a)·하단
+    /// H(b)의 ratio 가 `snap` 이내면 관통 Split(H) 로 되돌리고 그 path(=path 자체) 반환;
+    /// 아니면 트리 무변경 + None.
+    /// ```text
+    /// Split(V, s, Split(H,r1,aTL,aTR), Split(H,r2,bBL,bBR))   (r1≈r2)
+    ///   → Split(H, r1, Split(V,s,aTL,bBL), Split(V,s,aTR,bBR))   관통 재병합
+    /// ```
+    pub fn merge_vtoh_at(&mut self, path: &[u8], snap: f32) -> Option<Vec<u8>> {
+        match path.split_first() {
+            Some((head, tail)) => {
+                let PtyLayout::Split { a, b, .. } = self else {
+                    return None;
+                };
+                let child = if *head == 0 { a } else { b };
+                let mut sub = child.merge_vtoh_at(tail, snap)?;
+                sub.insert(0, *head);
+                Some(sub)
+            }
+            None => {
+                let PtyLayout::Split { dir: SplitDir::Vertical, ratio: s, a, b } = self else {
+                    return None;
+                };
+                let s = *s;
+                let (r1, a_tl, a_tr) = match a.as_ref() {
+                    PtyLayout::Split { dir: SplitDir::Horizontal, ratio, a, b } => {
+                        (*ratio, a.clone(), b.clone())
+                    }
+                    _ => return None,
+                };
+                let (r2, b_bl, b_br) = match b.as_ref() {
+                    PtyLayout::Split { dir: SplitDir::Horizontal, ratio, a, b } => {
+                        (*ratio, a.clone(), b.clone())
+                    }
+                    _ => return None,
+                };
+                if (r1 - r2).abs() > snap {
+                    return None; // 상/하 세로선이 아직 안 맞음 — 분리 유지
+                }
+                *self = PtyLayout::Split {
+                    dir: SplitDir::Horizontal,
+                    ratio: r1,
+                    a: Box::new(PtyLayout::Split {
+                        dir: SplitDir::Vertical,
+                        ratio: s,
+                        a: a_tl,
+                        b: b_bl,
+                    }),
+                    b: Box::new(PtyLayout::Split {
+                        dir: SplitDir::Vertical,
+                        ratio: s,
+                        a: a_tr,
+                        b: b_br,
+                    }),
+                };
+                Some(path.to_vec())
+            }
+        }
+    }
+
     fn resize_at(&mut self, path: &[u8], pos: u16, x: u16, y: u16, w: u16, h: u16) -> bool {
         let PtyLayout::Split { dir, ratio, a, b } = self else {
             return false;
@@ -831,6 +892,33 @@ mod tests {
         assert_eq!(xw(&t, "%1"), top1, "상단 %1 가로 불변");
         assert_eq!(xw(&t, "%2"), top2, "상단 %2 가로 불변");
         assert_ne!(xw(&t, "%5"), bl_before, "하단 경계는 이동");
+    }
+
+    #[test]
+    fn merge_vtoh_roundtrip() {
+        // split_htov_at 으로 상하 분리 → 분리 직후 상단·하단 세로선 ratio 는 둘 다
+        // 원래 컬럼 비율(0.4)이라 정렬됨 → merge_vtoh_at 이 관통 Horizontal 로 재병합.
+        let mut t = aligned_columns();
+        let bot = t.split_htov_at(&[]).expect("분리");
+        assert_eq!(bot, vec![1]);
+        let merged = t.merge_vtoh_at(&[], 0.02).expect("정렬 → 재병합");
+        assert_eq!(merged, vec![], "관통 Horizontal split = 루트");
+        match &t {
+            PtyLayout::Split { dir: SplitDir::Horizontal, ratio, .. } => {
+                assert!((ratio - 0.5).abs() < 1e-6, "관통 세로선 비율(0.5) 복원")
+            }
+            _ => panic!("관통 Horizontal 로 재병합돼야"),
+        }
+    }
+
+    #[test]
+    fn merge_vtoh_rejects_unaligned() {
+        // 하단 세로선만 옮겨 상단과 어긋나면 재병합 거부 — 상하 분리(Vertical) 유지.
+        let mut t = aligned_columns();
+        let bot = t.split_htov_at(&[]).expect("분리");
+        t.set_ratio_at(&bot, 0.8); // 하단만 0.8, 상단은 0.4
+        assert_eq!(t.merge_vtoh_at(&[], 0.02), None, "안 맞으면 거부");
+        assert!(matches!(t, PtyLayout::Split { dir: SplitDir::Vertical, .. }));
     }
 
     #[test]

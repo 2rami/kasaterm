@@ -116,6 +116,11 @@ pub(crate) struct FileTreeState {
     pub(crate) search_active: bool,
     pub(crate) search_query: String,
     pub(crate) search_rect: (f32, f32, f32, f32),
+    /// 트리 본문의 실제 geometry: (x, start_y, w, visible_h). start_y 는 검색박스
+    /// + 빠른파일 섹션(항목 수만큼 동적) 아래로 밀린 트리 첫 행 y. visible_h 는
+    /// dock 을 뺀 창 끝까지의 본문 높이. 렌더가 매 paint 갱신 → 스크롤 처리가
+    /// 이걸로 clamp 해야 동적 헤더 높이를 정확히 반영(하드코딩하면 max_scroll 틀림).
+    pub(crate) body_rect: (f32, f32, f32, f32),
     pub(crate) root: Option<std::path::PathBuf>,
     pub(crate) expanded: std::collections::HashSet<std::path::PathBuf>,
     pub(crate) nodes: Vec<FileNode>,

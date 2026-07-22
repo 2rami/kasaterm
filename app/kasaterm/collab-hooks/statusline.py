@@ -49,6 +49,8 @@ EFFORT_HEX = {
 C_MODEL, C_GIT, C_DIR, C_CTX, C_SEP, C_FALLBACK = (
     "7aa2f7", "73daca", "bb9af7", "ff9e64", "565f89", "a0a6b0",
 )
+# 로그인 계정 세그먼트 — 팀=sky, 개인=mint (거노가 개인/팀 플랜을 오가며 헷갈려 함)
+C_ACCT_TEAM, C_ACCT_SOLO = "7aa2f7", "73daca"
 
 ICON_SETS = {
     "nerd-font": {"model": "", "git": "", "folder": "", "effort": ""},
@@ -78,6 +80,19 @@ def load_config():
             except Exception:
                 pass
     return {}
+
+
+def load_account():
+    """로그인한 Claude 계정 — top-level .claude.json 의 oauthAccount dict.
+    CLAUDE_CONFIG_DIR 있으면 그 아래, 없으면 ~/.claude.json. 파일 없음/파싱 실패/
+    키 없음은 None 반환해 세그먼트만 생략 — statusline 을 절대 죽이지 않는다."""
+    cfgdir = os.environ.get("CLAUDE_CONFIG_DIR")
+    path = (Path(cfgdir) if cfgdir else Path.home()) / ".claude.json"
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f).get("oauthAccount")
+    except Exception:
+        return None
 
 
 def get_git_branch(cwd):
@@ -146,6 +161,18 @@ def main():
             parts.append(f"{c}{SPRITE}{RESET}")  # kasaterm 이 idle 도트로 대체
         else:
             parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
+
+    # 로그인 계정 — 프사 바로 오른쪽. organizationType 에 team/enterprise 가 있으면
+    # 조직 계정(org 명), 그 외(pro/max/personal)는 개인. team 이 나머지보다 시그널이
+    # 뚜렷해 team 판정을 정본으로 두고 org 명 없을 때만 "팀" 폴백한다.
+    acct = load_account()
+    if acct:
+        otype = (acct.get("organizationType") or "").lower()
+        org = (acct.get("organizationName") or "").strip()
+        if "team" in otype or "enterprise" in otype:
+            parts.append(f"{ansi(C_ACCT_TEAM)}{(org or '팀')[:14]}{RESET}")
+        else:
+            parts.append(f"{ansi(C_ACCT_SOLO)}개인{RESET}")
 
     # ⑂bg 백그라운드 배지 제거(거노: 복원 세션에 자꾸 백그라운드로 떠 짜증). anchor
     # (KASATERM_SESSION_ID) 불일치 판정은 detach 포크·앱 재시작 복원·continuation 을

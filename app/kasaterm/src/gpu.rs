@@ -1995,6 +1995,36 @@ impl GpuRenderer {
         ));
     }
 
+    /// `queue_image` 의 cover-fit 바닥 배경 버전 — 박스를 꽉 채우고(fill) 넘치는
+    /// 축은 UV 를 중앙 크롭한다. 이미지 패스(셀보다 먼저 그려짐)라 default-bg 셀
+    /// 자리로 비친다 — agents/resume 피커의 교실 배경용. LOGICAL px.
+    pub fn queue_image_cover(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32) {
+        let Some(entry) = self.images.get(id) else { return };
+        let s = self.scale;
+        let (bx, by, bw, bh) = (x * s, y * s, w * s, h * s);
+        if bw <= 0.0 || bh <= 0.0 {
+            return;
+        }
+        let (iw, ih) = (entry.w as f32, entry.h as f32);
+        // cover: 박스를 덮는 최소 배율(둘 중 큰 쪽). no-upscale 캡을 두지 않는다 —
+        // 배경은 살짝 확대돼 흐려도 빈틈 없이 채우는 게 맞다.
+        let fit = (bw / iw).max(bh / ih);
+        let (dw, dh) = (iw * fit, ih * fit);
+        let uv_x0 = (1.0 - (bw / dw).min(1.0)) * 0.5;
+        let uv_y0 = (1.0 - (bh / dh).min(1.0)) * 0.5;
+        self.image_quads.push((
+            id.to_string(),
+            CellInstance {
+                cell_px: [bx, by, bw, bh],
+                uv_min: [uv_x0, uv_y0],
+                uv_max: [1.0 - uv_x0, 1.0 - uv_y0],
+                fg_rgba: [1.0, 1.0, 1.0, 1.0],
+                flags: CellInstance::FLAG_COLOR,
+                ..Default::default()
+            },
+        ));
+    }
+
     /// `queue_image` 의 세로 클립 버전 — 박스가 pane 밖까지 이어질 때(스크롤로
     /// 잘린 학생 배너) contain-fit 결과를 클립 범위와 교차시키고 UV 를 같은
     /// 비율로 잘라, 스프라이트가 셀 스크롤과 함께 자연스럽게 잘려 나가게

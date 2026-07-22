@@ -340,6 +340,8 @@ impl App {
             Vec::new();
         // agents 뷰 SCHALE 로고 자리(Clawd 마스코트 위치 / 헤더 왼쪽 여백) — 위치만.
         let mut schale_logo_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
+        // agents 목록·resume 피커 화면의 교실 배경(셀 뒤 cover-fit). pane 본문 rect.
+        let mut classroom_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
@@ -1116,7 +1118,7 @@ impl App {
                 // resume 피커(claude 시스템 UI)는 `╭─╮ Search ╰─╯` 박스가 pane
                 // 입력박스로 오인돼 학생 accent 후처리가 오발동한다(거노: 빈 초록
                 // 사각형). agents 목록 뷰처럼 학생 accent·세션 제목 인레이를 끈다.
-                let resume_picker = !has_profile_slot && screen_is_resume_picker(&composed);
+                let resume_picker = screen_is_resume_picker(&composed);
                 let prompt_accent = if agents_view || resume_picker {
                     None
                 } else {
@@ -1137,6 +1139,14 @@ impl App {
                 };
                 if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
+                    // 칩 @이름 을 pane 캐릭터로 통일 — claude argv 의 agent 이름은
+                    // 부팅 시 고정이라, 이후 swap-character·컴팩트 재부팅으로 pane
+                    // 시각 캐릭터가 바뀌면 칩(@yuuka)과 pane(코하루)이 갈라진다.
+                    if let Some(slug) =
+                        pane.character.as_deref().and_then(theme::character_slug)
+                    {
+                        restyle_chip_name(&mut composed, slug);
+                    }
                     // 입력박스 상단 보더 왼쪽 '─' 구간에 세션 제목 인레이(거노:
                     // @이름칩만으론 이 pane 이 뭘 하는 중인지 안 보임). 라벨
                     // 규칙은 피커와 동일(custom-title > aiTitle > 첫 user) —
@@ -1282,6 +1292,13 @@ impl App {
                     }
                 };
                 footer_slots.push((id.clone(), box_x, box_y, box_w, box_h));
+                // claude agents 목록·resume 피커 화면에만 샬레 교실 배경을 셀 뒤에
+                // 깐다(거노: 세션 선택 화면만). default-bg 셀은 fill 을 안 뿜어
+                // (gpu.draw_cells) 이미지가 그 자리로 비치고, 메뉴 글리프는 위 패스에
+                // 또렷이 얹힌다. 로더가 이미지를 어둡게 낮춰 텍스트 대비를 확보한다.
+                if agents_view || resume_picker {
+                    classroom_slots.push((box_x, box_y, box_w, box_h));
+                }
                 // image/md pane만 헤더 띠 데이터 생성(전용 컨트롤 자리). 일반
                 // 터미널은 hover ⋮ 핸들로 — has_header()가 그 경계를 가른다.
                 if pane.has_header() {
@@ -1299,7 +1316,13 @@ impl App {
                             Some(t) => format!("샬레 · {t}"),
                             None => "샬레".to_string(),
                         }
-                    } else if let Some(c) = pane.character.as_ref() {
+                    } else if let Some(c) = true_char.as_ref() {
+                        // 헤더 학생명은 `display_pane_char`(=true_char) 정본을 쓴다 —
+                        // raw pane.character 만 보면 claude agents 로 이어받은 백그라운드
+                        // 세션은 ws.pane_character 가 비어(attach 스폰이 캐릭터 미배정)
+                        // 이 분기를 못 타고 아래 폴백으로 흘러 "미도리 · 작업명" 대신
+                        // 세션제목이 칩자리에 박혔다(거노 Q1). session_character(bound sid)
+                        // 로 해석하면 스프라이트·프사(둘 다 true_char)와 헤더가 일치한다.
                         match pane
                             .title
                             .clone()
@@ -1446,6 +1469,8 @@ impl App {
         let toast_alpha = self.copy_toast_alpha();
         // Collab completion toast (top-right). Pre-read here like toast_alpha so
         // the render block below never re-borrows self while g is held.
+        // 5시간 사용량 pill 값 — g 생성 전에 읽어 borrow 충돌을 피한다(다른 pre-read 와 동일).
+        let claude_usage_pct = self.claude_usage.lock().ok().and_then(|v| *v);
         let collab_toast_alpha = self.collab_toast_alpha();
         let collab_toast_msg = self.collab.toast.as_ref().map(|(m, _)| m.clone());
         let collab_toast_action_on = self.collab.toast_action.is_some();
@@ -1874,6 +1899,17 @@ impl App {
                 });
             }
             // agents 뷰 SCHALE 로고 — Clawd 자리(또는 헤더 왼쪽 여백)에 정적 1프레임.
+            // 교실 배경 — 셀 뒤(이미지 패스, cover-fit). agents/resume 피커 pane 만.
+            if !classroom_slots.is_empty() {
+                if !g.has_image("schale:classroom") {
+                    if let Some((rgba, w, h)) = schale_classroom_rgba() {
+                        g.upload_image("schale:classroom", &rgba, w, h);
+                    }
+                }
+                for (bx, by, bw, bh) in &classroom_slots {
+                    g.queue_image_cover("schale:classroom", *bx, *by, *bw, *bh);
+                }
+            }
             if !schale_logo_slots.is_empty() {
                 if !g.has_image("schale:logo") {
                     if let Some((rgba, w, h)) = schale_logo_rgba() {
@@ -2870,51 +2906,30 @@ impl App {
                         .as_ref()
                         .and_then(|id| ws.panes.get(id).and_then(|p| p.preview_path.clone()))
                 });
-                // ── 빠른 파일 고정 섹션 ── 트리 최상단(스크롤 무관)에 개인/프로젝트
-                // CLAUDE.md·프로젝트 MEMORY.md 원클릭 행. 클릭=보조탭, Opt+클릭=별도창.
-                self.file_tree.quick_rects.clear();
+                // ── 빠른 파일 고정 섹션 ── 여기선 높이만 잡아 start_y 를 확정하고,
+                // 실제 그리기는 트리 본문 뒤로 미룬다. 이 렌더러는 scissor 가 없어
+                // 스크롤로 start_y 위까지 올라온 트리 항목을 나중에 불투명 배경으로
+                // 덮어야 겹침이 안 난다(개인 CLAUDE.md 행에 폴더가 파고들던 문제).
                 let quick = &quick_files_list;
-                if !quick.is_empty() {
-                    g.draw_text(
-                        row_x + 6.0,
-                        tree_top + 3.0,
-                        "빠른 파일",
-                        gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
-                    );
-                    tree_top += 19.0;
-                    let (qmx, qmy) = self.cursor_px;
-                    for (label, path, icon) in quick {
-                        let y = tree_top;
-                        let hovered = qmx >= row_x && qmx <= row_x + row_w && qmy >= y && qmy <= y + item_h;
-                        let is_open = active_file.as_deref() == Some(path.as_path());
-                        if hovered {
-                            round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::surface_hover());
-                        } else if is_open {
-                            round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::surface_active());
-                        }
-                        if is_open {
-                            g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::accent());
-                        }
-                        let isz = 16.0_f32;
-                        let iy = y + (item_h - isz) / 2.0;
-                        let icon_x = row_x + 18.0;
-                        let col = if hovered || is_open { theme::text() } else { theme::text_dim() };
-                        g.queue_icon(icon, icon_x, iy, isz, col);
-                        g.draw_text(
-                            icon_x + isz + 8.0,
-                            y + (item_h - 13.0) / 2.0,
-                            label,
-                            gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false },
-                        );
-                        self.file_tree.quick_rects.push((path.clone(), (row_x, y, row_w, item_h)));
-                        tree_top += item_h;
-                    }
-                    // 구분선 — 빠른 파일과 트리 본문 사이 하이라인.
-                    tree_top += 4.0;
-                    g.rect(row_x, tree_top, row_w, 1.0, theme::with_alpha(theme::border(), 0x88));
-                    tree_top += 7.0;
-                }
+                let quick_top = tree_top;
+                let quick_h = if quick.is_empty() {
+                    0.0
+                } else {
+                    // 헤더(19) + 항목들(item_h*n) + 구분선(4+7)
+                    19.0 + quick.len() as f32 * item_h + 11.0
+                };
+                tree_top += quick_h;
                 let start_y = tree_top;
+                // 본문 geometry 를 스크롤 처리에 넘겨주기 위해 저장: start_y 는 검색박스
+                // + 빠른파일 섹션(항목 수만큼 동적) 아래 첫 행 y, visible_h 는 dock 을
+                // 뺀 창 끝까지. input.rs 가 이걸로 max_scroll 을 정확히 clamp 한다.
+                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() {
+                    0.0
+                } else {
+                    DOCK_HEIGHT
+                };
+                let body_visible_h = (sb_win_h - dock_h - start_y).max(0.0);
+                self.file_tree.body_rect = (row_x, start_y, row_w, body_visible_h);
                 let win_h = win_px.1 / scale;
                 let step = 14.0_f32; // per-depth indent width
                 let mut rects: Vec<(std::path::PathBuf, (f32, f32, f32, f32))> = Vec::new();
@@ -2925,8 +2940,12 @@ impl App {
                 for (idx, node) in vis_nodes.iter().enumerate() {
                     let node = *node;
                     let y = start_y - self.file_tree.scroll + idx as f32 * item_h;
-                    if y + item_h < start_y || y > win_h {
-                        continue; // off-screen → clip (and don't cache a hit rect)
+                    // start_y 위로 조금이라도 걸친 항목은 통째 스킵한다. 아이콘은
+                    // queue_icon 별도 패스라 나중에 그린 빠른파일 배경으로도 못 덮어
+                    // (chevron/폴더 글리프가 빠른파일 행에 파고들던 겹침) — 부분 행을
+                    // 아예 안 그려야 근본 차단된다. 상단 잘림은 위쪽 fade 가 가린다.
+                    if y < start_y - 0.5 || y > win_h {
+                        continue; // off-screen / 상단 부분걸침 → clip (hit rect 도 생략)
                     }
                     let hovered =
                         self.file_tree.hover.as_deref() == Some(node.path.as_path());
@@ -3112,6 +3131,51 @@ impl App {
                             view_top + (viewport_h - thumb_h) * (scroll / overflow).clamp(0.0, 1.0);
                         round_rect(g, tree_col_x + tree_col_w - 6.0, thumb_y, 3.5, thumb_h, 1.75, theme::with_alpha(theme::text(), 0x66));
                     }
+                }
+                // ── 빠른 파일 섹션(지연 그리기) ── 트리 본문·페이드 뒤에 그려, 스크롤로
+                // start_y 위로 올라온 트리 항목을 불투명 배경으로 덮는다(scissor 없는
+                // 렌더러의 겹침 방지). 클릭=보조탭, Opt+클릭=별도창.
+                self.file_tree.quick_rects.clear();
+                if !quick.is_empty() {
+                    g.rect(tree_col_x, quick_top, tree_col_w - 1.0, quick_h, theme::bg());
+                    let mut qy = quick_top;
+                    g.draw_text(
+                        row_x + 6.0,
+                        qy + 3.0,
+                        "빠른 파일",
+                        gpu::DrawOpts { font_size: 10.5, color: theme::text_mute(), bold: false, italic: false },
+                    );
+                    qy += 19.0;
+                    let (qmx, qmy) = self.cursor_px;
+                    for (label, path, icon) in quick {
+                        let y = qy;
+                        let hovered = qmx >= row_x && qmx <= row_x + row_w && qmy >= y && qmy <= y + item_h;
+                        let is_open = active_file.as_deref() == Some(path.as_path());
+                        if hovered {
+                            round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::surface_hover());
+                        } else if is_open {
+                            round_rect(g, row_x, y, row_w, item_h, theme::RADIUS_SM, theme::surface_active());
+                        }
+                        if is_open {
+                            g.rect(row_x, y + 2.0, 2.0, item_h - 4.0, theme::accent());
+                        }
+                        let isz = 16.0_f32;
+                        let iy = y + (item_h - isz) / 2.0;
+                        let icon_x = row_x + 18.0;
+                        let col = if hovered || is_open { theme::text() } else { theme::text_dim() };
+                        g.queue_icon(icon, icon_x, iy, isz, col);
+                        g.draw_text(
+                            icon_x + isz + 8.0,
+                            y + (item_h - 13.0) / 2.0,
+                            label,
+                            gpu::DrawOpts { font_size: 13.0, color: col, bold: false, italic: false },
+                        );
+                        self.file_tree.quick_rects.push((path.clone(), (row_x, y, row_w, item_h)));
+                        qy += item_h;
+                    }
+                    // 구분선 — 빠른 파일과 트리 본문 사이 하이라인.
+                    qy += 4.0;
+                    g.rect(row_x, qy, row_w, 1.0, theme::with_alpha(theme::border(), 0x88));
                 }
                 // Right-click context menu — painted last in the column so it
                 // overlays the rows. Items + hit rects build straight into
@@ -5336,6 +5400,40 @@ impl App {
             // Launch build banner, bottom-right, painted last so it sits
             // on top. Faint and short-lived — fades out after a few
             // seconds. Coords are logical px (gpu promotes to physical).
+            // claude 5시간 사용량 pill — 타이틀바 우상단. 웹뷰 TitleBar UsagePill 의
+            // 터미널 미러(거노: 웹뷰 안 봐서 터미널에). 70%↑ 호박·90%↑ 산호로 경고.
+            // 데이터는 claude_usage 폴러(handler.rs, 로컬 /claude-usage 60초).
+            if let Some(pct) = claude_usage_pct {
+                let win_w = win_px.0 / scale;
+                let f = 11.0_f32;
+                let label = format!("5h {:.0}%", pct);
+                let tw = label.chars().count() as f32 * f * 0.6;
+                let pad_x = 8.0_f32;
+                let pill_w = tw + pad_x * 2.0;
+                let pill_h = 19.0_f32;
+                // git-column 토글(우측 끝, 폭 26 + 마진 8 = win_w-34~-8)과 자리가
+                // 겹쳐 토글 glyph 가 반투명 pill 위로 비쳐 "5h" 가 뭉개졌다(거노: "5万").
+                // pill 을 그 클러스터 왼쪽으로 park.
+                let x = (win_w - pill_w - 42.0).max(0.0);
+                let y = ((TITLE_HEIGHT - pill_h) / 2.0).max(2.0);
+                let accent = if pct >= 90.0 {
+                    [0xf7, 0x76, 0x8e, 0xff]
+                } else if pct >= 70.0 {
+                    [0xe0, 0xaf, 0x68, 0xff]
+                } else {
+                    [0x73, 0xda, 0xca, 0xff]
+                };
+                round_rect(
+                    g, x, y, pill_w, pill_h, pill_h / 2.0,
+                    theme::with_alpha(theme::surface_active(), 0xE6),
+                );
+                g.draw_text(
+                    x + pad_x,
+                    y + (pill_h - f) / 2.0 - 1.0,
+                    &label,
+                    gpu::DrawOpts { font_size: f, color: accent, bold: true, italic: false },
+                );
+            }
             let v_alpha = version_alpha;
             if v_alpha > 0.0 {
                 let label = Self::version_label();
@@ -5758,10 +5856,14 @@ fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
     let b2 = rows.iter().rposition(|r| is_border(r))?;
     let b1 = rows[..b2].iter().rposition(|r| is_border(r))?;
     let range = (b1 + 1)..b2;
+    // claude 입력박스 마커는 `❯`(U+276F, 또는 옛 `›`)뿐 — ASCII `>` 는 제외한다.
+    // diff·git·노트 TUI 는 대시줄 사이에 ASCII `>`(인용·프롬프트) 를 흔히 둬서,
+    // `>` 까지 마커로 치면 그 대시줄 쌍을 입력박스로 오인해 뜬금없는 빈 초록
+    // 사각형을 덧그렸다(거노 2026-07-22).
     let has_marker = rows[range.clone()].iter().any(|r| {
         r.iter()
             .find(|c| c.ch != ' ' && c.ch != '\0')
-            .is_some_and(|c| matches!(c.ch, '❯' | '›' | '>'))
+            .is_some_and(|c| matches!(c.ch, '❯' | '›'))
     });
     (has_marker && !range.is_empty()).then_some(range)
 }
@@ -5796,6 +5898,55 @@ fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
         {
             c.fg = fg.clone();
         }
+    }
+}
+
+/// 입력박스 상단 보더 오른쪽 `@<slug>-<sid>` 칩의 이름(캐릭터 slug) 부분을 pane
+/// 캐릭터로 통일한다. claude argv 의 agent 이름은 부팅 시 고정이라, 이후
+/// swap-character 나 컴팩트 재부팅으로 pane 시각 캐릭터가 바뀌면 칩(@yuuka)과
+/// pane(코하루)이 갈라진다(거노: "%5 코하루인데 @yuuka"). `-<sid>` 는 세션
+/// 식별로 유지하고 첫 slug run 만 교체 — 칩을 오른쪽 끝 고정으로 두고 왼쪽 '─'
+/// 보더를 흡수/보충해 뒤쪽 ` ──` 정렬을 지킨다. 스냅샷 전용(원본 무손상).
+fn restyle_chip_name(rows: &mut [Vec<GridCell>], slug: &str) {
+    let Some(range) = prompt_box_rows(rows) else { return };
+    let row = &mut rows[range.start - 1];
+    let Some(at) = row.iter().position(|c| c.ch == '@') else { return };
+    // 이름 run: '@' 다음 영숫자 연속(첫 slug). sid 구분자 '-' 에서 멈춘다.
+    let name_len = row[at + 1..]
+        .iter()
+        .take_while(|c| c.ch.is_ascii_alphanumeric())
+        .count();
+    if name_len == 0 {
+        return;
+    }
+    let old: String = row[at + 1..at + 1 + name_len].iter().map(|c| c.ch).collect();
+    if old == slug {
+        return; // 이미 일치 — 손대지 않는다
+    }
+    // 칩 토큰 끝: 이름 run + sid('-'/'_'/영숫자) 연속.
+    let tok_end = at
+        + 1
+        + row[at + 1..]
+            .iter()
+            .take_while(|c| c.ch.is_ascii_alphanumeric() || c.ch == '-' || c.ch == '_')
+            .count();
+    let sid: String = row[at + 1 + name_len..tok_end].iter().map(|c| c.ch).collect();
+    let style = row[at].clone();
+    let mk = |ch: char| {
+        let mut c = style.clone();
+        c.ch = ch;
+        c
+    };
+    let new_tok: Vec<char> = format!("@{}{}", slug, sid).chars().collect();
+    let new_start = tok_end.saturating_sub(new_tok.len());
+    for (k, ch) in new_tok.iter().enumerate() {
+        if new_start + k < row.len() {
+            row[new_start + k] = mk(*ch);
+        }
+    }
+    // 칩이 짧아졌으면 옛 '@' ~ new_start 잔재를 보더 대시로 되메운다.
+    for i in at..new_start {
+        row[i] = mk('─');
     }
 }
 
@@ -6507,6 +6658,27 @@ fn schale_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {
     Some((img.into_raw(), w, h))
 }
 
+/// agents/resume 피커 배경(교실). 셀 뒤에 깔리므로 텍스트 대비 확보를 위해 로드
+/// 시 밝기를 낮춘다 — 원본 에셋은 보존, 여기서만 RGB × DIM. user override
+/// (students_dir/schale-classroom.png) 우선, 없으면 include_bytes 번들.
+fn schale_classroom_rgba() -> Option<(Vec<u8>, u32, u32)> {
+    const DIM: f32 = 0.40;
+    let mut img = user_asset_rgba("schale-classroom.png")
+        .and_then(|(rgba, w, h)| image::RgbaImage::from_raw(w, h, rgba))
+        .or_else(|| {
+            image::load_from_memory(include_bytes!("../assets/schale-classroom.png"))
+                .ok()
+                .map(|i| i.to_rgba8())
+        })?;
+    for px in img.pixels_mut() {
+        px[0] = (px[0] as f32 * DIM) as u8;
+        px[1] = (px[1] as f32 * DIM) as u8;
+        px[2] = (px[2] as f32 * DIM) as u8;
+    }
+    let (w, h) = img.dimensions();
+    Some((img.into_raw(), w, h))
+}
+
 /// agents 목록 뷰에서 SCHALE 로고를 얹을 위치 — "Claude Code" 헤더 행을 찾아 그
 /// 왼쪽 여백(logo_cols + 2칸 갭 앞)의 top-left (row, col)을 돌려준다. Clawd 블록아트가
 /// 없는 목록 뷰에서 startup 배너의 Clawd 자리와 같은 쪽(헤더 왼쪽)에 앵커한다.
@@ -7078,18 +7250,26 @@ fn screen_is_agents_list(rows: &[Vec<GridCell>]) -> bool {
 /// !has_profile_slot 로 이미 걸러진다.
 fn screen_is_resume_picker(rows: &[Vec<GridCell>]) -> bool {
     let full: String = rows.iter().flat_map(|r| r.iter().map(|c| c.ch)).collect();
-    full.contains("Resume session")
+    // "Resume session (N of M)" 헤더가 피커 고유 — 단순 "Resume session" 은
+    // 대화 본문에 우연히 나올 수 있어 여는 괄호까지 확인한다. 피커도 맨 아래
+    // statusline(U+FFFC) 한 줄이 남아 has_profile_slot 으로는 못 거른다
+    // (거노: Search 아래 핑크 사각형 잔재 — accent 후처리 오발동).
+    full.contains("Resume session (")
 }
 
 /// Claude Code 라이브 스피너("✻ Verbing…" 별 dingbat, 또는 braille) 위치 감지 —
 /// `rows_show_working`(input.rs)과 같은 신호를 행·열 좌표로 돌려준다. 마지막
-/// non-blank 10행, 행 앞머리(col<8)만 본다(본문 인용 별표 오탐 방지). 스피너
+/// non-blank 30행, 행 앞머리(col<8)만 본다(본문 인용 별표 오탐 방지). 스피너
 /// 셀은 blank 처리하고 그 자리에 학생 working 도트를 얹는 용도.
 fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
     let last = rows
         .iter()
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;
-    let start = (last + 1).saturating_sub(10);
+    // todo 트리가 뜨면 스피너 행이 statusline(=last)에서 멀어진다: todo ~7행 +
+    // 입력박스(테두리·❯·테두리) ~4행이 사이에 껴 10행 창 밖으로 밀려나 walk
+    // 도트가 사라졌다(거노). 앞머리 글리프(별/점/점자 col<8) + '…'/"esc to
+    // interrupt" 라는 강한 시그니처라 30행으로 넓혀도 본문 오탐은 사실상 없다.
+    let start = (last + 1).saturating_sub(30);
     // 스피너 애니메이션은 별(U+2720~274F)·점자(U+2800~28FF)·가운뎃점(·) 등
     // 여러 글리프를 순환한다. 특정 글리프만 잡으면 점 프레임에서 감지가 끊겨
     // 학생 도트가 프레임마다 깜빡인다 → `rows_show_working` 과 같은 문맥 기준
@@ -8057,5 +8237,48 @@ mod sticky_seek_tests {
         set_pills(&[]); // 최상단 — pill 없음
         assert_eq!(sticky_seek_step(), None);
         assert!(!sticky_seek_active());
+    }
+}
+
+#[cfg(test)]
+mod prompt_box_tests {
+    use super::*;
+
+    fn row_from(s: &str) -> Vec<GridCell> {
+        s.chars()
+            .map(|c| {
+                let mut cell = GridCell::blank();
+                cell.ch = c;
+                cell
+            })
+            .collect()
+    }
+
+    // 진짜 claude 입력박스: 대시줄 사이 ❯ 마커행 → 감지된다(실제 composed 는
+    // 모서리·세로선 없는 순수 대시줄이라 box_rows 와 동일 형태).
+    #[test]
+    fn real_prompt_box_detected() {
+        let rows = vec![
+            row_from("some output above"),
+            row_from(&"─".repeat(28)),
+            row_from(&format!("❯ hello{}", " ".repeat(21))),
+            row_from(&"─".repeat(28)),
+        ];
+        assert_eq!(prompt_box_rows(&rows), Some(2..3));
+    }
+
+    // diff·git·노트 TUI 의 대시 구분선 쌍은 사이에 ASCII '>'(인용·프롬프트)가
+    // 있어도 입력박스로 오인하지 않는다 — 거노 2026-07-22: 뜬금없는 빈 초록
+    // 사각형(style_prompt_box 오발동) 회귀 방지.
+    #[test]
+    fn plain_dash_rules_ignored() {
+        let rows = vec![
+            row_from("web/public/cast/ += 캐릭터 12장"),
+            row_from(&"─".repeat(30)),
+            row_from(" > some diff line here"),
+            row_from(&"─".repeat(30)),
+            row_from("Notes: press n to add notes"),
+        ];
+        assert!(prompt_box_rows(&rows).is_none());
     }
 }

@@ -408,19 +408,8 @@ impl App {
         if completed.is_empty() {
             return;
         }
-        // A sibling finished: top-right toast + header pulse. 캐릭터명(pane 고정,
-        // stale 없음)만 라벨로 — OSC 작업명 실시간 조회는 stale 원천이라 뺀다. 이
-        // 경로는 glyph 스캔 완료라 hook title 이 없어 "작업 완료" 고정 문구.
-        let character = completed.first().and_then(|id| self.pane_character_if_known(id));
-        let msg = match character {
-            Some(c) => format!("✓ {c} 작업 완료"),
-            None => "✓ 작업 완료".to_string(),
-        };
-        // A sticky approval toast (a pane waiting on the user) outranks a sibling
-        // completion blip — don't swap its text out from under the chips.
-        if self.collab.toast_action.is_none() {
-            self.collab.toast = Some((msg, now));
-        }
+        // A sibling finished: 헤더 펄스 + 학생 cheer 만 남긴다. 완료 "토스트"는
+        // glyph 스캔 기반이라 오탐(엉뚱한 pane·타이밍)이 잦아 제거(거노 요청).
         for id in completed {
             self.notify_flash.insert(id.clone(), now);
             // 턴 완료 → 학생 cheer 시작. 사용자가 이 pane 에 입력할 때까지 유지.
@@ -459,17 +448,19 @@ impl App {
                         .lock()
                         .unwrap()
                         .insert(id.clone(), "승인 대기 (화면 감지)".to_string());
+                    // 화면 승인 토스트/칩은 화면 감지 오탐이 있어 제거(거노 요청).
+                    // 승인 신호는 board attention(위) + (pane 안 볼 때) 데스크탑 알림
+                    // 으로만 남긴다 — toast_action 은 Sparkle 업데이트 토스트가 공유해
+                    // 건드리지 않는다.
                     if faces_user {
-                        let label = self.pane_character_if_known(id);
-                        let who = label.as_deref().unwrap_or("pane");
-                        self.collab.toast = Some((format!("⚠ {who} 승인 대기"), now));
-                        self.collab.toast_action = Some(id.clone());
-                        self.collab.toast_rect = None;
+                        let who = self
+                            .pane_character_if_known(id)
+                            .unwrap_or_else(|| "pane".to_string());
                         let looking = self.window_focused
                             && self.ws.lock().unwrap().active_pane.as_deref()
                                 == Some(id.as_str());
                         if !looking {
-                            crate::chrome::notify_desktop("⚠ 승인 필요", who);
+                            crate::chrome::notify_desktop("⚠ 승인 필요", &who);
                         }
                     }
                     changed = true;
@@ -841,6 +832,44 @@ impl App {
                 }
             }
         }
+        // File-tree column scroll — handled BEFORE wheel_step so it uses the raw
+        // delta: trackpad gets pixel-precise smooth scroll, the mouse wheel reacts
+        // instantly per notch (no accumulate-to-a-whole-line quantise lag). Only
+        // intercepts while the pointer is over the tree column; body_rect (the real
+        // geometry the renderer fills each paint) drives max_scroll.
+        if self.file_tree.visible
+            && self.cursor_px.1 > TITLE_HEIGHT
+            && self.cursor_px.0 >= self.file_tree_col_x()
+            && self.cursor_px.0 < self.file_tree_col_x() + self.file_tree.w_logical
+        {
+            let (_, start_y, _, visible_h) = self.file_tree.body_rect;
+            // 첫 paint 전이면 body_rect 가 (0,0,0,0) — 스크롤 대신 redraw 로 geometry 를
+            // 채우고 다음 휠부터 정상 동작.
+            if (start_y, visible_h) == (0.0, 0.0) {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+                return;
+            }
+            let item_h = 26.0_f32;
+            let content_h = self.file_tree.nodes.len() as f32 * item_h;
+            let max_scroll = (content_h - visible_h).max(0.0);
+            // 픽셀 스크롤량: 마우스휠은 노치당 ≈3행, 트랙패드는 픽셀 1:1(관성 그대로).
+            // 아래로 굴리면(자연 스크롤) scroll 증가.
+            let delta_px = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y * item_h * 3.0,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            let next = (self.file_tree.scroll - delta_px).clamp(0.0, max_scroll);
+            if (next - self.file_tree.scroll).abs() > 0.01 {
+                self.file_tree.scroll = next;
+                self.chrome_dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            return;
+        }
         let lines = match wheel_step(
             &mut self.wheel_accum_y,
             dy_cells,
@@ -874,34 +903,6 @@ impl App {
                 }
                 return;
             }
-        }
-        // File-tree column: the pointer is over the tree, not a terminal, so
-        // scroll the rows instead of delegating to a pane (px_to_pane_cell
-        // returns None here and would otherwise fall through to the active
-        // pane). Clamp so it can't scroll above the top or past the last row.
-        if self.file_tree.visible
-            && self.cursor_px.1 > TITLE_HEIGHT
-            && self.cursor_px.0 >= self.file_tree_col_x()
-            && self.cursor_px.0 < self.file_tree_col_x() + self.file_tree.w_logical
-        {
-            let item_h = 26.0_f32;
-            let win_h = self.window.as_ref().map_or(800.0, |w| {
-                w.inner_size().height as f32 / self.effective_scale()
-            });
-            let start_y = TITLE_HEIGHT + 10.0;
-            let content_h = self.file_tree.nodes.len() as f32 * item_h;
-            let max_scroll = (content_h - (win_h - start_y).max(0.0)).max(0.0);
-            // lines>0 = wheel up = toward the top = less scroll.
-            let delta_px = lines as f32 * item_h;
-            let next = (self.file_tree.scroll - delta_px).clamp(0.0, max_scroll);
-            if (next - self.file_tree.scroll).abs() > 0.01 {
-                self.file_tree.scroll = next;
-                self.chrome_dirty = true;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-            return;
         }
         // Git column: scroll the change list when the pointer is over it. Same
         // clamp idea as the file tree; the visible height is the band between
