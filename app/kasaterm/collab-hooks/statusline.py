@@ -31,6 +31,7 @@ except ImportError:
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
+ITALIC = "\033[3m"
 DIM = "\033[2m"
 
 # 학생명 → accent hex (kasaterm theme.rs character_accent 와 동일 값)
@@ -49,8 +50,9 @@ EFFORT_HEX = {
 C_MODEL, C_GIT, C_DIR, C_CTX, C_SEP, C_FALLBACK = (
     "7aa2f7", "73daca", "bb9af7", "ff9e64", "565f89", "a0a6b0",
 )
-# 로그인 계정 세그먼트 — 팀=sky, 개인=mint (거노가 개인/팀 플랜을 오가며 헷갈려 함)
-C_ACCT_TEAM, C_ACCT_SOLO = "7aa2f7", "73daca"
+# 로그인 계정 세그먼트 — 흰색+이탤릭(거노: 색 세그먼트들 사이에서 계정만 구분되게.
+# 터미널 셀은 폰트 패밀리 교체가 불가라 "폰트 다르게"는 italic 스타일로 대응)
+C_ACCT = "ffffff"
 
 ICON_SETS = {
     "nerd-font": {"model": "", "git": "", "folder": "", "effort": ""},
@@ -170,9 +172,9 @@ def main():
         otype = (acct.get("organizationType") or "").lower()
         org = (acct.get("organizationName") or "").strip()
         if "team" in otype or "enterprise" in otype:
-            parts.append(f"{ansi(C_ACCT_TEAM)}{(org or '팀')[:14]}{RESET}")
+            parts.append(f"{ansi(C_ACCT)}{ITALIC}{(org or '팀')[:14]}{RESET}")
         else:
-            parts.append(f"{ansi(C_ACCT_SOLO)}개인{RESET}")
+            parts.append(f"{ansi(C_ACCT)}{ITALIC}개인{RESET}")
 
     # ⑂bg 백그라운드 배지 제거(거노: 복원 세션에 자꾸 백그라운드로 떠 짜증). anchor
     # (KASATERM_SESSION_ID) 불일치 판정은 detach 포크·앱 재시작 복원·continuation 을

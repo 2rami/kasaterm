@@ -1032,6 +1032,12 @@ impl App {
                             .or_else(|| self.pane_cwd_cache.get(id.as_str()))?;
                         crate::socket::project_jsonl(cwd, sid)
                     });
+                    // 자동 말풍선은 pane 의 "마지막" 접힌 줄에만 — 위쪽 옛 메시지
+                    // 행들이 같은 pane 키를 서로 덮으며 타이머를 매 프레임 리셋하는
+                    // 것 방지(새 메시지는 항상 제일 아래 줄로 도착한다).
+                    let last_tm_row = (0..composed.len())
+                        .rev()
+                        .find(|&r| teammate_collapsed_line(&composed[r]).is_some());
                     for r in 0..composed.len() {
                         let Some((c0, count, sender)) = teammate_collapsed_line(&composed[r])
                         else {
@@ -1051,11 +1057,32 @@ impl App {
                                 body_top + (r + 1) as f32 * sch,
                             );
                             let row_w = composed[r].len() as f32 * scw;
-                            if cy >= ry0
+                            let hovering = cy >= ry0
                                 && cy < ry1
                                 && cx >= body_left
-                                && cx < body_left + row_w
-                            {
+                                && cx < body_left + row_w;
+                            // 새 메시지 도착 감지 — 해시가 바뀌면 타이머 재시작,
+                            // TEAMMATE_BUBBLE_AUTO_MS 내면 hover 없이 자동 표시.
+                            // 리드로우는 커서 블링크 WaitUntil 틱이 보장.
+                            let auto_live = Some(r) == last_tm_row && {
+                                use std::hash::{Hash, Hasher};
+                                let mut h = std::collections::hash_map::DefaultHasher::new();
+                                (&sender, count, &m.body).hash(&mut h);
+                                let key = h.finish();
+                                TEAMMATE_BUBBLE_AUTO.with(|s| {
+                                    let mut map = s.borrow_mut();
+                                    let now = std::time::Instant::now();
+                                    let e = map.entry(id.clone()).or_insert((key, now));
+                                    if e.0 != key {
+                                        *e = (key, now);
+                                    }
+                                    now.duration_since(e.1).as_millis()
+                                        < TEAMMATE_BUBBLE_AUTO_MS as u128
+                                })
+                            };
+                            // hover 는 auto 를 덮지만(사용자 의도가 명시적),
+                            // auto 는 이미 있는 말풍선을 덮지 않는다.
+                            if hovering || (auto_live && teammate_bubble.is_none()) {
                                 // 복수("N messages from")면 마지막 N통을 시간순으로
                                 // 합쳐 말풍선에(호버 시에만 회수). 단수면 최신 1통.
                                 let (summary, body) = if count > 1 {
@@ -6814,7 +6841,19 @@ thread_local! {
     /// 뷰포트로 들어와 sticky 텍스트가 바뀌거나(또는 최상단 도달로 사라지면) 멈춘다.
     pub(crate) static STICKY_SEEK: std::cell::RefCell<Option<StickySeek>> =
         std::cell::RefCell::new(None);
+
+    /// pane → (마지막 팀메시지 해시, 최초 감지 시각). 새 SendMessage 도착 시 hover
+    /// 없이도 말풍선을 TEAMMATE_BUBBLE_AUTO_MS 동안 자동 표시(거노: 마우스오버 말고
+    /// 자동으로). 그리드는 reflow 불가 + 접힌 줄 아래 빈 행이 보통 1개뿐이라 인라인
+    /// 다행 전개로는 긴 메시지를 못 살림 — 전문은 말풍선이 유일한 캔버스.
+    static TEAMMATE_BUBBLE_AUTO:
+        std::cell::RefCell<std::collections::HashMap<String, (u64, std::time::Instant)>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
+
+/// 자동 말풍선 표시 시간 — 긴 협업 메시지(수백 자)를 읽을 여유. 만료 후에도
+/// hover 말풍선은 그대로 동작한다.
+const TEAMMATE_BUBBLE_AUTO_MS: u64 = 15_000;
 
 /// 클릭한 sticky 프롬프트를 화면으로 끌어오는 seek 상태(struct App 밖 — 무접촉).
 pub(crate) struct StickySeek {

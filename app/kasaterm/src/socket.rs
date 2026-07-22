@@ -173,6 +173,12 @@ pub struct PtyBackend {
     /// surface_id → 마지막 지글(NudgePaneResize) 발동 시각 — stale statusline pane 을
     /// 10s 에 1회만 흔들어 재실행 강제가 리사이즈 폭주가 되지 않게 한다.
     nudged: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    /// agents/attach 뷰로 판정된 pane 집합 — rebind_agents_panes(3s 폴러)가 재구축.
+    /// 뷰 pane 의 statusline report-cwd 는 뷰어 프로세스 자신의 cwd(pane 스폰 경로)지
+    /// 표시 중인 세션의 프로젝트가 아니라, 파일트리 오버라이드로 흘리면 transcript
+    /// 유래 진짜 세션 cwd 를 덮는다(거노: bg 세션 파일트리가 pane cwd 고착) —
+    /// report_cwd 가 이 집합을 보고 GUI 이벤트를 생략한다.
+    view_panes: Arc<Mutex<HashSet<String>>>,
 }
 
 /// `claude agents --json` 의 sessionId→status (2s static 캐시). board(PtyBackend.
@@ -279,6 +285,7 @@ impl PtyBackend {
             pane_status_pub,
             bg_agents,
             nudged: Arc::new(Mutex::new(HashMap::new())),
+            view_panes: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -393,11 +400,15 @@ impl PtyBackend {
     /// 한 호출로 정렬된다. 매칭 실패(피커 화면·중복 이름)면 건드리지 않는다.
     pub(crate) fn rebind_agents_panes(&self, live: &HashSet<String>) {
         let mut name_sids: Option<HashMap<String, String>> = None;
+        // 이번 패스의 뷰 pane 집합 — 끝에서 통째 교체해 죽은 pane·뷰 종료가
+        // 자연히 빠진다(뷰가 아니게 된 pane 의 statusline report 는 다시 흐름).
+        let mut views: HashSet<String> = HashSet::new();
         for (id, shell_pid) in self.query_pane_pids() {
             if !live.contains(&id) {
                 continue;
             }
             let Some(sub) = claude_view_subcommand(shell_pid) else { continue };
+            views.insert(id.clone());
             let sid = match sub {
                 "attach" => attach_target_from_cmdline(shell_pid),
                 _ => {
@@ -453,8 +464,14 @@ impl PtyBackend {
             let cur = self.bound.lock().unwrap().get(&id).cloned();
             if cur.as_ref() != Some(&path) {
                 let _ = self.bind_transcript(&id, &path.to_string_lossy());
+            } else {
+                // 바인딩이 그대로여도 view_cwd 는 재공표 — 뷰 판정이 3s 폴이라
+                // 첫 판정 전에 statusline report 가 오버라이드를 pane cwd 로 덮는
+                // 선착 경합이 있다. 매 패스 진실(transcript cwd)로 재수렴시킨다.
+                self.publish_transcript_cwd(&id, &path);
             }
         }
+        *self.view_panes.lock().unwrap() = views;
     }
 
     /// sessionId → official claude status (idle/busy/waiting), cached 2s.
@@ -831,6 +848,13 @@ impl Backend for PtyBackend {
             .lock()
             .unwrap()
             .insert(surface_id.to_string(), cwd.to_string());
+        // agents/attach 뷰 pane: 이 보고는 뷰어 claude 프로세스 자신의 cwd(pane
+        // 스폰 경로)지 표시 중인 세션의 프로젝트가 아니다 — GUI 로 흘리면
+        // publish_transcript_cwd 가 넣은 진짜 세션 cwd 를 매 렌더 덮는다(거노:
+        // bg 세션 파일트리가 pane cwd 고착). 오버라이드는 transcript bind 에 맡긴다.
+        if self.view_panes.lock().unwrap().contains(surface_id) {
+            return Ok(());
+        }
         // GUI 파일트리가 "pane 이 보는 경로"를 셸 cwd 보다 우선하도록 위임.
         let _ = self.proxy.send_event(UserEvent::SocketViewCwd(
             surface_id.to_string(),
