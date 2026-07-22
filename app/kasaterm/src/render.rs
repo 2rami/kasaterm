@@ -1471,6 +1471,19 @@ impl App {
         // the render block below never re-borrows self while g is held.
         // 5시간 사용량 pill 값 — g 생성 전에 읽어 borrow 충돌을 피한다(다른 pre-read 와 동일).
         let claude_usage_pct = self.claude_usage.lock().ok().and_then(|v| *v);
+        // pill 은 우상단 아이콘 클러스터(arona/settings/git-col) 왼쪽에 앉혀야 한다 —
+        // 그 최좌단 버튼 x 를 미리 읽어 pill 우측 경계로 쓴다. 고정 마진이면 shim
+        // OFF(arona 숨김)나 배치 변경 때 다시 겹친다(거노: pill 이 토글 위에 올라
+        // "5h" 가 "5万" 으로 뭉갬). 버튼이 하나도 없으면 win 우측(폴백).
+        let usage_pill_right = [
+            self.arona_btn_rect(),
+            self.settings_toggle_rect(),
+            self.git_col_toggle_rect(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|(bx, ..)| bx)
+        .fold(f32::INFINITY, f32::min);
         let collab_toast_alpha = self.collab_toast_alpha();
         let collab_toast_msg = self.collab.toast.as_ref().map(|(m, _)| m.clone());
         let collab_toast_action_on = self.collab.toast_action.is_some();
@@ -5411,10 +5424,14 @@ impl App {
                 let pad_x = 8.0_f32;
                 let pill_w = tw + pad_x * 2.0;
                 let pill_h = 19.0_f32;
-                // git-column 토글(우측 끝, 폭 26 + 마진 8 = win_w-34~-8)과 자리가
-                // 겹쳐 토글 glyph 가 반투명 pill 위로 비쳐 "5h" 가 뭉개졌다(거노: "5万").
-                // pill 을 그 클러스터 왼쪽으로 park.
-                let x = (win_w - pill_w - 42.0).max(0.0);
+                // 아이콘 클러스터 최좌단(usage_pill_right, pre-read) 왼쪽에 8px 띄워
+                // park — 어떤 버튼과도 안 겹친다. 버튼이 다 없으면 win 우측 폴백.
+                let right_edge = if usage_pill_right.is_finite() {
+                    usage_pill_right - 8.0
+                } else {
+                    win_w - 12.0
+                };
+                let x = (right_edge - pill_w).max(0.0);
                 let y = ((TITLE_HEIGHT - pill_h) / 2.0).max(2.0);
                 let accent = if pct >= 90.0 {
                     [0xf7, 0x76, 0x8e, 0xff]
