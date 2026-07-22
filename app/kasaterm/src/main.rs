@@ -3300,6 +3300,10 @@ struct App {
     /// --json --all` 폴러(handler.rs resumed)가 3초마다 갱신. 타이틀바 배지·학생 유지
     /// (부모 캐릭터 상속)가 읽는다. 백그라운드 세션이 아니면 키 없음.
     bg_agents: std::sync::Arc<std::sync::Mutex<HashMap<String, Option<String>>>>,
+    /// claude 5시간 사용량 창 사용률(%). handler.rs resumed 의 폴러가 로컬
+    /// `/claude-usage`(oauth/usage 프록시)를 60초마다 조회해 채운다. 타이틀바
+    /// 우상단 사용량 pill 이 읽는다. 토큰 없음/실패면 None → pill 숨김.
+    claude_usage: std::sync::Arc<std::sync::Mutex<Option<f32>>>,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,
@@ -3657,6 +3661,7 @@ impl App {
             pane_claude_sid: HashMap::new(),
             socket_backend: None,
             bg_agents: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            claude_usage: std::sync::Arc::new(std::sync::Mutex::new(None)),
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

@@ -31,8 +31,7 @@ import time
 CLIP = 48
 TAIL = 128 * 1024
 MIN_INTERVAL_S = 60
-CTX_PROMPTS = 6
-CTX_CHARS = 1400
+CTX_CHARS = 2000
 
 
 def read_tail(tp):
@@ -175,16 +174,19 @@ def generate(tp, sid, srclen):
     claude = real_claude()
     if not claude:
         return
-    # 컨텍스트: 최근 실사용자 프롬프트 위주 + 마지막 응답 한 줌.
-    ctx = []
-    for _, t in users[-CTX_PROMPTS:]:
-        ctx.append(f"[사용자] {t[:200]}")
-    if asst:
-        ctx.append(f"[claude] {asst[-1][1][:200]}")
-    ctx_s = "\n".join(ctx)[-CTX_CHARS:]
+    # 전체 대화 흐름(오래된→최근 user 프롬프트)을 맥락으로 주고, 마지막 프롬프트를 따로
+    # 강조해 "지금 하는 작업"을 콕 집어 제목으로 만든다. 최근 몇 개만 주면 맥락이 없어
+    # 엉뚱하게 요약됐다(거노: 그지같이 요약). 흐름은 짧게 많이, 지금 프롬프트는 길게.
+    # asst 응답은 안 넣는다 — 제목의 기준은 사용자 의도.
+    flow = [t.replace("\n", " ").strip()[:70] for _, t in users if t.strip()]
+    recent = (users[-1][1].replace("\n", " ").strip()[:350]) if users else ""
+    flow_s = "\n".join(f"- {t}" for t in flow[-15:])
+    ctx_s = f"[대화 흐름 · 오래된 순]\n{flow_s}\n\n[지금 프롬프트]\n{recent}"[-CTX_CHARS:]
     prompt = (
-        "다음 대화 발췌를 보고 이 세션이 지금 하고 있는 작업을 한국어 6~16자 "
-        "제목으로 지어줘. 제목만 한 줄로 출력, 따옴표·마침표 없이.\n\n" + ctx_s
+        "아래는 한 개발 작업 세션의 사용자 프롬프트들이야. [대화 흐름]으로 전체 맥락을 "
+        "파악한 뒤, [지금 프롬프트]가 가리키는 '지금 하고 있는 작업'을 한국어 제목으로 "
+        "지어줘. 세션 전체의 큰 주제가 아니라 가장 최근에 착수한 구체적 작업을 콕 집어서. "
+        "6~18자, 제목만 한 줄, 따옴표·마침표·번호 없이.\n\n" + ctx_s
     )
     # KASATERM_* 를 제거한 env 로 실행 — 안 그러면 이 headless claude(및 그 내부
     # 제목생성 서브세션)가 부모 pane 의 KASATERM_PANE_ID 를 물려받아 SessionStart

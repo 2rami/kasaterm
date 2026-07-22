@@ -833,6 +833,30 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
+        // claude 5시간 사용량 폴러 — 로컬 /claude-usage(oauth/usage 프록시)를 60초마다
+        // 조회해 5시간 창 사용률(%)을 채운다. 타이틀바 우상단 pill 의 소스(거노: 웹뷰
+        // TitleBar UsagePill 을 웹뷰 안 봐서 터미널에도). curl 로 로컬 엔드포인트만 쳐
+        // 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 값이 바뀔 때만 redraw.
+        {
+            let usage_proxy = self.proxy.clone();
+            let usage_cache = self.claude_usage.clone();
+            std::thread::spawn(move || loop {
+                let next = fetch_claude_five_hour(&crate::mcp_panel_port());
+                match usage_cache.lock() {
+                    Ok(mut g) => {
+                        if *g != next {
+                            *g = next;
+                            drop(g);
+                            if usage_proxy.send_event(UserEvent::Redraw).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            });
+        }
         // bg-agents 폴러. `claude agents --json --all` 로 claude 자체 supervisor 의
         // background 세션(←← detach 로 fork 된 것)을 3초마다 조회해 sessionId→
         // parentSessionId 맵을 채운다. 타이틀바 배지·학생 유지(부모 캐릭터 상속)가
@@ -1466,6 +1490,27 @@ impl ApplicationHandler<UserEvent> for App {
                             tree.resize_divider(&path, pos, cols, rows);
                         }
                         self.last_divider_pos = Some(pos);
+                        // Ctrl+드래그 중 하단 세로선(split_htov_at 이 만든 [..,1])이 상단
+                        // 세로선과 ratio 정렬되면 관통 세로선으로 재병합 — 그때부턴 상하가
+                        // 같이 움직인다(거노: 위에랑 맞춰지면 같이). resize_drag 를 관통
+                        // divider 로 전환해 이후 드래그가 상하 함께 이동한다. merge_vtoh_at
+                        // 이 구조(V split + 상하 H)까지 검증하므로 일반 divider 엔 무해.
+                        if self.modifiers.control_key()
+                            && dir == kasa_pty::SplitDir::Horizontal
+                            && path.last() == Some(&1)
+                        {
+                            let v_path = path[..path.len() - 1].to_vec();
+                            let snap = 1.5 / cols.max(1) as f32;
+                            if let Some(merged) = self
+                                .pty_layout
+                                .as_mut()
+                                .and_then(|t| t.merge_vtoh_at(&v_path, snap))
+                            {
+                                self.resize_drag =
+                                    Some((merged, kasa_pty::SplitDir::Horizontal));
+                                self.last_divider_pos = None;
+                            }
+                        }
                         self.publish_pty_layout();
                         // PTY reshape is the expensive bit (Claude Code does
                         // a full TUI repaint on every SIGWINCH). Layout
@@ -3573,18 +3618,24 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(hd) = self.header_drag.take() {
                             window.set_cursor(CursorIcon::Default);
                             if hd.active {
-                                // 드래그 중 이미 라이브로 실제 재배치됨 → 현재
-                                // pty_layout 이 곧 최종. 백업/throttle 만 정리한다.
-                                let applied = self.finish_live_drag();
-                                if !applied {
-                                    // 같은 창 안 유효 드롭이 없었던 경우 — 사이드바
-                                    // 윈도우 칩 위에 떨군 cross-window 이동만 따로.
-                                    // 그 외엔 carried pane 이 이미 원위치로 복귀돼 있다.
-                                    if let Some(target) = self
-                                        .sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
-                                    {
-                                        self.move_pane(&hd.pane, &target, DropZone::Right);
+                                // 커서가 사이드바의 다른 윈도우 탭 위면 cross-window
+                                // 이동이 최우선이다. 라이브 재배치가 pane 가장자리에
+                                // 매핑돼 drag_live_applied=Some 이 돼 있어도(거의 항상
+                                // 그렇다) 그걸 먼저 확정하면 사이드바 드롭이 통째로
+                                // 스킵된다 — 그게 "윈도우 간 pane 이동이 안 되던" 버그.
+                                // 라이브로 옮겨진 자리를 원본으로 되돌린 뒤 옮긴다.
+                                if let Some(target) = self
+                                    .sidebar_window_drop_target(self.cursor_px.0, self.cursor_px.1)
+                                {
+                                    if let Some(orig) = self.drag_orig_layout.take() {
+                                        self.pty_layout = Some(orig);
                                     }
+                                    self.drag_live_applied = None;
+                                    self.move_pane(&hd.pane, &target, DropZone::Right);
+                                } else {
+                                    // 같은 창 안 — 라이브로 이미 재배치된 현재
+                                    // pty_layout 이 최종. 백업/throttle 만 정리한다.
+                                    self.finish_live_drag();
                                 }
                                 window.request_redraw();
                             } else if hd.from_handle {
@@ -4210,6 +4261,28 @@ impl App {
 /// Returns `None` on a transient git failure so the caller keeps the last good
 /// snapshot. Shared by the 1.2s poller and the per-click stage/unstage refresh
 /// so a + / − press reflects immediately instead of waiting for the next tick.
+/// 로컬 `/claude-usage`(oauth/usage 프록시)에서 5시간 창 사용률(%)만 뽑는다. curl 로
+/// 로컬 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 실패/토큰
+/// 없음/형식밖이면 None. utilization 은 이미 0..100 퍼센트(웹뷰 UsagePill 과 동일).
+fn fetch_claude_five_hour(port: &str) -> Option<f32> {
+    let out = std::process::Command::new("curl")
+        .args(["-s", "--max-time", "5", &format!("http://127.0.0.1:{port}/claude-usage")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
+        return None;
+    }
+    v.get("usage")?
+        .get("five_hour")?
+        .get("utilization")?
+        .as_f64()
+        .map(|x| x as f32)
+}
+
 fn fetch_git_col_view(cwd: &std::path::Path) -> Option<GitColView> {
     let v = kasa_mcp::git::git_status(cwd);
     if v.get("error").is_some() {
