@@ -1713,6 +1713,26 @@ impl App {
         };
         pids.iter().find_map(|p| self.pid_busy(p))
     }
+    /// First running job in sidebar session `idx` only — drives the per-session
+    /// close confirm (sidebar tab ×). Mirrors `close_window`'s layout pick: the
+    /// active window's tree lives in `pty_layout`, the rest in `windows[idx]`.
+    fn window_busy(&self, idx: usize) -> Option<String> {
+        let layout = if idx == self.active_window {
+            self.pty_layout.as_ref()
+        } else {
+            self.windows.get(idx).and_then(|w| w.as_ref())
+        }?;
+        let pids: Vec<String> = {
+            let ws = self.ws.lock().unwrap();
+            layout
+                .leaves()
+                .iter()
+                .filter_map(|leaf| ws.panes.get(*leaf))
+                .flat_map(|p| p.tabs.iter().filter_map(|t| t.pid.clone()))
+                .collect()
+        };
+        pids.iter().find_map(|p| self.pid_busy(p))
+    }
     /// Cmd+W / header ×: close tab `idx` of `pane`. A multi-tab pane drops just
     /// that tab; the last tab drops the pane (no-op on a single-pane window, so
     /// we skip it there and leave the OS close button to quit). If the tab is
@@ -1753,6 +1773,15 @@ impl App {
             None => false,
         }
     }
+    /// Sidebar session (window `idx`) close: raise the confirm modal if any pane
+    /// in that session is running a job, else close it now. The app stays open —
+    /// this is the per-session path, distinct from the whole-app quit above.
+    pub(crate) fn confirm_or_close_session(&mut self, idx: usize) {
+        match self.window_busy(idx) {
+            Some(proc) => self.open_confirm_close(proc, PendingClose::Session(idx)),
+            None => self.do_close(PendingClose::Session(idx)),
+        }
+    }
     fn open_confirm_close(&mut self, proc: String, action: PendingClose) {
         self.confirm_close = Some(ConfirmClose { proc, action });
         self.chrome_dirty = true;
@@ -1771,6 +1800,11 @@ impl App {
                 }
             }
             PendingClose::Pane { pane } => self.close_pane(&pane),
+            PendingClose::Session(idx) => {
+                if let Err(e) = self.close_window(idx) {
+                    eprintln!("[window] close failed: {e:#}");
+                }
+            }
             PendingClose::Window => {}
         }
     }

@@ -275,6 +275,10 @@ impl App {
             /// running tool, cross-window). Draws the flowing bar along the
             /// header bottom; idle panes draw nothing.
             busy: bool,
+            /// True when a background shell / Monitor is in-flight but no spinner
+            /// shows (from the transcript tail, not the glyph scan). When `busy`
+            /// is false, this draws the slower pulse bar instead.
+            bg_active: bool,
         }
         // Captured once so the &mut self.gpu block below (which can't
         // re-borrow &self) can still see the collapsed/expanded width.
@@ -357,8 +361,6 @@ impl App {
         // 와 달리 학생 이름을 들고 있어(hover 큰 bust·클릭→학생설정 딥링크) — /resume
         // 피커 프사는 이름을 모르므로 여기 안 담고 statusline 프사만.
         let mut profile_face_hits: Vec<(String, &'static str, (f32, f32, f32, f32))> = Vec::new();
-        // 접힌 팀메시지 줄 hover 시 전문 말풍선 — 커서는 한 곳이라 최대 1개.
-        let mut teammate_bubble: Option<TeammateBubbleSlot> = None;
         // 입력박스 위 스페이서 행(effort 칩 자리)에 서 있는 학생(전신 애니).
         // 두 번째 필드 = 모션: "cheer"(턴 완료 직후) 또는 "idle"(대기).
         let mut standing_slots: Vec<(&'static str, &'static str, (f32, f32, f32, f32))> =
@@ -1014,17 +1016,73 @@ impl App {
                         faces += 1;
                     }
                 }
+                // agents 목록 뷰(claude agents 피커)의 세션 행에 캐릭터 칩 — resume
+                // 피커의 `· #학생` 태그가 없어, 캐시된 세션 name→sid→캐릭터로 역추적
+                // 한다(호시노 청사진). 각 행의 실제 텍스트에서 캐시 name 을 substring
+                // 검색해 세션 행을 식별(그룹 헤더·빈 줄은 매칭 안 됨), 동명세션은 캐시
+                // 에서 이미 드롭돼 스킵된다. 얼굴은 name 시작 셀 왼쪽(마커 자리)에 얹어
+                // 세션명은 가리지 않는다. 긴 이름이 …로 잘린 행은 매칭 실패로 스킵.
+                if agents_view {
+                    let name_sids = crate::socket::agents_name_sids_cached();
+                    if !name_sids.is_empty() {
+                        let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                        let scw = self.cell.w * fs;
+                        let sch = self.cell.h * fs;
+                        let mut faces = 0usize;
+                        'agents_rows: for r in 0..composed.len() {
+                            if faces >= 40 {
+                                break;
+                            }
+                            let (text, cols) = row_text_cells(&composed[r]);
+                            let text_chars: Vec<char> = text.chars().collect();
+                            for (name, sid) in &name_sids {
+                                let name_chars: Vec<char> = name.chars().collect();
+                                if name_chars.len() < 2 || name_chars.len() > text_chars.len() {
+                                    continue;
+                                }
+                                let Some(cpos) = text_chars
+                                    .windows(name_chars.len())
+                                    .position(|w| w == name_chars.as_slice())
+                                else {
+                                    continue;
+                                };
+                                let Some(slug) = kasa_mcp::character::session_character(sid)
+                                    .and_then(|c| theme::character_slug(&c))
+                                else {
+                                    continue;
+                                };
+                                let cell_col = cols[cpos];
+                                // 이름 왼쪽 여백(불릿·공백)을 지우고 그 자리에 얼굴 —
+                                // 세션명 첫 글자와 겹치지 않게 얼굴 오른끝을 이름 시작에
+                                // 맞춘다(여백이 좁으면 body_left 로 클램프).
+                                let row_len = composed[r].len();
+                                for cell in composed[r][..cell_col.min(row_len)].iter_mut() {
+                                    *cell = GridCell::blank();
+                                }
+                                // 정사각(누끼 bust 96×96 왜곡 방지). 얼굴은 이름 왼쪽
+                                // 여백(불릿·공백)에만 앉혀 세션명을 안 가린다 — 변은
+                                // 여백폭에 맞추되(최대 2행) 이름 시작을 넘지 않는다.
+                                // 밀집 단행이라 세로는 행 중앙 정렬(투명 여백만 이웃 행에).
+                                let name_x = body_left + cell_col as f32 * scw;
+                                let side = (name_x - body_left).min(2.0 * sch).max(sch);
+                                let x = body_left;
+                                let y = (body_top + r as f32 * sch + (sch - side) / 2.0)
+                                    .max(body_top);
+                                profile_slots.push((slug, (x, y, side, side)));
+                                faces += 1;
+                                continue 'agents_rows;
+                            }
+                        }
+                    }
+                }
                 // 접힌 팀메시지("› Message from @이름", verbose OFF) — 보낸 학생
                 // 색으로 "@ 이름❯ 본문…" 인라인 전개(거노: verbose 안 켜고도
                 // 읽고 싶다. 클로드코드에 팀메시지만 펼치는 설정은 없음 —
                 // verbosity 카테고리는 bash/agent/todo 뿐이라 그리드 재작성으로).
                 // 본문은 이 pane transcript tail 의 <teammate-message> 태그에서.
-                // 그리드는 reflow 가 안 되니 여러 줄 전개 대신 인라인 한 줄 +
-                // 줄에 마우스를 올리면 전문 말풍선(TeammateBubbleSlot).
+                // 그리드는 reflow 불가라 접힌 줄 아래 빈 여백(blank_run)에만 다줄
+                // 전개 — 최신 메시지(하단, 빈 공간 큼)일수록 더 많이 보인다.
                 {
-                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
-                    let scw = self.cell.w * fs;
-                    let sch = self.cell.h * fs;
                     let msg_path = self.pane_claude_sid.get(id.as_str()).and_then(|sid| {
                         let cwd = self
                             .pane_view_cwd
@@ -1032,14 +1090,8 @@ impl App {
                             .or_else(|| self.pane_cwd_cache.get(id.as_str()))?;
                         crate::socket::project_jsonl(cwd, sid)
                     });
-                    // 자동 말풍선은 pane 의 "마지막" 접힌 줄에만 — 위쪽 옛 메시지
-                    // 행들이 같은 pane 키를 서로 덮으며 타이머를 매 프레임 리셋하는
-                    // 것 방지(새 메시지는 항상 제일 아래 줄로 도착한다).
-                    let last_tm_row = (0..composed.len())
-                        .rev()
-                        .find(|&r| teammate_collapsed_line(&composed[r]).is_some());
                     for r in 0..composed.len() {
-                        let Some((c0, count, sender)) = teammate_collapsed_line(&composed[r])
+                        let Some((c0, _count, sender)) = teammate_collapsed_line(&composed[r])
                         else {
                             continue;
                         };
@@ -1050,76 +1102,6 @@ impl App {
                             &sender,
                             msg.as_ref().and_then(|m| m.color.as_deref()),
                         );
-                        if let Some(m) = &msg {
-                            let (cx, cy) = self.cursor_px;
-                            let (ry0, ry1) = (
-                                body_top + r as f32 * sch,
-                                body_top + (r + 1) as f32 * sch,
-                            );
-                            let row_w = composed[r].len() as f32 * scw;
-                            let hovering = cy >= ry0
-                                && cy < ry1
-                                && cx >= body_left
-                                && cx < body_left + row_w;
-                            // 새 메시지 도착 감지 — 해시가 바뀌면 타이머 재시작,
-                            // TEAMMATE_BUBBLE_AUTO_MS 내면 hover 없이 자동 표시.
-                            // 리드로우는 커서 블링크 WaitUntil 틱이 보장.
-                            let auto_live = Some(r) == last_tm_row && {
-                                use std::hash::{Hash, Hasher};
-                                let mut h = std::collections::hash_map::DefaultHasher::new();
-                                (&sender, count, &m.body).hash(&mut h);
-                                let key = h.finish();
-                                TEAMMATE_BUBBLE_AUTO.with(|s| {
-                                    let mut map = s.borrow_mut();
-                                    let now = std::time::Instant::now();
-                                    let e = map.entry(id.clone()).or_insert((key, now));
-                                    if e.0 != key {
-                                        *e = (key, now);
-                                    }
-                                    now.duration_since(e.1).as_millis()
-                                        < TEAMMATE_BUBBLE_AUTO_MS as u128
-                                })
-                            };
-                            // hover 는 auto 를 덮지만(사용자 의도가 명시적),
-                            // auto 는 이미 있는 말풍선을 덮지 않는다.
-                            if hovering || (auto_live && teammate_bubble.is_none()) {
-                                // 복수("N messages from")면 마지막 N통을 시간순으로
-                                // 합쳐 말풍선에(호버 시에만 회수). 단수면 최신 1통.
-                                let (summary, body) = if count > 1 {
-                                    let msgs = msg_path
-                                        .as_deref()
-                                        .map(|p| last_teammate_msgs(p, &sender, count))
-                                        .unwrap_or_default();
-                                    let joined = msgs
-                                        .iter()
-                                        .map(|mm| {
-                                            if mm.summary.is_empty() {
-                                                mm.body.clone()
-                                            } else {
-                                                format!("{}\n{}", mm.summary, mm.body)
-                                            }
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n───\n");
-                                    (format!("{count} messages"), joined)
-                                } else {
-                                    (m.summary.clone(), m.body.clone())
-                                };
-                                teammate_bubble = Some(TeammateBubbleSlot {
-                                    sender: sender.clone(),
-                                    summary,
-                                    body,
-                                    accent,
-                                    anchor: (body_left + c0 as f32 * scw, ry0, ry1),
-                                    pane: (
-                                        body_left,
-                                        body_top,
-                                        row_w,
-                                        composed.len() as f32 * sch,
-                                    ),
-                                });
-                            }
-                        }
                         expand_teammate_message(
                             &mut composed,
                             r,
@@ -1128,6 +1110,44 @@ impl App {
                             msg.as_ref().map(|m| m.body.as_str()),
                             accent,
                         );
+                    }
+                }
+                // 크로스-방 tell(⟦캐릭터⟧ 본문)을 발신 학생 테마색으로 — 팀 경계를
+                // 넘는 tell 은 네이티브 teammate 가 아니라 raw user 입력이라 거노 발신
+                // 처럼 보인다. 마커가 유효 캐릭터면 그 행과 wrap 연속 행을 발신자
+                // accent 로 칠하고, 마커 자리에 발신 학생 프사(bust)를 얹는다 —
+                // profile_slots(statusline·resume 피커와 같은 이미지 패스)로 소비.
+                {
+                    let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                    let scw = self.cell.w * fs;
+                    let sch = self.cell.h * fs;
+                    let mut r = 0;
+                    while r < composed.len() {
+                        if let Some((marker_end, name)) = tell_marker_line(&composed[r]) {
+                            if let Some(accent) = theme::character_accent(&name) {
+                                let face_col =
+                                    restyle_tell_line(&mut composed[r], marker_end, &name, accent);
+                                if let (Some(c0), Some(slug)) =
+                                    (face_col, theme::character_slug(&name))
+                                {
+                                    // 바닥 정렬 2행 키(resume 피커 공식) — 발을 tell
+                                    // 행 바닥에 붙이고 위 행(user 턴 앞 빈 줄)으로 서게.
+                                    let face_w = TELL_FACE_COLS as f32 * scw;
+                                    let face_h = 2.0 * sch;
+                                    let x = body_left + c0 as f32 * scw;
+                                    let y =
+                                        (body_top + (r + 1) as f32 * sch - face_h).max(body_top);
+                                    profile_slots.push((slug, (x, y, face_w, face_h)));
+                                }
+                                r += 1;
+                                while r < composed.len() && tell_wrap_continuation(&composed[r]) {
+                                    tint_row(&mut composed[r], accent);
+                                    r += 1;
+                                }
+                                continue;
+                            }
+                        }
+                        r += 1;
                     }
                 }
                 let pane_font_scale = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
@@ -1146,7 +1166,13 @@ impl App {
                 // 입력박스로 오인돼 학생 accent 후처리가 오발동한다(거노: 빈 초록
                 // 사각형). agents 목록 뷰처럼 학생 accent·세션 제목 인레이를 끈다.
                 let resume_picker = screen_is_resume_picker(&composed);
-                let prompt_accent = if agents_view || resume_picker {
+                // AskUserQuestion picker 도 `❯ 1. …` 옵션줄 + 하단 힌트 박스가
+                // 입력박스로 오인돼 accent 사각형이 남는다(거노: "question 이나
+                // resume" 둘 다). team member/bg 세션 입력박스는 @칩 대신 세션
+                // 제목이 상단보더에 와서 @칩 게이트론 못 가른다 → 화면 시그니처
+                // ("Chat about this" 등)로 감지해 resume 와 동일하게 accent 를 끈다.
+                let ask_picker = screen_is_ask_picker(&composed);
+                let prompt_accent = if agents_view || resume_picker || ask_picker {
                     None
                 } else {
                     pane.character
@@ -1405,6 +1431,13 @@ impl App {
                             .pane_activity
                             .get(&id)
                             .map(|a| a.status != "idle" && !a.status.is_empty())
+                            .unwrap_or(false),
+                        // A background shell / Monitor is running with no spinner —
+                        // drives the slower header pulse bar when not busy.
+                        bg_active: self
+                            .pane_activity
+                            .get(&id)
+                            .map(|a| a.bg_active)
                             .unwrap_or(false),
                         color: pane.color,
                         is_markdown: pane.markdown().map_or(false, |m| m.is_md_doc),
@@ -4071,6 +4104,13 @@ impl App {
                     // over a faint track from u.time, so there's no per-frame
                     // CPU phase math and no chrome rebuild to keep it moving.
                     g.working_bar(h.x, by, h.w, bar_h, theme::accent());
+                } else if h.bg_active {
+                    // Not visibly working, but a background shell / Monitor is
+                    // in-flight — one FLAG_PULSE_BAR quad breathes the same accent
+                    // rail on a slow 3s sine, a distinct rhythm from the sweep.
+                    let bar_h = 3.0;
+                    let by = h.y + PANE_HEADER_HEIGHT - bar_h;
+                    g.pulse_bar(h.x, by, h.w, bar_h, theme::accent());
                 }
                 // No bottom hairline: the band == body, and the active tab
                 // flows straight into the cell grid (browser-tab feel).
@@ -4896,57 +4936,6 @@ impl App {
                 g.rect(r2x, r2y, t, s, fg);
                 g.rect(r2x + s - t, r2y, t, s, fg);
             }
-            // 접힌 팀메시지 hover 말풍선 — 전문을 보낸 학생색 링의 박스로.
-            // 그리드는 reflow 불가라 항시 전개 대신 hover 전개(인라인 한 줄로
-            // 못 다 보여준 본문을 여기서). pane 아래 공간이 모자라면 줄 위로.
-            if let Some(b) = &teammate_bubble {
-                let font = 12.5_f32;
-                let lh = 18.0_f32;
-                let pad = 12.0_f32;
-                let max_w = (b.pane.2 - 40.0).clamp(160.0, 620.0);
-                let header = if b.summary.is_empty() {
-                    format!("@ {}", b.sender)
-                } else {
-                    format!("@ {}  {}", b.sender, b.summary)
-                };
-                let mut lines = wrap_chrome_text(g, &b.body, max_w, font);
-                const MAX_LINES: usize = 18;
-                if lines.len() > MAX_LINES {
-                    lines.truncate(MAX_LINES);
-                    if let Some(last) = lines.last_mut() {
-                        last.push('…');
-                    }
-                }
-                let hw = g.measure_chrome_text(&header, font, true);
-                let text_w = lines
-                    .iter()
-                    .map(|l| g.measure_chrome_text(l, font, false))
-                    .fold(hw, f32::max)
-                    .min(max_w);
-                let w = text_w + pad * 2.0;
-                let h = pad * 2.0 + lh * (lines.len() as f32 + 1.0) + 6.0;
-                let (ax, ay0, ay1) = b.anchor;
-                let x = ax.min(b.pane.0 + b.pane.2 - w).max(b.pane.0);
-                let mut y = ay1 + 4.0;
-                if y + h > b.pane.1 + b.pane.3 {
-                    y = (ay0 - 4.0 - h).max(b.pane.1);
-                }
-                round_rect(
-                    g, x - 1.5, y - 1.5, w + 3.0, h + 3.0, theme::RADIUS_MD + 1.5,
-                    [b.accent[0], b.accent[1], b.accent[2], 230],
-                );
-                round_rect(g, x, y, w, h, theme::RADIUS_MD, theme::surface());
-                g.draw_text(
-                    x + pad, y + pad, &header,
-                    gpu::DrawOpts { font_size: font, color: b.accent, bold: true, italic: false },
-                );
-                for (i, l) in lines.iter().enumerate() {
-                    g.draw_text(
-                        x + pad, y + pad + 6.0 + lh * (i as f32 + 1.0), l,
-                        gpu::DrawOpts { font_size: font, color: theme::text(), bold: false, italic: false },
-                    );
-                }
-            }
             // Status-bar dropdown (directory picker / branch switcher), drawn
             // last so it overlays the cell grid + every bar. Anchored to the
             // chip that opened it and expanded UPWARD — the bar lives at the
@@ -5522,6 +5511,7 @@ impl App {
                 let title = format!("{} 실행 중이에요", dlg.proc);
                 let subtitle = match dlg.action {
                     crate::PendingClose::Window => "앱을 닫을까요?",
+                    crate::PendingClose::Session(_) => "이 세션을 닫을까요?",
                     _ => "이 탭을 닫을까요?",
                 };
                 g.draw_text(
@@ -5698,6 +5688,60 @@ impl App {
                     g.draw_text(gx + 24.0, gy + (pill_h - gf) / 2.0, &name,
                         gpu::DrawOpts { font_size: gf, color: theme::text(), bold: false, italic: false });
                 }
+            }
+            // Pane header drag ghost — 잡은 pane 이 커서를 따라오는 pill(파일트리
+            // drag ghost 와 동일 방식). 거노: pane 을 잡았을 때 "잡혔다"는 피드백이
+            // 없어 마우스가 안 따라오는 느낌. 라벨은 display_pane_char(캐릭터 표시명,
+            // 없으면 pane id). update_live_drag(라이브 재배치)와 별개의 최상단 층이라
+            // 미리보기 무손상 — 커서가 사이드바로 나가 자리 프리뷰가 원위치로 돌아가도
+            // 이 pill 은 계속 커서를 따라와 무엇을 어디로 옮기는지 보여준다.
+            if self.header_drag.as_ref().is_some_and(|hd| hd.active) {
+                let pane_id = self.header_drag.as_ref().unwrap().pane.clone();
+                // display_pane_char 를 인라인 — g(self 가변 빌림)가 살아있어 &self
+                // 메서드는 못 부르고 필드 직접 접근만 된다(파일트리 ghost 와 동일 제약).
+                let label = self
+                    .pane_claude_sid
+                    .get(&pane_id)
+                    .and_then(|sid| kasa_mcp::character::session_character(sid))
+                    .or_else(|| {
+                        let agents = self
+                            .pty
+                            .get(&pane_id)
+                            .map(|p| p.is_claude_agents())
+                            .unwrap_or(false);
+                        if agents {
+                            None
+                        } else {
+                            self.ws
+                                .lock()
+                                .ok()
+                                .and_then(|ws| ws.pane_character.get(&pane_id).cloned())
+                        }
+                    })
+                    .unwrap_or(pane_id);
+                let (cx, cy) = self.cursor_px;
+                let gf = 12.0_f32;
+                let tw = g.measure_chrome_text(&label, gf, true);
+                let pill_w = 14.0 + tw + 14.0;
+                let pill_h = 22.0_f32;
+                let gx = cx + 12.0;
+                let gy = cy + 10.0;
+                round_rect(g, gx, gy, pill_w, pill_h, theme::RADIUS_SM, theme::accent());
+                round_rect(
+                    g,
+                    gx + 1.0,
+                    gy + 1.0,
+                    pill_w - 2.0,
+                    pill_h - 2.0,
+                    theme::RADIUS_SM - 1.0,
+                    theme::with_alpha(theme::surface_active(), 0xF5),
+                );
+                g.draw_text(
+                    gx + 14.0,
+                    gy + (pill_h - gf) / 2.0,
+                    &label,
+                    gpu::DrawOpts { font_size: gf, color: theme::accent(), bold: true, italic: false },
+                );
             }
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
@@ -6106,6 +6150,109 @@ fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, usize, String)> {
     Some((first, count, name))
 }
 
+/// tell 주입 마커 `⟦캐릭터⟧ 본문` 감지 — kasaterm-cli tell 이 발신 pane 캐릭터를
+/// 앞에 심는다(SendMessage 는 팀 경계 안이라 크로스-방 tell 만 화면에 발신자 앵커가
+/// 필요). `character_accent` 유효 캐릭터만 인정해 거노가 우연히 친 `⟦…⟧` 오탐을
+/// 막는다. 반환: (⟧ 다음 col, 캐릭터명).
+fn tell_marker_line(row: &[GridCell]) -> Option<(usize, String)> {
+    let chars: Vec<char> = row
+        .iter()
+        .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+        .collect();
+    let mut first = chars.iter().position(|&c| c != ' ')?;
+    // claude TUI 는 제출된 user 턴을 `❯ ` 프롬프트 마커로 시작해 그린다 — 마커는
+    // 그 뒤에 온다.
+    if chars[first] == '❯' {
+        first = chars[first + 1..]
+            .iter()
+            .position(|&c| c != ' ')
+            .map(|i| first + 1 + i)?;
+    }
+    if chars[first] != '⟦' {
+        return None;
+    }
+    let close_rel = chars[first + 1..].iter().position(|&c| c == '⟧')?;
+    // wide 글자는 그리드에서 ch + blank 2셀이라, 이름 구간의 padding blank 를 뺀다.
+    let name: String = chars[first + 1..first + 1 + close_rel]
+        .iter()
+        .filter(|&&c| c != ' ' && c != '\0')
+        .collect();
+    theme::character_accent(&name)?;
+    Some((first + 1 + close_rel + 1, name))
+}
+
+/// tell 프사 셀 폭 — bust(96×96)가 2행 높이일 때 정사각이 되는 셀 수. 뒤 1셀은
+/// 라벨 `›` 와의 여백.
+pub(crate) const TELL_FACE_COLS: usize = 4;
+
+/// tell 마커 행을 발신 학생색으로 — 마커 `⟦이름⟧` 자리에 발신 학생 프사(에셋
+/// 있으면) + `›` 라벨을 놓고 그 행 전체를 accent fg 로 칠해 SendMessage 인라인과
+/// 시각을 맞춘다. 프사가 이름을 대신하므로 라벨엔 이름을 안 쓴다(resume 피커와
+/// 동일 성향 — 거노: 이름 말고 프사). slug 없는 캐릭터만 `이름 ›` 폴백. 반환은
+/// 마커 시작 col(프사 rect 의 x 기준) — 프사를 안 얹었으면 None.
+fn restyle_tell_line(
+    row: &mut [GridCell],
+    marker_end: usize,
+    name: &str,
+    accent: [u8; 4],
+) -> Option<usize> {
+    use unicode_width::UnicodeWidthChar;
+    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
+    let end = marker_end.min(row.len());
+    let lead = row[..end]
+        .iter()
+        .position(|c| c.ch != ' ' && c.ch != '\0')
+        .unwrap_or(0);
+    for c in row[..end].iter_mut() {
+        *c = GridCell::blank();
+    }
+    let face = theme::character_slug(name).is_some();
+    let label = if face { "›".to_string() } else { format!("{name} ›") };
+    let mut w = if face { lead + TELL_FACE_COLS + 1 } else { lead };
+    for ch in label.chars() {
+        let cw = ch.width().unwrap_or(1).max(1);
+        if w + cw > end {
+            break;
+        }
+        let mut cell = GridCell::blank();
+        cell.ch = ch;
+        cell.fg = fg.clone();
+        row[w] = cell;
+        if cw == 2 && w + 1 < end {
+            let mut sp = GridCell::blank();
+            sp.fg = fg.clone();
+            row[w + 1] = sp;
+        }
+        w += cw;
+    }
+    // 본문(마커 뒤)도 학생색으로.
+    tint_row(&mut row[end..], accent);
+    face.then_some(lead)
+}
+
+/// 행의 비공백 글자 fg 를 accent 로 — tell 마커 행과 그 wrap 연속 행이 공유.
+fn tint_row(row: &mut [GridCell], accent: [u8; 4]) {
+    let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
+    for c in row.iter_mut() {
+        if c.ch != ' ' && c.ch != '\0' {
+            c.fg = fg.clone();
+        }
+    }
+}
+
+/// tell 마커 행의 wrap 연속 행 판정 — claude TUI 는 긴 user 턴을 2칸 들여쓰기
+/// 행으로 wrap 한다. 들여쓰기가 정확히 2 이고 첫 글자가 TUI 구조 글리프가
+/// 아니면 같은 메시지의 연속으로 본다(⎿·⏺ 등 다음 블록에서 끊김).
+fn tell_wrap_continuation(row: &[GridCell]) -> bool {
+    match row.iter().position(|c| c.ch != ' ' && c.ch != '\0') {
+        Some(2) => !matches!(
+            row[2].ch,
+            '⏺' | '✻' | '⎿' | '│' | '⎢' | '❯' | '─' | '═' | '╌' | '⏵' | '·'
+        ),
+        _ => false,
+    }
+}
+
 /// 팀원 agent 이름("aru-9c88")의 보낸 학생 accent — 로마자 앞부분(마지막 '-'
 /// 앞)을 로스터로 역매핑. 로스터 밖(team-lead 등)은 transcript 태그의 color
 /// 명 → 그것도 없으면 테마 accent.
@@ -6130,7 +6277,6 @@ fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
 /// transcript 에서 회수한 팀메시지 원문(접힌 줄 전개·말풍선용).
 #[derive(Clone)]
 struct TeammateMsg {
-    summary: String,
     body: String,
     color: Option<String>,
 }
@@ -6154,7 +6300,6 @@ fn extract_teammate_msg(text: &str, sender: &str) -> Option<TeammateMsg> {
         if attr("teammate_id").as_deref() == Some(sender) {
             let end = tail.find("</teammate-message>").unwrap_or(tail.len());
             return Some(TeammateMsg {
-                summary: attr("summary").unwrap_or_default(),
                 body: tail[..end].trim().to_string(),
                 color: attr("color"),
             });
@@ -6204,35 +6349,6 @@ fn latest_teammate_msg(path: &std::path::Path, sender: &str) -> Option<TeammateM
     });
     map.insert(key, (len, found.clone()));
     found
-}
-
-/// sender 의 마지막 n 통(오래된→최신 순) — 접힌 "N messages from @이름"의 호버
-/// 말풍선용. latest_teammate_msg 와 달리 호버 시에만 불려 캐시 없이 tail 재스캔.
-fn last_teammate_msgs(path: &std::path::Path, sender: &str, n: usize) -> Vec<TeammateMsg> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let (tail, _) = crate::socket::read_tail(path, 256 * 1024);
-    let mut out: Vec<TeammateMsg> = Vec::new();
-    for l in tail.lines().rev() {
-        if out.len() >= n {
-            break;
-        }
-        if !l.contains("<teammate-message") || !l.contains(sender) {
-            continue;
-        }
-        let Some(v) = serde_json::from_str::<serde_json::Value>(l).ok() else {
-            continue;
-        };
-        let Some(t) = jsonl_user_text(&v) else {
-            continue;
-        };
-        if let Some(m) = extract_teammate_msg(&t, sender) {
-            out.push(m);
-        }
-    }
-    out.reverse();
-    out
 }
 
 /// 행 전체가 공백/blank 인가 — 팀메시지 줄바꿈 전개가 이어 쓸 수 있는 행.
@@ -6419,56 +6535,6 @@ fn expand_teammate_message(
             ellipsis(row, w);
         }
     }
-}
-
-/// 접힌 팀메시지 hover 말풍선 페이로드 — pane 루프에서 채워 overlay 패스가
-/// 그린다(copy 버튼과 같은 슬롯 관례).
-struct TeammateBubbleSlot {
-    sender: String,
-    summary: String,
-    body: String,
-    accent: [u8; 4],
-    /// 접힌 줄의 (x, top, bottom) — 말풍선 앵커.
-    anchor: (f32, f32, f32),
-    /// pane 본문 rect (x, y, w, h) — 말풍선을 이 안으로 클램프.
-    pane: (f32, f32, f32, f32),
-}
-
-/// 말풍선 본문 word-wrap — measure 기반, '\n' 존중, 공백 우선 분할(없으면
-/// 글자 단위). 빈 문단은 빈 줄로 남아 문단 간격 역할을 한다.
-fn wrap_chrome_text(
-    g: &mut gpu::GpuRenderer,
-    text: &str,
-    max_w: f32,
-    font: f32,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    for para in text.split('\n') {
-        let mut cur = String::new();
-        let mut cur_w = 0.0f32;
-        let mut sp: Option<usize> = None; // 마지막 공백 '뒤' byte 오프셋
-        for ch in para.chars() {
-            let cw = g.measure_chrome_text(&ch.to_string(), font, false);
-            if cur_w + cw > max_w && !cur.is_empty() {
-                if let Some(b) = sp.filter(|b| *b < cur.len()) {
-                    let tail = cur.split_off(b);
-                    out.push(std::mem::take(&mut cur).trim_end().to_string());
-                    cur = tail;
-                } else {
-                    out.push(std::mem::take(&mut cur));
-                }
-                cur_w = g.measure_chrome_text(&cur, font, false);
-                sp = None;
-            }
-            cur.push(ch);
-            cur_w += cw;
-            if ch == ' ' {
-                sp = Some(cur.len());
-            }
-        }
-        out.push(cur.trim_end().to_string());
-    }
-    out
 }
 
 /// 사용자 override 학생 애셋의 최대 변 길이. 렌더가 슬롯에 contain-fit 하므로
@@ -6743,6 +6809,28 @@ fn find_agents_header_anchor(rows: &[Vec<GridCell>], logo_cols: usize) -> Option
 /// 텍스트가 로스터 이름 — 이라 일반 터미널 출력 오탐은 사실상 없다. PR 번호
 /// (`repo#12`) 같은 다른 '#' 는 이름 검증에서 떨어지므로 행의 모든 '#' 후보를
 /// 순서대로 시도한다.
+/// 그리드 행 → (스페이서를 흡수한 실제 텍스트, 각 텍스트 char 의 셀 col). 와이드
+/// 문자(한글, ≥U+1100) 다음의 스페이서 셀('\0', 또는 alacritty composed 의 직후
+/// ' ')을 소비해, 캐시된 세션 name 을 셀 텍스트에서 그대로 substring 검색할 수 있게
+/// 한다(picker_student_tag 와 동일한 wide 스페이서 규칙). agents 뷰 세션 행 칩용.
+fn row_text_cells(row: &[GridCell]) -> (String, Vec<usize>) {
+    let mut text = String::new();
+    let mut cols = Vec::new();
+    let mut spacer_pending = false;
+    for (i, cell) in row.iter().enumerate() {
+        match cell.ch {
+            '\0' => spacer_pending = false,
+            ' ' if spacer_pending => spacer_pending = false,
+            ch => {
+                text.push(ch);
+                cols.push(i);
+                spacer_pending = (ch as u32) >= 0x1100;
+            }
+        }
+    }
+    (text, cols)
+}
+
 fn picker_student_tag(row: &[GridCell]) -> Option<(usize, usize, &'static str)> {
     for (c0, _) in row.iter().enumerate().filter(|(_, c)| c.ch == '#') {
         if c0 < 2 || row[c0 - 1].ch != ' ' || row[c0 - 2].ch != '·' {
@@ -6841,19 +6929,7 @@ thread_local! {
     /// 뷰포트로 들어와 sticky 텍스트가 바뀌거나(또는 최상단 도달로 사라지면) 멈춘다.
     pub(crate) static STICKY_SEEK: std::cell::RefCell<Option<StickySeek>> =
         std::cell::RefCell::new(None);
-
-    /// pane → (마지막 팀메시지 해시, 최초 감지 시각). 새 SendMessage 도착 시 hover
-    /// 없이도 말풍선을 TEAMMATE_BUBBLE_AUTO_MS 동안 자동 표시(거노: 마우스오버 말고
-    /// 자동으로). 그리드는 reflow 불가 + 접힌 줄 아래 빈 행이 보통 1개뿐이라 인라인
-    /// 다행 전개로는 긴 메시지를 못 살림 — 전문은 말풍선이 유일한 캔버스.
-    static TEAMMATE_BUBBLE_AUTO:
-        std::cell::RefCell<std::collections::HashMap<String, (u64, std::time::Instant)>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
 }
-
-/// 자동 말풍선 표시 시간 — 긴 협업 메시지(수백 자)를 읽을 여유. 만료 후에도
-/// hover 말풍선은 그대로 동작한다.
-const TEAMMATE_BUBBLE_AUTO_MS: u64 = 15_000;
 
 /// 클릭한 sticky 프롬프트를 화면으로 끌어오는 seek 상태(struct App 밖 — 무접촉).
 pub(crate) struct StickySeek {
@@ -7310,7 +7386,34 @@ fn screen_is_resume_picker(rows: &[Vec<GridCell>]) -> bool {
     // 대화 본문에 우연히 나올 수 있어 여는 괄호까지 확인한다. 피커도 맨 아래
     // statusline(U+FFFC) 한 줄이 남아 has_profile_slot 으로는 못 거른다
     // (거노: Search 아래 핑크 사각형 잔재 — accent 후처리 오발동).
-    full.contains("Resume session (")
+    //
+    // 좁은 창에선 "Resume session" 과 "(N of M)" 이 다른 셀 행으로 wrap 되며
+    // 사이에 행끝 패딩(스페이스·U+0000)이 껴 "Resume session (" 직접 매칭이
+    // 깨진다(거노: 특정 창 크기에서만 사각형 잔상 재발). 공백류·null 을 한 칸
+    // 으로 접어 wrap 여부와 무관하게 매칭한다.
+    let squashed: String = full
+        .split(|c: char| c.is_whitespace() || c == '\0')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    squashed.contains("Resume session (")
+}
+
+/// AskUserQuestion picker 감지 — `❯ 1. …` 옵션 목록 + 하단 힌트 박스가 학생
+/// 입력박스로 오인돼 accent 사각형이 남던 화면(거노: "question 이나 resume").
+/// 고유 시그니처: 항상 마지막 옵션인 "Chat about this" + 하단 네비 힌트
+/// ("Esc to cancel" 또는 "Enter to select"). resume 피커엔 없는 조합이라
+/// 대화 본문 우연 등장을 힌트 AND 로 한 번 더 거른다. resume 와 같은 squash
+/// 정규화로 wrap·다중 공백에 강건하게 매칭한다.
+fn screen_is_ask_picker(rows: &[Vec<GridCell>]) -> bool {
+    let full: String = rows.iter().flat_map(|r| r.iter().map(|c| c.ch)).collect();
+    let squashed: String = full
+        .split(|c: char| c.is_whitespace() || c == '\0')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    squashed.contains("Chat about this")
+        && (squashed.contains("Esc to cancel") || squashed.contains("Enter to select"))
 }
 
 /// Claude Code 라이브 스피너("✻ Verbing…" 별 dingbat, 또는 braille) 위치 감지 —
@@ -7465,6 +7568,57 @@ mod picker_tag_tests {
             // 이름 마지막 셀까지 범위에 포함(블랭크 처리 범위).
             assert!(row[c0..=end].iter().any(|c| c.ch == '나'));
         }
+    }
+
+    // 좁은 창서 헤더가 wrap 되면 "Resume session" 과 "(N of M)" 사이에 행끝
+    // 패딩(스페이스·\0)이 껴 예전엔 감지가 끊겨 accent 사각형이 남았다
+    // (거노: 특정 창 크기에서만 재발). 공백류를 접어 wrap 무관하게 잡는다.
+    #[test]
+    fn resume_picker_survives_wrapped_header() {
+        // 한 행 안 다수 공백(직접 매칭이면 "Resume session   (" 로 깨짐)
+        assert!(screen_is_resume_picker(&[row_from(
+            "Resume session      (2 of 5)"
+        )]));
+        // 두 행으로 wrap + 행끝 패딩(스페이스/\0)
+        let wrapped_sp = vec![row_from("Resume session   "), row_from("(2 of 5)")];
+        assert!(screen_is_resume_picker(&wrapped_sp));
+        let wrapped_null = vec![row_from("Resume session\0\0\0"), row_from("(2 of 5)")];
+        assert!(screen_is_resume_picker(&wrapped_null));
+        // 정상 한 칸 케이스 유지
+        assert!(screen_is_resume_picker(&[row_from("Resume session (3 of 9)")]));
+        // 본문 산문은 여전히 무시(여는 괄호 시퀀스 없음)
+        assert!(!screen_is_resume_picker(&[row_from(
+            "let's Resume session tomorrow"
+        )]));
+    }
+
+    // AskUserQuestion picker 는 "Chat about this"(항상 마지막 옵션) + 하단
+    // 네비 힌트로 감지한다 — 정상 입력박스(미도리 세션제목 보더든 @칩이든)는
+    // 건드리지 않고 picker 만 accent 배제(거노: question 도 사각형 잔상).
+    #[test]
+    fn ask_picker_detected_by_signature() {
+        // 실측 시그니처: 옵션 목록 + "Chat about this" + "Enter to select"·"Esc to cancel"
+        let full = vec![
+            row_from("❯ 1. 기존과 동일 스윕"),
+            row_from("  2. 은은한 정적 바"),
+            row_from("  3. Type something."),
+            row_from("──────────────"),
+            row_from("  4. Chat about this"),
+            row_from("Enter to select · ↑/↓ to navigate · Esc to cancel"),
+        ];
+        assert!(screen_is_ask_picker(&full));
+        // "Tab/Arrow keys to navigate" 변형(Enter to select 문구 없이 Esc 만)
+        let variant = vec![
+            row_from("  N. Chat about this"),
+            row_from("Tab/Arrow keys to navigate · Esc to cancel"),
+        ];
+        assert!(screen_is_ask_picker(&variant));
+        // resume 피커는 ask 아님("Chat about this" 없음)
+        assert!(!screen_is_ask_picker(&[row_from("Resume session (2 of 5)")]));
+        // 본문에 "Chat about this" 가 우연히 있어도 힌트 없으면 무시(AND 게이트)
+        assert!(!screen_is_ask_picker(&[row_from(
+            "We could Chat about this later"
+        )]));
     }
 
     // PR 번호(`repo#12`)의 '#' 는 이름 검증에서 떨어지고, 뒤의 진짜 태그가 잡힌다.
@@ -7942,11 +8096,52 @@ mod teammate_msg_tests {
         let text = "<teammate-message teammate_id=\"aru-9c88\" color=\"orange\" \
                     summary=\"확인 통지\">아루다. 확인했다.</teammate-message>";
         let m = extract_teammate_msg(text, "aru-9c88").unwrap();
-        assert_eq!(m.summary, "확인 통지");
         assert_eq!(m.body, "아루다. 확인했다.");
         assert_eq!(m.color.as_deref(), Some("orange"));
         // 다른 보낸이의 태그는 건너뛰고 일치하는 태그만.
         assert!(extract_teammate_msg(text, "yuzu-1ba1").is_none());
+    }
+
+    // 크로스-방 tell 마커: 유효 캐릭터 `⟦이름⟧` 만 인정, 거노 직접 입력(마커 없음)·
+    // 오탐(`⟦…⟧` 이지만 캐릭터 아님)은 무시 = 무색.
+    #[test]
+    fn tell_marker_parsed_and_guarded() {
+        let row = row_from("⟦미도리⟧ 안녕하세요", 80);
+        let (_, name) = tell_marker_line(&row).expect("유효 캐릭터 마커");
+        assert_eq!(name, "미도리");
+        // claude TUI 실화면: 제출된 user 턴은 `❯ ` 프롬프트 마커 뒤에 온다.
+        let prompted = row_from("❯ ⟦프라나⟧ 검증 메시지", 80);
+        let (_, name) = tell_marker_line(&prompted).expect("❯ 뒤 마커도 인정");
+        assert_eq!(name, "프라나");
+        assert!(tell_marker_line(&row_from("그냥 내 입력", 80)).is_none());
+        assert!(tell_marker_line(&row_from("❯ 마커 없는 제출", 80)).is_none());
+        assert!(tell_marker_line(&row_from("⟦없는캐릭⟧ x", 80)).is_none());
+    }
+
+    // 프사 라벨: slug 있는 캐릭터는 이름 없이 `›` 만(프사가 이름 대신), 마커 시작
+    // col 을 반환해 프사 rect 기준으로 쓴다. 본문은 accent 로 칠해진다.
+    #[test]
+    fn restyle_tell_face_label() {
+        let mut row = row_from("❯ ⟦미도리⟧ 본문", 80);
+        let (marker_end, name) = tell_marker_line(&row).unwrap();
+        let face_col = restyle_tell_line(&mut row, marker_end, &name, [107, 207, 127, 255]);
+        assert_eq!(face_col, Some(0), "❯ 위치(첫 non-space)가 프사 기준");
+        assert_eq!(row[TELL_FACE_COLS + 1].ch, '›', "프사+여백 뒤 › 라벨");
+        assert!(
+            row[..TELL_FACE_COLS + 1].iter().all(|c| c.ch == ' ' || c.ch == '\0'),
+            "프사 자리는 blank"
+        );
+        assert!(!row_text(&row).contains("미도리"), "이름은 프사가 대신");
+    }
+
+    // wrap 연속 행: 2칸 들여쓰기 본문만 연속, TUI 구조 글리프(⎿·⏺)·빈 행에서 끊김.
+    #[test]
+    fn tell_wrap_continuation_bounds() {
+        assert!(tell_wrap_continuation(&row_from("  짧게 답해줘.", 80)));
+        assert!(!tell_wrap_continuation(&row_from("  ⎿  4 skills available", 80)));
+        assert!(!tell_wrap_continuation(&row_from("⏺ 확인", 80)));
+        assert!(!tell_wrap_continuation(&row_from("", 80)));
+        assert!(!tell_wrap_continuation(&row_from("   들여쓰기 3", 80)));
     }
 
     // 인라인 재작성: 헤더 + 본문(한글 와이드 = 글자+스페이서), 원문 잔재 제거.

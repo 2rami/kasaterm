@@ -164,17 +164,21 @@ def main():
         else:
             parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
 
-    # 로그인 계정 — 프사 바로 오른쪽. organizationType 에 team/enterprise 가 있으면
-    # 조직 계정(org 명), 그 외(pro/max/personal)는 개인. team 이 나머지보다 시그널이
-    # 뚜렷해 team 판정을 정본으로 두고 org 명 없을 때만 "팀" 폴백한다.
+    # 로그인 계정 — 프사 바로 오른쪽. team/enterprise 는 조직명, 그 외(pro/max/
+    # personal)는 사용자 이름(displayName). 개인계정 organizationName 은
+    # "<이름>'s Organization" 이라 무의미해 "개인" 대신 실제 이름을 쓰고(거노),
+    # displayName 없으면 이메일 로컬파트, 그마저 없으면 "개인" 폴백.
     acct = load_account()
     if acct:
         otype = (acct.get("organizationType") or "").lower()
         org = (acct.get("organizationName") or "").strip()
         if "team" in otype or "enterprise" in otype:
-            parts.append(f"{ansi(C_ACCT)}{ITALIC}{(org or '팀')[:14]}{RESET}")
+            label = org or "팀"
         else:
-            parts.append(f"{ansi(C_ACCT)}{ITALIC}개인{RESET}")
+            label = ((acct.get("displayName") or "").strip()
+                     or (acct.get("emailAddress") or "").split("@")[0]
+                     or "개인")
+        parts.append(f"{ansi(C_ACCT)}{ITALIC}{label[:14]}{RESET}")
 
     # ⑂bg 백그라운드 배지 제거(거노: 복원 세션에 자꾸 백그라운드로 떠 짜증). anchor
     # (KASATERM_SESSION_ID) 불일치 판정은 detach 포크·앱 재시작 복원·continuation 을

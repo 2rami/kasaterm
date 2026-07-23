@@ -25,4 +25,9 @@ pub struct PaneStatusView {
     /// Why `status == "waiting"` (claude blocked on a prompt). None unless waiting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<String>,
+    /// A `run_in_background` shell or `Monitor` is in-flight for this pane even
+    /// though no spinner shows on screen. Drives the header pulse bar; derived
+    /// from the transcript tail, not the glyph scan.
+    #[serde(default)]
+    pub bg_active: bool,
 }

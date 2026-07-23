@@ -207,6 +207,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::SocketSessionBound(pane, sid) => {
                 // 배지 판정용: pane → claude 실제 sessionId(fork 시 갈라진 진짜 세션).
+                // report-cwd 가 매 렌더 이 이벤트를 재발화해 bg 세션 pane_claude_sid 를
+                // 보강하므로(F/H), 이미 같은 sid 면 no-op — 무한 relabel·render 를 막는다.
+                if self.pane_claude_sid.get(pane.as_str()) == Some(&sid) {
+                    return;
+                }
                 self.pane_claude_sid.insert(pane.clone(), sid.clone());
                 self.apply_session_character(pane, sid);
                 // 즉시 redraw — 없으면 idle 세션 attach 는 화면 업데이트가 안 흘러
@@ -842,17 +847,21 @@ impl ApplicationHandler<UserEvent> for App {
             let usage_cache = self.claude_usage.clone();
             std::thread::spawn(move || loop {
                 let next = fetch_claude_five_hour(&crate::mcp_panel_port());
-                match usage_cache.lock() {
-                    Ok(mut g) => {
-                        if *g != next {
-                            *g = next;
-                            drop(g);
-                            if usage_proxy.send_event(UserEvent::Redraw).is_err() {
-                                break;
+                // 일시적 fetch 실패(None)면 마지막 유효값을 유지 — pill 깜빡임/사라짐 방지.
+                // (git col 폴러와 동일 정책. 5시간 창은 항상 존재해 참 None 은 사실상 없음.)
+                if next.is_some() {
+                    match usage_cache.lock() {
+                        Ok(mut g) => {
+                            if *g != next {
+                                *g = next;
+                                drop(g);
+                                if usage_proxy.send_event(UserEvent::Redraw).is_err() {
+                                    break;
+                                }
                             }
                         }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
                 std::thread::sleep(std::time::Duration::from_secs(60));
             });
@@ -1842,9 +1851,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| inside(r))
                         .map(|(i, _)| *i)
                     {
-                        if let Err(e) = self.close_window(idx) {
-                            eprintln!("[window] close failed: {e:#}");
-                        }
+                        self.confirm_or_close_session(idx);
                     }
                 }
             }

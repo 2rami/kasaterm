@@ -182,7 +182,8 @@ const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
 동료의 surface_id 는 `kasaterm-cli board` 로 확인한다. 동료가 한 턴을 끝내면 이 명령이 스스로 종료되고, 시스템이 너를 자동으로 깨운다(task-notification). 깨어나면 그 출력(\"<동료> 작업 끝남\")을 보고 이어서 진행해라. 이렇게 하면 네 입력창을 더럽히지 않고 동료 완료 즉시 이어받는다.\n\
 \n\
 [협업 — 학생 채팅]\n\
-같은 방 학생(다른 pane 이나 백그라운드 세션)에게 직접 말을 걸 땐 SendMessage 도구를 써라(to: 상대 agent 이름, 예: \"shiroko-1a2b\"). 자기 agent 이름은 env $KASATERM_AGENT, 같은 방 명단은 `ls ~/.claude/teams/$KASATERM_TEAM/inboxes/` 로 확인한다(파일명 = agent 이름). 답장은 teammate-message 로 자동 도착하니 따로 폴링하지 마라. $KASATERM_AGENT 가 비어 있으면 이 채널이 없는 세션이니 tell 로 폴백해라.";
+같은 방 학생(다른 pane 이나 백그라운드 세션)에게 직접 말을 걸 땐 SendMessage 도구를 써라(to: 상대 agent 이름, 예: \"shiroko-1a2b\"). 자기 agent 이름은 env $KASATERM_AGENT, 같은 방 명단은 `ls ~/.claude/teams/$KASATERM_TEAM/inboxes/` 로 확인한다(파일명 = agent 이름). 답장은 teammate-message 로 자동 도착하니 따로 폴링하지 마라.\n\
+단 background job 세션(env $CLAUDE_JOB_DIR 존재)이거나, SendMessage 가 'not reachable' 로 실패하거나, $KASATERM_AGENT 가 비어 있으면 — 하네스 팀 레지스트리에 안 잡히는 세션이라 SendMessage 가 안 닿는다(inbox 파일이 실재해도 마찬가지). 그땐 `kasaterm-cli tell <상대 surface_id>` 로 소통해라(상대 surface_id 는 `kasaterm-cli board` 로 확인). 보내고 받는 것 모두 tell 로 된다 — bg 세션과의 소통은 tell 이 정식 경로다.";
 
 /// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
 pub fn mode_slug(cwd: &Path) -> String {

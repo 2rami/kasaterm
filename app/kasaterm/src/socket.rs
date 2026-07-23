@@ -257,8 +257,9 @@ pub(crate) fn agents_status_cached() -> HashMap<String, String> {
     agents_cached().0
 }
 
-/// 세션 name → sessionId(모호 이름 제외, 2s 캐시 공유).
-fn agents_name_sids_cached() -> HashMap<String, String> {
+/// 세션 name → sessionId(모호 이름 제외, 2s 캐시 공유). GUI 렌더의 agents 뷰
+/// 세션 행 캐릭터 칩(행 name 을 sid→캐릭터로 역추적)에서도 쓴다.
+pub(crate) fn agents_name_sids_cached() -> HashMap<String, String> {
     agents_cached().1
 }
 
@@ -843,7 +844,7 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn report_cwd(&self, surface_id: &str, cwd: &str, _session_id: &str) -> Result<()> {
+    fn report_cwd(&self, surface_id: &str, cwd: &str, session_id: &str) -> Result<()> {
         self.reported_cwd
             .lock()
             .unwrap()
@@ -852,8 +853,21 @@ impl Backend for PtyBackend {
         // 스폰 경로)지 표시 중인 세션의 프로젝트가 아니다 — GUI 로 흘리면
         // publish_transcript_cwd 가 넣은 진짜 세션 cwd 를 매 렌더 덮는다(거노:
         // bg 세션 파일트리가 pane cwd 고착). 오버라이드는 transcript bind 에 맡긴다.
+        // (session_id 바인딩도 뷰 pane 은 뷰어 세션이라 오염되므로 함께 스킵.)
         if self.view_panes.lock().unwrap().contains(surface_id) {
             return Ok(());
+        }
+        // pane 활성 세션의 real sid 로 pane_claude_sid 를 보강(SocketSessionBound 재사용).
+        // bg job(bind-transcript hook 을 CLAUDE_JOB_DIR 로 스킵)·포크(SessionStart 가
+        // 못 온 pane)는 pane_claude_sid 가 비어 display_pane_char 가 None → statusline
+        // 프사·이름이 빈다(거노: bg 세션 얼굴 없고 그 자리 배경만 = F/H). statusline 은
+        // 이 세션에서도 매 렌더 real sid 를 report 하므로, 이 경로가 pane→세션 바인딩의
+        // 최후 보루가 된다(handler arm 이 같은 sid 면 no-op → 매 report 부하 없음).
+        if !session_id.is_empty() {
+            let _ = self.proxy.send_event(UserEvent::SocketSessionBound(
+                surface_id.to_string(),
+                session_id.to_string(),
+            ));
         }
         // GUI 파일트리가 "pane 이 보는 경로"를 셸 cwd 보다 우선하도록 위임.
         let _ = self.proxy.send_event(UserEvent::SocketViewCwd(
