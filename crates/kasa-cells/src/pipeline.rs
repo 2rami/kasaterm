@@ -37,6 +37,11 @@ impl CellInstance {
     /// draws an indeterminate sweep over a faint track using `u.time`, so a busy
     /// pane's loading bar animates on the GPU with no per-frame CPU rebuild.
     pub const FLAG_WORKING_BAR: u32 = 4;
+    /// Bit 3 set = a pulse-bar quad. Like the working bar it ignores the atlas,
+    /// but instead of a sweeping segment it fills the full width and breathes its
+    /// alpha on a slow 3s sine — the "background job / Monitor running" signal,
+    /// whose slower rhythm reads as distinct from the working-bar sweep.
+    pub const FLAG_PULSE_BAR: u32 = 8;
 }
 
 #[repr(C)]

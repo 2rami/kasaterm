@@ -856,6 +856,65 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .stderr(std::process::Stdio::null())
             .spawn();
     }
+    /// stash 트리(Option 슬롯)에서 leaf 하나 제거. 마지막 leaf 면 트리째 비운다
+    /// (`None`). 제거했으면 true.
+    fn remove_stashed_leaf(slot: &mut Option<kasa_pty::PtyLayout>, target: &str) -> bool {
+        let Some(tree) = slot.as_mut() else {
+            return false;
+        };
+        let ls = tree.leaves();
+        if !ls.iter().any(|l| *l == target) {
+            return false;
+        }
+        if ls.len() > 1 {
+            tree.remove_leaf(target);
+        } else {
+            *slot = None;
+        }
+        true
+    }
+
+    /// active 트리 밖(현재 세션의 stash 윈도우 + 백그라운드 세션들)에서 pane 을
+    /// 걷어낸다 — CLI close 가 다른 윈도우/세션 pane 을 겨눌 때 유령 leaf(빈
+    /// pane)가 남는 것 방지. 마지막 leaf 로 윈도우가 비면 그 윈도우도 닫는다.
+    fn remove_pane_stashed(&mut self, target: &str) {
+        let mut emptied_win: Option<usize> = None;
+        for (i, slot) in self.windows.iter_mut().enumerate() {
+            if Self::remove_stashed_leaf(slot, target) && slot.is_none() {
+                emptied_win = Some(i);
+            }
+        }
+        if let Some(i) = emptied_win {
+            // close_window 가 인덱스·탭 스트립 보정까지 처리. 마지막 윈도우면
+            // bail 하니 빈 슬롯이 잠시 남을 뿐 상태는 안 깨진다.
+            let _ = self.close_window(i);
+        }
+        for sess in self.sessions.iter_mut().flatten() {
+            sess.pty.remove(target);
+            if let Ok(mut ws) = sess.ws.lock() {
+                ws.panes.remove(target);
+                ws.rebuild_pid_map();
+            }
+            Self::remove_stashed_leaf(&mut sess.pty_layout, target);
+            let mut emptied: Option<usize> = None;
+            for (i, slot) in sess.windows.iter_mut().enumerate() {
+                if Self::remove_stashed_leaf(slot, target) && slot.is_none() {
+                    emptied = Some(i);
+                }
+            }
+            // 백그라운드 세션엔 close_window 를 못 쓴다(&mut self 라이브 필드
+            // 전제) — 빈 윈도우 슬롯 제거와 active_window 보정만 직접.
+            if let Some(i) = emptied {
+                if i != sess.active_window && sess.windows.len() > 1 {
+                    sess.windows.remove(i);
+                    if sess.active_window > i {
+                        sess.active_window -= 1;
+                    }
+                }
+            }
+        }
+    }
+
     /// Internal: drop a pane regardless of whether it's the active one.
     /// Used by both `close_pane` (Cmd+W / header ×) and `reap_dead_panes`
     /// (shell exit). Picks a survivor focus when removing the focused
@@ -871,9 +930,20 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .unwrap_or(false);
         let leaves: Vec<String> = match self.pty_layout.as_ref() {
             Some(t) => t.leaves().iter().map(|s| s.to_string()).collect(),
-            None => return,
+            None => {
+                // active 트리가 없어도(단일 pane 폴백) stash 쪽 유령은 걷어낸다.
+                self.remove_pane_stashed(target);
+                return;
+            }
         };
-        let next_focus: Option<String> = if was_active && leaves.len() > 1 {
+        // CLI close 는 stash 된 윈도우·백그라운드 세션의 pane 도 겨눈다 — 그때
+        // active 트리를 조작하면 (a) 유령 leaf 가 그쪽 트리에 남아 빈 pane 으로
+        // 렌더되고 (b) active 가 단일 pane 이면 멀쩡한 트리를 통째 드랍한다.
+        let in_active = leaves.iter().any(|l| l == target);
+        if !in_active {
+            self.remove_pane_stashed(target);
+        }
+        let next_focus: Option<String> = if was_active && in_active && leaves.len() > 1 {
             let cur_idx = leaves.iter().position(|l| l == target).unwrap_or(0);
             if cur_idx + 1 < leaves.len() {
                 Some(leaves[cur_idx + 1].clone())
@@ -883,14 +953,16 @@ for p in glob.glob(os.path.join(d, '*.json')):
         } else {
             None
         };
-        if leaves.len() > 1 {
-            if let Some(tree) = self.pty_layout.as_mut() {
-                tree.remove_leaf(target);
+        if in_active {
+            if leaves.len() > 1 {
+                if let Some(tree) = self.pty_layout.as_mut() {
+                    tree.remove_leaf(target);
+                }
+            } else {
+                // Last leaf — drop the tree entirely so single-pane
+                // fallback re-engages if a future split repopulates it.
+                self.pty_layout = None;
             }
-        } else {
-            // Last leaf — drop the tree entirely so single-pane
-            // fallback re-engages if a future split repopulates it.
-            self.pty_layout = None;
         }
         let closed_cwd = self.pane_cwd_cache.get(target).cloned();
         self.pty.remove(target);
@@ -942,6 +1014,17 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 되어 안 닫히던 것 → 새 tty 셸로 교체). Otherwise just remove it.
     pub(crate) fn close_pane(&mut self, pid: &str) {
         if self.tmux.is_some() {
+            return;
+        }
+        // stash 윈도우·백그라운드 세션 pane(CLI close)은 active 트리와 무관 —
+        // 아래 "마지막 pane 대체 셸 스폰" 분기를 타면 active 윈도우에 불필요한
+        // 새 셸이 생긴다. remove_pane 이 stash 쪽 정리까지 맡는다.
+        let in_active = self
+            .pty_layout
+            .as_ref()
+            .is_some_and(|t| t.leaves().iter().any(|l| *l == pid));
+        if !in_active {
+            self.remove_pane(pid);
             return;
         }
         let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());

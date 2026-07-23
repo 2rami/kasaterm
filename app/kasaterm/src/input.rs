@@ -390,11 +390,19 @@ impl App {
                 self.pane_last_busy.remove(id);
             }
             let status = if busy { "working" } else { "idle" };
+            // A visibly-working pane already shows the sweep, so skip the tail
+            // read; only idle panes need the "background job running" check, and
+            // their transcript rarely changes so the mtime cache keeps IO ~zero.
+            let bg_active = if busy { false } else { self.pane_bg_active(id) };
             self.pane_activity
                 .entry(id.clone())
-                .and_modify(|a| a.status = status.to_string())
+                .and_modify(|a| {
+                    a.status = status.to_string();
+                    a.bg_active = bg_active;
+                })
                 .or_insert_with(|| crate::stream::PaneStatusView {
                     status: status.to_string(),
+                    bg_active,
                     ..Default::default()
                 });
         }
@@ -418,6 +426,34 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    /// Whether a `run_in_background` shell or `Monitor` is in-flight for this
+    /// pane, read from the claude transcript tail. mtime-gated: an unchanged
+    /// transcript returns the cached verdict, so an idle pane costs one `stat`.
+    fn pane_bg_active(&mut self, pane_id: &str) -> bool {
+        let Some(sid) = self.pane_claude_sid.get(pane_id).cloned() else {
+            return false;
+        };
+        let Some(path) = crate::socket::transcript_path_for_session(&sid) else {
+            return false;
+        };
+        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if let Some(mt) = mtime {
+            if let Some((cached_mt, cached)) = self.pane_bg_mtime.get(pane_id) {
+                if *cached_mt == mt {
+                    return *cached;
+                }
+            }
+        }
+        let (tail, idle) = crate::socket::read_tail(&path, 64 * 1024);
+        let bg = !crate::transcript::snapshot_from_tail(&sid, &tail, idle)
+            .background
+            .is_empty();
+        if let Some(mt) = mtime {
+            self.pane_bg_mtime.insert(pane_id.to_string(), (mt, bg));
+        }
+        bg
     }
 
     /// munder식 승인 프롬프트 라우팅: 오케스트레이터(또는 협업방 없는 단독 pane)의 프롬프트만
@@ -679,8 +715,18 @@ impl App {
             // emits once |accum| ≥ 1). 3 cells/notch matches the 3-line default
             // most GUI terminals use, so a notch scrolls immediately.
             MouseScrollDelta::LineDelta(_, y) => y * 3.0,
-            // Trackpad: pixel-precise, already smooth — keep the gentle factor.
-            MouseScrollDelta::PixelDelta(p) => (p.y as f32) / self.cell.h.max(1.0) * 0.3,
+            // Trackpad: pixel-precise, already smooth. 고해상도 마우스휠도 PixelDelta 로
+            // 오는데 한 노치 p.y 가 작아 0.3 배율론 wheel_step 임계(1셀)를 못 넘어 여러 번
+            // 굴려야 했다(거노: 드르륵 한 번엔 안 넘어감). gain 을 올리고, 유의미한 델타
+            // (관성 미세꼬리 sub-2px 제외)는 최소 1셀 보장해 살짝 굴려도 즉시 넘어간다.
+            MouseScrollDelta::PixelDelta(p) => {
+                let raw = (p.y as f32) / self.cell.h.max(1.0) * wheel_pixel_gain();
+                if raw != 0.0 && raw.abs() < 1.0 && (p.y.abs() as f32) >= WHEEL_PIXEL_FLOOR_PX {
+                    raw.signum()
+                } else {
+                    raw
+                }
+            }
         };
         if wdbg {
             eprintln!(

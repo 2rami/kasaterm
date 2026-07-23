@@ -2095,7 +2095,7 @@ fn strip_exe_suffix(name: String) -> String {
 /// because it has no `ps`; Unix shells out to `ps`. Callers match on pid/ppid
 /// and substring the name (e.g. `.contains("claude")`).
 #[cfg(windows)]
-pub fn process_table() -> Vec<(u32, u32, String)> {
+fn process_table_raw() -> Vec<(u32, u32, String)> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -2129,7 +2129,7 @@ pub fn process_table() -> Vec<(u32, u32, String)> {
 }
 
 #[cfg(unix)]
-pub fn process_table() -> Vec<(u32, u32, String)> {
+fn process_table_raw() -> Vec<(u32, u32, String)> {
     let Ok(output) = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,comm="])
         .output()
@@ -2155,6 +2155,31 @@ pub fn process_table() -> Vec<(u32, u32, String)> {
         out.push((pid, ppid, name));
     }
     out
+}
+
+/// `process_table_raw` 를 짧은 TTL 로 감싼 전역 캐시. 세션이 많을 때 렌더 스레드가
+/// pane 마다 active_process_name/is_claude_agents 로 이걸 부르면, per-pane 500ms
+/// 캐시가 같은 프레임에 동시 만료될 때 K 번 ps fork 가 겹쳐 프레임드랍(거노: 세션
+/// 많을 때). 300ms 전역 캐시로 한 프레임의 중복 fork 를 1 회로 접는다(per-pane 캐시
+/// 보다 촘촘해 신선도는 유지). fork 대신 Vec clone 이라 비용이 pane 수에 선형이지만
+/// ps fork+파싱보다 훨씬 싸다. 빈 결과(ps 실패)는 캐싱하지 않아 다음 호출이 재시도한다.
+pub fn process_table() -> Vec<(u32, u32, String)> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<(Instant, Vec<(u32, u32, String)>)>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        std::sync::Mutex::new((Instant::now() - std::time::Duration::from_secs(1), Vec::new()))
+    });
+    if let Ok(mut g) = cache.lock() {
+        if !g.1.is_empty() && g.0.elapsed().as_millis() < 300 {
+            return g.1.clone();
+        }
+        let fresh = process_table_raw();
+        if !fresh.is_empty() {
+            *g = (Instant::now(), fresh.clone());
+        }
+        return fresh;
+    }
+    process_table_raw()
 }
 
 /// shell 의 직계 claude 자식이 `claude agents`(에이전트 목록 뷰) 서브커맨드로

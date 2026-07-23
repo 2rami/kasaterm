@@ -163,6 +163,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let rgb = boost_saturation(in.fg.rgb, u.color_sat);
         return vec4<f32>(prepare_output(rgb), a);
     }
+    // Pulse-bar (flags & 8): a full-width rail whose alpha breathes on a slow
+    // 3s sine — a background/Monitor job is running with no on-screen spinner.
+    // The gentler, slower rhythm keeps it distinct from the working-bar sweep.
+    if ((in.flags & 8u) != 0u) {
+        let breath = 0.30 + 0.45 * (0.5 + 0.5 * sin(u.time * 2.0943951)); // 2π/3 → 3s period
+        let rgb = boost_saturation(in.fg.rgb, u.color_sat);
+        return vec4<f32>(prepare_output(rgb), in.fg.a * breath);
+    }
     // Color glyphs (emoji) are baked as full RGBA — draw them verbatim,
     // letting fg.a act as a global opacity. Coverage masks are baked as
     // white×alpha, so fg.rgb × tex.a reproduces the monochrome path.

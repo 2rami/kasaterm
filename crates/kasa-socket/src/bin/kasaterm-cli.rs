@@ -717,8 +717,19 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             // menu/special states where a bare CR was eaten (munder pattern,
             // hiddenClaude.ts). The handler ships body first, then \r 140ms
             // later so Ink has finished processing the paste before the submit.
+            // 발신 학생 마커 — 받는 pane 이 tell 을 발신자 테마색으로 렌더하려면 화면에
+            // 앵커가 필요하다(터미널은 그리드라 transcript 대조로 user 턴을 못 집는다).
+            // 발신 pane 자기 캐릭터($KASATERM_CHARACTER)를 `⟦이름⟧` 로 앞에 심는다 —
+            // 사람이 직접 친 cli 는 env 가 없어 마커 없이(거노 발신=무색) 나간다.
+            let marked = match std::env::var("KASATERM_CHARACTER")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
+                Some(c) => format!("⟦{c}⟧ {}", flat.trim()),
+                None => flat.trim().to_string(),
+            };
             let mut params = json!({ "surface_id": surface,
-                "text": format!("\x15\x1b[200~{}\x1b[201~\r", flat.trim()) });
+                "text": format!("\x15\x1b[200~{}\x1b[201~\r", marked) });
             // 발신 메타 동봉 — 서버가 방 기준 slug 의 messages.jsonl 에 기록해 채팅뷰가
             // 학생→학생 tell 을 발신자 좌측 버블로 그린다(거노 #5/#7). CLI 자체 기록은
             // 발신 셸의 cwd 기준 slug 라 cd 상태에 따라 파일이 갈라져 매칭이 새던 것을
@@ -727,7 +738,9 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
                 std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty())
             {
                 params["from_pane"] = json!(fp);
-                params["plain"] = json!(flat.trim());
+                // plain 도 마커 포함 — 웹뷰 senderOf 가 transcript 정확대조라 마커가
+                // 한쪽에만 있으면 발신자 버블 매칭이 깨진다.
+                params["plain"] = json!(marked);
             }
             ("surface.send_text", params)
         }
@@ -1025,6 +1038,9 @@ fn run_session_rename(args: &[String]) -> Result<()> {
         "type": "custom-title",
         "customTitle": name,
         "sessionId": id,
+        // 사용자가 CLI 로 직접 지은 이름 = 수동 개명 → title-sync 가 존중(자동
+        // 갱신 제외). 이 마커가 없던 과거 rename 산은 title-sync 가 갱신 대상으로 본다.
+        "nameSource": "user",
     }))
     .context("record 직렬화")?;
     let mut f = std::fs::OpenOptions::new()

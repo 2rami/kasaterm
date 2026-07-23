@@ -520,6 +520,22 @@ impl GpuRenderer {
         });
     }
 
+    /// Pulse-indicator rail (logical px). Pushes ONE `FLAG_PULSE_BAR` instance;
+    /// the shader breathes a full-width fill's alpha on a slow 3s sine from
+    /// `u.time`, so a pane with a background/Monitor job animates on the GPU with
+    /// no per-frame CPU rebuild — same idle-0-CPU property as `working_bar`.
+    pub fn pulse_bar(&mut self, x: f32, y: f32, w: f32, h: f32, rgba_u8: [u8; 4]) {
+        let s = self.scale;
+        self.chrome.push(CellInstance {
+            cell_px: [x * s, y * s, w * s, h * s],
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+            fg_rgba: srgb_rgba_to_linear(rgba_u8),
+            flags: CellInstance::FLAG_PULSE_BAR,
+            ..Default::default()
+        });
+    }
+
     /// Filled rounded rectangle (logical px) — circle-traced caps, same as
     /// main.rs's `round_rect` but a method so the markdown renderer can round
     /// code blocks / inline-code chips.

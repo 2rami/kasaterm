@@ -387,6 +387,23 @@ fn wheel_throttle_ms() -> u64 {
             .unwrap_or(0)
     })
 }
+/// PixelDelta(트랙패드·고해상도 마우스휠) 스크롤 감도 배율. 구 기본 0.3 은 트랙패드
+/// 관성엔 부드러웠지만 한 노치 p.y 가 작은 마우스휠에선 굼떠(거노: 드르륵 한 번에
+/// 안 넘어감) 1.0 으로 올렸다. `KASATERM_WHEEL_PIXEL_GAIN=<f>` 로 재시작 후 감도 조절.
+fn wheel_pixel_gain() -> f32 {
+    static CACHED: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("KASATERM_WHEEL_PIXEL_GAIN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|v: &f32| *v > 0.0)
+            .unwrap_or(1.0)
+    })
+}
+/// PixelDelta 최소 스텝 floor(px). 이 픽셀 이상 굴린 델타는 배율 결과가 1셀 미만
+/// 이어도 최소 1셀 emit 해 "드르륵 한 번"이 즉시 넘어간다. 트랙패드 관성 미세꼬리
+/// (sub-2px)는 floor 밖이라 과민해지지 않는다.
+const WHEEL_PIXEL_FLOOR_PX: f32 = 2.0;
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
 /// default; iTerm2 uses 500. 530 matches the platform feel.
 const BLINK_HALF_PERIOD_MS: u64 = 530;
@@ -1432,6 +1449,9 @@ enum PendingClose {
     Tab { pane: String, idx: usize },
     /// Drop a whole pane (its last tab).
     Pane { pane: String },
+    /// Close one sidebar session (window `idx`) — the app stays open. Distinct
+    /// from `Window` (whole-app quit): only this session's panes are killed.
+    Session(usize),
     /// Quit the app (window red-light / Cmd+W on the last pane).
     Window,
 }
@@ -3048,6 +3068,10 @@ struct App {
     /// for `BUSY_GRACE` after the last spinner sighting so only a real stop
     /// (grace elapsed) counts as completion.
     pane_last_busy: HashMap<String, Instant>,
+    /// pane id → (transcript mtime, bg_active) — an mtime-gated cache for the
+    /// header pulse bar. An idle pane's transcript rarely changes, so the bar's
+    /// "background/Monitor running" check reads the tail only when mtime moves.
+    pane_bg_mtime: HashMap<String, (std::time::SystemTime, bool)>,
     /// (window index, rect) for every window tab in the left sidebar.
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
@@ -3599,6 +3623,7 @@ impl App {
             copy_toast_at: None,
             pane_busy_check: None,
             pane_last_busy: HashMap::new(),
+            pane_bg_mtime: HashMap::new(),
             window_tab_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
             win_tab_first: 0,
