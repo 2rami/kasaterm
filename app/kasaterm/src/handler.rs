@@ -2744,22 +2744,6 @@ impl ApplicationHandler<UserEvent> for App {
                         // Empty column space — swallow the click.
                         return;
                     }
-                    // Code-block copy button. Checked before the cell-grid /
-                    // mouse-forward path so a click lands on the button even
-                    // inside a mouse-reporting TUI (Claude Code), the same
-                    // way the Shift escape hatch steals selection.
-                    if let Some(text) = self
-                        .copy_btn_rects
-                        .iter()
-                        .find(|(_, r)| {
-                            cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
-                        })
-                        .map(|(t, _)| t.clone())
-                    {
-                        self.copy_block_text(&text);
-                        window.request_redraw();
-                        return;
-                    }
                     // ── ghostty ⋮ 핸들 메뉴 ─────────────────────────────
                     // ⋮ 클릭 → 메뉴 토글. 메뉴 열림 상태: 버튼=액션, ⋮ 자기=닫기,
                     // 밖=닫고 클릭은 흘려보냄. (드래그 이동은 Phase 4)

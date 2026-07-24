@@ -330,7 +330,6 @@ impl App {
         let pane_scales = self.pane_font_scales.clone();
         // Code-block copy buttons (text + logical rect), filled per pane in
         // the loop below and handed to both the mouse handler and overlay.
-        let mut copy_btns: Vec<(String, (f32, f32, f32, f32))> = Vec::new();
         // Image panes collected here (id, pixels, body box in LOGICAL px) so
         // the gpu block below can upload + queue them after the cell pass.
         // (pid, image_data, body_box, zoom, rotation_quarters, pan_xy)
@@ -928,27 +927,6 @@ impl App {
                         }
                     }
                 }
-                // Code-block scan is O(cells × distinct-colours) and walks
-                // the whole grid twice per frame. It only makes sense on the
-                // normal screen — TUIs in alt-screen (claude code TUI mode,
-                // vim, less, full-screen apps) get a copy chip per pseudo-
-                // block which is never useful. Skipping there reclaims most
-                // of render_frame_gpu's time at high update rates.
-                let pane_alt = pane.term().map(|t| t.alt_screen).unwrap_or(false);
-                if !pane_alt {
-                    for block in detect_code_blocks(&composed) {
-                        let text = extract_block(&composed, block);
-                        if text.trim().is_empty() {
-                            continue;
-                        }
-                        let (start, _end, _left, right) = block;
-                        let block_top = body_top + start as f32 * self.cell.h;
-                        let block_right = body_left + (right as f32 + 1.0) * self.cell.w;
-                        let bx = (block_right - COPY_BTN_W - 4.0).max(body_left);
-                        let by = block_top + 3.0;
-                        copy_btns.push((text, (bx, by, COPY_BTN_W, COPY_BTN_H)));
-                    }
-                }
                 // /rename 세션명 아웃라인 — claude 입력박스 위 "── 세션명 ──" 구분선의
                 // 이름 텍스트 섬을 찾아 그 셀 범위를 rename/학생 색 사각 테두리로 두른다
                 // (거노). 순수 '─' rule·statusline·입력행은 걸러진다. 테두리 패스에서 소비.
@@ -1511,21 +1489,6 @@ impl App {
             }
             (slots, headers, footer_slots, agents_view_panes)
         };
-        // Publish copy-button hit rects for the mouse handler; snapshot the
-        // bare rects (+ hover state) for the overlay draw below. Both read
-        // from the same numbers so a click lands on what the user sees.
-        self.copy_btn_rects = copy_btns;
-        let copy_btns_draw: Vec<(f32, f32, f32, f32, bool)> = self
-            .copy_btn_rects
-            .iter()
-            .map(|(_, r)| {
-                let hover = self.cursor_px.0 >= r.0
-                    && self.cursor_px.0 <= r.0 + r.2
-                    && self.cursor_px.1 >= r.1
-                    && self.cursor_px.1 <= r.1 + r.3;
-                (r.0, r.1, r.2, r.3, hover)
-            })
-            .collect();
         let toast_alpha = self.copy_toast_alpha();
         // Collab completion toast (top-right). Pre-read here like toast_alpha so
         // the render block below never re-borrows self while g is held.
@@ -4898,39 +4861,6 @@ impl App {
                 }
             }
             Self::paint_gpu_overlays(g, &overlay);
-            // Code-block copy buttons, painted on top of the inactive-pane
-            // veil so they stay legible everywhere. The icon is two
-            // overlapping squares drawn from rects (font glyphs map
-            // unreliably in this renderer — see CLAUDE.md box-drawing note).
-            for (bx, by, bw, bh, hover) in &copy_btns_draw {
-                let (bx, by, bw, bh) = (*bx, *by, *bw, *bh);
-                let bg = if *hover {
-                    theme::surface_hover()
-                } else {
-                    theme::with_alpha(theme::surface_active(), 0xE0)
-                };
-                round_rect(g, bx, by, bw, bh, theme::RADIUS_SM, bg);
-                let fg = if *hover { theme::text() } else { theme::text_dim() };
-                let s = 8.0; // square side
-                let off = 2.5; // overlap offset
-                let t = 1.3; // stroke
-                let gx = bx + (bw - (s + off)) / 2.0;
-                let gy = by + (bh - (s + off)) / 2.0;
-                // Back square (up-right), outline only.
-                let (r1x, r1y) = (gx + off, gy);
-                g.rect(r1x, r1y, s, t, fg);
-                g.rect(r1x, r1y + s - t, s, t, fg);
-                g.rect(r1x, r1y, t, s, fg);
-                g.rect(r1x + s - t, r1y, t, s, fg);
-                // Front square (down-left): refill the chip bg first so it
-                // reads as sitting on top, then outline.
-                let (r2x, r2y) = (gx, gy + off);
-                g.rect(r2x, r2y, s, s, bg);
-                g.rect(r2x, r2y, s, t, fg);
-                g.rect(r2x, r2y + s - t, s, t, fg);
-                g.rect(r2x, r2y, t, s, fg);
-                g.rect(r2x + s - t, r2y, t, s, fg);
-            }
             // Status-bar dropdown (directory picker / branch switcher), drawn
             // last so it overlays the cell grid + every bar. Anchored to the
             // chip that opened it and expanded UPWARD — the bar lives at the
@@ -6879,7 +6809,11 @@ fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
         }
         // 이름 섬이 없는 순수 '─' rule(입력박스 바닥 테두리 등)은 건너뛴다 — `?` 로 함수를
         // 끝내면 그 아래 순수 rule 이 세션명 줄보다 먼저 걸려 아웃라인이 통째 사라진다(거노).
-        let is_name = |c: &GridCell| !matches!(c.ch, '─' | ' ' | '\0');
+        // box-drawing 문자(╭╮╰╯│…, U+2500-257F) 전체를 이름에서 제외 — 둥근 입력박스
+        // 테두리 행(╭────╮)의 모서리가 이름 섬으로 오탐되어 행 전체에 사각형이 그려졌다(거노).
+        let is_name = |c: &GridCell| {
+            !matches!(c.ch, ' ' | '\0') && !('\u{2500}'..='\u{257F}').contains(&c.ch)
+        };
         let Some(first) = row.iter().position(&is_name) else { continue };
         let Some(last) = row.iter().rposition(&is_name) else { continue };
         // 이름 왼쪽의 마지막 '─' 다음 셀 = c0(선행 공백 포함), 오른쪽 첫 '─' 이전 셀 = c1
@@ -8095,6 +8029,23 @@ mod teammate_msg_tests {
         assert_eq!(m.color.as_deref(), Some("orange"));
         // 다른 보낸이의 태그는 건너뛰고 일치하는 태그만.
         assert!(extract_teammate_msg(text, "yuzu-1ba1").is_none());
+    }
+
+    // 세션명 rule 검출: 진짜 "── 이름 ──" 만. 둥근 입력박스 테두리(╭────╮·╰────╯)의
+    // 모서리는 box-drawing 이라 이름 섬이 아니다 — 행 전체 사각형 오탐 회귀 방지(거노).
+    #[test]
+    fn titled_rule_ignores_box_border_rows() {
+        let dash = |n: usize| "─".repeat(n);
+        let title = row_from(&format!("{} 세션명 {}", dash(30), dash(30)), 80);
+        let (r, c0, c1) = find_titled_rule(&[title]).expect("이름 섬 있는 rule 인정");
+        assert_eq!(r, 0);
+        assert!(c0 > 0 && c1 < 79, "이름 구간만, 행 전체 아님");
+        let top = row_from(&format!("╭{}╮", dash(70)), 80);
+        let bottom = row_from(&format!("╰{}╯", dash(70)), 80);
+        let plain = row_from(&dash(72), 80);
+        assert!(find_titled_rule(&[top]).is_none(), "둥근 상단 테두리 무시");
+        assert!(find_titled_rule(&[bottom]).is_none(), "둥근 하단 테두리 무시");
+        assert!(find_titled_rule(&[plain]).is_none(), "순수 rule 무시");
     }
 
     // 크로스-방 tell 마커: 유효 캐릭터 `⟦이름⟧` 만 인정, 거노 직접 입력(마커 없음)·
