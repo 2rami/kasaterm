@@ -2069,31 +2069,110 @@ fn read_claude_token() -> Option<String> {
 /// `GET /claude-usage` — claude oauth usage API(5시간/주간 한도·사용률·리셋)를 그대로
 /// 프록시한다. rate limit 은 claude CLI 가 안 내보내지만 `/api/oauth/usage` 가 직접 준다
 /// (거노: ba모드 사용량 패널). 토큰 만료/실패는 그 상태를 ok:false 로 전달.
+///
+/// **프로세스 전역 TTL 캐시(거노: "사용량 또 안 뜸")**: oauth/usage 는 레이트리밋이
+/// 빡빡해, 터미널 폴러(60초)+웹뷰 TitleBar+여러 pane 이 매 요청 upstream 을 치면 금방
+/// 429 로 막힌다. 성공 응답을 캐시해 60초 이내 재요청은 upstream 없이 캐시로 답하고
+/// (호출을 60초당 1회로 수렴), upstream 실패(429 등) 시엔 마지막 성공값을 stale 로 돌려
+/// pill 이 안 꺼지게 한다. 5시간 창 값이라 수십 초~수 분 stale 은 무해.
 async fn claude_usage_handler() -> impl IntoResponse {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    // (freshness, usage). freshness=Some(at) 면 그 시점 성공값, None 이면 디스크에서
+    // 로드한 재시작 이전 값(항상 만료 취급 → upstream 재시도, 실패 시 stale 폴백).
+    static CACHE: OnceLock<Mutex<Option<(Option<Instant>, serde_json::Value)>>> = OnceLock::new();
+    const TTL: Duration = Duration::from_secs(60);
+    // 첫 접근 시 디스크 캐시를 로드 — kasaterm 재시작(서버도 함께 재시작)에도 마지막
+    // 성공값을 즉시 돌려줘 pill 이 안 꺼진다(거노: "사용량 또 안 뜸").
+    let cache = CACHE.get_or_init(|| Mutex::new(load_usage_disk().map(|v| (None, v))));
+
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
-    let Some(token) = read_claude_token() else {
-        return (cors, Json(serde_json::json!({ "ok": false, "error": "no claude token" })));
+    let ok = |v: &serde_json::Value, stale: bool| {
+        serde_json::json!({ "ok": true, "usage": v, "stale": stale })
     };
-    let resp = reqwest::Client::new()
-        .get("https://api.anthropic.com/api/oauth/usage")
-        .header("authorization", format!("Bearer {token}"))
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .send()
-        .await;
-    match resp {
-        Ok(r) if r.status().is_success() => match r.text().await {
-            Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-                Ok(v) => (cors, Json(serde_json::json!({ "ok": true, "usage": v }))),
-                Err(e) => (cors, Json(serde_json::json!({ "ok": false, "error": e.to_string() }))),
-            },
-            Err(e) => (cors, Json(serde_json::json!({ "ok": false, "error": e.to_string() }))),
-        },
-        Ok(r) => (
-            cors,
-            Json(serde_json::json!({ "ok": false, "error": format!("usage api {}", r.status()) })),
-        ),
-        Err(e) => (cors, Json(serde_json::json!({ "ok": false, "error": e.to_string() }))),
+
+    // 1) 신선한 캐시(60초 이내 성공)면 upstream 없이 그대로.
+    if let Ok(g) = cache.lock() {
+        if let Some((Some(at), v)) = g.as_ref() {
+            if at.elapsed() < TTL {
+                return (cors, Json(ok(v, false)));
+            }
+        }
     }
+
+    // 2) 신선 캐시가 없을 때만 upstream 시도.
+    let fresh: Option<serde_json::Value> = match read_claude_token() {
+        Some(token) => {
+            let resp = reqwest::Client::new()
+                .get("https://api.anthropic.com/api/oauth/usage")
+                .header("authorization", format!("Bearer {token}"))
+                .header("anthropic-beta", "oauth-2025-04-20")
+                .send()
+                .await;
+            match resp {
+                Ok(r) if r.status().is_success() => r
+                    .text()
+                    .await
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
+                _ => None,
+            }
+        }
+        None => None,
+    };
+
+    if let Some(v) = fresh {
+        if let Ok(mut g) = cache.lock() {
+            *g = Some((Some(Instant::now()), v.clone()));
+        }
+        save_usage_disk(&v);
+        return (cors, Json(ok(&v, false)));
+    }
+
+    // 3) upstream 실패 — 만료됐어도 마지막 성공값이 있으면 stale 로 폴백(pill 유지).
+    if let Ok(g) = cache.lock() {
+        if let Some((_, v)) = g.as_ref() {
+            return (cors, Json(ok(v, true)));
+        }
+    }
+    (
+        cors,
+        Json(serde_json::json!({ "ok": false, "error": "usage api unavailable (rate-limited, no cache yet)" })),
+    )
+}
+
+/// `~/.config/kasaterm/usage-cache.json` — claude 5시간 사용량 마지막 성공 스냅샷.
+fn usage_cache_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join(".config/kasaterm/usage-cache.json"))
+}
+
+/// 디스크 캐시 로드 — 6시간 이내 기록만(5시간 창이 만료됐으면 폐기). 반환은 usage 본문.
+fn load_usage_disk() -> Option<serde_json::Value> {
+    let s = std::fs::read_to_string(usage_cache_path()?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    let ts = v.get("ts")?.as_u64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    if now.saturating_sub(ts) > 6 * 3600 {
+        return None;
+    }
+    v.get("usage").cloned()
+}
+
+/// 성공 usage 본문을 ts 와 함께 디스크에 저장(재시작 폴백 소스).
+fn save_usage_disk(usage: &serde_json::Value) {
+    let Some(p) = usage_cache_path() else { return };
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::write(p, serde_json::json!({ "ts": now, "usage": usage }).to_string());
 }
 
 /// `GET /messages?n=50` — messages.jsonl 을 캐릭터명 해석 포함 최근 N 개(ts 내림차순).
