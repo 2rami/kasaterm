@@ -1195,7 +1195,21 @@ impl App {
                         })
                         .and_then(|p| pane_session_label(&p));
                     if let Some(t) = title.as_deref() {
-                        inlay_prompt_box_title(&mut composed, t);
+                        // 인레이한 이름 구간을 학생색 사각 테두리로 감싼다(거노
+                        // 스케치) — /rename 아웃라인과 같은 시각 언어. 좌표 공식은
+                        // find_titled_rule 슬롯과 동일(pad_y 2, 셀 경계 딱 맞게).
+                        if let Some((tr, c0, c1)) = inlay_prompt_box_title(&mut composed, t) {
+                            let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                            let scw = self.cell.w * fs;
+                            let sch = self.cell.h * fs;
+                            title_outline_slots.push((
+                                body_left + c0 as f32 * scw,
+                                body_top + tr as f32 * sch - 2.0,
+                                (c1 - c0 + 1) as f32 * scw,
+                                sch + 4.0,
+                                accent,
+                            ));
+                        }
                     }
                 }
                 slots.push(PaneSlot {
@@ -5987,14 +6001,20 @@ fn pane_session_label(path: &std::path::Path) -> Option<String> {
 /// run 안에서만 쓰므로 건드리지 않는다. 스타일은 보더 셀 승계 —
 /// style_prompt_box 가 학생 accent 로 칠한 뒤 호출되어 칩·보더와 색 언어가
 /// 같다. 폭이 모자라면 '…' 말줄임, 대시 여유(양끝 대시+양옆 공백 4칸)조차
-/// 없는 극단 폭은 그냥 포기한다.
-fn inlay_prompt_box_title(rows: &mut [Vec<GridCell>], title: &str) {
+/// 없는 극단 폭은 그냥 포기한다. 반환 = 쓴 구간 (row, c0, c1) — 호출측이
+/// 그 구간을 학생색 테두리로 감싼다(거노 스케치. 네이티브 /rename 아웃라인
+/// 스캔은 인레이 전 그리드를 봐서 이 구간을 모름).
+fn inlay_prompt_box_title(
+    rows: &mut [Vec<GridCell>],
+    title: &str,
+) -> Option<(usize, usize, usize)> {
     use unicode_width::UnicodeWidthChar;
-    let Some(range) = prompt_box_rows(rows) else { return };
-    let row = &mut rows[range.start - 1];
-    let Some(l0) = row.iter().position(|c| c.ch == '─') else { return };
+    let range = prompt_box_rows(rows)?;
+    let tr = range.start - 1;
+    let row = &mut rows[tr];
+    let l0 = row.iter().position(|c| c.ch == '─')?;
     let run = row[l0..].iter().take_while(|c| c.ch == '─').count();
-    let Some(avail) = run.checked_sub(4).filter(|a| *a >= 2) else { return };
+    let avail = run.checked_sub(4).filter(|a| *a >= 2)?;
     let style = row[l0].clone();
     let mk = |ch: char| {
         let mut c = style.clone();
@@ -6019,9 +6039,10 @@ fn inlay_prompt_box_title(rows: &mut [Vec<GridCell>], title: &str) {
         }
     }
     if cells.is_empty() {
-        return;
+        return None;
     }
-    let mut w = l0 + 1;
+    let start = l0 + 1;
+    let mut w = start;
     row[w] = mk(' ');
     w += 1;
     for cell in cells {
@@ -6029,6 +6050,7 @@ fn inlay_prompt_box_title(rows: &mut [Vec<GridCell>], title: &str) {
         w += 1;
     }
     row[w] = mk(' ');
+    Some((tr, start, w))
 }
 
 /// verbose OFF 에서 접힌 팀메시지 행 탐지 — 단수 "› Message from @<이름>" 또는
@@ -8284,11 +8306,13 @@ mod prompt_title_inlay_tests {
     #[test]
     fn title_inlaid_left_of_border() {
         let mut rows = box_rows(30);
-        inlay_prompt_box_title(&mut rows, "제목");
+        let span = inlay_prompt_box_title(&mut rows, "제목");
         // 대시 1칸 유지 후 " 제(sp)목(sp) " — 나머지는 보더 그대로.
         assert_eq!(row_text(&rows[0]), format!("─ 제 목  {}", "─".repeat(23)));
         // 아래 보더·본문은 무손상.
         assert!(rows[2].iter().all(|c| c.ch == '─'));
+        // 반환 span = 쓴 구간(선행 공백 col1 ~ 후행 공백 col6) — 테두리 감싸기 좌표 소스.
+        assert_eq!(span, Some((0, 1, 6)));
     }
 
     #[test]
