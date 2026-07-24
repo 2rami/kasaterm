@@ -764,10 +764,11 @@ impl ApplicationHandler<UserEvent> for App {
                 std::thread::sleep(std::time::Duration::from_millis(
                     crate::render::STUDENT_ANIM_FRAME_MS,
                 ));
-                if crate::render::STUDENT_SPRITE_ANIMATING
+                let animating = crate::render::STUDENT_SPRITE_ANIMATING
                     .load(std::sync::atomic::Ordering::Relaxed)
-                    && anim_proxy.send_event(UserEvent::Redraw).is_err()
-                {
+                    || crate::render::TITLE_TYPE_ANIMATING
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                if animating && anim_proxy.send_event(UserEvent::Redraw).is_err() {
                     break;
                 }
             });

@@ -347,6 +347,9 @@ impl App {
         let mut classroom_slots: Vec<(f32, f32, f32, f32)> = Vec::new();
         // /rename 세션명 아웃라인 (x,y,w,h,color) — 입력박스 위 구분선 이름을 사각 테두리로.
         let mut title_outline_slots: Vec<(f32, f32, f32, f32, [u8; 4])> = Vec::new();
+        // 세션 제목 타이프라이터 진행 중인 pane 이 하나라도 있나 — 프레임 끝에
+        // TITLE_TYPE_ANIMATING 으로 발행해 펌프 스레드가 33ms Redraw 를 돌린다.
+        let mut title_typing = false;
         // Claude Code 스크롤 sticky prompt → 웹뷰풍 pill: (px, py, pw, ph, text,
         // pane_id). logical px. 스캔 루프에서 감지·수집, chrome 패스에서 그린다.
         let mut sticky_pill_slots: Vec<(f32, f32, f32, f32, String, String)> = Vec::new();
@@ -1195,10 +1198,16 @@ impl App {
                         })
                         .and_then(|p| pane_session_label(&p));
                     if let Some(t) = title.as_deref() {
+                        // 타이프라이터: 제목이 처음 뜨거나 바뀌면 한 글자씩 드러난다
+                        // (거노). 진행 중엔 펌프 스레드(handler)가 33ms Redraw 를 돌림.
+                        let (shown, typing) = title_typewriter_frame(id.as_str(), t);
+                        title_typing |= typing;
                         // 인레이한 이름 구간을 학생색 사각 테두리로 감싼다(거노
-                        // 스케치) — /rename 아웃라인과 같은 시각 언어. 좌표 공식은
-                        // find_titled_rule 슬롯과 동일(pad_y 2, 셀 경계 딱 맞게).
-                        if let Some((tr, c0, c1)) = inlay_prompt_box_title(&mut composed, t) {
+                        // 스케치) — /rename 아웃라인과 같은 시각 언어. 아래로 6px
+                        // 더 내려 보더 선을 물고 매달린 태그처럼(거노 2안 "밑에까지").
+                        if let Some((tr, c0, c1)) =
+                            inlay_prompt_box_title(&mut composed, &shown)
+                        {
                             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                             let scw = self.cell.w * fs;
                             let sch = self.cell.h * fs;
@@ -1206,7 +1215,7 @@ impl App {
                                 body_left + c0 as f32 * scw,
                                 body_top + tr as f32 * sch - 2.0,
                                 (c1 - c0 + 1) as f32 * scw,
-                                sch + 4.0,
+                                sch + 8.0,
                                 accent,
                             ));
                         }
@@ -1503,6 +1512,7 @@ impl App {
             }
             (slots, headers, footer_slots, agents_view_panes)
         };
+        TITLE_TYPE_ANIMATING.store(title_typing, std::sync::atomic::Ordering::Relaxed);
         let toast_alpha = self.copy_toast_alpha();
         // Collab completion toast (top-right). Pre-read here like toast_alpha so
         // the render block below never re-borrows self while g is held.
@@ -5862,6 +5872,47 @@ pub(crate) const INPUT_STANDING_ROWS: usize = 3;
 pub(crate) static STUDENT_SPRITE_ANIMATING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 세션 제목 타이프라이터 진행 중 — 같은 펌프 스레드가 OR 로 보고 33ms Redraw.
+/// 매 프레임 render 가 실측으로 재발행(타이핑 끝나면 저절로 false).
+pub(crate) static TITLE_TYPE_ANIMATING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 글자당 드러나는 간격(ms) — 사람 타자 체감. 너무 빠르면 효과가 안 보인다.
+const TITLE_TYPE_MS_PER_CHAR: u128 = 45;
+
+thread_local! {
+    /// pane별 (전체 제목, 타이핑 시작 시각). 제목이 처음 뜨거나 바뀌면 리셋해
+    /// 한 글자씩 드러난다. struct App 무접촉(병렬 작업 규칙) — GUI 단일 스레드라
+    /// thread_local 로 충분. 닫힌 pane 의 잔존 엔트리는 무해(수 개 수준).
+    static TITLE_TYPEWRITER: std::cell::RefCell<
+        std::collections::HashMap<String, (String, std::time::Instant)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// 이번 프레임에 보여줄 제목 조각. 반환 (표시 문자열, 타이핑 진행 중?).
+/// 진행 중엔 끝에 '▍' 캐럿을 붙여 "치는 중" 을 판다.
+fn title_typewriter_frame(pane_id: &str, full: &str) -> (String, bool) {
+    TITLE_TYPEWRITER.with(|m| {
+        let mut m = m.borrow_mut();
+        let now = std::time::Instant::now();
+        let e = m
+            .entry(pane_id.to_string())
+            .or_insert_with(|| (full.to_string(), now));
+        if e.0 != full {
+            *e = (full.to_string(), now);
+        }
+        let chars: Vec<char> = full.chars().collect();
+        let n = (e.1.elapsed().as_millis() / TITLE_TYPE_MS_PER_CHAR) as usize;
+        if n >= chars.len() {
+            (full.to_string(), false)
+        } else {
+            let mut s: String = chars[..n].iter().collect();
+            s.push('▍');
+            (s, true)
+        }
+    })
+}
+
 /// claude TUI 입력박스 행 탐지 — 화면 하단에서 위로 ─ 보더 두 줄을 찾아 그
 /// 사이 행 범위를 돌려준다(양끝 보더 행 번호는 range.start-1 / range.end).
 /// 사이에 ❯ 프롬프트 마커 행이 있어야 입력박스로 인정한다(권한 메뉴 등
@@ -6019,6 +6070,7 @@ fn inlay_prompt_box_title(
     let mk = |ch: char| {
         let mut c = style.clone();
         c.ch = ch;
+        c.bold = true; // 제목은 굵게(거노 3안) — 보더 대시와 무게 차등
         c
     };
     let total: usize = title.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
