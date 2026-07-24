@@ -1411,8 +1411,14 @@ impl App {
     /// `pane_id` 터미널 pane 을 별도창으로 undock. **핵심**: `remove_pane` 을 쓰면
     /// `self.pty.remove` 로 세션까지 죽으므로 쓰지 않는다 — 레이아웃 트리에서 leaf 만
     /// 빼고 `self.pty`·`ws.panes` 는 유지해, PtySession 이 살아있고 그 셀 그리드를
-    /// 별도창이 계속 뷰한다. 헤더 pop-out 아이콘 클릭이 진입점.
-    pub(crate) fn undock_pane_terminal(&mut self, pane_id: &str, event_loop: &ActiveEventLoop) {
+    /// 별도창이 계속 뷰한다. 진입점 = 헤더 pop-out 아이콘 클릭(near=None) +
+    /// 탭을 창 밖으로 드래그(tear-off, near=커서 물리좌표 — 파일 탭과 동일 제스처).
+    pub(crate) fn undock_pane_terminal(
+        &mut self,
+        pane_id: &str,
+        event_loop: &ActiveEventLoop,
+        near: Option<winit::dpi::PhysicalPosition<i32>>,
+    ) {
         // 이미 별도창이면 포커스만.
         if let Some(i) = self
             .aux_windows
@@ -1472,7 +1478,7 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        self.spawn_aux_terminal(pane_id.to_string(), event_loop, None);
+        self.spawn_aux_terminal(pane_id.to_string(), event_loop, near);
     }
 
     /// 터미널 별도창을 닫으며 그 pane 을 메인 레이아웃으로 되돌린다(dock). 창을 먼저
