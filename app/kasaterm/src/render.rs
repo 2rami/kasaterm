@@ -4240,20 +4240,15 @@ impl App {
                     } else {
                         theme::with_alpha(theme::text_dim(), combine(0x82))
                     };
-                    // Is this a file (markdown/text editor) tab? Those get a
-                    // hover pop-out icon that tears the tab off into its own
-                    // wgpu editor window (auxwin.rs).
-                    let is_file_tab = if h.tabs.is_empty() {
-                        h.single_is_file
-                    } else {
-                        h.tab_is_file.get(i).copied().unwrap_or(false)
-                    };
                     // Truncate this tab's title to its share of the bar.
                     // × space is reserved on every tab — see `reserve_x`.
                     // No per-tab terminal glyph: the +button already signals
                     // "new shell"; doubling that icon on every tab was noise.
                     // File tabs reserve an extra icon slot (pop-out), left of ×.
-                    let popout_reserve = if is_file_tab { close_w + 4.0 } else { 0.0 };
+                    // 터미널 탭도 undock(별도 OS 창) 아이콘을 같은 자리에 쓴다 —
+                    // 이미지 pane 만 제외(뷰어라 별도창 대상 아님).
+                    let can_popout = !h.is_image;
+                    let popout_reserve = if can_popout { close_w + 4.0 } else { 0.0 };
                     let x_reserve = if reserve_x { close_w + 8.0 + popout_reserve } else { 0.0 };
                     let budget = (per_tab - x_reserve - 14.0).max(0.0);
                     let mut label = tab.to_string();
@@ -4305,7 +4300,7 @@ impl App {
                     // active or hovered tab. Sits left of the ×; clicking it
                     // moves the tab's editor into its own OS window.
                     let mut action_x = cx + 8.0;
-                    if is_file_tab && show_x {
+                    if can_popout && show_x {
                         let po_x = action_x;
                         let chip = icon_size + 6.0;
                         let chip_x = po_x + (icon_size - chip) / 2.0;

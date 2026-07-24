@@ -557,8 +557,11 @@ impl ApplicationHandler<UserEvent> for App {
         // A focused pop-out editor window blinks its caret off the same wake
         // (blink thread / timer). request_redraw coalesces, and only the
         // focused aux window repaints — unfocused ones stay idle (no GPU burn).
+        // Terminal undock 창은 예외: 이 wake 를 만든 PTY echo 가 그 창이 뷰하는
+        // pane 을 갱신했을 수 있어, 포커스 여부와 무관하게 매 wake redraw 해야 셸
+        // 출력이 라이브로 반영된다(idle 엔 Wait 라 wake 자체가 안 나 CPU 0).
         for a in &self.aux_windows {
-            if a.focused {
+            if a.focused || matches!(a.kind, crate::auxwin::AuxWindowKind::Terminal { .. }) {
                 a.window.request_redraw();
             }
         }
@@ -3024,7 +3027,22 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, _, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
                         .map(|(id, i, _)| (id.clone(), *i))
                     {
-                        self.popout_pane_tab(&pid, idx, event_loop, None);
+                        // 파일 탭 → 에디터 팝아웃 창. 터미널 탭 → PTY pane undock(별도
+                        // 터미널 창). 같은 pop-out 아이콘을 content 종류로 분기한다.
+                        let is_term = self
+                            .ws
+                            .lock()
+                            .unwrap()
+                            .panes
+                            .get(&pid)
+                            .and_then(|p| p.tabs.get(idx))
+                            .map(|t| matches!(t.content, PaneContent::Terminal(_)))
+                            .unwrap_or(false);
+                        if is_term {
+                            self.undock_pane_terminal(&pid, event_loop);
+                        } else {
+                            self.popout_pane_tab(&pid, idx, event_loop, None);
+                        }
                         window.request_redraw();
                         return;
                     }
@@ -4160,6 +4178,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoshellmenu();
         self.run_pending_automdselect();
         self.run_pending_auxpopout(event_loop);
+        self.run_pending_autoundock(event_loop);
         self.drain_aux_captures();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via

@@ -246,6 +246,43 @@ impl App {
             w.request_redraw();
         }
     }
+    /// Headless undock repro: `KASATERM_AUTOUNDOCK_MS` 후 활성 터미널 pane 을
+    /// 별도창으로 undock(헤더 아이콘 클릭은 헤드리스 주입 불가) 하고, 그 aux 창을
+    /// +2500ms 에 자체 캡처(`KASATERM_AUTOUNDOCK_CAP`, 기본 temp undock-window.png).
+    /// autosettings 처럼 함수-로컬 static(병렬 작업 규칙: struct App 무접촉).
+    pub(crate) fn run_pending_autoundock(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOUNDOCK_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
+        eprintln!("[autoundock] undock pane {pid}");
+        self.undock_pane_terminal(&pid, event_loop);
+        let cap = std::env::var("KASATERM_AUTOUNDOCK_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir()
+                .join("undock-window.png")
+                .to_string_lossy()
+                .into_owned()
+        });
+        if let Some(a) = self.aux_windows.iter_mut().find(|a| {
+            matches!(&a.kind,
+                crate::auxwin::AuxWindowKind::Terminal { pane_id } if *pane_id == pid)
+        }) {
+            a.pending_capture =
+                Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
+        }
+    }
     /// Headless "+" 셸 피커 repro: `KASATERM_AUTOSHELLMENU_MS` 후 피커 팝업을 연다 —
     /// 항목(기본 셸·Claude 학생 등)을 클릭 없이 캡처. autosettings 처럼 함수-로컬
     /// static(병렬 작업 규칙: struct App 무접촉).
