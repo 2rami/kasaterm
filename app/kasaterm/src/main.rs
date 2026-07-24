@@ -4390,53 +4390,27 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         format!("[ -n \"$PERSONA_OK\" ] && set -- {extra} \"$@\"\n")
     };
     let persona_block = format!("{persona_line}{model_line}{effort_line}{extra_line}");
-    // 팀모드 상시 개방(거노 07-16): 캐릭터 배정 pane 의 claude 를 전부 teammate 트리플로
-    // 부팅한다. 인박스 폴러는 트리플만으로 arm 되고(config.json 불필요) 명시적 --session-id
-    // 가 팀 파생 id("already in use") 트랩을 우회함을 실측 확인(v2.1.211) — 이 조합으로
-    // SendMessage 네이티브 채팅이 pane·백그라운드 어디서든 상시 열린다. (detach 포크는
-    // 데몬 argv 재구성으로 트리플 유실 — 6차 실측. 수신은 bridge.rs 보완, --resume 재부팅 시 재편입.)
-    // 세부 규칙은 아래 sh 블록 주석이 아니라 여기에:
-    // - 이름 = <로마자 슬러그>-<세션id 앞 4자>. 한글은 inbox 파일명 슬러그가 "---" 로
-    //   붕괴해 충돌하고(team.rs), split 상속·detach 쌍둥이로 같은 학생이 공존할 수 있어
-    //   세션 id 의 유일성을 그대로 빌린다. 같은 pane 재실행 = 같은 sid = 같은 이름(연속성).
-    // - 팀 = 방(cwd) 단위, /teamname 엔드포인트가 계산(fnv 해시는 순수 sh 재현 불가).
-    //   서버가 죽어 팀명이 비면 플래그 전체 생략 — 순정 claude 부팅으로 조용히 폴백.
-    // - --bg 도 트리플 부착(07-16 실측: --agent-* 는 데몬 스폰까지 전달, SendMessage
-    //   발신·인박스 폴러 수신 풀 듀플렉스. --session-id 만 무시+경고). 세션 id 를 이름에
-    //   못 쓰니 접미사는 랜덤 4자(BGSUF) — 단 비-hex 알파벳(g-z)만 써서 bridge.rs 의
-    //   "꼬리 4hex=sid 프리픽스" 매칭과 우연히 겹치는 오배달 클래스를 원천 차단.
-    //   --bg --resume 은 TSID(resume id)가 BGSUF 를 이겨 sid4 이름 연속성 유지.
-    //   --continue 는 여전히 제외(id 미상 + 랜덤 이름은 연속성만 깨뜨림).
-    // - agent-name=목표작업명 규칙(team.rs, 다이얼로그 스폰용)과 공존: 사용자가 --agent-*
-    //   를 직접 주면 우리 트리플은 통째 생략된다.
-    // - agent-id 는 전원 고정 문자열 "team-lead"(07-17 실측, v2.1.212): claude 의 승인
-    //   포워딩 게이트가 agent-id=="team-lead" 를 리더로 판정해 꺼지므로, AskUserQuestion·
-    //   권한 요청이 "Waiting for team lead approval"(존재하지 않는 리더 무한대기 + 요청
-    //   유실)로 새지 않고 그 pane 에 네이티브 렌더된다. 수신 폴러·인박스 파일명·SendMessage
-    //   주소는 전부 agent-name 기준이라 id 중복 무해(로컬 피커+선택+인박스 수신 E2E 확인).
-    //   비공개 인터페이스 문자열 비교라 claude 버전 업 시 재검증 필요.
-    let team_arms = teammate_case_arms();
-    let team_block = if team_arms.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "AGENT=\"\"; ACOLOR=\"\"; TSID=\"$SID\"; prev=\"\"\n\
+    // teammate 트리플 자동 부착은 제거됐다(거노 2026-07-24): kasaterm 재시작으로 복원된
+    // 세션(claude --resume)은 인박스 폴러가 안 돌아 SendMessage 가 조용히 유실되고(파일에만
+    // 쌓임, 아루 실측), tell 이 발신 학생 프사·색으로 렌더되면서 크로스 pane 통신의 정식
+    // 경로가 됐다. 팀 채널(SendMessage)은 오케스트레이터가 학생을 **명시 트리플로 스폰**한
+    // 세트 안에서만 연다 — 사용자/스폰 다이얼로그의 --agent-* 는 이전처럼 그대로 통과된다.
+    // 아래 블록은 트리플과 무관하게 유지되는 resume 연속성 처리만 남긴 것:
+    // - TSID 파싱(--session-id/--resume 값, --continue 는 cwd 프로젝트 최신 transcript 추론)
+    // - KASATERM_RESUMED_SID/RESUME_PICKER 마커(statusline ⑂bg 오발화 방지)
+    // - resume 부팅 캐릭터 정합 교정(거노: 모모이 세션이 프라나 배지·persona 로 부팅)
+    let team_block = format!(
+        "TSID=\"$SID\"; prev=\"\"\n\
 for a in \"$@\"; do case \"$prev\" in --session-id|--resume) case \"$a\" in -*) ;; *) TSID=\"$a\" ;; esac ;; esac; prev=\"$a\"; done\n\
-# id 없는 --resume(피커 모드)·--continue 도 트리플 부착 — TSID 부재로 무팀 부팅되면\n\
-# SendMessage 송수신이 통째로 단절된다(피커: /resume 가시성 복원 후 표면화, --continue:\n\
-# 07-19 앱 재시작 복원 실사고). 피커는 --bg 와 같은 비-hex 랜덤 접미사(bridge 4hex 매칭\n\
-# 오배달 회피)로 이름만 유일화. --continue 는 claude 와 같은 기준(cwd 프로젝트 최신\n\
-# transcript)으로 sid 를 추론해 이름(캐릭터-sid4)·캐릭터 정합 교정까지 연속 유지하고,\n\
-# 추론 실패(파일 없음/비 uuid)만 랜덤 접미사 폴백.\n\
+# id 없는 --continue 는 claude 와 같은 기준(cwd 프로젝트 최신 transcript)으로 sid 를\n\
+# 추론해 캐릭터 정합·RESUMED_SID 마커의 연속성을 유지한다(추론 실패는 마커 없이 부팅).\n\
 case \" $* \" in\n\
 *\" --continue \"*|*\" -c \"*) if [ -z \"$TSID\" ]; then\n\
   RSLUG=$(printf %s \"$PWD\" | sed 's![/.]!-!g')\n\
   LATEST=$(ls -t \"$HOME/.claude/projects/$RSLUG\"/*.jsonl 2>/dev/null | head -1)\n\
   [ -n \"$LATEST\" ] && TSID=$(basename \"$LATEST\" .jsonl)\n\
   case \"$TSID\" in ????????-????-????-????-????????????) ;; *) TSID=\"\" ;; esac\n\
-  [ -z \"$TSID\" ] && BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz')\n\
 fi ;;\n\
-*\" --resume \"*) [ -z \"$TSID\" ] && BGSUF=$(od -An -N2 -tx1 /dev/urandom | tr -d ' \\n' | tr '0123456789abcdef' 'ghjkmnpqrstvwxyz') ;;\n\
 esac\n\
 # 사용자 주도 resume 마커 — statusline 의 ⑂bg 배지가 anchor 불일치 휴리스틱이라\n\
 # resume 세션 전부에 오발화한다(거노). id 있으면 그 sid 를, 피커/continue 는 플래그를\n\
@@ -4452,28 +4426,8 @@ if [ -n \"$PERSONA_OK\" ] && [ -z \"$SID\" ] && [ -n \"$TSID\" ]; then\n\
     export KASATERM_CHARACTER=\"$RC\"\n\
     KASATERM_PERSONA=$(curl -s --max-time 2 --get --data-urlencode \"sid=$TSID\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/persona\" 2>/dev/null)\n\
   fi\n\
-fi\n\
-if [ -n \"$PERSONA_OK\" ] && [ -n \"$TSID$BGSUF\" ] && [ -n \"$KASATERM_CHARACTER\" ]; then\n\
-  case \" $* \" in *\" --agent-id \"*|*\" --agent-name \"*|*\" --team-name \"*) : ;; *)\n\
-    case \"$KASATERM_CHARACTER\" in\n\
-{team_arms}\
-    esac\n\
-  ;; esac\n\
-fi\n\
-if [ -n \"$AGENT\" ]; then\n\
-  TEAM=$(curl -s --max-time 2 --get --data-urlencode \"cwd=$PWD\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/teamname\" 2>/dev/null)\n\
-  if [ -n \"$TEAM\" ]; then\n\
-    AGENT=\"$AGENT-$(printf %.4s \"$TSID$BGSUF\")\"\n\
-    IB=\"$HOME/.claude/teams/$TEAM/inboxes/$AGENT.json\"\n\
-    mkdir -p \"${{IB%/*}}\" 2>/dev/null\n\
-    [ -f \"$IB\" ] || printf '[]' > \"$IB\"\n\
-    export KASATERM_TEAM=\"$TEAM\" KASATERM_AGENT=\"$AGENT\"\n\
-    set -- --agent-id team-lead --agent-name \"$AGENT\" --team-name \"$TEAM\" \"$@\"\n\
-    [ -n \"$ACOLOR\" ] && set -- --agent-color \"$ACOLOR\" \"$@\"\n\
-  fi\n\
 fi\n"
-        )
-    };
+    );
     let wrapper = format!("#!/bin/sh\n\
 # kasaterm pane-only claude wrapper — injects the collab hooks session-scoped\n\
 # (--settings) so ~/.claude/settings.json stays untouched. Outside a pane this\n\
@@ -4558,33 +4512,6 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
             eprintln!("[shim] chmod kasacollab wrapper failed: {e}");
         }
     }
-}
-
-/// claude shim 의 teammate 이름/색 case 분기(`미도리) AGENT=midori; ACOLOR=green ;;`) —
-/// 배정 캐릭터(한글)를 ASCII agent 이름과 8색 --agent-color 로 사상한다. 로마자 슬러그가
-/// 정본(inbox 파일명이 agent-name 슬러그라 한글은 "---" 로 붕괴), 슬러그 없는 커스텀
-/// 캐릭터는 해시 축약으로 방어. 색은 characters.json claude_color 를 8색으로 정규화 —
-/// --agent-color 는 teammate TUI 전체 테마라 pane accent 와 결이 맞아야 한다(team.rs).
-fn teammate_case_arms() -> String {
-    let Some(chars) = kasa_mcp::character::characters_json() else {
-        return String::new();
-    };
-    let mut arms = String::new();
-    for name in kasa_mcp::character::member_names(&chars) {
-        // case 패턴 자리에 그대로 박히므로 sh 특수문자가 든 이름은 건너뛴다(사용자 편집
-        // characters.json 방어 — 그 캐릭터만 팀모드 없이 부팅될 뿐 스크립트는 안 깨진다).
-        if name.chars().any(|c| c.is_whitespace() || "|)('\"`;&<>*?[]{}$!\\#~".contains(c)) {
-            continue;
-        }
-        let slug = theme::character_slug(&name)
-            .map(String::from)
-            .unwrap_or_else(|| kasa_mcp::team::ascii_ident(&name));
-        let color = kasa_mcp::character::claude_color_for(&chars, &name)
-            .map(|c| kasa_mcp::team::normalize_agent_color(&c).to_string())
-            .unwrap_or_default();
-        arms.push_str(&format!("      {name}) AGENT={slug}; ACOLOR={color} ;;\n"));
-    }
-    arms
 }
 
 /// 학생 이름을 pane 명령으로 스테이징 — `시로코`(또는 슬러그 `shiroko`)를 치면
@@ -5094,7 +5021,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_wrapper_is_valid_sh_and_carries_teammate_triple() {
+    fn claude_wrapper_is_valid_sh_without_auto_teammate_triple() {
         // 실제 생성물(팀모드 블록 포함)이 POSIX sh 로 파싱되는지 — 문자열 조립이라
         // 이스케이프 하나로 전체 pane claude 부팅이 깨질 수 있는 지점의 안전망.
         let dir = std::env::temp_dir().join(format!("kt-shim-syntax-{}", std::process::id()));
@@ -5113,12 +5040,11 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         assert!(ok, "generated claude wrapper failed sh -n");
-        if body.contains("AGENT=") {
-            // 고정 id "team-lead" = claude 승인 포워딩(존재하지 않는 리더 무한대기) 차단 스위치.
-            // <이름>@<팀> 꼴로 되돌아가면 AskUserQuestion 이 pane 에 안 뜨는 회귀.
-            assert!(body.contains("--agent-id team-lead"), "teammate triple missing lead id");
-            assert!(body.contains("/teamname"), "teamname endpoint call missing");
-        }
+        // 자동 teammate 트리플은 제거됐다(거노 2026-07-24) — 부활하면 재시작 복원
+        // 세션의 SendMessage 조용한 유실 클래스가 돌아온다. 팀 채널은 스폰 다이얼로그/
+        // 사용자 명시 --agent-* 만. wrapper 에 자동 트리플 흔적이 없어야 한다.
+        assert!(!body.contains("--agent-id"), "auto teammate triple resurfaced in shim");
+        assert!(!body.contains("/teamname"), "auto team computation resurfaced in shim");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5177,27 +5103,6 @@ mod tests {
             "leaf": { "cwd": "/repo", "was_claude": false, "character": "" }
         }]}]});
         assert_eq!(App::count_claude_panes(&empty_char), 0);
-    }
-
-    #[test]
-    fn teammate_case_arms_maps_characters_to_ascii_idents() {
-        // 레포의 characters.json 기준 — 없으면(외부 빌드 환경) 스킵.
-        let arms = teammate_case_arms();
-        if arms.is_empty() {
-            return;
-        }
-        // 로마자 슬러그 사상 + 8색 정규화가 arm 한 줄로 나온다.
-        assert!(arms.contains("미도리) AGENT=midori;"), "{arms}");
-        assert!(arms.contains("시로코) AGENT=shiroko;"), "{arms}");
-        // agent 이름(대입값)은 전부 ASCII — 한글이 남으면 inbox 슬러그가 붕괴한다.
-        for line in arms.lines() {
-            let Some(rest) = line.trim().split_once("AGENT=") else { continue };
-            let ident = rest.1.split(';').next().unwrap_or("");
-            assert!(
-                !ident.is_empty() && ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
-                "non-ascii agent ident in arm: {line}"
-            );
-        }
     }
 
     #[test]
