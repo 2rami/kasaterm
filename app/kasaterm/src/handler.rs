@@ -3023,7 +3023,7 @@ impl ApplicationHandler<UserEvent> for App {
                             .map(|t| matches!(t.content, PaneContent::Terminal(_)))
                             .unwrap_or(false);
                         if is_term {
-                            self.undock_pane_terminal(&pid, event_loop);
+                            self.undock_pane_terminal(&pid, event_loop, None);
                         } else {
                             self.popout_pane_tab(&pid, idx, event_loop, None);
                         }
@@ -3358,10 +3358,11 @@ impl ApplicationHandler<UserEvent> for App {
                         // list; a plain press just switches to that tab.
                         if let Some(mut td) = self.tab_drag.take() {
                             window.set_cursor(CursorIcon::Default);
-                            // Phase 3 tear-off: 파일 탭을 창 밖에서 놓으면 별도
-                            // 편집기 창으로 뜯어낸다. 창 안(패널 body 포함)에
-                            // 놓으면 아래 split/dock 경로가 그대로 처리 —
-                            // 여기선 커서가 창 밖으로 나갔을 때만 가로챈다.
+                            // Phase 3 tear-off: 탭을 창 밖에서 놓으면 별도 창으로
+                            // 뜯어낸다 — 파일 탭=편집기 창, 터미널 탭=undock 터미널
+                            // 창(헤더 pop-out 아이콘과 동일 경로, 커서 자리에 스폰).
+                            // 창 안(패널 body 포함)에 놓으면 아래 split/dock 경로가
+                            // 그대로 처리 — 여기선 창 밖으로 나갔을 때만 가로챈다.
                             if td.active {
                                 let (win_w, win_h) = self.logical_win_size();
                                 if Self::drag_left_window(
@@ -3369,21 +3370,43 @@ impl ApplicationHandler<UserEvent> for App {
                                     self.cursor_px.1,
                                     win_w,
                                     win_h,
-                                ) && self.tab_is_file(&td.pane, td.from)
-                                {
-                                    // 단일탭 파일 pane 이면 라이브 백업이 남아
-                                    // 있을 수 있으니 먼저 정리(원위치 복귀 상태).
-                                    self.finish_live_drag();
-                                    let near = self.cursor_screen_phys();
-                                    self.popout_pane_tab(
-                                        &td.pane,
-                                        td.from,
-                                        event_loop,
-                                        near,
-                                    );
-                                    self.chrome_dirty = true;
-                                    window.request_redraw();
-                                    return;
+                                ) {
+                                    if self.tab_is_file(&td.pane, td.from) {
+                                        // 단일탭 파일 pane 이면 라이브 백업이 남아
+                                        // 있을 수 있으니 먼저 정리(원위치 복귀 상태).
+                                        self.finish_live_drag();
+                                        let near = self.cursor_screen_phys();
+                                        self.popout_pane_tab(
+                                            &td.pane,
+                                            td.from,
+                                            event_loop,
+                                            near,
+                                        );
+                                        self.chrome_dirty = true;
+                                        window.request_redraw();
+                                        return;
+                                    }
+                                    let is_term = self
+                                        .ws
+                                        .lock()
+                                        .unwrap()
+                                        .panes
+                                        .get(&td.pane)
+                                        .and_then(|p| p.tabs.get(td.from))
+                                        .map(|t| {
+                                            matches!(t.content, PaneContent::Terminal(_))
+                                        })
+                                        .unwrap_or(false);
+                                    if is_term {
+                                        self.finish_live_drag();
+                                        let near = self.cursor_screen_phys();
+                                        self.undock_pane_terminal(
+                                            &td.pane, event_loop, near,
+                                        );
+                                        self.chrome_dirty = true;
+                                        window.request_redraw();
+                                        return;
+                                    }
                                 }
                             }
                             // 단일탭 pane 을 라이브로 통째 옮긴 경우: 이미 실제

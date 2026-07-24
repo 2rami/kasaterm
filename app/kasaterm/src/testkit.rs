@@ -268,7 +268,7 @@ impl App {
         FIRED.store(true, Ordering::Relaxed);
         let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
         eprintln!("[autoundock] undock pane {pid}");
-        self.undock_pane_terminal(&pid, event_loop);
+        self.undock_pane_terminal(&pid, event_loop, None);
         let cap = std::env::var("KASATERM_AUTOUNDOCK_CAP").unwrap_or_else(|_| {
             std::env::temp_dir()
                 .join("undock-window.png")
