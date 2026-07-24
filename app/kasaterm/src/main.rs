@@ -338,10 +338,6 @@ const ACTIVE_ACCENT_STROKE: f32 = 2.0;
 /// every render origin + click-to-cell map applies the same offset.
 const PANE_INNER_X: f32 = 6.0;
 const PANE_INNER_Y: f32 = 0.0;
-/// Code-block copy button (overlay) size in logical px. Small chip that
-/// sits at a detected block's top-right corner.
-const COPY_BTN_W: f32 = 26.0;
-const COPY_BTN_H: f32 = 18.0;
 /// Left sidebar width in logical pixels. Hosts the vertical tab list
 /// (one row per tab) plus the new-tab "+" button. The cell grid origin
 /// shifts right by this amount so pane contents never overlap the
@@ -1225,127 +1221,6 @@ fn extract_selection(rows: &[Vec<GridCell>], sel: Selection) -> String {
         .rev()
         .collect();
     trimmed.join("\n")
-}
-
-/// A detected "code block": a run of consecutive rows that share one
-/// non-page background color, the way Claude Code paints fenced code /
-/// command boxes. `(start_row, end_row_inclusive, left_col, right_col)`.
-type CodeBlock = (usize, usize, usize, usize);
-
-/// Scan a pane's composed grid for code blocks. The shell / TUI gives us
-/// no markdown metadata (fences arrive as styled cells), so we lean on the
-/// one signal that survives: Claude Code renders code/command blocks with
-/// a solid background box. We find the pane's dominant ("page") bg, then
-/// any contiguous rows carrying a *different* uniform bg across a wide
-/// enough span are a block. Purely heuristic — when it doesn't match
-/// (no bg box) it just returns nothing, so the caller shows no button.
-fn detect_code_blocks(rows: &[Vec<GridCell>]) -> Vec<CodeBlock> {
-    use kasa_bridge::screen::Color;
-    // Minimum horizontal run of one bg color for a row to count as "inside
-    // a box". Filters single-token inline highlights and 1-2 cell artifacts.
-    const MIN_RUN: usize = 10;
-    // Dominant bg across the grid = the page background. Treated like
-    // Default so a TUI that paints every cell doesn't read as one block.
-    let mut counts: Vec<(Color, usize)> = Vec::new();
-    for row in rows {
-        for cell in row {
-            match counts.iter_mut().find(|(c, _)| *c == cell.bg) {
-                Some((_, n)) => *n += 1,
-                None => counts.push((cell.bg.clone(), 1)),
-            }
-        }
-    }
-    let page_bg = counts
-        .into_iter()
-        .max_by_key(|(_, n)| *n)
-        .map(|(c, _)| c)
-        .unwrap_or(Color::Default);
-    // Longest contiguous run of a single bg that is neither Default nor the
-    // page bg. Returns (bg, left, right) when it clears MIN_RUN.
-    let row_box = |row: &[GridCell]| -> Option<(Color, usize, usize)> {
-        let mut best: Option<(Color, usize, usize)> = None;
-        let mut i = 0;
-        while i < row.len() {
-            let bg = row[i].bg.clone();
-            if bg == Color::Default || bg == page_bg {
-                i += 1;
-                continue;
-            }
-            let start = i;
-            while i < row.len() && row[i].bg == bg {
-                i += 1;
-            }
-            let len = i - start;
-            if len >= MIN_RUN
-                && best.as_ref().map(|(_, bs, be)| be - bs + 1 < len).unwrap_or(true)
-            {
-                best = Some((bg, start, i - 1));
-            }
-        }
-        best
-    };
-    let mut blocks = Vec::new();
-    let mut r = 0;
-    while r < rows.len() {
-        let Some((bg, l, rr)) = row_box(&rows[r]) else {
-            r += 1;
-            continue;
-        };
-        let start = r;
-        let (mut left, mut right) = (l, rr);
-        r += 1;
-        while r < rows.len() {
-            match row_box(&rows[r]) {
-                Some((b2, l2, r2)) if b2 == bg => {
-                    left = left.min(l2);
-                    right = right.max(r2);
-                    r += 1;
-                }
-                _ => break,
-            }
-        }
-        blocks.push((start, r - 1, left, right));
-    }
-    blocks
-}
-
-/// Extract the text inside a detected code block: columns `left..=right`
-/// of rows `start..=end`, trailing spaces trimmed per row, joined with
-/// `\n`, blank edge lines stripped. Mirrors `extract_selection`'s trims.
-fn extract_block(rows: &[Vec<GridCell>], block: CodeBlock) -> String {
-    let (start, end, left, right) = block;
-    let mut lines: Vec<String> = Vec::new();
-    for row in rows.iter().take(end + 1).skip(start) {
-        let mut line = String::new();
-        append_cells_text(row.iter().take(right + 1).skip(left), &mut line);
-        while line.ends_with(' ') {
-            line.pop();
-        }
-        lines.push(line);
-    }
-    while lines.first().map(|l| l.trim().is_empty()).unwrap_or(false) {
-        lines.remove(0);
-    }
-    while lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
-        lines.pop();
-    }
-    // Strip the common leading whitespace the bg box padded each line with,
-    // so a copied command pastes ready-to-run. Leading pad is ASCII spaces,
-    // so byte slicing is safe; blank lines don't constrain the amount.
-    let indent = lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
-        .min()
-        .unwrap_or(0);
-    if indent > 0 {
-        for l in &mut lines {
-            if l.len() >= indent {
-                *l = l[indent..].to_string();
-            }
-        }
-    }
-    lines.join("\n")
 }
 
 /// True for any codepoint the Hangul IME composes. Covers the four
@@ -3019,11 +2894,6 @@ struct App {
     handle_menu: Option<String>,
     /// ⋮ 메뉴 버튼 hit rect: (액션, logical rect). render가 매 프레임 채움.
     handle_menu_hits: Vec<(ActionKind, (f32, f32, f32, f32))>,
-    /// (block text, copy-button rect) for every code block detected in the
-    /// visible panes this frame. Logical px. Populated by the render path,
-    /// consumed by the MouseInput handler so a click on the button copies
-    /// the block. Cleared+rebuilt every paint.
-    copy_btn_rects: Vec<(String, (f32, f32, f32, f32))>,
     /// Rendered markdown content height (logical px) per pane id, published by
     /// the renderer each frame. The scroll handler clamps scroll_offset to
     /// (content_h - visible_h) so a markdown pane can't over-scroll.
@@ -3610,7 +3480,6 @@ impl App {
             // 부팅 시 강제로 열어 자동캡처로 메뉴 레이아웃을 검증한다. 미설정이면 None.
             handle_menu: std::env::var("KASATERM_FORCE_HANDLE_MENU").ok(),
             handle_menu_hits: Vec::new(),
-            copy_btn_rects: Vec::new(),
             md_content_h: HashMap::new(),
             md_body_rects: HashMap::new(),
             pane_tab_rects: Vec::new(),
@@ -5293,14 +5162,6 @@ mod tests {
         let row = wide_row("a한 b", 12);
         let sel = Selection { anchor: (0, 0), end: (5, 0) };
         assert_eq!(extract_selection(&[row], sel), "a한 b");
-    }
-
-    #[test]
-    fn block_extract_drops_wide_char_spacer() {
-        let row = wide_row("코드복사", 16);
-        // block = (start, end, left, right) inclusive, full CJK run is cols 0..=7.
-        let out = extract_block(&[row], (0, 0, 0, 7));
-        assert_eq!(out, "코드복사");
     }
 
     #[test]
