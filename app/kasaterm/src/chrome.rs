@@ -4,18 +4,6 @@ use super::*;
 /// How long a completion notification pulses a pane header / sidebar done-dot.
 const NOTIFY_FLASH_MS: u128 = 1800;
 
-/// 완료 토스트 문구 — "누가(캐릭터, pane 고정값) + 무엇(hook title, 완료 순간
-/// 캡처)". OSC 작업명(가변·stale 원천)은 안 쓰고 캐릭터명만 결합하므로 stale 이
-/// 없다. 캐릭터 미배정·미현존 pane 이면 hook title 만(정보 보존 폴백). title 앞
-/// "✓ " 는 중복이라 벗겨낸다.
-fn format_completion_toast(character: Option<&str>, title: &str) -> String {
-    let gist = title.trim().trim_start_matches('✓').trim();
-    match character {
-        Some(c) => format!("✓ {c} — {gist}"),
-        None => format!("✓ {gist}"),
-    }
-}
-
 /// 권한 대기 토스트 — 완료 토스트와 같은 원칙(캐릭터 고정값 + hook reason,
 /// 미현존이면 reason 만). Notification hook 경로.
 fn format_attention_toast(character: Option<&str>, reason: &str) -> String {
@@ -67,16 +55,13 @@ impl App {
         // claude's Stop hook fired → this pane's turn is DONE. Trust this push
         // over the glyph heuristic: force the pane idle right now so the working
         // bar can't linger on a stale "✻ Churned for 42s" line, and drop the
-        // busy-grace timer. The completion toast is surfaced here (named by the
-        // pane's tab-header label); the glyph working→idle path in
-        // `refresh_pane_activity` then sees the pane is already idle and won't
-        // double-fire. A pane that wasn't working (idle hook re-fire) skips the
-        // toast.
+        // busy-grace timer. The glyph working→idle path in
+        // `refresh_pane_activity` then sees the pane is already idle.
+        //
+        // 완료 화면 토스트는 제거(거노 2026-07-27) — 학생이 많아 턴마다 떠서 시야를
+        // 가린다. 완료 신호는 탭 펄스·dock 배지·백그라운드 데스크톱 알림(아래)으로
+        // 전달된다.
         self.pane_last_busy.remove(surface_id);
-        let was_working = self
-            .pane_activity
-            .get(surface_id)
-            .map_or(false, |a| a.status != "idle" && !a.status.is_empty());
         self.pane_activity
             .entry(surface_id.to_string())
             .and_modify(|a| a.status = "idle".to_string())
@@ -84,16 +69,6 @@ impl App {
                 status: "idle".to_string(),
                 ..Default::default()
             });
-        // A sticky approval toast (chips waiting on the user) outranks a
-        // completion blip — same guard as the grid-scan path in input.rs.
-        if was_working && self.collab.toast_action.is_none() {
-            // 토스트 = 캐릭터명(pane 고정, stale 없음) + hook title(완료 순간 캡처).
-            // surface_id 가 미현존(resume/재사용 stale)이면 캐릭터 없이 title 만.
-            let character = self.pane_character_if_known(surface_id);
-            self.collab.toast =
-                Some((format_completion_toast(character.as_deref(), title), now));
-            self.collab.toast_rect = None;
-        }
         self.notify_flash.insert(surface_id.to_string(), now);
         // A pane in a *background* window finished — pulse that window's sidebar
         // tab until the user switches to it (switch_window clears the entry).
@@ -1938,20 +1913,21 @@ mod toast_tests {
 
     // 완료 토스트 = 캐릭터(pane 고정) + hook title(완료 순간). title 앞 "✓ " 중복 제거.
     #[test]
-    fn completion_toast_combines_character_and_title() {
+    fn attention_toast_combines_character_and_reason() {
         assert_eq!(
-            format_completion_toast(Some("미도리"), "✓ ai-art-지원 — claude 완료"),
-            "✓ 미도리 — ai-art-지원 — claude 완료"
+            format_attention_toast(Some("미도리"), "권한 요청"),
+            "⚠ 미도리 — 권한 요청"
         );
     }
 
     // 미현존/미배정 pane → 캐릭터 없이 hook title 만(정보 보존, 드롭 안 함).
     #[test]
-    fn completion_toast_falls_back_to_title_when_no_character() {
+    fn attention_toast_falls_back_when_no_character() {
         assert_eq!(
-            format_completion_toast(None, "✓ ai-art-지원 — claude 완료"),
-            "✓ ai-art-지원 — claude 완료"
+            format_attention_toast(None, "권한 요청"),
+            "⚠ 권한 대기중 — 권한 요청"
         );
+        assert_eq!(format_attention_toast(None, ""), "⚠ 권한 대기중");
     }
 
     // 권한 대기 토스트 — 캐릭터·reason 유무 4갈래.
