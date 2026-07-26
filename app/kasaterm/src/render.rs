@@ -6083,12 +6083,11 @@ fn inlay_prompt_box_title(
     if cells.is_empty() {
         return None;
     }
-    // 우측 정렬(거노: 왼쪽은 프롬프트 박스 ╭ 모서리·입력과 간섭 — 클로드코드
-    // 네이티브도 세션명을 오른쪽 보더에 건다). run 오른쪽 끝(╮ 쪽)에서 여백을
-    // 두고 역방향으로 앉힌다. start 가 왼쪽 첫 대시(l0+1)를 침범하면 거기서 멈춘다.
-    const RIGHT_PAD: usize = 3;
-    let block_w = cells.len() + 2; // 좌우 공백 포함
-    let start = (l0 + run).saturating_sub(RIGHT_PAD + block_w).max(l0 + 1);
+    // 좌측 정렬(거노 2026-07-27): 우측은 claude 네이티브 teammate 칩(`@이름`)
+    // 자리라 세션명을 그리로 보내면 서로 다른 내용이 한 구석에 몰려 헷갈린다
+    // (거노: "세션이름이랑 우측 이거 내용이 다른데"). 칩=우측 / 세션명=좌측 으로
+    // 자리를 나눈다. 사각 테두리를 뺀 뒤라 옛 ╭ 모서리 간섭은 재발하지 않는다.
+    let start = l0 + 1;
     let mut w = start;
     row[w] = mk(' ');
     w += 1;
@@ -6885,6 +6884,11 @@ fn find_titled_rule(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
         };
         let Some(first) = row.iter().position(&is_name) else { continue };
         let Some(last) = row.iter().rposition(&is_name) else { continue };
+        // teammate 칩(`──── @이름 ──`)은 claude 네이티브가 그리는 agent 배지지
+        // 세션명이 아니다 — 아웃라인을 두르면 칩에 네모칸이 생긴다(거노 2026-07-27).
+        if row[first].ch == '@' {
+            continue;
+        }
         // 이름 왼쪽의 마지막 '─' 다음 셀 = c0(선행 공백 포함), 오른쪽 첫 '─' 이전 셀 = c1
         // (와이드 문자 둘째 셀·후행 공백 포함). 대시 런이 없으면 이름 셀로 폴백.
         let c0 = row[..first].iter().rposition(|c| c.ch == '─').map_or(first, |i| i + 1);
@@ -8117,6 +8121,19 @@ mod teammate_msg_tests {
         assert!(find_titled_rule(&[plain]).is_none(), "순수 rule 무시");
     }
 
+    // teammate 칩 행(`──── @이름 ──`)은 세션명이 아니다 — claude 네이티브가 그리는
+    // agent 이름 배지라 아웃라인(사각 테두리)을 두르면 안 된다(거노 2026-07-27:
+    // "칩 네모칸"). 세션명 rule 은 계속 인정.
+    #[test]
+    fn titled_rule_ignores_agent_chip_row() {
+        let dash = |n: usize| "─".repeat(n);
+        let chip = row_from(&format!("{} @model-check {}", dash(50), dash(4)), 80);
+        assert!(find_titled_rule(&[chip]).is_none(), "@칩 행은 세션명 아님");
+        // 칩과 무관한 진짜 세션명은 그대로 인정.
+        let title = row_from(&format!("{} 세션명 {}", dash(30), dash(30)), 80);
+        assert!(find_titled_rule(&[title]).is_some(), "세션명 rule 은 유지");
+    }
+
     // 크로스-방 tell 마커: 유효 캐릭터 `⟦이름⟧` 만 인정, 거노 직접 입력(마커 없음)·
     // 오탐(`⟦…⟧` 이지만 캐릭터 아님)은 무시 = 무색.
     #[test]
@@ -8351,19 +8368,14 @@ mod prompt_title_inlay_tests {
     }
 
     #[test]
-    fn title_inlaid_right_of_border() {
+    fn title_inlaid_left_of_border() {
         let mut rows = box_rows(30);
         let span = inlay_prompt_box_title(&mut rows, "제목");
-        // 우측 정렬: 오른쪽 끝에서 RIGHT_PAD(3) 대시 남기고 " 제(sp)목(sp) ".
-        // run=30 → start=30-3-6=21, 왼쪽 대시 21칸 유지 후 6칸 블록 + 대시 3칸.
-        assert_eq!(
-            row_text(&rows[0]),
-            format!("{} 제 목  {}", "─".repeat(21), "─".repeat(3))
-        );
+        // 좌측 정렬(칩은 우측이라 자리를 나눈다): 대시 1칸 뒤 " 제(sp)목(sp) ".
+        assert_eq!(row_text(&rows[0]), format!("─ 제 목  {}", "─".repeat(23)));
         // 아래 보더·본문은 무손상.
         assert!(rows[2].iter().all(|c| c.ch == '─'));
-        // 반환 span = 쓴 구간(선행 공백 col21 ~ 후행 공백 col26) — 감싸기 좌표 소스.
-        assert_eq!(span, Some((0, 21, 26)));
+        assert_eq!(span, Some((0, 1, 6)));
     }
 
     #[test]
