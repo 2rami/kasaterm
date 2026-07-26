@@ -6093,7 +6093,12 @@ fn inlay_prompt_box_title(
     if cells.is_empty() {
         return None;
     }
-    let start = l0 + 1;
+    // 우측 정렬(거노: 왼쪽은 프롬프트 박스 ╭ 모서리·입력과 간섭 — 클로드코드
+    // 네이티브도 세션명을 오른쪽 보더에 건다). run 오른쪽 끝(╮ 쪽)에서 여백을
+    // 두고 역방향으로 앉힌다. start 가 왼쪽 첫 대시(l0+1)를 침범하면 거기서 멈춘다.
+    const RIGHT_PAD: usize = 3;
+    let block_w = cells.len() + 2; // 좌우 공백 포함
+    let start = (l0 + run).saturating_sub(RIGHT_PAD + block_w).max(l0 + 1);
     let mut w = start;
     row[w] = mk(' ');
     w += 1;
@@ -8356,15 +8361,19 @@ mod prompt_title_inlay_tests {
     }
 
     #[test]
-    fn title_inlaid_left_of_border() {
+    fn title_inlaid_right_of_border() {
         let mut rows = box_rows(30);
         let span = inlay_prompt_box_title(&mut rows, "제목");
-        // 대시 1칸 유지 후 " 제(sp)목(sp) " — 나머지는 보더 그대로.
-        assert_eq!(row_text(&rows[0]), format!("─ 제 목  {}", "─".repeat(23)));
+        // 우측 정렬: 오른쪽 끝에서 RIGHT_PAD(3) 대시 남기고 " 제(sp)목(sp) ".
+        // run=30 → start=30-3-6=21, 왼쪽 대시 21칸 유지 후 6칸 블록 + 대시 3칸.
+        assert_eq!(
+            row_text(&rows[0]),
+            format!("{} 제 목  {}", "─".repeat(21), "─".repeat(3))
+        );
         // 아래 보더·본문은 무손상.
         assert!(rows[2].iter().all(|c| c.ch == '─'));
-        // 반환 span = 쓴 구간(선행 공백 col1 ~ 후행 공백 col6) — 테두리 감싸기 좌표 소스.
-        assert_eq!(span, Some((0, 1, 6)));
+        // 반환 span = 쓴 구간(선행 공백 col21 ~ 후행 공백 col26) — 감싸기 좌표 소스.
+        assert_eq!(span, Some((0, 21, 26)));
     }
 
     #[test]
@@ -8388,9 +8397,10 @@ mod prompt_title_inlay_tests {
         inlay_prompt_box_title(&mut tiny, "제목");
         // run 5 는 prompt_box_rows 의 dash>=10 미달 — 인식 자체가 안 돼 원문 유지.
         assert!(tiny[0].iter().all(|c| c.ch == '─'));
-        // 정상 인식되는 11칸: avail=7, "제목"(4칸)은 들어간다.
+        // 정상 인식되는 11칸: "제목"(4칸)이 우측에 앉고 왼쪽 대시는 유지된다.
         inlay_prompt_box_title(&mut rows, "제목");
-        assert!(row_text(&rows[0]).starts_with("─ 제 목 "));
+        assert!(row_text(&rows[0]).starts_with('─'));
+        assert!(row_text(&rows[0]).contains(" 제 목 "));
     }
 
     #[test]
