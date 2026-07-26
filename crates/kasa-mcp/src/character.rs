@@ -182,7 +182,17 @@ const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
 동료의 surface_id 는 `kasaterm-cli board` 로 확인한다. 동료가 한 턴을 끝내면 이 명령이 스스로 종료되고, 시스템이 너를 자동으로 깨운다(task-notification). 깨어나면 그 출력(\"<동료> 작업 끝남\")을 보고 이어서 진행해라. 이렇게 하면 네 입력창을 더럽히지 않고 동료 완료 즉시 이어받는다.\n\
 \n\
 [협업 — 학생 채팅]\n\
-SendMessage 도구는 **네가 트리플 플래그(--agent-id/--agent-name/--team-name)로 직접 스폰한 학생**에게 지시·브리프를 보낼 때만 써라(to: 스폰 시 지정한 agent-name). 그 외 모든 상대 — 네가 스폰하지 않은 같은 방 pane, 다른 방 pane, 백그라운드 세션, 비-claude pane, 그리고 오케스트레이터에게 하는 보고·질문·완료 통지 — 는 `kasaterm-cli tell <상대 surface_id> \"...\"` 가 정식 경로다(상대 surface_id 는 `kasaterm-cli board` 로 확인, 텍스트는 개행 없는 한 줄). tell 은 받는 pane 에 네 프사와 학생색으로 렌더되니 발신자 표기를 걱정하지 마라. SendMessage 가 'not reachable' 로 실패하면 그 상대는 스폰 관계가 아니라는 뜻이다 — 재시도하지 말고 tell 로 전환해라.";
+SendMessage 도구는 **네가 트리플 플래그(--agent-id/--agent-name/--team-name)로 직접 스폰한 학생**에게 지시·브리프를 보낼 때만 써라(to: 스폰 시 지정한 agent-name). 그 외 모든 상대 — 네가 스폰하지 않은 같은 방 pane, 다른 방 pane, 백그라운드 세션, 비-claude pane, 그리고 오케스트레이터에게 하는 보고·질문·완료 통지 — 는 `kasaterm-cli tell <상대 surface_id> \"...\"` 가 정식 경로다(상대 surface_id 는 `kasaterm-cli board` 로 확인, 텍스트는 개행 없는 한 줄). tell 은 받는 pane 에 네 프사와 학생색으로 렌더되니 발신자 표기를 걱정하지 마라. SendMessage 가 'not reachable' 로 실패하면 그 상대는 스폰 관계가 아니라는 뜻이다 — 재시도하지 말고 tell 로 전환해라.\n\
+\n\
+[협업 — 학생 스폰]\n\
+네가 직접 학생을 띄울 때는 **트리플 플래그를 반드시 붙여라** — 안 붙이면 그 학생에게 SendMessage 가 영영 닿지 않는다(인박스 폴러가 arm 되지 않음). 정본 한 줄:\n\
+`kasaterm-cli send --surface <새 pane> $'cd <레포> && claude --model \\'claude-opus-5[1m]\\' --effort xhigh --agent-id team-lead --agent-name <ASCII작업명> --team-name <팀명>\\n'`\n\
+- 셋(--agent-id/--agent-name/--team-name)은 세트다. 하나라도 빠지면 부팅이 에러난다. 이후 SendMessage 의 `to:` 는 여기 준 --agent-name.\n\
+- 모델은 **`claude-opus-5[1m]`** — `opus` alias 는 아직 옛 버전(4.8)을 가리켜 오푸스 5 로 안 뜬다. 가벼운 정찰은 `claude-sonnet-5[1m]`. 대괄호 때문에 따옴표 필수.\n\
+- --agent-id 는 `team-lead` 그대로 둬라(학생의 AskUserQuestion 이 그 pane 에서 거노에게 직접 뜬다).\n\
+- ⚠️ 스폰 직후 SendMessage 가 'not reachable' 이면 **네 쪽에 트리플이 없어서**다(거노가 연 pane 은 트리플 없이 뜬다). 재시도하지 말고 인박스 파일에 직접 append 해라 — SendMessage 의 실체가 이 파일이라 학생은 똑같이 네이티브로 받는다:\n\
+  `~/.claude/teams/<팀명>/inboxes/<agent-name>.json` 에 `{\"from\":\"<네 캐릭터명>\",\"color\":\"cyan\",\"text\":\"<지시>\",\"summary\":\"<요약>\",\"timestamp\":\"<ISO8601 Z>\",\"msgV\":1,\"msg_id\":\"<uuid>\",\"type\":\"message\",\"read\":false}` 를 배열에 추가(디렉토리 없으면 mkdir -p). 폴러가 먹으면 파일이 `[]` 로 비니 그걸로 도착을 확인해라.\n\
+- 학생의 보고는 SendMessage 로 받지 못한다(같은 이유) — 브리프에 \"보고·질문·완료 통지는 `kasaterm-cli tell <네 pane id>` 로\" 를 네 pane id 와 함께 명시해라.";
 
 /// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
 pub fn mode_slug(cwd: &Path) -> String {
