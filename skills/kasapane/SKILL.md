@@ -301,7 +301,7 @@ echo '{"tool_name":"SendUserFile","tool_input":{"files":["/tmp/foo.png"]}}' \
 
 오케스트레이터(작업 배분하는 pane — 아무 학생이나 가능)가 작업을 병렬 배분할 때 학생 claude pane을 만드는 표준 레시피. teammate 플래그로 이름·색이 **부팅 시점에 네이티브 표시**된다(입력박스 상단 `@이름` — v2.1.207 실측).
 
-**위임 기본값(거노 확정 2026-07-19): kasaterm 안에서 병렬·장시간 작업 위임은 학생 pane 스폰이 기본이다.** Agent 툴 백그라운드 서브에이전트는 board·statusline에 안 보여 거노가 진행을 지켜볼 수 없다 — Agent 툴은 kasaterm 셸 밖이거나 거노가 명시할 때만. 거노가 모델을 지정하면("오푸스로") 그 지시가 스킬의 기본 모델보다 우선하며, 이미 실행 중인 학생의 모델 전환은 `kasaterm-cli tell <id> "/model opus[1m]"`(TUI 슬래시 명령 주입)로 컨텍스트 유지한 채 가능하다 — 반드시 [1m] 변형으로.
+**위임 기본값(거노 확정 2026-07-19): kasaterm 안에서 병렬·장시간 작업 위임은 학생 pane 스폰이 기본이다.** Agent 툴 백그라운드 서브에이전트는 board·statusline에 안 보여 거노가 진행을 지켜볼 수 없다 — Agent 툴은 kasaterm 셸 밖이거나 거노가 명시할 때만. 거노가 모델을 지정하면("오푸스로") 그 지시가 스킬의 기본 모델보다 우선하며, 이미 실행 중인 학생의 모델 전환은 `kasaterm-cli tell <id> "/model claude-opus-5[1m]"`(TUI 슬래시 명령 주입)로 컨텍스트 유지한 채 가능하다 — 반드시 풀네임+[1m] 변형으로.
 
 ```bash
 S=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
@@ -310,17 +310,17 @@ kasaterm-cli color  "$S" "#58a6ff"
 # split 직후 send는 "surface 없음" 가드 오발동이 잦다(id 재사용, 실측 2회) → 실패 시 sleep 2 후 재시도
 # 트리플은 명시 부착 필수(2026-07-24 shim 자동 부착 제거 — 거노 정책: 본인이 스폰한 학생만 SendMessage, 나머지는 전부 tell)
 # 셋 세트: --agent-id team-lead --agent-name <작업명> --team-name <팀 자유명명, 예: kt-undock-0724>. id=team-lead면 학생의 AskUserQuestion이 그 pane에 네이티브로 뜸(F-3)
-kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --model \'opus[1m]\' --effort xhigh --agent-id team-lead --agent-name <작업명> --team-name <팀>\n'   # 모델은 [1m] 변형 필수 — 아래 학생 모델 항목
+kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --model \'claude-opus-5[1m]\' --effort xhigh --agent-id team-lead --agent-name <작업명> --team-name <팀>\n'   # 모델은 풀네임+[1m] 필수 — 아래 학생 모델 항목
 sleep 9                                  # 부팅 대기 — peek 로 ❯ 프롬프트 + 헤더 `@이름`(= agent 이름) 확인
 # 브리프는 SendMessage 로 — 방금 내가 트리플로 스폰한 학생이라서다(스폰 관계 밖은 전부 tell, 2026-07-24 정책):
 #   SendMessage({to: "<agent이름>", summary: "<작업> 브리프", message: "<배경·파일 포인터·검증 기준·커밋 금지(커밋은 오케스트레이터)>"})
-#   오케스트레이터 자신에게 트리플이 없으면 SendMessage 가 'not reachable' 날 수 있다 → F-2 파일 append(동일 실체)로 대체.
+#   ⚠️ 오케스트레이터 자신에게 트리플이 없으면 SendMessage 는 **반드시** 'not reachable' 이다(2026-07-26 실측 — shim 자동 부착 제거 후 거노가 연 pane 은 전부 트리플 없음). 재시도 말고 F-2 파일 append 로 — 동일 실체라 학생은 네이티브로 받고, 폴러가 먹으면 파일이 `[]` 로 비어 도착 확인까지 된다(왕복 실측 완료).
 # 긴 브리프는 파일로 쓰고 "브리프 파일 <절대경로>를 Read 후 수행" 한 줄만. 학생의 보고·질문·완료 통지는 `kasaterm-cli tell <내 pane id>` 로 하게 브리프에 명시 — 내 pane id($KASATERM_PANE_ID)를 브리프에 적어줄 것(아래 학생 답장 프로토콜).
 kasaterm-cli wake-watch "$S" 30          # Bash run_in_background 로 — 턴 종료 시 auto-wake(예비 감시)
 ```
 
 - `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan). `--model`·`--effort`·`--session-id`·`--resume`은 공개 플래그.
-- **학생 모델 = 반드시 `[1m]`(1M 컨텍스트) 변형**(거노 확정 2026-07-19 — "컨텍스트 딸려"): 가벼운 잡·정찰=`'sonnet[1m]'`, 구현·생성 본작업=`'opus[1m]'`(유효 실측 2026-07-19). 표준(200K) 변형으로 띄우거나 `/model opus`처럼 무접미 전환하면 컨텍스트 창이 줄어든다 — 실사고: sonnet[1m] 세션을 `/model opus`(200K)로 바꾸자 같은 대화가 87%로 점프. **미드세션 전환도 항상 `/model opus[1m]` 꼴로.** 대괄호가 zsh glob이라 CLI에선 **따옴표 필수**(안 감싸면 "no matches found"). 거노가 모델을 지정하면 그 계열의 [1m] 변형으로 해석한다. 모델의 자기보고("200K 표준")는 훈련지식이라 믿지 말 것 — 하네스 statusline이 진실. **함정(실사고 07-19): tell로 주입한 슬래시 명령은 학생이 working 중이면 제출돼도 큐에만 걸리고 발화하지 않는다** — 코하루가 전환 미발화 상태로 200K를 100%까지 소진. 주입 후 반드시 peek로 statusline의 `1M` 표기를 확인하고, 큐에 걸려 있으면 `key escape`로 턴을 끊어 발화시켜라(파일 수정분은 보존됨).
+- **학생 모델 = 반드시 풀네임 + `[1m]`(1M 컨텍스트) 변형**: 가벼운 잡·정찰=`'claude-sonnet-5[1m]'`, 구현·생성 본작업=`'claude-opus-5[1m]'`(유효 실측 2026-07-26). ⚠️ **`opus`·`sonnet` 짧은 alias 를 쓰지 마라** — alias 는 아직 이전 세대(`opus`→Opus 4.8)를 가리켜 오푸스 5 로 안 뜬다(거노 실사고 2026-07-26: 학생이 전부 4.8 로 소환됨). 세대가 바뀌면 alias 가 늦게 따라오므로 풀네임이 정본이다. 표준(200K) 변형으로 띄우거나 `/model opus`처럼 무접미 전환하면 컨텍스트 창이 줄어든다 — 실사고: sonnet[1m] 세션을 `/model opus`(200K)로 바꾸자 같은 대화가 87%로 점프. **미드세션 전환도 항상 `/model claude-opus-5[1m]` 꼴로.** 대괄호가 zsh glob이라 CLI에선 **따옴표 필수**(안 감싸면 "no matches found"). 거노가 모델을 지정하면 그 계열의 [1m] 변형으로 해석한다. 모델의 자기보고("200K 표준")는 훈련지식이라 믿지 말 것 — 하네스 statusline이 진실. **함정(실사고 07-19): tell로 주입한 슬래시 명령은 학생이 working 중이면 제출돼도 큐에만 걸리고 발화하지 않는다** — 코하루가 전환 미발화 상태로 200K를 100%까지 소진. 주입 후 반드시 peek로 statusline의 `1M` 표기를 확인하고, 큐에 걸려 있으면 `key escape`로 턴을 끊어 발화시켜라(파일 수정분은 보존됨).
 - **agent-name은 학생 캐릭터명이 아니라 목표 작업명으로**(거노 확정, 예: `native-wiring-backend`) — 캐릭터는 kasaterm이 pane에 자동 배정하니 이름 중복이 불필요하고, ASCII 작업명이면 inbox 슬러그 유일성도 자연 해결.
 - **표시 매핑(실제 팀모드 스크린샷 실측, 2026-07-13)**: `--agent-color`는 배지(`@이름`)뿐 아니라 teammate TUI 전체 톤을 그 색으로 테마한다. tmux pane 제목 = 에이전트 이름, TUI 상단 `✳ 헤더` = 역할(`--agent-type`, 예: Explore). → kasaterm 스폰도 `rename`을 agent-name(작업명)과 일치시키고, `--agent-color`는 배정 학생 accent에 가장 가까운 8색으로 골라 pane 테두리색과 TUI 색을 맞춘다.
 - `--agent-type`은 역할 표시용으로 보이지만 **그 agent 정의(도구 제한 포함)를 실제 로드**한다 — Explore는 read-only라 작업 학생에 부적합. 임의 문자열 동작은 미검증 → 학생 스폰엔 생략.
