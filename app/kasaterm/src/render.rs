@@ -6201,7 +6201,13 @@ fn restyle_tell_line(
     }
     let face = theme::character_slug(name).is_some();
     let label = if face { "›".to_string() } else { format!("{name} ›") };
-    let mut w = if face { lead + TELL_FACE_COLS + 1 } else { lead };
+    // 프사+라벨 블록을 본문 쪽(end)에 붙인다. 지우는 마커 `⟦이름⟧ ` 폭은 이름
+    // 길이에 따라 가변인데 블록은 고정폭이라, 왼쪽 정렬하면 남는 칸이 그대로
+    // `›`—본문 사이 갭으로 보였다(거노 2026-07-27: 이름이 길수록 더 벌어짐).
+    let label_w: usize = label.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
+    let block_w = if face { TELL_FACE_COLS + 1 + label_w } else { label_w };
+    let start = end.saturating_sub(block_w + 1).max(lead);
+    let mut w = if face { start + TELL_FACE_COLS + 1 } else { start };
     for ch in label.chars() {
         let cw = ch.width().unwrap_or(1).max(1);
         if w + cw > end {
@@ -6220,7 +6226,7 @@ fn restyle_tell_line(
     }
     // 본문(마커 뒤)도 학생색으로.
     tint_row(&mut row[end..], accent);
-    face.then_some(lead)
+    face.then_some(start)
 }
 
 /// 행의 비공백 글자 fg 를 accent 로 — tell 마커 행과 그 wrap 연속 행이 공유.
@@ -6250,6 +6256,12 @@ fn tell_wrap_continuation(row: &[GridCell]) -> bool {
 /// 앞)을 로스터로 역매핑. 로스터 밖(team-lead 등)은 transcript 태그의 color
 /// 명 → 그것도 없으면 테마 accent.
 fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
+    // 발신자가 한글 캐릭터 표시명인 경우(F-2 인박스 규칙의 `from` = 발신 캐릭터명)
+    // 를 먼저 본다 — 슬러그 경로만 타면 "프라나" 같은 이름이 매칭에 실패해 학생색
+    // 대신 tag_color 폴백으로 떨어졌다(거노 2026-07-27: SendMessage 도 학생 테마).
+    if let Some(c) = theme::character_accent(name) {
+        return c;
+    }
     let slug = name.rsplit_once('-').map(|(a, _)| a).unwrap_or(name);
     if let Some(c) = theme::slug_character(slug).and_then(theme::character_accent) {
         return c;
@@ -8164,6 +8176,27 @@ mod teammate_msg_tests {
             "프사 자리는 blank"
         );
         assert!(!row_text(&row).contains("미도리"), "이름은 프사가 대신");
+    }
+
+    // 실제 화면은 한글이 2셀이라 마커 `⟦이름⟧ ` 폭이 프사 블록(6칸)보다 넓다 —
+    // 왼쪽 정렬이면 그 차이가 `›`와 본문 사이 갭으로 남았다(거노 2026-07-27).
+    // 블록이 본문에 붙어 갭이 이름 길이와 무관하게 일정한지 확인.
+    #[test]
+    fn tell_face_block_hugs_body_for_wide_names() {
+        // wide 셀 재현: 한글 뒤에 스페이서 한 칸(composed 경로와 동일).
+        let mut row = row_from("❯ ⟦호 시 노 ⟧ 본문", 80);
+        let (marker_end, name) = tell_marker_line(&row).expect("마커 인식");
+        assert_eq!(name, "호시노");
+        let face_col =
+            restyle_tell_line(&mut row, marker_end, &name, [107, 207, 127, 255]).expect("프사");
+        // `›` 는 프사(4칸)+여백(1) 뒤에 오고, 그 블록 끝이 본문 직전에 붙는다.
+        let caret = face_col + TELL_FACE_COLS + 1;
+        assert_eq!(row[caret].ch, '›', "프사+여백 뒤 › 라벨");
+        assert!(
+            marker_end - (caret + 1) <= 1,
+            "› 와 본문 사이 갭은 최대 1칸 (실제 {})",
+            marker_end - (caret + 1)
+        );
     }
 
     // wrap 연속 행: 2칸 들여쓰기 본문만 연속, TUI 구조 글리프(⎿·⏺)·빈 행에서 끊김.
