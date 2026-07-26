@@ -1186,14 +1186,11 @@ impl App {
                 };
                 if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
-                    // 칩 @이름 을 pane 캐릭터로 통일 — claude argv 의 agent 이름은
-                    // 부팅 시 고정이라, 이후 swap-character·컴팩트 재부팅으로 pane
-                    // 시각 캐릭터가 바뀌면 칩(@yuuka)과 pane(코하루)이 갈라진다.
-                    if let Some(slug) =
-                        pane.character.as_deref().and_then(theme::character_slug)
-                    {
-                        restyle_chip_name(&mut composed, slug);
-                    }
+                    // teammate 칩(@agent이름)은 입력박스에서 걷어낸다 — 그 이름은
+                    // pane 헤더 탭이 들고 있고, 여기 남으면 좌측 대화 제목과 정체가
+                    // 다른 이름 둘이 한 줄에 서서 헷갈린다(거노 2026-07-27). 칩을
+                    // 지우면 보더 run 이 넓어져 제목 인레이 여유도 늘어난다.
+                    strip_agent_chip(&mut composed);
                     // 입력박스 상단 보더 왼쪽 '─' 구간에 세션 제목 인레이(거노:
                     // @이름칩만으론 이 pane 이 뭘 하는 중인지 안 보임). 라벨
                     // 규칙은 피커와 동일(custom-title > aiTitle > 첫 user) —
@@ -5988,45 +5985,42 @@ fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
 /// pane(코하루)이 갈라진다(거노: "%5 코하루인데 @yuuka"). `-<sid>` 는 세션
 /// 식별로 유지하고 첫 slug run 만 교체 — 칩을 오른쪽 끝 고정으로 두고 왼쪽 '─'
 /// 보더를 흡수/보충해 뒤쪽 ` ──` 정렬을 지킨다. 스냅샷 전용(원본 무손상).
-fn restyle_chip_name(rows: &mut [Vec<GridCell>], slug: &str) {
+/// 입력박스 상단 보더의 teammate 칩(`@agent이름`)을 지우고 보더 대시로 되메운다.
+/// 거노 2026-07-27: 같은 줄에 정체가 다른 두 이름(좌=대화 제목, 우=agent 이름)이
+/// 나란히 떠 "세션이름이 왜 둘이냐"가 됐다. agent 이름은 pane 헤더 탭이 이미
+/// 들고 있으므로(패턴 F 는 rename 을 agent-name 과 일치시킨다) 입력박스에서는
+/// 대화 제목 하나만 남긴다. 칩 양옆 공백까지 함께 메워 대시가 끊기지 않게 한다.
+fn strip_agent_chip(rows: &mut [Vec<GridCell>]) {
     let Some(range) = prompt_box_rows(rows) else { return };
     let row = &mut rows[range.start - 1];
     let Some(at) = row.iter().position(|c| c.ch == '@') else { return };
-    // 이름 run: '@' 다음 영숫자 연속(첫 slug). sid 구분자 '-' 에서 멈춘다.
-    let name_len = row[at + 1..]
-        .iter()
-        .take_while(|c| c.ch.is_ascii_alphanumeric())
-        .count();
-    if name_len == 0 {
-        return;
-    }
-    let old: String = row[at + 1..at + 1 + name_len].iter().map(|c| c.ch).collect();
-    if old == slug {
-        return; // 이미 일치 — 손대지 않는다
-    }
-    // 칩 토큰 끝: 이름 run + sid('-'/'_'/영숫자) 연속.
+    // 칩 토큰: '@' + 영숫자/'-'/'_' 연속. 그 뒤가 보더('─')나 행 끝이어야 칩으로
+    // 인정한다 — 본문에 우연히 섞인 '@단어' 를 지우지 않기 위한 가드.
     let tok_end = at
         + 1
         + row[at + 1..]
             .iter()
             .take_while(|c| c.ch.is_ascii_alphanumeric() || c.ch == '-' || c.ch == '_')
             .count();
-    let sid: String = row[at + 1 + name_len..tok_end].iter().map(|c| c.ch).collect();
+    if tok_end == at + 1 {
+        return;
+    }
     let style = row[at].clone();
     let mk = |ch: char| {
         let mut c = style.clone();
         c.ch = ch;
         c
     };
-    let new_tok: Vec<char> = format!("@{}{}", slug, sid).chars().collect();
-    let new_start = tok_end.saturating_sub(new_tok.len());
-    for (k, ch) in new_tok.iter().enumerate() {
-        if new_start + k < row.len() {
-            row[new_start + k] = mk(*ch);
-        }
-    }
-    // 칩이 짧아졌으면 옛 '@' ~ new_start 잔재를 보더 대시로 되메운다.
-    for i in at..new_start {
+    // 칩 앞뒤 공백도 대시로 흡수(보더 연속성).
+    let lo = row[..at]
+        .iter()
+        .rposition(|c| c.ch != ' ' && c.ch != '\0')
+        .map_or(at, |i| i + 1);
+    let hi = row[tok_end..]
+        .iter()
+        .position(|c| c.ch != ' ' && c.ch != '\0')
+        .map_or(row.len(), |i| tok_end + i);
+    for i in lo..hi.min(row.len()) {
         row[i] = mk('─');
     }
 }
@@ -8458,6 +8452,22 @@ mod prompt_title_inlay_tests {
 
     fn row_text(row: &[GridCell]) -> String {
         row.iter().map(|c| c.ch).collect()
+    }
+
+    // teammate 칩은 입력박스에서 걷어내고 보더 대시로 되메운다 — agent 이름은
+    // pane 헤더가 들고, 입력박스엔 대화 제목 하나만(거노 2026-07-27).
+    #[test]
+    fn agent_chip_stripped_from_prompt_border() {
+        let mut rows = box_rows(40);
+        // 보더 오른쪽에 claude 네이티브 칩을 얹은 상태를 재현.
+        let chip = " @model-check ";
+        for (i, ch) in chip.chars().enumerate() {
+            rows[0][20 + i].ch = ch;
+        }
+        strip_agent_chip(&mut rows);
+        let text = row_text(&rows[0]);
+        assert!(!text.contains('@'), "칩이 남았다: {text}");
+        assert!(text.chars().all(|c| c == '─'), "대시로 되메움: {text}");
     }
 
     #[test]
