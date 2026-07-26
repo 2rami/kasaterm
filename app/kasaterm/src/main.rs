@@ -4246,7 +4246,13 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     let model_line = if model.is_empty() {
         String::new()
     } else {
-        format!("[ -n \"$PERSONA_OK\" ] && set -- --model {model} \"$@\"\n")
+        // 모델 문자열은 작은따옴표로 감싼다 — `claude-opus-5[1m]` 의 `[1m]` 이
+        // zsh 글롭이라 무인용이면 "no matches found" 로 set 이 통째 실패해
+        // --model 이 아예 안 붙고 claude 가 기본 모델(구세대 Opus)로 떨어졌다
+        // (거노 2026-07-27 실사고: 학생이 전부 4.8). 작은따옴표 이스케이프로
+        // 임의 모델 문자열도 안전하게 리터럴 전달한다.
+        let q = model.replace('\'', "'\\''");
+        format!("[ -n \"$PERSONA_OK\" ] && set -- --model '{q}' \"$@\"\n")
     };
     let effort_line = if effort.is_empty() {
         String::new()
