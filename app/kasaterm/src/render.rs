@@ -1091,7 +1091,8 @@ impl App {
                             msg.as_ref().map(|m| m.body.as_str()),
                             accent,
                         );
-                        // 발신 학생 프사 — tell 과 같은 이미지 패스·바닥 정렬 2행 키.
+                        // 발신 학생 프사 — tell 과 같은 이미지 패스·같은 자리(첫 줄
+                        // 왼쪽 여백 2칸). 셀이 세로 2:1 이라 2칸×1행이 정사각.
                         if let (Some(fc), Some(slug)) =
                             (face_col, teammate_sender_slug(&sender))
                         {
@@ -1099,9 +1100,9 @@ impl App {
                             let scw = self.cell.w * fs;
                             let sch = self.cell.h * fs;
                             let face_w = TELL_FACE_COLS as f32 * scw;
-                            let face_h = 2.0 * sch;
+                            let face_h = sch;
                             let x = body_left + fc as f32 * scw;
-                            let y = (body_top + (r + 1) as f32 * sch - face_h).max(body_top);
+                            let y = body_top + r as f32 * sch;
                             profile_slots.push((slug, (x, y, face_w, face_h)));
                         }
                     }
@@ -1117,20 +1118,27 @@ impl App {
                     let sch = self.cell.h * fs;
                     let mut r = 0;
                     while r < composed.len() {
-                        if let Some((marker_end, name)) = tell_marker_line(&composed[r]) {
+                        if let Some((marker_start, marker_end, name)) =
+                            tell_marker_line(&composed[r])
+                        {
                             if let Some(accent) = theme::character_accent(&name) {
-                                let face_col =
-                                    restyle_tell_line(&mut composed[r], marker_end, &name, accent);
+                                let face_col = restyle_tell_line(
+                                    &mut composed[r],
+                                    marker_start,
+                                    marker_end,
+                                    &name,
+                                    accent,
+                                );
                                 if let (Some(c0), Some(slug)) =
                                     (face_col, theme::character_slug(&name))
                                 {
-                                    // 바닥 정렬 2행 키(resume 피커 공식) — 발을 tell
-                                    // 행 바닥에 붙이고 위 행(user 턴 앞 빈 줄)으로 서게.
+                                    // 프사는 본문 왼쪽 여백(`❯` 자리, 2칸)에 같은
+                                    // 행으로 — 셀은 세로 2:1 이라 2칸×1행이 정사각.
+                                    // 본문은 첫 줄부터 wrap 연속 행과 같은 col.
                                     let face_w = TELL_FACE_COLS as f32 * scw;
-                                    let face_h = 2.0 * sch;
+                                    let face_h = sch;
                                     let x = body_left + c0 as f32 * scw;
-                                    let y =
-                                        (body_top + (r + 1) as f32 * sch - face_h).max(body_top);
+                                    let y = body_top + r as f32 * sch;
                                     profile_slots.push((slug, (x, y, face_w, face_h)));
                                 }
                                 r += 1;
@@ -6153,8 +6161,8 @@ fn teammate_collapsed_line(row: &[GridCell]) -> Option<(usize, usize, String)> {
 /// tell 주입 마커 `⟦캐릭터⟧ 본문` 감지 — kasaterm-cli tell 이 발신 pane 캐릭터를
 /// 앞에 심는다(SendMessage 는 팀 경계 안이라 크로스-방 tell 만 화면에 발신자 앵커가
 /// 필요). `character_accent` 유효 캐릭터만 인정해 거노가 우연히 친 `⟦…⟧` 오탐을
-/// 막는다. 반환: (⟧ 다음 col, 캐릭터명).
-fn tell_marker_line(row: &[GridCell]) -> Option<(usize, String)> {
+/// 막는다. 반환: (⟦ 시작 col, ⟧ 다음 col, 캐릭터명).
+fn tell_marker_line(row: &[GridCell]) -> Option<(usize, usize, String)> {
     let chars: Vec<char> = row
         .iter()
         .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
@@ -6178,20 +6186,23 @@ fn tell_marker_line(row: &[GridCell]) -> Option<(usize, String)> {
         .filter(|&&c| c != ' ' && c != '\0')
         .collect();
     theme::character_accent(&name)?;
-    Some((first + 1 + close_rel + 1, name))
+    Some((first, first + 1 + close_rel + 1, name))
 }
 
-/// tell 프사 셀 폭 — bust(96×96)가 2행 높이일 때 정사각이 되는 셀 수. 뒤 1셀은
-/// 라벨 `›` 와의 여백.
-pub(crate) const TELL_FACE_COLS: usize = 4;
+/// tell·SendMessage 프사 셀 폭 — claude 가 접는 본문 들여쓰기(2칸)와 같아야
+/// 본문 좌측선을 밀지 않는다. 셀이 세로 2:1 이라 2칸×1행이 곧 정사각 bust.
+pub(crate) const TELL_FACE_COLS: usize = 2;
 
-/// tell 마커 행을 발신 학생색으로 — 마커 `⟦이름⟧` 자리에 발신 학생 프사(에셋
-/// 있으면) + `›` 라벨을 놓고 그 행 전체를 accent fg 로 칠해 SendMessage 인라인과
-/// 시각을 맞춘다. 프사가 이름을 대신하므로 라벨엔 이름을 안 쓴다(resume 피커와
-/// 동일 성향 — 거노: 이름 말고 프사). slug 없는 캐릭터만 `이름 ›` 폴백. 반환은
-/// 마커 시작 col(프사 rect 의 x 기준) — 프사를 안 얹었으면 None.
+/// tell 마커 행을 발신 학생색으로 — 그 행 전체를 accent fg 로 칠해 SendMessage
+/// 인라인과 시각을 맞춘다. 프사가 있는 캐릭터는 첫 줄 본문을 마커 시작 col 로
+/// 당겨(= claude 의 `❯ ` 폭 2 = wrap 들여쓰기) 접힌 줄과 좌측선을 맞추고, 비워진
+/// `❯` 자리 2칸에 아바타를 얹는다(호출측 이미지 패스) — 옛 배치는 첫 줄만 프사
+/// 폭만큼 밀려 계단이 졌다(거노 2026-07-27). 위 행 헤더로 올리는 안은 claude 가
+/// user 턴 앞에 빈 줄을 두지 않아 윗줄 글자를 덮어 기각(실측). slug 없는
+/// 캐릭터만 `이름 ›` 인라인 폴백. 반환은 프사 rect 의 x 기준 col — 없으면 None.
 fn restyle_tell_line(
     row: &mut [GridCell],
+    marker_start: usize,
     marker_end: usize,
     name: &str,
     accent: [u8; 4],
@@ -6199,6 +6210,39 @@ fn restyle_tell_line(
     use unicode_width::UnicodeWidthChar;
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let end = marker_end.min(row.len());
+    if theme::character_slug(name).is_some() {
+        // 마커 뒤 본문을 마커 시작 col 로 당긴다(claude 의 `❯ ` 폭 = 2 = wrap
+        // 들여쓰기라 첫 줄과 연속 줄이 같은 col 에 선다).
+        let body_start = row[end..]
+            .iter()
+            .position(|c| c.ch != ' ' && c.ch != '\0')
+            .map(|i| end + i)
+            .unwrap_or(end);
+        let shift = body_start.saturating_sub(marker_start);
+        if shift > 0 {
+            row[marker_start..].rotate_left(shift);
+            let n = row.len();
+            for c in row[n - shift..].iter_mut() {
+                *c = GridCell::blank();
+            }
+        }
+        // 비운 앞칸은 본문 셀의 배경(claude 가 깐 user 턴 하이라이트)을 물려받는다
+        // — blank 로 두면 첫 줄만 배경이 늦게 시작해 wrap 연속 행과 계단이 진다.
+        let pad = {
+            let mut c = row[marker_start.min(row.len() - 1)].clone();
+            c.ch = ' ';
+            c
+        };
+        for c in row[..marker_start].iter_mut() {
+            *c = pad.clone();
+        }
+        tint_row(row, accent);
+        // 프사는 `❯` 가 있던 왼쪽 여백에 본문과 같은 행으로 — 위 행은 claude 가
+        // 이전 블록(`✻ Worked for 5s` 등)으로 채워 두는 게 보통이라 헤더로 올리면
+        // 그 글자를 덮는다(실측 2026-07-27). 여백이 프사 폭에 못 미치면(마커가
+        // 행 머리) 프사를 포기하고 색만 입힌다.
+        return (marker_start >= TELL_FACE_COLS).then_some(0);
+    }
     let lead = row[..end]
         .iter()
         .position(|c| c.ch != ' ' && c.ch != '\0')
@@ -6206,15 +6250,13 @@ fn restyle_tell_line(
     for c in row[..end].iter_mut() {
         *c = GridCell::blank();
     }
-    let face = theme::character_slug(name).is_some();
-    let label = if face { "›".to_string() } else { format!("{name} ›") };
-    // 프사+라벨 블록을 본문 쪽(end)에 붙인다. 지우는 마커 `⟦이름⟧ ` 폭은 이름
-    // 길이에 따라 가변인데 블록은 고정폭이라, 왼쪽 정렬하면 남는 칸이 그대로
-    // `›`—본문 사이 갭으로 보였다(거노 2026-07-27: 이름이 길수록 더 벌어짐).
+    let label = format!("{name} ›");
+    // 라벨을 본문 쪽(end)에 붙인다. 지우는 마커 `⟦이름⟧ ` 폭은 이름 길이에 따라
+    // 가변인데 라벨은 고정폭이라, 왼쪽 정렬하면 남는 칸이 그대로 `›`—본문 사이
+    // 갭으로 보였다(거노 2026-07-27: 이름이 길수록 더 벌어짐).
     let label_w: usize = label.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
-    let block_w = if face { TELL_FACE_COLS + 1 + label_w } else { label_w };
-    let start = end.saturating_sub(block_w + 1).max(lead);
-    let mut w = if face { start + TELL_FACE_COLS + 1 } else { start };
+    let start = end.saturating_sub(label_w + 1).max(lead);
+    let mut w = start;
     for ch in label.chars() {
         let cw = ch.width().unwrap_or(1).max(1);
         if w + cw > end {
@@ -6233,7 +6275,7 @@ fn restyle_tell_line(
     }
     // 본문(마커 뒤)도 학생색으로.
     tint_row(&mut row[end..], accent);
-    face.then_some(start)
+    None
 }
 
 /// 행의 비공백 글자 fg 를 accent 로 — tell 마커 행과 그 wrap 연속 행이 공유.
@@ -6493,13 +6535,14 @@ fn expand_teammate_message(
     } else {
         blank_run.saturating_sub(1)
     };
-    // 발신자가 배정 학생이면 이름 텍스트 대신 프사(bust) + `›` — tell 렌더와
-    // 같은 시각 언어(거노 2026-07-27: SendMessage 도 학생 테마로). 프사 자리는
-    // blank 로 두고 호출측이 이미지 패스로 얹는다.
+    // 발신자가 배정 학생이면 이름 텍스트 대신 프사(bust) — tell 렌더와 같은 시각
+    // 언어(거노 2026-07-27: SendMessage 도 학생 테마로). 프사는 첫 줄 왼쪽 여백
+    // 2칸에 얹으므로(호출측 이미지 패스) 헤더는 그만큼 비운다 — 그 폭이 곧 이어
+    // 쓰는 줄의 들여쓰기(indent = start+2)라 본문 좌측이 한 줄로 선다.
     let face_slug = teammate_sender_slug(sender);
-    let head_start = if face_slug.is_some() { start + TELL_FACE_COLS + 1 } else { start };
+    let head_start = start;
     let header = if face_slug.is_some() {
-        "› ".to_string()
+        "  ".to_string()
     } else {
         format!("@ {sender}❯ ")
     };
@@ -8183,52 +8226,44 @@ mod teammate_msg_tests {
     #[test]
     fn tell_marker_parsed_and_guarded() {
         let row = row_from("⟦미도리⟧ 안녕하세요", 80);
-        let (_, name) = tell_marker_line(&row).expect("유효 캐릭터 마커");
-        assert_eq!(name, "미도리");
+        let (start, _, name) = tell_marker_line(&row).expect("유효 캐릭터 마커");
+        assert_eq!((start, name.as_str()), (0, "미도리"));
         // claude TUI 실화면: 제출된 user 턴은 `❯ ` 프롬프트 마커 뒤에 온다.
         let prompted = row_from("❯ ⟦프라나⟧ 검증 메시지", 80);
-        let (_, name) = tell_marker_line(&prompted).expect("❯ 뒤 마커도 인정");
-        assert_eq!(name, "프라나");
+        let (start, _, name) = tell_marker_line(&prompted).expect("❯ 뒤 마커도 인정");
+        assert_eq!((start, name.as_str()), (2, "프라나"), "마커 시작 = ❯ + 공백 뒤");
         assert!(tell_marker_line(&row_from("그냥 내 입력", 80)).is_none());
         assert!(tell_marker_line(&row_from("❯ 마커 없는 제출", 80)).is_none());
         assert!(tell_marker_line(&row_from("⟦없는캐릭⟧ x", 80)).is_none());
     }
 
-    // 프사 라벨: slug 있는 캐릭터는 이름 없이 `›` 만(프사가 이름 대신), 마커 시작
-    // col 을 반환해 프사 rect 기준으로 쓴다. 본문은 accent 로 칠해진다.
+    // 프사 캐릭터: 아바타는 본문 위 행으로 올라가고(반환 col 이 그 x 기준) 본문은
+    // 마커 자리(= `❯ ` 뒤 col 2)로 당겨져 wrap 연속 행과 좌측이 맞는다. `❯` 자리엔
+    // 인용 마커 `›` 만 남고 이름 텍스트는 프사가 대신한다.
     #[test]
-    fn restyle_tell_face_label() {
+    fn restyle_tell_lifts_face_and_aligns_body() {
         let mut row = row_from("❯ ⟦미도리⟧ 본문", 80);
-        let (marker_end, name) = tell_marker_line(&row).unwrap();
-        let face_col = restyle_tell_line(&mut row, marker_end, &name, [107, 207, 127, 255]);
-        assert_eq!(face_col, Some(0), "❯ 위치(첫 non-space)가 프사 기준");
-        assert_eq!(row[TELL_FACE_COLS + 1].ch, '›', "프사+여백 뒤 › 라벨");
-        assert!(
-            row[..TELL_FACE_COLS + 1].iter().all(|c| c.ch == ' ' || c.ch == '\0'),
-            "프사 자리는 blank"
-        );
+        let (marker_start, marker_end, name) = tell_marker_line(&row).unwrap();
+        let face_col =
+            restyle_tell_line(&mut row, marker_start, marker_end, &name, [107, 207, 127, 255]);
+        assert_eq!(face_col, Some(0), "프사 x = ❯ 가 있던 왼쪽 여백");
+        assert_eq!(row[0].ch, ' ', "여백은 프사 자리로 비운다");
+        assert_eq!(row[2].ch, '본', "본문은 col 2 = wrap 연속 행과 동일");
         assert!(!row_text(&row).contains("미도리"), "이름은 프사가 대신");
     }
 
-    // 실제 화면은 한글이 2셀이라 마커 `⟦이름⟧ ` 폭이 프사 블록(6칸)보다 넓다 —
-    // 왼쪽 정렬이면 그 차이가 `›`와 본문 사이 갭으로 남았다(거노 2026-07-27).
-    // 블록이 본문에 붙어 갭이 이름 길이와 무관하게 일정한지 확인.
+    // 실제 화면은 한글이 2셀이라 마커 `⟦이름⟧ ` 폭이 이름 길이에 따라 가변이다 —
+    // 본문 시작 col 이 그 폭에 휘둘리면 wrap 연속 행과 계단이 진다(거노 2026-07-27).
     #[test]
-    fn tell_face_block_hugs_body_for_wide_names() {
+    fn tell_body_col_independent_of_name_width() {
         // wide 셀 재현: 한글 뒤에 스페이서 한 칸(composed 경로와 동일).
         let mut row = row_from("❯ ⟦호 시 노 ⟧ 본문", 80);
-        let (marker_end, name) = tell_marker_line(&row).expect("마커 인식");
+        let (marker_start, marker_end, name) = tell_marker_line(&row).expect("마커 인식");
         assert_eq!(name, "호시노");
-        let face_col =
-            restyle_tell_line(&mut row, marker_end, &name, [107, 207, 127, 255]).expect("프사");
-        // `›` 는 프사(4칸)+여백(1) 뒤에 오고, 그 블록 끝이 본문 직전에 붙는다.
-        let caret = face_col + TELL_FACE_COLS + 1;
-        assert_eq!(row[caret].ch, '›', "프사+여백 뒤 › 라벨");
-        assert!(
-            marker_end - (caret + 1) <= 1,
-            "› 와 본문 사이 갭은 최대 1칸 (실제 {})",
-            marker_end - (caret + 1)
-        );
+        let face_col = restyle_tell_line(&mut row, marker_start, marker_end, &name, [107, 207, 127, 255])
+            .expect("프사");
+        assert_eq!(face_col, 0, "이름이 길어도 프사는 왼쪽 여백 고정");
+        assert_eq!(row[2].ch, '본', "{}", row_text(&row));
     }
 
     // wrap 연속 행: 2칸 들여쓰기 본문만 연속, TUI 구조 글리프(⎿·⏺)·빈 행에서 끊김.
@@ -8241,23 +8276,19 @@ mod teammate_msg_tests {
         assert!(!tell_wrap_continuation(&row_from("   들여쓰기 3", 80)));
     }
 
-    // 인라인 재작성(학생 발신): 프사 자리 + `›` + 본문. 이름 텍스트는 프사가 대신
-    // 하고 원문 "› Message from @…" 잔재는 지워진다(거노 2026-07-27 SendMessage 테마).
+    // 인라인 재작성(학생 발신): 프사는 본문 위 행(호출측 이미지 패스)이고 첫 줄은
+    // `› ` + 본문 — 그 폭이 이어 쓰는 줄의 들여쓰기와 같아 좌측이 한 줄로 선다.
+    // 이름 텍스트는 프사가 대신하고 원문 "› Message from @…" 잔재는 지워진다.
     #[test]
     fn restyle_writes_inline_body_with_face_for_student() {
         let mut rows = vec![row_from("› Message from @aru-9c88", 60)];
         let face =
             expand_teammate_message(&mut rows, 0, 0, "aru-9c88", Some("아루다 확인"), [255, 128, 0, 255]);
         assert_eq!(face, Some(0), "프사 col 반환");
-        let caret = TELL_FACE_COLS + 1;
-        assert_eq!(rows[0][caret].ch, '›', "프사 뒤 › 라벨");
-        assert!(
-            rows[0][..caret].iter().all(|c| c.ch == ' ' || c.ch == '\0'),
-            "프사 자리는 blank"
-        );
-        assert!(rows[0][caret].bold, "헤더는 bold");
+        assert_eq!(rows[0][0].ch, ' ', "첫 두 칸은 프사 자리");
+        assert_eq!(rows[0][2].ch, '아', "본문은 이어 쓰는 줄과 같은 col 2");
         assert_eq!(
-            rows[0][caret].fg,
+            rows[0][2].fg,
             kasa_bridge::screen::Color::Rgb(255, 128, 0),
             "학생 accent 로 도색"
         );
@@ -8283,9 +8314,12 @@ mod teammate_msg_tests {
             row_from("› Message from @aru-9c88", 24),
             row_from("다음 항목", 24),
         ];
-        expand_teammate_message(&mut rows, 0, 0, "aru-9c88", Some("긴 본문이 들어간다"), [255, 0, 0, 255]);
+        expand_teammate_message(
+            &mut rows, 0, 0, "aru-9c88",
+            Some("긴 본문이 한 줄을 넘겨 잘린다"),
+            [255, 0, 0, 255],
+        );
         let text = row_text(&rows[0]);
-        assert_eq!(rows[0][TELL_FACE_COLS + 1].ch, '›', "{text}");
         assert!(text.ends_with('…'), "{text}");
         assert_eq!(row_text(&rows[1]), "다음 항목", "다음 항목 무손상");
     }
@@ -8306,7 +8340,6 @@ mod teammate_msg_tests {
             Some("긴 본문이 여러 줄에 걸쳐 이어진다"),
             [255, 0, 0, 255],
         );
-        assert_eq!(rows[0][TELL_FACE_COLS + 1].ch, '›', "{}", row_text(&rows[0]));
         assert!(row_text(&rows[0]).contains('긴'), "{}", row_text(&rows[0]));
         // 이어 쓴 줄은 2칸 들여쓰기 + 학생색.
         assert!(row_text(&rows[1]).starts_with("  "), "{}", row_text(&rows[1]));
