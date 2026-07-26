@@ -313,7 +313,7 @@ impl GpuRenderer {
         // Register a bold variant of the primary face. swash uses this when
         // a cell's BOLD flag is set; no variant → renderer can fall back to
         // double-draw synthesised bold (handled in draw_cells).
-        if let Some((bold_path, bold_idx)) = primary_bold_font_path() {
+        if let Some((bold_path, bold_idx)) = primary_bold_font_path(&font_path) {
             shaper.set_bold_face_path(0, &bold_path, bold_idx);
         }
         // Real italic file (JetBrains Mono Italic etc). Without one, the
@@ -3058,10 +3058,24 @@ fn primary_italic_font_path() -> Option<(String, u32)> {
 /// Bold variant of the primary mono face. Returns None on platforms where
 /// we can't find one — the renderer falls back to synthesised double-draw
 /// bold in that case. Honours `KASATERM_GRID_FONT_BOLD` for overrides.
-fn primary_bold_font_path() -> Option<(String, u32)> {
+///
+/// `primary` 는 실제 로드된 regular 경로 — 같은 패밀리의 `-Bold` 형제를 최우선
+/// 으로 본다. 패밀리가 어긋나면(예: primary=D2Coding, bold=JetBrains) 한글처럼
+/// bold 파일이 커버하지 않는 글자가 designed bold 를 못 타고 regular 로 폴백해
+/// "볼드가 약한" 증상이 난다(거노 2026-07-26 실측: 한글 세션명 1.22x → 1.33x).
+fn primary_bold_font_path(primary: &str) -> Option<(String, u32)> {
     if let Ok(p) = std::env::var("KASATERM_GRID_FONT_BOLD") {
         if !p.is_empty() && std::path::Path::new(&p).exists() {
             return Some((p, 0));
+        }
+    }
+    // 패밀리 일치 우선 — "-Regular" → "-Bold" 형제 파일.
+    if let Some(sib) = primary
+        .rsplit_once("-Regular")
+        .map(|(head, tail)| format!("{head}-Bold{tail}"))
+    {
+        if std::path::Path::new(&sib).exists() {
+            return Some((sib, 0));
         }
     }
     #[cfg(target_os = "macos")]

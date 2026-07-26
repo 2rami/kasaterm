@@ -417,10 +417,13 @@ impl Shaper {
             } else {
                 None
             };
-            // Synthesised stroke-widen for bold when we DIDN'T land on a
-            // real bold face. Keeps consistent visual weight when JetBrains
-            // Bold is missing on disk (D2Coding-only systems etc).
-            let want_dilate = bold && !matches!(kind, FaceKind::Bold);
+            // Stroke-widen every bold cell, designed face included. D2Coding's
+            // designed bold is a mild weight step (한글 1.12x over regular —
+            // *thinner* than regular+dilate at 1.22x), so gating dilation on
+            // "no real bold face" made real-bold text the weakest of the three.
+            // Dilating on top of the designed face keeps its stroke balance and
+            // lands at 1.33x — the weight 거노 asked for (2026-07-26 실측).
+            let want_dilate = bold;
             let render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
                 let font = FontRef::from_index(font_data, font_index).unwrap();
                 let mut scaler = scale_ctx.builder(font).size(face_size).hint(true).build();

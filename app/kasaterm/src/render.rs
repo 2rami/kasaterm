@@ -1211,11 +1211,15 @@ impl App {
                             let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
                             let scw = self.cell.w * fs;
                             let sch = self.cell.h * fs;
+                            // 위로 자라는 감싸기(거노 2026-07-26): 아래로 6px
+                            // 뻗던 옛 박스가 입력 첫 줄 글자 상단을 침범했다.
+                            // 하단은 보더 행 안(+2px)에서 끝내고 위로 8px 뻗어
+                            // 크기감은 유지 — 보더 위는 claude TUI 여백이라 안전.
                             title_outline_slots.push((
                                 body_left + c0 as f32 * scw,
-                                body_top + tr as f32 * sch - 2.0,
+                                body_top + tr as f32 * sch - 8.0,
                                 (c1 - c0 + 1) as f32 * scw,
-                                sch + 8.0,
+                                sch + 10.0,
                                 accent,
                             ));
                         }
@@ -1350,7 +1354,10 @@ impl App {
                 // 깐다(거노: 세션 선택 화면만). default-bg 셀은 fill 을 안 뿜어
                 // (gpu.draw_cells) 이미지가 그 자리로 비치고, 메뉴 글리프는 위 패스에
                 // 또렷이 얹힌다. 로더가 이미지를 어둡게 낮춰 텍스트 대비를 확보한다.
-                if agents_view || resume_picker {
+                // 거노 2026-07-26: /resume 은 일반 배경으로 — 백그라운드 세션
+                // 목록(agents)과 같은 교실 배경을 쓰니 두 화면이 겹쳐 보였다.
+                // 교실 배경은 agents 목록의 시각 정체성으로만 남긴다.
+                if agents_view {
                     classroom_slots.push((box_x, box_y, box_w, box_h));
                 }
                 // image/md pane만 헤더 띠 데이터 생성(전용 컨트롤 자리). 일반
