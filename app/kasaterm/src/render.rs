@@ -1202,27 +1202,10 @@ impl App {
                         // (거노). 진행 중엔 펌프 스레드(handler)가 33ms Redraw 를 돌림.
                         let (shown, typing) = title_typewriter_frame(id.as_str(), t);
                         title_typing |= typing;
-                        // 인레이한 이름 구간을 학생색 사각 테두리로 감싼다(거노
-                        // 스케치) — /rename 아웃라인과 같은 시각 언어. 아래로 6px
-                        // 더 내려 보더 선을 물고 매달린 태그처럼(거노 2안 "밑에까지").
-                        if let Some((tr, c0, c1)) =
-                            inlay_prompt_box_title(&mut composed, &shown)
-                        {
-                            let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
-                            let scw = self.cell.w * fs;
-                            let sch = self.cell.h * fs;
-                            // 위로 자라는 감싸기(거노 2026-07-26): 아래로 6px
-                            // 뻗던 옛 박스가 입력 첫 줄 글자 상단을 침범했다.
-                            // 하단은 보더 행 안(+2px)에서 끝내고 위로 8px 뻗어
-                            // 크기감은 유지 — 보더 위는 claude TUI 여백이라 안전.
-                            title_outline_slots.push((
-                                body_left + c0 as f32 * scw,
-                                body_top + tr as f32 * sch - 8.0,
-                                (c1 - c0 + 1) as f32 * scw,
-                                sch + 10.0,
-                                accent,
-                            ));
-                        }
+                        // 사각 테두리는 뺐다(거노 2026-07-26: "네모칸 구려") —
+                        // bold 굵기만으로 보더 대시와 무게 차등이 충분하고,
+                        // 박스가 입력 첫 줄과 겹치던 간섭도 원천 소멸한다.
+                        inlay_prompt_box_title(&mut composed, &shown);
                     }
                 }
                 slots.push(PaneSlot {
