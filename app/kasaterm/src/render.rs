@@ -1083,7 +1083,7 @@ impl App {
                             &sender,
                             msg.as_ref().and_then(|m| m.color.as_deref()),
                         );
-                        expand_teammate_message(
+                        let face_col = expand_teammate_message(
                             &mut composed,
                             r,
                             c0,
@@ -1091,6 +1091,19 @@ impl App {
                             msg.as_ref().map(|m| m.body.as_str()),
                             accent,
                         );
+                        // 발신 학생 프사 — tell 과 같은 이미지 패스·바닥 정렬 2행 키.
+                        if let (Some(fc), Some(slug)) =
+                            (face_col, teammate_sender_slug(&sender))
+                        {
+                            let fs = pane_scales.get(id.as_str()).copied().unwrap_or(1.0);
+                            let scw = self.cell.w * fs;
+                            let sch = self.cell.h * fs;
+                            let face_w = TELL_FACE_COLS as f32 * scw;
+                            let face_h = 2.0 * sch;
+                            let x = body_left + fc as f32 * scw;
+                            let y = (body_top + (r + 1) as f32 * sch - face_h).max(body_top);
+                            profile_slots.push((slug, (x, y, face_w, face_h)));
+                        }
                     }
                 }
                 // 크로스-방 tell(⟦캐릭터⟧ 본문)을 발신 학생 테마색으로 — 팀 경계를
@@ -6255,6 +6268,16 @@ fn tell_wrap_continuation(row: &[GridCell]) -> bool {
 /// 팀원 agent 이름("aru-9c88")의 보낸 학생 accent — 로마자 앞부분(마지막 '-'
 /// 앞)을 로스터로 역매핑. 로스터 밖(team-lead 등)은 transcript 태그의 color
 /// 명 → 그것도 없으면 테마 accent.
+/// 팀메시지 발신자 이름 → 학생 슬러그(프사 에셋 키). `from` 이 한글 표시명
+/// ("프라나")인 경우와 agent-name 꼬리표가 붙은 슬러그("midori-2535") 둘 다 받는다.
+fn teammate_sender_slug(name: &str) -> Option<&'static str> {
+    if let Some(s) = theme::character_slug(name) {
+        return Some(s);
+    }
+    let slug = name.rsplit_once('-').map(|(a, _)| a).unwrap_or(name);
+    theme::slug_character(slug).and_then(theme::character_slug)
+}
+
 fn teammate_sender_accent(name: &str, tag_color: Option<&str>) -> [u8; 4] {
     // 발신자가 한글 캐릭터 표시명인 경우(F-2 인박스 규칙의 `from` = 발신 캐릭터명)
     // 를 먼저 본다 — 슬러그 경로만 타면 "프라나" 같은 이름이 매칭에 실패해 학생색
@@ -6455,7 +6478,7 @@ fn expand_teammate_message(
     sender: &str,
     body: Option<&str>,
     accent: [u8; 4],
-) {
+) -> Option<usize> {
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
     let Some(body) = body else {
         for c in rows[r].iter_mut() {
@@ -6463,11 +6486,11 @@ fn expand_teammate_message(
                 c.fg = fg.clone();
             }
         }
-        return;
+        return None;
     };
     let cols = rows[r].len();
     if start >= cols || cols == 0 {
-        return;
+        return None;
     }
     let style = rows[r][start].clone();
     let blank_run = rows[r + 1..].iter().take_while(|w| row_is_blank(w)).count();
@@ -6476,12 +6499,21 @@ fn expand_teammate_message(
     } else {
         blank_run.saturating_sub(1)
     };
-    let header = format!("@ {sender}❯ ");
+    // 발신자가 배정 학생이면 이름 텍스트 대신 프사(bust) + `›` — tell 렌더와
+    // 같은 시각 언어(거노 2026-07-27: SendMessage 도 학생 테마로). 프사 자리는
+    // blank 로 두고 호출측이 이미지 패스로 얹는다.
+    let face_slug = teammate_sender_slug(sender);
+    let head_start = if face_slug.is_some() { start + TELL_FACE_COLS + 1 } else { start };
+    let header = if face_slug.is_some() {
+        "› ".to_string()
+    } else {
+        format!("@ {sender}❯ ")
+    };
     let indent = start + 2;
     let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let (lines, truncated) = wrap_body_cells(
         &flat,
-        cols.saturating_sub(start + cell_width(&header)),
+        cols.saturating_sub(head_start + cell_width(&header)),
         cols.saturating_sub(indent),
         1 + usable,
     );
@@ -6522,7 +6554,12 @@ fn expand_teammate_message(
         .rposition(|c| c.ch != ' ' && c.ch != '\0')
         .map(|p| p + 1)
         .unwrap_or(0);
-    let mut w = put_line(&mut rows[r], start, &header, true);
+    // 프사 자리(start..head_start)는 비워 둔다 — 원문 "› Message from @…" 잔재가
+    // 프사 뒤로 비쳐 보이면 안 된다.
+    for c in rows[r][start..head_start.min(cols)].iter_mut() {
+        *c = GridCell::blank();
+    }
+    let mut w = put_line(&mut rows[r], head_start, &header, true);
     if let Some(first) = lines.first() {
         w = put_line(&mut rows[r], w, first, false);
     }
@@ -6540,6 +6577,7 @@ fn expand_teammate_message(
             ellipsis(row, w);
         }
     }
+    face_slug.map(|_| start)
 }
 
 /// 사용자 override 학생 애셋의 최대 변 길이. 렌더가 슬롯에 contain-fit 하므로
@@ -8209,18 +8247,39 @@ mod teammate_msg_tests {
         assert!(!tell_wrap_continuation(&row_from("   들여쓰기 3", 80)));
     }
 
-    // 인라인 재작성: 헤더 + 본문(한글 와이드 = 글자+스페이서), 원문 잔재 제거.
+    // 인라인 재작성(학생 발신): 프사 자리 + `›` + 본문. 이름 텍스트는 프사가 대신
+    // 하고 원문 "› Message from @…" 잔재는 지워진다(거노 2026-07-27 SendMessage 테마).
     #[test]
-    fn restyle_writes_inline_body_with_wide_spacers() {
+    fn restyle_writes_inline_body_with_face_for_student() {
         let mut rows = vec![row_from("› Message from @aru-9c88", 60)];
-        expand_teammate_message(&mut rows, 0, 0, "aru-9c88", Some("아루다 확인"), [255, 128, 0, 255]);
-        assert_eq!(row_text(&rows[0]), "@ aru-9c88❯ 아 루 다  확 인");
-        assert!(rows[0][0].bold, "헤더는 bold");
+        let face =
+            expand_teammate_message(&mut rows, 0, 0, "aru-9c88", Some("아루다 확인"), [255, 128, 0, 255]);
+        assert_eq!(face, Some(0), "프사 col 반환");
+        let caret = TELL_FACE_COLS + 1;
+        assert_eq!(rows[0][caret].ch, '›', "프사 뒤 › 라벨");
+        assert!(
+            rows[0][..caret].iter().all(|c| c.ch == ' ' || c.ch == '\0'),
+            "프사 자리는 blank"
+        );
+        assert!(rows[0][caret].bold, "헤더는 bold");
         assert_eq!(
-            rows[0][0].fg,
+            rows[0][caret].fg,
             kasa_bridge::screen::Color::Rgb(255, 128, 0),
             "학생 accent 로 도색"
         );
+        let text = row_text(&rows[0]);
+        assert!(text.contains("아 루 다"), "본문 와이드 스페이서 유지: {text}");
+        assert!(!text.contains("aru-9c88"), "이름은 프사가 대신: {text}");
+    }
+
+    // 학생이 아닌 발신자(team-lead 등)는 프사가 없어 기존 `@이름❯` 헤더 유지.
+    #[test]
+    fn restyle_keeps_name_header_for_non_student() {
+        let mut rows = vec![row_from("› Message from @team-lead", 60)];
+        let face =
+            expand_teammate_message(&mut rows, 0, 0, "team-lead", Some("확인"), [255, 128, 0, 255]);
+        assert_eq!(face, None, "프사 없음");
+        assert!(row_text(&rows[0]).starts_with("@ team-lead❯"), "{}", row_text(&rows[0]));
     }
 
     // 이어 쓸 blank 행이 없으면 말줄임으로 끝난다 — 다음 항목 침범 없음.
@@ -8232,7 +8291,7 @@ mod teammate_msg_tests {
         ];
         expand_teammate_message(&mut rows, 0, 0, "aru-9c88", Some("긴 본문이 들어간다"), [255, 0, 0, 255]);
         let text = row_text(&rows[0]);
-        assert!(text.starts_with("@ aru-9c88❯"), "{text}");
+        assert_eq!(rows[0][TELL_FACE_COLS + 1].ch, '›', "{text}");
         assert!(text.ends_with('…'), "{text}");
         assert_eq!(row_text(&rows[1]), "다음 항목", "다음 항목 무손상");
     }
@@ -8253,7 +8312,8 @@ mod teammate_msg_tests {
             Some("긴 본문이 여러 줄에 걸쳐 이어진다"),
             [255, 0, 0, 255],
         );
-        assert!(row_text(&rows[0]).starts_with("@ aru-9c88❯ 긴"), "{}", row_text(&rows[0]));
+        assert_eq!(rows[0][TELL_FACE_COLS + 1].ch, '›', "{}", row_text(&rows[0]));
+        assert!(row_text(&rows[0]).contains('긴'), "{}", row_text(&rows[0]));
         // 이어 쓴 줄은 2칸 들여쓰기 + 학생색.
         assert!(row_text(&rows[1]).starts_with("  "), "{}", row_text(&rows[1]));
         assert!(!row_is_blank(&rows[1]));
