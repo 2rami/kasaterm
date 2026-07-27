@@ -855,6 +855,18 @@ impl App {
     /// changes — pane switch or `cd`. Cheap string compare per frame; the
     /// read_dir walk only runs on a real change (or after expand/collapse,
     /// which calls `rebuild_file_tree_nodes` directly).
+    /// `cwd` 를 감싸는 가장 가까운 git 레포 루트(1-엔트리 캐시 경유).
+    /// 레포 밖이면 None — 호출부가 cwd 를 그대로 쓴다.
+    fn anchored_tree_root(&mut self, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+        if let Some((cached_cwd, root)) = &self.file_tree.anchor_cache {
+            if cached_cwd == cwd {
+                return root.clone();
+            }
+        }
+        let found = git_repo_root(cwd);
+        self.file_tree.anchor_cache = Some((cwd.to_path_buf(), found.clone()));
+        found
+    }
     pub(crate) fn refresh_file_tree(&mut self) {
         self.ensure_file_tree_watcher();
         // A background watcher flagged an on-disk change (file added / removed /
@@ -882,6 +894,10 @@ impl App {
             // cwd, so opening a file doesn't reshuffle the sidebar root.
             .or_else(|| self.file_tree.root.clone())
             .or_else(|| std::env::current_dir().ok());
+        // git 레포 앵커: cwd 가 레포 안이면 레포 루트를 트리 루트로 삼는다.
+        // 없으면 cwd 그대로. 이게 없으면 `cd src/` 한 번에 사이드바가 그
+        // 하위로 좁아져, 레포를 오가며 작업할 때마다 트리가 다시 접힌다.
+        let root = root.map(|c| self.anchored_tree_root(&c).unwrap_or(c));
         if root == self.file_tree.root {
             return;
         }
@@ -2257,5 +2273,49 @@ impl App {
         // bind hook 없이 즉석 확정(bind_transcript)할 때 쓴다.
         self.socket_backend = Some(backend.clone());
         self.start_socket_with(backend);
+    }
+}
+
+/// `start` 부터 위로 올라가며 첫 git 레포 루트를 찾는다.
+///
+/// `.git` 은 일반 체크아웃이면 디렉토리, worktree·submodule 이면 **파일**이므로
+/// `is_dir` 이 아니라 `exists` 로 봐야 둘 다 잡힌다.
+///
+/// 홈과 파일시스템 루트는 레포로 인정하지 않는다 — dotfiles 를 git 으로 관리하면
+/// 홈 자체가 레포라, 앵커가 어느 프로젝트에서든 홈 전체로 튀어 사이드바가
+/// 쓸모없어진다.
+fn git_repo_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        if dir.parent().is_none() || home.as_deref() == Some(dir) {
+            break;
+        }
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_repo_root;
+
+    #[test]
+    fn anchors_to_repo_root_from_a_subdirectory() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("workspace root");
+        let sub = repo.join("app/kasaterm/src");
+        assert_eq!(git_repo_root(&sub).as_deref(), Some(repo));
+    }
+
+    #[test]
+    fn returns_none_outside_any_repo() {
+        // /tmp 는 레포가 아니고 홈 아래도 아니라 위로 훑어도 `.git` 이 없다.
+        assert_eq!(git_repo_root(std::path::Path::new("/tmp")), None);
     }
 }

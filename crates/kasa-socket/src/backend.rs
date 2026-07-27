@@ -23,31 +23,6 @@ pub enum SplitDirection {
     Down,
 }
 
-/// Which standalone panel window a panel command targets. The git status
-/// and sessions panels are separate OS windows (wry webviews) the host
-/// spawns next to the terminal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PanelKind {
-    Git,
-    Session,
-    Board,
-}
-
-/// Geometry of a panel window and its embedded webview, returned by
-/// `panel_info`. When the panel is responsive the `view_*` (webview)
-/// dimensions track the `win_*` (window) ones; a mismatch means the
-/// webview failed to follow a window resize — the bug this lets a caller
-/// verify without a screenshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PanelGeom {
-    pub open: bool,
-    pub win_w: u32,
-    pub win_h: u32,
-    pub view_w: u32,
-    pub view_h: u32,
-}
-
 /// A workspace as seen by the protocol — analogous to a tmux session
 /// or a cmux workspace. Returned by `workspace.list` /
 /// `workspace.current`.
@@ -599,11 +574,6 @@ pub trait Backend: Send + Sync {
     fn open_preview(&self, _kind: &str, _path: &str, _target: Option<&str>) -> Result<()> {
         anyhow::bail!("open_preview not supported")
     }
-    /// Open or close a standalone panel window (git status / sessions).
-    /// Default unsupported (e.g. the legacy tmux backend has no window host).
-    fn set_panel(&self, _which: PanelKind, _open: bool) -> Result<()> {
-        anyhow::bail!("set_panel not supported")
-    }
     /// Show/hide the *main terminal* window. The arona classroom window calls
     /// this so entering the classroom can take the screen over and its
     /// red-pill button can bring the terminal back. `focus_pane` additionally
@@ -617,16 +587,6 @@ pub trait Backend: Send + Sync {
     /// the web page can't close its own host window. Default unsupported.
     fn close_arona(&self) -> Result<()> {
         anyhow::bail!("close_arona not supported")
-    }
-    /// Resize a panel window to `w`x`h` logical px and re-bound its webview
-    /// to match. Errors if the panel isn't open. Default unsupported.
-    fn resize_panel(&self, _which: PanelKind, _w: u32, _h: u32) -> Result<()> {
-        anyhow::bail!("resize_panel not supported")
-    }
-    /// Report a panel window's geometry (window + webview bounds) so a
-    /// caller can verify the webview tracks the window. Default unsupported.
-    fn panel_info(&self, _which: PanelKind) -> Result<PanelGeom> {
-        anyhow::bail!("panel_info not supported")
     }
 
     /// Read every pane's activity. Default: empty board — a backend that
