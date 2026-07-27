@@ -2596,6 +2596,37 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        // 칼럼 탭(Git / Info). 닫기·확장보다 먼저 봐야 한다 —
+                        // 셋 다 같은 머리 줄에 있고 탭이 가장 왼쪽이다.
+                        if let Some((tab, _)) = self
+                            .info
+                            .tab_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(t, r)| (*t, *r))
+                        {
+                            if self.info.tab != tab {
+                                self.info.tab = tab;
+                                // Info 로 막 넘어왔으면 목록이 비어 있다 — 다음
+                                // 프레임의 pump_info 가 즉시 채우도록 놓아둔다.
+                                self.info.scroll = 0.0;
+                            }
+                            window.request_redraw();
+                            return;
+                        }
+                        // 포트 칩 → 브라우저로 localhost 열기. dev 서버를 띄운
+                        // 직후 "몇 번 포트였지"를 확인하러 스크롤백을 뒤지는 일이
+                        // 이 클릭 하나로 끝난다.
+                        if let Some(port) = self
+                            .info
+                            .port_rects
+                            .iter()
+                            .find(|(_, r)| inside(r))
+                            .map(|(p, _)| *p)
+                        {
+                            self.open_localhost(port);
+                            return;
+                        }
                         // Panel header: close / expand.
                         if self.git.col_close_rect.map(|r| inside(&r)).unwrap_or(false) {
                             self.toggle_git_col();

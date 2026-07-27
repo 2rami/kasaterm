@@ -202,6 +202,8 @@ impl App {
         // Git column follows the same active-pane cwd; publish it so the
         // off-thread poller refreshes the right repo.
         self.publish_git_col_cwd();
+        // Info 탭이 열려 있으면 프로세스·포트 스냅샷을 갱신(스로틀은 내부에서).
+        self.pump_info();
         // Every pane's status bar wants its own repo badge — feed all pane cwds
         // to the same poller.
         self.publish_pane_git_cwds();
@@ -3330,7 +3332,7 @@ impl App {
             self.git.branch_hdr_rect = None;
             self.git.path_menu_rects.clear();
             self.git.branch_menu_rects.clear();
-            if git_col_w > 0.0 {
+            if git_col_w > 0.0 && self.info.tab == state::SideTab::Git {
                 let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
                 let gcx0 = git_col_x + 14.0;
                 let gcw = (git_col_w - 28.0).max(0.0);
@@ -3340,23 +3342,19 @@ impl App {
                 g.rect(git_col_x, top, git_col_w, bottom - top, theme::bg());
                 g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
                 let red = [229, 83, 75, 255];
-                let mut y = top + 10.0;
-                // ── Row 1: ~path : branch  ····  N · +ins -del   ⤢ ✕
+                // ── Row 0: Git | Info 탭 + ⤢ ✕ (두 탭 공통 머리)
+                let mut y = info::draw_side_tabs(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    &mut self.git,
+                    git_col_x,
+                    git_col_w,
+                    top,
+                );
+                // ── Row 1: ~path : branch  ····  N · +ins -del
                 // Path click → repo picker, branch click → switcher (rects below).
                 {
-                    let bi = 15.0_f32;
-                    let close_x = git_col_x + git_col_w - 12.0 - bi;
-                    let expand_x = close_x - bi - 8.0;
-                    let bhov = |bx: f32| {
-                        self.cursor_px.0 >= bx - 3.0
-                            && self.cursor_px.0 <= bx + bi + 3.0
-                            && self.cursor_px.1 >= y - 3.0
-                            && self.cursor_px.1 <= y + bi + 3.0
-                    };
-                    g.queue_icon("maximize", expand_x, y, bi, if bhov(expand_x) { theme::text() } else { theme::text_mute() });
-                    g.queue_icon("x", close_x, y, bi, if bhov(close_x) { theme::text() } else { theme::text_mute() });
-                    self.git.col_expand_rect = Some((expand_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
-                    self.git.col_close_rect = Some((close_x - 3.0, y - 3.0, bi + 6.0, bi + 6.0));
                     let home = std::env::var("HOME").ok();
                     let path_disp = git_view
                         .cwd
@@ -3400,7 +3398,7 @@ impl App {
                             + g.measure_chrome_text(&plus, 12.0, false)
                             + 5.0
                             + g.measure_chrome_text(&minus, 12.0, false);
-                        let sx0 = expand_x - 12.0 - total;
+                        let sx0 = git_col_x + git_col_w - 12.0 - total;
                         if sx0 > bend + 14.0 {
                             g.queue_icon("file-text", sx0, y, 12.0, theme::text_mute());
                             let mut sx = sx0 + 16.0;
@@ -4046,6 +4044,34 @@ impl App {
                     g.draw_text(conf_x + (confirm_w - wconf) / 2.0, cby + 10.0, "Confirm", gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: true, italic: false });
                     self.git.commit_modal_rects.push((GitModalBtn::Confirm, (conf_x, cby, confirm_w, 34.0)));
                 }
+            }
+            // Info 탭 — 같은 칼럼, 같은 머리, 본문만 다르다. git 본문과 형제
+            // 블록으로 두는 편이 거대한 git 블록을 통째로 else 로 감싸는 것보다
+            // diff 가 얕고, 각 탭이 자기 배경부터 그려 잔상이 남지 않는다.
+            if git_col_w > 0.0 && self.info.tab == state::SideTab::Info {
+                let dock_h = if self.docked.is_empty() && self.zoomed_pane.is_none() { 0.0 } else { DOCK_HEIGHT };
+                let top = TITLE_HEIGHT;
+                let bottom = (win_px.1 / scale - dock_h).max(top);
+                g.rect(git_col_x, top, git_col_w, bottom - top, theme::bg());
+                g.rect(git_col_x, top, 1.0, bottom - top, theme::border());
+                let body_top = info::draw_side_tabs(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    &mut self.git,
+                    git_col_x,
+                    git_col_w,
+                    top,
+                );
+                info::draw_info_col(
+                    g,
+                    self.cursor_px,
+                    &mut self.info,
+                    git_col_x,
+                    git_col_w,
+                    body_top,
+                    bottom,
+                );
             }
             // Per-pane header bar. The band is the unified BG (same as the
             // body) so there's no depth seam; a bottom hairline separates it

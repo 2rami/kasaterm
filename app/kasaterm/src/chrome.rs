@@ -573,6 +573,19 @@ impl App {
             let _ = crate::proc::command("xdg-open").arg(dir).spawn();
         }
     }
+    /// Info 패널의 포트 칩 클릭 — 기본 브라우저로 `http://localhost:<port>`.
+    /// https 를 시도하지 않는 건 로컬 dev 서버가 거의 평문이기 때문이다(TLS 인
+    /// 서버는 브라우저가 리다이렉트해준다).
+    pub(crate) fn open_localhost(&self, port: u16) {
+        let url = format!("http://localhost:{port}");
+        #[cfg(target_os = "macos")]
+        let _ = crate::proc::command("open").arg(&url).spawn();
+        #[cfg(target_os = "windows")]
+        let _ = crate::proc::command("cmd").args(["/C", "start", "", &url]).spawn();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let _ = crate::proc::command("xdg-open").arg(&url).spawn();
+    }
+
     /// Expand/collapse a file's inline unified diff in the git panel. The diff
     /// is parsed once on first expand and cached; `git diff` for a single file
     /// is cheap but not render-loop cheap, so it must not run per frame.

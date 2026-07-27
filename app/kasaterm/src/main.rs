@@ -31,6 +31,7 @@ mod settings;
 mod syntax;
 mod links;
 mod proc;
+mod info;
 mod state;
 // macOS `.md` 더블클릭(odoc Apple Event) 핸들러. 다른 OS 엔 파일오픈 이벤트가
 // 이 경로로 안 와서 macos 전용.
@@ -3220,6 +3221,9 @@ struct App {
     /// App definition — CLAUDE.md 병렬 규칙. (badge poller `git_poll_cwds` and
     /// the file-tree `git_ignore_*` stay separate — different domains.)
     git: state::GitState,
+    /// 우측 칼럼의 Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. 칼럼
+    /// 폭/닫기는 `git` 과 공유하고 본문과 갱신 스레드만 여기 있다(state.rs).
+    info: state::InfoState,
     /// Per-pane status bar (cwd/branch/diff chips at each pane's foot) + the
     /// open dropdown's state. Grouped into a sub-struct (state.rs) so statusbar
     /// work touches one file, not this App definition — CLAUDE.md 병렬 규칙.
@@ -3566,6 +3570,17 @@ impl App {
                     .unwrap_or(false),
                 col_w_logical: GIT_COL_W,
                 commit_modal_include_unstaged: true,
+                ..Default::default()
+            },
+            info: state::InfoState {
+                // 헤드리스 검증용 — 시작 탭을 Info 로. 탭 전환은 클릭이라
+                // PTY-only autosend 로는 재현할 수 없다(KASATERM_TEST_FILETREE
+                // 가 사이드바를 강제로 여는 것과 같은 이유).
+                tab: if std::env::var("KASATERM_TEST_INFO").is_ok() {
+                    state::SideTab::Info
+                } else {
+                    state::SideTab::Git
+                },
                 ..Default::default()
             },
             statusbar: Default::default(),
