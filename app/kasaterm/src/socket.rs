@@ -2055,13 +2055,20 @@ pub fn read_tab_position() -> String {
 }
 
 /// Base cell font size (logical px) from settings. Missing/invalid → the
-/// built-in default (16). Clamped to the same sane range the stepper offers.
+/// built-in default. Clamped to the same sane range the stepper offers.
+///
+/// 기본값 16 → 13 (2026-07-27). 셀 치수를 주 폰트 metric 에서 뽑는데 주 폰트가
+/// D2Coding(advance 0.500em · line 1.160em)에서 JetBrains Mono(0.600em · 1.320em)로
+/// 바뀌어, 같은 16 에서 칸이 가로 20%·세로 14% 커졌다(거노: "전체적으로 폰트가
+/// 커졌네"). 13 이면 0.600 × 13 = 7.8px 로 옛 0.500 × 16 = 8px 과 사실상 같다.
+/// 폰트 크기 = em 픽셀이라는 의미는 그대로 두고 기본값만 새 폰트에 맞춘 것 —
+/// 명시적으로 값을 저장해 둔 사용자는 자기 크기를 그대로 유지한다.
 pub fn read_font_size() -> f32 {
     read_settings()
         .get("font_size")
         .and_then(|x| x.as_f64())
         .map(|v| (v as f32).clamp(9.0, 32.0))
-        .unwrap_or(16.0)
+        .unwrap_or(13.0)
 }
 
 /// Whether the file-tree sidebar starts open on launch. Default `false`
