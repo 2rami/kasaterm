@@ -88,6 +88,46 @@ pub(crate) struct GitState {
     pub(crate) branch_menu_rects: Vec<(String, (f32, f32, f32, f32))>,
 }
 
+/// 우측 칼럼의 활성 탭. 칼럼은 원래 git 전용이었고 Info 가 나중에 붙었다 —
+/// 둘은 폭·스크롤·닫기 버튼을 공유하고 본문만 갈린다.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SideTab {
+    #[default]
+    Git,
+    Info,
+}
+
+/// Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. `rows` 는 워커 스레드가
+/// 채우는 스냅샷이고 `busy`/`last_refresh` 가 그 워커를 스로틀한다(수집이 `ps` +
+/// `lsof` fork 라 렌더 스레드에서 돌릴 수 없다 — info.rs 참고). `shell_pid` 는
+/// 현재 목록이 어느 pane 것인지로, pane 을 옮기면 즉시 갱신을 트리거한다.
+pub(crate) struct InfoState {
+    pub(crate) tab: SideTab,
+    pub(crate) rows: std::sync::Arc<std::sync::Mutex<Vec<crate::info::ProcRow>>>,
+    pub(crate) busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) last_refresh: Option<std::time::Instant>,
+    pub(crate) shell_pid: Option<u32>,
+    pub(crate) scroll: f32,
+    /// 매 paint 재생성되는 hit target. 탭 머리 / 포트 칩(→ 브라우저로 열기).
+    pub(crate) tab_rects: Vec<(SideTab, (f32, f32, f32, f32))>,
+    pub(crate) port_rects: Vec<(u16, (f32, f32, f32, f32))>,
+}
+
+impl Default for InfoState {
+    fn default() -> Self {
+        Self {
+            tab: SideTab::Git,
+            rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_refresh: None,
+            shell_pid: None,
+            scroll: 0.0,
+            tab_rects: Vec::new(),
+            port_rects: Vec::new(),
+        }
+    }
+}
+
 /// Sidebar file-tree column. `root` follows the active pane's cwd; `nodes` is
 /// the flattened expanded tree (rebuilt only on root/expand change). `drag`/
 /// `new`/`selected`/`search_*` carry the in-flight tree interactions; `fs_dirty`
