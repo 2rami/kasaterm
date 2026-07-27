@@ -425,6 +425,34 @@ impl App {
                 }
                 eprintln!("[mdscript] cap → {p}");
             }
+            // 편집 키는 winit `KeyEvent` 를 밖에서 만들 수 없어(비공개 필드)
+            // 순수 메서드를 직접 부른다. 키→메서드 배선은 유닛 테스트가 아니라
+            // 코드 경로로 확인하고, 여기선 **결과가 화면에 어떻게 그려지는지**만
+            // 본다 — 들여쓴 항목이 실제로 한 단 들어가 보이는지 같은 것.
+            Some(("edit", v)) => {
+                {
+                    let Ok(mut ws) = self.ws.lock() else { return };
+                    let Some(pane) = ws.panes.get_mut(&id) else { return };
+                    pane.dirty = true;
+                    let Some(m) = pane.markdown_mut() else { return };
+                    match v {
+                        "tab" => m.indent(false),
+                        "untab" => m.indent(true),
+                        "enter" => m.newline(),
+                        // `at <line>,<col>` 은 캐럿 이동, 나머지는 그대로 타이핑.
+                        _ => match v.strip_prefix("at ") {
+                            Some(pos) => {
+                                let (l, c) = pos.split_once(',').unwrap_or((pos, "0"));
+                                m.cur_line = l.trim().parse().unwrap_or(0);
+                                m.cur_col = c.trim().parse().unwrap_or(0);
+                            }
+                            None => m.insert_at_caret(v),
+                        },
+                    }
+                    eprintln!("[mdscript] edit={v} caret=({},{})", m.cur_line, m.cur_col);
+                }
+                self.md_ensure_caret_visible();
+            }
             _ => eprintln!("[mdscript] 모르는 단계: {step:?}"),
         }
         self.chrome_dirty = true;
