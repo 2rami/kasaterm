@@ -379,7 +379,7 @@ impl App {
             (f32, f32, f32, f32),
             f32,
             bool,
-            Option<Vec<String>>,
+            Option<Arc<Vec<String>>>,
             (usize, usize),
             Option<((usize, usize), (usize, usize))>,
             f32,
@@ -537,7 +537,7 @@ impl App {
                 let md: Option<(
                     Arc<MarkdownDoc>,
                     bool,
-                    Option<Vec<String>>,
+                    Option<Arc<Vec<String>>>,
                     (usize, usize),
                     Option<((usize, usize), (usize, usize))>,
                     f32,
@@ -548,11 +548,8 @@ impl App {
                     (
                         m.doc.clone(),
                         m.raw_mode,
-                        if m.raw_mode {
-                            Some(m.edit_lines.clone())
-                        } else {
-                            None
-                        },
+                        // 프레임마다 도는 자리다 — Arc 라 포인터 하나 복사.
+                        m.raw_mode.then(|| Arc::clone(&m.edit_lines)),
                         (m.cur_line, m.cur_col),
                         m.sel_range(),
                         m.scroll as f32,
@@ -2110,7 +2107,7 @@ impl App {
             ) in &md_slots
             {
                 let content_h = if *raw_mode {
-                    let lines = lines.as_deref().unwrap_or(&[]);
+                    let lines = lines.as_ref().map_or(&[][..], |v| v.as_slice());
                     // Stash the body box so a mouse click can hit-test to a caret
                     // position (md_click_caret reads this).
                     self.md_body_rects.insert(id.clone(), (*bx, *by, *bw, *bh));

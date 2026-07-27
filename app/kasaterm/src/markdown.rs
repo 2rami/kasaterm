@@ -306,7 +306,7 @@ impl MarkdownPane {
             return false;
         };
         if s.0 == e.0 {
-            let line = &mut self.edit_lines[s.0];
+            let line = &mut self.lines_mut()[s.0];
             let b0 = char_byte(line, s.1);
             let b1 = char_byte(line, e.1);
             line.replace_range(b0..b1, "");
@@ -316,9 +316,9 @@ impl MarkdownPane {
                 last[char_byte(last, e.1)..].to_string()
             };
             let keep = char_byte(&self.edit_lines[s.0], s.1);
-            self.edit_lines[s.0].truncate(keep);
-            self.edit_lines[s.0].push_str(&tail);
-            self.edit_lines.drain(s.0 + 1..=e.0);
+            self.lines_mut()[s.0].truncate(keep);
+            self.lines_mut()[s.0].push_str(&tail);
+            self.lines_mut().drain(s.0 + 1..=e.0);
         }
         self.cur_line = s.0;
         self.cur_col = s.1;
@@ -326,8 +326,15 @@ impl MarkdownPane {
         self.touch();
         true
     }
+    /// The buffer, mutably. Every write goes through here so the copy-on-write
+    /// is in one place: `make_mut` clones the lines only while an undo snapshot
+    /// or an in-flight frame still points at them, which is once per edit run.
+    pub(crate) fn lines_mut(&mut self) -> &mut Vec<String> {
+        Arc::make_mut(&mut self.edit_lines)
+    }
+    /// O(1) now that the buffer is shared — this used to deep-copy the file.
     fn snapshot(&self) -> EditSnapshot {
-        EditSnapshot { lines: self.edit_lines.clone(), cur: (self.cur_line, self.cur_col) }
+        EditSnapshot { lines: Arc::clone(&self.edit_lines), cur: (self.cur_line, self.cur_col) }
     }
     /// Push the pre-edit state onto the undo stack. Consecutive same-kind
     /// edits (a typing run, a backspace run) coalesce into the run's first
@@ -348,7 +355,7 @@ impl MarkdownPane {
     fn apply_snapshot(&mut self, snap: EditSnapshot) {
         self.edit_lines = snap.lines;
         if self.edit_lines.is_empty() {
-            self.edit_lines.push(String::new());
+            self.lines_mut().push(String::new());
         }
         self.cur_line = snap.cur.0.min(self.edit_lines.len() - 1);
         self.cur_col = snap.cur.1.min(self.edit_lines[self.cur_line].chars().count());
@@ -370,9 +377,9 @@ impl MarkdownPane {
             self.raw_mode = true;
         }
         if self.edit_lines.is_empty() {
-            self.edit_lines = self.doc.raw.split('\n').map(String::from).collect();
+            self.edit_lines = Arc::new(self.doc.raw.split('\n').map(String::from).collect());
             if self.edit_lines.is_empty() {
-                self.edit_lines.push(String::new());
+                self.lines_mut().push(String::new());
             }
         }
     }
@@ -385,7 +392,7 @@ impl MarkdownPane {
             return;
         }
         if self.edit_lines.is_empty() {
-            self.edit_lines.push(String::new());
+            self.lines_mut().push(String::new());
         }
         // Typing over a selection replaces it — delete + insert as one undo
         // unit (the Other snapshot covers both).
@@ -397,7 +404,7 @@ impl MarkdownPane {
         }
         let line = self.cur_line.min(self.edit_lines.len() - 1);
         let col = self.cur_col.min(self.edit_lines[line].chars().count());
-        let s = &mut self.edit_lines[line];
+        let s = &mut self.lines_mut()[line];
         let b = char_byte(s, col);
         s.insert_str(b, text);
         self.cur_line = line;
@@ -408,7 +415,7 @@ impl MarkdownPane {
     /// Move one line by a single indent step; returns the caret-column delta
     /// for any caret sitting on it.
     fn shift_line(&mut self, li: usize, outdent: bool) -> i64 {
-        let l = &mut self.edit_lines[li];
+        let l = &mut self.lines_mut()[li];
         if outdent {
             let w = outdent_width(l);
             let b = char_byte(l, w);
@@ -431,7 +438,7 @@ impl MarkdownPane {
     /// otherwise inserts a step at the caret.
     pub(crate) fn indent(&mut self, outdent: bool) {
         if self.edit_lines.is_empty() {
-            self.edit_lines.push(String::new());
+            self.lines_mut().push(String::new());
         }
         if let Some((s, e)) = self.sel_range() {
             self.push_undo(EditKind::Other);
@@ -454,7 +461,7 @@ impl MarkdownPane {
                 self.cur_col = (self.cur_col as i64 + d).max(0) as usize;
             } else {
                 let col = self.cur_col.min(self.edit_lines[line].chars().count());
-                let s = &mut self.edit_lines[line];
+                let s = &mut self.lines_mut()[line];
                 let b = char_byte(s, col);
                 s.insert_str(b, INDENT);
                 self.cur_col = col + INDENT.len();
@@ -470,7 +477,7 @@ impl MarkdownPane {
     /// without reaching for Backspace (VS Code and Obsidian both do this).
     pub(crate) fn newline(&mut self) {
         if self.edit_lines.is_empty() {
-            self.edit_lines.push(String::new());
+            self.lines_mut().push(String::new());
         }
         self.push_undo(EditKind::Other);
         self.delete_selection();
@@ -482,18 +489,18 @@ impl MarkdownPane {
         let at_body = col >= p.len;
         if p.marker && at_body && self.edit_lines[line].chars().skip(p.len).all(char::is_whitespace)
         {
-            self.edit_lines[line].clear();
+            self.lines_mut()[line].clear();
             self.cur_line = line;
             self.cur_col = 0;
             self.touch();
             return;
         }
         let carry = if at_body { p.next } else { String::new() };
-        let s = &mut self.edit_lines[line];
+        let s = &mut self.lines_mut()[line];
         let b = char_byte(s, col);
         let mut rest = s.split_off(b);
         rest.insert_str(0, &carry);
-        self.edit_lines.insert(line + 1, rest);
+        self.lines_mut().insert(line + 1, rest);
         self.cur_line = line + 1;
         self.cur_col = carry.chars().count();
         self.touch();
@@ -592,7 +599,7 @@ impl MarkdownPane {
         let Some(&(l, c0, c1)) = f.hits.get(f.idx) else { return };
         let with = f.replace.clone();
         self.push_undo(EditKind::Other);
-        let s = &mut self.edit_lines[l];
+        let s = &mut self.lines_mut()[l];
         let (b0, b1) = (char_byte(s, c0), char_byte(s, c1));
         s.replace_range(b0..b1, &with);
         self.cur_line = l;
@@ -615,7 +622,7 @@ impl MarkdownPane {
         self.push_undo(EditKind::Other);
         // 뒤에서부터 — 앞을 먼저 바꾸면 같은 줄 뒤쪽 열 번호가 전부 밀린다.
         for &(l, c0, c1) in hits.iter().rev() {
-            let s = &mut self.edit_lines[l];
+            let s = &mut self.lines_mut()[l];
             let (b0, b1) = (char_byte(s, c0), char_byte(s, c1));
             s.replace_range(b0..b1, &with);
         }
@@ -691,7 +698,7 @@ impl MarkdownPane {
     ) {
         use winit::keyboard::{Key, NamedKey};
         if self.edit_lines.is_empty() {
-            self.edit_lines.push(String::new());
+            self.lines_mut().push(String::new());
         }
         let is_motion = matches!(
             &event.logical_key,
@@ -726,7 +733,7 @@ impl MarkdownPane {
                     edited = true;
                 } else if col > 0 {
                     self.push_undo(EditKind::Deleting);
-                    let s = &mut self.edit_lines[line];
+                    let s = &mut self.lines_mut()[line];
                     let b0 = char_byte(s, col - 1);
                     let b1 = char_byte(s, col);
                     s.replace_range(b0..b1, "");
@@ -734,10 +741,10 @@ impl MarkdownPane {
                     edited = true;
                 } else if line > 0 {
                     self.push_undo(EditKind::Other);
-                    let cur = self.edit_lines.remove(line);
+                    let cur = self.lines_mut().remove(line);
                     line -= 1;
                     col = self.edit_lines[line].chars().count();
-                    self.edit_lines[line].push_str(&cur);
+                    self.lines_mut()[line].push_str(&cur);
                     edited = true;
                 }
             }
@@ -750,15 +757,15 @@ impl MarkdownPane {
                     edited = true;
                 } else if col < self.edit_lines[line].chars().count() {
                     self.push_undo(EditKind::Deleting);
-                    let s = &mut self.edit_lines[line];
+                    let s = &mut self.lines_mut()[line];
                     let b0 = char_byte(s, col);
                     let b1 = char_byte(s, col + 1);
                     s.replace_range(b0..b1, "");
                     edited = true;
                 } else if line + 1 < self.edit_lines.len() {
                     self.push_undo(EditKind::Other);
-                    let next = self.edit_lines.remove(line + 1);
-                    self.edit_lines[line].push_str(&next);
+                    let next = self.lines_mut().remove(line + 1);
+                    self.lines_mut()[line].push_str(&next);
                     edited = true;
                 }
             }
@@ -846,7 +853,7 @@ impl MarkdownPane {
                 } else {
                     self.push_undo(EditKind::Typing);
                 }
-                let s = &mut self.edit_lines[line];
+                let s = &mut self.lines_mut()[line];
                 let b = char_byte(s, col);
                 s.insert(b, ' ');
                 col += 1;
@@ -861,7 +868,7 @@ impl MarkdownPane {
                 } else {
                     self.push_undo(EditKind::Typing);
                 }
-                let s = &mut self.edit_lines[line];
+                let s = &mut self.lines_mut()[line];
                 let b = char_byte(s, col);
                 s.insert_str(b, txt);
                 col += txt.chars().count();
@@ -887,7 +894,7 @@ impl MarkdownPane {
     pub(crate) fn apply_cmd_arrow(&mut self, code: winit::keyboard::KeyCode, shift: bool) {
         use winit::keyboard::KeyCode;
         if self.edit_lines.is_empty() {
-            self.edit_lines.push(String::new());
+            self.lines_mut().push(String::new());
         }
         if shift {
             if self.sel_anchor.is_none() {
@@ -944,7 +951,7 @@ impl MarkdownPane {
     /// Cmd+A: anchor at the top, caret at the very end.
     pub(crate) fn select_all_buf(&mut self) {
         if self.edit_lines.is_empty() {
-            self.edit_lines.push(String::new());
+            self.lines_mut().push(String::new());
         }
         self.sel_anchor = Some((0, 0));
         self.cur_line = self.edit_lines.len() - 1;
@@ -956,26 +963,26 @@ impl MarkdownPane {
     /// undo unit, replacing any selection.
     pub(crate) fn paste_at_caret(&mut self, text: &str) {
         if self.edit_lines.is_empty() {
-            self.edit_lines.push(String::new());
+            self.lines_mut().push(String::new());
         }
         self.push_undo(EditKind::Other);
         self.delete_selection();
         let line = self.cur_line.min(self.edit_lines.len() - 1);
         let col = self.cur_col.min(self.edit_lines[line].chars().count());
         let b = char_byte(&self.edit_lines[line], col);
-        let tail = self.edit_lines[line].split_off(b);
+        let tail = self.lines_mut()[line].split_off(b);
         let mut segs = text.split('\n');
         if let Some(first) = segs.next() {
-            self.edit_lines[line].push_str(first);
+            self.lines_mut()[line].push_str(first);
         }
         let mut cur = line;
         for seg in segs {
             cur += 1;
-            self.edit_lines.insert(cur, seg.to_string());
+            self.lines_mut().insert(cur, seg.to_string());
         }
         self.cur_line = cur;
         self.cur_col = self.edit_lines[cur].chars().count();
-        self.edit_lines[cur].push_str(&tail);
+        self.lines_mut()[cur].push_str(&tail);
         self.touch();
     }
 
@@ -1520,9 +1527,9 @@ impl App {
             }
         } else if let Some(m) = pane.markdown_mut() {
             // Render → Raw: seed the edit buffer from the source.
-            m.edit_lines = m.doc.raw.split('\n').map(String::from).collect();
+            m.edit_lines = Arc::new(m.doc.raw.split('\n').map(String::from).collect());
             if m.edit_lines.is_empty() {
-                m.edit_lines.push(String::new());
+                m.lines_mut().push(String::new());
             }
             let line = anchor.unwrap_or(0).min(m.edit_lines.len().saturating_sub(1));
             // 커서도 보던 줄에 둔다 — 여기서 0 으로 되돌리면 "고치려고" 연 raw
@@ -1622,7 +1629,7 @@ mod tests {
             doc: Arc::new(build_markdown_doc("%t", std::path::Path::new("/tmp/t.rs"), "")),
             is_md_doc: false,
             raw_mode: true,
-            edit_lines: lines.iter().map(|s| s.to_string()).collect(),
+            edit_lines: lines.iter().map(|s| s.to_string()).collect::<Vec<_>>().into(),
             cur_line: 0,
             cur_col: 0,
             scroll: 0,
@@ -1667,23 +1674,23 @@ mod tests {
         let mut m = pane(&["- 하나"]);
         m.cur_col = 4;
         m.newline();
-        assert_eq!(m.edit_lines, vec!["- 하나", "- "]);
+        assert_eq!(*m.edit_lines, vec!["- 하나", "- "]);
         assert_eq!((m.cur_line, m.cur_col), (1, 2));
         // 빈 항목에서 한 번 더 → 줄이 늘지 않고 마커만 사라진다.
         m.newline();
-        assert_eq!(m.edit_lines, vec!["- 하나", ""]);
+        assert_eq!(*m.edit_lines, vec!["- 하나", ""]);
         assert_eq!((m.cur_line, m.cur_col), (1, 0));
         // 줄 가운데서 자르면 뒷부분이 새 항목이 된다.
         let mut m = pane(&["  1. 하나둘"]);
         m.cur_col = 7;
         m.newline();
-        assert_eq!(m.edit_lines, vec!["  1. 하나", "  2. 둘"]);
+        assert_eq!(*m.edit_lines, vec!["  1. 하나", "  2. 둘"]);
         assert_eq!((m.cur_line, m.cur_col), (1, 5));
         // 캐럿이 마커 안이면 이어쓰기 없이 그냥 쪼갠다.
         let mut m = pane(&["- 하나"]);
         m.cur_col = 0;
         m.newline();
-        assert_eq!(m.edit_lines, vec!["", "- 하나"]);
+        assert_eq!(*m.edit_lines, vec!["", "- 하나"]);
     }
 
     /// Tab 은 선택이 있으면 줄 단위, 없으면 리스트 줄만 통째로.
@@ -1695,17 +1702,17 @@ mod tests {
         m.cur_col = 1;
         m.indent(false);
         // 빈 줄은 건드리지 않는다 — 안 보이는 공백만 남는다.
-        assert_eq!(m.edit_lines, vec!["  가", "", "  나"]);
+        assert_eq!(*m.edit_lines, vec!["  가", "", "  나"]);
         // 선택은 같은 글자를 계속 덮는다.
         assert_eq!(m.sel_anchor, Some((0, 3)));
         assert_eq!((m.cur_line, m.cur_col), (2, 3));
         m.indent(true);
-        assert_eq!(m.edit_lines, vec!["가", "", "나"]);
+        assert_eq!(*m.edit_lines, vec!["가", "", "나"]);
         assert_eq!(m.sel_anchor, Some((0, 1)));
         // 탭 문자로 들여쓴 줄도 Shift+Tab 이 문다.
         let mut m = pane(&["\t탭"]);
         m.indent(true);
-        assert_eq!(m.edit_lines, vec!["탭"]);
+        assert_eq!(*m.edit_lines, vec!["탭"]);
     }
 
     #[test]
@@ -1714,13 +1721,13 @@ mod tests {
         let mut m = pane(&["- 항목"]);
         m.cur_col = 4;
         m.indent(false);
-        assert_eq!(m.edit_lines, vec!["  - 항목"]);
+        assert_eq!(*m.edit_lines, vec!["  - 항목"]);
         assert_eq!(m.cur_col, 6);
         // 평범한 문단이면 캐럿 자리에 두 칸.
         let mut m = pane(&["문단"]);
         m.cur_col = 1;
         m.indent(false);
-        assert_eq!(m.edit_lines, vec!["문  단"]);
+        assert_eq!(*m.edit_lines, vec!["문  단"]);
         assert_eq!(m.cur_col, 3);
     }
 
@@ -1764,10 +1771,10 @@ mod tests {
         m.find_type("ab");
         m.find.as_mut().unwrap().replace = "xyzw".into();
         assert_eq!(m.find_replace_all(), 4);
-        assert_eq!(m.edit_lines, vec!["xyzw xyzw xyzw", "xyzw"]);
+        assert_eq!(*m.edit_lines, vec!["xyzw xyzw xyzw", "xyzw"]);
         // 한 번 되돌리면 통째로 원복 — 전체 바꾸기는 undo 한 단위다.
         m.do_undo();
-        assert_eq!(m.edit_lines, vec!["ab ab ab", "ab"]);
+        assert_eq!(*m.edit_lines, vec!["ab ab ab", "ab"]);
     }
 
     /// 바꾼 결과가 검색어를 다시 품으면(`a`→`aa`) 방금 넣은 글자를 또 잡아
@@ -1779,9 +1786,9 @@ mod tests {
         m.find_type("a");
         m.find.as_mut().unwrap().replace = "aa".into();
         m.find_replace_one();
-        assert_eq!(m.edit_lines, vec!["aa a"]);
+        assert_eq!(*m.edit_lines, vec!["aa a"]);
         m.find_replace_one();
-        assert_eq!(m.edit_lines, vec!["aa aa"]);
+        assert_eq!(*m.edit_lines, vec!["aa aa"]);
     }
 
     #[test]
@@ -1837,7 +1844,7 @@ mod tests {
         m.cur_line = 2;
         m.cur_col = 2;
         assert!(m.delete_selection());
-        assert_eq!(m.edit_lines, vec!["helrld".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["helrld".to_string()]);
         assert_eq!((m.cur_line, m.cur_col), (0, 3));
         assert_eq!(m.sel_anchor, None);
         assert!(m.modified);
@@ -1846,7 +1853,7 @@ mod tests {
         m.sel_anchor = Some((0, 7));
         m.cur_col = 9;
         assert!(m.delete_selection());
-        assert_eq!(m.edit_lines, vec!["hangul  tail".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["hangul  tail".to_string()]);
     }
 
     #[test]
@@ -1854,9 +1861,9 @@ mod tests {
         let mut m = pane(&["ab"]);
         // Two same-kind pushes in a row = one snapshot (a typing run).
         m.push_undo(EditKind::Typing);
-        m.edit_lines[0].push('c');
+        m.lines_mut()[0].push('c');
         m.push_undo(EditKind::Typing);
-        m.edit_lines[0].push('d');
+        m.lines_mut()[0].push('d');
         assert_eq!(m.undo_stack.len(), 1);
         // A break (caret move) reopens the boundary.
         m.last_edit = EditKind::Break;
@@ -1873,20 +1880,20 @@ mod tests {
         let mut m = pane(&["one"]);
         m.cur_col = 3;
         m.push_undo(EditKind::Other);
-        m.edit_lines = vec!["two".into(), "three".into()];
+        m.edit_lines = Arc::new(vec!["two".into(), "three".into()]);
         m.cur_line = 1;
         m.cur_col = 5;
         let before = m.snapshot();
         let snap = m.undo_stack.pop().unwrap();
         m.redo_stack.push(before);
         m.apply_snapshot(snap);
-        assert_eq!(m.edit_lines, vec!["one".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["one".to_string()]);
         assert_eq!((m.cur_line, m.cur_col), (0, 3));
         assert_eq!(m.last_edit, EditKind::Break);
         // Redo restores the edited state.
         let snap = m.redo_stack.pop().unwrap();
         m.apply_snapshot(snap);
-        assert_eq!(m.edit_lines, vec!["two".to_string(), "three".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["two".to_string(), "three".to_string()]);
         assert_eq!((m.cur_line, m.cur_col), (1, 5));
     }
 
@@ -1895,7 +1902,7 @@ mod tests {
         let mut m = pane(&["x"]);
         for i in 0..(UNDO_CAP + 20) {
             m.push_undo(EditKind::Other);
-            m.edit_lines[0] = format!("{i}");
+            m.lines_mut()[0] = format!("{i}");
         }
         assert_eq!(m.undo_stack.len(), UNDO_CAP);
         // Oldest entries fell off the bottom — the floor moved up by 20.
@@ -1909,7 +1916,7 @@ mod tests {
         let mut m = pane(&["hello"]);
         m.cur_col = 5;
         m.insert_at_caret("!");
-        assert_eq!(m.edit_lines, vec!["hello!".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["hello!".to_string()]);
         assert_eq!(m.cur_col, 6);
         assert!(m.modified);
         // Insert over a selection replaces the range.
@@ -1917,7 +1924,7 @@ mod tests {
         m.sel_anchor = Some((0, 0));
         m.cur_col = 5; // select "hello"
         m.insert_at_caret("bye");
-        assert_eq!(m.edit_lines, vec!["bye world".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["bye world".to_string()]);
         assert_eq!((m.cur_line, m.cur_col), (0, 3));
     }
 
@@ -1926,7 +1933,7 @@ mod tests {
         let mut m = pane(&["abcd"]);
         m.cur_col = 2; // caret between b and c
         m.paste_at_caret("X\nY");
-        assert_eq!(m.edit_lines, vec!["abX".to_string(), "Ycd".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["abX".to_string(), "Ycd".to_string()]);
         assert_eq!((m.cur_line, m.cur_col), (1, 1));
     }
 
@@ -1935,11 +1942,11 @@ mod tests {
         let mut m = pane(&["a"]);
         m.cur_col = 1;
         m.insert_at_caret("b"); // "ab"
-        assert_eq!(m.edit_lines, vec!["ab".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["ab".to_string()]);
         assert!(m.do_undo());
-        assert_eq!(m.edit_lines, vec!["a".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["a".to_string()]);
         assert!(m.do_redo());
-        assert_eq!(m.edit_lines, vec!["ab".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["ab".to_string()]);
         // Empty stacks return false.
         assert!(m.do_undo());
         assert!(!m.do_undo());
@@ -1953,10 +1960,10 @@ mod tests {
         assert_eq!((m.cur_line, m.cur_col), (1, 3));
         // Copy leaves the buffer; cut removes the selection.
         assert_eq!(m.take_copy(false).as_deref(), Some("one\ntwo"));
-        assert_eq!(m.edit_lines, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["one".to_string(), "two".to_string()]);
         m.select_all_buf();
         assert_eq!(m.take_copy(true).as_deref(), Some("one\ntwo"));
-        assert_eq!(m.edit_lines, vec![String::new()]);
+        assert_eq!(*m.edit_lines, vec![String::new()]);
         // No selection = None.
         assert_eq!(m.take_copy(false), None);
     }
@@ -1973,7 +1980,7 @@ mod tests {
             doc,
             is_md_doc: true,
             raw_mode: false,
-            edit_lines: Vec::new(),
+            edit_lines: Arc::default(),
             cur_line: 0,
             cur_col: 0,
             scroll: 0,
@@ -1988,11 +1995,11 @@ mod tests {
         };
         m.ensure_raw_seeded();
         assert!(m.raw_mode);
-        assert_eq!(m.edit_lines, vec!["line1".to_string(), "line2".to_string()]);
+        assert_eq!(*m.edit_lines, vec!["line1".to_string(), "line2".to_string()]);
         // Already-seeded buffers are left untouched.
         let mut m2 = pane(&["kept"]);
         m2.ensure_raw_seeded();
-        assert_eq!(m2.edit_lines, vec!["kept".to_string()]);
+        assert_eq!(*m2.edit_lines, vec!["kept".to_string()]);
     }
 
     /// 원자적 쓰기가 지켜야 하는 것: 내용이 맞을 것, 권한을 잃지 않을 것,

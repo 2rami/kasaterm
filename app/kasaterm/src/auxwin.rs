@@ -285,7 +285,8 @@ impl App {
         self.next_pane_id += 1;
         let is_md = matches!(ext.as_str(), "md" | "markdown");
         let doc = Arc::new(build_markdown_doc(&id, &path, &raw));
-        let edit_lines: Vec<String> = raw.split('\n').map(|s| s.to_string()).collect();
+        let edit_lines: Arc<Vec<String>> =
+            Arc::new(raw.split('\n').map(|s| s.to_string()).collect());
         let md = MarkdownPane {
             doc,
             is_md_doc: is_md,

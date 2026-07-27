@@ -1061,11 +1061,11 @@ impl App {
             // the raw editor (line-number gutter + syntax highlight + editable)
             // — the fenced-code-block render path mangled long lines and was
             // read-only, which is wrong for source files.
-            let edit_lines: Vec<String> = if is_md {
+            let edit_lines: Arc<Vec<String>> = Arc::new(if is_md {
                 Vec::new()
             } else {
                 raw.split('\n').map(|s| s.to_string()).collect()
-            };
+            });
             PaneContent::Markdown(MarkdownPane {
                 doc,
                 is_md_doc: is_md,
@@ -1219,7 +1219,7 @@ impl App {
             doc,
             is_md_doc: true,
             raw_mode: false,
-            edit_lines: Vec::new(),
+            edit_lines: Arc::default(),
             cur_line: 0,
             cur_col: 0,
             scroll: 0,
