@@ -1893,23 +1893,7 @@ impl App {
     pub(crate) fn save_dirty_docs(&mut self, docs: &[(DirtyDoc, String)]) -> bool {
         let mut ok = true;
         for (doc, name) in docs {
-            let job = match doc {
-                DirtyDoc::Tab { pane, tab } => {
-                    let ws = self.ws.lock().unwrap();
-                    ws.panes
-                        .get(pane)
-                        .and_then(|p| p.tabs.get(*tab))
-                        .and_then(|t| t.markdown())
-                        .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()))
-                }
-                DirtyDoc::Aux(id) => self
-                    .aux_windows
-                    .iter()
-                    .find(|a| a.window.id() == *id)
-                    .and_then(|a| a.editor())
-                    .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone())),
-            };
-            let Some((text, path)) = job else { continue };
+            let Some((text, path)) = self.doc_text(doc) else { continue };
             if let Err(e) = crate::markdown::write_atomic(&path, &text) {
                 eprintln!("[editor] 저장 실패 {path}: {e}");
                 self.set_toast(format!("⚠ {name} 저장 실패: {e}"));
@@ -1929,27 +1913,111 @@ impl App {
         }
     }
 
+    /// Write every editor whose typing has gone quiet for the autosave delay,
+    /// and report when the next one comes due so the caller can park a timer
+    /// on it (the loop sleeps completely when idle — without a deadline the
+    /// last edit would sit unwritten until something else woke us).
+    ///
+    /// Silent by design: no toast, and a failure only logs. Autosave the user
+    /// didn't ask for shouldn't interrupt them; the unsaved dot stays up and
+    /// the close guard still catches it, which is the honest signal.
+    pub(crate) fn run_editor_autosave(&mut self) -> Option<Instant> {
+        let Some(delay) = self.set_autosave else { return None };
+        // "저장 / 저장 안 함" 을 묻는 중에 몰래 쓰면 '저장 안 함' 이 거짓말이 된다.
+        // 대화창이 닫힐 때까지 미룬다(취소하면 그때 정상 만기로 다시 걸린다).
+        if matches!(
+            self.confirm_close.as_ref().map(|c| &c.why),
+            Some(CloseWhy::Dirty(_))
+        ) {
+            return None;
+        }
+        let now = Instant::now();
+        let mut next: Option<Instant> = None;
+        // (문서 위치, 마지막 타자 시각) 을 먼저 모은다 — 저장은 ws 락 밖에서.
+        let mut ready: Vec<DirtyDoc> = Vec::new();
+        {
+            let ws = self.ws.lock().unwrap();
+            for (id, pane) in ws.panes.iter() {
+                for (t, tab) in pane.tabs.iter().enumerate() {
+                    let Some(at) = tab.markdown().and_then(|m| m.edited_at) else { continue };
+                    if now.duration_since(at) >= delay {
+                        ready.push(DirtyDoc::Tab { pane: id.clone(), tab: t });
+                    } else {
+                        let due = at + delay;
+                        next = Some(next.map_or(due, |n: Instant| n.min(due)));
+                    }
+                }
+            }
+        }
+        for a in self.aux_windows.iter() {
+            let Some(at) = a.editor().and_then(|m| m.edited_at) else { continue };
+            if now.duration_since(at) >= delay {
+                ready.push(DirtyDoc::Aux(a.window.id()));
+            } else {
+                let due = at + delay;
+                next = Some(next.map_or(due, |n: Instant| n.min(due)));
+            }
+        }
+        if !ready.is_empty() {
+            self.save_dirty_docs_quiet(&ready);
+            self.chrome_dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        next
+    }
+
+    /// `save_dirty_docs` without the failure toast — see `run_editor_autosave`.
+    fn save_dirty_docs_quiet(&mut self, docs: &[DirtyDoc]) {
+        for doc in docs {
+            let job = self.doc_text(doc);
+            let Some((text, path)) = job else { continue };
+            match crate::markdown::write_atomic(&path, &text) {
+                Ok(()) => self.mark_doc_clean(doc),
+                Err(e) => eprintln!("[editor] 자동 저장 실패 {path}: {e}"),
+            }
+        }
+    }
+
+    fn doc_text(&self, doc: &DirtyDoc) -> Option<(String, String)> {
+        match doc {
+            DirtyDoc::Tab { pane, tab } => {
+                let ws = self.ws.lock().unwrap();
+                ws.panes
+                    .get(pane)
+                    .and_then(|p| p.tabs.get(*tab))
+                    .and_then(|t| t.markdown())
+                    .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()))
+            }
+            DirtyDoc::Aux(id) => self
+                .aux_windows
+                .iter()
+                .find(|a| a.window.id() == *id)
+                .and_then(|a| a.editor())
+                .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone())),
+        }
+    }
+
     fn mark_doc_clean(&mut self, doc: &DirtyDoc) {
         match doc {
             DirtyDoc::Tab { pane, tab } => {
                 let mut ws = self.ws.lock().unwrap();
-                if let Some(m) = ws
-                    .panes
-                    .get_mut(pane)
-                    .and_then(|p| p.tabs.get_mut(*tab))
-                    .and_then(|t| t.markdown_mut())
-                {
-                    m.modified = false;
+                let Some(p) = ws.panes.get_mut(pane) else { return };
+                if let Some(m) = p.tabs.get_mut(*tab).and_then(|t| t.markdown_mut()) {
+                    m.mark_saved();
+                    // 미저장 점이 사라지려면 이 pane 이 다시 그려져야 한다.
+                    p.dirty = true;
                 }
             }
             DirtyDoc::Aux(id) => {
-                if let Some(m) = self
-                    .aux_windows
-                    .iter_mut()
-                    .find(|a| a.window.id() == *id)
-                    .and_then(|a| a.editor_mut())
-                {
-                    m.modified = false;
+                let Some(a) = self.aux_windows.iter_mut().find(|a| a.window.id() == *id)
+                else {
+                    return;
+                };
+                if let Some(m) = a.editor_mut() {
+                    m.mark_saved();
+                    a.window.request_redraw();
                 }
             }
         }

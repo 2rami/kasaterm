@@ -1504,6 +1504,10 @@ struct MarkdownPane {
     /// Buffer has edits not yet written to `doc.path`. Cleared by Cmd+S and
     /// the .md Raw→Render save; drives the ● unsaved dot on the tab label.
     modified: bool,
+    /// When the buffer was last touched. Autosave waits for this to go quiet
+    /// (VS Code's afterDelay), so a typing run writes once at the end instead
+    /// of once per keystroke. Set with `touch`, cleared on save.
+    edited_at: Option<Instant>,
     /// Selection anchor as (line, col) in chars; the cursor is the head, so
     /// anchor..cursor is the selection either direction. None = no selection.
     sel_anchor: Option<(usize, usize)>,
@@ -2760,6 +2764,8 @@ pub(crate) enum SettingsAction {
     FocusCwdPath,
     ToggleFileTree,
     ToggleFooter,
+    /// Editor autosave quiet period in ms; 0 = off.
+    AutosaveDelay(u64),
     ShellPreset(String),
     FocusShell,
     ThemeMode(&'static str),
@@ -3428,6 +3434,10 @@ struct App {
     set_cwd_mode: String,
     set_file_tree_default: bool,
     set_footer_default: bool,
+    /// Editor autosave quiet period. `None` = off, which is the default and
+    /// what VS Code ships — writing a user's file without being asked is a
+    /// surprise, so it stays opt-in. Cmd+S keeps its `✓ 저장됨` toast either way.
+    set_autosave: Option<std::time::Duration>,
     set_shell: String,
     /// Per-pane claude wrapper injection (the shim reads these): persona on/off,
     /// model/effort overrides, and free-form extra args. Invariants
@@ -3781,6 +3791,7 @@ impl App {
             set_cwd_mode: socket::read_default_cwd_mode(),
             set_file_tree_default: socket::read_file_tree_default(),
             set_footer_default: socket::read_footer_default(),
+            set_autosave: socket::read_editor_autosave(),
             set_shell: socket::read_default_shell().unwrap_or_default(),
             set_claude_persona: socket::read_claude_persona(),
             set_shim_inject: socket::read_shim_inject(),

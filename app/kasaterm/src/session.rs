@@ -1081,6 +1081,7 @@ impl App {
                 redo_stack: Vec::new(),
                 last_edit: EditKind::Break,
             find: None,
+            edited_at: None,
             })
         };
 
@@ -1229,6 +1230,7 @@ impl App {
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
             find: None,
+            edited_at: None,
         });
         tab.title = title;
         tab.title_pinned = true;

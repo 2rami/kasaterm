@@ -2089,6 +2089,14 @@ pub fn read_footer_default() -> bool {
         .unwrap_or(true)
 }
 
+/// Editor autosave quiet period in ms (`editor_autosave_ms`). 0 / missing =
+/// off. Clamped to 200ms..60s: below that every keystroke is a disk write,
+/// above it the setting stops being autosave in any useful sense.
+pub fn read_editor_autosave() -> Option<std::time::Duration> {
+    let ms = read_settings().get("editor_autosave_ms")?.as_u64()?;
+    (ms > 0).then(|| std::time::Duration::from_millis(ms.clamp(200, 60_000)))
+}
+
 /// User's preferred shell override (`default_shell` key). Empty/missing → None,
 /// letting `$SHELL`/login-shell detection take over.
 pub fn read_default_shell() -> Option<String> {

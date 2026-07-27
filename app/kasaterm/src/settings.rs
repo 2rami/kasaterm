@@ -29,6 +29,8 @@ pub(crate) struct SettingsCtx {
     pub cwd_mode: String,
     pub file_tree_default: bool,
     pub footer_default: bool,
+    /// Editor autosave quiet period in ms; 0 = off.
+    pub autosave_ms: u64,
     pub shell: String,
     pub input: Option<SettingsInput>,
     pub cursor: (f32, f32),
@@ -234,6 +236,10 @@ impl App {
         socket::write_setting("default_cwd", serde_json::Value::String(self.set_cwd_mode.clone()));
         socket::write_setting("file_tree_default", serde_json::Value::Bool(self.set_file_tree_default));
         socket::write_setting("pane_footer_default", serde_json::Value::Bool(self.set_footer_default));
+        socket::write_setting(
+            "editor_autosave_ms",
+            serde_json::Value::from(self.set_autosave.map_or(0, |d| d.as_millis() as u64)),
+        );
         socket::write_setting("default_shell", serde_json::Value::String(self.set_shell.clone()));
         socket::write_setting("claude_persona", serde_json::Value::Bool(self.set_claude_persona));
         socket::write_setting("shim_inject", serde_json::Value::Bool(self.set_shim_inject));
@@ -292,6 +298,7 @@ impl App {
             cwd_mode: self.set_cwd_mode.clone(),
             file_tree_default: self.set_file_tree_default,
             footer_default: self.set_footer_default,
+            autosave_ms: self.set_autosave.map_or(0, |d| d.as_millis() as u64),
             shell: self.set_shell.clone(),
             input: self.settings_input,
             cursor,
@@ -413,6 +420,10 @@ impl App {
                 self.statusbar.shown.clear();
                 let (cols, rows) = self.window_cells();
                 self.resize_backend(cols, rows);
+            }
+            SettingsAction::AutosaveDelay(ms) => {
+                self.set_autosave = (ms > 0).then(|| std::time::Duration::from_millis(ms));
+                self.settings_save();
             }
             SettingsAction::ShellPreset(s) => {
                 self.set_shell = s;
@@ -820,6 +831,24 @@ pub(crate) fn paint_settings(
                 rects.push((SettingsAction::ToggleFooter, fr));
             }
             y += 30.0 + ROW_GAP;
+            y = field_header(
+                g,
+                fx,
+                y,
+                clip,
+                "Editor autosave",
+                &["타자가 멎으면 편집기가 조용히 저장 (Cmd+S 는 그대로)"],
+            );
+            if y > clip {
+                let cells = [
+                    ("Off", ctx.autosave_ms == 0, SettingsAction::AutosaveDelay(0)),
+                    ("1s", ctx.autosave_ms == 1000, SettingsAction::AutosaveDelay(1000)),
+                    ("3s", ctx.autosave_ms == 3000, SettingsAction::AutosaveDelay(3000)),
+                    ("10s", ctx.autosave_ms == 10000, SettingsAction::AutosaveDelay(10000)),
+                ];
+                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
+            }
+            y += SEG_H + ROW_GAP;
             y = field_header(g, fx, y, clip, "Tab position", &["윈도우 탭을 상단 타이틀바 또는 좌측 사이드바에 표시"]);
             if y > clip {
                 let cells = [

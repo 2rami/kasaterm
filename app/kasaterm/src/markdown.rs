@@ -323,7 +323,7 @@ impl MarkdownPane {
         self.cur_line = s.0;
         self.cur_col = s.1;
         self.sel_anchor = None;
-        self.modified = true;
+        self.touch();
         true
     }
     fn snapshot(&self) -> EditSnapshot {
@@ -354,7 +354,7 @@ impl MarkdownPane {
         self.cur_col = snap.cur.1.min(self.edit_lines[self.cur_line].chars().count());
         self.sel_anchor = None;
         self.last_edit = EditKind::Break;
-        self.modified = true;
+        self.touch();
     }
 
     // ── Pure buffer-mutation core (shared by the active-pane path in `impl App`
@@ -402,7 +402,7 @@ impl MarkdownPane {
         s.insert_str(b, text);
         self.cur_line = line;
         self.cur_col = col + text.chars().count();
-        self.modified = true;
+        self.touch();
     }
 
     /// Move one line by a single indent step; returns the caret-column delta
@@ -461,7 +461,7 @@ impl MarkdownPane {
             }
             self.cur_line = line;
         }
-        self.modified = true;
+        self.touch();
     }
 
     /// Enter — split the line, carrying the indent and list/quote marker onto
@@ -485,7 +485,7 @@ impl MarkdownPane {
             self.edit_lines[line].clear();
             self.cur_line = line;
             self.cur_col = 0;
-            self.modified = true;
+            self.touch();
             return;
         }
         let carry = if at_body { p.next } else { String::new() };
@@ -496,12 +496,26 @@ impl MarkdownPane {
         self.edit_lines.insert(line + 1, rest);
         self.cur_line = line + 1;
         self.cur_col = carry.chars().count();
-        self.modified = true;
+        self.touch();
     }
 
     // ── Find / replace bar. Open == it owns typing, so the buffer can only
     // change under it through replace; that's why the hit list is a cache
     // refreshed at the few points that can invalidate it.
+
+    /// Buffer changed: raise the unsaved dot and restart the autosave quiet
+    /// period. Every mutation goes through here so no edit can slip past
+    /// autosave or the close guard by forgetting one of the two flags.
+    pub(crate) fn touch(&mut self) {
+        self.modified = true;
+        self.edited_at = Some(Instant::now());
+    }
+
+    /// Buffer matches disk again.
+    pub(crate) fn mark_saved(&mut self) {
+        self.modified = false;
+        self.edited_at = None;
+    }
 
     /// Open the bar, or expand it to replace if it's already open. The query
     /// seeds from the selection — "find what I just highlighted" is the common
@@ -584,7 +598,7 @@ impl MarkdownPane {
         self.cur_line = l;
         self.cur_col = c0 + with.chars().count();
         self.sel_anchor = None;
-        self.modified = true;
+        self.touch();
         // 바꾼 글자가 새 검색어와 겹칠 수 있으니(`a`→`aa`) 목록을 다시 만들고,
         // 캐럿 뒤 첫 매치로 간다 — 안 그러면 방금 넣은 글자를 또 바꾼다.
         self.find_refresh(true);
@@ -609,7 +623,7 @@ impl MarkdownPane {
         self.cur_line = l;
         self.cur_col = c0;
         self.sel_anchor = None;
-        self.modified = true;
+        self.touch();
         self.find_refresh(true);
         hits.len()
     }
@@ -858,7 +872,7 @@ impl MarkdownPane {
         self.cur_line = line;
         self.cur_col = col;
         if edited {
-            self.modified = true;
+            self.touch();
         }
         if is_motion {
             if !shift {
@@ -962,7 +976,7 @@ impl MarkdownPane {
         self.cur_line = cur;
         self.cur_col = self.edit_lines[cur].chars().count();
         self.edit_lines[cur].push_str(&tail);
-        self.modified = true;
+        self.touch();
     }
 
     /// Copy (or cut) the selection, returning its text. Cut deletes the range
@@ -1342,7 +1356,7 @@ impl App {
             match write_atomic(&path, &text) {
                 Ok(()) => {
                     if let Some(m) = pane.markdown_mut() {
-                        m.modified = false;
+                        m.mark_saved();
                     }
                     pane.dirty = true;
                     Ok(path)
@@ -1495,7 +1509,11 @@ impl App {
                 if let Some(m) = pane.markdown_mut() {
                     m.doc = Arc::new(doc);
                     m.raw_mode = false;
-                    m.modified = !saved;
+                    if saved {
+                        m.mark_saved();
+                    } else {
+                        m.touch();
+                    }
                     m.scroll = guess.unwrap_or(0.0).max(0.0) as usize;
                 }
                 pending = anchor;
@@ -1615,6 +1633,7 @@ mod tests {
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
             find: None,
+            edited_at: None,
         }
     }
 
@@ -1965,6 +1984,7 @@ mod tests {
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
             find: None,
+            edited_at: None,
         };
         m.ensure_raw_seeded();
         assert!(m.raw_mode);
