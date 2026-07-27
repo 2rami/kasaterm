@@ -1491,7 +1491,16 @@ struct MarkdownPane {
     /// false = Render (laid-out view), true = Raw (wgpu text editor).
     raw_mode: bool,
     /// Raw-mode edit buffer, one entry per line.
-    edit_lines: Vec<String>,
+    ///
+    /// Shared, not owned: the renderer takes a copy every frame (it reads under
+    /// the ws lock and draws after releasing it) and every undo snapshot takes
+    /// another. As a plain `Vec` that was a full deep copy of the file each
+    /// time — thousands of `String` allocations per frame on a big document.
+    /// Behind an `Arc` those are pointer bumps, and `Arc::make_mut` (see
+    /// `lines_mut`) pays for exactly one real copy per edit run: the first
+    /// keystroke after a snapshot, which is the copy `push_undo` was making
+    /// anyway.
+    edit_lines: Arc<Vec<String>>,
     /// Edit cursor: line index + column in chars.
     cur_line: usize,
     cur_col: usize,
@@ -1558,7 +1567,7 @@ struct FindState {
 /// One undo/redo unit for the raw editor: the full buffer + cursor.
 #[derive(Clone)]
 struct EditSnapshot {
-    lines: Vec<String>,
+    lines: Arc<Vec<String>>,
     cur: (usize, usize),
 }
 
