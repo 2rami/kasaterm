@@ -384,6 +384,7 @@ impl App {
             Option<((usize, usize), (usize, usize))>,
             f32,
             &'static str,
+            Option<FindState>,
         )> = Vec::new();
         // Per-pane body rect (header-excluded) in logical px, collected for
         // every pane so in-pane WebViews and other overlays can be snapped
@@ -542,6 +543,7 @@ impl App {
                     f32,
                     f32,
                     &'static str,
+                    Option<FindState>,
                 )> = pane.markdown().map(|m| {
                     (
                         m.doc.clone(),
@@ -556,6 +558,7 @@ impl App {
                         m.scroll as f32,
                         m.h_scroll,
                         code_lang_for_path(std::path::Path::new(&m.doc.path)),
+                        m.find.clone(),
                     )
                 });
                 let mut composed: Vec<Vec<GridCell>> = match pane.term() {
@@ -1299,7 +1302,8 @@ impl App {
                 if let Some(image) = img {
                     image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot, img_pan));
                 }
-                if let Some((doc, raw_mode, lines, cursor, sel, scroll, h_scroll, lang)) = md {
+                if let Some((doc, raw_mode, lines, cursor, sel, scroll, h_scroll, lang, find)) = md
+                {
                     md_slots.push((
                         id.clone(),
                         doc,
@@ -1311,6 +1315,7 @@ impl App {
                         sel,
                         h_scroll,
                         lang,
+                        find,
                     ));
                 }
                 // Box geometry (logical px). Right/bottom-edge panes stretch to
@@ -2089,18 +2094,56 @@ impl App {
             // Rebuilt fresh each frame so a pane toggled out of raw mode (or
             // closed) drops its caret hit box.
             self.md_body_rects.clear();
-            for (id, doc, (bx, by, bw, bh), scroll, raw_mode, lines, cursor, sel, h_scroll, lang) in
-                &md_slots
+            let mut find_btn_hits: Vec<(String, FindBtn, (f32, f32, f32, f32))> = Vec::new();
+            for (
+                id,
+                doc,
+                (bx, by, bw, bh),
+                scroll,
+                raw_mode,
+                lines,
+                cursor,
+                sel,
+                h_scroll,
+                lang,
+                find,
+            ) in &md_slots
             {
                 let content_h = if *raw_mode {
                     let lines = lines.as_deref().unwrap_or(&[]);
                     // Stash the body box so a mouse click can hit-test to a caret
                     // position (md_click_caret reads this).
                     self.md_body_rects.insert(id.clone(), (*bx, *by, *bw, *bh));
-                    g.draw_raw_editor(
-                        lines, *cursor, *sel, *bx, *by, *bw, *bh, *scroll, *h_scroll, lang,
-                        &md_preedit, raw_cursor_on,
-                    )
+                    // 조합 중인 한글은 포커스를 가진 쪽에 그린다 — 찾기 바가
+                    // 열려 있는데 문서 캐럿에 preedit 이 뜨면 어디에 쓰고 있는지
+                    // 화면이 거짓말을 한다.
+                    let (body_pe, bar_pe): (&str, &str) = match find {
+                        Some(_) => ("", md_preedit.as_str()),
+                        None => (md_preedit.as_str(), ""),
+                    };
+                    let h = g.draw_raw_editor(
+                        lines,
+                        *cursor,
+                        *sel,
+                        *bx,
+                        *by,
+                        *bw,
+                        *bh,
+                        *scroll,
+                        *h_scroll,
+                        lang,
+                        body_pe,
+                        raw_cursor_on,
+                        find.as_ref().map(|f| (f.hits.as_slice(), f.idx)),
+                    );
+                    if let Some(f) = find {
+                        for (btn, r) in
+                            Self::draw_find_bar(g, f, *bx, *by, *bw, bar_pe, raw_cursor_on)
+                        {
+                            find_btn_hits.push((id.clone(), btn, r));
+                        }
+                    }
+                    h
                 } else {
                     // Upload this doc's inline images once (keyed per block).
                     for im in &doc.images {
@@ -2135,6 +2178,7 @@ impl App {
                 };
                 self.md_content_h.insert(id.clone(), content_h);
             }
+            self.md_find_rects = find_btn_hits;
             // Title strip fill: the unified BG so the top bar reads as one
             // surface with the sidebar and terminal body (no depth seam).
             g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::bg());
@@ -5836,6 +5880,180 @@ impl App {
                 w.request_redraw();
             }
         }
+    }
+
+    /// Find/replace bar, floated over the top-right of a raw editor's body box
+    /// (`x`/`y`/`w`). Returns its clickable rects in logical px.
+    ///
+    /// It overlays rather than pushing the text down, so opening it never
+    /// reflows what you were reading — the same reason VS Code floats its own.
+    fn draw_find_bar(
+        g: &mut gpu::GpuRenderer,
+        f: &FindState,
+        x: f32,
+        y: f32,
+        w: f32,
+        preedit: &str,
+        caret_on: bool,
+    ) -> Vec<(FindBtn, (f32, f32, f32, f32))> {
+        const PAD: f32 = 8.0;
+        const ROW: f32 = 26.0;
+        const BTN: f32 = 24.0;
+        const FIELD_W: f32 = 190.0;
+        const COUNT_W: f32 = 58.0;
+        const TOGGLE_W: f32 = 16.0;
+        const FS: f32 = 12.0;
+        let mut hits = Vec::new();
+
+        let bar_w = PAD + TOGGLE_W + 6.0 + FIELD_W + COUNT_W + 6.0 + BTN * 3.0 + PAD;
+        let rows = if f.replacing { 2.0 } else { 1.0 };
+        let bar_h = PAD + ROW * rows + (rows - 1.0) * 4.0 + PAD;
+        let x0 = (x + w - bar_w - 10.0).max(x + 4.0);
+        let y0 = y + 6.0;
+        // 얇은 테두리는 바깥에 한 겹 더 그려서 낸다 — 편집기 본문 위에 뜨는
+        // 물건이라 경계가 없으면 글자에 파묻힌다.
+        round_rect(g, x0 - 1.0, y0 - 1.0, bar_w + 2.0, bar_h + 2.0, theme::RADIUS_MD + 1.0, theme::border());
+        round_rect(g, x0, y0, bar_w, bar_h, theme::RADIUS_MD, theme::surface());
+
+        let text_baseline = |row_y: f32| row_y + (ROW - FS) * 0.5 - 1.0;
+        let row1 = y0 + PAD;
+
+        // 바꾸기 행 펼침/접기.
+        let tg = (x0 + PAD, row1 + (ROW - TOGGLE_W) * 0.5, TOGGLE_W, TOGGLE_W);
+        g.queue_icon(
+            if f.replacing { "chevron-down" } else { "chevron-right" },
+            tg.0,
+            tg.1,
+            TOGGLE_W,
+            theme::text_dim(),
+        );
+        hits.push((FindBtn::ToggleReplace, (tg.0 - 2.0, row1, TOGGLE_W + 4.0, ROW)));
+
+        // 입력칸 하나를 그린다. 넘치는 글자는 왼쪽으로 밀어 끝(캐럿 쪽)을
+        // 보여 준다 — 앞머리만 남으면 지금 뭘 치고 있는지 안 보인다.
+        let field_x = x0 + PAD + TOGGLE_W + 6.0;
+        let field = |g: &mut gpu::GpuRenderer,
+                         row_y: f32,
+                         width: f32,
+                         text: &str,
+                         placeholder: &str,
+                         focused: bool,
+                         pe: &str| {
+            round_rect(g, field_x, row_y, width, ROW, theme::RADIUS_SM, theme::bg());
+            if focused {
+                round_rect(g, field_x, row_y, width, ROW, theme::RADIUS_SM, theme::with_alpha(theme::accent(), 0x22));
+            }
+            let inner_l = field_x + 7.0;
+            let inner_r = field_x + width - 7.0;
+            let by = text_baseline(row_y);
+            if text.is_empty() && pe.is_empty() {
+                g.draw_text(
+                    inner_l,
+                    by,
+                    placeholder,
+                    gpu::DrawOpts { font_size: FS, color: theme::text_mute(), bold: false, italic: false },
+                );
+                if focused && caret_on {
+                    g.rect(inner_l, row_y + 5.0, 1.5, ROW - 10.0, theme::accent());
+                }
+                return;
+            }
+            let tw = g.measure_chrome_text(text, FS, false)
+                + if pe.is_empty() { 0.0 } else { g.measure_chrome_text(pe, FS, false) };
+            let shift = (tw - (inner_r - inner_l)).max(0.0);
+            let mut pen = g.draw_text_clipped(
+                inner_l - shift,
+                by,
+                text,
+                gpu::DrawOpts { font_size: FS, color: theme::text(), bold: false, italic: false },
+                inner_l,
+                inner_r,
+            );
+            if !pe.is_empty() {
+                let pw = g.measure_chrome_text(pe, FS, false);
+                pen = g.draw_text_clipped(
+                    pen,
+                    by,
+                    pe,
+                    gpu::DrawOpts { font_size: FS, color: theme::text(), bold: false, italic: false },
+                    inner_l,
+                    inner_r,
+                );
+                g.rect(pen - pw, row_y + ROW - 6.0, pw, 1.5, theme::accent());
+            }
+            if focused && caret_on && pen <= inner_r {
+                g.rect(pen + 1.0, row_y + 5.0, 1.5, ROW - 10.0, theme::accent());
+            }
+        };
+
+        field(
+            g,
+            row1,
+            FIELD_W,
+            &f.query,
+            "찾기",
+            !f.focus_replace,
+            preedit,
+        );
+
+        // n/m — 검색어가 있는데 0건이면 빨갛게. 빈 검색어는 아무 말도 안 한다.
+        let count = if f.query.is_empty() {
+            String::new()
+        } else if f.hits.is_empty() {
+            "결과 없음".to_string()
+        } else {
+            format!("{}/{}", f.idx + 1, f.hits.len())
+        };
+        if !count.is_empty() {
+            let col = if f.hits.is_empty() { theme::danger() } else { theme::text_dim() };
+            let cw = g.measure_chrome_text(&count, FS, false);
+            g.draw_text(
+                field_x + FIELD_W + COUNT_W - 8.0 - cw,
+                text_baseline(row1),
+                &count,
+                gpu::DrawOpts { font_size: FS, color: col, bold: false, italic: false },
+            );
+        }
+
+        let btn_x = field_x + FIELD_W + COUNT_W + 6.0;
+        for (i, (icon, btn)) in [
+            ("chevron-up", FindBtn::Prev),
+            ("chevron-down", FindBtn::Next),
+            ("x", FindBtn::Close),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bx = btn_x + BTN * i as f32;
+            let dim = f.hits.is_empty() && btn != FindBtn::Close;
+            g.queue_icon(
+                icon,
+                bx + (BTN - 14.0) * 0.5,
+                row1 + (ROW - 14.0) * 0.5,
+                14.0,
+                if dim { theme::text_mute() } else { theme::text_dim() },
+            );
+            hits.push((btn, (bx, row1, BTN, ROW)));
+        }
+
+        if f.replacing {
+            let row2 = row1 + ROW + 4.0;
+            field(g, row2, FIELD_W, &f.replace, "바꾸기", f.focus_replace, "");
+            let mut lx = field_x + FIELD_W + 6.0;
+            for (label, btn) in [("바꾸기", FindBtn::ReplaceOne), ("전부", FindBtn::ReplaceAll)] {
+                let lw = g.measure_chrome_text(label, FS, false) + 14.0;
+                round_rect(g, lx, row2 + 2.0, lw, ROW - 4.0, theme::RADIUS_SM, theme::surface_hover());
+                g.draw_text(
+                    lx + 7.0,
+                    text_baseline(row2),
+                    label,
+                    gpu::DrawOpts { font_size: FS, color: theme::text_dim(), bold: false, italic: false },
+                );
+                hits.push((btn, (lx, row2, lw, ROW)));
+                lx += lw + 5.0;
+            }
+        }
+        hits
     }
 
     pub(crate) fn render_frame(&mut self) {

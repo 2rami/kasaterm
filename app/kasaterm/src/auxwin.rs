@@ -134,6 +134,10 @@ impl AuxWindow {
                     lang,
                     &pe,
                     cursor_on,
+                    // 팝아웃 창엔 아직 찾기 바가 없다(Cmd+F 는 aux 단축키
+                    // 경로라 열리지 않는다) — 하이라이트만 켜면 켤 방법이
+                    // 없는 표시가 남는다.
+                    None,
                 );
             }
             // Settings/Terminal 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
@@ -296,6 +300,7 @@ impl App {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
+            find: None,
         };
         self.spawn_aux_editor(md, event_loop, None);
     }

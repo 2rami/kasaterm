@@ -1666,7 +1666,6 @@ impl GpuRenderer {
         Some(spans)
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Raw-editor row metrics for the current font: (top pad, line height) in
     /// logical px. `draw_raw_editor` lays lines out at `pad + line * lh`, and
     /// `set_md_mode` inverts that to turn a scroll offset into a line number —
@@ -1677,6 +1676,10 @@ impl GpuRenderer {
         (base * 0.6, lh)
     }
 
+    /// `find` = the find bar's matches as (line, start col, end col) plus the
+    /// index of the highlighted one. Every match gets a band, so the spread of
+    /// hits down the page is visible, not just the one you're standing on.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_raw_editor(
         &mut self,
         lines: &[String],
@@ -1691,6 +1694,7 @@ impl GpuRenderer {
         lang: &str,
         preedit: &str,
         cursor_on: bool,
+        find: Option<(&[(usize, usize, usize)], usize)>,
     ) -> f32 {
         let clip_right = x + w;
         let base = self.font_size_px as f32 / self.scale;
@@ -1749,6 +1753,26 @@ impl GpuRenderer {
                                 lh,
                                 crate::theme::with_alpha(crate::theme::accent(), 0x4A),
                             );
+                        }
+                    }
+                }
+                // Find matches on this line, under the text like the selection.
+                // The active one is opaque-ish, the rest are a faint wash.
+                if let Some((hits, active)) = find {
+                    for (hi, &(hl, c0, c1)) in hits.iter().enumerate() {
+                        if hl != li {
+                            continue;
+                        }
+                        let p0: String = line.chars().take(c0).collect();
+                        let p1: String = line.chars().take(c1).collect();
+                        let sx0 = tx0 + self.measure_run(&p0, base, false, false, true, false);
+                        let sx1 = tx0 + self.measure_run(&p1, base, false, false, true, false);
+                        let rx0 = sx0.max(cx0);
+                        let rx1 = sx1.min(clip_right);
+                        if rx1 > rx0 {
+                            let a = if hi == active { 0x99 } else { 0x38 };
+                            let col = crate::theme::with_alpha(crate::theme::syn_type(), a);
+                            self.rect(rx0, pen_y, rx1 - rx0, lh, col);
                         }
                     }
                 }

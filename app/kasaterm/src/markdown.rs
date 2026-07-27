@@ -106,6 +106,43 @@ pub(crate) fn line_prefix(line: &str) -> LinePrefix {
     plain
 }
 
+/// Every match of `query` in `lines` as (line, start col, end col) in chars,
+/// document order, non-overlapping. Smart case: an all-lowercase query ignores
+/// case, one with any uppercase matches exactly — the ripgrep/Vim rule, which
+/// buys the useful half of a case toggle without a button to find.
+///
+/// Comparison is char-wise rather than on a lowercased copy of the line:
+/// `to_lowercase` can change a string's length, which would slide every column
+/// after it and land the highlight on the wrong glyph.
+pub(crate) fn find_hits(lines: &[String], query: &str) -> Vec<(usize, usize, usize)> {
+    let q: Vec<char> = query.chars().collect();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let cased = q.iter().any(|c| c.is_uppercase());
+    let eq = |a: char, b: char| {
+        if cased {
+            a == b
+        } else {
+            a.to_lowercase().eq(b.to_lowercase())
+        }
+    };
+    let mut out = Vec::new();
+    for (li, line) in lines.iter().enumerate() {
+        let cs: Vec<char> = line.chars().collect();
+        let mut i = 0;
+        while i + q.len() <= cs.len() {
+            if (0..q.len()).all(|k| eq(cs[i + k], q[k])) {
+                out.push((li, i, i + q.len()));
+                i += q.len();
+            } else {
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Chars one outdent step removes from the head of `line`: a tab, or up to one
 /// `INDENT` worth of spaces. Markdown written elsewhere may use tabs, and
 /// Shift+Tab should still bite on those lines.
@@ -394,6 +431,171 @@ impl MarkdownPane {
         self.cur_line = line + 1;
         self.cur_col = carry.chars().count();
         self.modified = true;
+    }
+
+    // ── Find / replace bar. Open == it owns typing, so the buffer can only
+    // change under it through replace; that's why the hit list is a cache
+    // refreshed at the few points that can invalidate it.
+
+    /// Open the bar, or expand it to replace if it's already open. The query
+    /// seeds from the selection — "find what I just highlighted" is the common
+    /// case, and re-pressing Cmd+F on a new selection re-seeds it.
+    pub(crate) fn find_open(&mut self, replacing: bool) {
+        let seed = self.selected_text().filter(|s| !s.contains('\n'));
+        let f = self.find.get_or_insert_with(|| FindState {
+            query: String::new(),
+            replace: String::new(),
+            replacing: false,
+            focus_replace: false,
+            hits: Vec::new(),
+            idx: 0,
+        });
+        if let Some(s) = seed {
+            f.query = s;
+        }
+        f.replacing |= replacing;
+        f.focus_replace = replacing && !f.query.is_empty();
+        self.find_refresh(true);
+    }
+
+    /// Close the bar and hand typing back to the buffer.
+    pub(crate) fn find_close(&mut self) {
+        self.find = None;
+        self.sel_anchor = None;
+    }
+
+    /// Rebuild the hit list. `seek` parks the highlight on the first match at
+    /// or after the caret (a fresh query starts from where you are, not from
+    /// the top of the file); otherwise the current index is only clamped, so a
+    /// replace doesn't throw you back to match one.
+    pub(crate) fn find_refresh(&mut self, seek: bool) {
+        let Some(f) = self.find.as_mut() else { return };
+        f.hits = find_hits(&self.edit_lines, &f.query);
+        if f.hits.is_empty() {
+            f.idx = 0;
+            return;
+        }
+        if seek {
+            let from = (self.cur_line, self.cur_col);
+            f.idx = f.hits.iter().position(|h| (h.0, h.1) >= from).unwrap_or(0);
+        } else {
+            f.idx = f.idx.min(f.hits.len() - 1);
+        }
+        self.find_reveal();
+    }
+
+    /// Put the caret on the highlighted match and select it, so Esc leaves you
+    /// exactly where the search landed.
+    fn find_reveal(&mut self) {
+        let Some(&(l, c0, c1)) = self.find.as_ref().and_then(|f| f.hits.get(f.idx)) else {
+            return;
+        };
+        self.sel_anchor = Some((l, c0));
+        self.cur_line = l;
+        self.cur_col = c1;
+    }
+
+    /// Next (or previous) match, wrapping at the ends.
+    pub(crate) fn find_step(&mut self, back: bool) {
+        let Some(f) = self.find.as_mut() else { return };
+        let n = f.hits.len();
+        if n == 0 {
+            return;
+        }
+        f.idx = if back { (f.idx + n - 1) % n } else { (f.idx + 1) % n };
+        self.find_reveal();
+    }
+
+    /// Replace the highlighted match, then land on the next one.
+    pub(crate) fn find_replace_one(&mut self) {
+        let Some(f) = self.find.as_ref() else { return };
+        let Some(&(l, c0, c1)) = f.hits.get(f.idx) else { return };
+        let with = f.replace.clone();
+        self.push_undo(EditKind::Other);
+        let s = &mut self.edit_lines[l];
+        let (b0, b1) = (char_byte(s, c0), char_byte(s, c1));
+        s.replace_range(b0..b1, &with);
+        self.cur_line = l;
+        self.cur_col = c0 + with.chars().count();
+        self.sel_anchor = None;
+        self.modified = true;
+        // 바꾼 글자가 새 검색어와 겹칠 수 있으니(`a`→`aa`) 목록을 다시 만들고,
+        // 캐럿 뒤 첫 매치로 간다 — 안 그러면 방금 넣은 글자를 또 바꾼다.
+        self.find_refresh(true);
+    }
+
+    /// Replace every match as one undo unit. Returns how many.
+    pub(crate) fn find_replace_all(&mut self) -> usize {
+        let Some(f) = self.find.as_ref() else { return 0 };
+        let hits = f.hits.clone();
+        let with = f.replace.clone();
+        if hits.is_empty() {
+            return 0;
+        }
+        self.push_undo(EditKind::Other);
+        // 뒤에서부터 — 앞을 먼저 바꾸면 같은 줄 뒤쪽 열 번호가 전부 밀린다.
+        for &(l, c0, c1) in hits.iter().rev() {
+            let s = &mut self.edit_lines[l];
+            let (b0, b1) = (char_byte(s, c0), char_byte(s, c1));
+            s.replace_range(b0..b1, &with);
+        }
+        let (l, c0, _) = hits[0];
+        self.cur_line = l;
+        self.cur_col = c0;
+        self.sel_anchor = None;
+        self.modified = true;
+        self.find_refresh(true);
+        hits.len()
+    }
+
+    /// Type into the focused field (a committed Hangul syllable arrives here
+    /// too, which is why it isn't folded into the key handler).
+    pub(crate) fn find_type(&mut self, text: &str) {
+        let Some(f) = self.find.as_mut() else { return };
+        if f.focus_replace {
+            f.replace.push_str(text);
+            return;
+        }
+        f.query.push_str(text);
+        self.find_refresh(true);
+    }
+
+    /// One key for the open bar. Returns false when the key isn't the bar's —
+    /// the caller swallows it rather than letting it reach the buffer, since
+    /// the bar holds focus.
+    pub(crate) fn find_key(&mut self, event: &KeyEvent, shift: bool) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let Some(f) = self.find.as_mut() else { return false };
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => self.find_close(),
+            Key::Named(NamedKey::Enter) => {
+                if f.focus_replace && !shift {
+                    self.find_replace_one();
+                } else {
+                    self.find_step(shift);
+                }
+            }
+            Key::Named(NamedKey::Tab) => {
+                if f.replacing {
+                    f.focus_replace = !f.focus_replace;
+                }
+            }
+            // 칸 안에서 캐럿을 옮기는 편집은 없으니(끝에 붙이고 지우는 게 전부)
+            // 위아래는 결과 이동에 준다 — 삼키면 죽은 키가 된다.
+            Key::Named(NamedKey::ArrowUp) => self.find_step(true),
+            Key::Named(NamedKey::ArrowDown) => self.find_step(false),
+            Key::Named(NamedKey::Backspace) => {
+                let field = if f.focus_replace { &mut f.replace } else { &mut f.query };
+                field.pop();
+                if !f.focus_replace {
+                    self.find_refresh(true);
+                }
+            }
+            Key::Named(NamedKey::Space) => self.find_type(" "),
+            Key::Character(t) => self.find_type(t),
+            _ => return false,
+        }
+        true
     }
 
     /// Apply one editing/motion key to the buffer. `shift`/`alt` are the live
@@ -721,7 +923,13 @@ impl App {
             let Some(pane) = ws.active_mut() else { return };
             pane.dirty = true;
             let Some(m) = pane.markdown_mut() else { return };
-            m.insert_at_caret(text);
+            // 찾기 바가 열려 있으면 타이핑은 검색어로 간다 — 조합이 끝난 한글
+            // 음절도 이 문을 지나므로 여기서 갈라야 한글 검색이 된다.
+            if m.find.is_some() {
+                m.find_type(text);
+            } else {
+                m.insert_at_caret(text);
+            }
         }
         self.md_ensure_caret_visible();
     }
@@ -784,7 +992,14 @@ impl App {
             let Some(pane) = ws.active_mut() else { return };
             pane.dirty = true;
             let Some(m) = pane.markdown_mut() else { return };
-            m.apply_edit_key(event, shift, alt, page_lines);
+            // 찾기 바가 열려 있는 동안은 그쪽이 키보드를 가진다. 바가 안 쓰는
+            // 키도 버퍼로 흘려보내지 않는다 — Enter 한 번에 검색 결과로 가려다
+            // 문서에 줄이 끼는 일이 없어야 한다.
+            if m.find.is_some() {
+                m.find_key(event, shift);
+            } else {
+                m.apply_edit_key(event, shift, alt, page_lines);
+            }
         }
         self.md_ensure_caret_visible();
     }
@@ -872,8 +1087,76 @@ impl App {
                 self.md_cmd_arrow(code);
                 true
             }
+            // Cmd+F 찾기, Cmd+Opt+F 는 바꾸기 행까지. 이미 열려 있으면 선택으로
+            // 검색어를 다시 채운다 — VS Code 와 같은 결.
+            KeyCode::KeyF => {
+                let replacing = self.modifiers.alt_key();
+                self.md_with_editor(|m| m.find_open(replacing));
+                true
+            }
+            KeyCode::KeyG => {
+                let back = self.modifiers.shift_key();
+                self.md_with_editor(|m| m.find_step(back));
+                true
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter if self.modifiers.alt_key() => {
+                let n = self.md_with_editor(|m| m.find_replace_all()).unwrap_or(0);
+                if n > 0 {
+                    self.set_toast(format!("✓ {n}곳 바꿈"));
+                }
+                true
+            }
             _ => false,
         }
+    }
+
+    /// A press inside `pane_id`'s find bar: run the button under the cursor and
+    /// report that the click was consumed. False means the bar didn't want it.
+    pub(crate) fn md_find_click(&mut self, pane_id: &str) -> bool {
+        let (cx, cy) = self.cursor_px;
+        let Some(btn) = self
+            .md_find_rects
+            .iter()
+            .find(|(id, _, r)| {
+                id == pane_id && cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+            })
+            .map(|(_, b, _)| *b)
+        else {
+            return false;
+        };
+        match btn {
+            FindBtn::ToggleReplace => self.md_with_editor(|m| {
+                if let Some(f) = m.find.as_mut() {
+                    f.replacing = !f.replacing;
+                    f.focus_replace = f.replacing;
+                }
+            }),
+            FindBtn::Prev => self.md_with_editor(|m| m.find_step(true)),
+            FindBtn::Next => self.md_with_editor(|m| m.find_step(false)),
+            FindBtn::Close => self.md_with_editor(|m| m.find_close()),
+            FindBtn::ReplaceOne => self.md_with_editor(|m| m.find_replace_one()),
+            FindBtn::ReplaceAll => {
+                let n = self.md_with_editor(|m| m.find_replace_all()).unwrap_or(0);
+                if n > 0 {
+                    self.set_toast(format!("✓ {n}곳 바꿈"));
+                }
+                None
+            }
+        };
+        true
+    }
+
+    /// Run `f` against the active pane's editor, marking it dirty. Returns None
+    /// when the active pane isn't one.
+    fn md_with_editor<T>(&mut self, f: impl FnOnce(&mut MarkdownPane) -> T) -> Option<T> {
+        let out = {
+            let mut ws = self.ws.lock().ok()?;
+            let pane = ws.active_mut()?;
+            pane.dirty = true;
+            Some(f(pane.markdown_mut()?))
+        };
+        self.md_ensure_caret_visible();
+        out
     }
     /// Cmd+arrow jumps for the raw editor (see `md_editor_shortcut`).
     fn md_cmd_arrow(&mut self, code: winit::keyboard::KeyCode) {
@@ -1257,6 +1540,7 @@ mod tests {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
+            find: None,
         }
     }
 
@@ -1345,6 +1629,66 @@ mod tests {
         m.indent(false);
         assert_eq!(m.edit_lines, vec!["문  단"]);
         assert_eq!(m.cur_col, 3);
+    }
+
+    #[test]
+    fn find_hits_are_smart_cased_and_non_overlapping() {
+        let l: Vec<String> = ["Foo foo FOO", "aaaa", ""].iter().map(|s| s.to_string()).collect();
+        // 소문자 검색어 → 대소문자 무시.
+        assert_eq!(find_hits(&l, "foo"), vec![(0, 0, 3), (0, 4, 7), (0, 8, 11)]);
+        // 대문자가 하나라도 있으면 그대로 맞춘다.
+        assert_eq!(find_hits(&l, "Foo"), vec![(0, 0, 3)]);
+        // 겹치지 않는다 — `aa` 는 aaaa 에서 둘.
+        assert_eq!(find_hits(&l, "aa"), vec![(1, 0, 2), (1, 2, 4)]);
+        assert!(find_hits(&l, "").is_empty());
+        // 한글도 열 번호가 문자 기준이라 바이트에 밀리지 않는다.
+        let k = vec!["가나다 나다".to_string()];
+        assert_eq!(find_hits(&k, "나다"), vec![(0, 1, 3), (0, 4, 6)]);
+    }
+
+    #[test]
+    fn find_steps_wrap_and_carry_the_caret() {
+        let mut m = pane(&["foo", "bar foo"]);
+        m.find_open(false);
+        m.find_type("foo");
+        // 캐럿이 0,0 이라 첫 매치부터.
+        assert_eq!(m.find.as_ref().unwrap().hits.len(), 2);
+        assert_eq!((m.cur_line, m.cur_col), (0, 3));
+        assert_eq!(m.sel_anchor, Some((0, 0)));
+        m.find_step(false);
+        assert_eq!((m.cur_line, m.cur_col), (1, 7));
+        // 끝에서 한 번 더 → 처음으로 돈다.
+        m.find_step(false);
+        assert_eq!(m.find.as_ref().unwrap().idx, 0);
+        m.find_step(true);
+        assert_eq!(m.find.as_ref().unwrap().idx, 1);
+    }
+
+    #[test]
+    fn replace_all_keeps_later_columns_valid() {
+        let mut m = pane(&["ab ab ab", "ab"]);
+        m.find_open(false);
+        m.find_type("ab");
+        m.find.as_mut().unwrap().replace = "xyzw".into();
+        assert_eq!(m.find_replace_all(), 4);
+        assert_eq!(m.edit_lines, vec!["xyzw xyzw xyzw", "xyzw"]);
+        // 한 번 되돌리면 통째로 원복 — 전체 바꾸기는 undo 한 단위다.
+        m.do_undo();
+        assert_eq!(m.edit_lines, vec!["ab ab ab", "ab"]);
+    }
+
+    /// 바꾼 결과가 검색어를 다시 품으면(`a`→`aa`) 방금 넣은 글자를 또 잡아
+    /// 제자리걸음 한다 — 한 번 바꾼 뒤엔 캐럿 뒤로 넘어가야 한다.
+    #[test]
+    fn replace_one_does_not_rematch_what_it_just_wrote() {
+        let mut m = pane(&["a a"]);
+        m.find_open(false);
+        m.find_type("a");
+        m.find.as_mut().unwrap().replace = "aa".into();
+        m.find_replace_one();
+        assert_eq!(m.edit_lines, vec!["aa a"]);
+        m.find_replace_one();
+        assert_eq!(m.edit_lines, vec!["aa aa"]);
     }
 
     #[test]
@@ -1546,6 +1890,7 @@ mod tests {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
+            find: None,
         };
         m.ensure_raw_seeded();
         assert!(m.raw_mode);
