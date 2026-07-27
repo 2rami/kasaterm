@@ -5068,17 +5068,24 @@ mod tests {
             App::count_claude_panes(&serde_json::json!({ "sessions": [] })),
             0
         );
-        // 캐릭터가 있으면 was_claude 감지가 실패(순수 셸로 오인)해도 복원 대상으로
-        // 카운트한다 — 오케스트레이터 pane 이 저장 순간 claude 미감지돼도 되살린다.
+        // 캐릭터는 claude 증거가 아니다 — assign_character_env 가 spawn 때 모든
+        // pane 에 배정하므로, 이걸 세면 순수 셸 3개짜리 창이 "claude 세션 3개"로
+        // 표시된다(실제 발생). 이 단언이 그 회귀를 막는다.
         let char_only = serde_json::json!({ "sessions": [{ "windows": [{
             "leaf": { "cwd": "/repo", "was_claude": false, "session_id": null, "character": "아루" }
         }]}]});
-        assert_eq!(App::count_claude_panes(&char_only), 1);
-        // 빈 문자열 character 는 캐릭터 미배정이라 카운트하지 않는다.
-        let empty_char = serde_json::json!({ "sessions": [{ "windows": [{
-            "leaf": { "cwd": "/repo", "was_claude": false, "character": "" }
+        assert_eq!(App::count_claude_panes(&char_only), 0, "캐릭터만으론 claude 아님");
+        // was_claude 감지 실패(저장 순간 claude 가 포그라운드가 아님) 보정은
+        // session_id 로 한다 — claude 가 실제로 세션을 바인딩했을 때만 붙는다.
+        let sid_only = serde_json::json!({ "sessions": [{ "windows": [{
+            "leaf": { "cwd": "/repo", "was_claude": false, "session_id": "abcd-1234" }
         }]}]});
-        assert_eq!(App::count_claude_panes(&empty_char), 0);
+        assert_eq!(App::count_claude_panes(&sid_only), 1, "바인딩된 세션은 claude");
+        // 프롬프트를 띄울 기준은 전체 pane 수 — claude 가 0이어도 레이아웃과
+        // 스크롤백은 되살릴 값이 있다.
+        assert_eq!(App::count_panes(&state), 5, "null leaf 포함 전체 leaf");
+        assert_eq!(App::count_panes(&char_only), 1);
+        assert_eq!(App::count_panes(&serde_json::json!({})), 0);
     }
 
     #[test]
