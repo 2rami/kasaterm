@@ -4358,6 +4358,14 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_auxpopout(event_loop);
         self.run_pending_autoundock(event_loop);
         self.drain_aux_captures();
+        // 편집기 자동 저장 — 타자가 멎은 지 설정 시간이 지난 버퍼를 쓴다.
+        // 반환된 다음 만기는 아래 control flow 에 넣는다. 실측하면 이게 없어도
+        // 저장은 되는데, 커서 블링크 스레드가 530ms 마다 무조건 루프를 깨워
+        // about_to_wait 이 계속 돌기 때문이다 — 즉 지금은 무관한 장식용 타이머에
+        // 얹혀 가는 셈이다. 블링크가 언젠가 조건부가 되면(창이 비활성일 때 안
+        // 깜빡이는 건 충분히 있을 법하다) 조용한 편집기가 소리 없이 안 써진다.
+        // 대기 중인 게 없으면 None 이라 유휴 비용은 0.
+        let autosave_due = self.run_editor_autosave();
         // Pure event-driven loop, like Ghostty. A WaitUntil timer poll
         // gets coalesced by macOS, so a cross-thread wake (PTY echo via
         // the proxy) landed anywhere from 6ms to ~290ms late — that was
@@ -4410,17 +4418,21 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
-        } else if self.session_touched {
-            // 강제 종료 대비 스냅샷은 "조용해진 직후"가 가장 중요한데, 이 앱은
-            // 할 일이 없으면 Wait 로 완전히 잠들어(CPU 0) about_to_wait 자체가
-            // 안 돈다. 그대로 두면 마지막 변경이 디스크에 안 남은 채 몇 시간
-            // 방치될 수 있다. dirty 인 동안만 깨어날 시각을 걸어 한 번 flush 하고,
-            // 그 뒤엔 다시 완전한 Wait 로 돌아간다(idle 상시 폴링 아님).
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                self.session_saved_at + crate::SESSION_AUTOSAVE_PERIOD,
-            ));
         } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            // 지연 flush 두 종(세션 스냅샷·편집기 자동 저장)은 "조용해진 직후"가
+            // 가장 중요하다. dirty 인 동안만 이른 쪽 만기를 걸어 그때 한 번
+            // flush 하고, 끝나면 다시 완전한 Wait 로 돌아간다(idle 상시 폴링
+            // 아님). 이 만기에만 기대야 하는 이유는 위 `autosave_due` 주석 참고.
+            let deadline = self
+                .session_touched
+                .then(|| self.session_saved_at + crate::SESSION_AUTOSAVE_PERIOD)
+                .into_iter()
+                .chain(autosave_due)
+                .min();
+            event_loop.set_control_flow(match deadline {
+                Some(at) => ControlFlow::WaitUntil(at),
+                None => ControlFlow::Wait,
+            });
         }
     }
 

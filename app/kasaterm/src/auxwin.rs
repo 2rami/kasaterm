@@ -301,6 +301,7 @@ impl App {
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
             find: None,
+            edited_at: None,
         };
         self.spawn_aux_editor(md, event_loop, None);
     }
@@ -725,7 +726,7 @@ impl App {
         match crate::markdown::write_atomic(&path, &text) {
             Ok(()) => {
                 if let Some(m) = self.aux_windows.get_mut(idx).and_then(|a| a.editor_mut()) {
-                    m.modified = false;
+                    m.mark_saved();
                 }
                 let name = std::path::Path::new(&path)
                     .file_name()
