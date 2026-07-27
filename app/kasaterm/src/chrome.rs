@@ -959,9 +959,10 @@ impl App {
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)
         {
-            if let Err(e) = self.close_window(idx) {
-                eprintln!("[window] close failed: {e:#}");
-            }
+            // close_window 를 직접 부르면 그 창의 claude 가 돌고 있어도 말없이
+            // 죽는다. 같은 동작의 가운데 클릭은 confirm_or_close_session 으로
+            // 물어보는데, 이 ×(사이드바/상단 strip 공용)만 확인을 건너뛰고 있었다.
+            self.confirm_or_close_session(idx);
             return true;
         }
         if let Some(idx) = self

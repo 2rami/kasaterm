@@ -148,6 +148,52 @@ impl App {
         let raised = self.confirm_or_close_window();
         eprintln!("[autoconfirm] confirm_or_close_window -> raised={raised}");
     }
+    /// Headless 사이드바 창-닫기 repro: `KASATERM_AUTOWINCLOSE_MS` 뒤에 사이드바
+    /// 창 탭의 ×를 **실제 hit-test 경로**(`window_strip_click`)로 누른다.
+    ///
+    /// 그 ×는 한 번 확인 모달을 잃은 적이 있다 — 사이드바 strip 과 상단 탭 strip 을
+    /// 한 함수로 합치면서 `close_window` 를 직접 부르게 돼, 돌고 있는 claude 가
+    /// 말없이 죽었다. `confirm_or_close_session` 을 직접 부르는 테스트로는 그 회귀를
+    /// 못 잡으므로(끊긴 건 라우팅이지 모달이 아니다) 좌표 클릭으로 재현한다.
+    /// AUTOSEND="sleep 300" 과 같이 써서 pane 에 진짜 작업을 물려둘 것.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autowinclose(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOWINCLOSE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        // close rect 는 ①사이드바가 보이고 ②창이 2개 이상일 때만 그려진다
+        // (sidebar_layout 의 `n > 1` — 마지막 창은 닫을 수 없으니 ×가 없다).
+        // 좌표는 렌더가 채우므로 조건을 맞춘 뒤 한 프레임 그린다.
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        if self.windows.len() < 2 {
+            self.new_window();
+        }
+        self.render_frame();
+        let Some((_, r)) = self.window_tab_close_rects.first().copied() else {
+            eprintln!("[autowinclose] close rect 없음 — 사이드바 창 탭이 안 그려졌다");
+            return;
+        };
+        let handled = self.window_strip_click(r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+        eprintln!(
+            "[autowinclose] handled={handled} confirm_raised={} proc={:?}",
+            self.confirm_close.is_some(),
+            self.confirm_close.as_ref().map(|c| c.proc.clone()),
+        );
+    }
     /// Headless settings-window repro: open the settings *window* (auxwin) after
     /// `KASATERM_AUTOSETTINGS_MS`, on the category named in `KASATERM_AUTOSETTINGS`
     /// ("appearance" / "shell" / "claude" / "students", default General), then arm

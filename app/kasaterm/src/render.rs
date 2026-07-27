@@ -5616,7 +5616,13 @@ impl App {
                     "이전 세션을 복원할까요?",
                     gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
                 );
-                let subtitle = format!("claude 세션 {n}개를 마지막 레이아웃 그대로 이어서 켭니다");
+                // claude 가 없는 창도 복원 대상이라, 있을 때만 그 수를 덧붙인다.
+                let total = crate::App::count_panes(&state);
+                let subtitle = if n > 0 {
+                    format!("claude 세션 {n}개를 포함한 pane {total}개를 마지막 레이아웃 그대로 이어서 켭니다")
+                } else {
+                    format!("pane {total}개를 마지막 레이아웃 그대로 이어서 켭니다")
+                };
                 g.draw_text(
                     cx0 + 24.0,
                     cy0 + 60.0,

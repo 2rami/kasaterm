@@ -1007,7 +1007,9 @@ impl ApplicationHandler<UserEvent> for App {
         // so only the direct-PTY path prompts.
         if !want_tmux {
             if let Some(state) = crate::socket::read_session_state() {
-                if App::count_claude_panes(&state) > 0 {
+                // 기준은 claude 수가 아니라 전체 pane 수 — 셸만 쓰던 창도 레이아웃과
+                // 스크롤백은 되살릴 값이 있다(claude 기준이면 아무것도 못 되살린다).
+                if App::count_panes(&state) > 0 {
                     self.restore_prompt = Some(state);
                 }
             }
@@ -4227,6 +4229,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autotabs();
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
+        self.run_pending_autowinclose();
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
         self.run_pending_autoftmenu();
