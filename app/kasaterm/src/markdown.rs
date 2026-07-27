@@ -9,6 +9,72 @@ pub(crate) const UNDO_CAP: usize = 100;
 /// their parent by column count, and a tab's width is the viewer's opinion.
 const INDENT: &str = "  ";
 
+/// Write a text file **atomically** — sibling temp file, fsync, rename.
+///
+/// `fs::write` truncates the destination first, so anything that interrupts the
+/// write (crash, power loss, a full disk) leaves the user's document half
+/// erased. `rename(2)` within one filesystem is atomic: whatever happens, the
+/// path holds either the whole old file or the whole new one. `sync_all` before
+/// the rename is the power-loss half — a rename can otherwise land while the
+/// bytes are still only in the page cache, making an empty file the survivor.
+///
+/// Two things this deliberately does beyond `write_session_state`, because
+/// here the destination is the **user's own file** and not our scratch state:
+///
+/// - **Symlinks are followed.** Renaming onto a symlink would replace the link
+///   itself with a regular file — a real way to quietly break a dotfile farm.
+///   The temp file is created next to the *resolved* target.
+/// - **Permissions are carried over.** A fresh temp file is 0644 minus umask,
+///   so without this a 0600 note would come back world-readable.
+///
+/// Hard links do break (the target gets a new inode). That is inherent to the
+/// rename approach and the trade every editor with a safe-write mode makes.
+pub(crate) fn write_atomic(path: &str, text: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, Write};
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "부모 디렉터리 없음"))?;
+    let stem = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "파일 이름 없음"))?;
+    // 같은 디렉터리여야 rename 이 원자적이다(파일시스템을 넘으면 복사가 된다).
+    // pid 를 붙여 두 창이 같은 파일을 저장해도 서로의 임시파일을 안 밟는다.
+    let tmp = dir.join(format!(".{stem}.kasaterm-{}.tmp", std::process::id()));
+    let mode = std::fs::metadata(&path).ok().map(|m| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            m.permissions().mode()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = &m;
+            0u32
+        }
+    });
+    // 중간에 실패하면 임시파일을 치우고 나간다 — 목적지는 손대지 않았으니
+    // 사용자 파일은 그대로다.
+    let write = || -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        std::fs::rename(&tmp, &path)
+    };
+    write().inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 /// Would this key change the buffer if the pane were in Raw mode? Rendered
 /// mode uses it to decide whether a keypress means "I want to edit" (switch to
 /// Raw and keep the key) or just navigation (leave the view alone).
@@ -1273,7 +1339,7 @@ impl App {
                     .then(|| (m.edit_lines.join("\n"), m.doc.path.clone()))
             });
             let Some((text, path)) = job else { return false };
-            match std::fs::write(&path, &text) {
+            match write_atomic(&path, &text) {
                 Ok(()) => {
                     if let Some(m) = pane.markdown_mut() {
                         m.modified = false;
@@ -1409,7 +1475,15 @@ impl App {
                 .markdown()
                 .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()));
             if let Some((text, path)) = save {
-                let _ = std::fs::write(&path, &text);
+                // 저장이 실패했는데 modified 를 내리면 dirty 표시도 닫기 확인도
+                // 사라져 편집분이 조용히 증발한다 — 실패하면 dirty 인 채로 둔다.
+                let saved = match write_atomic(&path, &text) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("[editor] 저장 실패 {path}: {e}");
+                        false
+                    }
+                };
                 let doc = build_markdown_doc(id, std::path::Path::new(&path), &text);
                 // 새 레이아웃의 블록 y 는 아직 없다 — 그려봐야 나온다. 옛 y 로
                 // 일단 근사해 한 프레임짜리 튐을 줄이고, 정확한 위치는 렌더가
@@ -1421,7 +1495,7 @@ impl App {
                 if let Some(m) = pane.markdown_mut() {
                     m.doc = Arc::new(doc);
                     m.raw_mode = false;
-                    m.modified = false;
+                    m.modified = !saved;
                     m.scroll = guess.unwrap_or(0.0).max(0.0) as usize;
                 }
                 pending = anchor;
@@ -1899,5 +1973,55 @@ mod tests {
         let mut m2 = pane(&["kept"]);
         m2.ensure_raw_seeded();
         assert_eq!(m2.edit_lines, vec!["kept".to_string()]);
+    }
+
+    /// 원자적 쓰기가 지켜야 하는 것: 내용이 맞을 것, 권한을 잃지 않을 것,
+    /// 심볼릭 링크를 파일로 갈아치우지 않을 것, 임시파일을 안 남길 것.
+    #[test]
+    fn atomic_write_keeps_mode_and_follows_symlinks() {
+        let dir = std::env::temp_dir().join(format!("kasaterm-aw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("note.md");
+        std::fs::write(&real, "before").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        write_atomic(real.to_str().unwrap(), "after").unwrap();
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "after");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "권한이 임시파일 기본값으로 넓어졌다");
+        }
+
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.md");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            write_atomic(link.to_str().unwrap(), "via link").unwrap();
+            assert!(
+                std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+                "링크가 일반 파일로 바뀌었다"
+            );
+            assert_eq!(std::fs::read_to_string(&real).unwrap(), "via link");
+        }
+
+        // 새 파일(아직 없는 경로)도 만들어져야 한다 — canonicalize 가 실패하는 쪽.
+        let fresh = dir.join("fresh.md");
+        write_atomic(fresh.to_str().unwrap(), "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "new");
+
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "임시파일이 남았다: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

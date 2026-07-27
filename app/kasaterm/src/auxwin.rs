@@ -712,7 +712,7 @@ impl App {
             a.editor().map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()))
         });
         let Some((text, path)) = job else { return };
-        match std::fs::write(&path, &text) {
+        match crate::markdown::write_atomic(&path, &text) {
             Ok(()) => {
                 if let Some(m) = self.aux_windows.get_mut(idx).and_then(|a| a.editor_mut()) {
                     m.modified = false;
