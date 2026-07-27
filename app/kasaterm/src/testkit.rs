@@ -194,6 +194,64 @@ impl App {
             self.confirm_close.as_ref().map(|c| c.proc.clone()),
         );
     }
+    /// Headless Info 패널 repro: `KASATERM_AUTOINFO_MS` 뒤에 우측 칼럼을 열고
+    /// Info 탭으로 넘긴다. 그 탭은 클릭으로만 갈 수 있어 캡처 하네스에서 볼
+    /// 방법이 없었다 — 프로세스·포트 목록은 눈으로 봐야 폭·정렬을 판단한다.
+    /// AUTOSEND 로 pane 에 자식 프로세스를 물려두면 목록이 채워진 채 찍힌다.
+    ///
+    /// `KASATERM_AUTOINFO=hover|menu` 를 주면 탭이 열리고 1.5초 뒤(첫 수집이
+    /// 끝나 행 좌표가 생긴 뒤) 첫 프로세스 행에 커서를 올리거나 우클릭 메뉴를
+    /// 띄운다. 종료(×) 버튼과 메뉴는 호버·우클릭에만 나타나 정적 캡처로는
+    /// 존재 자체를 확인할 수 없다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autoinfo(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static OPENED: AtomicBool = AtomicBool::new(false);
+        static ACTED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOINFO_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if Instant::now() < *due {
+            return;
+        }
+        if !OPENED.swap(true, Ordering::Relaxed) {
+            if !self.git.col_visible {
+                self.toggle_git_col();
+            }
+            self.info.tab = crate::state::SideTab::Info;
+            self.info.scroll = 0.0;
+            eprintln!("[autoinfo] Info 탭 열림 (col_visible={})", self.git.col_visible);
+            return;
+        }
+        let act = match std::env::var("KASATERM_AUTOINFO").ok() {
+            Some(v) if v == "hover" || v == "menu" => v,
+            _ => return,
+        };
+        if ACTED.load(Ordering::Relaxed)
+            || Instant::now() < *due + std::time::Duration::from_millis(1500)
+        {
+            return;
+        }
+        ACTED.store(true, Ordering::Relaxed);
+        let Some((pid, r)) = self.info.proc_rects.first().copied() else {
+            eprintln!("[autoinfo] 프로세스 행 없음 — 좌표가 아직 안 생겼다");
+            return;
+        };
+        let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+        if act == "menu" {
+            self.info.ctx_menu = Some((cx, cy, pid));
+        }
+        // hover 든 menu 든 커서는 행 위에 둔다 — menu 도 그 행이 하이라이트된
+        // 상태로 찍혀야 어느 프로세스를 겨눈 메뉴인지 보인다.
+        self.cursor_px = (cx, cy);
+        eprintln!("[autoinfo] act={act} pid={pid} at ({cx:.0},{cy:.0})");
+    }
     /// Headless settings-window repro: open the settings *window* (auxwin) after
     /// `KASATERM_AUTOSETTINGS_MS`, on the category named in `KASATERM_AUTOSETTINGS`
     /// ("appearance" / "shell" / "claude" / "students", default General), then arm
