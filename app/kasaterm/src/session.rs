@@ -1666,9 +1666,12 @@ impl App {
         Ok(())
     }
     /// Serialize every session (active + stashed) as a layout tree so the next
-    /// launch can restore the full multi-pane, multi-session workspace. Written
-    /// on exit by save_session_state.
-    pub(crate) fn save_session_state(&self) {
+    /// launch can restore the full multi-pane, multi-session workspace.
+    ///
+    /// Split out from `save_session_state` so the autosave path can hash the
+    /// result and skip an identical write — the two must produce byte-identical
+    /// state or a Cmd+Q would look like a change and rewrite for nothing.
+    pub(crate) fn session_state_json(&self) -> Option<serde_json::Value> {
         let mut sessions_json = Vec::new();
         for i in 0..self.sessions.len() {
             // Each session contributes all its windows. The active session's
@@ -1722,12 +1725,44 @@ impl App {
             }));
         }
         if sessions_json.is_empty() {
-            return;
+            return None;
         }
-        let state = serde_json::json!({
+        Some(serde_json::json!({
             "active_session": self.active_session,
             "sessions": sessions_json,
-        });
+        }))
+    }
+    /// Write the restore snapshot unconditionally. Used by `exiting()`.
+    pub(crate) fn save_session_state(&self) {
+        if let Some(state) = self.session_state_json() {
+            socket::write_session_state(&state);
+        }
+    }
+    /// 강제 종료 대비 자동 스냅샷. `exiting()` 만으로는 Cmd+Q(정중한 종료) 때만
+    /// 저장돼, SIGKILL·크래시·정전이면 그 세션의 작업이 디스크에 아예 안 남고
+    /// 복원 창은 **직전에 정상 종료했던 시점**의 낡은 상태를 띄운다.
+    ///
+    /// 실제로 바뀐 경우에만 쓴다. 이 앱은 마우스만 움직여도 깨어나므로 wake 를
+    /// 곧 변경으로 보면 몇 초마다 같은 내용을 다시 쓰게 된다 — 직렬화는 하되
+    /// 해시가 같으면 디스크는 건드리지 않는다.
+    pub(crate) fn autosave_session(&mut self) {
+        self.session_saved_at = std::time::Instant::now();
+        self.session_touched = false;
+        // 복원 창이 떠 있는 동안은 절대 저장하지 않는다 — 사용자가 "복원"을 고르기
+        // 전의 화면은 빈 새 세션이라, 자동 저장이 복원 대상 자체를 덮어써 버린다
+        // (되돌릴 수 없는 자해). 선택이 끝나면 그 클릭이 다시 touched 를 세운다.
+        if self.restore_prompt.is_some() {
+            return;
+        }
+        let Some(state) = self.session_state_json() else { return };
+        let body = state.to_string();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&body, &mut h);
+        let sum = std::hash::Hasher::finish(&h);
+        if self.session_saved_hash == Some(sum) {
+            return;
+        }
+        self.session_saved_hash = Some(sum);
         socket::write_session_state(&state);
     }
     /// Walk a live PtyLayout into the nested JSON the restore loader reads,

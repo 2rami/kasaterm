@@ -1906,14 +1906,30 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
 /// Write the full multi-session restore state (built by the caller from each
 /// session's layout tree). Written on exit, read by start_pty. Best-effort;
 /// failures are silent.
+/// Persist the restore snapshot **atomically** — temp file, flush, rename.
+///
+/// 이전엔 목적지에 곧바로 `create` + `write_all` 했다. 종료 시 한 번만 쓸 땐
+/// 티가 안 났지만, 자동 저장(`autosave_session`)이 붙으면서 쓰는 도중에 강제
+/// 종료당할 창이 생겼다 — 그러면 JSON 이 잘려 `read_session_state` 가 None 을
+/// 내고 **복원 창이 아예 안 뜬다**(안 하느니만 못한 결과). rename(2) 은 같은
+/// 파일시스템 안에서 원자적이라, 어느 순간에 죽어도 디스크엔 완전한 옛 파일
+/// 아니면 완전한 새 파일만 남는다. rename 전 `sync_all` 은 정전 대비 —
+/// 데이터가 아직 캐시에만 있는 채로 이름만 바뀌면 빈 파일이 정본이 된다.
 pub fn write_session_state(state: &serde_json::Value) {
     use std::io::Write;
     let Some(path) = session_file_path() else { return };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut f) = std::fs::File::create(&path) {
-        let _ = f.write_all(state.to_string().as_bytes());
+    let tmp = path.with_extension("json.tmp");
+    let Ok(mut f) = std::fs::File::create(&tmp) else { return };
+    if f.write_all(state.to_string().as_bytes()).is_err() || f.sync_all().is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    drop(f);
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
