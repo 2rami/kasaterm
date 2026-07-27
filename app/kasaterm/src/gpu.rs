@@ -1116,6 +1116,74 @@ impl GpuRenderer {
         );
     }
 
+    /// Height (logical px) `md_runs` needs to wrap `spans` into `max_w`. Runs
+    /// the real wrap with a clip range that makes every line invisible, so the
+    /// measurement can never drift from what the draw pass lays out (table rows
+    /// need the row height before they can place the row box).
+    ///
+    /// `x_start` must be the same one the draw pass will use: the wrap test is
+    /// `pen_x + word > x_start + max_w`, and when a cell's text lands exactly on
+    /// its column edge, measuring at x=0 and drawing at x=1050 disagree on that
+    /// comparison — f32 drops the low bits of the sum once the offset is large.
+    /// That mismatch showed up as a row twice as tall as the line inside it.
+    fn md_runs_height(
+        &mut self,
+        spans: &[crate::MdSpan],
+        x_start: f32,
+        max_w: f32,
+        size: f32,
+        force_bold: bool,
+    ) -> f32 {
+        self.md_runs(
+            spans,
+            x_start,
+            0.0,
+            max_w,
+            size,
+            force_bold,
+            crate::theme::text(),
+            f32::MAX,
+            f32::MIN,
+        )
+    }
+
+    /// Unwrapped width (logical px) of a table cell's spans — the natural width
+    /// its column wants before any shrink.
+    fn md_cell_width(&mut self, cell: &[crate::MdSpan], size: f32, force_bold: bool) -> f32 {
+        let mut w = 0.0;
+        for sp in cell {
+            w += self.measure_run(
+                &sp.text,
+                size,
+                sp.bold || force_bold,
+                sp.italic,
+                sp.code,
+                sp.code,
+            );
+        }
+        w
+    }
+
+    /// Narrowest a table cell can get before its column starts overlapping the
+    /// next one: the widest single word. `md_runs` only breaks on spaces, so a
+    /// column squeezed below this can't wrap — it just spills.
+    fn md_cell_min_width(&mut self, cell: &[crate::MdSpan], size: f32, force_bold: bool) -> f32 {
+        let mut m: f32 = 0.0;
+        for sp in cell {
+            for word in sp.text.split_whitespace() {
+                m = m.max(self.measure_run(
+                    word,
+                    size,
+                    sp.bold || force_bold,
+                    sp.italic,
+                    sp.code,
+                    sp.code,
+                ));
+            }
+        }
+        m
+    }
+
     /// Lay out + draw a markdown document into the pane box (all logical px).
     /// Glyphs/rects go into the chrome buffer (drawn over the empty cell pass,
     /// under pane headers). Returns total content height (logical) so the
@@ -1323,6 +1391,145 @@ impl GpuRenderer {
                         }
                         pen_y += lh + base * 0.4;
                     }
+                }
+                MdBlock::Table { head, rows, align } => {
+                    let ncols = head.len().max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
+                    if ncols == 0 {
+                        continue;
+                    }
+                    let size = base * 0.92;
+                    let pad_x = base * 0.6;
+                    let pad_y = base * 0.4;
+                    // Column widths: each column wants its widest cell, and can
+                    // give back down to its widest *word*.
+                    let mut colw = vec![0.0f32; ncols];
+                    let mut colmin = vec![0.0f32; ncols];
+                    for (ci, cell) in head.iter().enumerate().take(ncols) {
+                        colw[ci] = colw[ci].max(self.md_cell_width(cell, size, true));
+                        colmin[ci] = colmin[ci].max(self.md_cell_min_width(cell, size, true));
+                    }
+                    for row in rows {
+                        for (ci, cell) in row.iter().enumerate().take(ncols) {
+                            colw[ci] = colw[ci].max(self.md_cell_width(cell, size, false));
+                            colmin[ci] = colmin[ci].max(self.md_cell_min_width(cell, size, false));
+                        }
+                    }
+                    for c in colw.iter_mut().chain(colmin.iter_mut()) {
+                        *c += pad_x * 2.0;
+                    }
+                    // Overflow: take the excess out of the columns that have
+                    // slack, proportional to how much each has. A column whose
+                    // content is one long token (`anchor_cache`) keeps its width
+                    // and the prose column next to it wraps instead — an even
+                    // shrink would squeeze both and the token would spill into
+                    // its neighbour.
+                    let total: f32 = colw.iter().sum();
+                    if total > w {
+                        let min_total: f32 = colmin.iter().sum();
+                        let slack = total - min_total;
+                        if slack > 0.0 && min_total < w {
+                            let k = (total - w) / slack;
+                            for (c, m) in colw.iter_mut().zip(colmin.iter()) {
+                                *c -= (*c - *m) * k;
+                            }
+                        } else {
+                            // Even the minimums don't fit — nothing to do but
+                            // scale everything and accept the spill.
+                            let k = w / total;
+                            for c in colw.iter_mut() {
+                                *c *= k;
+                            }
+                        }
+                    }
+                    let table_w: f32 = colw.iter().sum();
+                    pen_y += base * 0.6;
+                    let table_top = pen_y;
+                    let empty: crate::MdCell = Vec::new();
+                    // Per-row (pen origin, wrap width), shared by the measure and
+                    // draw passes below.
+                    let mut cellbox: Vec<(f32, f32)> = Vec::with_capacity(ncols);
+                    let head_rows = if head.is_empty() { &[][..] } else { std::slice::from_ref(head) };
+                    for (row, is_head) in head_rows
+                        .iter()
+                        .map(|r| (r, true))
+                        .chain(rows.iter().map(|r| (r, false)))
+                    {
+                        // Pass 1: pin every cell's pen origin + wrap width, and
+                        // take the row height from those exact numbers. Pass 2
+                        // draws from the same list so the two can't diverge.
+                        cellbox.clear();
+                        let mut row_h: f32 = 0.0;
+                        let mut cx = x;
+                        for ci in 0..ncols {
+                            let cell = row.get(ci).unwrap_or(&empty);
+                            let inner = (colw[ci] - pad_x * 2.0).max(base);
+                            // Alignment only bites when the cell fits on one
+                            // line; a wrapped cell has no single width to align
+                            // against, so it stays left.
+                            let nat = self.md_cell_width(cell, size, is_head);
+                            let off = if nat < inner {
+                                match align.get(ci) {
+                                    Some(crate::MdAlign::Center) => (inner - nat) * 0.5,
+                                    Some(crate::MdAlign::Right) => inner - nat,
+                                    _ => 0.0,
+                                }
+                            } else {
+                                0.0
+                            };
+                            let tx = cx + pad_x + off;
+                            row_h = row_h.max(self.md_runs_height(cell, tx, inner, size, is_head));
+                            cellbox.push((tx, inner));
+                            cx += colw[ci];
+                        }
+                        let row_h = row_h + pad_y * 2.0;
+                        if pen_y + row_h > clip_top && pen_y < clip_bot {
+                            if is_head {
+                                let by0 = pen_y.max(clip_top);
+                                let by1 = (pen_y + row_h).min(clip_bot);
+                                // A hair *lighter* than bg so the header band
+                                // reads as raised; SURFACE is near-black here and
+                                // made the table top-heavy.
+                                self.rect(x, by0, table_w, by1 - by0, crate::theme::surface_hover());
+                            }
+                            let col = if is_head {
+                                crate::theme::text()
+                            } else {
+                                crate::theme::text_dim()
+                            };
+                            for (ci, (tx, inner)) in cellbox.iter().enumerate() {
+                                let cell = row.get(ci).unwrap_or(&empty);
+                                self.md_runs(
+                                    cell,
+                                    *tx,
+                                    pen_y + pad_y,
+                                    *inner,
+                                    size,
+                                    is_head,
+                                    col,
+                                    clip_top,
+                                    clip_bot,
+                                );
+                            }
+                            self.rect(x, pen_y + row_h, table_w, 1.0, crate::theme::border());
+                        }
+                        pen_y += row_h;
+                    }
+                    // Column rules + the top hairline, clamped to the scroll clip
+                    // (this renderer has no scissor, so a tall table would
+                    // otherwise bleed past the pane box).
+                    let vy0 = table_top.max(clip_top);
+                    let vy1 = pen_y.min(clip_bot);
+                    if vy1 > vy0 {
+                        let mut vx = x;
+                        for c in colw.iter().take(ncols - 1) {
+                            vx += c;
+                            self.rect(vx, vy0, 1.0, vy1 - vy0, crate::theme::border());
+                        }
+                        if table_top >= clip_top {
+                            self.rect(x, table_top, table_w, 1.0, crate::theme::border());
+                        }
+                    }
+                    pen_y += base * 0.9;
                 }
             }
         }
