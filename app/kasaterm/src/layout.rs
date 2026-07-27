@@ -972,6 +972,8 @@ for p in glob.glob(os.path.join(d, '*.json')):
             g.drop_image(target);
         }
         self.md_content_h.remove(target);
+        self.md_block_ys.remove(target);
+        self.md_scroll_anchor.remove(target);
         // Drop secondary-tab ptys hosted by this pane and prune the reverse
         // map. Without this, an in-pane tab's shell would linger past its
         // container pane and `find_tab_by_pty` would point at a dead outer.

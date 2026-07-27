@@ -350,6 +350,88 @@ impl App {
             w.request_redraw();
         }
     }
+    /// Headless 편집기 스크립트: `KASATERM_TEST_MD_SCRIPT` 에 `|` 로 이은 단계를
+    /// `KASATERM_TEST_MD_STEP_MS`(기본 700) 간격으로 하나씩 실행한다. 첫 단계는
+    /// `KASATERM_TEST_MD_SCRIPT_MS`(기본 5000, `KASATERM_AUTOOPEN` 이 편집기를
+    /// 띄운 뒤여야 한다) 에 시작.
+    ///
+    /// 단계: `scroll:<px>` 절대 스크롤 · `mode:raw|render` 토글 · `cap:<경로>` 캡처.
+    /// 키 입력이 아니라 상태를 직접 건드리는 이유는 winit `KeyEvent` 가 밖에서
+    /// 만들 수 없어서다(비공개 필드) — 키 경로 자체는 유닛 테스트가 맡는다.
+    /// autosettings 처럼 함수-로컬 static 이라 `struct App` 은 안 건드린다.
+    pub(crate) fn run_pending_automdscript(&mut self) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+        static PLAN: OnceLock<Option<(Instant, u64, Vec<String>)>> = OnceLock::new();
+        static DONE: AtomicUsize = AtomicUsize::new(0);
+        let plan = PLAN.get_or_init(|| {
+            let spec = std::env::var("KASATERM_TEST_MD_SCRIPT").ok()?;
+            let start: u64 = std::env::var("KASATERM_TEST_MD_SCRIPT_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5000);
+            let step: u64 = std::env::var("KASATERM_TEST_MD_STEP_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(700);
+            let steps: Vec<String> = spec.split('|').map(|s| s.trim().to_string()).collect();
+            Some((
+                Instant::now() + std::time::Duration::from_millis(start),
+                step,
+                steps,
+            ))
+        });
+        let Some((start, step_ms, steps)) = plan else { return };
+        let n = DONE.load(Ordering::Relaxed);
+        if n >= steps.len() {
+            return;
+        }
+        let due = *start + std::time::Duration::from_millis(*step_ms * n as u64);
+        if Instant::now() < due {
+            return;
+        }
+        DONE.store(n + 1, Ordering::Relaxed);
+        let step = steps[n].clone();
+        let Some(id) = self.ws.lock().ok().and_then(|w| w.active_pane.clone()) else {
+            eprintln!("[mdscript] {step}: 활성 pane 없음");
+            return;
+        };
+        match step.split_once(':') {
+            Some(("scroll", v)) => {
+                let px: usize = v.parse().unwrap_or(0);
+                if let Ok(mut ws) = self.ws.lock() {
+                    if let Some(pane) = ws.panes.get_mut(&id) {
+                        pane.dirty = true;
+                        if let Some(m) = pane.markdown_mut() {
+                            m.scroll = px;
+                        }
+                    }
+                }
+                eprintln!("[mdscript] scroll={px}");
+            }
+            Some(("mode", v)) => {
+                let want_raw = v == "raw";
+                self.set_md_mode(&id, want_raw);
+                let at = self.md_anchor_line(&id);
+                eprintln!("[mdscript] mode={v} anchor_line={at:?}");
+            }
+            Some(("cap", p)) => {
+                // `pending_capture` 큐를 거치지 않고 바로 무장한다 — 그 큐의 드레인은
+                // 이 함수보다 **앞에서** 돌아, 큐에 넣으면 빨라야 다음 패스에나
+                // 집히고 그 사이에 다음 단계가 끼어들면 바뀐 화면이 찍힌다
+                // (실제로 raw 캡처가 render 로 되돌린 뒤 화면을 담았다).
+                if let Some(g) = self.gpu.as_mut() {
+                    g.capture_next = Some(p.to_string());
+                }
+                eprintln!("[mdscript] cap → {p}");
+            }
+            _ => eprintln!("[mdscript] 모르는 단계: {step:?}"),
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
     /// Headless undock repro: `KASATERM_AUTOUNDOCK_MS` 후 활성 터미널 pane 을
     /// 별도창으로 undock(헤더 아이콘 클릭은 헤드리스 주입 불가) 하고, 그 aux 창을
     /// +2500ms 에 자체 캡처(`KASATERM_AUTOUNDOCK_CAP`, 기본 temp undock-window.png).
