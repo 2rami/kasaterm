@@ -32,7 +32,7 @@ kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 
 렌더러/색 파이프라인·아키텍처 배경, 렌더버그 디버깅 카탈로그, 코드 수정 주의점(PTY reader **`try_send` 필수** 등), 성능 히스토리는 CLAUDE.md 에 중복해 두지 않는다 — `.memory/MEMORY.md` 토픽 파일에 있다. 1순위 = [[feedback_tmuxify_rendering_pipeline]] (렌더버그 카탈로그 + try_send 트랩). 코드 만지기 전 관련 토픽을 먼저 recall 할 것.
 
-## 코드 맵 (main.rs 12896→3515줄, App 메서드 8모듈 분할 — 2026-06-05)
+## 코드 맵 (main.rs 12896→5187줄, App 메서드 기능별 모듈 분할 — 2026-06-05 8모듈에서 이후 확장)
 
 `main.rs` = `struct App`/기타 struct·enum 정의 + `new` 생성자 + 자유함수(`file_icon`/`parse_markdown`/`round_rect` 등) + `fn main` + tests 만. **App 메서드는 기능별 모듈로 분리**(전부 `impl App { ... }` 확장 + `use super::*`, 타입·자유함수는 crate root 그대로 참조, cross-module 호출 메서드는 `pub(crate)`):
 
@@ -44,6 +44,13 @@ kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 - `input.rs` — `send_bytes`·mouse(`send_mouse_sgr`)·copy/paste·`handle_wheel`·`forward_key`·claude 상태 글리프
 - `markdown.rs` — `md_editor_*`·md 링크/블록
 - `testkit.rs` — `schedule_auto*`·`arm_auto*`·`run_pending_auto*` (env 자동테스트 하네스)
+- `gpu.rs` — `KASATERM_RENDERER=gpu` 경로. 자체 wgpu Surface + 셀 파이프라인(sugarloaf 경로와 상호배타)
+- `auxwin.rs` — 자체 wgpu Surface 기반 **별도 OS 창**(chrome.rs 의 wry webview 패널들과 다름): 편집기/파일뷰 + pane undock(`AuxWindowKind::Terminal`)
+- `settings.rs` — 설정 화면(타이틀바 기어 → pane 그리드 대체 전체 뷰, 좌 카테고리 nav + 우 폼)
+- `socket.rs` — agent-socket ↔ TmuxSession 브리지(`PtyBackend`)·`open_preview`·`pane_record`/`window.json` IO
+- `transcript.rs` — claude-code transcript(jsonl) → board 스냅샷 추출
+- `bridge.rs` — bg SendMessage 브리지(teammate 플래그 유실된 detach 세션 인박스를 `claude attach` pty 로 직접 주입)
+- `stream.rs` — 제거된 데몬 스트림 프로토콜에서 남은 GUI 뷰 타입(`DockedView`/`PaneStatusView`)
 
 새 App 메서드 추가 시 도메인 맞는 모듈에. 다른 모듈/crate root 에서 호출되면 `pub(crate)`. 상세 [[reference_kasaterm_main_module_split]].
 
@@ -66,4 +73,9 @@ kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 - **resize**: `resize_backend`(`layout.rs`)는 **`leaf_cells` 기반**(leaf id == primary pid 직접 resize). split 직후 새 pane은 `ws.panes`에 PaneState가 아직 없어 ws.panes 순회 방식은 80×24 방치→화면 겹침이었음. 보조탭만 ws.panes로.
 - **divider/window 영속**: ratio는 `save_session_state`의 layout(json)에 저장→복원. 윈도우 크기는 `~/.config/kasaterm/window.json`(`handler.rs` exiting/resumed, IO는 `socket.rs`).
 
-**후속 미구현(데몬 제거로 빠진 것 — 로컬 재구현):** ① `claude --resume` 세션 복원("열면 이어가기" 핵심, `start_pty`가 아직 복원 안 함, `pane_record`는 저장 중) ② working bar status(transcript watcher가 데몬 연결이라 dead) ③ 파일 미리보기(`open_preview`)·cross-window drag. **undock은 구현됨(2026-07-24)**: 헤더 pop-out 아이콘 → `undock_pane_terminal`(auxwin.rs, aux wgpu 창이 App.ws 셀 그리드를 뷰·PTY는 App.pty에 잔존이라 세션 무중단), 창 닫기/Cmd+W = dock(활성 pane 오른쪽 split 재삽입). 헤드리스 검증은 `KASATERM_AUTOUNDOCK_MS`(+`_CAP`, testkit.rs). 상세 [[project_kasaterm_session_lifecycle]] · [[reference_kasaterm_daemon_removal]].
+**데몬 제거로 빠졌던 것은 2026-07 기준 전부 로컬 재구현 완료** (미구현이라 적혀 있던 옛 문서에 속지 말 것 — 2026-07-27 실측 확인):
+- **세션 복원** — `restore_session_state`(session.rs)가 저장된 split 트리를 재생성하고 leaf 별 scrollback 을 심은 뒤, claude 를 돌던 pane 에는 `claude --resume <sid>` 를 큐잉한다. 저장된 sid 의 jsonl 이 실재할 때만 resume(없으면 셸만 뜨던 회귀 차단).
+- **working bar status** — `refresh_pane_activity`(input.rs:335)가 `handler.rs` 틱에서 `App.pane_activity` 를 채우고, 렌더가 그걸 읽어 헤더 busy 바 / bg 펄스를 그린다. render.rs 의 "the daemon's transcript watcher" 주석은 낡은 문구고 동작은 로컬이다.
+- **파일 미리보기·cross-window drag** — `open_preview` 로컬 재구현(main.rs:2372, `open_file` 이 확장자로 분기 → `preview_windows`), 창 간 pane 이동은 `move_pane_cross_window`(layout.rs:1435) + 헤드리스 하네스 `KASATERM_AUTOPANEMOVE`.
+
+**undock(2026-07-24)**: 헤더 pop-out 아이콘 → `undock_pane_terminal`(auxwin.rs, aux wgpu 창이 App.ws 셀 그리드를 뷰·PTY는 App.pty에 잔존이라 세션 무중단), 창 닫기/Cmd+W = dock(활성 pane 오른쪽 split 재삽입). 헤드리스 검증은 `KASATERM_AUTOUNDOCK_MS`(+`_CAP`, testkit.rs). 상세 [[project_kasaterm_session_lifecycle]] · [[reference_kasaterm_daemon_removal]].

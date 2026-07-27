@@ -323,15 +323,7 @@ impl GpuRenderer {
         if let Some((italic_path, italic_idx)) = primary_italic_font_path() {
             shaper.set_italic_face_path(0, &italic_path, italic_idx);
         }
-        for (path, idx) in fallback_font_paths() {
-            shaper.add_fallback_path(&path, idx);
-        }
-        // Bundled fallbacks (always present in the binary) — sit at
-        // the end of the chain so a user-installed Nerd Font still
-        // wins, but blank-outline gaps in the primary fall through
-        // here for a guaranteed glyph.
-        shaper.add_fallback_bytes(kasa_cells::CASCADIA_CODE_NF, 0);
-        shaper.add_fallback_bytes(kasa_cells::SYMBOLS_NERD_FONT_MONO, 0);
+        attach_fallback_chain(&mut shaper);
         // Markdown body font — a proportional gothic. Falls back to the primary
         // mono if the gothic can't load so the renderer never panics.
         let (md_font, md_idx) = md_font_path();
@@ -341,21 +333,13 @@ impl GpuRenderer {
         eprintln!("[font] markdown={md_font}");
         // Same bundled symbol/icon fallbacks so glyphs the gothic lacks still
         // resolve (and CJK falls through to the gothic's own coverage first).
-        for (path, idx) in fallback_font_paths() {
-            md_shaper.add_fallback_path(&path, idx);
-        }
-        md_shaper.add_fallback_bytes(kasa_cells::CASCADIA_CODE_NF, 0);
-        md_shaper.add_fallback_bytes(kasa_cells::SYMBOLS_NERD_FONT_MONO, 0);
+        attach_fallback_chain(&mut md_shaper);
         // Bold weight of the markdown gothic.
         let (md_bold_font, md_bold_idx) = md_bold_font_path();
         let mut md_bold_shaper = Shaper::from_path(&md_bold_font, md_bold_idx)
             .or_else(|_| Shaper::from_path(&md_font, md_idx))
             .with_context(|| format!("load markdown bold font {md_bold_font}"))?;
-        for (path, idx) in fallback_font_paths() {
-            md_bold_shaper.add_fallback_path(&path, idx);
-        }
-        md_bold_shaper.add_fallback_bytes(kasa_cells::CASCADIA_CODE_NF, 0);
-        md_bold_shaper.add_fallback_bytes(kasa_cells::SYMBOLS_NERD_FONT_MONO, 0);
+        attach_fallback_chain(&mut md_bold_shaper);
         let cell_w = shaper.cell_advance(font_size_px as f32).ceil();
         // Use the font's natural line metric (ascent+descent+leading)
         // for cell height instead of an arbitrary multiplier. Lines
@@ -2892,6 +2876,57 @@ fn text_render_knobs() -> (f32, f32, f32) {
 /// is `(path, face_index_inside_TTC)`; swash skips a face whose
 /// charmap doesn't cover the codepoint, so the chain falls through
 /// gracefully.
+/// "-Regular" 파일 옆의 "-Bold" 형제를 찾는다. 폴백 페이스에 designed bold 를
+/// 걸어주기 위한 것으로, 없으면 그 페이스가 담당하는 문자는 볼드로 요청해도
+/// regular 로 그려진다 — CJK 가 특히 그렇다(합성 팽창을 CJK 에는 적용하지 않아
+/// 굵어질 다른 경로가 없다).
+/// Windows 는 폰트가 per-user(`%LOCALAPPDATA%\Microsoft\Windows\Fonts`) 와
+/// 시스템 전체(`C:\Windows\Fonts`) 두 곳에 갈릴 수 있다. 설치 위치를 가정하지
+/// 않도록 파일명마다 두 경로를 그 순서로 펼친다.
+#[cfg(target_os = "windows")]
+fn windows_font_candidates(names: &[&str]) -> Vec<String> {
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let mut out = Vec::with_capacity(names.len() * 2);
+    for name in names {
+        if !local.is_empty() {
+            out.push(format!(r"{local}\Microsoft\Windows\Fonts\{name}"));
+        }
+        out.push(format!(r"C:\Windows\Fonts\{name}"));
+    }
+    out
+}
+
+fn sibling_bold_font_path(regular: &str) -> Option<(String, u32)> {
+    // 두 관례를 시도한다: Nerd Font 계열의 `-Regular`→`-Bold`, 그리고 Windows
+    // 시스템 폰트의 `<stem>`→`<stem>bd`(consola→consolab, malgun→malgunbd).
+    // 후자가 없으면 한글 최종 폴백(맑은 고딕)의 볼드가 합성으로 떨어져 획이
+    // 뭉개진다.
+    let mut candidates: Vec<String> = Vec::new();
+    if let Some((head, tail)) = regular.rsplit_once("-Regular") {
+        candidates.push(format!("{head}-Bold{tail}"));
+    }
+    if let Some((head, ext)) = regular.rsplit_once('.') {
+        candidates.push(format!("{head}bd.{ext}"));
+    }
+    candidates
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .map(|p| (p, 0))
+}
+
+/// 폴백 체인을 한 벌 붙인다(설치 폰트 + 번들 폰트). 세 shaper(그리드·마크다운·
+/// 마크다운 볼드)가 같은 체인을 쓰므로 한 곳에 모아 어긋나지 않게 한다.
+/// 번들 폰트는 체인 끝에 둔다 — 사용자가 설치한 Nerd Font 가 먼저 이기되,
+/// primary 의 빈 아웃라인 구멍은 여기까지 흘러와 반드시 글리프를 얻는다.
+fn attach_fallback_chain(shaper: &mut Shaper) {
+    for (path, idx) in fallback_font_paths() {
+        let bold = sibling_bold_font_path(&path);
+        shaper.add_fallback_with_bold(&path, idx, bold);
+    }
+    shaper.add_fallback_bytes(kasa_cells::CASCADIA_CODE_NF, 0);
+    shaper.add_fallback_bytes(kasa_cells::SYMBOLS_NERD_FONT_MONO, 0);
+}
+
 fn fallback_font_paths() -> Vec<(String, u32)> {
     let mut out: Vec<(String, u32)> = Vec::new();
     #[cfg(target_os = "macos")]
@@ -2958,9 +2993,18 @@ fn fallback_font_paths() -> Vec<(String, u32)> {
                 out.push((p.to_string(), i));
             }
         };
-        // Hangul — 맑은 고딕. The primary (consola) and bundled Cascadia
-        // fallbacks carry no Hangul glyphs, so without this the entire
-        // Korean output renders as blank cells.
+        // 라틴 보강 + 한글 — macOS 체인과 같은 순서다. JetBrains 는 주 폰트가
+        // 잡히지 않았을 때 라틴을 받고, D2Coding **논-Mono** 가 한글을 받는다
+        // (Mono 패치는 한글을 0.5em 으로 압축해 칸의 절반만 채운다 — shaper 의
+        // cjk_fit 이 키우기 전 원본 비율이 성한 쪽을 쓴다).
+        for p in windows_font_candidates(&[
+            "JetBrainsMonoNerdFontMono-Regular.ttf",
+            "D2CodingLigatureNerdFont-Regular.ttf",
+        ]) {
+            push_if(&mut out, &p, 0);
+        }
+        // 맑은 고딕 — D2Coding 이 없는 기본 설치에서 한글을 받는 최후 보루.
+        // 이게 없으면 한국어 출력 전체가 빈 칸으로 렌더된다.
         push_if(&mut out, r"C:\Windows\Fonts\malgun.ttf", 0);
         // CJK — Microsoft YaHei (Simplified Chinese) and Meiryo (Japanese).
         push_if(&mut out, r"C:\Windows\Fonts\msyh.ttc", 0);
@@ -3119,14 +3163,23 @@ fn primary_bold_font_path(primary: &str) -> Option<(String, u32)> {
 fn default_font_path() -> String {
     #[cfg(target_os = "macos")]
     {
-        // D2CodingLigature Nerd Font Mono. Has designed Hangul that
-        // lines up cleanly on the monospace grid (자간 issues we saw
-        // came from JetBrains-as-primary routing Hangul through a
-        // fallback face with different sidebearings). Box-drawing
-        // chars are rendered as GPU quads via `block_rects` so the
-        // font choice doesn't affect line continuity — ghostty does
-        // the same thing in `src/font/sprite/draw/box.zig`.
+        // JetBrains Mono for Latin; Hangul falls through to D2Coding 논-Mono
+        // in the fallback chain (거노 요청 2026-07-27).
+        //
+        // 예전에 JetBrains-as-primary 를 시도했다 되돌린 적이 있는데, 그때 자간이
+        // 벌어진 원인은 JetBrains 자체가 아니라 **한글을 받던 폴백이 D2Coding
+        // Mono** 였다는 데 있다. Mono 패치는 한글까지 0.5em 으로 압축하는데 칸은
+        // 라틴 0.6em × 2 = 1.2em 이라 글리프가 칸의 절반도 못 채웠다. 지금은
+        // 논-Mono(한글 1.0em)가 받고 shaper 가 두 칸에 맞춰 키운다.
+        //
+        // Box-drawing chars are rendered as GPU quads via `block_rects` so the
+        // font choice doesn't affect line continuity — ghostty does the same
+        // thing in `src/font/sprite/draw/box.zig`.
         let home = std::env::var("HOME").unwrap_or_default();
+        let jb = format!("{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Regular.ttf");
+        if std::path::Path::new(&jb).exists() {
+            return jb;
+        }
         let d2 = format!("{home}/Library/Fonts/D2CodingLigatureNerdFontMono-Regular.ttf");
         if std::path::Path::new(&d2).exists() {
             return d2;
@@ -3135,18 +3188,16 @@ fn default_font_path() -> String {
     }
     #[cfg(target_os = "windows")]
     {
-        // Match the user's Windows Terminal font (D2CodingLigature Nerd
-        // Font) so kasaterm reads consistently alongside their other
-        // terminal. D2Coding's designed Hangul also lines up cleanly on
-        // the mono grid — the same reason it's the macOS primary.
-        // Per-user Nerd Font installs live under LocalAppData; fall back
-        // to Consolas when it isn't installed.
-        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let d2 = format!(
-            r"{local}\Microsoft\Windows\Fonts\D2CodingLigatureNerdFontMono-Regular.ttf"
-        );
-        if std::path::Path::new(&d2).exists() {
-            return d2;
+        // macOS 와 같은 순서를 유지한다 — JetBrains Mono 가 라틴을 잡고 한글은
+        // 폴백(D2Coding 논-Mono → 맑은 고딕)이 받는다. 플랫폼마다 주 폰트가
+        // 다르면 같은 화면이 OS 별로 다르게 읽힌다.
+        for p in windows_font_candidates(&[
+            "JetBrainsMonoNerdFontMono-Regular.ttf",
+            "D2CodingLigatureNerdFontMono-Regular.ttf",
+        ]) {
+            if std::path::Path::new(&p).exists() {
+                return p;
+            }
         }
         return r"C:\Windows\Fonts\consola.ttf".into();
     }
