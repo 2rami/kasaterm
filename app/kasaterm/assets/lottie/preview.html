@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8"><title>Claude mark — Lottie</title>
+<!-- 이 폴더에서: python3 -m http.server 8790 → http://127.0.0.1:8790/preview.html
+     (file:// 로 열면 fetch 가 CORS 에 막혀 아무것도 안 뜬다) -->
+<style>
+  body{margin:0;min-height:100vh;display:grid;place-items:center;gap:28px;
+       background:#1c1c1f;color:#8a8a92;font:13px ui-monospace,monospace}
+  .row{display:flex;align-items:center;gap:36px}
+  .cell{display:grid;place-items:center;gap:8px}
+  .box{background:#232327;border-radius:12px;display:grid;place-items:center}
+</style>
+<div class="row">
+  <div class="cell"><div class="box" style="width:200px;height:200px"><div id="a" style="width:160px;height:160px"></div></div><span>160px</span></div>
+  <div class="cell"><div class="box" style="width:96px;height:96px"><div id="b" style="width:64px;height:64px"></div></div><span>64px</span></div>
+  <div class="cell"><div class="box" style="width:48px;height:48px"><div id="c" style="width:20px;height:20px"></div></div><span>20px (탭 아이콘 크기)</span></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>
+<script>
+fetch('./claude-mark.json').then(r => r.json()).then(data => {
+  for (const id of ['a','b','c'])
+    lottie.loadAnimation({container:document.getElementById(id), renderer:'svg',
+                          loop:true, autoplay:true, animationData:structuredClone(data)});
+});
+</script>
