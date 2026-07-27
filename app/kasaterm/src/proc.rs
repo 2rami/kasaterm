@@ -9,6 +9,9 @@ use std::ffi::OsStr;
 use std::process::Command;
 
 pub(crate) fn command<S: AsRef<OsStr>>(program: S) -> Command {
+    // `mut` 는 아래 windows 블록이 쓴다 — 떼면 그쪽 빌드가 깨지므로
+    // 다른 플랫폼에서만 나는 경고를 끈다.
+    #[allow(unused_mut)]
     let mut c = Command::new(program);
     #[cfg(windows)]
     {

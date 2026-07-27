@@ -741,29 +741,6 @@ impl App {
             proc
         }
     }
-    /// The pane's tab-header label — custom title (rename/OSC) wins, else the
-    /// live foreground process, else the raw `%N` id. Mirrors the header render
-    /// path (render.rs) so the completion toast names a pane the same way the
-    /// user sees it in the tab strip.
-    pub(crate) fn pane_header_label(&self, id: &str) -> String {
-        let (title, character) = {
-            let ws = self.ws.lock().unwrap();
-            let title = ws.panes.get(id).and_then(|p| p.title.clone()).filter(|t| !t.is_empty());
-            let character = ws.pane_character.get(id).cloned();
-            (title, character)
-        };
-        // BA GUI(board)와 라벨 통일: 캐릭터 배정 pane 은 "미도리 · 작업명"(작업명=OSC
-        // title). 작업명 없으면 캐릭터 단독. board mcp.ts 의 character/title 합성과 동일.
-        if let Some(c) = character {
-            return match title {
-                Some(t) => format!("{c} · {t}"),
-                None => c,
-            };
-        }
-        title
-            .or_else(|| self.pty.get(id).and_then(|p| Self::smart_pane_label(p)))
-            .unwrap_or_else(|| id.to_string())
-    }
     /// cwd의 마지막 폴더명. 홈 디렉토리면 `~`.
     pub(crate) fn cwd_basename(p: &std::path::Path) -> String {
         if let Ok(h) = std::env::var("HOME") {

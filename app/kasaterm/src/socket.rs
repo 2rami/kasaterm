@@ -1275,7 +1275,7 @@ impl Backend for PtyBackend {
                     None => base_slug.to_string(),
                 };
                 // GUI 가 spawn/swap 시 배정한 ws.pane_character 우선 — 터미널 헤더
-                // (pane_header_label)와 같은 소스라 board·탭 캐릭터가 항상 일치(거노:
+                // 렌더(render.rs)와 같은 소스라 board·탭 캐릭터가 항상 일치(거노:
                 // board 미도리 둘 / 헤더 모모이 불일치). 없으면 방 dir 의 character-<N> 마커.
                 // 세션 자신의 바인딩 → 없으면 포크 부모 사슬을 따라 원본 학생을 찾는다.
                 // detach 포크로 세션 id 가 갈려도 --resume 부모 끝의 바인딩이 retained 진실
@@ -1410,7 +1410,7 @@ impl Backend for PtyBackend {
         // 컨텍스트 % — claude TUI 상태바에서 파싱(transcript 토큰이 0 이어도 robust).
         // 화면 스냅샷은 in-memory(visible_text)라 싸다 — 락 짧게.
         // 화면 스냅샷 + OSC title 을 한 락에서. title 은 board row 라벨을 터미널 탭
-        // (pane_header_label)과 같은 소스(OSC title)로 통일 — 양쪽 "미도리 · 작업명".
+        // 렌더(render.rs)와 같은 소스(OSC title)로 통일 — 양쪽 "미도리 · 작업명".
         let (screens, osc_titles): (HashMap<String, String>, HashMap<String, String>) = {
             let ws = self.ws.lock().unwrap();
             let mut screens = HashMap::new();
