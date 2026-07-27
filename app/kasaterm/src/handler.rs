@@ -3414,6 +3414,12 @@ impl ApplicationHandler<UserEvent> for App {
                                 // mode it opens a link.
                                 self.selection = None;
                                 self.drag_anchor = None;
+                                // 찾기 바는 본문 위에 떠 있다 — 바를 눌렀는데
+                                // 밑에 있는 글자로 캐럿까지 옮겨 가면 안 된다.
+                                if self.md_find_click(&pane_id) {
+                                    window.request_redraw();
+                                    return;
+                                }
                                 if !self.try_copy_md_block() {
                                     if self.md_body_rects.contains_key(&pane_id) {
                                         self.md_click_caret(

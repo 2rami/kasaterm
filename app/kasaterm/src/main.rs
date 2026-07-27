@@ -1490,6 +1490,39 @@ struct MarkdownPane {
     /// Kind of the last mutation — consecutive same-kind edits (a typing run,
     /// a backspace run) coalesce into one undo unit; any caret move breaks it.
     last_edit: EditKind,
+    /// Find/replace bar. Some == open, and while it is open it owns typing
+    /// (Esc closes and hands the keyboard back to the buffer).
+    find: Option<FindState>,
+}
+
+/// Clickable control on the find bar. Every one has a keyboard equivalent —
+/// the mouse is for the hand that's already there, not the only way in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FindBtn {
+    /// Expand/collapse the replace row.
+    ToggleReplace,
+    Prev,
+    Next,
+    Close,
+    ReplaceOne,
+    ReplaceAll,
+}
+
+/// Find/replace bar state for one raw editor pane.
+#[derive(Clone)]
+struct FindState {
+    query: String,
+    replace: String,
+    /// The replace row is showing (Cmd+Opt+F). Find-only otherwise.
+    replacing: bool,
+    /// Typing lands in the replace field rather than the query; Tab flips it.
+    focus_replace: bool,
+    /// Matches as (line, start col, end col) in chars, document order. Rebuilt
+    /// when the query or buffer changes — the bar owns the keyboard, so the
+    /// buffer only moves under it via replace.
+    hits: Vec<(usize, usize, usize)>,
+    /// Index of the highlighted match in `hits`; meaningless when empty.
+    idx: usize,
 }
 
 /// One undo/redo unit for the raw editor: the full buffer + cursor.
@@ -3001,6 +3034,10 @@ struct App {
     /// Raw→Render toggle. The new layout's block positions only exist after a
     /// draw, so the renderer consumes this once `md_block_ys` is fresh.
     md_scroll_anchor: HashMap<String, usize>,
+    /// Find-bar button hit boxes (pane id, button, logical-px rect), rebuilt by
+    /// the renderer each frame. Tested before the body box below, since the bar
+    /// floats over the editor — a click on it must not also move the caret.
+    md_find_rects: Vec<(String, FindBtn, (f32, f32, f32, f32))>,
     /// Raw-editor body box (logical px) per pane id, published by the renderer
     /// each frame. A click in this box hit-tests to a caret position so the
     /// mouse can place the edit cursor (see `md_click_caret`).
@@ -3594,6 +3631,7 @@ impl App {
             md_content_h: HashMap::new(),
             md_block_ys: HashMap::new(),
             md_scroll_anchor: HashMap::new(),
+            md_find_rects: Vec::new(),
             md_body_rects: HashMap::new(),
             pane_tab_rects: Vec::new(),
             pane_tab_close_rects: Vec::new(),

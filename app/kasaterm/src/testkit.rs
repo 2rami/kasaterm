@@ -392,8 +392,16 @@ impl App {
         }
         DONE.store(n + 1, Ordering::Relaxed);
         let step = steps[n].clone();
-        let Some(id) = self.ws.lock().ok().and_then(|w| w.active_pane.clone()) else {
-            eprintln!("[mdscript] {step}: 활성 pane 없음");
+        // 활성 pane 이 아니라 **마크다운 pane** 을 찾는다. 옆 셸이 먼저 죽으면
+        // 포커스가 그쪽으로 넘어가고, 그러면 단계들이 아무 말 없이 반환돼
+        // 스크립트가 중간에 멈춘 것처럼 보였다(실제로 4단계에서 끊겼다).
+        let Some(id) = self.ws.lock().ok().and_then(|w| {
+            let act = w.active_pane.clone();
+            let is_md = |i: &String| w.panes.get(i).is_some_and(|p| p.markdown().is_some());
+            act.filter(&is_md)
+                .or_else(|| w.panes.keys().find(|i| is_md(i)).cloned())
+        }) else {
+            eprintln!("[mdscript] {step}: 마크다운 pane 없음");
             return;
         };
         match step.split_once(':') {
@@ -439,6 +447,10 @@ impl App {
                         "tab" => m.indent(false),
                         "untab" => m.indent(true),
                         "enter" => m.newline(),
+                        "find" => m.find_open(false),
+                        "replace" => m.find_open(true),
+                        "next" => m.find_step(false),
+                        "prev" => m.find_step(true),
                         // `at <line>,<col>` 은 캐럿 이동, 나머지는 그대로 타이핑.
                         _ => match v.strip_prefix("at ") {
                             Some(pos) => {
@@ -446,6 +458,9 @@ impl App {
                                 m.cur_line = l.trim().parse().unwrap_or(0);
                                 m.cur_col = c.trim().parse().unwrap_or(0);
                             }
+                            // 찾기 바가 열려 있으면 타이핑은 검색어로 — 실제
+                            // 키 경로(md_editor_insert)와 같은 갈림길이다.
+                            None if m.find.is_some() => m.find_type(v),
                             None => m.insert_at_caret(v),
                         },
                     }
