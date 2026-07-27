@@ -1,13 +1,19 @@
 <!doctype html>
-<meta charset="utf-8"><title>Claude mark — Lottie</title>
+<meta charset="utf-8"><title>Claude mark — Lottie (공식)</title>
 <!-- 이 폴더에서: python3 -m http.server 8790 → http://127.0.0.1:8790/preview.html
-     (file:// 로 열면 fetch 가 CORS 에 막혀 아무것도 안 뜬다) -->
+     (file:// 로 열면 fetch 가 CORS 에 막혀 아무것도 안 뜬다)
+     로더는 anthropic.com 쪽과 같은 lottie-web 5.12.2 — 저쪽에서 보이는 대로 보인다.
+     에셋 출처는 SOURCE.md. -->
 <style>
   body{margin:0;min-height:100vh;display:grid;place-items:center;gap:28px;
        background:#1c1c1f;color:#8a8a92;font:13px ui-monospace,monospace}
   .row{display:flex;align-items:center;gap:36px}
   .cell{display:grid;place-items:center;gap:8px}
   .box{background:#232327;border-radius:12px;display:grid;place-items:center}
+  /* 원본 fill 은 검정이다(anthropic.com 은 밝은 배경에 얹는다). 우리 쪽
+     queue_icon 도 알파만 쓰고 색을 따로 입히므로, 미리보기도 같은 방식으로
+     브랜드색을 씌워 실제로 보이는 모양을 확인한다. */
+  .box svg path{fill:#D97757}
 </style>
 <div class="row">
   <div class="cell"><div class="box" style="width:200px;height:200px"><div id="a" style="width:160px;height:160px"></div></div><span>160px</span></div>
