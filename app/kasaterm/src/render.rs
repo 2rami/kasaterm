@@ -5587,17 +5587,42 @@ impl App {
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
-                let card_w = 360.0_f32;
+                let dirty = matches!(dlg.why, crate::CloseWhy::Dirty(_));
+                let card_w = if dirty { 420.0_f32 } else { 360.0_f32 };
                 let card_h = 168.0_f32;
                 let cx0 = ((win_w - card_w) / 2.0).round();
                 let cy0 = ((win_h - card_h) / 2.0).round();
                 round_rect(g, cx0, cy0, card_w, card_h, theme::RADIUS_MD, theme::surface_active());
-                let title = format!("{} 실행 중이에요", dlg.proc);
-                let subtitle = match dlg.action {
-                    crate::PendingClose::Window => "앱을 닫을까요?",
-                    crate::PendingClose::Session(_) => "이 세션을 닫을까요?",
-                    _ => "이 탭을 닫을까요?",
+                let what = match dlg.action {
+                    crate::PendingClose::Window => "앱을",
+                    crate::PendingClose::Session(_) => "이 세션을",
+                    crate::PendingClose::AuxEditor(_) => "이 창을",
+                    _ => "이 탭을",
                 };
+                let (title, subtitle) = match &dlg.why {
+                    crate::CloseWhy::Busy(proc) => (
+                        format!("{proc} 실행 중이에요"),
+                        format!("{what} 닫을까요?"),
+                    ),
+                    // 파일 이름을 보여줘야 뭘 잃는지 안다. 셋을 넘으면 카드가
+                    // 감당 못 하니 나머지는 개수로 접는다.
+                    crate::CloseWhy::Dirty(docs) => {
+                        let head: Vec<&str> =
+                            docs.iter().take(3).map(|(_, n)| n.as_str()).collect();
+                        let rest = docs.len().saturating_sub(head.len());
+                        let names = if rest > 0 {
+                            format!("{} 외 {rest}개", head.join(", "))
+                        } else {
+                            head.join(", ")
+                        };
+                        (
+                            "저장하지 않은 변경이 있어요".to_string(),
+                            format!("{names} — {what} 닫을까요?"),
+                        )
+                    }
+                };
+                let title = &title;
+                let subtitle = subtitle.as_str();
                 g.draw_text(
                     cx0 + 24.0,
                     cy0 + 30.0,
@@ -5615,52 +5640,52 @@ impl App {
                 let bpad = 18.0_f32;
                 let btn_h = 34.0_f32;
                 let btn_y = cy0 + card_h - 20.0 - btn_h;
-                // 닫기 (destructive), flush to the card's right edge.
-                let close_w = "닫기".chars().count() as f32 * bf + bpad * 2.0;
-                let close_x = cx0 + card_w - 24.0 - close_w;
-                let close_hover = mx >= close_x
-                    && mx <= close_x + close_w
-                    && my >= btn_y
-                    && my <= btn_y + btn_h;
-                round_rect(
-                    g,
-                    close_x,
-                    btn_y,
-                    close_w,
-                    btn_h,
-                    theme::RADIUS_SM,
-                    theme::with_alpha(theme::danger(), if close_hover { 0xFF } else { 0xDD }),
-                );
-                g.draw_text(
-                    close_x + bpad,
-                    btn_y + (btn_h - bf) / 2.0,
-                    "닫기",
-                    gpu::DrawOpts { font_size: bf, color: [0xFF, 0xFF, 0xFF, 0xFF], bold: true, italic: false },
-                );
-                confirm_btn_hits.push((crate::ConfirmBtn::Close, (close_x, btn_y, close_w, btn_h)));
-                // 취소, to its left.
-                let cancel_w = "취소".chars().count() as f32 * bf + bpad * 2.0;
-                let cancel_x = close_x - 10.0 - cancel_w;
-                let cancel_hover = mx >= cancel_x
-                    && mx <= cancel_x + cancel_w
-                    && my >= btn_y
-                    && my <= btn_y + btn_h;
-                round_rect(
-                    g,
-                    cancel_x,
-                    btn_y,
-                    cancel_w,
-                    btn_h,
-                    theme::RADIUS_SM,
-                    if cancel_hover { theme::surface_hover() } else { theme::surface() },
-                );
-                g.draw_text(
-                    cancel_x + bpad,
-                    btn_y + (btn_h - bf) / 2.0,
-                    "취소",
-                    gpu::DrawOpts { font_size: bf, color: theme::text(), bold: false, italic: false },
-                );
-                confirm_btn_hits.push((crate::ConfirmBtn::Cancel, (cancel_x, btn_y, cancel_w, btn_h)));
+                // 오른쪽부터 왼쪽으로 쌓는다 — 기본 동작이 오른쪽 끝에 오는 배치.
+                let mut right = cx0 + card_w - 24.0;
+                // 채움색이 곧 뜻이다: accent = 기본 동작, danger = 되돌릴 수
+                // 없는 쪽, 무채색 = 그 외. 저장은 파괴적이지 않으니 빨강을 안 쓴다.
+                let mut button = |g: &mut gpu::GpuRenderer,
+                                  hits: &mut Vec<(crate::ConfirmBtn, (f32, f32, f32, f32))>,
+                                  label: &str,
+                                  btn: crate::ConfirmBtn,
+                                  tone: Option<[u8; 4]>| {
+                    let w = label.chars().count() as f32 * bf + bpad * 2.0;
+                    let x = right - w;
+                    right = x - 10.0;
+                    let hot = mx >= x && mx <= x + w && my >= btn_y && my <= btn_y + btn_h;
+                    let (fill, fg, bold) = match tone {
+                        Some(c) => (
+                            theme::with_alpha(c, if hot { 0xFF } else { 0xDD }),
+                            [0xFF, 0xFF, 0xFF, 0xFF],
+                            true,
+                        ),
+                        None => (
+                            if hot { theme::surface_hover() } else { theme::surface() },
+                            theme::text(),
+                            false,
+                        ),
+                    };
+                    round_rect(g, x, btn_y, w, btn_h, theme::RADIUS_SM, fill);
+                    g.draw_text(
+                        x + bpad,
+                        btn_y + (btn_h - bf) / 2.0,
+                        label,
+                        gpu::DrawOpts { font_size: bf, color: fg, bold, italic: false },
+                    );
+                    hits.push((btn, (x, btn_y, w, btn_h)));
+                };
+                if dirty {
+                    // 저장이 기본이라 오른쪽 끝 — 실수로 끝을 눌러도 안전한 쪽이
+                    // 걸리게. 편집분을 버리는 "저장 안 함" 은 그 왼쪽에 빨강으로.
+                    let acc = theme::accent();
+                    button(g, &mut confirm_btn_hits, "저장", crate::ConfirmBtn::Save, Some(acc));
+                    let dg = theme::danger();
+                    button(g, &mut confirm_btn_hits, "저장 안 함", crate::ConfirmBtn::Close, Some(dg));
+                } else {
+                    let dg = theme::danger();
+                    button(g, &mut confirm_btn_hits, "닫기", crate::ConfirmBtn::Close, Some(dg));
+                }
+                button(g, &mut confirm_btn_hits, "취소", crate::ConfirmBtn::Cancel, None);
             }
             // Chrome-style restore prompt: dim scrim + centered card offering to
             // reopen the last session's panes. Queued after the confirm modal so

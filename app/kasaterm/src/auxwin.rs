@@ -71,13 +71,13 @@ pub(crate) struct AuxWindow {
 }
 
 impl AuxWindow {
-    fn editor(&self) -> Option<&MarkdownPane> {
+    pub(crate) fn editor(&self) -> Option<&MarkdownPane> {
         match &self.kind {
             AuxWindowKind::Editor(m) => Some(m),
             AuxWindowKind::Settings | AuxWindowKind::Terminal { .. } => None,
         }
     }
-    fn editor_mut(&mut self) -> Option<&mut MarkdownPane> {
+    pub(crate) fn editor_mut(&mut self) -> Option<&mut MarkdownPane> {
         match &mut self.kind {
             AuxWindowKind::Editor(m) => Some(m),
             AuxWindowKind::Settings | AuxWindowKind::Terminal { .. } => None,
@@ -352,6 +352,16 @@ impl App {
     }
 
     /// 별도창을 닫는다(dirty 여도 그냥 — P1 철학, ● 가 경고였다).
+    /// 편집기 별도창 닫기 요청 — 저장 안 한 편집분이 있으면 확인 모달을 띄우고
+    /// 창은 그대로 둔다(모달이 답을 받으면 `PendingClose::AuxEditor` 로 돌아온다).
+    pub(crate) fn close_editor_window(&mut self, idx: usize) {
+        let Some(id) = self.aux_windows.get(idx).map(|a| a.window.id()) else { return };
+        if self.guard_dirty(&crate::PendingClose::AuxEditor(id)) {
+            return;
+        }
+        self.close_aux_window(idx);
+    }
+
     pub(crate) fn close_aux_window(&mut self, idx: usize) {
         if idx < self.aux_windows.len() {
             let _ = self.aux_windows.remove(idx);
@@ -451,7 +461,7 @@ impl App {
         }
         match event {
             WindowEvent::CloseRequested => {
-                self.close_aux_window(idx);
+                self.close_editor_window(idx);
             }
             WindowEvent::Resized(size) => {
                 if let Some(a) = self.aux_windows.get_mut(idx) {
@@ -527,11 +537,11 @@ impl App {
             return;
         }
         self.last_input_at = Instant::now();
-        // Cmd+W: 이 별도창 닫기(dirty 여도 그냥 — 메인 pane 을 안 건드림).
+        // Cmd+W: 이 별도창 닫기. 저장 안 한 편집분이 있으면 먼저 묻는다.
         if self.host_mod()
             && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW))
         {
-            self.close_aux_window(idx);
+            self.close_editor_window(idx);
             return;
         }
         // Cmd/Ctrl 조합 = 편집기 단축키(저장/복붙/undo/선택/커서점프). 그 외 조합은 삼킴.

@@ -1751,6 +1751,9 @@ impl App {
             }
             PendingClose::Pane { pane: pane.to_string() }
         };
+        if self.guard_dirty(&action) {
+            return;
+        }
         match pid.as_deref().and_then(|p| self.pid_busy(p)) {
             Some(proc) => self.open_confirm_close(proc, action),
             None => self.do_close(action),
@@ -1760,6 +1763,9 @@ impl App {
     /// and the confirm modal was raised — the caller must NOT exit yet. Returns
     /// false when nothing's running, so the caller exits immediately.
     pub(crate) fn confirm_or_close_window(&mut self) -> bool {
+        if self.guard_dirty(&PendingClose::Window) {
+            return true;
+        }
         match self.any_pane_busy() {
             Some(proc) => {
                 self.open_confirm_close(proc, PendingClose::Window);
@@ -1772,18 +1778,183 @@ impl App {
     /// in that session is running a job, else close it now. The app stays open —
     /// this is the per-session path, distinct from the whole-app quit above.
     pub(crate) fn confirm_or_close_session(&mut self, idx: usize) {
+        if self.guard_dirty(&PendingClose::Session(idx)) {
+            return;
+        }
         match self.window_busy(idx) {
             Some(proc) => self.open_confirm_close(proc, PendingClose::Session(idx)),
             None => self.do_close(PendingClose::Session(idx)),
         }
     }
     fn open_confirm_close(&mut self, proc: String, action: PendingClose) {
-        self.confirm_close = Some(ConfirmClose { proc, action });
+        self.raise_confirm(ConfirmClose { why: CloseWhy::Busy(proc), action });
+    }
+    fn raise_confirm(&mut self, dlg: ConfirmClose) {
+        self.confirm_close = Some(dlg);
         self.chrome_dirty = true;
         if let Some(w) = &self.window {
             w.request_redraw();
         }
     }
+
+    /// Every unsaved editor that `action` would destroy, with the file name to
+    /// show. Empty means nothing would be lost.
+    fn dirty_docs(&self, action: &PendingClose) -> Vec<(DirtyDoc, String)> {
+        // 별도창 편집기는 pane 트리 밖에 산다 — 앱 종료와 그 창 자체를 닫을
+        // 때만 걸린다.
+        let aux = |want: Option<winit::window::WindowId>| -> Vec<(DirtyDoc, String)> {
+            self.aux_windows
+                .iter()
+                .filter(|a| want.is_none_or(|w| a.window.id() == w))
+                .filter_map(|a| {
+                    let m = a.editor().filter(|m| m.modified)?;
+                    Some((DirtyDoc::Aux(a.window.id()), doc_name(&m.doc.path)))
+                })
+                .collect()
+        };
+        let panes: Vec<String> = match action {
+            PendingClose::Tab { pane, idx } => {
+                let ws = self.ws.lock().unwrap();
+                return ws
+                    .panes
+                    .get(pane)
+                    .and_then(|p| p.tabs.get(*idx))
+                    .and_then(|t| t.markdown().filter(|m| m.modified))
+                    .map(|m| {
+                        vec![(
+                            DirtyDoc::Tab { pane: pane.clone(), tab: *idx },
+                            doc_name(&m.doc.path),
+                        )]
+                    })
+                    .unwrap_or_default();
+            }
+            PendingClose::Pane { pane } => vec![pane.clone()],
+            PendingClose::Session(i) => {
+                let layout = if *i == self.active_window {
+                    self.pty_layout.as_ref()
+                } else {
+                    self.windows.get(*i).and_then(|w| w.as_ref())
+                };
+                layout.map_or_else(Vec::new, |t| t.leaves().iter().map(|l| l.to_string()).collect())
+            }
+            PendingClose::AuxEditor(id) => return aux(Some(*id)),
+            // 앱 종료는 세션 전부 + 별도창 전부.
+            PendingClose::Window => {
+                let mut all: Vec<String> = self
+                    .windows
+                    .iter()
+                    .flatten()
+                    .chain(self.pty_layout.as_ref())
+                    .flat_map(|t| t.leaves().into_iter().map(|l| l.to_string()))
+                    .collect();
+                all.sort();
+                all.dedup();
+                all
+            }
+        };
+        let ws = self.ws.lock().unwrap();
+        let mut out: Vec<(DirtyDoc, String)> = panes
+            .iter()
+            .filter_map(|id| Some((id, ws.panes.get(id)?)))
+            .flat_map(|(id, p)| {
+                p.tabs.iter().enumerate().filter_map(move |(t, tab)| {
+                    let m = tab.markdown().filter(|m| m.modified)?;
+                    Some((DirtyDoc::Tab { pane: id.clone(), tab: t }, doc_name(&m.doc.path)))
+                })
+            })
+            .collect();
+        drop(ws);
+        if matches!(action, PendingClose::Window) {
+            out.extend(aux(None));
+        }
+        out
+    }
+
+    /// Raise the unsaved-changes dialog if `action` would throw work away.
+    /// Returns true when the caller must stop and wait for the answer.
+    pub(crate) fn guard_dirty(&mut self, action: &PendingClose) -> bool {
+        let docs = self.dirty_docs(action);
+        if docs.is_empty() {
+            return false;
+        }
+        // 별도창을 닫으려는데 확인은 메인 창에 뜬다 — 안 띄우면 사용자는 창이
+        // 그냥 안 닫히는 것으로 본다.
+        if matches!(action, PendingClose::AuxEditor(_)) {
+            if let Some(w) = &self.window {
+                w.focus_window();
+            }
+        }
+        self.raise_confirm(ConfirmClose { why: CloseWhy::Dirty(docs), action: action.clone() });
+        true
+    }
+
+    /// Save every listed editor. False means at least one write failed — the
+    /// caller must abort the close rather than lose those edits.
+    pub(crate) fn save_dirty_docs(&mut self, docs: &[(DirtyDoc, String)]) -> bool {
+        let mut ok = true;
+        for (doc, name) in docs {
+            let job = match doc {
+                DirtyDoc::Tab { pane, tab } => {
+                    let ws = self.ws.lock().unwrap();
+                    ws.panes
+                        .get(pane)
+                        .and_then(|p| p.tabs.get(*tab))
+                        .and_then(|t| t.markdown())
+                        .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone()))
+                }
+                DirtyDoc::Aux(id) => self
+                    .aux_windows
+                    .iter()
+                    .find(|a| a.window.id() == *id)
+                    .and_then(|a| a.editor())
+                    .map(|m| (m.edit_lines.join("\n"), m.doc.path.clone())),
+            };
+            let Some((text, path)) = job else { continue };
+            if let Err(e) = crate::markdown::write_atomic(&path, &text) {
+                eprintln!("[editor] 저장 실패 {path}: {e}");
+                self.set_toast(format!("⚠ {name} 저장 실패: {e}"));
+                ok = false;
+                continue;
+            }
+            self.mark_doc_clean(doc);
+        }
+        ok
+    }
+
+    /// Drop the listed editors' changes. Clearing `modified` is what makes the
+    /// close go through — the re-entered guard then sees nothing to lose.
+    pub(crate) fn discard_dirty_docs(&mut self, docs: &[(DirtyDoc, String)]) {
+        for (doc, _) in docs {
+            self.mark_doc_clean(doc);
+        }
+    }
+
+    fn mark_doc_clean(&mut self, doc: &DirtyDoc) {
+        match doc {
+            DirtyDoc::Tab { pane, tab } => {
+                let mut ws = self.ws.lock().unwrap();
+                if let Some(m) = ws
+                    .panes
+                    .get_mut(pane)
+                    .and_then(|p| p.tabs.get_mut(*tab))
+                    .and_then(|t| t.markdown_mut())
+                {
+                    m.modified = false;
+                }
+            }
+            DirtyDoc::Aux(id) => {
+                if let Some(m) = self
+                    .aux_windows
+                    .iter_mut()
+                    .find(|a| a.window.id() == *id)
+                    .and_then(|a| a.editor_mut())
+                {
+                    m.modified = false;
+                }
+            }
+        }
+    }
+
     /// Run a non-window close action immediately. `Window` is left to the
     /// caller (it needs the event loop to exit).
     pub(crate) fn do_close(&mut self, action: PendingClose) {
@@ -1800,9 +1971,23 @@ impl App {
                     eprintln!("[window] close failed: {e:#}");
                 }
             }
+            PendingClose::AuxEditor(id) => {
+                if let Some(i) = self.aux_windows.iter().position(|a| a.window.id() == id) {
+                    self.close_aux_window(i);
+                }
+            }
             PendingClose::Window => {}
         }
     }
+}
+
+/// File name for the dialog — the full path would blow the card's width.
+fn doc_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// Raise a macOS desktop notification. Inside the signed `.app` bundle we use

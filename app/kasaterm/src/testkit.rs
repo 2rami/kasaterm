@@ -1,6 +1,14 @@
 //! 자동 테스트 하네스 — env 기반 auto-split/window/toggle/drag/tabs + schedule 타이머.
 use super::*;
 
+/// md 스크립트에 아직 실행할 단계가 남았는지. `about_to_wait` 이 이걸 보고
+/// 프레임을 펌프한다 — 자세한 사정은 `run_pending_automdscript` 참고.
+static MDSCRIPT_LEFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn mdscript_pending() -> bool {
+    MDSCRIPT_LEFT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl App {
     /// Headless verification: arm a clean exit after KASATERM_AUTOQUIT_MS so a
     /// background run exercises the save-on-exit path (and thus the next
@@ -189,9 +197,13 @@ impl App {
         };
         let handled = self.window_strip_click(r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
         eprintln!(
-            "[autowinclose] handled={handled} confirm_raised={} proc={:?}",
+            "[autowinclose] handled={handled} confirm_raised={} why={:?}",
             self.confirm_close.is_some(),
-            self.confirm_close.as_ref().map(|c| c.proc.clone()),
+            self.confirm_close.as_ref().map(|c| match &c.why {
+                CloseWhy::Busy(p) => format!("busy:{p}"),
+                CloseWhy::Dirty(d) =>
+                    format!("dirty:{}", d.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(",")),
+            }),
         );
     }
     /// Headless Info 패널 repro: `KASATERM_AUTOINFO_MS` 뒤에 우측 칼럼을 열고
@@ -359,11 +371,21 @@ impl App {
     /// 키 입력이 아니라 상태를 직접 건드리는 이유는 winit `KeyEvent` 가 밖에서
     /// 만들 수 없어서다(비공개 필드) — 키 경로 자체는 유닛 테스트가 맡는다.
     /// autosettings 처럼 함수-로컬 static 이라 `struct App` 은 안 건드린다.
-    pub(crate) fn run_pending_automdscript(&mut self) {
+    pub(crate) fn run_pending_automdscript(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::OnceLock;
         static PLAN: OnceLock<Option<(Instant, u64, Vec<String>)>> = OnceLock::new();
         static DONE: AtomicUsize = AtomicUsize::new(0);
+        // 이 함수는 about_to_wait 에서만 도는데, 앱은 할 일이 없으면 `Wait` 로
+        // 완전히 잠들어 about_to_wait 자체가 안 돈다. 그러면 다음 단계 시각이
+        // 와도 아무도 깨우지 않아 스크립트가 중간에 멎는다. 남은 단계가 있는
+        // 동안은 펌프를 켠다(`MDSCRIPT_LEFT`).
+        //
+        // 그리고 **밀린 단계는 한 번에 다 소화한다.** 한 패스에 한 단계만 처리하면
+        // 스크립트가 사실상 "프레임 수"로 페이싱된다 — 디버그 빌드의 raw 편집기는
+        // 한 프레임이 swash 글리프 힌팅에 수 초를 쓰므로(샘플러로 확인), 같은
+        // 스크립트가 판마다 3~7단계에서 제멋대로 끊겼다. 코드 문제로 보였지만
+        // 실은 하네스가 프레임을 못 따라간 것이다.
         let plan = PLAN.get_or_init(|| {
             let spec = std::env::var("KASATERM_TEST_MD_SCRIPT").ok()?;
             let start: u64 = std::env::var("KASATERM_TEST_MD_SCRIPT_MS")
@@ -382,16 +404,59 @@ impl App {
             ))
         });
         let Some((start, step_ms, steps)) = plan else { return };
-        let n = DONE.load(Ordering::Relaxed);
-        if n >= steps.len() {
-            return;
+        loop {
+            let n = DONE.load(Ordering::Relaxed);
+            MDSCRIPT_LEFT.store(n < steps.len(), Ordering::Relaxed);
+            if n >= steps.len() {
+                return;
+            }
+            let due = *start + std::time::Duration::from_millis(*step_ms * n as u64);
+            if Instant::now() < due {
+                return;
+            }
+            DONE.store(n + 1, Ordering::Relaxed);
+            // 마지막 단계가 캡처면 거기서 멈춘다 — 캡처는 *다음* 프레임에
+            // 찍히므로, 뒤에 밀린 단계를 이어서 돌리면 찍히기도 전에 화면이
+            // 바뀐다.
+            let stop_after = steps[n].starts_with("cap:");
+            self.run_one_mdstep(&steps[n].clone(), event_loop);
+            if stop_after {
+                return;
+            }
         }
-        let due = *start + std::time::Duration::from_millis(*step_ms * n as u64);
-        if Instant::now() < due {
-            return;
+    }
+
+    fn run_one_mdstep(&mut self, step: &str, event_loop: &ActiveEventLoop) {
+        let step = step.to_string();
+        // pane 이 필요 없는 단계를 먼저 — 닫기 확인을 해소한 뒤엔 마크다운 pane
+        // 자체가 사라지는데, 정작 그 "닫힌 뒤 화면"이 캡처하고 싶은 것이다.
+        match step.split_once(':') {
+            Some(("cap", p)) => {
+                // `pending_capture` 큐를 거치지 않고 바로 무장한다 — 그 큐의 드레인은
+                // 이 함수보다 **앞에서** 돌아, 큐에 넣으면 빨라야 다음 패스에나
+                // 집히고 그 사이에 다음 단계가 끼어들면 바뀐 화면이 찍힌다
+                // (실제로 raw 캡처가 render 로 되돌린 뒤 화면을 담았다).
+                if let Some(g) = self.gpu.as_mut() {
+                    g.capture_next = Some(p.to_string());
+                }
+                eprintln!("[mdscript] cap → {p}");
+                self.wake_after_mdstep();
+                return;
+            }
+            // 모달 버튼 누르기 — 저장/저장 안 함/취소.
+            Some(("pick", v)) => {
+                let btn = match v {
+                    "save" => ConfirmBtn::Save,
+                    "cancel" => ConfirmBtn::Cancel,
+                    _ => ConfirmBtn::Close,
+                };
+                self.confirm_dialog_pick(btn, event_loop);
+                eprintln!("[mdscript] pick={v} modal_left={}", self.confirm_close.is_some());
+                self.wake_after_mdstep();
+                return;
+            }
+            _ => {}
         }
-        DONE.store(n + 1, Ordering::Relaxed);
-        let step = steps[n].clone();
         // 활성 pane 이 아니라 **마크다운 pane** 을 찾는다. 옆 셸이 먼저 죽으면
         // 포커스가 그쪽으로 넘어가고, 그러면 단계들이 아무 말 없이 반환돼
         // 스크립트가 중간에 멈춘 것처럼 보였다(실제로 4단계에서 끊겼다).
@@ -423,15 +488,24 @@ impl App {
                 let at = self.md_anchor_line(&id);
                 eprintln!("[mdscript] mode={v} anchor_line={at:?}");
             }
-            Some(("cap", p)) => {
-                // `pending_capture` 큐를 거치지 않고 바로 무장한다 — 그 큐의 드레인은
-                // 이 함수보다 **앞에서** 돌아, 큐에 넣으면 빨라야 다음 패스에나
-                // 집히고 그 사이에 다음 단계가 끼어들면 바뀐 화면이 찍힌다
-                // (실제로 raw 캡처가 render 로 되돌린 뒤 화면을 담았다).
-                if let Some(g) = self.gpu.as_mut() {
-                    g.capture_next = Some(p.to_string());
-                }
-                eprintln!("[mdscript] cap → {p}");
+            // 이 마크다운 탭을 닫아 본다 — 저장 안 한 편집분이 있으면 확인
+            // 모달이 떠야 하고, 그 화면이 이 단계의 관찰 대상이다.
+            Some(("close", _)) => {
+                let tab = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .and_then(|w| w.panes.get(&id).map(|p| p.active_tab))
+                    .unwrap_or(0);
+                self.confirm_or_close_tab(&id, tab);
+                let why = self.confirm_close.as_ref().map(|c| match &c.why {
+                    CloseWhy::Busy(p) => format!("busy:{p}"),
+                    CloseWhy::Dirty(d) => format!(
+                        "dirty:{}",
+                        d.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(",")
+                    ),
+                });
+                eprintln!("[mdscript] close why={why:?}");
             }
             // 편집 키는 winit `KeyEvent` 를 밖에서 만들 수 없어(비공개 필드)
             // 순수 메서드를 직접 부른다. 키→메서드 배선은 유닛 테스트가 아니라
@@ -470,6 +544,10 @@ impl App {
             }
             _ => eprintln!("[mdscript] 모르는 단계: {step:?}"),
         }
+        self.wake_after_mdstep();
+    }
+
+    fn wake_after_mdstep(&mut self) {
         self.chrome_dirty = true;
         if let Some(w) = &self.window {
             w.request_redraw();
