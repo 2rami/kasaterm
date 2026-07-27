@@ -1997,6 +1997,9 @@ struct MdDocImage {
 /// images the renderer uploads + draws.
 struct MarkdownDoc {
     blocks: Vec<MdBlock>,
+    /// 0-based source line of each block, index-aligned with `blocks`. Lets the
+    /// Raw↔Render toggle keep the line you were reading on screen.
+    block_lines: Vec<usize>,
     path: String,
     images: Vec<MdDocImage>,
     /// Original source text — seeds the Raw editor buffer and is rewritten on
@@ -2020,9 +2023,20 @@ fn heading_level(l: pulldown_cmark::HeadingLevel) -> u8 {
 /// is flattened (a quote's paragraphs collapse into Quote blocks, list-item
 /// paragraphs into the item) — enough structure for a document-style reader
 /// without a full layout tree.
-fn parse_markdown(text: &str) -> Vec<MdBlock> {
+///
+/// The second return is each block's 0-based source line, index-aligned with
+/// the blocks. Raw↔Render mode switching uses it to keep the line you were
+/// looking at on screen; without it the toggle can only guess.
+fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     let mut blocks: Vec<MdBlock> = Vec::new();
+    let mut block_lines: Vec<usize> = Vec::new();
+    // Byte offset of every line start, so a block's byte offset becomes a line
+    // number by binary search. Counting newlines per block would be O(n) each.
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let line_of = |off: usize| line_starts.partition_point(|&s| s <= off).saturating_sub(1);
     let mut spans: Vec<MdSpan> = Vec::new();
     let mut bold = 0i32;
     let mut italic = 0i32;
@@ -2053,7 +2067,7 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
             }
         };
 
-    for ev in Parser::new_ext(text, Options::ENABLE_TABLES) {
+    for (ev, rng) in Parser::new_ext(text, Options::ENABLE_TABLES).into_offset_iter() {
         match ev {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
@@ -2071,7 +2085,22 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                         pulldown_cmark::CodeBlockKind::Indented => String::new(),
                     };
                 }
-                Tag::List(start) => list_stack.push(start),
+                Tag::List(start) => {
+                    // 중첩 리스트가 열리면 부모 항목을 **여기서** 밀어 넣는다.
+                    // TagEnd::Item 까지 미루면 자식이 먼저 블록 목록에 들어가
+                    // 화면에서 부모 위로 올라오고, 게다가 자식의 Tag::Item 이
+                    // 공유 버퍼인 spans 를 비워 부모 텍스트가 통째로 사라진다
+                    // (`- outer` / `  - inner` 가 inner, "" 순으로 나왔다).
+                    if in_item && !spans.is_empty() {
+                        blocks.push(MdBlock::ListItem {
+                            depth: list_stack.len().saturating_sub(1) as u8,
+                            marker: std::mem::take(&mut item_marker),
+                            spans: std::mem::take(&mut spans),
+                        });
+                        in_item = false;
+                    }
+                    list_stack.push(start)
+                }
                 Tag::Item => {
                     in_item = true;
                     spans.clear();
@@ -2146,13 +2175,17 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                     list_stack.pop();
                 }
                 TagEnd::Item => {
-                    let depth = list_stack.len().saturating_sub(1) as u8;
-                    blocks.push(MdBlock::ListItem {
-                        depth,
-                        marker: std::mem::take(&mut item_marker),
-                        spans: std::mem::take(&mut spans),
-                    });
-                    in_item = false;
+                    // `in_item` 이 false 면 중첩 리스트가 열릴 때 이미 내보낸
+                    // 항목이다 — 여기서 또 밀면 빈 항목이 하나 더 생긴다.
+                    if in_item {
+                        let depth = list_stack.len().saturating_sub(1) as u8;
+                        blocks.push(MdBlock::ListItem {
+                            depth,
+                            marker: std::mem::take(&mut item_marker),
+                            spans: std::mem::take(&mut spans),
+                        });
+                        in_item = false;
+                    }
                 }
                 TagEnd::Emphasis => italic -= 1,
                 TagEnd::Strong => bold -= 1,
@@ -2200,8 +2233,15 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
             Event::Rule => blocks.push(MdBlock::Rule),
             _ => {}
         }
+        // 이 이벤트가 블록을 밀어 넣었으면 소스 줄을 짝지어 둔다. End 이벤트의
+        // 범위는 요소 전체라 `rng.start` 가 곧 그 블록이 시작한 줄이다. 푸시
+        // 지점마다 적지 않고 여기 한 곳에서 채우는 건, 그래야 두 벡터의 길이가
+        // 구조적으로 어긋날 수 없어서다.
+        while block_lines.len() < blocks.len() {
+            block_lines.push(line_of(rng.start));
+        }
     }
-    blocks
+    (blocks, block_lines)
 }
 
 /// Parse + decode a markdown document: parse blocks, then decode each inline
@@ -2209,7 +2249,7 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
 /// URLs) under `key_prefix`-scoped texture keys. Shared by initial open and
 /// post-edit re-parse.
 fn build_markdown_doc(key_prefix: &str, p: &std::path::Path, text: &str) -> MarkdownDoc {
-    let mut blocks = parse_markdown(text);
+    let (mut blocks, block_lines) = parse_markdown(text);
     let md_dir = p.parent().map(|d| d.to_path_buf());
     let mut images: Vec<MdDocImage> = Vec::new();
     for (idx, block) in blocks.iter_mut().enumerate() {
@@ -2235,6 +2275,7 @@ fn build_markdown_doc(key_prefix: &str, p: &std::path::Path, text: &str) -> Mark
     }
     MarkdownDoc {
         blocks,
+        block_lines,
         path: p.to_string_lossy().into_owned(),
         images,
         raw: text.to_string(),
@@ -2952,6 +2993,14 @@ struct App {
     /// the renderer each frame. The scroll handler clamps scroll_offset to
     /// (content_h - visible_h) so a markdown pane can't over-scroll.
     md_content_h: HashMap<String, f32>,
+    /// Document-space y of each rendered block per pane id, published by the
+    /// renderer each frame (see `Gpu::md_block_ys`). `set_md_mode` reads it to
+    /// carry the scroll position across a Raw↔Render toggle.
+    md_block_ys: HashMap<String, Vec<f32>>,
+    /// Pending "put this source line at the top" request per pane id, set by a
+    /// Raw→Render toggle. The new layout's block positions only exist after a
+    /// draw, so the renderer consumes this once `md_block_ys` is fresh.
+    md_scroll_anchor: HashMap<String, usize>,
     /// Raw-editor body box (logical px) per pane id, published by the renderer
     /// each frame. A click in this box hit-tests to a caret position so the
     /// mouse can place the edit cursor (see `md_click_caret`).
@@ -3543,6 +3592,8 @@ impl App {
             handle_menu: std::env::var("KASATERM_FORCE_HANDLE_MENU").ok(),
             handle_menu_hits: Vec::new(),
             md_content_h: HashMap::new(),
+            md_block_ys: HashMap::new(),
+            md_scroll_anchor: HashMap::new(),
             md_body_rects: HashMap::new(),
             pane_tab_rects: Vec::new(),
             pane_tab_close_rects: Vec::new(),
@@ -4977,7 +5028,7 @@ mod tests {
     #[test]
     fn table_parses_into_head_rows_and_alignment() {
         let md = "| 층 | 코드네임 |\n|:---|---:|\n| ① 엔진 | **kasaterm** |\n| ② 작업환경 | `kasaspace` |\n";
-        let blocks = parse_markdown(md);
+        let (blocks, _) = parse_markdown(md);
         let table = blocks
             .iter()
             .find_map(|b| match b {
@@ -4994,6 +5045,43 @@ mod tests {
         assert!(rows.iter().all(|r| r.len() == 2), "빈 행이 섞였다: {rows:?}");
         assert!(rows[0][1][0].bold, "셀 안 인라인 스타일 보존");
         assert!(rows[1][1][0].code, "셀 안 인라인 코드 보존");
+    }
+
+    /// 중첩 리스트의 부모 항목은 자식 리스트가 열릴 때 나가야 한다. TagEnd::Item
+    /// 까지 미루면 ① 자식이 먼저 블록에 들어가 화면에서 부모 위로 올라오고
+    /// ② 자식의 Tag::Item 이 공유 spans 를 비워 부모 텍스트가 사라졌다.
+    #[test]
+    fn nested_list_keeps_parent_text_and_order() {
+        let (blocks, _) = parse_markdown("- outer\n  - inner\n");
+        let items: Vec<(u8, String)> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                MdBlock::ListItem { depth, spans, .. } => {
+                    Some((*depth, spans.iter().map(|s| s.text.as_str()).collect()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            items,
+            vec![(0, "outer".to_string()), (1, "inner".to_string())],
+            "부모가 먼저, 텍스트를 지닌 채로 나와야 한다"
+        );
+    }
+
+    /// `block_lines` 는 블록과 개수가 같고 **오름차순**이어야 한다 — Raw↔Render
+    /// 토글이 이진 탐색(`partition_point`)으로 줄↔블록을 짝지으므로, 순서가
+    /// 뒤집히면 엉뚱한 위치로 점프한다.
+    #[test]
+    fn block_lines_align_with_blocks_and_ascend() {
+        let md = "# 제목\n\n문단 하나.\n\n- outer\n  - inner\n- 둘째\n\n\
+                  > 인용\n\n```rust\nfn main() {}\n```\n\n\
+                  | a | b |\n|---|---|\n| 1 | 2 |\n\n---\n\n마지막 문단.\n";
+        let (blocks, lines) = parse_markdown(md);
+        assert_eq!(blocks.len(), lines.len(), "두 벡터의 길이가 어긋났다");
+        assert!(lines.windows(2).all(|w| w[0] <= w[1]), "줄 번호가 역행한다: {lines:?}");
+        assert_eq!(lines[0], 0, "첫 블록은 0줄");
+        assert_eq!(*lines.last().unwrap(), 20, "마지막 문단의 줄");
     }
 
     #[test]

@@ -92,6 +92,12 @@ pub struct GpuRenderer {
     /// code). main.rs hit-tests a click and copies `code`. Rebuilt each
     /// `draw_markdown` like `md_link_rects`.
     pub md_copy_rects: Vec<(f32, f32, f32, f32, String)>,
+    /// Document-space y (logical px from the top of the doc, scroll excluded)
+    /// where each block starts, index-aligned with the blocks just drawn. The
+    /// Raw↔Render toggle pairs this with `MarkdownDoc::block_lines` to convert
+    /// a scroll offset in one mode to the other. Filled by `draw_markdown`;
+    /// render.rs moves it out per pane id.
+    pub md_block_ys: Vec<f32>,
     /// Tree-sitter span cache for raw-editor buffers, content-addressed by a
     /// hash of (lang, lines) — no pane id needed, and a tiny LRU keeps a few
     /// split editors from thrashing each other's entries.
@@ -431,6 +437,7 @@ impl GpuRenderer {
             icon_quads: Vec::new(),
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
+            md_block_ys: Vec::new(),
             raw_hl: Vec::new(),
         })
     }
@@ -1202,6 +1209,8 @@ impl GpuRenderer {
         // they track the current scroll offset; main.rs hit-tests clicks.
         self.md_link_rects.clear();
         self.md_copy_rects.clear();
+        self.md_block_ys.clear();
+        self.md_block_ys.reserve(blocks.len());
         let base = self.font_size_px as f32 / self.scale;
         // Notion-style reading column: generous side padding, capped content
         // width, centered in the pane. Shadow x/w so the block code below lays
@@ -1217,6 +1226,10 @@ impl GpuRenderer {
         let top0 = y - scroll;
         let mut pen_y = top0 + base * 1.1;
         for block in blocks {
+            // 이 블록이 문서 어디쯤에 놓였는지(스크롤 뺀 좌표) 적어 둔다. 레이아웃
+            // 은 여기서만 계산되므로, 모드 토글이 쓸 위치는 실제 그린 값이어야
+            // 한다 — 따로 추정하면 헤딩 간격·이미지 높이에서 어긋난다.
+            self.md_block_ys.push(pen_y - top0);
             match block {
                 MdBlock::Heading { level, spans } => {
                     let scale_f = match level {
@@ -1654,6 +1667,16 @@ impl GpuRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Raw-editor row metrics for the current font: (top pad, line height) in
+    /// logical px. `draw_raw_editor` lays lines out at `pad + line * lh`, and
+    /// `set_md_mode` inverts that to turn a scroll offset into a line number —
+    /// so both must read the numbers from here, not restate them.
+    pub fn raw_editor_metrics(&mut self) -> (f32, f32) {
+        let base = self.font_size_px as f32 / self.scale;
+        let lh = (self.shaper.line_height(base * self.scale).ceil() / self.scale) * 1.25;
+        (base * 0.6, lh)
+    }
+
     pub fn draw_raw_editor(
         &mut self,
         lines: &[String],
@@ -1671,8 +1694,7 @@ impl GpuRenderer {
     ) -> f32 {
         let clip_right = x + w;
         let base = self.font_size_px as f32 / self.scale;
-        let pad = base * 0.6;
-        let lh = (self.shaper.line_height(base * self.scale).ceil() / self.scale) * 1.25;
+        let (pad, lh) = self.raw_editor_metrics();
         // The line box (lh) is 1.25× the glyph height for breathing room, so the
         // text/number/cursor must drop by half the slack to sit centered in the
         // row — otherwise they cling to the top and the current-line highlight

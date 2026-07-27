@@ -2108,7 +2108,30 @@ impl App {
                             g.upload_image(&im.key, &im.rgba, im.w, im.h);
                         }
                     }
-                    g.draw_markdown(&doc.blocks, *bx, *by, *bw, *bh, *scroll)
+                    let h = g.draw_markdown(&doc.blocks, *bx, *by, *bw, *bh, *scroll);
+                    // 블록별 문서좌표 y 를 pane 별로 옮겨 둔다 — Gpu 쪽은 pane
+                    // 을 모르고 매 프레임 덮어써서, 마크다운 pane 이 둘이면
+                    // 마지막 것만 남는다.
+                    let ys = std::mem::take(&mut g.md_block_ys);
+                    // Raw→Render 토글이 남긴 앵커: 이제야 새 레이아웃의 y 가
+                    // 생겼으니 보던 줄을 화면 맨 위로 되돌린다. 한 프레임 늦는
+                    // 건 어쩔 수 없다 — 위치는 그려봐야 알 수 있어서다.
+                    if let Some(line) = self.md_scroll_anchor.remove(id) {
+                        let i = doc.block_lines.partition_point(|&l| l <= line).saturating_sub(1);
+                        let want = ys.get(i).copied().unwrap_or(0.0).max(0.0) as usize;
+                        if want != *scroll as usize {
+                            if let Ok(mut ws) = self.ws.lock() {
+                                if let Some(pane) = ws.panes.get_mut(id) {
+                                    pane.dirty = true;
+                                    if let Some(m) = pane.markdown_mut() {
+                                        m.scroll = want;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.md_block_ys.insert(id.clone(), ys);
+                    h
                 };
                 self.md_content_h.insert(id.clone(), content_h);
             }

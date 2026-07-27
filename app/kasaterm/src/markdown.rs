@@ -5,6 +5,28 @@ use super::*;
 /// bounds memory (~cap × file size worst case).
 pub(crate) const UNDO_CAP: usize = 100;
 
+/// Would this key change the buffer if the pane were in Raw mode? Rendered
+/// mode uses it to decide whether a keypress means "I want to edit" (switch to
+/// Raw and keep the key) or just navigation (leave the view alone).
+///
+/// Kept in step with `apply_edit_key`'s mutating arms — a key that edits there
+/// but is missing here gets silently eaten in Rendered mode, which is exactly
+/// the behaviour this replaces.
+pub(crate) fn md_mutating_key(event: &KeyEvent) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    matches!(
+        &event.logical_key,
+        Key::Character(_)
+            | Key::Named(
+                NamedKey::Space
+                    | NamedKey::Enter
+                    | NamedKey::Tab
+                    | NamedKey::Backspace
+                    | NamedKey::Delete
+            )
+    )
+}
+
 /// Word-motion character class: identifier chars group together, everything
 /// else (symbols) groups separately, whitespace separates both.
 fn is_word_char(c: char) -> bool {
@@ -871,11 +893,44 @@ impl App {
             }
         }
     }
+    /// Source line currently at the top of a markdown pane's viewport, whatever
+    /// mode it is in. This is the intermediate currency for mode switching: the
+    /// two modes scroll in different coordinate systems (block layout vs. fixed
+    /// row height), and a line number is the only thing they both agree on.
+    pub(crate) fn md_anchor_line(&mut self, id: &str) -> Option<usize> {
+        let (raw_mode, scroll, block_line_at) = {
+            let ws = self.ws.lock().unwrap();
+            let m = ws.panes.get(id)?.markdown()?;
+            let scroll = m.scroll as f32;
+            if m.raw_mode {
+                (true, scroll, None)
+            } else {
+                // Last block whose top is at or above the viewport top.
+                let ys = self.md_block_ys.get(id)?;
+                let i = ys.partition_point(|&y| y <= scroll).saturating_sub(1);
+                (false, scroll, m.doc.block_lines.get(i).copied())
+            }
+        };
+        if !raw_mode {
+            return block_line_at;
+        }
+        let (pad, lh) = self.gpu.as_mut()?.raw_editor_metrics();
+        Some((((scroll - pad) / lh).floor().max(0.0)) as usize)
+    }
+
     /// Set a markdown pane's view mode from the header "Rendered | Raw" toggle.
     /// No-op if already in `want_raw`. Render → Raw seeds the edit buffer from
     /// the doc source; Raw → Render writes the buffer back to disk and re-parses
     /// so the laid-out view reflects the edits.
+    ///
+    /// Both directions carry the reading position across. Resetting to the top
+    /// was the single most grating thing about the editor — you lost your place
+    /// every time you switched to fix a typo.
     pub(crate) fn set_md_mode(&mut self, id: &str, want_raw: bool) {
+        let anchor = self.md_anchor_line(id);
+        let raw_metrics = self.gpu.as_mut().map(|g| g.raw_editor_metrics());
+        let old_ys = self.md_block_ys.get(id).cloned();
+        let mut pending: Option<usize> = None;
         let mut ws = self.ws.lock().unwrap();
         let Some(pane) = ws.panes.get_mut(id) else { return };
         let is_raw = pane.markdown().map_or(false, |m| m.raw_mode);
@@ -891,12 +946,20 @@ impl App {
             if let Some((text, path)) = save {
                 let _ = std::fs::write(&path, &text);
                 let doc = build_markdown_doc(id, std::path::Path::new(&path), &text);
+                // 새 레이아웃의 블록 y 는 아직 없다 — 그려봐야 나온다. 옛 y 로
+                // 일단 근사해 한 프레임짜리 튐을 줄이고, 정확한 위치는 렌더가
+                // y 를 채운 뒤 pending 앵커가 바로잡는다.
+                let guess = anchor.zip(old_ys.as_ref()).and_then(|(line, ys)| {
+                    let i = doc.block_lines.partition_point(|&l| l <= line).saturating_sub(1);
+                    ys.get(i).copied()
+                });
                 if let Some(m) = pane.markdown_mut() {
                     m.doc = Arc::new(doc);
-                    m.scroll = 0;
                     m.raw_mode = false;
                     m.modified = false;
+                    m.scroll = guess.unwrap_or(0.0).max(0.0) as usize;
                 }
+                pending = anchor;
             }
         } else if let Some(m) = pane.markdown_mut() {
             // Render → Raw: seed the edit buffer from the source.
@@ -904,10 +967,17 @@ impl App {
             if m.edit_lines.is_empty() {
                 m.edit_lines.push(String::new());
             }
-            m.cur_line = 0;
+            let line = anchor.unwrap_or(0).min(m.edit_lines.len().saturating_sub(1));
+            // 커서도 보던 줄에 둔다 — 여기서 0 으로 되돌리면 "고치려고" 연 raw
+            // 모드가 매번 파일 맨 위에서 시작한다.
+            m.cur_line = line;
             m.cur_col = 0;
-            m.scroll = 0;
+            m.scroll = raw_metrics.map_or(0, |(pad, lh)| (pad + line as f32 * lh) as usize);
             m.raw_mode = true;
+        }
+        drop(ws);
+        if let Some(line) = pending {
+            self.md_scroll_anchor.insert(id.to_string(), line);
         }
     }
 

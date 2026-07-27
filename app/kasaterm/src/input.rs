@@ -1681,7 +1681,22 @@ impl App {
                 // 터미널용 잔재 제안이 아래 Ctrl+E 수락 경로에 낚이지 않게 비운다.
                 self.current_suggestion = None;
             } else {
-                if is_raw {
+                // Rendered 모드에서 글자를 치면 삼키는 대신 raw 로 넘어가 그
+                // 글자를 살린다. 편집하려는 의도가 분명한데 아무 일도 안 일어나면
+                // 왜 안 써지는지 화면이 설명해 주지 못한다. 방향키·PageUp 같은
+                // 이동 키는 그대로 두고(스크롤은 휠), 버퍼를 바꾸는 키만 태운다.
+                let mut raw_now = is_raw;
+                if !raw_now && crate::markdown::md_mutating_key(event) {
+                    let id = self.ws.lock().unwrap().active_pane.clone();
+                    if let Some(id) = id {
+                        self.set_md_mode(&id, true);
+                        // 실제로 바뀌었는지 다시 읽는다 — 못 바꿨는데 편집 경로로
+                        // 넘기면 씨딩 안 된 버퍼를 건드린다.
+                        let ws = self.ws.lock().unwrap();
+                        raw_now = ws.panes.get(&id).and_then(|p| p.markdown()).is_some_and(|m| m.raw_mode);
+                    }
+                }
+                if raw_now {
                     self.md_editor_input(event);
                     if let Some(w) = &self.window {
                         w.request_redraw();
