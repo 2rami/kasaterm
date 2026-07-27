@@ -2260,8 +2260,8 @@ struct Workspace {
     /// 같은 매핑을 본다(별 스레드라 App 필드는 socket.rs 가 못 봄).
     pane_room: HashMap<String, String>,
     /// pane → 배정 캐릭터명(미도리 등). pane_room 과 같은 이유로 ws 에 둔다 —
-    /// pump 스레드(apply_screen_update)가 PaneState.character 를 동기하고, GUI·
-    /// pane_header_label 이 같은 매핑을 본다. assign_character_env 가 spawn 시 채운다.
+    /// pump 스레드(apply_screen_update)가 PaneState.character 를 동기하고, 헤더
+    /// 렌더(render.rs)가 같은 매핑을 본다. assign_character_env 가 spawn 시 채운다.
     pane_character: HashMap<String, String>,
     /// 활성 윈도우(보이는 방)의 leaf pane id 집합. `publish_pty_layout` 이 갱신한다.
     /// collab_board 가 이걸로 bound pane 을 필터해 *활성 방 학생만* board 에 올린다
@@ -2596,13 +2596,13 @@ enum FtMenuAction {
     OpenDefault,
 }
 
-/// Action buttons at the foot of the git column. `StageAll` runs `git add -A`;
-/// `Commit` hands the commit to the active claude pane; `Pull`/`Push` sync the
-/// current branch with its upstream. All shell out through `kasa_mcp::git` on a
-/// worker thread so the UI never blocks.
+/// Action buttons at the foot of the git column. `Commit` hands the commit to
+/// the active claude pane; `Pull`/`Push` sync the current branch with its
+/// upstream. All shell out through `kasa_mcp::git` on a worker thread so the UI
+/// never blocks. (전체 stage 버튼은 cursor 개조 때 사라졌다 — 파일 행마다
+/// 개별 stage 하는 모델로 바뀌어서다.)
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GitColBtn {
-    StageAll,
     Commit,
     Pull,
     Push,

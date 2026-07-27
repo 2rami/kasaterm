@@ -781,7 +781,7 @@ impl App {
         }
     }
     /// Run a git-column button off a worker thread so the UI never blocks on
-    /// git/network. StageAll = `git add -A`; Pull/Push sync the branch; Commit
+    /// git/network. Pull/Push sync the branch; Commit
     /// commits the STAGED changes with the panel's message (VSCode model). All
     /// read the column's repo from the poller's snapshot so the action always
     /// targets what the user sees.
@@ -789,15 +789,6 @@ impl App {
         let cwd = self.git.col_data.lock().ok().and_then(|g| g.cwd.clone());
         let Some(cwd) = cwd else { return };
         match btn {
-            GitColBtn::StageAll => {
-                // `git add -A` off-thread; the poller's next tick flips the
-                // rows to staged.
-                let proxy = self.proxy.clone();
-                std::thread::spawn(move || {
-                    let _ = kasa_mcp::git::git_stage_all(&cwd);
-                    let _ = proxy.send_event(UserEvent::Redraw);
-                });
-            }
             GitColBtn::Pull => {
                 self.git.op = Some("Pulling");
                 let proxy = self.proxy.clone();

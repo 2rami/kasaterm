@@ -383,12 +383,6 @@ pub fn git_commit_file_diff(repo: &Path, hash: &str, path: &str) -> Vec<DiffLine
     parse_unified_diff(out.trim_start())
 }
 
-/// 작업트리의 모든 변경을 stage (`git add -A`) — 패널의 "전체 Stage".
-pub fn git_stage_all(repo: &Path) -> Value {
-    let (ok, out) = run_git(repo, &["add", "-A"]);
-    json!({ "ok": ok, "output": out.trim() })
-}
-
 /// 로컬 브랜치 이름 목록. 패널의 브랜치 전환 드롭다운용. repo가 아니거나
 /// 브랜치가 없으면 빈 Vec. 현재 브랜치 표시는 호출부가 `git_status`의
 /// branch와 비교해서 한다(여기선 순수 목록만).

@@ -81,10 +81,6 @@ struct Buffer {
 }
 
 impl Buffer {
-    fn is_empty(&self) -> bool {
-        self.cho.is_none() && self.jung.is_none() && self.jong.is_none()
-    }
-
     fn render(&self) -> Option<String> {
         match (self.cho, self.jung, self.jong) {
             (Some(c), Some(j), Some(jj)) => Some(syllable(c, j, jj).to_string()),
@@ -111,10 +107,6 @@ pub struct Composer {
 }
 
 impl Composer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn preedit(&self) -> Option<String> {
         self.buf.render()
     }
@@ -258,7 +250,7 @@ mod tests {
 
     #[test]
     fn rk_makes_ga() {
-        let mut c = Composer::new();
+        let mut c = Composer::default();
         assert_eq!(c.feed(dubeolsik('r').unwrap()), None);
         assert_eq!(c.preedit().as_deref(), Some("ㄱ"));
         assert_eq!(c.feed(dubeolsik('k').unwrap()), None);
@@ -269,7 +261,7 @@ mod tests {
     #[test]
     fn rkqkfk_makes_가밥아() {
         // "rkqkfk" = ㄱㅏㅂㅏㄹㅏ → 가, 바, 라
-        let mut c = Composer::new();
+        let mut c = Composer::default();
         let mut out = String::new();
         for ch in "rkqkfk".chars() {
             if let Some(s) = c.feed(dubeolsik(ch).unwrap()) {
@@ -285,7 +277,7 @@ mod tests {
     #[test]
     fn rks_makes_간() {
         // r=ㄱ k=ㅏ s=ㄴ → 간
-        let mut c = Composer::new();
+        let mut c = Composer::default();
         for ch in "rks".chars() {
             c.feed(dubeolsik(ch).unwrap());
         }
@@ -295,7 +287,7 @@ mod tests {
     #[test]
     fn rksk_makes_가나() {
         // 간 + ㅏ → 가나 (jong moves to next cho)
-        let mut c = Composer::new();
+        let mut c = Composer::default();
         let mut out = String::new();
         for ch in "rksk".chars() {
             if let Some(s) = c.feed(dubeolsik(ch).unwrap()) {
