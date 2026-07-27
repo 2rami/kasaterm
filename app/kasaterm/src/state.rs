@@ -162,6 +162,10 @@ pub(crate) struct FileTreeState {
     /// 이걸로 clamp 해야 동적 헤더 높이를 정확히 반영(하드코딩하면 max_scroll 틀림).
     pub(crate) body_rect: (f32, f32, f32, f32),
     pub(crate) root: Option<std::path::PathBuf>,
+    /// git 레포 앵커 계산의 1-엔트리 캐시: `(pane cwd, 그 cwd 를 감싸는 레포 루트)`.
+    /// 앵커는 cwd 부터 위로 `.git` 을 훑으므로 깊이만큼 stat 이 든다 —
+    /// `refresh_file_tree` 가 매 프레임 불리니 cwd 가 그대로면 재계산하지 않는다.
+    pub(crate) anchor_cache: Option<(std::path::PathBuf, Option<std::path::PathBuf>)>,
     pub(crate) expanded: std::collections::HashSet<std::path::PathBuf>,
     pub(crate) nodes: Vec<FileNode>,
     pub(crate) fs_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
