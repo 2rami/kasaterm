@@ -198,6 +198,27 @@ impl Shaper {
         }
     }
 
+    /// 폴백 페이스를 추가하면서 같은 슬롯의 designed bold 도 함께 건다.
+    ///
+    /// 슬롯 번호를 호출부가 세지 않아도 되는 게 핵심이다 — `add_fallback_path` 는
+    /// 로드에 실패하면 조용히 건너뛰므로, 바깥에서 순번을 세면 볼드가 엉뚱한
+    /// 페이스에 붙을 수 있다. 폴백에 볼드가 없으면 그 페이스가 담당하는 문자는
+    /// 볼드로 요청해도 regular 로 그려진다(CJK 는 합성 팽창 대상이 아니라서
+    /// 특히 그렇다 — 한글 볼드가 통째로 밋밋해진다).
+    pub fn add_fallback_with_bold(
+        &mut self,
+        path: &str,
+        index: u32,
+        bold: Option<(String, u32)>,
+    ) {
+        let Some(data) = map_font(path, index) else { return };
+        self.faces.push((data, index));
+        let slot = self.faces.len() - 1;
+        if let Some((bold_path, bold_idx)) = bold {
+            self.set_bold_face_path(slot, &bold_path, bold_idx);
+        }
+    }
+
     /// Append a fallback face from in-memory bytes. Used for fonts
     /// we ship inside the binary via `include_bytes!` — guarantees
     /// the chain has Misc-Technical / Nerd icon coverage regardless
@@ -300,6 +321,16 @@ impl Shaper {
         bold: bool,
         italic: bool,
     ) -> Option<Rasterized> {
+        // 라틴 한 칸의 폭. CJK 를 폴백 페이스가 그릴 때 "두 칸을 꽉 채우도록"
+        // 키우는 기준이 된다 — primary 가 라틴 전용(JetBrains, 한글 글리프 없음)
+        // 이면 한글은 폴백(D2Coding 논-Mono, 1.0em)에서 잡히는데, 칸은 라틴
+        // 0.6em × 2 = 1.2em 이라 그대로 두면 양쪽에 0.1em 씩 빈 공간이 남아
+        // 글자마다 벌어져 보인다. 이 값이 그 간극을 메우는 배율의 분자다.
+        let latin_cell = if is_cjk_wide(ch) {
+            self.advance('M', size_px)
+        } else {
+            0.0
+        };
         // Pick the most specific face we have for the (bold, italic)
         // combo: bold_italic > italic > bold > regular. JetBrains Mono
         // ships all four with matching metrics so they layer cleanly.
@@ -417,13 +448,15 @@ impl Shaper {
             } else {
                 None
             };
-            // Stroke-widen every bold cell, designed face included. D2Coding's
-            // designed bold is a mild weight step (한글 1.12x over regular —
-            // *thinner* than regular+dilate at 1.22x), so gating dilation on
-            // "no real bold face" made real-bold text the weakest of the three.
-            // Dilating on top of the designed face keeps its stroke balance and
-            // lands at 1.33x — the weight 거노 asked for (2026-07-26 실측).
-            let want_dilate = bold;
+            // Dilate only when this slot has no designed bold. A real bold
+            // outline is already shaped at the right weight, so smearing it
+            // wider gives the "fat blocky" look — the symptom 거노 flagged.
+            //
+            // 2026-07-26 에 이걸 `bold` 전체로 넓혔던 이유는 D2Coding 의 designed
+            // bold 가 약해서(한글 1.12x) 팽창한 regular 보다도 얇았기 때문이다.
+            // 라틴을 JetBrains 로 옮기면서 그 전제가 사라진다 — JetBrains Bold 는
+            // 자체 굵기가 충분해 덧칠이 필요 없다. 그래서 게이팅을 되돌린다.
+            let want_dilate = bold && !matches!(kind, FaceKind::Bold);
             let render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
                 let font = FontRef::from_index(font_data, font_index).unwrap();
                 let mut scaler = scale_ctx.builder(font).size(face_size).hint(true).build();
@@ -442,7 +475,22 @@ impl Shaper {
                 }
                 render.render(&mut scaler, glyph_id)
             };
-            let first_size = if boost { size_px * 1.25 } else { size_px };
+            // CJK 를 폴백이 그릴 때만 두 칸에 맞춰 키운다. primary 가 직접 한글을
+            // 그리는 구성(D2Coding Mono 를 주 폰트로 쓰던 기존 배치)에서는 이미
+            // 칸에 맞아 있으므로 건드리지 않는다 — 거기 배율을 걸면 두 배로 커진다.
+            // 상한을 두는 건 메트릭이 이상한 폰트가 폴백에 끼어들어도 글리프가
+            // 줄 높이를 넘지 않게 하기 위해서다.
+            let cjk_fit = if is_cjk_wide(ch) && face_idx != 0 && latin_cell > 0.0 && advance > 0.0
+            {
+                ((latin_cell * 2.0) / advance).clamp(0.75, 1.45)
+            } else {
+                1.0
+            };
+            let first_size = if boost {
+                size_px * 1.25
+            } else {
+                size_px * cjk_fit
+            };
             let Some(mut image) = render_at(&mut self.scale_ctx, first_size) else {
                 continue;
             };
