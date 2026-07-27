@@ -1732,8 +1732,16 @@ impl App {
             "sessions": sessions_json,
         }))
     }
-    /// Write the restore snapshot unconditionally. Used by `exiting()`.
+    /// Write the restore snapshot on exit.
+    ///
+    /// 복원 창이 아직 떠 있으면 쓰지 않는다 — 그 화면은 사용자가 "복원"을 고르기
+    /// 전의 빈 새 세션이라, 여기서 저장하면 **되살리려던 작업 공간을 그 빈 세션으로
+    /// 덮어써** 영영 잃는다(복원할지 말지 못 정하고 그냥 껐을 때). autosave_session
+    /// 과 같은 이유.
     pub(crate) fn save_session_state(&self) {
+        if self.restore_prompt.is_some() {
+            return;
+        }
         if let Some(state) = self.session_state_json() {
             socket::write_session_state(&state);
         }
@@ -1822,8 +1830,13 @@ impl App {
         }
     }
     /// Count leaves that were running claude across the whole saved state — the
-    /// number the restore prompt shows ("claude 세션 N개"). A zero count means
-    /// nothing worth restoring, so resumed() skips the prompt entirely.
+    /// number the restore prompt shows. 총 pane 수는 `count_panes`.
+    ///
+    /// 예전엔 `character` 가 붙어 있으면 claude pane 으로 셌다. 캐릭터는 claude
+    /// 여부와 무관하게 **spawn 때 모든 pane 에 배정**되므로(assign_character_env),
+    /// 순수 셸 3개짜리 창이 "claude 세션 3개"로 표시됐다. 감지 실패 보정은
+    /// session_id 로 한다 — 그건 claude 가 실제로 세션을 바인딩했을 때만 붙어,
+    /// 저장 시점에 claude 가 포그라운드가 아니어도 남는다.
     pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
             if let Some(leaf) = node.get("leaf") {
@@ -1831,15 +1844,41 @@ impl App {
                     .get("was_claude")
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false);
-                // 캐릭터가 있으면 claude 학생 pane 이었다는 확증 — was_claude 감지가
-                // 실패(순수 셸로 오인)해도 복원 대상으로 카운트해 프롬프트를 띄운다.
-                let has_char = leaf
-                    .get("character")
+                let bound_sid = leaf
+                    .get("session_id")
                     .and_then(|c| c.as_str())
                     .is_some_and(|s| !s.is_empty());
-                if was_claude || has_char {
+                if was_claude || bound_sid {
                     *n += 1;
                 }
+            } else if let Some(split) = node.get("split") {
+                if let Some(a) = split.get("a") {
+                    walk(a, n);
+                }
+                if let Some(b) = split.get("b") {
+                    walk(b, n);
+                }
+            }
+        }
+        let mut n = 0;
+        if let Some(sessions) = state.get("sessions").and_then(|s| s.as_array()) {
+            for s in sessions {
+                if let Some(windows) = s.get("windows").and_then(|w| w.as_array()) {
+                    for w in windows {
+                        walk(w, &mut n);
+                    }
+                }
+            }
+        }
+        n
+    }
+    /// 저장된 상태의 전체 pane(leaf) 수. claude 가 하나도 없는 순수 셸 작업 공간도
+    /// 레이아웃·스크롤백은 복원할 값이 있으므로, 프롬프트를 띄울지는 이 수로 정한다
+    /// (claude 수로 정하면 셸만 쓰던 창은 강제 종료 후 아무것도 못 되살린다).
+    pub(crate) fn count_panes(state: &serde_json::Value) -> usize {
+        fn walk(node: &serde_json::Value, n: &mut usize) {
+            if node.get("leaf").is_some() {
+                *n += 1;
             } else if let Some(split) = node.get("split") {
                 if let Some(a) = split.get("a") {
                     walk(a, n);
