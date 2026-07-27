@@ -1932,7 +1932,7 @@ fn char_byte(s: &str, col: usize) -> usize {
 /// One styled inline run inside a markdown block. The renderer picks the
 /// font weight/slant and (for `code`) a mono face + chip background from
 /// these flags.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct MdSpan {
     text: String,
     bold: bool,
@@ -1961,6 +1961,21 @@ enum MdBlock {
     /// size for aspect layout; all three are filled in after parse when the
     /// image is decoded (0/empty until then). `path` is kept for alt fallback.
     Image { path: String, alt: String, key: String, w: u32, h: u32 },
+    /// GFM table. `head` is the header row (empty for a headerless table),
+    /// `rows` the body; every cell carries its own inline spans so a cell can
+    /// hold bold/code/links like any other block. `align` is per column.
+    Table { head: Vec<MdCell>, rows: Vec<Vec<MdCell>>, align: Vec<MdAlign> },
+}
+
+/// One table cell's inline content.
+type MdCell = Vec<MdSpan>;
+
+/// Per-column alignment from a table's `|:--:|` delimiter row.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MdAlign {
+    Left,
+    Center,
+    Right,
 }
 
 /// A decoded image referenced by a markdown document, uploaded to the GPU
@@ -2002,7 +2017,7 @@ fn heading_level(l: pulldown_cmark::HeadingLevel) -> u8 {
 /// paragraphs into the item) — enough structure for a document-style reader
 /// without a full layout tree.
 fn parse_markdown(text: &str) -> Vec<MdBlock> {
-    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     let mut blocks: Vec<MdBlock> = Vec::new();
     let mut spans: Vec<MdSpan> = Vec::new();
     let mut bold = 0i32;
@@ -2020,6 +2035,12 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
     let mut img_url = String::new();
     let mut img_alt = String::new();
     let mut link_url: Option<String> = None;
+    // Table accumulators. Cells reuse `spans` (they hold inline content only —
+    // pulldown emits no Paragraph inside a cell), flushed at each TagEnd.
+    let mut tbl_align: Vec<MdAlign> = Vec::new();
+    let mut tbl_head: Vec<MdCell> = Vec::new();
+    let mut tbl_rows: Vec<Vec<MdCell>> = Vec::new();
+    let mut tbl_row: Vec<MdCell> = Vec::new();
 
     let push_span =
         |spans: &mut Vec<MdSpan>, t: &str, b: bool, i: bool, c: bool, link: Option<String>| {
@@ -2028,7 +2049,7 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
             }
         };
 
-    for ev in Parser::new(text) {
+    for ev in Parser::new_ext(text, Options::ENABLE_TABLES) {
         match ev {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
@@ -2073,6 +2094,21 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                 Tag::Link { dest_url, .. } => {
                     link_url = Some(dest_url.to_string());
                 }
+                Tag::Table(aligns) => {
+                    tbl_align = aligns
+                        .iter()
+                        .map(|a| match a {
+                            pulldown_cmark::Alignment::Center => MdAlign::Center,
+                            pulldown_cmark::Alignment::Right => MdAlign::Right,
+                            _ => MdAlign::Left,
+                        })
+                        .collect();
+                    tbl_head.clear();
+                    tbl_rows.clear();
+                    tbl_row.clear();
+                }
+                Tag::TableHead | Tag::TableRow => tbl_row.clear(),
+                Tag::TableCell => spans.clear(),
                 _ => {}
             },
             Event::End(tag) => match tag {
@@ -2128,6 +2164,14 @@ fn parse_markdown(text: &str) -> Vec<MdBlock> {
                     });
                     in_image = false;
                 }
+                TagEnd::TableCell => tbl_row.push(std::mem::take(&mut spans)),
+                TagEnd::TableHead => tbl_head = std::mem::take(&mut tbl_row),
+                TagEnd::TableRow => tbl_rows.push(std::mem::take(&mut tbl_row)),
+                TagEnd::Table => blocks.push(MdBlock::Table {
+                    head: std::mem::take(&mut tbl_head),
+                    rows: std::mem::take(&mut tbl_rows),
+                    align: std::mem::take(&mut tbl_align),
+                }),
                 _ => {}
             },
             Event::Text(t) => {
@@ -4913,6 +4957,31 @@ mod tests {
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
+    }
+
+    /// Tables only reach the renderer when `ENABLE_TABLES` is on — without it
+    /// pulldown emits the rows as plain text that the block builder drops on the
+    /// floor, which is exactly how CLAUDE.md's 3-layer table went missing.
+    #[test]
+    fn table_parses_into_head_rows_and_alignment() {
+        let md = "| 층 | 코드네임 |\n|:---|---:|\n| ① 엔진 | **kasaterm** |\n| ② 작업환경 | `kasaspace` |\n";
+        let blocks = parse_markdown(md);
+        let table = blocks
+            .iter()
+            .find_map(|b| match b {
+                MdBlock::Table { head, rows, align } => Some((head, rows, align)),
+                _ => None,
+            })
+            .expect("표가 블록으로 나오지 않았다");
+        let (head, rows, align) = table;
+        assert_eq!(head.len(), 2);
+        assert_eq!(head[0][0].text, "층");
+        assert_eq!(align, &vec![MdAlign::Left, MdAlign::Right]);
+        // A trailing empty row would render as a phantom band under the table.
+        assert_eq!(rows.len(), 2, "본문 행 개수");
+        assert!(rows.iter().all(|r| r.len() == 2), "빈 행이 섞였다: {rows:?}");
+        assert!(rows[0][1][0].bold, "셀 안 인라인 스타일 보존");
+        assert!(rows[1][1][0].code, "셀 안 인라인 코드 보존");
     }
 
     #[test]
