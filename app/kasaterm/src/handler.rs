@@ -4215,6 +4215,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoconfirm();
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
+        self.run_pending_autoftmenu();
         self.run_pending_automdselect();
         self.run_pending_auxpopout(event_loop);
         self.run_pending_autoundock(event_loop);

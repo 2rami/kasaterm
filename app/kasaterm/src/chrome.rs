@@ -544,6 +544,21 @@ impl App {
                     self.reveal_in_file_manager(&p);
                 }
             }
+            A::OpenWith(i) => {
+                // 인덱스는 이 프레임에 메뉴를 그린 목록에서 왔고 그 목록은
+                // 프로세스당 한 번만 만들어지므로 어긋날 수 없다. 그래도 get 으로
+                // 받는 건, 목록이 비었을 때 패닉 대신 아무 일도 안 일어나게.
+                if let (Some(p), Some((_, target))) =
+                    (target, crate::proc::open_with_apps().get(i))
+                {
+                    crate::proc::open_path_with(target, &p);
+                }
+            }
+            A::OpenDefault => {
+                if let Some(p) = target {
+                    crate::proc::open_path_default(&p);
+                }
+            }
             A::Delete => self.delete_tree_selection(),
         }
         if let Some(w) = self.window.as_ref() {

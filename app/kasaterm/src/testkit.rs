@@ -309,6 +309,39 @@ impl App {
             w.request_redraw();
         }
     }
+    /// Headless 파일트리 우클릭 메뉴 repro: `KASATERM_TEST_FTMENU_MS` 후 트리
+    /// 첫 파일을 선택하고 컨텍스트 메뉴를 연다. 우클릭은 마우스 이벤트라 헤드리스
+    /// 주입이 안 되는데, "…에서 열기" 항목은 기기에 설치된 앱 수만큼 늘어나므로
+    /// 눈으로 한 번은 확인해야 한다. autoshellmenu 처럼 함수-로컬 static.
+    pub(crate) fn run_pending_autoftmenu(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_TEST_FTMENU_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        // 트리가 아직 안 채워졌으면 다음 프레임에 다시 본다 — 파일트리는 워커가
+        // 비동기로 채우므로 고정 지연만으로는 빈 트리에 메뉴를 띄울 수 있다.
+        let Some(first) = self.file_tree.nodes.first().map(|n| n.path.clone()) else {
+            return;
+        };
+        FIRED.store(true, Ordering::Relaxed);
+        eprintln!("[autoftmenu] context menu on {}", first.display());
+        self.file_tree.selected = Some(first);
+        self.file_tree.ctx_menu = Some((260.0, 200.0));
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
     /// Headless file-open repro: schedule `open_file_split` on the path in
     /// `KASATERM_AUTOOPEN` after `KASATERM_AUTOOPEN_MS` (default 4000ms), so a
     /// background run can prove the preview pane + file-tree highlight without
