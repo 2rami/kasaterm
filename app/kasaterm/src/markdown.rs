@@ -5,6 +5,10 @@ use super::*;
 /// bounds memory (~cap × file size worst case).
 pub(crate) const UNDO_CAP: usize = 100;
 
+/// One indent step. Spaces, not a tab: nested list markers only line up under
+/// their parent by column count, and a tab's width is the viewer's opinion.
+const INDENT: &str = "  ";
+
 /// Would this key change the buffer if the pane were in Raw mode? Rendered
 /// mode uses it to decide whether a keypress means "I want to edit" (switch to
 /// Raw and keep the key) or just navigation (leave the view alone).
@@ -25,6 +29,92 @@ pub(crate) fn md_mutating_key(event: &KeyEvent) -> bool {
                     | NamedKey::Delete
             )
     )
+}
+
+/// One line split into "leading whitespace + list/quote marker" and the rest.
+/// Enter uses it to carry the prefix onto the next line; Tab uses `list` to
+/// decide whether to indent the whole item or just insert spaces at the caret.
+pub(crate) struct LinePrefix {
+    /// Prefix length in chars (indent + marker). A caret before this sits
+    /// inside the marker, where continuing it would be wrong.
+    pub len: usize,
+    /// What the next line starts with — indent, plus the marker when there is
+    /// one (ordered markers increment, task markers reset to unchecked).
+    pub next: String,
+    /// A quote or list marker was present.
+    pub marker: bool,
+    /// …and it was a list (bullet or ordered), not a quote.
+    pub list: bool,
+}
+
+/// Split a line into its continuation prefix. Recognizes `- `/`* `/`+ `,
+/// `1. `/`1) `, task items (`- [ ] `), and `> ` quotes — the markers this
+/// repo's documents actually use. A quote's contents aren't re-scanned for a
+/// nested bullet; that nesting is rare enough that guessing wrong costs more
+/// than not guessing.
+pub(crate) fn line_prefix(line: &str) -> LinePrefix {
+    let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+    let rest = &line[indent.len()..];
+    let ind_len = indent.chars().count();
+    let plain = LinePrefix { len: ind_len, next: indent.clone(), marker: false, list: false };
+
+    if rest.starts_with('>') {
+        let q: String = rest.chars().take_while(|c| *c == '>' || *c == ' ').collect();
+        // `>` 뒤 공백이 없으면 붙여 준다 — 이어 쓴 줄이 `>foo` 로 나오면
+        // 파서에 따라 인용으로 안 잡힌다.
+        let norm = if q.ends_with(' ') { q.clone() } else { format!("{q} ") };
+        return LinePrefix {
+            len: ind_len + q.chars().count(),
+            next: format!("{indent}{norm}"),
+            marker: true,
+            list: false,
+        };
+    }
+
+    let bullet = rest.chars().next().filter(|c| matches!(c, '-' | '*' | '+'));
+    if let Some(b) = bullet {
+        if rest[1..].starts_with(' ') {
+            let after = &rest[2..];
+            // 체크박스는 이어 쓸 때 비운다 — 완료 표시까지 물려받으면
+            // 새 항목이 처음부터 끝난 것으로 보인다.
+            let task = ["[ ] ", "[x] ", "[X] "].iter().any(|t| after.starts_with(t));
+            let mark = if task { format!("{b} [ ] ") } else { format!("{b} ") };
+            return LinePrefix {
+                len: ind_len + if task { 6 } else { 2 },
+                next: format!("{indent}{mark}"),
+                marker: true,
+                list: true,
+            };
+        }
+        return plain;
+    }
+
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if !digits.is_empty() {
+        let tail = &rest[digits.len()..];
+        let sep = tail.chars().next();
+        if matches!(sep, Some('.') | Some(')')) && tail[1..].starts_with(' ') {
+            let n: u64 = digits.parse().unwrap_or(0);
+            return LinePrefix {
+                len: ind_len + digits.len() + 2,
+                next: format!("{indent}{}{} ", n + 1, sep.unwrap()),
+                marker: true,
+                list: true,
+            };
+        }
+    }
+    plain
+}
+
+/// Chars one outdent step removes from the head of `line`: a tab, or up to one
+/// `INDENT` worth of spaces. Markdown written elsewhere may use tabs, and
+/// Shift+Tab should still bite on those lines.
+fn outdent_width(line: &str) -> usize {
+    if line.starts_with('\t') {
+        1
+    } else {
+        line.chars().take(INDENT.len()).take_while(|c| *c == ' ').count()
+    }
 }
 
 /// Word-motion character class: identifier chars group together, everything
@@ -212,6 +302,100 @@ impl MarkdownPane {
         self.modified = true;
     }
 
+    /// Move one line by a single indent step; returns the caret-column delta
+    /// for any caret sitting on it.
+    fn shift_line(&mut self, li: usize, outdent: bool) -> i64 {
+        let l = &mut self.edit_lines[li];
+        if outdent {
+            let w = outdent_width(l);
+            let b = char_byte(l, w);
+            l.replace_range(..b, "");
+            -(w as i64)
+        } else if l.is_empty() {
+            // 빈 줄엔 공백을 심지 않는다 — 화면에 안 보이는 잡티가 diff 에만
+            // 남는다.
+            0
+        } else {
+            l.insert_str(0, INDENT);
+            INDENT.len() as i64
+        }
+    }
+
+    /// Tab / Shift+Tab. With a selection every line it touches moves one step
+    /// (line-wise, like VS Code) and the selection keeps covering the same
+    /// text. Without one, Shift+Tab outdents the caret's line; Tab indents the
+    /// whole line when it's a list item — that's how a bullet nests — and
+    /// otherwise inserts a step at the caret.
+    pub(crate) fn indent(&mut self, outdent: bool) {
+        if self.edit_lines.is_empty() {
+            self.edit_lines.push(String::new());
+        }
+        if let Some((s, e)) = self.sel_range() {
+            self.push_undo(EditKind::Other);
+            let deltas: Vec<i64> = (s.0..=e.0).map(|li| self.shift_line(li, outdent)).collect();
+            let fix = |(l, c): (usize, usize)| -> (usize, usize) {
+                let Some(d) = l.checked_sub(s.0).and_then(|i| deltas.get(i)) else {
+                    return (l, c);
+                };
+                (l, (c as i64 + d).max(0) as usize)
+            };
+            if let Some(a) = self.sel_anchor {
+                self.sel_anchor = Some(fix(a));
+            }
+            (self.cur_line, self.cur_col) = fix((self.cur_line, self.cur_col));
+        } else {
+            let line = self.cur_line.min(self.edit_lines.len() - 1);
+            self.push_undo(EditKind::Other);
+            if outdent || line_prefix(&self.edit_lines[line]).list {
+                let d = self.shift_line(line, outdent);
+                self.cur_col = (self.cur_col as i64 + d).max(0) as usize;
+            } else {
+                let col = self.cur_col.min(self.edit_lines[line].chars().count());
+                let s = &mut self.edit_lines[line];
+                let b = char_byte(s, col);
+                s.insert_str(b, INDENT);
+                self.cur_col = col + INDENT.len();
+            }
+            self.cur_line = line;
+        }
+        self.modified = true;
+    }
+
+    /// Enter — split the line, carrying the indent and list/quote marker onto
+    /// the new one. On an item holding nothing but its marker, Enter wipes the
+    /// marker instead of stacking another empty one; that's how a list ends
+    /// without reaching for Backspace (VS Code and Obsidian both do this).
+    pub(crate) fn newline(&mut self) {
+        if self.edit_lines.is_empty() {
+            self.edit_lines.push(String::new());
+        }
+        self.push_undo(EditKind::Other);
+        self.delete_selection();
+        let line = self.cur_line.min(self.edit_lines.len() - 1);
+        let col = self.cur_col.min(self.edit_lines[line].chars().count());
+        let p = line_prefix(&self.edit_lines[line]);
+        // 캐럿이 마커 안에 있으면(col < len) 이어쓰기를 하지 않는다 — 그 자리의
+        // Enter 는 "이 항목 위에 빈 줄" 이라는 뜻이지 새 항목이 아니다.
+        let at_body = col >= p.len;
+        if p.marker && at_body && self.edit_lines[line].chars().skip(p.len).all(char::is_whitespace)
+        {
+            self.edit_lines[line].clear();
+            self.cur_line = line;
+            self.cur_col = 0;
+            self.modified = true;
+            return;
+        }
+        let carry = if at_body { p.next } else { String::new() };
+        let s = &mut self.edit_lines[line];
+        let b = char_byte(s, col);
+        let mut rest = s.split_off(b);
+        rest.insert_str(0, &carry);
+        self.edit_lines.insert(line + 1, rest);
+        self.cur_line = line + 1;
+        self.cur_col = carry.chars().count();
+        self.modified = true;
+    }
+
     /// Apply one editing/motion key to the buffer. `shift`/`alt` are the live
     /// modifier state; `page_lines` is the pre-computed PageUp/Down step (the
     /// driver measures it against its own renderer). Selection, undo runs, and
@@ -297,17 +481,15 @@ impl MarkdownPane {
                 }
             }
             Key::Named(NamedKey::Enter) => {
-                self.push_undo(EditKind::Other);
-                if self.delete_selection() {
-                    line = self.cur_line;
-                    col = self.cur_col;
-                }
-                let s = &mut self.edit_lines[line];
-                let b = char_byte(s, col);
-                let rest = s.split_off(b);
-                self.edit_lines.insert(line + 1, rest);
-                line += 1;
-                col = 0;
+                self.newline();
+                line = self.cur_line;
+                col = self.cur_col;
+                edited = true;
+            }
+            Key::Named(NamedKey::Tab) => {
+                self.indent(shift);
+                line = self.cur_line;
+                col = self.cur_col;
                 edited = true;
             }
             Key::Named(NamedKey::ArrowLeft) => {
@@ -1076,6 +1258,93 @@ mod tests {
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
         }
+    }
+
+    /// 이어쓰기 접두사 인식 — Enter 와 Tab 이 둘 다 이 판단에 얹혀 있다.
+    #[test]
+    fn line_prefix_reads_markers() {
+        let case = |s: &str| {
+            let p = line_prefix(s);
+            (p.len, p.next, p.marker, p.list)
+        };
+        assert_eq!(case("문단"), (0, String::new(), false, false));
+        assert_eq!(case("    들여쓴 문단"), (4, "    ".into(), false, false));
+        assert_eq!(case("- 항목"), (2, "- ".into(), true, true));
+        assert_eq!(case("  * 중첩"), (4, "  * ".into(), true, true));
+        // 번호는 이어 붙일 때 하나 올린다.
+        assert_eq!(case("3. 셋째"), (3, "4. ".into(), true, true));
+        assert_eq!(case("10) 열째"), (4, "11) ".into(), true, true));
+        // 체크박스는 비운 채로 물려받는다.
+        assert_eq!(case("- [x] 끝난 일"), (6, "- [ ] ".into(), true, true));
+        // 인용은 마커지만 리스트는 아니다(Tab 이 줄째로 들여쓰지 않는다).
+        assert_eq!(case("> 인용"), (2, "> ".into(), true, false));
+        assert_eq!(case(">인용"), (1, "> ".into(), true, false));
+        // 마커처럼 생겼지만 공백이 없으면 그냥 글자다.
+        assert_eq!(case("-대시로 시작"), (0, String::new(), false, false));
+        assert_eq!(case("2026년"), (0, String::new(), false, false));
+    }
+
+    /// Enter 는 접두사를 물려받고, 마커만 남은 줄에선 그 마커를 지운다.
+    #[test]
+    fn newline_continues_and_ends_lists() {
+        let mut m = pane(&["- 하나"]);
+        m.cur_col = 4;
+        m.newline();
+        assert_eq!(m.edit_lines, vec!["- 하나", "- "]);
+        assert_eq!((m.cur_line, m.cur_col), (1, 2));
+        // 빈 항목에서 한 번 더 → 줄이 늘지 않고 마커만 사라진다.
+        m.newline();
+        assert_eq!(m.edit_lines, vec!["- 하나", ""]);
+        assert_eq!((m.cur_line, m.cur_col), (1, 0));
+        // 줄 가운데서 자르면 뒷부분이 새 항목이 된다.
+        let mut m = pane(&["  1. 하나둘"]);
+        m.cur_col = 7;
+        m.newline();
+        assert_eq!(m.edit_lines, vec!["  1. 하나", "  2. 둘"]);
+        assert_eq!((m.cur_line, m.cur_col), (1, 5));
+        // 캐럿이 마커 안이면 이어쓰기 없이 그냥 쪼갠다.
+        let mut m = pane(&["- 하나"]);
+        m.cur_col = 0;
+        m.newline();
+        assert_eq!(m.edit_lines, vec!["", "- 하나"]);
+    }
+
+    /// Tab 은 선택이 있으면 줄 단위, 없으면 리스트 줄만 통째로.
+    #[test]
+    fn indent_is_line_wise_over_a_selection() {
+        let mut m = pane(&["가", "", "나"]);
+        m.sel_anchor = Some((0, 1));
+        m.cur_line = 2;
+        m.cur_col = 1;
+        m.indent(false);
+        // 빈 줄은 건드리지 않는다 — 안 보이는 공백만 남는다.
+        assert_eq!(m.edit_lines, vec!["  가", "", "  나"]);
+        // 선택은 같은 글자를 계속 덮는다.
+        assert_eq!(m.sel_anchor, Some((0, 3)));
+        assert_eq!((m.cur_line, m.cur_col), (2, 3));
+        m.indent(true);
+        assert_eq!(m.edit_lines, vec!["가", "", "나"]);
+        assert_eq!(m.sel_anchor, Some((0, 1)));
+        // 탭 문자로 들여쓴 줄도 Shift+Tab 이 문다.
+        let mut m = pane(&["\t탭"]);
+        m.indent(true);
+        assert_eq!(m.edit_lines, vec!["탭"]);
+    }
+
+    #[test]
+    fn indent_nests_a_list_item_but_types_spaces_elsewhere() {
+        // 리스트 줄은 캐럿이 어디 있든 항목째로 한 단 내려간다.
+        let mut m = pane(&["- 항목"]);
+        m.cur_col = 4;
+        m.indent(false);
+        assert_eq!(m.edit_lines, vec!["  - 항목"]);
+        assert_eq!(m.cur_col, 6);
+        // 평범한 문단이면 캐럿 자리에 두 칸.
+        let mut m = pane(&["문단"]);
+        m.cur_col = 1;
+        m.indent(false);
+        assert_eq!(m.edit_lines, vec!["문  단"]);
+        assert_eq!(m.cur_col, 3);
     }
 
     #[test]
