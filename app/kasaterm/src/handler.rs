@@ -7,6 +7,9 @@ impl ApplicationHandler<UserEvent> for App {
     /// Delivered even while a WaitUntil is parked, so this is what makes
     /// committed-Hangul echo / backspace / space show up without lag.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        // window_event 와 같은 이유 — 소켓/백그라운드에서 온 변경도 자동 저장
+        // 대상이다(pane 분할·세션 바인딩이 여기로 들어온다).
+        self.session_touched = true;
         // Local cmux socket backend delegated a pane write / split / focus to
         // this GUI thread (the socket server can't touch self.pty directly).
         match &event {
@@ -1037,6 +1040,10 @@ impl ApplicationHandler<UserEvent> for App {
         id: WindowId,
         event: WindowEvent,
     ) {
+        // 실제 이벤트로 깨어났다 = 저장할 거리가 생겼을 수 있다. 우리가 건
+        // 자동 저장 타이머(new_events 의 ResumeTimeReached)로는 세우지 않는다 —
+        // 그러면 idle 상태에서도 5초마다 wake→touched→wake 가 영구히 돈다.
+        self.session_touched = true;
         // Child panel windows (session/board) drive their own wry webviews.
         // Their events must never reach the terminal logic below: without this
         // guard a panel's Resized/ScaleFactorChanged falls through and calls
@@ -3960,6 +3967,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.save_window_frame();
             }
         }
+        // 창 크기와 같은 이유로 세션 스냅샷도 주기 저장한다 — exiting() 은 Cmd+Q
+        // 때만 돌아, 강제 종료·크래시면 복원 창이 직전 정상 종료 시점의 낡은
+        // 상태를 띄운다. 실제 이벤트가 있었을 때만(touched) 주기마다 한 번.
+        if self.session_touched && self.session_saved_at.elapsed() >= crate::SESSION_AUTOSAVE_PERIOD
+        {
+            self.autosave_session();
+        }
         // Dock badge tracks unread notifications: opening a pane clears it,
         // a background notify raises it.
         self.sync_dock_badge();
@@ -4270,6 +4284,15 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
+        } else if self.session_touched {
+            // 강제 종료 대비 스냅샷은 "조용해진 직후"가 가장 중요한데, 이 앱은
+            // 할 일이 없으면 Wait 로 완전히 잠들어(CPU 0) about_to_wait 자체가
+            // 안 돈다. 그대로 두면 마지막 변경이 디스크에 안 남은 채 몇 시간
+            // 방치될 수 있다. dirty 인 동안만 깨어날 시각을 걸어 한 번 flush 하고,
+            // 그 뒤엔 다시 완전한 Wait 로 돌아간다(idle 상시 폴링 아님).
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                self.session_saved_at + crate::SESSION_AUTOSAVE_PERIOD,
+            ));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }

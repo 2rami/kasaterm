@@ -1154,6 +1154,10 @@ fn append_cells_text<'a>(cells: impl IntoIterator<Item = &'a GridCell>, out: &mu
 /// session file so a pane with a huge history doesn't bloat session.json.
 const SCROLLBACK_SAVE_MAX: usize = 500;
 
+/// 자동 스냅샷 주기. 강제 종료 시 잃는 최대치가 이 값이다. 짧을수록 안전하지만
+/// pane 마다 500줄을 직렬화하므로, 체감되지 않으면서 손실이 충분히 작은 값으로.
+pub(crate) const SESSION_AUTOSAVE_PERIOD: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Capture a pane's scrollback (history + current screen) as trimmed text
 /// lines for session restore, newest-biased: keeps the last SCROLLBACK_SAVE_MAX
 /// lines and drops the trailing blank rows so a restored pane doesn't carry an
@@ -3094,6 +3098,11 @@ struct App {
     restore_prompt: Option<serde_json::Value>,
     /// Restore-prompt button hit rects, refreshed each frame: `(btn, rect)`.
     restore_btn_rects: Vec<(RestoreBtn, (f32, f32, f32, f32))>,
+    /// 자동 스냅샷(강제 종료 대비) 상태 — 마지막 저장 시각, 그 뒤로 깨어난 적이
+    /// 있는지, 그때 쓴 내용의 해시. `autosave_session` 참조.
+    session_saved_at: std::time::Instant,
+    session_touched: bool,
+    session_saved_hash: Option<u64>,
     /// Currently hovered in-pane tab `(pane_id, tab_idx)`. Drives the
     /// hover-only × and brighter text on inactive tabs.
     pane_tab_hover: Option<(String, usize)>,
@@ -3574,6 +3583,9 @@ impl App {
             confirm_btn_rects: Vec::new(),
             restore_prompt: None,
             restore_btn_rects: Vec::new(),
+            session_saved_at: std::time::Instant::now(),
+            session_touched: false,
+            session_saved_hash: None,
             pane_tab_hover: None,
             image_btn_rects: Vec::new(),
             sidebar_w_logical: SIDEBAR_W,
