@@ -3919,14 +3919,19 @@ impl ApplicationHandler<UserEvent> for App {
                 window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                // Confirm-close modal: Enter = 닫기, Esc = 취소. Swallow all
-                // other keys so nothing reaches the PTY behind the dim.
+                // Confirm-close modal: Enter = 기본 버튼(저장 안 한 게 있으면
+                // 저장, 아니면 닫기), Esc = 취소. Swallow all other keys so
+                // nothing reaches the PTY behind the dim.
                 if self.confirm_close.is_some() {
                     if matches!(event.state, ElementState::Pressed) {
                         use winit::keyboard::{Key, NamedKey};
+                        let go = match &self.confirm_close {
+                            Some(d) if matches!(d.why, CloseWhy::Dirty(_)) => ConfirmBtn::Save,
+                            _ => ConfirmBtn::Close,
+                        };
                         match event.logical_key {
                             Key::Named(NamedKey::Enter) => {
-                                self.confirm_dialog_pick(ConfirmBtn::Close, event_loop);
+                                self.confirm_dialog_pick(go, event_loop);
                             }
                             Key::Named(NamedKey::Escape) => {
                                 self.confirm_dialog_pick(ConfirmBtn::Cancel, event_loop);
@@ -4221,6 +4226,11 @@ impl ApplicationHandler<UserEvent> for App {
                 #[cfg(not(target_os = "macos"))]
                 let ok = true;
                 if ok {
+                    // exiting() 이 저장하는 건 세션 스냅샷이지 편집기 버퍼가
+                    // 아니다 — 저장 안 한 문서가 있으면 여기서 먼저 묻는다.
+                    if self.guard_dirty(&PendingClose::Window) {
+                        return;
+                    }
                     event_loop.exit();
                     return;
                 }
@@ -4344,7 +4354,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoshellmenu();
         self.run_pending_autoftmenu();
         self.run_pending_automdselect();
-        self.run_pending_automdscript();
+        self.run_pending_automdscript(event_loop);
         self.run_pending_auxpopout(event_loop);
         self.run_pending_autoundock(event_loop);
         self.drain_aux_captures();
@@ -4385,6 +4395,8 @@ impl ApplicationHandler<UserEvent> for App {
             || self.aux_windows.iter().any(|a| a.pending_capture.is_some())
             || self.pending_autogit.is_some()
             || self.autoquit_at.is_some()
+            // 남은 md 스크립트 단계는 about_to_wait 이 다시 돌아야 발화한다.
+            || crate::testkit::mdscript_pending()
             // sticky 클릭 seek 이 도는 동안엔 스크롤이 목표 프롬프트에 닿을 때까지
             // 프레임을 펌프해야 노치가 계속 나가고 화면 관찰이 이어진다.
             || crate::render::sticky_seek_active()
@@ -4433,10 +4445,40 @@ impl App {
     /// Resolve a confirm-close modal: 취소 just dismisses; 닫기 runs the pending
     /// action (a `Window` close needs the event loop to exit, the rest go
     /// through `do_close`).
+    ///
+    /// The unsaved-changes flavour resolves the *files* here and then re-enters
+    /// the same close path instead of closing directly. Those editors are clean
+    /// now, so the guard can't fire twice, and a close that also had a job
+    /// running still gets its "실행 중이에요" question — which it wouldn't if we
+    /// jumped straight to `do_close`.
     pub(crate) fn confirm_dialog_pick(&mut self, btn: ConfirmBtn, event_loop: &ActiveEventLoop) {
         let Some(dlg) = self.confirm_close.take() else { return };
         self.chrome_dirty = true;
         if btn == ConfirmBtn::Cancel {
+            return;
+        }
+        if let CloseWhy::Dirty(docs) = &dlg.why {
+            if btn == ConfirmBtn::Save {
+                // 쓰기가 실패했으면 닫지 않는다 — 여기서 밀고 나가면 저장하려던
+                // 편집분을 그대로 버리는 셈이다(토스트가 이유를 띄운다).
+                if !self.save_dirty_docs(docs) {
+                    return;
+                }
+            } else {
+                self.discard_dirty_docs(docs);
+            }
+            match dlg.action {
+                PendingClose::Window => {
+                    if !self.confirm_or_close_window() {
+                        event_loop.exit();
+                    }
+                }
+                PendingClose::Tab { pane, idx } => self.confirm_or_close_tab(&pane, idx),
+                // 단일 탭 pane 은 confirm_or_close_tab 이 Pane 으로 승격시킨다.
+                PendingClose::Pane { pane } => self.confirm_or_close_tab(&pane, 0),
+                PendingClose::Session(i) => self.confirm_or_close_session(i),
+                other @ PendingClose::AuxEditor(_) => self.do_close(other),
+            }
             return;
         }
         match dlg.action {

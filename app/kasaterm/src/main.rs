@@ -1334,22 +1334,48 @@ enum PendingClose {
     Session(usize),
     /// Quit the app (window red-light / Cmd+W on the last pane).
     Window,
+    /// Close a popped-out editor window. Identified by window id, not by index:
+    /// `aux_windows` is a Vec and another window closing shifts every index
+    /// after it, so a stored index can point at the wrong window by the time
+    /// the dialog resolves.
+    AuxEditor(winit::window::WindowId),
 }
 
-/// A pending "something's running — close anyway?" confirmation. `proc` is the
-/// foreground process name that triggered it (for the message); `action` is
-/// what the 닫기 button runs.
+/// Where one unsaved editor lives, so the dialog can go back and save it (or
+/// drop its changes) once the user has decided.
+#[derive(Clone)]
+enum DirtyDoc {
+    /// Tab `tab` of pane `pane` in the main window.
+    Tab { pane: String, tab: usize },
+    /// A popped-out editor window.
+    Aux(winit::window::WindowId),
+}
+
+/// Why a close is being held up.
+#[derive(Clone)]
+enum CloseWhy {
+    /// A real foreground job is running — the process name, for the message.
+    Busy(String),
+    /// Editors with unsaved changes: where each one is, and its file name.
+    Dirty(Vec<(DirtyDoc, String)>),
+}
+
+/// A pending close confirmation: `why` it was raised, `action` is what
+/// proceeding actually closes.
 #[derive(Clone)]
 struct ConfirmClose {
-    proc: String,
+    why: CloseWhy,
     action: PendingClose,
 }
 
-/// The two buttons in the confirm-close modal.
+/// Buttons in the confirm-close modal. A busy dialog shows 취소/닫기; an
+/// unsaved-changes dialog shows 취소/저장 안 함/저장 — `Close` is the
+/// "proceed without saving" button in both.
 #[derive(Clone, Copy, PartialEq)]
 enum ConfirmBtn {
     Cancel,
     Close,
+    Save,
 }
 
 /// The two buttons in the Chrome-style session-restore prompt shown at launch
