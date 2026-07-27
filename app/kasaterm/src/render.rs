@@ -3263,19 +3263,53 @@ impl App {
                     let reveal_label = "Finder에서 보기";
                     #[cfg(not(target_os = "macos"))]
                     let reveal_label = "탐색기에서 보기";
-                    // (action, label, danger, separator-before)
-                    let items: [(crate::FtMenuAction, &str, bool, bool); 6] = [
-                        (crate::FtMenuAction::NewFile, "새 파일", false, false),
-                        (crate::FtMenuAction::NewFolder, "새 폴더", false, false),
-                        (crate::FtMenuAction::Rename, "이름 변경", false, true),
-                        (crate::FtMenuAction::CopyPath, "경로 복사", false, false),
-                        (crate::FtMenuAction::Reveal, reveal_label, false, false),
-                        (crate::FtMenuAction::Delete, "", true, true),
-                    ];
+                    // (action, label, danger, separator-before). "…에서 열기"는
+                    // 설치된 앱 수만큼 늘어나므로 배열이 아니라 Vec 이다.
+                    // "…로/으로" 대신 "…에서"로 통일한 건 조사 때문 — 영문
+                    // 앱 이름은 받침 판정이 안 서고, "Finder에서 보기"와도
+                    // 어울린다.
+                    let mut items: Vec<(crate::FtMenuAction, String, bool, bool)> = Vec::new();
+                    for (i, (name, _)) in crate::proc::open_with_apps().iter().enumerate() {
+                        items.push((
+                            crate::FtMenuAction::OpenWith(i),
+                            format!("{name}에서 열기"),
+                            false,
+                            false,
+                        ));
+                    }
+                    items.push((
+                        crate::FtMenuAction::OpenDefault,
+                        "기본 앱으로 열기".to_string(),
+                        false,
+                        false,
+                    ));
+                    let first_sep = !items.is_empty();
+                    items.extend([
+                        (crate::FtMenuAction::NewFile, "새 파일".to_string(), false, first_sep),
+                        (crate::FtMenuAction::NewFolder, "새 폴더".to_string(), false, false),
+                        (crate::FtMenuAction::Rename, "이름 변경".to_string(), false, true),
+                        (crate::FtMenuAction::CopyPath, "경로 복사".to_string(), false, false),
+                        (crate::FtMenuAction::Reveal, reveal_label.to_string(), false, false),
+                        (crate::FtMenuAction::Delete, String::new(), true, true),
+                    ]);
                     let mih = 28.0_f32;
                     let sep = 7.0_f32;
                     let pad = 6.0_f32;
-                    let menu_w = 200.0_f32;
+                    // 폭은 가장 긴 항목에 맞춘다. 고정 200px 이던 시절엔 앱
+                    // 이름이 긴 항목("Antigravity에서 열기")이 오른쪽 테두리를
+                    // 넘어 잘렸다 — 항목이 기기마다 다르니 폭도 그래야 한다.
+                    let widest = items
+                        .iter()
+                        .map(|(action, label, _, _)| {
+                            let s = if matches!(action, crate::FtMenuAction::Delete) {
+                                del_label.as_str()
+                            } else {
+                                label.as_str()
+                            };
+                            g.measure_chrome_text(s, 13.0, false)
+                        })
+                        .fold(0.0_f32, f32::max);
+                    let menu_w = (widest + 32.0).max(200.0);
                     let nsep = items.iter().filter(|(_, _, _, s)| *s).count() as f32;
                     let menu_h = pad * 2.0 + items.len() as f32 * mih + nsep * sep;
                     let win_w = win_px.0 / scale;
@@ -3302,7 +3336,7 @@ impl App {
                         let lbl = if matches!(action, crate::FtMenuAction::Delete) {
                             del_label.as_str()
                         } else {
-                            label
+                            label.as_str()
                         };
                         let color = if danger { theme::danger() } else { theme::text() };
                         g.draw_text(

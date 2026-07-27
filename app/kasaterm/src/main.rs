@@ -2541,6 +2541,11 @@ enum FtMenuAction {
     CopyPath,
     Reveal,
     Delete,
+    /// "<앱>에서 열기" — `proc::open_with_apps()` 의 인덱스. 이름이 아니라
+    /// 인덱스인 건 후보가 기기마다 다르기 때문이다(설치된 것만 노출한다).
+    OpenWith(usize),
+    /// OS 기본 연결 프로그램으로 열기.
+    OpenDefault,
 }
 
 /// Action buttons at the foot of the git column. `StageAll` runs `git add -A`;
