@@ -1832,6 +1832,26 @@ impl ApplicationHandler<UserEvent> for App {
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
+                    return;
+                }
+                // Info 탭 프로세스 행 → 종료·복사 메뉴. 행 rect 는 Info 본문이
+                // 그릴 때만 갱신되므로 탭까지 확인한다(Git 탭에선 낡은 좌표).
+                if self.git.col_visible
+                    && self.info.tab == state::SideTab::Info
+                    && cy > TITLE_HEIGHT
+                    && cx >= self.git_col_x()
+                {
+                    if let Some(pid) = self
+                        .info
+                        .proc_rects
+                        .iter()
+                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
+                        .map(|(p, _)| *p)
+                    {
+                        self.info.ctx_menu = Some((cx, cy, pid));
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
                 }
             }
             // Middle-click → close the tab under the cursor: in-pane tab pill
@@ -2605,6 +2625,24 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        // 프로세스 우클릭 메뉴가 떠 있으면 그게 최상단이다.
+                        // 밖을 눌렀으면 닫기만 하고 클릭을 삼킨다 — 메뉴를 닫는
+                        // 클릭이 밑의 행까지 누르면 놀란다.
+                        if self.info.ctx_menu.is_some() {
+                            let picked = self
+                                .info
+                                .ctx_menu_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(a, _)| *a);
+                            let pid = self.info.ctx_menu.map(|(_, _, p)| p).unwrap_or(0);
+                            self.info.ctx_menu = None;
+                            if let Some(action) = picked {
+                                self.run_info_menu_action(action, pid);
+                            }
+                            window.request_redraw();
+                            return;
+                        }
                         // 칼럼 탭(Git / Info). 닫기·확장보다 먼저 봐야 한다 —
                         // 셋 다 같은 머리 줄에 있고 탭이 가장 왼쪽이다.
                         if let Some((tab, _)) = self
@@ -2619,22 +2657,87 @@ impl ApplicationHandler<UserEvent> for App {
                                 // Info 로 막 넘어왔으면 목록이 비어 있다 — 다음
                                 // 프레임의 pump_info 가 즉시 채우도록 놓아둔다.
                                 self.info.scroll = 0.0;
+                                // Git 탭에선 Info 본문이 안 그려져 메뉴도 안 뜨는데
+                                // 열린 채로 두면 그 뒤 클릭을 계속 삼킨다.
+                                self.info.ctx_menu = None;
                             }
                             window.request_redraw();
                             return;
                         }
-                        // 포트 칩 → 브라우저로 localhost 열기. dev 서버를 띄운
-                        // 직후 "몇 번 포트였지"를 확인하러 스크롤백을 뒤지는 일이
-                        // 이 클릭 하나로 끝난다.
-                        if let Some(port) = self
-                            .info
-                            .port_rects
-                            .iter()
-                            .find(|(_, r)| inside(r))
-                            .map(|(p, _)| *p)
-                        {
-                            self.open_localhost(port);
-                            return;
+                        // 아래 hit rect 들은 Info 본문이 그릴 때만 갱신되므로,
+                        // Git 탭에서는 낡은 좌표가 남아 있다 — 탭을 확인하지
+                        // 않으면 git 목록 클릭을 Info 행이 가로챈다.
+                        if self.info.tab == state::SideTab::Info {
+                            if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
+                                self.info.last_refresh = None;
+                                window.request_redraw();
+                                return;
+                            }
+                            if let Some(sec) = self
+                                .info
+                                .sec_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(s, _)| *s)
+                            {
+                                let flag = match sec {
+                                    state::InfoSection::Dir => &mut self.info.dir_collapsed,
+                                    state::InfoSection::Procs => &mut self.info.procs_collapsed,
+                                    state::InfoSection::Ports => &mut self.info.ports_collapsed,
+                                };
+                                *flag = !*flag;
+                                window.request_redraw();
+                                return;
+                            }
+                            if let Some(btn) = self
+                                .info
+                                .dir_btn_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(b, _)| *b)
+                            {
+                                if let Some(path) = self.info.root.clone() {
+                                    match btn {
+                                        state::InfoDirBtn::Reveal => self.reveal_in_file_manager(&path),
+                                        state::InfoDirBtn::Editor => {
+                                            if let Some((_, target)) = crate::proc::open_with_apps().first() {
+                                                crate::proc::open_path_with(target, &path);
+                                            }
+                                        }
+                                        state::InfoDirBtn::CopyPath => {
+                                            let s = path.to_string_lossy().into_owned();
+                                            self.copy_to_clipboard(s, "경로 복사됨");
+                                        }
+                                    }
+                                }
+                                window.request_redraw();
+                                return;
+                            }
+                            // 종료(×)는 행보다 먼저 — 행 안에 겹쳐 있다.
+                            if let Some(pid) = self
+                                .info
+                                .kill_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(p, _)| *p)
+                            {
+                                self.kill_process(pid, false);
+                                window.request_redraw();
+                                return;
+                            }
+                            // 포트 행 → 브라우저로 localhost 열기. dev 서버를 띄운
+                            // 직후 "몇 번 포트였지"를 확인하러 스크롤백을 뒤지는
+                            // 일이 이 클릭 하나로 끝난다.
+                            if let Some(port) = self
+                                .info
+                                .port_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(p, _)| *p)
+                            {
+                                self.open_localhost(port);
+                                return;
+                            }
                         }
                         // Panel header: close / expand.
                         if self.git.col_close_rect.map(|r| inside(&r)).unwrap_or(false) {
@@ -4230,6 +4333,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
         self.run_pending_autowinclose();
+        self.run_pending_autoinfo();
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
         self.run_pending_autoftmenu();

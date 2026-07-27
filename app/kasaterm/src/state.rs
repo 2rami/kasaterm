@@ -97,33 +97,89 @@ pub(crate) enum SideTab {
     Info,
 }
 
-/// Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. `rows` 는 워커 스레드가
+/// Info 패널의 접히는 섹션. 접힘 상태는 pane 을 옮겨도 유지된다 — 포트만 보려고
+/// 프로세스를 접어둔 사람이 탭을 옮길 때마다 다시 접을 이유가 없다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InfoSection {
+    Dir,
+    Procs,
+    Ports,
+}
+
+/// 프로젝트 디렉터리 섹션의 액션 버튼.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InfoDirBtn {
+    /// Finder(macOS) · 탐색기 · 파일 관리자.
+    Reveal,
+    /// 설치된 에디터 중 첫 번째(`proc::open_with_apps`).
+    Editor,
+    CopyPath,
+}
+
+/// 프로세스 행 우클릭 메뉴 항목.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InfoMenuAction {
+    Terminate,
+    ForceKill,
+    CopyPid,
+    CopyCmd,
+}
+
+/// Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. `snap` 은 워커 스레드가
 /// 채우는 스냅샷이고 `busy`/`last_refresh` 가 그 워커를 스로틀한다(수집이 `ps` +
 /// `lsof` fork 라 렌더 스레드에서 돌릴 수 없다 — info.rs 참고). `shell_pid` 는
 /// 현재 목록이 어느 pane 것인지로, pane 을 옮기면 즉시 갱신을 트리거한다.
+/// `root`/`root_is_repo` 는 파일트리가 앵커한 디렉터리로, 그게 git 레포라서
+/// 골라진 것인지를 패널이 정직하게 밝히는 데 쓴다.
 pub(crate) struct InfoState {
     pub(crate) tab: SideTab,
-    pub(crate) rows: std::sync::Arc<std::sync::Mutex<Vec<crate::info::ProcRow>>>,
+    pub(crate) snap: std::sync::Arc<std::sync::Mutex<crate::info::InfoSnap>>,
     pub(crate) busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) last_refresh: Option<std::time::Instant>,
     pub(crate) shell_pid: Option<u32>,
     pub(crate) scroll: f32,
-    /// 매 paint 재생성되는 hit target. 탭 머리 / 포트 칩(→ 브라우저로 열기).
+    pub(crate) root: Option<std::path::PathBuf>,
+    pub(crate) root_is_repo: bool,
+    pub(crate) dir_collapsed: bool,
+    pub(crate) procs_collapsed: bool,
+    pub(crate) ports_collapsed: bool,
+    /// 우클릭 메뉴 — `(화면 좌표, 대상 pid)`.
+    pub(crate) ctx_menu: Option<(f32, f32, u32)>,
+    /// 매 paint 재생성되는 hit target. 탭 머리 / 포트 행(→ 브라우저로 열기) /
+    /// 프로세스 행(우클릭 대상) / 종료 버튼 / 섹션 머리 / 디렉터리 버튼.
     pub(crate) tab_rects: Vec<(SideTab, (f32, f32, f32, f32))>,
     pub(crate) port_rects: Vec<(u16, (f32, f32, f32, f32))>,
+    pub(crate) proc_rects: Vec<(u32, (f32, f32, f32, f32))>,
+    pub(crate) kill_rects: Vec<(u32, (f32, f32, f32, f32))>,
+    pub(crate) sec_rects: Vec<(InfoSection, (f32, f32, f32, f32))>,
+    pub(crate) dir_btn_rects: Vec<(InfoDirBtn, (f32, f32, f32, f32))>,
+    pub(crate) ctx_menu_rects: Vec<(InfoMenuAction, (f32, f32, f32, f32))>,
+    pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
 }
 
 impl Default for InfoState {
     fn default() -> Self {
         Self {
             tab: SideTab::Git,
-            rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            snap: std::sync::Arc::new(std::sync::Mutex::new(crate::info::InfoSnap::default())),
             busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_refresh: None,
             shell_pid: None,
             scroll: 0.0,
+            root: None,
+            root_is_repo: false,
+            dir_collapsed: false,
+            procs_collapsed: false,
+            ports_collapsed: false,
+            ctx_menu: None,
             tab_rects: Vec::new(),
             port_rects: Vec::new(),
+            proc_rects: Vec::new(),
+            kill_rects: Vec::new(),
+            sec_rects: Vec::new(),
+            dir_btn_rects: Vec::new(),
+            ctx_menu_rects: Vec::new(),
+            refresh_rect: None,
         }
     }
 }

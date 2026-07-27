@@ -857,7 +857,7 @@ impl App {
     /// which calls `rebuild_file_tree_nodes` directly).
     /// `cwd` 를 감싸는 가장 가까운 git 레포 루트(1-엔트리 캐시 경유).
     /// 레포 밖이면 None — 호출부가 cwd 를 그대로 쓴다.
-    fn anchored_tree_root(&mut self, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    pub(crate) fn anchored_tree_root(&mut self, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
         if let Some((cached_cwd, root)) = &self.file_tree.anchor_cache {
             if cached_cwd == cwd {
                 return root.clone();
