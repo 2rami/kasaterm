@@ -102,6 +102,19 @@ pub struct GpuRenderer {
     /// hash of (lang, lines) — no pane id needed, and a tiny LRU keeps a few
     /// split editors from thrashing each other's entries.
     raw_hl: Vec<RawHlEntry>,
+    /// Laid-out height of each markdown block, so a block scrolled off screen
+    /// can be stepped over instead of re-measured. Same tiny-LRU shape as
+    /// `raw_hl` (keyed by doc + layout, so two markdown panes don't evict each
+    /// other every frame).
+    md_heights: Vec<MdHeightEntry>,
+}
+
+/// One document's block heights under one layout. `key` is (doc generation,
+/// column width, base font size, dpi scale) — every input the layout depends
+/// on, so a stale entry can't be served after a resize or a reparse.
+struct MdHeightEntry {
+    key: (u64, u32, u32, u32),
+    h: Vec<f32>,
 }
 
 /// One cached tree-sitter highlight: the buffer hash it was computed from and
@@ -439,6 +452,7 @@ impl GpuRenderer {
             md_copy_rects: Vec::new(),
             md_block_ys: Vec::new(),
             raw_hl: Vec::new(),
+            md_heights: Vec::new(),
         })
     }
 
@@ -1198,6 +1212,7 @@ impl GpuRenderer {
     pub fn draw_markdown(
         &mut self,
         blocks: &[crate::MdBlock],
+        doc_gen: u64,
         x: f32,
         y: f32,
         w: f32,
@@ -1225,11 +1240,36 @@ impl GpuRenderer {
         let clip_bot = y + h;
         let top0 = y - scroll;
         let mut pen_y = top0 + base * 1.1;
-        for block in blocks {
+        // 지난 프레임에 잰 블록 높이. 스크롤은 레이아웃을 바꾸지 않으므로
+        // (문서·폭·글자크기·dpi 가 같으면) 그대로 쓸 수 있고, 화면 밖 블록은
+        // 재지 않고 높이만큼 건너뛴다. 큰 문서에선 이 스캔이 마크다운 그리기
+        // 시간의 절반이었다(4399줄 3.1ms 중 1.6ms — 보이는 양은 110줄 문서와
+        // 똑같은데도).
+        // 꺼내 들고 가는 이유는 self 를 다시 빌려야 해서다.
+        let key = (doc_gen, w.to_bits(), base.to_bits(), self.scale.to_bits());
+        let mut heights = match self.md_heights.iter().position(|e| e.key == key) {
+            Some(i) => self.md_heights.remove(i).h,
+            None => Vec::new(),
+        };
+        // 블록 수가 다르면(같은 세대에 있을 수 없지만) 인덱스가 어긋나므로 버린다.
+        if heights.len() != blocks.len() {
+            heights.clear();
+            heights.resize(blocks.len(), f32::NAN);
+        }
+        for (bi, block) in blocks.iter().enumerate() {
             // 이 블록이 문서 어디쯤에 놓였는지(스크롤 뺀 좌표) 적어 둔다. 레이아웃
             // 은 여기서만 계산되므로, 모드 토글이 쓸 위치는 실제 그린 값이어야
             // 한다 — 따로 추정하면 헤딩 간격·이미지 높이에서 어긋난다.
             self.md_block_ys.push(pen_y - top0);
+            let block_y0 = pen_y;
+            // 화면 밖이고 높이를 이미 아는 블록은 통째로 건너뛴다. 링크·복사
+            // 버튼 rect 는 원래 보이는 것만 등록되므로(md_runs 의 clip 검사 안,
+            // 코드블록은 `if visible`) 건너뛰어도 히트 영역이 어긋나지 않는다.
+            let known = heights[bi];
+            if known.is_finite() && (pen_y + known < clip_top || pen_y > clip_bot) {
+                pen_y += known;
+                continue;
+            }
             match block {
                 MdBlock::Heading { level, spans } => {
                     let scale_f = match level {
@@ -1545,7 +1585,14 @@ impl GpuRenderer {
                     pen_y += base * 0.9;
                 }
             }
+            // 방금 그리며 실제로 잰 높이 — 다음 프레임에 이 블록이 화면 밖으로
+            // 밀려나면 이 값으로 건너뛴다.
+            heights[bi] = pen_y - block_y0;
         }
+        // 최근 문서 몇 개만 들고 있는다(raw_hl 과 같은 꼬마 LRU) — 마크다운
+        // pane 이 둘이어도 서로 쫓아내지 않을 만큼.
+        self.md_heights.insert(0, MdHeightEntry { key, h: heights });
+        self.md_heights.truncate(4);
         (pen_y - top0).max(0.0)
     }
 

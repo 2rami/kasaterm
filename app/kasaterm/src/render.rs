@@ -2148,7 +2148,7 @@ impl App {
                             g.upload_image(&im.key, &im.rgba, im.w, im.h);
                         }
                     }
-                    let h = g.draw_markdown(&doc.blocks, *bx, *by, *bw, *bh, *scroll);
+                    let h = g.draw_markdown(&doc.blocks, doc.gen, *bx, *by, *bw, *bh, *scroll);
                     // 블록별 문서좌표 y 를 pane 별로 옮겨 둔다 — Gpu 쪽은 pane
                     // 을 모르고 매 프레임 덮어써서, 마크다운 pane 이 둘이면
                     // 마지막 것만 남는다.
