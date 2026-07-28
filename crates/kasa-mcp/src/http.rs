@@ -2027,25 +2027,66 @@ async fn events_handler(
     )
 }
 
-/// claude oauth usage API 토큰 — `~/.claude/.credentials.json` 우선, 없으면 macOS
-/// Keychain(`Claude Code-credentials` 서비스). claude Code 가 토큰을 둘 중 하나에 둔다.
+/// Keychain service name holding one account's credentials.
+///
+/// Claude Code (2.1.220, function `oG`) appends `-<sha256(store path)[0..8]>`
+/// whenever the credential store is overridden, and nothing when it is not. We
+/// mirror that instead of tracking items ourselves, so the usage pill reads the
+/// account the panes are actually running as. `dir` must be the same string the
+/// shim exports — the CLI NFC-normalises it before hashing, and a path that is
+/// already NFC (everything we generate) hashes identically.
+fn claude_keychain_service(dir: Option<&str>) -> String {
+    const BASE: &str = "Claude Code-credentials";
+    match dir.filter(|d| !d.is_empty()) {
+        None => BASE.to_string(),
+        Some(d) => {
+            use sha2::{Digest, Sha256};
+            let h = Sha256::digest(d.as_bytes());
+            format!("{BASE}-{}", &format!("{h:x}")[..8])
+        }
+    }
+}
+
+/// claude oauth usage API 토큰 — 활성 계정의 저장소에서 읽는다. macOS 는
+/// Keychain, 그 외는 저장소 dir 의 `.credentials.json`.
+///
+/// 활성 계정은 `KASATERM_CLAUDE_ACCOUNT_DIR`(kasaterm 이 shim 을 깔 때마다 자기
+/// 프로세스 env 에 갱신)로 온다. 이게 없으면 기본 로그인이라 예전과 똑같이 동작한다.
+/// 이걸 안 따라가면 계정을 바꿔도 pill 이 기본 계정 사용량을 계속 보여준다 —
+/// 한도 분산이 목적인 기능에서 한도 표시가 거짓말을 하는 셈이라 같이 따라가야 한다.
 fn read_claude_token() -> Option<String> {
+    let account_dir = std::env::var("KASATERM_CLAUDE_ACCOUNT_DIR")
+        .ok()
+        .filter(|s| !s.is_empty());
+    read_claude_token_from(account_dir.as_deref())
+}
+
+/// 위와 같되 계정 저장소를 인자로 받는다 — env 를 안 건드려 테스트가 서로 안 밟는다.
+fn read_claude_token_from(account_dir: Option<&str>) -> Option<String> {
     let pick = |v: &serde_json::Value| {
         v.pointer("/claudeAiOauth/accessToken")
             .and_then(|t| t.as_str())
             .map(str::to_string)
     };
-    if let Ok(home) = std::env::var("HOME") {
-        if let Ok(s) = std::fs::read_to_string(format!("{home}/.claude/.credentials.json")) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                if let Some(t) = pick(&v) {
-                    return Some(t);
-                }
+    let account_dir = account_dir.filter(|s| !s.is_empty());
+    let creds_dir = match account_dir {
+        Some(d) => d.to_string(),
+        None => format!("{}/.claude", std::env::var("HOME").ok()?),
+    };
+    if let Ok(s) = std::fs::read_to_string(format!("{creds_dir}/.credentials.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            if let Some(t) = pick(&v) {
+                return Some(t);
             }
         }
     }
     let out = crate::no_window_command("security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            &claude_keychain_service(account_dir),
+            "-w",
+        ])
         .output()
         .ok()?;
     let s = String::from_utf8(out.stdout).ok()?;
@@ -2686,6 +2727,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// Pins the naming to Claude Code's own scheme. Expected values come from
+    /// `printf %s <path> | shasum -a 256`, which is what the CLI computes — if
+    /// this drifts, the usage pill silently falls back to reading nothing.
+    #[test]
+    fn keychain_service_matches_claudes_hashing() {
+        assert_eq!(
+            claude_keychain_service(Some("/tmp/acct/a1")),
+            "Claude Code-credentials-63cab202"
+        );
+        // 미선택·빈 문자열은 둘 다 "접미사 없는 기본 저장소"다. 빈 문자열을 해시하면
+        // e3b0c442(빈 입력의 sha256)라는 그럴듯한 이름이 나와 조용히 빗나간다.
+        assert_eq!(claude_keychain_service(None), "Claude Code-credentials");
+        assert_eq!(claude_keychain_service(Some("")), "Claude Code-credentials");
+    }
+
+    /// 계정을 고르면 그 저장소에서 토큰을 읽어야 한다 — 안 그러면 pill 이 계정을
+    /// 바꿔도 기본 계정 한도를 계속 보여준다.
+    #[test]
+    fn token_comes_from_the_selected_account_store() {
+        let d = temp_dir("acct-token");
+        std::fs::write(
+            d.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"tok-from-account"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_claude_token_from(Some(d.to_str().unwrap())),
+            Some("tok-from-account".to_string())
+        );
     }
 
     /// kasacollab.py mode_path 와 같은 치환이어야 같은 마커를 공유한다.

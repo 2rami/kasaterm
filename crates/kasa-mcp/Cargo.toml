@@ -26,6 +26,9 @@ bytes = "1"
 libc = "0.2"
 # pane session id: claude --session-id 가 엄격 UUID 요구(Windows 엔 uuidgen 없음).
 uuid = { version = "1", features = ["v4"] }
+# 계정별 Keychain 항목 찾기: claude 가 서비스명에 sha256(저장소 경로) 앞 8자를 붙인다.
+# 이미 잠금 파일에 있던 버전이라 새로 받는 게 없다.
+sha2 = "0.10"
 
 # Standalone webview backend: serves the arona-ui daemon view off a second
 # port so the webview survives kasaterm exiting.
