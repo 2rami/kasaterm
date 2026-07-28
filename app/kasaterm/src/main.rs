@@ -2322,13 +2322,13 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
 
 /// Parse + decode a markdown document: parse blocks, then decode each inline
 /// image (resolving relative paths against the md file's dir, skipping remote
-/// URLs) under `key_prefix`-scoped texture keys. Shared by initial open and
-/// post-edit re-parse.
-fn build_markdown_doc(key_prefix: &str, p: &std::path::Path, text: &str) -> MarkdownDoc {
+/// URLs) under path-keyed textures. Shared by initial open and post-edit
+/// re-parse.
+fn build_markdown_doc(p: &std::path::Path, text: &str) -> MarkdownDoc {
     let (mut blocks, block_lines) = parse_markdown(text);
     let md_dir = p.parent().map(|d| d.to_path_buf());
     let mut images: Vec<MdDocImage> = Vec::new();
-    for (idx, block) in blocks.iter_mut().enumerate() {
+    for block in blocks.iter_mut() {
         if let MdBlock::Image { path: ipath, key, w, h, .. } = block {
             if ipath.starts_with("http://") || ipath.starts_with("https://") {
                 continue;
@@ -2341,7 +2341,13 @@ fn build_markdown_doc(key_prefix: &str, p: &std::path::Path, text: &str) -> Mark
                 std::path::PathBuf::from(&*ipath)
             };
             if let Ok(img) = decode_image_rgba(&resolved) {
-                let k = format!("{key_prefix}#img{idx}");
+                // 텍스처 id 는 **이미지 파일 경로**다. 예전엔 `{pane}#img{블록번호}`
+                // 였는데, 이미지 위에 문단 하나만 끼워 넣어도 번호가 밀려 새 키가
+                // 되고 옛 텍스처는 `Gpu::images` 에 주인 없이 남았다(누수). 게다가
+                // 같은 파일을 두 pane 에서 열면 같은 그림을 두 번 올렸다.
+                // 경로로 잡으면 문서를 다시 파싱해도, pane 이 몇 개든 하나다.
+                let canon = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+                let k = format!("mdimg:{}", canon.display());
                 *key = k.clone();
                 *w = img.w;
                 *h = img.h;

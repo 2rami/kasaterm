@@ -1505,7 +1505,7 @@ impl App {
                         false
                     }
                 };
-                let doc = build_markdown_doc(id, std::path::Path::new(&path), &text);
+                let doc = build_markdown_doc(std::path::Path::new(&path), &text);
                 // 새 레이아웃의 블록 y 는 아직 없다 — 그려봐야 나온다. 옛 y 로
                 // 일단 근사해 한 프레임짜리 튐을 줄이고, 정확한 위치는 렌더가
                 // y 를 채운 뒤 pending 앵커가 바로잡는다.
@@ -1626,7 +1626,7 @@ mod tests {
 
     fn pane(lines: &[&str]) -> MarkdownPane {
         MarkdownPane {
-            doc: Arc::new(build_markdown_doc("%t", std::path::Path::new("/tmp/t.rs"), "")),
+            doc: Arc::new(build_markdown_doc(std::path::Path::new("/tmp/t.rs"), "")),
             is_md_doc: false,
             raw_mode: true,
             edit_lines: lines.iter().map(|s| s.to_string()).collect::<Vec<_>>().into(),
@@ -1972,7 +1972,6 @@ mod tests {
     fn ensure_raw_seeded_from_doc_source() {
         // A render-mode .md pane (empty edit buffer) seeds from doc.raw on pop-out.
         let doc = Arc::new(build_markdown_doc(
-            "%t",
             std::path::Path::new("/tmp/t.md"),
             "line1\nline2",
         ));
