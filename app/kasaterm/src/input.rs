@@ -1830,6 +1830,17 @@ impl App {
                         }
                         return;
                     }
+                    // Cmd+Shift+R (Ctrl+Shift+R elsewhere) → rebuild the
+                    // renderer's display state: swapchain, DPI scale, font
+                    // metrics, glyph atlas. Browser hard-refresh parity, and
+                    // the one recovery a terminal can offer for a window that
+                    // came back wrong from another monitor — quitting would
+                    // take every live pane with it. Plain Cmd+R is left to the
+                    // shell (^R reverse-search).
+                    if code == KeyCode::KeyR && self.modifiers.shift_key() {
+                        self.refresh_renderer();
+                        return;
+                    }
                     // Close the focused tab (a multi-tab pane keeps its other
                     // tabs). Last-tab/last-pane close is left to the OS close
                     // button.

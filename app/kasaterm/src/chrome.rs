@@ -1634,6 +1634,38 @@ impl App {
             }
         }
     }
+    /// Rebuild everything the renderer derives from the display, without
+    /// touching a single PTY. Cmd+Shift+R and the pane ⋮ menu's rotate icon.
+    ///
+    /// This exists because a terminal is the one app you cannot just restart
+    /// to fix — every pane in it is live work. The automatic invalidation
+    /// (`set_scale` → oversample + repack, `maintain_atlas` on a full atlas)
+    /// should make this unnecessary; it is here for the display state we
+    /// failed to notice, so a wrong-looking window is never a dead end.
+    ///
+    /// Order matters: reconfigure the swapchain to the size we are actually
+    /// at, re-derive scale/font metrics/PTY grid from the *current* monitor,
+    /// and queue the atlas repack last so it lands at the next frame boundary
+    /// with the new scale already in place.
+    pub(crate) fn refresh_renderer(&mut self) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.reconfigure_surface();
+        }
+        self.apply_effective_scale();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.force_atlas_reset();
+        }
+        self.chrome_dirty = true;
+        if let Ok(mut ws) = self.ws.lock() {
+            for pane in ws.panes.values_mut() {
+                pane.dirty = true;
+            }
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        self.set_toast("화면 새로고침".to_string());
+    }
     /// Adjust the focused pane's font multiplier (pane-local zoom). Only that
     /// pane's glyphs + PTY grid change; the BSP layout and other panes stay
     /// put. Delta is additive on the multiplier; clamped to a sane range.
