@@ -2247,9 +2247,9 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         return;
                     }
-                    // Claude 계정 칩 + 드롭다운. 드롭다운은 타이틀바 아래 pane 위로
-                    // 걸치므로 pane 라우팅보다 먼저 잡아야 한다. rect 는 직전 프레임의
-                    // render 가 채운 것(⋮ 핸들 메뉴와 같은 짝).
+                    // 사용량 pill = Claude 계정 스위처. 드롭다운은 타이틀바 아래 pane
+                    // 위로 걸치므로 pane 라우팅보다 먼저 잡아야 한다. rect 는 직전
+                    // 프레임의 render 가 채운 것(⋮ 핸들 메뉴와 같은 짝).
                     let chip_hit = self.account_chip_rect.is_some_and(|r| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     });
@@ -2258,16 +2258,27 @@ impl ApplicationHandler<UserEvent> for App {
                             .account_menu_hits
                             .iter()
                             .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
-                            .map(|(id, _)| id.clone());
+                            .map(|(item, _)| item.clone());
                         self.account_menu = false;
                         self.chrome_dirty = true;
                         window.request_redraw();
-                        if let Some(id) = pick {
+                        match pick {
                             // settings_save 가 끝에서 shim 을 재생성하므로, 이미 열려
                             // 있는 pane 도 다음 claude 부터 이 계정으로 뜬다.
-                            self.set_claude_account = id;
-                            self.settings_save();
-                            return;
+                            Some(AccountMenuItem::Select(id)) => {
+                                self.set_claude_account = id;
+                                self.settings_save();
+                                return;
+                            }
+                            Some(AccountMenuItem::AddInSettings) => {
+                                self.open_settings_window(
+                                    event_loop,
+                                    Some(SettingsCat::Claude),
+                                    None,
+                                );
+                                return;
+                            }
+                            None => {}
                         }
                         // 칩 자기 클릭은 여기서 소비 — 안 그러면 아래 토글이 다시 연다.
                         if chip_hit {
