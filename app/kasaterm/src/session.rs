@@ -1056,7 +1056,7 @@ impl App {
                 }
             };
             let is_md = matches!(ext.as_str(), "md" | "markdown");
-            let doc = Arc::new(build_markdown_doc(&new_id, &path, &raw));
+            let doc = Arc::new(build_markdown_doc(&path, &raw));
             // Markdown renders as a laid-out doc; code/text opens straight into
             // the raw editor (line-number gutter + syntax highlight + editable)
             // — the fenced-code-block render path mangled long lines and was
@@ -1208,7 +1208,7 @@ impl App {
         };
         let new_id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
-        let doc = Arc::new(build_markdown_doc(&new_id, &path, &raw));
+        let doc = Arc::new(build_markdown_doc(&path, &raw));
         let title = path
             .file_name()
             .and_then(|s| s.to_str())
