@@ -2912,11 +2912,18 @@ impl ApplicationHandler<UserEvent> for App {
                                     let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
                                 }
                                 ActionKind::ToggleStatusbar => self.toggle_statusbar(&menu_pid),
+                                ActionKind::ToggleHeader => self.toggle_pane_header(&menu_pid),
+                                ActionKind::ToggleZoom => self.toggle_pane_zoom(&menu_pid),
                                 ActionKind::NewTab => {
                                     let _ = self.spawn_new_tab(&menu_pid);
                                 }
                                 ActionKind::Close => self.close_pane(&menu_pid),
-                                _ => {}
+                                // md 토글은 헤더 세그먼트 전용이라 ⋮ 메뉴엔 없다.
+                                // 와일드카드로 두지 않는 이유: ⋮ 항목을 늘렸는데
+                                // 여기 arm 을 빠뜨리면 클릭이 조용히 아무것도 안
+                                // 하고 끝난다(ToggleHeader·ToggleZoom 이 실제로
+                                // 그랬다) — 컴파일 에러로 잡히게 남김없이 적는다.
+                                ActionKind::MdRender | ActionKind::MdRaw => {}
                             }
                             self.handle_menu = None;
                             self.chrome_dirty = true;
