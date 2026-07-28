@@ -4530,6 +4530,14 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
             eprintln!("[shim] claude account dir 생성 실패: {e}");
         }
     }
+    // 사용량 pill 도 같은 계정을 봐야 한다. `/claude-usage` 핸들러는 이 프로세스 안에서
+    // 돌므로 우리 env 로 알린다 — shim 을 다시 깔 때마다(=계정을 바꿀 때마다) 갱신되니
+    // pill 이 다음 폴링부터 새 계정 한도를 읽는다. 자식 pane 도 이 값을 물려받지만
+    // 읽는 쪽이 없고, shim 이 보는 이름과 달라 서로 간섭하지 않는다.
+    std::env::set_var(
+        "KASATERM_CLAUDE_ACCOUNT_DIR",
+        account_dir.as_deref().map_or(String::new(), |d| d.display().to_string()),
+    );
     let account_block = claude_account_export_line(account_dir.as_deref());
     // teammate 트리플 자동 부착은 제거됐다(거노 2026-07-24): kasaterm 재시작으로 복원된
     // 세션(claude --resume)은 인박스 폴러가 안 돌아 SendMessage 가 조용히 유실되고(파일에만
