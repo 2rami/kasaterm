@@ -5552,7 +5552,12 @@ impl App {
                 let usage_w = usage_label
                     .as_deref()
                     .map_or(0.0, |l| g.measure_chrome_text(l, f, true));
-                let pill_w = name_w + sep_w + usage_w + pad_x * 2.0;
+                // ▾ — 누를 수 있다는 유일한 신호다. 계정을 안 쓰면 pill 내용이 예전과
+                // 똑같아서, 이게 없으면 기능이 붙었는지 알 방법이 없다(거노: "바뀐게
+                // 없어"). 계정 유무와 무관하게 항상 그린다.
+                let chev = 11.0_f32;
+                let chev_gap = 4.0_f32;
+                let pill_w = name_w + sep_w + usage_w + chev_gap + chev + pad_x * 2.0;
                 let right_edge = if usage_pill_right.is_finite() {
                     usage_pill_right - 8.0
                 } else {
@@ -5590,7 +5595,15 @@ impl App {
                     };
                     g.draw_text(tx, ty, l,
                         gpu::DrawOpts { font_size: f, color: accent, bold: true, italic: false });
+                    tx += usage_w;
                 }
+                g.queue_icon(
+                    "chevron-down",
+                    tx + chev_gap,
+                    pill_y + (pill_h - chev) / 2.0,
+                    chev,
+                    if hovered { theme::text() } else { theme::text_dim() },
+                );
                 // 계정이 아직 하나도 없어도 pill 은 눌린다 — 드롭다운이 "기본 +
                 // 설정에서 추가…" 뿐이라도, 클릭했는데 아무 일도 안 나면 고장으로
                 // 보인다. 쉬는 모습은 그대로라 안 쓰는 사람에게 드는 비용은 0.

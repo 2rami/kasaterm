@@ -369,6 +369,79 @@ impl App {
         self.cursor_px = (cx, cy);
         eprintln!("[autoinfo] act={act} pid={pid} at ({cx:.0},{cy:.0})");
     }
+    /// `KASATERM_AUTOPILLCLICK_MS` 뒤에 타이틀바 사용량 pill 을 **진짜로 클릭**한다.
+    /// 다른 probe 처럼 상태를 손으로 세팅하지 않고 winit `MouseInput` 을 그대로
+    /// `window_event` 에 흘려보내 handler 디스패치까지 태운다 — "render 는 그렸는데
+    /// handler 가 안 잡는다"(⋮ 메뉴의 상단바 토글이 실제로 그랬다) 종류의 버그는
+    /// 이 경로로만 잡히기 때문이다. 두 번째 클릭 좌표를 `KASATERM_AUTOPILLPICK`
+    /// (드롭다운 행 인덱스)으로 주면 그 항목까지 눌러 전환 결과를 확인한다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autopillclick(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOPILLCLICK_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        // 단계마다 800ms 간격 — 클릭 결과가 다음 프레임에 그려질 시간을 준다.
+        if Instant::now() < *due + std::time::Duration::from_millis(800 * step as u64) {
+            return;
+        }
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        let click = |app: &mut Self, x: f32, y: f32| {
+            app.cursor_px = (x, y);
+            for state in [ElementState::Pressed, ElementState::Released] {
+                app.window_event(
+                    event_loop,
+                    wid,
+                    WindowEvent::MouseInput { device_id: DeviceId::dummy(), state, button: MouseButton::Left },
+                );
+            }
+        };
+        match step {
+            0 => {
+                let Some(r) = self.account_chip_rect else {
+                    eprintln!("[autopillclick] chip rect 없음 — pill 자체가 안 그려졌다");
+                    STEP.store(9, Ordering::Relaxed);
+                    return;
+                };
+                let (x, y) = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                click(self, x, y);
+                eprintln!(
+                    "[autopillclick] pill({x:.0},{y:.0}) 클릭 → account_menu={} rows={}",
+                    self.account_menu,
+                    self.account_menu_hits.len()
+                );
+                STEP.store(1, Ordering::Relaxed);
+            }
+            1 => {
+                let pick = std::env::var("KASATERM_AUTOPILLPICK")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok());
+                if let Some(i) = pick {
+                    match self.account_menu_hits.get(i).map(|(_, r)| *r) {
+                        Some(r) => {
+                            click(self, r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                            eprintln!(
+                                "[autopillclick] row{i} 클릭 → account='{}' menu={}",
+                                self.set_claude_account, self.account_menu
+                            );
+                        }
+                        None => eprintln!("[autopillclick] row{i} 없음"),
+                    }
+                }
+                STEP.store(9, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
     /// Headless settings-window repro: open the settings *window* (auxwin) after
     /// `KASATERM_AUTOSETTINGS_MS`, on the category named in `KASATERM_AUTOSETTINGS`
     /// ("appearance" / "shell" / "claude" / "students", default General), then arm
