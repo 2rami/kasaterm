@@ -9,6 +9,10 @@ pub(crate) fn mdscript_pending() -> bool {
     MDSCRIPT_LEFT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// 모니터 이동 프로브의 "정착 후" 재측정 예약 시각. 검증 전용이라
+/// `struct App` 을 늘리지 않는다(병렬 작업 충돌 핫스팟).
+static LAYERGEOM_DUE: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
 impl App {
     /// Headless verification: arm a clean exit after KASATERM_AUTOQUIT_MS so a
     /// background run exercises the save-on-exit path (and thus the next
@@ -258,6 +262,99 @@ impl App {
             _ => eprintln!("[autoheader] 4 헤더 켠 뒤 {:?}", snap(self)),
         }
     }
+    /// surface 크기 어긋남 재현. `KASATERM_FORCE_SURFACE_HALF_MS` 뒤에 스왑체인만
+    /// 창의 절반 크기로 다시 잡는다 — 모니터를 옮길 때 Resized/ScaleFactorChanged
+    /// 가 코얼레스되며 실제로 벌어지는 상태를 인위적으로 만든 것이다.
+    /// 거노 스크린샷 실측(창 1510x950 안에 콘텐츠 754x472, 빈 영역은 우리
+    /// 배경색이 아닌 NSWindow 기본색)이 바로 이 상태다.
+    pub(crate) fn run_pending_forcesurfacehalf(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_FORCE_SURFACE_HALF_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if Instant::now() < *due || DONE.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(size) = self.window.as_ref().map(|w| w.inner_size()) else { return };
+        // `view` = 뷰 자체를 줄인다(거노가 본 상태 — UI 가 온전한 채로 축소).
+        // 그 외 = 스왑체인만 줄인다(UI 가 잘림). 두 증상이 다르다는 게
+        // 원인 판별의 핵심이었다.
+        if std::env::var("KASATERM_FORCE_SURFACE_HALF_KIND").as_deref() == Ok("view") {
+            if let Some(w) = self.window.as_ref() {
+                gpu::shrink_view_for_test(w);
+            }
+        } else if let Some(g) = self.gpu.as_mut() {
+            g.resize(size.width / 2, size.height / 2);
+            eprintln!(
+                "[forcehalf] 스왑체인만 {}x{} 로 축소(창은 {}x{} 그대로)",
+                size.width / 2,
+                size.height / 2,
+                size.width,
+                size.height
+            );
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+    /// 모니터 이동 재현. `KASATERM_AUTOMOVESCREEN_MS="7000,11000"` 처럼 콤마로
+    /// 여러 시각을 주면 그때마다 창을 **다른 물리 모니터로** 옮긴다(핑퐁).
+    /// `KASATERM_AUTOCAPTURE_MS` 를 그 사이사이에 끼워 이동 전/후 프레임을
+    /// 비교하면 "큰 모니터로 옮기면 화면이 구석에 처박힌다" 를 헤드리스에서
+    /// 그대로 볼 수 있다. 레이어 속성만 흉내 내는 재현은 실패했다 — AppKit 이
+    /// 진짜로 backing scale 을 바꿔야 한다.
+    pub(crate) fn run_pending_automovescreen(&mut self) {
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Vec<Instant>> = OnceLock::new();
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOMOVESCREEN_MS")
+                .ok()
+                .map(|s| {
+                    let now = Instant::now();
+                    s.split(',')
+                        .filter_map(|p| p.trim().parse::<u64>().ok())
+                        .map(|ms| now + std::time::Duration::from_millis(ms))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let i = NEXT.load(std::sync::atomic::Ordering::Relaxed);
+        let Some(at) = due.get(i) else { return };
+        if Instant::now() < *at {
+            return;
+        }
+        NEXT.store(i + 1, std::sync::atomic::Ordering::Relaxed);
+        let Some(w) = self.window.clone() else { return };
+        eprintln!("[movescreen] #{i} 이동 시작");
+        gpu::log_layer_geometry(&w, &format!("이동#{i} 전"));
+        gpu::move_window_to_other_screen(&w);
+        gpu::log_layer_geometry(&w, &format!("이동#{i} 직후"));
+        *LAYERGEOM_DUE.lock().unwrap() = Some(Instant::now() + std::time::Duration::from_millis(1200));
+    }
+    /// 이동 뒤 AppKit 이 프레임/스케일을 정착시킬 시간을 준 다음 한 번 더 실측.
+    /// `ScaleFactorChanged` 는 `setFrame:` 과 같은 턴에 안 올 수 있어서
+    /// "직후" 값만 보면 정상으로 오판한다. (검증 전용이라 struct App 필드를
+    /// 늘리지 않는다 — 병렬 작업 충돌 핫스팟이다.)
+    pub(crate) fn run_pending_layergeom(&mut self) {
+        let due = { *LAYERGEOM_DUE.lock().unwrap() };
+        let Some(at) = due else { return };
+        if Instant::now() < at {
+            return;
+        }
+        *LAYERGEOM_DUE.lock().unwrap() = None;
+        if let Some(w) = self.window.clone() {
+            gpu::log_layer_geometry(&w, "정착 후");
+        }
+    }
     /// 줌 클릭 매핑 프로브. `KASATERM_AUTOZOOMPROBE_MS` 뒤에 활성 pane 을 줌하고,
     /// 작업영역 전체에 격자로 점을 찍어 `px_to_pane_cell` 이 어디로 보내는지 찍는다.
     ///
@@ -380,6 +477,55 @@ impl App {
         let Some(id) = self.ws.lock().unwrap().active_pane.clone() else { return };
         self.handle_menu = Some(id);
         self.chrome_dirty = true;
+    }
+    /// `KASATERM_AUTOMENUPICK=<idx>` — 열려 있는 ⋮ 메뉴의 idx 번째 항목을
+    /// **진짜 클릭**한다(`KASATERM_FORCE_HANDLE_MENU=*` 로 연 뒤). 화면
+    /// 새로고침처럼 "깨진 화면을 고치는" 동작은 고쳐지는 걸 캡처로 봐야
+    /// 검증이 되는데, winit `KeyEvent` 는 외부에서 만들 수 없어 단축키로는
+    /// 하네스를 못 짠다 — 마우스 경로가 유일한 자동 검증 통로다.
+    pub(crate) fn run_pending_automenuclick(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<(Instant, usize)>> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let idx = std::env::var("KASATERM_AUTOMENUPICK")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())?;
+            let ms = std::env::var("KASATERM_AUTOMENUCLICK_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(5000);
+            Some((Instant::now() + std::time::Duration::from_millis(ms), idx))
+        });
+        let Some((due, idx)) = *due else { return };
+        if DONE.load(Ordering::Relaxed) || Instant::now() < due {
+            return;
+        }
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        let Some(&(act, r)) = self.handle_menu_hits.get(idx) else {
+            eprintln!(
+                "[automenuclick] idx{idx} 없음 (rects={})",
+                self.handle_menu_hits.len()
+            );
+            DONE.store(true, Ordering::Relaxed);
+            return;
+        };
+        DONE.store(true, Ordering::Relaxed);
+        self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+        for state in [ElementState::Pressed, ElementState::Released] {
+            self.window_event(
+                event_loop,
+                wid,
+                WindowEvent::MouseInput {
+                    device_id: DeviceId::dummy(),
+                    state,
+                    button: MouseButton::Left,
+                },
+            );
+        }
+        eprintln!("[automenuclick] idx{idx} {act:?} 클릭 @({:.0},{:.0})", self.cursor_px.0, self.cursor_px.1);
     }
     /// `KASATERM_AUTOPILLCLICK_MS` 뒤에 타이틀바 사용량 pill 을 **진짜로 클릭**한다.
     /// 다른 probe 처럼 상태를 손으로 세팅하지 않고 winit `MouseInput` 을 그대로

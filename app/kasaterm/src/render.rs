@@ -6303,6 +6303,28 @@ impl App {
         if drifted {
             self.apply_effective_scale();
         }
+        // 같은 이유로 **크기**도 자가치유한다. 지금까지 scale 만 되잡았는데,
+        // 어긋날 수 있는 건 둘이고 크기 쪽은 한 번 틀어지면 되돌릴 장치가
+        // 아예 없었다(실측: 스왑체인만 절반으로 만들어 두면 6초 뒤에도 그대로).
+        //
+        // 순서가 중요하다 — 뷰부터 창에 되맞춘다. 뷰가 작아지면 레이어도
+        // `inner_size()` 도 스왑체인도 같이 작아져 앱 내부에선 완벽히 일관돼
+        // 보이고, 어긋난 건 창과 뷰 사이뿐이라 크기 대조로는 안 잡힌다.
+        // 정상 상태에선 둘 다 msg_send 몇 번·정수 비교 두 번이라 사실상 공짜다.
+        if let Some(w) = self.window.clone() {
+            let refit = gpu::ensure_view_fills_window(&w);
+            let want = w.inner_size();
+            let stale = self
+                .gpu
+                .as_ref()
+                .map_or(false, |g| g.surface_size() != (want.width, want.height));
+            if refit || stale {
+                if let Some(g) = self.gpu.as_mut() {
+                    g.resize(want.width, want.height);
+                }
+                self.apply_effective_scale();
+            }
+        }
         // gpu path takes over the whole frame — no chrome yet, just
         // the cell grid through the cell-renderer pipeline.
         if self.gpu.is_some() {

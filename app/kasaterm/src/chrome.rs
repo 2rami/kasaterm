@@ -1643,13 +1643,25 @@ impl App {
     /// should make this unnecessary; it is here for the display state we
     /// failed to notice, so a wrong-looking window is never a dead end.
     ///
-    /// Order matters: reconfigure the swapchain to the size we are actually
-    /// at, re-derive scale/font metrics/PTY grid from the *current* monitor,
-    /// and queue the atlas repack last so it lands at the next frame boundary
-    /// with the new scale already in place.
+    /// Order matters: re-seat the NSView onto the window's content rect,
+    /// reconfigure the swapchain to the size we are actually at, re-derive
+    /// scale/font metrics/PTY grid from the *current* monitor, and queue the
+    /// atlas repack last so it lands at the next frame boundary with the new
+    /// scale in place.
+    ///
+    /// The view step is the one that matters for a window that came back wrong
+    /// from another monitor — see `gpu::ensure_view_fills_window`. It must run
+    /// first: everything below reads `inner_size()`, which is derived from the
+    /// view, so a shrunken view would quietly poison all of it. The swapchain
+    /// must then be re-jammed with the size read *now*, not with the stored
+    /// config — a refresh is needed precisely when that config is what drifted.
     pub(crate) fn refresh_renderer(&mut self) {
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.reconfigure_surface();
+        if let Some(w) = self.window.as_ref() {
+            gpu::ensure_view_fills_window(w);
+            let size = w.inner_size();
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.resize(size.width, size.height);
+            }
         }
         self.apply_effective_scale();
         if let Some(gpu) = self.gpu.as_mut() {

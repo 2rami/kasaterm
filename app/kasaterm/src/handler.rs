@@ -1128,6 +1128,13 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let Some(window) = self.window.clone() else { return; };
+        // 위 가드를 다 통과했어도 **메인 창이 아닌 id** 는 여기로 오면 안 된다.
+        // 패널을 닫는 순간 필드를 먼저 비우므로, 같은 배치에 남아 있던 그 창의
+        // Resized 가 이 아래로 흘러 `g.resize()` 를 남의 크기로 부른다 — 위
+        // 1050행대 주석이 기록한 바로 그 사고(메인 뷰포트가 통째로 줄어듦)다.
+        if id != window.id() {
+            return;
+        }
         // gpu path uses our own wgpu surface, sugarloaf path keeps
         // its renderer. Only resize / rescale touch the surface
         // owner — everything else (keyboard, mouse, IME, wheel,
@@ -1149,7 +1156,11 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                 }
             }
-            WindowEvent::ScaleFactorChanged { scale_factor: _, .. } => {
+            WindowEvent::ScaleFactorChanged { .. } => {
+                // 모니터가 바뀌면 뷰가 창보다 작게 남는 일이 있다 — 그 상태는
+                // 앱 내부에선 아무 모순도 안 보이므로(레이어·inner_size·스왑체인이
+                // 전부 같이 작아진다) 창 기준으로 먼저 되잡는다.
+                gpu::ensure_view_fills_window(&window);
                 let size = window.inner_size();
                 if gpu_mode {
                     if let Some(g) = self.gpu.as_mut() {
@@ -4414,6 +4425,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autozoomprobe();
         self.run_pending_autoheader();
         self.resolve_force_handle_menu();
+        self.run_pending_automovescreen();
+        self.run_pending_forcesurfacehalf();
+        self.run_pending_layergeom();
+        self.run_pending_automenuclick(event_loop);
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
