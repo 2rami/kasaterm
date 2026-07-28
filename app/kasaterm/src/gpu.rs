@@ -534,9 +534,6 @@ impl GpuRenderer {
     /// Re-apply the surface configuration as-is. A monitor move can leave the
     /// swapchain describing the display we left; reconfiguring against the
     /// current size makes the next frame land on the one we are on.
-    pub fn reconfigure_surface(&mut self) {
-        self.surface.configure(&self.device, &self.config);
-    }
 
     pub fn set_font_size(&mut self, font_size_logical: f32) -> (f32, f32) {
         let new_px = (font_size_logical * self.scale).round().max(8.0) as u32;
@@ -2473,6 +2470,13 @@ impl GpuRenderer {
         ));
     }
 
+    /// 스왑체인이 지금 잡고 있는 물리 픽셀 크기. 창 크기와 어긋났는지 프레임마다
+    /// 대조하는 자가치유용 — 어긋난 채로 두면 컴포지터가 그 작은 드로어블을 창
+    /// 구석에 얹어 화면이 영구히 축소돼 처박힌다.
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     pub fn resize(&mut self, w: u32, h: u32) {
         self.config.width = w.max(1);
         self.config.height = h.max(1);
@@ -3584,6 +3588,104 @@ fn default_font_path() -> String {
     }
 }
 
+/// NSView 가 창의 콘텐츠 영역을 **꽉 채우는지** 확인하고, 작으면 다시 채운다.
+/// 고쳤으면 `true`.
+///
+/// 거노가 큰 모니터에서 본 화면(창 1510x950 안에 UI 가 754x472 로 온전히
+/// 축소돼 구석에 붙고, 빈 영역엔 우리 배경색이 아닌 NSWindow 기본색)이 바로
+/// 이 상태다. 뷰가 작아지면 그 아래(레이어·`inner_size()`·스왑체인)가 전부
+/// 사이좋게 작아지므로 **앱 내부에선 아무 모순이 안 보인다** — 어긋난 건 창과
+/// 뷰 사이뿐이라, 자기 크기만 들여다보는 코드로는 영영 못 잡는다. 그래서 창
+/// 쪽(`contentRectForFrameRect:`)을 기준으로 삼는다.
+///
+/// 스왑체인만 어긋난 경우와는 증상이 다르다(그쪽은 UI 가 **잘린다**).
+/// `KASATERM_FORCE_SURFACE_HALF_MS` 로 둘을 갈라 실측해 둔 구분이다.
+#[cfg(target_os = "macos")]
+pub fn ensure_view_fills_window(window: &Window) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use raw_window_handle::RawWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return false;
+    };
+    let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return false;
+        }
+        let wf: NSRect = msg_send![ns_window, frame];
+        let content: NSRect = msg_send![ns_window, contentRectForFrameRect: wf];
+        let vf: NSRect = msg_send![ns_view, frame];
+        // 미니마이즈/화면 밖 등으로 0 이 나올 때 뷰를 0 으로 만들지 않는다.
+        if !(content.size.width > 1.0 && content.size.height > 1.0) {
+            return false;
+        }
+        if (content.size.width - vf.size.width).abs() < 1.0
+            && (content.size.height - vf.size.height).abs() < 1.0
+            && vf.origin.x.abs() < 1.0
+            && vf.origin.y.abs() < 1.0
+        {
+            return false;
+        }
+        let fixed = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(content.size.width, content.size.height),
+        );
+        let _: () = msg_send![ns_view, setFrame: fixed];
+        eprintln!(
+            "[viewfit] 뷰가 창보다 작았다 — {:.0}x{:.0}@({:.0},{:.0}) → {:.0}x{:.0} 로 복구",
+            vf.size.width, vf.size.height, vf.origin.x, vf.origin.y,
+            content.size.width, content.size.height
+        );
+        true
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn ensure_view_fills_window(_window: &Window) -> bool {
+    false
+}
+
+/// 검증 전용: NSView 를 창의 절반으로 줄여 거노가 본 상태를 그대로 만든다.
+/// `ensure_view_fills_window` 가 이걸 되돌리는지 보는 것이 이 하네스의 목적.
+#[cfg(target_os = "macos")]
+pub fn shrink_view_for_test(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use raw_window_handle::RawWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+    unsafe {
+        let vf: NSRect = msg_send![ns_view, frame];
+        let half = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(vf.size.width / 2.0, vf.size.height / 2.0),
+        );
+        let _: () = msg_send![ns_view, setFrame: half];
+        eprintln!(
+            "[forceview] 뷰를 {:.0}x{:.0} → {:.0}x{:.0} 로 축소",
+            vf.size.width,
+            vf.size.height,
+            half.size.width,
+            half.size.height
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn shrink_view_for_test(_window: &Window) {}
+
 #[cfg(target_os = "macos")]
 unsafe fn patch_metal_layer_gravity(window: &Window) {
     use objc2::msg_send;
@@ -4065,6 +4167,163 @@ pub fn toggle_maximize_no_anim(window: &Window, saved: &mut Option<(f64, f64, f6
 pub fn toggle_maximize_no_anim(window: &Window, _saved: &mut Option<(f64, f64, f64, f64)>) {
     window.set_maximized(!window.is_maximized());
 }
+
+/// 창을 **다른 물리 모니터로 옮긴다**. 검증 전용 — 거노가 손으로 하는
+/// "맥북 화면 ↔ 큰 모니터" 이동을 헤드리스에서 그대로 일으키려면 backing
+/// scale 이 진짜로 바뀌어야 하는데, winit 이벤트는 외부에서 합성할 수 없고
+/// 레이어 속성만 흉내 내는 건 (실측으로) 증상을 재현하지 못했다. 유일하게
+/// 정직한 재현은 실제 `setFrame:` 으로 창을 옮겨 AppKit 이 스스로
+/// `ScaleFactorChanged` 를 쏘게 하는 것이다.
+#[cfg(target_os = "macos")]
+pub fn move_window_to_other_screen(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    use raw_window_handle::RawWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let Some(cls) = AnyClass::get(c"NSScreen") else {
+            return;
+        };
+        let screens: *mut AnyObject = msg_send![cls, screens];
+        let n: usize = msg_send![screens, count];
+        let cur: *mut AnyObject = msg_send![ns_window, screen];
+        if cur.is_null() {
+            eprintln!("[movescreen] 창이 어느 화면에도 안 걸림");
+            return;
+        }
+        let cur_frame: NSRect = msg_send![cur, frame];
+        let cur_scale: f64 = msg_send![cur, backingScaleFactor];
+        // NSScreen 인스턴스는 재생성될 수 있어 포인터 비교가 위험하다 —
+        // origin 으로 같은 화면인지 판정한다.
+        let mut target: *mut AnyObject = std::ptr::null_mut();
+        for i in 0..n {
+            let s: *mut AnyObject = msg_send![screens, objectAtIndex: i];
+            let f: NSRect = msg_send![s, frame];
+            let sc: f64 = msg_send![s, backingScaleFactor];
+            eprintln!(
+                "[movescreen]   #{i} scale={sc} {}x{} @({},{})",
+                f.size.width, f.size.height, f.origin.x, f.origin.y
+            );
+            let same = (f.origin.x - cur_frame.origin.x).abs() < 1.0
+                && (f.origin.y - cur_frame.origin.y).abs() < 1.0;
+            if !same && target.is_null() {
+                target = s;
+            }
+        }
+        if target.is_null() {
+            eprintln!("[movescreen] 화면이 하나뿐 — 이동 불가(재현 실패)");
+            return;
+        }
+        let vf: NSRect = msg_send![target, visibleFrame];
+        let tscale: f64 = msg_send![target, backingScaleFactor];
+        let cf: NSRect = msg_send![ns_window, frame];
+        let w = cf.size.width.min(vf.size.width);
+        let ht = cf.size.height.min(vf.size.height);
+        let frame = NSRect::new(
+            NSPoint::new(
+                vf.origin.x + (vf.size.width - w) / 2.0,
+                vf.origin.y + (vf.size.height - ht) / 2.0,
+            ),
+            NSSize::new(w, ht),
+        );
+        let _: () = msg_send![ns_window, setFrame: frame, display: true, animate: false];
+        eprintln!("[movescreen] scale {cur_scale} → {tscale}, frame {w}x{ht}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn move_window_to_other_screen(_window: &Window) {}
+
+/// CAMetalLayer 의 실측 기하를 찍는다. GPU 리드백 캡처는 **우리 렌더 타깃**을
+/// 읽으므로 컴포지터가 그 타깃을 레이어 어디에 어떤 크기로 얹는지는 절대
+/// 안 보인다 — 모니터 이동 버그는 정확히 그 층에 있어서 이 프로브가 유일한 눈이다.
+///
+/// 불변식: `drawableSize == bounds × contentsScale`. 어긋난 채로
+/// `contentsGravity = topLeft` 면 화면이 창 구석에 축소돼 처박힌다.
+#[cfg(target_os = "macos")]
+pub fn log_layer_geometry(window: &Window, tag: &str) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSRect, NSSize};
+    use raw_window_handle::RawWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+    unsafe {
+        let layer: *mut AnyObject = msg_send![ns_view, layer];
+        if layer.is_null() {
+            eprintln!("[layergeom] {tag}: 레이어 없음");
+            return;
+        }
+        let bounds: NSRect = msg_send![layer, bounds];
+        let cs: f64 = msg_send![layer, contentsScale];
+        let responds: bool = msg_send![layer, respondsToSelector: objc2::sel!(drawableSize)];
+        let ds: NSSize = if responds {
+            msg_send![layer, drawableSize]
+        } else {
+            NSSize::new(-1.0, -1.0)
+        };
+        let vb: NSRect = msg_send![ns_view, frame];
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        // contentLayoutRect 는 타이틀바를 뺀 값이라 기준이 못 된다 — 우리 창은
+        // 타이틀바를 투명하게 두고 뷰가 그 위까지 덮는다. contentRectForFrameRect:
+        // 가 "뷰가 채워야 할 진짜 영역"이다.
+        let content: NSRect = if ns_window.is_null() {
+            NSRect::new(
+                objc2_foundation::NSPoint::new(0.0, 0.0),
+                NSSize::new(-1.0, -1.0),
+            )
+        } else {
+            let wf: NSRect = msg_send![ns_window, frame];
+            msg_send![ns_window, contentRectForFrameRect: wf]
+        };
+        let view_fills = (content.size.width - vb.size.width).abs() < 1.0
+            && (content.size.height - vb.size.height).abs() < 1.0;
+        let inner = window.inner_size();
+        let sf = window.scale_factor();
+        let want = (bounds.size.width * cs, bounds.size.height * cs);
+        let ok = (want.0 - ds.width).abs() < 1.0 && (want.1 - ds.height).abs() < 1.0;
+        eprintln!(
+            "[layergeom] {tag}: viewFrame={:.0}x{:.0}@({:.0},{:.0}) content={:.0}x{:.0} {} | \
+             layerBounds={:.0}x{:.0} cs={cs} \
+             drawable={:.0}x{:.0} (기대 {:.0}x{:.0} {}) | winit inner={}x{} sf={sf}",
+            vb.size.width,
+            vb.size.height,
+            vb.origin.x,
+            vb.origin.y,
+            content.size.width,
+            content.size.height,
+            if view_fills { "채움" } else { "★뷰가 작음★" },
+            bounds.size.width,
+            bounds.size.height,
+            ds.width,
+            ds.height,
+            want.0,
+            want.1,
+            if ok { "일치" } else { "★어긋남★" },
+            inner.width,
+            inner.height,
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn log_layer_geometry(_window: &Window, _tag: &str) {}
 
 /// While the window is NOT zoomed, remember its frame as the un-zoom restore
 /// target. The green traffic-light zoom never passes through
