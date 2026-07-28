@@ -5523,23 +5523,26 @@ impl App {
             // claude 5시간 사용량 pill — 타이틀바 우상단. 웹뷰 TitleBar UsagePill 의
             // 터미널 미러(거노: 웹뷰 안 봐서 터미널에). 70%↑ 호박·90%↑ 산호로 경고.
             // 데이터는 claude_usage 폴러(handler.rs, 로컬 /claude-usage 60초).
+            // 아이콘 클러스터 최좌단(usage_pill_right, pre-read) 왼쪽에 8px 띄워
+            // park — 어떤 버튼과도 안 겹친다. 버튼이 다 없으면 win 우측 폴백.
+            // 사용량 pill 과 계정 칩이 이 경계를 오른쪽부터 차례로 나눠 쓴다.
+            let mut chip_right = if usage_pill_right.is_finite() {
+                usage_pill_right - 8.0
+            } else {
+                win_px.0 / scale - 12.0
+            };
+            let pill_h = 19.0_f32;
+            let pill_y = ((TITLE_HEIGHT - pill_h) / 2.0).max(2.0);
             if let Some(pct) = claude_usage_pct {
-                let win_w = win_px.0 / scale;
                 let f = 11.0_f32;
                 let label = format!("5h {:.0}%", pct);
                 let tw = label.chars().count() as f32 * f * 0.6;
                 let pad_x = 8.0_f32;
                 let pill_w = tw + pad_x * 2.0;
-                let pill_h = 19.0_f32;
-                // 아이콘 클러스터 최좌단(usage_pill_right, pre-read) 왼쪽에 8px 띄워
-                // park — 어떤 버튼과도 안 겹친다. 버튼이 다 없으면 win 우측 폴백.
-                let right_edge = if usage_pill_right.is_finite() {
-                    usage_pill_right - 8.0
-                } else {
-                    win_w - 12.0
-                };
+                let right_edge = chip_right;
                 let x = (right_edge - pill_w).max(0.0);
-                let y = ((TITLE_HEIGHT - pill_h) / 2.0).max(2.0);
+                let y = pill_y;
+                chip_right = x - 6.0;
                 let accent = if pct >= 90.0 {
                     [0xf7, 0x76, 0x8e, 0xff]
                 } else if pct >= 70.0 {
@@ -5557,6 +5560,86 @@ impl App {
                     &label,
                     gpu::DrawOpts { font_size: f, color: accent, bold: true, italic: false },
                 );
+            }
+            // Claude 계정 칩 — 사용량 pill 왼쪽. 고를 게 하나뿐이면(추가 계정 0개 =
+            // 기본 로그인만) 아예 안 그린다: 쓰지도 않는 사람 타이틀바에 잡음을
+            // 얹지 않는다. 클릭 → 드롭다운, 고르면 다음에 뜨는 claude 부터 그 계정.
+            self.account_chip_rect = None;
+            self.account_menu_hits.clear();
+            if !self.set_claude_accounts.is_empty() {
+                let (hmx, hmy) = self.cursor_px;
+                let f = 11.0_f32;
+                let active_label = self
+                    .set_claude_accounts
+                    .iter()
+                    .find(|a| a.id == self.set_claude_account)
+                    .map_or("기본", |a| a.label.as_str());
+                let pad_x = 9.0_f32;
+                let cw = g.measure_chrome_text(active_label, f, true) + pad_x * 2.0;
+                let cx0 = (chip_right - cw).max(0.0);
+                let hovered = self.account_menu
+                    || (hmx >= cx0 && hmx <= cx0 + cw && hmy >= pill_y && hmy <= pill_y + pill_h);
+                round_rect(
+                    g, cx0, pill_y, cw, pill_h, pill_h / 2.0,
+                    theme::with_alpha(
+                        if hovered { theme::surface_hover() } else { theme::surface_active() },
+                        0xE6,
+                    ),
+                );
+                g.draw_text(
+                    cx0 + pad_x,
+                    pill_y + (pill_h - f) / 2.0 - 1.0,
+                    active_label,
+                    gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false },
+                );
+                self.account_chip_rect = Some((cx0, pill_y, cw, pill_h));
+                if self.account_menu {
+                    // 첫 행은 언제나 기본(id `""`) — 설정 화면의 목록과 같은 순서.
+                    let rows: Vec<(&str, &str)> = std::iter::once(("", "기본"))
+                        .chain(
+                            self.set_claude_accounts
+                                .iter()
+                                .map(|a| (a.id.as_str(), a.label.as_str())),
+                        )
+                        .collect();
+                    let rh = 24.0_f32;
+                    let pad = 4.0_f32;
+                    let mw = rows
+                        .iter()
+                        .map(|(_, l)| g.measure_chrome_text(l, f, true) + pad_x * 2.0)
+                        .fold(cw, f32::max);
+                    let mh = pad * 2.0 + rh * rows.len() as f32;
+                    // 칩 오른쪽 끝에 맞춰 내린다 — 창 왼쪽으로는 안 넘어가게 클램프.
+                    let mx = (cx0 + cw - mw).max(4.0);
+                    let my = pill_y + pill_h + 4.0;
+                    round_rect(g, mx, my, mw, mh, theme::RADIUS_SM, theme::border());
+                    round_rect(g, mx + 1.0, my + 1.0, mw - 2.0, mh - 2.0,
+                        theme::RADIUS_SM - 1.0, theme::surface_hover());
+                    let mut ry = my + pad;
+                    for (id, label) in rows {
+                        let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + rh;
+                        let active = id == self.set_claude_account;
+                        if on {
+                            round_rect(g, mx + pad, ry, mw - pad * 2.0, rh,
+                                theme::RADIUS_SM, theme::surface_active());
+                        }
+                        if active {
+                            // 활성 표시는 왼쪽 accent 막대 — 체크 아이콘보다 좁다.
+                            round_rect(g, mx + pad, ry + 5.0, 2.5, rh - 10.0, 1.25, theme::accent());
+                        }
+                        g.draw_text(
+                            mx + pad_x, ry + (rh - f) / 2.0 - 1.0, label,
+                            gpu::DrawOpts {
+                                font_size: f,
+                                color: if active { theme::text() } else { theme::text_dim() },
+                                bold: active,
+                                italic: false,
+                            },
+                        );
+                        self.account_menu_hits.push((id.to_string(), (mx, ry, mw, rh)));
+                        ry += rh;
+                    }
+                }
             }
             let v_alpha = version_alpha;
             if v_alpha > 0.0 {

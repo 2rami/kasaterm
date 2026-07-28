@@ -3109,6 +3109,13 @@ struct App {
     handle_menu: Option<String>,
     /// ⋮ 메뉴 버튼 hit rect: (액션, logical rect). render가 매 프레임 채움.
     handle_menu_hits: Vec<(ActionKind, (f32, f32, f32, f32))>,
+    /// 타이틀바 Claude 계정 칩의 드롭다운이 열려 있는지. ⋮ 핸들 메뉴와 같은 짝 —
+    /// render 가 매 프레임 rect 를 채우고 handler 가 이전 프레임 rect 로 힛테스트.
+    account_menu: bool,
+    /// 계정 칩 자체의 rect(클릭 = 드롭다운 토글). 칩을 안 그리는 프레임엔 None.
+    account_chip_rect: Option<(f32, f32, f32, f32)>,
+    /// 드롭다운 항목 hit rect: (계정 id, rect). 빈 id = 기본 로그인.
+    account_menu_hits: Vec<(String, (f32, f32, f32, f32))>,
     /// Rendered markdown content height (logical px) per pane id, published by
     /// the renderer each frame. The scroll handler clamps scroll_offset to
     /// (content_h - visible_h) so a markdown pane can't over-scroll.
@@ -3723,6 +3730,11 @@ impl App {
             // 부팅 시 강제로 열어 자동캡처로 메뉴 레이아웃을 검증한다. 미설정이면 None.
             handle_menu: std::env::var("KASATERM_FORCE_HANDLE_MENU").ok(),
             handle_menu_hits: Vec::new(),
+            // KASATERM_FORCE_HANDLE_MENU 와 같은 헤드리스 검증용 — 클릭 합성 없이
+            // 드롭다운이 열린 프레임을 캡처한다.
+            account_menu: std::env::var_os("KASATERM_FORCE_ACCOUNT_MENU").is_some(),
+            account_chip_rect: None,
+            account_menu_hits: Vec::new(),
             md_content_h: HashMap::new(),
             md_block_ys: HashMap::new(),
             md_scroll_anchor: HashMap::new(),
