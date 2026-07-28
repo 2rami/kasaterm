@@ -278,6 +278,35 @@ impl Shaper {
         size_px * 0.5
     }
 
+    /// 폴백 페이스를 주 폰트의 설계 크기에 맞추는 배율 — 두 폰트의 cap height
+    /// 비다. 폰트를 섞을 때 크기를 맞추는 표준 방법이고, advance(칸 폭)로
+    /// 맞추면 왜 안 되는지는 `rasterize_inner` 의 호출부 주석에 있다.
+    /// cap height 가 없는 폰트는 x-height, 그것도 없으면 1.0 으로 물러선다.
+    fn cap_match(&self, font_data: &[u8], font_index: usize) -> f32 {
+        let Some(f) = FontRef::from_index(font_data, font_index) else {
+            return 1.0;
+        };
+        // scale(1.0) = em 대비 비율. upm 이 다른 폰트끼리도 그대로 비교된다.
+        let pick = |m: &swash::Metrics| {
+            if m.cap_height > 0.0 {
+                m.cap_height
+            } else {
+                m.x_height
+            }
+        };
+        let base = pick(&self.face(0).metrics(&[]).scale(1.0));
+        let this = pick(&f.metrics(&[]).scale(1.0));
+        if base <= 0.0 || this <= 0.0 {
+            return 1.0;
+        }
+        if std::env::var_os("KASATERM_FONT_DEBUG").is_some() {
+            eprintln!("[capmatch] base={base:.4} this={this:.4} → {:.4}", base / this);
+        }
+        // 상·하한은 메트릭이 망가진 폰트가 폴백에 끼어들었을 때의 안전장치일
+        // 뿐이다 — 정상적인 짝이면 1.0 근처에서 논다.
+        (base / this).clamp(0.8, 1.4)
+    }
+
     /// Line height in pixels at `size_px` — primary face's
     /// ascent+descent+line_gap. Caller uses this directly for cell
     /// height so the grid metric matches the font's natural line
@@ -475,14 +504,22 @@ impl Shaper {
                 }
                 render.render(&mut scaler, glyph_id)
             };
-            // CJK 를 폴백이 그릴 때만 두 칸에 맞춰 키운다. primary 가 직접 한글을
-            // 그리는 구성(D2Coding Mono 를 주 폰트로 쓰던 기존 배치)에서는 이미
-            // 칸에 맞아 있으므로 건드리지 않는다 — 거기 배율을 걸면 두 배로 커진다.
-            // 상한을 두는 건 메트릭이 이상한 폰트가 폴백에 끼어들어도 글리프가
-            // 줄 높이를 넘지 않게 하기 위해서다.
-            let cjk_fit = if is_cjk_wide(ch) && face_idx != 0 && latin_cell > 0.0 && advance > 0.0
-            {
-                ((latin_cell * 2.0) / advance).clamp(0.75, 1.45)
+            // 폴백이 그리는 CJK 는 주 폰트의 **설계 크기**에 맞춘다(cap height 비).
+            // 예전엔 "두 칸 폭 ÷ 글리프 advance" 로 맞췄는데, 그리드는 떨어져도
+            // 글자가 통째로 부푼다 — JetBrains 칸 0.6em×2 ÷ D2Coding 한글 1.0em
+            // = 1.2배가 걸려 한글 ink 가 0.895em → 1.07em, 라틴 대문자(0.73em)의
+            // 1.5배로 보였다(거노 지적, 실측 35px vs 23px). cap height 로 맞추면
+            // 1.05배라 크기가 자연스럽고, 두 칸과의 틈도 한쪽 0.04em 뿐이다.
+            // primary 가 직접 한글을 그리는 구성에서는 배율을 걸지 않는다.
+            let cjk_fit = if is_cjk_wide(ch) && face_idx != 0 {
+                let mut s = self.cap_match(font_data, font_index);
+                // 두 칸 폭은 **상한**으로만 쓴다. 이걸 목표로 삼았던 게 원래
+                // 코드였고, 메트릭이 이상한 폴백이 옆 칸을 침범하는 것만
+                // 막으면 된다.
+                if latin_cell > 0.0 && advance > 0.0 {
+                    s = s.min((latin_cell * 2.0) / advance);
+                }
+                s
             } else {
                 1.0
             };
