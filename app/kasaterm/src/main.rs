@@ -2068,6 +2068,10 @@ struct MdDocImage {
 /// is the source file (for the edit button); `images` are decoded inline
 /// images the renderer uploads + draws.
 struct MarkdownDoc {
+    /// Serial number, unique per parse. The renderer memoizes block heights
+    /// against it — a pointer/path wouldn't do, since a reparsed doc can land
+    /// on the same address and would then be served the old layout.
+    gen: u64,
     blocks: Vec<MdBlock>,
     /// 0-based source line of each block, index-aligned with `blocks`. Lets the
     /// Raw↔Render toggle keep the line you were reading on screen.
@@ -2345,7 +2349,9 @@ fn build_markdown_doc(key_prefix: &str, p: &std::path::Path, text: &str) -> Mark
             }
         }
     }
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     MarkdownDoc {
+        gen: GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         blocks,
         block_lines,
         path: p.to_string_lossy().into_owned(),
