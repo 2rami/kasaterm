@@ -1424,6 +1424,16 @@ enum ActionKind {
     ToggleZoom,
 }
 
+/// 타이틀바 사용량 pill 드롭다운의 한 줄.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum AccountMenuItem {
+    /// 이 계정으로 전환. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
+    Select(String),
+    /// 설정 → Claude 로 보낸다. 계정이 하나뿐일 때 드롭다운이 막다른 골목이
+    /// 되지 않게 항상 맨 아래에 둔다 — 실제 추가는 거기서 /login 까지 간다.
+    AddInSettings,
+}
+
 /// State for an in-flight in-pane tab reorder drag. A press on a tab arms
 /// this; it only becomes a real drag past the threshold, so a plain press
 /// just switches the active tab on release.
@@ -3112,10 +3122,10 @@ struct App {
     /// 타이틀바 Claude 계정 칩의 드롭다운이 열려 있는지. ⋮ 핸들 메뉴와 같은 짝 —
     /// render 가 매 프레임 rect 를 채우고 handler 가 이전 프레임 rect 로 힛테스트.
     account_menu: bool,
-    /// 계정 칩 자체의 rect(클릭 = 드롭다운 토글). 칩을 안 그리는 프레임엔 None.
+    /// 사용량 pill 의 rect(클릭 = 계정 드롭다운 토글). pill 을 안 그리는 프레임엔 None.
     account_chip_rect: Option<(f32, f32, f32, f32)>,
-    /// 드롭다운 항목 hit rect: (계정 id, rect). 빈 id = 기본 로그인.
-    account_menu_hits: Vec<(String, (f32, f32, f32, f32))>,
+    /// 드롭다운 항목 hit rect.
+    account_menu_hits: Vec<(AccountMenuItem, (f32, f32, f32, f32))>,
     /// Rendered markdown content height (logical px) per pane id, published by
     /// the renderer each frame. The scroll handler clamps scroll_offset to
     /// (content_h - visible_h) so a markdown pane can't over-scroll.

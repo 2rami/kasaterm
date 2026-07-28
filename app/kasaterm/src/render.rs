@@ -5525,100 +5525,110 @@ impl App {
             // 데이터는 claude_usage 폴러(handler.rs, 로컬 /claude-usage 60초).
             // 아이콘 클러스터 최좌단(usage_pill_right, pre-read) 왼쪽에 8px 띄워
             // park — 어떤 버튼과도 안 겹친다. 버튼이 다 없으면 win 우측 폴백.
-            // 사용량 pill 과 계정 칩이 이 경계를 오른쪽부터 차례로 나눠 쓴다.
-            let mut chip_right = if usage_pill_right.is_finite() {
-                usage_pill_right - 8.0
-            } else {
-                win_px.0 / scale - 12.0
-            };
-            let pill_h = 19.0_f32;
-            let pill_y = ((TITLE_HEIGHT - pill_h) / 2.0).max(2.0);
-            if let Some(pct) = claude_usage_pct {
-                let f = 11.0_f32;
-                let label = format!("5h {:.0}%", pct);
-                let tw = label.chars().count() as f32 * f * 0.6;
-                let pad_x = 8.0_f32;
-                let pill_w = tw + pad_x * 2.0;
-                let right_edge = chip_right;
-                let x = (right_edge - pill_w).max(0.0);
-                let y = pill_y;
-                chip_right = x - 6.0;
-                let accent = if pct >= 90.0 {
-                    [0xf7, 0x76, 0x8e, 0xff]
-                } else if pct >= 70.0 {
-                    [0xe0, 0xaf, 0x68, 0xff]
-                } else {
-                    [0x73, 0xda, 0xca, 0xff]
-                };
-                round_rect(
-                    g, x, y, pill_w, pill_h, pill_h / 2.0,
-                    theme::with_alpha(theme::surface_active(), 0xE6),
-                );
-                g.draw_text(
-                    x + pad_x,
-                    y + (pill_h - f) / 2.0 - 1.0,
-                    &label,
-                    gpu::DrawOpts { font_size: f, color: accent, bold: true, italic: false },
-                );
-            }
-            // Claude 계정 칩 — 사용량 pill 왼쪽. 고를 게 하나뿐이면(추가 계정 0개 =
-            // 기본 로그인만) 아예 안 그린다: 쓰지도 않는 사람 타이틀바에 잡음을
-            // 얹지 않는다. 클릭 → 드롭다운, 고르면 다음에 뜨는 claude 부터 그 계정.
+            //
+            // pill 이 곧 계정 스위처다(거노 요청) — 애초에 여기 보이는 한도가 **활성
+            // 계정의** 것이라, 계정 이름을 같은 pill 에 적고 클릭을 전환에 쓰는 게
+            // 별도 칩보다 정직하다. 계정을 안 쓰면 이름 없이 예전 그대로 `5h N%`.
             self.account_chip_rect = None;
             self.account_menu_hits.clear();
-            if !self.set_claude_accounts.is_empty() {
-                let (hmx, hmy) = self.cursor_px;
-                let f = 11.0_f32;
-                let active_label = self
-                    .set_claude_accounts
+            let pill_h = 19.0_f32;
+            let pill_y = ((TITLE_HEIGHT - pill_h) / 2.0).max(2.0);
+            let f = 11.0_f32;
+            let pad_x = 9.0_f32;
+            // 계정을 하나라도 추가했을 때만 이름을 붙인다 — 안 쓰는 사람 pill 에
+            // "기본 · " 을 얹는 건 잡음이다.
+            let acct_label = (!self.set_claude_accounts.is_empty()).then(|| {
+                self.set_claude_accounts
                     .iter()
                     .find(|a| a.id == self.set_claude_account)
-                    .map_or("기본", |a| a.label.as_str());
-                let pad_x = 9.0_f32;
-                let cw = g.measure_chrome_text(active_label, f, true) + pad_x * 2.0;
-                let cx0 = (chip_right - cw).max(0.0);
+                    .map_or("기본", |a| a.label.as_str())
+            });
+            let usage_label = claude_usage_pct.map(|pct| format!("5h {pct:.0}%"));
+            if acct_label.is_some() || usage_label.is_some() {
+                let (hmx, hmy) = self.cursor_px;
+                let sep = if acct_label.is_some() && usage_label.is_some() { " · " } else { "" };
+                let name_w = acct_label.map_or(0.0, |l| g.measure_chrome_text(l, f, true));
+                let sep_w = g.measure_chrome_text(sep, f, false);
+                let usage_w = usage_label
+                    .as_deref()
+                    .map_or(0.0, |l| g.measure_chrome_text(l, f, true));
+                let pill_w = name_w + sep_w + usage_w + pad_x * 2.0;
+                let right_edge = if usage_pill_right.is_finite() {
+                    usage_pill_right - 8.0
+                } else {
+                    win_px.0 / scale - 12.0
+                };
+                let x = (right_edge - pill_w).max(0.0);
                 let hovered = self.account_menu
-                    || (hmx >= cx0 && hmx <= cx0 + cw && hmy >= pill_y && hmy <= pill_y + pill_h);
+                    || (hmx >= x && hmx <= x + pill_w && hmy >= pill_y && hmy <= pill_y + pill_h);
                 round_rect(
-                    g, cx0, pill_y, cw, pill_h, pill_h / 2.0,
+                    g, x, pill_y, pill_w, pill_h, pill_h / 2.0,
                     theme::with_alpha(
                         if hovered { theme::surface_hover() } else { theme::surface_active() },
                         0xE6,
                     ),
                 );
-                g.draw_text(
-                    cx0 + pad_x,
-                    pill_y + (pill_h - f) / 2.0 - 1.0,
-                    active_label,
-                    gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false },
-                );
-                self.account_chip_rect = Some((cx0, pill_y, cw, pill_h));
+                let ty = pill_y + (pill_h - f) / 2.0 - 1.0;
+                let mut tx = x + pad_x;
+                if let Some(l) = acct_label {
+                    g.draw_text(tx, ty, l,
+                        gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false });
+                    tx += name_w;
+                    g.draw_text(tx, ty, sep,
+                        gpu::DrawOpts { font_size: f, color: theme::text_dim(), bold: false, italic: false });
+                    tx += sep_w;
+                }
+                if let Some(l) = usage_label.as_deref() {
+                    // 70%↑ 호박·90%↑ 산호로 경고(웹뷰 UsagePill 과 같은 임계).
+                    let pct = claude_usage_pct.unwrap_or(0.0);
+                    let accent = if pct >= 90.0 {
+                        [0xf7, 0x76, 0x8e, 0xff]
+                    } else if pct >= 70.0 {
+                        [0xe0, 0xaf, 0x68, 0xff]
+                    } else {
+                        [0x73, 0xda, 0xca, 0xff]
+                    };
+                    g.draw_text(tx, ty, l,
+                        gpu::DrawOpts { font_size: f, color: accent, bold: true, italic: false });
+                }
+                // 계정이 아직 하나도 없어도 pill 은 눌린다 — 드롭다운이 "기본 +
+                // 설정에서 추가…" 뿐이라도, 클릭했는데 아무 일도 안 나면 고장으로
+                // 보인다. 쉬는 모습은 그대로라 안 쓰는 사람에게 드는 비용은 0.
+                self.account_chip_rect = Some((x, pill_y, pill_w, pill_h));
                 if self.account_menu {
                     // 첫 행은 언제나 기본(id `""`) — 설정 화면의 목록과 같은 순서.
-                    let rows: Vec<(&str, &str)> = std::iter::once(("", "기본"))
-                        .chain(
-                            self.set_claude_accounts
-                                .iter()
-                                .map(|a| (a.id.as_str(), a.label.as_str())),
-                        )
-                        .collect();
+                    // 맨 아래 "설정에서 계정 추가…" 로 막다른 골목을 막는다.
+                    let mut rows: Vec<(AccountMenuItem, &str)> =
+                        vec![(AccountMenuItem::Select(String::new()), "기본")];
+                    rows.extend(
+                        self.set_claude_accounts
+                            .iter()
+                            .map(|a| (AccountMenuItem::Select(a.id.clone()), a.label.as_str())),
+                    );
+                    rows.push((AccountMenuItem::AddInSettings, "설정에서 계정 추가…"));
                     let rh = 24.0_f32;
                     let pad = 4.0_f32;
                     let mw = rows
                         .iter()
                         .map(|(_, l)| g.measure_chrome_text(l, f, true) + pad_x * 2.0)
-                        .fold(cw, f32::max);
-                    let mh = pad * 2.0 + rh * rows.len() as f32;
-                    // 칩 오른쪽 끝에 맞춰 내린다 — 창 왼쪽으로는 안 넘어가게 클램프.
-                    let mx = (cx0 + cw - mw).max(4.0);
+                        .fold(pill_w, f32::max);
+                    // +5 = "추가" 행 위 구분선이 먹는 자리.
+                    let mh = pad * 2.0 + rh * rows.len() as f32 + 5.0;
+                    // pill 오른쪽 끝에 맞춰 내린다 — 창 왼쪽으로는 안 넘어가게 클램프.
+                    let mx = (x + pill_w - mw).max(4.0);
                     let my = pill_y + pill_h + 4.0;
                     round_rect(g, mx, my, mw, mh, theme::RADIUS_SM, theme::border());
                     round_rect(g, mx + 1.0, my + 1.0, mw - 2.0, mh - 2.0,
                         theme::RADIUS_SM - 1.0, theme::surface_hover());
                     let mut ry = my + pad;
-                    for (id, label) in rows {
+                    for (item, label) in rows {
+                        if item == AccountMenuItem::AddInSettings {
+                            // 전환 목록과는 다른 종류의 동작이라 얇은 선으로 가른다.
+                            g.rect(mx + pad, ry + 2.0, mw - pad * 2.0, 1.0, theme::border());
+                            ry += 5.0;
+                        }
                         let on = hmx >= mx && hmx <= mx + mw && hmy >= ry && hmy <= ry + rh;
-                        let active = id == self.set_claude_account;
+                        let active = item == AccountMenuItem::Select(self.set_claude_account.clone());
                         if on {
                             round_rect(g, mx + pad, ry, mw - pad * 2.0, rh,
                                 theme::RADIUS_SM, theme::surface_active());
@@ -5636,7 +5646,7 @@ impl App {
                                 italic: false,
                             },
                         );
-                        self.account_menu_hits.push((id.to_string(), (mx, ry, mw, rh)));
+                        self.account_menu_hits.push((item, (mx, ry, mw, rh)));
                         ry += rh;
                     }
                 }
