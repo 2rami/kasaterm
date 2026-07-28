@@ -2123,6 +2123,56 @@ pub fn read_claude_extra() -> String {
     read_settings().get("claude_extra").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+/// One switchable Claude login. `id` names a directory under
+/// `~/.config/kasaterm/claude-accounts/`; that path — not the label — is what
+/// Claude Code hashes into its credential-store key, so **renaming is free but
+/// re-`id`-ing would orphan the login**.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClaudeAccount {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+/// Configured extra logins, in display order. The default login (whatever
+/// `claude` already uses) is *not* in this list — it is the implicit first row.
+pub fn read_claude_accounts() -> Vec<ClaudeAccount> {
+    read_settings()
+        .get("claude_accounts")
+        .and_then(|v| serde_json::from_value::<Vec<ClaudeAccount>>(v.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Active account id, or `""` for the default login. An id that is no longer in
+/// `read_claude_accounts` reads as `""` — a deleted account must fall back to
+/// the default rather than point `claude` at a store nothing can log into.
+pub fn read_claude_account() -> String {
+    let id = read_settings()
+        .get("claude_account")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    if id.is_empty() || read_claude_accounts().iter().any(|a| a.id == id) {
+        id
+    } else {
+        String::new()
+    }
+}
+
+/// Credential-store directory for an account id. `""` → None, meaning "add no
+/// env at all" — the default login is the *absence* of the override, not a path.
+///
+/// Hangs off the settings file's directory rather than a hardcoded `~/.config`,
+/// so a headless run pointed at a scratch `KASATERM_SETTINGS_FILE` also gets
+/// scratch account dirs — a test can never hash its way onto a real login.
+pub fn claude_account_dir(id: &str) -> Option<std::path::PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    let base = settings_file_path()?.parent()?.to_path_buf();
+    Some(base.join("claude-accounts").join(id))
+}
+
 /// shim 주입 전역 스위치(설정 "shim_inject"). false 면 install_pane_shims 가 shim dir 를
 /// 아예 안 만들어 PATH/ZDOTDIR 무접촉 → 순정 claude(캐릭터·프록시·훅·board 전무 진짜 독립).
 /// 기본 true(하위호환 — 지금 풀 경험 유지). install 은 부팅 1회라 변경은 재시작 후 적용.

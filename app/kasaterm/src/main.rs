@@ -4359,6 +4359,38 @@ pub(crate) fn proxy_env(pane_id: &str) -> Vec<(String, String)> {
     }
 }
 
+/// The one shim line that switches Claude accounts, or `""` for the default
+/// login.
+///
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR` moves *only* the credential store — Claude
+/// Code hashes it into its Keychain item name — while `CLAUDE_CONFIG_DIR` stays
+/// unset so `~/.claude` keeps holding transcripts, agents, teams and MCP config.
+/// Switching the config dir instead would fracture all of that, since kasaterm
+/// hardcodes `~/.claude` in the statusline, the board reader and the shim's own
+/// `--continue` inference.
+///
+/// No account selected emits **nothing**: the default login is the absence of
+/// the override, so an untouched install behaves exactly as before. An inherited
+/// value wins, which is what lets the add-account flow log in to a brand new
+/// store by exporting it explicitly.
+///
+/// The guard tests `${VAR+x}`, not `$VAR`, because **empty is not unset here**.
+/// Claude Code reads a defined-but-empty value as "use the unsuffixed store" and
+/// deliberately forwards it to child processes (its env allowlist special-cases
+/// this one name so the empty string survives), so a claude that was told to
+/// stay on the default login must keep that instruction. `[ -z "$VAR" ]` cannot
+/// tell the two apart and silently re-points such a child at our account —
+/// verified against 2.1.220: with the value set to `""`, `claude auth status`
+/// reports the default login as signed in.
+fn claude_account_export_line(dir: Option<&std::path::Path>) -> String {
+    let Some(dir) = dir else { return String::new() };
+    let q = dir.display().to_string().replace('\'', "'\\''");
+    format!(
+        "[ -z \"${{CLAUDE_SECURESTORAGE_CONFIG_DIR+x}}\" ] && \
+         export CLAUDE_SECURESTORAGE_CONFIG_DIR='{q}'\n"
+    )
+}
+
 /// Stage a `claude` wrapper + a session-scoped hook settings file on the pane
 /// PATH (munder-difflin pattern). Collab hooks ride in via `claude --settings`
 /// instead of edits to ~/.claude/settings.json, so claude outside a kasaterm
@@ -4488,6 +4520,17 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         format!("[ -n \"$PERSONA_OK\" ] && set -- {extra} \"$@\"\n")
     };
     let persona_block = format!("{persona_line}{model_line}{effort_line}{extra_line}");
+    // 계정 전환. persona/model 노브와 달리 **PERSONA_OK 게이트 밖**이다 — 저것들은
+    // attach·agents·-p·stop/logs 에서 일부러 빠지지만, 인증이 서브커맨드마다 다른
+    // 계정을 보면 그건 그냥 고장이다. 디렉터리는 여기서 만들어 둔다: macOS 는 경로를
+    // 해시해 Keychain 항목명만 가르지만, 다른 OS 는 이 안에 .credentials.json 을 쓴다.
+    let account_dir = socket::claude_account_dir(&socket::read_claude_account());
+    if let Some(ref d) = account_dir {
+        if let Err(e) = std::fs::create_dir_all(d) {
+            eprintln!("[shim] claude account dir 생성 실패: {e}");
+        }
+    }
+    let account_block = claude_account_export_line(account_dir.as_deref());
     // teammate 트리플 자동 부착은 제거됐다(거노 2026-07-24): kasaterm 재시작으로 복원된
     // 세션(claude --resume)은 인박스 폴러가 안 돌아 SendMessage 가 조용히 유실되고(파일에만
     // 쌓임, 아루 실측), tell 이 발신 학생 프사·색으로 렌더되면서 크로스 pane 통신의 정식
@@ -4538,6 +4581,7 @@ if [ -z \"$REAL\" ]; then\n\
   echo \"kasaterm claude shim: real claude not found on PATH\" >&2\n\
   exit 127\n\
 fi\n\
+{ablk}\
 SETTINGS=\"$SELF_DIR/claude-hooks-settings.json\"\n\
 # 백엔드가 이 pane 에 심은 캐릭터 정체성 적용(거노): persona = 시스템프롬프트 prefix(캐시,\n\
 # per-turn 0), session-id = transcript 파일명 고정. 사용자가 --session-id/--resume 를\n\
@@ -4575,7 +4619,7 @@ if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
-        hd = hd, tblk = team_block, pblk = persona_block);
+        hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block);
     let wrapper_path = shim_dir.join("claude");
     if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");
@@ -5116,6 +5160,49 @@ mod tests {
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
+    }
+
+    /// No account selected must emit *nothing*. An `export` with an empty value
+    /// would not be inert — Claude Code treats a defined-but-empty
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` as an explicit "use the unsuffixed
+    /// store", which is a different code path from leaving it unset.
+    #[test]
+    fn no_claude_account_emits_no_shim_line() {
+        assert_eq!(claude_account_export_line(None), "");
+    }
+
+    /// The guard must key on `+x` (set-ness), not the value. A child claude that
+    /// inherited an explicit empty value is being told to stay on the default
+    /// login; `[ -z "$VAR" ]` would read that as "unset" and hijack it.
+    #[test]
+    fn claude_account_line_guards_on_set_ness_not_emptiness() {
+        let line = claude_account_export_line(Some(std::path::Path::new("/tmp/acct/a1")));
+        assert_eq!(
+            line,
+            "[ -z \"${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}\" ] && \
+             export CLAUDE_SECURESTORAGE_CONFIG_DIR='/tmp/acct/a1'\n"
+        );
+        // The behaviour the string is there for, exercised through a real shell.
+        let probe = format!("{line}printf %s \"${{CLAUDE_SECURESTORAGE_CONFIG_DIR-UNSET}}\"");
+        let run = |env: Option<&str>| {
+            let mut c = std::process::Command::new("sh");
+            c.arg("-c").arg(&probe).env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR");
+            if let Some(v) = env {
+                c.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", v);
+            }
+            String::from_utf8(c.output().expect("sh").stdout).expect("utf8")
+        };
+        assert_eq!(run(None), "/tmp/acct/a1", "미설정이면 우리 계정을 심어야 한다");
+        assert_eq!(run(Some("")), "", "빈 값 = '기본 저장소' 지시라 존중해야 한다");
+        assert_eq!(run(Some("/other")), "/other", "명시 값이 우선이어야 한다");
+    }
+
+    /// Paths are single-quoted, so an apostrophe in a directory name would end
+    /// the quote and let the rest of the path run as shell words.
+    #[test]
+    fn claude_account_line_escapes_a_quote_in_the_path() {
+        let line = claude_account_export_line(Some(std::path::Path::new("/tmp/geo'no/a1")));
+        assert!(line.ends_with("='/tmp/geo'\\''no/a1'\n"), "{line}");
     }
 
     /// Tables only reach the renderer when `ENABLE_TABLES` is on — without it
