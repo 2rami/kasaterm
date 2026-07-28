@@ -49,6 +49,11 @@ pub(crate) struct SettingsCtx {
     pub claude_model: String,
     pub claude_effort: String,
     pub claude_extra: String,
+    /// 전환 가능한 Claude 로그인들. 기본 로그인(지금 `claude` 가 쓰는 것)은 이
+    /// 목록에 없다 — 목록 위에 암묵적 첫 행으로 그린다.
+    pub claude_accounts: Vec<socket::ClaudeAccount>,
+    /// 활성 계정 id, `""` = 기본 로그인.
+    pub claude_account: String,
     /// (표시명, 에셋 슬러그) — Students 카테고리 목록·프사 썸네일용. slug 가
     /// None 이면 아직 도트 에셋이 없는 캐릭터(썸네일 자리표시).
     pub characters: Vec<(String, Option<&'static str>)>,
@@ -246,7 +251,58 @@ impl App {
         socket::write_setting("claude_model", serde_json::Value::String(self.set_claude_model.clone()));
         socket::write_setting("claude_effort", serde_json::Value::String(self.set_claude_effort.clone()));
         socket::write_setting("claude_extra", serde_json::Value::String(self.set_claude_extra.clone()));
+        socket::write_setting(
+            "claude_accounts",
+            serde_json::to_value(&self.set_claude_accounts).unwrap_or(serde_json::Value::Null),
+        );
+        socket::write_setting("claude_account", serde_json::Value::String(self.set_claude_account.clone()));
         self.regen_claude_shim();
+    }
+
+    /// 계정 슬롯을 하나 만들고, 그 인증 저장소를 얹은 `claude` 를 새 pane 에 띄운다.
+    /// 실제 로그인은 OAuth 브라우저 흐름이라 거노가 그 pane 에서 `/login` 을 한 번
+    /// 눌러야 끝난다.
+    ///
+    /// **추가만 하고 활성 전환은 하지 않는다** — 아직 아무도 로그인하지 않은 저장소로
+    /// 즉시 갈아타면 그 뒤에 뜨는 모든 claude 가 로그아웃 상태로 뜬다. 전환은 로그인이
+    /// 끝난 뒤 거노가 목록에서 직접 고른다.
+    fn add_claude_account(&mut self) {
+        // dir 이름이 곧 Keychain 서비스명 해시의 입력이라 계정마다 유일하고 그 뒤로
+        // 안 변해야 한다 — 재사용하면 지운 계정의 토큰을 새 계정이 물려받는다.
+        let id = (1..)
+            .map(|n| format!("acct-{n}"))
+            .find(|c| self.set_claude_accounts.iter().all(|a| &a.id != c))
+            .expect("1.. is infinite");
+        let Some(dir) = socket::claude_account_dir(&id) else {
+            self.set_toast("계정 폴더 경로를 만들 수 없습니다".to_string());
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_toast(format!("계정 폴더 생성 실패: {e}"));
+            return;
+        }
+        let label = format!("계정 {}", self.set_claude_accounts.len() + 2);
+        self.set_claude_accounts.push(socket::ClaudeAccount { id, label });
+        self.settings_save();
+
+        // env 를 명령 앞에 붙여 그 claude 프로세스에만 새 저장소를 물린다. shim 의
+        // export 는 `${VAR+x}` 가드라 이미 설정된 값을 덮지 않는다.
+        let pane = self
+            .split_active_pane(kasa_pty::SplitDir::Horizontal)
+            .unwrap_or_default();
+        let Some(sess) = self.pty.get(&pane).cloned() else {
+            self.set_toast("계정 추가됨 — pane 을 열지 못해 로그인은 수동으로".to_string());
+            return;
+        };
+        let q = dir.display().to_string().replace('\'', "'\\''");
+        // 900ms = swap_character 와 같은 "셸 프롬프트가 뜰 즈음" 대기.
+        let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+        self.pending_restores.push((
+            sess,
+            format!("CLAUDE_SECURESTORAGE_CONFIG_DIR='{q}' claude\r"),
+            at,
+        ));
+        self.set_toast("새 pane 에서 /login 으로 로그인하세요".to_string());
     }
 
     /// 학생 이미지 override 폴더(`~/.config/kasaterm/students/`)를 OS 파일
@@ -314,6 +370,8 @@ impl App {
             claude_model: self.set_claude_model.clone(),
             claude_effort: self.set_claude_effort.clone(),
             claude_extra: self.set_claude_extra.clone(),
+            claude_accounts: self.set_claude_accounts.clone(),
+            claude_account: self.set_claude_account.clone(),
             characters: kasa_mcp::character::characters_json()
                 .map(|c| {
                     kasa_mcp::character::member_names(&c)
@@ -488,6 +546,30 @@ impl App {
                 self.settings_caret = self.set_claude_extra.chars().count();
                 self.settings_input = Some(SettingsInput::ClaudeExtra);
             }
+            SettingsAction::ClaudeAccount(id) => {
+                self.set_claude_account = id;
+                self.settings_input = None;
+                self.settings_save();
+            }
+            SettingsAction::AddClaudeAccount => self.add_claude_account(),
+            SettingsAction::RemoveClaudeAccount(id) => {
+                self.set_claude_accounts.retain(|a| a.id != id);
+                // 지운 계정이 활성이었으면 기본 로그인으로 — 아무도 로그인할 수
+                // 없는 저장소를 계속 가리키면 pane 이 통째로 로그아웃 상태로 뜬다.
+                if self.set_claude_account == id {
+                    self.set_claude_account = String::new();
+                }
+                // 라벨 포커스는 행 인덱스라 목록이 줄면 다른 행을 가리킨다.
+                self.settings_input = None;
+                self.settings_save();
+            }
+            SettingsAction::FocusClaudeAccountLabel(i) => {
+                self.settings_caret = self
+                    .set_claude_accounts
+                    .get(i)
+                    .map_or(0, |a| a.label.chars().count());
+                self.settings_input = Some(SettingsInput::ClaudeAccountLabel(i));
+            }
             SettingsAction::OpenStudentsDir => self.open_students_dir(),
             SettingsAction::OpenCharactersJson => self.open_characters_json(),
             SettingsAction::RefreshStudentAssets => self.refresh_student_assets(),
@@ -544,6 +626,12 @@ impl App {
                 SettingsInput::CwdPath => &mut self.set_cwd_mode,
                 SettingsInput::Shell => &mut self.set_shell,
                 SettingsInput::ClaudeExtra => &mut self.set_claude_extra,
+                // 행 인덱스라 목록이 줄면 가리키던 행이 사라질 수 있다 — 그땐 키를
+                // 소비만 하고 흘린다(엉뚱한 행에 글자가 찍히는 것보다 낫다).
+                SettingsInput::ClaudeAccountLabel(i) => match self.set_claude_accounts.get_mut(i) {
+                    Some(a) => &mut a.label,
+                    None => return true,
+                },
                 SettingsInput::StudentPersona => unreachable!("handled above"),
             };
             if *caret > buf.chars().count() {
@@ -670,6 +758,10 @@ impl App {
             SettingsInput::CwdPath => &mut self.set_cwd_mode,
             SettingsInput::Shell => &mut self.set_shell,
             SettingsInput::ClaudeExtra => &mut self.set_claude_extra,
+            SettingsInput::ClaudeAccountLabel(i) => match self.set_claude_accounts.get_mut(i) {
+                Some(a) => &mut a.label,
+                None => return,
+            },
             SettingsInput::StudentPersona => unreachable!("handled above"),
         };
         if *caret > buf.chars().count() {
@@ -1029,6 +1121,83 @@ pub(crate) fn paint_settings(
                 rects.push((SettingsAction::ToggleClaudePersona, pr));
             }
             y += 30.0 + ROW_GAP;
+            y = field_header(g, fx, y, clip, "Account",
+                &["로그인 계정을 골라요 — 다음에 뜨는 claude 부터 그 계정으로",
+                  "이미 돌고 있는 세션은 원래 계정 그대로예요",
+                  "지워도 로그인 자체는 남아요 — 목록에서만 빠져요"]);
+            let row_h = 34.0_f32;
+            // 첫 행은 언제나 "기본"(활성 계정 `""` = env 미설정 = 지금 로그인). 이 행은
+            // 우리가 만든 슬롯이 아니라 지울 것도, 이름 붙일 것도 없다.
+            let acct_rows = std::iter::once((String::new(), "기본 (지금 로그인된 계정)".to_string(), None))
+                .chain(
+                    ctx.claude_accounts
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| (a.id.clone(), a.label.clone(), Some(i))),
+                );
+            for (id, label, idx) in acct_rows {
+                if y > clip {
+                    let active = ctx.claude_account == id;
+                    // 라디오 — 켜지면 accent 링 + 가운데 점.
+                    let dot = (fx, y + (row_h - 16.0) / 2.0, 16.0, 16.0);
+                    round_rect(g, dot.0, dot.1, dot.2, dot.3, 8.0,
+                        if active { theme::accent() } else { theme::surface_active() });
+                    if active {
+                        round_rect(g, dot.0 + 5.0, dot.1 + 5.0, 6.0, 6.0, 3.0, theme::bg());
+                    }
+                    let hit = (fx - 4.0, y, 24.0, row_h);
+                    if inside(hit, ctx.cursor) && !active {
+                        round_rect(g, dot.0, dot.1, dot.2, dot.3, 8.0, theme::surface_hover());
+                    }
+                    rects.push((SettingsAction::ClaudeAccount(id.clone()), hit));
+                    // 오른쪽 끝에 그 슬롯의 진짜 신원 — 라벨은 거노가 붙인 별명이라
+                    // 로그인이 실제로 됐는지는 말해 주지 않는다.
+                    let status_x = match idx {
+                        None => {
+                            g.draw_text(
+                                fx + 28.0, y + (row_h - 14.0) / 2.0, &label,
+                                gpu::DrawOpts { font_size: 14.0, color: theme::text_mute(), bold: active, italic: false },
+                            );
+                            fx + 28.0 + g.measure_chrome_text(&label, 14.0, active) + 12.0
+                        }
+                        Some(i) => {
+                            let lr = (fx + 28.0, y, fw.min(240.0), row_h);
+                            let focused = ctx.input == Some(SettingsInput::ClaudeAccountLabel(i));
+                            text_field(g, lr, &label, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
+                            rects.push((SettingsAction::FocusClaudeAccountLabel(i), lr));
+                            let dr = (lr.0 + lr.2 + 8.0, y, 30.0, row_h);
+                            stepper_btn(g, dr, "x", ctx.cursor);
+                            rects.push((SettingsAction::RemoveClaudeAccount(id.clone()), dr));
+                            dr.0 + dr.2 + 12.0
+                        }
+                    };
+                    if let Some(p) = auth_probe(&id) {
+                        let (txt, col) = if p.logged_in {
+                            (p.email, theme::text_mute())
+                        } else {
+                            ("로그인 필요".to_string(), theme::danger())
+                        };
+                        g.draw_text(
+                            status_x, y + (row_h - 12.0) / 2.0, &txt,
+                            gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false },
+                        );
+                    }
+                }
+                y += row_h + 6.0;
+            }
+            if y > clip {
+                let label = "+ 계정 추가";
+                let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
+                let r = (fx, y, bw, 34.0);
+                round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
+                    if inside(r, ctx.cursor) { theme::surface_hover() } else { theme::surface_active() });
+                g.draw_text(
+                    r.0 + 14.0, r.1 + 9.0, label,
+                    gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+                );
+                rects.push((SettingsAction::AddClaudeAccount, r));
+            }
+            y += 34.0 + ROW_GAP;
             y = field_header(g, fx, y, clip, "Model", &["Claude 모델 덮어쓰기 (Default = 원래대로 유지)"]);
             if y > clip {
                 let cells = [
@@ -1181,6 +1350,62 @@ pub(crate) fn paint_settings(
 
 /// 세그먼트 컨트롤의 고정 높이(트랙 + 내부 패딩).
 const SEG_H: f32 = 34.0;
+
+/// 계정 슬롯 하나의 실제 로그인 상태. `~/.claude.json` 의 `oauthAccount` 캐시는
+/// config dir 소속이라 계정끼리 **공유**돼서 전환 직후 옛 계정 이름이 남는다 —
+/// 그래서 캐시 대신 계정별 저장소를 얹은 `claude auth status` 의 답을 쓴다.
+#[derive(Clone)]
+struct AuthProbe {
+    logged_in: bool,
+    email: String,
+}
+
+/// 계정별 probe 캐시. 렌더가 매 프레임 도는 자리라 캐시 없이는 subprocess 폭주가
+/// 된다. 값이 `None` 이면 "조회 중"(또는 실패) — 그동안은 아무것도 안 그린다.
+/// TTL 을 두는 이유: 거노가 pane 에서 `/login` 을 마치면 클릭 없이 저절로 반영돼야
+/// 한다. 함수-로컬 static 이라 `struct App` 은 안 건드린다(병렬 작업 규칙).
+fn auth_probe(id: &str) -> Option<AuthProbe> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    type Cache = Mutex<HashMap<String, (Instant, Option<AuthProbe>)>>;
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    let cache = CACHE.get_or_init(Cache::default);
+    {
+        let mut m = cache.lock().unwrap();
+        if let Some((at, v)) = m.get(id) {
+            if at.elapsed() < Duration::from_secs(20) {
+                return v.clone();
+            }
+        }
+        // 조회 중 표시를 먼저 박아 다음 프레임이 또 스폰하지 않게 한다.
+        m.insert(id.to_string(), (Instant::now(), None));
+    }
+    let key = id.to_string();
+    let dir = socket::claude_account_dir(id);
+    std::thread::spawn(move || {
+        // pane 과 같은 PATH 를 보려면 로그인 셸을 거쳐야 한다 — Finder 로 뜬 .app 의
+        // PATH 에는 claude 가 없어서 직접 spawn 하면 항상 실패한다.
+        let shell = resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
+        let mut c = std::process::Command::new(shell);
+        c.arg("-lc").arg("claude auth status");
+        if let Some(d) = dir {
+            c.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", d);
+        }
+        let probe = c
+            .output()
+            .ok()
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+            .map(|v| AuthProbe {
+                logged_in: v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false),
+                email: v.get("email").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            });
+        if let Some(cache) = CACHE.get() {
+            cache.lock().unwrap().insert(key, (Instant::now(), probe));
+        }
+    });
+    None
+}
 
 /// 설정 항목의 제목과 (있으면) 설명 줄들을 그리고, 컨트롤이 놓일 y 를 돌려준다.
 /// 스크롤로 clip 위로 올라간 줄은 그리지 않되 자리(y 전진)는 유지한다 — 렌더러에

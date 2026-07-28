@@ -2792,6 +2792,10 @@ pub(crate) enum SettingsInput {
     ClaudeExtra,
     /// Students 카테고리 persona 멀티라인 편집 필드가 포커스됨.
     StudentPersona,
+    /// Claude 계정 라벨 필드. 목록이라 어느 행인지 실어야 하는데, 이 enum 은
+    /// `Copy` 로 여기저기 값 복사돼 돌아서 String 을 못 넣는다 — 행 인덱스로 잡고
+    /// 계정 삭제 시 포커스를 푼다(인덱스가 밀려 엉뚱한 행을 가리키지 않게).
+    ClaudeAccountLabel(usize),
 }
 
 /// Clickable targets painted into the settings screen, collected each frame for
@@ -2818,6 +2822,18 @@ pub(crate) enum SettingsAction {
     ClaudeModel(String),
     ClaudeEffort(String),
     FocusClaudeExtra,
+    /// 활성 Claude 계정 선택. 빈 문자열 = 기본 로그인(env 를 아예 안 붙임).
+    ClaudeAccount(String),
+    /// 계정 추가 — 저장소 dir 을 만들고, 그 dir 을 가리킨 채 `claude` 를 띄운
+    /// 새 pane 을 연다. 로그인은 거노가 그 pane 에서 한 번 한다(OAuth 브라우저
+    /// 흐름이라 우리가 대신 못 한다).
+    AddClaudeAccount,
+    /// 계정을 목록에서 뺀다. Keychain 항목은 건드리지 않는다 — 지우면 재로그인
+    /// 말고는 복구가 없고, 남겨 둬도 해가 없다.
+    RemoveClaudeAccount(String),
+    /// 계정 라벨 텍스트 필드에 포커스(행 인덱스 — `SettingsInput` 이 Copy 라
+    /// id 를 못 싣는다). 선택·삭제는 인덱스가 밀려도 안전하도록 id 로 받는다.
+    FocusClaudeAccountLabel(usize),
     /// Open `~/.config/kasaterm/students/` in the OS file manager so the user
     /// can drop replacement character images there.
     OpenStudentsDir,
@@ -3486,6 +3502,10 @@ struct App {
     set_claude_model: String,
     set_claude_effort: String,
     set_claude_extra: String,
+    /// 전환 가능한 Claude 로그인 목록과 활성 계정 id(`""` = 기본 로그인). 설정
+    /// 스냅샷이 프레임마다 만들어지므로 파일을 그때 읽지 않고 여기 들고 있는다.
+    set_claude_accounts: Vec<socket::ClaudeAccount>,
+    set_claude_account: String,
     /// Which form text field has focus (cwd custom path / shell), if any.
     settings_input: Option<SettingsInput>,
     /// Caret (char index) for the focused single-line settings field
@@ -3837,6 +3857,8 @@ impl App {
             set_claude_model: socket::read_claude_model(),
             set_claude_effort: socket::read_claude_effort(),
             set_claude_extra: socket::read_claude_extra(),
+            set_claude_accounts: socket::read_claude_accounts(),
+            set_claude_account: socket::read_claude_account(),
             settings_input: None,
             settings_rects: Vec::new(),
             // KASATERM_TEST_STUDENT=<이름> 이면 그 캐릭터를 선택 상태로 시드해
