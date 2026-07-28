@@ -11,6 +11,34 @@ impl App {
     pub(crate) fn px_to_pane_cell(&self, px: f32, py: f32) -> Option<(String, u16, u16)> {
         let sb = self.effective_sidebar_w();
         let ws = self.ws.lock().unwrap();
+        // 줌 중엔 그 pane 하나가 작업영역을 통째로 채운다(effective_leaf_rects) —
+        // 원본 split 트리로 판정하면 클릭이 **숨어 있는** pane 으로 가고, 셀 좌표도
+        // 그 pane 의 옛 박스 원점으로 계산돼 화면과 어긋난다. Claude 프롬프트가
+        // 아래쪽에 있으니 위 절반만 대충 맞고 아래는 통째로 빗나갔다(거노:
+        // "최대화하고 위치 매핑이 이상해"). 박스가 하나뿐이라 단일 pane 경로와
+        // 계산이 같다. 렌더와 같은 조건(트리에 살아 있는 leaf)일 때만 타서,
+        // 닫힌 pane 의 유령 줌이 클릭을 삼키지 않는다.
+        if let Some(z) = self.zoomed_pane.as_deref() {
+            let live = self
+                .pty_layout
+                .as_ref()
+                .is_some_and(|t| t.leaves().iter().any(|l| *l == z));
+            if live {
+                let pane = ws.panes.get(z)?;
+                let t = pane.term()?;
+                if t.cols == 0 || t.rows == 0 {
+                    return None;
+                }
+                let fs = self.pane_font_scales.get(z).copied().unwrap_or(1.0).max(0.1);
+                let lc = ((px - sb - WINDOW_PADDING - PANE_INNER_X).max(0.0)
+                    / (self.cell.w * fs))
+                    .floor() as u16;
+                let lr = ((py - TITLE_HEIGHT - pane.header_px() - PANE_INNER_Y).max(0.0)
+                    / (self.cell.h * fs))
+                    .floor() as u16;
+                return Some((z.to_string(), lc.min(t.cols - 1), lr.min(t.rows - 1)));
+            }
+        }
         if let Some(layout) = ws.layout.as_ref() {
             // ghostty식: 헤더 띠 폐기 → 헤더만큼 셀을 밀던 보정 제거.
             let header_h = 0.0_f32;
@@ -315,6 +343,12 @@ impl App {
     /// the thin seam easy to grab. None when not over any divider.
     pub(crate) fn divider_at_px(&self, x: f32, y: f32) -> Option<(Vec<u8>, kasa_pty::SplitDir)> {
         let tree = self.pty_layout.as_ref()?;
+        // 줌 중엔 경계선을 아예 안 그린다(render 의 pane_seams 가 빈 벡터). 그런데도
+        // 여기서 잡으면 아무것도 없는 자리에서 커서가 리사이즈로 바뀌고, 드래그가
+        // 보이지 않는 분할비를 움직인다 — 보이지 않는 것은 클릭도 먹지 않아야 한다.
+        if self.zoomed_pane.is_some() {
+            return None;
+        }
         if tree.leaves().len() <= 1 {
             return None;
         }

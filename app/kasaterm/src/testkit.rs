@@ -206,6 +206,59 @@ impl App {
             }),
         );
     }
+    /// 줌 클릭 매핑 프로브. `KASATERM_AUTOZOOMPROBE_MS` 뒤에 활성 pane 을 줌하고,
+    /// 작업영역 전체에 격자로 점을 찍어 `px_to_pane_cell` 이 어디로 보내는지 찍는다.
+    ///
+    /// 지켜야 할 불변식은 하나다 — **줌 중엔 작업영역 안 모든 점이 줌된 pane 으로
+    /// 가야 한다.** 예전엔 원본 split 박스로 판정해 아래 절반이 숨은 pane 으로
+    /// 샜고(거노: "최대화하고 위치 매핑이 이상해"), 화면엔 그 pane 이 안 보이니
+    /// 클릭이 사라지는 것처럼 보였다. 눈으로 보는 캡처로는 절대 안 잡히는 종류라
+    /// 좌표를 직접 찍는 프로브를 남긴다.
+    pub(crate) fn run_pending_autozoomprobe(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOZOOMPROBE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if Instant::now() < *due || DONE.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(target) = self.ws.lock().unwrap().active_pane.clone() else {
+            eprintln!("[zoomprobe] 활성 pane 없음");
+            return;
+        };
+        let Some(size) = self.window.as_ref().map(|w| w.inner_size()) else {
+            eprintln!("[zoomprobe] 창 없음");
+            return;
+        };
+        let scale = self.effective_scale();
+        let (lw, lh) = (size.width as f32 / scale, size.height as f32 / scale);
+        let probe = |app: &Self, tag: &str| {
+            // 작업영역 안쪽만 — 패딩·타이틀바 밖은 애초에 pane 이 아니다.
+            let x0 = app.effective_sidebar_w() + WINDOW_PADDING + 4.0;
+            for i in 0..5 {
+                for j in 0..5 {
+                    let px = x0 + (lw - x0 - 8.0) * (i as f32 / 4.0);
+                    let py = TITLE_HEIGHT + 4.0 + (lh - TITLE_HEIGHT - 40.0) * (j as f32 / 4.0);
+                    let hit = app.px_to_pane_cell(px, py);
+                    eprintln!(
+                        "[zoomprobe] {tag} ({px:.0},{py:.0}) → {}",
+                        hit.map_or("(없음)".to_string(), |(p, c, r)| format!("{p} {c},{r}"))
+                    );
+                }
+            }
+        };
+        probe(self, "before");
+        self.toggle_pane_zoom(&target);
+        eprintln!("[zoomprobe] zoomed={target}");
+        probe(self, "after");
+    }
     /// Headless Info 패널 repro: `KASATERM_AUTOINFO_MS` 뒤에 우측 칼럼을 열고
     /// Info 탭으로 넘긴다. 그 탭은 클릭으로만 갈 수 있어 캡처 하네스에서 볼
     /// 방법이 없었다 — 프로세스·포트 목록은 눈으로 봐야 폭·정렬을 판단한다.
