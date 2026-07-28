@@ -1622,17 +1622,26 @@ impl GpuRenderer {
         let top0 = (y - scroll) + pad;
         let line = (((click_y - top0) / lh).floor().max(0.0) as usize)
             .min(lines.len().saturating_sub(1));
-        let chars: Vec<char> = lines.get(line).map(|l| l.chars().collect()).unwrap_or_default();
-        // Walk the prefixes and pick the column whose pen-x is nearest the click.
+        // Walk the pen across the line and take the column it passes closest to.
+        // The pen accumulates: `measure_run` just sums per-character advances
+        // (no cross-character shaping), so stepping one char at a time gives the
+        // same x as measuring the whole prefix — but without rebuilding and
+        // re-measuring that prefix per column, which made a click on a long line
+        // O(L²). And since advances are never negative the pen only moves right,
+        // so once it passes the click nothing later can be closer: stop there.
         let mut best_col = 0;
-        let mut best_d = f32::MAX;
-        for col in 0..=chars.len() {
-            let prefix: String = chars[..col].iter().collect();
-            let px = tx0 + self.measure_run(&prefix, base, false, false, true, false);
+        let mut best_d = (tx0 - click_x).abs();
+        let mut px = tx0;
+        let mut buf = [0u8; 4];
+        for (i, ch) in lines.get(line).map_or("", |l| l.as_str()).chars().enumerate() {
+            px += self.measure_run(ch.encode_utf8(&mut buf), base, false, false, true, false);
             let d = (px - click_x).abs();
             if d < best_d {
                 best_d = d;
-                best_col = col;
+                best_col = i + 1;
+            }
+            if px >= click_x {
+                break;
             }
         }
         (line, best_col)
