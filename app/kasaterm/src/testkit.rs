@@ -206,6 +206,58 @@ impl App {
             }),
         );
     }
+    /// 상단바 토글 프로브. `KASATERM_AUTOHEADER_MS` 뒤에 활성 pane 의 헤더 띠를
+    /// 켜고, PTY 행 수가 실제로 줄었는지 찍는다.
+    ///
+    /// 띠를 켜면 셀 그리드가 그만큼 밀리므로 render·hit-test·PTY 가 같은 값을 봐야
+    /// 한다. 행 수가 그대로면 PTY 만 옛 크기로 남아 클릭이 한 행씩 어긋나는데,
+    /// 캡처로는 멀쩡해 보인다 — 그래서 숫자로 찍는다.
+    pub(crate) fn run_pending_autoheader(&mut self) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicUsize = AtomicUsize::new(0);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOHEADER_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        // 단계마다 1.5초 — SIGWINCH → 셸 재그림 → apply_screen_update 가 비동기라
+        // 토글 직후 읽으면 옛 격자가 그대로 보인다.
+        let step = STEP.load(Ordering::Relaxed);
+        if step > 4
+            || Instant::now() < *due + std::time::Duration::from_millis(1500 * step as u64)
+        {
+            return;
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
+        let Some(target) = self.ws.lock().unwrap().active_pane.clone() else { return };
+        let snap = |app: &Self| {
+            let ws = app.ws.lock().unwrap();
+            ws.panes.get(&target).map(|p| {
+                (p.has_header(), p.term().map_or((0, 0), |t| (t.cols, t.rows)))
+            })
+        };
+        // 0: 그대로 읽기 → 1: resize_backend 만(토글 없이) → 2: 읽기 → 3: 헤더 켜기
+        // → 4: 읽기. 1번이 있어야 "격자가 변한 게 헤더 때문인지, 그냥 리사이즈가
+        // 처음 밀린 것인지" 를 가른다 — 이걸 안 갈라서 한 번 오판했다.
+        match step {
+            0 => eprintln!("[autoheader] 0 초기 {:?}", snap(self)),
+            1 => {
+                let (c, r) = self.window_cells();
+                self.resize_backend(c, r);
+                eprintln!("[autoheader] 1 헤더 없이 resize_backend 만 호출");
+            }
+            2 => eprintln!("[autoheader] 2 리사이즈 후 {:?}", snap(self)),
+            3 => {
+                self.toggle_pane_header(&target);
+                eprintln!("[autoheader] 3 헤더 켬");
+            }
+            _ => eprintln!("[autoheader] 4 헤더 켠 뒤 {:?}", snap(self)),
+        }
+    }
     /// 줌 클릭 매핑 프로브. `KASATERM_AUTOZOOMPROBE_MS` 뒤에 활성 pane 을 줌하고,
     /// 작업영역 전체에 격자로 점을 찍어 `px_to_pane_cell` 이 어디로 보내는지 찍는다.
     ///

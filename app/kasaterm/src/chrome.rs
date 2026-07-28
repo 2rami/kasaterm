@@ -337,6 +337,26 @@ impl App {
         self.resize_backend(cols, rows);
         self.chrome_dirty = true;
     }
+    /// Flip the pane's top bar (header band), pinning the choice so it stops
+    /// following the automatic rule (tabs>1 / image / md).
+    ///
+    /// Must resize the backend: the band eats a row off the cell grid, and
+    /// render / hit-test / PTY all derive that from `header_px()`. Skip this and
+    /// the PTY keeps its old row count while the renderer draws the new one —
+    /// clicks land a row off, which is the same class of bug as the zoom
+    /// mapping. `chrome_dirty` alone would repaint but not re-measure.
+    pub(crate) fn toggle_pane_header(&mut self, id: &str) {
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let Some(pane) = ws.panes.get_mut(id) else { return };
+            let now = pane.has_header();
+            pane.header_override = Some(!now);
+            pane.dirty = true;
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.chrome_dirty = true;
+    }
     /// Open (or toggle) a status-bar dropdown for pane `id`. The list is
     /// snapshotted now — `read_dir` / `git_branches` block, so they can't run on
     /// the render path. A second click on the same chip closes the menu.

@@ -1416,6 +1416,12 @@ enum ActionKind {
     /// ··· 메뉴의 "새 탭" — 이 pane(outer)에 in-pane 탭을 추가한다. 탭이 둘
     /// 이상이 되면 has_header()가 켜져 탭 스트립이 보인다.
     NewTab,
+    /// ⋮ 메뉴의 상단바(pane 헤더) 토글. 하단 상태바 토글과 대칭 — 헤더는 지금까지
+    /// 탭 여러 개·이미지·md 일 때만 자동으로 떴고 사용자가 켤 방법이 없었다.
+    ToggleHeader,
+    /// ⋮ 메뉴의 최대화 — 헤더/탭 더블클릭과 같은 tmux 식 줌. 제스처를 모르거나
+    /// 더블클릭이 안 잡히는 경우를 위한 보이는 경로.
+    ToggleZoom,
 }
 
 /// State for an in-flight in-pane tab reorder drag. A press on a tab arms
@@ -1794,6 +1800,12 @@ struct PaneState {
     /// Frame-dirty flag; cleared after the next render. When every pane is
     /// clean and no chrome anim is pending, the render loop skips the GPU pass.
     dirty: bool,
+    /// ⋮ 메뉴의 상단바 토글. `None` = 자동(탭 여러 개·이미지·md 면 켬), `Some(b)` =
+    /// 사용자가 직접 정함. 하단바처럼 App 쪽 HashSet 으로 두지 않고 pane 에 붙인
+    /// 이유는 `has_header()`/`header_px()` 가 이미 pane 만 보고 답하기 때문이다 —
+    /// 여기 두면 렌더·히트테스트·resize 의 모든 기존 호출부가 그대로 맞는다.
+    /// 헤더 유무는 셀 그리드를 밀므로 세 곳이 어긋나면 클릭이 행 하나씩 밀린다.
+    header_override: Option<bool>,
 }
 
 impl Default for PaneState {
@@ -1807,6 +1819,7 @@ impl Default for PaneState {
             tab_last_active: 0,
             character: None,
             dirty: false,
+            header_override: None,
         }
     }
 }
@@ -1819,6 +1832,11 @@ impl PaneState {
         // 학생 헤더 띠 폐기(거노) — 학생 이름은 상단 타이틀바(claude 실행 시),
         // 로딩바는 pane 위 별도. 헤더 띠는 멀티탭·이미지·md 전용 컨트롤만 남긴다.
         // 코드/텍스트 raw 편집기도 헤더를 가진다 — 파일명 + ● 미저장 도트의 자리.
+        // ⋮ 에서 직접 정했으면 그게 우선 — 탭이 하나인 터미널에도 띠를 띄워
+        // 제목·pop-out 을 쓸 수 있고, md 처럼 자동으로 뜨는 pane 은 접을 수 있다.
+        if let Some(forced) = self.header_override {
+            return forced;
+        }
         self.tabs.len() > 1
             || self.image().is_some()
             || self.markdown().is_some()
