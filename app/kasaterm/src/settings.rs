@@ -237,7 +237,7 @@ impl App {
 
     /// Persist the current in-memory settings to `settings.json`. Called after
     /// every control change so the choice survives a relaunch.
-    fn settings_save(&self) {
+    pub(crate) fn settings_save(&self) {
         socket::write_setting("default_cwd", serde_json::Value::String(self.set_cwd_mode.clone()));
         socket::write_setting("file_tree_default", serde_json::Value::Bool(self.set_file_tree_default));
         socket::write_setting("pane_footer_default", serde_json::Value::Bool(self.set_footer_default));
