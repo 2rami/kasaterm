@@ -193,6 +193,14 @@ impl App {
     }
 
     fn render_frame_gpu(&mut self, scale: f32, time_secs: f32) {
+        // Glyph-atlas repack, if one is pending. This is the only safe point
+        // for it: from here on the frame emits quads whose UVs index the
+        // current packing, so a repack mid-frame would show them whatever
+        // texels land in those slots instead. Everything this frame needs
+        // re-bakes below.
+        if let Some(g) = self.gpu.as_mut() {
+            g.maintain_atlas();
+        }
         // Keep the header breadcrumb's cwd cache fresh (self-rate-limited).
         self.refresh_pane_cwds();
         // File-tree column follows the active pane's cwd (rebuild on change).
@@ -4842,6 +4850,7 @@ impl App {
                             (hdr_icon, ActionKind::ToggleHeader),
                             (sb_icon, ActionKind::ToggleStatusbar),
                             ("maximize", ActionKind::ToggleZoom),
+                            ("rotate-cw", ActionKind::RefreshRenderer),
                             ("x", ActionKind::Close),
                         ];
                         let bw = 30.0_f32;
@@ -4852,8 +4861,16 @@ impl App {
                         let mw = pad * 2.0 + bw * n + gap * (n - 1.0);
                         let mh = bh + pad * 2.0;
                         let mut mx = hx + HANDLE / 2.0 - mw / 2.0;
-                        // pane 가장자리 안으로 클램프(좌측/우측 끝 pane).
-                        mx = mx.max(*fx + 2.0).min(*fx + *fw - mw - 2.0);
+                        // pane 가장자리 안으로 클램프(좌측/우측 끝 pane). 단 메뉴가
+                        // pane 보다 넓으면(좁은 3분할 + 아이콘 8개) 좌우 경계가 서로를
+                        // 뒤집어 메뉴를 창 밖으로 밀어낸다 — 그땐 창 기준으로 물러선다.
+                        // 메뉴는 pane 위에 뜨는 오버레이라 옆 pane 을 덮는 건 무방하다.
+                        let (lo, hi) = if mw + 4.0 <= *fw {
+                            (*fx + 2.0, *fx + *fw - mw - 2.0)
+                        } else {
+                            (2.0, (win_px.0 / scale - mw - 2.0).max(2.0))
+                        };
+                        mx = mx.clamp(lo, hi);
                         let my = hy + HANDLE + 3.0;
                         round_rect(g, mx, my, mw, mh, theme::RADIUS_SM, theme::border());
                         round_rect(g, mx + 1.0, my + 1.0, mw - 2.0, mh - 2.0,
@@ -6011,6 +6028,15 @@ impl App {
             }
         }
         self.chrome_dirty = false;
+        // A bake that found no room during this frame left blank cells behind.
+        // The repack happens at the top of the next frame — but an idle app
+        // paints no next frame, so the blanks would just sit there. Ask for it.
+        if self.gpu.as_ref().is_some_and(|g| g.atlas_needs_another_frame()) {
+            self.chrome_dirty = true;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
+        }
         // Keep the frame loop alive while a git op spins, so the spinner
         // animates until GitOpDone clears it.
         if self.git.op.is_some() {

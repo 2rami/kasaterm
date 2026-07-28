@@ -369,6 +369,18 @@ impl App {
         self.cursor_px = (cx, cy);
         eprintln!("[autoinfo] act={act} pid={pid} at ({cx:.0},{cy:.0})");
     }
+    /// `KASATERM_FORCE_HANDLE_MENU=*` → 활성 pane 의 ⋮ 메뉴를 연다. 이 env 는
+    /// 생성자에서 pane id 를 그대로 받는데(main.rs), 로컬 PTY 모드의 leaf id 는
+    /// 곧 셸 pid 라 실행 전에는 알 수가 없다 — 그래서 `*` 만 여기서 한 번
+    /// 실제 id 로 바꿔 준다. pane 이 생긴 뒤에 도는 틱에서 호출된다.
+    pub(crate) fn resolve_force_handle_menu(&mut self) {
+        if self.handle_menu.as_deref() != Some("*") {
+            return;
+        }
+        let Some(id) = self.ws.lock().unwrap().active_pane.clone() else { return };
+        self.handle_menu = Some(id);
+        self.chrome_dirty = true;
+    }
     /// `KASATERM_AUTOPILLCLICK_MS` 뒤에 타이틀바 사용량 pill 을 **진짜로 클릭**한다.
     /// 다른 probe 처럼 상태를 손으로 세팅하지 않고 winit `MouseInput` 을 그대로
     /// `window_event` 에 흘려보내 handler 디스패치까지 태운다 — "render 는 그렸는데

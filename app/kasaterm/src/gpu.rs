@@ -21,6 +21,15 @@ use winit::window::Window;
 
 const ATLAS_SIZE: u32 = 2048;
 
+/// Glyph supersampling factor for a render scale. Below Retina the logical
+/// pixel size is too small to resolve a coverage mask cleanly, so bake at 2x
+/// and let the Linear sampler downsample; Retina already has the pixels.
+/// Must be re-evaluated on every DPI change, not just at startup — see
+/// `Renderer::set_scale`.
+fn oversample_for(scale: f32) -> u32 {
+    if scale < 2.0 { 2 } else { 1 }
+}
+
 /// A decoded image uploaded to its own wgpu texture. Kept alive (texture +
 /// view) for as long as the pane shows it, since the bind group borrows the
 /// view. Keyed by pane id in `GpuRenderer::images`.
@@ -372,7 +381,7 @@ impl GpuRenderer {
         // coverage mask, so bake at 2x and let the Linear sampler downsample
         // — Retina-class sharpness without changing layout. Retina (scale>=2)
         // already has the pixels, so keep it 1:1.
-        atlas.set_oversample(if scale < 2.0 { 2 } else { 1 });
+        atlas.set_oversample(oversample_for(scale));
         for code in 0x20u32..0x7Fu32 {
             if let Some(ch) = char::from_u32(code) {
                 let key = GlyphKey {
@@ -467,8 +476,24 @@ impl GpuRenderer {
     /// Update the effective render scale (DPI × ui_zoom). All chrome/cell
     /// draws multiply logical coords by `self.scale`, so changing it here and
     /// re-running `set_font_size` rescales the whole UI. Caller reflows layout.
+    ///
+    /// The atlas has to follow. Its supersampling factor is chosen from the
+    /// scale, so leaving it stale after a monitor move bakes 1x-resolution
+    /// coverage masks for a 1x display — the "글씨 깨짐" on the external
+    /// monitor. And every cached entry is keyed by a `size_px` derived from
+    /// the old scale, so without a repack the dead set just sits there until
+    /// the texture is full.
     pub fn set_scale(&mut self, scale: f32) {
-        self.scale = scale.max(0.1);
+        let scale = scale.max(0.1);
+        if (scale - self.scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.scale = scale;
+        // set_oversample only requests a reset when the factor actually
+        // changes (Retina↔Retina moves keep it), so ask explicitly — the
+        // size_px keys are stale either way.
+        self.atlas.set_oversample(oversample_for(scale));
+        self.atlas.request_reset();
     }
 
     /// Current effective render scale the GPU side is drawing with. Used by
@@ -478,8 +503,49 @@ impl GpuRenderer {
         self.scale
     }
 
+    /// Repack the glyph atlas if it asked to be repacked — because a bake
+    /// found no room, or because a DPI / font-size change invalidated every
+    /// cached size. **Frame boundary only**: quads already queued this frame
+    /// hold UVs into the current packing, and a repack would leave them
+    /// pointing at whatever lands in those texels next.
+    ///
+    /// Missing glyphs re-bake on the paint that follows, so a full atlas
+    /// costs one frame with some blank cells instead of blanking those
+    /// characters for the rest of the session.
+    pub fn maintain_atlas(&mut self) {
+        let before = self.atlas.len();
+        if self.atlas.begin_frame() {
+            eprintln!("[gpu] atlas repacked ({before} glyphs dropped, scale={})", self.scale);
+        }
+    }
+
+    /// True when the frame just painted left blank cells the next one can
+    /// fill. The caller must schedule that frame — nothing else will.
+    pub fn atlas_needs_another_frame(&self) -> bool {
+        self.atlas.needs_another_frame()
+    }
+
+    /// Unconditional repack — the manual "화면 새로고침" escape hatch for
+    /// state we failed to invalidate on our own.
+    pub fn force_atlas_reset(&mut self) {
+        self.atlas.request_reset();
+    }
+
+    /// Re-apply the surface configuration as-is. A monitor move can leave the
+    /// swapchain describing the display we left; reconfiguring against the
+    /// current size makes the next frame land on the one we are on.
+    pub fn reconfigure_surface(&mut self) {
+        self.surface.configure(&self.device, &self.config);
+    }
+
     pub fn set_font_size(&mut self, font_size_logical: f32) -> (f32, f32) {
         let new_px = (font_size_logical * self.scale).round().max(8.0) as u32;
+        // Only on a real change: this is called on every DPI event and every
+        // reflow, usually with the value it already has, and an unconditional
+        // repack would throw the atlas away several times per second.
+        if new_px != self.font_size_px {
+            self.atlas.request_reset();
+        }
         self.font_size_px = new_px;
         let cell_w_px = self.shaper.cell_advance(new_px as f32).ceil();
         let cell_h_px = self.shaper.line_height(new_px as f32).ceil();

@@ -2962,6 +2962,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     let _ = self.spawn_new_tab(&menu_pid);
                                 }
                                 ActionKind::Close => self.close_pane(&menu_pid),
+                                ActionKind::RefreshRenderer => self.refresh_renderer(),
                                 // md 토글은 헤더 세그먼트 전용이라 ⋮ 메뉴엔 없다.
                                 // 와일드카드로 두지 않는 이유: ⋮ 항목을 늘렸는데
                                 // 여기 arm 을 빠뜨리면 클릭이 조용히 아무것도 안
@@ -3045,6 +3046,9 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             ActionKind::ToggleZoom => {
                                 self.toggle_pane_zoom(&pid);
+                            }
+                            ActionKind::RefreshRenderer => {
+                                self.refresh_renderer();
                             }
                         }
                         window.request_redraw();
@@ -4409,6 +4413,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoinfo();
         self.run_pending_autozoomprobe();
         self.run_pending_autoheader();
+        self.resolve_force_handle_menu();
         self.run_pending_autopillclick(event_loop);
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
