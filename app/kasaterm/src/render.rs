@@ -4824,6 +4824,14 @@ impl App {
                         let fvis = self.statusbar.shown.contains(fid.as_str())
                             || (!self.statusbar.hidden.contains(fid.as_str()) && self.set_footer_default);
                         let sb_icon = if fvis { "panel-bottom" } else { "panel-bottom-dashed" };
+                        // 상단바(헤더 띠)도 같은 방식 — 지금 보이는 상태를 아이콘이
+                        // 그대로 드러낸다. hdr_vis 는 has_header() 와 같은 답이어야
+                        // 하므로 pane 에 직접 물어본다(override 포함).
+                        let hdr_vis = {
+                            let ws = self.ws.lock().unwrap();
+                            ws.panes.get(fid.as_str()).is_some_and(|p| p.has_header())
+                        };
+                        let hdr_icon = if hdr_vis { "panel-top" } else { "panel-top-dashed" };
                         let items = [
                             ("plus", ActionKind::NewTab),
                             // columns-2(세로선=좌우 2칸) → Horizontal(right),
@@ -4831,7 +4839,9 @@ impl App {
                             // 곧 결과 배치다 — SplitDir 이름과는 반대 매핑.
                             ("columns-2", ActionKind::SplitH),
                             ("rows-2", ActionKind::SplitV),
+                            (hdr_icon, ActionKind::ToggleHeader),
                             (sb_icon, ActionKind::ToggleStatusbar),
+                            ("maximize", ActionKind::ToggleZoom),
                             ("x", ActionKind::Close),
                         ];
                         let bw = 30.0_f32;

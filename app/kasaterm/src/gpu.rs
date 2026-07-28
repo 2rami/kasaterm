@@ -2058,6 +2058,8 @@ impl GpuRenderer {
             "chevrons-down-up" => include_str!("../assets/icons/chevrons-down-up.svg"),
             "panel-bottom" => include_str!("../assets/icons/panel-bottom.svg"),
             "panel-bottom-dashed" => include_str!("../assets/icons/panel-bottom-dashed.svg"),
+            "panel-top" => include_str!("../assets/icons/panel-top.svg"),
+            "panel-top-dashed" => include_str!("../assets/icons/panel-top-dashed.svg"),
             "git-commit-horizontal" => include_str!("../assets/icons/git-commit-horizontal.svg"),
             "ellipsis-vertical" => include_str!("../assets/icons/ellipsis-vertical.svg"),
             "ellipsis-horizontal" => include_str!("../assets/icons/ellipsis-horizontal.svg"),

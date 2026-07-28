@@ -2989,6 +2989,12 @@ impl ApplicationHandler<UserEvent> for App {
                             ActionKind::NewTab => {
                                 let _ = self.spawn_new_tab(&pid);
                             }
+                            ActionKind::ToggleHeader => {
+                                self.toggle_pane_header(&pid);
+                            }
+                            ActionKind::ToggleZoom => {
+                                self.toggle_pane_zoom(&pid);
+                            }
                         }
                         window.request_redraw();
                         return;
@@ -4351,6 +4357,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autowinclose();
         self.run_pending_autoinfo();
         self.run_pending_autozoomprobe();
+        self.run_pending_autoheader();
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
         self.run_pending_autoftmenu();
