@@ -4350,6 +4350,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoconfirm();
         self.run_pending_autowinclose();
         self.run_pending_autoinfo();
+        self.run_pending_autozoomprobe();
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
         self.run_pending_autoftmenu();
