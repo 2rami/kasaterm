@@ -488,6 +488,25 @@ impl App {
                 let at = self.md_anchor_line(&id);
                 eprintln!("[mdscript] mode={v} anchor_line={at:?}");
             }
+            // Raw 편집기 클릭 → 캐럿. 좌표는 **본문 박스 기준 상대 px**
+            // (`click:<dx>,<dy>`) 이라 창 크기가 달라도 같은 자리를 가리킨다.
+            // 마우스 이벤트를 밖에서 만들 수 없어 히트테스트 진입점을 직접 부른다.
+            Some(("click", v)) => {
+                let (dx, dy) = v.split_once(',').unwrap_or((v, "0"));
+                let (dx, dy): (f32, f32) =
+                    (dx.trim().parse().unwrap_or(0.0), dy.trim().parse().unwrap_or(0.0));
+                let Some(&(bx, by, _, _)) = self.md_body_rects.get(&id) else {
+                    eprintln!("[mdscript] click: 본문 박스 없음(raw 모드인지 확인)");
+                    return;
+                };
+                self.md_click_caret(&id, bx + dx, by + dy);
+                let at = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .and_then(|w| w.panes.get(&id).and_then(|p| p.markdown()).map(|m| (m.cur_line, m.cur_col)));
+                eprintln!("[mdscript] click=({dx},{dy}) caret={at:?}");
+            }
             // 이 마크다운 탭을 닫아 본다 — 저장 안 한 편집분이 있으면 확인
             // 모달이 떠야 하고, 그 화면이 이 단계의 관찰 대상이다.
             Some(("close", _)) => {
