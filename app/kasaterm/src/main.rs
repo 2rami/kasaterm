@@ -4137,7 +4137,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !sweep_dead_kasaterm_sockets() {
         cleanup_stale_collab_markers();
     }
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    // 헤드리스 검증 실행이 거노 화면을 뺏지 않게 한다. 스스로 종료하는 실행
+    // (`KASATERM_AUTOQUIT_MS`)은 정의상 테스트라 자동으로 배경에 띄운다 —
+    // Accessory 정책이면 Dock/⌘Tab 에도 안 올라오고 활성 앱도 안 바뀌므로,
+    // 캡처를 도는 동안 거노가 하던 창에 그대로 머문다. `KASATERM_NO_FOCUS`
+    // 로 직접 켜고 끌 수도 있다(0/false 면 강제로 평소처럼 뜬다).
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    #[cfg(target_os = "macos")]
+    if background_launch() {
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        builder
+            .with_activation_policy(ActivationPolicy::Accessory)
+            .with_activate_ignoring_other_apps(false);
+    }
+    let event_loop = builder.build()?;
     let proxy = event_loop.create_proxy();
     // argv 폴백: `kasaterm file.md` / 커맨드라인. `.md` 인자면 새 워크스페이스
     // 마크다운으로 위임(resumed 전이면 디퍼됐다 start_pty 후 flush). `open`(1)은
@@ -4194,6 +4207,15 @@ fn load_capture_config() {
 /// kasaterm-cli(pane 간 협업)·imgopen/mdopen(preview)·zsh OSC133 prompt-mark
 /// (입력줄 감지). teammate-mode tmux 위장은 제거됨 — pane 생성은 오케스트레이터가
 /// `kasaterm-cli split` 로 한다. best-effort: 실패해도 본체는 동작한다.
+/// 창을 활성화하지 않고 배경에 띄울지. 자동 종료하는 검증 실행이면 기본 on.
+pub(crate) fn background_launch() -> bool {
+    match std::env::var("KASATERM_NO_FOCUS").as_deref() {
+        Ok("0") | Ok("false") | Ok("") => false,
+        Ok(_) => true,
+        Err(_) => std::env::var_os("KASATERM_AUTOQUIT_MS").is_some(),
+    }
+}
+
 fn install_pane_shims() {
     // 전역 shim 스위치 OFF → shim dir 자체를 안 만든다. KASATERM_TMUX_SHIM_DIR 이 미설정
     // 이면 pty-backend(state.rs)가 PATH prepend·ZDOTDIR 를 건드리지 않아 자식 셸이 순정
