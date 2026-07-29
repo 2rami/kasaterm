@@ -302,7 +302,16 @@ impl App {
             format!("CLAUDE_SECURESTORAGE_CONFIG_DIR='{q}' claude\r"),
             at,
         ));
-        self.set_toast("새 pane 에서 /login 으로 로그인하세요".to_string());
+        self.set_toast("새 pane 에서 로그인하세요 — 끝나면 설정에서 계정을 고르면 돼요".to_string());
+        // 설정은 **별도 창**이라, 이걸 안 닫으면 로그인 pane 도 토스트도 전부 그
+        // 창 뒤에서 벌어진다 — 거노 눈엔 버튼이 먹통인 것과 구별이 안 됐다.
+        // 어차피 다음 할 일이 터미널에서 로그인하는 것이니 본창으로 넘긴다.
+        if let Some(i) = self.settings_window_idx() {
+            self.close_settings_window(i);
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.focus_window();
+        }
     }
 
     /// 학생 이미지 override 폴더(`~/.config/kasaterm/students/`)를 OS 파일

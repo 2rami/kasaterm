@@ -936,7 +936,7 @@ impl App {
         Some(idx)
     }
 
-    fn close_settings_window(&mut self, idx: usize) {
+    pub(crate) fn close_settings_window(&mut self, idx: usize) {
         self.flush_student_persona();
         self.settings_input = None;
         self.settings_open = false;
