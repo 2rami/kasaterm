@@ -1771,6 +1771,12 @@ impl App {
                 // Attach the pane's scrollback (text lines) so restore can
                 // repaint what was on screen. Only when we have a real record.
                 if let Some(obj) = rec.as_object_mut() {
+                    // pane id 자체를 저장한다. 이게 없으면 복원이 `%1` 부터 새로
+                    // 번호를 매기는데, `--resume` 으로 되살아난 학생은 재시작 **전**
+                    // 의 surface_id 를 대화 기록째 기억하고 있다 → `tell %5` 가 없는
+                    // pane 이거나 그 사이 다른 pane 이 물려받은 번호로 배달된다
+                    // (거노: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
+                    obj.insert("pane_id".to_string(), serde_json::json!(pane_id));
                     let sb = ws
                         .panes
                         .get(pane_id)
@@ -2005,8 +2011,9 @@ impl App {
         cols: u16,
         rows: u16,
     ) -> Option<String> {
-        let id = format!("%{}", self.next_pane_id);
-        self.next_pane_id += 1;
+        let saved = rec.get("pane_id").and_then(|v| v.as_str());
+        let taken = |s: &str| self.pty.contains_key(s);
+        let id = pick_restore_id(saved, taken, &mut self.next_pane_id);
         let cwd = rec
             .get("cwd")
             .and_then(|c| c.as_str())
@@ -2354,9 +2361,61 @@ fn git_repo_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
+/// 복원되는 pane 이 쓸 id 를 고른다. **저장된 id 를 최우선**으로 되살린다 —
+/// `--resume` 으로 되살아난 학생은 재시작 전의 surface_id 를 대화 기록째 기억하고
+/// 있어서, 번호를 새로 매기면 `tell` 이 없는 pane 이거나 그 사이 다른 pane 이
+/// 물려받은 번호로 배달된다(거노: "재시작하면 학생들이 tell 을 이상한 pane 에 쓴다").
+///
+/// 저장본에 id 가 없거나(옛 포맷) 이미 쓰이는 번호면 새로 발급한다. 되살린 번호가
+/// 카운터보다 크면 카운터를 그 위로 밀어, 이후 split 이 같은 번호를 다시 내주지
+/// 않게 한다.
+fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool, next: &mut u32) -> String {
+    if let Some(s) = saved {
+        if let Some(n) = s.strip_prefix('%').and_then(|d| d.parse::<u32>().ok()) {
+            if !taken(s) {
+                *next = (*next).max(n + 1);
+                return s.to_string();
+            }
+        }
+    }
+    let s = format!("%{next}");
+    *next += 1;
+    s
+}
+
 #[cfg(test)]
 mod tests {
-    use super::git_repo_root;
+    use super::{git_repo_root, pick_restore_id};
+
+    #[test]
+    fn restore_keeps_the_saved_pane_id() {
+        let mut next = 1;
+        assert_eq!(pick_restore_id(Some("%9"), |_| false, &mut next), "%9");
+        // 되살린 번호 위로 카운터가 밀려야 다음 split 이 %9 를 다시 안 준다.
+        assert_eq!(next, 10);
+    }
+
+    #[test]
+    fn restore_falls_back_when_the_id_is_missing_or_taken() {
+        // 옛 저장본엔 pane_id 가 없다.
+        let mut next = 3;
+        assert_eq!(pick_restore_id(None, |_| false, &mut next), "%3");
+        assert_eq!(next, 4);
+        // 이미 살아 있는 번호는 뺏지 않는다.
+        let mut next = 3;
+        assert_eq!(pick_restore_id(Some("%1"), |s| s == "%1", &mut next), "%3");
+        assert_eq!(next, 4);
+        // `%` 없는 쓰레기 값도 폴백.
+        let mut next = 5;
+        assert_eq!(pick_restore_id(Some("garbage"), |_| false, &mut next), "%5");
+    }
+
+    #[test]
+    fn restore_never_lowers_the_counter() {
+        let mut next = 20;
+        assert_eq!(pick_restore_id(Some("%2"), |_| false, &mut next), "%2");
+        assert_eq!(next, 20);
+    }
 
     #[test]
     fn anchors_to_repo_root_from_a_subdirectory() {
