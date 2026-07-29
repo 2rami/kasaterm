@@ -866,6 +866,20 @@ impl App {
             // 순수 메서드를 직접 부른다. 키→메서드 배선은 유닛 테스트가 아니라
             // 코드 경로로 확인하고, 여기선 **결과가 화면에 어떻게 그려지는지**만
             // 본다 — 들여쓴 항목이 실제로 한 단 들어가 보이는지 같은 것.
+            // 한글 조합. `md_editor_input` 이 자모에 대해 하는 일과 **같은
+            // 코드**(소유권 주장 → `md_feed_jamo`)를 탄다 — winit KeyEvent 를
+            // 못 만들어 조합 경로만 검증 사각지대였던 걸 여기서 메운다.
+            Some(("jamo", v)) => {
+                for c in v.chars() {
+                    self.ime_retarget(crate::ImeFocus::Editor(id.clone()));
+                    let took = self.md_feed_jamo(c);
+                    eprintln!(
+                        "[mdscript] jamo {c} took={took} preedit={:?} focus={:?}",
+                        self.preedit, self.ime_focus
+                    );
+                }
+                self.md_ensure_caret_visible();
+            }
             Some(("edit", v)) => {
                 {
                     let Ok(mut ws) = self.ws.lock() else { return };

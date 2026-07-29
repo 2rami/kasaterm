@@ -1040,6 +1040,26 @@ impl App {
     /// (U+3130..318F) through `event.text`; we feed the local composer (same as
     /// the terminal path), insert committed syllables, and keep the preedit in
     /// `self.preedit` for the editor overlay. Non-jamo flushes then edits.
+    /// 자모 한 글자를 편집기 조합기에 먹인다. `c` 가 호환 자모가 아니면 아무
+    /// 일도 안 하고 `false` — 호출자는 평소 키 처리로 넘어가면 된다.
+    ///
+    /// 키 경로에서 따로 뗀 이유는 **검증 때문**이다. winit `KeyEvent` 는 밖에서
+    /// 만들 수 없어 조합을 헤드리스로 재현할 길이 없었는데, 진짜 경로가 이
+    /// 함수 하나로 모이면 하네스(`mdscript` 의 `jamo` 단계)가 같은 코드를 탄다.
+    /// 조합 버그를 "거노가 직접 쳐 봐야만" 아는 상태를 벗어나는 게 목적이다.
+    pub(crate) fn md_feed_jamo(&mut self, c: char) -> bool {
+        if !(0x3130..=0x318F).contains(&(c as u32)) {
+            return false;
+        }
+        if let Some(commit) = self.hangul.feed(c) {
+            self.md_editor_insert(&commit);
+        }
+        self.preedit = self.hangul.preedit().unwrap_or_default();
+        self.in_preedit = !self.preedit.is_empty();
+        self.chrome_dirty = true;
+        true
+    }
+
     pub(crate) fn md_editor_input(&mut self, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
         // 조합기 주인을 이 편집기로. `ime_retarget` 은 ws 를 다시 잠그는데
@@ -1052,15 +1072,15 @@ impl App {
         }
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
+            // 자모가 낱자로 버퍼에 박히는 사고는 **코드포인트가 예상 범위 밖**일
+            // 때만 나는데, 그건 로그 없이는 화면만 봐선 구분이 안 된다.
+            if std::env::var_os("KASATERM_IME_DEBUG").is_some() {
+                let cps: Vec<String> = t.chars().map(|c| format!("U+{:04X}", c as u32)).collect();
+                eprintln!("[md-key] text={t:?} {cps:?} focus={:?}", self.ime_focus);
+            }
             if t.chars().count() == 1 {
                 if let Some(c) = t.chars().next() {
-                    if (0x3130..=0x318F).contains(&(c as u32)) {
-                        if let Some(commit) = self.hangul.feed(c) {
-                            self.md_editor_insert(&commit);
-                        }
-                        self.preedit = self.hangul.preedit().unwrap_or_default();
-                        self.in_preedit = !self.preedit.is_empty();
-                        self.chrome_dirty = true;
+                    if self.md_feed_jamo(c) {
                         return;
                     }
                 }

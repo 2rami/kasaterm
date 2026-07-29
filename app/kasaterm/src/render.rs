@@ -14,7 +14,13 @@ impl App {
     /// already cell-space — the renderer-side helper applies cell
     /// metric multiplication.
     fn gpu_overlay_snapshot(&self) -> GpuOverlay {
-        let preedit_text = self.preedit.clone();
+        // 터미널 오버레이도 조합기 주인일 때만 그린다. 편집기가 조합 중인데
+        // 포커스만 터미널로 옮겨진 순간(클릭 직후, 아직 아무 키도 안 친 상태)
+        // 남의 조합 글자를 터미널 커서에 그리게 된다.
+        let preedit_text = match &self.ime_focus {
+            Some(crate::ImeFocus::Editor(_)) | Some(crate::ImeFocus::AuxEditor(_)) => String::new(),
+            _ => self.preedit.clone(),
+        };
         let commit_overlay = self.commit_overlay.clone();
         // Active pane's font multiplier — the overlay anchors to this same
         // pane (see pane_origin below), so its cell size must match the
@@ -67,7 +73,14 @@ impl App {
                     // Until the committed syllable's echo lands (cursor
                     // still where it was at commit time), draw the
                     // committed text in front of the preedit at that spot.
+                    //
+                    // PTY 가 없는 pane(편집기·이미지)은 위에서 (0,0) 을 기본으로
+                    // 받는다. 거기에 조합 문자열을 그리면 **줄번호 거터 위에
+                    // 유령**이 뜨고, raw 편집기는 자기 문서 캐럿에 preedit 을
+                    // 따로 그리므로 같은 글자가 두 군데 보인다(거노: "입력이
+                    // 동시에 되고"). 터미널 오버레이는 터미널일 때만 그린다.
                     let (display, prow, pcol) = match &commit_overlay {
+                        _ if pane.term().is_none() => (String::new(), base_row, base_col),
                         Some((ctext, before)) if *before == (cur_row, cur_col) => {
                             (format!("{ctext}{preedit_text}"), before.0, before.1)
                         }
@@ -1870,7 +1883,14 @@ impl App {
                     && sb_cursor.1 <= r.1 + r.3
             })
             .map(|(i, _)| *i);
+        // 조합 중인 글자는 **조합기 주인**에게만 그린다. 예전엔 pane 을 안 가려서,
+        // 터미널에서 치는 한글이 열려 있는 편집기에도 같이 떴다(거노: "입력이
+        // 동시에 되고"). 주인은 `ime_focus` 가 이미 알고 있다.
         let md_preedit = self.preedit.clone();
+        let ime_editor: Option<String> = match &self.ime_focus {
+            Some(crate::ImeFocus::Editor(id)) => Some(id.clone()),
+            _ => None,
+        };
         // Raw-editor cursor blink phase (shared with the terminal cursor), read
         // before the gpu borrow so the editor cursor blinks in step.
         let raw_cursor_on = self.cursor_blink_on(std::time::Instant::now());
@@ -2122,9 +2142,11 @@ impl App {
                     // 조합 중인 한글은 포커스를 가진 쪽에 그린다 — 찾기 바가
                     // 열려 있는데 문서 캐럿에 preedit 이 뜨면 어디에 쓰고 있는지
                     // 화면이 거짓말을 한다.
+                    let mine = ime_editor.as_deref() == Some(id.as_str());
+                    let pe = if mine { md_preedit.as_str() } else { "" };
                     let (body_pe, bar_pe): (&str, &str) = match find {
-                        Some(_) => ("", md_preedit.as_str()),
-                        None => (md_preedit.as_str(), ""),
+                        Some(_) => ("", pe),
+                        None => (pe, ""),
                     };
                     let h = g.draw_raw_editor(
                         lines,
