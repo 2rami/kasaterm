@@ -2753,6 +2753,24 @@ enum FtMenuAction {
     OpenDefault,
 }
 
+/// 한글 조합기(`App::hangul`)를 쓰는 입력 문맥. 조합기는 App 에 **하나뿐인데**
+/// 이걸 쓰는 입구는 아홉 곳이라, 문맥이 바뀌어도 조합 상태가 그대로 남아 다음
+/// 문맥으로 새어 나간다. 그 주인을 이 값으로 들고 다니며 바뀌는 순간 정리한다.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum ImeFocus {
+    /// 터미널 pane(PTY). 메인창·별도창 공통 — pane id 가 곧 보낼 곳이다.
+    Pane(String),
+    /// 메인창 raw 편집기(pane id).
+    Editor(String),
+    /// 별도창 raw 편집기(aux 인덱스).
+    AuxEditor(usize),
+    GitCommit,
+    PathSearch,
+    TreeSearch,
+    TreeNew,
+    Settings,
+}
+
 /// Action buttons at the foot of the git column. `Commit` hands the commit to
 /// the active claude pane; `Pull`/`Push` sync the current branch with its
 /// upstream. All shell out through `kasa_mcp::git` on a worker thread so the UI
@@ -3105,6 +3123,10 @@ struct App {
     /// jamo through our own Composer instead of trusting macOS to
     /// queue it for us.
     hangul: kasa_ime::Composer,
+    /// 위 조합기를 지금 쓰고 있는 입력 문맥. `ime_retarget` 이 이 값이 바뀌는
+    /// 순간 조합 중이던 음절을 **떠나는 쪽에** 확정시킨다 — 안 그러면 터미널에서
+    /// 치던 글자가 편집기에 떨어지고, Backspace 는 그 잔재만 갉는다.
+    ime_focus: Option<ImeFocus>,
     /// (pane_id, close_rect) for every visible pane header. Populated
     /// by `render_frame` and consumed by the MouseInput handler so a
     /// click on the × button closes that pane.
@@ -3735,6 +3757,7 @@ impl App {
             commit_overlay: None,
             ime_active: false,
             hangul: kasa_ime::Composer::new(),
+            ime_focus: None,
             pane_header_rects: Vec::new(),
             pane_handle_rects: Vec::new(),
             pane_top_zones: Vec::new(),

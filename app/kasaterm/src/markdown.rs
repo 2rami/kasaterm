@@ -1002,12 +1002,23 @@ impl App {
     /// Insert text at the active markdown editor's cursor (committed Hangul or
     /// pasted text). Multi-char safe; advances the cursor by char count.
     pub(crate) fn md_editor_insert(&mut self, text: &str) {
+        let active = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
+        let Some(id) = active else { return };
+        self.md_insert_into(&id, text);
+    }
+
+    /// `md_editor_insert` 의 pane 지정판. 조합기 주인이 바뀔 때(`ime_retarget`)
+    /// 남은 음절은 **떠나는** 편집기에 떨궈야 하는데, 그 시점엔 그 pane 이 이미
+    /// 활성이 아니다 — 활성 기준으로 넣으면 새 문맥에 오배달된다.
+    pub(crate) fn md_insert_into(&mut self, id: &str, text: &str) {
         if text.is_empty() {
             return;
         }
         {
             let mut ws = self.ws.lock().unwrap();
-            let Some(pane) = ws.active_mut() else { return };
+            // `pane_mut` 는 없으면 만들어 버린다 — 닫힌 pane 에 유령을 남기지
+            // 않도록 조회만 한다.
+            let Some(pane) = ws.panes.get_mut(id) else { return };
             pane.dirty = true;
             let Some(m) = pane.markdown_mut() else { return };
             // 찾기 바가 열려 있으면 타이핑은 검색어로 간다 — 조합이 끝난 한글
@@ -1018,7 +1029,12 @@ impl App {
                 m.insert_at_caret(text);
             }
         }
-        self.md_ensure_caret_visible();
+        // 캐럿 스크롤은 활성 pane 기준이라 떠난 pane 엔 의미가 없다(돌아올 때
+        // 다시 맞춰진다).
+        let active = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
+        if active.as_deref() == Some(id) {
+            self.md_ensure_caret_visible();
+        }
     }
     /// Raw-editor key entry point with Hangul composition. macOS hands jamo
     /// (U+3130..318F) through `event.text`; we feed the local composer (same as
@@ -1026,6 +1042,14 @@ impl App {
     /// `self.preedit` for the editor overlay. Non-jamo flushes then edits.
     pub(crate) fn md_editor_input(&mut self, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
+        // 조합기 주인을 이 편집기로. `ime_retarget` 은 ws 를 다시 잠그는데
+        // 2021 에디션에선 `if let` 조건식의 임시 MutexGuard 가 body 끝까지
+        // 살아 **같은 스레드가 자기 락에 물린다** — id 는 별도 문으로 꺼내
+        // 락을 확실히 놓고 부른다.
+        let active = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
+        if let Some(id) = active {
+            self.ime_retarget(crate::ImeFocus::Editor(id));
+        }
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
             if t.chars().count() == 1 {

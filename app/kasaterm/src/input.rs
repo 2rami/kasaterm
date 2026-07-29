@@ -1195,6 +1195,55 @@ impl App {
         self.git.commit_msg.insert_str(b, text);
         self.git.commit_cursor = col + text.chars().count();
     }
+    /// 조합기의 주인을 `next` 로 옮긴다. 주인이 실제로 바뀔 때만 일한다.
+    ///
+    /// 조합기(`self.hangul`)와 preedit 은 App 에 하나뿐인데 이걸 쓰는 입구는
+    /// 아홉 곳(터미널·편집기·별도창 셋·git 커밋·경로검색·트리검색·새이름·설정)
+    /// 이다. 문맥이 바뀌어도 조합 상태가 그대로 남아 있어서, 터미널에서 "한" 을
+    /// 치다 편집기를 클릭하면 그 "한" 이 **편집기에** 떨어지고(이상하게 쳐짐),
+    /// Backspace 는 편집기 글자 대신 그 잔재를 갉아 아무것도 안 지워진다
+    /// (이상하게 지워짐). 거노 실사고 — 편집기가 "못 쓸 정도" 였던 정체다.
+    ///
+    /// 남은 음절은 **떠나는 쪽에** 확정시킨다(macOS 가 포커스 이동 때 하는 것과
+    /// 같다). 떠나는 쪽이 이미 사라졌으면(pane 닫힘·드롭다운 닫힘) 조용히 버린다
+    /// — 갈 곳 없는 음절을 아무 데나 떨구는 게 잃는 것보다 나쁘다.
+    pub(crate) fn ime_retarget(&mut self, next: crate::ImeFocus) {
+        if self.ime_focus.as_ref() == Some(&next) {
+            return;
+        }
+        let prev = self.ime_focus.replace(next);
+        let pending = self.hangul.flush();
+        self.preedit.clear();
+        self.in_preedit = false;
+        // 별도창(편집기·터미널 양쪽)은 프리에딧을 self 가 아니라 자기 창에
+        // 스탬프한다. 주인이 바뀌었다는 건 그 조합이 끝났다는 뜻이니 전부
+        // 비운다 — 안 그러면 조합 중이던 글자가 떠난 창에 유령으로 남는다.
+        // (새 주인 창은 다음 키에서 다시 스탬프한다.)
+        for a in self.aux_windows.iter_mut() {
+            a.preedit.clear();
+        }
+        let (Some(text), Some(prev)) = (pending, prev) else { return };
+        match prev {
+            crate::ImeFocus::Pane(id) => {
+                // 탭이 있는 pane 은 leaf id 와 실제 pid 가 갈린다 —
+                // `self.pty.get(id)` 로는 보조 탭을 못 찾는다.
+                if let Some(s) = self.pty_for_pane(&id) {
+                    let _ = s.send_bytes(text.as_bytes());
+                }
+            }
+            crate::ImeFocus::Editor(id) => self.md_insert_into(&id, &text),
+            crate::ImeFocus::AuxEditor(i) => self.aux_insert(i, &text),
+            crate::ImeFocus::GitCommit => self.git_commit_insert(&text),
+            crate::ImeFocus::PathSearch => self.statusbar.menu_search.push_str(&text),
+            crate::ImeFocus::TreeSearch => self.file_tree.search_query.push_str(&text),
+            crate::ImeFocus::TreeNew => {
+                if let Some(buf) = self.ft_edit_buf() {
+                    buf.push_str(&text);
+                }
+            }
+            crate::ImeFocus::Settings => self.settings_insert_text(&text),
+        }
+    }
     /// Commit-input key entry with Hangul composition, mirroring
     /// `md_editor_input` for the single-line git commit field. macOS hands jamo
     /// through `event.text`; feed the shared composer, insert committed
@@ -1202,6 +1251,7 @@ impl App {
     /// flushes the pending syllable first, then edits.
     pub(crate) fn git_commit_input(&mut self, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
+        self.ime_retarget(crate::ImeFocus::GitCommit);
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
             if t.chars().count() == 1 {
@@ -1295,6 +1345,7 @@ impl App {
     /// so Korean filters compose. Esc closes, Enter opens the first match,
     /// Backspace deletes a jamo then a char. Every edit resets the scroll.
     pub(crate) fn statusbar_menu_search_key(&mut self, event: &KeyEvent) {
+        self.ime_retarget(crate::ImeFocus::PathSearch);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
@@ -1360,6 +1411,7 @@ impl App {
     /// Esc closes the box, Backspace deletes a jamo then a char. The filtered
     /// node list is recomputed by `rebuild_file_tree_nodes` on each edit.
     pub(crate) fn file_tree_search_key(&mut self, event: &KeyEvent) {
+        self.ime_retarget(crate::ImeFocus::TreeSearch);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
@@ -1425,6 +1477,7 @@ impl App {
     /// `ft_edit_buf` 로 통일 — rename 이 있으면 그쪽, 없으면 new. Enter 는 모드에
     /// 맞는 commit, Esc 는 둘 다 취소. 한글 조합은 search 행과 동일 경로.
     pub(crate) fn file_tree_new_key(&mut self, event: &KeyEvent) {
+        self.ime_retarget(crate::ImeFocus::TreeNew);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
@@ -1703,6 +1756,19 @@ impl App {
                     }
                 }
                 return;
+            }
+        }
+        // 여기부터는 터미널 pane 의 키다 — 조합기 주인을 이 pane 으로 옮긴다.
+        // md pane 도 Cmd 조합이면 위 블록을 통과해 여기까지 흘러오므로 `is_md`
+        // 로 걸러낸다. 안 그러면 편집기가 쥐고 있던 소유권을 PTY 없는 pane 이
+        // 뺏어, 확정될 음절이 갈 곳을 잃는다.
+        if !is_md {
+            // id 를 별도 문으로 꺼내 락을 확실히 놓는다 — `if let` 조건식의
+            // 임시 MutexGuard 는 2021 에디션에서 body 끝까지 살아, 안에서
+            // ws 를 다시 잠그는 `ime_retarget` 과 자기 락에 물린다.
+            let active = self.ws.lock().ok().and_then(|ws| ws.active_pane.clone());
+            if let Some(id) = active {
+                self.ime_retarget(crate::ImeFocus::Pane(id));
             }
         }
         // Typing snaps the active pane back to live tail. Other panes'
