@@ -621,6 +621,7 @@ impl App {
     /// self.hangul 를 쓰되 프리에딧은 이 창의 것으로 스탬프한다.
     fn aux_editor_input(&mut self, idx: usize, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
+        self.ime_retarget(crate::ImeFocus::AuxEditor(idx));
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
             if t.chars().count() == 1 {
@@ -685,7 +686,7 @@ impl App {
         }
     }
 
-    fn aux_insert(&mut self, idx: usize, text: &str) {
+    pub(crate) fn aux_insert(&mut self, idx: usize, text: &str) {
         if let Some(a) = self.aux_windows.get_mut(idx) {
             if let Some(m) = a.editor_mut() {
                 m.insert_at_caret(text);
@@ -1017,6 +1018,7 @@ impl App {
             return;
         }
         self.last_input_at = Instant::now();
+        self.ime_retarget(crate::ImeFocus::Settings);
         // Cmd/Ctrl+W: 설정 창 닫기.
         if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) {
             self.close_settings_window(idx);
@@ -1304,6 +1306,7 @@ impl App {
             Some(p) => p.to_string(),
             None => return,
         };
+        self.ime_retarget(crate::ImeFocus::Pane(pane_id.clone()));
         // Cmd/Ctrl+W: 이 창 닫기 → dock 복귀(pane 을 메인 레이아웃으로 되돌림).
         if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) {
             self.dock_pane_terminal(idx);
