@@ -1930,7 +1930,32 @@ impl GpuRenderer {
                 // else the stateless line lexer (single TEXT color when `lang`
                 // is empty, e.g. plain text). Panned by h_scroll.
                 let mut tx = tx0;
+                // 조합 중인 줄은 하이라이트를 한 프레임 접고 prefix/조합/suffix 를
+                // 직접 그린다. 예전엔 줄을 다 그린 뒤 조합 글자를 캐럿 자리에
+                // **덮어** 그려서, 편집기에선 뒤 글자와 뭉개져 어디에 쓰고 있는지
+                // 안 보였다(거노: "입력중인거 이상한 위치에 있어"). 터미널은 셀
+                // 격자라 덮어도 되지만 편집기는 밀어야 맞다.
+                let composing = li == cursor.0 && !preedit.is_empty();
+                if composing {
+                    let prefix: String = line.chars().take(cursor.1).collect();
+                    let suffix: String = line.chars().skip(cursor.1).collect();
+                    let plain = DrawOpts {
+                        font_size: base,
+                        color: crate::theme::text(),
+                        bold: false,
+                        italic: false,
+                    };
+                    let accent = DrawOpts { color: crate::theme::accent(), ..plain };
+                    tx = self.draw_text_clipped(tx, pen_y + glyph_voff, &prefix, plain, cx0, clip_right);
+                    let pe_x = tx;
+                    tx = self.draw_text_clipped(tx, pen_y + glyph_voff, preedit, accent, cx0, clip_right);
+                    if tx > pe_x {
+                        self.rect(pe_x, pen_y + glyph_voff + base - 2.0, tx - pe_x, 2.0, crate::theme::accent());
+                    }
+                    tx = self.draw_text_clipped(tx, pen_y + glyph_voff, &suffix, plain, cx0, clip_right);
+                }
                 match ts_spans.as_ref().and_then(|s| s.get(li)) {
+                    _ if composing => {}
                     Some(spans) => {
                         for (tok, kind) in spans {
                             tx = self.draw_text_clipped(
@@ -1967,25 +1992,10 @@ impl GpuRenderer {
                     let prefix: String = line.chars().take(cursor.1).collect();
                     let cw = self.measure_run(&prefix, base, false, false, true, false);
                     let mut cur_x = tx0 + cw;
-                    // Composing Hangul: draw the preedit at the cursor with an
-                    // accent underline, cursor sits after it.
+                    // 조합 글자는 위 `composing` 가지가 이미 밀어 그렸다 — 여기선
+                    // 그 폭만큼 캐럿을 뒤로 옮기기만 한다(두 번 그리면 겹친다).
                     if !preedit.is_empty() {
-                        let pw = self.measure_run(preedit, base, false, false, true, false);
-                        self.rect(cur_x, pen_y + glyph_voff + base - 2.0, pw, 2.0, crate::theme::accent());
-                        self.draw_text_clipped(
-                            cur_x,
-                            pen_y + glyph_voff,
-                            preedit,
-                            DrawOpts {
-                                font_size: base,
-                                color: crate::theme::accent(),
-                                bold: false,
-                                italic: false,
-                            },
-                            cx0,
-                            clip_right,
-                        );
-                        cur_x += pw;
+                        cur_x += self.measure_run(preedit, base, false, false, true, false);
                     }
                     if cursor_on && cur_x >= cx0 {
                         // Cursor bar matches the glyph box (same voff + height as
