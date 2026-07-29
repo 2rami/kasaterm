@@ -114,6 +114,26 @@ fn is_cjk_wide(ch: char) -> bool {
     ) || cp >= 0x20000          // CJK Ext B and beyond
 }
 
+/// CJK 폴백 배율을 "설계 크기 일치"(0.0) ↔ "두 칸 꽉 채움"(1.0) 사이 어디에
+/// 둘지. `KASATERM_CJK_FIT_BIAS` 로 덮을 수 있다.
+///
+/// 0.0 은 한글 크기가 라틴과 자연스럽게 맞는 대신 두 칸이 글자보다 넓어
+/// 자간이 벌어져 보이고, 1.0 은 자간이 붙는 대신 한글이 라틴 대문자보다
+/// 14% 커진다. 어느 쪽도 공짜가 아니라 기본값은 눈으로 골랐다.
+fn cjk_fit_bias() -> f32 {
+    use std::sync::OnceLock;
+    static BIAS: OnceLock<f32> = OnceLock::new();
+    *BIAS.get_or_init(|| {
+        std::env::var("KASATERM_CJK_FIT_BIAS")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(DEFAULT_CJK_FIT_BIAS)
+            .clamp(0.0, 1.0)
+    })
+}
+
+const DEFAULT_CJK_FIT_BIAS: f32 = 0.0;
+
 /// Synthesised bold via horizontal alpha dilation. Walks each row twice:
 /// once left→right, once right→left, taking the max against the original
 /// neighbour at each step. The result thickens vertical stems by ~2px
@@ -486,6 +506,27 @@ impl Shaper {
             // 라틴을 JetBrains 로 옮기면서 그 전제가 사라진다 — JetBrains Bold 는
             // 자체 굵기가 충분해 덧칠이 필요 없다. 그래서 게이팅을 되돌린다.
             let want_dilate = bold && !matches!(kind, FaceKind::Bold);
+            // 폴백이 그리는 CJK 는 주 폰트의 **설계 크기**에 맞춘다(cap height 비).
+            // 예전엔 "두 칸 폭 ÷ 글리프 advance" 로 맞췄는데, 그리드는 떨어져도
+            // 글자가 통째로 부푼다 — JetBrains 칸 0.6em×2 ÷ D2Coding 한글 1.0em
+            // = 1.2배가 걸려 한글 ink 가 0.895em → 1.07em, 라틴 대문자(0.73em)의
+            // 1.5배로 보였다(거노 지적, 실측 35px vs 23px). cap height 로 맞추면
+            // 1.05배라 크기가 자연스럽다.
+            // primary 가 직접 한글을 그리는 구성에서는 배율을 걸지 않는다.
+            let cjk_fit = if is_cjk_wide(ch) && face_idx != 0 {
+                let cap = self.cap_match(font_data, font_index);
+                // 두 칸 폭에 딱 맞추는 배율. 여기선 목표가 아니라 **상한**이다 —
+                // 칸을 좁힌 구성(`KASATERM_CELL_TIGHTEN`)에선 cap 배율이 두 칸을
+                // 넘길 수 있는데, 그러면 한글이 옆 칸을 침범한다.
+                let fill = if latin_cell > 0.0 && advance > 0.0 {
+                    (latin_cell * 2.0) / advance
+                } else {
+                    cap
+                };
+                (cap + (fill - cap) * cjk_fit_bias()).min(fill.max(0.1))
+            } else {
+                1.0
+            };
             let render_at = |scale_ctx: &mut ScaleContext, face_size: f32| {
                 let font = FontRef::from_index(font_data, font_index).unwrap();
                 let mut scaler = scale_ctx.builder(font).size(face_size).hint(true).build();
@@ -503,25 +544,6 @@ impl Shaper {
                     render.transform(Some(t));
                 }
                 render.render(&mut scaler, glyph_id)
-            };
-            // 폴백이 그리는 CJK 는 주 폰트의 **설계 크기**에 맞춘다(cap height 비).
-            // 예전엔 "두 칸 폭 ÷ 글리프 advance" 로 맞췄는데, 그리드는 떨어져도
-            // 글자가 통째로 부푼다 — JetBrains 칸 0.6em×2 ÷ D2Coding 한글 1.0em
-            // = 1.2배가 걸려 한글 ink 가 0.895em → 1.07em, 라틴 대문자(0.73em)의
-            // 1.5배로 보였다(거노 지적, 실측 35px vs 23px). cap height 로 맞추면
-            // 1.05배라 크기가 자연스럽고, 두 칸과의 틈도 한쪽 0.04em 뿐이다.
-            // primary 가 직접 한글을 그리는 구성에서는 배율을 걸지 않는다.
-            let cjk_fit = if is_cjk_wide(ch) && face_idx != 0 {
-                let mut s = self.cap_match(font_data, font_index);
-                // 두 칸 폭은 **상한**으로만 쓴다. 이걸 목표로 삼았던 게 원래
-                // 코드였고, 메트릭이 이상한 폴백이 옆 칸을 침범하는 것만
-                // 막으면 된다.
-                if latin_cell > 0.0 && advance > 0.0 {
-                    s = s.min((latin_cell * 2.0) / advance);
-                }
-                s
-            } else {
-                1.0
             };
             let first_size = if boost {
                 size_px * 1.25

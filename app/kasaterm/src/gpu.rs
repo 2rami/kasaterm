@@ -30,6 +30,37 @@ fn oversample_for(scale: f32) -> u32 {
     if scale < 2.0 { 2 } else { 1 }
 }
 
+/// 칸 폭을 주 폰트의 자연 advance 보다 좁히는 비율. `KASATERM_CELL_TIGHTEN`.
+///
+/// 자간은 "칸 폭 − 글자 폭"이라, 글자를 안 건드리고 좁히려면 여기밖에 없다.
+/// 한글은 두 칸을 쓰므로 칸을 1px 줄이면 한글 사이는 2px, 라틴은 1px 줄어
+/// **한글이 두 배 속도로** 좁아진다 — 라틴 자간이 지나치게 붙기 전에 한글이
+/// 먼저 제자리를 찾는다는 뜻이다. 칸이 글자보다 좁아지면 글자가 옆 칸을
+/// 침범하므로 0.85 아래로는 못 내려간다.
+fn cell_tighten() -> f32 {
+    use std::sync::OnceLock;
+    static T: OnceLock<f32> = OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("KASATERM_CELL_TIGHTEN")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(DEFAULT_CELL_TIGHTEN)
+            .clamp(0.85, 1.0)
+    })
+}
+
+/// 0.87 = JetBrains Mono 의 자연 칸(0.6em)에서 12% 조임. 눈으로 골랐다 —
+/// 16px 칸에선 한글이 글자 단위로 흩어져 읽히고, 14px 에서 비로소 단어로
+/// 뭉친다(한글 사이 8px→4px). 라틴은 4px→2px 인데 JetBrains 가 넓은 얼굴이라
+/// 여전히 답답하지 않다. 글리프 잉크는 24px 로 셋 다 같다 — 칸만 좁아진다.
+const DEFAULT_CELL_TIGHTEN: f32 = 0.87;
+
+/// 칸 폭 계산의 **단 하나의 자리**. 부팅과 폰트 크기 변경이 서로 다른 식을
+/// 쓰면 크기를 바꾸는 순간 조임이 풀린다(실제로 그랬다).
+fn cell_w_for(shaper: &mut Shaper, size_px: f32) -> f32 {
+    (shaper.cell_advance(size_px) * cell_tighten()).ceil().max(1.0)
+}
+
 /// A decoded image uploaded to its own wgpu texture. Kept alive (texture +
 /// view) for as long as the pane shows it, since the bind group borrows the
 /// view. Keyed by pane id in `GpuRenderer::images`.
@@ -368,7 +399,7 @@ impl GpuRenderer {
             .or_else(|_| Shaper::from_path(&md_font, md_idx))
             .with_context(|| format!("load markdown bold font {md_bold_font}"))?;
         attach_fallback_chain(&mut md_bold_shaper);
-        let cell_w = shaper.cell_advance(font_size_px as f32).ceil();
+        let cell_w = cell_w_for(&mut shaper, font_size_px as f32);
         // Use the font's natural line metric (ascent+descent+leading)
         // for cell height instead of an arbitrary multiplier. Lines
         // pack at the same density sugarloaf produces with
@@ -544,7 +575,7 @@ impl GpuRenderer {
             self.atlas.request_reset();
         }
         self.font_size_px = new_px;
-        let cell_w_px = self.shaper.cell_advance(new_px as f32).ceil();
+        let cell_w_px = cell_w_for(&mut self.shaper, new_px as f32);
         let cell_h_px = self.shaper.line_height(new_px as f32).ceil();
         self.cell_w = cell_w_px / self.scale;
         self.cell_h = cell_h_px / self.scale;
