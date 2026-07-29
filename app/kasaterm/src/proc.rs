@@ -37,12 +37,11 @@ pub(crate) fn open_with_apps() -> &'static [(String, String)] {
 
 #[cfg(target_os = "macos")]
 fn scan_open_with_apps() -> Vec<(String, String)> {
-    // 코드 에디터 우선, 그다음 문서 계열. 순서가 곧 메뉴 순서다.
+    // 순서가 곧 메뉴 순서다. 거노가 안 쓰는 에디터(Cursor·Antigravity·Obsidian)는
+    // 뺐다 — 설치돼 있다고 다 올리면 정작 쓰는 항목이 목록에 파묻힌다.
     const CANDIDATES: &[&str] = &[
-        "Cursor",
         "Visual Studio Code",
         "Zed",
-        "Antigravity",
         "Windsurf",
         "Sublime Text",
         "Nova",
@@ -50,14 +49,13 @@ fn scan_open_with_apps() -> Vec<(String, String)> {
         "WebStorm",
         "PyCharm",
         "Xcode",
-        "Obsidian",
     ];
     let home = std::env::var("HOME").unwrap_or_default();
     let roots = [
         "/Applications".to_string(),
         format!("{home}/Applications"),
     ];
-    let mut out = Vec::new();
+    let mut out: Vec<(String, String)> = Vec::new();
     for name in CANDIDATES {
         for root in &roots {
             let bundle = format!("{root}/{name}.app");
@@ -67,6 +65,45 @@ fn scan_open_with_apps() -> Vec<(String, String)> {
             }
         }
     }
+    // 표준 위치에 없는 건 Spotlight 에 한 번 더 묻는다. 앱이 꼭 `/Applications`
+    // 에 있으란 법이 없어서다 — 이 기기의 VS Code 는 `~/Desktop/momewomo` 에
+    // 있었고, 그래서 "제일 중요한 항목이 메뉴에 없다"는 사고가 났다.
+    // 질의는 미발견 후보를 묶어 **한 번만** 던진다(앱마다 fork 하면 우클릭이
+    // 체감될 만큼 늦다 — 실측 1회 47ms).
+    let missing: Vec<&str> = CANDIDATES
+        .iter()
+        .copied()
+        .filter(|n| !out.iter().any(|(have, _)| have == n))
+        .collect();
+    if !missing.is_empty() {
+        let clause = missing
+            .iter()
+            .map(|n| format!("kMDItemFSName == '{n}.app'"))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let q = format!("kMDItemContentType == 'com.apple.application-bundle' && ({clause})");
+        if let Ok(o) = command("mdfind").arg(&q).output() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let path = line.trim();
+                // 다른 번들 안에 끼어 있는 사본은 앱이 아니라 부품이다.
+                if path.is_empty() || path.trim_end_matches(".app").contains(".app/") {
+                    continue;
+                }
+                let Some(name) = std::path::Path::new(path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                else {
+                    continue;
+                };
+                // Spotlight 는 같은 경로를 두 번 주기도 한다.
+                if missing.contains(&name) && !out.iter().any(|(have, _)| have == name) {
+                    out.push((name.to_string(), path.to_string()));
+                }
+            }
+        }
+        // mdfind 결과는 CANDIDATES 순서를 모르므로 여기서 되돌린다.
+        out.sort_by_key(|(n, _)| CANDIDATES.iter().position(|c| c == n).unwrap_or(usize::MAX));
+    }
     out
 }
 
@@ -74,8 +111,7 @@ fn scan_open_with_apps() -> Vec<(String, String)> {
 fn scan_open_with_apps() -> Vec<(String, String)> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
-    let candidates: [(&str, Vec<String>); 5] = [
-        ("Cursor", vec![format!(r"{local}\Programs\cursor\Cursor.exe")]),
+    let candidates: [(&str, Vec<String>); 4] = [
         (
             "Visual Studio Code",
             vec![
@@ -100,7 +136,6 @@ fn scan_open_with_apps() -> Vec<(String, String)> {
 fn scan_open_with_apps() -> Vec<(String, String)> {
     // PATH 를 직접 훑는다 — `which` 를 fork 하는 것보다 싸고, 셸이 없어도 된다.
     const CANDIDATES: &[(&str, &str)] = &[
-        ("Cursor", "cursor"),
         ("Visual Studio Code", "code"),
         ("Zed", "zed"),
         ("Sublime Text", "subl"),
