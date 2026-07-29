@@ -678,7 +678,9 @@ impl ApplicationHandler<UserEvent> for App {
             // give black text on our dark content view and make the
             // process-name label nearly invisible in light mode.
             .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(init_w, init_h));
+            .with_inner_size(LogicalSize::new(init_w, init_h))
+            // 배경 실행(검증 캡처)일 땐 뜨면서 키 포커스를 가져가지 않는다.
+            .with_active(!crate::background_launch());
         // Custom chrome: traffic-light row sits inside the content view
         // so we can paint tabs and drag handles right next to the
         // native buttons. OS still owns the traffic lights themselves
