@@ -49,6 +49,10 @@ pub(crate) struct PortRow {
     pub(crate) pid: u32,
     /// 소유 프로세스의 표시 이름. 못 찾으면 빈 문자열.
     pub(crate) name: String,
+    /// 이 pane 의 셸 자손이 **아니고** 작업 폴더가 같아서 딸려온 것. 띄운 셸이
+    /// 죽어 launchd 밑으로 넘어간 dev 서버가 대부분이라, 이 pane 이 지금 돌리는
+    /// 것처럼 보이면 안 된다(끄려고 pane 을 닫아도 안 죽는다).
+    pub(crate) orphan: bool,
 }
 
 /// 한 번의 수집 결과. 셸 이름까지 같이 담는 건 머리와 목록이 같은 스냅샷에서
@@ -73,7 +77,7 @@ struct Raw {
 
 /// 셸 pid 아래의 프로세스와 그것들이 listen 중인 포트. 순서는 트리 선행 순회 —
 /// 부모 바로 밑에 자식이 오도록 정렬해 들여쓰기가 말이 되게 한다.
-pub(crate) fn collect(shell_pid: u32) -> InfoSnap {
+pub(crate) fn collect(shell_pid: u32, root: Option<&std::path::Path>) -> InfoSnap {
     let table = process_snapshot();
     if table.is_empty() {
         return InfoSnap::default();
@@ -81,17 +85,43 @@ pub(crate) fn collect(shell_pid: u32) -> InfoSnap {
     let by_pid: HashMap<u32, &Raw> = table.iter().map(|r| (r.pid, r)).collect();
     let out = build_rows(&table, shell_pid);
     // 셸 자신도 포트를 쥘 수 있다(`nc -l` 같은 걸 셸이 직접 돌린 경우).
-    let mut pids: Vec<u32> = out.iter().map(|r| r.pid).collect();
-    pids.push(shell_pid);
-    let ports = listening_ports(&pids)
+    let mut mine: std::collections::HashSet<u32> = out.iter().map(|r| r.pid).collect();
+    mine.insert(shell_pid);
+    // 셸 자손만 보면 **정작 찾는 서버를 놓친다**. `npm run dev` 를 띄운 셸이
+    // 끝나면 서버는 launchd(ppid 1) 밑으로 넘어가 트리에서 사라지는데, 포트는
+    // 그대로 물고 있다(실측: dev 서버 넷 전부 ppid 1). 거노가 "포트 열려 있는데
+    // info 가 못 잡는다" 고 한 게 이것 — 그래서 전체 listen 을 훑은 뒤,
+    // **작업 폴더가 이 pane 의 레포 안**인 것까지 끌어온다. 폴더로 거르니
+    // ControlCenter·Adobe 같은 시스템 포트는 안 딸려온다.
+    let all = listening_ports();
+    let extra: Vec<u32> = all
+        .iter()
+        .map(|(_, pid)| *pid)
+        .filter(|pid| !mine.contains(pid))
+        .collect();
+    let cwds = if root.is_some() { cwds_of(&extra) } else { HashMap::new() };
+    let ports = all
         .into_iter()
-        .map(|(port, pid)| PortRow {
-            port,
-            pid,
-            name: by_pid
-                .get(&pid)
-                .map(|r| split_argv(&r.args).0)
-                .unwrap_or_default(),
+        .filter_map(|(port, pid)| {
+            let own = mine.contains(&pid);
+            if !own {
+                let in_root = match (root, cwds.get(&pid)) {
+                    (Some(r), Some(c)) => c.starts_with(r),
+                    _ => false,
+                };
+                if !in_root {
+                    return None;
+                }
+            }
+            Some(PortRow {
+                port,
+                pid,
+                name: by_pid
+                    .get(&pid)
+                    .map(|r| split_argv(&r.args).0)
+                    .unwrap_or_default(),
+                orphan: !own,
+            })
         })
         .collect();
     let shell = by_pid
@@ -219,22 +249,19 @@ fn process_snapshot() -> Vec<Raw> {
         .collect()
 }
 
-/// 주어진 pid 들이 listen 중인 `(포트, pid)`. 실패하면 빈 목록이라 패널은
+/// listen 중인 TCP 포트 전부 — `(포트, pid)`. 실패하면 빈 목록이라 패널은
 /// 포트 섹션만 비운 채 뜬다.
+///
+/// pid 로 미리 거르지 않는다. 고아가 된 dev 서버(띄운 셸이 죽어 ppid 1)를
+/// 놓치지 않으려면 전부 받아 호출자가 걸러야 하고, 실측 비용도 46ms 로
+/// pid 필터를 걸 때와 사실상 같다.
 #[cfg(unix)]
-fn listening_ports(pids: &[u32]) -> Vec<(u16, u32)> {
-    if pids.is_empty() {
-        return Vec::new();
-    }
-    // `-a -p <목록>` 으로 셀렉터를 AND 해 이 세션의 프로세스만 본다. 필터 없이
-    // 부르면 머신의 모든 fd 를 훑고 남을 버리는 셈이라, 포트를 하나도 안 쓰는
-    // pane 에서도 값을 치른다.
-    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+fn listening_ports() -> Vec<(u16, u32)> {
     // `-F pn` 은 프로세스 레코드(p<pid>)와 이름 레코드(n<addr>)만 내보내는 lsof
     // 의 기계 판독 모드다. 사람이 읽는 표를 파싱하면 명령 이름에 공백이 든
     // 프로세스에서 열이 밀린다.
     let Ok(out) = proc::command("lsof")
-        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &list, "-F", "pn"])
+        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pn"])
         .output()
     else {
         return Vec::new();
@@ -260,9 +287,7 @@ fn listening_ports(pids: &[u32]) -> Vec<(u16, u32)> {
 }
 
 #[cfg(windows)]
-fn listening_ports(pids: &[u32]) -> Vec<(u16, u32)> {
-    // netstat 엔 pid 필터가 없어 전체를 받아 걸러낸다.
-    let want: std::collections::HashSet<u32> = pids.iter().copied().collect();
+fn listening_ports() -> Vec<(u16, u32)> {
     let Ok(out) = proc::command("netstat").args(["-ano", "-p", "TCP"]).output() else {
         return Vec::new();
     };
@@ -285,6 +310,43 @@ fn listening_ports(pids: &[u32]) -> Vec<(u16, u32)> {
         }
     }
     dedup_ports(ports)
+}
+
+/// pid → 작업 폴더. 셸 트리 밖의 포트를 "이 레포 것"으로 인정할지 가르는 유일한
+/// 근거다. 포트를 쥔 프로세스만 물으므로 한 번의 fork 로 끝난다(실측 32ms).
+#[cfg(unix)]
+fn cwds_of(pids: &[u32]) -> HashMap<u32, std::path::PathBuf> {
+    let mut out = HashMap::new();
+    if pids.is_empty() {
+        return out;
+    }
+    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let Ok(o) = proc::command("lsof")
+        .args(["-nP", "-a", "-p", &list, "-d", "cwd", "-F", "pn"])
+        .output()
+    else {
+        return out;
+    };
+    let s = String::from_utf8_lossy(&o.stdout);
+    let mut cur: u32 = 0;
+    for line in s.lines() {
+        let (tag, val) = line.split_at(line.char_indices().nth(1).map_or(0, |(i, _)| i));
+        match tag {
+            "p" => cur = val.parse::<u32>().unwrap_or(0),
+            "n" if cur != 0 => {
+                out.insert(cur, std::path::PathBuf::from(val));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Windows 엔 남의 프로세스 cwd 를 싸게 읽을 방법이 없다 — 고아 서버는 못 잡고
+/// 셸 자손만 뜬다(unix 와 달리 레포 폴더 확장이 안 된다).
+#[cfg(windows)]
+fn cwds_of(_pids: &[u32]) -> HashMap<u32, std::path::PathBuf> {
+    HashMap::new()
 }
 
 /// 포트 오름차순 정렬 + 중복 제거. 같은 소켓이 IPv4 와 IPv6 로 한 번씩 잡히므로
@@ -405,8 +467,13 @@ impl App {
         let snap = self.info.snap.clone();
         let busy = self.info.busy.clone();
         let proxy = self.proxy.clone();
+        // 포트 섹션이 셸 트리 밖 프로세스를 끌어올 때 쓰는 경계. **git 레포일
+        // 때만** 넓힌다 — `~/Desktop` 처럼 레포가 아닌 폴더를 앵커로 쓰면 그
+        // 아래 모든 프로젝트의 서버가 딸려온다(실측 15개). "이 레포에서 도는
+        // 서버"는 뜻이 있지만 "이 폴더 밑 아무거나"는 잡음일 뿐이다.
+        let root = if self.info.root_is_repo { self.info.root.clone() } else { None };
         std::thread::spawn(move || {
-            let fresh = collect(pid);
+            let fresh = collect(pid, root.as_deref());
             if let Ok(mut g) = snap.lock() {
                 *g = fresh;
             }
@@ -974,7 +1041,10 @@ fn draw_port_row(
     if hov {
         g.rect(x, y, w, ROW_H, theme::surface_hover());
     }
-    round_rect(g, x0, y + 8.0, 6.0, 6.0, 3.0, theme::accent());
+    // 이 pane 이 돌리는 게 아니면 점을 흐리게 — pane 을 닫아도 안 죽는다는
+    // 사실이 목록에서 바로 보여야 한다(대개 셸이 죽어 launchd 로 넘어간 서버).
+    let dot = if p.orphan { theme::text_dim() } else { theme::accent() };
+    round_rect(g, x0, y + 8.0, 6.0, 6.0, 3.0, dot);
     let port_s = p.port.to_string();
     g.draw_text(
         x0 + 12.0,
