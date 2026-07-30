@@ -700,19 +700,24 @@ impl MarkdownPane {
         if self.edit_lines.is_empty() {
             self.lines_mut().push(String::new());
         }
-        let is_motion = matches!(
-            &event.logical_key,
-            Key::Named(
-                NamedKey::ArrowLeft
-                    | NamedKey::ArrowRight
-                    | NamedKey::ArrowUp
-                    | NamedKey::ArrowDown
-                    | NamedKey::Home
-                    | NamedKey::End
-                    | NamedKey::PageUp
-                    | NamedKey::PageDown
-            )
-        );
+        // Opt+↑↓ 는 이동이 아니라 **줄 편집**(이동·복제)이다 — motion 으로 두면
+        // 아래 Shift 분기가 선택 앵커를 세워 Shift+Opt+↑↓ 줄 복제를 가로챈다.
+        let is_line_cmd = alt
+            && matches!(&event.logical_key, Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown));
+        let is_motion = !is_line_cmd
+            && matches!(
+                &event.logical_key,
+                Key::Named(
+                    NamedKey::ArrowLeft
+                        | NamedKey::ArrowRight
+                        | NamedKey::ArrowUp
+                        | NamedKey::ArrowDown
+                        | NamedKey::Home
+                        | NamedKey::End
+                        | NamedKey::PageUp
+                        | NamedKey::PageDown
+                )
+            );
         // Shift+motion grows a selection from the current caret; plain motion
         // drops it (Left/Right collapse to its edges first).
         if is_motion && shift && self.sel_anchor.is_none() {
@@ -817,6 +822,28 @@ impl MarkdownPane {
                     line += 1;
                     col = 0;
                 }
+            }
+            // Opt+↑↓ = 줄 이동, Shift+Opt+↑↓ = 줄 복제. 이 두 팔이 없어 `alt` 가
+            // 버려지고 "커서만 한 줄 이동" 이 되던 자리다.
+            Key::Named(NamedKey::ArrowUp) if is_line_cmd => {
+                if shift {
+                    self.duplicate_lines(true);
+                } else {
+                    self.move_lines(true);
+                }
+                line = self.cur_line;
+                col = self.cur_col;
+                edited = true;
+            }
+            Key::Named(NamedKey::ArrowDown) if is_line_cmd => {
+                if shift {
+                    self.duplicate_lines(false);
+                } else {
+                    self.move_lines(false);
+                }
+                line = self.cur_line;
+                col = self.cur_col;
+                edited = true;
             }
             Key::Named(NamedKey::ArrowUp) => {
                 if line > 0 {
@@ -957,6 +984,104 @@ impl MarkdownPane {
         self.cur_line = self.edit_lines.len() - 1;
         self.cur_col = self.edit_lines[self.cur_line].chars().count();
         self.last_edit = EditKind::Break;
+    }
+
+    /// 캐럿이 놓인 단어를 선택한다 — Cmd+D 첫 누름(그리고 나중의 더블클릭).
+    /// 경계는 Opt+←→ 와 **같은** 판정(`prev_word_col`/`next_word_col`)을 쓴다:
+    /// 두 조작이 각자 경계를 두면 같은 줄에서 결과가 갈려 어느 쪽이 맞는지
+    /// 화면이 설명해 주지 못한다. 캐럿이 공백 위면 왼쪽 단어를 집는다(방금
+    /// 타이핑한 낱말을 잡으려는 게 대개의 의도).
+    /// 잡을 단어가 없으면 선택을 건드리지 않고 false.
+    pub(crate) fn select_word_at(&mut self) -> bool {
+        let Some(line) = self.edit_lines.get(self.cur_line) else { return false };
+        let chars: Vec<char> = line.chars().collect();
+        let start = prev_word_col(&chars, self.cur_col.min(chars.len()));
+        let end = next_word_col(&chars, start);
+        if end <= start {
+            return false;
+        }
+        self.sel_anchor = Some((self.cur_line, start));
+        self.cur_col = end;
+        self.last_edit = EditKind::Break;
+        true
+    }
+
+    /// 줄 단위 명령(줄 이동·복제, 나중의 줄 삭제·주석 토글)이 대상으로 삼는 줄
+    /// 범위. 선택이 있으면 그것이 걸친 줄 전부, 없으면 캐럿 줄 하나.
+    fn line_block(&self) -> (usize, usize) {
+        match self.sel_range() {
+            Some((s, e)) => (s.0, e.0),
+            None => {
+                let l = self.cur_line.min(self.edit_lines.len().saturating_sub(1));
+                (l, l)
+            }
+        }
+    }
+
+    /// 캐럿과 선택 앵커의 **줄 번호만** `d` 만큼 옮긴다(열은 유지). 줄이 통째로
+    /// 움직이는 명령에서 선택이 따라오지 않으면 방금 옮긴 줄이 선택에서 벗어난다.
+    fn shift_caret_lines(&mut self, d: i64) {
+        let last = self.edit_lines.len().saturating_sub(1);
+        let mv = |l: usize| ((l as i64 + d).max(0) as usize).min(last);
+        self.cur_line = mv(self.cur_line);
+        if let Some((al, ac)) = self.sel_anchor {
+            self.sel_anchor = Some((mv(al), ac));
+        }
+    }
+
+    /// Opt+↑↓ — 캐럿 줄(선택이 있으면 그 블록)을 한 줄 위/아래로 옮긴다.
+    /// 경계에 닿으면 아무것도 하지 않고 false — 예전엔 이 키가 `alt` 를 아예
+    /// 무시해 "커서만 한 줄 이동" 으로 조용히 처리됐다(거노: 아무 일도 안 난 것
+    /// 처럼 보임).
+    pub(crate) fn move_lines(&mut self, up: bool) -> bool {
+        if self.edit_lines.is_empty() {
+            return false;
+        }
+        let (s, e) = self.line_block();
+        if up && s == 0 {
+            return false;
+        }
+        if !up && e + 1 >= self.edit_lines.len() {
+            return false;
+        }
+        self.push_undo(EditKind::Other);
+        // 블록을 옮기는 대신 **이웃 한 줄을 블록 반대편으로** 넘긴다 — 결과가
+        // 같고 블록 길이와 무관하게 remove+insert 한 번이다.
+        let lines = self.lines_mut();
+        if up {
+            let moved = lines.remove(s - 1);
+            lines.insert(e, moved);
+        } else {
+            let moved = lines.remove(e + 1);
+            lines.insert(s, moved);
+        }
+        self.shift_caret_lines(if up { -1 } else { 1 });
+        self.last_edit = EditKind::Other;
+        true
+    }
+
+    /// Shift+Opt+↑↓ — 캐럿 줄(선택이 있으면 그 블록)을 복제한다.
+    pub(crate) fn duplicate_lines(&mut self, up: bool) -> bool {
+        if self.edit_lines.is_empty() {
+            return false;
+        }
+        let (s, e) = self.line_block();
+        self.push_undo(EditKind::Other);
+        let block: Vec<String> = self.edit_lines[s..=e].to_vec();
+        let n = block.len();
+        let at = if up { s } else { e + 1 };
+        let lines = self.lines_mut();
+        for (i, l) in block.into_iter().enumerate() {
+            lines.insert(at + i, l);
+        }
+        // 아래로 복제하면 캐럿을 복제본으로 옮겨 연달아 누르는 게 자연스럽게
+        // 이어진다. 위로 복제하면 삽입이 원본을 밀어내므로 캐럿을 그대로 두면
+        // 이미 복제본 위에 있다.
+        if !up {
+            self.shift_caret_lines(n as i64);
+        }
+        self.last_edit = EditKind::Other;
+        true
     }
 
     /// Splice already-normalized (`\n`-only) clipboard text at the caret as one
@@ -1147,6 +1272,17 @@ impl App {
     /// Cmd/Ctrl(host-mod) shortcuts the raw editor owns. Returns true when the
     /// event was consumed here; anything else falls through to the global
     /// shortcut block so Cmd+W/D/T keep working with an editor focused.
+    /// 조합 중인 한글 음절을 버퍼에 확정한다. 캐럿을 옮기거나 버퍼를 읽는
+    /// 동작 **앞에서** 부른다 — 안 그러면 조합 중이던 글자가 파일에서 빠지거나
+    /// (Cmd+S) 옮겨 간 캐럿 자리에 남는다. 조합 중이 아니면 아무 일도 없다.
+    pub(crate) fn md_flush_preedit(&mut self) {
+        if let Some(flushed) = self.hangul.flush() {
+            self.md_editor_insert(&flushed);
+        }
+        self.preedit.clear();
+        self.in_preedit = false;
+    }
+
     pub(crate) fn md_editor_shortcut(&mut self, event: &KeyEvent) -> bool {
         use winit::keyboard::{KeyCode, PhysicalKey};
         if !self.host_mod() {
@@ -1155,24 +1291,16 @@ impl App {
         let PhysicalKey::Code(code) = event.physical_key else {
             return false;
         };
+        // 확정은 **모든** 단축키 앞에서 한 번. 예전엔 팔마다 같은 네 줄을 복붙해
+        // S/V/X/A/Z 만 확정했고 Cmd+C·Cmd+화살표·Cmd+F/G 는 빠져 있어, 조합 중
+        // 그 키를 누르면 음절이 유실되거나 옮겨 간 캐럿 자리에 남았다.
+        self.md_flush_preedit();
         match code {
             KeyCode::KeyS => {
-                // 조합 중인 한글 음절을 버퍼에 넣고 저장 — 안 그러면 마지막
-                // 글자가 파일에서 빠진다.
-                if let Some(flushed) = self.hangul.flush() {
-                    self.md_editor_insert(&flushed);
-                }
-                self.preedit.clear();
-                self.in_preedit = false;
                 self.save_active_editor();
                 true
             }
             KeyCode::KeyV => {
-                if let Some(flushed) = self.hangul.flush() {
-                    self.md_editor_insert(&flushed);
-                }
-                self.preedit.clear();
-                self.in_preedit = false;
                 self.md_editor_paste();
                 true
             }
@@ -1181,30 +1309,21 @@ impl App {
                 true
             }
             KeyCode::KeyX => {
-                if let Some(flushed) = self.hangul.flush() {
-                    self.md_editor_insert(&flushed);
-                }
-                self.preedit.clear();
-                self.in_preedit = false;
                 self.md_copy_selection(true);
                 true
             }
             KeyCode::KeyA => {
-                if let Some(flushed) = self.hangul.flush() {
-                    self.md_editor_insert(&flushed);
-                }
-                self.preedit.clear();
-                self.in_preedit = false;
                 self.md_select_all();
                 true
             }
+            // Cmd+D = 캐럿 단어 선택(VS Code 첫 누름). 이 팔이 없어 전역 폴백으로
+            // 새면서 **편집 중에 pane 이 쪼개졌다**. Shift 조합은 흘려보내
+            // Cmd+Shift+D 세로 분할 경로를 남긴다.
+            KeyCode::KeyD if !self.modifiers.shift_key() => {
+                self.md_with_editor(|m| m.select_word_at());
+                true
+            }
             KeyCode::KeyZ => {
-                // 조합 중이던 음절은 undo 대상 버퍼에 먼저 확정시킨다.
-                if let Some(flushed) = self.hangul.flush() {
-                    self.md_editor_insert(&flushed);
-                }
-                self.preedit.clear();
-                self.in_preedit = false;
                 if self.modifiers.shift_key() {
                     self.md_redo();
                 } else {
@@ -1373,7 +1492,7 @@ impl App {
                 .get(line)
                 .map(|l| l.chars().take(m.cur_col).collect())
                 .unwrap_or_default();
-            (id, m.edit_lines.len(), line, prefix, m.scroll as f32, m.h_scroll)
+            (id, m.edit_lines.len(), line, prefix, m.scroll, m.h_scroll)
         };
         let (id, line_count, cur_line, prefix, scroll, h_scroll) = snap;
         let Some(&(_bx, _by, bw, bh)) = self.md_body_rects.get(&id) else { return };
@@ -1385,7 +1504,7 @@ impl App {
             if let Some(pane) = ws.panes.get_mut(&id) {
                 pane.dirty = true;
                 if let Some(m) = pane.markdown_mut() {
-                    m.scroll = ns.max(0.0) as usize;
+                    m.scroll = ns.max(0.0);
                     m.h_scroll = nh.max(0.0);
                 }
             }
@@ -1465,6 +1584,15 @@ impl App {
     /// by the renderer), hit-tests the pixel to a (line, col) via the GPU shaper,
     /// then writes it back. No-op unless `id` is a raw-mode markdown pane.
     pub(crate) fn md_click_caret(&mut self, id: &str, px: f32, py: f32) {
+        // 조합 중 클릭은 **캐럿을 옮기기 전에** 옛 자리에 확정해야 한다.
+        // `ime_retarget` 은 조합기 주인이 바뀔 때만 일하고 같은 대상이면 조기
+        // 반환하므로(input.rs), 같은 편집기 안 클릭은 그 경로로 안 잡힌다 —
+        // preedit 렌더는 매 프레임 현재 캐럿을 따라가니 화면은 멀쩡해 보이는데
+        // 다음 자모가 완성되는 순간 **클릭한 새 자리에** 커밋됐다.
+        let mine = matches!(self.ime_focus.as_ref(), Some(crate::ImeFocus::Editor(e)) if e == id);
+        if mine {
+            self.md_flush_preedit();
+        }
         let Some(&(bx, by, _bw, _bh)) = self.md_body_rects.get(id) else { return };
         // Pull the lines + pan out under a short lock so the GPU borrow below
         // doesn't overlap the workspace borrow.
@@ -1472,7 +1600,7 @@ impl App {
             let ws = self.ws.lock().unwrap();
             ws.panes.get(id).and_then(|p| p.markdown()).and_then(|m| {
                 m.raw_mode
-                    .then(|| (m.edit_lines.clone(), m.scroll as f32, m.h_scroll))
+                    .then(|| (m.edit_lines.clone(), m.scroll, m.h_scroll))
             })
         };
         let Some((lines, scroll, h_scroll)) = snapshot else { return };
@@ -1488,6 +1616,14 @@ impl App {
                 m.last_edit = EditKind::Break;
             }
         }
+        drop(ws);
+        // 다른 문맥(터미널·다른 편집기·설정 필드)에서 조합 중이었다면 그 **옛
+        // 대상에** 확정하고 조합기 주인을 이 편집기로 넘긴다. 이미 이 편집기가
+        // 주인이면 위에서 비웠으므로 부를 필요가 없다(드래그마다 도는 자리라
+        // 불필요한 String 할당도 피한다).
+        if !mine {
+            self.ime_retarget(crate::ImeFocus::Editor(id.to_string()));
+        }
     }
     /// Source line currently at the top of a markdown pane's viewport, whatever
     /// mode it is in. This is the intermediate currency for mode switching: the
@@ -1497,7 +1633,7 @@ impl App {
         let (raw_mode, scroll, block_line_at) = {
             let ws = self.ws.lock().unwrap();
             let m = ws.panes.get(id)?.markdown()?;
-            let scroll = m.scroll as f32;
+            let scroll = m.scroll;
             if m.raw_mode {
                 (true, scroll, None)
             } else {
@@ -1565,7 +1701,7 @@ impl App {
                     } else {
                         m.touch();
                     }
-                    m.scroll = guess.unwrap_or(0.0).max(0.0) as usize;
+                    m.scroll = guess.unwrap_or(0.0).max(0.0);
                 }
                 pending = anchor;
             }
@@ -1580,7 +1716,7 @@ impl App {
             // 모드가 매번 파일 맨 위에서 시작한다.
             m.cur_line = line;
             m.cur_col = 0;
-            m.scroll = raw_metrics.map_or(0, |(pad, lh)| (pad + line as f32 * lh) as usize);
+            m.scroll = raw_metrics.map_or(0.0, |(pad, lh)| pad + line as f32 * lh);
             m.raw_mode = true;
         }
         drop(ws);
@@ -1676,7 +1812,7 @@ mod tests {
             edit_lines: lines.iter().map(|s| s.to_string()).collect::<Vec<_>>().into(),
             cur_line: 0,
             cur_col: 0,
-            scroll: 0,
+            scroll: 0.0,
             h_scroll: 0.0,
             modified: false,
             sel_anchor: None,
@@ -1686,6 +1822,85 @@ mod tests {
             find: None,
             edited_at: None,
         }
+    }
+
+    #[test]
+    fn select_word_at_grabs_the_run_under_the_caret() {
+        // 단어 중간
+        let mut p = pane(&["let value = 1;"]);
+        p.cur_col = 6;
+        assert!(p.select_word_at());
+        assert_eq!(p.sel_range(), Some(((0, 4), (0, 9))));
+        // 단어 끝에 붙은 캐럿(방금 타이핑한 뒤)도 그 단어를 잡는다
+        let mut p = pane(&["let value = 1;"]);
+        p.cur_col = 9;
+        assert!(p.select_word_at());
+        assert_eq!(p.sel_range(), Some(((0, 4), (0, 9))));
+        // 줄 시작
+        let mut p = pane(&["let value = 1;"]);
+        p.cur_col = 0;
+        assert!(p.select_word_at());
+        assert_eq!(p.sel_range(), Some(((0, 0), (0, 3))));
+    }
+
+    #[test]
+    fn select_word_at_on_an_empty_line_changes_nothing() {
+        let mut p = pane(&[""]);
+        assert!(!p.select_word_at());
+        assert_eq!(p.sel_anchor, None);
+    }
+
+    #[test]
+    fn move_lines_swaps_with_the_neighbour_and_carries_the_caret() {
+        let mut p = pane(&["a", "b", "c"]);
+        p.cur_line = 1;
+        assert!(p.move_lines(true));
+        assert_eq!(p.edit_lines.join("\n"), "b\na\nc");
+        assert_eq!(p.cur_line, 0);
+        assert!(p.move_lines(false));
+        assert_eq!(p.edit_lines.join("\n"), "a\nb\nc");
+        assert_eq!(p.cur_line, 1);
+    }
+
+    #[test]
+    fn move_lines_at_the_edge_is_a_no_op() {
+        let mut p = pane(&["a", "b"]);
+        p.cur_line = 0;
+        assert!(!p.move_lines(true));
+        p.cur_line = 1;
+        assert!(!p.move_lines(false));
+        assert_eq!(p.edit_lines.join("\n"), "a\nb");
+    }
+
+    #[test]
+    fn move_lines_moves_a_whole_selected_block_and_keeps_it_selected() {
+        let mut p = pane(&["a", "b", "c", "d"]);
+        p.sel_anchor = Some((1, 0));
+        p.cur_line = 2;
+        p.cur_col = 1;
+        assert!(p.move_lines(false));
+        assert_eq!(p.edit_lines.join("\n"), "a\nd\nb\nc");
+        // 앵커까지 따라와야 옮긴 블록이 계속 선택된 채로 남는다.
+        assert_eq!(p.sel_anchor, Some((2, 0)));
+        assert_eq!(p.cur_line, 3);
+    }
+
+    #[test]
+    fn duplicate_lines_lands_the_caret_on_the_copy_going_down() {
+        let mut p = pane(&["x", "y"]);
+        p.cur_line = 0;
+        assert!(p.duplicate_lines(false));
+        assert_eq!(p.edit_lines.join("\n"), "x\nx\ny");
+        assert_eq!(p.cur_line, 1);
+    }
+
+    #[test]
+    fn duplicate_lines_going_up_leaves_the_caret_on_the_upper_copy() {
+        let mut p = pane(&["x", "y"]);
+        p.cur_line = 1;
+        assert!(p.duplicate_lines(true));
+        assert_eq!(p.edit_lines.join("\n"), "x\ny\ny");
+        assert_eq!(p.cur_line, 1);
     }
 
     /// 이어쓰기 접두사 인식 — Enter 와 Tab 이 둘 다 이 판단에 얹혀 있다.
@@ -2026,7 +2241,7 @@ mod tests {
             edit_lines: Arc::default(),
             cur_line: 0,
             cur_col: 0,
-            scroll: 0,
+            scroll: 0.0,
             h_scroll: 0.0,
             modified: false,
             sel_anchor: None,

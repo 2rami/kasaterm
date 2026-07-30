@@ -71,6 +71,12 @@ pub struct Shaper {
     /// cleaner than skew-synth which can clip ascenders at the cell edge.
     italic_faces: Vec<(FontData, u32)>,
     scale_ctx: ScaleContext,
+    /// `cell_advance` 결과 캐시(size_px 비트 → advance). 이게 없으면 **공백을
+    /// 그릴 때마다 'M' 을 통째로 래스터라이즈**한다 — 비트맵 Vec 할당까지 도는
+    /// 일이라 글자 하나가 마이크로초 단위로 비싸졌고, 텍스트가 많은 크롬
+    /// (Info 패널 40행 = 9.0ms)이 먼저 무너졌다. 폭은 크기당 상수라 한 번만
+    /// 재면 된다.
+    cell_adv: std::collections::HashMap<u32, f32>,
 }
 
 /// One baked glyph's raster + metric. Coordinates follow the swash /
@@ -170,6 +176,7 @@ impl Shaper {
             bold_faces: Vec::new(),
             italic_faces: Vec::new(),
             scale_ctx: ScaleContext::new(),
+            cell_adv: std::collections::HashMap::new(),
         })
     }
 
@@ -205,6 +212,7 @@ impl Shaper {
             bold_faces: Vec::new(),
             italic_faces: Vec::new(),
             scale_ctx: ScaleContext::new(),
+            cell_adv: std::collections::HashMap::new(),
         })
     }
 
@@ -215,6 +223,8 @@ impl Shaper {
     pub fn add_fallback_path(&mut self, path: &str, index: u32) {
         if let Some(data) = map_font(path, index) {
             self.faces.push((data, index));
+            // 체인이 바뀌면 'M' 이 다른 페이스에서 잡힐 수 있다.
+            self.cell_adv.clear();
         }
     }
 
@@ -233,6 +243,7 @@ impl Shaper {
     ) {
         let Some(data) = map_font(path, index) else { return };
         self.faces.push((data, index));
+        self.cell_adv.clear();
         let slot = self.faces.len() - 1;
         if let Some((bold_path, bold_idx)) = bold {
             self.set_bold_face_path(slot, &bold_path, bold_idx);
@@ -246,6 +257,7 @@ impl Shaper {
     pub fn add_fallback_bytes(&mut self, bytes: &'static [u8], index: u32) {
         if FontRef::from_index(bytes, index as usize).is_some() {
             self.faces.push((FontData::Owned(bytes.to_vec()), index));
+            self.cell_adv.clear();
         }
     }
 
@@ -279,9 +291,16 @@ impl Shaper {
     }
 
     pub fn cell_advance(&mut self, size_px: f32) -> f32 {
-        self.rasterize('M', size_px)
+        let key = size_px.to_bits();
+        if let Some(v) = self.cell_adv.get(&key) {
+            return *v;
+        }
+        let v = self
+            .rasterize('M', size_px)
             .map(|r| r.advance)
-            .unwrap_or(size_px * 0.6)
+            .unwrap_or(size_px * 0.6);
+        self.cell_adv.insert(key, v);
+        v
     }
 
     /// Advance width of `ch` at `size_px` straight from glyph metrics — works

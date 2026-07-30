@@ -74,6 +74,11 @@ pub struct ScreenUpdate {
     /// (`ESC O A`) not CSI (`ESC [ A`) — claude code / vim / readline
     /// turn it on, and a CSI arrow silently no-ops their line navigation.
     pub app_cursor: bool,
+    /// True when the inner app enabled bracketed paste (DECSET 2004).
+    /// The host must wrap a paste in `ESC[200~ … ESC[201~` **only** then —
+    /// an app that never asked for it receives those bytes as literal input
+    /// (거노: `claude auth login` 의 코드 프롬프트가 "Invalid code" 로 튕겼다).
+    pub bracketed_paste: bool,
     /// Window title set by shell OSC 0/2 (vt100 parser exposes it).
     pub title: Option<String>,
     /// Sentinel: the PTY reader hit EOF / error (shell or claude exited).

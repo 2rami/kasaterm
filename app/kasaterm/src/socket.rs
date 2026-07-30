@@ -2226,6 +2226,160 @@ pub fn claude_account_dir(id: &str) -> Option<std::path::PathBuf> {
     Some(base.join("claude-accounts").join(id))
 }
 
+/// 슬롯별 OAuth 브라우저 프로필 자리. 계정 저장소와 같은 이유로 설정 파일 옆에
+/// 매단다 — 스크래치 설정으로 도는 헤드리스 실행이 진짜 프로필을 안 밟는다.
+/// 프로필이 슬롯마다 갈려야 두 번째 로그인이 첫 번째 세션을 물려받지 않는다.
+pub fn oauth_profile_dir(id: &str) -> Option<std::path::PathBuf> {
+    if id.is_empty() {
+        return None;
+    }
+    let base = settings_file_path()?.parent()?.to_path_buf();
+    Some(base.join("oauth-profiles").join(id))
+}
+
+/// 한도가 차면 다음 계정으로 알아서 넘어갈지(설정 "claude_account_autoswitch").
+/// **기본 off** — 켜지 않은 사람의 인증을 마음대로 바꾸는 건 사고다.
+pub fn read_account_autoswitch() -> bool {
+    read_settings()
+        .get("claude_account_autoswitch")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false)
+}
+
+/// 전환을 부르는 사용률(%) — 기본 90. 100 이면 벽에 부딪힌 뒤에나 넘어가니
+/// 여유를 두고 미리 넘어가는 게 이 기능의 요점이다.
+pub fn read_account_autoswitch_pct() -> f32 {
+    read_settings()
+        .get("claude_account_autoswitch_pct")
+        .and_then(|x| x.as_f64())
+        .map(|x| x as f32)
+        .filter(|x| (1.0..=100.0).contains(x))
+        .unwrap_or(90.0)
+}
+
+/// 한도가 차서 떠나온 계정의 "이때 전까진 돌아가지 마라" 표. id → epoch 초
+/// (기본 로그인은 `""` 키). 계정 dir 과 같은 이유로 설정 파일 옆에 둔다 —
+/// 스크래치 설정으로 도는 헤드리스 실행이 진짜 쿨다운을 밟지 않게.
+fn account_cooldown_path() -> Option<std::path::PathBuf> {
+    Some(settings_file_path()?.parent()?.join("account-cooldown.json"))
+}
+
+pub fn read_account_cooldowns() -> std::collections::HashMap<String, u64> {
+    let Some(p) = account_cooldown_path() else { return Default::default() };
+    std::fs::read_to_string(p)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 만료 시각을 기록한다. 이미 더 뒤를 가리키고 있으면 그대로 둔다 — 짧은 창
+/// (5시간)이 긴 창(주간)의 금지를 덮어 계정을 너무 일찍 되돌리면 안 된다.
+pub fn write_account_cooldown(id: &str, until: u64) {
+    let Some(p) = account_cooldown_path() else { return };
+    let mut map = read_account_cooldowns();
+    if map.get(id).is_some_and(|&t| t >= until) {
+        return;
+    }
+    map.insert(id.to_string(), until);
+    if let Some(dir) = p.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(txt) = serde_json::to_string(&map) {
+        let _ = std::fs::write(p, txt);
+    }
+}
+
+/// 쿨다운 표를 통째로 비운다 — 자동 전환을 켜는 순간에 부른다. 며칠 묵은
+/// 소진 기록이 남아 있으면 켜자마자 "갈 곳이 없다"로 조용히 잠들어 버린다.
+pub fn clear_account_cooldowns() {
+    if let Some(p) = account_cooldown_path() {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// 지금 압박을 주는 한도 — `limits[]` 중 percent 가 가장 높은 것. 5시간 창만
+/// 보면 주간 한도에 먼저 부딪히는 요즘 패턴을 통째로 놓친다(pill 은 여전히
+/// five_hour 만 보여준다 — 그건 "이 세션이 얼마나 남았나"라는 다른 질문이다).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UsagePressure {
+    pub pct: f32,
+    /// 그 창이 풀리는 시각(epoch 초). 없으면 쿨다운 없이 즉시 후보로 돌아온다.
+    pub resets_at: Option<u64>,
+}
+
+pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
+    let top = v.get("limits").and_then(|l| l.as_array()).and_then(|arr| {
+        arr.iter()
+            .filter_map(|e| {
+                let pct = e.get("percent").and_then(|p| p.as_f64())? as f32;
+                Some((pct, e.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch)))
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+    });
+    if let Some((pct, resets_at)) = top {
+        return Some(UsagePressure { pct, resets_at });
+    }
+    // limits[] 가 없는 옛/축약 응답 폴백 — pill 과 같은 소스.
+    let five = v.get("five_hour")?;
+    Some(UsagePressure {
+        pct: five.get("utilization")?.as_f64()? as f32,
+        resets_at: five.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch),
+    })
+}
+
+/// `2026-07-30T11:49:59.589840+00:00` → epoch 초. chrono 를 끌어오기엔 쓰임이
+/// 이거 하나뿐이라 직접 판다. 오프셋(`Z`/`±HH:MM`)까지 반영한다.
+fn rfc3339_epoch(s: &str) -> Option<u64> {
+    let b = s.as_bytes();
+    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b' ') {
+        return None;
+    }
+    let n = |a: usize, z: usize| s.get(a..z)?.parse::<i64>().ok();
+    let (y, mo, d) = (n(0, 4)?, n(5, 7)?, n(8, 10)?);
+    let (h, mi, sec) = (n(11, 13)?, n(14, 16)?, n(17, 19)?);
+    let mut secs = days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + sec;
+    // 소수점 이하는 버리고 오프셋만 찾는다.
+    let tail = &s[19..];
+    if let Some(i) = tail.find(['+', '-']) {
+        let off = &tail[i..];
+        let sign = if off.starts_with('-') { 1 } else { -1 };
+        let oh = off.get(1..3)?.parse::<i64>().ok()?;
+        let om = off.get(4..6).and_then(|x| x.parse::<i64>().ok()).unwrap_or(0);
+        secs += sign * (oh * 3600 + om * 60);
+    }
+    u64::try_from(secs).ok()
+}
+
+/// 그레고리력 날짜 → 1970-01-01 기준 일수 (Howard Hinnant, `days_from_civil`).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// 다음으로 옮겨갈 계정 id. 후보는 `""`(기본 로그인) + 설정 목록 순서이고,
+/// 현재 계정 **다음** 자리부터 한 바퀴 돌며 쿨다운이 풀린 첫 후보를 고른다.
+/// 전부 잠겨 있으면 `None` — 어차피 갈 곳이 없는데 옮기면 멀쩡한 계정에서
+/// 소진된 계정으로 내려앉는 꼴이 된다.
+pub fn pick_next_account(
+    current: &str,
+    accounts: &[ClaudeAccount],
+    cooldowns: &std::collections::HashMap<String, u64>,
+    now: u64,
+) -> Option<String> {
+    let mut ids: Vec<&str> = vec![""];
+    ids.extend(accounts.iter().map(|a| a.id.as_str()));
+    let here = ids.iter().position(|&i| i == current).unwrap_or(0);
+    (1..ids.len())
+        .map(|step| ids[(here + step) % ids.len()])
+        .find(|id| cooldowns.get(*id).is_none_or(|&t| t <= now))
+        .map(str::to_string)
+}
+
 /// shim 주입 전역 스위치(설정 "shim_inject"). false 면 install_pane_shims 가 shim dir 를
 /// 아예 안 만들어 PATH/ZDOTDIR 무접촉 → 순정 claude(캐릭터·프록시·훅·board 전무 진짜 독립).
 /// 기본 true(하위호환 — 지금 풀 경험 유지). install 은 부팅 1회라 변경은 재시작 후 적용.
@@ -2658,5 +2812,82 @@ mod agents_view_tests {
         assert_eq!(title_session_name("  tmuxify-58 "), "tmuxify-58");
         // 전부 글리프면 빈 문자열(매칭 스킵 신호).
         assert_eq!(title_session_name("⠐⠑ "), "");
+    }
+}
+
+/// 한도 자동 계정 전환의 판정부. 전부 순수 함수라 실제 인증 저장소·설정 파일을
+/// 건드리지 않고 검증된다 — 이 기능의 실수는 남의 로그인을 갈아치우는 실수라
+/// 로직만이라도 파일 IO 밖에서 확인할 수 있게 갈라 뒀다.
+#[cfg(test)]
+mod account_autoswitch_tests {
+    use super::*;
+
+    #[test]
+    fn rfc3339_epoch_reads_offsets_and_fractions() {
+        // oauth/usage 가 실제로 주는 모양(마이크로초 + `+00:00`).
+        assert_eq!(rfc3339_epoch("2026-07-30T11:49:59.589840+00:00"), Some(1785412199));
+        // 같은 순간을 KST 로 쓴 것 — 오프셋을 안 빼면 9시간이 어긋난다.
+        assert_eq!(rfc3339_epoch("2026-07-30T20:49:59+09:00"), Some(1785412199));
+        assert_eq!(rfc3339_epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(rfc3339_epoch("어제"), None);
+    }
+
+    #[test]
+    fn usage_pressure_takes_the_worst_window_not_the_five_hour_one() {
+        // 5시간 창은 한가한데 주간이 차 있는 상태 — pill(12%)만 보면 못 넘어간다.
+        let v = serde_json::json!({
+            "five_hour": { "utilization": 12.0, "resets_at": "2026-07-30T11:49:59.589840+00:00" },
+            "limits": [
+                { "kind": "session", "percent": 12, "resets_at": "2026-07-30T11:49:59.589840+00:00" },
+                { "kind": "weekly_all", "percent": 94, "resets_at": "2026-08-05T09:59:59+00:00" },
+            ]
+        });
+        let p = usage_pressure(&v).expect("limits 가 있으면 판정된다");
+        assert_eq!(p.pct, 94.0);
+        assert_eq!(p.resets_at, Some(1785923999));
+    }
+
+    #[test]
+    fn usage_pressure_falls_back_to_five_hour_without_limits() {
+        let v = serde_json::json!({ "five_hour": { "utilization": 91.0 } });
+        let p = usage_pressure(&v).expect("five_hour 만 있어도 판정된다");
+        assert_eq!(p.pct, 91.0);
+        assert_eq!(p.resets_at, None);
+    }
+
+    fn accts(ids: &[&str]) -> Vec<ClaudeAccount> {
+        ids.iter()
+            .map(|i| ClaudeAccount { id: i.to_string(), label: String::new() })
+            .collect()
+    }
+
+    #[test]
+    fn pick_next_account_rotates_from_the_current_slot() {
+        let a = accts(&["acct-1", "acct-2"]);
+        let none = Default::default();
+        // 기본 → 첫 슬롯 → 둘째 슬롯 → 다시 기본.
+        assert_eq!(pick_next_account("", &a, &none, 0).as_deref(), Some("acct-1"));
+        assert_eq!(pick_next_account("acct-1", &a, &none, 0).as_deref(), Some("acct-2"));
+        assert_eq!(pick_next_account("acct-2", &a, &none, 0).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn pick_next_account_skips_and_then_refuses_cooled_down_slots() {
+        let a = accts(&["acct-1", "acct-2"]);
+        let mut cool = std::collections::HashMap::new();
+        cool.insert("acct-1".to_string(), 500_u64);
+        // acct-1 은 아직 잠겨 있으니 건너뛴다.
+        assert_eq!(pick_next_account("", &a, &cool, 100).as_deref(), Some("acct-2"));
+        // 풀린 뒤에는 다시 1순위.
+        assert_eq!(pick_next_account("", &a, &cool, 600).as_deref(), Some("acct-1"));
+        // 전부 잠기면 안 옮긴다 — 멀쩡한 자리에서 소진된 자리로 내려앉지 않게.
+        cool.insert("acct-2".to_string(), 500);
+        cool.insert(String::new(), 500);
+        assert_eq!(pick_next_account("acct-1", &a, &cool, 100), None);
+    }
+
+    #[test]
+    fn pick_next_account_has_nowhere_to_go_with_a_single_login() {
+        assert_eq!(pick_next_account("", &[], &Default::default(), 0), None);
     }
 }

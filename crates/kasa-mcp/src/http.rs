@@ -2279,6 +2279,80 @@ fn read_claude_token_from(account_dir: Option<&str>) -> Option<String> {
 /// 429 로 막힌다. 성공 응답을 캐시해 60초 이내 재요청은 upstream 없이 캐시로 답하고
 /// (호출을 60초당 1회로 수렴), upstream 실패(429 등) 시엔 마지막 성공값을 stale 로 돌려
 /// pill 이 안 꺼지게 한다. 5시간 창 값이라 수십 초~수 분 stale 은 무해.
+/// `GET /claude-identity?dir=<계정 저장소 경로>` — **그 슬롯의 토큰으로** 진짜 신원을
+/// 물어본다. `dir` 없음/빈 값 = 기본 로그인.
+///
+/// 왜 이게 필요한가: `claude auth status` 의 `email`·`orgId`·`orgName` 은 슬롯별
+/// 저장소가 아니라 **공유 캐시 `~/.claude.json`** 에서 온다(실측: 공유 캐시를 치우면
+/// `loggedIn: true` 인데 email 이 `null`). 그래서 어느 슬롯에 로그인하든 모든 슬롯의
+/// 표시 이메일이 방금 로그인한 계정으로 바뀌었다 — 거노: "계정추가하면 1도 그거로
+/// 바뀌어". 저장소는 실제로 갈려 있었고 표시만 거짓말을 하고 있었다.
+///
+/// 토큰은 이 프로세스 안에서 키체인에서 읽어 헤더로만 나간다 — argv 에 안 실린다
+/// (URL 로 오는 건 경로뿐, 비밀이 아니다).
+///
+/// 슬롯별 TTL 캐시: 설정 화면이 프레임마다 probe 를 부르는 자리라 캐시 없이는
+/// upstream 을 두들겨 429 를 부른다. 신원은 거의 안 바뀌므로 5분이면 넉넉하다.
+async fn claude_identity_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, serde_json::Value)>>> = OnceLock::new();
+    const TTL: Duration = Duration::from_secs(300);
+    let cache = CACHE.get_or_init(Default::default);
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+
+    let dir = params.get("dir").cloned().unwrap_or_default();
+    if let Ok(m) = cache.lock() {
+        if let Some((at, v)) = m.get(&dir) {
+            if at.elapsed() < TTL {
+                return (cors, Json(v.clone()));
+            }
+        }
+    }
+    let Some(token) = read_claude_token_from(Some(dir.as_str())) else {
+        // 토큰이 없으면 그 슬롯은 로그인 자체가 안 된 것 — 호출자가 그대로 표시한다.
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "no token" })));
+    };
+    let resp = reqwest::Client::new()
+        .get("https://api.anthropic.com/api/oauth/profile")
+        .header("authorization", format!("Bearer {token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await;
+    let body = match resp {
+        Ok(r) if r.status().is_success() => r
+            .text()
+            .await
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()),
+        _ => None,
+    };
+    let Some(body) = body else {
+        // 실패는 캐시하지 않는다 — 네트워크가 돌아오면 바로 진짜 값을 보여야 한다.
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "profile api unavailable" })));
+    };
+    // 응답 어디에 이메일이 들리는지는 버전에 따라 갈리므로 후보를 순서대로 훑는다.
+    let pick = |paths: &[&str]| -> Option<String> {
+        paths
+            .iter()
+            .filter_map(|p| body.pointer(p).and_then(|v| v.as_str()))
+            .find(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let email = pick(&["/account/email_address", "/account/email", "/email_address", "/email"]);
+    let org = pick(&["/organization/name", "/account/organization_name", "/organization_name"]);
+    let out = serde_json::json!({ "ok": email.is_some(), "email": email, "org": org });
+    if out["ok"] == serde_json::Value::Bool(true) {
+        if let Ok(mut m) = cache.lock() {
+            m.insert(dir, (Instant::now(), out.clone()));
+        }
+    }
+    (cors, Json(out))
+}
+
 async fn claude_usage_handler() -> impl IntoResponse {
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
@@ -2786,6 +2860,7 @@ pub fn spawn_http_server_opts(
                         }),
                     )
                     .route("/claude-usage", get(claude_usage_handler))
+                    .route("/claude-identity", get(claude_identity_handler))
                     .route(
                         "/slash-commands",
                         get(move || slash_commands_handler(slash_backend.clone())),

@@ -1291,6 +1291,8 @@ fn snapshot(
         || mode.contains(alacritty_terminal::term::TermMode::MOUSE_MOTION);
     let mouse_sgr = mode.contains(alacritty_terminal::term::TermMode::SGR_MOUSE);
     let app_cursor = mode.contains(alacritty_terminal::term::TermMode::APP_CURSOR);
+    let bracketed_paste =
+        mode.contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
     // OSC 0 / OSC 2 title pushed by the inner program. Cached in the
     // forwarder so we can return the latest value on every snapshot
     // rather than draining alacritty's pending-title queue once and
@@ -1308,6 +1310,7 @@ fn snapshot(
         mouse_enabled,
         mouse_sgr,
         app_cursor,
+        bracketed_paste,
         title,
         eof: false,
         // Filled in by the reader thread when this batch carried an
