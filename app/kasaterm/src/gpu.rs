@@ -1322,12 +1322,18 @@ impl GpuRenderer {
         let space_w = self.measure_run(" ", size, false, false, false, false);
         let mut pen_x = x_start;
         let mut pen_y = y_start;
+        // 앞 낱말이 같은 줄의 인라인 코드였고, 그 칩이 사이 공백까지 덮었는가.
+        // 칩 이음매를 메울지 판단하는 유일한 근거다(앞뒤 예측 없이 이 한 칸).
+        let mut code_joint = false;
         for span in spans {
             let bold = span.bold || force_bold;
             for word in span.text.split_inclusive(' ') {
                 let trailing_space = word.ends_with(' ');
                 let trimmed = word.trim_end_matches(' ');
                 if trimmed.is_empty() {
+                    // 스팬 경계의 공백은 코드 런 *안쪽*이 아니다(`a` `b` 는 칩
+                    // 두 개다) — 이음매를 끊어 별개의 칩이 하나로 붙지 않게 한다.
+                    code_joint = false;
                     // 스팬 경계에 붙은 선행 공백(`[링크](…) 가` 의 " ")은 낱말이
                     // 아니라 버려졌는데, 그러면 선택 띠가 그 폭에서 끊기고 복사문에서
                     // 공백이 사라진다 — 폭 있는 빈 칸으로 똑같이 기록한다.
@@ -1344,6 +1350,8 @@ impl GpuRenderer {
                     if pen_x + ww > x_start + max_w && pen_x > x_start {
                         pen_x = x_start;
                         pen_y += lh;
+                        // 줄이 바뀌면 앞 칩은 다른 줄에 있다 — 이음매 없음.
+                        code_joint = false;
                     }
                     if pen_y + lh > clip_top && pen_y < clip_bot {
                         // 선택은 셀 격자가 없어 "그려진 낱말" 이 유일한 기준이다 —
@@ -1367,15 +1375,40 @@ impl GpuRenderer {
                             // (not the 1.5× line height) so it hugs the text, and
                             // span the trailing space so a multi-word `inline
                             // code` is one chip, not one box per word.
+                            let chip_r = size * 0.28;
+                            let chip_y = pen_y + size * 0.06;
+                            let chip_h = size * 1.04;
+                            if code_joint {
+                                // 칩을 낱말마다 그리니 이웃과의 겹침(0.4×공백)이
+                                // 모서리 지름(2r)보다 좁고, 그러면 두 칩이 서로의
+                                // 모서리 호를 못 메워 이음매 위·아래에 홈이 남는다
+                                // — 물결 모양 알약. 겹침이 2r 이 되게 늘리려면
+                                // 다음 낱말을 미리 알아야 하고(줄바꿈까지 예측),
+                                // 뒤 칩을 왼쪽으로 늘리면 이미 그려진 앞 낱말 글자를
+                                // 덮는다(rect 와 글리프가 같은 버퍼). 그래서 두 칩이
+                                // 각자 모서리를 깎는 그 구간만 각진 사각형으로 메운다.
+                                // 왼쪽 끝은 앞 낱말 글자 끝(pen_x - 공백)까지만.
+                                let jl = (pen_x + space_w * 0.2 - chip_r).max(pen_x - space_w);
+                                let jr = pen_x + chip_r - space_w * 0.2;
+                                if jr > jl {
+                                    self.rect(
+                                        jl,
+                                        chip_y,
+                                        jr - jl,
+                                        chip_h,
+                                        crate::theme::surface_active(),
+                                    );
+                                }
+                            }
                             let chip_w = ww
                                 + space_w * 0.4
                                 + if trailing_space { space_w } else { 0.0 };
                             self.round_rect_fill(
                                 pen_x - space_w * 0.2,
-                                pen_y + size * 0.06,
+                                chip_y,
                                 chip_w,
-                                size * 1.04,
-                                size * 0.28,
+                                chip_h,
+                                chip_r,
                                 crate::theme::surface_active(),
                             );
                         }
@@ -1426,6 +1459,11 @@ impl GpuRenderer {
                         }
                     }
                     pen_x += ww;
+                    // 이 낱말의 칩이 뒤따르는 공백까지 덮었을 때만 다음 낱말과
+                    // 이음매가 생긴다. 코드 스팬 안에서 trailing_space 가 참이면
+                    // 뒤에 같은 스팬의 낱말이 반드시 더 있다(split_inclusive 는
+                    // 마지막 조각에만 공백을 안 남긴다) — 이게 예측 없는 예측이다.
+                    code_joint = span.code && trailing_space;
                 }
                 if trailing_space {
                     pen_x += space_w;
