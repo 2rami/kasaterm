@@ -22,7 +22,28 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+/// 이미 훑어 본 파일 — `경로 → (mtime, 크기, 그때의 학생 바인딩)`. 셋이 그대로면
+/// 이번 바퀴의 결과도 같을 수밖에 없으니 파일을 아예 열지 않는다.
+///
+/// 전수 스윕은 60초마다 도는데, 이 기기의 `~/.claude/projects` 는 jsonl 3,427개
+/// 1.5GB 다 — 파일마다 head+tail 64KB 를 읽어 바이트 검색하면 한 바퀴에 수백 MB
+/// 를 훑고 코어 하나를 몇 초씩 문다(실측: 3초 sample 내내 이 스레드 100%).
+/// 게다가 세션이 쌓일수록 무거워진다. 옛 transcript 는 두 번 다시 바뀌지 않으니
+/// 첫 바퀴 뒤로는 claude 가 실제로 쓴 몇 개만 남는다.
+///
+/// 바인딩까지 키에 넣는 건 `stamp_tag` 때문이다 — 파일이 그대로여도 나중에 학생
+/// 배정이 생기면 태그를 새로 찍어야 하는데, mtime 만 보면 영영 건너뛴다.
+type SeenMap = HashMap<PathBuf, (SystemTime, u64, Option<String>)>;
+static SEEN: std::sync::LazyLock<std::sync::Mutex<SeenMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
 
 /// claude /resume 스캐너의 head/tail 읽기 창과 동일(바이너리 uD=65536 실측).
 const WINDOW: u64 = 65536;
@@ -79,9 +100,26 @@ fn sweep_projects_root(
                 continue;
             }
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let binding = bindings.get(stem).cloned();
+            let before = file_stamp(&path);
+            // 지난 바퀴와 완전히 같은 상태면 열지 않는다(위 SEEN 주석).
+            if let Some((mtime, len)) = before {
+                let same = SEEN
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.get(&path).cloned())
+                    .is_some_and(|(t, l, b)| t == mtime && l == len && b == binding);
+                if same {
+                    continue;
+                }
+            }
             let mut changed = patch_file(&path).unwrap_or(false);
-            if let Some(student) = bindings.get(stem) {
+            if let Some(student) = &binding {
                 changed |= stamp_tag(&path, stem, student, students).unwrap_or(false);
+            }
+            // 처리 뒤 상태로 기록한다 — stamp_tag 는 파일을 늘릴 수 있다.
+            if let (Some(stamp), Ok(mut g)) = (file_stamp(&path), SEEN.lock()) {
+                g.insert(path.clone(), (stamp.0, stamp.1, binding));
             }
             if changed {
                 touched += 1;
@@ -369,6 +407,28 @@ mod tests {
         assert!(body.contains("\"tag\":\"시로코\""));
         assert!(!std::fs::read_to_string(&plain).unwrap().contains("tag"));
         assert!(std::fs::read_to_string(&agent).unwrap().contains("\"teamName\""));
+    }
+
+    /// 전수 스윕은 60초마다 도는데 파일이 수천 개다 — 안 바뀐 파일은 아예 열지
+    /// 않아야 한다. 다만 "안 열기"가 지나치면 **나중에 생긴 학생 바인딩**을 영영
+    /// 못 찍으므로(파일은 그대로니까), 그 한 경우는 다시 봐야 한다.
+    #[test]
+    fn sweep_skips_unchanged_files_but_still_sees_a_new_binding() {
+        let d = tmpdir("skip");
+        let proj = d.join("-Users-x-proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let path = proj.join(format!("{SID}.jsonl"));
+        std::fs::write(&path, team_line("kt-room-abcd")).unwrap();
+
+        let none: HashMap<String, String> = HashMap::new();
+        // 첫 바퀴 = needle 패치.
+        assert_eq!(sweep_projects_root(&d, &none, &students()), 1);
+        // 둘째 바퀴 = 파일도 바인딩도 그대로 → 건너뛴다.
+        assert_eq!(sweep_projects_root(&d, &none, &students()), 0);
+        // 바인딩이 새로 생기면 같은 파일이라도 다시 봐서 태그를 찍는다.
+        let bound: HashMap<String, String> = [(SID.to_string(), "프라나".to_string())].into();
+        assert_eq!(sweep_projects_root(&d, &bound, &students()), 1);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"tag\":\"프라나\""));
     }
 
     #[cfg(unix)]

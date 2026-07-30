@@ -9,6 +9,31 @@ pub(crate) const UNDO_CAP: usize = 100;
 /// their parent by column count, and a tab's width is the viewer's opinion.
 const INDENT: &str = "  ";
 
+/// `[[토픽이름]]` 이 가리키는 파일을 `dir` 아래에서 찾는다. 인덱스와 토픽이 같은
+/// 폴더에 있지 않으므로(볼트가 `sionic/` `life/` 처럼 주제 폴더로 갈라져 있다)
+/// 바로 아래 한 단계까지 훑는다. 그 이상 재귀하지 않는 이유는 볼트 구조가 두
+/// 단계고, 무제한 재귀는 큰 폴더에서 클릭 한 번이 디스크를 통째로 뒤지게 만든다.
+pub(crate) fn wiki_target_in(
+    dir: &std::path::Path,
+    name: &str,
+) -> Option<std::path::PathBuf> {
+    let file = format!("{name}.md");
+    let direct = dir.join(&file);
+    if direct.exists() {
+        return Some(direct);
+    }
+    let mut subs: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    // 폴더 순서는 OS 가 주는 대로라 판마다 다를 수 있다 — 같은 이름이 두 폴더에
+    // 있을 때 열리는 파일이 바뀌면 버그로 보인다.
+    subs.sort();
+    subs.into_iter().map(|d| d.join(&file)).find(|p| p.exists())
+}
+
 /// Write a text file **atomically** — sibling temp file, fsync, rename.
 ///
 /// `fs::write` truncates the destination first, so anything that interrupts the
@@ -475,6 +500,31 @@ impl MarkdownPane {
     /// the new one. On an item holding nothing but its marker, Enter wipes the
     /// marker instead of stacking another empty one; that's how a list ends
     /// without reaching for Backspace (VS Code and Obsidian both do this).
+    /// 선택을 괄호·따옴표로 감싼다. 선택을 지우고 덮어쓰지 않는 게 VS Code
+    /// 동작이고, 감싼 뒤에도 안쪽 내용이 선택으로 남아 연속으로 감쌀 수 있다.
+    pub(crate) fn wrap_selection(&mut self, open: char, close: char) {
+        let Some((s, e)) = self.sel_range() else { return };
+        if self.edit_lines.is_empty() {
+            return;
+        }
+        self.push_undo(EditKind::Other);
+        // 끝을 먼저 끼운다 — 앞을 먼저 끼우면 같은 줄의 끝 col 이 한 칸 밀린다.
+        {
+            let l = &mut self.lines_mut()[e.0];
+            let b = char_byte(l, e.1.min(l.chars().count()));
+            l.insert(b, close);
+        }
+        {
+            let l = &mut self.lines_mut()[s.0];
+            let b = char_byte(l, s.1.min(l.chars().count()));
+            l.insert(b, open);
+        }
+        self.sel_anchor = Some((s.0, s.1 + 1));
+        self.cur_line = e.0;
+        self.cur_col = if e.0 == s.0 { e.1 + 1 } else { e.1 };
+        self.touch();
+    }
+
     pub(crate) fn newline(&mut self) {
         if self.edit_lines.is_empty() {
             self.lines_mut().push(String::new());
@@ -483,6 +533,30 @@ impl MarkdownPane {
         self.delete_selection();
         let line = self.cur_line.min(self.edit_lines.len() - 1);
         let col = self.cur_col.min(self.edit_lines[line].chars().count());
+        // 괄호 **사이**의 Enter 는 블록을 연다: 한 단계 들여쓴 빈 줄에 캐럿을
+        // 두고 닫는 괄호는 원래 들여쓰기로 내린다. 따옴표는 제외한다(여닫이가
+        // 같은 글자라 여러 줄로 갈라 놓으면 문자열이 깨진다).
+        let cs: Vec<char> = self.edit_lines[line].chars().collect();
+        let block = matches!(
+            (col.checked_sub(1).and_then(|i| cs.get(i)), cs.get(col)),
+            (Some(&o), Some(&c)) if o != c && auto_close_for(o) == Some(c)
+        );
+        if block {
+            let pad: String = cs
+                .iter()
+                .take_while(|c| **c == ' ' || **c == '\t')
+                .collect();
+            let s = &mut self.lines_mut()[line];
+            let b = char_byte(s, col);
+            let tail = s.split_off(b);
+            let inner = format!("{pad}{INDENT}");
+            self.lines_mut().insert(line + 1, inner.clone());
+            self.lines_mut().insert(line + 2, format!("{pad}{tail}"));
+            self.cur_line = line + 1;
+            self.cur_col = inner.chars().count();
+            self.touch();
+            return;
+        }
         let p = line_prefix(&self.edit_lines[line]);
         // 캐럿이 마커 안에 있으면(col < len) 이어쓰기를 하지 않는다 — 그 자리의
         // Enter 는 "이 항목 위에 빈 줄" 이라는 뜻이지 새 항목이 아니다.
@@ -739,8 +813,15 @@ impl MarkdownPane {
                 } else if col > 0 {
                     self.push_undo(EditKind::Deleting);
                     let s = &mut self.lines_mut()[line];
+                    // 자동으로 들어온 짝은 같이 지운다 — 여는 쪽만 사라지고
+                    // 닫는 쪽이 남으면 손으로 또 지워야 한다.
+                    let cs: Vec<char> = s.chars().collect();
+                    let paired = matches!(
+                        (cs.get(col - 1), cs.get(col)),
+                        (Some(&o), Some(&c)) if auto_close_for(o) == Some(c)
+                    );
                     let b0 = char_byte(s, col - 1);
-                    let b1 = char_byte(s, col);
+                    let b1 = char_byte(s, col + usize::from(paired));
                     s.replace_range(b0..b1, "");
                     col -= 1;
                     edited = true;
@@ -887,6 +968,37 @@ impl MarkdownPane {
                 edited = true;
             }
             Key::Character(txt) => {
+                // 자동 닫기는 **키로 친 한 글자**에만 붙는다. 붙여넣기
+                // (`md_editor_paste`)와 한글 확정(`md_insert_into`)은 다른
+                // 경로라 여기 오지 않으므로, 붙여넣은 코드에 괄호가 있어도
+                // 짝이 덧붙지 않는다.
+                let plan = match txt.chars().next() {
+                    Some(ch) if txt.chars().count() == 1 => {
+                        let cs: Vec<char> = self.edit_lines[line].chars().collect();
+                        plan_typed(
+                            ch,
+                            col.checked_sub(1).and_then(|i| cs.get(i).copied()),
+                            cs.get(col).copied(),
+                            sel.is_some(),
+                        )
+                    }
+                    _ => TypeAction::Plain,
+                };
+                match plan {
+                    TypeAction::Wrap(close) => {
+                        self.wrap_selection(txt.chars().next().unwrap_or('('), close);
+                        return;
+                    }
+                    // 넘어가기는 버퍼를 안 바꾼다 — undo 를 쌓지도, 저장 대상으로
+                    // 표시하지도 않는다.
+                    TypeAction::Overtype => {
+                        self.sel_anchor = None;
+                        self.cur_line = line;
+                        self.cur_col = col + 1;
+                        return;
+                    }
+                    _ => {}
+                }
                 if sel.is_some() {
                     self.push_undo(EditKind::Other);
                     self.delete_selection();
@@ -899,6 +1011,11 @@ impl MarkdownPane {
                 let b = char_byte(s, col);
                 s.insert_str(b, txt);
                 col += txt.chars().count();
+                if let TypeAction::Pair(close) = plan {
+                    let s = &mut self.lines_mut()[line];
+                    let b = char_byte(s, col);
+                    s.insert(b, close);
+                }
                 edited = true;
             }
             _ => {}
@@ -1270,6 +1387,145 @@ impl MarkdownPane {
         self.touch();
         true
     }
+}
+
+/// 짝을 맞추는 괄호 쌍.
+const BRACKET_PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
+
+/// 타이핑하면 짝이 따라 들어오는 글자. 따옴표는 여닫이가 같아서 판단 규칙이
+/// 다르므로(`plan_typed`) 여기선 같은 글자를 짝으로 돌려준다.
+pub(crate) fn auto_close_for(ch: char) -> Option<char> {
+    BRACKET_PAIRS
+        .iter()
+        .find_map(|&(o, c)| (ch == o).then_some(c))
+        .or_else(|| matches!(ch, '"' | '\'' | '`').then_some(ch))
+}
+
+/// 글자 하나를 쳤을 때 편집기가 할 일.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum TypeAction {
+    /// 그냥 그 글자만 넣는다.
+    Plain,
+    /// 넣고 짝도 넣고 캐럿은 사이에.
+    Pair(char),
+    /// 이미 있는 닫는 글자를 넘어간다(글자를 새로 넣지 않는다).
+    Overtype,
+    /// 선택을 지우지 않고 앞뒤로 감싼다.
+    Wrap(char),
+}
+
+/// 자동 닫기 판단. `before`/`after` 는 캐럿 좌우 글자.
+///
+/// VS Code 규칙을 따른다: **오른쪽에 낱말이 붙어 있으면 짝을 넣지 않는다**
+/// (`foo` 앞에서 `(` 를 치면 `(foo` 지 `()foo` 가 아니다). 따옴표는 추가로
+/// 왼쪽도 본다 — `don't` 의 `'` 가 짝을 끌고 오면 못 쓴다.
+pub(crate) fn plan_typed(
+    ch: char,
+    before: Option<char>,
+    after: Option<char>,
+    has_sel: bool,
+) -> TypeAction {
+    let close = auto_close_for(ch);
+    if has_sel {
+        return close.map_or(TypeAction::Plain, TypeAction::Wrap);
+    }
+    // 닫는 글자를 쳤는데 그 자리에 이미 같은 글자가 있으면 넘어간다 — 자동으로
+    // 들어온 짝을 손으로 또 치는 게 사람의 자연스러운 습관이다.
+    let closing = BRACKET_PAIRS.iter().any(|&(_, c)| ch == c) || matches!(ch, '"' | '\'' | '`');
+    if closing && after == Some(ch) {
+        return TypeAction::Overtype;
+    }
+    let Some(close) = close else {
+        return TypeAction::Plain;
+    };
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    if word(after) {
+        return TypeAction::Plain;
+    }
+    if ch == close && (word(before) || before == Some(ch)) {
+        return TypeAction::Plain;
+    }
+    TypeAction::Pair(close)
+}
+
+/// 캐럿에 붙어 있는 괄호와 그 짝의 위치. 캐럿 **왼쪽**을 먼저 보고 없으면
+/// 오른쪽을 본다 — 닫는 괄호를 막 타이핑한 순간에 짝이 보여야 하기 때문이다.
+///
+/// 문자열·주석 안의 괄호는 걸러내지 않는다. 정확히 하려면 tree-sitter 스팬과
+/// 교차 검사해야 하는데, 그 스팬은 타이핑 중 의도적으로 낡은 상태로 두므로
+/// (`raw_editor_ts_spans`) 오히려 어긋난 강조가 나온다. 짝이 틀릴 수 있는
+/// 경우는 문자열 안에 홀괄호를 쓸 때뿐이고, 그때는 강조가 안 뜨거나 엉뚱한
+/// 곳에 뜰 뿐 편집을 망가뜨리지 않는다.
+pub(crate) fn match_bracket(
+    lines: &[String],
+    line: usize,
+    col: usize,
+) -> Option<((usize, usize), (usize, usize))> {
+    /// 훑기 상한 — 매 프레임 도는 자리라 큰 파일에서 버퍼 끝까지 가면 안 된다.
+    /// 짝이 이보다 멀면 강조를 포기한다(화면 밖이라 보이지도 않는다).
+    const MAX_SCAN: usize = 5_000;
+    let row: Vec<char> = lines.get(line)?.chars().collect();
+    let (at, ch) = [col.checked_sub(1), Some(col)]
+        .into_iter()
+        .flatten()
+        .find_map(|i| {
+            let c = *row.get(i)?;
+            BRACKET_PAIRS
+                .iter()
+                .any(|&(o, cl)| c == o || c == cl)
+                .then_some((i, c))
+        })?;
+    let (open, close, forward) = BRACKET_PAIRS.iter().find_map(|&(o, cl)| {
+        if ch == o {
+            Some((o, cl, true))
+        } else if ch == cl {
+            Some((o, cl, false))
+        } else {
+            None
+        }
+    })?;
+    let mut depth = 0i32;
+    let mut scanned = 0usize;
+    if forward {
+        for l in line..lines.len() {
+            let cur: Vec<char> = lines[l].chars().collect();
+            let from = if l == line { at } else { 0 };
+            for (c, &x) in cur.iter().enumerate().skip(from) {
+                scanned += 1;
+                if scanned > MAX_SCAN {
+                    return None;
+                }
+                if x == open {
+                    depth += 1;
+                } else if x == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(((line, at), (l, c)));
+                    }
+                }
+            }
+        }
+    } else {
+        for l in (0..=line).rev() {
+            let cur: Vec<char> = lines[l].chars().collect();
+            let upto = if l == line { at + 1 } else { cur.len() };
+            for c in (0..upto.min(cur.len())).rev() {
+                scanned += 1;
+                if scanned > MAX_SCAN {
+                    return None;
+                }
+                if cur[c] == close {
+                    depth += 1;
+                } else if cur[c] == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(((line, at), (l, c)));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// 같은 자리 연타를 센다 — 2 = 더블클릭, 3 = 트리플클릭, 네 번째는 다시 1 로
@@ -2014,7 +2270,7 @@ impl App {
     /// Hit-test the cursor against the link rects the renderer recorded for
     /// the last markdown frame; open the destination if one is under it.
     /// Returns true if a link was opened (so the caller skips other handling).
-    pub(crate) fn try_open_md_link(&self) -> bool {
+    pub(crate) fn try_open_md_link(&mut self) -> bool {
         let (cx, cy) = self.cursor_px;
         let Some(g) = self.gpu.as_ref() else { return false };
         let dest = g
@@ -2030,10 +2286,24 @@ impl App {
             None => false,
         }
     }
+    /// `[[토픽이름]]` 이 가리키는 파일.
+    fn find_wiki_target(&self, name: &str) -> Option<std::path::PathBuf> {
+        wiki_target_in(&self.active_markdown_dir()?, name)
+    }
     /// Open a markdown link destination: http(s)/mailto go to the default
     /// app (browser/mail); a local path is revealed in Finder (`open -R`),
     /// resolving relative paths against the markdown file's directory.
-    pub(crate) fn open_md_dest(&self, dest: &str) {
+    pub(crate) fn open_md_dest(&mut self, dest: &str) {
+        // 문서 사이 링크는 **이 뷰 안에서** 열어야 이동이 이동으로 읽힌다 — 파일
+        // 열기 설정(VS Code 등)을 타면 클릭마다 다른 앱으로 튄다. 못 찾으면 조용히
+        // 넘기지 말고 어느 이름을 못 찾았는지 알려 준다(표기 오타가 흔하다).
+        if let Some(name) = dest.strip_prefix("wiki:") {
+            match self.find_wiki_target(name) {
+                Some(p) => self.open_file(p, None, true),
+                None => self.set_toast(format!("{name} 을 못 찾았습니다")),
+            }
+            return;
+        }
         if dest.starts_with("http://")
             || dest.starts_with("https://")
             || dest.starts_with("mailto:")
@@ -2237,6 +2507,114 @@ mod tests {
         assert_eq!(line_comment_prefix("css"), None);
         assert_eq!(line_comment_prefix("html"), None);
         assert_eq!(line_comment_prefix(""), None);
+    }
+
+    #[test]
+    fn plan_typed_pairs_only_when_the_right_side_is_free() {
+        assert_eq!(plan_typed('(', None, None, false), TypeAction::Pair(')'));
+        assert_eq!(plan_typed('{', Some(' '), Some(')'), false), TypeAction::Pair('}'));
+        // 오른쪽에 낱말이 붙어 있으면 짝을 넣지 않는다.
+        assert_eq!(plan_typed('(', None, Some('f'), false), TypeAction::Plain);
+        assert_eq!(plan_typed('[', None, Some('가'), false), TypeAction::Plain);
+        // 짝이 없는 글자는 그냥 글자다.
+        assert_eq!(plan_typed('a', None, None, false), TypeAction::Plain);
+    }
+
+    #[test]
+    fn plan_typed_overtypes_an_existing_closer() {
+        assert_eq!(plan_typed(')', Some('a'), Some(')'), false), TypeAction::Overtype);
+        assert_eq!(plan_typed('"', Some('a'), Some('"'), false), TypeAction::Overtype);
+        // 오른쪽이 다른 글자면 넘어가지 않고 그대로 넣는다.
+        assert_eq!(plan_typed(')', Some('a'), Some(';'), false), TypeAction::Plain);
+    }
+
+    #[test]
+    fn plan_typed_leaves_an_apostrophe_inside_a_word_alone() {
+        // don't 의 ' 가 짝을 끌고 오면 못 쓴다.
+        assert_eq!(plan_typed('\'', Some('n'), Some('t'), false), TypeAction::Plain);
+        assert_eq!(plan_typed('\'', Some('n'), None, false), TypeAction::Plain);
+        // 낱말 밖이면 짝을 넣는다.
+        assert_eq!(plan_typed('\'', Some(' '), None, false), TypeAction::Pair('\''));
+    }
+
+    #[test]
+    fn plan_typed_wraps_a_selection_instead_of_replacing_it() {
+        assert_eq!(plan_typed('(', None, Some('f'), true), TypeAction::Wrap(')'));
+        assert_eq!(plan_typed('"', Some('n'), Some('t'), true), TypeAction::Wrap('"'));
+        // 짝 없는 글자는 선택이 있어도 그냥 덮어쓴다.
+        assert_eq!(plan_typed('a', None, None, true), TypeAction::Plain);
+    }
+
+    #[test]
+    fn wrap_selection_keeps_the_text_and_the_selection() {
+        let mut m = pane(&["foo bar"]);
+        m.sel_anchor = Some((0, 4));
+        m.cur_col = 7;
+        m.wrap_selection('(', ')');
+        assert_eq!(*m.edit_lines, vec!["foo (bar)"]);
+        assert_eq!(m.sel_anchor, Some((0, 5)));
+        assert_eq!((m.cur_line, m.cur_col), (0, 8));
+        // 남은 선택이 감싼 내용 그대로여서 연속으로 감쌀 수 있다.
+        m.wrap_selection('"', '"');
+        assert_eq!(*m.edit_lines, vec!["foo (\"bar\")"]);
+    }
+
+    #[test]
+    fn wrap_selection_spans_lines_without_shifting_the_far_end() {
+        let mut m = pane(&["a", "b"]);
+        m.sel_anchor = Some((0, 0));
+        m.cur_line = 1;
+        m.cur_col = 1;
+        m.wrap_selection('{', '}');
+        assert_eq!(*m.edit_lines, vec!["{a", "b}"]);
+        assert_eq!((m.cur_line, m.cur_col), (1, 1));
+    }
+
+    #[test]
+    fn newline_between_brackets_opens_a_block() {
+        let mut m = pane(&["  fn a() {}"]);
+        m.cur_col = 10;
+        m.newline();
+        assert_eq!(*m.edit_lines, vec!["  fn a() {", "    ", "  }"]);
+        assert_eq!((m.cur_line, m.cur_col), (1, 4));
+        // 따옴표는 블록이 아니다 — 문자열이 두 줄로 갈리면 깨진다.
+        let mut q = pane(&["\"\""]);
+        q.cur_col = 1;
+        q.newline();
+        assert_eq!(*q.edit_lines, vec!["\"", "\""]);
+    }
+
+    #[test]
+    fn match_bracket_prefers_the_glyph_left_of_the_caret() {
+        let lines = vec!["foo(bar)".to_string()];
+        // 캐럿이 ')' 바로 오른쪽 — 방금 닫은 괄호의 짝이 보여야 한다.
+        assert_eq!(match_bracket(&lines, 0, 8), Some(((0, 7), (0, 3))));
+        // 캐럿이 '(' 왼쪽 — 왼쪽엔 괄호가 없으니 오른쪽을 본다.
+        assert_eq!(match_bracket(&lines, 0, 3), Some(((0, 3), (0, 7))));
+        assert_eq!(match_bracket(&lines, 0, 1), None);
+    }
+
+    #[test]
+    fn match_bracket_counts_nesting_across_lines() {
+        let lines = vec![
+            "fn a() {".to_string(),
+            "    if b {".to_string(),
+            "    }".to_string(),
+            "}".to_string(),
+        ];
+        assert_eq!(match_bracket(&lines, 0, 8), Some(((0, 7), (3, 0))));
+        assert_eq!(match_bracket(&lines, 3, 1), Some(((3, 0), (0, 7))));
+        assert_eq!(match_bracket(&lines, 1, 10), Some(((1, 9), (2, 4))));
+    }
+
+    #[test]
+    fn match_bracket_gives_up_when_the_pair_is_missing() {
+        let lines = vec!["a(b".to_string(), "c)d)".to_string()];
+        // 뒤쪽 ')' 는 짝이 없다 — 앞의 ')' 가 유일한 '(' 를 이미 먹었다.
+        assert_eq!(match_bracket(&lines, 1, 4), None);
+        assert_eq!(match_bracket(&lines, 1, 2), Some(((1, 1), (0, 1))));
+        let orphan = vec!["}".to_string()];
+        assert_eq!(match_bracket(&orphan, 0, 1), None);
     }
 
     #[test]
@@ -2685,6 +3063,33 @@ mod tests {
             .filter(|n| n.ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "임시파일이 남았다: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 같은 폴더 우선, 없으면 한 단계 아래 폴더. 볼트가 주제 폴더로 갈라져 있어
+    /// 인덱스의 `[[이름]]` 은 대개 아래 폴더를 가리킨다.
+    #[test]
+    fn wiki_target_prefers_same_dir_then_one_level_down() {
+        let dir =
+            std::env::temp_dir().join(format!("kasaterm-wiki-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("life")).unwrap();
+        std::fs::create_dir_all(dir.join("aaa")).unwrap();
+        std::fs::write(dir.join("here.md"), "").unwrap();
+        std::fs::write(dir.join("life/deep.md"), "").unwrap();
+        // 같은 이름이 두 폴더에 — 정렬 순서상 aaa 가 이겨야 한다(OS 폴더 순서에
+        // 좌우되면 클릭마다 열리는 파일이 바뀐다).
+        std::fs::write(dir.join("aaa/dup.md"), "").unwrap();
+        std::fs::write(dir.join("life/dup.md"), "").unwrap();
+
+        assert_eq!(wiki_target_in(&dir, "here"), Some(dir.join("here.md")));
+        assert_eq!(wiki_target_in(&dir, "deep"), Some(dir.join("life/deep.md")));
+        assert_eq!(wiki_target_in(&dir, "dup"), Some(dir.join("aaa/dup.md")));
+        // 두 단계 아래는 일부러 안 찾는다.
+        std::fs::create_dir_all(dir.join("life/inner")).unwrap();
+        std::fs::write(dir.join("life/inner/buried.md"), "").unwrap();
+        assert_eq!(wiki_target_in(&dir, "buried"), None);
+        assert_eq!(wiki_target_in(&dir, "없는이름"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

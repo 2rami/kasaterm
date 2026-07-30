@@ -1734,10 +1734,43 @@ pub(crate) fn foreground_proc_name(shell_pid: u32) -> Option<String> {
     best_child.map(|(_, n)| n).or(shell_comm)
 }
 
-/// Resolve a process's current working directory via lsof. macOS has no
-/// `/proc`; `lsof -d cwd` prints the cwd path. Called ~once/sec by the git
-/// panel poll, so the subprocess cost is acceptable.
-#[cfg(unix)]
+/// 프로세스의 현재 작업 디렉터리 — libproc 에 직접 묻는다.
+///
+/// 오래 `lsof -d cwd` 를 fork 했고 "git 패널이 초당 한 번 부르니 서브프로세스
+/// 값은 감당된다"고 적혀 있었는데, 그 전제가 깨진 지 오래다. 지금은 렌더가
+/// pane 마다 **매 프레임** 부른다(`smart_pane_label`). fork+exec 한 번이 그
+/// 자리에서 수십 ms 라, 마크다운 스크롤 프레임 간격 32ms 중 메인 스레드 샘플의
+/// 절반이 이 함수였다(아리스 제보 → sample 로 확인). 같은 답을 syscall 하나로
+/// 얻을 수 있다 — Windows 가 PEB 를 직접 읽는 것과 같은 결이다.
+#[cfg(target_os = "macos")]
+pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let want = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    // 남의 프로세스는 같은 uid 일 때만 답한다(lsof 도 마찬가지였다) — 실패는 None.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            want,
+        )
+    };
+    if got < want {
+        return None;
+    }
+    // libc 가 낡은 rustc 호환 때문에 1024바이트 경로를 [[c_char; 32]; 32] 로
+    // 쪼개 뒀다 — 실제 메모리는 평면이라 그대로 편다.
+    let path = unsafe {
+        std::slice::from_raw_parts(info.pvi_cdir.vip_path.as_ptr().cast::<u8>(), 32 * 32)
+    };
+    let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+    (end > 0).then(|| std::path::PathBuf::from(std::ffi::OsString::from_vec(path[..end].to_vec())))
+}
+
+/// Resolve a process's current working directory via lsof (non-macOS unix).
+#[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
     let out = crate::proc::command("lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
@@ -1753,7 +1786,7 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
 /// happens when kasaterm is launched from Finder/Dock with no `LANG` set, which
 /// otherwise renders a 한글 cwd as `\xec\xa7\x80`. Reverse the escaping on the raw
 /// bytes so the path survives; already-plain output passes through untouched.
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn unescape_lsof_path(line: &[u8]) -> std::path::PathBuf {
     use std::os::unix::ffi::OsStringExt;
     let mut bytes = Vec::with_capacity(line.len());
@@ -2889,5 +2922,24 @@ mod account_autoswitch_tests {
     #[test]
     fn pick_next_account_has_nowhere_to_go_with_a_single_login() {
         assert_eq!(pick_next_account("", &[], &Default::default(), 0), None);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod pid_cwd_tests {
+    /// libproc 경로가 예전 `lsof -d cwd` 와 같은 답을 내는지 — 자기 자신에게
+    /// 물어 `current_dir` 과 맞춰본다. FFI(구조체 크기·평면화한 vip_path·NUL
+    /// 종료)가 어긋나면 조용히 빈 경로나 쓰레기를 내므로 여기서 잡는다.
+    #[test]
+    fn pid_cwd_reads_our_own_cwd() {
+        let got = super::pid_cwd(std::process::id()).expect("자기 cwd 는 항상 읽힌다");
+        let want = std::env::current_dir().unwrap();
+        assert_eq!(got.canonicalize().unwrap(), want.canonicalize().unwrap());
+    }
+
+    /// 없는 pid 는 None — 실패를 빈 PathBuf 로 흘리면 호출부가 루트를 cwd 로 본다.
+    #[test]
+    fn pid_cwd_is_none_for_a_dead_pid() {
+        assert_eq!(super::pid_cwd(u32::MAX - 1), None);
     }
 }
