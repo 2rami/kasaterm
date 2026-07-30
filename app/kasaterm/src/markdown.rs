@@ -1389,6 +1389,51 @@ impl MarkdownPane {
     }
 }
 
+/// 들여쓰기 한 단계가 몇 칸인지. 가이드 선을 그리는 쪽(`draw_raw_editor`)이
+/// 편집기와 같은 눈금을 써야 선이 글자 사이에 정확히 떨어진다.
+pub(crate) fn indent_step_cols() -> usize {
+    INDENT.chars().count().max(1)
+}
+
+/// 그 줄에 들여쓰기 가이드를 몇 개 그릴지.
+///
+/// 빈 줄은 위아래에서 가장 가까운 실줄 중 **얕은 쪽**을 물려받는다 — 블록
+/// 사이 빈 줄에서 선이 끊기면 오히려 눈에 걸리고, 깊은 쪽을 쓰면 블록이 끝난
+/// 뒤에도 선이 남는다. 들여쓰기에 탭이 섞인 줄은 0 — 탭 폭을 모르는 채로 그으면
+/// 글자와 어긋난 선만 남는다.
+pub(crate) fn indent_guide_depth(lines: &[String], li: usize) -> usize {
+    /// 빈 줄에서 실줄을 찾아 올라갈/내려갈 상한. 화면 한 폭을 넘게 비어 있으면
+    /// 어차피 잇는 의미가 없다.
+    const LOOK: usize = 200;
+    let step = indent_step_cols();
+    // None = 공백뿐인 줄(물려받아야 하는 줄).
+    let lead = |l: &String| -> Option<usize> {
+        let ws: Vec<char> = l.chars().take_while(|c| c.is_whitespace()).collect();
+        if ws.len() == l.chars().count() {
+            return None;
+        }
+        if ws.contains(&'\t') {
+            return Some(0);
+        }
+        Some(ws.len() / step)
+    };
+    let Some(cur) = lines.get(li) else { return 0 };
+    if let Some(d) = lead(cur) {
+        return d;
+    }
+    let up = lines[..li].iter().rev().take(LOOK).find_map(&lead);
+    let down = lines
+        .get(li + 1..)
+        .into_iter()
+        .flatten()
+        .take(LOOK)
+        .find_map(&lead);
+    match (up, down) {
+        (Some(a), Some(b)) => a.min(b),
+        _ => 0,
+    }
+}
+
 /// 짝을 맞추는 괄호 쌍.
 const BRACKET_PAIRS: [(char, char); 3] = [('(', ')'), ('[', ']'), ('{', '}')];
 
@@ -2507,6 +2552,30 @@ mod tests {
         assert_eq!(line_comment_prefix("css"), None);
         assert_eq!(line_comment_prefix("html"), None);
         assert_eq!(line_comment_prefix(""), None);
+    }
+
+    #[test]
+    fn indent_guide_depth_counts_steps_and_skips_tabs() {
+        let lines: Vec<String> = ["fn a() {", "  let b = 1;", "    if b {", "\tlegacy", ""]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(indent_guide_depth(&lines, 0), 0);
+        assert_eq!(indent_guide_depth(&lines, 1), 1);
+        assert_eq!(indent_guide_depth(&lines, 2), 2);
+        // 탭이 섞인 줄은 그리지 않는다 — 탭 폭을 모르면 선이 글자와 어긋난다.
+        assert_eq!(indent_guide_depth(&lines, 3), 0);
+    }
+
+    #[test]
+    fn indent_guide_depth_carries_the_shallower_side_across_a_blank_line() {
+        let lines: Vec<String> = ["    a", "", "  b"].iter().map(|s| s.to_string()).collect();
+        // 위는 2단계, 아래는 1단계 → 얕은 쪽. 깊은 쪽을 쓰면 블록이 끝난 뒤에도
+        // 선이 남는다.
+        assert_eq!(indent_guide_depth(&lines, 1), 1);
+        // 문서 끝의 빈 줄은 아래에 실줄이 없으니 잇지 않는다.
+        let tail: Vec<String> = ["    a", ""].iter().map(|s| s.to_string()).collect();
+        assert_eq!(indent_guide_depth(&tail, 1), 0);
     }
 
     #[test]
