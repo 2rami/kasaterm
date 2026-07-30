@@ -196,8 +196,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.new_room_with_character(character);
                 return;
             }
-            UserEvent::SocketSpawnStudent(character) => {
-                self.spawn_student(character);
+            UserEvent::SocketSpawnStudent(character, reply) => {
+                let id = self.spawn_student(character);
+                let _ = reply.send(id);
                 return;
             }
             UserEvent::SocketSwapCharacter(pane, character) => {

@@ -389,19 +389,25 @@ impl App {
     /// 현재 방에 캐릭터 지정 학생 추가(StudentNav '+ 학생'). pending_character 를 세팅하고
     /// split — assign_character_env 가 그 캐릭터로 마커·persona env 를 입힌다(아로나/프라나
     /// 포함). 자동 빈슬롯 순환 대신 사용자가 고른 캐릭터.
-    pub(crate) fn spawn_student(&mut self, character: &str) {
+    /// 새 pane 의 surface id 를 돌려준다(빈 문자열 = 실패) — 디스패처가 스폰 직후
+    /// 그 학생에게 브리프를 주입할 주소로 쓴다.
+    pub(crate) fn spawn_student(&mut self, character: &str) -> String {
         self.pending_character = Some(character.to_string());
-        if let Err(e) = self.split_active_pane(kasa_pty::SplitDir::Horizontal) {
-            eprintln!("[spawn_student] split failed: {e:#}");
-            self.pending_character = None;
-            return;
-        }
+        let id = match self.split_active_pane(kasa_pty::SplitDir::Horizontal) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("[spawn_student] split failed: {e:#}");
+                self.pending_character = None;
+                return String::new();
+            }
+        };
         let (cols, rows) = self.window_cells();
         self.resize_backend(cols, rows);
         self.publish_pty_layout();
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+        id
     }
 
     pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
