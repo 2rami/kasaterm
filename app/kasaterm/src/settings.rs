@@ -27,6 +27,12 @@ pub(crate) struct SettingsCtx {
     pub area: Rect,
     pub cat: SettingsCat,
     pub cwd_mode: String,
+    /// "builtin" · "app" · "terminal" — 파일을 무엇으로 열지.
+    pub file_open_mode: String,
+    /// `app` 모드가 쓸 앱 이름. 비어 있으면 OS 연결 프로그램.
+    pub file_open_app: String,
+    /// `terminal` 모드의 명령줄. 비어 있으면 자동 감지된 편집기를 쓴다.
+    pub file_open_cmd: String,
     pub file_tree_default: bool,
     pub footer_default: bool,
     /// Editor autosave quiet period in ms; 0 = off.
@@ -239,6 +245,9 @@ impl App {
     /// every control change so the choice survives a relaunch.
     pub(crate) fn settings_save(&self) {
         socket::write_setting("default_cwd", serde_json::Value::String(self.set_cwd_mode.clone()));
+        socket::write_setting("file_open_mode", serde_json::Value::String(self.set_file_open_mode.clone()));
+        socket::write_setting("file_open_app", serde_json::Value::String(self.set_file_open_app.clone()));
+        socket::write_setting("file_open_cmd", serde_json::Value::String(self.set_file_open_cmd.clone()));
         socket::write_setting("file_tree_default", serde_json::Value::Bool(self.set_file_tree_default));
         socket::write_setting("pane_footer_default", serde_json::Value::Bool(self.set_footer_default));
         socket::write_setting(
@@ -361,6 +370,9 @@ impl App {
             area,
             cat: self.settings_cat,
             cwd_mode: self.set_cwd_mode.clone(),
+            file_open_mode: self.set_file_open_mode.clone(),
+            file_open_app: self.set_file_open_app.clone(),
+            file_open_cmd: self.set_file_open_cmd.clone(),
             file_tree_default: self.set_file_tree_default,
             footer_default: self.set_footer_default,
             autosave_ms: self.set_autosave.map_or(0, |d| d.as_millis() as u64),
@@ -462,6 +474,43 @@ impl App {
             SettingsAction::FocusCwdPath => {
                 self.settings_caret = self.set_cwd_mode.chars().count();
                 self.settings_input = Some(SettingsInput::CwdPath);
+            }
+            SettingsAction::FileOpenMode(m) => {
+                self.set_file_open_mode = m.to_string();
+                // "App" 을 처음 고르면 설치된 편집기 중 첫 번째로 채운다. 빈 값은
+                // "OS 연결 프로그램" 인데, 이 기기의 기본은 거노가 목록에서 일부러
+                // 뺀 앱이었다 — 고르자마자 그게 뜨면 설정이 배신처럼 느껴진다.
+                if m == "app" && self.set_file_open_app.is_empty() {
+                    if let Some((name, _)) = crate::proc::open_with_apps().first() {
+                        self.set_file_open_app = name.clone();
+                    }
+                }
+                // 처음 "Terminal" 을 고르는 순간 감지된 편집기로 필드를 채운다 —
+                // 빈 칸을 주고 알아서 적으라 하면 뭘 적어야 하는지 알 수 없다
+                // (CwdMode("custom") 이 $HOME 을 시드하는 것과 같은 배려).
+                if m == "terminal" {
+                    if self.set_file_open_cmd.trim().is_empty() {
+                        match socket::resolve_terminal_editor() {
+                            Some(cmd) => self.set_file_open_cmd = cmd,
+                            None => self.set_toast(
+                                "터미널 편집기를 못 찾았어요 — 명령을 직접 적어 주세요".to_string(),
+                            ),
+                        }
+                    }
+                    self.settings_caret = self.set_file_open_cmd.chars().count();
+                    self.settings_input = Some(SettingsInput::FileOpenCmd);
+                } else {
+                    self.settings_input = None;
+                }
+                self.settings_save();
+            }
+            SettingsAction::FileOpenApp(name) => {
+                self.set_file_open_app = name;
+                self.settings_save();
+            }
+            SettingsAction::FocusFileOpenCmd => {
+                self.settings_caret = self.set_file_open_cmd.chars().count();
+                self.settings_input = Some(SettingsInput::FileOpenCmd);
             }
             SettingsAction::ToggleFileTree => {
                 self.set_file_tree_default = !self.set_file_tree_default;
@@ -633,6 +682,7 @@ impl App {
             let caret = &mut self.settings_caret;
             let buf = match field {
                 SettingsInput::CwdPath => &mut self.set_cwd_mode,
+                SettingsInput::FileOpenCmd => &mut self.set_file_open_cmd,
                 SettingsInput::Shell => &mut self.set_shell,
                 SettingsInput::ClaudeExtra => &mut self.set_claude_extra,
                 // 행 인덱스라 목록이 줄면 가리키던 행이 사라질 수 있다 — 그땐 키를
@@ -765,6 +815,7 @@ impl App {
         let caret = &mut self.settings_caret;
         let buf = match field {
             SettingsInput::CwdPath => &mut self.set_cwd_mode,
+            SettingsInput::FileOpenCmd => &mut self.set_file_open_cmd,
             SettingsInput::Shell => &mut self.set_shell,
             SettingsInput::ClaudeExtra => &mut self.set_claude_extra,
             SettingsInput::ClaudeAccountLabel(i) => match self.set_claude_accounts.get_mut(i) {
@@ -932,6 +983,67 @@ pub(crate) fn paint_settings(
                 rects.push((SettingsAction::ToggleFooter, fr));
             }
             y += 30.0 + ROW_GAP;
+            y = field_header(
+                g,
+                fx,
+                y,
+                clip,
+                "File open",
+                &[
+                    "파일 트리에서 파일을 열 때 무엇으로 열지",
+                    "App = VS Code 같은 GUI 편집기로 열기",
+                    "Terminal = 새 pane 에서 CLI 편집기 ({} 는 파일 경로 자리)",
+                ],
+            );
+            // `"system"` 은 `"app"` 의 옛 저장값 — 앱 미지정과 뜻이 같아 같은 칸으로.
+            let open_is = |m: &str| {
+                ctx.file_open_mode == m || (m == "app" && ctx.file_open_mode == "system")
+            };
+            if y > clip {
+                let cells = [
+                    ("Built-in", open_is("builtin"), SettingsAction::FileOpenMode("builtin")),
+                    ("App", open_is("app"), SettingsAction::FileOpenMode("app")),
+                    ("Terminal", open_is("terminal"), SettingsAction::FileOpenMode("terminal")),
+                ];
+                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
+            }
+            y += SEG_H;
+            if open_is("app") {
+                y += 10.0;
+                if y > clip {
+                    // 설치된 것만 뜬다(`open_with_apps`). 마지막 "기본 앱" 은 OS
+                    // 연결 프로그램 — 목록에 없는 앱을 쓰는 사람의 탈출구다.
+                    let apps = crate::proc::open_with_apps();
+                    let mut cells: Vec<(&str, bool, SettingsAction)> = apps
+                        .iter()
+                        .map(|(name, _)| {
+                            (
+                                crate::info::short_app_name(name),
+                                ctx.file_open_app == *name,
+                                SettingsAction::FileOpenApp(name.clone()),
+                            )
+                        })
+                        .collect();
+                    cells.push((
+                        "기본 앱",
+                        ctx.file_open_app.is_empty(),
+                        SettingsAction::FileOpenApp(String::new()),
+                    ));
+                    segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
+                }
+                y += SEG_H;
+            }
+            if open_is("terminal") {
+                y += 10.0;
+                if y > clip {
+                    let r = (fx, y, fw.min(420.0), 34.0);
+                    let focused = ctx.input == Some(SettingsInput::FileOpenCmd);
+                    text_field(g, r, &ctx.file_open_cmd, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
+                    rects.push((SettingsAction::FocusFileOpenCmd, r));
+                }
+                y += 34.0;
+            }
+            y += ROW_GAP;
             y = field_header(
                 g,
                 fx,

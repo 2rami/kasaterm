@@ -266,10 +266,7 @@ impl App {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        if matches!(
-            ext.as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico"
-        ) {
+        if crate::is_image_path(&path) {
             // 이미지는 별도 편집기 창의 범위 밖 — 기존 보조탭 경로로 폴백.
             self.open_file(path, None, true);
             return;

@@ -1136,7 +1136,7 @@ fn draw_proc_menu(
 
 /// `Visual Studio Code` 처럼 긴 앱 이름을 버튼에 들어갈 길이로. 목록에 없는
 /// 이름은 그대로 두고, 안 들어가면 호출부가 아이콘만 그린다.
-fn short_app_name(name: &str) -> &str {
+pub(crate) fn short_app_name(name: &str) -> &str {
     match name {
         "Visual Studio Code" => "VS Code",
         "IntelliJ IDEA" => "IntelliJ",
