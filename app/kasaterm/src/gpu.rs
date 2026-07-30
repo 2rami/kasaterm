@@ -2189,6 +2189,10 @@ impl GpuRenderer {
             .is_none()
             .then(|| crate::markdown::match_bracket(lines, cursor.0, cursor.1))
             .flatten();
+        // 들여쓰기 한 단계의 픽셀 폭. 공백 폭은 글리프마다 달라지지 않으므로
+        // 루프 밖에서 한 번만 재고 곱해 쓴다.
+        let guide_step =
+            self.measure_pen_run(" ", base, false, false) * crate::markdown::indent_step_cols() as f32;
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
             if pen_y + lh > clip_top && pen_y < clip_bot {
@@ -2197,6 +2201,16 @@ impl GpuRenderer {
                 // brighter than BG — SURFACE is *darker*, so it reads invisible.
                 if li == cursor.0 {
                     self.rect(x, pen_y, w, lh, crate::theme::surface_hover());
+                }
+                // 들여쓰기 가이드 — 현재 줄 밴드 위, 선택 밴드 아래. 첫 선이
+                // 들여쓰기 0 칸 자리라 코드 왼쪽 끝에 붙는다(VS Code 와 같다).
+                let guide_col = crate::theme::with_alpha(crate::theme::text(), 0x1A);
+                for k in 0..crate::markdown::indent_guide_depth(lines, li) {
+                    let gx = tx0 + guide_step * k as f32;
+                    if gx < cx0 || gx > clip_right {
+                        continue;
+                    }
+                    self.rect(gx, pen_y, 1.0, lh, guide_col);
                 }
                 // Selection band for this line's slice of the (normalized)
                 // range: full width on interior lines (plus a small nub for
