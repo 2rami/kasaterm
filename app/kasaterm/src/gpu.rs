@@ -156,6 +156,15 @@ pub struct GpuRenderer {
     /// 재파싱 대기 — (버퍼 해시, 그 해시를 처음 본 시각). 타이핑이 이어지면
     /// 키마다 해시가 바뀌어 이 값이 계속 새로 서므로 파싱이 미뤄진다.
     raw_hl_pending: Option<(u64, std::time::Instant)>,
+    /// 직전 전체 파싱이 실제로 걸린 시간. 다음 재파싱을 얼마나 미룰지를 이
+    /// 값에서 뽑는다(`RAW_HL_COST_MULT`) — 파일 크기를 세지 않고도 무거운
+    /// 문서에서 저절로 더 참는다.
+    raw_hl_cost: std::time::Duration,
+    /// 이 언어로 한 번이라도 파싱했는지. **첫 파싱은 비용 기준에서 뺀다** —
+    /// 그때는 tree-sitter config·쿼리 빌드가 함께 잡혀 9줄 파일에서도 14ms 가
+    /// 나오고, 그걸 기준으로 임계를 세우면 작은 파일까지 210ms 를 기다렸다
+    /// (실측).
+    raw_hl_parsed_once: bool,
     /// Laid-out height of each markdown block, so a block scrolled off screen
     /// can be stepped over instead of re-measured. Same tiny-LRU shape as
     /// `raw_hl` (keyed by doc + layout, so two markdown panes don't evict each
@@ -182,10 +191,16 @@ struct RawHlEntry {
     spans: std::rc::Rc<Vec<Vec<(String, crate::syntax::SynKind)>>>,
 }
 
-/// 타이핑이 멈췄다고 볼 정지 시간. 커서 blink 스레드가 `BLINK_HALF_PERIOD_MS`
-/// (530ms) 마다 프레임을 깨우므로 실제 재파싱은 그 tick 에 실린다 — 이 값이
-/// 정하는 건 "연타 중에는 절대 파싱하지 않는다"는 하한뿐이다.
-const RAW_HL_DEBOUNCE_MS: u64 = 80;
+/// 재파싱 간격을 **직전 파싱 비용의 몇 배로 벌리는지**. 고정 임계는 못 쓴다 —
+/// 80ms 로 뒀더니 사람의 타이핑 간격(100~300ms)이 그보다 길어 매 키마다 그냥
+/// 통과해 버렸다(실측: 20타에 재파싱 11회 잔존). 비용에 비례해 벌리면 9줄
+/// 파일(0.84ms)은 사실상 즉시 갱신되고 5736줄(20ms)은 드물게 갱신된다 —
+/// 파싱에 쓰는 시간이 어느 파일에서든 대략 1/12 로 묶인다.
+const RAW_HL_COST_MULT: u32 = 12;
+/// 비례 임계의 하한·상한. 하한은 작은 파일에서 매 프레임 파싱하지 않게,
+/// 상한은 아주 큰 파일에서 색이 몇 초씩 낡아 있지 않게 잡는다.
+const RAW_HL_QUIET_MIN_MS: u64 = 80;
+const RAW_HL_QUIET_MAX_MS: u64 = 600;
 
 /// One pane's slot in `render_frame`. Mirrors the data the existing
 /// sugarloaf renderer carries through `PaneFrame` but trimmed to
@@ -517,6 +532,8 @@ impl GpuRenderer {
             md_block_ys: Vec::new(),
             raw_hl: Vec::new(),
             raw_hl_pending: None,
+            raw_hl_cost: std::time::Duration::ZERO,
+            raw_hl_parsed_once: false,
             md_heights: Vec::new(),
         })
     }
@@ -1185,6 +1202,15 @@ impl GpuRenderer {
     /// Lay styled spans into `max_w` at logical (x_start, y_start), wrapping on
     /// word boundaries. Returns pen_y after the last line. Lines fully outside
     /// [clip_top, clip_bot) are skipped — that's the scroll clip for markdown.
+    /// 선택 띠 한 칸. 높이는 줄간격이 아니라 글자 박스에 맞춘다 — 줄간격(1.5배)
+    /// 으로 깔면 띠가 글자 아래 여백까지 먹어 글줄이 아래로 밀려 보인다.
+    /// 전용 선택 토큰은 없어 accent 의 알파만 낮춰 쓴다(글자 밑에 깔리는 배경).
+    fn md_sel_band(&mut self, x: f32, y: f32, w: f32, size: f32) {
+        let mut col = crate::theme::accent();
+        col[3] = 90;
+        self.rect(x, y - size * 0.1, w, size * 1.22, col);
+    }
+
     fn md_runs(
         &mut self,
         spans: &[crate::MdSpan],
@@ -1210,7 +1236,19 @@ impl GpuRenderer {
             for word in span.text.split_inclusive(' ') {
                 let trailing_space = word.ends_with(' ');
                 let trimmed = word.trim_end_matches(' ');
-                if !trimmed.is_empty() {
+                if trimmed.is_empty() {
+                    // 스팬 경계에 붙은 선행 공백(`[링크](…) 가` 의 " ")은 낱말이
+                    // 아니라 버려졌는데, 그러면 선택 띠가 그 폭에서 끊기고 복사문에서
+                    // 공백이 사라진다 — 폭 있는 빈 칸으로 똑같이 기록한다.
+                    if trailing_space && pen_y + lh > clip_top && pen_y < clip_bot {
+                        self.md_word_rects
+                            .push((pen_x, pen_y, space_w, size, word.to_string()));
+                        if word_in_sel(self.md_sel_screen, pen_x + space_w * 0.5, pen_y + size * 0.5)
+                        {
+                            self.md_sel_band(pen_x, pen_y, space_w, size);
+                        }
+                    }
+                } else {
                     let ww = self.measure_run(trimmed, size, bold, span.italic, span.code, span.code);
                     if pen_x + ww > x_start + max_w && pen_x > x_start {
                         pen_x = x_start;
@@ -1220,16 +1258,15 @@ impl GpuRenderer {
                         // 선택은 셀 격자가 없어 "그려진 낱말" 이 유일한 기준이다 —
                         // 낱말 사각형을 적어 두고(복사·히트테스트가 이걸 읽는다),
                         // 범위에 들면 글자 **전에** 띠를 깔아야 배경이 된다(rect 와
-                        // 글리프가 같은 버퍼라 나중에 그리면 글자를 덮는다).
+                        // 글리프가 같은 버퍼라 나중에 그리면 글자를 덮는다). 높이는
+                        // 줄간격(lh, 1.5배)이 아니라 글자 박스(size)다 — lh 로 재면
+                        // 중심이 글자 아래 여백에 떨어져 히트 판정이 한 줄씩 밀린다.
+                        // 원문 공백을 살려 적어 복사문이 원문 간격 그대로 나온다.
                         self.md_word_rects
-                            .push((pen_x, pen_y, ww, lh, trimmed.to_string()));
-                        if word_in_sel(self.md_sel_screen, pen_x + ww * 0.5, pen_y + lh * 0.5) {
+                            .push((pen_x, pen_y, ww, size, word.to_string()));
+                        if word_in_sel(self.md_sel_screen, pen_x + ww * 0.5, pen_y + size * 0.5) {
                             let band = ww + if trailing_space { space_w } else { 0.0 };
-                            // 전용 선택 토큰은 없다 — 테마 주석대로 accent 가 선택색
-                            // 이고, 띠는 글자 밑에 깔려야 하니 알파만 낮춘다.
-                            let mut col = crate::theme::accent();
-                            col[3] = 90;
-                            self.rect(pen_x, pen_y, band, lh, col);
+                            self.md_sel_band(pen_x, pen_y, band, size);
                         }
                         if span.code {
                             // Notion-style chip: a hair *lighter* than the body
@@ -2012,10 +2049,15 @@ impl GpuRenderer {
             return Some((spans, false));
         }
         let now = std::time::Instant::now();
+        let quiet = self
+            .raw_hl_cost
+            .saturating_mul(RAW_HL_COST_MULT)
+            .clamp(
+                std::time::Duration::from_millis(RAW_HL_QUIET_MIN_MS),
+                std::time::Duration::from_millis(RAW_HL_QUIET_MAX_MS),
+            );
         let due = match self.raw_hl_pending {
-            Some((h, since)) if h == hash => {
-                now.duration_since(since).as_millis() as u64 >= RAW_HL_DEBOUNCE_MS
-            }
+            Some((h, since)) if h == hash => now.duration_since(since) >= quiet,
             _ => {
                 self.raw_hl_pending = Some((hash, now));
                 false
@@ -2032,12 +2074,21 @@ impl GpuRenderer {
             }
         }
         self.raw_hl_pending = None;
-        let t_parse = prof.map(|_| std::time::Instant::now());
+        // 이 시각은 프로파일링과 무관하게 항상 잰다 — 다음 재파싱을 얼마나
+        // 미룰지가 이 값에서 나오므로 계측이 곧 동작이다.
+        let t_parse = std::time::Instant::now();
         let spans = std::rc::Rc::new(crate::syntax::highlight_lines(lang, lines)?);
-        if let (Some(us), Some(t)) = (hash_us, t_parse) {
+        let cost = t_parse.elapsed();
+        if self.raw_hl_parsed_once {
+            self.raw_hl_cost = cost;
+        } else {
+            self.raw_hl_parsed_once = true;
+        }
+        if let Some(us) = hash_us {
             eprintln!(
-                "[prof] ts_spans MISS hash={us}us parse={}us lines={}",
-                t.elapsed().as_micros(),
+                "[prof] ts_spans MISS hash={us}us parse={}us quiet={}ms lines={}",
+                cost.as_micros(),
+                quiet.as_millis(),
                 lines.len()
             );
         }

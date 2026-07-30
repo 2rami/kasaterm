@@ -818,6 +818,30 @@ impl App {
                 }
                 eprintln!("[mdscript] scroll={px}");
             }
+            // 렌더 뷰 선택을 문서 좌표로 직접 세운다 — `sel:<ax>,<ay>,<bx>,<by>`.
+            // 마우스 드래그는 밖에서 만들 수 없어(winit) 상태를 세워 띠 렌더와
+            // 복사 추출만 확인한다. `selcopy` 는 그 결과를 로그로 찍는다(클립보드는
+            // 건드리지 않는다 — 검증이 사용자 클립보드를 덮으면 안 된다).
+            Some(("sel", v)) => {
+                let n: Vec<f32> =
+                    v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                if n.len() != 4 {
+                    eprintln!("[mdscript] sel: 좌표 4개 필요(ax,ay,bx,by)");
+                    return;
+                }
+                self.md_render_sel = Some(crate::MdRenderSel {
+                    pane: id.clone(),
+                    anchor: (n[0], n[1]),
+                    end: (n[2], n[3]),
+                    dragging: false,
+                });
+                if let Ok(mut ws) = self.ws.lock() {
+                    if let Some(pane) = ws.panes.get_mut(&id) {
+                        pane.dirty = true;
+                    }
+                }
+                eprintln!("[mdscript] sel=({},{})-({},{})", n[0], n[1], n[2], n[3]);
+            }
             Some(("mode", v)) => {
                 let want_raw = v == "raw";
                 self.set_md_mode(&id, want_raw);
@@ -857,6 +881,13 @@ impl App {
                         .map(|m| (m.cur_line, m.cur_col))
                 });
                 eprintln!("[mdscript] type={v:?} caret={at:?}");
+            }
+            // 선택 텍스트 확인. 클립보드 대신 로그로 찍는다(위 `sel:` 주석 참고).
+            Some(("selcopy", _)) => {
+                match self.md_render_selection_text() {
+                    Some(t) => eprintln!("[mdscript] selcopy={t:?}"),
+                    None => eprintln!("[mdscript] selcopy=<없음>"),
+                }
             }
             // 이 마크다운 탭을 닫아 본다 — 저장 안 한 편집분이 있으면 확인
             // 모달이 떠야 하고, 그 화면이 이 단계의 관찰 대상이다.

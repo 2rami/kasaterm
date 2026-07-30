@@ -656,13 +656,15 @@ impl App {
             })
             .unwrap_or_else(|| "shell".to_string())
     }
-    /// 렌더 뷰 선택을 클립보드로. 낱말 사각형(마지막 프레임)에서 범위에 든 것을
-    /// 읽는 순서로 이어 붙인다 — 줄이 바뀌면 개행. 사각형은 화면에 그려진 것만
-    /// 있으므로 보이는 범위가 곧 복사 범위다(화면 밖 블록은 애초에 레이아웃을
-    /// 건너뛴다). true 면 이 호출이 복사를 처리했다.
-    pub(crate) fn copy_md_render_selection(&self) -> bool {
-        let Some(sel) = self.md_render_sel.as_ref() else { return false };
-        let Some(words) = self.md_word_rects.get(&sel.pane) else { return false };
+    /// 렌더 뷰 선택 텍스트. 낱말 사각형(마지막 프레임)에서 범위에 든 것을 읽는
+    /// 순서로 이어 붙인다 — 줄이 바뀌면 개행. 사각형은 화면에 그려진 것만 있으므로
+    /// 보이는 범위가 곧 복사 범위다(화면 밖 블록은 애초에 레이아웃을 건너뛴다).
+    ///
+    /// 클립보드 쓰기와 갈라 둔 이유는 검증 때문이다 — 헤드리스 하네스가 이걸 불러
+    /// 결과를 로그로 찍으면 거노 클립보드를 건드리지 않고 정확성을 확인할 수 있다.
+    pub(crate) fn md_render_selection_text(&self) -> Option<String> {
+        let sel = self.md_render_sel.as_ref()?;
+        let words = self.md_word_rects.get(&sel.pane)?;
         let scroll = self
             .ws
             .lock()
@@ -688,21 +690,31 @@ impl App {
             .map(|(x, y, _, _, t)| (*y, *x, t.as_str()))
             .collect();
         if hits.is_empty() {
-            return false;
+            return None;
         }
         hits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mut out = String::new();
         let mut line_y = hits[0].0;
         for (y, _, t) in &hits {
-            if !out.is_empty() {
-                out.push(if *y > line_y { '\n' } else { ' ' });
+            // 낱말 사이에 공백을 끼워 넣지 않는다 — 기록된 조각이 원문의 트레일링
+            // 공백을 그대로 품고 있어서, 넣으면 `**굵게**,` 가 `굵게 ,` 로 벌어진다.
+            if *y > line_y {
+                while out.ends_with(' ') {
+                    out.pop();
+                }
+                out.push('\n');
             }
             line_y = *y;
             out.push_str(t);
         }
+        Some(out.trim_end().to_string())
+    }
+    /// 렌더 뷰 선택을 클립보드로. true 면 이 호출이 복사를 처리했다.
+    pub(crate) fn copy_md_render_selection(&self) -> bool {
+        let Some(text) = self.md_render_selection_text() else { return false };
         match arboard::Clipboard::new() {
             Ok(mut cb) => {
-                if let Err(e) = cb.set_text(out) {
+                if let Err(e) = cb.set_text(text) {
                     eprintln!("[kasaterm] clipboard write failed: {e}");
                 }
             }
