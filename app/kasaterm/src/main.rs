@@ -2083,6 +2083,21 @@ enum MdBlock {
     /// a checkbox instead of `marker`.
     ListItem { depth: u8, marker: String, spans: Vec<MdSpan>, task: Option<bool> },
     Quote { spans: Vec<MdSpan> },
+    /// `> [!NOTE]` 알림. 인용문과 같은 문단 평탄화를 쓰되 `first`/`last` 로 여러
+    /// 문단이 한 상자로 이어지게 한다 — 문단마다 상자를 닫으면 이어진 글이
+    /// 토막토막 끊겨 읽힌다.
+    ///
+    /// `list` 는 알림 안 목록 항목의 (깊이, 표식). 목록을 `ListItem` 으로 내보내면
+    /// 상자 밖에 매달려 경고에 딸린 목록이 경고 밖의 글로 읽힌다. 알림 안
+    /// 체크박스(`- [ ]`)는 표식으로만 떨어진다 — 상자 안 체크박스는 실제 문서에서
+    /// 거의 안 쓰여, 렌더 코드를 겹쳐 둘 값이 없다.
+    Callout {
+        kind: MdCallout,
+        spans: Vec<MdSpan>,
+        first: bool,
+        last: bool,
+        list: Option<(u8, String)>,
+    },
     Rule,
     /// YAML frontmatter, as label/value rows. Kept as its own block rather than
     /// parsed into the body: without it the closing `---` reads as a setext
@@ -2114,6 +2129,31 @@ struct MdRenderSel {
 
 /// One table cell's inline content.
 type MdCell = Vec<MdSpan>;
+
+/// GFM 알림 종류(`> [!NOTE]`) — 노션 콜아웃 자리. 인용문과 달리 "이걸 조심해라"
+/// 는 신호라, 색과 표지로 본문 흐름에서 튀어나와야 한다.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MdCallout {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl MdCallout {
+    /// 표지 아이콘·제목·색. 짝은 GitHub 이 쓰는 그대로 둔다 — 같은 문서를 딴 데서
+    /// 볼 때와 뜻이 어긋나면 안 된다. 색은 전부 테마 토큰이라 테마를 바꿔도 따라간다.
+    fn face(self) -> (&'static str, &'static str, [u8; 4]) {
+        match self {
+            Self::Note => ("info", "Note", theme::accent()),
+            Self::Tip => ("lightbulb", "Tip", theme::success()),
+            Self::Important => ("message-square-warning", "Important", theme::syn_keyword()),
+            Self::Warning => ("triangle-alert", "Warning", theme::syn_type()),
+            Self::Caution => ("octagon-alert", "Caution", theme::danger()),
+        }
+    }
+}
 
 /// Per-column alignment from a table's `|:--:|` delimiter row.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -2325,6 +2365,10 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
     let mut in_item = false;
     let mut item_marker = String::new();
     let mut in_quote = false;
+    // 열려 있는 인용문이 알림(`> [!NOTE]`)이면 그 종류. `quote_first` 는 상자
+    // 머리(아이콘·제목)를 첫 문단에만 그리기 위한 것이다.
+    let mut quote_kind: Option<MdCallout> = None;
+    let mut quote_first = true;
     let mut in_image = false;
     let mut img_url = String::new();
     let mut img_alt = String::new();
@@ -2357,10 +2401,12 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
 
     // GFM 확장을 켜 둔다: 켜지 않으면 `~~취소선~~`·`- [ ]` 가 평문으로 떨어지고,
     // 무엇보다 frontmatter 의 닫는 `---` 가 setext heading 으로 읽혀 YAML 머리가
-    // 문서 첫 화면을 거대한 굵은 글씨로 덮는다.
+    // 문서 첫 화면을 거대한 굵은 글씨로 덮는다. `ENABLE_GFM` 은 알림 태그
+    // (`> [!NOTE]`) 하나만 켠다 — 다른 파싱 규칙은 건드리지 않는다.
     let opts = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_GFM
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
     for (ev, rng) in Parser::new_ext(text, opts).into_offset_iter() {
         match ev {
@@ -2417,8 +2463,16 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                     in_meta = true;
                     meta_buf.clear();
                 }
-                Tag::BlockQuote(_) => {
+                Tag::BlockQuote(kind) => {
                     in_quote = true;
+                    quote_kind = kind.map(|k| match k {
+                        pulldown_cmark::BlockQuoteKind::Note => MdCallout::Note,
+                        pulldown_cmark::BlockQuoteKind::Tip => MdCallout::Tip,
+                        pulldown_cmark::BlockQuoteKind::Important => MdCallout::Important,
+                        pulldown_cmark::BlockQuoteKind::Warning => MdCallout::Warning,
+                        pulldown_cmark::BlockQuoteKind::Caution => MdCallout::Caution,
+                    });
+                    quote_first = true;
                     spans.clear();
                 }
                 Tag::Image { dest_url, .. } => {
@@ -2456,7 +2510,22 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                     // image, which was emitted as its own Image block).
                     if in_quote {
                         if !spans.is_empty() {
-                            blocks.push(MdBlock::Quote { spans: wikilinked(&mut spans) });
+                            let spans = wikilinked(&mut spans);
+                            blocks.push(match quote_kind {
+                                Some(kind) => {
+                                    let first = std::mem::take(&mut quote_first);
+                                    // `last` 는 인용문이 닫힐 때 되짚어 세운다 —
+                                    // 여기선 다음 문단이 있을지 알 수 없다.
+                                    MdBlock::Callout {
+                                        kind,
+                                        spans,
+                                        first,
+                                        last: false,
+                                        list: None,
+                                    }
+                                }
+                                None => MdBlock::Quote { spans },
+                            });
                         }
                     } else if !in_item && !spans.is_empty() {
                         blocks.push(MdBlock::Para { spans: wikilinked(&mut spans) });
@@ -2481,11 +2550,18 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                     // 항목이다 — 여기서 또 밀면 빈 항목이 하나 더 생긴다.
                     if in_item {
                         let depth = list_stack.len().saturating_sub(1) as u8;
-                        blocks.push(MdBlock::ListItem {
-                            depth,
-                            marker: std::mem::take(&mut item_marker),
-                            spans: wikilinked(&mut spans),
-                            task: item_task.take(),
+                        let marker = std::mem::take(&mut item_marker);
+                        let spans = wikilinked(&mut spans);
+                        let task = item_task.take();
+                        blocks.push(match quote_kind {
+                            Some(kind) => MdBlock::Callout {
+                                kind,
+                                spans,
+                                first: std::mem::take(&mut quote_first),
+                                last: false,
+                                list: Some((depth, marker)),
+                            },
+                            None => MdBlock::ListItem { depth, marker, spans, task },
                         });
                         in_item = false;
                     }
@@ -2501,7 +2577,22 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                     }
                 }
                 TagEnd::Link => link_url = None,
-                TagEnd::BlockQuote(_) => in_quote = false,
+                TagEnd::BlockQuote(_) => {
+                    in_quote = false;
+                    // 상자 아래를 닫는다. `quote_first` 가 아직 서 있으면 이 알림엔
+                    // 문단이 하나도 없던 것(목록만 든 알림)이라 닫을 상자가 없다.
+                    // 뒤에서부터 찾는 이유: 알림 안 목록은 상자 밖으로 평탄화돼
+                    // `blocks` 맨 끝이 ListItem 일 수 있다.
+                    if quote_kind.take().is_some() && !quote_first {
+                        if let Some(MdBlock::Callout { last, .. }) = blocks
+                            .iter_mut()
+                            .rev()
+                            .find(|b| matches!(b, MdBlock::Callout { .. }))
+                        {
+                            *last = true;
+                        }
+                    }
+                }
                 TagEnd::Image => {
                     blocks.push(MdBlock::Image {
                         path: std::mem::take(&mut img_url),
@@ -5585,6 +5676,7 @@ mod tests {
                 MdBlock::ListItem { spans, .. }
                 | MdBlock::Para { spans }
                 | MdBlock::Heading { spans, .. }
+                | MdBlock::Callout { spans, .. }
                 | MdBlock::Quote { spans } => Some(spans),
                 _ => None,
             })
@@ -5611,6 +5703,96 @@ mod tests {
                 "{src:?} 에서 링크가 죽었다: {got:?}"
             );
         }
+    }
+
+    /// 알림 종류별 블록 모양. `first`/`last` 가 상자를 그리는 기준이라, 이게
+    /// 어긋나면 배경이 안 그려지거나 문단마다 상자가 끊긴다.
+    #[test]
+    fn callout_tags_become_callout_blocks() {
+        for (src, want) in [
+            ("> [!NOTE]\n> 알림\n", MdCallout::Note),
+            ("> [!TIP]\n> 팁\n", MdCallout::Tip),
+            ("> [!IMPORTANT]\n> 중요\n", MdCallout::Important),
+            ("> [!WARNING]\n> 경고\n", MdCallout::Warning),
+            ("> [!CAUTION]\n> 주의\n", MdCallout::Caution),
+        ] {
+            let (blocks, _) = parse_markdown(src);
+            match blocks.as_slice() {
+                [MdBlock::Callout { kind, first, last, spans, .. }] => {
+                    assert_eq!(*kind, want, "{src:?}");
+                    assert!(*first && *last, "{src:?} 한 문단이면 상자를 열고 닫아야 한다");
+                    // 태그 줄은 표지로 그려지므로 본문에 남으면 두 번 보인다.
+                    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+                    assert!(!text.contains("[!"), "{src:?} 본문에 태그가 남았다: {text:?}");
+                }
+                other => panic!("{src:?} → 콜아웃이 아니다: {} 블록", other.len()),
+            }
+        }
+    }
+
+    /// 알림이 아닌 것은 알림이 되지 말아야 한다 — 인용문은 인용문으로 남는다.
+    #[test]
+    fn plain_and_unknown_quotes_stay_quotes() {
+        for src in ["> 그냥 인용문\n", "> [!HELLO]\n> 없는 종류\n"] {
+            let (blocks, _) = parse_markdown(src);
+            assert!(
+                blocks.iter().all(|b| !matches!(b, MdBlock::Callout { .. })),
+                "{src:?} 가 콜아웃으로 잡혔다"
+            );
+            assert!(
+                blocks.iter().any(|b| matches!(b, MdBlock::Quote { .. })),
+                "{src:?} 가 인용문으로도 안 남았다"
+            );
+        }
+    }
+
+    /// 여러 문단 알림은 첫 조각만 상자를 열고 마지막 조각만 닫는다 — 조각마다
+    /// 상자를 그리면 이음새에서 배경이 겹쳐 그 띠만 색이 진해진다.
+    #[test]
+    fn multi_paragraph_callout_opens_once_and_closes_once() {
+        let (blocks, _) = parse_markdown("> [!WARNING]\n> 첫 문단\n>\n> 둘째 문단\n");
+        let flags: Vec<(bool, bool)> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                MdBlock::Callout { first, last, .. } => Some((*first, *last)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flags, vec![(true, false), (false, true)], "조각 표시가 어긋났다");
+    }
+
+    /// 알림 안 목록은 상자 안에 남아야 한다 — `ListItem` 으로 새면 경고에 딸린
+    /// 목록이 경고 밖의 글로 읽힌다(실제로 상자 아래에 매달려 나왔다).
+    #[test]
+    fn list_inside_callout_stays_in_the_box() {
+        let (blocks, _) = parse_markdown("> [!WARNING]\n> 확인해라.\n>\n> - 첫째\n> - 둘째\n");
+        assert!(
+            blocks.iter().all(|b| !matches!(b, MdBlock::ListItem { .. })),
+            "목록이 상자 밖으로 샜다"
+        );
+        let depths: Vec<Option<u8>> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                MdBlock::Callout { list, .. } => Some(list.as_ref().map(|(d, _)| *d)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(depths, vec![None, Some(0), Some(0)], "문단 하나 + 목록 둘이어야 한다");
+        assert!(
+            matches!(blocks.last(), Some(MdBlock::Callout { last: true, .. })),
+            "마지막 조각이 상자를 닫지 않았다"
+        );
+    }
+
+    /// 알림 안에서도 문서 사이 링크는 살아 있어야 한다 — 경고문에 관련 문서를
+    /// 달아 두는 게 이 볼트의 실제 사용법이다.
+    #[test]
+    fn wikilink_works_inside_callout() {
+        let got = spans_of("> [!WARNING]\n> 자세히는 [[topic_a]] 참고\n");
+        assert!(
+            got.iter().any(|(t, l)| t == "topic_a" && l.as_deref() == Some("wiki:topic_a")),
+            "알림 안 링크가 죽었다: {got:?}"
+        );
     }
 
     /// 인라인 코드 안의 표기는 링크가 아니다 — 문서에서 표기 자체를 설명할 때
