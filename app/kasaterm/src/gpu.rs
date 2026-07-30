@@ -1497,7 +1497,11 @@ impl GpuRenderer {
             // 버튼 rect 는 원래 보이는 것만 등록되므로(md_runs 의 clip 검사 안,
             // 코드블록은 `if visible`) 건너뛰어도 히트 영역이 어긋나지 않는다.
             let known = heights[bi];
-            if known.is_finite() && (pen_y + known < clip_top || pen_y > clip_bot) {
+            // 알림의 첫 조각은 건너뛰지 않는다 — 상자 배경을 이 조각이 통째로
+            // 그리므로, 조각이 화면 위로 벗어난 순간 나머지 문단의 배경까지 사라진다.
+            let draws_for_others = matches!(block, MdBlock::Callout { first: true, .. });
+            if !draws_for_others && known.is_finite() && (pen_y + known < clip_top || pen_y > clip_bot)
+            {
                 pen_y += known;
                 continue;
             }
@@ -1661,6 +1665,130 @@ impl GpuRenderer {
                         self.rect(x, start_y, base * 0.22, bar_h, crate::theme::accent());
                     }
                     pen_y += base * 0.8;
+                }
+                MdBlock::Callout { kind, spans, first, last, list } => {
+                    let (icon_name, title, col) = kind.face();
+                    let size = base;
+                    let pad = base * 0.8;
+                    let bar_w = base * 0.22;
+                    let text_x = x + bar_w + pad;
+                    let text_w = (w - bar_w - pad * 2.0).max(1.0);
+                    // 상자 안 목록은 바깥 목록과 같은 들여쓰기·간격을 쓴다 — 알림에
+                    // 들어갔다고 목록 모양이 달라지면 같은 글이 다르게 읽힌다.
+                    let indent_of = |l: &Option<(u8, String)>| {
+                        l.as_ref().map_or(0.0, |(d, _)| (*d as f32 + 1.0) * base * 1.5)
+                    };
+                    // 조각 뒤 간격. 문단 사이는 바깥 문단 간격(0.85)보다 좁혀야 상자
+                    // 안이 한 덩어리로 읽힌다.
+                    let after_of =
+                        |l: &Option<(u8, String)>| if l.is_some() { base * 0.4 } else { base * 0.55 };
+                    let indent = indent_of(list);
+                    let body_x = text_x + indent;
+                    let body_w = (text_w - indent).max(1.0);
+                    if *first {
+                        // 표지 제목은 본문과 같은 경로(md_runs)로 그린다 — draw_text 는
+                        // 터미널 등폭 폰트라 상자 머리만 서체가 튄다(Meta 블록이 겪은
+                        // 것과 같은 함정).
+                        let title_size = size * 0.95;
+                        let isz = size * 1.05;
+                        let icon_col = isz + base * 0.45;
+                        let title_spans = [crate::MdSpan {
+                            text: title.to_string(),
+                            bold: true,
+                            italic: false,
+                            code: false,
+                            strike: false,
+                            link: None,
+                        }];
+                        let title_w = (text_w - icon_col).max(1.0);
+                        let head_h = self.md_runs_height(
+                            &title_spans,
+                            text_x + icon_col,
+                            title_w,
+                            title_size,
+                            true,
+                        ) + base * 0.25;
+                        // 상자는 첫 조각이 통째로 그린다. 조각마다 그리면 이음새에서
+                        // 배경이 두 번 겹쳐 그 띠만 색이 진해지고, 둥근 모서리가
+                        // 상자 중간에 생긴다.
+                        let mut box_h =
+                            pad + head_h + self.md_runs_height(spans, body_x, body_w, size, false);
+                        let mut next_gap = after_of(list);
+                        for nb in &blocks[bi + 1..] {
+                            match nb {
+                                MdBlock::Callout { spans: s2, list: l2, first: false, .. } => {
+                                    let ind = indent_of(l2);
+                                    box_h += next_gap
+                                        + self.md_runs_height(
+                                            s2,
+                                            text_x + ind,
+                                            (text_w - ind).max(1.0),
+                                            size,
+                                            false,
+                                        );
+                                    next_gap = after_of(l2);
+                                }
+                                _ => break,
+                            }
+                        }
+                        box_h += pad;
+                        if pen_y + box_h > clip_top && pen_y < clip_bot {
+                            let mut tint = col;
+                            // 배경은 종류색을 옅게 깐다 — 코드블록의 surface() 배경과
+                            // 색으로 갈려야 무엇이 코드고 무엇이 알림인지 읽힌다.
+                            tint[3] = 30;
+                            self.round_rect_fill(x, pen_y, w, box_h, base * 0.5, tint);
+                            self.rect(x, pen_y, bar_w, box_h, col);
+                        }
+                        pen_y += pad;
+                        if pen_y + head_h > clip_top && pen_y < clip_bot {
+                            // 아이콘은 제목 글줄의 세로 중앙에 놓는다 — 위쪽에 맞추면
+                            // 한글 제목처럼 글줄이 높은 경우 표지가 떠 보인다.
+                            let lh = self.md_shaper.line_height(title_size * self.scale).ceil()
+                                / self.scale;
+                            self.queue_icon(icon_name, text_x, pen_y + (lh - isz) / 2.0, isz, col);
+                            self.md_runs(
+                                &title_spans,
+                                text_x + icon_col,
+                                pen_y,
+                                title_w,
+                                title_size,
+                                true,
+                                col,
+                                clip_top,
+                                clip_bot,
+                            );
+                        }
+                        pen_y += head_h;
+                    }
+                    if let Some((_, marker)) = list {
+                        let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
+                        if pen_y + lh > clip_top && pen_y < clip_bot {
+                            self.draw_text(
+                                body_x - base * 1.1,
+                                pen_y,
+                                marker,
+                                DrawOpts {
+                                    font_size: size,
+                                    color: col,
+                                    bold: false,
+                                    italic: false,
+                                },
+                            );
+                        }
+                    }
+                    pen_y = self.md_runs(
+                        spans,
+                        body_x,
+                        pen_y,
+                        body_w,
+                        size,
+                        false,
+                        crate::theme::text(),
+                        clip_top,
+                        clip_bot,
+                    );
+                    pen_y += if *last { pad + base * 0.85 } else { after_of(list) };
                 }
                 MdBlock::Rule => {
                     pen_y += base * 0.9;
@@ -2545,6 +2673,14 @@ impl GpuRenderer {
             "undo-2" => include_str!("../assets/icons/undo-2.svg"),
             "external-link" => include_str!("../assets/icons/external-link.svg"),
             "claude" => include_str!("../assets/icons/claude.svg"),
+            // 마크다운 콜아웃(`> [!NOTE]` …) 표지. 이모지 대신 SVG 를 쓰는 이유는
+            // 이모지가 폰트에 따라 흑백 글리프로 떨어지기 때문 — 실제로 `⚠️` 가
+            // 밋밋한 `▲` 로 나온다.
+            "info" => include_str!("../assets/icons/info.svg"),
+            "lightbulb" => include_str!("../assets/icons/lightbulb.svg"),
+            "triangle-alert" => include_str!("../assets/icons/triangle-alert.svg"),
+            "octagon-alert" => include_str!("../assets/icons/octagon-alert.svg"),
+            "message-square-warning" => include_str!("../assets/icons/message-square-warning.svg"),
             // File-type set (assets/icons/ft): VSCode Material 계열의 브랜드컬러
             // filled SVG — 모노크롬 틴트가 아닌 `queue_icon_colored` 로 그린다.
             "ft/audio" => include_str!("../assets/icons/ft/audio.svg"),
