@@ -3617,26 +3617,17 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 if !self.try_copy_md_block() {
                                     if self.md_body_rects.contains_key(&pane_id) {
-                                        self.md_click_caret(
+                                        // 캐럿 이동 + 드래그 앵커 + 연타 선택
+                                        // (더블 = 단어, 트리플 = 줄). 순서가
+                                        // 계약이라 한 함수에 묶여 있고, 헤드리스
+                                        // 하네스도 같은 함수를 쓴다. 평범한
+                                        // 클릭은 Released 에서 앵커 == 캐럿으로
+                                        // 판정돼 선택이 접힌다.
+                                        self.md_press_caret(
                                             &pane_id,
                                             self.cursor_px.0,
                                             self.cursor_px.1,
                                         );
-                                        // Arm a selection drag: anchor at the
-                                        // pressed caret; the drag moves the
-                                        // caret while the anchor stays. A
-                                        // plain click resolves on Released
-                                        // (anchor == caret → cleared).
-                                        if let Ok(mut ws) = self.ws.lock() {
-                                            if let Some(m) = ws
-                                                .panes
-                                                .get_mut(&pane_id)
-                                                .and_then(|p| p.markdown_mut())
-                                            {
-                                                m.sel_anchor =
-                                                    Some((m.cur_line, m.cur_col));
-                                            }
-                                        }
                                         self.md_select_drag = Some(pane_id.clone());
                                     } else {
                                         // 렌더 뷰: 문서 좌표로 선택 앵커를 잡는다.
@@ -4376,6 +4367,9 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(dl));
             }
         }
+        // 마크다운 노치 스크롤 관성 — gif 와 같은 방식(상태 tick → dirty → 아래
+        // 펌프 조건이 redraw). 애니가 없으면 첫 줄에서 바로 돌아온다.
+        self.tick_md_scroll();
         // Live-resize flush: if a Resized arrived while the user was dragging
         // an edge we stashed it and skipped the actual resize work. Once the
         // user lets go, inLiveResize flips false and we replay the final size
@@ -4654,9 +4648,14 @@ impl ApplicationHandler<UserEvent> for App {
             // An unseen-notification window tab blinks (synced to the cursor
             // blink) until the user switches to it — pump frames so it pulses.
             || !self.window_alert.is_empty()
+            // 노치 스크롤 관성이 목표에 붙을 때까지 프레임을 펌프한다.
+            || !self.md_scroll_anim.is_empty()
         {
+            // 관성은 33ms(≈30fps)로 굴리면 그 자체가 계단으로 보인다 — 도는 동안만
+            // 8ms 로 촘촘히. 다른 펌프 사유(블링크·펄스)엔 33ms 로 충분하다.
+            let period = if self.md_scroll_anim.is_empty() { 33 } else { 8 };
             event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + std::time::Duration::from_millis(33),
+                Instant::now() + std::time::Duration::from_millis(period),
             ));
             if let Some(w) = &self.window {
                 w.request_redraw();

@@ -1008,6 +1008,22 @@ impl MarkdownPane {
 
     /// 줄 단위 명령(줄 이동·복제, 나중의 줄 삭제·주석 토글)이 대상으로 삼는 줄
     /// 범위. 선택이 있으면 그것이 걸친 줄 전부, 없으면 캐럿 줄 하나.
+    /// 트리플클릭 — 캐럿이 선 줄을 처음부터 끝까지 선택한다. 빈 줄이면 앵커와
+    /// 캐럿이 같아져 release 경로가 알아서 선택을 접는다.
+    pub(crate) fn select_line_at(&mut self) -> bool {
+        let Some(len) = self
+            .edit_lines
+            .get(self.cur_line)
+            .map(|l| l.chars().count())
+        else {
+            return false;
+        };
+        self.sel_anchor = Some((self.cur_line, 0));
+        self.cur_col = len;
+        self.last_edit = EditKind::Break;
+        true
+    }
+
     fn line_block(&self) -> (usize, usize) {
         match self.sel_range() {
             Some((s, e)) => (s.0, e.0),
@@ -1112,15 +1128,191 @@ impl MarkdownPane {
     }
 
     /// Copy (or cut) the selection, returning its text. Cut deletes the range
-    /// under its own undo unit. None when there's no selection.
+    /// under its own undo unit.
+    ///
+    /// 선택이 없으면 **캐럿이 선 줄 전체**를 개행까지 붙여 집는다 — VS Code 의
+    /// Cmd+C/Cmd+X 가 그렇게 동작한다. 이 폴백이 없으면 줄을 옮기려고 Cmd+X 를
+    /// 누른 사람에게 아무 일도 일어나지 않는다(선택부터 하라고 요구하는 셈).
     pub(crate) fn take_copy(&mut self, cut: bool) -> Option<String> {
-        let text = self.selected_text()?;
+        if let Some(text) = self.selected_text() {
+            if cut {
+                self.push_undo(EditKind::Other);
+                self.delete_selection();
+            }
+            return Some(text);
+        }
+        let li = self.cur_line;
+        let line = self.edit_lines.get(li)?.clone();
         if cut {
             self.push_undo(EditKind::Other);
-            self.delete_selection();
+            let lines = self.lines_mut();
+            // 마지막 한 줄은 지우지 않고 비운다 — 버퍼가 완전히 비면 이후
+            // 줄·열 인덱싱이 전부 무너진다.
+            if lines.len() > 1 {
+                lines.remove(li);
+            } else {
+                lines[0].clear();
+            }
+            self.cur_line = li.min(self.edit_lines.len().saturating_sub(1));
+            self.cur_col = 0;
+            self.last_edit = EditKind::Break;
+            self.touch();
         }
-        Some(text)
+        Some(format!("{line}\n"))
     }
+
+    /// Cmd+Shift+K — 선택이 걸친 줄들(선택이 없으면 캐럿 줄)을 통째로 지운다.
+    pub(crate) fn delete_lines(&mut self) -> bool {
+        let (s, e) = self.line_block();
+        self.push_undo(EditKind::Break);
+        let lines = self.lines_mut();
+        let e = e.min(lines.len().saturating_sub(1));
+        if s > e {
+            return false;
+        }
+        lines.drain(s..=e);
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        self.sel_anchor = None;
+        self.cur_line = s.min(self.edit_lines.len().saturating_sub(1));
+        self.cur_col = 0;
+        self.last_edit = EditKind::Break;
+        self.touch();
+        true
+    }
+
+    /// Cmd+Enter — 캐럿이 줄 어디에 있든 **아래에** 새 줄을 열고 내려간다.
+    /// `above` 면 위에 연다(Cmd+Shift+Enter). 들여쓰기만 현재 줄에서 물려받는다
+    /// — `line_prefix` 는 `- `/`> ` 같은 마크다운 마커까지 이어붙이므로 코드
+    /// 편집기에서는 쓰지 않는다.
+    pub(crate) fn open_line(&mut self, above: bool) {
+        self.push_undo(EditKind::Break);
+        let indent: String = self
+            .edit_lines
+            .get(self.cur_line)
+            .map(|l| l.chars().take_while(|c| *c == ' ' || *c == '\t').collect())
+            .unwrap_or_default();
+        let at = if above { self.cur_line } else { self.cur_line + 1 };
+        let lines = self.lines_mut();
+        let at = at.min(lines.len());
+        lines.insert(at, indent.clone());
+        self.sel_anchor = None;
+        self.cur_line = at;
+        self.cur_col = indent.chars().count();
+        self.last_edit = EditKind::Break;
+        self.touch();
+    }
+
+    /// Cmd+/ — 선택이 걸친 줄들(없으면 캐럿 줄)의 줄 주석을 켜고 끈다.
+    ///
+    /// 블록 안 **한 줄이라도** 주석이 아니면 전체를 주석 처리하고, 전부 주석일
+    /// 때만 해제한다(VS Code 규칙). 넣을 때는 블록에서 가장 얕은 들여쓰기에
+    /// 맞춰 세로로 정렬하고, 빈 줄은 건드리지 않는다 — 빈 줄에 주석 기호만
+    /// 남으면 지운 뒤에도 흔적이 남는다.
+    pub(crate) fn toggle_comment(&mut self, prefix: &str) -> bool {
+        let (s, e) = self.line_block();
+        let rows: Vec<usize> = (s..=e)
+            .filter(|&i| {
+                self.edit_lines
+                    .get(i)
+                    .is_some_and(|l| !l.trim().is_empty())
+            })
+            .collect();
+        if rows.is_empty() {
+            return false;
+        }
+        let on = rows
+            .iter()
+            .all(|&i| self.edit_lines[i].trim_start().starts_with(prefix));
+        self.push_undo(EditKind::Break);
+        // 들여쓰기는 공백·탭뿐이고 주석 기호도 ASCII 라 바이트 인덱스와 char
+        // 인덱스가 같다 — 그래서 아래 슬라이싱이 안전하다.
+        let head = prefix.len() + 1;
+        let lines = self.lines_mut();
+        if on {
+            for &i in &rows {
+                let ws = lines[i].len() - lines[i].trim_start().len();
+                let rest = lines[i][ws + prefix.len()..].to_string();
+                let rest = rest.strip_prefix(' ').unwrap_or(&rest).to_string();
+                lines[i] = format!("{}{}", &lines[i][..ws], rest);
+            }
+        } else {
+            let col = rows
+                .iter()
+                .map(|&i| lines[i].len() - lines[i].trim_start().len())
+                .min()
+                .unwrap_or(0);
+            for &i in &rows {
+                lines[i].insert_str(col, &format!("{prefix} "));
+            }
+        }
+        // 캐럿·앵커가 주석 기호만큼 밀린다. 주석을 넣은 열보다 왼쪽에 있던
+        // 캐럿은 그대로 둔다.
+        let shift = |col: usize, line: &str| -> usize {
+            if on {
+                col.saturating_sub(head).min(line.chars().count())
+            } else {
+                (col + head).min(line.chars().count())
+            }
+        };
+        if rows.contains(&self.cur_line) {
+            let l = self.edit_lines[self.cur_line].clone();
+            self.cur_col = shift(self.cur_col, &l);
+        }
+        if let Some((al, ac)) = self.sel_anchor {
+            if rows.contains(&al) {
+                let l = self.edit_lines[al].clone();
+                self.sel_anchor = Some((al, shift(ac, &l)));
+            }
+        }
+        self.last_edit = EditKind::Break;
+        self.touch();
+        true
+    }
+}
+
+/// 같은 자리 연타를 센다 — 2 = 더블클릭, 3 = 트리플클릭, 네 번째는 다시 1 로
+/// 감는다. winit 은 더블클릭 이벤트를 주지 않고, 이 레포에는 판정 코드가 아예
+/// 없었다(터미널 pane 도 없다). `now` 를 인자로 받는 이유는 테스트에서 시간을
+/// 넘겨 볼 수 있게 하려고다.
+pub(crate) fn click_streak(
+    prev: Option<(std::time::Instant, f32, f32, u8)>,
+    now: std::time::Instant,
+    px: f32,
+    py: f32,
+) -> u8 {
+    /// 연타로 볼 최대 간격. macOS 기본 더블클릭 속도(0.5s)보다 조금 좁게.
+    const GAP_MS: u128 = 450;
+    /// 손이 미세하게 흔들려도 같은 자리로 본다.
+    const SLOP: f32 = 4.0;
+    match prev {
+        Some((t, x, y, n))
+            if now.duration_since(t).as_millis() <= GAP_MS
+                && (px - x).abs() <= SLOP
+                && (py - y).abs() <= SLOP =>
+        {
+            if n >= 3 {
+                1
+            } else {
+                n + 1
+            }
+        }
+        _ => 1,
+    }
+}
+
+/// 줄 주석 접두사. **css·html 은 일부러 None** — 줄 주석 문법이 아예 없어서
+/// `//` 를 넣으면 스타일시트가 조용히 깨진다(css 는 `/* */`, html 은
+/// `<!-- -->` 만 유효). 블록 주석으로 감싸는 건 별개 작업이라 여기서는
+/// 무동작으로 두고 부르는 쪽이 토스트를 띄운다.
+pub(crate) fn line_comment_prefix(lang: &str) -> Option<&'static str> {
+    Some(match lang {
+        "rust" | "javascript" | "typescript" | "tsx" | "go" | "c" | "c++" | "json" => "//",
+        "python" | "bash" | "toml" | "yaml" => "#",
+        "sql" => "--",
+        _ => return None,
+    })
 }
 
 impl App {
@@ -1356,6 +1548,37 @@ impl App {
                 }
                 true
             }
+            // Cmd+Enter = 아래에 새 줄, Cmd+Shift+Enter = 위에 새 줄. 캐럿이 줄
+            // 중간에 있어도 줄을 쪼개지 않는다 — 그게 평범한 Enter 와 다른 점이다.
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                let above = self.modifiers.shift_key();
+                self.md_with_editor(|m| m.open_line(above));
+                true
+            }
+            // Cmd+Shift+K = 줄 삭제. Shift 없는 Cmd+K 는 전역으로 흘려보낸다.
+            KeyCode::KeyK if self.modifiers.shift_key() => {
+                self.md_with_editor(|m| m.delete_lines());
+                true
+            }
+            // Cmd+/ 주석 토글. 접두사는 파일 확장자에서 뽑고, 줄 주석이 없는
+            // 형식(css·html)은 아무것도 하지 않고 이유를 알린다 — 조용히
+            // 무시하면 단축키가 고장난 것처럼 보인다.
+            KeyCode::Slash => {
+                let done = self.md_with_editor(|m| {
+                    let lang = code_lang_for_path(std::path::Path::new(m.doc.path.as_str()));
+                    match line_comment_prefix(lang) {
+                        Some(p) => {
+                            m.toggle_comment(p);
+                            true
+                        }
+                        None => false,
+                    }
+                });
+                if done == Some(false) {
+                    self.set_toast("이 형식엔 줄 주석이 없어요".into());
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -1583,6 +1806,40 @@ impl App {
     /// Place the raw-editor caret at a click. Reads the pane's body box (stashed
     /// by the renderer), hit-tests the pixel to a (line, col) via the GPU shaper,
     /// then writes it back. No-op unless `id` is a raw-mode markdown pane.
+    /// 클릭 연타 상태를 갱신하고 이번 클릭이 몇 번째인지 돌려준다.
+    pub(crate) fn md_click_count(&mut self, px: f32, py: f32) -> u8 {
+        let now = std::time::Instant::now();
+        let n = click_streak(self.md_click_streak, now, px, py);
+        self.md_click_streak = Some((now, px, py, n));
+        n
+    }
+
+    /// 편집기 본문에 press 한 번이 들어왔을 때의 전체 처리: 캐럿 이동 → 드래그
+    /// 앵커 → 연타 선택(2 = 단어, 3 = 줄). 돌려주는 값은 이번 클릭이 몇 번째인지.
+    ///
+    /// **순서가 계약이다** — 앵커를 연타 선택보다 나중에 세우면 더블클릭으로 잡은
+    /// 선택을 그 앵커가 지워 버린다. handler 의 press 경로와 헤드리스 하네스가
+    /// 같은 함수를 써야 검증이 실물과 어긋나지 않으므로 여기 한 곳에 둔다.
+    pub(crate) fn md_press_caret(&mut self, id: &str, px: f32, py: f32) -> u8 {
+        self.md_click_caret(id, px, py);
+        let clicks = self.md_click_count(px, py);
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(m) = ws.panes.get_mut(id).and_then(|p| p.markdown_mut()) {
+                m.sel_anchor = Some((m.cur_line, m.cur_col));
+                match clicks {
+                    2 => {
+                        m.select_word_at();
+                    }
+                    n if n >= 3 => {
+                        m.select_line_at();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        clicks
+    }
+
     pub(crate) fn md_click_caret(&mut self, id: &str, px: f32, py: f32) {
         // 조합 중 클릭은 **캐럿을 옮기기 전에** 옛 자리에 확정해야 한다.
         // `ime_retarget` 은 조합기 주인이 바뀔 때만 일하고 같은 대상이면 조기
@@ -1860,6 +2117,126 @@ mod tests {
         assert!(p.move_lines(false));
         assert_eq!(p.edit_lines.join("\n"), "a\nb\nc");
         assert_eq!(p.cur_line, 1);
+    }
+
+    #[test]
+    fn select_line_at_grabs_the_whole_line() {
+        let mut p = pane(&["  hello world", "x"]);
+        p.cur_col = 5;
+        assert!(p.select_line_at());
+        assert_eq!(p.sel_anchor, Some((0, 0)));
+        assert_eq!(p.cur_col, 13);
+    }
+
+    #[test]
+    fn click_streak_counts_only_the_same_spot_and_wraps_after_three() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        assert_eq!(click_streak(None, t0, 10.0, 10.0), 1);
+        let one = Some((t0, 10.0, 10.0, 1));
+        assert_eq!(
+            click_streak(one, t0 + Duration::from_millis(100), 10.0, 10.0),
+            2
+        );
+        // 너무 늦었으면 새 클릭
+        assert_eq!(
+            click_streak(one, t0 + Duration::from_millis(600), 10.0, 10.0),
+            1
+        );
+        // 자리가 멀면 새 클릭
+        assert_eq!(
+            click_streak(one, t0 + Duration::from_millis(100), 40.0, 10.0),
+            1
+        );
+        // 트리플 다음은 다시 1
+        let three = Some((t0, 10.0, 10.0, 3));
+        assert_eq!(
+            click_streak(three, t0 + Duration::from_millis(100), 10.0, 10.0),
+            1
+        );
+    }
+
+    #[test]
+    fn toggle_comment_turns_the_caret_line_on_and_off() {
+        let mut p = pane(&["let x = 1;"]);
+        p.cur_col = 4;
+        assert!(p.toggle_comment("//"));
+        assert_eq!(p.edit_lines.join("\n"), "// let x = 1;");
+        assert_eq!(p.cur_col, 7);
+        assert!(p.toggle_comment("//"));
+        assert_eq!(p.edit_lines.join("\n"), "let x = 1;");
+        assert_eq!(p.cur_col, 4);
+    }
+
+    #[test]
+    fn toggle_comment_aligns_a_block_to_its_shallowest_indent() {
+        let mut p = pane(&["    a", "  b", "      c"]);
+        p.sel_anchor = Some((0, 0));
+        p.cur_line = 2;
+        assert!(p.toggle_comment("//"));
+        assert_eq!(p.edit_lines.join("\n"), "  //   a\n  // b\n  //     c");
+    }
+
+    #[test]
+    fn toggle_comment_leaves_blank_lines_alone() {
+        let mut p = pane(&["a", "", "b"]);
+        p.sel_anchor = Some((0, 0));
+        p.cur_line = 2;
+        assert!(p.toggle_comment("#"));
+        assert_eq!(p.edit_lines.join("\n"), "# a\n\n# b");
+    }
+
+    #[test]
+    fn toggle_comment_uncomments_only_when_every_line_already_is() {
+        let mut p = pane(&["// a", "b"]);
+        p.sel_anchor = Some((0, 0));
+        p.cur_line = 1;
+        assert!(p.toggle_comment("//"));
+        assert_eq!(p.edit_lines.join("\n"), "// // a\n// b");
+    }
+
+    #[test]
+    fn delete_lines_removes_the_block_and_never_empties_the_buffer() {
+        let mut p = pane(&["a", "b", "c"]);
+        p.sel_anchor = Some((0, 0));
+        p.cur_line = 1;
+        assert!(p.delete_lines());
+        assert_eq!(p.edit_lines.join("\n"), "c");
+        assert_eq!((p.cur_line, p.cur_col), (0, 0));
+        assert!(p.delete_lines());
+        assert_eq!(p.edit_lines.len(), 1);
+        assert_eq!(p.edit_lines[0], "");
+    }
+
+    #[test]
+    fn open_line_inherits_indent_without_splitting_the_line() {
+        let mut p = pane(&["    let x = 1;"]);
+        p.cur_col = 8;
+        p.open_line(false);
+        assert_eq!(p.edit_lines.join("\n"), "    let x = 1;\n    ");
+        assert_eq!((p.cur_line, p.cur_col), (1, 4));
+        p.open_line(true);
+        assert_eq!(p.edit_lines.len(), 3);
+        assert_eq!((p.cur_line, p.cur_col), (1, 4));
+    }
+
+    #[test]
+    fn cut_without_a_selection_takes_the_whole_line() {
+        let mut p = pane(&["a", "b"]);
+        assert_eq!(p.take_copy(true).as_deref(), Some("a\n"));
+        assert_eq!(p.edit_lines.join("\n"), "b");
+        assert_eq!(p.take_copy(false).as_deref(), Some("b\n"));
+        assert_eq!(p.edit_lines.join("\n"), "b");
+    }
+
+    #[test]
+    fn line_comment_prefix_refuses_formats_that_have_none() {
+        assert_eq!(line_comment_prefix("rust"), Some("//"));
+        assert_eq!(line_comment_prefix("python"), Some("#"));
+        assert_eq!(line_comment_prefix("sql"), Some("--"));
+        assert_eq!(line_comment_prefix("css"), None);
+        assert_eq!(line_comment_prefix("html"), None);
+        assert_eq!(line_comment_prefix(""), None);
     }
 
     #[test]
@@ -2223,8 +2600,9 @@ mod tests {
         m.select_all_buf();
         assert_eq!(m.take_copy(true).as_deref(), Some("one\ntwo"));
         assert_eq!(*m.edit_lines, vec![String::new()]);
-        // No selection = None.
-        assert_eq!(m.take_copy(false), None);
+        // 선택이 없으면 캐럿이 선 줄을 집는다(VS Code 의 Cmd+C/Cmd+X). 여기선
+        // 방금 전부 잘라내 빈 줄 하나만 남았으니 개행 하나가 나온다.
+        assert_eq!(m.take_copy(false).as_deref(), Some("\n"));
     }
 
     #[test]

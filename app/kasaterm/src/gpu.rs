@@ -1904,7 +1904,34 @@ impl GpuRenderer {
         // pane 이 둘이어도 서로 쫓아내지 않을 만큼.
         self.md_heights.insert(0, MdHeightEntry { key, h: heights });
         self.md_heights.truncate(4);
-        (pen_y - top0).max(0.0)
+        let content_h = (pen_y - top0).max(0.0);
+        // 문서 안 어디쯤인지 — 긴 메모리 파일을 굴리다 보면 위치 감각이 통째로
+        // 없다. macOS 오버레이 스타일로 트랙 없이 엄지만, 읽기 칼럼 밖(pane 오른쪽
+        // 여백)에 둔다. 여기서 그리는 이유는 총 높이가 방금 잰 값이라서다 — 앞에서
+        // 그리면 한 프레임 전 높이를 써야 한다.
+        if content_h > h + 1.0 {
+            let track_h = (h - 8.0).max(1.0);
+            let th = (h / content_h * track_h).max(24.0);
+            let t = (scroll / (content_h - h)).clamp(0.0, 1.0);
+            let mut col = crate::theme::text();
+            col[3] = 45;
+            if std::env::var_os("KASATERM_MD_SB_DEBUG").is_some() {
+                eprintln!(
+                    "[mdsb] x={:.0} y={:.0} w={:.0} h={:.0} content={:.0} t={:.2} th={:.0}",
+                    x, y, w, h, content_h, t, th
+                );
+                col = [255, 0, 0, 255];
+            }
+            self.round_rect_fill(
+                x + w - 5.0,
+                y + 4.0 + (track_h - th) * t,
+                3.0,
+                th,
+                1.5,
+                col,
+            );
+        }
+        content_h
     }
 
     /// Draw the Raw markdown editor: source lines in the mono font + a cursor
