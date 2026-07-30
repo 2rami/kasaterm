@@ -2202,7 +2202,19 @@ impl App {
                             g.upload_image(&im.key, &im.rgba, im.w, im.h);
                         }
                     }
-                    let h = g.draw_markdown(&doc.blocks, doc.gen, *bx, *by, *bw, *bh, *scroll);
+                    // 이 pane 의 선택만 넘긴다 — 마크다운 pane 이 둘일 때 다른
+                    // pane 의 범위로 띠를 깔면 안 된다.
+                    let sel = self
+                        .md_render_sel
+                        .as_ref()
+                        .filter(|s| s.pane == *id)
+                        .map(|s| (s.anchor.0, s.anchor.1, s.end.0, s.end.1));
+                    let h =
+                        g.draw_markdown(&doc.blocks, doc.gen, *bx, *by, *bw, *bh, *scroll, sel);
+                    // 이 pane 이 그린 낱말 사각형을 옮겨 둔다 — 복사·히트테스트가
+                    // 읽고, block_ys 와 같은 이유로 pane 별로 갈라야 한다.
+                    let words = std::mem::take(&mut g.md_word_rects);
+                    self.md_word_rects.insert(id.clone(), words);
                     // 블록별 문서좌표 y 를 pane 별로 옮겨 둔다 — Gpu 쪽은 pane
                     // 을 모르고 매 프레임 덮어써서, 마크다운 pane 이 둘이면
                     // 마지막 것만 남는다.

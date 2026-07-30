@@ -2099,6 +2099,19 @@ enum MdBlock {
     Table { head: Vec<MdCell>, rows: Vec<Vec<MdCell>>, align: Vec<MdAlign> },
 }
 
+/// A drag selection inside a rendered markdown pane. Coordinates are **document
+/// space** = screen px + the pane's scroll offset. Keeping the scroll folded in
+/// is what lets a selection survive scrolling mid-drag; with plain screen y the
+/// whole range would slide along with the wheel.
+struct MdRenderSel {
+    pane: String,
+    anchor: (f32, f32),
+    end: (f32, f32),
+    /// Mouse still held. Cleared on release so the selection stays visible (and
+    /// copyable) afterwards without the cursor dragging it around.
+    dragging: bool,
+}
+
 /// One table cell's inline content.
 type MdCell = Vec<MdSpan>;
 
@@ -3321,6 +3334,12 @@ struct App {
     /// Raw→Render toggle. The new layout's block positions only exist after a
     /// draw, so the renderer consumes this once `md_block_ys` is fresh.
     md_scroll_anchor: HashMap<String, usize>,
+    /// Screen-space rects of every word the rendered view drew last frame, per
+    /// pane id: (x, y, w, h, text). A document view has no cell grid, so this is
+    /// what a drag selection and its copy resolve against.
+    md_word_rects: HashMap<String, Vec<(f32, f32, f32, f32, String)>>,
+    /// Live drag selection in the rendered view. `None` = nothing selected.
+    md_render_sel: Option<MdRenderSel>,
     /// Find-bar button hit boxes (pane id, button, logical-px rect), rebuilt by
     /// the renderer each frame. Tested before the body box below, since the bar
     /// floats over the editor — a click on it must not also move the caret.
@@ -3940,6 +3959,8 @@ impl App {
             md_content_h: HashMap::new(),
             md_block_ys: HashMap::new(),
             md_scroll_anchor: HashMap::new(),
+            md_word_rects: HashMap::new(),
+            md_render_sel: None,
             md_find_rects: Vec::new(),
             md_body_rects: HashMap::new(),
             pane_tab_rects: Vec::new(),
