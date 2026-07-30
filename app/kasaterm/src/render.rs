@@ -406,6 +406,7 @@ impl App {
             f32,
             &'static str,
             Option<FindState>,
+            Option<(Vec<String>, usize, usize)>,
         )> = Vec::new();
         // Per-pane body rect (header-excluded) in logical px, collected for
         // every pane so in-pane WebViews and other overlays can be snapped
@@ -565,6 +566,7 @@ impl App {
                     f32,
                     &'static str,
                     Option<FindState>,
+                    Option<(Vec<String>, usize, usize)>,
                 )> = pane.markdown().map(|m| {
                     (
                         m.doc.clone(),
@@ -577,6 +579,10 @@ impl App {
                         m.h_scroll,
                         code_lang_for_path(std::path::Path::new(&m.doc.path)),
                         m.find.clone(),
+                        // 팝업이 열렸을 때만 후보를 복사한다(최대 8개).
+                        m.complete
+                            .as_ref()
+                            .map(|c| (c.items.clone(), c.sel, c.from_col)),
                     )
                 });
                 let mut composed: Vec<Vec<GridCell>> = match pane.term() {
@@ -1344,7 +1350,8 @@ impl App {
                 if let Some(image) = img {
                     image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot, img_pan));
                 }
-                if let Some((doc, raw_mode, lines, cursor, sel, scroll, h_scroll, lang, find)) = md
+                if let Some((doc, raw_mode, lines, cursor, sel, scroll, h_scroll, lang, find, complete)) =
+                    md
                 {
                     md_slots.push((
                         id.clone(),
@@ -1358,6 +1365,7 @@ impl App {
                         h_scroll,
                         lang,
                         find,
+                        complete,
                     ));
                 }
                 // Box geometry (logical px). Right/bottom-edge panes stretch to
@@ -2164,6 +2172,7 @@ impl App {
                 h_scroll,
                 lang,
                 find,
+                complete,
             ) in &md_slots
             {
                 let content_h = if *raw_mode {
@@ -2194,6 +2203,7 @@ impl App {
                         body_pe,
                         raw_cursor_on,
                         find.as_ref().map(|f| (f.hits.as_slice(), f.idx)),
+                        complete.as_ref().map(|(i, s, c)| (i.as_slice(), *s, *c)),
                     );
                     if let Some(f) = find {
                         for (btn, r) in

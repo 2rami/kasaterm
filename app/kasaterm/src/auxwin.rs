@@ -138,6 +138,10 @@ impl AuxWindow {
                     // 경로라 열리지 않는다) — 하이라이트만 켜면 켤 방법이
                     // 없는 표시가 남는다.
                     None,
+                    // 자동완성도 같은 이유로 아직 없다 — aux 창은 키를
+                    // `aux_insert` 로 받아 팝업 키 경로를 안 지난다. 목록만
+                    // 띄우면 고를 수 없는 유령이 된다.
+                    None,
                 );
             }
             // Settings/Terminal 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
@@ -297,6 +301,7 @@ impl App {
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
             find: None,
+            complete: None,
             edited_at: None,
         };
         self.spawn_aux_editor(md, event_loop, None);
