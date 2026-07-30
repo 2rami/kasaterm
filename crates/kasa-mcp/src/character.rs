@@ -175,11 +175,15 @@ pub fn update_member(name: &str, key: &str, value: Value) -> std::io::Result<()>
 }
 
 /// 모든 캐릭터 persona 끝에 붙는 협업 규약 — 동료를 기다릴 땐 tell 로 깨우지 말고
-/// wake-watch 를 background 로 띄워 자동 재개(거노: task-notification wake 활용).
+/// `board-watch` 를 Monitor 에 걸어 자동 재개. 예전엔 `wake-watch` 를 권했는데
+/// 동료가 끝났는데도 완료를 못 잡고 40분 타임아웃으로 죽는 걸 실측했다(2026-07-30).
 const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
-다른 학생(동료 pane)의 작업이 끝나길 기다려야 할 때는, tell 로 깨우거나 board 를 반복해서 확인하지 말고 아래를 background 로 띄워라(Bash 도구의 run_in_background, 또는 명령 끝에 &):\n\
-  kasaterm-cli wake-watch <동료 surface_id>\n\
-동료의 surface_id 는 `kasaterm-cli board` 로 확인한다. 동료가 한 턴을 끝내면 이 명령이 스스로 종료되고, 시스템이 너를 자동으로 깨운다(task-notification). 깨어나면 그 출력(\"<동료> 작업 끝남\")을 보고 이어서 진행해라. 이렇게 하면 네 입력창을 더럽히지 않고 동료 완료 즉시 이어받는다.\n\
+동료 pane 의 작업이 끝나길 기다려야 할 때는 tell 로 깨우거나 board 를 반복 확인하지 말고, **Monitor 도구**에 아래를 걸어라(persistent: true):\n\
+  kasaterm-cli board-watch 3 2>&1 | grep -E --line-buffered ' (waiting|idle|attention)'\n\
+동료가 턴을 끝내면(idle) 또는 입력·승인에 막히면(waiting/attention) 그 줄이 알림으로 온다 — 한 명이 아니라 **모든 pane 을 한 번에** 본다. 깨어나면 그 pane 이 뭘 했는지 `kasaterm-cli peek`·`transcript` 로 확인하고 이어서 진행해라.\n\
+⚠️ 필터는 **필수**다. 안 걸면 매 도구 호출까지 흘러나와 12초에 8줄(분당 40줄)이 되고, Monitor 가 알림 폭주로 자동 중지된다(실측).\n\
+⚠️ `kasaterm-cli wake-watch <surface_id>` 도 있지만 **동료가 끝났는데 완료를 못 잡고 40분 타임아웃으로 죽은 실측이 있다**. 한 명만 볼 때의 폴백으로만 쓰고 기본은 위 Monitor 로 해라.\n\
+⚠️ 기다릴 일이 있을 때만 걸어라. 아무도 안 기다리는데 걸어 두면 남의 턴 종료마다 깨어나 토큰만 태운다.\n\
 \n\
 [협업 — 학생 채팅]\n\
 SendMessage 도구는 **네가 트리플 플래그(--agent-id/--agent-name/--team-name)로 직접 스폰한 학생**에게 지시·브리프를 보낼 때만 써라(to: 스폰 시 지정한 agent-name). 그 외 모든 상대 — 네가 스폰하지 않은 같은 방 pane, 다른 방 pane, 백그라운드 세션, 비-claude pane, 그리고 오케스트레이터에게 하는 보고·질문·완료 통지 — 는 `kasaterm-cli tell <상대 surface_id> \"...\"` 가 정식 경로다(상대 surface_id 는 `kasaterm-cli board` 로 확인, 텍스트는 개행 없는 한 줄). tell 은 받는 pane 에 네 프사와 학생색으로 렌더되니 발신자 표기를 걱정하지 마라. SendMessage 가 'not reachable' 로 실패하면 그 상대는 스폰 관계가 아니라는 뜻이다 — 재시도하지 말고 tell 로 전환해라.\n\

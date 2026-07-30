@@ -3340,6 +3340,17 @@ struct App {
     md_word_rects: HashMap<String, Vec<(f32, f32, f32, f32, String)>>,
     /// Live drag selection in the rendered view. `None` = nothing selected.
     md_render_sel: Option<MdRenderSel>,
+    /// 마우스 노치 스크롤의 목표 위치와 마지막 보간 시각(pane id 별). 트랙패드
+    /// 픽셀 델타는 그 자체가 부드러워 즉시 반영한다 — 보간하면 손가락보다 늦게
+    /// 미끄러진다. 노치는 한 번에 세 줄을 뛰어 계단으로 읽히니 목표만 받아 두고
+    /// `tick_md_scroll` 이 프레임마다 지수로 따라간다. 비어 있으면 애니 없음.
+    /// (MarkdownPane 이 아니라 여기 두는 이유: pane 구조체에 필드를 더하면 생성부
+    /// 다섯 곳이 동시에 깨져 병렬 작업이 서로를 막는다.)
+    md_scroll_anim: HashMap<String, (f32, Instant)>,
+    /// 클릭 연타 기억: (마지막 클릭 시각, x, y, 연타 횟수). 더블클릭 단어선택 ·
+    /// 트리플클릭 줄선택 판정용. 레포에 더블클릭 판정이 아예 없어(터미널조차)
+    /// 새로 두는 자리다.
+    md_click_streak: Option<(Instant, f32, f32, u8)>,
     /// Find-bar button hit boxes (pane id, button, logical-px rect), rebuilt by
     /// the renderer each frame. Tested before the body box below, since the bar
     /// floats over the editor — a click on it must not also move the caret.
@@ -3961,6 +3972,8 @@ impl App {
             md_scroll_anchor: HashMap::new(),
             md_word_rects: HashMap::new(),
             md_render_sel: None,
+            md_scroll_anim: HashMap::new(),
+            md_click_streak: None,
             md_find_rects: Vec::new(),
             md_body_rects: HashMap::new(),
             pane_tab_rects: Vec::new(),
