@@ -872,6 +872,15 @@ impl App {
                 // 더블클릭이 재현되지 않아 검증이 실물과 어긋난다. 같은
                 // 좌표로 짧은 간격(`_STEP_MS` 450 이하)에 두 번 주면 단어
                 // 선택, 세 번이면 줄 선택이 걸린다.
+                // 실물 press 와 같은 순서: 미니맵 띠를 먼저 본다. 이걸 빼면
+                // 하네스가 미니맵 클릭을 캐럿 클릭으로 재현해 검증이 거짓말을 한다.
+                if self.md_mini_jump(&id, bx + dx, by + dy) {
+                    let s = self.ws.lock().ok().and_then(|w| {
+                        w.panes.get(&id).and_then(|p| p.markdown()).map(|m| m.scroll)
+                    });
+                    eprintln!("[mdscript] click=({dx},{dy}) 미니맵 점프 scroll={s:?}");
+                    return;
+                }
                 let clicks = self.md_press_caret(&id, bx + dx, by + dy);
                 let at = self.ws.lock().ok().and_then(|w| {
                     w.panes
