@@ -1,6 +1,35 @@
 //! pane 레이아웃 조작 — split/move/close/focus/swap/drop/divider/zoom/tab + 좌표·resize. daemon-authoritative.
 use super::*;
 
+/// 본문 중앙의 "안에 넣기" 존 반경 — pane 반폭·반높이를 1.0 으로 본 정규화 좌표.
+/// 0.42 면 중앙 사각형이 pane 의 42%×42% 를 먹고, 네 쐐기는 여전히 각 변을
+/// 통째로 낀다. 더 좁히면(0.25) 조준이 어려워 "안 붙는다"로 읽히고, 더 넓히면
+/// 가장자리 split 을 노릴 때 중앙이 걸린다.
+const DROP_CENTER_R: f32 = 0.42;
+
+/// pane 중심 기준 정규화 offset → 드롭 존. 순수 함수(단위테스트 대상).
+///
+/// 4방향 판정은 raw 픽셀 거리가 아니라 정규화 offset 으로 한다 — 픽셀 거리를
+/// 비교하면 가로로 넓은 pane 은 Up/Down 쐐기가 좁아져 "끝까지 가야" 방향이
+/// 나왔다. half-w/half-h 로 나눠 정사각형 공간에서 비교하면 네 방향이 공평한
+/// 90° 쐐기를 받는다.
+///
+/// 중앙은 어느 쪽으로 가를지 정할 수 없는 자리이므로 split 이 아니라 병합
+/// (`Center` = 이 pane 의 탭으로 들어가기)이다. 이 존이 없으면 pane 을 통째로
+/// 끌어 놓을 때 헤더 띠(28px)를 정확히 맞히지 않는 한 무조건 split 이 됐다.
+pub(crate) fn drop_zone_for_offsets(nx: f32, ny: f32) -> DropZone {
+    if nx.abs() < DROP_CENTER_R && ny.abs() < DROP_CENTER_R {
+        return DropZone::Center;
+    }
+    if nx.abs() > ny.abs() {
+        if nx < 0.0 { DropZone::Left } else { DropZone::Right }
+    } else if ny < 0.0 {
+        DropZone::Up
+    } else {
+        DropZone::Down
+    }
+}
+
 impl App {
     /// Convert logical-pixel position into a (pane_id, col, row) cell
     /// inside the pane the click landed in. Multi-pane aware: walks the
@@ -756,6 +785,60 @@ impl App {
             w.request_redraw();
         }
     }
+    /// pane 을 통째로 `dst` 의 탭 스트립 안에 넣는다 — 드래그를 헤더/본문 중앙에
+    /// 놓았을 때(`DropZone::Center`). 소스의 탭 **전부**가 순서대로 dst 뒤에 붙고
+    /// 소스는 레이아웃에서 사라진다. split 과 달리 화면이 더 쪼개지지 않는다.
+    ///
+    /// `remove_pane` 이 아니라 `collapse_layout_only` 로 걷어내는 게 급소다 —
+    /// 옮긴 탭들의 PtySession·이미지 텍스처·마크다운 캐시는 이제 dst 소유인데,
+    /// `remove_pane` 은 그것들을 소스 것으로 보고 죽여 버린다(빈 pane 만 남는다).
+    ///
+    /// 반환값 = 실제로 옮겼는지. 자기 자신·없는 pane·빈 소스면 false.
+    pub(crate) fn merge_pane_into_tabs(&mut self, src: &str, dst: &str) -> bool {
+        if src == dst {
+            return false;
+        }
+        let moved: Vec<PaneTab> = {
+            let mut ws = self.ws.lock().unwrap();
+            if !ws.panes.contains_key(dst) {
+                return false;
+            }
+            let Some(s) = ws.panes.get_mut(src) else { return false };
+            std::mem::take(&mut s.tabs)
+        };
+        if moved.is_empty() {
+            return false;
+        }
+        {
+            let mut ws = self.ws.lock().unwrap();
+            // 옮긴 탭들의 pid → dst 재바인딩. 이걸 빼먹으면 앞으로 오는
+            // ScreenUpdate 가 사라진 소스로 배달돼 화면이 얼어붙는다.
+            for t in &moved {
+                if let Some(pid) = t.pid.clone() {
+                    ws.pid_to_pane.insert(pid, dst.to_string());
+                }
+            }
+            if let Some(d) = ws.panes.get_mut(dst) {
+                // 끌어온 것을 곧바로 보여 준다 — 사용자가 방금 옮긴 pane 이
+                // 뒤에 숨어 있으면 "사라졌다"로 읽힌다.
+                let first = d.tabs.len();
+                d.tabs.extend(moved);
+                d.active_tab = first;
+                d.dirty = true;
+            }
+            ws.panes.remove(src);
+        }
+        self.collapse_layout_only(src);
+        self.ws.lock().unwrap().active_pane = Some(dst.to_string());
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        true
+    }
     /// Cross-pane drag aftermath. The source pane lost every tab to dest;
     /// we just need its layout slot gone — *not* the PtySession (now owned
     /// by dest under the same pid key) or the image / markdown caches the
@@ -1246,21 +1329,10 @@ for p in glob.glob(os.path.join(d, '*.json')):
                 if y < body_top {
                     return Some((id.clone(), DropZone::Center));
                 }
-                // 4방향 판정은 pane 중심 기준 *정규화* offset 으로 한다. raw 픽셀
-                // 거리(dist_left vs dist_top)를 비교하면 가로로 넓은 pane은 Up/Down
-                // 쐐기가 좁아져 "끝까지 가야" 방향이 나왔다 — half-w/half-h 로 나눠
-                // 정사각형 공간에서 비교하면 네 방향이 공평한 90° 쐐기를 받는다.
                 let body_h = (pane_top + bh - body_top).max(1.0);
                 let nx = (x - (bx + bw / 2.0)) / (bw / 2.0);
                 let ny = (y - (body_top + body_h / 2.0)) / (body_h / 2.0);
-                let zone = if nx.abs() > ny.abs() {
-                    if nx < 0.0 { DropZone::Left } else { DropZone::Right }
-                } else if ny < 0.0 {
-                    DropZone::Up
-                } else {
-                    DropZone::Down
-                };
-                return Some((id.clone(), zone));
+                return Some((id.clone(), drop_zone_for_offsets(nx, ny)));
             }
         }
         None
@@ -1346,10 +1418,10 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// 되돌린다. hit-test 는 carried pane 을 *제거한* base 트리 기준으로 해서
     /// (라이브로 옮겨진 트리가 아니라) 커서→target 매핑이 흔들리지 않게 한다.
     /// 드래그 시작 시 `drag_orig_layout` 에 원본을 박제하고, 드롭/취소 때 정리한다.
-    pub(crate) fn update_live_drag(&mut self) {
-        // 어떤 pane 을 옮기는 중인가 — header/handle 드래그는 통째로, tab 드래그는
-        // 단일탭 pane 일 때만 통째 이동(멀티탭은 탭 추출이라 라이브 미적용).
-        let moving = if let Some(hd) = self.header_drag.as_ref() {
+    /// 라이브 드래그로 옮기는 중인 pane — header/handle 드래그는 통째로, tab
+    /// 드래그는 단일탭 pane 일 때만(멀티탭은 탭 추출이라 라이브 미적용).
+    pub(crate) fn live_drag_moving(&self) -> Option<String> {
+        if let Some(hd) = self.header_drag.as_ref() {
             hd.active.then(|| hd.pane.clone())
         } else if let Some(td) = self.tab_drag.as_ref() {
             let single = self
@@ -1361,8 +1433,38 @@ for p in glob.glob(os.path.join(d, '*.json')):
             (td.active && single).then(|| td.pane.clone())
         } else {
             None
-        };
-        let Some(moving) = moving else { return };
+        }
+    }
+    /// 라이브 드래그가 조준하고 있는 드롭 후보. carried pane 을 **제거한** base
+    /// 트리 기준이다 — 화면에서 형제들이 벌어져 빈자리를 채운 그 모습이 곧
+    /// 사용자가 겨누는 과녁이라, 드롭 확정도 같은 트리로 판정해야 프리뷰와
+    /// 결과가 어긋나지 않는다(원본 트리로 재판정하면 두 pane 사이 분할선이
+    /// 커서 밑에 되살아나 중앙 병합이 가장자리 split 으로 뒤집혔다).
+    pub(crate) fn live_drag_hit(&self, moving: &str) -> Option<(String, DropZone)> {
+        let mut base = self.drag_orig_layout.clone().or_else(|| self.pty_layout.clone())?;
+        if !base.remove_leaf(moving) {
+            return None;
+        }
+        let (cols, rows) = self.window_cells();
+        let rects = base.leaf_rects(cols, rows);
+        self.drop_zone_in_rects(&rects, base.leaves().len(), self.cursor_px.0, self.cursor_px.1)
+    }
+    /// 드롭이 "안에 넣기"(중앙)면 소스 pane 을 타깃 탭 스트립으로 병합하고 true.
+    /// 라이브로 옮겨 둔 자리를 원본으로 되돌린 뒤 병합한다 — 안 되돌리면 이미
+    /// 재배치된 트리 위에 병합이 겹쳐 소스가 두 번 사라진 것처럼 보인다.
+    pub(crate) fn take_center_drop(&mut self, moving: &str) -> bool {
+        let Some((dst, DropZone::Center)) = self.live_drag_hit(moving) else { return false };
+        if dst == moving {
+            return false;
+        }
+        if let Some(orig) = self.drag_orig_layout.take() {
+            self.pty_layout = Some(orig);
+        }
+        self.drag_live_applied = None;
+        self.merge_pane_into_tabs(moving, &dst)
+    }
+    pub(crate) fn update_live_drag(&mut self) {
+        let Some(moving) = self.live_drag_moving() else { return };
         // 첫 라이브 적용 — 원본 박제. base = 원본에서 carried pane 제거.
         if self.drag_orig_layout.is_none() {
             self.drag_orig_layout = self.pty_layout.clone();
@@ -1375,10 +1477,17 @@ for p in glob.glob(os.path.join(d, '*.json')):
             return;
         }
         let (cols, rows) = self.window_cells();
-        let base_rects = base.leaf_rects(cols, rows);
-        let hit = self.drop_zone_in_rects(&base_rects, base.leaves().len(), self.cursor_px.0, self.cursor_px.1);
+        let hit = self.live_drag_hit(&moving);
         // 유효 드롭이면 base 에 끼워 넣은 live 트리, 아니면 원본(원위치 복귀).
         let (next_layout, applied) = match hit {
+            // 중앙 = "안에 넣기" 프리뷰. 소스를 그리드에서 **뺀 채로** 보여 준다 —
+            // 병합 후의 모습이 정확히 이것(빈자리를 형제가 채우고, 소스 내용은
+            // 타깃 탭으로 들어간다)이고, 커서를 따라다니는 pill 이 옮기는 중인
+            // pane 을 대신 보여 준다. 덤으로 화면과 hit-test 트리가 같아져
+            // 프리뷰와 드롭 결과가 어긋날 여지가 사라진다.
+            Some((ref target, DropZone::Center)) if *target != moving => {
+                (base.clone(), Some((target.clone(), DropZone::Center)))
+            }
             Some((ref target, zone))
                 if zone != DropZone::Center && *target != moving =>
             {
@@ -1402,11 +1511,18 @@ for p in glob.glob(os.path.join(d, '*.json')):
         if applied == self.drag_live_applied {
             return;
         }
+        // 중앙 프리뷰 동안 소스는 트리에 없다 — 그걸 active_pane 으로 두면 활성
+        // pane 이 leaf 가 아닌 상태가 되어 헤더 강조·좌표 조회가 헛돈다. 겨누고
+        // 있는 타깃을 활성으로 둔다(어차피 병합 후 활성이 될 pane 이다).
+        let focus = match applied.as_ref() {
+            Some((target, DropZone::Center)) => target.clone(),
+            _ => moving.clone(),
+        };
         self.drag_live_applied = applied;
         self.pty_layout = Some(next_layout);
         self.resize_backend(cols, rows);
         if let Ok(mut ws) = self.ws.lock() {
-            ws.active_pane = Some(moving.clone());
+            ws.active_pane = Some(focus);
         }
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
@@ -1542,5 +1658,49 @@ for p in glob.glob(os.path.join(d, '*.json')):
             self.switch_window(dst_idx);
             self.ws.lock().unwrap().active_pane = Some(moving.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod drop_zone_tests {
+    use super::*;
+
+    #[test]
+    fn center_is_a_zone_of_its_own_not_a_split() {
+        // 중앙과 그 근처는 병합이다 — 이게 없으면 pane 을 통째로 끌어 놓을 때
+        // 헤더 띠(28px)를 정확히 맞히지 않는 한 무조건 split 이 됐다.
+        assert_eq!(drop_zone_for_offsets(0.0, 0.0), DropZone::Center);
+        assert_eq!(drop_zone_for_offsets(0.3, -0.3), DropZone::Center);
+        assert_eq!(drop_zone_for_offsets(-0.41, 0.41), DropZone::Center);
+    }
+
+    #[test]
+    fn edges_still_split_in_four_directions() {
+        assert_eq!(drop_zone_for_offsets(-0.9, 0.0), DropZone::Left);
+        assert_eq!(drop_zone_for_offsets(0.9, 0.0), DropZone::Right);
+        assert_eq!(drop_zone_for_offsets(0.0, -0.9), DropZone::Up);
+        assert_eq!(drop_zone_for_offsets(0.0, 0.9), DropZone::Down);
+    }
+
+    #[test]
+    fn center_zone_never_swallows_a_whole_edge() {
+        // 어느 변이든 가장자리까지 가면 반드시 split — 중앙 존이 pane 을 통째로
+        // 먹어 split 이 불가능해지는 회귀를 막는다.
+        for t in [-0.99_f32, -0.5, 0.0, 0.5, 0.99] {
+            assert_ne!(drop_zone_for_offsets(-1.0, t), DropZone::Center);
+            assert_ne!(drop_zone_for_offsets(1.0, t), DropZone::Center);
+            assert_ne!(drop_zone_for_offsets(t, -1.0), DropZone::Center);
+            assert_ne!(drop_zone_for_offsets(t, 1.0), DropZone::Center);
+        }
+    }
+
+    #[test]
+    fn diagonal_outside_center_picks_the_dominant_axis() {
+        // 대각선은 지배 축을 따른다 — 정규화 좌표라 가로로 넓은 pane 에서도
+        // Up/Down 쐐기가 좁아지지 않는다.
+        assert_eq!(drop_zone_for_offsets(0.8, 0.5), DropZone::Right);
+        assert_eq!(drop_zone_for_offsets(0.5, 0.8), DropZone::Down);
+        assert_eq!(drop_zone_for_offsets(-0.8, -0.5), DropZone::Left);
+        assert_eq!(drop_zone_for_offsets(-0.5, -0.8), DropZone::Up);
     }
 }

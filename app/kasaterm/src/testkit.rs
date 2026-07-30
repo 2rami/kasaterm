@@ -5,6 +5,14 @@ use super::*;
 /// 프레임을 펌프한다 — 자세한 사정은 `run_pending_automdscript` 참고.
 static MDSCRIPT_LEFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// `KASATERM_AUTOPANEMERGE` 예약 슬롯 — (발사 시각, 대상 leaf).
+static AUTO_MERGE: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, String)>>> =
+    std::sync::OnceLock::new();
+
+fn auto_merge_slot() -> &'static std::sync::Mutex<Option<(Instant, String)>> {
+    AUTO_MERGE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 pub(crate) fn mdscript_pending() -> bool {
     MDSCRIPT_LEFT.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -1323,6 +1331,87 @@ impl App {
         self.force_drag_at = Some(Instant::now() + std::time::Duration::from_millis(ms));
         eprintln!("[force_drag] armed in {ms}ms");
     }
+    /// 헤드리스 pane 병합 검증. `KASATERM_AUTOPANEMERGE="%N"`(빈값=첫 leaf) 이면
+    /// 그 leaf 를 header_drag 로 집어 **형제의 본문 중앙**에 커서를 두고 라이브
+    /// 프리뷰를 적용한 뒤, 릴리즈 핸들러와 똑같은 경로(`take_center_drop`)로 놓는다.
+    /// 예약 상태를 `struct App` 필드가 아니라 모듈 static 에 두는 이유는 검증
+    /// 전용 스캐폴딩이 병렬 작업의 충돌 핫스팟(App 필드 정의)을 늘리지 않게 하려는
+    /// 것이다.
+    pub(crate) fn arm_auto_pane_merge(&mut self) {
+        let Ok(env) = std::env::var("KASATERM_AUTOPANEMERGE") else { return };
+        let ms: u64 = std::env::var("KASATERM_AUTOPANEMERGE_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4000);
+        *auto_merge_slot().lock().unwrap() =
+            Some((Instant::now() + std::time::Duration::from_millis(ms), env));
+        eprintln!("[panemerge] armed in {ms}ms");
+    }
+    pub(crate) fn run_pending_auto_pane_merge(&mut self) {
+        let due = {
+            let mut slot = auto_merge_slot().lock().unwrap();
+            match slot.as_ref() {
+                Some((t, _)) if Instant::now() >= *t => slot.take().map(|(_, w)| w),
+                _ => None,
+            }
+        };
+        let Some(want) = due else { return };
+        let leaves: Vec<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|l| l.leaves().into_iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        if leaves.len() < 2 {
+            eprintln!("[panemerge] need 2+ panes, have {}", leaves.len());
+            return;
+        }
+        let pane = if leaves.iter().any(|s| *s == want) { want } else { leaves[0].clone() };
+        // carried pane 을 빼면 형제가 창을 통째로 채운다 — 그 중앙이 곧 Center 존.
+        let (cols, rows) = self.window_cells();
+        let pad = WINDOW_PADDING + self.effective_sidebar_w();
+        let win_w = cols as f32 * self.cell.w;
+        let win_h = rows as f32 * self.cell.h;
+        self.cursor_px = (pad + win_w / 2.0, TITLE_HEIGHT + win_h * 0.5);
+        self.header_drag =
+            Some(HeaderDrag { pane: pane.clone(), start: (0.0, 0.0), active: true, from_handle: false });
+        self.update_live_drag();
+        let hit = self.live_drag_hit(&pane);
+        eprintln!("[panemerge] src={pane} cursor=({:.0},{:.0}) hit={hit:?} preview_leaves={:?}",
+            self.cursor_px.0, self.cursor_px.1,
+            self.pty_layout.as_ref().map(|l| l.leaves().len()));
+        let dst = hit.as_ref().map(|(t, _)| t.clone());
+        let before = dst.as_ref().and_then(|d| {
+            self.ws.lock().ok().and_then(|w| w.panes.get(d).map(|p| p.tabs.len()))
+        });
+        let merged = self.take_center_drop(&pane);
+        self.header_drag = None;
+        let after = dst.as_ref().and_then(|d| {
+            self.ws.lock().ok().and_then(|w| w.panes.get(d).map(|p| p.tabs.len()))
+        });
+        let src_gone = self
+            .pty_layout
+            .as_ref()
+            .map(|l| !l.leaves().iter().any(|s| *s == pane))
+            .unwrap_or(true);
+        let routed = dst
+            .as_ref()
+            .map(|d| {
+                self.ws
+                    .lock()
+                    .ok()
+                    .map(|w| w.pid_to_pane.values().filter(|v| *v == d).count())
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        eprintln!(
+            "[panemerge] merged={merged} dst={dst:?} tabs={before:?}→{after:?} src_gone={src_gone} pids_routed_to_dst={routed} leaves={:?}",
+            self.pty_layout.as_ref().map(|l| l.leaves().len())
+        );
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
     pub(crate) fn run_pending_force_drag(&mut self) {
         let Some(t) = self.force_drag_at else { return };
         if Instant::now() < t { return; }
@@ -1346,7 +1435,13 @@ impl App {
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
         let win_w = cols as f32 * self.cell.w;
         let win_h = rows as f32 * self.cell.h;
-        self.cursor_px = (pad + win_w / 2.0, TITLE_HEIGHT + win_h * 0.8);
+        // `KASATERM_FORCE_DRAG_AT=center` 면 중앙(병합 프리뷰) 자리에 park —
+        // 소스가 그리드에서 빠지고 타깃에 "안에 넣기" 박스가 뜬 순간을 캡처한다.
+        let fy = match std::env::var("KASATERM_FORCE_DRAG_AT").as_deref() {
+            Ok("center") => 0.5,
+            _ => 0.8,
+        };
+        self.cursor_px = (pad + win_w / 2.0, TITLE_HEIGHT + win_h * fy);
         self.header_drag = Some(HeaderDrag { pane, start: (0.0, 0.0), active: true, from_handle: false });
         // 라이브 이동을 실제로 적용 — 실드래그의 mouse-move 가 하는 일을 흉내.
         self.update_live_drag();
