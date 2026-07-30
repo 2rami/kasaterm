@@ -583,6 +583,21 @@ impl App {
                     Some(t) => t.cells.iter().take(rows_now).map(normalise).collect(),
                     None => Vec::new(),
                 };
+                // 학생 도트·배너·스피너 같은 claude 화면 해석은 **claude 가 실제로
+                // 도는 pane** 에서만 한다. 화면 모양만 보고 판정하면 남의 TUI 를
+                // claude 로 오인한다 — helix 의 LSP 진행 스피너가 브라유라, 파일을
+                // 편집기 pane 으로 열면 학생 도트가 편집기 상태줄 위에 올라앉았다
+                // (실측). alt screen 여부로는 못 가른다: claude code 2.1.220 도
+                // alt screen 을 쓴다(tmux `#{alternate_on}` 으로 helix·claude 양쪽
+                // 실측 — 둘 다 1).
+                // active_process_name 은 셸의 **직속** 자식이라, claude 가 안에서
+                // cargo·vim 을 띄워도 여전히 claude 다(그것들의 부모는 claude).
+                // 500ms 캐시가 이미 붙어 있어 매 프레임 불러도 싸다.
+                let runs_claude = self
+                    .pty
+                    .get(id.as_str())
+                    .and_then(|p| p.active_process_name())
+                    .is_some_and(|n| n.contains("claude"));
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
                 // or window edge.
@@ -716,7 +731,7 @@ impl App {
                 let true_char = self.display_pane_char(&ws, &id);
                 if let Some((name, slug)) = true_char
                     .as_deref()
-                    .filter(|_| !agents_view)
+                    .filter(|_| !agents_view && runs_claude)
                     .and_then(|n| theme::character_slug(n).map(|s| (n, s)))
                 {
                     // 같은 학생 pane 이 여럿이면(지정 스폰 중복 허용) 순번 변주색.
