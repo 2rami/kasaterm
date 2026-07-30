@@ -2222,6 +2222,29 @@ impl GpuRenderer {
         (line, col)
     }
 
+    /// 미니맵 띠의 폭(logical px). 0 이면 안 그린다.
+    ///
+    /// 본문이 `MINI_MIN_BODY_COLS` 칸보다 좁아지면 접는다 — 좁은 pane 에서 미니맵이
+    /// 본문을 잡아먹으면 코드를 읽는 것 자체가 어려워진다. 그리는 쪽과 클릭을
+    /// 받는 쪽이 **같은 함수**를 불러야 띠와 히트 영역이 갈리지 않는다.
+    pub fn raw_editor_mini_w(&self, w: f32) -> f32 {
+        const MINI_MIN_BODY_COLS: f32 = 50.0;
+        let base = self.font_size_px as f32 / self.scale;
+        let want = base * 4.5;
+        if (w - want) / self.cell_w >= MINI_MIN_BODY_COLS {
+            want
+        } else {
+            0.0
+        }
+    }
+
+    /// 미니맵에서 논리 줄 하나가 차지하는 높이(logical px). 문서가 길면 1px 아래로
+    /// 내려가고, 그때는 여러 줄이 막대 하나로 묶인다(`draw_raw_editor` 가 그렇게
+    /// 샘플링한다). 스크롤 점프도 이 값을 써야 클릭한 자리로 정확히 간다.
+    pub fn raw_editor_mini_per(&self, h: f32, line_count: usize) -> f32 {
+        (h / line_count.max(1) as f32).min(3.0)
+    }
+
     /// Raw-editor line box height in logical px — the one number
     /// `draw_raw_editor`, hit-testing and scroll math must all agree on.
     pub fn raw_editor_line_h(&mut self) -> f32 {
@@ -2400,7 +2423,10 @@ impl GpuRenderer {
         // 자동완성 팝업: (후보, 고른 것, 낱말이 시작한 열).
         complete: Option<(&[String], usize, usize)>,
     ) -> f32 {
-        let clip_right = x + w;
+        // 본문은 미니맵 왼쪽까지만 쓴다. 이 렌더러엔 scissor 가 없어서
+        // clip_right 가 곧 본문의 오른쪽 벽이다.
+        let mini_w = self.raw_editor_mini_w(w);
+        let clip_right = x + w - mini_w;
         let base = self.font_size_px as f32 / self.scale;
         let (pad, lh) = self.raw_editor_metrics();
         // The line box (lh) is 1.25× the glyph height for breathing room, so the
@@ -2623,6 +2649,74 @@ impl GpuRenderer {
                 );
             }
             pen_y += lh;
+        }
+        // 미니맵 — 문서 전체를 오른쪽 띠에 축소해 얹는다. 글리프를 그리지 않고
+        // 줄마다 막대 하나만 놓는다: 문서 모양(들여쓰기 계단·빈 줄·긴 줄)을 읽는
+        // 게 목적이고, 5천 줄에 글리프를 그리면 프레임 예산을 통째로 먹는다.
+        if mini_w > 0.0 && !lines.is_empty() {
+            const MINI_COLS: f32 = 80.0;
+            let mx = x + w - mini_w;
+            let per = self.raw_editor_mini_per(h, lines.len());
+            let px_per_col = mini_w / MINI_COLS;
+            self.rect(mx, y, mini_w, h, crate::theme::surface());
+            // 본문과 붙어 있으면 코드 오른쪽이 지저분해 보인다 — 머리카락 한 줄로 뗀다.
+            self.rect(mx, y, 1.0, h, crate::theme::border());
+            // 막대 하나가 1px 아래로 얇아지면 여러 줄을 묶는다 — 안 묶으면 5천
+            // 줄이 5천 인스턴스가 되는데, 화면에 있는 픽셀 행보다 많아 그릴
+            // 의미가 없다.
+            let step = (1.0 / per).ceil().max(1.0) as usize;
+            let slot_h = (per * step as f32).max(1.0);
+            // 막대는 자기 칸의 일부만 채운다 — 빈틈 없이 이으면 줄 경계가 사라져
+            // 회색 덩어리가 되고, 들여쓰기 계단도 안 읽힌다.
+            let bar_h = (slot_h * 0.55).max(1.0);
+            let bar_col = crate::theme::with_alpha(crate::theme::text(), 0x3A);
+            let comment_col = crate::theme::with_alpha(crate::theme::syn_comment(), 0x3A);
+            for start in (0..lines.len()).step_by(step) {
+                // 묶음의 **평균** 길이로 대표한다. 최댓값을 쓰면 4줄 중 한 줄만
+                // 길어도 그 구간이 꽉 차 보여서, 문서가 전부 긴 줄처럼 읽힌다.
+                let end = (start + step).min(lines.len());
+                let mut lead = usize::MAX;
+                let mut sum = 0usize;
+                let mut live = 0usize;
+                let mut only_comment = true;
+                for l in &lines[start..end] {
+                    let t = l.trim_start();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    lead = lead.min(l.chars().count() - t.chars().count());
+                    sum += cell_cols(l);
+                    live += 1;
+                    if !(t.starts_with("//") || t.starts_with('#') || t.starts_with("--")) {
+                        only_comment = false;
+                    }
+                }
+                if live == 0 {
+                    continue;
+                }
+                let cols = sum / live;
+                let lead = lead.min(cols);
+                let bx = mx + 1.0 + lead as f32 * px_per_col;
+                let bw = ((cols - lead) as f32 * px_per_col).min(mx + mini_w - bx);
+                if bw > 0.0 {
+                    let c = if only_comment { comment_col } else { bar_col };
+                    self.rect(bx, y + (start / step) as f32 * slot_h, bw, bar_h, c);
+                }
+            }
+            // 지금 보이는 범위 — 미니맵 어디를 보고 있는지 알려 주는 창. 판만
+            // 깔면 막대에 묻혀 안 보이므로 위아래에 선을 하나씩 얹는다.
+            let vy = (y + (scroll / lh) * per).clamp(y, y + h);
+            let vh = ((h / lh) * per).max(3.0).min(y + h - vy);
+            self.rect(
+                mx + 1.0,
+                vy,
+                mini_w - 1.0,
+                vh,
+                crate::theme::with_alpha(crate::theme::text(), 0x22),
+            );
+            let edge = crate::theme::with_alpha(crate::theme::accent(), 0xAA);
+            self.rect(mx + 1.0, vy, mini_w - 1.0, 1.0, edge);
+            self.rect(mx + 1.0, vy + vh - 1.0, mini_w - 1.0, 1.0, edge);
         }
         // 자동완성 팝업 — 줄 루프 **밖**에서 마지막에 그린다. 안에서 그리면
         // 뒤에 오는 줄들이 위에 덮여 목록이 반쯤 잘린다.

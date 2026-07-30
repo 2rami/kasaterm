@@ -2441,6 +2441,47 @@ impl App {
     /// **순서가 계약이다** — 앵커를 연타 선택보다 나중에 세우면 더블클릭으로 잡은
     /// 선택을 그 앵커가 지워 버린다. handler 의 press 경로와 헤드리스 하네스가
     /// 같은 함수를 써야 검증이 실물과 어긋나지 않으므로 여기 한 곳에 둔다.
+    /// 미니맵을 눌렀으면 그 자리로 스크롤하고 true. 본문을 눌렀으면 false —
+    /// 호출자는 평소 캐럿 배치로 넘어간다.
+    ///
+    /// 폭·줄높이는 그리는 쪽과 **같은 함수**에서 얻는다(`raw_editor_mini_*`).
+    /// 같은 식을 두 벌 두면 폰트 크기를 바꾸는 순간 띠와 히트 영역이 갈린다.
+    pub(crate) fn md_mini_jump(&mut self, id: &str, px: f32, py: f32) -> bool {
+        let Some(&(bx, by, bw, bh)) = self.md_body_rects.get(id) else {
+            return false;
+        };
+        let n = {
+            let Ok(ws) = self.ws.lock() else { return false };
+            match ws.panes.get(id).and_then(|p| p.markdown()) {
+                Some(m) if m.raw_mode => m.edit_lines.len(),
+                _ => return false,
+            }
+        };
+        let (mini_w, per, lh) = {
+            let Some(g) = self.gpu.as_mut() else { return false };
+            (
+                g.raw_editor_mini_w(bw),
+                g.raw_editor_mini_per(bh, n),
+                g.raw_editor_line_h(),
+            )
+        };
+        if mini_w <= 0.0 || px < bx + bw - mini_w {
+            return false;
+        }
+        // 누른 줄이 화면 **가운데**로 오게 옮긴다 — 맨 위에 놓으면 그 위 문맥이
+        // 잘려서 왜 그 자리를 눌렀는지 확인할 수가 없다.
+        let want = (((py - by) / per).max(0.0) * lh - bh * 0.5).max(0.0);
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(pane) = ws.panes.get_mut(id) {
+                pane.dirty = true;
+                if let Some(m) = pane.markdown_mut() {
+                    m.scroll = want.min((n as f32 * lh - bh).max(0.0));
+                }
+            }
+        }
+        true
+    }
+
     pub(crate) fn md_press_caret(&mut self, id: &str, px: f32, py: f32) -> u8 {
         self.md_click_caret(id, px, py);
         let clicks = self.md_click_count(px, py);
