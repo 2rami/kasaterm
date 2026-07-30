@@ -1568,6 +1568,24 @@ struct MarkdownPane {
     /// Find/replace bar. Some == open, and while it is open it owns typing
     /// (Esc closes and hands the keyboard back to the buffer).
     find: Option<FindState>,
+    /// 자동완성 팝업. Some == 열림, 그동안 ↑↓·Tab·Enter·Esc 를 팝업이 먼저 먹는다.
+    complete: Option<CompleteState>,
+}
+
+/// 자동완성 팝업 상태.
+///
+/// 후보는 버퍼 안 낱말에서 만든다(`markdown::word_completions`). LSP 가 붙은
+/// 뒤에도 이 목록은 남는다 — 서버 응답은 왕복이 있어서, 그 사이 한 프레임을
+/// 이걸로 메워야 타이핑이 멈춘 것처럼 보이지 않는다.
+struct CompleteState {
+    /// 후보 목록. 캐럿에서 가까운 줄이 앞.
+    items: Vec<String>,
+    /// 고른 후보.
+    sel: usize,
+    /// 채워 넣을 낱말이 시작하는 열. 확정할 때 여기부터 캐럿까지를 후보로
+    /// 갈아끼운다 — 캐럿 위치만 들고 있으면 이미 친 앞부분이 남아 `cocost`
+    /// 처럼 겹쳐 들어간다.
+    from_col: usize,
 }
 
 /// Clickable control on the find bar. Every one has a keyboard equivalent —

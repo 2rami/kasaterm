@@ -842,6 +842,97 @@ impl GpuRenderer {
         }
     }
 
+    /// 편집기 코드 줄을 **격자**에 그린다 — 글자마다 정수 칸.
+    ///
+    /// 배치 규칙은 터미널(`draw_cells`)과 **같다**: 와이드(CJK·한글)는 2칸 박스
+    /// 중앙(넘치면 종횡비 유지 축소), 좁은데 칸보다 넓은 글리프(①ⓐⅠ 같은
+    /// Ambiguous)는 이웃 **빈칸으로 슬라이드**한다(`fit_cell_glyph`). 같은 문서가
+    /// 터미널과 편집기에서 같은 자리에 놓여야 하니 규칙이 하나여야 한다.
+    ///
+    /// 비례 배치(`draw_text_clipped`)와 갈라 둔 이유: 편집기는 한글이 섞여도
+    /// 들여쓰기와 세로 정렬이 맞아야 하고, 좌표가 정수 칸이면 캐럿·선택·클릭이
+    /// 아틀라스 조회 없이 곱셈 한 번으로 나온다. 마크다운 렌더 뷰는 계속 비례
+    /// 배치이므로 그쪽은 이 함수를 쓰지 않는다.
+    ///
+    /// `cells` 는 글자별 색 — 토큰을 이어 그리는 대신 줄 전체를 한 번에 받는다.
+    /// 이웃 칸이 비었는지 봐야 슬라이드를 판단할 수 있고, 토큰 단위로 끊으면
+    /// 경계에서 그 판단이 불가능하다. 반환값은 그 줄이 쓴 칸 수.
+    pub fn draw_editor_cells(
+        &mut self,
+        cells: &[(char, [u8; 4])],
+        line_x: f32,
+        y: f32,
+        size: f32,
+        clip_left: f32,
+        clip_right: f32,
+    ) -> usize {
+        let s = self.scale;
+        let size_px = (size * s).round().max(1.0) as u32;
+        let cw = self.cell_w * s;
+        let baseline_y = y * s + size_px as f32 * 0.78;
+        let clip_l = clip_left * s;
+        let clip_r = clip_right * s;
+        let x0 = line_x * s;
+        let blank = |c: Option<&(char, [u8; 4])>| matches!(c, Some(&(' ' | '\t', _)));
+        let mut col = 0usize;
+        // 슬라이드가 왼쪽으로 얼마나 갈 수 있는지 재려면 앞 글리프가 실제로
+        // 어디까지 찼는지 알아야 한다(터미널과 같은 이유).
+        let mut glyph_right = x0;
+        for (i, &(ch, color)) in cells.iter().enumerate() {
+            let step = 1 + usize::from(is_wide_char(ch));
+            if ch == ' ' || ch == '\t' {
+                col += step;
+                continue;
+            }
+            let key = GlyphKey {
+                ch,
+                bold: false,
+                italic: false,
+                size_px,
+                font: 0,
+            };
+            let Some(entry) =
+                self.atlas
+                    .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
+            else {
+                col += step;
+                continue;
+            };
+            let cell_x = x0 + col as f32 * cw;
+            let rect = if step == 2 {
+                let span = cw * 2.0;
+                let gw0 = entry.px_w as f32;
+                let fit = if gw0 > span { span / gw0 } else { 1.0 };
+                [
+                    cell_x + (span - gw0 * fit) * 0.5,
+                    baseline_y - entry.bearing_y as f32 * fit,
+                    gw0 * fit,
+                    entry.px_h as f32 * fit,
+                ]
+            } else {
+                let room_right = if blank(cells.get(i + 1)) { cw } else { 0.0 };
+                let room_left = if i > 0 && blank(cells.get(i - 1)) {
+                    cw.min((cell_x - glyph_right).max(0.0))
+                } else {
+                    0.0
+                };
+                fit_cell_glyph(&entry, cell_x, baseline_y, cw, room_left, room_right)
+            };
+            glyph_right = rect[0] + rect[2];
+            if rect[0] >= clip_l && rect[0] + rect[2] <= clip_r {
+                self.chrome.push(CellInstance {
+                    cell_px: rect,
+                    uv_min: entry.uv_min,
+                    uv_max: entry.uv_max,
+                    fg_rgba: srgb_rgba_to_linear(color),
+                    ..Default::default()
+                });
+            }
+            col += step;
+        }
+        col
+    }
+
     /// `draw_text_clipped` 이 그릴 폭(logical px) — 같은 규칙·같은 폰트(0)로
     /// 펜만 굴리고 글리프는 안 그린다. 편집기의 캐럿 x·선택 밴드 경계·
     /// 클릭 히트테스트·거터 폭은 전부 이걸로 재야 한다.
@@ -2084,29 +2175,22 @@ impl GpuRenderer {
         let top0 = (y - scroll) + pad;
         let line = (((click_y - top0) / lh).floor().max(0.0) as usize)
             .min(lines.len().saturating_sub(1));
-        // Walk the pen across the line and take the column it passes closest to.
-        // The pen accumulates: `measure_run` just sums per-character advances
-        // (no cross-character shaping), so stepping one char at a time gives the
-        // same x as measuring the whole prefix — but without rebuilding and
-        // re-measuring that prefix per column, which made a click on a long line
-        // O(L²). And since advances are never negative the pen only moves right,
-        // so once it passes the click nothing later can be closer: stop there.
-        let mut best_col = 0;
-        let mut best_d = (tx0 - click_x).abs();
-        let mut px = tx0;
-        let mut buf = [0u8; 4];
-        for (i, ch) in lines.get(line).map_or("", |l| l.as_str()).chars().enumerate() {
-            px += self.measure_pen_run(ch.encode_utf8(&mut buf), base, false, false);
-            let d = (px - click_x).abs();
-            if d < best_d {
-                best_d = d;
-                best_col = i + 1;
-            }
-            if px >= click_x {
+        // 격자라 클릭 x 는 실수 칸 위치로 바로 떨어진다 — 글자마다 아틀라스를
+        // 조회하며 펜을 굴릴 필요가 없다. 칸에서 열로 되돌릴 때만 순회하는데,
+        // 와이드 글자가 2칸이라 나눗셈 한 번으로는 안 되기 때문이다. 글자의
+        // 절반을 넘어섰을 때 다음 열로 넘긴다(그 글자를 클릭한 것으로 본다).
+        let want = (click_x - tx0) / self.cell_w;
+        let mut acc = 0.0f32;
+        let mut col = 0usize;
+        for ch in lines.get(line).map_or("", |l| l.as_str()).chars() {
+            let step = (1 + usize::from(is_wide_char(ch))) as f32;
+            if want < acc + step * 0.5 {
                 break;
             }
+            acc += step;
+            col += 1;
         }
-        (line, best_col)
+        (line, col)
     }
 
     /// Raw-editor line box height in logical px — the one number
@@ -2145,7 +2229,7 @@ impl GpuRenderer {
         // the next glyph is already visible while typing at the edge.
         let view_w = (w - pad * 2.0 - gutter_w).max(base);
         let margin = (base * 2.0).min(view_w * 0.25);
-        let caret_x = self.measure_pen_run(prefix, base, false, false);
+        let caret_x = cell_cols(prefix) as f32 * self.cell_w;
         let mut nh = h_scroll;
         if caret_x < nh + margin {
             nh = (caret_x - margin).max(0.0);
@@ -2284,6 +2368,8 @@ impl GpuRenderer {
         preedit: &str,
         cursor_on: bool,
         find: Option<(&[(usize, usize, usize)], usize)>,
+        // 자동완성 팝업: (후보, 고른 것, 낱말이 시작한 열).
+        complete: Option<(&[String], usize, usize)>,
     ) -> f32 {
         let clip_right = x + w;
         let base = self.font_size_px as f32 / self.scale;
@@ -2317,10 +2403,10 @@ impl GpuRenderer {
             .is_none()
             .then(|| crate::markdown::match_bracket(lines, cursor.0, cursor.1))
             .flatten();
-        // 들여쓰기 한 단계의 픽셀 폭. 공백 폭은 글리프마다 달라지지 않으므로
-        // 루프 밖에서 한 번만 재고 곱해 쓴다.
-        let guide_step =
-            self.measure_pen_run(" ", base, false, false) * crate::markdown::indent_step_cols() as f32;
+        // 격자라 칸 폭 하나로 모든 x 가 나온다 — 아래의 선택 밴드·괄호 강조·
+        // 캐럿·가이드가 전부 이 값의 곱이다.
+        let cw = self.cell_w;
+        let guide_step = cw * crate::markdown::indent_step_cols() as f32;
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
             if pen_y + lh > clip_top && pen_y < clip_bot {
@@ -2351,10 +2437,11 @@ impl GpuRenderer {
                         let c1 = if li == e.0 { e.1.min(n) } else { n };
                         let p0: String = line.chars().take(c0).collect();
                         let p1: String = line.chars().take(c1).collect();
-                        let sx0 = tx0 + self.measure_pen_run(&p0, base, false, false);
-                        let mut sx1 = tx0 + self.measure_pen_run(&p1, base, false, false);
+                        let sx0 = tx0 + cell_cols(&p0) as f32 * cw;
+                        let mut sx1 = tx0 + cell_cols(&p1) as f32 * cw;
                         if li < e.0 {
-                            sx1 += base * 0.45;
+                            // 줄바꿈도 선택에 들어갔다는 표시로 한 칸을 더 덮는다.
+                            sx1 += cw;
                         }
                         let rx0 = sx0.max(cx0);
                         let rx1 = sx1.min(clip_right);
@@ -2378,9 +2465,8 @@ impl GpuRenderer {
                             continue;
                         }
                         let pre: String = line.chars().take(bc).collect();
-                        let bx0 = tx0 + self.measure_pen_run(&pre, base, false, false);
-                        let glyph: String = line.chars().skip(bc).take(1).collect();
-                        let bw = self.measure_pen_run(&glyph, base, false, false);
+                        let bx0 = tx0 + cell_cols(&pre) as f32 * cw;
+                        let bw = cw;
                         let rx0 = bx0.max(cx0);
                         let rx1 = (bx0 + bw).min(clip_right);
                         if rx1 > rx0 {
@@ -2403,8 +2489,8 @@ impl GpuRenderer {
                         }
                         let p0: String = line.chars().take(c0).collect();
                         let p1: String = line.chars().take(c1).collect();
-                        let sx0 = tx0 + self.measure_pen_run(&p0, base, false, false);
-                        let sx1 = tx0 + self.measure_pen_run(&p1, base, false, false);
+                        let sx0 = tx0 + cell_cols(&p0) as f32 * cw;
+                        let sx1 = tx0 + cell_cols(&p1) as f32 * cw;
                         let rx0 = sx0.max(cx0);
                         let rx1 = sx1.min(clip_right);
                         if rx1 > rx0 {
@@ -2417,63 +2503,52 @@ impl GpuRenderer {
                 // Code line: tree-sitter spans when the grammar is supported,
                 // else the stateless line lexer (single TEXT color when `lang`
                 // is empty, e.g. plain text). Panned by h_scroll.
-                let mut tx = tx0;
                 // 조합 중인 줄은 하이라이트를 한 프레임 접고 prefix/조합/suffix 를
                 // 직접 그린다. 예전엔 줄을 다 그린 뒤 조합 글자를 캐럿 자리에
                 // **덮어** 그려서, 편집기에선 뒤 글자와 뭉개져 어디에 쓰고 있는지
                 // 안 보였다(거노: "입력중인거 이상한 위치에 있어"). 터미널은 셀
                 // 격자라 덮어도 되지만 편집기는 밀어야 맞다.
                 let composing = li == cursor.0 && !preedit.is_empty();
-                if composing {
-                    let prefix: String = line.chars().take(cursor.1).collect();
-                    let suffix: String = line.chars().skip(cursor.1).collect();
-                    let plain = DrawOpts {
-                        font_size: base,
-                        color: crate::theme::text(),
-                        bold: false,
-                        italic: false,
-                    };
-                    let accent = DrawOpts { color: crate::theme::accent(), ..plain };
-                    tx = self.draw_text_clipped(tx, pen_y + glyph_voff, &prefix, plain, cx0, clip_right);
-                    let pe_x = tx;
-                    tx = self.draw_text_clipped(tx, pen_y + glyph_voff, preedit, accent, cx0, clip_right);
-                    if tx > pe_x {
-                        self.rect(pe_x, pen_y + glyph_voff + base - 2.0, tx - pe_x, 2.0, crate::theme::accent());
-                    }
-                    tx = self.draw_text_clipped(tx, pen_y + glyph_voff, &suffix, plain, cx0, clip_right);
-                }
                 // 재파싱을 미루는 동안(ts_stale)엔 **편집 중인 줄만** 줄 단위
                 // lexer 로 칠한다. 그 줄의 캐시 색은 이미 낡아서 방금 친 글자가
                 // 무색으로 남는데, 그러면 타이핑이 죽은 것처럼 읽힌다. 나머지
                 // 줄은 캐시 색이 그대로 맞으므로 건드리지 않는다.
                 let row = ts_spans.as_ref().and_then(|s| s.get(li));
                 let lexer = row.is_none() || (ts_stale && li == cursor.0);
+                // 글자별 색으로 펼쳐 한 줄을 한 번에 격자에 그린다 — 토큰마다
+                // 나눠 그리면 경계에서 이웃 칸이 비었는지 알 수 없어 넓은 글리프의
+                // 슬라이드 판정이 깨진다.
+                let text_col = crate::theme::text();
+                let mut cells: Vec<(char, [u8; 4])> = Vec::with_capacity(line.len() + 4);
+                let mut pe_cols = (0usize, 0usize);
                 if composing {
+                    let accent = crate::theme::accent();
+                    cells.extend(line.chars().take(cursor.1).map(|c| (c, text_col)));
+                    pe_cols.0 = cells.iter().map(|&(c, _)| 1 + usize::from(is_wide_char(c))).sum();
+                    cells.extend(preedit.chars().map(|c| (c, accent)));
+                    pe_cols.1 = pe_cols.0 + cell_cols(preedit);
+                    cells.extend(line.chars().skip(cursor.1).map(|c| (c, text_col)));
                 } else if let (false, Some(spans)) = (lexer, row) {
                     for (tok, kind) in spans {
-                        tx = self.draw_text_clipped(
-                            tx,
-                            pen_y + glyph_voff,
-                            tok,
-                            DrawOpts {
-                                font_size: base,
-                                color: kind.color(crate::theme::text()),
-                                bold: false,
-                                italic: false,
-                            },
-                            cx0,
-                            clip_right,
-                        );
+                        let c = kind.color(text_col);
+                        cells.extend(tok.chars().map(|ch| (ch, c)));
                     }
                 } else {
-                    for (tok, col) in highlight_code_line(line, lang, crate::theme::text()) {
-                        tx = self.draw_text_clipped(
-                            tx,
-                            pen_y + glyph_voff,
-                            &tok,
-                            DrawOpts { font_size: base, color: col, bold: false, italic: false },
-                            cx0,
-                            clip_right,
+                    for (tok, col) in highlight_code_line(line, lang, text_col) {
+                        cells.extend(tok.chars().map(|ch| (ch, col)));
+                    }
+                }
+                self.draw_editor_cells(&cells, tx0, pen_y + glyph_voff, base, cx0, clip_right);
+                if pe_cols.1 > pe_cols.0 {
+                    let ux0 = (tx0 + pe_cols.0 as f32 * cw).max(cx0);
+                    let ux1 = (tx0 + pe_cols.1 as f32 * cw).min(clip_right);
+                    if ux1 > ux0 {
+                        self.rect(
+                            ux0,
+                            pen_y + glyph_voff + base - 2.0,
+                            ux1 - ux0,
+                            2.0,
+                            crate::theme::accent(),
                         );
                     }
                 }
@@ -2481,12 +2556,11 @@ impl GpuRenderer {
                 // gutter gets clipped away cleanly).
                 if li == cursor.0 {
                     let prefix: String = line.chars().take(cursor.1).collect();
-                    let cw = self.measure_pen_run(&prefix, base, false, false);
-                    let mut cur_x = tx0 + cw;
+                    let mut cur_x = tx0 + cell_cols(&prefix) as f32 * cw;
                     // 조합 글자는 위 `composing` 가지가 이미 밀어 그렸다 — 여기선
                     // 그 폭만큼 캐럿을 뒤로 옮기기만 한다(두 번 그리면 겹친다).
                     if !preedit.is_empty() {
-                        cur_x += self.measure_pen_run(preedit, base, false, false);
+                        cur_x += cell_cols(preedit) as f32 * cw;
                     }
                     if cursor_on && cur_x >= cx0 {
                         // Cursor bar matches the glyph box (same voff + height as
@@ -2520,6 +2594,52 @@ impl GpuRenderer {
                 );
             }
             pen_y += lh;
+        }
+        // 자동완성 팝업 — 줄 루프 **밖**에서 마지막에 그린다. 안에서 그리면
+        // 뒤에 오는 줄들이 위에 덮여 목록이 반쯤 잘린다.
+        if let Some((items, sel, from_col)) = complete {
+            if !items.is_empty() {
+                let px = (tx0 + from_col as f32 * cw).max(cx0);
+                let wide = items.iter().map(|s| cell_cols(s)).max().unwrap_or(0);
+                let bw = ((wide + 2) as f32 * cw).min(clip_right - px);
+                let bh = items.len() as f32 * lh;
+                let below = top0 + (cursor.0 + 1) as f32 * lh;
+                // 아래로 넘치면 캐럿 줄 위로 뒤집는다 — 화면 밖에 뜬 목록은
+                // 없는 것과 같다.
+                let by = if below + bh <= y + h {
+                    below
+                } else {
+                    (below - lh - bh).max(y)
+                };
+                // bg 보다 밝은 판 + 테두리라야 문서 위에 떠 있는 것으로 읽힌다.
+                self.rect(px, by, bw, bh, crate::theme::surface_active());
+                self.rect(px, by, bw, 1.0, crate::theme::border());
+                self.rect(px, by + bh - 1.0, bw, 1.0, crate::theme::border());
+                self.rect(px, by, 1.0, bh, crate::theme::border());
+                self.rect(px + bw - 1.0, by, 1.0, bh, crate::theme::border());
+                for (i, it) in items.iter().enumerate() {
+                    let iy = by + i as f32 * lh;
+                    if i == sel {
+                        self.rect(
+                            px + 1.0,
+                            iy,
+                            bw - 2.0,
+                            lh,
+                            crate::theme::with_alpha(crate::theme::accent(), 0x66),
+                        );
+                    }
+                    let cells: Vec<(char, [u8; 4])> =
+                        it.chars().map(|c| (c, crate::theme::text())).collect();
+                    self.draw_editor_cells(
+                        &cells,
+                        px + cw,
+                        iy + glyph_voff,
+                        base,
+                        px,
+                        px + bw,
+                    );
+                }
+            }
         }
         if let Some(t) = prof_draw {
             eprintln!(
@@ -3606,6 +3726,15 @@ fn fit_cell_glyph(
 /// this the syllable drifts into / overlaps its neighbour ("출력 한글
 /// 깨짐"). sugarloaf gets this for free because cosmic_text shapes onto
 /// the monospace grid.
+/// 편집기 격자에서 이 텍스트가 차지하는 칸 수. 캐럿 x·선택 밴드·괄호 강조·
+/// 들여쓰기 가이드가 전부 이 하나로 좌표를 얻으므로, 그리는 쪽
+/// (`draw_editor_cells`)과 칸 세는 규칙이 갈릴 수 없다.
+pub(crate) fn cell_cols(text: &str) -> usize {
+    text.chars()
+        .map(|c| 1 + usize::from(is_wide_char(c)))
+        .sum()
+}
+
 pub(crate) fn is_wide_char(ch: char) -> bool {
     let cp = ch as u32;
     matches!(cp,

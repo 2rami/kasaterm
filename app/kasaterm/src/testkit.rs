@@ -896,6 +896,23 @@ impl App {
                 });
                 eprintln!("[mdscript] type={v:?} caret={at:?}");
             }
+            // 자동완성 팝업을 캐럿 앞 낱말로 열어 본다 — `complete:`. 실물 키가
+            // 부르는 것과 **같은 함수**를 직접 부른다(winit `KeyEvent` 를 밖에서
+            // 못 만들어 타이핑으로는 팝업까지 갈 수 없다).
+            Some(("complete", _)) => {
+                let got = {
+                    let mut ws = self.ws.lock().unwrap();
+                    ws.panes.get_mut(&id).and_then(|p| {
+                        p.dirty = true;
+                        p.markdown_mut()
+                    })
+                    .map(|m| {
+                        m.complete_refresh();
+                        m.complete.as_ref().map(|c| (c.items.clone(), c.sel, c.from_col))
+                    })
+                };
+                eprintln!("[mdscript] complete={got:?}");
+            }
             // 선택 텍스트 확인. 클립보드 대신 로그로 찍는다(위 `sel:` 주석 참고).
             Some(("selcopy", _)) => {
                 match self.md_render_selection_text() {

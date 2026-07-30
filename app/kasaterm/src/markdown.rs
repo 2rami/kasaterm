@@ -500,6 +500,106 @@ impl MarkdownPane {
     /// the new one. On an item holding nothing but its marker, Enter wipes the
     /// marker instead of stacking another empty one; that's how a list ends
     /// without reaching for Backspace (VS Code and Obsidian both do this).
+    /// 캐럿 앞 낱말로 자동완성 후보를 다시 만든다. 낱말이 짧거나 후보가 없으면
+    /// 팝업을 닫는다.
+    ///
+    /// 두 글자부터 연다 — 한 글자로는 후보가 버퍼 절반이라 고를 거리가 아니라
+    /// 방해다(VS Code 도 같은 문턱을 쓴다).
+    pub(crate) fn complete_refresh(&mut self) {
+        const MIN_PREFIX: usize = 2;
+        const LIMIT: usize = 8;
+        if self.edit_lines.is_empty() {
+            self.complete = None;
+            return;
+        }
+        let line = self.cur_line.min(self.edit_lines.len() - 1);
+        let chars: Vec<char> = self.edit_lines[line].chars().collect();
+        let col = self.cur_col.min(chars.len());
+        let wordish = |c: char| c.is_alphanumeric() || c == '_';
+        let mut from = col;
+        while from > 0 && wordish(chars[from - 1]) {
+            from -= 1;
+        }
+        let prefix: String = chars[from..col].iter().collect();
+        if prefix.chars().count() < MIN_PREFIX {
+            self.complete = None;
+            return;
+        }
+        let items = word_completions(&self.edit_lines, &prefix, line, LIMIT);
+        self.complete = (!items.is_empty()).then_some(CompleteState {
+            items,
+            sel: 0,
+            from_col: from,
+        });
+    }
+
+    /// 고른 후보로 낱말을 갈아끼운다. 팝업이 닫혀 있으면 아무 일도 없고 false.
+    pub(crate) fn complete_accept(&mut self) -> bool {
+        let Some(c) = self.complete.take() else {
+            return false;
+        };
+        let Some(word) = c.items.get(c.sel).cloned() else {
+            return false;
+        };
+        if self.edit_lines.is_empty() {
+            return false;
+        }
+        self.push_undo(EditKind::Other);
+        let line = self.cur_line.min(self.edit_lines.len() - 1);
+        let to = self.cur_col;
+        let s = &mut self.lines_mut()[line];
+        let b0 = char_byte(s, c.from_col);
+        let b1 = char_byte(s, to);
+        s.replace_range(b0..b1, &word);
+        self.cur_col = c.from_col + word.chars().count();
+        self.sel_anchor = None;
+        self.touch();
+        true
+    }
+
+    /// 팝업이 열려 있는 동안 먼저 먹는 키. 먹었으면 true.
+    ///
+    /// Tab·Enter 로 확정하고 Esc 로 닫는다. 팝업이 이 키를 먹지 않으면 Enter 가
+    /// 줄을 끼우고 Tab 이 들여쓰기를 해 버려서, 후보를 고르려던 손이 문서를
+    /// 망가뜨린다.
+    pub(crate) fn complete_key(&mut self, event: &KeyEvent) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let Some(c) = self.complete.as_mut() else {
+            return false;
+        };
+        let n = c.items.len();
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.complete = None;
+                true
+            }
+            Key::Named(NamedKey::Tab | NamedKey::Enter) => self.complete_accept(),
+            Key::Named(NamedKey::ArrowDown) => {
+                c.sel = (c.sel + 1) % n.max(1);
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                c.sel = (c.sel + n.saturating_sub(1)) % n.max(1);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 키가 버퍼를 바꾼 뒤 후보를 다시 만든다. 낱말과 무관한 키(방향키·Enter 등)
+    /// 뒤에는 팝업을 닫는다 — 캐럿이 딴 데로 갔는데 후보가 남아 있으면 엉뚱한
+    /// 자리에 채워 넣힌다.
+    ///
+    /// 한글은 이 경로로 오지 않는다(조합은 `md_feed_jamo`) — 조합 중에 후보를
+    /// 세우면 미확정 글자로 목록이 흔들리므로 일부러 뺐다.
+    pub(crate) fn complete_after_key(&mut self, event: &KeyEvent) {
+        use winit::keyboard::{Key, NamedKey};
+        match &event.logical_key {
+            Key::Character(_) | Key::Named(NamedKey::Backspace) => self.complete_refresh(),
+            _ => self.complete = None,
+        }
+    }
+
     /// 선택을 괄호·따옴표로 감싼다. 선택을 지우고 덮어쓰지 않는 게 VS Code
     /// 동작이고, 감싼 뒤에도 안쪽 내용이 선택으로 남아 연속으로 감쌀 수 있다.
     pub(crate) fn wrap_selection(&mut self, open: char, close: char) {
@@ -1389,6 +1489,156 @@ impl MarkdownPane {
     }
 }
 
+// 멀티커서 배선(struct MarkdownPane 을 커서 벡터로 바꾸는 단계) 전까지는
+// 호출부가 없다. 테스트는 이미 붙어 있고 규칙이 확정된 로직이다.
+#[allow(dead_code)]
+/// 커서 하나 — 캐럿 위치와, 선택 중이면 그 앵커.
+///
+/// 멀티커서의 단위. `MarkdownPane` 이 아직 단일 `cur_line`/`cur_col` 을 들고
+/// 있어서 이 타입은 먼저 순수 로직만 세워 둔 것이다 — struct 배선은 별개 단계다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Caret {
+    pub line: usize,
+    pub col: usize,
+    /// 선택 앵커. `None` 이면 선택 없이 캐럿만.
+    pub anchor: Option<(usize, usize)>,
+}
+
+impl Caret {
+    pub(crate) fn at(line: usize, col: usize) -> Self {
+        Self { line, col, anchor: None }
+    }
+
+    /// 이 커서가 덮는 범위를 문서 순으로 — 앵커가 캐럿보다 뒤일 수 있다.
+    pub(crate) fn span(&self) -> ((usize, usize), (usize, usize)) {
+        let head = (self.line, self.col);
+        match self.anchor {
+            Some(a) if a <= head => (a, head),
+            Some(a) => (head, a),
+            None => (head, head),
+        }
+    }
+}
+
+#[allow(dead_code)]
+/// 커서 목록을 정규화한다 — 문서 순으로 정렬하고, 같은 자리이거나 범위가
+/// 겹치는 커서를 하나로 합친다.
+///
+/// 편집마다 이걸 통과시켜야 한다: 두 커서가 같은 자리에 남으면 타이핑 한 번에
+/// 글자가 두 번 들어가고, 겹친 선택을 각각 지우면 두 번째 삭제가 이미 사라진
+/// 범위를 가리켜 엉뚱한 글자를 먹는다.
+///
+/// 병합된 커서의 **방향은 앞 커서를 따른다** — 위에서 아래로 Shift 드래그하던
+/// 사람이 병합 후 갑자기 반대로 자라는 걸 보면 안 된다.
+pub(crate) fn normalize_carets(mut carets: Vec<Caret>) -> Vec<Caret> {
+    if carets.len() < 2 {
+        return carets;
+    }
+    carets.sort_by_key(|c| c.span());
+    let mut out: Vec<Caret> = Vec::with_capacity(carets.len());
+    for c in carets {
+        let (cs, ce) = c.span();
+        let Some(prev) = out.last_mut() else {
+            out.push(c);
+            continue;
+        };
+        let (ps, pe) = prev.span();
+        if cs > pe {
+            out.push(c);
+            continue;
+        }
+        // 겹친다 — 앞 커서의 방향을 유지한 채 범위만 넓힌다.
+        let (ns, ne) = (ps.min(cs), pe.max(ce));
+        let forward = prev.anchor.is_none_or(|a| a <= (prev.line, prev.col));
+        if ns == ne {
+            *prev = Caret::at(ns.0, ns.1);
+        } else if forward {
+            *prev = Caret { line: ne.0, col: ne.1, anchor: Some(ns) };
+        } else {
+            *prev = Caret { line: ns.0, col: ns.1, anchor: Some(ne) };
+        }
+    }
+    out
+}
+
+/// 버퍼 안 낱말로 만드는 자동완성 후보 — `prefix` 로 시작하는 서로 다른 낱말을
+/// **캐럿에서 가까운 줄 순서**로 최대 `limit` 개.
+///
+/// LSP 가 붙기 전에도 쓸 수 있고, 붙은 뒤에도 서버 응답이 오기 전 한 프레임을
+/// 메운다(VS Code 의 word-based suggestion 과 같은 자리). 가까운 줄을 앞세우는
+/// 이유는 방금 쓴 이름이 다시 쓸 이름일 확률이 가장 높기 때문이다.
+///
+/// `prefix` 와 똑같은 낱말은 넣지 않는다 — 고를 이유가 없는 후보다.
+pub(crate) fn word_completions(
+    lines: &[String],
+    prefix: &str,
+    near: usize,
+    limit: usize,
+) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let wordish = |c: char| c.is_alphanumeric() || c == '_';
+    let mut hits: Vec<(usize, usize, String)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (li, l) in lines.iter().enumerate() {
+        for w in l.split(|c: char| !wordish(c)) {
+            if w.len() < prefix.len() || !w.starts_with(prefix) || w == prefix {
+                continue;
+            }
+            if seen.iter().any(|s| s == w) {
+                continue;
+            }
+            seen.push(w.to_string());
+            hits.push((li.abs_diff(near), li, w.to_string()));
+        }
+    }
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    hits.into_iter().take(limit).map(|(_, _, w)| w).collect()
+}
+
+// Cmd+D 두 번째 누름(다음 출현에 커서 추가) 배선 전까지 호출부가 없다.
+#[allow(dead_code)]
+/// `needle` 이 `from` **뒤에서** 처음 나오는 자리(줄, 열). 문서 끝까지 없으면
+/// 처음부터 `from` 까지 다시 훑는다 — Cmd+D 를 계속 누르면 문서를 한 바퀴 돌아야
+/// 마지막 출현에서 멈춰 버리지 않는다.
+///
+/// 대소문자를 구분한다(코드에서 `Foo` 와 `foo` 는 다른 것이다) 그리고 단어
+/// 경계를 보지 않는다 — VS Code 의 Cmd+D 도 고른 글자열 그대로 찾는다.
+pub(crate) fn find_after(
+    lines: &[String],
+    needle: &str,
+    from: (usize, usize),
+) -> Option<(usize, usize)> {
+    let n: Vec<char> = needle.chars().collect();
+    if n.is_empty() || lines.is_empty() {
+        return None;
+    }
+    let hit = |li: usize, lo: usize, hi: usize| -> Option<usize> {
+        let hay: Vec<char> = lines[li].chars().collect();
+        if hay.len() < n.len() {
+            return None;
+        }
+        (lo..=hay.len() - n.len()).filter(|&i| i < hi).find(|&i| hay[i..i + n.len()] == n[..])
+    };
+    let start = from.0.min(lines.len() - 1);
+    if let Some(c) = hit(start, from.1, usize::MAX) {
+        return Some((start, c));
+    }
+    for li in (start + 1)..lines.len() {
+        if let Some(c) = hit(li, 0, usize::MAX) {
+            return Some((li, c));
+        }
+    }
+    for li in 0..start {
+        if let Some(c) = hit(li, 0, usize::MAX) {
+            return Some((li, c));
+        }
+    }
+    // 마지막으로 시작 줄의 `from` 앞쪽 — 한 바퀴를 여기서 닫는다.
+    hit(start, 0, from.1).map(|c| (start, c))
+}
+
 /// 들여쓰기 한 단계가 몇 칸인지. 가이드 선을 그리는 쪽(`draw_raw_editor`)이
 /// 편집기와 같은 눈금을 써야 선이 글자 사이에 정확히 떨어진다.
 pub(crate) fn indent_step_cols() -> usize {
@@ -1432,6 +1682,45 @@ pub(crate) fn indent_guide_depth(lines: &[String], li: usize) -> usize {
         (Some(a), Some(b)) => a.min(b),
         _ => 0,
     }
+}
+
+// 폴딩 배선(거터 삼각형 + 접힌 줄 건너뛰기) 전까지 호출부가 없다.
+#[allow(dead_code)]
+/// 접기용 들여쓰기 깊이. `None` 은 공백뿐인 줄.
+///
+/// 가이드(`indent_guide_depth`)와 탭 처리가 다르다 — 가이드는 탭이 섞이면 선을
+/// 안 그려야 하지만(폭을 몰라 어긋난다), 접기는 **상대** 깊이만 보므로 탭을 한
+/// 단계로 세면 그만이다.
+fn fold_depth(l: &str) -> Option<usize> {
+    let ws: Vec<char> = l.chars().take_while(|c| c.is_whitespace()).collect();
+    if ws.len() == l.chars().count() {
+        return None;
+    }
+    let step = indent_step_cols();
+    Some(ws.iter().map(|c| if *c == '\t' { step } else { 1 }).sum::<usize>() / step)
+}
+
+#[allow(dead_code)]
+/// 그 줄에서 접을 수 있는 블록의 마지막 줄. 접을 게 없으면 `None`.
+///
+/// 들여쓰기로 잡는다 — 언어 문법 없이 모든 파일에서 동작하고, tree-sitter
+/// 스팬은 타이핑 중 일부러 낡은 상태로 두므로(`raw_editor_ts_spans`) 접기 범위의
+/// 근거로 쓰면 방금 만든 블록이 안 접힌다.
+///
+/// 블록은 "다음 실줄이 더 깊은" 줄에서 시작해 그 깊이 이하로 돌아오는 줄 **앞**
+/// 까지다. 중간 빈 줄은 블록을 끊지 않지만(끊으면 함수 안 빈 줄마다 접기가
+/// 잘린다) 블록 **끝**의 빈 줄은 포함하지 않는다 — 접었을 때 남는 꼬리가 된다.
+pub(crate) fn fold_end(lines: &[String], li: usize) -> Option<usize> {
+    let base = fold_depth(lines.get(li)?)?;
+    let mut end = None;
+    for (i, l) in lines.iter().enumerate().skip(li + 1) {
+        let Some(d) = fold_depth(l) else { continue };
+        if d <= base {
+            break;
+        }
+        end = Some(i);
+    }
+    end
 }
 
 /// 짝을 맞추는 괄호 쌍.
@@ -1746,8 +2035,11 @@ impl App {
             // 문서에 줄이 끼는 일이 없어야 한다.
             if m.find.is_some() {
                 m.find_key(event, shift);
+            } else if m.complete_key(event) {
+                // 자동완성 팝업이 먹었다 — 버퍼로 흘려보내지 않는다.
             } else {
                 m.apply_edit_key(event, shift, alt, page_lines);
+                m.complete_after_key(event);
             }
         }
         self.md_ensure_caret_visible();
@@ -2392,6 +2684,7 @@ mod tests {
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
             find: None,
+            complete: None,
             edited_at: None,
         }
     }
@@ -2552,6 +2845,181 @@ mod tests {
         assert_eq!(line_comment_prefix("css"), None);
         assert_eq!(line_comment_prefix("html"), None);
         assert_eq!(line_comment_prefix(""), None);
+    }
+
+    #[test]
+    fn complete_refresh_needs_two_chars_and_accept_swaps_the_word() {
+        let mut m = pane(&["let counter = 0;", "let cost = 1;", "co"]);
+        m.cur_line = 2;
+        m.cur_col = 2;
+        m.complete_refresh();
+        let c = m.complete.as_ref().expect("두 글자면 팝업이 열려야 한다");
+        // 가까운 줄이 앞 — cost(1줄 차) 가 counter(2줄 차) 보다 먼저.
+        assert_eq!(c.items, vec!["cost", "counter"]);
+        assert_eq!((c.sel, c.from_col), (0, 0));
+        assert!(m.complete_accept());
+        assert_eq!(*m.edit_lines, vec!["let counter = 0;", "let cost = 1;", "cost"]);
+        assert_eq!(m.cur_col, 4);
+        assert!(m.complete.is_none());
+        // 확정할 팝업이 없으면 아무 일도 없다.
+        assert!(!m.complete_accept());
+    }
+
+    #[test]
+    fn complete_refresh_stays_shut_for_one_char_or_no_match() {
+        let mut m = pane(&["let counter = 0;", "c"]);
+        m.cur_line = 1;
+        m.cur_col = 1;
+        m.complete_refresh();
+        assert!(m.complete.is_none(), "한 글자로는 후보가 버퍼 절반이라 방해다");
+        let mut z = pane(&["let counter = 0;", "zz"]);
+        z.cur_line = 1;
+        z.cur_col = 2;
+        z.complete_refresh();
+        assert!(z.complete.is_none());
+    }
+
+    #[test]
+    fn complete_accept_keeps_the_tail_of_the_line() {
+        let mut m = pane(&["fn handler() {}", "ha();"]);
+        m.cur_line = 1;
+        m.cur_col = 2;
+        m.complete_refresh();
+        assert!(m.complete_accept());
+        // 낱말만 갈아끼우고 뒤에 이미 친 `();` 는 그대로 남는다.
+        assert_eq!(m.edit_lines[1], "handler();");
+        assert_eq!(m.cur_col, 7);
+    }
+
+    #[test]
+    fn word_completions_prefers_nearby_lines_and_drops_the_prefix_itself() {
+        let lines: Vec<String> = [
+            "let counter = 0;",   // 0
+            "let cost = 1;",      // 1
+            "co",                 // 2  캐럿 줄 — 자기 자신은 후보가 아니다
+            "let coffee = 2;",    // 3
+            "counter += 1;",      // 4  이미 나온 낱말은 중복으로 안 넣는다
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            word_completions(&lines, "co", 2, 10),
+            vec!["cost", "coffee", "counter"]
+        );
+        // limit 을 지킨다.
+        assert_eq!(word_completions(&lines, "co", 2, 1), vec!["cost"]);
+        // 빈 prefix 로는 후보를 만들지 않는다 — 버퍼 전체가 쏟아진다.
+        assert!(word_completions(&lines, "", 0, 10).is_empty());
+    }
+
+    #[test]
+    fn word_completions_takes_hangul_identifiers() {
+        let lines: Vec<String> = ["let 한글변수 = 1;", "let 한글이름 = 2;"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            word_completions(&lines, "한글", 0, 10),
+            vec!["한글변수", "한글이름"]
+        );
+    }
+
+    #[test]
+    fn find_after_walks_forward_then_wraps_around() {
+        let lines: Vec<String> = ["foo bar foo", "baz", "foo"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // 같은 줄 뒤쪽
+        assert_eq!(find_after(&lines, "foo", (0, 1)), Some((0, 8)));
+        // 아래 줄로
+        assert_eq!(find_after(&lines, "foo", (0, 9)), Some((2, 0)));
+        // 문서 끝에서 한 바퀴 돌아 앞으로
+        assert_eq!(find_after(&lines, "foo", (2, 1)), Some((0, 0)));
+        // 시작 줄의 from 앞쪽에서 한 바퀴가 닫힌다
+        assert_eq!(find_after(&lines, "bar", (0, 5)), Some((0, 4)));
+        assert_eq!(find_after(&lines, "nope", (0, 0)), None);
+        assert_eq!(find_after(&lines, "", (0, 0)), None);
+    }
+
+    #[test]
+    fn find_after_is_case_sensitive_and_counts_chars_not_bytes() {
+        let lines: Vec<String> = ["Foo foo", "가나다 nap"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(find_after(&lines, "foo", (0, 0)), Some((0, 4)));
+        // 열은 char 인덱스 — 한글이 앞에 있어도 바이트로 밀리지 않는다.
+        assert_eq!(find_after(&lines, "nap", (1, 0)), Some((1, 4)));
+    }
+
+    #[test]
+    fn fold_end_spans_the_block_and_drops_the_trailing_blank() {
+        let lines: Vec<String> = [
+            "fn a() {",   // 0
+            "  one();",   // 1
+            "",           // 2  블록 중간 빈 줄 — 끊지 않는다
+            "  two();",   // 3
+            "",           // 4  블록 끝 빈 줄 — 포함하지 않는다
+            "}",          // 5
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(fold_end(&lines, 0), Some(3));
+        // 자기보다 깊은 줄이 없으면 접을 게 없다.
+        assert_eq!(fold_end(&lines, 3), None);
+        assert_eq!(fold_end(&lines, 5), None);
+        // 빈 줄에서는 접기가 시작되지 않는다.
+        assert_eq!(fold_end(&lines, 2), None);
+    }
+
+    #[test]
+    fn fold_end_nests_and_counts_a_tab_as_one_step() {
+        let lines: Vec<String> = ["a", "  b", "    c", "  d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(fold_end(&lines, 0), Some(3));
+        assert_eq!(fold_end(&lines, 1), Some(2));
+        let tabs: Vec<String> = ["a", "\tb", "\t\tc", "d"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(fold_end(&tabs, 0), Some(2));
+        assert_eq!(fold_end(&tabs, 1), Some(2));
+    }
+
+    #[test]
+    fn normalize_carets_merges_the_same_spot() {
+        let out = normalize_carets(vec![Caret::at(3, 2), Caret::at(1, 0), Caret::at(3, 2)]);
+        assert_eq!(out, vec![Caret::at(1, 0), Caret::at(3, 2)]);
+    }
+
+    #[test]
+    fn normalize_carets_joins_overlapping_selections_keeping_direction() {
+        // 아래로 자라던 선택 + 겹치는 선택 → 하나로 넓히고 방향은 앞 것.
+        let a = Caret { line: 1, col: 5, anchor: Some((0, 2)) };
+        let b = Caret { line: 2, col: 1, anchor: Some((1, 3)) };
+        assert_eq!(
+            normalize_carets(vec![a, b]),
+            vec![Caret { line: 2, col: 1, anchor: Some((0, 2)) }]
+        );
+        // 위로 자라던 선택이 앞이면 병합 후에도 위로 자란다.
+        let c = Caret { line: 0, col: 2, anchor: Some((1, 5)) };
+        assert_eq!(
+            normalize_carets(vec![c, b]),
+            vec![Caret { line: 0, col: 2, anchor: Some((2, 1)) }]
+        );
+    }
+
+    #[test]
+    fn normalize_carets_leaves_disjoint_ones_alone() {
+        let a = Caret { line: 0, col: 3, anchor: Some((0, 1)) };
+        let b = Caret { line: 5, col: 2, anchor: Some((5, 0)) };
+        assert_eq!(normalize_carets(vec![b, a]), vec![a, b]);
+        // 맞닿기만 한 두 범위는 합친다 — 사이에 글자가 없으면 두 커서를 따로
+        // 둘 이유가 없고, 삭제 때 경계가 겹쳐 사고가 난다.
+        let c = Caret { line: 0, col: 5, anchor: Some((0, 3)) };
+        assert_eq!(
+            normalize_carets(vec![a, c]),
+            vec![Caret { line: 0, col: 5, anchor: Some((0, 1)) }]
+        );
     }
 
     #[test]
@@ -3074,6 +3542,7 @@ mod tests {
             redo_stack: Vec::new(),
             last_edit: EditKind::Break,
             find: None,
+            complete: None,
             edited_at: None,
         };
         m.ensure_raw_seeded();
