@@ -980,6 +980,70 @@ impl App {
             }
         });
     }
+    /// "파일 열기" 설정이 내장 편집기가 아니면 그쪽으로 보내고 `true`. `false` 면
+    /// 호출자가 내장 경로를 그대로 이어 간다 — 편집기를 못 찾았을 때도 여기로
+    /// 떨어져, 설정이 어긋나 있어도 파일은 늘 열린다.
+    fn open_file_elsewhere(&mut self, path: &std::path::Path) -> bool {
+        // `"system"` 은 `"app"` 의 옛 저장값(앱 미지정 = OS 기본이라 뜻이 같다).
+        match socket::read_file_open_mode().as_str() {
+            "app" | "system" => self.open_file_in_app(path),
+            "terminal" => self.open_file_in_editor_pane(path),
+            _ => false,
+        }
+    }
+
+    /// GUI 편집기로 넘긴다. 지정 앱을 **설치 목록에서 되찾아** 번들 경로로 여는
+    /// 게 핵심 — 이 기기의 VS Code 는 `/Applications` 밖에 있어 이름만으로는
+    /// LaunchServices 가 못 찾을 수 있다. 앱이 사라졌으면 OS 기본으로 넘기지 않고
+    /// 내장 편집기로 되돌린다: 이 맥의 기본 연결 프로그램은 거노가 목록에서
+    /// 일부러 뺀 앱이라, 폴백이 그쪽으로 가면 고친 게 도로 나타난다.
+    fn open_file_in_app(&mut self, path: &std::path::Path) -> bool {
+        let want = socket::read_file_open_app();
+        if want.trim().is_empty() {
+            crate::proc::open_path_default(path);
+            return true;
+        }
+        match crate::proc::open_with_apps().iter().find(|(name, _)| *name == want) {
+            Some((_, target)) => {
+                crate::proc::open_path_with(target, path);
+                true
+            }
+            None => {
+                self.set_toast(format!("{want} 를 못 찾았어요 — 내장 편집기로 엽니다"));
+                false
+            }
+        }
+    }
+
+    /// 새 split pane 을 열고 그 셸에 편집기 명령을 친다. helix·vim 처럼 터미널을
+    /// 통째로 쓰는 편집기는 이렇게 띄우는 게 정공법이다 — kasaterm 이 터미널이니
+    /// 멀티커서·LSP·코드접기가 우리 구현 없이 그대로 딸려 온다.
+    fn open_file_in_editor_pane(&mut self, path: &std::path::Path) -> bool {
+        let cmd = socket::read_file_open_cmd();
+        let cmd = if cmd.trim().is_empty() {
+            socket::resolve_terminal_editor().unwrap_or_default()
+        } else {
+            cmd
+        };
+        if cmd.trim().is_empty() {
+            self.set_toast("터미널 편집기를 못 찾았어요 — 내장 편집기로 엽니다".to_string());
+            return false;
+        }
+        let Ok(pane) = self.split_active_pane(kasa_pty::SplitDir::Horizontal) else {
+            self.set_toast("pane 을 열지 못했어요 — 내장 편집기로 엽니다".to_string());
+            return false;
+        };
+        let Some(sess) = self.pty.get(&pane).cloned() else {
+            self.set_toast("pane 을 열지 못했어요 — 내장 편집기로 엽니다".to_string());
+            return false;
+        };
+        // 900ms = 계정 추가·swap_character 와 같은 "셸 프롬프트가 뜰 즈음" 대기.
+        // 더 일찍 보내면 셸이 아직 안 읽어 명령이 통째로 유실된다.
+        let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+        self.pending_restores.push((sess, format!("{}\r", editor_command_line(&cmd, path)), at));
+        true
+    }
+
     /// Open a sidebar file in a fresh split pane (right of the active pane).
     /// Images decode into an `Image` pane; real markdown renders as a laid-out
     /// doc; any other text loads as a fenced code block so the highlighter
@@ -1001,6 +1065,12 @@ impl App {
         as_tab: bool,
     ) {
         if self.tmux.is_some() {
+            return;
+        }
+        // "파일 열기" 설정은 **사람이 연 것**에만 적용한다. `as_tab` 은 에이전트·
+        // 소켓의 미리보기 요청이라, 그것까지 pane 을 새로 열면 파일을 보여 달랄
+        // 때마다 화면이 쪼개진다.
+        if !as_tab && !crate::is_image_path(&path) && self.open_file_elsewhere(&path) {
             return;
         }
         // Already open? Focus that pane + tab rather than spawning a duplicate.
@@ -1035,11 +1105,7 @@ impl App {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let is_image = matches!(
-            ext.as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico"
-        );
-        let content = if is_image {
+        let content = if crate::is_image_path(&path) {
             match decode_image_rgba(&path) {
                 Ok(img) => PaneContent::Image(Arc::new(img)),
                 Err(e) => {
@@ -1103,7 +1169,7 @@ impl App {
         // injectable in a background run). KASATERM_TEST_IMG_ZOOM sets the
         // initial zoom; KASATERM_TEST_IMG_PAN="x,y" the initial pan (logical
         // px). Only meaningful for image panes.
-        if is_image {
+        if crate::is_image_path(&path) {
             if let Some(z) = std::env::var("KASATERM_TEST_IMG_ZOOM")
                 .ok()
                 .and_then(|s| s.parse::<f32>().ok())
@@ -2383,9 +2449,37 @@ fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool, next: &mut
     s
 }
 
+/// 편집기 명령과 파일 경로로 셸에 칠 한 줄을 만든다. `{}` 가 있으면 그 자리에,
+/// 없으면 맨 뒤에 경로가 들어간다(`code -w {} --goto 1` 처럼 인자 뒤에 뭔가 더
+/// 붙는 편집기가 있다). 경로는 홑따옴표로 감싸고 내부 `'` 를 POSIX 방식으로
+/// 끊어 붙인다 — 공백·한글·따옴표가 든 파일명이 명령을 쪼개지 못하게.
+fn editor_command_line(cmd: &str, path: &std::path::Path) -> String {
+    let q = format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
+    if cmd.contains("{}") {
+        cmd.replace("{}", &q)
+    } else {
+        format!("{} {q}", cmd.trim())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{git_repo_root, pick_restore_id};
+    use super::{editor_command_line, git_repo_root, pick_restore_id};
+
+    #[test]
+    fn editor_line_quotes_the_path_and_honors_the_placeholder() {
+        let p = std::path::Path::new("/tmp/a b/main.rs");
+        assert_eq!(editor_command_line("hx", p), "hx '/tmp/a b/main.rs'");
+        assert_eq!(
+            editor_command_line("code -w {} --goto 1", p),
+            "code -w '/tmp/a b/main.rs' --goto 1"
+        );
+        // 따옴표가 든 이름이 인용을 깨고 나오면 뒤가 명령으로 실행된다.
+        assert_eq!(
+            editor_command_line("hx", std::path::Path::new("/tmp/it's.rs")),
+            r"hx '/tmp/it'\''s.rs'"
+        );
+    }
 
     #[test]
     fn restore_keeps_the_saved_pane_id() {

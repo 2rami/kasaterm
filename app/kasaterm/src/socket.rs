@@ -2113,6 +2113,54 @@ pub fn read_default_shell() -> Option<String> {
 pub fn read_claude_persona() -> bool {
     read_settings().get("claude_persona").and_then(|x| x.as_bool()).unwrap_or(true)
 }
+/// 파일트리에서 파일을 열 때 무엇으로 여는가 — `"builtin"`(내장 편집기 pane,
+/// 기본) · `"app"`(VS Code 같은 GUI 편집기) · `"terminal"`(새 pane 에서 CLI
+/// 편집기). `"system"` 은 `"app"` 의 옛 이름이라 그대로 받아 준다.
+pub fn read_file_open_mode() -> String {
+    read_settings()
+        .get("file_open_mode")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("builtin")
+        .to_string()
+}
+
+/// `"app"` 모드가 쓸 앱의 표시 이름(`proc::open_with_apps()` 의 첫 필드).
+/// 빈 문자열이면 OS 연결 프로그램으로 연다.
+pub fn read_file_open_app() -> String {
+    read_settings().get("file_open_app").and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+/// `"terminal"` 모드가 pane 에서 실행할 명령줄. `{}` 가 있으면 파일 경로로
+/// 치환하고, 없으면 뒤에 붙인다. 빈 문자열이면 `resolve_terminal_editor()` 가
+/// 고른다.
+pub fn read_file_open_cmd() -> String {
+    read_settings().get("file_open_cmd").and_then(|x| x.as_str()).unwrap_or("").to_string()
+}
+
+/// PATH 에 있는 CLI 편집기를 하나 고른다 — `$VISUAL`/`$EDITOR` 가 먼저고(사용자가
+/// 이미 밝힌 취향이다), 없으면 helix→neovim→vim→nano 순. 아무것도 없으면 `None`
+/// 이라 호출자가 내장 편집기로 되돌아간다.
+pub fn resolve_terminal_editor() -> Option<String> {
+    let on_path = |cmd: &str| {
+        // `$EDITOR="code -w"` 처럼 인자가 붙어 올 수 있어 첫 토큰만 찾는다.
+        let Some(bin) = cmd.split_whitespace().next() else { return false };
+        if bin.contains('/') {
+            return std::path::Path::new(bin).is_file();
+        }
+        let Some(path) = std::env::var_os("PATH") else { return false };
+        std::env::split_paths(&path).any(|d| d.join(bin).is_file())
+    };
+    for key in ["VISUAL", "EDITOR"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.trim().is_empty() && on_path(&v) {
+                return Some(v);
+            }
+        }
+    }
+    ["hx", "helix", "nvim", "vim", "nano"].into_iter().find(|c| on_path(c)).map(String::from)
+}
+
 pub fn read_claude_model() -> String {
     read_settings().get("claude_model").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }

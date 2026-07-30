@@ -221,6 +221,16 @@ pub(crate) fn strip_activity_prefix(s: &str) -> &str {
     })
 }
 
+/// 내장 이미지 뷰로 열 수 있는 확장자인가. 이미지는 "파일 열기" 설정을 타지
+/// 않는다 — CLI 편집기에 넘기면 바이너리 쓰레기만 뜬다.
+pub(crate) fn is_image_path(path: &std::path::Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "tif" | "ico"
+    )
+}
+
 /// File-type icon (assets/icons/ft, 브랜드컬러 filled)를 파일명에서 고른다.
 /// 특수 파일명(README, Dockerfile, tsconfig…)이 확장자보다 우선. `None` 이면
 /// 매핑이 없다는 뜻 — 호출부는 기존 모노크롬 "file" 글리프로 폴백한다.
@@ -2820,6 +2830,8 @@ pub(crate) enum SettingsCat {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsInput {
     CwdPath,
+    /// 터미널 편집기 명령줄 필드("파일 열기"가 `terminal` 일 때만 보인다).
+    FileOpenCmd,
     Shell,
     ClaudeExtra,
     /// Students 카테고리 persona 멀티라인 편집 필드가 포커스됨.
@@ -2837,6 +2849,11 @@ pub(crate) enum SettingsAction {
     Category(SettingsCat),
     CwdMode(&'static str),
     FocusCwdPath,
+    /// 파일트리에서 파일을 열 때 쓸 방식 — `"builtin"` · `"app"` · `"terminal"`.
+    FileOpenMode(&'static str),
+    /// `"app"` 모드가 쓸 앱 이름. 빈 문자열 = OS 연결 프로그램.
+    FileOpenApp(String),
+    FocusFileOpenCmd,
     ToggleFileTree,
     ToggleFooter,
     /// Editor autosave quiet period in ms; 0 = off.
@@ -3530,6 +3547,11 @@ struct App {
     /// In-memory mirror of settings.json, edited live and written on each
     /// change so the next launch (and `resolve_*`) pick it up.
     set_cwd_mode: String,
+    /// 파일트리에서 파일을 열 때의 기본 동작, `app` 모드가 쓸 앱 이름,
+    /// `terminal` 모드가 실행할 명령줄.
+    set_file_open_mode: String,
+    set_file_open_app: String,
+    set_file_open_cmd: String,
     set_file_tree_default: bool,
     set_footer_default: bool,
     /// Editor autosave quiet period. `None` = off, which is the default and
@@ -3897,6 +3919,9 @@ impl App {
             settings_open: false,
             settings_cat: SettingsCat::General,
             set_cwd_mode: socket::read_default_cwd_mode(),
+            set_file_open_mode: socket::read_file_open_mode(),
+            set_file_open_app: socket::read_file_open_app(),
+            set_file_open_cmd: socket::read_file_open_cmd(),
             set_file_tree_default: socket::read_file_tree_default(),
             set_footer_default: socket::read_footer_default(),
             set_autosave: socket::read_editor_autosave(),
