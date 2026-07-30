@@ -355,7 +355,31 @@ impl MarkdownPane {
     /// is in one place: `make_mut` clones the lines only while an undo snapshot
     /// or an in-flight frame still points at them, which is once per edit run.
     pub(crate) fn lines_mut(&mut self) -> &mut Vec<String> {
+        // 버퍼가 바뀌는 **유일한** 관문이라 최장 줄 캐시를 여기서 버린다.
+        // `touch()` 에 걸면 안 된다 — touch 를 안 지나는 경로(스냅샷 복원)에서
+        // 캐시가 살아남아 가로 스크롤 상한이 옛 버퍼를 가리킨다.
+        self.longest_cache = None;
         Arc::make_mut(&mut self.edit_lines)
+    }
+
+    /// 가장 긴 줄의 **칸** 수 — 가로 스크롤 상한을 여기서 얻는다. 글자 수가 아니라
+    /// 칸 수인 이유는 편집기가 격자에 그리기 때문이다(한글 한 글자가 2칸).
+    ///
+    /// 캐시한다. 원래는 트랙패드 제스처가 오는 프레임마다 버퍼 전체를 훑어
+    /// 최장 줄을 다시 셌다 — 한 번의 스와이프가 수십 프레임이라 5천 줄 파일에서
+    /// 같은 스캔을 수십 번 반복했다.
+    pub(crate) fn longest_cols(&mut self) -> usize {
+        if let Some(n) = self.longest_cache {
+            return n;
+        }
+        let n = self
+            .edit_lines
+            .iter()
+            .map(|l| crate::gpu::cell_cols(l))
+            .max()
+            .unwrap_or(0);
+        self.longest_cache = Some(n);
+        n
     }
     /// O(1) now that the buffer is shared — this used to deep-copy the file.
     fn snapshot(&self) -> EditSnapshot {
@@ -379,6 +403,9 @@ impl MarkdownPane {
     /// Restore a snapshot (undo/redo target), clamping the cursor to it.
     fn apply_snapshot(&mut self, snap: EditSnapshot) {
         self.edit_lines = snap.lines;
+        // 버퍼를 통째로 갈아끼우는 경로다 — `lines_mut` 를 안 지나므로 캐시를
+        // 직접 버려야 한다(안 버리면 undo 후 가로 스크롤 상한이 옛 버퍼 값).
+        self.longest_cache = None;
         if self.edit_lines.is_empty() {
             self.lines_mut().push(String::new());
         }
@@ -403,6 +430,7 @@ impl MarkdownPane {
         }
         if self.edit_lines.is_empty() {
             self.edit_lines = Arc::new(self.doc.raw.split('\n').map(String::from).collect());
+            self.longest_cache = None;
             if self.edit_lines.is_empty() {
                 self.lines_mut().push(String::new());
             }
@@ -2685,6 +2713,7 @@ mod tests {
             last_edit: EditKind::Break,
             find: None,
             complete: None,
+            longest_cache: None,
             edited_at: None,
         }
     }
@@ -2845,6 +2874,24 @@ mod tests {
         assert_eq!(line_comment_prefix("css"), None);
         assert_eq!(line_comment_prefix("html"), None);
         assert_eq!(line_comment_prefix(""), None);
+    }
+
+    #[test]
+    fn longest_cols_counts_cells_and_survives_only_until_the_buffer_moves() {
+        let mut m = pane(&["ab", "가나다"]);
+        // 한글 3자 = 6칸 > ASCII 2칸.
+        assert_eq!(m.longest_cols(), 6);
+        assert_eq!(m.longest_cache, Some(6));
+        // 편집은 lines_mut 을 지나므로 캐시가 버려진다.
+        m.lines_mut()[0] = "abcdefghij".to_string();
+        assert_eq!(m.longest_cache, None);
+        assert_eq!(m.longest_cols(), 10);
+        // undo 는 버퍼를 통째로 갈아끼우는데, 그 경로도 캐시를 버려야 한다.
+        m.push_undo(EditKind::Other);
+        m.lines_mut()[0] = "x".to_string();
+        m.do_undo();
+        assert_eq!(m.longest_cache, None);
+        assert_eq!(m.longest_cols(), 10);
     }
 
     #[test]
@@ -3543,6 +3590,7 @@ mod tests {
             last_edit: EditKind::Break,
             find: None,
             complete: None,
+            longest_cache: None,
             edited_at: None,
         };
         m.ensure_raw_seeded();

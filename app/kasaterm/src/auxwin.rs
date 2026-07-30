@@ -302,6 +302,7 @@ impl App {
             last_edit: EditKind::Break,
             find: None,
             complete: None,
+            longest_cache: None,
             edited_at: None,
         };
         self.spawn_aux_editor(md, event_loop, None);

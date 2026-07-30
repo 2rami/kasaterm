@@ -1149,6 +1149,7 @@ impl App {
                 last_edit: EditKind::Break,
             find: None,
             complete: None,
+            longest_cache: None,
             edited_at: None,
             })
         };
@@ -1299,6 +1300,7 @@ impl App {
             last_edit: EditKind::Break,
             find: None,
             complete: None,
+            longest_cache: None,
             edited_at: None,
         });
         tab.title = title;

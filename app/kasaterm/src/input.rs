@@ -1119,12 +1119,10 @@ impl App {
                             if let Some(pane) = ws.panes.get_mut(id) {
                                 let cw = self.cell.w;
                                 if let Some(m) = pane.markdown_mut() {
-                                    let longest = m
-                                        .edit_lines
-                                        .iter()
-                                        .map(|l| l.chars().count())
-                                        .max()
-                                        .unwrap_or(0);
+                                    // 캐시된 칸 수 — 제스처 프레임마다 버퍼를
+                                    // 다시 훑지 않는다. 글자 수가 아니라 칸 수라야
+                                    // 한글이 섞인 줄의 상한이 실제 폭과 맞는다.
+                                    let longest = m.longest_cols();
                                     let max_h = (longest as f32 * cw - cw * 4.0).max(0.0);
                                     m.h_scroll = (m.h_scroll - dx_px).clamp(0.0, max_h);
                                 }
