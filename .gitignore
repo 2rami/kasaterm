@@ -17,3 +17,7 @@ Cargo.lock
 /schale-light.png
 web/arona-ui/character-src/_*.png
 web/arona-ui/character-src/.walklog-*.log
+
+# macOS Finder 폴더 커스텀 아이콘 — 이름이 Icon+CR 이라 Windows 가 checkout 못 한다
+# (CR 하나는 gitignore 파서가 CRLF 로 보고 먹으므로 두 번 쓴다)
+Icon
