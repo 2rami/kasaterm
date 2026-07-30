@@ -1684,7 +1684,13 @@ impl App {
                             .unwrap_or(true)
                 })
                 .unwrap_or(false);
-        let show_drop_zone = tab_drag_active && !live_drag;
+        // 중앙("안에 넣기") 프리뷰는 라이브 드래그에서도 박스를 띄운다 — 소스가
+        // 그리드에서 빠지는 것만으론 *어느* pane 안으로 들어가는지 안 보인다.
+        let live_center = self
+            .drag_live_applied
+            .as_ref()
+            .is_some_and(|(_, z)| *z == DropZone::Center);
+        let show_drop_zone = (tab_drag_active && !live_drag) || live_center;
         // Indicator policy:
         //   - header band (cursor_on_header) → strip insertion bar only
         //                                       (overlay 안 그림)
@@ -1716,7 +1722,7 @@ impl App {
         let drop_zone_rect: Option<(f32, f32, f32, f32)> = show_drop_zone
             .then_some(current_zone)
             .flatten()
-            .filter(|_| !cursor_on_header)
+            .filter(|_| live_center || !cursor_on_header)
             .and_then(|(target, zone)| {
                 let tree = self.pty_layout.as_ref()?;
                 let leaves = tree.leaves().len();
@@ -1739,7 +1745,9 @@ impl App {
                     DropZone::Right => (bx + bw / 2.0, body_top, bw / 2.0, body_h),
                     DropZone::Up => (bx, body_top, bw, body_h / 2.0),
                     DropZone::Down => (bx, body_top + body_h / 2.0, bw, body_h / 2.0),
-                    DropZone::Center => return None,
+                    // 반쪽이 아니라 body 통째 — "이 pane 안으로 들어간다"는 뜻이고,
+                    // 어느 쪽으로도 갈리지 않는다는 것도 같이 읽힌다.
+                    DropZone::Center => (bx, body_top, bw, body_h),
                 })
             });
         // Ghostty-style split seams: one 1px hairline per interior split

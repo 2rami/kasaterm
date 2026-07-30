@@ -1097,6 +1097,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autodrag();
         self.arm_autopanemove();
         self.arm_force_drag();
+        self.arm_auto_pane_merge();
         self.arm_autoopen();
         self.arm_autoconfirm();
         self.schedule_autoquit();
@@ -3785,6 +3786,17 @@ impl ApplicationHandler<UserEvent> for App {
                                     }
                                 }
                             }
+                            // 라이브로 옮기던 단일탭 pane 을 타깃 중앙에 놓았다 —
+                            // split 이 아니라 그 pane 의 탭으로 들어간다. 라이브가
+                            // 걸린 드래그(drag_orig_layout 이 있는 경우)는 여기서
+                            // 판정해야 한다: 아래 body_drop 은 **원본** 트리로
+                            // 재판정하는데, 화면엔 소스가 빠져 형제가 벌어진 모습이
+                            // 떠 있어 커서 밑 과녁이 서로 다르다.
+                            if self.drag_orig_layout.is_some() && self.take_center_drop(&td.pane) {
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
                             // 단일탭 pane 을 라이브로 통째 옮긴 경우: 이미 실제
                             // 재배치가 끝났으니 백업만 정리하고 확정한다. 아래의
                             // split/move 경로를 또 타면 이중 적용된다.
@@ -4040,6 +4052,10 @@ impl ApplicationHandler<UserEvent> for App {
                                     }
                                     self.drag_live_applied = None;
                                     self.move_pane(&hd.pane, &target, DropZone::Right);
+                                } else if self.take_center_drop(&hd.pane) {
+                                    // 타깃 중앙(헤더 띠 또는 본문 가운데)에 놓았다 —
+                                    // 화면을 더 쪼개는 게 아니라 그 pane 의 탭으로
+                                    // 들어간다. 병합이 resize·publish 까지 마친다.
                                 } else {
                                     // 같은 창 안 — 라이브로 이미 재배치된 현재
                                     // pty_layout 이 최종. 백업/throttle 만 정리한다.
@@ -4570,6 +4586,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autodrag();
         self.run_pending_autopanemove();
         self.run_pending_force_drag();
+        self.run_pending_auto_pane_merge();
         self.run_pending_autowheel();
         self.run_pending_sticky_seek();
         self.run_pending_autotoggle();
