@@ -1640,6 +1640,27 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // 렌더 뷰 선택 드래그: 끝점만 따라온다(앵커는 누른 자리에 고정).
+                if self.md_render_sel.as_ref().is_some_and(|s| s.dragging) {
+                    let scroll = self
+                        .md_render_sel
+                        .as_ref()
+                        .and_then(|s| {
+                            let pane = s.pane.clone();
+                            self.ws.lock().ok().and_then(|ws| {
+                                ws.panes
+                                    .get(&pane)
+                                    .and_then(|p| p.markdown())
+                                    .map(|m| m.scroll)
+                            })
+                        })
+                        .unwrap_or(0.0);
+                    if let Some(s) = self.md_render_sel.as_mut() {
+                        s.end = (self.cursor_px.0, self.cursor_px.1 + scroll);
+                    }
+                    window.request_redraw();
+                    return;
+                }
                 // Image pan drag: slide the zoomed image by the cursor delta,
                 // clamped to the slack so it can't be dragged off the texture.
                 if let Some((pane_id, start, base)) = self.image_pan_drag.clone() {
@@ -3618,7 +3639,29 @@ impl ApplicationHandler<UserEvent> for App {
                                         }
                                         self.md_select_drag = Some(pane_id.clone());
                                     } else {
-                                        self.try_open_md_link();
+                                        // 렌더 뷰: 문서 좌표로 선택 앵커를 잡는다.
+                                        // 링크 열기는 Released 로 미룬다 — 링크 위에서
+                                        // 드래그를 시작할 수도 있어서, 누르는 순간
+                                        // 브라우저가 뜨면 선택이 불가능해진다.
+                                        let scroll = self
+                                            .ws
+                                            .lock()
+                                            .ok()
+                                            .and_then(|ws| {
+                                                ws.panes
+                                                    .get(&pane_id)
+                                                    .and_then(|p| p.markdown())
+                                                    .map(|m| m.scroll)
+                                            })
+                                            .unwrap_or(0.0);
+                                        let at =
+                                            (self.cursor_px.0, self.cursor_px.1 + scroll);
+                                        self.md_render_sel = Some(crate::MdRenderSel {
+                                            pane: pane_id.clone(),
+                                            anchor: at,
+                                            end: at,
+                                            dragging: true,
+                                        });
                                     }
                                 }
                             } else {
@@ -3668,6 +3711,24 @@ impl ApplicationHandler<UserEvent> for App {
                                     }
                                     pane.dirty = true;
                                 }
+                            }
+                            window.request_redraw();
+                            return;
+                        }
+                        // 렌더 뷰 선택 드래그 종료. 거의 안 움직였으면 그건 선택이
+                        // 아니라 클릭이다 — 선택을 지우고 그때서야 링크를 연다.
+                        if self.md_render_sel.as_ref().is_some_and(|s| s.dragging) {
+                            let moved = self.md_render_sel.as_ref().is_some_and(|s| {
+                                (s.end.0 - s.anchor.0).abs() > 3.0
+                                    || (s.end.1 - s.anchor.1).abs() > 3.0
+                            });
+                            if moved {
+                                if let Some(s) = self.md_render_sel.as_mut() {
+                                    s.dragging = false;
+                                }
+                            } else {
+                                self.md_render_sel = None;
+                                self.try_open_md_link();
                             }
                             window.request_redraw();
                             return;

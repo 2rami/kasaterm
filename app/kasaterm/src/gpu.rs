@@ -132,6 +132,17 @@ pub struct GpuRenderer {
     /// code). main.rs hit-tests a click and copies `code`. Rebuilt each
     /// `draw_markdown` like `md_link_rects`.
     pub md_copy_rects: Vec<(f32, f32, f32, f32, String)>,
+    /// Logical-px rects of every word drawn in the most recent markdown frame:
+    /// (x, y, w, h, text). Drives text selection in the rendered view — the
+    /// document has no cell grid, so a drag range has to be resolved against
+    /// what was actually laid out. Rebuilt each `draw_markdown`.
+    pub md_word_rects: Vec<(f32, f32, f32, f32, String)>,
+    /// Active selection for the rendered view, in **screen** logical px:
+    /// (ax, ay, bx, by), unordered. Set by `draw_markdown` from the caller's
+    /// document-space anchor; `md_runs` paints the band behind each word that
+    /// falls inside. Read here rather than passed down because every block kind
+    /// calls `md_runs` and none of them cares about selection.
+    pub md_sel_screen: Option<(f32, f32, f32, f32)>,
     /// Document-space y (logical px from the top of the doc, scroll excluded)
     /// where each block starts, index-aligned with the blocks just drawn. The
     /// Raw↔Render toggle pairs this with `MarkdownDoc::block_lines` to convert
@@ -142,6 +153,9 @@ pub struct GpuRenderer {
     /// hash of (lang, lines) — no pane id needed, and a tiny LRU keeps a few
     /// split editors from thrashing each other's entries.
     raw_hl: Vec<RawHlEntry>,
+    /// 재파싱 대기 — (버퍼 해시, 그 해시를 처음 본 시각). 타이핑이 이어지면
+    /// 키마다 해시가 바뀌어 이 값이 계속 새로 서므로 파싱이 미뤄진다.
+    raw_hl_pending: Option<(u64, std::time::Instant)>,
     /// Laid-out height of each markdown block, so a block scrolled off screen
     /// can be stepped over instead of re-measured. Same tiny-LRU shape as
     /// `raw_hl` (keyed by doc + layout, so two markdown panes don't evict each
@@ -159,11 +173,19 @@ struct MdHeightEntry {
 
 /// One cached tree-sitter highlight: the buffer hash it was computed from and
 /// the per-line (token, kind) runs, shared with the draw loop via Rc so the
-/// cache lookup doesn't fight the `&mut self` draw calls.
+/// cache lookup doesn't fight the `&mut self` draw calls. `len` = the line
+/// count it was computed for, so a deferred reparse can pick a stale entry
+/// whose row indices still line up (see `raw_editor_ts_spans`).
 struct RawHlEntry {
     hash: u64,
+    len: usize,
     spans: std::rc::Rc<Vec<Vec<(String, crate::syntax::SynKind)>>>,
 }
+
+/// 타이핑이 멈췄다고 볼 정지 시간. 커서 blink 스레드가 `BLINK_HALF_PERIOD_MS`
+/// (530ms) 마다 프레임을 깨우므로 실제 재파싱은 그 tick 에 실린다 — 이 값이
+/// 정하는 건 "연타 중에는 절대 파싱하지 않는다"는 하한뿐이다.
+const RAW_HL_DEBOUNCE_MS: u64 = 80;
 
 /// One pane's slot in `render_frame`. Mirrors the data the existing
 /// sugarloaf renderer carries through `PaneFrame` but trimmed to
@@ -490,8 +512,11 @@ impl GpuRenderer {
             icon_quads: Vec::new(),
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
+            md_word_rects: Vec::new(),
+            md_sel_screen: None,
             md_block_ys: Vec::new(),
             raw_hl: Vec::new(),
+            raw_hl_pending: None,
             md_heights: Vec::new(),
         })
     }
@@ -1192,6 +1217,20 @@ impl GpuRenderer {
                         pen_y += lh;
                     }
                     if pen_y + lh > clip_top && pen_y < clip_bot {
+                        // 선택은 셀 격자가 없어 "그려진 낱말" 이 유일한 기준이다 —
+                        // 낱말 사각형을 적어 두고(복사·히트테스트가 이걸 읽는다),
+                        // 범위에 들면 글자 **전에** 띠를 깔아야 배경이 된다(rect 와
+                        // 글리프가 같은 버퍼라 나중에 그리면 글자를 덮는다).
+                        self.md_word_rects
+                            .push((pen_x, pen_y, ww, lh, trimmed.to_string()));
+                        if word_in_sel(self.md_sel_screen, pen_x + ww * 0.5, pen_y + lh * 0.5) {
+                            let band = ww + if trailing_space { space_w } else { 0.0 };
+                            // 전용 선택 토큰은 없다 — 테마 주석대로 accent 가 선택색
+                            // 이고, 띠는 글자 밑에 깔려야 하니 알파만 낮춘다.
+                            let mut col = crate::theme::accent();
+                            col[3] = 90;
+                            self.rect(pen_x, pen_y, band, lh, col);
+                        }
                         if span.code {
                             // Notion-style chip: a hair *lighter* than the body
                             // (SURFACE_ACTIVE > BG) so the code reads as a raised
@@ -1365,12 +1404,20 @@ impl GpuRenderer {
         w: f32,
         h: f32,
         scroll: f32,
+        // 선택 범위, **문서 좌표**(ax, ay, bx, by). 화면 좌표로 받으면 선택 중
+        // 스크롤할 때 범위가 손가락을 따라 흘러간다 — 여기서 스크롤을 빼 화면
+        // 좌표로 바꿔 둔다.
+        sel_doc: Option<(f32, f32, f32, f32)>,
     ) -> f32 {
         use crate::MdBlock;
         // Link / copy-button rects are rebuilt from scratch each frame so
         // they track the current scroll offset; main.rs hit-tests clicks.
         self.md_link_rects.clear();
         self.md_copy_rects.clear();
+        self.md_word_rects.clear();
+        // 문서 좌표 = 화면 좌표 + scroll (본문 박스 오프셋은 낱말 사각형과 선택에
+        // 똑같이 들어가므로 비교에서 상쇄된다 — 뺄 필요가 없다).
+        self.md_sel_screen = sel_doc.map(|(ax, ay, bx, by)| (ax, ay - scroll, bx, by - scroll));
         self.md_block_ys.clear();
         self.md_block_ys.reserve(blocks.len());
         let base = self.font_size_px as f32 / self.scale;
@@ -1921,13 +1968,28 @@ impl GpuRenderer {
     }
 
     /// Content-addressed lookup of tree-sitter spans for a raw-editor buffer.
-    /// Recomputes only when the buffer (or lang) actually changed; None for
-    /// unsupported or oversized files → the caller uses the line lexer.
+    /// Returns `(spans, stale)`; None for unsupported or oversized files → the
+    /// caller uses the line lexer for every line.
+    ///
+    /// **재파싱은 타이핑이 멈춘 뒤로 미룬다.** `tree-sitter-highlight` 에는
+    /// 증분 API 가 없어 한 글자만 바뀌어도 문서를 통째로 다시 파싱하는데,
+    /// 그 값이 5736줄에서 **1키당 20.3ms**(9줄은 0.84ms)로 프레임 예산
+    /// 16.7ms 를 넘었다 — 키마다 화면을 1~2프레임 떨어뜨려 거노가 "반응이
+    /// 0.3초 느리다"고 한 그것이다(실측). 연타 중에는 버퍼 해시가 매 키마다
+    /// 바뀌므로 `raw_hl_pending` 이 계속 갱신되어 파싱이 한 번도 돌지 않고,
+    /// 손이 멈추면 커서 blink 스레드가 깨우는 프레임에 실려 한 번만 돈다.
+    ///
+    /// 기다리는 동안엔 `stale=true` 로 직전 색을 그대로 쓴다. 폴백 후보를
+    /// 줄 수가 같은 항목으로 제한하는 이유는 이 캐시가 pane id 를 안 들고
+    /// 있어서다 — 편집기를 둘 띄워 두면 남의 스팬을 물어올 수 있다.
     fn raw_editor_ts_spans(
         &mut self,
         lines: &[String],
         lang: &str,
-    ) -> Option<std::rc::Rc<Vec<Vec<(String, crate::syntax::SynKind)>>>> {
+    ) -> Option<(
+        std::rc::Rc<Vec<Vec<(String, crate::syntax::SynKind)>>>,
+        bool,
+    )> {
         crate::syntax::canon_lang(lang)?;
         let prof = crate::info::profiling().then(std::time::Instant::now);
         use std::hash::{Hash, Hasher};
@@ -1943,11 +2005,33 @@ impl GpuRenderer {
             let e = self.raw_hl.remove(i);
             let spans = e.spans.clone();
             self.raw_hl.insert(0, e);
+            self.raw_hl_pending = None;
             if let Some(us) = hash_us {
                 eprintln!("[prof] ts_spans hit hash={us}us lines={}", lines.len());
             }
-            return Some(spans);
+            return Some((spans, false));
         }
+        let now = std::time::Instant::now();
+        let due = match self.raw_hl_pending {
+            Some((h, since)) if h == hash => {
+                now.duration_since(since).as_millis() as u64 >= RAW_HL_DEBOUNCE_MS
+            }
+            _ => {
+                self.raw_hl_pending = Some((hash, now));
+                false
+            }
+        };
+        if !due {
+            // 첫 로드만은 기다리지 않는다 — 쓸 색이 아직 하나도 없는데
+            // 무색 화면을 0.5초 보여줄 이유가 없다.
+            if let Some(e) = self.raw_hl.iter().find(|e| e.len == lines.len()) {
+                if let Some(us) = hash_us {
+                    eprintln!("[prof] ts_spans defer hash={us}us lines={}", lines.len());
+                }
+                return Some((e.spans.clone(), true));
+            }
+        }
+        self.raw_hl_pending = None;
         let t_parse = prof.map(|_| std::time::Instant::now());
         let spans = std::rc::Rc::new(crate::syntax::highlight_lines(lang, lines)?);
         if let (Some(us), Some(t)) = (hash_us, t_parse) {
@@ -1957,9 +2041,16 @@ impl GpuRenderer {
                 lines.len()
             );
         }
-        self.raw_hl.insert(0, RawHlEntry { hash, spans: spans.clone() });
+        self.raw_hl.insert(
+            0,
+            RawHlEntry {
+                hash,
+                len: lines.len(),
+                spans: spans.clone(),
+            },
+        );
         self.raw_hl.truncate(4);
-        Some(spans)
+        Some((spans, false))
     }
 
     /// Raw-editor row metrics for the current font: (top pad, line height) in
@@ -2014,7 +2105,10 @@ impl GpuRenderer {
         // the borrow doesn't block the &mut draw calls below). None → the
         // per-line lexer fallback inside the loop.
         let prof_draw = crate::info::profiling().then(std::time::Instant::now);
-        let ts_spans = self.raw_editor_ts_spans(lines, lang);
+        let (ts_spans, ts_stale) = match self.raw_editor_ts_spans(lines, lang) {
+            Some((spans, stale)) => (Some(spans), stale),
+            None => (None, false),
+        };
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
             if pen_y + lh > clip_top && pen_y < clip_bot {
@@ -2101,36 +2195,39 @@ impl GpuRenderer {
                     }
                     tx = self.draw_text_clipped(tx, pen_y + glyph_voff, &suffix, plain, cx0, clip_right);
                 }
-                match ts_spans.as_ref().and_then(|s| s.get(li)) {
-                    _ if composing => {}
-                    Some(spans) => {
-                        for (tok, kind) in spans {
-                            tx = self.draw_text_clipped(
-                                tx,
-                                pen_y + glyph_voff,
-                                tok,
-                                DrawOpts {
-                                    font_size: base,
-                                    color: kind.color(crate::theme::text()),
-                                    bold: false,
-                                    italic: false,
-                                },
-                                cx0,
-                                clip_right,
-                            );
-                        }
+                // 재파싱을 미루는 동안(ts_stale)엔 **편집 중인 줄만** 줄 단위
+                // lexer 로 칠한다. 그 줄의 캐시 색은 이미 낡아서 방금 친 글자가
+                // 무색으로 남는데, 그러면 타이핑이 죽은 것처럼 읽힌다. 나머지
+                // 줄은 캐시 색이 그대로 맞으므로 건드리지 않는다.
+                let row = ts_spans.as_ref().and_then(|s| s.get(li));
+                let lexer = row.is_none() || (ts_stale && li == cursor.0);
+                if composing {
+                } else if let (false, Some(spans)) = (lexer, row) {
+                    for (tok, kind) in spans {
+                        tx = self.draw_text_clipped(
+                            tx,
+                            pen_y + glyph_voff,
+                            tok,
+                            DrawOpts {
+                                font_size: base,
+                                color: kind.color(crate::theme::text()),
+                                bold: false,
+                                italic: false,
+                            },
+                            cx0,
+                            clip_right,
+                        );
                     }
-                    None => {
-                        for (tok, col) in highlight_code_line(line, lang, crate::theme::text()) {
-                            tx = self.draw_text_clipped(
-                                tx,
-                                pen_y + glyph_voff,
-                                &tok,
-                                DrawOpts { font_size: base, color: col, bold: false, italic: false },
-                                cx0,
-                                clip_right,
-                            );
-                        }
+                } else {
+                    for (tok, col) in highlight_code_line(line, lang, crate::theme::text()) {
+                        tx = self.draw_text_clipped(
+                            tx,
+                            pen_y + glyph_voff,
+                            &tok,
+                            DrawOpts { font_size: base, color: col, bold: false, italic: false },
+                            cx0,
+                            clip_right,
+                        );
                     }
                 }
                 // Cursor (drawn before the gutter mask so one panned under the
@@ -3269,6 +3366,20 @@ pub(crate) fn is_wide_char(ch: char) -> bool {
         | 0xFF00..=0xFF60      // Fullwidth Forms
         | 0xFFE0..=0xFFE6      // Fullwidth signs
     ) || cp >= 0x20000          // CJK Ext B and beyond
+}
+
+/// 낱말 중심점이 선택 범위 안인지. 읽는 순서(줄 → 가로) 비교라 사전식이면
+/// 충분하다 — 같은 줄에 놓인 낱말들은 같은 `pen_y` 를 쓰므로 y 가 정확히 같고,
+/// 줄이 다르면 y 가 줄 높이만큼 벌어져 저절로 갈린다. 좌표는 화면 로컬 px.
+pub(crate) fn word_in_sel(sel: Option<(f32, f32, f32, f32)>, cx: f32, cy: f32) -> bool {
+    let Some((ax, ay, bx, by)) = sel else { return false };
+    // 드래그는 위로도 아래로도 가므로 먼저 읽는 순서로 세운다.
+    let (s, e) = if (ay, ax) <= (by, bx) {
+        ((ax, ay), (bx, by))
+    } else {
+        ((bx, by), (ax, ay))
+    };
+    (cy, cx) >= (s.1, s.0) && (cy, cx) <= (e.1, e.0)
 }
 
 /// Link tint by destination kind, so links read as varied rather than one

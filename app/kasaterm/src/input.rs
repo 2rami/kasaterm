@@ -656,7 +656,64 @@ impl App {
             })
             .unwrap_or_else(|| "shell".to_string())
     }
+    /// 렌더 뷰 선택을 클립보드로. 낱말 사각형(마지막 프레임)에서 범위에 든 것을
+    /// 읽는 순서로 이어 붙인다 — 줄이 바뀌면 개행. 사각형은 화면에 그려진 것만
+    /// 있으므로 보이는 범위가 곧 복사 범위다(화면 밖 블록은 애초에 레이아웃을
+    /// 건너뛴다). true 면 이 호출이 복사를 처리했다.
+    pub(crate) fn copy_md_render_selection(&self) -> bool {
+        let Some(sel) = self.md_render_sel.as_ref() else { return false };
+        let Some(words) = self.md_word_rects.get(&sel.pane) else { return false };
+        let scroll = self
+            .ws
+            .lock()
+            .ok()
+            .and_then(|ws| {
+                ws.panes
+                    .get(&sel.pane)
+                    .and_then(|p| p.markdown())
+                    .map(|m| m.scroll)
+            })
+            .unwrap_or(0.0);
+        let screen = (
+            sel.anchor.0,
+            sel.anchor.1 - scroll,
+            sel.end.0,
+            sel.end.1 - scroll,
+        );
+        let mut hits: Vec<(f32, f32, &str)> = words
+            .iter()
+            .filter(|(x, y, w, h, _)| {
+                crate::gpu::word_in_sel(Some(screen), x + w * 0.5, y + h * 0.5)
+            })
+            .map(|(x, y, _, _, t)| (*y, *x, t.as_str()))
+            .collect();
+        if hits.is_empty() {
+            return false;
+        }
+        hits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mut out = String::new();
+        let mut line_y = hits[0].0;
+        for (y, _, t) in &hits {
+            if !out.is_empty() {
+                out.push(if *y > line_y { '\n' } else { ' ' });
+            }
+            line_y = *y;
+            out.push_str(t);
+        }
+        match arboard::Clipboard::new() {
+            Ok(mut cb) => {
+                if let Err(e) = cb.set_text(out) {
+                    eprintln!("[kasaterm] clipboard write failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("[kasaterm] clipboard open failed: {e}"),
+        }
+        true
+    }
     pub(crate) fn copy_selection(&self) {
+        if self.copy_md_render_selection() {
+            return;
+        }
         let Some(sel) = self.selection else { return; };
         let rows = {
             let ws = self.ws.lock().unwrap();
