@@ -305,9 +305,7 @@ fn listening_ports() -> Vec<(u16, u32)> {
         ) else {
             continue;
         };
-        if want.contains(&pid) {
-            ports.push((port, pid));
-        }
+        ports.push((port, pid));
     }
     dedup_ports(ports)
 }
