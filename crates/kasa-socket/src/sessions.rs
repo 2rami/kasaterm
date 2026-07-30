@@ -66,7 +66,7 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let label = parse_session_label(&path)
+            let label = parse_session_label(&path, true)
                 .unwrap_or_else(|| id.chars().take(8).collect());
             Some(RecentSession { id, label, mtime: mtime_secs, cwd: cwd_str.clone() })
         })
@@ -81,7 +81,7 @@ pub fn recent_sessions_for(cwd: &Path, limit: usize) -> Vec<RecentSession> {
 /// 말미로 append 되므로 앞 스캔으론 못 보고 꼬리 64KB 역스캔으로 잡는다 —
 /// teammate 세션은 claude `/rename` 이 막혀 있어 외부 append 가 유일한
 /// 개명 경로라 이 우회를 피커가 반드시 읽어줘야 한다.
-fn parse_session_label(path: &Path) -> Option<String> {
+fn parse_session_label(path: &Path, allow_custom: bool) -> Option<String> {
     use std::io::BufRead;
     // title-gen junk 세션(title-sync 가 haiku 제목 생성용으로 스폰하는 `claude -p`
     // 의 cwd=kasaterm-title-gen)은 사용자 세션이 아니다 — 첫 user 가 "다음 대화
@@ -94,11 +94,14 @@ fn parse_session_label(path: &Path) -> Option<String> {
     if let Some(t) = last_custom_title(path) {
         // "세션제목생성" = claude 내부 제목생성(title-gen) 서브세션이 자기 세션에
         // 다는 마커 제목. 이 세션의 첫 user 는 "아래 대화의 주제를…" 메타프롬프트라
-        // 폴백도 오염된다 — 라벨 자체를 포기해 인레이/피커에서 지운다.
+        // 폴백도 오염된다 — 라벨 자체를 포기해 인레이/피커에서 지운다. 이 가드는
+        // `allow_custom` 과 무관하게 걸어야 한다(오염 판정이지 라벨 선택이 아니다).
         if t == "세션제목생성" {
             return None;
         }
-        return Some(t);
+        if allow_custom {
+            return Some(t);
+        }
     }
     let f = std::fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(f);
@@ -136,10 +139,18 @@ fn parse_session_label(path: &Path) -> Option<String> {
 }
 
 /// 피커 라벨 규칙(custom-title > aiTitle > 첫 user)을 transcript 경로에 직접
-/// 적용하는 pub 래퍼 — GUI 입력박스 제목 인레이(render.rs) 등 목록 밖에서
-/// 한 세션의 라벨만 필요할 때 쓴다.
+/// 적용하는 pub 래퍼 — 목록 밖에서 한 세션의 라벨만 필요할 때 쓴다.
 pub fn session_label_for(path: &Path) -> Option<String> {
-    parse_session_label(path)
+    parse_session_label(path, true)
+}
+
+/// 같은 규칙에서 **사용자가 `/rename` 으로 붙인 이름만 뺀** 것(aiTitle > 첫
+/// user) — 입력박스 **좌측** 제목 인레이 전용이다. claude 가 그 rename 이름을
+/// 입력박스 **우측**에 이미 그리고 있어서, 좌측까지 custom-title 을 쓰면 한 줄에
+/// 똑같은 이름이 두 번 서고 "이 pane 이 무슨 작업 중인지"가 사라진다
+/// (거노 2026-07-30: "리네임하면 좌측은 세션이름요약, 우측칩은 리네임한 이름").
+pub fn session_summary_for(path: &Path) -> Option<String> {
+    parse_session_label(path, false)
 }
 
 /// jsonl 꼬리에서 가장 마지막 `custom-title` 레코드의 제목. 여러 번 rename 하면
@@ -227,7 +238,7 @@ fn user_message_text(v: &serde_json::Value) -> Option<String> {
 /// 없는 standalone 이 background 세션들의 현황을 board 로 만들 때 쓴다.
 pub fn session_board_meta(cwd: &Path, id: &str) -> Option<(String, String)> {
     let path = session_jsonl_path(cwd, id)?;
-    let title = parse_session_label(&path).unwrap_or_default();
+    let title = parse_session_label(&path, true).unwrap_or_default();
     let last_prompt = last_user_text(&path).unwrap_or_default();
     Some((title, last_prompt))
 }
@@ -365,6 +376,10 @@ mod tests {
         format!(r#"{{"type": "user", "message": {{"content": "{t}"}}}}"#) + "\n"
     }
 
+    fn ai_title_rec(t: &str) -> String {
+        format!(r#"{{"type": "ai-title", "aiTitle": "{t}"}}"#) + "\n"
+    }
+
     // title-gen 세션(custom-title="세션제목생성")은 라벨을 포기한다 — 스탬프가
     // 있어도 첫 user(메타프롬프트)로 폴백하지 않고 None.
     #[test]
@@ -372,7 +387,7 @@ mod tests {
         let mut body = user_rec("아래 대화의 주제를 나타내는 한국어 제목을 딱 하나 출력해");
         body.push_str(&title_rec("세션제목생성"));
         let p = tmp_jsonl("titlegenmarker", &body);
-        assert_eq!(parse_session_label(&p), None);
+        assert_eq!(parse_session_label(&p, true), None);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -382,7 +397,7 @@ mod tests {
     fn titlegen_metaprompt_first_user_skipped() {
         let body = user_rec("아래 대화의 주제를 나타내는 한국어 제목을 딱 하나 출력해");
         let p = tmp_jsonl("metaonly", &body);
-        assert_eq!(parse_session_label(&p), None);
+        assert_eq!(parse_session_label(&p, true), None);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -392,11 +407,44 @@ mod tests {
         let mut custom = user_rec("간단히 인사만 해줘");
         custom.push_str(&title_rec("한 문장 인사"));
         let p1 = tmp_jsonl("normalcustom", &custom);
-        assert_eq!(parse_session_label(&p1).as_deref(), Some("한 문장 인사"));
+        assert_eq!(parse_session_label(&p1, true).as_deref(), Some("한 문장 인사"));
         let _ = std::fs::remove_file(&p1);
 
         let p2 = tmp_jsonl("normaluser", &user_rec("파일트리 버그 고쳐줘"));
-        assert_eq!(parse_session_label(&p2).as_deref(), Some("파일트리 버그 고쳐줘"));
+        assert_eq!(parse_session_label(&p2, true).as_deref(), Some("파일트리 버그 고쳐줘"));
         let _ = std::fs::remove_file(&p2);
+    }
+
+    /// 입력박스 좌측 인레이(`session_summary_for`)는 `/rename` 이름을 건너뛰고
+    /// 요약으로 떨어져야 한다 — 우측에 claude 가 그 이름을 이미 그리므로.
+    #[test]
+    fn summary_skips_the_rename_but_label_keeps_it() {
+        let mut body = user_rec("파일 열기를 GUI 앱으로 바꾸자");
+        body.push_str(&ai_title_rec("파일 열기 방식 설정"));
+        body.push_str(&title_rec("kasa"));
+        let p = tmp_jsonl("renamed", &body);
+        assert_eq!(session_label_for(&p).as_deref(), Some("kasa"));
+        assert_eq!(session_summary_for(&p).as_deref(), Some("파일 열기 방식 설정"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// aiTitle 조차 없으면 첫 user 로 떨어진다(rename 값으로 되돌아가지 않는다).
+    #[test]
+    fn summary_falls_back_to_first_user_not_the_rename() {
+        let mut body = user_rec("파일트리 버그 고쳐줘");
+        body.push_str(&title_rec("kasa"));
+        let p = tmp_jsonl("renamednoai", &body);
+        assert_eq!(session_summary_for(&p).as_deref(), Some("파일트리 버그 고쳐줘"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// title-gen 오염 가드는 `allow_custom` 과 무관하게 걸려야 한다.
+    #[test]
+    fn summary_still_drops_titlegen_marker() {
+        let mut body = user_rec("아래 대화의 주제를 나타내는 한국어 제목을 딱 하나 출력해");
+        body.push_str(&title_rec("세션제목생성"));
+        let p = tmp_jsonl("titlegensummary", &body);
+        assert_eq!(session_summary_for(&p), None);
+        let _ = std::fs::remove_file(&p);
     }
 }
