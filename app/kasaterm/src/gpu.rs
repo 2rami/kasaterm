@@ -1519,6 +1519,41 @@ impl GpuRenderer {
         m
     }
 
+    /// 목록 표식을 본문 시작선 왼쪽에 **오른쪽 맞춤**으로 그린다.
+    ///
+    /// 왼쪽 맞춤으로 그리면 표식마다 폭이 달라 결과가 어긋난다 — 점 하나는
+    /// 여백이 넉넉한데 `1.` 은 본문 시작선까지 밀려 숫자와 글자가 붙고,
+    /// `10.` 은 글자를 덮는다. 오른쪽 끝을 고정하면 표식이 몇 칸이든 본문과의
+    /// 간격이 같다.
+    ///
+    /// 마크다운 셰이퍼로 그리는 이유는 `draw_text` 가 터미널 폰트라, 본문 바로
+    /// 옆에서 서체가 튀기 때문이다(Meta 블록이 같은 함정을 적어 두고 있다).
+    fn md_list_marker(
+        &mut self,
+        marker: &str,
+        body_x: f32,
+        left: f32,
+        pen_y: f32,
+        size: f32,
+        col: [u8; 4],
+        clip_top: f32,
+        clip_bot: f32,
+    ) {
+        let cell = [crate::MdSpan {
+            text: marker.to_string(),
+            bold: false,
+            italic: false,
+            code: false,
+            strike: false,
+            link: None,
+        }];
+        let mw = self.md_cell_width(&cell, size, false);
+        // 들여쓰기가 표식보다 좁으면 왼쪽 여백에 붙인다. 음수로 나가면 pane
+        // 밖에서 잘려 표식이 통째로 사라진다.
+        let mx = (body_x - size * 0.4 - mw).max(left);
+        self.md_runs(&cell, mx, pen_y, mw + 1.0, size, false, col, clip_top, clip_bot);
+    }
+
     /// Lay out + draw a markdown document into the pane box (all logical px).
     /// Glyphs/rects go into the chrome buffer (drawn over the empty cell pass,
     /// under pane headers). Returns total content height (logical) so the
@@ -1553,6 +1588,11 @@ impl GpuRenderer {
         // width, centered in the pane. Shadow x/w so the block code below lays
         // out into the column without per-line changes. Clipping still uses the
         // full pane box (y/h).
+        // 표식이 오른쪽 맞춤으로 왼쪽으로 넘칠 때의 한계선. 읽기 열 왼쪽에서
+        // 멈추게 하면 `100.` 같은 세 자리 표식이 본문 글자를 덮는다 — 브라우저가
+        // `<ol>` 을 그리는 방식대로, 넘치는 만큼 열 바깥 여백을 쓰게 둔다. 본문
+        // 시작선은 건드리지 않으므로 한 목록 안의 글줄 맞춤이 흔들리지 않는다.
+        let marker_floor = x + base * 0.3;
         let side_pad = base * 1.7;
         let avail = (w - side_pad * 2.0).max(1.0);
         let cw = avail.min(base * 46.0);
@@ -1702,19 +1742,16 @@ impl GpuRenderer {
                                     },
                                 );
                             }
-                            None => {
-                                self.draw_text(
-                                    x + indent - base * 1.1,
-                                    pen_y,
-                                    marker,
-                                    DrawOpts {
-                                        font_size: size,
-                                        color: crate::theme::accent(),
-                                        bold: false,
-                                        italic: false,
-                                    },
-                                );
-                            }
+                            None => self.md_list_marker(
+                                marker,
+                                x + indent,
+                                marker_floor,
+                                pen_y,
+                                size,
+                                crate::theme::accent(),
+                                clip_top,
+                                clip_bot,
+                            ),
                         }
                     }
                     // 끝낸 할 일은 노션처럼 본문까지 흐려진다 — 체크박스만 바뀌면
@@ -1853,20 +1890,12 @@ impl GpuRenderer {
                         pen_y += head_h;
                     }
                     if let Some((_, marker)) = list {
-                        let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
-                        if pen_y + lh > clip_top && pen_y < clip_bot {
-                            self.draw_text(
-                                body_x - base * 1.1,
-                                pen_y,
-                                marker,
-                                DrawOpts {
-                                    font_size: size,
-                                    color: col,
-                                    bold: false,
-                                    italic: false,
-                                },
-                            );
-                        }
+                        self.md_list_marker(
+                            // 상자 안에서도 표식이 왼쪽으로 넘칠 수 있다. 세로 막대
+                            // 바로 뒤까지만 허용한다 — 그보다 왼쪽은 상자 밖이다.
+                            marker, body_x, x + bar_w + base * 0.15, pen_y, size, col, clip_top,
+                            clip_bot,
+                        );
                     }
                     pen_y = self.md_runs(
                         spans,
