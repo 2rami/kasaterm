@@ -15,8 +15,12 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 struct Fleet {
     board: Vec<PaneActivity>,
+    panes: Vec<String>,
     sent: Vec<(String, String)>,
+    closed: Vec<String>,
     next: usize,
+    /// true 면 스폰한 pane 에 claude 가 올라오지 않는다(런처 실패·키 만료 재현).
+    boot_fails: bool,
 }
 
 struct FakeBackend(Mutex<Fleet>);
@@ -27,9 +31,6 @@ impl Backend for FakeBackend {
     }
     fn current_workspace(&self) -> Result<Option<WorkspaceInfo>> {
         Ok(None)
-    }
-    fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> {
-        Ok(Vec::new())
     }
     fn focus_surface(&self, _: &str) -> Result<()> {
         Ok(())
@@ -55,6 +56,10 @@ impl Backend for FakeBackend {
         let sid = format!("%{}", f.next);
         // 실제 학생은 곧 파일을 잡는다 — 그래야 형제의 브리프에 "남이 잡은 파일"이 실린다.
         let claimed = format!("app/kasaterm/src/pane{}.rs", f.next);
+        f.panes.push(sid.clone());
+        if f.boot_fails {
+            return Ok(sid); // pane 은 생겼지만 claude 는 없다
+        }
         f.board.push(PaneActivity {
             surface_id: sid.clone(),
             status: "working".into(),
@@ -67,6 +72,24 @@ impl Backend for FakeBackend {
 
     fn collab_board(&self) -> Result<Vec<PaneActivity>> {
         Ok(self.0.lock().unwrap().board.clone())
+    }
+
+    /// pane 은 board 와 별개로 존재한다 — 셸만 뜬 pane 도 여기 잡혀야 상한이 지켜진다.
+    fn list_surfaces(&self) -> Result<Vec<SurfaceInfo>> {
+        let f = self.0.lock().unwrap();
+        Ok(f
+            .panes
+            .iter()
+            .map(|id| SurfaceInfo { id: id.clone(), workspace_id: "w".into(), title: None })
+            .collect())
+    }
+
+    fn close_surface(&self, id: &str) -> Result<()> {
+        let mut f = self.0.lock().unwrap();
+        f.panes.retain(|p| p != id);
+        f.board.retain(|r| r.surface_id != id);
+        f.closed.push(id.to_string());
+        Ok(())
     }
 }
 
@@ -104,8 +127,12 @@ fn main() -> Result<()> {
         settle_sec: 0.0, // 가짜 백엔드는 즉시 상태를 바꿔 유예가 필요 없다
         context_cap: 85,
         planner_model: "sonnet".into(),
+        max_attempts: 2,
         heavy_model: String::new(),
         light_model: String::new(),
+        heavy_launcher: String::new(),
+        light_launcher: "glm".into(), // 가벼운 일은 게이트웨이로 — 명령 조립을 눈으로 보려고
+
         characters: vec!["미도리".into(), "유즈".into(), "아리스".into()],
     });
 
@@ -149,6 +176,28 @@ fn main() -> Result<()> {
         println!("  {sid} ← {}", text.replace('\r', "⏎").replace('\x15', "^U"));
     }
 
+    // ── claude 가 올라오지 않는 경우 — 예전엔 여기서 pane 이 무한히 늘었다 ──
+    println!("\n[부팅 실패 재현] 이후 스폰되는 pane 에는 claude 가 안 뜬다");
+    {
+        let mut f = be.0.lock().unwrap();
+        f.boot_fails = true;
+        f.board.clear(); // 기존 학생도 정리해 빈 상태에서 시작
+        f.panes.clear();
+        f.closed.clear();
+    }
+    dispatch::reset_on_boot();
+    dispatch::push_tasks(vec![mk("D: 안 뜨는 학생", &["app/kasaterm/src/d.rs"])]);
+    for i in 1..=9 {
+        dispatch::dispatch_tick(&backend, &mut rt);
+        let f = be.0.lock().unwrap();
+        let st = dispatch::read_queue()
+            .iter()
+            .find(|t| t.brief.starts_with("D:"))
+            .map(|t| format!("{}(시도 {})", t.status, t.attempts))
+            .unwrap_or_default();
+        println!("  tick {i}: 살아있는 pane {} · 닫은 pane {} · 작업 {}", f.panes.len(), f.closed.len(), st);
+    }
+
     if std::env::args().any(|a| a == "--planner") {
         println!("\n── 판단기(실제 claude -p) ──");
         let rtio = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -180,6 +229,7 @@ fn mk(brief: &str, files: &[&str]) -> dispatch::QueueTask {
         origin: "설정 화면 자간 작업".into(),
         cwd: "/tmp/fake-repo".into(),
         report_to: "%9".into(),
+        attempts: 0,
         result: String::new(),
         created_ts: 0.0,
         updated_ts: 0.0,
