@@ -3493,9 +3493,10 @@ fn link_color(dest: &str) -> [u8; 4] {
     if dest.starts_with("http://") || dest.starts_with("https://") {
         crate::theme::accent()
     } else if dest.starts_with("wiki:") {
-        // 문서 사이를 잇는 링크는 밖으로 나가는 링크와 색이 달라야 한다 — 누르면
-        // 브라우저가 뜨는지 옆 문서가 열리는지가 색으로 구분된다.
-        crate::theme::syn_type()
+        // 문서 사이 링크는 본문색 그대로 두고 밑줄로만 알린다. 색을 주면 인덱스처럼
+        // 링크가 줄마다 있는 문서가 통째로 물들고, 인라인 코드 칩과도 색이 섞여
+        // 무엇이 코드고 무엇이 링크인지 안 읽힌다. 밖으로 나가는 링크만 색을 쓴다.
+        crate::theme::text()
     } else if dest.starts_with("mailto:") {
         crate::theme::syn_keyword()
     } else if dest.starts_with('#') {

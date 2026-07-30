@@ -2217,6 +2217,45 @@ fn parse_frontmatter_rows(src: &str) -> Vec<(String, String)> {
     rows
 }
 
+/// 블록이 확정될 때 `[[토픽이름]]` 을 링크 스팬으로 바꾼다.
+///
+/// 파싱 도중에 못 하는 이유: cmark 는 짝이 안 맞는 대괄호를 **낱개 이벤트**로
+/// 흘린다(`[`·`[`·이름·`]`·`]` 다섯 개). 이벤트 하나만 보면 표기가 완성돼 보이는
+/// 순간이 없어, 스팬이 다 모인 뒤 이어 붙여야 비로소 눈에 띈다.
+///
+/// 스타일이 같은 평문 스팬만 이어 붙인다 — 인라인 코드나 이미 링크인 조각을
+/// 삼키면 `` `[[a]]` `` 처럼 일부러 표기를 보여 주는 글까지 링크가 된다.
+fn wikilinked(spans: &mut Vec<MdSpan>) -> Vec<MdSpan> {
+    let src = std::mem::take(spans);
+    if !src.iter().any(|s| s.link.is_none() && !s.code && s.text.contains('[')) {
+        return src;
+    }
+    let mut out: Vec<MdSpan> = Vec::with_capacity(src.len());
+    let mut run = String::new();
+    let mut style = (false, false, false);
+    fn flush(out: &mut Vec<MdSpan>, run: &mut String, st: (bool, bool, bool)) {
+        if !run.is_empty() {
+            push_wikilinked(out, run, st.0, st.1, st.2);
+            run.clear();
+        }
+    }
+    for s in src {
+        let st = (s.bold, s.italic, s.strike);
+        if s.link.is_none() && !s.code {
+            if !run.is_empty() && st != style {
+                flush(&mut out, &mut run, style);
+            }
+            style = st;
+            run.push_str(&s.text);
+        } else {
+            flush(&mut out, &mut run, style);
+            out.push(s);
+        }
+    }
+    flush(&mut out, &mut run, style);
+    out
+}
+
 /// `[[토픽이름]]` 을 클릭 가능한 링크로 쪼갠다. 메모리 볼트는 문서를 이 표기로
 /// 엮는데(인덱스 한 줄이 곧 한 토픽) 마크다운 표준이 아니라 여태 죽은 글자였다 —
 /// 노션의 페이지 링크에 해당하는 자리다. 목적지는 `wiki:` 스킴으로 넘겨 클릭할 때
@@ -2351,7 +2390,7 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                         blocks.push(MdBlock::ListItem {
                             depth: list_stack.len().saturating_sub(1) as u8,
                             marker: std::mem::take(&mut item_marker),
-                            spans: std::mem::take(&mut spans),
+                            spans: wikilinked(&mut spans),
                             task: item_task.take(),
                         });
                         in_item = false;
@@ -2410,17 +2449,17 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
             Event::End(tag) => match tag {
                 TagEnd::Heading(_) => blocks.push(MdBlock::Heading {
                     level: heading.take().unwrap_or(1),
-                    spans: std::mem::take(&mut spans),
+                    spans: wikilinked(&mut spans),
                 }),
                 TagEnd::Paragraph => {
                     // Skip empty paragraphs (e.g. a paragraph that held only an
                     // image, which was emitted as its own Image block).
                     if in_quote {
                         if !spans.is_empty() {
-                            blocks.push(MdBlock::Quote { spans: std::mem::take(&mut spans) });
+                            blocks.push(MdBlock::Quote { spans: wikilinked(&mut spans) });
                         }
                     } else if !in_item && !spans.is_empty() {
-                        blocks.push(MdBlock::Para { spans: std::mem::take(&mut spans) });
+                        blocks.push(MdBlock::Para { spans: wikilinked(&mut spans) });
                     }
                     if !in_item {
                         spans.clear();
@@ -2445,7 +2484,7 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                         blocks.push(MdBlock::ListItem {
                             depth,
                             marker: std::mem::take(&mut item_marker),
-                            spans: std::mem::take(&mut spans),
+                            spans: wikilinked(&mut spans),
                             task: item_task.take(),
                         });
                         in_item = false;
@@ -2473,7 +2512,7 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                     });
                     in_image = false;
                 }
-                TagEnd::TableCell => tbl_row.push(std::mem::take(&mut spans)),
+                TagEnd::TableCell => tbl_row.push(wikilinked(&mut spans)),
                 TagEnd::TableHead => tbl_head = std::mem::take(&mut tbl_row),
                 TagEnd::TableRow => tbl_rows.push(std::mem::take(&mut tbl_row)),
                 TagEnd::Table => blocks.push(MdBlock::Table {
@@ -2501,8 +2540,15 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                         link_url.clone(),
                     );
                 } else {
-                    // 이미 링크 안이면 손대지 않는다 — `[[…]]` 를 감싼 링크는 없다.
-                    push_wikilinked(&mut spans, &t, bold > 0, italic > 0, strike > 0);
+                    push_span(
+                        &mut spans,
+                        &t,
+                        bold > 0,
+                        italic > 0,
+                        strike > 0,
+                        false,
+                        None,
+                    );
                 }
             }
             Event::Code(t) => push_span(
@@ -5529,6 +5575,53 @@ mod tests {
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
+    }
+
+    fn spans_of(src: &str) -> Vec<(String, Option<String>)> {
+        let (blocks, _) = parse_markdown(src);
+        blocks
+            .iter()
+            .filter_map(|b| match b {
+                MdBlock::ListItem { spans, .. }
+                | MdBlock::Para { spans }
+                | MdBlock::Heading { spans, .. }
+                | MdBlock::Quote { spans } => Some(spans),
+                _ => None,
+            })
+            .flatten()
+            .map(|s| (s.text.clone(), s.link.clone()))
+            .collect()
+    }
+
+    /// 파서 전체를 거쳐야 하는 테스트 — cmark 가 `[[` 를 낱개 이벤트로 흘리므로
+    /// `push_wikilinked` 단독 테스트만으론 실제 문서에서 링크가 죽는 걸 못 잡는다
+    /// (실제로 그렇게 놓쳐서 화면에 대괄호가 그대로 나왔다).
+    #[test]
+    fn wikilink_survives_the_whole_parser() {
+        for src in [
+            "- [[topic_a]] — 뒤에 설명\n",
+            "[[topic_a]] 문단\n",
+            "# [[topic_a]] 제목\n",
+            "> [[topic_a]] 인용\n",
+        ] {
+            let got = spans_of(src);
+            assert_eq!(
+                got.first().map(|(t, l)| (t.as_str(), l.as_deref())),
+                Some(("topic_a", Some("wiki:topic_a"))),
+                "{src:?} 에서 링크가 죽었다: {got:?}"
+            );
+        }
+    }
+
+    /// 인라인 코드 안의 표기는 링크가 아니다 — 문서에서 표기 자체를 설명할 때
+    /// 쓰는 자리다(이 레포 주석·메모리 문서가 실제로 그렇게 쓴다).
+    #[test]
+    fn wikilink_inside_inline_code_stays_literal() {
+        let got = spans_of("`[[topic_a]]` 는 표기다\n");
+        assert!(
+            got.iter().all(|(_, l)| l.is_none()),
+            "코드 안 표기가 링크가 됐다: {got:?}"
+        );
     }
 
     /// `[[이름]]` 은 대괄호를 벗긴 링크 스팬이 되고 앞뒤 글은 평문으로 남아야 한다 —

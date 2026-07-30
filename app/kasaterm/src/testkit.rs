@@ -895,6 +895,20 @@ impl App {
                     None => eprintln!("[mdscript] selcopy=<없음>"),
                 }
             }
+            // `[[이름]]` 링크를 눌러 본다 — `wiki:<이름>`. 클릭 좌표 대신 목적지를
+            // 직접 넘긴다: 링크 글자의 화면 위치는 창 폭과 스크롤에 따라 움직여
+            // 좌표로 짚으면 검증이 창 크기에 묶인다. 확인하려는 건 히트테스트가
+            // 아니라 **어느 파일이 열리는가** 다(볼트가 주제 폴더로 갈라져 있다).
+            Some(("wiki", v)) => {
+                self.open_md_dest(&format!("wiki:{v}"));
+                let opened = self.ws.lock().ok().map(|w| {
+                    w.panes
+                        .values()
+                        .filter_map(|p| p.markdown().map(|m| m.doc.path.clone()))
+                        .collect::<Vec<_>>()
+                });
+                eprintln!("[mdscript] wiki={v} 열린문서={opened:?}");
+            }
             // 이 마크다운 탭을 닫아 본다 — 저장 안 한 편집분이 있으면 확인
             // 모달이 떠야 하고, 그 화면이 이 단계의 관찰 대상이다.
             Some(("close", _)) => {
