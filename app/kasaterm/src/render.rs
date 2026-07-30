@@ -6577,7 +6577,9 @@ fn pane_session_label(path: &std::path::Path) -> Option<String> {
             return t.clone();
         }
     }
-    let found = kasa_socket::sessions::session_label_for(path);
+    // `session_label_for` 가 아니라 `_summary_for` — /rename 이름은 claude 가
+    // 이 줄 오른쪽에 이미 그린다. 좌측은 "무슨 작업 중인지" 자리다.
+    let found = kasa_socket::sessions::session_summary_for(path);
     map.insert(path.to_path_buf(), (len, found.clone()));
     found
 }
