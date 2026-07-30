@@ -321,10 +321,16 @@ async fn dispatch_config_handler(body: String) -> impl IntoResponse {
     if let Some(n) = v.get("context_cap").and_then(|x| x.as_u64()) {
         cfg.context_cap = n.clamp(10, 100) as u8;
     }
+    if let Some(n) = v.get("max_attempts").and_then(|x| x.as_u64()) {
+        cfg.max_attempts = n.clamp(1, 10) as u8;
+    }
     for (key, slot) in [
         ("planner_model", &mut cfg.planner_model),
         ("heavy_model", &mut cfg.heavy_model),
         ("light_model", &mut cfg.light_model),
+        // 가벼운 일을 싼 백엔드로 — `"glm"` 같은 셸 래퍼 이름.
+        ("heavy_launcher", &mut cfg.heavy_launcher),
+        ("light_launcher", &mut cfg.light_launcher),
     ] {
         if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
             *slot = s.to_string();

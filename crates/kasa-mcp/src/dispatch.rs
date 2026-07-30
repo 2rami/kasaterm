@@ -63,7 +63,12 @@ pub struct QueueTask {
     /// pane 이 아닌 곳에서 낸 지시는 받을 주소가 없다.
     #[serde(default)]
     pub report_to: String,
-    /// 수확한 보고(그 학생의 마지막 답변).
+    /// 배정 시도 횟수. pane 은 떴는데 claude 가 안 올라오는 경우(런처 실패·키 만료·
+    /// 셸 에러)를 세어 `max_attempts` 에서 접는다 — 이게 없으면 되돌리기와 재스폰이
+    /// 영원히 반복되며 pane 만 쌓인다.
+    #[serde(default)]
+    pub attempts: u8,
+    /// 수확한 보고(그 학생의 마지막 답변). `failed` 면 접은 사유.
     #[serde(default)]
     pub result: String,
     #[serde(default)]
@@ -98,12 +103,23 @@ pub struct DispatchConfig {
     /// 층2 판단기 모델. 판단은 짧아 가벼운 티어로 충분하다.
     #[serde(default = "d_planner_model")]
     pub planner_model: String,
+    /// pane 은 떴는데 claude 가 올라오지 않을 때 몇 번까지 다시 시도할지.
+    #[serde(default = "d_max_attempts")]
+    pub max_attempts: u8,
     /// heavy 작업 학생 모델. 빈 값 = 사용자 기본 모델.
     #[serde(default)]
     pub heavy_model: String,
     /// light 작업 학생 모델. 빈 값 = 사용자 기본 모델.
     #[serde(default)]
     pub light_model: String,
+    /// 학생을 띄울 때 `claude` 앞에 끼울 래퍼 — 가볍고 급한 일은 싸고 빠른 백엔드로
+    /// 돌리려는 것(거노). `"glm"` 이면 `glm claude '<브리프>'` 가 되고, 그 셸 함수가
+    /// 게이트웨이 env 와 모델을 스스로 세팅한다. 래퍼가 모델을 강제하므로 이때
+    /// `*_model` 은 붙이지 않는다(두 지정이 싸운다).
+    #[serde(default)]
+    pub heavy_launcher: String,
+    #[serde(default)]
+    pub light_launcher: String,
     /// 스폰할 때 돌려 쓸 캐릭터 이름. 비면 `characters.json` 순서를 따른다.
     #[serde(default)]
     pub characters: Vec<String>,
@@ -124,6 +140,9 @@ fn d_ctx_cap() -> u8 {
 fn d_planner_model() -> String {
     "sonnet".into()
 }
+fn d_max_attempts() -> u8 {
+    2
+}
 
 impl Default for DispatchConfig {
     fn default() -> Self {
@@ -134,8 +153,11 @@ impl Default for DispatchConfig {
             settle_sec: d_settle_sec(),
             context_cap: d_ctx_cap(),
             planner_model: d_planner_model(),
+            max_attempts: d_max_attempts(),
             heavy_model: String::new(),
             light_model: String::new(),
+            heavy_launcher: String::new(),
+            light_launcher: String::new(),
             characters: Vec::new(),
         }
     }
@@ -348,8 +370,12 @@ pub struct DispatchRuntime {
 pub enum Decision {
     /// 끝났다 — 그 학생의 마지막 답변을 결과로 걷는다.
     Harvest { idx: usize, result: String },
-    /// 배정했던 pane 이 사라졌다 — 대기열로 되돌린다.
-    Requeue { idx: usize },
+    /// 다시 대기열로. `close_pane` 이면 그 pane 도 치운다 — claude 가 올라오지 않은
+    /// 껍데기 pane 을 남겨 두면 화면만 쌓인다.
+    Requeue { idx: usize, close_pane: bool },
+    /// 몇 번 시도해도 학생이 올라오지 않아 접는다. 조용히 반복하는 것보다 큐에
+    /// 실패로 남는 게 낫다(선생님이 `GET /tasks` 에서 사유를 본다).
+    Fail { idx: usize, reason: String },
     /// 이미 도는 자기 학생에게 지시를 제출한다.
     AssignExisting { idx: usize, surface: String, character: String },
     /// 새 학생을 부른다(브리프를 부팅 인자로 싣는다).
@@ -358,9 +384,17 @@ pub enum Decision {
 
 /// 순수 판단 — 큐·board·명부·설정·idle 연속 카운트를 보고 무엇을 할지만 정한다.
 /// 아무것도 쓰지 않고 아무것도 호출하지 않는다.
+///
+/// `live_panes` 와 `board` 는 다른 것이고, 섞으면 학생이 무한 증식한다. board 는
+/// **claude 가 도는 pane** 만 담는다(transcript 가 근거) — 방금 스폰해 셸만 뜬 pane 은
+/// 없다. 그래서 board 로 "pane 이 사라졌다"를 판정하면 부팅 중인 학생을 죽은 것으로
+/// 보고 되돌리고, 명부에서도 빼 상한을 우회한 뒤 또 부른다. 실제 pane 목록은
+/// `list_surfaces()` 가 정본이다.
+#[allow(clippy::too_many_arguments)]
 pub fn decide(
     q: &[QueueTask],
     board: &[PaneActivity],
+    live_panes: &HashSet<String>,
     state: &DispatchState,
     cfg: &DispatchConfig,
     streak: &HashMap<String, u8>,
@@ -374,9 +408,12 @@ pub fn decide(
     // ── 수확 ── 배정 앞에 둔다: 방금 끝난 학생이 같은 tick 에 다음 일을 받게.
     let mut freed: HashSet<String> = HashSet::new();
     for (i, t) in q.iter().enumerate().filter(|(_, t)| t.status == "assigned") {
+        // pane 자체가 없다 = 선생님이 닫았다. 결과를 못 봤으니 done 이 아니고, 치울 것도 없다.
+        if !live_panes.contains(&t.surface) {
+            out.push(Decision::Requeue { idx: i, close_pane: false });
+            continue;
+        }
         match by_surface.get(t.surface.as_str()) {
-            // pane 이 사라졌다(선생님이 닫음) → 결과를 못 봤으니 done 이 아니다.
-            None => out.push(Decision::Requeue { idx: i }),
             Some(row) => {
                 if now - t.assigned_ts < cfg.settle_sec {
                     continue; // 부팅 유예 — 아직 idle 로 보이는 게 정상이다
@@ -384,6 +421,21 @@ pub fn decide(
                 if streak.get(t.surface.as_str()).copied().unwrap_or(0) >= cfg.idle_ticks {
                     out.push(Decision::Harvest { idx: i, result: row.last_reply.clone() });
                     freed.insert(t.surface.clone());
+                }
+            }
+            // pane 은 살아 있는데 claude 가 안 보인다 — 부팅 중이거나, 부팅에 실패했다
+            // (런처 없음·키 만료·셸 에러). 유예를 넘겼으면 실패로 취급하고 껍데기를 치운다.
+            None => {
+                if now - t.assigned_ts < cfg.settle_sec {
+                    continue;
+                }
+                if t.attempts + 1 >= cfg.max_attempts.max(1) {
+                    out.push(Decision::Fail {
+                        idx: i,
+                        reason: format!("학생이 올라오지 않았다({}회 시도)", t.attempts + 1),
+                    });
+                } else {
+                    out.push(Decision::Requeue { idx: i, close_pane: true });
                 }
             }
         }
@@ -467,20 +519,25 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
         return;
     }
     let board = backend.collab_board().unwrap_or_default();
-    let live: HashSet<&str> = board.iter().map(|r| r.surface_id.as_str()).collect();
+    // 실제 pane 목록 — 셸만 뜬 pane 도 여기 있다. 이걸 명부·상한의 기준으로 삼아야
+    // 부팅 중인 학생을 죽은 것으로 오해하지 않는다(`decide` 주석 참고).
+    let live: HashSet<String> = backend
+        .list_surfaces()
+        .map(|v| v.into_iter().map(|s| s.id).collect())
+        .unwrap_or_else(|_| board.iter().map(|r| r.surface_id.clone()).collect());
 
-    // 살아 있는 pane 만 명부에 남긴다 — 선생님이 닫은 학생은 잊는다.
+    // 사라진 pane 은 명부에서 잊는다 — 선생님이 닫은 학생.
     let mut state = read_state();
-    state.students.retain(|s| live.contains(s.surface.as_str()));
+    state.students.retain(|s| live.contains(&s.surface));
 
     for row in board.iter() {
         let e = rt.idle_streak.entry(row.surface_id.clone()).or_insert(0);
         *e = if is_idle(row) { e.saturating_add(1) } else { 0 };
     }
-    rt.idle_streak.retain(|k, _| live.contains(k.as_str()));
+    rt.idle_streak.retain(|k, _| live.contains(k));
 
     let now = now_unix();
-    let decisions = decide(&q, &board, &state, &cfg, &rt.idle_streak, now, &mut rt.cursor);
+    let decisions = decide(&q, &board, &live, &state, &cfg, &rt.idle_streak, now, &mut rt.cursor);
     let mut changed = false;
 
     for d in decisions {
@@ -491,11 +548,30 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                 q[idx].updated_ts = now;
                 changed = true;
             }
-            Decision::Requeue { idx } => {
+            Decision::Requeue { idx, close_pane } => {
+                if close_pane {
+                    // 학생이 안 올라온 껍데기 — 놔두면 화면만 쌓인다.
+                    let surface = q[idx].surface.clone();
+                    if let Err(e) = backend.close_surface(&surface) {
+                        eprintln!("[dispatch] close {surface} failed: {e:#}");
+                    }
+                    state.students.retain(|s| s.surface != surface);
+                    q[idx].attempts = q[idx].attempts.saturating_add(1);
+                }
                 q[idx].status = "pending".into();
                 q[idx].surface.clear();
                 q[idx].character.clear();
                 q[idx].assigned_ts = 0.0;
+                q[idx].updated_ts = now;
+                changed = true;
+            }
+            Decision::Fail { idx, reason } => {
+                let surface = q[idx].surface.clone();
+                let _ = backend.close_surface(&surface);
+                state.students.retain(|s| s.surface != surface);
+                q[idx].attempts = q[idx].attempts.saturating_add(1);
+                q[idx].status = "failed".into();
+                q[idx].result = reason;
                 q[idx].updated_ts = now;
                 changed = true;
             }
@@ -664,12 +740,26 @@ fn compose_brief(idx: usize, q: &[QueueTask], board: &[PaneActivity]) -> String 
 }
 
 /// 스폰된 pane 에 넣을 한 줄. cd 를 앞에 붙이는 이유는 `QueueTask::cwd` 주석에 있다.
+///
+/// 래퍼(`*_launcher`)가 있으면 `<래퍼> claude '<브리프>'` 가 된다 — 가벼운 일을 싸고
+/// 빠른 백엔드로 돌리려는 것(거노). `glm` 이 그런 래퍼이고, 게이트웨이 env 와 모델을
+/// 스스로 세팅한 뒤 `command claude --model <게이트웨이 모델> "$@"` 로 넘긴다. 그래서
+/// 래퍼가 있을 때 `--model` 을 또 주면 두 지정이 싸운다 — 이때는 붙이지 않는다.
+/// 래퍼는 셸 함수일 수 있어(실제로 `glm` 이 그렇다) pane 의 인터랙티브 zsh 에서만
+/// 해석된다 — 그래서 명령 문자열로 넣고 프로세스를 직접 spawn 하지 않는다.
 fn boot_command(cfg: &DispatchConfig, task: &QueueTask) -> String {
-    let model = if task.weight == "light" { &cfg.light_model } else { &cfg.heavy_model };
-    let model_arg = if model.is_empty() {
+    let light = task.weight == "light";
+    let launcher = if light { &cfg.light_launcher } else { &cfg.heavy_launcher };
+    let model = if light { &cfg.light_model } else { &cfg.heavy_model };
+    let prefix = if launcher.is_empty() {
         String::new()
     } else {
+        format!("{} ", launcher.trim())
+    };
+    let model_arg = if launcher.is_empty() && !model.is_empty() {
         format!(" --model {}", sh_quote(model))
+    } else {
+        String::new()
     };
     let cd = if task.cwd.is_empty() {
         String::new()
@@ -678,7 +768,7 @@ fn boot_command(cfg: &DispatchConfig, task: &QueueTask) -> String {
     };
     // 개행은 셸 인자에서 줄을 끊어 명령을 두 동으로 쪼갠다 — 한 줄로 평탄화한다.
     let brief = task.brief.replace(['\n', '\r'], " ");
-    format!("{}claude{} {}\r", cd, model_arg, sh_quote(&brief))
+    format!("{}{}claude{} {}\r", cd, prefix, model_arg, sh_quote(&brief))
 }
 
 /// split 이 id 를 돌려준 직후엔 그 pane 이 아직 send 경로에 등록되지 않아 "surface 없음"
@@ -779,6 +869,7 @@ pub fn solo_task(instruction: &str, cwd: &str) -> QueueTask {
         origin: instruction.to_string(),
         cwd: cwd.to_string(),
         report_to: String::new(),
+        attempts: 0,
         result: String::new(),
         created_ts: 0.0,
         updated_ts: 0.0,
@@ -897,6 +988,7 @@ fn parse_plan(text: &str, origin: &str, cwd: &str) -> Option<Vec<QueueTask>> {
             origin: origin.to_string(),
             cwd: cwd.to_string(),
             report_to: String::new(),
+            attempts: 0,
             result: String::new(),
             created_ts: 0.0,
             updated_ts: 0.0,
@@ -919,6 +1011,21 @@ mod tests {
         }
     }
 
+    /// board 에 뜬 pane 은 당연히 살아 있다 — 대부분의 테스트가 그 경우라 래퍼로 줄인다.
+    /// "pane 은 살아 있는데 claude 가 없다"를 시험하는 테스트만 `decide` 를 직접 부른다.
+    fn decide_t(
+        q: &[QueueTask],
+        board: &[PaneActivity],
+        state: &DispatchState,
+        cfg: &DispatchConfig,
+        streak: &HashMap<String, u8>,
+        now: f64,
+        cursor: &mut usize,
+    ) -> Vec<Decision> {
+        let live: HashSet<String> = board.iter().map(|r| r.surface_id.clone()).collect();
+        decide(q, board, &live, state, cfg, streak, now, cursor)
+    }
+
     fn task(id: &str, status: &str, files: &[&str], deps: &[&str]) -> QueueTask {
         QueueTask {
             id: id.into(),
@@ -933,6 +1040,7 @@ mod tests {
             origin: String::new(),
             cwd: "/repo".into(),
             report_to: String::new(),
+            attempts: 0,
             result: String::new(),
             created_ts: 0.0,
             updated_ts: 0.0,
@@ -1016,6 +1124,28 @@ mod tests {
     }
 
     #[test]
+    fn light_work_can_run_on_a_cheaper_backend() {
+        // 거노 지시: 급하거나 덜 중요한 일은 GLM 게이트웨이로 — 모델명이 아니라 셸 래퍼다.
+        let mut cfg = cfg_for(2);
+        cfg.light_launcher = "glm".into();
+        cfg.light_model = "무시돼야-한다".into();
+        cfg.heavy_model = "claude-opus-5[1m]".into();
+        let mut t = task("t1", "pending", &[], &[]);
+        t.brief = "로그 한 줄 찾아줘".into();
+        t.cwd = "/repo".into();
+
+        t.weight = "light".into();
+        let light = boot_command(&cfg, &t);
+        assert!(light.contains("&& glm claude '로그 한 줄 찾아줘'"), "래퍼 경유: {light}");
+        assert!(!light.contains("--model"), "래퍼가 모델을 정하니 --model 은 빼야 한다: {light}");
+
+        t.weight = "heavy".into();
+        let heavy = boot_command(&cfg, &t);
+        assert!(heavy.contains("&& claude --model 'claude-opus-5[1m]'"), "무거운 일은 그대로: {heavy}");
+        assert!(!heavy.contains("glm"), "래퍼는 light 에만 붙는다");
+    }
+
+    #[test]
     fn boot_command_pins_the_repo_and_model() {
         let mut cfg = cfg_for(2);
         cfg.heavy_model = "claude-opus-5[1m]".into();
@@ -1082,7 +1212,7 @@ mod tests {
         let board = vec![row("%1", "idle", &[])];
         let state = DispatchState { students: vec![owned("%1", "미도리")] };
         let mut cur = 0;
-        let d = decide(&q, &board, &state, &cfg_for(4), &settled(&["%1"], 2), 1000.0, &mut cur);
+        let d = decide_t(&q, &board, &state, &cfg_for(4), &settled(&["%1"], 2), 1000.0, &mut cur);
         assert_eq!(
             d,
             vec![Decision::AssignExisting { idx: 0, surface: "%1".into(), character: String::new() }],
@@ -1100,7 +1230,7 @@ mod tests {
             task("t4", "pending", &["d.rs"], &[]),
         ];
         let mut cur = 0;
-        let d = decide(&q, &[], &DispatchState::default(), &cfg_for(2), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide_t(&q, &[], &DispatchState::default(), &cfg_for(2), &HashMap::new(), 1000.0, &mut cur);
         assert_eq!(d.len(), 2, "상한을 넘겨 부르지 않는다");
         assert!(matches!(d[0], Decision::SpawnFor { idx: 0, .. }));
         assert!(matches!(d[1], Decision::SpawnFor { idx: 1, .. }));
@@ -1128,7 +1258,7 @@ mod tests {
         q[0].surface = "%1".into();
         q[0].assigned_ts = 999.0;
         let mut cur = 0;
-        let d = decide(&q, &board, &state, &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide_t(&q, &board, &state, &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
         assert!(d.is_empty(), "같은 파일을 만질 작업엔 아무도 붙이지 않는다");
     }
 
@@ -1137,7 +1267,7 @@ mod tests {
         let mut q = vec![task("t1", "pending", &["a.rs"], &[])];
         q[0].depth = 1;
         let mut cur = 0;
-        let d = decide(&q, &[], &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide_t(&q, &[], &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
         assert!(d.is_empty(), "학생이 만든 작업은 증식을 막으려 새 학생을 못 부른다");
     }
 
@@ -1150,7 +1280,7 @@ mod tests {
         board[0].last_reply = "아직 시작도 안 했다".into();
         let state = DispatchState { students: vec![owned("%1", "미도리")] };
         let mut cur = 0;
-        let d = decide(&q, &board, &state, &cfg_for(4), &settled(&["%1"], 9), 1000.0, &mut cur);
+        let d = decide_t(&q, &board, &state, &cfg_for(4), &settled(&["%1"], 9), 1000.0, &mut cur);
         assert!(d.is_empty(), "부팅 직후의 idle 을 완료로 오해하면 안 된다");
     }
 
@@ -1164,9 +1294,9 @@ mod tests {
         let state = DispatchState { students: vec![owned("%1", "미도리")] };
         let mut cur = 0;
         // idle 1회 — agents 상태가 2초 캐시라 이것만으론 못 믿는다.
-        let d = decide(&q, &board, &state, &cfg_for(4), &settled(&["%1"], 1), 1000.0, &mut cur);
+        let d = decide_t(&q, &board, &state, &cfg_for(4), &settled(&["%1"], 1), 1000.0, &mut cur);
         assert!(d.is_empty(), "idle 1 tick 은 완료 근거가 못 된다");
-        let d = decide(&q, &board, &state, &cfg_for(4), &settled(&["%1"], 2), 1000.0, &mut cur);
+        let d = decide_t(&q, &board, &state, &cfg_for(4), &settled(&["%1"], 2), 1000.0, &mut cur);
         assert_eq!(d, vec![Decision::Harvest { idx: 0, result: "다 했어요".into() }]);
     }
 
@@ -1182,7 +1312,7 @@ mod tests {
         board[0].last_reply = "끝".into();
         let state = DispatchState { students: vec![owned("%1", "미도리")] };
         let mut cur = 0;
-        let d = decide(&q, &board, &state, &cfg_for(1), &settled(&["%1"], 3), 1000.0, &mut cur);
+        let d = decide_t(&q, &board, &state, &cfg_for(1), &settled(&["%1"], 3), 1000.0, &mut cur);
         assert_eq!(d.len(), 2, "수확과 재배정이 한 tick 에 이어진다");
         assert!(matches!(d[0], Decision::Harvest { idx: 0, .. }));
         assert_eq!(
@@ -1192,14 +1322,70 @@ mod tests {
         );
     }
 
+    // ── 학생이 올라오지 않는 pane (무한 증식이 나던 자리) ──
+
+    #[test]
+    fn booting_student_is_not_mistaken_for_a_dead_one() {
+        // 방금 스폰 → pane 은 있지만 board 에는 없다(transcript 가 아직 없다).
+        // 이걸 죽음으로 보면 되돌리고 또 부르며 pane 만 쌓인다.
+        let mut q = vec![task("t1", "assigned", &["a.rs"], &[])];
+        q[0].surface = "%1".into();
+        q[0].assigned_ts = 995.0; // 5초 전 — 유예 45초 안
+        let live: HashSet<String> = ["%1".to_string()].into_iter().collect();
+        let state = DispatchState { students: vec![owned("%1", "미도리")] };
+        let mut cur = 0;
+        let d = decide(&q, &[], &live, &state, &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        assert!(d.is_empty(), "부팅 중인 학생은 건드리지 않는다: {d:?}");
+    }
+
+    #[test]
+    fn shell_only_pane_is_retried_then_given_up() {
+        // 유예를 넘겨도 claude 가 없다 = 부팅 실패(런처 없음·키 만료 등).
+        let mut q = vec![task("t1", "assigned", &["a.rs"], &[])];
+        q[0].surface = "%1".into();
+        q[0].assigned_ts = 100.0;
+        let live: HashSet<String> = ["%1".to_string()].into_iter().collect();
+        let state = DispatchState { students: vec![owned("%1", "미도리")] };
+        let mut cur = 0;
+
+        // 1회차 — 껍데기를 치우고 다시 대기열로.
+        let d = decide(&q, &[], &live, &state, &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        assert_eq!(
+            d,
+            vec![Decision::Requeue { idx: 0, close_pane: true }],
+            "학생이 안 올라온 pane 은 닫아야 쌓이지 않는다"
+        );
+
+        // 상한(기본 2)에 닿으면 접는다 — 조용히 영원히 반복하지 않는다.
+        q[0].attempts = 1;
+        let d = decide(&q, &[], &live, &state, &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        match &d[..] {
+            [Decision::Fail { idx: 0, reason }] => assert!(reason.contains("올라오지"), "{reason}"),
+            other => panic!("접어야 한다: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_cap_counts_shell_only_panes() {
+        // 껍데기 pane 도 자기 학생이다 — 명부에서 빠지면 상한이 무력해져 무한 증식한다.
+        let q = vec![task("t1", "pending", &["a.rs"], &[]), task("t2", "pending", &["b.rs"], &[])];
+        let live: HashSet<String> = ["%1".to_string(), "%2".to_string()].into_iter().collect();
+        let state =
+            DispatchState { students: vec![owned("%1", "미도리"), owned("%2", "유즈")] };
+        let mut cur = 0;
+        // board 는 비어 있다(둘 다 아직 claude 없음) — 그래도 상한 2 는 이미 찼다.
+        let d = decide(&q, &[], &live, &state, &cfg_for(2), &HashMap::new(), 1000.0, &mut cur);
+        assert!(d.is_empty(), "board 가 비었다고 상한을 우회해선 안 된다: {d:?}");
+    }
+
     #[test]
     fn vanished_pane_requeues_without_result() {
         let mut q = vec![task("t1", "assigned", &["a.rs"], &[])];
         q[0].surface = "%9".into();
         q[0].assigned_ts = 100.0;
         let mut cur = 0;
-        let d = decide(&q, &[], &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
-        assert_eq!(d, vec![Decision::Requeue { idx: 0 }], "닫힌 학생의 작업은 done 이 아니다");
+        let d = decide_t(&q, &[], &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        assert_eq!(d, vec![Decision::Requeue { idx: 0, close_pane: false }], "닫힌 학생의 작업은 done 이 아니다");
     }
 
     #[test]
@@ -1210,7 +1396,7 @@ mod tests {
         board[0].context_pct = 90;
         let state = DispatchState { students: vec![owned("%1", "미도리")] };
         let mut cur = 0;
-        let d = decide(&q, &board, &state, &cfg_for(1), &settled(&["%1"], 5), 1000.0, &mut cur);
+        let d = decide_t(&q, &board, &state, &cfg_for(1), &settled(&["%1"], 5), 1000.0, &mut cur);
         assert!(d.is_empty(), "상한이 1이고 그 학생은 쓸 수 없으니 대기");
     }
 
@@ -1220,7 +1406,7 @@ mod tests {
         let q = vec![task("t1", "pending", &["app/kasaterm/src/main.rs"], &[])];
         let board = vec![row("%2", "working", &["app/kasaterm/src/main.rs"])];
         let mut cur = 0;
-        let d = decide(&q, &board, &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide_t(&q, &board, &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
         assert!(d.is_empty(), "남이 만지는 파일에는 학생을 붙이지 않는다");
     }
 
@@ -1229,10 +1415,10 @@ mod tests {
         // files_hint 가 비면 충돌 판정이 불가 — 혼자일 때만 돈다.
         let q = vec![task("t1", "pending", &[], &[])];
         let mut cur = 0;
-        let d = decide(&q, &[], &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide_t(&q, &[], &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
         assert_eq!(d.len(), 1, "아무도 일하지 않으면 파일 미상이어도 착수");
         let board = vec![row("%2", "working", &["x.rs"])];
-        let d = decide(&q, &board, &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide_t(&q, &board, &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
         assert!(d.is_empty(), "누군가 일하는 중엔 파일 미상 작업을 재운다");
     }
 
@@ -1241,7 +1427,7 @@ mod tests {
         let mut q = vec![task("t1", "pending", &["a.rs"], &[]), task("t2", "pending", &["b.rs"], &["t1"])];
         q[0].files_hint = vec!["a.rs".into()];
         let mut cur = 0;
-        let d = decide(&q, &[], &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
+        let d = decide_t(&q, &[], &DispatchState::default(), &cfg_for(4), &HashMap::new(), 1000.0, &mut cur);
         assert_eq!(d.len(), 1, "선행이 안 끝났으면 후행은 배정 대상이 아니다");
         assert!(matches!(d[0], Decision::SpawnFor { idx: 0, .. }));
     }
