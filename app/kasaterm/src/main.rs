@@ -2217,6 +2217,49 @@ fn parse_frontmatter_rows(src: &str) -> Vec<(String, String)> {
     rows
 }
 
+/// `[[토픽이름]]` 을 클릭 가능한 링크로 쪼갠다. 메모리 볼트는 문서를 이 표기로
+/// 엮는데(인덱스 한 줄이 곧 한 토픽) 마크다운 표준이 아니라 여태 죽은 글자였다 —
+/// 노션의 페이지 링크에 해당하는 자리다. 목적지는 `wiki:` 스킴으로 넘겨 클릭할 때
+/// 파일을 찾고, 화면에는 대괄호를 벗긴 이름만 남긴다.
+fn push_wikilinked(spans: &mut Vec<MdSpan>, t: &str, bold: bool, italic: bool, strike: bool) {
+    let plain = |spans: &mut Vec<MdSpan>, s: &str| {
+        if !s.is_empty() {
+            spans.push(MdSpan {
+                text: s.to_string(),
+                bold,
+                italic,
+                code: false,
+                strike,
+                link: None,
+            });
+        }
+    };
+    let mut rest = t;
+    while let Some(i) = rest.find("[[") {
+        let after = &rest[i + 2..];
+        let Some(j) = after.find("]]") else { break };
+        let name = &after[..j];
+        // 이름에 대괄호나 줄바꿈이 섞이면 위키링크가 아니다 — 여는 괄호까지만
+        // 평문으로 흘리고 그 뒤에서 다시 찾는다.
+        if name.is_empty() || name.contains(['[', ']', '\n']) {
+            plain(spans, &rest[..i + 2]);
+            rest = after;
+            continue;
+        }
+        plain(spans, &rest[..i]);
+        spans.push(MdSpan {
+            text: name.to_string(),
+            bold,
+            italic,
+            code: false,
+            strike,
+            link: Some(format!("wiki:{name}")),
+        });
+        rest = &after[j + 2..];
+    }
+    plain(spans, rest);
+}
+
 fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     let mut blocks: Vec<MdBlock> = Vec::new();
@@ -2447,7 +2490,7 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                     img_alt.push_str(&t);
                 } else if in_code {
                     code_buf.push_str(&t);
-                } else {
+                } else if link_url.is_some() {
                     push_span(
                         &mut spans,
                         &t,
@@ -2457,6 +2500,9 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                         false,
                         link_url.clone(),
                     );
+                } else {
+                    // 이미 링크 안이면 손대지 않는다 — `[[…]]` 를 감싼 링크는 없다.
+                    push_wikilinked(&mut spans, &t, bold > 0, italic > 0, strike > 0);
                 }
             }
             Event::Code(t) => push_span(
@@ -5483,6 +5529,54 @@ mod tests {
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
+    }
+
+    /// `[[이름]]` 은 대괄호를 벗긴 링크 스팬이 되고 앞뒤 글은 평문으로 남아야 한다 —
+    /// 메모리 인덱스가 통째로 이 표기라, 여기서 어긋나면 문서 사이 이동이 죽는다.
+    #[test]
+    fn wikilink_becomes_link_span() {
+        let mut spans = Vec::new();
+        push_wikilinked(&mut spans, "앞 [[topic_a]] 뒤", false, false, false);
+        let shape: Vec<(&str, Option<&str>)> = spans
+            .iter()
+            .map(|s| (s.text.as_str(), s.link.as_deref()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("앞 ", None),
+                ("topic_a", Some("wiki:topic_a")),
+                (" 뒤", None)
+            ]
+        );
+    }
+
+    /// 닫히지 않은 `[[` 나 대괄호가 섞인 이름은 링크가 아니다. 링크로 만들면 문서에
+    /// 없는 파일을 가리키는 죽은 링크가 생긴다.
+    #[test]
+    fn malformed_wikilink_stays_plain() {
+        for src in ["[[열린 채", "[[a[b]]", "[[]]"] {
+            let mut spans = Vec::new();
+            push_wikilinked(&mut spans, src, false, false, false);
+            assert!(
+                spans.iter().all(|s| s.link.is_none()),
+                "{src} 가 링크로 잡혔다"
+            );
+            let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+            assert_eq!(joined, src, "{src} 의 글자가 유실됐다");
+        }
+    }
+
+    /// 한 줄에 여러 개, 그리고 붙어 있는 경우까지. 메모리 인덱스는 한 줄에 두세 개를
+    /// 예사로 쓴다.
+    #[test]
+    fn multiple_wikilinks_in_one_run() {
+        let mut spans = Vec::new();
+        push_wikilinked(&mut spans, "[[a]]·[[b]]", false, false, false);
+        let links: Vec<&str> = spans.iter().filter_map(|s| s.link.as_deref()).collect();
+        assert_eq!(links, vec!["wiki:a", "wiki:b"]);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "a·b");
     }
 
     /// No account selected must emit *nothing*. An `export` with an empty value

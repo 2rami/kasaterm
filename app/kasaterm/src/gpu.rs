@@ -1915,15 +1915,11 @@ impl GpuRenderer {
             let t = (scroll / (content_h - h)).clamp(0.0, 1.0);
             let mut col = crate::theme::text();
             col[3] = 45;
-            if std::env::var_os("KASATERM_MD_SB_DEBUG").is_some() {
-                eprintln!(
-                    "[mdsb] x={:.0} y={:.0} w={:.0} h={:.0} content={:.0} t={:.2} th={:.0}",
-                    x, y, w, h, content_h, t, th
-                );
-                col = [255, 0, 0, 255];
-            }
+            // 본문 박스 오른쪽이 곧 글줄 오른쪽이라, 박스 안에 두면 막대가 글에
+            // 달라붙는다. pane 안쪽 여백(PANE_INNER_X) 쪽으로 밀어 글과 떨어뜨린다
+            // — 그 여백은 본문 박스 밖이지만 여전히 pane 안이다.
             self.round_rect_fill(
-                x + w - 5.0,
+                x + w + 1.0,
                 y + 4.0 + (track_h - th) * t,
                 3.0,
                 th,
@@ -2187,6 +2183,12 @@ impl GpuRenderer {
             Some((spans, stale)) => (Some(spans), stale),
             None => (None, false),
         };
+        // 캐럿에 붙은 괄호와 그 짝. 선택 중엔 계산하지 않는다 — 선택 밴드와
+        // 겹쳐 그리면 어느 쪽이 선택인지 읽히지 않는다.
+        let brackets = sel
+            .is_none()
+            .then(|| crate::markdown::match_bracket(lines, cursor.0, cursor.1))
+            .flatten();
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
             if pen_y + lh > clip_top && pen_y < clip_bot {
@@ -2221,6 +2223,31 @@ impl GpuRenderer {
                                 rx1 - rx0,
                                 lh,
                                 crate::theme::with_alpha(crate::theme::accent(), 0x4A),
+                            );
+                        }
+                    }
+                }
+                // 괄호 짝 — 글자 뒤에 옅은 판을 깔아 두 짝이 같이 밝아진다.
+                // 테두리가 아니라 배경인 이유: 셀 폭이 글리프마다 달라서
+                // 1px 선은 글자와 어긋난 채로 붙는다.
+                if let Some((a, b)) = brackets {
+                    for (bl, bc) in [a, b] {
+                        if bl != li {
+                            continue;
+                        }
+                        let pre: String = line.chars().take(bc).collect();
+                        let bx0 = tx0 + self.measure_pen_run(&pre, base, false, false);
+                        let glyph: String = line.chars().skip(bc).take(1).collect();
+                        let bw = self.measure_pen_run(&glyph, base, false, false);
+                        let rx0 = bx0.max(cx0);
+                        let rx1 = (bx0 + bw).min(clip_right);
+                        if rx1 > rx0 {
+                            self.rect(
+                                rx0,
+                                pen_y,
+                                rx1 - rx0,
+                                lh,
+                                crate::theme::with_alpha(crate::theme::accent(), 0x38),
                             );
                         }
                     }
@@ -3465,6 +3492,10 @@ pub(crate) fn word_in_sel(sel: Option<(f32, f32, f32, f32)>, cx: f32, cy: f32) -
 fn link_color(dest: &str) -> [u8; 4] {
     if dest.starts_with("http://") || dest.starts_with("https://") {
         crate::theme::accent()
+    } else if dest.starts_with("wiki:") {
+        // 문서 사이를 잇는 링크는 밖으로 나가는 링크와 색이 달라야 한다 — 누르면
+        // 브라우저가 뜨는지 옆 문서가 열리는지가 색으로 구분된다.
+        crate::theme::syn_type()
     } else if dest.starts_with("mailto:") {
         crate::theme::syn_keyword()
     } else if dest.starts_with('#') {
