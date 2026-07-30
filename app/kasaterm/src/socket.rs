@@ -540,11 +540,16 @@ impl Backend for PtyBackend {
     }
 
     /// `POST /spawn-student?character=<name>` — 현재 방에 캐릭터 지정 학생 추가.
-    fn spawn_student(&self, character: &str) -> Result<()> {
+    /// split 은 GUI 스레드에서 도니 reply 채널로 새 pane id 를 받아 돌려준다
+    /// (`split_surface` 와 같은 패턴) — 디스패처가 그 주소로 브리프를 쏜다.
+    fn spawn_student(&self, character: &str) -> Result<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
         self.proxy
-            .send_event(UserEvent::SocketSpawnStudent(character.to_string()))
+            .send_event(UserEvent::SocketSpawnStudent(character.to_string(), tx))
             .map_err(|_| anyhow::anyhow!("gui event loop gone"))?;
-        Ok(())
+        Ok(rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_default())
     }
 
     /// `POST /swap-character?surface=<id>&character=<name>` — pane 캐릭터 교체(respawn).

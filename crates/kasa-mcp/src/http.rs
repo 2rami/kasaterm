@@ -27,7 +27,7 @@ use crate::{git, KasaspaceTools};
 /// open origin stays local-only.
 /// Directory git commands run in: follow the active pane's shell cwd so the
 /// panel tracks the user's terminal directory; fall back to the host cwd.
-fn resolve_cwd(backend: &Arc<dyn Backend>) -> std::path::PathBuf {
+pub(crate) fn resolve_cwd(backend: &Arc<dyn Backend>) -> std::path::PathBuf {
     backend
         .active_cwd()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")))
@@ -169,6 +169,172 @@ async fn schedule_loop(backend: Arc<dyn Backend>) {
             write_schedule(&items);
         }
     }
+}
+
+// ── 디스패처(학생 자동 호출) — 큐 조회·등록·설정 ────────────────────────────
+// 판단·배정 로직은 `dispatch` 모듈에 있고 여기선 HTTP 표면만 붙인다.
+
+/// `GET /tasks` — 일감 큐 전체(부름 이력이 곧 이 목록이다).
+async fn tasks_list_handler() -> impl IntoResponse {
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({
+            "ok": true,
+            "items": crate::dispatch::read_queue(),
+            "config": crate::dispatch::read_config(),
+        })),
+    )
+}
+
+/// `POST /task` — 작업 1건 직접 등록(판단기 없이). body{brief,files_hint?,depends_on?,
+/// weight?,depth?}. 학생이 후속 작업을 넣을 때도 이 경로 — `depth>=1` 은 새 학생을
+/// 못 부르고 빈 학생만 쓴다(증식 차단).
+async fn task_add_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (cors, Json(serde_json::json!({ "ok": false, "error": format!("bad body: {e}") })));
+        }
+    };
+    let brief = v.get("brief").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    if brief.is_empty() {
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "brief required" })));
+    }
+    let strs = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str()).map(|s| s.to_string()).collect())
+            .unwrap_or_default()
+    };
+    // cwd 는 요청이 준 값 우선, 없으면 지금 방의 경로 — 학생이 어느 레포에서 뜰지가 여기서 정해진다.
+    let cwd = v
+        .get("cwd")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| resolve_cwd(&backend).to_string_lossy().to_string());
+    let mut task = crate::dispatch::solo_task(&brief, &cwd);
+    task.files_hint = strs("files_hint");
+    task.depends_on = strs("depends_on");
+    task.depth = v.get("depth").and_then(|x| x.as_u64()).unwrap_or(0).min(255) as u8;
+    if let Some(w) = v.get("weight").and_then(|x| x.as_str()) {
+        task.weight = w.to_string();
+    }
+    // 학생이 후속 작업을 넣을 때 자기 pane 을 주면 그 학생이 결과를 되받는다.
+    if let Some(r) = v.get("report_to").and_then(|x| x.as_str()) {
+        task.report_to = r.to_string();
+    }
+    let ids = crate::dispatch::push_tasks(vec![task]);
+    (cors, Json(serde_json::json!({ "ok": true, "ids": ids })))
+}
+
+/// `POST /task-delete?id=<id>` — 큐에서 제거.
+async fn task_delete_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let id = params.get("id").cloned().unwrap_or_default();
+    let removed = crate::dispatch::delete_task(&id);
+    (
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        Json(serde_json::json!({ "ok": true, "removed": removed })),
+    )
+}
+
+/// `POST /dispatch` — 지시 원문을 넣으면 판단기가 작업으로 쪼개 큐에 넣는다.
+/// body{instruction}. 응답의 `note` 는 판단기가 실패해 1건으로 떨어진 사유(있을 때만).
+async fn dispatch_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let parsed = serde_json::from_str::<serde_json::Value>(&body).ok();
+    let instruction = match parsed.as_ref() {
+        Some(v) => v.get("instruction").and_then(|x| x.as_str()).unwrap_or("").trim().to_string(),
+        // 평문 body 도 받는다 — 지시 한 줄을 보내려고 JSON 을 만들 이유가 없다.
+        None => body.trim().to_string(),
+    };
+    if instruction.is_empty() {
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "instruction required" })));
+    }
+    let report_to = parsed
+        .as_ref()
+        .and_then(|v| v.get("report_to").and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let (mut tasks, note) = crate::dispatch::plan_tasks(&instruction, &backend).await;
+    for t in tasks.iter_mut() {
+        t.report_to = report_to.clone();
+    }
+    let planned: Vec<serde_json::Value> = tasks
+        .iter()
+        .map(|t| serde_json::json!({ "brief": t.brief, "files_hint": t.files_hint, "weight": t.weight }))
+        .collect();
+    let ids = crate::dispatch::push_tasks(tasks);
+    (
+        cors,
+        Json(serde_json::json!({ "ok": true, "ids": ids, "planned": planned, "note": note })),
+    )
+}
+
+/// `POST /broadcast[?all=1]` (body=알릴 내용) — 외부에서 온 소식을 일하는 학생들에게
+/// 흘린다. 슬랙·CI 훅이 "배포 실패했다" 를 던지는 통로 — 일감이 아니라 정보라 큐에
+/// 넣지 않고 곧바로 각 pane 에 제출한다. `all=1` 은 board 의 모든 pane(선생님 화면 포함).
+async fn broadcast_handler(
+    backend: Arc<dyn Backend>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    body: String,
+) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    // JSON{text} 도, 평문도 받는다(훅 스크립트가 curl 한 줄로 끝나게).
+    let text = match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(v) => v.get("text").and_then(|x| x.as_str()).unwrap_or("").trim().to_string(),
+        Err(_) => body.trim().to_string(),
+    };
+    if text.is_empty() {
+        return (cors, Json(serde_json::json!({ "ok": false, "error": "text required" })));
+    }
+    let all = params.get("all").map(|s| s == "1").unwrap_or(false);
+    let sent = crate::dispatch::broadcast(&backend, &text, all);
+    (cors, Json(serde_json::json!({ "ok": true, "sent": sent })))
+}
+
+/// `GET /dispatch-config` · `POST /dispatch-config` — 자동 호출 스위치와 상한.
+/// POST 는 준 필드만 덮어쓴다(부분 갱신) — 토글 하나 바꾸려고 전체를 보낼 이유가 없다.
+async fn dispatch_config_handler(body: String) -> impl IntoResponse {
+    let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    let mut cfg = crate::dispatch::read_config();
+    let v: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (cors, Json(serde_json::json!({ "ok": false, "error": format!("bad body: {e}") })));
+        }
+    };
+    if let Some(b) = v.get("enabled").and_then(|x| x.as_bool()) {
+        cfg.enabled = b;
+    }
+    if let Some(n) = v.get("max_students").and_then(|x| x.as_u64()) {
+        cfg.max_students = n.clamp(1, 12) as usize;
+    }
+    if let Some(n) = v.get("idle_ticks").and_then(|x| x.as_u64()) {
+        cfg.idle_ticks = n.clamp(1, 30) as u8;
+    }
+    if let Some(n) = v.get("settle_sec").and_then(|x| x.as_f64()) {
+        cfg.settle_sec = n.clamp(5.0, 600.0);
+    }
+    if let Some(n) = v.get("context_cap").and_then(|x| x.as_u64()) {
+        cfg.context_cap = n.clamp(10, 100) as u8;
+    }
+    for (key, slot) in [
+        ("planner_model", &mut cfg.planner_model),
+        ("heavy_model", &mut cfg.heavy_model),
+        ("light_model", &mut cfg.light_model),
+    ] {
+        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+            *slot = s.to_string();
+        }
+    }
+    if let Some(a) = v.get("characters").and_then(|x| x.as_array()) {
+        cfg.characters = a.iter().filter_map(|s| s.as_str()).map(|s| s.to_string()).collect();
+    }
+    crate::dispatch::write_config(&cfg);
+    (cors, Json(serde_json::json!({ "ok": true, "config": cfg })))
 }
 
 /// `GET /schedule` — 스케줄 목록.
@@ -1062,7 +1228,10 @@ async fn spawn_student_handler(
         serde_json::json!({ "ok": false, "error": "character required" })
     } else {
         match backend.spawn_student(character) {
-            Ok(()) => serde_json::json!({ "ok": true, "character": character }),
+            // surface = 새 pane id — 스폰 직후 그 학생에게 지시를 보낼 주소.
+            Ok(surface) => {
+                serde_json::json!({ "ok": true, "character": character, "surface": surface })
+            }
             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
         }
     };
@@ -2293,6 +2462,10 @@ pub fn spawn_http_server_opts(
                 // (run_scheduler=false)은 공유 schedule.json 을 소비/영속하면 안 됨(유령버블·유실·레이스).
                 if run_scheduler {
                     tokio::spawn(schedule_loop(backend.clone()));
+                    // 학생 자동 호출 — 큐를 보고 빈 학생에게 배정하고 없으면 스폰(10s 주기).
+                    // standalone 제외 이유는 scheduler 와 같다: 공유 queue.json 을 두 곳이
+                    // 뮤테이트하면 배정이 사라지거나 이중 배달된다. PTY 를 가진 본체만 쓴다.
+                    tokio::spawn(crate::dispatch::dispatch_loop(backend.clone()));
                     // /resume 가시성 스위퍼 — 팀 세션 transcript 의 teamName 마커를
                     // 같은 길이 키로 중화해 claude /resume 피커에 되살리고, 학생
                     // 바인딩은 #태그로 스탬프한다(부팅 직후 + 60초 주기). standalone
@@ -2313,6 +2486,9 @@ pub fn spawn_http_server_opts(
                 let session_switch_backend = backend.clone();
                 let session_new_backend = backend.clone();
                 let spawn_student_backend = backend.clone();
+                let dispatch_backend = backend.clone();
+                let task_add_backend = backend.clone();
+                let broadcast_backend = backend.clone();
                 let swap_character_backend = backend.clone();
                 let repersona_backend = backend.clone();
                 let session_close_backend = backend.clone();
@@ -2607,6 +2783,34 @@ pub fn spawn_http_server_opts(
                     .route(
                         "/slash-commands",
                         get(move || slash_commands_handler(slash_backend.clone())),
+                    )
+                    .route("/tasks", get(tasks_list_handler))
+                    .route(
+                        "/task",
+                        post(move |body: String| task_add_handler(task_add_backend.clone(), body)),
+                    )
+                    .route(
+                        "/task-delete",
+                        post(|q: Query<std::collections::HashMap<String, String>>| {
+                            task_delete_handler(q)
+                        }),
+                    )
+                    .route(
+                        "/dispatch",
+                        post(move |body: String| dispatch_handler(dispatch_backend.clone(), body)),
+                    )
+                    .route(
+                        "/broadcast",
+                        post(
+                            move |q: Query<std::collections::HashMap<String, String>>, body: String| {
+                                broadcast_handler(broadcast_backend.clone(), q, body)
+                            },
+                        ),
+                    )
+                    .route(
+                        "/dispatch-config",
+                        get(|| dispatch_config_handler("{}".to_string()))
+                            .post(|body: String| dispatch_config_handler(body)),
                     )
                     .route(
                         "/schedule",

@@ -389,8 +389,11 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("rename_surface unsupported by this backend")
     }
     /// Add a new student pane to the active room with an explicit character
-    /// (members or leaders — 아로나/프라나 included). Default: unsupported.
-    fn spawn_student(&self, _character: &str) -> Result<()> {
+    /// (members or leaders — 아로나/프라나 included). Returns the new pane's
+    /// surface id so a caller can immediately address it (the dispatcher sends
+    /// the brief there); an empty string means the backend created no pane.
+    /// Default: unsupported.
+    fn spawn_student(&self, _character: &str) -> Result<String> {
         anyhow::bail!("spawn_student unsupported by this backend")
     }
     /// Swap a pane's character: respawn its PTY with the new persona (the live

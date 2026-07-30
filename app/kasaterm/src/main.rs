@@ -2570,7 +2570,9 @@ enum UserEvent {
     SocketNewRoom(String),
     /// `POST /spawn-student?character=<name>` 위임 — 현재 방에 캐릭터 지정 학생 추가
     /// (split + pending_character). 아로나/프라나도 학생처럼 고를 수 있다(거노).
-    SocketSpawnStudent(String),
+    /// Sender 로 새 pane id 를 돌려준다(SocketSplit 패턴) — 디스패처가 스폰 직후
+    /// 그 pane 에 브리프를 쏘려면 주소가 필요하다. 빈 문자열 = pane 미생성.
+    SocketSpawnStudent(String, std::sync::mpsc::Sender<String>),
     /// `POST /swap-character?surface=<id>&character=<name>` 위임 — (pane, 캐릭터).
     /// 그 pane PTY 를 새 persona 로 respawn(대화 리셋, persona 는 셸 spawn 시 고정).
     SocketSwapCharacter(String, String),
