@@ -422,11 +422,11 @@ impl PtySession {
         cache.0 = now;
         // process_table() already returns bare exe names (no path), so the
         // shell row and the newest direct child are matched on pid/ppid alone.
-        let table = process_table();
+        let table = process_table_shared();
         let pid = effective_shell_pid(&table, pid);
         let mut best_child: Option<(u32, String)> = None;
         let mut shell_comm: Option<String> = None;
-        for (row_pid, row_ppid, name) in &table {
+        for (row_pid, row_ppid, name) in table.iter() {
             if *row_pid == pid {
                 shell_comm = Some(name.clone());
             } else if *row_ppid == pid && best_child.as_ref().is_none_or(|(p, _)| *p < *row_pid) {
@@ -483,7 +483,7 @@ impl PtySession {
         let Some(pid) = self.shell_pid else {
             return false;
         };
-        let table = process_table();
+        let table = process_table_shared();
         let pid = effective_shell_pid(&table, pid);
         if table.iter().any(|(_, ppid, _)| *ppid == pid) {
             return true;
@@ -2167,22 +2167,62 @@ fn process_table_raw() -> Vec<(u32, u32, String)> {
 /// 보다 촘촘해 신선도는 유지). fork 대신 Vec clone 이라 비용이 pane 수에 선형이지만
 /// ps fork+파싱보다 훨씬 싸다. 빈 결과(ps 실패)는 캐싱하지 않아 다음 호출이 재시도한다.
 pub fn process_table() -> Vec<(u32, u32, String)> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<(Instant, Vec<(u32, u32, String)>)>> =
-        std::sync::OnceLock::new();
-    let cache = CACHE.get_or_init(|| {
-        std::sync::Mutex::new((Instant::now() - std::time::Duration::from_secs(1), Vec::new()))
-    });
-    if let Ok(mut g) = cache.lock() {
-        if !g.1.is_empty() && g.0.elapsed().as_millis() < 300 {
-            return g.1.clone();
-        }
-        let fresh = process_table_raw();
-        if !fresh.is_empty() {
-            *g = (Instant::now(), fresh.clone());
-        }
-        return fresh;
+    (*process_table_shared()).clone()
+}
+
+pub type ProcessTable = std::sync::Arc<Vec<(u32, u32, String)>>;
+
+/// 같은 캐시를 **복사 없이** 빌려준다. 렌더처럼 pane 마다 매 프레임 부르는 쪽은
+/// 이걸 써야 한다 — `process_table()` 은 히트할 때도 테이블을 통째로 clone 해서
+/// 프로세스 수백 개면 프레임마다 그만큼의 String 할당이 돈다.
+pub fn process_table_shared() -> ProcessTable {
+    struct Cached {
+        at: Instant,
+        table: ProcessTable,
+        refreshing: bool,
     }
-    process_table_raw()
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cached>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        std::sync::Mutex::new(Cached {
+            at: Instant::now() - std::time::Duration::from_secs(1),
+            table: Default::default(),
+            refreshing: false,
+        })
+    });
+    let Ok(mut g) = cache.lock() else {
+        return std::sync::Arc::new(process_table_raw());
+    };
+    if !g.table.is_empty() && g.at.elapsed().as_millis() < 300 {
+        return g.table.clone();
+    }
+    // 첫 호출은 답이 없으니 그 자리에서 채운다. 그 뒤로는 **절대 프레임 안에서
+    // 새로 뜨지 않는다** — 갱신은 백그라운드로 돌리고 직전 표를 그대로 준다.
+    // ps fork 는 수 ms 짜리라, 300ms 마다 렌더 프레임 하나가 그걸 뒤집어쓰면
+    // 초당 세 번 눈에 띄는 딸꾹질이 된다.
+    if g.table.is_empty() {
+        let fresh = process_table_raw();
+        if fresh.is_empty() {
+            // ps 실패는 캐싱하지 않는다 — 다음 호출이 재시도한다.
+            return Default::default();
+        }
+        g.at = Instant::now();
+        g.table = std::sync::Arc::new(fresh);
+        return g.table.clone();
+    }
+    if !g.refreshing {
+        g.refreshing = true;
+        std::thread::spawn(move || {
+            let fresh = process_table_raw();
+            if let Ok(mut g) = cache.lock() {
+                if !fresh.is_empty() {
+                    g.at = Instant::now();
+                    g.table = std::sync::Arc::new(fresh);
+                }
+                g.refreshing = false;
+            }
+        });
+    }
+    g.table.clone()
 }
 
 /// shell 의 직계 claude 자식이 `claude agents`(에이전트 목록 뷰) 서브커맨드로
@@ -2329,4 +2369,32 @@ pub fn process_env_var(pid: u32, key: &str) -> Option<String> {
 #[cfg(not(unix))]
 pub fn process_env_var(_pid: u32, _key: &str) -> Option<String> {
     None
+}
+
+#[cfg(test)]
+mod process_table_tests {
+    use super::{process_table_shared, ProcessTable};
+
+    /// 표 자체가 맞는지 — 자기 프로세스는 반드시 들어 있다. `ps` 출력 파싱이
+    /// 깨지면(열 순서·comm 공백) 여기서 잡힌다.
+    #[test]
+    fn shared_table_contains_this_process() {
+        let t: ProcessTable = process_table_shared();
+        let me = std::process::id();
+        assert!(!t.is_empty(), "표가 비었다 — ps 파싱 실패");
+        assert!(t.iter().any(|(pid, _, _)| *pid == me), "자기 pid 가 표에 없다");
+    }
+
+    /// TTL 안의 두 호출은 **같은 Arc** 여야 한다. 여기서 복사본이 나오기 시작하면
+    /// 렌더가 pane 마다 매 프레임 표를 통째로 clone 하던 시절로 돌아간다 —
+    /// 프로세스 수백 개면 프레임마다 그만큼의 String 할당이다.
+    #[test]
+    fn shared_table_is_not_copied_within_ttl() {
+        // 첫 호출이 백그라운드 갱신을 걸었을 수 있으니 가라앉힌 뒤에 잰다.
+        let _ = process_table_shared();
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let a = process_table_shared();
+        let b = process_table_shared();
+        assert!(std::sync::Arc::ptr_eq(&a, &b), "TTL 안인데 표가 새로 만들어졌다");
+    }
 }
