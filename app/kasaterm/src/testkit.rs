@@ -859,13 +859,19 @@ impl App {
                     eprintln!("[mdscript] click: 본문 박스 없음(raw 모드인지 확인)");
                     return;
                 };
-                self.md_click_caret(&id, bx + dx, by + dy);
-                let at = self
-                    .ws
-                    .lock()
-                    .ok()
-                    .and_then(|w| w.panes.get(&id).and_then(|p| p.markdown()).map(|m| (m.cur_line, m.cur_col)));
-                eprintln!("[mdscript] click=({dx},{dy}) caret={at:?}");
+                // 실물 press 경로와 같은 함수를 쓴다 — 캐럿·드래그 앵커·연타
+                // 선택의 순서가 계약이라, 여기서 md_click_caret 만 부르면
+                // 더블클릭이 재현되지 않아 검증이 실물과 어긋난다. 같은
+                // 좌표로 짧은 간격(`_STEP_MS` 450 이하)에 두 번 주면 단어
+                // 선택, 세 번이면 줄 선택이 걸린다.
+                let clicks = self.md_press_caret(&id, bx + dx, by + dy);
+                let at = self.ws.lock().ok().and_then(|w| {
+                    w.panes
+                        .get(&id)
+                        .and_then(|p| p.markdown())
+                        .map(|m| (m.cur_line, m.cur_col, m.sel_anchor, m.selected_text()))
+                });
+                eprintln!("[mdscript] click=({dx},{dy}) clicks={clicks} caret={at:?}");
             }
             // 편집기에 글자를 넣어 본다 — `type:<문자열>`. 키 이벤트를 밖에서
             // 만들 수 없어(winit `KeyEvent`) 삽입 진입점을 직접 부른다.

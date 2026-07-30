@@ -656,6 +656,71 @@ impl App {
             })
             .unwrap_or_else(|| "shell".to_string())
     }
+    /// pane 의 현재 스크롤(logical px). 없는 pane 이면 0.
+    pub(crate) fn md_scroll_of(&self, id: &str) -> f32 {
+        self.ws
+            .lock()
+            .ok()
+            .and_then(|ws| {
+                ws.panes
+                    .get(id)
+                    .and_then(|p| p.markdown())
+                    .map(|m| m.scroll)
+            })
+            .unwrap_or(0.0)
+    }
+
+    /// 노치 스크롤 한 프레임 보간. 목표에 지수로 붙고, 0.5px 안에 들면 목표에
+    /// 붙이고 애니를 끝낸다. 반환값 = 아직 도는 애니가 있는지(프레임 펌프 조건).
+    ///
+    /// 감쇠를 프레임이 아니라 **경과 시간**으로 계산하는 이유: 디버그 빌드는 한
+    /// 프레임이 수십 ms 씩 튀는데, 프레임당 고정 비율로 붙이면 같은 스크롤이
+    /// 빌드마다 다른 속도로 보인다.
+    pub(crate) fn tick_md_scroll(&mut self) -> bool {
+        if self.md_scroll_anim.is_empty() {
+            return false;
+        }
+        let now = Instant::now();
+        let mut done: Vec<String> = Vec::new();
+        if let Ok(mut ws) = self.ws.lock() {
+            for (id, (target, last)) in self.md_scroll_anim.iter_mut() {
+                // 첫 프레임이 창 리사이즈 등으로 늦게 오면 dt 가 커져 한 번에
+                // 목표까지 튄다 — 관성이 사라지므로 상한을 둔다.
+                let raw_dt = now.duration_since(*last).as_secs_f32();
+                let dt = raw_dt.min(0.05);
+                *last = now;
+                let Some(pane) = ws.panes.get_mut(id) else {
+                    done.push(id.clone());
+                    continue;
+                };
+                let Some(m) = pane.markdown_mut() else {
+                    done.push(id.clone());
+                    continue;
+                };
+                let d = *target - m.scroll;
+                if d.abs() < 0.5 {
+                    m.scroll = *target;
+                    done.push(id.clone());
+                } else {
+                    m.scroll += d * (1.0 - (-dt * 18.0).exp());
+                }
+                if std::env::var_os("KASATERM_WHEEL_DEBUG").is_some() {
+                    eprintln!(
+                        "[wheel]   tick 간격={:.1}ms scroll={:.1} → {:.1}",
+                        raw_dt * 1000.0,
+                        m.scroll,
+                        target
+                    );
+                }
+                pane.dirty = true;
+            }
+        }
+        for id in done {
+            self.md_scroll_anim.remove(&id);
+        }
+        !self.md_scroll_anim.is_empty()
+    }
+
     /// 렌더 뷰 선택 텍스트. 낱말 사각형(마지막 프레임)에서 범위에 든 것을 읽는
     /// 순서로 이어 붙인다 — 줄이 바뀌면 개행. 사각형은 화면에 그려진 것만 있으므로
     /// 보이는 범위가 곧 복사 범위다(화면 밖 블록은 애초에 레이아웃을 건너뛴다).
@@ -1082,24 +1147,44 @@ impl App {
                 let max_scroll = (content_h - visible_h).max(0.0);
                 // 픽셀 스크롤량: 마우스휠은 노치당 3행, 트랙패드는 픽셀 1:1.
                 // 아래로 굴리면(자연 스크롤) scroll 증가.
-                let dy_px = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y * self.cell.h * 3.0,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                let (dy_px, notch) = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => (y * self.cell.h * 3.0, true),
+                    MouseScrollDelta::PixelDelta(p) => (p.y as f32, false),
                 };
                 if wdbg {
                     eprintln!("[wheel]   md pane={id} dy_px={dy_px:.2} max={max_scroll:.1}");
                 }
+                // 노치는 목표만 옮기고 실제 위치는 `tick_md_scroll` 이 따라간다 —
+                // 한 번에 세 줄을 순간이동하면 계단으로 읽힌다. 이미 애니가 도는
+                // 중이면 표시 위치가 아니라 **목표**에 누적해야 빠른 연타가 밀리지
+                // 않는다. 트랙패드는 손가락이 곧 위치라 즉시 반영(보간하면 늦게
+                // 미끄러진다).
                 let mut moved = false;
-                if let Ok(mut ws) = self.ws.lock() {
-                    if let Some(pane) = ws.panes.get_mut(id) {
-                        if let Some(m) = pane.markdown_mut() {
-                            let next = (m.scroll - dy_px).clamp(0.0, max_scroll);
-                            if (next - m.scroll).abs() > 0.01 {
-                                m.scroll = next;
-                                moved = true;
+                if notch {
+                    let base = self
+                        .md_scroll_anim
+                        .get(id)
+                        .map(|(t, _)| *t)
+                        .unwrap_or_else(|| self.md_scroll_of(id));
+                    let target = (base - dy_px).clamp(0.0, max_scroll);
+                    if (target - self.md_scroll_of(id)).abs() > 0.5 {
+                        self.md_scroll_anim
+                            .insert(id.to_string(), (target, Instant::now()));
+                        moved = true;
+                    }
+                } else {
+                    self.md_scroll_anim.remove(id);
+                    if let Ok(mut ws) = self.ws.lock() {
+                        if let Some(pane) = ws.panes.get_mut(id) {
+                            if let Some(m) = pane.markdown_mut() {
+                                let next = (m.scroll - dy_px).clamp(0.0, max_scroll);
+                                if (next - m.scroll).abs() > 0.01 {
+                                    m.scroll = next;
+                                    moved = true;
+                                }
                             }
+                            pane.dirty |= moved;
                         }
-                        pane.dirty |= moved;
                     }
                 }
                 if moved {
