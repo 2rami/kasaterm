@@ -2384,6 +2384,48 @@ fn push_wikilinked(spans: &mut Vec<MdSpan>, t: &str, bold: bool, italic: bool, s
     plain(spans, rest);
 }
 
+/// 원시 HTML 조각에서 사람이 읽을 글자만 뽑는다. 렌더뷰엔 HTML 엔진이 없어
+/// 태그를 그릴 수는 없지만, 태그에 감싸였다는 이유로 본문을 버리면 문서 내용이
+/// 조용히 사라진다 — `<div>`·`<summary>`·`<system-reminder>` 안의 문장이 실제로
+/// 화면에서 없어졌다. 태그 이름에 밑줄이 든 `<critical_rule>` 은 HTML 태그
+/// 규칙에 어긋나 애초에 평문으로 흐르니 이 경로를 타지 않는다.
+///
+/// 주석(`<!-- -->`)은 반대로 지우는 게 맞다. 감춰 두려고 쓴 표기라 드러내면
+/// 글쓴이의 뜻이 뒤집힌다.
+fn html_visible_text(raw: &str) -> String {
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let skip = if tail.starts_with("<!--") {
+            // 닫히지 않은 주석은 문서 끝까지 주석이다(CommonMark).
+            match tail[4..].find("-->") {
+                Some(k) => 4 + k + 3,
+                None => break,
+            }
+        } else {
+            match tail.find('>') {
+                Some(k) => k + 1,
+                None => break,
+            }
+        };
+        rest = &tail[skip..];
+    }
+    out.push_str(rest);
+    // 엔티티는 자주 쓰는 것만 푼다. 전체 표를 들일 만큼 마크다운 문서에
+    // 엔티티가 잦지 않다. `&amp;` 를 맨 뒤에 두는 건 `&amp;lt;` 가 `<` 로
+    // 두 번 풀리지 않게 하기 위한 것이다.
+    let out = out
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     let mut blocks: Vec<MdBlock> = Vec::new();
@@ -2696,6 +2738,59 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                 true,
                 link_url.clone(),
             ),
+            Event::Html(raw) => {
+                // 블록 HTML. 태그만 든 줄은 아무것도 남기지 않고, 태그에 감싸인
+                // 문장만 문단으로 살아난다. cmark 가 이 블록을 한 덩어리로 주든
+                // 줄마다 쪼개 주든 결과가 같아, 어느 쪽이어도 글이 안 사라진다.
+                let text = html_visible_text(&raw);
+                if !text.is_empty() {
+                    let mut s = vec![MdSpan {
+                        text,
+                        bold: false,
+                        italic: false,
+                        code: false,
+                        strike: false,
+                        link: None,
+                    }];
+                    blocks.push(MdBlock::Para { spans: wikilinked(&mut s) });
+                }
+            }
+            Event::InlineHtml(raw) => {
+                // 인라인 태그. 통째로 버리면 강조가 사라지고 글자로 그리면 문서에
+                // 없던 꺾쇠가 생긴다 — 아는 태그는 서체로 옮기고 모르는 태그만
+                // 조용히 지운다. `<br>` 는 띄어쓰기로 떨어진다(스팬에 줄바꿈
+                // 표기가 없다). 붙여 버리면 앞뒤 낱말이 한 덩어리가 된다.
+                let t = raw.trim();
+                let closing = t.starts_with("</");
+                let name = t
+                    .trim_start_matches(['<', '/'])
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .flat_map(|c| c.to_lowercase())
+                    .collect::<String>();
+                let bump = |n: &mut i32| {
+                    if closing {
+                        *n = (*n - 1).max(0)
+                    } else {
+                        *n += 1
+                    }
+                };
+                match name.as_str() {
+                    "b" | "strong" => bump(&mut bold),
+                    "i" | "em" => bump(&mut italic),
+                    "s" | "del" | "strike" => bump(&mut strike),
+                    "br" => push_span(
+                        &mut spans,
+                        " ",
+                        bold > 0,
+                        italic > 0,
+                        strike > 0,
+                        false,
+                        link_url.clone(),
+                    ),
+                    _ => {}
+                }
+            }
             Event::TaskListMarker(checked) => item_task = Some(checked),
             Event::SoftBreak | Event::HardBreak => {
                 if in_meta {
@@ -5849,6 +5944,74 @@ mod tests {
             got.iter().all(|(_, l)| l.is_none()),
             "코드 안 표기가 링크가 됐다: {got:?}"
         );
+    }
+
+    /// HTML 태그에 감싸인 본문은 살아야 한다. 옛 렌더는 `Event::Html` 을 통째로
+    /// 버려서, 유효한 태그 이름을 만나면 그 안 문장이 화면에서 사라졌다 —
+    /// GitHub 접기 절(`<details>`)의 제목과 `<div>` 안 문장이 실제로 그랬다.
+    #[test]
+    fn html_tag_bodies_survive() {
+        let got = spans_of(
+            "<details>\n<summary>접히는 제목</summary>\n</details>\n\n\
+             <div align=\"center\">\n가운데 문장.\n</div>\n\n\
+             <system-reminder>\n하이픈 태그 안.\n</system-reminder>\n",
+        );
+        let texts: Vec<&str> = got.iter().map(|(t, _)| t.as_str()).collect();
+        for want in ["접히는 제목", "가운데 문장.", "하이픈 태그 안."] {
+            assert!(texts.iter().any(|t| t.contains(want)), "{want} 이 사라졌다: {got:?}");
+        }
+        // 태그 자체는 문서에 없던 글자다.
+        assert!(
+            texts.iter().all(|t| !t.contains('<') && !t.contains('>')),
+            "태그가 글자로 그려졌다: {got:?}"
+        );
+    }
+
+    /// 주석은 반대로 감춰져야 한다 — 안 보이게 하려고 쓴 표기라, 태그만 벗겨
+    /// 내용을 드러내면 글쓴이의 뜻이 뒤집힌다.
+    #[test]
+    fn html_comments_stay_hidden() {
+        let got = spans_of("앞 문단.\n\n<!-- 감춰 둔 메모 -->\n\n뒤 문단.\n");
+        assert!(
+            got.iter().all(|(t, _)| !t.contains("감춰 둔 메모")),
+            "주석이 드러났다: {got:?}"
+        );
+    }
+
+    /// 인라인 태그는 서체로 옮긴다. 태그를 지우기만 하면 강조가 사라지고,
+    /// 글자로 그리면 문서에 없던 꺾쇠가 생긴다.
+    #[test]
+    fn inline_html_maps_to_styles() {
+        let (blocks, _) = parse_markdown("평범 <b>굵게</b> 와 <em>기울게</em> 끝\n");
+        let spans = match &blocks[0] {
+            MdBlock::Para { spans } => spans,
+            _ => panic!("문단이 아니다"),
+        };
+        let shape: Vec<(&str, bool, bool)> = spans
+            .iter()
+            .map(|s| (s.text.as_str(), s.bold, s.italic))
+            .collect();
+        assert!(
+            shape.iter().any(|&(t, b, _)| t == "굵게" && b),
+            "b 태그가 굵게로 안 옮겨졌다: {shape:?}"
+        );
+        assert!(
+            shape.iter().any(|&(t, _, i)| t == "기울게" && i),
+            "em 태그가 기울게로 안 옮겨졌다: {shape:?}"
+        );
+        assert!(
+            shape.iter().all(|&(t, ..)| !t.contains('<')),
+            "태그가 글자로 남았다: {shape:?}"
+        );
+    }
+
+    /// `<br>` 는 스팬에 줄바꿈 표기가 없어 띄어쓰기로 떨어진다 — 그냥 지우면
+    /// 앞뒤 낱말이 한 덩어리로 붙는다(표 셀에서 자주 쓰는 표기다).
+    #[test]
+    fn inline_br_becomes_space() {
+        let got = spans_of("여러<br>줄\n");
+        let joined: String = got.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(joined, "여러 줄");
     }
 
     /// `[[이름]]` 은 대괄호를 벗긴 링크 스팬이 되고 앞뒤 글은 평문으로 남아야 한다 —
