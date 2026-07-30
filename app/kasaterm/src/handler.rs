@@ -541,7 +541,14 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(be) = self.socket_backend.clone() {
                     let live: std::collections::HashSet<String> =
                         self.ws.lock().unwrap().panes.keys().cloned().collect();
-                    be.rebind_agents_panes(&live);
+                    // 반드시 GUI 스레드 **밖에서**. 이 안의 `query_pane_pids` 는 GUI
+                    // 스레드에 이벤트를 보내고 답을 기다리는 구조라, GUI 스레드가
+                    // 직접 부르면 자기가 처리해야 할 이벤트를 자기가 기다리는 꼴이
+                    // 된다 — 300ms 를 꽉 채워 타임아웃하고 빈 목록을 받으므로 창은
+                    // 3초마다 300ms 멈추고 재바인딩은 한 번도 성공하지 못한다
+                    // (실측: 메인 스레드 대기 시간의 10%가 여기였다). pane argv 를
+                    // 읽는 ps 포크가 프레임 밖으로 나가는 건 덤이다.
+                    std::thread::spawn(move || be.rebind_agents_panes(&live));
                 }
                 // 포크 사전 바인딩: 새 bg 세션이 미바인딩이고 부모(argv --resume 계보)
                 // 가 바인딩돼 있으면 즉시 영속 — 포크 SessionStart 의 persona 조회
@@ -3618,6 +3625,17 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 if !self.try_copy_md_block() {
                                     if self.md_body_rects.contains_key(&pane_id) {
+                                        // 미니맵 띠를 먼저 본다 — 그 안이면 캐럿이
+                                        // 아니라 스크롤 점프고, 드래그 앵커도 세우지
+                                        // 않는다(안 그러면 띠에서 손을 떼는 순간
+                                        // 본문에 엉뚱한 선택이 생긴다).
+                                        if self.md_mini_jump(
+                                            &pane_id,
+                                            self.cursor_px.0,
+                                            self.cursor_px.1,
+                                        ) {
+                                            return;
+                                        }
                                         // 캐럿 이동 + 드래그 앵커 + 연타 선택
                                         // (더블 = 단어, 트리플 = 줄). 순서가
                                         // 계약이라 한 함수에 묶여 있고, 헤드리스
