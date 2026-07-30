@@ -31,8 +31,31 @@ pub(crate) fn command<S: AsRef<OsStr>>(program: S) -> Command {
 /// 결과는 프로세스당 한 번만 훑어 캐시한다. 우클릭할 때마다 파일시스템을 뒤지면
 /// 메뉴가 뜨는 데 체감될 만큼 늦다.
 pub(crate) fn open_with_apps() -> &'static [(String, String)] {
-    static APPS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
     APPS.get_or_init(scan_open_with_apps)
+}
+
+static APPS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+
+/// 렌더 경로 전용 — 아직 안 훑었으면 `None`. 첫 스캔이 Spotlight(`mdfind`) 를
+/// fork 하므로 프레임 안에서 기다리면 창이 통째로 멈춘다(실측: Info 패널 첫
+/// 프레임 104ms 중 dir 섹션이 104.45ms). 그릴 땐 준비된 것만 쓰고, 준비는
+/// `warm_open_with_apps` 가 백그라운드에서 시킨다.
+pub(crate) fn open_with_apps_ready() -> Option<&'static [(String, String)]> {
+    APPS.get().map(Vec::as_slice)
+}
+
+/// 백그라운드로 미리 훑는다. 완료되면 `done` 을 부른다(재그리기 트리거용).
+/// 이미 준비됐거나 훑는 중이면 아무 것도 하지 않는다.
+pub(crate) fn warm_open_with_apps(done: impl FnOnce() + Send + 'static) {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if APPS.get().is_some() || STARTED.swap(true, Relaxed) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let _ = open_with_apps();
+        done();
+    });
 }
 
 #[cfg(target_os = "macos")]

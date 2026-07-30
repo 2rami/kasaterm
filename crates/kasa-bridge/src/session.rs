@@ -457,6 +457,9 @@ fn spawn_flusher(
                 // tmux/vt100 backend doesn't surface DECCKM; PTY backend
                 // (the default) does the real work via TermMode::APP_CURSOR.
                 app_cursor: false,
+                // 마찬가지로 DECSET 2004 를 안 내보낸다 — false 면 호스트가 감싸개
+                // 없이 그대로 붙여넣어, 최소한 escape 가 섞이는 일은 없다.
+                bracketed_paste: false,
                 title: snap.title,
                 eof: false,
                 // tmux backend doesn't track OSC 133 prompt marks; the

@@ -505,6 +505,33 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::ClaudeAccountAutoswitch { to, cooldown_until, pct } => {
+                // 떠나는 계정을 먼저 잠근다 — 저장 순서가 반대면 그 사이 폴러가
+                // 한 번 더 판정해 방금 소진한 계정으로 되돌아갈 수 있다.
+                if let Some(until) = *cooldown_until {
+                    socket::write_account_cooldown(&self.set_claude_account, until);
+                }
+                let label = |id: &str| -> String {
+                    if id.is_empty() {
+                        "기본 계정".to_string()
+                    } else {
+                        self.set_claude_accounts
+                            .iter()
+                            .find(|a| a.id == id)
+                            .map_or_else(|| id.to_string(), |a| a.label.clone())
+                    }
+                };
+                let (from_label, to_label) = (label(&self.set_claude_account), label(to));
+                self.set_claude_account = to.clone();
+                // shim 을 다시 깔아 이미 열려 있는 pane 도 다음 claude 부터 새 계정으로.
+                self.settings_save();
+                self.set_toast(format!(
+                    "{from_label} 사용량 {pct:.0}% — {to_label} 로 전환했어요 (다음에 뜨는 claude 부터)"
+                ));
+                self.chrome_dirty = true;
+                self.render_frame();
+                return;
+            }
             UserEvent::BgAgentsChanged => {
                 // agents/attach 뷰 pane 재바인딩을 board 폴링에만 맡기지 않는다 — 웹뷰/
                 // CLI 가 board 를 안 부르는 세션에선 rebind 가 영영 안 돌아 pane 이 스폰
@@ -855,25 +882,61 @@ impl ApplicationHandler<UserEvent> for App {
         {
             let usage_proxy = self.proxy.clone();
             let usage_cache = self.claude_usage.clone();
-            std::thread::spawn(move || loop {
-                let next = fetch_claude_five_hour(&crate::mcp_panel_port());
-                // 일시적 fetch 실패(None)면 마지막 유효값을 유지 — pill 깜빡임/사라짐 방지.
-                // (git col 폴러와 동일 정책. 5시간 창은 항상 존재해 참 None 은 사실상 없음.)
-                if next.is_some() {
-                    match usage_cache.lock() {
-                        Ok(mut g) => {
-                            if *g != next {
-                                *g = next;
-                                drop(g);
-                                if usage_proxy.send_event(UserEvent::Redraw).is_err() {
-                                    break;
+            std::thread::spawn(move || {
+                // 방금 전환했으면 잠시 판정을 쉰다. `/claude-usage` 는 60초 TTL 캐시라
+                // 전환 직후 한 번은 **떠나온 계정의 값**이 그대로 나올 수 있고, 그걸
+                // 새 계정의 사용률로 읽으면 계정을 연쇄로 건너뛴다.
+                let mut last_switch: Option<std::time::Instant> = None;
+                loop {
+                    let usage = fetch_claude_usage(&crate::mcp_panel_port());
+                    let next = usage.as_ref().and_then(five_hour_pct);
+                    // 일시적 fetch 실패(None)면 마지막 유효값을 유지 — pill 깜빡임/사라짐 방지.
+                    // (git col 폴러와 동일 정책. 5시간 창은 항상 존재해 참 None 은 사실상 없음.)
+                    if next.is_some() {
+                        match usage_cache.lock() {
+                            Ok(mut g) => {
+                                if *g != next {
+                                    *g = next;
+                                    drop(g);
+                                    if usage_proxy.send_event(UserEvent::Redraw).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    // 한도 자동 계정 전환. 판정은 여기(폴러)서 하고 실제 전환은 GUI
+                    // 스레드가 한다 — 설정 저장이 shim 을 다시 까는 일이라 App 이 필요하다.
+                    let rested = last_switch.is_none_or(|t| t.elapsed().as_secs() >= 300);
+                    if let (Some(u), true, true) = (usage.as_ref(), socket::read_account_autoswitch(), rested) {
+                        if let Some(p) = socket::usage_pressure(u) {
+                            if p.pct >= socket::read_account_autoswitch_pct() {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map_or(0, |d| d.as_secs());
+                                let to = socket::pick_next_account(
+                                    &socket::read_claude_account(),
+                                    &socket::read_claude_accounts(),
+                                    &socket::read_account_cooldowns(),
+                                    now,
+                                );
+                                if let Some(to) = to {
+                                    last_switch = Some(std::time::Instant::now());
+                                    let ev = UserEvent::ClaudeAccountAutoswitch {
+                                        to,
+                                        cooldown_until: p.resets_at,
+                                        pct: p.pct,
+                                    };
+                                    if usage_proxy.send_event(ev).is_err() {
+                                        break;
+                                    }
                                 }
                             }
                         }
-                        Err(_) => break,
                     }
+                    std::thread::sleep(std::time::Duration::from_secs(60));
                 }
-                std::thread::sleep(std::time::Duration::from_secs(60));
             });
         }
         // bg-agents 폴러. `claude agents --json --all` 로 claude 자체 supervisor 의
@@ -1848,21 +1911,31 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     return;
                 }
-                // Info 탭 프로세스 행 → 종료·복사 메뉴. 행 rect 는 Info 본문이
+                // Info 탭 프로세스·포트 행 → 종료·복사 메뉴. 행 rect 는 Info 본문이
                 // 그릴 때만 갱신되므로 탭까지 확인한다(Git 탭에선 낡은 좌표).
                 if self.git.col_visible
                     && self.info.tab == state::SideTab::Info
                     && cy > TITLE_HEIGHT
                     && cx >= self.git_col_x()
                 {
-                    if let Some(pid) = self
+                    let inside = |r: &(f32, f32, f32, f32)| {
+                        cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
+                    };
+                    let target = self
                         .info
                         .proc_rects
                         .iter()
-                        .find(|(_, r)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3)
-                        .map(|(p, _)| *p)
-                    {
-                        self.info.ctx_menu = Some((cx, cy, pid));
+                        .find(|(_, r)| inside(r))
+                        .map(|(p, _)| state::InfoTarget::Proc(*p))
+                        .or_else(|| {
+                            self.info
+                                .port_rects
+                                .iter()
+                                .find(|(_, _, r)| inside(r))
+                                .map(|(port, pid, _)| state::InfoTarget::Port(*port, *pid))
+                        });
+                    if let Some(target) = target {
+                        self.info.ctx_menu = Some((cx, cy, target));
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -2683,20 +2756,19 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
-                        // 프로세스 우클릭 메뉴가 떠 있으면 그게 최상단이다.
+                        // 프로세스·포트 우클릭 메뉴가 떠 있으면 그게 최상단이다.
                         // 밖을 눌렀으면 닫기만 하고 클릭을 삼킨다 — 메뉴를 닫는
                         // 클릭이 밑의 행까지 누르면 놀란다.
-                        if self.info.ctx_menu.is_some() {
+                        if let Some((_, _, target)) = self.info.ctx_menu {
                             let picked = self
                                 .info
                                 .ctx_menu_rects
                                 .iter()
                                 .find(|(_, r)| inside(r))
                                 .map(|(a, _)| *a);
-                            let pid = self.info.ctx_menu.map(|(_, _, p)| p).unwrap_or(0);
                             self.info.ctx_menu = None;
                             if let Some(action) = picked {
-                                self.run_info_menu_action(action, pid);
+                                self.run_info_menu_action(action, target);
                             }
                             window.request_redraw();
                             return;
@@ -2771,6 +2843,20 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
+                            // pane 그룹 머리 → 그 그룹만 접기.
+                            if let Some(pane) = self
+                                .info
+                                .group_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(p, _)| p.clone())
+                            {
+                                if !self.info.group_collapsed.remove(&pane) {
+                                    self.info.group_collapsed.insert(pane);
+                                }
+                                window.request_redraw();
+                                return;
+                            }
                             // 종료(×)는 행보다 먼저 — 행 안에 겹쳐 있다.
                             if let Some(pid) = self
                                 .info
@@ -2783,6 +2869,19 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
+                            // 포트의 종료(×)도 결국 쥔 프로세스를 죽이는 것 —
+                            // 열기(행 클릭)보다 먼저 봐야 행에 삼켜지지 않는다.
+                            if let Some(pid) = self
+                                .info
+                                .port_kill_rects
+                                .iter()
+                                .find(|(_, _, r)| inside(r))
+                                .map(|(_, pid, _)| *pid)
+                            {
+                                self.kill_process(pid, false);
+                                window.request_redraw();
+                                return;
+                            }
                             // 포트 행 → 브라우저로 localhost 열기. dev 서버를 띄운
                             // 직후 "몇 번 포트였지"를 확인하러 스크롤백을 뒤지는
                             // 일이 이 클릭 하나로 끝난다.
@@ -2790,8 +2889,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 .info
                                 .port_rects
                                 .iter()
-                                .find(|(_, r)| inside(r))
-                                .map(|(p, _)| *p)
+                                .find(|(_, _, r)| inside(r))
+                                .map(|(p, _, _)| *p)
                             {
                                 self.open_localhost(port);
                                 return;
@@ -4601,10 +4700,10 @@ impl App {
 /// Returns `None` on a transient git failure so the caller keeps the last good
 /// snapshot. Shared by the 1.2s poller and the per-click stage/unstage refresh
 /// so a + / − press reflects immediately instead of waiting for the next tick.
-/// 로컬 `/claude-usage`(oauth/usage 프록시)에서 5시간 창 사용률(%)만 뽑는다. curl 로
-/// 로컬 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 실패/토큰
-/// 없음/형식밖이면 None. utilization 은 이미 0..100 퍼센트(웹뷰 UsagePill 과 동일).
-fn fetch_claude_five_hour(port: &str) -> Option<f32> {
+/// 로컬 `/claude-usage`(oauth/usage 프록시)의 `usage` 본문. curl 로 로컬
+/// 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 실패/토큰
+/// 없음/형식밖이면 None.
+fn fetch_claude_usage(port: &str) -> Option<serde_json::Value> {
     let out = std::process::Command::new("curl")
         .args(["-s", "--max-time", "5", &format!("http://127.0.0.1:{port}/claude-usage")])
         .output()
@@ -4616,11 +4715,14 @@ fn fetch_claude_five_hour(port: &str) -> Option<f32> {
     if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
         return None;
     }
-    v.get("usage")?
-        .get("five_hour")?
-        .get("utilization")?
-        .as_f64()
-        .map(|x| x as f32)
+    v.get("usage").cloned()
+}
+
+/// 타이틀바 pill 이 쓰는 5시간 창 사용률(%). 자동 전환은 이걸 안 보고 주간까지
+/// 아우르는 `socket::usage_pressure` 를 본다 — pill 은 "이 세션이 얼마나
+/// 남았나"라는 다른 질문에 답한다. utilization 은 이미 0..100 퍼센트.
+fn five_hour_pct(usage: &serde_json::Value) -> Option<f32> {
+    usage.get("five_hour")?.get("utilization")?.as_f64().map(|x| x as f32)
 }
 
 fn fetch_git_col_view(cwd: &std::path::Path) -> Option<GitColView> {

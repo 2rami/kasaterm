@@ -129,7 +129,7 @@ impl AuxWindow {
                     0.0,
                     w,
                     h,
-                    m.scroll as f32,
+                    m.scroll,
                     m.h_scroll,
                     lang,
                     &pe,
@@ -162,7 +162,7 @@ impl AuxWindow {
                     .get(line)
                     .map(|l| l.chars().take(m.cur_col).collect())
                     .unwrap_or_default();
-                (m.edit_lines.len(), line, prefix, m.scroll as f32, m.h_scroll)
+                (m.edit_lines.len(), line, prefix, m.scroll, m.h_scroll)
             }
             AuxWindowKind::Settings | AuxWindowKind::Terminal { .. } => return,
         };
@@ -171,7 +171,7 @@ impl AuxWindow {
             .gpu
             .raw_editor_ensure_visible(line_count, cur_line, &prefix, w, h, scroll, h_scroll);
         if let Some(m) = self.editor_mut() {
-            m.scroll = ns.max(0.0) as usize;
+            m.scroll = ns.max(0.0);
             m.h_scroll = nh.max(0.0);
         }
     }
@@ -289,7 +289,7 @@ impl App {
             edit_lines,
             cur_line: 0,
             cur_col: 0,
-            scroll: 0,
+            scroll: 0.0,
             h_scroll: 0.0,
             modified: false,
             sel_anchor: None,
@@ -558,14 +558,16 @@ impl App {
     /// 확장 시 false 팔이 필요할 수 있어 유지).
     fn aux_editor_shortcut(&mut self, idx: usize, code: winit::keyboard::KeyCode) -> bool {
         use winit::keyboard::KeyCode;
+        // 확정은 **모든** 팔 앞에서 한 번 — pane 편집기의 `md_flush_preedit` 과
+        // 같은 규칙. 예전엔 C·화살표가 빠져 있어 조합 중 그 키를 누르면 음절이
+        // 유실됐다(양쪽 테이블에 같은 버그가 복제돼 있었다).
+        self.aux_flush_hangul(idx);
         match code {
             KeyCode::KeyS => {
-                self.aux_flush_hangul(idx);
                 self.aux_editor_save(idx);
                 true
             }
             KeyCode::KeyV => {
-                self.aux_flush_hangul(idx);
                 self.aux_editor_paste(idx);
                 true
             }
@@ -574,19 +576,26 @@ impl App {
                 true
             }
             KeyCode::KeyX => {
-                self.aux_flush_hangul(idx);
                 self.aux_copy(idx, true);
                 true
             }
             KeyCode::KeyA => {
-                self.aux_flush_hangul(idx);
                 if let Some(m) = self.aux_windows.get_mut(idx).and_then(|a| a.editor_mut()) {
                     m.select_all_buf();
                 }
                 true
             }
+            // pane 편집기와 같은 Cmd+D = 캐럿 단어 선택.
+            KeyCode::KeyD if !self.modifiers.shift_key() => {
+                if let Some(m) = self.aux_windows.get_mut(idx).and_then(|a| a.editor_mut()) {
+                    m.select_word_at();
+                }
+                if let Some(a) = self.aux_windows.get_mut(idx) {
+                    a.ensure_caret_visible();
+                }
+                true
+            }
             KeyCode::KeyZ => {
-                self.aux_flush_hangul(idx);
                 let redo = self.modifiers.shift_key();
                 if let Some(a) = self.aux_windows.get_mut(idx) {
                     if let Some(m) = a.editor_mut() {
@@ -785,7 +794,7 @@ impl App {
             let Some(m) = a.editor() else { return (0, 0) };
             (
                 m.edit_lines.clone(),
-                m.scroll as f32,
+                m.scroll,
                 m.h_scroll,
                 a.cursor_px.0,
                 a.cursor_px.1,
@@ -839,8 +848,8 @@ impl App {
         let max_scroll = (content_h - h + lh * 2.0).max(0.0);
         if let Some(m) = a.editor_mut() {
             // 위로 스크롤(y>0) = scroll 감소.
-            let ns = (m.scroll as f32 - dy).clamp(0.0, max_scroll);
-            m.scroll = ns.max(0.0) as usize;
+            let ns = (m.scroll - dy).clamp(0.0, max_scroll);
+            m.scroll = ns.max(0.0);
         }
         a.dirty = true;
         a.window.request_redraw();

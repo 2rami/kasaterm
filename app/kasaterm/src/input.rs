@@ -693,11 +693,31 @@ impl App {
         // 클립보드 PNG를 [Image] 칩으로 읽게 한다.
         if let Ok(text) = cb.get_text() {
             if !text.is_empty() {
-                let mut payload = Vec::with_capacity(text.len() + 12);
-                payload.extend_from_slice(b"\x1b[200~");
-                payload.extend_from_slice(text.as_bytes());
-                payload.extend_from_slice(b"\x1b[201~");
-                self.send_bytes(&payload);
+                // 감싸개(`ESC[200~ … ESC[201~`)는 앱이 DECSET 2004 로 **켰을 때만**
+                // 보낸다. 안 켠 앱은 저 바이트를 입력의 일부로 받는다 — `claude auth
+                // login` 의 코드 프롬프트가 그래서 "Invalid code" 로 튕겼다(거노:
+                // "붙여넣기가 안되는거같은데"). zsh·claude TUI 는 켜므로 평소 붙여넣기
+                // 경험은 그대로다.
+                let bracketed = self
+                    .ws
+                    .lock()
+                    .unwrap()
+                    .active()
+                    .and_then(|p| p.term())
+                    .map(|t| t.bracketed_paste)
+                    .unwrap_or(false);
+                if bracketed {
+                    let mut payload = Vec::with_capacity(text.len() + 12);
+                    payload.extend_from_slice(b"\x1b[200~");
+                    payload.extend_from_slice(text.as_bytes());
+                    payload.extend_from_slice(b"\x1b[201~");
+                    self.send_bytes(&payload);
+                } else {
+                    // 감싸개가 없으면 줄바꿈이 곧 실행이다 — 실제 터미널과 같이
+                    // CR 로 보낸다(LF 는 대부분의 라인 편집기가 안 먹는다).
+                    let raw = text.replace("\r\n", "\r").replace('\n', "\r");
+                    self.send_bytes(raw.as_bytes());
+                }
                 return;
             }
         }
@@ -916,6 +936,111 @@ impl App {
             }
             return;
         }
+        // 마크다운·편집기 pane 도 파일트리와 같은 이유로 wheel_step **앞에서** 잡는다.
+        // 정수 셀로 양자화하면 트랙패드 픽셀 델타가 한 행 높이씩 튀고, 관성 꼬리는
+        // 1셀 임계를 못 넘어 통째로 버려진다 — 문서 뷰는 셀 격자에 맞출 이유가 없다.
+        // 크롬 오버레이(상태바 드롭다운·사이드 열)가 커서 아래 있으면 그쪽이 먼저
+        // 먹어야 하므로 그 두 경우만 비켜 준다(target 이 활성 pane 으로 폴백하므로
+        // 커서가 pane 밖에 있어도 여기 걸린다).
+        let (cx, cy) = self.cursor_px;
+        let over_menu = self.statusbar.menu_rect.is_some_and(|(mx, my, mw, mh)| {
+            cx >= mx && cx <= mx + mw && cy >= my && cy <= my + mh
+        });
+        let over_side_col = self.git.col_visible && cy > TITLE_HEIGHT && cx >= self.git_col_x();
+        // Decide which pane handles this wheel: the pane the pointer is
+        // hovering over. Falls back to the active pane if the pointer
+        // is in a gutter. Multi-pane lets the user scroll inside any
+        // pane regardless of which one currently has keyboard focus.
+        let target_pane_id = self
+            .px_to_pane_cell(cx, cy)
+            .map(|(id, _, _)| id)
+            .or_else(|| self.target_pane());
+        // Markdown pane: scroll the laid-out document by pixels (it has no PTY
+        // history to delegate to). Clamp to the content height the renderer
+        // last published so it can't scroll past the end.
+        let (is_md, is_raw) = {
+            let ws = self.ws.lock().unwrap();
+            target_pane_id
+                .as_deref()
+                .and_then(|id| ws.panes.get(id))
+                .and_then(|p| p.markdown())
+                .map_or((false, false), |m| (true, m.raw_mode))
+        };
+        if is_md && !over_menu && !over_side_col {
+            // Raw editor: a horizontal wheel/trackpad component pans long code
+            // lines under the fixed gutter. Clamp to the longest line so it
+            // can't scroll into empty space past the end of the text.
+            if is_raw {
+                let (dx_px, dy_cmp) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x * self.cell.w * 3.0, y),
+                    MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
+                };
+                // Trackpad vertical swipes carry a stray horizontal component
+                // (e.g. x:36, y:-98). Pan only when the gesture is decisively
+                // horizontal (dx > 2×dy) — otherwise a plain up/down scroll
+                // yanks long code lines sideways and the short ones vanish.
+                if dx_px.abs() > dy_cmp.abs() * 2.0 && dx_px.abs() > 1.0 {
+                    if let Some(id) = target_pane_id.as_deref() {
+                        if let Ok(mut ws) = self.ws.lock() {
+                            if let Some(pane) = ws.panes.get_mut(id) {
+                                let cw = self.cell.w;
+                                if let Some(m) = pane.markdown_mut() {
+                                    let longest = m
+                                        .edit_lines
+                                        .iter()
+                                        .map(|l| l.chars().count())
+                                        .max()
+                                        .unwrap_or(0);
+                                    let max_h = (longest as f32 * cw - cw * 4.0).max(0.0);
+                                    m.h_scroll = (m.h_scroll - dx_px).clamp(0.0, max_h);
+                                }
+                                pane.dirty = true;
+                            }
+                        }
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+            }
+            if let Some(id) = target_pane_id.as_deref() {
+                let visible_h = self.window.as_ref().map_or(400.0, |w| {
+                    w.inner_size().height as f32 / (w.scale_factor() as f32 * self.ui_zoom)
+                }) - TITLE_HEIGHT
+                    - PANE_HEADER_HEIGHT
+                    - 2.0 * PANE_INNER_Y;
+                let content_h = self.md_content_h.get(id).copied().unwrap_or(0.0);
+                let max_scroll = (content_h - visible_h).max(0.0);
+                // 픽셀 스크롤량: 마우스휠은 노치당 3행, 트랙패드는 픽셀 1:1.
+                // 아래로 굴리면(자연 스크롤) scroll 증가.
+                let dy_px = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y * self.cell.h * 3.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                if wdbg {
+                    eprintln!("[wheel]   md pane={id} dy_px={dy_px:.2} max={max_scroll:.1}");
+                }
+                let mut moved = false;
+                if let Ok(mut ws) = self.ws.lock() {
+                    if let Some(pane) = ws.panes.get_mut(id) {
+                        if let Some(m) = pane.markdown_mut() {
+                            let next = (m.scroll - dy_px).clamp(0.0, max_scroll);
+                            if (next - m.scroll).abs() > 0.01 {
+                                m.scroll = next;
+                                moved = true;
+                            }
+                        }
+                        pane.dirty |= moved;
+                    }
+                }
+                if moved {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            return;
+        }
         let lines = match wheel_step(
             &mut self.wheel_accum_y,
             dy_cells,
@@ -1001,94 +1126,12 @@ impl App {
             }
             return;
         }
-        // Decide which pane handles this wheel: the pane the pointer is
-        // hovering over. Falls back to the active pane if the pointer
-        // is in a gutter. Multi-pane lets the user scroll inside any
-        // pane regardless of which one currently has keyboard focus.
-        let target_pane_id = self
-            .px_to_pane_cell(self.cursor_px.0, self.cursor_px.1)
-            .map(|(id, _, _)| id)
-            .or_else(|| self.target_pane());
         if wdbg {
             eprintln!(
                 "[wheel]   lines={lines} target_pane={:?} active={:?}",
                 target_pane_id,
                 self.ws.lock().unwrap().active_pane
             );
-        }
-        // Markdown pane: scroll the laid-out document by pixels (it has no PTY
-        // history to delegate to). Clamp to the content height the renderer
-        // last published so it can't scroll past the end.
-        let (is_md, is_raw) = {
-            let ws = self.ws.lock().unwrap();
-            target_pane_id
-                .as_deref()
-                .and_then(|id| ws.panes.get(id))
-                .and_then(|p| p.markdown())
-                .map_or((false, false), |m| (true, m.raw_mode))
-        };
-        if is_md {
-            // Raw editor: a horizontal wheel/trackpad component pans long code
-            // lines under the fixed gutter. Clamp to the longest line so it
-            // can't scroll into empty space past the end of the text.
-            if is_raw {
-                let (dx_px, dy_cmp) = match delta {
-                    MouseScrollDelta::LineDelta(x, y) => (x * self.cell.w * 3.0, y),
-                    MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
-                };
-                // Trackpad vertical swipes carry a stray horizontal component
-                // (e.g. x:36, y:-98). Pan only when the gesture is decisively
-                // horizontal (dx > 2×dy) — otherwise a plain up/down scroll
-                // yanks long code lines sideways and the short ones vanish.
-                if dx_px.abs() > dy_cmp.abs() * 2.0 && dx_px.abs() > 1.0 {
-                    if let Some(id) = target_pane_id.as_deref() {
-                        if let Ok(mut ws) = self.ws.lock() {
-                            if let Some(pane) = ws.panes.get_mut(id) {
-                                let cw = self.cell.w;
-                                if let Some(m) = pane.markdown_mut() {
-                                    let longest = m
-                                        .edit_lines
-                                        .iter()
-                                        .map(|l| l.chars().count())
-                                        .max()
-                                        .unwrap_or(0);
-                                    let max_h = (longest as f32 * cw - cw * 4.0).max(0.0);
-                                    m.h_scroll = (m.h_scroll - dx_px).clamp(0.0, max_h);
-                                }
-                                pane.dirty = true;
-                            }
-                        }
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
-                    }
-                }
-            }
-            if let Some(id) = target_pane_id.as_deref() {
-                let visible_h = self.window.as_ref().map_or(400.0, |w| {
-                    w.inner_size().height as f32 / (w.scale_factor() as f32 * self.ui_zoom)
-                }) - TITLE_HEIGHT
-                    - PANE_HEADER_HEIGHT
-                    - 2.0 * PANE_INNER_Y;
-                let content_h = self.md_content_h.get(id).copied().unwrap_or(0.0);
-                let max_scroll = (content_h - visible_h).max(0.0);
-                // lines>0 = wheel up = toward the top of the doc = less scroll.
-                let delta_px = lines as f32 * self.cell.h;
-                if let Ok(mut ws) = self.ws.lock() {
-                    if let Some(pane) = ws.panes.get_mut(id) {
-                        pane.dirty = true;
-                        if let Some(m) = pane.markdown_mut() {
-                            let cur = m.scroll as f32;
-                            let next = (cur - delta_px).clamp(0.0, max_scroll);
-                            m.scroll = next.round() as usize;
-                        }
-                    }
-                }
-            }
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-            return;
         }
         let (alt, hist_len, mouse_on, mouse_sgr) = {
             let ws = self.ws.lock().unwrap();

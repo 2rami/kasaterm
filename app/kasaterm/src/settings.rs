@@ -60,6 +60,9 @@ pub(crate) struct SettingsCtx {
     pub claude_accounts: Vec<socket::ClaudeAccount>,
     /// 활성 계정 id, `""` = 기본 로그인.
     pub claude_account: String,
+    /// 한도가 차면 다음 계정으로 알아서 넘어간다 + 그 임계 사용률(%).
+    pub account_autoswitch: bool,
+    pub account_autoswitch_pct: f32,
     /// (표시명, 에셋 슬러그) — Students 카테고리 목록·프사 썸네일용. slug 가
     /// None 이면 아직 도트 에셋이 없는 캐릭터(썸네일 자리표시).
     pub characters: Vec<(String, Option<&'static str>)>,
@@ -265,6 +268,14 @@ impl App {
             serde_json::to_value(&self.set_claude_accounts).unwrap_or(serde_json::Value::Null),
         );
         socket::write_setting("claude_account", serde_json::Value::String(self.set_claude_account.clone()));
+        socket::write_setting(
+            "claude_account_autoswitch",
+            serde_json::Value::Bool(self.set_account_autoswitch),
+        );
+        socket::write_setting(
+            "claude_account_autoswitch_pct",
+            serde_json::Value::from(self.set_account_autoswitch_pct),
+        );
         self.regen_claude_shim();
     }
 
@@ -291,7 +302,7 @@ impl App {
             return;
         }
         let label = format!("계정 {}", self.set_claude_accounts.len() + 2);
-        self.set_claude_accounts.push(socket::ClaudeAccount { id, label });
+        self.set_claude_accounts.push(socket::ClaudeAccount { id: id.clone(), label });
         self.settings_save();
 
         // env 를 명령 앞에 붙여 그 claude 프로세스에만 새 저장소를 물린다. shim 의
@@ -306,12 +317,23 @@ impl App {
         let q = dir.display().to_string().replace('\'', "'\\''");
         // 900ms = swap_character 와 같은 "셸 프롬프트가 뜰 즈음" 대기.
         let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
+        // 예전엔 맨 `claude` 를 띄웠다. 그러면 로그인은 거노가 그 안에서 `/login` 을
+        // 찾아 눌러야 하는 숨은 한 단계였고(거노: "계정추가 누르면 그냥 클로드가
+        // 켜지는데?"), 정작 계정을 가르는 일은 아무것도 안 했다.
         self.pending_restores.push((
             sess,
-            format!("CLAUDE_SECURESTORAGE_CONFIG_DIR='{q}' claude\r"),
+            format!("CLAUDE_SECURESTORAGE_CONFIG_DIR='{q}' claude auth login --claudeai\r"),
             at,
         ));
-        self.set_toast("새 pane 에서 로그인하세요 — 끝나면 설정에서 계정을 고르면 돼요".to_string());
+        // 슬롯이 자꾸 같은 계정으로 겹친 진짜 원인은 여기다: `claude auth login` 이
+        // 기본 브라우저를 여는데 거기엔 지금 계정의 claude.ai 세션이 살아 있어
+        // 그대로 승인돼 버린다. 슬롯마다 **쿠키 없는 브라우저 프로필**을 갈라 두면
+        // 새 창은 로그인 화면부터 뜨고, 그제서야 다른 계정을 넣을 수 있다.
+        spawn_oauth_browser_watch(self.ws.clone(), pane.clone(), socket::oauth_profile_dir(&id));
+        self.set_toast(
+            "빈 브라우저 창에서 새 계정으로 로그인하세요 — 기본 브라우저 탭은 닫으시고요"
+                .to_string(),
+        );
         // 설정은 **별도 창**이라, 이걸 안 닫으면 로그인 pane 도 토스트도 전부 그
         // 창 뒤에서 벌어진다 — 거노 눈엔 버튼이 먹통인 것과 구별이 안 됐다.
         // 어차피 다음 할 일이 터미널에서 로그인하는 것이니 본창으로 넘긴다.
@@ -393,6 +415,8 @@ impl App {
             claude_extra: self.set_claude_extra.clone(),
             claude_accounts: self.set_claude_accounts.clone(),
             claude_account: self.set_claude_account.clone(),
+            account_autoswitch: self.set_account_autoswitch,
+            account_autoswitch_pct: self.set_account_autoswitch_pct,
             characters: kasa_mcp::character::characters_json()
                 .map(|c| {
                     kasa_mcp::character::member_names(&c)
@@ -607,6 +631,19 @@ impl App {
             SettingsAction::ClaudeAccount(id) => {
                 self.set_claude_account = id;
                 self.settings_input = None;
+                self.settings_save();
+            }
+            SettingsAction::ToggleAccountAutoswitch => {
+                self.set_account_autoswitch = !self.set_account_autoswitch;
+                // 켜는 순간 옛 쿨다운은 버린다 — 며칠 전 소진 기록이 남아 있으면
+                // 켜자마자 "갈 곳이 없다"로 조용히 아무 일도 안 하게 된다.
+                if self.set_account_autoswitch {
+                    socket::clear_account_cooldowns();
+                }
+                self.settings_save();
+            }
+            SettingsAction::AccountAutoswitchPct(p) => {
+                self.set_account_autoswitch_pct = p as f32;
                 self.settings_save();
             }
             SettingsAction::AddClaudeAccount => self.add_claude_account(),
@@ -1319,6 +1356,35 @@ pub(crate) fn paint_settings(
                 rects.push((SettingsAction::AddClaudeAccount, r));
             }
             y += 34.0 + ROW_GAP;
+            // 자동 전환. 계정이 하나뿐이면 갈 곳이 없어 아무 일도 안 일어나므로
+            // 그 상태를 설명 줄로 미리 알려 준다 — 켜 놓고 "안 되네" 하는 게 이
+            // 기능에서 제일 흔한 오해다.
+            let lone = ctx.claude_accounts.is_empty();
+            y = field_header(g, fx, y, clip, "Auto switch",
+                &["한도가 차면 다음 계정으로 알아서 넘어가요 — 다음에 뜨는 claude 부터",
+                  if lone { "계정이 하나뿐이라 지금은 넘어갈 곳이 없어요" }
+                  else { "떠난 계정은 그 한도가 풀릴 때까지 후보에서 빠져요" }]);
+            if y > clip {
+                let ar = (fx, y, 52.0, 30.0);
+                toggle(g, ar, ctx.account_autoswitch, ctx.cursor);
+                rects.push((SettingsAction::ToggleAccountAutoswitch, ar));
+            }
+            y += 30.0 + ROW_GAP;
+            if ctx.account_autoswitch {
+                y = field_header(g, fx, y, clip, "Switch at",
+                    &["이 사용률을 넘으면 넘어가요 — 5시간 창과 주간 한도 중 높은 쪽 기준"]);
+                if y > clip {
+                    let pct = ctx.account_autoswitch_pct.round() as u32;
+                    let cells = [
+                        ("80%", pct == 80, SettingsAction::AccountAutoswitchPct(80)),
+                        ("85%", pct == 85, SettingsAction::AccountAutoswitchPct(85)),
+                        ("90%", pct == 90, SettingsAction::AccountAutoswitchPct(90)),
+                        ("95%", pct == 95, SettingsAction::AccountAutoswitchPct(95)),
+                    ];
+                    segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
+                }
+                y += SEG_H + ROW_GAP;
+            }
             y = field_header(g, fx, y, clip, "Model", &["Claude 모델 덮어쓰기 (Default = 원래대로 유지)"]);
             if y > clip {
                 let cells = [
@@ -1472,9 +1538,136 @@ pub(crate) fn paint_settings(
 /// 세그먼트 컨트롤의 고정 높이(트랙 + 내부 패딩).
 const SEG_H: f32 = 34.0;
 
-/// 계정 슬롯 하나의 실제 로그인 상태. `~/.claude.json` 의 `oauthAccount` 캐시는
-/// config dir 소속이라 계정끼리 **공유**돼서 전환 직후 옛 계정 이름이 남는다 —
-/// 그래서 캐시 대신 계정별 저장소를 얹은 `claude auth status` 의 답을 쓴다.
+/// 로그인 pane 이 뱉는 OAuth URL 을 주워 **쿠키 없는 별도 브라우저 창**으로 넘긴다.
+///
+/// `claude auth login` 은 기본 브라우저를 여는데, 거기엔 지금 계정의 claude.ai
+/// 세션이 살아 있어 그대로 승인된다 — 슬롯을 아무리 갈라도 전부 같은 계정이 붙는
+/// 이유가 이것뿐이었다(거노: "계정추가하면 1,2 같은계정으로 되는데"). 프로필이 빈
+/// 창은 로그인 화면부터 뜨므로 그제서야 다른 계정을 넣을 수 있다.
+///
+/// 화면을 폴링하는 이유: 우리는 이 pane 의 PTY 를 소유하니 URL 이 찍히는 걸 그냥
+/// 읽으면 된다. 30초 안에 못 찾으면 조용히 포기한다 — 그때는 pane 에 URL 이
+/// 그대로 남아 있으니 사용자가 직접 열 수 있다.
+fn spawn_oauth_browser_watch(
+    ws: Arc<Mutex<Workspace>>,
+    pane: String,
+    profile: Option<std::path::PathBuf>,
+) {
+    let Some(profile) = profile else { return };
+    std::thread::spawn(move || {
+        for _ in 0..75 {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let screen = {
+                let Ok(w) = ws.lock() else { return };
+                match w.panes.get(&pane) {
+                    Some(p) => p.visible_text(40),
+                    None => return,
+                }
+            };
+            let Some(url) = oauth_url_in(&screen) else { continue };
+            let _ = std::fs::create_dir_all(&profile);
+            open_isolated_browser(&url, &profile);
+            return;
+        }
+    });
+}
+
+/// 화면에서 OAuth authorize URL 을 뽑는다. 화면은 폭에 맞춰 접혀 있으므로 개행을
+/// 걷어내고 이어 붙인다.
+///
+/// ⚠️ `state` 를 **정확히 43자**로 끊는 게 핵심이다. 공백까지 먹게 두면 접힌 URL
+/// 뒤에 이어진 다음 줄의 첫 단어("Paste code here …")가 그대로 붙어 `…-r8Paste`
+/// 가 되고, 그 링크는 invalid state 로 튕긴다. state 는 32바이트 base64url 이라
+/// 길이가 항상 43이다.
+fn oauth_url_in(screen: &str) -> Option<String> {
+    const HEAD: &str = "https://claude.com/cai/oauth/authorize";
+    const STATE_LEN: usize = 43;
+    let joined: String = screen.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+    let tail = &joined[joined.rfind(HEAD)?..];
+    let end = tail.find("state=")? + "state=".len() + STATE_LEN;
+    let url = tail.get(..end)?;
+    // 화면이 아직 덜 찍혔으면 state 가 43자를 못 채운다 — 그때는 다음 폴에 다시.
+    let state = &url[url.len() - STATE_LEN..];
+    let ok = state.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    (ok && !url.contains(' ')).then(|| url.to_string())
+}
+
+/// 프로필을 갈라 브라우저를 띄운다. 크롬이 없으면 아무것도 안 한다 — 그 경우
+/// pane 에 URL 이 남아 있으니 사용자가 직접 시크릿 창에 붙여넣으면 된다.
+fn open_isolated_browser(url: &str, profile: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    const CHROME: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+    #[cfg(target_os = "windows")]
+    const CHROME: &str = r"C:\Program Files\Google\Chrome\Application\chrome.exe";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    const CHROME: &str = "google-chrome";
+    if !std::path::Path::new(CHROME).exists() {
+        eprintln!("[account] 크롬을 못 찾음 — URL 을 직접 시크릿 창에 여세요");
+        return;
+    }
+    let r = std::process::Command::new(CHROME)
+        .arg(format!("--user-data-dir={}", profile.display()))
+        .args(["--no-first-run", "--no-default-browser-check"])
+        .arg(url)
+        .spawn();
+    if let Err(e) = r {
+        eprintln!("[account] 격리 브라우저 실행 실패: {e}");
+    }
+}
+
+#[cfg(test)]
+mod oauth_url_tests {
+    use super::oauth_url_in;
+
+    /// 화면에 실제로 찍히는 모양 — URL 이 폭에 맞춰 세 줄로 접히고 바로 다음 줄에
+    /// 프롬프트가 온다. 접힌 걸 이어 붙이면 `state` 뒤에 `Paste` 가 그대로 달라붙는데,
+    /// 그 링크는 invalid state 로 튕긴다. 오늘 로그인이 두 번 깨진 원인이 이거였다.
+    const SCREEN: &str = "\
+Opening browser to sign in…
+If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c&response_type=code&r
+edirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&code_challenge_method=S256&state=VI3QV7OJRM5
+WNUMLZqCgXipW1WXeZQhoWTHm3R3Smtw
+Paste code here if prompted > ";
+
+    #[test]
+    fn joins_the_wrapped_url_without_swallowing_the_next_line() {
+        let url = oauth_url_in(SCREEN).expect("접힌 URL 도 복원돼야 한다");
+        assert!(url.ends_with("state=VI3QV7OJRM5WNUMLZqCgXipW1WXeZQhoWTHm3R3Smtw"));
+        assert!(!url.contains("Paste"), "다음 줄이 딸려 들어왔다: {url}");
+    }
+
+    #[test]
+    fn waits_while_the_state_is_still_being_printed() {
+        // 43자를 아직 다 못 받은 프레임은 URL 로 치지 않는다 — 반쪽 링크를 열면
+        // 그 시도는 그대로 죽고 사용자는 다시 처음부터 해야 한다.
+        let half = SCREEN.split("WNUMLZ").next().unwrap();
+        assert_eq!(oauth_url_in(half), None);
+    }
+
+    #[test]
+    fn ignores_a_screen_with_no_login_url() {
+        assert_eq!(oauth_url_in("kasa@mac ~ % ls\nCargo.toml  src"), None);
+    }
+
+    #[test]
+    fn takes_the_newest_url_when_an_earlier_attempt_is_still_on_screen() {
+        let two = format!("{SCREEN}\n{}", SCREEN.replace("VI3QV7OJRM5", "ZZ9QV7OJRM5"));
+        let url = oauth_url_in(&two).expect("두 번째 시도의 URL");
+        assert!(url.contains("state=ZZ9QV7OJRM5WNUMLZ"), "옛 URL 을 골랐다: {url}");
+    }
+}
+
+/// 계정 슬롯 하나의 실제 로그인 상태.
+///
+/// **`claude auth status` 의 email 은 쓰면 안 된다** — 그 필드는 슬롯별 저장소가
+/// 아니라 공유 캐시 `~/.claude.json` 에서 온다(실측: 공유 캐시를 치우면 `loggedIn:
+/// true` 인데 email 이 `null`). 그래서 어느 슬롯에 로그인하든 **모든 슬롯의 표시
+/// 이메일이 방금 로그인한 계정으로** 바뀌었다(거노: "계정추가하면 1도 그거로 바뀌어").
+/// 저장소는 실제로 갈려 있었고 표시만 거짓말을 하던 것이다 — 이 화면을 보고 "슬롯이
+/// 겹쳤다"고 판단해 몇 시간을 엉뚱한 데 썼다.
+///
+/// 그래서 `logged_in` 만 `claude auth status` 에서 받고, 신원은 로컬
+/// `/claude-identity`(그 슬롯의 토큰으로 `oauth/profile` 조회)에서 받는다.
 #[derive(Clone)]
 struct AuthProbe {
     logged_in: bool,
@@ -1510,22 +1703,48 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
         let shell = resolve_default_shell().unwrap_or_else(|| "/bin/sh".to_string());
         let mut c = std::process::Command::new(shell);
         c.arg("-lc").arg("claude auth status");
-        if let Some(d) = dir {
+        if let Some(d) = dir.as_deref() {
             c.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", d);
         }
-        let probe = c
+        let logged_in = c
             .output()
             .ok()
             .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
-            .map(|v| AuthProbe {
-                logged_in: v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false),
-                email: v.get("email").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-            });
+            .map(|v| v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false));
+        let probe = logged_in.map(|logged_in| AuthProbe {
+            logged_in,
+            // 로그인 안 된 슬롯은 물어볼 토큰이 없다 — 호출을 아낀다.
+            email: if logged_in { slot_identity(dir.as_deref()) } else { String::new() },
+        });
         if let Some(cache) = CACHE.get() {
             cache.lock().unwrap().insert(key, (Instant::now(), probe));
         }
     });
     None
+}
+
+/// 그 슬롯이 **정말로** 어느 계정인지. 로컬 `/claude-identity` 가 슬롯 토큰으로
+/// `oauth/profile` 을 물어 답한다 — 공유 캐시(`~/.claude.json`)를 안 거치는 유일한
+/// 경로다. 토큰은 서버 프로세스가 키체인에서 읽으니 argv 에 안 실린다.
+///
+/// 실패하면 빈 문자열 — 화면은 그때 이메일 자리를 비운다. **틀린 이메일을 그리는
+/// 것보다 아무것도 안 그리는 게 낫다**(그 표시를 믿고 슬롯이 겹쳤다고 오판했다).
+fn slot_identity(dir: Option<&std::path::Path>) -> String {
+    let port = crate::mcp_panel_port();
+    let d = dir.map(|p| p.display().to_string()).unwrap_or_default();
+    // -G + --data-urlencode: 경로에 공백이나 한글이 섞여도 쿼리로 안전하게 실린다.
+    let Ok(out) = std::process::Command::new("curl")
+        .args(["-s", "--max-time", "12", "-G", "--data-urlencode", &format!("dir={d}")])
+        .arg(format!("http://127.0.0.1:{port}/claude-identity"))
+        .output()
+    else {
+        return String::new();
+    };
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .ok()
+        .filter(|v| v.get("ok").and_then(|b| b.as_bool()) == Some(true))
+        .and_then(|v| v.get("email").and_then(|s| s.as_str()).map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// 설정 항목의 제목과 (있으면) 설명 줄들을 그리고, 컨트롤이 놓일 y 를 돌려준다.

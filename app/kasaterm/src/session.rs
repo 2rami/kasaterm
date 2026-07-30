@@ -83,6 +83,7 @@ impl App {
         tp.mouse_enabled = update.mouse_enabled;
         tp.mouse_sgr = update.mouse_sgr;
         tp.app_cursor = update.app_cursor;
+        tp.bracketed_paste = update.bracketed_paste;
         // Carry the OSC 133 prompt-end mark only on frames that
         // actually emitted one; keep the last otherwise so a
         // mid-typing frame doesn't erase it.
@@ -1139,7 +1140,7 @@ impl App {
                 edit_lines,
                 cur_line: 0,
                 cur_col: 0,
-                scroll: 0,
+                scroll: 0.0,
                 h_scroll: 0.0,
                 modified: false,
                 sel_anchor: None,
@@ -1288,7 +1289,7 @@ impl App {
             edit_lines: Arc::default(),
             cur_line: 0,
             cur_col: 0,
-            scroll: 0,
+            scroll: 0.0,
             h_scroll: 0.0,
             modified: false,
             sel_anchor: None,
@@ -2412,7 +2413,7 @@ impl App {
 /// 홈과 파일시스템 루트는 레포로 인정하지 않는다 — dotfiles 를 git 으로 관리하면
 /// 홈 자체가 레포라, 앵커가 어느 프로젝트에서든 홈 전체로 튀어 사이드바가
 /// 쓸모없어진다.
-fn git_repo_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+pub(crate) fn git_repo_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok().map(std::path::PathBuf::from);
     let mut cur = Some(start);
     while let Some(dir) = cur {

@@ -766,11 +766,7 @@ impl GpuRenderer {
             let glyph_x = pen + entry.bearing_x as f32;
             let glyph_y = baseline_px - entry.bearing_y as f32;
             if glyph_x < clip_l || glyph_x + entry.px_w as f32 > clip_px {
-                pen += if is_wide_char(ch) {
-                    entry.px_w as f32 + size_px as f32 * 0.18
-                } else {
-                    entry.advance
-                };
+                pen += Self::pen_step(ch, entry.px_w as f32, entry.advance, size_px as f32);
                 continue;
             }
             self.chrome.push(CellInstance {
@@ -780,16 +776,61 @@ impl GpuRenderer {
                 fg_rgba: fg,
                 ..Default::default()
             });
-            // Header text is proportional, not a mono grid. A wide (CJK)
-            // glyph carries a ~2-cell mono advance, which leaves big gaps
-            // between Hangul in a small label ("탭이름 테스트" reads spaced
-            // out). Tighten wide glyphs to their ink width + a little
-            // tracking so the label reads evenly.
-            pen += if is_wide_char(ch) {
-                entry.px_w as f32 + size_px as f32 * 0.18
-            } else {
-                entry.advance
+            pen += Self::pen_step(ch, entry.px_w as f32, entry.advance, size_px as f32);
+        }
+        pen / s
+    }
+
+    /// 비례 배치 텍스트에서 글자 하나가 펜을 얼마나 밀어내는가 —
+    /// `draw_text_clipped` 이 실제로 쓰는 규칙 그 자체다.
+    ///
+    /// 헤더·편집기 텍스트는 모노 격자가 아니다. 와이드(CJK) 글리프는 모노
+    /// 페이스에서 2셀에 가까운 advance 를 들고 오는데 그대로 쓰면 작은
+    /// 라벨의 한글이 뜨문뜨문 벌어져 보인다("탭이름 테스트"). 그래서 잉크
+    /// 폭 + 약간의 트래킹으로 좁힌다.
+    ///
+    /// 캐럿·선택 밴드·클릭 히트테스트가 이 함수를 거치지 않으면 화면과
+    /// 좌표가 갈린다 — 한글 3글자를 선택했는데 밴드가 2.3글자만 덮던
+    /// 실측 버그가 정확히 그것이었다(측정 쪽만 폰트 원시 advance 를 썼다).
+    fn pen_step(ch: char, px_w: f32, advance: f32, size_px: f32) -> f32 {
+        if is_wide_char(ch) {
+            px_w + size_px * 0.18
+        } else {
+            advance
+        }
+    }
+
+    /// `draw_text_clipped` 이 그릴 폭(logical px) — 같은 규칙·같은 폰트(0)로
+    /// 펜만 굴리고 글리프는 안 그린다. 편집기의 캐럿 x·선택 밴드 경계·
+    /// 클릭 히트테스트·거터 폭은 전부 이걸로 재야 한다.
+    ///
+    /// `measure_run` 과 헷갈리면 안 된다 — 그쪽은 `md_draw_word`(마크다운
+    /// 비례 배치)의 파트너로, 공백을 폰트 metric 으로 재고 CJK 를 고딕
+    /// 페이스로 넘길 수 있다. 두 렌더 경로가 규칙이 다르므로 측정 함수도
+    /// 둘이어야 하고, 섞어 쓰면 어느 한쪽이 반드시 어긋난다.
+    pub fn measure_pen_run(&mut self, text: &str, size: f32, bold: bool, italic: bool) -> f32 {
+        let s = self.scale;
+        let size_px = (size * s).round().max(1.0) as u32;
+        let mut pen = 0.0f32;
+        for ch in text.chars() {
+            if ch == ' ' {
+                pen += self.shaper.cell_advance(size_px as f32);
+                continue;
+            }
+            let key = GlyphKey {
+                ch,
+                bold,
+                italic,
+                size_px,
+                font: 0,
             };
+            let Some(entry) =
+                self.atlas
+                    .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
+            else {
+                continue;
+            };
+            pen += Self::pen_step(ch, entry.px_w as f32, entry.advance, size_px as f32);
         }
         pen / s
     }
@@ -878,10 +919,12 @@ impl GpuRenderer {
                             ..Default::default()
                         });
                     } else {
-                        let x = cell_x + entry.bearing_x as f32;
-                        let y = baseline_y - entry.bearing_y as f32;
                         self.chrome.push(CellInstance {
-                            cell_px: [x, y, entry.px_w as f32, entry.px_h as f32],
+                            // preedit / ghost text is drawn standalone, with no
+                            // row to look sideways into — no room to lend.
+                            cell_px: fit_cell_glyph(
+                                &entry, cell_x, baseline_y, cell_w_px, 0.0, 0.0,
+                            ),
                             uv_min: entry.uv_min,
                             uv_max: entry.uv_max,
                             fg_rgba: acc,
@@ -951,10 +994,12 @@ impl GpuRenderer {
                             ..Default::default()
                         });
                     } else {
-                        let x = cell_x + entry.bearing_x as f32;
-                        let y = baseline_y - entry.bearing_y as f32;
                         self.chrome.push(CellInstance {
-                            cell_px: [x, y, entry.px_w as f32, entry.px_h as f32],
+                            // preedit / ghost text is drawn standalone, with no
+                            // row to look sideways into — no room to lend.
+                            cell_px: fit_cell_glyph(
+                                &entry, cell_x, baseline_y, cell_w_px, 0.0, 0.0,
+                            ),
                             uv_min: entry.uv_min,
                             uv_max: entry.uv_max,
                             fg_rgba: fg,
@@ -1192,6 +1237,14 @@ impl GpuRenderer {
                             self.md_draw_word(
                                 trimmed, pen_x, pen_y, size, col, bold, span.italic, font, false,
                             );
+                        }
+                        if span.strike {
+                            // 링크 밑줄과 같은 획을 x-height 중간에 — 글자를 가로질러야
+                            // 취소선으로 읽힌다. 트레일링 스페이스까지 이어 그려
+                            // 여러 낱말이 한 줄로 지워진다.
+                            let sy = pen_y + size * 0.6;
+                            let sw = ww + if trailing_space { space_w } else { 0.0 };
+                            self.rect(pen_x, sy, sw, (size * 0.06).max(1.0), color);
                         }
                         if let Some(dest) = &span.link {
                             // Underline just below the glyph baseline (size-based,
@@ -1448,23 +1501,49 @@ impl GpuRenderer {
                     }
                     pen_y += block_h + base * 0.85;
                 }
-                MdBlock::ListItem { depth, marker, spans } => {
+                MdBlock::ListItem { depth, marker, spans, task } => {
                     let size = base;
                     let lh = self.md_shaper.line_height(size * self.scale).ceil() / self.scale;
                     let indent = (*depth as f32 + 1.0) * base * 1.5;
                     if pen_y + lh > clip_top && pen_y < clip_bot {
-                        self.draw_text(
-                            x + indent - base * 1.1,
-                            pen_y,
-                            marker,
-                            DrawOpts {
-                                font_size: size,
-                                color: crate::theme::accent(),
-                                bold: false,
-                                italic: false,
-                            },
-                        );
+                        match task {
+                            // 체크박스는 글리프가 아니라 아이콘으로 그린다 — ☐/☑ 는
+                            // 폰트에 있을 때만 나와서 기기마다 다르게 보인다.
+                            Some(checked) => {
+                                let isz = size * 0.95;
+                                self.queue_icon(
+                                    if *checked { "square-check" } else { "square" },
+                                    x + indent - base * 1.35,
+                                    pen_y + (lh - isz) / 2.0,
+                                    isz,
+                                    if *checked {
+                                        crate::theme::accent()
+                                    } else {
+                                        crate::theme::text_dim()
+                                    },
+                                );
+                            }
+                            None => {
+                                self.draw_text(
+                                    x + indent - base * 1.1,
+                                    pen_y,
+                                    marker,
+                                    DrawOpts {
+                                        font_size: size,
+                                        color: crate::theme::accent(),
+                                        bold: false,
+                                        italic: false,
+                                    },
+                                );
+                            }
+                        }
                     }
+                    // 끝낸 할 일은 노션처럼 본문까지 흐려진다 — 체크박스만 바뀌면
+                    // 목록을 훑을 때 남은 일과 끝난 일이 같은 무게로 읽힌다.
+                    let body = match task {
+                        Some(true) => crate::theme::text_dim(),
+                        _ => crate::theme::text(),
+                    };
                     pen_y = self.md_runs(
                         spans,
                         x + indent,
@@ -1472,7 +1551,7 @@ impl GpuRenderer {
                         (w - indent).max(1.0),
                         size,
                         false,
-                        crate::theme::text(),
+                        body,
                         clip_top,
                         clip_bot,
                     );
@@ -1501,6 +1580,60 @@ impl GpuRenderer {
                 }
                 MdBlock::Rule => {
                     pen_y += base * 0.9;
+                    if pen_y > clip_top && pen_y < clip_bot {
+                        self.rect(x, pen_y, w, 1.0, crate::theme::border());
+                    }
+                    pen_y += base * 0.9;
+                }
+                MdBlock::Meta { rows } => {
+                    // 노션 속성 영역: 본문보다 작고 흐린 라벨 열 + 값 열, 아래에 얇은
+                    // 경계선. 본문과 같은 경로(md_runs)로 그린다 — draw_text 는 터미널
+                    // 폰트라 등폭 폭으로 열을 잡게 되고, 그러면 값이 라벨 위에 겹쳐
+                    // 그려진다(실측: `metadata.node_ty` 에 `memory` 가 포개졌다).
+                    let size = base * 0.82;
+                    let mk = |t: &str| crate::MdSpan {
+                        text: t.to_string(),
+                        bold: false,
+                        italic: false,
+                        code: false,
+                        strike: false,
+                        link: None,
+                    };
+                    let label_w = rows
+                        .iter()
+                        .map(|(k, _)| self.measure_run(k, size, false, false, false, false))
+                        .fold(0.0_f32, f32::max)
+                        + base * 1.2;
+                    for (k, v) in rows {
+                        let label = [mk(k)];
+                        let value = [mk(v)];
+                        let y0 = pen_y;
+                        self.md_runs(
+                            &label,
+                            x,
+                            y0,
+                            label_w,
+                            size,
+                            false,
+                            crate::theme::text_dim(),
+                            clip_top,
+                            clip_bot,
+                        );
+                        // 값은 남은 폭 안에서 접힌다 — 긴 description 을 잘라 버리면
+                        // 속성 영역이 정보를 잃는다.
+                        pen_y = self.md_runs(
+                            &value,
+                            x + label_w,
+                            y0,
+                            (w - label_w).max(1.0),
+                            size,
+                            false,
+                            crate::theme::text(),
+                            clip_top,
+                            clip_bot,
+                        );
+                    }
+                    pen_y += base * 0.55;
                     if pen_y > clip_top && pen_y < clip_bot {
                         self.rect(x, pen_y, w, 1.0, crate::theme::border());
                     }
@@ -1728,7 +1861,7 @@ impl GpuRenderer {
         let mut px = tx0;
         let mut buf = [0u8; 4];
         for (i, ch) in lines.get(line).map_or("", |l| l.as_str()).chars().enumerate() {
-            px += self.measure_run(ch.encode_utf8(&mut buf), base, false, false, true, false);
+            px += self.measure_pen_run(ch.encode_utf8(&mut buf), base, false, false);
             let d = (px - click_x).abs();
             if d < best_d {
                 best_d = d;
@@ -1777,7 +1910,7 @@ impl GpuRenderer {
         // the next glyph is already visible while typing at the edge.
         let view_w = (w - pad * 2.0 - gutter_w).max(base);
         let margin = (base * 2.0).min(view_w * 0.25);
-        let caret_x = self.measure_run(prefix, base, false, false, true, false);
+        let caret_x = self.measure_pen_run(prefix, base, false, false);
         let mut nh = h_scroll;
         if caret_x < nh + margin {
             nh = (caret_x - margin).max(0.0);
@@ -1796,6 +1929,7 @@ impl GpuRenderer {
         lang: &str,
     ) -> Option<std::rc::Rc<Vec<Vec<(String, crate::syntax::SynKind)>>>> {
         crate::syntax::canon_lang(lang)?;
+        let prof = crate::info::profiling().then(std::time::Instant::now);
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         lang.hash(&mut h);
@@ -1804,13 +1938,25 @@ impl GpuRenderer {
             l.hash(&mut h);
         }
         let hash = h.finish();
+        let hash_us = prof.map(|t| t.elapsed().as_micros());
         if let Some(i) = self.raw_hl.iter().position(|e| e.hash == hash) {
             let e = self.raw_hl.remove(i);
             let spans = e.spans.clone();
             self.raw_hl.insert(0, e);
+            if let Some(us) = hash_us {
+                eprintln!("[prof] ts_spans hit hash={us}us lines={}", lines.len());
+            }
             return Some(spans);
         }
+        let t_parse = prof.map(|_| std::time::Instant::now());
         let spans = std::rc::Rc::new(crate::syntax::highlight_lines(lang, lines)?);
+        if let (Some(us), Some(t)) = (hash_us, t_parse) {
+            eprintln!(
+                "[prof] ts_spans MISS hash={us}us parse={}us lines={}",
+                t.elapsed().as_micros(),
+                lines.len()
+            );
+        }
         self.raw_hl.insert(0, RawHlEntry { hash, spans: spans.clone() });
         self.raw_hl.truncate(4);
         Some(spans)
@@ -1867,6 +2013,7 @@ impl GpuRenderer {
         // Tree-sitter spans for the whole buffer (cached across frames, Rc so
         // the borrow doesn't block the &mut draw calls below). None → the
         // per-line lexer fallback inside the loop.
+        let prof_draw = crate::info::profiling().then(std::time::Instant::now);
         let ts_spans = self.raw_editor_ts_spans(lines, lang);
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
@@ -1888,8 +2035,8 @@ impl GpuRenderer {
                         let c1 = if li == e.0 { e.1.min(n) } else { n };
                         let p0: String = line.chars().take(c0).collect();
                         let p1: String = line.chars().take(c1).collect();
-                        let sx0 = tx0 + self.measure_run(&p0, base, false, false, true, false);
-                        let mut sx1 = tx0 + self.measure_run(&p1, base, false, false, true, false);
+                        let sx0 = tx0 + self.measure_pen_run(&p0, base, false, false);
+                        let mut sx1 = tx0 + self.measure_pen_run(&p1, base, false, false);
                         if li < e.0 {
                             sx1 += base * 0.45;
                         }
@@ -1915,8 +2062,8 @@ impl GpuRenderer {
                         }
                         let p0: String = line.chars().take(c0).collect();
                         let p1: String = line.chars().take(c1).collect();
-                        let sx0 = tx0 + self.measure_run(&p0, base, false, false, true, false);
-                        let sx1 = tx0 + self.measure_run(&p1, base, false, false, true, false);
+                        let sx0 = tx0 + self.measure_pen_run(&p0, base, false, false);
+                        let sx1 = tx0 + self.measure_pen_run(&p1, base, false, false);
                         let rx0 = sx0.max(cx0);
                         let rx1 = sx1.min(clip_right);
                         if rx1 > rx0 {
@@ -1990,12 +2137,12 @@ impl GpuRenderer {
                 // gutter gets clipped away cleanly).
                 if li == cursor.0 {
                     let prefix: String = line.chars().take(cursor.1).collect();
-                    let cw = self.measure_run(&prefix, base, false, false, true, false);
+                    let cw = self.measure_pen_run(&prefix, base, false, false);
                     let mut cur_x = tx0 + cw;
                     // 조합 글자는 위 `composing` 가지가 이미 밀어 그렸다 — 여기선
                     // 그 폭만큼 캐럿을 뒤로 옮기기만 한다(두 번 그리면 겹친다).
                     if !preedit.is_empty() {
-                        cur_x += self.measure_run(preedit, base, false, false, true, false);
+                        cur_x += self.measure_pen_run(preedit, base, false, false);
                     }
                     if cursor_on && cur_x >= cx0 {
                         // Cursor bar matches the glyph box (same voff + height as
@@ -2015,7 +2162,7 @@ impl GpuRenderer {
                 };
                 self.rect(x, pen_y, cx0 - x, lh, gutter_bg);
                 let num = format!("{}", li + 1);
-                let num_w = self.measure_run(&num, base, false, false, true, false);
+                let num_w = self.measure_pen_run(&num, base, false, false);
                 self.draw_text(
                     x + pad + (gutter_w - base * 0.5 - num_w).max(0.0),
                     pen_y + glyph_voff,
@@ -2029,6 +2176,13 @@ impl GpuRenderer {
                 );
             }
             pen_y += lh;
+        }
+        if let Some(t) = prof_draw {
+            eprintln!(
+                "[prof] draw_raw_editor {}us lines={}",
+                t.elapsed().as_micros(),
+                lines.len()
+            );
         }
         (pen_y - top0 + pad).max(0.0)
     }
@@ -2132,6 +2286,8 @@ impl GpuRenderer {
     fn icon_svg(name: &str) -> Option<&'static str> {
         Some(match name {
             "folder" => include_str!("../assets/icons/folder.svg"),
+            "square" => include_str!("../assets/icons/square.svg"),
+            "square-check" => include_str!("../assets/icons/square-check.svg"),
             "x" => include_str!("../assets/icons/x.svg"),
             "plus" => include_str!("../assets/icons/plus.svg"),
             "minus" => include_str!("../assets/icons/minus.svg"),
@@ -2598,6 +2754,10 @@ impl GpuRenderer {
             let cell_h_px = self.cell_h * self.scale * pane.font_scale;
             let pane_size_px = ((self.font_size_px as f32 * pane.font_scale).round() as u32).max(8);
             for (r, row) in pane.rows.iter().enumerate() {
+                // Right edge of the last glyph painted on this row. A blank
+                // cell an oversized neighbour already spilled into is not free
+                // room any more, so `fit_cell_glyph` is told about it.
+                let mut glyph_right = f32::NEG_INFINITY;
                 for (col, cell) in row.iter().enumerate() {
                     // Blanks contribute no glyph.
                     let ch = cell.ch;
@@ -2742,6 +2902,7 @@ impl GpuRenderer {
                         let gh = gh0 * fit;
                         let x = cell_x + (span_w - gw) * 0.5;
                         let y = cell_y + (cell_h_px - gh) * 0.5;
+                        glyph_right = x + gw;
                         self.chrome.push(CellInstance {
                             cell_px: [x, y, gw, gh],
                             uv_min: entry.uv_min,
@@ -2764,6 +2925,7 @@ impl GpuRenderer {
                         let gh = entry.px_h as f32 * scale_fit;
                         let x = cell_x + (span_w - gw) * 0.5;
                         let y = baseline_y - entry.bearing_y as f32 * scale_fit;
+                        glyph_right = x + gw;
                         self.chrome.push(CellInstance {
                             cell_px: [x, y, gw, gh],
                             uv_min: entry.uv_min,
@@ -2772,10 +2934,29 @@ impl GpuRenderer {
                             ..Default::default()
                         });
                     } else {
-                        let x = cell_x + entry.bearing_x as f32;
-                        let y = baseline_y - entry.bearing_y as f32;
+                        // An oversized ambiguous-width glyph is slid into the
+                        // blank columns beside it. A column counts as free only
+                        // when it really exists — past the row's end there is
+                        // nothing to borrow and the spill would cross into the
+                        // neighbouring pane — and only up to where the previous
+                        // glyph already reaches, so `① ②잠금` cannot have the ②
+                        // slide left onto the ①.
+                        let room_right = match row.get(col + 1) {
+                            Some(n) if matches!(n.ch, ' ' | '\0') => cell_w_px,
+                            _ => 0.0,
+                        };
+                        let room_left = match col.checked_sub(1).and_then(|c| row.get(c)) {
+                            Some(p) if matches!(p.ch, ' ' | '\0') => {
+                                cell_w_px.min((cell_x - glyph_right).max(0.0))
+                            }
+                            _ => 0.0,
+                        };
+                        let rect = fit_cell_glyph(
+                            &entry, cell_x, baseline_y, cell_w_px, room_left, room_right,
+                        );
+                        glyph_right = rect[0] + rect[2];
                         self.chrome.push(CellInstance {
-                            cell_px: [x, y, entry.px_w as f32, entry.px_h as f32],
+                            cell_px: rect,
                             uv_min: entry.uv_min,
                             uv_max: entry.uv_max,
                             fg_rgba: srgb_rgba_to_linear(fg),
@@ -3007,6 +3188,57 @@ impl GpuRenderer {
 pub(crate) fn save_rgba_png(path: &str, rgba: &[u8], w: u32, h: u32) -> std::io::Result<()> {
     image::save_buffer(path, rgba, w, h, image::ExtendedColorType::Rgba8)
         .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Place a **single-column** glyph, keeping its natural size whenever the
+/// columns beside it leave room. `room_left`/`room_right` are how many px of
+/// blank the caller is willing to lend. Returns `[x, y, w, h]` in physical px.
+///
+/// East Asian **Ambiguous** codepoints (①②③, Ⅰ Ⅱ, ⓐ …) are counted as one
+/// column by the grid — `unicode_width` says 1 and alacritty agrees — but no
+/// monospace face in the chain carries them, so the fallback that does is a CJK
+/// font that rasters them **full-width** (measured: D2Coding gives `①` exactly
+/// 2× the advance of `A`). Drawn unguarded they ran over their neighbour:
+/// `⑤브릿지` had the ⑤ sitting on top of the 브.
+///
+/// Widening the grid instead (adding the block to `is_wide_char`) is the wrong
+/// half of the fix — the parser still advances one column, so every glyph after
+/// it would sit a cell off. Shrinking to one cell is the other wrong fix: a lone
+/// stunted ⑤ beside full-size ①②③④ reads worse than the overlap did.
+///
+/// So the glyph is *slid* rather than resized. It holds its natural position
+/// until it would spill onto a real character, then backs off into whatever
+/// blank the caller lent — `판정 ⑤브릿지` borrows the space to its left, `① ② ③`
+/// the one to its right. Only a glyph boxed in on both sides scales, and it
+/// keeps its aspect ratio. Glyphs that fit their own cell take the untouched
+/// bearing path, so ASCII and every well-behaved monospace glyph render exactly
+/// as before.
+fn fit_cell_glyph(
+    entry: &AtlasEntry,
+    cell_x: f32,
+    baseline_y: f32,
+    cell_w: f32,
+    room_left: f32,
+    room_right: f32,
+) -> [f32; 4] {
+    let gw = entry.px_w as f32;
+    let y = baseline_y - entry.bearing_y as f32;
+    if gw <= cell_w {
+        return [cell_x + entry.bearing_x as f32, y, gw, entry.px_h as f32];
+    }
+    let lo = cell_x - room_left;
+    let hi = cell_x + cell_w + room_right;
+    if gw <= hi - lo {
+        let x = (cell_x + entry.bearing_x as f32).min(hi - gw).max(lo);
+        return [x, y, gw, entry.px_h as f32];
+    }
+    let fit = (hi - lo) / gw;
+    [
+        lo,
+        baseline_y - entry.bearing_y as f32 * fit,
+        gw * fit,
+        entry.px_h as f32 * fit,
+    ]
 }
 
 /// Nerd Font / symbol icon codepoint ranges that should be scaled to

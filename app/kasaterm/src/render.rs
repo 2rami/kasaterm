@@ -573,7 +573,7 @@ impl App {
                         m.raw_mode.then(|| Arc::clone(&m.edit_lines)),
                         (m.cur_line, m.cur_col),
                         m.sel_range(),
-                        m.scroll as f32,
+                        m.scroll,
                         m.h_scroll,
                         code_lang_for_path(std::path::Path::new(&m.doc.path)),
                         m.find.clone(),
@@ -1330,7 +1330,16 @@ impl App {
                     base_h
                 };
                 let bottom_inset = if y_cells + eff_h_cells >= grid_rows { 0.0 } else { PANE_INNER_Y };
-                let bh = (full_h - header_shift_logical - PANE_INNER_Y - bottom_inset).max(1.0);
+                // 상태바 띠를 빼야 한다. PTY 그리드는 `resize_backend` 가 푸터만큼
+                // 행을 줄여 바 위에서 멈추는데, 편집기·이미지처럼 PTY 없는 pane 은
+                // 이 박스가 곧 본문 클립이라 여기서 빼지 않으면 마지막 줄이 바
+                // 아래로 새어 창 끝까지 그려졌다(실측).
+                let bh = (full_h
+                    - header_shift_logical
+                    - PANE_INNER_Y
+                    - bottom_inset
+                    - self.statusbar_px(&id))
+                .max(1.0);
                 body_rects.push((id.clone(), (bx, by, bw, bh)));
                 if let Some(image) = img {
                     image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot, img_pan));
@@ -2203,8 +2212,8 @@ impl App {
                     // 건 어쩔 수 없다 — 위치는 그려봐야 알 수 있어서다.
                     if let Some(line) = self.md_scroll_anchor.remove(id) {
                         let i = doc.block_lines.partition_point(|&l| l <= line).saturating_sub(1);
-                        let want = ys.get(i).copied().unwrap_or(0.0).max(0.0) as usize;
-                        if want != *scroll as usize {
+                        let want = ys.get(i).copied().unwrap_or(0.0).max(0.0);
+                        if (want - *scroll).abs() > 0.5 {
                             if let Ok(mut ws) = self.ws.lock() {
                                 if let Some(pane) = ws.panes.get_mut(id) {
                                     pane.dirty = true;

@@ -116,13 +116,32 @@ pub(crate) enum InfoDirBtn {
     CopyPath,
 }
 
-/// 프로세스 행 우클릭 메뉴 항목.
+/// 프로세스·포트 행 우클릭 메뉴 항목.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InfoMenuAction {
     Terminate,
     ForceKill,
     CopyPid,
     CopyCmd,
+    /// 포트 전용 — 브라우저로 `http://localhost:<port>`.
+    OpenPort,
+    CopyUrl,
+}
+
+/// 우클릭 메뉴가 겨눈 대상. 포트도 결국 프로세스를 죽여서 닫으므로 pid 를 함께
+/// 들고 다닌다 — 메뉴가 열린 뒤 목록이 갱신돼도 겨눈 대상이 흔들리지 않는다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InfoTarget {
+    Proc(u32),
+    Port(u16, u32),
+}
+
+impl InfoTarget {
+    pub(crate) fn pid(self) -> u32 {
+        match self {
+            Self::Proc(pid) | Self::Port(_, pid) => pid,
+        }
+    }
 }
 
 /// Info 탭 — 활성 pane 셸 아래 프로세스 + listen 포트. `snap` 은 워커 스레드가
@@ -134,21 +153,39 @@ pub(crate) enum InfoMenuAction {
 pub(crate) struct InfoState {
     pub(crate) tab: SideTab,
     pub(crate) snap: std::sync::Arc<std::sync::Mutex<crate::info::InfoSnap>>,
+    /// 렌더가 읽는 사본. 매 프레임 `snap` 을 잠가 통째로 clone 하면 프로세스가
+    /// 수십이면 프레임마다 그만큼의 String 할당이 도는데, 실제 내용은 1.5초에
+    /// 한 번만 바뀐다 — `rev` 가 올라갔을 때만 옮겨 담는다.
+    pub(crate) view: crate::info::InfoSnap,
+    /// 워커가 새 스냅샷을 넣을 때마다 증가. GUI 는 `seen_rev` 와 비교만 한다.
+    pub(crate) rev: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) seen_rev: u64,
+    /// 포트가 응답한 제목 캐시(워커가 채운다).
+    pub(crate) sites: crate::info::SiteCache,
     pub(crate) busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub(crate) last_refresh: Option<std::time::Instant>,
-    pub(crate) shell_pid: Option<u32>,
+    /// 지금 목록이 어느 pane 집합의 것인지 — pane 이 열리거나 닫히면 달라져
+    /// 즉시 재수집을 트리거한다.
+    pub(crate) key: String,
     pub(crate) scroll: f32,
     pub(crate) root: Option<std::path::PathBuf>,
     pub(crate) root_is_repo: bool,
     pub(crate) dir_collapsed: bool,
     pub(crate) procs_collapsed: bool,
     pub(crate) ports_collapsed: bool,
-    /// 우클릭 메뉴 — `(화면 좌표, 대상 pid)`.
-    pub(crate) ctx_menu: Option<(f32, f32, u32)>,
+    /// 우클릭 메뉴 — `(화면 좌표, 대상)`.
+    pub(crate) ctx_menu: Option<(f32, f32, InfoTarget)>,
+    /// 접어둔 pane 그룹(surface id). 남의 pane 은 접어두고 자기 것만 펴 두는
+    /// 쓰임이 기본이라 pane 을 옮겨도 유지한다.
+    pub(crate) group_collapsed: std::collections::HashSet<String>,
     /// 매 paint 재생성되는 hit target. 탭 머리 / 포트 행(→ 브라우저로 열기) /
     /// 프로세스 행(우클릭 대상) / 종료 버튼 / 섹션 머리 / 디렉터리 버튼.
     pub(crate) tab_rects: Vec<(SideTab, (f32, f32, f32, f32))>,
-    pub(crate) port_rects: Vec<(u16, (f32, f32, f32, f32))>,
+    /// `(포트, 소유 pid, rect)` — 종료가 붙으면서 pid 없이는 행을 다룰 수 없다.
+    pub(crate) port_rects: Vec<(u16, u32, (f32, f32, f32, f32))>,
+    pub(crate) port_kill_rects: Vec<(u16, u32, (f32, f32, f32, f32))>,
+    /// pane 그룹 머리 — 클릭하면 그 그룹만 접힌다.
+    pub(crate) group_rects: Vec<(String, (f32, f32, f32, f32))>,
     pub(crate) proc_rects: Vec<(u32, (f32, f32, f32, f32))>,
     pub(crate) kill_rects: Vec<(u32, (f32, f32, f32, f32))>,
     pub(crate) sec_rects: Vec<(InfoSection, (f32, f32, f32, f32))>,
@@ -162,9 +199,13 @@ impl Default for InfoState {
         Self {
             tab: SideTab::Git,
             snap: std::sync::Arc::new(std::sync::Mutex::new(crate::info::InfoSnap::default())),
+            view: crate::info::InfoSnap::default(),
+            rev: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            seen_rev: 0,
+            sites: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_refresh: None,
-            shell_pid: None,
+            key: String::new(),
             scroll: 0.0,
             root: None,
             root_is_repo: false,
@@ -172,8 +213,11 @@ impl Default for InfoState {
             procs_collapsed: false,
             ports_collapsed: false,
             ctx_menu: None,
+            group_collapsed: std::collections::HashSet::new(),
             tab_rects: Vec::new(),
             port_rects: Vec::new(),
+            port_kill_rects: Vec::new(),
+            group_rects: Vec::new(),
             proc_rects: Vec::new(),
             kill_rects: Vec::new(),
             sec_rects: Vec::new(),

@@ -1500,6 +1500,10 @@ struct TerminalPane {
     /// as SS3 (`ESC O A`) instead of CSI (`ESC [ A`) so claude code /
     /// vim line navigation works. See the arrow-key send path.
     app_cursor: bool,
+    /// DECSET 2004 (bracketed paste). Only when the app turned this on may a
+    /// paste be wrapped in `ESC[200~ … ESC[201~` — otherwise those bytes land
+    /// in the app's input buffer as if typed.
+    bracketed_paste: bool,
     history: VecDeque<Vec<GridCell>>,
     /// Scrollback offset in rows. `0` = live tail; positive = N rows
     /// back into history visible at the top.
@@ -1534,8 +1538,10 @@ struct MarkdownPane {
     /// Edit cursor: line index + column in chars.
     cur_line: usize,
     cur_col: usize,
-    /// Scroll offset in logical px (both Render and Raw).
-    scroll: usize,
+    /// Scroll offset in logical px (both Render and Raw). f32, not an integer:
+    /// a trackpad frame carries sub-pixel tails, and rounding each one away
+    /// made a slow swipe stall instead of glide.
+    scroll: f32,
     /// Raw-mode horizontal scroll in logical px. Long code lines (checksums,
     /// URLs) overflow the pane — this pans the text under a fixed line-number
     /// gutter. 0 = flush left. Render mode ignores it (markdown wraps).
@@ -2056,6 +2062,8 @@ struct MdSpan {
     bold: bool,
     italic: bool,
     code: bool,
+    /// `~~취소선~~`. 렌더는 밑줄과 같은 선을 x-height 중간에 긋는다.
+    strike: bool,
     /// `Some(dest)` for the text inside a `[text](dest)` link. The renderer
     /// draws it accented + underlined; a click resolves `dest` to a file
     /// (Finder) or URL (browser).
@@ -2071,9 +2079,15 @@ enum MdBlock {
     /// Fenced/indented code block — raw text with embedded newlines. `lang`
     /// is the fence info string (e.g. "rust"), empty for indented blocks.
     Code { code: String, lang: String },
-    ListItem { depth: u8, marker: String, spans: Vec<MdSpan> },
+    /// `task` = `Some(checked)` for a `- [ ]` / `- [x]` item; the renderer draws
+    /// a checkbox instead of `marker`.
+    ListItem { depth: u8, marker: String, spans: Vec<MdSpan>, task: Option<bool> },
     Quote { spans: Vec<MdSpan> },
     Rule,
+    /// YAML frontmatter, as label/value rows. Kept as its own block rather than
+    /// parsed into the body: without it the closing `---` reads as a setext
+    /// heading and the whole header lands on screen as huge bold text.
+    Meta { rows: Vec<(String, String)> },
     /// `![alt](path)` — rendered as a wgpu texture inline (same path as the
     /// image pane). `key` is the texture cache id, `w`/`h` the decoded pixel
     /// size for aspect layout; all three are filled in after parse when the
@@ -2145,6 +2159,51 @@ fn heading_level(l: pulldown_cmark::HeadingLevel) -> u8 {
 /// The second return is each block's 0-based source line, index-aligned with
 /// the blocks. Raw↔Render mode switching uses it to keep the line you were
 /// looking at on screen; without it the toggle can only guess.
+/// frontmatter 를 화면에 세울 라벨/값 줄로 눕힌다. 진짜 YAML 파서를 붙일 이유는
+/// 없다 — 속성 줄로 보여줄 만큼만 읽는다. 중첩 키는 `부모.자식`으로 펴고, `- `
+/// 목록은 바로 위 키의 값에 이어 붙인다.
+fn parse_frontmatter_rows(src: &str) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut parent: Option<String> = None;
+    for line in src.lines() {
+        let body = line.trim();
+        if body.is_empty() {
+            continue;
+        }
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        if let Some(item) = body.strip_prefix("- ") {
+            if let Some(last) = rows.last_mut() {
+                if last.1.is_empty() {
+                    last.1 = item.trim().to_string();
+                } else {
+                    last.1.push_str(", ");
+                    last.1.push_str(item.trim());
+                }
+            }
+            continue;
+        }
+        let Some((k, v)) = body.split_once(':') else { continue };
+        let (k, v) = (k.trim(), v.trim());
+        if k.is_empty() {
+            continue;
+        }
+        // 값이 빈 최상위 키(`metadata:`)는 뒤따르는 들여쓰기 줄들의 부모다.
+        if v.is_empty() && !indented {
+            parent = Some(k.to_string());
+            continue;
+        }
+        let label = match (indented, parent.as_deref()) {
+            (true, Some(p)) => format!("{p}.{k}"),
+            _ => k.to_string(),
+        };
+        if !indented {
+            parent = None;
+        }
+        rows.push((label, v.to_string()));
+    }
+    rows
+}
+
 fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
     use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
     let mut blocks: Vec<MdBlock> = Vec::new();
@@ -2158,6 +2217,10 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
     let mut spans: Vec<MdSpan> = Vec::new();
     let mut bold = 0i32;
     let mut italic = 0i32;
+    let mut strike = 0i32;
+    let mut in_meta = false;
+    let mut meta_buf = String::new();
+    let mut item_task: Option<bool> = None;
     let mut heading: Option<u8> = None;
     let mut in_code = false;
     let mut code_buf = String::new();
@@ -2178,14 +2241,33 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
     let mut tbl_rows: Vec<Vec<MdCell>> = Vec::new();
     let mut tbl_row: Vec<MdCell> = Vec::new();
 
-    let push_span =
-        |spans: &mut Vec<MdSpan>, t: &str, b: bool, i: bool, c: bool, link: Option<String>| {
-            if !t.is_empty() {
-                spans.push(MdSpan { text: t.to_string(), bold: b, italic: i, code: c, link });
-            }
-        };
+    let push_span = |spans: &mut Vec<MdSpan>,
+                     t: &str,
+                     b: bool,
+                     i: bool,
+                     s: bool,
+                     c: bool,
+                     link: Option<String>| {
+        if !t.is_empty() {
+            spans.push(MdSpan {
+                text: t.to_string(),
+                bold: b,
+                italic: i,
+                code: c,
+                strike: s,
+                link,
+            });
+        }
+    };
 
-    for (ev, rng) in Parser::new_ext(text, Options::ENABLE_TABLES).into_offset_iter() {
+    // GFM 확장을 켜 둔다: 켜지 않으면 `~~취소선~~`·`- [ ]` 가 평문으로 떨어지고,
+    // 무엇보다 frontmatter 의 닫는 `---` 가 setext heading 으로 읽혀 YAML 머리가
+    // 문서 첫 화면을 거대한 굵은 글씨로 덮는다.
+    let opts = Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS;
+    for (ev, rng) in Parser::new_ext(text, opts).into_offset_iter() {
         match ev {
             Event::Start(tag) => match tag {
                 Tag::Heading { level, .. } => {
@@ -2214,6 +2296,7 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                             depth: list_stack.len().saturating_sub(1) as u8,
                             marker: std::mem::take(&mut item_marker),
                             spans: std::mem::take(&mut spans),
+                            task: item_task.take(),
                         });
                         in_item = false;
                     }
@@ -2221,6 +2304,7 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                 }
                 Tag::Item => {
                     in_item = true;
+                    item_task = None;
                     spans.clear();
                     item_marker = match list_stack.last_mut() {
                         Some(Some(n)) => {
@@ -2233,6 +2317,11 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                 }
                 Tag::Emphasis => italic += 1,
                 Tag::Strong => bold += 1,
+                Tag::Strikethrough => strike += 1,
+                Tag::MetadataBlock(_) => {
+                    in_meta = true;
+                    meta_buf.clear();
+                }
                 Tag::BlockQuote(_) => {
                     in_quote = true;
                     spans.clear();
@@ -2301,12 +2390,21 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                             depth,
                             marker: std::mem::take(&mut item_marker),
                             spans: std::mem::take(&mut spans),
+                            task: item_task.take(),
                         });
                         in_item = false;
                     }
                 }
                 TagEnd::Emphasis => italic -= 1,
                 TagEnd::Strong => bold -= 1,
+                TagEnd::Strikethrough => strike -= 1,
+                TagEnd::MetadataBlock(_) => {
+                    in_meta = false;
+                    let rows = parse_frontmatter_rows(&std::mem::take(&mut meta_buf));
+                    if !rows.is_empty() {
+                        blocks.push(MdBlock::Meta { rows });
+                    }
+                }
                 TagEnd::Link => link_url = None,
                 TagEnd::BlockQuote(_) => in_quote = false,
                 TagEnd::Image => {
@@ -2330,22 +2428,49 @@ fn parse_markdown(text: &str) -> (Vec<MdBlock>, Vec<usize>) {
                 _ => {}
             },
             Event::Text(t) => {
-                if in_image {
+                if in_meta {
+                    meta_buf.push_str(&t);
+                } else if in_image {
                     img_alt.push_str(&t);
                 } else if in_code {
                     code_buf.push_str(&t);
                 } else {
-                    push_span(&mut spans, &t, bold > 0, italic > 0, false, link_url.clone());
+                    push_span(
+                        &mut spans,
+                        &t,
+                        bold > 0,
+                        italic > 0,
+                        strike > 0,
+                        false,
+                        link_url.clone(),
+                    );
                 }
             }
-            Event::Code(t) => {
-                push_span(&mut spans, &t, bold > 0, italic > 0, true, link_url.clone())
-            }
+            Event::Code(t) => push_span(
+                &mut spans,
+                &t,
+                bold > 0,
+                italic > 0,
+                strike > 0,
+                true,
+                link_url.clone(),
+            ),
+            Event::TaskListMarker(checked) => item_task = Some(checked),
             Event::SoftBreak | Event::HardBreak => {
-                if in_code {
+                if in_meta {
+                    meta_buf.push('\n');
+                } else if in_code {
                     code_buf.push('\n');
                 } else {
-                    push_span(&mut spans, " ", bold > 0, italic > 0, false, link_url.clone());
+                    push_span(
+                        &mut spans,
+                        " ",
+                        bold > 0,
+                        italic > 0,
+                        strike > 0,
+                        false,
+                        link_url.clone(),
+                    );
                 }
             }
             Event::Rule => blocks.push(MdBlock::Rule),
@@ -2672,6 +2797,15 @@ enum UserEvent {
         surface_id: String,
         reason: String,
     },
+    /// 사용량 폴러가 "지금 계정이 임계를 넘었고, 갈 만한 다른 계정이 있다"고
+    /// 판정했다. 실제 전환은 GUI 스레드 몫이다 — `settings_save` 가 shim 을 다시
+    /// 깔아야 이미 열려 있는 pane 도 다음 claude 부터 새 계정으로 뜬다.
+    /// 페이로드 = (옮겨갈 id, 떠나는 창이 풀리는 시각 epoch, 그때 사용률).
+    ClaudeAccountAutoswitch {
+        to: String,
+        cooldown_until: Option<u64>,
+        pct: f32,
+    },
     /// macOS `.md` 더블클릭(odoc Apple Event) 또는 argv → 새 워크스페이스에
     /// 마크다운 풀 뷰어. `SocketOpenPreview`(현재 창 split)와 달리 별도 탭의
     /// 단독 pane 으로 띄워 기존 작업 워크스페이스를 안 건드린다. 페이로드 = 경로.
@@ -2882,6 +3016,10 @@ pub(crate) enum SettingsAction {
     /// 계정을 목록에서 뺀다. Keychain 항목은 건드리지 않는다 — 지우면 재로그인
     /// 말고는 복구가 없고, 남겨 둬도 해가 없다.
     RemoveClaudeAccount(String),
+    /// 한도가 차면 다음 계정으로 알아서 넘어가는 스위치.
+    ToggleAccountAutoswitch,
+    /// 그 전환을 부르는 사용률(%).
+    AccountAutoswitchPct(u32),
     /// 계정 라벨 텍스트 필드에 포커스(행 인덱스 — `SettingsInput` 이 Copy 라
     /// id 를 못 싣는다). 선택·삭제는 인덱스가 밀려도 안전하도록 id 로 받는다.
     FocusClaudeAccountLabel(usize),
@@ -3573,6 +3711,9 @@ struct App {
     /// 스냅샷이 프레임마다 만들어지므로 파일을 그때 읽지 않고 여기 들고 있는다.
     set_claude_accounts: Vec<socket::ClaudeAccount>,
     set_claude_account: String,
+    /// 한도가 차면 다음 계정으로 알아서 넘어간다(기본 off) + 그 임계 사용률(%).
+    set_account_autoswitch: bool,
+    set_account_autoswitch_pct: f32,
     /// Which form text field has focus (cwd custom path / shell), if any.
     settings_input: Option<SettingsInput>,
     /// Caret (char index) for the focused single-line settings field
@@ -3935,6 +4076,8 @@ impl App {
             set_claude_extra: socket::read_claude_extra(),
             set_claude_accounts: socket::read_claude_accounts(),
             set_claude_account: socket::read_claude_account(),
+            set_account_autoswitch: socket::read_account_autoswitch(),
+            set_account_autoswitch_pct: socket::read_account_autoswitch_pct(),
             settings_input: None,
             settings_rects: Vec::new(),
             // KASATERM_TEST_STUDENT=<이름> 이면 그 캐릭터를 선택 상태로 시드해

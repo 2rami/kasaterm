@@ -316,17 +316,50 @@ fn load_session_chars(path: &Path) -> serde_json::Map<String, Value> {
         .unwrap_or_default()
 }
 
+type CharCache = Option<(PathBuf, std::time::SystemTime, u64, serde_json::Map<String, Value>)>;
+static CHARS: std::sync::Mutex<CharCache> = std::sync::Mutex::new(None);
+
+/// 파싱한 매핑을 빌려준다 — 파일이 그대로면 디스크를 다시 읽지 않는다.
+///
+/// 렌더가 pane 마다, 프레임마다 부르는 경로다. 캐시 없이 두면 창 하나가 코어를
+/// 통째로 태운다(실측: `sample` 상 렌더 프레임 시간의 77%가 이 안의 serde_json).
+/// 무효화 판정은 mtime+크기 — 쓰기가 tmp→rename 원자 교체라 내용이 바뀌면 둘 중
+/// 하나는 반드시 달라지고, 쓰는 쪽이 직접 캐시를 비우기까지 한다.
+fn with_session_chars<R>(path: &Path, f: impl FnOnce(&serde_json::Map<String, Value>) -> R) -> R {
+    let stamp = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| Some((m.modified().ok()?, m.len())));
+    // stat 이 실패하면 언제 무효화할지 알 수 없다 — 캐시하지 않고 그때그때 읽는다.
+    let Some((mtime, len)) = stamp else {
+        return f(&load_session_chars(path));
+    };
+    let Ok(mut g) = CHARS.lock() else {
+        return f(&load_session_chars(path));
+    };
+    let fresh = g
+        .as_ref()
+        .is_some_and(|(p, t, l, _)| p == path && *t == mtime && *l == len);
+    if !fresh {
+        *g = Some((path.to_path_buf(), mtime, len, load_session_chars(path)));
+    }
+    match g.as_ref() {
+        Some((_, _, _, map)) => f(map),
+        None => f(&serde_json::Map::new()),
+    }
+}
+
 /// 세션 id 의 영속 배정 캐릭터 — 있으면 재사용, 없으면(None) 신규 세션이라 랜덤 배정.
 pub fn session_character(sid: &str) -> Option<String> {
     session_character_in(&session_char_path(), sid)
 }
 
 fn session_character_in(path: &Path, sid: &str) -> Option<String> {
-    load_session_chars(path)
-        .get(sid)
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .filter(|s| !s.is_empty())
+    with_session_chars(path, |m| {
+        m.get(sid)
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .filter(|s| !s.is_empty())
+    })
 }
 
 /// 세션id→캐릭터 매핑 저장(같은 값이면 무쓰기). 원자 쓰기(tmp→rename, write_marker 관례).
@@ -349,7 +382,13 @@ fn bind_session_character_in(path: &Path, sid: &str, name: &str) -> std::io::Res
     let tmp = path.with_extension("json.tmp");
     let body = serde_json::to_string_pretty(&Value::Object(map)).map_err(std::io::Error::other)?;
     std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, path)
+    let r = std::fs::rename(&tmp, path);
+    // mtime 판정에만 기대지 않는다 — 쓰고 바로 읽는 흐름에서 파일시스템 시각
+    // 해상도가 두 시점을 같게 볼 여지를 없앤다.
+    if let Ok(mut g) = CHARS.lock() {
+        *g = None;
+    }
+    r
 }
 
 /// 새 `claude --session-id` 용 uuid. claude 가 엄격한 UUID 형식을 요구하므로
@@ -385,6 +424,33 @@ mod tests {
         bind_session_character_in(&path, "", "유즈").unwrap();
         bind_session_character_in(&path, "sid-3", "").unwrap();
         assert_eq!(session_character_in(&path, "sid-3"), None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// 읽기는 파싱 결과를 캐시한다(렌더가 프레임마다 부르는 경로) — 그 캐시가
+    /// **다른 프로세스의 쓰기**를 놓치면 학생이 옛 이름으로 굳는다. 여기서
+    /// `bind_*` 를 거치지 않고 파일을 직접 갈아 끼우는 이유다(그쪽은 스스로
+    /// 캐시를 비우므로 무효화 판정을 검증하지 못한다).
+    #[test]
+    fn session_chars_reload_on_external_write() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir()
+            .join(format!("kasaterm-sesschar-ext-{}-{n}", std::process::id()))
+            .join("session_characters.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"sid-x":"프라나"}"#).unwrap();
+        assert_eq!(session_character_in(&path, "sid-x").as_deref(), Some("프라나"));
+        std::fs::write(&path, r#"{"sid-x":"하늘색 미도리"}"#).unwrap();
+        assert_eq!(
+            session_character_in(&path, "sid-x").as_deref(),
+            Some("하늘색 미도리")
+        );
+        // 파일이 사라지면 캐시가 아니라 없음으로 읽혀야 한다.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(session_character_in(&path, "sid-x"), None);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }

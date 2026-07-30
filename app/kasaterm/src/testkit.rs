@@ -459,7 +459,7 @@ impl App {
         };
         let (cx, cy) = (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
         if act == "menu" {
-            self.info.ctx_menu = Some((cx, cy, pid));
+            self.info.ctx_menu = Some((cx, cy, crate::state::InfoTarget::Proc(pid)));
         }
         // hover 든 menu 든 커서는 행 위에 둔다 — menu 도 그 행이 하이라이트된
         // 상태로 찍혀야 어느 프로세스를 겨눈 메뉴인지 보인다.
@@ -807,7 +807,7 @@ impl App {
         };
         match step.split_once(':') {
             Some(("scroll", v)) => {
-                let px: usize = v.parse().unwrap_or(0);
+                let px: f32 = v.parse().unwrap_or(0.0);
                 if let Ok(mut ws) = self.ws.lock() {
                     if let Some(pane) = ws.panes.get_mut(&id) {
                         pane.dirty = true;
@@ -842,6 +842,21 @@ impl App {
                     .ok()
                     .and_then(|w| w.panes.get(&id).and_then(|p| p.markdown()).map(|m| (m.cur_line, m.cur_col)));
                 eprintln!("[mdscript] click=({dx},{dy}) caret={at:?}");
+            }
+            // 편집기에 글자를 넣어 본다 — `type:<문자열>`. 키 이벤트를 밖에서
+            // 만들 수 없어(winit `KeyEvent`) 삽입 진입점을 직접 부른다.
+            // 실타이핑의 비용 구조를 재려면 **한 단계에 한 글자**로 써야 한다
+            // (`type:a|type:b|…`): 한 단계에 여러 글자를 넣으면 그 사이에
+            // 프레임이 안 그려져 버퍼 재파싱이 한 번으로 접혀 버린다.
+            Some(("type", v)) => {
+                self.md_insert_into(&id, v);
+                let at = self.ws.lock().ok().and_then(|w| {
+                    w.panes
+                        .get(&id)
+                        .and_then(|p| p.markdown())
+                        .map(|m| (m.cur_line, m.cur_col))
+                });
+                eprintln!("[mdscript] type={v:?} caret={at:?}");
             }
             // 이 마크다운 탭을 닫아 본다 — 저장 안 한 편집분이 있으면 확인
             // 모달이 떠야 하고, 그 화면이 이 단계의 관찰 대상이다.
@@ -1038,8 +1053,11 @@ impl App {
         }
         self.autoopen_at = None;
         if let Some(p) = self.autoopen_path.take() {
-            eprintln!("[autoopen] open_file_split {}", p.display());
-            self.open_file_split(p);
+            eprintln!("[autoopen] open_file {}", p.display());
+            // 사람 경로(`open_file_split`)가 아니라 미리보기 경로로 연다: "파일 열기"
+            // 설정이 App/Terminal 이면 사람 경로는 파일을 외부 앱으로 넘겨버려,
+            // 내장 뷰를 증명하려는 이 하네스가 아무것도 열지 못한다.
+            self.open_file(p, None, true);
         }
     }
     /// Headless verification helper. Reads `KASATERM_AUTOSPLIT` ("h" / "v"
@@ -1446,7 +1464,10 @@ impl App {
     }
 
     /// [임시·검증용] Headless 스크롤 주입: `KASATERM_AUTOWHEEL_MS` 후 active pane
-    /// 본문 중앙에 커서를 놓고 휠 up 을 `KASATERM_AUTOWHEEL`(기본 10) 노치 보낸다.
+    /// 본문 중앙에 커서를 놓고 휠을 `KASATERM_AUTOWHEEL`(기본 10) 번 보낸다. 음수면
+    /// 아래로 굴린다. `KASATERM_AUTOWHEEL_PX=<px>` 를 주면 노치(LineDelta) 대신 그
+    /// 픽셀만큼의 트랙패드 델타로 보낸다 — 문서 뷰의 픽셀 스크롤 경로는 노치로는
+    /// 밟히지 않아, 이것 없이는 헤드리스로 확인할 방법이 없다.
     /// mouse-tracking TUI(claude)면 SGR 로 그 pane 에 전달돼 실제 스크롤 경로를 밟아
     /// sticky prompt 를 재현한다 — sticky pill 감지/표시를 헤드리스로 확인하려는 용도.
     pub(crate) fn run_pending_autowheel(&mut self) {
@@ -1465,21 +1486,49 @@ impl App {
             return;
         }
         FIRED.store(true, Ordering::Relaxed);
-        let n: usize = std::env::var("KASATERM_AUTOWHEEL")
+        let n: i32 = std::env::var("KASATERM_AUTOWHEEL")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(10);
+        let px: Option<f32> = std::env::var("KASATERM_AUTOWHEEL_PX")
+            .ok()
+            .and_then(|s| s.parse().ok());
         let (cols, rows) = self.window_cells();
         let pad = WINDOW_PADDING + self.effective_sidebar_w();
         self.cursor_px = (
             pad + cols as f32 * self.cell.w / 2.0,
             TITLE_HEIGHT + rows as f32 * self.cell.h / 2.0,
         );
-        eprintln!("[autowheel] scroll up {n} notches, cursor=({:.0},{:.0})",
-            self.cursor_px.0, self.cursor_px.1);
-        for _ in 0..n {
-            self.handle_wheel(winit::event::MouseScrollDelta::LineDelta(0.0, 1.0));
+        let dir = if n < 0 { -1.0 } else { 1.0 };
+        eprintln!(
+            "[autowheel] {} ticks {} px_mode={px:?} cursor=({:.0},{:.0})",
+            n.abs(),
+            if n < 0 { "down" } else { "up" },
+            self.cursor_px.0,
+            self.cursor_px.1
+        );
+        let before = self.autowheel_md_scroll();
+        for _ in 0..n.abs() {
+            let delta = match px {
+                Some(v) => winit::event::MouseScrollDelta::PixelDelta(
+                    winit::dpi::PhysicalPosition::new(0.0, (v * dir) as f64),
+                ),
+                None => winit::event::MouseScrollDelta::LineDelta(0.0, dir),
+            };
+            self.handle_wheel(delta);
         }
+        eprintln!(
+            "[autowheel] md scroll {before:?} -> {:?}",
+            self.autowheel_md_scroll()
+        );
+    }
+
+    /// active pane 이 문서 뷰면 그 스크롤 오프셋(logical px). autowheel 로그가
+    /// "몇 픽셀 움직였나" 를 찍어야 셀 단위로 튀는 회귀를 눈이 아니라 숫자로 잡는다.
+    fn autowheel_md_scroll(&self) -> Option<f32> {
+        let ws = self.ws.lock().ok()?;
+        let id = ws.active_pane.as_ref()?;
+        ws.panes.get(id)?.markdown().map(|m| m.scroll)
     }
 
     /// Arm any due aux-window self-capture: set its gpu `capture_next` and wake
