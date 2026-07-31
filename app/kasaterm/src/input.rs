@@ -1118,7 +1118,7 @@ impl App {
                         if let Ok(mut ws) = self.ws.lock() {
                             if let Some(pane) = ws.panes.get_mut(id) {
                                 let cw = self.cell.w;
-                                if let Some(m) = pane.markdown_mut() {
+                                if let Some(m) = pane.markdown_mut().filter(|m| !m.wrap) {
                                     // 캐시된 칸 수 — 제스처 프레임마다 버퍼를
                                     // 다시 훑지 않는다. 글자 수가 아니라 칸 수라야
                                     // 한글이 섞인 줄의 상한이 실제 폭과 맞는다.

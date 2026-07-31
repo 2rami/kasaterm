@@ -2345,6 +2345,7 @@ impl GpuRenderer {
         click_x: f32,
         click_y: f32,
         folds: &[(usize, usize)],
+        wrap_cols: usize,
     ) -> (usize, usize) {
         let base = self.font_size_px as f32 / self.scale;
         let pad = base * 0.6;
@@ -2354,18 +2355,25 @@ impl GpuRenderer {
         let cx0 = x + pad + gutter_w;
         let tx0 = cx0 - h_scroll;
         let top0 = (y - scroll) + pad;
-        // 접힘이 있으면 화면 행과 버퍼 줄이 갈린다 — 클릭은 **행**을 가리키므로
-        // 줄로 되돌려야 한다(접힘이 없으면 이 변환은 항등이다).
+        // 접힘·랩이 있으면 화면 행과 버퍼 줄이 갈린다 — 클릭은 **행**을 가리키므로
+        // 줄과 그 행이 시작하는 열로 되돌린다(둘 다 없으면 항등이다).
+        let rows = crate::markdown::layout_rows(lines, folds, wrap_cols);
         let row = ((click_y - top0) / lh).floor().max(0.0) as usize;
-        let line = crate::markdown::buffer_line(folds, row, lines.len());
+        let (line, from, upto) = crate::markdown::row_span(&rows, row, lines);
         // 격자라 클릭 x 는 실수 칸 위치로 바로 떨어진다 — 글자마다 아틀라스를
         // 조회하며 펜을 굴릴 필요가 없다. 칸에서 열로 되돌릴 때만 순회하는데,
         // 와이드 글자가 2칸이라 나눗셈 한 번으로는 안 되기 때문이다. 글자의
         // 절반을 넘어섰을 때 다음 열로 넘긴다(그 글자를 클릭한 것으로 본다).
         let want = (click_x - tx0) / self.cell_w;
         let mut acc = 0.0f32;
-        let mut col = 0usize;
-        for ch in lines.get(line).map_or("", |l| l.as_str()).chars() {
+        let mut col = from;
+        for ch in lines
+            .get(line)
+            .map_or("", |l| l.as_str())
+            .chars()
+            .skip(from)
+            .take(upto - from)
+        {
             let step = (1 + usize::from(is_wide_char(ch))) as f32;
             if want < acc + step * 0.5 {
                 break;
@@ -2420,6 +2428,8 @@ impl GpuRenderer {
         scroll: f32,
         h_scroll: f32,
         folds: &[(usize, usize)],
+        wrap_cols: usize,
+        lines: &[String],
     ) -> (f32, f32) {
         let base = self.font_size_px as f32 / self.scale;
         let pad = base * 0.6;
@@ -2428,11 +2438,18 @@ impl GpuRenderer {
         let gutter_w = base * 0.62 * digits as f32 + base * 1.0;
         // Vertical: line top on screen is y + pad + li*lh - scroll, so the box
         // stays fully visible while scroll ∈ [pad+(li+1)*lh - h, pad + li*lh].
-        // 스크롤은 **화면 행** 기준이라 접힘을 건너뛴 행 번호로 재야 한다.
-        let row = crate::markdown::visual_row(folds, cur_line) as f32;
+        // 스크롤은 **화면 행** 기준이라 접힘·랩을 반영한 행 번호로 재야 한다.
+        let rows = crate::markdown::layout_rows(lines, folds, wrap_cols);
+        let cur_col = prefix.chars().count();
+        let row = crate::markdown::row_of(&rows, cur_line, cur_col) as f32;
         let hi = pad + row * lh;
         let lo = (pad + (row + 1.0) * lh - h).max(0.0);
         let ns = scroll.clamp(lo, hi.max(lo));
+        // 랩이 켜져 있으면 줄이 폭 안에서 접히므로 가로로 밀 곳이 없다 —
+        // 여기서 0 으로 고정하지 않으면 옛 h_scroll 이 남아 본문이 잘려 보인다.
+        if wrap_cols > 0 {
+            return (ns, 0.0);
+        }
         // Horizontal: the caret pen-x must stay inside the text viewport
         // (right of the gutter, left of the pane edge), with a small margin so
         // the next glyph is already visible while typing at the edge.
@@ -2564,6 +2581,20 @@ impl GpuRenderer {
         }
     }
 
+    /// 랩 폭(칸). 끄면 0. **본문 폭 계산이 여기 한 곳에만 있어야** 그리는 쪽과
+    /// 클릭·스크롤 쪽이 다른 폭으로 줄을 접는 사고가 안 난다.
+    pub fn raw_editor_wrap_cols(&mut self, w: f32, line_count: usize, wrap: bool) -> usize {
+        if !wrap {
+            return 0;
+        }
+        let base = self.font_size_px as f32 / self.scale;
+        let pad = base * 0.6;
+        let digits = ((line_count.max(1)) as f32).log10().floor() as usize + 1;
+        let gutter_w = base * 0.62 * digits as f32 + base * 1.0;
+        let body = w - self.raw_editor_mini_w(w) - pad - gutter_w;
+        ((body / self.cell_w).floor() as usize).max(8)
+    }
+
     /// 거터의 접기 삼각형을 눌렀는가 — 눌렀으면 그 **버퍼 줄**. 판정 기준이
     /// `draw_raw_editor` 와 갈리면 안 보이는 자리가 눌리므로 같은 수치를 쓴다.
     #[allow(clippy::too_many_arguments)]
@@ -2628,6 +2659,8 @@ impl GpuRenderer {
         diags: &[crate::lsp::Diag],
         // 접힌 구간들. 비어 있으면 모든 줄이 그대로 그려진다.
         folds: &[(usize, usize)],
+        // 긴 줄을 본문 폭에서 접어 내릴지. 끄면 가로 스크롤로 본다.
+        wrap: bool,
     ) -> f32 {
         // 본문은 미니맵 왼쪽까지만 쓴다. 이 렌더러엔 scissor 가 없어서
         // clip_right 가 곧 본문의 오른쪽 벽이다.
@@ -2668,14 +2701,24 @@ impl GpuRenderer {
         // 캐럿·가이드가 전부 이 값의 곱이다.
         let cw = self.cell_w;
         let guide_step = cw * crate::markdown::indent_step_cols() as f32;
+        // 화면 행 배열 — 접힘은 행을 지우고 랩은 행을 늘린다. 이 배열 하나가
+        // "몇 번째 줄을 어디부터 어디까지 그릴까"를 전부 답한다.
+        let wrap_cols = self.raw_editor_wrap_cols(w, lines.len(), wrap);
+        let rows = crate::markdown::layout_rows(lines, folds, wrap_cols);
         let mut pen_y = top0;
-        for (li, line) in lines.iter().enumerate() {
-            // 접혀서 숨은 줄은 자리도 차지하지 않는다 — `pen_y` 를 안 올리므로
-            // 아래 줄들이 그대로 끌려 올라온다. 이 `continue` 하나가 폴딩의
-            // 전부이고, 나머지(캐럿·클릭·스크롤)는 같은 변환을 쓰는 쪽에서 맞춘다.
-            if crate::markdown::is_hidden(folds, li) {
-                continue;
-            }
+        for ri in 0..rows.len() {
+            let (li, from, to) = crate::markdown::row_span(&rows, ri, lines);
+            let line = &lines[li];
+            // 이 줄의 마지막 행인가 — 줄 끝에 붙는 것들(캐럿의 끝자리·Error
+            // Lens·접힘 배지·선택의 줄바꿈 표시)이 이걸 본다.
+            let last_row = to >= line.chars().count();
+            // 열 `c` 까지가 **이 행 안에서** 몇 칸인지. 행 밖은 잘라 낸다 —
+            // 선택·괄호·찾기·진단이 전부 이 하나로 x 를 얻으므로, 랩이 걸려도
+            // 좌표가 갈릴 수 없다.
+            let cols_to = |c: usize| -> f32 {
+                let c = c.clamp(from, to);
+                cell_cols(&line.chars().skip(from).take(c - from).collect::<String>()) as f32
+            };
             if pen_y + lh > clip_top && pen_y < clip_bot {
                 // Current-line highlight: a faint band across the pane behind
                 // the cursor's row (drawn first so code paints on top). Must be
@@ -2686,7 +2729,14 @@ impl GpuRenderer {
                 // 들여쓰기 가이드 — 현재 줄 밴드 위, 선택 밴드 아래. 첫 선이
                 // 들여쓰기 0 칸 자리라 코드 왼쪽 끝에 붙는다(VS Code 와 같다).
                 let guide_col = crate::theme::with_alpha(crate::theme::text(), 0x1A);
-                for k in 0..crate::markdown::indent_guide_depth(lines, li) {
+                // 랩으로 이어진 행엔 안 그린다 — 이어진 행은 들여쓰기가 아니라
+                // 같은 줄의 계속이라, 세로선을 얹으면 없는 블록이 보인다.
+                let guide_n = if from == 0 {
+                    crate::markdown::indent_guide_depth(lines, li)
+                } else {
+                    0
+                };
+                for k in 0..guide_n {
                     let gx = tx0 + guide_step * k as f32;
                     if gx < cx0 || gx > clip_right {
                         continue;
@@ -2699,15 +2749,14 @@ impl GpuRenderer {
                 // Drawn before the text so glyphs stay crisp on top.
                 if let Some((s, e)) = sel {
                     if li >= s.0 && li <= e.0 {
-                        let n = line.chars().count();
-                        let c0 = if li == s.0 { s.1.min(n) } else { 0 };
-                        let c1 = if li == e.0 { e.1.min(n) } else { n };
-                        let p0: String = line.chars().take(c0).collect();
-                        let p1: String = line.chars().take(c1).collect();
-                        let sx0 = tx0 + cell_cols(&p0) as f32 * cw;
-                        let mut sx1 = tx0 + cell_cols(&p1) as f32 * cw;
-                        if li < e.0 {
+                        let c0 = if li == s.0 { s.1 } else { from };
+                        let c1 = if li == e.0 { e.1 } else { to };
+                        let sx0 = tx0 + cols_to(c0) * cw;
+                        let mut sx1 = tx0 + cols_to(c1) * cw;
+                        if li < e.0 && last_row {
                             // 줄바꿈도 선택에 들어갔다는 표시로 한 칸을 더 덮는다.
+                            // 줄의 **마지막 행**에만 — 랩으로 이어지는 자리엔
+                            // 줄바꿈이 없다.
                             sx1 += cw;
                         }
                         let rx0 = sx0.max(cx0);
@@ -2731,8 +2780,10 @@ impl GpuRenderer {
                         if bl != li {
                             continue;
                         }
-                        let pre: String = line.chars().take(bc).collect();
-                        let bx0 = tx0 + cell_cols(&pre) as f32 * cw;
+                        if bc < from || bc >= to {
+                            continue;
+                        }
+                        let bx0 = tx0 + cols_to(bc) * cw;
                         let bw = cw;
                         let rx0 = bx0.max(cx0);
                         let rx1 = (bx0 + bw).min(clip_right);
@@ -2754,10 +2805,8 @@ impl GpuRenderer {
                         if hl != li {
                             continue;
                         }
-                        let p0: String = line.chars().take(c0).collect();
-                        let p1: String = line.chars().take(c1).collect();
-                        let sx0 = tx0 + cell_cols(&p0) as f32 * cw;
-                        let sx1 = tx0 + cell_cols(&p1) as f32 * cw;
+                        let sx0 = tx0 + cols_to(c0) * cw;
+                        let sx1 = tx0 + cols_to(c1) * cw;
                         let rx0 = sx0.max(cx0);
                         let rx1 = sx1.min(clip_right);
                         if rx1 > rx0 {
@@ -2805,10 +2854,27 @@ impl GpuRenderer {
                         cells.extend(tok.chars().map(|ch| (ch, col)));
                     }
                 }
-                self.draw_editor_cells(&cells, tx0, pen_y + glyph_voff, base, cx0, clip_right);
-                if pe_cols.1 > pe_cols.0 {
-                    let ux0 = (tx0 + pe_cols.0 as f32 * cw).max(cx0);
-                    let ux1 = (tx0 + pe_cols.1 as f32 * cw).min(clip_right);
+                // 이 행이 담는 부분만 그린다. `cells` 는 줄 전체로 만들어 두고
+                // 여기서 자르는데, 그래야 tree-sitter 스팬을 행 경계에 맞춰
+                // 쪼개는 일을 안 한다.
+                let (sa, sb) = if composing {
+                    // 조합 글자가 캐럿 앞에 끼어 `cells` 가 그만큼 길다 —
+                    // 캐럿 뒤쪽 열은 그 길이만큼 밀린다.
+                    let pe = preedit.chars().count();
+                    (
+                        from + if from > cursor.1 { pe } else { 0 },
+                        to + if to >= cursor.1 { pe } else { 0 },
+                    )
+                } else {
+                    (from, to)
+                };
+                let sa = sa.min(cells.len());
+                let sb = sb.clamp(sa, cells.len());
+                self.draw_editor_cells(&cells[sa..sb], tx0, pen_y + glyph_voff, base, cx0, clip_right);
+                if pe_cols.1 > pe_cols.0 && cursor.1 >= from && cursor.1 <= to {
+                    let at = cols_to(cursor.1);
+                    let ux0 = (tx0 + at * cw).max(cx0);
+                    let ux1 = (tx0 + (at + cell_cols(preedit) as f32) * cw).min(clip_right);
                     if ux1 > ux0 {
                         self.rect(
                             ux0,
@@ -2828,14 +2894,15 @@ impl GpuRenderer {
                         .iter()
                         .filter(move |d| d.severity == s && li >= d.line && li <= d.end_line)
                 }) {
-                    let n = line.chars().count();
-                    let c0 = if li == d.line { d.col.min(n) } else { 0 };
-                    let c1 = if li == d.end_line { d.end_col.min(n) } else { n };
-                    let p0: String = line.chars().take(c0).collect();
-                    let p1: String = line.chars().take(c1).collect();
-                    let ux0 = tx0 + cell_cols(&p0) as f32 * cw;
-                    // 빈 범위(줄 끝을 가리키는 진단)도 한 칸은 보여야 한다.
-                    let ux1 = (tx0 + cell_cols(&p1) as f32 * cw).max(ux0 + cw);
+                    let c0 = if li == d.line { d.col } else { from };
+                    let c1 = if li == d.end_line { d.end_col } else { to };
+                    // 이 행과 안 겹치면 건너뛴다. 빈 범위(줄 끝을 가리키는
+                    // 진단)는 겹치는 것으로 친다 — 그것도 보여야 한다.
+                    if c1 < from || (c0 >= to && !(last_row && c0 == c1)) {
+                        continue;
+                    }
+                    let ux0 = tx0 + cols_to(c0) * cw;
+                    let ux1 = (tx0 + cols_to(c1) * cw).max(ux0 + cw);
                     let rx0 = ux0.max(cx0);
                     let rx1 = ux1.min(clip_right);
                     if rx1 > rx0 {
@@ -2845,8 +2912,8 @@ impl GpuRenderer {
                 }
                 // 접힌 머리 줄 끝에 몇 줄이 숨었는지. 접힌 자리가 눈에 띄지
                 // 않으면 사라진 코드를 찾다가 파일이 망가진 줄 안다.
-                if let Some(&(_, fe)) = folds.iter().find(|&&(s, _)| s == li) {
-                    let bx = tx0 + (cell_cols(line) + 1) as f32 * cw;
+                if let Some(&(_, fe)) = folds.iter().find(|&&(s, _)| s == li).filter(|_| last_row) {
+                    let bx = tx0 + (cols_to(to) + 1.0) * cw;
                     let label = format!("⋯ {}", fe - li);
                     let lw = self.measure_pen_run(&label, base * 0.85, false, false) + cw;
                     if bx > cx0 && bx + lw < clip_right {
@@ -2872,9 +2939,8 @@ impl GpuRenderer {
                 }
                 // Cursor (drawn before the gutter mask so one panned under the
                 // gutter gets clipped away cleanly).
-                if li == cursor.0 {
-                    let prefix: String = line.chars().take(cursor.1).collect();
-                    let mut cur_x = tx0 + cell_cols(&prefix) as f32 * cw;
+                if li == cursor.0 && cursor.1 >= from && (cursor.1 < to || last_row) {
+                    let mut cur_x = tx0 + cols_to(cursor.1) * cw;
                     // 조합 글자는 위 `composing` 가지가 이미 밀어 그렸다 — 여기선
                     // 그 폭만큼 캐럿을 뒤로 옮기기만 한다(두 번 그리면 겹친다).
                     if !preedit.is_empty() {
@@ -2895,8 +2961,8 @@ impl GpuRenderer {
                         .min_by_key(|d| d.severity)
                     {
                         let msg = d.message.lines().next().unwrap_or("");
-                        let mx = tx0 + (cell_cols(line) + 2) as f32 * cw;
-                        if !msg.is_empty() && mx < clip_right {
+                        let mx = tx0 + (cols_to(to) + 2.0) * cw;
+                        if last_row && !msg.is_empty() && mx < clip_right {
                             self.draw_text_clipped(
                                 mx,
                                 pen_y + glyph_voff,
@@ -2930,8 +2996,11 @@ impl GpuRenderer {
                 // 있는지는 **다음 줄이 더 깊은가**로 본다: 블록 끝까지 훑는
                 // `fold_end` 는 화면의 모든 줄에서 부르기엔 비싸고, 여기 필요한
                 // 건 "표시할까" 하나뿐이다.
-                let folded_here = folds.iter().any(|&(s, _)| s == li);
-                let foldable = folded_here
+                // 랩으로 이어진 행에는 번호도 삼각형도 없다 — VS Code 와 같다.
+                // 번호가 반복되면 그게 새 줄인 줄 안다.
+                let folded_here = from == 0 && folds.iter().any(|&(s, _)| s == li);
+                let foldable = from == 0
+                    && folded_here
                     || crate::markdown::fold_depth(line)
                         .zip(
                             lines
@@ -2955,7 +3024,7 @@ impl GpuRenderer {
                         },
                     );
                 }
-                let num = format!("{}", li + 1);
+                let num = if from == 0 { format!("{}", li + 1) } else { String::new() };
                 let num_w = self.measure_pen_run(&num, base, false, false);
                 self.draw_text(
                     x + pad + (gutter_w - base * 0.5 - num_w).max(0.0),
