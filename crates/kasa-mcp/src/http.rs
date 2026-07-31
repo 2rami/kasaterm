@@ -2532,13 +2532,53 @@ async fn term_panes_handler() -> impl IntoResponse {
     Json(kasa_pty::live_sessions())
 }
 
+/// 이 웹소켓 연결이 우리 페이지에서 온 것인가.
+///
+/// ⚠️ **웹소켓은 same-origin 정책의 보호를 받지 않는다.** 브라우저는 임의 출처
+/// 페이지가 `ws://127.0.0.1:<port>` 로 연결하는 걸 막지 않고 CORS preflight 도
+/// 없다. 즉 127.0.0.1 바인딩은 「다른 기기」만 막을 뿐, **사용자가 방문한 아무
+/// 웹페이지가 이 셸을 잡아 임의 명령을 실행하는** 경로는 그대로 열려 있다.
+/// 다른 라우트의 wildcard CORS 를 정당화하던 "local-only" 논리가 여기엔 통하지
+/// 않는다 — 읽기 전용 JSON 과 셸은 위험의 급이 다르다.
+///
+/// 그래서 Origin 을 직접 본다. Origin 이 아예 없으면 브라우저가 아닌 로컬
+/// 클라이언트(curl·스크립트)이고, 그건 이미 같은 사용자 권한으로 도는 프로세스라
+/// 막아도 얻는 게 없다.
+fn ws_origin_ok(h: &HeaderMap) -> bool {
+    let Some(origin) = h.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    let host = h
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let o = origin.split_once("://").map(|(_, rest)| rest).unwrap_or("");
+    // 호스트명을 정확히 대조한다 — starts_with 로 봤다면 `127.0.0.1.evil.com`
+    // 이 통과한다.
+    let hostname = host.rsplit_once(':').map(|(n, _)| n).unwrap_or(host);
+    !host.is_empty() && o == host && (hostname == "127.0.0.1" || hostname == "localhost")
+}
+
 async fn term_ws_handler(
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
     Query(q): Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    if !ws_origin_ok(&headers) {
+        eprintln!(
+            "[term-ws] 교차 출처 연결을 거부했습니다: {:?}",
+            headers.get(header::ORIGIN)
+        );
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "cross-origin websocket refused",
+        )
+            .into_response();
+    }
     let pane = q.get("pane").cloned().unwrap_or_default();
     let cwd = q.get("cwd").cloned();
     ws.on_upgrade(move |socket| term_ws_run(socket, pane, cwd))
+        .into_response()
 }
 
 async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
