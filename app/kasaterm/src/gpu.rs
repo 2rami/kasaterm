@@ -2542,6 +2542,22 @@ impl GpuRenderer {
         Some((spans, false))
     }
 
+    /// 물결 밑줄. 이 렌더러엔 선분 프리미티브가 없어서 짧은 사각형을 위아래로
+    /// 번갈아 놓아 톱니를 만든다 — 1px 단위라 눈에는 물결로 읽힌다. 직선이
+    /// 아닌 이유는 편집기 밑줄이 preedit(직선)과 진단 둘 다 쓰기 때문이다.
+    fn wavy_line(&mut self, x0: f32, x1: f32, y: f32, col: [u8; 4]) {
+        const SEG: f32 = 2.0;
+        const TH: f32 = 1.4;
+        let mut px = x0;
+        let mut up = true;
+        while px < x1 {
+            let w = SEG.min(x1 - px);
+            self.rect(px, if up { y } else { y + TH }, w, TH, col);
+            px += SEG;
+            up = !up;
+        }
+    }
+
     /// Raw-editor row metrics for the current font: (top pad, line height) in
     /// logical px. `draw_raw_editor` lays lines out at `pad + line * lh`, and
     /// `set_md_mode` inverts that to turn a scroll offset into a line number —
@@ -2573,6 +2589,8 @@ impl GpuRenderer {
         find: Option<(&[(usize, usize, usize)], usize)>,
         // 자동완성 팝업: (후보, 고른 것, 낱말이 시작한 열).
         complete: Option<(&[String], usize, usize)>,
+        // LSP 진단 — 물결 밑줄과 캐럿 줄 옆 인라인 메시지.
+        diags: &[crate::lsp::Diag],
     ) -> f32 {
         // 본문은 미니맵 왼쪽까지만 쓴다. 이 렌더러엔 scissor 가 없어서
         // clip_right 가 곧 본문의 오른쪽 벽이다.
@@ -2758,6 +2776,30 @@ impl GpuRenderer {
                         );
                     }
                 }
+                // LSP 진단 — 글자 아래 물결. 밴드가 아니라 밑줄인 이유는 선택·
+                // 찾기·괄호가 이미 배경 판을 쓰기 때문이다. 배경으로 겹치면
+                // 어느 것이 선택인지 안 읽힌다.
+                // 덜 심각한 것부터 — 범위가 겹치면 나중에 그린 쪽이 남는다.
+                for d in [4u8, 3, 2, 1].iter().flat_map(|&s| {
+                    diags
+                        .iter()
+                        .filter(move |d| d.severity == s && li >= d.line && li <= d.end_line)
+                }) {
+                    let n = line.chars().count();
+                    let c0 = if li == d.line { d.col.min(n) } else { 0 };
+                    let c1 = if li == d.end_line { d.end_col.min(n) } else { n };
+                    let p0: String = line.chars().take(c0).collect();
+                    let p1: String = line.chars().take(c1).collect();
+                    let ux0 = tx0 + cell_cols(&p0) as f32 * cw;
+                    // 빈 범위(줄 끝을 가리키는 진단)도 한 칸은 보여야 한다.
+                    let ux1 = (tx0 + cell_cols(&p1) as f32 * cw).max(ux0 + cw);
+                    let rx0 = ux0.max(cx0);
+                    let rx1 = ux1.min(clip_right);
+                    if rx1 > rx0 {
+                        let col = diag_color(d.severity);
+                        self.wavy_line(rx0, rx1, pen_y + glyph_voff + base - 1.0, col);
+                    }
+                }
                 // Cursor (drawn before the gutter mask so one panned under the
                 // gutter gets clipped away cleanly).
                 if li == cursor.0 {
@@ -2773,6 +2815,35 @@ impl GpuRenderer {
                         // the text) so it lines up with the characters, not the
                         // padded line box.
                         self.rect(cur_x, pen_y + glyph_voff, 2.0, base, crate::theme::accent());
+                    }
+                    // 캐럿이 선 줄의 진단 메시지를 줄 끝에 덧붙인다(Error Lens).
+                    // 호버는 마우스 좌표가 있어야 하는데, 편집 중엔 손이 키보드에
+                    // 있으니 캐럿 줄에 붙이는 편이 실제로 읽힌다. 심각한 것 하나만.
+                    if let Some(d) = diags
+                        .iter()
+                        .filter(|d| li >= d.line && li <= d.end_line)
+                        .min_by_key(|d| d.severity)
+                    {
+                        let msg = d.message.lines().next().unwrap_or("");
+                        let mx = tx0 + (cell_cols(line) + 2) as f32 * cw;
+                        if !msg.is_empty() && mx < clip_right {
+                            self.draw_text_clipped(
+                                mx,
+                                pen_y + glyph_voff,
+                                msg,
+                                DrawOpts {
+                                    font_size: base,
+                                    color: crate::theme::with_alpha(
+                                        diag_color(d.severity),
+                                        0xB0,
+                                    ),
+                                    bold: false,
+                                    italic: true,
+                                },
+                                cx0,
+                                clip_right,
+                            );
+                        }
                     }
                 }
                 // Gutter mask: repaint the column over any text that scrolled
@@ -2868,6 +2939,26 @@ impl GpuRenderer {
             let edge = crate::theme::with_alpha(crate::theme::accent(), 0xAA);
             self.rect(mx + 1.0, vy, mini_w - 1.0, 1.0, edge);
             self.rect(mx + 1.0, vy + vh - 1.0, mini_w - 1.0, 1.0, edge);
+            // 진단 마커 — 미니맵 오른쪽 가장자리에. 뷰포트 창 **뒤에** 그린다:
+            // 지금 보고 있는 구간의 에러가 창에 묻히면 마커의 존재 이유가 없다.
+            //
+            // 덜 심각한 것부터 그린다. 한 줄에 error 와 hint 가 같이 오는 건
+            // 흔한데(rust-analyzer 는 "expected due to this" 를 hint 로 딸려
+            // 보낸다), 순서대로 그리면 회색 hint 가 빨간 error 를 덮어 문서에
+            // 에러가 없는 것처럼 보였다(실측).
+            const MARK_W: f32 = 3.0;
+            for sev in [4u8, 3, 2, 1] {
+                for d in diags.iter().filter(|d| d.severity == sev) {
+                    let my = (y + d.line as f32 * per).clamp(y, y + h - 1.0);
+                    self.rect(
+                        mx + mini_w - MARK_W,
+                        my,
+                        MARK_W,
+                        per.max(2.0),
+                        diag_color(sev),
+                    );
+                }
+            }
         }
         // 자동완성 팝업 — 줄 루프 **밖**에서 마지막에 그린다. 안에서 그리면
         // 뒤에 오는 줄들이 위에 덮여 목록이 반쯤 잘린다.
@@ -4018,6 +4109,16 @@ pub(crate) fn cell_cols(text: &str) -> usize {
     text.chars()
         .map(|c| 1 + usize::from(is_wide_char(c)))
         .sum()
+}
+
+/// LSP severity → 색. 1=error 2=warning 3=information 4=hint.
+pub(crate) fn diag_color(severity: u8) -> [u8; 4] {
+    match severity {
+        1 => crate::theme::danger(),
+        2 => crate::theme::syn_type(),
+        3 => crate::theme::accent(),
+        _ => crate::theme::text_mute(),
+    }
 }
 
 pub(crate) fn is_wide_char(ch: char) -> bool {

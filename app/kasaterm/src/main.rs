@@ -29,6 +29,7 @@ mod auxwin;
 mod input;
 mod settings;
 mod syntax;
+mod lsp;
 mod links;
 mod proc;
 mod info;
@@ -1574,6 +1575,10 @@ struct MarkdownPane {
     /// 센다. 트랙패드 제스처는 프레임마다 상한을 묻는데, 캐시가 없으면 그때마다
     /// 버퍼 전체를 훑었다.
     longest_cache: Option<usize>,
+    /// 버퍼가 바뀔 때마다 오르는 세대 번호. LSP 재전송 디바운스가 "달라졌나"를
+    /// 이 정수 하나로 판정한다 — 매 틱 5천 줄을 이어 붙여 해시하면 그 자체가
+    /// 프레임 예산이고, 저장 플래그(`dirty`)는 Cmd+S 에 꺼져서 못 쓴다.
+    edit_gen: u64,
 }
 
 /// 자동완성 팝업 상태.
@@ -3482,6 +3487,10 @@ struct App {
     /// Set when `KASATERM_RENDERER=gpu`. Mutually exclusive with
     /// `sugarloaf` — both own a wgpu Surface, only one can present.
     gpu: Option<gpu::GpuRenderer>,
+    /// 살아 있는 rust-analyzer 하나 — **프로젝트 루트당 하나**. 첫 rust 파일을
+    /// 편집기로 열 때 뜨고, 그 전엔 아예 띄우지 않는다: 인덱싱에 수십 초와 수 GB
+    /// 를 쓰는 프로세스라 쓸지 모르는 채로 켜 두면 안 된다.
+    lsp: Option<lsp::LspClient>,
     tmux: Option<Arc<TmuxSession>>,
     /// Phase C backend. Mutually exclusive with `tmux` — exactly one
     /// is `Some` after `start_backend`. Selection driven by the
@@ -4236,6 +4245,7 @@ impl App {
         Self {
             window: None,
             gpu: None,
+            lsp: None,
             tmux: None,
             pty: HashMap::new(),
             pty_layout: None,

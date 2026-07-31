@@ -142,6 +142,8 @@ impl AuxWindow {
                     // `aux_insert` 로 받아 팝업 키 경로를 안 지난다. 목록만
                     // 띄우면 고를 수 없는 유령이 된다.
                     None,
+                    // 진단은 App 이 들고 있어(`App.lsp`) 이 창에서 못 읽는다.
+                    &[],
                 );
             }
             // Settings/Terminal 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
@@ -303,6 +305,7 @@ impl App {
             find: None,
             complete: None,
             longest_cache: None,
+            edit_gen: 0,
             edited_at: None,
         };
         self.spawn_aux_editor(md, event_loop, None);
