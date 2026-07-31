@@ -567,6 +567,10 @@ impl App {
         if self.windows[idx].is_none() {
             return;
         }
+        // 줌은 App 전역 상태인데 pane 은 방(윈도우)마다 다르다 — 줌한 채로 방을
+        // 옮기면 그 방에 없는 pane 을 가리킨 유령 줌이 남아, 새 방이 「최대화된
+        // 무언가」처럼 보이거나 되돌릴 대상이 없어진다. 방을 옮기는 순간 푼다.
+        self.zoomed_pane = None;
         self.windows[self.active_window] = self.pty_layout.take();
         self.pty_layout = self.windows[idx].take();
         self.active_window = idx;
