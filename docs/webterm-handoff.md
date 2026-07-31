@@ -5,13 +5,28 @@
 
 ## 지금 되는 것
 
+**평소 경로는 kasaterm 자신이다.** kasaterm 이 떠 있으면 그 서버가 `/term` 을 연다 —
+따로 띄울 게 없다.
+
 ```
-cargo build -p kasa-mcp --bin kasa-serve-web
-./target/debug/kasa-serve-web --port 8799
-# 브라우저에서 http://127.0.0.1:8799/term
+open "http://127.0.0.1:8765/term"
 ```
 
-kasaterm 이 떠 있으면 그 안의 서버(8765)에서도 같은 `/term` 이 열린다.
+⚠️ **8765 를 하드코딩하지 마라.** 그 포트가 점유돼 있으면 서버는 조용히 임의 포트로
+간다(`bind(("127.0.0.1", 8765)).or_else(bind(("127.0.0.1", 0)))`). 붙는 쪽은 실제
+포트를 찾아야 한다:
+
+```sh
+PORT=$(lsof -nP -iTCP -sTCP:LISTEN -a -c kasaterm 2>/dev/null \
+       | awk 'NR>1{split($9,a,":"); print a[2]; exit}')
+```
+
+kasaterm 없이 서버만 띄울 수도 있다(포트는 임의로 골라 쓴다):
+
+```
+cargo build -p kasa-mcp --bin kasa-serve-web
+./target/debug/kasa-serve-web --port 8799   # 8799 는 예시일 뿐, 약속된 포트가 아니다
+```
 
 | 라우트 | 하는 일 |
 |---|---|
