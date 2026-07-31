@@ -925,6 +925,35 @@ impl App {
                 // 받으므로 뒤에 `citems:` 단계를 두고 갈아끼워진 후보를 본다.
                 self.lsp_complete_request(&id);
             }
+            // 그 자리에 마우스를 멈춘 것으로 친다 — `hover:<dx>,<dy>`(본문 박스
+            // 기준). 실제 커서를 밖에서 못 움직여서 상태를 직접 세우고, 멈춘
+            // 시각을 과거로 둬 대기 시간을 건너뛴다. 답은 틱이 받으므로 뒤에
+            // `tip:` 단계를 둔다.
+            Some(("hover", v)) => {
+                let (dx, dy) = v.split_once(',').unwrap_or((v, "0"));
+                let (dx, dy): (f32, f32) =
+                    (dx.trim().parse().unwrap_or(0.0), dy.trim().parse().unwrap_or(0.0));
+                let Some(&(bx, by, _, _)) = self.md_body_rects.get(&id) else {
+                    eprintln!("[mdscript] hover: 본문 박스 없음(raw 모드인지 확인)");
+                    return;
+                };
+                let past = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(1))
+                    .unwrap_or_else(std::time::Instant::now);
+                self.hover = Some(crate::HoverState {
+                    at: (bx + dx, by + dy),
+                    since: past,
+                    req: None,
+                    text: None,
+                });
+                self.lsp_hover_tick();
+                eprintln!("[mdscript] hover=({dx},{dy}) 요청={}", self.hover.is_some());
+            }
+            // 지금 떠 있는 툴팁 글 — `tip:`.
+            Some(("tip", _)) => {
+                let t = self.hover.as_ref().and_then(|h| h.text.clone());
+                eprintln!("[mdscript] tip={t:?}");
+            }
             // 정의로 뛴다 — `goto:`. Cmd+클릭이 부르는 것과 같은 함수를 직접
             // 부른다(수정키 상태를 밖에서 만들 수 없다). 응답은 틱이 받으므로
             // 뒤에 `caret:` 단계를 두고 옮겨진 자리를 본다.

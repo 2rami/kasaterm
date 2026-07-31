@@ -2558,6 +2558,76 @@ impl App {
         }
     }
 
+    /// 이 화면 좌표를 품은 편집기 pane.
+    fn md_pane_at_px(&self, px: f32, py: f32) -> Option<String> {
+        self.md_body_rects
+            .iter()
+            .find(|(_, &(x, y, w, h))| px >= x && px < x + w && py >= y && py < y + h)
+            .map(|(id, _)| id.clone())
+    }
+
+    /// 화면 좌표가 가리키는 (줄, 열, 그 줄 텍스트) — **캐럿은 건드리지 않는다**.
+    /// 호버가 쓴다: 마우스가 지나가는 자리마다 캐럿이 따라가면 편집이 불가능하다.
+    fn md_pos_at_px(&mut self, id: &str, px: f32, py: f32) -> Option<(usize, usize, String)> {
+        let &(bx, by, _, _) = self.md_body_rects.get(id)?;
+        let snap = {
+            let ws = self.ws.lock().ok()?;
+            let m = ws.panes.get(id)?.markdown()?;
+            m.raw_mode
+                .then(|| (m.edit_lines.clone(), m.scroll, m.h_scroll))?
+        };
+        let (lines, scroll, h_scroll) = snap;
+        let gpu = self.gpu.as_mut()?;
+        let (line, col) = gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py);
+        Some((line, col, lines.get(line).cloned().unwrap_or_default()))
+    }
+
+    /// 마우스가 멎었으면 그 자리를 묻고, 답이 왔으면 툴팁에 담는다. 틱마다 부른다.
+    pub(crate) fn lsp_hover_tick(&mut self) {
+        // 사람이 "여기 뭐지" 하고 멈추는 시간. 더 짧으면 지나가다 툴팁이 튀고,
+        // 더 길면 기다리는 게 느껴진다.
+        const DELAY: std::time::Duration = std::time::Duration::from_millis(450);
+        let Some(h) = self.hover.as_ref() else { return };
+        if h.text.is_some() {
+            return;
+        }
+        // 답을 기다리는 중이면 받기만 한다.
+        if let Some(rid) = h.req {
+            if let Some(t) = self.lsp.as_ref().and_then(|c| c.take_hover(rid)) {
+                if let Some(h) = self.hover.as_mut() {
+                    h.text = Some(t);
+                }
+                self.chrome_dirty = true;
+            }
+            return;
+        }
+        if h.since.elapsed() < DELAY {
+            return;
+        }
+        let (px, py) = h.at;
+        // 여기서부터는 한 번만 시도한다 — 실패하면 상태를 지워, 마우스가 다시
+        // 움직일 때까지 조용하다(안 그러면 틱마다 같은 자리를 되묻는다).
+        self.hover = None;
+        let Some(id) = self.md_pane_at_px(px, py) else { return };
+        let Some((line, col, line_text)) = self.md_pos_at_px(&id, px, py) else { return };
+        let Some((path, gen, _, _, _)) = self.lsp_caret_at(&id) else { return };
+        self.lsp_sync_now(&id, &path, gen);
+        let utf16 = crate::lsp::char_col_to_utf16(&line_text, col);
+        let Some(rid) = self
+            .lsp
+            .as_mut()
+            .and_then(|c| c.request_hover(&path, line, utf16))
+        else {
+            return;
+        };
+        self.hover = Some(crate::HoverState {
+            at: (px, py),
+            since: std::time::Instant::now(),
+            req: Some(rid),
+            text: None,
+        });
+    }
+
     /// Cmd+클릭이 닿은 자리의 정의를 묻는다. 답이 오면 `lsp_goto_pump` 가 그
     /// 파일을 열고 캐럿을 옮긴다.
     pub(crate) fn lsp_goto_request(&mut self, id: &str) {

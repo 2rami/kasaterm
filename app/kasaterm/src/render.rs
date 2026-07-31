@@ -2272,6 +2272,15 @@ impl App {
                 self.md_content_h.insert(id.clone(), content_h);
             }
             self.md_find_rects = find_btn_hits;
+            // 호버 툴팁 — pane 을 다 그린 뒤에 얹는다. pane 안에서 그리면 툴팁이
+            // 경계를 넘는 순간 다음 pane 이 위를 덮어 반쪽만 남는다.
+            if let Some((tip, hx, hy)) = self
+                .hover
+                .as_ref()
+                .and_then(|h| h.text.as_ref().map(|t| (t.clone(), h.at.0, h.at.1)))
+            {
+                Self::draw_hover_tip(g, &tip, hx, hy, win_px.0 / scale, win_px.1 / scale);
+            }
             // Title strip fill: the unified BG so the top bar reads as one
             // surface with the sidebar and terminal body (no depth seam).
             g.rect(0.0, 0.0, win_px.0 / scale, TITLE_HEIGHT, theme::bg());
@@ -6200,6 +6209,73 @@ impl App {
     /// Find/replace bar, floated over the top-right of a raw editor's body box
     /// (`x`/`y`/`w`). Returns its clickable rects in logical px.
     ///
+    /// 호버 툴팁 — 마우스 아래에 뜨는 작은 상자. rust-analyzer 는 타입에 문서
+    /// 전체를 붙여 주기도 해서 가로·세로 둘 다 자른다: 화면 절반을 덮는 툴팁은
+    /// 정보가 아니라 방해다.
+    fn draw_hover_tip(
+        g: &mut gpu::GpuRenderer,
+        text: &str,
+        mx: f32,
+        my: f32,
+        win_w: f32,
+        win_h: f32,
+    ) {
+        const MAX_LINES: usize = 10;
+        const MAX_COLS: usize = 78;
+        const PAD: f32 = 7.0;
+        let (_, lh0) = g.raw_editor_metrics();
+        let size = lh0 / 1.25 * 0.92;
+        let lh = size * 1.35;
+        let lines: Vec<String> = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .take(MAX_LINES)
+            .map(|l| {
+                if l.chars().count() > MAX_COLS {
+                    format!("{}…", l.chars().take(MAX_COLS).collect::<String>())
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+        let tw = lines
+            .iter()
+            .map(|l| g.measure_pen_run(l, size, false, false))
+            .fold(0.0f32, f32::max);
+        let w = tw + PAD * 2.0;
+        let h = lines.len() as f32 * lh + PAD * 2.0;
+        // 마우스 아래가 기본. 아래가 모자라면 위로 뒤집고, 오른쪽으로 넘치면
+        // 왼쪽으로 민다 — 창 밖으로 나간 툴팁은 그리나 마나다.
+        let x = (mx + 12.0).min(win_w - w - 4.0).max(4.0);
+        let y = if my + 18.0 + h < win_h {
+            my + 18.0
+        } else {
+            (my - 12.0 - h).max(4.0)
+        };
+        g.rect(x, y, w, h, theme::surface());
+        let edge = theme::border();
+        g.rect(x, y, w, 1.0, edge);
+        g.rect(x, y + h - 1.0, w, 1.0, edge);
+        g.rect(x, y, 1.0, h, edge);
+        g.rect(x + w - 1.0, y, 1.0, h, edge);
+        for (i, l) in lines.iter().enumerate() {
+            g.draw_text(
+                x + PAD,
+                y + PAD + i as f32 * lh,
+                l,
+                gpu::DrawOpts {
+                    font_size: size,
+                    color: theme::text(),
+                    bold: false,
+                    italic: false,
+                },
+            );
+        }
+    }
+
     /// It overlays rather than pushing the text down, so opening it never
     /// reflows what you were reading — the same reason VS Code floats its own.
     fn draw_find_bar(
