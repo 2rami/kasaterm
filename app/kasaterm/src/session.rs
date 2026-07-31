@@ -342,7 +342,7 @@ impl App {
             initial_scrollback: Vec::new(),
         })?);
         self.pump_pty_screens(session.screens.clone(), id.clone());
-        self.pty.insert(id.clone(), session.clone());
+        self.insert_pty(id.clone(), session.clone());
         self.pty_layout = Some(kasa_pty::PtyLayout::single(&id));
         self.ws.lock().unwrap().active_pane = Some(id);
         Ok(())
@@ -499,7 +499,7 @@ impl App {
             Ok(session) => {
                 let sess = Arc::new(session);
                 self.pump_pty_screens(sess.screens.clone(), pane.to_string());
-                self.pty.insert(pane.to_string(), sess.clone());
+                self.insert_pty(pane.to_string(), sess.clone());
                 // old PTY 의 EOF 가 이 pane id 를 dead_panes 에 넣었을 수 있다 — 같은 id 로
                 // respawn 했으니 그 stale 죽음표시를 지워 reap 이 새 pane 을 닫지 않게(거노:
                 // 캐릭터 변경하면 pane 이 닫히던 버그). reap 에 contains_key 가드도 있지만 명시.
@@ -559,6 +559,17 @@ impl App {
             };
             layout.is_some_and(|l| l.leaves().contains(&pane))
         })
+    }
+    /// PTY 세션을 App 에 넣으면서 전역 레지스트리에도 등록한다.
+    ///
+    /// 웹 터미널·소켓 백엔드는 GUI 스레드를 거치지 않고 이 레지스트리로 세션에
+    /// 붙으므로, **pane 을 만드는 모든 경로는 `self.pty.insert` 대신 이걸 써야**
+    /// 한다. 한 곳이라도 빠뜨리면 그 pane 만 조용히 웹에서 안 보이는, 찾기 어려운
+    /// 종류의 구멍이 난다 — 그래서 통로를 하나로 묶었다. 레지스트리는 Weak 이라
+    /// 해제는 App 이 Arc 를 떨어뜨리는 것으로 저절로 된다.
+    pub(crate) fn insert_pty(&mut self, id: String, sess: std::sync::Arc<kasa_pty::PtySession>) {
+        kasa_pty::register_session(&id, &sess);
+        self.pty.insert(id, sess);
     }
     pub(crate) fn switch_window(&mut self, idx: usize) {
         if idx == self.active_window || idx >= self.windows.len() {
@@ -2187,7 +2198,7 @@ impl App {
             self.pane_cwd_cache
                 .insert(id.clone(), std::path::PathBuf::from(c));
         }
-        self.pty.insert(id.clone(), session.clone());
+        self.insert_pty(id.clone(), session.clone());
         // Bring claude back: --resume the saved conversation (the shim
         // re-attaches team/persona/character from the session id), or a fresh
         // claude when the pane ran claude but no session id was captured.
