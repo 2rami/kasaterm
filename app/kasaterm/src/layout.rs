@@ -478,7 +478,7 @@ impl App {
             initial_scrollback: Vec::new(),
         })?;
         self.pump_pty_screens(session.screens.clone(), new_id.clone());
-        self.pty.insert(new_id.clone(), Arc::new(session));
+        self.insert_pty(new_id.clone(), Arc::new(session));
 
         let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
         if !layout.split_leaf(&active, dir, new_id.clone()) {
@@ -523,7 +523,7 @@ impl App {
             initial_scrollback: Vec::new(),
         })?;
         self.pump_pty_screens(session.screens.clone(), new_pid.clone());
-        self.pty.insert(new_pid.clone(), Arc::new(session));
+        self.insert_pty(new_pid.clone(), Arc::new(session));
         {
             let mut ws = self.ws.lock().unwrap();
             ws.pid_to_pane.insert(new_pid.clone(), outer.to_string());
@@ -687,7 +687,7 @@ impl App {
             initial_scrollback: Vec::new(),
         })?;
         self.pump_pty_screens(session.screens.clone(), new_id.clone());
-        self.pty.insert(new_id.clone(), Arc::new(session));
+        self.insert_pty(new_id.clone(), Arc::new(session));
         // `before=true` means the new leaf becomes the LEFT/TOP child, so
         // the source ends up on the RIGHT/BOTTOM. We want source on the
         // dropped side → new on the opposite side.

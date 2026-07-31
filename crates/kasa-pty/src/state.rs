@@ -137,6 +137,12 @@ pub struct PtySession {
     /// zsh/bash) never updates the process's real cwd. None until the injected
     /// shell integration emits its first prompt.
     cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// raw PTY 바이트를 그대로 받아 가는 구독자들 — 브라우저의 xterm.js 처럼
+    /// **자기 VT 파서를 가진** 소비자를 위한 tee. 여기로 흘리는 건 우리가 파싱한
+    /// 셀이 아니라 셸이 뱉은 바이트 그 자체라, 받는 쪽이 kasaterm 내부 구조에
+    /// 전혀 묶이지 않는다. `blocks` 와 같은 이유로 Arc 공유 — HTTP 백엔드가
+    /// GUI 스레드를 거치지 않고 직접 붙는다.
+    byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
 }
 
 impl PtySession {
@@ -335,6 +341,7 @@ impl PtySession {
             proc.advance(&mut *t, line.as_bytes());
             proc.advance(&mut *t, b"\r\n");
         }
+        let byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
         let reader_thread = spawn_reader_thread(
             reader,
             tx.clone(),
@@ -346,6 +353,7 @@ impl PtySession {
             Arc::clone(&term),
             Arc::clone(&blocks),
             Arc::clone(&cwd_handle),
+            Arc::clone(&byte_taps),
         );
 
         Ok(Self {
@@ -366,6 +374,7 @@ impl PtySession {
             ))),
             term,
             screens_tx: tx,
+            byte_taps,
             title_handle,
             pane_id: opts.pane_id.clone(),
             tty_short,
@@ -595,6 +604,22 @@ impl PtySession {
         snapshot(&mut t, cols, rows, &self.pane_id, &self.title_handle, true)
     }
 
+    /// raw PTY 바이트 스트림을 구독한다. 받는 쪽이 자기 VT 파서를 갖고 있을 때
+    /// 쓴다(브라우저 xterm.js). 돌려준 `Receiver` 를 떨어뜨리면 다음 read 때
+    /// reader 가 알아서 걷어내므로 해지 API 가 따로 없다.
+    ///
+    /// 버퍼는 64청크 — 64KB read 기준 최악 4MB다. 소비가 이보다 밀리면 reader 가
+    /// 이 구독을 끊는다(`spawn_reader_thread` 의 tee 주석 참고).
+    /// 현재 PTY 격자 크기 `(cols, rows)`. 미러로 붙는 쪽이 자기 화면을 여기에
+    /// 맞춰야 줄바꿈이 어긋나지 않는다.
+    pub fn size(&self) -> (u16, u16) {
+        *self.size.lock().unwrap()
+    }
+    pub fn tap_bytes(&self) -> Receiver<Vec<u8>> {
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        self.byte_taps.lock().unwrap().push(tx);
+        rx
+    }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         // Kernel-side PTY first (child sees SIGWINCH).
         {
@@ -877,6 +902,41 @@ fn make_term(cols: u16, rows: u16, listener: PtyEventForwarder) -> Term<PtyEvent
     Term::new(config, &size, listener)
 }
 
+/// 살아 있는 PTY 세션 레지스트리 — pane id → 세션.
+///
+/// 소유권은 GUI(`App.pty`)에 있고 여기엔 **Weak** 만 둔다. pane 이 닫히면 App 이
+/// Arc 를 떨어뜨리는 것만으로 항목이 저절로 무효가 되므로, 해제를 잊어 유령
+/// 세션이 남는 부류의 버그가 원천적으로 없다. HTTP·소켓 백엔드가 GUI 스레드를
+/// 거치지 않고 세션에 직접 붙는 통로다.
+fn registry() -> &'static Mutex<std::collections::HashMap<String, std::sync::Weak<PtySession>>> {
+    static R: std::sync::OnceLock<
+        Mutex<std::collections::HashMap<String, std::sync::Weak<PtySession>>>,
+    > = std::sync::OnceLock::new();
+    R.get_or_init(Default::default)
+}
+
+/// pane 을 띄운 쪽이 `Arc` 를 손에 넣은 직후 한 번 부른다.
+pub fn register_session(id: &str, sess: &Arc<PtySession>) {
+    registry()
+        .lock()
+        .unwrap()
+        .insert(id.to_string(), Arc::downgrade(sess));
+}
+
+/// 살아 있으면 세션을 돌려준다. 이미 닫힌 pane 이면 `None`.
+pub fn lookup_session(id: &str) -> Option<Arc<PtySession>> {
+    registry().lock().unwrap().get(id)?.upgrade()
+}
+
+/// 지금 살아 있는 pane id 목록(정렬). 죽은 항목은 조회하는 김에 걷어낸다.
+pub fn live_sessions() -> Vec<String> {
+    let mut r = registry().lock().unwrap();
+    r.retain(|_, w| w.strong_count() > 0);
+    let mut ids: Vec<String> = r.keys().cloned().collect();
+    ids.sort();
+    ids
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_reader_thread(
     mut reader: Box<dyn Read + Send>,
@@ -889,6 +949,7 @@ fn spawn_reader_thread(
     term: Arc<Mutex<Term<PtyEventForwarder>>>,
     blocks: Arc<Mutex<VecDeque<CommandBlock>>>,
     cwd_handle: Arc<Mutex<Option<std::path::PathBuf>>>,
+    byte_taps: Arc<Mutex<Vec<Sender<Vec<u8>>>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         use unicode_normalization::UnicodeNormalization;
@@ -983,6 +1044,21 @@ fn spawn_reader_thread(
                     return;
                 }
             };
+            // 외부 구독자(브라우저 xterm.js 등)에게 raw 바이트를 그대로 흘린다.
+            // 파싱 전 원본이라 받는 쪽은 자기 VT 파서로 독립적으로 그린다.
+            //
+            // ⚠️ 여기서 블로킹하면 아래 스냅샷 try_send 와 똑같은 병에 걸린다 —
+            // reader 가 멎으면 셸이 backpressure 를 먹어 터미널 전체가 느려진다.
+            // 그래서 try_send 이고, **밀린 구독자는 버리는 게 아니라 끊는다**:
+            // VT 스트림은 연속이라 중간 청크를 흘리면 받는 쪽 화면이 복구 불능
+            // 으로 깨진다. 조용히 깨뜨리느니 연결을 닫아 재연결시키는 편이 낫다.
+            // 구독자가 없으면 lock 만 잡았다 놓으므로 평소 비용은 사실상 0.
+            {
+                let mut taps = byte_taps.lock().unwrap();
+                if !taps.is_empty() {
+                    taps.retain(|t| t.try_send(buf[..n].to_vec()).is_ok());
+                }
+            }
             // Append raw bytes (hex + escaped-printable preview) to the
             // KASATERM_PTY_LOG file so claude-code escape sequences can
             // be diffed against ghostty's `script` capture.
