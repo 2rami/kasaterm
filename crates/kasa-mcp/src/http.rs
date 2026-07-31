@@ -9,6 +9,7 @@ use std::sync::Arc;
 use kasa_socket::backend::Backend;
 use axum::{
     body::Bytes,
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{Path as AxPath, Query},
     http::{header, HeaderMap, Method},
     response::IntoResponse,
@@ -2491,6 +2492,144 @@ async fn schale_state_handler() -> impl IntoResponse {
 /// background thread. Tries `preferred_port` first, then falls back to an
 /// OS-assigned port. Returns the actual port bound so the host can write
 /// it into `.mcp.json` / an env var.
+// ── 웹 터미널 ────────────────────────────────────────────────────────────
+//
+// 브라우저(xterm.js)가 붙는 자리. 흘려보내는 건 우리가 파싱한 셀이 아니라 셸이
+// 뱉은 **raw 바이트 그 자체**라, 받는 쪽은 kasaterm 내부 구조를 하나도 몰라도
+// 된다 — VT 해석은 xterm.js 가 자기 파서로 한다. 그래서 이게 「터미널만 따로
+// 떼어낸 것」이 된다.
+//
+// 한 라우트에 두 모드가 있다:
+//   (파라미터 없음)  웹 전용 셸을 **새로 띄운다**. 연결이 끊기면 Arc 가 떨어져
+//                    셸도 함께 끝난다 — 브라우저 탭이 곧 세션 수명이다.
+//   ?pane=%1         기존 kasaterm pane 을 **미러**한다(같은 PTY 를 함께 본다).
+
+// xterm.js 는 vendored 다(assets/term, MIT). CDN 을 쓰면 오프라인에서 죽고
+// 사내망 정책에도 걸린다 — 바이너리에 박아 넣으면 서버 하나로 자족한다.
+async fn term_page_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../assets/term/index.html"),
+    )
+}
+
+async fn term_asset_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../assets/term/xterm.js"),
+    )
+}
+
+async fn term_asset_css() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../assets/term/xterm.css"),
+    )
+}
+
+/// 살아 있는 pane 목록 — 미러 대상을 고르는 데 쓴다.
+async fn term_panes_handler() -> impl IntoResponse {
+    Json(kasa_pty::live_sessions())
+}
+
+async fn term_ws_handler(
+    ws: WebSocketUpgrade,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let pane = q.get("pane").cloned().unwrap_or_default();
+    let cwd = q.get("cwd").cloned();
+    ws.on_upgrade(move |socket| term_ws_run(socket, pane, cwd))
+}
+
+async fn term_ws_run(socket: WebSocket, pane: String, cwd: Option<String>) {
+    use futures_util::{SinkExt, StreamExt};
+    // 미러냐 새 셸이냐. 새 셸의 pane_id 는 kasaterm 의 "%n" 과 겹치면 안 된다
+    // (레지스트리 키 충돌) — 웹 전용 접두사를 붙인다.
+    let (sess, mirrored) = if pane.is_empty() {
+        let opts = kasa_pty::PtyOptions {
+            cwd: cwd.or_else(|| std::env::var("HOME").ok()),
+            cols: 80,
+            rows: 24,
+            pane_id: format!("web-{}", uuid::Uuid::new_v4()),
+            ..Default::default()
+        };
+        match kasa_pty::PtySession::start(opts) {
+            Ok(s) => (std::sync::Arc::new(s), false),
+            Err(e) => {
+                eprintln!("[term-ws] 셸을 못 띄웠습니다: {e}");
+                return;
+            }
+        }
+    } else {
+        match kasa_pty::lookup_session(&pane) {
+            Some(s) => (s, true),
+            None => {
+                eprintln!("[term-ws] 그런 pane 이 없습니다: {pane}");
+                return;
+            }
+        }
+    };
+    let rx = sess.tap_bytes();
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    // 붙자마자 현재 격자 크기를 알려 준다 — 미러는 이 크기에 자기를 맞춰야
+    // 줄바꿈이 어긋나지 않는다(웹이 PTY 를 바꾸면 kasaterm 쪽이 깨지므로).
+    let (c, r) = sess.size();
+    let _ = ws_tx
+        .send(Message::Text(
+            format!(r#"{{"t":"size","cols":{c},"rows":{r},"mirror":{mirrored}}}"#).into(),
+        ))
+        .await;
+
+    // crossbeam recv 는 블로킹이라 tokio 워커에서 그대로 돌리면 런타임을 세운다.
+    // 전용 스레드가 받아 tokio 채널로 건넨다.
+    let (btx, mut brx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    std::thread::spawn(move || {
+        while let Ok(chunk) = rx.recv() {
+            if btx.blocking_send(chunk).is_err() {
+                break;
+            }
+        }
+    });
+
+    let sess_in = sess.clone();
+    let mut to_browser = tokio::spawn(async move {
+        while let Some(chunk) = brx.recv().await {
+            if ws_tx.send(Message::Binary(chunk.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut to_shell = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            match msg {
+                // 키 입력은 binary — 텍스트 채널과 섞이지 않아 파싱이 필요 없다.
+                Message::Binary(b) => {
+                    let _ = sess_in.send_bytes(&b);
+                }
+                Message::Text(t) => {
+                    let Ok(v) = serde_json::from_str::<serde_json::Value>(&t) else {
+                        continue;
+                    };
+                    if v.get("t").and_then(|x| x.as_str()) == Some("resize") && !mirrored {
+                        // ⚠️ 미러일 땐 무시한다. 같은 PTY 를 보고 있는 kasaterm
+                        // pane 의 화면이 같이 깨진다.
+                        let c = v.get("cols").and_then(|x| x.as_u64()).unwrap_or(80) as u16;
+                        let r = v.get("rows").and_then(|x| x.as_u64()).unwrap_or(24) as u16;
+                        let _ = sess_in.resize(c.max(20), r.max(5));
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
+    });
+    // 한쪽이 끝나면 다른 쪽도 접는다. 새 셸이면 여기서 Arc 가 떨어져 셸이 종료된다.
+    tokio::select! {
+        _ = &mut to_browser => to_shell.abort(),
+        _ = &mut to_shell => to_browser.abort(),
+    }
+}
+
 pub fn spawn_http_server(
     backend: Arc<dyn Backend>,
     preferred_port: u16,
@@ -2686,6 +2825,12 @@ pub fn spawn_http_server_opts(
                         get(move || layout_handler(layout_backend.clone())),
                     )
                     .route("/characters", get(characters_handler))
+                    // 웹 터미널 — 브라우저에서 독립으로 여는 셸.
+                    .route("/term", get(term_page_handler))
+                    .route("/term/xterm.js", get(term_asset_js))
+                    .route("/term/xterm.css", get(term_asset_css))
+                    .route("/term/panes", get(term_panes_handler))
+                    .route("/term/ws", get(term_ws_handler))
                     .route(
                         "/mode",
                         get(move || mode_get_handler(mode_get_backend.clone())),

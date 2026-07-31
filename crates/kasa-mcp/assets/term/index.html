@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kasaterm</title>
+<link rel="stylesheet" href="/term/xterm.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #12161c; }
+  #term { position: absolute; inset: 8px; }
+  /* xterm 기본 스크롤바는 밝은 톤이라 어두운 터미널 위에서 흰 띠로 튄다. */
+  .xterm-viewport::-webkit-scrollbar { width: 10px; }
+  .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+  .xterm-viewport::-webkit-scrollbar-thumb {
+    background: #2c3543; border-radius: 5px;
+  }
+  .xterm-viewport { scrollbar-width: thin; scrollbar-color: #2c3543 transparent; }
+  #status {
+    position: absolute; right: 12px; bottom: 8px; z-index: 5;
+    font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #6b7683; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="term"></div>
+<div id="status"></div>
+<script src="/term/xterm.js"></script>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const statusEl = document.getElementById('status');
+  const term = new Terminal({
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, "D2Coding", monospace',
+    fontSize: 13,
+    cursorBlink: true,
+    allowProposedApi: true,
+    theme: {
+      background: '#12161c', foreground: '#c8d0d9', cursor: '#7aa2f7',
+      selectionBackground: '#2c3543',
+    },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('term'));
+  fit.fit();
+
+  // 미러 모드에서는 PTY 크기를 우리가 바꾸면 안 된다 — 같은 PTY 를 보고 있는
+  // kasaterm pane 의 화면이 같이 깨진다. 서버가 알려준 크기에 우리를 맞춘다.
+  let mirror = false;
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/term/ws?${q.toString()}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onmessage = (e) => {
+    // 텍스트 = 제어 메시지, 바이너리 = PTY 바이트. 채널이 갈려 있어 파싱이 없다.
+    if (typeof e.data === 'string') {
+      const m = JSON.parse(e.data);
+      if (m.t === 'size') {
+        mirror = !!m.mirror;
+        term.resize(m.cols, m.rows);
+        statusEl.textContent = mirror ? `mirror ${q.get('pane') || ''}` : '';
+      }
+      return;
+    }
+    term.write(new Uint8Array(e.data));
+  };
+
+  const enc = new TextEncoder();
+  term.onData((d) => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
+
+  const syncSize = () => {
+    if (mirror || ws.readyState !== 1) return;
+    fit.fit();
+    ws.send(JSON.stringify({ t: 'resize', cols: term.cols, rows: term.rows }));
+  };
+  ws.onopen = () => { term.focus(); setTimeout(syncSize, 0); };
+  window.addEventListener('resize', syncSize);
+
+  ws.onclose = () => {
+    statusEl.textContent = '';
+    term.write('\r\n\x1b[31m● 연결이 끊겼습니다\x1b[0m\r\n');
+  };
+  ws.onerror = () => { statusEl.textContent = '연결 오류'; };
+})();
+</script>
+</body>
+</html>
