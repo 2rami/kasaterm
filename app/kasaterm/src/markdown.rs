@@ -359,6 +359,7 @@ impl MarkdownPane {
         // `touch()` 에 걸면 안 된다 — touch 를 안 지나는 경로(스냅샷 복원)에서
         // 캐시가 살아남아 가로 스크롤 상한이 옛 버퍼를 가리킨다.
         self.longest_cache = None;
+        self.edit_gen = self.edit_gen.wrapping_add(1);
         Arc::make_mut(&mut self.edit_lines)
     }
 
@@ -2441,6 +2442,76 @@ impl App {
     /// **순서가 계약이다** — 앵커를 연타 선택보다 나중에 세우면 더블클릭으로 잡은
     /// 선택을 그 앵커가 지워 버린다. handler 의 press 경로와 헤드리스 하네스가
     /// 같은 함수를 써야 검증이 실물과 어긋나지 않으므로 여기 한 곳에 둔다.
+    /// rust 파일이 편집기로 열렸으면 rust-analyzer 를 붙인다(없으면 띄운다).
+    ///
+    /// 서버는 프로젝트 루트당 하나만 띄우고, 루트는 `Cargo.toml` 을 찾아 올라가
+    /// 정한다. rust 가 아니거나 rust-analyzer 가 없으면 조용히 아무 일도 안 한다 —
+    /// 편집기는 LSP 없이도 온전히 동작해야 한다.
+    pub(crate) fn lsp_attach(&mut self, id: &str) {
+        // 틱마다 불리는 자리라 **경로와 세대**만 먼저 본다. 버퍼를 이어 붙이는
+        // 건 정말 보낼 때뿐이다 — 5천 줄 join 이 곧 프레임 예산이다.
+        let Some((path, gen)) = ({
+            let Ok(ws) = self.ws.lock() else { return };
+            match ws.panes.get(id).and_then(|p| p.markdown()) {
+                Some(m) if m.raw_mode && m.doc.path.ends_with(".rs") => {
+                    Some((std::path::PathBuf::from(&m.doc.path), m.edit_gen))
+                }
+                _ => None,
+            }
+        }) else {
+            return;
+        };
+        // 이미 알린 파일이면 남은 일은 재전송뿐. 타이핑이 멎은 뒤에만 보낸다.
+        if let Some(c) = self.lsp.as_mut() {
+            if c.is_open(&path) {
+                if !c.change_due(&path, gen) {
+                    return;
+                }
+                let Some(text) = ({
+                    let Ok(ws) = self.ws.lock() else { return };
+                    ws.panes
+                        .get(id)
+                        .and_then(|p| p.markdown())
+                        .map(|m| m.edit_lines.join("\n"))
+                }) else {
+                    return;
+                };
+                c.did_change(&path, &text, gen);
+                return;
+            }
+        }
+        let Some(text) = ({
+            let Ok(ws) = self.ws.lock() else { return };
+            ws.panes
+                .get(id)
+                .and_then(|p| p.markdown())
+                .map(|m| m.edit_lines.join("\n"))
+        }) else {
+            return;
+        };
+        if self.lsp.is_none() {
+            // Cargo.toml 이 있는 가장 가까운 조상이 루트. 못 찾으면 붙이지 않는다 —
+            // 루트를 잘못 주면 rust-analyzer 가 홈 디렉토리를 인덱싱하러 든다.
+            let root = path.ancestors().skip(1).find(|d| d.join("Cargo.toml").is_file());
+            let Some(root) = root else { return };
+            self.lsp = crate::lsp::LspClient::spawn(root);
+        }
+        if let Some(c) = self.lsp.as_mut() {
+            c.did_open(&path, &text);
+        }
+    }
+
+    /// 이 파일의 진단 — 렌더가 매 프레임 부른다. 잠금을 짧게 잡으려고 복사한다.
+    pub(crate) fn lsp_diags(&self, path: &str) -> Vec<crate::lsp::Diag> {
+        let Some(c) = self.lsp.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(m) = c.diags.lock() else {
+            return Vec::new();
+        };
+        m.get(std::path::Path::new(path)).cloned().unwrap_or_default()
+    }
+
     /// 미니맵을 눌렀으면 그 자리로 스크롤하고 true. 본문을 눌렀으면 false —
     /// 호출자는 평소 캐럿 배치로 넘어간다.
     ///
@@ -2755,6 +2826,7 @@ mod tests {
             find: None,
             complete: None,
             longest_cache: None,
+            edit_gen: 0,
             edited_at: None,
         }
     }
@@ -3632,6 +3704,7 @@ mod tests {
             find: None,
             complete: None,
             longest_cache: None,
+            edit_gen: 0,
             edited_at: None,
         };
         m.ensure_raw_seeded();

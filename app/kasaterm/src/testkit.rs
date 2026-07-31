@@ -922,6 +922,28 @@ impl App {
                 };
                 eprintln!("[mdscript] complete={got:?}");
             }
+            // LSP 진단 확인 — `diags:`. rust-analyzer 의 첫 인덱싱은 수 초~수십 초라
+            // 이 단계 앞에 넉넉한 `_STEP_MS` 를 두거나 여러 번 찍어야 한다.
+            Some(("diags", _)) => {
+                let path = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.panes.get(&id).and_then(|p| p.markdown()).map(|m| m.doc.path.clone())
+                };
+                match path {
+                    Some(p) => {
+                        let ds = self.lsp_diags(&p);
+                        eprintln!(
+                            "[mdscript] diags n={} {:?}",
+                            ds.len(),
+                            ds.iter()
+                                .take(4)
+                                .map(|d| (d.line, d.col, d.severity, d.message.clone()))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    None => eprintln!("[mdscript] diags: 편집기 pane 이 아님"),
+                }
+            }
             // 선택 텍스트 확인. 클립보드 대신 로그로 찍는다(위 `sel:` 주석 참고).
             Some(("selcopy", _)) => {
                 match self.md_render_selection_text() {

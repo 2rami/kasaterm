@@ -407,6 +407,7 @@ impl App {
             &'static str,
             Option<FindState>,
             Option<(Vec<String>, usize, usize)>,
+            Vec<crate::lsp::Diag>,
         )> = Vec::new();
         // Per-pane body rect (header-excluded) in logical px, collected for
         // every pane so in-pane WebViews and other overlays can be snapped
@@ -1353,6 +1354,14 @@ impl App {
                 if let Some((doc, raw_mode, lines, cursor, sel, scroll, h_scroll, lang, find, complete)) =
                     md
                 {
+                    // 편집기 모드에서만 — 렌더 뷰엔 밑줄을 그릴 자리가 없다.
+                    // 여기서 뽑는 이유는 아래 그리는 루프가 `&mut self.gpu` 를
+                    // 잡고 있어 self 를 다시 빌릴 수 없기 때문이다.
+                    let diags = if raw_mode {
+                        self.lsp_diags(&doc.path)
+                    } else {
+                        Vec::new()
+                    };
                     md_slots.push((
                         id.clone(),
                         doc,
@@ -1366,6 +1375,7 @@ impl App {
                         lang,
                         find,
                         complete,
+                        diags,
                     ));
                 }
                 // Box geometry (logical px). Right/bottom-edge panes stretch to
@@ -2173,6 +2183,7 @@ impl App {
                 lang,
                 find,
                 complete,
+                diags,
             ) in &md_slots
             {
                 let content_h = if *raw_mode {
@@ -2204,6 +2215,7 @@ impl App {
                         raw_cursor_on,
                         find.as_ref().map(|f| (f.hits.as_slice(), f.idx)),
                         complete.as_ref().map(|(i, s, c)| (i.as_slice(), *s, *c)),
+                        diags,
                     );
                     if let Some(f) = find {
                         for (btn, r) in

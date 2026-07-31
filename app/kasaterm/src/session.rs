@@ -1150,6 +1150,7 @@ impl App {
             find: None,
             complete: None,
             longest_cache: None,
+            edit_gen: 0,
             edited_at: None,
             })
         };
@@ -1301,6 +1302,7 @@ impl App {
             find: None,
             complete: None,
             longest_cache: None,
+            edit_gen: 0,
             edited_at: None,
         });
         tab.title = title;

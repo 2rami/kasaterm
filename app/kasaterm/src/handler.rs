@@ -4593,6 +4593,13 @@ impl ApplicationHandler<UserEvent> for App {
         // Refresh per-pane busy state (Claude's working spinner → header bar +
         // completion toast). Self-throttled, so this is cheap per loop turn.
         self.refresh_pane_activity();
+        // rust 파일이 편집기로 열려 있으면 rust-analyzer 를 붙인다. 여기서 하는
+        // 이유는 편집기가 열리는 경로가 여러 개라서다(사이드바·소켓·복원·팝아웃)
+        // — 한 자리에 두면 어느 경로로 열려도 같은 순간에 붙는다. 이미 알린
+        // 파일이면 `lsp_attach` 가 경로만 보고 즉시 나간다.
+        if let Some(id) = self.ws.lock().ok().and_then(|w| w.active_pane.clone()) {
+            self.lsp_attach(&id);
+        }
         // Drain socket commands from external cmux clients. These run
         // through the same split/focus/send paths Cmd+D etc use, so
         // visible behavior is identical regardless of whether the
