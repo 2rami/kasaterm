@@ -107,6 +107,41 @@ pub fn parse_definition(msg: &serde_json::Value) -> Option<(PathBuf, usize, usiz
     ))
 }
 
+/// 호버 응답에서 보여 줄 글만 뽑는다.
+///
+/// `contents` 는 문자열 · `{kind, value}` · 그 둘의 배열 셋 다 올 수 있다(구
+/// 프로토콜 잔재). rust-analyzer 는 마크다운으로 주는데, 우리 툴팁은 평문이라
+/// 코드 울타리(```)만 걷어낸다 — 나머지 마크다운은 그대로 둔다. 타입 시그니처가
+/// 본문의 거의 전부라 그 이상 손보면 오히려 읽기 나빠진다.
+pub fn parse_hover(msg: &serde_json::Value) -> Option<String> {
+    let c = msg.get("result")?.get("contents")?;
+    let raw = match c {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(_) => c.get("value")?.as_str()?.to_string(),
+        serde_json::Value::Array(a) => a
+            .iter()
+            .filter_map(|x| {
+                x.get("value")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| x.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return None,
+    };
+    // 코드 울타리와 수평선만 걷어낸다. rust-analyzer 는 타입과 메모리 레이아웃을
+    // `---` 로 갈라 보내는데, 평문 툴팁에선 그 선이 그냥 대시 세 개로 남는다.
+    let body: Vec<&str> = raw
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.starts_with("```") && !(t.len() >= 3 && t.chars().all(|c| c == '-'))
+        })
+        .collect();
+    let out = body.join("\n").trim().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
 /// `Content-Length` 프레임 하나를 읽어 본문을 돌려준다. 스트림이 끝나면 `None`.
 ///
 /// 헤더는 CRLF 로 끝나고 빈 줄 뒤에 본문이 온다. `Content-Type` 같은 다른
@@ -247,6 +282,8 @@ pub struct LspClient {
     completions: Arc<Mutex<Option<(i64, Vec<String>)>>>,
     /// 마지막 정의 이동 응답 — (요청 id, (파일, 줄, UTF-16 열)).
     definitions: Arc<Mutex<Option<(i64, (PathBuf, usize, usize))>>>,
+    /// 마지막 호버 응답 — (요청 id, 보여 줄 글).
+    hovers: Arc<Mutex<Option<(i64, String)>>>,
     /// 재전송 디바운스 상태. App 이 아니라 여기 두는 이유는 서버가 죽어 새로
     /// 붙을 때 이 기억도 같이 사라져야 하기 때문이다 — 남아 있으면 새 서버가
     /// 아직 못 본 버퍼를 "이미 보냈다"고 건너뛴다.
@@ -326,6 +363,8 @@ impl LspClient {
         let definitions: Arc<Mutex<Option<(i64, (PathBuf, usize, usize))>>> =
             Arc::new(Mutex::new(None));
         let dsink = Arc::clone(&definitions);
+        let hovers: Arc<Mutex<Option<(i64, String)>>> = Arc::new(Mutex::new(None));
+        let hsink = Arc::clone(&hovers);
         std::thread::spawn(move || {
             let mut r = BufReader::new(stdout);
             while let Some(body) = read_frame(&mut r) {
@@ -367,6 +406,13 @@ impl LspClient {
                         if let Ok(mut d) = dsink.lock() {
                             *d = Some((id, at));
                         }
+                    } else if let Some(t) = parse_hover(&v) {
+                        if debug {
+                            eprintln!("[lsp] 호버 {} 자 (id={id})", t.chars().count());
+                        }
+                        if let Ok(mut h) = hsink.lock() {
+                            *h = Some((id, t));
+                        }
                     } else if let Some(items) = parse_completion(&v) {
                         if debug {
                             eprintln!("[lsp] 후보 {} 개 (id={id})", items.len());
@@ -397,6 +443,7 @@ impl LspClient {
             ready,
             completions,
             definitions,
+            hovers,
             sync: HashMap::new(),
             child,
         };
@@ -424,7 +471,10 @@ impl LspClient {
                         "completion": { "completionItem": { "snippetSupport": false } },
                         // 한 자리에 정의가 여럿일 때 `LocationLink` 로 받는다 —
                         // 어느 이름 위에서 뛰었는지까지 서버가 알려 준다.
-                        "definition": { "linkSupport": true }
+                        "definition": { "linkSupport": true },
+                        // 평문으로 달라고 해도 rust-analyzer 는 마크다운을 준다 —
+                        // 받아서 우리가 걷어낸다(`parse_hover`).
+                        "hover": { "contentFormat": ["plaintext", "markdown"] }
                     }
                 },
                 "clientInfo": { "name": "kasaterm" }
@@ -527,6 +577,33 @@ impl LspClient {
         });
         self.send(req.to_string())?;
         Some(id)
+    }
+
+    /// 이 자리에 무엇이 있는지 묻는다(타입·문서).
+    pub fn request_hover(&mut self, path: &Path, line: usize, utf16_col: usize) -> Option<i64> {
+        if !self.ready.load(Ordering::Relaxed) || !self.opened.contains_key(path) {
+            return None;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "textDocument/hover",
+            "params": {
+                "textDocument": { "uri": path_to_uri(path) },
+                "position": { "line": line, "character": utf16_col }
+            }
+        });
+        self.send(req.to_string())?;
+        Some(id)
+    }
+
+    /// 이 id 의 호버 응답이 왔으면 꺼낸다(한 번만).
+    pub fn take_hover(&self, id: i64) -> Option<String> {
+        let mut h = self.hovers.lock().ok()?;
+        if h.as_ref()?.0 != id {
+            return None;
+        }
+        h.take().map(|(_, t)| t)
     }
 
     /// 이 id 의 정의 응답이 왔으면 꺼낸다(한 번만).

@@ -1600,6 +1600,20 @@ struct CompleteState {
     lsp_req: Option<i64>,
 }
 
+/// 호버 툴팁 상태. 마우스가 편집기 위에서 **멎으면** 서버에 묻고, 답이 오면 그
+/// 자리에 띄운다. 움직이는 동안 묻지 않는 이유는 지나가는 글자마다 요청을 쏘면
+/// 서버가 취소·재시작만 반복하기 때문이다.
+struct HoverState {
+    /// 마우스가 멎은 화면 좌표(logical px).
+    at: (f32, f32),
+    /// 그 자리에 멎은 시각.
+    since: std::time::Instant,
+    /// 보낸 요청 id. `Some` 이면 답을 기다리는 중 — 같은 자리를 다시 묻지 않는다.
+    req: Option<i64>,
+    /// 서버가 준 글. 있으면 툴팁을 그린다.
+    text: Option<String>,
+}
+
 /// Clickable control on the find bar. Every one has a keyboard equivalent —
 /// the mouse is for the hand that's already there, not the only way in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3494,6 +3508,8 @@ struct App {
     /// 편집기로 열 때 뜨고, 그 전엔 아예 띄우지 않는다: 인덱싱에 수십 초와 수 GB
     /// 를 쓰는 프로세스라 쓸지 모르는 채로 켜 두면 안 된다.
     lsp: Option<lsp::LspClient>,
+    /// 마우스가 편집기 위에 멎어 있는 자리. 없으면 툴팁도 없다.
+    hover: Option<HoverState>,
     /// 답을 기다리는 정의 이동 요청 id. 응답은 왕복이라 클릭한 그 자리에서
     /// 기다릴 수 없어, 틱이 `lsp_goto_pump` 로 받아 파일을 연다.
     lsp_goto: Option<i64>,
@@ -4252,6 +4268,7 @@ impl App {
             window: None,
             gpu: None,
             lsp: None,
+            hover: None,
             lsp_goto: None,
             tmux: None,
             pty: HashMap::new(),

@@ -1366,6 +1366,27 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.autohover.is_none() {
                     self.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
                 }
+                // 호버 툴팁 시계를 다시 잰다. 셀 하나를 넘게 움직였을 때만 —
+                // 손 떨림 수준의 1px 이동으로 시계가 매번 리셋되면 툴팁이 영원히
+                // 안 뜬다. 이미 떠 있던 툴팁은 자리를 벗어나는 순간 접는다.
+                {
+                    let (cx, cy) = self.cursor_px;
+                    let moved = self
+                        .hover
+                        .as_ref()
+                        .is_none_or(|h| (h.at.0 - cx).abs() > 4.0 || (h.at.1 - cy).abs() > 4.0);
+                    if moved {
+                        if self.hover.as_ref().is_some_and(|h| h.text.is_some()) {
+                            self.chrome_dirty = true;
+                        }
+                        self.hover = Some(crate::HoverState {
+                            at: (cx, cy),
+                            since: std::time::Instant::now(),
+                            req: None,
+                            text: None,
+                        });
+                    }
+                }
                 // A deferred titlebar press turns into a window move once the
                 // pointer travels past the threshold (so a stationary press
                 // stays a click and the double-click path keeps working).
@@ -4614,6 +4635,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // 정의 이동 응답도 왕복이라 여기서 받는다 — 온 순간 그 파일을 연다.
         self.lsp_goto_pump();
+        // 마우스가 멎었으면 그 자리를 묻고, 답이 왔으면 툴팁에 담는다.
+        self.lsp_hover_tick();
         // Drain socket commands from external cmux clients. These run
         // through the same split/focus/send paths Cmd+D etc use, so
         // visible behavior is identical regardless of whether the
