@@ -2513,6 +2513,99 @@ impl App {
         }
     }
 
+    /// 활성 편집기 캐럿 자리 — (경로, 버퍼 세대, 줄, 열, 그 줄 텍스트).
+    /// rust 파일이 편집기 모드로 열려 있을 때만 Some.
+    fn lsp_caret_at(&self, id: &str) -> Option<(std::path::PathBuf, u64, usize, usize, String)> {
+        let ws = self.ws.lock().ok()?;
+        let m = ws.panes.get(id)?.markdown()?;
+        if !m.raw_mode || !m.doc.path.ends_with(".rs") {
+            return None;
+        }
+        let li = m.cur_line.min(m.edit_lines.len().saturating_sub(1));
+        let text = m.edit_lines.get(li).cloned().unwrap_or_default();
+        let col = m.cur_col.min(text.chars().count());
+        Some((
+            std::path::PathBuf::from(&m.doc.path),
+            m.edit_gen,
+            li,
+            col,
+            text,
+        ))
+    }
+
+    /// 서버가 아는 본문이 지금 버퍼보다 낡았으면 **디바운스를 건너뛰고** 먼저
+    /// 맞춘다. 방금 친 글자를 모르는 문서에 대고 물으면 서버는 그 자리에
+    /// 아무것도 없다고 답한다 — 자동완성·정의 이동 둘 다 이게 급소다.
+    fn lsp_sync_now(&mut self, id: &str, path: &std::path::Path, gen: u64) {
+        let stale = self
+            .lsp
+            .as_ref()
+            .is_some_and(|c| c.is_open(path) && c.sent_gen(path) != Some(gen));
+        if !stale {
+            return;
+        }
+        let Some(text) = ({
+            let Ok(ws) = self.ws.lock() else { return };
+            ws.panes
+                .get(id)
+                .and_then(|p| p.markdown())
+                .map(|m| m.edit_lines.join("\n"))
+        }) else {
+            return;
+        };
+        if let Some(c) = self.lsp.as_mut() {
+            c.did_change(path, &text, gen);
+        }
+    }
+
+    /// Cmd+클릭이 닿은 자리의 정의를 묻는다. 답이 오면 `lsp_goto_pump` 가 그
+    /// 파일을 열고 캐럿을 옮긴다.
+    pub(crate) fn lsp_goto_request(&mut self, id: &str) {
+        let Some((path, gen, line, col, line_text)) = self.lsp_caret_at(id) else {
+            return;
+        };
+        self.lsp_sync_now(id, &path, gen);
+        let utf16 = crate::lsp::char_col_to_utf16(&line_text, col);
+        self.lsp_goto = self
+            .lsp
+            .as_mut()
+            .and_then(|c| c.request_definition(&path, line, utf16));
+    }
+
+    /// 정의 응답이 왔으면 그 파일을 열고 그 줄로 간다. 틱마다 부른다.
+    pub(crate) fn lsp_goto_pump(&mut self) {
+        let Some(rid) = self.lsp_goto else { return };
+        let Some((path, line, utf16)) = self.lsp.as_ref().and_then(|c| c.take_definition(rid))
+        else {
+            return;
+        };
+        self.lsp_goto = None;
+        self.open_file(path.clone(), None, false);
+        let want = path.to_string_lossy().to_string();
+        {
+            let Ok(mut ws) = self.ws.lock() else { return };
+            let Some(id) = ws.active_pane.clone() else { return };
+            let Some(pane) = ws.panes.get_mut(&id) else { return };
+            pane.dirty = true;
+            let Some(m) = pane.markdown_mut() else { return };
+            // 설정에 따라 외부 앱으로 열렸을 수도 있다 — 그때는 엉뚱한 pane 의
+            // 캐럿을 옮기지 않는다.
+            if m.doc.path != want {
+                return;
+            }
+            let li = line.min(m.edit_lines.len().saturating_sub(1));
+            m.cur_line = li;
+            // 대상 파일의 그 줄로 UTF-16 을 되돌린다 — 응답 좌표도 UTF-16 이다.
+            m.cur_col = m
+                .edit_lines
+                .get(li)
+                .map(|l| crate::lsp::utf16_col_to_char(l, utf16))
+                .unwrap_or(0);
+            m.sel_anchor = None;
+        }
+        self.md_ensure_caret_visible();
+    }
+
     /// 자동완성 팝업이 열려 있으면 서버에도 물어본다.
     ///
     /// 버퍼 낱말로 **이미 채워 둔** 팝업을 나중에 서버 답으로 갈아끼우는 구조다.
@@ -2527,59 +2620,20 @@ impl App {
         // 낱말 두 글자, 또는 멤버 접근 직후(`.`/`::`). 후자는 prefix 가 비어도
         // 물어야 한다 — 그 자리가 바로 서버만 아는 후보가 나오는 곳이다.
         const MIN_PREFIX: usize = 2;
-        let Some((path, gen, line, col, line_text, from)) = ({
-            let Ok(ws) = self.ws.lock() else { return };
-            match ws.panes.get(id).and_then(|p| p.markdown()) {
-                Some(m) if m.raw_mode && m.doc.path.ends_with(".rs") => {
-                    let li = m.cur_line.min(m.edit_lines.len().saturating_sub(1));
-                    let text = m.edit_lines.get(li).cloned().unwrap_or_default();
-                    let chars: Vec<char> = text.chars().collect();
-                    let col = m.cur_col.min(chars.len());
-                    let wordish = |c: char| c.is_alphanumeric() || c == '_';
-                    let mut from = col;
-                    while from > 0 && wordish(chars[from - 1]) {
-                        from -= 1;
-                    }
-                    let trigger = from > 0 && matches!(chars[from - 1], '.' | ':');
-                    if col - from < MIN_PREFIX && !trigger {
-                        None
-                    } else {
-                        Some((
-                            std::path::PathBuf::from(&m.doc.path),
-                            m.edit_gen,
-                            li,
-                            col,
-                            text,
-                            from,
-                        ))
-                    }
-                }
-                _ => None,
-            }
-        }) else {
+        let Some((path, gen, line, col, line_text)) = self.lsp_caret_at(id) else {
             return;
         };
-        // 서버가 아는 본문이 지금 버퍼보다 낡았으면 **디바운스를 건너뛰고** 먼저
-        // 맞춘다. 방금 친 글자를 모르는 문서에 대고 물으면 서버는 그 자리에
-        // 아무 후보도 없다고 답한다.
-        let stale = self
-            .lsp
-            .as_ref()
-            .is_some_and(|c| c.is_open(&path) && c.sent_gen(&path) != Some(gen));
-        if stale {
-            let Some(text) = ({
-                let Ok(ws) = self.ws.lock() else { return };
-                ws.panes
-                    .get(id)
-                    .and_then(|p| p.markdown())
-                    .map(|m| m.edit_lines.join("\n"))
-            }) else {
-                return;
-            };
-            if let Some(c) = self.lsp.as_mut() {
-                c.did_change(&path, &text, gen);
-            }
+        let chars: Vec<char> = line_text.chars().collect();
+        let wordish = |c: char| c.is_alphanumeric() || c == '_';
+        let mut from = col;
+        while from > 0 && wordish(chars[from - 1]) {
+            from -= 1;
         }
+        let trigger = from > 0 && matches!(chars[from - 1], '.' | ':');
+        if col - from < MIN_PREFIX && !trigger {
+            return;
+        }
+        self.lsp_sync_now(id, &path, gen);
         let utf16 = crate::lsp::char_col_to_utf16(&line_text, col);
         let Some(rid) = self
             .lsp

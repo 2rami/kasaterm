@@ -83,6 +83,30 @@ pub fn parse_completion(msg: &serde_json::Value) -> Option<Vec<String>> {
     )
 }
 
+/// 정의 이동 응답에서 (파일, 줄, UTF-16 열) 하나를 뽑는다. 여러 곳이면 첫 번째
+/// — 트레이트 구현이 여럿일 때 고르라고 목록을 띄우는 건 다음 이야기다.
+///
+/// 응답 모양이 셋이다: `Location`(`uri`+`range`) · `Location[]` ·
+/// `LocationLink[]`(`targetUri`+`targetSelectionRange`). 셋 다 받는다.
+pub fn parse_definition(msg: &serde_json::Value) -> Option<(PathBuf, usize, usize)> {
+    let r = msg.get("result")?;
+    let first = match r.as_array() {
+        Some(a) => a.first()?,
+        None => r,
+    };
+    let uri = first.get("uri").or_else(|| first.get("targetUri"))?.as_str()?;
+    let range = first
+        .get("range")
+        .or_else(|| first.get("targetSelectionRange"))
+        .or_else(|| first.get("targetRange"))?;
+    let s = range.get("start")?;
+    Some((
+        uri_to_path(uri)?,
+        s.get("line")?.as_u64()? as usize,
+        s.get("character")?.as_u64()? as usize,
+    ))
+}
+
 /// `Content-Length` 프레임 하나를 읽어 본문을 돌려준다. 스트림이 끝나면 `None`.
 ///
 /// 헤더는 CRLF 로 끝나고 빈 줄 뒤에 본문이 온다. `Content-Type` 같은 다른
@@ -221,6 +245,8 @@ pub struct LspClient {
     /// 마지막 자동완성 응답 — (요청 id, 후보). id 를 같이 두는 이유는 늦게 온
     /// 옛 응답이 지금 치고 있는 낱말의 후보를 덮으면 안 되기 때문이다.
     completions: Arc<Mutex<Option<(i64, Vec<String>)>>>,
+    /// 마지막 정의 이동 응답 — (요청 id, (파일, 줄, UTF-16 열)).
+    definitions: Arc<Mutex<Option<(i64, (PathBuf, usize, usize))>>>,
     /// 재전송 디바운스 상태. App 이 아니라 여기 두는 이유는 서버가 죽어 새로
     /// 붙을 때 이 기억도 같이 사라져야 하기 때문이다 — 남아 있으면 새 서버가
     /// 아직 못 본 버퍼를 "이미 보냈다"고 건너뛴다.
@@ -297,6 +323,9 @@ impl LspClient {
         let tsink = Arc::clone(&texts);
         let completions: Arc<Mutex<Option<(i64, Vec<String>)>>> = Arc::new(Mutex::new(None));
         let csink = Arc::clone(&completions);
+        let definitions: Arc<Mutex<Option<(i64, (PathBuf, usize, usize))>>> =
+            Arc::new(Mutex::new(None));
+        let dsink = Arc::clone(&definitions);
         std::thread::spawn(move || {
             let mut r = BufReader::new(stdout);
             while let Some(body) = read_frame(&mut r) {
@@ -327,9 +356,18 @@ impl LspClient {
                         eprintln!("[lsp] initialized — 이제 didOpen 을 받는다");
                     }
                 }
-                // 자동완성 응답 — id 가 붙은 응답 중 후보 배열이 있는 것만.
+                // id 가 붙은 응답 — 우리가 보낸 요청의 답. 정의 이동을 **먼저**
+                // 본다: 정의 응답도 배열이라 자동완성 파서가 먼저 보면 "후보 0개"
+                // 로 삼켜 버린다.
                 if let Some(id) = v.get("id").and_then(|i| i.as_i64()) {
-                    if let Some(items) = parse_completion(&v) {
+                    if let Some(at) = parse_definition(&v) {
+                        if debug {
+                            eprintln!("[lsp] 정의 {at:?} (id={id})");
+                        }
+                        if let Ok(mut d) = dsink.lock() {
+                            *d = Some((id, at));
+                        }
+                    } else if let Some(items) = parse_completion(&v) {
                         if debug {
                             eprintln!("[lsp] 후보 {} 개 (id={id})", items.len());
                         }
@@ -358,6 +396,7 @@ impl LspClient {
             diags,
             ready,
             completions,
+            definitions,
             sync: HashMap::new(),
             child,
         };
@@ -382,7 +421,10 @@ impl LspClient {
                         // 스니펫은 안 받는다 — 받으면 insertText 에 `$1` 같은
                         // 자리표시자가 섞여 오고, 우리 팝업은 그걸 해석하지
                         // 않아 그대로 버퍼에 박힌다.
-                        "completion": { "completionItem": { "snippetSupport": false } }
+                        "completion": { "completionItem": { "snippetSupport": false } },
+                        // 한 자리에 정의가 여럿일 때 `LocationLink` 로 받는다 —
+                        // 어느 이름 위에서 뛰었는지까지 서버가 알려 준다.
+                        "definition": { "linkSupport": true }
                     }
                 },
                 "clientInfo": { "name": "kasaterm" }
@@ -467,6 +509,33 @@ impl LspClient {
             return None;
         }
         c.take().map(|(_, items)| items)
+    }
+
+    /// 이 자리의 정의가 어디인지 묻는다.
+    pub fn request_definition(&mut self, path: &Path, line: usize, utf16_col: usize) -> Option<i64> {
+        if !self.ready.load(Ordering::Relaxed) || !self.opened.contains_key(path) {
+            return None;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "textDocument/definition",
+            "params": {
+                "textDocument": { "uri": path_to_uri(path) },
+                "position": { "line": line, "character": utf16_col }
+            }
+        });
+        self.send(req.to_string())?;
+        Some(id)
+    }
+
+    /// 이 id 의 정의 응답이 왔으면 꺼낸다(한 번만).
+    pub fn take_definition(&self, id: i64) -> Option<(PathBuf, usize, usize)> {
+        let mut d = self.definitions.lock().ok()?;
+        if d.as_ref()?.0 != id {
+            return None;
+        }
+        d.take().map(|(_, at)| at)
     }
 
     /// 이 파일의 마지막 전송 세대. 자동완성처럼 **정확한 답이 필요한** 요청은

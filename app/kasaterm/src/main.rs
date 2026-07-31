@@ -3494,6 +3494,9 @@ struct App {
     /// 편집기로 열 때 뜨고, 그 전엔 아예 띄우지 않는다: 인덱싱에 수십 초와 수 GB
     /// 를 쓰는 프로세스라 쓸지 모르는 채로 켜 두면 안 된다.
     lsp: Option<lsp::LspClient>,
+    /// 답을 기다리는 정의 이동 요청 id. 응답은 왕복이라 클릭한 그 자리에서
+    /// 기다릴 수 없어, 틱이 `lsp_goto_pump` 로 받아 파일을 연다.
+    lsp_goto: Option<i64>,
     tmux: Option<Arc<TmuxSession>>,
     /// Phase C backend. Mutually exclusive with `tmux` — exactly one
     /// is `Some` after `start_backend`. Selection driven by the
@@ -4249,6 +4252,7 @@ impl App {
             window: None,
             gpu: None,
             lsp: None,
+            lsp_goto: None,
             tmux: None,
             pty: HashMap::new(),
             pty_layout: None,

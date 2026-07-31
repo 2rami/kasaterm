@@ -3647,6 +3647,15 @@ impl ApplicationHandler<UserEvent> for App {
                                             self.cursor_px.0,
                                             self.cursor_px.1,
                                         );
+                                        // Cmd+클릭 = 정의로 뛴다. 캐럿은 먼저
+                                        // 옮겨 어디를 눌렀는지 보이게 하고, 드래그
+                                        // 앵커는 세우지 않는다 — 뛰고 나서 원래
+                                        // 파일에 선택이 남아 있으면 어리둥절하다.
+                                        if self.modifiers.super_key() {
+                                            self.lsp_goto_request(&pane_id);
+                                            window.request_redraw();
+                                            return;
+                                        }
                                         self.md_select_drag = Some(pane_id.clone());
                                     } else {
                                         // 렌더 뷰: 문서 좌표로 선택 앵커를 잡는다.
@@ -4603,6 +4612,8 @@ impl ApplicationHandler<UserEvent> for App {
             // 여기서 받아 팝업에 얹는다.
             self.lsp_complete_pump(&id);
         }
+        // 정의 이동 응답도 왕복이라 여기서 받는다 — 온 순간 그 파일을 연다.
+        self.lsp_goto_pump();
         // Drain socket commands from external cmux clients. These run
         // through the same split/focus/send paths Cmd+D etc use, so
         // visible behavior is identical regardless of whether the
