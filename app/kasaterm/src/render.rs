@@ -434,7 +434,17 @@ impl App {
             let zoom_leaves: Option<Vec<(String, u16, u16, u16, u16)>> =
                 match self.zoomed_pane.as_deref() {
                     Some(z) if ws.panes.contains_key(z) => {
-                        Some(vec![(z.to_string(), 0, 0, grid_cols, grid_rows)])
+                        // 사방을 들여 「떠 있는 카드」로 — inset 규칙은
+                        // effective_leaf_rects(PTY resize·히트테스트)와 같은
+                        // 함수를 써야 그린 칸과 PTY 가 어긋나지 않는다.
+                        let (ix, iy) = self.zoom_inset_cells(grid_cols, grid_rows);
+                        Some(vec![(
+                            z.to_string(),
+                            ix,
+                            iy,
+                            grid_cols - ix * 2,
+                            grid_rows - iy * 2,
+                        )])
                     }
                     _ => None,
                 };
@@ -4926,6 +4936,10 @@ impl App {
                 })
                 .map(|(id, ..)| id.clone())
                 .collect();
+            // 줌 pane 은 claude 여부·split 여부와 무관하게 테두리를 두른다 — 줌의
+            // 유일한 시각 단서라서(하단 dock 칩 하나로는 안 읽힌다). g(=&mut
+            // self.gpu) 를 잡기 전에 스냅샷.
+            let zoomed_now = self.zoomed_pane.clone();
             // 헤더를 실제로 그린 pane 집합 — 헤더 working bar 가 거기 뜨므로 footer 로딩바는
             // 이 pane 들을 건너뛴다. `ws.panes.has_header()` 가 아니라 방금 그린 `headers`
             // (pty_layout 기반)에서 뽑아야 ws.panes↔pty_layout 데싱크로 한 pane 에 헤더(위)·
@@ -4949,23 +4963,34 @@ impl App {
                     // pane 테두리 — 포커스된(active) claude pane 만 자기 학생 고정색
                     // 테두리(지금 어느 pane 을 보고 있는지 한눈에). 비활성·순수 셸은
                     // 무테두리 — 여러 pane 이 동시에 테두리를 둘러 지저분하던 걸 정리(거노).
-                    if is_split
-                        && active_pane.as_deref() == Some(fid.as_str())
-                        && claude_panes.contains(fid.as_str())
+                    let zoom_focus = zoomed_now.as_deref() == Some(fid.as_str());
+                    if zoom_focus
+                        || (is_split
+                            && active_pane.as_deref() == Some(fid.as_str())
+                            && claude_panes.contains(fid.as_str()))
                     {
                         // agents 목록 뷰는 SCHALE 블루 고정, 그 외엔 배정 학생색.
                         let border_col = if agents_view_panes.contains(fid.as_str()) {
                             theme::character_accent("샬레")
                         } else {
-                            pane_chars.get(fid.as_str()).and_then(|n| {
-                                theme::character_accent_n(
-                                    n,
-                                    theme::character_ordinal(&pane_chars, fid),
-                                )
-                            })
+                            pane_chars
+                                .get(fid.as_str())
+                                .and_then(|n| {
+                                    theme::character_accent_n(
+                                        n,
+                                        theme::character_ordinal(&pane_chars, fid),
+                                    )
+                                })
+                                // 줌은 학생이 없는 순수 셸에서도 테두리가 있어야
+                                // 한다 — 없으면 줌 자체가 안 보인다.
+                                .or_else(|| {
+                                    zoom_focus
+                                        .then(|| theme::accent_color(theme::accent_name()))
+                                })
                         };
                         if let Some(col) = border_col {
-                            let t = 1.5_f32;
+                            // 줌은 조금 두껍게 — 여백 위에 홀로 뜬 카드의 윤곽선이다.
+                            let t = if zoom_focus { 2.0_f32 } else { 1.5_f32 };
                             g.rect(*fx, *fy, *fw, t, col);
                             g.rect(*fx, fy + fbox_h - t, *fw, t, col);
                             g.rect(*fx, *fy, t, *fbox_h, col);
