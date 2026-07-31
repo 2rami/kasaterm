@@ -502,7 +502,14 @@ const PORT = "__PORT__";
 // iframe 으로 얼마든지 `null` 을 만든다). 그래서 토큰으로 신원을 밝힌다. 이 HTML 은
 // 네트워크로 나가지 않으므로 토큰이 새지 않는다.
 const TOKEN = "__TOKEN__";
-const post = (u) => fetch(u, { method: "POST", headers: { "X-Kasa-Token": TOKEN } });
+// GET 도 cross-site 로 잡히므로(이 문서는 origin 이 null) 개별 호출에 헤더를 다는
+// 대신 fetch 자체를 감싼다 — 새 호출을 추가하다 빠뜨릴 여지를 없앤다.
+const _rawFetch = window.fetch;
+window.fetch = (u, o) => {
+  o = o || {};
+  return _rawFetch(u, { ...o, headers: { ...(o.headers || {}), "X-Kasa-Token": TOKEN } });
+};
+const post = (u) => fetch(u, { method: "POST" });
 const $ = (id) => document.getElementById(id);
 const base = "http://127.0.0.1:" + PORT;
 let busy = false;
@@ -729,6 +736,14 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
   <div id="err" class="err" style="display:none"></div>
 <script>
 const PORT = "__PORT__";
+// 이 패널도 with_html 문서라 origin 이 null 이고, 그래서 모든 fetch 가 서버 눈에
+// cross-site 로 보인다. 토큰으로 신원을 밝힌다(세션 패널과 같은 이유).
+const TOKEN = "__TOKEN__";
+const _rawFetch = window.fetch;
+window.fetch = (u, o) => {
+  o = o || {};
+  return _rawFetch(u, { ...o, headers: { ...(o.headers || {}), "X-Kasa-Token": TOKEN } });
+};
 const base = "http://127.0.0.1:" + PORT;
 const $ = (id) => document.getElementById(id);
 

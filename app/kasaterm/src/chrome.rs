@@ -1333,7 +1333,9 @@ impl App {
                 return;
             }
         };
-        let html = BOARD_PANEL_HTML.replace("__PORT__", &port);
+        let html = BOARD_PANEL_HTML
+            .replace("__PORT__", &port)
+            .replace("__TOKEN__", kasa_mcp::session_token());
         // build_as_child for the same use-after-free reason as the git panel.
         let webview = match wry::WebViewBuilder::new()
             .with_html(html)
