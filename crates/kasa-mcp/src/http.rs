@@ -2554,13 +2554,37 @@ pub fn session_token() -> &'static str {
 /// 바인딩만으로는 「사용자가 방문한 아무 웹페이지가 터미널에 명령을 꽂는」 경로가
 /// 열려 있었다.
 fn mutating_request_ok(h: &HeaderMap) -> bool {
-    if h.get("x-kasa-token")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|t| t == session_token())
-    {
+    if has_token(h) {
         return true;
     }
     ws_origin_ok(h)
+}
+
+fn has_token(h: &HeaderMap) -> bool {
+    h.get("x-kasa-token")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t == session_token())
+}
+
+/// 남의 사이트에서 건너온 요청인가.
+///
+/// ⚠️ **Origin 검사만으로는 GET 을 못 막는다.** `location = "…/open-markdown?…"`
+/// 같은 top-level navigation 은 **Origin 헤더를 아예 보내지 않아서** 「Origin 이
+/// 없으면 로컬 CLI」라는 판정을 그대로 통과한다. 그러면 응답을 못 읽어도 **일은
+/// 이미 벌어진다** — 이 서버의 GET 에는 창을 띄우는 것(`/open-markdown`), 상태를
+/// 바꾸는 것(`/repersona`), 대화·파일 내용을 내주는 것(`/peek` `/transcript`
+/// `/list-dir`)이 섞여 있고, wildcard CORS 때문에 그 응답은 실제로 읽힌다.
+///
+/// `Sec-Fetch-Site` 는 그 구멍을 정확히 메운다 — **브라우저는 navigation 을 포함해
+/// 항상 보내고, curl 같은 로컬 도구는 보내지 않는다.** 그래서 `cross-site` 하나만
+/// 거부하면 「남의 웹페이지」만 걸러지고, 주소창 직접 입력(`none`)·우리 페이지
+/// (`same-origin`)·로컬 CLI(헤더 없음)는 전부 살아남는다. 보수적으로 cross-site
+/// 만 본다 — 브라우저마다 값이 갈리는 회색지대를 막았다가 webview 를 통째로
+/// 죽이는 쪽이 더 나쁘다.
+fn cross_site_request(h: &HeaderMap) -> bool {
+    h.get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "cross-site")
 }
 
 /// POST 를 전부 통과시키는 관문. `Router::layer` 로 걸린다.
@@ -2573,11 +2597,21 @@ async fn origin_guard_mw(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if req.method() == Method::POST && !mutating_request_ok(req.headers()) {
+    let h = req.headers();
+    // ① 메서드를 가리지 않는다 — GET 에도 창을 띄우거나 대화를 내주는 창구가 있고,
+    //    navigation 은 Origin 을 안 보내 ②만으로는 못 잡는다.
+    let blocked = if has_token(h) {
+        false
+    } else {
+        cross_site_request(h) || (req.method() == Method::POST && !mutating_request_ok(h))
+    };
+    if blocked {
         eprintln!(
-            "[http] 교차 출처 POST 를 거부했습니다: {} (origin {:?})",
+            "[http] 교차 출처 요청을 거부했습니다: {} {} (origin {:?}, sec-fetch-site {:?})",
+            req.method(),
             req.uri().path(),
-            req.headers().get(header::ORIGIN)
+            h.get(header::ORIGIN),
+            h.get("sec-fetch-site")
         );
         return (
             axum::http::StatusCode::FORBIDDEN,
