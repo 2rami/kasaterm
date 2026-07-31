@@ -4599,6 +4599,9 @@ impl ApplicationHandler<UserEvent> for App {
         // 파일이면 `lsp_attach` 가 경로만 보고 즉시 나간다.
         if let Some(id) = self.ws.lock().ok().and_then(|w| w.active_pane.clone()) {
             self.lsp_attach(&id);
+            // 자동완성 응답은 왕복이라 키 경로에서 못 기다린다 — 도착한 것을
+            // 여기서 받아 팝업에 얹는다.
+            self.lsp_complete_pump(&id);
         }
         // Drain socket commands from external cmux clients. These run
         // through the same split/focus/send paths Cmd+D etc use, so

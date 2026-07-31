@@ -921,6 +921,22 @@ impl App {
                     })
                 };
                 eprintln!("[mdscript] complete={got:?}");
+                // 실물 키 경로가 하는 그대로 서버에도 물어 둔다. 응답은 틱에서
+                // 받으므로 뒤에 `citems:` 단계를 두고 갈아끼워진 후보를 본다.
+                self.lsp_complete_request(&id);
+            }
+            // 지금 팝업에 들어 있는 후보만 찍는다 — `citems:`. `complete:` 를 다시
+            // 부르면 버퍼 낱말로 덮어써서 서버 답이 왔는지 알 수 없다.
+            Some(("citems", _)) => {
+                let got = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.panes
+                        .get(&id)
+                        .and_then(|p| p.markdown())
+                        .and_then(|m| m.complete.as_ref())
+                        .map(|c| (c.items.clone(), c.sel, c.lsp_req))
+                };
+                eprintln!("[mdscript] citems={got:?}");
             }
             // LSP 진단 확인 — `diags:`. rust-analyzer 의 첫 인덱싱은 수 초~수십 초라
             // 이 단계 앞에 넉넉한 `_STEP_MS` 를 두거나 여러 번 찍어야 한다.

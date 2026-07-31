@@ -559,6 +559,7 @@ impl MarkdownPane {
             items,
             sel: 0,
             from_col: from,
+            lsp_req: None,
         });
     }
 
@@ -596,6 +597,11 @@ impl MarkdownPane {
         let Some(c) = self.complete.as_mut() else {
             return false;
         };
+        // 후보가 비어 있는 팝업 = 서버 답을 기다리는 자리표시자. 화면에 아무것도
+        // 없는데 키를 먹으면 Enter·Tab 이 통째로 사라진 것처럼 보인다.
+        if c.items.is_empty() {
+            return false;
+        }
         let n = c.items.len();
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
@@ -2072,6 +2078,12 @@ impl App {
             }
         }
         self.md_ensure_caret_visible();
+        // 팝업이 열렸으면 서버에도 물어 둔다(응답은 다음 틱에 `lsp_complete_pump`
+        // 가 받는다). 위 ws lock 을 놓은 뒤라야 한다 — 이 안에서 다시 잠근다.
+        let id = { self.ws.lock().ok().and_then(|w| w.active_pane.clone()) };
+        if let Some(id) = id {
+            self.lsp_complete_request(&id);
+        }
     }
     /// Lines per PageUp/Down step for the active raw editor: the body height
     /// over the gpu line height, minus one line of overlap.
@@ -2497,7 +2509,157 @@ impl App {
             self.lsp = crate::lsp::LspClient::spawn(root);
         }
         if let Some(c) = self.lsp.as_mut() {
-            c.did_open(&path, &text);
+            c.did_open(&path, &text, gen);
+        }
+    }
+
+    /// 자동완성 팝업이 열려 있으면 서버에도 물어본다.
+    ///
+    /// 버퍼 낱말로 **이미 채워 둔** 팝업을 나중에 서버 답으로 갈아끼우는 구조다.
+    /// 요청-응답은 왕복이라 즉시 오지 않는데, 그동안 팝업이 비어 있으면 타이핑이
+    /// 끊긴 것처럼 읽힌다. VS Code 도 같은 순서로 채운다.
+    ///
+    /// 팝업이 **닫혀 있어도** 묻는다. 버퍼 낱말이 없으면 팝업이 안 열리는데,
+    /// 정작 자동완성이 가장 필요한 자리(`s.` 뒤의 메서드처럼 버퍼 어디에도 없는
+    /// 이름)가 전부 거기라 그대로 두면 LSP 후보를 영영 볼 수 없다. 답이 오면
+    /// `lsp_complete_pump` 가 그때 팝업을 채운다.
+    pub(crate) fn lsp_complete_request(&mut self, id: &str) {
+        // 낱말 두 글자, 또는 멤버 접근 직후(`.`/`::`). 후자는 prefix 가 비어도
+        // 물어야 한다 — 그 자리가 바로 서버만 아는 후보가 나오는 곳이다.
+        const MIN_PREFIX: usize = 2;
+        let Some((path, gen, line, col, line_text, from)) = ({
+            let Ok(ws) = self.ws.lock() else { return };
+            match ws.panes.get(id).and_then(|p| p.markdown()) {
+                Some(m) if m.raw_mode && m.doc.path.ends_with(".rs") => {
+                    let li = m.cur_line.min(m.edit_lines.len().saturating_sub(1));
+                    let text = m.edit_lines.get(li).cloned().unwrap_or_default();
+                    let chars: Vec<char> = text.chars().collect();
+                    let col = m.cur_col.min(chars.len());
+                    let wordish = |c: char| c.is_alphanumeric() || c == '_';
+                    let mut from = col;
+                    while from > 0 && wordish(chars[from - 1]) {
+                        from -= 1;
+                    }
+                    let trigger = from > 0 && matches!(chars[from - 1], '.' | ':');
+                    if col - from < MIN_PREFIX && !trigger {
+                        None
+                    } else {
+                        Some((
+                            std::path::PathBuf::from(&m.doc.path),
+                            m.edit_gen,
+                            li,
+                            col,
+                            text,
+                            from,
+                        ))
+                    }
+                }
+                _ => None,
+            }
+        }) else {
+            return;
+        };
+        // 서버가 아는 본문이 지금 버퍼보다 낡았으면 **디바운스를 건너뛰고** 먼저
+        // 맞춘다. 방금 친 글자를 모르는 문서에 대고 물으면 서버는 그 자리에
+        // 아무 후보도 없다고 답한다.
+        let stale = self
+            .lsp
+            .as_ref()
+            .is_some_and(|c| c.is_open(&path) && c.sent_gen(&path) != Some(gen));
+        if stale {
+            let Some(text) = ({
+                let Ok(ws) = self.ws.lock() else { return };
+                ws.panes
+                    .get(id)
+                    .and_then(|p| p.markdown())
+                    .map(|m| m.edit_lines.join("\n"))
+            }) else {
+                return;
+            };
+            if let Some(c) = self.lsp.as_mut() {
+                c.did_change(&path, &text, gen);
+            }
+        }
+        let utf16 = crate::lsp::char_col_to_utf16(&line_text, col);
+        let Some(rid) = self
+            .lsp
+            .as_mut()
+            .and_then(|c| c.request_completion(&path, line, utf16))
+        else {
+            return;
+        };
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(m) = ws.panes.get_mut(id).and_then(|p| p.markdown_mut()) {
+                match m.complete.as_mut() {
+                    Some(cs) => cs.lsp_req = Some(rid),
+                    // 아직 팝업이 없으면 자리표시자만 세운다 — 후보가 비어 있는
+                    // 동안은 그리지도, 키를 먹지도 않는다.
+                    None => {
+                        m.complete = Some(CompleteState {
+                            items: Vec::new(),
+                            sel: 0,
+                            from_col: from,
+                            lsp_req: Some(rid),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    /// 도착한 서버 후보로 팝업을 갈아끼운다. 틱마다 부른다 — 응답이 언제 올지
+    /// 모르므로 키 경로에서 기다릴 수는 없다.
+    pub(crate) fn lsp_complete_pump(&mut self, id: &str) {
+        const LIMIT: usize = 8;
+        let Some(rid) = ({
+            let Ok(ws) = self.ws.lock() else { return };
+            ws.panes
+                .get(id)
+                .and_then(|p| p.markdown())
+                .and_then(|m| m.complete.as_ref())
+                .and_then(|c| c.lsp_req)
+        }) else {
+            return;
+        };
+        let Some(items) = self.lsp.as_ref().and_then(|c| c.take_completion(rid)) else {
+            return;
+        };
+        let Ok(mut ws) = self.ws.lock() else { return };
+        let Some(pane) = ws.panes.get_mut(id) else { return };
+        pane.dirty = true;
+        let Some(m) = pane.markdown_mut() else { return };
+        let Some(cs) = m.complete.as_ref() else { return };
+        let prefix: String = m
+            .edit_lines
+            .get(m.cur_line)
+            .map(|l| {
+                l.chars()
+                    .skip(cs.from_col)
+                    .take(m.cur_col.saturating_sub(cs.from_col))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let picked: Vec<String> = items
+            .into_iter()
+            .filter(|it| it.starts_with(&prefix))
+            .take(LIMIT)
+            .collect();
+        let empty = {
+            let Some(cs) = m.complete.as_mut() else { return };
+            // 한 번 받은 요청은 다시 묻지 않는다 — 안 지우면 틱마다 같은 id 를
+            // 되물어 팝업이 계속 흔들린다.
+            cs.lsp_req = None;
+            // 서버가 아무것도 못 주면 버퍼 낱말 후보를 그대로 둔다. 갑자기 비면
+            // 팝업이 깜빡이는데, 그게 "후보 없음"보다 훨씬 거슬린다.
+            if !picked.is_empty() {
+                cs.items = picked;
+                cs.sel = 0;
+            }
+            cs.items.is_empty()
+        };
+        // 자리표시자로 열어 뒀는데 서버도 줄 게 없었다 — 흔적을 남기지 않는다.
+        if empty {
+            m.complete = None;
         }
     }
 
