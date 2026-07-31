@@ -564,7 +564,8 @@ impl App {
         if let Some(z) = self.zoomed_pane.as_ref() {
             if let Some(tree) = self.pty_layout.as_ref() {
                 if tree.leaves().iter().any(|l| *l == z.as_str()) {
-                    return vec![(z.clone(), 0, 0, cols, rows)];
+                    let (ix, iy) = self.zoom_inset_cells(cols, rows);
+                    return vec![(z.clone(), ix, iy, cols - ix * 2, rows - iy * 2)];
                 }
             }
         }
@@ -572,6 +573,19 @@ impl App {
             .as_ref()
             .map(|t| t.leaf_rects(cols, rows))
             .unwrap_or_default()
+    }
+    /// 줌 pane 을 작업영역 가장자리에서 들이는 셀 수 `(가로, 세로)`.
+    ///
+    /// 통째로 채우면 줌 화면이 「pane 하나뿐인 평소 화면」과 픽셀 단위로 같아져,
+    /// 최대화 중인지 아닌지 구분이 안 된다(거노). 여백 + 테두리(render.rs)가
+    /// 「이것만 보고 있다」를 만든다. 셀은 세로로 긴 직사각형이라 사방 1셀씩
+    /// 들이면 여백이 2배 어긋나므로 종횡비로 가로를 보정한다. 창이 좁으면 그
+    /// 축은 들이지 않는다 — 여백보다 내용 칸이 먼저다.
+    pub(crate) fn zoom_inset_cells(&self, cols: u16, rows: u16) -> (u16, u16) {
+        let ratio = (self.cell.h / self.cell.w.max(1.0)).round().clamp(1.0, 4.0) as u16;
+        let ix = if cols > ratio * 2 + 8 { ratio } else { 0 };
+        let iy = if rows > 6 { 1 } else { 0 };
+        (ix, iy)
     }
     /// Toggle tmux-style zoom on `pane`: zoom fills the work area with just that
     /// pane; toggling again (or the pane already being zoomed) restores the
