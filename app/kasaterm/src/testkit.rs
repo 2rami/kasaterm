@@ -925,6 +925,31 @@ impl App {
                 // 받으므로 뒤에 `citems:` 단계를 두고 갈아끼워진 후보를 본다.
                 self.lsp_complete_request(&id);
             }
+            // 정의로 뛴다 — `goto:`. Cmd+클릭이 부르는 것과 같은 함수를 직접
+            // 부른다(수정키 상태를 밖에서 만들 수 없다). 응답은 틱이 받으므로
+            // 뒤에 `caret:` 단계를 두고 옮겨진 자리를 본다.
+            Some(("goto", _)) => {
+                self.lsp_goto_request(&id);
+                eprintln!("[mdscript] goto 요청");
+            }
+            // 지금 캐럿이 어느 파일 몇 줄인지 — `caret:`.
+            Some(("caret", _)) => {
+                let got = {
+                    let ws = self.ws.lock().unwrap();
+                    ws.active_pane
+                        .as_ref()
+                        .and_then(|a| ws.panes.get(a))
+                        .and_then(|p| p.markdown())
+                        .map(|m| {
+                            (
+                                m.doc.path.rsplit('/').next().unwrap_or("").to_string(),
+                                m.cur_line,
+                                m.cur_col,
+                            )
+                        })
+                };
+                eprintln!("[mdscript] caret={got:?}");
+            }
             // 지금 팝업에 들어 있는 후보만 찍는다 — `citems:`. `complete:` 를 다시
             // 부르면 버퍼 낱말로 덮어써서 서버 답이 왔는지 알 수 없다.
             Some(("citems", _)) => {
