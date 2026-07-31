@@ -842,6 +842,33 @@ impl GpuRenderer {
         }
     }
 
+    /// `draw_text` 가 이 글자에서 펜을 미는 거리(논리 px).
+    ///
+    /// 코드 블록 접기는 잴 때와 그릴 때가 같은 규칙이어야 한다 — 자가
+    /// 다르면 접은 자리가 한 글자씩 어긋나 상자 안에서 잘리거나 밖으로
+    /// 삐져나간다.
+    fn mono_advance(&mut self, ch: char, font_size: f32) -> f32 {
+        let s = self.scale;
+        let size_px = (font_size * s).round() as u32;
+        if ch == ' ' {
+            return self.shaper.cell_advance(size_px as f32) / s;
+        }
+        let key = GlyphKey {
+            ch,
+            bold: false,
+            italic: false,
+            size_px,
+            font: 0,
+        };
+        match self
+            .atlas
+            .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
+        {
+            Some(e) => Self::pen_step(ch, e.px_w as f32, e.advance, size_px as f32) / s,
+            None => 0.0,
+        }
+    }
+
     /// 편집기 코드 줄을 **격자**에 그린다 — 글자마다 정수 칸.
     ///
     /// 배치 규칙은 터미널(`draw_cells`)과 **같다**: 와이드(CJK·한글)는 2칸 박스
@@ -1704,30 +1731,112 @@ impl GpuRenderer {
                     let lh =
                         (self.md_shaper.line_height(size * self.scale).ceil() / self.scale) * 1.35;
                     let pad = base * 0.85;
+                    // 위 여백만 넓다 — 복사 버튼·언어 라벨이 첫 코드 줄과 같은
+                    // 높이에 떠 있어서, 첫 줄이 길면 글자가 버튼 밑을 지나갔다.
+                    // 겹침을 z 순서로 덮는 대신 자리부터 갈라 둔다.
+                    let pad_top = base * 1.8;
+                    let inner_w = (w - pad * 2.0).max(base);
                     let lines: Vec<&str> = code.trim_end_matches('\n').split('\n').collect();
-                    let block_h = lines.len() as f32 * lh + pad * 2.0;
+                    let cell = self.mono_advance(' ', size);
+                    // 논리 줄 하나를 상자 폭에 맞는 시각 줄들로 접는다: (줄 번호,
+                    // 들여쓰기, 문자 범위). 이 렌더러엔 scissor 가 없어 넘친 코드가
+                    // 상자·읽기 열·스크롤바까지 밟고 지나갔다. 가로 스크롤은 블록마다
+                    // 상태가 필요하니 읽기 뷰에선 노션처럼 접는 쪽이 맞다.
+                    let mut plans: Vec<(usize, f32, usize, usize)> = Vec::new();
+                    for (li, line) in lines.iter().enumerate() {
+                        let chs: Vec<char> = line.chars().collect();
+                        // 대부분의 줄은 여유롭게 들어간다 — 그 판정을 셀 폭 산술로
+                        // 끝내 글자별 아틀라스 조회는 경계에 걸린 줄만 물린다.
+                        // 1.15 는 안전 쪽 여유값(넉넉히 들어갈 때만 건너뛴다).
+                        let bound = chs
+                            .iter()
+                            .map(|c| if is_wide_char(*c) { 2.0 } else { 1.0 })
+                            .sum::<f32>()
+                            * cell;
+                        if chs.is_empty() || bound * 1.15 <= inner_w {
+                            plans.push((li, 0.0, 0, chs.len()));
+                            continue;
+                        }
+                        // 접힌 줄은 원래 줄 들여쓰기에 한 칸 더 물려 이어짐을 보인다.
+                        let lead = chs.iter().take_while(|c| **c == ' ' || **c == '\t').count();
+                        let cont = ((lead as f32 + 2.0) * cell).min(inner_w * 0.5);
+                        let mut i = 0usize;
+                        let mut first = true;
+                        while i < chs.len() {
+                            let ox = if first { 0.0 } else { cont };
+                            let avail = inner_w - ox;
+                            let mut pen = 0.0;
+                            let mut j = i;
+                            let mut brk: Option<usize> = None;
+                            while j < chs.len() {
+                                let a = self.mono_advance(chs[j], size);
+                                if pen + a > avail && j > i {
+                                    break;
+                                }
+                                if chs[j] == ' ' && j > i {
+                                    brk = Some(j + 1);
+                                }
+                                pen += a;
+                                j += 1;
+                            }
+                            // 낱말 경계가 있으면 거기서 끊는다(공백은 앞 줄이 먹는다).
+                            let cut = if j < chs.len() {
+                                brk.filter(|c| *c > i).unwrap_or(j)
+                            } else {
+                                j
+                            };
+                            plans.push((li, ox, i, cut));
+                            i = cut;
+                            first = false;
+                        }
+                    }
+                    let block_h = plans.len() as f32 * lh + pad_top + pad;
                     let block_top = pen_y;
                     let visible = pen_y + block_h > clip_top && pen_y < clip_bot;
                     if visible {
                         self.round_rect_fill(x, pen_y, w, block_h, base * 0.5, crate::theme::surface());
                     }
-                    let mut ly = pen_y + pad;
-                    for line in &lines {
+                    let clip_r = x + w - pad * 0.4;
+                    let mut ly = pen_y + pad_top;
+                    // 같은 논리 줄이 여러 시각 줄로 접히니 하이라이트는 줄이 바뀔
+                    // 때만 다시 돈다.
+                    let mut hl: Option<(usize, Vec<(char, [u8; 4])>)> = None;
+                    for (li, ox, from, to) in &plans {
                         if ly + lh > clip_top && ly < clip_bot {
-                            // Syntax-highlight: draw each token in its color,
-                            // chaining pen-x from draw_text's return value.
-                            let mut tx = x + pad;
-                            for (tok, col) in highlight_code_line(line, lang, crate::theme::text_dim()) {
-                                tx = self.draw_text(
+                            if hl.as_ref().map(|(i, _)| i != li).unwrap_or(true) {
+                                let mut cells: Vec<(char, [u8; 4])> = Vec::new();
+                                for (tok, col) in
+                                    highlight_code_line(lines[*li], lang, crate::theme::text_dim())
+                                {
+                                    cells.extend(tok.chars().map(|c| (c, col)));
+                                }
+                                hl = Some((*li, cells));
+                            }
+                            let cells = &hl.as_ref().unwrap().1;
+                            let mut tx = x + pad + ox;
+                            let mut k = *from;
+                            let end = (*to).min(cells.len());
+                            while k < end {
+                                // 색이 같은 이웃 글자는 한 번에 — draw_text 는 글자마다
+                                // 펜을 이어 주니 나눠 그려도 자리는 같다.
+                                let col = cells[k].1;
+                                let mut run = String::new();
+                                while k < end && cells[k].1 == col {
+                                    run.push(cells[k].0);
+                                    k += 1;
+                                }
+                                tx = self.draw_text_clipped(
                                     tx,
                                     ly,
-                                    &tok,
+                                    &run,
                                     DrawOpts {
                                         font_size: size,
                                         color: col,
                                         bold: false,
                                         italic: false,
                                     },
+                                    f32::NEG_INFINITY,
+                                    clip_r,
                                 );
                             }
                         }
@@ -1742,13 +1851,17 @@ impl GpuRenderer {
                         self.md_copy_rects
                             .push((bx, by, btn, btn * 0.78, code.clone()));
                         if !lang.is_empty() {
-                            let lw = self.measure_run(lang, size * 0.82, false, false, false, false);
+                            // 라벨은 draw_text(모노)로 그리는데 md 셰이퍼로 재면 폭이
+                            // 6할로 나와 복사 버튼 밑으로 파고들었다 — 그릴 때와 같은
+                            // 자로 잰다.
+                            let lsize = size * 0.82;
+                            let lw = self.measure_chrome_text(lang, lsize, false);
                             self.draw_text(
                                 bx - lw - base * 0.5,
                                 by + base * 0.05,
                                 lang,
                                 DrawOpts {
-                                    font_size: size * 0.82,
+                                    font_size: lsize,
                                     color: crate::theme::text_mute(),
                                     bold: false,
                                     italic: false,
