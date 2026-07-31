@@ -3218,6 +3218,18 @@ struct FileNode {
     /// Set in a second pass by `rebuild_file_tree_nodes` (one batched
     /// `git check-ignore`), so `walk_dir` leaves it `false`.
     ignored: bool,
+    /// 이 폴더가 git 저장소 루트인가 — 아이콘을 폴더 대신 브랜치로 바꿔 「어느
+    /// 게 레포인지」를 목록에서 바로 읽게 한다(거노). 워크트리는 `.git` 이
+    /// 디렉터리가 아니라 gitdir 을 가리키는 파일이라 존재 여부로만 본다.
+    is_repo: bool,
+}
+
+/// 이 경로가 git 저장소 루트인가. 워크트리·서브모듈은 `.git` 이 디렉터리가
+/// 아니라 gitdir 을 가리키는 **파일**이라 종류를 안 따지고 존재만 본다.
+/// 폴더 하나당 stat 한 번 — 파일트리는 이미 엔트리마다 file_type 을 물으므로
+/// 실질 추가 비용이 없다. 파일에는 부르지 말 것.
+fn is_git_repo(p: &std::path::Path) -> bool {
+    p.join(".git").exists()
 }
 
 /// Parsed `git status` snapshot for the right-hand git column. The background

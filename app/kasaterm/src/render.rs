@@ -3300,7 +3300,11 @@ impl App {
                         theme::text_dim()
                     };
                     if node.is_dir {
-                        g.queue_icon("folder", icon_x, iy, isz, icon_color);
+                        // 레포는 폴더 대신 브랜치 아이콘 — 펼침 화살표가 이미
+                        // 폴더성을 말해 주므로 정보가 줄지 않고, 목록에서 어느
+                        // 게 레포인지 한눈에 갈린다(거노).
+                        let ic = if node.is_repo { "git-branch" } else { "folder" };
+                        g.queue_icon(ic, icon_x, iy, isz, icon_color);
                     } else if let Some(ft) = file_icon(&node.name) {
                         let alpha = if node.ignored {
                             0.35
