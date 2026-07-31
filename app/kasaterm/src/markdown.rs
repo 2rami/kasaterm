@@ -1830,6 +1830,105 @@ pub(crate) fn buffer_line(folds: &[(usize, usize)], row: usize, total: usize) ->
     line.min(total.saturating_sub(1))
 }
 
+/// 화면 행 하나 = `(버퍼 줄, 그 행이 시작하는 char 열)`.
+///
+/// 접힘은 행을 **지우고**, 랩은 행을 **늘린다**. 둘 다 겪고 나면 화면 행과 버퍼
+/// 줄은 더 이상 같은 것이 아니라서, 캐럿·클릭·스크롤·선택이 전부 이 배열을 거쳐
+/// 좌표를 얻는다.
+#[allow(dead_code)]
+pub(crate) type Rows = Vec<(usize, usize)>;
+
+/// 이 줄을 `cols` 칸 폭으로 잘랐을 때 각 행이 시작하는 char 열. 항상 `0` 으로
+/// 시작하므로 결과는 비지 않는다.
+///
+/// 낱말 경계(공백 뒤)에서 자르되, 한 낱말이 통째로 폭보다 길면 그 자리에서
+/// 강제로 자른다 — 안 그러면 긴 URL 하나가 줄 전체를 한 행으로 밀어낸다.
+#[allow(dead_code)] // 배선 대기: 렌더 루프를 행 기준으로 바꾸는 단계에서 쓴다
+pub(crate) fn wrap_starts(line: &str, cols: usize) -> Vec<usize> {
+    let mut out = vec![0usize];
+    if cols == 0 {
+        return out;
+    }
+    let chars: Vec<char> = line.chars().collect();
+    let mut start = 0usize;
+    let mut w = 0usize;
+    let mut last_break: Option<usize> = None;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let cw = 1 + usize::from(crate::gpu::is_wide_char(chars[i]));
+        // `i > start` 는 한 행에 최소 한 글자를 보장한다 — 폭이 1 인데 와이드
+        // 글자가 오면 이게 없으면 영원히 자리를 못 잡는다.
+        if w + cw > cols && i > start {
+            // 낱말 경계로 되돌리되, 그 행이 공백만 남는 자리면 쓰지 않는다 —
+            // 들여쓴 줄에서 첫 낱말이 폭에 못 들어가면 "빈칸만 있는 행"이
+            // 하나 생기고, 화면엔 이유 없이 비어 보이는 줄로 남는다.
+            let br = last_break
+                .filter(|&b| b > start && chars[start..b].iter().any(|c| !c.is_whitespace()))
+                .unwrap_or(i);
+            out.push(br);
+            start = br;
+            w = 0;
+            last_break = None;
+            i = br;
+            continue;
+        }
+        w += cw;
+        if chars[i] == ' ' || chars[i] == '\t' {
+            last_break = Some(i + 1);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// 접힘과 랩을 적용한 화면 행 목록. `cols == 0` 이면 랩을 끈다(줄당 한 행).
+#[allow(dead_code)] // 배선 대기: 렌더 루프를 행 기준으로 바꾸는 단계에서 쓴다
+pub(crate) fn layout_rows(lines: &[String], folds: &[(usize, usize)], cols: usize) -> Rows {
+    let mut out: Rows = Vec::with_capacity(lines.len());
+    for (li, l) in lines.iter().enumerate() {
+        if is_hidden(folds, li) {
+            continue;
+        }
+        if cols == 0 {
+            out.push((li, 0));
+            continue;
+        }
+        out.extend(wrap_starts(l, cols).into_iter().map(|s| (li, s)));
+    }
+    out
+}
+
+/// 이 (줄, 열)이 놓인 화면 행. 접혀서 사라진 줄이면 **머리 줄의 행**을 준다 —
+/// 폴딩의 `visual_row` 와 같은 약속이다.
+#[allow(dead_code)] // 배선 대기: 렌더 루프를 행 기준으로 바꾸는 단계에서 쓴다
+pub(crate) fn row_of(rows: &Rows, line: usize, col: usize) -> usize {
+    match rows.binary_search(&(line, col)) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    }
+}
+
+/// 이 화면 행이 담는 (줄, 시작 열). 범위를 넘으면 마지막 행.
+#[allow(dead_code)] // 배선 대기: 렌더 루프를 행 기준으로 바꾸는 단계에서 쓴다
+pub(crate) fn row_at(rows: &Rows, row: usize) -> (usize, usize) {
+    rows.get(row)
+        .copied()
+        .or_else(|| rows.last().copied())
+        .unwrap_or((0, 0))
+}
+
+/// 이 행이 담는 열 범위 `[시작, 끝)`. 끝은 다음 행의 시작이거나 줄 끝이다.
+#[allow(dead_code)] // 배선 대기: 렌더 루프를 행 기준으로 바꾸는 단계에서 쓴다
+pub(crate) fn row_span(rows: &Rows, row: usize, lines: &[String]) -> (usize, usize, usize) {
+    let (li, from) = row_at(rows, row);
+    let end = match rows.get(row + 1) {
+        // 같은 줄이 이어지면 다음 행 시작까지, 줄이 바뀌면 이 줄 끝까지.
+        Some(&(nl, ns)) if nl == li => ns,
+        _ => lines.get(li).map_or(from, |l| l.chars().count()),
+    };
+    (li, from, end)
+}
+
 /// 구간 하나를 접힘 목록에 넣는다. 이미 그 머리가 접혀 있으면 **펴고** false.
 ///
 /// 겹치는 구간은 통째로 걷어낸다 — 바깥 블록을 접었는데 안쪽 접힘이 남아 있으면,
@@ -3522,6 +3621,60 @@ mod tests {
         assert_eq!(find_after(&lines, "foo", (0, 0)), Some((0, 4)));
         // 열은 char 인덱스 — 한글이 앞에 있어도 바이트로 밀리지 않는다.
         assert_eq!(find_after(&lines, "nap", (1, 0)), Some((1, 4)));
+    }
+
+    #[test]
+    fn wrap_breaks_at_words_and_forces_long_ones() {
+        // 낱말 경계에서 자른다 — 공백 **뒤**가 다음 행의 시작이다.
+        assert_eq!(wrap_starts("hello world foo", 8), vec![0, 6, 12]);
+        // 낱말 하나가 폭보다 길면 그 자리에서 강제로 자른다(긴 URL 대비).
+        assert_eq!(wrap_starts("abcdefghij", 4), vec![0, 4, 8]);
+        // 한글은 두 칸이라 폭 4 에 두 글자.
+        assert_eq!(wrap_starts("가나다라", 4), vec![0, 2]);
+        // 폭이 남으면 자를 일이 없다. 랩을 끄면(0) 언제나 한 행.
+        assert_eq!(wrap_starts("short", 80), vec![0]);
+        assert_eq!(wrap_starts("아주 긴 줄이지만 랩이 꺼져 있다", 0), vec![0]);
+        // 폭 1 에 와이드 글자 — 한 행에 최소 한 글자는 넣어야 멈춘다.
+        assert_eq!(wrap_starts("가나", 1), vec![0, 1]);
+    }
+
+    #[test]
+    fn layout_rows_drops_folded_lines_and_expands_wrapped_ones() {
+        let lines: Vec<String> = ["fn a() {", "    aaaa bbbb cccc", "}", "tail"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // 랩 끔 → 줄당 한 행.
+        assert_eq!(layout_rows(&lines, &[], 0), vec![(0, 0), (1, 0), (2, 0), (3, 0)]);
+        // 폭 8 → 둘째 줄이 세 행으로("    aaaa" / " bbbb " / "cccc").
+        let rows = layout_rows(&lines, &[], 8);
+        assert_eq!(rows, vec![(0, 0), (1, 0), (1, 8), (1, 14), (2, 0), (3, 0)]);
+        // 들여쓰기 뒤 첫 낱말은 폭을 넘겨도 그 행에 남는다 — 공백만 있는 행을
+        // 만들지 않는다.
+        assert_eq!(wrap_starts("    aaaa bbbb cccc", 8), vec![0, 8, 14]);
+        // 접힌 줄은 아예 목록에 없다 — 랩과 접힘이 같은 배열에서 만난다.
+        let rows = layout_rows(&lines, &[(0, 1)], 8);
+        assert_eq!(rows, vec![(0, 0), (2, 0), (3, 0)]);
+    }
+
+    #[test]
+    fn row_lookup_maps_both_ways_and_gives_the_span() {
+        let lines: Vec<String> = ["fn a() {", "    aaaa bbbb cccc", "}"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows = layout_rows(&lines, &[], 8);
+        // (줄, 열) → 행: 랩된 줄 안쪽 열은 그 열을 담은 행으로 간다.
+        assert_eq!(row_of(&rows, 1, 0), 1);
+        assert_eq!(row_of(&rows, 1, 10), 2);
+        assert_eq!(row_of(&rows, 1, 14), 3);
+        assert_eq!(row_of(&rows, 2, 0), 4);
+        // 행 → 그 행이 담는 [시작, 끝).
+        assert_eq!(row_span(&rows, 1, &lines), (1, 0, 8));
+        assert_eq!(row_span(&rows, 2, &lines), (1, 8, 14));
+        // 줄의 마지막 행은 줄 끝까지.
+        assert_eq!(row_span(&rows, 3, &lines), (1, 14, 18));
+        assert_eq!(row_span(&rows, 4, &lines), (2, 0, 1));
     }
 
     #[test]
