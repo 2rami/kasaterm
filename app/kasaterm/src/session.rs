@@ -606,6 +606,29 @@ impl App {
             w.request_redraw();
         }
     }
+
+    /// pane 하나로 포커스를 옮긴다 — 다른 방(윈도우)에 있으면 그 방부터 앞으로
+    /// 가져온다. `active_pane` 만 바꾸면 안 보이는 윈도우의 pane 이 선택돼 화면은
+    /// 그대로다. `switch_window` 가 leaves[0] 로 `active_pane` 을 덮으므로 순서는
+    /// 반드시 **방 전환 → pane 지정**이다.
+    ///
+    /// 실재하는 leaf 일 때만 옮긴다 — 캐릭터·작업명 같은 집계 id 로 `active_pane`
+    /// 을 덮으면 다음 `/layout` 폴에서 그 타일이 빠져 pane 이 닫힌 것처럼 보였다
+    /// (거노: 캐릭터 클릭→학생 선택하면 닫힘).
+    pub(crate) fn focus_pane(&mut self, pane: &str) -> bool {
+        let Some(wi) = self.window_of_pane(pane) else {
+            return false;
+        };
+        if wi != self.active_window {
+            self.switch_window(wi);
+        }
+        if let Ok(mut ws) = self.ws.lock() {
+            ws.active_pane = Some(pane.to_string());
+        }
+        self.chrome_dirty = true;
+        true
+    }
+
     /// Close the window at `idx`. The last window can't be closed (a session
     /// always needs one). Every pane in the closed window is torn down — its
     /// PTY Arc dropped (kills the shell) and its render state removed — same

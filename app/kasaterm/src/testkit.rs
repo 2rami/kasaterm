@@ -1878,3 +1878,70 @@ impl App {
         }
     }
 }
+
+impl App {
+    /// Info 패널 그룹 머리 **더블클릭 → 그 학생으로 포커스** 헤드리스 검증.
+    /// `KASATERM_AUTOINFODBL_MS` 뒤에, 지금 활성이 아닌 첫 pane 그룹을 두 번
+    /// 눌러 `active_pane` 이 실제로 옮겨갔는지 로그로 남긴다. 사람 손 없이
+    /// 확인할 수 있는 유일한 경로다 — 포커스는 그려지는 값이 아니라 상태다.
+    pub(crate) fn run_pending_autoinfodbl(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOINFODBL_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if Instant::now() < *due || DONE.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        let before = self.ws.lock().ok().and_then(|w| w.active_pane.clone()).unwrap_or_default();
+        // `KASATERM_AUTOINFODBL=win` 이면 방 머리를, 아니면 지금 활성이 아닌
+        // pane 머리를 겨눈다 — 두 경로가 서로 다른 동작(방 전환 / pane 포커스)이라
+        // 따로 재야 한다.
+        let want_win = std::env::var("KASATERM_AUTOINFODBL").is_ok_and(|v| v == "win");
+        let target = self
+            .info
+            .group_rects
+            .iter()
+            .find(|(k, _)| {
+                if want_win {
+                    k.strip_prefix("win:").is_some_and(|n| n != self.active_window.to_string())
+                } else {
+                    !k.starts_with("win:") && *k != before
+                }
+            })
+            .map(|(k, r)| (k.clone(), *r));
+        let Some((key, r)) = target else {
+            eprintln!("[autoinfodbl] 비활성 pane 그룹이 없다(그룹 {})", self.info.group_rects.len());
+            return;
+        };
+        let (x, y) = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+        for _ in 0..2 {
+            self.cursor_px = (x, y);
+            for state in [ElementState::Pressed, ElementState::Released] {
+                self.window_event(
+                    event_loop,
+                    wid,
+                    WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state,
+                        button: MouseButton::Left,
+                    },
+                );
+            }
+        }
+        let after = self.ws.lock().ok().and_then(|w| w.active_pane.clone()).unwrap_or_default();
+        eprintln!(
+            "[autoinfodbl] {key} 더블클릭 → active_pane {before} → {after} (win={}) 접힘={}",
+            self.active_window,
+            self.info.group_collapsed.contains(&key)
+        );
+    }
+}
