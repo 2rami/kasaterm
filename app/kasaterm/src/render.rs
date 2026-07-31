@@ -34,18 +34,22 @@ impl App {
             // Active pane's top-left in cell units. When the workspace is
             // split the cursor/preedit overlay must anchor to THIS pane,
             // not the global origin (which is the left/top pane).
+            //
+            // 원점은 **실제로 그린 rect**(effective_leaf_rects)에서 온다 —
+            // ws.layout 의 split 좌표는 줌을 모르기 때문이다. 줌한 pane 은 원래
+            // 자리가 아니라 작업영역 한가운데 들여 그려지므로, split 좌표를 쓰면
+            // 커서·조합 오버레이만 옛 자리에 남아 화면 어딘가로 사라진다.
+            // (아래쪽 pane 을 줌하면 예전에도 어긋났고, inset 이 생기며 항상
+            // 드러났다.) leaf_rects 의 id 는 이미 `%n` 꼴이라 변환이 없다.
+            let (gcols, grows) = self.window_cells();
             let pane_origin = ws
                 .active_pane
                 .as_ref()
                 .and_then(|aid| {
-                    ws.layout.as_ref().and_then(|l| {
-                        l.leaves().into_iter().find_map(|n| match n {
-                            Layout::Pane { id, x, y, .. } if format!("%{id}") == *aid => {
-                                Some((*x, *y))
-                            }
-                            _ => None,
-                        })
-                    })
+                    self.effective_leaf_rects(gcols, grows)
+                        .into_iter()
+                        .find(|(id, ..)| id == aid)
+                        .map(|(_, x, y, _, _)| (x, y))
                 })
                 .unwrap_or((0u16, 0u16));
             ws.active_pane.clone().and_then(|id| {
@@ -4975,6 +4979,10 @@ impl App {
                         } else {
                             pane_chars
                                 .get(fid.as_str())
+                                // 학생색은 claude 가 도는 pane 에만 — 순수 셸을
+                                // 줌했을 때 남의 학생색이 둘러지면 「저 pane 에
+                                // 누가 있다」로 잘못 읽힌다. 줌은 accent 로.
+                                .filter(|_| claude_panes.contains(fid.as_str()))
                                 .and_then(|n| {
                                     theme::character_accent_n(
                                         n,
