@@ -363,6 +363,37 @@ impl MarkdownPane {
         Arc::make_mut(&mut self.edit_lines)
     }
 
+    /// 지금 유효한 접힘 목록. 편집으로 블록 모양이 바뀐 구간은 여기서 걷어낸다
+    /// — 줄이 늘거나 줄면 접힘이 엉뚱한 자리를 가리키는데, 그 상태로 그리면
+    /// 멀쩡한 줄이 사라진 것처럼 보인다.
+    pub(crate) fn folds_valid(&mut self) -> &[(usize, usize)] {
+        if !self.folds.is_empty() && self.folds_gen != self.edit_gen {
+            self.folds_gen = self.edit_gen;
+            // Arc 라 clone 은 포인터 하나 — retain 클로저가 self 를 다시 빌리는
+            // 것만 피하면 된다.
+            let lines = Arc::clone(&self.edit_lines);
+            self.folds.retain(|&(s, e)| fold_end(&lines, s) == Some(e));
+        }
+        &self.folds
+    }
+
+    /// 이 줄의 블록을 접거나 편다. 접을 게 없으면 false.
+    pub(crate) fn toggle_fold(&mut self, li: usize) -> bool {
+        let Some(end) = fold_end(&self.edit_lines, li) else {
+            return false;
+        };
+        let folded = fold_toggle(&mut self.folds, li, end);
+        self.folds_gen = self.edit_gen;
+        // 접은 안쪽에 캐럿이 있으면 머리로 끌어올린다 — 안 그러면 보이지 않는
+        // 줄에 커서가 남아 타이핑이 화면 밖에서 일어난다.
+        if folded && self.cur_line > li && self.cur_line <= end {
+            self.cur_line = li;
+            self.cur_col = 0;
+            self.sel_anchor = None;
+        }
+        true
+    }
+
     /// 가장 긴 줄의 **칸** 수 — 가로 스크롤 상한을 여기서 얻는다. 글자 수가 아니라
     /// 칸 수인 이유는 편집기가 격자에 그리기 때문이다(한글 한 글자가 2칸).
     ///
@@ -1726,7 +1757,7 @@ pub(crate) fn indent_guide_depth(lines: &[String], li: usize) -> usize {
 /// 가이드(`indent_guide_depth`)와 탭 처리가 다르다 — 가이드는 탭이 섞이면 선을
 /// 안 그려야 하지만(폭을 몰라 어긋난다), 접기는 **상대** 깊이만 보므로 탭을 한
 /// 단계로 세면 그만이다.
-fn fold_depth(l: &str) -> Option<usize> {
+pub(crate) fn fold_depth(l: &str) -> Option<usize> {
     let ws: Vec<char> = l.chars().take_while(|c| c.is_whitespace()).collect();
     if ws.len() == l.chars().count() {
         return None;
@@ -1756,6 +1787,62 @@ pub(crate) fn fold_end(lines: &[String], li: usize) -> Option<usize> {
         end = Some(i);
     }
     end
+}
+
+/// 접힌 구간 하나 = `(머리 줄, 마지막 숨은 줄)`. 머리 줄은 **보인다** — 접힌
+/// 표시를 그 줄에 얹어야 어디가 접혔는지 알 수 있다.
+///
+/// 구간들은 항상 머리 줄 오름차순이고 서로 겹치지 않는다(`fold_insert` 가
+/// 지킨다). 그래야 아래 변환들이 한 번의 순회로 끝난다.
+pub(crate) type Folds = Vec<(usize, usize)>;
+
+/// 이 줄이 접혀서 화면에 없는가.
+pub(crate) fn is_hidden(folds: &[(usize, usize)], line: usize) -> bool {
+    folds.iter().any(|&(s, e)| line > s && line <= e)
+}
+
+/// 버퍼 줄 → 화면 행. 접힘이 없으면 그대로다.
+///
+/// 숨은 줄을 물어보면 그 줄이 속한 구간의 **머리 줄** 행을 준다 — 접힌 안쪽을
+/// 가리키는 좌표(캐럿·진단)가 화면 밖으로 사라지는 대신 접힌 머리에 얹힌다.
+pub(crate) fn visual_row(folds: &[(usize, usize)], line: usize) -> usize {
+    let mut skipped = 0usize;
+    for &(s, e) in folds {
+        if s >= line {
+            break;
+        }
+        // 구간이 이 줄을 품고 있으면 이 줄까지만 센다 — 그러면 숨은 줄이
+        // 머리 줄의 행으로 접힌다.
+        skipped += e.min(line) - s;
+    }
+    line - skipped
+}
+
+/// 화면 행 → 버퍼 줄. `visual_row` 의 역.
+pub(crate) fn buffer_line(folds: &[(usize, usize)], row: usize, total: usize) -> usize {
+    let mut line = row;
+    for &(s, e) in folds {
+        if s >= line {
+            break;
+        }
+        line += e - s;
+    }
+    line.min(total.saturating_sub(1))
+}
+
+/// 구간 하나를 접힘 목록에 넣는다. 이미 그 머리가 접혀 있으면 **펴고** false.
+///
+/// 겹치는 구간은 통째로 걷어낸다 — 바깥 블록을 접었는데 안쪽 접힘이 남아 있으면,
+/// 바깥을 펴는 순간 안쪽이 접힌 채로 튀어나와 사람이 접은 적 없는 모양이 된다.
+pub(crate) fn fold_toggle(folds: &mut Folds, s: usize, e: usize) -> bool {
+    if let Some(i) = folds.iter().position(|&(fs, _)| fs == s) {
+        folds.remove(i);
+        return false;
+    }
+    folds.retain(|&(fs, fe)| fe < s || fs > e);
+    folds.push((s, e));
+    folds.sort_by_key(|&(fs, _)| fs);
+    true
 }
 
 /// 짝을 맞추는 괄호 쌍.
@@ -2349,13 +2436,15 @@ impl App {
                 .get(line)
                 .map(|l| l.chars().take(m.cur_col).collect())
                 .unwrap_or_default();
-            (id, m.edit_lines.len(), line, prefix, m.scroll, m.h_scroll)
+            (id, m.edit_lines.len(), line, prefix, m.scroll, m.h_scroll, m.folds.clone())
         };
-        let (id, line_count, cur_line, prefix, scroll, h_scroll) = snap;
+        let (id, line_count, cur_line, prefix, scroll, h_scroll, folds) = snap;
         let Some(&(_bx, _by, bw, bh)) = self.md_body_rects.get(&id) else { return };
         let Some(gpu) = self.gpu.as_mut() else { return };
         let (ns, nh) =
-            gpu.raw_editor_ensure_visible(line_count, cur_line, &prefix, bw, bh, scroll, h_scroll);
+            gpu.raw_editor_ensure_visible(
+            line_count, cur_line, &prefix, bw, bh, scroll, h_scroll, &folds,
+        );
         if (ns - scroll).abs() > 0.5 || (nh - h_scroll).abs() > 0.5 {
             let mut ws = self.ws.lock().unwrap();
             if let Some(pane) = ws.panes.get_mut(&id) {
@@ -2574,11 +2663,12 @@ impl App {
             let ws = self.ws.lock().ok()?;
             let m = ws.panes.get(id)?.markdown()?;
             m.raw_mode
-                .then(|| (m.edit_lines.clone(), m.scroll, m.h_scroll))?
+                .then(|| (m.edit_lines.clone(), m.scroll, m.h_scroll, m.folds.clone()))?
         };
-        let (lines, scroll, h_scroll) = snap;
+        let (lines, scroll, h_scroll, folds) = snap;
         let gpu = self.gpu.as_mut()?;
-        let (line, col) = gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py);
+        let (line, col) =
+            gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py, &folds);
         Some((line, col, lines.get(line).cloned().unwrap_or_default()))
     }
 
@@ -2798,6 +2888,40 @@ impl App {
         m.get(std::path::Path::new(path)).cloned().unwrap_or_default()
     }
 
+    /// 거터의 접기 삼각형을 눌렀으면 접거나 펴고 true. 본문을 눌렀으면 false —
+    /// 호출자는 평소 캐럿 배치로 넘어간다.
+    pub(crate) fn md_fold_click(&mut self, id: &str, px: f32, py: f32) -> bool {
+        let Some(&(bx, by, _, _)) = self.md_body_rects.get(id) else {
+            return false;
+        };
+        let snap = {
+            let ws = self.ws.lock().ok();
+            ws.and_then(|w| {
+                w.panes.get(id).and_then(|p| p.markdown()).and_then(|m| {
+                    m.raw_mode
+                        .then(|| (m.edit_lines.clone(), m.scroll, m.folds.clone()))
+                })
+            })
+        };
+        let Some((lines, scroll, folds)) = snap else {
+            return false;
+        };
+        let Some(gpu) = self.gpu.as_mut() else {
+            return false;
+        };
+        let Some(li) = gpu.raw_editor_fold_hit(&lines, bx, by, scroll, px, py, &folds) else {
+            return false;
+        };
+        let Ok(mut ws) = self.ws.lock() else { return false };
+        let Some(pane) = ws.panes.get_mut(id) else { return false };
+        pane.dirty = true;
+        let Some(m) = pane.markdown_mut() else { return false };
+        // 접을 게 없는 줄을 눌렀어도 **true** 다 — 거터를 누른 것이지 본문을 누른
+        // 게 아니라서, 여기서 false 를 주면 캐럿이 엉뚱하게 튄다.
+        m.toggle_fold(li);
+        true
+    }
+
     /// 미니맵을 눌렀으면 그 자리로 스크롤하고 true. 본문을 눌렀으면 false —
     /// 호출자는 평소 캐럿 배치로 넘어간다.
     ///
@@ -2876,12 +3000,13 @@ impl App {
             let ws = self.ws.lock().unwrap();
             ws.panes.get(id).and_then(|p| p.markdown()).and_then(|m| {
                 m.raw_mode
-                    .then(|| (m.edit_lines.clone(), m.scroll, m.h_scroll))
+                    .then(|| (m.edit_lines.clone(), m.scroll, m.h_scroll, m.folds.clone()))
             })
         };
-        let Some((lines, scroll, h_scroll)) = snapshot else { return };
+        let Some((lines, scroll, h_scroll, folds)) = snapshot else { return };
         let Some(gpu) = self.gpu.as_mut() else { return };
-        let (line, col) = gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py);
+        let (line, col) =
+            gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py, &folds);
         let mut ws = self.ws.lock().unwrap();
         if let Some(pane) = ws.panes.get_mut(id) {
             pane.dirty = true;
@@ -3113,6 +3238,8 @@ mod tests {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            folds: Vec::new(),
+            folds_gen: 0,
             edited_at: None,
         }
     }
@@ -3395,6 +3522,57 @@ mod tests {
         assert_eq!(find_after(&lines, "foo", (0, 0)), Some((0, 4)));
         // 열은 char 인덱스 — 한글이 앞에 있어도 바이트로 밀리지 않는다.
         assert_eq!(find_after(&lines, "nap", (1, 0)), Some((1, 4)));
+    }
+
+    #[test]
+    fn fold_mapping_skips_hidden_lines_both_ways() {
+        // 줄 2 를 머리로 3·4·5 가 접혔다.
+        let f = vec![(2usize, 5usize)];
+        assert!(!is_hidden(&f, 2));
+        assert!(is_hidden(&f, 3) && is_hidden(&f, 5));
+        assert!(!is_hidden(&f, 6));
+        // 보이는 줄: 0 1 2 6 7 8 9 → 행 0..6
+        assert_eq!(visual_row(&f, 0), 0);
+        assert_eq!(visual_row(&f, 2), 2);
+        assert_eq!(visual_row(&f, 6), 3);
+        assert_eq!(visual_row(&f, 9), 6);
+        // 숨은 줄은 머리 줄의 행에 얹힌다 — 캐럿이 화면 밖으로 사라지지 않는다.
+        assert_eq!(visual_row(&f, 3), 2);
+        assert_eq!(visual_row(&f, 5), 2);
+        // 역변환은 보이는 줄만 가리킨다.
+        assert_eq!(buffer_line(&f, 2, 10), 2);
+        assert_eq!(buffer_line(&f, 3, 10), 6);
+        assert_eq!(buffer_line(&f, 6, 10), 9);
+    }
+
+    #[test]
+    fn fold_mapping_handles_several_ranges() {
+        let f = vec![(1usize, 2usize), (5usize, 7usize)];
+        // 보이는 줄: 0 1 3 4 5 8 9
+        assert_eq!(visual_row(&f, 8), 5);
+        assert_eq!(buffer_line(&f, 5, 10), 8);
+        // 접힘이 없으면 항등 — 이 경로가 평소의 전부다.
+        assert_eq!(visual_row(&[], 42), 42);
+        assert_eq!(buffer_line(&[], 42, 100), 42);
+    }
+
+    #[test]
+    fn fold_toggle_folds_unfolds_and_swallows_inner_ranges() {
+        let mut f: Folds = Vec::new();
+        assert!(fold_toggle(&mut f, 5, 9));
+        assert_eq!(f, vec![(5, 9)]);
+        // 같은 머리를 다시 누르면 펴진다.
+        assert!(!fold_toggle(&mut f, 5, 9));
+        assert!(f.is_empty());
+        // 안쪽을 접은 뒤 바깥을 접으면 안쪽은 삼켜진다 — 안 그러면 바깥을 펼 때
+        // 사람이 접은 적 없는 접힘이 남아 있다.
+        fold_toggle(&mut f, 6, 8);
+        fold_toggle(&mut f, 2, 12);
+        assert_eq!(f, vec![(2, 12)]);
+        // 겹치지 않는 구간은 나란히 산다(머리 줄 순서).
+        fold_toggle(&mut f, 20, 25);
+        fold_toggle(&mut f, 14, 16);
+        assert_eq!(f, vec![(2, 12), (14, 16), (20, 25)]);
     }
 
     #[test]
@@ -3991,6 +4169,8 @@ mod tests {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            folds: Vec::new(),
+            folds_gen: 0,
             edited_at: None,
         };
         m.ensure_raw_seeded();

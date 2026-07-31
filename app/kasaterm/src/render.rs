@@ -408,6 +408,7 @@ impl App {
             Option<FindState>,
             Option<(Vec<String>, usize, usize)>,
             Vec<crate::lsp::Diag>,
+            crate::markdown::Folds,
         )> = Vec::new();
         // Per-pane body rect (header-excluded) in logical px, collected for
         // every pane so in-pane WebViews and other overlays can be snapped
@@ -568,6 +569,7 @@ impl App {
                     &'static str,
                     Option<FindState>,
                     Option<(Vec<String>, usize, usize)>,
+                    crate::markdown::Folds,
                 )> = pane.markdown().map(|m| {
                     (
                         m.doc.clone(),
@@ -584,6 +586,7 @@ impl App {
                         m.complete
                             .as_ref()
                             .map(|c| (c.items.clone(), c.sel, c.from_col)),
+                        m.folds.clone(),
                     )
                 });
                 let mut composed: Vec<Vec<GridCell>> = match pane.term() {
@@ -1351,8 +1354,19 @@ impl App {
                 if let Some(image) = img {
                     image_slots.push((id.clone(), image, (bx, by, bw, bh), img_zoom, img_rot, img_pan));
                 }
-                if let Some((doc, raw_mode, lines, cursor, sel, scroll, h_scroll, lang, find, complete)) =
-                    md
+                if let Some((
+                    doc,
+                    raw_mode,
+                    lines,
+                    cursor,
+                    sel,
+                    scroll,
+                    h_scroll,
+                    lang,
+                    find,
+                    complete,
+                    folds,
+                )) = md
                 {
                     // 편집기 모드에서만 — 렌더 뷰엔 밑줄을 그릴 자리가 없다.
                     // 여기서 뽑는 이유는 아래 그리는 루프가 `&mut self.gpu` 를
@@ -1376,6 +1390,7 @@ impl App {
                         find,
                         complete,
                         diags,
+                        folds,
                     ));
                 }
                 // Box geometry (logical px). Right/bottom-edge panes stretch to
@@ -2184,6 +2199,7 @@ impl App {
                 find,
                 complete,
                 diags,
+                folds,
             ) in &md_slots
             {
                 let content_h = if *raw_mode {
@@ -2216,6 +2232,7 @@ impl App {
                         find.as_ref().map(|f| (f.hits.as_slice(), f.idx)),
                         complete.as_ref().map(|(i, s, c)| (i.as_slice(), *s, *c)),
                         diags,
+                        folds,
                     );
                     if let Some(f) = find {
                         for (btn, r) in

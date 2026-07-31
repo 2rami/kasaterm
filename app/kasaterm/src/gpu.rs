@@ -2344,6 +2344,7 @@ impl GpuRenderer {
         h_scroll: f32,
         click_x: f32,
         click_y: f32,
+        folds: &[(usize, usize)],
     ) -> (usize, usize) {
         let base = self.font_size_px as f32 / self.scale;
         let pad = base * 0.6;
@@ -2353,8 +2354,10 @@ impl GpuRenderer {
         let cx0 = x + pad + gutter_w;
         let tx0 = cx0 - h_scroll;
         let top0 = (y - scroll) + pad;
-        let line = (((click_y - top0) / lh).floor().max(0.0) as usize)
-            .min(lines.len().saturating_sub(1));
+        // 접힘이 있으면 화면 행과 버퍼 줄이 갈린다 — 클릭은 **행**을 가리키므로
+        // 줄로 되돌려야 한다(접힘이 없으면 이 변환은 항등이다).
+        let row = ((click_y - top0) / lh).floor().max(0.0) as usize;
+        let line = crate::markdown::buffer_line(folds, row, lines.len());
         // 격자라 클릭 x 는 실수 칸 위치로 바로 떨어진다 — 글자마다 아틀라스를
         // 조회하며 펜을 굴릴 필요가 없다. 칸에서 열로 되돌릴 때만 순회하는데,
         // 와이드 글자가 2칸이라 나눗셈 한 번으로는 안 되기 때문이다. 글자의
@@ -2416,6 +2419,7 @@ impl GpuRenderer {
         h: f32,
         scroll: f32,
         h_scroll: f32,
+        folds: &[(usize, usize)],
     ) -> (f32, f32) {
         let base = self.font_size_px as f32 / self.scale;
         let pad = base * 0.6;
@@ -2424,8 +2428,10 @@ impl GpuRenderer {
         let gutter_w = base * 0.62 * digits as f32 + base * 1.0;
         // Vertical: line top on screen is y + pad + li*lh - scroll, so the box
         // stays fully visible while scroll ∈ [pad+(li+1)*lh - h, pad + li*lh].
-        let hi = pad + cur_line as f32 * lh;
-        let lo = (pad + (cur_line as f32 + 1.0) * lh - h).max(0.0);
+        // 스크롤은 **화면 행** 기준이라 접힘을 건너뛴 행 번호로 재야 한다.
+        let row = crate::markdown::visual_row(folds, cur_line) as f32;
+        let hi = pad + row * lh;
+        let lo = (pad + (row + 1.0) * lh - h).max(0.0);
         let ns = scroll.clamp(lo, hi.max(lo));
         // Horizontal: the caret pen-x must stay inside the text viewport
         // (right of the gutter, left of the pane edge), with a small margin so
@@ -2558,6 +2564,35 @@ impl GpuRenderer {
         }
     }
 
+    /// 거터의 접기 삼각형을 눌렀는가 — 눌렀으면 그 **버퍼 줄**. 판정 기준이
+    /// `draw_raw_editor` 와 갈리면 안 보이는 자리가 눌리므로 같은 수치를 쓴다.
+    #[allow(clippy::too_many_arguments)]
+    pub fn raw_editor_fold_hit(
+        &mut self,
+        lines: &[String],
+        x: f32,
+        y: f32,
+        scroll: f32,
+        click_x: f32,
+        click_y: f32,
+        folds: &[(usize, usize)],
+    ) -> Option<usize> {
+        let base = self.font_size_px as f32 / self.scale;
+        let (pad, lh) = self.raw_editor_metrics();
+        let digits = ((lines.len().max(1)) as f32).log10().floor() as usize + 1;
+        let gutter_w = base * 0.62 * digits as f32 + base * 1.0;
+        // 삼각형이 그려지는 띠. 조금 넓게 잡는다 — 8px 표적을 정확히 맞히라고
+        // 요구하면 아무도 안 쓴다.
+        let lo = x + pad + gutter_w - base * 0.95;
+        let hi = x + pad + gutter_w + base * 0.15;
+        if click_x < lo || click_x > hi {
+            return None;
+        }
+        let top0 = (y - scroll) + pad;
+        let row = ((click_y - top0) / lh).floor().max(0.0) as usize;
+        Some(crate::markdown::buffer_line(folds, row, lines.len()))
+    }
+
     /// Raw-editor row metrics for the current font: (top pad, line height) in
     /// logical px. `draw_raw_editor` lays lines out at `pad + line * lh`, and
     /// `set_md_mode` inverts that to turn a scroll offset into a line number —
@@ -2591,6 +2626,8 @@ impl GpuRenderer {
         complete: Option<(&[String], usize, usize)>,
         // LSP 진단 — 물결 밑줄과 캐럿 줄 옆 인라인 메시지.
         diags: &[crate::lsp::Diag],
+        // 접힌 구간들. 비어 있으면 모든 줄이 그대로 그려진다.
+        folds: &[(usize, usize)],
     ) -> f32 {
         // 본문은 미니맵 왼쪽까지만 쓴다. 이 렌더러엔 scissor 가 없어서
         // clip_right 가 곧 본문의 오른쪽 벽이다.
@@ -2633,6 +2670,12 @@ impl GpuRenderer {
         let guide_step = cw * crate::markdown::indent_step_cols() as f32;
         let mut pen_y = top0;
         for (li, line) in lines.iter().enumerate() {
+            // 접혀서 숨은 줄은 자리도 차지하지 않는다 — `pen_y` 를 안 올리므로
+            // 아래 줄들이 그대로 끌려 올라온다. 이 `continue` 하나가 폴딩의
+            // 전부이고, 나머지(캐럿·클릭·스크롤)는 같은 변환을 쓰는 쪽에서 맞춘다.
+            if crate::markdown::is_hidden(folds, li) {
+                continue;
+            }
             if pen_y + lh > clip_top && pen_y < clip_bot {
                 // Current-line highlight: a faint band across the pane behind
                 // the cursor's row (drawn first so code paints on top). Must be
@@ -2800,6 +2843,33 @@ impl GpuRenderer {
                         self.wavy_line(rx0, rx1, pen_y + glyph_voff + base - 1.0, col);
                     }
                 }
+                // 접힌 머리 줄 끝에 몇 줄이 숨었는지. 접힌 자리가 눈에 띄지
+                // 않으면 사라진 코드를 찾다가 파일이 망가진 줄 안다.
+                if let Some(&(_, fe)) = folds.iter().find(|&&(s, _)| s == li) {
+                    let bx = tx0 + (cell_cols(line) + 1) as f32 * cw;
+                    let label = format!("⋯ {}", fe - li);
+                    let lw = self.measure_pen_run(&label, base * 0.85, false, false) + cw;
+                    if bx > cx0 && bx + lw < clip_right {
+                        self.rect(
+                            bx,
+                            pen_y + glyph_voff * 0.4,
+                            lw,
+                            base * 1.15,
+                            crate::theme::surface_active(),
+                        );
+                        self.draw_text(
+                            bx + cw * 0.5,
+                            pen_y + glyph_voff,
+                            &label,
+                            DrawOpts {
+                                font_size: base * 0.85,
+                                color: crate::theme::text_dim(),
+                                bold: false,
+                                italic: false,
+                            },
+                        );
+                    }
+                }
                 // Cursor (drawn before the gutter mask so one panned under the
                 // gutter gets clipped away cleanly).
                 if li == cursor.0 {
@@ -2856,6 +2926,35 @@ impl GpuRenderer {
                     crate::theme::bg()
                 };
                 self.rect(x, pen_y, cx0 - x, lh, gutter_bg);
+                // 접기 표시 — 줄 번호와 코드 사이 여백에 삼각형 하나. 접을 수
+                // 있는지는 **다음 줄이 더 깊은가**로 본다: 블록 끝까지 훑는
+                // `fold_end` 는 화면의 모든 줄에서 부르기엔 비싸고, 여기 필요한
+                // 건 "표시할까" 하나뿐이다.
+                let folded_here = folds.iter().any(|&(s, _)| s == li);
+                let foldable = folded_here
+                    || crate::markdown::fold_depth(line)
+                        .zip(
+                            lines
+                                .get(li + 1)
+                                .and_then(|n| crate::markdown::fold_depth(n)),
+                        )
+                        .is_some_and(|(a, b)| b > a);
+                if foldable {
+                    self.draw_text(
+                        x + pad + gutter_w - base * 0.62,
+                        pen_y + glyph_voff,
+                        if folded_here { "▸" } else { "▾" },
+                        DrawOpts {
+                            font_size: base * 0.8,
+                            color: crate::theme::with_alpha(
+                                crate::theme::text_mute(),
+                                if folded_here { 0xFF } else { 0x66 },
+                            ),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                }
                 let num = format!("{}", li + 1);
                 let num_w = self.measure_pen_run(&num, base, false, false);
                 self.draw_text(

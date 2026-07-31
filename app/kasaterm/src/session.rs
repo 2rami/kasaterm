@@ -1151,6 +1151,8 @@ impl App {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            folds: Vec::new(),
+            folds_gen: 0,
             edited_at: None,
             })
         };
@@ -1303,6 +1305,8 @@ impl App {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            folds: Vec::new(),
+            folds_gen: 0,
             edited_at: None,
         });
         tab.title = title;
