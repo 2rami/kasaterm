@@ -1801,23 +1801,6 @@ pub(crate) fn is_hidden(folds: &[(usize, usize)], line: usize) -> bool {
     folds.iter().any(|&(s, e)| line > s && line <= e)
 }
 
-/// 버퍼 줄 → 화면 행. 접힘이 없으면 그대로다.
-///
-/// 숨은 줄을 물어보면 그 줄이 속한 구간의 **머리 줄** 행을 준다 — 접힌 안쪽을
-/// 가리키는 좌표(캐럿·진단)가 화면 밖으로 사라지는 대신 접힌 머리에 얹힌다.
-pub(crate) fn visual_row(folds: &[(usize, usize)], line: usize) -> usize {
-    let mut skipped = 0usize;
-    for &(s, e) in folds {
-        if s >= line {
-            break;
-        }
-        // 구간이 이 줄을 품고 있으면 이 줄까지만 센다 — 그러면 숨은 줄이
-        // 머리 줄의 행으로 접힌다.
-        skipped += e.min(line) - s;
-    }
-    line - skipped
-}
-
 /// 화면 행 → 버퍼 줄. `visual_row` 의 역.
 pub(crate) fn buffer_line(folds: &[(usize, usize)], row: usize, total: usize) -> usize {
     let mut line = row;
@@ -2254,7 +2237,19 @@ impl App {
             // 찾기 바가 열려 있는 동안은 그쪽이 키보드를 가진다. 바가 안 쓰는
             // 키도 버퍼로 흘려보내지 않는다 — Enter 한 번에 검색 결과로 가려다
             // 문서에 줄이 끼는 일이 없어야 한다.
-            if m.find.is_some() {
+            if alt
+                && event.physical_key
+                    == winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyZ)
+            {
+                // Alt+Z — 줄 접기 토글(VS Code 와 같은 자리). **물리 키**로 본다:
+                // macOS 에서 Alt+z 의 논리 키는 `Ω` 라 글자로 비교하면 안 잡힌다.
+                m.wrap = !m.wrap;
+                if m.wrap {
+                    // 랩을 켜면 가로로 밀 곳이 없다 — 남은 h_scroll 이 그대로면
+                    // 본문 왼쪽이 잘린 채 그려진다.
+                    m.h_scroll = 0.0;
+                }
+            } else if m.find.is_some() {
                 m.find_key(event, shift);
             } else if m.complete_key(event) {
                 // 자동완성 팝업이 먹었다 — 버퍼로 흘려보내지 않는다.
@@ -2535,14 +2530,24 @@ impl App {
                 .get(line)
                 .map(|l| l.chars().take(m.cur_col).collect())
                 .unwrap_or_default();
-            (id, m.edit_lines.len(), line, prefix, m.scroll, m.h_scroll, m.folds.clone())
+            (
+                id,
+                m.edit_lines.clone(),
+                line,
+                prefix,
+                m.scroll,
+                m.h_scroll,
+                m.folds.clone(),
+                m.wrap,
+            )
         };
-        let (id, line_count, cur_line, prefix, scroll, h_scroll, folds) = snap;
+        let (id, lines, cur_line, prefix, scroll, h_scroll, folds, wrap) = snap;
+        let line_count = lines.len();
         let Some(&(_bx, _by, bw, bh)) = self.md_body_rects.get(&id) else { return };
         let Some(gpu) = self.gpu.as_mut() else { return };
-        let (ns, nh) =
-            gpu.raw_editor_ensure_visible(
-            line_count, cur_line, &prefix, bw, bh, scroll, h_scroll, &folds,
+        let wc = gpu.raw_editor_wrap_cols(bw, line_count, wrap);
+        let (ns, nh) = gpu.raw_editor_ensure_visible(
+            line_count, cur_line, &prefix, bw, bh, scroll, h_scroll, &folds, wc, &lines,
         );
         if (ns - scroll).abs() > 0.5 || (nh - h_scroll).abs() > 0.5 {
             let mut ws = self.ws.lock().unwrap();
@@ -2757,17 +2762,19 @@ impl App {
     /// 화면 좌표가 가리키는 (줄, 열, 그 줄 텍스트) — **캐럿은 건드리지 않는다**.
     /// 호버가 쓴다: 마우스가 지나가는 자리마다 캐럿이 따라가면 편집이 불가능하다.
     fn md_pos_at_px(&mut self, id: &str, px: f32, py: f32) -> Option<(usize, usize, String)> {
-        let &(bx, by, _, _) = self.md_body_rects.get(id)?;
+        let &(bx, by, bw_for_wrap, _) = self.md_body_rects.get(id)?;
         let snap = {
             let ws = self.ws.lock().ok()?;
             let m = ws.panes.get(id)?.markdown()?;
-            m.raw_mode
-                .then(|| (m.edit_lines.clone(), m.scroll, m.h_scroll, m.folds.clone()))?
+            m.raw_mode.then(|| {
+                (m.edit_lines.clone(), m.scroll, m.h_scroll, m.folds.clone(), m.wrap)
+            })?
         };
-        let (lines, scroll, h_scroll, folds) = snap;
+        let (lines, scroll, h_scroll, folds, wrap) = snap;
         let gpu = self.gpu.as_mut()?;
+        let wc = gpu.raw_editor_wrap_cols(bw_for_wrap, lines.len(), wrap);
         let (line, col) =
-            gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py, &folds);
+            gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py, &folds, wc);
         Some((line, col, lines.get(line).cloned().unwrap_or_default()))
     }
 
@@ -3092,20 +3099,22 @@ impl App {
         if mine {
             self.md_flush_preedit();
         }
-        let Some(&(bx, by, _bw, _bh)) = self.md_body_rects.get(id) else { return };
+        let Some(&(bx, by, bw_for_wrap, _bh)) = self.md_body_rects.get(id) else { return };
         // Pull the lines + pan out under a short lock so the GPU borrow below
         // doesn't overlap the workspace borrow.
         let snapshot = {
             let ws = self.ws.lock().unwrap();
             ws.panes.get(id).and_then(|p| p.markdown()).and_then(|m| {
-                m.raw_mode
-                    .then(|| (m.edit_lines.clone(), m.scroll, m.h_scroll, m.folds.clone()))
+                m.raw_mode.then(|| {
+                    (m.edit_lines.clone(), m.scroll, m.h_scroll, m.folds.clone(), m.wrap)
+                })
             })
         };
-        let Some((lines, scroll, h_scroll, folds)) = snapshot else { return };
+        let Some((lines, scroll, h_scroll, folds, wrap)) = snapshot else { return };
         let Some(gpu) = self.gpu.as_mut() else { return };
+        let wc = gpu.raw_editor_wrap_cols(bw_for_wrap, lines.len(), wrap);
         let (line, col) =
-            gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py, &folds);
+            gpu.raw_editor_caret_at(&lines, bx, by, scroll, h_scroll, px, py, &folds, wc);
         let mut ws = self.ws.lock().unwrap();
         if let Some(pane) = ws.panes.get_mut(id) {
             pane.dirty = true;
@@ -3337,6 +3346,7 @@ mod tests {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            wrap: false,
             folds: Vec::new(),
             folds_gen: 0,
             edited_at: None,
@@ -3684,15 +3694,7 @@ mod tests {
         assert!(!is_hidden(&f, 2));
         assert!(is_hidden(&f, 3) && is_hidden(&f, 5));
         assert!(!is_hidden(&f, 6));
-        // 보이는 줄: 0 1 2 6 7 8 9 → 행 0..6
-        assert_eq!(visual_row(&f, 0), 0);
-        assert_eq!(visual_row(&f, 2), 2);
-        assert_eq!(visual_row(&f, 6), 3);
-        assert_eq!(visual_row(&f, 9), 6);
-        // 숨은 줄은 머리 줄의 행에 얹힌다 — 캐럿이 화면 밖으로 사라지지 않는다.
-        assert_eq!(visual_row(&f, 3), 2);
-        assert_eq!(visual_row(&f, 5), 2);
-        // 역변환은 보이는 줄만 가리킨다.
+        // 보이는 줄: 0 1 2 6 7 8 9 → 행 0..6. 행→줄 변환은 보이는 줄만 가리킨다.
         assert_eq!(buffer_line(&f, 2, 10), 2);
         assert_eq!(buffer_line(&f, 3, 10), 6);
         assert_eq!(buffer_line(&f, 6, 10), 9);
@@ -3702,10 +3704,8 @@ mod tests {
     fn fold_mapping_handles_several_ranges() {
         let f = vec![(1usize, 2usize), (5usize, 7usize)];
         // 보이는 줄: 0 1 3 4 5 8 9
-        assert_eq!(visual_row(&f, 8), 5);
         assert_eq!(buffer_line(&f, 5, 10), 8);
         // 접힘이 없으면 항등 — 이 경로가 평소의 전부다.
-        assert_eq!(visual_row(&[], 42), 42);
         assert_eq!(buffer_line(&[], 42, 100), 42);
     }
 
@@ -4322,6 +4322,7 @@ mod tests {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            wrap: false,
             folds: Vec::new(),
             folds_gen: 0,
             edited_at: None,

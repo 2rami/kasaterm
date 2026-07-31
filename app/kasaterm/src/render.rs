@@ -409,6 +409,7 @@ impl App {
             Option<(Vec<String>, usize, usize)>,
             Vec<crate::lsp::Diag>,
             crate::markdown::Folds,
+            bool,
         )> = Vec::new();
         // Per-pane body rect (header-excluded) in logical px, collected for
         // every pane so in-pane WebViews and other overlays can be snapped
@@ -570,6 +571,7 @@ impl App {
                     Option<FindState>,
                     Option<(Vec<String>, usize, usize)>,
                     crate::markdown::Folds,
+                    bool,
                 )> = pane.markdown().map(|m| {
                     (
                         m.doc.clone(),
@@ -587,6 +589,7 @@ impl App {
                             .as_ref()
                             .map(|c| (c.items.clone(), c.sel, c.from_col)),
                         m.folds.clone(),
+                        m.wrap,
                     )
                 });
                 let mut composed: Vec<Vec<GridCell>> = match pane.term() {
@@ -1366,6 +1369,7 @@ impl App {
                     find,
                     complete,
                     folds,
+                    wrap,
                 )) = md
                 {
                     // 편집기 모드에서만 — 렌더 뷰엔 밑줄을 그릴 자리가 없다.
@@ -1391,6 +1395,7 @@ impl App {
                         complete,
                         diags,
                         folds,
+                        wrap,
                     ));
                 }
                 // Box geometry (logical px). Right/bottom-edge panes stretch to
@@ -2200,6 +2205,7 @@ impl App {
                 complete,
                 diags,
                 folds,
+                wrap,
             ) in &md_slots
             {
                 let content_h = if *raw_mode {
@@ -2233,6 +2239,7 @@ impl App {
                         complete.as_ref().map(|(i, s, c)| (i.as_slice(), *s, *c)),
                         diags,
                         folds,
+                        *wrap,
                     );
                     if let Some(f) = find {
                         for (btn, r) in

@@ -898,6 +898,26 @@ impl App {
                 });
                 eprintln!("[mdscript] click=({dx},{dy}) clicks={clicks} caret={at:?}");
             }
+            // 누른 채로 끌고 간 자리 — `drag:<dx>,<dy>`(앞에 `click:` 이 앵커를
+            // 세워 둔 뒤에 쓴다). CursorMoved 의 드래그 갈래가 부르는 것과 같은
+            // 함수라, 접힌 줄을 가로지르는 선택 밴드도 실물과 같은 경로로 선다.
+            Some(("drag", v)) => {
+                let (dx, dy) = v.split_once(',').unwrap_or((v, "0"));
+                let (dx, dy): (f32, f32) =
+                    (dx.trim().parse().unwrap_or(0.0), dy.trim().parse().unwrap_or(0.0));
+                let Some(&(bx, by, _, _)) = self.md_body_rects.get(&id) else {
+                    eprintln!("[mdscript] drag: 본문 박스 없음(raw 모드인지 확인)");
+                    return;
+                };
+                self.md_click_caret(&id, bx + dx, by + dy);
+                let at = self.ws.lock().ok().and_then(|w| {
+                    w.panes
+                        .get(&id)
+                        .and_then(|p| p.markdown())
+                        .map(|m| (m.cur_line, m.cur_col, m.sel_anchor))
+                });
+                eprintln!("[mdscript] drag=({dx},{dy}) caret={at:?}");
+            }
             // 편집기에 글자를 넣어 본다 — `type:<문자열>`. 키 이벤트를 밖에서
             // 만들 수 없어(winit `KeyEvent`) 삽입 진입점을 직접 부른다.
             // 실타이핑의 비용 구조를 재려면 **한 단계에 한 글자**로 써야 한다
@@ -961,6 +981,25 @@ impl App {
             Some(("tip", _)) => {
                 let t = self.hover.as_ref().and_then(|h| h.text.clone());
                 eprintln!("[mdscript] tip={t:?}");
+            }
+            // 줄 접기(word wrap) 토글 — `wrap:`. Alt+Z 가 부르는 것과 같은
+            // 상태를 직접 세운다(수정키 조합을 밖에서 만들 수 없다).
+            Some(("wrap", _)) => {
+                let on = {
+                    let mut ws = self.ws.lock().unwrap();
+                    ws.panes.get_mut(&id).and_then(|p| {
+                        p.dirty = true;
+                        p.markdown_mut()
+                    })
+                    .map(|m| {
+                        m.wrap = !m.wrap;
+                        if m.wrap {
+                            m.h_scroll = 0.0;
+                        }
+                        m.wrap
+                    })
+                };
+                eprintln!("[mdscript] wrap={on:?}");
             }
             // 정의로 뛴다 — `goto:`. Cmd+클릭이 부르는 것과 같은 함수를 직접
             // 부른다(수정키 상태를 밖에서 만들 수 없다). 응답은 틱이 받으므로

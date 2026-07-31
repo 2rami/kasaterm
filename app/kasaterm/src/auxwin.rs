@@ -146,6 +146,7 @@ impl AuxWindow {
                     &[],
                     // 접기 UI 는 본 창 거터에만 있다 — 여기선 늘 비어 있다.
                     &[],
+                    m.wrap,
                 );
             }
             // Settings/Terminal 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
@@ -170,14 +171,17 @@ impl AuxWindow {
                     .get(line)
                     .map(|l| l.chars().take(m.cur_col).collect())
                     .unwrap_or_default();
-                (m.edit_lines.len(), line, prefix, m.scroll, m.h_scroll)
+                ((*m.edit_lines).clone(), line, prefix, m.scroll, m.h_scroll)
             }
             AuxWindowKind::Settings | AuxWindowKind::Terminal { .. } => return,
         };
-        let (line_count, cur_line, prefix, scroll, h_scroll) = snap;
+        let (lines, cur_line, prefix, scroll, h_scroll) = snap;
+        let line_count = lines.len();
         let (ns, nh) = self
             .gpu
-            .raw_editor_ensure_visible(line_count, cur_line, &prefix, w, h, scroll, h_scroll, &[]);
+            .raw_editor_ensure_visible(
+                line_count, cur_line, &prefix, w, h, scroll, h_scroll, &[], 0, &lines,
+            );
         if let Some(m) = self.editor_mut() {
             m.scroll = ns.max(0.0);
             m.h_scroll = nh.max(0.0);
@@ -308,6 +312,7 @@ impl App {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            wrap: false,
             folds: Vec::new(),
             folds_gen: 0,
             edited_at: None,
@@ -816,7 +821,7 @@ impl App {
         let (lines, scroll, h_scroll, cx, cy) = snap;
         let Some(a) = self.aux_windows.get_mut(idx) else { return (0, 0) };
         a.gpu
-            .raw_editor_caret_at(&lines, 0.0, 0.0, scroll, h_scroll, cx, cy, &[])
+            .raw_editor_caret_at(&lines, 0.0, 0.0, scroll, h_scroll, cx, cy, &[], 0)
     }
 
     fn aux_mouse_press(&mut self, idx: usize) {
