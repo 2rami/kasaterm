@@ -53,6 +53,36 @@ pub fn utf16_col_to_char(line: &str, utf16: usize) -> usize {
     line.chars().count()
 }
 
+/// char 인덱스를 LSP 가 쓰는 UTF-16 코드유닛 오프셋으로 — `utf16_col_to_char`
+/// 의 역방향. **요청 좌표도 UTF-16 이다**: 한글 줄에서 char 열을 그대로 보내면
+/// 서버가 다른 자리를 보고 엉뚱한 후보를 답한다.
+pub fn char_col_to_utf16(line: &str, col: usize) -> usize {
+    line.chars().take(col).map(char::len_utf16).sum()
+}
+
+/// 자동완성 응답에서 넣을 문자열만 뽑는다. 응답은 배열이거나
+/// `{isIncomplete, items}` 둘 다 올 수 있다(LSP 가 양쪽을 허용한다).
+///
+/// `insertText` 를 먼저 보는 이유: rust-analyzer 의 `label` 은 사람이 읽는
+/// 이름이라 `foo(…)` 처럼 장식이 붙을 수 있고, 그대로 버퍼에 넣으면 안 된다.
+pub fn parse_completion(msg: &serde_json::Value) -> Option<Vec<String>> {
+    let r = msg.get("result")?;
+    let arr = match r.as_array() {
+        Some(a) => a,
+        None => r.get("items")?.as_array()?,
+    };
+    Some(
+        arr.iter()
+            .filter_map(|it| {
+                it.get("insertText")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| it.get("label").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+            })
+            .collect(),
+    )
+}
+
 /// `Content-Length` 프레임 하나를 읽어 본문을 돌려준다. 스트림이 끝나면 `None`.
 ///
 /// 헤더는 CRLF 로 끝나고 빈 줄 뒤에 본문이 온다. `Content-Type` 같은 다른
@@ -188,6 +218,9 @@ pub struct LspClient {
     /// 정해 두었고, 어긴 채 보낸 didOpen 은 rust-analyzer 가 조용히 버린다
     /// (진단이 영원히 0 이던 원인이 정확히 이것이었다).
     ready: Arc<AtomicBool>,
+    /// 마지막 자동완성 응답 — (요청 id, 후보). id 를 같이 두는 이유는 늦게 온
+    /// 옛 응답이 지금 치고 있는 낱말의 후보를 덮으면 안 되기 때문이다.
+    completions: Arc<Mutex<Option<(i64, Vec<String>)>>>,
     /// 재전송 디바운스 상태. App 이 아니라 여기 두는 이유는 서버가 죽어 새로
     /// 붙을 때 이 기억도 같이 사라져야 하기 때문이다 — 남아 있으면 새 서버가
     /// 아직 못 본 버퍼를 "이미 보냈다"고 건너뛴다.
@@ -262,6 +295,8 @@ impl LspClient {
         let rtx = tx.clone();
         let texts: Arc<Mutex<HashMap<PathBuf, Vec<String>>>> = Arc::new(Mutex::new(HashMap::new()));
         let tsink = Arc::clone(&texts);
+        let completions: Arc<Mutex<Option<(i64, Vec<String>)>>> = Arc::new(Mutex::new(None));
+        let csink = Arc::clone(&completions);
         std::thread::spawn(move || {
             let mut r = BufReader::new(stdout);
             while let Some(body) = read_frame(&mut r) {
@@ -292,6 +327,17 @@ impl LspClient {
                         eprintln!("[lsp] initialized — 이제 didOpen 을 받는다");
                     }
                 }
+                // 자동완성 응답 — id 가 붙은 응답 중 후보 배열이 있는 것만.
+                if let Some(id) = v.get("id").and_then(|i| i.as_i64()) {
+                    if let Some(items) = parse_completion(&v) {
+                        if debug {
+                            eprintln!("[lsp] 후보 {} 개 (id={id})", items.len());
+                        }
+                        if let Ok(mut c) = csink.lock() {
+                            *c = Some((id, items));
+                        }
+                    }
+                }
                 if let Some((path, ds)) = parse_diagnostics(&v, line_of) {
                     if debug {
                         eprintln!("[lsp] 진단 {} 개 {path:?}", ds.len());
@@ -311,6 +357,7 @@ impl LspClient {
             texts,
             diags,
             ready,
+            completions,
             sync: HashMap::new(),
             child,
         };
@@ -331,7 +378,11 @@ impl LspClient {
                 "capabilities": {
                     "textDocument": {
                         "publishDiagnostics": { "relatedInformation": false },
-                        "synchronization": { "didSave": false }
+                        "synchronization": { "didSave": false },
+                        // 스니펫은 안 받는다 — 받으면 insertText 에 `$1` 같은
+                        // 자리표시자가 섞여 오고, 우리 팝업은 그걸 해석하지
+                        // 않아 그대로 버퍼에 박힌다.
+                        "completion": { "completionItem": { "snippetSupport": false } }
                     }
                 },
                 "clientInfo": { "name": "kasaterm" }
@@ -352,8 +403,10 @@ impl LspClient {
         self.opened.contains_key(p)
     }
 
-    /// 파일을 서버에 처음 알린다. 이미 열었으면 아무 일도 안 한다.
-    pub fn did_open(&mut self, path: &Path, text: &str) {
+    /// 파일을 서버에 처음 알린다. 이미 열었으면 아무 일도 안 한다. `gen` 은 이
+    /// 본문의 버퍼 세대 — 처음부터 기록해 둬야 "서버가 아는 것"과 "지금 버퍼"를
+    /// 비교할 수 있다(없으면 자동완성이 매번 전체 재전송을 부른다).
+    pub fn did_open(&mut self, path: &Path, text: &str, gen: u64) {
         // 아직 initialize 응답을 못 봤으면 보내지 않는다. 호출자(틱)가 계속 다시
         // 부르므로 문이 열리는 순간 저절로 나간다.
         if !self.ready.load(Ordering::Relaxed) || self.opened.contains_key(path) {
@@ -361,6 +414,10 @@ impl LspClient {
         }
         self.opened.insert(path.to_path_buf(), ());
         self.version.insert(path.to_path_buf(), 1);
+        self.sync.insert(
+            path.to_path_buf(),
+            SyncState { seen: gen, at: std::time::Instant::now(), sent: gen },
+        );
         self.remember(path, text);
         let note = serde_json::json!({
             "jsonrpc": "2.0", "method": "textDocument/didOpen",
@@ -378,6 +435,44 @@ impl LspClient {
         if let Ok(mut m) = self.texts.lock() {
             m.insert(path.to_path_buf(), text.split('\n').map(String::from).collect());
         }
+    }
+
+    /// 이 자리의 자동완성을 서버에 묻는다. 돌려준 id 로 나중에 응답을 맞춘다.
+    ///
+    /// `utf16_col` 은 **UTF-16 코드유닛** 오프셋이다 — 호출자가 지금 버퍼의 그
+    /// 줄로 `char_col_to_utf16` 을 돌려서 준다. 클라이언트가 들고 있는 `texts`
+    /// 로 바꾸면 안 된다: 재전송 디바운스 때문에 그건 방금 친 글자를 아직 모른다.
+    pub fn request_completion(&mut self, path: &Path, line: usize, utf16_col: usize) -> Option<i64> {
+        if !self.ready.load(Ordering::Relaxed) || !self.opened.contains_key(path) {
+            return None;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "textDocument/completion",
+            "params": {
+                "textDocument": { "uri": path_to_uri(path) },
+                "position": { "line": line, "character": utf16_col }
+            }
+        });
+        self.send(req.to_string())?;
+        Some(id)
+    }
+
+    /// 이 id 의 응답이 도착했으면 꺼낸다(한 번만). 다른 id 면 남겨 둔다 —
+    /// 아직 안 온 것과 이미 지나간 것을 구별해야 팝업이 깜빡이지 않는다.
+    pub fn take_completion(&self, id: i64) -> Option<Vec<String>> {
+        let mut c = self.completions.lock().ok()?;
+        if c.as_ref()?.0 != id {
+            return None;
+        }
+        c.take().map(|(_, items)| items)
+    }
+
+    /// 이 파일의 마지막 전송 세대. 자동완성처럼 **정확한 답이 필요한** 요청은
+    /// 이걸 보고 버퍼가 앞서 있으면 디바운스를 건너뛰고 먼저 맞춘다.
+    pub fn sent_gen(&self, path: &Path) -> Option<u64> {
+        self.sync.get(path).map(|s| s.sent)
     }
 
     /// 이 세대의 버퍼를 지금 보내야 하는가. 세대가 새로 바뀌면 시계를 다시
@@ -400,12 +495,12 @@ impl LspClient {
     /// **조용해진 뒤에만** 하므로(tree-sitter 재파싱과 같은 판정) 한 번의 전체
     /// 전송이 증분 추적 코드를 유지할 값어치보다 싸다.
     pub fn did_change(&mut self, path: &Path, text: &str, gen: u64) {
+        if !self.opened.contains_key(path) {
+            self.did_open(path, text, gen);
+            return;
+        }
         if let Some(st) = self.sync.get_mut(path) {
             st.sent = gen;
-        }
-        if !self.opened.contains_key(path) {
-            self.did_open(path, text);
-            return;
         }
         self.remember(path, text);
         let v = self.version.entry(path.to_path_buf()).or_insert(1);

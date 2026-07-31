@@ -1595,6 +1595,9 @@ struct CompleteState {
     /// 갈아끼운다 — 캐럿 위치만 들고 있으면 이미 친 앞부분이 남아 `cocost`
     /// 처럼 겹쳐 들어간다.
     from_col: usize,
+    /// 서버에 보낸 자동완성 요청 id. 응답은 비동기로 오므로, 도착한 것이 **이
+    /// 팝업의** 답인지 이걸로 가린다. `None` = 버퍼 낱말만으로 채운 상태.
+    lsp_req: Option<i64>,
 }
 
 /// Clickable control on the find bar. Every one has a keyboard equivalent —
