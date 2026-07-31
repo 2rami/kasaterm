@@ -59,6 +59,15 @@ pub fn git_status(repo: &Path) -> Value {
 /// 파싱 대신 rev-parse + shortstat 두 번만 돌려 호출당 비용을 줄인다.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GitBadge {
+    /// 파일트리 git 표시용 **절대경로 → 마커**(M 수정 · A 스테이지됨 · U 미추적).
+    /// 변경된 파일뿐 아니라 그 조상 폴더까지 미리 펼쳐 둔다(`status_marks`) —
+    /// 렌더는 행마다 조회만 하면 된다. 행마다 경로 접두어를 비교하면
+    /// 트리 크기 × 변경 수가 매 프레임 돈다.
+    ///
+    /// 이 배지에 실은 이유: 배지 폴러는 **모든 pane 의 cwd 에 대해 항상** 도는데,
+    /// git 컬럼 폴러는 그 패널이 열렸을 때만 돈다. 파일트리 표시가 남의 패널
+    /// 개폐에 묶이면 안 된다.
+    pub marks: std::collections::HashMap<std::path::PathBuf, char>,
     pub branch: String,
     /// Files changed vs HEAD (the leading `N` of `--shortstat`). Tracked-only,
     /// like insertions/deletions.
@@ -70,15 +79,32 @@ pub struct GitBadge {
 /// `repo`가 git 워크트리면 배지 정보를, 아니면 `None`. 브랜치를 못 읽으면
 /// (git repo 아님 등) 배지 자체를 숨기는 게 자연스러우므로 `None`을 돌린다.
 pub fn git_badge(repo: &Path) -> Option<GitBadge> {
-    let (ok, head) = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    // 브랜치와 레포 루트를 **한 번의 rev-parse** 로 같이 받는다 — 루트는 마커의
+    // 상대경로를 절대경로로 펼 때 필요하고, 따로 부르면 폴링 주기마다 git 프로세스가
+    // 하나 더 뜬다. 출력은 「브랜치\n루트」 두 줄.
+    let (ok, head) = run_git(repo, &["rev-parse", "--abbrev-ref", "HEAD", "--show-toplevel"]);
     if !ok {
         return None;
     }
-    let branch = head.trim().to_string();
+    let mut lines = head.lines();
+    let branch = lines.next().unwrap_or("").trim().to_string();
+    let toplevel = lines.next().map(|s| Path::new(s.trim()).to_path_buf());
     if branch.is_empty() {
         return None;
     }
-    let (_o, stat) = run_git(repo, &["diff", "HEAD", "--shortstat"]);
+    let marks = toplevel
+        .map(|root| {
+            // `--no-optional-locks` — status 는 평소 stat 캐시를 갱신하려 인덱스를
+            // 잠근다. 1.5초마다 도는 폴러가 그 잠금을 잡으면 같은 레포에서 사람이
+            // 치는 commit·add 가 `index.lock` 충돌로 죽는다. 읽기만 하면 되니 뺀다.
+            let (_ok, st) = run_git(repo, &["--no-optional-locks", "status", "--porcelain=v1", "-z"]);
+            status_marks(
+                &root,
+                parse_status_porcelain_z(&st).iter().map(|(m, p)| (*m, p.as_str())),
+            )
+        })
+        .unwrap_or_default();
+    let (_o, stat) = run_git(repo, &["--no-optional-locks", "diff", "HEAD", "--shortstat"]);
     let (insertions, deletions) = parse_shortstat(&stat);
     // Leading `N` of " 11 files changed, …" — 0 when the tree is clean.
     let files = stat
@@ -87,11 +113,52 @@ pub fn git_badge(repo: &Path) -> Option<GitBadge> {
         .and_then(|n| n.parse().ok())
         .unwrap_or(0);
     Some(GitBadge {
+        marks,
         branch,
         files,
         insertions,
         deletions,
     })
+}
+
+/// `git status --porcelain=v1 -z` 출력 → `(마커, 레포 루트 상대경로)`. 순수 함수.
+///
+/// `-z` 를 쓰는 이유: 기본 출력은 공백·따옴표가 든 경로를 `"..."` 로 감싸고
+/// 이스케이프해서, 그런 파일만 경로가 어긋나 표시가 조용히 빠진다. NUL 구분은
+/// 경로를 날것 그대로 준다.
+///
+/// 마커는 git 컬럼이 쓰는 것과 같은 세 가지로 접는다 — 작업트리가 더러우면 `M`,
+/// 인덱스만 바뀌었으면 `A`, 미추적이면 `U`. 이름변경/복사(R·C)는 **다음 레코드가
+/// 원래 경로**라 한 칸 더 먹어야 한다. 안 먹으면 그 원본 경로가 다음 항목의
+/// 상태 문자로 읽혀 그 뒤가 통째로 밀린다.
+pub fn parse_status_porcelain_z(out: &str) -> Vec<(char, String)> {
+    let mut rows = Vec::new();
+    let mut it = out.split('\0');
+    while let Some(rec) = it.next() {
+        if rec.len() < 4 {
+            continue;
+        }
+        let b = rec.as_bytes();
+        let (x, y) = (b[0] as char, b[1] as char);
+        let path = rec[3..].to_string();
+        if x == 'R' || x == 'C' {
+            it.next();
+        }
+        // 인덱스(x)·워크트리(y) 두 축을 한 글자로 접는다. 「스테이지 여부」가
+        // 아니라 「무슨 일이 일어났나」로 갈라야 파일트리에서 쓸모가 있다 —
+        // 스테이지된 수정(`M `)은 추가가 아니라 수정이다.
+        let marker = if x == '?' || y == '?' {
+            'U'
+        } else if x == 'D' || y == 'D' {
+            'D'
+        } else if x == 'A' || x == 'R' || x == 'C' {
+            'A'
+        } else {
+            'M'
+        };
+        rows.push((marker, path));
+    }
+    rows
 }
 
 /// HEAD 대비 작업트리의 추가/삭제 라인 수. 사이드바 git 배지("+460 -59")용.
@@ -598,6 +665,154 @@ fn parse_unified_diff(text: &str) -> Vec<DiffLine> {
         }
     }
     rows
+}
+
+/// 마커의 우선순위 — 폴더가 자손들의 상태를 하나로 물려받을 때 쓴다.
+/// 수정 > 스테이지됨 > 미추적. 폴더 하나에 색이 하나뿐이라 "가장 알려야 할 것"을
+/// 고르는데, 이미 손댄 파일(M)이 새로 생긴 파일(U)보다 먼저 눈에 띄어야 한다.
+pub fn mark_rank(m: char) -> u8 {
+    match m {
+        'M' => 4,
+        'D' => 3,
+        'A' => 2,
+        'U' => 1,
+        _ => 0,
+    }
+}
+
+/// `(마커, 레포 루트 상대경로)` 목록을 **절대경로 → 마커** 맵으로 펼친다.
+///
+/// 파일만이 아니라 **조상 폴더까지** 같은 맵에 채우는 게 요점이다 — 접힌 폴더
+/// 안에 변경이 있어도 트리에서 아무 표시가 없으면, 무엇이 바뀌었는지 보려고
+/// 폴더를 하나씩 펼쳐 봐야 한다. 폴더는 자손 중 가장 높은 순위를 물려받는다.
+///
+/// 루트 자신도 포함한다. 트리가 레포보다 위에서 시작할 때(예: 상위 폴더를 열어
+/// 둔 경우) 레포 폴더 자체에도 표시가 붙어야 한눈에 보인다.
+pub fn status_marks<'a>(
+    root: &Path,
+    entries: impl IntoIterator<Item = (char, &'a str)>,
+) -> std::collections::HashMap<std::path::PathBuf, char> {
+    let mut out: std::collections::HashMap<std::path::PathBuf, char> =
+        std::collections::HashMap::new();
+    let mut put = |p: std::path::PathBuf, m: char| {
+        match out.entry(p) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                if mark_rank(m) > mark_rank(*e.get()) {
+                    e.insert(m);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(m);
+            }
+        };
+    };
+    for (marker, rel) in entries {
+        let rel = rel.trim_end_matches('/');
+        if rel.is_empty() {
+            continue;
+        }
+        let abs = root.join(rel);
+        put(abs.clone(), marker);
+        // 조상 폴더로 롤업. 루트에서 멈추되 루트 자신은 포함한다.
+        let mut cur = abs.parent();
+        while let Some(dir) = cur {
+            put(dir.to_path_buf(), marker);
+            if dir == root {
+                break;
+            }
+            cur = dir.parent();
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod status_marks_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn root() -> PathBuf {
+        PathBuf::from("/repo")
+    }
+
+    #[test]
+    fn files_and_every_ancestor_get_a_mark() {
+        let m = status_marks(&root(), [('M', "app/src/main.rs")]);
+        assert_eq!(m.get(&PathBuf::from("/repo/app/src/main.rs")), Some(&'M'));
+        assert_eq!(m.get(&PathBuf::from("/repo/app/src")), Some(&'M'));
+        assert_eq!(m.get(&PathBuf::from("/repo/app")), Some(&'M'));
+        // 루트 자신도 — 트리가 레포보다 위에서 시작하면 레포 폴더에도 표시가 붙는다.
+        assert_eq!(m.get(&root()), Some(&'M'));
+    }
+
+    #[test]
+    fn does_not_leak_above_the_repo_root() {
+        let m = status_marks(&root(), [('M', "a.txt")]);
+        assert_eq!(m.get(&PathBuf::from("/")), None);
+    }
+
+    #[test]
+    fn folder_inherits_the_highest_ranked_descendant() {
+        // 같은 폴더 아래 미추적(U)과 수정(M)이 섞이면 폴더는 M 이어야 한다 —
+        // 순서를 뒤집어도 결과가 같아야 진짜 순위 비교다.
+        let m = status_marks(&root(), [('U', "src/new.rs"), ('M', "src/old.rs")]);
+        assert_eq!(m.get(&PathBuf::from("/repo/src")), Some(&'M'));
+        let m = status_marks(&root(), [('M', "src/old.rs"), ('U', "src/new.rs")]);
+        assert_eq!(m.get(&PathBuf::from("/repo/src")), Some(&'M'));
+        // 파일 자신은 자기 마커를 그대로 지킨다.
+        assert_eq!(m.get(&PathBuf::from("/repo/src/new.rs")), Some(&'U'));
+    }
+
+    #[test]
+    fn a_file_in_both_buckets_keeps_the_stronger_marker() {
+        // 부분 스테이지된 파일은 staged(A)·unstaged(M) 양쪽에 나온다.
+        let m = status_marks(&root(), [('A', "x.rs"), ('M', "x.rs")]);
+        assert_eq!(m.get(&PathBuf::from("/repo/x.rs")), Some(&'M'));
+    }
+
+    #[test]
+    fn porcelain_z_folds_status_by_what_happened_not_by_staging() {
+        // `M ` 은 스테이지됐을 뿐 여전히 수정이다 — 추가(A)로 접으면 새 파일과
+        // 구분이 사라진다. 삭제는 자기 글자를 지켜야 눈에 띈다.
+        let out = "?? new.rs\0 M edited.rs\0M  staged.rs\0MM both.rs\0A  added.rs\0 D gone.rs\0";
+        let rows = parse_status_porcelain_z(out);
+        assert_eq!(
+            rows,
+            vec![
+                ('U', "new.rs".into()),
+                ('M', "edited.rs".into()),
+                ('M', "staged.rs".into()),
+                ('M', "both.rs".into()),
+                ('A', "added.rs".into()),
+                ('D', "gone.rs".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn porcelain_z_consumes_the_rename_origin_record() {
+        // R 레코드 뒤엔 원래 경로가 한 칸 더 온다. 안 먹으면 그 경로가 다음
+        // 항목의 상태 문자로 읽혀 뒤가 통째로 밀린다.
+        let out = "R  new/name.rs\0old/name.rs\0 M after.rs\0";
+        let rows = parse_status_porcelain_z(out);
+        assert_eq!(rows, vec![('A', "new/name.rs".into()), ('M', "after.rs".into())]);
+    }
+
+    #[test]
+    fn porcelain_z_keeps_paths_with_spaces_intact() {
+        // 기본 출력이면 따옴표로 감싸여 경로가 어긋나던 자리.
+        let rows = parse_status_porcelain_z(" M dir with space/a b.rs\0");
+        assert_eq!(rows, vec![('M', "dir with space/a b.rs".into())]);
+    }
+
+    #[test]
+    fn untracked_directory_entry_marks_the_directory_itself() {
+        // git 은 미추적 폴더를 `dir/` 하나로 접어서 준다 — 슬래시를 안 떼면
+        // 트리의 폴더 경로와 안 맞아 표시가 통째로 빠진다.
+        let m = status_marks(&root(), [('U', "assets/icons/")]);
+        assert_eq!(m.get(&PathBuf::from("/repo/assets/icons")), Some(&'U'));
+        assert_eq!(m.get(&PathBuf::from("/repo/assets")), Some(&'U'));
+    }
 }
 
 #[cfg(test)]
