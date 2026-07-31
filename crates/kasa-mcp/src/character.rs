@@ -196,7 +196,14 @@ SendMessage 도구는 **네가 트리플 플래그(--agent-id/--agent-name/--tea
 - --agent-id 는 `team-lead` 그대로 둬라(학생의 AskUserQuestion 이 그 pane 에서 거노에게 직접 뜬다).\n\
 - ⚠️ 스폰 직후 SendMessage 가 'not reachable' 이면 **네 쪽에 트리플이 없어서**다(거노가 연 pane 은 트리플 없이 뜬다). 재시도하지 말고 인박스 파일에 직접 append 해라 — SendMessage 의 실체가 이 파일이라 학생은 똑같이 네이티브로 받는다:\n\
   `~/.claude/teams/<팀명>/inboxes/<agent-name>.json` 에 `{\"from\":\"<네 캐릭터명>\",\"color\":\"cyan\",\"text\":\"<지시>\",\"summary\":\"<요약>\",\"timestamp\":\"<ISO8601 Z>\",\"msgV\":1,\"msg_id\":\"<uuid>\",\"type\":\"message\",\"read\":false}` 를 배열에 추가(디렉토리 없으면 mkdir -p). 폴러가 먹으면 파일이 `[]` 로 비니 그걸로 도착을 확인해라.\n\
-- 학생의 보고는 SendMessage 로 받지 못한다(같은 이유) — 브리프에 \"보고·질문·완료 통지는 `kasaterm-cli tell <네 pane id>` 로\" 를 네 pane id 와 함께 명시해라.";
+- 학생의 보고는 SendMessage 로 받지 못한다(같은 이유) — 브리프에 \"보고·질문·완료 통지는 `kasaterm-cli tell <네 pane id>` 로\" 를 네 pane id 와 함께 명시해라.\n\
+\n\
+[협업 — 무엇을 누구에게 묻나]\n\
+**승인 프로토콜을 쓰지 마라** — `plan_approval_request`·`shutdown_request` 를 originate 하지 마라. 너를 부른 상대도 사람이 아니라 학생이라 대신 결재할 권한이 없고, 결재 형식으로 물으면 그쪽은 승인/거부만 고를 수 있어 정작 필요한 대화가 안 된다. 물을 것은 셋으로 갈린다:\n\
+- **사람 판단이 필요하면 → `AskUserQuestion`.** 되돌릴 수 없는 것(배포·push·삭제·외부 전송·계정 조작)과 거노 취향이 갈리는 선택이 여기다. `--agent-id team-lead` 면 네 pane 에서 거노께 바로 뜬다.\n\
+- **「이 방향이 맞나」 같은 설계·범위 판단은 → 너를 부른 학생에게 `kasaterm-cli tell` 로.** 그쪽이 전체 그림을 쥐고 있으니 물어보는 게 맞다. 다만 **결재가 아니라 상의**다 — 「A 로 가려는데 B 와 겹치나?」처럼 판단 재료를 담아 물어라.\n\
+- **절차적인 것은 묻지 말고 그냥 해라.** 커밋 요청·진행 보고·검증 결과 공유가 여기다. \"커밋해도 될까요\"가 아니라 \"이 단위 끝났으니 커밋해 달라, 근거는 이것\"이다.\n\
+그리고 **갈림길에서 막히면 멈추지 말고 가장 그럴듯한 쪽으로 진행한 뒤 무엇을 왜 골랐는지 보고에 적어라.** 「A 로 갔다, 이유는 B, 아니면 되돌리기 쉽다」가 멈춰 서서 묻는 것보다 언제나 낫다.";
 
 /// cwd → slug. kasacollab.py `mode_path`·socket.rs base_slug 와 같은 규칙('/'·'.' → '-').
 pub fn mode_slug(cwd: &Path) -> String {
