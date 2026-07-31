@@ -144,6 +144,8 @@ impl AuxWindow {
                     None,
                     // 진단은 App 이 들고 있어(`App.lsp`) 이 창에서 못 읽는다.
                     &[],
+                    // 접기 UI 는 본 창 거터에만 있다 — 여기선 늘 비어 있다.
+                    &[],
                 );
             }
             // Settings/Terminal 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
@@ -175,7 +177,7 @@ impl AuxWindow {
         let (line_count, cur_line, prefix, scroll, h_scroll) = snap;
         let (ns, nh) = self
             .gpu
-            .raw_editor_ensure_visible(line_count, cur_line, &prefix, w, h, scroll, h_scroll);
+            .raw_editor_ensure_visible(line_count, cur_line, &prefix, w, h, scroll, h_scroll, &[]);
         if let Some(m) = self.editor_mut() {
             m.scroll = ns.max(0.0);
             m.h_scroll = nh.max(0.0);
@@ -306,6 +308,8 @@ impl App {
             complete: None,
             longest_cache: None,
             edit_gen: 0,
+            folds: Vec::new(),
+            folds_gen: 0,
             edited_at: None,
         };
         self.spawn_aux_editor(md, event_loop, None);
@@ -812,7 +816,7 @@ impl App {
         let (lines, scroll, h_scroll, cx, cy) = snap;
         let Some(a) = self.aux_windows.get_mut(idx) else { return (0, 0) };
         a.gpu
-            .raw_editor_caret_at(&lines, 0.0, 0.0, scroll, h_scroll, cx, cy)
+            .raw_editor_caret_at(&lines, 0.0, 0.0, scroll, h_scroll, cx, cy, &[])
     }
 
     fn aux_mouse_press(&mut self, idx: usize) {

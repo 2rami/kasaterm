@@ -874,6 +874,14 @@ impl App {
                 // 선택, 세 번이면 줄 선택이 걸린다.
                 // 실물 press 와 같은 순서: 미니맵 띠를 먼저 본다. 이걸 빼면
                 // 하네스가 미니맵 클릭을 캐럿 클릭으로 재현해 검증이 거짓말을 한다.
+                if self.md_fold_click(&id, bx + dx, by + dy) {
+                    let f = self.ws.lock().ok().and_then(|w| {
+                        w.panes.get(&id).and_then(|p| p.markdown()).map(|m| m.folds.clone())
+                    });
+                    eprintln!("[mdscript] fold click=({dx},{dy}) folds={f:?}");
+                    self.wake_after_mdstep();
+                    return;
+                }
                 if self.md_mini_jump(&id, bx + dx, by + dy) {
                     let s = self.ws.lock().ok().and_then(|w| {
                         w.panes.get(&id).and_then(|p| p.markdown()).map(|m| m.scroll)

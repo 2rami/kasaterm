@@ -3657,6 +3657,16 @@ impl ApplicationHandler<UserEvent> for App {
                                         ) {
                                             return;
                                         }
+                                        // 거터의 접기 삼각형도 캐럿 배치보다
+                                        // 먼저 본다 — 같은 이유다.
+                                        if self.md_fold_click(
+                                            &pane_id,
+                                            self.cursor_px.0,
+                                            self.cursor_px.1,
+                                        ) {
+                                            window.request_redraw();
+                                            return;
+                                        }
                                         // 캐럿 이동 + 드래그 앵커 + 연타 선택
                                         // (더블 = 단어, 트리플 = 줄). 순서가
                                         // 계약이라 한 함수에 묶여 있고, 헤드리스
@@ -4632,6 +4642,12 @@ impl ApplicationHandler<UserEvent> for App {
             // 자동완성 응답은 왕복이라 키 경로에서 못 기다린다 — 도착한 것을
             // 여기서 받아 팝업에 얹는다.
             self.lsp_complete_pump(&id);
+            // 편집으로 어긋난 접힘을 걷어낸다. 렌더는 검증된 목록을 보게 된다.
+            if let Ok(mut ws) = self.ws.lock() {
+                if let Some(m) = ws.panes.get_mut(&id).and_then(|p| p.markdown_mut()) {
+                    m.folds_valid();
+                }
+            }
         }
         // 정의 이동 응답도 왕복이라 여기서 받는다 — 온 순간 그 파일을 연다.
         self.lsp_goto_pump();
