@@ -2532,6 +2532,62 @@ async fn term_panes_handler() -> impl IntoResponse {
     Json(kasa_pty::live_sessions())
 }
 
+/// 이 서버 인스턴스의 1회용 토큰. 프로세스가 뜰 때 한 번 만들어진다.
+///
+/// `with_html` 로 띄우는 패널(세션·보드)은 문서 origin 이 `null` 이라 Origin 검사를
+/// 통과할 수 없다. 그렇다고 `null` 을 허용하면 방어가 무너진다 — 악성 사이트가
+/// `<iframe sandbox>` 안에서 fetch 하면 그것도 `null` 이기 때문이다. 그래서 그
+/// 패널들에는 HTML 을 만들 때 토큰을 심어 주고(`__TOKEN__` 치환, 네트워크로 나가지
+/// 않는다), 요청에 실려 온 토큰이 맞으면 통과시킨다.
+pub fn session_token() -> &'static str {
+    static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    T.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
+
+/// 부작용이 있는 요청(POST)이 우리 것인지 가른다.
+///
+/// ⚠️ **CORS 는 「응답 읽기」를 막지 「실행」을 막지 않는다.** `Content-Type` 이
+/// `text/plain` 이면 body 가 있어도 simple request 라 preflight 없이 그냥 실행된다 —
+/// 악성 페이지가 응답을 못 읽어도 **부작용은 이미 일어난 뒤**다. 이 서버에는
+/// `/send`(pane 에 키 입력) `/spawn-student` `/git-push` `/close-pane` 처럼 명령을
+/// 실행하거나 되돌릴 수 없는 창구가 30개 넘게 있어서, wildcard CORS + 127.0.0.1
+/// 바인딩만으로는 「사용자가 방문한 아무 웹페이지가 터미널에 명령을 꽂는」 경로가
+/// 열려 있었다.
+fn mutating_request_ok(h: &HeaderMap) -> bool {
+    if h.get("x-kasa-token")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|t| t == session_token())
+    {
+        return true;
+    }
+    ws_origin_ok(h)
+}
+
+/// POST 를 전부 통과시키는 관문. `Router::layer` 로 걸린다.
+///
+/// GET 은 통과시킨다 — 이 서버의 GET 은 읽기 전용이고, 막으면 webview 폴링이
+/// 죽는다. 부작용은 POST 에 모여 있다. 로컬 CLI·MCP 클라이언트는 Origin 을 아예
+/// 안 보내므로 그대로 통과한다(이미 같은 사용자 권한으로 도는 프로세스라 막아도
+/// 얻는 게 없다).
+async fn origin_guard_mw(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if req.method() == Method::POST && !mutating_request_ok(req.headers()) {
+        eprintln!(
+            "[http] 교차 출처 POST 를 거부했습니다: {} (origin {:?})",
+            req.uri().path(),
+            req.headers().get(header::ORIGIN)
+        );
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "cross-origin request refused",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
 /// 이 웹소켓 연결이 우리 페이지에서 온 것인가.
 ///
 /// ⚠️ **웹소켓은 same-origin 정책의 보호를 받지 않는다.** 브라우저는 임의 출처
@@ -3178,7 +3234,11 @@ pub fn spawn_http_server_opts(
                             }
                         }),
                     )
-                    .nest_service("/mcp", service);
+                    .nest_service("/mcp", service)
+                    // 부작용 있는 요청에 두르는 마지막 한 겹. 라우트마다 손으로
+                    // 거는 대신 레이어로 걸어야 **새로 추가될 라우트도 자동으로**
+                    // 보호된다 — 31개 중 하나를 빠뜨리면 그게 곧 구멍이다.
+                    .layer(axum::middleware::from_fn(origin_guard_mw));
                 if let Err(e) = axum::serve(tokio_listener, app).await {
                     eprintln!("[kasaspace-mcp] serve error: {e}");
                 }

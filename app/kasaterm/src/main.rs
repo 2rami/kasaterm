@@ -497,6 +497,12 @@ const SESSION_PANEL_HTML: &str = r#"<!DOCTYPE html>
   <div id="err" class="err" style="display:none"></div>
 <script>
 const PORT = "__PORT__";
+// 이 패널은 with_html 로 뜨는 문서라 origin 이 `null` 이다 — 서버의 Origin 검사를
+// 통과할 수 없고, `null` 을 허용하면 방어가 무너진다(악성 사이트가 sandboxed
+// iframe 으로 얼마든지 `null` 을 만든다). 그래서 토큰으로 신원을 밝힌다. 이 HTML 은
+// 네트워크로 나가지 않으므로 토큰이 새지 않는다.
+const TOKEN = "__TOKEN__";
+const post = (u) => fetch(u, { method: "POST", headers: { "X-Kasa-Token": TOKEN } });
 const $ = (id) => document.getElementById(id);
 const base = "http://127.0.0.1:" + PORT;
 let busy = false;
@@ -565,7 +571,7 @@ async function restoreSaved(idx) {
   if (busy) return;
   busy = true;
   try {
-    await fetch(base + "/session-restore?idx=" + idx, { method: "POST" });
+    await post(base + "/session-restore?idx=" + idx);
   } catch (e) {}
   busy = false;
   poll();
@@ -577,7 +583,7 @@ async function switchTo(idx) {
   // idx in the query string, no JSON body → no CORS preflight (the panel's
   // null origin would otherwise trip an OPTIONS the server 405s).
   try {
-    await fetch(base + "/session-switch?idx=" + idx, { method: "POST" });
+    await post(base + "/session-switch?idx=" + idx);
   } catch (e) {}
   busy = false;
   poll();
@@ -587,7 +593,7 @@ async function closeSession(idx) {
   if (busy) return;
   busy = true;
   try {
-    await fetch(base + "/session-close?idx=" + idx, { method: "POST" });
+    await post(base + "/session-close?idx=" + idx);
   } catch (e) {}
   busy = false;
   poll();
@@ -620,7 +626,7 @@ function startRename(idx, li, labelEl) {
 async function renameSession(idx, name) {
   busy = true;
   try {
-    await fetch(base + "/session-rename?idx=" + idx + "&name=" + encodeURIComponent(name), { method: "POST" });
+    await post(base + "/session-rename?idx=" + idx + "&name=" + encodeURIComponent(name));
   } catch (e) {}
   busy = false;
   poll();
@@ -632,7 +638,7 @@ async function doReset() {
   busy = true;
   $("btn-reset").disabled = true;
   try {
-    await fetch(base + "/session-reset", { method: "POST" });
+    await post(base + "/session-reset");
   } catch (e) {}
   busy = false;
   $("btn-reset").disabled = false;
@@ -644,7 +650,7 @@ async function doNew() {
   busy = true;
   $("btn-new").disabled = true;
   try {
-    await fetch(base + "/session-new", { method: "POST" });
+    await post(base + "/session-new");
   } catch (e) {}
   busy = false;
   $("btn-new").disabled = false;
