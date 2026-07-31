@@ -351,6 +351,136 @@ impl MarkdownPane {
         self.touch();
         true
     }
+    /// 지금 문서에 있는 커서 전부 — 주 커서 + 보조 커서, 문서 순으로 정렬·병합.
+    pub(crate) fn carets(&self) -> Vec<Caret> {
+        let mut v = Vec::with_capacity(self.extra.len() + 1);
+        v.push(Caret { line: self.cur_line, col: self.cur_col, anchor: self.sel_anchor });
+        v.extend_from_slice(&self.extra);
+        normalize_carets(v)
+    }
+
+    /// 커서 목록을 되돌려 놓는다. **맨 위 커서가 주 커서**가 된다 — 편집 뒤
+    /// 화면이 따라갈 기준을 하나로 못 박아 둬야 커서마다 뷰가 튀지 않는다.
+    pub(crate) fn set_carets(&mut self, mut v: Vec<Caret>) {
+        if v.is_empty() {
+            self.extra.clear();
+            return;
+        }
+        let head = v.remove(0);
+        self.cur_line = head.line;
+        self.cur_col = head.col;
+        self.sel_anchor = head.anchor;
+        self.extra = v;
+    }
+
+    /// 보조 커서를 모두 거둔다 — Esc, 그냥 클릭, 모드 전환이 부른다.
+    /// 거둘 게 있었으면 true.
+    pub(crate) fn clear_extra_carets(&mut self) -> bool {
+        let had = !self.extra.is_empty();
+        self.extra.clear();
+        had
+    }
+
+    /// 커서 **전부**에서 같은 편집을 돌린다. 보조 커서가 없으면 그냥 한 번이라
+    /// 지금까지의 단일 커서 편집기와 완전히 같다.
+    ///
+    /// 문서 아래에서 위로 도는 이유: 위쪽 편집은 아래쪽 줄 번호를 밀지만 그
+    /// 반대는 없다. 그래도 밀린 좌표는 다시 매겨야 해서 편집마다 `Remap` 을
+    /// 통과시킨다 — 명령별 규칙을 손으로 적는 대신 버퍼가 스스로 말하게 한다.
+    ///
+    /// 커서마다 편집 전 버퍼를 하나 붙들고 있어 `make_mut` 가 매번 깊은 복사를
+    /// 한다. 멀티커서는 상시 경로가 아니라 이 값은 치른다 — 문제가 되면 좁힐
+    /// 곳은 스냅샷 범위지 이 구조가 아니다.
+    pub(crate) fn each_caret(&mut self, mut f: impl FnMut(&mut Self)) {
+        if self.extra.is_empty() {
+            f(self);
+            return;
+        }
+        let mut todo = self.carets();
+        let mut done: Vec<Caret> = Vec::with_capacity(todo.len());
+        let mut first = true;
+        while let Some(c) = todo.pop() {
+            self.cur_line = c.line;
+            self.cur_col = c.col;
+            self.sel_anchor = c.anchor;
+            let before = Arc::clone(&self.edit_lines);
+            self.undo_locked = !first;
+            f(self);
+            self.undo_locked = false;
+            first = false;
+            if !Arc::ptr_eq(&before, &self.edit_lines) {
+                let r = Remap::between(&before, &self.edit_lines);
+                // 이미 끝낸 아래쪽뿐 아니라 남은 위쪽도 통과시킨다 — 줄 첫머리
+                // backspace 처럼 편집이 **위로** 뻗는 명령이 있다.
+                for d in done.iter_mut().chain(todo.iter_mut()) {
+                    let h = r.at((d.line, d.col));
+                    d.line = h.0;
+                    d.col = h.1;
+                    d.anchor = d.anchor.map(|a| r.at(a));
+                }
+            }
+            done.push(Caret { line: self.cur_line, col: self.cur_col, anchor: self.sel_anchor });
+        }
+        self.set_carets(normalize_carets(done));
+    }
+
+    /// Cmd+D — 캐럿 낱말을 고르고, 이미 골라 뒀으면 **다음 출현에 커서를 더한다**.
+    /// 새 커서가 주 커서가 된다(화면이 새로 찾은 자리를 따라가야 한다).
+    /// 더 이상 찾을 게 없으면 false.
+    pub(crate) fn select_next_occurrence(&mut self) -> bool {
+        let Some(needle) = self.selected_text() else {
+            self.select_word_at();
+            return self.sel_anchor.is_some();
+        };
+        let n = needle.chars().count();
+        let (_, end) = self.sel_range().unwrap_or(((0, 0), (self.cur_line, self.cur_col)));
+        let lines = Arc::clone(&self.edit_lines);
+        let Some(hit) = find_after(&lines, &needle, end) else {
+            return false;
+        };
+        // 한 바퀴 돌아 이미 잡아 둔 자리로 되돌아왔으면 더 늘리지 않는다.
+        let dup = Caret { line: hit.0, col: hit.1 + n, anchor: Some(hit) };
+        if self.carets().contains(&dup) {
+            return false;
+        }
+        self.extra.push(Caret {
+            line: self.cur_line,
+            col: self.cur_col,
+            anchor: self.sel_anchor,
+        });
+        self.cur_line = dup.line;
+        self.cur_col = dup.col;
+        self.sel_anchor = dup.anchor;
+        true
+    }
+
+    /// 위/아래 줄 같은 열에 커서를 하나 더한다(Cmd+Opt+↑↓). 문서 밖이면 false.
+    pub(crate) fn add_caret_vert(&mut self, down: bool) -> bool {
+        let all = self.carets();
+        // 이미 있는 커서 무리의 **가장자리**에서 자란다 — 안 그러면 세 번째
+        // 누름이 이미 커서가 있는 줄을 다시 고른다.
+        let edge = if down { all.last() } else { all.first() };
+        let Some(edge) = edge.copied() else { return false };
+        let Some(line) = (if down { edge.line.checked_add(1) } else { edge.line.checked_sub(1) })
+        else {
+            return false;
+        };
+        if line >= self.edit_lines.len() {
+            return false;
+        }
+        let col = edge.col.min(self.edit_lines[line].chars().count());
+        self.extra.push(Caret {
+            line: self.cur_line,
+            col: self.cur_col,
+            anchor: self.sel_anchor,
+        });
+        self.cur_line = line;
+        self.cur_col = col;
+        self.sel_anchor = None;
+        self.extra = normalize_carets(std::mem::take(&mut self.extra));
+        true
+    }
+
     /// The buffer, mutably. Every write goes through here so the copy-on-write
     /// is in one place: `make_mut` clones the lines only while an undo snapshot
     /// or an in-flight frame still points at them, which is once per edit run.
@@ -422,6 +552,12 @@ impl MarkdownPane {
     /// snapshot; `Other` is always its own boundary. Any redo history dies
     /// here — a fresh edit forks the timeline.
     pub(crate) fn push_undo(&mut self, kind: EditKind) {
+        // 멀티커서 한 번의 편집은 undo 도 한 번이라야 한다 — 커서마다 스냅샷을
+        // 쌓으면 Cmd+Z 가 커서 하나씩 되돌려, 되돌리는 중간 상태가 사람이 만든
+        // 적 없는 문서가 된다.
+        if self.undo_locked {
+            return;
+        }
         if kind != EditKind::Other && self.last_edit == kind {
             return;
         }
@@ -1278,8 +1414,37 @@ impl MarkdownPane {
     pub(crate) fn select_word_at(&mut self) -> bool {
         let Some(line) = self.edit_lines.get(self.cur_line) else { return false };
         let chars: Vec<char> = line.chars().collect();
-        let start = prev_word_col(&chars, self.cur_col.min(chars.len()));
-        let end = next_word_col(&chars, start);
+        let i = self.cur_col.min(chars.len());
+        let wordish = |c: char| c.is_alphanumeric() || c == '_';
+        // 캐럿이 낱말과 공백의 **경계**에 서 있으면 낱말 쪽을 고른다. 경계에서
+        // 그냥 왼쪽으로 되짚으면 앞의 공백 덩어리째 잡혀서, 들여쓴 줄을
+        // 더블클릭하면 「    let」 이 선택되고 Cmd+D 는 그 문자열로 다음 곳을
+        // 찾아 엉뚱한 자리에서 멈춘다.
+        let anchor = if i < chars.len() && wordish(chars[i]) {
+            Some(i)
+        } else if i > 0 && wordish(chars[i - 1]) {
+            Some(i - 1)
+        } else {
+            None
+        };
+        let (start, end) = match anchor {
+            Some(k) => {
+                let mut s = k;
+                while s > 0 && wordish(chars[s - 1]) {
+                    s -= 1;
+                }
+                let mut e = k;
+                while e < chars.len() && wordish(chars[e]) {
+                    e += 1;
+                }
+                (s, e)
+            }
+            // 기호·공백 덩어리는 기존 낱말 경계 규칙 그대로.
+            None => {
+                let s = prev_word_col(&chars, i);
+                (s, next_word_col(&chars, s))
+            }
+        };
         if end <= start {
             return false;
         }
@@ -1555,13 +1720,11 @@ impl MarkdownPane {
     }
 }
 
-// 멀티커서 배선(struct MarkdownPane 을 커서 벡터로 바꾸는 단계) 전까지는
-// 호출부가 없다. 테스트는 이미 붙어 있고 규칙이 확정된 로직이다.
-#[allow(dead_code)]
 /// 커서 하나 — 캐럿 위치와, 선택 중이면 그 앵커.
 ///
-/// 멀티커서의 단위. `MarkdownPane` 이 아직 단일 `cur_line`/`cur_col` 을 들고
-/// 있어서 이 타입은 먼저 순수 로직만 세워 둔 것이다 — struct 배선은 별개 단계다.
+/// 멀티커서의 단위. `MarkdownPane` 의 주 커서는 여전히 `cur_line`/`cur_col` 이고
+/// 이 타입은 **보조** 커서(`extra`)를 담는다 — 그래야 기존 편집 명령을 한 줄도
+/// 안 고치고 그대로 재사용할 수 있다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Caret {
     pub line: usize,
@@ -1586,7 +1749,6 @@ impl Caret {
     }
 }
 
-#[allow(dead_code)]
 /// 커서 목록을 정규화한다 — 문서 순으로 정렬하고, 같은 자리이거나 범위가
 /// 겹치는 커서를 하나로 합친다.
 ///
@@ -1627,6 +1789,84 @@ pub(crate) fn normalize_carets(mut carets: Vec<Caret>) -> Vec<Caret> {
     out
 }
 
+/// 편집 하나가 그 **뒤쪽** 좌표를 어디로 옮겼는지.
+///
+/// 명령마다 "이 명령은 커서를 이만큼 민다"를 손으로 적지 않고 편집 전후 버퍼를
+/// 비교해 만든다. 손으로 적으면 명령이 늘 때마다 하나씩 빠뜨리는데, 빠진 자리는
+/// 에러가 아니라 **보조 커서가 조용히 어긋나는 것**으로만 드러나 찾을 수가 없다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Remap {
+    /// 안 바뀐 앞부분의 끝 = 바뀌기 시작한 자리.
+    head: (usize, usize),
+    /// 안 바뀐 뒷부분이 편집 **전에** 시작하던 자리.
+    was: (usize, usize),
+    /// 그 뒷부분이 편집 **후에** 가 있는 자리.
+    now: (usize, usize),
+}
+
+fn common_prefix_chars(a: &str, b: &str) -> usize {
+    a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+}
+
+fn common_suffix_chars(a: &str, b: &str) -> usize {
+    a.chars().rev().zip(b.chars().rev()).take_while(|(x, y)| x == y).count()
+}
+
+impl Remap {
+    /// 편집 전후 버퍼에서 바뀐 구간을 읽는다 — 앞뒤로 같은 줄을 걷어내고, 남은
+    /// 구간의 첫 줄·마지막 줄은 글자 단위까지 좁힌다.
+    pub(crate) fn between(before: &[String], after: &[String]) -> Self {
+        let (n0, n1) = (before.len(), after.len());
+        let mut a = 0;
+        while a < n0 && a < n1 && before[a] == after[a] {
+            a += 1;
+        }
+        let mut sfx = 0;
+        while sfx < n0 - a && sfx < n1 - a && before[n0 - 1 - sfx] == after[n1 - 1 - sfx] {
+            sfx += 1;
+        }
+        let (old_hi, new_hi) = (n0 - sfx, n1 - sfx);
+        if a == old_hi && a == new_hi {
+            // 바뀐 게 없다 — 모든 좌표가 `head` 앞이라 항등이 된다.
+            let end = (n0, 0);
+            return Self { head: end, was: end, now: end };
+        }
+        if a < old_hi && a < new_hi {
+            let p = common_prefix_chars(&before[a], &after[a]);
+            let (lo, ln) = (old_hi - 1, new_hi - 1);
+            let (cb, cn) = (before[lo].chars().count(), after[ln].chars().count());
+            // 첫 줄이자 마지막 줄이면 공통 뒷부분이 공통 앞부분을 넘어가면 안 된다
+            // — 넘어가면 같은 글자를 앞뒤로 두 번 세어 구간이 음수가 된다.
+            let cap = if lo == a && ln == a { cb.min(cn) - p } else { cb.min(cn) };
+            let q = common_suffix_chars(&before[lo], &after[ln]).min(cap);
+            Self { head: (a, p), was: (lo, cb - q), now: (ln, cn - q) }
+        } else if a == old_hi {
+            // 줄이 통째로 끼어들었다 — 옛 버퍼엔 바뀐 줄이 없다.
+            Self { head: (a, 0), was: (a, 0), now: (new_hi, 0) }
+        } else {
+            // 줄이 통째로 빠졌다.
+            Self { head: (a, 0), was: (old_hi, 0), now: (a, 0) }
+        }
+    }
+
+    /// 좌표 하나를 편집 후 자리로 옮긴다. 바뀐 구간 **안쪽**을 가리키던 좌표는
+    /// 구간 시작으로 당긴다 — 사라진 글자 한가운데를 가리키는 커서를 남기느니
+    /// 경계에 세우는 편이 낫다.
+    pub(crate) fn at(&self, p: (usize, usize)) -> (usize, usize) {
+        if p <= self.head {
+            p
+        } else if p >= self.was {
+            if p.0 == self.was.0 {
+                (self.now.0, self.now.1 + (p.1 - self.was.1))
+            } else {
+                (p.0 + self.now.0 - self.was.0, p.1)
+            }
+        } else {
+            self.head
+        }
+    }
+}
+
 /// 버퍼 안 낱말로 만드는 자동완성 후보 — `prefix` 로 시작하는 서로 다른 낱말을
 /// **캐럿에서 가까운 줄 순서**로 최대 `limit` 개.
 ///
@@ -1663,8 +1903,6 @@ pub(crate) fn word_completions(
     hits.into_iter().take(limit).map(|(_, _, w)| w).collect()
 }
 
-// Cmd+D 두 번째 누름(다음 출현에 커서 추가) 배선 전까지 호출부가 없다.
-#[allow(dead_code)]
 /// `needle` 이 `from` **뒤에서** 처음 나오는 자리(줄, 열). 문서 끝까지 없으면
 /// 처음부터 `from` 까지 다시 훑는다 — Cmd+D 를 계속 누르면 문서를 한 바퀴 돌아야
 /// 마지막 출현에서 멈춰 버리지 않는다.
@@ -2137,7 +2375,7 @@ impl App {
             if m.find.is_some() {
                 m.find_type(text);
             } else {
-                m.insert_at_caret(text);
+                m.each_caret(|m| m.insert_at_caret(text));
             }
         }
         // 캐럿 스크롤은 활성 pane 기준이라 떠난 pane 엔 의미가 없다(돌아올 때
@@ -2229,6 +2467,7 @@ impl App {
         } else {
             0
         };
+        let mut multi = true;
         {
             let mut ws = self.ws.lock().unwrap();
             let Some(pane) = ws.active_mut() else { return };
@@ -2253,12 +2492,24 @@ impl App {
                 m.find_key(event, shift);
             } else if m.complete_key(event) {
                 // 자동완성 팝업이 먹었다 — 버퍼로 흘려보내지 않는다.
+            } else if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                && m.clear_extra_carets()
+            {
+                // Esc 는 보조 커서부터 거둔다 — 선택 해제보다 이게 먼저다.
+                // 커서를 여럿 세워 둔 사람이 Esc 로 기대하는 건 그것들이 사라지는
+                // 것이지 캐럿이 움직이는 게 아니다.
+                multi = false;
             } else {
-                m.apply_edit_key(event, shift, alt, page_lines);
+                m.each_caret(|m| m.apply_edit_key(event, shift, alt, page_lines));
                 m.complete_after_key(event);
             }
+            multi &= !m.extra.is_empty();
         }
-        self.md_ensure_caret_visible();
+        // 보조 커서가 서 있는 동안은 화면을 끌지 않는다 — 커서마다 뷰가 튀면
+        // 여러 곳을 동시에 고치는 일 자체가 불가능해진다.
+        if !multi {
+            self.md_ensure_caret_visible();
+        }
         // 팝업이 열렸으면 서버에도 물어 둔다(응답은 다음 틱에 `lsp_complete_pump`
         // 가 받는다). 위 ws lock 을 놓은 뒤라야 한다 — 이 안에서 다시 잠근다.
         let id = { self.ws.lock().ok().and_then(|w| w.active_pane.clone()) };
@@ -2323,11 +2574,17 @@ impl App {
                 self.md_select_all();
                 true
             }
-            // Cmd+D = 캐럿 단어 선택(VS Code 첫 누름). 이 팔이 없어 전역 폴백으로
-            // 새면서 **편집 중에 pane 이 쪼개졌다**. Shift 조합은 흘려보내
-            // Cmd+Shift+D 세로 분할 경로를 남긴다.
+            // Cmd+D = 캐럿 낱말 선택, 한 번 더 누르면 **다음 출현에 커서 추가**
+            // (VS Code 와 같은 결). 이 팔이 없던 시절엔 전역 폴백으로 새면서
+            // 편집 중에 pane 이 쪼개졌다. Shift 조합은 흘려보내 Cmd+Shift+D
+            // 세로 분할 경로를 남긴다.
             KeyCode::KeyD if !self.modifiers.shift_key() => {
-                self.md_with_editor(|m| m.select_word_at());
+                let more = self.md_with_editor(|m| m.select_next_occurrence());
+                if more == Some(false) {
+                    self.set_toast("더 찾을 곳이 없습니다".into());
+                }
+                // 새로 잡은 자리는 화면 밖일 수 있다 — 여기선 끌어와야 한다.
+                self.md_ensure_caret_visible();
                 true
             }
             KeyCode::KeyZ => {
@@ -2336,6 +2593,13 @@ impl App {
                 } else {
                     self.md_undo();
                 }
+                true
+            }
+            // Cmd+Opt+↑↓ = 위/아래 줄에 커서 추가. Cmd+↑↓(문서 처음·끝) 보다
+            // **먼저** 봐야 한다 — 뒤에 두면 Opt 를 무시하고 문서 끝으로 튄다.
+            KeyCode::ArrowUp | KeyCode::ArrowDown if self.modifiers.alt_key() => {
+                let down = code == KeyCode::ArrowDown;
+                self.md_with_editor(|m| m.add_caret_vert(down));
                 true
             }
             KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::ArrowUp | KeyCode::ArrowDown => {
@@ -3070,8 +3334,43 @@ impl App {
     }
 
     pub(crate) fn md_press_caret(&mut self, id: &str, px: f32, py: f32) -> u8 {
+        // Opt+클릭은 커서를 **더한다**(VS Code 와 같은 자리). 이미 커서가 선
+        // 자리를 다시 Opt+클릭하면 그 커서를 뺀다 — 잘못 찍은 걸 무를 길이
+        // 없으면 처음부터 다시 세워야 한다.
+        let add = self.modifiers.alt_key();
+        let was = self.ws.lock().ok().and_then(|w| {
+            w.panes
+                .get(id)
+                .and_then(|p| p.markdown())
+                .map(|m| Caret { line: m.cur_line, col: m.cur_col, anchor: m.sel_anchor })
+        });
         self.md_click_caret(id, px, py);
         let clicks = self.md_click_count(px, py);
+        let mut removed = false;
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(m) = ws.panes.get_mut(id).and_then(|p| p.markdown_mut()) {
+                match (add, was) {
+                    (true, Some(was)) => {
+                        let hit = (m.cur_line, m.cur_col);
+                        if let Some(i) = m.extra.iter().position(|c| (c.line, c.col) == hit) {
+                            m.extra.remove(i);
+                            m.cur_line = was.line;
+                            m.cur_col = was.col;
+                            m.sel_anchor = was.anchor;
+                            removed = true;
+                        } else if (was.line, was.col) != hit {
+                            m.extra.push(was);
+                        }
+                    }
+                    // 그냥 클릭은 세워 둔 보조 커서를 전부 거둔다 — 안 거두면
+                    // 다음 타이핑이 화면에 안 보이는 옛 자리에도 같이 들어간다.
+                    _ => m.extra.clear(),
+                }
+            }
+        }
+        if removed {
+            return clicks;
+        }
         if let Ok(mut ws) = self.ws.lock() {
             if let Some(m) = ws.panes.get_mut(id).and_then(|p| p.markdown_mut()) {
                 m.sel_anchor = Some((m.cur_line, m.cur_col));
@@ -3347,6 +3646,8 @@ mod tests {
             longest_cache: None,
             edit_gen: 0,
             wrap: false,
+            extra: Vec::new(),
+            undo_locked: false,
             folds: Vec::new(),
             folds_gen: 0,
             edited_at: None,
@@ -3760,6 +4061,125 @@ mod tests {
         let tabs: Vec<String> = ["a", "\tb", "\t\tc", "d"].iter().map(|s| s.to_string()).collect();
         assert_eq!(fold_end(&tabs, 0), Some(2));
         assert_eq!(fold_end(&tabs, 1), Some(2));
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn select_word_at_takes_the_word_not_the_indent() {
+        let mut m = pane(&["    let total = 1;"]);
+        // 캐럿이 들여쓰기와 `let` 의 경계 — 왼쪽으로 되짚으면 공백째 잡힌다.
+        m.cur_col = 4;
+        assert!(m.select_word_at());
+        assert_eq!(m.selected_text().as_deref(), Some("let"));
+        // 낱말 끝 경계도 그 낱말이다.
+        m.sel_anchor = None;
+        m.cur_col = 7;
+        assert!(m.select_word_at());
+        assert_eq!(m.selected_text().as_deref(), Some("let"));
+    }
+
+    #[test]
+    fn remap_shifts_a_later_caret_on_the_same_line() {
+        let r = Remap::between(&strs(&["abcd"]), &strs(&["abXcd"]));
+        assert_eq!(r.at((0, 4)), (0, 5), "삽입 뒤쪽 열은 밀린다");
+        assert_eq!(r.at((0, 1)), (0, 1), "삽입 앞쪽 열은 그대로");
+        assert_eq!(r.at((1, 0)), (1, 0), "다른 줄은 그대로");
+    }
+
+    #[test]
+    fn remap_carries_a_caret_across_a_line_split() {
+        // 줄 가운데서 Enter — 뒤쪽 커서는 새로 생긴 줄로 따라가야 한다.
+        let r = Remap::between(&strs(&["abcd"]), &strs(&["ab", "cd"]));
+        assert_eq!(r.at((0, 3)), (1, 1));
+        assert_eq!(r.at((1, 0)), (2, 0), "아래 줄은 통째로 한 칸 내려간다");
+    }
+
+    #[test]
+    fn remap_carries_a_caret_across_a_line_join() {
+        // 줄 첫머리 backspace — 편집이 **위로** 뻗는 경우.
+        let r = Remap::between(&strs(&["ab", "cd"]), &strs(&["abcd"]));
+        assert_eq!(r.at((1, 1)), (0, 3));
+        assert_eq!(r.at((2, 0)), (1, 0));
+    }
+
+    #[test]
+    fn remap_handles_whole_line_insert_and_delete() {
+        let ins = Remap::between(&strs(&["a", "b"]), &strs(&["a", "a", "b"]));
+        assert_eq!(ins.at((1, 1)), (2, 1));
+        let del = Remap::between(&strs(&["a", "b", "c"]), &strs(&["a", "c"]));
+        assert_eq!(del.at((2, 0)), (1, 0));
+    }
+
+    #[test]
+    fn remap_is_identity_when_nothing_changed() {
+        let r = Remap::between(&strs(&["a", "b"]), &strs(&["a", "b"]));
+        assert_eq!(r.at((1, 1)), (1, 1));
+        assert_eq!(r.at((0, 0)), (0, 0));
+    }
+
+    #[test]
+    fn each_caret_types_at_every_cursor_on_one_line() {
+        // 같은 줄에 커서 둘 — 앞쪽 삽입이 뒤쪽 열을 밀기 때문에 순서가 곧
+        // 정확성이다. 아래(=뒤)부터 처리해야 둘 다 제자리에 들어간다.
+        let mut m = pane(&["foo bar"]);
+        m.cur_line = 0;
+        m.cur_col = 3;
+        m.extra = vec![Caret::at(0, 7)];
+        m.each_caret(|m| m.insert_at_caret("!"));
+        assert_eq!(m.edit_lines[0], "foo! bar!");
+        assert_eq!(m.carets(), vec![Caret::at(0, 4), Caret::at(0, 9)]);
+    }
+
+    #[test]
+    fn each_caret_keeps_lower_cursors_after_a_newline_above() {
+        let mut m = pane(&["ab", "cd"]);
+        m.cur_line = 0;
+        m.cur_col = 1;
+        m.extra = vec![Caret::at(1, 1)];
+        m.each_caret(|m| m.newline());
+        assert_eq!(*m.edit_lines, strs(&["a", "b", "c", "d"]));
+        // 위에서 줄이 하나 늘었으니 아래 커서는 그만큼 내려가 있어야 한다.
+        assert_eq!(m.carets(), vec![Caret::at(1, 0), Caret::at(3, 0)]);
+    }
+
+    #[test]
+    fn each_caret_pushes_one_undo_entry_for_the_whole_edit() {
+        let mut m = pane(&["a", "b"]);
+        m.cur_line = 0;
+        m.cur_col = 1;
+        m.extra = vec![Caret::at(1, 1)];
+        let before = m.undo_stack.len();
+        m.each_caret(|m| m.newline());
+        assert_eq!(m.undo_stack.len(), before + 1, "커서마다 쌓으면 Cmd+Z 가 하나씩 되돌린다");
+    }
+
+    #[test]
+    fn select_next_occurrence_walks_then_stops_after_a_full_lap() {
+        let mut m = pane(&["foo = 1;", "bar = foo;"]);
+        m.cur_line = 0;
+        m.cur_col = 1;
+        assert!(m.select_next_occurrence(), "첫 누름은 캐럿 낱말을 고른다");
+        assert_eq!(m.selected_text().as_deref(), Some("foo"));
+        assert!(m.select_next_occurrence(), "두 번째는 다음 출현에 커서를 더한다");
+        assert_eq!(m.carets().len(), 2);
+        assert_eq!((m.cur_line, m.cur_col), (1, 9));
+        // 한 바퀴 — 처음 자리로 돌아오므로 더 늘지 않는다.
+        assert!(!m.select_next_occurrence());
+        assert_eq!(m.carets().len(), 2);
+    }
+
+    #[test]
+    fn add_caret_vert_grows_from_the_edge_not_the_primary() {
+        let mut m = pane(&["one", "two", "three"]);
+        m.cur_line = 0;
+        m.cur_col = 3;
+        assert!(m.add_caret_vert(true));
+        assert!(m.add_caret_vert(true), "세 번째 누름은 무리의 아래 가장자리에서 자란다");
+        assert_eq!(m.carets(), vec![Caret::at(0, 3), Caret::at(1, 3), Caret::at(2, 3)]);
+        assert!(!m.add_caret_vert(true), "문서 밖으론 안 자란다");
     }
 
     #[test]
@@ -4323,6 +4743,8 @@ mod tests {
             longest_cache: None,
             edit_gen: 0,
             wrap: false,
+            extra: Vec::new(),
+            undo_locked: false,
             folds: Vec::new(),
             folds_gen: 0,
             edited_at: None,

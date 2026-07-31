@@ -147,6 +147,9 @@ impl AuxWindow {
                     // 접기 UI 는 본 창 거터에만 있다 — 여기선 늘 비어 있다.
                     &[],
                     m.wrap,
+                    // 팝아웃 창엔 멀티커서 키 경로가 없다 — 커서를 더할 방법이
+                    // 없는데 그리기만 하면 지울 수도 없는 표시가 남는다.
+                    &[],
                 );
             }
             // Settings/Terminal 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
@@ -313,6 +316,8 @@ impl App {
             longest_cache: None,
             edit_gen: 0,
             wrap: false,
+            extra: Vec::new(),
+            undo_locked: false,
             folds: Vec::new(),
             folds_gen: 0,
             edited_at: None,

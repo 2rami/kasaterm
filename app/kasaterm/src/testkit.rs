@@ -918,6 +918,25 @@ impl App {
                 });
                 eprintln!("[mdscript] drag=({dx},{dy}) caret={at:?}");
             }
+            // Cmd+D — `occ:`. 첫 번은 캐럿 낱말, 그 뒤로는 다음 출현에 커서 추가.
+            // Cmd+Opt+↑↓ 는 `vcaret:up|down`. 실물 키가 부르는 것과 같은 함수다.
+            Some(("occ", _)) | Some(("vcaret", _)) => {
+                let down = step.split_once(':').map(|(_, v)| v) != Some("up");
+                let occ = step.starts_with("occ");
+                let got = {
+                    let mut ws = self.ws.lock().unwrap();
+                    ws.panes.get_mut(&id).and_then(|p| {
+                        p.dirty = true;
+                        p.markdown_mut()
+                    })
+                    .map(|m| {
+                        let ok =
+                            if occ { m.select_next_occurrence() } else { m.add_caret_vert(down) };
+                        (ok, m.carets())
+                    })
+                };
+                eprintln!("[mdscript] {step} → {got:?}");
+            }
             // 편집기에 글자를 넣어 본다 — `type:<문자열>`. 키 이벤트를 밖에서
             // 만들 수 없어(winit `KeyEvent`) 삽입 진입점을 직접 부른다.
             // 실타이핑의 비용 구조를 재려면 **한 단계에 한 글자**로 써야 한다
