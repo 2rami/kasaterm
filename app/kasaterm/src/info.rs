@@ -103,9 +103,15 @@ pub(crate) struct PaneGroup {
     pub(crate) pane: String,
     /// 학생 이름. 없으면 빈 문자열이고 렌더가 셸 이름으로 대신한다.
     pub(crate) label: String,
+    /// 이 pane 의 claude 세션 제목 — `/rename` 이름이 있으면 그것, 없으면
+    /// aiTitle(요약). 학생 이름은 "누가"고 이건 "무엇을" 이라 둘 다 필요하다.
+    pub(crate) session: String,
     pub(crate) shell: String,
     pub(crate) shell_pid: u32,
     pub(crate) active: bool,
+    /// 방(윈도우) 인덱스와 이름 — 방이 둘 이상일 때만 머리로 그린다.
+    pub(crate) window: usize,
+    pub(crate) window_label: String,
     pub(crate) rows: Vec<ProcRow>,
 }
 
@@ -125,6 +131,11 @@ pub(crate) struct PaneTarget {
     pub(crate) label: String,
     pub(crate) cwd: Option<std::path::PathBuf>,
     pub(crate) active: bool,
+    pub(crate) window: usize,
+    pub(crate) window_label: String,
+    /// 이 pane 이 붙든 claude transcript. 제목을 뽑으려면 jsonl 꼬리를 읽어야
+    /// 해서 **경로만** GUI 가 넘기고 읽기는 워커가 한다.
+    pub(crate) session_path: Option<std::path::PathBuf>,
 }
 
 /// `ps` 한 줄에서 뽑은 원시 레코드. 좀비도 담는다 — 목록에는 안 올리지만
@@ -151,6 +162,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
         .map(|t| PaneGroup {
             pane: t.id.clone(),
             label: t.label.clone(),
+            session: t.session_path.as_deref().map(session_title).unwrap_or_default(),
             shell: by_pid
                 .get(&t.shell_pid)
                 .map(|r| split_argv(&r.args).0)
@@ -159,12 +171,26 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
                 .unwrap_or_default(),
             shell_pid: t.shell_pid,
             active: t.active,
+            window: t.window,
+            window_label: t.window_label.clone(),
             rows: build_rows(&table, t.shell_pid),
         })
         .collect();
-    // 활성 pane 이 맨 위, 나머지는 pane 번호순. 정렬 기준을 고정하지 않으면
-    // HashMap 순회 순서 때문에 목록이 수집할 때마다 자리를 바꾼다.
-    panes.sort_by_key(|g| (!g.active, pane_ord(&g.pane), g.pane.clone()));
+    // 방이 먼저, 그 안에서 활성 pane 이 위, 나머지는 pane 번호순. 방을 1차 키로
+    // 두어야 같은 방의 pane 이 붙어 서고 방 머리를 한 번만 그릴 수 있다. 활성
+    // 방을 통째로 맨 앞에 올리는 건 "지금 보고 있는 화면"이 목록 위에 있어야
+    // 스크롤 없이 읽히기 때문이다. 정렬 기준을 고정하지 않으면 HashMap 순회
+    // 순서 때문에 목록이 수집할 때마다 자리를 바꾼다.
+    let active_window = panes.iter().find(|g| g.active).map(|g| g.window);
+    panes.sort_by_key(|g| {
+        (
+            active_window != Some(g.window),
+            g.window,
+            !g.active,
+            pane_ord(&g.pane),
+            g.pane.clone(),
+        )
+    });
 
     // pid → 소유 pane. 포트를 쥔 프로세스를 pane 으로 되짚는 역인덱스다.
     let mut owner: HashMap<u32, String> = HashMap::new();
@@ -248,6 +274,33 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
 /// 문자열 정렬은 `%10` 을 `%2` 앞에 둔다.
 fn pane_ord(id: &str) -> u32 {
     id.trim_start_matches('%').parse().unwrap_or(u32::MAX)
+}
+
+/// transcript 에서 뽑은 세션 제목 — `/rename` 으로 붙인 이름이 있으면 그것,
+/// 없으면 aiTitle(요약) > 첫 user 프롬프트. claude `/resume` 피커와 같은 규칙이라
+/// 목록에서 보던 이름이 여기서도 그대로 보인다.
+///
+/// jsonl 꼬리를 읽는 일이라 **워커에서만** 부른다. 파일 크기가 그대로면 다시
+/// 읽지 않는다 — transcript 는 append 로만 자라므로 크기가 곧 세대 번호다.
+fn session_title(path: &std::path::Path) -> String {
+    type Cache = HashMap<std::path::PathBuf, (u64, String)>;
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<Cache>> =
+        std::sync::LazyLock::new(Default::default);
+    let Ok(len) = std::fs::metadata(path).map(|m| m.len()) else {
+        return String::new();
+    };
+    if let Ok(g) = CACHE.lock() {
+        if let Some((seen, title)) = g.get(path) {
+            if *seen == len {
+                return title.clone();
+            }
+        }
+    }
+    let title = kasa_socket::sessions::session_label_for(path).unwrap_or_default();
+    if let Ok(mut g) = CACHE.lock() {
+        g.insert(path.to_path_buf(), (len, title.clone()));
+    }
+    title
 }
 
 /// `(포트, pid)` → 그 서버가 응답한 제목. 키에 pid 를 넣는 건 같은 포트를 다른
@@ -1023,6 +1076,8 @@ impl App {
         if fresh {
             return;
         }
+        // 방 이름은 여기서 한 번 세워 둔다(자체 1초 게이트라 재수집 주기보다 싸다).
+        self.refresh_window_labels();
         let targets = self.info_targets();
         if targets.is_empty() {
             return;
@@ -1078,6 +1133,7 @@ impl App {
             .pty
             .iter()
             .filter_map(|(id, s)| {
+                let window = ws.pane_window.get(id).copied().unwrap_or(self.active_window);
                 Some(PaneTarget {
                     label: self.display_pane_char(&ws, id).unwrap_or_default(),
                     // "pane 이 보는 경로"가 셸 cwd 보다 우선 — bg-attach 뷰 pane 은
@@ -1088,6 +1144,28 @@ impl App {
                         .or_else(|| self.pane_cwd_cache.get(id))
                         .cloned(),
                     active: active.as_deref() == Some(id.as_str()),
+                    window,
+                    // `window_labels.0` 은 안 쓴다 — 그 자리는 대표 pane 의 OSC
+                    // 타이틀이라 셸만 떠 있으면 방마다 똑같이 `zsh` 가 된다(실측).
+                    // 방을 실제로 가르는 건 사용자가 붙인 이름, 없으면 작업 폴더다.
+                    // 경로는 끝 조각만 — 좁은 칼럼에서 전체 경로는 앞부분만 남고
+                    // 정작 구분되는 꼬리가 잘려 나간다.
+                    window_label: self
+                        .window_name_override
+                        .get(&window)
+                        .cloned()
+                        .or_else(|| {
+                            let (_, cwd) = self.window_labels.get(window)?;
+                            let tail = cwd.rsplit('/').next().unwrap_or(cwd);
+                            (!tail.is_empty()).then(|| tail.to_string())
+                        })
+                        .unwrap_or_default(),
+                    // 경로 해석까지만 GUI 가 한다 — 제목을 읽으려면 jsonl 꼬리를
+                    // 훑어야 해서 그건 워커 몫이다(session_title).
+                    session_path: self
+                        .pane_claude_sid
+                        .get(id)
+                        .and_then(|sid| crate::socket::transcript_path_for_session(sid)),
                     id: id.clone(),
                     shell_pid: s.shell_pid()?,
                 })
@@ -1285,6 +1363,9 @@ const SEC_GAP: f32 = 8.0;
 const HEAD_H: f32 = 30.0;
 /// pane 그룹 머리.
 const GROUP_H: f32 = 24.0;
+/// 방(윈도우) 머리. pane 머리보다 낮게 둬서 "구획선에 이름이 붙은 것"으로 읽히게
+/// 한다 — 좁은 칼럼에서 방까지 들여쓰기로 표현하면 정작 프로세스 트리가 눌린다.
+const WIN_H: f32 = 20.0;
 /// 포트 행은 두 줄이다 — 번호·소유 pane 이 윗줄, "무엇인지"가 아랫줄.
 const PORT_H: f32 = 32.0;
 /// 계보 한 단의 가로 폭. 좁은 칼럼에서 깊이 3~4 단은 흔하므로(claude → MCP
@@ -1341,22 +1422,30 @@ pub(crate) fn draw_info_col(
         path_lines.len() as f32 * PATH_LINE_H + 8.0 + BTN_H + 10.0
     };
     let proc_total: usize = snap.panes.iter().map(|g| g.rows.len()).sum();
+    // 방이 하나뿐이면 머리를 안 그린다 — 늘 같은 이름 한 줄이 목록 맨 위를
+    // 차지하면서 알려주는 게 없다.
+    let show_windows = snap.panes.iter().any(|g| g.window != snap.panes[0].window);
     let procs_h = if info.procs_collapsed {
         0.0
     } else if snap.panes.is_empty() {
         EMPTY_H
     } else {
-        snap.panes
-            .iter()
-            .map(|gp| {
-                let body = if info.group_collapsed.contains(&gp.pane) {
-                    0.0
-                } else {
-                    gp.rows.len() as f32 * ROW_H
-                };
-                GROUP_H + body
-            })
-            .sum()
+        let mut h = 0.0;
+        let mut prev: Option<usize> = None;
+        for gp in &snap.panes {
+            if show_windows && prev != Some(gp.window) {
+                h += WIN_H;
+                prev = Some(gp.window);
+            }
+            if show_windows && info.group_collapsed.contains(&win_key(gp.window)) {
+                continue;
+            }
+            h += GROUP_H;
+            if !info.group_collapsed.contains(&gp.pane) {
+                h += gp.rows.len() as f32 * ROW_H;
+            }
+        }
+        h
     };
     let ports_h = match (info.ports_collapsed, snap.ports.len()) {
         (true, _) => 0.0,
@@ -1487,7 +1576,22 @@ pub(crate) fn draw_info_col(
             draw_empty(g, x0, y, top, bottom, "실행 중인 프로세스 없음");
             y += EMPTY_H;
         }
+        let mut prev_win: Option<usize> = None;
         for gp in &snap.panes {
+            if show_windows && prev_win != Some(gp.window) {
+                prev_win = Some(gp.window);
+                let key = win_key(gp.window);
+                let shut = info.group_collapsed.contains(&key);
+                if y + WIN_H > top && y < bottom {
+                    let n = snap.panes.iter().filter(|o| o.window == gp.window).count();
+                    draw_window_head(g, cursor, gp, shut, n, x, w, x0, right, y);
+                }
+                info.group_rects.push((key, (x, y, w, WIN_H)));
+                y += WIN_H;
+            }
+            if show_windows && info.group_collapsed.contains(&win_key(gp.window)) {
+                continue;
+            }
             let collapsed = info.group_collapsed.contains(&gp.pane);
             if y + GROUP_H > top && y < bottom {
                 draw_group_head(g, cursor, gp, collapsed, x, w, x0, right, y);
@@ -1622,10 +1726,73 @@ fn draw_empty(g: &mut gpu::GpuRenderer, x0: f32, y: f32, top: f32, bottom: f32, 
     );
 }
 
-/// pane 그룹 머리 — `▾ ● %17 프라나        zsh 75941  [5]`. 점 색은 그 pane 의
-/// 학생 색으로, 터미널 헤더·테두리가 이미 쓰는 색과 같다(같은 pane 은 어디서든
-/// 같은 색). 활성 pane 은 왼쪽 띠로 한 번 더 표시한다 — 목록이 전 pane 공유라
-/// "내가 지금 있는 곳"이 안 보이면 매번 번호를 대조하게 된다.
+/// 접힘 집합은 pane id(`%17`)와 방을 같이 담는다 — 접기 상태 저장소를 둘로
+/// 나눌 이유가 없어서, 방 쪽만 pane id 와 절대 겹치지 않는 열쇠를 쓴다.
+fn win_key(idx: usize) -> String {
+    format!("win:{idx}")
+}
+
+/// 방(윈도우) 머리 — 이름 붙은 구획선. pane 머리를 들여쓰지 않고 이 줄로만
+/// 나누는 건, 좁은 칼럼에서 한 단계를 더 들여쓰면 정작 프로세스 트리의
+/// 계보선이 설 자리가 없어지기 때문이다.
+#[allow(clippy::too_many_arguments)]
+fn draw_window_head(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    gp: &PaneGroup,
+    collapsed: bool,
+    panes: usize,
+    x: f32,
+    w: f32,
+    x0: f32,
+    right: f32,
+    y: f32,
+) {
+    if hit(cursor, &(x, y, w, WIN_H)) {
+        g.rect(x, y, w, WIN_H, theme::surface_hover());
+    }
+    g.queue_icon(
+        if collapsed { "chevron-right" } else { "chevron-down" },
+        x0 - 3.0,
+        y + 4.0,
+        11.0,
+        theme::text_mute(),
+    );
+    let n = format!("pane {panes}");
+    let nw = g.measure_chrome_text(&n, 9.5, false);
+    g.draw_text(
+        right - nw,
+        y + 5.0,
+        &n,
+        gpu::DrawOpts {
+            font_size: 9.5,
+            color: theme::with_alpha(theme::text_mute(), 0xA0),
+            bold: false,
+            italic: false,
+        },
+    );
+    let tx = x0 + 12.0;
+    // 번호를 앞에 세운다 — 방 이름은 작업 폴더에서 오는데 두 방이 같은 폴더면
+    // 이름만으론 구분이 안 된다(실측: 방 셋이 전부 `Desktop`). 폭이 모자라 뒤가
+    // 잘려도 번호는 남는다.
+    let name = if gp.window_label.is_empty() {
+        format!("방 {}", gp.window + 1)
+    } else {
+        format!("방 {} · {}", gp.window + 1, gp.window_label)
+    };
+    let name = fit_text(g, &name, (right - nw - 8.0 - tx).max(0.0), 10.5, true);
+    g.draw_text(
+        tx,
+        y + 4.0,
+        &name,
+        gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: true, italic: false },
+    );
+}
+
+/// pane 그룹 머리 — `▾ ● %17 프라나  info 최적화   zsh 75941  [5]`. 점 색은 그
+/// pane 의 학생 색으로, 터미널 헤더·테두리가 이미 쓰는 색과 같다(같은 pane 은
+/// 어디서든 같은 색). 활성 pane 은 왼쪽 띠로 한 번 더 표시한다 — 목록이 전 pane
+/// 공유라 "내가 지금 있는 곳"이 안 보이면 매번 번호를 대조하게 된다.
 #[allow(clippy::too_many_arguments)]
 fn draw_group_head(
     g: &mut gpu::GpuRenderer,
@@ -1679,13 +1846,29 @@ fn draw_group_head(
         &title,
         gpu::DrawOpts { font_size: 12.0, color: theme::text(), bold: true, italic: false },
     );
-    // 셸과 pid 는 남는 폭에만 — 그룹을 가리키는 이름이 잘리는 것보다 낫다.
+    // 학생 이름 다음은 **세션 제목**이다. 학생은 "누가"고 제목은 "무엇을" 이라,
+    // pane 이 여럿일 때 정작 찾는 단서는 이쪽이다 — 그래서 셸·pid 보다 폭을
+    // 먼저 가져간다(폭이 모자라면 밀려나는 건 셸·pid 쪽).
     budget -= tw + 8.0;
+    let mut cx = tx + tw + 8.0;
+    if !gp.session.is_empty() && budget > 40.0 {
+        let s = fit_text(g, &gp.session, budget, 10.5, false);
+        let sw = g.measure_chrome_text(&s, 10.5, false);
+        g.draw_text(
+            cx,
+            y + 6.0,
+            &s,
+            gpu::DrawOpts { font_size: 10.5, color: theme::text_dim(), bold: false, italic: false },
+        );
+        cx += sw + 8.0;
+        budget -= sw + 8.0;
+    }
+    // 셸과 pid 는 남는 폭에만 — 그룹을 가리키는 이름이 잘리는 것보다 낫다.
     let shell = format!("{} {}", gp.shell, gp.shell_pid);
     if budget > 40.0 {
         let s = fit_text(g, &shell, budget, 10.0, false);
         g.draw_text(
-            tx + tw + 8.0,
+            cx,
             y + 6.0,
             &s,
             gpu::DrawOpts {
@@ -2113,4 +2296,54 @@ fn fit_text(g: &mut gpu::GpuRenderer, s: &str, avail: f32, size: f32, bold: bool
         }
     }
     s.to_string()
+}
+
+#[cfg(test)]
+mod session_title_tests {
+    use super::session_title;
+
+    fn tmp_jsonl(tag: &str, body: &str) -> std::path::PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d = std::env::temp_dir().join(format!("kasaterm-sesstitle-{tag}-{n}"));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("11111111-2222-3333-4444-555555555555.jsonl");
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    /// `/rename` 으로 붙인 이름이 최우선 — pane 머리에 학생 이름 옆으로 나가는 값.
+    #[test]
+    fn custom_title_wins() {
+        let p = tmp_jsonl(
+            "custom",
+            "{\"type\":\"ai-title\",\"aiTitle\":\"하이쿠 요약\"}\n\
+             {\"type\":\"custom-title\",\"customTitle\":\"info 최적화\"}\n",
+        );
+        assert_eq!(session_title(&p), "info 최적화");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// rename 이 없으면 claude 가 붙인 요약(aiTitle)으로 떨어진다.
+    #[test]
+    fn falls_back_to_ai_title() {
+        let p = tmp_jsonl("ai", "{\"type\":\"ai-title\",\"aiTitle\":\"하이쿠 요약\"}\n");
+        assert_eq!(session_title(&p), "하이쿠 요약");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// 캐시 열쇠는 파일 크기다 — transcript 가 자라면(rename 이 append 된다) 반드시
+    /// 다시 읽어야 한다. 여기서 옛 제목이 나오면 pane 머리가 영영 안 바뀐다.
+    #[test]
+    fn reread_after_the_transcript_grows() {
+        let p = tmp_jsonl("grow", "{\"type\":\"ai-title\",\"aiTitle\":\"처음\"}\n");
+        assert_eq!(session_title(&p), "처음");
+        let mut body = std::fs::read_to_string(&p).unwrap();
+        body.push_str("{\"type\":\"custom-title\",\"customTitle\":\"이름 바꿈\"}\n");
+        std::fs::write(&p, body).unwrap();
+        assert_eq!(session_title(&p), "이름 바꿈");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
 }

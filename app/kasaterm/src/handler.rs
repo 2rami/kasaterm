@@ -79,12 +79,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // board id 가 실제 leaf 인 윈도우가 있을 때만 포커스한다 — 캐릭터/작업명/async
                 // 같은 비-leaf 집계 id 로 active_pane 을 덮으면 다음 /layout 폴에서 그 타일이
                 // 빠져 "pane 이 닫힌 것처럼" 보였다(거노: 캐릭터 클릭→학생 선택하면 닫힘).
-                if let Some(wi) = self.window_of_pane(id) {
-                    if wi != self.active_window {
-                        self.switch_window(wi);
-                    }
-                    self.ws.lock().unwrap().active_pane = Some(id.clone());
-                    self.chrome_dirty = true;
+                if self.focus_pane(id) {
                     self.render_frame();
                 }
                 return;
@@ -2901,9 +2896,32 @@ impl ApplicationHandler<UserEvent> for App {
                                 .find(|(_, r)| inside(r))
                                 .map(|(p, _)| p.clone())
                             {
+                                // 한 번 = 접기/펴기, 두 번 = 그 학생으로 포커스.
+                                // 더블클릭이면 접기 토글이 두 번 걸려 제자리로
+                                // 돌아오므로, 여기선 포커스만 얹으면 된다.
+                                let now = Instant::now();
+                                let is_double = matches!(
+                                    self.info.last_group_click.as_ref(),
+                                    Some((t, k))
+                                        if *k == pane
+                                            && now.duration_since(*t).as_millis() < 400
+                                );
                                 if !self.info.group_collapsed.remove(&pane) {
-                                    self.info.group_collapsed.insert(pane);
+                                    self.info.group_collapsed.insert(pane.clone());
                                 }
+                                if is_double {
+                                    self.info.last_group_click = None;
+                                    // 방 머리는 그 방으로, pane 머리는 그 pane 으로.
+                                    match pane.strip_prefix("win:").and_then(|n| n.parse().ok()) {
+                                        Some(wi) => self.switch_window(wi),
+                                        None => {
+                                            self.focus_pane(&pane);
+                                        }
+                                    }
+                                } else {
+                                    self.info.last_group_click = Some((now, pane));
+                                }
+                                self.chrome_dirty = true;
                                 window.request_redraw();
                                 return;
                             }
@@ -4682,6 +4700,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_layergeom();
         self.run_pending_automenuclick(event_loop);
         self.run_pending_autopillclick(event_loop);
+        self.run_pending_autoinfodbl(event_loop);
         self.run_pending_autosettings(event_loop);
         self.run_pending_autoshellmenu();
         self.run_pending_autoftmenu();

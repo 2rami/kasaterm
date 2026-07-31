@@ -178,6 +178,9 @@ pub(crate) struct InfoState {
     /// 접어둔 pane 그룹(surface id). 남의 pane 은 접어두고 자기 것만 펴 두는
     /// 쓰임이 기본이라 pane 을 옮겨도 유지한다.
     pub(crate) group_collapsed: std::collections::HashSet<String>,
+    /// 그룹 머리 직전 클릭 `(시각, 열쇠)` — 더블클릭(=그 학생으로 포커스) 판정용.
+    /// 한 번 클릭은 접기라, 두 번째 클릭이 접기를 되돌리고 포커스까지 옮긴다.
+    pub(crate) last_group_click: Option<(std::time::Instant, String)>,
     /// 매 paint 재생성되는 hit target. 탭 머리 / 포트 행(→ 브라우저로 열기) /
     /// 프로세스 행(우클릭 대상) / 종료 버튼 / 섹션 머리 / 디렉터리 버튼.
     pub(crate) tab_rects: Vec<(SideTab, (f32, f32, f32, f32))>,
@@ -214,6 +217,7 @@ impl Default for InfoState {
             ports_collapsed: false,
             ctx_menu: None,
             group_collapsed: std::collections::HashSet::new(),
+            last_group_click: None,
             tab_rects: Vec::new(),
             port_rects: Vec::new(),
             port_kill_rects: Vec::new(),
