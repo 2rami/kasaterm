@@ -3155,6 +3155,23 @@ impl App {
                 // for whole-tree search hits (file_tree_search_collect), empty
                 // restores the expanded tree. So just render it as-is.
                 let vis_nodes: Vec<&FileNode> = self.file_tree.nodes.iter().collect();
+                // git 표시는 **배지 폴러**가 채운 맵을 읽는다(git 컬럼 폴러가 아니라)
+                // — 컬럼 폴러는 그 패널이 열렸을 때만 돌아서, 파일트리 표시가 남의
+                // 패널 개폐에 묶여 버린다. 배지는 모든 pane 의 cwd 로 항상 돈다.
+                // 루프 **밖에서 한 번만** 잠근다: 행마다 잠그면 폴러와 프레임당
+                // 수십 번 부딪히고, 복사하면 프레임마다 맵을 통째로 clone 한다.
+                let ft_cwd = self
+                    .ws
+                    .lock()
+                    .ok()
+                    .and_then(|w| w.active_pane.clone())
+                    .and_then(|id| self.pane_cwd_cache.get(&id).cloned());
+                let git_badges = self.window_git.lock().ok();
+                let git_marks = ft_cwd
+                    .as_ref()
+                    .zip(git_badges.as_ref())
+                    .and_then(|(p, m)| m.get(p))
+                    .map(|b| &b.marks);
                 for (idx, node) in vis_nodes.iter().enumerate() {
                     let node = *node;
                     let y = start_y - self.file_tree.scroll + idx as f32 * item_h;
@@ -3232,7 +3249,22 @@ impl App {
                     }
                     // Folders read brighter than files (soft hierarchy); ignored
                     // rows are muted; hover/open lift to full strength.
-                    let fg = if node.ignored {
+                    // git 마커가 있으면 이름 색이 그걸 따른다 — 배지만으론 좁은
+                    // 사이드바에서 눈에 안 들어온다(VSCode 도 이름을 물들인다).
+                    // ignored 행은 제외: gitignore 된 것은 애초에 status 에 안 나오고,
+                    // 나온다 해도 흐리게 두는 게 이 행의 뜻이다.
+                    let git_mark = (!node.ignored)
+                        .then(|| git_marks.and_then(|m| m.get(&node.path).copied()))
+                        .flatten();
+                    let mark_color = |m: char| match m {
+                        'M' => theme::syn_type(),
+                        'A' | 'U' => theme::success(),
+                        'D' => theme::danger(),
+                        _ => theme::text_dim(),
+                    };
+                    let fg = if let Some(m) = git_mark {
+                        mark_color(m)
+                    } else if node.ignored {
                         theme::text_mute()
                     } else if hovered || is_open || node.is_dir {
                         theme::text()
@@ -3243,7 +3275,10 @@ impl App {
                     // Clip the name to the column width with an ellipsis — long
                     // hashed file names (webp/jpg) otherwise overflow the sidebar
                     // straight into the terminal grid.
-                    let avail = (row_x + row_w - text_x - 4.0).max(0.0);
+                    // 배지 자리를 먼저 떼어 둔다 — 안 그러면 긴 이름이 배지 밑을
+                    // 파고들어 글자와 마커가 겹친다.
+                    let badge_w = if git_mark.is_some() { 13.0 } else { 0.0 };
+                    let avail = (row_x + row_w - text_x - 4.0 - badge_w).max(0.0);
                     let label = if g.measure_chrome_text(&node.name, font, false) <= avail {
                         node.name.clone()
                     } else {
@@ -3297,6 +3332,34 @@ impl App {
                             &label,
                             gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: node.ignored },
                         );
+                        // 행 오른쪽 끝 상태 배지. 파일은 글자(M/A/U)로 무엇이
+                        // 바뀌었는지까지 말하고, 폴더는 점 하나 — 폴더의 글자는
+                        // 자손 여럿을 하나로 뭉친 것이라 "M" 이라 쓰면 그 폴더가
+                        // 수정됐다는 오해를 준다. 점은 "안에 뭔가 있다"만 말한다.
+                        if let Some(m) = git_mark {
+                            let c = mark_color(m);
+                            if node.is_dir {
+                                let d = 6.0_f32;
+                                round_rect(
+                                    g,
+                                    row_x + row_w - 4.0 - d,
+                                    y + (item_h - d) / 2.0,
+                                    d,
+                                    d,
+                                    d / 2.0,
+                                    c,
+                                );
+                            } else {
+                                let bf = 10.0_f32;
+                                let bw = g.measure_chrome_text(&m.to_string(), bf, true);
+                                g.draw_text(
+                                    row_x + row_w - 4.0 - bw,
+                                    y + (item_h - bf) / 2.0,
+                                    &m.to_string(),
+                                    gpu::DrawOpts { font_size: bf, color: c, bold: true, italic: false },
+                                );
+                            }
+                        }
                     }
                     rects.push((node.path.clone(), (row_x, y, row_w, item_h)));
                 }
