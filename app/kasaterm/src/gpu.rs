@@ -2661,6 +2661,8 @@ impl GpuRenderer {
         folds: &[(usize, usize)],
         // 긴 줄을 본문 폭에서 접어 내릴지. 끄면 가로 스크롤로 본다.
         wrap: bool,
+        // 보조 커서들. 비어 있는 게 보통이고, 그때는 아래 loop 가 한 번도 안 돈다.
+        extra: &[crate::markdown::Caret],
     ) -> f32 {
         // 본문은 미니맵 왼쪽까지만 쓴다. 이 렌더러엔 scissor 가 없어서
         // clip_right 가 곧 본문의 오른쪽 벽이다.
@@ -2703,6 +2705,9 @@ impl GpuRenderer {
         let guide_step = cw * crate::markdown::indent_step_cols() as f32;
         // 화면 행 배열 — 접힘은 행을 지우고 랩은 행을 늘린다. 이 배열 하나가
         // "몇 번째 줄을 어디부터 어디까지 그릴까"를 전부 답한다.
+        // 보조 커서가 덮는 범위. 한 번만 뽑아 두고 줄마다 재사용한다.
+        let extra_sel: Vec<((usize, usize), (usize, usize))> =
+            extra.iter().filter(|c| c.anchor.is_some()).map(|c| c.span()).collect();
         let wrap_cols = self.raw_editor_wrap_cols(w, lines.len(), wrap);
         let rows = crate::markdown::layout_rows(lines, folds, wrap_cols);
         let mut pen_y = top0;
@@ -2747,7 +2752,9 @@ impl GpuRenderer {
                 // range: full width on interior lines (plus a small nub for
                 // the newline), prefix-measured ends on the boundary lines.
                 // Drawn before the text so glyphs stay crisp on top.
-                if let Some((s, e)) = sel {
+                // 주 선택과 보조 커서의 선택을 **같은 규칙**으로 그린다 — 규칙을
+                // 두 벌로 두면 랩·접힘이 바뀔 때 한쪽만 고쳐져 어긋난다.
+                for (s, e) in sel.iter().copied().chain(extra_sel.iter().copied()) {
                     if li >= s.0 && li <= e.0 {
                         let c0 = if li == s.0 { s.1 } else { from };
                         let c1 = if li == e.0 { e.1 } else { to };
@@ -2935,6 +2942,19 @@ impl GpuRenderer {
                                 italic: false,
                             },
                         );
+                    }
+                }
+                // 보조 커서 — 주 캐럿과 같은 깜빡임을 탄다. 서 있는 커서가
+                // 깜빡이지 않으면 "여기도 타이핑이 들어간다"가 안 읽힌다.
+                if cursor_on {
+                    for c in extra {
+                        if c.line != li || c.col < from || (c.col >= to && !last_row) {
+                            continue;
+                        }
+                        let ex = tx0 + cols_to(c.col) * cw;
+                        if ex >= cx0 && ex < clip_right {
+                            self.rect(ex, pen_y + glyph_voff, 2.0, base, crate::theme::accent());
+                        }
                     }
                 }
                 // Cursor (drawn before the gutter mask so one panned under the

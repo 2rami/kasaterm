@@ -1577,6 +1577,13 @@ struct MarkdownPane {
     longest_cache: Option<usize>,
     /// 긴 줄을 본문 폭에서 접어 내릴지. 끄면 가로로 스크롤해 본다.
     wrap: bool,
+    /// 보조 커서들 — 주 커서(`cur_line`/`cur_col`/`sel_anchor`)와 같은 편집을 함께
+    /// 받는다. 비어 있는 게 보통이고, 그때는 지금까지와 완전히 같은 단일 커서
+    /// 편집기라 비용이 0 이다.
+    extra: Vec<crate::markdown::Caret>,
+    /// 멀티커서 편집이 도는 동안 undo 스냅샷을 막는다 — 커서 N 개의 한 번 편집이
+    /// undo 도 한 번이라야 한다.
+    undo_locked: bool,
     /// 접힌 구간들 — `(머리 줄, 마지막 숨은 줄)`. 비어 있는 게 보통이고, 그때
     /// 화면 행 ↔ 버퍼 줄 변환은 전부 항등이라 비용이 0 이다.
     folds: crate::markdown::Folds,

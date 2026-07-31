@@ -410,6 +410,7 @@ impl App {
             Vec<crate::lsp::Diag>,
             crate::markdown::Folds,
             bool,
+            Vec<crate::markdown::Caret>,
         )> = Vec::new();
         // Per-pane body rect (header-excluded) in logical px, collected for
         // every pane so in-pane WebViews and other overlays can be snapped
@@ -572,6 +573,7 @@ impl App {
                     Option<(Vec<String>, usize, usize)>,
                     crate::markdown::Folds,
                     bool,
+                    Vec<crate::markdown::Caret>,
                 )> = pane.markdown().map(|m| {
                     (
                         m.doc.clone(),
@@ -590,6 +592,7 @@ impl App {
                             .map(|c| (c.items.clone(), c.sel, c.from_col)),
                         m.folds.clone(),
                         m.wrap,
+                        m.extra.clone(),
                     )
                 });
                 let mut composed: Vec<Vec<GridCell>> = match pane.term() {
@@ -1370,6 +1373,7 @@ impl App {
                     complete,
                     folds,
                     wrap,
+                    extra,
                 )) = md
                 {
                     // 편집기 모드에서만 — 렌더 뷰엔 밑줄을 그릴 자리가 없다.
@@ -1396,6 +1400,7 @@ impl App {
                         diags,
                         folds,
                         wrap,
+                        extra,
                     ));
                 }
                 // Box geometry (logical px). Right/bottom-edge panes stretch to
@@ -2206,6 +2211,7 @@ impl App {
                 diags,
                 folds,
                 wrap,
+                extra,
             ) in &md_slots
             {
                 let content_h = if *raw_mode {
@@ -2240,6 +2246,7 @@ impl App {
                         diags,
                         folds,
                         *wrap,
+                        extra,
                     );
                     if let Some(f) = find {
                         for (btn, r) in
