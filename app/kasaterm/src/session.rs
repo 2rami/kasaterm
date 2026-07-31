@@ -1384,6 +1384,7 @@ impl App {
                 is_dir: true,
                 depth: 0,
                 ignored: false,
+                is_repo: is_git_repo(&root),
             });
             if self.file_tree.expanded.contains(&root) {
                 Self::walk_dir(&root, 1, &self.file_tree.expanded, &mut self.file_tree.nodes);
@@ -1460,7 +1461,9 @@ impl App {
             let name = nfc_hangul(&e.file_name().to_string_lossy());
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             if name.to_lowercase().contains(q) {
-                out.push(FileNode { path: e.path(), name: name.clone(), is_dir, depth: 0, ignored: false });
+                let p = e.path();
+                let is_repo = is_dir && is_git_repo(&p);
+                out.push(FileNode { path: p, name: name.clone(), is_dir, depth: 0, ignored: false, is_repo });
                 if out.len() >= 300 {
                     return;
                 }
@@ -1637,7 +1640,9 @@ impl App {
                     return None;
                 }
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                Some(FileNode { path: e.path(), name, is_dir, depth, ignored: false })
+                let p = e.path();
+                let is_repo = is_dir && is_git_repo(&p);
+                Some(FileNode { path: p, name, is_dir, depth, ignored: false, is_repo })
             })
             .collect();
         entries.sort_by(|a, b| {
