@@ -344,6 +344,7 @@ impl App {
         let Some(w) = self.window.clone() else { return };
         eprintln!("[movescreen] #{i} 이동 시작");
         gpu::log_layer_geometry(&w, &format!("이동#{i} 전"));
+        self.log_window_placement(&format!("이동#{i} 전"));
         gpu::move_window_to_other_screen(&w);
         gpu::log_layer_geometry(&w, &format!("이동#{i} 직후"));
         *LAYERGEOM_DUE.lock().unwrap() = Some(Instant::now() + std::time::Duration::from_millis(1200));
@@ -361,7 +362,43 @@ impl App {
         *LAYERGEOM_DUE.lock().unwrap() = None;
         if let Some(w) = self.window.clone() {
             gpu::log_layer_geometry(&w, "정착 후");
+            self.log_window_placement("정착 후");
         }
+    }
+    /// 저장될 창 좌표가 **복원 때 살아남는지**를 그 자리에서 판정해 찍는다.
+    /// 저장은 조용히 성공하고 복원만 조용히 실패하므로, 둘을 따로 보면
+    /// "위치가 왜 안 돌아오지" 를 영영 못 잡는다 — `resumed` 의 on_screen
+    /// 판정을 그대로 재현해 같은 줄에 놓는 것이 요점이다.
+    pub(crate) fn log_window_placement(&mut self, tag: &str) {
+        let Some(w) = self.window.clone() else { return };
+        let Ok(p) = w.outer_position() else { return };
+        let (px, py) = (p.x as f64, p.y as f64);
+        let mut restorable = false;
+        for m in w.available_monitors() {
+            let mp = m.position();
+            let ms = m.size();
+            let ok = px >= mp.x as f64
+                && px < (mp.x as f64 + ms.width as f64 - 60.0)
+                && py >= mp.y as f64
+                && py < (mp.y as f64 + ms.height as f64 - 60.0);
+            eprintln!(
+                "[winpos]   모니터 @({},{}) {}x{} sf={} → {}",
+                mp.x,
+                mp.y,
+                ms.width,
+                ms.height,
+                m.scale_factor(),
+                if ok { "통과" } else { "탈락" }
+            );
+            restorable |= ok;
+        }
+        eprintln!(
+            "[winpos] {tag}: outer=({px},{py}) inner={}x{} sf={} → 복원 {}",
+            w.inner_size().width,
+            w.inner_size().height,
+            w.scale_factor(),
+            if restorable { "됨" } else { "★버려짐★" }
+        );
     }
     /// 줌 클릭 매핑 프로브. `KASATERM_AUTOZOOMPROBE_MS` 뒤에 활성 pane 을 줌하고,
     /// 작업영역 전체에 격자로 점을 찍어 `px_to_pane_cell` 이 어디로 보내는지 찍는다.
