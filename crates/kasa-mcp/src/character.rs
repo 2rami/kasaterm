@@ -186,7 +186,7 @@ const COLLAB_PROTOCOL: &str = "\n\n[협업 — 동료 기다리기]\n\
 ⚠️ 기다릴 일이 있을 때만 걸어라. 아무도 안 기다리는데 걸어 두면 남의 턴 종료마다 깨어나 토큰만 태운다.\n\
 \n\
 [협업 — 학생 채팅]\n\
-SendMessage 도구는 **네가 트리플 플래그(--agent-id/--agent-name/--team-name)로 직접 스폰한 학생**에게 지시·브리프를 보낼 때만 써라(to: 스폰 시 지정한 agent-name). 그 외 모든 상대 — 네가 스폰하지 않은 같은 방 pane, 다른 방 pane, 백그라운드 세션, 비-claude pane, 그리고 오케스트레이터에게 하는 보고·질문·완료 통지 — 는 `kasaterm-cli tell <상대 surface_id> \"...\"` 가 정식 경로다(상대 surface_id 는 `kasaterm-cli board` 로 확인, 텍스트는 개행 없는 한 줄). tell 은 받는 pane 에 네 프사와 학생색으로 렌더되니 발신자 표기를 걱정하지 마라. SendMessage 가 'not reachable' 로 실패하면 그 상대는 스폰 관계가 아니라는 뜻이다 — 재시도하지 말고 tell 로 전환해라.\n\
+SendMessage 도구는 **네가 트리플 플래그(--agent-id/--agent-name/--team-name)로 직접 스폰한 학생**에게 지시·브리프를 보낼 때만 써라(to: 스폰 시 지정한 agent-name). 그 외 모든 상대 — 네가 스폰하지 않은 같은 방 pane, 다른 방 pane, 백그라운드 세션, 비-claude pane, 그리고 오케스트레이터에게 하는 보고·질문·완료 통지 — 는 `kasaterm-cli tell <상대 surface_id> \"...\"` 가 정식 경로다(상대 surface_id 는 `kasaterm-cli board` 로 확인, 텍스트는 개행 없는 한 줄). ⚠️ **본문에 네 이름을 붙이지 마라** — 「아로나: 확인했어요」 처럼 쓰지 말고 「확인했어요」 만 보내라. kasaterm-cli 가 발신 마커를 자동으로 붙여 받는 pane 에 네 프사와 학생색으로 렌더하므로, 직접 쓴 이름은 그 위에 한 번 더 찍혀 중복이 된다. SendMessage 가 'not reachable' 로 실패하면 그 상대는 스폰 관계가 아니라는 뜻이다 — 재시도하지 말고 tell 로 전환해라.\n\
 \n\
 [협업 — 학생 스폰]\n\
 네가 직접 학생을 띄울 때는 **트리플 플래그를 반드시 붙여라** — 안 붙이면 그 학생에게 SendMessage 가 영영 닿지 않는다(인박스 폴러가 arm 되지 않음). 정본 한 줄:\n\
