@@ -4998,6 +4998,56 @@ pub fn ensure_view_fills_window(_window: &Window) -> bool {
     false
 }
 
+/// 레이어의 backing scale(`contentsScale`)이 창의 현재 scale 과 맞는지 확인하고,
+/// 어긋나면 맞춘다. 고쳤으면 `true`.
+///
+/// 모니터를 옮기면 winit 의 `scale_factor()` 도 drawable 도 새 화면을 따라가는데
+/// **레이어의 `contentsScale` 만 창을 만들 때 박힌 값에 영원히 머문다** — 내장↔외부를
+/// 세 번 오가며 실측해도 cs 는 초기값 그대로였다. 그러면 레이어는 "이 넓이를 cs 배
+/// 픽셀로 채워라" 라고 기대하는데 drawable 은 새 scale 기준이라, 2→1(내장→외부)
+/// 이동에선 텍스처가 레이어 좌상단 1/4 에만 그려지고 나머지는 우리가 안 그린
+/// NSWindow 기본색으로 남는다. 거노가 본 "큰 모니터로 옮기면 화면이 구석에 절반
+/// 크기로 처박힘" 이 이것이고, 맥북으로 되돌리면 멀쩡한 건 고쳐져서가 아니라 cs 가
+/// 원래 맞던 화면으로 돌아왔을 뿐이다.
+///
+/// 렌더버그 카탈로그 39번이 이 자리를 "죽은 가설" 로 폐기했던 건 반증 실험이 cs 를
+/// **4.0 이라는 아무 화면과도 안 맞는 값**으로 강제해 본 것이었기 때문이다. 문제는
+/// cs 의 절대값이 아니라 cs 와 drawable 이 서로 어긋나는 것이라, 틀린 값으로 흔들면
+/// 아무 일도 안 일어나고 맞는 값으로 맞춰야 낫는다.
+#[cfg(target_os = "macos")]
+pub fn ensure_layer_scale_matches(window: &Window) -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use raw_window_handle::RawWindowHandle;
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return false;
+    };
+    let ns_view = h.ns_view.as_ptr() as *mut AnyObject;
+    unsafe {
+        let layer: *mut AnyObject = msg_send![ns_view, layer];
+        if layer.is_null() {
+            return false;
+        }
+        let cur: f64 = msg_send![layer, contentsScale];
+        let want = window.scale_factor();
+        // 화면이 없거나 축소 중이면 0 이 나올 수 있다 — 그 값으로 레이어를 망치지 않는다.
+        if !(want > 0.0) || (cur - want).abs() < 0.01 {
+            return false;
+        }
+        let _: () = msg_send![layer, setContentsScale: want];
+        eprintln!("[layerscale] 레이어 backing scale 이 창과 어긋났다 — {cur} → {want} 로 맞춤");
+        true
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn ensure_layer_scale_matches(_window: &Window) -> bool {
+    false
+}
+
 /// 검증 전용: NSView 를 창의 절반으로 줄여 거노가 본 상태를 그대로 만든다.
 /// `ensure_view_fills_window` 가 이걸 되돌리는지 보는 것이 이 하네스의 목적.
 #[cfg(target_os = "macos")]

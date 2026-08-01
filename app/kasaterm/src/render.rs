@@ -6606,14 +6606,21 @@ impl App {
         // `inner_size()` 도 스왑체인도 같이 작아져 앱 내부에선 완벽히 일관돼
         // 보이고, 어긋난 건 창과 뷰 사이뿐이라 크기 대조로는 안 잡힌다.
         // 정상 상태에선 둘 다 msg_send 몇 번·정수 비교 두 번이라 사실상 공짜다.
+        // 어긋날 수 있는 자리는 둘이 아니라 셋이었다. 뷰도 스왑체인도 창과
+        // 맞는데 **레이어의 backing scale 만** 옛 화면에 머무는 상태가 있고,
+        // 그때 두 불변식은 나란히 "이상 없음" 이라 답한다 — 39번 수정이
+        // 모니터 이동을 못 잡은 이유가 이 침묵이었다.
         if let Some(w) = self.window.clone() {
             let refit = gpu::ensure_view_fills_window(&w);
+            let rescaled = gpu::ensure_layer_scale_matches(&w);
             let want = w.inner_size();
             let stale = self
                 .gpu
                 .as_ref()
                 .map_or(false, |g| g.surface_size() != (want.width, want.height));
-            if refit || stale {
+            // cs 를 고쳤으면 drawable 을 다시 잡아야 짝이 맞는다(`resize` 는
+            // 같은 크기로 불러도 `surface.configure` 를 다시 태운다).
+            if refit || rescaled || stale {
                 if let Some(g) = self.gpu.as_mut() {
                     g.resize(want.width, want.height);
                 }
