@@ -701,6 +701,25 @@ impl ApplicationHandler<UserEvent> for App {
         // Restore the last window size; fall back to the default on first run.
         let (init_w, init_h) =
             crate::socket::read_window_size().unwrap_or((1100.0, 860.0));
+        // 저장된 자리가 아직 살아 있는 화면이면 **창을 만들 때부터** 그 자리에
+        // 띄운다. 만든 뒤에 옮기면 세 가지를 잃는다: ① 저장된 크기가 만들어진
+        // 화면에 맞춰 깎이고(큰 모니터용 3840 이 내장에서 1512 로 잘렸다) ②
+        // 레이어 backing scale 이 만들어진 화면 값으로 박히며 ③ 옮긴 뒤에야
+        // 되잡는 한 박자가 생긴다. 판정 기준은 좌상단 점이 아니라 창 중심이다 —
+        // 점으로 보면 창을 화면 가장자리에 붙이는 흔한 습관에 1픽셀만 어긋나도
+        // 위치 기억이 통째로 버려진다(실측 x=1510, 화면 시작 1512).
+        let restore_pos = crate::socket::read_window_pos().filter(|&(px, py)| {
+            event_loop.available_monitors().any(|m| {
+                let mp = m.position();
+                let ms = m.size();
+                let sf = m.scale_factor();
+                let (cx, cy) = (px + init_w * sf / 2.0, py + init_h * sf / 2.0);
+                cx >= mp.x as f64
+                    && cx < (mp.x as f64 + ms.width as f64)
+                    && cy >= mp.y as f64
+                    && cy < (mp.y as f64 + ms.height as f64)
+            })
+        });
         let attrs = WindowAttributes::default()
             .with_title("kasaterm")
             // Force dark appearance so the system titlebar paints its
@@ -711,6 +730,10 @@ impl ApplicationHandler<UserEvent> for App {
             .with_inner_size(LogicalSize::new(init_w, init_h))
             // 배경 실행(검증 캡처)일 땐 뜨면서 키 포커스를 가져가지 않는다.
             .with_active(!crate::background_launch());
+        let attrs = match restore_pos {
+            Some((px, py)) => attrs.with_position(winit::dpi::PhysicalPosition::new(px, py)),
+            None => attrs,
+        };
         // Custom chrome: traffic-light row sits inside the content view
         // so we can paint tabs and drag handles right next to the
         // native buttons. OS still owns the traffic lights themselves
@@ -735,21 +758,10 @@ impl ApplicationHandler<UserEvent> for App {
                 .create_window(attrs)
                 .expect("create window"),
         );
-        // Restore the saved window position (physical px). Only when the saved
-        // point still lands on a live monitor — the monitor may have been
-        // unplugged since, and an off-screen restore would strand the window.
-        if let Some((px, py)) = crate::socket::read_window_pos() {
-            let on_screen = window.available_monitors().any(|m| {
-                let mp = m.position();
-                let ms = m.size();
-                px >= mp.x as f64
-                    && px < (mp.x as f64 + ms.width as f64 - 60.0)
-                    && py >= mp.y as f64
-                    && py < (mp.y as f64 + ms.height as f64 - 60.0)
-            });
-            if on_screen {
-                window.set_outer_position(winit::dpi::PhysicalPosition::new(px, py));
-            }
+        // `with_position` 을 무시하는 플랫폼(일부 Wayland 컴포지터)을 위한 폴백.
+        // 이미 그 자리에 떴으면 no-op 이라 mac/Windows 에선 값이 없다.
+        if let Some((px, py)) = restore_pos {
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(px, py));
         }
         // Start the launch banner clock when the window actually appears,
         // not at struct construction (which can precede the first frame).
