@@ -760,7 +760,7 @@ kasaterm-cli wake-watch %3          # %3이 한 턴 끝내면 스스로 종료
 kasaterm-cli tell %3 "socket.rs 동결 해제 — 이어서 진행해"
 ```
 
-`tell`은 대상 PTY에 텍스트 주입 후 `\r`로 제출 — idle claude를 새 user turn으로 깨운다. focus는 안 바뀐다. **SendMessage는 본인이 스폰한 학생에게만, 그 외 전부 tell이 기본**(2026-07-24 거노 확정). 발신 pane의 `$KASATERM_CHARACTER` 마커가 자동 프리픽스되어 받는 pane에 발신 학생 프사+학생색으로 렌더된다(2026-07-24). kasaterm-cli가 발신 메타(from_pane+plain)를 동봉하고 서버가 방 기준 `messages.jsonl`에 기록해, 웹뷰 대화에도 발신 학생 이름 버블로 뜬다(2026-07-12).
+`tell`은 대상 PTY에 텍스트 주입 후 `\r`로 제출 — idle claude를 새 user turn으로 깨운다. focus는 안 바뀐다. **SendMessage는 본인이 스폰한 학생에게만, 그 외 전부 tell이 기본**(2026-07-24 거노 확정). 발신 pane의 `$KASATERM_CHARACTER` 마커가 자동 프리픽스되어 받는 pane에 발신 학생 프사+학생색으로 렌더된다(2026-07-24). ⚠️ **그러니 본문에 발신자 이름을 직접 쓰지 말 것** — 「아로나: 확인했어요」가 아니라 「확인했어요」. 자동 마커 위에 한 번 더 찍혀 중복으로 보인다(2026-08-02 거노 지적). kasaterm-cli가 발신 메타(from_pane+plain)를 동봉하고 서버가 방 기준 `messages.jsonl`에 기록해, 웹뷰 대화에도 발신 학생 이름 버블로 뜬다(2026-07-12).
 
 - **상대가 working/선택지 대기면 입력창에 큐잉**되고 즉시 처리 안 된다. 급한 게 아니면 `wake-watch`로 idle을 기다렸다 tell — 브리프 여러 건을 working 상대에게 연달아 쏘지 말 것.
 - tell 텍스트는 **개행 없는 한 줄**로(개행=조기 제출).
