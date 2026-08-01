@@ -1851,8 +1851,15 @@ fn draw_group_head(
     // 먼저 가져간다(폭이 모자라면 밀려나는 건 셸·pid 쪽).
     budget -= tw + 8.0;
     let mut cx = tx + tw + 8.0;
-    if !gp.session.is_empty() && budget > 40.0 {
-        let s = fit_text(g, &gp.session, budget, 10.5, false);
+    let shell = format!("{} {}", gp.shell, gp.shell_pid);
+    // 다만 **통째로** 밀어내진 않는다 — 긴 제목 하나가 폭을 다 먹어 pid 가 사라지면
+    // 프로세스를 짚을 열쇠가 없어진다(실측: 30자 제목이 `zsh 35776` 을 지웠다).
+    // 셸 몫을 떼고 남는 만큼만 제목에 준다. 둘 다 못 담을 좁은 칼럼에서만 제목이
+    // 전부 가져간다 — 그때는 pid 보다 "무엇을" 이 먼저다.
+    let shell_w = g.measure_chrome_text(&shell, 10.0, false) + 8.0;
+    let title_budget = if budget > shell_w + 60.0 { budget - shell_w } else { budget };
+    if !gp.session.is_empty() && title_budget > 40.0 {
+        let s = fit_text(g, &gp.session, title_budget, 10.5, false);
         let sw = g.measure_chrome_text(&s, 10.5, false);
         g.draw_text(
             cx,
@@ -1864,7 +1871,6 @@ fn draw_group_head(
         budget -= sw + 8.0;
     }
     // 셸과 pid 는 남는 폭에만 — 그룹을 가리키는 이름이 잘리는 것보다 낫다.
-    let shell = format!("{} {}", gp.shell, gp.shell_pid);
     if budget > 40.0 {
         let s = fit_text(g, &shell, budget, 10.0, false);
         g.draw_text(
