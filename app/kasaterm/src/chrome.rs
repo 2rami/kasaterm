@@ -1662,6 +1662,10 @@ impl App {
     pub(crate) fn refresh_renderer(&mut self) {
         if let Some(w) = self.window.as_ref() {
             gpu::ensure_view_fills_window(w);
+            // 뷰가 멀쩡한데도 화면이 어긋나 새로고침을 누르는 경우가 있다 —
+            // 레이어 backing scale 이 옛 모니터에 남은 상태. 아래 resize 로
+            // drawable 을 다시 잡기 전에 짝부터 맞춰 둔다.
+            gpu::ensure_layer_scale_matches(w);
             let size = w.inner_size();
             if let Some(gpu) = self.gpu.as_mut() {
                 gpu.resize(size.width, size.height);

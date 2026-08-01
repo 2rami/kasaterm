@@ -1230,6 +1230,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // 앱 내부에선 아무 모순도 안 보이므로(레이어·inner_size·스왑체인이
                 // 전부 같이 작아진다) 창 기준으로 먼저 되잡는다.
                 gpu::ensure_view_fills_window(&window);
+                // 레이어 backing scale 은 AppKit 이 갱신해 주지 않는다(실측: 내장↔외부를
+                // 세 번 오가도 창을 만들 때 값 그대로). 새 drawable 을 잡기 **전**에
+                // 맞춰야 둘의 짝이 같은 프레임에 성립한다.
+                gpu::ensure_layer_scale_matches(&window);
                 let size = window.inner_size();
                 if gpu_mode {
                     if let Some(g) = self.gpu.as_mut() {
