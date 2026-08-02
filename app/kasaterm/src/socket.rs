@@ -2209,6 +2209,25 @@ pub fn read_claude_extra() -> String {
     read_settings().get("claude_extra").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+/// pane 안 `claude` 에 자동으로 얹을 MCP 서버 목록의 위치. `--mcp-config` 가 그대로
+/// 먹는 `{"mcpServers":{…}}` 파일이라 **파일이 곧 진실**이다 — 여기가 갈리면 shim 을
+/// 다시 굽지 않아도 다음 `claude` 부터 반영된다. `settings.json` 에 넣지 않은 이유는
+/// `settings_set()` 이 그 파일을 통째로 다시 써서, MCP 를 등록하는 외부 스크립트와
+/// 설정창이 동시에 쓰면 한쪽 변경이 조용히 사라지기 때문.
+pub fn claude_mcp_config_path() -> Option<std::path::PathBuf> {
+    Some(settings_file_path()?.with_file_name("claude-mcp.json"))
+}
+
+/// 위 파일을 shim 이 `--mcp-config` 로 넘길지. 기본 on — 파일이 없으면 shim 쪽 검사에서
+/// 알아서 빠지므로, 평소 끄는 방법은 등록 스크립트로 항목을 빼는 것이다.
+///
+/// 설정창 토글은 **일부러 안 만들었다**: 파일에서 항목을 빼는 것과 기능이 겹쳐 노브가
+/// 둘이 되고, 어느 쪽이 진실인지 헷갈린다. 파일은 그대로 두고 잠시 꺼야 할 때만
+/// `settings.json` 에 `"claude_mcp": false` 를 직접 넣는다.
+pub fn read_claude_mcp() -> bool {
+    read_settings().get("claude_mcp").and_then(|x| x.as_bool()).unwrap_or(true)
+}
+
 /// One switchable Claude login. `id` names a directory under
 /// `~/.config/kasaterm/claude-accounts/`; that path — not the label — is what
 /// Claude Code hashes into its credential-store key, so **renaming is free but

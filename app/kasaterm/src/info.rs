@@ -1354,6 +1354,7 @@ pub(crate) fn draw_side_tabs(
             && cursor.0 <= hot.0 + hot.2
             && cursor.1 >= hot.1
             && cursor.1 <= hot.1 + hot.3;
+        g.hover_pointer |= hovered;
         let col = if active {
             theme::text()
         } else if hovered {
@@ -1374,6 +1375,118 @@ pub(crate) fn draw_side_tabs(
         tx += tw + 16.0;
     }
     y + 27.0
+}
+
+/// 탭 머리와 본문 사이의 전역 진입점 — 계정·사용량 행, 그리고 아로나/설정 버튼.
+/// 셋 다 우상단 아이콘 클러스터에 있던 것으로, 거기서는 제목·경로와 자리를 다퉜다.
+///
+/// 본문(`draw_info_col`)이 아니라 그 위에 있는 건 스크롤 때문이다 — 프로세스가
+/// 수십이면 진입점이 화면 밖으로 밀려나는데, 이것들은 목록의 일부가 아니라 늘
+/// 같은 자리에 있어야 하는 버튼이다.
+///
+/// 계정 드롭다운은 여기서 안 그린다. 패널 위로 떠야 하고 그리려면 계정 목록 전체가
+/// 필요해서, 반환한 행 rect 를 앵커로 호출부(render.rs)가 마지막에 그린다.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_info_actions(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    info: &mut state::InfoState,
+    acct_label: Option<&str>,
+    usage_pct: Option<f32>,
+    menu_open: bool,
+    arona_on: bool,
+    x: f32,
+    w: f32,
+    top: f32,
+) -> (f32, Option<(f32, f32, f32, f32)>) {
+    info.action_rects.clear();
+    let x0 = x + 14.0;
+    let right = x + w - 12.0;
+    let avail = (right - x0).max(0.0);
+    let mut y = top + 2.0;
+
+    // ── 계정 · 사용량 ──
+    // 여기 보이는 한도가 **활성 계정의** 것이라 이름과 한 행에 둔다. 계정을 안 쓰면
+    // 이름 없이 사용률만 — 안 쓰는 사람 행에 "기본" 을 얹는 건 잡음이다.
+    let acct_rect = (acct_label.is_some() || usage_pct.is_some()).then(|| {
+        let h = 30.0_f32;
+        let r = (x0, y, avail, h);
+        let hov = menu_open || hit(cursor, &r);
+        g.hover_pointer |= hov;
+        round_rect(
+            g, r.0, r.1, r.2, r.3, theme::radius_sm(),
+            if hov { theme::surface_hover() } else { theme::surface() },
+        );
+        let f = 11.5_f32;
+        let ty = y + (h - f) / 2.0 - 1.0;
+        let chev = 11.0_f32;
+        g.queue_icon(
+            "chevron-down",
+            right - 10.0 - chev,
+            y + (h - chev) / 2.0,
+            chev,
+            if hov { theme::text() } else { theme::text_mute() },
+        );
+        let mut tx = x0 + 10.0;
+        if let Some(l) = acct_label {
+            let lw = g.measure_chrome_text(l, f, true);
+            g.draw_text(tx, ty, l,
+                gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false });
+            tx += lw + 8.0;
+        }
+        if let Some(pct) = usage_pct {
+            // 70%↑ 주의·90%↑ 위험(웹뷰 UsagePill 과 같은 임계). 세 색 다 테마
+            // 토큰이다 — 하드코딩한 청록/산호는 팔레트를 갈아도 그대로 남아,
+            // 호박색 화면에서 이 숫자 하나만 딴 데서 온 것처럼 떴다.
+            let col = if pct >= 90.0 {
+                theme::danger()
+            } else if pct >= 70.0 {
+                theme::syn_number()
+            } else {
+                theme::success()
+            };
+            let l = format!("5h {pct:.0}%");
+            g.draw_text(tx, ty, &l,
+                gpu::DrawOpts { font_size: f, color: col, bold: true, italic: false });
+        }
+        y += h + 6.0;
+        r
+    });
+
+    // ── 전역 진입점 ──
+    // 아로나는 shim OFF 면 진입점 자체가 없다(빈 웹뷰로 들어갈 길을 원천 차단).
+    // 그때는 설정이 그 자리를 마저 쓴다 — 반 폭짜리 버튼 하나가 남으면 잘린 것처럼
+    // 보인다.
+    let mut btns: Vec<(state::InfoAction, &str, &str)> = Vec::new();
+    if arona_on {
+        btns.push((state::InfoAction::Arona, "sparkles", "아로나"));
+    }
+    btns.push((state::InfoAction::Settings, "settings-2", "설정"));
+    btns.push((state::InfoAction::Feedback, "message-square-warning", "피드백"));
+    let bh = 28.0_f32;
+    let gap = 6.0;
+    let bw = ((avail - gap * (btns.len() - 1) as f32) / btns.len() as f32).max(0.0);
+    for (i, (kind, icon, label)) in btns.into_iter().enumerate() {
+        let bx = x0 + i as f32 * (bw + gap);
+        let hov = hit(cursor, &(bx, y, bw, bh));
+        g.hover_pointer |= hov;
+        panel_rect(
+            g, bx, y, bw, bh, theme::radius_sm(),
+            if hov { theme::surface_hover() } else { theme::surface() },
+        );
+        let col = if hov { theme::text() } else { theme::text_dim() };
+        let f = 11.0_f32;
+        let lw = g.measure_chrome_text(label, f, false);
+        let inner = 13.0 + 5.0 + lw;
+        let ix = bx + (bw - inner) / 2.0;
+        g.queue_icon(icon, ix, y + (bh - 13.0) / 2.0, 13.0, col);
+        g.draw_text(ix + 18.0, y + (bh - f) / 2.0 - 1.0, label,
+            gpu::DrawOpts { font_size: f, color: col, bold: false, italic: false });
+        info.action_rects.push((kind, (bx, y, bw, bh)));
+    }
+    y += bh + 10.0;
+    g.rect(x0, y, avail, 1.0, theme::border());
+    (y + 9.0, acct_rect)
 }
 
 const ROW_H: f32 = 22.0;
@@ -1503,6 +1616,7 @@ pub(crate) fn draw_info_col(
         );
         let rr = (right - 15.0, y + 4.0, 15.0, 15.0);
         let rhov = hit(cursor, &(rr.0 - 4.0, rr.1 - 4.0, rr.2 + 8.0, rr.3 + 8.0));
+        g.hover_pointer |= rhov;
         g.queue_icon(
             "rotate-cw",
             rr.0,
@@ -1555,13 +1669,14 @@ pub(crate) fn draw_info_col(
             for (i, (kind, icon, label)) in btns.into_iter().enumerate() {
                 let bx = x0 + i as f32 * (bw + gap);
                 let hov = hit(cursor, &(bx, y, bw, BTN_H));
-                round_rect(
+                g.hover_pointer |= hov;
+                panel_rect(
                     g,
                     bx,
                     y,
                     bw,
                     BTN_H,
-                    theme::RADIUS_SM,
+                    theme::radius_sm(),
                     if hov { theme::surface_hover() } else { theme::surface() },
                 );
                 let col = if hov { theme::text() } else { theme::text_dim() };
@@ -1697,6 +1812,7 @@ fn draw_section(
         return r;
     }
     let hov = hit(cursor, &r);
+    g.hover_pointer |= hov;
     if hov {
         g.rect(x, y, w, SEC_H, theme::surface_hover());
     }
@@ -1718,7 +1834,7 @@ fn draw_section(
     if let Some(n) = count {
         let s = n.to_string();
         let tw = g.measure_chrome_text(&s, 10.0, true);
-        round_rect(g, right - tw - 10.0, y + 5.0, tw + 10.0, 16.0, 8.0, theme::surface());
+        pill_rect(g, right - tw - 10.0, y + 5.0, tw + 10.0, 16.0, theme::surface());
         g.draw_text(
             right - tw - 5.0,
             y + 7.0,
@@ -1843,7 +1959,7 @@ fn draw_group_head(
         theme::text_mute(),
     );
     let tint = theme::character_accent(&gp.label).unwrap_or_else(theme::text_mute);
-    round_rect(g, x0 + 12.0, y + 9.0, 6.0, 6.0, 3.0, tint);
+    circle_rect(g, x0 + 12.0, y + 9.0, 6.0, tint);
     // 개수 배지가 오른쪽 끝을 먼저 잡는다 — 접힌 그룹에서 유일한 내용물이라
     // 이름에 밀려 사라지면 안 된다.
     let n = gp.rows.len().to_string();
@@ -1932,6 +2048,7 @@ fn draw_proc_row(
 ) {
     let row = (x, y, w, ROW_H);
     let hov = hit(cursor, &row);
+    g.hover_pointer |= hov;
     if hov {
         g.rect(x, y, w, ROW_H, theme::surface_hover());
     }
@@ -1956,8 +2073,9 @@ fn draw_proc_row(
     if hov {
         let br = (rx - 16.0, y + 3.0, 16.0, 16.0);
         let bhov = hit(cursor, &br);
+        g.hover_pointer |= bhov;
         if bhov {
-            round_rect(g, br.0, br.1, br.2, br.3, 4.0, theme::with_alpha(theme::danger(), 0x33));
+            round_rect(g, br.0, br.1, br.2, br.3, theme::radius_sm(), theme::with_alpha(theme::danger(), 0x33));
         }
         g.queue_icon(
             "x",
@@ -2091,13 +2209,14 @@ fn draw_port_row(
 ) {
     let row = (x, y, w, PORT_H);
     let hov = hit(cursor, &row);
+    g.hover_pointer |= hov;
     if hov {
         g.rect(x, y, w, PORT_H, theme::surface_hover());
     }
     // 어느 pane 도 돌리고 있지 않으면(띄운 셸이 죽어 launchd 로 넘어간 서버) 점을
     // 흐리게 — pane 을 닫아도 안 죽는다는 사실이 목록에서 바로 보여야 한다.
     let dot = if p.orphan { theme::text_dim() } else { theme::accent() };
-    round_rect(g, x0, y + 7.0, 6.0, 6.0, 3.0, dot);
+    circle_rect(g, x0, y + 7.0, 6.0, dot);
     let port_s = p.port.to_string();
     g.draw_text(
         x0 + 12.0,
@@ -2113,8 +2232,9 @@ fn draw_port_row(
         // 손으로 옮겨 적는 일이 된다(거노).
         let br = (rx - 16.0, y + 3.0, 16.0, 16.0);
         let bhov = hit(cursor, &br);
+        g.hover_pointer |= bhov;
         if bhov {
-            round_rect(g, br.0, br.1, br.2, br.3, 4.0, theme::with_alpha(theme::danger(), 0x33));
+            round_rect(g, br.0, br.1, br.2, br.3, theme::radius_sm(), theme::with_alpha(theme::danger(), 0x33));
         }
         g.queue_icon(
             "x",
@@ -2212,7 +2332,7 @@ fn draw_row_menu(
     let menu_h = pad * 2.0 + items.len() as f32 * mih + nsep * sep;
     let mx = rawx.min(x + w - menu_w - 4.0).max(x + 4.0);
     let my = rawy.min(bottom - menu_h - 4.0).max(top);
-    round_rect(g, mx, my, menu_w, menu_h, theme::RADIUS_MD, theme::surface());
+    panel_rect_outlined(g, mx, my, menu_w, menu_h, theme::radius_md(), theme::surface());
     let bc = theme::with_alpha(theme::border(), 0xCC);
     g.rect(mx, my, menu_w, 1.0, bc);
     g.rect(mx, my + menu_h - 1.0, menu_w, 1.0, bc);
@@ -2226,7 +2346,7 @@ fn draw_row_menu(
         }
         let r = (mx + 4.0, iy, menu_w - 8.0, mih);
         if hit(cursor, &r) {
-            round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_SM, theme::surface_hover());
+            crate::hover_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm());
         }
         g.draw_text(
             r.0 + 12.0,

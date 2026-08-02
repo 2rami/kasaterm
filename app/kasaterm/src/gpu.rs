@@ -21,6 +21,17 @@ use winit::window::Window;
 
 const ATLAS_SIZE: u32 = 2048;
 
+/// Bundled pixel face for chrome labels under a pixel Shape (SIL OFL 1.1 — see
+/// assets/fonts/OFL-Galmuri.txt). Shipped verbatim, not subset: a subset is a
+/// Modified Version under that license, and the few MB saved aren't worth it.
+const GALMURI_11: &[u8] = include_bytes!("../assets/fonts/Galmuri11.ttf");
+/// Device px per Galmuri dot — every cut draws one dot per `upem/100` units, so
+/// Galmuri11 (upem 1200) is crisp only at whole multiples of 12.
+const GALMURI_DOT_PX: u32 = 12;
+/// Side of the pixel icons' design grid. Their paths sit on whole units, so any
+/// raster size off this multiple lands dot edges on fractions and softens them.
+const ICON_GRID_PX: u32 = 24;
+
 /// Glyph supersampling factor for a render scale. Below Retina the logical
 /// pixel size is too small to resolve a coverage mask cleanly, so bake at 2x
 /// and let the Linear sampler downsample; Retina already has the pixels.
@@ -84,6 +95,12 @@ pub struct GpuRenderer {
     pipeline: Pipeline,
     atlas: Atlas,
     shaper: Shaper,
+    /// Bundled pixel face for chrome labels under a pixel Shape (font=3 in the
+    /// shared atlas). Loaded on first use, not at startup: most sessions never
+    /// select that shape, and the face is 5 MB of Hangul.
+    chrome_shaper: Option<Shaper>,
+    /// Set once loading fails so a broken face doesn't retry every frame.
+    chrome_shaper_failed: bool,
     /// Secondary shaper for markdown body/heading text — a proportional gothic
     /// (Noto Sans KR if installed, else Apple SD Gothic Neo) so documents read
     /// like prose, not code. Glyphs go into the SAME atlas keyed by font=1.
@@ -123,6 +140,13 @@ pub struct GpuRenderer {
     /// path as `image_quads`, but drawn AFTER the chrome pass so the icons
     /// sit on top of the title bar / pane headers instead of under them.
     icon_quads: Vec<(String, CellInstance)>,
+    /// 이번 프레임에 `hover_rect` 가 한 번이라도 그려졌나 — 즉 커서 밑에
+    /// 누를 수 있는 표면이 있나. 커서 모양(손가락)을 이 하나로 정하려고 둔다.
+    ///
+    /// 히트렉트 목록을 따로 순회하지 않는 건, 그렇게 하면 "배경은 들리는데
+    /// 커서는 그대로"인 표면이 계속 새로 생기기 때문이다. 들림을 그리는
+    /// 함수가 곧 이 플래그를 세우니 둘이 갈릴 수가 없다.
+    pub hover_pointer: bool,
     /// Logical-px rects of link spans drawn in the most recent markdown
     /// frame: (x, y, w, h, dest). main.rs hit-tests a click against these to
     /// open a file (Finder) or URL (browser). Cleared at the start of every
@@ -511,6 +535,8 @@ impl GpuRenderer {
             pipeline,
             atlas,
             shaper,
+            chrome_shaper: None,
+            chrome_shaper_failed: false,
             md_shaper,
             md_bold_shaper,
             bind_group,
@@ -525,6 +551,7 @@ impl GpuRenderer {
             images: HashMap::new(),
             image_quads: Vec::new(),
             icon_quads: Vec::new(),
+            hover_pointer: false,
             md_link_rects: Vec::new(),
             md_copy_rects: Vec::new(),
             md_word_rects: Vec::new(),
@@ -727,13 +754,81 @@ impl GpuRenderer {
     /// Logical width `draw_text` would advance for `text` at `font_size`,
     /// without drawing. Same per-glyph stepping (wide-char tightening
     /// included) so tab backgrounds size to the exact drawn run.
+    /// Resolve which face chrome text renders in, and at what device size.
+    ///
+    /// A pixel face only stays crisp on whole multiples of its dot grid — every
+    /// Galmuri cut draws one dot per `upem/100` units, so Galmuri11 (upem 1200)
+    /// wants multiples of 12 device px. Off-grid sizes resample the dots and the
+    /// result reads as a blurry mono font rather than a pixel one. Measuring and
+    /// drawing both come through here so the snapped size can never diverge.
+    fn chrome_face(&mut self, font_size: f32) -> (u8, u32) {
+        self.chrome_face_opt(font_size, false)
+    }
+
+    /// `force_mono` pins the terminal face regardless of shape — for chrome that
+    /// is *depicting* the terminal (the theme cards' `ls -la` line). Drawing that
+    /// in the UI face would make the preview lie about what the terminal shows.
+    fn chrome_face_opt(&mut self, font_size: f32, force_mono: bool) -> (u8, u32) {
+        let raw = (font_size * self.scale).round().max(1.0) as u32;
+        if force_mono || !crate::theme::pixel_chrome() {
+            return (0, raw);
+        }
+        self.ensure_chrome_shaper();
+        if self.chrome_shaper.is_none() {
+            return (0, raw);
+        }
+        let dot = GALMURI_DOT_PX as f32;
+        let steps = (raw as f32 / dot).round().max(1.0);
+        (3, (dot * steps) as u32)
+    }
+
+    fn ensure_chrome_shaper(&mut self) {
+        if self.chrome_shaper.is_some() || self.chrome_shaper_failed {
+            return;
+        }
+        match Shaper::from_bytes(GALMURI_11.to_vec(), 0) {
+            Ok(mut sh) => {
+                // Hangul and Latin come from Galmuri itself; the chain covers
+                // the icon/symbol glyphs a text face has no reason to carry.
+                attach_fallback_chain(&mut sh);
+                self.chrome_shaper = Some(sh);
+            }
+            Err(e) => {
+                eprintln!("[font] pixel chrome face failed to load: {e}");
+                self.chrome_shaper_failed = true;
+            }
+        }
+    }
+
+    fn chrome_glyph(&mut self, key: GlyphKey) -> Option<AtlasEntry> {
+        if key.font == 3 {
+            if let Some(sh) = self.chrome_shaper.as_mut() {
+                return self.atlas.get_or_bake(&self.device, &self.queue, sh, key);
+            }
+        }
+        self.atlas
+            .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
+    }
+
+    /// Space width for chrome runs. The mono primary's cell advance is the right
+    /// answer for itself, but on the proportional pixel face it would space words
+    /// out to an 'M' — that face gets its own designed space instead.
+    fn chrome_space_advance(&mut self, size_px: f32, font: u8) -> f32 {
+        if font == 3 {
+            if let Some(sh) = self.chrome_shaper.as_ref() {
+                return sh.advance(' ', size_px);
+            }
+        }
+        self.shaper.cell_advance(size_px)
+    }
+
     pub fn measure_chrome_text(&mut self, text: &str, font_size: f32, bold: bool) -> f32 {
         let s = self.scale;
-        let size_px = (font_size * s).round() as u32;
+        let (font, size_px) = self.chrome_face(font_size);
         let mut pen = 0.0_f32;
         for ch in text.chars() {
             if ch == ' ' {
-                pen += self.shaper.cell_advance(size_px as f32);
+                pen += self.chrome_space_advance(size_px as f32, font);
                 continue;
             }
             let key = GlyphKey {
@@ -741,12 +836,9 @@ impl GpuRenderer {
                 bold,
                 italic: false,
                 size_px,
-                font: 0,
+                font,
             };
-            if let Some(entry) =
-                self.atlas
-                    .get_or_bake(&self.device, &self.queue, &mut self.shaper, key)
-            {
+            if let Some(entry) = self.chrome_glyph(key) {
                 pen += if is_wide_char(ch) {
                     entry.px_w as f32 + size_px as f32 * 0.18
                 } else {
@@ -759,6 +851,11 @@ impl GpuRenderer {
 
     pub fn draw_text(&mut self, x: f32, y: f32, text: &str, opts: DrawOpts) -> f32 {
         self.draw_text_clipped(x, y, text, opts, f32::NEG_INFINITY, f32::INFINITY)
+    }
+
+    /// `draw_text` pinned to the terminal face — see `chrome_face_opt`.
+    pub fn draw_text_mono(&mut self, x: f32, y: f32, text: &str, opts: DrawOpts) -> f32 {
+        self.draw_text_inner(x, y, text, opts, f32::NEG_INFINITY, f32::INFINITY, true)
     }
 
     /// `draw_text` with hard left/right edges (logical px): a glyph that would
@@ -777,17 +874,34 @@ impl GpuRenderer {
         clip_left: f32,
         clip_right: f32,
     ) -> f32 {
+        self.draw_text_inner(x, y, text, opts, clip_left, clip_right, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text_inner(
+        &mut self,
+        x: f32,
+        y: f32,
+        text: &str,
+        opts: DrawOpts,
+        clip_left: f32,
+        clip_right: f32,
+        force_mono: bool,
+    ) -> f32 {
         let s = self.scale;
-        let size_px = (opts.font_size * s).round() as u32;
-        let baseline_px = y * s + (size_px as f32 * 0.78);
+        let (font, size_px) = self.chrome_face_opt(opts.font_size, force_mono);
+        // The pixel face sets ascent == em, so its glyphs sit far higher above
+        // the baseline than the mono primary's 0.78 assumption — without the
+        // taller ratio the whole label rides up out of its row.
+        let baseline_ratio = if font == 3 { 0.92 } else { 0.78 };
+        let baseline_px = y * s + (size_px as f32 * baseline_ratio);
         let fg = srgb_rgba_to_linear(opts.color);
         let clip_l = clip_left * s;
         let clip_px = clip_right * s;
         let mut pen = x * s;
         for ch in text.chars() {
             if ch == ' ' {
-                let adv = self.shaper.cell_advance(size_px as f32);
-                pen += adv;
+                pen += self.chrome_space_advance(size_px as f32, font);
                 continue;
             }
             let key = GlyphKey {
@@ -795,14 +909,9 @@ impl GpuRenderer {
                 bold: opts.bold,
                 italic: opts.italic,
                 size_px,
-                font: 0,
+                font,
             };
-            let Some(entry) = self.atlas.get_or_bake(
-                &self.device,
-                &self.queue,
-                &mut self.shaper,
-                key,
-            ) else {
+            let Some(entry) = self.chrome_glyph(key) else {
                 continue;
             };
             let glyph_x = pen + entry.bearing_x as f32;
@@ -1505,7 +1614,7 @@ impl GpuRenderer {
     /// chrome icon. All logical px.
     fn draw_copy_icon(&mut self, bx: f32, by: f32, bw: f32, bh: f32) {
         let bg = crate::theme::with_alpha(crate::theme::surface_active(), 0xE0);
-        self.round_rect_fill(bx, by, bw, bh, crate::theme::RADIUS_SM, bg);
+        self.round_rect_fill(bx, by, bw, bh, crate::theme::radius_sm(), bg);
         let isz = crate::theme::ICON_SIZE;
         self.queue_icon(
             "copy",
@@ -3211,6 +3320,7 @@ impl GpuRenderer {
         self.chrome.clear();
         self.image_quads.clear();
         self.icon_quads.clear();
+        self.hover_pointer = false;
     }
 
     /// Drop pending chrome icons only. Icons draw in their own pass *after*
@@ -3309,6 +3419,7 @@ impl GpuRenderer {
             "plus" => include_str!("../assets/icons/plus.svg"),
             "minus" => include_str!("../assets/icons/minus.svg"),
             "panel-left" => include_str!("../assets/icons/panel-left.svg"),
+            "panel-right" => include_str!("../assets/icons/panel-right.svg"),
             "folder-tree" => include_str!("../assets/icons/folder-tree.svg"),
             "folder-open" => include_str!("../assets/icons/folder-open.svg"),
             "folder-plus" => include_str!("../assets/icons/folder-plus.svg"),
@@ -3415,6 +3526,66 @@ impl GpuRenderer {
         })
     }
 
+    /// Dot-matrix counterpart of `icon_svg`, used when the active Shape asks for
+    /// pixel chrome. Falling back to `icon_svg` on a miss is deliberate: the set
+    /// covers everything but the two brand marks (github, claude), which have no
+    /// honest pixel form, and a miss should show the vector icon rather than a
+    /// hole. Sourced from pixelarticons (MIT) plus the panel/tree glyphs drawn
+    /// here — see assets/icons/pixel/LICENSE.
+    fn icon_svg_pixel(name: &str) -> Option<&'static str> {
+        Some(match name {
+            "arrow-down" => include_str!("../assets/icons/pixel/arrow-down.svg"),
+            "arrow-up" => include_str!("../assets/icons/pixel/arrow-up.svg"),
+            "braces" => include_str!("../assets/icons/pixel/braces.svg"),
+            "chevron-down" => include_str!("../assets/icons/pixel/chevron-down.svg"),
+            "chevron-left" => include_str!("../assets/icons/pixel/chevron-left.svg"),
+            "chevron-right" => include_str!("../assets/icons/pixel/chevron-right.svg"),
+            "chevron-up" => include_str!("../assets/icons/pixel/chevron-up.svg"),
+            "chevrons-down-up" => include_str!("../assets/icons/pixel/chevrons-down-up.svg"),
+            "columns-2" => include_str!("../assets/icons/pixel/columns-2.svg"),
+            "copy" => include_str!("../assets/icons/pixel/copy.svg"),
+            "ellipsis-horizontal" => include_str!("../assets/icons/pixel/ellipsis-horizontal.svg"),
+            "ellipsis-vertical" => include_str!("../assets/icons/pixel/ellipsis-vertical.svg"),
+            "external-link" => include_str!("../assets/icons/pixel/external-link.svg"),
+            "file" => include_str!("../assets/icons/pixel/file.svg"),
+            "file-code" => include_str!("../assets/icons/pixel/file-code.svg"),
+            "file-plus" => include_str!("../assets/icons/pixel/file-plus.svg"),
+            "file-text" => include_str!("../assets/icons/pixel/file-text.svg"),
+            "folder" => include_str!("../assets/icons/pixel/folder.svg"),
+            "folder-open" => include_str!("../assets/icons/pixel/folder-open.svg"),
+            "folder-plus" => include_str!("../assets/icons/pixel/folder-plus.svg"),
+            "folder-tree" => include_str!("../assets/icons/pixel/folder-tree.svg"),
+            "git-branch" => include_str!("../assets/icons/pixel/git-branch.svg"),
+            "git-commit-horizontal" => include_str!("../assets/icons/pixel/git-commit-horizontal.svg"),
+            "image" => include_str!("../assets/icons/pixel/image.svg"),
+            "info" => include_str!("../assets/icons/pixel/info.svg"),
+            "lightbulb" => include_str!("../assets/icons/pixel/lightbulb.svg"),
+            "maximize" => include_str!("../assets/icons/pixel/maximize.svg"),
+            "message-square-warning" => include_str!("../assets/icons/pixel/message-square-warning.svg"),
+            "minus" => include_str!("../assets/icons/pixel/minus.svg"),
+            "octagon-alert" => include_str!("../assets/icons/pixel/octagon-alert.svg"),
+            "panel-bottom" => include_str!("../assets/icons/pixel/panel-bottom.svg"),
+            "panel-bottom-dashed" => include_str!("../assets/icons/pixel/panel-bottom-dashed.svg"),
+            "panel-left" => include_str!("../assets/icons/pixel/panel-left.svg"),
+            "panel-right" => include_str!("../assets/icons/pixel/panel-right.svg"),
+            "panel-top" => include_str!("../assets/icons/pixel/panel-top.svg"),
+            "panel-top-dashed" => include_str!("../assets/icons/pixel/panel-top-dashed.svg"),
+            "plus" => include_str!("../assets/icons/pixel/plus.svg"),
+            "rotate-cw" => include_str!("../assets/icons/pixel/rotate-cw.svg"),
+            "rows-2" => include_str!("../assets/icons/pixel/rows-2.svg"),
+            "settings-2" => include_str!("../assets/icons/pixel/settings-2.svg"),
+            "sparkles" => include_str!("../assets/icons/pixel/sparkles.svg"),
+            "square" => include_str!("../assets/icons/pixel/square.svg"),
+            "square-check" => include_str!("../assets/icons/pixel/square-check.svg"),
+            "terminal" => include_str!("../assets/icons/pixel/terminal.svg"),
+            "triangle-alert" => include_str!("../assets/icons/pixel/triangle-alert.svg"),
+            "undo-2" => include_str!("../assets/icons/pixel/undo-2.svg"),
+            "users" => include_str!("../assets/icons/pixel/users.svg"),
+            "x" => include_str!("../assets/icons/pixel/x.svg"),
+            _ => return None,
+        })
+    }
+
     /// Rasterize an SVG into a square `px`-side RGBA8 buffer. `currentColor`
     /// is forced white: only the alpha channel matters because icons draw
     /// through the glyph tint path (texel.a × fg.rgb), so the theme color is
@@ -3465,11 +3636,24 @@ impl GpuRenderer {
         if px == 0 {
             return;
         }
-        let key = format!("__icon:{name}:{px}");
+        // Under a pixel Shape the dot-matrix cut replaces the vector one, and it
+        // only stays crisp on whole multiples of its 24-unit grid — the icon
+        // equivalent of the font's dot snapping. Floor rather than round: an
+        // icon that grew past the box its caller reserved would collide with
+        // neighbouring chrome, while one that shrinks just gets recentred below.
+        let pixel = crate::theme::pixel_chrome().then(|| Self::icon_svg_pixel(name)).flatten();
+        let draw_px = match pixel {
+            Some(_) if px >= ICON_GRID_PX => px / ICON_GRID_PX * ICON_GRID_PX,
+            _ => px,
+        };
+        let key = match pixel {
+            Some(_) => format!("__iconp:{name}:{draw_px}"),
+            None => format!("__icon:{name}:{px}"),
+        };
         if !self.images.contains_key(&key) {
-            let Some(svg) = Self::icon_svg(name) else { return };
-            let Some(rgba) = Self::rasterize_icon(svg, px) else { return };
-            self.upload_image(&key, &rgba, px, px);
+            let Some(svg) = pixel.or_else(|| Self::icon_svg(name)) else { return };
+            let Some(rgba) = Self::rasterize_icon(svg, draw_px) else { return };
+            self.upload_image(&key, &rgba, draw_px, draw_px);
         }
         if !self.images.contains_key(&key) {
             return;
@@ -3477,8 +3661,12 @@ impl GpuRenderer {
         // Snap to whole device pixels: the texture is rasterized 1:1 at `px`,
         // so a fractional dest makes the linear sampler blur / fringe the
         // edges ("마우스오버 픽셀 보임"). Integer dest = crisp 1:1 blit.
-        let (dx, dy) = ((x * self.scale).round(), (y * self.scale).round());
-        let dpx = px as f32;
+        let inset = ((px - draw_px) / 2) as f32;
+        let (dx, dy) = (
+            (x * self.scale).round() + inset,
+            (y * self.scale).round() + inset,
+        );
+        let dpx = draw_px as f32;
         self.icon_quads.push((
             key,
             CellInstance {

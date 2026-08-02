@@ -45,6 +45,8 @@ pub(crate) struct SettingsCtx {
     pub scroll: f32,
     /// Active theme key ("dark", "catppuccin-mocha", "custom"…).
     pub theme: String,
+    /// Active silhouette key ("rounded" · "sharp" · "pixel").
+    pub shape: String,
     /// settings.json has a `custom_theme` object → show the Custom card.
     pub has_custom_theme: bool,
     pub accent: String,
@@ -76,6 +78,10 @@ pub(crate) struct SettingsCtx {
     pub student_selected: Option<String>,
     pub student_persona: String,
     pub student_caret: usize,
+    /// Feedback 본문 버퍼·캐럿·진단 첨부 스위치.
+    pub feedback_body: String,
+    pub feedback_caret: usize,
+    pub feedback_diag: bool,
     /// 설정 화면 위에 덮어 그릴 토스트 (메시지, 알파). 설정 오버레이가 chrome
     /// 토스트를 가리므로 여기서 다시 그린다 — 출처는 동일한 collab.toast 슬롯.
     pub toast: Option<(String, f32)>,
@@ -121,12 +127,12 @@ pub(crate) mod textedit {
     }
 }
 
-/// persona 평문을 편집 박스 폭에 맞춰 시각 라인들로 접는다(word-wrap).
+/// 평문을 편집 박스 폭에 맞춰 시각 라인들로 접는다(word-wrap).
 /// 각 원소 = (그 시각 라인 문자열, 그 라인 첫 글자의 전역 char 인덱스).
 /// '\n' 은 강제 개행, 그 외엔 폭 초과 시 공백 우선(없으면 글자 단위) 분할.
 /// 빈 텍스트도 시각 라인 1개(빈 줄)를 돌려준다 — 캐럿 그릴 자리가 필요하다.
-/// 평문 persona 는 보통 줄바꿈 없는 긴 문단이라 wrap 없이는 박스 밖으로 잘린다.
-fn wrap_persona(
+/// 사람이 쓴 문단은 보통 줄바꿈 없이 길어서, wrap 없이는 박스 밖으로 잘린다.
+fn wrap_lines(
     g: &mut gpu::GpuRenderer,
     text: &str,
     max_w: f32,
@@ -179,7 +185,7 @@ fn wrap_persona(
 
 /// wrap 결과에서 캐럿의 (시각 라인 번호, 라인 내 열)을 찾는다. 소프트 wrap
 /// 경계(공백/글자 접힘)에선 아랫줄 맨 앞에 둔다 — 강제 '\n' 경계에선 윗줄 끝에.
-fn persona_visual_caret(vis: &[(String, usize)], caret: usize) -> (usize, usize) {
+fn visual_caret(vis: &[(String, usize)], caret: usize) -> (usize, usize) {
     let mut result = (
         vis.len().saturating_sub(1),
         vis.last().map(|(s, _)| s.chars().count()).unwrap_or(0),
@@ -216,25 +222,21 @@ impl App {
     /// Sidebar "Settings" entry — same tab-box style as the session tabs, sat
     /// just below the "+" new-window button so it reads as the last item in the
     /// tab list (Warp-style). Logical px; mirrors `sidebar_layout`'s geometry.
-    pub(crate) fn settings_btn_rect(&self, _win_h_logical: f32) -> Rect {
-        // 이 버튼은 세션 사이드바 탭 리스트의 마지막 항목이라, 사이드바가 없으면
-        // (top 모드 또는 사이드바 접힘) 그려지지도 않는다. 그런데 rect 는 매 프레임
-        // 저장돼(render) 클릭 hit-test 에 남는다 — top 모드에서 이 유령 rect 가
-        // 설정 화면 좌측 카테고리 nav(같은 좌상단 영역)의 Appearance·Shell 클릭을
-        // 가로채 페이지 전환이 안 됐다(거노). 안 그려질 땐 hit 대상도 없어야 하므로
-        // 무효 rect 를 돌려준다. 설정 진입점은 타이틀바 톱니(settings_toggle)가 담당.
-        if self.tabs_on_top || !self.sidebar_visible {
-            return (0.0, 0.0, 0.0, 0.0);
-        }
-        let n = self.windows.len();
-        let tab_x = SIDEBAR_TAB_INSET;
-        let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
-        let top = TITLE_HEIGHT + 8.0;
-        let stride = SIDEBAR_TAB_H + SIDEBAR_TAB_GAP;
-        let plus_y = top + n as f32 * stride;
-        // Below the 28px "+" button, with a slightly larger gap as a divider.
-        let y = plus_y + 28.0 + SIDEBAR_TAB_GAP + 6.0;
-        (tab_x, y, tab_w, SIDEBAR_TAB_H)
+    pub(crate) fn settings_btn_rect(&self, win_h_logical: f32) -> Rect {
+        // 사이드바 하단 트레이의 오른쪽 끝. 사이드바가 없으면(top 모드 또는 접힘)
+        // 그려지지도 않는데 rect 는 매 프레임 저장돼(render) hit-test 에 남는다 —
+        // top 모드에서 이 유령 rect 가 설정 화면 좌측 카테고리 nav(같은 좌상단
+        // 영역)의 Appearance·Shell 클릭을 가로채 페이지 전환이 안 됐다(거노).
+        // 안 그려질 땐 hit 대상도 없어야 하므로 무효 rect 를 돌려준다 — 그때의
+        // 설정 진입점은 우측 패널 Info 탭이 담당한다.
+        self.sidebar_tray_rects(win_h_logical)
+            .map_or((0.0, 0.0, 0.0, 0.0), |(_, _, _, s)| s)
+    }
+    /// 트레이의 피드백 버튼. 설정 바로 왼쪽 — 둘 다 "앱에 말을 거는" 쪽이라 묶어
+    /// 두고, 새 세션(`+`)과는 트레이 양 끝으로 갈라 성격을 구분한다.
+    pub(crate) fn feedback_btn_rect(&self, win_h_logical: f32) -> Rect {
+        self.sidebar_tray_rects(win_h_logical)
+            .map_or((0.0, 0.0, 0.0, 0.0), |(_, _, f, _)| f)
     }
 
     /// Re-emit the claude wrapper into the live shim dir so an already-open pane
@@ -412,6 +414,7 @@ impl App {
             theme: theme::theme_name().to_string(),
             has_custom_theme: socket::read_settings().get("custom_theme").is_some(),
             accent: theme::accent_name().to_string(),
+            shape: theme::shape_name().to_string(),
             font_size: self.font_size,
             wheel_pixel_gain: self.set_wheel_pixel_gain,
             tabs_on_top: self.tabs_on_top,
@@ -439,6 +442,9 @@ impl App {
             student_selected: self.students_selected.clone(),
             student_persona: self.students_persona.clone(),
             student_caret: self.students_caret,
+            feedback_body: self.feedback_body.clone(),
+            feedback_caret: self.feedback_caret,
+            feedback_diag: self.feedback_diag,
             toast: {
                 let a = self.collab_toast_alpha();
                 if a > 0.0 {
@@ -591,6 +597,20 @@ impl App {
                 socket::write_setting("accent", serde_json::Value::String(name));
                 self.repaint_all();
             }
+            SettingsAction::Shape(s) => {
+                theme::set_shape(s);
+                socket::write_setting("shape", serde_json::Value::String(s.to_string()));
+                self.repaint_all();
+            }
+            SettingsAction::MinContrast(label) => {
+                let v = theme::CONTRAST_PRESETS
+                    .iter()
+                    .find(|(l, _)| *l == label)
+                    .map_or(2.5, |(_, v)| *v);
+                theme::set_min_contrast(v);
+                socket::write_setting("min_contrast", serde_json::json!(v));
+                self.repaint_all();
+            }
             SettingsAction::TabPosition(pos) => {
                 let want_top = pos == "top";
                 if self.tabs_on_top != want_top {
@@ -683,6 +703,17 @@ impl App {
             SettingsAction::OpenCharactersJson => self.open_characters_json(),
             SettingsAction::RefreshStudentAssets => self.refresh_student_assets(),
             SettingsAction::SelectStudent(name) => self.select_student_for_edit(name),
+            SettingsAction::FocusFeedbackBody => {
+                self.feedback_caret = self.feedback_body.chars().count();
+                self.settings_input = Some(SettingsInput::FeedbackBody);
+            }
+            SettingsAction::ToggleFeedbackDiag => self.feedback_diag = !self.feedback_diag,
+            SettingsAction::SaveFeedback => self.save_feedback(),
+            SettingsAction::OpenFeedbackDir => {
+                let dir = feedback_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                open_path(&dir);
+            }
             SettingsAction::FocusStudentPersona => {
                 // 캐럿 저장소를 단일라인 필드와 공유하므로, 다른 필드가 만졌을 수
                 // 있는 캐럿을 persona 끝으로 되돌린다.
@@ -700,13 +731,13 @@ impl App {
     /// Route a keystroke into the focused single-line settings text field.
     /// Returns true if consumed. Full char-index caret: ←→ 이동, 중간
     /// 삽입/삭제, Home/End, host+V 붙여넣기. Enter=커밋(blur+저장 토스트),
-    /// Esc=blur. persona 멀티라인은 별도 경로.
+    /// Esc=blur. 멀티라인 필드는 별도 경로.
     pub(crate) fn settings_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::event::ElementState;
         use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
         let Some(field) = self.settings_input else { return false };
-        if field == SettingsInput::StudentPersona {
-            return self.student_persona_key(event);
+        if matches!(field, SettingsInput::StudentPersona | SettingsInput::FeedbackBody) {
+            return self.multiline_key(field, event);
         }
         if event.state != ElementState::Pressed {
             return true;
@@ -742,7 +773,9 @@ impl App {
                     Some(a) => &mut a.label,
                     None => return true,
                 },
-                SettingsInput::StudentPersona => unreachable!("handled above"),
+                SettingsInput::StudentPersona | SettingsInput::FeedbackBody => {
+                    unreachable!("multiline_key 가 먼저 가로챈다")
+                }
             };
             if *caret > buf.chars().count() {
                 *caret = buf.chars().count();
@@ -797,36 +830,43 @@ impl App {
         true
     }
 
-    /// persona 멀티라인 편집 키 라우팅. Enter=개행, Esc=저장+blur, 방향키 좌우로
-    /// 캐럿 이동, 문자/Space 삽입, Backspace 삭제. 저장은 blur 시(flush)라 매 키
-    /// characters.json 쓰기는 하지 않는다.
-    fn student_persona_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+    /// 멀티라인 편집 키 라우팅(persona · 피드백 본문). Enter=개행, 방향키 좌우로
+    /// 캐럿 이동, 문자/Space 삽입, Backspace 삭제.
+    ///
+    /// Esc 는 blur 인데 뒤처리가 필드마다 다르다 — persona 는 blur 가 곧 저장이라
+    /// characters.json 을 쓰고(매 키가 아니라 여기서만), 피드백은 저장 버튼이
+    /// 따로 있으니 버퍼만 남긴다. 그래서 Esc 만 borrow 전에 먼저 처리한다.
+    fn multiline_key(&mut self, field: SettingsInput, event: &winit::event::KeyEvent) -> bool {
         use winit::event::ElementState;
         use winit::keyboard::{Key, NamedKey};
         if event.state != ElementState::Pressed {
             return true;
         }
-        match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            if field == SettingsInput::StudentPersona {
                 self.flush_student_persona();
-                self.settings_input = None;
             }
-            Key::Named(NamedKey::Enter) => {
-                textedit::insert(&mut self.students_persona, &mut self.students_caret, '\n');
+            self.settings_input = None;
+            self.chrome_dirty = true;
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
             }
-            Key::Named(NamedKey::Backspace) => {
-                textedit::backspace(&mut self.students_persona, &mut self.students_caret);
-            }
-            Key::Named(NamedKey::ArrowLeft) => textedit::left(&mut self.students_caret),
-            Key::Named(NamedKey::ArrowRight) => {
-                textedit::right(&self.students_persona, &mut self.students_caret)
-            }
-            Key::Named(NamedKey::Space) => {
-                textedit::insert(&mut self.students_persona, &mut self.students_caret, ' ');
-            }
+            return true;
+        }
+        let (buf, caret) = if field == SettingsInput::FeedbackBody {
+            (&mut self.feedback_body, &mut self.feedback_caret)
+        } else {
+            (&mut self.students_persona, &mut self.students_caret)
+        };
+        match &event.logical_key {
+            Key::Named(NamedKey::Enter) => textedit::insert(buf, caret, '\n'),
+            Key::Named(NamedKey::Backspace) => textedit::backspace(buf, caret),
+            Key::Named(NamedKey::ArrowLeft) => textedit::left(caret),
+            Key::Named(NamedKey::ArrowRight) => textedit::right(buf, caret),
+            Key::Named(NamedKey::Space) => textedit::insert(buf, caret, ' '),
             Key::Character(t) => {
                 for ch in t.chars() {
-                    textedit::insert(&mut self.students_persona, &mut self.students_caret, ch);
+                    textedit::insert(buf, caret, ch);
                 }
             }
             _ => return true,
@@ -853,12 +893,17 @@ impl App {
     }
 
     /// 현재 포커스된 설정 필드에 텍스트를 삽입(IME commit·한글 조합 완성 경로 공용).
-    /// persona 는 students_caret, 단일라인 필드는 settings_caret 를 캐럿으로 쓴다.
+    /// 멀티라인 필드는 각자의 캐럿을, 단일라인 필드는 settings_caret 를 쓴다.
     pub(crate) fn settings_insert_text(&mut self, text: &str) {
         let Some(field) = self.settings_input else { return };
-        if field == SettingsInput::StudentPersona {
+        if matches!(field, SettingsInput::StudentPersona | SettingsInput::FeedbackBody) {
+            let (buf, caret) = if field == SettingsInput::FeedbackBody {
+                (&mut self.feedback_body, &mut self.feedback_caret)
+            } else {
+                (&mut self.students_persona, &mut self.students_caret)
+            };
             for ch in text.chars() {
-                textedit::insert(&mut self.students_persona, &mut self.students_caret, ch);
+                textedit::insert(buf, caret, ch);
             }
             self.chrome_dirty = true;
             return;
@@ -873,7 +918,9 @@ impl App {
                 Some(a) => &mut a.label,
                 None => return,
             },
-            SettingsInput::StudentPersona => unreachable!("handled above"),
+            SettingsInput::StudentPersona | SettingsInput::FeedbackBody => {
+                unreachable!("multiline_key 가 먼저 가로챈다")
+            }
         };
         if *caret > buf.chars().count() {
             *caret = buf.chars().count();
@@ -903,6 +950,91 @@ impl App {
         );
         self.regen_claude_shim();
     }
+
+    /// 피드백 본문을 `~/.config/kasaterm/feedback/` 에 마크다운 한 장으로 굳힌다.
+    ///
+    /// 보낼 곳이 아직 없다 — 그래서 "전송"이 아니라 "저장"이고, 파일로 남기는
+    /// 것까지가 이 기능의 전부다. 나중에 받는 창구가 생기면 이 폴더를 그대로
+    /// 올리면 되도록 한 건=한 파일로 둔다.
+    pub(crate) fn save_feedback(&mut self) {
+        let body = self.feedback_body.trim().to_string();
+        if body.is_empty() {
+            return;
+        }
+        let dir = feedback_dir();
+        if std::fs::create_dir_all(&dir).is_err() {
+            self.set_toast("피드백 폴더를 못 만들었어요".to_string());
+            return;
+        }
+        let stamp = local_stamp();
+        let mut doc = format!("# {stamp}\n\n{body}\n");
+        if self.feedback_diag {
+            doc.push_str(&format!("\n---\n{}\n", diag_line()));
+        }
+        // 같은 분 안에 두 번 저장해도 덮어쓰지 않게 뒤에 번호를 붙인다.
+        let base = stamp.replace([' ', ':'], "-");
+        let mut path = dir.join(format!("{base}.md"));
+        let mut n = 2;
+        while path.exists() {
+            path = dir.join(format!("{base}-{n}.md"));
+            n += 1;
+        }
+        match std::fs::write(&path, doc) {
+            Ok(()) => {
+                self.feedback_body.clear();
+                self.feedback_caret = 0;
+                self.settings_input = None;
+                self.set_toast("피드백을 저장했어요".to_string());
+            }
+            Err(e) => self.set_toast(format!("저장 실패: {e}")),
+        }
+    }
+}
+
+/// 저장된 피드백이 쌓이는 폴더.
+fn feedback_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".config/kasaterm/feedback")
+}
+
+/// 제보에 붙는 진단 한 줄. 이게 없으면 대부분의 제보가 "어느 버전에서요?"로
+/// 한 번 더 왕복한다.
+fn diag_line() -> String {
+    format!(
+        "kasaterm {} · {} {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}
+
+/// 파일명·머리글에 쓸 지역시각 `YYYY-MM-DD HH:MM`.
+///
+/// 시간대 변환은 OS 에 맡긴다 — 직접 하려면 tz 데이터베이스를 들여야 하고,
+/// 9시간 어긋난 시각은 시각이 없는 것보다 나쁘다. libc 를 macOS 타깃에만
+/// 붙여 둬서 그 밖에서는 epoch 초로 물러난다(정렬은 그대로 된다).
+fn local_stamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    #[cfg(target_os = "macos")]
+    {
+        let t = secs as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&t, &mut tm) };
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        secs.to_string()
+    }
 }
 
 /// Paint the full settings screen. Returns the frame's clickable rects plus
@@ -918,7 +1050,7 @@ pub(crate) fn paint_settings(
     g.rect(ax, ay, aw, ah, theme::bg());
 
     // ── Left category nav ────────────────────────────────────────────────
-    g.rect(ax, ay, CAT_W, ah, theme::bg());
+    g.rect(ax, ay, CAT_W, ah, theme::panel_bg());
     g.rect(ax + CAT_W - 1.0, ay, 1.0, ah, theme::border());
     g.draw_text(
         ax + 20.0,
@@ -932,6 +1064,7 @@ pub(crate) fn paint_settings(
         (SettingsCat::Shell, "Shell", "terminal"),
         (SettingsCat::Claude, "Claude", "claude"),
         (SettingsCat::Students, "Students", "users"),
+        (SettingsCat::Feedback, "Feedback", "message-square-warning"),
     ];
     let mut cy = ay + 52.0;
     let mut active_label = "General";
@@ -942,10 +1075,11 @@ pub(crate) fn paint_settings(
             active_label = label;
         }
         let hover = inside(r, ctx.cursor);
+        g.hover_pointer |= hover;
         if selected {
-            round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD, theme::surface_active());
+            round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(), theme::surface_active());
         } else if hover {
-            round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD, theme::surface_hover());
+            round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(), theme::surface_hover());
         }
         let icon_c = if selected { theme::text() } else { theme::text_mute() };
         g.queue_icon(icon, r.0 + 12.0, r.1 + (r.3 - 15.0) / 2.0, 15.0, icon_c);
@@ -1171,12 +1305,13 @@ pub(crate) fn paint_settings(
                 let r = (x, cy, card_w, card_h);
                 let sel = ctx.theme == key;
                 let hover = inside(r, ctx.cursor);
+                g.hover_pointer |= hover;
                 // Selection / hover ring — a slightly larger plate behind the
                 // card (same halo trick as the accent swatches).
                 if sel {
-                    round_rect(g, x - 2.0, cy - 2.0, card_w + 4.0, card_h + 4.0, theme::RADIUS_MD + 2.0, theme::accent());
+                    round_rect(g, x - 2.0, cy - 2.0, card_w + 4.0, card_h + 4.0, theme::radius_md() + 2.0, theme::accent());
                 } else if hover {
-                    round_rect(g, x - 2.0, cy - 2.0, card_w + 4.0, card_h + 4.0, theme::RADIUS_MD + 2.0, theme::surface_hover());
+                    round_rect(g, x - 2.0, cy - 2.0, card_w + 4.0, card_h + 4.0, theme::radius_md() + 2.0, theme::surface_hover());
                 }
                 // Custom card has no static palette — preview with the live
                 // colors instead (it IS the applied palette when selected).
@@ -1190,17 +1325,19 @@ pub(crate) fn paint_settings(
                         (theme::bg(), theme::text(), theme::text_mute(), a)
                     }
                 };
-                round_rect(g, x, cy, card_w, card_h, theme::RADIUS_MD, bg);
+                panel_rect(g, x, cy, card_w, card_h, theme::radius_md(), bg);
                 // Prompt sample in the theme's own text color.
-                g.draw_text(
+                // 미리보기 줄은 터미널 폰트 고정 — 이 카드가 대변하는 건 UI 크롬이
+                // 아니라 터미널 본문이고, 본문 폰트는 형태 축이 건드리지 않는다.
+                g.draw_text_mono(
                     x + 12.0, cy + 12.0, "❯ ls -la",
                     gpu::DrawOpts { font_size: 12.0, color: text, bold: false, italic: false },
                 );
                 // ANSI 1..=6 dots (red green yellow blue magenta cyan).
                 for i in 0..6 {
                     let c = ansi[i + 1];
-                    round_rect(
-                        g, x + 12.0 + i as f32 * 16.0, cy + 36.0, 10.0, 10.0, 5.0,
+                    circle_rect(
+                        g, x + 12.0 + i as f32 * 16.0, cy + 36.0, 10.0,
                         [c[0], c[1], c[2], 255],
                     );
                 }
@@ -1218,6 +1355,51 @@ pub(crate) fn paint_settings(
             }
             let rows = idx.div_ceil(per_row);
             y += rows as f32 * (card_h + gap) + ROW_GAP;
+            // 형태 — 팔레트와 독립된 축. 각 카드가 *자기* 실루엣으로 그려진다
+            // (모서리 반경 · 테두리 두께 · 그림자 · 점과 캡슐의 둥글기) — 테마
+            // 카드가 팔레트를 미리 보여주는 것과 같은 규칙이라, 고르기 전에
+            // 형태가 눈에 보인다.
+            y = field_header(g, fx, y, clip, "Shape", &["모서리 · 점 · 토글의 실루엣 (팔레트와 별개 축)"]);
+            if y > clip {
+                let (sw, sh) = (108.0_f32, 58.0_f32);
+                let mut sxp = fx;
+                for (key, label, sp) in theme::SHAPE_PRESETS {
+                    let r = (sxp, y, sw, sh);
+                    let sel = ctx.shape.as_str() == *key;
+                    let hover = inside(r, ctx.cursor);
+                    g.hover_pointer |= hover;
+                    if sel || hover {
+                        let ring = if sel { theme::accent() } else { theme::surface_hover() };
+                        round_rect(g, sxp - 2.0, y - 2.0, sw + 4.0, sh + 4.0, sp.radius_md + 2.0, ring);
+                    }
+                    if sp.shadow_offset > 0.0 {
+                        round_rect(g, sxp + sp.shadow_offset, y + sp.shadow_offset, sw, sh, sp.radius_md, [0, 0, 0, 0x66]);
+                    }
+                    // 두꺼운 테두리는 곧 픽셀 아웃라인 — panel_rect 와 같은 검정을
+                    // 써야 카드가 실제로 그려질 모습을 보여준다.
+                    let outline = if sp.border_w > 1.0 { [0, 0, 0, 0xE0] } else { theme::border() };
+                    round_rect(g, sxp, y, sw, sh, sp.radius_md, outline);
+                    let b = sp.border_w;
+                    round_rect(g, sxp + b, y + b, sw - b * 2.0, sh - b * 2.0, (sp.radius_md - b).max(0.0), theme::surface());
+                    // 점과 캡슐 — roundness 가 0 이면 사각으로 떨어진다.
+                    round_rect(g, sxp + 12.0, y + 13.0, 10.0, 10.0, 5.0 * sp.roundness, theme::accent());
+                    round_rect(g, sxp + 28.0, y + 13.0, 28.0, 10.0, 5.0 * sp.roundness, theme::text_mute());
+                    g.draw_text(
+                        sxp + 12.0,
+                        y + sh - 22.0,
+                        label,
+                        gpu::DrawOpts {
+                            font_size: 11.5,
+                            color: if sel { theme::text() } else { theme::text_dim() },
+                            bold: sel,
+                            italic: false,
+                        },
+                    );
+                    rects.push((SettingsAction::Shape(*key), r));
+                    sxp += sw + 12.0;
+                }
+            }
+            y += 58.0 + ROW_GAP;
             y = field_header(g, fx, y, clip, "Accent color", &["선택 영역 · 커서 · 링크 색"]);
             if y > clip {
                 let mut cxp = fx;
@@ -1226,19 +1408,78 @@ pub(crate) fn paint_settings(
                     let r = (cxp, y, sz, sz);
                     let sel = *name == ctx.accent;
                     let hover = inside(r, ctx.cursor);
+                    g.hover_pointer |= hover;
                     // Halo behind the swatch: text-colored disc when selected,
                     // muted disc on hover — same feedback the other controls give.
                     if sel {
-                        round_rect(g, r.0 - 3.0, r.1 - 3.0, sz + 6.0, sz + 6.0, (sz + 6.0) / 2.0, theme::text());
+                        circle_rect(g, r.0 - 3.0, r.1 - 3.0, sz + 6.0, theme::text());
                     } else if hover {
-                        round_rect(g, r.0 - 3.0, r.1 - 3.0, sz + 6.0, sz + 6.0, (sz + 6.0) / 2.0, theme::text_mute());
+                        circle_rect(g, r.0 - 3.0, r.1 - 3.0, sz + 6.0, theme::text_mute());
                     }
-                    round_rect(g, r.0, r.1, sz, sz, sz / 2.0, *col);
+                    circle_rect(g, r.0, r.1, sz, *col);
                     rects.push((SettingsAction::Accent(name.to_string()), r));
                     cxp += sz + 14.0;
                 }
             }
             y += 30.0 + ROW_GAP;
+            // 최소 대비 — 앱이 스스로 이름 붙인 색만 대상이다. 각 버튼은 자기
+            // 임계를 적용한 샘플을 그려서, 고르기 전에 그 값이 실제로 얼마나
+            // 끌어올리는지 눈으로 비교된다.
+            y = field_header(
+                g, fx, y, clip, "Minimum contrast",
+                &["앱이 직접 지정한 색이 배경에 묻힐 때만 끌어올린다 (dim 은 제외)"],
+            );
+            if y > clip {
+                let (bw, bh) = (86.0_f32, 44.0_f32);
+                let mut bxp = fx;
+                let cur = theme::min_contrast();
+                // 샘플은 카드 배경에서 글자색 쪽으로 아주 조금 민 색 — 고정
+                // 회색으로 두면 다크 팔레트에선 이미 잘 보여서 네 버튼이 전부
+                // 같아 보인다. 배경 기준이라 어느 테마에서든 "거의 안 보이는"
+                // 지점에서 출발한다.
+                let (sf, tx) = (theme::surface(), theme::text());
+                let mut sample = [0u8, 0, 0, 0xFF];
+                for i in 0..3 {
+                    sample[i] = (sf[i] as f32 + (tx[i] as f32 - sf[i] as f32) * 0.18).round() as u8;
+                }
+                for (label, v) in theme::CONTRAST_PRESETS {
+                    let r = (bxp, y, bw, bh);
+                    // 사용자가 settings.json 에 임의 값을 넣을 수 있으니 동등이
+                    // 아니라 가장 가까운 프리셋을 선택으로 본다.
+                    let sel = theme::CONTRAST_PRESETS
+                        .iter()
+                        .min_by(|a, b| (a.1 - cur).abs().total_cmp(&(b.1 - cur).abs()))
+                        .is_some_and(|(l, _)| l == label);
+                    let hover = inside(r, ctx.cursor);
+                    g.hover_pointer |= hover;
+                    if sel || hover {
+                        let ring = if sel { theme::accent() } else { theme::surface_hover() };
+                        round_rect(g, bxp - 2.0, y - 2.0, bw + 4.0, bh + 4.0, theme::radius_md() + 2.0, ring);
+                    }
+                    round_rect(g, bxp, y, bw, bh, theme::radius_md(), theme::surface());
+                    g.draw_text(
+                        bxp + 10.0, y + 8.0, "Aa 가나",
+                        gpu::DrawOpts {
+                            font_size: 12.0,
+                            color: theme::enforce_contrast_at(sample, theme::surface(), *v),
+                            bold: false,
+                            italic: false,
+                        },
+                    );
+                    g.draw_text(
+                        bxp + 10.0, y + bh - 18.0, label,
+                        gpu::DrawOpts {
+                            font_size: 11.0,
+                            color: if sel { theme::text() } else { theme::text_dim() },
+                            bold: sel,
+                            italic: false,
+                        },
+                    );
+                    rects.push((SettingsAction::MinContrast(label), r));
+                    bxp += bw + 10.0;
+                }
+            }
+            y += 44.0 + ROW_GAP;
             // 폰트 크기 스테퍼 — 값은 즉시 적용(그리드 리플로우)되고
             // settings.json 에 저장돼 재시작에도 유지된다.
             y = field_header(g, fx, y, clip, "Font size", &["터미널 셀 폰트 크기 (기본 16 · Cmd+/- 줌과 별개인 기준값)"]);
@@ -1333,14 +1574,14 @@ pub(crate) fn paint_settings(
                     let active = ctx.claude_account == id;
                     // 라디오 — 켜지면 accent 링 + 가운데 점.
                     let dot = (fx, y + (row_h - 16.0) / 2.0, 16.0, 16.0);
-                    round_rect(g, dot.0, dot.1, dot.2, dot.3, 8.0,
+                    circle_rect(g, dot.0, dot.1, dot.2,
                         if active { theme::accent() } else { theme::surface_active() });
                     if active {
-                        round_rect(g, dot.0 + 5.0, dot.1 + 5.0, 6.0, 6.0, 3.0, theme::bg());
+                        circle_rect(g, dot.0 + 5.0, dot.1 + 5.0, 6.0, theme::bg());
                     }
                     let hit = (fx - 4.0, y, 24.0, row_h);
                     if inside(hit, ctx.cursor) && !active {
-                        round_rect(g, dot.0, dot.1, dot.2, dot.3, 8.0, theme::surface_hover());
+                        circle_rect(g, dot.0, dot.1, dot.2, theme::surface_hover());
                     }
                     rects.push((SettingsAction::ClaudeAccount(id.clone()), hit));
                     // 오른쪽 끝에 그 슬롯의 진짜 신원 — 라벨은 거노가 붙인 별명이라
@@ -1382,7 +1623,7 @@ pub(crate) fn paint_settings(
                 let label = "+ 계정 추가";
                 let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
                 let r = (fx, y, bw, 34.0);
-                round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
+                round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(),
                     if inside(r, ctx.cursor) { theme::surface_hover() } else { theme::surface_active() });
                 g.draw_text(
                     r.0 + 14.0, r.1 + 9.0, label,
@@ -1468,8 +1709,9 @@ pub(crate) fn paint_settings(
                     let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
                     let r = (bx, y, bw, 34.0);
                     let hover = inside(r, ctx.cursor);
+                    g.hover_pointer |= hover;
                     round_rect(
-                        g, r.0, r.1, r.2, r.3, theme::RADIUS_MD,
+                        g, r.0, r.1, r.2, r.3, theme::radius_md(),
                         if hover { theme::surface_hover() } else { theme::surface_active() },
                     );
                     g.draw_text(
@@ -1491,13 +1733,14 @@ pub(crate) fn paint_settings(
                     let r = (fx - 6.0, y - 2.0, fw.min(380.0), row_h);
                     let selected = ctx.student_selected.as_deref() == Some(name.as_str());
                     let hover = inside(r, ctx.cursor);
+                    g.hover_pointer |= hover;
                     if selected {
-                        round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_SM, theme::surface_active());
+                        round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_active());
                     } else if hover {
-                        round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_SM, theme::surface_hover());
+                        round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_hover());
                     }
                     let sw = theme::character_accent(name).unwrap_or([128, 128, 128, 255]);
-                    round_rect(g, fx, y + 3.0, 14.0, 14.0, theme::RADIUS_SM, sw);
+                    round_rect(g, fx, y + 3.0, 14.0, 14.0, theme::radius_sm(), sw);
                     g.draw_text(
                         fx + 24.0, y, name,
                         gpu::DrawOpts { font_size: 14.0, color: theme::text(), bold: selected, italic: false },
@@ -1516,35 +1759,71 @@ pub(crate) fn paint_settings(
                 y += ROW_GAP;
                 y = field_header(g, fx, y, clip, &format!("{sel} · persona"),
                     &["성격·말투를 평문으로. Enter=줄바꿈, 바깥 클릭·Esc=저장"]);
-                let box_w = fw.min(560.0);
-                let line_h = 18.0_f32;
-                let vis = wrap_persona(g, &ctx.student_persona, box_w - 24.0, 13.0);
-                let box_h = (vis.len() as f32 * line_h + 16.0).max(56.0);
-                let focused = ctx.input == Some(SettingsInput::StudentPersona);
-                if y < ay + ah && y + box_h > clip {
-                    let bg = if focused { theme::surface_hover() } else { theme::surface_active() };
-                    round_rect(g, fx, y, box_w, box_h, theme::RADIUS_MD, bg);
-                    rects.push((SettingsAction::FocusStudentPersona, (fx, y, box_w, box_h)));
-                }
-                let (caret_vl, caret_col) = persona_visual_caret(&vis, ctx.student_caret);
-                let mut ly = y + 9.0;
-                for (vi, (line, _)) in vis.iter().enumerate() {
-                    if ly > clip && ly < ay + ah - line_h {
-                        g.draw_text(
-                            fx + 12.0, ly, line,
-                            gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
-                        );
-                        if focused && ctx.caret_on && vi == caret_vl {
-                            let pre: String = line.chars().take(caret_col).collect();
-                            let cx = fx + 12.0 + g.measure_chrome_text(&pre, 13.0, false);
-                            g.rect(cx, ly, 1.5, line_h - 2.0, theme::accent());
-                        }
-                    }
-                    ly += line_h;
-                }
-                y += box_h;
+                y += multiline_field(
+                    g, &mut rects, ctx, (fx, y, fw.min(560.0)), &ctx.student_persona,
+                    ctx.student_caret, SettingsInput::StudentPersona,
+                    SettingsAction::FocusStudentPersona, clip,
+                );
             }
             content_bottom = y;
+        }
+        SettingsCat::Feedback => {
+            let mut y = fy;
+            y = field_header(g, fx, y, clip, "무엇이 불편했나요",
+                &["버그 · 이상한 동작 · 있었으면 하는 것 — 아무 형식이나 괜찮아요",
+                  "Enter=줄바꿈, Esc=포커스 해제"]);
+            y += multiline_field(
+                g, &mut rects, ctx, (fx, y, fw.min(560.0)), &ctx.feedback_body,
+                ctx.feedback_caret, SettingsInput::FeedbackBody,
+                SettingsAction::FocusFeedbackBody, clip,
+            );
+            y += ROW_GAP;
+            let diag = diag_line();
+            y = field_header(g, fx, y, clip, "진단 정보 함께 남기기", &[diag.as_str()]);
+            if y > clip {
+                let tr = (fx, y, 52.0, 30.0);
+                toggle(g, tr, ctx.feedback_diag, ctx.cursor);
+                rects.push((SettingsAction::ToggleFeedbackDiag, tr));
+            }
+            y += 30.0 + ROW_GAP;
+            // 보내는 게 아니라 쌓는 거라 "저장". 받는 곳이 생기기 전에 "보내기"라고
+            // 쓰면 안 간 걸 갔다고 말하는 셈이다.
+            if y > clip {
+                let mut bx = fx;
+                let empty = ctx.feedback_body.trim().is_empty();
+                for (label, action, primary) in [
+                    ("저장", SettingsAction::SaveFeedback, true),
+                    ("저장된 피드백 열기", SettingsAction::OpenFeedbackDir, false),
+                ] {
+                    let bw = g.measure_chrome_text(label, 13.0, false) + 28.0;
+                    let r = (bx, y, bw, 34.0);
+                    let live = !(primary && empty);
+                    let hover = live && inside(r, ctx.cursor);
+                    g.hover_pointer |= hover;
+                    let bg = match (primary, live, hover) {
+                        (true, true, true) => theme::accent(),
+                        (true, true, false) => theme::with_alpha(theme::accent(), 200),
+                        (_, false, _) => theme::surface_active(),
+                        (false, _, true) => theme::surface_hover(),
+                        _ => theme::surface_active(),
+                    };
+                    round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(), bg);
+                    let fg = if primary && live { theme::bg() } else if live {
+                        theme::text()
+                    } else {
+                        theme::text_mute()
+                    };
+                    g.draw_text(
+                        r.0 + 14.0, r.1 + 9.0, label,
+                        gpu::DrawOpts { font_size: 13.0, color: fg, bold: primary, italic: false },
+                    );
+                    if live {
+                        rects.push((action, r));
+                    }
+                    bx += bw + 8.0;
+                }
+            }
+            content_bottom = y + 34.0;
         }
     }
 
@@ -1559,7 +1838,7 @@ pub(crate) fn paint_settings(
         let bx = ax + aw - box_w - 16.0;
         let by = ay + 12.0;
         let a = (235.0 * alpha).round() as u8;
-        round_rect(g, bx, by, box_w, box_h, theme::RADIUS_MD, theme::with_alpha(theme::surface_active(), a));
+        round_rect(g, bx, by, box_w, box_h, theme::radius_md(), theme::with_alpha(theme::surface_active(), a));
         let ta = (255.0 * alpha).round() as u8;
         g.draw_text(
             bx + px, by + py, msg,
@@ -1710,9 +1989,15 @@ struct AuthProbe {
 }
 
 /// 계정별 probe 캐시. 렌더가 매 프레임 도는 자리라 캐시 없이는 subprocess 폭주가
-/// 된다. 값이 `None` 이면 "조회 중"(또는 실패) — 그동안은 아무것도 안 그린다.
-/// TTL 을 두는 이유: 거노가 pane 에서 `/login` 을 마치면 클릭 없이 저절로 반영돼야
-/// 한다. 함수-로컬 static 이라 `struct App` 은 안 건드린다(병렬 작업 규칙).
+/// 된다. 값이 `None` 이면 **아직 한 번도 못 물어봤다**는 뜻 — 그동안은 아무것도
+/// 안 그린다. TTL 을 두는 이유: 거노가 pane 에서 `/login` 을 마치면 클릭 없이
+/// 저절로 반영돼야 한다. 함수-로컬 static 이라 `struct App` 은 안 건드린다.
+///
+/// 재조회를 걸 때 **옛 값을 지우지 않는다.** 예전엔 `None` 으로 덮어 "조회 중" 을
+/// 표시했는데, `claude auth status` 는 로그인 셸을 거쳐 claude 를 띄우는 일이라
+/// 초 단위로 걸린다 — TTL 20초마다 그만큼 계정 칸이 빈칸이 되어, 가만히 보고 있으면
+/// 계정이 주기적으로 풀리는 것처럼 깜빡였다(거노 2026-08-03). git 폴러가 일시적
+/// 실패에 마지막 값을 붙드는 것과 같은 이유로, 새 답이 올 때까지는 알던 값을 보인다.
 fn auth_probe(id: &str) -> Option<AuthProbe> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -1720,16 +2005,17 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
     type Cache = Mutex<HashMap<String, (Instant, Option<AuthProbe>)>>;
     static CACHE: OnceLock<Cache> = OnceLock::new();
     let cache = CACHE.get_or_init(Cache::default);
-    {
+    let stale = {
         let mut m = cache.lock().unwrap();
-        if let Some((at, v)) = m.get(id) {
-            if at.elapsed() < Duration::from_secs(20) {
-                return v.clone();
-            }
-        }
-        // 조회 중 표시를 먼저 박아 다음 프레임이 또 스폰하지 않게 한다.
-        m.insert(id.to_string(), (Instant::now(), None));
-    }
+        let prev = match m.get(id) {
+            Some((at, v)) if at.elapsed() < Duration::from_secs(20) => return v.clone(),
+            Some((_, v)) => v.clone(),
+            None => None,
+        };
+        // 시각만 새로 박아 다음 프레임이 또 스폰하지 않게 하고, 값은 그대로 둔다.
+        m.insert(id.to_string(), (Instant::now(), prev.clone()));
+        prev
+    };
     let key = id.to_string();
     let dir = socket::claude_account_dir(id);
     std::thread::spawn(move || {
@@ -1752,10 +2038,14 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
             email: if logged_in { slot_identity(dir.as_deref()) } else { String::new() },
         });
         if let Some(cache) = CACHE.get() {
-            cache.lock().unwrap().insert(key, (Instant::now(), probe));
+            let mut m = cache.lock().unwrap();
+            // 조회 자체가 실패했으면(셸이 안 뜸·JSON 이 아님) 알던 값을 유지한다 —
+            // 답을 못 받은 것과 "로그인 안 됐다" 는 답을 받은 것은 다르다.
+            let v = probe.or_else(|| m.get(&key).and_then(|(_, v)| v.clone()));
+            m.insert(key, (Instant::now(), v));
         }
     });
-    None
+    stale
 }
 
 /// 그 슬롯이 **정말로** 어느 계정인지. 로컬 `/claude-identity` 가 슬롯 토큰으로
@@ -1821,17 +2111,18 @@ fn segmented(
         .map(|(label, _, _)| g.measure_chrome_text(label, 13.0, true) + cell_pad * 2.0)
         .collect();
     let total: f32 = pad * 2.0 + widths.iter().sum::<f32>();
-    round_rect(g, x, y, total, SEG_H, theme::RADIUS_MD, theme::surface_active());
+    round_rect(g, x, y, total, SEG_H, theme::radius_md(), theme::surface_active());
     let mut cxp = x + pad;
     let cell_h = SEG_H - pad * 2.0;
     for (i, (label, sel, action)) in cells.iter().enumerate() {
         let cw = widths[i];
         let cell = (cxp, y + pad, cw, cell_h);
         let hover = inside(cell, cursor);
+        g.hover_pointer |= hover;
         if *sel {
-            round_rect(g, cell.0, cell.1, cell.2, cell.3, theme::RADIUS_SM, theme::accent());
+            round_rect(g, cell.0, cell.1, cell.2, cell.3, theme::radius_sm(), theme::accent());
         } else if hover {
-            round_rect(g, cell.0, cell.1, cell.2, cell.3, theme::RADIUS_SM, theme::surface_hover());
+            round_rect(g, cell.0, cell.1, cell.2, cell.3, theme::radius_sm(), theme::surface_hover());
         }
         let tw = g.measure_chrome_text(label, 13.0, *sel);
         g.draw_text(
@@ -1872,8 +2163,9 @@ fn help_text(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
 /// Square icon button for the font-size stepper (− / +).
 fn stepper_btn(g: &mut gpu::GpuRenderer, r: Rect, glyph: &str, cursor: (f32, f32)) {
     let hover = inside(r, cursor);
+    g.hover_pointer |= hover;
     round_rect(
-        g, r.0, r.1, r.2, r.3, theme::RADIUS_SM,
+        g, r.0, r.1, r.2, r.3, theme::radius_sm(),
         if hover { theme::surface_hover() } else { theme::surface_active() },
     );
     let isz = 14.0;
@@ -1888,6 +2180,7 @@ fn stepper_btn(g: &mut gpu::GpuRenderer, r: Rect, glyph: &str, cursor: (f32, f32
 
 fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, f32)) {
     let hover = inside(r, cursor);
+    g.hover_pointer |= hover;
     let track = if on {
         theme::accent()
     } else if hover {
@@ -1895,10 +2188,56 @@ fn toggle(g: &mut gpu::GpuRenderer, r: Rect, on: bool, cursor: (f32, f32)) {
     } else {
         theme::surface_active()
     };
-    round_rect(g, r.0, r.1, r.2, r.3, r.3 / 2.0, track);
+    pill_rect(g, r.0, r.1, r.2, r.3, track);
     let knob = r.3 - 8.0;
     let kx = if on { r.0 + r.2 - knob - 4.0 } else { r.0 + 4.0 };
-    round_rect(g, kx, r.1 + 4.0, knob, knob, knob / 2.0, theme::text());
+    circle_rect(g, kx, r.1 + 4.0, knob, theme::text());
+}
+
+/// 멀티라인 평문 편집기 — 배경 박스 + 접힌 줄 + 캐럿. 자란 높이를 돌려주므로
+/// 호출부는 `y += multiline_field(..)` 로 다음 요소를 민다.
+///
+/// 폼이 스크롤되므로 줄 단위로 클립한다 — 화면 밖 줄까지 그리면 긴 글에서 매
+/// 프레임 수백 줄을 헛그린다.
+#[allow(clippy::too_many_arguments)]
+fn multiline_field(
+    g: &mut gpu::GpuRenderer,
+    rects: &mut Vec<(SettingsAction, Rect)>,
+    ctx: &SettingsCtx,
+    (x, y, w): (f32, f32, f32),
+    text: &str,
+    caret: usize,
+    field: SettingsInput,
+    action: SettingsAction,
+    clip: f32,
+) -> f32 {
+    let (_, ay, _, ah) = ctx.area;
+    let line_h = 18.0_f32;
+    let vis = wrap_lines(g, text, w - 24.0, 13.0);
+    let box_h = (vis.len() as f32 * line_h + 16.0).max(56.0);
+    let focused = ctx.input == Some(field);
+    if y < ay + ah && y + box_h > clip {
+        let bg = if focused { theme::surface_hover() } else { theme::surface_active() };
+        round_rect(g, x, y, w, box_h, theme::radius_md(), bg);
+        rects.push((action, (x, y, w, box_h)));
+    }
+    let (caret_vl, caret_col) = visual_caret(&vis, caret);
+    let mut ly = y + 9.0;
+    for (vi, (line, _)) in vis.iter().enumerate() {
+        if ly > clip && ly < ay + ah - line_h {
+            g.draw_text(
+                x + 12.0, ly, line,
+                gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
+            );
+            if focused && ctx.caret_on && vi == caret_vl {
+                let pre: String = line.chars().take(caret_col).collect();
+                let cx = x + 12.0 + g.measure_chrome_text(&pre, 13.0, false);
+                g.rect(cx, ly, 1.5, line_h - 2.0, theme::accent());
+            }
+        }
+        ly += line_h;
+    }
+    box_h
 }
 
 /// 단일라인 텍스트 필드. `caret` 는 문자(char) 인덱스라 문자열 중간에도 캐럿을
@@ -1913,7 +2252,8 @@ fn text_field(
     cursor: (f32, f32),
 ) {
     let hover = inside(r, cursor);
-    round_rect(g, r.0, r.1, r.2, r.3, theme::RADIUS_SM, theme::surface_active());
+    g.hover_pointer |= hover;
+    round_rect(g, r.0, r.1, r.2, r.3, theme::radius_sm(), theme::surface_active());
     let border = if focused {
         theme::accent()
     } else if hover {
@@ -1998,7 +2338,7 @@ mod textedit_tests {
 
     #[test]
     fn visual_caret_soft_vs_hard_break() {
-        use super::persona_visual_caret as vc;
+        use super::visual_caret as vc;
         let one = vec![("hello".to_string(), 0usize)];
         assert_eq!(vc(&one, 0), (0, 0));
         assert_eq!(vc(&one, 3), (0, 3));

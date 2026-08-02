@@ -607,6 +607,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Persist the window size + position so the next launch restores the
         // frame instead of the hardcoded default (껐던 크기·위치 복원).
         self.save_window_frame();
+        crate::arm_self_install();
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -1928,6 +1929,17 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         icon
                     };
+                    // 그 밖의 모든 누를 수 있는 표면 — 버튼·탭·메뉴 항목·목록 행.
+                    // 히트렉트를 다시 훑지 않고 직전 프레임이 세운 플래그를 읽는다.
+                    // 들림을 그린 자리가 곧 손가락이 뜨는 자리라, 새 버튼을 만들어도
+                    // 커서를 따로 챙길 일이 없다.
+                    let icon = if matches!(icon, CursorIcon::Default)
+                        && self.gpu.as_ref().is_some_and(|g| g.hover_pointer)
+                    {
+                        CursorIcon::Pointer
+                    } else {
+                        icon
+                    };
                     window.set_cursor(icon);
                     // Hover glow on chrome buttons (+ / action cluster) needs
                     // a redraw on every move — paint reads self.cursor_px to
@@ -2204,6 +2216,13 @@ impl ApplicationHandler<UserEvent> for App {
                     let hit = |r: (f32, f32, f32, f32)| {
                         cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3
                     };
+                    if hit(self.feedback_btn_rect) {
+                        // 트레이 말풍선 — 설정 창을 Feedback 페이지로 바로 연다.
+                        // 쓰다 만 본문은 App 에 남아 있어 다시 열면 그대로다.
+                        self.open_settings_window(event_loop, Some(SettingsCat::Feedback), None);
+                        window.request_redraw();
+                        return;
+                    }
                     if hit(self.settings_btn_rect) {
                         // 사이드바 "Settings" 항목 — 설정 별도창을 열거나(이미
                         // 열려 있으면) 그 창을 포커스한다.
@@ -2444,7 +2463,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // so the click toggles instead of moving the window. Not
                     // painted with tabs on top, so don't eat the click either.
                     if !self.tabs_on_top {
-                        let (bx, by, bw, bh) = Self::sidebar_toggle_rect();
+                        let (bx, by, bw, bh) = self.sidebar_toggle_rect();
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_sidebar();
                             return;
@@ -2458,23 +2477,10 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
-                    // SCHALE OS(아로나) ✨ 버튼 — 터미널↔SCHALE OS 토글(메뉴 대신).
-                    if let Some((bx, by, bw, bh)) = self.arona_btn_rect() {
-                        if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
-                            self.toggle_arona_panel(event_loop);
-                            window.request_redraw();
-                            return;
-                        }
-                    }
-                    // Settings gear — opens the settings window (or focuses it if
-                    // already open). Closing is via the window's own controls.
-                    if let Some((bx, by, bw, bh)) = self.settings_toggle_rect() {
-                        if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
-                            self.open_settings_window(event_loop, None, None);
-                            return;
-                        }
-                    }
-                    // Git-column toggle, parked at the right end of the strip.
+                    // Side-panel toggle, parked at the right end of the strip.
+                    // It's the only chrome button left up here — the account
+                    // pill, the arona ✨ and the settings gear all moved into
+                    // the panel's Info tab, which this button opens.
                     if let Some((bx, by, bw, bh)) = self.git_col_toggle_rect() {
                         if cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh {
                             self.toggle_git_col();
@@ -2859,6 +2865,30 @@ impl ApplicationHandler<UserEvent> for App {
                         // Git 탭에서는 낡은 좌표가 남아 있다 — 탭을 확인하지
                         // 않으면 git 목록 클릭을 Info 행이 가로챈다.
                         if self.info.tab == state::SideTab::Info {
+                            // 머리의 전역 진입점(아로나·설정). 계정 행은 여기가 아니라
+                            // 타이틀바 시절과 같은 `account_chip_rect` 경로로 잡힌다 —
+                            // 드롭다운을 여는 클릭이라 pane 라우팅보다 앞서야 한다.
+                            if let Some(act) = self
+                                .info
+                                .action_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(a, _)| *a)
+                            {
+                                match act {
+                                    state::InfoAction::Arona => self.toggle_arona_panel(event_loop),
+                                    state::InfoAction::Settings => {
+                                        self.open_settings_window(event_loop, None, None)
+                                    }
+                                    state::InfoAction::Feedback => self.open_settings_window(
+                                        event_loop,
+                                        Some(SettingsCat::Feedback),
+                                        None,
+                                    ),
+                                }
+                                window.request_redraw();
+                                return;
+                            }
                             if self.info.refresh_rect.map(|r| inside(&r)).unwrap_or(false) {
                                 self.info.last_refresh = None;
                                 window.request_redraw();
@@ -4708,6 +4738,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoconfirm();
         self.run_pending_autowinclose();
         self.run_pending_autoinfo();
+        self.run_pending_autocursor();
         self.run_pending_autozoomprobe();
         self.run_pending_autoheader();
         self.resolve_force_handle_menu();

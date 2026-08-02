@@ -1739,7 +1739,9 @@ impl App {
         // of the column, and 24px stays free for "+"-adjacent chrome + the
         // chevron-down overflow hint.
         let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
-        let avail_h = (win_h - dock_h - top - 28.0 - 24.0).max(stride);
+        // 트레이(+ · 피드백 · 설정)가 바닥을 먹는다 — 목록은 그 위까지만. 24px 는
+        // chevron-down 오버플로 힌트 자리.
+        let avail_h = (win_h - dock_h - top - SIDEBAR_TRAY_H - 24.0).max(stride);
         let n_vis = n
             .min((((avail_h + SIDEBAR_TAB_GAP) / stride) as usize).max(1));
         let first = self.win_tab_first.min(n.saturating_sub(n_vis));
@@ -1750,11 +1752,19 @@ impl App {
             tabs.push((i, (tab_x, y, tab_w, SIDEBAR_TAB_H)));
             if n > 1 {
                 let cs = 14.0;
-                closes.push((i, (tab_x + tab_w - cs - 3.0, y + 3.0, cs, cs)));
+                // Centered on the *name* row (drawn at y+11, 13.5px) rather than
+                // pinned to the card top — the two-line tab put the × above the
+                // title it belongs to, reading as detached from both lines.
+                closes.push((i, (tab_x + tab_w - cs - 3.0, y + 11.0, cs, cs)));
             }
         }
-        let plus_y = top + tabs.len() as f32 * stride;
-        let plus = (tab_x, plus_y, tab_w, 28.0);
+        // `+` 는 목록 꼬리가 아니라 하단 트레이의 왼쪽 칸이다 — 세션이 늘어도 자리가
+        // 안 움직인다. 트레이가 없는 배치(top 탭·사이드바 접힘)에서는 어차피 이
+        // 분기를 안 타므로 폴백은 목록 꼬리 그대로.
+        let plus = self.sidebar_tray_rects(win_h).map_or_else(
+            || (tab_x, top + tabs.len() as f32 * stride, tab_w, 28.0),
+            |(_, p, ..)| p,
+        );
         (tabs, closes, plus)
     }
     pub(crate) fn start_pty(&mut self) -> Result<()> {

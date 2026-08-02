@@ -103,8 +103,26 @@ pub fn cell_fg_with(cell: &Cell, dfg: [u8; 4]) -> [u8; 4] {
         for i in 0..3 {
             fg[i] = (fg[i] as f32 * (1.0 - t) + bg[i] as f32 * t).round() as u8;
         }
+        // Faint is a deliberate request to recede. Lifting it back to a
+        // contrast floor would erase the distinction the app just drew.
+        return fg;
+    }
+    if names_own_color(if cell.inverse { &cell.bg } else { &cell.fg }) {
+        fg = crate::theme::enforce_min_contrast(fg, cell_bg_with(cell, dfg));
     }
     fg
+}
+
+/// Whether the cell picked this color itself rather than inheriting one the
+/// theme controls. Only those need the contrast guard: `Default` is the theme's
+/// own fg, and ANSI 0-15 are remapped per palette, so both are already legible
+/// by construction — running the guard on them would second-guess the theme.
+fn names_own_color(c: &Color) -> bool {
+    match c {
+        Color::Default => false,
+        Color::Idx(i) => *i >= 16,
+        Color::Rgb(..) => true,
+    }
 }
 
 /// 셀 배경색 — bg 자체는 무틴트(스펙)지만, inverse 셀의 배경 채움은 정의상 fg 색이므로
