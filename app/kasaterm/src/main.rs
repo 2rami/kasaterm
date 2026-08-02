@@ -395,23 +395,38 @@ fn wheel_throttle_ms() -> u64 {
             .unwrap_or(0)
     })
 }
-/// PixelDelta(트랙패드·고해상도 마우스휠) 스크롤 감도 배율. 구 기본 0.3 은 트랙패드
-/// 관성엔 부드러웠지만 한 노치 p.y 가 작은 마우스휠에선 굼떠(거노: 드르륵 한 번에
-/// 안 넘어감) 1.0 으로 올렸다. `KASATERM_WHEEL_PIXEL_GAIN=<f>` 로 재시작 후 감도 조절.
-fn wheel_pixel_gain() -> f32 {
-    static CACHED: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("KASATERM_WHEEL_PIXEL_GAIN")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|v: &f32| *v > 0.0)
-            .unwrap_or(1.0)
-    })
+/// PixelDelta(트랙패드·고해상도 마우스휠) 스크롤 감도 배율. 기본 **0.3** 은 트랙패드
+/// 기준이다 — 트랙패드와 고해상도 마우스휠은 winit 에서 **같은 PixelDelta 로 와서
+/// 구분할 수가 없으므로**, 한쪽에 맞추면 다른 쪽이 어긋난다. 마우스휠이 굼떠 1.0 +
+/// 최소 1셀 floor 로 올렸던 적이 있는데(2026-07-23 `1aa9b6c`) 그러자 트랙패드가 세
+/// 배 넘게 민감해졌다(거노: "트랙패드 스크롤 원래대로 돌려줘"). 손이 늘 닿아 있는
+/// 쪽을 기본값으로 두고, 마우스를 쓸 때 설정에서 올린다.
+///
+/// 설정(`settings.json` 의 `wheel_pixel_gain`) → env(`KASATERM_WHEEL_PIXEL_GAIN`) 순.
+/// 매 휠 이벤트마다 파일을 읽을 수는 없어 캐시하고, 설정을 저장할 때 비운다.
+static WHEEL_GAIN_CACHE: std::sync::RwLock<Option<f32>> = std::sync::RwLock::new(None);
+pub(crate) fn wheel_pixel_gain() -> f32 {
+    if let Ok(g) = WHEEL_GAIN_CACHE.read() {
+        if let Some(v) = *g {
+            return v;
+        }
+    }
+    let v = std::env::var("KASATERM_WHEEL_PIXEL_GAIN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|v: &f32| *v > 0.0)
+        .unwrap_or_else(socket::read_wheel_pixel_gain);
+    if let Ok(mut g) = WHEEL_GAIN_CACHE.write() {
+        *g = Some(v);
+    }
+    v
 }
-/// PixelDelta 최소 스텝 floor(px). 이 픽셀 이상 굴린 델타는 배율 결과가 1셀 미만
-/// 이어도 최소 1셀 emit 해 "드르륵 한 번"이 즉시 넘어간다. 트랙패드 관성 미세꼬리
-/// (sub-2px)는 floor 밖이라 과민해지지 않는다.
-const WHEEL_PIXEL_FLOOR_PX: f32 = 2.0;
+/// 설정이 바뀌었으니 다음 휠 이벤트에서 다시 읽어라.
+pub(crate) fn invalidate_wheel_pixel_gain() {
+    if let Ok(mut g) = WHEEL_GAIN_CACHE.write() {
+        *g = None;
+    }
+}
 /// Half-period of the cursor blink in milliseconds. macOS uses 530 by
 /// default; iTerm2 uses 500. 530 matches the platform feel.
 const BLINK_HALF_PERIOD_MS: u64 = 530;
@@ -3426,6 +3441,9 @@ pub(crate) enum SettingsAction {
     ToggleAccountAutoswitch,
     /// 그 전환을 부르는 사용률(%).
     AccountAutoswitchPct(u32),
+    /// PixelDelta 스크롤 감도 배율 ×100. 트랙패드와 고해상도 마우스휠이 같은
+    /// 델타로 와 구분이 안 되므로 사람이 고른다.
+    WheelPixelGain(u32),
     /// 계정 라벨 텍스트 필드에 포커스(행 인덱스 — `SettingsInput` 이 Copy 라
     /// id 를 못 싣는다). 선택·삭제는 인덱스가 밀려도 안전하도록 id 로 받는다.
     FocusClaudeAccountLabel(usize),
@@ -4131,6 +4149,9 @@ struct App {
     /// surprise, so it stays opt-in. Cmd+S keeps its `✓ 저장됨` toast either way.
     set_autosave: Option<std::time::Duration>,
     set_shell: String,
+    /// PixelDelta 스크롤 감도 배율. 기본 0.3 은 트랙패드 기준이고, 마우스휠을
+    /// 쓰는 사람이 설정에서 올린다 — 둘이 같은 델타로 와 자동 구분이 안 된다.
+    set_wheel_pixel_gain: f32,
     /// Per-pane claude wrapper injection (the shim reads these): persona on/off,
     /// model/effort overrides, and free-form extra args. Invariants
     /// (session-id/settings/task-list) stay hardcoded and are never exposed here.
@@ -4508,6 +4529,7 @@ impl App {
             set_footer_default: socket::read_footer_default(),
             set_autosave: socket::read_editor_autosave(),
             set_shell: socket::read_default_shell().unwrap_or_default(),
+            set_wheel_pixel_gain: socket::read_wheel_pixel_gain(),
             set_claude_persona: socket::read_claude_persona(),
             set_shim_inject: socket::read_shim_inject(),
             set_claude_model: socket::read_claude_model(),
