@@ -44,6 +44,19 @@ node scripts/install.mjs --verify   # 브리지·확장이 붙었는지 확인
 툴바 아이콘에 마우스를 올리면 지금 누가 무슨 작업 중인지가 툴팁으로 나온다.
 브리지 로그는 `~/.<패키지명>/bridge.log`(1MB 넘으면 한 세대만 남기고 갈아엎는다).
 
+<!-- host-only -->
+### kasaterm 을 쓴다면
+
+`node scripts/install-kasaterm.mjs` 한 번이면 pane 안에서 새로 뜨는 `claude` 마다 이 MCP 가 저절로 붙는다.
+kasaterm 이 `claude` 를 감쌀 때 `~/.config/kasaterm/claude-mcp.json` 을 `--mcp-config` 로 넘기는 구조라,
+파일이 곧 claude 가 읽는 모양이고 갈아 끼우면 다음 `claude` 부터 반영된다(재빌드 불필요).
+되돌리기는 `--remove`.
+
+> ⚠ 그 파일이 깨지면 **모든 pane 의 claude 가 부팅을 거부한다.** 그래서 스크립트는 임시 파일에 쓰고
+> rename 하는 원자적 경로만 쓴다. 손으로 망가뜨렸다면 그 파일을 지우면 원복되고, claude 에러 메시지가
+> 경로를 그대로 찍어 준다.
+<!-- /host-only -->
+
 ## 누가 조작 중인지 표시
 
 여러 터미널 창에서 동시에 브라우저를 조작하면 "지금 이 탭을 움직이는 게 누구인가"가 바로 헷갈린다.
