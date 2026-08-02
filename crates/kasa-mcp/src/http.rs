@@ -2294,6 +2294,41 @@ fn read_claude_token_from(account_dir: Option<&str>) -> Option<String> {
 ///
 /// 슬롯별 TTL 캐시: 설정 화면이 프레임마다 probe 를 부르는 자리라 캐시 없이는
 /// upstream 을 두들겨 429 를 부른다. 신원은 거의 안 바뀌므로 5분이면 넉넉하다.
+/// 그 슬롯으로 `claude` 를 한 번 조용히 돌려 만료된 access token 을 갱신시킨다.
+/// 갱신 자체는 Claude Code 가 하고 우리는 방아쇠만 당긴다 — 토큰을 직접 만지는
+/// 길은 버전 의존이라 조용히 깨지고, 잘못하면 그 슬롯 로그인이 날아간다.
+///
+/// **프로세스 수명당 슬롯마다 한 번만.** 설정 화면은 이 조회를 프레임마다 부르므로,
+/// 가드가 없으면 로그인이 진짜로 죽은 슬롯 하나가 초당 수십 개의 claude 를 낳는다.
+/// 실패해도 다시 시도하지 않는 건 그래서다 — 진짜 죽은 슬롯은 사람이 다시 로그인해야
+/// 하지 반복 실행으로는 안 살아난다.
+fn refresh_slot_once(dir: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static TRIED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    {
+        let Ok(mut t) = TRIED.get_or_init(Default::default).lock() else {
+            return;
+        };
+        if !t.insert(dir.to_string()) {
+            return;
+        }
+    }
+    let dir = dir.to_string();
+    std::thread::spawn(move || {
+        let mut cmd = crate::no_window_command(claude_bin().to_string_lossy().as_ref());
+        if !dir.is_empty() {
+            cmd.env("CLAUDE_CONFIG_DIR", &dir);
+        }
+        // 가장 짧은 왕복이면 된다 — 목적은 답이 아니라 토큰 갱신이다.
+        let _ = cmd
+            .args(["-p", "ok", "--max-turns", "1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
 async fn claude_identity_handler(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -2332,6 +2367,17 @@ async fn claude_identity_handler(
         _ => None,
     };
     let Some(body) = body else {
+        // 십중팔구 access token 이 만료된 것이다. 안 쓰는 슬롯은 Claude Code 가
+        // 갱신할 일이 없어 며칠이면 죽고, 그러면 이 자리가 영영 빈칸으로 남아
+        // "계정이 하나밖에 안 보인다"가 된다(거노, 2026-08-02. 실측: 기본 슬롯만
+        // 유효하고 나머지 둘은 이틀 전 만료였다).
+        //
+        // **토큰은 우리가 만지지 않는다.** refresh 를 직접 구현하려면 Anthropic 의
+        // OAuth client_id·엔드포인트를 흉내내야 하는데 그건 Claude Code 내부 상수라
+        // 버전이 오르면 조용히 깨지고, 회전된 refresh token 을 잘못 쓰면 그 슬롯의
+        // 로그인이 통째로 날아간다. 대신 Claude Code 에게 시킨다 — 그 슬롯으로 한 번
+        // 돌려 주면 자기 로직으로 갱신한다(실측으로 두 슬롯 다 이 방법으로 살아났다).
+        refresh_slot_once(&dir);
         // 실패는 캐시하지 않는다 — 네트워크가 돌아오면 바로 진짜 값을 보여야 한다.
         return (cors, Json(serde_json::json!({ "ok": false, "error": "profile api unavailable" })));
     };
