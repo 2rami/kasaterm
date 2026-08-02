@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "kasaterm Browser",
+  "version": "0.5.0",
+  "description": "터미널의 에이전트가 평소 쓰는 크롬 프로필을 직접 조작한다. 누가 어느 탭에서 무슨 작업 중인지 페이지 위 칩과 아이콘 팝업으로 보여준다.",
+  "permissions": [
+    "debugger",
+    "tabs",
+    "tabGroups",
+    "sidePanel",
+    "scripting",
+    "activeTab",
+    "alarms",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "kasaterm Browser",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
+  }
+}

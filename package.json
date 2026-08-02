@@ -1,0 +1,22 @@
+{
+  "name": "chromeclaude",
+  "version": "1.0.0",
+  "description": "터미널의 에이전트가 평소 쓰는 크롬을 조작한다 — MV3 확장 + 로컬 브리지 + MCP",
+  "scripts": {
+    "bridge": "node bridge/server.mjs",
+    "mcp": "node mcp/server.mjs",
+    "icons": "node scripts/icons.mjs",
+    "brand": "node scripts/brand.mjs",
+    "setup": "node scripts/install.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.21.1",
+    "zod": "^4.4.3"
+  },
+  "private": true
+}

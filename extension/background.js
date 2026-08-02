@@ -1,0 +1,176 @@
+import { dispatch, targetTabOf } from './tools.js'
+import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes } from './sessions.js'
+import { hostOf } from './url.js'
+import { PORT } from './port.js'
+
+// 이름을 URL 로 두면 전역 URL 생성자를 가려 hostOf 가 조용히 폴백을 탄다
+const BRIDGE_URL = `ws://127.0.0.1:${PORT}`
+
+// 미리 대상 탭을 정할 수 없는 툴 — 아무 탭도 건드리지 않거나(status·list_tabs),
+// 대상이 실행 결과로만 정해진다(new_tab). 여기서 활성 탭을 잡으면 엉뚱한 탭이 조작 중으로 켜진 채 남는다.
+const NO_TAB_TOOLS = new Set(['status', 'list_tabs', 'set_task', 'dev_reload', 'new_tab'])
+
+// 툴 호출을 사람이 읽는 한 줄로 옮긴다. null 이면 기록하지 않는다 — 상태 조회까지 남기면
+// 정작 무엇을 했는지가 묻힌다. ⚠️입력값은 절대 넣지 않는다(비밀번호·검색어가 그대로 남는다).
+function describe(tool, args = {}, result = {}) {
+  const t = result?.target
+  switch (tool) {
+    case 'click': return t ? `클릭 — ${t}` : '클릭'
+    case 'fill': return t ? `입력 — ${t}` : '입력'
+    case 'type': return '타이핑'
+    case 'press_key': return `키 — ${args.key}`
+    case 'navigate': return `이동 — ${hostOf(args.url)}`
+    case 'new_tab': return `새 탭 — ${hostOf(result?.url || args.url)}`
+    case 'close_tab': return '탭 닫기'
+    case 'activate_tab': return '탭 전환'
+    case 'screenshot': return '화면 확인'
+    case 'read_page': case 'get_text': return '페이지 읽기'
+    case 'find': return `요소 찾기 — ${args.query}`
+    case 'scroll': case 'scroll_to': return '스크롤'
+    case 'hover': return '마우스 올리기'
+    case 'drag': return '끌어놓기'
+    case 'eval_js': return '스크립트 실행'
+    case 'upload_file': return '파일 업로드'
+    case 'console_logs': return '콘솔 확인'
+    case 'network_requests': return '네트워크 확인'
+    case 'wait_for': return '대기'
+    case 'resize_window': return '창 크기 조절'
+    case 'ungroup_tabs': return '탭 그룹 해제'
+    case 'set_task': return `작업명 — ${args.task}`
+    case 'cdp_raw': return `CDP — ${args.method}`
+    default: return null
+  }
+}
+
+let ws = null
+let backoff = 500
+let connecting = false
+// 세션 open/close 는 저장소를 읽느라 비동기라, 그냥 두면 뒤따라온 첫 호출이 세션보다 먼저 실행돼
+// 신원 없이 처리된다(작업명이 조용히 버려졌다). 세션 처리는 한 줄로 세우고 호출은 그 뒤에 태운다.
+let sessionChain = Promise.resolve()
+
+function connect() {
+  if (connecting || (ws && ws.readyState <= 1)) return
+  connecting = true
+  try {
+    ws = new WebSocket(BRIDGE_URL)
+  } catch {
+    connecting = false
+    schedule()
+    return
+  }
+
+  ws.onopen = () => {
+    connecting = false
+    backoff = 500
+    ws.send(JSON.stringify({ type: 'hello', role: 'extension' }))
+    refreshAction(true)
+  }
+
+  ws.onmessage = async (ev) => {
+    let msg
+    try { msg = JSON.parse(ev.data) } catch { return }
+    if (msg.type === 'ping') return
+
+    if (msg.type === 'session') {
+      sessionChain = sessionChain
+        .then(() => (msg.action === 'open' ? openSession(msg.client, msg.identity) : closeSession(msg.client)))
+        .catch(() => {})
+      return
+    }
+
+    if (msg.type !== 'call') return
+    await sessionChain
+    const ctx = { client: msg.client }
+    let tabId = null
+    try {
+      if (!NO_TAB_TOOLS.has(msg.tool)) {
+        tabId = await targetTabOf(msg.args).catch(() => null)
+        if (tabId) await markBusy(msg.client, tabId)
+      }
+      const result = await dispatch(msg.tool, msg.args, ctx)
+      if (msg.tool === 'new_tab' && result?.tabId) {
+        tabId = result.tabId
+        // 새 탭에도 곧바로 오버레이를 띄운다 — 누가 연 창인지 바로 보이게
+        await markBusy(msg.client, tabId)
+      }
+      const label = describe(msg.tool, msg.args, result)
+      if (label) addActivity(msg.client, label, tabId)
+      if (tabId) markDone(msg.client, tabId)
+      reply({ type: 'result', id: msg.id, ok: true, result })
+    } catch (e) {
+      // 실패도 남긴다 — "눌렀는데 왜 안 됐지" 를 되짚을 때 성공만 보이면 그림이 반쪽이다
+      const label = describe(msg.tool, msg.args, {})
+      if (label) addActivity(msg.client, label, tabId, false)
+      if (tabId) markDone(msg.client, tabId)
+      reply({ type: 'result', id: msg.id, ok: false, error: String(e && e.message ? e.message : e) })
+    }
+  }
+
+  ws.onclose = () => {
+    connecting = false
+    ws = null
+    refreshAction(false)
+    schedule()
+  }
+
+  ws.onerror = () => { try { ws.close() } catch {} }
+}
+
+function reply(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj))
+}
+
+function schedule() {
+  backoff = Math.min(backoff * 2, 15000)
+  setTimeout(connect, backoff)
+}
+
+function connected() {
+  return !!(ws && ws.readyState === 1)
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => forgetTab(tabId))
+
+// 페이지가 새로 뜨면 오버레이가 통째로 날아간다. 담당 세션이 있는 탭이면 칩을 다시 붙인다.
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === 'complete') restoreOverlay(tabId).catch(() => {})
+})
+
+// 확장 아이콘 팝업이 상태를 물어온다. 팝업이 열렸다는 건 service worker 가 막 깨어났을 수도 있다는
+// 뜻이라 여기서 브리지 연결도 한 번 확인한다(세션은 확장이 붙는 즉시 브리지가 다시 알려준다).
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!msg || msg.__ccPopup !== true) return
+  if (msg.op === 'state') {
+    connect()
+    snapshot(connected())
+      .then(sendResponse)
+      .catch((e) => sendResponse({ connected: connected(), sessions: [], error: String(e?.message || e) }))
+    return true
+  }
+  if (msg.op === 'focus') {
+    chrome.tabs.update(msg.tabId, { active: true })
+      .then(() => chrome.windows.update(msg.windowId, { focused: true }))
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+  if (msg.op === 'group' || msg.op === 'ungroup') {
+    const run = msg.op === 'group' ? groupTabs : ungroupTabs
+    run(msg.key)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
+    return true
+  }
+})
+
+// service worker 가 잠들면 소켓도 같이 죽는다. alarm 이 깨워서 다시 붙인다.
+chrome.alarms.create('cc-keepalive', { periodInMinutes: 0.5 })
+chrome.alarms.onAlarm.addListener(() => connect())
+
+// 브라우저를 새로 켰다 = 탭 id 가 전부 갈렸다. 저장소에 남은 세션 레코드는 이 시점에 무효다.
+chrome.runtime.onStartup.addListener(() => { clearPanes(); connect() })
+chrome.runtime.onInstalled.addListener(() => connect())
+
+connect()
+refreshAction(false)
