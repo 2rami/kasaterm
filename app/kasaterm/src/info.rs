@@ -176,21 +176,17 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
             rows: build_rows(&table, t.shell_pid),
         })
         .collect();
-    // 방이 먼저, 그 안에서 활성 pane 이 위, 나머지는 pane 번호순. 방을 1차 키로
-    // 두어야 같은 방의 pane 이 붙어 서고 방 머리를 한 번만 그릴 수 있다. 활성
-    // 방을 통째로 맨 앞에 올리는 건 "지금 보고 있는 화면"이 목록 위에 있어야
-    // 스크롤 없이 읽히기 때문이다. 정렬 기준을 고정하지 않으면 HashMap 순회
-    // 순서 때문에 목록이 수집할 때마다 자리를 바꾼다.
-    let active_window = panes.iter().find(|g| g.active).map(|g| g.window);
-    panes.sort_by_key(|g| {
-        (
-            active_window != Some(g.window),
-            g.window,
-            !g.active,
-            pane_ord(&g.pane),
-            g.pane.clone(),
-        )
-    });
+    // 방이 먼저, 그 안에서 pane 번호순. 방을 1차 키로 두어야 같은 방의 pane 이
+    // 붙어 서고 방 머리를 한 번만 그릴 수 있다. 정렬 기준을 고정하지 않으면
+    // HashMap 순회 순서 때문에 목록이 수집할 때마다 자리를 바꾼다.
+    //
+    // **정렬 키에 "지금 활성" 을 넣지 마라.** 예전엔 활성 방과 활성 pane 을 각각
+    // 맨 앞으로 끌어올렸는데("보고 있는 화면이 위에 있어야 스크롤 없이 읽힌다"),
+    // 그러면 pane 을 옮길 때마다 목록이 통째로 재배치돼 **누르려던 행이 손가락
+    // 밑에서 달아난다**(거노: "뭐 생길 때마다 왔다갔다 돼서 원하는 거 클릭 못 할
+    // 때도 있어"). 자리는 고정해 두고 활성은 색으로만 알린다 — 목록은 위치가
+    // 기억되는 지도여야지 매번 다시 읽어야 하는 피드가 아니다.
+    panes.sort_by_key(|g| (g.window, pane_ord(&g.pane), g.pane.clone()));
 
     // pid → 소유 pane. 포트를 쥔 프로세스를 pane 으로 되짚는 역인덱스다.
     let mut owner: HashMap<u32, String> = HashMap::new();
@@ -1056,8 +1052,33 @@ impl App {
         // 워커가 새 스냅샷을 올렸을 때만 렌더용 사본으로 옮긴다. 프레임마다
         // 잠그고 통째로 clone 하면 프로세스 수만큼의 String 할당이 60fps 로
         // 도는데, 정작 내용은 1.5초에 한 번 바뀐다.
+        //
+        // 단, **커서가 패널 위에 있는 동안은 갈아끼우지 않는다.** 프로세스가 뜨거나
+        // 포트가 하나 열리면 그 아래 행이 전부 밀리는데, 하필 그 순간 누르면 엉뚱한
+        // 것이 눌린다(거노: "뭐 생길 때마다 왔다갔다 돼서 원하는 거 클릭 못 할 때도
+        // 있어"). 손을 치우면 그 다음 프레임에 바로 최신으로 따라잡는다 — rev 는
+        // 계속 오르고 seen_rev 만 뒤처져 있으니 조건이 저절로 다시 참이 된다.
         let rev = self.info.rev.load(Relaxed);
-        if rev != self.info.seen_rev {
+        let hovering = self.info.panel_rect.is_some_and(|(px, py, pw, ph)| {
+            let (cx, cy) = self.cursor_px;
+            cx >= px && cx < px + pw && cy >= py && cy < py + ph
+        });
+        // 동결에 시한을 두는 건 `CursorLeft` 를 안 받기 때문이다 — 커서 좌표는 창을
+        // 떠나도 마지막 자리에 남으므로, 패널 위에 마우스를 얹은 채 자리를 뜨면
+        // 목록이 영영 굳는다. 시한이 지나면 한 프레임 흘려보내고 다시 언다: 손을
+        // 얹고 있는 동안에도 최신을 아주 잃지는 않으면서, 누르려는 찰나에 행이
+        // 밀릴 확률은 갱신 주기(1.5초)보다 훨씬 낮게 유지된다.
+        let now = std::time::Instant::now();
+        if hovering {
+            let since = *self.info.frozen_since.get_or_insert(now);
+            if now.duration_since(since) > std::time::Duration::from_secs(3) {
+                self.info.frozen_since = None;
+            }
+        } else {
+            self.info.frozen_since = None;
+        }
+        let frozen = hovering && self.info.frozen_since.is_some();
+        if rev != self.info.seen_rev && !frozen {
             if let Ok(g) = self.info.snap.lock() {
                 self.info.view = g.clone();
             }
@@ -1388,6 +1409,8 @@ pub(crate) fn draw_info_col(
     bottom: f32,
 ) {
     let prof = profiling().then(Instant::now);
+    // 커서가 이 안에 있는 동안은 목록을 갈아끼우지 않는다(pump_info 참고).
+    info.panel_rect = Some((x, top, w, (bottom - top).max(0.0)));
     let x0 = x + 14.0;
     let right = x + w - 12.0;
     let avail = (right - x0).max(0.0);
