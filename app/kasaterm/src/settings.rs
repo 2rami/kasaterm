@@ -49,6 +49,8 @@ pub(crate) struct SettingsCtx {
     pub has_custom_theme: bool,
     pub accent: String,
     pub font_size: f32,
+    /// PixelDelta 스크롤 감도 배율(트랙패드·고해상도 마우스휠 공용).
+    pub wheel_pixel_gain: f32,
     pub tabs_on_top: bool,
     pub claude_persona: bool,
     pub shim_inject: bool,
@@ -276,6 +278,10 @@ impl App {
             "claude_account_autoswitch_pct",
             serde_json::Value::from(self.set_account_autoswitch_pct),
         );
+        socket::write_setting(
+            "wheel_pixel_gain",
+            serde_json::Value::from(self.set_wheel_pixel_gain),
+        );
         self.regen_claude_shim();
     }
 
@@ -407,6 +413,7 @@ impl App {
             has_custom_theme: socket::read_settings().get("custom_theme").is_some(),
             accent: theme::accent_name().to_string(),
             font_size: self.font_size,
+            wheel_pixel_gain: self.set_wheel_pixel_gain,
             tabs_on_top: self.tabs_on_top,
             claude_persona: self.set_claude_persona,
             shim_inject: self.set_shim_inject,
@@ -645,6 +652,13 @@ impl App {
             SettingsAction::AccountAutoswitchPct(p) => {
                 self.set_account_autoswitch_pct = p as f32;
                 self.settings_save();
+            }
+            SettingsAction::WheelPixelGain(x100) => {
+                self.set_wheel_pixel_gain = x100 as f32 / 100.0;
+                self.settings_save();
+                // 휠 경로는 값을 캐시해 둔다(매 이벤트 파일을 읽을 수 없다) —
+                // 비워 주지 않으면 다음 스크롤까지 옛 감도로 굴러간다.
+                crate::invalidate_wheel_pixel_gain();
             }
             SettingsAction::AddClaudeAccount => self.add_claude_account(),
             SettingsAction::RemoveClaudeAccount(id) => {
@@ -1104,6 +1118,27 @@ pub(crate) fn paint_settings(
                 let cells = [
                     ("Top", ctx.tabs_on_top, SettingsAction::TabPosition("top")),
                     ("Side", !ctx.tabs_on_top, SettingsAction::TabPosition("side")),
+                ];
+                segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
+            }
+            y += SEG_H + ROW_GAP;
+            // 트랙패드와 고해상도 마우스휠은 같은 델타로 들어와 자동으로 못 가른다 —
+            // 그래서 한쪽에 맞추면 다른 쪽이 어긋난다. 고르는 몫을 사람에게 넘긴다.
+            y = field_header(
+                g,
+                fx,
+                y,
+                clip,
+                "Scroll sensitivity",
+                &["트랙패드 기준이 기본이에요. 마우스 휠이 굼뜨면 올리세요"],
+            );
+            if y > clip {
+                let x100 = (ctx.wheel_pixel_gain * 100.0).round() as u32;
+                let cells = [
+                    ("트랙패드", x100 == 30, SettingsAction::WheelPixelGain(30)),
+                    ("보통", x100 == 60, SettingsAction::WheelPixelGain(60)),
+                    ("마우스", x100 == 100, SettingsAction::WheelPixelGain(100)),
+                    ("빠르게", x100 == 150, SettingsAction::WheelPixelGain(150)),
                 ];
                 segmented(g, &mut rects, fx, y, &cells, ctx.cursor);
             }

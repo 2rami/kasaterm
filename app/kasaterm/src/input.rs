@@ -869,17 +869,13 @@ impl App {
             // emits once |accum| ≥ 1). 3 cells/notch matches the 3-line default
             // most GUI terminals use, so a notch scrolls immediately.
             MouseScrollDelta::LineDelta(_, y) => y * 3.0,
-            // Trackpad: pixel-precise, already smooth. 고해상도 마우스휠도 PixelDelta 로
-            // 오는데 한 노치 p.y 가 작아 0.3 배율론 wheel_step 임계(1셀)를 못 넘어 여러 번
-            // 굴려야 했다(거노: 드르륵 한 번엔 안 넘어감). gain 을 올리고, 유의미한 델타
-            // (관성 미세꼬리 sub-2px 제외)는 최소 1셀 보장해 살짝 굴려도 즉시 넘어간다.
+            // Trackpad: pixel-precise, already smooth. 고해상도 마우스휠도 같은
+            // PixelDelta 로 와서 **둘을 구분할 수가 없다** — 그래서 한때 마우스휠을
+            // 살리려고 배율을 올리고 "2px 이상은 최소 1셀" 을 얹었더니 트랙패드가
+            // 세 배 넘게 민감해졌다. 승격은 걷어내고 배율 하나로만 두되, 그 배율을
+            // 설정에서 조절하게 해 마우스를 쓰는 날엔 올릴 수 있게 한다.
             MouseScrollDelta::PixelDelta(p) => {
-                let raw = (p.y as f32) / self.cell.h.max(1.0) * wheel_pixel_gain();
-                if raw != 0.0 && raw.abs() < 1.0 && (p.y.abs() as f32) >= WHEEL_PIXEL_FLOOR_PX {
-                    raw.signum()
-                } else {
-                    raw
-                }
+                (p.y as f32) / self.cell.h.max(1.0) * wheel_pixel_gain()
             }
         };
         if wdbg {

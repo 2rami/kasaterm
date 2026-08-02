@@ -2290,6 +2290,19 @@ pub fn read_account_autoswitch_pct() -> f32 {
         .unwrap_or(90.0)
 }
 
+/// PixelDelta 스크롤 감도 배율 — 기본 0.3(트랙패드 기준). 트랙패드와 고해상도
+/// 마우스휠이 winit 에서 같은 델타로 와 구분이 안 되므로, 마우스를 쓰는 사람이
+/// 여기서 올린다. 상한은 안전장치다(오타 하나로 한 번에 화면 열 장이 넘어가면
+/// 되돌릴 방법을 찾기 어렵다).
+pub fn read_wheel_pixel_gain() -> f32 {
+    read_settings()
+        .get("wheel_pixel_gain")
+        .and_then(|x| x.as_f64())
+        .map(|x| x as f32)
+        .filter(|x| (0.05..=5.0).contains(x))
+        .unwrap_or(0.3)
+}
+
 /// 한도가 차서 떠나온 계정의 "이때 전까진 돌아가지 마라" 표. id → epoch 초
 /// (기본 로그인은 `""` 키). 계정 dir 과 같은 이유로 설정 파일 옆에 둔다 —
 /// 스크래치 설정으로 도는 헤드리스 실행이 진짜 쿨다운을 밟지 않게.
