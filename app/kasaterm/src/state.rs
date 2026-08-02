@@ -106,6 +106,19 @@ pub(crate) enum InfoSection {
     Ports,
 }
 
+/// Info 탭 머리의 앱 전역 진입점. 우상단 아이콘 클러스터에 흩어져 있던 것들이라
+/// 프로세스·포트와 달리 pane 상태와 무관하다 — 스크롤 위, 탭 머리 바로 아래 고정.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InfoAction {
+    /// SCHALE OS(아로나) 패널 토글.
+    Arona,
+    /// 설정 화면.
+    Settings,
+    /// 피드백 작성(설정 창의 Feedback 페이지). 사이드바 트레이에도 있지만,
+    /// 사이드바를 접으면 트레이째 사라져 여기가 유일한 진입점이 된다.
+    Feedback,
+}
+
 /// 프로젝트 디렉터리 섹션의 액션 버튼.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InfoDirBtn {
@@ -202,6 +215,9 @@ pub(crate) struct InfoState {
     pub(crate) kill_rects: Vec<(u32, (f32, f32, f32, f32))>,
     pub(crate) sec_rects: Vec<(InfoSection, (f32, f32, f32, f32))>,
     pub(crate) dir_btn_rects: Vec<(InfoDirBtn, (f32, f32, f32, f32))>,
+    /// 머리의 전역 진입점 버튼. 스크롤 밖(고정)이라 본문 rect 들과 달리
+    /// `draw_info_col` 이 아니라 그 위 블록이 채운다.
+    pub(crate) action_rects: Vec<(InfoAction, (f32, f32, f32, f32))>,
     pub(crate) ctx_menu_rects: Vec<(InfoMenuAction, (f32, f32, f32, f32))>,
     pub(crate) refresh_rect: Option<(f32, f32, f32, f32)>,
 }
@@ -237,6 +253,7 @@ impl Default for InfoState {
             kill_rects: Vec::new(),
             sec_rects: Vec::new(),
             dir_btn_rects: Vec::new(),
+            action_rects: Vec::new(),
             ctx_menu_rects: Vec::new(),
             refresh_rect: None,
         }

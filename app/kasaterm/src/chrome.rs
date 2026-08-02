@@ -282,23 +282,6 @@ impl App {
         let y = (TITLE_HEIGHT - h) / 2.0;
         Some((x, y, w, h))
     }
-    /// Settings-screen toggle, parked just left of the git-column toggle at the
-    /// right end of the title strip. Always present (unlike the sidebar's
-    /// bottom entry, which hides when the sidebar is collapsed) so the screen is
-    /// always one click away.
-    pub(crate) fn settings_toggle_rect(&self) -> Option<(f32, f32, f32, f32)> {
-        let w = 26.0;
-        let h = 22.0;
-        let win_w = self.window.as_ref().map(|win| {
-            let scale = self.effective_scale();
-            win.inner_size().width as f32 / scale
-        })?;
-        let x = win_w - w - 8.0 - (w + 4.0);
-        #[cfg(windows)]
-        let x = Self::win_control_rects(win_w)[0].0 - 2.0 - w - (w + 4.0);
-        let y = (TITLE_HEIGHT - h) / 2.0;
-        Some((x, y, w, h))
-    }
     /// Show/hide the git column. Same reflow path as `toggle_sidebar`: flip the
     /// flag, resize the PTYs to the new usable cols, repaint. Publishes the
     /// active cwd so the poller has something to refresh the moment it opens.
@@ -1010,51 +993,65 @@ impl App {
         let Some(cwd) = cwd else { return };
         self.open_file(cwd.join(rel), None, false);
     }
-    /// Title-bar sidebar-toggle button rect (logical px), parked just
-    /// right of the macOS traffic lights. Fixed position (doesn't depend
-    /// on state) so the renderer and the click handler share one source.
-    pub(crate) fn sidebar_toggle_rect() -> (f32, f32, f32, f32) {
+    /// 사이드바 하단에 붙박인 트레이 — 새 세션(`+`)과 앱 전역 버튼(피드백·설정).
+    /// 반환은 `(구분선 y, +, 피드백, 설정)`, 세로 사이드바가 없으면 `None`.
+    ///
+    /// 셋 다 원래는 세션 목록 *뒤에* 줄줄이 붙어 있었다. 그러면 세션이 늘 때마다
+    /// 아래로 밀려서, 늘 같은 버튼을 누르는데 자리가 매번 달라진다. 트레이는 목록
+    /// 길이와 무관하게 바닥에 고정이라 근육기억이 선다.
+    pub(crate) fn sidebar_tray_rects(
+        &self,
+        win_h: f32,
+    ) -> Option<(f32, (f32, f32, f32, f32), (f32, f32, f32, f32), (f32, f32, f32, f32))> {
+        if self.tabs_on_top || !self.sidebar_visible {
+            return None;
+        }
+        let dock_h = if self.docked.is_empty() { 0.0 } else { DOCK_HEIGHT };
+        let b = 28.0_f32;
+        let line_y = (win_h - dock_h - SIDEBAR_TRAY_H).max(TITLE_HEIGHT);
+        let y = line_y + (SIDEBAR_TRAY_H - b) / 2.0;
+        let left = SIDEBAR_TAB_INSET + 4.0;
+        let right = (self.sidebar_w_logical - SIDEBAR_TAB_INSET - 4.0 - b).max(left);
+        Some((
+            line_y,
+            (left, y, b, b),
+            (right - 4.0 - b, y, b, b),
+            (right, y, b, b),
+        ))
+    }
+    /// 사이드바 토글 버튼 rect(논리 px).
+    ///
+    /// 자리가 상태에 따라 갈린다. 접혀 있으면 신호등 오른쪽 — 열 것이 아직 없으니
+    /// 창의 버튼이다. 펴져 있으면 사이드바 자신의 오른쪽 위 — 닫는 버튼은 닫힐
+    /// 판 위에 있어야 무엇을 닫는지가 자리로 설명된다. 사이드바를 좁게 끌면
+    /// 신호등을 침범하니 거기서 멈춘다.
+    pub(crate) fn sidebar_toggle_rect(&self) -> (f32, f32, f32, f32) {
         let w = 26.0;
         let h = 22.0;
         #[cfg(not(windows))]
-        let x = TRAFFIC_LIGHT_WIDTH + 6.0;
+        let home = TRAFFIC_LIGHT_WIDTH + 6.0;
         // Windows is frameless with no traffic-light cluster to clear — start
         // the toggles at the left edge instead of reserving the macOS width.
         #[cfg(windows)]
-        let x = 10.0;
+        let home = 10.0;
         let y = (TITLE_HEIGHT - h) / 2.0;
-        (x, y, w, h)
+        if self.tabs_on_top || !self.sidebar_visible {
+            return (home, y, w, h);
+        }
+        ((self.sidebar_w_logical - SIDEBAR_TAB_INSET - w).max(home), y, w, h)
     }
-    /// File-tree-toggle button rect, parked just right of the sidebar toggle.
-    /// With tabs on top the sidebar toggle isn't painted, so this takes its
-    /// slot instead of leaving a gap next to the traffic lights.
+    /// 파일트리 토글 rect. 사이드바 토글을 따라다닌다 — 접혀 있으면 그 오른쪽,
+    /// 펴져 있으면 사이드바 밖(본문 쪽 첫 자리)이다. 토글이 판 안으로 들어간
+    /// 마당에 트리 버튼까지 넣으면 세션 목록 머리가 버튼 줄이 된다.
     pub(crate) fn file_tree_toggle_rect(&self) -> (f32, f32, f32, f32) {
-        let (sx, sy, sw, sh) = Self::sidebar_toggle_rect();
+        let (sx, sy, sw, sh) = self.sidebar_toggle_rect();
         if self.tabs_on_top {
             return (sx, sy, sw, sh);
         }
-        (sx + sw + 2.0, sy, sw, sh)
-    }
-    /// SCHALE OS(아로나) 토글 버튼 — 우측 끝, 설정 토글 왼쪽(git-col·settings 다음).
-    /// 좌측에 두면 경로 브레드크럼과 겹쳐서 우측으로(거노). ✨ 아이콘, 클릭 →
-    /// toggle_arona_panel. win_w 필요해 첫 페인트 전엔 None.
-    pub(crate) fn arona_btn_rect(&self) -> Option<(f32, f32, f32, f32)> {
-        // shim OFF(순정 모드)면 아로나 진입점 자체를 숨긴다 — 버튼이 없어야
-        // open_arona_panel 차단과 일관되고 빈 웹뷰로 들어갈 길이 원천 차단된다.
-        if !crate::socket::read_shim_inject() {
-            return None;
+        if self.sidebar_visible {
+            return (self.sidebar_w_logical + 10.0, sy, sw, sh);
         }
-        let w = 26.0;
-        let h = 22.0;
-        let win_w = self.window.as_ref().map(|win| {
-            let scale = self.effective_scale();
-            win.inner_size().width as f32 / scale
-        })?;
-        let x = win_w - w - 8.0 - 2.0 * (w + 4.0);
-        #[cfg(windows)]
-        let x = Self::win_control_rects(win_w)[0].0 - 2.0 - w - 2.0 * (w + 4.0);
-        let y = (TITLE_HEIGHT - h) / 2.0;
-        Some((x, y, w, h))
+        (sx + sw + 2.0, sy, sw, sh)
     }
     /// Windows-only frameless window controls (minimize / maximize / close),
     /// parked at the right end of the title strip. macOS keeps the native

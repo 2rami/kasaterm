@@ -331,6 +331,43 @@ const SCHALE_DARK: Palette = Palette {
     ],
 };
 
+/// 호박색 인광 모니터. `shape: "pixel"` 과 짝이 되라고 만든 팔레트다 — 각진
+/// 실루엣과 픽셀 글꼴만으로는 "모서리 없는 다크 테마" 에서 멈추고, 색까지
+/// 그 시절을 가리켜야 레트로로 읽힌다.
+///
+/// 단색으로는 안 갔다. 인광 하나로 화면을 칠하면 그럴싸하지만 ANSI 16색이
+/// 전부 같은 호박색이 되어 ls 도 diff 도 못 읽는다. 크롬만 호박으로 묶고
+/// 셀 색은 그 시절 하드웨어(CGA/EGA)의 채도로 가져와 구분을 남겼다.
+const AMBER_CRT: Palette = Palette {
+    // 인광 화면의 검정은 순수 검정이 아니라 미열이 도는 갈색이다.
+    bg: [0x1A, 0x13, 0x0C, 255],
+    fg: [0xFF, 0xB0, 0x00, 255],
+    surface: [0x25, 0x1B, 0x11, 255],
+    surface_hover: [0x36, 0x27, 0x17, 255],
+    surface_active: [0x48, 0x34, 0x1D, 255],
+    border: [0x5E, 0x45, 0x22, 150],
+    text: [0xFF, 0xB0, 0x00, 255],
+    // 흐린 층을 다른 다크 테마보다 높게 잡았다. 픽셀 글꼴은 획이 1px 이라
+    // 같은 명도라도 회색 글꼴보다 훨씬 묽게 보인다 — 첫 값으로는 부제와
+    // "listen 중인 포트 없음" 이 배경에 잠겼다.
+    text_dim: [0xDB, 0xA2, 0x4A, 255],
+    text_mute: [0xA0, 0x76, 0x36, 255],
+    success: [0x8F, 0xCF, 0x45, 255],
+    danger: [0xFF, 0x5A, 0x33, 255],
+    syn_keyword: [0xFF, 0x8C, 0x42, 255],
+    syn_string: [0xC2, 0xDC, 0x50, 255],
+    syn_number: [0xFF, 0xD9, 0x66, 255],
+    syn_comment: [0xA0, 0x76, 0x36, 255],
+    syn_function: [0xFF, 0xB0, 0x00, 255],
+    syn_type: [0xFF, 0x7A, 0xC8, 255],
+    ansi: [
+        [0x25, 0x1B, 0x11], [0xE8, 0x50, 0x3F], [0x8F, 0xCF, 0x45], [0xFF, 0xB0, 0x00],
+        [0x5B, 0x9B, 0xE8], [0xE8, 0x5F, 0xBF], [0x46, 0xC8, 0xD8], [0xE8, 0xD0, 0xA8],
+        [0xA0, 0x76, 0x36], [0xFF, 0x74, 0x5C], [0xAD, 0xE0, 0x60], [0xFF, 0xD9, 0x66],
+        [0x7C, 0xB5, 0xF5], [0xFF, 0x84, 0xD4], [0x6E, 0xE0, 0xEE], [0xFF, 0xF0, 0xD8],
+    ],
+};
+
 /// Selectable themes: (settings.json key, display label, palette). "dark" /
 /// "light" keep their historical keys so existing settings files keep working.
 pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
@@ -342,6 +379,7 @@ pub const THEME_PRESETS: &[(&str, &str, &Palette)] = &[
     ("tokyo-night", "Tokyo Night", &TOKYO_NIGHT),
     ("schale-light", "Schale Light", &SCHALE_LIGHT),
     ("schale-dark", "Schale Dark", &SCHALE_DARK),
+    ("amber-crt", "Amber CRT", &AMBER_CRT),
 ];
 
 fn store_palette(p: &Palette) {
@@ -488,11 +526,234 @@ pub fn apply_from_settings() {
     set_theme(mode);
     let accent = s.get("accent").and_then(|x| x.as_str()).unwrap_or("blue");
     set_accent(accent);
+    // KASATERM_SHAPE overrides the stored key so a silhouette can be previewed
+    // (or screenshot-verified) without editing the live settings file — the
+    // settings file is shared with the running app, so a test that rewrote it
+    // would change the user's own window mid-session.
+    let shape = std::env::var("KASATERM_SHAPE").ok().unwrap_or_else(|| {
+        s.get("shape")
+            .and_then(|x| x.as_str())
+            .unwrap_or("rounded")
+            .to_string()
+    });
+    set_shape(&shape);
+    if let Some(v) = s.get("min_contrast").and_then(|x| x.as_f64()) {
+        set_min_contrast(v as f32);
+    }
 }
 
-/// Corner radii (logical px) for the native `round_rect` helper.
-pub const RADIUS_SM: f32 = 6.0;
-pub const RADIUS_MD: f32 = 9.0;
+// ── Shape axis ───────────────────────────────────────────────────────────
+// Form lives on its own axis, independent of the color Palette: a palette says
+// what something is colored, a shape says what silhouette it's cut to. Keeping
+// them apart means any palette can be worn with any silhouette (Schale's colors
+// with pixel corners), which is the same reason accent isn't baked into Palette
+// — see `set_accent`. Baking radii into Palette would multiply presets instead.
+
+/// Define an atomic f32 slot + its reader fn. f32 has no atomic type, so the
+/// bit pattern rides in an AtomicU32 (`to_bits` is const since 1.83).
+macro_rules! f32_slot {
+    ($slot:ident, $get:ident, $default:expr) => {
+        static $slot: AtomicU32 = AtomicU32::new(($default as f32).to_bits());
+        #[inline]
+        pub fn $get() -> f32 {
+            f32::from_bits($slot.load(Ordering::Relaxed))
+        }
+    };
+}
+
+f32_slot!(S_RADIUS_SM, radius_sm, 6.0);
+f32_slot!(S_RADIUS_MD, radius_md, 9.0);
+f32_slot!(S_BORDER_W, border_w, 1.0);
+f32_slot!(S_SHADOW_OFFSET, shadow_offset, 0.0);
+f32_slot!(S_ROUNDNESS, roundness, 1.0);
+
+/// One silhouette. Radii feed the native `round_rect` helper; the rest are the
+/// knobs a pixel/sharp look needs beyond corners.
+#[derive(Clone, Copy)]
+pub struct Shape {
+    pub radius_sm: f32,
+    pub radius_md: f32,
+    /// Structural hairline thickness (logical px).
+    pub border_w: f32,
+    /// Hard drop-shadow offset; 0 = none. Pixel UIs use a blur-less offset that
+    /// shrinks under a press — that displacement is what reads as physical.
+    pub shadow_offset: f32,
+    /// How far shapes that mean *circle* or *capsule* — status dots, avatar
+    /// chips, pill toggles, scrollbar thumbs — bend toward square. 1 = true
+    /// circle, 0 = square. Separate from the radii because a circle isn't a
+    /// rounded corner: squaring it is a deliberate silhouette choice (a pixel
+    /// UI wants square dots, not slightly-rounded ones), and scaling it off
+    /// `radius_sm` would make a 6px dot and a 200px panel bend together.
+    /// Consumed through the `circle_rect` / `pill_rect` helpers.
+    pub roundness: f32,
+    /// Draw chrome labels and icons from the bundled dot-matrix assets instead
+    /// of the terminal font and the Lucide set. It rides on Shape rather than a
+    /// separate axis because a dot-matrix typeface next to 6px-rounded corners
+    /// reads as a mistake, not a choice — and unlike the radii, there is no
+    /// in-between value to mix.
+    pub pixel_chrome: bool,
+}
+
+/// Whether chrome text and icons come from the pixel assets (see `Shape::pixel_chrome`).
+pub fn pixel_chrome() -> bool {
+    S_PIXEL_CHROME.load(Ordering::Relaxed) != 0
+}
+static S_PIXEL_CHROME: AtomicU32 = AtomicU32::new(0);
+
+/// Today's look — the values that shipped as `RADIUS_SM` / `RADIUS_MD`, so a
+/// fresh config renders byte-identical to before the axis existed.
+const SHAPE_ROUNDED: Shape = Shape {
+    radius_sm: 6.0,
+    radius_md: 9.0,
+    border_w: 1.0,
+    shadow_offset: 0.0,
+    roundness: 1.0,
+    pixel_chrome: false,
+};
+
+/// Softened corners kept only where they aid hit-reading; no shadow. Dots and
+/// toggles stay round — this sharpens the *chrome*, not every mark on it.
+const SHAPE_SHARP: Shape = Shape {
+    radius_sm: 2.0,
+    radius_md: 3.0,
+    border_w: 1.0,
+    shadow_offset: 0.0,
+    roundness: 1.0,
+    pixel_chrome: false,
+};
+
+/// Square corners, doubled rules, hard offset shadow — the munder pixel-kit
+/// language (PixelButton/PixelBadge), which is form rather than color.
+const SHAPE_PIXEL: Shape = Shape {
+    radius_sm: 0.0,
+    radius_md: 0.0,
+    border_w: 2.0,
+    shadow_offset: 3.0,
+    roundness: 0.0,
+    pixel_chrome: true,
+};
+
+/// Selectable silhouettes: (settings.json key, display label, shape).
+pub const SHAPE_PRESETS: &[(&str, &str, &Shape)] = &[
+    ("rounded", "Rounded", &SHAPE_ROUNDED),
+    ("sharp", "Sharp", &SHAPE_SHARP),
+    ("pixel", "Pixel", &SHAPE_PIXEL),
+];
+
+/// Active shape key for the settings screen's selected state — the numbers
+/// alone can't tell presets apart, so the key is tracked at set time (mirrors
+/// CURRENT_THEME).
+static CURRENT_SHAPE: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+pub fn shape_name() -> &'static str {
+    CURRENT_SHAPE.lock().ok().and_then(|g| *g).unwrap_or("rounded")
+}
+
+/// Switch silhouette by key; unknown keys fall back to rounded.
+pub fn set_shape(key: &str) {
+    let (k, _, s) = SHAPE_PRESETS
+        .iter()
+        .find(|(k, _, _)| *k == key)
+        .unwrap_or(&SHAPE_PRESETS[0]);
+    S_RADIUS_SM.store(s.radius_sm.to_bits(), Ordering::Relaxed);
+    S_RADIUS_MD.store(s.radius_md.to_bits(), Ordering::Relaxed);
+    S_BORDER_W.store(s.border_w.to_bits(), Ordering::Relaxed);
+    S_SHADOW_OFFSET.store(s.shadow_offset.to_bits(), Ordering::Relaxed);
+    S_ROUNDNESS.store(s.roundness.to_bits(), Ordering::Relaxed);
+    S_PIXEL_CHROME.store(s.pixel_chrome as u32, Ordering::Relaxed);
+    if let Ok(mut g) = CURRENT_SHAPE.lock() {
+        *g = Some(k);
+    }
+}
+
+// ── Minimum contrast ─────────────────────────────────────────────────────
+// A palette can only rescue the colors it owns. ANSI 0-15 get remapped per
+// theme (that's why the light sets ship a grey "white"), but an app that names
+// a color outright — truecolor, or the 256-cube — bypasses the palette
+// entirely, and Claude Code names near-white for its completion text. On a
+// light background that text is simply gone. This is the terminal's job to
+// catch, the same guard Ghostty and iTerm2 expose.
+
+f32_slot!(S_MIN_CONTRAST, min_contrast, 2.5);
+
+/// Contrast floor for app-named cell colors, as a WCAG ratio (1 = off). The
+/// default only rescues text that is genuinely unreadable: at 2.5, grey-on-white
+/// down to about #949494 is left untouched, so deliberately quiet UI keeps
+/// reading as quiet.
+pub fn set_min_contrast(v: f32) {
+    S_MIN_CONTRAST.store(v.clamp(1.0, 21.0).to_bits(), Ordering::Relaxed);
+}
+
+/// sRGB byte → linear, cached: the guard runs per cell, and `powf` on six
+/// channels of every colored glyph is real work for a table of 256 answers.
+fn srgb_lut() -> &'static [f32; 256] {
+    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut t = [0.0f32; 256];
+        for (i, v) in t.iter_mut().enumerate() {
+            let c = i as f32 / 255.0;
+            *v = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+        }
+        t
+    })
+}
+
+/// WCAG relative luminance.
+fn luminance(c: [u8; 4]) -> f32 {
+    let l = srgb_lut();
+    0.2126 * l[c[0] as usize] + 0.7152 * l[c[1] as usize] + 0.0722 * l[c[2] as usize]
+}
+
+fn contrast_of(a: f32, b: f32) -> f32 {
+    let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Push `fg` toward black or white — whichever the background isn't — until it
+/// clears the contrast floor. Hue rides along the lerp rather than being
+/// recomputed, so a washed-out orange darkens into orange instead of turning
+/// into grey text.
+pub fn enforce_min_contrast(fg: [u8; 4], bg: [u8; 4]) -> [u8; 4] {
+    enforce_contrast_at(fg, bg, min_contrast())
+}
+
+/// Selectable floors. Stored as a number so a hand-edited settings.json can name
+/// any value; the screen just offers the four worth clicking.
+pub const CONTRAST_PRESETS: &[(&str, f32)] =
+    &[("Off", 1.0), ("Low", 2.0), ("Default", 2.5), ("High", 3.5)];
+
+/// `enforce_min_contrast` against an explicit floor — lets the settings screen
+/// preview each preset without disturbing the live one.
+pub fn enforce_contrast_at(fg: [u8; 4], bg: [u8; 4], min: f32) -> [u8; 4] {
+    if min <= 1.0 {
+        return fg;
+    }
+    let l_bg = luminance(bg);
+    if contrast_of(luminance(fg), l_bg) >= min {
+        return fg;
+    }
+    let target = if l_bg > 0.18 { 0.0f32 } else { 255.0 };
+    let mix = |t: f32| {
+        let mut c = fg;
+        for i in 0..3 {
+            c[i] = (fg[i] as f32 + (target - fg[i] as f32) * t).round() as u8;
+        }
+        c
+    };
+    // The floor may be unreachable (a mid-grey background caps how far either
+    // direction gets), so settle on the closest the search reached rather than
+    // looping forever chasing it.
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..8 {
+        let mid = (lo + hi) * 0.5;
+        if contrast_of(luminance(mix(mid)), l_bg) >= min {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    mix(hi)
+}
 
 /// Base glyph size for chrome icons (logical px; draw_text multiplies by scale).
 pub const ICON_SIZE: f32 = 16.0;
@@ -507,6 +768,16 @@ pub fn lerp(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
     let t = t.clamp(0.0, 1.0);
     let mix = |x: u8, y: u8| (x as f32 * (1.0 - t) + y as f32 * t).round() as u8;
     [mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2]), 255]
+}
+
+/// 크롬 판(사이드바 · 타이틀 스트립)의 바닥색. 본문(`bg`)과 한 톤 갈라 사이드바가
+/// "터미널의 왼쪽 여백"이 아니라 별도의 판으로 읽히게 한다.
+///
+/// 고정 색이 아니라 `bg`↔`surface_hover` 중간인 건 방향 때문이다 — 대비로 가는
+/// 방향이 테마마다 반대다(어두운 테마는 밝게, 밝은 테마는 어둡게). 팔레트가 이미
+/// 그 방향을 알고 있으니 절반만 따라가면 여덟 테마에서 전부 맞는다.
+pub fn panel_bg() -> [u8; 4] {
+    lerp(bg(), surface_hover(), 0.5)
 }
 
 /// 캐릭터명 → 고정 accent (pane 번호와 무관하게 학생=색 고정). 전원 원작색

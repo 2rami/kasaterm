@@ -117,6 +117,73 @@ fn round_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, 
     g.round_rect_fill(x, y, w, h, r, col);
 }
 
+/// A mark that means *circle* — status dots, avatar chips, toggle knobs.
+/// Callers state the intent and the active silhouette decides how round it
+/// actually is (`theme::roundness`), because a square dot is what reads as
+/// pixel-art while a dot drawn with a small corner radius just reads as a
+/// mistake. Passing `size / 2.0` to `round_rect` by hand froze that decision at
+/// every call site.
+fn circle_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, size: f32, col: [u8; 4]) {
+    round_rect(g, x, y, size, size, size / 2.0 * theme::roundness(), col);
+}
+
+/// A mark that means *capsule* — pill toggles, scrollbar thumbs, count chips.
+/// Same contract as `circle_rect`: the fully-round radius is derived from the
+/// short side, then bent by the silhouette.
+fn pill_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, col: [u8; 4]) {
+    round_rect(g, x, y, w, h, w.min(h) / 2.0 * theme::roundness(), col);
+}
+
+/// A raised surface — card, panel, selected tab. Lays down the silhouette's
+/// hard drop shadow and its border rule before the fill, which is what makes a
+/// pixel UI read as a physical object rather than a flat square. At the default
+/// silhouette (offset 0, 1px border) both extras collapse and this is exactly
+/// one `round_rect`, so existing surfaces render unchanged.
+fn panel_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, fill: [u8; 4]) {
+    let off = theme::shadow_offset();
+    if off > 0.0 {
+        // Blur-less and fully opaque-ish: a soft shadow would just look like a
+        // rounded theme with extra steps.
+        round_rect(g, x + off, y + off, w, h, r, [0, 0, 0, 0x66]);
+    }
+    let b = theme::border_w();
+    if b > 1.0 {
+        // The pixel outline is black rather than theme::border() — a border tinted
+        // to match the surface disappears into it, which is what killed the first cut.
+        round_rect(g, x, y, w, h, r, [0, 0, 0, 0xE0]);
+        round_rect(g, x + b, y + b, w - b * 2.0, h - b * 2.0, (r - b).max(0.0), fill);
+    } else {
+        round_rect(g, x, y, w, h, r, fill);
+    }
+}
+
+/// 판 중에서도 **테두리로 층을 선언해야 하는 것** — 행 위에 뜨는 메뉴·드롭다운,
+/// 값을 받는 입력 상자.
+///
+/// `panel_rect` 과 갈리는 건 사이드바 탭처럼 바탕에 붙어 있는 판이다 — 그건
+/// 테두리가 없어야 목록이 조용하고, 행을 가리며 뜨는 메뉴는 테두리가 있어야
+/// 어디까지가 메뉴인지 읽힌다.
+///
+/// 밝은 링은 실루엣과 무관하게 **항상** 두른다. 픽셀 실루엣의 검은 테두리는
+/// 어두운 바탕 위에서 그냥 사라져서, 스크림 위에 뜬 모달이나 검은 터미널 위의
+/// 메뉴가 테두리 없는 색판으로 보였다 — 층을 선언하라고 만든 함수가 정작
+/// 층이 필요한 자리에서만 침묵한 셈이다.
+fn panel_rect_outlined(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32, fill: [u8; 4]) {
+    round_rect(g, x - 1.0, y - 1.0, w + 2.0, h + 2.0, r, theme::border());
+    panel_rect(g, x, y, w, h, r, fill);
+}
+
+/// 커서가 얹힌 것을 **들어 올리는** 유일한 함수 — 버튼·탭·행·메뉴 항목, 눌리는
+/// 것이면 전부 여기를 지난다.
+///
+/// 색을 인자로 받지 않는 게 요점이다. 예전엔 자리마다 `surface_hover` 와
+/// `text` 22%·18% 반투명이 섞여 같은 동작에 세 가지 밝기가 났다. 그리고 들림을
+/// 그리는 김에 커서 플래그까지 세우니, 손 모양이 안 뜨는 버튼이 생길 수 없다.
+fn hover_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, r: f32) {
+    g.hover_pointer = true;
+    round_rect(g, x, y, w, h, r, theme::surface_hover());
+}
+
 /// Paint the git-column header dropdowns (repo path picker + branch switcher)
 /// and fill their click rects. A free fn, not a method, so it can run inside
 /// the `&mut self.gpu` block (which can't re-borrow `&self`): the caller hands
@@ -144,12 +211,12 @@ fn git_paint_dropdowns(
     let pw = (col_w - 12.0).max(0.0);
     // A raised menu panel with a 1px border so it reads above the list.
     let panel = |g: &mut gpu::GpuRenderer, y: f32, h: f32| {
-        round_rect(g, px - 1.0, y - 1.0, pw + 2.0, h + 2.0, theme::RADIUS_MD, theme::border());
-        round_rect(g, px, y, pw, h, theme::RADIUS_MD, theme::surface_active());
+        round_rect(g, px - 1.0, y - 1.0, pw + 2.0, h + 2.0, theme::radius_md(), theme::border());
+        round_rect(g, px, y, pw, h, theme::radius_md(), theme::surface_active());
     };
     let row = |g: &mut gpu::GpuRenderer, iy: f32, label: &str, on: bool| {
         if on {
-            round_rect(g, px + 4.0, iy + 1.0, pw - 8.0, item_h - 2.0, theme::RADIUS_SM, theme::with_alpha(theme::accent(), 0x40));
+            round_rect(g, px + 4.0, iy + 1.0, pw - 8.0, item_h - 2.0, theme::radius_sm(), theme::with_alpha(theme::accent(), 0x40));
         }
         let col = if on { theme::text() } else { theme::text_dim() };
         g.draw_text(px + 12.0, iy + (item_h - 12.0) / 2.0, label, gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false });
@@ -366,6 +433,9 @@ const SIDEBAR_W: f32 = 200.0;
 const SIDEBAR_TAB_H: f32 = 54.0;
 const SIDEBAR_TAB_GAP: f32 = 3.0;
 const SIDEBAR_TAB_INSET: f32 = 8.0;
+/// 사이드바 바닥에 붙박인 트레이(+ · 피드백 · 설정)의 높이. 세션 목록은 여기까지만
+/// 자란다.
+const SIDEBAR_TRAY_H: f32 = 44.0;
 /// File-tree column, parked just right of the session-tab sidebar (VSCode
 /// explorer layout). Its own width + visibility, independent of the tab
 /// strip, so the tree can be toggled / resized without touching the tabs.
@@ -3380,6 +3450,9 @@ pub(crate) enum SettingsCat {
     Shell,
     Claude,
     Students,
+    /// 앱에 말을 거는 쪽 — 불편한 점을 적어 두는 곳. 다른 카테고리와 달리 설정을
+    /// 바꾸지 않으므로 nav 맨 아래에 따로 떨어뜨린다.
+    Feedback,
 }
 
 /// The two free-text fields in the settings form. Tracks which one (if any)
@@ -3393,6 +3466,9 @@ pub(crate) enum SettingsInput {
     ClaudeExtra,
     /// Students 카테고리 persona 멀티라인 편집 필드가 포커스됨.
     StudentPersona,
+    /// Feedback 본문 멀티라인 필드. persona 와 같은 편집 경로를 타지만 캐럿·버퍼가
+    /// 따로라, 설정 창을 두 카테고리로 오가도 서로 안 덮어쓴다.
+    FeedbackBody,
     /// Claude 계정 라벨 필드. 목록이라 어느 행인지 실어야 하는데, 이 enum 은
     /// `Copy` 로 여기저기 값 복사돼 돌아서 String 을 못 넣는다 — 행 인덱스로 잡고
     /// 계정 삭제 시 포커스를 푼다(인덱스가 밀려 엉뚱한 행을 가리키지 않게).
@@ -3410,6 +3486,8 @@ pub(crate) enum SettingsAction {
     FileOpenMode(&'static str),
     /// `"app"` 모드가 쓸 앱 이름. 빈 문자열 = OS 연결 프로그램.
     FileOpenApp(String),
+    /// 최소 대비 프리셋 이름 (`theme::CONTRAST_PRESETS`).
+    MinContrast(&'static str),
     FocusFileOpenCmd,
     ToggleFileTree,
     ToggleFooter,
@@ -3419,6 +3497,9 @@ pub(crate) enum SettingsAction {
     FocusShell,
     ThemeMode(&'static str),
     Accent(String),
+    /// Silhouette preset: "rounded" · "sharp" · "pixel". Its own axis, so any
+    /// palette can be worn with any corner treatment.
+    Shape(&'static str),
     /// Font-size stepper: −1 / +1 logical px on the base cell font.
     FontSizeDelta(i8),
     /// Window-tab placement: "top" (title-strip tabs) or "side" (Warp strip).
@@ -3460,6 +3541,15 @@ pub(crate) enum SettingsAction {
     SelectStudent(String),
     /// Focus the persona multiline editor for the selected character.
     FocusStudentPersona,
+    /// 피드백 본문 편집기에 포커스.
+    FocusFeedbackBody,
+    /// 진단 정보(버전·OS·창 구성)를 같이 남길지. 기본 켬 — 없으면 대부분의
+    /// 제보가 "어느 버전에서요?"로 한 번 더 왕복한다.
+    ToggleFeedbackDiag,
+    /// 피드백을 파일로 굳힌다. 보낼 곳이 아직 없어서, 나가는 게 아니라 쌓인다.
+    SaveFeedback,
+    /// 쌓인 피드백 폴더를 파일 관리자로 연다.
+    OpenFeedbackDir,
 }
 
 /// Which dropdown a pane's status bar has open. `Path` lists the cwd's sibling
@@ -4204,8 +4294,17 @@ struct App {
     /// form area, computed by the render pass (paint_settings returns the
     /// content height). The wheel handler clamps against this.
     settings_scroll_max: f32,
+    /// 피드백 본문 편집 버퍼. 설정 창을 닫아도 안 비운다 — 쓰다 만 글이
+    /// 실수로 창을 닫았다고 사라지면 다시 안 쓴다.
+    feedback_body: String,
+    /// 그 버퍼의 캐럿(문자 인덱스). persona 와 나눠 갖는다.
+    feedback_caret: usize,
+    /// 진단 정보 첨부 스위치.
+    feedback_diag: bool,
     /// Sidebar "Settings" entry rect (bottom-anchored), for hit-testing.
     settings_btn_rect: (f32, f32, f32, f32),
+    /// 사이드바 트레이의 피드백 버튼 rect — 설정과 같은 짝.
+    feedback_btn_rect: (f32, f32, f32, f32),
     /// Cursor-blink phase captured at the last successful render.
     /// Used by `render_frame`'s early-return: a blink toggle counts
     /// as "something changed" and forces the GPU pass even when
@@ -4565,7 +4664,11 @@ impl App {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0),
             settings_scroll_max: 0.0,
+            feedback_body: String::new(),
+            feedback_caret: 0,
+            feedback_diag: true,
             settings_btn_rect: (0.0, 0.0, 0.0, 0.0),
+            feedback_btn_rect: (0.0, 0.0, 0.0, 0.0),
             last_blink_on: false,
             chrome_dirty: true,
             cursor_px: std::env::var("KASATERM_AUTOHOVER")
@@ -4769,7 +4872,89 @@ impl App {
 
 }
 
+/// 종료 뒤 새 빌드를 스스로 설치하도록 도우미를 띄운다 — 껐다 켜면 최신이 되게.
+///
+/// 새로 구운 번들이 `dist/` 에 놓여도 도는 앱과는 무관해서, 재시작 스크립트를 따로
+/// 돌리지 않으면 옛 바이너리가 계속 뜬다. 코드를 고치고 앱을 껐다 켠 사람에게
+/// "그건 반영이 아니다" 를 매번 설명해야 했다 — 껐다 켜는 것이 곧 반영이어야 한다.
+///
+/// 설치를 지금 하지 않고 도우미에게 미루는 건, 우리 번들을 우리가 도는 중에 덮으면
+/// 안 되기 때문이다: pane shim 이 번들 안 헬퍼들을 심링크로 물고 있어 `rm -rf` 가
+/// 그걸 중간에 끊는다. 그래서 우리 pid 가 사라질 때까지 기다렸다가 복사한다.
+///
+/// 다시 띄우지는 않는다. 사람이 끄려고 끈 것일 수도 있는데 창이 혼자 되살아나면
+/// 그게 더 놀랍다 — 다음에 켤 때 새것이면 충분하다.
+///
+/// 다음 셋을 다 만족할 때만 움직인다. 하나라도 어긋나면 조용히 아무것도 안 한다:
+/// 지금 도는 것이 **그 설치본**일 것(개발 `cargo run` 이나 남의 위치 앱은 남의 것),
+/// 빌드 트리의 번들이 실재할 것(배포된 머신엔 없다), 그리고 그게 **더 새것**일 것.
+fn arm_self_install() {
+    let installed = match std::env::var("HOME") {
+        Ok(h) => std::path::PathBuf::from(h).join("Applications/kasaterm.app"),
+        Err(_) => return,
+    };
+    let running = installed.join("Contents/MacOS/kasaterm");
+    if std::env::current_exe().ok().as_deref() != Some(running.as_path()) {
+        return;
+    }
+    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../dist/kasaterm.app");
+    let mtime = |p: &std::path::Path| {
+        std::fs::metadata(p).and_then(|m| m.modified()).ok()
+    };
+    let fresh = dist.join("Contents/MacOS/kasaterm");
+    let (Some(new), Some(old)) = (mtime(&fresh), mtime(&running)) else { return };
+    if new <= old {
+        return;
+    }
+    let log = std::env::temp_dir().join("kasaterm-selfinstall.log");
+    let script = format!(
+        "while kill -0 {pid} 2>/dev/null; do sleep 0.3; done\n\
+         rm -rf '{inst}' && cp -R '{dist}' '{inst}' && touch '{inst}' \
+         && echo \"installed $(date)\" || echo \"install FAILED $(date)\"\n",
+        pid = std::process::id(),
+        inst = installed.display(),
+        dist = dist.display(),
+    );
+    let Ok(out) = std::fs::File::create(&log) else { return };
+    let Ok(err) = out.try_clone() else { return };
+    let _ = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .stdout(out)
+        .stderr(err)
+        .spawn();
+}
+
+/// 우리를 띄운 claude 세션의 흔적을 우리 env 에서 지운다 — pane 을 낳기 전에.
+///
+/// kasaterm 을 claude 안에서 실행하는 건 예외가 아니라 일상이다: 재시작 스크립트를
+/// 세션에서 돌리면 새 앱이 그 claude 의 자식으로 뜬다. 그러면 `CHILD_SESSION`·
+/// `TEAMMATE_MODE`·`SESSION_ID` 가 앱에 눌어붙고, 앱이 낳는 **모든 pane** 에 흘러
+/// 거기서 뜬 claude 가 "나는 이미 남의 자식" 이라며 transcript 저장을 끈다. 거노가
+/// 본 `Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker` 가
+/// 그것이다. pane 하나가 아니라 그 인스턴스의 pane 전부가 그렇게 된다.
+///
+/// spawn 쪽이 아니라 여기서 지우는 건, 새는 통로가 pane 만이 아니어서다 — 훅·MCP
+/// 서버·계정 갱신 프로브도 같은 env 를 물려받는다. 입구를 한 번 막는 게 출구를
+/// 전부 세는 것보다 낫다. 앱은 이 값들을 하나도 읽지 않으므로 지워서 잃을 게 없다.
+fn scrub_inherited_claude_markers() {
+    for k in [
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_TEAMMATE_MODE",
+        "CLAUDE_CODE_FORK_SUBAGENT",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
+        "CLAUDE_PID",
+        "CLAUDECODE",
+    ] {
+        std::env::remove_var(k);
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    scrub_inherited_claude_markers();
     // `open`(1) doesn't forward shell env to the launched .app, but the
     // .app's screen-recording TCC permission only applies when launched
     // via `open` (not when the binary runs directly). So a capture/test
@@ -5262,6 +5447,30 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         format!("[ -n \"$PERSONA_OK\" ] && set -- {extra} \"$@\"\n")
     };
     let persona_block = format!("{persona_line}{model_line}{effort_line}{extra_line}");
+    // MCP 자동 주입. 위 노브들과 달리 **prepend 가 아니라 append** 라서 블록이 따로다 —
+    // `--mcp-config` 는 variadic 이라 뒤따르는 non-flag 를 값으로 삼켜, 앞에 두면 사용자
+    // 프롬프트가 통째로 사라진다. 반복 지정은 누적되므로 사용자가 자기 것을 줘도 안 부딪힌다.
+    let mcp_block = match socket::claude_mcp_config_path() {
+        Some(p) if socket::read_claude_mcp() => {
+            let q = p
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('$', "\\$")
+                .replace('`', "\\`");
+            format!(
+                "MCPCFG=\"{q}\"\n\
+                 # 파일이 비었거나 mcpServers 키가 없으면 claude 가 **부팅 자체를 거부**한다.\n\
+                 # 문법 오류까지는 못 잡지만(복구는 그 파일을 지우는 것 한 줄이고 claude 가\n\
+                 # 경로를 그대로 찍어준다), 빈 파일 하나로 모든 pane 을 벽돌로 만드는 사고는\n\
+                 # 이 얕은 검사로 막힌다.\n\
+                 if [ -n \"$PERSONA_OK\" ] && [ -s \"$MCPCFG\" ] && grep -q '\"mcpServers\"' \"$MCPCFG\" 2>/dev/null; then\n\
+                 case \" $* \" in *\" --strict-mcp-config \"*|*\" -- \"*) ;; *) set -- \"$@\" --mcp-config \"$MCPCFG\" ;; esac\n\
+                 fi\n"
+            )
+        }
+        _ => String::new(),
+    };
     // 계정 전환. persona/model 노브와 달리 **PERSONA_OK 게이트 밖**이다 — 저것들은
     // attach·agents·-p·stop/logs 에서 일부러 빠지지만, 인증이 서브커맨드마다 다른
     // 계정을 보면 그건 그냥 고장이다. 디렉터리는 여기서 만들어 둔다: macOS 는 경로를
@@ -5365,11 +5574,12 @@ fi\n\
 # 가 매 실행 임의 session-<hex8> 로 task 를 저장해 pane↔task 매핑이 끊긴다(거노: 유즈\n\
 # 업무탭 빔). SID 비면(사용자 --resume) claude 기본.\n\
 [ -n \"$SID\" ] && export CLAUDE_TASK_LIST_ID=\"$SID\"\n\
+{mblk}\
 if [ \"$USER_SETTINGS\" = 1 ] || [ ! -f \"$SETTINGS\" ]; then\n\
   exec \"$REAL\" \"$@\"\n\
 fi\n\
 exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
-        hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block);
+        hd = hd, tblk = team_block, pblk = persona_block, ablk = account_block, mblk = mcp_block);
     let wrapper_path = shim_dir.join("claude");
     if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
         eprintln!("[shim] write claude wrapper failed: {e}");
@@ -6300,6 +6510,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_wrapper_appends_mcp_config_after_user_args() {
+        // `--mcp-config` 는 variadic 이라 **뒤따르는 non-flag 를 값으로 삼킨다** — 다른 노브들처럼
+        // prepend 로 바꾸면 사용자 프롬프트가 통째로 인자에 먹혀 조용히 사라진다. 그리고 exec 이
+        // 두 갈래(사용자 --settings 유무)라 분기 뒤에 붙이면 한쪽에서만 빠진다.
+        let dir = std::env::temp_dir().join(format!("kt-shim-mcp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        install_claude_hook_shim(&dir);
+        let Ok(body) = std::fs::read_to_string(dir.join("claude")) else { return };
+        if !body.contains("--mcp-config") {
+            // 설정에서 껐거나 홈을 못 찾은 환경 — 블록 자체가 안 실린 것이라 검사할 대상이 없다.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        assert!(
+            body.contains("set -- \"$@\" --mcp-config"),
+            "--mcp-config 가 prepend 로 돌아갔다 — 사용자 프롬프트를 삼킨다"
+        );
+        let at = body.find("--mcp-config").unwrap();
+        let exec_at = body.find("\nexec ").or_else(|| body.find("  exec ")).unwrap();
+        assert!(at < exec_at, "--mcp-config 주입이 exec 분기보다 뒤에 있다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn count_claude_panes_walks_nested_splits_and_windows() {
         // Mirrors save_session_state's schema: nested split leaves + a second
         // window, mixed was_claude. Only claude leaves count; a null leaf
@@ -6376,6 +6611,18 @@ mod tests {
         // 별표로 시작 안 하면 원문 그대로(rename 사용자 값 보호).
         assert_eq!(strip_activity_prefix("학생 프사 개선"), "학생 프사 개선");
         assert_eq!(strip_activity_prefix("main.rs · vim"), "main.rs · vim");
+    }
+
+    /// 자기 설치가 겨누는 `dist/` 가 정말 레포 루트 밑인지. 상대 경로가 한 칸만
+    /// 어긋나도 `metadata` 가 조용히 실패해 **아무 일도 안 일어나고**, 그 침묵은
+    /// "새 빌드가 없어서 안 깔았다" 와 구분되지 않는다 — 껐다 켜도 옛 바이너리인
+    /// 채로 아무도 눈치채지 못한다.
+    #[test]
+    fn self_install_dist_path_resolves_to_the_repo_root() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let root = root.canonicalize().expect("레포 루트는 언제나 실재한다");
+        assert!(root.join("Cargo.toml").is_file(), "워크스페이스 매니페스트가 여기 있어야 한다");
+        assert!(root.join("scripts/build-app.sh").is_file(), "번들을 굽는 스크립트도 같은 자리");
     }
 
     #[test]

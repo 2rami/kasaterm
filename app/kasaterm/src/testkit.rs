@@ -31,6 +31,38 @@ impl App {
         eprintln!("[autoquit] clean exit in {ms}ms");
         self.autoquit_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(ms));
     }
+    /// `KASATERM_AUTOCURSOR="x,y"` (+ `_MS`) — 커서를 그 논리 좌표에 놓는다.
+    ///
+    /// hover 는 정적 캡처로 볼 방법이 없다. 들림도 손가락 커서도 커서가 그 위에
+    /// 있을 때만 생기는데, 헤드리스는 마우스를 못 움직여 "hover 를 넣었다" 는
+    /// 주장이 눈으로 확인되지 않은 채 남는다. 캡처 직전에 커서만 옮겨 두면
+    /// 그 프레임이 곧 hover 스크린샷이 된다.
+    pub(crate) fn run_pending_autocursor(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, f32, f32)>> = OnceLock::new();
+        static MOVED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let spec = std::env::var("KASATERM_AUTOCURSOR").ok()?;
+            let (xs, ys) = spec.split_once(',')?;
+            let ms: u64 = std::env::var("KASATERM_AUTOCURSOR_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(6000);
+            Some((
+                Instant::now() + std::time::Duration::from_millis(ms),
+                xs.trim().parse().ok()?,
+                ys.trim().parse().ok()?,
+            ))
+        });
+        let Some((due, x, y)) = *due else { return };
+        if Instant::now() < due || MOVED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        self.cursor_px = (x, y);
+        self.chrome_dirty = true;
+        eprintln!("[autocursor] ({x:.0},{y:.0})");
+    }
     pub(crate) fn schedule_autocapture(&mut self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOCAPTURE_MS") else { return; };
         // 콤마로 여러 시각 지정 가능("14000,14300") — 애니메이션처럼 시간에
@@ -647,7 +679,7 @@ impl App {
     }
     /// Headless settings-window repro: open the settings *window* (auxwin) after
     /// `KASATERM_AUTOSETTINGS_MS`, on the category named in `KASATERM_AUTOSETTINGS`
-    /// ("appearance" / "shell" / "claude" / "students", default General), then arm
+    /// ("appearance" / "shell" / "claude" / "students" / "feedback", default General), then arm
     /// a self-capture of that aux surface at +1500ms (path `KASATERM_AUTOSETTINGS_CAP`,
     /// default scratchpad `settings-window.png`). Function-local statics — no App
     /// field (parallel-work rule: struct App stays untouched).
@@ -673,6 +705,7 @@ impl App {
             "shell" => SettingsCat::Shell,
             "claude" => SettingsCat::Claude,
             "students" => SettingsCat::Students,
+            "feedback" => SettingsCat::Feedback,
             _ => SettingsCat::General,
         };
         // 딥링크 검증: KASATERM_AUTOSETTINGS_STUDENT 로 특정 학생 선택 상태(=프사
@@ -682,17 +715,35 @@ impl App {
             .filter(|s| !s.is_empty());
         eprintln!("[autosettings] open settings window cat={cat_env} student={student:?}");
         self.open_settings_window(event_loop, Some(cat), student);
+        // 피드백 본문은 키 이벤트로만 채워지는데 헤드리스엔 그 경로가 없다 —
+        // 버퍼를 직접 심어 wrap·캐럿·활성 버튼을 캡처로 본다.
+        // KASATERM_AUTOFEEDBACK_SAVE=1 이면 저장까지 눌러, 캡처엔 비워진 폼과
+        // 토스트가 남는다(파일이 실제로 떨어졌는지는 폴더로 확인).
+        if let Ok(t) = std::env::var("KASATERM_AUTOFEEDBACK_TEXT") {
+            self.feedback_caret = t.chars().count();
+            self.feedback_body = t;
+            self.settings_input = Some(SettingsInput::FeedbackBody);
+            if std::env::var("KASATERM_AUTOFEEDBACK_SAVE").is_ok_and(|v| v == "1") {
+                self.save_feedback();
+            }
+        }
         // Aux capture (main autocapture only reaches the main window). +1500ms so
-        // the new window renders a full frame first.
+        // the new window renders a full frame first. 화면에 든 값이 subprocess 를
+        // 기다리는 자리(계정 슬롯의 `claude auth status`)면 한 프레임으로는 부족해
+        // 늘 빈칸만 찍힌다 — `_CAP_MS` 로 그 지연을 연다.
         let cap = std::env::var("KASATERM_AUTOSETTINGS_CAP").unwrap_or_else(|_| {
             std::env::temp_dir()
                 .join("settings-window.png")
                 .to_string_lossy()
                 .into_owned()
         });
+        let delay = std::env::var("KASATERM_AUTOSETTINGS_CAP_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(1500);
         if let Some(a) = self.settings_window_idx().and_then(|i| self.aux_windows.get_mut(i)) {
             a.pending_capture =
-                Some((Instant::now() + std::time::Duration::from_millis(1500), cap));
+                Some((Instant::now() + std::time::Duration::from_millis(delay), cap));
         }
     }
     /// Headless raw-editor selection seed: KASATERM_TEST_MD_SELECT="al,ac,cl,cc"

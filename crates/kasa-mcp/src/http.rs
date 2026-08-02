@@ -2318,7 +2318,12 @@ fn refresh_slot_once(dir: &str) {
     std::thread::spawn(move || {
         let mut cmd = crate::no_window_command(claude_bin().to_string_lossy().as_ref());
         if !dir.is_empty() {
-            cmd.env("CLAUDE_CONFIG_DIR", &dir);
+            // 슬롯을 가르는 건 **자격증명 저장소**뿐이다. 처음엔 `CLAUDE_CONFIG_DIR`
+            // 를 줬는데 그건 설정 전체를 옮기는 변수라, 정작 인증은 기본 슬롯 그대로
+            // 붙어 (갱신하려던 슬롯이 아니라) 기본 토큰만 살아나고, 대신 슬롯 폴더에
+            // `.claude.json`·`projects/` 가 통째로 생겼다. 갱신은 영영 안 되니 그 슬롯은
+            // 계속 빈칸 — 이 함수가 고치려던 증상 그대로다.
+            cmd.env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &dir);
         }
         // 가장 짧은 왕복이면 된다 — 목적은 답이 아니라 토큰 갱신이다.
         let _ = cmd

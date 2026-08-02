@@ -28,6 +28,22 @@ kasaterm (자체 tmux GUI 터미널 + Claude 런처). 사용자: 거노 (디자�
 4. **체감(스크롤·입력 지연)은 반드시 release** — `cargo run --release -p kasaterm`. 디버그 빌드는 원래 버벅임(debug=느림, release/.app=빠름). 디버그로 "느리다" 판단 금지.
 5. **시각 확인** — 스크린샷 본 후 어색한 부분 직접 짚어내고 수정. "어때보여요?" 묻지 말고 너의 판단으로 다음 액션.
 
+## 거노 앱에 반영하기 — 굽고, 껐다 켜면 끝
+
+거노가 쓰는 건 `~/Applications/kasaterm.app` 이고, 그건 `dist/kasaterm.app` 의 **복사본**이다. `cargo build` 도 `build-app.sh` 도 그 복사를 하지 않으니, **빌드했다고 반영된 게 아니다**(설치본 mtime 을 확인하면 바로 보인다).
+
+너는 여기까지만 한다:
+
+```bash
+bash scripts/build-app.sh      # dist/kasaterm.app 을 새로 굽는다
+```
+
+그 다음은 **거노가 앱을 껐다 켜면 끝난다.** 종료 시 `arm_self_install`(main.rs)이 도우미를 남겨, 프로세스가 완전히 사라진 뒤 `dist` 를 설치본 자리에 복사한다. 그래서 다음에 켜는 것이 새 바이너리다. 다시 띄워 주지는 않는다 — 끄려고 끈 것일 수도 있어서다. 결과는 `$TMPDIR/kasaterm-selfinstall.log`.
+
+- **`scripts/relaunch.sh` 는 이제 선택**이다(quit→설치→재실행→inode 검증까지 한 번에 하고 싶을 때). ⚠️ **pane 안에서 돌리지 마라** — 앱을 quit 하는 순간 네 PTY 째 죽는다. 거노가 `! scripts/relaunch.sh --no-build` 로 돌린다.
+- 자기 설치는 **그 설치본으로 도는 앱**에서만, **빌드 트리의 번들이 더 새로울 때만** 움직인다. `cargo run` 개발 실행과 배포된 남의 머신에서는 아무 일도 안 한다.
+- ⚠️ **앱을 claude 세션 안에서 띄우지 마라**(pane 에서 `open`·relaunch). 그 앱이 claude 의 `CLAUDE_CODE_CHILD_SESSION`·`TEAMMATE_MODE`·`SESSION_ID` 를 물려받고, 그러면 그 앱이 낳는 **모든 pane** 의 claude 가 transcript 저장을 끈다. `scrub_inherited_claude_markers`(main.rs, 부팅 첫 줄)가 이제 그걸 지우지만, 애초에 안 물리는 게 낫다.
+
 ## 함정·배경·수정 주의점은 메모리에
 
 렌더러/색 파이프라인·아키텍처 배경, 렌더버그 디버깅 카탈로그, 코드 수정 주의점(PTY reader **`try_send` 필수** 등), 성능 히스토리는 CLAUDE.md 에 중복해 두지 않는다 — `.memory/MEMORY.md` 토픽 파일에 있다. 1순위 = [[feedback_tmuxify_rendering_pipeline]] (렌더버그 카탈로그 + try_send 트랩). 코드 만지기 전 관련 토픽을 먼저 recall 할 것.

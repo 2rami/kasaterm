@@ -923,7 +923,10 @@ impl App {
         let attrs = WindowAttributes::default()
             .with_title("Settings")
             .with_theme(Some(Theme::Dark))
-            .with_inner_size(LogicalSize::new(720.0, 620.0));
+            // Wide enough that the theme grid wraps to three columns instead of
+            // four rows — at 720 the palette cards alone filled the viewport and
+            // pushed shape/accent below the fold.
+            .with_inner_size(LogicalSize::new(920.0, 720.0));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
