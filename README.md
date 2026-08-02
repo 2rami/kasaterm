@@ -52,6 +52,10 @@ kasaterm 이 `claude` 를 감쌀 때 `~/.config/kasaterm/claude-mcp.json` 을 `-
 파일이 곧 claude 가 읽는 모양이고 갈아 끼우면 다음 `claude` 부터 반영된다(재빌드 불필요).
 되돌리기는 `--remove`.
 
+주입은 **인자 맨 뒤**로 간다 — `--mcp-config` 는 variadic 이라 뒤따르는 non-flag 를 값으로 삼키므로,
+앞에 두면 사용자 프롬프트가 통째로 사라진다. `attach` 같은 서브커맨드와 `--strict-mcp-config`·`--` 가
+있을 때는 붙지 않는다. 반복 지정은 누적되므로 사용자가 자기 `--mcp-config` 를 줘도 부딪히지 않는다.
+
 > ⚠ 그 파일이 깨지면 **모든 pane 의 claude 가 부팅을 거부한다.** 그래서 스크립트는 임시 파일에 쓰고
 > rename 하는 원자적 경로만 쓴다. 손으로 망가뜨렸다면 그 파일을 지우면 원복되고, claude 에러 메시지가
 > 경로를 그대로 찍어 준다.
