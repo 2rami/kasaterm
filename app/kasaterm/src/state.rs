@@ -175,6 +175,15 @@ pub(crate) struct InfoState {
     pub(crate) ports_collapsed: bool,
     /// 우클릭 메뉴 — `(화면 좌표, 대상)`.
     pub(crate) ctx_menu: Option<(f32, f32, InfoTarget)>,
+    /// 직전 프레임에 이 패널이 차지한 영역 `(x, y, w, h)`. 커서가 여기 있는 동안은
+    /// 새 스냅샷을 렌더 사본으로 옮기지 않는다 — 항목이 생기거나 사라지면 아래
+    /// 행들이 밀려 **누르려던 것이 손가락 밑에서 달아나기** 때문이다. 한 프레임
+    /// 늦은 값이지만 패널 위치는 거의 안 변해 판정에 충분하다.
+    pub(crate) panel_rect: Option<(f32, f32, f32, f32)>,
+    /// 동결이 시작된 시각. 커서가 패널을 떠나면 비운다. `CursorLeft` 를 안 받으므로
+    /// 커서 좌표는 창을 떠나도 마지막 자리에 남는다 — 패널 위에 마우스를 얹어 둔 채
+    /// 자리를 뜨면 목록이 영영 굳는다. 그래서 동결에 시한을 둔다.
+    pub(crate) frozen_since: Option<std::time::Instant>,
     /// 접어둔 pane 그룹(surface id). 남의 pane 은 접어두고 자기 것만 펴 두는
     /// 쓰임이 기본이라 pane 을 옮겨도 유지한다.
     pub(crate) group_collapsed: std::collections::HashSet<String>,
@@ -208,6 +217,8 @@ impl Default for InfoState {
             sites: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             busy: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             last_refresh: None,
+            panel_rect: None,
+            frozen_since: None,
             key: String::new(),
             scroll: 0.0,
             root: None,
