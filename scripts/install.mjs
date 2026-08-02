@@ -2,14 +2,16 @@
 // 처음 설치할 때 한 번 돌린다. 자동으로 할 수 있는 건 다 하고, 사람이 해야만 하는 한 단계를 정확히 알려준다.
 //   node scripts/install.mjs           설치
 //   node scripts/install.mjs --verify  붙었는지 확인만
+//
+// 이 파일은 node_modules 가 아직 없는 상태에서 처음 돌아간다. 그래서 의존성을 최상위에서
+// import 하지 않는다 — `import { WebSocket } from 'ws'` 가 맨 위에 있던 동안은 정작 npm install 을
+// 실행하는 줄에 닿기도 전에 ERR_MODULE_NOT_FOUND 로 죽었다(설치 스크립트가 설치 전에는 못 돌았다).
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { readFileSync } from 'node:fs'
-import { WebSocket } from 'ws'
 import { PORT } from '../extension/port.js'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -40,7 +42,9 @@ function probePort() {
   })
 }
 
-function bridgeStatus() {
+async function bridgeStatus() {
+  let WebSocket
+  try { ({ WebSocket } = await import('ws')) } catch { return null }
   return new Promise((resolve) => {
     let sock
     const done = (v) => { try { sock?.close() } catch {}; clearTimeout(timer); resolve(v) }
@@ -58,6 +62,11 @@ function bridgeStatus() {
 }
 
 if (verifyOnly) {
+  // 의존성이 없으면 브리지에 물어볼 수단 자체가 없다. "브리지 없음" 으로 뭉뚱그리면 원인을 오진한다.
+  if (!existsSync(join(ROOT, 'node_modules'))) {
+    say('아직 설치 전입니다 — 먼저 `node scripts/install.mjs` 를 돌리세요.')
+    process.exit(1)
+  }
   const st = await bridgeStatus()
   if (!st) {
     say(`브리지에 못 붙었습니다 (127.0.0.1:${PORT}). 터미널에서 브라우저 툴을 한 번 쓰면 자동으로 뜹니다.`)
