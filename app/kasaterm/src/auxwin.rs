@@ -147,6 +147,16 @@ impl AuxWindow {
         self.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
         let pe = self.preedit.clone();
         match &self.kind {
+            // 렌더 뷰 — pane 과 같은 `raw_mode` 분기다. 별도창이 늘 raw 였던 건
+            // 이 갈래가 없어서지 의도가 아니었다(거노: "별도창으로 보면 렌더뷰가
+            // 안 된다"). 본문 높이는 그려 봐야 나오므로 휠이 쓰도록 받아 둔다.
+            AuxWindowKind::Editor(m) if !m.raw_mode => {
+                let blocks = m.doc.blocks.clone();
+                let gen = m.doc.gen;
+                let scroll = m.scroll;
+                let ch = self.gpu.draw_markdown(&blocks, gen, 0.0, 0.0, w, h, scroll, None);
+                self.md_content_h = ch;
+            }
             AuxWindowKind::Editor(m) => {
                 let lang = crate::code_lang_for_path(std::path::Path::new(&m.doc.path));
                 let sel = m.sel_range();
@@ -243,8 +253,9 @@ impl App {
         event_loop: &ActiveEventLoop,
         near: Option<winit::dpi::PhysicalPosition<i32>>,
     ) -> Option<usize> {
-        // 별도창은 항상 raw 편집기 — .md 를 렌더뷰로 열어놨어도 편집 버퍼를 시드한다.
-        md.ensure_raw_seeded();
+        // 버퍼만 미리 채운다 — 뷰 모드는 부르는 쪽이 정한다. 여기서 raw 로
+        // 못박던 동안엔 `.md` 를 팝아웃하면 렌더 뷰가 통째로 사라졌다(거노).
+        md.seed_edit_lines();
         let title = aux_editor_title(&md);
         let mut attrs = WindowAttributes::default()
             .with_title(title.clone())
@@ -283,6 +294,7 @@ impl App {
             preedit: String::new(),
             last_title: title,
             pending_capture: None,
+            md_content_h: 0.0,
             window,
         };
         self.aux_windows.push(aux);
@@ -334,7 +346,9 @@ impl App {
         let md = MarkdownPane {
             doc,
             is_md_doc: is_md,
-            raw_mode: true,
+            // 마크다운은 읽으려고 여는 것이라 렌더 뷰로 시작한다 — 코드·텍스트는
+            // 그럴 뷰가 없으니 그대로 raw. 편집은 글자를 치면 알아서 넘어간다.
+            raw_mode: !is_md,
             edit_lines,
             cur_line: 0,
             cur_col: 0,
@@ -619,6 +633,34 @@ impl App {
             }
             self.aux_redraw(idx);
             return;
+        }
+        // 렌더 뷰에서 글자를 치면 삼키는 대신 raw 로 넘어가 그 글자를 살린다
+        // (pane 편집기와 같은 규칙). 방향키·PageUp 같은 이동 키는 렌더 뷰에서
+        // 할 일이 없으니 그대로 삼킨다 — 스크롤은 휠이다.
+        if self.aux_windows.get(idx).and_then(|a| a.editor()).is_some_and(|m| !m.raw_mode) {
+            if !crate::markdown::md_mutating_key(event) {
+                return;
+            }
+            if let Some(a) = self.aux_windows.get_mut(idx) {
+                // 두 뷰의 스크롤은 단위가 다르다 — 렌더는 본문 픽셀, raw 는 줄
+                // 좌표다. 값을 그대로 넘기면 엉뚱한 줄로 튀고 0 으로 되돌리면
+                // 읽던 자리를 잃으니, 본문 높이 대비 비율로 옮겨 대략 같은 곳에서
+                // 편집이 시작되게 한다.
+                let lh = a.gpu.raw_editor_line_h();
+                let ratio = if a.md_content_h > 0.0 {
+                    (a.editor().map_or(0.0, |m| m.scroll) / a.md_content_h).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                if let Some(m) = a.editor_mut() {
+                    m.ensure_raw_seeded();
+                    let line = ((m.edit_lines.len() as f32 * ratio) as usize)
+                        .min(m.edit_lines.len().saturating_sub(1));
+                    m.cur_line = line;
+                    m.cur_col = 0;
+                    m.scroll = line as f32 * lh;
+                }
+            }
         }
         // 평문 키 — 한글 조합 경유 편집.
         self.aux_editor_input(idx, event);
@@ -913,9 +955,16 @@ impl App {
             MouseScrollDelta::LineDelta(_, y) => y * lh * 3.0,
             MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
+        // 렌더 뷰는 줄 수로 높이를 못 구한다(블록마다 높이가 다르다) — 지난
+        // 프레임이 남긴 실제 본문 높이를 쓴다. 아직 한 번도 안 그렸으면 0 이라
+        // clamp 가 스크롤을 막아 버리므로, 그때만 줄 기준으로 물러선다.
+        let rendered = a.editor().is_some_and(|m| !m.raw_mode);
         let lines_n = a.editor().map(|m| m.edit_lines.len()).unwrap_or(0);
+        let content_h = match (rendered, a.md_content_h) {
+            (true, ch) if ch > 0.0 => ch,
+            _ => lines_n as f32 * lh,
+        };
         // 본문 높이를 넘는 만큼만 스크롤 — 마지막 줄이 화면 안에 머물게 여유 2줄.
-        let content_h = lines_n as f32 * lh;
         let max_scroll = (content_h - h + lh * 2.0).max(0.0);
         if let Some(m) = a.editor_mut() {
             // 위로 스크롤(y>0) = scroll 감소.
@@ -1005,6 +1054,7 @@ impl App {
             preedit: String::new(),
             last_title: "Settings".to_string(),
             pending_capture: None,
+            md_content_h: 0.0,
             window,
         };
         self.aux_windows.push(aux);
@@ -1212,6 +1262,7 @@ impl App {
             preedit: String::new(),
             last_title: title,
             pending_capture: None,
+            md_content_h: 0.0,
             window,
         };
         self.aux_windows.push(aux);

@@ -3778,19 +3778,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 if !self.try_copy_md_block() {
                                     if self.md_body_rects.contains_key(&pane_id) {
-                                        // 미니맵 띠를 먼저 본다 — 그 안이면 캐럿이
-                                        // 아니라 스크롤 점프고, 드래그 앵커도 세우지
-                                        // 않는다(안 그러면 띠에서 손을 떼는 순간
-                                        // 본문에 엉뚱한 선택이 생긴다).
-                                        if self.md_mini_jump(
-                                            &pane_id,
-                                            self.cursor_px.0,
-                                            self.cursor_px.1,
-                                        ) {
-                                            return;
-                                        }
-                                        // 거터의 접기 삼각형도 캐럿 배치보다
-                                        // 먼저 본다 — 같은 이유다.
+                                        // 거터의 접기 삼각형은 캐럿 배치보다 먼저
+                                        // 본다 — 삼각형 위에서 손을 떼는 순간
+                                        // 본문에 엉뚱한 선택이 생기면 안 된다.
                                         if self.md_fold_click(
                                             &pane_id,
                                             self.cursor_px.0,
