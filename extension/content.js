@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '2'
+  const OVERLAY_V = '3'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -233,6 +233,13 @@ if (!window.__ccInjected) {
           transform-origin: 100% 0;
           transition: opacity .3s ease, transform .3s ease, box-shadow .3s ease;
         }
+        /* 조작 중에만 나타나 숨쉬는 바깥 링. box-shadow 를 직접 애니메이션하면 매 프레임 다시
+           그려야 하지만, 링을 따로 두면 opacity·transform 만 움직여 compositor 가 처리한다. */
+        .chip::before {
+          content: ''; position: absolute; inset: -4px; border-radius: 999px;
+          border: 2px solid var(--cc, #6BCF7F); opacity: 0;
+          transition: opacity .3s ease;
+        }
         .ava { position: relative; width: 22px; height: 22px; flex: none; }
         .chip img { width: 22px; height: 22px; border-radius: 50%; display: block; }
         .dot {
@@ -256,14 +263,20 @@ if (!window.__ccInjected) {
           0% { opacity: .9; transform: scale(.6) }
           100% { opacity: 0; transform: scale(1.9) }
         }
-        /* 조작 중 — 테두리가 숨쉬고 상태 점이 뛴다 */
+        /* 조작 중 — 칩 바깥 링이 숨쉬고 상태 점이 뛴다 */
+        :host([data-mode="active"]) .chip::before { opacity: 1; animation: halo 2.4s ease-in-out infinite; }
+        @keyframes halo {
+          0%,100% { opacity: .9; transform: scale(1) }
+          50% { opacity: .2; transform: scale(1.08) }
+        }
         :host([data-mode="active"]) .dot { background: #f08c00; animation: blip 1.1s ease-in-out infinite; }
         @keyframes blip { 0%,100% { transform: scale(1); opacity: 1 } 50% { transform: scale(.6); opacity: .5 } }
-        /* 대기 — 테두리와 커서는 걷고 칩만 조용히 남긴다. 페이지를 가리지 않을 만큼 작고 흐리게. */
+        /* 대기 — 페이지 테두리와 커서는 걷고 칩만 조용히 남긴다. 작고 흐리게 낮추되 **테두리 두께는
+           그대로** 둔다 — 얇아지면 "누가 잡고 있다"는 신호 자체가 흐려진다. */
         :host([data-mode="idle"]) .frame { animation: none; opacity: 0; }
         :host([data-mode="idle"]) .chip {
           opacity: .78; transform: scale(.9);
-          box-shadow: 0 1px 8px rgba(0,0,0,.28), 0 0 0 1.5px var(--cc, #6BCF7F);
+          box-shadow: 0 1px 8px rgba(0,0,0,.28), 0 0 0 2px var(--cc, #6BCF7F);
         }
         :host([data-mode="idle"]) .cursor { opacity: 0 !important; }
       </style>
