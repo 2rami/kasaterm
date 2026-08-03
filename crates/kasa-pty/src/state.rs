@@ -660,6 +660,36 @@ impl Drop for PtySession {
     }
 }
 
+/// 호스트가 OSC 10/11/12 질의에 답할 색. `0x00RRGGBB` 로 담는다.
+///
+/// TUI 는 켤 때 이걸 한 번 물어 자기 테마(밝은 배경이냐 어두운 배경이냐)를 정한다
+/// — Claude Code 의 `theme: auto` 가 그렇다. 그래서 **여기 답이 곧 그 결정**이다.
+/// 예전엔 어두운 값이 박혀 있어, kasaterm 을 라이트 테마로 바꿔도 안에서 뜬 claude
+/// 는 계속 자기가 어두운 터미널에 있는 줄 알았다.
+///
+/// crate 경계를 static 으로 넘는 건 방향 때문이다. 팔레트는 app 이 쥐고 있고
+/// kasa-pty 는 app 을 의존하지 않는다(그 반대다) — 인자로 받으려면 PTY 생성 경로
+/// 전체에 색을 실어 날라야 하는데, 정작 읽는 곳은 이 콜백 하나뿐이다.
+pub static HOST_BG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x252C35);
+pub static HOST_FG: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0xFFFFFF);
+pub static HOST_CURSOR: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0xC5C8C6);
+
+/// 테마가 바뀔 때마다 app 이 부른다. **이미 도는 TUI 는 안 바뀐다** — 질의는 시작할
+/// 때 한 번뿐이라, 새로 뜨는 프로그램부터 적용된다.
+pub fn set_host_colors(bg: (u8, u8, u8), fg: (u8, u8, u8), cursor: (u8, u8, u8)) {
+    use std::sync::atomic::Ordering;
+    let pack = |c: (u8, u8, u8)| (u32::from(c.0) << 16) | (u32::from(c.1) << 8) | u32::from(c.2);
+    HOST_BG.store(pack(bg), Ordering::Relaxed);
+    HOST_FG.store(pack(fg), Ordering::Relaxed);
+    HOST_CURSOR.store(pack(cursor), Ordering::Relaxed);
+}
+
+fn host_rgb(cell: &std::sync::atomic::AtomicU32) -> (u8, u8, u8) {
+    let v = cell.load(std::sync::atomic::Ordering::Relaxed);
+    ((v >> 16) as u8, (v >> 8) as u8, v as u8)
+}
+
 /// Bridges alacritty_terminal's `EventListener` callbacks back into
 /// the PTY's input side. This is non-optional: terminals expect the
 /// host to *reply* to a handful of control sequences, not just
@@ -771,18 +801,16 @@ impl EventListener for PtyEventForwarder {
                     13 => (0xC3, 0x97, 0xD8),
                     14 => (0x70, 0xC0, 0xB1),
                     15 => (0xEA, 0xEA, 0xEA),
-                    // 256 = NamedColor::Foreground. kasaterm's DEFAULT_FG
-                    // is pure white (cells::DEFAULT_FG = [255, 255, 255]).
-                    256 => (0xFF, 0xFF, 0xFF),
-                    // 257 = NamedColor::Background. kasaterm chrome bg
-                    // = theme::BG = [37, 44, 53] (#252C35). TUIs use this
-                    // OSC 11 reply to pick a syntax-highlight contrast
-                    // that actually matches what's behind their text on
-                    // screen — answering ghostty's bg would shift their
-                    // colour decisions slightly off.
-                    257 => (37, 44, 53),
-                    // 258 = NamedColor::Cursor. Match palette[7] (off-white).
-                    258 => (0xC5, 0xC8, 0xC6),
+                    // 256/257/258 = Foreground/Background/Cursor. 이 셋만은
+                    // 고정값이 아니라 **지금 화면에 실제로 깔린 색**을 답한다 —
+                    // TUI 가 이 답으로 자기 테마를 고르므로(Claude Code 의
+                    // `theme: auto`), 어두운 값을 박아 두면 라이트 테마로 바꿔도
+                    // 안에서는 계속 어두운 터미널인 줄 안다. 나머지 ANSI 16색을
+                    // ghostty 기본값으로 두는 건 그대로다: 그건 셀 팔레트라
+                    // 우리가 이미 렌더 단계에서 테마에 맞춰 다시 칠한다.
+                    256 => host_rgb(&HOST_FG),
+                    257 => host_rgb(&HOST_BG),
+                    258 => host_rgb(&HOST_CURSOR),
                     // 16-255: xterm 6×6×6 cube + 24-step gray ramp,
                     // identical to ghostty's hardcoded fallback.
                     n if n >= 16 && n < 232 => {
