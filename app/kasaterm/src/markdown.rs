@@ -589,13 +589,10 @@ impl MarkdownPane {
     // the pane's own fields — no `App`/`ws` — so both drivers reuse identical
     // edit semantics; the driver owns undo/caret-scroll wiring around them.
 
-    /// Force raw-editor mode and seed the edit buffer from the doc source if it
-    /// isn't populated yet (a `.md` opened in Render mode carries no lines). A
-    /// pop-out window always edits raw, so this runs on the way out.
-    pub(crate) fn ensure_raw_seeded(&mut self) {
-        if !self.raw_mode {
-            self.raw_mode = true;
-        }
+    /// Seed the edit buffer from the doc source if it isn't populated yet — a
+    /// `.md` opened in Render mode carries no lines, and the first keystroke
+    /// would otherwise edit an empty buffer. Leaves the view mode alone.
+    pub(crate) fn seed_edit_lines(&mut self) {
         if self.edit_lines.is_empty() {
             self.edit_lines = Arc::new(self.doc.raw.split('\n').map(String::from).collect());
             self.longest_cache = None;
@@ -603,6 +600,13 @@ impl MarkdownPane {
                 self.lines_mut().push(String::new());
             }
         }
+    }
+
+    /// `seed_edit_lines` + 뷰를 raw 로 확정. 렌더 뷰에서 편집으로 넘어가는 자리에
+    /// 쓴다.
+    pub(crate) fn ensure_raw_seeded(&mut self) {
+        self.raw_mode = true;
+        self.seed_edit_lines();
     }
 
     /// Insert `text` (a committed Hangul syllable or a single typed segment) at
@@ -3289,47 +3293,6 @@ impl App {
         // 접을 게 없는 줄을 눌렀어도 **true** 다 — 거터를 누른 것이지 본문을 누른
         // 게 아니라서, 여기서 false 를 주면 캐럿이 엉뚱하게 튄다.
         m.toggle_fold(li);
-        true
-    }
-
-    /// 미니맵을 눌렀으면 그 자리로 스크롤하고 true. 본문을 눌렀으면 false —
-    /// 호출자는 평소 캐럿 배치로 넘어간다.
-    ///
-    /// 폭·줄높이는 그리는 쪽과 **같은 함수**에서 얻는다(`raw_editor_mini_*`).
-    /// 같은 식을 두 벌 두면 폰트 크기를 바꾸는 순간 띠와 히트 영역이 갈린다.
-    pub(crate) fn md_mini_jump(&mut self, id: &str, px: f32, py: f32) -> bool {
-        let Some(&(bx, by, bw, bh)) = self.md_body_rects.get(id) else {
-            return false;
-        };
-        let n = {
-            let Ok(ws) = self.ws.lock() else { return false };
-            match ws.panes.get(id).and_then(|p| p.markdown()) {
-                Some(m) if m.raw_mode => m.edit_lines.len(),
-                _ => return false,
-            }
-        };
-        let (mini_w, per, lh) = {
-            let Some(g) = self.gpu.as_mut() else { return false };
-            (
-                g.raw_editor_mini_w(bw),
-                g.raw_editor_mini_per(bh, n),
-                g.raw_editor_line_h(),
-            )
-        };
-        if mini_w <= 0.0 || px < bx + bw - mini_w {
-            return false;
-        }
-        // 누른 줄이 화면 **가운데**로 오게 옮긴다 — 맨 위에 놓으면 그 위 문맥이
-        // 잘려서 왜 그 자리를 눌렀는지 확인할 수가 없다.
-        let want = (((py - by) / per).max(0.0) * lh - bh * 0.5).max(0.0);
-        if let Ok(mut ws) = self.ws.lock() {
-            if let Some(pane) = ws.panes.get_mut(id) {
-                pane.dirty = true;
-                if let Some(m) = pane.markdown_mut() {
-                    m.scroll = want.min((n as f32 * lh - bh).max(0.0));
-                }
-            }
-        }
         true
     }
 
