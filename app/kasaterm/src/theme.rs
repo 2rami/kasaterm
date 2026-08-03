@@ -403,7 +403,28 @@ fn store_palette(p: &Palette) {
     for (i, c) in p.ansi.iter().enumerate() {
         S_ANSI[i].store(pack([c[0], c[1], c[2], 255]), Ordering::Relaxed);
     }
+    // pane 안에서 도는 TUI 도 같은 색을 봐야 한다. 이 셋(fg/bg/cursor)이 OSC
+    // 10/11/12 질의의 답이 되고, Claude Code 의 `theme: auto` 는 그 배경색으로
+    // 밝은 테마와 어두운 테마를 가른다 — 안 넘기면 라이트로 바꿔도 안쪽만 어둡다.
+    kasa_pty::set_host_colors(
+        (p.bg[0], p.bg[1], p.bg[2]),
+        (p.fg[0], p.fg[1], p.fg[2]),
+        // 커서는 팔레트에 없다 — 밝은 배경에선 fg 쪽이, 어두운 배경에선 ANSI 7
+        // (off-white)이 실제 커서에 가깝다.
+        if is_light(p.bg) {
+            (p.fg[0], p.fg[1], p.fg[2])
+        } else {
+            (p.ansi[7][0], p.ansi[7][1], p.ansi[7][2])
+        },
+    );
     // Accent intentionally not touched here — see set_accent.
+}
+
+/// 배경이 밝은 쪽인가. ITU-R BT.601 휘도 — 사람이 느끼는 밝기에 맞춰 녹색에
+/// 가중치를 준다. 단순 평균은 순수 파랑(#0000FF)을 밝다고 판정한다.
+fn is_light(bg: [u8; 4]) -> bool {
+    let l = 0.299 * f32::from(bg[0]) + 0.587 * f32::from(bg[1]) + 0.114 * f32::from(bg[2]);
+    l > 128.0
 }
 
 /// Accent presets offered in the settings screen; first is the default blue.
