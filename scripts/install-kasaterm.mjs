@@ -41,6 +41,15 @@ function write(obj) {
   renameSync(tmp, CFG)
 }
 
+// 캐릭터 색·프로필 이미지가 있는 레포. 런타임에 PATH 로 찾으면 **claude 가 뜬 시점의 PATH**에
+// 달려서, 셸에는 있는데 MCP 프로세스에는 없는 일이 생긴다(그러면 아바타가 모노그램으로 떨어진다).
+// 설치 시점의 셸 PATH 에서 한 번 찾아 env 로 굳혀 둔다.
+function kasatermDir() {
+  if (process.env.CHROMECLAUDE_KASATERM_DIR) return process.env.CHROMECLAUDE_KASATERM_DIR
+  const hit = (process.env.PATH || '').split(':').find((p) => p.endsWith('/tmuxify/bin'))
+  return hit ? hit.slice(0, -'/bin'.length) : null
+}
+
 const cfg = read()
 
 if (remove) {
@@ -57,11 +66,18 @@ if (remove) {
   process.exit(0)
 }
 
-cfg.mcpServers[KEY] = { command: 'node', args: [join(ROOT, 'mcp', 'server.mjs')] }
+const dir = kasatermDir()
+cfg.mcpServers[KEY] = {
+  command: 'node',
+  args: [join(ROOT, 'mcp', 'server.mjs')],
+  ...(dir ? { env: { CHROMECLAUDE_KASATERM_DIR: dir } } : {}),
+}
 write(cfg)
 
 say(`등록했습니다: ${KEY}`)
 say(`  ${CFG}`)
+if (dir) say(`  캐릭터 자산: ${dir}`)
+else say('  ⚠ kasaterm 레포를 못 찾아 아바타는 이름 첫 글자로 나옵니다 (CHROMECLAUDE_KASATERM_DIR 로 지정 가능)')
 const others = Object.keys(cfg.mcpServers).filter((k) => k !== KEY)
 if (others.length) say(`  (같은 파일의 다른 서버는 그대로 뒀습니다: ${others.join(', ')})`)
 say('')
