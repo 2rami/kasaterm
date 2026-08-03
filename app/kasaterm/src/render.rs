@@ -6109,6 +6109,16 @@ impl App {
                     gpu::DrawOpts { font_size: gf, color: theme::accent(), bold: true, italic: false },
                 );
             }
+            // 테마 전환 — 옛 배경색이 픽셀 블록으로 부서지며 걷힌다. 맨 마지막에
+            // 그려 화면 전체(터미널·크롬·모달)를 한 장으로 덮는다.
+            if let Some((at, old_bg)) = self.theme_fx {
+                let t = at.elapsed().as_secs_f32() / THEME_FX_SECS;
+                if t >= 1.0 {
+                    self.theme_fx = None;
+                } else {
+                    paint_theme_dissolve(g, t, old_bg, win_px.0 / scale, win_px.1 / scale);
+                }
+            }
             if let Err(e) = g.render(&slot_views, scale, time_secs, true) {
                 eprintln!("[gpu] render error: {e:?}");
             }
@@ -7551,6 +7561,47 @@ fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     let img = image::load_from_memory(student_profile_png(slug)?).ok()?.to_rgba8();
     let (w, h) = img.dimensions();
     Some((img.into_raw(), w, h))
+}
+
+/// 테마 전환이 걷히는 데 걸리는 시간. 눈이 "무엇이 바뀌었나"를 읽을 만큼은 길고,
+/// 다음 클릭을 기다리게 할 만큼 길지는 않은 자리.
+pub(crate) const THEME_FX_SECS: f32 = 0.34;
+
+/// 픽셀 블록 한 변(논리 px). 셀보다 크게 잡아야 "큰 픽셀"로 읽힌다 — 셀 크기에
+/// 맞추면 그냥 부드러운 페이드처럼 보이고, 블록 수도 네 배가 된다.
+const FX_BLOCK: f32 = 26.0;
+
+/// 테마 전환 디졸브 — 옛 배경색 블록이 가운데서 바깥으로 걷힌다.
+///
+/// 블록마다 사라질 시점을 「중심에서의 거리」와 「좌표 해시」로 섞어 정한다. 거리만
+/// 쓰면 매끈한 원이 퍼져 픽셀이라는 느낌이 안 나고, 해시만 쓰면 방향 없이 지글거리는
+/// TV 노이즈가 된다. 둘을 섞어야 퍼지는 물결의 **가장자리가 픽셀로 부서진다**.
+fn paint_theme_dissolve(g: &mut gpu::GpuRenderer, t: f32, old_bg: [u8; 4], w: f32, h: f32) {
+    let (cx, cy) = (w * 0.5, h * 0.5);
+    let max_d = (cx * cx + cy * cy).sqrt().max(1.0);
+    let cols = (w / FX_BLOCK).ceil() as i32;
+    let rows = (h / FX_BLOCK).ceil() as i32;
+    for j in 0..rows {
+        for i in 0..cols {
+            let (bx, by) = (i as f32 * FX_BLOCK, j as f32 * FX_BLOCK);
+            let d = ((bx + FX_BLOCK * 0.5 - cx).powi(2) + (by + FX_BLOCK * 0.5 - cy).powi(2))
+                .sqrt()
+                / max_d;
+            // 좌표를 섞어 0..1 로 흩는 값. 난수를 안 쓰는 건 프레임마다 같은 답이
+            // 나와야 블록이 한 번 사라진 뒤 다시 나타나지 않기 때문이다.
+            let hash = {
+                let n = (i.wrapping_mul(73_856_093) ^ j.wrapping_mul(19_349_663)) as u32;
+                (n >> 8 & 0xFFFF) as f32 / 65535.0
+            };
+            // 거리 70% + 흩뿌림 30%. 앞의 +0.2 는 **첫 프레임에 이미 중앙이 뚫려
+            // 있게** 한다 — 0 에서 시작하면 한 프레임 동안 화면 전체가 옛 배경
+            // 단색이라 "퍼진다"가 아니라 "깜빡 꺼졌다 켜진다"로 읽힌다.
+            if t * 1.1 + 0.2 > d * 0.7 + hash * 0.3 {
+                continue;
+            }
+            round_rect(g, bx, by, FX_BLOCK, FX_BLOCK, 0.0, old_bg);
+        }
+    }
 }
 
 /// 캐릭터 이름 자리에 그 학생의 얼굴을 그린다 — 없는 캐릭터면 아무것도 안 그리고

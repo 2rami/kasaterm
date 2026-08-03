@@ -63,6 +63,33 @@ impl App {
         self.chrome_dirty = true;
         eprintln!("[autocursor] ({x:.0},{y:.0})");
     }
+    /// `KASATERM_AUTOTHEME="<키>"` (+ `_MS`) — 그 시각에 테마를 갈아 끼운다.
+    ///
+    /// 전환 디졸브는 0.4초짜리라 손으로는 중간을 못 잡는다. 바뀌는 시각을 못박아
+    /// 두면 `AUTOCAPTURE_MS` 를 그 뒤 몇십 ms 에 붙여 원하는 진행도의 한 장을
+    /// 정확히 찍을 수 있다(콤마로 여러 시각을 주면 연속 프레임).
+    pub(crate) fn run_pending_autotheme(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, String)>> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let key = std::env::var("KASATERM_AUTOTHEME").ok()?;
+            let ms: u64 = std::env::var("KASATERM_AUTOTHEME_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3000);
+            Some((Instant::now() + std::time::Duration::from_millis(ms), key))
+        });
+        let Some((due, key)) = due.as_ref() else { return };
+        if Instant::now() < *due || DONE.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        self.begin_theme_fx();
+        crate::theme::set_theme(key);
+        self.repaint_all();
+        eprintln!("[autotheme] → {key}");
+    }
     pub(crate) fn schedule_autocapture(&mut self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOCAPTURE_MS") else { return; };
         // 콤마로 여러 시각 지정 가능("14000,14300") — 애니메이션처럼 시간에

@@ -1366,6 +1366,17 @@ impl ApplicationHandler<UserEvent> for App {
                 self.chrome_dirty = true;
                 window.request_redraw();
             }
+            // 비-macOS 에서 OS 의 밝게/어둡게를 아는 유일한 창구. macOS 는 창
+            // 장식을 다크로 고정해 둬 이 값이 시스템을 안 나타내므로, 그쪽은
+            // theme.rs 가 시스템 설정을 직접 읽고 이 이벤트는 흘려보낸다.
+            WindowEvent::ThemeChanged(t) => {
+                theme::note_window_theme(t == winit::window::Theme::Light);
+                if theme::poll_system_theme() {
+                    self.begin_theme_fx();
+                    self.repaint_all();
+                }
+                window.request_redraw();
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.handle_wheel(delta);
             }
@@ -4739,6 +4750,13 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autowinclose();
         self.run_pending_autoinfo();
         self.run_pending_autocursor();
+        self.run_pending_autotheme();
+        // OS 의 밝게/어둡게가 바뀌었나 — `theme: system` 일 때만 실제로 조회한다
+        // (게이트는 poll 안에 있다). 바뀐 순간에만 참이라 평소엔 아무 일도 없다.
+        if theme::poll_system_theme() {
+            self.begin_theme_fx();
+            self.repaint_all();
+        }
         self.run_pending_autozoomprobe();
         self.run_pending_autoheader();
         self.resolve_force_handle_menu();
@@ -4811,10 +4829,18 @@ impl ApplicationHandler<UserEvent> for App {
             || !self.window_alert.is_empty()
             // 노치 스크롤 관성이 목표에 붙을 때까지 프레임을 펌프한다.
             || !self.md_scroll_anim.is_empty()
+            // 테마 전환 디졸브가 걷히는 동안.
+            || self.theme_fx.is_some()
         {
             // 관성은 33ms(≈30fps)로 굴리면 그 자체가 계단으로 보인다 — 도는 동안만
-            // 8ms 로 촘촘히. 다른 펌프 사유(블링크·펄스)엔 33ms 로 충분하다.
-            let period = if self.md_scroll_anim.is_empty() { 33 } else { 8 };
+            // 8ms 로 촘촘히. 테마 디졸브도 같은 이유로 촘촘한 쪽에 붙인다 —
+            // 0.4초짜리라 30fps 면 열두 장뿐이고, 그러면 블록이 퍼지는 게 아니라
+            // 뚝뚝 끊겨 보인다. 다른 펌프 사유(블링크·펄스)엔 33ms 로 충분하다.
+            let period = if self.md_scroll_anim.is_empty() && self.theme_fx.is_none() {
+                33
+            } else {
+                8
+            };
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + std::time::Duration::from_millis(period),
             ));
