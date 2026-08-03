@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '7'
+  const OVERLAY_V = '9'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -226,23 +226,55 @@ if (!window.__ccInjected) {
           transition: border-width .3s ease;
         }
         :host([data-mode="active"]) .frame { border-width: 3px; }
-        /* 조작 중에만 안쪽으로 번지는 글로우. 숨쉬는 것은 이 층뿐이라 선 자체는 늘 또렷하다. */
+        /* 안쪽으로 번지는 글로우. 대기에도 은은히 켜 두고 조작 중에만 짙어지며 숨쉰다.
+           숨쉬는 것은 이 층뿐이라 선 자체는 늘 또렷하다.
+           ⚠️숨쉬기 저점을 대기값보다 낮추면 조작 중이 대기보다 흐려 보이는 역전이 생긴다. */
         .frame::before {
           content: ''; position: absolute; inset: 0;
           box-shadow: inset 0 0 32px -6px var(--cc, #6BCF7F);
-          opacity: 0; transition: opacity .3s ease;
+          opacity: .4; transition: opacity .3s ease;
         }
         :host([data-mode="active"]) .frame::before { opacity: 1; animation: breathe 2.4s ease-in-out infinite; }
-        @keyframes breathe { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
-        /* brand-skip — 창 테두리를 도는 픽셀 러너. 둘레가 6000px 대라 칸을 96 로 잘게 나눠도
-           한 칸이 60px 이 넘어 이동이 확실히 끊겨 보인다. 조작 중에만 나타난다. */
-        .frame::after {
-          content: ''; position: absolute; width: 8px; height: 8px;
-          background: var(--cc, #6BCF7F); box-shadow: 0 0 10px var(--cc, #6BCF7F);
-          offset-path: border-box; offset-distance: 0%; offset-rotate: 0deg;
+        @keyframes breathe { 0%,100% { opacity: 1 } 50% { opacity: .6 } }
+        /* brand-skip — 창 테두리를 도는 픽셀 러너. 흰 머리 한 칸과 옅어지는 꼬리 네 칸이 같은
+           경로를 한 칸씩 시차를 두고 돌아 지나간 자취처럼 보인다. 다섯 칸의 크기를 똑같이 두는
+           것이 중요하다 — 뒤로 갈수록 작게 만들면 자취가 아니라 따로 노는 점 다섯 개가 된다.
+           96칸 × 100ms 라 한 칸이 60px 을 넘어 이동이 확실히 끊긴다.
+           ⚠️anchor 를 기본(중앙)으로 두면 러너 절반이 창 밖으로 잘린다. 위쪽 가장자리를 경로에
+           맞추고 offset-rotate: auto 로 진행 방향을 따르게 하면 네 변 모두에서 안쪽에 온전히 놓인다.
+           ⚠️active 규칙에서 animation 단축을 쓰면 칸마다 준 delay 가 0 으로 덮여 다섯이
+           겹쳐 돈다. 꼬리를 만드는 것이 그 delay 이므로 여기서는 개별 속성으로 쓴다. */
+        .frame i {
+          position: absolute; display: block; width: 10px; height: 10px;
+          offset-path: border-box; offset-distance: 0%;
+          offset-rotate: auto; offset-anchor: 50% 0%;
           opacity: 0; transition: opacity .3s ease;
         }
-        :host([data-mode="active"]) .frame::after { opacity: 1; animation: runner 9s steps(96) infinite; }
+        :host([data-mode="active"]) .frame i {
+          opacity: 1;
+          animation-name: runner; animation-duration: 9.6s;
+          animation-timing-function: steps(96); animation-iteration-count: infinite;
+        }
+        .frame i:nth-child(1) {
+          background: #fff;
+          box-shadow: 0 0 6px var(--cc, #6BCF7F), 0 0 18px var(--cc, #6BCF7F);
+          animation-delay: -.4s;
+        }
+        .frame i:nth-child(2) {
+          background: var(--cc, #6BCF7F); box-shadow: 0 0 10px var(--cc, #6BCF7F);
+          animation-delay: -.3s;
+        }
+        .frame i:nth-child(3) {
+          background: color-mix(in srgb, var(--cc, #6BCF7F) 55%, transparent);
+          animation-delay: -.2s;
+        }
+        .frame i:nth-child(4) {
+          background: color-mix(in srgb, var(--cc, #6BCF7F) 32%, transparent);
+          animation-delay: -.1s;
+        }
+        .frame i:nth-child(5) {
+          background: color-mix(in srgb, var(--cc, #6BCF7F) 16%, transparent);
+        }
         /* /brand-skip */
         .chip {
           position: fixed; top: 12px; right: 12px; display: flex; align-items: center; gap: 8px;
@@ -321,6 +353,11 @@ if (!window.__ccInjected) {
       <div class="frame"></div>
       <div class="chip"><span class="ava"><img alt=""><i class="dot"></i></span><span class="label"></span></div>
       <div class="cursor"><img alt=""></div>`
+    /* brand-skip — 러너 다섯 칸. 마크업이 아니라 여기서 만드는 이유는 배포판에서 이 블록만
+       들어내면 쓰이지 않는 빈 요소도 함께 사라지기 때문이다. */
+    const fr = root.querySelector('.frame')
+    for (let i = 0; i < 5; i++) fr.appendChild(document.createElement('i'))
+    /* /brand-skip */
     document.documentElement.appendChild(host)
     return root
   }
