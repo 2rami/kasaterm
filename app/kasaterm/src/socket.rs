@@ -2743,18 +2743,38 @@ fn claude_child_pid(shell_pid: u32) -> Option<u32> {
 /// 즉석 확정할 때 쓴다 — cwd 로 프로젝트 dir 슬러그를 재현하는 대신 실재 파일을 찾아
 /// claude 의 슬러그 규칙 드리프트에 무해하다. 세션 id 는 uuid 라 전역 유일.
 pub(crate) fn transcript_path_for_session(sid: &str) -> Option<std::path::PathBuf> {
+    let projects = kasa_socket::home_dir()?.join(".claude").join("projects");
+    scan_projects_for_session(&projects, sid)
+}
+
+/// `transcript_path_for_session` 의 순수 부분 — projects 루트를 인자로 받아
+/// `$HOME` 없이도 테스트할 수 있게 갈라 뒀다.
+///
+/// 같은 sid 가 여러 폴더에 있을 수 있다 — rename 을 겪은 사람이 옛 폴더의 대화를
+/// 새 폴더로 복사해 손수 복구하기 때문이다(미도리 실측). `read_dir` 순서는
+/// 파일시스템이 정하므로 첫 히트를 쓰면 어느 쪽을 이어갈지가 실행마다 달라진다.
+/// 최근에 쓰인 것이 곧 이어가려던 대화라 mtime 최신을 고르고, 같으면 경로
+/// 사전순으로 끊어 답을 하나로 굳힌다.
+fn scan_projects_for_session(
+    projects: &std::path::Path,
+    sid: &str,
+) -> Option<std::path::PathBuf> {
     if sid.is_empty() || sid.contains('/') {
         return None;
     }
-    let projects = kasa_socket::home_dir()?.join(".claude").join("projects");
     let want = format!("{sid}.jsonl");
-    for d in std::fs::read_dir(projects).ok()?.flatten() {
-        let p = d.path().join(&want);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
+    let mut hits: Vec<(std::time::SystemTime, std::path::PathBuf)> =
+        std::fs::read_dir(projects)
+            .ok()?
+            .flatten()
+            .filter_map(|d| {
+                let p = d.path().join(&want);
+                let mtime = p.metadata().and_then(|m| m.modified()).ok()?;
+                Some((mtime, p))
+            })
+            .collect();
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    hits.into_iter().next().map(|(_, p)| p)
 }
 
 fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathBuf> {
@@ -2768,7 +2788,7 @@ fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathB
     }
     // 2순위: argv 의 session id(exact) — --resume/--session-id claude.
     if let Some(id) = claude_session_id_from_cmdline(shell_pid) {
-        return project_jsonl(&cwd, &id).filter(|p| p.exists());
+        return jsonl_for_session(&cwd, &id);
     }
     // agents/attach 뷰 pane 은 여기서 절대 추측하지 않는다 — 어느 세션을 보는지 cwd 로
     // 알 수 없어, recent-jsonl 폴백이 같은 cwd 의 남의 활성 세션을 훔쳤다(거노: bg 뷰
@@ -2804,7 +2824,36 @@ fn roster_transcript(pane_id: &str, cwd: &std::path::Path) -> Option<std::path::
         return None;
     }
     let session = entry.get("session_id").and_then(|s| s.as_str())?;
-    project_jsonl(cwd, session).filter(|p| p.exists())
+    jsonl_for_session(cwd, session)
+}
+
+/// `session` 의 transcript 경로. cwd 로 만든 폴더를 먼저 보고, 없으면 projects
+/// 전체에서 그 uuid 를 찾는다.
+///
+/// ⚠️ 폴더명은 **claude 가 시작한 시점의 cwd** 로 굳는다 — 레포 폴더 이름을
+/// 바꾸면 대화는 옛 이름 폴더에 남는데 우리는 새 cwd 로만 찾아, 살아 있는
+/// 세션의 바인딩이 조용히 끊겼다. 그러면 저장에 sid 가 안 실리고 다음 재시작이
+/// 이어가기 대신 빈 세션을 띄운다(미도리 실측: chromeclaude→kasachrome rename
+/// 뒤 19MB 대화가 끊김). sid 는 uuid 라 전역에서 유일하니 폴더가 갈려도 안전하다.
+pub(crate) fn jsonl_for_session(
+    cwd: &std::path::Path,
+    session: &str,
+) -> Option<std::path::PathBuf> {
+    let projects = kasa_socket::home_dir()?.join(".claude/projects");
+    jsonl_for_session_in(&projects, cwd, session)
+}
+
+/// `jsonl_for_session` 의 순수 부분 — projects 루트를 인자로 받는다.
+fn jsonl_for_session_in(
+    projects: &std::path::Path,
+    cwd: &std::path::Path,
+    session: &str,
+) -> Option<std::path::PathBuf> {
+    let direct = projects.join(project_slug(cwd)).join(format!("{session}.jsonl"));
+    if direct.exists() {
+        return Some(direct);
+    }
+    scan_projects_for_session(projects, session)
 }
 
 /// `cwd` 의 claude 프로젝트 디렉터리에서 `within` 안에 수정된 .jsonl 경로들.
@@ -2850,13 +2899,17 @@ fn parse_status_model(screen: &str) -> Option<String> {
     None
 }
 
+/// claude 가 cwd 를 projects 폴더 이름으로 굳힐 때 쓰는 규칙 — `/` 와 `.` 이 `-`.
+pub(crate) fn project_slug(cwd: &std::path::Path) -> String {
+    cwd.to_string_lossy().replace(['/', '.'], "-")
+}
+
 /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
 pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std::path::PathBuf> {
-    let encoded = cwd.to_string_lossy().replace(['/', '.'], "-");
     Some(
         kasa_socket::home_dir()?
             .join(".claude/projects")
-            .join(encoded)
+            .join(project_slug(cwd))
             .join(format!("{session}.jsonl")),
     )
 }
@@ -2865,6 +2918,48 @@ pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std:
 #[cfg(test)]
 mod agents_view_tests {
     use super::*;
+
+    #[test]
+    fn session_found_after_the_repo_folder_was_renamed() {
+        // 폴더명은 claude 가 시작한 시점의 cwd 로 굳는다 — rename 하면 대화는 옛
+        // 이름 폴더에 남는다. 새 cwd 로만 찾던 동안엔 살아 있는 세션의 바인딩이
+        // 조용히 끊겨 다음 재시작이 빈 세션이 됐다(미도리 실측).
+        let root = std::env::temp_dir().join(format!("kt-proj-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let new_cwd = std::path::Path::new("/Users/kasa/Desktop/momewomo/kasachrome");
+        let old = root.join("-Users-kasa-Desktop-momewomo-chromeclaude");
+        let new = root.join(project_slug(new_cwd));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap(); // rename 직후라 비어 있다
+        let sid = "6fbe280f-1111-2222-3333-444455556666";
+        let in_old = old.join(format!("{sid}.jsonl"));
+        std::fs::write(&in_old, "{}\n").unwrap();
+
+        assert_eq!(jsonl_for_session_in(&root, new_cwd, sid), Some(in_old.clone()));
+        assert_eq!(jsonl_for_session_in(&root, new_cwd, "no-such-session"), None);
+
+        // 새 cwd 폴더에 같은 대화가 생기면(사용자가 손수 복구) 그쪽이 이긴다 —
+        // 폴백은 cwd 로 못 찾았을 때만 도는 뒷문이다.
+        let in_new = new.join(format!("{sid}.jsonl"));
+        std::fs::write(&in_new, "{}\n").unwrap();
+        assert_eq!(jsonl_for_session_in(&root, new_cwd, sid), Some(in_new.clone()));
+
+        // 폴백이 여러 폴더에서 같은 sid 를 만나도 답은 하나여야 한다 — mtime 최신.
+        // (read_dir 순서에 기대면 어느 대화를 이어갈지가 실행마다 갈린다.)
+        let now = std::time::SystemTime::now();
+        set_mtime(&in_old, now);
+        set_mtime(&in_new, now - std::time::Duration::from_secs(60));
+        let other_cwd = std::path::Path::new("/nowhere");
+        assert_eq!(jsonl_for_session_in(&root, other_cwd, sid), Some(in_old));
+        set_mtime(&new.join(format!("{sid}.jsonl")), now + std::time::Duration::from_secs(60));
+        assert_eq!(jsonl_for_session_in(&root, other_cwd, sid), Some(in_new));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    fn set_mtime(p: &std::path::Path, t: std::time::SystemTime) {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(t).unwrap();
+    }
 
     #[test]
     fn screen_marker_sid8_finds_last_valid_marker() {
