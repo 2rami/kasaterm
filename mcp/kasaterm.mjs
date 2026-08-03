@@ -5,7 +5,7 @@ import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 function root() {
-  if (process.env.CHROMECLAUDE_KASATERM_DIR) return process.env.CHROMECLAUDE_KASATERM_DIR
+  if (process.env.KASACHROME_KASATERM_DIR) return process.env.KASACHROME_KASATERM_DIR
   // 호스트가 PATH 에 자기 bin 을 꽂아두므로 거기서 레포 위치를 되짚는다.
   const hit = (process.env.PATH || '').split(':').find((p) => p.endsWith('/tmuxify/bin'))
   return hit ? hit.slice(0, -'/bin'.length) : null

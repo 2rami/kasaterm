@@ -253,16 +253,29 @@ export async function screenshot(tabId, { fullPage = false, format = 'png', qual
   return data
 }
 
+// ⚠️`replMode` 와 `awaitPromise` 는 같이 못 쓴다 — replMode 가 이기면서 Promise 가 resolve 되기
+// 전에 직렬화돼 **`{}` 만 돌아온다**(실측). 값을 받는 쪽이 훨씬 중요하므로 replMode 를 버리고,
+// 대신 top-level await 는 async IIFE 로 감싸 되살린다. 표현식이 우선이고(대부분 `await fetch(…)`
+// 꼴이다) 그게 SyntaxError 면 statement 로 한 번 더 — 그때는 `return` 이 호출자 몫이다.
 export async function evaluate(tabId, expression, { awaitPromise = true } = {}) {
   await ensureDomain(tabId, 'Runtime')
-  const res = await send(tabId, 'Runtime.evaluate', {
-    expression, awaitPromise, returnByValue: true, userGesture: true, replMode: true,
-  })
-  touch(tabId)
-  if (res.exceptionDetails) {
-    throw new Error(`JS_ERROR: ${res.exceptionDetails.exception?.description || res.exceptionDetails.text}`)
+  const needsWrap = awaitPromise && /\bawait\b/.test(expression) && !/^\s*\(\s*async/.test(expression)
+  const forms = needsWrap
+    ? [`(async () => (${expression}))()`, `(async () => { ${expression} })()`]
+    : [expression]
+
+  let last
+  for (const form of forms) {
+    const res = await send(tabId, 'Runtime.evaluate', {
+      expression: form, awaitPromise, returnByValue: true, userGesture: true,
+    })
+    touch(tabId)
+    last = res.exceptionDetails
+    if (!last) return res.result?.value ?? res.result?.description ?? null
+    // 감싸기 때문에 생긴 문법 오류만 다음 형태로 넘어간다. 진짜 런타임 오류는 그대로 알린다.
+    if (last.exception?.className !== 'SyntaxError') break
   }
-  return res.result?.value ?? res.result?.description ?? null
+  throw new Error(`JS_ERROR: ${last.exception?.description || last.text}`)
 }
 
 export async function setFileInputFiles(tabId, files, { ref, selector } = {}) {

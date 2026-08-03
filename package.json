@@ -1,5 +1,5 @@
 {
-  "name": "chromeclaude",
+  "name": "kasachrome",
   "version": "1.0.0",
   "description": "터미널의 에이전트가 평소 쓰는 크롬을 조작한다 — MV3 확장 + 로컬 브리지 + MCP",
   "scripts": {

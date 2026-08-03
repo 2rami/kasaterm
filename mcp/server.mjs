@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { PORT } from '../extension/port.js'
 
 // 서버 이름은 한 곳에만. 배포판은 이 한 줄만 치환하면 로그·MCP 핸드셰이크가 함께 따라온다.
-const NAME = 'chromeclaude'
+const NAME = 'kasachrome'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BRIDGE = join(HERE, '..', 'bridge', 'server.mjs')
 // 이름을 URL 로 두면 전역 URL 생성자를 가린다. 확장에서 그 사고가 한 번 났으므로 여기서도 피한다.

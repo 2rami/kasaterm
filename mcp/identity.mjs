@@ -34,13 +34,13 @@ const TAG = `#${(((process.pid * 0x9e3779b1) ^ Date.now()) >>> 0).toString(36).s
 function paneOf() {
   const e = process.env
   const iterm = (e.ITERM_SESSION_ID || '').split(':')[0]
-  return e.CHROMECLAUDE_PANE || e.KASATERM_PANE_ID || e.WEZTERM_PANE || e.TMUX_PANE
+  return e.KASACHROME_PANE || e.KASATERM_PANE_ID || e.WEZTERM_PANE || e.TMUX_PANE
     || iterm || e.TERM_SESSION_ID || TAG
 }
 
 export function resolveIdentity() {
   const character = process.env.KASATERM_CHARACTER
-  const name = process.env.CHROMECLAUDE_NAME || character || userInfo().username || 'claude'
+  const name = process.env.KASACHROME_NAME || character || userInfo().username || 'claude'
 
   // 호스트가 배정한 캐릭터일 때만 그쪽 자산을 찾는다. 이름을 직접 지정했으면 그 이름이 이긴다.
   const entry = (host && character && name === character && host.lookup(name)) || {}

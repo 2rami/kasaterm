@@ -70,12 +70,12 @@ kasaterm 이 `claude` 를 감쌀 때 `~/.config/kasaterm/claude-mcp.json` 을 `-
 
 | 값 | 출처 (위에서부터 먼저) |
 |---|---|
-| 이름 | `CHROMECLAUDE_NAME` → `KASATERM_CHARACTER` → OS 사용자명 → `claude` |
-| 세션 키 | `CHROMECLAUDE_PANE` → `KASATERM_PANE_ID` → `WEZTERM_PANE` → `TMUX_PANE` → `ITERM_SESSION_ID` → 프로세스 고유 태그 |
+| 이름 | `KASACHROME_NAME` → `KASATERM_CHARACTER` → OS 사용자명 → `claude` |
+| 세션 키 | `KASACHROME_PANE` → `KASATERM_PANE_ID` → `WEZTERM_PANE` → `TMUX_PANE` → `ITERM_SESSION_ID` → 프로세스 고유 태그 |
 | 색 | 신원에 색이 없으면 **이름 해시 → 크롬 탭 그룹 8색**. 결정적이라 같은 이름은 어느 기기에서든 같은 색 |
 | 아바타 | 프로필 이미지가 없으면 **이름 첫 글자 모노그램** |
 
-이름을 직접 정하려면 `CHROMECLAUDE_NAME=philip claude` 처럼 환경변수를 준다.
+이름을 직접 정하려면 `KASACHROME_NAME=philip claude` 처럼 환경변수를 준다.
 
 한때 이 해석기가 조건에 안 맞으면 `null` 을 돌려줬는데, 그 한 줄이 브리지의 `if (identity)` 가드에 걸려
 **오버레이·활동 로그·툴바 아이콘이 통째로 죽었다**. 브라우저 조작 툴은 멀쩡히 도는데 팝업만 비어 있어

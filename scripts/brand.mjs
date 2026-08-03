@@ -16,7 +16,7 @@ const BRAND = {
 }
 
 const SRC_NAME = 'kasaterm Browser'
-const SRC_KEY = 'chromeclaude'
+const SRC_KEY = 'kasachrome'
 
 const OUT = join(ROOT, 'dist', BRAND.key)
 // node_modules 는 받는 쪽에서 npm install 로 만든다. dist 는 매번 새로 짓는다.
