@@ -133,13 +133,19 @@ pub struct GpuRenderer {
     /// Uploaded image textures keyed by pane id. Populated lazily on the
     /// first frame a given image pane is drawn.
     images: HashMap<String, ImageEntry>,
-    /// Per-frame image quads: (pane id, instance). Drained in `render()`
-    /// where each is drawn with that pane's texture bind group.
-    image_quads: Vec<(String, CellInstance)>,
-    /// Per-frame chrome icon quads: (texture key, instance). Same texture
-    /// path as `image_quads`, but drawn AFTER the chrome pass so the icons
-    /// sit on top of the title bar / pane headers instead of under them.
-    icon_quads: Vec<(String, CellInstance)>,
+    /// Per-frame image quads: (pane id, instance, chrome watermark). Drained
+    /// in `render()` where each is drawn with that pane's texture bind group.
+    ///
+    /// The watermark is `chrome.len()` at queue time — how much chrome was
+    /// already queued when this quad was asked for. `render` uses it to slice
+    /// the chrome pass and drop the quad back into its place, so **the order
+    /// you queue things in is the order they come out**. Without it images and
+    /// icons live in their own passes, permanently below/above all chrome, and
+    /// no panel or modal can cover them however late it is drawn.
+    image_quads: Vec<(String, CellInstance, u32)>,
+    /// Per-frame chrome icon quads: (texture key, instance, chrome watermark).
+    /// Same texture path and same ordering rule as `image_quads`.
+    icon_quads: Vec<(String, CellInstance, u32)>,
     /// 이번 프레임에 `hover_rect` 가 한 번이라도 그려졌나 — 즉 커서 밑에
     /// 누를 수 있는 표면이 있나. 커서 모양(손가락)을 이 하나로 정하려고 둔다.
     ///
@@ -3323,15 +3329,6 @@ impl GpuRenderer {
         self.hover_pointer = false;
     }
 
-    /// Drop pending chrome icons only. Icons draw in their own pass *after*
-    /// the chrome pass (see `icon_quads`), so a full-screen modal scrim — a
-    /// plain chrome rect — can't cover them; the split/action glyphs bleed
-    /// through. A modal that owns no icons of its own calls this so every
-    /// icon queued below it disappears under the scrim.
-    pub fn clear_icons(&mut self) {
-        self.icon_quads.clear();
-    }
-
     /// Has this pane's image already been uploaded? Lets the caller skip
     /// re-handing us the pixel buffer every frame.
     pub fn has_image(&self, id: &str) -> bool {
@@ -3677,6 +3674,7 @@ impl GpuRenderer {
                 flags: CellInstance::FLAG_ICON,
                 ..Default::default()
             },
+            self.chrome.len() as u32,
         ));
     }
 
@@ -3709,6 +3707,7 @@ impl GpuRenderer {
                 flags: CellInstance::FLAG_COLOR,
                 ..Default::default()
             },
+            self.chrome.len() as u32,
         ));
     }
 
@@ -3776,6 +3775,7 @@ impl GpuRenderer {
                 flags: CellInstance::FLAG_COLOR,
                 ..Default::default()
             },
+            self.chrome.len() as u32,
         ));
     }
 
@@ -3806,6 +3806,7 @@ impl GpuRenderer {
                 flags: CellInstance::FLAG_COLOR,
                 ..Default::default()
             },
+            self.chrome.len() as u32,
         ));
     }
 
@@ -3850,6 +3851,7 @@ impl GpuRenderer {
                 flags: CellInstance::FLAG_COLOR,
                 ..Default::default()
             },
+            self.chrome.len() as u32,
         ));
     }
 
@@ -3877,6 +3879,7 @@ impl GpuRenderer {
                 flags: CellInstance::FLAG_COLOR,
                 ..Default::default()
             },
+            self.chrome.len() as u32,
         ));
     }
 
@@ -4258,13 +4261,14 @@ impl GpuRenderer {
             self.pipeline
                 .write_instances(&self.device, &self.queue, &self.chrome);
             // Upload this frame's image + icon quads (images first, icons
-            // appended). Images draw under the chrome pass; icons over it.
+            // appended) into one buffer. Buffer position is just storage —
+            // the draw order comes from the watermarks below.
             if !self.image_quads.is_empty() || !self.icon_quads.is_empty() {
                 let all_instances: Vec<CellInstance> = self
                     .image_quads
                     .iter()
                     .chain(self.icon_quads.iter())
-                    .map(|(_, inst)| *inst)
+                    .map(|(_, inst, _)| *inst)
                     .collect();
                 self.image_pipeline
                     .write_instances(&self.device, &self.queue, &all_instances);
@@ -4304,24 +4308,44 @@ impl GpuRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // Images first: they sit at the bottom of the pane box so the
-            // chrome pass (pane headers, focus ring, inactive-dim overlay)
-            // paints over them. Each image binds its own texture.
-            for (i, (id, _)) in self.image_quads.iter().enumerate() {
+            // Chrome is one big instance buffer, but images and icons each
+            // need their own texture bound, so they can't ride in it. Instead
+            // of giving them fixed layers under/over the whole chrome pass, we
+            // cut the chrome at each quad's watermark and drop the quad in
+            // there — an icon queued before a panel ends up under that panel,
+            // and one queued after ends up on top, which is what every caller
+            // already assumes when it draws a cover over something.
+            let mut ordered: Vec<(u32, u32, &String)> = self
+                .image_quads
+                .iter()
+                .enumerate()
+                .map(|(i, (id, _, wm))| (*wm, i as u32, id))
+                .chain(
+                    self.icon_quads
+                        .iter()
+                        .enumerate()
+                        .map(|(j, (id, _, wm))| (*wm, (n_img + j) as u32, id)),
+                )
+                .collect();
+            // Stable so quads with the same watermark keep queue order — that
+            // is the case for an icon drawn right on top of an image.
+            ordered.sort_by_key(|(wm, _, _)| *wm);
+            let mut drawn = 0u32;
+            for (wm, buf_idx, id) in ordered {
+                let wm = wm.min(instance_count as u32);
+                if wm > drawn {
+                    self.pipeline
+                        .draw_range(&mut pass, &self.bind_group, drawn, wm);
+                    drawn = wm;
+                }
                 if let Some(entry) = self.images.get(id) {
                     self.image_pipeline
-                        .draw_at(&mut pass, &entry.bind_group, i as u32);
+                        .draw_at(&mut pass, &entry.bind_group, buf_idx);
                 }
             }
-            self.pipeline
-                .draw(&mut pass, &self.bind_group, instance_count as u32);
-            // Chrome icons on top of the title bar / pane headers. Indices
-            // continue past the image quads in the shared instance buffer.
-            for (j, (id, _)) in self.icon_quads.iter().enumerate() {
-                if let Some(entry) = self.images.get(id) {
-                    self.image_pipeline
-                        .draw_at(&mut pass, &entry.bind_group, (n_img + j) as u32);
-                }
+            if drawn < instance_count as u32 {
+                self.pipeline
+                    .draw_range(&mut pass, &self.bind_group, drawn, instance_count as u32);
             }
         }
         // Self-capture: copy the just-rendered frame into a buffer before

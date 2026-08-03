@@ -348,13 +348,26 @@ impl Pipeline {
         bind_group: &'a wgpu::BindGroup,
         instance_count: u32,
     ) {
-        if instance_count == 0 {
+        self.draw_range(pass, bind_group, 0, instance_count);
+    }
+
+    /// Draw only `start..end` of the instance buffer. The caller uses this to
+    /// interleave other passes (images, icons) between slices of the chrome
+    /// pass, so the order things were queued in is the order they end up in.
+    pub fn draw_range<'a>(
+        &'a self,
+        pass: &mut wgpu::RenderPass<'a>,
+        bind_group: &'a wgpu::BindGroup,
+        start: u32,
+        end: u32,
+    ) {
+        if end <= start {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
-        pass.draw(0..6, 0..instance_count);
+        pass.draw(0..6, start..end);
     }
 
     /// Draw a single instance at `instance_index` with its own bind group.
