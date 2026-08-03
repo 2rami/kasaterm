@@ -65,6 +65,15 @@ function dropSection(rel, marker) {
   writeFileSync(p, t.replace(re, ''))
 }
 
+// 개인판에만 두는 장식. 회사 화면에 섞이면 튀므로 통째로 뺀다.
+function dropBlock(rel, marker) {
+  const p = join(OUT, rel)
+  const t = readFileSync(p, 'utf8')
+  const re = new RegExp(`\\n?[ \\t]*/\\* ${marker}[\\s\\S]*?/\\* /${marker} \\*/`, 'g')
+  if (!t.match(re)) throw new Error(`${rel} 에 /* ${marker} */ 블록이 없습니다`)
+  writeFileSync(p, t.replace(re, ''))
+}
+
 swap('extension/manifest.json', [[SRC_NAME, BRAND.name]])
 swap('extension/popup.html', [[SRC_NAME, BRAND.name]])
 swap('extension/sidepanel.html', [[SRC_NAME, BRAND.name]])
@@ -72,5 +81,6 @@ swap('mcp/server.mjs', [[`const NAME = '${SRC_KEY}'`, `const NAME = '${BRAND.key
 swap('package.json', [[`"name": "${SRC_KEY}"`, `"name": "${BRAND.key}"`]])
 swap('README.md', [[`# ${SRC_NAME}`, `# ${BRAND.name}`]])
 dropSection('README.md', 'host-only')
+dropBlock('extension/content.js', 'brand-skip')
 
 console.log(`${OUT}\n확장 로드 경로: ${join(OUT, 'extension')}`)

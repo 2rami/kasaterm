@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '4'
+  const OVERLAY_V = '5'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -228,11 +228,22 @@ if (!window.__ccInjected) {
           padding: 5px 12px 5px 5px; border-radius: 999px;
           background: rgba(20,22,26,.88); color: #fff;
           font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif;
-          box-shadow: 0 2px 12px rgba(0,0,0,.35), 0 0 0 2px var(--cc, #6BCF7F);
+          box-shadow: 0 2px 12px rgba(0,0,0,.35), 0 0 0 2px var(--cc, #6BCF7F), 0 0 16px -4px var(--cc, #6BCF7F);
           white-space: nowrap;
           transform-origin: 100% 0;
           transition: opacity .3s ease, transform .3s ease, box-shadow .3s ease;
         }
+        /* brand-skip — 칩 둘레를 도는 픽셀 러너. offset-path: border-box 가 칩의 pill 모양을 그대로
+           경로로 쓰므로 글자 길이가 바뀌어도 따로 계산할 게 없다. steps() 로 칸칸이 끊어 옮겨야
+           픽셀처럼 보인다 — 부드럽게 미끄러지면 그냥 도는 점이다. */
+        .chip::after {
+          content: ''; position: absolute; width: 5px; height: 5px;
+          background: var(--cc, #6BCF7F); box-shadow: 0 0 6px var(--cc, #6BCF7F);
+          offset-path: border-box; offset-distance: 0%; offset-rotate: 0deg;
+          animation: runner 3.6s steps(28) infinite;
+        }
+        @keyframes runner { to { offset-distance: 100% } }
+        /* /brand-skip */
         /* 조작 중에만 나타나 숨쉬는 바깥 링. box-shadow 를 직접 애니메이션하면 매 프레임 다시
            그려야 하지만, 링을 따로 두면 opacity·transform 만 움직여 compositor 가 처리한다. */
         .chip::before {
@@ -263,8 +274,11 @@ if (!window.__ccInjected) {
           0% { opacity: .9; transform: scale(.6) }
           100% { opacity: 0; transform: scale(1.9) }
         }
-        /* 조작 중 — 칩 바깥 링이 숨쉬고 상태 점이 뛴다 */
+        /* 조작 중 — 칩 바깥 링이 숨쉬고 상태 점이 뛴다. 러너는 상시 돌되 여기서 속도만 올린다. */
         :host([data-mode="active"]) .chip::before { opacity: 1; animation: halo 2.4s ease-in-out infinite; }
+        /* brand-skip */
+        :host([data-mode="active"]) .chip::after { animation-duration: 1.6s; }
+        /* /brand-skip */
         @keyframes halo {
           0%,100% { opacity: .9; transform: scale(1) }
           50% { opacity: .2; transform: scale(1.08) }
@@ -279,7 +293,7 @@ if (!window.__ccInjected) {
           transform: scale(.9);
           background: rgba(20,22,26,.62);
           color: rgba(255,255,255,.82);
-          box-shadow: 0 1px 8px rgba(0,0,0,.24), 0 0 0 2px var(--cc, #6BCF7F);
+          box-shadow: 0 1px 8px rgba(0,0,0,.24), 0 0 0 2px var(--cc, #6BCF7F), 0 0 12px -5px var(--cc, #6BCF7F);
         }
         :host([data-mode="idle"]) .chip img { opacity: .82; }
         :host([data-mode="idle"]) .cursor { opacity: 0 !important; }
