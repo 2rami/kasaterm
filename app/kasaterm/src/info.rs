@@ -1568,6 +1568,7 @@ pub(crate) fn draw_info_col(
     info.group_rects.clear();
     info.proc_rects.clear();
     info.closed_rects.clear();
+    info.closed_kill_rects.clear();
     info.kill_rects.clear();
     info.sec_rects.clear();
     info.dir_btn_rects.clear();
@@ -1785,7 +1786,10 @@ pub(crate) fn draw_info_col(
         // 맨 위(=가장 최근) 것을 되살린다.
         for (i, c) in closed.iter().enumerate().rev() {
             if y + ROW_H > top && y < bottom {
-                draw_closed_row(g, cursor, c, i + 1 == closed.len(), x, w, x0, right, y);
+                if let Some(br) = draw_closed_row(g, cursor, c, i + 1 == closed.len(), x, w, x0, right, y)
+                {
+                    info.closed_kill_rects.push((i, br));
+                }
             }
             info.closed_rects.push((i, (x, y, w, ROW_H)));
             y += ROW_H;
@@ -2127,14 +2131,47 @@ fn draw_closed_row(
     x0: f32,
     right: f32,
     y: f32,
-) {
+) -> Option<(f32, f32, f32, f32)> {
     let row = (x, y, w, ROW_H);
     let hov = hit(cursor, &row);
     g.hover_pointer |= hov;
     if hov {
         g.rect(x, y, w, ROW_H, theme::surface_hover());
     }
-    let fg = theme::with_alpha(theme::text_mute(), if hov { 0xF0 } else { 0x99 });
+    // 아직 도는 pane 이 기본이다 — 닫아도 죽지 않으니까. 프로세스가 사라진 것만
+    // 흐리게 두고 꼬리표를 달아, 되살리기가 재부착이 아니라 `--resume` 이라는 걸
+    // 누르기 전에 알 수 있게 한다.
+    let base = if c.alive { 0x99 } else { 0x66 };
+    let fg = theme::with_alpha(theme::text_mute(), if hov { base + 0x57 } else { base });
+    // 커서가 얹힌 줄에만 × — 상시 노출하면 되살리려다 잘못 끄기 쉽다(프로세스 행과
+    // 같은 규칙).
+    let mut right = right;
+    let mut kill = None;
+    if hov {
+        let br = (right - 16.0, y + 3.0, 16.0, 16.0);
+        let bhov = hit(cursor, &br);
+        g.hover_pointer |= bhov;
+        if bhov {
+            round_rect(
+                g,
+                br.0,
+                br.1,
+                br.2,
+                br.3,
+                theme::radius_sm(),
+                theme::with_alpha(theme::danger(), 0x33),
+            );
+        }
+        g.queue_icon(
+            "x",
+            br.0 + 3.0,
+            br.1 + 3.0,
+            10.0,
+            if bhov { theme::danger() } else { theme::text_mute() },
+        );
+        kill = Some(br);
+        right = br.0 - 6.0;
+    }
     // ⌘⇧T 는 맨 위 한 줄에만 적는다 — 그 키가 되살리는 건 언제나 가장 최근 것이다.
     let kbd = newest.then(|| "\u{2318}\u{21E7}T".to_string());
     let kfs = 10.0_f32;
@@ -2149,6 +2186,9 @@ fn draw_closed_row(
     if !c.folder.is_empty() {
         label.push_str(" · ");
         label.push_str(&c.folder);
+    }
+    if !c.alive {
+        label.push_str(" · resume");
     }
     let tx = x0 + isz + 8.0;
     let label = fit_text(g, &label, (right - kbd_w - 8.0 - tx).max(0.0), 11.0, false);
@@ -2171,6 +2211,7 @@ fn draw_closed_row(
             },
         );
     }
+    kill
 }
 
 /// 프로세스 한 줄 — `├─ mcp playwright  --cdp-endpoint …    :9222  2% · 90 MB  pid`.

@@ -1056,11 +1056,117 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// Used by both `close_pane` (Cmd+W / header ×) and `reap_dead_panes`
     /// (shell exit). Picks a survivor focus when removing the focused
     /// pane.
+    /// pane 이 쥐고 있던 자원을 놓는다 — PTY(**여기서 셸과 claude 가 죽는다**)·보조
+    /// 탭 셸·협업 마커·GPU 텍스처·마크다운 캐시·화면 상태. 트리는 건드리지 않으므로
+    /// 트리에서 이미 빠진 pane(숨긴 것)에도 그대로 쓴다.
+    fn drop_pane_resources(&mut self, target: &str) {
+        let closed_cwd = self.pane_cwd_cache.get(target).cloned();
+        // `Arc<PtySession>` 의 마지막 주인을 놓는 지점 — 이 한 줄이 프로세스의 생사다.
+        self.pty.remove(target);
+        Self::cleanup_collab_markers(target, closed_cwd.as_deref());
+        // Free the GPU texture if this was an image pane (no-op otherwise).
+        if let Some(g) = self.gpu.as_mut() {
+            g.drop_image(target);
+        }
+        self.md_content_h.remove(target);
+        self.md_block_ys.remove(target);
+        self.md_scroll_anchor.remove(target);
+        // Drop secondary-tab ptys hosted by this pane and prune the reverse
+        // map. Without this, an in-pane tab's shell would linger past its
+        // container pane and `find_tab_by_pty` would point at a dead outer.
+        let secondary_pids: Vec<String> = {
+            let ws = self.ws.lock().unwrap();
+            ws.pid_to_pane
+                .iter()
+                .filter_map(|(pid, outer)| (outer == target).then(|| pid.clone()))
+                .collect()
+        };
+        for pid in &secondary_pids {
+            self.pty.remove(pid);
+        }
+        let mut ws = self.ws.lock().unwrap();
+        ws.panes.remove(target);
+        ws.rebuild_pid_map();
+    }
+
+    /// 사용자가 닫은 pane — **죽이지 않고 화면에서만 뗀다.** BSP 트리에서 leaf 를
+    /// 빼는 것이 전부라 PTY 도 화면 상태도 남고, 그래서 그 안의 claude 는 하던 일을
+    /// 계속한다(거노: resume 로 잇는 게 아니라 데몬처럼 돌기를 원함). 출력이 유실될
+    /// 걱정은 없다 — 화면 갱신은 pane 마다 붙은 전용 스레드(`pump_pty_screens`)라
+    /// 트리와 무관하게 계속 돈다. 리사이즈는 `leaf_cells` 기반이라 트리 밖 pane 을
+    /// 건드리지 않아 마지막 크기가 그대로 유지된다.
+    ///
+    /// 되살리기는 `reopen_pane_record` 의 재부착 경로, 정말 끄는 것은 인포의 ×
+    /// (`discard_closed_pane_at`)다.
+    pub(crate) fn hide_pane(&mut self, target: &str) {
+        let in_active = self
+            .pty_layout
+            .as_ref()
+            .is_some_and(|t| t.leaves().iter().any(|l| *l == target));
+        if !in_active {
+            // 다른 윈도우·백그라운드 세션의 pane 은 숨김 대상이 아니다(그쪽 트리를
+            // 여기서 조작하면 유령 leaf 가 남는다) — 기존 경로로 보낸다.
+            self.remove_pane(target);
+            return;
+        }
+        self.record_closed_pane(target, true);
+        let was_active = self
+            .ws
+            .lock()
+            .unwrap()
+            .active_pane
+            .as_deref()
+            .map(|a| a == target)
+            .unwrap_or(false);
+        let leaves: Vec<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|t| t.leaves().iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        let next_focus: Option<String> = if was_active && leaves.len() > 1 {
+            let i = leaves.iter().position(|l| l == target).unwrap_or(0);
+            Some(leaves[if i + 1 < leaves.len() { i + 1 } else { i - 1 }].clone())
+        } else {
+            None
+        };
+        if leaves.len() > 1 {
+            if let Some(tree) = self.pty_layout.as_mut() {
+                tree.remove_leaf(target);
+            }
+        } else {
+            self.pty_layout = None;
+        }
+        {
+            let mut ws = self.ws.lock().unwrap();
+            if was_active {
+                ws.active_pane = next_focus;
+            }
+            for pane in ws.panes.values_mut() {
+                pane.dirty = true;
+            }
+        }
+        self.chrome_dirty = true;
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// 숨겨 둔 pane 을 정말 끈다 — 트리 밖이라 레이아웃 조작이 필요 없고, 자원만
+    /// 놓으면 된다. `remove_pane` 을 쓰면 되살리기 기록이 한 번 더 쌓인다.
+    pub(crate) fn kill_hidden_pane(&mut self, target: &str) {
+        self.drop_pane_resources(target);
+        self.chrome_dirty = true;
+    }
+
     pub(crate) fn remove_pane(&mut self, target: &str) {
-        // 사라지기 전에 되살릴 재료를 챙긴다(⌘⇧T). 여기가 모든 닫기 경로의 길목이라
+        // 사라지기 전에 되살릴 재료를 챙긴다(⌘⇧T). 여기가 "정말 죽는" 경로의 길목이라
         // 한 줄이면 충분하다 — 셸이 스스로 끝난 pane(`reap_dead_panes`)도 지나므로,
-        // 실수로 exit 한 학생도 되돌릴 수 있다.
-        self.record_closed_pane(target);
+        // 실수로 exit 한 학생도 되돌릴 수 있다. 다만 그건 프로세스가 이미 없으니
+        // 되살리기가 재부착이 아니라 레코드로 새로 띄우는 쪽이다(`alive=false`).
+        self.record_closed_pane(target, false);
         let was_active = self
             .ws
             .lock()
@@ -1105,33 +1211,9 @@ for p in glob.glob(os.path.join(d, '*.json')):
                 self.pty_layout = None;
             }
         }
-        let closed_cwd = self.pane_cwd_cache.get(target).cloned();
-        self.pty.remove(target);
-        Self::cleanup_collab_markers(target, closed_cwd.as_deref());
-        // Free the GPU texture if this was an image pane (no-op otherwise).
-        if let Some(g) = self.gpu.as_mut() {
-            g.drop_image(target);
-        }
-        self.md_content_h.remove(target);
-        self.md_block_ys.remove(target);
-        self.md_scroll_anchor.remove(target);
-        // Drop secondary-tab ptys hosted by this pane and prune the reverse
-        // map. Without this, an in-pane tab's shell would linger past its
-        // container pane and `find_tab_by_pty` would point at a dead outer.
-        let secondary_pids: Vec<String> = {
-            let ws = self.ws.lock().unwrap();
-            ws.pid_to_pane
-                .iter()
-                .filter_map(|(pid, outer)| (outer == target).then(|| pid.clone()))
-                .collect()
-        };
-        for pid in &secondary_pids {
-            self.pty.remove(pid);
-        }
+        self.drop_pane_resources(target);
         {
             let mut ws = self.ws.lock().unwrap();
-            ws.panes.remove(target);
-            ws.rebuild_pid_map();
             if was_active {
                 ws.active_pane = next_focus;
             }
@@ -1172,16 +1254,17 @@ for p in glob.glob(os.path.join(d, '*.json')):
         }
         let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
         if leaves <= 1 {
-            // split a fresh shell next to it, then drop the original — the new
-            // shell takes over the whole window, the closed pane (claude) is gone.
+            // split a fresh shell next to it, then hide the original — the new
+            // shell takes over the whole window. 원본은 죽지 않고 백그라운드로
+            // 물러날 뿐이라 ⌘⇧T 로 그대로 데려올 수 있다.
             if let Ok(new_id) = self.split_active_pane(kasa_pty::SplitDir::Horizontal) {
                 if !new_id.is_empty() && new_id != pid {
-                    self.remove_pane(pid);
+                    self.hide_pane(pid);
                 }
             }
             return;
         }
-        self.remove_pane(pid);
+        self.hide_pane(pid);
     }
     /// Cmd+W: close the active *tab*. A pane with several tabs drops only the
     /// focused one — the rest stay alive (the "Cmd+W killed every bound tab /

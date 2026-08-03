@@ -1580,9 +1580,15 @@ struct TabDrag {
 
 /// 닫은 pane 하나 — ⌘⇧T 로 되살릴 대상.
 ///
-/// 되살리는 데 필요한 것이 세션 복원이 쓰는 레코드와 **똑같아서** 그대로 들고 있는다:
-/// cwd·claude 세션 id·캐릭터·스크롤백이 한 덩어리다. 덕분에 복원은 `restore_leaf`
-/// 재사용이고, claude 였던 pane 은 `--resume` 까지 그 함수가 알아서 처리한다.
+/// **닫아도 프로세스는 죽지 않는다.** 사용자가 닫은 pane 은 화면(BSP 트리)에서만
+/// 빠지고 PTY 는 계속 돌아, 되살리기가 "다시 붙이기"가 된다 — claude 가 하던 일을
+/// 이어서 하고 있으므로 `--resume` 으로 대화를 되감을 이유가 없다(거노: 데몬처럼
+/// 계속 돌기를 원함). 진짜로 끄고 싶으면 인포 줄의 × 다.
+///
+/// 다만 죽은 채 목록에 남는 경우도 있다 — 셸이 스스로 exit 한 pane, 그리고 앱을
+/// 껐다 켜 프로세스가 사라진 뒤의 복원분. 그때는 세션 복원과 **똑같은 레코드**
+/// (cwd·claude 세션 id·캐릭터·스크롤백)를 들고 있으므로 `restore_leaf` 재사용으로
+/// 새로 띄우고 `--resume` 까지 그 함수가 처리한다. `alive` 가 그 두 길을 가른다.
 pub(crate) struct ClosedPane {
     /// `restore_leaf` 가 먹는 레코드(`layout_to_json` 의 leaf 본문).
     pub(crate) rec: serde_json::Value,
@@ -1598,6 +1604,9 @@ pub(crate) struct ClosedPane {
     /// 닫힌 방. 아직 있으면 그 방으로 돌아간다. 방 재배치를 따라 remap 된다 —
     /// 안 그러면 되살린 pane 이 남의 방에서 튀어나온다.
     pub(crate) window: usize,
+    /// PTY 가 아직 도는가. 참이면 되살리기는 트리에 leaf 를 다시 꽂는 것뿐이고
+    /// (`pane_id` 가 그대로 유효하다), 거짓이면 `rec` 로 새로 띄운다.
+    pub(crate) alive: bool,
 }
 
 /// 닫은 pane 을 몇 개까지 들고 있을지. 레코드마다 스크롤백이 통째 붙어 있어

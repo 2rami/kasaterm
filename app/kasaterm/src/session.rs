@@ -692,7 +692,11 @@ impl App {
     /// 레코드는 세션 저장이 쓰는 것과 **같은 형식**(`layout_to_json` 의 leaf 본문)이다.
     /// 그래서 되살리기가 `restore_leaf` 재사용이 되고, claude 였던 pane 은 `--resume`
     /// 까지 그 함수가 알아서 딸려 온다.
-    pub(crate) fn record_closed_pane(&mut self, pane: &str) {
+    ///
+    /// `alive` 는 이 pane 의 PTY 가 계속 도는지다 — 사용자가 닫은 것(`hide_pane`)은
+    /// 참이라 되살리기가 재부착이 되고, 셸이 스스로 끝난 것(`reap_dead_panes`)은
+    /// 거짓이라 레코드로 새로 띄운다.
+    pub(crate) fn record_closed_pane(&mut self, pane: &str, alive: bool) {
         if self.tmux.is_some() || !self.pty.contains_key(pane) {
             return;
         }
@@ -737,12 +741,33 @@ impl App {
             folder,
             neighbor,
             window,
+            alive,
         });
-        // 오래된 것부터 버린다 — 레코드마다 스크롤백이 통째 붙어 있다.
+        // 오래된 것부터 버린다 — 레코드마다 스크롤백이 통째 붙어 있고, 살아 있는
+        // 것은 프로세스까지 물고 있다. 여기서 놓지 않으면 닫기만 반복해도 셸이
+        // 무한정 쌓인다.
         while self.closed_panes.len() > crate::CLOSED_PANE_KEEP {
-            self.closed_panes.remove(0);
+            let c = self.closed_panes.remove(0);
+            if c.alive {
+                self.kill_hidden_pane(&c.pane_id);
+            }
         }
         self.chrome_dirty = true;
+    }
+
+    /// 인포의 × — 되살리기 목록에서 지우고, 아직 돌고 있으면 프로세스까지 끈다.
+    pub(crate) fn discard_closed_pane_at(&mut self, idx: usize) {
+        if idx >= self.closed_panes.len() {
+            return;
+        }
+        let c = self.closed_panes.remove(idx);
+        if c.alive {
+            self.kill_hidden_pane(&c.pane_id);
+        }
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     /// ⌘⇧T — 가장 최근에 닫은 pane 을 되살린다.
@@ -771,10 +796,20 @@ impl App {
         {
             self.switch_window(c.window);
         }
-        let (cols, rows) = self.window_cells();
-        let Some(new_id) = self.restore_leaf(&c.rec, cols, rows) else {
-            eprintln!("[reopen] {} 되살리기 실패 — PTY 를 못 띄웠다", c.pane_id);
-            return;
+        // 아직 돌고 있으면 새로 띄우지 않는다 — 그 pane 은 화면에서만 빠져 있었을
+        // 뿐 셸도 claude 도 그대로다. `--resume` 으로 대화를 되감으면 오히려 하던
+        // 일이 끊긴다. `alive` 를 믿지 말고 실제 PTY 로 확인하는 건, 숨긴 사이에
+        // 셸이 스스로 끝났을 수 있어서다(그때는 아래 레코드 경로로 흘러간다).
+        let attached = c.alive && self.pty.contains_key(&c.pane_id);
+        let new_id = if attached {
+            c.pane_id.clone()
+        } else {
+            let (cols, rows) = self.window_cells();
+            let Some(id) = self.restore_leaf(&c.rec, cols, rows) else {
+                eprintln!("[reopen] {} 되살리기 실패 — PTY 를 못 띄웠다", c.pane_id);
+                return;
+            };
+            id
         };
         let anchor = c
             .neighbor
