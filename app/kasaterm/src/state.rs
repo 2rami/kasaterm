@@ -209,6 +209,10 @@ pub(crate) struct InfoState {
     /// 닫힌 pane 줄의 hit rect `(스택 인덱스, rect)` — 누르면 그 줄만 되살린다.
     /// 매 paint 재생성(다른 hit target 과 같은 규칙).
     pub(crate) closed_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// 그 줄의 × `(스택 인덱스, rect)` — 되살리기를 포기하고 **프로세스까지** 끈다.
+    /// 커서가 얹힌 줄에만 생기므로 `closed_rects` 보다 성기고, 겹치는 자리라 클릭
+    /// 판정을 먼저 받아야 한다.
+    pub(crate) closed_kill_rects: Vec<(usize, (f32, f32, f32, f32))>,
     /// 그룹 머리 직전 클릭 `(시각, 열쇠)` — 더블클릭(=그 학생으로 포커스) 판정용.
     /// 한 번 클릭은 접기라, 두 번째 클릭이 접기를 되돌리고 포커스까지 옮긴다.
     pub(crate) last_group_click: Option<(std::time::Instant, String)>,
@@ -255,6 +259,7 @@ impl Default for InfoState {
             group_collapsed: std::collections::HashSet::new(),
             pane_expanded: std::collections::HashSet::new(),
             closed_rects: Vec::new(),
+            closed_kill_rects: Vec::new(),
             last_group_click: None,
             tab_rects: Vec::new(),
             port_rects: Vec::new(),

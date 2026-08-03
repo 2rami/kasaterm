@@ -2981,6 +2981,20 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
+                            // 되살리기 대기 줄의 × → 목록에서 지우고 프로세스도 끈다.
+                            // 줄 자체보다 먼저 본다 — × 는 그 줄 위에 얹혀 있어,
+                            // 순서가 반대면 끄려던 것이 되살아난다.
+                            if let Some(idx) = self
+                                .info
+                                .closed_kill_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(i, _)| *i)
+                            {
+                                self.discard_closed_pane_at(idx);
+                                window.request_redraw();
+                                return;
+                            }
                             // 되살리기 대기 줄 → 그 pane 만 되살린다. 그룹 머리보다
                             // 먼저 본다 — 목록 끝에 붙어 있어 서로 겹치진 않지만,
                             // 되살리기는 되돌릴 수 있는 동작이라 우선해도 안전하다.

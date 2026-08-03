@@ -397,7 +397,14 @@ impl App {
         let stack = |app: &App| -> Vec<String> {
             app.closed_panes
                 .iter()
-                .map(|c| format!("{}({})", c.pane_id, c.folder))
+                .map(|c| {
+                    format!(
+                        "{}({}{})",
+                        c.pane_id,
+                        c.folder,
+                        if c.alive { ",살아있음" } else { ",죽음" }
+                    )
+                })
                 .collect()
         };
         let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
@@ -408,9 +415,10 @@ impl App {
         self.close_pane(&victim);
         self.render_frame();
         eprintln!(
-            "[autoclosereopen] {victim} 닫음 → leaves={:?} 스택={:?}",
+            "[autoclosereopen] {victim} 닫음 → leaves={:?} 스택={:?} PTY생존={}",
             leaves(self),
-            stack(self)
+            stack(self),
+            self.pty.contains_key(&victim)
         );
         if std::env::var("KASATERM_AUTOCLOSEREOPEN_HOLD").is_ok() {
             eprintln!("[autoclosereopen] hold — 인포의 대기 줄 캡처 대기");
@@ -418,13 +426,29 @@ impl App {
         }
         self.reopen_closed_pane();
         self.render_frame();
+        let after = leaves(self);
         eprintln!(
-            "[autoclosereopen] 되살린 뒤: leaves={:?} 스택={:?}",
-            leaves(self),
+            "[autoclosereopen] 되살린 뒤: leaves={:?} 스택={:?} 같은id복귀={}",
+            after,
+            stack(self),
+            after.iter().any(|l| *l == victim)
+        );
+        // × 경로 — 다시 닫고 이번엔 되살리는 대신 끈다. 여기서만 프로세스가 죽어야
+        // 한다. "끄기전=true, 끈뒤=false" 가 아니면 × 가 목록만 지우고 셸을 남긴
+        // 것이고, 그건 닫을수록 프로세스가 쌓인다는 뜻이다.
+        self.close_pane(&victim);
+        self.render_frame();
+        let before_kill = self.pty.contains_key(&victim);
+        let last = self.closed_panes.len().saturating_sub(1);
+        self.discard_closed_pane_at(last);
+        self.render_frame();
+        eprintln!(
+            "[autoclosereopen] × 로 끔 → 끄기전PTY={before_kill} 끈뒤PTY={} 스택={:?}",
+            self.pty.contains_key(&victim),
             stack(self)
         );
         eprintln!(
-            "[autoclosereopen] 기대: 닫으면 leaf 하나 줄고 스택에 남고 · 되살리면 leaf 수가 돌아오고 스택은 빈다"
+            "[autoclosereopen] 기대: 닫아도 PTY생존=true(죽이지 않는다) · 되살리면 같은id복귀=true(새로 띄우는 게 아니라 다시 붙인다) · × 만 끄기전true→끈뒤false"
         );
     }
 
