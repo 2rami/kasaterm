@@ -3188,10 +3188,10 @@ impl App {
                 for (idx, node) in vis_nodes.iter().enumerate() {
                     let node = *node;
                     let y = start_y - self.file_tree.scroll + idx as f32 * item_h;
-                    // start_y 위로 조금이라도 걸친 항목은 통째 스킵한다. 아이콘은
-                    // queue_icon 별도 패스라 나중에 그린 빠른파일 배경으로도 못 덮어
-                    // (chevron/폴더 글리프가 빠른파일 행에 파고들던 겹침) — 부분 행을
-                    // 아예 안 그려야 근본 차단된다. 상단 잘림은 위쪽 fade 가 가린다.
+                    // start_y 위로 조금이라도 걸친 항목은 통째 스킵한다. 그리기만
+                    // 놓고 보면 이제 뒤에 오는 빠른파일 배경이 덮어 주지만, 이 루프는
+                    // 히트렉트도 같이 만들어서 — 덮인 행이 여전히 눌린다. 그리기와
+                    // 히트를 함께 끊는 자리가 여기뿐이다. 상단 잘림은 위쪽 fade 가 가린다.
                     if y < start_y - 0.5 || y > win_h {
                         continue; // off-screen / 상단 부분걸침 → clip (hit rect 도 생략)
                     }
@@ -5814,10 +5814,6 @@ impl App {
             // Confirm-close modal: a dim scrim + centered card with 취소/닫기,
             // queued last so it sits over every pane, overlay and toast.
             if let Some(dlg) = self.confirm_close.clone() {
-                // Icons draw after the chrome pass, so the scrim (a chrome rect)
-                // can't cover the split/action glyphs — drop them so nothing
-                // bleeds through the modal.
-                g.clear_icons();
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
@@ -5933,7 +5929,6 @@ impl App {
             // it sits over everything at launch. [복원] rebuilds the workspace,
             // [새로 시작] keeps the fresh session.
             if let Some(state) = self.restore_prompt.clone() {
-                g.clear_icons();
                 let win_w = win_px.0 / scale;
                 let win_h = win_px.1 / scale;
                 g.rect(0.0, 0.0, win_w, win_h, theme::with_alpha([0, 0, 0, 255], 0xB0));
