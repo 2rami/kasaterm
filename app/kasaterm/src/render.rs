@@ -2007,6 +2007,9 @@ impl App {
         let sidebar_tray = self.sidebar_tray_rects(win_h_logical);
         let file_tree_toggle = self.file_tree_toggle_rect();
         let sidebar_toggle = self.sidebar_toggle_rect();
+        // 타이틀바 제목을 가운데 세울 때 오른쪽 한계로 쓴다 — 같은 이유로 여기서
+        // 미리 읽는다(`g` 가 self.gpu 를 잡은 뒤엔 &self 메서드를 못 부른다).
+        let git_col_toggle = self.git_col_toggle_rect();
         // Caret blink for the commit-modal message box, computed before `g`
         // borrows `self.gpu` (the blink helper takes `&self`).
         let commit_caret_on = self.cursor_blink_on(std::time::Instant::now());
@@ -2585,34 +2588,60 @@ impl App {
                 // 배경은 flat(round_rect)이어야 한다. panel_rect 로 그렸더니 픽셀
                 // 실루엣의 검은 테두리·하드 섀도가 붙어 떠오른 버튼처럼 보였는데,
                 // 이건 클릭 대상이 아니라 표시라 눌리는 신호를 주면 안 된다.
-                let mut next_x = px0;
+                //
+                // 가운데에 세우는 것은 **이름 칩 하나**다. 경로는 파일트리 버튼
+                // 오른쪽 제자리에 남는다(거노) — 둘을 한 덩어리로 묶어 가운데를
+                // 잡으면 뒤에 붙는 경로 길이만큼 이름이 왼쪽으로 밀려, 정작
+                // 가운데 오는 것은 이름과 경로 사이 빈 자리가 된다. 칩이 경로와
+                // 오른쪽 토글 사이에 안 들어갈 만큼 길면 중앙을 포기하고 경로
+                // 오른쪽에 붙인다 — 잘리는 것보다 낫다.
+                // 포크/백그라운드 세션이면 이름 뒤에 dim 배지(⑂ = 분기 기호).
+                const BG_BADGE: &str = "  ⑂ bg";
+                let gl = 14.0_f32;
+                let pad = 10.0_f32;
+                let ph = 26.0_f32;
+                let py = (TITLE_HEIGHT - ph) / 2.0;
+                let isz = theme::ICON_SIZE;
+                let (tw, bw) = if title_text.is_empty() {
+                    (0.0, 0.0)
+                } else {
+                    (
+                        g.measure_chrome_text(&title_text, chrome_font, true),
+                        if title_is_bg {
+                            g.measure_chrome_text(BG_BADGE, chrome_font, false)
+                        } else {
+                            0.0
+                        },
+                    )
+                };
+                let pw = if title_text.is_empty() {
+                    0.0
+                } else {
+                    pad + gl + 7.0 + tw + bw + pad
+                };
+                let cwd_w = if cwd_str.is_empty() {
+                    0.0
+                } else {
+                    12.0 + isz + 6.0 + g.measure_chrome_text(&cwd_str, chrome_font, false)
+                };
+                let win_w = win_px.0 / scale;
+                let right_lim = git_col_toggle.map_or(win_w - 8.0, |(x, ..)| x - 12.0);
+                let left_lim = px0 + cwd_w;
+                let start = ((win_w - pw) / 2.0).clamp(left_lim, (right_lim - pw).max(left_lim));
                 if !title_text.is_empty() {
-                    // 포크/백그라운드 세션이면 이름 뒤에 dim 배지(⑂ = 분기 기호).
-                    const BG_BADGE: &str = "  ⑂ bg";
-                    let tw = g.measure_chrome_text(&title_text, chrome_font, true);
-                    let bw = if title_is_bg {
-                        g.measure_chrome_text(BG_BADGE, chrome_font, false)
-                    } else {
-                        0.0
-                    };
-                    let gl = 14.0_f32;
-                    let pad = 10.0_f32;
-                    let ph = 26.0_f32;
-                    let py = (TITLE_HEIGHT - ph) / 2.0;
-                    let pw = pad + gl + 7.0 + tw + bw + pad;
-                    round_rect(g, px0, py, pw, ph, theme::radius_md(), theme::surface());
+                    round_rect(g, start, py, pw, ph, theme::radius_md(), theme::surface());
                     let icon_name = sb_labels
                         .get(sb_active)
                         .map(|(n, _)| n.as_str())
                         .unwrap_or(title_text.as_str());
                     g.queue_icon(
                         tab_icon_glyph(icon_name),
-                        px0 + pad,
+                        start + pad,
                         py + (ph - gl) / 2.0,
                         gl,
                         theme::text_dim(),
                     );
-                    let tx = px0 + pad + gl + 7.0;
+                    let tx = start + pad + gl + 7.0;
                     g.draw_text(
                         tx,
                         ty,
@@ -2637,11 +2666,10 @@ impl App {
                             },
                         );
                     }
-                    next_x = px0 + pw;
                 }
                 if !cwd_str.is_empty() {
                     let isz = theme::ICON_SIZE;
-                    let cx0 = next_x + 12.0;
+                    let cx0 = px0 + 12.0;
                     g.queue_icon("folder", cx0, (TITLE_HEIGHT - isz) / 2.0, isz, theme::text_mute());
                     g.draw_text(
                         cx0 + isz + 6.0,
