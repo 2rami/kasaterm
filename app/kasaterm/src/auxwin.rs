@@ -1105,29 +1105,36 @@ impl App {
             return;
         }
         // macOS 는 OS IME 를 껐으므로 한글 자모(U+3130..318F)는 in-process composer
-        // 로 조합해 완성 음절만 포커스 필드에 넣는다(설정 폼엔 preedit 렌더 없음).
+        // 로 조합해 완성 음절만 포커스 필드에 넣는다.
+        //
+        // ⚠️ 자모는 `event.text` 로만 온다 — `logical_key` 는 같은 키의 **영문
+        // 각인**(ㄱ→r, ㅖ→P)이라, 그걸 보고 판단하면 자모가 조합기를 그냥
+        // 지나쳐 `settings_key` 에 낱자로 꽂힌다("계"가 "ㄱㅖ"로 남던 것).
         #[cfg(target_os = "macos")]
         if self.settings_input.is_some() {
-            if let Some(t) = &event.text {
-                if t.chars().count() == 1 {
-                    if let Some(c) = t.chars().next() {
-                        if (0x3130..=0x318F).contains(&(c as u32)) {
-                            if let Some(commit) = self.hangul.feed(c) {
-                                self.settings_insert_text(&commit);
-                            }
-                            self.aux_redraw(idx);
-                            return;
-                        }
-                    }
+            // text 가 비고 logical_key 만 자모로 오는 프레임이 있어 둘 다 본다 —
+            // 한쪽만 보면 그 프레임의 자모가 조합기를 못 만나고 필드에 낱자로 꽂힌다.
+            let one = |s: &str| {
+                let mut it = s.chars();
+                it.next().filter(|_| it.next().is_none())
+            };
+            let typed = event.text.as_ref().and_then(|t| one(t)).or_else(|| {
+                match &event.logical_key {
+                    Key::Character(s) => one(s),
+                    _ => None,
+                }
+            });
+            if let Some(c) = typed {
+                if self.settings_hangul_char(c) {
+                    self.aux_redraw(idx);
+                    return;
                 }
             }
             if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) && self.hangul.backspace() {
                 self.aux_redraw(idx);
                 return;
             }
-            if let Some(flushed) = self.hangul.flush() {
-                self.settings_insert_text(&flushed);
-            }
+            self.settings_hangul_flush();
         }
         // 포커스 필드가 있으면 그 필드로(persona/단일라인 분기는 settings_key 내부).
         if self.settings_input.is_some() {
