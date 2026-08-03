@@ -1057,6 +1057,10 @@ for p in glob.glob(os.path.join(d, '*.json')):
     /// (shell exit). Picks a survivor focus when removing the focused
     /// pane.
     pub(crate) fn remove_pane(&mut self, target: &str) {
+        // 사라지기 전에 되살릴 재료를 챙긴다(⌘⇧T). 여기가 모든 닫기 경로의 길목이라
+        // 한 줄이면 충분하다 — 셸이 스스로 끝난 pane(`reap_dead_panes`)도 지나므로,
+        // 실수로 exit 한 학생도 되돌릴 수 있다.
+        self.record_closed_pane(target);
         let was_active = self
             .ws
             .lock()

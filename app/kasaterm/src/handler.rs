@@ -1730,6 +1730,42 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // 방(윈도우) 탭 재배치 드래그. 문턱을 넘으면 active 로 바꾸고,
+                // 커서가 지나친 탭 개수로 삽입 자리를 다시 읽는다.
+                if self.win_tab_drag.is_some() {
+                    let (px, py) = self.cursor_px;
+                    let start = self.win_tab_drag.as_ref().unwrap().start;
+                    let (dx, dy) = (px - start.0, py - start.1);
+                    // 세로 사이드바는 y, 상단 탭 모드는 x 로 읽는다.
+                    let horizontal = self.tabs_on_top;
+                    // 오버플로로 앞쪽 탭이 접혀 있으면 그 앞으로는 못 꽂는다 —
+                    // 보이는 첫 탭을 하한으로 두어야 안 보이는 자리에 떨어지지
+                    // 않는다(rects 는 보이는 탭만 담는다).
+                    let mut target =
+                        self.window_tab_rects.first().map(|(i, _)| *i).unwrap_or(0);
+                    for (i, (rx, ry, rw, rh)) in &self.window_tab_rects {
+                        let past = if horizontal {
+                            px > rx + rw / 2.0
+                        } else {
+                            py > ry + rh / 2.0
+                        };
+                        if past {
+                            target = i + 1;
+                        }
+                    }
+                    if let Some(d) = self.win_tab_drag.as_mut() {
+                        if !d.active && dx * dx + dy * dy > 9.0 {
+                            d.active = true;
+                        }
+                        d.target = target;
+                    }
+                    if self.win_tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
+                        window.set_cursor(CursorIcon::Grabbing);
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // Tab reorder drag: flip to active past the threshold, then
                 // re-derive the drop index from the cursor's x over this
                 // pane's tab pills. The insertion bar is painted from
@@ -2945,6 +2981,20 @@ impl ApplicationHandler<UserEvent> for App {
                                 window.request_redraw();
                                 return;
                             }
+                            // 되살리기 대기 줄 → 그 pane 만 되살린다. 그룹 머리보다
+                            // 먼저 본다 — 목록 끝에 붙어 있어 서로 겹치진 않지만,
+                            // 되살리기는 되돌릴 수 있는 동작이라 우선해도 안전하다.
+                            if let Some(idx) = self
+                                .info
+                                .closed_rects
+                                .iter()
+                                .find(|(_, r)| inside(r))
+                                .map(|(i, _)| *i)
+                            {
+                                self.reopen_closed_pane_at(idx);
+                                window.request_redraw();
+                                return;
+                            }
                             // pane 그룹 머리 → 그 그룹만 접기.
                             if let Some(pane) = self
                                 .info
@@ -2963,8 +3013,15 @@ impl ApplicationHandler<UserEvent> for App {
                                         if *k == pane
                                             && now.duration_since(*t).as_millis() < 400
                                 );
-                                if !self.info.group_collapsed.remove(&pane) {
-                                    self.info.group_collapsed.insert(pane.clone());
+                                // 방은 「접어둔 것」을, 학생은 「펴 둔 것」을 기억한다
+                                // — 기본값이 서로 반대(방=열림, 학생=닫힘)라 한 집합
+                                // 으로는 표현할 수 없다.
+                                if pane.starts_with("win:") {
+                                    if !self.info.group_collapsed.remove(&pane) {
+                                        self.info.group_collapsed.insert(pane.clone());
+                                    }
+                                } else if !self.info.pane_expanded.remove(&pane) {
+                                    self.info.pane_expanded.insert(pane.clone());
                                 }
                                 if is_double {
                                     self.info.last_group_click = None;
@@ -3858,6 +3915,29 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        // 방 탭 재배치 종료. 문턱을 넘었을 때만 옮긴다 — 전환은
+                        // press 가 이미 했으므로, 안 넘었으면 버릴 것뿐이다.
+                        if let Some(d) = self.win_tab_drag.take() {
+                            if d.active {
+                                window.set_cursor(CursorIcon::Default);
+                                // 창 밖에 놓으면 재배치가 아니라 그 방을 통째로
+                                // 별도 창으로 꺼낸다 — pane 탭 tear-off 와 같은 규칙.
+                                let (win_w, win_h) = self.logical_win_size();
+                                if Self::drag_left_window(
+                                    self.cursor_px.0,
+                                    self.cursor_px.1,
+                                    win_w,
+                                    win_h,
+                                ) {
+                                    let near = self.cursor_screen_phys();
+                                    self.undock_window_room(d.from, event_loop, near);
+                                } else {
+                                    self.reorder_window(d.from, d.target);
+                                }
+                                window.request_redraw();
+                                return;
+                            }
+                        }
                         // End an image pan drag.
                         if self.image_pan_drag.take().is_some() {
                             window.set_cursor(CursorIcon::Default);
@@ -4748,6 +4828,9 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
         self.run_pending_autowinclose();
+        self.run_pending_autowinreorder();
+        self.run_pending_autowinundock(event_loop);
+        self.run_pending_autoclosereopen();
         self.run_pending_autoinfo();
         self.run_pending_autocursor();
         self.run_pending_autotheme();

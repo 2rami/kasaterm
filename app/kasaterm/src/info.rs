@@ -120,6 +120,9 @@ pub(crate) struct PaneGroup {
     /// 방(윈도우) 인덱스와 이름 — 방이 둘 이상일 때만 머리로 그린다.
     pub(crate) window: usize,
     pub(crate) window_label: String,
+    /// 이 방이 별도 창으로 나가 있나. 나가 있으면 그 pane 들은 메인 화면에 없으므로,
+    /// 표시가 없으면 "왜 여기 있는데 안 보이지"가 된다.
+    pub(crate) undocked: bool,
     pub(crate) rows: Vec<ProcRow>,
 }
 
@@ -141,6 +144,9 @@ pub(crate) struct PaneTarget {
     pub(crate) active: bool,
     pub(crate) window: usize,
     pub(crate) window_label: String,
+    /// 이 방이 별도 창으로 나가 있나. 나가 있으면 그 pane 들은 메인 화면에 없으므로,
+    /// 표시가 없으면 "왜 여기 있는데 안 보이지"가 된다.
+    pub(crate) undocked: bool,
     /// 이 pane 이 붙든 claude transcript. 제목을 뽑으려면 jsonl 꼬리를 읽어야
     /// 해서 **경로만** GUI 가 넘기고 읽기는 워커가 한다.
     pub(crate) session_path: Option<std::path::PathBuf>,
@@ -181,6 +187,7 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
             active: t.active,
             window: t.window,
             window_label: t.window_label.clone(),
+            undocked: t.undocked,
             rows: build_rows(&table, t.shell_pid),
         })
         .collect();
@@ -1194,6 +1201,7 @@ impl App {
                             (!tail.is_empty()).then(|| tail.to_string())
                         })
                         .unwrap_or_default(),
+                    undocked: self.window_is_undocked(window),
                     // 경로 해석까지만 GUI 가 한다 — 제목을 읽으려면 jsonl 꼬리를
                     // 훑어야 해서 그건 워커 몫이다(session_title).
                     session_path: self
@@ -1537,6 +1545,9 @@ pub(crate) fn draw_info_col(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     info: &mut state::InfoState,
+    // 되살리기 대기 중인 pane(최근이 뒤). 프로세스 목록 끝에 흐린 줄로 붙는다 —
+    // 되돌릴 수 있다는 걸 알리지 않으면 ⌘⇧T 는 아는 사람만 쓰는 기능이 된다.
+    closed: &[crate::ClosedPane],
     x: f32,
     w: f32,
     top: f32,
@@ -1556,6 +1567,7 @@ pub(crate) fn draw_info_col(
     info.port_kill_rects.clear();
     info.group_rects.clear();
     info.proc_rects.clear();
+    info.closed_rects.clear();
     info.kill_rects.clear();
     info.sec_rects.clear();
     info.dir_btn_rects.clear();
@@ -1598,10 +1610,10 @@ pub(crate) fn draw_info_col(
                 continue;
             }
             h += GROUP_H;
-            if !info.group_collapsed.contains(&gp.pane) {
-                h += gp.rows.len() as f32 * ROW_H;
-            }
+            h += visible_row_count(info, gp) as f32 * ROW_H;
         }
+        // 되살리기 대기 줄은 목록 끝에 붙는다.
+        h += closed.len() as f32 * ROW_H;
         h
     };
     let ports_h = match (info.ports_collapsed, snap.ports.len()) {
@@ -1751,22 +1763,32 @@ pub(crate) fn draw_info_col(
             if show_windows && info.group_collapsed.contains(&win_key(gp.window)) {
                 continue;
             }
-            let collapsed = info.group_collapsed.contains(&gp.pane);
+            // 학생은 접힌 게 기본 — 펴 둔 것만 `pane_expanded` 에 있다.
+            let collapsed = !info.pane_expanded.contains(&gp.pane);
             if y + GROUP_H > top && y < bottom {
                 draw_group_head(g, cursor, gp, collapsed, x, w, x0, right, y);
             }
             info.group_rects.push((gp.pane.clone(), (x, y, w, GROUP_H)));
             y += GROUP_H;
-            if collapsed {
-                continue;
-            }
-            for p in &gp.rows {
+            // 접혀 있어도 포트를 쥔 줄은 남는다(`visible_rows`). 소유값이라 아래
+            // `info` 재차용과 안 부딪힌다.
+            let rows = visible_rows(info, gp);
+            for p in &rows {
                 if y + ROW_H > top && y < bottom {
                     draw_proc_row(g, cursor, info, p, x, w, x0, right, y);
                 }
                 info.proc_rects.push((p.pid, (x, y, w, ROW_H)));
                 y += ROW_H;
             }
+        }
+        // ── 되살리기 대기 ── 최근 닫은 것이 위. 줄을 누르면 그것만, ⌘⇧T 는 언제나
+        // 맨 위(=가장 최근) 것을 되살린다.
+        for (i, c) in closed.iter().enumerate().rev() {
+            if y + ROW_H > top && y < bottom {
+                draw_closed_row(g, cursor, c, i + 1 == closed.len(), x, w, x0, right, y);
+            }
+            info.closed_rects.push((i, (x, y, w, ROW_H)));
+            y += ROW_H;
         }
     }
     let d_dir = match (t_a, t_procs) {
@@ -1886,8 +1908,39 @@ fn draw_empty(g: &mut gpu::GpuRenderer, x0: f32, y: f32, top: f32, bottom: f32, 
     );
 }
 
-/// 접힘 집합은 pane id(`%17`)와 방을 같이 담는다 — 접기 상태 저장소를 둘로
-/// 나눌 이유가 없어서, 방 쪽만 pane id 와 절대 겹치지 않는 열쇠를 쓴다.
+/// 이 학생 그룹에서 지금 보일 프로세스 행 수. 높이 계산과 그리기가 같은 판정을
+/// 봐야 목록이 제 높이만큼만 스크롤된다.
+fn visible_row_count(info: &state::InfoState, gp: &PaneGroup) -> usize {
+    if info.pane_expanded.contains(&gp.pane) {
+        gp.rows.len()
+    } else {
+        gp.rows.iter().filter(|r| !r.ports.is_empty()).count()
+    }
+}
+
+/// 그 행들의 실제 목록. 접었으면 **포트를 쥔 줄만** 남는다 — 접는 건 목록을 줄이려는
+/// 것이지 서버가 떠 있다는 사실까지 감추려는 게 아니다.
+///
+/// 남은 줄은 계보선을 다시 매긴다. 원래 `depth`/`spine` 은 프로세스 나무에서의
+/// 자리라, 중간 가지만 뽑아 두면 부모 없는 선이 허공에서 시작한다.
+fn visible_rows(info: &state::InfoState, gp: &PaneGroup) -> Vec<ProcRow> {
+    if info.pane_expanded.contains(&gp.pane) {
+        return gp.rows.clone();
+    }
+    let mut shown: Vec<ProcRow> =
+        gp.rows.iter().filter(|r| !r.ports.is_empty()).cloned().collect();
+    let n = shown.len();
+    for (i, r) in shown.iter_mut().enumerate() {
+        r.depth = 0;
+        r.spine = 0;
+        r.last = i + 1 == n;
+    }
+    shown
+}
+
+/// 방의 접힘 열쇠. pane id(`%17`)와 절대 겹치지 않는 접두사를 쓴다 — 클릭 히트
+/// 목록(`group_rects`)이 방 머리와 학생 머리를 한 벌로 담아, 열쇠만 보고 어느
+/// 쪽인지 갈라야 하기 때문이다(기본값이 서로 반대라 집합도 갈라져 있다).
 fn win_key(idx: usize) -> String {
     format!("win:{idx}")
 }
@@ -1940,6 +1993,9 @@ fn draw_window_head(
     } else {
         format!("방 {} · {}", gp.window + 1, gp.window_label)
     };
+    // 별도 창으로 나간 방은 그 사실을 머리에 적는다 — 이 pane 들은 메인 화면에
+    // 없으니, 표시가 없으면 목록에만 있고 어디에도 안 보이는 유령으로 읽힌다.
+    let name = if gp.undocked { format!("{name} · 별도 창") } else { name };
     let name = fit_text(g, &name, (right - nw - 8.0 - tx).max(0.0), 10.5, true);
     g.draw_text(
         tx,
@@ -2050,6 +2106,66 @@ fn draw_group_head(
             gpu::DrawOpts {
                 font_size: 10.0,
                 color: theme::with_alpha(theme::text_mute(), 0xA0),
+                bold: false,
+                italic: false,
+            },
+        );
+    }
+}
+
+/// 되살리기 대기 줄 — `%3 시로코 · tmuxify`. 살아 있는 프로세스가 아니니 흐리게
+/// 두되, 누를 수 있다는 것과 ⌘⇧T 가 **어느 줄**을 되살리는지는 분명해야 한다 —
+/// 스택이 여럿일 때 그 키가 무엇을 꺼낼지 모르면 누르기가 망설여진다.
+#[allow(clippy::too_many_arguments)]
+fn draw_closed_row(
+    g: &mut gpu::GpuRenderer,
+    cursor: (f32, f32),
+    c: &crate::ClosedPane,
+    newest: bool,
+    x: f32,
+    w: f32,
+    x0: f32,
+    right: f32,
+    y: f32,
+) {
+    let row = (x, y, w, ROW_H);
+    let hov = hit(cursor, &row);
+    g.hover_pointer |= hov;
+    if hov {
+        g.rect(x, y, w, ROW_H, theme::surface_hover());
+    }
+    let fg = theme::with_alpha(theme::text_mute(), if hov { 0xF0 } else { 0x99 });
+    // ⌘⇧T 는 맨 위 한 줄에만 적는다 — 그 키가 되살리는 건 언제나 가장 최근 것이다.
+    let kbd = newest.then(|| "\u{2318}\u{21E7}T".to_string());
+    let kfs = 10.0_f32;
+    let kbd_w = kbd.as_deref().map_or(0.0, |k| g.measure_chrome_text(k, kfs, false));
+    let isz = 12.0_f32;
+    g.queue_icon("terminal", x0 + 2.0, y + (ROW_H - isz) / 2.0, isz, fg);
+    let mut label = c.pane_id.clone();
+    if !c.character.is_empty() {
+        label.push(' ');
+        label.push_str(&c.character);
+    }
+    if !c.folder.is_empty() {
+        label.push_str(" · ");
+        label.push_str(&c.folder);
+    }
+    let tx = x0 + isz + 8.0;
+    let label = fit_text(g, &label, (right - kbd_w - 8.0 - tx).max(0.0), 11.0, false);
+    g.draw_text(
+        tx,
+        y + (ROW_H - 11.0) / 2.0,
+        &label,
+        gpu::DrawOpts { font_size: 11.0, color: fg, bold: false, italic: false },
+    );
+    if let Some(k) = kbd {
+        g.draw_text(
+            right - kbd_w,
+            y + (ROW_H - kfs) / 2.0,
+            &k,
+            gpu::DrawOpts {
+                font_size: kfs,
+                color: theme::with_alpha(theme::text_mute(), 0x88),
                 bold: false,
                 italic: false,
             },

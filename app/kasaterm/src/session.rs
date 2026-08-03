@@ -572,7 +572,17 @@ impl App {
         self.pty.insert(id, sess);
     }
     pub(crate) fn switch_window(&mut self, idx: usize) {
-        if idx == self.active_window || idx >= self.windows.len() {
+        if idx >= self.windows.len() {
+            return;
+        }
+        // 밖에 나가 있는 방은 메인에 그리지 않는다 — 같은 트리를 두 창이 그리면 한쪽
+        // 입력이 다른 쪽에 안 비치는 유령 상태가 된다. 대신 그 창을 앞으로 가져온다.
+        // (사이드바 탭 클릭도 여기로 오므로, 「밖에 있음」 탭을 누르면 창이 뜬다.)
+        if let Some(i) = self.aux_windows.iter().position(|a| a.room_window() == Some(idx)) {
+            self.aux_windows[i].window.focus_window();
+            return;
+        }
+        if idx == self.active_window {
             return;
         }
         if self.windows[idx].is_none() {
@@ -620,6 +630,188 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    /// 방(윈도우) 탭을 끌어 순서를 바꾼다. `from` 을 뽑아 `to` 자리에 꽂는다.
+    /// `to` 는 **뽑기 전** 기준의 삽입 슬롯(0..=len)이라, 드래그 중 그리는 삽입선
+    /// 위치를 그대로 넘기면 된다.
+    ///
+    /// 인덱스가 곧 신원인 상태가 넷이다 — 활성 방, 이름 오버라이드, 알림 마킹,
+    /// 라벨 캐시. 벡터만 흔들고 이것들을 두면 방을 옮긴 순간 이름이 남의 방에
+    /// 붙고 알림 점이 엉뚱한 탭에서 뛰므로, 같은 remap 을 넷 다 통과시킨다.
+    /// 세션 저장(`session_state_json`)과 board 의 `window_idx` 는 이 벡터 순서를
+    /// 매번 다시 읽으니 저절로 따라온다.
+    pub(crate) fn reorder_window(&mut self, from: usize, to: usize) {
+        let n = self.windows.len();
+        if from >= n || to > n {
+            return;
+        }
+        // 뽑고 난 뒤 기준의 착지 인덱스. 제자리면 옮길 것이 없다.
+        let dst = if to > from { to - 1 } else { to };
+        if dst == from {
+            return;
+        }
+        // 활성 방의 트리는 슬롯이 아니라 pty_layout 에 있다 — 슬롯만 옮기면 활성
+        // 방의 내용이 통째로 빠진다. 제자리에 돌려놓고 옮긴 뒤 새 자리에서 꺼낸다.
+        self.windows[self.active_window] = self.pty_layout.take();
+        let slot = self.windows.remove(from);
+        self.windows.insert(dst, slot);
+        let remap = move |i: usize| crate::remap_window_index(i, from, dst);
+        self.active_window = remap(self.active_window);
+        let overrides = std::mem::take(&mut self.window_name_override);
+        self.window_name_override =
+            overrides.into_iter().map(|(i, name)| (remap(i), name)).collect();
+        let alerts = std::mem::take(&mut self.window_alert);
+        self.window_alert = alerts.into_iter().map(remap).collect();
+        // 밖에 나가 있는 방도 인덱스로 자기 트리를 찾는다 — 여기서 안 옮기면 재배치
+        // 한 번에 별도 창이 남의 방을 그린다.
+        for a in self.aux_windows.iter_mut() {
+            if let crate::auxwin::AuxWindowKind::Room { window, .. } = &mut a.kind {
+                *window = remap(*window);
+            }
+        }
+        // 되살리기 대기 중인 pane 도 자기 방을 인덱스로 가리킨다 — 안 옮기면 ⌘⇧T 가
+        // 엉뚱한 방에서 pane 을 꺼낸다.
+        for c in self.closed_panes.iter_mut() {
+            c.window = remap(c.window);
+        }
+        self.pty_layout = self.windows[self.active_window].take();
+        // 라벨은 인덱스 병렬 배열이라 캐시를 버려 다음 paint 에 다시 뽑게 한다.
+        self.window_labels_at = None;
+        self.win_tab_reveal(self.active_window);
+        self.session_touched = true;
+        self.chrome_dirty = true;
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// 닫히기 직전의 pane 을 되살릴 수 있게 적어 둔다. `remove_pane` 이 유일한
+    /// 호출자다 — ⌘W·헤더 ×·CLI 어느 경로로 닫아도 거길 지나므로 한 곳에서 잡힌다.
+    ///
+    /// 레코드는 세션 저장이 쓰는 것과 **같은 형식**(`layout_to_json` 의 leaf 본문)이다.
+    /// 그래서 되살리기가 `restore_leaf` 재사용이 되고, claude 였던 pane 은 `--resume`
+    /// 까지 그 함수가 알아서 딸려 온다.
+    pub(crate) fn record_closed_pane(&mut self, pane: &str) {
+        if self.tmux.is_some() || !self.pty.contains_key(pane) {
+            return;
+        }
+        // 되돌릴 자리를 가리킬 닻 — 같은 트리의 이웃 leaf(뒤쪽 우선, 없으면 앞).
+        let neighbor = self.pty_layout.as_ref().and_then(|t| {
+            let leaves = t.leaves();
+            let i = leaves.iter().position(|l| *l == pane)?;
+            leaves
+                .get(i + 1)
+                .or_else(|| leaves.get(i.wrapping_sub(1)))
+                .map(|s| s.to_string())
+        });
+        let (rec, character) = {
+            let ws = self.ws.lock().unwrap();
+            let rec = Self::layout_to_json(
+                &kasa_pty::PtyLayout::single(pane),
+                &self.pty,
+                &ws,
+                &self.pane_claude_sid,
+            );
+            let ch = ws.pane_character.get(pane).cloned().unwrap_or_default();
+            (rec, ch)
+        };
+        let Some(rec) = rec.get("leaf").cloned().filter(|r| !r.is_null()) else {
+            return;
+        };
+        // cwd 캐시는 `lsof` 로 채워져 갓 만든 pane 에선 아직 비어 있다 — 그때는
+        // 레코드에 실린 cwd 로 되짚는다(복원도 그 값을 쓰므로 어긋날 일이 없다).
+        let folder = self
+            .pane_view_cwd
+            .get(pane)
+            .or_else(|| self.pane_cwd_cache.get(pane))
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| rec.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string()))
+            .and_then(|s| s.rsplit('/').find(|t| !t.is_empty()).map(|t| t.to_string()))
+            .unwrap_or_default();
+        let window = self.window_of_pane(pane).unwrap_or(self.active_window);
+        self.closed_panes.push(crate::ClosedPane {
+            rec,
+            pane_id: pane.to_string(),
+            character,
+            folder,
+            neighbor,
+            window,
+        });
+        // 오래된 것부터 버린다 — 레코드마다 스크롤백이 통째 붙어 있다.
+        while self.closed_panes.len() > crate::CLOSED_PANE_KEEP {
+            self.closed_panes.remove(0);
+        }
+        self.chrome_dirty = true;
+    }
+
+    /// ⌘⇧T — 가장 최근에 닫은 pane 을 되살린다.
+    pub(crate) fn reopen_closed_pane(&mut self) {
+        let Some(c) = self.closed_panes.pop() else { return };
+        self.reopen_pane_record(c);
+    }
+
+    /// 인포의 닫힘 줄 클릭용 — 스택 가운데 하나를 지목해 되살린다.
+    pub(crate) fn reopen_closed_pane_at(&mut self, idx: usize) {
+        if idx >= self.closed_panes.len() {
+            return;
+        }
+        let c = self.closed_panes.remove(idx);
+        self.reopen_pane_record(c);
+    }
+
+    /// 닫힌 방이 아직 있으면 그 방으로 돌아가 원래 이웃 옆에 되살린다. 이웃이 그 사이
+    /// 사라졌으면 활성 pane 옆으로 — 자리를 못 찾았다고 되살리기를 포기하진 않는다.
+    fn reopen_pane_record(&mut self, c: crate::ClosedPane) {
+        // 밖에 나가 있는 방으로는 보내지 않는다 — `switch_window` 가 그 창을 앞으로
+        // 보낼 뿐 메인은 그대로라, 되살린 pane 이 보이지 않는 방에 들어가 버린다.
+        if c.window < self.windows.len()
+            && c.window != self.active_window
+            && !self.window_is_undocked(c.window)
+        {
+            self.switch_window(c.window);
+        }
+        let (cols, rows) = self.window_cells();
+        let Some(new_id) = self.restore_leaf(&c.rec, cols, rows) else {
+            eprintln!("[reopen] {} 되살리기 실패 — PTY 를 못 띄웠다", c.pane_id);
+            return;
+        };
+        let anchor = c
+            .neighbor
+            .filter(|n| {
+                self.pty.contains_key(n)
+                    && self
+                        .pty_layout
+                        .as_ref()
+                        .is_some_and(|t| t.leaves().iter().any(|l| *l == n.as_str()))
+            })
+            .or_else(|| self.ws.lock().unwrap().active_pane.clone());
+        let grafted = match (anchor, self.pty_layout.as_mut()) {
+            (Some(a), Some(tree)) => {
+                tree.split_leaf(&a, kasa_pty::SplitDir::Horizontal, new_id.clone())
+            }
+            _ => false,
+        };
+        if !grafted {
+            // 트리가 비었거나 닻이 사라졌다 — 이 pane 을 유일 leaf 로 세운다.
+            self.pty_layout = Some(kasa_pty::PtyLayout::single(new_id.as_str()));
+        }
+        {
+            let mut ws = self.ws.lock().unwrap();
+            ws.active_pane = Some(new_id.clone());
+            for pane in ws.panes.values_mut() {
+                pane.dirty = true;
+            }
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.session_touched = true;
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        eprintln!("[reopen] {} → {new_id} 되살림", c.pane_id);
     }
 
     /// pane 하나로 포커스를 옮긴다 — 다른 방(윈도우)에 있으면 그 방부터 앞으로
