@@ -398,13 +398,16 @@ const TRAFFIC_LIGHT_WIDTH: f32 = 78.0;
 /// pane gets one of these strips above its cell grid; a single
 /// un-split window renders no header at all (matches the iTerm
 /// behavior the user pointed at).
-const PANE_HEADER_HEIGHT: f32 = 30.0;
+const PANE_HEADER_HEIGHT: f32 = 34.0;
 /// Per-pane status bar height (logical px) — the strip below a pane's cell grid
 /// holding the cwd / git-branch / diff chips. Mirrors the header band: when a
 /// pane shows its bar, the PTY's usable rows shrink by the equivalent cell
 /// count so the grid still fits above it. Toggled per pane (see
 /// `statusbar_hidden`); a hidden pane reserves nothing.
-const PANE_FOOTER_HEIGHT: f32 = 24.0;
+///
+/// 헤더(34)보다 낮은 건 의도다 — 헤더는 탭을 이고 있고 하단바는 칩만 얹는다.
+/// 다만 예전 24 는 18px 칩에 여백이 3px 밖에 안 남아 띠가 칩에 눌려 보였다.
+const PANE_FOOTER_HEIGHT: f32 = 30.0;
 /// Bottom dock bar height (logical px) — folded-pane chips. Reserved from the
 /// grid only when the dock is non-empty.
 const DOCK_HEIGHT: f32 = 40.0;

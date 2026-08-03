@@ -5020,14 +5020,16 @@ impl App {
                 let bt = if is_split && active_pane.as_deref() == Some(fid.as_str()) { 1.5_f32 } else { 0.0 };
                 g.rect(fx + bt, bar_y, fw - 2.0 * bt, PANE_FOOTER_HEIGHT - bt, theme::bg());
                 g.rect(fx + bt, bar_y, fw - 2.0 * bt, 1.0, theme::border());
-                // Pill metrics shared by every chip.
-                let pill_h = 18.0_f32;
+                // Pill metrics shared by every chip. 12/13 은 앱을 통틀어 가장 작은
+                // 글자·아이콘이었다 — 같은 화면의 사이드바(13~14)와 나란히 놓이니
+                // 하단바만 축소된 것처럼 읽혔다(거노). 본문 단과 같은 단으로 올린다.
+                let pill_h = 22.0_f32;
                 let pill_y = bar_y + (PANE_FOOTER_HEIGHT - pill_h) / 2.0;
-                let icon_sz = 13.0_f32;
+                let icon_sz = 14.0_f32;
                 let pad_x = 9.0_f32;
                 let icon_gap = 6.0_f32;
                 let chip_gap = 7.0_f32;
-                let font = 12.0_f32;
+                let font = 13.0_f32;
                 let txt_y = pill_y + (pill_h - font) / 2.0;
                 let footer_hover = sb_my >= bar_y
                     && sb_my <= bar_y + PANE_FOOTER_HEIGHT
