@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '10'
+  const OVERLAY_V = '11'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -217,10 +217,10 @@ if (!window.__ccInjected) {
         :host { all: initial; }
         /* 첫 버전의 글로우 테두리를 그대로 기본값으로 쓴다 — 3px 선에 안쪽으로 번지는 글로우.
            조작이 끝나도 남아 "이 창은 누가 잡고 있다"를 계속 알린다. 조작 중임은 글로우의
-           숨쉬기와 픽셀 러너로 알리므로 선 자체는 두 상태에서 똑같다.
+           숨쉬기로 알리므로 선 자체는 두 상태에서 똑같다.
            안쪽 1px 어두운 선은 밝은 배경에서 밝은 학생색이 묻히지 않게 하는 대비용.
-           ⚠️글로우를 .frame 의 box-shadow 에 두고 숨쉬기를 걸면 선과 러너(자식)까지 함께
-           흐려진다. 글로우만 별도 층으로 떼면 숨쉬는 것이 그 층뿐이라 둘 다 늘 또렷하다. */
+           ⚠️글로우를 .frame 의 box-shadow 에 두고 숨쉬기를 걸면 테두리 선과 그 자식까지 함께
+           흐려진다. 글로우만 별도 층으로 떼면 숨쉬는 것이 그 층뿐이라 선은 늘 또렷하다. */
         .frame {
           position: fixed; inset: 0; pointer-events: none;
           border: 3px solid var(--cc, #6BCF7F);
@@ -235,7 +235,11 @@ if (!window.__ccInjected) {
         /* brand-skip — 창 테두리를 도는 픽셀 러너. 흰 머리 한 칸과 옅어지는 꼬리 네 칸이 같은
            경로를 한 칸씩 시차를 두고 돌아 지나간 자취처럼 보인다. 다섯 칸의 크기를 똑같이 두는
            것이 중요하다 — 뒤로 갈수록 작게 만들면 자취가 아니라 따로 노는 점 다섯 개가 된다.
-           96칸 × 100ms 라 한 칸이 60px 을 넘어 이동이 확실히 끊긴다.
+           96칸 × 100ms 라 한 칸이 60px 을 넘어 이동이 확실히 끊긴다. 글로우가 .frame 이 아니라
+           별도 층에 있는 덕에 숨쉬기가 이 러너까지 함께 흐리지는 않는다.
+           ⚠️러너는 대기에도 계속 돌고 보이기만 토글한다. 애니메이션 자체를 조작 중에만 켜면
+           조작할 때마다 0%(좌상단)에서 다시 시작해, 한 바퀴 9.6초 중 1~2초짜리 조작에서는
+           늘 상단 왼쪽만 스쳐 지나가고 나머지 세 변은 영영 보이지 않는다(실측).
            ⚠️anchor 를 기본(중앙)으로 두면 러너 절반이 창 밖으로 잘린다. 위쪽 가장자리를 경로에
            맞추고 offset-rotate: auto 로 진행 방향을 따르게 하면 네 변 모두에서 안쪽에 온전히 놓인다.
            ⚠️active 규칙에서 animation 단축을 쓰면 칸마다 준 delay 가 0 으로 덮여 다섯이
@@ -245,12 +249,10 @@ if (!window.__ccInjected) {
           offset-path: border-box; offset-distance: 0%;
           offset-rotate: auto; offset-anchor: 50% 0%;
           opacity: 0; transition: opacity .3s ease;
-        }
-        :host([data-mode="active"]) .frame i {
-          opacity: 1;
           animation-name: runner; animation-duration: 9.6s;
           animation-timing-function: steps(96); animation-iteration-count: infinite;
         }
+        :host([data-mode="active"]) .frame i { opacity: 1; }
         .frame i:nth-child(1) {
           background: #fff;
           box-shadow: 0 0 6px var(--cc, #6BCF7F), 0 0 18px var(--cc, #6BCF7F);
@@ -323,9 +325,9 @@ if (!window.__ccInjected) {
           0% { opacity: .9; transform: scale(.6) }
           100% { opacity: 0; transform: scale(1.9) }
         }
-        /* 조작 중 — 칩 바깥 링이 숨쉬고 상태 점이 뛴다. 러너는 상시 돌되 여기서 속도만 올린다. */
+        /* 조작 중 — 칩 바깥 링이 숨쉬고 상태 점이 뛴다. */
         :host([data-mode="active"]) .chip::before { opacity: 1; animation: halo 2.4s ease-in-out infinite; }
-        /* brand-skip */
+        /* brand-skip — 러너는 상시 돌되 여기서 속도만 올린다. */
         :host([data-mode="active"]) .chip::after { animation-duration: 1.6s; }
         /* /brand-skip */
         @keyframes halo {
