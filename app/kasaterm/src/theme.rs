@@ -463,11 +463,104 @@ pub fn theme_name() -> &'static str {
     CURRENT_THEME.lock().ok().and_then(|g| *g).unwrap_or("dark")
 }
 
+/// OS 가 지금 밝은 모드인가. 판단이 안 서면 `None` — 그때는 다크로 둔다(이 앱의
+/// 원래 모습이고, 모르는 상태에서 화면을 하얗게 뒤집는 것보다 낫다).
+///
+/// macOS 는 창이 아니라 **시스템 설정 자체**를 읽는다. `window.theme()` 을 쓰면
+/// 우리가 창마다 `with_theme(Theme::Dark)` 로 장식을 고정해 둔 값이 되돌아와,
+/// 시스템이 무엇이든 항상 다크라고 답한다.
+#[cfg(target_os = "macos")]
+fn system_is_light() -> Option<bool> {
+    use objc2_foundation::{NSString, NSUserDefaults};
+    // AppleInterfaceStyle 은 다크일 때만 "Dark" 로 있고, 라이트면 키가 아예 없다.
+    let key = NSString::from_str("AppleInterfaceStyle");
+    let style = NSUserDefaults::standardUserDefaults().stringForKey(&key);
+    Some(!style.is_some_and(|s| s.to_string().eq_ignore_ascii_case("Dark")))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_is_light() -> Option<bool> {
+    // 다른 플랫폼은 창에서 받아 온 값을 쓴다 — handler 가 winit 의 theme 을
+    // 여기 넣어 준다(Windows 는 그 경로가 레지스트리를 본다).
+    let v = SYSTEM_IS_LIGHT.load(Ordering::Relaxed);
+    (v != 0).then(|| v == 2)
+}
+
+/// `system_is_light` 의 비-macOS 백업 저장소. 0=모름, 1=다크, 2=라이트.
+static SYSTEM_IS_LIGHT: AtomicU32 = AtomicU32::new(0);
+
+/// `system` 모드일 때 **마지막으로 적용한** 해석 결과(0=dark, 1=light). 폴링이
+/// 이것과 지금 OS 값을 비교해 바뀐 순간에만 다시 칠한다.
+static SYSTEM_RESOLVED: AtomicU32 = AtomicU32::new(0);
+
+/// OS 다크/라이트가 방금 바뀌었으면 새 팔레트를 적용하고 `true`.
+///
+/// 알림을 구독하지 않고 폴링하는 건, 알림 옵저버가 플랫폼마다 다른 배선을
+/// 요구하는 데 비해 이 조회가 캐시된 값 하나를 읽는 정도로 싸기 때문이다.
+/// 사람이 시스템 테마를 바꾸는 빈도를 생각하면 한 틱 늦게 따라가도 무해하다.
+pub fn poll_system_theme() -> bool {
+    if theme_name() != "system" {
+        return false;
+    }
+    // 호출부는 매 프레임 도는 틱이라 게이트를 여기 둔다 — 부르는 쪽마다 타이머를
+    // 챙기게 하면 새 호출부가 생길 때 조용히 빠진다.
+    {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+        let Ok(mut g) = LAST.lock() else { return false };
+        if g.is_some_and(|t| t.elapsed() < Duration::from_millis(700)) {
+            return false;
+        }
+        *g = Some(Instant::now());
+    }
+    let now = u32::from(system_is_light() == Some(true));
+    if SYSTEM_RESOLVED.swap(now, Ordering::Relaxed) == now {
+        return false;
+    }
+    let key = if now == 1 { "light" } else { "dark" };
+    if let Some((_, _, p)) = THEME_PRESETS.iter().find(|(k, _, _)| *k == key) {
+        store_palette(p);
+    }
+    true
+}
+
+/// winit 이 창 테마를 알려줄 때 handler 가 부른다. macOS 에서는 창 장식을 고정해
+/// 두어 이 값이 시스템을 안 나타내므로 무시한다.
+pub fn note_window_theme(is_light: bool) {
+    if cfg!(not(target_os = "macos")) {
+        SYSTEM_IS_LIGHT.store(if is_light { 2 } else { 1 }, Ordering::Relaxed);
+    }
+}
+
+/// `theme: "system"` 이 지금 어느 프리셋을 가리키는가.
+pub fn system_theme_key() -> &'static str {
+    if system_is_light() == Some(true) {
+        "light"
+    } else {
+        "dark"
+    }
+}
+
 /// Switch to a preset theme by key; unknown keys fall back to dark. "custom"
 /// re-reads the settings file's palette overrides.
 pub fn set_theme(mode: &str) {
     if mode == "custom" {
         apply_custom_theme(&crate::socket::read_settings());
+        return;
+    }
+    // 저장되는 값은 "system" 그대로다 — 지금 해석한 결과(dark/light)를 적어 버리면
+    // 다음에 켤 때 그 순간의 OS 설정이 고정값으로 굳어 따라다니길 그만둔다.
+    if mode == "system" {
+        let (key, _, p) = THEME_PRESETS
+            .iter()
+            .find(|(k, _, _)| *k == system_theme_key())
+            .unwrap_or(&THEME_PRESETS[0]);
+        store_palette(p);
+        if let Ok(mut g) = CURRENT_THEME.lock() {
+            *g = Some("system");
+        }
+        SYSTEM_RESOLVED.store(u32::from(*key == "light"), Ordering::Relaxed);
         return;
     }
     let (key, _, p) = THEME_PRESETS

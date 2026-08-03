@@ -458,7 +458,15 @@ impl App {
 
     /// Mark every pane + chrome dirty so a theme/accent change repaints the
     /// whole window (cell backgrounds pick up the new palette too).
-    fn repaint_all(&mut self) {
+    /// 테마를 갈기 **직전에** 부른다 — 지금 배경색을 붙잡아 둬야 그게 흩어질 옛
+    /// 화면이 된다. 전환이 이미 돌고 있으면 시작 시각만 되감아, 빠르게 여러 번
+    /// 눌러도 화면이 옛 색 여러 겹으로 두꺼워지지 않는다.
+    pub(crate) fn begin_theme_fx(&mut self) {
+        let keep = self.theme_fx.map(|(_, bg)| bg).unwrap_or_else(theme::bg);
+        self.theme_fx = Some((std::time::Instant::now(), keep));
+    }
+
+    pub(crate) fn repaint_all(&mut self) {
         if let Ok(mut ws) = self.ws.lock() {
             for p in ws.panes.values_mut() {
                 p.dirty = true;
@@ -588,6 +596,7 @@ impl App {
                 self.settings_input = Some(SettingsInput::Shell);
             }
             SettingsAction::ThemeMode(m) => {
+                self.begin_theme_fx();
                 theme::set_theme(m);
                 socket::write_setting("theme", serde_json::Value::String(m.to_string()));
                 self.repaint_all();
@@ -1283,7 +1292,9 @@ pub(crate) fn paint_settings(
             // 테마 — 프리셋 카드 그리드. 카드 하나 = 그 팔레트의 미니 프리뷰
             // (bg 칠 + 프롬프트 샘플 + ANSI 도트 + 라벨)라서 고르기 전에 색이
             // 보인다. UI 토큰과 터미널 ANSI 16색이 함께 바뀐다.
-            y = field_header(g, fx, y, clip, "Theme", &["UI + 터미널 ANSI 팔레트가 함께 바뀌어요"]);
+            y = field_header(g, fx, y, clip, "Theme",
+                &["UI + 터미널 ANSI 팔레트가 함께 바뀌어요",
+                  "System 은 OS 의 밝게/어둡게를 따라가요 — 바꾸면 알아서 넘어가요"]);
             let (card_w, card_h, gap) = (158.0_f32, 96.0_f32, 12.0_f32);
             let per_row = (((fw + gap) / (card_w + gap)).floor() as usize).max(1);
             let mut idx = 0usize;
@@ -1347,6 +1358,18 @@ pub(crate) fn paint_settings(
                 );
                 rects.push((SettingsAction::ThemeMode(key), r));
             };
+            // System 이 맨 앞 — Dark·Light 와 함께 기본 셋을 이룬다. 미리보기는
+            // 지금 OS 가 가리키는 팔레트로 그린다(라이브 색을 쓰면 다른 테마를
+            // 고른 상태에서 그 색이 비쳐 시스템이 무엇인지 거짓말을 한다).
+            let sys_key = theme::system_theme_key();
+            let sys = theme::THEME_PRESETS.iter().find(|(k, _, _)| *k == sys_key);
+            // 라벨에 지금 따르는 쪽을 적는다 — 안 적으면 System 카드가 Light 카드와
+            // 똑같이 생겨서 둘의 차이가 화면에 없다.
+            let sys_label = match sys {
+                Some((_, l, _)) => format!("System · {l}"),
+                None => "System".to_string(),
+            };
+            card(g, &mut rects, "system", &sys_label, sys.map(|(_, _, p)| *p));
             for (key, label, pal) in theme::THEME_PRESETS {
                 card(g, &mut rects, key, label, Some(pal));
             }

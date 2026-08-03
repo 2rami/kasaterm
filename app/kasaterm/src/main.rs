@@ -4315,6 +4315,13 @@ struct App {
     /// shifts, resize, mouse hover, etc.). PTY changes set the
     /// per-pane `PaneState::dirty` instead.
     chrome_dirty: bool,
+    /// 테마가 방금 바뀌었으면 (시작 시각, 이전 배경색). 새 팔레트는 즉시 적용되고
+    /// 이 값은 그 위에 덮을 **옛 배경**을 들고 있다가 픽셀 블록으로 흩어진다.
+    ///
+    /// 이전 화면을 통째로 캡처하지 않는 건 그럴 필요가 없어서다 — 눈이 읽는 건
+    /// 바탕색이 갈리는 순간이지 그 위 글자가 아니다. 단색 블록만으로 충분하고,
+    /// 그래야 전환 중에도 새 화면이 계속 갱신된다(캡처를 덮으면 그동안 화면이 언다).
+    theme_fx: Option<(std::time::Instant, [u8; 4])>,
     cursor_px: (f32, f32),
     /// Headless hover testing: KASATERM_AUTOHOVER="x,y" (logical px) pins
     /// the cursor so a screenshot can capture a hover state without a real
@@ -4671,6 +4678,7 @@ impl App {
             feedback_btn_rect: (0.0, 0.0, 0.0, 0.0),
             last_blink_on: false,
             chrome_dirty: true,
+            theme_fx: None,
             cursor_px: std::env::var("KASATERM_AUTOHOVER")
                 .ok()
                 .and_then(|s| {
