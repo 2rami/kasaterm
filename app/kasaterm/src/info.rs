@@ -85,10 +85,18 @@ pub(crate) struct PortRow {
     /// 어느 pane 의 셸 자손도 **아니고** 작업 폴더가 같아서 딸려온 것. 띄운 셸이
     /// 죽어 launchd 밑으로 넘어간 dev 서버가 대부분이라, pane 이 지금 돌리는
     /// 것처럼 보이면 안 된다(끄려고 pane 을 닫아도 안 죽는다).
+    ///
+    /// **"주인을 모른다"는 뜻이 아니다.** 이 값이 참일 때도 `pane`·`label` 은 이미
+    /// 채워져 있다 — 작업 폴더로 되짚어 찾았으니까. 예전엔 이걸 "(고아)" 로 적었는데,
+    /// 학생이 백그라운드로 띄운 dev 서버가 전부 그렇게 표시돼 누가 띄웠는지 아는
+    /// 서버까지 주인 없는 것처럼 읽혔다(거노). 지금은 점 색으로만 구분한다.
     pub(crate) orphan: bool,
     /// 이 포트를 쥔 프로세스가 속한 pane(`%17`). 여러 pane 이 한 목록을 공유하니
     /// 소유자를 안 밝히면 "3000 이 누구 건지" 를 결국 사람이 추적해야 한다.
     pub(crate) pane: Option<String>,
+    /// 그 pane 에 배정된 학생 이름. pane id(`%17`)는 기계의 이름이라 사람이 못
+    /// 외운다 — 얼굴과 이름이 있어야 "코하루가 띄운 3000" 으로 읽힌다.
+    pub(crate) label: String,
     /// 무엇이 떠 있는지 — 프로젝트 폴더명, 알려진 서비스명, 또는 응답한 HTML 의
     /// `<title>`. 포트 번호만으로는 며칠 전 띄워둔 서버의 정체를 알 수 없다.
     pub(crate) site: String,
@@ -241,6 +249,11 @@ pub(crate) fn collect(targets: &[PaneTarget], sites: &SiteCache) -> InfoSnap {
                     .map(|r| classify(&r.args, ProcKind::Plain).0)
                     .unwrap_or_default(),
                 orphan,
+                label: pane
+                    .as_deref()
+                    .and_then(|id| panes.iter().find(|g| g.pane == id))
+                    .map(|g| g.label.clone())
+                    .unwrap_or_default(),
                 pane,
                 site: site_label(port, cwds.get(&pid).map(|p| p.as_path()), sites),
             })
@@ -1413,9 +1426,17 @@ pub(crate) fn draw_info_actions(
         let r = (x0, y, avail, h);
         let hov = menu_open || hit(cursor, &r);
         g.hover_pointer |= hov;
+        // 한도가 코앞이면 행 전체가 물든다. 숫자 색만 바꾸면 11px 글자 하나가
+        // 빨개질 뿐이라, 정작 알아야 할 때(작업 중 한도가 닫히는 것) 눈에 안 든다.
+        let danger = usage_pct.is_some_and(|p| p >= 90.0);
         round_rect(
             g, r.0, r.1, r.2, r.3, theme::radius_sm(),
-            if hov { theme::surface_hover() } else { theme::surface() },
+            match (danger, hov) {
+                (true, true) => theme::with_alpha(theme::danger(), 0x44),
+                (true, false) => theme::with_alpha(theme::danger(), 0x2A),
+                (false, true) => theme::surface_hover(),
+                (false, false) => theme::surface(),
+            },
         );
         let f = 11.5_f32;
         let ty = y + (h - f) / 2.0 - 1.0;
@@ -1958,8 +1979,18 @@ fn draw_group_head(
         12.0,
         theme::text_mute(),
     );
+    // 배정된 학생이면 색 점이 아니라 그 얼굴을 놓는다 — 색만으로는 어느 학생인지
+    // 외워야 알고, 픽셀 실루엣에서는 점이 네모로 굳어 상태 표시처럼 보였다.
+    // 얼굴이 없는 pane(학생 미배정)만 원래대로 색 점.
+    //
+    // 얼굴은 점보다 넓어서 이름 시작점도 같이 민다 — 고정 오프셋을 쓰면 chevron
+    // 과 이름 양쪽에 얼굴이 겹쳐 붙는다.
     let tint = theme::character_accent(&gp.label).unwrap_or_else(theme::text_mute);
-    circle_rect(g, x0 + 12.0, y + 9.0, 6.0, tint);
+    const FACE: f32 = GROUP_H - 6.0;
+    let has_face = crate::render::draw_student_face(g, &gp.label, x0 + 11.0, y + 3.0, FACE);
+    if !has_face {
+        circle_rect(g, x0 + 12.0, y + 9.0, 6.0, tint);
+    }
     // 개수 배지가 오른쪽 끝을 먼저 잡는다 — 접힌 그룹에서 유일한 내용물이라
     // 이름에 밀려 사라지면 안 된다.
     let n = gp.rows.len().to_string();
@@ -1970,7 +2001,7 @@ fn draw_group_head(
         &n,
         gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: true, italic: false },
     );
-    let tx = x0 + 24.0;
+    let tx = x0 + if has_face { 15.0 + FACE } else { 24.0 };
     let mut budget = (right - nw - 8.0 - tx).max(0.0);
     let title = if gp.label.is_empty() {
         gp.pane.clone()
@@ -2153,6 +2184,13 @@ fn draw_proc_row(
         _ => ("", p.name.as_str()),
     };
     let mut nx = cx;
+    // claude 본체는 로고를 앞에 단다. 이름만으로도 읽히지만 목록에서 계보의
+    // 기점이라 — 그 아래 npm·node·Bash 가 전부 이 프로세스의 자손이다 — 눈이
+    // 한 번에 찾아야 할 자리다. 색(accent)만으로는 흑백에 가까운 테마에서 약하다.
+    if matches!(p.kind, ProcKind::Claude) && avail > 40.0 {
+        g.queue_icon("claude", nx, y + 5.0, 12.0, theme::accent());
+        nx += 16.0;
+    }
     if !head.is_empty() {
         let hw = g.measure_chrome_text(head, 10.5, false);
         if avail > hw + 40.0 {
@@ -2248,15 +2286,35 @@ fn draw_port_row(
         g.queue_icon("external-link", rx - 12.0, y + 5.0, 12.0, theme::text_dim());
         rx -= 18.0;
     }
-    if let Some(pane) = p.pane.as_deref().filter(|_| rx - x0 - pw - 24.0 > 30.0) {
-        let s = if p.orphan { format!("{pane} (고아)") } else { pane.to_string() };
-        let s = fit_text(g, &s, (rx - x0 - pw - 24.0).max(0.0), 10.0, false);
-        g.draw_text(
-            x0 + 12.0 + pw + 8.0,
-            y + 4.0,
-            &s,
-            gpu::DrawOpts { font_size: 10.0, color: theme::text_mute(), bold: false, italic: false },
-        );
+    // 누가 띄웠는지 — 학생이 배정된 pane 이면 얼굴을 앞에 놓고 이름을 쓴다.
+    // "(고아)" 를 떼어낸 자리다: 주인은 이미 알고 있는데 그 말이 주인 없음으로
+    // 읽혀, 학생이 백그라운드로 띄운 서버가 전부 미아처럼 보였다. pane 을 닫아도
+    // 안 죽는다는 사실은 위의 점 색(흐림)이 이미 말한다.
+    let mut ox = x0 + 12.0 + pw + 8.0;
+    let avail = (rx - ox - 12.0).max(0.0);
+    if avail > 30.0 {
+        let owner = if p.label.is_empty() {
+            p.pane.clone().unwrap_or_default()
+        } else {
+            p.label.clone()
+        };
+        if !owner.is_empty() {
+            if crate::render::draw_student_face(g, &p.label, ox, y + 2.0, 14.0) {
+                ox += 17.0;
+            }
+            let s = fit_text(g, &owner, (rx - ox - 12.0).max(0.0), 10.0, false);
+            g.draw_text(
+                ox,
+                y + 4.0,
+                &s,
+                gpu::DrawOpts {
+                    font_size: 10.0,
+                    color: theme::text_mute(),
+                    bold: false,
+                    italic: false,
+                },
+            );
+        }
     }
     // 아랫줄 — 무엇인지가 왼쪽, 그걸 쥔 프로세스가 오른쪽.
     let mut lx = right;

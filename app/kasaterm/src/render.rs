@@ -7553,6 +7553,33 @@ fn student_profile_rgba(slug: &str) -> Option<(Vec<u8>, u32, u32)> {
     Some((img.into_raw(), w, h))
 }
 
+/// 캐릭터 이름 자리에 그 학생의 얼굴을 그린다 — 없는 캐릭터면 아무것도 안 그리고
+/// `false` 를 돌려 부르는 쪽이 색 점으로 되돌아가게 한다.
+///
+/// 업로드는 캐릭터당 한 번(`has_image` 미스일 때만)이라 프레임마다 불러도 싸다.
+/// statusline·Info·tell 렌더가 같은 키를 공유하니 어디서 처음 그리든 나머지는
+/// 캐시를 탄다.
+pub(crate) fn draw_student_face(
+    g: &mut gpu::GpuRenderer,
+    name: &str,
+    x: f32,
+    y: f32,
+    size: f32,
+) -> bool {
+    let Some(slug) = theme::character_slug(name) else {
+        return false;
+    };
+    let key = format!("student:{slug}:profile");
+    if !g.has_image(&key) {
+        let Some((rgba, w, h)) = student_profile_rgba(slug) else {
+            return false;
+        };
+        g.upload_image(&key, &rgba, w, h);
+    }
+    g.queue_image_above(&key, x, y, size, size);
+    true
+}
+
 /// SCHALE 로고 PNG → RGBA. agents 뷰 캐시 미스 시 1회 디코딩. 사용자
 /// override(students_dir/schale-logo.png) 우선, 없으면 include_bytes 번들.
 fn schale_logo_rgba() -> Option<(Vec<u8>, u32, u32)> {

@@ -5559,7 +5559,11 @@ case \" $* \" in *\" attach \"*|*\" agents \"*|*\" -p \"*|*\" --print \"*) SID=\
 # zshrc claude() 알리아스(--dangerously-skip-permissions prepend)에 깨진다(실측) — 첫 non-flag\n\
 # 인자로 판정. 값 받는 플래그가 stop/logs 앞에 오는 조합은 비현실적이라 허용 리스크.\n\
 SUB=\"\"; for a in \"$@\"; do case \"$a\" in -*) ;; *) SUB=\"$a\"; break ;; esac; done\n\
-case \"$SUB\" in stop|logs) SID=\"\"; PERSONA_OK=\"\" ;; esac\n\
+# 서브커맨드에는 노브를 하나도 얹지 않는다 — `--mcp-config` 처럼 대화형 실행에만 있는 플래그를\n\
+# 붙이면 `claude mcp list` 가 통째로 `unknown option` 으로 죽는다(2026-08-03 실사고). 첫 non-flag\n\
+# 인자가 **정확히** 이 이름일 때만이라 프롬프트(`claude \"mcp 어떻게 써\"`)는 안 걸린다.\n\
+# claude 가 새 서브커맨드를 내면 여기 추가할 것.\n\
+case \"$SUB\" in stop|logs|mcp|config|configuration|doctor|update|upgrade|install|installation|plugin|plugins|project|auth|gateway|setup-token|auto-mode|ultrareview|migrate-installer) SID=\"\"; PERSONA_OK=\"\" ;; esac\n\
 # 학생 명령(`시로코`)의 pane 별 정체성 override — env 는 셸 spawn 시 고정이라 재배정은\n\
 # 파일로 온다. 있으면 persona/character 를 덮는다(빈 파일 = persona 없는 학생 = 미적용).\n\
 OVP=\"$SELF_DIR/repersona-${{KASATERM_PANE_ID}}.persona\"\n\
