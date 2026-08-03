@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '3'
+  const OVERLAY_V = '4'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -271,13 +271,17 @@ if (!window.__ccInjected) {
         }
         :host([data-mode="active"]) .dot { background: #f08c00; animation: blip 1.1s ease-in-out infinite; }
         @keyframes blip { 0%,100% { transform: scale(1); opacity: 1 } 50% { transform: scale(.6); opacity: .5 } }
-        /* 대기 — 페이지 테두리와 커서는 걷고 칩만 조용히 남긴다. 작고 흐리게 낮추되 **테두리 두께는
-           그대로** 둔다 — 얇아지면 "누가 잡고 있다"는 신호 자체가 흐려진다. */
+        /* 대기 — 페이지 테두리와 커서는 걷고 칩만 조용히 남긴다. 작고 얌전해지되 **테두리는 그대로**.
+           ⚠️칩 전체에 opacity 를 걸면 테두리까지 같이 흐려져 밝은 페이지에서 통째로 사라진다(실측).
+           투명도는 배경과 글자에만 주고 테두리는 불투명하게 남긴다 — 그게 "누가 잡고 있다"는 신호다. */
         :host([data-mode="idle"]) .frame { animation: none; opacity: 0; }
         :host([data-mode="idle"]) .chip {
-          opacity: .78; transform: scale(.9);
-          box-shadow: 0 1px 8px rgba(0,0,0,.28), 0 0 0 2px var(--cc, #6BCF7F);
+          transform: scale(.9);
+          background: rgba(20,22,26,.62);
+          color: rgba(255,255,255,.82);
+          box-shadow: 0 1px 8px rgba(0,0,0,.24), 0 0 0 2px var(--cc, #6BCF7F);
         }
+        :host([data-mode="idle"]) .chip img { opacity: .82; }
         :host([data-mode="idle"]) .cursor { opacity: 0 !important; }
       </style>
       <div class="frame"></div>
