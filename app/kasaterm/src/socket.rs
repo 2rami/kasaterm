@@ -2239,6 +2239,20 @@ pub struct ClaudeAccount {
     pub label: String,
 }
 
+impl ClaudeAccount {
+    /// 목록·칩에 보일 이름. 라벨은 설정 화면에서 통째로 지울 수 있는 자유
+    /// 텍스트라 빈 문자열이 되는데, 그대로 그리면 **글자가 하나도 없는 행**이
+    /// 남아 슬롯이 깨진 것처럼 보인다. 비면 추가할 때와 같은 규칙으로 자리를
+    /// 메운다 — `idx` 는 이 목록에서의 위치고, 목록 밖 "기본"이 1번이라 +2.
+    pub fn display_label(&self, idx: usize) -> String {
+        if self.label.trim().is_empty() {
+            format!("계정 {}", idx + 2)
+        } else {
+            self.label.clone()
+        }
+    }
+}
+
 /// Configured extra logins, in display order. The default login (whatever
 /// `claude` already uses) is *not* in this list — it is the implicit first row.
 pub fn read_claude_accounts() -> Vec<ClaudeAccount> {
