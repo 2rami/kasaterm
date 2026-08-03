@@ -4231,14 +4231,17 @@ impl App {
                 let acct_label = (!self.set_claude_accounts.is_empty()).then(|| {
                     self.set_claude_accounts
                         .iter()
-                        .find(|a| a.id == self.set_claude_account)
-                        .map_or("기본", |a| a.label.as_str())
+                        .position(|a| a.id == self.set_claude_account)
+                        .map_or_else(
+                            || "기본".to_string(),
+                            |i| self.set_claude_accounts[i].display_label(i),
+                        )
                 });
                 let (body_top, acct_rect) = info::draw_info_actions(
                     g,
                     self.cursor_px,
                     &mut self.info,
-                    acct_label,
+                    acct_label.as_deref(),
                     claude_usage_pct,
                     self.account_menu,
                     crate::socket::read_shim_inject(),
@@ -5642,32 +5645,35 @@ impl App {
             self.account_menu_hits.clear();
             if let (true, Some((ax, ay, aw, ah))) = (self.account_menu, self.account_chip_rect) {
                 let (hmx, hmy) = self.cursor_px;
-                let f = 11.5_f32;
+                let f = 13.0_f32;
                 let pad_x = 10.0_f32;
                 // 첫 행은 언제나 기본(id `""`) — 설정 화면의 목록과 같은 순서.
                 // 맨 아래 "설정에서 계정 추가…" 로 막다른 골목을 막는다.
-                let mut rows: Vec<(AccountMenuItem, &str)> =
-                    vec![(AccountMenuItem::Select(String::new()), "기본")];
-                rows.extend(
-                    self.set_claude_accounts
-                        .iter()
-                        .map(|a| (AccountMenuItem::Select(a.id.clone()), a.label.as_str())),
-                );
-                rows.push((AccountMenuItem::AddInSettings, "설정에서 계정 추가…"));
-                let rh = 24.0_f32;
+                let mut rows: Vec<(AccountMenuItem, String)> =
+                    vec![(AccountMenuItem::Select(String::new()), "기본".to_string())];
+                rows.extend(self.set_claude_accounts.iter().enumerate().map(|(i, a)| {
+                    (AccountMenuItem::Select(a.id.clone()), a.display_label(i))
+                }));
+                rows.push((
+                    AccountMenuItem::AddInSettings,
+                    "설정에서 계정 추가…".to_string(),
+                ));
+                let rh = 28.0_f32;
                 let pad = 4.0_f32;
                 let mw = rows
                     .iter()
-                    .map(|(_, l)| g.measure_chrome_text(l, f, true) + pad_x * 2.0)
+                    .map(|(_, l)| g.measure_chrome_text(l.as_str(), f, true) + pad_x * 2.0)
                     .fold(aw, f32::max);
                 // +5 = "추가" 행 위 구분선이 먹는 자리.
                 let mh = pad * 2.0 + rh * rows.len() as f32 + 5.0;
                 // 계정 행 오른쪽 끝에 맞춰 내린다 — 창 왼쪽으로는 안 넘어가게 클램프.
                 let mx = (ax + aw - mw).max(4.0);
                 let my = ay + ah + 4.0;
-                round_rect(g, mx, my, mw, mh, theme::radius_sm(), theme::border());
-                round_rect(g, mx + 1.0, my + 1.0, mw - 2.0, mh - 2.0,
-                    theme::radius_sm() - 1.0, theme::surface_hover());
+                // 패널 배경과 팝업 배경은 6단계밖에 안 벌어져서, 색만으로는 이게
+                // 떠 있는 메뉴인지 패널의 한 구역인지 읽히지 않았다(거노: 뒤가
+                // 비쳐 보인다). 층 선언은 색이 아니라 그림자·테두리가 하는 일이라
+                // 그걸 위해 있는 공통 함수로 넘긴다 — 셸 메뉴·모달과 같은 언어.
+                panel_rect_outlined(g, mx, my, mw, mh, theme::radius_sm(), theme::surface_hover());
                 let mut ry = my + pad;
                 for (item, label) in rows {
                     if item == AccountMenuItem::AddInSettings {
@@ -5686,7 +5692,7 @@ impl App {
                         pill_rect(g, mx + pad, ry + 5.0, 2.5, rh - 10.0, theme::accent());
                     }
                     g.draw_text(
-                        mx + pad_x, ry + (rh - f) / 2.0 - 1.0, label,
+                        mx + pad_x, ry + (rh - f) / 2.0 - 1.0, &label,
                         gpu::DrawOpts {
                             font_size: f,
                             color: if active { theme::text() } else { theme::text_dim() },
