@@ -1605,17 +1605,20 @@ pub(crate) fn paint_settings(
                             dr.0 + dr.2 + 12.0
                         }
                     };
-                    if let Some(p) = auth_probe(&id) {
-                        let (txt, col) = if p.logged_in {
-                            (p.email, theme::text_mute())
-                        } else {
-                            ("로그인 필요".to_string(), theme::danger())
-                        };
-                        g.draw_text(
-                            status_x, y + (row_h - 12.0) / 2.0, &txt,
-                            gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false },
-                        );
-                    }
+                    // 빈칸을 남기지 않는다. 답이 아직 없는 두 경우 — 첫 조회 중이거나,
+                    // 로그인은 됐는데 안 쓰던 슬롯이라 토큰이 만료돼 갱신이 도는 중 —
+                    // 이 자리를 비워 두면 계정이 사라진 것처럼 보인다(거노: "계정
+                    // 재시작할때마다 또 없어지냐"). 실제로는 몇 초 뒤 채워지므로,
+                    // 없다고 말하지 말고 아직 모른다고 말한다.
+                    let (txt, col) = match auth_probe(&id) {
+                        Some(p) if !p.logged_in => ("로그인 필요".to_string(), theme::danger()),
+                        Some(p) if !p.email.is_empty() => (p.email, theme::text_mute()),
+                        _ => ("확인 중…".to_string(), theme::with_alpha(theme::text_mute(), 0x99)),
+                    };
+                    g.draw_text(
+                        status_x, y + (row_h - 12.0) / 2.0, &txt,
+                        gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false },
+                    );
                 }
                 y += row_h + 6.0;
             }
