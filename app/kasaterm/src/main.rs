@@ -4642,6 +4642,10 @@ impl App {
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false),
                 col_w_logical: GIT_COL_W,
+                // KASATERM_FORCE_ACCOUNT_MENU 와 같은 헤드리스 검증용 — 클릭 합성
+                // 없이 모달이 열린 프레임을 캡처한다(모달은 창 안 모든 것 위에
+                // 떠야 해서 겹침 회귀가 나기 쉬운 자리다).
+                commit_modal_open: std::env::var_os("KASATERM_FORCE_COMMIT_MODAL").is_some(),
                 commit_modal_include_unstaged: true,
                 ..Default::default()
             },
