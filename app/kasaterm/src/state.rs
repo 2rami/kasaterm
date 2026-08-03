@@ -197,9 +197,18 @@ pub(crate) struct InfoState {
     /// 커서 좌표는 창을 떠나도 마지막 자리에 남는다 — 패널 위에 마우스를 얹어 둔 채
     /// 자리를 뜨면 목록이 영영 굳는다. 그래서 동결에 시한을 둔다.
     pub(crate) frozen_since: Option<std::time::Instant>,
-    /// 접어둔 pane 그룹(surface id). 남의 pane 은 접어두고 자기 것만 펴 두는
-    /// 쓰임이 기본이라 pane 을 옮겨도 유지한다.
+    /// 접어둔 **방**(`win:N`). 방은 펴진 게 기본이라 여기 담긴 것만 접힌다.
     pub(crate) group_collapsed: std::collections::HashSet<String>,
+    /// 펴 둔 **학생 그룹**(surface id). 학생은 접힌 게 기본이라 여기 담긴 것만
+    /// 펴진다 — 방과 기본값이 반대여서 한 집합으로는 표현할 수 없다.
+    ///
+    /// 기본을 접힘으로 둔 건 목록 길이 때문이다. pane 마다 프로세스 나무를 다 펴면
+    /// 방 몇 개만 돼도 화면을 넘겨야 "누가 무슨 포트를 쥐었나"에 닿는다. 접힌 학생도
+    /// 포트를 쥔 줄은 남으므로(그리기 참조) 접는다고 서버를 놓치지는 않는다.
+    pub(crate) pane_expanded: std::collections::HashSet<String>,
+    /// 닫힌 pane 줄의 hit rect `(스택 인덱스, rect)` — 누르면 그 줄만 되살린다.
+    /// 매 paint 재생성(다른 hit target 과 같은 규칙).
+    pub(crate) closed_rects: Vec<(usize, (f32, f32, f32, f32))>,
     /// 그룹 머리 직전 클릭 `(시각, 열쇠)` — 더블클릭(=그 학생으로 포커스) 판정용.
     /// 한 번 클릭은 접기라, 두 번째 클릭이 접기를 되돌리고 포커스까지 옮긴다.
     pub(crate) last_group_click: Option<(std::time::Instant, String)>,
@@ -244,6 +253,8 @@ impl Default for InfoState {
             ports_collapsed: false,
             ctx_menu: None,
             group_collapsed: std::collections::HashSet::new(),
+            pane_expanded: std::collections::HashSet::new(),
+            closed_rects: Vec::new(),
             last_group_click: None,
             tab_rects: Vec::new(),
             port_rects: Vec::new(),

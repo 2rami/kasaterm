@@ -1948,6 +1948,13 @@ impl App {
         let sb_alert: Vec<bool> = (0..sb_labels.len())
             .map(|i| self.window_alert.contains(&i))
             .collect();
+        // 별도 창으로 나가 있는 방 — 탭은 자리를 지키되 ⌘N 대신 나갔다는 표시가 뜬다.
+        let sb_undocked: Vec<bool> =
+            (0..sb_labels.len()).map(|i| self.window_is_undocked(i)).collect();
+        // 방 탭을 끌고 있는 동안 떨어질 자리. 탭 자체는 제자리에 두고 삽입선만
+        // 그린다 — 실제 이동은 release 뿐이라, 놓기 전엔 "여기로 간다"만 알면 된다.
+        let win_drag_target: Option<usize> =
+            self.win_tab_drag.as_ref().filter(|d| d.active).map(|d| d.target);
         // Which tab the cursor is over (for hover affordance + showing × only
         // where the user is pointing, Warp-style).
         let sb_cursor = self.cursor_px;
@@ -2804,6 +2811,23 @@ impl App {
                         g.queue_icon("chevron-right", px + pw + 3.0, cy, cis, theme::text_mute());
                     }
                 }
+                // 재배치 드래그 중이면 떨어질 자리에 세로 막대. 마지막 탭 뒤로
+                // 미는 경우만 끝 모서리에 붙는다(target == 마지막 + 1).
+                if let Some(t) = win_drag_target {
+                    let bar_x = sb_tabs
+                        .iter()
+                        .find(|(i, _)| *i == t)
+                        .map(|(_, r)| r.0 - 2.0)
+                        .or_else(|| {
+                            sb_tabs
+                                .last()
+                                .filter(|(i, _)| t == i + 1)
+                                .map(|(_, r)| r.0 + r.2 + 2.0)
+                        });
+                    if let (Some(bx), Some((_, fr))) = (bar_x, sb_tabs.first()) {
+                        g.rect(bx - 1.5, fr.1, 3.0, fr.3, theme::accent());
+                    }
+                }
             }
             // Window-tab sidebar, Warp-style. Painted first so per-pane
             // headers / rings layer on top at the seam.
@@ -2889,11 +2913,18 @@ impl App {
                     // 숫자를 왼쪽 여백에 두면 "몇 번째"까지만 말하지만, 이름 옆의
                     // `⌘1` 은 "이 키로 온다"까지 말한다. 9 까지만 매핑돼 있고, ×
                     // 가 뜨는 동안은 같은 자리라 물러난다.
-                    let kbd = (!show_close && *i < 9).then(|| format!("\u{2318}{}", *i + 1));
+                    // 밖에 나가 있는 방은 그 자리에 ⌘N 대신 나갔다는 표시가 온다 —
+                    // 그 키는 방을 메인에 다시 그리는 게 아니라 별도 창을 앞으로
+                    // 가져오므로(switch_window 라우팅), 키 힌트를 남기면 거짓말이 된다.
+                    let undocked = !show_close && sb_undocked.get(*i).copied().unwrap_or(false);
+                    let kbd =
+                        (!show_close && !undocked && *i < 9).then(|| format!("\u{2318}{}", *i + 1));
                     let kfs = 11.0_f32;
                     let kbd_w = kbd.as_deref().map_or(0.0, |k| g.measure_chrome_text(k, kfs, false));
+                    const UNDOCK_ICON: f32 = 13.0;
+                    let right_slot = if undocked { UNDOCK_ICON } else { kbd_w };
                     let name_budget = (tab_right
-                        - if show_close { 23.0 } else { 8.0 + kbd_w + 6.0 }
+                        - if show_close { 23.0 } else { 8.0 + right_slot + 6.0 }
                         - text_x)
                         .max(0.0);
                     let cwd_budget = (tab_right - 8.0 - text_x).max(0.0);
@@ -2916,6 +2947,15 @@ impl App {
                             *ty + 12.0,
                             &k,
                             gpu::DrawOpts { font_size: kfs, color: theme::text_mute(), bold: false, italic: false },
+                        );
+                    }
+                    if undocked {
+                        g.queue_icon(
+                            "external-link",
+                            tab_right - 8.0 - UNDOCK_ICON,
+                            *ty + 9.0,
+                            UNDOCK_ICON,
+                            theme::accent(),
                         );
                     }
                     if !cwd.is_empty() {
@@ -2987,6 +3027,23 @@ impl App {
                     }
                     if sb_over_after {
                         g.queue_icon("chevron-down", ccx, py + ph + 4.0, cis, theme::text_mute());
+                    }
+                }
+                // 재배치 드래그 중이면 떨어질 자리에 가로 막대. 마지막 탭 아래로
+                // 미는 경우만 끝 모서리에 붙는다(target == 마지막 + 1).
+                if let Some(t) = win_drag_target {
+                    let bar_y = sb_tabs
+                        .iter()
+                        .find(|(i, _)| *i == t)
+                        .map(|(_, r)| r.1 - SIDEBAR_TAB_GAP / 2.0)
+                        .or_else(|| {
+                            sb_tabs
+                                .last()
+                                .filter(|(i, _)| t == i + 1)
+                                .map(|(_, r)| r.1 + r.3 + SIDEBAR_TAB_GAP / 2.0)
+                        });
+                    if let (Some(by), Some((_, fr))) = (bar_y, sb_tabs.first()) {
+                        g.rect(fr.0, by - 1.5, fr.2, 3.0, theme::accent());
                     }
                 }
                 // ── 하단 트레이 ── 새 세션 · 피드백 · 설정. 목록과 얇은 선으로
@@ -4342,6 +4399,7 @@ impl App {
                     g,
                     self.cursor_px,
                     &mut self.info,
+                    &self.closed_panes,
                     git_col_x,
                     git_col_w,
                     body_top,

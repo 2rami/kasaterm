@@ -1575,6 +1575,47 @@ struct TabDrag {
     drop_pane: String,
 }
 
+/// 닫은 pane 하나 — ⌘⇧T 로 되살릴 대상.
+///
+/// 되살리는 데 필요한 것이 세션 복원이 쓰는 레코드와 **똑같아서** 그대로 들고 있는다:
+/// cwd·claude 세션 id·캐릭터·스크롤백이 한 덩어리다. 덕분에 복원은 `restore_leaf`
+/// 재사용이고, claude 였던 pane 은 `--resume` 까지 그 함수가 알아서 처리한다.
+pub(crate) struct ClosedPane {
+    /// `restore_leaf` 가 먹는 레코드(`layout_to_json` 의 leaf 본문).
+    pub(crate) rec: serde_json::Value,
+    /// 닫힌 pane 의 원래 id — 인포 줄에 그대로 뜬다(`%3`).
+    pub(crate) pane_id: String,
+    /// 학생 이름. 없으면 빈 문자열이고 인포는 셸 이름 자리를 비운다.
+    pub(crate) character: String,
+    /// 작업 폴더의 끝 조각 — 어느 일감이었는지 가르는 실제 단서다(경로 전체는 좁은
+    /// 칼럼에서 앞부분만 남고 정작 구분되는 꼬리가 잘린다).
+    pub(crate) folder: String,
+    /// 되살릴 때 이 pane 옆에 꽂는다. 그 사이 사라졌으면 활성 pane 옆.
+    pub(crate) neighbor: Option<String>,
+    /// 닫힌 방. 아직 있으면 그 방으로 돌아간다. 방 재배치를 따라 remap 된다 —
+    /// 안 그러면 되살린 pane 이 남의 방에서 튀어나온다.
+    pub(crate) window: usize,
+}
+
+/// 닫은 pane 을 몇 개까지 들고 있을지. 레코드마다 스크롤백이 통째 붙어 있어
+/// 무한히 쌓으면 닫기만 반복해도 메모리가 는다.
+const CLOSED_PANE_KEEP: usize = 10;
+
+/// State for an in-flight window-tab (방) reorder drag in the sidebar / top
+/// strip. Unlike `TabDrag` the press already switched to the tab — a window
+/// switch is cheap and browser tabs behave that way — so a press that never
+/// passes the threshold leaves nothing for the release to undo.
+struct WinTabDrag {
+    /// Window index grabbed at press time.
+    from: usize,
+    /// Press position in logical px, for the click→drag threshold.
+    start: (f32, f32),
+    /// True once the cursor moved past the threshold.
+    active: bool,
+    /// Insertion slot (0..=windows.len()) the tab would drop into.
+    target: usize,
+}
+
 /// In-flight file-tree → terminal drag. Armed on a press over a tree row;
 /// once the cursor moves past the threshold (`active`), releasing over a
 /// terminal pane types that file's path into the dropped-on shell. A press
@@ -3926,6 +3967,11 @@ struct App {
     win_tab_vis: usize,
     /// Sub-step wheel accumulator for the tab strip (px; one tab per 48).
     win_tab_wheel_accum: f32,
+    /// In-flight window-tab reorder drag; `None` when no tab is being dragged.
+    win_tab_drag: Option<WinTabDrag>,
+    /// 닫은 pane 스택(최근이 뒤). ⌘⇧T 가 뒤에서 꺼내 되살리고, 인포가 흐린 줄로
+    /// 보여 준다 — 되돌릴 수 있다는 걸 알리지 않으면 있으나 마나다.
+    closed_panes: Vec<ClosedPane>,
     /// Sidebar "+" new-window button rect, logical px. None before first paint.
     new_window_btn_rect: Option<(f32, f32, f32, f32)>,
     /// Whether the "+" shell picker popup is open. Toggled by clicking the
@@ -4524,6 +4570,8 @@ impl App {
             win_tab_first: 0,
             win_tab_vis: usize::MAX,
             win_tab_wheel_accum: 0.0,
+            win_tab_drag: None,
+            closed_panes: Vec::new(),
             new_window_btn_rect: None,
             shell_menu_open: false,
             shell_menu_hits: Vec::new(),
@@ -5725,6 +5773,24 @@ pub(crate) fn resolve_initial_cwd() -> Option<String> {
 ///   - `KASATERM_CWD` env (explicit launch override) — first pane / fixed modes.
 ///   - `"home"` → `$HOME`.
 ///   - an absolute or `~`-prefixed path → that directory if it exists.
+/// 방(윈도우) 하나를 `from` 에서 `dst` 로 옮겼을 때 인덱스 `i` 가 가는 새 자리.
+/// `dst` 는 뽑아낸 **뒤** 기준(`Vec::remove` 후 `insert` 자리)이다.
+///
+/// 인덱스가 곧 방의 신원인 상태 — 활성 방, 이름 오버라이드, 알림 마킹 — 를 전부
+/// 이 하나로 통과시킨다. 자리마다 손으로 옮기면 한 군데만 어긋나도 이름이 남의
+/// 방에 붙는 식으로 조용히 틀어지므로, 규칙을 한 곳에 두고 테스트로 못박았다.
+pub(crate) fn remap_window_index(i: usize, from: usize, dst: usize) -> usize {
+    if i == from {
+        dst
+    } else if from < dst && i > from && i <= dst {
+        i - 1
+    } else if from > dst && i >= dst && i < from {
+        i + 1
+    } else {
+        i
+    }
+}
+
 /// Anything unresolved falls through to home, then the process cwd.
 pub(crate) fn resolve_spawn_cwd(prev: Option<std::path::PathBuf>) -> Option<String> {
     let mode = socket::read_default_cwd_mode();
@@ -6132,6 +6198,36 @@ mod tests {
 
     fn ms(t: Instant, n: u64) -> Instant {
         t + Duration::from_millis(n)
+    }
+
+    #[test]
+    fn window_reorder_remap_matches_the_actual_move() {
+        // 2번 방을 3번 자리로 끌면 잡은 방이 3으로 가고, 밀려난 3이 2로 당겨온다.
+        assert_eq!(remap_window_index(2, 2, 3), 3);
+        assert_eq!(remap_window_index(3, 2, 3), 2);
+        assert_eq!(remap_window_index(0, 2, 3), 0);
+        assert_eq!(remap_window_index(4, 2, 3), 4);
+        // 뒤에서 앞으로 끌면 사이에 낀 방들이 한 칸씩 뒤로 밀린다.
+        assert_eq!(remap_window_index(3, 3, 1), 1);
+        assert_eq!(remap_window_index(1, 3, 1), 2);
+        assert_eq!(remap_window_index(2, 3, 1), 3);
+        // remap 이 말하는 자리와 벡터를 실제로 옮긴 결과가 어긋나면, 방 이름과
+        // 알림이 남의 방에 붙는다 — 눈에 잘 안 띄는 종류라 전수로 못박는다.
+        for n in 1..7usize {
+            for from in 0..n {
+                for dst in 0..n {
+                    let mut moved: Vec<usize> = (0..n).collect();
+                    let grabbed = moved.remove(from);
+                    moved.insert(dst, grabbed);
+                    for i in 0..n {
+                        assert_eq!(
+                            moved[remap_window_index(i, from, dst)], i,
+                            "n={n} from={from} dst={dst} i={i}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn spans_of(src: &str) -> Vec<(String, Option<String>)> {

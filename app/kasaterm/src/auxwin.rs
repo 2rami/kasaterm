@@ -30,6 +30,17 @@ pub(crate) enum AuxWindowKind {
     /// 빼고 pty·ws.panes 는 유지). 렌더는 `aux_terminal_render`, 이벤트는
     /// `aux_terminal_event` 로 위임(Settings 가 paint_settings 를 재사용하는 것과 동형).
     Terminal { pane_id: String },
+    /// 방(윈도우) 하나를 통째로 별도 OS 창으로 분리. `Terminal` 이 pane 하나를 보듯
+    /// 이건 그 방의 **BSP 트리 전체**를 본다 — pane 여러 개가 자기 자리에 그려진다.
+    ///
+    /// 트리를 들고 오지 않고 `App.windows[window]` 에 그대로 둔 채 인덱스로 참조한다.
+    /// 그래서 되돌리기가 `switch_window(window)` 한 줄이고, info 방 그룹핑과 세션
+    /// 저장이 손대지 않아도 맞는다. 대가는 방 재배치 때 인덱스가 흔들리는 것인데,
+    /// 그건 `reorder_window` 의 remap 이 이 필드까지 통과시켜 막는다.
+    ///
+    /// `focus` 는 이 창 안에서 키 입력을 받을 pane. `term_pane_id()` 가 이걸 내주므로
+    /// 키·휠·IME 경로는 `Terminal` 것을 그대로 쓴다.
+    Room { window: usize, focus: Option<String> },
 }
 
 /// 편집기 창의 OS 타이틀 — 파일명(+ dirty ●). doc.path 는 String 이라 Path 로 감싼다.
@@ -66,6 +77,10 @@ pub(crate) struct AuxWindow {
     /// 헤드리스 캡처 (deadline, png 경로). 메인 `pending_capture` 의 aux 판 — 자동캡처가
     /// 메인 창만 찍으므로 별도창은 자기 gpu 로 따로 readback 한다.
     pub(crate) pending_capture: Option<(Instant, String)>,
+    /// 렌더 뷰(마크다운) 본문 높이. raw 편집기는 줄 수 × 줄높이로 미리 알 수 있지만
+    /// 렌더 뷰는 **그려 봐야** 안다(`draw_markdown` 의 반환값) — 휠 clamp 가 한 프레임
+    /// 전 값을 쓰는 건 그래서다. 0 이면 아직 안 그렸다는 뜻이라 clamp 를 걸지 않는다.
+    pub(crate) md_content_h: f32,
     /// `window` 는 맨 뒤 — `gpu` 보다 나중에 드롭돼 surface 가 살아있는 창을 참조한다.
     pub(crate) window: Arc<Window>,
 }
@@ -74,19 +89,32 @@ impl AuxWindow {
     pub(crate) fn editor(&self) -> Option<&MarkdownPane> {
         match &self.kind {
             AuxWindowKind::Editor(m) => Some(m),
-            AuxWindowKind::Settings | AuxWindowKind::Terminal { .. } => None,
+            AuxWindowKind::Settings
+            | AuxWindowKind::Terminal { .. }
+            | AuxWindowKind::Room { .. } => None,
         }
     }
     pub(crate) fn editor_mut(&mut self) -> Option<&mut MarkdownPane> {
         match &mut self.kind {
             AuxWindowKind::Editor(m) => Some(m),
-            AuxWindowKind::Settings | AuxWindowKind::Terminal { .. } => None,
+            AuxWindowKind::Settings
+            | AuxWindowKind::Terminal { .. }
+            | AuxWindowKind::Room { .. } => None,
         }
     }
-    /// 터미널 창이 뷰하는 pane id. 그 외 종류는 None.
+    /// 키 입력이 갈 pane id. 터미널 창은 그 pane, 방 창은 지금 포커스된 pane.
+    /// 둘을 한 값으로 내주는 덕에 키·휠·IME 라우팅이 한 벌로 끝난다.
     fn term_pane_id(&self) -> Option<&str> {
         match &self.kind {
             AuxWindowKind::Terminal { pane_id } => Some(pane_id.as_str()),
+            AuxWindowKind::Room { focus, .. } => focus.as_deref(),
+            _ => None,
+        }
+    }
+    /// 이 창이 통째로 들고 있는 방 인덱스(방 창일 때만).
+    pub(crate) fn room_window(&self) -> Option<usize> {
+        match &self.kind {
+            AuxWindowKind::Room { window, .. } => Some(*window),
             _ => None,
         }
     }
@@ -104,6 +132,8 @@ impl AuxWindow {
             // v1 은 pane id — 프로세스명(vim/claude…) 인레이는 App 만 알아 aux_render 가
             // 더 나은 라벨로 덮어쓸 수 있다(현재는 id 그대로).
             AuxWindowKind::Terminal { pane_id } => pane_id.clone(),
+            // 방 이름(window_labels)은 App 만 알아 `aux_room_render` 가 덮어쓴다.
+            AuxWindowKind::Room { window, .. } => format!("방 {}", window + 1),
         }
     }
     /// 한 프레임 렌더. 자체 gpu 로 배경 + `draw_raw_editor` 를 그리고 present.
@@ -152,10 +182,12 @@ impl AuxWindow {
                     &[],
                 );
             }
-            // Settings/Terminal 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
-            // `aux_render_settings`/`aux_terminal_render` 가 직접 페인트한다 — 이
-            // 편집기 전용 render 로는 오지 않는다.
-            AuxWindowKind::Settings | AuxWindowKind::Terminal { .. } => {}
+            // Settings/Terminal/Room 창은 App 스냅샷(설정 상태·ws 셀 그리드)이 필요해
+            // `aux_render_settings`/`aux_terminal_render`/`aux_room_render` 가 직접
+            // 페인트한다 — 이 편집기 전용 render 로는 오지 않는다.
+            AuxWindowKind::Settings
+            | AuxWindowKind::Terminal { .. }
+            | AuxWindowKind::Room { .. } => {}
         }
         let _ = self.gpu.render(&[], scale, 0.0, true);
     }
@@ -176,7 +208,9 @@ impl AuxWindow {
                     .unwrap_or_default();
                 ((*m.edit_lines).clone(), line, prefix, m.scroll, m.h_scroll)
             }
-            AuxWindowKind::Settings | AuxWindowKind::Terminal { .. } => return,
+            AuxWindowKind::Settings
+            | AuxWindowKind::Terminal { .. }
+            | AuxWindowKind::Room { .. } => return,
         };
         let (lines, cur_line, prefix, scroll, h_scroll) = snap;
         let line_count = lines.len();
@@ -420,6 +454,13 @@ impl App {
             self.aux_terminal_render(idx, blink);
             return;
         }
+        if matches!(
+            self.aux_windows.get(idx).map(|a| &a.kind),
+            Some(AuxWindowKind::Room { .. })
+        ) {
+            self.aux_room_render(idx, blink);
+            return;
+        }
         let Some(a) = self.aux_windows.get_mut(idx) else { return };
         let on = a.focused && blink;
         a.render(on);
@@ -477,6 +518,13 @@ impl App {
             Some(AuxWindowKind::Terminal { .. })
         ) {
             self.aux_terminal_event(idx, event, event_loop);
+            return;
+        }
+        if matches!(
+            self.aux_windows.get(idx).map(|a| &a.kind),
+            Some(AuxWindowKind::Room { .. })
+        ) {
+            self.aux_room_event(idx, event, event_loop);
             return;
         }
         match event {
@@ -1245,6 +1293,132 @@ impl App {
         a.dirty = false;
     }
 
+    /// 이 방이 지금 별도 창으로 나가 있나. 사이드바 탭 표시와 info 배지가 같은
+    /// 판정을 쓰도록 한 곳에 둔다.
+    pub(crate) fn window_is_undocked(&self, window: usize) -> bool {
+        self.aux_windows.iter().any(|a| a.room_window() == Some(window))
+    }
+
+    /// 방 창이 그릴 leaf rect(셀 단위). 창 client 를 셀수로 환산해 그 방 트리를 편다.
+    ///
+    /// 꺼낸 방은 활성이 아니어서 트리가 `windows[i]` 에 있지만, 활성일 때도 되도록
+    /// `pty_layout` 을 함께 본다 — 활성 판정이 한 틱 어긋나도 빈 창이 되지 않는다.
+    pub(crate) fn room_leaf_rects(&self, idx: usize) -> Vec<(String, u16, u16, u16, u16)> {
+        let Some(a) = self.aux_windows.get(idx) else { return Vec::new() };
+        let Some(window) = a.room_window() else { return Vec::new() };
+        let (w, h) = a.logical_size();
+        let (cw, ch) = (a.gpu.cell_w, a.gpu.cell_h);
+        if cw <= 0.0 || ch <= 0.0 {
+            return Vec::new();
+        }
+        let cols = (((w - PANE_INNER_X * 2.0) / cw).floor() as i32).max(1) as u16;
+        let rows = (((h - PANE_INNER_Y * 2.0) / ch).floor() as i32).max(1) as u16;
+        let layout = if window == self.active_window {
+            self.pty_layout.as_ref()
+        } else {
+            self.windows.get(window).and_then(|s| s.as_ref())
+        };
+        layout.map(|l| l.leaf_rects(cols, rows)).unwrap_or_default()
+    }
+
+    /// 방 별도창 한 프레임 — 트리를 `leaf_rects` 로 펼쳐 pane 마다 셀 그리드를 그린다.
+    /// `draw_cells` 가 슬라이스를 받으므로 pane 이 몇이든 한 번에 올라간다. 포커스
+    /// pane 만 또렷하고(나머지 dim) 커서도 거기만 — 메인 창의 관례 그대로다.
+    fn aux_room_render(&mut self, idx: usize, blink: bool) {
+        let (window, focus, scale, w, h, focused, cw, ch) = {
+            let Some(a) = self.aux_windows.get(idx) else { return };
+            let AuxWindowKind::Room { window, focus } = &a.kind else { return };
+            let (w, h) = a.logical_size();
+            (*window, focus.clone(), a.gpu.scale(), w, h, a.focused, a.gpu.cell_w, a.gpu.cell_h)
+        };
+        let rects = self.room_leaf_rects(idx);
+        // 방 이름은 App 만 안다 — title() 이 붙인 「방 N」을 실제 라벨로 승격.
+        let label = self
+            .window_labels
+            .get(window)
+            .map(|(n, _)| n.clone())
+            .filter(|n| !n.is_empty());
+        // 셀은 draw 전에 복사해 둔다 — 그리는 동안 ws lock 을 쥐지 않기 위해서.
+        let snaps: Vec<_> = {
+            let ws = self.ws.lock().unwrap();
+            rects
+                .iter()
+                .filter_map(|(pid, x, y, _, _)| {
+                    ws.panes.get(pid).and_then(|p| {
+                        p.term().map(|t| {
+                            (
+                                pid.clone(),
+                                t.cells.clone(),
+                                *x,
+                                *y,
+                                t.cursor_row,
+                                t.cursor_col,
+                                t.cursor_visible,
+                            )
+                        })
+                    })
+                })
+                .collect()
+        };
+        let Some(a) = self.aux_windows.get_mut(idx) else { return };
+        if let Some(name) = label {
+            if a.last_title != name {
+                a.window.set_title(&name);
+                a.last_title = name;
+            }
+        }
+        a.gpu.clear_chrome();
+        a.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
+        let slots: Vec<gpu::PaneSlot> = snaps
+            .iter()
+            .map(|(pid, cells, x, y, _, _, _)| gpu::PaneSlot {
+                rows: cells,
+                // origin_px 는 물리 px(draw_cells 규약) — 셀 좌표를 논리 px 로 편 뒤 스케일.
+                origin_px: (
+                    (PANE_INNER_X + *x as f32 * cw) * scale,
+                    (PANE_INNER_Y + *y as f32 * ch) * scale,
+                ),
+                font_scale: 1.0,
+                dim: focus.as_deref() != Some(pid.as_str()),
+                links: Vec::new(),
+                default_fg: crate::cells::default_fg(),
+            })
+            .collect();
+        a.gpu.draw_cells(&slots);
+        // pane 경계 — 나눠져 있다는 걸 보이게. 포커스만 accent 테두리.
+        for (pid, x, y, pw, ph) in &rects {
+            let rx = PANE_INNER_X + *x as f32 * cw;
+            let ry = PANE_INNER_Y + *y as f32 * ch;
+            let (rw, rh) = (*pw as f32 * cw, *ph as f32 * ch);
+            let is_focus = focus.as_deref() == Some(pid.as_str());
+            let col = if is_focus { crate::theme::accent() } else { crate::theme::border() };
+            a.gpu.rect(rx, ry, rw, 1.0, col);
+            a.gpu.rect(rx, ry + rh - 1.0, rw, 1.0, col);
+            a.gpu.rect(rx, ry, 1.0, rh, col);
+            a.gpu.rect(rx + rw - 1.0, ry, 1.0, rh, col);
+        }
+        // 커서/프리에딧은 포커스 pane 자리에만.
+        if let Some((_, _, x, y, cur_row, cur_col, cur_vis)) = snaps
+            .iter()
+            .find(|(pid, ..)| focus.as_deref() == Some(pid.as_str()))
+        {
+            let px = PANE_INNER_X + (*x as f32 + *cur_col as f32) * cw;
+            let py = PANE_INNER_Y + (*y as f32 + *cur_row as f32) * ch;
+            let pe = a.preedit.clone();
+            if pe.is_empty() {
+                if *cur_vis && focused && blink {
+                    let mut c = crate::cells::iterm_cursor();
+                    c[3] = 140;
+                    a.gpu.rect(px, py, cw, ch, c);
+                }
+            } else {
+                a.gpu.draw_preedit(px, py, &pe, crate::cells::iterm_cursor(), 1.0);
+            }
+        }
+        let _ = a.gpu.render(&[], scale, 0.0, true);
+        a.dirty = false;
+    }
+
     /// 이 창이 뷰하는 pane 의 PTY 로 바이트 전송(빈 입력 무시).
     fn aux_term_send(&self, pane_id: &str, bytes: &[u8]) {
         if bytes.is_empty() {
@@ -1339,9 +1513,13 @@ impl App {
             None => return,
         };
         self.ime_retarget(crate::ImeFocus::Pane(pane_id.clone()));
-        // Cmd/Ctrl+W: 이 창 닫기 → dock 복귀(pane 을 메인 레이아웃으로 되돌림).
+        // Cmd/Ctrl+W: 이 창 닫기 → dock 복귀. 방 창이면 방을, 아니면 pane 을 되돌린다.
         if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) {
-            self.dock_pane_terminal(idx);
+            if self.aux_windows.get(idx).and_then(|a| a.room_window()).is_some() {
+                self.dock_window_room(idx);
+            } else {
+                self.dock_pane_terminal(idx);
+            }
             return;
         }
         // macOS in-process 한글 조합: 자모(U+3130..318F)면 completer 로, 완성 음절만 PTY.
@@ -1579,6 +1757,236 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
+    }
+
+    /// 방 별도창 이벤트. 키·휠·IME 는 터미널 창 경로를 그대로 쓴다 — `term_pane_id`
+    /// 가 포커스 pane 을 내주므로 한 벌로 충분하다. 다른 건 셋뿐이다: 닫기는 방을
+    /// 메인으로 되돌리고, 리사이즈는 leaf 마다 PTY 를 다시 재고, 클릭은 포커스를 옮긴다.
+    fn aux_room_event(&mut self, idx: usize, event: WindowEvent, event_loop: &ActiveEventLoop) {
+        let _ = event_loop;
+        match event {
+            WindowEvent::CloseRequested => self.dock_window_room(idx),
+            WindowEvent::Resized(size) => {
+                if let Some(a) = self.aux_windows.get_mut(idx) {
+                    a.gpu.resize(size.width, size.height);
+                    a.dirty = true;
+                    a.window.request_redraw();
+                }
+                self.aux_room_resize_pty(idx);
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(a) = self.aux_windows.get_mut(idx) {
+                    let sf = a.window.scale_factor() as f32;
+                    a.gpu.set_scale(sf);
+                    a.gpu.set_font_size(FONT_SIZE);
+                    let sz = a.window.inner_size();
+                    a.gpu.resize(sz.width, sz.height);
+                    a.dirty = true;
+                    a.window.request_redraw();
+                }
+                self.aux_room_resize_pty(idx);
+            }
+            WindowEvent::Focused(f) => {
+                if let Some(a) = self.aux_windows.get_mut(idx) {
+                    a.focused = f;
+                    a.window.request_redraw();
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
+                if let Some(a) = self.aux_windows.get_mut(idx) {
+                    a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => self.aux_room_click(idx),
+            WindowEvent::MouseWheel { delta, .. } => self.aux_terminal_wheel(idx, delta),
+            WindowEvent::KeyboardInput { event, .. } => self.aux_terminal_key(idx, &event),
+            WindowEvent::Ime(ime) => self.aux_terminal_ime(idx, ime),
+            WindowEvent::RedrawRequested => self.aux_render(idx),
+            _ => {}
+        }
+    }
+
+    /// 방 창 크기 변화 → leaf 마다 제 몫으로 PTY resize. 메인 `resize_backend` 가 하는
+    /// 일을 이 창의 셀 메트릭 기준으로 한 것.
+    fn aux_room_resize_pty(&mut self, idx: usize) {
+        for (pid, _, _, w, h) in self.room_leaf_rects(idx) {
+            if let Some(pty) = self.pty.get(&pid) {
+                let _ = pty.resize(w.max(1), h.max(1));
+            }
+        }
+    }
+
+    /// 방 창 클릭 → 커서 아래 pane 으로 포커스 이동(키 입력이 그리로 간다).
+    fn aux_room_click(&mut self, idx: usize) {
+        let (cx, cy, cw, ch) = {
+            let Some(a) = self.aux_windows.get(idx) else { return };
+            (a.cursor_px.0, a.cursor_px.1, a.gpu.cell_w, a.gpu.cell_h)
+        };
+        if cw <= 0.0 || ch <= 0.0 {
+            return;
+        }
+        let hit = self.room_leaf_rects(idx).into_iter().find(|(_, x, y, w, h)| {
+            let rx = PANE_INNER_X + *x as f32 * cw;
+            let ry = PANE_INNER_Y + *y as f32 * ch;
+            cx >= rx && cx < rx + *w as f32 * cw && cy >= ry && cy < ry + *h as f32 * ch
+        });
+        let Some((pid, ..)) = hit else { return };
+        if let Some(a) = self.aux_windows.get_mut(idx) {
+            if let AuxWindowKind::Room { focus, .. } = &mut a.kind {
+                if focus.as_deref() == Some(pid.as_str()) {
+                    return;
+                }
+                *focus = Some(pid);
+            }
+        }
+        self.aux_redraw(idx);
+    }
+
+    /// 방(윈도우) 하나를 통째로 별도 창으로 꺼낸다 — 탭을 창 밖에 놓았을 때.
+    ///
+    /// 꺼낼 방은 드래그 press 가 이미 활성으로 만들어 뒀고, 활성 방의 트리는 슬롯이
+    /// 아니라 `pty_layout` 에 얹혀 있다. 그래서 먼저 제자리에 park 하고 메인이 볼
+    /// 다른 방으로 활성을 옮긴 뒤 창을 띄운다. **방이 하나뿐이면 거부** — 꺼내고 나면
+    /// 메인 창이 빈 채로 남는다.
+    pub(crate) fn undock_window_room(
+        &mut self,
+        window: usize,
+        event_loop: &ActiveEventLoop,
+        near: Option<winit::dpi::PhysicalPosition<i32>>,
+    ) {
+        if let Some(i) = self.aux_windows.iter().position(|a| a.room_window() == Some(window)) {
+            self.aux_windows[i].window.focus_window();
+            return;
+        }
+        if self.tmux.is_some() || window >= self.windows.len() || self.windows.len() < 2 {
+            return;
+        }
+        self.windows[self.active_window] = self.pty_layout.take();
+        if self.active_window == window {
+            self.active_window = if window + 1 < self.windows.len() {
+                window + 1
+            } else {
+                window - 1
+            };
+        }
+        self.pty_layout = self.windows[self.active_window].take();
+        self.window_alert.remove(&self.active_window);
+        let focus = self
+            .windows
+            .get(window)
+            .and_then(|s| s.as_ref())
+            .and_then(|l| l.leaves().first().map(|s| s.to_string()));
+        // 메인의 활성 pane 이 꺼낸 방 소속이면 남은 방의 것으로 옮긴다 — 안 그러면
+        // 화면에 없는 pane 이 선택된 채로 키 입력이 별도 창 pane 에 꽂힌다.
+        let leaves: Vec<String> = self
+            .pty_layout
+            .as_ref()
+            .map(|l| l.leaves().iter().map(|s| s.to_string()).collect())
+            .unwrap_or_default();
+        {
+            let mut ws = self.ws.lock().unwrap();
+            let stale = ws.active_pane.as_ref().map(|p| !leaves.contains(p)).unwrap_or(true);
+            if stale {
+                ws.active_pane = leaves.first().cloned();
+            }
+            for pane in ws.panes.values_mut() {
+                pane.dirty = true;
+            }
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        self.publish_pty_layout();
+        self.window_labels_at = None;
+        self.session_touched = true;
+        self.chrome_dirty = true;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        self.spawn_aux_room(window, focus, event_loop, near);
+    }
+
+    /// 방 별도창을 닫으며 그 방을 메인으로 되돌린다. 트리는 처음부터 `windows` 에
+    /// 그대로 있었으므로 창을 없애고 그 방으로 전환하면 끝이다 — 재삽입이 없다.
+    /// (`switch_window` 는 밖에 나간 방이면 창을 앞으로 보내므로, 반드시 창을 먼저
+    /// 없애고 전환한다.)
+    pub(crate) fn dock_window_room(&mut self, idx: usize) {
+        let window = self.aux_windows.get(idx).and_then(|a| a.room_window());
+        self.close_aux_window(idx);
+        let Some(w) = window else { return };
+        if w < self.windows.len() {
+            self.switch_window(w);
+        }
+        self.session_touched = true;
+        self.chrome_dirty = true;
+        if let Some(win) = &self.window {
+            win.request_redraw();
+        }
+    }
+
+    /// 방 별도창 스폰. `spawn_aux_terminal` 과 같은 얼개지만 pane 이 여럿이라 기본
+    /// 크기가 더 크다.
+    fn spawn_aux_room(
+        &mut self,
+        window: usize,
+        focus: Option<String>,
+        event_loop: &ActiveEventLoop,
+        near: Option<winit::dpi::PhysicalPosition<i32>>,
+    ) -> Option<usize> {
+        let title = self
+            .window_labels
+            .get(window)
+            .map(|(n, _)| n.clone())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| format!("방 {}", window + 1));
+        let mut attrs = WindowAttributes::default()
+            .with_title(title.clone())
+            .with_theme(Some(Theme::Dark))
+            .with_inner_size(LogicalSize::new(1000.0, 660.0));
+        if let Some(pos) = near {
+            attrs = attrs.with_position(pos);
+        }
+        let window_handle = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("[auxwin] room window create failed: {e}");
+                return None;
+            }
+        };
+        #[cfg(target_os = "macos")]
+        window_handle.set_ime_allowed(false);
+        #[cfg(not(target_os = "macos"))]
+        window_handle.set_ime_allowed(true);
+        let gpu = match gpu::GpuRenderer::new(window_handle.clone(), FONT_SIZE) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("[auxwin] room gpu init failed: {e}");
+                return None;
+            }
+        };
+        self.aux_windows.push(AuxWindow {
+            gpu,
+            kind: AuxWindowKind::Room { window, focus },
+            dirty: true,
+            cursor_px: (0.0, 0.0),
+            selecting: false,
+            focused: true,
+            preedit: String::new(),
+            last_title: title,
+            pending_capture: None,
+            md_content_h: 0.0,
+            window: window_handle,
+        });
+        let idx = self.aux_windows.len() - 1;
+        eprintln!("[auxwin] opened room window #{idx} for window {window}");
+        // 창 크기에 맞춰 leaf 마다 PTY 를 즉시 재운다(셸이 SIGWINCH 로 리플로우).
+        self.aux_room_resize_pty(idx);
+        self.aux_redraw(idx);
+        Some(idx)
     }
 }
 

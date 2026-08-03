@@ -966,6 +966,15 @@ impl App {
             .map(|(i, _)| *i)
         {
             self.switch_window(idx);
+            // 전환은 누르는 즉시(브라우저 탭과 같다 — 방 전환은 트리 스왑이라
+            // 싸다), 재배치는 여기서 장전만. 문턱을 못 넘으면 release 가 그냥
+            // 버리므로 평범한 클릭의 감각은 그대로다.
+            self.win_tab_drag = Some(WinTabDrag {
+                from: idx,
+                start: (cx, cy),
+                active: false,
+                target: idx,
+            });
             return true;
         }
         if self.new_window_btn_rect.map(|r| inside(&r)).unwrap_or(false) {

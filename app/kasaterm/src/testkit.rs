@@ -277,6 +277,252 @@ impl App {
             }),
         );
     }
+    /// Headless 방 재배치 repro: `KASATERM_AUTOWINREORDER_MS` 뒤에 방 셋을 만들어
+    /// 이름·알림을 심고, 가운데 탭을 **실제 hit-test 경로**(`window_strip_click`)로
+    /// 잡아 맨 뒤로 끌어 놓는다.
+    ///
+    /// 여기서 깨지기 쉬운 건 순서가 아니라 신원이다 — 활성 방의 트리는 슬롯이 아니라
+    /// `pty_layout` 에 얹혀 있고, 이름·알림은 인덱스가 키다. 그래서 옮기기 전후로 각
+    /// 방의 leaf 수와 이름을 같이 찍는다. leaf 가 0 이면 그 방의 내용이 증발한
+    /// 것이고, 이름이 어긋나면 남의 이름을 단 것이다 — 캡처로는 둘 다 멀쩡해 보인다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autowinreorder(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOWINREORDER_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let dump = |app: &App, tag: &str| {
+            let rows: Vec<String> = (0..app.windows.len())
+                .map(|i| {
+                    let layout = if i == app.active_window {
+                        app.pty_layout.as_ref()
+                    } else {
+                        app.windows[i].as_ref()
+                    };
+                    format!(
+                        "{i}{}:{} leaves={}{}{}",
+                        if i == app.active_window { "*" } else { "" },
+                        app.window_name_override.get(&i).map(|s| s.as_str()).unwrap_or("-"),
+                        layout.map(|l| l.leaves().len()).unwrap_or(0),
+                        if app.window_alert.contains(&i) { " alert" } else { "" },
+                        if app.window_is_undocked(i) { " 밖" } else { "" },
+                    )
+                })
+                .collect();
+            eprintln!("[autowinreorder] {tag}: {}", rows.join(" | "));
+        };
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        while self.windows.len() < 3 {
+            self.new_window();
+        }
+        for (i, name) in ["A", "B", "C"].iter().enumerate() {
+            self.window_name_override.insert(i, name.to_string());
+        }
+        // 알림은 안 잡을 방(2번)에 건다 — 잡은 방은 press 가 전환하면서 지운다.
+        self.window_alert.insert(2);
+        self.window_labels_at = None;
+        self.render_frame();
+        dump(self, "before");
+        let Some((_, r)) = self.window_tab_rects.get(1).copied() else {
+            eprintln!("[autowinreorder] 탭 rect 없음 — 사이드바 창 탭이 안 그려졌다");
+            return;
+        };
+        let handled = self.window_strip_click(r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+        let armed = self.win_tab_drag.as_ref().map(|d| d.from);
+        // 마지막 탭 아래까지 끌었다고 친다(문턱 통과 + 삽입 슬롯 = 방 개수).
+        let end = self.windows.len();
+        if let Some(d) = self.win_tab_drag.as_mut() {
+            d.active = true;
+            d.target = end;
+        }
+        // HOLD 면 놓지 않고 잡은 채로 둔다 — `AUTOCAPTURE_MS` 를 뒤에 붙여 삽입선이
+        // 그려지는 프레임을 잡기 위한 것(놓고 나면 선은 사라져 캡처할 수 없다).
+        if std::env::var("KASATERM_AUTOWINREORDER_HOLD").is_ok() {
+            self.chrome_dirty = true;
+            eprintln!("[autowinreorder] hold — 잡은 채로 유지, 삽입선 프레임 대기");
+            return;
+        }
+        if let Some(d) = self.win_tab_drag.take() {
+            self.reorder_window(d.from, d.target);
+        }
+        self.refresh_window_labels();
+        eprintln!("[autowinreorder] press handled={handled} armed_from={armed:?} target={end}");
+        dump(self, "after ");
+        eprintln!(
+            "[autowinreorder] 기대: A,C,B / 잡은 B 가 활성인 채 맨 뒤 / alert 는 C 를 따라 1번 / 모든 leaves>0"
+        );
+    }
+    /// Headless 닫기→되살리기 repro: `KASATERM_AUTOCLOSEREOPEN_MS` 뒤에 pane 을 쪼갠 뒤
+    /// 하나를 닫고, 되살리기 스택에 남았는지 찍고, 다시 되살린다.
+    ///
+    /// "새 셸이 하나 뜬다"로는 되살렸는지 알 수 없다 — 원래 자리·cwd·대화를 되찾아야
+    /// 되살린 것이다. 그래서 닫기 전후 leaf 목록과 스택 내용(어느 pane·어느 폴더)을 같이
+    /// 찍는다. `_HOLD=1` 이면 되살리지 않고 멈춘다(인포의 대기 줄을 캡처하기 위한 것).
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autoclosereopen(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOCLOSEREOPEN_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let leaves = |app: &App| -> Vec<String> {
+            app.pty_layout
+                .as_ref()
+                .map(|l| l.leaves().iter().map(|s| s.to_string()).collect())
+                .unwrap_or_default()
+        };
+        let stack = |app: &App| -> Vec<String> {
+            app.closed_panes
+                .iter()
+                .map(|c| format!("{}({})", c.pane_id, c.folder))
+                .collect()
+        };
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        self.render_frame();
+        let before = leaves(self);
+        let Some(victim) = before.last().cloned() else { return };
+        eprintln!("[autoclosereopen] before: leaves={before:?}");
+        self.close_pane(&victim);
+        self.render_frame();
+        eprintln!(
+            "[autoclosereopen] {victim} 닫음 → leaves={:?} 스택={:?}",
+            leaves(self),
+            stack(self)
+        );
+        if std::env::var("KASATERM_AUTOCLOSEREOPEN_HOLD").is_ok() {
+            eprintln!("[autoclosereopen] hold — 인포의 대기 줄 캡처 대기");
+            return;
+        }
+        self.reopen_closed_pane();
+        self.render_frame();
+        eprintln!(
+            "[autoclosereopen] 되살린 뒤: leaves={:?} 스택={:?}",
+            leaves(self),
+            stack(self)
+        );
+        eprintln!(
+            "[autoclosereopen] 기대: 닫으면 leaf 하나 줄고 스택에 남고 · 되살리면 leaf 수가 돌아오고 스택은 빈다"
+        );
+    }
+
+    /// Headless 방 꺼내기 repro: `KASATERM_AUTOWINUNDOCK_MS` 뒤에 방 둘을 만들어
+    /// 하나를 pane 셋짜리로 쪼갠 다음, 그 방을 통째로 별도 창으로 꺼낸다.
+    ///
+    /// 확인할 건 "창이 떴다"가 아니라 **아무것도 잃지 않았나**다. 트리를 옮기지 않는
+    /// 설계라 방 목록은 줄지 않아야 하고, 메인은 남은 방으로 옮겨가야 하고, 꺼낸 방의
+    /// leaf 셋이 별도 창에서 rect 셋으로 서야 한다. 하나라도 어긋나면 캡처는 멀쩡해
+    /// 보이는데 pane 이 조용히 사라진 상태다 — 그래서 숫자로 찍는다.
+    /// `_DOCK=1` 이면 곧바로 되돌려 방이 메인으로 무사히 돌아오는지까지 본다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autowinundock(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOWINUNDOCK_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        let dump = |app: &App, tag: &str| {
+            let rooms: Vec<String> = (0..app.windows.len())
+                .map(|i| {
+                    let layout = if i == app.active_window {
+                        app.pty_layout.as_ref()
+                    } else {
+                        app.windows[i].as_ref()
+                    };
+                    format!(
+                        "{i}{}: leaves={}{}",
+                        if i == app.active_window { "*" } else { "" },
+                        layout.map(|l| l.leaves().len()).unwrap_or(0),
+                        if app.window_is_undocked(i) { " 밖" } else { "" },
+                    )
+                })
+                .collect();
+            eprintln!(
+                "[autowinundock] {tag}: windows={} aux={} | {}",
+                app.windows.len(),
+                app.aux_windows.len(),
+                rooms.join(" | ")
+            );
+        };
+        if !self.sidebar_visible {
+            self.toggle_sidebar();
+        }
+        while self.windows.len() < 2 {
+            self.new_window();
+        }
+        // 꺼낼 방을 pane 셋으로 — 한 개짜리로는 "pane 들이 제 자리에 선다"를 못 본다.
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+        let _ = self.split_active_pane(kasa_pty::SplitDir::Vertical);
+        self.window_labels_at = None;
+        self.render_frame();
+        let target = self.active_window;
+        let before = self.pty_layout.as_ref().map(|l| l.leaves().len()).unwrap_or(0);
+        dump(self, "before");
+        self.undock_window_room(target, event_loop, None);
+        dump(self, "after ");
+        let aux_idx = self.aux_windows.iter().position(|a| a.room_window() == Some(target));
+        let rects = aux_idx.map(|i| self.room_leaf_rects(i)).unwrap_or_default();
+        eprintln!(
+            "[autowinundock] 방 {target}: 꺼내기 전 leaf={before} → 별도 창 rect={} {:?}",
+            rects.len(),
+            rects
+                .iter()
+                .map(|(p, x, y, w, h)| format!("{p}@{x},{y} {w}x{h}"))
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "[autowinundock] 기대: windows 그대로 · 활성은 남은 방 · 꺼낸 방에 「밖」 · rect 수 = 꺼내기 전 leaf 수"
+        );
+        if std::env::var("KASATERM_AUTOWINUNDOCK_DOCK").is_ok() {
+            if let Some(i) = aux_idx {
+                self.dock_window_room(i);
+            }
+            self.render_frame();
+            dump(self, "docked");
+            eprintln!("[autowinundock] 기대(되돌린 뒤): aux=0 · 그 방이 다시 활성 · leaves 그대로");
+            return;
+        }
+        let cap = std::env::var("KASATERM_AUTOWINUNDOCK_CAP").unwrap_or_else(|_| {
+            std::env::temp_dir().join("undock-room.png").to_string_lossy().into_owned()
+        });
+        if let Some(a) = aux_idx.and_then(|i| self.aux_windows.get_mut(i)) {
+            a.pending_capture =
+                Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
+        }
+    }
+
     /// 상단바 토글 프로브. `KASATERM_AUTOHEADER_MS` 뒤에 활성 pane 의 헤더 띠를
     /// 켜고, PTY 행 수가 실제로 줄었는지 찍는다.
     ///
@@ -746,6 +992,29 @@ impl App {
         // 버퍼를 직접 심어 wrap·캐럿·활성 버튼을 캡처로 본다.
         // KASATERM_AUTOFEEDBACK_SAVE=1 이면 저장까지 눌러, 캡처엔 비워진 폼과
         // 토스트가 남는다(파일이 실제로 떨어졌는지는 폴더로 확인).
+        // 한글 조합 검증: KASATERM_AUTOSETTINGS_TYPE 의 자모를 계정 이름 필드에
+        // 한 글자씩 먹여, 조합기가 완성 음절을 만드는지 낱자로 흘리는지 찍는다.
+        // 실제 IME 없이 재현할 수 있는 건 macOS 가 OS IME 를 끄고 자모를 그대로
+        // 받기 때문 — 그 경로가 곧 거노가 치는 경로다.
+        if let Ok(t) = std::env::var("KASATERM_AUTOSETTINGS_TYPE") {
+            self.settings_input = Some(SettingsInput::ClaudeAccountLabel(0));
+            self.settings_caret = 0;
+            if let Some(a) = self.set_claude_accounts.first_mut() {
+                a.label.clear();
+            }
+            for c in t.chars() {
+                if !self.settings_hangul_char(c) {
+                    self.settings_hangul_flush();
+                    self.settings_insert_text(&c.to_string());
+                }
+            }
+            let pre = self.hangul.preedit().unwrap_or_default();
+            eprintln!(
+                "[autotype] label={:?} caret={} preedit={pre:?}",
+                self.set_claude_accounts.first().map(|a| a.label.clone()),
+                self.settings_caret
+            );
+        }
         if let Ok(t) = std::env::var("KASATERM_AUTOFEEDBACK_TEXT") {
             self.feedback_caret = t.chars().count();
             self.feedback_body = t;
@@ -987,21 +1256,14 @@ impl App {
                 // 더블클릭이 재현되지 않아 검증이 실물과 어긋난다. 같은
                 // 좌표로 짧은 간격(`_STEP_MS` 450 이하)에 두 번 주면 단어
                 // 선택, 세 번이면 줄 선택이 걸린다.
-                // 실물 press 와 같은 순서: 미니맵 띠를 먼저 본다. 이걸 빼면
-                // 하네스가 미니맵 클릭을 캐럿 클릭으로 재현해 검증이 거짓말을 한다.
+                // 실물 press 와 같은 순서: 접기 삼각형을 먼저 본다. 이걸 빼면
+                // 하네스가 삼각형 클릭을 캐럿 클릭으로 재현해 검증이 거짓말을 한다.
                 if self.md_fold_click(&id, bx + dx, by + dy) {
                     let f = self.ws.lock().ok().and_then(|w| {
                         w.panes.get(&id).and_then(|p| p.markdown()).map(|m| m.folds.clone())
                     });
                     eprintln!("[mdscript] fold click=({dx},{dy}) folds={f:?}");
                     self.wake_after_mdstep();
-                    return;
-                }
-                if self.md_mini_jump(&id, bx + dx, by + dy) {
-                    let s = self.ws.lock().ok().and_then(|w| {
-                        w.panes.get(&id).and_then(|p| p.markdown()).map(|m| m.scroll)
-                    });
-                    eprintln!("[mdscript] click=({dx},{dy}) 미니맵 점프 scroll={s:?}");
                     return;
                 }
                 let clicks = self.md_press_caret(&id, bx + dx, by + dy);
@@ -2056,7 +2318,11 @@ impl App {
         eprintln!(
             "[autoinfodbl] {key} 더블클릭 → active_pane {before} → {after} (win={}) 접힘={}",
             self.active_window,
-            self.info.group_collapsed.contains(&key)
+            if key.starts_with("win:") {
+                self.info.group_collapsed.contains(&key)
+            } else {
+                !self.info.pane_expanded.contains(&key)
+            }
         );
     }
 }

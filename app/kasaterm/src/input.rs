@@ -2111,9 +2111,10 @@ impl App {
                     // start at 1.
                     if code == KeyCode::KeyT && self.tmux.is_none() {
                         if self.modifiers.shift_key() {
-                            // Cmd+Shift+T → reopen closed pane (ghostty). dock이
-                            // 제거됐으므로 후속에서 claude --resume 식 로컬 복원으로
-                            // 재구현 예정 — 현재는 no-op.
+                            // Cmd+Shift+T → 마지막에 닫은 pane 되살리기(ghostty).
+                            // 닫을 때 적어 둔 레코드로 세션 복원과 같은 경로를 타므로
+                            // claude 였던 pane 은 대화까지 --resume 으로 돌아온다.
+                            self.reopen_closed_pane();
                         } else {
                             self.new_window();
                         }
