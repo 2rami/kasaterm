@@ -85,6 +85,11 @@ pub(crate) struct SettingsCtx {
     /// 설정 화면 위에 덮어 그릴 토스트 (메시지, 알파). 설정 오버레이가 chrome
     /// 토스트를 가리므로 여기서 다시 그린다 — 출처는 동일한 collab.toast 슬롯.
     pub toast: Option<(String, f32)>,
+    /// 조합 중인 한글 음절. macOS 는 OS IME 를 꺼 두고 자모를 직접 조합하는데,
+    /// 이걸 안 그리면 완성될 때까지 화면에 아무 일도 일어나지 않는다 — 거노가
+    /// "조합도 안 보이고 계가 ㄱㅖ로 된다"고 한 것의 절반이 이거다(친 자모가
+    /// 사라진 것처럼 보이니 다시 치게 된다).
+    pub preedit: String,
 }
 
 /// 폼 컨트롤이 퍼지는 최대 가로폭. 넓은 창에서 컨트롤이 오른쪽 허공으로
@@ -445,6 +450,7 @@ impl App {
             feedback_body: self.feedback_body.clone(),
             feedback_caret: self.feedback_caret,
             feedback_diag: self.feedback_diag,
+            preedit: self.hangul.preedit().unwrap_or_default(),
             toast: {
                 let a = self.collab_toast_alpha();
                 if a > 0.0 {
@@ -815,9 +821,17 @@ impl App {
                     }
                     Key::Character(t) => {
                         for ch in t.chars() {
+                            // 낱자는 조합기 것이다. macOS 한글 배열은 자모를
+                            // `event.text` 로 주지만 그게 비고 `logical_key` 만
+                            // 오는 프레임이 있는데, 그때 여기로 새면 "계"가
+                            // "ㄱㅖ"로 박힌다 — 조합을 거치지 않은 자모는 그 자체로
+                            // 잘못 온 것이라 넣지 않는다.
+                            if is_jamo(ch) {
+                                continue;
+                            }
                             textedit::insert(buf, caret, ch);
+                            changed = true;
                         }
-                        changed = true;
                     }
                     _ => {}
                 }
@@ -903,6 +917,31 @@ impl App {
 
     /// 현재 포커스된 설정 필드에 텍스트를 삽입(IME commit·한글 조합 완성 경로 공용).
     /// 멀티라인 필드는 각자의 캐럿을, 단일라인 필드는 settings_caret 를 쓴다.
+    /// 자모 하나를 조합기에 먹인다. 완성된 음절이 떨어지면 포커스 필드에 넣고,
+    /// 조합 중이면 아무것도 넣지 않는다(그 사이 화면에 보이는 건 `SettingsCtx.preedit`).
+    /// 반환값 = 이 키를 조합기가 삼켰는가 — true 면 필드 편집으로 넘기면 안 된다.
+    ///
+    /// 키 핸들러에서 이 판단을 인라인으로 하던 것을 함수로 뺀 건 헤드리스로
+    /// 확인할 자리를 만들기 위해서다 — 조합은 실제 IME 없이는 재현이 안 돼
+    /// 지금까지 이 경로만 검증 사각이었다.
+    pub(crate) fn settings_hangul_char(&mut self, c: char) -> bool {
+        if self.settings_input.is_none() || !is_jamo(c) {
+            return false;
+        }
+        if let Some(commit) = self.hangul.feed(c) {
+            self.settings_insert_text(&commit);
+        }
+        true
+    }
+
+    /// 조합 중이던 음절을 확정해 필드에 넣는다. 자모가 아닌 키·포커스 이동처럼
+    /// 조합이 끝나는 자리마다 불러야 마지막 글자가 증발하지 않는다.
+    pub(crate) fn settings_hangul_flush(&mut self) {
+        if let Some(flushed) = self.hangul.flush() {
+            self.settings_insert_text(&flushed);
+        }
+    }
+
     pub(crate) fn settings_insert_text(&mut self, text: &str) {
         let Some(field) = self.settings_input else { return };
         if matches!(field, SettingsInput::StudentPersona | SettingsInput::FeedbackBody) {
@@ -1157,7 +1196,7 @@ pub(crate) fn paint_settings(
                 if y > clip {
                     let r = (fx, y, fw.min(420.0), 34.0);
                     let focused = ctx.input == Some(SettingsInput::CwdPath);
-                    text_field(g, r, &ctx.cwd_mode, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
+                    text_field(g, r, &ctx.cwd_mode, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
                     rects.push((SettingsAction::FocusCwdPath, r));
                 }
                 y += 34.0;
@@ -1232,7 +1271,7 @@ pub(crate) fn paint_settings(
                 if y > clip {
                     let r = (fx, y, fw.min(420.0), 34.0);
                     let focused = ctx.input == Some(SettingsInput::FileOpenCmd);
-                    text_field(g, r, &ctx.file_open_cmd, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
+                    text_field(g, r, &ctx.file_open_cmd, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
                     rects.push((SettingsAction::FocusFileOpenCmd, r));
                 }
                 y += 34.0;
@@ -1548,7 +1587,7 @@ pub(crate) fn paint_settings(
                 if y > clip {
                     let r = (fx, y, fw.min(420.0), 34.0);
                     let focused = ctx.input == Some(SettingsInput::Shell);
-                    text_field(g, r, &ctx.shell, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
+                    text_field(g, r, &ctx.shell, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
                     rects.push((SettingsAction::FocusShell, r));
                 }
                 y += 34.0;
@@ -1620,7 +1659,7 @@ pub(crate) fn paint_settings(
                         Some(i) => {
                             let lr = (fx + 28.0, y, fw.min(240.0), row_h);
                             let focused = ctx.input == Some(SettingsInput::ClaudeAccountLabel(i));
-                            text_field(g, lr, &label, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
+                            text_field(g, lr, &label, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
                             rects.push((SettingsAction::FocusClaudeAccountLabel(i), lr));
                             let dr = (lr.0 + lr.2 + 8.0, y, 30.0, row_h);
                             stepper_btn(g, dr, "x", ctx.cursor);
@@ -1714,7 +1753,7 @@ pub(crate) fn paint_settings(
             if y > clip {
                 let r = (fx, y, fw.min(420.0), 34.0);
                 let focused = ctx.input == Some(SettingsInput::ClaudeExtra);
-                text_field(g, r, &ctx.claude_extra, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor);
+                text_field(g, r, &ctx.claude_extra, ctx.settings_caret, focused, ctx.caret_on, ctx.cursor, if focused { &ctx.preedit } else { "" });
                 rects.push((SettingsAction::FocusClaudeExtra, r));
             }
             content_bottom = y + 34.0;
@@ -2268,6 +2307,14 @@ fn multiline_field(
 
 /// 단일라인 텍스트 필드. `caret` 는 문자(char) 인덱스라 문자열 중간에도 캐럿을
 /// 그린다 — 캐럿 앞 부분 폭을 재서 그 x 에 1.5px 세로 막대를 세운다.
+/// 한글 낱자(호환 자모 블록). 완성 음절 "계"(U+ACC4)는 여기 안 든다 — 조합을
+/// 마친 글자와 조합 재료를 가르는 선이 이 함수다.
+fn is_jamo(c: char) -> bool {
+    (0x3130..=0x318F).contains(&(c as u32))
+}
+
+/// `preedit` 는 조합 중인 한글 음절 — 포커스된 필드에서만, 캐럿 자리에 밑줄을 깔고
+/// 그린다. 아직 버퍼에 없는 글자라 캐럿은 그 오른쪽으로 밀어 둔다.
 fn text_field(
     g: &mut gpu::GpuRenderer,
     r: Rect,
@@ -2276,6 +2323,7 @@ fn text_field(
     focused: bool,
     caret_on: bool,
     cursor: (f32, f32),
+    preedit: &str,
 ) {
     let hover = inside(r, cursor);
     g.hover_pointer |= hover;
@@ -2300,9 +2348,21 @@ fn text_field(
         text,
         gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false },
     );
-    if focused && caret_on {
-        let pre: String = text.chars().take(caret).collect();
-        let cx = tx + g.measure_chrome_text(&pre, 13.0, false);
+    let pre: String = text.chars().take(caret).collect();
+    let mut cx = tx + g.measure_chrome_text(&pre, 13.0, false);
+    if focused && !preedit.is_empty() {
+        let pw = g.measure_chrome_text(preedit, 13.0, false);
+        // 캐럿 뒤 글자를 덮으므로 배경부터 깐다. accent 를 옅게 쓰는 건 밑줄과
+        // 한 덩어리로 읽히게 하려는 것 — 회색 판이면 필드 배경에 가라앉는다.
+        g.rect(cx, r.1 + 4.0, pw, r.3 - 8.0, theme::with_alpha(theme::accent(), 0x33));
+        g.draw_text(cx, ty, preedit,
+            gpu::DrawOpts { font_size: 13.0, color: theme::text(), bold: false, italic: false });
+        g.rect(cx, ty + 15.0, pw, 1.0, theme::accent());
+        cx += pw;
+    }
+    // 조합 중에는 깜빡임을 멈춘다 — 조합 글자와 캐럿이 번갈아 사라지면 어디까지
+    // 쳤는지 읽을 수가 없다.
+    if focused && (caret_on || !preedit.is_empty()) {
         g.rect(cx, r.1 + 7.0, 1.5, r.3 - 14.0, theme::text());
     }
 }
