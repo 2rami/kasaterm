@@ -2423,6 +2423,18 @@ impl App {
                 Some(sid) if resumable => format!("claude --resume {sid}\r"),
                 _ => "claude\r".to_string(),
             };
+            // 이어가기 실패는 무증상이었다 — 빈 세션이 학생 얼굴로 멀쩡히 떠서,
+            // 대화를 잃은 줄 모른 채 계속 쓰게 된다(미도리 실측). 자리를 만들어
+            // 준 것만으로는 부족하고 잃은 것을 말해 줘야 한다.
+            if session_id.is_some() && !resumable {
+                self.collab.toast = Some((
+                    format!(
+                        "{} 이어갈 대화를 못 찾아 새로 시작합니다",
+                        saved_char.as_deref().unwrap_or("이 pane 은")
+                    ),
+                    std::time::Instant::now(),
+                ));
+            }
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));
         }
