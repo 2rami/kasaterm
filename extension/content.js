@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '6'
+  const OVERLAY_V = '7'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -216,16 +216,24 @@ if (!window.__ccInjected) {
       <style>
         :host { all: initial; }
         /* 기본값이 곧 대기 상태다 — 조작이 끝나도 테두리는 남아 "이 창은 누가 잡고 있다"를 계속 알린다.
-           페이지를 읽는 데 방해되지 않을 만큼만 흐리게. */
+           ⚠️테두리 전체에 opacity 를 걸면 학생색까지 흐려져 밝은 페이지에서 선이 사라진다(실측).
+           선은 대기·조작 모두 불투명하게 두고, 두께와 안쪽 글로우로만 두 상태를 가른다.
+           안쪽 1px 어두운 선은 밝은 배경에서 밝은 학생색이 묻히지 않게 하는 대비용. */
         .frame {
           position: fixed; inset: 0; pointer-events: none;
-          border: 3px solid var(--cc, #6BCF7F);
-          box-shadow: inset 0 0 32px -6px var(--cc, #6BCF7F), 0 0 0 1px rgba(0,0,0,.15) inset;
-          opacity: .22;
-          transition: opacity .3s ease;
+          border: 2px solid var(--cc, #6BCF7F);
+          box-shadow: inset 0 0 0 1px rgba(0,0,0,.28);
+          transition: border-width .3s ease;
         }
-        :host([data-mode="active"]) .frame { opacity: 1; animation: breathe 2.4s ease-in-out infinite; }
-        @keyframes breathe { 0%,100% { opacity: .85 } 50% { opacity: .45 } }
+        :host([data-mode="active"]) .frame { border-width: 3px; }
+        /* 조작 중에만 안쪽으로 번지는 글로우. 숨쉬는 것은 이 층뿐이라 선 자체는 늘 또렷하다. */
+        .frame::before {
+          content: ''; position: absolute; inset: 0;
+          box-shadow: inset 0 0 32px -6px var(--cc, #6BCF7F);
+          opacity: 0; transition: opacity .3s ease;
+        }
+        :host([data-mode="active"]) .frame::before { opacity: 1; animation: breathe 2.4s ease-in-out infinite; }
+        @keyframes breathe { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
         /* brand-skip — 창 테두리를 도는 픽셀 러너. 둘레가 6000px 대라 칸을 96 로 잘게 나눠도
            한 칸이 60px 이 넘어 이동이 확실히 끊겨 보인다. 조작 중에만 나타난다. */
         .frame::after {
