@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '5'
+  const OVERLAY_V = '6'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -215,14 +215,27 @@ if (!window.__ccInjected) {
     root.innerHTML = `
       <style>
         :host { all: initial; }
+        /* 기본값이 곧 대기 상태다 — 조작이 끝나도 테두리는 남아 "이 창은 누가 잡고 있다"를 계속 알린다.
+           페이지를 읽는 데 방해되지 않을 만큼만 흐리게. */
         .frame {
           position: fixed; inset: 0; pointer-events: none;
           border: 3px solid var(--cc, #6BCF7F);
           box-shadow: inset 0 0 32px -6px var(--cc, #6BCF7F), 0 0 0 1px rgba(0,0,0,.15) inset;
-          animation: breathe 2.4s ease-in-out infinite;
+          opacity: .22;
           transition: opacity .3s ease;
         }
+        :host([data-mode="active"]) .frame { opacity: 1; animation: breathe 2.4s ease-in-out infinite; }
         @keyframes breathe { 0%,100% { opacity: .85 } 50% { opacity: .45 } }
+        /* brand-skip — 창 테두리를 도는 픽셀 러너. 둘레가 6000px 대라 칸을 96 로 잘게 나눠도
+           한 칸이 60px 이 넘어 이동이 확실히 끊겨 보인다. 조작 중에만 나타난다. */
+        .frame::after {
+          content: ''; position: absolute; width: 8px; height: 8px;
+          background: var(--cc, #6BCF7F); box-shadow: 0 0 10px var(--cc, #6BCF7F);
+          offset-path: border-box; offset-distance: 0%; offset-rotate: 0deg;
+          opacity: 0; transition: opacity .3s ease;
+        }
+        :host([data-mode="active"]) .frame::after { opacity: 1; animation: runner 9s steps(96) infinite; }
+        /* /brand-skip */
         .chip {
           position: fixed; top: 12px; right: 12px; display: flex; align-items: center; gap: 8px;
           padding: 5px 12px 5px 5px; border-radius: 999px;
@@ -285,10 +298,9 @@ if (!window.__ccInjected) {
         }
         :host([data-mode="active"]) .dot { background: #f08c00; animation: blip 1.1s ease-in-out infinite; }
         @keyframes blip { 0%,100% { transform: scale(1); opacity: 1 } 50% { transform: scale(.6); opacity: .5 } }
-        /* 대기 — 페이지 테두리와 커서는 걷고 칩만 조용히 남긴다. 작고 얌전해지되 **테두리는 그대로**.
+        /* 대기 — 커서만 걷고 테두리·칩은 남긴다. 칩은 작고 얌전해지되 **테두리는 그대로**.
            ⚠️칩 전체에 opacity 를 걸면 테두리까지 같이 흐려져 밝은 페이지에서 통째로 사라진다(실측).
            투명도는 배경과 글자에만 주고 테두리는 불투명하게 남긴다 — 그게 "누가 잡고 있다"는 신호다. */
-        :host([data-mode="idle"]) .frame { animation: none; opacity: 0; }
         :host([data-mode="idle"]) .chip {
           transform: scale(.9);
           background: rgba(20,22,26,.62);
