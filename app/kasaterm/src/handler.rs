@@ -1104,6 +1104,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.schedule_autocapture();
         self.arm_autosplit();
         self.arm_autowindows();
+        self.arm_autoexpand();
         self.arm_autotoggle();
         self.arm_autoarona();
         // 온보딩 제거(거노) — 강제 ModePicker 자동오픈 안 함. 터미널이 기본,
@@ -3924,15 +3925,28 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(d) = self.win_tab_drag.take() {
                             if d.active {
                                 window.set_cursor(CursorIcon::Default);
-                                // 창 밖에 놓으면 재배치가 아니라 그 방을 통째로
-                                // 별도 창으로 꺼낸다 — pane 탭 tear-off 와 같은 규칙.
+                                // 기준은 「창 밖」이 아니라 **패널 밖**이다. 창을
+                                // 통째로 벗어나야 꺼지게 뒀더니, 사이드바에서 옆으로
+                                // 빼는 자연스러운 동작이 전부 재배치로 흘러 기능이
+                                // 죽어 있었다(거노 요청은 "윈도우 패널에서 꺼내면").
+                                // 재배치는 패널 안에서 위아래, 꺼내기는 패널 밖으로
+                                // 가른다 — 세로 사이드바에서 이 둘은 축이 다르다.
+                                //
+                                // 상단 탭 모드는 스트립이 가로라 같은 논리를 쓰면
+                                // 재배치(좌우)와 꺼내기(아래)가 뒤엉킨다 — 그쪽은
+                                // 창 밖 기준 그대로 둔다.
+                                const TEAR_MARGIN: f32 = 40.0;
                                 let (win_w, win_h) = self.logical_win_size();
-                                if Self::drag_left_window(
+                                let left_win = Self::drag_left_window(
                                     self.cursor_px.0,
                                     self.cursor_px.1,
                                     win_w,
                                     win_h,
-                                ) {
+                                );
+                                let left_panel = !self.tabs_on_top
+                                    && self.cursor_px.0
+                                        > self.effective_sidebar_w() + TEAR_MARGIN;
+                                if left_win || left_panel {
                                     let near = self.cursor_screen_phys();
                                     self.undock_window_room(d.from, event_loop, near);
                                 } else {
