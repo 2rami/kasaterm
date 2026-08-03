@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '9'
+  const OVERLAY_V = '10'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -215,27 +215,23 @@ if (!window.__ccInjected) {
     root.innerHTML = `
       <style>
         :host { all: initial; }
-        /* 기본값이 곧 대기 상태다 — 조작이 끝나도 테두리는 남아 "이 창은 누가 잡고 있다"를 계속 알린다.
-           ⚠️테두리 전체에 opacity 를 걸면 학생색까지 흐려져 밝은 페이지에서 선이 사라진다(실측).
-           선은 대기·조작 모두 불투명하게 두고, 두께와 안쪽 글로우로만 두 상태를 가른다.
-           안쪽 1px 어두운 선은 밝은 배경에서 밝은 학생색이 묻히지 않게 하는 대비용. */
+        /* 첫 버전의 글로우 테두리를 그대로 기본값으로 쓴다 — 3px 선에 안쪽으로 번지는 글로우.
+           조작이 끝나도 남아 "이 창은 누가 잡고 있다"를 계속 알린다. 조작 중임은 글로우의
+           숨쉬기와 픽셀 러너로 알리므로 선 자체는 두 상태에서 똑같다.
+           안쪽 1px 어두운 선은 밝은 배경에서 밝은 학생색이 묻히지 않게 하는 대비용.
+           ⚠️글로우를 .frame 의 box-shadow 에 두고 숨쉬기를 걸면 선과 러너(자식)까지 함께
+           흐려진다. 글로우만 별도 층으로 떼면 숨쉬는 것이 그 층뿐이라 둘 다 늘 또렷하다. */
         .frame {
           position: fixed; inset: 0; pointer-events: none;
-          border: 2px solid var(--cc, #6BCF7F);
-          box-shadow: inset 0 0 0 1px rgba(0,0,0,.28);
-          transition: border-width .3s ease;
+          border: 3px solid var(--cc, #6BCF7F);
+          box-shadow: inset 0 0 0 1px rgba(0,0,0,.15);
         }
-        :host([data-mode="active"]) .frame { border-width: 3px; }
-        /* 안쪽으로 번지는 글로우. 대기에도 은은히 켜 두고 조작 중에만 짙어지며 숨쉰다.
-           숨쉬는 것은 이 층뿐이라 선 자체는 늘 또렷하다.
-           ⚠️숨쉬기 저점을 대기값보다 낮추면 조작 중이 대기보다 흐려 보이는 역전이 생긴다. */
         .frame::before {
           content: ''; position: absolute; inset: 0;
           box-shadow: inset 0 0 32px -6px var(--cc, #6BCF7F);
-          opacity: .4; transition: opacity .3s ease;
         }
-        :host([data-mode="active"]) .frame::before { opacity: 1; animation: breathe 2.4s ease-in-out infinite; }
-        @keyframes breathe { 0%,100% { opacity: 1 } 50% { opacity: .6 } }
+        :host([data-mode="active"]) .frame::before { animation: breathe 2.4s ease-in-out infinite; }
+        @keyframes breathe { 0%,100% { opacity: 1 } 50% { opacity: .45 } }
         /* brand-skip — 창 테두리를 도는 픽셀 러너. 흰 머리 한 칸과 옅어지는 꼬리 네 칸이 같은
            경로를 한 칸씩 시차를 두고 돌아 지나간 자취처럼 보인다. 다섯 칸의 크기를 똑같이 두는
            것이 중요하다 — 뒤로 갈수록 작게 만들면 자취가 아니라 따로 노는 점 다섯 개가 된다.
