@@ -609,6 +609,14 @@ impl GpuRenderer {
         self.scale
     }
 
+    /// Current font size in **logical** px — the value `set_font_size` was last
+    /// given (round-tripped through the physical size it stores). Separate
+    /// windows keep their own zoom here instead of in App's global `ui_zoom`,
+    /// so a zoom shortcut needs to read back what this window is at.
+    pub fn font_size(&self) -> f32 {
+        self.font_size_px as f32 / self.scale
+    }
+
     /// Repack the glyph atlas if it asked to be repacked — because a bake
     /// found no room, or because a DPI / font-size change invalidated every
     /// cached size. **Frame boundary only**: quads already queued this frame

@@ -1848,6 +1848,11 @@ impl App {
             None => return,
         };
         self.ime_retarget(crate::ImeFocus::Pane(pane_id.clone()));
+        // OS 키 자동반복은 Cmd 조합에선 삼킨다 — 메인 창(forward_key)과 같은 규칙.
+        // Cmd 단축키는 전부 단발성이라, 살짝 길게 눌린 것만으로 여러 번 발사된다.
+        if self.host_mod() && event.repeat {
+            return;
+        }
         // Cmd/Ctrl+W: 이 창 닫기 → dock 복귀. 방 창이면 방을, 아니면 pane 을 되돌린다.
         if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) {
             if self.aux_windows.get(idx).and_then(|a| a.room_window()).is_some() {
@@ -1856,6 +1861,43 @@ impl App {
                 self.dock_pane_terminal(idx);
             }
             return;
+        }
+        // 폰트 줌(Cmd+= / Cmd+- / Cmd+0). **한글 조합 분기보다 먼저** 와야 한다 —
+        // 조합 중엔 아래 자모 경로나 맨 끝 평문 경로가 이 키를 먼저 먹어 셸에 '-' 가
+        // 박혔다(별도창엔 줌 처리가 아예 없었다). 메인 창(forward_key)과 같은 규칙으로
+        // **물리키와 논리문자를 둘 다** 본다: 한글·유럽 배열은 같은 문자를 다른 물리
+        // 위치에서 내놓는다. 메인 창은 App 전역 ui_zoom 을 움직이지만 별도창은 자기
+        // gpu 의 폰트 크기가 전부라, 여기서 그 값을 직접 올리고 PTY 를 리플로우한다.
+        let zoom_mod = if cfg!(target_os = "macos") {
+            self.host_mod()
+        } else {
+            self.modifiers.control_key()
+        };
+        if zoom_mod {
+            let logical_str = match &event.logical_key {
+                Key::Character(s) => Some(s.as_str()),
+                _ => None,
+            };
+            let code = match event.physical_key {
+                PhysicalKey::Code(c) => Some(c),
+                _ => None,
+            };
+            if let Some(z) = crate::input::zoom_key(code, logical_str) {
+                if let Some(a) = self.aux_windows.get_mut(idx) {
+                    let next = match z {
+                        crate::input::ZoomKey::Reset => FONT_SIZE,
+                        crate::input::ZoomKey::In => (a.gpu.font_size() + 1.0).clamp(8.0, 40.0),
+                        crate::input::ZoomKey::Out => (a.gpu.font_size() - 1.0).clamp(8.0, 40.0),
+                    };
+                    a.gpu.set_font_size(next);
+                    a.dirty = true;
+                    a.window.request_redraw();
+                }
+                // 셀이 커졌으니 같은 창에 들어가는 칸 수가 달라진다 — 셸이 SIGWINCH
+                // 로 리플로우하지 않으면 글자만 커지고 줄바꿈이 옛 폭에 묶인다.
+                self.aux_terminal_resize_pty(idx);
+                return;
+            }
         }
         // macOS in-process 한글 조합: 자모(U+3130..318F)면 completer 로, 완성 음절만 PTY.
         #[cfg(target_os = "macos")]
