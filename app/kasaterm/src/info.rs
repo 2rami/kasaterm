@@ -1545,7 +1545,8 @@ pub(crate) fn draw_info_col(
     g: &mut gpu::GpuRenderer,
     cursor: (f32, f32),
     info: &mut state::InfoState,
-    // 되살리기 대기 중인 pane(최근이 뒤). 프로세스 목록 끝에 흐린 줄로 붙는다 —
+    // 되살리기 대기 중인 pane(최근이 뒤). 되살릴 게 있을 때만 나타나는 독립
+    // 섹션이다 — 프로세스 목록 꼬리에 달아 두면 목록이 길 때 통째로 묻히고,
     // 되돌릴 수 있다는 걸 알리지 않으면 ⌘⇧T 는 아는 사람만 쓰는 기능이 된다.
     closed: &[crate::ClosedPane],
     x: f32,
@@ -1613,16 +1614,24 @@ pub(crate) fn draw_info_col(
             h += GROUP_H;
             h += visible_row_count(info, gp) as f32 * ROW_H;
         }
-        // 되살리기 대기 줄은 목록 끝에 붙는다.
-        h += closed.len() as f32 * ROW_H;
         h
+    };
+    // 되살릴 게 없으면 섹션 머리조차 안 그린다 — 늘 비어 있는 섹션이 자리를
+    // 차지하면 알려주는 게 없다.
+    let closed_h = if closed.is_empty() {
+        0.0
+    } else if info.closed_collapsed {
+        SEC_H + SEC_GAP
+    } else {
+        SEC_H + closed.len() as f32 * ROW_H + SEC_GAP
     };
     let ports_h = match (info.ports_collapsed, snap.ports.len()) {
         (true, _) => 0.0,
         (false, 0) => EMPTY_H,
         (false, n) => n as f32 * PORT_H,
     };
-    let content = HEAD_H + SEC_H * 3.0 + SEC_GAP * 2.0 + dir_h + procs_h + ports_h + 14.0;
+    let content =
+        HEAD_H + SEC_H * 3.0 + SEC_GAP * 2.0 + dir_h + procs_h + closed_h + ports_h + 14.0;
     info.scroll = info.scroll.clamp(0.0, (content - (bottom - top)).max(0.0));
     let mut y = top - info.scroll;
 
@@ -1782,18 +1791,6 @@ pub(crate) fn draw_info_col(
                 y += ROW_H;
             }
         }
-        // ── 되살리기 대기 ── 최근 닫은 것이 위. 줄을 누르면 그것만, ⌘⇧T 는 언제나
-        // 맨 위(=가장 최근) 것을 되살린다.
-        for (i, c) in closed.iter().enumerate().rev() {
-            if y + ROW_H > top && y < bottom {
-                if let Some(br) = draw_closed_row(g, cursor, c, i + 1 == closed.len(), x, w, x0, right, y)
-                {
-                    info.closed_kill_rects.push((i, br));
-                }
-            }
-            info.closed_rects.push((i, (x, y, w, ROW_H)));
-            y += ROW_H;
-        }
     }
     let d_dir = match (t_a, t_procs) {
         (Some(a), Some(b)) => (b - a).as_secs_f32() * 1000.0,
@@ -1801,6 +1798,40 @@ pub(crate) fn draw_info_col(
     };
     let d_procs = t_procs.map(|t| t.elapsed().as_secs_f32() * 1000.0).unwrap_or(0.0);
     y += SEC_GAP;
+
+    // ── 되살리기 ── 최근 닫은 것이 위. 줄을 누르면 그것만, ⌘⇧T 는 언제나
+    // 맨 위(=가장 최근) 것을 되살린다. 되살릴 게 없으면 통째로 없다.
+    if !closed.is_empty() {
+        let r = draw_section(
+            g,
+            cursor,
+            "되살리기",
+            Some(closed.len()),
+            None,
+            info.closed_collapsed,
+            x,
+            w,
+            y,
+            bottom,
+            top,
+        );
+        info.sec_rects.push((state::InfoSection::Closed, r));
+        y += SEC_H;
+        if !info.closed_collapsed {
+            for (i, c) in closed.iter().enumerate().rev() {
+                if y + ROW_H > top && y < bottom {
+                    if let Some(br) =
+                        draw_closed_row(g, cursor, c, i + 1 == closed.len(), x, w, x0, right, y)
+                    {
+                        info.closed_kill_rects.push((i, br));
+                    }
+                }
+                info.closed_rects.push((i, (x, y, w, ROW_H)));
+                y += ROW_H;
+            }
+        }
+        y += SEC_GAP;
+    }
 
     // ── 포트 ──
     let r = draw_section(
