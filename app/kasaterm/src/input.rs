@@ -2198,31 +2198,23 @@ impl App {
                         Key::Character(s) => Some(s.as_str()),
                         _ => None,
                     };
-                    let is_plus = code == KeyCode::Equal
-                        || code == KeyCode::NumpadAdd
-                        || logical_str == Some("=")
-                        || logical_str == Some("+");
-                    let is_minus = code == KeyCode::Minus
-                        || code == KeyCode::NumpadSubtract
-                        || logical_str == Some("-")
-                        || logical_str == Some("_");
-                    let is_zero = code == KeyCode::Digit0
-                        || code == KeyCode::Numpad0
-                        || logical_str == Some("0");
                     // host_mod_alt (Win: Alt, mac: Shift) narrows the zoom to
                     // just the focused pane; without it, the whole UI zooms.
                     let pane_only = self.host_mod_alt();
-                    if is_plus {
-                        if pane_only { self.change_pane_font(0.1); } else { self.change_ui_zoom(0.1); }
-                        return;
-                    }
-                    if is_minus {
-                        if pane_only { self.change_pane_font(-0.1); } else { self.change_ui_zoom(-0.1); }
-                        return;
-                    }
-                    if is_zero {
-                        if pane_only { self.reset_pane_font(); } else { self.reset_ui_zoom(); }
-                        return;
+                    match zoom_key(Some(code), logical_str) {
+                        Some(ZoomKey::In) => {
+                            if pane_only { self.change_pane_font(0.1); } else { self.change_ui_zoom(0.1); }
+                            return;
+                        }
+                        Some(ZoomKey::Out) => {
+                            if pane_only { self.change_pane_font(-0.1); } else { self.change_ui_zoom(-0.1); }
+                            return;
+                        }
+                        Some(ZoomKey::Reset) => {
+                            if pane_only { self.reset_pane_font(); } else { self.reset_ui_zoom(); }
+                            return;
+                        }
+                        None => {}
                     }
                 }
                 // Ctrl+letter → the corresponding ASCII control byte.
@@ -2626,6 +2618,48 @@ fn is_modifier_logical(key: &winit::keyboard::Key) -> bool {
     )
 }
 
+/// 줌 단축키(확대/축소/원래대로) 판정.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ZoomKey {
+    In,
+    Out,
+    Reset,
+}
+
+/// `code`(물리 위치) 와 `logical`(그 키가 실제로 내놓은 문자)을 **둘 다** 본다.
+/// 한글·유럽 배열은 같은 문자를 다른 물리 위치에서 내놓기 때문이다 — 물리키만
+/// 보면 그 배열에서 Cmd+- 가 안 먹고, 문자만 보면 US 배열의 NumpadSubtract 를
+/// 놓친다. 메인 창(`forward_key`)과 별도창(`aux_terminal_key`)이 같은 판정을
+/// 쓰라고 한 벌만 둔다: 두 벌이면 한쪽만 고쳐진다(별도창이 실제로 그랬다).
+///
+/// winit `KeyEvent` 는 비공개 필드가 있어 테스트에서 만들 수 없으니
+/// `is_modifier_logical` 과 같은 이유로 두 조각만 따로 받는다.
+pub(crate) fn zoom_key(
+    code: Option<winit::keyboard::KeyCode>,
+    logical: Option<&str>,
+) -> Option<ZoomKey> {
+    use winit::keyboard::KeyCode;
+    // `+` 는 Shift+`=` 라 같은 팔에 든다.
+    if code == Some(KeyCode::Equal)
+        || code == Some(KeyCode::NumpadAdd)
+        || logical == Some("=")
+        || logical == Some("+")
+    {
+        return Some(ZoomKey::In);
+    }
+    if code == Some(KeyCode::Minus)
+        || code == Some(KeyCode::NumpadSubtract)
+        || logical == Some("-")
+        || logical == Some("_")
+    {
+        return Some(ZoomKey::Out);
+    }
+    if code == Some(KeyCode::Digit0) || code == Some(KeyCode::Numpad0) || logical == Some("0") {
+        return Some(ZoomKey::Reset);
+    }
+    None
+}
+
 /// Whether the bottom of `cells` shows a live "agent working" indicator.
 ///
 /// Scans the last 10 *non-blank* rows, not the last 10 physical rows. Claude
@@ -2893,5 +2927,47 @@ mod working_scan_tests {
         assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Space)));
         // 단축키는 수식키가 눌린 채로 와도 logical_key 가 글자라 안 걸린다.
         assert!(!super::is_modifier_logical(&Key::Character("w".into())));
+    }
+}
+
+#[cfg(test)]
+mod zoom_key_tests {
+    use super::{zoom_key, ZoomKey};
+    use winit::keyboard::KeyCode;
+
+    #[test]
+    fn us_layout_physical_keys() {
+        assert_eq!(zoom_key(Some(KeyCode::Equal), Some("=")), Some(ZoomKey::In));
+        assert_eq!(zoom_key(Some(KeyCode::Minus), Some("-")), Some(ZoomKey::Out));
+        assert_eq!(zoom_key(Some(KeyCode::Digit0), Some("0")), Some(ZoomKey::Reset));
+        assert_eq!(zoom_key(Some(KeyCode::NumpadAdd), None), Some(ZoomKey::In));
+        assert_eq!(zoom_key(Some(KeyCode::NumpadSubtract), None), Some(ZoomKey::Out));
+    }
+
+    /// Shift 를 낀 `+` / `_` 도 같은 팔이어야 한다 — `+` 는 Shift+`=` 다.
+    #[test]
+    fn shifted_variants() {
+        assert_eq!(zoom_key(Some(KeyCode::Equal), Some("+")), Some(ZoomKey::In));
+        assert_eq!(zoom_key(Some(KeyCode::Minus), Some("_")), Some(ZoomKey::Out));
+    }
+
+    /// 이게 이 함수의 존재 이유다: 한글(두벌식) 배열에선 Cmd 를 낀 키의 물리 위치가
+    /// US 와 어긋날 수 있어, 물리키만 보면 별도창에서 Cmd+- 가 안 먹고 '-' 가 셸에
+    /// 박혔다. 문자가 맞으면 물리 위치를 몰라도 잡아야 한다.
+    #[test]
+    fn logical_char_alone_is_enough() {
+        assert_eq!(zoom_key(None, Some("-")), Some(ZoomKey::Out));
+        assert_eq!(zoom_key(None, Some("=")), Some(ZoomKey::In));
+        assert_eq!(zoom_key(None, Some("0")), Some(ZoomKey::Reset));
+    }
+
+    /// 조합 중인 자모나 평범한 글자는 절대 줌으로 새면 안 된다 — 새면 그 키가
+    /// 셸에 안 가고 조용히 사라진다.
+    #[test]
+    fn ordinary_keys_are_not_zoom() {
+        assert_eq!(zoom_key(Some(KeyCode::KeyA), Some("a")), None);
+        assert_eq!(zoom_key(Some(KeyCode::KeyR), Some("ㄱ")), None);
+        assert_eq!(zoom_key(Some(KeyCode::Digit1), Some("1")), None);
+        assert_eq!(zoom_key(None, None), None);
     }
 }
