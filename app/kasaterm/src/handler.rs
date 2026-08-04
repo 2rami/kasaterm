@@ -766,9 +766,7 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(windows)]
         let attrs = attrs.with_decorations(false);
         let window = Arc::new(
-            event_loop
-                .create_window(crate::auxwin::untabbed(attrs))
-                .expect("create window"),
+            crate::auxwin::create_untabbed(event_loop, attrs).expect("create window"),
         );
         // `with_position` 을 무시하는 플랫폼(일부 Wayland 컴포지터)을 위한 폴백.
         // 이미 그 자리에 떴으면 no-op 이라 mac/Windows 에선 값이 없다.

@@ -15,25 +15,61 @@
 //! refcount 만 줄고 실제 Window 는 `aux.window` 가 아직 잡고 있어 살아있다.
 use super::*;
 
-/// macOS 창 탭 묶기를 끈다.
+/// macOS 창 탭 묶기를 끄고 창을 만든다.
 ///
 /// 시스템 설정이 "탭 선호: 항상"(`AppleWindowTabbingMode=always`)이면 macOS 가 새
 /// 창을 기존 창의 **탭으로 합쳐** 버린다. 그러면 pane 을 꺼내도 별도 창이 아니라
 /// 탭 한 장이 되고, 그 탭을 떼면 같이 묶인 것들이 전부 딸려 나온다(거노 실측).
-/// 창마다 **다른** 식별자를 주면 macOS 가 묶을 짝을 못 찾는다 — 탭은 같은 식별자
-/// 끼리만 묶이기 때문. 우리 창은 문서 창이 아니라 저마다 다른 것을 들고 있으므로
-/// 묶일 이유가 없다.
-pub(crate) fn untabbed(attrs: WindowAttributes) -> WindowAttributes {
+///
+/// 창마다 다른 `tabbingIdentifier` 를 주는 것으론 **안 막힌다** — 그건 "묶을 짝"만
+/// 가릴 뿐 창의 탭 참여 자체는 켜진 채라, 탭바 드래그·창 합치기 경로가 그대로
+/// 살아 있다(거노: 새 빌드에서도 여전히 안 떼짐). 꺼야 하는 건 모드 자체다.
+/// `NSWindowTabbingMode::Disallowed` 는 시스템 설정과 무관하게 그 창을 탭에서
+/// 통째로 뺀다.
+pub(crate) fn create_untabbed(
+    event_loop: &ActiveEventLoop,
+    attrs: WindowAttributes,
+) -> Result<Window, winit::error::OsError> {
+    let win = event_loop.create_window(attrs)?;
     #[cfg(target_os = "macos")]
-    {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use winit::platform::macos::WindowAttributesExtMacOS;
-        static N: AtomicU64 = AtomicU64::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        return attrs.with_tabbing_identifier(&format!("kasaterm-w{n}"));
+    disallow_tabbing(&win);
+    Ok(win)
+}
+
+/// 이미 만들어진 창의 탭 참여를 끈다. `create_untabbed` 를 못 쓰는 자리(winit 이
+/// 만들어 준 창을 나중에 받는 경로)에서 쓴다.
+#[cfg(target_os = "macos")]
+pub(crate) fn disallow_tabbing(window: &Window) {
+    use objc2_app_kit::{NSView, NSWindowTabbingMode};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(h) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = h.as_raw() else { return };
+    // ns_view 는 살아 있는 NSView* 다(창이 이 함수 호출 동안 유지된다). 거기서
+    // 얻는 window 는 방금 만든 그 NSWindow.
+    unsafe {
+        let view: &NSView = h.ns_view.cast().as_ref();
+        if let Some(w) = view.window() {
+            w.setTabbingMode(NSWindowTabbingMode::Disallowed);
+        }
     }
-    #[cfg(not(target_os = "macos"))]
-    attrs
+}
+
+/// `(tabbingMode, 이 창이 묶여 있는 탭 수)`. 헤드리스 검증용 — "탭이 안 보인다"는
+/// 눈으로 못 재고, 묶였는지는 `tabbedWindows` 가 nil 이 아닌지로만 확실해진다
+/// (mode 만 보면 "끄긴 껐는데 이미 묶인 뒤"를 못 가른다).
+#[cfg(target_os = "macos")]
+pub(crate) fn tabbing_probe(window: &Window) -> (isize, usize) {
+    use objc2_app_kit::NSView;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(h) = window.window_handle() else { return (-1, 0) };
+    let RawWindowHandle::AppKit(h) = h.as_raw() else { return (-1, 0) };
+    unsafe {
+        let view: &NSView = h.ns_view.cast().as_ref();
+        match view.window() {
+            Some(w) => (w.tabbingMode().0, w.tabbedWindows().map_or(0, |t| t.len())),
+            None => (-1, 0),
+        }
+    }
 }
 
 /// 별도 창 헤더 높이. OS 타이틀바를 껐으므로 이 띠가 창의 유일한 손잡이다.
@@ -291,7 +327,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window = match event_loop.create_window(untabbed(attrs)) {
+        let window = match create_untabbed(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] window create failed: {e}");
@@ -1054,7 +1090,7 @@ impl App {
             // four rows — at 720 the palette cards alone filled the viewport and
             // pushed shape/accent below the fold.
             .with_inner_size(LogicalSize::new(920.0, 720.0));
-        let window = match event_loop.create_window(untabbed(attrs)) {
+        let window = match create_untabbed(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] settings window create failed: {e}");
@@ -1272,7 +1308,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window = match event_loop.create_window(untabbed(attrs)) {
+        let window = match create_untabbed(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] terminal window create failed: {e}");
@@ -2201,7 +2237,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window_handle = match event_loop.create_window(untabbed(attrs)) {
+        let window_handle = match create_untabbed(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] room window create failed: {e}");
