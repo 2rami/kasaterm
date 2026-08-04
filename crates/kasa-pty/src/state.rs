@@ -2458,21 +2458,41 @@ pub fn process_cmdline(pid: u32) -> Option<String> {
 /// 공백 split 파싱이 안전하다. `ps eww` = env 를 command 열 뒤에 붙여 출력(macOS/BSD).
 #[cfg(unix)]
 pub fn process_env_var(pid: u32, key: &str) -> Option<String> {
-    let out = std::process::Command::new("ps")
+    process_env_vars(pid, &[key]).remove(key)
+}
+
+/// 여러 키를 **ps 한 번**으로 읽는다 — board 는 pane 마다 여러 env 를 보는데 키당
+/// 프로세스를 띄우면 폴링(1s)마다 pane 수 × 키 수만큼 ps 가 뜬다.
+#[cfg(unix)]
+pub fn process_env_vars(pid: u32, keys: &[&str]) -> std::collections::HashMap<String, String> {
+    let mut found = std::collections::HashMap::new();
+    let Ok(out) = std::process::Command::new("ps")
         .args(["eww", "-p", &pid.to_string(), "-o", "command="])
         .output()
-        .ok()?;
+    else {
+        return found;
+    };
     let s = String::from_utf8_lossy(&out.stdout);
-    let needle = format!("{key}=");
-    s.split_whitespace()
-        .find_map(|tok| tok.strip_prefix(&needle))
-        .filter(|v| !v.is_empty())
-        .map(String::from)
+    for tok in s.split_whitespace() {
+        for k in keys {
+            if let Some(v) = tok.strip_prefix(&format!("{k}=")) {
+                if !v.is_empty() {
+                    found.insert((*k).to_string(), v.to_string());
+                }
+            }
+        }
+    }
+    found
 }
 
 #[cfg(not(unix))]
 pub fn process_env_var(_pid: u32, _key: &str) -> Option<String> {
     None
+}
+
+#[cfg(not(unix))]
+pub fn process_env_vars(_pid: u32, _keys: &[&str]) -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::new()
 }
 
 #[cfg(test)]

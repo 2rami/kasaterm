@@ -139,6 +139,16 @@ pub struct PaneActivity {
     /// 테마 없는 방은 None.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character: Option<String>,
+    /// 이 pane 의 claude 가 팀원으로 떠 있을 때의 하네스 이름·팀(shim 이 pane 셸에
+    /// export 하는 `KASATERM_AGENT`/`KASATERM_TEAM`). 둘 다 있으면 그 pane 은
+    /// `teams/<team>/inboxes/<agent>.json` 을 폴링하므로 **인박스로 말을 걸 수 있다**
+    /// — 입력창에 텍스트를 밀어넣지 않고 SendMessage 와 같은 경로가 열린다. 이름을
+    /// 규칙(`<슬러그>-p<번호>`)으로 추측하면 어긋난 순간 고아 인박스가 되므로 실측값만
+    /// 싣는다. 트리플 없이 뜬 pane(비-claude·다른 방)은 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
     /// Why this pane is `status == "waiting"` — the `waitingFor` field from
     /// `claude agents --json` (2.1.162+), e.g. "permission" or "user input".
     /// The transcript watcher can't see this: when claude blocks on a
@@ -346,12 +356,22 @@ pub trait Backend: Send + Sync {
         anyhow::bail!("save_session unsupported by this backend")
     }
     fn focus_surface(&self, surface_id: &str) -> Result<()>;
-    /// Split the focused surface. `focus` decides whether the *new* pane
-    /// becomes active: CLI/automation callers pass `false` so a scripted split
-    /// doesn't yank the user's focus (like `tell`, it stays put); the GUI's own
-    /// keyboard split keeps focus-follows behavior by going through `layout`
-    /// directly, not this method.
-    fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo>;
+    /// Split a surface. `from` is the pane to split — `None` means "the focused
+    /// one", which is only right for a human at the keyboard. An agent calling
+    /// from its own pane passes its id, otherwise the split lands wherever the
+    /// human happens to be looking.
+    ///
+    /// `focus` decides whether the *new* pane becomes active: CLI/automation
+    /// callers pass `false` so a scripted split doesn't yank the user's focus
+    /// (like `tell`, it stays put); the GUI's own keyboard split keeps
+    /// focus-follows behavior by going through `layout` directly, not this
+    /// method.
+    fn split_surface(
+        &self,
+        direction: SplitDirection,
+        focus: bool,
+        from: Option<&str>,
+    ) -> Result<SurfaceInfo>;
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()>;
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()>;
     /// Send raw bytes straight to a surface's PTY (no symbolic-key mapping).

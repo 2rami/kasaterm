@@ -53,7 +53,12 @@ impl Backend for StandaloneBackend {
     fn focus_surface(&self, _surface_id: &str) -> Result<()> {
         anyhow::bail!("standalone webview server has no live panes")
     }
-    fn split_surface(&self, _direction: SplitDirection, _focus: bool) -> Result<SurfaceInfo> {
+    fn split_surface(
+        &self,
+        _direction: SplitDirection,
+        _focus: bool,
+        _from: Option<&str>,
+    ) -> Result<SurfaceInfo> {
         anyhow::bail!("standalone webview server has no live panes")
     }
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()> {

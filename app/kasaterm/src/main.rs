@@ -173,6 +173,31 @@ fn panel_rect_outlined(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32,
     panel_rect(g, x, y, w, h, r, fill);
 }
 
+/// 점선 사각 — "여기 뭔가 있었다"를 그리는 유일한 자리.
+///
+/// 채운 판이 **없다**는 것 자체가 뜻이라, 실선으로 두르면 그냥 빈 카드가 되고
+/// 아무것도 안 두르면 목록에서 그 자리가 사라진다. 점선은 자리는 지키되 비어
+/// 있음을 말한다.
+fn dashed_rect(g: &mut gpu::GpuRenderer, x: f32, y: f32, w: f32, h: f32, col: [u8; 4]) {
+    const DASH: f32 = 4.0;
+    const GAP: f32 = 3.0;
+    let step = DASH + GAP;
+    let mut px = x;
+    while px < x + w {
+        let seg = DASH.min(x + w - px);
+        g.rect(px, y, seg, 1.0, col);
+        g.rect(px, y + h - 1.0, seg, 1.0, col);
+        px += step;
+    }
+    let mut py = y;
+    while py < y + h {
+        let seg = DASH.min(y + h - py);
+        g.rect(x, py, 1.0, seg, col);
+        g.rect(x + w - 1.0, py, 1.0, seg, col);
+        py += step;
+    }
+}
+
 /// 커서가 얹힌 것을 **들어 올리는** 유일한 함수 — 버튼·탭·행·메뉴 항목, 눌리는
 /// 것이면 전부 여기를 지난다.
 ///
@@ -435,6 +460,12 @@ const SIDEBAR_W: f32 = 200.0;
 /// highlight inset from the strip edges. Tabs sit close together.
 const SIDEBAR_TAB_H: f32 = 54.0;
 const SIDEBAR_TAB_GAP: f32 = 3.0;
+/// 방을 펼쳤을 때 그 안 pane 한 줄의 높이와, 목록 위아래 숨통.
+const SIDEBAR_ROW_H: f32 = 22.0;
+const SIDEBAR_ROW_PAD: f32 = 8.0;
+/// 방을 펴고 접는 데 걸리는 시간. 사이드바는 하루에도 여러 번 여닫는 곳이라
+/// 테마 전환(0.34)보다 짧다 — 여기서 기다려야 하면 곧 안 쓰게 된다.
+const EXPAND_ANIM_SECS: f32 = 0.16;
 const SIDEBAR_TAB_INSET: f32 = 8.0;
 /// 사이드바 바닥에 붙박인 트레이(+ · 피드백 · 설정)의 높이. 세션 목록은 여기까지만
 /// 자란다.
@@ -1617,6 +1648,22 @@ const CLOSED_PANE_KEEP: usize = 10;
 /// strip. Unlike `TabDrag` the press already switched to the tab — a window
 /// switch is cheap and browser tabs behave that way — so a press that never
 /// passes the threshold leaves nothing for the release to undo.
+/// 사이드바에서 **pane 줄 하나**를 끌고 있는 상태.
+///
+/// 방 탭(`WinTabDrag`)과 갈리는 건 옮기는 것이 방이 아니라 그 안의 pane 이라는
+/// 점이다. 목록이 방 경계를 넘어 이어져 있으므로, 남의 방 줄 위에 떨어뜨리면 그게
+/// 곧 방 옮기기가 된다 — 따로 "다른 방으로" 명령을 두지 않아도 된다.
+struct SidebarRowDrag {
+    /// 잡은 pane.
+    pane: String,
+    /// 누른 자리(논리 px) — 클릭과 드래그를 가르는 문턱용.
+    start: (f32, f32),
+    /// 문턱을 넘었나.
+    active: bool,
+    /// 떨어질 자리 — `(기준 pane, 그 위인가)`. 아무 줄 위도 아니면 None.
+    target: Option<(String, bool)>,
+}
+
 struct WinTabDrag {
     /// Window index grabbed at press time.
     from: usize,
@@ -3203,7 +3250,15 @@ enum UserEvent {
     /// non-existent pane and its `send-keys` payload is dropped. The `bool` is
     /// `focus`: false (CLI/automation default) keeps focus on the current pane,
     /// true follows into the new one.
-    SocketSplit(kasa_pty::SplitDir, bool, std::sync::mpsc::Sender<String>),
+    /// 세 번째 필드는 **쪼갤 pane**. None 이면 포커스된 pane 을 쪼갠다(GUI 와 같은
+    /// 뜻). 에이전트가 자기 pane 에서 부를 때는 자기 id 를 실어 보낸다 — 안 그러면
+    /// 사람이 보고 있는 창이 쪼개진다(거노: "자꾸 내가 포커스하는 윈도우에 띄우냐").
+    SocketSplit(
+        kasa_pty::SplitDir,
+        bool,
+        Option<String>,
+        std::sync::mpsc::Sender<String>,
+    ),
     SocketFocus(String),
     /// 활성 pane 의 shell OS pid 질의(socket 스레드 → GUI 동기 RPC,
     /// SocketSplit 의 Sender 패턴). GET /mode 등 방 판정이 쓰는
@@ -3555,6 +3610,12 @@ pub(crate) enum SettingsAction {
     Shape(&'static str),
     /// Font-size stepper: −1 / +1 logical px on the base cell font.
     FontSizeDelta(i8),
+    /// UI 배율 스테퍼(±10%). Cmd+/− 와 같은 축이지만, 키로만 있으면 얼마나
+    /// 틀어졌는지 화면에 안 보여 되돌릴 생각을 못 한다.
+    UiZoomDelta(i8),
+    /// 배율 100% + 폰트 기본값으로 한 번에. 둘을 따로 만지다 보면 어느 쪽이
+    /// 어긋났는지 알 수 없게 되는데, 그때 돌아올 자리가 필요하다.
+    ResetScale,
     /// Window-tab placement: "top" (title-strip tabs) or "side" (Warp strip).
     TabPosition(&'static str),
     ToggleClaudePersona,
@@ -3966,6 +4027,9 @@ struct App {
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
     window_tab_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// 펼친 방 아래 pane 한 줄씩의 히트 영역 — (방, pane id, rect). 탭 rect 안에
+    /// 들어 있으므로 클릭 판정은 **탭보다 먼저** 해야 한다.
+    sidebar_row_rects: Vec<(usize, String, (f32, f32, f32, f32))>,
     /// (window index, close-× rect) for each window tab. Only present when
     /// there's more than one window (the last window can't be closed).
     window_tab_close_rects: Vec<(usize, (f32, f32, f32, f32))>,
@@ -4169,6 +4233,32 @@ struct App {
     /// pulses until the user switches to that window, which clears the entry —
     /// a persistent "you missed this" cue, unlike the brief `notify_flash`.
     window_alert: std::collections::HashSet<usize>,
+    /// 사이드바에서 pane 목록을 펴 둔 방. **펼친 것만** 담으므로 기본은 접힘이다
+    /// (info.rs 의 `group_collapsed` 는 기본이 열림이라 반대 뜻 — 한 집합에 못 담아
+    /// 따로 둔다). 방 인덱스가 키라 `reorder_window` 의 remap 을 반드시 통과해야
+    /// 한다 — 안 그러면 2번을 펴 두고 3번 자리로 끌어 옮겼을 때 3번이 펴진 채 뜬다.
+    expanded_windows: std::collections::HashSet<usize>,
+    /// 지금 펴지거나 접히는 중인 방 — `(방, 펴는 중인가, 시작 시각)`.
+    ///
+    /// 한 번에 하나만 담는다. 다른 방을 토글하면 앞엣것은 그 자리에서 끝난 것으로
+    /// 친다 — 목록이 동시에 두 군데서 밀리면 어느 쪽이 내가 누른 것인지 못 읽는다.
+    expand_anim: Option<(usize, bool, std::time::Instant)>,
+    /// 사이드바 pane 줄을 끌고 있는 중이면 그 상태.
+    sidebar_row_drag: Option<SidebarRowDrag>,
+    /// 밖에 나간 방을 **되돌리는** 아이콘의 자리 — `(방 인덱스, 사각)`. 매 프레임
+    /// 재구축이라 창을 닫으면 그 자리도 같이 사라진다.
+    window_dock_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// claude 가 **한 번이라도** 떴던 pane. 학생 얼굴을 여기에만 내보인다.
+    ///
+    /// 캐릭터 자체는 pane 을 만들 때 배정된다 — 셸 env(`KASATERM_CHARACTER`·
+    /// `KASATERM_PERSONA`)에 미리 심어 둬야 나중에 거기서 켜는 claude 가 그 학생으로
+    /// 부팅되기 때문이다. 그런데 그러면 셸만 도는 pane 에도 얼굴이 먼저 떠 있어
+    /// "누가 일하고 있다"로 읽힌다(거노: "zsh 인데 학생이 이미 있는 이유는 뭐야").
+    /// 배정은 그대로 두고 **보이는 시점만** claude 가 실제로 붙을 때로 미룬다.
+    ///
+    /// 한 번 본 것을 계속 기억하는 건, claude 가 cargo 같은 자식을 띄우면 그동안
+    /// 프로세스 이름이 그쪽으로 바뀌어 얼굴이 깜빡 사라지기 때문이다.
+    pane_claude_seen: std::collections::HashSet<String>,
     /// Panes that fired a notify/attention while not being looked at and
     /// haven't been opened since — drives the Dock badge count. Cleared when
     /// the pane becomes the focused active pane (`sync_dock_badge`).
@@ -4578,6 +4668,7 @@ impl App {
             pane_last_busy: HashMap::new(),
             pane_bg_mtime: HashMap::new(),
             window_tab_rects: Vec::new(),
+            sidebar_row_rects: Vec::new(),
             window_tab_close_rects: Vec::new(),
             win_tab_first: 0,
             win_tab_vis: usize::MAX,
@@ -4630,6 +4721,11 @@ impl App {
             notify_flash: HashMap::new(),
             turn_done_panes: std::collections::HashSet::new(),
             window_alert: std::collections::HashSet::new(),
+            expanded_windows: std::collections::HashSet::new(),
+            expand_anim: None,
+            sidebar_row_drag: None,
+            window_dock_rects: Vec::new(),
+            pane_claude_seen: std::collections::HashSet::new(),
             unread_panes: std::collections::HashSet::new(),
             dock_badge_n: 0,
             collab: Default::default(),
@@ -5395,6 +5491,33 @@ fn claude_account_export_line(dir: Option<&std::path::Path>) -> String {
 /// instead of edits to ~/.claude/settings.json, so claude outside a kasaterm
 /// pane runs exactly as the user configured it and install-hooks.sh is no
 /// longer needed.
+/// claude shim 의 teammate 이름/색 case 분기(`미도리) AGENT=midori; ACOLOR=green ;;`) —
+/// 배정 캐릭터(한글)를 ASCII agent 이름과 8색 --agent-color 로 사상한다. 로마자 슬러그가
+/// 정본(inbox 파일명이 agent-name 슬러그라 한글은 "---" 로 붕괴), 슬러그 없는 커스텀
+/// 캐릭터는 해시 축약으로 방어. 색은 characters.json claude_color 를 8색으로 정규화 —
+/// --agent-color 는 teammate TUI 전체 테마라 pane accent 와 결이 맞아야 한다(team.rs).
+fn teammate_case_arms() -> String {
+    let Some(chars) = kasa_mcp::character::characters_json() else {
+        return String::new();
+    };
+    let mut arms = String::new();
+    for name in kasa_mcp::character::member_names(&chars) {
+        // case 패턴 자리에 그대로 박히므로 sh 특수문자가 든 이름은 건너뛴다(사용자 편집
+        // characters.json 방어 — 그 캐릭터만 팀모드 없이 부팅될 뿐 스크립트는 안 깨진다).
+        if name.chars().any(|c| c.is_whitespace() || "|)('\"`;&<>*?[]{}$!\\#~".contains(c)) {
+            continue;
+        }
+        let slug = theme::character_slug(&name)
+            .map(String::from)
+            .unwrap_or_else(|| kasa_mcp::team::ascii_ident(&name));
+        let color = kasa_mcp::character::claude_color_for(&chars, &name)
+            .map(|c| kasa_mcp::team::normalize_agent_color(&c).to_string())
+            .unwrap_or_default();
+        arms.push_str(&format!("      {name}) AGENT={slug}; ACOLOR={color} ;;\n"));
+    }
+    arms
+}
+
 pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
     let Some(hooks_dir) = locate_collab_hooks_dir() else {
         eprintln!("[shim] collab-hooks dir not found — claude hook shim skipped");
@@ -5562,17 +5685,43 @@ pub(crate) fn install_claude_hook_shim(shim_dir: &std::path::Path) {
         account_dir.as_deref().map_or(String::new(), |d| d.display().to_string()),
     );
     let account_block = claude_account_export_line(account_dir.as_deref());
-    // teammate 트리플 자동 부착은 제거됐다(거노 2026-07-24): kasaterm 재시작으로 복원된
-    // 세션(claude --resume)은 인박스 폴러가 안 돌아 SendMessage 가 조용히 유실되고(파일에만
-    // 쌓임, 아루 실측), tell 이 발신 학생 프사·색으로 렌더되면서 크로스 pane 통신의 정식
-    // 경로가 됐다. 팀 채널(SendMessage)은 오케스트레이터가 학생을 **명시 트리플로 스폰**한
-    // 세트 안에서만 연다 — 사용자/스폰 다이얼로그의 --agent-* 는 이전처럼 그대로 통과된다.
-    // 아래 블록은 트리플과 무관하게 유지되는 resume 연속성 처리만 남긴 것:
+    // teammate 트리플 자동 부착 — pane 의 claude 를 전부 팀원으로 부팅해 SendMessage 를
+    // 상시 연다. 인박스 폴러는 트리플만으로 arm 되고 config.json 은 필요 없다.
+    //
+    // 이 블록은 2026-07-24 에 한 번 통째로 제거됐다가 08-04 에 되살아났다. 제거 사유는
+    // 둘이었는데 **둘 다 이름 꼬리가 세션 id 였던 탓**이다: `--resume` 마다 sid 가 바뀌니
+    // 이름이 바뀌고, 옛 이름 인박스로 간 SendMessage 는 아무도 안 읽는 파일에 쌓였다(조용한
+    // 유실). 유령 인박스도 재시작 횟수만큼 늘었다. 그래서 꼬리를 **pane 번호**로 바꿨다 —
+    // pane 은 자기 생애 동안 번호가 안 바뀌므로 같은 pane 에서 몇 번을 resume 해도 같은
+    // 이름·같은 인박스고, 인박스 개수는 방의 pane 슬롯 수로 묶인다.
+    //
+    // 되살린 이유: 제거의 진짜 동기는 `@이름` 칩이 입력박스 구분선에서 /rename 세션 이름
+    // 자리를 뺏는 것이었는데(거노), 그건 이제 render.rs 의 strip_teammate_chip 이 칩만
+    // 지워서 해결한다 — 통신을 끄지 않고도 화면이 조용해진다.
+    //
+    // 나머지 규칙:
+    // - 이름 = <로마자 슬러그>-p<pane 번호>. 한글은 inbox 파일명 슬러그가 "---" 로 붕괴해
+    //   충돌한다(team.rs). 같은 캐릭터가 여러 pane 에 있어도 번호로 갈린다.
+    // - 팀 = 방(cwd) 단위, /teamname 엔드포인트가 계산(fnv 해시는 순수 sh 재현 불가).
+    //   서버가 죽어 팀명이 비면 플래그 전체 생략 — 순정 claude 부팅으로 조용히 폴백.
+    // - pane 밖(--bg detach 포크 등)은 트리플을 안 붙인다. 데몬이 argv 를 재구성하는
+    //   경로라 어차피 유실되고, pane 번호도 없어 이름이 안 선다.
+    // - agent-name=목표작업명 규칙(team.rs, 다이얼로그 스폰용)과 공존: 사용자가 --agent-*
+    //   를 직접 주면 우리 트리플은 통째 생략된다.
+    // - agent-id 는 전원 고정 문자열 "team-lead": claude 의 승인 포워딩 게이트가
+    //   agent-id=="team-lead" 를 리더로 판정해 꺼지므로, AskUserQuestion·권한 요청이
+    //   "Waiting for team lead approval"(존재하지 않는 리더 무한대기 + 요청 유실)로 새지
+    //   않고 그 pane 에 네이티브 렌더된다. 수신 폴러·인박스 파일명·SendMessage 주소는 전부
+    //   agent-name 기준이라 id 중복은 무해하다. 비공개 인터페이스 문자열 비교라 claude
+    //   버전 업 시 재검증 필요.
+    //
+    // 함께 남아 있는 resume 연속성 처리(트리플과 무관):
     // - TSID 파싱(--session-id/--resume 값, --continue 는 cwd 프로젝트 최신 transcript 추론)
     // - KASATERM_RESUMED_SID/RESUME_PICKER 마커(statusline ⑂bg 오발화 방지)
     // - resume 부팅 캐릭터 정합 교정(거노: 모모이 세션이 프라나 배지·persona 로 부팅)
+    let team_arms = teammate_case_arms();
     let team_block = format!(
-        "TSID=\"$SID\"; prev=\"\"\n\
+        "AGENT=\"\"; ACOLOR=\"\"; TSID=\"$SID\"; prev=\"\"\n\
 for a in \"$@\"; do case \"$prev\" in --session-id|--resume) case \"$a\" in -*) ;; *) TSID=\"$a\" ;; esac ;; esac; prev=\"$a\"; done\n\
 # id 없는 --continue 는 claude 와 같은 기준(cwd 프로젝트 최신 transcript)으로 sid 를\n\
 # 추론해 캐릭터 정합·RESUMED_SID 마커의 연속성을 유지한다(추론 실패는 마커 없이 부팅).\n\
@@ -5597,6 +5746,25 @@ if [ -n \"$PERSONA_OK\" ] && [ -z \"$SID\" ] && [ -n \"$TSID\" ]; then\n\
   if [ -n \"$RC\" ]; then\n\
     export KASATERM_CHARACTER=\"$RC\"\n\
     KASATERM_PERSONA=$(curl -s --max-time 2 --get --data-urlencode \"sid=$TSID\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/persona\" 2>/dev/null)\n\
+  fi\n\
+fi\n\
+if [ -n \"$PERSONA_OK\" ] && [ -n \"$KASATERM_PANE_ID\" ] && [ -n \"$KASATERM_CHARACTER\" ]; then\n\
+  case \" $* \" in *\" --agent-id \"*|*\" --agent-name \"*|*\" --team-name \"*) : ;; *)\n\
+    case \"$KASATERM_CHARACTER\" in\n\
+{team_arms}\
+    esac\n\
+  ;; esac\n\
+fi\n\
+if [ -n \"$AGENT\" ]; then\n\
+  TEAM=$(curl -s --max-time 2 --get --data-urlencode \"cwd=$PWD\" \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/teamname\" 2>/dev/null)\n\
+  if [ -n \"$TEAM\" ]; then\n\
+    AGENT=\"$AGENT-p${{KASATERM_PANE_ID#%}}\"\n\
+    IB=\"$HOME/.claude/teams/$TEAM/inboxes/$AGENT.json\"\n\
+    mkdir -p \"${{IB%/*}}\" 2>/dev/null\n\
+    [ -f \"$IB\" ] || printf '[]' > \"$IB\"\n\
+    export KASATERM_TEAM=\"$TEAM\" KASATERM_AGENT=\"$AGENT\"\n\
+    set -- --agent-id team-lead --agent-name \"$AGENT\" --team-name \"$TEAM\" \"$@\"\n\
+    [ -n \"$ACOLOR\" ] && set -- --agent-color \"$ACOLOR\" \"$@\"\n\
   fi\n\
 fi\n"
     );
@@ -6625,11 +6793,13 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         assert!(ok, "generated claude wrapper failed sh -n");
-        // 자동 teammate 트리플은 제거됐다(거노 2026-07-24) — 부활하면 재시작 복원
-        // 세션의 SendMessage 조용한 유실 클래스가 돌아온다. 팀 채널은 스폰 다이얼로그/
-        // 사용자 명시 --agent-* 만. wrapper 에 자동 트리플 흔적이 없어야 한다.
-        assert!(!body.contains("--agent-id"), "auto teammate triple resurfaced in shim");
-        assert!(!body.contains("/teamname"), "auto team computation resurfaced in shim");
+        // 자동 teammate 트리플은 2026-08-04 복원됐다(이 가드는 07-24 제거 시절의 것이라
+        // 복원 때 같이 안 뒤집혀 빨간 채로 남아 있었다). 제거 사유였던 "재시작마다 인박스
+        // 고아화"는 꼬리를 세션 id 에서 pane 번호로 바꿔 사라졌다 — pane 은 생애 동안 번호가
+        // 안 변해 몇 번을 resume 해도 같은 인박스다. 이게 빠지면 pane 간 SendMessage 와
+        // board 의 agent_name/team(도는 학생에게 인박스로 말 걸기)이 통째로 죽는다.
+        assert!(body.contains("--agent-id team-lead"), "auto teammate triple went missing");
+        assert!(body.contains("KASATERM_AGENT="), "board 가 읽는 AGENT env 가 사라졌다");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -63,6 +63,162 @@ impl App {
         self.chrome_dirty = true;
         eprintln!("[autocursor] ({x:.0},{y:.0})");
     }
+    /// `KASATERM_AUTOEXPANDCLICK="<방idx>"` (+ `_MS`) — 그 방의 **펼치기 버튼**을
+    /// 진짜로 누른다. `"2:body"` 는 같은 카드의 이름줄, `"2:dots"` 는 버튼 바로
+    /// 오른쪽 상태 점 자리 — 둘 다 방 전환으로 흘러야 하는 곳이다.
+    ///
+    /// 상태를 직접 세우는 `AUTOEXPAND` 와 갈리는 건 좌표 판정을 지난다는 점이다.
+    /// 버튼과 전환이 한 카드 안에서 갈리므로, 정작 검증해야 할 것이 그 갈림
+    /// 자체다 — 예전엔 클릭 쪽이 "아랫줄 오른쪽 100px" 라는 자기 공식을 갖고 있어
+    /// 눈에 보이는 삼각형보다 훨씬 넓은 구역이 전환을 삼켰다.
+    pub(crate) fn run_pending_autoexpandclick(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, usize, u8)>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let spec = std::env::var("KASATERM_AUTOEXPANDCLICK").ok()?;
+            let (idx, rest) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+            let ms: u64 = std::env::var("KASATERM_AUTOEXPANDCLICK_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5000);
+            Some((
+                Instant::now() + std::time::Duration::from_millis(ms),
+                idx.trim().parse().ok()?,
+                match rest.trim() {
+                    "body" => 1,
+                    "dots" => 2,
+                    _ => 0,
+                },
+            ))
+        });
+        let Some((due, idx, spot)) = *due else { return };
+        if Instant::now() < due || FIRED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(tab) = self.window_tab_rects.iter().find(|(i, _)| *i == idx).map(|(_, r)| *r)
+        else {
+            eprintln!("[autoexpandclick] 방 {idx} 없음");
+            return;
+        };
+        let btn = self.window_expand_rect(idx, tab);
+        let (x, y) = match (spot, btn) {
+            (1, _) => (tab.0 + 40.0, tab.1 + 14.0),
+            // 배지 **왼쪽** 여백 — 아랫줄에서 드래그를 시작할 수 있는 자리다.
+            // 오른쪽은 배지가 카드 끝에 붙어 있어 카드 밖으로 나간다(실측 handled=false).
+            (2, Some(r)) => (r.0 - 10.0, r.1 + r.3 / 2.0),
+            (_, Some(r)) => (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0),
+            _ => {
+                eprintln!("[autoexpandclick] 방 {idx} 는 pane 이 하나라 버튼이 없음");
+                return;
+            }
+        };
+        let before = self.active_window;
+        let handled = self.window_strip_click(x, y);
+        // 드래그 장전 여부까지 찍는다 — 버튼을 카드에서 도려내는 변경은 그 자리의
+        // tear-off 를 조용히 죽일 수 있고(빌드도 클릭도 멀쩡하다), 신호가 여기뿐이다.
+        eprintln!(
+            "[autoexpandclick] ({x:.0},{y:.0}) handled={handled} 활성 {before}->{} 펼침={:?} 드래그장전={}",
+            self.active_window,
+            self.expanded_windows,
+            self.win_tab_drag.is_some()
+        );
+        // 펼침 모션 프레임은 **클릭 기준**으로 잡아야 한다. 시작 기준
+        // `AUTOCAPTURE_MS` 로는 못 잡는다 — 이 클릭 자체가 이벤트 루프가 깨어날 때
+        // 나가서, 예약보다 한참 늦게 발화한다(실측: 캡처가 먼저 찍혀 네 장 모두
+        // 접힌 그림이 나왔다). `_CAP` 에 경로, `_CAP_MS` 에 클릭 후 ms 를 콤마로.
+        //
+        // ⚠️ 여러 장을 걸 때는 **간격을 readback 보다 넓게**. 캡처는 `capture_next`
+        // 한 칸을 거쳐 다음 렌더에 찍히는데 그 전에 다음 만기가 오면 앞엣것을
+        // 덮어써 파일이 조용히 빈다(실측: 30·70·120·300 중 1·4 번만 남았다).
+        // 0.16초짜리 이 모션은 오프셋을 바꿔 가며 한 실행에 한 장이 확실하다.
+        let Ok(path) = std::env::var("KASATERM_AUTOEXPANDCLICK_CAP") else { return };
+        let offs = std::env::var("KASATERM_AUTOEXPANDCLICK_CAP_MS")
+            .unwrap_or_else(|_| "40,90,140,260".into());
+        let now = Instant::now();
+        for (i, ms) in offs.split(',').filter_map(|s| s.trim().parse::<u64>().ok()).enumerate() {
+            let p = match path.rsplit_once('.') {
+                Some((stem, ext)) => format!("{stem}-{}.{ext}", i + 1),
+                None => format!("{path}-{}", i + 1),
+            };
+            self.pending_capture.push((now + std::time::Duration::from_millis(ms), p));
+        }
+    }
+    /// `KASATERM_AUTOROWDRAG="<src줄>:<dst줄>[:before]"` (+ `_MS`) — 사이드바
+    /// 목록의 src 번째 줄을 잡아 dst 번째 줄 위(`before`)나 아래에 떨어뜨린다.
+    ///
+    /// 누르기는 진짜 클릭 판정(`window_strip_click`)을 지나고, 떨어질 자리는
+    /// handler 와 같은 규칙(대상 줄의 위/아래 절반)으로 잡는다. 확인할 건 "옮겼다"가
+    /// 아니라 **아무것도 잃지 않았나**다 — pane 이동은 트리에서 leaf 를 떼어 다른
+    /// 트리에 붙이는 일이라, 어긋나면 캡처는 멀쩡한데 pane 하나가 조용히 사라진다.
+    pub(crate) fn run_pending_autorowdrag(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, usize, usize, bool)>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            let spec = std::env::var("KASATERM_AUTOROWDRAG").ok()?;
+            let mut it = spec.split(':');
+            let src: usize = it.next()?.trim().parse().ok()?;
+            let dst: usize = it.next()?.trim().parse().ok()?;
+            let before = it.next().map(|s| s.trim() == "before").unwrap_or(false);
+            let ms: u64 = std::env::var("KASATERM_AUTOROWDRAG_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5000);
+            Some((Instant::now() + std::time::Duration::from_millis(ms), src, dst, before))
+        });
+        let Some((due, src, dst, before)) = *due else { return };
+        if Instant::now() < due || FIRED.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let rows = self.sidebar_row_rects.clone();
+        let Some((_, sid, sr)) = rows.get(src) else {
+            eprintln!("[autorowdrag] 줄 {src} 없음 (총 {})", rows.len());
+            return;
+        };
+        // dst 가 줄 범위를 넘으면 **방 카드**에 떨어뜨린 것으로 본다(넘긴 만큼이 방
+        // 인덱스) — pane 하나짜리 방은 목록에 줄이 없어 이 경로로만 닿는다.
+        let did = match rows.get(dst) {
+            Some((_, id, _)) => id.clone(),
+            None => {
+                let wi = dst - rows.len();
+                match self.window_leaves(wi).into_iter().last() {
+                    Some(id) => id,
+                    None => {
+                        eprintln!("[autorowdrag] 방 {wi} 가 비었음");
+                        return;
+                    }
+                }
+            }
+        };
+        let did = &did;
+        let all = |s: &Self| -> Vec<String> {
+            (0..s.windows.len()).flat_map(|i| s.window_leaves(i)).collect()
+        };
+        let before_leaves = all(self);
+        self.window_strip_click(sr.0 + sr.2 / 2.0, sr.1 + sr.3 / 2.0);
+        let armed = self.sidebar_row_drag.is_some();
+        if let Some(d) = self.sidebar_row_drag.as_mut() {
+            d.active = true;
+            d.target = Some((did.clone(), before));
+        }
+        let zone = if before { crate::DropZone::Up } else { crate::DropZone::Down };
+        let (sid, did) = (sid.clone(), did.clone());
+        self.move_pane(&sid, &did, zone);
+        self.sidebar_row_drag = None;
+        self.render_frame();
+        let after = all(self);
+        eprintln!(
+            "[autorowdrag] {sid} → {did} ({}) 장전={armed} leaves {}개→{}개 {:?}",
+            if before { "위" } else { "아래" },
+            before_leaves.len(),
+            after.len(),
+            after
+        );
+        eprintln!("[autorowdrag] 기대: 장전=true · leaves 수 그대로 · 모든 pane 살아 있음");
+    }
     /// `KASATERM_AUTOTHEME="<키>"` (+ `_MS`) — 그 시각에 테마를 갈아 끼운다.
     ///
     /// 전환 디졸브는 0.4초짜리라 손으로는 중간을 못 잡는다. 바뀌는 시각을 못박아
@@ -421,7 +577,11 @@ impl App {
             self.pty.contains_key(&victim)
         );
         if std::env::var("KASATERM_AUTOCLOSEREOPEN_HOLD").is_ok() {
-            eprintln!("[autoclosereopen] hold — 인포의 대기 줄 캡처 대기");
+            eprintln!(
+                "[autoclosereopen] hold — 하단바 칩={:?} 예약={}",
+                self.dock_chip_rects,
+                self.dock_reserve_h()
+            );
             return;
         }
         self.reopen_closed_pane();
@@ -529,8 +689,19 @@ impl App {
         eprintln!(
             "[autowinundock] 기대: windows 그대로 · 활성은 남은 방 · 꺼낸 방에 「밖」 · rect 수 = 꺼내기 전 leaf 수"
         );
-        if std::env::var("KASATERM_AUTOWINUNDOCK_DOCK").is_ok() {
-            if let Some(i) = aux_idx {
+        if let Ok(mode) = std::env::var("KASATERM_AUTOWINUNDOCK_DOCK") {
+            // `click` 은 사이드바 빈 슬롯의 되돌리기 버튼을 실제로 눌러 본다 —
+            // `dock_window_room` 직접 호출은 aux 인덱스로 말하고 사이드바는 방
+            // 인덱스로 말해서, 둘이 어긋나면 엉뚱한 창이 돌아온다.
+            if mode == "click" {
+                self.render_frame();
+                let hit = self.window_dock_rects.first().copied();
+                eprintln!("[autowinundock] 되돌리기 버튼={hit:?}");
+                if let Some((_, r)) = hit {
+                    let handled = self.window_strip_click(r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                    eprintln!("[autowinundock] 버튼 클릭 handled={handled}");
+                }
+            } else if let Some(i) = aux_idx {
                 self.dock_window_room(i);
             }
             self.render_frame();
@@ -1020,6 +1191,34 @@ impl App {
         // 한 글자씩 먹여, 조합기가 완성 음절을 만드는지 낱자로 흘리는지 찍는다.
         // 실제 IME 없이 재현할 수 있는 건 macOS 가 OS IME 를 끄고 자모를 그대로
         // 받기 때문 — 그 경로가 곧 거노가 치는 경로다.
+        // 페이지 아래쪽 항목은 창을 아무리 키워도 첫 화면에 안 들어온다 —
+        // 스크롤 위치를 직접 심어 그 자리를 캡처한다(휠 이벤트는 aux 창으로
+        // 안 간다).
+        if let Ok(s) = std::env::var("KASATERM_AUTOSETTINGS_SCROLL") {
+            if let Ok(v) = s.parse::<f32>() {
+                self.settings_scroll = v;
+            }
+        }
+        // 배율/폰트를 흐트러뜨린 뒤 "1:1 로 되돌리기"가 둘 다 되돌리는지. 되돌린
+        // 값이 맞아도 격자를 다시 안 재면 화면만 옛 크기로 남으므로 cells 도 찍는다.
+        if std::env::var("KASATERM_AUTOSETTINGS_RESET").is_ok() {
+            self.change_ui_zoom(0.3);
+            self.font_size = 22.0;
+            self.apply_effective_scale();
+            eprintln!(
+                "[autoreset] 흐트러뜨림: zoom={:.2} font={} cells={:?}",
+                self.ui_zoom,
+                self.font_size,
+                self.window_cells()
+            );
+            self.settings_apply(crate::SettingsAction::ResetScale);
+            eprintln!(
+                "[autoreset] 되돌린 뒤: zoom={:.2} font={} cells={:?}",
+                self.ui_zoom,
+                self.font_size,
+                self.window_cells()
+            );
+        }
         if let Ok(t) = std::env::var("KASATERM_AUTOSETTINGS_TYPE") {
             self.settings_input = Some(SettingsInput::ClaudeAccountLabel(0));
             self.settings_caret = 0;
@@ -1612,7 +1811,7 @@ impl App {
         });
         if let Some(a) = self.aux_windows.iter_mut().find(|a| {
             matches!(&a.kind,
-                crate::auxwin::AuxWindowKind::Terminal { pane_id } if *pane_id == pid)
+                crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if *pane_id == pid)
         }) {
             a.pending_capture =
                 Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
@@ -1784,6 +1983,48 @@ impl App {
         } else {
             self.autotoggle_sidebar_at = None;
         }
+    }
+    /// 사이드바 방 펼치기 헤드리스 재현 — `KASATERM_AUTOEXPAND` 에 방 인덱스를
+    /// 콤마로(`0,2`). 펼침은 클릭 손잡이가 유일한 입구라, 상태를 직접 세워야
+    /// 목록의 배치·잘림·넘침을 캡처로 볼 수 있다. 방이 아직 없어도 인덱스만
+    /// 담아 두면 나중에 생기는 방에 그대로 적용된다.
+    /// `KASATERM_AUTOALERT="0,2"` — 그 방들에 "못 본 알림"을 세운다.
+    ///
+    /// 알림·대기 표시는 밖에서 일이 일어나야(claude 가 끝나거나 물어봐야) 켜지는데,
+    /// 헤드리스에는 그 일이 없다. 상태만 세워 두면 캡처가 곧 그 표시의 스크린샷이
+    /// 된다 — 색·자리·속도가 정말 갈리는지는 눈으로만 확인된다.
+    pub(crate) fn arm_autoalert(&mut self) {
+        let Ok(v) = std::env::var("KASATERM_AUTOALERT") else { return };
+        for i in v.split(',').filter_map(|s| s.trim().parse::<usize>().ok()) {
+            self.window_alert.insert(i);
+        }
+        eprintln!("[autoalert] {:?}", self.window_alert);
+    }
+    /// `KASATERM_AUTOWAIT="%2"` — 그 pane 을 "손을 기다리는 중"으로 세운다.
+    ///
+    /// 한 번 세우고 끝낼 수 없다. `refresh_pane_activity` 가 틱마다 transcript 를
+    /// 다시 읽어 `pane_activity` 를 통째로 덮어쓰므로, 캡처가 뜰 즈음엔 세워 둔
+    /// 상태가 이미 지워져 있다(실측: 띠가 한 장도 안 나왔다). 그래서 매 틱 덮는다.
+    pub(crate) fn apply_autowait(&mut self) {
+        use std::sync::OnceLock;
+        static IDS: OnceLock<Vec<String>> = OnceLock::new();
+        let ids = IDS.get_or_init(|| {
+            std::env::var("KASATERM_AUTOWAIT")
+                .map(|v| {
+                    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                })
+                .unwrap_or_default()
+        });
+        for id in ids {
+            self.pane_activity.entry(id.clone()).or_default().status = "waiting".into();
+        }
+    }
+    pub(crate) fn arm_autoexpand(&mut self) {
+        let Ok(v) = std::env::var("KASATERM_AUTOEXPAND") else { return };
+        for i in v.split(',').filter_map(|s| s.trim().parse::<usize>().ok()) {
+            self.expanded_windows.insert(i);
+        }
+        eprintln!("[autoexpand] {:?}", self.expanded_windows);
     }
     pub(crate) fn arm_autotoggle(&mut self) {
         let Ok(ms_str) = std::env::var("KASATERM_AUTOTOGGLE_SIDEBAR_MS") else { return };
