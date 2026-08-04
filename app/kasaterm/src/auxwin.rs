@@ -1325,14 +1325,31 @@ impl App {
             };
             (pid.to_string(), a.gpu.scale(), w, h, a.focused, home)
         };
-        // draw 중 lock 을 안 쥐도록 셀/커서를 복사해 스냅샷.
-        let snap = {
+        // draw 중 lock 을 안 쥐도록 셀/커서를 복사해 스냅샷. 배정 학생도 같이 —
+        // 꺼낸 pane 도 메인 그리드에 있을 때와 같은 학생색·이름을 달아야 한다
+        // (거노: 별도창이 완전 다른 앱 같다). ordinal 은 동명이인 구분용이라
+        // 전체 pane 맵이 필요하다.
+        let (snap, student) = {
             let ws = self.ws.lock().unwrap();
-            ws.panes.get(&pane_id).and_then(|p| {
+            let cells = ws.panes.get(&pane_id).and_then(|p| {
                 p.term()
                     .map(|t| (t.cells.clone(), t.cursor_row, t.cursor_col, t.cursor_visible))
-            })
+            });
+            let who = ws.pane_character.get(&pane_id).cloned().map(|name| {
+                let ord = crate::theme::character_ordinal(&ws.pane_character, &pane_id);
+                let col = crate::theme::character_accent_n(&name, ord);
+                (name, col)
+            });
+            (cells, who)
         };
+        let working = self
+            .pane_activity
+            .get(&pane_id)
+            .is_some_and(|a| a.status == "working");
+        let accent = student
+            .as_ref()
+            .and_then(|(_, c)| *c)
+            .unwrap_or_else(|| crate::theme::accent());
         let Some(a) = self.aux_windows.get_mut(idx) else { return };
         a.gpu.clear_chrome();
         a.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
@@ -1346,23 +1363,41 @@ impl App {
         // 왼쪽에 「%3 · 2번 방」(꺼낸 pane 의 번호와 나온 방), 오른쪽에 되돌리기.
         // 빈 곳을 끌면 창이 움직인다(`aux_header_press` → `drag_window`).
         {
-            let label = format!("{pane_id} · {}번 방", home_window + 1);
+            // 학생이 있으면 그 이름을 앞에 세우고 학생색으로 — 메인 그리드에서
+            // 테두리·헤더가 하던 "이 창에 누가 있나"를 여기서도 한눈에.
+            let label = match &student {
+                Some((name, _)) => format!("{name} · {pane_id} · {}번 방", home_window + 1),
+                None => format!("{pane_id} · {}번 방", home_window + 1),
+            };
             a.gpu.rect(0.0, 0.0, w, AUX_HEADER_H, crate::theme::surface());
             a.gpu.rect(0.0, AUX_HEADER_H - 1.0, w, 1.0, crate::theme::border());
+            let label_col = if student.is_some() { accent } else { crate::theme::text_mute() };
             a.gpu.draw_text(
                 12.0,
                 (AUX_HEADER_H - 12.0) / 2.0,
                 &label,
                 gpu::DrawOpts {
                     font_size: 12.0,
-                    color: crate::theme::with_alpha(
-                        crate::theme::text_mute(),
-                        if focused { 0xF0 } else { 0x99 },
-                    ),
-                    bold: false,
+                    color: crate::theme::with_alpha(label_col, if focused { 0xF0 } else { 0x99 }),
+                    bold: student.is_some(),
                     italic: false,
                 },
             );
+            // working 스윕바 — 메인 pane 상단의 그것과 같은 신호다. 없으면 꺼낸
+            // 창만 "멈춘 것처럼" 보인다.
+            if working {
+                const BAR_H: f32 = 2.5;
+                let phase = crate::render::anim_phase_secs();
+                a.gpu.rect(0.0, 0.0, w, BAR_H, crate::theme::with_alpha(accent, 0x2e));
+                let seg = (w * 0.32).clamp(36.0, 160.0);
+                let span = w + seg;
+                let off = (phase * 0.5).fract() * span - seg;
+                let sx = off.max(0.0);
+                let ex = (off + seg).min(w);
+                if ex > sx {
+                    a.gpu.rect(sx, 0.0, ex - sx, BAR_H, accent);
+                }
+            }
             // 되돌리기 — ⌘W 와 같은 동작이지만, 그 단축키를 모르면 창에 갇힌다.
             a.gpu.queue_icon(
                 "corner-down-left",
@@ -1399,8 +1434,26 @@ impl App {
             // 조합 중 한글 — 커서 자리에 프리에딧(메인 render 와 동일 draw_preedit).
             a.gpu.draw_preedit(px, py, &pe, crate::cells::iterm_cursor(), 1.0);
         }
+        // 학생색 외곽선 — 메인 그리드의 active pane 테두리와 같은 신호다. 셀 위에
+        // 얹어야 가장자리 글자에 안 먹힌다. 포커스가 없을 땐 흐리게 남겨 어느 창이
+        // 누구인지는 계속 보이게 한다.
+        if student.is_some() {
+            const T: f32 = 1.5;
+            let col = crate::theme::with_alpha(accent, if focused { 0xFF } else { 0x66 });
+            a.gpu.rect(0.0, 0.0, w, T, col);
+            a.gpu.rect(0.0, h - T, w, T, col);
+            a.gpu.rect(0.0, 0.0, T, h, col);
+            a.gpu.rect(w - T, 0.0, T, h, col);
+        }
         let _ = a.gpu.render(&[], scale, 0.0, true);
         a.dirty = false;
+        // 스윕바는 애니메이션이라 다음 프레임을 스스로 불러야 한다 — PTY 출력이
+        // 없으면 아무도 이 창을 다시 그리지 않아 바가 한 자리에 얼어붙는다.
+        // working 이 끝나면 이 요청도 끊긴다.
+        if working {
+            a.dirty = true;
+            a.window.request_redraw();
+        }
     }
 
     /// 이 방이 지금 별도 창으로 나가 있나. 사이드바 탭 표시와 info 배지가 같은

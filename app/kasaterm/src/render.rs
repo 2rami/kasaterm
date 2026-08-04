@@ -5060,6 +5060,11 @@ impl App {
             // 모은다. statusbar 루프(아래)도 active 보더 inset 계산에 active_pane/
             // is_split을 쓰므로 settings 분기 밖, 더 넓은 스코프에 둔다.
             let is_split = footer_slots.len() > 1;
+            // 테두리를 실제로 그린 pane 과 그 두께. 하단바(footer)는 나중에 그려지므로
+            // 이 값만큼 안쪽으로 물러나야 테두리를 안 덮는다. 두 곳이 각자 조건을
+            // 계산하면 반드시 어긋난다 — 줌 pane 은 테두리가 있는데 하단바는 그걸
+            // 모르고 덮어 아래쪽만 끊겨 보였다(거노). 그린 쪽이 기록하고 덮는 쪽이 읽는다.
+            let mut border_inset: HashMap<String, f32> = HashMap::new();
             // active_pane + pane 별 캐릭터명을 한 lock 으로 스냅샷 — 아래 pane 테두리
             // 루프가 g(=&mut self.gpu) 안이라 self 재borrow 불가. character_accent 폴백용.
             let (active_pane, pane_chars) = self
@@ -5171,6 +5176,7 @@ impl App {
                             g.rect(*fx, fy + fbox_h - t, *fw, t, col);
                             g.rect(*fx, *fy, t, *fbox_h, col);
                             g.rect(fx + fw - t, *fy, t, *fbox_h, col);
+                            border_inset.insert(fid.clone(), t);
                         }
                     }
                     // 로딩바 — claude 작업 중(pane_activity working)일 때 box 상단
@@ -5303,11 +5309,11 @@ impl App {
                     continue;
                 }
                 let bar_y = fy + fbox_h - PANE_FOOTER_HEIGHT;
-                // active pane 파란 보더(1.5px)를 footer 배경이 덮지 않게 좌우·하단을
-                // 보더 두께만큼 안쪽으로 그린다 — 안 그러면 나중에 그려지는 footer bg 가
-                // 보더의 하단·좌우 끝을 덮어 "파란선이 하단바를 제외하고 감싸는"것처럼
-                // 보인다(거노). active 가 아니면 inset 0.
-                let bt = if is_split && active_pane.as_deref() == Some(fid.as_str()) { 1.5_f32 } else { 0.0 };
+                // 테두리를 footer 배경이 덮지 않게 좌우·하단을 그 두께만큼 안쪽으로
+                // 그린다 — 안 그러면 나중에 그려지는 footer bg 가 보더의 하단·좌우 끝을
+                // 덮어 "선이 하단바를 제외하고 감싸는" 것처럼 보인다(거노). 두께는
+                // 실제로 그린 쪽이 남긴 값을 쓴다(줌은 2.0, 분할 active 는 1.5).
+                let bt = border_inset.get(fid.as_str()).copied().unwrap_or(0.0);
                 g.rect(fx + bt, bar_y, fw - 2.0 * bt, PANE_FOOTER_HEIGHT - bt, theme::bg());
                 g.rect(fx + bt, bar_y, fw - 2.0 * bt, 1.0, theme::border());
                 // Pill metrics shared by every chip. 12/13 은 앱을 통틀어 가장 작은
