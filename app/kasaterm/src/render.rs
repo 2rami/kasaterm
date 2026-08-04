@@ -5829,7 +5829,7 @@ impl App {
             // — the hidden sibling panes, so the maximize visibly "sends the
             // others to the dock" and a sibling chip click switches the zoom to
             // it. zoom siblings have no × (they're live panes, not parked).
-            let mut dock_items: Vec<(String, String, bool)> = if let Some(z) = self.zoomed_pane.clone() {
+            let dock_items: Vec<(String, String, bool)> = if let Some(z) = self.zoomed_pane.clone() {
                 let ws = self.ws.lock().unwrap();
                 self.pty_layout
                     .as_ref()
@@ -5863,26 +5863,10 @@ impl App {
                     })
                     .collect()
             };
-            // 닫아서 물러난 pane 도 같은 자리에 선다 — 하단바는 이미 "레이아웃에서
-            // 빠졌지만 살아 있는 것"의 자리고, 닫은 pane 이 정확히 그것이다(죽이지
-            // 않고 화면에서만 물러난다). Info 목록에도 있지만 거긴 프로세스 목록
-            // 맨 아래라 묻혀서, 되살릴 게 있다는 사실 자체가 안 보였다.
+            // 닫은 pane 은 여기 안 선다 — 되살리기는 Info 의 「되살리기」 섹션이
+            // 맡는다. 하단바에 두면 pane 하나 닫을 때마다 띠가 생겨 그리드가 통째로
+            // 재배치되고, 그 띠가 포커스 테두리 아랫변을 덮었다(거노).
             //
-            // ×(영구 삭제)는 안 붙인다. 그 한 번이 도는 claude 를 죽이는데 여긴
-            // 지나다 누르기 쉬운 자리다 — 지우기는 Info 줄에 그대로 남는다.
-            let dock_closed_from = dock_items.len();
-            {
-                let win = self.active_window;
-                for c in self.closed_panes.iter().rev().filter(|c| c.window == win) {
-                    let label = match (c.character.as_str(), c.folder.as_str()) {
-                        ("", "") => c.pane_id.clone(),
-                        ("", f) => f.to_string(),
-                        (n, "") => n.to_string(),
-                        (n, f) => format!("{n} · {f}"),
-                    };
-                    dock_items.push((c.pane_id.clone(), label, false));
-                }
-            }
             // 칩이 하나도 없어도 예약된 띠는 칠한다 — 안 칠하면 그리드가 비워 둔
             // 자리에 창 배경이 그대로 비쳐 바닥에 검은 틈이 생긴다.
             if dock_reserve > 0.0 {
@@ -5906,57 +5890,26 @@ impl App {
                 let mut cx = grid_x + 8.0;
                 let mut chip_hits = Vec::new();
                 let mut chip_close_hits = Vec::new();
-                for (i, (id, label, killable)) in dock_items.iter().enumerate() {
-                    let closed = i >= dock_closed_from;
+                for (id, label, killable) in dock_items.iter() {
                     let lw = g.measure_chrome_text(label, chrome_font, false);
-                    let chip_w = if *killable {
-                        lw + icon + 24.0
-                    } else if closed {
-                        lw + icon + 22.0
-                    } else {
-                        lw + 20.0
-                    };
+                    let chip_w = if *killable { lw + icon + 24.0 } else { lw + 20.0 };
                     let hover = mx >= cx && mx <= cx + chip_w && my >= cy && my <= cy + chip_h;
-                    // 닫은 pane 은 **빈 자리**로 그린다 — 채운 판으로 그리면 지금
-                    // 화면에 떠 있는 zoom 형제 칩과 구분이 안 된다. 얹으면 채워져
-                    // "여기 다시 들어온다"를 보인다(사이드바의 밖에 나간 방과 같은 언어).
-                    if closed && !hover {
-                        dashed_rect(
-                            g,
-                            cx,
-                            cy,
-                            chip_w,
-                            chip_h,
-                            theme::with_alpha(theme::border(), 0xC0),
-                        );
-                    } else {
-                        round_rect(
-                            g,
-                            cx,
-                            cy,
-                            chip_w,
-                            chip_h,
-                            theme::radius_sm(),
-                            if hover { theme::surface_hover() } else { theme::surface_active() },
-                        );
-                    }
-                    let tx0 = if closed { cx + icon + 12.0 } else { cx + 10.0 };
-                    if closed {
-                        g.queue_icon(
-                            "undo-2",
-                            cx + 8.0,
-                            cy + (chip_h - icon) / 2.0,
-                            icon,
-                            if hover { theme::text() } else { theme::text_dim() },
-                        );
-                    }
+                    round_rect(
+                        g,
+                        cx,
+                        cy,
+                        chip_w,
+                        chip_h,
+                        theme::radius_sm(),
+                        if hover { theme::surface_hover() } else { theme::surface_active() },
+                    );
                     g.draw_text(
-                        tx0,
+                        cx + 10.0,
                         cy + (chip_h - chrome_font) / 2.0 + 1.0,
                         label,
                         gpu::DrawOpts {
                             font_size: chrome_font,
-                            color: if closed && !hover { theme::text_dim() } else { theme::text() },
+                            color: theme::text(),
                             bold: false,
                             italic: false,
                         },

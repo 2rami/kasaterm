@@ -1161,14 +1161,13 @@ impl App {
     /// 하단바가 pane 그리드에서 먹는 높이(0 이면 바 자체가 없다).
     ///
     /// 예약과 그리기가 서로 다른 조건을 보면 바가 마지막 셀 줄 위에 겹치거나
-    /// 빈 띠만 남는다 — 판단은 여기 한 곳에서만 한다. 닫은 pane 은 활성 방
-    /// 것만 센다(하단바가 그 방의 물러난 것들 자리라서).
+    /// 빈 띠만 남는다 — 판단은 여기 한 곳에서만 한다.
+    ///
+    /// 닫은 pane 은 여기 안 센다. 되살리기는 Info 의 「되살리기」 섹션이 맡는다 —
+    /// 하단바에 두면 pane 을 하나 닫을 때마다 그리드가 40px 줄면서 화면 전체가
+    /// 재배치되고, 그 띠가 포커스 테두리 아랫변까지 덮었다(거노).
     pub(crate) fn dock_reserve_h(&self) -> f32 {
-        let has_closed = self
-            .closed_panes
-            .iter()
-            .any(|c| c.window == self.active_window);
-        if self.docked.is_empty() && self.zoomed_pane.is_none() && !has_closed {
+        if self.docked.is_empty() && self.zoomed_pane.is_none() {
             0.0
         } else {
             DOCK_HEIGHT

@@ -2382,14 +2382,7 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| hit(*r))
                         .map(|(i, _)| i.clone())
                     {
-                        // 닫힌 pane 칩이 먼저다 — zoom 중에도 하단바엔 형제와
-                        // 닫힌 것이 함께 서고, 닫힌 쪽에 toggle_pane_zoom 을 걸면
-                        // 레이아웃에 없는 id 로 zoom 이 들어가 화면이 빈다.
-                        if let Some(idx) =
-                            self.closed_panes.iter().position(|c| c.pane_id == id)
-                        {
-                            self.reopen_closed_pane_at(idx);
-                        } else if self.zoomed_pane.is_some() {
+                        if self.zoomed_pane.is_some() {
                             self.toggle_pane_zoom(&id);
                         }
                         window.request_redraw();
@@ -3017,6 +3010,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 let flag = match sec {
                                     state::InfoSection::Dir => &mut self.info.dir_collapsed,
                                     state::InfoSection::Procs => &mut self.info.procs_collapsed,
+                                    state::InfoSection::Closed => &mut self.info.closed_collapsed,
                                     state::InfoSection::Ports => &mut self.info.ports_collapsed,
                                 };
                                 *flag = !*flag;

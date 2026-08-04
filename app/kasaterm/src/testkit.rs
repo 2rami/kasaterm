@@ -577,10 +577,18 @@ impl App {
             self.pty.contains_key(&victim)
         );
         if std::env::var("KASATERM_AUTOCLOSEREOPEN_HOLD").is_ok() {
+            // 되살리기는 Info 섹션이 맡으므로 hold 는 그 화면에서 멈춘다 — 하단바가
+            // 0 이라는 것만 찍고 끝내면 "되살릴 길이 사라진 것"과 구분이 안 된다.
+            if !self.git.col_visible {
+                self.toggle_git_col();
+            }
+            self.info.tab = crate::state::SideTab::Info;
+            self.render_frame();
             eprintln!(
-                "[autoclosereopen] hold — 하단바 칩={:?} 예약={}",
+                "[autoclosereopen] hold — 하단바 칩={:?} 예약={} · Info 되살리기 줄={:?}",
                 self.dock_chip_rects,
-                self.dock_reserve_h()
+                self.dock_reserve_h(),
+                self.info.closed_rects
             );
             return;
         }

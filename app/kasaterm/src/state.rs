@@ -103,6 +103,9 @@ pub(crate) enum SideTab {
 pub(crate) enum InfoSection {
     Dir,
     Procs,
+    /// 닫아서 물러난 pane. 되살릴 게 있을 때만 나타나는 섹션이라, 다른 셋과 달리
+    /// 자리를 상시 차지하지 않는다.
+    Closed,
     Ports,
 }
 
@@ -185,6 +188,7 @@ pub(crate) struct InfoState {
     pub(crate) root_is_repo: bool,
     pub(crate) dir_collapsed: bool,
     pub(crate) procs_collapsed: bool,
+    pub(crate) closed_collapsed: bool,
     pub(crate) ports_collapsed: bool,
     /// 우클릭 메뉴 — `(화면 좌표, 대상)`.
     pub(crate) ctx_menu: Option<(f32, f32, InfoTarget)>,
@@ -254,6 +258,7 @@ impl Default for InfoState {
             root_is_repo: false,
             dir_collapsed: false,
             procs_collapsed: false,
+            closed_collapsed: false,
             ports_collapsed: false,
             ctx_menu: None,
             group_collapsed: std::collections::HashSet::new(),
