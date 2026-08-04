@@ -2405,7 +2405,12 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| hit(*r))
                         .map(|(i, _)| i.clone())
                     {
-                        if self.zoomed_pane.is_some() {
+                        // `aux:<i>` = 접어 둔 별도창. pane id 와 한 목록에 서므로
+                        // 접두사로 가른다 — 그 id 로 toggle_pane_zoom 을 부르면
+                        // 레이아웃에 없는 pane 으로 zoom 이 들어가 화면이 빈다.
+                        if let Some(i) = id.strip_prefix("aux:").and_then(|n| n.parse().ok()) {
+                            self.unhide_aux(i, event_loop);
+                        } else if self.zoomed_pane.is_some() {
                             self.toggle_pane_zoom(&id);
                         }
                         window.request_redraw();

@@ -1047,7 +1047,11 @@ impl App {
         tab: (f32, f32, f32, f32),
     ) -> Option<(f32, f32, f32, f32)> {
         let n = self.window_leaves(idx).len();
-        if n < 2 {
+        // pane 이 하나뿐인 방도 편다. 예전엔 `n < 2` 로 막았는데 — 한 줄짜리 목록은
+        // 펼 값어치가 없다는 판단이었다 — 그 한 줄이 **누가 거기 있고 무슨 상태인지**
+        // 다. 학생 하나를 방 하나에 두고 쓰면 사이드바에서 그 학생을 볼 길이 통째로
+        // 사라졌다(거노: "방하나에 학생하나면 펼치기가 없어서 학생목록이 안보이네").
+        if n == 0 {
             return None;
         }
         // 삼각형 하나짜리 18px 칩은 눌러 보기에 너무 작았다(거노). pane 개수를
@@ -1166,8 +1170,11 @@ impl App {
     /// 닫은 pane 은 여기 안 센다. 되살리기는 Info 의 「되살리기」 섹션이 맡는다 —
     /// 하단바에 두면 pane 을 하나 닫을 때마다 그리드가 40px 줄면서 화면 전체가
     /// 재배치되고, 그 띠가 포커스 테두리 아랫변까지 덮었다(거노).
+    ///
+    /// 접어 둔 별도창은 **센다**. 그건 사용자가 그 순간 직접 접은 것이라 띠가 생기는
+    /// 게 결과로 읽히고, 무엇보다 되살릴 손잡이가 여기 말고는 없다.
     pub(crate) fn dock_reserve_h(&self) -> f32 {
-        if self.docked.is_empty() && self.zoomed_pane.is_none() {
+        if self.docked.is_empty() && self.zoomed_pane.is_none() && self.hidden_aux.is_empty() {
             0.0
         } else {
             DOCK_HEIGHT
