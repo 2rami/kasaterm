@@ -4920,6 +4920,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_pane_activity();
         self.note_claude_panes();
         self.apply_autowait();
+        self.apply_autounread();
         // rust 파일이 편집기로 열려 있으면 rust-analyzer 를 붙인다. 여기서 하는
         // 이유는 편집기가 열리는 경로가 여러 개라서다(사이드바·소켓·복원·팝아웃)
         // — 한 자리에 두면 어느 경로로 열려도 같은 순간에 붙는다. 이미 알린
@@ -5045,7 +5046,7 @@ impl ApplicationHandler<UserEvent> for App {
             // 못 본 알림이 있는 방 탭은 숨쉰다 — 그 호흡이 이어지려면 프레임이
             // 계속 나가야 한다(커서 블링크에 얹혀 있던 시절엔 공짜였다).
             || !self.window_alert.is_empty()
-            // 손을 기다리는 pane 의 danger 띠도 같은 이유로.
+            // 손을 기다리는 pane 의 핑크 깜빡임(사이드바 줄 + pane 테두리)도 같은 이유로.
             || self.pane_activity.values().any(|a| a.status == "waiting")
             // 노치 스크롤 관성이 목표에 붙을 때까지 프레임을 펌프한다.
             || !self.md_scroll_anim.is_empty()

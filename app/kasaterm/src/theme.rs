@@ -53,6 +53,18 @@ color_slot!(S_SYN_COMMENT, syn_comment, [106, 115, 130, 255]);
 color_slot!(S_SYN_FUNCTION, syn_function, [97, 175, 239, 255]);
 color_slot!(S_SYN_TYPE, syn_type, [229, 192, 123, 255]);
 
+/// 「내 손을 기다린다」 색. 상태 언어의 네 번째 자리 — accent=도는 중,
+/// success=끝남, danger=잘못됨, 그리고 이것은 **막혀서 나를 부르는 중**이다.
+/// 예전엔 danger 를 빌려 썼는데 빨강은 "고장났다"로 읽혀, 승인 한 번이면 풀릴
+/// 일이 사고처럼 보였다(거노: "내가 엔터해야되는 건 핑크색으로").
+///
+/// 팔레트 슬롯이 아니라 고정값인 이유: 이건 테마 취향이 아니라 신호다. 테마마다
+/// 달라지면 같은 뜻이 창마다 다른 색으로 읽힌다. 밝기를 중간에 둬 밝은 테마의
+/// 흰 바탕과 어두운 테마의 검정 바탕 양쪽에서 다 떠오른다.
+pub fn attention() -> [u8; 4] {
+    [236, 106, 173, 255]
+}
+
 /// Terminal ANSI 0-15, runtime-swappable alongside the UI tokens so a theme
 /// switch recolors the terminal body too (256-cube / grayscale stay computed).
 /// Seeded with the dark default (Ghostty Tomorrow Night Bright) so pre-settings

@@ -199,7 +199,7 @@ impl App {
     pub(crate) fn pane_state_color(&self, id: &str) -> [u8; 4] {
         let st = self.pane_activity.get(id);
         if st.is_some_and(|a| a.status == "waiting") {
-            theme::danger()
+            theme::attention()
         } else if self.notify_flash_factor(id).is_some() {
             theme::success()
         } else if st.is_some_and(|a| a.status != "idle" && !a.status.is_empty())
