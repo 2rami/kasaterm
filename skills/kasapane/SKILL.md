@@ -776,7 +776,10 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 §4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용. 네 축이다:
 
 - **board** — 누가 뭘 하나. `kasaterm-cli board`로 **직접 조회**한다(옛 `kasaterm-board-context.py` 자동주입은 폐기 — settings 미등록). 충돌 회피·합류 판단에 쓴다.
-- **SendMessage** — **pane 간 소통의 기본**(2026-08-04 shim 자동 트리플 복원 후). `to:` 는 상대의 `$KASATERM_AGENT`(= `<캐릭터 슬러그>-p<pane번호>`). 인박스 네이티브 주입이라 상대 입력창을 안 건드리고 발신자 이름·색으로 렌더된다. 같은 방(cwd) pane 끼리 열려 있고, 다른 방이면 팀이 달라 안 닿으니 그때만 tell.
+- **SendMessage** — **pane 간 소통의 기본**(2026-08-04 shim 자동 트리플 복원 후). `to:` 는 상대의 `$KASATERM_AGENT`. 인박스 네이티브 주입이라 상대 입력창을 안 건드리고 발신자 이름·색으로 렌더된다. **유휴로 프롬프트만 떠 있는 pane 도 5초 안에 읽는다**(실측 2026-08-04 — 넣자마자 드레인+턴 시작). 깨우려고 tell 을 덧댈 필요 없다.
+  - ⚠️ **팀이 다르면 조용히 사라진다.** 팀은 방(cwd) 단위라 **다른 레포에 띄운 학생은 다른 팀**이다. 이때 SendMessage 는 실패하지 않고 *내 팀* 인박스에 그 이름의 고아 파일을 만들 뿐이며, 상대는 자기 팀 파일만 본다. 실사고(2026-08-04): mission-control 방에서 demo-showcase 방의 코하루에게 브리프 → 무응답. 내 팀 인박스 `koharu-p7.json` 1121B, 코하루가 읽는 파일은 `[]`.
+  - 보내기 전에 `kasaterm-cli board` 로 상대의 **`team` 이 내 `$KASATERM_TEAM` 과 같은지** 확인해라 — board 가 `agent`·`team` 을 pane 프로세스에서 실측해 싣는다(2026-08-04 추가). 이름을 `<슬러그>-p<번호>` 규칙으로 짐작하지 마라: 어긋나도 오류가 안 난다.
+  - **팀이 다르면 tell 로 지시하고, 브리프에 「보고는 하지 마라」고 적어라.** 반대 방향도 안 닿으므로 그 학생의 보고는 영영 오지 않는다 — 결과는 커밋과 `peek`·`transcript` 로 오케스트레이터가 직접 확인한다.
 - **tell** — **그 외 전부의 기본 채널**: 스폰 관계 없는 같은 방 pane·다른 방·bg 세션·비-claude(codex·antigravity·셸)·학생→오케스트레이터 보고·`/model` 같은 슬래시 명령 주입·idle claude 즉시 깨우기. 2026-07-24부터 받는 pane에 발신 학생 프사+학생색으로 렌더되어 거노 입력과 구분된다. 서버가 발신자를 기록해 웹뷰 대화에도 발신 학생 이름으로 뜬다.
 - **wait** — 동료 작업이 끝나길 기다릴 때. `tell`로 깨우거나 `board`를 반복 조회하지 말고 `wake-watch`를 background로 띄운다(아래).
 
