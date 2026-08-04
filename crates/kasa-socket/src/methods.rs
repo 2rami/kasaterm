@@ -523,7 +523,11 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
     // 기본 no-focus (자동화 경로): `focus:true` 를 명시할 때만 새 pane 으로 포커스
     // 이동. CLI 의 `--focus` 플래그가 이 값을 채운다.
     let focus = params.get("focus").and_then(|v| v.as_bool()).unwrap_or(false);
-    match backend.split_surface(dir, focus) {
+    // `from` 없이 오면 포커스된 pane 을 쪼갠다(사람이 키보드로 부른 경우). CLI 는
+    // pane 안에서 부르면 자기 id 를 채워 보낸다 — 그래야 에이전트의 split 이 사람이
+    // 보고 있는 창을 건드리지 않는다.
+    let from = params.get("from").and_then(|v| v.as_str());
+    match backend.split_surface(dir, focus, from) {
         Ok(s) => Response::success(id, json!({"surface": s})),
         Err(e) => backend_err(id, e),
     }
@@ -567,10 +571,73 @@ fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Respon
             log_agent_tell(backend, from, to, plain);
         }
     }
+    if let Some(to) = target {
+        if let Some(msg) = claude_boot_into_running_pane(backend, to, text) {
+            return param_err(id, &msg);
+        }
+    }
     match backend.send_text(target, text) {
         Ok(()) => Response::success(id, json!({"ok": true})),
         Err(e) => backend_err(id, e),
     }
+}
+
+/// 이미 claude 가 도는 pane 에 **claude 부팅 커맨드**를 쏘는 것을 막는다.
+///
+/// 그 pane 의 claude 는 셸이 아니라 자기 입력창에 그 문자열을 받아 지시로 읽어 버리고,
+/// 브리프를 인박스에 미리 넣어 두는 스폰 절차(인박스 선주입 → pane 에서 claude 부팅)를
+/// 그대로 쓰면 **아무도 뜨지 않은 이름의 인박스**가 하나 생겨 지시가 조용히 사라진다.
+/// 도는 pane 에 말을 거는 정답은 인박스(SendMessage)다.
+///
+/// 거부 사유 문자열을 돌려주고, 보내도 되면 `None`.
+fn claude_boot_into_running_pane(backend: &dyn Backend, target: &str, text: &str) -> Option<String> {
+    if !looks_like_claude_boot(text) {
+        return None;
+    }
+    // board 에 있다 = transcript 가 도는 claude 가 그 pane 에 있다. 비싼 조회라
+    // 부팅 커맨드로 보일 때만 확인한다(대부분의 send 는 여기 오지 않는다).
+    let row = backend
+        .collab_board()
+        .ok()?
+        .into_iter()
+        .find(|r| r.surface_id == target)?;
+    let how = match (&row.agent_name, &row.team) {
+        (Some(a), Some(_)) => format!("SendMessage 로 `to: \"{a}\"` 에 보내라"),
+        _ => "SendMessage(같은 방 pane) 나 tell(그 밖) 로 보내라".to_string(),
+    };
+    Some(format!(
+        "{target} 에는 이미 claude 가 돌고 있다 — 부팅 커맨드를 보내면 그 claude 의 \
+         입력창에 텍스트로 박힌다. 새 학생을 띄우려면 빈 pane 을 먼저 만들고, \
+         이 pane 에 지시할 거라면 {how}."
+    ))
+}
+
+/// claude 를 **띄우는** 명령처럼 보이는지. 좁게 잡는다 — "claude 가 왜 이래" 같은
+/// 평범한 지시문이 걸리면 tell 이 막혀 더 나쁘다. 그래서 실행 형태(`cd … && claude`)
+/// 이거나, 줄머리 `claude` + 런처 플래그가 붙은 경우만 본다.
+fn looks_like_claude_boot(text: &str) -> bool {
+    const FLAGS: [&str; 7] = [
+        "--model",
+        "--agent-id",
+        "--agent-name",
+        "--team-name",
+        "--resume",
+        "--effort",
+        "--dangerously-skip-permissions",
+    ];
+    text.lines().any(|line| {
+        let l = line.trim_matches(|c: char| c.is_control() || c == '~' || c == '[').trim();
+        let parts: Vec<&str> = l.split("&&").flat_map(|p| p.split(';')).map(str::trim).collect();
+        let runs_claude = |p: &str| p == "claude" || p.starts_with("claude ");
+        // `cd … && claude …` 처럼 이어붙인 명령은 그 자체로 실행이다. 조각이 하나뿐이면
+        // 사람이 쓴 문장일 수 있으니 런처 플래그가 붙었을 때만 본다.
+        if parts.len() > 1 {
+            return parts.iter().any(|p| runs_claude(p));
+        }
+        parts
+            .first()
+            .is_some_and(|p| runs_claude(p) && (*p == "claude" || FLAGS.iter().any(|f| p.contains(f))))
+    })
 }
 
 /// tell 발신 이벤트를 messages.jsonl 에 append — http `persist_sensei_msg` 와 같은
@@ -703,6 +770,8 @@ mod tests {
         // tell 기록(log_agent_tell)의 slug 소스 — 테스트가 스크래치 경로를 지정해
         // 실제 방 slug 를 오염시키지 않게 한다. None 이면 trait 기본(None)과 동일.
         cwd: Option<std::path::PathBuf>,
+        // claude 가 도는 pane 들 — 부팅 커맨드 가드가 이걸 보고 판정한다.
+        board: Vec<crate::backend::PaneActivity>,
     }
 
     impl Backend for FakeBackend {
@@ -731,7 +800,15 @@ mod tests {
         fn focus_surface(&self, _surface_id: &str) -> anyhow::Result<()> {
             Ok(())
         }
-        fn split_surface(&self, _direction: SplitDirection, _focus: bool) -> anyhow::Result<SurfaceInfo> {
+        fn collab_board(&self) -> anyhow::Result<Vec<crate::backend::PaneActivity>> {
+            Ok(self.board.clone())
+        }
+        fn split_surface(
+            &self,
+            _direction: SplitDirection,
+            _focus: bool,
+            _from: Option<&str>,
+        ) -> anyhow::Result<SurfaceInfo> {
             Ok(SurfaceInfo {
                 id: "surf-2".into(),
                 workspace_id: "ws-1".into(),
@@ -915,6 +992,58 @@ mod tests {
             .collect();
         let path = crate::collab_root().join(&slug).join("messages.jsonl");
         assert!(!path.exists(), "메타 없는 send_text 는 기록을 남기지 않는다");
+    }
+
+    #[test]
+    fn claude_boot_signature_is_narrow() {
+        // 실행 형태 — 막아야 한다.
+        assert!(looks_like_claude_boot("cd /repo && claude"));
+        assert!(looks_like_claude_boot("cd /repo && claude --model 'claude-opus-5[1m]'"));
+        assert!(looks_like_claude_boot("claude --resume abc123"));
+        assert!(looks_like_claude_boot("claude"));
+        // 사람이 쓴 지시문 — tell 이 막히면 안 된다.
+        assert!(!looks_like_claude_boot("claude 코드 좀 봐줘"));
+        assert!(!looks_like_claude_boot("claude 가 왜 이래?"));
+        assert!(!looks_like_claude_boot("이거 claude --model 로 띄웠었나?"));
+    }
+
+    #[test]
+    fn boot_command_into_running_pane_is_refused() {
+        let backend = FakeBackend {
+            board: vec![crate::backend::PaneActivity {
+                surface_id: "surf-1".into(),
+                agent_name: Some("prana-p5".into()),
+                team: Some("kt-x".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-1", "text": "cd /repo && claude --model opus\n"}),
+            ),
+        );
+        assert!(!r.ok);
+        // 무엇을 대신 쓸지까지 알려줘야 부른 쪽이 고칠 수 있다.
+        assert!(r.error.unwrap().message.contains("prana-p5"));
+        assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
+    }
+
+    #[test]
+    fn boot_command_into_shell_only_pane_passes() {
+        // board 에 없다 = claude 가 아직 없다. 새 학생을 띄우는 정상 경로다.
+        let backend = FakeBackend::default();
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-9", "text": "cd /repo && claude --model opus\n"}),
+            ),
+        );
+        assert!(r.ok);
+        assert_eq!(backend.sent_text.lock().unwrap().len(), 1);
     }
 
     #[test]

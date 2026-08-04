@@ -15,6 +15,9 @@
 //! refcount 만 줄고 실제 Window 는 `aux.window` 가 아직 잡고 있어 살아있다.
 use super::*;
 
+/// 별도 창 헤더 높이. OS 타이틀바를 껐으므로 이 띠가 창의 유일한 손잡이다.
+const AUX_HEADER_H: f32 = 30.0;
+
 /// 별도창이 담는 내용물. 이 enum 을 match 하는 지점(render/key/mouse/title)의
 /// 팔만 채우면 새 창 종류를 꽂을 수 있다. `Settings` 는 데이터를 안 들고 있다 —
 /// 설정 상태(`settings_cat`/`set_*`/`students_*`)는 App 이 소유하고 이 창은 뷰라,
@@ -29,7 +32,10 @@ pub(crate) enum AuxWindowKind {
     /// 은 App.pty 에 그대로 살아 세션이 안 끊긴다(undock 은 레이아웃 트리에서 leaf 만
     /// 빼고 pty·ws.panes 는 유지). 렌더는 `aux_terminal_render`, 이벤트는
     /// `aux_terminal_event` 로 위임(Settings 가 paint_settings 를 재사용하는 것과 동형).
-    Terminal { pane_id: String },
+    /// pane 하나를 꺼낸 창. `window` 는 **어느 방에서 나왔는지** — 이게 없으면
+    /// 되돌릴 때 원래 방이 아니라 그때 활성 pane 옆에 붙고, 헤더에 소속을 적을
+    /// 수도 없다. 방 재배치를 따라 remap 된다(`reorder_window`).
+    Terminal { pane_id: String, window: usize },
     /// 방(윈도우) 하나를 통째로 별도 OS 창으로 분리. `Terminal` 이 pane 하나를 보듯
     /// 이건 그 방의 **BSP 트리 전체**를 본다 — pane 여러 개가 자기 자리에 그려진다.
     ///
@@ -106,7 +112,7 @@ impl AuxWindow {
     /// 둘을 한 값으로 내주는 덕에 키·휠·IME 라우팅이 한 벌로 끝난다.
     fn term_pane_id(&self) -> Option<&str> {
         match &self.kind {
-            AuxWindowKind::Terminal { pane_id } => Some(pane_id.as_str()),
+            AuxWindowKind::Terminal { pane_id, .. } => Some(pane_id.as_str()),
             AuxWindowKind::Room { focus, .. } => focus.as_deref(),
             _ => None,
         }
@@ -131,7 +137,7 @@ impl AuxWindow {
             AuxWindowKind::Settings => "Settings".to_string(),
             // v1 은 pane id — 프로세스명(vim/claude…) 인레이는 App 만 알아 aux_render 가
             // 더 나은 라벨로 덮어쓸 수 있다(현재는 id 그대로).
-            AuxWindowKind::Terminal { pane_id } => pane_id.clone(),
+            AuxWindowKind::Terminal { pane_id, .. } => pane_id.clone(),
             // 방 이름(window_labels)은 App 만 알아 `aux_room_render` 가 덮어쓴다.
             AuxWindowKind::Room { window, .. } => format!("방 {}", window + 1),
         }
@@ -1222,12 +1228,18 @@ impl App {
     pub(crate) fn spawn_aux_terminal(
         &mut self,
         pane_id: String,
+        home_window: usize,
         event_loop: &ActiveEventLoop,
         near: Option<winit::dpi::PhysicalPosition<i32>>,
     ) -> Option<usize> {
         let title = pane_id.clone();
         let mut attrs = WindowAttributes::default()
             .with_title(title.clone())
+            // TODO(다음): 헤더의 클릭·드래그 배선(되돌리기 버튼 + drag_window)이
+            // 붙는 즉시 `.with_decorations(false)` 를 여기 되살린다. 헤더 그리기는
+            // 이미 됐지만 배선 없이 타이틀바를 끄면 창을 옮길 손잡이도, 되돌릴
+            // 수단도 없는 창이 남는다 — 거노 요구는 "우리 UI 로"지 "손잡이 없이"가
+            // 아니다.
             .with_theme(Some(Theme::Dark))
             .with_inner_size(LogicalSize::new(800.0, 520.0));
         if let Some(pos) = near {
@@ -1254,7 +1266,7 @@ impl App {
         };
         let aux = AuxWindow {
             gpu,
-            kind: AuxWindowKind::Terminal { pane_id: pane_id.clone() },
+            kind: AuxWindowKind::Terminal { pane_id: pane_id.clone(), window: home_window },
             dirty: true,
             cursor_px: (0.0, 0.0),
             selecting: false,
@@ -1297,11 +1309,15 @@ impl App {
     /// `draw_cells` 로 본문을, blink 위상이면 커서 rect 를 그린다(단일 pane 이라
     /// 헤더/링크hover/선택 오버레이는 v1 제외 — paint_gpu_overlays 커서부만 복제).
     fn aux_terminal_render(&mut self, idx: usize, blink: bool) {
-        let (pane_id, scale, w, h, focused) = {
+        let (pane_id, scale, w, h, focused, home_window) = {
             let Some(a) = self.aux_windows.get(idx) else { return };
             let Some(pid) = a.term_pane_id() else { return };
             let (w, h) = a.logical_size();
-            (pid.to_string(), a.gpu.scale(), w, h, a.focused)
+            let home = match &a.kind {
+                AuxWindowKind::Terminal { window, .. } => *window,
+                _ => 0,
+            };
+            (pid.to_string(), a.gpu.scale(), w, h, a.focused, home)
         };
         // draw 중 lock 을 안 쥐도록 셀/커서를 복사해 스냅샷.
         let snap = {
@@ -1320,8 +1336,38 @@ impl App {
             a.dirty = false;
             return;
         };
+        // OS 타이틀바를 껐으니 헤더는 우리가 그린다 — 여기가 창의 유일한 손잡이다.
+        // 왼쪽에 「%3 · 2번 방」(꺼낸 pane 의 번호와 나온 방), 오른쪽에 되돌리기.
+        // 빈 곳을 끌면 창이 움직인다(`aux_header_press` → `drag_window`).
+        {
+            let label = format!("{pane_id} · {}번 방", home_window + 1);
+            a.gpu.rect(0.0, 0.0, w, AUX_HEADER_H, crate::theme::surface());
+            a.gpu.rect(0.0, AUX_HEADER_H - 1.0, w, 1.0, crate::theme::border());
+            a.gpu.draw_text(
+                12.0,
+                (AUX_HEADER_H - 12.0) / 2.0,
+                &label,
+                gpu::DrawOpts {
+                    font_size: 12.0,
+                    color: crate::theme::with_alpha(
+                        crate::theme::text_mute(),
+                        if focused { 0xF0 } else { 0x99 },
+                    ),
+                    bold: false,
+                    italic: false,
+                },
+            );
+            // 되돌리기 — ⌘W 와 같은 동작이지만, 그 단축키를 모르면 창에 갇힌다.
+            a.gpu.queue_icon(
+                "corner-down-left",
+                w - AUX_HEADER_H + 6.0,
+                (AUX_HEADER_H - 14.0) / 2.0,
+                14.0,
+                crate::theme::text_mute(),
+            );
+        }
         // origin_px 는 물리 px(draw_cells 규약), 커서 rect 은 논리 px(gpu.rect 규약).
-        let origin_px = (PANE_INNER_X * scale, PANE_INNER_Y * scale);
+        let origin_px = (PANE_INNER_X * scale, (PANE_INNER_Y + AUX_HEADER_H) * scale);
         let slot = gpu::PaneSlot {
             rows: &rows,
             origin_px,
@@ -1718,6 +1764,9 @@ impl App {
         if self.tmux.is_some() || !self.pty.contains_key(pane_id) {
             return;
         }
+        // 나온 방을 지금 붙들어야 한다 — 아래에서 트리의 leaf 를 빼고 나면
+        // `window_of_pane` 이 더는 못 찾는다.
+        let home_window = self.window_of_pane(pane_id).unwrap_or(self.active_window);
         let leaves: Vec<String> = self
             .pty_layout
             .as_ref()
@@ -1764,7 +1813,7 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        self.spawn_aux_terminal(pane_id.to_string(), event_loop, near);
+        self.spawn_aux_terminal(pane_id.to_string(), home_window, event_loop, near);
     }
 
     /// 터미널 별도창을 닫으며 그 pane 을 메인 레이아웃으로 되돌린다(dock). 창을 먼저
@@ -1779,10 +1828,23 @@ impl App {
                 return;
             }
         };
+        // 나온 방을 창이 들고 있다 — 닫기 전에 꺼내야 한다.
+        let home = match self.aux_windows.get(idx).map(|a| &a.kind) {
+            Some(AuxWindowKind::Terminal { window, .. }) => Some(*window),
+            _ => None,
+        };
         self.close_aux_window(idx);
         // 셸이 이미 종료돼 세션이 사라졌으면 되돌릴 게 없다.
         if !self.pty.contains_key(&pane_id) {
             return;
+        }
+        // 나왔던 방으로 돌아간다. 이게 없으면 그때 보고 있던 방에 남의 pane 이
+        // 튀어나온다 — 꺼낼 때와 되돌릴 때 활성 방이 같으리란 보장이 없다.
+        // 밖에 나가 있는 방으로는 보내지 않는다(그 방은 메인에 안 그려진다).
+        if let Some(w) = home {
+            if w < self.windows.len() && w != self.active_window && !self.window_is_undocked(w) {
+                self.switch_window(w);
+            }
         }
         let in_tree = self
             .pty_layout

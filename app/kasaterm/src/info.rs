@@ -1499,9 +1499,9 @@ pub(crate) fn draw_info_actions(
         let bx = x0 + i as f32 * (bw + gap);
         let hov = hit(cursor, &(bx, y, bw, bh));
         g.hover_pointer |= hov;
-        panel_rect(
+        panel_rect_outlined(
             g, bx, y, bw, bh, theme::radius_sm(),
-            if hov { theme::surface_hover() } else { theme::surface() },
+            theme::raised_on(theme::panel_bg(), hov),
         );
         let col = if hov { theme::text() } else { theme::text_dim() };
         let f = 11.0_f32;
@@ -1704,14 +1704,14 @@ pub(crate) fn draw_info_col(
                 let bx = x0 + i as f32 * (bw + gap);
                 let hov = hit(cursor, &(bx, y, bw, BTN_H));
                 g.hover_pointer |= hov;
-                panel_rect(
+                panel_rect_outlined(
                     g,
                     bx,
                     y,
                     bw,
                     BTN_H,
                     theme::radius_sm(),
-                    if hov { theme::surface_hover() } else { theme::surface() },
+                    theme::raised_on(theme::panel_bg(), hov),
                 );
                 let col = if hov { theme::text() } else { theme::text_dim() };
                 let lw = g.measure_chrome_text(label, 10.5, false);

@@ -52,13 +52,24 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
-            UserEvent::SocketSplit(dir, focus, reply) => {
+            UserEvent::SocketSplit(dir, focus, from, reply) => {
                 // `split_active_pane` always sets the new pane active (correct
                 // for the GUI's keyboard split). The socket path defaults to
                 // no-focus so a scripted split doesn't yank the user's focus
                 // (like `tell`) — restore the prior active pane unless the
                 // caller opted in with `--focus`.
                 let prev = self.ws.lock().unwrap().active_pane.clone();
+                // 부른 쪽이 pane 을 지정했으면 그 pane 을 쪼갠다. split_active_pane 이
+                // active_pane 하나만 보고 cwd·방·트리 위치를 전부 거기서 가져오므로,
+                // 잠깐 갈아끼웠다 아래에서 되돌리는 것으로 충분하다. 없는 pane 이면
+                // 무시하고 포커스 기준으로 — 죽은 id 로 갈아끼우면 split 이 통째로
+                // 실패한다.
+                if let Some(from) = from {
+                    let mut ws = self.ws.lock().unwrap();
+                    if ws.panes.contains_key(from) {
+                        ws.active_pane = Some(from.clone());
+                    }
+                }
                 let new_id = self.split_active_pane(*dir).unwrap_or_default();
                 if !*focus {
                     if let Some(prev) = prev {
@@ -1105,6 +1116,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.arm_autosplit();
         self.arm_autowindows();
         self.arm_autoexpand();
+        self.arm_autoalert();
         self.arm_autotoggle();
         self.arm_autoarona();
         // 온보딩 제거(거노) — 강제 ModePicker 자동오픈 안 함. 터미널이 기본,
@@ -1731,6 +1743,52 @@ impl ApplicationHandler<UserEvent> for App {
                     window.request_redraw();
                     return;
                 }
+                // 사이드바 pane 줄 드래그. 떨어질 자리는 **커서가 얹힌 줄의 위/아래
+                // 절반**이라, 같은 방 안 재배치와 다른 방으로 옮기기가 한 규칙으로
+                // 처리된다(목록이 방 경계를 넘어 이어져 있어서다).
+                if self.sidebar_row_drag.is_some() {
+                    let (px, py) = self.cursor_px;
+                    let start = self.sidebar_row_drag.as_ref().unwrap().start;
+                    let (dx, dy) = (px - start.0, py - start.1);
+                    let src = self.sidebar_row_drag.as_ref().unwrap().pane.clone();
+                    let target = self
+                        .sidebar_row_rects
+                        .iter()
+                        .find(|(_, id, r)| {
+                            *id != src
+                                && px >= r.0
+                                && px <= r.0 + r.2
+                                && py >= r.1
+                                && py <= r.1 + r.3
+                        })
+                        .map(|(_, id, r)| (id.clone(), py < r.1 + r.3 / 2.0))
+                        // 줄이 아니라 **방 카드**에 떨어뜨려도 받는다. pane 이 하나뿐인
+                        // 방은 목록을 펴지 않으므로 줄만 받으면 그런 방으로는 영영 못
+                        // 옮긴다 — 정작 옮길 이유가 가장 큰 쪽이 막히는 셈이다.
+                        .or_else(|| {
+                            let wi = self
+                                .window_tab_rects
+                                .iter()
+                                .find(|(_, r)| {
+                                    px >= r.0 && px <= r.0 + r.2 && py >= r.1 && py <= r.1 + r.3
+                                })
+                                .map(|(i, _)| *i)?;
+                            let last = self.window_leaves(wi).into_iter().last()?;
+                            (last != src).then_some((last, false))
+                        });
+                    if let Some(d) = self.sidebar_row_drag.as_mut() {
+                        if !d.active && dx * dx + dy * dy > 9.0 {
+                            d.active = true;
+                        }
+                        d.target = target;
+                    }
+                    if self.sidebar_row_drag.as_ref().map(|d| d.active).unwrap_or(false) {
+                        window.set_cursor(CursorIcon::Grabbing);
+                        self.chrome_dirty = true;
+                        window.request_redraw();
+                    }
+                    return;
+                }
                 // 방(윈도우) 탭 재배치 드래그. 문턱을 넘으면 active 로 바꾸고,
                 // 커서가 지나친 탭 개수로 삽입 자리를 다시 읽는다.
                 if self.win_tab_drag.is_some() {
@@ -2324,7 +2382,14 @@ impl ApplicationHandler<UserEvent> for App {
                         .find(|(_, r)| hit(*r))
                         .map(|(i, _)| i.clone())
                     {
-                        if self.zoomed_pane.is_some() {
+                        // 닫힌 pane 칩이 먼저다 — zoom 중에도 하단바엔 형제와
+                        // 닫힌 것이 함께 서고, 닫힌 쪽에 toggle_pane_zoom 을 걸면
+                        // 레이아웃에 없는 id 로 zoom 이 들어가 화면이 빈다.
+                        if let Some(idx) =
+                            self.closed_panes.iter().position(|c| c.pane_id == id)
+                        {
+                            self.reopen_closed_pane_at(idx);
+                        } else if self.zoomed_pane.is_some() {
                             self.toggle_pane_zoom(&id);
                         }
                         window.request_redraw();
@@ -3920,6 +3985,22 @@ impl ApplicationHandler<UserEvent> for App {
                             window.request_redraw();
                             return;
                         }
+                        // 사이드바 pane 줄 드래그 종료. 문턱을 넘고 떨어질 줄이
+                        // 있을 때만 옮긴다 — 포커스는 press 가 이미 했다.
+                        if let Some(d) = self.sidebar_row_drag.take() {
+                            window.set_cursor(CursorIcon::Default);
+                            if let (true, Some((target, before))) = (d.active, d.target) {
+                                let zone = if before {
+                                    crate::DropZone::Up
+                                } else {
+                                    crate::DropZone::Down
+                                };
+                                self.move_pane(&d.pane, &target, zone);
+                                self.chrome_dirty = true;
+                            }
+                            window.request_redraw();
+                            return;
+                        }
                         // 방 탭 재배치 종료. 문턱을 넘었을 때만 옮긴다 — 전환은
                         // press 가 이미 했으므로, 안 넘었으면 버릴 것뿐이다.
                         if let Some(d) = self.win_tab_drag.take() {
@@ -4806,6 +4887,8 @@ impl ApplicationHandler<UserEvent> for App {
         // Refresh per-pane busy state (Claude's working spinner → header bar +
         // completion toast). Self-throttled, so this is cheap per loop turn.
         self.refresh_pane_activity();
+        self.note_claude_panes();
+        self.apply_autowait();
         // rust 파일이 편집기로 열려 있으면 rust-analyzer 를 붙인다. 여기서 하는
         // 이유는 편집기가 열리는 경로가 여러 개라서다(사이드바·소켓·복원·팝아웃)
         // — 한 자리에 두면 어느 경로로 열려도 같은 순간에 붙는다. 이미 알린
@@ -4851,6 +4934,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoclosereopen();
         self.run_pending_autoinfo();
         self.run_pending_autocursor();
+        self.run_pending_autoexpandclick();
+        self.run_pending_autorowdrag();
         self.run_pending_autotheme();
         // OS 의 밝게/어둡게가 바뀌었나 — `theme: system` 일 때만 실제로 조회한다
         // (게이트는 poll 안에 있다). 바뀐 순간에만 참이라 평소엔 아무 일도 없다.
@@ -4925,19 +5010,29 @@ impl ApplicationHandler<UserEvent> for App {
             // sticky 클릭 seek 이 도는 동안엔 스크롤이 목표 프롬프트에 닿을 때까지
             // 프레임을 펌프해야 노치가 계속 나가고 화면 관찰이 이어진다.
             || crate::render::sticky_seek_active()
-            // An unseen-notification window tab blinks (synced to the cursor
-            // blink) until the user switches to it — pump frames so it pulses.
+            // 못 본 알림이 있는 방 탭은 숨쉰다 — 그 호흡이 이어지려면 프레임이
+            // 계속 나가야 한다(커서 블링크에 얹혀 있던 시절엔 공짜였다).
             || !self.window_alert.is_empty()
+            // 손을 기다리는 pane 의 danger 띠도 같은 이유로.
+            || self.pane_activity.values().any(|a| a.status == "waiting")
             // 노치 스크롤 관성이 목표에 붙을 때까지 프레임을 펌프한다.
             || !self.md_scroll_anim.is_empty()
             // 테마 전환 디졸브가 걷히는 동안.
             || self.theme_fx.is_some()
+            // 사이드바 방이 펴지거나 접히는 동안.
+            || self.expand_anim.is_some()
+            // 펼친 목록의 학생 얼굴은 idle gif 라 프레임을 계속 넘겨야 한다.
+            // 접으면 멈춘다 — 안 보이는 그림에 프레임을 태우지 않는다.
+            || (self.sidebar_visible && !self.tabs_on_top && !self.expanded_windows.is_empty())
         {
             // 관성은 33ms(≈30fps)로 굴리면 그 자체가 계단으로 보인다 — 도는 동안만
             // 8ms 로 촘촘히. 테마 디졸브도 같은 이유로 촘촘한 쪽에 붙인다 —
             // 0.4초짜리라 30fps 면 열두 장뿐이고, 그러면 블록이 퍼지는 게 아니라
             // 뚝뚝 끊겨 보인다. 다른 펌프 사유(블링크·펄스)엔 33ms 로 충분하다.
-            let period = if self.md_scroll_anim.is_empty() && self.theme_fx.is_none() {
+            let period = if self.md_scroll_anim.is_empty()
+                && self.theme_fx.is_none()
+                && self.expand_anim.is_none()
+            {
                 33
             } else {
                 8

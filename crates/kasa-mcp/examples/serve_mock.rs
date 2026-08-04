@@ -29,7 +29,7 @@ impl Backend for MockBackend {
     fn focus_surface(&self, _: &str) -> Result<()> {
         Ok(())
     }
-    fn split_surface(&self, _: SplitDirection, _focus: bool) -> Result<SurfaceInfo> {
+    fn split_surface(&self, _: SplitDirection, _focus: bool, _: Option<&str>) -> Result<SurfaceInfo> {
         Ok(SurfaceInfo { id: "%2".into(), workspace_id: "local-0".into(), title: None })
     }
     fn send_text(&self, _: Option<&str>, _: &str) -> Result<()> {

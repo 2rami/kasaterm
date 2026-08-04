@@ -63,7 +63,13 @@ impl Backend for TmuxBackend {
         Ok(())
     }
 
-    fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo> {
+    fn split_surface(
+        &self,
+        direction: SplitDirection,
+        focus: bool,
+        _from: Option<&str>,
+    ) -> Result<SurfaceInfo> {
+        // tmux 백엔드는 늘 현재 pane 을 쪼갠다 — 대상 지정은 로컬 PTY 경로만.
         // tmux's split-window takes -h for horizontal split, -v for
         // vertical. cmux's direction terminology is what *cell rows*
         // grow into — right/left are horizontal splits, up/down are
@@ -882,7 +888,12 @@ impl Backend for PtyBackend {
         Ok(())
     }
 
-    fn split_surface(&self, direction: SplitDirection, focus: bool) -> Result<SurfaceInfo> {
+    fn split_surface(
+        &self,
+        direction: SplitDirection,
+        focus: bool,
+        from: Option<&str>,
+    ) -> Result<SurfaceInfo> {
         let dir = match direction {
             SplitDirection::Right | SplitDirection::Left => kasa_pty::SplitDir::Horizontal,
             SplitDirection::Up | SplitDirection::Down => kasa_pty::SplitDir::Vertical,
@@ -894,7 +905,12 @@ impl Backend for PtyBackend {
         // `focus` rides along so the GUI thread keeps focus on the current pane
         // unless the caller opted in (CLI `--focus`).
         let (tx, rx) = std::sync::mpsc::channel();
-        let _ = self.proxy.send_event(UserEvent::SocketSplit(dir, focus, tx));
+        let _ = self.proxy.send_event(UserEvent::SocketSplit(
+            dir,
+            focus,
+            from.map(str::to_string),
+            tx,
+        ));
         let id = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .ok()
@@ -1191,6 +1207,28 @@ impl Backend for PtyBackend {
         // 최우선으로 읽어 복원된 ws·marker·랜덤보다 먼저 정체성을 고정한다. 로스터 밖
         // 값은 무시(오염 방지). ps 는 폴당 pane 수만큼(1/s)이라 부담 없음.
         let pane_shell_pid: HashMap<String, u32> = self.query_pane_pids().into_iter().collect();
+        // ⚠️ KASATERM_* 은 **pane 셸에 없다** — shim 이 claude 를 띄우며 그 프로세스에만
+        // 실어 준다(실측: `/bin/zsh -il` env 엔 하나도 없고 자식 claude 엔 전부 있다).
+        // 그래서 셸이 아니라 자식 claude 를 찾아 읽는다. AGENT/TEAM 이 있는 pane 은
+        // 인박스를 폴링하므로, 말을 걸 때 입력창이 아니라 인박스를 써야 한다.
+        // pane 당 ps 한 번 — 키마다 부르면 폴링마다 pane×키 개의 ps 가 뜬다.
+        let ptable = kasa_pty::process_table_shared();
+        let pane_env: HashMap<String, HashMap<String, String>> = pane_shell_pid
+            .iter()
+            .filter_map(|(sid, &shell)| {
+                let pid = claude_under(&ptable, shell)?;
+                let vars = kasa_pty::process_env_vars(
+                    pid,
+                    &[
+                        "KASATERM_SESSION_ID",
+                        "KASATERM_CHARACTER",
+                        "KASATERM_AGENT",
+                        "KASATERM_TEAM",
+                    ],
+                );
+                Some((sid.clone(), vars))
+            })
+            .collect();
         let valid_members: HashSet<String> = kasa_mcp::character::characters_json()
             .map(|c| kasa_mcp::character::member_names(&c).into_iter().collect())
             .unwrap_or_default();
@@ -1307,14 +1345,21 @@ impl Backend for PtyBackend {
                 // SESSION_ID 가 가리키는 실제 세션 bind 는 각자 아루·히마리·아리스였다).
                 // 그래서 SESSION_ID 의 세션 bind 를 먼저(신선) 조회하고, 없을 때만 동결
                 // CHARACTER 로 폴백한다.
-                let env_char = pane_shell_pid
-                    .get(sid.as_str())
-                    .and_then(|&pid| {
-                        kasa_pty::process_env_var(pid, "KASATERM_SESSION_ID")
-                            .and_then(|s| kasa_mcp::character::session_character(&s))
-                            .or_else(|| kasa_pty::process_env_var(pid, "KASATERM_CHARACTER"))
+                let env = pane_env.get(sid.as_str());
+                let env_char = env
+                    .and_then(|e| {
+                        e.get("KASATERM_SESSION_ID")
+                            .and_then(|s| kasa_mcp::character::session_character(s))
+                            .or_else(|| e.get("KASATERM_CHARACTER").cloned())
                     })
                     .filter(|c| valid_members.contains(c));
+                // 둘 다 있을 때만 인박스 경로가 성립한다 — 한쪽만으론 파일 경로가 안 나온다.
+                if let (Some(a), Some(t)) =
+                    (env.and_then(|e| e.get("KASATERM_AGENT")), env.and_then(|e| e.get("KASATERM_TEAM")))
+                {
+                    row.agent_name = Some(a.clone());
+                    row.team = Some(t.clone());
+                }
                 row.character = retained
                     .clone()
                     .or(env_char)
@@ -2101,12 +2146,17 @@ pub fn read_tab_position() -> String {
 /// 커졌네"). 13 이면 0.600 × 13 = 7.8px 로 옛 0.500 × 16 = 8px 과 사실상 같다.
 /// 폰트 크기 = em 픽셀이라는 의미는 그대로 두고 기본값만 새 폰트에 맞춘 것 —
 /// 명시적으로 값을 저장해 둔 사용자는 자기 크기를 그대로 유지한다.
+/// 설정을 지웠을 때 돌아오는 셀 폰트 크기. 설정 화면의 "되돌리기"도 같은 값을
+/// 써야 해서 상수로 둔다 — 두 곳에 숫자를 적으면 한쪽만 바뀌어 되돌린 결과가
+/// 기본값과 다른 자리에 선다.
+pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+
 pub fn read_font_size() -> f32 {
     read_settings()
         .get("font_size")
         .and_then(|x| x.as_f64())
         .map(|v| (v as f32).clamp(9.0, 32.0))
-        .unwrap_or(13.0)
+        .unwrap_or(DEFAULT_FONT_SIZE)
 }
 
 /// Whether the file-tree sidebar starts open on launch. Default `false`
@@ -2533,6 +2583,32 @@ fn claude_saved_effort() -> String {
 /// 아니라 데몬 띄운 셸값을 전 세션이 공유해 못 쓴다(거노: 한 뷰 다 같은 학생). 대신 argv 의
 /// `--resume <부모>` 사슬을 따라 원본 세션의 바인딩까지 되짚는다. `ps`(env 불필요) 1회/프로세스,
 /// 2s 캐시. parent = --resume 값의 파일명 stem(=uuid) 또는 값 그대로.
+/// pane 셸 아래에서 도는 claude 프로세스 pid. shim 이 심는 KASATERM_* env 와 팀원
+/// 트리플은 이 프로세스에만 있다(셸엔 없다). 셸 → claude 가 보통 직계지만 래퍼가
+/// 끼는 경우가 있어 몇 대 아래까지 훑는다.
+fn claude_under(table: &[(u32, u32, String)], shell: u32) -> Option<u32> {
+    let mut frontier = vec![shell];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for (pid, ppid, cmd) in table {
+            if !frontier.contains(ppid) {
+                continue;
+            }
+            // 셸이 낳은 것 중 claude 실행파일만 — `claude` 를 인자로 든 셸 명령이
+            // 아니라 실행 경로가 claude 로 끝나는 프로세스.
+            if cmd.split_whitespace().next().is_some_and(|exe| exe.ends_with("claude")) {
+                return Some(*pid);
+            }
+            next.push(*pid);
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+    None
+}
+
 fn daemon_session_parents() -> HashMap<String, String> {
     static CACHE: std::sync::LazyLock<
         std::sync::Mutex<Option<(std::time::Instant, HashMap<String, String>)>>,
@@ -3082,5 +3158,28 @@ mod pid_cwd_tests {
     #[test]
     fn pid_cwd_is_none_for_a_dead_pid() {
         assert_eq!(super::pid_cwd(u32::MAX - 1), None);
+    }
+
+    #[test]
+    fn finds_claude_below_the_pane_shell() {
+        // 실측 형태: pane 셸(zsh) → claude. claude 의 자식 셸(Bash 툴)도 같이 있다.
+        let table = vec![
+            (100, 1, "/bin/zsh -il".to_string()),
+            (200, 100, "/Users/x/.local/bin/claude --model opus".to_string()),
+            (300, 200, "/bin/zsh -c ls".to_string()),
+        ];
+        assert_eq!(super::claude_under(&table, 100), Some(200));
+        // claude 없이 셸만 도는 pane — 인박스로 말을 걸 수 없다.
+        assert_eq!(super::claude_under(&table[..1], 100), None);
+    }
+
+    #[test]
+    fn a_shell_running_the_word_claude_is_not_claude() {
+        // `send` 로 부팅 커맨드를 흘려보낸 직후의 셸 — 아직 claude 가 아니다.
+        let table = vec![
+            (100, 1, "/bin/zsh -il".to_string()),
+            (200, 100, "/bin/zsh -c cd /repo && claude --model opus".to_string()),
+        ];
+        assert_eq!(super::claude_under(&table, 100), None);
     }
 }

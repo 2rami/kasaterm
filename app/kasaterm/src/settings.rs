@@ -20,7 +20,9 @@ use super::*;
 type Rect = (f32, f32, f32, f32);
 
 const CAT_W: f32 = 200.0;
-const ROW_GAP: f32 = 28.0;
+/// 항목과 항목 **사이**. `field_header` 안쪽 간격보다 넓게 유지할 것 — 안쪽이
+/// 더 벌어지면 설명이 제 제목을 떠나 위 항목에 붙어 읽힌다.
+const ROW_GAP: f32 = 24.0;
 
 /// Snapshot captured before the gpu borrow so the paint never touches `&self`.
 pub(crate) struct SettingsCtx {
@@ -51,6 +53,8 @@ pub(crate) struct SettingsCtx {
     pub has_custom_theme: bool,
     pub accent: String,
     pub font_size: f32,
+    /// 전체 UI 배율(1.0 = 100%). 화면에 숫자로 보여야 얼마나 틀어졌는지 안다.
+    pub ui_zoom: f32,
     /// PixelDelta 스크롤 감도 배율(트랙패드·고해상도 마우스휠 공용).
     pub wheel_pixel_gain: f32,
     pub tabs_on_top: bool,
@@ -421,6 +425,7 @@ impl App {
             accent: theme::accent_name().to_string(),
             shape: theme::shape_name().to_string(),
             font_size: self.font_size,
+            ui_zoom: self.ui_zoom,
             wheel_pixel_gain: self.set_wheel_pixel_gain,
             tabs_on_top: self.tabs_on_top,
             claude_persona: self.set_claude_persona,
@@ -498,6 +503,13 @@ impl App {
             self.chrome_dirty = true;
             return true;
         };
+        self.settings_apply(action);
+        true
+    }
+
+    /// 설정 항목 하나를 실행한다. `settings_click` 에서 갈라 둔 건 히트렉트 없이도
+    /// (헤드리스 검증·단축키) 같은 경로를 탈 수 있게 하기 위한 것이다.
+    pub(crate) fn settings_apply(&mut self, action: SettingsAction) {
         match action {
             SettingsAction::Category(c) => {
                 self.flush_student_persona();
@@ -646,6 +658,18 @@ impl App {
                     self.apply_effective_scale();
                 }
             }
+            SettingsAction::UiZoomDelta(d) => {
+                self.change_ui_zoom(d as f32 * 0.1);
+            }
+            SettingsAction::ResetScale => {
+                self.font_size = socket::DEFAULT_FONT_SIZE;
+                socket::write_setting("font_size", serde_json::json!(self.font_size));
+                // `reset_ui_zoom` 은 이미 1.0 이면 일찍 빠져나가므로, 폰트만 바뀐
+                // 경우에도 격자가 다시 서도록 여기서 한 번 더 부른다.
+                self.reset_ui_zoom();
+                self.apply_effective_scale();
+                self.set_toast("배율 100% · 폰트 기본값".to_string());
+            }
             SettingsAction::ToggleClaudePersona => {
                 self.set_claude_persona = !self.set_claude_persona;
                 self.settings_save();
@@ -740,7 +764,6 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
-        true
     }
 
     /// Route a keystroke into the focused single-line settings text field.
@@ -1104,7 +1127,7 @@ pub(crate) fn paint_settings(
         ax + 20.0,
         ay + 20.0,
         "Settings",
-        gpu::DrawOpts { font_size: 13.0, color: theme::text_mute(), bold: true, italic: false },
+        gpu::DrawOpts { font_size: 12.0, color: theme::text_dim(), bold: true, italic: false },
     );
     let cats = [
         (SettingsCat::General, "General", "settings-2"),
@@ -1114,10 +1137,10 @@ pub(crate) fn paint_settings(
         (SettingsCat::Students, "Students", "users"),
         (SettingsCat::Feedback, "Feedback", "message-square-warning"),
     ];
-    let mut cy = ay + 52.0;
+    let mut cy = ay + 48.0;
     let mut active_label = "General";
     for (cat, label, icon) in cats {
-        let r = (ax + 10.0, cy, CAT_W - 20.0, 36.0);
+        let r = (ax + 10.0, cy, CAT_W - 20.0, 32.0);
         let selected = cat == ctx.cat;
         if selected {
             active_label = label;
@@ -1126,24 +1149,27 @@ pub(crate) fn paint_settings(
         g.hover_pointer |= hover;
         if selected {
             round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(), theme::surface_active());
+            // 왼쪽 띠 — 채움만으로는 흑백에서 선택이 겨우 보인다. 색을 걷어내도
+            // 어느 항목에 있는지 읽혀야 하니 형태를 하나 더 준다.
+            g.rect(r.0, r.1 + 6.0, 2.0, r.3 - 12.0, theme::accent());
         } else if hover {
             round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(), theme::surface_hover());
         }
         let icon_c = if selected { theme::text() } else { theme::text_mute() };
-        g.queue_icon(icon, r.0 + 12.0, r.1 + (r.3 - 15.0) / 2.0, 15.0, icon_c);
+        g.queue_icon(icon, r.0 + 12.0, r.1 + (r.3 - 14.0) / 2.0, 14.0, icon_c);
         g.draw_text(
-            r.0 + 36.0,
-            r.1 + 10.0,
+            r.0 + 34.0,
+            r.1 + (r.3 - 13.0) / 2.0 - 1.0,
             label,
             gpu::DrawOpts {
-                font_size: 14.0,
+                font_size: 13.0,
                 color: if selected { theme::text() } else { theme::text_dim() },
                 bold: selected,
                 italic: false,
             },
         );
         rects.push((SettingsAction::Category(cat), r));
-        cy += 40.0;
+        cy += 34.0;
     }
 
     // ── Right form pane ──────────────────────────────────────────────────
@@ -1152,8 +1178,8 @@ pub(crate) fn paint_settings(
     let fx = ax + CAT_W + 40.0;
     let fw = (aw - CAT_W - 80.0).max(120.0).min(CONTENT_W);
     g.draw_text(
-        fx, ay + 28.0, active_label,
-        gpu::DrawOpts { font_size: 20.0, color: theme::text(), bold: true, italic: false },
+        fx, ay + 26.0, active_label,
+        gpu::DrawOpts { font_size: 24.0, color: theme::text(), bold: true, italic: false },
     );
     g.rect(fx, ay + 62.0, fw, 1.0, theme::border());
     // ── Scrollable form ── the wheel shifts everything below the page header
@@ -1544,7 +1570,7 @@ pub(crate) fn paint_settings(
             y += 44.0 + ROW_GAP;
             // 폰트 크기 스테퍼 — 값은 즉시 적용(그리드 리플로우)되고
             // settings.json 에 저장돼 재시작에도 유지된다.
-            y = field_header(g, fx, y, clip, "Font size", &["터미널 셀 폰트 크기 (기본 16 · Cmd+/- 줌과 별개인 기준값)"]);
+            y = field_header(g, fx, y, clip, "Font size", &["터미널 셀 폰트 크기 — Cmd+/− 배율과는 별개인 기준값이에요"]);
             if y > clip {
                 let bs = 30.0_f32;
                 let minus = (fx, y, bs, bs);
@@ -1562,6 +1588,58 @@ pub(crate) fn paint_settings(
                 let plus = (fx + bs + num_span, y, bs, bs);
                 stepper_btn(g, plus, "plus", ctx.cursor);
                 rects.push((SettingsAction::FontSizeDelta(1), plus));
+            }
+            y += 30.0 + ROW_GAP;
+            // UI 배율 — 여태 Cmd+/− 키에만 있었다. 키로만 있으면 지금 몇 %인지
+            // 화면 어디에도 안 적혀서, 폰트 크기와 배율을 번갈아 만지다 UI 가
+            // 어긋나도 어느 쪽이 범인인지 알 수가 없다(거노). 숫자를 보여 주고,
+            // 둘을 한 번에 되돌릴 자리를 옆에 둔다.
+            y = field_header(g, fx, y, clip, "UI 배율",
+                &["크롬·사이드바·pane 이 함께 커져요 (Cmd+/− 와 같은 축)"]);
+            if y > clip {
+                let bs = 30.0_f32;
+                let minus = (fx, y, bs, bs);
+                stepper_btn(g, minus, "minus", ctx.cursor);
+                rects.push((SettingsAction::UiZoomDelta(-1), minus));
+                let num = format!("{:.0}%", ctx.ui_zoom * 100.0);
+                let num_w = g.measure_chrome_text(&num, 15.0, true);
+                let num_span = 62.0_f32;
+                g.draw_text(
+                    fx + bs + (num_span - num_w) / 2.0,
+                    y + (bs - 15.0) / 2.0,
+                    &num,
+                    gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
+                );
+                let plus = (fx + bs + num_span, y, bs, bs);
+                stepper_btn(g, plus, "plus", ctx.cursor);
+                rects.push((SettingsAction::UiZoomDelta(1), plus));
+                // 되돌리기 — 이미 기본값이면 누를 것이 없으므로 흐리게 두고
+                // 히트렉트도 안 만든다(눌러도 아무 일 없는 버튼은 고장으로 읽힌다).
+                let at_default = (ctx.ui_zoom - 1.0).abs() < 0.01
+                    && (ctx.font_size - socket::DEFAULT_FONT_SIZE).abs() < 0.01;
+                let label = "1:1 로 되돌리기";
+                let bw = g.measure_chrome_text(label, 12.5, false) + 26.0;
+                let r = (fx + bs * 2.0 + num_span + 14.0, y, bw, bs);
+                let hov = !at_default && inside(r, ctx.cursor);
+                if at_default {
+                    round_rect(g, r.0, r.1, r.2, r.3, theme::radius_md(), theme::surface());
+                } else {
+                    g.hover_pointer |= hov;
+                    panel_rect_outlined(
+                        g, r.0, r.1, r.2, r.3, theme::radius_md(),
+                        theme::raised_on(theme::panel_bg(), hov),
+                    );
+                    rects.push((SettingsAction::ResetScale, r));
+                }
+                g.draw_text(
+                    r.0 + 13.0, r.1 + (bs - 12.5) / 2.0, label,
+                    gpu::DrawOpts {
+                        font_size: 12.5,
+                        color: if at_default { theme::text_mute() } else { theme::text() },
+                        bold: false,
+                        italic: false,
+                    },
+                );
             }
             content_bottom = y + 30.0;
         }
@@ -1672,15 +1750,29 @@ pub(crate) fn paint_settings(
                     // 이 자리를 비워 두면 계정이 사라진 것처럼 보인다(거노: "계정
                     // 재시작할때마다 또 없어지냐"). 실제로는 몇 초 뒤 채워지므로,
                     // 없다고 말하지 말고 아직 모른다고 말한다.
-                    let (txt, col) = match auth_probe(&id) {
+                    let probe = auth_probe(&id);
+                    let team = probe.as_ref().and_then(|p| team_org(&p.email, &p.org));
+                    let (txt, col) = match &probe {
                         Some(p) if !p.logged_in => ("로그인 필요".to_string(), theme::danger()),
-                        Some(p) if !p.email.is_empty() => (p.email, theme::text_mute()),
+                        Some(p) if !p.email.is_empty() => (p.email.clone(), theme::text_mute()),
                         _ => ("확인 중…".to_string(), theme::with_alpha(theme::text_mute(), 0x99)),
                     };
                     g.draw_text(
                         status_x, y + (row_h - 12.0) / 2.0, &txt,
                         gpu::DrawOpts { font_size: 12.0, color: col, bold: false, italic: false },
                     );
+                    // 팀 조직만 배지로. 같은 이메일이 두 슬롯에 걸릴 때 이게 유일한
+                    // 구분점이라 이메일 옆에 붙여 한 눈에 같이 읽히게 둔다.
+                    if let Some(org) = team {
+                        let bx = status_x + g.measure_chrome_text(&txt, 12.0, false) + 8.0;
+                        let bw = g.measure_chrome_text(&org, 11.0, false) + 14.0;
+                        round_rect(g, bx, y + (row_h - 18.0) / 2.0, bw, 18.0,
+                            theme::radius_sm(), theme::surface_active());
+                        g.draw_text(
+                            bx + 7.0, y + (row_h - 11.0) / 2.0, &org,
+                            gpu::DrawOpts { font_size: 11.0, color: theme::accent(), bold: false, italic: false },
+                        );
+                    }
                 }
                 y += row_h + 6.0;
             }
@@ -2051,6 +2143,11 @@ Paste code here if prompted > ";
 struct AuthProbe {
     logged_in: bool,
     email: String,
+    /// 그 슬롯 토큰이 속한 조직. 이메일 하나에 개인 조직과 팀 조직이 둘 다 달려
+    /// 있으면 슬롯 둘이 **같은 이메일로** 보여 어느 쪽이 회사 것인지 알 수 없다
+    /// (거노: "팀플랜인지 구분하게 돼?"). 한도가 따로 도는 별개 계정이라 이걸
+    /// 못 가르면 자동 전환이 어디로 갔는지도 못 읽는다.
+    org: String,
 }
 
 /// 계정별 probe 캐시. 렌더가 매 프레임 도는 자리라 캐시 없이는 subprocess 폭주가
@@ -2097,10 +2194,14 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
             .ok()
             .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
             .map(|v| v.get("loggedIn").and_then(|x| x.as_bool()).unwrap_or(false));
-        let probe = logged_in.map(|logged_in| AuthProbe {
-            logged_in,
+        let probe = logged_in.map(|logged_in| {
             // 로그인 안 된 슬롯은 물어볼 토큰이 없다 — 호출을 아낀다.
-            email: if logged_in { slot_identity(dir.as_deref()) } else { String::new() },
+            let (email, org) = if logged_in {
+                slot_identity(dir.as_deref())
+            } else {
+                (String::new(), String::new())
+            };
+            AuthProbe { logged_in, email, org }
         });
         if let Some(cache) = CACHE.get() {
             let mut m = cache.lock().unwrap();
@@ -2119,7 +2220,9 @@ fn auth_probe(id: &str) -> Option<AuthProbe> {
 ///
 /// 실패하면 빈 문자열 — 화면은 그때 이메일 자리를 비운다. **틀린 이메일을 그리는
 /// 것보다 아무것도 안 그리는 게 낫다**(그 표시를 믿고 슬롯이 겹쳤다고 오판했다).
-fn slot_identity(dir: Option<&std::path::Path>) -> String {
+///
+/// 반환은 (이메일, 조직명). 조직명은 팀 슬롯을 가르는 유일한 단서라 같이 받는다.
+fn slot_identity(dir: Option<&std::path::Path>) -> (String, String) {
     let port = crate::mcp_panel_port();
     let d = dir.map(|p| p.display().to_string()).unwrap_or_default();
     // -G + --data-urlencode: 경로에 공백이나 한글이 섞여도 쿼리로 안전하게 실린다.
@@ -2128,33 +2231,49 @@ fn slot_identity(dir: Option<&std::path::Path>) -> String {
         .arg(format!("http://127.0.0.1:{port}/claude-identity"))
         .output()
     else {
-        return String::new();
+        return (String::new(), String::new());
+    };
+    let field = |v: &serde_json::Value, k: &str| {
+        v.get(k).and_then(|s| s.as_str()).unwrap_or_default().to_string()
     };
     serde_json::from_slice::<serde_json::Value>(&out.stdout)
         .ok()
         .filter(|v| v.get("ok").and_then(|b| b.as_bool()) == Some(true))
-        .and_then(|v| v.get("email").and_then(|s| s.as_str()).map(str::to_string))
+        .map(|v| (field(&v, "email"), field(&v, "org")))
         .unwrap_or_default()
+}
+
+/// 화면에 띄울 조직명 — 팀 조직일 때만 Some. 개인 조직은 이름이 `<이메일>'s
+/// Organization` 이라 이메일을 한 번 더 읽는 것과 다름없어 노이즈만 된다.
+fn team_org(email: &str, org: &str) -> Option<String> {
+    let personal = format!("{email}'s Organization");
+    (!org.is_empty() && org != personal).then(|| org.to_string())
 }
 
 /// 설정 항목의 제목과 (있으면) 설명 줄들을 그리고, 컨트롤이 놓일 y 를 돌려준다.
 /// 스크롤로 clip 위로 올라간 줄은 그리지 않되 자리(y 전진)는 유지한다 — 렌더러에
 /// scissor 가 없어 헤더/타이틀바를 침범하지 않으려면 통째로 스킵해야 한다.
+/// 항목 하나의 머리(제목 + 설명 줄). 다음 요소가 설 y 를 돌려준다.
+///
+/// 간격이 **제목 쪽으로 쏠려 있다** — 제목·설명·컨트롤은 한 덩어리고, 덩어리와
+/// 덩어리 사이(`ROW_GAP`)가 그보다 넓어야 눈이 항목 단위로 끊어 읽는다. 예전엔
+/// 제목→설명 24 · 설명→컨트롤 10 · 항목 사이 28 이라 안쪽이 바깥보다 벌어져,
+/// 설명이 제 제목이 아니라 위 항목의 꼬리처럼 붙어 보였다.
 fn field_header(g: &mut gpu::GpuRenderer, x: f32, y: f32, clip: f32, title: &str, help: &[&str]) -> f32 {
     if y > clip {
         section_label(g, x, y, title);
     }
     if help.is_empty() {
-        return y + 32.0;
+        return y + 26.0;
     }
-    let mut hy = y + 24.0;
+    let mut hy = y + 20.0;
     for line in help {
         if hy > clip {
             help_text(g, x, hy, line);
         }
-        hy += 18.0;
+        hy += 16.0;
     }
-    hy + 10.0
+    hy + 8.0
 }
 
 /// 세그먼트 컨트롤 — 하나의 트랙(pill) 안에 옵션 칸들이 붙어 있는 형태. 선택된
@@ -2207,12 +2326,14 @@ fn segmented(
     }
 }
 
+/// 항목 제목. 화면 제목(24)과 **두 단 아래**여야 한다 — 15 였을 때는 둘이 거의
+/// 같은 크기라, 페이지 안에 항목이 나열된 게 아니라 제목만 여럿 흩어져 보였다.
 fn section_label(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
     g.draw_text(
         x,
         y,
         text,
-        gpu::DrawOpts { font_size: 15.0, color: theme::text(), bold: true, italic: false },
+        gpu::DrawOpts { font_size: 13.5, color: theme::text(), bold: true, italic: false },
     );
 }
 
@@ -2221,7 +2342,7 @@ fn help_text(g: &mut gpu::GpuRenderer, x: f32, y: f32, text: &str) {
         x,
         y,
         text,
-        gpu::DrawOpts { font_size: 12.0, color: theme::text_mute(), bold: false, italic: false },
+        gpu::DrawOpts { font_size: 11.5, color: theme::text_mute(), bold: false, italic: false },
     );
 }
 

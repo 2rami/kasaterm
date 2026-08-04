@@ -663,11 +663,23 @@ impl App {
             overrides.into_iter().map(|(i, name)| (remap(i), name)).collect();
         let alerts = std::mem::take(&mut self.window_alert);
         self.window_alert = alerts.into_iter().map(remap).collect();
+        let expanded = std::mem::take(&mut self.expanded_windows);
+        self.expanded_windows = expanded.into_iter().map(remap).collect();
+        // 도는 중인 펼침 모션도 방을 인덱스로 가리킨다. 0.16초짜리라 그 안에 방을
+        // 끌어 옮기는 일은 드물지만, 인덱스를 키로 쓰는 필드가 **예외 없이** 여기를
+        // 지나야 다음 사람이 이 목록을 믿는다.
+        self.expand_anim = self.expand_anim.map(|(i, opening, at)| (remap(i), opening, at));
         // 밖에 나가 있는 방도 인덱스로 자기 트리를 찾는다 — 여기서 안 옮기면 재배치
         // 한 번에 별도 창이 남의 방을 그린다.
+        // 꺼낸 pane 도 나온 방을 인덱스로 들고 있다 — 안 옮기면 되돌릴 때 남의 방에서
+        // 튀어나온다. 인덱스를 키로 쓰는 필드는 예외 없이 이 목록을 지난다.
         for a in self.aux_windows.iter_mut() {
-            if let crate::auxwin::AuxWindowKind::Room { window, .. } = &mut a.kind {
-                *window = remap(*window);
+            match &mut a.kind {
+                crate::auxwin::AuxWindowKind::Room { window, .. }
+                | crate::auxwin::AuxWindowKind::Terminal { window, .. } => {
+                    *window = remap(*window);
+                }
+                _ => {}
             }
         }
         // 되살리기 대기 중인 pane 도 자기 방을 인덱스로 가리킨다 — 안 옮기면 ⌘⇧T 가
@@ -764,6 +776,11 @@ impl App {
         if c.alive {
             self.kill_hidden_pane(&c.pane_id);
         }
+        // 마지막 하나를 지우면 하단바가 접힌다 — 그만큼 그리드가 다시 늘어야 한다.
+        // 안 그러면 바가 있던 40px 이 빈 띠로 남는다(닫을 때는 `hide_pane` 이 이미
+        // 같은 일을 한다).
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
         self.chrome_dirty = true;
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -948,20 +965,46 @@ impl App {
         for i in 0..n {
             // Representative pane = first leaf of the window's layout. The
             // active window's tree lives in pty_layout; the rest in windows[i].
-            let repr = {
+            let leaves: Vec<String> = {
                 let layout = if i == self.active_window {
                     self.pty_layout.as_ref()
                 } else {
                     self.windows.get(i).and_then(|o| o.as_ref())
                 };
-                layout.and_then(|l| l.leaves().first().map(|s| s.to_string()))
+                layout.map_or(Vec::new(), |l| l.leaves().iter().map(|s| s.to_string()).collect())
             };
-            // window.rename override 가 파생 이름보다 우선한다 —
-            // 지정 pane 이 대표 leaf 가 아니어도 유지돼야 한다.
+            let repr = leaves.first().cloned();
+            // 방을 대표하는 cwd — 첫 leaf 가 아니라 **방 전체의 최빈값**이다. 첫
+            // pane 하나로 이름을 지으면 그 pane 이 뭘 띄웠는지에 따라 방 이름이
+            // 흔들려, 사이드바에서 자리로 방을 찾던 눈이 매번 다시 읽어야 했다.
+            // 방은 대개 한 프로젝트라 최빈 cwd 가 곧 그 방의 정체다(거노 확인).
+            let home = leaves
+                .iter()
+                .filter_map(|id| self.pane_current_cwd(id))
+                .fold(Vec::<(std::path::PathBuf, usize)>::new(), |mut acc, p| {
+                    match acc.iter_mut().find(|(q, _)| *q == p) {
+                        Some((_, c)) => *c += 1,
+                        None => acc.push((p, 1)),
+                    }
+                    acc
+                })
+                .into_iter()
+                // 동률이면 먼저 나온 것(첫 leaf 쪽)을 남긴다 — leaves 순서가
+                // 고정이라 같은 방이 늘 같은 이름을 얻는다.
+                .reduce(|a, b| if b.1 > a.1 { b } else { a })
+                .map(|(p, _)| p);
+            // 손으로 붙인 이름은 파생을 항상 이긴다 — 지정 pane 이 대표 leaf 가
+            // 아니어도, 방을 옮겨도 유지돼야 한다.
             let name = self
                 .window_name_override
                 .get(&i)
                 .cloned()
+                .or_else(|| {
+                    home.as_ref()
+                        .and_then(|p| p.file_name())
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .filter(|s| !s.is_empty())
+                })
                 .or_else(|| {
                     repr.as_ref().and_then(|id| {
                         ws.panes
@@ -977,10 +1020,9 @@ impl App {
                     })
                 })
                 .unwrap_or_else(|| format!("win {}", i + 1));
-            let cwd = repr
+            let cwd = home
                 .as_ref()
-                .and_then(|id| self.pane_current_cwd(id))
-                .map(|p| Self::shorten_cwd(&p))
+                .map(|p| Self::shorten_cwd(p))
                 .unwrap_or_default();
             out.push((name, cwd));
         }
@@ -1909,6 +1951,17 @@ impl App {
     /// the renderer has no scissor). This only clamps `first` into range;
     /// keeping the *active* tab in view is `win_tab_reveal`'s job at
     /// switch/create time, so a free wheel-scroll is never yanked back.
+    /// `i` 번 방의 pane id 들. 활성 방의 트리만 `pty_layout` 에 나가 있어 슬롯이
+    /// 비는데, 그걸 모르고 `windows[i]` 만 보면 지금 보고 있는 방이 늘 빈 방이 된다
+    /// — 사이드바·라벨·상태 점이 다 이 갈래를 각자 쓰고 있어 한 곳으로 모은다.
+    pub(crate) fn window_leaves(&self, i: usize) -> Vec<String> {
+        let layout = if i == self.active_window {
+            self.pty_layout.as_ref()
+        } else {
+            self.windows.get(i).and_then(|o| o.as_ref())
+        };
+        layout.map_or(Vec::new(), |l| l.leaves().iter().map(|s| s.to_string()).collect())
+    }
     pub(crate) fn sidebar_layout(
         &self,
         win_h: f32,
@@ -1916,6 +1969,7 @@ impl App {
         Vec<(usize, (f32, f32, f32, f32))>,
         Vec<(usize, (f32, f32, f32, f32))>,
         (f32, f32, f32, f32),
+        Vec<(usize, String, (f32, f32, f32, f32))>,
     ) {
         let n = self.windows.len();
         if self.tabs_on_top {
@@ -1955,7 +2009,8 @@ impl App {
                 }
             }
             let plus = (x0 + tabs.len() as f32 * (tab_w + gap), y, plus_w, tab_h);
-            return (tabs, closes, plus);
+            // 가로 탭엔 아래로 펼 자리가 없다 — pane 목록은 세로 사이드바 전용.
+            return (tabs, closes, plus, Vec::new());
         }
         let tab_x = SIDEBAR_TAB_INSET;
         let tab_w = (self.sidebar_w_logical - 2.0 * SIDEBAR_TAB_INSET).max(0.0);
@@ -1969,14 +2024,33 @@ impl App {
         // 트레이(+ · 피드백 · 설정)가 바닥을 먹는다 — 목록은 그 위까지만. 24px 는
         // chevron-down 오버플로 힌트 자리.
         let avail_h = (win_h - dock_h - top - SIDEBAR_TRAY_H - 24.0).max(stride);
+        // 스크롤 시작점은 **접힌 높이 기준**으로 잡는다 — 펼침은 방금 사용자가
+        // 편 것이라 그만큼 뒤가 밀리는 게 자연스럽고, 가변 높이로 역산하면 펼칠
+        // 때마다 목록이 통째로 점프한다.
         let n_vis = n
             .min((((avail_h + SIDEBAR_TAB_GAP) / stride) as usize).max(1));
         let first = self.win_tab_first.min(n.saturating_sub(n_vis));
         let mut tabs = Vec::with_capacity(n_vis);
         let mut closes = Vec::new();
-        for (vi, i) in (first..n.min(first + n_vis)).enumerate() {
-            let y = top + vi as f32 * stride;
-            tabs.push((i, (tab_x, y, tab_w, SIDEBAR_TAB_H)));
+        let mut rows = Vec::new();
+        // 펼친 방은 카드가 pane 수만큼 길어진다 — 고정 stride 를 쓰던 자리를 누적
+        // y 로 바꾼 이유가 이것이다. 넘치는 방은 그리지 않는다(렌더러에 scissor 가
+        // 없어 반쪽 카드는 트레이를 침범한다).
+        let mut y = top;
+        for i in first..n {
+            let leaves = self.window_leaves(i);
+            // pane 이 하나뿐인 방은 펼치지 않는다 — 점 하나가 이미 그 하나를 말하고
+            // 있어 목록이 같은 말을 반복할 뿐이다. 손잡이(render)도 같은 조건이라
+            // 여기서 갈라지면 손이 닿지 않는 펼침 상태가 생긴다.
+            // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
+            let t = if leaves.len() > 1 { self.expand_progress(i) } else { 0.0 };
+            let full_h = leaves.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
+            let list_h = (full_h * t).round();
+            let h = SIDEBAR_TAB_H + list_h;
+            if !tabs.is_empty() && y + h > top + avail_h {
+                break;
+            }
+            tabs.push((i, (tab_x, y, tab_w, h)));
             if n > 1 {
                 let cs = 14.0;
                 // Centered on the *name* row (drawn at y+11, 13.5px) rather than
@@ -1984,15 +2058,28 @@ impl App {
                 // title it belongs to, reading as detached from both lines.
                 closes.push((i, (tab_x + tab_w - cs - 3.0, y + 11.0, cs, cs)));
             }
+            if list_h > 0.0 {
+                // 카드 안에 온전히 들어온 줄만 낸다 — scissor 가 없어 반쪽 줄은
+                // 카드 밖으로 삐져나온다. 그래서 목록이 아래에서 한 줄씩 드러난다.
+                let bottom = y + h;
+                for (k, id) in leaves.iter().enumerate() {
+                    let ry = y + SIDEBAR_TAB_H + SIDEBAR_ROW_PAD / 2.0 + k as f32 * SIDEBAR_ROW_H;
+                    if ry + SIDEBAR_ROW_H > bottom {
+                        break;
+                    }
+                    rows.push((i, id.clone(), (tab_x + 8.0, ry, tab_w - 16.0, SIDEBAR_ROW_H)));
+                }
+            }
+            y += h + SIDEBAR_TAB_GAP;
         }
         // `+` 는 목록 꼬리가 아니라 하단 트레이의 왼쪽 칸이다 — 세션이 늘어도 자리가
         // 안 움직인다. 트레이가 없는 배치(top 탭·사이드바 접힘)에서는 어차피 이
         // 분기를 안 타므로 폴백은 목록 꼬리 그대로.
         let plus = self.sidebar_tray_rects(win_h).map_or_else(
-            || (tab_x, top + tabs.len() as f32 * stride, tab_w, 28.0),
+            || (tab_x, y, tab_w, 28.0),
             |(_, p, ..)| p,
         );
-        (tabs, closes, plus)
+        (tabs, closes, plus, rows)
     }
     pub(crate) fn start_pty(&mut self) -> Result<()> {
         let _window = self.window.as_ref().expect("window before pty");

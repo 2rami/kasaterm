@@ -154,7 +154,12 @@ mod tests {
         fn focus_surface(&self, _: &str) -> Result<()> {
             Ok(())
         }
-        fn split_surface(&self, _: crate::backend::SplitDirection, _focus: bool) -> Result<SurfaceInfo> {
+        fn split_surface(
+            &self,
+            _: crate::backend::SplitDirection,
+            _focus: bool,
+            _from: Option<&str>,
+        ) -> Result<SurfaceInfo> {
             anyhow::bail!("not implemented")
         }
         fn send_text(&self, _: Option<&str>, _: &str) -> Result<()> {

@@ -89,6 +89,13 @@ fn run() -> Result<Option<Response>> {
         run_wake_watch(&socket_path, &target, interval, timeout)?;
         return Ok(None);
     }
+    // `dismiss <id>…` — 일 끝난 학생 pane 을 한 번에 닫는다. 인사말·완료 보고를
+    // 주고받는 대신 오케스트레이터가 그냥 닫는다(회수할 게 있으면 git 이 막는다).
+    if cmd == "dismiss" {
+        let socket_path = resolve_socket_path()?;
+        run_dismiss(&socket_path, &args)?;
+        return Ok(None);
+    }
     // `sessions`/`resume` — 터미널 안 세션 피커. claude 자체 /resume 은 teamName 이
     // 기록된 세션(=팀 트리플로 뜨는 kasaterm pane 세션 전부)을 무조건 숨기므로,
     // jsonl 직스캔으로 팀 세션까지 전부 보여주고 학생색·학생명으로 구분한다.
@@ -310,6 +317,109 @@ fn run_wake_watch(
     }
 }
 
+/// `dismiss <id>…` — 일이 끝난 학생 pane 을 한 번에 닫는다. 닫기 전에 각 pane 의
+/// cwd 를 `git status --porcelain` 으로 보고, **커밋 안 된 변경이 있으면 닫지 않고
+/// 보고만** 한다. 회수할 것이 있는지는 오케스트레이터가 pane 을 죽인 뒤엔 물어볼
+/// 데가 없기 때문이다 — 워크트리 파일은 남지만 어느 pane 이 무엇을 만지고 있었는지는
+/// board 와 함께 사라진다.
+///
+/// 대상은 **항상 명시**한다(`--all` 없음). 스폰한 쪽은 자기가 띄운 id 를 알고,
+/// 화면에는 그 작업과 무관한 pane 이 늘 함께 떠 있다 — 한 번의 오작동이 남의 세션을
+/// 통째로 날린다.
+///
+/// 출력은 JSON 이 아니라 한 줄씩이다. 이 명령을 읽는 것은 사람 아니면 에이전트고,
+/// 둘 다 "무엇이 닫혔고 무엇이 남았나" 한 눈에 보는 편이 싸다.
+fn run_dismiss(socket_path: &str, args: &[String]) -> Result<()> {
+    let force = args.iter().any(|a| a == "--force");
+    let targets: Vec<String> = args
+        .iter()
+        .filter(|a| a.starts_with('%'))
+        .cloned()
+        .collect();
+    if targets.is_empty() {
+        return Err(anyhow!(
+            "dismiss 는 닫을 pane 을 명시해야 한다 (예: dismiss %3 %4 [--force])"
+        ));
+    }
+    let board = roundtrip(
+        socket_path,
+        &Request {
+            id: "dismiss".into(),
+            method: "collab.board".into(),
+            params: json!({}),
+        },
+    )
+    .ok()
+    .and_then(|r| r.result)
+    .and_then(|v| v.get("board").cloned())
+    .and_then(|v| v.as_array().cloned())
+    .unwrap_or_default();
+    let mut kept = 0usize;
+    for id in &targets {
+        let entry = board
+            .iter()
+            .find(|e| e.get("surface_id").and_then(|v| v.as_str()) == Some(id.as_str()));
+        let who = entry
+            .and_then(|e| e.get("character"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let cwd = entry
+            .and_then(|e| e.get("cwd"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let where_ = Path::new(cwd)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| cwd.to_string());
+        let dirty = if force || cwd.is_empty() {
+            0
+        } else {
+            git_dirty_count(cwd)
+        };
+        if dirty > 0 {
+            kept += 1;
+            println!("kept    {id} {who} — {where_}: 커밋 안 된 변경 {dirty}개");
+            continue;
+        }
+        let resp = roundtrip(
+            socket_path,
+            &Request {
+                id: "dismiss".into(),
+                method: "surface.close".into(),
+                params: json!({ "surface_id": id }),
+            },
+        )?;
+        if resp.ok {
+            println!("closed  {id} {who} — {where_}");
+        } else {
+            kept += 1;
+            let why = resp
+                .error
+                .as_ref()
+                .map(|e| e.message.clone())
+                .unwrap_or_else(|| "close 실패".into());
+            println!("failed  {id} {who} — {why}");
+        }
+    }
+    if kept > 0 {
+        println!("\n남은 {kept}개는 손대지 않았다 — 회수하거나 --force 로 다시.");
+    }
+    Ok(())
+}
+
+/// 그 디렉토리의 커밋 안 된 변경 개수. git 이 아니거나 실패하면 0 — "모르면 닫는다"
+/// 가 아니라 "모르면 막지 않는다" 쪽인데, 여기서 막으면 git 아닌 cwd 의 pane 을
+/// 영영 못 닫는다. 진짜 회수 대상은 워크트리이고 그건 git 이다.
+fn git_dirty_count(cwd: &str) -> usize {
+    std::process::Command::new("git")
+        .args(["-C", cwd, "--no-optional-locks", "status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().count())
+        .unwrap_or(0)
+}
+
 /// `/tmp/kasaterm-collab/<cwd-with-/-and-.-as-->/messages.jsonl` — the same
 /// path kasacollab.py derives, so `board-watch` reads the inbox kasacollab msg
 /// writes. cwd-dependent, so the watch must run from the project directory.
@@ -493,10 +603,15 @@ fn print_help() {
     eprintln!("  kasaterm-cli list <workspaces|surfaces>");
     eprintln!("  kasaterm-cli focus <surface_id>");
     eprintln!("  kasaterm-cli close <surface_id>");
+    eprintln!(
+        "  kasaterm-cli dismiss <surface_id>… [--force]  # 일 끝난 학생 pane 닫기(커밋 안 된 변경이 있으면 안 닫고 보고)"
+    );
     eprintln!("  kasaterm-cli rename <surface_id> <title>");
     eprintln!("  kasaterm-cli rename-window <title>          # 이 pane 의 세션 이름");
     eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
-    eprintln!("  kasaterm-cli split <left|right|up|down> [--focus]  # 기본 no-focus");
+    eprintln!(
+        "  kasaterm-cli split <left|right|up|down> [%surface] [--focus]  # 기본 no-focus·이 pane 을 쪼갬"
+    );
     eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
     eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (오케스트레이터 크게)");
     eprintln!("  kasaterm-cli send  <text>");
@@ -609,9 +724,20 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             let focus = args.iter().any(|a| a == "--focus");
             let dir = args
                 .iter()
-                .find(|a| !a.starts_with("--"))
+                .find(|a| !a.starts_with("--") && !a.starts_with('%'))
                 .ok_or_else(|| anyhow!("split needs a direction"))?;
-            ("surface.split", json!({ "direction": dir, "focus": focus }))
+            // 쪼갤 pane: 명시한 %id > 이 CLI 가 도는 pane. 둘 다 없을 때만(=pane 밖에서
+            // 부른 경우) 포커스 기준으로 떨어진다. 예전엔 늘 포커스 기준이라, 에이전트가
+            // 자기 pane 에서 학생을 띄워도 사람이 보고 있는 창이 쪼개졌다.
+            let from = args
+                .iter()
+                .find(|a| a.starts_with('%'))
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+            (
+                "surface.split",
+                json!({ "direction": dir, "focus": focus, "from": from }),
+            )
         }
         "swap" => {
             let a = args

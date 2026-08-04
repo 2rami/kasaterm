@@ -64,9 +64,10 @@ MCP 도구 카탈로그 전수는 [부록 A](#부록-a--mcp-도구-카탈로그)
 
 | 명령 | 인자·동작 | 특이 반환 |
 |---|---|---|
-| `split <left\|right\|up\|down> [--focus]` | 현재(또는 focus된) pane을 방향 분할. `--focus` 없으면 포커스 유지(기본 no-focus) | `result.surface.id` = 새 pane id |
+| `split <left\|right\|up\|down> [%id] [--focus]` | **부른 pane**(`$KASATERM_PANE_ID`)을 방향 분할 — 2026-08-04 이전엔 늘 포커스된 pane 이라, 에이전트가 학생을 띄우면 거노가 보고 있던 창이 쪼개졌다. `%id` 로 다른 pane 지정 가능, pane 밖에서 부르면 포커스 기준. `--focus` 없으면 포커스 유지 | `result.surface.id` = 새 pane id |
 | `focus <id>` | 포커스 이동 | — |
 | `close <id>` | pane 닫기(셸 종료) | — |
+| `dismiss <id>… [--force]` | 일 끝난 학생 pane 을 한 번에 닫기. 각 pane 의 cwd 를 `git status` 로 보고 **커밋 안 된 변경이 있으면 안 닫고 보고**. 대상 항상 명시(`--all` 없음) — 패턴 G | 한 줄씩 plain text(`closed`/`kept`/`failed`) |
 | `rename <id> <title>` | 헤더 제목 | — |
 | `rename-window <title>` | **이 pane의 세션(윈도우) 이름.** id 안 받음 — 자기 세션 대상 | — |
 | `color <id> <#rrggbb>` | 헤더 accent 색 | — |
@@ -304,20 +305,21 @@ echo '{"tool_name":"SendUserFile","tool_input":{"files":["/tmp/foo.png"]}}' \
 **위임 기본값(거노 확정 2026-07-19): kasaterm 안에서 병렬·장시간 작업 위임은 학생 pane 스폰이 기본이다.** Agent 툴 백그라운드 서브에이전트는 board·statusline에 안 보여 거노가 진행을 지켜볼 수 없다 — Agent 툴은 kasaterm 셸 밖이거나 거노가 명시할 때만. 거노가 모델을 지정하면("오푸스로") 그 지시가 스킬의 기본 모델보다 우선하며, 이미 실행 중인 학생의 모델 전환은 `kasaterm-cli tell <id> "/model claude-opus-5[1m]"`(TUI 슬래시 명령 주입)로 컨텍스트 유지한 채 가능하다 — 반드시 풀네임+[1m] 변형으로.
 
 ```bash
+# split 은 **부른 pane** 을 쪼갠다(2026-08-04) — 거노가 보고 있는 창이 아니라 내 자리 옆에 뜬다.
 S=$(kasaterm-cli split right | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["surface"]["id"])')
 kasaterm-cli rename "$S" "<작업명>"
 kasaterm-cli color  "$S" "#58a6ff"
 # split 직후 send는 "surface 없음" 가드 오발동이 잦다(id 재사용, 실측 2회) → 실패 시 sleep 2 후 재시도
-# 트리플은 명시 부착 필수(2026-07-24 shim 자동 부착 제거 — 거노 정책: 본인이 스폰한 학생만 SendMessage, 나머지는 전부 tell)
-# 셋 세트: --agent-id team-lead --agent-name <작업명> --team-name <팀 자유명명, 예: kt-undock-0724>. id=team-lead면 학생의 AskUserQuestion이 그 pane에 네이티브로 뜸(F-3)
-kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --model \'claude-opus-5[1m]\' --effort xhigh --agent-id team-lead --agent-name <작업명> --team-name <팀>\n'   # 모델은 풀네임+[1m] 필수 — 아래 학생 모델 항목
-sleep 9                                  # 부팅 대기 — peek 로 ❯ 프롬프트 + 헤더 `@이름`(= agent 이름) 확인
-# 브리프는 SendMessage 로 — 방금 내가 트리플로 스폰한 학생이라서다(스폰 관계 밖은 전부 tell, 2026-07-24 정책):
-#   SendMessage({to: "<agent이름>", summary: "<작업> 브리프", message: "<배경·파일 포인터·검증 기준·커밋 금지(커밋은 오케스트레이터)>"})
-#   ⚠️ 오케스트레이터 자신에게 트리플이 없으면 SendMessage 는 **반드시** 'not reachable' 이다(2026-07-26 실측 — shim 자동 부착 제거 후 거노가 연 pane 은 전부 트리플 없음). 재시도 말고 F-2 파일 append 로 — 동일 실체라 학생은 네이티브로 받고, 폴러가 먹으면 파일이 `[]` 로 비어 도착 확인까지 된다(왕복 실측 완료).
-# 긴 브리프는 파일로 쓰고 "브리프 파일 <절대경로>를 Read 후 수행" 한 줄만. 학생의 보고·질문·완료 통지는 `kasaterm-cli tell <내 pane id>` 로 하게 브리프에 명시 — 내 pane id($KASATERM_PANE_ID)를 브리프에 적어줄 것(아래 학생 답장 프로토콜).
-kasaterm-cli wake-watch "$S" 30          # Bash run_in_background 로 — 턴 종료 시 auto-wake(예비 감시)
+# 트리플(--agent-id/--agent-name/--team-name)은 **붙이지 마라** — shim 이 자동으로 붙인다(2026-08-04 복원).
+# 직접 주면 자동 부착이 통째로 꺼진다. 이름은 <캐릭터 슬러그>-p<pane번호>, 팀은 방(cwd) 단위.
+kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --model \'claude-opus-5[1m]\' --effort xhigh\n'   # 모델은 풀네임+[1m] 필수 — 아래 학생 모델 항목
+sleep 9                                  # 부팅 대기 — peek 로 ❯ 프롬프트 확인
+# 브리프는 SendMessage 로. to: 는 상대의 $KASATERM_AGENT(= <슬러그>-p<pane번호>) — pane 번호에서 바로 온다.
+#   SendMessage({to: "<슬러그>-p<번호>", summary: "<작업> 브리프", message: "<배경·파일 포인터·검증 기준·자기 브랜치에 커밋>"})
+# 긴 브리프는 파일로 쓰고 "브리프 파일 <절대경로>를 Read 후 수행" 한 줄만 — 받는 pane 은 거노가 보는 화면이다.
 ```
+
+⚠️ **부팅 커맨드는 갓 만든 빈 pane 에만.** 이미 claude 가 도는 pane 에 `... && claude ...` 를 보내면 셸이 아니라 **그 claude 의 입력창**이 받아 지시로 읽고, 하네스식 스폰 절차(인박스 선주입 → pane 부팅)를 그대로 쓰면 아무도 뜨지 않은 이름의 인박스가 하나 생겨 브리프가 조용히 사라진다(`inboxes/` 의 고아 파일들이 그 잔해다). 2026-08-04부터 **서버가 거부한다** — `surface.send_text` 가 board(=claude 가 도는 pane 목록)를 보고 부팅 커맨드면 막고 대신 쓸 `to:` 이름을 알려준다. 도는 pane 에 할 말은 SendMessage 뿐이다.
 
 - `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan). `--model`·`--effort`·`--session-id`·`--resume`은 공개 플래그.
 - **학생 모델 = 반드시 풀네임 + `[1m]`(1M 컨텍스트) 변형**: 가벼운 잡·정찰=`'claude-sonnet-5[1m]'`, 구현·생성 본작업=`'claude-opus-5[1m]'`(유효 실측 2026-07-26). ⚠️ **`opus`·`sonnet` 짧은 alias 를 쓰지 마라** — alias 는 아직 이전 세대(`opus`→Opus 4.8)를 가리켜 오푸스 5 로 안 뜬다(거노 실사고 2026-07-26: 학생이 전부 4.8 로 소환됨). 세대가 바뀌면 alias 가 늦게 따라오므로 풀네임이 정본이다. 표준(200K) 변형으로 띄우거나 `/model opus`처럼 무접미 전환하면 컨텍스트 창이 줄어든다 — 실사고: sonnet[1m] 세션을 `/model opus`(200K)로 바꾸자 같은 대화가 87%로 점프. **미드세션 전환도 항상 `/model claude-opus-5[1m]` 꼴로.** 대괄호가 zsh glob이라 CLI에선 **따옴표 필수**(안 감싸면 "no matches found"). 거노가 모델을 지정하면 그 계열의 [1m] 변형으로 해석한다. 모델의 자기보고("200K 표준")는 훈련지식이라 믿지 말 것 — 하네스 statusline이 진실. **함정(실사고 07-19): tell로 주입한 슬래시 명령은 학생이 working 중이면 제출돼도 큐에만 걸리고 발화하지 않는다** — 코하루가 전환 미발화 상태로 200K를 100%까지 소진. 주입 후 반드시 peek로 statusline의 `1M` 표기를 확인하고, 큐에 걸려 있으면 `key escape`로 턴을 끊어 발화시켜라(파일 수정분은 보존됨).
@@ -329,16 +331,16 @@ kasaterm-cli wake-watch "$S" 30          # Bash run_in_background 로 — 턴 �
 - 배분 전 `board`로 형제 pane의 `changed_files`를 확인해 **파일 경계를 사전 분리**(같은 파일을 두 학생이 만지면 같은 작업트리라 git 이전에 물리 충돌). 검수·커밋은 오케스트레이터 단독.
 - wake-watch가 울려도 board idle은 오판일 수 있다 — `peek`로 실화면(스피너/보고문) 확인 후 판단(§5 함정 표).
 
-**학생 답장 프로토콜(2026-07-24 개정 — tell 학생 렌더 도입 후)** — 학생이 pane에 남기는 일반 답장(턴 최종 텍스트)은 **pane 사용자(거노)에게만 보이고 오케스트레이터에게 자동 전달되지 않는다.** "어떻게 볼까"를 고민하지 말고 받는 경로를 브리프에 못박아라:
-1. **push(기본) = tell** — 브리핑에 반드시 포함: "보고·질문·완료 통지는 `kasaterm-cli tell <오케스트레이터 pane id>` 로"(pane id를 브리프에 명기). tell은 2026-07-24부터 받는 pane에 발신 학생 프사+학생색으로 렌더되어 거노 입력과 오해되지 않는다. 오케스트레이터가 working 중이면 입력창에 큐잉됐다 턴 경계에 도착한다(보고는 단발이라 무해).
-2. **pull(예비)** — 학생이 tell을 깜빡했을 때: wake-watch(턴 종료 감지) → `kasaterm-cli transcript <id> N`.
-(구 2026-07-19 "보고도 SendMessage" 규칙은 shim 자동 트리플 전제였다 — 자동 부착 제거로 일반 오케스트레이터 세션엔 인박스 폴러가 없어 역방향 SendMessage가 안 닿는다. 오케스트레이터가 team-lead 트리플로 명시 부팅한 F-2 구성에서만 역방향 유효.)
+**학생 답장 프로토콜(2026-08-04 개정 — shim 자동 트리플 복원 후)** — 학생이 pane에 남기는 일반 답장(턴 최종 텍스트)은 **pane 사용자(거노)에게만 보이고 오케스트레이터에게 자동 전달되지 않는다.** 받는 경로를 브리프에 못박아라:
+1. **push(기본) = SendMessage** — 브리핑에 포함: "보고는 SendMessage to `$KASATERM_AGENT`(= 내 이름)". 양쪽 다 shim 트리플로 떠 있어 양방향이 열려 있다. 인박스 주입이라 상대 턴을 안 깨뜨린다.
+2. **pull(예비)** — 학생이 보고를 깜빡했을 때: board-watch 로 idle 감지 → `kasaterm-cli transcript <id> N`.
+**완료 통지는 시키지 마라.** 끝났는지는 board 의 idle 과 커밋이 말한다. 「작업 완료했습니다」 왕복은 양쪽 컨텍스트만 태운다 — 일이 끝나면 오케스트레이터가 `kasaterm-cli dismiss <id>…` 로 그냥 닫는다(패턴 G).
 
 #### 패턴 F-2 — 네이티브 팀 배선 (SendMessage = inbox 파일, 2026-07-13 실측 확정 · 같은 날 풀 왕복 재검증)
 
 teammate 플래그로 부팅된 세션은 **`~/.claude/teams/<팀>/inboxes/<슬러그(agent-name)>.json`을 스스로 폴링**해서, 새 항목을 `<teammate-message>` user 턴으로 즉시 주입받는다(미드런 OK·발신자 이름·색·summary 표시). SendMessage 도구의 실체가 이 파일 append다 — 즉 **파일만 쓰면 누구든(오케스트레이터·kasaterm·스크립트) 네이티브로 메시지를 꽂을 수 있다.** 전 경로 왕복 재검증 완료(2026-07-13, collab-native 실측): 리더→학생(파일 append) / 학생↔학생(SendMessage 상호 지목) / 학생→리더(team-lead inbox) / idle 자동 알림 — 순서만 지키면(분할→config 선작성→부팅) 수동 스폰으로 완전한 네이티브 팀이 된다.
 
-**⚡ shim 자동 부착은 제거됐다(2026-07-24, 거노 확정)**: 2026-07-16~23엔 shim이 모든 pane claude에 트리플(방 단위 팀)을 자동 부착했으나, `--resume` 재시작마다 agent 이름 꼬리(sid4)가 바뀌어 **옛 이름 인박스가 고아화**(그리로 보낸 SendMessage는 조용히 유실)되고 유령 인박스가 재시작마다 쌓여 폐기. 이제 **트리플은 오케스트레이터가 학생 스폰 시 명시 부착하는 것만 존재**하고, SendMessage는 그 스폰 관계 안에서만 쓴다. 그 외 모든 소통(스폰 관계 없는 pane·다른 방·bg 세션·비-claude)은 tell — 받는 pane에 발신 학생 프사·색으로 렌더된다(2026-07-24). env `KASATERM_TEAM`/`KASATERM_AGENT`도 더는 자동 설정되지 않는다. **config.json 없이도 수신 주입·SendMessage 발신이 전부 동작한다(v2.1.211 재실측)** — 아래 config 선작성은 idle 자동보고·`claude agents` 명부가 필요한 오케스트레이션용이고, 단순 지시·보고엔 불필요.
+**⚡ shim 자동 부착은 복원됐다(2026-08-04)**: 2026-07-24~08-03 사이엔 꺼져 있었다. 껐던 이유 둘 — `--resume` 마다 agent 이름 꼬리(sid4)가 바뀌어 **옛 이름 인박스가 고아화**(SendMessage 조용히 유실)되고 유령 인박스가 재시작마다 쌓인 것 — 은 **꼬리가 세션 id 였던 탓**이라, 꼬리를 **pane 번호**(`<슬러그>-p<번호>`)로 바꿔 둘 다 사라졌다: pane 은 생애 동안 번호가 안 바뀌어 몇 번을 resume 해도 같은 인박스고, 인박스 수는 방의 pane 슬롯 수로 묶인다. 진짜 동기였던 `@이름` 칩(입력박스 구분선에서 `/rename` 세션 이름 자리를 뺏음)은 render.rs `strip_teammate_chip` 이 칩만 지워 해결한다. 이제 pane claude 는 전부 팀원이라 **SendMessage 가 기본**이고, env `KASATERM_TEAM`/`KASATERM_AGENT` 도 다시 자동 설정된다. tell 은 SendMessage 가 안 닿는 상대(다른 방·bg 세션·비-claude)에만. **config.json 없이도 수신 주입·SendMessage 발신이 전부 동작한다(v2.1.211 재실측)** — 아래 config 선작성은 idle 자동보고·`claude agents` 명부가 필요한 오케스트레이션용이고, 단순 지시·보고엔 불필요.
 
 **⚠️ detach(←←) 포크는 팀에서 이탈한다(2026-07-16 실측)**: detach는 같은 프로세스 유지가 아니라 **데몬이 argv를 재구성한 새 포크 프로세스**다 — teammate 트리플·`--append-system-prompt`(persona)·`--model`이 전부 유실되고 인박스 폴러가 안 돈다(인박스에 써도 미소비 실측). env도 원 pane이 아니라 **데몬을 낳은 옛 pane의 env**를 물려받아 계보가 틀리다. 백그라운드 포크에 SendMessage는 닿지 않는다 — 팀원으로 되살리려면 pane에서 `claude --resume <포크 sid>`에 **트리플을 명시 부착**해 재부팅해야 한다(2026-07-24 자동 재부착 제거 — 플래그 없이 resume하면 일반 세션으로 돌아올 뿐 팀원이 아니다). persona는 kasaterm SessionStart 훅이 세션 바인딩(/persona 엔드포인트)으로 자동 재주입한다.
 
@@ -396,6 +398,36 @@ teammate 학생의 `AskUserQuestion`(및 승인 필요 도구)은 자기 pane에
 운영 정책(거노 확정): **사소한 판단이면 리더가 알아서** 승인/답변하고 진행시켜라. **중요한 결정이면 리더가 자기 AskUserQuestion으로 거노에게 물어본 뒤** 그 답을 permission_response(또는 후속 메시지)로 relay한다. 학생에게는 애초에 "중요 결정은 리더에게 메시지로 물어라"라고 브리핑하는 게 깔끔하다.
 
 ---
+
+### 패턴 G — 해산 (`dismiss`)
+
+일이 끝나면 인사말·완료 보고를 주고받지 말고 **그냥 닫는다**:
+
+```bash
+kasaterm-cli dismiss %64 %65 %66        # 커밋 안 된 변경이 있으면 그 pane 은 안 닫고 보고
+kasaterm-cli dismiss %64 --force        # 회수 끝났으면
+```
+
+출력은 JSON이 아니라 한 줄씩(`closed %64 프라나 — mc-dashboard` / `kept %66 아리스 — …: 커밋 안 된 변경 3개`). pane 을 닫아도 워크트리 파일은 그대로 남는다(실측) — 막는 것은 "어느 pane 이 뭘 만지고 있었는지"가 board 와 함께 사라지기 전에 회수하라는 뜻이다.
+
+**대상은 항상 명시한다.** `--all` 은 없다 — 화면에는 그 작업과 무관한 pane(거노 본인 작업, 다른 방)이 늘 함께 떠 있고, 한 번의 오작동이 남의 세션을 통째로 날린다. 스폰한 쪽은 자기가 띄운 id를 안다.
+
+**「마무리하겠습니다」·「수고했다」·완료 통지는 전부 없어도 되는 왕복이다** — 무엇이 끝났는지는 커밋과 공유 태스크 목록과 dismiss 출력이 말한다.
+
+### 패턴 H — 공유 태스크 목록
+
+태스크 목록은 **팀 이름 단위**(`~/.claude/tasks/<팀>/`)고 팀은 방(cwd) 단위라, 같은 방 pane 은 **한 목록을 공유한다**(거노 확정 2026-08-04: 공유 유지). 인박스(SendMessage)와 같은 팀 이름을 쓰므로 둘은 따로 못 끈다 — 태스크를 pane 별로 가르려면 SendMessage 도 같이 죽는다.
+
+이게 진행 보고를 대신한다. 말로 알리지 말고 목록을 갱신해라:
+- 시작 시 `TaskUpdate`로 `in_progress` + `owner`를 **자기 이름으로**. 끝나면 `completed`. 안 하면 남이 같은 걸 또 잡는다.
+- **남의 owner가 붙은 태스크는 상태도 바꾸지 말고 지우지도 마라** — 그 사람이 아직 도는 중이다.
+- 오케스트레이터는 배분 전에 `TaskList`로 이미 잡힌 것을 보고 겹치지 않게 나눈다.
+
+### 패턴 I — 질문은 각자 거노께
+
+**학생끼리 상의하지 마라**(거노 지시 2026-08-04). 「이 방향 맞나」·「이거 어떻게 할까」는 전부 그 학생 pane 에서 `AskUserQuestion`으로 거노께 직접 뜬다 — shim이 `--agent-id team-lead`로 부팅하므로 승인 포워딩 게이트가 꺼져 있어 네이티브로 렌더된다(F-3).
+
+학생끼리 주고받는 상의는 거노 눈에 안 보이는 곳에서 방향이 정해지고, 왕복이 두 배가 되고, 물어본 쪽도 결국 추측으로 답한다. pane 간 SendMessage는 **질문이 아니라 통보**로 쓴다 — 「이 파일 내가 만진다」, 「이거 끝났으니 이어서」.
 
 ## 2) 긴 잡 사이클 — kasaterm pane에서 빌드·dev server·배포
 
@@ -729,7 +761,7 @@ rm -rf ~/.claude/teams/$TEAM/inboxes/<좀비이름>
 §4 팀 모드가 **TeamCreate 위계**(리드↔팀원)라면, 이건 **위계 없는 peer 협업**이다. 떠 있는 pane들끼리 — claude든 codex·antigravity든 — 소통하고 충돌을 피한다. `KASATERM_PANE_ID`가 비어 있으면 형제 pane이 없는 것이니 비적용. 네 축이다:
 
 - **board** — 누가 뭘 하나. `kasaterm-cli board`로 **직접 조회**한다(옛 `kasaterm-board-context.py` 자동주입은 폐기 — settings 미등록). 충돌 회피·합류 판단에 쓴다.
-- **SendMessage** — **본인이 명시 트리플로 스폰한 학생에게 지시·브리프를 보낼 때만**(2026-07-24 거노 확정 — shim 자동 트리플 제거 후). `to:` 스폰 시 지정한 --agent-name. 인박스 네이티브 주입이라 상대 입력창을 안 건드리고 발신자 이름·색으로 렌더된다. 스폰 관계 밖엔 시도하지 마라 — 재시작 후 이름 꼬리가 바뀐 고아 인박스로 조용히 유실될 수 있다.
+- **SendMessage** — **pane 간 소통의 기본**(2026-08-04 shim 자동 트리플 복원 후). `to:` 는 상대의 `$KASATERM_AGENT`(= `<캐릭터 슬러그>-p<pane번호>`). 인박스 네이티브 주입이라 상대 입력창을 안 건드리고 발신자 이름·색으로 렌더된다. 같은 방(cwd) pane 끼리 열려 있고, 다른 방이면 팀이 달라 안 닿으니 그때만 tell.
 - **tell** — **그 외 전부의 기본 채널**: 스폰 관계 없는 같은 방 pane·다른 방·bg 세션·비-claude(codex·antigravity·셸)·학생→오케스트레이터 보고·`/model` 같은 슬래시 명령 주입·idle claude 즉시 깨우기. 2026-07-24부터 받는 pane에 발신 학생 프사+학생색으로 렌더되어 거노 입력과 구분된다. 서버가 발신자를 기록해 웹뷰 대화에도 발신 학생 이름으로 뜬다.
 - **wait** — 동료 작업이 끝나길 기다릴 때. `tell`로 깨우거나 `board`를 반복 조회하지 말고 `wake-watch`를 background로 띄운다(아래).
 
@@ -771,8 +803,8 @@ kasaterm-cli tell %3 "socket.rs 동결 해제 — 이어서 진행해"
 
 | 안 됨 | 왜 |
 |---|---|
-| 스폰 관계 밖 상대에게 SendMessage | 재시작 후 agent 이름 꼬리(sid4)가 바뀌어 고아 인박스로 조용히 유실(실사고 07-24 아리스). 스폰 관계 밖은 전부 tell(2026-07-24 거노 확정) |
-| working 상대에게 브리프 연발 tell | 입력창 큐잉·선택지 오염. 본인 스폰 학생 브리프는 SendMessage(인박스 주입 — 상대 턴 안 깨뜨림), 그 외엔 wake-watch로 idle 기다렸다 tell 1건 |
+| 다른 방(cwd) pane에 SendMessage | 팀명이 방 단위라 인박스가 갈린다 — 안 닿으면 tell 로 |
+| working 상대에게 브리프 연발 tell | 입력창 큐잉·선택지 오염. 브리프는 SendMessage(인박스 주입 — 상대 턴 안 깨뜨림), tell 밖에 없는 상대면 board-watch로 idle 기다렸다 1건 |
 | inbox(`kasacollab inbox`)를 소통 채널로 설계 | 모모톡/inbox UI는 폐기(2026-07-12, board tell-피드로 대체). msg는 tell 별칭일 뿐 |
 | `send`로 깨우려 함 | `\r` 없음 → 글자만. idle 깨우기는 `tell` |
 | `tell`에 surface_id 생략 | 항상 `<surface_id> <text>`. 자기 자신엔 안 씀 |

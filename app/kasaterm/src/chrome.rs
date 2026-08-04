@@ -134,6 +134,46 @@ impl App {
         known.then(|| ws.pane_character.get(id).cloned()).flatten()
     }
 
+    /// claude 가 떠 있는 pane 을 기억해 둔다 — 얼굴을 내보일 자격.
+    ///
+    /// pane 이 사라지면 같이 잊는다. surface id 는 재사용되므로, 안 지우면 새로 난
+    /// 셸 pane 이 남의 자격을 물려받아 켜지도 않은 학생을 달고 뜬다.
+    pub(crate) fn note_claude_panes(&mut self) {
+        // 판정은 **OSC 제목** 이 먼저다. claude 는 뜨자마자 「✳ Claude Code」를
+        // 보내는데, 프로세스 이름 쪽은 셸의 직계 자식을 500ms 캐시로 훑는 경로라
+        // 헤드리스 실측에서 claude 가 떠 있는데도 계속 `zsh` 를 돌려줬다.
+        let seen: Vec<String> = self
+            .pty
+            .iter()
+            .filter(|(_, p)| {
+                p.osc_title().is_some_and(|t| t.contains("Claude"))
+                    || p.active_process_name().is_some_and(|n| n.contains("claude"))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.pane_claude_seen.extend(seen);
+        self.pane_claude_seen.retain(|id| self.pty.contains_key(id));
+    }
+
+    /// 밖에 나간 방을 메인으로 되돌린다 — 사이드바가 부르는 쪽 입구.
+    ///
+    /// `dock_window_room` 은 **aux 창 인덱스**를 받는데 사이드바는 방 인덱스로만
+    /// 말한다. 그 둘을 그대로 넘기면 엉뚱한 창이 닫히므로 여기서 한 번 옮긴다.
+    pub(crate) fn dock_room_back(&mut self, win: usize) {
+        let Some(aux) =
+            self.aux_windows.iter().position(|a| a.room_window() == Some(win))
+        else {
+            return;
+        };
+        self.dock_window_room(aux);
+        self.chrome_dirty = true;
+    }
+
+    /// 이 pane 에 학생 얼굴을 내보여도 되나 — claude 를 한 번이라도 띄웠는가.
+    pub(crate) fn pane_claude_ready(&self, id: &str) -> bool {
+        self.pane_claude_seen.contains(id)
+    }
+
     /// Drop the focused pane from the unread set (the user is now looking at
     /// it) and push the count to the Dock badge when it changes. Called every
     /// tick from `about_to_wait` — cheap unless the count actually moves.
@@ -153,6 +193,26 @@ impl App {
     /// Flash strength (1.0 → 0.0) for `id`'s completion pulse, or `None` when
     /// it isn't flashing. Drives the header pulse and the sidebar done-dot;
     /// both fade over `NOTIFY_FLASH_MS`.
+    /// pane 하나의 상태를 색 하나로. 사이드바가 방을 열지 않고도 "누가 나를
+    /// 기다리는지"를 말하는 근거다 — 대기가 먼저다: 작업 중은 놔두면 끝나지만
+    /// 대기는 내가 손대야 풀리므로, 둘이 겹치면 급한 쪽을 보여야 한다.
+    pub(crate) fn pane_state_color(&self, id: &str) -> [u8; 4] {
+        let st = self.pane_activity.get(id);
+        if st.is_some_and(|a| a.status == "waiting") {
+            theme::danger()
+        } else if self.notify_flash_factor(id).is_some() {
+            theme::success()
+        } else if st.is_some_and(|a| a.status != "idle" && !a.status.is_empty())
+            // 파란 점은 **지금 보고 있는 pane** 에만 준다. 작업 중인 pane 이 여럿이면
+            // 목록이 온통 파래져 정작 손이 필요한 빨강·끝난 초록이 묻혔다 — 남의
+            // 진행은 배너 바가 이미 말하고 있으니 여기서 한 번 더 외칠 자리가 아니다.
+            && self.ws.lock().unwrap().active_pane.as_deref() == Some(id)
+        {
+            theme::accent()
+        } else {
+            theme::with_alpha(theme::text_mute(), 0x66)
+        }
+    }
     pub(crate) fn notify_flash_factor(&self, id: &str) -> Option<f32> {
         self.notify_flash.get(id).and_then(|t| {
             let age = t.elapsed().as_millis();
@@ -944,9 +1004,74 @@ impl App {
     /// the side sidebar strip and the top-tabs title strip — the top strip
     /// previously had no click gate at all, so its tabs painted but never
     /// switched/closed. Returns true when the click was handled.
+    /// 그 방의 목록이 얼마나 펴져 있나 — 0(접힘)..1(다 폄).
+    ///
+    /// 애니메이션이 없으면 0 이나 1 이고, 도는 중이면 그 사이다. 목록 높이·행
+    /// 투명도가 이 하나를 같이 보므로 밀림과 나타남이 어긋나지 않는다.
+    pub(crate) fn expand_progress(&self, idx: usize) -> f32 {
+        let target = if self.expanded_windows.contains(&idx) { 1.0 } else { 0.0 };
+        let Some((ai, opening, at)) = self.expand_anim else { return target };
+        if ai != idx {
+            return target;
+        }
+        let t = (at.elapsed().as_secs_f32() / EXPAND_ANIM_SECS).clamp(0.0, 1.0);
+        // ease-out — 손을 뗀 직후가 가장 빠르고 끝에서 가라앉는다. 선형은 멈추는
+        // 순간이 툭 끊겨 목록이 "튄" 것처럼 보인다.
+        let e = 1.0 - (1.0 - t).powi(3);
+        if opening { e } else { 1.0 - e }
+    }
+
+    /// 방을 펴거나 접는다 — 상태와 애니메이션을 같이 세우는 유일한 입구.
+    pub(crate) fn toggle_window_expand(&mut self, idx: usize) {
+        let opening = !self.expanded_windows.contains(&idx);
+        if opening {
+            self.expanded_windows.insert(idx);
+        } else {
+            self.expanded_windows.remove(&idx);
+        }
+        self.expand_anim = Some((idx, opening, std::time::Instant::now()));
+        self.chrome_dirty = true;
+    }
+
+    /// 방 탭 카드 안 **펼치기 버튼**의 사각 — 상태 점 왼쪽의 삼각형 자리.
+    /// `tab` 은 그 방 카드의 사각.
+    ///
+    /// 렌더와 클릭 판정이 이 하나를 같이 본다. 예전엔 클릭 쪽이 "아랫줄 오른쪽
+    /// 100px" 이라는 자기 공식을 따로 갖고 있어서, 눈에는 삼각형 하나만 보이는데
+    /// 그 옆 점들까지 눌러도 방 전환이 안 됐다 — 버튼이 어디까지인지 화면이
+    /// 말해 주지 않는 상태였다(거노: "접기 버튼이 따로 있어야, 누르면 전환은
+    /// 되고"). pane 이 하나뿐인 방은 펼쳐도 그 하나뿐이라 버튼을 두지 않는다.
+    pub(crate) fn window_expand_rect(
+        &self,
+        idx: usize,
+        tab: (f32, f32, f32, f32),
+    ) -> Option<(f32, f32, f32, f32)> {
+        let n = self.window_leaves(idx).len();
+        if n < 2 {
+            return None;
+        }
+        // 삼각형 하나짜리 18px 칩은 눌러 보기에 너무 작았다(거노). pane 개수를
+        // 같이 담아 pill 로 키우면 타깃이 두 배 넘게 커지고, 방을 펴지 않고도
+        // 몇 개짜리 방인지 읽힌다 — 커진 자리에 정보가 같이 들어온 셈이다.
+        let w = if n >= 10 { 44.0 } else { 37.0 };
+        Some((tab.0 + tab.2 - 8.0 - w, tab.1 + 26.0, w, 20.0))
+    }
+
     pub(crate) fn window_strip_click(&mut self, cx: f32, cy: f32) -> bool {
         let inside =
             |r: &(f32, f32, f32, f32)| cx >= r.0 && cx <= r.0 + r.2 && cy >= r.1 && cy <= r.1 + r.3;
+        // 밖에 나간 방의 되돌리기 버튼이 가장 먼저다. × 히트렉트는 그려지지 않는
+        // 탭에도 남아 있고 자리가 정확히 겹쳐서, 뒤에 두면 되돌리려던 클릭이
+        // 「이 방 닫을까요」로 새어 나갔다(실측: 방이 통째로 사라짐).
+        if let Some(idx) = self
+            .window_dock_rects
+            .iter()
+            .find(|(_, r)| inside(r))
+            .map(|(i, _)| *i)
+        {
+            self.dock_room_back(idx);
+            return true;
+        }
         if let Some(idx) = self
             .window_tab_close_rects
             .iter()
@@ -959,12 +1084,43 @@ impl App {
             self.confirm_or_close_session(idx);
             return true;
         }
+        // 펼쳐 둔 pane 줄이 먼저다 — 줄은 탭 카드 **안에** 그려지므로, 탭을 먼저
+        // 검사하면 줄을 눌러도 방 전환만 되고 학생에게는 영영 못 간다.
+        if let Some((wi, pane)) = self
+            .sidebar_row_rects
+            .iter()
+            .find(|(_, _, r)| inside(r))
+            .map(|(i, p, _)| (*i, p.clone()))
+        {
+            if wi != self.active_window {
+                self.switch_window(wi);
+            }
+            self.focus_pane(&pane);
+            // 포커스는 누르는 즉시(목록에서 pane 을 고르는 게 이 줄의 본업이다),
+            // 옮기기는 여기서 장전만. 문턱을 못 넘으면 release 가 그냥 버린다.
+            self.sidebar_row_drag = Some(crate::SidebarRowDrag {
+                pane,
+                start: (cx, cy),
+                active: false,
+                target: None,
+            });
+            self.chrome_dirty = true;
+            return true;
+        }
         if let Some(idx) = self
             .window_tab_rects
             .iter()
             .find(|(_, r)| inside(r))
             .map(|(i, _)| *i)
         {
+            // 펼치기 버튼만 전환의 예외다 — 그 삼각형 하나 크기.
+            let tab = self.window_tab_rects.iter().find(|(i, _)| *i == idx).map(|(_, r)| *r);
+            if let Some(r) = tab.and_then(|t| self.window_expand_rect(idx, t)) {
+                if inside(&r) {
+                    self.toggle_window_expand(idx);
+                    return true;
+                }
+            }
             self.switch_window(idx);
             // 전환은 누르는 즉시(브라우저 탭과 같다 — 방 전환은 트리 스왑이라
             // 싸다), 재배치는 여기서 장전만. 문턱을 못 넘으면 release 가 그냥
@@ -1002,6 +1158,23 @@ impl App {
         let Some(cwd) = cwd else { return };
         self.open_file(cwd.join(rel), None, false);
     }
+    /// 하단바가 pane 그리드에서 먹는 높이(0 이면 바 자체가 없다).
+    ///
+    /// 예약과 그리기가 서로 다른 조건을 보면 바가 마지막 셀 줄 위에 겹치거나
+    /// 빈 띠만 남는다 — 판단은 여기 한 곳에서만 한다. 닫은 pane 은 활성 방
+    /// 것만 센다(하단바가 그 방의 물러난 것들 자리라서).
+    pub(crate) fn dock_reserve_h(&self) -> f32 {
+        let has_closed = self
+            .closed_panes
+            .iter()
+            .any(|c| c.window == self.active_window);
+        if self.docked.is_empty() && self.zoomed_pane.is_none() && !has_closed {
+            0.0
+        } else {
+            DOCK_HEIGHT
+        }
+    }
+
     /// 사이드바 하단에 붙박인 트레이 — 새 세션(`+`)과 앱 전역 버튼(피드백·설정).
     /// 반환은 `(구분선 y, +, 피드백, 설정)`, 세로 사이드바가 없으면 `None`.
     ///

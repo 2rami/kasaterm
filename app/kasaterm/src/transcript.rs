@@ -339,6 +339,9 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         screen: None,
         // 캐릭터는 transcript 가 아니라 collab 마커 소관 — collab_board 가 채운다.
         character: None,
+        // 하네스 이름·팀도 pane 프로세스 env 소관 — collab_board 가 채운다.
+        agent_name: None,
+        team: None,
         // transcript는 permission 대기를 기록하지 않는다 — 화면 peek로만 보인다.
         waiting_for: None,
         tokens_in,
