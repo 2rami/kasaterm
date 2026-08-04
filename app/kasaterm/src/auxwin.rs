@@ -72,6 +72,44 @@ pub(crate) fn tabbing_probe(window: &Window) -> (isize, usize) {
     }
 }
 
+/// 헤더 오른쪽 버튼 두 개 — [접기][되돌리기]. 그리면서 히트 rect 을 창에 적어
+/// 두므로 그림과 판정이 갈릴 수 없다. 되돌리기는 ⌘W 와 같은 동작이지만, 그
+/// 단축키를 모르면 창에 갇힌다.
+fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
+    const B: f32 = 26.0;
+    const ICON: f32 = 14.0;
+    a.header_btns.clear();
+    let (mx, my) = a.cursor_px;
+    for (i, (kind, icon)) in
+        [(AuxHeaderBtn::Hide, "minus"), (AuxHeaderBtn::Dock, "corner-down-left")]
+            .into_iter()
+            .enumerate()
+    {
+        let bx = w - B * (2 - i) as f32 - 6.0;
+        let by = (AUX_HEADER_H - B) / 2.0;
+        let hov = mx >= bx && mx <= bx + B && my >= by && my <= by + B;
+        if hov {
+            crate::round_rect(
+                &mut a.gpu,
+                bx,
+                by,
+                B,
+                B,
+                crate::theme::radius_sm(),
+                crate::theme::surface_hover(),
+            );
+        }
+        a.gpu.queue_icon(
+            icon,
+            bx + (B - ICON) / 2.0,
+            by + (B - ICON) / 2.0,
+            ICON,
+            if hov { crate::theme::text() } else { crate::theme::text_mute() },
+        );
+        a.header_btns.push((kind, (bx, by, B, B)));
+    }
+}
+
 /// 별도 창 헤더 높이. macOS 에선 OS 타이틀바 **자리 위에** 그리므로 메인 창의
 /// `TITLE_HEIGHT` 와 같아야 두 창이 같은 앱으로 읽힌다. 그 외 플랫폼은 OS
 /// 타이틀바가 따로 있고 이 띠는 그 아래라, 더 얇게 둔다.
@@ -158,6 +196,17 @@ fn aux_editor_title(m: &MarkdownPane) -> String {
     }
 }
 
+/// 별도창 헤더의 버튼.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuxHeaderBtn {
+    /// 창을 접어 메인 창 하단바 칩으로 보낸다. pane·PTY 는 그대로 살아 있고
+    /// 칩을 누르면 같은 창이 다시 선다 — 최소화와 달리 Dock 이 아니라 **일하던
+    /// 창 안**으로 들어가므로, 꺼내 둔 것이 몇인지 거기서 한눈에 보인다(거노).
+    Hide,
+    /// 메인 그리드로 되돌린다(창 닫기·⌘W 와 같은 동작).
+    Dock,
+}
+
 pub(crate) struct AuxWindow {
     /// 자체 wgpu 렌더러. `window` 보다 먼저 드롭돼야 하므로 앞에 선언(모듈 doc 참조).
     pub(crate) gpu: gpu::GpuRenderer,
@@ -183,6 +232,9 @@ pub(crate) struct AuxWindow {
     /// 렌더 뷰는 **그려 봐야** 안다(`draw_markdown` 의 반환값) — 휠 clamp 가 한 프레임
     /// 전 값을 쓰는 건 그래서다. 0 이면 아직 안 그렸다는 뜻이라 clamp 를 걸지 않는다.
     pub(crate) md_content_h: f32,
+    /// 헤더 버튼의 히트 rect — 그린 프레임이 곧 클릭 판정이라 렌더가 채운다.
+    /// 아이콘 자리를 코드 두 곳에 적으면 그림과 판정이 어긋난다.
+    pub(crate) header_btns: Vec<(AuxHeaderBtn, (f32, f32, f32, f32))>,
     /// `window` 는 맨 뒤 — `gpu` 보다 나중에 드롭돼 surface 가 살아있는 창을 참조한다.
     pub(crate) window: Arc<Window>,
 }
@@ -397,6 +449,7 @@ impl App {
             last_title: title,
             pending_capture: None,
             md_content_h: 0.0,
+            header_btns: Vec::new(),
             window,
         };
         self.aux_windows.push(aux);
@@ -1160,6 +1213,7 @@ impl App {
             last_title: "Settings".to_string(),
             pending_capture: None,
             md_content_h: 0.0,
+            header_btns: Vec::new(),
             window,
         };
         self.aux_windows.push(aux);
@@ -1377,6 +1431,7 @@ impl App {
             last_title: title,
             pending_capture: None,
             md_content_h: 0.0,
+            header_btns: Vec::new(),
             window,
         };
         self.aux_windows.push(aux);
@@ -1495,14 +1550,7 @@ impl App {
                     a.gpu.rect(sx, 0.0, ex - sx, BAR_H, accent);
                 }
             }
-            // 되돌리기 — ⌘W 와 같은 동작이지만, 그 단축키를 모르면 창에 갇힌다.
-            a.gpu.queue_icon(
-                "corner-down-left",
-                w - AUX_HEADER_H + 6.0,
-                (AUX_HEADER_H - 14.0) / 2.0,
-                14.0,
-                crate::theme::text_mute(),
-            );
+            draw_aux_header_btns(a, w);
         }
         // origin_px 는 물리 px(draw_cells 규약), 커서 rect 은 논리 px(gpu.rect 규약).
         let origin_px = (PANE_INNER_X * scale, AUX_CELL_TOP * scale);
@@ -1675,6 +1723,7 @@ impl App {
                     italic: false,
                 },
             );
+            draw_aux_header_btns(a, w);
         }
         let slots: Vec<gpu::PaneSlot> = snaps
             .iter()
@@ -1803,14 +1852,128 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
                 if let Some(a) = self.aux_windows.get_mut(idx) {
+                    let was_header = a.cursor_px.1 <= AUX_HEADER_H;
                     a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                    // 헤더를 지나는 동안만 다시 그린다 — 버튼 hover 는 그 띠에서만
+                    // 바뀌고, 셀 위에서 매 픽셀 재렌더하면 그냥 낭비다. 띠를 벗어나는
+                    // 프레임도 한 번은 그려야 hover 가 남아 굳지 않는다.
+                    if was_header || a.cursor_px.1 <= AUX_HEADER_H {
+                        a.dirty = true;
+                        a.window.request_redraw();
+                    }
                 }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.aux_header_click(idx);
             }
             WindowEvent::MouseWheel { delta, .. } => self.aux_terminal_wheel(idx, delta),
             WindowEvent::KeyboardInput { event, .. } => self.aux_terminal_key(idx, &event),
             WindowEvent::Ime(ime) => self.aux_terminal_ime(idx, ime),
             WindowEvent::RedrawRequested => self.aux_render(idx),
             _ => {}
+        }
+    }
+
+    /// 헤더 버튼 클릭 처리. 눌린 게 없으면 `false` — 호출부가 평소 경로를 잇는다.
+    pub(crate) fn aux_header_click(&mut self, idx: usize) -> bool {
+        let Some(a) = self.aux_windows.get(idx) else { return false };
+        let (cx, cy) = a.cursor_px;
+        let hit = a
+            .header_btns
+            .iter()
+            .find(|(_, (bx, by, bw, bh))| {
+                cx >= *bx && cx <= bx + bw && cy >= *by && cy <= by + bh
+            })
+            .map(|(k, _)| *k);
+        match hit {
+            Some(AuxHeaderBtn::Hide) => {
+                self.hide_aux_window(idx);
+                true
+            }
+            Some(AuxHeaderBtn::Dock) => {
+                // 창 종류마다 되돌리는 곳이 다르다 — pane 은 메인 그리드로,
+                // 방은 방 목록으로. 둘 다 창 닫기(⌘W)와 같은 경로다.
+                match self.aux_windows.get(idx).map(|a| matches!(a.kind, AuxWindowKind::Room { .. }))
+                {
+                    Some(true) => self.dock_window_room(idx),
+                    Some(false) => self.dock_pane_terminal(idx),
+                    None => {}
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 별도창을 접어 메인 창 하단바 칩으로 보낸다. pane·PTY·방 트리는 그대로
+    /// 두고 **창만** 없앤다 — 그래서 되살리기가 `spawn_aux_*` 재호출로 끝난다.
+    ///
+    /// 되돌리기(dock)와 다르다: 되돌리기는 pane 을 메인 그리드에 다시 꽂아 레이아웃을
+    /// 바꾸고, 접기는 꺼내 둔 상태를 유지한 채 화면에서만 물러난다. OS 최소화와도
+    /// 다르다 — Dock 이 아니라 일하던 창 안으로 들어가므로, 꺼내 둔 게 몇인지
+    /// 거기서 한눈에 보인다(거노).
+    pub(crate) fn hide_aux_window(&mut self, idx: usize) {
+        let Some(a) = self.aux_windows.get(idx) else { return };
+        let pos = a.window.outer_position().ok();
+        let what = match &a.kind {
+            AuxWindowKind::Terminal { pane_id, window, .. } => {
+                crate::HiddenAuxKind::Terminal { pane_id: pane_id.clone(), home_window: *window }
+            }
+            AuxWindowKind::Room { window, .. } => crate::HiddenAuxKind::Room { window: *window },
+            // 편집기·설정은 접을 자리가 없다(하단바는 pane 그리드의 띠다).
+            _ => return,
+        };
+        let label = match &what {
+            crate::HiddenAuxKind::Terminal { pane_id, .. } => {
+                let ws = self.ws.lock().unwrap();
+                match ws.pane_character.get(pane_id) {
+                    Some(name) => format!("{name} · {pane_id}"),
+                    None => pane_id.clone(),
+                }
+            }
+            crate::HiddenAuxKind::Room { window } => self
+                .window_labels
+                .get(*window)
+                .map(|(n, _)| n.clone())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| format!("{}번 방", window + 1)),
+        };
+        self.hidden_aux.push(crate::HiddenAux { label, what, pos });
+        self.aux_windows.remove(idx);
+        // 하단바가 새로 생기면 그리드가 그만큼 줄어든다 — PTY 도 같이 줄여야
+        // 마지막 줄이 띠 밑으로 숨지 않는다.
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// 접어 둔 별도창을 다시 세운다. 그 사이 pane 이 사라졌거나 방이 없어졌으면
+    /// 조용히 목록에서만 지운다 — 되살릴 대상이 없는데 빈 창을 띄우면 그게 더 나쁘다.
+    pub(crate) fn unhide_aux(&mut self, i: usize, event_loop: &ActiveEventLoop) {
+        if i >= self.hidden_aux.len() {
+            return;
+        }
+        let h = self.hidden_aux.remove(i);
+        match h.what {
+            crate::HiddenAuxKind::Terminal { pane_id, home_window } => {
+                if self.pty.contains_key(&pane_id) {
+                    self.spawn_aux_terminal(pane_id, home_window, event_loop, h.pos);
+                }
+            }
+            crate::HiddenAuxKind::Room { window } => {
+                self.spawn_aux_room(window, None, event_loop, h.pos);
+            }
+        }
+        let (cols, rows) = self.window_cells();
+        self.resize_backend(cols, rows);
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
         }
     }
 
@@ -2188,14 +2351,28 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
                 if let Some(a) = self.aux_windows.get_mut(idx) {
+                    let was_header = a.cursor_px.1 <= AUX_HEADER_H;
                     a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
+                    // 헤더를 지나는 동안만 다시 그린다 — 버튼 hover 는 그 띠에서만
+                    // 바뀌고, 셀 위에서 매 픽셀 재렌더하면 그냥 낭비다. 띠를 벗어나는
+                    // 프레임도 한 번은 그려야 hover 가 남아 굳지 않는다.
+                    if was_header || a.cursor_px.1 <= AUX_HEADER_H {
+                        a.dirty = true;
+                        a.window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
-            } => self.aux_room_click(idx),
+            } => {
+                // 헤더 버튼이 먼저다 — 그 띠는 셀 그리드 밖이라 pane 포커스로
+                // 흘려보내면 버튼이 영영 안 눌린다.
+                if !self.aux_header_click(idx) {
+                    self.aux_room_click(idx);
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => self.aux_terminal_wheel(idx, delta),
             WindowEvent::KeyboardInput { event, .. } => self.aux_terminal_key(idx, &event),
             WindowEvent::Ime(ime) => self.aux_terminal_ime(idx, ime),
@@ -2372,6 +2549,7 @@ impl App {
             last_title: title,
             pending_capture: None,
             md_content_h: 0.0,
+            header_btns: Vec::new(),
             window: window_handle,
         });
         let idx = self.aux_windows.len() - 1;

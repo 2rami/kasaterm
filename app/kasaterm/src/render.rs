@@ -5938,7 +5938,7 @@ impl App {
             // — the hidden sibling panes, so the maximize visibly "sends the
             // others to the dock" and a sibling chip click switches the zoom to
             // it. zoom siblings have no × (they're live panes, not parked).
-            let dock_items: Vec<(String, String, bool)> = if let Some(z) = self.zoomed_pane.clone() {
+            let mut dock_items: Vec<(String, String, bool)> = if let Some(z) = self.zoomed_pane.clone() {
                 let ws = self.ws.lock().unwrap();
                 self.pty_layout
                     .as_ref()
@@ -5976,6 +5976,11 @@ impl App {
             // 맡는다. 하단바에 두면 pane 하나 닫을 때마다 띠가 생겨 그리드가 통째로
             // 재배치되고, 그 띠가 포커스 테두리 아랫변을 덮었다(거노).
             //
+            // 접어 둔 별도창은 여기 선다. id 는 `aux:<i>` 로 접두사를 붙여 pane id
+            // 와 섞이지 않게 한다 — 클릭 라우팅이 둘을 같은 목록에서 가른다.
+            for (i, h) in self.hidden_aux.iter().enumerate() {
+                dock_items.push((format!("aux:{i}"), h.label.clone(), false));
+            }
             // 칩이 하나도 없어도 예약된 띠는 칠한다 — 안 칠하면 그리드가 비워 둔
             // 자리에 창 배경이 그대로 비쳐 바닥에 검은 틈이 생긴다.
             if dock_reserve > 0.0 {

@@ -1620,6 +1620,25 @@ struct TabDrag {
 /// 껐다 켜 프로세스가 사라진 뒤의 복원분. 그때는 세션 복원과 **똑같은 레코드**
 /// (cwd·claude 세션 id·캐릭터·스크롤백)를 들고 있으므로 `restore_leaf` 재사용으로
 /// 새로 띄우고 `--resume` 까지 그 함수가 처리한다. `alive` 가 그 두 길을 가른다.
+/// 접어 둔 별도창 하나. 창을 되살리는 데 필요한 최소한만 든다 — 내용물(pane 의
+/// PTY·스크롤백, 방의 레이아웃 트리)은 App 이 그대로 쥐고 있으므로 여기 복사하지
+/// 않는다. 그래서 접기는 "창만 없애기"고, 되살리기는 `spawn_aux_*` 재호출이다.
+pub(crate) struct HiddenAux {
+    /// 하단바 칩에 적을 이름.
+    pub(crate) label: String,
+    pub(crate) what: HiddenAuxKind,
+    /// 접을 때의 창 위치 — 되살릴 때 같은 자리에 세운다. 화면 한가운데로
+    /// 튀어나오면 "아까 그 창"으로 안 읽힌다.
+    pub(crate) pos: Option<winit::dpi::PhysicalPosition<i32>>,
+}
+
+pub(crate) enum HiddenAuxKind {
+    /// 꺼낸 pane 하나. `home_window` 는 되돌릴 방.
+    Terminal { pane_id: String, home_window: usize },
+    /// 통째로 꺼낸 방.
+    Room { window: usize },
+}
+
 pub(crate) struct ClosedPane {
     /// `restore_leaf` 가 먹는 레코드(`layout_to_json` 의 leaf 본문).
     pub(crate) rec: serde_json::Value,
@@ -4048,6 +4067,9 @@ struct App {
     /// 닫은 pane 스택(최근이 뒤). ⌘⇧T 가 뒤에서 꺼내 되살리고, 인포가 흐린 줄로
     /// 보여 준다 — 되돌릴 수 있다는 걸 알리지 않으면 있으나 마나다.
     closed_panes: Vec<ClosedPane>,
+    /// 접어 둔 별도창(하단바 칩). 창만 없애고 pane·PTY 는 그대로라, 칩을 누르면
+    /// 같은 내용의 창이 다시 선다.
+    hidden_aux: Vec<HiddenAux>,
     /// Sidebar "+" new-window button rect, logical px. None before first paint.
     new_window_btn_rect: Option<(f32, f32, f32, f32)>,
     /// Whether the "+" shell picker popup is open. Toggled by clicking the
@@ -4675,6 +4697,7 @@ impl App {
             win_tab_wheel_accum: 0.0,
             win_tab_drag: None,
             closed_panes: Vec::new(),
+            hidden_aux: Vec::new(),
             new_window_btn_rect: None,
             shell_menu_open: false,
             shell_menu_hits: Vec::new(),

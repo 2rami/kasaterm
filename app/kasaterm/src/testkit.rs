@@ -1833,6 +1833,34 @@ impl App {
             a.pending_capture =
                 Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
         }
+        // `_HIDE=1` 이면 이어서 접기→되살리기까지 본다. 접기는 창만 없애는 것이라
+        // **PTY 가 살아 있는지**가 판정의 전부다 — 창 수만 세면 "접었다"와 "죽였다"가
+        // 똑같아 보인다.
+        if std::env::var("KASATERM_AUTOUNDOCK_HIDE").is_err() {
+            return;
+        }
+        self.hide_aux_window(0);
+        self.render_frame();
+        eprintln!(
+            "[autoundock] 접음 → aux={} 접힌목록={:?} 하단바예약={} PTY생존={}",
+            self.aux_windows.len(),
+            self.hidden_aux.iter().map(|h| h.label.clone()).collect::<Vec<_>>(),
+            self.dock_reserve_h(),
+            self.pty.contains_key(&pid)
+        );
+        eprintln!("[autoundock] 하단바 칩={:?}", self.dock_chip_rects);
+        self.unhide_aux(0, event_loop);
+        self.render_frame();
+        eprintln!(
+            "[autoundock] 되살림 → aux={} 접힌목록={} 하단바예약={} PTY생존={}",
+            self.aux_windows.len(),
+            self.hidden_aux.len(),
+            self.dock_reserve_h(),
+            self.pty.contains_key(&pid)
+        );
+        eprintln!(
+            "[autoundock] 기대: 접으면 aux=0·예약=40·PTY생존=true / 되살리면 aux=1·예약=0·PTY생존=true"
+        );
     }
     /// Headless 드래그-tear repro: `KASATERM_AUTOTEARDRAG_MS` 뒤에 활성 pane 의 탭
     /// 드래그를 세우고 커서를 창 **밖으로** 옮긴다 — 마우스를 놓지 않은 채 별도창이
