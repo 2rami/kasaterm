@@ -2175,6 +2175,26 @@ impl App {
             self.pane_activity.entry(id.clone()).or_default().status = "waiting".into();
         }
     }
+    /// `KASATERM_AUTOUNREAD="%2"` — 그 pane 을 "끝났는데 아직 안 본" 상태로 세운다.
+    /// 방 단위인 `KASATERM_AUTOALERT` 의 pane 판 — 완료 숨쉬기가 방 전체가 아니라
+    /// **그 세션 줄** 에만 걸리는지 보려면 둘을 따로 세울 수 있어야 한다.
+    ///
+    /// autowait 과 같은 이유로 매 틱 다시 넣는다: `sync_dock_badge` 가 활성 pane 을
+    /// 지우고 지나가므로 한 번 세워 두면 캡처 전에 사라질 수 있다.
+    pub(crate) fn apply_autounread(&mut self) {
+        use std::sync::OnceLock;
+        static IDS: OnceLock<Vec<String>> = OnceLock::new();
+        let ids = IDS.get_or_init(|| {
+            std::env::var("KASATERM_AUTOUNREAD")
+                .map(|v| {
+                    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                })
+                .unwrap_or_default()
+        });
+        for id in ids {
+            self.unread_panes.insert(id.clone());
+        }
+    }
     pub(crate) fn arm_autoexpand(&mut self) {
         let Ok(v) = std::env::var("KASATERM_AUTOEXPAND") else { return };
         for i in v.split(',').filter_map(|s| s.trim().parse::<usize>().ok()) {
