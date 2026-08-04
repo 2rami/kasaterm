@@ -78,8 +78,9 @@ objc2-foundation = { version = "0.3", features = ["NSUserDefaults", "NSString", 
 # Native desktop notifications (UNUserNotificationCenter) so the alert carries
 # kasaterm's own .app icon; block2 builds the authorization completion handler.
 objc2-user-notifications = { version = "0.3", features = ["UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationResponse"] }
-# Dock tile badge (unread-notification count) via NSApplication.dockTile.
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSDockTile"] }
+# Dock tile badge (unread-notification count) via NSApplication.dockTile,
+# 그리고 창마다 NSWindow.tabbingMode 를 끄는 데 NSWindow/NSView 가 필요하다.
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSResponder", "NSDockTile", "NSWindow", "NSView"] }
 block2 = "0.6"
 # Sparkle.framework 를 런타임 dlopen 하기 위한 libc::dlopen/RTLD_NOW (macos_sparkle.rs).
 libc = "0.2"

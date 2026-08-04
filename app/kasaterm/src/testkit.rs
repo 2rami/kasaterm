@@ -694,6 +694,15 @@ impl App {
                 .map(|(p, x, y, w, h)| format!("{p}@{x},{y} {w}x{h}"))
                 .collect::<Vec<_>>()
         );
+        // 창이 떴어도 macOS 가 탭으로 합쳐 버렸으면 「별도 창」이 아니다. mode 2 =
+        // Disallowed, 탭수 0 = 어디에도 안 묶임. 하나라도 어긋나면 드래그로 떼는
+        // 순간 형제까지 딸려 나온다(거노).
+        #[cfg(target_os = "macos")]
+        {
+            let main = self.window.as_ref().map(|w| crate::auxwin::tabbing_probe(w));
+            let aux = aux_idx.map(|i| crate::auxwin::tabbing_probe(&self.aux_windows[i].window));
+            eprintln!("[autowinundock] 탭(mode,묶인수): 메인={main:?} 꺼낸창={aux:?} · 기대 (2,0)");
+        }
         eprintln!(
             "[autowinundock] 기대: windows 그대로 · 활성은 남은 방 · 꺼낸 방에 「밖」 · rect 수 = 꺼내기 전 leaf 수"
         );
