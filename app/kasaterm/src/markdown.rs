@@ -2415,6 +2415,9 @@ impl App {
 
     pub(crate) fn md_editor_input(&mut self, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
+        if crate::input::is_modifier_key(event) {
+            return;
+        }
         // 조합기 주인을 이 편집기로. `ime_retarget` 은 ws 를 다시 잠그는데
         // 2021 에디션에선 `if let` 조건식의 임시 MutexGuard 가 body 끝까지
         // 살아 **같은 스레드가 자기 락에 물린다** — id 는 별도 문으로 꺼내

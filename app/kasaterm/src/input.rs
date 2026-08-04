@@ -1442,6 +1442,9 @@ impl App {
     /// flushes the pending syllable first, then edits.
     pub(crate) fn git_commit_input(&mut self, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
+        if is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::GitCommit);
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
@@ -1536,6 +1539,9 @@ impl App {
     /// so Korean filters compose. Esc closes, Enter opens the first match,
     /// Backspace deletes a jamo then a char. Every edit resets the scroll.
     pub(crate) fn statusbar_menu_search_key(&mut self, event: &KeyEvent) {
+        if is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::PathSearch);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
@@ -1602,6 +1608,9 @@ impl App {
     /// Esc closes the box, Backspace deletes a jamo then a char. The filtered
     /// node list is recomputed by `rebuild_file_tree_nodes` on each edit.
     pub(crate) fn file_tree_search_key(&mut self, event: &KeyEvent) {
+        if is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::TreeSearch);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
@@ -1668,6 +1677,9 @@ impl App {
     /// `ft_edit_buf` 로 통일 — rename 이 있으면 그쪽, 없으면 new. Enter 는 모드에
     /// 맞는 commit, Esc 는 둘 다 취소. 한글 조합은 search 행과 동일 경로.
     pub(crate) fn file_tree_new_key(&mut self, event: &KeyEvent) {
+        if is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::TreeNew);
         use winit::keyboard::{Key, NamedKey};
         #[cfg(target_os = "macos")]
@@ -2576,6 +2588,44 @@ fn term_is_working(t: &TerminalPane) -> bool {
     rows_show_working(&t.cells)
 }
 
+/// 수식키 **단독** 입력인가.
+///
+/// 조합기를 쓰는 입구들은 하나같이 "자모도 Backspace 도 아니면 조합을 확정한다"로
+/// 짜여 있는데, 그 규칙에 Shift 가 걸린다. "계"의 ㅖ 는 **Shift+ㅔ** 라, ㄱ 을 친
+/// 뒤 Shift 를 누르는 순간 ㄱ 이 확정돼 "ㄱㅖ"가 된다(거노 실측 2026-08-04).
+/// 수식키를 누르는 것은 조합을 끝내겠다는 뜻이 아니므로 조합기에 닿으면 안 된다.
+///
+/// 수식키가 **조합된** 단축키(Cmd+W 등)는 여기 안 걸린다 — 그때 logical_key 는
+/// 글자 쪽이다. 걸리는 건 수식키만 눌린 프레임뿐이라 단축키 경로는 그대로다.
+pub(crate) fn is_modifier_key(event: &KeyEvent) -> bool {
+    is_modifier_logical(&event.logical_key)
+}
+
+/// `is_modifier_key` 의 판정부. winit `KeyEvent` 는 비공개 필드가 있어 테스트에서
+/// 만들 수 없어 logical_key 만 따로 받는다.
+fn is_modifier_logical(key: &winit::keyboard::Key) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    matches!(
+        key,
+        Key::Named(
+            NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::AltGraph
+                | NamedKey::Super
+                | NamedKey::Meta
+                | NamedKey::Hyper
+                | NamedKey::CapsLock
+                | NamedKey::NumLock
+                | NamedKey::ScrollLock
+                | NamedKey::Fn
+                | NamedKey::FnLock
+                | NamedKey::Symbol
+                | NamedKey::SymbolLock
+        )
+    )
+}
+
 /// Whether the bottom of `cells` shows a live "agent working" indicator.
 ///
 /// Scans the last 10 *non-blank* rows, not the last 10 physical rows. Claude
@@ -2824,5 +2874,24 @@ mod working_scan_tests {
             rows_show_approval_prompt(&[row("❯ 12. 마지막 옵션")]),
             Some(ApprovalPrompt::Menu)
         );
+    }
+
+    #[test]
+    fn modifier_alone_must_not_end_a_composition() {
+        use winit::keyboard::{Key, NamedKey};
+        // "계"의 ㅖ 는 Shift+ㅔ — 조합 중 Shift 는 조합의 일부지 끝내라는 뜻이 아니다.
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::Shift)));
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::Control)));
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::Alt)));
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::Super)));
+        assert!(super::is_modifier_logical(&Key::Named(NamedKey::CapsLock)));
+        // 글자·편집키는 그대로 조합을 확정시켜야 한다.
+        assert!(!super::is_modifier_logical(&Key::Character("r".into())));
+        assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Enter)));
+        assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Backspace)));
+        assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Escape)));
+        assert!(!super::is_modifier_logical(&Key::Named(NamedKey::Space)));
+        // 단축키는 수식키가 눌린 채로 와도 logical_key 가 글자라 안 걸린다.
+        assert!(!super::is_modifier_logical(&Key::Character("w".into())));
     }
 }
