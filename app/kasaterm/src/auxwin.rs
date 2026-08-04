@@ -15,6 +15,27 @@
 //! refcount 만 줄고 실제 Window 는 `aux.window` 가 아직 잡고 있어 살아있다.
 use super::*;
 
+/// macOS 창 탭 묶기를 끈다.
+///
+/// 시스템 설정이 "탭 선호: 항상"(`AppleWindowTabbingMode=always`)이면 macOS 가 새
+/// 창을 기존 창의 **탭으로 합쳐** 버린다. 그러면 pane 을 꺼내도 별도 창이 아니라
+/// 탭 한 장이 되고, 그 탭을 떼면 같이 묶인 것들이 전부 딸려 나온다(거노 실측).
+/// 창마다 **다른** 식별자를 주면 macOS 가 묶을 짝을 못 찾는다 — 탭은 같은 식별자
+/// 끼리만 묶이기 때문. 우리 창은 문서 창이 아니라 저마다 다른 것을 들고 있으므로
+/// 묶일 이유가 없다.
+pub(crate) fn untabbed(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        return attrs.with_tabbing_identifier(&format!("kasaterm-w{n}"));
+    }
+    #[cfg(not(target_os = "macos"))]
+    attrs
+}
+
 /// 별도 창 헤더 높이. OS 타이틀바를 껐으므로 이 띠가 창의 유일한 손잡이다.
 const AUX_HEADER_H: f32 = 30.0;
 
@@ -270,7 +291,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window = match event_loop.create_window(attrs) {
+        let window = match event_loop.create_window(untabbed(attrs)) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] window create failed: {e}");
@@ -1033,7 +1054,7 @@ impl App {
             // four rows — at 720 the palette cards alone filled the viewport and
             // pushed shape/accent below the fold.
             .with_inner_size(LogicalSize::new(920.0, 720.0));
-        let window = match event_loop.create_window(attrs) {
+        let window = match event_loop.create_window(untabbed(attrs)) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] settings window create failed: {e}");
@@ -1251,7 +1272,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window = match event_loop.create_window(attrs) {
+        let window = match event_loop.create_window(untabbed(attrs)) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] terminal window create failed: {e}");
@@ -1501,6 +1522,29 @@ impl App {
             .get(window)
             .map(|(n, _)| n.clone())
             .filter(|n| !n.is_empty());
+        // pane 별 배정 학생색 — 꺼낸 방도 메인 그리드와 같은 색으로 읽혀야 한다.
+        // ordinal 은 동명이인 구분이라 전체 맵을 넘긴다(메인과 같은 규칙).
+        let pane_cols: HashMap<String, [u8; 4]> = {
+            let ws = self.ws.lock().unwrap();
+            rects
+                .iter()
+                .filter_map(|(pid, ..)| {
+                    let name = ws.pane_character.get(pid)?;
+                    let ord = crate::theme::character_ordinal(&ws.pane_character, pid);
+                    Some((pid.clone(), crate::theme::character_accent_n(name, ord)?))
+                })
+                .collect()
+        };
+        // working pane 집합도 미리 — 아래에서 창(`a`)을 가변 차용하고 나면 self 를
+        // 다시 못 읽는다.
+        let working_panes: std::collections::HashSet<String> = rects
+            .iter()
+            .filter(|(pid, ..)| {
+                self.pane_activity.get(pid).is_some_and(|s| s.status == "working")
+            })
+            .map(|(pid, ..)| pid.clone())
+            .collect();
+        let any_working = !working_panes.is_empty();
         // 셀은 draw 전에 복사해 둔다 — 그리는 동안 ws lock 을 쥐지 않기 위해서.
         let snaps: Vec<_> = {
             let ws = self.ws.lock().unwrap();
@@ -1548,17 +1592,40 @@ impl App {
             })
             .collect();
         a.gpu.draw_cells(&slots);
-        // pane 경계 — 나눠져 있다는 걸 보이게. 포커스만 accent 테두리.
+        // pane 경계 — 나눠져 있다는 걸 보이게. 포커스 pane 은 그 학생색으로(메인
+        // 그리드의 active 테두리와 같은 신호). 학생이 없으면 종전대로 accent.
         for (pid, x, y, pw, ph) in &rects {
             let rx = PANE_INNER_X + *x as f32 * cw;
             let ry = PANE_INNER_Y + *y as f32 * ch;
             let (rw, rh) = (*pw as f32 * cw, *ph as f32 * ch);
             let is_focus = focus.as_deref() == Some(pid.as_str());
-            let col = if is_focus { crate::theme::accent() } else { crate::theme::border() };
+            let student = pane_cols.get(pid.as_str()).copied();
+            let col = if is_focus {
+                student.unwrap_or_else(crate::theme::accent)
+            } else {
+                // 비포커스라도 학생이 있으면 그 색을 흐리게 — 여러 pane 이 나온 방에서
+                // 누가 어디 있는지가 경계선만으로 읽힌다.
+                student
+                    .map(|c| crate::theme::with_alpha(c, 0x55))
+                    .unwrap_or_else(crate::theme::border)
+            };
             a.gpu.rect(rx, ry, rw, 1.0, col);
             a.gpu.rect(rx, ry + rh - 1.0, rw, 1.0, col);
             a.gpu.rect(rx, ry, 1.0, rh, col);
             a.gpu.rect(rx + rw - 1.0, ry, 1.0, rh, col);
+            // working 스윕바 — 메인 pane 상단의 그것과 같은 자리, 같은 신호.
+            if working_panes.contains(pid.as_str()) {
+                const BAR_H: f32 = 2.5;
+                let base = student.unwrap_or_else(crate::theme::accent);
+                let phase = crate::render::anim_phase_secs();
+                a.gpu.rect(rx, ry, rw, BAR_H, crate::theme::with_alpha(base, 0x2e));
+                let seg = (rw * 0.32).clamp(36.0, 160.0);
+                let off = (phase * 0.5).fract() * (rw + seg) - seg;
+                let (sx, ex) = ((rx + off).max(rx), (rx + off + seg).min(rx + rw));
+                if ex > sx {
+                    a.gpu.rect(sx, ry, ex - sx, BAR_H, base);
+                }
+            }
         }
         // 커서/프리에딧은 포커스 pane 자리에만.
         if let Some((_, _, x, y, cur_row, cur_col, cur_vis)) = snaps
@@ -1580,6 +1647,11 @@ impl App {
         }
         let _ = a.gpu.render(&[], scale, 0.0, true);
         a.dirty = false;
+        // 스윕바가 도는 동안은 다음 프레임을 스스로 부른다(터미널 창과 같은 이유).
+        if any_working {
+            a.dirty = true;
+            a.window.request_redraw();
+        }
     }
 
     /// 이 창이 뷰하는 pane 의 PTY 로 바이트 전송(빈 입력 무시).
@@ -2129,7 +2201,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window_handle = match event_loop.create_window(attrs) {
+        let window_handle = match event_loop.create_window(untabbed(attrs)) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] room window create failed: {e}");
