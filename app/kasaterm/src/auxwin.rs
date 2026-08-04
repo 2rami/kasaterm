@@ -72,20 +72,28 @@ pub(crate) fn tabbing_probe(window: &Window) -> (isize, usize) {
     }
 }
 
-/// 헤더 오른쪽 버튼 두 개 — [접기][되돌리기]. 그리면서 히트 rect 을 창에 적어
+/// 헤더 오른쪽 버튼 — [파일트리][접기][되돌리기]. 그리면서 히트 rect 을 창에 적어
 /// 두므로 그림과 판정이 갈릴 수 없다. 되돌리기는 ⌘W 와 같은 동작이지만, 그
 /// 단축키를 모르면 창에 갇힌다.
 fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
     const B: f32 = 26.0;
     const ICON: f32 = 14.0;
+    // 트리 버튼은 켜져 있으면 accent 로 남긴다 — 토글은 눌린 상태가 안 보이면
+    // 누를 때마다 "이게 켜진 거야 꺼진 거야"를 화면 밖에서 세게 된다.
+    let on = a.tree_open;
+    let btns: [(AuxHeaderBtn, &str); 3] = [
+        (AuxHeaderBtn::FileTree, "folder-tree"),
+        (AuxHeaderBtn::Hide, "minus"),
+        // `corner-down-left` 은 에셋에도 gpu 아이콘 표에도 없어 **아무것도 안 그려졌다**
+        // — 보이지 않는데 눌리기는 하는 26px 버튼이라, 헤더 오른쪽을 잘못 짚으면 창이
+        // 영문 모르게 되돌아간다. 뜻이 같고 실재하는 undo-2 로 바꾼다.
+        (AuxHeaderBtn::Dock, "undo-2"),
+    ];
+    let n = btns.len();
     a.header_btns.clear();
     let (mx, my) = a.cursor_px;
-    for (i, (kind, icon)) in
-        [(AuxHeaderBtn::Hide, "minus"), (AuxHeaderBtn::Dock, "corner-down-left")]
-            .into_iter()
-            .enumerate()
-    {
-        let bx = w - B * (2 - i) as f32 - 6.0;
+    for (i, (kind, icon)) in btns.into_iter().enumerate() {
+        let bx = w - B * (n - i) as f32 - 6.0;
         let by = (AUX_HEADER_H - B) / 2.0;
         let hov = mx >= bx && mx <= bx + B && my >= by && my <= by + B;
         if hov {
@@ -99,14 +107,112 @@ fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
                 crate::theme::surface_hover(),
             );
         }
+        let lit = kind == AuxHeaderBtn::FileTree && on;
         a.gpu.queue_icon(
             icon,
             bx + (B - ICON) / 2.0,
             by + (B - ICON) / 2.0,
             ICON,
-            if hov { crate::theme::text() } else { crate::theme::text_mute() },
+            if lit {
+                crate::theme::accent()
+            } else if hov {
+                crate::theme::text()
+            } else {
+                crate::theme::text_mute()
+            },
         );
         a.header_btns.push((kind, (bx, by, B, B)));
+    }
+}
+
+/// 별도창 왼쪽 파일트리 패널 한 프레임. 메인 창 트리에서 **행 그리기만** 옮겨 왔다
+/// — 검색·이름바꾸기·새 파일·빠른파일·드래그·git 배지는 `App.file_tree` 의 편집
+/// 상태를 같이 써야 하는데, 그건 메인 창 좌표로 적혀 있어 두 창이 한 상태를 두고
+/// 싸운다. 여기선 읽기 전용으로 두고 펼치기·열기만 태운다.
+///
+/// 그린 행의 히트 rect 을 `a.tree_rows` 에 적어 클릭 판정이 그림과 갈리지 않게 한다.
+fn draw_aux_tree(a: &mut AuxWindow, rows: &[AuxTreeRow], h: f32) {
+    let w = AUX_TREE_W;
+    let top = AUX_HEADER_H;
+    a.tree_rows.clear();
+    a.gpu.rect(0.0, top, w, h - top, crate::theme::surface());
+    // 트리와 셀 사이 실선 — 배경색이 비슷해 경계가 없으면 글자가 패널 안에서
+    // 시작하는 것처럼 읽힌다.
+    a.gpu.rect(w - 1.0, top, 1.0, h - top, crate::theme::border());
+    let body_h = (h - top).max(0.0);
+    let max_scroll = (rows.len() as f32 * AUX_TREE_ROW_H - body_h).max(0.0);
+    a.tree_scroll = a.tree_scroll.clamp(0.0, max_scroll);
+    let (mx, my) = a.cursor_px;
+    const STEP: f32 = 12.0;
+    const ISZ: f32 = 15.0;
+    for (i, node) in rows.iter().enumerate() {
+        let y = top + i as f32 * AUX_TREE_ROW_H - a.tree_scroll;
+        // 이 렌더러엔 scissor 가 없다 — 위아래로 벗어난 행은 아예 안 그린다.
+        // 안 그러면 헤더 띠와 창 밖으로 글자가 삐져나온다.
+        if y + AUX_TREE_ROW_H <= top || y >= h {
+            continue;
+        }
+        let hov = mx >= 0.0 && mx < w && my >= y && my < y + AUX_TREE_ROW_H;
+        if hov {
+            crate::round_rect(
+                &mut a.gpu,
+                2.0,
+                y,
+                w - 6.0,
+                AUX_TREE_ROW_H,
+                crate::theme::radius_sm(),
+                crate::theme::surface_hover(),
+            );
+        }
+        let base_x = 6.0 + node.depth as f32 * STEP;
+        if node.is_dir {
+            let chev = if node.expanded { "chevron-down" } else { "chevron-right" };
+            a.gpu.queue_icon(
+                chev,
+                base_x,
+                y + (AUX_TREE_ROW_H - 11.0) / 2.0,
+                11.0,
+                if hov { crate::theme::text() } else { crate::theme::text_mute() },
+            );
+        }
+        let icon_x = base_x + 15.0;
+        let iy = y + (AUX_TREE_ROW_H - ISZ) / 2.0;
+        let icon_col = if node.ignored {
+            crate::theme::with_alpha(crate::theme::text_dim(), 0x99)
+        } else if hov {
+            crate::theme::text()
+        } else {
+            crate::theme::text_dim()
+        };
+        if node.is_dir {
+            // 메인 창과 같은 규칙 — 레포는 폴더 대신 브랜치 아이콘.
+            let ic = if node.is_repo { "git-branch" } else { "folder" };
+            a.gpu.queue_icon(ic, icon_x, iy, ISZ, icon_col);
+        } else if let Some(ft) = crate::file_icon(&node.name) {
+            a.gpu
+                .queue_icon_colored(ft, icon_x, iy, ISZ, if node.ignored { 0.35 } else { 0.9 });
+        } else {
+            a.gpu.queue_icon("file", icon_x, iy, ISZ, icon_col);
+        }
+        let text_x = icon_x + ISZ + 6.0;
+        let font = 12.0_f32;
+        let budget = (w - text_x - 6.0).max(0.0);
+        let label = crate::render::clip_px(&mut a.gpu, &node.name, font, false, budget);
+        let fg = if node.ignored {
+            crate::theme::text_mute()
+        } else if hov || node.is_dir {
+            crate::theme::text()
+        } else {
+            crate::theme::text_dim()
+        };
+        a.gpu.draw_text(
+            text_x,
+            y + (AUX_TREE_ROW_H - font) / 2.0,
+            &label,
+            gpu::DrawOpts { font_size: font, color: fg, bold: false, italic: false },
+        );
+        a.tree_rows
+            .push((node.path.clone(), node.is_dir, (0.0, y, w, AUX_TREE_ROW_H)));
     }
 }
 
@@ -205,6 +311,29 @@ pub(crate) enum AuxHeaderBtn {
     Hide,
     /// 메인 그리드로 되돌린다(창 닫기·⌘W 와 같은 동작).
     Dock,
+    /// 이 창 왼쪽에 파일트리 패널을 연다/닫는다. 창마다 따로 기억한다 — 전역
+    /// 설정으로 두면 pane 하나를 크게 보려고 꺼낸 창까지 같이 좁아진다.
+    FileTree,
+}
+
+/// 별도창 파일트리 패널 폭(logical px). 메인 창 컬럼보다 좁다 — 별도창은 대개
+/// pane 하나를 크게 보려고 꺼낸 것이라, 트리가 본문을 반이나 먹으면 꺼낸 이유가
+/// 사라진다.
+const AUX_TREE_W: f32 = 200.0;
+
+/// 파일트리 한 줄 높이(logical px).
+const AUX_TREE_ROW_H: f32 = 22.0;
+
+/// 페인트 루프에 넘길 파일트리 한 줄. `App.file_tree.nodes` 를 그대로 빌리면
+/// `self.aux_windows` 가변 차용과 겹치므로, 그리기 전에 필요한 것만 떠 온다.
+struct AuxTreeRow {
+    path: std::path::PathBuf,
+    name: String,
+    is_dir: bool,
+    depth: usize,
+    expanded: bool,
+    ignored: bool,
+    is_repo: bool,
 }
 
 pub(crate) struct AuxWindow {
@@ -235,11 +364,31 @@ pub(crate) struct AuxWindow {
     /// 헤더 버튼의 히트 rect — 그린 프레임이 곧 클릭 판정이라 렌더가 채운다.
     /// 아이콘 자리를 코드 두 곳에 적으면 그림과 판정이 어긋난다.
     pub(crate) header_btns: Vec<(AuxHeaderBtn, (f32, f32, f32, f32))>,
+    /// 이 창 왼쪽 파일트리 패널이 열려 있나. 트리 **내용**은 App.file_tree 하나를
+    /// 공유한다(같은 루트·같은 펼침 상태) — 창마다 따로 두면 같은 폴더를 창마다
+    /// 다시 펼쳐야 하고, 메인 창에서 연 것이 여기 안 보인다.
+    pub(crate) tree_open: bool,
+    /// 트리 세로 스크롤(logical px). 이건 창마다 따로다 — 보는 자리는 창의 것이다.
+    pub(crate) tree_scroll: f32,
+    /// 트리 행의 히트 rect — 그린 프레임이 곧 클릭 판정(header_btns 와 같은 규약).
+    pub(crate) tree_rows: Vec<(std::path::PathBuf, bool, (f32, f32, f32, f32))>,
     /// `window` 는 맨 뒤 — `gpu` 보다 나중에 드롭돼 surface 가 살아있는 창을 참조한다.
     pub(crate) window: Arc<Window>,
 }
 
 impl AuxWindow {
+    /// 파일트리가 먹는 폭(logical px). 닫혀 있으면 0.
+    fn tree_w(&self) -> f32 {
+        if self.tree_open { AUX_TREE_W } else { 0.0 }
+    }
+
+    /// 셀 그리드가 시작되는 x — 트리 폭만큼 밀린다. **셀 원점·커서·leaf rect·
+    /// cols 계산이 전부 이 하나를 지나야 한다.** 한 군데라도 빼먹으면 트리가 글자
+    /// 위에 겹치거나(원점만 밀고 cols 를 안 줄임) 오른쪽이 잘린다(반대).
+    fn cell_left(&self) -> f32 {
+        PANE_INNER_X + self.tree_w()
+    }
+
     pub(crate) fn editor(&self) -> Option<&MarkdownPane> {
         match &self.kind {
             AuxWindowKind::Editor(m) => Some(m),
@@ -258,7 +407,7 @@ impl AuxWindow {
     }
     /// 키 입력이 갈 pane id. 터미널 창은 그 pane, 방 창은 지금 포커스된 pane.
     /// 둘을 한 값으로 내주는 덕에 키·휠·IME 라우팅이 한 벌로 끝난다.
-    fn term_pane_id(&self) -> Option<&str> {
+    pub(crate) fn term_pane_id(&self) -> Option<&str> {
         match &self.kind {
             AuxWindowKind::Terminal { pane_id, .. } => Some(pane_id.as_str()),
             AuxWindowKind::Room { focus, .. } => focus.as_deref(),
@@ -449,6 +598,9 @@ impl App {
             last_title: title,
             pending_capture: None,
             md_content_h: 0.0,
+            tree_open: false,
+            tree_scroll: 0.0,
+            tree_rows: Vec::new(),
             header_btns: Vec::new(),
             window,
         };
@@ -1213,6 +1365,9 @@ impl App {
             last_title: "Settings".to_string(),
             pending_capture: None,
             md_content_h: 0.0,
+            tree_open: false,
+            tree_scroll: 0.0,
+            tree_rows: Vec::new(),
             header_btns: Vec::new(),
             window,
         };
@@ -1431,6 +1586,9 @@ impl App {
             last_title: title,
             pending_capture: None,
             md_content_h: 0.0,
+            tree_open: false,
+            tree_scroll: 0.0,
+            tree_rows: Vec::new(),
             header_btns: Vec::new(),
             window,
         };
@@ -1446,16 +1604,18 @@ impl App {
     /// 창 client 크기(logical)를 셀수로 환산해 이 창이 뷰하는 pane 의 PTY 를 resize.
     /// 본문 = 창 − 좌우/상하 PANE_INNER 여백. 셀 메트릭은 이 창 gpu 의 것(논리 px).
     fn aux_terminal_resize_pty(&mut self, idx: usize) {
-        let (pane_id, w, h, cw, ch) = {
+        let (pane_id, w, h, cw, ch, left) = {
             let Some(a) = self.aux_windows.get(idx) else { return };
             let Some(pid) = a.term_pane_id() else { return };
             let (w, h) = a.logical_size();
-            (pid.to_string(), w, h, a.gpu.cell_w, a.gpu.cell_h)
+            (pid.to_string(), w, h, a.gpu.cell_w, a.gpu.cell_h, a.cell_left())
         };
         if cw <= 0.0 || ch <= 0.0 {
             return;
         }
-        let cols = (((w - PANE_INNER_X * 2.0) / cw).floor() as i32).max(1) as u16;
+        // 왼쪽은 트리 폭까지 포함한 `cell_left`, 오른쪽은 여백 하나 — 트리를 열면
+        // 셀이 들어갈 칸 수가 그만큼 줄어야 셸이 새 폭으로 줄바꿈한다.
+        let cols = (((w - left - PANE_INNER_X) / cw).floor() as i32).max(1) as u16;
         let rows = (((h - AUX_CELL_TOP - PANE_INNER_Y) / ch).floor() as i32).max(1) as u16;
         if let Some(pty) = self.pty.get(&pane_id) {
             let _ = pty.resize(cols, rows);
@@ -1501,6 +1661,14 @@ impl App {
             .as_ref()
             .and_then(|(_, c)| *c)
             .unwrap_or_else(|| crate::theme::accent());
+        // 트리는 `self.file_tree` 를 읽는데 아래에서 `self.aux_windows` 를 가변으로
+        // 잡으므로 먼저 떠 둔다. 닫혀 있으면 아예 안 뜬다 — 매 프레임 노드를 통째로
+        // clone 하는 값은 트리를 보고 있을 때만 치른다.
+        let tree_rows = if self.aux_windows.get(idx).is_some_and(|a| a.tree_open) {
+            self.aux_tree_rows()
+        } else {
+            Vec::new()
+        };
         let Some(a) = self.aux_windows.get_mut(idx) else { return };
         a.gpu.clear_chrome();
         a.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
@@ -1552,8 +1720,11 @@ impl App {
             }
             draw_aux_header_btns(a, w);
         }
+        if a.tree_open {
+            draw_aux_tree(a, &tree_rows, h);
+        }
         // origin_px 는 물리 px(draw_cells 규약), 커서 rect 은 논리 px(gpu.rect 규약).
-        let origin_px = (PANE_INNER_X * scale, AUX_CELL_TOP * scale);
+        let origin_px = (a.cell_left() * scale, AUX_CELL_TOP * scale);
         let slot = gpu::PaneSlot {
             rows: &rows,
             origin_px,
@@ -1566,7 +1737,7 @@ impl App {
         // 커서 자리(논리 px). 조합 중 한글이 있으면 그 프리에딧을, 없으면 blink 커서.
         let cw = a.gpu.cell_w;
         let ch = a.gpu.cell_h;
-        let px = PANE_INNER_X + cur_col as f32 * cw;
+        let px = a.cell_left() + cur_col as f32 * cw;
         let py = AUX_CELL_TOP + cur_row as f32 * ch;
         let pe = a.preedit.clone();
         if pe.is_empty() {
@@ -1619,7 +1790,7 @@ impl App {
         if cw <= 0.0 || ch <= 0.0 {
             return Vec::new();
         }
-        let cols = (((w - PANE_INNER_X * 2.0) / cw).floor() as i32).max(1) as u16;
+        let cols = (((w - a.cell_left() - PANE_INNER_X) / cw).floor() as i32).max(1) as u16;
         let rows = (((h - AUX_CELL_TOP - PANE_INNER_Y) / ch).floor() as i32).max(1) as u16;
         let layout = if window == self.active_window {
             self.pty_layout.as_ref()
@@ -1695,6 +1866,12 @@ impl App {
                 })
                 .collect()
         };
+        // 터미널 창과 같은 이유로 `aux_windows` 가변 차용 전에 떠 둔다.
+        let tree_rows = if self.aux_windows.get(idx).is_some_and(|a| a.tree_open) {
+            self.aux_tree_rows()
+        } else {
+            Vec::new()
+        };
         let Some(a) = self.aux_windows.get_mut(idx) else { return };
         if let Some(name) = label {
             if a.last_title != name {
@@ -1725,13 +1902,17 @@ impl App {
             );
             draw_aux_header_btns(a, w);
         }
+        if a.tree_open {
+            draw_aux_tree(a, &tree_rows, h);
+        }
+        let left = a.cell_left();
         let slots: Vec<gpu::PaneSlot> = snaps
             .iter()
             .map(|(pid, cells, x, y, _, _, _)| gpu::PaneSlot {
                 rows: cells,
                 // origin_px 는 물리 px(draw_cells 규약) — 셀 좌표를 논리 px 로 편 뒤 스케일.
                 origin_px: (
-                    (PANE_INNER_X + *x as f32 * cw) * scale,
+                    (left + *x as f32 * cw) * scale,
                     (AUX_CELL_TOP + *y as f32 * ch) * scale,
                 ),
                 font_scale: 1.0,
@@ -1744,7 +1925,7 @@ impl App {
         // pane 경계 — 나눠져 있다는 걸 보이게. 포커스 pane 은 그 학생색으로(메인
         // 그리드의 active 테두리와 같은 신호). 학생이 없으면 종전대로 accent.
         for (pid, x, y, pw, ph) in &rects {
-            let rx = PANE_INNER_X + *x as f32 * cw;
+            let rx = left + *x as f32 * cw;
             let ry = AUX_CELL_TOP + *y as f32 * ch;
             let (rw, rh) = (*pw as f32 * cw, *ph as f32 * ch);
             let is_focus = focus.as_deref() == Some(pid.as_str());
@@ -1781,7 +1962,7 @@ impl App {
             .iter()
             .find(|(pid, ..)| focus.as_deref() == Some(pid.as_str()))
         {
-            let px = PANE_INNER_X + (*x as f32 + *cur_col as f32) * cw;
+            let px = left + (*x as f32 + *cur_col as f32) * cw;
             let py = AUX_CELL_TOP + (*y as f32 + *cur_row as f32) * ch;
             let pe = a.preedit.clone();
             if pe.is_empty() {
@@ -1868,7 +2049,9 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.aux_header_click(idx);
+                if !self.aux_header_click(idx) {
+                    self.aux_tree_click(idx);
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => self.aux_terminal_wheel(idx, delta),
             WindowEvent::KeyboardInput { event, .. } => self.aux_terminal_key(idx, &event),
@@ -1905,8 +2088,102 @@ impl App {
                 }
                 true
             }
+            Some(AuxHeaderBtn::FileTree) => {
+                self.toggle_aux_tree(idx);
+                true
+            }
             None => false,
         }
+    }
+
+    /// 이 창의 파일트리 패널을 열고 닫는다. 셀 그리드가 트리 폭만큼 밀리므로
+    /// **PTY 도 같이 좁혀야** 한다 — 안 그러면 셸이 옛 폭으로 줄바꿈해 오른쪽이
+    /// 창 밖으로 나간다. 트리를 처음 열 때 루트가 아직 없으면 세우고 채운다:
+    /// 메인 창에서 트리를 한 번도 안 열었으면 `file_tree.nodes` 가 비어 있어,
+    /// 패널이 열리긴 하는데 빈 판으로 뜬다(고장으로 읽힌다).
+    pub(crate) fn toggle_aux_tree(&mut self, idx: usize) {
+        let Some(a) = self.aux_windows.get_mut(idx) else { return };
+        a.tree_open = !a.tree_open;
+        let opened = a.tree_open;
+        let is_room = matches!(a.kind, AuxWindowKind::Room { .. });
+        if opened && self.file_tree.nodes.is_empty() {
+            if self.file_tree.root.is_none() {
+                // 이 창이 보는 pane 의 cwd 가 가장 그럴듯한 루트다 — 트리를 여는
+                // 사람은 "여기서 일하는 폴더"를 보려는 것이다.
+                let cwd = self
+                    .aux_windows
+                    .get(idx)
+                    .and_then(|a| a.term_pane_id())
+                    .and_then(|p| self.pane_cwd_cache.get(p).cloned())
+                    .or_else(|| std::env::current_dir().ok());
+                if let Some(root) = cwd {
+                    // 루트는 펼친 채로 연다 — 메인 창이 루트를 세울 때와 같은 규칙.
+                    // 안 그러면 트리를 열었는데 접힌 폴더 한 줄만 떠, 켠 게 아니라
+                    // 고장난 것처럼 보인다.
+                    self.file_tree.expanded.insert(root.clone());
+                    self.file_tree.root = Some(root);
+                }
+            }
+            self.rebuild_file_tree_nodes();
+        }
+        if is_room {
+            self.aux_room_resize_pty(idx);
+        } else {
+            self.aux_terminal_resize_pty(idx);
+        }
+        self.aux_redraw(idx);
+    }
+
+    /// 그리기 직전에 뜨는 트리 스냅샷. `App.file_tree.nodes` 를 `aux_windows` 가변
+    /// 차용과 같은 자리에서 읽을 수 없어 필요한 것만 옮겨 담는다.
+    fn aux_tree_rows(&self) -> Vec<AuxTreeRow> {
+        self.file_tree
+            .nodes
+            .iter()
+            .map(|n| AuxTreeRow {
+                path: n.path.clone(),
+                name: n.name.clone(),
+                is_dir: n.is_dir,
+                depth: n.depth,
+                expanded: self.file_tree.expanded.contains(&n.path),
+                ignored: n.ignored,
+                is_repo: n.is_repo,
+            })
+            .collect()
+    }
+
+    /// 트리 패널 클릭. 폴더는 펼치고/접고(메인 창과 **같은** 펼침 상태를 쓰므로
+    /// 양쪽이 함께 움직인다), 파일은 연다. 판정은 `true` = 트리가 먹었다.
+    fn aux_tree_click(&mut self, idx: usize) -> bool {
+        let Some(a) = self.aux_windows.get(idx) else { return false };
+        if !a.tree_open {
+            return false;
+        }
+        let (cx, cy) = a.cursor_px;
+        if cx >= AUX_TREE_W || cy < AUX_HEADER_H {
+            return false;
+        }
+        let hit = a
+            .tree_rows
+            .iter()
+            .find(|(_, _, (_, ry, _, rh))| cy >= *ry && cy < ry + rh)
+            .map(|(p, d, _)| (p.clone(), *d));
+        // 패널 빈자리를 눌러도 셀 클릭으로 새면 안 된다 — 트리 위는 트리 것이다.
+        let Some((path, is_dir)) = hit else { return true };
+        if is_dir {
+            if !self.file_tree.expanded.remove(&path) {
+                self.file_tree.expanded.insert(path.clone());
+            }
+            self.rebuild_file_tree_nodes();
+            self.chrome_dirty = true;
+        } else {
+            // 파일은 메인 창에 연다(`open_file_split` — 사이드바 트리와 같은 경로).
+            // 별도창 안에서 여는 길은 아직 없다: 이 창은 pane 하나를 보는 뷰라
+            // 새 탭을 담을 자리가 없다.
+            self.open_file_split(path);
+        }
+        self.aux_redraw(idx);
+        true
     }
 
     /// 별도창을 접어 메인 창 하단바 칩으로 보낸다. pane·PTY·방 트리는 그대로
@@ -1988,6 +2265,20 @@ impl App {
             MouseScrollDelta::PixelDelta(p) => (p.y as f32) / 20.0,
         };
         if lines.abs() < 0.01 {
+            return;
+        }
+        // 커서가 트리 위면 트리를 굴린다 — 같은 창 안에 스크롤 대상이 둘이면
+        // 어느 쪽이냐는 커서가 정한다(메인 창 사이드바와 같은 규칙). 클램프는
+        // 그리는 쪽이 rows 를 알고 있으므로 draw_aux_tree 가 맡는다.
+        let on_tree = self
+            .aux_windows
+            .get(idx)
+            .is_some_and(|a| a.tree_open && a.cursor_px.0 < AUX_TREE_W && a.cursor_px.1 >= AUX_HEADER_H);
+        if on_tree {
+            if let Some(a) = self.aux_windows.get_mut(idx) {
+                a.tree_scroll = (a.tree_scroll - lines * AUX_TREE_ROW_H).max(0.0);
+            }
+            self.aux_redraw(idx);
             return;
         }
         let step = lines.abs().ceil() as i32;
@@ -2369,7 +2660,7 @@ impl App {
             } => {
                 // 헤더 버튼이 먼저다 — 그 띠는 셀 그리드 밖이라 pane 포커스로
                 // 흘려보내면 버튼이 영영 안 눌린다.
-                if !self.aux_header_click(idx) {
+                if !self.aux_header_click(idx) && !self.aux_tree_click(idx) {
                     self.aux_room_click(idx);
                 }
             }
@@ -2393,15 +2684,15 @@ impl App {
 
     /// 방 창 클릭 → 커서 아래 pane 으로 포커스 이동(키 입력이 그리로 간다).
     fn aux_room_click(&mut self, idx: usize) {
-        let (cx, cy, cw, ch) = {
+        let (cx, cy, cw, ch, left) = {
             let Some(a) = self.aux_windows.get(idx) else { return };
-            (a.cursor_px.0, a.cursor_px.1, a.gpu.cell_w, a.gpu.cell_h)
+            (a.cursor_px.0, a.cursor_px.1, a.gpu.cell_w, a.gpu.cell_h, a.cell_left())
         };
         if cw <= 0.0 || ch <= 0.0 {
             return;
         }
         let hit = self.room_leaf_rects(idx).into_iter().find(|(_, x, y, w, h)| {
-            let rx = PANE_INNER_X + *x as f32 * cw;
+            let rx = left + *x as f32 * cw;
             let ry = AUX_CELL_TOP + *y as f32 * ch;
             cx >= rx && cx < rx + *w as f32 * cw && cy >= ry && cy < ry + *h as f32 * ch
         });
@@ -2549,6 +2840,9 @@ impl App {
             last_title: title,
             pending_capture: None,
             md_content_h: 0.0,
+            tree_open: false,
+            tree_scroll: 0.0,
+            tree_rows: Vec::new(),
             header_btns: Vec::new(),
             window: window_handle,
         });
