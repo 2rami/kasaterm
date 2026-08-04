@@ -2203,6 +2203,70 @@ impl App {
             self.pane_activity.entry(id.clone()).or_default().status = "waiting".into();
         }
     }
+    /// Headless 별도창 파일트리 repro: `KASATERM_AUTOAUXTREE_MS` 뒤에 첫 aux 창의
+    /// 트리 패널을 연다(헤더 버튼 클릭은 그 창 좌표라 헤드리스 주입이 번거롭다).
+    /// `KASATERM_AUTOUNDOCK_MS` 로 창을 먼저 띄워 두고 쓴다.
+    ///
+    /// 트리를 여는 것만으론 반쪽이다 — 진짜 확인할 것은 **셀이 트리만큼 밀렸는가**라,
+    /// 열기 전후 cols 를 같이 찍는다. 원점만 밀고 cols 를 안 줄이면 오른쪽이 창 밖으로
+    /// 나가는데, 그건 스크린샷에서 "글자가 좀 잘렸네"로 흘려보내기 쉽다.
+    pub(crate) fn run_pending_autoauxtree(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOAUXTREE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if self.aux_windows.is_empty() {
+            eprintln!("[autoauxtree] FAIL — 별도창이 없다(KASATERM_AUTOUNDOCK_MS 를 앞에 둬라)");
+            return;
+        }
+        let cols_before = self
+            .aux_windows
+            .first()
+            .and_then(|a| a.term_pane_id())
+            .and_then(|p| self.pty.get(p))
+            .map(|p| p.size().0);
+        self.toggle_aux_tree(0);
+        // 한 프레임 그려야 `tree_rows` 가 찬다 — 안 그리고 세면 항상 0 이라 "행이
+        // 그려졌나"를 묻는 척만 하게 된다.
+        self.aux_render(0);
+        let (open, rows) = self
+            .aux_windows
+            .first()
+            .map(|a| (a.tree_open, a.tree_rows.len()))
+            .unwrap_or((false, 0));
+        let cols_after = self
+            .aux_windows
+            .first()
+            .and_then(|a| a.term_pane_id())
+            .and_then(|p| self.pty.get(p))
+            .map(|p| p.size().0);
+        eprintln!(
+            "[autoauxtree] 열림={open} 트리노드={} 그린줄={rows} cols {cols_before:?}→{cols_after:?}",
+            self.file_tree.nodes.len()
+        );
+        let narrowed = matches!((cols_before, cols_after), (Some(b), Some(a)) if a < b);
+        eprintln!(
+            "[autoauxtree] {}",
+            if open && rows > 0 && narrowed { "PASS" } else { "FAIL" }
+        );
+        if let Ok(cap) = std::env::var("KASATERM_AUTOAUXTREE_CAP") {
+            if let Some(a) = self.aux_windows.first_mut() {
+                a.pending_capture =
+                    Some((Instant::now() + std::time::Duration::from_millis(1500), cap));
+            }
+        }
+    }
     /// `KASATERM_AUTOUNREAD="%2"` — 그 pane 을 "끝났는데 아직 안 본" 상태로 세운다.
     /// 방 단위인 `KASATERM_AUTOALERT` 의 pane 판 — 완료 숨쉬기가 방 전체가 아니라
     /// **그 세션 줄** 에만 걸리는지 보려면 둘을 따로 세울 수 있어야 한다.

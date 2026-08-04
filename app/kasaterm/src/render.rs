@@ -9082,7 +9082,13 @@ fn approval_anchor(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
 /// only holds for the CJK/ASCII mix it was tuned against — an all-ASCII title
 /// measures far narrower than its column count implies, and an all-Hangul one
 /// wider. Where a label sits next to another element, measure instead of guess.
-fn clip_px(g: &mut gpu::GpuRenderer, s: &str, font_size: f32, bold: bool, budget: f32) -> String {
+pub(crate) fn clip_px(
+    g: &mut gpu::GpuRenderer,
+    s: &str,
+    font_size: f32,
+    bold: bool,
+    budget: f32,
+) -> String {
     if budget <= 0.0 {
         return String::new();
     }

@@ -4996,6 +4996,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_automdscript(event_loop);
         self.run_pending_auxpopout(event_loop);
         self.run_pending_autoundock(event_loop);
+        self.run_pending_autoauxtree();
         self.run_pending_autoteardrag(event_loop);
         self.drain_aux_captures();
         // 편집기 자동 저장 — 타자가 멎은 지 설정 시간이 지난 버퍼를 쓴다.
