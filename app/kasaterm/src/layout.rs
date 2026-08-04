@@ -1685,6 +1685,58 @@ for p in glob.glob(os.path.join(d, '*.json')):
             })
             .unwrap_or(false)
     }
+
+    /// 이 pane 이 이미 별도창으로 뜯겨 있는가 — 그 aux 창 인덱스. 드래그 도중
+    /// 뜯긴 상태를 App 필드 없이 판별하는 유일한 기준이다(`aux_windows` 자체가
+    /// 상태다). 병렬 작업 규칙상 struct App 은 건드리지 않는다.
+    pub(crate) fn torn_aux_window(&self, pane: &str) -> Option<usize> {
+        self.aux_windows.iter().position(|a| {
+            matches!(&a.kind, crate::auxwin::AuxWindowKind::Terminal { pane_id, .. } if pane_id == pane)
+        })
+    }
+
+    /// 드래그 중 커서가 창 밖으로 나갔을 때: 아직 안 뜯겼으면 **놓기 전에** 별도창으로
+    /// 뜯어내고, 이미 뜯겼으면 그 창을 커서 밑으로 옮긴다. 반환값 = 이 pane 이 지금
+    /// 별도창이다(= 호출부는 라이브 재배치를 하지 말아야 한다 — 레이아웃에 없는 pane 을
+    /// 옮기려 들면 엉뚱한 자리에 꽂힌다).
+    ///
+    /// 터미널 pane 만 대상이다. 파일(마크다운) 탭은 별도창 종류가 달라(`Editor`) 뜯긴
+    /// 여부를 pane id 로 판별할 수 없으니 놓는 순간 처리하는 기존 경로에 남긴다.
+    pub(crate) fn drag_tear_follow(
+        &mut self,
+        pane: &str,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> bool {
+        if let Some(i) = self.torn_aux_window(pane) {
+            // 창이 커서를 따라온다 — 뜯긴 순간의 자리에 못 박으면 "들고 있다"는
+            // 감각이 끊긴다. 위치 계산은 스폰 때와 같은 오프셋(cursor_screen_phys).
+            if let Some(pos) = self.cursor_screen_phys() {
+                self.aux_windows[i].window.set_outer_position(pos);
+            }
+            return true;
+        }
+        let is_term = self
+            .ws
+            .lock()
+            .ok()
+            .and_then(|w| {
+                // Deref 로 활성 탭을 본다 — 멀티탭 pane 은 v1 그대로 통째로 뜯긴다.
+                w.panes
+                    .get(pane)
+                    .map(|p| matches!(p.content, PaneContent::Terminal(_)))
+            })
+            .unwrap_or(false);
+        if !is_term {
+            return false;
+        }
+        // 라이브 재배치 백업을 먼저 정리한다 — 놓는 순간 뜯어내던 경로와 같은 순서.
+        // 안 하면 undock 뒤에도 백업 트리가 남아 다음 드래그가 옛 레이아웃을 복원한다.
+        self.finish_live_drag();
+        let near = self.cursor_screen_phys();
+        self.undock_pane_terminal(pane, event_loop, near);
+        self.torn_aux_window(pane).is_some()
+    }
+
     /// Detach `moving` from the active window and graft it beside `target`,
     /// which lives in window `dst_idx`'s parked tree. The PTY stays alive — only
     /// the BSP trees are rewired. If the active window held `moving` as its sole

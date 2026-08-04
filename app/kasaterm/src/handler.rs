@@ -1894,9 +1894,21 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     if self.tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
                         window.set_cursor(CursorIcon::Grabbing);
-                        // 단일탭 pane 드래그면 실제 레이아웃을 라이브로 재배치
-                        // (멀티탭은 탭 추출이라 update_live_drag 가 알아서 건너뜀).
-                        self.update_live_drag();
+                        // 창 밖으로 나가는 순간 뜯어낸다 — 놓을 때까지 기다리면
+                        // 드래그 내내 "빠질지 말지"가 화면에 안 보인다. 한 번
+                        // 뜯긴 뒤엔 커서가 창 안으로 돌아와도 계속 따라오게 두고
+                        // (되돌리기는 창 닫기 = dock), 라이브 재배치는 멈춘다 —
+                        // 레이아웃에 없는 pane 을 옮기려 들면 안 되기 때문이다.
+                        let (win_w, win_h) = self.logical_win_size();
+                        let out = Self::drag_left_window(px, py, win_w, win_h);
+                        let torn = out || self.torn_aux_window(&src_pane).is_some();
+                        let followed =
+                            torn && self.drag_tear_follow(&src_pane, event_loop);
+                        if !followed {
+                            // 단일탭 pane 드래그면 실제 레이아웃을 라이브로 재배치
+                            // (멀티탭은 탭 추출이라 update_live_drag 가 알아서 건너뜀).
+                            self.update_live_drag();
+                        }
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -1912,10 +1924,23 @@ impl ApplicationHandler<UserEvent> for App {
                         hd.active = true;
                     }
                     let active = hd.active;
+                    let pane = hd.pane.clone();
                     if active {
                         window.set_cursor(CursorIcon::Grabbing);
-                        // 프리뷰 박스가 아니라 실제 레이아웃을 라이브로 재배치.
-                        self.update_live_drag();
+                        // 탭 pill 과 같은 규칙 — 창 밖으로 나가면 놓기 전에 뜯긴다.
+                        let (win_w, win_h) = self.logical_win_size();
+                        let out = Self::drag_left_window(
+                            self.cursor_px.0,
+                            self.cursor_px.1,
+                            win_w,
+                            win_h,
+                        );
+                        let torn = out || self.torn_aux_window(&pane).is_some();
+                        let followed = torn && self.drag_tear_follow(&pane, event_loop);
+                        if !followed {
+                            // 프리뷰 박스가 아니라 실제 레이아웃을 라이브로 재배치.
+                            self.update_live_drag();
+                        }
                         window.request_redraw();
                     }
                     return;
@@ -4039,6 +4064,14 @@ impl ApplicationHandler<UserEvent> for App {
                         // list; a plain press just switches to that tab.
                         if let Some(mut td) = self.tab_drag.take() {
                             window.set_cursor(CursorIcon::Default);
+                            // 드래그 중 이미 뜯겨 별도창이 됐다 — 놓는 순간 할 일이
+                            // 없다. 아래 split/dock 경로를 그대로 태우면 레이아웃에
+                            // 없는 pane 을 다시 꽂으려 든다.
+                            if td.active && self.torn_aux_window(&td.pane).is_some() {
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
                             // Phase 3 tear-off: 탭을 창 밖에서 놓으면 별도 창으로
                             // 뜯어낸다 — 파일 탭=편집기 창, 터미널 탭=undock 터미널
                             // 창(헤더 pop-out 아이콘과 동일 경로, 커서 자리에 스폰).
@@ -4341,6 +4374,12 @@ impl ApplicationHandler<UserEvent> for App {
                         // reset the cursor.
                         if let Some(hd) = self.header_drag.take() {
                             window.set_cursor(CursorIcon::Default);
+                            // 이미 뜯긴 pane — 탭 드래그와 같은 이유로 여기서 끝낸다.
+                            if hd.active && self.torn_aux_window(&hd.pane).is_some() {
+                                self.chrome_dirty = true;
+                                window.request_redraw();
+                                return;
+                            }
                             if hd.active {
                                 // 커서가 사이드바의 다른 윈도우 탭 위면 cross-window
                                 // 이동이 최우선이다. 라이브 재배치가 pane 가장자리에

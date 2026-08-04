@@ -72,8 +72,47 @@ pub(crate) fn tabbing_probe(window: &Window) -> (isize, usize) {
     }
 }
 
-/// 별도 창 헤더 높이. OS 타이틀바를 껐으므로 이 띠가 창의 유일한 손잡이다.
+/// 별도 창 헤더 높이. macOS 에선 OS 타이틀바 **자리 위에** 그리므로 메인 창의
+/// `TITLE_HEIGHT` 와 같아야 두 창이 같은 앱으로 읽힌다. 그 외 플랫폼은 OS
+/// 타이틀바가 따로 있고 이 띠는 그 아래라, 더 얇게 둔다.
+#[cfg(target_os = "macos")]
+const AUX_HEADER_H: f32 = TITLE_HEIGHT;
+#[cfg(not(target_os = "macos"))]
 const AUX_HEADER_H: f32 = 30.0;
+
+/// 헤더 내용이 시작되는 x. macOS 는 신호등 세 개가 이 띠 왼쪽에 얹혀 있으므로
+/// 그만큼 비운다 — 안 비우면 라벨이 버튼 밑으로 들어간다.
+#[cfg(target_os = "macos")]
+const AUX_HEADER_X: f32 = TRAFFIC_LIGHT_WIDTH + 8.0;
+#[cfg(not(target_os = "macos"))]
+const AUX_HEADER_X: f32 = 12.0;
+
+/// 셀 그리드가 시작되는 y — 헤더 띠 바로 아래.
+///
+/// 전엔 이 값을 쓰는 곳과 안 쓰는 곳이 갈려 있었다: 셀은 헤더 아래로 내려 그리면서
+/// **행 수와 커서 위치는 창 꼭대기 기준**이라, 마지막 줄이 창 밖으로 밀리고 커서가
+/// 헤더 위에 찍혔다. 상단 오프셋을 쓰는 자리는 전부 이 상수 하나를 지난다.
+const AUX_CELL_TOP: f32 = PANE_INNER_Y + AUX_HEADER_H;
+
+/// 별도창에 메인 창과 같은 크롬 정책을 건다 — macOS 는 OS 타이틀바를 투명하게
+/// 비우고 콘텐츠를 그 위까지 끌어올려, **띠 하나**로 합친다.
+///
+/// 전엔 OS 타이틀바(회색 OS 테마) 바로 밑에 우리 헤더가 또 있어 띠가 두 겹이었다
+/// (거노: "상단바가 os테마이고 바로밑에 방 뭐시기"). decorations 를 끄는 대신
+/// 투명으로 가는 이유는 창 이동·리사이즈·신호등을 계속 OS 에 맡기기 위해서다 —
+/// 끄면 손잡이 없는 창이 남는다.
+fn with_aux_chrome(attrs: WindowAttributes) -> WindowAttributes {
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::WindowAttributesExtMacOS;
+        return attrs
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true)
+            .with_fullsize_content_view(true);
+    }
+    #[cfg(not(target_os = "macos"))]
+    attrs
+}
 
 /// 별도창이 담는 내용물. 이 enum 을 match 하는 지점(render/key/mouse/title)의
 /// 팔만 채우면 새 창 종류를 꽂을 수 있다. `Settings` 는 데이터를 안 들고 있다 —
@@ -1308,7 +1347,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window = match create_untabbed(event_loop, attrs) {
+        let window = match create_untabbed(event_loop, with_aux_chrome(attrs)) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] terminal window create failed: {e}");
@@ -1362,7 +1401,7 @@ impl App {
             return;
         }
         let cols = (((w - PANE_INNER_X * 2.0) / cw).floor() as i32).max(1) as u16;
-        let rows = (((h - PANE_INNER_Y * 2.0) / ch).floor() as i32).max(1) as u16;
+        let rows = (((h - AUX_CELL_TOP - PANE_INNER_Y) / ch).floor() as i32).max(1) as u16;
         if let Some(pty) = self.pty.get(&pane_id) {
             let _ = pty.resize(cols, rows);
         }
@@ -1416,9 +1455,9 @@ impl App {
             a.dirty = false;
             return;
         };
-        // OS 타이틀바를 껐으니 헤더는 우리가 그린다 — 여기가 창의 유일한 손잡이다.
-        // 왼쪽에 「%3 · 2번 방」(꺼낸 pane 의 번호와 나온 방), 오른쪽에 되돌리기.
-        // 빈 곳을 끌면 창이 움직인다(`aux_header_press` → `drag_window`).
+        // macOS 는 OS 타이틀바를 투명으로 비웠으므로 이 띠가 그 자리에 얹힌다 —
+        // 신호등만 OS 것이고 나머지는 우리가 그린다(메인 창과 같은 방식). 왼쪽에
+        // 「아루 · %3 · 2번 방」, 오른쪽에 되돌리기. 창 이동·리사이즈는 OS 몫이다.
         {
             // 학생이 있으면 그 이름을 앞에 세우고 학생색으로 — 메인 그리드에서
             // 테두리·헤더가 하던 "이 창에 누가 있나"를 여기서도 한눈에.
@@ -1426,11 +1465,12 @@ impl App {
                 Some((name, _)) => format!("{name} · {pane_id} · {}번 방", home_window + 1),
                 None => format!("{pane_id} · {}번 방", home_window + 1),
             };
-            a.gpu.rect(0.0, 0.0, w, AUX_HEADER_H, crate::theme::surface());
+            // 배경은 창 배경 그대로 둔다 — 투명 타이틀바 위에 판을 하나 더 깔면
+            // 없애려던 두 겹이 색만 바뀐 채 돌아온다. 아래 hairline 만 남긴다.
             a.gpu.rect(0.0, AUX_HEADER_H - 1.0, w, 1.0, crate::theme::border());
             let label_col = if student.is_some() { accent } else { crate::theme::text_mute() };
             a.gpu.draw_text(
-                12.0,
+                AUX_HEADER_X,
                 (AUX_HEADER_H - 12.0) / 2.0,
                 &label,
                 gpu::DrawOpts {
@@ -1465,7 +1505,7 @@ impl App {
             );
         }
         // origin_px 는 물리 px(draw_cells 규약), 커서 rect 은 논리 px(gpu.rect 규약).
-        let origin_px = (PANE_INNER_X * scale, (PANE_INNER_Y + AUX_HEADER_H) * scale);
+        let origin_px = (PANE_INNER_X * scale, AUX_CELL_TOP * scale);
         let slot = gpu::PaneSlot {
             rows: &rows,
             origin_px,
@@ -1479,7 +1519,7 @@ impl App {
         let cw = a.gpu.cell_w;
         let ch = a.gpu.cell_h;
         let px = PANE_INNER_X + cur_col as f32 * cw;
-        let py = PANE_INNER_Y + cur_row as f32 * ch;
+        let py = AUX_CELL_TOP + cur_row as f32 * ch;
         let pe = a.preedit.clone();
         if pe.is_empty() {
             if cur_vis && focused && blink {
@@ -1532,7 +1572,7 @@ impl App {
             return Vec::new();
         }
         let cols = (((w - PANE_INNER_X * 2.0) / cw).floor() as i32).max(1) as u16;
-        let rows = (((h - PANE_INNER_Y * 2.0) / ch).floor() as i32).max(1) as u16;
+        let rows = (((h - AUX_CELL_TOP - PANE_INNER_Y) / ch).floor() as i32).max(1) as u16;
         let layout = if window == self.active_window {
             self.pty_layout.as_ref()
         } else {
@@ -1558,6 +1598,10 @@ impl App {
             .get(window)
             .map(|(n, _)| n.clone())
             .filter(|n| !n.is_empty());
+        // 헤더에 쓸 이름. 이름을 안 지은 방이면 번호로 — 띠를 비워 두면 창이
+        // 무엇인지 말해주는 게 아무것도 없다(OS 제목을 껐으므로).
+        let room_label =
+            label.clone().unwrap_or_else(|| format!("{}번 방", window + 1));
         // pane 별 배정 학생색 — 꺼낸 방도 메인 그리드와 같은 색으로 읽혀야 한다.
         // ordinal 은 동명이인 구분이라 전체 맵을 넘긴다(메인과 같은 규칙).
         let pane_cols: HashMap<String, [u8; 4]> = {
@@ -1612,6 +1656,26 @@ impl App {
         }
         a.gpu.clear_chrome();
         a.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
+        // 헤더 띠 — macOS 는 OS 타이틀바를 투명으로 비웠으므로 방 이름이 여기 선다.
+        // 전엔 OS 가 그린 제목이 그 자리를 채웠는데, 그건 회색 OS 테마라 창 하나만
+        // 다른 앱처럼 보였다(거노).
+        {
+            a.gpu.rect(0.0, AUX_CELL_TOP - 1.0, w, 1.0, crate::theme::border());
+            a.gpu.draw_text(
+                AUX_HEADER_X,
+                (AUX_HEADER_H - 12.0) / 2.0,
+                &room_label,
+                gpu::DrawOpts {
+                    font_size: 12.0,
+                    color: crate::theme::with_alpha(
+                        crate::theme::text_mute(),
+                        if focused { 0xF0 } else { 0x99 },
+                    ),
+                    bold: false,
+                    italic: false,
+                },
+            );
+        }
         let slots: Vec<gpu::PaneSlot> = snaps
             .iter()
             .map(|(pid, cells, x, y, _, _, _)| gpu::PaneSlot {
@@ -1619,7 +1683,7 @@ impl App {
                 // origin_px 는 물리 px(draw_cells 규약) — 셀 좌표를 논리 px 로 편 뒤 스케일.
                 origin_px: (
                     (PANE_INNER_X + *x as f32 * cw) * scale,
-                    (PANE_INNER_Y + *y as f32 * ch) * scale,
+                    (AUX_CELL_TOP + *y as f32 * ch) * scale,
                 ),
                 font_scale: 1.0,
                 dim: focus.as_deref() != Some(pid.as_str()),
@@ -1632,7 +1696,7 @@ impl App {
         // 그리드의 active 테두리와 같은 신호). 학생이 없으면 종전대로 accent.
         for (pid, x, y, pw, ph) in &rects {
             let rx = PANE_INNER_X + *x as f32 * cw;
-            let ry = PANE_INNER_Y + *y as f32 * ch;
+            let ry = AUX_CELL_TOP + *y as f32 * ch;
             let (rw, rh) = (*pw as f32 * cw, *ph as f32 * ch);
             let is_focus = focus.as_deref() == Some(pid.as_str());
             let student = pane_cols.get(pid.as_str()).copied();
@@ -1669,7 +1733,7 @@ impl App {
             .find(|(pid, ..)| focus.as_deref() == Some(pid.as_str()))
         {
             let px = PANE_INNER_X + (*x as f32 + *cur_col as f32) * cw;
-            let py = PANE_INNER_Y + (*y as f32 + *cur_row as f32) * ch;
+            let py = AUX_CELL_TOP + (*y as f32 + *cur_row as f32) * ch;
             let pe = a.preedit.clone();
             if pe.is_empty() {
                 if *cur_vis && focused && blink {
@@ -2119,7 +2183,7 @@ impl App {
         }
         let hit = self.room_leaf_rects(idx).into_iter().find(|(_, x, y, w, h)| {
             let rx = PANE_INNER_X + *x as f32 * cw;
-            let ry = PANE_INNER_Y + *y as f32 * ch;
+            let ry = AUX_CELL_TOP + *y as f32 * ch;
             cx >= rx && cx < rx + *w as f32 * cw && cy >= ry && cy < ry + *h as f32 * ch
         });
         let Some((pid, ..)) = hit else { return };
@@ -2237,7 +2301,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window_handle = match create_untabbed(event_loop, attrs) {
+        let window_handle = match create_untabbed(event_loop, with_aux_chrome(attrs)) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] room window create failed: {e}");
