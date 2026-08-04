@@ -746,6 +746,9 @@ impl App {
     /// self.hangul 를 쓰되 프리에딧은 이 창의 것으로 스탬프한다.
     fn aux_editor_input(&mut self, idx: usize, event: &KeyEvent) {
         use winit::keyboard::{Key, NamedKey};
+        if crate::input::is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::AuxEditor(idx));
         #[cfg(target_os = "macos")]
         if let Some(t) = &event.text {
@@ -1154,6 +1157,9 @@ impl App {
             return;
         }
         self.last_input_at = Instant::now();
+        if crate::input::is_modifier_key(event) {
+            return;
+        }
         self.ime_retarget(crate::ImeFocus::Settings);
         // Cmd/Ctrl+W: 설정 창 닫기.
         if self.host_mod() && matches!(event.physical_key, PhysicalKey::Code(KeyCode::KeyW)) {
