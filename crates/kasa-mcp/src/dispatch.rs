@@ -595,7 +595,11 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                 let brief = compose_brief(idx, &q, &board);
                 // 이미 도는 학생에겐 인박스가 정답이다 — 입력창 주입은 상대가 타이핑
                 // 중이면 글자가 섞이고, 그 pane 이 무엇을 하던 중이든 화면을 가로챈다.
-                // 인박스는 하네스가 턴 경계에서 teammate-message 로 꺼내 준다.
+                //
+                // 유휴 pane 도 인박스를 읽는다(실측 2026-08-04: 넣고 5초 만에 드레인+
+                // 턴 시작). "유휴는 못 깨운다"는 관찰이 한 번 있었지만 그건 **다른 방에
+                // 만든 학생에게 자기 팀 이름으로 보내** 고아 인박스가 된 것이었다 —
+                // 그래서 team 은 규칙으로 짐작하지 않고 board 실측값만 쓴다.
                 let delivered = match &inbox {
                     Some(addr) => crate::team::append_message(
                         &crate::team::teams_root(),
@@ -609,7 +613,7 @@ pub fn dispatch_tick(backend: &Arc<dyn Backend>, rt: &mut DispatchRuntime) {
                         },
                     )
                     .map_err(anyhow::Error::from),
-                    // 트리플 없이 뜬 pane(비-claude·다른 방)은 인박스를 안 읽는다.
+                    // 트리플 없이 뜬 pane(비-claude·shim 밖)은 인박스를 안 읽는다.
                     None => backend.send_text(Some(&surface), &submit_payload(&brief)),
                 };
                 if let Err(e) = delivered {
