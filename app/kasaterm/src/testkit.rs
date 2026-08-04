@@ -1834,6 +1834,145 @@ impl App {
                 Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
         }
     }
+    /// Headless 드래그-tear repro: `KASATERM_AUTOTEARDRAG_MS` 뒤에 활성 pane 의 탭
+    /// 드래그를 세우고 커서를 창 **밖으로** 옮긴다 — 마우스를 놓지 않은 채 별도창이
+    /// 떨어지는지, 그 창이 커서를 따라오는지, 놓았을 때 되꽂히지 않는지까지 본다.
+    /// 상태를 손으로 세팅하지 않고 `CursorMoved`/`MouseInput` 을 그대로 `window_event`
+    /// 에 흘려보내 handler 라우팅까지 태운다(automenuclick 과 같은 이유).
+    /// autoundock 처럼 함수-로컬 static — struct App 은 건드리지 않는다.
+    /// 단계 사이에 900ms 를 두는 이유: macOS 의 `set_outer_position` 은 윈도우
+    /// 서버에 비동기로 전달돼, 같은 이벤트 루프 반복 안에서 `outer_position()` 을
+    /// 다시 읽으면 **옮기기 전 값**이 나온다("따라오지 않는다"로 오판했던 자리).
+    pub(crate) fn run_pending_autoteardrag(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        static POS1: AtomicI32 = AtomicI32::new(i32::MIN);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOTEARDRAG_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        if step > 3 || Instant::now() < *due + std::time::Duration::from_millis(900 * step as u64)
+        {
+            return;
+        }
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        let scale = self.effective_scale() as f64;
+        let moved = |app: &mut Self, x: f32, y: f32| {
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::CursorMoved {
+                    device_id: DeviceId::dummy(),
+                    position: winit::dpi::PhysicalPosition::new(
+                        x as f64 * scale,
+                        y as f64 * scale,
+                    ),
+                },
+            );
+        };
+        let dragged = self.tab_drag.as_ref().map(|d| d.pane.clone());
+        match step {
+            // 0) 메인 창을 화면보다 작게 줄인다. 창 밖 좌표가 **화면 안**이어야
+            //    별도창이 커서 자리에 그대로 놓인다 — 화면 밖을 노리면 macOS 가
+            //    두 요청을 같은 자리로 물려 "안 따라온다"로 오독된다.
+            0 => {
+                if let Some(w) = self.window.as_ref() {
+                    let _ = w.request_inner_size(winit::dpi::LogicalSize::new(900.0, 600.0));
+                }
+                STEP.store(1, Ordering::Relaxed);
+            }
+            // 1) 드래그를 세우고 커서를 창 밖으로 — 여기서 이미 뜯겨야 한다(놓기 전).
+            1 => {
+                // 뜯긴 뒤에도 메인 창에 뭐가 남아 있어야 리플로우를 볼 수 있다.
+                if self.pty_layout.as_ref().map(|t| t.leaves().len()).unwrap_or(0) < 2 {
+                    let _ = self.split_active_pane(kasa_pty::SplitDir::Horizontal);
+                }
+                let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
+                self.tab_drag = Some(TabDrag {
+                    pane: pid.clone(),
+                    from: 0,
+                    start: (120.0, 10.0),
+                    active: true,
+                    target: 0,
+                    drop_pane: pid.clone(),
+                });
+                moved(self, 1000.0, 120.0);
+                let torn = self.torn_aux_window(&pid);
+                if let Some(p) =
+                    torn.and_then(|i| self.aux_windows[i].window.outer_position().ok())
+                {
+                    POS1.store(p.y, Ordering::Relaxed);
+                }
+                eprintln!(
+                    "[autoteardrag] 1) pane={pid} win={:?} 놓기전뜯김={} 트리에남음={}",
+                    self.logical_win_size(),
+                    torn.is_some(),
+                    self.pty_layout
+                        .as_ref()
+                        .map(|t| t.leaves().iter().any(|l| *l == pid))
+                        .unwrap_or(false),
+                );
+                STEP.store(2, Ordering::Relaxed);
+            }
+            // 2) 커서를 더 내린다 — 창이 따라오는지.
+            2 => {
+                moved(self, 1000.0, 400.0);
+                STEP.store(3, Ordering::Relaxed);
+            }
+            // 3) 옮겨진 자리를 읽고 놓는다 — 되꽂히면 안 된다.
+            _ => {
+                STEP.store(4, Ordering::Relaxed);
+                let Some(pid) = dragged else {
+                    eprintln!("[autoteardrag] FAIL — 드래그 상태가 사라졌다");
+                    return;
+                };
+                let y2 = self
+                    .torn_aux_window(&pid)
+                    .and_then(|i| self.aux_windows[i].window.outer_position().ok())
+                    .map(|p| p.y);
+                let y1 = POS1.load(Ordering::Relaxed);
+                let followed = matches!(y2, Some(y) if y1 != i32::MIN && y != y1);
+                self.window_event(
+                    event_loop,
+                    wid,
+                    WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Released,
+                        button: MouseButton::Left,
+                    },
+                );
+                let still_torn = self.torn_aux_window(&pid).is_some();
+                let back_in_tree = self
+                    .pty_layout
+                    .as_ref()
+                    .map(|t| t.leaves().iter().any(|l| *l == pid))
+                    .unwrap_or(false);
+                eprintln!(
+                    "[autoteardrag] 2) 따라옴={followed}(y {y1}→{y2:?}) 3) 놓은뒤유지={still_torn} 트리복귀={back_in_tree}"
+                );
+                // 뜯긴 창이 살아 있는 셸을 계속 그리는지는 눈으로만 확인된다.
+                if let Some(cap) = std::env::var("KASATERM_AUTOTEARDRAG_CAP").ok() {
+                    if let Some(i) = self.torn_aux_window(&pid) {
+                        self.aux_windows[i].pending_capture = Some((
+                            Instant::now() + std::time::Duration::from_millis(2000),
+                            cap,
+                        ));
+                    }
+                }
+                eprintln!(
+                    "[autoteardrag] {}",
+                    if followed && still_torn && !back_in_tree { "PASS" } else { "FAIL" }
+                );
+            }
+        }
+    }
     /// Headless "+" 셸 피커 repro: `KASATERM_AUTOSHELLMENU_MS` 후 피커 팝업을 연다 —
     /// 항목(기본 셸·Claude 학생 등)을 클릭 없이 캡처. autosettings 처럼 함수-로컬
     /// static(병렬 작업 규칙: struct App 무접촉).

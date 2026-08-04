@@ -1829,9 +1829,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // `tab_drag.target`.
                 if self.tab_drag.is_some() {
                     let (px, py) = self.cursor_px;
-                    let (start, src_pane) = {
+                    let (start, src_pane, src_tab) = {
                         let d = self.tab_drag.as_ref().unwrap();
-                        (d.start, d.pane.clone())
+                        (d.start, d.pane.clone(), d.from)
                     };
                     let dx = self.cursor_px.0 - start.0;
                     let dy = self.cursor_px.1 - start.1;
@@ -1902,8 +1902,8 @@ impl ApplicationHandler<UserEvent> for App {
                         let (win_w, win_h) = self.logical_win_size();
                         let out = Self::drag_left_window(px, py, win_w, win_h);
                         let torn = out || self.torn_aux_window(&src_pane).is_some();
-                        let followed =
-                            torn && self.drag_tear_follow(&src_pane, event_loop);
+                        let followed = torn
+                            && self.drag_tear_follow(&src_pane, Some(src_tab), event_loop);
                         if !followed {
                             // 단일탭 pane 드래그면 실제 레이아웃을 라이브로 재배치
                             // (멀티탭은 탭 추출이라 update_live_drag 가 알아서 건너뜀).
@@ -1936,7 +1936,7 @@ impl ApplicationHandler<UserEvent> for App {
                             win_h,
                         );
                         let torn = out || self.torn_aux_window(&pane).is_some();
-                        let followed = torn && self.drag_tear_follow(&pane, event_loop);
+                        let followed = torn && self.drag_tear_follow(&pane, None, event_loop);
                         if !followed {
                             // 프리뷰 박스가 아니라 실제 레이아웃을 라이브로 재배치.
                             self.update_live_drag();
@@ -4990,6 +4990,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_automdscript(event_loop);
         self.run_pending_auxpopout(event_loop);
         self.run_pending_autoundock(event_loop);
+        self.run_pending_autoteardrag(event_loop);
         self.drain_aux_captures();
         // 편집기 자동 저장 — 타자가 멎은 지 설정 시간이 지난 버퍼를 쓴다.
         // 반환된 다음 만기는 아래 control flow 에 넣는다. 실측하면 이게 없어도

@@ -1702,9 +1702,11 @@ for p in glob.glob(os.path.join(d, '*.json')):
     ///
     /// 터미널 pane 만 대상이다. 파일(마크다운) 탭은 별도창 종류가 달라(`Editor`) 뜯긴
     /// 여부를 pane id 로 판별할 수 없으니 놓는 순간 처리하는 기존 경로에 남긴다.
+    /// `tab` = 잡은 탭 인덱스(헤더 드래그처럼 모르면 `None` → 활성 탭).
     pub(crate) fn drag_tear_follow(
         &mut self,
         pane: &str,
+        tab: Option<usize>,
         event_loop: &winit::event_loop::ActiveEventLoop,
     ) -> bool {
         if let Some(i) = self.torn_aux_window(pane) {
@@ -1715,18 +1717,23 @@ for p in glob.glob(os.path.join(d, '*.json')):
             }
             return true;
         }
-        let is_term = self
-            .ws
-            .lock()
-            .ok()
-            .and_then(|w| {
-                // Deref 로 활성 탭을 본다 — 멀티탭 pane 은 v1 그대로 통째로 뜯긴다.
-                w.panes
-                    .get(pane)
-                    .map(|p| matches!(p.content, PaneContent::Terminal(_)))
+        // 파일 탭이면 넘긴다. 판정은 `ws.panes` 를 보는데, 갓 split 된 pane 은 아직
+        // PaneState 가 없다(첫 출력이 만든다) — 그때 "터미널이 아니다"로 읽히면
+        // 안 되므로 없으면 false(=터미널)로 떨어지는 tab_is_file 을 그대로 쓴다.
+        let tab_idx = tab
+            .or_else(|| {
+                self.ws
+                    .lock()
+                    .ok()
+                    .and_then(|w| w.panes.get(pane).map(|p| p.active_tab))
             })
-            .unwrap_or(false);
-        if !is_term {
+            .unwrap_or(0);
+        if self.tab_is_file(pane, tab_idx) {
+            return false;
+        }
+        // PTY 없는 pane(이미지·md)은 undock 이 어차피 거절한다 — 미리 걸러 쓸데없이
+        // 라이브 백업만 날리는 일을 막는다.
+        if !self.pty.contains_key(pane) {
             return false;
         }
         // 라이브 재배치 백업을 먼저 정리한다 — 놓는 순간 뜯어내던 경로와 같은 순서.
