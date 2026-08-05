@@ -302,6 +302,22 @@ fn cell_text_log() -> Option<&'static std::sync::Mutex<Vec<String>>> {
     .as_ref()
 }
 
+/// 신고 통과 크롬 텍스트 로그를 **둘 다** 비운다 — 하네스가 "이 프레임에 그렸나"를
+/// 물으려면 필수다.
+///
+/// 비우지 않으면 `drew_text` 는 "지금까지 한 번이라도"에 답하고, 그건 **꺼진 기능도
+/// 통과시킨다**. 실제로 그랬다(2026-08-05): 인레이가 초반 프레임엔 그리다가 조건이
+/// 무너져 꺼졌는데, 남아 있던 옛 신고가 뒤 프레임 판정을 PASS 로 만들었다. 판정
+/// 직전에 이걸 부르고 → 한 프레임 그리고 → 그 프레임만 보라.
+pub fn clear_text_logs(g: &mut GpuRenderer) {
+    if let Some(log) = g.text_log.as_mut() {
+        log.clear();
+    }
+    if let Some(m) = cell_text_log() {
+        m.lock().unwrap().clear();
+    }
+}
+
 /// 인레이가 자기가 쓴 문자열을 신고한다. `drew_text` 가 이것까지 본다.
 ///
 /// 판정이 검사 대상을 그대로 믿는 게 아니냐 — 아니다. 이건 "무엇을 썼다"는 신고고,
