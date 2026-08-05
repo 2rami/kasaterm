@@ -3288,6 +3288,23 @@ impl GpuRenderer {
         Some(self.text_log.as_ref()?.iter().any(|t| t.contains(needle)))
     }
 
+    /// 셀 그리드에 **써넣은** 텍스트를 `drew_text` 가 보게 기록한다.
+    ///
+    /// `text_log` 는 크롬 텍스트 draw 경로만 채운다. 그런데 입력박스 보더의
+    /// 제목·pane 이름 인레이는 셀 스냅샷에 직접 써넣는 방식이라 그 경로를 안 타고,
+    /// 하네스가 "그려졌나"를 물을 수단이 없다. 그래서 인레이가 자기 결과를 여기
+    /// 흘려 준다.
+    ///
+    /// 판정이 검사 대상을 그대로 믿는 게 아니냐 — 아니다. 이건 "무엇을 썼다"는
+    /// 신고고, 그 신고 없이는 관문이 조용히 실패해도 화면과 구분이 안 된다.
+    /// 실제로 칩 제거 관문이 폭 조건에서 돌아서는 걸 아무 판정도 못 잡아
+    /// 거노 화면까지 갔다(2026-08-05).
+    pub fn note_cell_text(&mut self, s: &str) {
+        if let Some(log) = self.text_log.as_mut() {
+            log.push(s.to_string());
+        }
+    }
+
     /// Upload an image pane's RGBA8 pixels into a texture + bind group keyed
     /// by pane id. No-op if already present. `rgba` must be `w * h * 4` bytes.
     pub fn upload_image(&mut self, id: &str, rgba: &[u8], w: u32, h: u32) {
