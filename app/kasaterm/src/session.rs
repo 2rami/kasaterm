@@ -2532,16 +2532,25 @@ impl App {
             // pane 이 통째 죽는다(거노: %3 시로코 복원 실패 — claude 세션이 없어 board
             // 순회에서 빠졌다). 그땐 fresh claude 로 폴백해 최소한 학생 pane(캐릭터는
             // env/marker 로 유지)은 살린다 — 대화는 잃지만 pane 이 통째 죽는 것보다 낫다.
+            //
+            // 파일이 사는 곳이 하네스마다 다르다 — claude 는 `~/.claude/projects/<슬러그>/
+            // <sid>.jsonl`, codex 는 `~/.codex/sessions/<Y>/<M>/<D>/rollout-<ts>-<sid>.jsonl`.
             let resumable = session_id
                 .as_deref()
-                .and_then(socket::transcript_path_for_session)
+                .and_then(|sid| {
+                    if was_agent == Some("codex") {
+                        socket::codex_rollout_for_session(sid)
+                    } else {
+                        socket::transcript_path_for_session(sid)
+                    }
+                })
                 .map(|p| p.exists())
                 .unwrap_or(false);
             // 이어가기 실패는 무증상이었다 — 빈 세션이 학생 얼굴로 멀쩡히 떠서,
             // 대화를 잃은 줄 모른 채 계속 쓰게 된다(미도리 실측). 자리를 만들어
-            // 준 것만으로는 부족하고 잃은 것을 말해 줘야 한다. codex 는 애초에
-            // 이어가기를 시도하지 않으니(아래 함수 주석) 잃었다고 말할 것도 없다.
-            if was_agent != Some("codex") && session_id.is_some() && !resumable {
+            // 준 것만으로는 부족하고 잃은 것을 말해 줘야 한다. 하네스와 무관하게
+            // 같다 — codex 도 이제 이어가므로 잃으면 똑같이 말해야 한다.
+            if session_id.is_some() && !resumable {
                 self.collab.toast = Some((
                     format!(
                         "{} 이어갈 대화를 못 찾아 새로 시작합니다",
@@ -2858,25 +2867,28 @@ fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
         .then_some("claude")
 }
 
-/// 복원된 pane 에 넣을 명령. 세 갈래(codex · claude 이어가기 · fresh claude)라 순수
+/// 복원된 pane 에 넣을 명령. 네 갈래(codex 이어가기/새로 · claude 이어가기/새로)라 순수
 /// 함수로 뺐다 — `restore_leaf` 는 살아있는 PTY 없이 못 부르고, 그러면 이 분기를
 /// 테스트할 방법이 사라진다.
 ///
-/// **codex 는 언제나 새로 띄운다.** 세션 id 를 argv 에 안 남겨 `pane_record` 가 못
-/// 집고(실측), `codex resume --last` 는 `CODEX_HOME/sessions` 전체에서 최신 하나를
-/// 고르는데 그 디렉터리는 shim 이 `~/.codex` 로 미러해 **다른 pane·pane 밖 codex 의
-/// 대화**까지 후보다 — 남의 대화로 되살아나느니 빈 codex 가 낫다. per-pane 이어가기는
-/// rollout 파일명의 sid 를 집어야 하고, 그건 transcript 파싱이 codex 를 이해한 뒤 일이다.
+/// codex 도 이어간다. 셋을 실측으로 확인했다(2026-08-05):
+/// - `codex resume <uuid>` 는 **pane 홈이 사라져도** 대화를 되살린다. shim 이 세운
+///   pane 별 CODEX_HOME 은 GUI pid 별이라 재시작이면 통째로 없어지는데, `sessions` 가
+///   `~/.codex/sessions` 심볼릭이라 실체가 남고 codex 가 거기서 찾아낸다(홈을 치우고
+///   다른 pane 홈에서 resume 해 첫 질문까지 그대로 복원되는 것을 확인).
+/// - 세션 id 는 `pane_claude_sid`(bind-transcript 훅)로 들어온다 — rollout 파일명에서
+///   uuid 를 떼어낸 값이다. argv 로는 못 집는다.
+/// - `resume --last` 는 쓰지 않는다. 그건 미러된 `~/.codex/sessions` 전체에서 최신 하나를
+///   고르므로 **다른 pane·pane 밖 codex 의 대화**를 물어온다. id 가 없으면 새로 띄운다.
 pub(crate) fn restore_agent_command(
     agent: Option<&str>,
     session_id: Option<&str>,
     resumable: bool,
 ) -> String {
-    if agent == Some("codex") {
-        return "codex\r".to_string();
-    }
-    match session_id {
-        Some(sid) if resumable => format!("claude --resume {sid}\r"),
+    match (agent, session_id) {
+        (Some("codex"), Some(sid)) if resumable => format!("codex resume {sid}\r"),
+        (Some("codex"), _) => "codex\r".to_string(),
+        (_, Some(sid)) if resumable => format!("claude --resume {sid}\r"),
         _ => "claude\r".to_string(),
     }
 }

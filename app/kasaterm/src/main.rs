@@ -7188,9 +7188,13 @@ mod tests {
     fn restore_command_picks_the_harness_it_was() {
         use crate::session::restore_agent_command as cmd;
         assert_eq!(cmd(Some("codex"), None, false), "codex\r");
-        // 옛 저장본이 sid 를 달고 있어도 codex 는 이어가지 않는다 — `resume --last` 가
-        // ~/.codex 미러 전체에서 고르므로 남의 대화를 물어온다.
-        assert_eq!(cmd(Some("codex"), Some("abcd-1234"), true), "codex\r");
+        assert_eq!(
+            cmd(Some("codex"), Some("019fd187-ba6e-7812-8976-2a27ffcd843e"), true),
+            "codex resume 019fd187-ba6e-7812-8976-2a27ffcd843e\r"
+        );
+        // rollout 이 사라졌으면 새로 — `resume --last` 로 흘리지 않는다(미러된
+        // ~/.codex/sessions 전체에서 골라 남의 대화를 물어온다).
+        assert_eq!(cmd(Some("codex"), Some("019fd187-ba6e"), false), "codex\r");
         assert_eq!(
             cmd(Some("claude"), Some("abcd-1234"), true),
             "claude --resume abcd-1234\r"
