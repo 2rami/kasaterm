@@ -97,11 +97,166 @@ fn turn_cost(model: &str, ti: u64, to: u64, cr: u64, cc: u64) -> f64 {
     (ti as f64 * pin + to as f64 * pout + cr as f64 * pcr + cc as f64 * pcc) / 1_000_000.0
 }
 
+/// codex 롤아웃 로그인가 — 한 줄이라도 `{timestamp,type,payload}` 꼴이면.
+///
+/// 포맷을 **내용으로** 가른다. 호출부(`socket.rs`)에 종류를 실어 보내는 게 깔끔하지만
+/// 그 파일은 지금 다른 작업이 잡고 있고, 무엇보다 tail 만 보고도 확실히 갈린다 —
+/// claude jsonl 은 `payload` 키가 없고 codex 는 모든 줄에 있다(실측 2026-08-05).
+fn looks_like_codex(tail: &str) -> bool {
+    tail.lines().filter(|l| !l.trim().is_empty()).take(40).any(|l| {
+        serde_json::from_str::<serde_json::Value>(l).is_ok_and(|v| {
+            v.get("payload").is_some_and(|p| p.is_object())
+                && v.get("timestamp").is_some()
+                && v.get("type").and_then(|t| t.as_str()).is_some_and(|t| {
+                    matches!(
+                        t,
+                        "event_msg" | "response_item" | "turn_context" | "session_meta"
+                    )
+                })
+        })
+    })
+}
+
+/// codex 롤아웃 로그(`~/.codex/sessions/**/rollout-*.jsonl`) → board 한 줄.
+///
+/// 스키마는 거노 머신에서 직접 재서 매핑했다(2026-08-05):
+/// - `session_meta` → `cwd` (여기 `context_window` 는 숫자가 아니라 `{window_id}` 다)
+/// - `turn_context` → `model`(턴마다 실려 최신이 이긴다)
+/// - `event_msg/token_count` → `info.total_token_usage{input,cached_input,cache_write,output}`
+///   + `info.model_context_window`(실측 258400) — 창 크기의 유일한 실값
+/// - `event_msg/user_message` → 마지막 프롬프트, `event_msg/agent_message` → 마지막 응답
+///
+/// **비용은 0 으로 둔다.** 로그에 단가도 금액도 없다. claude 쪽 `turn_cost` 처럼
+/// 단가표를 지어 넣으면 board 에 *틀린 숫자*가 뜬다 — 빈칸이 거짓 금액보다 낫다.
+/// 대신 codex 는 `rate_limits.used_percent`/`plan_type` 을 주는데, 구독제라 그쪽이
+/// 실제로 알고 싶은 값이다. 담을 칸이 생기면 그때 싣는다.
+fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
+    let mut model = String::new();
+    let mut cwd = String::new();
+    let mut last_prompt = String::new();
+    let mut last_reply = String::new();
+    let (mut ti, mut to, mut cr, mut cc) = (0u64, 0u64, 0u64, 0u64);
+    let mut observed_ctx = 0u64;
+    let mut ctx_window = 0u64;
+    // 역순 — 채움 필드는 "처음 만나는(=최신)" 것이 이긴다(claude 경로와 같은 규칙).
+    for line in tail.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Some(p) = v.get("payload").and_then(|p| p.as_object()) else { continue };
+        let kind = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let sub = p.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let get_str = |o: &serde_json::Map<String, serde_json::Value>, k: &str| {
+            o.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
+        };
+        match (kind, sub) {
+            ("turn_context", _) if model.is_empty() => model = get_str(p, "model"),
+            ("session_meta", _) => {
+                if cwd.is_empty() {
+                    cwd = get_str(p, "cwd");
+                }
+                // ⚠️ `session_meta.context_window` 는 **숫자가 아니다** — `{window_id: …}`
+                // 객체다(실측). 여기서 창 크기를 읽으려 하면 늘 0 이 된다. 진짜 값은
+                // `token_count.info.model_context_window`(실측 258400).
+            }
+            ("event_msg", "user_message") if last_prompt.is_empty() => {
+                last_prompt = get_str(p, "message");
+            }
+            ("event_msg", "agent_message") if last_reply.is_empty() => {
+                last_reply = get_str(p, "message");
+            }
+            ("event_msg", "token_count") => {
+                let Some(info) = p.get("info").and_then(|i| i.as_object()) else { continue };
+                if ctx_window == 0 {
+                    ctx_window = info
+                        .get("model_context_window")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0);
+                }
+                // 누적 합은 codex 가 **이미** total 로 준다 — 우리가 더하면 이중 계산이다.
+                // 그래서 최신 total 한 번만 쓴다(claude 는 턴별이라 합산이 맞지만 여기선 아니다).
+                if ti == 0 && to == 0 {
+                    if let Some(t) = info.get("total_token_usage").and_then(|x| x.as_object()) {
+                        let n = |k: &str| t.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                        // ⚠️ codex 의 `input_tokens` 는 **캐시된 것을 이미 포함**한다
+                        // (실측: total_tokens = input + output, cached 를 안 더한다).
+                        // board 의 in/cache_read 는 claude 규약(둘을 더하면 총 입력)이라
+                        // 캐시분을 빼서 맞춘다 — 안 그러면 입력이 이중 계산된다.
+                        cr = n("cached_input_tokens");
+                        ti = n("input_tokens").saturating_sub(cr);
+                        to = n("output_tokens");
+                        cc = n("cache_write_input_tokens");
+                    }
+                }
+                // 컨텍스트 점유 = **마지막 요청**이 끌어온 크기(claude 경로와 같은 정의).
+                if observed_ctx == 0 {
+                    if let Some(l) = info.get("last_token_usage").and_then(|x| x.as_object()) {
+                        // `input_tokens` 하나가 곧 그 요청이 끌어온 컨텍스트다. 캐시분을
+                        // 더하면 두 배 가까이 부풀어 board 가 "곧 터진다"고 거짓말한다.
+                        observed_ctx = l.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let context_limit = if ctx_window > 0 {
+        ctx_window
+    } else {
+        context_limit_for(&model, observed_ctx)
+    };
+    // u8 이라 100 을 넘기면 감긴다 — codex 는 compact 전에 한도를 살짝 넘길 수 있어
+    // 상한을 건다(0% 로 보이는 것보다 100% 가 맞다).
+    let context_pct = if context_limit > 0 {
+        (((observed_ctx as f64 / context_limit as f64) * 100.0).round() as u64).min(100) as u8
+    } else {
+        0
+    };
+    PaneActivity {
+        surface_id: surface_id.to_string(),
+        title: String::new(),
+        last_prompt,
+        last_reply,
+        intent: "active".into(),
+        status: if idle { "idle".into() } else { "working".into() },
+        files: Vec::new(),
+        screen: None,
+        character: None,
+        agent_name: None,
+        team: None,
+        waiting_for: None,
+        tokens_in: ti,
+        tokens_out: to,
+        cache_read: cr,
+        cache_creation: cc,
+        cost_usd: 0.0,
+        tool_counts: Vec::new(),
+        changed_files: Vec::new(),
+        subagents: Vec::new(),
+        subagents_done: Vec::new(),
+        background: Vec::new(),
+        recent_tools: Vec::new(),
+        model,
+        context_limit,
+        context_pct,
+        context_tokens: observed_ctx,
+        cwd,
+        view_cwd: String::new(),
+        effort_default: String::new(),
+        branch: None,
+        window_idx: 0,
+    }
+}
+
 /// transcript의 **마지막 부분**(socket.rs가 tail 64KB를 잘라 넘김)을 역순으로
 /// 1패스 훑어 board 한 줄을 만든다. 각 필드는 **처음 만나는(=최신)** 값에서
 /// 채우고, 다 차면 조기 종료한다. `idle`(파일 mtime 기준)은 socket.rs가 판정해
 /// 넘긴다 — transcript 자체엔 "막힘/대기" 신호가 없다.
+///
+/// codex 롤아웃 로그면 `codex_snapshot` 으로 넘긴다 — 스키마가 통째로 달라
+/// 같은 루프에서 갈래를 치면 두 포맷이 서로를 오염시킨다.
 pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
+    if looks_like_codex(tail) {
+        return codex_snapshot(surface_id, tail, idle);
+    }
     let mut title = String::new();
     let mut last_prompt = String::new();
     let mut last_reply = String::new();
@@ -559,5 +714,67 @@ mod tests {
         // sonnet 단가: (300*3 + 130*15 + 10*0.3 + 20*3.75) / 1e6
         let expect = (300.0 * 3.0 + 130.0 * 15.0 + 10.0 * 0.3 + 20.0 * 3.75) / 1_000_000.0;
         assert!((a.cost_usd - expect).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    /// 거노 머신 실물 로그(2026-08-05, gpt-5.5)에서 뽑은 값 그대로. 스키마 매핑이
+    /// 조용히 되돌아가면 board 가 **거짓 숫자**를 내므로 실값으로 못박는다.
+    fn sample() -> String {
+        [
+            r#"{"timestamp":"t","type":"session_meta","payload":{"cwd":"/repo","context_window":{"window_id":"w1"},"session_id":"s1"}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5","effort":"high","cwd":"/repo"}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"user_message","message":"이거 해줘"}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"agent_message","message":"했습니다"}}"#,
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":37822,"cached_input_tokens":22272,"cache_write_input_tokens":0,"output_tokens":1375,"total_tokens":39197},"last_token_usage":{"input_tokens":19055,"cached_input_tokens":17792,"output_tokens":1046,"total_tokens":20101},"model_context_window":258400}}}"#,
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn codex_로그를_claude_파서로_보내지_않는다() {
+        assert!(looks_like_codex(&sample()));
+        // 음성 대조군 — claude jsonl 은 payload 가 없다.
+        assert!(!looks_like_codex(
+            r#"{"type":"assistant","message":{"content":[]}}"#
+        ));
+    }
+
+    #[test]
+    fn 모델과_cwd_를_뽑는다() {
+        let a = snapshot_from_tail("%1", &sample(), false);
+        assert_eq!(a.model, "gpt-5.5");
+        assert_eq!(a.cwd, "/repo");
+        assert_eq!(a.last_prompt, "이거 해줘");
+        assert_eq!(a.last_reply, "했습니다");
+    }
+
+    #[test]
+    fn 입력토큰에서_캐시분을_뺀다() {
+        // codex 의 input_tokens 는 cached 를 **포함**한다(total = input + output 으로 확인).
+        // board 규약은 in + cache_read = 총 입력이라, 안 빼면 입력이 이중 계산된다.
+        let a = snapshot_from_tail("%1", &sample(), false);
+        assert_eq!(a.cache_read, 22272);
+        assert_eq!(a.tokens_in, 37822 - 22272);
+        assert_eq!(a.tokens_in + a.cache_read, 37822, "합이 원본 input 이어야 한다");
+        assert_eq!(a.tokens_out, 1375);
+    }
+
+    #[test]
+    fn 컨텍스트는_마지막_요청의_input_하나다() {
+        // 캐시분을 더하면 36847 로 부풀어 board 가 "곧 터진다"고 거짓말한다.
+        let a = snapshot_from_tail("%1", &sample(), false);
+        assert_eq!(a.context_tokens, 19055);
+        assert_eq!(a.context_limit, 258400, "창 크기는 token_count 쪽 실값");
+        assert_eq!(a.context_pct, 7);
+    }
+
+    #[test]
+    fn 비용은_지어내지_않는다() {
+        // 로그에 단가도 금액도 없다 — 빈칸이 거짓 금액보다 낫다.
+        assert_eq!(snapshot_from_tail("%1", &sample(), false).cost_usd, 0.0);
     }
 }
