@@ -153,6 +153,17 @@ pub fn session_summary_for(path: &Path) -> Option<String> {
     parse_session_label(path, false)
 }
 
+/// `/rename` 으로 붙인 이름 **하나만** — 없으면 None. 입력박스 **우측** 인레이 전용.
+///
+/// `session_label_for` 의 폴백 사슬(custom-title > aiTitle > 첫 user)을 안 쓰는 게
+/// 핵심이다. 폴백을 쓰면 rename 하지 않은 pane 의 우측에 aiTitle 이 뜨는데, 좌측
+/// 요약이 이미 그걸 보여 주고 있어 같은 이름이 한 줄에 두 번 선다 — 좌우를 나눈
+/// 이유가 사라진다(거노 2026-07-30: "리네임하면 좌측은 세션이름요약, 우측칩은
+/// 리네임한 이름"). 리네임 안 했으면 우측은 비는 게 맞다.
+pub fn session_rename_for(path: &Path) -> Option<String> {
+    last_custom_title(path)
+}
+
 /// jsonl 꼬리에서 가장 마지막 `custom-title` 레코드의 제목. 여러 번 rename 하면
 /// 마지막 것이 이긴다(claude `/rename` 동일 규칙). 에이전트 세션은 한 턴에 툴
 /// 결과가 수백 KB 씩 append 돼 마지막 스탬프가 금세 꼬리 64KB 밖으로 밀린다

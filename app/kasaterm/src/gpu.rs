@@ -283,6 +283,44 @@ pub struct DrawOpts {
     pub italic: bool,
 }
 
+/// 셀 스냅샷에 **써넣은** 인레이 텍스트를 담는 통 — `KASATERM_TEXT_LOG` 가 있을 때만.
+///
+/// `text_log` 는 크롬 텍스트 draw 경로만 채운다. 입력박스 보더의 제목·pane 이름
+/// 인레이는 셀에 직접 써넣어 그 경로를 안 타므로, 하네스가 "그 자리에 무엇이
+/// 그려졌나"를 물을 수단이 없었다. 그 공백의 대가를 실제로 치렀다 — 칩 제거 관문이
+/// 폭 조건에서 조용히 돌아서는 걸 아무 판정도 못 잡아 거노 화면까지 갔다(2026-08-05).
+///
+/// 메서드가 아니라 자유 함수인 이유: 슬롯 조립(`inlay_prompt_box_*`)은 `g` 를 만들기
+/// **전에** 돌아서 `&mut GpuRenderer` 가 없다. 거기서 `self.gpu` 를 다시 빌리면
+/// borrow 가 충돌한다.
+fn cell_text_log() -> Option<&'static std::sync::Mutex<Vec<String>>> {
+    static ON: std::sync::OnceLock<Option<std::sync::Mutex<Vec<String>>>> =
+        std::sync::OnceLock::new();
+    ON.get_or_init(|| {
+        std::env::var_os("KASATERM_TEXT_LOG").map(|_| std::sync::Mutex::new(Vec::new()))
+    })
+    .as_ref()
+}
+
+/// 인레이가 자기가 쓴 문자열을 신고한다. `drew_text` 가 이것까지 본다.
+///
+/// 판정이 검사 대상을 그대로 믿는 게 아니냐 — 아니다. 이건 "무엇을 썼다"는 신고고,
+/// 신고가 없으면 관문이 실패해도 성공과 화면상 구분이 안 된다. 대신 **부분 문자열을
+/// 넘겨라** — 타이프라이터가 한 글자씩 드러내는 중이면 그 프레임에 실제 들어간
+/// 만큼만. 완성형을 넘기면 아직 안 그려진 글자까지 그려졌다고 신고하게 된다.
+///
+/// `text_log` 와 같이 **프레임마다 비우지 않고 누적**한다(기존 동작과 일치). 그래서
+/// `drew_text` 는 "이 프레임에"가 아니라 "지금까지 한 번이라도"에 답한다 — 켰다 끈
+/// 기능을 판정할 땐 이 성질을 감안해야 한다.
+pub fn stage_cell_text(s: &str) {
+    if s.is_empty() {
+        return;
+    }
+    if let Some(m) = cell_text_log() {
+        m.lock().unwrap().push(s.to_string());
+    }
+}
+
 impl GpuRenderer {
     pub fn new(window: Arc<Window>, font_size_logical: f32) -> Result<Self> {
         let scale = window.scale_factor() as f32;
@@ -3285,24 +3323,27 @@ impl GpuRenderer {
     /// 를 안 켜면 항상 `None` — "안 그려졌다"와 "안 재고 있다"를 섞지 않기 위해
     /// bool 이 아니라 `Option` 이다.
     pub fn drew_text(&self, needle: &str) -> Option<bool> {
-        Some(self.text_log.as_ref()?.iter().any(|t| t.contains(needle)))
+        let log = self.text_log.as_ref()?;
+        Some(log.iter().any(|t| t.contains(needle)) || Self::staged_cell_text(needle))
     }
 
-    /// 셀 그리드에 **써넣은** 텍스트를 `drew_text` 가 보게 기록한다.
-    ///
-    /// `text_log` 는 크롬 텍스트 draw 경로만 채운다. 그런데 입력박스 보더의
-    /// 제목·pane 이름 인레이는 셀 스냅샷에 직접 써넣는 방식이라 그 경로를 안 타고,
-    /// 하네스가 "그려졌나"를 물을 수단이 없다. 그래서 인레이가 자기 결과를 여기
-    /// 흘려 준다.
-    ///
-    /// 판정이 검사 대상을 그대로 믿는 게 아니냐 — 아니다. 이건 "무엇을 썼다"는
-    /// 신고고, 그 신고 없이는 관문이 조용히 실패해도 화면과 구분이 안 된다.
-    /// 실제로 칩 제거 관문이 폭 조건에서 돌아서는 걸 아무 판정도 못 잡아
-    /// 거노 화면까지 갔다(2026-08-05).
-    pub fn note_cell_text(&mut self, s: &str) {
-        if let Some(log) = self.text_log.as_mut() {
-            log.push(s.to_string());
-        }
+    /// `drew_text` 가 셀 인레이까지 보게 하는 두 번째 통. `stage_cell_text` 참고.
+    fn staged_cell_text(needle: &str) -> bool {
+        cell_text_log()
+            .map(|m| m.lock().unwrap().iter().any(|t| t.contains(needle)))
+            .unwrap_or(false)
+    }
+
+    /// 입력박스 보더 인레이가 신고한 마지막 자리 `(좌측 끝, 우측 시작, 우측 끝)`.
+    /// 좌측이 없으면 -1. 좌우가 **겹쳤는지**를 재려면 이게 필요하다 — "그렸다"는
+    /// 신고만으로는 같은 칸에 겹쳐 써도 통과한다.
+    pub fn staged_span(&self) -> Option<(i64, usize, usize)> {
+        let m = cell_text_log()?;
+        let log = m.lock().unwrap();
+        let line = log.iter().rev().find(|t| t.starts_with("[boxspan] "))?;
+        let (l, r) = line.strip_prefix("[boxspan] L=")?.split_once(" R=")?;
+        let (c0, c1) = r.split_once('-')?;
+        Some((l.parse().ok()?, c0.parse().ok()?, c1.parse().ok()?))
     }
 
     /// Upload an image pane's RGBA8 pixels into a texture + bind group keyed

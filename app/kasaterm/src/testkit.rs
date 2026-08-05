@@ -2300,9 +2300,13 @@ impl App {
             //
             //   (빈 행)                  ← 앵커. 비어 있어야 한다(내용이 0열부터
             //                              시작하면 left_c 가 음수가 되어 None)
-            //   ──── 대시보드 ────       ← 윗 테두리. 짧은 텍스트 섬을 일부러 넣어
+            //   ────…──── 대시보드 ──    ← 윗 테두리. 텍스트 섬을 일부러 넣어
             //                              max_label 24 분기까지 태운다(세션명이
-            //                              박히면 standing 이 사라졌던 거노 실사고)
+            //                              박히면 standing 이 사라졌던 거노 실사고).
+            //                              **라벨은 오른쪽 끝**에 둔다 — 실제 claude 가
+            //                              그 모양이고, 왼쪽 대시 run 이 짧으면 좌측
+            //                              제목 인레이가 폭 부족으로 포기한다(4칸으로
+            //                              뒀다가 `autoboxlabel` 이 좌측을 못 봤다)
             //   ❯                        ← 입력 영역
             //   ──────────────           ← 아래 테두리(순수 '─')
             //   FFFC×4 ctx 42%           ← statusline = face_row
@@ -2312,7 +2316,7 @@ impl App {
                 "printf 'fn main(){std::thread::sleep(std::time::Duration::from_secs(600));}' > \"$d/c.rs\"; ",
                 "rustc -o \"$d/claude\" \"$d/c.rs\" >/dev/null 2>&1; }; ",
                 "R(){ printf \"\\342\\224\\200%.0s\" $(seq 1 \"$1\"); }; ",
-                "echo; R 4; printf ' 대시보드 '; R 20; echo; ",
+                "echo; R 40; printf ' 대시보드 '; R 2; echo; ",
                 "printf \"\\342\\235\\257 \\n\"; ",
                 "R 60; echo; ",
                 "printf \"\\357\\277\\274\\357\\277\\274\\357\\277\\274\\357\\277\\274 ctx 42%% \\n\"; ",
@@ -2377,6 +2381,138 @@ impl App {
         self.render_frame();
         self.autostudent_assert_standing(&pid);
     }
+    /// 입력박스 보더의 좌=대화요약 / 우=pane 이름(`/rename`)이 **각자 제자리에**
+    /// 그려졌는지: `KASATERM_AUTOBOXLABEL_MS`.
+    ///
+    /// `KASATERM_AUTOSTUDENT_MS` 와 함께 켜라 — 입력박스를 찍는 건 그쪽 가짜 claude 다.
+    /// `KASATERM_TEXT_LOG` 도 필요하다(신고 통이 그 env 로 열린다).
+    ///
+    /// 이름의 정본은 transcript jsonl 이라 헤드리스엔 없다. 그래서 **가짜 jsonl 을
+    /// 심는다** — 진짜 claude 를 띄우는 대신, 판정 대상(`pane_rename_label` →
+    /// `session_rename_for`)이 손대지 않은 채로 참이 되게. 프로젝트 디렉터리는
+    /// `/tmp/...` 로 슬러그가 나게 골라 거노 실제 프로젝트 폴더를 안 건드린다.
+    ///
+    /// 판정 셋: ①좌측 요약 ②우측 이름 ③**겹치지 않았나**. ③이 없으면 좌우가 한
+    /// 낱말로 붙어 읽히는 실제 버그를 통과시킨다 — 신고는 "썼다"만 말하기 때문이다.
+    /// 음성 대조군으로 심지 않은 문자열을 하나 물어 판정이 항상-PASS 가 아님을 보인다.
+    pub(crate) fn run_pending_autoboxlabel(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            let ms = std::env::var("KASATERM_AUTOBOXLABEL_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())?;
+            Some(Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        // 두 단계인 이유: 좌측 제목은 타이프라이터라 **시간이 지나야** 다 드러난다
+        // (`title_typewriter_frame` 이 elapsed/글자당ms). 심은 직후 한 프레임만 그리고
+        // 판정하면 좌측은 커서 '▍' 하나뿐이라 "안 그렸다"로 읽힌다 — 실측으로 한 번
+        // 그렇게 FAIL 을 냈다. 1단계에서 심고, 2단계에서 다 드러난 뒤 잰다.
+        let step = STEP.load(Ordering::Relaxed);
+        const AT_MS: [u64; 2] = [0, 1200];
+        let Some(&off) = AT_MS.get(step as usize) else { return };
+        if Instant::now() < *due + std::time::Duration::from_millis(off) {
+            return;
+        }
+        STEP.store(step + 1, Ordering::Relaxed);
+        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
+        if step == 1 {
+            // **판정한 그 프레임**을 찍는다(`_CAP`). 별도 시각에 찍으면 타이프라이터
+            // 때문에 픽셀과 판정이 어긋나 "숫자는 PASS 인데 화면엔 없다"가 된다 —
+            // 실측으로 한 번 그렇게 봤다.
+            self.chrome_dirty = true;
+            if let Ok(path) = std::env::var("KASATERM_AUTOBOXLABEL_CAP") {
+                if let Some(g) = self.gpu.as_mut() {
+                    g.capture_next = Some(path);
+                }
+            }
+            self.render_frame();
+            self.autoboxlabel_judge();
+            return;
+        }
+
+        const SUMMARY: &str = "테스트요약";
+        const RENAME: &str = "지어준이름";
+        let cwd = std::path::PathBuf::from("/tmp/kasaterm-boxlabel");
+        let sid = "boxlabel-probe";
+        let _ = std::fs::create_dir_all(&cwd);
+        let Some(jsonl) = crate::socket::project_jsonl(&cwd, sid) else {
+            eprintln!("[autoboxlabel] FAIL — project_jsonl 이 경로를 못 만든다");
+            return;
+        };
+        if let Some(dir) = jsonl.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // 좌측 요약은 **`type:"ai-title"`** 레코드에서 온다 — `"summary"` 로 적었다가
+        // 좌측이 안 뜨는 FAIL 을 한 번 봤다(파서가 타입으로 갈라 받는다).
+        // 우측 이름은 `custom-title`.
+        let body = format!(
+            "{{\"type\":\"ai-title\",\"aiTitle\":\"{SUMMARY}\"}}\n\
+             {{\"type\":\"custom-title\",\"customTitle\":\"{RENAME}\",\
+             \"sessionId\":\"{sid}\",\"nameSource\":\"user\"}}\n"
+        );
+        if let Err(e) = std::fs::write(&jsonl, body) {
+            eprintln!("[autoboxlabel] FAIL — 가짜 jsonl 을 못 썼다: {e}");
+            return;
+        }
+        self.pane_cwd_cache.insert(pid.clone(), cwd);
+        self.pane_claude_sid.insert(pid.clone(), sid.to_string());
+        // 여기서 한 번 그려 타이프라이터 시계를 출발시킨다. 판정은 2단계.
+        self.chrome_dirty = true;
+        self.render_frame();
+        eprintln!("[autoboxlabel] pane={pid} 가짜 jsonl 심었다 — 타이핑 기다리는 중");
+    }
+
+    /// `autoboxlabel` 2단계 판정. 1단계와 나눈 이유는 그쪽 주석에.
+    fn autoboxlabel_judge(&mut self) {
+        const SUMMARY: &str = "테스트요약";
+        const RENAME: &str = "지어준이름";
+        const NEVER: &str = "심지않은문자열";
+        let Some(g) = self.gpu.as_ref() else {
+            eprintln!("[autoboxlabel] 미측정 — gpu 렌더러가 아니다");
+            return;
+        };
+        let (left, right, never) =
+            (g.drew_text(SUMMARY), g.drew_text(RENAME), g.drew_text(NEVER));
+        if left.is_none() {
+            eprintln!("[autoboxlabel] 미측정 — KASATERM_TEXT_LOG 를 켜라");
+            return;
+        }
+        eprintln!(
+            "[autoboxlabel] 좌측 요약 {} / 우측 이름 {} / 대조군 {}",
+            if left == Some(true) { "그림" } else { "안 그림" },
+            if right == Some(true) { "그림" } else { "안 그림" },
+            if never == Some(true) { "그림(오염!)" } else { "안 그림" },
+        );
+        let span = g.staged_span();
+        match (left, right, never) {
+            (_, _, Some(true)) => eprintln!(
+                "[autoboxlabel] FAIL — 심지도 않은 문자열이 그려졌다고 나온다(신고 통이 오염됐다)"
+            ),
+            (Some(true), Some(true), _) => match span {
+                Some((l, c0, _)) if l >= 0 && (c0 as i64) <= l => eprintln!(
+                    "[autoboxlabel] FAIL — 좌측이 {l} 열까지 쓰는데 우측이 {c0} 열에서 시작한다(겹침)"
+                ),
+                Some((l, c0, c1)) => eprintln!(
+                    "[autoboxlabel] PASS — 좌 …{l} / 우 {c0}-{c1}, 겹치지 않는다"
+                ),
+                None => eprintln!("[autoboxlabel] FAIL — 자리 신고가 없다(우측 인레이가 안 불렸다)"),
+            },
+            (Some(true), _, _) => eprintln!(
+                "[autoboxlabel] FAIL — 좌측만 그렸다. 우측은 `session_rename_for` 가 \
+                 custom-title 을 못 찾거나 폭이 모자라 포기한 것이다"
+            ),
+            (_, Some(true), _) => eprintln!("[autoboxlabel] FAIL — 우측만 그렸다(좌측 요약이 죽었다)"),
+            _ => eprintln!(
+                "[autoboxlabel] FAIL — 둘 다 안 그렸다. 입력박스를 못 찾은 쪽이 크다 \
+                 — AUTOSTUDENT 로 가짜 박스를 먼저 찍고 이 하네스를 그 뒤에 둬라"
+            ),
+        }
+    }
+
     /// 프사와 별개로 **전신이 입력박스 위에 섰는지**.
     ///
     /// 프사(`:profile`)는 statusline 한 줄만 있으면 뜨는데 standing 은 앵커가 더

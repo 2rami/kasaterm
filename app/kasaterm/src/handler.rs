@@ -5046,6 +5046,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoteardrag(event_loop);
         self.run_pending_autotearroom(event_loop);
         self.run_pending_autostudent(event_loop);
+        self.run_pending_autoboxlabel();
         self.run_pending_autoroomsplit();
         self.run_pending_autofacehover(event_loop);
         self.run_pending_autotreeclick(event_loop);
