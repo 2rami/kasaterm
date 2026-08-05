@@ -10064,6 +10064,40 @@ mod teammate_msg_tests {
 mod student_asset_tests {
     use super::*;
 
+    /// 번들 내장 프레임이 **모든 학생 × 모든 모션**에서 실제로 디코딩되는지.
+    ///
+    /// `student_sprite_frames` 는 프레임 크기가 하나라도 다르거나 PNG 하나가
+    /// 안 풀리면 그 모션을 통째로 `None` 으로 돌려주고, 호출측은 업로드를 건너뛴
+    /// 뒤 없는 키로 `queue_image_above` 를 부른다 — **아무것도 안 그려지고 에러도
+    /// 없다**. 그래서 "프사(정적 로더)는 뜨는데 애니만 안 뜬다" 가 되면 원인을
+    /// 밖에서 가릴 수 없다(2026-08-05 거노 신고 추적에 하루가 들었다).
+    #[test]
+    fn bundled_sprite_frames_decode_for_every_student_and_motion() {
+        let mut checked = 0;
+        for (_, slug) in crate::theme::CHARACTER_SLUGS {
+            for motion in ["idle", "wave", "cheer", "walk"] {
+                let frames = student_sprite_frames(slug, motion)
+                    .unwrap_or_else(|| panic!("{slug}/{motion}: 프레임이 None — 애니가 통째로 안 그려진다"));
+                let want = if motion == "walk" {
+                    STUDENT_WALK_FRAMES
+                } else {
+                    STUDENT_IDLE_FRAMES
+                };
+                assert_eq!(frames.len(), want, "{slug}/{motion}: 프레임 수");
+                for (i, (rgba, w, h)) in frames.iter().enumerate() {
+                    assert!(*w > 0 && *h > 0, "{slug}/{motion}[{i}]: 0 크기");
+                    assert_eq!(
+                        rgba.len(),
+                        (*w as usize) * (*h as usize) * 4,
+                        "{slug}/{motion}[{i}]: RGBA 길이가 w*h*4 와 안 맞는다"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked >= 4, "모션을 하나도 못 셌다 — 로스터가 비었나");
+    }
+
     // 사용자 override 파일이 없으면 None → 호출측이 번들 include_bytes 로 폴백.
     #[test]
     fn user_asset_missing_falls_back() {
