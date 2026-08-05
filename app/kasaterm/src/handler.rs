@@ -5004,6 +5004,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autotearroom(event_loop);
         self.run_pending_autostudent(event_loop);
         self.run_pending_autoroomsplit();
+        self.run_pending_autofacehover();
         self.drain_aux_captures();
         // 편집기 자동 저장 — 타자가 멎은 지 설정 시간이 지난 버퍼를 쓴다.
         // 반환된 다음 만기는 아래 control flow 에 넣는다. 실측하면 이게 없어도

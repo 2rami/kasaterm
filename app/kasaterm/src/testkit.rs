@@ -2513,6 +2513,99 @@ impl App {
             }
         }
     }
+    /// Headless 별도창 **프사 마우스오버 확대** repro: `KASATERM_AUTOFACEHOVER_MS`
+    /// (+`_CAP`). `KASATERM_AUTOSTUDENT_ROOM` 이 꺼내 둔 창을 쓴다.
+    ///
+    /// 판정을 **키 이름으로 못 한다**: 팝업(`paint_face_popup`)이 작은 프사와 같은
+    /// `student:<slug>:profile` 을 크기만 키워 재사용한다. 헤더 이름도 못 쓴다 —
+    /// 별도창 헤더는 커서와 무관하게 늘 학생 이름을 싣는다. 그래서 **같은 키의
+    /// quad 가 하나 더, 훨씬 크게 붙었나**로 본다(팝업은 `8.0 * cell_h`).
+    ///
+    /// 프사 자리는 렌더에서 **되읽는다**. `cell_left()`·`AUX_CELL_TOP` 은 auxwin
+    /// private 이라 하네스가 좌표를 다시 계산해야 하는데, 그 복제본이 틀리면
+    /// 커서가 엉뚱한 데 놓여 「팝업 안 뜸」으로 읽힌다 — 검사 대상이 아니라
+    /// 하네스가 틀린 건데 구분이 안 된다.
+    ///
+    /// 커서를 프사 **밖**에 둔 대조 프레임을 같은 실행에서 먼저 찍는다. 그게
+    /// 없으면 「팝업이 늘 떠 있는」 회귀를 PASS 로 넘긴다.
+    pub(crate) fn run_pending_autofacehover(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOFACEHOVER_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if DONE.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        DONE.store(true, Ordering::Relaxed);
+        // 프사를 실제로 그리는 창을 찾는다. 어느 창이 학생을 담았는지 트리를
+        // 뒤져 고르면 그 계산이 곧 검사 대상과 같은 코드가 된다.
+        let mut target = None;
+        for idx in 0..self.aux_windows.len() {
+            self.aux_render(idx);
+            let Some(a) = self.aux_windows.get(idx) else { continue };
+            if let Some(k) = a.gpu.drawn_image_keys().find(|k| k.ends_with(":profile")) {
+                target = Some((idx, k.to_string()));
+                break;
+            }
+        }
+        let Some((idx, key)) = target else {
+            eprintln!("[autofacehover] FAIL — 프사를 그리는 별도창이 없다(AUTOSTUDENT_ROOM 을 앞에 둬라)");
+            return;
+        };
+        let saved = self.aux_windows[idx].cursor_px;
+        // 대조 프레임: 커서를 창 밖 음수 좌표로. 어떤 히트 rect 에도 안 걸린다.
+        self.aux_windows[idx].cursor_px = (-1000.0, -1000.0);
+        self.aux_render(idx);
+        let cold = self.aux_windows[idx].gpu.drawn_image_rects(&key);
+        let Some(&(fx, fy, fw, fh)) = cold.first() else {
+            eprintln!("[autofacehover] FAIL — 대조 프레임에 프사가 아예 없다");
+            self.aux_windows[idx].cursor_px = saved;
+            return;
+        };
+        let cold_max = cold.iter().map(|r| r.3).fold(0.0f32, f32::max);
+        self.aux_windows[idx].cursor_px = (fx + fw / 2.0, fy + fh / 2.0);
+        if let Ok(path) = std::env::var("KASATERM_AUTOFACEHOVER_CAP") {
+            self.aux_windows[idx].gpu.capture_next = Some(path);
+        }
+        self.aux_render(idx);
+        let hot = self.aux_windows[idx].gpu.drawn_image_rects(&key);
+        let hot_max = hot.iter().map(|r| r.3).fold(0.0f32, f32::max);
+        self.aux_windows[idx].cursor_px = saved;
+        let a = &self.aux_windows[idx];
+        // 방창을 먼저 물어야 한다 — `term_pane_id()` 는 방창에서도 포커스 pane 을
+        // 내주므로 순서를 바꾸면 방창이 터미널창으로 찍힌다.
+        let what = match (a.room_window(), a.term_pane_id()) {
+            (Some(w), _) => format!("방창 {w}"),
+            (_, Some(p)) => format!("터미널창 {p}"),
+            _ => "별도창".into(),
+        };
+        eprintln!(
+            "[autofacehover] {what} 프사 {key} rect=({fx:.0},{fy:.0},{fw:.0}x{fh:.0})"
+        );
+        // 「하나 더」와 「더 크다」를 같이 본다. 개수만 보면 같은 크기 프사가 둘
+        // 그려지는 회귀를 팝업으로 읽고, 크기만 보면 작은 프사가 통째로 커진
+        // 회귀를 팝업으로 읽는다.
+        let grew = hot.len() > cold.len() && hot_max > cold_max * 2.0;
+        eprintln!(
+            "[autofacehover] 커서 밖: quad {}개(최대 {cold_max:.0}px) / 프사 위: {}개(최대 {hot_max:.0}px) → {}",
+            cold.len(),
+            hot.len(),
+            if grew {
+                "PASS"
+            } else if hot.len() == cold.len() {
+                "FAIL — 팝업이 안 떴다"
+            } else {
+                "FAIL — quad 는 늘었는데 확대가 아니다"
+            }
+        );
+    }
     /// Headless **방 탭** 드래그-tear repro: `KASATERM_AUTOTEARROOM_MS`. pane 탭
     /// (`autoteardrag`)과 별개 경로다 — 방 탭은 `win_tab_drag` 를 타고, 꺼내기 판정도
     /// 「창 밖」이 아니라 「사이드바 패널 밖 + 40px」이다. 거노가 "드래그 뗄 때
