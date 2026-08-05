@@ -61,6 +61,55 @@ function groupButton(s) {
   return b
 }
 
+// --- 화면 표시 설정 --------------------------------------------------------
+
+const PARTS = [['frame', '테두리'], ['chip', '칩'], ['cursor', '커서']]
+const POS = [['tl', '좌상'], ['tr', '우상'], ['bl', '좌하'], ['br', '우하']]
+const DISPLAY_FALLBACK = { off: false, frame: true, chip: true, cursor: true, pos: 'tr' }
+
+async function apply(patch) {
+  await ask('setDisplay', { patch })
+  lastSig = null
+  await tick()
+}
+
+// 페이지 위 표시를 사람이 끄고 옮기는 줄. 세션이 없어도 미리 정해둘 수 있어 항상 맨 위에 둔다.
+// 우상단 칩이 사이트의 계정 메뉴·닫기 버튼을 가리는 일이 잦아 위치를 고르게 했다.
+function displayBar(d) {
+  const wrap = el('div', d.off ? 'disp off' : 'disp')
+
+  const sw = el('button', 'sw', d.off ? '숨김 해제' : '전부 숨김')
+  sw.title = '단축키 ⌥⇧O'
+  sw.addEventListener('click', () => apply({ off: !d.off }))
+  const head = el('div', 'disp-h')
+  head.append(el('span', 'disp-t', '화면 표시'), sw)
+
+  const tgs = el('div', 'tgs')
+  for (const [k, label] of PARTS) {
+    const b = el('button', d[k] ? 'tg on' : 'tg', label)
+    b.disabled = d.off
+    b.addEventListener('click', () => apply({ [k]: !d[k] }))
+    tgs.appendChild(b)
+  }
+
+  const poss = el('div', 'poss')
+  for (const [v, label] of POS) {
+    const b = el('button', d.pos === v ? 'pos on' : 'pos')
+    b.dataset.v = v
+    b.title = `칩 위치 — ${label}`
+    b.setAttribute('aria-label', `칩 위치 ${label}`)
+    // 칩을 꺼둔 채 위치를 고르는 건 아무 일도 일어나지 않는 조작이다
+    b.disabled = d.off || !d.chip
+    b.addEventListener('click', () => apply({ pos: v }))
+    poss.appendChild(b)
+  }
+
+  const row = el('div', 'disp-r')
+  row.append(tgs, poss)
+  wrap.append(head, row)
+  return wrap
+}
+
 function card(s) {
   const c = el('div', 'card')
 
@@ -120,6 +169,7 @@ function render(state) {
   if (!connected) {
     rootEl.appendChild(el('div', 'warn', `브리지(127.0.0.1:${PORT})에 붙어 있지 않습니다. 터미널에서 브라우저 툴을 한 번 쓰면 브리지가 자동으로 뜹니다.`))
   }
+  rootEl.appendChild(displayBar({ ...DISPLAY_FALLBACK, ...(state?.display || {}) }))
   if (!sessions.length) {
     const e = el('div', 'empty')
     e.appendChild(el('b', null, '아직 이 크롬을 조작한 세션이 없습니다'))
@@ -136,6 +186,7 @@ function render(state) {
 function sig(state) {
   return JSON.stringify({
     c: state?.connected,
+    d: state?.display,
     s: (state?.sessions || []).map((s) => [
       s.key, s.name, s.paneId, s.task, s.busy, s.grouped,
       s.log?.length, s.log?.[0]?.at,

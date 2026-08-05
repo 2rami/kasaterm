@@ -1,5 +1,6 @@
 import { dispatch, targetTabOf } from './tools.js'
-import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes } from './sessions.js'
+import { openSession, closeSession, markBusy, markDone, forgetTab, refreshAction, restoreOverlay, snapshot, groupTabs, ungroupTabs, addActivity, clearPanes, repaintAll } from './sessions.js'
+import { getDisplay, setDisplay } from './display.js'
 import { hostOf } from './url.js'
 import { PORT } from './port.js'
 
@@ -155,6 +156,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true
   }
+  if (msg.op === 'setDisplay') {
+    setDisplay(msg.patch || {})
+      .then(async (d) => { await repaintAll(); sendResponse(d) })
+      .catch((e) => sendResponse({ error: String(e?.message || e) }))
+    return true
+  }
   if (msg.op === 'group' || msg.op === 'ungroup') {
     const run = msg.op === 'group' ? groupTabs : ungroupTabs
     run(msg.key)
@@ -162,6 +169,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }))
     return true
   }
+})
+
+// 칩이 하필 지금 보려던 것을 가렸을 때 팝업을 열어 항목을 찾는 건 세 단계다. 한 번에 전부 걷는다.
+// 개별 토글은 그대로 두고 이 스위치만 덮어쓰므로, 되돌리면 끄기 전 조합이 그대로 돌아온다.
+chrome.commands.onCommand.addListener((cmd) => {
+  if (cmd !== 'toggle-overlay') return
+  getDisplay()
+    .then((d) => setDisplay({ off: !d.off }))
+    .then(() => repaintAll())
+    .catch(() => {})
 })
 
 // service worker 가 잠들면 소켓도 같이 죽는다. alarm 이 깨워서 다시 붙인다.

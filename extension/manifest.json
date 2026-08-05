@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "kasaterm Browser",
-  "version": "0.5.0",
+  "version": "0.6.4",
   "description": "터미널의 에이전트가 평소 쓰는 크롬 프로필을 직접 조작한다. 누가 어느 탭에서 무슨 작업 중인지 페이지 위 칩과 아이콘 팝업으로 보여준다.",
   "permissions": [
     "debugger",
@@ -28,6 +28,12 @@
   },
   "side_panel": {
     "default_path": "sidepanel.html"
+  },
+  "commands": {
+    "toggle-overlay": {
+      "suggested_key": { "default": "Alt+Shift+O" },
+      "description": "페이지 위 표시(테두리·칩·커서) 전부 숨기기/되돌리기"
+    }
   },
   "action": {
     "default_title": "kasaterm Browser",

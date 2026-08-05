@@ -3,7 +3,9 @@
 // 조작 지점의 아바타 커서. 크롬 탭 그룹은 글자와 8색뿐이라 이미지를 못 넣어 쓰지 않는다.
 // 글로우와 커서는 조작하는 동안만, 칩은 세션이 끝날 때까지 남는다 — 담당 신원은 상시 보여야 한다.
 // 이미지 합성은 background 에서 — content script 에서 canvas 를 쓰면 페이지 CSP 에 막힌다.
+// 셋 다 사람이 끌 수 있다(display.js) — 우상단 칩이 사이트의 계정 메뉴를 가리는 일이 있어서다.
 import { page } from './page.js'
+import { getDisplay } from './display.js'
 
 const sessions = new Map() // paneKey -> {identity, task, tabs:Set, busy:Set}
 const clientPane = new Map() // clientKey -> paneKey
@@ -178,6 +180,7 @@ async function setOverlay(tabId, s, mode) {
     avatar: dataUrl,
     name: s.identity.name,
     task: s.task,
+    display: await getDisplay(),
   }).catch((e) => {
     // 크롬 내부 페이지와 그새 닫힌 탭은 정상적인 실패다. 나머지만 남겨 status 로 볼 수 있게 한다.
     if (!/RESTRICTED_PAGE|No tab with id/.test(String(e.message))) note('overlay', e)
@@ -198,6 +201,12 @@ async function paintSession(key) {
     if (!alive) { forgetTab(tabId); continue }
     await paintTab(tabId, s).catch(() => {})
   }
+}
+
+// 표시 설정을 바꾸면 이미 칠해둔 탭들은 옛 설정 그대로 남는다. 담당 탭 전부를 다시 칠한다 —
+// 설정을 껐는데 보던 탭에서 그대로 보이면 설정이 안 먹은 것으로 읽힌다.
+export async function repaintAll() {
+  for (const key of [...sessions.keys()]) await paintSession(key).catch(() => {})
 }
 
 // 페이지가 새로 뜨면 오버레이가 통째로 날아간다. 담당 세션이 있는 탭이면 다시 그린다.
@@ -497,7 +506,8 @@ export async function snapshot(connected) {
       log: [...s.log].reverse(),
     })
   }
-  return { connected, sessions: out, lastError: self.__ccLastError || null }
+  // 표시 설정도 함께 싣는다 — 팝업이 따로 물으면 폴링이 두 번이 된다.
+  return { connected, display: await getDisplay(), sessions: out, lastError: self.__ccLastError || null }
 }
 
 // --- 툴바 아이콘 ----------------------------------------------------------

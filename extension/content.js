@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '11'
+  const OVERLAY_V = '13'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -215,16 +215,28 @@ if (!window.__ccInjected) {
     root.innerHTML = `
       <style>
         :host { all: initial; }
-        /* 첫 버전의 글로우 테두리를 그대로 기본값으로 쓴다 — 3px 선에 안쪽으로 번지는 글로우.
-           조작이 끝나도 남아 "이 창은 누가 잡고 있다"를 계속 알린다. 조작 중임은 글로우의
-           숨쉬기로 알리므로 선 자체는 두 상태에서 똑같다.
-           안쪽 1px 어두운 선은 밝은 배경에서 밝은 학생색이 묻히지 않게 하는 대비용.
+        /* 표시 설정 — 꺼둔 것은 아예 그리지 않는다. display:none 이면 러너 애니메이션도 함께 멎어
+           보이지 않는 것을 계속 돌리지 않는다.
+           ⚠️"칩을 눌러서 치우기" 는 만들지 말 것 — 칩에 pointer-events 를 주는 순간 CDP 승격
+           경로가 쏘는 좌표 클릭을 칩이 가로채 그 자리의 조작이 조용히 실패한다. 치우는 길은
+           설정과 단축키뿐이어야 한다. */
+        :host([data-off="1"]) { display: none; }
+        :host([data-frame="0"]) .frame { display: none; }
+        :host([data-chip="0"]) .chip { display: none; }
+        :host([data-cursor="0"]) .cursor { display: none; }
+        /* 가는 선에 안쪽으로 번지는 글로우. 조작이 끝나도 남아 "이 창은 누가 잡고 있다"를 계속
+           알린다. 조작 중임은 글로우의 숨쉬기로 알리므로 선 자체는 두 상태에서 똑같다.
+           선의 몫은 위치를 잡아주는 것뿐이고 존재감은 글로우가 낸다 — 굵게 만들면 페이지가
+           액자에 갇힌 것처럼 답답해진다.
+           ⚠️inset box-shadow 는 padding box 안쪽에 그려져 border 와 겹치지 않는다. 즉 대비선은
+           선 두께에 그대로 더해진다(2px + .5px = 2.5px). 두께를 볼 때 이 둘을 함께 세야 한다.
+           안쪽 어두운 선은 밝은 배경에서 밝은 학생색이 묻히지 않게 하는 대비용.
            ⚠️글로우를 .frame 의 box-shadow 에 두고 숨쉬기를 걸면 테두리 선과 그 자식까지 함께
            흐려진다. 글로우만 별도 층으로 떼면 숨쉬는 것이 그 층뿐이라 선은 늘 또렷하다. */
         .frame {
           position: fixed; inset: 0; pointer-events: none;
-          border: 3px solid var(--cc, #6BCF7F);
-          box-shadow: inset 0 0 0 1px rgba(0,0,0,.15);
+          border: 2px solid var(--cc, #6BCF7F);
+          box-shadow: inset 0 0 0 .5px rgba(0,0,0,.18);
         }
         .frame::before {
           content: ''; position: absolute; inset: 0;
@@ -284,6 +296,12 @@ if (!window.__ccInjected) {
           transform-origin: 100% 0;
           transition: opacity .3s ease, transform .3s ease, box-shadow .3s ease;
         }
+        /* 칩 자리. 기본은 우상단이지만 계정 메뉴·닫기 버튼이 거기 있는 사이트에서는 그걸 가린다.
+           transform-origin 을 함께 옮겨야 대기 상태의 축소(scale .9)가 모서리 안쪽으로 모인다 —
+           안 옮기면 좌하단 칩이 축소될 때 오른쪽 위로 밀려 자리가 어긋난다. */
+        :host([data-pos="tl"]) .chip { right: auto; left: 12px; transform-origin: 0 0; }
+        :host([data-pos="bl"]) .chip { top: auto; bottom: 12px; right: auto; left: 12px; transform-origin: 0 100%; }
+        :host([data-pos="br"]) .chip { top: auto; bottom: 12px; transform-origin: 100% 100%; }
         /* brand-skip — 칩 둘레를 도는 픽셀 러너. offset-path: border-box 가 칩의 pill 모양을 그대로
            경로로 쓰므로 글자 길이가 바뀌어도 따로 계산할 게 없다. steps() 로 칸칸이 끊어 옮겨야
            픽셀처럼 보인다 — 부드럽게 미끄러지면 그냥 도는 점이다. */
@@ -469,6 +487,13 @@ if (!window.__ccInjected) {
       const mode = a.state === 'idle' ? 'idle' : 'active'
       root.host.dataset.on = '1'
       root.host.dataset.mode = mode
+      // 무엇을 보일지는 사람이 정한다. 설정을 못 받은 호출(옛 background)은 전부 켠 것으로 본다.
+      const d = a.display || {}
+      root.host.dataset.off = d.off ? '1' : '0'
+      root.host.dataset.frame = d.frame === false ? '0' : '1'
+      root.host.dataset.chip = d.chip === false ? '0' : '1'
+      root.host.dataset.cursor = d.cursor === false ? '0' : '1'
+      root.host.dataset.pos = d.pos || 'tr'
       clearTimeout(window.__ccOverlayTimer)
       root.host.style.opacity = '1'
       if (a.color) {
