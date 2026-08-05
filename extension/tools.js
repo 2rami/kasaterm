@@ -12,6 +12,14 @@ let jobSeq = 0
 // 그룹에 속하지 않은 탭의 groupId. chrome.tabGroups.TAB_GROUP_ID_NONE 과 같은 값이지만,
 // service worker 가 그 상수를 못 읽는 경우가 있어 직접 둔다.
 const NO_GROUP = -1
+
+// 폰뷰가 진짜로 걸렸는지 페이지에 직접 물어보는 값들. 크기만 보면 터치 관련 분기가 빠진 것을 놓친다.
+const PHONE_PROBE = `({
+  viewport: innerWidth + 'x' + innerHeight,
+  touchPoints: navigator.maxTouchPoints,
+  hoverNone: matchMedia('(hover: none)').matches,
+  pointerCoarse: matchMedia('(pointer: coarse)').matches
+})`
 const GROUP_COLORS = new Set(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'])
 
 function tabsQuery(q) {
@@ -504,10 +512,16 @@ const handlers = {
     const id = await resolveTabId(tabId)
 
     if (off) {
-      if (cdp.isAttached(id)) await cdp.raw(id, 'Emulation.clearDeviceMetricsOverride').catch(() => {})
+      if (cdp.isAttached(id)) {
+        await cdp.raw(id, 'Emulation.clearDeviceMetricsOverride').catch(() => {})
+        await cdp.raw(id, 'Emulation.setTouchEmulationEnabled', { enabled: false }).catch(() => {})
+      }
       await cdp.unpin(id, 'emulation')
-      const seen = await cdp.evaluate(id, 'innerWidth + "x" + innerHeight').catch(() => null)
-      return { tabId: id, emulating: false, viewport: seen, note: '핀을 풀었으니 유휴 15초 뒤 디버깅 배너도 걷힙니다.' }
+      const seen = await cdp.evaluate(id, PHONE_PROBE).catch(() => null)
+      return {
+        tabId: id, emulating: false, viewport: seen?.viewport ?? null,
+        note: '핀을 풀었으니 유휴 15초 뒤 디버깅 배너도 걷힙니다.',
+      }
     }
 
     const w = Number(width)
@@ -519,11 +533,23 @@ const handlers = {
     await cdp.raw(id, 'Emulation.setDeviceMetricsOverride', {
       width: w, height: h, deviceScaleFactor: Number(deviceScaleFactor) || 0, mobile: !!mobile,
     })
-    // 걸었다는 말만으로는 유지 여부를 모른다. 페이지가 실제로 본 크기를 함께 돌려준다.
-    const seen = await cdp.evaluate(id, 'innerWidth + "x" + innerHeight').catch(() => null)
+    // ★크기만 바꾸면 폰이 되지 않는다. 폰에는 마우스가 없으므로 터치까지 켜야 `(hover: none)` 과
+    // `(pointer: coarse)` 규칙이 걸린다 — 안 켜면 **실제 폰에서만 보이는 스타일을 못 본 채**
+    // 「폰뷰 확인」이 끝난다(2026-08-05 실측: 크기만 바꾼 상태와 터치까지 켠 상태가 그 두 조건에서
+    // 갈렸다. mission-control 에는 `(hover: none)` 규칙이 두 곳 있다). 창을 좁히는 우회로는
+    // 애초에 재현할 수 없는 부분이다 — 마우스가 붙어 있는 한 hover 는 계속 hover 다.
+    if (mobile) {
+      await cdp.raw(id, 'Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 }).catch(() => {})
+    }
+    // 걸었다는 말만으로는 유지 여부를 모른다. 페이지가 실제로 무엇을 봤는지 함께 돌려준다.
+    const seen = await cdp.evaluate(id, PHONE_PROBE).catch(() => null)
     return {
       tabId: id, emulating: true, width: w, height: h,
-      deviceScaleFactor: Number(deviceScaleFactor) || 0, mobile: !!mobile, viewport: seen,
+      deviceScaleFactor: Number(deviceScaleFactor) || 0, mobile: !!mobile,
+      viewport: seen?.viewport ?? null,
+      touchPoints: seen?.touchPoints ?? null,
+      hoverNone: seen?.hoverNone ?? null,
+      pointerCoarse: seen?.pointerCoarse ?? null,
     }
   },
 
