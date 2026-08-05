@@ -782,15 +782,19 @@ struct AiCommitReq {
 }
 
 /// `POST /git-ai-commit` — delegate the commit to the AI. If the active pane
-/// runs claude, inject a commit instruction (with the checked files) so the
-/// working agent does the commit; otherwise ask the user to focus a claude
+/// runs an agent, inject a commit instruction (with the checked files) so the
+/// working agent does the commit; otherwise ask the user to focus an agent
 /// pane (agent spawn is phase 2).
+///
+/// ⚠️ 판정은 **`active_agent`(하네스)** 로 한다. 예전엔 `active_process_name` 에
+/// "claude" 가 들었나만 봤는데, codex 는 npm shim 이라 프로세스 이름이 `node` 라서
+/// codex pane 에선 버튼이 영영 "claude 가 켜진 pane 에서 눌러주세요" 만 뱉었다.
 async fn git_ai_commit_handler(backend: Arc<dyn Backend>, body: String) -> impl IntoResponse {
     // Raw JSON string body (text/plain) to avoid the CORS preflight — see
     // git_commit_handler. Empty/garbage body falls back to "no files".
     let req: AiCommitReq = serde_json::from_str(&body).unwrap_or(AiCommitReq { files: Vec::new() });
-    let proc = backend.active_process_name().unwrap_or_default();
-    let body = if proc.contains("claude") {
+    let agent = backend.active_agent();
+    let body = if let Some(agent) = agent {
         let msg = if req.files.is_empty() {
             "git 패널에서 AI 커밋을 눌렀어. 지금 작업 디렉토리의 변경사항을 검토하고 적절한 한국어 커밋 메시지로 git add + commit 해줘.\n".to_string()
         } else {
@@ -800,10 +804,11 @@ async fn git_ai_commit_handler(backend: Arc<dyn Backend>, body: String) -> impl 
             )
         };
         let _ = backend.send_text(None, &msg);
-        serde_json::json!({ "ok": true, "output": "작업 중인 claude에게 커밋을 요청했어요" })
+        serde_json::json!({ "ok": true, "output": format!("작업 중인 {agent}에게 커밋을 요청했어요") })
     } else {
+        let proc = backend.active_process_name().unwrap_or_default();
         let who = if proc.is_empty() { "셸".to_string() } else { proc };
-        serde_json::json!({ "ok": false, "output": format!("claude가 켜진 pane에서 눌러주세요 (활성: {who})") })
+        serde_json::json!({ "ok": false, "output": format!("claude·codex가 켜진 pane에서 눌러주세요 (활성: {who})") })
     };
     ([(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")], Json(body))
 }

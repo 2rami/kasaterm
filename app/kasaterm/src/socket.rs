@@ -606,6 +606,19 @@ impl Backend for PtyBackend {
         foreground_proc_name(pid)
     }
 
+    /// 활성 pane 의 하네스. `active_process_name` 은 직속 자식 이름이라 codex 를 못
+    /// 본다(npm shim → `node`) — 판정은 kasa-pty 의 `agent_for_shell` 에 맡긴다.
+    fn active_agent(&self) -> Option<String> {
+        let active = self.ws.lock().unwrap().active_pane.clone()?;
+        let pid = self
+            .query_pane_pids()
+            .into_iter()
+            .find(|(id, _)| *id == active)
+            .map(|(_, p)| p)?;
+        kasa_pty::agent_for_shell(&kasa_pty::process_table_shared(), pid)
+            .map(|k| k.as_str().to_string())
+    }
+
     /// pane → claude session_id(`/pane-tasks` 용) = bound transcript 파일명 stem.
     /// normal claude 는 transcript==session 이라 task store dir(`session-<id 첫8hex>`)
     /// 매핑에 폴백으로 쓴다.
@@ -1493,6 +1506,13 @@ impl Backend for PtyBackend {
                     row.agent_name = Some(a.clone());
                     row.team = Some(t.clone());
                 }
+                // 어느 하네스인지 — codex 는 인박스가 없어 위 두 칸이 영영 비고,
+                // 그것만으론 "트리플 없이 뜬 claude" 와 구별이 안 된다. 종류를 밝혀야
+                // 오케스트레이터가 SendMessage 대신 tell 을 고른다.
+                row.harness = pane_shell_pid
+                    .get(sid.as_str())
+                    .and_then(|&pid| kasa_pty::agent_for_shell(&ptable, pid))
+                    .map(|k| k.as_str().to_string());
                 row.character = retained
                     .clone()
                     .or(env_char)
@@ -2101,11 +2121,7 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     // 라서 codex pane 은 재시작하면 셸로 돌아왔다 — 무엇이었는지 기록이 없으니
     // 되살릴 수가 없었다. 판정은 state.rs 의 `active_agent`(런처 한 세대 하강 포함).
     let agent = sess.active_agent();
-    let was_agent = match agent {
-        Some(kasa_pty::AgentKind::Claude) => Some("claude"),
-        Some(kasa_pty::AgentKind::Codex) => Some("codex"),
-        None => None,
-    };
+    let was_agent = agent.map(|k| k.as_str());
     // Only record a session id for panes actually running claude, straight off
     // the running claude's argv (exact per-pane). The cwd-mtime fallback that
     // used to fill argv-less `claude` panes is gone — it collapsed every pane

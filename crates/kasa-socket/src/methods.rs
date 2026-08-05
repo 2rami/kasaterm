@@ -585,41 +585,48 @@ fn surface_send_text(backend: &dyn Backend, id: Value, params: &Value) -> Respon
     }
 }
 
-/// 이미 claude 가 도는 pane 에 **claude 부팅 커맨드**를 쏘는 것을 막는다.
+/// 이미 에이전트가 도는 pane 에 **부팅 커맨드**를 쏘는 것을 막는다.
 ///
-/// 그 pane 의 claude 는 셸이 아니라 자기 입력창에 그 문자열을 받아 지시로 읽어 버리고,
+/// 그 pane 의 에이전트는 셸이 아니라 자기 입력창에 그 문자열을 받아 지시로 읽어 버리고,
 /// 브리프를 인박스에 미리 넣어 두는 스폰 절차(인박스 선주입 → pane 에서 claude 부팅)를
 /// 그대로 쓰면 **아무도 뜨지 않은 이름의 인박스**가 하나 생겨 지시가 조용히 사라진다.
-/// 도는 pane 에 말을 거는 정답은 인박스(SendMessage)다.
+/// 도는 pane 에 말을 거는 정답은 인박스(SendMessage)이고, codex pane 은 tell 뿐이다.
 ///
 /// 거부 사유 문자열을 돌려주고, 보내도 되면 `None`.
 fn claude_boot_into_running_pane(backend: &dyn Backend, target: &str, text: &str) -> Option<String> {
     if !looks_like_claude_boot(text) {
         return None;
     }
-    // board 에 있다 = transcript 가 도는 claude 가 그 pane 에 있다. 비싼 조회라
+    // board 에 있다 = transcript 가 도는 에이전트가 그 pane 에 있다. 비싼 조회라
     // 부팅 커맨드로 보일 때만 확인한다(대부분의 send 는 여기 오지 않는다).
     let row = backend
         .collab_board()
         .ok()?
         .into_iter()
         .find(|r| r.surface_id == target)?;
-    let how = match (&row.agent_name, &row.team) {
-        (Some(a), Some(_)) => format!("SendMessage 로 `to: \"{a}\"` 에 보내라"),
+    // codex 는 인박스가 없어 agent_name 이 영영 비므로, 하네스를 알 때는 그걸 먼저
+    // 본다 — 안 그러면 닿지도 않는 SendMessage 를 답으로 알려주게 된다.
+    let how = match (row.harness.as_deref(), &row.agent_name, &row.team) {
+        (Some("codex"), _, _) => "codex 엔 인박스가 없다 — tell 로 보내라".to_string(),
+        (_, Some(a), Some(_)) => format!("SendMessage 로 `to: \"{a}\"` 에 보내라"),
         _ => "SendMessage(같은 방 pane) 나 tell(그 밖) 로 보내라".to_string(),
     };
+    let who = row.harness.as_deref().unwrap_or("에이전트");
     Some(format!(
-        "{target} 에는 이미 claude 가 돌고 있다 — 부팅 커맨드를 보내면 그 claude 의 \
-         입력창에 텍스트로 박힌다. 새 학생을 띄우려면 빈 pane 을 먼저 만들고, \
+        "{target} 에는 이미 {who} 가 돌고 있다 — 부팅 커맨드를 보내면 그 입력창에 \
+         텍스트로 박힌다. 새 학생을 띄우려면 빈 pane 을 먼저 만들고, \
          이 pane 에 지시할 거라면 {how}."
     ))
 }
 
-/// claude 를 **띄우는** 명령처럼 보이는지. 좁게 잡는다 — "claude 가 왜 이래" 같은
+/// 에이전트를 **띄우는** 명령처럼 보이는지. 좁게 잡는다 — "claude 가 왜 이래" 같은
 /// 평범한 지시문이 걸리면 tell 이 막혀 더 나쁘다. 그래서 실행 형태(`cd … && claude`)
 /// 이거나, 줄머리 `claude` + 런처 플래그가 붙은 경우만 본다.
+///
+/// codex 도 같은 함정이라 같이 본다 — 도는 codex pane 에 `cd … && codex` 를 쏘면
+/// 그 codex 가 입력창에 그대로 받아 읽는다(claude 와 판박이).
 fn looks_like_claude_boot(text: &str) -> bool {
-    const FLAGS: [&str; 7] = [
+    const FLAGS: [&str; 8] = [
         "--model",
         "--agent-id",
         "--agent-name",
@@ -627,19 +634,25 @@ fn looks_like_claude_boot(text: &str) -> bool {
         "--resume",
         "--effort",
         "--dangerously-skip-permissions",
+        "--dangerously-bypass-hook-trust",
     ];
     text.lines().any(|line| {
         let l = line.trim_matches(|c: char| c.is_control() || c == '~' || c == '[').trim();
         let parts: Vec<&str> = l.split("&&").flat_map(|p| p.split(';')).map(str::trim).collect();
-        let runs_claude = |p: &str| p == "claude" || p.starts_with("claude ");
+        let runs_agent = |p: &str| {
+            ["claude", "codex"]
+                .iter()
+                .any(|a| p == *a || p.starts_with(&format!("{a} ")))
+        };
+        let bare = |p: &str| p == "claude" || p == "codex";
         // `cd … && claude …` 처럼 이어붙인 명령은 그 자체로 실행이다. 조각이 하나뿐이면
         // 사람이 쓴 문장일 수 있으니 런처 플래그가 붙었을 때만 본다.
         if parts.len() > 1 {
-            return parts.iter().any(|p| runs_claude(p));
+            return parts.iter().any(|p| runs_agent(p));
         }
         parts
             .first()
-            .is_some_and(|p| runs_claude(p) && (*p == "claude" || FLAGS.iter().any(|f| p.contains(f))))
+            .is_some_and(|p| runs_agent(p) && (bare(p) || FLAGS.iter().any(|f| p.contains(f))))
     })
 }
 
@@ -1008,6 +1021,45 @@ mod tests {
         assert!(!looks_like_claude_boot("claude 코드 좀 봐줘"));
         assert!(!looks_like_claude_boot("claude 가 왜 이래?"));
         assert!(!looks_like_claude_boot("이거 claude --model 로 띄웠었나?"));
+    }
+
+    /// codex 도 같은 함정이다 — 도는 codex pane 에 부팅 커맨드를 쏘면 그 codex 의
+    /// 입력창에 텍스트로 박힌다. claude 판정만 있던 시절엔 그냥 통과했다.
+    #[test]
+    fn codex_boot_is_caught_too() {
+        assert!(looks_like_claude_boot("cd /repo && codex"));
+        assert!(looks_like_claude_boot("codex --dangerously-bypass-hook-trust"));
+        assert!(looks_like_claude_boot("codex"));
+        // 좁기는 claude 와 똑같이 — 사람이 쓴 문장은 통과시킨다.
+        assert!(!looks_like_claude_boot("codex 가 왜 이래?"));
+        assert!(!looks_like_claude_boot("codex 로 한번 띄워봐"));
+    }
+
+    /// codex pane 은 인박스가 없어 `agent_name` 이 영영 빈다 — 그때 SendMessage 를
+    /// 답으로 알려주면 부른 쪽이 닿지도 않는 곳에 쏘고 기다린다.
+    #[test]
+    fn codex_pane_is_told_to_use_tell_not_sendmessage() {
+        let backend = FakeBackend {
+            board: vec![crate::backend::PaneActivity {
+                surface_id: "surf-9".into(),
+                harness: Some("codex".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = dispatch(
+            &backend,
+            req(
+                "surface.send_text",
+                json!({"surface_id": "surf-9", "text": "cd /repo && codex\n"}),
+            ),
+        );
+        assert!(!r.ok);
+        let msg = r.error.unwrap().message;
+        assert!(msg.contains("tell"), "tell 을 답으로 줘야 한다: {msg}");
+        assert!(!msg.contains("SendMessage"), "codex 엔 인박스가 없다: {msg}");
+        assert!(msg.contains("codex"), "무엇이 돌고 있는지 밝혀야 한다: {msg}");
+        assert!(backend.sent_text.lock().unwrap().is_empty(), "거부했으면 보내지 않는다");
     }
 
     #[test]

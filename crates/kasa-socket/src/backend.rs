@@ -158,6 +158,15 @@ pub struct PaneActivity {
     pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
+    /// 이 pane 이 돌리는 하네스(`"claude"` | `"codex"`). 셸이면 None.
+    ///
+    /// **말 거는 법이 갈리는 자리다.** codex 엔 팀 모드도 인박스도 없어
+    /// `agent_name`/`team` 이 영영 None 이고, SendMessage 는 실패하지 않고 **조용히
+    /// 사라진다** — 오케스트레이터가 헛되이 쏘고 답을 기다리게 된다. 그래서 board 가
+    /// 종류를 밝힌다: `"codex"` 면 `kasaterm-cli tell`(입력창 주입)이 유일한 경로다.
+    /// `agent_name` 이 None 인 것만으로는 "트리플 없이 뜬 claude" 와 구별이 안 된다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
     /// Why this pane is `status == "waiting"` — the `waitingFor` field from
     /// `claude agents --json` (2.1.162+), e.g. "permission" or "user input".
     /// The transcript watcher can't see this: when claude blocks on a
@@ -521,6 +530,15 @@ pub trait Backend: Send + Sync {
     /// Lets the AI-commit button decide whether to delegate the commit to a
     /// running claude or fall back. Default `None`.
     fn active_process_name(&self) -> Option<String> {
+        None
+    }
+    /// 활성 pane 이 돌리는 **하네스 종류**(`"claude"` | `"codex"`). 셸이면 None.
+    ///
+    /// `active_process_name` 으로는 못 갈음한다 — codex 는 npm shim 이라 셸의 직속
+    /// 자식이 `node` 라서 이름에 "codex" 가 없다(실측). 판정은 kasa-pty 의
+    /// `agent_for_shell` 하나이고 여기선 그 문자열만 건넨다(kasa-socket 은 kasa-pty
+    /// 를 안 쓴다). Default 는 None — PTY 를 안 가진 백엔드는 알 길이 없다.
+    fn active_agent(&self) -> Option<String> {
         None
     }
     /// Fire a "work complete" notification for a surface. The push half of
