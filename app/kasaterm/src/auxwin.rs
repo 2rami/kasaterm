@@ -123,11 +123,13 @@ fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
     // 트리 버튼은 켜져 있으면 accent 로 남긴다 — 토글은 눌린 상태가 안 보이면
     // 누를 때마다 "이게 켜진 거야 꺼진 거야"를 화면 밖에서 세게 된다.
     let on = a.tree_open;
+    let pinned = a.pinned;
     // 파일트리는 **왼쪽**, 창 조작(접기·되돌리기)은 오른쪽. 메인 창 타이틀 스트립이
     // 같은 규칙이고(트리 토글이 맨 왼쪽), 트리 패널 자체가 왼쪽에서 열리니 버튼도
     // 그쪽에 있어야 무엇을 여는 버튼인지가 위치로 읽힌다(거노).
-    let btns: [(AuxHeaderBtn, &str, bool); 3] = [
+    let btns: [(AuxHeaderBtn, &str, bool); 4] = [
         (AuxHeaderBtn::FileTree, "folder-tree", true),
+        (AuxHeaderBtn::Pin, "pin", false),
         (AuxHeaderBtn::Hide, "minus", false),
         // `corner-down-left` 은 에셋에도 gpu 아이콘 표에도 없어 **아무것도 안 그려졌다**
         // — 보이지 않는데 눌리기는 하는 26px 버튼이라, 헤더 오른쪽을 잘못 짚으면 창이
@@ -159,7 +161,7 @@ fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
                 crate::theme::surface_hover(),
             );
         }
-        let lit = kind == AuxHeaderBtn::FileTree && on;
+        let lit = (kind == AuxHeaderBtn::FileTree && on) || (kind == AuxHeaderBtn::Pin && pinned);
         a.gpu.queue_icon(
             icon,
             bx + (B - ICON) / 2.0,
@@ -175,6 +177,21 @@ fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
         );
         a.header_btns.push((kind, (bx, by, B, B)));
     }
+}
+
+/// 커서가 statusline 프사 위면 큰 bust 를 팝업. 메인 창과 같은 그리기 함수를 쓰고,
+/// 창 경계 클램프의 위쪽 한계만 이 창의 헤더(`AUX_HEADER_H`)로 준다.
+fn paint_aux_face_hover(a: &mut AuxWindow, slots: &crate::render::StudentOverlays, w: f32) {
+    let (mx, my) = a.cursor_px;
+    let Some((name, slug, r)) = slots
+        .faces
+        .iter()
+        .find(|(_, _, r)| mx >= r.0 && mx <= r.0 + r.2 && my >= r.1 && my <= r.1 + r.3)
+    else {
+        return;
+    };
+    let pop = 8.0 * a.gpu.cell_h;
+    crate::render::paint_face_popup(&mut a.gpu, name, slug, *r, pop, w, AUX_HEADER_H);
 }
 
 /// 별도창 왼쪽 파일트리 패널 한 프레임. 메인 창 트리에서 **행 그리기만** 옮겨 왔다
@@ -375,6 +392,10 @@ pub(crate) enum AuxHeaderBtn {
     /// 이 창 왼쪽에 파일트리 패널을 연다/닫는다. 창마다 따로 기억한다 — 전역
     /// 설정으로 두면 pane 하나를 크게 보려고 꺼낸 창까지 같이 좁아진다.
     FileTree,
+    /// 이 창을 다른 앱 위에 고정한다(always-on-top). 별도창을 꺼내는 이유가 대개
+    /// "다른 걸 보면서 이걸 곁눈질"이라, 클릭할 때마다 앞으로 끌어올리는 대신
+    /// 아예 위에 붙여 둔다. 창마다 따로 기억한다.
+    Pin,
 }
 
 /// 별도창 파일트리 패널 폭(logical px). 메인 창 컬럼보다 좁다 — 별도창은 대개
@@ -429,6 +450,9 @@ pub(crate) struct AuxWindow {
     /// 공유한다(같은 루트·같은 펼침 상태) — 창마다 따로 두면 같은 폴더를 창마다
     /// 다시 펼쳐야 하고, 메인 창에서 연 것이 여기 안 보인다.
     pub(crate) tree_open: bool,
+    /// 다른 앱 위에 고정(always-on-top)돼 있나. winit 에 "지금 레벨" 을 묻는 API 가
+    /// 없어 우리가 기억한다 — 헤더 아이콘 불빛도 이 값으로 켠다.
+    pub(crate) pinned: bool,
     /// 트리 세로 스크롤(logical px). 이건 창마다 따로다 — 보는 자리는 창의 것이다.
     pub(crate) tree_scroll: f32,
     /// 트리 행의 히트 rect — 그린 프레임이 곧 클릭 판정(header_btns 와 같은 규약).
@@ -660,6 +684,7 @@ impl App {
             pending_capture: None,
             md_content_h: 0.0,
             tree_open: false,
+            pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
             header_btns: Vec::new(),
@@ -1427,6 +1452,7 @@ impl App {
             pending_capture: None,
             md_content_h: 0.0,
             tree_open: false,
+            pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
             header_btns: Vec::new(),
@@ -1648,6 +1674,7 @@ impl App {
             pending_capture: None,
             md_content_h: 0.0,
             tree_open: false,
+            pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
             header_btns: Vec::new(),
@@ -1816,6 +1843,7 @@ impl App {
         // 학생 스프라이트 — 메인 그리드와 같은 함수·같은 이미지 키. 셀 위 패스라
         // 비워 둔 자리표시자 위에 얼굴이 또렷하게 얹힌다.
         crate::render::paint_student_overlays(&mut a.gpu, &sprites, anim_ms);
+        paint_aux_face_hover(a, &sprites, w);
         // 커서 자리(논리 px). 조합 중 한글이 있으면 그 프리에딧을, 없으면 blink 커서.
         let cw = a.gpu.cell_w;
         let ch = a.gpu.cell_h;
@@ -2096,6 +2124,7 @@ impl App {
         // 학생 스프라이트는 셀 위 패스 — statusline 테두리 글리프가 얼굴을
         // 가로지르지 않게. 메인 그리드와 같은 함수·같은 이미지 키를 쓴다.
         crate::render::paint_student_overlays(&mut a.gpu, &student, anim_ms);
+        paint_aux_face_hover(a, &student, w);
         // 커서/프리에딧은 포커스 pane 자리에만.
         if let Some((_, _, x, y, cur_row, cur_col, cur_vis)) = snaps
             .iter()
@@ -2156,10 +2185,10 @@ impl App {
         {
             return out;
         }
-        let Some(slug) = ({
+        let Some((name, slug)) = ({
             let ws = self.ws.lock().unwrap();
             self.display_pane_char(&ws, pane_id)
-                .and_then(|n| crate::theme::character_slug(&n))
+                .and_then(|n| crate::theme::character_slug(&n).map(|s| (n, s)))
         }) else {
             return out;
         };
@@ -2212,15 +2241,14 @@ impl App {
                 *cell = GridCell::blank();
             }
             let face_h = crate::render::STATUSLINE_FACE_ROWS as f32 * ch;
-            out.profile.push((
-                slug,
-                (
-                    ox + sc as f32 * cw,
-                    (oy + (sr + 1) as f32 * ch - face_h).max(oy),
-                    len as f32 * cw,
-                    face_h,
-                ),
-            ));
+            let face_rect = (
+                ox + sc as f32 * cw,
+                (oy + (sr + 1) as f32 * ch - face_h).max(oy),
+                len as f32 * cw,
+                face_h,
+            );
+            out.profile.push((slug, face_rect));
+            out.faces.push((name, slug, face_rect));
             if !busy {
                 if let Some((anchor, left_c)) =
                     crate::render::find_standing_anchor(cells, sr, cols)
@@ -2356,6 +2384,18 @@ impl App {
             }
             Some(AuxHeaderBtn::FileTree) => {
                 self.toggle_aux_tree(idx);
+                true
+            }
+            Some(AuxHeaderBtn::Pin) => {
+                if let Some(a) = self.aux_windows.get_mut(idx) {
+                    a.pinned = !a.pinned;
+                    a.window.set_window_level(if a.pinned {
+                        winit::window::WindowLevel::AlwaysOnTop
+                    } else {
+                        winit::window::WindowLevel::Normal
+                    });
+                    a.window.request_redraw();
+                }
                 true
             }
             None => false,
@@ -3107,6 +3147,7 @@ impl App {
             pending_capture: None,
             md_content_h: 0.0,
             tree_open: false,
+            pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
             header_btns: Vec::new(),

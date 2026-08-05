@@ -2152,6 +2152,7 @@ impl App {
                 waiting: std::mem::take(&mut waiting_slots),
                 standing: std::mem::take(&mut standing_slots),
                 profile: std::mem::take(&mut profile_slots),
+                faces: Vec::new(),
             };
             paint_student_overlays(g, &student_slots, anim_ms);
             // Claude Code 스크롤 sticky prompt: 텍스트·흰 배경은 위 스캔에서 원본
@@ -2202,33 +2203,14 @@ impl App {
                 .iter()
                 .find(|(_, _, r)| fmx >= r.0 && fmx <= r.0 + r.2 && fmy >= r.1 && fmy <= r.1 + r.3)
             {
-                let cname = cname.clone();
-                let slug = *slug;
-                let (fx, fy, fw, _) = *r;
-                let key = format!("student:{slug}:profile");
-                if !g.has_image(&key) {
-                    if let Some((rgba, w, h)) = student_profile_rgba(slug) {
-                        g.upload_image(&key, &rgba, w, h);
-                    }
-                }
-                let pop = 8.0 * self.cell.h;
-                let win_w = win_px.0 / scale;
-                let (px, py) = face_popup_pos(fx, fw, fy, pop, win_w, TITLE_HEIGHT);
-                // bust 는 누끼(투명 배경)라 캐릭터만 뜨고 뒤가 비친다 — 배경 박스
-                // 제거(거노: "배경색 아예 없애고"). 이름표만 얇은 pill 로 가독성 확보.
-                g.queue_image_above(&key, px, py, pop, pop);
-                let accent = theme::character_accent(&cname).unwrap_or_else(theme::accent);
-                let fs = 13.0;
-                let tw = g.measure_chrome_text(&cname, fs, true);
-                let tx = px + (pop - tw) / 2.0;
-                let ty = py + pop + 4.0;
-                round_rect(
-                    g, tx - 7.0, ty - 3.0, tw + 14.0, fs + 8.0,
-                    theme::radius_sm(), theme::with_alpha(theme::bg(), 0xE6),
-                );
-                g.draw_text(
-                    tx, ty, &cname,
-                    gpu::DrawOpts { font_size: fs, color: accent, bold: true, italic: false },
+                paint_face_popup(
+                    g,
+                    cname,
+                    slug,
+                    *r,
+                    8.0 * self.cell.h,
+                    win_px.0 / scale,
+                    TITLE_HEIGHT,
                 );
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
@@ -8878,16 +8860,13 @@ pub(crate) struct StudentOverlays {
     pub(crate) standing: Vec<(&'static str, &'static str, (f32, f32, f32, f32))>,
     /// statusline 프사(bust) 자리.
     pub(crate) profile: Vec<(&'static str, (f32, f32, f32, f32))>,
+    /// 그중 hover 확대가 걸리는 것 — `(학생 이름, slug, rect)`. 별도창만 채운다:
+    /// 메인 창은 프사 rect 를 클릭 히트(`face_hit_rects`)로도 재활용하느라 자체
+    /// 목록을 따로 쥐고 있다. 이름이 slug 와 별개인 건 팝업 이름표 때문(slug 는 에셋 키).
+    pub(crate) faces: Vec<(String, &'static str, (f32, f32, f32, f32))>,
 }
 
 impl StudentOverlays {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.banner.is_empty()
-            && self.spinner.is_empty()
-            && self.waiting.is_empty()
-            && self.standing.is_empty()
-            && self.profile.is_empty()
-    }
     /// 다음 프레임을 스스로 불러야 하나 — 움직이는 스프라이트가 하나라도 있으면.
     /// 프사만 있는 창은 정적 1프레임이라 깨울 필요가 없다.
     pub(crate) fn animating(&self) -> bool {
@@ -8950,6 +8929,49 @@ pub(crate) fn paint_student_overlays(
         }
         g.queue_image_above(&key, *bx, *by, *bw, *bh);
     }
+}
+
+/// statusline 프사 위에 커서가 있을 때 뜨는 큰 bust 팝업.
+///
+/// `face` 는 그 프사 자리(논리 px), `pop` 은 팝업 한 변, `title_h` 는 팝업이
+/// 넘어가면 안 되는 위쪽 크롬 높이. statusline 은 늘 창 아래쪽이라 위로 띄운다.
+///
+/// bust 는 누끼(투명 배경)라 캐릭터만 뜨고 뒤가 비친다 — 배경 박스는 없다
+/// (거노: "배경색 아예 없애고"). 이름표만 얇은 pill 로 가독성을 확보한다.
+///
+/// 매 프레임 hover 를 다시 판정하는 쪽이 호출자다 — 커서가 벗어나면 다음 프레임에
+/// 저절로 사라진다(애니 없음).
+pub(crate) fn paint_face_popup(
+    g: &mut gpu::GpuRenderer,
+    cname: &str,
+    slug: &str,
+    face: (f32, f32, f32, f32),
+    pop: f32,
+    win_w: f32,
+    title_h: f32,
+) {
+    let key = format!("student:{slug}:profile");
+    if !g.has_image(&key) {
+        if let Some((rgba, w, h)) = student_profile_rgba(slug) {
+            g.upload_image(&key, &rgba, w, h);
+        }
+    }
+    let (fx, fy, fw, _) = face;
+    let (px, py) = face_popup_pos(fx, fw, fy, pop, win_w, title_h);
+    g.queue_image_above(&key, px, py, pop, pop);
+    let accent = theme::character_accent(cname).unwrap_or_else(theme::accent);
+    let fs = 13.0;
+    let tw = g.measure_chrome_text(cname, fs, true);
+    let tx = px + (pop - tw) / 2.0;
+    let ty = py + pop + 4.0;
+    round_rect(
+        g, tx - 7.0, ty - 3.0, tw + 14.0, fs + 8.0,
+        theme::radius_sm(), theme::with_alpha(theme::bg(), 0xE6),
+    );
+    g.draw_text(
+        tx, ty, cname,
+        gpu::DrawOpts { font_size: fs, color: accent, bold: true, italic: false },
+    );
 }
 
 /// statusline 프사 자리표시자(U+FFFC 연속 셀) 위치 — `(행, 시작열, 칸수)`.
