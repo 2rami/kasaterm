@@ -938,6 +938,46 @@ impl Backend for PtyBackend {
         })
     }
 
+    /// 모든 창 + 그 창의 pane 들. `move`(창 간 이동)를 쓰려면 **어느 창에 뭐가 있는지**
+    /// 보여야 하는데, 이게 미구현이라 `kasaterm-cli windows` 가 늘 "(윈도우 없음)"을
+    /// 냈다 — 이동 기능을 붙여 놓고 목적지를 못 찾는 상태였다.
+    ///
+    /// GUI RPC 없이 `ws.pane_window`(pane → 창 인덱스)로 짓는다. 그건 `publish_pty_layout`
+    /// 이 **전 윈도우** leaf 를 채워 두는 미러라 socket 스레드에서 그대로 읽힌다
+    /// (App 의 `windows`/`pty_layout` 은 GUI 스레드 소유라 여기서 못 본다).
+    ///
+    /// rect 는 **활성 창만** 채운다 — ws 에 실리는 layout 트리가 활성 창 하나뿐이다.
+    /// 비활성 창은 pane 목록만 준다(이동 대상을 고르는 데는 그걸로 충분하다).
+    fn windows_overview(&self) -> Result<Vec<kasa_socket::backend::WindowOverview>> {
+        // ws 를 잠그기 **전에** 부른다 — std Mutex 는 재진입이 안 돼 안에서 부르면 멈춘다.
+        let active_rects = self.window_layout().unwrap_or_default();
+        let ws = self.ws.lock().unwrap();
+        let mut by_win: std::collections::BTreeMap<usize, Vec<String>> = Default::default();
+        for (pane, idx) in &ws.pane_window {
+            by_win.entry(*idx).or_default().push(pane.clone());
+        }
+        // 활성 창 = 활성 leaf 집합의 아무 pane 이 속한 창.
+        let active_idx = ws
+            .active_window_panes
+            .iter()
+            .find_map(|p| ws.pane_window.get(p))
+            .copied();
+        drop(ws);
+        Ok(by_win
+            .into_iter()
+            .map(|(idx, mut surfaces)| {
+                surfaces.sort();
+                let active = Some(idx) == active_idx;
+                kasa_socket::backend::WindowOverview {
+                    idx,
+                    active,
+                    panes: if active { active_rects.clone() } else { Vec::new() },
+                    surfaces,
+                }
+            })
+            .collect())
+    }
+
     fn new_window(&self) -> Result<()> {
         // 창 생성은 회신할 게 없다(창 인덱스는 `windows` 로 읽는다) — 이벤트만 던진다.
         let _ = self.proxy.send_event(UserEvent::SocketNewWindow);
