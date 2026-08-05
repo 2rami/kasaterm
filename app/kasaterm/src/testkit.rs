@@ -2756,12 +2756,84 @@ impl App {
             "[autoauxtree] {}",
             if open && rows > 0 && narrowed { "PASS" } else { "FAIL" }
         );
+        self.autoauxtree_probe_bg();
         if let Ok(cap) = std::env::var("KASATERM_AUTOAUXTREE_CAP") {
             if let Some(a) = self.aux_windows.first_mut() {
                 a.pending_capture =
                     Some((Instant::now() + std::time::Duration::from_millis(1500), cap));
             }
         }
+    }
+    /// 트리 패널이 **정말 `panel_bg()` 로 칠해졌나** — 실제 프레임 픽셀 한 점.
+    ///
+    /// 거노가 "파일트리 배경이 검정이야"라고 한 자리다. 그리기 목록을 뒤져
+    /// "`rect(panel_bg)` 를 부르긴 했다"로 판정하면 그 위에 뭔가 덮어 그려도
+    /// 통과한다 — 합성된 결과를 봐야 그 구분이 선다. 그래서 캡처 PNG 를 도로
+    /// 읽는다(readback 이 `aux_render` 안에서 동기로 끝나 그 자리에서 열린다).
+    ///
+    /// 표본 자리는 `tree_rows`(그린 행의 히트 rect)에서 되읽는다 — `AUX_TREE_W`·
+    /// `AUX_HEADER_H` 는 auxwin private 이고, 여기서 다시 계산하면 그 복제본이
+    /// 틀렸을 때 "패널이 검다"로 잘못 읽힌다. x 는 행 내용이 시작하는 6px 보다
+    /// 왼쪽(3px)이라 어느 행 위에서도 순수 배경이다.
+    ///
+    /// 패널 **밖**(트리 오른쪽 셀 영역) 한 점을 같은 프레임에서 같이 잰다. 거긴
+    /// `bg()` 라 `panel_bg()` 와 달라야 한다 — 그게 안 갈리면 허용오차가 두 색을
+    /// 삼킨 것이고, 그러면 패널 쪽 PASS 도 의미가 없다.
+    fn autoauxtree_probe_bg(&mut self) {
+        let Some(a) = self.aux_windows.first_mut() else { return };
+        let Some(&(_, _, (_, row_y, row_w, row_h))) = a.tree_rows.first() else {
+            eprintln!("[autoauxtree] 배경 미측정 — 그린 행이 없어 표본 자리를 못 잡는다");
+            return;
+        };
+        // 커서가 행 위에 있으면 hover 하이라이트(`surface_hover`)가 표본을 덮는다.
+        let saved = a.cursor_px;
+        a.cursor_px = (-1000.0, -1000.0);
+        let scale = a.gpu.scale();
+        let path = std::env::temp_dir().join("kasaterm-treeprobe.png");
+        let Some(path) = path.to_str().map(str::to_string) else { return };
+        a.gpu.capture_next = Some(path.clone());
+        self.aux_render(0);
+        if let Some(a) = self.aux_windows.first_mut() {
+            a.cursor_px = saved;
+        }
+        let img = match image::open(&path) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                eprintln!("[autoauxtree] 배경 미측정 — 캡처를 못 읽었다: {e}");
+                return;
+            }
+        };
+        let y = ((row_y + row_h / 2.0) * scale) as u32;
+        let at = |x: f32| img.get_pixel_checked((x * scale) as u32, y).map(|p| p.0);
+        let (Some(inside), Some(outside)) = (at(3.0), at(row_w + 20.0)) else {
+            eprintln!("[autoauxtree] 배경 미측정 — 표본 자리가 캡처 밖이다");
+            return;
+        };
+        // 캡처는 sRGB 서피스를 도로 읽은 값이라 원본과 1 LSB 어긋난다. 딱 그만큼만
+        // 봐준다 — `panel_bg` 는 `lerp(bg, surface_hover, 0.5)` 라 `bg` 와 채널당
+        // 5~8 밖에 안 떨어져, 넉넉히 잡으면 판정이 두 색을 한 색으로 삼킨다(실측:
+        // 6 이면 R·G 가 통과하고 B 하나로 겨우 갈렸다).
+        let near = |a: [u8; 4], b: [u8; 4]| (0..3).all(|i| a[i].abs_diff(b[i]) <= 2);
+        let want = crate::theme::panel_bg();
+        let black = [0u8, 0, 0, 0xFF];
+        eprintln!(
+            "[autoauxtree] 패널 배경 rgba={inside:?} 기대 panel_bg={want:?} → {}",
+            if near(inside, want) {
+                "PASS"
+            } else if near(inside, black) {
+                "FAIL — 검정이다(거노가 신고한 그 상태)"
+            } else {
+                "FAIL — panel_bg 가 아닌 다른 색이 덮었다"
+            }
+        );
+        eprintln!(
+            "[autoauxtree] 대조점(패널 밖) rgba={outside:?} → {}",
+            if near(outside, want) {
+                "FAIL — 패널 안팎이 같은 색으로 읽힌다(판정이 색을 못 가른다)"
+            } else {
+                "PASS — 판정이 색을 가른다"
+            }
+        );
     }
     /// `KASATERM_AUTOUNREAD="%2"` — 그 pane 을 "끝났는데 아직 안 본" 상태로 세운다.
     /// 방 단위인 `KASATERM_AUTOALERT` 의 pane 판 — 완료 숨쉬기가 방 전체가 아니라
