@@ -431,6 +431,24 @@ async function groupInWindow(s, windowId, tabIds) {
   return groupId
 }
 
+// new_tab/new_window 로 **내가 만든** 탭만 자기 그룹에 넣는다. 여럿이 한 브라우저를 쓸 때
+// 누구 탭인지 이름과 색으로 갈리고, 사람이 열어둔 탭 사이에 섞이지 않는다.
+// ⚠️`markBusy` 가 claim 하는 「조작한 기존 탭」은 절대 여기 넣지 마라 — 사람이 열어둔 탭이
+// 제멋대로 그룹으로 옮겨 다니는 것이 claude-in-chrome 이 금지된 이유다. 내가 만든 것만 내가 묶는다.
+export async function groupOwnTab(client, tabId) {
+  const s = sessionOf(client)
+  if (!s) return null
+  const t = await chrome.tabs.get(tabId).catch(() => null)
+  if (!t) return null
+  try {
+    return await groupInWindow(s, t.windowId, [tabId])
+  } catch (e) {
+    // 묶기가 실패해도 탭은 이미 열렸다. 탭 생성을 실패로 만들지 않는다.
+    note('group-own', e)
+    return null
+  }
+}
+
 export async function groupTabs(key) {
   const s = sessions.get(key)
   if (!s) return { ok: false, error: '세션이 없습니다.' }

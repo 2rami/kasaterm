@@ -2,7 +2,7 @@
 // 그래서 평소엔 디버깅 배너가 안 뜨지만 능력치는 CDP 와 동일하다.
 import * as cdp from './cdp.js'
 import { page, restricted } from './page.js'
-import { setTask, forgetTab, identityOf, showCursor } from './sessions.js'
+import { setTask, forgetTab, identityOf, showCursor, groupOwnTab } from './sessions.js'
 
 // 워커가 언제 떴는지. 이 값이 방금 태어난 것으로 나오면 직전 명령이 실패한 이유는 대개 워커가
 // 도중에 죽은 것이다 — 끊김의 원인을 코드에서 찾기 전에 여기부터 본다.
@@ -133,7 +133,7 @@ const handlers = {
 
   // 기본은 백그라운드다. 사람이 보던 화면을 에이전트가 뺏으면 안 된다.
   // 애니메이션·미디어처럼 보이는 탭이어야 도는 것을 확인할 때만 active:true 나 activate_tab 을 쓴다.
-  async new_tab({ url, active = false, windowId } = {}) {
+  async new_tab({ url, active = false, windowId } = {}, ctx = {}) {
     // ⚠️service worker 에서 부르면 create 의 active:false 가 무시되고 새 탭이 앞으로 나온다(실측 — 같은
     // 호출이 확장 페이지에서는 존중된다). 사람이 보던 탭을 뺏지 않도록 직전 활성 탭을 곧바로 되돌린다.
     // 되돌릴 대상은 반드시 "새 탭이 실제로 생긴 창"의 것이어야 한다 — 창이 여러 개일 때
@@ -152,8 +152,10 @@ const handlers = {
     // 로딩이 끝나는 시점에 다시 앞으로 나오는 경우가 있어 한 번 더 확인한다
     await restore()
     const fresh = await chrome.tabs.get(tab.id)
+    // 내가 만든 탭이니 내 그룹에 넣는다 — 사람이 열어둔 탭 사이에 섞이지 않게.
+    const groupId = await groupOwnTab(ctx.client, fresh.id)
     // active 를 돌려주는 이유: 백그라운드로 열었는데 앞으로 튀어나오면 여기서 바로 드러난다
-    return { tabId: fresh.id, url: fresh.url, title: fresh.title, active: fresh.active }
+    return { tabId: fresh.id, url: fresh.url, title: fresh.title, active: fresh.active, ...(groupId ? { groupId } : {}) }
   },
 
   // 별도 창은 선생님 탭바를 아예 건드리지 않는다 — 에이전트가 자기 창에서 놀면 열어둔 탭의 순서도
@@ -161,7 +163,7 @@ const handlers = {
   // tabId 를 주면 이미 있는 탭을 그 창으로 떼어낸다.
   // ⚠️focused 기본값은 false 다. 새 창이 앞으로 튀어나오면 선생님이 보던 앱을 가린다 — 탭을
   // 백그라운드로 여는 것과 같은 이유이고, 여기서는 되돌릴 방법이 없으니 기본값이 더 중요하다.
-  async new_window({ url, tabId, focused = false, width, height, incognito } = {}) {
+  async new_window({ url, tabId, focused = false, width, height, incognito } = {}, ctx = {}) {
     const opts = { focused, ...(incognito ? { incognito: true } : {}) }
     if (width && height) Object.assign(opts, { width: Number(width), height: Number(height), left: 0, top: 0 })
     if (tabId) opts.tabId = await resolveTabId(tabId)
@@ -176,9 +178,12 @@ const handlers = {
     // 온다 — 실측). 조용히 지나가면 좁은 폭에서 확인한 줄 알고 오판하므로 다를 때 반드시 알린다.
     // 하한보다 좁은 폭은 창이 아니라 Emulation.setDeviceMetricsOverride 로 봐야 한다.
     const forced = width && win.width !== Number(width)
+    // url 로 새로 만든 탭만 내 그룹에 넣는다. tabId 로 떼어낸 것은 원래 사람 탭일 수 있다.
+    const groupId = tabId ? null : await groupOwnTab(ctx.client, fresh.id)
     return {
       windowId: win.id, tabId: fresh.id, url: fresh.url, title: fresh.title,
       width: win.width, height: win.height, focused: win.focused,
+      ...(groupId ? { groupId } : {}),
       ...(forced ? { note: `요청한 폭 ${width}px 이 아니라 ${win.width}px 로 열렸습니다(크롬 창 폭 하한). 더 좁은 폭은 cdp_raw 의 Emulation.setDeviceMetricsOverride 로 확인하세요.` } : {}),
     }
   },
