@@ -228,6 +228,14 @@ tool('browser_set_task', 'Name what you are doing in the browser. It appears on 
   task: z.string().describe('Short label for the current task, e.g. "checkout flow" or "landing page".'),
 }, async (a) => text(await call('set_task', a, 5000)))
 
+tool('browser_group_tabs', 'Put the given tabs into a Chrome tab group, naming and coloring it. Use it when the human is comparing several pages and needs them visually separated from the rest of the tab bar. Pass the returned groupId back to add more tabs to the same group later. ONLY groups the tabIds you pass — nothing is ever grouped automatically, and you must not build any flow that groups tabs the human did not ask for. Tabs from different windows get pulled into one window by Chrome, so the result says so when that happens. browser_ungroup_tabs is the inverse.', {
+  tabIds: z.array(z.number().int()).min(1),
+  title: z.string().optional(),
+  color: z.enum(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange']).optional(),
+  groupId: z.number().int().optional(),
+  collapsed: z.boolean().optional(),
+}, async (a) => text(await call('group_tabs', a, 15000)))
+
 tool('browser_ungroup_tabs', 'Pull tabs out of their tab groups. Omit tabIds to ungroup every grouped tab. A group disappears once its last tab leaves — there is no delete-group API.', {
   tabIds: z.array(z.number().int()).optional().describe('Specific tabs to ungroup. Omit for all.'),
 }, async (a) => text(await call('ungroup_tabs', a, 15000)))

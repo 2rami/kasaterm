@@ -9,6 +9,11 @@ import { setTask, forgetTab, identityOf, showCursor } from './sessions.js'
 const WORKER_STARTED = Date.now()
 let jobSeq = 0
 
+// 그룹에 속하지 않은 탭의 groupId. chrome.tabGroups.TAB_GROUP_ID_NONE 과 같은 값이지만,
+// service worker 가 그 상수를 못 읽는 경우가 있어 직접 둔다.
+const NO_GROUP = -1
+const GROUP_COLORS = new Set(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'])
+
 function tabsQuery(q) {
   return new Promise((resolve) => chrome.tabs.query(q, resolve))
 }
@@ -120,6 +125,8 @@ const handlers = {
         tabId: t.id, windowId: t.windowId, title: t.title, url: t.url,
         active: t.active, audible: t.audible || false, status: t.status,
         attached: cdp.isAttached(t.id),
+        // 그룹에 속하지 않은 탭은 -1 이라 그대로 실으면 매 줄에 의미 없는 값이 붙는다.
+        ...(t.groupId !== undefined && t.groupId !== NO_GROUP ? { groupId: t.groupId } : {}),
       })),
     }
   },
@@ -197,8 +204,49 @@ const handlers = {
 
   // 탭을 그룹에서 빼낸다. 마지막 탭이 빠지면 그룹은 크롬이 알아서 없앤다(그룹 삭제 API 는 없다).
   // ungroup 은 tabs 권한이면 되고 tabGroups 권한은 필요 없다.
+  // ⚠️**명시적으로 부를 때만** 묶는다. 새 탭을 열 때 자동 편입하거나, 지정하지 않은 탭을 끌어오는
+  // 동작을 절대 넣지 마라 — claude-in-chrome 이 금지된 이유가 정확히 그 자동 묶기였다(열어둔 탭을
+  // 제멋대로 자기 그룹으로 묶고, 확장을 꺼도 12초마다 스스로 되살렸다). ungroup_tabs 와 짝이다.
+  async group_tabs({ tabIds, title, color, groupId, collapsed } = {}) {
+    const ids = (Array.isArray(tabIds) ? tabIds : [tabIds]).filter((v) => v != null).map(Number)
+    if (!ids.length) throw new Error('NO_TAB_IDS: 묶을 탭을 tabIds 로 지정하세요 — 자동으로 고르지 않습니다.')
+    if (color && !GROUP_COLORS.has(color)) {
+      throw new Error(`BAD_COLOR: "${color}" 는 쓸 수 없습니다. ${[...GROUP_COLORS].join('|')} 중 하나여야 합니다.`)
+    }
+    // 없는 탭이 하나라도 섞이면 group 이 통째로 실패한다. 어느 것이 문제인지 집어서 알려준다.
+    const live = await tabsQuery({})
+    const known = new Map(live.map((t) => [t.id, t]))
+    const missing = ids.filter((id) => !known.has(id))
+    if (missing.length) throw new Error(`TAB_NOT_FOUND: ${missing.join(', ')} — list_tabs 로 확인하세요.`)
+
+    // ⚠️크롬은 다른 창의 탭을 그룹에 넣을 때 그 탭을 그룹이 있는 창으로 옮긴다. 조용히 지나가면
+    // 선생님 탭이 왜 사라졌는지 알 수 없으므로 미리 알린다.
+    const wins = new Set(ids.map((id) => known.get(id).windowId))
+
+    const gid = await chrome.tabs.group(
+      groupId != null ? { tabIds: ids, groupId: Number(groupId) } : { tabIds: ids },
+    )
+    const patch = {}
+    if (title != null) patch.title = String(title)
+    if (color) patch.color = color
+    if (collapsed != null) patch.collapsed = !!collapsed
+    let group = null
+    if (Object.keys(patch).length) group = await chrome.tabGroups.update(gid, patch).catch(() => null)
+    if (!group) group = await chrome.tabGroups.get(gid).catch(() => null)
+
+    return {
+      groupId: gid,
+      grouped: ids.length,
+      title: group?.title ?? null,
+      color: group?.color ?? null,
+      collapsed: group?.collapsed ?? null,
+      windowId: group?.windowId ?? null,
+      ...(wins.size > 1 ? { note: `탭이 창 ${wins.size}개에 걸쳐 있어 크롬이 한 창으로 모았습니다.` } : {}),
+    }
+  },
+
   async ungroup_tabs({ tabIds } = {}) {
-    const NONE = -1
+    const NONE = NO_GROUP
     const tabs = await tabsQuery({})
     const grouped = tabs.filter((t) => t.groupId !== undefined && t.groupId !== NONE)
     const targets = tabIds && tabIds.length ? tabIds.map(Number) : grouped.map((t) => t.id)
