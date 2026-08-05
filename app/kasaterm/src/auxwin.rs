@@ -54,6 +54,48 @@ pub(crate) fn disallow_tabbing(window: &Window) {
     }
 }
 
+/// 터미널·방 별도창을 만든다 — 탭 묶기 없이, OS 신호등 없이, 우리 헤더 자리를
+/// 비운 채로. 편집기·설정 창은 본문이 상단 여백을 안 비워 이 경로를 안 쓴다.
+fn create_aux_window(
+    event_loop: &ActiveEventLoop,
+    attrs: WindowAttributes,
+) -> Result<Window, winit::error::OsError> {
+    let win = create_untabbed(event_loop, with_aux_chrome(attrs))?;
+    #[cfg(target_os = "macos")]
+    hide_traffic_lights(&win);
+    Ok(win)
+}
+
+/// OS 신호등(닫기·최소화·최대화) 세 개를 숨긴다.
+///
+/// 우리 헤더가 이미 같은 일을 한다 — `↶` 가 되돌리기(=닫기), `−` 가 접기다.
+/// 둘이 나란히 있으면 같은 기능이 창마다 두 벌이고, 신호등이 헤더 왼쪽 78px 을
+/// 붙박이로 먹어 방 이름·학생 칩이 그만큼 밀린다(거노).
+///
+/// ⚠️ **`with_decorations(false)` 로 하면 안 된다.** 그건 타이틀바 자체를 없애서
+/// 창 이동·가장자리 리사이즈까지 통째로 앗아간다(옛 TODO 가 그래서 막혀 있었다).
+/// 버튼 세 개만 `isHidden` 으로 지우면 타이틀바는 남아 드래그·리사이즈가 그대로다.
+#[cfg(target_os = "macos")]
+pub(crate) fn hide_traffic_lights(window: &Window) {
+    use objc2_app_kit::{NSView, NSWindowButton};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(h) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = h.as_raw() else { return };
+    unsafe {
+        let view: &NSView = h.ns_view.cast().as_ref();
+        let Some(w) = view.window() else { return };
+        for b in [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ] {
+            if let Some(btn) = w.standardWindowButton(b) {
+                btn.setHidden(true);
+            }
+        }
+    }
+}
+
 /// `(tabbingMode, 이 창이 묶여 있는 탭 수)`. 헤드리스 검증용 — "탭이 안 보인다"는
 /// 눈으로 못 재고, 묶였는지는 `tabbedWindows` 가 nil 이 아닌지로만 확실해진다
 /// (mode 만 보면 "끄긴 껐는데 이미 묶인 뒤"를 못 가른다).
@@ -76,24 +118,34 @@ pub(crate) fn tabbing_probe(window: &Window) -> (isize, usize) {
 /// 두므로 그림과 판정이 갈릴 수 없다. 되돌리기는 ⌘W 와 같은 동작이지만, 그
 /// 단축키를 모르면 창에 갇힌다.
 fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
-    const B: f32 = 26.0;
+    const B: f32 = AUX_HEADER_BTN;
     const ICON: f32 = 14.0;
     // 트리 버튼은 켜져 있으면 accent 로 남긴다 — 토글은 눌린 상태가 안 보이면
     // 누를 때마다 "이게 켜진 거야 꺼진 거야"를 화면 밖에서 세게 된다.
     let on = a.tree_open;
-    let btns: [(AuxHeaderBtn, &str); 3] = [
-        (AuxHeaderBtn::FileTree, "folder-tree"),
-        (AuxHeaderBtn::Hide, "minus"),
+    // 파일트리는 **왼쪽**, 창 조작(접기·되돌리기)은 오른쪽. 메인 창 타이틀 스트립이
+    // 같은 규칙이고(트리 토글이 맨 왼쪽), 트리 패널 자체가 왼쪽에서 열리니 버튼도
+    // 그쪽에 있어야 무엇을 여는 버튼인지가 위치로 읽힌다(거노).
+    let btns: [(AuxHeaderBtn, &str, bool); 3] = [
+        (AuxHeaderBtn::FileTree, "folder-tree", true),
+        (AuxHeaderBtn::Hide, "minus", false),
         // `corner-down-left` 은 에셋에도 gpu 아이콘 표에도 없어 **아무것도 안 그려졌다**
         // — 보이지 않는데 눌리기는 하는 26px 버튼이라, 헤더 오른쪽을 잘못 짚으면 창이
         // 영문 모르게 되돌아간다. 뜻이 같고 실재하는 undo-2 로 바꾼다.
-        (AuxHeaderBtn::Dock, "undo-2"),
+        (AuxHeaderBtn::Dock, "undo-2", false),
     ];
-    let n = btns.len();
+    let n_right = btns.iter().filter(|(_, _, left)| !left).count();
     a.header_btns.clear();
     let (mx, my) = a.cursor_px;
-    for (i, (kind, icon)) in btns.into_iter().enumerate() {
-        let bx = w - B * (n - i) as f32 - 6.0;
+    let mut right_i = 0usize;
+    for (kind, icon, left) in btns.into_iter() {
+        let bx = if left {
+            AUX_HEADER_PAD
+        } else {
+            let x = w - B * (n_right - right_i) as f32 - AUX_HEADER_PAD;
+            right_i += 1;
+            x
+        };
         let by = (AUX_HEADER_H - B) / 2.0;
         let hov = mx >= bx && mx <= bx + B && my >= by && my <= by + B;
         if hov {
@@ -135,7 +187,11 @@ fn draw_aux_tree(a: &mut AuxWindow, rows: &[AuxTreeRow], h: f32) {
     let w = AUX_TREE_W;
     let top = AUX_HEADER_H;
     a.tree_rows.clear();
-    a.gpu.rect(0.0, top, w, h - top, crate::theme::surface());
+    // `surface` 는 팔레트에서 본문(`bg`)보다 **어두운** 색이라, 트리가 판이 아니라
+    // 검게 파인 구멍으로 보였다(거노: "파일트리 배경이 검정이야"). 메인 창 사이드바가
+    // 쓰는 `panel_bg`(bg↔surface_hover 중간)로 맞춘다 — 대비로 가는 방향이 테마마다
+    // 반대라 고정색으로는 여덟 테마를 다 못 맞춘다.
+    a.gpu.rect(0.0, top, w, h - top, crate::theme::panel_bg());
     // 트리와 셀 사이 실선 — 배경색이 비슷해 경계가 없으면 글자가 패널 안에서
     // 시작하는 것처럼 읽힌다.
     a.gpu.rect(w - 1.0, top, 1.0, h - top, crate::theme::border());
@@ -224,12 +280,17 @@ const AUX_HEADER_H: f32 = TITLE_HEIGHT;
 #[cfg(not(target_os = "macos"))]
 const AUX_HEADER_H: f32 = 30.0;
 
-/// 헤더 내용이 시작되는 x. macOS 는 신호등 세 개가 이 띠 왼쪽에 얹혀 있으므로
-/// 그만큼 비운다 — 안 비우면 라벨이 버튼 밑으로 들어간다.
-#[cfg(target_os = "macos")]
-const AUX_HEADER_X: f32 = TRAFFIC_LIGHT_WIDTH + 8.0;
-#[cfg(not(target_os = "macos"))]
-const AUX_HEADER_X: f32 = 12.0;
+/// 헤더 양끝 여백.
+const AUX_HEADER_PAD: f32 = 6.0;
+/// 헤더 버튼 한 변.
+const AUX_HEADER_BTN: f32 = 26.0;
+
+/// 라벨(방 이름·학생 이름)이 시작되는 x — 왼쪽 파일트리 버튼 바로 오른쪽.
+///
+/// 전엔 신호등 세 개(`TRAFFIC_LIGHT_WIDTH`)를 피해 78px 을 통째로 비웠다.
+/// 이제 그 버튼들을 숨기므로(`hide_traffic_lights`) 그 자리가 우리 것이다 —
+/// 라벨이 창 왼쪽으로 붙어 학생 이름이 헤더 한가운데로 밀리지 않는다.
+const AUX_HEADER_X: f32 = AUX_HEADER_PAD * 2.0 + AUX_HEADER_BTN;
 
 /// 셀 그리드가 시작되는 y — 헤더 띠 바로 아래.
 ///
@@ -1556,7 +1617,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window = match create_untabbed(event_loop, with_aux_chrome(attrs)) {
+        let window = match create_aux_window(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] terminal window create failed: {e}");
@@ -1777,10 +1838,14 @@ impl App {
         if student.is_some() {
             const T: f32 = 1.5;
             let col = crate::theme::with_alpha(accent, if focused { 0xFF } else { 0x66 });
+            // 세로 변은 가로 변 **사이만** 채운다. 네 변을 각각 통짜로 그리면 모서리
+            // 1.5×1.5 가 두 번 칠해지는데, 포커스가 없을 땐 알파가 0x66 이라 그
+            // 네 점만 두 배로 진해져 꼭짓점이 점처럼 튄다(거노: "테두리 꼭짓점이
+            // 이상해"). 불투명일 땐 안 보이던 게 반투명이 되며 드러났다.
             a.gpu.rect(0.0, 0.0, w, T, col);
             a.gpu.rect(0.0, h - T, w, T, col);
-            a.gpu.rect(0.0, 0.0, T, h, col);
-            a.gpu.rect(w - T, 0.0, T, h, col);
+            a.gpu.rect(0.0, T, T, (h - T * 2.0).max(0.0), col);
+            a.gpu.rect(w - T, T, T, (h - T * 2.0).max(0.0), col);
         }
         let _ = a.gpu.render(&[], scale, 0.0, true);
         a.dirty = false;
@@ -1840,8 +1905,34 @@ impl App {
             .filter(|n| !n.is_empty());
         // 헤더에 쓸 이름. 이름을 안 지은 방이면 번호로 — 띠를 비워 두면 창이
         // 무엇인지 말해주는 게 아무것도 없다(OS 제목을 껐으므로).
-        let room_label =
-            label.clone().unwrap_or_else(|| format!("{}번 방", window + 1));
+        //
+        // 포커스 pane 에 학생이 있으면 그 이름을 **앞에** 세운다(터미널 별도창과
+        // 같은 「학생 · %N · 방」 꼴). 방 이름만 있으면 pane 을 옮겨 다녀도 지금
+        // 누구를 보고 있는지가 어디에도 안 뜬다(거노).
+        let room_label = {
+            let room = label.clone().unwrap_or_else(|| format!("{}번 방", window + 1));
+            match focus.as_deref() {
+                Some(pid) => {
+                    let who = {
+                        let ws = self.ws.lock().unwrap();
+                        self.display_pane_char(&ws, pid)
+                    };
+                    match who {
+                        Some(name) => format!("{name} · {pid} · {room}"),
+                        None => format!("{pid} · {room}"),
+                    }
+                }
+                None => room,
+            }
+        };
+        // 헤더 라벨 색 — 포커스 pane 의 학생색. 창 테두리·pane 테두리와 같은 신호를
+        // 띠에서도 준다(터미널 별도창이 이미 그렇게 한다).
+        let label_col = focus.as_deref().and_then(|pid| {
+            let ws = self.ws.lock().unwrap();
+            let name = ws.pane_character.get(pid)?;
+            let ord = crate::theme::character_ordinal(&ws.pane_character, pid);
+            crate::theme::character_accent_n(name, ord)
+        });
         // pane 별 배정 학생색 — 꺼낸 방도 메인 그리드와 같은 색으로 읽혀야 한다.
         // ordinal 은 동명이인 구분이라 전체 맵을 넘긴다(메인과 같은 규칙).
         let pane_cols: HashMap<String, [u8; 4]> = {
@@ -1936,10 +2027,10 @@ impl App {
                 gpu::DrawOpts {
                     font_size: 12.0,
                     color: crate::theme::with_alpha(
-                        crate::theme::text_mute(),
+                        label_col.unwrap_or_else(crate::theme::text_mute),
                         if focused { 0xF0 } else { 0x99 },
                     ),
-                    bold: false,
+                    bold: label_col.is_some(),
                     italic: false,
                 },
             );
@@ -1982,10 +2073,12 @@ impl App {
                     .map(|c| crate::theme::with_alpha(c, 0x55))
                     .unwrap_or_else(crate::theme::border)
             };
+            // 세로 변은 가로 변 사이만 — 모서리를 두 번 칠하면 반투명(비포커스
+            // 0x55)일 때 네 꼭짓점만 진해져 점처럼 튄다.
             a.gpu.rect(rx, ry, rw, 1.0, col);
             a.gpu.rect(rx, ry + rh - 1.0, rw, 1.0, col);
-            a.gpu.rect(rx, ry, 1.0, rh, col);
-            a.gpu.rect(rx + rw - 1.0, ry, 1.0, rh, col);
+            a.gpu.rect(rx, ry + 1.0, 1.0, (rh - 2.0).max(0.0), col);
+            a.gpu.rect(rx + rw - 1.0, ry + 1.0, 1.0, (rh - 2.0).max(0.0), col);
             // working 스윕바 — 메인 pane 상단의 그것과 같은 자리, 같은 신호.
             if working_panes.contains(pid.as_str()) {
                 const BAR_H: f32 = 2.5;
@@ -2984,7 +3077,7 @@ impl App {
         if let Some(pos) = near {
             attrs = attrs.with_position(pos);
         }
-        let window_handle = match create_untabbed(event_loop, with_aux_chrome(attrs)) {
+        let window_handle = match create_aux_window(event_loop, attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
                 eprintln!("[auxwin] room window create failed: {e}");

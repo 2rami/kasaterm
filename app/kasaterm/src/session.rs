@@ -2039,11 +2039,13 @@ impl App {
         let mut y = top;
         for i in first..n {
             let leaves = self.window_leaves(i);
-            // pane 이 하나뿐인 방은 펼치지 않는다 — 점 하나가 이미 그 하나를 말하고
-            // 있어 목록이 같은 말을 반복할 뿐이다. 손잡이(render)도 같은 조건이라
-            // 여기서 갈라지면 손이 닿지 않는 펼침 상태가 생긴다.
+            // 학생이 하나인 방도 편다. "점 하나가 이미 그 하나를 말한다"고 봤는데,
+            // 그 한 줄이 **누가 있고 무슨 상태인지의 전부**라 접어 두면 학생 하나짜리
+            // 방에선 그 학생을 볼 길이 통째로 사라졌다(거노, 두 번). 손잡이 쪽은 이미
+            // 폈는데 여기가 안 따라와 버튼만 있고 아무것도 안 나오는 상태였다 — 두
+            // 조건이 갈리면 손이 닿지 않는 펼침이 생긴다.
             // 펴는 중이면 0..1 사이 — 카드가 그만큼만 자란다.
-            let t = if leaves.len() > 1 { self.expand_progress(i) } else { 0.0 };
+            let t = if leaves.is_empty() { 0.0 } else { self.expand_progress(i) };
             let full_h = leaves.len() as f32 * SIDEBAR_ROW_H + SIDEBAR_ROW_PAD;
             let list_h = (full_h * t).round();
             let h = SIDEBAR_TAB_H + list_h;
