@@ -2058,7 +2058,11 @@ impl App {
             let ws = self.ws.lock().unwrap();
             match ws.panes.get(pane) {
                 Some(p) => (p.tabs.len(), p.tabs.get(idx).and_then(|t| t.pid.clone())),
-                None => return,
+                // PaneState 가 **없는 게 정상**인 pane 이 있다 — split leaf 는 보조 탭이
+                // 생길 때까지 `ws.panes` 에 안 들어간다(main.rs `pane_font_scales` 주석이
+                // 같은 사실을 말한다). 여기서 return 하면 그런 pane 은 Cmd+W 가 통째로
+                // 죽는다(거노: "커맨드 W 해도 무반응"). 항목이 없다 = 탭 하나짜리 pane.
+                None => (1, None),
             }
         };
         let action = if tabs_len > 1 {
@@ -2066,8 +2070,22 @@ impl App {
         } else {
             let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
             if leaves <= 1 {
-                // Last pane of the window: close is a no-op (OS button quits),
-                // so don't even confirm.
+                // 이 방의 마지막 pane. 방이 여럿이면 **방을 닫는 것**으로 잇는다 —
+                // 전에는 여기서 그냥 return 이라 Cmd+W 가 죽은 키였다(거노).
+                // 방이 하나뿐이면 그건 앱 종료라 OS 닫기 버튼에 맡기고 no-op.
+                let idx = self.active_window;
+                if self.windows.len() <= 1 {
+                    return;
+                }
+                let action = PendingClose::Session(idx);
+                // 바쁨·미저장이 있으면 그쪽 대화가 무엇을 잃는지까지 말해 주므로 먼저다.
+                if self.guard_dirty(&action) {
+                    return;
+                }
+                match self.window_busy(idx) {
+                    Some(proc) => self.open_confirm_close(proc, action),
+                    None => self.raise_confirm(ConfirmClose { why: CloseWhy::LastPane, action }),
+                }
                 return;
             }
             PendingClose::Pane { pane: pane.to_string() }

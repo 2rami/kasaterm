@@ -6041,11 +6041,49 @@ impl App {
                     AccountMenuItem::AddInSettings,
                     "설정에서 계정 추가…".to_string(),
                 ));
+                // 계정별 한도 — **누르기 전에** 보여야 한다(거노: "누르면 전환되버리잖아").
+                // 폴러가 슬롯별로 채운 표(`claude_usage_all`)를 그대로 읽는다. 값이 없는
+                // 계정(한 번도 조회 못 함·토큰 없음)은 빈칸으로 둔다 — 0% 로 그리면
+                // "여유 있음"이라는 **거짓말**이 되고, 그게 옮길 곳을 고르는 판단을 망친다.
+                let usage_of = |id: &str| -> Option<crate::UsageBadge> {
+                    let key = crate::socket::claude_account_dir(id)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    self.claude_usage_all.lock().ok()?.get(&key).cloned()
+                };
+                // 표기·색은 **Info 탭 사용량 pill 과 같은 규칙**을 쓴다(info.rs
+                // draw_info_actions): `7d 62%`, stale 이면 `~` 를 앞에. 같은 숫자가
+                // 두 자리에서 다르게 보이면 어느 쪽을 믿을지가 문제가 된다.
+                let usage_text = |b: &Option<crate::UsageBadge>| -> String {
+                    match b {
+                        Some(b) if b.stale => format!("~{} {:.0}%", b.label, b.pct),
+                        Some(b) => format!("{} {:.0}%", b.label, b.pct),
+                        None => "—".to_string(),
+                    }
+                };
+                // 값이 없는 계정은 **빈칸이 아니라 `—`**. 빈칸은 "한도 여유"로 읽혀서,
+                // 옮길 곳을 고르는 판단을 정확히 반대로 만든다. 오래 안 쓴 계정은 OAuth
+                // 토큰이 만료돼(8시간쯤) usage 조회가 거부되므로 실제로 자주 생긴다 —
+                // 그 계정으로 claude 를 한 번 돌리면 토큰이 갱신돼 숫자가 돌아온다.
+                let row_usage = |item: &AccountMenuItem| -> Option<Option<crate::UsageBadge>> {
+                    match item {
+                        AccountMenuItem::Select(id) => Some(usage_of(id)),
+                        _ => None,
+                    }
+                };
                 let rh = 28.0_f32;
                 let pad = 4.0_f32;
+                // 한도 칸이 이름을 밀지 않게 폭 계산에 함께 넣는다.
+                let gap = 14.0_f32;
                 let mw = rows
                     .iter()
-                    .map(|(_, l)| g.measure_chrome_text(l.as_str(), f, true) + pad_x * 2.0)
+                    .map(|(item, l)| {
+                        let mut w = g.measure_chrome_text(l.as_str(), f, true) + pad_x * 2.0;
+                        if let Some(b) = row_usage(item) {
+                            w += gap + g.measure_chrome_text(usage_text(&b).as_str(), f - 1.0, true);
+                        }
+                        w
+                    })
                     .fold(aw, f32::max);
                 // +5 = "추가" 행 위 구분선이 먹는 자리.
                 let mh = pad * 2.0 + rh * rows.len() as f32 + 5.0;
@@ -6083,6 +6121,29 @@ impl App {
                             italic: false,
                         },
                     );
+                    if let Some(b) = row_usage(&item) {
+                        let u = usage_text(&b);
+                        let uf = f - 1.0;
+                        let uw = g.measure_chrome_text(u.as_str(), uf, true);
+                        // 임계도 pill 과 같은 값(90 위험 · 70 주의). 옮길 곳을 고르려고
+                        // 여는 목록이라 "여기도 꽉 찼다"가 이름만큼 빨리 읽혀야 한다.
+                        // 모르는 값(`—`)은 색을 안 준다 — 초록으로 그리면 여유로 읽힌다.
+                        let col = match &b {
+                            None => theme::text_mute(),
+                            Some(b) if b.pct >= 90.0 => theme::danger(),
+                            Some(b) if b.pct >= 70.0 => theme::syn_number(),
+                            Some(_) => theme::success(),
+                        };
+                        let col = if b.as_ref().is_some_and(|b| b.stale) {
+                            theme::with_alpha(col, 0x99)
+                        } else {
+                            col
+                        };
+                        g.draw_text(
+                            mx + mw - pad_x - uw, ry + (rh - uf) / 2.0 - 1.0, &u,
+                            gpu::DrawOpts { font_size: uf, color: col, bold: true, italic: false },
+                        );
+                    }
                     self.account_menu_hits.push((item, (mx, ry, mw, rh)));
                     ry += rh;
                 }
@@ -6294,6 +6355,12 @@ impl App {
                             format!("{names} — {what} 닫을까요?"),
                         )
                     }
+                    // 왜 하나가 아니라 방이 닫히는지부터 말한다 — Cmd+W 는 「하나
+                    // 닫기」로 익힌 키라, 이유 없이 방 확인이 뜨면 오작동처럼 읽힌다.
+                    crate::CloseWhy::LastPane => (
+                        "이 방의 마지막 pane 이에요".to_string(),
+                        format!("{what} 닫을까요?"),
+                    ),
                 };
                 let title = &title;
                 let subtitle = subtitle.as_str();
