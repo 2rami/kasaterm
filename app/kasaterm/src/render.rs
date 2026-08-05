@@ -7177,27 +7177,40 @@ fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
             }
         }
     }
-    // codex — 칠해진 입력행. 글리프가 하나도 없는 행은 배경만 남은 여백일 수 있어
-    // 마커를 함께 요구한다.
-    let f = rows.iter().rposition(|r| {
-        if !marker_row(r) {
-            return false;
-        }
-        let mut fill: Option<&kasa_bridge::screen::Color> = None;
+    // codex — 칠해진 입력행. 행 전체가 같은 non-Default bg 를 쓰는 것이 시그니처고,
+    // 마커(`›`)를 함께 요구해 배경만 남은 여백 행과 구별한다.
+    let uniform_fill = |r: &[GridCell]| -> Option<kasa_bridge::screen::Color> {
+        let mut fill: Option<kasa_bridge::screen::Color> = None;
         let mut glyphs = 0usize;
         for c in r.iter().filter(|c| c.ch != '\0') {
             if matches!(c.bg, kasa_bridge::screen::Color::Default) {
-                return false;
+                return None;
             }
-            if fill.is_some_and(|f| *f != c.bg) {
-                return false;
+            if fill.is_some_and(|f| f != c.bg) {
+                return None;
             }
-            fill = Some(&c.bg);
+            fill = Some(c.bg.clone());
             glyphs += 1;
         }
-        glyphs >= 8
-    })?;
-    Some(PromptBox::Filled { rows: f..(f + 1) })
+        (glyphs >= 8).then_some(fill?)
+    };
+    let f = rows
+        .iter()
+        .rposition(|r| marker_row(r) && uniform_fill(r).is_some())?;
+    let fill = uniform_fill(&rows[f])?;
+    // 입력창은 **여러 줄이다** — 마커 행 위아래로 같은 채움색 여백 행이 붙고,
+    // 여러 줄을 입력하면 그만큼 자란다(실측 0.146.0: 여백-입력-여백 3줄). 마커
+    // 행만 칠하면 가운데 한 줄만 색이 바뀌어 상자가 아니라 밑줄로 보인다(거노).
+    let same = |r: &[GridCell]| uniform_fill(r).is_some_and(|c| c == fill);
+    let mut start = f;
+    while start > 0 && same(&rows[start - 1]) {
+        start -= 1;
+    }
+    let mut end = f + 1;
+    while end < rows.len() && same(&rows[end]) {
+        end += 1;
+    }
+    Some(PromptBox::Filled { rows: start..end })
 }
 
 /// 학생 pane 입력박스의 양끝 보더 행(─ 줄 + @배지)을 claude 가 /color·
@@ -10621,6 +10634,20 @@ mod prompt_box_tests {
             row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
         ];
         assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { ref rows }) if *rows == (1..2)));
+
+        // 실제 codex 는 마커 행 위아래에 같은 채움색 여백 행을 둔다(실측 3줄).
+        // 마커 행만 잡으면 가운데 한 줄만 칠해져 상자가 아니라 밑줄이 된다(거노).
+        let boxed = vec![
+            row_from("⚠ MCP startup incomplete"),
+            filled(&" ".repeat(50)),
+            filled("› Use /skills to list available skills"),
+            filled(&" ".repeat(50)),
+            row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
+        ];
+        assert!(
+            matches!(prompt_box(&boxed), Some(PromptBox::Filled { ref rows }) if *rows == (1..4)),
+            "여백 행까지 한 상자로"
+        );
         // 같은 줄이라도 배경이 없으면 입력창이 아니다 — 인용문 오인 방지.
         let plain = vec![row_from("› quoted line, not an input box at all")];
         assert!(prompt_box(&plain).is_none());
@@ -10642,11 +10669,13 @@ mod prompt_box_tests {
         let rows = vec![
             row_from("⚠ MCP startup incomplete"),
             row_from(""),
+            filled(&" ".repeat(50)),
             filled("› Write tests for @filename"),
+            filled(&" ".repeat(50)),
             row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
         ];
         let (anchor, left_c) = find_filled_standing_anchor(&rows, 80).expect("앵커");
-        assert_eq!(anchor, 1, "입력행(2) 바로 위");
+        assert_eq!(anchor, 1, "여백 행까지 포함한 상자(2..5) 바로 위");
         // 앵커 행이 비어 있으면 오른쪽 끝에 선다.
         assert!((left_c - (80.0 - 1.0 - STAND_CELLS)).abs() < f32::EPSILON);
 
