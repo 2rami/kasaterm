@@ -215,7 +215,12 @@ tool('browser_wait_for', 'Wait for text to appear or disappear, or just wait a f
   tabId, text: z.string().optional(), textGone: z.string().optional(), ms: z.number().int().optional(), timeoutMs: z.number().int().optional(),
 }, async (a) => text(await call('wait_for', a, 60000)))
 
-tool('browser_resize_window', 'Resize the window that owns a tab.', { tabId, width: z.number().int(), height: z.number().int() },
+tool('browser_emulate_device', 'Give one TAB a phone-sized viewport and keep it that way until you turn it off. This is the right tool for checking a mobile layout — not browser_resize_window, because a window is shared by everyone driving this browser (resizing it silently wipes someone else\'s setup) and Chrome will not go below 500px wide anyway. The override lives on the debugger session, so this pins the session open; that leaves a debugging banner on the tab, which is the trade for it not reverting. Call again with off:true to clear it and drop the banner. The result includes the viewport the page actually reports, so you can confirm it took rather than trusting the call.', {
+  tabId, width: z.number().int().optional(), height: z.number().int().optional(),
+  deviceScaleFactor: z.number().optional(), mobile: z.boolean().optional(), off: z.boolean().optional(),
+}, async (a) => text(await call('emulate_device', a, 20000)))
+
+tool('browser_resize_window', 'Resize the window that owns a tab. Prefer browser_emulate_device for mobile-layout checks: a window is shared by every session driving this browser, so resizing wipes other people\'s setup, and Chrome clamps the width at 500px.', { tabId, width: z.number().int(), height: z.number().int() },
   async (a) => text(await call('resize_window', a)))
 
 tool('browser_attach_debugger', 'Manually attach the debugger to a tab. Rarely needed — other tools attach on demand and detach after 15s idle.', { tabId },

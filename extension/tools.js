@@ -484,6 +484,39 @@ const handlers = {
     throw new Error(`WAIT_TIMEOUT: ${timeoutMs}ms 안에 조건이 만족되지 않았습니다.`)
   },
 
+  // 폰뷰는 창이 아니라 탭에 건다. 창은 pane 여럿이 함께 쓰는 자원이라 누가 리사이즈하면 남의
+  // 설정이 조용히 사라지고, 크롬 최소 창 폭이 500px 이어서 390 을 만들 수도 없다.
+  // ★override 는 디버거 세션에 매여 있어서 세션을 놓으면 통째로 풀린다 — 유휴 15초에 detach 하는
+  // 구조에서 「걸어두면 몇 분 뒤 데스크톱으로 돌아가 있다」의 원인이 이것이다(2026-08-05 아로나 실측).
+  // 그래서 핀을 걸어 유휴 detach 대상에서 뺀다. 디버깅 배너가 남지만 폰뷰가 유지되는 쪽이 중요하고,
+  // off:true 로 끄면 배너도 함께 걷힌다.
+  async emulate_device({ tabId, width, height, deviceScaleFactor = 2, mobile = true, off } = {}) {
+    const id = await resolveTabId(tabId)
+
+    if (off) {
+      if (cdp.isAttached(id)) await cdp.raw(id, 'Emulation.clearDeviceMetricsOverride').catch(() => {})
+      await cdp.unpin(id, 'emulation')
+      const seen = await cdp.evaluate(id, 'innerWidth + "x" + innerHeight').catch(() => null)
+      return { tabId: id, emulating: false, viewport: seen, note: '핀을 풀었으니 유휴 15초 뒤 디버깅 배너도 걷힙니다.' }
+    }
+
+    const w = Number(width)
+    const h = Number(height)
+    if (!w || !h) throw new Error('NEED_SIZE: width 와 height 를 지정하세요(예: 390 × 844). 해제는 off:true.')
+
+    // ⚠️핀을 먼저 건다. override 를 걸고 나서 붙잡으면 그 사이에 타이머가 세션을 놓을 수 있다.
+    await cdp.pin(id, 'emulation')
+    await cdp.raw(id, 'Emulation.setDeviceMetricsOverride', {
+      width: w, height: h, deviceScaleFactor: Number(deviceScaleFactor) || 0, mobile: !!mobile,
+    })
+    // 걸었다는 말만으로는 유지 여부를 모른다. 페이지가 실제로 본 크기를 함께 돌려준다.
+    const seen = await cdp.evaluate(id, 'innerWidth + "x" + innerHeight').catch(() => null)
+    return {
+      tabId: id, emulating: true, width: w, height: h,
+      deviceScaleFactor: Number(deviceScaleFactor) || 0, mobile: !!mobile, viewport: seen,
+    }
+  },
+
   async resize_window({ tabId, width, height }) {
     const id = await resolveTabId(tabId)
     const tab = await chrome.tabs.get(id)
