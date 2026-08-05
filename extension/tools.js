@@ -2,7 +2,7 @@
 // 그래서 평소엔 디버깅 배너가 안 뜨지만 능력치는 CDP 와 동일하다.
 import * as cdp from './cdp.js'
 import { page, restricted } from './page.js'
-import { setTask, forgetTab, identityOf, showCursor, groupOwnTab } from './sessions.js'
+import { setTask, forgetTab, identityOf, showCursor, groupOwnTab, ungroupBeforeClose, ownWindowOf, listGroups } from './sessions.js'
 
 // 워커가 언제 떴는지. 이 값이 방금 태어난 것으로 나오면 직전 명령이 실패한 이유는 대개 워커가
 // 도중에 죽은 것이다 — 끊김의 원인을 코드에서 찾기 전에 여기부터 본다.
@@ -21,6 +21,15 @@ const PHONE_PROBE = `({
   pointerCoarse: matchMedia('(pointer: coarse)').matches
 })`
 const GROUP_COLORS = new Set(['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'])
+
+// 이름 하나로 폭·높이·dpr 을 한꺼번에 맞춘다. 폭만 옮겨 적고 dpr 을 잊으면 레티나에서만 드러나는
+// 이미지·보더 문제를 통째로 못 본다.
+const DEVICES = {
+  phone: { width: 390, height: 844, deviceScaleFactor: 3 },
+  'iphone-se': { width: 375, height: 667, deviceScaleFactor: 2 },
+  pixel: { width: 412, height: 915, deviceScaleFactor: 2.625 },
+  tablet: { width: 768, height: 1024, deviceScaleFactor: 2 },
+}
 
 function tabsQuery(q) {
   return new Promise((resolve) => chrome.tabs.query(q, resolve))
@@ -56,6 +65,21 @@ function waitForLoad(tabId, timeoutMs = 20000) {
     const timer = setTimeout(() => finish('timeout'), timeoutMs)
     chrome.tabs.get(tabId).then((t) => { if (t.status === 'complete') finish('complete') }).catch(() => {})
   })
+}
+
+// 창이 페이지에 실제로 내주는 공간. ⚠️붙자마자 재면 안 된다 — attach 하면 크롬이 디버깅 인포바를
+// 띄우고 그것이 슬라이드해 내려오는 동안 높이가 계속 줄어든다(실측: 직후 632 → 71ms 600 →
+// 123ms 583 에서 안정). 그 과도기 값을 쓰면 창을 53px 크게 잡아 그만큼 화면 밖으로 밀려난다.
+async function measureRoom(tabId) {
+  let prev = null
+  for (let i = 0; i < 8; i++) {
+    const now = await cdp.evaluate(tabId, '({ w: innerWidth, h: innerHeight })').catch(() => null)
+    if (!now) return prev
+    if (prev && prev.w === now.w && prev.h === now.h) return now
+    prev = now
+    await new Promise((r) => setTimeout(r, 60))
+  }
+  return prev
 }
 
 // 클릭이 네비게이션을 유발했으면 그것이 끝난 뒤에 결과를 준다. 안 그러면 곧바로 이어지는 read_page 가
@@ -171,7 +195,23 @@ const handlers = {
   // tabId 를 주면 이미 있는 탭을 그 창으로 떼어낸다.
   // ⚠️focused 기본값은 false 다. 새 창이 앞으로 튀어나오면 선생님이 보던 앱을 가린다 — 탭을
   // 백그라운드로 여는 것과 같은 이유이고, 여기서는 되돌릴 방법이 없으니 기본값이 더 중요하다.
-  async new_window({ url, tabId, focused = false, width, height, incognito } = {}, ctx = {}) {
+  async new_window({ url, tabId, focused = false, width, height, incognito, reuse = true } = {}, ctx = {}) {
+    // ★내 창이 이미 있으면 거기에 연다. 확인을 반복할 때마다 창을 새로 열면 사람 화면에 창이 쌓이고
+    // 창마다 그룹이 하나씩 더 생긴다(2026-08-05: 실험을 돌리는 동안 탭바가 그룹으로 가득 찼다).
+    // 탭을 떼어내는 호출과 시크릿 창은 재사용할 수 없다 — 목적 자체가 별도 창이다.
+    if (reuse && !tabId && !incognito) {
+      const windowId = await ownWindowOf(ctx.client)
+      if (windowId != null) {
+        if (width && height) await chrome.windows.update(windowId, { width: Number(width), height: Number(height) }).catch(() => {})
+        const made = await handlers.new_tab({ url, active: true, windowId }, ctx)
+        const win = await chrome.windows.get(windowId).catch(() => null)
+        return {
+          ...made, windowId, reused: true,
+          width: win?.width ?? null, height: win?.height ?? null, focused: !!win?.focused,
+        }
+      }
+    }
+
     const opts = { focused, ...(incognito ? { incognito: true } : {}) }
     if (width && height) Object.assign(opts, { width: Number(width), height: Number(height), left: 0, top: 0 })
     if (tabId) opts.tabId = await resolveTabId(tabId)
@@ -198,6 +238,7 @@ const handlers = {
 
   async close_window({ windowId }) {
     const tabs = await tabsQuery({ windowId: Number(windowId) })
+    await ungroupBeforeClose(tabs.map((t) => t.id))
     for (const t of tabs) { await cdp.detach(t.id).catch(() => {}); forgetTab(t.id) }
     await chrome.windows.remove(Number(windowId))
     return { closed: Number(windowId), tabs: tabs.length }
@@ -205,6 +246,7 @@ const handlers = {
 
   async close_tab({ tabId }) {
     const id = await resolveTabId(tabId)
+    await ungroupBeforeClose([id])
     await cdp.detach(id).catch(() => {})
     forgetTab(id)
     await chrome.tabs.remove(id)
@@ -213,6 +255,10 @@ const handlers = {
 
   async set_task({ task }, ctx = {}) {
     return setTask(ctx.client, task)
+  },
+
+  async list_groups() {
+    return await listGroups()
   },
 
   // 탭을 그룹에서 빼낸다. 마지막 탭이 빠지면 그룹은 크롬이 알아서 없앤다(그룹 삭제 API 는 없다).
@@ -508,7 +554,7 @@ const handlers = {
   // 구조에서 「걸어두면 몇 분 뒤 데스크톱으로 돌아가 있다」의 원인이 이것이다(2026-08-05 아로나 실측).
   // 그래서 핀을 걸어 유휴 detach 대상에서 뺀다. 디버깅 배너가 남지만 폰뷰가 유지되는 쪽이 중요하고,
   // off:true 로 끄면 배너도 함께 걷힌다.
-  async emulate_device({ tabId, width, height, deviceScaleFactor = 2, mobile = true, off } = {}) {
+  async emulate_device({ tabId, device, width, height, deviceScaleFactor, mobile = true, fit = true, off } = {}) {
     const id = await resolveTabId(tabId)
 
     if (off) {
@@ -524,14 +570,34 @@ const handlers = {
       }
     }
 
-    const w = Number(width)
-    const h = Number(height)
-    if (!w || !h) throw new Error('NEED_SIZE: width 와 height 를 지정하세요(예: 390 × 844). 해제는 off:true.')
+    const preset = DEVICES[String(device || 'phone').toLowerCase()]
+    if (device && !preset) throw new Error(`UNKNOWN_DEVICE: ${device}. 쓸 수 있는 이름 — ${Object.keys(DEVICES).join(', ')}`)
+    const w = Math.round(Number(width) || preset.width)
+    const h = Math.round(Number(height) || preset.height)
+    const dsf = Number(deviceScaleFactor) || preset.deviceScaleFactor
+    if (!(w >= 100 && w <= 4000 && h >= 100 && h <= 4000)) {
+      throw new Error(`BAD_SIZE: ${w}x${h} 는 폰 화면 크기가 아닙니다. 100~4000 사이로 주거나 device 이름을 쓰세요.`)
+    }
 
     // ⚠️핀을 먼저 건다. override 를 걸고 나서 붙잡으면 그 사이에 타이머가 세션을 놓을 수 있다.
     await cdp.pin(id, 'emulation')
+
+    // ★창이 페이지에 실제로 내주는 공간을 먼저 잰다. override 가 이미 걸려 있으면 innerHeight 도
+    // outerHeight 도 그 값으로 덮여서, 창이 그보다 작아도 페이지는 알 방법이 없다 — 이것이
+    // 「폰뷰인데 하단 네비바가 없다」의 정체다(2026-08-05 실측: 창 772 에 844 를 걸어 아래 72px 이
+    // 창 밖으로 나갔고 bottom:0 인 탭바 783~844 가 통째로 잘렸다. 스크린샷은 CDP 라 844 전부를
+    // 찍으니 이미지로는 멀쩡해 보여서 더 헷갈린다).
+    await cdp.raw(id, 'Emulation.clearDeviceMetricsOverride').catch(() => {})
+    const room = await measureRoom(id)
+
+    // DevTools 기기 모드와 같은 처리다 — CSS 픽셀은 그대로 두고 화면에 그릴 때만 줄이므로
+    // 미디어쿼리 분기는 하나도 바뀌지 않는다(실측: scale 0.915 에서 innerWidth 390 유지).
+    const scale = fit && room ? Math.min(1, room.w / w, room.h / h) : 1
+    const overflows = !!room && (w > room.w || h > room.h)
+
     await cdp.raw(id, 'Emulation.setDeviceMetricsOverride', {
-      width: w, height: h, deviceScaleFactor: Number(deviceScaleFactor) || 0, mobile: !!mobile,
+      width: w, height: h, deviceScaleFactor: dsf, mobile: !!mobile,
+      ...(scale < 1 ? { scale } : {}),
     })
     // ★크기만 바꾸면 폰이 되지 않는다. 폰에는 마우스가 없으므로 터치까지 켜야 `(hover: none)` 과
     // `(pointer: coarse)` 규칙이 걸린다 — 안 켜면 **실제 폰에서만 보이는 스타일을 못 본 채**
@@ -544,12 +610,21 @@ const handlers = {
     // 걸었다는 말만으로는 유지 여부를 모른다. 페이지가 실제로 무엇을 봤는지 함께 돌려준다.
     const seen = await cdp.evaluate(id, PHONE_PROBE).catch(() => null)
     return {
-      tabId: id, emulating: true, width: w, height: h,
-      deviceScaleFactor: Number(deviceScaleFactor) || 0, mobile: !!mobile,
+      tabId: id, emulating: true, ...(preset && !width && !height ? { device: String(device || 'phone').toLowerCase() } : {}),
+      width: w, height: h, deviceScaleFactor: dsf, mobile: !!mobile,
       viewport: seen?.viewport ?? null,
       touchPoints: seen?.touchPoints ?? null,
       hoverNone: seen?.hoverNone ?? null,
       pointerCoarse: seen?.pointerCoarse ?? null,
+      windowRoom: room ? `${room.w}x${room.h}` : null,
+      scale: Number(scale.toFixed(3)),
+      // 「걸렸다」와 「사람 눈에 다 보인다」는 다른 말이다. 후자를 명시적으로 돌려준다.
+      fullyVisible: room ? Math.round(h * scale) <= room.h + 1 && Math.round(w * scale) <= room.w + 1 : null,
+      ...(scale < 1
+        ? { note: `창이 ${room.w}x${room.h} 라 ${Math.round(scale * 100)}% 로 축소해 넣었습니다. CSS 픽셀은 ${w}x${h} 그대로여서 미디어쿼리는 안 바뀝니다.` }
+        : overflows
+          ? { note: `⚠️창(${room.w}x${room.h})보다 커서 화면 밖으로 잘립니다. bottom 에 붙은 요소는 안 보입니다 — fit 을 켜면 축소해 맞춥니다.` }
+          : {}),
     }
   },
 

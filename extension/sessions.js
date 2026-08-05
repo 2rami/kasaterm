@@ -449,6 +449,54 @@ export async function groupOwnTab(client, tabId) {
   }
 }
 
+// 이 세션이 이미 쓰고 있는 창. 확인을 반복할 때마다 창을 새로 열면 사람 화면에 창이 쌓이고,
+// 그때마다 창별로 그룹이 하나씩 더 생긴다(그룹은 창을 넘나들지 못한다).
+export async function ownWindowOf(client) {
+  const s = sessionOf(client)
+  if (!s) return null
+  for (const gid of [...s.groups]) {
+    const g = await chrome.tabGroups.get(gid).catch(() => null)
+    if (!g) { s.groups.delete(gid); continue }
+    return g.windowId
+  }
+  return null
+}
+
+// 탭 그룹 현황. 껍데기만 남은 그룹이 몇 개인지는 눈으로 세는 수밖에 없어서 여기서 세어 준다.
+export async function listGroups() {
+  const ours = new Set()
+  for (const s of sessions.values()) for (const g of s.groups) ours.add(g)
+  const groups = await chrome.tabGroups.query({}).catch(() => [])
+  const out = []
+  for (const g of groups) {
+    const tabs = await new Promise((r) => chrome.tabs.query({ groupId: g.id }, r)).catch(() => [])
+    out.push({ groupId: g.id, title: g.title, color: g.color, windowId: g.windowId, tabs: tabs.length, ours: ours.has(g.id) })
+  }
+  return {
+    groups: out,
+    empty: out.filter((g) => g.tabs === 0).length,
+    // 확장 API 에 그룹 삭제가 생겼는지 — 없으면 껍데기는 사람이 우클릭으로 지우는 수밖에 없다.
+    canRemove: typeof chrome.tabGroups?.remove === 'function',
+  }
+}
+
+// ★크롬은 탭 그룹을 자동으로 저장한다. 그룹에 든 채로 마지막 탭이 닫히면 그룹이 사라지는 게 아니라
+// **이름만 남은 껍데기가 탭바에 계속 붙어 있다**(2026-08-05: 학생 넷이 만든 그룹 10개가 그렇게 쌓여
+// 탭바를 채웠다). 확장에는 그룹 삭제 API 가 없으므로 사후 정리도 불가능하다 — 닫기 전에 빼내는 것이
+// 유일한 방법이다. 우리가 만든 그룹만 건드린다. 사람 그룹의 탭을 빼면 그 사람이 저장해 둔 그룹이
+// 대신 사라진다.
+export async function ungroupBeforeClose(tabIds) {
+  const ours = new Set()
+  for (const s of sessions.values()) for (const g of s.groups) ours.add(g)
+  if (!ours.size) return
+  const targets = []
+  for (const id of tabIds) {
+    const t = await chrome.tabs.get(id).catch(() => null)
+    if (t && ours.has(t.groupId)) targets.push(id)
+  }
+  if (targets.length) await chrome.tabs.ungroup(targets).catch((e) => note('ungroup-close', e))
+}
+
 export async function groupTabs(key) {
   const s = sessions.get(key)
   if (!s) return { ok: false, error: '세션이 없습니다.' }
