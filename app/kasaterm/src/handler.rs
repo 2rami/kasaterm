@@ -1810,14 +1810,27 @@ impl ApplicationHandler<UserEvent> for App {
                             target = i + 1;
                         }
                     }
+                    let mut from = 0usize;
                     if let Some(d) = self.win_tab_drag.as_mut() {
                         if !d.active && dx * dx + dy * dy > 9.0 {
                             d.active = true;
                         }
                         d.target = target;
+                        from = d.from;
                     }
                     if self.win_tab_drag.as_ref().map(|d| d.active).unwrap_or(false) {
                         window.set_cursor(CursorIcon::Grabbing);
+                        // 꺼내기 자리에 들어서는 **순간** 방이 별도창으로 떨어지고,
+                        // 그 창이 커서를 따라온다. 놓을 때까지 기다리면 드래그 내내
+                        // 이게 나갈지 말지가 화면에 안 보인다(거노: "아직도 드래그
+                        // 뗄 때 분리된다"). 판정은 놓을 때 쓰던 `room_drag_tears`
+                        // 그대로라 두 순간이 갈리지 않는다.
+                        let tears = self.room_drag_tears();
+                        let torn = self.torn_aux_room(from).is_some();
+                        self.drag_trace("방탭", tears, torn);
+                        if torn || tears {
+                            self.drag_tear_follow_room(from, event_loop);
+                        }
                         self.chrome_dirty = true;
                         window.request_redraw();
                     }
@@ -1901,6 +1914,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // 레이아웃에 없는 pane 을 옮기려 들면 안 되기 때문이다.
                         let (win_w, win_h) = self.logical_win_size();
                         let out = Self::drag_left_window(px, py, win_w, win_h);
+                        self.drag_trace("pane탭", out, self.torn_aux_window(&src_pane).is_some());
                         let torn = out || self.torn_aux_window(&src_pane).is_some();
                         let followed = torn
                             && self.drag_tear_follow(&src_pane, Some(src_tab), event_loop);
@@ -1935,6 +1949,7 @@ impl ApplicationHandler<UserEvent> for App {
                             win_w,
                             win_h,
                         );
+                        self.drag_trace("pane헤더", out, self.torn_aux_window(&pane).is_some());
                         let torn = out || self.torn_aux_window(&pane).is_some();
                         let followed = torn && self.drag_tear_follow(&pane, None, event_loop);
                         if !followed {
@@ -4028,28 +4043,16 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(d) = self.win_tab_drag.take() {
                             if d.active {
                                 window.set_cursor(CursorIcon::Default);
-                                // 기준은 「창 밖」이 아니라 **패널 밖**이다. 창을
-                                // 통째로 벗어나야 꺼지게 뒀더니, 사이드바에서 옆으로
-                                // 빼는 자연스러운 동작이 전부 재배치로 흘러 기능이
-                                // 죽어 있었다(거노 요청은 "윈도우 패널에서 꺼내면").
-                                // 재배치는 패널 안에서 위아래, 꺼내기는 패널 밖으로
-                                // 가른다 — 세로 사이드바에서 이 둘은 축이 다르다.
-                                //
-                                // 상단 탭 모드는 스트립이 가로라 같은 논리를 쓰면
-                                // 재배치(좌우)와 꺼내기(아래)가 뒤엉킨다 — 그쪽은
-                                // 창 밖 기준 그대로 둔다.
-                                const TEAR_MARGIN: f32 = 40.0;
-                                let (win_w, win_h) = self.logical_win_size();
-                                let left_win = Self::drag_left_window(
-                                    self.cursor_px.0,
-                                    self.cursor_px.1,
-                                    win_w,
-                                    win_h,
-                                );
-                                let left_panel = !self.tabs_on_top
-                                    && self.cursor_px.0
-                                        > self.effective_sidebar_w() + TEAR_MARGIN;
-                                if left_win || left_panel {
+                                // 끄는 도중에 이미 나갔으면 놓는 순간 할 일이 없다 —
+                                // 여기서 재배치를 태우면 방금 꺼낸 방을 다시 줄 세운다.
+                                // 판정(`room_drag_tears`)은 CursorMoved 와 한 벌을
+                                // 쓴다: 두 벌이면 「끌 땐 안 나가는데 놓으면 나가는」
+                                // 어긋남이 생기고 화면만 봐선 원인을 못 짚는다.
+                                if self.torn_aux_room(d.from).is_some() {
+                                    window.request_redraw();
+                                    return;
+                                }
+                                if self.room_drag_tears() {
                                     let near = self.cursor_screen_phys();
                                     self.undock_window_room(d.from, event_loop, near);
                                 } else {
@@ -4998,6 +5001,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoundock(event_loop);
         self.run_pending_autoauxtree();
         self.run_pending_autoteardrag(event_loop);
+        self.run_pending_autotearroom(event_loop);
         self.drain_aux_captures();
         // 편집기 자동 저장 — 타자가 멎은 지 설정 시간이 지난 버퍼를 쓴다.
         // 반환된 다음 만기는 아래 control flow 에 넣는다. 실측하면 이게 없어도

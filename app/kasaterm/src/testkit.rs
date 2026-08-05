@@ -2203,6 +2203,99 @@ impl App {
             self.pane_activity.entry(id.clone()).or_default().status = "waiting".into();
         }
     }
+    /// Headless **방 탭** 드래그-tear repro: `KASATERM_AUTOTEARROOM_MS`. pane 탭
+    /// (`autoteardrag`)과 별개 경로다 — 방 탭은 `win_tab_drag` 를 타고, 꺼내기 판정도
+    /// 「창 밖」이 아니라 「사이드바 패널 밖 + 40px」이다. 거노가 "드래그 뗄 때
+    /// 분리된다"고 한 게 이쪽이라 따로 잰다.
+    pub(crate) fn run_pending_autotearroom(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOTEARROOM_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        if step > 2 || Instant::now() < *due + std::time::Duration::from_millis(900 * step as u64)
+        {
+            return;
+        }
+        let Some(wid) = self.window.as_ref().map(|w| w.id()) else { return };
+        let scale = self.effective_scale() as f64;
+        let moved = |app: &mut Self, x: f32, y: f32| {
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::CursorMoved {
+                    device_id: DeviceId::dummy(),
+                    position: winit::dpi::PhysicalPosition::new(
+                        x as f64 * scale,
+                        y as f64 * scale,
+                    ),
+                },
+            );
+        };
+        match step {
+            // 방 탭을 잡고(press) 패널 밖으로 끌어낸다. 잡는 자리는 렌더가 적어 둔
+            // 실제 탭 rect — 좌표를 손으로 지어내면 press 가 엉뚱한 데 떨어진다.
+            0 => {
+                STEP.store(1, Ordering::Relaxed);
+                let Some(&(_, r)) = self.window_tab_rects.first() else {
+                    eprintln!("[autotearroom] FAIL — 방 탭 rect 이 없다(사이드바를 켜라)");
+                    STEP.store(3, Ordering::Relaxed);
+                    return;
+                };
+                self.cursor_px = (r.0 + r.2 / 2.0, r.1 + r.3 / 2.0);
+                self.window_event(
+                    event_loop,
+                    wid,
+                    WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                    },
+                );
+                // 패널 밖 + 여유. 여기서 이미 떨어져야 한다(놓기 전).
+                moved(self, self.effective_sidebar_w() + 160.0, r.1 + 40.0);
+                let torn = self.aux_windows.iter().any(|a| a.room_window().is_some());
+                eprintln!(
+                    "[autotearroom] 1) drag={} 놓기전뜯김={torn}",
+                    self.win_tab_drag.as_ref().map(|d| d.active).unwrap_or(false),
+                );
+            }
+            // 더 옮긴다 — 창이 따라오는지.
+            1 => {
+                STEP.store(2, Ordering::Relaxed);
+                moved(self, self.effective_sidebar_w() + 320.0, 260.0);
+            }
+            _ => {
+                STEP.store(3, Ordering::Relaxed);
+                let torn_before = self.aux_windows.iter().any(|a| a.room_window().is_some());
+                self.window_event(
+                    event_loop,
+                    wid,
+                    WindowEvent::MouseInput {
+                        device_id: DeviceId::dummy(),
+                        state: ElementState::Released,
+                        button: MouseButton::Left,
+                    },
+                );
+                let torn_after = self.aux_windows.iter().any(|a| a.room_window().is_some());
+                eprintln!(
+                    "[autotearroom] 2) 놓기직전뜯김={torn_before} 3) 놓은뒤뜯김={torn_after}"
+                );
+                eprintln!(
+                    "[autotearroom] {}",
+                    if torn_before { "PASS" } else { "FAIL — 놓아야만 떨어진다" }
+                );
+            }
+        }
+    }
     /// Headless 별도창 파일트리 repro: `KASATERM_AUTOAUXTREE_MS` 뒤에 첫 aux 창의
     /// 트리 패널을 연다(헤더 버튼 클릭은 그 창 좌표라 헤드리스 주입이 번거롭다).
     /// `KASATERM_AUTOUNDOCK_MS` 로 창을 먼저 띄워 두고 쓴다.

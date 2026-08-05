@@ -1686,6 +1686,69 @@ for p in glob.glob(os.path.join(d, '*.json')):
             .unwrap_or(false)
     }
 
+    /// `KASATERM_DRAG_DEBUG=1` 일 때 드래그 판정을 한 줄로 찍는다.
+    ///
+    /// "끌어도 안 떨어진다"는 보고가 오면 **어느 제스처를 쓰는지**부터 갈라야 하는데,
+    /// pane 탭·pane 헤더·방 탭이 각각 다른 경로라 화면만 봐선 구별이 안 된다. 실제로
+    /// pane 탭만 고쳐 놓고 방 탭 제스처를 쓰는 바람에 "하나도 안 고쳐졌다"로 읽힌
+    /// 왕복이 한 번 있었다 — 그때 이게 있었으면 한 줄로 끝났다.
+    pub(crate) fn drag_trace(&self, what: &str, tears: bool, torn: bool) {
+        if std::env::var_os("KASATERM_DRAG_DEBUG").is_none() {
+            return;
+        }
+        let (w, h) = self.logical_win_size();
+        eprintln!(
+            "[drag] {what} cursor=({:.0},{:.0}) win=({w:.0}x{h:.0}) 꺼내기자리={tears} 이미나감={torn}",
+            self.cursor_px.0, self.cursor_px.1
+        );
+    }
+
+    /// 방 탭 드래그가 「꺼내기」 자리에 와 있는가. **놓을 때와 끄는 도중이 같은 판정을
+    /// 써야 하므로** 한 벌만 둔다 — 두 벌이면 「끌 땐 안 나가는데 놓으면 나가는」
+    /// 어긋남이 생기고, 그건 화면만 봐선 원인을 못 짚는다.
+    ///
+    /// 기준이 「창 밖」이 아니라 **패널 밖**인 이유: 창을 통째로 벗어나야 꺼지게 뒀더니
+    /// 사이드바에서 옆으로 빼는 자연스러운 동작이 전부 재배치로 흘러 기능이 죽어 있었다
+    /// (거노: "윈도우 패널에서 꺼내면"). 상단 탭 모드는 스트립이 가로라 같은 논리를 쓰면
+    /// 재배치(좌우)와 꺼내기(아래)가 뒤엉켜, 그쪽만 창 밖 기준을 남긴다.
+    pub(crate) fn room_drag_tears(&self) -> bool {
+        const TEAR_MARGIN: f32 = 40.0;
+        let (win_w, win_h) = self.logical_win_size();
+        let left_win =
+            Self::drag_left_window(self.cursor_px.0, self.cursor_px.1, win_w, win_h);
+        let left_panel = !self.tabs_on_top
+            && self.cursor_px.0 > self.effective_sidebar_w() + TEAR_MARGIN;
+        left_win || left_panel
+    }
+
+    /// 이 방이 이미 별도창으로 나가 있는가 — 그 aux 창 인덱스.
+    pub(crate) fn torn_aux_room(&self, win: usize) -> Option<usize> {
+        self.aux_windows.iter().position(|a| a.room_window() == Some(win))
+    }
+
+    /// 방 탭 드래그 도중: 아직 안 나갔으면 **놓기 전에** 꺼내고, 이미 나갔으면 그 창을
+    /// 커서 밑으로 옮긴다. 반환값 = 이 방이 지금 별도창이다(= 호출부는 재배치 미리보기를
+    /// 멈춰야 한다).
+    ///
+    /// pane 쪽 `drag_tear_follow` 와 형제지만 대상이 다르다 — 이쪽은 방(윈도우) 통째다.
+    /// 거노가 "드래그 뗄 때 분리된다"고 한 건 이 경로였다: pane 탭만 고쳐 두고 방 탭을
+    /// 안 고쳐서, 고친 쪽을 안 쓰면 아무것도 안 바뀐 것처럼 보였다.
+    pub(crate) fn drag_tear_follow_room(
+        &mut self,
+        win: usize,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> bool {
+        if let Some(i) = self.torn_aux_room(win) {
+            if let Some(pos) = self.cursor_screen_phys() {
+                self.aux_windows[i].window.set_outer_position(pos);
+            }
+            return true;
+        }
+        let near = self.cursor_screen_phys();
+        self.undock_window_room(win, event_loop, near);
+        self.torn_aux_room(win).is_some()
+    }
+
     /// 이 pane 이 이미 별도창으로 뜯겨 있는가 — 그 aux 창 인덱스. 드래그 도중
     /// 뜯긴 상태를 App 필드 없이 판별하는 유일한 기준이다(`aux_windows` 자체가
     /// 상태다). 병렬 작업 규칙상 struct App 은 건드리지 않는다.
