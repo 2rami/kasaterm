@@ -9153,7 +9153,17 @@ const CHIP_SCAN_ROWS: usize = 24;
 /// rule 행이 아니거나 `@` 섬이 없으면 아무것도 안 한다 — 아래 테두리(순수 대시)와
 /// /rename 세션 이름(`── 이름 ──`, `@` 없음)은 그대로 남는다.
 fn strip_teammate_chip(row: &mut [GridCell]) {
-    if row.iter().filter(|c| c.ch == '─').count() <= row.len() / 2 {
+    // rule 판정을 **격자 전체 폭이 아니라 내용 폭**으로. 전체 폭으로 재면 pane 이
+    // claude 입력박스보다 넓을 때(오른쪽이 빈 셀) 대시가 소수가 되어 관문에서
+    // 돌아서고, 칩이 영영 안 지워진다 — `find_standing_anchor` 의 `is_rule` 에서
+    // 같은 함정을 밟았고 그때 이 사본을 같이 못 고쳤다(로직 두 벌의 값). 최소
+    // 길이(8)로 짧은 구분선 조각을 테두리로 오인하는 것을 막는다.
+    let content_w = row
+        .iter()
+        .rposition(|c| !matches!(c.ch, ' ' | '\0'))
+        .map_or(0, |i| i + 1);
+    let dashes = row.iter().filter(|c| c.ch == '─').count();
+    if dashes < 8 || dashes <= content_w / 2 {
         return;
     }
     let Some(at) = row.iter().position(|c| c.ch == '@') else {
@@ -10415,6 +10425,30 @@ mod teammate_chip_tests {
         let mut row = row_from(&format!("{} @chiptest {}", rule(40), rule(2)));
         strip_teammate_chip(&mut row);
         assert_eq!(text(&row), rule(53));
+    }
+
+    /// 거노 화면에서 그대로 뜬 행(2026-08-05, `peek %5` 실측). 기존 케이스와
+    /// 다른 점 둘: 이름에 **하이픈**이 있고(`prana-p5`), 칩이 행의 **오른쪽 끝**에
+    /// 붙어 대시가 왼쪽에 길게 쏠려 있다. 실측 모양을 안 넣으면 「테스트는 통과하는데
+    /// 화면엔 남는」 상태를 못 잡는다.
+    #[test]
+    fn real_world_chip_with_hyphen_at_row_end() {
+        let mut row = row_from(&format!("{} @prana-p5 {}", rule(108), rule(2)));
+        assert_eq!(row.len(), 121, "실측 행 길이");
+        strip_teammate_chip(&mut row);
+        assert_eq!(text(&row), rule(121), "칩이 통째로 대시가 돼야 한다");
+    }
+
+    /// 같은 행이 **격자보다 좁은 박스**로 들어오면(pane 이 claude 입력박스보다
+    /// 넓을 때) — 관문이 격자 전체 폭을 보면 대시가 소수가 되어 통째로 안 지워진다.
+    /// `find_standing_anchor` 에서 같은 함정을 이미 밟았다(dash=60/155).
+    #[test]
+    fn chip_stripped_even_when_box_is_narrower_than_pane() {
+        let mut row = row_from(&format!("{} @prana-p5 {}", rule(40), rule(2)));
+        row.resize(155, GridCell::blank()); // 나머지는 빈 셀 = pane 이 더 넓다
+        strip_teammate_chip(&mut row);
+        let t = text(&row);
+        assert!(!t.contains('@'), "칩이 남았다: {t:?}");
     }
 
     #[test]
