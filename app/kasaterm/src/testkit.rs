@@ -2460,6 +2460,15 @@ impl App {
         }
         self.pane_cwd_cache.insert(pid.clone(), cwd);
         self.pane_claude_sid.insert(pid.clone(), sid.to_string());
+        // 헤더 띠를 강제로 켠다. 단일 탭 터미널은 `has_header()` 가 false 라(학생 헤더
+        // 띠는 거노가 폐기, main.rs:2146) 헤더 라벨 경로를 그냥은 못 태운다. ⋮ 로 켠
+        // pane 과 멀티탭에서는 그 띠가 뜨므로, 거기 실리는 정체 표시(`{캐릭터} %N`)를
+        // 여기서 검증한다.
+        if let Ok(mut ws) = self.ws.lock() {
+            if let Some(p) = ws.panes.get_mut(&pid) {
+                p.header_override = Some(true);
+            }
+        }
         // 여기서 한 번 그려 타이프라이터 시계를 출발시킨다. 판정은 2단계.
         self.chrome_dirty = true;
         self.render_frame();
@@ -2477,6 +2486,26 @@ impl App {
         };
         let (left, right, never) =
             (g.drew_text(SUMMARY), g.drew_text(RENAME), g.drew_text(NEVER));
+        // 헤더 정체 표시 — 보더 우측을 `/rename` 자리로 비웠으니 "이 pane 이 누구인가"는
+        // 헤더가 든다(거노 2026-08-05). 인레이와 달리 헤더는 크롬 텍스트 draw 라
+        // `text_log` 가 직접 잡는다 — 신고 통을 안 거친다.
+        let who = {
+            let ws = self.ws.lock().unwrap();
+            ws.active_pane
+                .clone()
+                .and_then(|p| self.display_pane_char(&ws, &p).map(|n| (n, p)))
+        };
+        if let Some((name, pid)) = who.as_ref() {
+            let want = format!("{name} {pid}");
+            eprintln!(
+                "[autoboxlabel] 헤더 정체 {want:?} → {}",
+                match g.drew_text(&want) {
+                    Some(true) => "그림 PASS",
+                    Some(false) => "안 그림 FAIL — 헤더 라벨에 pane 아이디가 안 붙었다",
+                    None => "미측정",
+                }
+            );
+        }
         if left.is_none() {
             eprintln!("[autoboxlabel] 미측정 — KASATERM_TEXT_LOG 를 켜라");
             return;

@@ -1545,8 +1545,19 @@ impl App {
                             .map(|t| crate::strip_activity_prefix(&t).to_string())
                             .filter(|t| !t.is_empty())
                         {
-                            Some(t) => format!("{c} · {t}"),
-                            None => c.clone(),
+                            // pane 아이디를 캐릭터 뒤에 붙인다(거노 2026-08-05: "칩 위치를
+                            // 바꿔 pane아이디 이런데에, 거기는 /rename 들어갈 자리니까").
+                            // 입력박스 보더 우측은 `/rename` 이름 자리로 비워 뒀으니
+                            // (`inlay_prompt_box_right`) **이 pane 이 누구인가**는 헤더가
+                            // 든다. 학생 pane 은 여태 캐릭터만 실어 아이디가 어디에도
+                            // 없었다 — `tell %N` 을 쓰려면 그걸 알아야 한다.
+                            //
+                            // agent 이름(`midori-p1`)을 그대로 싣지 않는 이유: 그건 캐릭터
+                            // 슬러그 + pane 번호라 `미도리 %1` 과 같은 정보인데, 로마자
+                            // 슬러그는 스프라이트·board 의 한글 이름과 안 맞아 두 이름을
+                            // 오가게 만든다. 정체 표시는 한 벌로 둔다.
+                            Some(t) => format!("{c} {id} · {t}"),
+                            None => format!("{c} {id}"),
                         }
                     } else {
                         // Custom title (rename / OSC) wins; otherwise the live
