@@ -237,6 +237,29 @@ pub struct PaneActivity {
     /// 0 기본 — board 빌더(socket.rs)가 윈도우별로 채운다.
     #[serde(default)]
     pub window_idx: usize,
+    /// 구독 한도 사용률(%) — **codex 전용**, claude pane 은 None.
+    ///
+    /// 거노 2026-08-05: codex 는 정액제라 비용($)이 무의미하고(그래서 board 비용 칸은
+    /// `—`), 실제로 알고 싶은 건 "얼마나 썼나 / 언제 리셋되나"다. 화면 모양:
+    /// ```text
+    /// claude   $126.02  ctx 50%
+    /// codex     —       ctx 7%   주간 62% (3h 뒤 리셋)
+    /// ```
+    /// 창이 여럿이면 **가장 먼저 터질 것**(사용률 최대) 하나만 싣는다. 실측(2026-08-05,
+    /// 78표본)에선 `primary` 주간창(10080분) 하나뿐이고 `secondary` 는 늘 null 이었다.
+    #[serde(default)]
+    pub rate_used_pct: Option<f32>,
+    /// 위 사용률이 어느 창의 것인지(분). 10080 = 주간. 표시 라벨을 여기서 정한다 —
+    /// 창 종류가 늘어도 코드를 안 고치게 이름 대신 숫자를 싣는다.
+    #[serde(default)]
+    pub rate_window_minutes: Option<u32>,
+    /// 그 창이 리셋되는 절대 시각(unix 초). **표시는 상대 시간으로** 바꿔라(거노) —
+    /// 절대 시각은 읽는 사람이 매번 뺄셈을 해야 한다.
+    #[serde(default)]
+    pub rate_resets_at: Option<i64>,
+    /// 구독 플랜 이름(실측 "plus"). 같은 사용률도 플랜에 따라 뜻이 달라 함께 싣는다.
+    #[serde(default)]
+    pub plan_type: Option<String>,
 }
 
 /// One live session from `claude agents --json` (Claude Code 2.1.162+).

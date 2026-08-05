@@ -139,6 +139,9 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
     let mut observed_ctx = 0u64;
     let mut ctx_window = 0u64;
     let mut intent = String::new();
+    // 한도 — 창이 여럿이면 **가장 먼저 터질 것**(사용률 최대) 하나만 남긴다.
+    let mut rate: Option<(f32, u32, i64)> = None;
+    let mut plan_type: Option<String> = None;
     let mut recent_tools: Vec<String> = Vec::new();
     let mut tool_counts: Vec<(String, u32)> = Vec::new();
     // 역순 — 채움 필드는 "처음 만나는(=최신)" 것이 이긴다(claude 경로와 같은 규칙).
@@ -167,6 +170,31 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
                 last_reply = get_str(p, "message");
             }
             ("event_msg", "token_count") => {
+                if let Some(rl) = p.get("rate_limits").and_then(|r| r.as_object()) {
+                    if plan_type.is_none() {
+                        plan_type = rl
+                            .get("plan_type")
+                            .and_then(|x| x.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string);
+                    }
+                    // 실측(78표본)에선 primary 하나뿐이었지만, 창이 늘어도 코드를 안
+                    // 고치게 후보를 다 훑어 최대치를 고른다.
+                    for key in ["primary", "secondary", "individual_limit"] {
+                        let Some(w) = rl.get(key).and_then(|x| x.as_object()) else { continue };
+                        let Some(pct) = w.get("used_percent").and_then(|x| x.as_f64()) else {
+                            continue;
+                        };
+                        let cand = (
+                            pct as f32,
+                            w.get("window_minutes").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+                            w.get("resets_at").and_then(|x| x.as_i64()).unwrap_or(0),
+                        );
+                        if rate.is_none_or(|(cur, _, _)| cand.0 > cur) {
+                            rate = Some(cand);
+                        }
+                    }
+                }
                 let Some(info) = p.get("info").and_then(|i| i.as_object()) else { continue };
                 if ctx_window == 0 {
                     ctx_window = info
@@ -283,6 +311,10 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         effort_default: String::new(),
         branch: None,
         window_idx: 0,
+        rate_used_pct: rate.map(|(p, _, _)| p),
+        rate_window_minutes: rate.map(|(_, w, _)| w),
+        rate_resets_at: rate.map(|(_, _, r)| r),
+        plan_type,
     }
 }
 
@@ -561,6 +593,11 @@ pub fn snapshot_from_tail(surface_id: &str, tail: &str, idle: bool) -> PaneActiv
         effort_default: String::new(), // collab_board 가 settings.json effortLevel 로 채운다.
         branch: None,
         window_idx: 0,
+        // claude 는 종량제라 이 지표가 없다 — 비용($)이 그 자리를 대신한다.
+        rate_used_pct: None,
+        rate_window_minutes: None,
+        rate_resets_at: None,
+        plan_type: None,
     }
 }
 
@@ -832,6 +869,29 @@ mod codex_tests {
     fn 도구가_없으면_intent_는_active() {
         // board UI 가 "active" 를 숨긴다 — 빈 문자열을 넣으면 빈 줄이 생긴다.
         assert_eq!(snapshot_from_tail("%1", &sample(), false).intent, "active");
+    }
+
+    #[test]
+    fn 한도는_가장_먼저_터질_창을_고른다() {
+        // 실측(2026-08-05, 78표본)은 primary 주간창 하나뿐이고 secondary 는 늘 null
+        // 이었다. 창이 늘어도 코드를 안 고치게 최대치를 고르는지 함께 잰다.
+        let tail = [
+            r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"plan_type":"plus","primary":{"used_percent":3.0,"window_minutes":10080,"resets_at":1786433096},"secondary":{"used_percent":62.5,"window_minutes":300,"resets_at":1786400000}}}}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        assert_eq!(a.rate_used_pct, Some(62.5), "주간 3% 가 아니라 5시간 62.5% 가 먼저 터진다");
+        assert_eq!(a.rate_window_minutes, Some(300));
+        assert_eq!(a.rate_resets_at, Some(1786400000));
+        assert_eq!(a.plan_type.as_deref(), Some("plus"));
+    }
+
+    #[test]
+    fn 실측_한도는_주간창_하나다() {
+        let tail = r#"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"plan_type":"plus","primary":{"used_percent":3.0,"window_minutes":10080,"resets_at":1786433096},"secondary":null}}}"#;
+        let a = snapshot_from_tail("%1", tail, false);
+        assert_eq!(a.rate_used_pct, Some(3.0));
+        assert_eq!(a.rate_window_minutes, Some(10080), "10080분 = 7일");
     }
 
     #[test]
