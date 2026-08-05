@@ -138,6 +138,9 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
     let (mut ti, mut to, mut cr, mut cc) = (0u64, 0u64, 0u64, 0u64);
     let mut observed_ctx = 0u64;
     let mut ctx_window = 0u64;
+    let mut intent = String::new();
+    let mut recent_tools: Vec<String> = Vec::new();
+    let mut tool_counts: Vec<(String, u32)> = Vec::new();
     // 역순 — 채움 필드는 "처음 만나는(=최신)" 것이 이긴다(claude 경로와 같은 규칙).
     for line in tail.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
@@ -195,6 +198,42 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
                     }
                 }
             }
+            // 도구 호출 — claude 의 `tool_use` 자리. 이름·인자 구조가 달라 라벨은
+            // 여기서 만든다(실측: exec_command{cmd,workdir} · view_image{path} ·
+            // update_plan{plan[]} · imagegen{prompt}).
+            ("response_item", "function_call") => {
+                let name = get_str(p, "name");
+                if name.is_empty() {
+                    continue;
+                }
+                let args: serde_json::Value = serde_json::from_str(&get_str(p, "arguments"))
+                    .unwrap_or(serde_json::Value::Null);
+                let a = |k: &str| args.get(k).and_then(|x| x.as_str()).unwrap_or("");
+                let label = match name.as_str() {
+                    // 첫 명령만·공백 정규화·40자 — claude Bash 라벨과 같은 규칙이라
+                    // board 두 종류가 같은 모양으로 읽힌다.
+                    "exec_command" => {
+                        let first = a("cmd").split(['\n', ';', '&']).next().unwrap_or("").trim();
+                        let short: String = first
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .chars()
+                            .take(40)
+                            .collect();
+                        format!("exec {short}")
+                    }
+                    "view_image" => format!("view {}", basename(a("path"))),
+                    other => other.to_string(),
+                };
+                bump(&mut tool_counts, &name);
+                if recent_tools.len() < 8 {
+                    recent_tools.push(label.clone());
+                }
+                if intent.is_empty() {
+                    intent = label;
+                }
+            }
             _ => {}
         }
     }
@@ -215,7 +254,8 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         title: String::new(),
         last_prompt,
         last_reply,
-        intent: "active".into(),
+        // claude 경로와 같은 규칙 — 비면 "active"(board UI 가 그 값을 숨긴다).
+        intent: if intent.is_empty() { "active".into() } else { intent },
         status: if idle { "idle".into() } else { "working".into() },
         files: Vec::new(),
         screen: None,
@@ -228,12 +268,12 @@ fn codex_snapshot(surface_id: &str, tail: &str, idle: bool) -> PaneActivity {
         cache_read: cr,
         cache_creation: cc,
         cost_usd: 0.0,
-        tool_counts: Vec::new(),
+        tool_counts,
         changed_files: Vec::new(),
         subagents: Vec::new(),
         subagents_done: Vec::new(),
         background: Vec::new(),
-        recent_tools: Vec::new(),
+        recent_tools,
         model,
         context_limit,
         context_pct,
@@ -770,6 +810,28 @@ mod codex_tests {
         assert_eq!(a.context_tokens, 19055);
         assert_eq!(a.context_limit, 258400, "창 크기는 token_count 쪽 실값");
         assert_eq!(a.context_pct, 7);
+    }
+
+    #[test]
+    fn 도구_호출을_intent_와_최근도구에_싣는다() {
+        // 실측 인자 구조(exec_command{cmd,workdir} · view_image{path}).
+        let tail = [
+            r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cargo build -p kasaterm\",\"workdir\":\"/repo\"}"}}"#,
+            r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"view_image","arguments":"{\"path\":\"/a/b/shot.png\"}"}}"#,
+            r#"{"timestamp":"t","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+        ]
+        .join("\n");
+        let a = snapshot_from_tail("%1", &tail, false);
+        // 역순 순회라 **가장 나중 호출**이 intent 다.
+        assert_eq!(a.intent, "view shot.png");
+        assert_eq!(a.recent_tools, vec!["view shot.png", "exec cargo build -p kasaterm"]);
+        assert_eq!(a.tool_counts.len(), 2);
+    }
+
+    #[test]
+    fn 도구가_없으면_intent_는_active() {
+        // board UI 가 "active" 를 숨긴다 — 빈 문자열을 넣으면 빈 줄이 생긴다.
+        assert_eq!(snapshot_from_tail("%1", &sample(), false).intent, "active");
     }
 
     #[test]
