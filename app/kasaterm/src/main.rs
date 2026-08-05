@@ -5337,8 +5337,11 @@ fn install_pane_shims() {
     // Stage a `claude` wrapper that injects the collab hooks session-scoped
     // (`--settings`) so ~/.claude/settings.json is never modified.
     install_claude_hook_shim(&shim_dir);
+    // codex 도 같은 대접 — pane 전용 CODEX_HOME 에 우리 훅·페르소나를 얹는다.
+    install_codex_hook_shim(&shim_dir);
     // 학생 이름 자체를 명령으로(`시로코`/`shiroko`) — 이 pane 을 그 학생으로
-    // 재배정하고 claude 를 띄운다. characters.json 기준 부팅 1회 생성.
+    // 재배정하고 하네스(claude 기본, `시로코 codex`)를 띄운다. characters.json
+    // 기준 부팅 1회 생성.
     install_student_shims(&shim_dir);
     // Force our shim dir to the FRONT of PATH even after the user's rc
     // files run. A login+interactive zsh sources brew's zprofile, which
@@ -5926,6 +5929,144 @@ exec \"$REAL\" --settings \"$SETTINGS\" \"$@\"\n",
     }
 }
 
+/// codex 판 hook shim. claude 와 목적은 같다(pane 안에서만 협업 훅·페르소나를 얹고
+/// 거노 개인 설정은 안 건드린다) — 수단이 넷 다르다. 전부 2026-08-05 실측 확정:
+///
+/// 1. **`--settings` 등가물이 없다.** codex 는 훅을 `$CODEX_HOME/hooks.json` 에서만
+///    읽으므로, 세션 스코프 주입 자리가 `CODEX_HOME` 자체다 → pane 별 홈을 세우고
+///    `~/.codex` 를 심볼릭으로 미러한다(세션·플러그인·스킬·캐시·인증 공유).
+/// 2. **`config.toml` 만 복사한다.** codex 가 신뢰 목록·훅 해시를 여기 되쓰는데,
+///    심볼릭이면 그 쓰기가 거노 개인 설정으로 샌다. 매 실행 다시 복사해 안 낡는다.
+/// 3. **훅 trust 관문** — `[hooks.state]` 에 커맨드 SHA256 이 박히고 shim 경로가 GUI
+///    pid 별이라 매번 깨져 TUI 가 재승인을 묻는다 → `--dangerously-bypass-hook-trust`
+///    를 상시 붙인다(거노 승인).
+/// 4. **`timeout` 단위가 초다**(claude 는 ms). 실측 판별: `timeout:500`+`sleep 1` 은
+///    완주하고 `timeout:1`+`sleep 3` 은 Failed — ms 였다면 전자가 죽었어야 하고,
+///    무시였다면 후자가 살았어야 한다. claude 쪽 5000 을 그대로 옮기면 83분이 된다.
+///
+/// 이벤트는 claude 와 같은 PascalCase 스키마고 stdin JSON 도 같다(`session_id`·
+/// `transcript_path`·`cwd`·`hook_event_name`·`model`·`permission_mode`). 다만
+/// **`Notification` 이 없어** attention 훅은 `PermissionRequest` 에 건다.
+/// `transcript_path` 는 `$CODEX_HOME/sessions/<Y>/<M>/<D>/rollout-<ts>-<sid>.jsonl`.
+pub(crate) fn install_codex_hook_shim(shim_dir: &std::path::Path) {
+    let Some(hooks_dir) = locate_collab_hooks_dir() else {
+        eprintln!("[shim] collab-hooks dir not found — codex hook shim skipped");
+        return;
+    };
+    let hd = if cfg!(windows) {
+        hooks_dir.display().to_string().replace('\\', "/")
+    } else {
+        hooks_dir.display().to_string()
+    };
+    // 초 단위. claude 판(`install_claude_hook_shim`)의 ms 값을 복붙하지 말 것.
+    let cmd = |script: &str, timeout_s: u64| {
+        let run = if cfg!(windows) {
+            format!("sh \"{hd}/{script}\"")
+        } else {
+            format!("\"{hd}/{script}\"")
+        };
+        serde_json::json!({ "type": "command", "command": run, "timeout": timeout_s })
+    };
+    let settings = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{ "hooks": [cmd("kasaterm-bind-transcript.sh", 5)] }],
+            "PreToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [cmd("kasaterm-conflict-guard.py", 5)] }],
+            "PostToolUse": [
+                { "matcher": "SendUserFile", "hooks": [cmd("auto-imgopen.sh", 5)] },
+                { "hooks": [cmd("kasaterm-steer-hook.sh", 5)] }
+            ],
+            "Stop": [{ "hooks": [cmd("kasaterm-stop-drain.sh", 5)] }],
+            // claude 의 Notification 자리 — codex 엔 그 이벤트가 없다.
+            "PermissionRequest": [{ "hooks": [cmd("kasaterm-notify-attention.sh", 5)] }],
+        },
+    });
+    let settings_path = shim_dir.join("codex-hooks.json");
+    match serde_json::to_string_pretty(&settings) {
+        Ok(s) => {
+            if let Err(e) = std::fs::write(&settings_path, s) {
+                eprintln!("[shim] write codex-hooks.json failed: {e}");
+                return;
+            }
+        }
+        Err(e) => {
+            eprintln!("[shim] serialize codex hook settings failed: {e}");
+            return;
+        }
+    }
+    // 래퍼는 Rust 쪽 값이 하나도 안 박혀 정적 문자열이다 — hooks 경로는 위 json 안에
+    // 있고 나머지는 전부 실행 시점에 셸이 푼다. 덕분에 format! 이스케이프가 없다.
+    let wrapper = r#"#!/bin/sh
+# kasaterm pane-only codex wrapper — pane 전용 CODEX_HOME 을 세워 훅·페르소나를 얹는다.
+# ~/.codex 는 읽기만 한다. pane 밖에선 이 래퍼가 PATH 에 없어 순정 codex 가 돈다.
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$SELF_DIR" | paste -sd: -)
+REAL=$(PATH="$CLEAN_PATH" command -v codex 2>/dev/null)
+if [ -z "$REAL" ]; then
+  echo "kasaterm codex shim: real codex not found on PATH" >&2
+  exit 127
+fi
+# 관리 서브커맨드는 순정으로 통과 — 우리 홈을 씌우면 `login` 이 엉뚱한 자리를 보고
+# `plugin add` 는 다음 실행에 사라진다(config 를 매번 새로 복사하므로). 대화 계열
+# (서브커맨드 없음=TUI · exec · resume · fork · review)만 우리 홈을 쓴다.
+SUB=""; for a in "$@"; do case "$a" in -*) ;; *) SUB="$a"; break ;; esac; done
+case "$SUB" in
+  login|logout|mcp|plugin|app|app-server|remote-control|completion|update|doctor|sandbox|debug|apply|cloud|exec-server|features|help|archive|delete|unarchive)
+    exec "$REAL" "$@" ;;
+esac
+SRC="$HOME/.codex"
+CH="$SELF_DIR/codex-home-${KASATERM_PANE_ID:-solo}"
+mkdir -p "$CH" 2>/dev/null || exec "$REAL" "$@"
+# ~/.codex 를 심볼릭으로 미러 — 세션·플러그인·스킬·캐시·인증을 원본과 공유해 pane 안
+# codex 가 pane 밖 codex 와 같은 것을 본다. auth.json 도 심볼릭이라 토큰 갱신이 원본에
+# 그대로 써져 로그인이 안 갈린다(실측: doctor 가 stored ChatGPT tokens=true). 매 실행
+# ln -sfn 이라 pane 안에서 생긴 드리프트는 다음 실행에 원상복구된다.
+for e in "$SRC"/* "$SRC"/.[!.]*; do
+  [ -e "$e" ] || continue
+  n=${e##*/}
+  case "$n" in config.toml|hooks.json|AGENTS.md) continue ;; esac
+  ln -sfn "$e" "$CH/$n" 2>/dev/null
+done
+cp "$SRC/config.toml" "$CH/config.toml" 2>/dev/null
+# 디렉터리 신뢰 프롬프트 선해결 — 무인 스폰이 여기서 멈춘다("Do you trust the contents
+# of this directory?", 실측). 같은 경로를 또 쓰면 TOML 중복 테이블이라 config 가 통째로
+# 안 읽히므로 없을 때만 붙인다.
+if [ -n "$PWD" ] && ! grep -qF "[projects.\"$PWD\"]" "$CH/config.toml" 2>/dev/null; then
+  printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$PWD" >> "$CH/config.toml"
+fi
+cp "$SELF_DIR/codex-hooks.json" "$CH/hooks.json" 2>/dev/null
+# 페르소나 — codex 엔 --append-system-prompt 등가물이 없어 CODEX_HOME/AGENTS.md 로 준다
+# (pane 별 홈이라 격리). 거노 전역 AGENTS.md 를 먼저 깔고 뒤에 얹는다 — 통째로 갈아치우면
+# 그의 전역 지시가 pane 안에서만 조용히 사라진다. 매 실행 다시 복사라 누적되지 않는다.
+OVP="$SELF_DIR/repersona-${KASATERM_PANE_ID}.persona"
+if [ -n "$KASATERM_PANE_ID" ] && [ -f "$OVP" ]; then
+  KASATERM_PERSONA=$(cat "$OVP")
+  [ -f "${OVP%.persona}.character" ] && export KASATERM_CHARACTER="$(cat "${OVP%.persona}.character")"
+fi
+cp "$SRC/AGENTS.md" "$CH/AGENTS.md" 2>/dev/null || : > "$CH/AGENTS.md"
+[ -n "$KASATERM_PERSONA" ] && printf '\n%s\n' "$KASATERM_PERSONA" >> "$CH/AGENTS.md"
+export CODEX_HOME="$CH"
+case " $* " in
+  *" --dangerously-bypass-hook-trust "*) ;;
+  *) set -- --dangerously-bypass-hook-trust "$@" ;;
+esac
+exec "$REAL" "$@"
+"#;
+    let wrapper_path = shim_dir.join("codex");
+    if let Err(e) = std::fs::write(&wrapper_path, wrapper) {
+        eprintln!("[shim] write codex wrapper failed: {e}");
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            std::fs::set_permissions(&wrapper_path, std::fs::Permissions::from_mode(0o755))
+        {
+            eprintln!("[shim] chmod codex wrapper failed: {e}");
+        }
+    }
+}
+
 /// 학생 이름을 pane 명령으로 스테이징 — `시로코`(또는 슬러그 `shiroko`)를 치면
 /// 그 pane 을 해당 학생으로 재배정하고 claude 를 실행한다. persona 는 override
 /// 파일(`repersona-<pane>.persona`)로 claude 래퍼에 전달(env 는 셸 spawn 시
@@ -5943,7 +6084,7 @@ fn install_student_shims(shim_dir: &std::path::Path) {
         let persona = kasa_mcp::character::persona_for(&chars, &name).unwrap_or_default();
         let script = format!(
             "#!/bin/sh\n\
-# kasaterm 학생 런처 — 이 pane 을 '{name}' 로 재배정하고 claude 실행.\n\
+# kasaterm 학생 런처 — 이 pane 을 '{name}' 로 재배정하고 하네스 실행.\n\
 SELF_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\n\
 if [ -n \"$KASATERM_PANE_ID\" ]; then\n\
   printf '%s' '{persona_sq}' > \"$SELF_DIR/repersona-$KASATERM_PANE_ID.persona\"\n\
@@ -5952,8 +6093,11 @@ if [ -n \"$KASATERM_PANE_ID\" ]; then\n\
     --data-urlencode \"character={name_sq}\" \\\n\
     \"http://127.0.0.1:${{KASASPACE_MCP_PORT:-8765}}/repersona\" >/dev/null 2>&1\n\
 fi\n\
-[ \"$1\" = claude ] && shift\n\
-exec claude \"$@\"\n",
+# 하네스 선택 — `{name}` 는 claude(기본), `{name} codex` 는 codex 로 뜬다. 첫 인자가\n\
+# 하네스 이름일 때만 소비하므로 `{name} \"버그 고쳐\"` 같은 프롬프트 전달은 그대로다.\n\
+H=claude\n\
+case \"$1\" in claude|codex) H=$1; shift ;; esac\n\
+exec \"$H\" \"$@\"\n",
             name_sq = sq(&name),
             persona_sq = sq(&persona),
         );
@@ -6918,8 +7062,11 @@ mod tests {
     #[test]
     fn count_claude_panes_walks_nested_splits_and_windows() {
         // Mirrors save_session_state's schema: nested split leaves + a second
-        // window, mixed was_claude. Only claude leaves count; a null leaf
+        // window, mixed agents. Only agent leaves count; a null leaf
         // (unresolved pane at save) and a plain shell are ignored.
+        //
+        // 이 테스트는 **옛 키(`was_claude`)로만** 짜여 있다 — 그대로 두는 것이
+        // 하위호환의 단언이다. 새 키는 아래 `was_agent_*` 테스트가 본다.
         let leaf = |claude: bool| {
             serde_json::json!({ "leaf": {
                 "cwd": "/repo",
@@ -6977,6 +7124,131 @@ mod tests {
         assert_eq!(App::count_panes(&state), 5, "null leaf 포함 전체 leaf");
         assert_eq!(App::count_panes(&char_only), 1);
         assert_eq!(App::count_panes(&serde_json::json!({})), 0);
+    }
+
+    /// 새 키 `was_agent` 는 종류를 담고, codex pane 도 복원 대상으로 센다.
+    /// 옛 `was_claude` 는 계속 claude 로 읽혀야 한다 — 판올림 한 번에 거노가 쓰던
+    /// 학생 pane 이 전부 셸로 되살아나는 것을 막는 단언.
+    #[test]
+    fn was_agent_counts_codex_and_keeps_legacy_was_claude() {
+        let win = |leaf: serde_json::Value| {
+            serde_json::json!({ "sessions": [{ "windows": [{ "leaf": leaf }]}]})
+        };
+        let n = |leaf: serde_json::Value| App::count_claude_panes(&win(leaf));
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_agent": "codex", "session_id": null })),
+            1,
+            "codex pane 도 복원 대상"
+        );
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_agent": "claude", "session_id": null })),
+            1
+        );
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_agent": null, "session_id": null })),
+            0,
+            "순수 셸"
+        );
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_claude": true, "session_id": null })),
+            1,
+            "옛 저장본은 claude 로 읽힌다"
+        );
+        assert_eq!(
+            n(serde_json::json!({ "cwd": "/repo", "was_claude": false, "session_id": null })),
+            0
+        );
+    }
+
+    /// 복원 명령 분기. codex pane 이 셸로 되살아나던 것이 이 작업의 출발점이라,
+    /// "codex 였으면 codex 로" 를 못박는다.
+    #[test]
+    fn restore_command_picks_the_harness_it_was() {
+        use crate::session::restore_agent_command as cmd;
+        assert_eq!(cmd(Some("codex"), None, false), "codex\r");
+        // 옛 저장본이 sid 를 달고 있어도 codex 는 이어가지 않는다 — `resume --last` 가
+        // ~/.codex 미러 전체에서 고르므로 남의 대화를 물어온다.
+        assert_eq!(cmd(Some("codex"), Some("abcd-1234"), true), "codex\r");
+        assert_eq!(
+            cmd(Some("claude"), Some("abcd-1234"), true),
+            "claude --resume abcd-1234\r"
+        );
+        // jsonl 이 사라진 세션은 fresh 로 — "No conversation found" 로 pane 이 통째 죽는다.
+        assert_eq!(cmd(Some("claude"), Some("abcd-1234"), false), "claude\r");
+        assert_eq!(cmd(Some("claude"), None, false), "claude\r");
+    }
+
+    /// codex shim 의 불변식. claude 판에서 값을 복붙하다 깨지기 쉬운 것들만 못박는다.
+    #[test]
+    fn codex_shim_wrapper_and_hooks_hold_their_invariants() {
+        let dir = std::env::temp_dir().join(format!("kt-shim-codex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        install_codex_hook_shim(&dir);
+        let (Ok(body), Ok(hooks)) = (
+            std::fs::read_to_string(dir.join("codex")),
+            std::fs::read_to_string(dir.join("codex-hooks.json")),
+        ) else {
+            // collab-hooks 를 못 찾는 환경 — 설치 자체가 스킵돼 볼 대상이 없다.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        assert!(
+            body.contains("--dangerously-bypass-hook-trust"),
+            "훅 trust 관문을 안 넘으면 TUI 가 매번 재승인을 묻는다"
+        );
+        assert!(
+            body.contains("export CODEX_HOME="),
+            "pane 전용 홈을 안 내보내면 훅도 페르소나도 안 붙는다"
+        );
+        assert!(
+            body.contains("cp \"$SRC/config.toml\""),
+            "config 는 반드시 복사 — 심볼릭이면 codex 의 신뢰/훅해시 쓰기가 거노 개인 설정으로 샌다"
+        );
+        assert!(
+            body.contains("trust_level = \\\"trusted\\\"") || body.contains("trust_level"),
+            "디렉터리 신뢰를 선주입하지 않으면 무인 스폰이 프롬프트에서 멈춘다"
+        );
+        assert!(
+            body.contains("grep -qF \"[projects.\\\"$PWD\\\"]\""),
+            "중복 [projects] 테이블은 TOML 파싱을 통째로 깬다 — 없을 때만 붙여야 한다"
+        );
+        let v: serde_json::Value = serde_json::from_str(&hooks).unwrap();
+        let h = &v["hooks"];
+        assert!(
+            h.get("Notification").is_none(),
+            "codex 엔 Notification 이벤트가 없다"
+        );
+        assert!(
+            h.get("PermissionRequest").is_some(),
+            "attention 훅은 PermissionRequest 로 간다"
+        );
+        // timeout 은 **초**다(실측: 500+sleep1 완주, 1+sleep3 Failed). claude 판의
+        // 5000 을 복붙하면 83분이 된다 — 세 자리 이상이면 그 사고다.
+        fn walk_timeouts(v: &serde_json::Value, out: &mut Vec<u64>) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    for (k, x) in m {
+                        if k == "timeout" {
+                            if let Some(n) = x.as_u64() {
+                                out.push(n);
+                            }
+                        }
+                        walk_timeouts(x, out);
+                    }
+                }
+                serde_json::Value::Array(a) => a.iter().for_each(|x| walk_timeouts(x, out)),
+                _ => {}
+            }
+        }
+        let mut ts = Vec::new();
+        walk_timeouts(&v, &mut ts);
+        assert!(!ts.is_empty(), "훅이 하나도 안 실렸다");
+        assert!(
+            ts.iter().all(|t| *t <= 60),
+            "timeout 이 ms 값처럼 크다 — codex 는 초 단위다: {ts:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
