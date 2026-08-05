@@ -2519,7 +2519,9 @@ impl App {
     /// 판정을 **키 이름으로 못 한다**: 팝업(`paint_face_popup`)이 작은 프사와 같은
     /// `student:<slug>:profile` 을 크기만 키워 재사용한다. 헤더 이름도 못 쓴다 —
     /// 별도창 헤더는 커서와 무관하게 늘 학생 이름을 싣는다. 그래서 **같은 키의
-    /// quad 가 하나 더, 훨씬 크게 붙었나**로 본다(팝업은 `8.0 * cell_h`).
+    /// quad 가 하나 더, 훨씬 크게 붙었나**로 본다(팝업은 `FACE_POPUP_CELLS *
+    /// cell_h`). 배수를 줄여도 판정은 안 흔들린다 — 프사가 한 칸이라 배수가 곧
+    /// 배율이고, 아래 `* 2.0` 문턱은 6배(약 7.6배 확대)에도 한참 여유가 있다.
     ///
     /// 프사 자리는 렌더에서 **되읽는다**. `cell_left()`·`AUX_CELL_TOP` 은 auxwin
     /// private 이라 하네스가 좌표를 다시 계산해야 하는데, 그 복제본이 틀리면
@@ -2528,9 +2530,17 @@ impl App {
     ///
     /// 커서를 프사 **밖**에 둔 대조 프레임을 같은 실행에서 먼저 찍는다. 그게
     /// 없으면 「팝업이 늘 떠 있는」 회귀를 PASS 로 넘긴다.
-    pub(crate) fn run_pending_autofacehover(&mut self) {
+    ///
+    /// 커서는 `cursor_px` 에 직접 꽂지 않고 **진짜 `WindowEvent::CursorMoved`** 를
+    /// `window_event` 에 넣어 옮긴다. 필드를 손으로 채우면 「그림은 맞는데 아무도
+    /// 안 부른다」(#48 계열)를 통째로 못 본다 — 실제로 여기서 하나 나왔다:
+    /// 방창의 CursorMoved arm 은 **헤더 띠(36px)에서만** 재렌더를 걸고 프사는
+    /// 그보다 아래라, 이벤트는 `cursor_px` 를 갱신하되 프레임을 요청하지 않는다.
+    /// 그래서 팝업 판정과 **재렌더 요청 여부**를 갈라 찍는다.
+    pub(crate) fn run_pending_autofacehover(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::OnceLock;
+        use winit::event::{DeviceId, WindowEvent};
         static DUE: OnceLock<Option<Instant>> = OnceLock::new();
         static DONE: AtomicBool = AtomicBool::new(false);
         let due = DUE.get_or_init(|| {
@@ -2559,25 +2569,61 @@ impl App {
             eprintln!("[autofacehover] FAIL — 프사를 그리는 별도창이 없다(AUTOSTUDENT_ROOM 을 앞에 둬라)");
             return;
         };
-        let saved = self.aux_windows[idx].cursor_px;
-        // 대조 프레임: 커서를 창 밖 음수 좌표로. 어떤 히트 rect 에도 안 걸린다.
-        self.aux_windows[idx].cursor_px = (-1000.0, -1000.0);
+        // 대조점을 프사 기준으로 잡으려면 자리를 먼저 알아야 한다. 이 프레임엔
+        // 팝업이 섞여 있을 수 있으니(커서가 이미 프사 위였을 수 있다) **가장 작은**
+        // quad 를 작은 프사로 본다 — 팝업은 정의상 훨씬 크다.
+        let Some(seed) = self.aux_windows[idx]
+            .gpu
+            .drawn_image_rects(&key)
+            .into_iter()
+            .min_by(|a, b| a.3.total_cmp(&b.3))
+        else {
+            eprintln!("[autofacehover] FAIL — 키는 있는데 quad 가 없다");
+            return;
+        };
+        let wid = self.aux_windows[idx].window.id();
+        let scale = self.aux_windows[idx].gpu.scale() as f64;
+        // 창 id 로 `window_event` 에 넣는다 — handler.rs 가 id 로 별도창을 갈라
+        // `aux_window_event` → kind 별 arm 으로 보내는 그 라우팅까지 같이 탄다.
+        // 좌표는 winit 규약대로 **물리 px**. 논리로 넣으면 고DPI 에서 커서가
+        // 프사 왼쪽 위로 어긋나 「팝업 안 뜸」이 된다.
+        let hover = |app: &mut Self, x: f32, y: f32| {
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::CursorMoved {
+                    device_id: DeviceId::dummy(),
+                    position: winit::dpi::PhysicalPosition::new(
+                        x as f64 * scale,
+                        y as f64 * scale,
+                    ),
+                },
+            );
+        };
+        // 대조 프레임: 프사 바로 아래, 셀 그리드 한복판. **창 밖 음수 좌표를 쓰면
+        // 안 된다** — 재렌더 게이트가 `was_header = cursor_px.1 <= 36` 이라 음수 y 가
+        // 「방금 헤더에 있었다」로 읽혀, 뒤이은 이동이 무조건 재렌더를 건 것처럼
+        // 보인다(실측으로 이 하네스가 한 번 거짓 PASS 를 냈다).
+        let (cold_x, cold_y) = (seed.0 + seed.2 / 2.0, seed.1 + seed.3 + 140.0);
+        hover(self, cold_x, cold_y);
         self.aux_render(idx);
         let cold = self.aux_windows[idx].gpu.drawn_image_rects(&key);
         let Some(&(fx, fy, fw, fh)) = cold.first() else {
             eprintln!("[autofacehover] FAIL — 대조 프레임에 프사가 아예 없다");
-            self.aux_windows[idx].cursor_px = saved;
             return;
         };
         let cold_max = cold.iter().map(|r| r.3).fold(0.0f32, f32::max);
-        self.aux_windows[idx].cursor_px = (fx + fw / 2.0, fy + fh / 2.0);
+        // `aux_render` 가 방금 내렸으니, 여기서 다시 서면 그건 이 이벤트가 세운 것.
+        self.aux_windows[idx].dirty = false;
+        hover(self, fx + fw / 2.0, fy + fh / 2.0);
+        let asked_redraw = self.aux_windows[idx].dirty;
+        let landed = self.aux_windows[idx].cursor_px;
         if let Ok(path) = std::env::var("KASATERM_AUTOFACEHOVER_CAP") {
             self.aux_windows[idx].gpu.capture_next = Some(path);
         }
         self.aux_render(idx);
         let hot = self.aux_windows[idx].gpu.drawn_image_rects(&key);
         let hot_max = hot.iter().map(|r| r.3).fold(0.0f32, f32::max);
-        self.aux_windows[idx].cursor_px = saved;
         let a = &self.aux_windows[idx];
         // 방창을 먼저 물어야 한다 — `term_pane_id()` 는 방창에서도 포커스 pane 을
         // 내주므로 순서를 바꾸면 방창이 터미널창으로 찍힌다.
@@ -2588,6 +2634,16 @@ impl App {
         };
         eprintln!(
             "[autofacehover] {what} 프사 {key} rect=({fx:.0},{fy:.0},{fw:.0}x{fh:.0})"
+        );
+        // 이벤트가 정말 필드까지 닿았나. 여기가 어긋나면 아래 판정은 팝업이 아니라
+        // 주입 실패를 재는 것이 된다(고DPI 스케일 실수가 대표적).
+        let reached = (landed.0 - (fx + fw / 2.0)).abs() < 1.0
+            && (landed.1 - (fy + fh / 2.0)).abs() < 1.0;
+        eprintln!(
+            "[autofacehover] CursorMoved → cursor_px=({:.0},{:.0}) {}",
+            landed.0,
+            landed.1,
+            if reached { "도달" } else { "FAIL — 이벤트가 좌표를 못 옮겼다" }
         );
         // 「하나 더」와 「더 크다」를 같이 본다. 개수만 보면 같은 크기 프사가 둘
         // 그려지는 회귀를 팝업으로 읽고, 크기만 보면 작은 프사가 통째로 커진
@@ -2603,6 +2659,124 @@ impl App {
                 "FAIL — 팝업이 안 떴다"
             } else {
                 "FAIL — quad 는 늘었는데 확대가 아니다"
+            }
+        );
+        // 위 PASS 는 「강제로 그리면 팝업이 있다」까지다. 실제 화면에 뜨려면 그
+        // 프레임을 **누가 요청**해야 하는데, 그건 별개다 — 이 줄이 그 칸이다.
+        // 방창은 PTY wake 재렌더 목록에서도 빠져 있어(handler.rs `about_to_wait`:
+        // focused 이거나 Terminal 종류만) 요청이 없으면 정말로 안 뜬다.
+        eprintln!(
+            "[autofacehover] 대조커서({cold_x:.0},{cold_y:.0})→프사 이동이 재렌더 요청 {} — {}",
+            if asked_redraw { "함" } else { "안 함" },
+            if asked_redraw {
+                "커서만 옮겨도 화면에 뜬다"
+            } else {
+                "FAIL — 그림은 맞는데 프레임을 아무도 안 부른다(#48 계열)"
+            }
+        );
+    }
+    /// Headless 별도창 **트리 버튼 클릭** repro: `KASATERM_AUTOTREECLICK_MS`.
+    /// `KASATERM_AUTOAUXTREE_MS` 가 `toggle_aux_tree` 를 직접 부르는 것과 달리,
+    /// 여기는 헤더 버튼을 **눌러서** 연다 — `CursorMoved` + `MouseInput` 을
+    /// `window_event` 에 넣어 id 라우팅 → `aux_header_click` → 히트 판정까지 태운다.
+    /// 함수가 맞아도 버튼 rect 이 어긋나거나 클릭이 pane 포커스로 새면 트리는
+    /// 영영 안 열리는데, 직접 호출 하네스는 그걸 통째로 못 본다.
+    ///
+    /// 버튼 자리는 렌더가 적어 둔 `header_btns` 에서 되읽는다(좌표 복제 금지 규약).
+    /// 대조로 **버튼 아닌 헤더 지점**을 같은 실행에서 먼저 눌러 본다 — 그게 없으면
+    /// 「헤더 아무 데나 누르면 열리는」 회귀를 PASS 로 넘긴다.
+    pub(crate) fn run_pending_autotreeclick(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        use winit::event::{DeviceId, ElementState, MouseButton, WindowEvent};
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static DONE: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOTREECLICK_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if DONE.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        DONE.store(true, Ordering::Relaxed);
+        // 버튼은 렌더가 채우므로 먼저 한 프레임 그린다.
+        let mut found = None;
+        for idx in 0..self.aux_windows.len() {
+            self.aux_render(idx);
+            let Some(a) = self.aux_windows.get(idx) else { continue };
+            if let Some(&(_, r)) = a
+                .header_btns
+                .iter()
+                .find(|(k, _)| matches!(k, crate::auxwin::AuxHeaderBtn::FileTree))
+            {
+                found = Some((idx, r));
+                break;
+            }
+        }
+        let Some((idx, (bx, by, bw, bh))) = found else {
+            eprintln!("[autotreeclick] FAIL — 트리 버튼을 그리는 별도창이 없다(AUTOUNDOCK 을 앞에 둬라)");
+            return;
+        };
+        let wid = self.aux_windows[idx].window.id();
+        let scale = self.aux_windows[idx].gpu.scale() as f64;
+        let click = |app: &mut Self, x: f32, y: f32| {
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::CursorMoved {
+                    device_id: DeviceId::dummy(),
+                    position: winit::dpi::PhysicalPosition::new(
+                        x as f64 * scale,
+                        y as f64 * scale,
+                    ),
+                },
+            );
+            app.window_event(
+                event_loop,
+                wid,
+                WindowEvent::MouseInput {
+                    device_id: DeviceId::dummy(),
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                },
+            );
+        };
+        let before = self.aux_windows[idx].tree_open;
+        // 대조: 같은 헤더 높이의 빈 자리. 어느 버튼 rect 에도 안 걸리는 x 를 실제
+        // 목록에서 골라야 한다 — 「왼쪽 끝은 비었겠지」는 배치가 바뀌면 틀린다.
+        let cy = by + bh / 2.0;
+        let btns = self.aux_windows[idx].header_btns.clone();
+        let empty_x = (2..400)
+            .map(|i| i as f32)
+            .find(|&x| !btns.iter().any(|(_, (rx, _, rw, _))| x >= *rx && x <= rx + rw));
+        match empty_x {
+            Some(x) => {
+                click(self, x, cy);
+                let flipped = self.aux_windows[idx].tree_open != before;
+                eprintln!(
+                    "[autotreeclick] 대조: 헤더 빈자리({x:.0},{cy:.0}) 클릭 → tree_open {} {}",
+                    if flipped { "바뀜" } else { "그대로" },
+                    if flipped { "FAIL — 버튼 밖인데 열린다" } else { "PASS" }
+                );
+            }
+            None => eprintln!("[autotreeclick] 대조 생략 — 헤더에 빈 x 가 없다"),
+        }
+        click(self, bx + bw / 2.0, cy);
+        let after = self.aux_windows[idx].tree_open;
+        self.aux_render(idx);
+        let rows = self.aux_windows[idx].tree_rows.len();
+        eprintln!(
+            "[autotreeclick] 버튼({:.0},{cy:.0}) 클릭 → tree_open {before}→{after}, 트리 행 {rows}개 → {}",
+            bx + bw / 2.0,
+            if after != before && rows > 0 {
+                "PASS"
+            } else if after == before {
+                "FAIL — 클릭이 버튼에 안 닿았다"
+            } else {
+                "FAIL — 열리긴 했는데 판이 비었다"
             }
         );
     }
