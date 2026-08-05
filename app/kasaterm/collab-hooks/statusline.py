@@ -84,36 +84,39 @@ def load_config():
     return {}
 
 
-def slot_account_label():
-    """**이 pane 이 실제로 쓰는** 계정 슬롯의 라벨 — kasaterm 설정에 거노가 붙인 이름
-    ("개인계정"·"사이오닉팀플랜"). 슬롯은 `CLAUDE_SECURESTORAGE_CONFIG_DIR` 에서 온다
-    (kasaterm shim 이 pane 마다 export). 그 env 가 없으면 기본 로그인이라 None →
-    호출측이 공유 캐시 폴백으로 간다.
+def active_account_label():
+    """kasaterm 설정의 **활성 계정** 라벨 — 거노가 붙인 이름("개인계정"·
+    "사이오닉팀플랜"). 활성 계정이 비었으면(기본 로그인) None → 호출측이 공유 캐시
+    폴백으로 간다.
 
-    왜 공유 캐시(`~/.claude.json` 의 `oauthAccount`)를 못 쓰나: 그 필드는 **슬롯별이
+    왜 공유 캐시(`~/.claude.json` 의 `oauthAccount`)를 안 쓰나: 그 필드는 **슬롯별이
     아니다**. 마지막으로 로그인한 계정으로 덮이므로 어느 슬롯으로 돌든 같은 이름이
     뜬다(거노: "계정추가하면 1도 그거로 바뀌어"). 2026-08-05 실측 — 이 pane 은
     `acct-2`(사이오닉팀플랜)로 도는데 statusline 은 `개인계정`을 보여주고 있었다.
-    한도 분산이 목적인 기능에서 **어느 계정으로 돌고 있는지가 거짓말**이면, 한도에
-    부딪혔을 때 어느 계정을 갈아야 하는지 알 수 없다.
 
-    설정 값이 아니라 env 를 보는 이유: 이미 도는 claude 는 부팅 때 토큰을 물어
-    **계정이 안 바뀐다**. 설정을 보여주면 "바꿨으니 이 pane 도 새 계정"이라는 또 다른
-    거짓말이 된다 — 새 계정은 다음에 띄우는 pane 부터다."""
-    d = (os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR") or "").strip()
-    if not d:
-        return None
-    slot_id = Path(d).name
+    **설정 값을 보는 것은 거노 선택이다**(2026-08-05): Info 에서 계정을 바꾸면 모든
+    pane 의 statusline 이 즉시 새 계정을 말한다. 대가는 알고 고른 것이다 — 이미 도는
+    claude 는 부팅 때 토큰을 물어 **실제로는 옛 계정으로 계속 돈다**. 그 pane 이 진짜
+    쓰는 슬롯을 알아야 하면 `CLAUDE_SECURESTORAGE_CONFIG_DIR` 을 봐라(env 는 pane
+    생애 동안 고정이다). 새 계정은 다음에 띄우는 pane 부터 실제로 적용된다.
+
+    갱신 시점은 claude 가 statusline 을 다시 그릴 때 = 그 pane 의 다음 턴이다.
+    유휴 pane 은 다음 입력까지 옛 이름을 들고 있다 — 이 스크립트를 부르는 건
+    kasaterm 이 아니라 claude 라서 우리가 앞당길 수 없다."""
     try:
         cfg = Path.home() / ".config" / "kasaterm" / "settings.json"
         with open(cfg, encoding="utf-8") as f:
-            for a in json.load(f).get("claude_accounts") or []:
-                if a.get("id") == slot_id:
-                    return (a.get("label") or "").strip() or slot_id
+            d = json.load(f)
     except Exception:
-        pass
-    # 설정에 없는 슬롯(손으로 만든 dir 등)은 id 를 그대로 — 빈칸보다 낫다.
-    return slot_id
+        return None
+    cur = (d.get("claude_account") or "").strip()
+    if not cur:
+        return None
+    for a in d.get("claude_accounts") or []:
+        if a.get("id") == cur:
+            return (a.get("label") or "").strip() or cur
+    # 설정 목록에 없는 id(손으로 지운 계정 등)는 그대로 — 빈칸보다 낫다.
+    return cur
 
 
 def load_account():
@@ -200,13 +203,13 @@ def main():
         else:
             parts.append(f"{c}●{RESET} {c}{BOLD}{name}{RESET}")
 
-    # 계정 — 프사 바로 오른쪽. **이 pane 이 실제로 쓰는 슬롯**의 라벨이 1순위다
-    # (kasaterm 설정에 붙인 이름). 슬롯 env 가 없는 pane = 기본 로그인이고, 그때만
-    # 공유 캐시가 참이라 종전 규칙으로 간다: team/enterprise 는 조직명, 그 외는
-    # 사용자 이름(displayName). 개인계정 organizationName 은 "<이름>'s Organization"
-    # 이라 무의미해 "개인" 대신 실제 이름을 쓰고(거노), displayName 없으면 이메일
-    # 로컬파트, 그마저 없으면 "개인" 폴백.
-    label = slot_account_label()
+    # 계정 — 프사 바로 오른쪽. kasaterm 설정의 **활성 계정** 라벨이 1순위다(거노가
+    # 붙인 이름). 활성 계정이 없으면 기본 로그인이고 그때만 공유 캐시가 참이라 종전
+    # 규칙으로 간다: team/enterprise 는 조직명, 그 외는 사용자 이름(displayName).
+    # 개인계정 organizationName 은 "<이름>'s Organization" 이라 무의미해 "개인" 대신
+    # 실제 이름을 쓰고(거노), displayName 없으면 이메일 로컬파트, 그마저 없으면
+    # "개인" 폴백.
+    label = active_account_label()
     if not label:
         acct = load_account()
         if acct:
