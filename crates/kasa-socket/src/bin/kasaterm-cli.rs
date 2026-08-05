@@ -678,7 +678,7 @@ fn print_help() {
     eprintln!("  kasaterm-cli rename-window <title>          # 이 pane 의 세션 이름");
     eprintln!("  kasaterm-cli color <surface_id> <#rrggbb>");
     eprintln!(
-        "  kasaterm-cli split <left|right|up|down> [%surface] [--focus]  # 기본 no-focus·이 pane 을 쪼갬"
+        "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N]  # 기본 no-focus·이 pane 을 쪼갬. --count N 으로 한 번에 N개(실패하면 멈추고 몇 개까지 됐는지 준다)"
     );
     eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
     eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (오케스트레이터 크게)");
