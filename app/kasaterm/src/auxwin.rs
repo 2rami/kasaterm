@@ -182,6 +182,9 @@ fn draw_aux_header_btns(a: &mut AuxWindow, w: f32) {
 /// 커서가 statusline 프사 위면 큰 bust 를 팝업. 메인 창과 같은 그리기 함수를 쓰고,
 /// 창 경계 클램프의 위쪽 한계만 이 창의 헤더(`AUX_HEADER_H`)로 준다.
 fn paint_aux_face_hover(a: &mut AuxWindow, slots: &crate::render::StudentOverlays, w: f32) {
+    // 히트 rect 를 남긴다 — CursorMoved 가 이걸 보고 재렌더를 걸어야 팝업이 뜨고
+    // 진다. 그린 프레임이 곧 판정이라는 규약(header_btns·tree_rows)과 같다.
+    a.face_rects = slots.faces.iter().map(|(_, _, r)| *r).collect();
     let (mx, my) = a.cursor_px;
     let Some((name, slug, r)) = slots
         .faces
@@ -190,8 +193,8 @@ fn paint_aux_face_hover(a: &mut AuxWindow, slots: &crate::render::StudentOverlay
     else {
         return;
     };
-    let pop = 8.0 * a.gpu.cell_h;
-    crate::render::paint_face_popup(&mut a.gpu, name, slug, *r, pop, w, AUX_HEADER_H);
+    let cell_h = a.gpu.cell_h;
+    crate::render::paint_face_popup(&mut a.gpu, name, slug, *r, cell_h, w, AUX_HEADER_H);
 }
 
 /// 별도창 왼쪽 파일트리 패널 한 프레임. 메인 창 트리에서 **행 그리기만** 옮겨 왔다
@@ -457,11 +460,24 @@ pub(crate) struct AuxWindow {
     pub(crate) tree_scroll: f32,
     /// 트리 행의 히트 rect — 그린 프레임이 곧 클릭 판정(header_btns 와 같은 규약).
     pub(crate) tree_rows: Vec<(std::path::PathBuf, bool, (f32, f32, f32, f32))>,
+    /// statusline 프사의 히트 rect — 렌더가 채운다(header_btns 와 같은 규약).
+    /// hover 팝업은 매 프레임 재판정이라 그 프레임을 **부를 사람**이 필요한데,
+    /// CursorMoved 는 헤더 띠에서만 재렌더를 걸었다. 프사는 그 띠 밖(y≈131)이라
+    /// 팝업이 뜨고 지는 프레임을 아무도 안 불렀고, 셸이 출력 중일 때만 PTY wake 에
+    /// 얹혀 우연히 떴다(조용하면 안 뜸 — 거노의 "가끔 안 뜬다"가 이것).
+    pub(crate) face_rects: Vec<(f32, f32, f32, f32)>,
     /// `window` 는 맨 뒤 — `gpu` 보다 나중에 드롭돼 surface 가 살아있는 창을 참조한다.
     pub(crate) window: Arc<Window>,
 }
 
 impl AuxWindow {
+    /// 커서가 statusline 프사 위인가 — hover 팝업이 떠야 하는 상태인지.
+    fn over_face(&self, at: (f32, f32)) -> bool {
+        self.face_rects
+            .iter()
+            .any(|r| at.0 >= r.0 && at.0 <= r.0 + r.2 && at.1 >= r.1 && at.1 <= r.1 + r.3)
+    }
+
     /// 파일트리가 먹는 폭(logical px). 닫혀 있으면 0.
     fn tree_w(&self) -> f32 {
         if self.tree_open { AUX_TREE_W } else { 0.0 }
@@ -687,6 +703,7 @@ impl App {
             pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
+            face_rects: Vec::new(),
             header_btns: Vec::new(),
             window,
         };
@@ -1455,6 +1472,7 @@ impl App {
             pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
+            face_rects: Vec::new(),
             header_btns: Vec::new(),
             window,
         };
@@ -1677,6 +1695,7 @@ impl App {
             pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
+            face_rects: Vec::new(),
             header_btns: Vec::new(),
             window,
         };
@@ -2348,11 +2367,15 @@ impl App {
                 let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
                 if let Some(a) = self.aux_windows.get_mut(idx) {
                     let was_header = a.cursor_px.1 <= AUX_HEADER_H;
+                    let was_face = a.over_face(a.cursor_px);
                     a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
                     // 헤더를 지나는 동안만 다시 그린다 — 버튼 hover 는 그 띠에서만
                     // 바뀌고, 셀 위에서 매 픽셀 재렌더하면 그냥 낭비다. 띠를 벗어나는
                     // 프레임도 한 번은 그려야 hover 가 남아 굳지 않는다.
-                    if was_header || a.cursor_px.1 <= AUX_HEADER_H {
+                    // 프사는 그 띠 밖이라 따로 봐야 한다 — 들고 나는 **경계에서만**
+                    // 그리면 팝업이 뜨고 지면서도 셀 위 매 픽셀 재렌더는 피한다.
+                    let is_face = a.over_face(a.cursor_px);
+                    if was_header || a.cursor_px.1 <= AUX_HEADER_H || was_face != is_face {
                         a.dirty = true;
                         a.window.request_redraw();
                     }
@@ -2986,11 +3009,15 @@ impl App {
                 let scale = self.aux_windows.get(idx).map(|a| a.gpu.scale()).unwrap_or(1.0);
                 if let Some(a) = self.aux_windows.get_mut(idx) {
                     let was_header = a.cursor_px.1 <= AUX_HEADER_H;
+                    let was_face = a.over_face(a.cursor_px);
                     a.cursor_px = (position.x as f32 / scale, position.y as f32 / scale);
                     // 헤더를 지나는 동안만 다시 그린다 — 버튼 hover 는 그 띠에서만
                     // 바뀌고, 셀 위에서 매 픽셀 재렌더하면 그냥 낭비다. 띠를 벗어나는
                     // 프레임도 한 번은 그려야 hover 가 남아 굳지 않는다.
-                    if was_header || a.cursor_px.1 <= AUX_HEADER_H {
+                    // 프사는 그 띠 밖이라 따로 봐야 한다 — 들고 나는 **경계에서만**
+                    // 그리면 팝업이 뜨고 지면서도 셀 위 매 픽셀 재렌더는 피한다.
+                    let is_face = a.over_face(a.cursor_px);
+                    if was_header || a.cursor_px.1 <= AUX_HEADER_H || was_face != is_face {
                         a.dirty = true;
                         a.window.request_redraw();
                     }
@@ -3243,6 +3270,7 @@ impl App {
             pinned: false,
             tree_scroll: 0.0,
             tree_rows: Vec::new(),
+            face_rects: Vec::new(),
             header_btns: Vec::new(),
             window: window_handle,
         });
