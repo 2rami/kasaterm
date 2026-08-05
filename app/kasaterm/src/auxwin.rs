@@ -2622,6 +2622,23 @@ impl App {
             }
             return;
         }
+        // Cmd+D / Cmd+Shift+D / Cmd+E: split — **방 창만**. pane 하나짜리 터미널
+        // 별도창은 leaf 하나를 창 전체에 그리므로 쪼개 봐야 새 pane 이 어디에도 안
+        // 보이고 셸만 는다. 화음은 메인 창(input::forward_key)과 같게 맞춘다.
+        if self.host_mod() && self.aux_windows.get(idx).and_then(|a| a.room_window()).is_some() {
+            if let PhysicalKey::Code(code) = event.physical_key {
+                let dir = match code {
+                    KeyCode::KeyD if self.host_mod_alt() => Some(kasa_pty::SplitDir::Vertical),
+                    KeyCode::KeyD => Some(kasa_pty::SplitDir::Horizontal),
+                    KeyCode::KeyE => Some(kasa_pty::SplitDir::Vertical),
+                    _ => None,
+                };
+                if let Some(dir) = dir {
+                    self.split_room_pane(idx, dir);
+                    return;
+                }
+            }
+        }
         // 폰트 줌(Cmd+= / Cmd+- / Cmd+0). **한글 조합 분기보다 먼저** 와야 한다 —
         // 조합 중엔 아래 자모 경로나 맨 끝 평문 경로가 이 키를 먼저 먹어 셸에 '-' 가
         // 박혔다(별도창엔 줌 처리가 아예 없었다). 메인 창(forward_key)과 같은 규칙으로
@@ -2986,6 +3003,62 @@ impl App {
                 let _ = pty.resize(w.max(1), h.max(1));
             }
         }
+    }
+
+    /// 방 별도창의 포커스 pane 을 쪼갠다(⌘D / ⌘⇧D / ⌘E — 메인 창과 같은 화음).
+    ///
+    /// `split_active_pane` 을 못 쓰는 건 그게 **활성 window 트리**(`pty_layout`)만
+    /// 보기 때문이다 — 꺼내 둔 방이 비활성이면 그 트리엔 이 pane 이 없어 split_leaf
+    /// 이 false 를 돌려주고 새 셸만 조용히 새 나간다. 여기선 어느 window 를 그리고
+    /// 있는지 창이 알고 있으니 그 트리에 직접 꽂고, 리사이즈도 메인 그리드가 아니라
+    /// 이 창의 leaf_rects 로 한다.
+    fn split_room_pane(&mut self, idx: usize, dir: kasa_pty::SplitDir) {
+        if self.tmux.is_some() {
+            return;
+        }
+        let Some((window, target)) = self
+            .aux_windows
+            .get(idx)
+            .and_then(|a| Some((a.room_window()?, a.term_pane_id()?.to_string())))
+        else {
+            return;
+        };
+        let new_id = match self.spawn_split_session(&target) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("[kasaterm] room split failed: {e}");
+                return;
+            }
+        };
+        let layout = if window == self.active_window {
+            self.pty_layout.as_mut()
+        } else {
+            self.windows.get_mut(window).and_then(|s| s.as_mut())
+        };
+        let placed = layout.is_some_and(|l| l.split_leaf(&target, dir, new_id.clone()));
+        if !placed {
+            self.pty.remove(&new_id);
+            self.next_pane_id -= 1;
+            return;
+        }
+        // 새 pane 으로 포커스를 옮긴다 — 메인 창 split 과 같은 관례(방금 만든 곳에
+        // 바로 친다). 활성 window 를 쪼갠 거면 메인 그리드도 같이 다시 그려야 한다.
+        if let Some(a) = self.aux_windows.get_mut(idx) {
+            if let AuxWindowKind::Room { focus, .. } = &mut a.kind {
+                *focus = Some(new_id.clone());
+            }
+        }
+        if window == self.active_window {
+            self.ws.lock().unwrap().active_pane = Some(new_id);
+            let (c, r) = self.window_cells();
+            self.resize_backend(c, r);
+            self.publish_pty_layout();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        self.aux_room_resize_pty(idx);
+        self.aux_redraw(idx);
     }
 
     /// 방 창 클릭 → 커서 아래 pane 으로 포커스 이동(키 입력이 그리로 간다).
