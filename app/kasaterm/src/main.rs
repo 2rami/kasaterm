@@ -3157,6 +3157,18 @@ fn build_markdown_doc(p: &std::path::Path, text: &str) -> MarkdownDoc {
 /// Whole-window state: HashMap of panes keyed by tmux pane id, the
 /// most recently parsed Layout tree, and which pane is active for
 /// keyboard / selection / cursor display.
+/// 사이드바 방 이름 인라인 편집 상태.
+///
+/// **느린 더블클릭**(Finder 파일명 바꾸기)이라 진짜 더블클릭과 갈라야 한다. 규칙은
+/// `starts_room_rename` 에 순수 함수로 두고 여기선 상태만 든다.
+#[derive(Default)]
+struct RoomRename {
+    /// 마지막으로 누른 방 줄과 그 시각 — 다음 클릭이 "느린" 것인지 판정하는 기준.
+    last_click: Option<(usize, std::time::Instant)>,
+    /// 편집 중인 방과 입력 버퍼. None = 편집 아님.
+    editing: Option<(usize, String)>,
+}
+
 struct Workspace {
     panes: HashMap<String, PaneState>,
     layout: Option<Layout>,
@@ -4111,6 +4123,9 @@ struct App {
     /// Populated by the render path, consumed by the MouseInput handler so
     /// a click switches windows. Logical px.
     window_tab_rects: Vec<(usize, (f32, f32, f32, f32))>,
+    /// 사이드바 방 이름 인라인 편집(느린 더블클릭). 필드를 늘리지 않으려 한 줄로 묶었다 —
+    /// `struct App` 정의는 병렬 작업 충돌 핫스팟이다(CLAUDE.md).
+    room_rename: RoomRename,
     /// 펼친 방 아래 pane 한 줄씩의 히트 영역 — (방, pane id, rect). 탭 rect 안에
     /// 들어 있으므로 클릭 판정은 **탭보다 먼저** 해야 한다.
     sidebar_row_rects: Vec<(usize, String, (f32, f32, f32, f32))>,
@@ -4770,6 +4785,7 @@ impl App {
             window_labels: Vec::new(),
             window_labels_at: None,
             window_name_override: HashMap::new(),
+            room_rename: RoomRename::default(),
             selection: None,
             drag_anchor: None,
             link_armed: None,
