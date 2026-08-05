@@ -463,6 +463,27 @@ impl PtySession {
         resolved
     }
 
+    /// 이 pane 이 지금 돌리는 **에이전트 종류**. 셸이거나 다른 프로그램이면 None.
+    ///
+    /// 게이트를 이 하나로 모으는 이유: 예전엔 11곳이 `active_process_name()` 을 각자
+    /// 보며 어떤 곳은 `== "claude"`, 어떤 곳은 `contains` 로 갈렸다. 종류가 둘이 되는
+    /// 순간 그 사본들이 제각각 갈라진다 — 오늘만 사본 때문에 세 번 물렸다.
+    ///
+    /// ⚠️ **codex 는 이름만 봐선 절대 못 잡는다.** npm shim 이라 셸의 직속 자식이
+    /// `node` 이고 진짜 바이너리는 **손자**다(실측):
+    /// ```text
+    /// 32387 ppid=셸    comm=node          args=node …/.npm-global/bin/codex
+    /// 32410 ppid=32387 comm=…/bin/codex   ← 이것
+    /// ```
+    /// 그래서 직속 자식이 런처류(node·npm·sh…)면 한 세대 더 내려간다. 프로세스
+    /// 테이블은 300ms 공유 캐시라 `ps` 추가 호출이 없다.
+    pub fn active_agent(&self) -> Option<AgentKind> {
+        let pid = self.shell_pid?;
+        let table = process_table_shared();
+        let pid = effective_shell_pid(&table, pid);
+        agent_in_table(&table, pid)
+    }
+
     /// `claude agents`(에이전트 목록 뷰)로 도는 pane 인지 — argv 서브커맨드로 판정.
     /// render 가 이 pane 에 개별 학생 대신 샬레 로고를 그릴지 결정한다. process_cmdline
     /// (ps) 은 비싸 active_process_name 과 같은 500ms 캐시. 대화(일반 claude/--resume)
@@ -2181,6 +2202,65 @@ fn orphan_claude_of_this_gui(table: &[(u32, u32, String)]) -> bool {
 /// Windows 프로세스명은 "claude.exe" — active_process_name 호출자들은 "claude" /
 /// "bash" 같은 bare 이름과 정확 일치 비교하므로 여기서 확장자를 벗겨 플랫폼
 /// 균질화한다. Unix 는 no-op.
+/// pane 에서 도는 에이전트 종류. 학생 대접(보더 학생색·타이틀바·얼굴·탭칩)은
+/// claude 전용이 아니라 **이 값이 Some 이면** 붙는다(거노 2026-08-05: codex 도 학생).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AgentKind {
+    Claude,
+    Codex,
+}
+
+impl AgentKind {
+    /// 프로세스 comm 으로 판정. comm 은 경로가 붙어 올 수 있어(손자 행은
+    /// `…/bin/codex`) 파일명만 떼어 본다.
+    fn from_comm(comm: &str) -> Option<Self> {
+        let base = comm.rsplit(['/', '\\']).next().unwrap_or(comm);
+        let base = strip_exe_suffix(base.to_string());
+        match base.as_str() {
+            "claude" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+}
+
+/// 셸 pid 아래에서 에이전트를 찾는다 — 테이블만 보는 순수 함수라 실측 트리로 잴 수 있다.
+///
+/// 같은 부모의 자식 중 **가장 나중에 뜬 것**(pid 큰 쪽)을 고른다 — `active_process_name`
+/// 과 같은 규칙. 직속 자식이 런처류면 한 세대 더 내려간다.
+fn agent_in_table(table: &[(u32, u32, String)], shell_pid: u32) -> Option<AgentKind> {
+    let newest_child = |parent: u32| -> Option<(u32, &str)> {
+        let mut best: Option<(u32, &str)> = None;
+        for (row_pid, row_ppid, name) in table.iter() {
+            if *row_ppid == parent && best.as_ref().is_none_or(|(p, _)| *p < *row_pid) {
+                best = Some((*row_pid, name.as_str()));
+            }
+        }
+        best
+    };
+    let (child_pid, child) = newest_child(shell_pid)?;
+    if let Some(kind) = AgentKind::from_comm(child) {
+        return Some(kind);
+    }
+    if is_agent_launcher(child) {
+        if let Some((_, grandchild)) = newest_child(child_pid) {
+            return AgentKind::from_comm(grandchild);
+        }
+    }
+    None
+}
+
+/// 에이전트를 감싸 띄우는 것들 — 이게 직속 자식이면 진짜 프로세스는 한 세대 아래다.
+/// codex 가 npm shim 이라 `node` 를 거치는 게 대표 사례고, `npx`·래퍼 셸도 같다.
+fn is_agent_launcher(comm: &str) -> bool {
+    let base = comm.rsplit(['/', '\\']).next().unwrap_or(comm);
+    let base = strip_exe_suffix(base.to_string());
+    matches!(
+        base.as_str(),
+        "node" | "npm" | "npx" | "bun" | "deno" | "env" | "sh" | "bash" | "zsh" | "fish"
+    )
+}
+
 fn strip_exe_suffix(name: String) -> String {
     #[cfg(not(windows))]
     {
@@ -2520,5 +2600,68 @@ mod process_table_tests {
         let a = process_table_shared();
         let b = process_table_shared();
         assert!(std::sync::Arc::ptr_eq(&a, &b), "TTL 안인데 표가 새로 만들어졌다");
+    }
+}
+
+#[cfg(test)]
+mod agent_kind_tests {
+    use super::*;
+
+    /// 실측 트리(2026-08-05, 거노 머신). codex 는 npm shim 이라 진짜 바이너리가
+    /// **손자**다 — 이름만 보는 판정은 여기서 반드시 실패한다.
+    fn codex_tree() -> Vec<(u32, u32, String)> {
+        vec![
+            (60536, 1, "zsh".into()),
+            (60973, 60536, "node".into()),
+            (60992, 60973, "codex".into()),
+        ]
+    }
+
+    #[test]
+    fn codex_는_node_아래_손자로_잡힌다() {
+        assert_eq!(agent_in_table(&codex_tree(), 60536), Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn claude_는_직속_자식으로_잡힌다() {
+        let t = vec![(71388, 1, "zsh".into()), (71391, 71388, "claude".into())];
+        assert_eq!(agent_in_table(&t, 71388), Some(AgentKind::Claude));
+    }
+
+    #[test]
+    fn 그냥_셸은_아무것도_아니다() {
+        // 음성 대조군이 없으면 "늘 Some" 을 내는 판정도 통과한다.
+        let t = vec![(100, 1, "zsh".into()), (101, 100, "vim".into())];
+        assert_eq!(agent_in_table(&t, 100), None);
+    }
+
+    #[test]
+    fn 런처만_있고_손자가_없으면_아무것도_아니다() {
+        // node 를 띄웠지만 codex 가 아닌 경우 — 런처를 봤다고 에이전트로 치면 안 된다.
+        let t = vec![(200, 1, "zsh".into()), (201, 200, "node".into())];
+        assert_eq!(agent_in_table(&t, 200), None);
+    }
+
+    #[test]
+    fn 자식이_여럿이면_가장_나중_것() {
+        // active_process_name 과 같은 규칙(pid 큰 쪽) — 옛 자식이 남아 있어도
+        // 지금 화면에 보이는 것을 고른다.
+        let t = vec![
+            (300, 1, "zsh".into()),
+            (301, 300, "vim".into()),
+            (302, 300, "claude".into()),
+        ];
+        assert_eq!(agent_in_table(&t, 300), Some(AgentKind::Claude));
+    }
+
+    #[test]
+    fn 경로가_붙어_와도_파일명으로_본다() {
+        // 테이블은 basename 으로 정규화하지만, 그 전제가 깨져도 판정은 서야 한다.
+        let t = vec![
+            (400, 1, "zsh".into()),
+            (401, 400, "/usr/local/bin/node".into()),
+            (402, 401, "/opt/homebrew/bin/codex".into()),
+        ];
+        assert_eq!(agent_in_table(&t, 400), Some(AgentKind::Codex));
     }
 }

@@ -286,11 +286,12 @@ fn git_paint_dropdowns(
 }
 
 /// Lucide icon name for a sidebar tab's chip, chosen from the window label.
-/// claude panes get the sparkle, markdown docs a file, everything else the
-/// terminal glyph — keeps window identity readable after the SVG switch.
+/// 에이전트 pane 은 sparkle, markdown 은 문서, 나머지는 터미널 글리프.
+/// codex 도 학생 대접이라 같은 sparkle 을 쓴다(거노 2026-08-05) — 종류를 아이콘으로
+/// 가르면 "누가 에이전트인가"가 한눈에 안 들어온다.
 fn tab_icon_glyph(name: &str) -> &'static str {
     let l = name.to_ascii_lowercase();
-    if name.contains('✳') || l.contains("claude") {
+    if name.contains('✳') || l.contains("claude") || l.contains("codex") {
         "sparkles"
     } else if l.ends_with(".md") {
         "file-text"

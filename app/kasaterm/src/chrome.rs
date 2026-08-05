@@ -146,8 +146,9 @@ impl App {
             .pty
             .iter()
             .filter(|(_, p)| {
-                p.osc_title().is_some_and(|t| t.contains("Claude"))
-                    || p.active_process_name().is_some_and(|n| n.contains("claude"))
+                p.osc_title()
+                    .is_some_and(|t| t.contains("Claude") || t.contains("Codex"))
+                    || p.active_agent().is_some()
             })
             .map(|(id, _)| id.clone())
             .collect();
