@@ -1860,12 +1860,15 @@ impl App {
             // 조합 중 한글 — 커서 자리에 프리에딧(메인 render 와 동일 draw_preedit).
             a.gpu.draw_preedit(px, py, &pe, crate::cells::iterm_cursor(), 1.0);
         }
-        // 학생색 외곽선 — 메인 그리드의 active pane 테두리와 같은 신호다. 셀 위에
-        // 얹어야 가장자리 글자에 안 먹힌다. 포커스가 없을 땐 흐리게 남겨 어느 창이
-        // 누구인지는 계속 보이게 한다.
-        if student.is_some() {
+        // 창 외곽선 — 셀 위에 얹어야 가장자리 글자에 안 먹힌다. 학생이 있으면 그
+        // 색으로(메인 그리드의 active pane 테두리와 같은 신호), 없으면 border 로.
+        // **학생 유무와 무관하게 항상 두른다**: OS 타이틀바를 껐으므로 테두리가
+        // 없으면 창이 어디서 끝나는지가 배경색 차이 하나뿐이라, 어두운 바탕 위에서
+        // 경계가 통째로 사라진다(거노). 포커스가 없을 땐 흐리게.
+        {
             const T: f32 = 1.5;
-            let col = crate::theme::with_alpha(accent, if focused { 0xFF } else { 0x66 });
+            let base = if student.is_some() { accent } else { crate::theme::border() };
+            let col = crate::theme::with_alpha(base, if focused { 0xFF } else { 0x66 });
             // 세로 변은 가로 변 **사이만** 채운다. 네 변을 각각 통짜로 그리면 모서리
             // 1.5×1.5 가 두 번 칠해지는데, 포커스가 없을 땐 알파가 0x66 이라 그
             // 네 점만 두 배로 진해져 꼭짓점이 점처럼 튄다(거노: "테두리 꼭짓점이
@@ -2120,6 +2123,19 @@ impl App {
                     a.gpu.rect(sx, ry, ex - sx, BAR_H, base);
                 }
             }
+        }
+        // 창 외곽선 — pane 별도창과 같은 규칙(거노: "pane 별도창은 전체에 테두리").
+        // 방 창은 안쪽 pane 경계만 있어 바깥이 열린 채였다: OS 타이틀바를 껐으니
+        // 테두리가 없으면 창이 어디서 끝나는지가 배경색 차이 하나뿐이다. 색은 헤더
+        // 라벨과 같은 포커스 학생색으로 — 같은 신호를 두 군데서 준다.
+        {
+            const T: f32 = 1.5;
+            let base = label_col.unwrap_or_else(crate::theme::border);
+            let col = crate::theme::with_alpha(base, if focused { 0xFF } else { 0x66 });
+            a.gpu.rect(0.0, 0.0, w, T, col);
+            a.gpu.rect(0.0, h - T, w, T, col);
+            a.gpu.rect(0.0, T, T, (h - T * 2.0).max(0.0), col);
+            a.gpu.rect(w - T, T, T, (h - T * 2.0).max(0.0), col);
         }
         // 학생 스프라이트는 셀 위 패스 — statusline 테두리 글리프가 얼굴을
         // 가로지르지 않게. 메인 그리드와 같은 함수·같은 이미지 키를 쓴다.
@@ -3012,7 +3028,7 @@ impl App {
     /// 이 false 를 돌려주고 새 셸만 조용히 새 나간다. 여기선 어느 window 를 그리고
     /// 있는지 창이 알고 있으니 그 트리에 직접 꽂고, 리사이즈도 메인 그리드가 아니라
     /// 이 창의 leaf_rects 로 한다.
-    fn split_room_pane(&mut self, idx: usize, dir: kasa_pty::SplitDir) {
+    pub(crate) fn split_room_pane(&mut self, idx: usize, dir: kasa_pty::SplitDir) {
         if self.tmux.is_some() {
             return;
         }
