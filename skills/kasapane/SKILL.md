@@ -312,14 +312,18 @@ kasaterm-cli color  "$S" "#58a6ff"
 # split 직후 send는 "surface 없음" 가드 오발동이 잦다(id 재사용, 실측 2회) → 실패 시 sleep 2 후 재시도
 # 트리플(--agent-id/--agent-name/--team-name)은 **붙이지 마라** — shim 이 자동으로 붙인다(2026-08-04 복원).
 # 직접 주면 자동 부착이 통째로 꺼진다. 이름은 <캐릭터 슬러그>-p<pane번호>, 팀은 방(cwd) 단위.
-kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --model \'claude-opus-5[1m]\' --effort xhigh\n'   # 모델은 풀네임+[1m] 필수 — 아래 학생 모델 항목
-sleep 9                                  # 부팅 대기 — peek 로 ❯ 프롬프트 확인
-# 브리프는 SendMessage 로. to: 는 상대의 $KASATERM_AGENT(= <슬러그>-p<pane번호>) — pane 번호에서 바로 온다.
-#   SendMessage({to: "<슬러그>-p<번호>", summary: "<작업> 브리프", message: "<배경·파일 포인터·검증 기준·자기 브랜치에 커밋>"})
-# 긴 브리프는 파일로 쓰고 "브리프 파일 <절대경로>를 Read 후 수행" 한 줄만 — 받는 pane 은 거노가 보는 화면이다.
+# 브리프를 **먼저** 파일에 쓰고, 부팅 커맨드에 경로를 인자로 실어 한 번에 보낸다.
+cat > /tmp/brief-$S.md <<'BRIEF'
+<배경·파일 포인터·검증 기준·커밋은 자기 브랜치에>
+BRIEF
+kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --model \'claude-opus-5[1m]\' --effort xhigh "/tmp/brief-'"$S"$'.md 읽고 수행"\n'
+# 부팅을 기다리지 않는다 — 입력이 큐에 쌓였다가 뜨자마자 처리된다(오케스트레이터 0.8s, 학생 첫 응답 6.9s 실측 2026-08-05).
+# 뒤이어 할 말이 생기면 그때는 SendMessage({to: "<슬러그>-p<번호>", ...}) — to: 는 pane 번호에서 바로 온다.
 ```
 
 ⚠️ **부팅 커맨드는 갓 만든 빈 pane 에만.** 이미 claude 가 도는 pane 에 `... && claude ...` 를 보내면 셸이 아니라 **그 claude 의 입력창**이 받아 지시로 읽고, 하네스식 스폰 절차(인박스 선주입 → pane 부팅)를 그대로 쓰면 아무도 뜨지 않은 이름의 인박스가 하나 생겨 브리프가 조용히 사라진다(`inboxes/` 의 고아 파일들이 그 잔해다). 2026-08-04부터 **서버가 거부한다** — `surface.send_text` 가 board(=claude 가 도는 pane 목록)를 보고 부팅 커맨드면 막고 대신 쓸 `to:` 이름을 알려준다. 도는 pane 에 할 말은 SendMessage 뿐이다.
+
+⚠️ **send 를 두 번 연달아 보내지 마라 — 둘째가 첫 명령줄 안으로 빨려 들어간다.** 부팅 커맨드를 보낸 직후 브리프를 또 보내면, 셸이 아직 `claude` 를 exec 하기 전이라 둘째 텍스트를 **같은 명령줄의 일부로** 읽는다(실측 2026-08-05: 모델명이 `claude-opus-5[1m]지금[1m]` 이 되어 부팅 실패, 프롬프트엔 「몇」 한 글자만 남음). 그래서 브리프는 **파일에 먼저 쓰고 경로를 claude 인자로** 한 번에 넘긴다. 이게 `sleep 9` 를 없애면서도 안전한 유일한 조합이다.
 
 - `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan). `--model`·`--effort`·`--session-id`·`--resume`은 공개 플래그.
 - **학생 모델 = 반드시 풀네임 + `[1m]`(1M 컨텍스트) 변형**: 가벼운 잡·정찰=`'claude-sonnet-5[1m]'`, 구현·생성 본작업=`'claude-opus-5[1m]'`(유효 실측 2026-07-26). ⚠️ **`opus`·`sonnet` 짧은 alias 를 쓰지 마라** — alias 는 아직 이전 세대(`opus`→Opus 4.8)를 가리켜 오푸스 5 로 안 뜬다(거노 실사고 2026-07-26: 학생이 전부 4.8 로 소환됨). 세대가 바뀌면 alias 가 늦게 따라오므로 풀네임이 정본이다. 표준(200K) 변형으로 띄우거나 `/model opus`처럼 무접미 전환하면 컨텍스트 창이 줄어든다 — 실사고: sonnet[1m] 세션을 `/model opus`(200K)로 바꾸자 같은 대화가 87%로 점프. **미드세션 전환도 항상 `/model claude-opus-5[1m]` 꼴로.** 대괄호가 zsh glob이라 CLI에선 **따옴표 필수**(안 감싸면 "no matches found"). 거노가 모델을 지정하면 그 계열의 [1m] 변형으로 해석한다. 모델의 자기보고("200K 표준")는 훈련지식이라 믿지 말 것 — 하네스 statusline이 진실. **함정(실사고 07-19): tell로 주입한 슬래시 명령은 학생이 working 중이면 제출돼도 큐에만 걸리고 발화하지 않는다** — 코하루가 전환 미발화 상태로 200K를 100%까지 소진. 주입 후 반드시 peek로 statusline의 `1M` 표기를 확인하고, 큐에 걸려 있으면 `key escape`로 턴을 끊어 발화시켜라(파일 수정분은 보존됨).
