@@ -2756,17 +2756,20 @@ impl App {
         // Model-invoked tools for the claude running inside a pane: the
         // same Backend, exposed over MCP-on-HTTP. Replaces the external
         // python bridge (mcp/kasa_mcp.py).
-        match kasa_mcp::spawn_http_server(backend.clone(), 8765) {
+        let http_port = match kasa_mcp::spawn_http_server(backend.clone(), 8765) {
             Ok(port) => {
                 eprintln!("[kasaspace-mcp] HTTP MCP on 127.0.0.1:{port}/mcp");
                 std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
-                let _ = std::fs::write(mcp_port_file_path(), port.to_string());
                 // No MCP auto-discovery: write our address into each AI
                 // client's config so any agent on this machine finds us.
                 kasa_mcp::register_clients(port);
+                Some(port)
             }
-            Err(e) => eprintln!("[kasaspace-mcp] HTTP MCP start failed: {e}"),
-        }
+            Err(e) => {
+                eprintln!("[kasaspace-mcp] HTTP MCP start failed: {e}");
+                None
+            }
+        };
         let path = resolve_kasaterm_socket_path();
         let server = match kasa_socket::Server::bind(&path) {
             Ok(s) => s,
@@ -2779,6 +2782,15 @@ impl App {
         eprintln!("[agent-socket] listening on {resolved}");
         std::env::set_var("KASATERM_SOCKET_PATH", &resolved);
         std::env::set_var("CMUX_SOCKET_PATH", &resolved);
+        // Publish the port only now: the file is keyed to the *resolved* socket,
+        // and until `Server::bind` returns we do not know it. Writing earlier
+        // used the inherited env — so an instance launched from a pane stamped
+        // its port next to the parent's socket and hijacked the parent's hooks.
+        // A failed bind returns above without publishing, which is correct: a
+        // port nobody can reach through this socket should not be advertised.
+        if let Some(port) = http_port {
+            let _ = std::fs::write(mcp_port_file_for(&resolved), port.to_string());
+        }
         let _join = server.spawn(backend);
     }
     pub(crate) fn start_socket_tmux(&self, tmux: Arc<kasa_bridge::TmuxSession>) {

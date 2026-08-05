@@ -44,9 +44,12 @@ while [ "$i" -lt 4 ] && [ -n "$pp" ] && [ "$pp" != "0" ] && [ "$pp" != "1" ]; do
 done
 if [ -z "$has_persona" ]; then
   psid="$(basename "$tp" .jsonl)"
-  # 포트는 env(스테일 가능)가 아니라 현 인스턴스가 쓰는 mcp_port 파일에서 — 소켓과
-  # 같은 TMPDIR 라 인스턴스가 갈려도 최신 것을 읽는다.
-  portf="$(dirname "${KASATERM_SOCKET_PATH:-/tmp/nosock}")/mcp_port"
+  # 포트 파일은 **내 소켓 짝**이다: <sock>.sock → <sock>.mcp_port. 예전엔 소켓의
+  # 디렉터리에 mcp_port 하나였는데, 소켓은 PID 별이고 그 파일은 디렉터리당 하나라
+  # 인스턴스가 서로 덮었다 — "최신 것을 읽는다"가 곧 "마지막에 뜬 아무 인스턴스를
+  # 읽는다"였고, pane 에서 띄운 테스트 인스턴스가 부모 앱 pane 들의 포트를 가로챘다.
+  portf="${KASATERM_SOCKET_PATH:-/tmp/nosock.sock}"
+  portf="${portf%.sock}.mcp_port"
   port="$(cat "$portf" 2>/dev/null)"
   persona="$(curl -s --max-time 2 --get --data-urlencode "sid=$psid" \
     "http://127.0.0.1:${port:-8765}/persona" 2>/dev/null)"
