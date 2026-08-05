@@ -585,6 +585,31 @@ fn read_claude_tasks(session_id: &str) -> Vec<(String, String, String)> {
     }
 }
 
+/// pane 의 **팀 이름** → task 디렉토리(`~/.claude/tasks/<team>/`). 정본 경로다.
+///
+/// 팀 이름은 board 의 `team`(= shim 이 pane 에 export 한 `KASATERM_TEAM`)이라 pane 마다
+/// 정확하고, cwd·mtime 추측이 필요 없다. 같은 방 pane 들이 **같은 목록을 공유하는 건 설계**다
+/// (그래서 여러 pane 을 한 번에 물을 때만 호출부가 dedup 한다).
+///
+/// 이게 없던 동안 태스크가 **모든 pane 에서 0개**로 떴다(거노: 아루 태스크가 이상하다).
+/// 옛 경로 둘이 다 빗나가서다 — store 는 `tasks/<team>/` 인데 세션 경로는 `tasks/session-<8hex>/`
+/// 를 찾았고, cwd 폴백은 `teams/<team>/config.json` 의 `members[].cwd` 를 읽는데 그 파일이
+/// 이제 안 생긴다(팀 디렉토리엔 `inboxes/` 뿐, 실측 2026-08-05).
+fn team_task_dir_by_name(team: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from)?;
+    team_task_dir_in(&home.join(".claude/tasks"), team)
+}
+
+/// `team_task_dir_by_name` 의 순수 부분 — `$HOME` 없이 테스트할 수 있게 갈라 뒀다.
+/// 팀 이름은 그대로 경로 조각이 되므로 구분자·상위참조를 막는다(외부에서 온 문자열).
+fn team_task_dir_in(base: &std::path::Path, team: &str) -> Option<std::path::PathBuf> {
+    if team.is_empty() || team.contains(['/', '\\']) || team.contains("..") {
+        return None;
+    }
+    let dir = base.join(team);
+    dir.is_dir().then_some(dir)
+}
+
 /// pane cwd → 그 cwd 의 **팀(TeamCreate) 세션** task 디렉토리. claude 가 팀 컨텍스트에서
 /// TaskCreate 하면 task store 가 개별 대화 세션이 아니라 **팀 세션 id**(`~/.claude/teams/
 /// session-<id>` = `~/.claude/tasks/session-<id>`)로 keying 된다(실측: 아로나 task=팀
@@ -664,7 +689,12 @@ async fn pane_tasks_handler(
         // 1) bound transcript session(solo claude — session==task), 2) 팀(cwd) 폴백.
         let reported_sid = reported.get(&row.surface_id).cloned().unwrap_or_default();
         let mut tasks = read_claude_tasks(&reported_sid);
-        let team = team_task_dir_for_cwd(&row.cwd);
+        // 팀 이름이 정본 — 없을 때만(트리플 없이 뜬 pane·옛 TeamCreate 팀) cwd 로 더듬는다.
+        let team = row
+            .team
+            .as_deref()
+            .and_then(team_task_dir_by_name)
+            .or_else(|| team_task_dir_for_cwd(&row.cwd));
         if tasks.is_empty() {
             if let Some(dir) = &team {
                 if claimed_team.insert(dir.clone()) {
@@ -3411,6 +3441,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// pane 의 팀 이름으로 task 디렉토리를 집는지. 옛 경로 둘(`tasks/session-<8hex>`,
+    /// `teams/<team>/config.json` 의 cwd 매칭)이 모두 빗나가 **모든 pane 의 태스크가 0개**
+    /// 로 뜨던 회귀를 못박는다 — store 는 `tasks/<team>/` 이고 그 config.json 은 이제 없다.
+    #[test]
+    fn team_task_dir_comes_from_the_team_name() {
+        let base = temp_dir("team-task-dir");
+        let team = "kt-Users-kasa-Desktop-momewomo-sionic-15b5";
+        std::fs::create_dir_all(base.join(team)).unwrap();
+        assert_eq!(team_task_dir_in(&base, team), Some(base.join(team)));
+        // 없는 팀은 빈 값 — 옆 팀 목록을 대신 보여주면 남의 태스크가 뜬다.
+        assert_eq!(team_task_dir_in(&base, "kt-other-0000"), None);
+        assert_eq!(team_task_dir_in(&base, ""), None);
+        // 팀 이름이 그대로 경로 조각이 되므로 탈출 시도는 막는다.
+        assert_eq!(team_task_dir_in(&base, "../etc"), None);
+        assert_eq!(team_task_dir_in(&base, "a/b"), None);
     }
 
     /// 계정 저장소별로 스냅샷이 갈리는지 — 한 계정의 숫자가 다른 계정 자리에 앉으면
