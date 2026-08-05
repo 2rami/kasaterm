@@ -2203,6 +2203,155 @@ impl App {
             self.pane_activity.entry(id.clone()).or_default().status = "waiting".into();
         }
     }
+    /// Headless 학생 오버레이 repro: `KASATERM_AUTOSTUDENT_MS`.
+    ///
+    /// 학생 표시(statusline 프사·standing·배너 도트)는 밖에서 claude 가 실제로 돌고
+    /// statusline.py 가 자리표시자를 내보내야 켜지는데, 헤드리스엔 그 일이 없다.
+    /// 그래서 지금까지 **이 층을 아예 재현할 수 없었다** — "별도창에 학생이 안 뜬다"
+    /// 같은 보고를 스크린샷 없이 코드만 읽고 좇아야 했다.
+    ///
+    /// 게이트가 셋인데, 셋 다 **우회 코드 없이** 진짜로 만족시킨다:
+    /// ① `runs_claude` — 셸의 직속 자식 이름이 claude 여야 한다. env 우회를 render 에
+    ///    심는 대신 **`claude` 라는 이름의 실제 바이너리를 rustc 로 즉석에서 굽는다**
+    ///    (300초 자는 3줄짜리, 0.1초면 빌드된다). 판정 코드가 손대지 않은 채로 참이
+    ///    되므로 게이트 자체도 같이 검증된다.
+    ///
+    ///    막다른 길 셋을 먼저 밟았다(다시 밟지 말라고 적어 둔다): macOS 의 `ps -o comm`
+    ///    은 **실제로 실행된 바이너리의 경로**를 준다. 그래서 `/bin/sh` 복사본은
+    ///    SIP/AMFI 가 SIGKILL(exit 137) 하고, 심링크는 `/bin/zsh` 로 풀려 보이고,
+    ///    셰방 스크립트는 인터프리터 이름으로 뜬다. 이름이 claude 인 **파일을 진짜로
+    ///    실행**하는 것 말고는 방법이 없다.
+    /// ② `display_pane_char` — `ws.pane_character` 에 실재하는 학생명을 배정한다
+    ///    (셸 pane 은 `is_claude_agents()` 가 false 라 이 폴백이 정본이 된다).
+    /// ③ 셀에 U+FFFC — 그 가짜 claude 가 statusline 을 흉내 낸 줄을 **PTY 로 실제
+    ///    출력**한다. 셀 그리드에 손으로 써넣지 않는 이유: 다음 pump 가 덮어쓴다.
+    ///
+    /// 위 행에 '─' rule 을 깔아 두는 건 standing(입력박스 위 전신) 앵커 때문이다.
+    pub(crate) fn run_pending_autostudent(&mut self, event_loop: &ActiveEventLoop) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<(Instant, String)>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            let ms = std::env::var("KASATERM_AUTOSTUDENT_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())?;
+            let who = std::env::var("KASATERM_AUTOSTUDENT")
+                .unwrap_or_else(|_| "미도리".to_string());
+            Some((Instant::now() + std::time::Duration::from_millis(ms), who))
+        });
+        let Some((due, who)) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        // 2초를 두는 이유: rustc 빌드 + 프로세스 표 캐시(300ms)와 pty 의 proc 캐시
+        // (500ms)가 겹쳐, 바로 물으면 아직 셸 이름이 돌아온다.
+        if step > 2 || Instant::now() < *due + std::time::Duration::from_millis(2000 * step as u64)
+        {
+            return;
+        }
+        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
+        if step == 0 {
+            STEP.store(1, Ordering::Relaxed);
+            if crate::theme::character_slug(who).is_none() {
+                eprintln!("[autostudent] FAIL — 없는 학생명 {who:?}");
+                STEP.store(2, Ordering::Relaxed);
+                return;
+            }
+            if let Ok(mut ws) = self.ws.lock() {
+                ws.pane_character.insert(pid.clone(), who.clone());
+            }
+            self.pane_claude_seen.insert(pid.clone());
+            // 순서가 중요하다: **먼저 찍고 그 다음에** 가짜 claude 를 띄운다. 그래야
+            // 화면 바닥 두 줄이 rule + statusline 인 채로 남는다(셸은 foreground job
+            // 이 끝날 때까지 프롬프트를 안 찍는다). exec 은 쓰지 않는다 — 셸을 갈아
+            // 치우면 그게 pane 의 셸이 돼 버려 직속 자식이 사라진다.
+            // U+FFFC 는 8진 이스케이프(EF BF BC)로 — 셸마다 \u 지원이 갈린다.
+            let script = concat!(
+                "d=\"$TMPDIR/kasaterm-student-probe\"; mkdir -p \"$d\"; ",
+                "[ -x \"$d/claude\" ] || { ",
+                "printf 'fn main(){std::thread::sleep(std::time::Duration::from_secs(600));}' > \"$d/c.rs\"; ",
+                "rustc -o \"$d/claude\" \"$d/c.rs\" >/dev/null 2>&1; }; ",
+                "printf \"\\342\\224\\200%.0s\" $(seq 1 60); echo; ",
+                "printf \"\\357\\277\\274\\357\\277\\274\\357\\277\\274\\357\\277\\274 ctx 42%% \\n\"; ",
+                "\"$d/claude\"\n",
+            );
+            if let Some(pty) = self.pty.get(&pid) {
+                let _ = pty.send_bytes(script.as_bytes());
+            }
+            eprintln!("[autostudent] pane={pid} 학생={who} — 가짜 claude 띄우는 중");
+            return;
+        }
+        if step == 2 {
+            STEP.store(3, Ordering::Relaxed);
+            self.autostudent_room(&pid, event_loop);
+            return;
+        }
+        STEP.store(2, Ordering::Relaxed);
+        // 게이트가 실제로 열렸는지 셋 다 따로 찍는다 — 하나만 닫혀도 화면엔
+        // 똑같이 "아무것도 안 뜸"이라, 뭉뚱그리면 어디가 막혔는지 못 짚는다.
+        let proc = self
+            .pty
+            .get(&pid)
+            .and_then(|p| p.active_process_name())
+            .unwrap_or_default();
+        let g1 = proc.contains("claude");
+        let g2 = {
+            let ws = self.ws.lock().unwrap();
+            self.display_pane_char(&ws, &pid)
+                .and_then(|n| crate::theme::character_slug(&n).map(|s| s.to_string()))
+        };
+        let g3 = self
+            .ws
+            .lock()
+            .unwrap()
+            .panes
+            .get(&pid)
+            .and_then(|p| p.term())
+            .map(|t| t.cells.iter().any(|row| row.iter().any(|c| c.ch == '\u{fffc}')))
+            .unwrap_or(false);
+        eprintln!(
+            "[autostudent] ①runs_claude={g1}(proc={proc:?}) ②학생slug={g2:?} ③U+FFFC={g3}"
+        );
+        eprintln!(
+            "[autostudent] {}",
+            if g1 && g2.is_some() && g3 { "PASS — 세 게이트 다 열림" } else { "FAIL" }
+        );
+        // 게이트가 열린 **바로 그 프레임**을 찍는다. `pending_capture` 큐에 넣으면
+        // 그 뒤로 아무도 프레임을 안 내보내(학생 오버레이엔 애니 펌프가 없다) 자동
+        // 캡처가 영영 발화하지 않는다 — 실측으로 두 번 놓쳤다. mdscript 의 `cap:` 과
+        // 같은 방식으로 gpu 에 직접 무장하고 그 자리에서 한 장 그린다.
+        self.chrome_dirty = true;
+        if let Ok(path) = std::env::var("KASATERM_AUTOSTUDENT_CAP") {
+            if let Some(g) = self.gpu.as_mut() {
+                g.capture_next = Some(path);
+            }
+        }
+        self.render_frame();
+    }
+    /// `autostudent` 3단계: 학생이 선 pane 이 **든 방을 통째로** 별도창으로 꺼내
+    /// 거기서도 학생이 뜨는지 본다(`KASATERM_AUTOSTUDENT_ROOM` = 캡처 경로).
+    ///
+    /// 터미널 별도창과 코드 경로가 같아 보여도 따로 재야 한다 — 방 창은 pane 이
+    /// 여럿이라 좌표를 `leaf_rects` 로 펼치고 **pane 마다** 스캔한다. 자리 계산이
+    /// 한 겹 더 있는 쪽이 틀리기 쉽다.
+    ///
+    /// 방을 하나 새로 여는 게 먼저인 이유: `undock_window_room` 은 방이 하나뿐이면
+    /// 거부한다(꺼내면 메인이 빈 채로 남는다). 새 방은 활성이 되므로, 꺼낼 방은
+    /// **학생을 심기 전에 기억해 둔 번호**여야 한다.
+    fn autostudent_room(&mut self, pid: &str, event_loop: &ActiveEventLoop) {
+        let Ok(cap) = std::env::var("KASATERM_AUTOSTUDENT_ROOM") else { return };
+        let Some(win) = self.window_of_pane(pid) else {
+            eprintln!("[autostudent] FAIL — pane {pid} 이 어느 방에도 없다");
+            return;
+        };
+        self.new_window();
+        self.undock_window_room(win, event_loop, None);
+        let Some(a) = self.aux_windows.iter_mut().find(|a| a.room_window() == Some(win)) else {
+            eprintln!("[autostudent] FAIL — 방 {win} 별도창이 안 떴다(방 수={})", self.windows.len());
+            return;
+        };
+        a.pending_capture = Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
+        eprintln!("[autostudent] 방 {win} 을 별도창으로 — 학생 pane {pid} 이 그 안에 있다");
+    }
     /// Headless **방 탭** 드래그-tear repro: `KASATERM_AUTOTEARROOM_MS`. pane 탭
     /// (`autoteardrag`)과 별개 경로다 — 방 탭은 `win_tab_drag` 를 타고, 꺼내기 판정도
     /// 「창 밖」이 아니라 「사이드바 패널 밖 + 40px」이다. 거노가 "드래그 뗄 때
