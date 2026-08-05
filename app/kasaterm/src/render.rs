@@ -1294,17 +1294,15 @@ impl App {
                     // 규칙은 피커와 동일(custom-title > aiTitle > 첫 user) —
                     // Stop hook(title-sync)이 턴마다 custom-title 을 최신
                     // 프롬프트로 갱신해 "지금 하는 작업"이 이 자리에 흐른다.
-                    let title = self
-                        .pane_claude_sid
-                        .get(id.as_str())
-                        .and_then(|sid| {
-                            let cwd = self
-                                .pane_view_cwd
-                                .get(id.as_str())
-                                .or_else(|| self.pane_cwd_cache.get(id.as_str()))?;
-                            crate::socket::project_jsonl(cwd, sid)
-                        })
-                        .and_then(|p| pane_session_label(&p));
+                    let jsonl = self.pane_claude_sid.get(id.as_str()).and_then(|sid| {
+                        let cwd = self
+                            .pane_view_cwd
+                            .get(id.as_str())
+                            .or_else(|| self.pane_cwd_cache.get(id.as_str()))?;
+                        crate::socket::project_jsonl(cwd, sid)
+                    });
+                    let title = jsonl.as_deref().and_then(pane_session_label);
+                    let mut left_end = None;
                     if let Some(t) = title.as_deref() {
                         // 타이프라이터: 제목이 처음 뜨거나 바뀌면 한 글자씩 드러난다
                         // (거노). 진행 중엔 펌프 스레드(handler)가 33ms Redraw 를 돌림.
@@ -1313,7 +1311,33 @@ impl App {
                         // 사각 테두리는 뺐다(거노 2026-07-26: "네모칸 구려") —
                         // bold 굵기만으로 보더 대시와 무게 차등이 충분하고,
                         // 박스가 입력 첫 줄과 겹치던 간섭도 원천 소멸한다.
-                        inlay_prompt_box_title(&mut composed, &shown);
+                        left_end =
+                            inlay_prompt_box_title(&mut composed, &shown).map(|(_, _, w)| w);
+                        // 신고는 **실제로 쓴 경우에만**. 폭이 모자라 포기해도(None)
+                        // 신고하면 "그렸다"가 되어 판정이 거짓 PASS 를 낸다 — 실측으로
+                        // 한 번 그렇게 나왔다. 그리고 넘기는 건 그 프레임에 실제 들어간
+                        // 만큼(`shown`)이다. 완성형을 넘기면 타이핑 중인 글자까지
+                        // 그렸다고 신고하게 된다.
+                        if left_end.is_some() {
+                            crate::gpu::stage_cell_text(&shown);
+                        }
+                    }
+                    // 우측 = pane 이름(`/rename`). 좌=무슨 작업 중인지 / 우=이 pane 이
+                    // 누구인지 로 자리를 나눈다(거노 2026-07-30). claude 가 그려 주던
+                    // 자리인데 팀원 세션에선 agent 이름으로 덮이고 그 칩을 우리가
+                    // 지우므로 비어 있었다 — 그래서 kasaterm 이 직접 채운다.
+                    if let Some(name) = jsonl.as_deref().and_then(pane_rename_label) {
+                        if let Some((_, c0, c1)) =
+                            inlay_prompt_box_right(&mut composed, &name, left_end)
+                        {
+                            crate::gpu::stage_cell_text(&name);
+                            // 자리 신고 — "썼다"만 알리면 좌우가 겹쳐도 판정이 통과한다.
+                            // 겹침은 화면에서 한 낱말로 읽히는 실제 버그다.
+                            crate::gpu::stage_cell_text(&format!(
+                                "[boxspan] L={} R={c0}-{c1}",
+                                left_end.map_or(-1, |w| w as i64)
+                            ));
+                        }
                     }
                 }
                 slots.push(PaneSlot {
@@ -7194,6 +7218,29 @@ fn pane_session_label(path: &std::path::Path) -> Option<String> {
     found
 }
 
+/// pane transcript 의 `/rename` 이름 — 입력박스 보더 **오른쪽** 인레이용.
+///
+/// 캐시가 선택이 아니라 필수다: `session_rename_for` 는 마지막 `custom-title` 을
+/// 찾으려 꼬리부터 64KB 씩 역스캔하고 스탬프가 없는 세션은 상한 8MB 까지 읽는다.
+/// 프레임마다 pane 수만큼 부르면 그대로 프레임 예산을 태운다. 좌측 라벨과 같은
+/// 전략(파일 길이가 그대로면 캐시)이지만 **캐시는 따로 둔다** — 한 통에 담으면
+/// 둘 중 하나만 필요할 때도 둘 다 파싱하게 된다.
+fn pane_rename_label(path: &std::path::Path) -> Option<String> {
+    type Cache = std::collections::HashMap<std::path::PathBuf, (u64, Option<String>)>;
+    static CACHE: std::sync::LazyLock<std::sync::Mutex<Cache>> =
+        std::sync::LazyLock::new(Default::default);
+    let len = std::fs::metadata(path).ok()?.len();
+    let mut map = CACHE.lock().ok()?;
+    if let Some((l, t)) = map.get(path) {
+        if *l == len {
+            return t.clone();
+        }
+    }
+    let found = kasa_socket::sessions::session_rename_for(path);
+    map.insert(path.to_path_buf(), (len, found.clone()));
+    found
+}
+
 /// 입력박스 상단 보더의 왼쪽 '─' 연속 구간에 세션 제목을 인레이 — 스냅샷 전용,
 /// 원본 그리드 무손상(배너 타이틀 치환과 같은 원칙). 오른쪽 @이름칩은 왼쪽
 /// run 안에서만 쓰므로 건드리지 않는다. 스타일은 보더 셀 승계 —
@@ -7253,7 +7300,89 @@ fn inlay_prompt_box_title(
         w += 1;
     }
     row[w] = mk(' ');
+    // `KASATERM_BOXLABEL_DEBUG=1` — 인레이가 **어느 행에 무엇을 썼는지** 스스로
+    // 말한다. 이 자리는 성공/실패가 화면에만 드러나서, 신고가 Some 인데 픽셀엔
+    // 없는 상태를 밖에서 가릴 수 없다(실측으로 그 상태를 봤다).
+    if std::env::var_os("KASATERM_BOXLABEL_DEBUG").is_some() {
+        let txt: String = rows[tr].iter().take(60).map(|c| c.ch).collect();
+        eprintln!("[boxlabel-debug] 좌측 tr={tr} l0={l0} run={run} avail={avail} → {txt:?}");
+    }
     Some((tr, start, w))
+}
+
+/// 입력박스 상단 보더의 **오른쪽 끝**에 pane 이름(`/rename` 이름)을 인레이.
+///
+/// 좌=무슨 작업 중인지 요약 / 우=pane 이름 으로 자리를 나눈다(거노 2026-07-30).
+/// 원래는 claude 가 우측에 그 이름을 그려 줬는데, **팀원 세션에선 agent 이름으로
+/// 덮이고 우리가 그 칩을 지우므로 아무것도 안 남는다**(아리스 실측 2026-08-05:
+/// 트리플 없으면 `── 트리플없음 ──`, 있으면 `── @probe-p99 ──`). 우리 pane 은 전부
+/// 팀원이라 항상 그렇다 — 그래서 kasaterm 이 직접 그린다.
+///
+/// `left_end` = 좌측 제목 인레이가 마지막으로 쓴 열(없으면 None). 그 뒤로 최소
+/// 대시 2칸을 남겨 두 인레이가 붙어 버리지 않게 한다 — 좁은 pane 에서 제목과
+/// 이름이 맞닿으면 한 낱말처럼 읽힌다.
+///
+/// 오른쪽 끝 대시 2칸은 남긴다(claude 네이티브가 `… 이름 ──` 이라 그 모양을 잇는다).
+/// 폭이 모자라면 '…' 말줄임, 그조차 안 되면 포기 — 좌측 인레이와 같은 정책이다.
+fn inlay_prompt_box_right(
+    rows: &mut [Vec<GridCell>],
+    name: &str,
+    left_end: Option<usize>,
+) -> Option<(usize, usize, usize)> {
+    use unicode_width::UnicodeWidthChar;
+    let range = prompt_box_rows(rows)?;
+    let tr = range.start - 1;
+    let row = &mut rows[tr];
+    // 보더의 오른쪽 끝 = 마지막 '─'. 그리드가 박스보다 넓어 뒤가 빈 칸이어도
+    // 여기서 잡힌다(폭 기준으로 재다가 칩 제거가 조용히 실패한 그 함정을 피한다).
+    let end = row.iter().rposition(|c| c.ch == '─')?;
+    // 이름 오른쪽: 공백 1 + 대시 2. 왼쪽: 공백 1. 그래서 이름이 쓸 수 있는 오른쪽
+    // 한계는 end-3 이고, 왼쪽 하한은 좌측 인레이 끝 + 대시 2 + 공백 1.
+    let right = end.checked_sub(3)?;
+    let floor = match left_end {
+        Some(l) => l + 3,
+        None => row.iter().position(|c| c.ch == '─')? + 1,
+    };
+    let avail = right.checked_sub(floor)?.checked_add(1)?;
+    if avail < 2 {
+        return None;
+    }
+    let style = row[end].clone();
+    let mk = |ch: char| {
+        let mut c = style.clone();
+        c.ch = ch;
+        c.bold = true;
+        c
+    };
+    let total: usize = name.chars().map(|c| c.width().unwrap_or(1).max(1)).sum();
+    let mut cells: Vec<GridCell> = Vec::with_capacity(avail.min(total));
+    for ch in name.chars() {
+        let w = ch.width().unwrap_or(1).max(1);
+        if total > avail && cells.len() + w + 1 > avail {
+            cells.push(mk('…'));
+            break;
+        }
+        if cells.len() + w > avail {
+            break;
+        }
+        cells.push(mk(ch));
+        if w == 2 {
+            cells.push(mk(' '));
+        }
+    }
+    if cells.is_empty() {
+        return None;
+    }
+    // 오른쪽 정렬 — 이름 끝을 end-3 에 맞춘다.
+    let start = right + 1 - cells.len();
+    row[start - 1] = mk(' ');
+    let mut w = start;
+    for cell in cells {
+        row[w] = cell;
+        w += 1;
+    }
+    row[w] = mk(' ');
+    Some((tr, start, w - 1))
 }
 
 /// verbose OFF 에서 접힌 팀메시지 행 탐지 — 단수 "› Message from @<이름>" 또는
