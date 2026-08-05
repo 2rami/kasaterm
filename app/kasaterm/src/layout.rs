@@ -438,13 +438,11 @@ impl App {
         id
     }
 
-    pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
-        if self.tmux.is_some() {
-            return Ok(String::new());
-        }
-        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
-            return Ok(String::new());
-        };
+    /// split 이 얹을 새 셸을 띄우고 `self.pty` 에 등록한다 — **레이아웃은 안 건드린다**.
+    /// 트리에 꽂는 일과 갈라 둔 건 방 별도창 때문이다: 그 창의 pane 은 비활성 window
+    /// 트리에 살아 `pty_layout` 에 없고, 리사이즈도 메인 그리드가 아니라 그 창이 한다.
+    /// 실패 시 pane id 카운터를 되돌리는 책임은 호출부에 있다(트리에 못 꽂았을 때).
+    pub(crate) fn spawn_split_session(&mut self, active: &str) -> Result<String> {
         let new_id = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
 
@@ -453,14 +451,14 @@ impl App {
         // rect, so the initial cols/rows here only matters for the
         // first bytes the shell prints before SIGWINCH lands.
         let (win_cols, win_rows) = self.window_cells();
-        let cwd = self.spawn_cwd_from(Some(&active));
+        let cwd = self.spawn_cwd_from(Some(active));
         // split = room 만 상속, 학생은 새로 랜덤 배정(전역 유일). 07-13 의 "소스 학생 상속"
         // 설계는 모든 pane 이 루트 학생 하나로 수렴하는 부작용(거노 07-17: pane 열면 다
         // 프라나)으로 폐기 — 상속이 막으려던 "둔갑"(랜덤으로 떴다 뒤늦게 교정)은 배정이
         // spawn 시점 즉시(assign_character_env)가 된 지금은 재발하지 않는다. resume 은
         // shim 의 /character 교정이 세션 정본 캐릭터로 되돌리고, 사용자가 '+ 학생'·학생
         // 명령으로 명시 지정한 pending 은 그대로 존중(중복 허용, 색 변주로 구분).
-        let room = self.ws.lock().unwrap().pane_room.get(&active).cloned();
+        let room = self.ws.lock().unwrap().pane_room.get(active).cloned();
         let mut env = crate::proxy_env(&new_id);
         if let Some(ref r) = room {
             env.push(("KASATERM_ROOM".to_string(), r.clone()));
@@ -478,7 +476,18 @@ impl App {
         })?;
         self.pump_pty_screens(session.screens.clone(), new_id.clone());
         self.insert_pty(new_id.clone(), Arc::new(session));
+        Ok(new_id)
+    }
 
+    pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
+        if self.tmux.is_some() {
+            return Ok(String::new());
+        }
+        let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
+            return Ok(String::new());
+        };
+        let new_id = self.spawn_split_session(&active)?;
+        let (win_cols, win_rows) = self.window_cells();
         let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
         if !layout.split_leaf(&active, dir, new_id.clone()) {
             // Active pane isn't in the tree — shouldn't happen, but
