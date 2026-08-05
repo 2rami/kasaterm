@@ -12,6 +12,11 @@ static MDSCRIPT_LEFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// 실제로 동료가 둘을 한꺼번에 밟았다(2026-08-05). 이전 문구는 "AUTOSTUDENT_ROOM
 /// 을 앞에 둬라"였는데, 그 변수는 이미 켜 있었고 문제는 **시각**이었다 — 조언이
 /// 오답이면 없는 것보다 나쁘다.
+/// `autoboxlabel` 이 심는 가짜 transcript 자리. `/tmp/...` 로 골라 프로젝트 슬러그가
+/// 거노 실제 폴더와 안 겹치게 한다 — 그 폴더를 잘못 건드린 사고를 한 번 냈다.
+const BOXLABEL_CWD: &str = "/tmp/kasaterm-boxlabel";
+const BOXLABEL_SID: &str = "boxlabel-probe";
+
 const AUX_STUDENT_HINT: &str = "\n  ①AUTOSTUDENT 는 로스터의 **한글 이름**이다(theme.rs CHARACTER_SLUGS). \
 슬러그(midori)를 주면 「없는 학생명」에서 끝나 프사가 아예 안 심긴다 — 안 주면 기본값 미도리.\
 \n  ②AUTOSTUDENT_ROOM 이 방을 꺼내는 건 AUTOSTUDENT_MS **+4000ms** 다(3단계). \
@@ -2423,9 +2428,19 @@ impl App {
             // **판정한 그 프레임**을 찍는다(`_CAP`). 별도 시각에 찍으면 타이프라이터
             // 때문에 픽셀과 판정이 어긋나 "숫자는 PASS 인데 화면엔 없다"가 된다 —
             // 실측으로 한 번 그렇게 봤다.
+            // cwd 를 **다시** 심는다. `SocketViewCwd`(handler)가 살아 있어 1단계에서
+            // 심어 둔 `pane_view_cwd` 를 실제 cwd 로 덮는다 — 그러면 인레이가 없는
+            // jsonl 을 가리켜 좌·우가 한꺼번에 사라진다. 판정 프레임 직전이 유일하게
+            // 안전한 시점이다.
+            self.boxlabel_seed(&pid);
+            // 신고 통을 **비우고** 한 프레임 그린다. 안 비우면 `drew_text` 가
+            // "지금까지 한 번이라도"에 답해 **꺼진 기능도 통과한다** — 실제로 그랬다
+            // (인레이가 초반엔 그리다 cwd 가 덮여 꺼졌는데 옛 신고가 PASS 를 냈다).
+            // 캡처도 같이 이 프레임에 걸어 픽셀과 판정을 맞물린다.
             self.chrome_dirty = true;
-            if let Ok(path) = std::env::var("KASATERM_AUTOBOXLABEL_CAP") {
-                if let Some(g) = self.gpu.as_mut() {
+            if let Some(g) = self.gpu.as_mut() {
+                crate::gpu::clear_text_logs(g);
+                if let Ok(path) = std::env::var("KASATERM_AUTOBOXLABEL_CAP") {
                     g.capture_next = Some(path);
                 }
             }
@@ -2436,8 +2451,8 @@ impl App {
 
         const SUMMARY: &str = "테스트요약";
         const RENAME: &str = "지어준이름";
-        let cwd = std::path::PathBuf::from("/tmp/kasaterm-boxlabel");
-        let sid = "boxlabel-probe";
+        let cwd = std::path::PathBuf::from(BOXLABEL_CWD);
+        let sid = BOXLABEL_SID;
         let _ = std::fs::create_dir_all(&cwd);
         let Some(jsonl) = crate::socket::project_jsonl(&cwd, sid) else {
             eprintln!("[autoboxlabel] FAIL — project_jsonl 이 경로를 못 만든다");
@@ -2458,8 +2473,7 @@ impl App {
             eprintln!("[autoboxlabel] FAIL — 가짜 jsonl 을 못 썼다: {e}");
             return;
         }
-        self.pane_cwd_cache.insert(pid.clone(), cwd);
-        self.pane_claude_sid.insert(pid.clone(), sid.to_string());
+        self.boxlabel_seed(&pid);
         // 헤더 띠를 강제로 켠다. 단일 탭 터미널은 `has_header()` 가 false 라(학생 헤더
         // 띠는 거노가 폐기, main.rs:2146) 헤더 라벨 경로를 그냥은 못 태운다. ⋮ 로 켠
         // pane 과 멀티탭에서는 그 띠가 뜨므로, 거기 실리는 정체 표시(`{캐릭터} %N`)를
@@ -2473,6 +2487,21 @@ impl App {
         self.chrome_dirty = true;
         self.render_frame();
         eprintln!("[autoboxlabel] pane={pid} 가짜 jsonl 심었다 — 타이핑 기다리는 중");
+    }
+
+    /// `autoboxlabel` 이 pane 을 가짜 transcript 로 가리키게 한다.
+    ///
+    /// **둘 다** 심어야 한다 — 인레이는 `pane_view_cwd` 를 먼저 보고 없을 때만
+    /// `pane_cwd_cache` 로 간다(render.rs:1298~). 캐시에만 심으면 `SocketViewCwd` 가
+    /// 실제 cwd(`~/Desktop`)를 채우는 순간 그쪽이 이겨 `project_jsonl` 이 없는 파일을
+    /// 가리키고 좌·우가 **한꺼번에** 사라진다(둘이 같은 jsonl 을 쓴다).
+    ///
+    /// 그리고 그 소켓 갱신이 계속 도니 **판정 프레임 직전에 다시** 불러야 한다.
+    fn boxlabel_seed(&mut self, pid: &str) {
+        let cwd = std::path::PathBuf::from(BOXLABEL_CWD);
+        self.pane_view_cwd.insert(pid.to_string(), cwd.clone());
+        self.pane_cwd_cache.insert(pid.to_string(), cwd);
+        self.pane_claude_sid.insert(pid.to_string(), BOXLABEL_SID.to_string());
     }
 
     /// `autoboxlabel` 2단계 판정. 1단계와 나눈 이유는 그쪽 주석에.
