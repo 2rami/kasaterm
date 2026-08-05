@@ -2279,15 +2279,12 @@ impl App {
     pub(crate) fn count_claude_panes(state: &serde_json::Value) -> usize {
         fn walk(node: &serde_json::Value, n: &mut usize) {
             if let Some(leaf) = node.get("leaf") {
-                let was_claude = leaf
-                    .get("was_claude")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false);
+                let was_agent = saved_agent(leaf).is_some();
                 let bound_sid = leaf
                     .get("session_id")
                     .and_then(|c| c.as_str())
                     .is_some_and(|s| !s.is_empty());
-                if was_claude || bound_sid {
+                if was_agent || bound_sid {
                     *n += 1;
                 }
             } else if let Some(split) = node.get("split") {
@@ -2454,9 +2451,9 @@ impl App {
         }
         None
     }
-    /// Spawn one restored pane from its saved record and, when it was running
-    /// claude, queue the resume command. Returns the new pane id, or None if the
-    /// PTY failed to start (caller then collapses the split).
+    /// Spawn one restored pane from its saved record and, when it was running an
+    /// agent, queue the command that brings it back. Returns the new pane id, or
+    /// None if the PTY failed to start (caller then collapses the split).
     fn restore_leaf(
         &mut self,
         rec: &serde_json::Value,
@@ -2471,10 +2468,7 @@ impl App {
             .and_then(|c| c.as_str())
             .map(|s| s.to_string())
             .or_else(resolve_initial_cwd);
-        let was_claude = rec
-            .get("was_claude")
-            .and_then(|b| b.as_bool())
-            .unwrap_or(false);
+        let was_agent = saved_agent(rec);
         let session_id = rec
             .get("session_id")
             .and_then(|s| s.as_str())
@@ -2525,14 +2519,14 @@ impl App {
                 .insert(id.clone(), std::path::PathBuf::from(c));
         }
         self.insert_pty(id.clone(), session.clone());
-        // Bring claude back: --resume the saved conversation (the shim
+        // Bring the agent back: --resume the saved conversation (the shim
         // re-attaches team/persona/character from the session id), or a fresh
-        // claude when the pane ran claude but no session id was captured.
+        // one when the pane ran an agent but no session id was captured.
         // Plain-shell panes restore to just their shell + scrollback. 900ms
         // mirrors swap_character's wait for the shell prompt before injection.
-        // was_claude 감지가 실패했어도 캐릭터+저장 sid 가 있으면 claude 학생 pane 이었던
+        // 하네스 감지가 실패했어도 캐릭터+저장 sid 가 있으면 claude 학생 pane 이었던
         // 것이라 --resume 으로 대화를 복원한다(감지 실패 시 셸만 뜨던 회귀 차단).
-        if was_claude || (saved_char.is_some() && session_id.is_some()) {
+        if was_agent.is_some() || (saved_char.is_some() && session_id.is_some()) {
             // --resume 대상 대화가 실재할 때만 resume 한다. 저장된 sid 의 jsonl 이
             // 사라졌으면 claude 가 "No conversation found" 를 뱉고 빈 셸만 남아 학생
             // pane 이 통째 죽는다(거노: %3 시로코 복원 실패 — claude 세션이 없어 board
@@ -2543,14 +2537,11 @@ impl App {
                 .and_then(socket::transcript_path_for_session)
                 .map(|p| p.exists())
                 .unwrap_or(false);
-            let cmd = match &session_id {
-                Some(sid) if resumable => format!("claude --resume {sid}\r"),
-                _ => "claude\r".to_string(),
-            };
             // 이어가기 실패는 무증상이었다 — 빈 세션이 학생 얼굴로 멀쩡히 떠서,
             // 대화를 잃은 줄 모른 채 계속 쓰게 된다(미도리 실측). 자리를 만들어
-            // 준 것만으로는 부족하고 잃은 것을 말해 줘야 한다.
-            if session_id.is_some() && !resumable {
+            // 준 것만으로는 부족하고 잃은 것을 말해 줘야 한다. codex 는 애초에
+            // 이어가기를 시도하지 않으니(아래 함수 주석) 잃었다고 말할 것도 없다.
+            if was_agent != Some("codex") && session_id.is_some() && !resumable {
                 self.collab.toast = Some((
                     format!(
                         "{} 이어갈 대화를 못 찾아 새로 시작합니다",
@@ -2559,6 +2550,7 @@ impl App {
                     std::time::Instant::now(),
                 ));
             }
+            let cmd = restore_agent_command(was_agent, session_id.as_deref(), resumable);
             let at = std::time::Instant::now() + std::time::Duration::from_millis(900);
             self.pending_restores.push((session, cmd, at));
         }
@@ -2845,6 +2837,47 @@ pub(crate) fn git_repo_root(start: &std::path::Path) -> Option<std::path::PathBu
 /// 저장본에 id 가 없거나(옛 포맷) 이미 쓰이는 번호면 새로 발급한다. 되살린 번호가
 /// 카운터보다 크면 카운터를 그 위로 밀어, 이후 split 이 같은 번호를 다시 내주지
 /// 않게 한다.
+/// 저장된 leaf 가 어떤 하네스로 돌던 pane 인지 — 없으면 순수 셸.
+///
+/// 정본 키는 `was_agent`("claude"|"codex"). 그 전 포맷은 `was_claude: true` 뿐이라
+/// **옛 저장본은 claude 로 읽는다** — 안 그러면 이번 판올림 한 번에 거노가 쓰던 학생
+/// pane 이 전부 셸로 되살아난다. 새 코드는 `was_agent` 만 쓴다(두 키를 같이 쓰면
+/// 언젠가 갈린다).
+fn saved_agent(rec: &serde_json::Value) -> Option<&'static str> {
+    match rec.get("was_agent").and_then(|v| v.as_str()) {
+        Some("codex") => return Some("codex"),
+        Some("claude") => return Some("claude"),
+        _ => {}
+    }
+    rec.get("was_claude")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false)
+        .then_some("claude")
+}
+
+/// 복원된 pane 에 넣을 명령. 세 갈래(codex · claude 이어가기 · fresh claude)라 순수
+/// 함수로 뺐다 — `restore_leaf` 는 살아있는 PTY 없이 못 부르고, 그러면 이 분기를
+/// 테스트할 방법이 사라진다.
+///
+/// **codex 는 언제나 새로 띄운다.** 세션 id 를 argv 에 안 남겨 `pane_record` 가 못
+/// 집고(실측), `codex resume --last` 는 `CODEX_HOME/sessions` 전체에서 최신 하나를
+/// 고르는데 그 디렉터리는 shim 이 `~/.codex` 로 미러해 **다른 pane·pane 밖 codex 의
+/// 대화**까지 후보다 — 남의 대화로 되살아나느니 빈 codex 가 낫다. per-pane 이어가기는
+/// rollout 파일명의 sid 를 집어야 하고, 그건 transcript 파싱이 codex 를 이해한 뒤 일이다.
+pub(crate) fn restore_agent_command(
+    agent: Option<&str>,
+    session_id: Option<&str>,
+    resumable: bool,
+) -> String {
+    if agent == Some("codex") {
+        return "codex\r".to_string();
+    }
+    match session_id {
+        Some(sid) if resumable => format!("claude --resume {sid}\r"),
+        _ => "claude\r".to_string(),
+    }
+}
+
 fn pick_restore_id(saved: Option<&str>, taken: impl Fn(&str) -> bool, next: &mut u32) -> String {
     if let Some(s) = saved {
         if let Some(n) = s.strip_prefix('%').and_then(|d| d.parse::<u32>().ok()) {

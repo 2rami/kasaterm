@@ -2085,15 +2085,21 @@ pub(crate) fn pid_cwd(pid: u32) -> Option<std::path::PathBuf> {
 
 
 /// Build one layout-tree leaf's restore record from a live PtySession: its
-/// cwd, whether it was running claude, and the newest claude session id under
-/// that cwd (for `claude --resume`). `cwd` is null when the shell pid/cwd
-/// can't be resolved — restore then falls back to the default cwd.
+/// cwd, **which harness** it was running (`was_agent`: "claude"|"codex"|null),
+/// and that claude's session id (for `claude --resume`). `cwd` is null when the
+/// shell pid/cwd can't be resolved — restore then falls back to the default cwd.
 pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     let shell_pid = sess.shell_pid();
     let cwd = shell_pid.and_then(pid_cwd);
-    let was_claude = sess
-        .active_process_name()
-        .map_or(false, |p| p.contains("claude"));
+    // 어떤 하네스로 돌던 pane 인지 **종류**를 남긴다. 예전엔 bool 하나(`was_claude`)
+    // 라서 codex pane 은 재시작하면 셸로 돌아왔다 — 무엇이었는지 기록이 없으니
+    // 되살릴 수가 없었다. 판정은 state.rs 의 `active_agent`(런처 한 세대 하강 포함).
+    let agent = sess.active_agent();
+    let was_agent = match agent {
+        Some(kasa_pty::AgentKind::Claude) => Some("claude"),
+        Some(kasa_pty::AgentKind::Codex) => Some("codex"),
+        None => None,
+    };
     // Only record a session id for panes actually running claude, straight off
     // the running claude's argv (exact per-pane). The cwd-mtime fallback that
     // used to fill argv-less `claude` panes is gone — it collapsed every pane
@@ -2101,14 +2107,16 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     // 캐릭터로 뭉침). layout_to_json 이 pane_claude_sid(SocketSessionBound)로 정확한
     // per-pane 세션을 채우므로, pane_record 는 argv id 만 보고하고 없으면 None 을 둔다
     // (restore_leaf 가 fresh claude 로 복원).
-    let session_id = if was_claude {
+    //
+    // codex 는 여기서 세션 id 를 못 집는다 — argv 에 없고 rollout 파일명에만 있다(실측).
+    let session_id = if matches!(agent, Some(kasa_pty::AgentKind::Claude)) {
         shell_pid.and_then(claude_session_id_from_cmdline)
     } else {
         None
     };
     serde_json::json!({
         "cwd": cwd.as_ref().map(|c| c.to_string_lossy().into_owned()),
-        "was_claude": was_claude,
+        "was_agent": was_agent,
         "session_id": session_id,
     })
 }
