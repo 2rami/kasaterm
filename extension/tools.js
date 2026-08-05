@@ -149,6 +149,40 @@ const handlers = {
     return { tabId: fresh.id, url: fresh.url, title: fresh.title, active: fresh.active }
   },
 
+  // 별도 창은 선생님 탭바를 아예 건드리지 않는다 — 에이전트가 자기 창에서 놀면 열어둔 탭의 순서도
+  // 개수도 그대로다. 특정 크기가 필요한 확인(반응형·좁은 폭)도 창째로 잡는 편이 정확하다.
+  // tabId 를 주면 이미 있는 탭을 그 창으로 떼어낸다.
+  // ⚠️focused 기본값은 false 다. 새 창이 앞으로 튀어나오면 선생님이 보던 앱을 가린다 — 탭을
+  // 백그라운드로 여는 것과 같은 이유이고, 여기서는 되돌릴 방법이 없으니 기본값이 더 중요하다.
+  async new_window({ url, tabId, focused = false, width, height, incognito } = {}) {
+    const opts = { focused, ...(incognito ? { incognito: true } : {}) }
+    if (width && height) Object.assign(opts, { width: Number(width), height: Number(height), left: 0, top: 0 })
+    if (tabId) opts.tabId = await resolveTabId(tabId)
+    else opts.url = normalizeUrl(url) || 'about:blank'
+
+    const win = await chrome.windows.create(opts)
+    const tab = win.tabs?.[0]
+    if (!tab) throw new Error('WINDOW_HAS_NO_TAB: 창은 열렸지만 탭을 찾지 못했습니다.')
+    if (url && !tabId) await waitForLoad(tab.id)
+    const fresh = await chrome.tabs.get(tab.id)
+    // ⚠️크롬은 창 폭에 하한이 있어 그보다 좁게 달라고 하면 조용히 넓혀 준다(390 을 요청하면 500 이
+    // 온다 — 실측). 조용히 지나가면 좁은 폭에서 확인한 줄 알고 오판하므로 다를 때 반드시 알린다.
+    // 하한보다 좁은 폭은 창이 아니라 Emulation.setDeviceMetricsOverride 로 봐야 한다.
+    const forced = width && win.width !== Number(width)
+    return {
+      windowId: win.id, tabId: fresh.id, url: fresh.url, title: fresh.title,
+      width: win.width, height: win.height, focused: win.focused,
+      ...(forced ? { note: `요청한 폭 ${width}px 이 아니라 ${win.width}px 로 열렸습니다(크롬 창 폭 하한). 더 좁은 폭은 cdp_raw 의 Emulation.setDeviceMetricsOverride 로 확인하세요.` } : {}),
+    }
+  },
+
+  async close_window({ windowId }) {
+    const tabs = await tabsQuery({ windowId: Number(windowId) })
+    for (const t of tabs) { await cdp.detach(t.id).catch(() => {}); forgetTab(t.id) }
+    await chrome.windows.remove(Number(windowId))
+    return { closed: Number(windowId), tabs: tabs.length }
+  },
+
   async close_tab({ tabId }) {
     const id = await resolveTabId(tabId)
     await cdp.detach(id).catch(() => {})

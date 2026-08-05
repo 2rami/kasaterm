@@ -263,7 +263,10 @@ export async function screenshot(tabId, { fullPage = false, format = 'png', qual
 // 꼴이다) 그게 SyntaxError 면 statement 로 한 번 더 — 그때는 `return` 이 호출자 몫이다.
 export async function evaluate(tabId, expression, { awaitPromise = true } = {}) {
   await ensureDomain(tabId, 'Runtime')
-  const needsWrap = awaitPromise && /\bawait\b/.test(expression) && !/^\s*\(\s*async/.test(expression)
+  // ⚠️`return` 도 감싸기 조건에 넣어야 한다. `await` 만 봤을 때는 await 없이 `return` 만 쓴 코드가
+  // 감싸이지 않은 채 최상위로 나가 `Illegal return statement` 로 죽었다 — 값을 돌려주려면 return 을
+  // 쓰라고 안내해 두고 정작 그 형태가 깨지고 있었다(2026-08-05 실측).
+  const needsWrap = awaitPromise && /\b(await|return)\b/.test(expression) && !/^\s*\(\s*async/.test(expression)
   const forms = needsWrap
     ? [`(async () => (${expression}))()`, `(async () => { ${expression} })()`]
     : [expression]

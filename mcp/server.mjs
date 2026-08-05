@@ -120,6 +120,15 @@ tool('browser_list_tabs', 'List all open tabs in the real Chrome profile (with t
 tool('browser_new_tab', 'Open a new tab and wait for it to finish loading. Opens in the BACKGROUND by default so the human keeps whatever they were looking at — the tab is fully operable while hidden. Pass active:true only when the page must actually be visible (animation, video, anything driven by rAF).', { url: z.string().optional(), active: z.boolean().optional(), windowId: z.number().int().optional() },
   async (a) => text(await call('new_tab', a, 40000)))
 
+tool('browser_new_window', 'Open a SEPARATE Chrome window instead of adding a tab to the human\'s existing window. Prefer this over browser_new_tab when you will open several pages, or when the human asked you not to disturb their tabs — their tab bar keeps exactly the tabs and order it had. Pass width+height to check a layout at a specific size (more accurate than emulation, which resets on the next navigation). Pass tabId to tear an existing tab out into its own window. Opens UNFOCUSED by default so it does not cover whatever app the human is using; pass focused:true only when the page must actually be visible (animation, media, rAF). Close it with browser_close_window — that closes every tab inside, so do not point it at the human\'s own window.', {
+  url: z.string().optional(), tabId: z.number().int().optional(),
+  focused: z.boolean().optional(), incognito: z.boolean().optional(),
+  width: z.number().int().optional(), height: z.number().int().optional(),
+}, async (a) => text(await call('new_window', a, 40000)))
+
+tool('browser_close_window', 'Close a window and every tab in it. Use it only on windows you opened yourself.', { windowId: z.number().int() },
+  async (a) => text(await call('close_window', a)))
+
 tool('browser_close_tab', 'Close a tab.', { tabId },
   async (a) => text(await call('close_tab', a)))
 
