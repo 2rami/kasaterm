@@ -6162,33 +6162,50 @@ pub(crate) fn available_shells() -> Vec<(&'static str, &'static str, String)> {
 /// in two places — the early env-var seed in `start_pty` so the very
 /// first shell sees a stable value, and the actual server bind in
 /// `start_socket_with` — and must return the same path in both.
-/// Path of the file the http-serving process (daemon, or in-process GUI)
-/// writes its ACTUAL bound MCP port into, so the panel webviews poll the right
-/// port even when the preferred one was taken and `spawn_http_server` fell back
-/// to an OS-assigned one. Lives beside the control socket (same
-/// `KASATERM_SOCKET_PATH` the daemon inherits) so GUI and daemon resolve the
-/// same file.
-pub(crate) fn mcp_port_file_path() -> std::path::PathBuf {
-    let sock = std::env::var("KASATERM_SOCKET_PATH").unwrap_or_else(|_| {
-        format!(
-            "{}/.config/kasaterm/daemon.sock",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    });
-    std::path::Path::new(&sock)
-        .parent()
-        .map(|p| p.join("mcp_port"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/kasaterm-mcp-port"))
+/// Path of the file the http-serving process writes its ACTUAL bound MCP port
+/// into, so pane hooks poll the right port even when the preferred one was
+/// taken and `spawn_http_server` fell back to an OS-assigned one.
+///
+/// Derived from the socket path by swapping the extension, so it is 1:1 with
+/// the socket: `kasaterm-25057.sock` → `kasaterm-25057.mcp_port`. That pairing
+/// is the whole point. The old shape was `<socket's dir>/mcp_port` — one file
+/// per *directory*, while sockets are per *pid* — so every concurrent instance
+/// wrote its port over the same file, and pane hooks reading it got whichever
+/// instance booted last. A test instance launched from a pane inherits the main
+/// app's `KASATERM_SOCKET_PATH`, so it landed its port in the main app's
+/// directory and silently redirected the main app's own panes at itself.
+pub(crate) fn mcp_port_file_for(sock: &str) -> std::path::PathBuf {
+    std::path::Path::new(sock).with_extension("mcp_port")
+}
+
+/// The socket path this process would use if it has not bound yet — env first
+/// (the value our own `start_socket_with` exported, or one inherited from a
+/// parent pane), else the daemon default. Read-only: unlike
+/// `resolve_kasaterm_socket_path` it never probes or decides to isolate.
+fn socket_path_hint() -> String {
+    std::env::var("KASATERM_SOCKET_PATH")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "{}/.config/kasaterm/daemon.sock",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        })
 }
 
 /// Port the panel webviews should poll. This process's own bound port
 /// (`KASASPACE_MCP_PORT`, set by `start_socket_with` right after the server
 /// binds) wins — env is per-process, so each instance's panels always reach
-/// their own server. `mcp_port_file_path` is a single global file that any
-/// concurrent instance overwrites; trusting it first stranded a second
-/// instance's panel webview on a dead/foreign port (the panel window stays
-/// hidden forever waiting for a load that never finishes). So the file is
-/// only a fallback for callers without the env, else the 8765 default.
+/// their own server. The port file is only a fallback for callers without the
+/// env; it is keyed to the socket path now, so it names one instance rather
+/// than "whoever booted last".
+///
+/// The last resort is 8765, which is *someone else's* server whenever this
+/// process failed to bind it — reaching it means panels quietly show another
+/// instance's panes. Kept because a panel with no port at all just hangs, but
+/// it is a wrong answer, not a neutral one.
 fn mcp_panel_port() -> String {
     let trimmed_nonempty = |s: String| {
         let s = s.trim().to_string();
@@ -6197,7 +6214,11 @@ fn mcp_panel_port() -> String {
     std::env::var("KASASPACE_MCP_PORT")
         .ok()
         .and_then(trimmed_nonempty)
-        .or_else(|| std::fs::read_to_string(mcp_port_file_path()).ok().and_then(trimmed_nonempty))
+        .or_else(|| {
+            std::fs::read_to_string(mcp_port_file_for(&socket_path_hint()))
+                .ok()
+                .and_then(trimmed_nonempty)
+        })
         .unwrap_or_else(|| "8765".to_string())
 }
 
@@ -7172,5 +7193,22 @@ mod tests {
         assert!(App::drag_left_window(w + 1.0, 400.0, w, h)); // 오른쪽 밖
         assert!(App::drag_left_window(600.0, -1.0, w, h)); // 위쪽 밖(탭바 위로 뜯음)
         assert!(App::drag_left_window(600.0, h + 1.0, w, h)); // 아래쪽 밖
+    }
+
+    #[test]
+    fn port_file_is_paired_with_its_socket_not_its_directory() {
+        // 실사고: 두 인스턴스의 소켓은 PID 로 갈렸는데 포트 파일은 "소켓의 디렉터리 +
+        // mcp_port" 라 한 파일이었다. pane 에서 띄운 테스트 인스턴스가 부모 앱의
+        // TMPDIR 에 자기 포트를 덮어써, 부모 pane 의 hook 들이 테스트 서버로 갔다.
+        let a = mcp_port_file_for("/tmp/kasaterm-25057.sock");
+        let b = mcp_port_file_for("/tmp/kasaterm-82694.sock");
+        assert_ne!(a, b, "같은 디렉터리의 두 인스턴스가 같은 포트 파일을 쓰면 안 된다");
+        assert_eq!(a, std::path::PathBuf::from("/tmp/kasaterm-25057.mcp_port"));
+        // 셸 hook 이 ${sock%.sock}.mcp_port 로 유도하는 것과 같은 결과여야 한다 —
+        // 한쪽만 바뀌면 hook 이 영영 빈 파일을 읽고 8765(남의 서버)로 폴백한다.
+        for sock in ["/tmp/kasaterm-1.sock", "/home/u/.config/kasaterm/daemon.sock"] {
+            let shell = format!("{}.mcp_port", sock.trim_end_matches(".sock"));
+            assert_eq!(mcp_port_file_for(sock), std::path::PathBuf::from(shell));
+        }
     }
 }
