@@ -1779,6 +1779,24 @@ impl App {
         // 학생 스프라이트 자리 — 셀 사본을 훑으며 자리표시자를 지우므로 draw_cells
         // 전에, 그리고 `aux_windows` 를 가변으로 잡기 전에 끝낸다.
         let mut snap = snap;
+        // 입력박스 손질을 **메인 그리드와 같은 함수로** — 거노 2026-08-05: 별도창엔
+        // `@aru-p12` 칩이 그대로 남아 있었다. 이 창은 자기 셀 스냅샷을 따로 뜨는
+        // 경로라(`render_frame_gpu` 를 안 탄다) 메인에만 걸린 손질이 통째로 빠져
+        // 있었다 — 꺼낸 pane 이 "완전 다른 앱 같다"는 그 증상의 남은 조각이다.
+        //
+        // 사본을 만들지 않고 `render::` 함수를 그대로 부른다. 오늘 같은 로직 두 벌이
+        // 세 번 물었고(칩 관문·`is_rule`·인레이), 그때마다 한쪽만 고쳐졌다.
+        if let Some((cells, ..)) = snap.as_mut() {
+            let runs_claude = self
+                .pty
+                .get(pane_id.as_str())
+                .and_then(|p| p.active_process_name())
+                .is_some_and(|n| n.contains("claude"));
+            if runs_claude {
+                crate::render::strip_agent_chip(cells);
+                crate::render::style_prompt_box(cells, accent);
+            }
+        }
         let (sprites, anim_ms) = {
             let (cl, cw, ch) = self
                 .aux_windows
@@ -2028,6 +2046,23 @@ impl App {
                 })
                 .collect()
         };
+        // 입력박스 손질 — 터미널 별도창과 같은 이유·같은 함수(거노 2026-08-05:
+        // 별도창에 `@aru-p12` 칩이 남아 있었다). 방 창은 pane 이 여럿이라 각자
+        // 자기 accent 로 도색한다.
+        for (pid, cells, ..) in snaps.iter_mut() {
+            let runs_claude = self
+                .pty
+                .get(pid.as_str())
+                .and_then(|p| p.active_process_name())
+                .is_some_and(|n| n.contains("claude"));
+            if !runs_claude {
+                continue;
+            }
+            crate::render::strip_agent_chip(cells);
+            if let Some(col) = pane_cols.get(pid) {
+                crate::render::style_prompt_box(cells, *col);
+            }
+        }
         // 학생 스프라이트 자리 — pane 마다 자기 셀을 훑는다. 사본을 훑으므로
         // 자리표시자 지우기가 draw_cells 에 그대로 반영된다(아래 slots 가 같은
         // 사본을 본다). `aux_windows` 를 가변 차용하기 전에 끝내야 self 를 읽을
