@@ -2827,6 +2827,29 @@ mod working_scan_tests {
         assert!(rows_show_working(&[row("⠋ installing")]));
     }
 
+    /// codex 도 같은 판정에 걸린다 — 실측 문구가 claude 와 글자 그대로 겹친다.
+    /// 2026-08-05 codex 0.146.0 화면에서 그대로 떠온 줄이다:
+    ///   `• Working (3s • esc to interrupt)`
+    /// 앞머리 글리프는 `•`(U+2022)라 claude 의 Dingbat 별(U+2720–274F)에도
+    /// 점자에도 안 걸리지만, "esc to interrupt" 가 먼저 잡아 준다. 그래서 codex
+    /// busy 표시는 **코드를 안 고치고** 동작한다 — 이 테스트는 codex 가 나중에
+    /// 문구를 바꾸면 조용히 죽는 대신 여기서 터지라고 있는 것이다.
+    #[test]
+    fn codex_working_line_is_working() {
+        assert!(rows_show_working(&[row("• Working (3s • esc to interrupt)")]));
+        // 입력줄·상태줄이 아래에 깔려도 하단 10행 창 안이라 잡힌다(실측 배치).
+        assert!(rows_show_working(&[
+            row("• Working (12s • esc to interrupt)"),
+            row("› Run /review on my current changes"),
+            row("  gpt-5.5 medium · tmuxify · main · Ask for approval · Context 3% used"),
+        ]));
+        // 답이 끝나면 그 줄이 사라진다 → idle. 상태줄만 남은 화면은 working 이 아니다.
+        assert!(!rows_show_working(&[
+            row("› Run /review on my current changes"),
+            row("  gpt-5.5 medium · tmuxify · main · Ask for approval · Context 3% used"),
+        ]));
+    }
+
     #[test]
     fn numbered_menu_is_menu_prompt() {
         let cells = vec![
