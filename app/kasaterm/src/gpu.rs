@@ -3258,6 +3258,29 @@ impl GpuRenderer {
         self.image_quads.iter().chain(self.icon_quads.iter()).map(|(k, ..)| k.as_str())
     }
 
+    /// 이번 프레임에 그 키로 그린 quad 들의 자리 — LOGICAL px `(x, y, w, h)`.
+    ///
+    /// 키만으로는 못 가르는 게 있어서 필요하다: 프사 마우스오버 팝업은 작은
+    /// 프사와 **같은 키**(`student:<slug>:profile`)를 크기만 키워 재사용한다.
+    /// 그래서 「팝업이 떴나」는 키 존재가 아니라 **큰 quad 가 하나 더 붙었나**로
+    /// 판정해야 한다.
+    ///
+    /// 덤으로 하네스가 프사 자리를 렌더에서 되읽을 수 있다 — 좌표 계산
+    /// (`cell_left()`·`AUX_CELL_TOP`)을 복제하면 그 복제본이 틀려도 하네스는
+    /// 통과해 버린다.
+    pub fn drawn_image_rects(&self, key: &str) -> Vec<(f32, f32, f32, f32)> {
+        let s = self.scale.max(f32::EPSILON);
+        self.image_quads
+            .iter()
+            .chain(self.icon_quads.iter())
+            .filter(|(k, ..)| k == key)
+            .map(|(_, c, _)| {
+                let [x, y, w, h] = c.cell_px;
+                (x / s, y / s, w / s, h / s)
+            })
+            .collect()
+    }
+
     /// 이번 프레임에 그린 문자열에 `needle` 이 들어간 게 있나. `KASATERM_TEXT_LOG`
     /// 를 안 켜면 항상 `None` — "안 그려졌다"와 "안 재고 있다"를 섞지 않기 위해
     /// bool 이 아니라 `Option` 이다.
