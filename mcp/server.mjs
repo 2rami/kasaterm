@@ -181,8 +181,9 @@ tool('browser_scroll', 'Scroll the page or a scroll container. Falls back to a r
 tool('browser_scroll_to', 'Scroll an element into view and return its viewport box.', { tabId, ref },
   async (a) => text(await call('scroll_to', a)))
 
-tool('browser_eval_js', 'Evaluate JavaScript in the page and return the value. Top-level await works. Use fetch(url,{credentials:"include"}) here to hit internal dashboard APIs directly instead of waiting for a UI to render.', {
-  tabId, code: z.string(),
+tool('browser_eval_js', 'Evaluate JavaScript in the page and return the value. Top-level await works. Use fetch(url,{credentials:"include"}) here to hit internal dashboard APIs directly instead of waiting for a UI to render.\n\nAnything that may run longer than ~25s MUST use background:true — a single blocking call dies mid-flight because the extension worker sleeps while it waits (20s returns a value, 35s returns nothing). With background:true the call returns a jobId immediately; poll it with jobId (no code) until done is true. The job lives on that page — navigating away discards it.', {
+  tabId, code: z.string().optional(),
+  background: z.boolean().optional(), jobId: z.string().optional(),
 }, async (a) => text(await call('eval_js', a, 45000)))
 
 tool('browser_watch', 'Turn console and/or network collection on or off for a tab. While on, the tab keeps a debugger session (and its banner) so nothing is missed.', {

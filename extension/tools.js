@@ -4,6 +4,11 @@ import * as cdp from './cdp.js'
 import { page, restricted } from './page.js'
 import { setTask, forgetTab, identityOf, showCursor } from './sessions.js'
 
+// 워커가 언제 떴는지. 이 값이 방금 태어난 것으로 나오면 직전 명령이 실패한 이유는 대개 워커가
+// 도중에 죽은 것이다 — 끊김의 원인을 코드에서 찾기 전에 여기부터 본다.
+const WORKER_STARTED = Date.now()
+let jobSeq = 0
+
 function tabsQuery(q) {
   return new Promise((resolve) => chrome.tabs.query(q, resolve))
 }
@@ -95,6 +100,7 @@ const handlers = {
       connected: true,
       // 확장을 고쳤는데 동작이 그대로면 service worker 가 옛 코드를 물고 있는 것이다. 먼저 여기를 본다.
       version: chrome.runtime.getManifest().version,
+      workerAgeMs: Date.now() - WORKER_STARTED,
       tabCount: tabs.length,
       // 프사 base64 는 25KB 라 응답에 실으면 안 된다
       identity: (() => {
@@ -303,10 +309,40 @@ const handlers = {
     return await page(id, 'scroll_to', { ref })
   },
 
-  async eval_js({ tabId, code }) {
+  // 30초를 넘기는 스크립트는 CDP 한 방으로 받을 수 없다. 명령이 응답을 기다리는 동안 확장 워커가
+  // 잠들면 디버거 세션이 통째로 떨어지기 때문이다 — 20초는 값이 오고 35초는 응답조차 없다(실측).
+  // 그래서 오래 걸리는 일은 페이지 안에서 돌리고 CDP 는 시작과 회수만 맡는다. 명령 하나하나가
+  // 1초 미만이라 워커 수명과 무관해진다.
+  // ⚠️작업은 그 페이지의 window 에 산다. 도중에 페이지가 이동하면 작업도 함께 사라진다.
+  async eval_js({ tabId, code, background, jobId }) {
     const id = await resolveTabId(tabId)
-    const value = await cdp.evaluate(id, code)
-    return { value }
+
+    if (jobId) {
+      const key = JSON.stringify(String(jobId))
+      const r = await cdp.evaluate(id, `(async () => {
+        const j = (window.__ccJobs || {})[${key}]
+        if (!j) return { jobId: ${key}, missing: true }
+        return { jobId: ${key}, done: j.done, value: j.value, error: j.error, elapsedMs: Date.now() - j.t0 }
+      })()`)
+      if (r && r.missing) {
+        throw new Error(`JOB_NOT_FOUND: 작업 ${jobId} 이 이 탭에 없습니다. 페이지가 이동했다면 작업도 함께 사라집니다.`)
+      }
+      return r
+    }
+
+    if (!background) return { value: await cdp.evaluate(id, code) }
+
+    const key = JSON.stringify(`job${++jobSeq}_${Date.now().toString(36)}`)
+    return await cdp.evaluate(id, `(async () => {
+      window.__ccJobs = window.__ccJobs || {}
+      const j = { done: false, t0: Date.now() }
+      window.__ccJobs[${key}] = j
+      ;(async () => { ${code} })().then(
+        (v) => { j.value = v; j.done = true },
+        (e) => { j.error = String((e && e.message) || e); j.done = true },
+      )
+      return { jobId: ${key}, started: true }
+    })()`)
   },
 
   async watch({ tabId, console: wantConsole, network: wantNetwork }) {

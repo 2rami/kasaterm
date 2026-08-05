@@ -2,8 +2,11 @@
 // 차단 정책과 무관하다 — 평소 쓰는 프로필과 열어둔 탭을 그대로 조작할 수 있는 유일한 길.
 const VERSION = '1.3'
 const AUTO_DETACH_MS = 15000
+// 진행 중인 명령이 있어도 영원히 붙어 있지는 않는다. 도구 쪽 최대 타임아웃(45초)보다 뒤에 둬서,
+// 정상적으로 오래 걸리는 한 방은 살리고 응답이 영영 오지 않는 좀비만 걷는다.
+const BUSY_DETACH_MS = 60000
 
-const sessions = new Map() // tabId -> {pinned:Set<string>, console:[], network:Map, idleTimer, domains:Set}
+const sessions = new Map() // tabId -> {pinned:Set<string>, console:[], network:Map, idleTimer, inflight, domains:Set}
 
 export function isAttached(tabId) {
   return sessions.has(tabId)
@@ -11,14 +14,23 @@ export function isAttached(tabId) {
 
 export function sessionInfo() {
   return [...sessions.entries()].map(([tabId, s]) => ({
-    tabId, pinned: [...s.pinned], consoleCount: s.console.length, networkCount: s.network.size,
+    tabId, pinned: [...s.pinned], inflight: s.inflight, consoleCount: s.console.length, networkCount: s.network.size,
   }))
 }
 
+// ⚠️보내는 동안은 idle 이 아니다. 명령이 도는 중에도 유휴 타이머가 그대로 돌면, 15초를 넘기는
+// 한 방(20초 대기 스크립트 같은 것)이 자기가 처리되는 도중에 스스로 끊긴다 — 크롬은
+// "Detached while handling command" 로 답하고, 도구 타임아웃(45초)은 구경도 못 한다.
+// 그래서 명령 수를 세어, 하나라도 떠 있으면 짧은 유휴 시계를 쓰지 않는다(2026-08-05 실측).
 function send(tabId, method, params = {}) {
+  const s = sessions.get(tabId)
+  if (s) s.inflight++
+  touch(tabId)
   return new Promise((resolve, reject) => {
     chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
       const err = chrome.runtime.lastError
+      if (s) s.inflight--
+      touch(tabId)
       if (err) reject(new Error(`CDP ${method} 실패: ${err.message}`))
       else resolve(result)
     })
@@ -41,7 +53,7 @@ export async function attach(tabId, reason = 'command') {
       }
     })
   })
-  const s = { pinned: new Set(), console: [], network: new Map(), idleTimer: null, domains: new Set(), reason }
+  const s = { pinned: new Set(), console: [], network: new Map(), idleTimer: null, inflight: 0, domains: new Set(), reason }
   sessions.set(tabId, s)
   touch(tabId)
   return s
@@ -62,7 +74,7 @@ function touch(tabId) {
   if (!s) return
   clearTimeout(s.idleTimer)
   if (s.pinned.size > 0) return
-  s.idleTimer = setTimeout(() => { detach(tabId).catch(() => {}) }, AUTO_DETACH_MS)
+  s.idleTimer = setTimeout(() => { detach(tabId).catch(() => {}) }, s.inflight > 0 ? BUSY_DETACH_MS : AUTO_DETACH_MS)
 }
 
 export async function ensureDomain(tabId, domain) {
@@ -173,14 +185,12 @@ export async function click(tabId, { x, y, button = 'left', clickCount = 1, modi
   const base = { x, y, button, clickCount, modifiers }
   await send(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' })
   await send(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' })
-  touch(tabId)
   return { dispatched: true, x, y }
 }
 
 export async function hover(tabId, { x, y }) {
   await attach(tabId)
   await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
-  touch(tabId)
   return { dispatched: true }
 }
 
@@ -196,21 +206,18 @@ export async function drag(tabId, { from, to }) {
     })
   }
   await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: to.x, y: to.y, button: 'left', clickCount: 1 })
-  touch(tabId)
   return { dispatched: true }
 }
 
 export async function wheel(tabId, { x, y, deltaX = 0, deltaY = 0 }) {
   await attach(tabId)
   await send(tabId, 'Input.dispatchMouseEvent', { type: 'mouseWheel', x, y, deltaX, deltaY })
-  touch(tabId)
   return { dispatched: true }
 }
 
 export async function insertText(tabId, text) {
   await attach(tabId)
   await send(tabId, 'Input.insertText', { text })
-  touch(tabId)
   return { inserted: text.length }
 }
 
@@ -221,7 +228,6 @@ export async function typeText(tabId, text) {
     await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', text: ch, key: ch, windowsVirtualKeyCode: code })
     await send(tabId, 'Input.dispatchKeyEvent', { type: 'keyUp', key: ch, windowsVirtualKeyCode: code })
   }
-  touch(tabId)
   return { typed: text.length }
 }
 
@@ -233,7 +239,6 @@ export async function pressKey(tabId, key, modifiers = 0) {
   await send(tabId, 'Input.dispatchKeyEvent', { ...common, type: isChar && !modifiers ? 'keyDown' : 'rawKeyDown', ...(isChar && !modifiers ? { text: key } : {}) })
   if (key === 'Enter') await send(tabId, 'Input.dispatchKeyEvent', { ...common, type: 'char', text: '\r' })
   await send(tabId, 'Input.dispatchKeyEvent', { ...common, type: 'keyUp' })
-  touch(tabId)
   return { pressed: key }
 }
 
@@ -249,7 +254,6 @@ export async function screenshot(tabId, { fullPage = false, format = 'png', qual
     }
   }
   const { data } = await send(tabId, 'Page.captureScreenshot', params)
-  touch(tabId)
   return data
 }
 
@@ -269,7 +273,6 @@ export async function evaluate(tabId, expression, { awaitPromise = true } = {}) 
     const res = await send(tabId, 'Runtime.evaluate', {
       expression: form, awaitPromise, returnByValue: true, userGesture: true,
     })
-    touch(tabId)
     last = res.exceptionDetails
     if (!last) return res.result?.value ?? res.result?.description ?? null
     // 감싸기 때문에 생긴 문법 오류만 다음 형태로 넘어간다. 진짜 런타임 오류는 그대로 알린다.
@@ -285,7 +288,6 @@ export async function setFileInputFiles(tabId, files, { ref, selector } = {}) {
   const { nodeId } = await send(tabId, 'DOM.querySelector', { nodeId: root.nodeId, selector: sel })
   if (!nodeId) throw new Error(`FILE_INPUT_NOT_FOUND: 선택자 "${sel}" 에 맞는 파일 입력이 없습니다.`)
   await send(tabId, 'DOM.setFileInputFiles', { nodeId, files })
-  touch(tabId)
   return { attached: files.length, selector: sel, ref }
 }
 
