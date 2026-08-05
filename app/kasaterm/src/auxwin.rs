@@ -2147,19 +2147,11 @@ impl App {
                 }
             }
         }
-        // 창 외곽선 — pane 별도창과 같은 규칙(거노: "pane 별도창은 전체에 테두리").
-        // 방 창은 안쪽 pane 경계만 있어 바깥이 열린 채였다: OS 타이틀바를 껐으니
-        // 테두리가 없으면 창이 어디서 끝나는지가 배경색 차이 하나뿐이다. 색은 헤더
-        // 라벨과 같은 포커스 학생색으로 — 같은 신호를 두 군데서 준다.
-        {
-            const T: f32 = 1.5;
-            let base = label_col.unwrap_or_else(crate::theme::border);
-            let col = crate::theme::with_alpha(base, if focused { 0xFF } else { 0x66 });
-            a.gpu.rect(0.0, 0.0, w, T, col);
-            a.gpu.rect(0.0, h - T, w, T, col);
-            a.gpu.rect(0.0, T, T, (h - T * 2.0).max(0.0), col);
-            a.gpu.rect(w - T, T, T, (h - T * 2.0).max(0.0), col);
-        }
+        // 창 전체 외곽선은 **여기 넣지 않는다** — 방 창은 pane 마다 테두리를 두고,
+        // 창 겉을 두르는 건 pane 별도창만이다(거노 2026-08-05). 어제 이 자리에
+        // 외곽선을 넣었다가 되돌렸다: 방 창은 안에 pane 이 여럿이라 겉테두리까지
+        // 두르면 테두리가 두 겹이 되고, 어느 pane 이 포커스인지를 말해야 할 색이
+        // 창 전체로 번져 신호가 흐려진다.
         // 학생 스프라이트는 셀 위 패스 — statusline 테두리 글리프가 얼굴을
         // 가로지르지 않게. 메인 그리드와 같은 함수·같은 이미지 키를 쓴다.
         crate::render::paint_student_overlays(&mut a.gpu, &student, anim_ms);
