@@ -2429,6 +2429,90 @@ impl App {
             }
         }
     }
+    /// Headless 방 별도창 split repro: `KASATERM_AUTOROOMSPLIT_MS`(+`_DIR=v|h`,
+    /// `_CAP`). `KASATERM_AUTOSTUDENT_ROOM` 이 꺼내 둔 방 창을 쪼갠다.
+    ///
+    /// ⌘D 를 창에 실제로 넣고 싶었으나 **못 한다**: winit 의 `KeyEvent` 는 macOS 에서
+    /// 밖에서 만들 수 없다(`platform_specific` 가 private 이고 그 타입에 `Default` 도
+    /// 없다). 그래서 `split_room_pane` 을 직접 부른다 — **키 화음과 「방 창일 때만」
+    /// 게이트는 이 하네스가 못 본다**. 그 배선이 끊기면 여기선 여전히 PASS 다.
+    ///
+    /// 진짜 관문은 **비활성 window** 다. `split_room_pane` 은 활성이면
+    /// `pty_layout` 을, 아니면 `windows[w]` 슬롯을 쪼개는데 활성 경로는 메인 창
+    /// 코드로도 통과해 회귀를 못 잡는다. `autostudent_room` 이 방을 둘 꺼내고
+    /// 활성을 세 번째 방으로 밀어 두므로 여기 오는 방 창은 항상 비활성이다.
+    pub(crate) fn run_pending_autoroomsplit(&mut self) {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static STEP: AtomicU8 = AtomicU8::new(0);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOROOMSPLIT_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        let step = STEP.load(Ordering::Relaxed);
+        // 2단계로 나누는 이유: split 이 낳은 셸이 뜨기 전에 PTY 생존을 물으면
+        // 아직 spawn 중이라 판정이 흔들린다.
+        if step > 1 || Instant::now() < *due + std::time::Duration::from_millis(1500 * step as u64)
+        {
+            return;
+        }
+        let Some(idx) = self.aux_windows.iter().position(|a| a.room_window().is_some()) else {
+            if step == 0 {
+                eprintln!("[autoroomsplit] FAIL — 방 별도창이 없다(AUTOSTUDENT_ROOM 을 앞에 둬라)");
+            }
+            STEP.store(2, Ordering::Relaxed);
+            return;
+        };
+        let win = self.aux_windows[idx].room_window().unwrap();
+        if step == 0 {
+            STEP.store(1, Ordering::Relaxed);
+            let vertical = std::env::var("KASATERM_AUTOROOMSPLIT_DIR")
+                .map(|d| d.starts_with('v'))
+                .unwrap_or(false);
+            let before = self.window_leaves(win);
+            eprintln!(
+                // ⌘ 표기는 「이 키가 부르는 것과 같은 함수」라는 뜻이지 키를 넣었다는
+                // 뜻이 아니다 — 키 주입은 못 한다(위 doc 주석).
+                "[autoroomsplit] 방 {win}(활성={}) leaf {}개 → split_room_pane({}) 직접 호출(⌘{} 경로)",
+                win == self.active_window,
+                before.len(),
+                if vertical { "Vertical" } else { "Horizontal" },
+                if vertical { "E" } else { "D" }
+            );
+            let dir = if vertical {
+                kasa_pty::SplitDir::Vertical
+            } else {
+                kasa_pty::SplitDir::Horizontal
+            };
+            self.split_room_pane(idx, dir);
+            return;
+        }
+        STEP.store(2, Ordering::Relaxed);
+        let leaves = self.window_leaves(win);
+        let alive: Vec<&String> = leaves.iter().filter(|l| self.pty.contains_key(*l)).collect();
+        eprintln!(
+            "[autoroomsplit] 방 {win} leaf {}개 {leaves:?} PTY생존 {}개 → {}",
+            leaves.len(),
+            alive.len(),
+            if leaves.len() >= 2 && alive.len() == leaves.len() {
+                "PASS"
+            } else if leaves.len() < 2 {
+                "FAIL — 안 쪼개졌다"
+            } else {
+                "FAIL — 쪼개졌는데 PTY 가 죽었다"
+            }
+        );
+        if let Ok(path) = std::env::var("KASATERM_AUTOROOMSPLIT_CAP") {
+            if let Some(a) = self.aux_windows.get_mut(idx) {
+                a.pending_capture =
+                    Some((Instant::now() + std::time::Duration::from_millis(600), path));
+            }
+        }
+    }
     /// Headless **방 탭** 드래그-tear repro: `KASATERM_AUTOTEARROOM_MS`. pane 탭
     /// (`autoteardrag`)과 별개 경로다 — 방 탭은 `win_tab_drag` 를 타고, 꺼내기 판정도
     /// 「창 밖」이 아니라 「사이드바 패널 밖 + 40px」이다. 거노가 "드래그 뗄 때
