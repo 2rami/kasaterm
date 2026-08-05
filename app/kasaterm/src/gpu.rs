@@ -115,6 +115,13 @@ pub struct GpuRenderer {
     /// Per-frame chrome instances. main.rs's chrome code pushes via
     /// `rect()` / `draw_text()` between frames; `render()` drains.
     chrome: Vec<CellInstance>,
+    /// 이번 프레임에 그린 문자열 원문 — 하네스 전용, `KASATERM_TEXT_LOG` 가 있을
+    /// 때만 켜진다(없으면 `Option` 검사 하나라 프로덕션엔 비용이 없다).
+    ///
+    /// `chrome` 에는 글리프 인스턴스만 남아 문자열을 되살릴 수 없다. 그래서
+    /// "헤더에 학생 이름이 떴나" 같은 걸 캡처를 눈으로 보는 것 말고는 물을 수가
+    /// 없었다 — 안 보면 조용히 통과한다.
+    text_log: Option<Vec<String>>,
     /// Scale we cached on init. winit logical→physical conversion.
     scale: f32,
     /// True when KASATERM_P3_ROOT installed our own root metal layer and
@@ -550,6 +557,7 @@ impl GpuRenderer {
             cell_w: cell_w / scale,
             cell_h: cell_h / scale,
             chrome: Vec::with_capacity(1024),
+            text_log: std::env::var_os("KASATERM_TEXT_LOG").map(|_| Vec::new()),
             scale,
             p3_root_owned: p3_root,
             image_pipeline,
@@ -903,6 +911,9 @@ impl GpuRenderer {
         force_mono: bool,
     ) -> f32 {
         let s = self.scale;
+        if let Some(log) = self.text_log.as_mut() {
+            log.push(text.to_string());
+        }
         let (font, size_px) = self.chrome_face_opt(opts.font_size, force_mono);
         // The pixel face sets ascent == em, so its glyphs sit far higher above
         // the baseline than the mono primary's 0.78 assumption — without the
@@ -3219,6 +3230,9 @@ impl GpuRenderer {
     /// frame don't pile up.
     pub fn clear_chrome(&mut self) {
         self.chrome.clear();
+        if let Some(log) = self.text_log.as_mut() {
+            log.clear();
+        }
         self.image_quads.clear();
         self.icon_quads.clear();
         self.hover_pointer = false;
@@ -3242,6 +3256,13 @@ impl GpuRenderer {
     /// 로 간다. 한쪽만 보면 프사가 멀쩡히 떠 있는데 0 개로 읽힌다(실측).
     pub fn drawn_image_keys(&self) -> impl Iterator<Item = &str> {
         self.image_quads.iter().chain(self.icon_quads.iter()).map(|(k, ..)| k.as_str())
+    }
+
+    /// 이번 프레임에 그린 문자열에 `needle` 이 들어간 게 있나. `KASATERM_TEXT_LOG`
+    /// 를 안 켜면 항상 `None` — "안 그려졌다"와 "안 재고 있다"를 섞지 않기 위해
+    /// bool 이 아니라 `Option` 이다.
+    pub fn drew_text(&self, needle: &str) -> Option<bool> {
+        Some(self.text_log.as_ref()?.iter().any(|t| t.contains(needle)))
     }
 
     /// Upload an image pane's RGBA8 pixels into a texture + bind group keyed

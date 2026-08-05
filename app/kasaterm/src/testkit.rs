@@ -2393,6 +2393,7 @@ impl App {
             return;
         }
         let home = self.window_of_pane(pid);
+        let who = { self.ws.lock().unwrap().pane_character.get(pid).cloned() };
         for idx in 0..self.aux_windows.len() {
             self.aux_render(idx);
             let Some(a) = self.aux_windows.get(idx) else { continue };
@@ -2416,6 +2417,16 @@ impl App {
                     (false, true) => "FAIL — 학생 없는 창에 스프라이트가 샜다",
                 }
             );
+            // 프사와 별개로 **헤더에 학생 이름이 실렸는지**. 터미널 창은 싣고 방
+            // 창은 방 이름만 실어 갈리는데, 캡처를 눈으로 보지 않으면 그 차이가
+            // 안 드러난다(거노가 방 창에서 짚은 것).
+            if let Some(name) = who.as_deref().filter(|_| want) {
+                match a.gpu.drew_text(name) {
+                    Some(true) => eprintln!("[autostudent] {what} 헤더 학생이름 {name} → 있음"),
+                    Some(false) => eprintln!("[autostudent] {what} 헤더 학생이름 {name} → 없음"),
+                    None => eprintln!("[autostudent] {what} 헤더 이름 미측정(KASATERM_TEXT_LOG 를 켜라)"),
+                }
+            }
         }
     }
     /// Headless **방 탭** 드래그-tear repro: `KASATERM_AUTOTEARROOM_MS`. pane 탭
