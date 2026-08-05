@@ -7110,11 +7110,36 @@ fn title_typewriter_frame(pane_id: &str, full: &str) -> (String, bool) {
     })
 }
 
-/// claude TUI 입력박스 행 탐지 — 화면 하단에서 위로 ─ 보더 두 줄을 찾아 그
-/// 사이 행 범위를 돌려준다(양끝 보더 행 번호는 range.start-1 / range.end).
-/// 사이에 ❯ 프롬프트 마커 행이 있어야 입력박스로 인정한다(권한 메뉴 등
-/// 다른 풀폭 박스 오인 방지).
-fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
+/// 에이전트 TUI 의 입력 영역. 하네스마다 **모양이 다르다** — claude 는 `─` 보더
+/// 두 줄이 입력행을 감싸고, codex 는 보더가 없는 대신 입력행 전체가 배경색으로
+/// 칠해져 있다(실측 `bg=Rgb(63,69,77)`, 주변은 `Default`).
+///
+/// 판정을 한 곳에 모으는 이유는 `strip_agent_chip` 주석(아래)에 적힌 사고 그대로다:
+/// 같은 일을 하는 사본이 각자 관문을 들면 한쪽만 고쳐져 조용히 어긋난다.
+pub(crate) enum PromptBox {
+    /// claude — `rows` 가 입력행, 그 바깥 `top`/`bottom` 이 대시 보더.
+    Bordered { rows: std::ops::Range<usize>, top: usize, bottom: usize },
+    /// codex — 보더가 없다. 칠할 것도 칩을 지울 자리도 입력행 자신뿐이다.
+    Filled { rows: std::ops::Range<usize> },
+}
+
+impl PromptBox {
+    pub(crate) fn rows(&self) -> std::ops::Range<usize> {
+        match self {
+            PromptBox::Bordered { rows, .. } | PromptBox::Filled { rows } => rows.clone(),
+        }
+    }
+}
+
+/// 에이전트 TUI 입력 영역 탐지 — 화면 하단에서 위로 찾는다.
+///
+/// **claude**: `─` 보더 두 줄 사이. 그 사이에 `❯` 마커 행이 있어야 인정한다
+/// (권한 메뉴 등 다른 풀폭 박스 오인 방지).
+///
+/// **codex**: 보더가 없다. 대신 입력행이 **명시 배경색으로 통째로 칠해져** 있어서
+/// 그걸 시그니처로 쓴다 — `›` 로 시작하고 그 행의 모든 글리프가 같은 non-Default
+/// `bg` 를 공유하는 행. 배경 없이 `›` 만 보면 인용문·diff 를 입력창으로 오인한다.
+fn prompt_box(rows: &[Vec<GridCell>]) -> Option<PromptBox> {
     fn is_border(r: &[GridCell]) -> bool {
         let (mut dash, mut glyph) = (0usize, 0usize);
         for c in r {
@@ -7128,19 +7153,42 @@ fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
         }
         dash >= 10 && dash * 2 >= glyph
     }
-    let b2 = rows.iter().rposition(|r| is_border(r))?;
-    let b1 = rows[..b2].iter().rposition(|r| is_border(r))?;
-    let range = (b1 + 1)..b2;
     // claude 입력박스 마커는 `❯`(U+276F, 또는 옛 `›`)뿐 — ASCII `>` 는 제외한다.
     // diff·git·노트 TUI 는 대시줄 사이에 ASCII `>`(인용·프롬프트) 를 흔히 둬서,
     // `>` 까지 마커로 치면 그 대시줄 쌍을 입력박스로 오인해 뜬금없는 빈 초록
     // 사각형을 덧그렸다(거노 2026-07-22).
-    let has_marker = rows[range.clone()].iter().any(|r| {
-        r.iter()
-            .find(|c| c.ch != ' ' && c.ch != '\0')
-            .is_some_and(|c| matches!(c.ch, '❯' | '›'))
-    });
-    (has_marker && !range.is_empty()).then_some(range)
+    fn marker_row(r: &[GridCell]) -> bool {
+        r.iter().find(|c| c.ch != ' ' && c.ch != '\0').is_some_and(|c| matches!(c.ch, '❯' | '›'))
+    }
+    if let Some(b2) = rows.iter().rposition(|r| is_border(r)) {
+        if let Some(b1) = rows[..b2].iter().rposition(|r| is_border(r)) {
+            let range = (b1 + 1)..b2;
+            if !range.is_empty() && rows[range.clone()].iter().any(|r| marker_row(r)) {
+                return Some(PromptBox::Bordered { rows: range, top: b1, bottom: b2 });
+            }
+        }
+    }
+    // codex — 칠해진 입력행. 글리프가 하나도 없는 행은 배경만 남은 여백일 수 있어
+    // 마커를 함께 요구한다.
+    let f = rows.iter().rposition(|r| {
+        if !marker_row(r) {
+            return false;
+        }
+        let mut fill: Option<&kasa_bridge::screen::Color> = None;
+        let mut glyphs = 0usize;
+        for c in r.iter().filter(|c| c.ch != '\0') {
+            if matches!(c.bg, kasa_bridge::screen::Color::Default) {
+                return false;
+            }
+            if fill.is_some_and(|f| *f != c.bg) {
+                return false;
+            }
+            fill = Some(&c.bg);
+            glyphs += 1;
+        }
+        glyphs >= 8
+    })?;
+    Some(PromptBox::Filled { rows: f..(f + 1) })
 }
 
 /// 학생 pane 입력박스의 양끝 보더 행(─ 줄 + @배지)을 claude 가 /color·
@@ -7148,24 +7196,40 @@ fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
 /// pane 정체성 색과 항상 일치. (본문 틴트가 있던 시절엔 사이 행의 입력 글자를
 /// 틴트에서 빼는 처리도 여기 있었는데, 본문이 테마 기본 fg 로 돌아가며 폐기.)
 pub(crate) fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
-    let Some(range) = prompt_box_rows(rows) else { return };
-    let (b1, b2) = (range.start - 1, range.end);
+    let Some(bx) = prompt_box(rows) else { return };
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
-    for i in [b1, b2] {
-        for c in rows[i].iter_mut() {
-            // 세션명/테두리 줄 배경(claude --agent-color 로 채운 accent 밴드)을
-            // 터미널색으로 되돌린다 — 아웃라인(─ 대시·세션명 글자)만 accent 로
-            // 두고 배경은 안 칠한다(거노: 배경까지 채우면 글자가 묻힌다).
-            c.bg = kasa_bridge::screen::Color::Default;
-            if c.ch != ' ' && c.ch != '\0' {
-                c.fg = fg.clone();
+    match &bx {
+        PromptBox::Bordered { top, bottom, .. } => {
+            for i in [*top, *bottom] {
+                for c in rows[i].iter_mut() {
+                    // 세션명/테두리 줄 배경(claude --agent-color 로 채운 accent 밴드)을
+                    // 터미널색으로 되돌린다 — 아웃라인(─ 대시·세션명 글자)만 accent 로
+                    // 두고 배경은 안 칠한다(거노: 배경까지 채우면 글자가 묻힌다).
+                    c.bg = kasa_bridge::screen::Color::Default;
+                    if c.ch != ' ' && c.ch != '\0' {
+                        c.fg = fg.clone();
+                    }
+                }
+            }
+        }
+        // codex 는 칠할 보더가 없다. 이미 배경으로 칠해진 그 줄을 학생색 쪽으로
+        // 끌어당긴다 — 거노 선택(2026-08-05). 원래 배경을 버리지 않고 섞는 이유는
+        // 입력 글자가 묻히지 않게 하기 위해서다(보더 도색이 배경을 비우는 것과
+        // 같은 이유). 여기서 fg 는 건드리지 않는다.
+        PromptBox::Filled { rows: r } => {
+            for i in r.clone() {
+                for c in rows[i].iter_mut() {
+                    if let kasa_bridge::screen::Color::Rgb(br, bg_, bb) = c.bg {
+                        c.bg = tint_toward([br, bg_, bb], accent, PROMPT_TINT);
+                    }
+                }
             }
         }
     }
     // 입력행 왼쪽 ❯ 프롬프트 마커도 학생 accent 로 — claude --agent-color(8색
     // 근사)가 남으면 보더와 화살표 색이 어긋난다(거노). 마커 글리프 한 칸만
     // 칠하고 입력 글자는 테마 기본 fg 유지.
-    for r in range {
+    for r in bx.rows() {
         if let Some(c) = rows[r]
             .iter_mut()
             .find(|c| c.ch != ' ' && c.ch != '\0')
@@ -7174,6 +7238,20 @@ pub(crate) fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
             c.fg = fg.clone();
         }
     }
+}
+
+/// codex 입력줄 배경을 학생색 쪽으로 끌어당기는 비율. 글자가 묻히지 않을 만큼만.
+const PROMPT_TINT: f32 = 0.22;
+
+/// `base` 를 `accent` 쪽으로 `amount` 만큼 섞는다. 셀 배경은 알파가 없어
+/// (`Color::Rgb` 뿐) 미리 합성해야 한다 — `theme::with_alpha` 를 못 쓰는 이유.
+fn tint_toward(base: [u8; 3], accent: [u8; 4], amount: f32) -> kasa_bridge::screen::Color {
+    let mix = |b: u8, a: u8| (b as f32 + (a as f32 - b as f32) * amount).round().clamp(0.0, 255.0) as u8;
+    kasa_bridge::screen::Color::Rgb(
+        mix(base[0], accent[0]),
+        mix(base[1], accent[1]),
+        mix(base[2], accent[2]),
+    )
 }
 
 /// 입력박스 상단 보더의 teammate 칩(`── @이름 ──`)을 지우고 보더 대시로 되메운다.
@@ -7193,8 +7271,9 @@ pub(crate) fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
 /// 돌았고, 그 관문이 `row.len()` 을 봐서 넓은 pane 에서 칩이 영영 남았다(거노
 /// 스크린샷 2026-08-05). 사본을 지우고 한 벌로 합친 이유다.
 pub(crate) fn strip_agent_chip(rows: &mut [Vec<GridCell>]) {
-    let Some(range) = prompt_box_rows(rows) else { return };
-    let row = &mut rows[range.start - 1];
+    // 칩이 앉는 자리가 상단 보더다 — 보더가 없는 하네스(codex)엔 지울 것도 없다.
+    let Some(PromptBox::Bordered { top, .. }) = prompt_box(rows) else { return };
+    let row = &mut rows[top];
     let Some(at) = row.iter().position(|c| c.ch == '@') else { return };
     // 대시의 색·굵기를 그대로 복사한다. 새 셀을 만들면 테두리 한가운데만 다른 색이
     // 되어 지운 자리가 오히려 눈에 띈다.
@@ -7278,8 +7357,8 @@ fn inlay_prompt_box_title(
     title: &str,
 ) -> Option<(usize, usize, usize)> {
     use unicode_width::UnicodeWidthChar;
-    let range = prompt_box_rows(rows)?;
-    let tr = range.start - 1;
+    // 인레이는 상단 보더의 `─` 런 안에 글자를 끼워 넣는 것이라 보더가 전제다.
+    let PromptBox::Bordered { top: tr, .. } = prompt_box(rows)? else { return None };
     let row = &mut rows[tr];
     let l0 = row.iter().position(|c| c.ch == '─')?;
     let run = row[l0..].iter().take_while(|c| c.ch == '─').count();
@@ -7354,8 +7433,7 @@ fn inlay_prompt_box_right(
     left_end: Option<usize>,
 ) -> Option<(usize, usize, usize)> {
     use unicode_width::UnicodeWidthChar;
-    let range = prompt_box_rows(rows)?;
-    let tr = range.start - 1;
+    let PromptBox::Bordered { top: tr, .. } = prompt_box(rows)? else { return None };
     let row = &mut rows[tr];
     // 보더의 오른쪽 끝 = 마지막 '─'. 그리드가 박스보다 넓어 뒤가 빈 칸이어도
     // 여기서 잡힌다(폭 기준으로 재다가 칩 제거가 조용히 실패한 그 함정을 피한다).
@@ -10485,7 +10563,32 @@ mod prompt_box_tests {
             row_from(&format!("❯ hello{}", " ".repeat(21))),
             row_from(&"─".repeat(28)),
         ];
-        assert_eq!(prompt_box_rows(&rows), Some(2..3));
+        assert!(matches!(
+            prompt_box(&rows),
+            Some(PromptBox::Bordered { ref rows, top: 1, bottom: 3 }) if *rows == (2..3)
+        ));
+    }
+
+    // codex 입력줄: 보더가 없고 **줄 전체가 명시 배경색**이다(실측 bg=Rgb(63,69,77)).
+    // 배경 없이 `›` 만 보면 인용문을 입력창으로 오인하므로 둘을 함께 요구한다.
+    #[test]
+    fn codex_filled_prompt_row_detected() {
+        let filled = |s: &str| {
+            let mut r = row_from(s);
+            for c in r.iter_mut() {
+                c.bg = kasa_bridge::screen::Color::Rgb(63, 69, 77);
+            }
+            r
+        };
+        let rows = vec![
+            row_from("⚠ MCP startup incomplete"),
+            filled("› Use /skills to list available skills"),
+            row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
+        ];
+        assert!(matches!(prompt_box(&rows), Some(PromptBox::Filled { ref rows }) if *rows == (1..2)));
+        // 같은 줄이라도 배경이 없으면 입력창이 아니다 — 인용문 오인 방지.
+        let plain = vec![row_from("› quoted line, not an input box at all")];
+        assert!(prompt_box(&plain).is_none());
     }
 
     // diff·git·노트 TUI 의 대시 구분선 쌍은 사이에 ASCII '>'(인용·프롬프트)가
@@ -10500,7 +10603,7 @@ mod prompt_box_tests {
             row_from(&"─".repeat(30)),
             row_from("Notes: press n to add notes"),
         ];
-        assert!(prompt_box_rows(&rows).is_none());
+        assert!(prompt_box(&rows).is_none());
     }
 }
 
