@@ -78,6 +78,12 @@ pub fn dispatch(backend: &dyn Backend, req: Request) -> Response {
         "surface.report_cwd" => surface_report_cwd(backend, id, &req.params),
         "surface.swap" => surface_swap(backend, id, &req.params),
         "surface.move" => surface_move(backend, id, &req.params),
+        "surface.new_tab" => match backend.new_tab(
+            req.params.get("outer").and_then(|v| v.as_str()),
+        ) {
+            Ok(s) => Response::success(id, json!({ "surface": s })),
+            Err(e) => backend_err(id, e),
+        },
         "surface.resize_divider" => surface_resize_divider(backend, id, &req.params),
         "surface.set_ratio" => surface_set_ratio(backend, id, &req.params),
         "surface.peek" => surface_peek(backend, id, &req.params),

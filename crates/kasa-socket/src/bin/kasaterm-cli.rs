@@ -680,7 +680,10 @@ fn print_help() {
     eprintln!(
         "  kasaterm-cli split <left|right|up|down> [%surface] [--focus] [--count N]  # 기본 no-focus·이 pane 을 쪼갬. --count N 으로 한 번에 N개(실패하면 멈추고 몇 개까지 됐는지 준다)"
     );
-    eprintln!("  kasaterm-cli swap  <surface_a> <surface_b>");
+    eprintln!("  kasaterm-cli window-new                    # 새 창
+  kasaterm-cli tab   [%surface]              # 쪼개지 않고 이 pane 안에 새 탭(화면이 안 줄어든다)
+  kasaterm-cli move  <surface> <target> [left|right|up|down]  # 대상이 다른 창이면 창을 건너뛴다(PTY 유지)
+  kasaterm-cli swap  <surface_a> <surface_b>");
     eprintln!("  kasaterm-cli resize <surface_id> <ratio>   # 직계 split 에서 차지 비중 0..1 (오케스트레이터 크게)");
     eprintln!("  kasaterm-cli send  <text>");
     eprintln!("  kasaterm-cli send  --surface <id> <text>");
@@ -809,6 +812,31 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
             (
                 "surface.split",
                 json!({ "direction": dir, "focus": focus, "from": from }),
+            )
+        }
+        // 새 창(사이드바에 하나 더). 창 간 이동(`move`)의 목적지를 만들 때 쓴다.
+        "window-new" => ("window.new", json!({})),
+        // 쪼개지 않고 **이 pane 안에** 새 탭. 학생을 더 띄워도 화면이 안 줄어든다.
+        "tab" => {
+            let outer = args
+                .iter()
+                .find(|a| a.starts_with('%'))
+                .cloned()
+                .or_else(|| std::env::var("KASATERM_PANE_ID").ok().filter(|s| !s.is_empty()));
+            ("surface.new_tab", json!({ "outer": outer }))
+        }
+        // pane 을 다른 pane 옆으로 — 대상이 다른 창이면 **창을 건너뛴다**(PTY 유지).
+        "move" => {
+            let moving = args
+                .first()
+                .ok_or_else(|| anyhow!("move needs <surface> <target> [left|right|up|down]"))?;
+            let target = args
+                .get(1)
+                .ok_or_else(|| anyhow!("move needs a target surface to land beside"))?;
+            let dir = args.get(2).map(String::as_str).unwrap_or("right");
+            (
+                "surface.move",
+                json!({ "surface_id": moving, "target": target, "direction": dir }),
             )
         }
         "swap" => {

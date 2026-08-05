@@ -461,6 +461,12 @@ pub trait Backend: Send + Sync {
     fn move_surface(&self, _surface_id: &str, _target: &str, _direction: SplitDirection) -> Result<()> {
         anyhow::bail!("move_surface unsupported by this backend")
     }
+    /// `outer` **안에 새 탭**을 연다 — 쪼개지 않으므로 화면이 안 줄어든다. `outer` 가
+    /// None 이면 포커스된 pane. 새 탭의 surface 를 돌려준다(부른 쪽이 거기에 명령을
+    /// 실어야 한다). Default: unsupported.
+    fn new_tab(&self, _outer: Option<&str>) -> Result<SurfaceInfo> {
+        anyhow::bail!("new_tab unsupported by this backend")
+    }
     /// Set the split ratio at `path` (the seam the GUI just dragged) so the
     /// daemon — the layout authority — persists it and restores it on restart.
     /// `path` is the tree route to the owning Split node (0 = child a, 1 = b).
