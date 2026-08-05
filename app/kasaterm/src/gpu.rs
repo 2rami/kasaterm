@@ -3230,6 +3230,20 @@ impl GpuRenderer {
         self.images.contains_key(id)
     }
 
+    /// 이번 프레임에 실제로 올라간 이미지 드로우의 키들 — **두 목록 다**.
+    ///
+    /// 하네스가 "학생 스프라이트가 정말 그려졌나"를 그림 없이 판정하는 유일한
+    /// 창구다. 스캐너(`find_statusline_face` 등)를 하네스가 직접 다시 돌리면
+    /// **자리가 있는지**만 알 뿐, 렌더 패스가 그걸 부르는지는 못 본다 — 그게
+    /// 정확히 #48 이었다(자리는 멀쩡했고 부르는 쪽이 없었다).
+    ///
+    /// `image_quads` 만 세면 안 된다: 같은 학생이라도 statusline 프사는 셀 위에
+    /// 얹히는 `queue_image_above` → `icon_quads` 로 가고 배경/커버는 `image_quads`
+    /// 로 간다. 한쪽만 보면 프사가 멀쩡히 떠 있는데 0 개로 읽힌다(실측).
+    pub fn drawn_image_keys(&self) -> impl Iterator<Item = &str> {
+        self.image_quads.iter().chain(self.icon_quads.iter()).map(|(k, ..)| k.as_str())
+    }
+
     /// Upload an image pane's RGBA8 pixels into a texture + bind group keyed
     /// by pane id. No-op if already present. `rgba` must be `w * h * 4` bytes.
     pub fn upload_image(&mut self, id: &str, rgba: &[u8], w: u32, h: u32) {
