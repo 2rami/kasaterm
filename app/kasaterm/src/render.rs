@@ -652,14 +652,13 @@ impl App {
                 // 이긴다 — 실측). 그래서 거노가 트리플을 통째로 뺐고, 그 바람에
                 // SendMessage 가 같이 죽었다 — 칩만 지우면 트리플을 되살릴 수 있다.
                 //
-                // 아래쪽 몇 행만 보는 것은 입력박스가 늘 화면 바닥에 있기 때문이고,
-                // rule 행(대시가 절반 초과)만 보므로 대화 본문의 `@누구` 는 안 걸린다.
-                // claude 가 도는 pane 에서만 — 남의 TUI 테두리를 건드리면 안 된다.
+                // 대상 행 찾기는 `strip_agent_chip` 안의 `prompt_box_rows` 한 곳에만
+                // 있다 — 대화 본문의 `@누구` 도, 남의 TUI 대시줄도 `❯` 마커가 없어
+                // 걸리지 않는다. 게이트를 `contains` 로 느슨하게 두는 것은 이 아래
+                // `prompt_accent`(정확일치 `== "claude"`)가 None 이 되는 경우에도
+                // 칩은 지워져야 하기 때문이다.
                 if runs_claude {
-                    let from = composed.len().saturating_sub(CHIP_SCAN_ROWS);
-                    for row in composed[from..].iter_mut() {
-                        strip_teammate_chip(row);
-                    }
+                    strip_agent_chip(&mut composed);
                 }
                 // Cells start below the header band when split, and are
                 // inset inside the pane box so text never jams the divider
@@ -1287,11 +1286,9 @@ impl App {
                 };
                 if let Some(accent) = prompt_accent {
                     style_prompt_box(&mut composed, accent);
-                    // teammate 칩(@agent이름)은 입력박스에서 걷어낸다 — 그 이름은
-                    // pane 헤더 탭이 들고 있고, 여기 남으면 좌측 대화 제목과 정체가
-                    // 다른 이름 둘이 한 줄에 서서 헷갈린다(거노 2026-07-27). 칩을
-                    // 지우면 보더 run 이 넓어져 제목 인레이 여유도 늘어난다.
-                    strip_agent_chip(&mut composed);
+                    // 칩 제거는 위 `runs_claude` 블록에서 이미 끝났다 — 여기서 한 번
+                    // 더 부르면 같은 일이 두 벌이 되고, 그 사본이 각자 다른 관문을
+                    // 갖는 순간 한쪽만 고쳐 놓치게 된다(2026-08-05 실사고).
                     // 입력박스 상단 보더 왼쪽 '─' 구간에 세션 제목 인레이(거노:
                     // @이름칩만으론 이 pane 이 뭘 하는 중인지 안 보임). 라벨
                     // 규칙은 피커와 동일(custom-title > aiTitle > 첫 user) —
@@ -7131,49 +7128,42 @@ fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
     }
 }
 
-/// 입력박스 상단 보더 오른쪽 `@<slug>-<sid>` 칩의 이름(캐릭터 slug) 부분을 pane
-/// 캐릭터로 통일한다. claude argv 의 agent 이름은 부팅 시 고정이라, 이후
-/// swap-character 나 컴팩트 재부팅으로 pane 시각 캐릭터가 바뀌면 칩(@yuuka)과
-/// pane(코하루)이 갈라진다(거노: "%5 코하루인데 @yuuka"). `-<sid>` 는 세션
-/// 식별로 유지하고 첫 slug run 만 교체 — 칩을 오른쪽 끝 고정으로 두고 왼쪽 '─'
-/// 보더를 흡수/보충해 뒤쪽 ` ──` 정렬을 지킨다. 스냅샷 전용(원본 무손상).
-/// 입력박스 상단 보더의 teammate 칩(`@agent이름`)을 지우고 보더 대시로 되메운다.
+/// 입력박스 상단 보더의 teammate 칩(`── @이름 ──`)을 지우고 보더 대시로 되메운다.
+///
 /// 거노 2026-07-27: 같은 줄에 정체가 다른 두 이름(좌=대화 제목, 우=agent 이름)이
 /// 나란히 떠 "세션이름이 왜 둘이냐"가 됐다. agent 이름은 pane 헤더 탭이 이미
-/// 들고 있으므로(패턴 F 는 rename 을 agent-name 과 일치시킨다) 입력박스에서는
-/// 대화 제목 하나만 남긴다. 칩 양옆 공백까지 함께 메워 대시가 끊기지 않게 한다.
+/// 들고 있으므로 입력박스에서는 대화 제목 하나만 남긴다.
+///
+/// **아리스 실측(2026-08-05)**: 이 자리는 claude 의 세션 라벨 슬롯 그 자체다 —
+/// 트리플 없이 띄우면 같은 칸에 `/rename` 이름이 뜨고, 팀원 모드면 agent 이름이
+/// 그 위를 덮어쓴다. 칩이 이름을 *뺏는* 게 아니라 같은 슬롯을 *덮는* 것이다.
+///
+/// 대상 행 판정은 `prompt_box_rows` 한 곳에 맡긴다: `❯` 마커를 요구하므로 남의
+/// TUI 대시줄을 입력박스로 오인하지 않고, 대시 비율을 **내용 기준**(`dash*2 >=
+/// glyph`)으로 재므로 pane 이 입력박스보다 넓어 오른쪽이 빈 셀이어도 걸리지 않는다.
+/// 예전엔 같은 일을 하는 사본(`strip_teammate_chip`)이 자체 폭 관문을 들고 따로
+/// 돌았고, 그 관문이 `row.len()` 을 봐서 넓은 pane 에서 칩이 영영 남았다(거노
+/// 스크린샷 2026-08-05). 사본을 지우고 한 벌로 합친 이유다.
 fn strip_agent_chip(rows: &mut [Vec<GridCell>]) {
     let Some(range) = prompt_box_rows(rows) else { return };
     let row = &mut rows[range.start - 1];
     let Some(at) = row.iter().position(|c| c.ch == '@') else { return };
-    // 칩 토큰: '@' + 영숫자/'-'/'_' 연속. 그 뒤가 보더('─')나 행 끝이어야 칩으로
-    // 인정한다 — 본문에 우연히 섞인 '@단어' 를 지우지 않기 위한 가드.
-    let tok_end = at
-        + 1
-        + row[at + 1..]
-            .iter()
-            .take_while(|c| c.ch.is_ascii_alphanumeric() || c.ch == '-' || c.ch == '_')
-            .count();
-    if tok_end == at + 1 {
-        return;
+    // 대시의 색·굵기를 그대로 복사한다. 새 셀을 만들면 테두리 한가운데만 다른 색이
+    // 되어 지운 자리가 오히려 눈에 띈다.
+    let Some(dash) = row.iter().find(|c| c.ch == '─').cloned() else { return };
+    // 칩 토큰 끝 — 공백·빈칸·대시 중 하나를 만나면 거기까지. 이름이 ASCII 슬러그가
+    // 아니어도(한글로 rename 한 세션) 걸린다.
+    let mut end = at;
+    while end < row.len() && !matches!(row[end].ch, ' ' | '\0' | '─') {
+        end += 1;
     }
-    let style = row[at].clone();
-    let mk = |ch: char| {
-        let mut c = style.clone();
-        c.ch = ch;
-        c
-    };
-    // 칩 앞뒤 공백도 대시로 흡수(보더 연속성).
-    let lo = row[..at]
-        .iter()
-        .rposition(|c| c.ch != ' ' && c.ch != '\0')
-        .map_or(at, |i| i + 1);
-    let hi = row[tok_end..]
-        .iter()
-        .position(|c| c.ch != ' ' && c.ch != '\0')
-        .map_or(row.len(), |i| tok_end + i);
-    for i in lo..hi.min(row.len()) {
-        row[i] = mk('─');
+    // 칩을 감싸던 공백까지 메운다 — 안 그러면 대시 줄 가운데 두 칸이 뚫린다.
+    let start = at - usize::from(at > 0 && matches!(row[at - 1].ch, ' ' | '\0'));
+    if end < row.len() && matches!(row[end].ch, ' ' | '\0') {
+        end += 1;
+    }
+    for cell in &mut row[start..end] {
+        *cell = dash.clone();
     }
 }
 
@@ -7191,8 +7181,14 @@ fn pane_session_label(path: &std::path::Path) -> Option<String> {
             return t.clone();
         }
     }
-    // `session_label_for` 가 아니라 `_summary_for` — /rename 이름은 claude 가
-    // 이 줄 오른쪽에 이미 그린다. 좌측은 "무슨 작업 중인지" 자리다.
+    // `session_label_for` 가 아니라 `_summary_for` — 이 인레이는 "무슨 작업
+    // 중인지" 자리다.
+    //
+    // 옛 근거는 "/rename 이름은 claude 가 이 줄 오른쪽에 이미 그린다"였는데
+    // **팀원 세션에선 거짓**이다(아리스 실측 2026-08-05): 오른쪽 슬롯은 트리플이
+    // 붙으면 agent 이름으로 덮이고 우리가 그 칩을 지우므로(`strip_agent_chip`)
+    // /rename 이름은 어디에도 안 뜬다. 우리 pane 은 전부 팀원이라 항상 그렇다.
+    // 결론(요약을 쓴다)은 그대로 옳지만 이유는 "오른쪽이 비어서" 가 아니다.
     let found = kasa_socket::sessions::session_summary_for(path);
     map.insert(path.to_path_buf(), (len, found.clone()));
     found
@@ -9145,50 +9141,6 @@ pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usiz
     None
 }
 
-/// 칩을 찾을 때 화면 바닥에서 훑는 행 수. 입력박스는 늘 바닥에 있고, ❯ 영역이
-/// 여러 줄로 자라도 이 안에 들어온다.
-const CHIP_SCAN_ROWS: usize = 24;
-
-/// 입력박스 테두리 줄에서 teammate 칩(`── @이름 ──`)을 지우고 대시로 메운다.
-/// rule 행이 아니거나 `@` 섬이 없으면 아무것도 안 한다 — 아래 테두리(순수 대시)와
-/// /rename 세션 이름(`── 이름 ──`, `@` 없음)은 그대로 남는다.
-fn strip_teammate_chip(row: &mut [GridCell]) {
-    // rule 판정을 **격자 전체 폭이 아니라 내용 폭**으로. 전체 폭으로 재면 pane 이
-    // claude 입력박스보다 넓을 때(오른쪽이 빈 셀) 대시가 소수가 되어 관문에서
-    // 돌아서고, 칩이 영영 안 지워진다 — `find_standing_anchor` 의 `is_rule` 에서
-    // 같은 함정을 밟았고 그때 이 사본을 같이 못 고쳤다(로직 두 벌의 값). 최소
-    // 길이(8)로 짧은 구분선 조각을 테두리로 오인하는 것을 막는다.
-    let content_w = row
-        .iter()
-        .rposition(|c| !matches!(c.ch, ' ' | '\0'))
-        .map_or(0, |i| i + 1);
-    let dashes = row.iter().filter(|c| c.ch == '─').count();
-    if dashes < 8 || dashes <= content_w / 2 {
-        return;
-    }
-    let Some(at) = row.iter().position(|c| c.ch == '@') else {
-        return;
-    };
-    // 대시의 색·굵기를 그대로 복사한다. 새 셀을 만들면 테두리 한가운데만 다른 색이
-    // 되어 지운 자리가 오히려 눈에 띈다.
-    let Some(dash) = row.iter().find(|c| c.ch == '─').cloned() else {
-        return;
-    };
-    let mut end = at;
-    while end < row.len() && !matches!(row[end].ch, ' ' | '\0' | '─') {
-        end += 1;
-    }
-    // 칩을 감싸던 공백까지 메운다 — 안 그러면 대시 줄 가운데 두 칸이 뚫린다.
-    let start = usize::from(at > 0 && matches!(row[at - 1].ch, ' ' | '\0'));
-    let start = at - start;
-    if end < row.len() && matches!(row[end].ch, ' ' | '\0') {
-        end += 1;
-    }
-    for cell in &mut row[start..end] {
-        *cell = dash.clone();
-    }
-}
-
 /// 승인 대기 도트가 설 자리 — 질문 헤더 행("Do you want to proceed", 없으면 첫
 /// ❯ 행, 그것도 없으면 마지막 non-blank 행)과 그 행의 텍스트 끝 col. pane
 /// 우상단 고정은 윈도우 우상단의 collab 승인 토스트와 겹쳐서(거부 버튼 가림)
@@ -10419,12 +10371,19 @@ mod teammate_chip_tests {
         "─".repeat(n)
     }
 
+    /// 칩 행을 상단 보더로 둔 최소 입력박스. `strip_agent_chip` 은 행을 직접 받지
+    /// 않고 `prompt_box_rows` 로 찾으므로(관문 한 벌), `❯` 마커 행과 하단 보더가
+    /// 함께 있어야 실제 렌더와 같은 조건이 된다.
+    fn boxed(top: Vec<GridCell>) -> Vec<Vec<GridCell>> {
+        vec![top, row_from("❯ hello"), row_from(&rule(30))]
+    }
+
     #[test]
     fn chip_becomes_dashes() {
         // claude code v2.1.220 이 실제로 그리는 모양 — 오른쪽에 `@이름` 섬, 뒤에 대시 2개.
-        let mut row = row_from(&format!("{} @chiptest {}", rule(40), rule(2)));
-        strip_teammate_chip(&mut row);
-        assert_eq!(text(&row), rule(53));
+        let mut rows = boxed(row_from(&format!("{} @chiptest {}", rule(40), rule(2))));
+        strip_agent_chip(&mut rows);
+        assert_eq!(text(&rows[0]), rule(53));
     }
 
     /// 거노 화면에서 그대로 뜬 행(2026-08-05, `peek %5` 실측). 기존 케이스와
@@ -10433,10 +10392,11 @@ mod teammate_chip_tests {
     /// 화면엔 남는」 상태를 못 잡는다.
     #[test]
     fn real_world_chip_with_hyphen_at_row_end() {
-        let mut row = row_from(&format!("{} @prana-p5 {}", rule(108), rule(2)));
-        assert_eq!(row.len(), 121, "실측 행 길이");
-        strip_teammate_chip(&mut row);
-        assert_eq!(text(&row), rule(121), "칩이 통째로 대시가 돼야 한다");
+        let top = row_from(&format!("{} @prana-p5 {}", rule(108), rule(2)));
+        assert_eq!(top.len(), 121, "실측 행 길이");
+        let mut rows = boxed(top);
+        strip_agent_chip(&mut rows);
+        assert_eq!(text(&rows[0]), rule(121), "칩이 통째로 대시가 돼야 한다");
     }
 
     /// 같은 행이 **격자보다 좁은 박스**로 들어오면(pane 이 claude 입력박스보다
@@ -10444,10 +10404,11 @@ mod teammate_chip_tests {
     /// `find_standing_anchor` 에서 같은 함정을 이미 밟았다(dash=60/155).
     #[test]
     fn chip_stripped_even_when_box_is_narrower_than_pane() {
-        let mut row = row_from(&format!("{} @prana-p5 {}", rule(40), rule(2)));
-        row.resize(155, GridCell::blank()); // 나머지는 빈 셀 = pane 이 더 넓다
-        strip_teammate_chip(&mut row);
-        let t = text(&row);
+        let mut top = row_from(&format!("{} @prana-p5 {}", rule(40), rule(2)));
+        top.resize(155, GridCell::blank()); // 나머지는 빈 셀 = pane 이 더 넓다
+        let mut rows = boxed(top);
+        strip_agent_chip(&mut rows);
+        let t = text(&rows[0]);
         assert!(!t.contains('@'), "칩이 남았다: {t:?}");
     }
 
@@ -10455,25 +10416,46 @@ mod teammate_chip_tests {
     fn renamed_session_label_survives() {
         // `/rename` 세션 이름은 `@` 가 없다 — 이건 거노가 남기고 싶어한 쪽이다.
         let before = format!("{} 아로나 {}", rule(40), rule(2));
-        let mut row = row_from(&before);
-        strip_teammate_chip(&mut row);
-        assert_eq!(text(&row), before);
+        let mut rows = boxed(row_from(&before));
+        strip_agent_chip(&mut rows);
+        assert_eq!(text(&rows[0]), before);
     }
 
     #[test]
     fn plain_border_untouched() {
         let before = rule(50);
-        let mut row = row_from(&before);
-        strip_teammate_chip(&mut row);
-        assert_eq!(text(&row), before);
+        let mut rows = boxed(row_from(&before));
+        strip_agent_chip(&mut rows);
+        assert_eq!(text(&rows[0]), before);
     }
 
+    /// 대화 본문의 `@이름` 은 입력박스 보더가 아니다 — 정상 입력박스와 함께 넣어
+    /// 「입력박스는 지우고 본문은 안 건드린다」를 한 번에 잰다.
     #[test]
     fn prose_mentioning_an_at_name_is_untouched() {
-        // 대화 본문은 rule 행이 아니다 — 대시가 절반을 못 넘으면 손대지 않는다.
-        let before = "@chiptest 한테 물어봐 ──";
-        let mut row = row_from(before);
-        strip_teammate_chip(&mut row);
-        assert_eq!(text(&row), before);
+        let prose = "@chiptest 한테 물어봐 ──";
+        let mut rows = vec![
+            row_from(prose),
+            row_from(&format!("{} @chiptest {}", rule(40), rule(2))),
+            row_from("❯ hello"),
+            row_from(&rule(30)),
+        ];
+        strip_agent_chip(&mut rows);
+        assert_eq!(text(&rows[0]), prose, "본문은 무손상");
+        assert!(!text(&rows[1]).contains('@'), "보더 칩은 지워져야 한다");
+    }
+
+    /// `❯` 마커가 없는 대시줄 쌍(권한 메뉴·diff TUI)은 입력박스가 아니다 —
+    /// 옛 사본은 rule 행이기만 하면 지워서 남의 TUI 테두리를 건드릴 수 있었다.
+    #[test]
+    fn dash_rules_without_prompt_marker_untouched() {
+        let before = format!("{} @notachip {}", rule(40), rule(2));
+        let mut rows = vec![
+            row_from(&before),
+            row_from("no marker here"),
+            row_from(&rule(30)),
+        ];
+        strip_agent_chip(&mut rows);
+        assert_eq!(text(&rows[0]), before);
     }
 }
