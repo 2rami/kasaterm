@@ -2024,11 +2024,15 @@ impl App {
                 cw,
                 ch,
             );
+            // 필드를 손으로 합치는 자리 — 하나라도 빠뜨리면 그 종류만 조용히
+            // 사라진다(faces 를 빠뜨려 방 창 hover 팝업이 통째로 안 떴다). 늘릴
+            // 때 여기도 같이 늘릴 것.
             student.banner.extend(s.banner);
             student.spinner.extend(s.spinner);
             student.waiting.extend(s.waiting);
             student.standing.extend(s.standing);
             student.profile.extend(s.profile);
+            student.faces.extend(s.faces);
         }
         let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
         // 터미널 창과 같은 이유로 `aux_windows` 가변 차용 전에 떠 둔다.
