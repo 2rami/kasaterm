@@ -447,6 +447,60 @@ impl App {
                 CloseWhy::Busy(p) => format!("busy:{p}"),
                 CloseWhy::Dirty(d) =>
                     format!("dirty:{}", d.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(",")),
+                CloseWhy::LastPane => "lastpane".to_string(),
+            }),
+        );
+    }
+    /// Headless Cmd+W repro: `KASATERM_AUTOLASTCLOSE_MS` 뒤에 방을 둘로 만들고
+    /// **pane 이 하나인 상태에서** `close_active_tab`(Cmd+W 가 부르는 그 함수)을 친다.
+    ///
+    /// 이 경로는 아무 일도 안 하던 자리다 — 마지막 pane 이면 `confirm_or_close_tab`
+    /// 이 조용히 return 해서 키가 죽은 것처럼 보였다(거노). 확인 모달이 뜨는지를
+    /// 로그로 못박는다. 모달만 띄우고 실제로 닫지는 않으므로 캡처도 그대로 남는다.
+    /// Function-local statics — struct App 은 건드리지 않는다(병렬 작업 규칙).
+    pub(crate) fn run_pending_autolastclose(&mut self) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::OnceLock;
+        static DUE: OnceLock<Option<Instant>> = OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let due = DUE.get_or_init(|| {
+            std::env::var("KASATERM_AUTOLASTCLOSE_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| Instant::now() + std::time::Duration::from_millis(ms))
+        });
+        let Some(due) = due else { return };
+        if FIRED.load(Ordering::Relaxed) || Instant::now() < *due {
+            return;
+        }
+        FIRED.store(true, Ordering::Relaxed);
+        if self.windows.len() < 2 {
+            self.new_window();
+        }
+        let leaves = self.pty_layout.as_ref().map_or(0, |t| t.leaves().len());
+        // 갈림길이 셋(탭 여러 개 / 마지막 pane / active_pane 없음)이라 어디로 갔는지
+        // 못 보면 "안 뜬다"까지만 알고 왜인지는 모른다.
+        let (active, tabs) = {
+            let ws = self.ws.lock().unwrap();
+            let a = ws.active_pane.clone();
+            let t = a.as_ref().and_then(|id| ws.panes.get(id)).map(|p| p.tabs.len());
+            (a, t)
+        };
+        self.close_active_tab();
+        eprintln!(
+            "[autolastclose] active={active:?} tabs={tabs:?} windows={} leaves={leaves} confirm_raised={} why={:?} action={:?}",
+            self.windows.len(),
+            self.confirm_close.is_some(),
+            self.confirm_close.as_ref().map(|c| match &c.why {
+                CloseWhy::Busy(p) => format!("busy:{p}"),
+                CloseWhy::Dirty(_) => "dirty".to_string(),
+                CloseWhy::LastPane => "lastpane".to_string(),
+            }),
+            self.confirm_close.as_ref().map(|c| match &c.action {
+                crate::PendingClose::Session(i) => format!("session:{i}"),
+                crate::PendingClose::Window => "window".to_string(),
+                crate::PendingClose::Pane { pane } => format!("pane:{pane}"),
+                _ => "other".to_string(),
             }),
         );
     }
@@ -1751,6 +1805,7 @@ impl App {
                         "dirty:{}",
                         d.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>().join(",")
                     ),
+                    CloseWhy::LastPane => "lastpane".to_string(),
                 });
                 eprintln!("[mdscript] close why={why:?}");
             }

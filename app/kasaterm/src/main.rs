@@ -1532,6 +1532,15 @@ enum CloseWhy {
     Busy(String),
     /// Editors with unsaved changes: where each one is, and its file name.
     Dirty(Vec<(DirtyDoc, String)>),
+    /// Cmd+W 를 눌렀는데 그 pane 이 이 방의 **마지막**이라, 닫으면 방(세션)째
+    /// 사라지는 경우. 전에는 여기서 아무 일도 안 일어나 키가 죽은 것처럼 보였다
+    /// (거노: "pane 하나 있고 다른 방 있으면 커맨드 W 해도 무반응"). 방이 하나뿐일
+    /// 때는 여전히 no-op 다 — 그건 앱 종료라 OS 닫기 버튼(Cmd+Q)의 몫이다.
+    ///
+    /// 바쁜 것도 저장 안 된 것도 없어도 **무조건 묻는다**: Cmd+W 는 「하나 닫기」로
+    /// 익힌 키인데 여기선 방 전체가 닫혀, 조용히 실행하면 되돌릴 수 없는 것을
+    /// 눌린 줄도 모르고 잃는다.
+    LastPane,
 }
 
 /// A pending close confirmation: `why` it was raised, `action` is what
@@ -4420,6 +4429,14 @@ struct App {
     /// `/claude-usage`(oauth/usage 프록시)를 조회해 채운다. Info 탭 머리의 계정 행이
     /// 읽는다. 토큰 없음/실패면 None → 숫자 숨김.
     claude_usage: std::sync::Arc<std::sync::Mutex<Option<UsageBadge>>>,
+    /// **계정 저장소 경로 → 그 계정의 한도**(`""` = 기본 로그인). 위 `claude_usage` 가
+    /// 활성 계정 하나만 담는 것과 달리, 이건 등록된 계정 전부를 담는다.
+    ///
+    /// 계정 드롭다운이 읽는다 — 누르기 **전에** 각 계정의 사용률이 보여야 하기 때문이다
+    /// (거노: "누르면 전환되버리잖아"). 전환해 봐야 아는 구조면 한도 때문에 옮기려는
+    /// 사람이 옮길 곳을 못 고른다. 활성이 아닌 계정도 조회할 수 있는 것은 usage 프록시가
+    /// 슬롯별 토큰을 직접 읽기 때문이다(`/claude-usage?dir=<슬롯>`) — 전환이 필요 없다.
+    claude_usage_all: std::sync::Arc<std::sync::Mutex<HashMap<String, UsageBadge>>>,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,
@@ -4845,6 +4862,7 @@ impl App {
             socket_backend: None,
             bg_agents: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             claude_usage: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            claude_usage_all: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             pane_tty_cache: HashMap::new(),
             window_git: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             git_poll_cwds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),

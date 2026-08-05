@@ -961,12 +961,16 @@ impl ApplicationHandler<UserEvent> for App {
         {
             let usage_proxy = self.proxy.clone();
             let usage_cache = self.claude_usage.clone();
+            let usage_all = self.claude_usage_all.clone();
             std::thread::spawn(move || {
                 // 방금 전환했으면 잠시 **자동 전환 판정만** 쉰다(표시는 계속 갱신).
                 let mut last_switch: Option<std::time::Instant> = None;
                 let mut seen_account = socket::read_claude_account();
+                // 비활성 계정 조회까지 남은 사이클 수(0 이면 이번에 친다). 60초 주기라
+                // 5 = 5분. 첫 바퀴는 0 이라 창을 열자마자 표가 찬다.
+                let mut others_due = 0u8;
                 loop {
-                    let fetched = fetch_claude_usage(&crate::mcp_panel_port());
+                    let fetched = fetch_claude_usage(&crate::mcp_panel_port(), None);
                     let usage = fetched.as_ref().map(|(u, _, _)| u);
                     let next = fetched.as_ref().and_then(|(u, stale, dir)| {
                         socket::usage_pressure(u).map(|p| crate::UsageBadge {
@@ -976,6 +980,8 @@ impl ApplicationHandler<UserEvent> for App {
                             account_dir: dir.clone(),
                         })
                     });
+                    // 아래 계정별 표에서 다시 쓴다 — 활성 계정을 두 번 조회하지 않게.
+                    let active_badge = next.clone();
                     // 일시적 fetch 실패(None)면 마지막 유효값을 유지 — 깜빡임/사라짐 방지.
                     // (git col 폴러와 동일 정책.)
                     if next.is_some() {
@@ -991,6 +997,70 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             Err(_) => break,
                         }
+                    }
+                    // 등록된 **모든** 계정의 한도 — 드롭다운이 누르기 전에 보여줘야 하는
+                    // 값이다(거노: "누르면 전환되버리잖아"). 활성 계정은 방금 받은 값을
+                    // 그대로 재사용하고, 나머지만 슬롯을 지정해 추가로 조회한다.
+                    // 프록시가 슬롯별 토큰을 직접 읽어 **전환 없이** 답한다.
+                    //
+                    // ⚠️ 오래 안 쓴 계정은 못 읽는다 — OAuth 토큰이 8시간쯤에 만료되고
+                    // 갱신은 그 계정으로 claude 를 돌릴 때 일어난다(실측 2026-08-05:
+                    // 세 슬롯 중 둘이 3시간 전 만료라 usage 가 거부됐다). 그런 계정은
+                    // 표에 안 들어가고 화면이 `—`(모름)를 그린다.
+                    //
+                    // 비활성 슬롯은 **5분마다**만 친다. 매 사이클 치면 만료된 슬롯에
+                    // 헛 curl 을 계속 띄우고, 살아 있는 슬롯은 upstream 레이트리밋을
+                    // 활성 계정과 나눠 쓰게 된다. 6시간짜리 디스크 스냅샷이 사이를 메운다.
+                    if others_due == 0 {
+                        let mut all: HashMap<String, crate::UsageBadge> = HashMap::new();
+                        if let Some(b) = active_badge {
+                            all.insert(b.account_dir.clone(), b);
+                        }
+                        let mut dirs: Vec<String> = vec![String::new()];
+                        dirs.extend(socket::read_claude_accounts().iter().filter_map(|a| {
+                            socket::claude_account_dir(&a.id)
+                                .map(|p| p.to_string_lossy().into_owned())
+                        }));
+                        for d in dirs {
+                            if all.contains_key(&d) {
+                                continue;
+                            }
+                            let Some((u, stale, dir)) =
+                                fetch_claude_usage(&crate::mcp_panel_port(), Some(&d))
+                            else {
+                                continue;
+                            };
+                            if let Some(p) = socket::usage_pressure(&u) {
+                                all.insert(
+                                    dir.clone(),
+                                    crate::UsageBadge {
+                                        pct: p.pct,
+                                        label: p.label,
+                                        stale,
+                                        account_dir: dir,
+                                    },
+                                );
+                            }
+                        }
+                        // 조회가 통째로 실패한 사이클엔 옛 표를 지우지 않는다 — 빈칸은
+                        // "한도 여유"로 읽혀서, 낡은 숫자보다 나쁘다.
+                        if !all.is_empty() {
+                            match usage_all.lock() {
+                                Ok(mut g) => {
+                                    if *g != all {
+                                        *g = all;
+                                        drop(g);
+                                        if usage_proxy.send_event(UserEvent::Redraw).is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        others_due = 5;
+                    } else {
+                        others_due -= 1;
                     }
                     // 한도 자동 계정 전환. 판정은 여기(폴러)서 하고 실제 전환은 GUI
                     // 스레드가 한다 — 설정 저장이 shim 을 다시 까는 일이라 App 이 필요하다.
@@ -5049,6 +5119,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.run_pending_autoopen();
         self.run_pending_autoconfirm();
         self.run_pending_autowinclose();
+        self.run_pending_autolastclose();
         self.run_pending_autowinreorder();
         self.run_pending_autowinundock(event_loop);
         self.run_pending_autoclosereopen();
@@ -5278,9 +5349,34 @@ impl App {
 /// `stale`·`account_dir` 이 필요한 이유: 화면이 "지금 값인지"와 "어느 계정 값인지"를
 /// 말해야 한다. 전에는 `usage` 만 떠서, upstream 이 막힌 옛 숫자와 방금 조회한 숫자가
 /// 화면에서 똑같이 보였고 계정을 바꿔도 표시가 안 바뀌었다(거노 2026-08-05).
-fn fetch_claude_usage(port: &str) -> Option<(serde_json::Value, bool, String)> {
+///
+/// `dir` 은 조회할 계정 저장소 — `None` 이면 활성 계정. 프록시가 슬롯별 토큰을 직접
+/// 읽으므로 **전환하지 않고** 남의 계정 한도를 볼 수 있다(계정 드롭다운이 그걸 쓴다).
+///
+/// 쿼리 값 퍼센트 인코딩. 슬롯 경로는 홈 아래 절대경로라 공백·한글·`&` 가 들어올 수
+/// 있고, 그대로 붙이면 거기서 쿼리가 잘려 **엉뚱한 슬롯**(대개 기본 계정)을 조회한다.
+/// `/` 는 쿼리 값에서 합법이라 남겨 로그를 읽을 수 있게 둔다.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn fetch_claude_usage(port: &str, dir: Option<&str>) -> Option<(serde_json::Value, bool, String)> {
+    // 슬롯 경로엔 공백·한글이 들어올 수 있어 쿼리로 넘기기 전에 퍼센트 인코딩한다.
+    let url = match dir {
+        Some(d) => format!("http://127.0.0.1:{port}/claude-usage?dir={}", urlencode(d)),
+        None => format!("http://127.0.0.1:{port}/claude-usage"),
+    };
     let out = std::process::Command::new("curl")
-        .args(["-s", "--max-time", "5", &format!("http://127.0.0.1:{port}/claude-usage")])
+        .args(["-s", "--max-time", "5", &url])
         .output()
         .ok()?;
     if !out.status.success() {
