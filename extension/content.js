@@ -6,7 +6,7 @@ if (!window.__ccInjected) {
   const S = { refs: new Map(), seq: 0 }
 
   // 오버레이 마크업을 바꿀 때마다 올린다 — 열려 있던 탭의 옛 오버레이를 갈아끼우는 기준이 된다.
-  const OVERLAY_V = '13'
+  const OVERLAY_V = '14'
 
   const ROLE_BY_TAG = {
     a: 'link', button: 'button', select: 'combobox', textarea: 'textbox',
@@ -238,6 +238,21 @@ if (!window.__ccInjected) {
           border: 2px solid var(--cc, #6BCF7F);
           box-shadow: inset 0 0 0 .5px rgba(0,0,0,.18);
         }
+        /* 둘 이상이 같은 탭에 붙었을 때. 한 색으로 그리면 화면이 거짓말을 한다 — 선을 사람 색이
+           번갈아 나오는 띠로 바꾼다. 두께는 그대로라 몇 명이 붙어도 테두리가 두꺼워지지 않는다.
+           ⚠️마스크를 .frame 에 직접 걸면 안 된다. 글로우(::before)와 러너(i)는 안쪽에 그려지는데
+           content-box 를 빼내는 마스크가 그것까지 잘라낸다. 띠는 자기 층에서 그린다.
+           ⚠️inset:-2px 은 .frame 의 border-box 와 겹치기 위한 값이다(자식의 absolute 기준은
+           padding-box 라 border 두께만큼 되돌려야 선 자리에 정확히 얹힌다). */
+        :host([data-multi="1"]) .frame { border-color: transparent; }
+        :host([data-multi="1"]) .frame::after {
+          content: ''; position: absolute; inset: -2px;
+          border: 2px solid transparent;
+          background: var(--stripes) border-box;
+          -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          -webkit-mask-composite: xor;
+          mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+        }
         .frame::before {
           content: ''; position: absolute; inset: 0;
           box-shadow: inset 0 0 32px -6px var(--cc, #6BCF7F);
@@ -320,12 +335,20 @@ if (!window.__ccInjected) {
           border: 2px solid var(--cc, #6BCF7F); opacity: 0;
           transition: opacity .3s ease;
         }
+        /* 아바타는 겹쳐 쌓는다. 나란히 놓으면 사람이 늘 때마다 칩이 옆으로 자라 우상단을 더 가린다 —
+           겹치면 세 명까지도 폭이 거의 그대로다. 테두리 링은 그 사람 색이라 누가 붙었는지 갈린다. */
+        .avas { display: flex; flex: none; }
         .ava { position: relative; width: 22px; height: 22px; flex: none; }
+        .avas .ava + .ava { margin-left: -9px; }
         .chip img { width: 22px; height: 22px; border-radius: 50%; display: block; }
+        /* 겹친 아바타는 서로 파고들어 경계가 안 보인다. 칩 배경색 링으로 떼어 놓는다. */
+        :host([data-multi="1"]) .ava img { box-shadow: 0 0 0 2px rgba(20,22,26,.88), 0 0 0 3.5px var(--cc, #6BCF7F); }
         .dot {
           position: absolute; right: -1px; bottom: -1px; width: 8px; height: 8px; border-radius: 50%;
           background: var(--cc, #6BCF7F); box-shadow: 0 0 0 2px rgba(20,22,26,.92);
         }
+        /* 여럿일 때 각자 자기 점을 달면 겹친 아바타 위에서 점끼리 부딪힌다. 상태 점은 맨 앞 하나만. */
+        :host([data-multi="1"]) .ava:not(:first-child) .dot { display: none; }
         .cursor {
           position: fixed; top: 0; left: 0; width: 30px; height: 30px; margin: -15px 0 0 -15px;
           opacity: 0; transition: transform .16s cubic-bezier(.22,1,.36,1), opacity .2s ease;
@@ -367,7 +390,7 @@ if (!window.__ccInjected) {
         :host([data-mode="idle"]) .cursor { opacity: 0 !important; }
       </style>
       <div class="frame"></div>
-      <div class="chip"><span class="ava"><img alt=""><i class="dot"></i></span><span class="label"></span></div>
+      <div class="chip"><span class="avas"></span><span class="label"></span></div>
       <div class="cursor"><img alt=""></div>`
     /* brand-skip — 러너 다섯 칸. 마크업이 아니라 여기서 만드는 이유는 배포판에서 이 블록만
        들어내면 쓰이지 않는 빈 요소도 함께 사라지기 때문이다. */
@@ -473,7 +496,6 @@ if (!window.__ccInjected) {
       if (!root) return { applied: false }
       const frame = root.querySelector('.frame')
       const chip = root.querySelector('.chip')
-      const cursor = root.querySelector('.cursor')
 
       if (a.state === 'off') {
         root.host.dataset.on = '0'
@@ -496,18 +518,47 @@ if (!window.__ccInjected) {
       root.host.dataset.pos = d.pos || 'tr'
       clearTimeout(window.__ccOverlayTimer)
       root.host.style.opacity = '1'
-      if (a.color) {
-        frame.style.setProperty('--cc', a.color)
-        cursor.style.setProperty('--cc', a.color)
-        chip.style.setProperty('--cc', a.color)
+
+      const occ = Array.isArray(a.occupants) ? a.occupants.filter(Boolean) : []
+      if (!occ.length) return { applied: false, reason: 'no-occupants' }
+      root.host.dataset.multi = occ.length > 1 ? '1' : '0'
+
+      // 기준색은 맨 앞(먼저 잡은) 사람. 글로우·러너·칩 링이 이 색을 쓴다.
+      const lead = occ[0].color
+      frame.style.setProperty('--cc', lead)
+      chip.style.setProperty('--cc', lead)
+      if (occ.length > 1) {
+        // 사람 수만큼 색이 도는 띠. 12px 씩 끊어야 멀리서도 두 색으로 읽힌다.
+        const seg = 12
+        const stops = occ.map((o, i) => `${o.color} ${i * seg}px ${(i + 1) * seg}px`).join(', ')
+        frame.style.setProperty('--stripes', `repeating-linear-gradient(135deg, ${stops})`)
       }
-      if (a.avatar) {
-        for (const img of root.querySelectorAll('img')) if (img.src !== a.avatar) img.src = a.avatar
+
+      // 아바타는 사람 수만큼. 매번 새로 만들면 이미지가 깜빡이므로 개수가 다를 때만 다시 짓는다.
+      const avas = chip.querySelector('.avas')
+      if (avas.children.length !== occ.length) {
+        avas.textContent = ''
+        for (let i = 0; i < occ.length; i++) {
+          const wrap = document.createElement('span')
+          wrap.className = 'ava'
+          wrap.innerHTML = '<img alt=""><i class="dot"></i>'
+          avas.appendChild(wrap)
+        }
       }
+      occ.forEach((o, i) => {
+        const wrap = avas.children[i]
+        wrap.style.setProperty('--cc', o.color)
+        const img = wrap.querySelector('img')
+        if (o.avatar && img.src !== o.avatar) img.src = o.avatar
+      })
+
       const label = chip.querySelector('.label')
-      const text = a.task ? `${a.name} · ${a.task}` : a.name
+      // 여럿이면 작업명은 접는다 — 이름 둘에 작업까지 붙이면 칩이 화면 폭을 가로지른다.
+      const text = occ.length === 1
+        ? (occ[0].task ? `${occ[0].name} · ${occ[0].task}` : occ[0].name)
+        : occ.map((o) => o.name).join(' · ')
       if (label.textContent !== text) label.textContent = text
-      return { applied: true, state: mode }
+      return { applied: true, state: mode, occupants: occ.length }
     },
 
     // 조작 지점을 사람이 눈으로 따라갈 수 있게 아바타 커서를 옮긴다.
@@ -515,6 +566,11 @@ if (!window.__ccInjected) {
       const root = ensureOverlay()
       if (!root) return { applied: false }
       const cursor = root.querySelector('.cursor')
+      // 커서 얼굴·색은 **방금 누른 사람** 것이다. 칩과 같은 이미지를 쓰면 둘이 붙어 있을 때
+      // 목록 첫 사람 얼굴이 찍혀, 누가 어디를 누르는지 알려준다는 커서의 존재 이유가 사라진다.
+      if (a.color) cursor.style.setProperty('--cc', a.color)
+      const face = cursor.querySelector('img')
+      if (a.avatar && face.src !== a.avatar) face.src = a.avatar
       cursor.style.transform = `translate(${Math.round(a.x)}px, ${Math.round(a.y)}px)`
       cursor.style.opacity = '1'
       if (a.click) {

@@ -9,7 +9,10 @@ import { getDisplay } from './display.js'
 
 const sessions = new Map() // paneKey -> {identity, task, tabs:Set, busy:Set}
 const clientPane = new Map() // clientKey -> paneKey
-const tabOwner = new Map() // tabId -> paneKey
+// ★한 탭에 여럿이 붙을 수 있다. 브라우저는 하나뿐이고 pane 은 여럿이라 같은 페이지를 둘이 보는 일이
+// 실제로 생긴다 — 예전엔 나중에 만진 쪽이 앞사람을 조용히 밀어내서, 둘이 붙어 있는데 화면에는 한
+// 명만 보이고 밀려난 쪽 탭 목록에서도 그 탭이 사라졌다.
+const tabOwner = new Map() // tabId -> Set<paneKey>, 먼저 잡은 순서
 const iconCache = new Map() // `${slug}:${state}:${size}` -> {imageData, dataUrl}
 const offTimers = new Map() // tabId -> timeout
 let lastActive = null
@@ -111,13 +114,21 @@ export function closeSession(client) {
   const s = sessions.get(key)
   if (!s) return
   // 탭은 남긴다. 사람이 보던 페이지를 세션이 끝났다고 닫아버리면 안 된다.
+  // ⚠️표시를 걷는 것은 **마지막 한 명**이 나갈 때뿐이다. 같은 탭에 아직 다른 pane 이 붙어 있는데
+  // 오버레이를 통째로 끄면 남은 사람이 계속 조작하는 페이지가 아무도 안 잡은 것처럼 보인다.
+  const left = []
   for (const tabId of s.tabs) {
+    const owners = tabOwner.get(tabId)
+    owners?.delete(key)
+    if (owners?.size) { left.push(tabId); continue }
     tabOwner.delete(tabId)
     clearTimeout(offTimers.get(tabId))
     offTimers.delete(tabId)
     page(tabId, 'overlay', { state: 'off', lingerMs: 0 }).catch(() => {})
   }
   sessions.delete(key)
+  // 세션을 지운 뒤에 칠해야 나간 사람이 목록에 남지 않는다.
+  for (const tabId of left) paintTab(tabId).catch(() => {})
   if (lastActive === key) lastActive = [...sessions.keys()].pop() || null
   refreshAction()
 }
@@ -137,27 +148,23 @@ export function identityOf(client) {
   return sessionOf(client)?.identity || null
 }
 
-// 한 탭의 주인은 하나뿐이다. 다른 세션이 이어받으면 이전 주인 목록에서 뺀다 —
-// tabOwner 만 덮으면 팝업에 같은 탭이 두 세션 밑에 동시에 남는다.
+// 이미 다른 세션이 잡고 있어도 뺏지 않고 함께 잡는다. 둘 다 조작할 수 있는 게 사실이므로
+// 표시도 그래야 한다 — 뺏는 쪽으로 만들면 화면이 사실과 다른 말을 한다.
 function claimTab(tabId, key) {
-  const prevKey = tabOwner.get(tabId)
-  if (prevKey === key) return
-  const prev = prevKey && sessions.get(prevKey)
-  if (prev) {
-    prev.tabs.delete(tabId)
-    prev.busy.delete(tabId)
-    persist(prevKey)
-  }
-  tabOwner.set(tabId, key)
+  let set = tabOwner.get(tabId)
+  if (!set) tabOwner.set(tabId, (set = new Set()))
+  set.add(key)
 }
 
 export function forgetTab(tabId) {
-  const key = tabOwner.get(tabId)
+  const keys = tabOwner.get(tabId)
   tabOwner.delete(tabId)
   clearTimeout(offTimers.get(tabId))
   offTimers.delete(tabId)
-  const s = key && sessions.get(key)
-  if (s) { s.tabs.delete(tabId); s.busy.delete(tabId) }
+  for (const key of keys || []) {
+    const s = sessions.get(key)
+    if (s) { s.tabs.delete(tabId); s.busy.delete(tabId) }
+  }
 }
 
 function anyBusy() {
@@ -167,29 +174,40 @@ function anyBusy() {
 
 // --- 오버레이 -------------------------------------------------------------
 
-// mode: 'on'(조작 중) · 'idle'(대기 — 칩만) · 'off'(세션 종료)
-async function setOverlay(tabId, s, mode) {
-  if (mode === 'off') {
-    await page(tabId, 'overlay', { state: 'off' }).catch(() => {})
-    return
+// 이 탭에 붙어 있는 사람들. 순서는 먼저 잡은 쪽이 앞이다 — 화면에 뜨는 순서가 호출 순서에 따라
+// 뒤바뀌면 사람이 매번 다시 읽어야 한다.
+async function occupantsOf(tabId) {
+  const out = []
+  for (const key of tabOwner.get(tabId) || []) {
+    const s = sessions.get(key)
+    if (!s) continue
+    let avatar = null
+    try { avatar = (await compose(s.identity, 'plain', 64)).dataUrl } catch (e) { note('overlay-avatar', e) }
+    out.push({
+      name: s.identity.name,
+      color: s.identity.headerColor || '#6BCF7F',
+      avatar,
+      task: s.task || null,
+      busy: s.busy.has(tabId),
+    })
   }
-  const { dataUrl } = await compose(s.identity, 'plain', 64)
+  return out
+}
+
+// 탭 하나를 지금 상태에 맞게 다시 칠한다. 세션이 아니라 **탭**을 기준으로 삼는 이유는 여럿이
+// 붙어 있을 수 있어서다 — 세션 기준으로 칠하면 나중에 칠한 쪽이 앞사람 표시를 덮어쓴다.
+// 한 명이라도 조작 중이면 조작 중으로 본다.
+async function paintTab(tabId) {
+  const occupants = await occupantsOf(tabId)
+  if (!occupants.length) return
   await page(tabId, 'overlay', {
-    state: mode,
-    color: s.identity.headerColor || '#6BCF7F',
-    avatar: dataUrl,
-    name: s.identity.name,
-    task: s.task,
+    state: occupants.some((o) => o.busy) ? 'on' : 'idle',
+    occupants,
     display: await getDisplay(),
   }).catch((e) => {
     // 크롬 내부 페이지와 그새 닫힌 탭은 정상적인 실패다. 나머지만 남겨 status 로 볼 수 있게 한다.
     if (!/RESTRICTED_PAGE|No tab with id/.test(String(e.message))) note('overlay', e)
   })
-}
-
-// 담당 탭 하나를 지금 상태에 맞게 다시 칠한다. 조작 중이면 글로우까지, 아니면 칩만.
-async function paintTab(tabId, s) {
-  await setOverlay(tabId, s, s.busy.has(tabId) ? 'on' : 'idle')
 }
 
 // 세션이 맡은 탭 전부를 다시 칠한다. 죽은 탭은 여기서 정리한다.
@@ -199,7 +217,7 @@ async function paintSession(key) {
   for (const tabId of [...s.tabs]) {
     const alive = await chrome.tabs.get(tabId).catch(() => null)
     if (!alive) { forgetTab(tabId); continue }
-    await paintTab(tabId, s).catch(() => {})
+    await paintTab(tabId).catch(() => {})
   }
 }
 
@@ -211,18 +229,26 @@ export async function repaintAll() {
 
 // 페이지가 새로 뜨면 오버레이가 통째로 날아간다. 담당 세션이 있는 탭이면 다시 그린다.
 export async function restoreOverlay(tabId) {
-  const key = tabOwner.get(tabId)
-  const s = key && sessions.get(key)
-  if (!s) return
-  await paintTab(tabId, s).catch(() => {})
+  if (!tabOwner.has(tabId)) return
+  await paintTab(tabId).catch(() => {})
 }
 
 // 조작 지점에 아바타 커서를 찍는다. 사람이 "지금 어디를 누르는지" 눈으로 따라갈 수 있게.
-export async function showCursor(tabId, x, y, click = false) {
+// ⚠️누가 움직이는 커서인지 함께 보낸다. 한 탭에 둘이 붙어 있을 때 커서를 칩과 같은 이미지로 두면
+// 방금 클릭한 사람이 아니라 목록 첫 사람 얼굴이 찍힌다 — 「누가 지금 어디를 누르는지」가 커서의
+// 유일한 존재 이유이므로 그게 틀리면 없느니만 못하다.
+export async function showCursor(client, tabId, x, y, click = false) {
   // 세션 없는 탭에 커서만 보내면 content script 가 오버레이 호스트를 만들어 둔다 — 화면엔 안 보이지만
   // (호스트가 opacity:0) 방문한 모든 페이지에 빈 div 가 남는다. 형제 함수들과 같은 자리에서 막는다.
   if (!tabId || x == null || y == null || !tabOwner.has(tabId)) return
-  await page(tabId, 'cursor', { x, y, click }).catch(() => {})
+  const s = sessionOf(client)
+  let who = null
+  if (s) {
+    let avatar = null
+    try { avatar = (await compose(s.identity, 'plain', 64)).dataUrl } catch (e) { note('cursor-avatar', e) }
+    who = { avatar, color: s.identity.headerColor || '#6BCF7F' }
+  }
+  await page(tabId, 'cursor', { x, y, click, ...(who || {}) }).catch(() => {})
 }
 
 export async function markBusy(client, tabId) {
@@ -240,7 +266,7 @@ export async function markBusy(client, tabId) {
     s.busy.add(tabId)
     clearTimeout(offTimers.get(tabId))
     offTimers.delete(tabId)
-    await setOverlay(tabId, s, 'on')
+    await paintTab(tabId)
   }
   refreshAction()
 }
@@ -255,7 +281,9 @@ export function markDone(client, tabId) {
       offTimers.delete(tabId)
       // close_tab 은 타이머를 지우지만 그 뒤 markDone 이 다시 건다. 사라진 탭이면 여기서 멈춘다.
       if (!tabOwner.has(tabId)) return
-      setOverlay(tabId, s, 'idle').catch(() => {})
+      // 내가 끝났어도 같은 탭을 다른 pane 이 아직 조작 중일 수 있다. paintTab 이 탭 전체를 보고
+      // 정하므로 여기서 idle 을 단정하지 않는다.
+      paintTab(tabId).catch(() => {})
       refreshAction()
     }, OVERLAY_LINGER_MS))
   }

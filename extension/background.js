@@ -90,9 +90,11 @@ function connect() {
         if (tabId) await markBusy(msg.client, tabId)
       }
       const result = await dispatch(msg.tool, msg.args, ctx)
-      if (msg.tool === 'new_tab' && result?.tabId) {
+      // 새로 만든 탭에도 곧바로 오버레이를 띄운다 — 누가 연 창인지 바로 보이게.
+      // ⚠️new_window 를 빠뜨리면 별도 창으로 연 페이지는 조작하기 전까지 임자 없는 탭으로 남는다.
+      // 그 사이 다른 pane 이 만지면 그쪽이 첫 점유자가 되어 칩 순서가 뒤바뀐다(실측).
+      if ((msg.tool === 'new_tab' || msg.tool === 'new_window') && result?.tabId) {
         tabId = result.tabId
-        // 새 탭에도 곧바로 오버레이를 띄운다 — 누가 연 창인지 바로 보이게
         await markBusy(msg.client, tabId)
       }
       const label = describe(msg.tool, msg.args, result)

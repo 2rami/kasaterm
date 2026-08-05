@@ -96,12 +96,12 @@ async function settle(tabId, ms = 300) {
   return { navigated: false, url: tab.url }
 }
 
-async function clickOn(id, { ref, coordinate, button = 'left', clickCount = 1, modifiers, trusted = false, retry = true }) {
+async function clickOn(id, { ref, coordinate, button = 'left', clickCount = 1, modifiers, trusted = false, retry = true }, client) {
   const mods = cdp.modifierMask(modifiers)
 
   if (coordinate) {
     const [x, y] = coordinate
-    await showCursor(id, x, y, true)
+    await showCursor(client, id, x, y, true)
     const r = await cdp.click(id, { x, y, button, clickCount, modifiers: mods })
     return { ...r, via: 'cdp', reason: 'coordinate' }
   }
@@ -109,13 +109,13 @@ async function clickOn(id, { ref, coordinate, button = 'left', clickCount = 1, m
 
   if (trusted || button !== 'left' || clickCount > 1 || mods) {
     const { box, name } = await page(id, 'box', { ref })
-    await showCursor(id, box.x, box.y, true)
+    await showCursor(client, id, box.x, box.y, true)
     const r = await cdp.click(id, { x: box.x, y: box.y, button, clickCount, modifiers: mods })
     return { ...r, target: name, via: 'cdp', reason: trusted ? 'trusted' : 'modifier/button' }
   }
 
   const { box: aim, name: aimName } = await page(id, 'box', { ref })
-  await showCursor(id, aim.x, aim.y, true)
+  await showCursor(client, id, aim.x, aim.y, true)
   const res = await page(id, 'click', { ref })
   if (res.changed) return { ...res, target: aimName, via: 'content' }
   if (!retry) {
@@ -370,9 +370,9 @@ const handlers = {
     return { data, format, via: 'cdp' }
   },
 
-  async click({ tabId, ...rest }) {
+  async click({ tabId, ...rest }, ctx = {}) {
     const id = await resolveTabId(tabId)
-    const out = await clickOn(id, rest)
+    const out = await clickOn(id, rest, ctx.client)
     return { ...out, page: await settle(id) }
   },
 
