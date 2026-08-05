@@ -1108,11 +1108,17 @@ impl Backend for PtyBackend {
         // transcript 파일명(stem) = claude 세션 id — GUI 에 위임해 세션→캐릭터 영속
         // 매핑을 조회/저장한다(거노 ④: resume 시 캐릭터 재사용). App 상태는 GUI 스레드
         // 소유라 proxy 로 넘긴다(SocketBytes 관례).
-        if let Some(sid) = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()) {
-            let _ = self.proxy.send_event(UserEvent::SocketSessionBound(
-                surface_id.to_string(),
-                sid.to_string(),
-            ));
+        //
+        // codex 는 `rollout-<ts>-<uuid>.jsonl` 이라 stem 이 sid 가 아니다 — 그대로 쓰면
+        // `rollout-2026-…-019f…` 가 세션 id 로 박혀 캐릭터 조회도 재시작 이어가기도 전부
+        // 빗나간다. 파일명이 rollout 꼴이면 거기서 uuid 를 떼어 쓴다.
+        let p = std::path::Path::new(path);
+        let sid = codex_sid_from_rollout(p)
+            .or_else(|| p.file_stem().and_then(|s| s.to_str()).map(str::to_string));
+        if let Some(sid) = sid {
+            let _ = self
+                .proxy
+                .send_event(UserEvent::SocketSessionBound(surface_id.to_string(), sid));
         }
         Ok(())
     }
@@ -2109,6 +2115,8 @@ pub fn pane_record(sess: &kasa_pty::PtySession) -> serde_json::Value {
     // (restore_leaf 가 fresh claude 로 복원).
     //
     // codex 는 여기서 세션 id 를 못 집는다 — argv 에 없고 rollout 파일명에만 있다(실측).
+    // 대신 bind-transcript 훅이 보고한 값이 `pane_claude_sid` 에 들어와 `layout_to_json`
+    // 이 그걸 정본으로 덮어쓴다(claude 와 같은 경로). 그래서 여기선 None 이 맞다.
     let session_id = if matches!(agent, Some(kasa_pty::AgentKind::Claude)) {
         shell_pid.and_then(claude_session_id_from_cmdline)
     } else {
@@ -3010,6 +3018,89 @@ fn scan_projects_for_session(
     hits.into_iter().next().map(|(_, p)| p)
 }
 
+/// codex rollout 파일명에서 세션 id 를 뽑는다 — `rollout-<ISO ts>-<uuid>.jsonl`.
+///
+/// claude 는 파일명 자체가 sid 라 `file_stem()` 이 곧 답이지만 codex 는 접두사·타임스탬프가
+/// 붙는다. 그대로 stem 을 쓰면 `rollout-2026-08-05T19-46-01-019f…` 가 sid 로 박혀
+/// `codex resume` 도 sqlite 조회도 전부 빗나간다.
+///
+/// uuid 는 `-` 를 품으므로 뒤에서 5토막을 떼어 붙인다(8-4-4-4-12). 타임스탬프도 `-` 를
+/// 품어 앞에서 세는 방식은 못 쓴다.
+pub(crate) fn codex_sid_from_rollout(path: &std::path::Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let rest = stem.strip_prefix("rollout-")?;
+    let parts: Vec<&str> = rest.rsplitn(6, '-').collect();
+    if parts.len() < 6 {
+        return None;
+    }
+    // rsplitn 은 역순 — 앞 5개가 uuid 의 뒤 5토막이다(6번째는 타임스탬프 잔여).
+    let sid = parts[..5]
+        .iter()
+        .rev()
+        .copied()
+        .collect::<Vec<_>>()
+        .join("-");
+    let ok = sid.len() == 36
+        && sid
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-');
+    ok.then_some(sid)
+}
+
+/// 세션 id → codex rollout jsonl. `transcript_path_for_session` 의 codex 판.
+///
+/// sqlite(`state_5.sqlite` 의 `threads`)에도 같은 정보가 있지만 **파일 탐색으로 간다**:
+/// 워크스페이스에 sqlite 의존성이 없고(넣을 만큼 큰 조회가 아니다), rollout 파일명이
+/// sid 를 그대로 품으며, transcript 파서도 같은 디렉터리를 읽는다 — 정본이 하나로 남는다.
+///
+/// **`~/.codex/sessions` 만 본다.** shim 이 세운 pane 별 CODEX_HOME 은 이 디렉터리를
+/// 심볼릭으로 미러하므로 pane 안에서 만든 세션의 실체도 여기 있다(실측). sqlite 에는
+/// 그때의 pane 홈 경유 경로가 박히는데 그 홈은 GUI 재시작이면 사라진다 — 그래서 기록된
+/// 경로를 믿지 않고 여기서 다시 찾는 편이 재시작 후에도 성립한다.
+pub(crate) fn codex_rollout_for_session(sid: &str) -> Option<std::path::PathBuf> {
+    let root = kasa_socket::home_dir()?.join(".codex").join("sessions");
+    scan_codex_sessions(&root, sid)
+}
+
+/// `codex_rollout_for_session` 의 순수 부분 — 루트를 인자로 받아 `$HOME` 없이 테스트한다.
+///
+/// 레이아웃은 `sessions/<Y>/<M>/<D>/rollout-<ts>-<sid>.jsonl`. 날짜 칸이 셋이라 깊이 3을
+/// 그대로 내려간다(전체 walk 은 하지 않는다 — 오래 쓰면 날짜 폴더만 수백 개다).
+fn scan_codex_sessions(root: &std::path::Path, sid: &str) -> Option<std::path::PathBuf> {
+    if sid.is_empty() || sid.contains('/') {
+        return None;
+    }
+    let suffix = format!("-{sid}.jsonl");
+    // 날짜 폴더를 이름 역순으로 — 최신이 먼저라 대개 첫 폴더에서 끝난다.
+    let sorted_dirs = |d: &std::path::Path| -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(d)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        v.sort_by(|a, b| b.cmp(a));
+        v
+    };
+    for y in sorted_dirs(root) {
+        for m in sorted_dirs(&y) {
+            for d in sorted_dirs(&m) {
+                for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                    let p = e.path();
+                    if p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.ends_with(&suffix))
+                    {
+                        return Some(p);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn discover_transcript(pane_id: &str, shell_pid: u32) -> Option<std::path::PathBuf> {
     claude_child_pid(shell_pid)?; // claude 자식 없으면 아직 claude 아님 — bind 안 함
     let cwd = pid_cwd(shell_pid)?;
@@ -3159,6 +3250,61 @@ pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std:
     )
 }
 
+
+#[cfg(test)]
+mod codex_session_lookup_tests {
+    use super::*;
+
+    /// codex 파일명은 `rollout-<ts>-<uuid>.jsonl` 이라 stem 이 sid 가 아니다.
+    /// 타임스탬프도 uuid 도 `-` 를 품어 앞에서 세는 방식은 못 쓴다.
+    #[test]
+    fn sid_comes_from_the_tail_not_the_stem() {
+        let p = std::path::Path::new(
+            "/x/sessions/2026/08/05/rollout-2026-08-05T19-46-01-019fd187-ba6e-7812-8976-2a27ffcd843e.jsonl",
+        );
+        assert_eq!(
+            codex_sid_from_rollout(p).as_deref(),
+            Some("019fd187-ba6e-7812-8976-2a27ffcd843e")
+        );
+        // claude 파일(파일명 자체가 sid)은 rollout 이 아니라 None — 호출측이 stem 폴백을 쓴다.
+        assert_eq!(
+            codex_sid_from_rollout(std::path::Path::new("/x/abcd-1234.jsonl")),
+            None
+        );
+        // 토막이 모자라거나 hex 가 아니면 안 받는다 — 엉뚱한 값을 sid 로 박느니 없는 편이 낫다.
+        assert_eq!(
+            codex_sid_from_rollout(std::path::Path::new("/x/rollout-2026-08-05.jsonl")),
+            None
+        );
+    }
+
+    /// 날짜 3단 아래에서 sid 로 끝나는 파일을 찾는다. **suffix 매칭이라** 다른 세션의
+    /// 파일명이 이 sid 를 접두사로 품어도 안 걸린다.
+    #[test]
+    fn finds_the_rollout_under_the_date_dirs() {
+        let root = std::env::temp_dir().join(format!("kt-codexsess-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let day = root.join("2026/08/05");
+        std::fs::create_dir_all(&day).unwrap();
+        let sid = "019fd187-ba6e-7812-8976-2a27ffcd843e";
+        let want = day.join(format!("rollout-2026-08-05T19-46-01-{sid}.jsonl"));
+        std::fs::write(&want, "{}").unwrap();
+        // 다른 날 + 다른 세션 — 골라내면 안 되는 것들.
+        let other = root.join("2026/08/04");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(
+            other.join("rollout-2026-08-04T10-00-00-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jsonl"),
+            "{}",
+        )
+        .unwrap();
+        assert_eq!(scan_codex_sessions(&root, sid).as_deref(), Some(want.as_path()));
+        assert_eq!(scan_codex_sessions(&root, "no-such-session"), None);
+        // 방어: 빈 sid·경로 조각은 디렉터리 전체를 훑게 두지 않는다.
+        assert_eq!(scan_codex_sessions(&root, ""), None);
+        assert_eq!(scan_codex_sessions(&root, "../x"), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
 
 #[cfg(test)]
 mod agents_view_tests {
