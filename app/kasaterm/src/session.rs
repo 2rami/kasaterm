@@ -2748,13 +2748,16 @@ impl App {
         // Model-invoked tools for the claude running inside a pane: the
         // same Backend, exposed over MCP-on-HTTP. Replaces the external
         // python bridge (mcp/kasa_mcp.py).
-        let http_port = match kasa_mcp::spawn_http_server(backend.clone(), 8765) {
+        // 정본 포트. 이미 물려 있으면 spawn_http_server 가 임시 포트로 떨어지고,
+        // 그러면 register_clients 가 전역 등록을 건너뛴다(주인 주소 보호).
+        const CANONICAL_MCP_PORT: u16 = 8765;
+        let http_port = match kasa_mcp::spawn_http_server(backend.clone(), CANONICAL_MCP_PORT) {
             Ok(port) => {
                 eprintln!("[kasaspace-mcp] HTTP MCP on 127.0.0.1:{port}/mcp");
                 std::env::set_var("KASASPACE_MCP_PORT", port.to_string());
                 // No MCP auto-discovery: write our address into each AI
                 // client's config so any agent on this machine finds us.
-                kasa_mcp::register_clients(port);
+                kasa_mcp::register_clients(port, CANONICAL_MCP_PORT);
                 Some(port)
             }
             Err(e) => {
