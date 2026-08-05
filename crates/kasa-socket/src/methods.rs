@@ -507,18 +507,15 @@ fn surface_split(backend: &dyn Backend, id: Value, params: &Value) -> Response {
         Some("right") => SplitDirection::Right,
         Some("up") => SplitDirection::Up,
         Some("down") => SplitDirection::Down,
+        Some("auto") => SplitDirection::Auto,
         Some(other) => {
             return param_err(
                 id,
-                format!("surface.split: direction must be left/right/up/down, got {other:?}"),
+                format!("surface.split: direction must be left/right/up/down/auto, got {other:?}"),
             )
         }
-        None => {
-            return param_err(
-                id,
-                "surface.split requires `direction` (left/right/up/down)",
-            )
-        }
+        // 방향 생략 = auto. 부른 쪽이 pane 모양을 모르는 게 정상이라 이게 기본이다.
+        None => SplitDirection::Auto,
     };
     // 기본 no-focus (자동화 경로): `focus:true` 를 명시할 때만 새 pane 으로 포커스
     // 이동. CLI 의 `--focus` 플래그가 이 값을 채운다.

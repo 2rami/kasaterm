@@ -17,6 +17,39 @@ const DROP_CENTER_R: f32 = 0.42;
 /// 중앙은 어느 쪽으로 가를지 정할 수 없는 자리이므로 split 이 아니라 병합
 /// (`Center` = 이 pane 의 탭으로 들어가기)이다. 이 존이 없으면 pane 을 통째로
 /// 끌어 놓을 때 헤더 띠(28px)를 정확히 맞히지 않는 한 무조건 split 이 됐다.
+/// 방향을 안 준 split 이 고를 축 — **긴 쪽을 쪼갠다.**
+///
+/// 거노 2026-08-05: "너무 가로로나 세로로 안 길게". 늘 같은 방향으로 쪼개면 네 번째
+/// pane 쯤에서 종잇장이 된다. 긴 축을 자르면 정사각에 가까워지고, 다음 split 은 자연히
+/// 반대 축을 골라 격자가 된다.
+///
+/// 판정은 **셀이 아니라 픽셀**로 한다 — 셀은 세로로 2.5배 길어(7×17.5) 80×24 pane 은
+/// 셀로는 "가로가 3배"지만 화면에선 거의 정사각이다. 눈에 보이는 모양이 기준이다.
+///
+/// 다만 가로로 쪼개 **80칸을 못 지키면** 세로로 돌린다 — 코드·로그가 접히는 건 좀
+/// 길쭉한 것보다 나쁘다. 반대로 세로로 쪼개 16줄을 못 지키면 가로로. 둘 다 못 지키면
+/// 긴 축 규칙 그대로(더 나은 선택이 없다).
+///
+/// 최소 줄수가 16인 이유: claude 입력박스만 5줄이라 12줄짜리 pane 은 대화가 두 줄
+/// 보인다. 「좁은 것보다 짧은 게 낫다」가 성립하려면 짧은 쪽이 실제로 쓸 만해야 한다 —
+/// 12로 뒀다가 80×24 pane(표준 크기)이 12줄 두 장으로 갈렸다.
+pub(crate) fn pick_split_axis(
+    px_w: f32,
+    px_h: f32,
+    cols: u16,
+    rows: u16,
+) -> kasa_pty::SplitDir {
+    use kasa_pty::SplitDir::{Horizontal, Vertical};
+    const MIN_COLS: u16 = 80;
+    const MIN_ROWS: u16 = 16;
+    let long_axis = if px_w >= px_h { Horizontal } else { Vertical };
+    match long_axis {
+        Horizontal if cols / 2 < MIN_COLS && rows / 2 >= MIN_ROWS => Vertical,
+        Vertical if rows / 2 < MIN_ROWS && cols / 2 >= MIN_COLS => Horizontal,
+        d => d,
+    }
+}
+
 pub(crate) fn drop_zone_for_offsets(nx: f32, ny: f32) -> DropZone {
     if nx.abs() < DROP_CENTER_R && ny.abs() < DROP_CENTER_R {
         return DropZone::Center;
@@ -486,6 +519,51 @@ impl App {
     /// 호출자가 성공으로 읽고 그 id 로 send 를 쏘면 조용히 사라진다. 거노가 학생
     /// 5명을 띄우려다 1명만 뜬 게 이것이다(2026-08-05). 사유 없는 실패는 호출자가
     /// `list surfaces` 를 다시 대조해야만 알 수 있어, 스크립트가 감지할 방법이 없었다.
+    /// 방향을 안 준 split 이 고를 축 — **긴 쪽을 쪼갠다.**
+    ///
+    /// 거노 2026-08-05: "너무 가로로나 세로로 안 길게". 늘 같은 방향으로 쪼개면 네
+    /// 번째 pane 쯤에서 종잇장이 된다. 긴 축을 자르면 정사각에 가까워지고, 다음
+    /// split 은 자연히 반대 축을 골라 격자가 된다.
+    ///
+    /// 판정은 **셀이 아니라 픽셀**로 한다 — 셀은 세로로 2.5배 길어(7×17.5) 80×24
+    /// pane 은 셀로는 "가로가 3배"지만 화면에선 거의 정사각이다. 눈에 보이는 모양을
+    /// 기준으로 삼는 게 요구사항에 맞다.
+    ///
+    /// 다만 가로로 쪼개 **80칸을 못 지키면** 세로로 돌린다(코드·로그가 접히면 좁은
+    /// 것보다 나쁘다). 반대로 세로로 쪼개 12줄을 못 지키면 가로로. 둘 다 못 지키면
+    /// 긴 축 규칙 그대로 — 어차피 더 나은 선택이 없다.
+    fn auto_split_dir(&mut self, pane: &str) -> kasa_pty::SplitDir {
+        let (cols, rows) = self.window_cells();
+        let Some((_, _, _, w, h)) = self
+            .effective_leaf_rects(cols, rows)
+            .into_iter()
+            .find(|(id, _, _, _, _)| id == pane)
+        else {
+            // 트리에서 못 찾으면 가로 — 창이 대개 가로로 넓다.
+            return kasa_pty::SplitDir::Horizontal;
+        };
+        pick_split_axis(
+            w as f32 * self.cell.w.max(1.0),
+            h as f32 * self.cell.h.max(1.0),
+            w,
+            h,
+        )
+    }
+
+    /// `dir` 가 `None` 이면 종횡비로 고른다(`auto_split_dir`).
+    pub(crate) fn split_pane_auto(&mut self, dir: Option<kasa_pty::SplitDir>) -> Result<String> {
+        let dir = match dir {
+            Some(d) => d,
+            None => {
+                let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
+                    anyhow::bail!("활성 pane 이 없다");
+                };
+                self.auto_split_dir(&active)
+            }
+        };
+        self.split_active_pane(dir)
+    }
+
     pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
         if self.tmux.is_some() {
             anyhow::bail!("tmux 백엔드에선 로컬 split 을 쓰지 않는다");
@@ -1908,6 +1986,64 @@ for p in glob.glob(os.path.join(d, '*.json')):
 }
 
 #[cfg(test)]
+mod auto_split_tests {
+    use super::*;
+    use kasa_pty::SplitDir::{Horizontal, Vertical};
+
+    // 실측 셀(logical 7×17.5). 셀과 픽셀의 모양이 다르다는 게 이 규칙의 핵심이라
+    // 테스트도 그 비율로 재야 의미가 있다.
+    const CW: f32 = 7.0;
+    const CH: f32 = 17.5;
+    fn pick(cols: u16, rows: u16) -> kasa_pty::SplitDir {
+        pick_split_axis(cols as f32 * CW, rows as f32 * CH, cols, rows)
+    }
+
+    #[test]
+    fn 화면에서_가로로_긴_pane_은_가로를_쪼갠다() {
+        // 240×50 = 1680×875px — 눈에 가로로 넓다.
+        assert_eq!(pick(240, 50), Horizontal);
+    }
+
+    #[test]
+    fn 화면에서_세로로_긴_pane_은_세로를_쪼갠다() {
+        // 90×90 = 630×1575px. 셀 수만 보면 정사각이라 판정이 갈리지 않는데,
+        // 픽셀로 보면 세로가 2.5배다 — 셀로 재면 여기서 틀린다.
+        assert_eq!(pick(90, 90), Vertical);
+    }
+
+    #[test]
+    fn 가로로_쪼개면_80칸을_못_지킬_때는_세로로_돌린다() {
+        // 150×40 = 1050×700px 라 긴 축은 가로지만, 반으로 자르면 75칸이라 글이
+        // 접힌다. 세로로 자르면 20줄이 남아 쓸 만하다.
+        assert_eq!(pick(150, 40), Vertical);
+    }
+
+    #[test]
+    fn 세로로_쪼개면_12줄을_못_지킬_때는_가로로_돌린다() {
+        // 200×20 = 1400×350px. 긴 축은 가로이므로 원래도 가로다 — 반대 방향의
+        // 가드가 발동하는 조합을 따로 만든다: 세로로 긴데 줄이 모자란 경우.
+        assert_eq!(pick_split_axis(300.0, 400.0, 200, 20), Horizontal);
+    }
+
+    #[test]
+    fn 표준_80x24_는_가로로_쪼갠다() {
+        // 680×516px — 아직 가로가 길다. 반 쪼개면 40칸이라 가드가 걸릴 것 같지만,
+        // 세로로 돌리면 12줄짜리 두 장이 된다(claude 입력박스만 5줄). **대안이
+        // 쓸 만할 때만** 돌리는 게 규칙이라 여기선 안 돌린다.
+        // MIN_ROWS 를 12 로 뒀을 때 이게 세로로 갈렸다 — 그래서 16.
+        assert_eq!(pick_split_axis(680.0, 516.0, 80, 24), Horizontal);
+    }
+
+    #[test]
+    fn 둘_다_못_지키면_긴_축_규칙_그대로() {
+        // 40×10 — 가로로 쪼개도 20칸, 세로로 쪼개도 5줄. 더 나은 선택이 없으니
+        // 규칙을 뒤집지 않는다(뒤집으면 어느 쪽이 나은지 설명할 수 없다).
+        assert_eq!(pick_split_axis(400.0, 200.0, 40, 10), Horizontal);
+        assert_eq!(pick_split_axis(200.0, 400.0, 40, 10), Vertical);
+    }
+}
+
+#[cfg(test)]
 mod drop_zone_tests {
     use super::*;
 
@@ -1949,4 +2085,5 @@ mod drop_zone_tests {
         assert_eq!(drop_zone_for_offsets(-0.8, -0.5), DropZone::Left);
         assert_eq!(drop_zone_for_offsets(-0.5, -0.8), DropZone::Up);
     }
+
 }

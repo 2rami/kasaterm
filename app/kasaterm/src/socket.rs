@@ -81,6 +81,10 @@ impl Backend for TmuxBackend {
             SplitDirection::Left => "split-window -hb",
             SplitDirection::Down => "split-window -v",
             SplitDirection::Up => "split-window -vb",
+            // tmux 백엔드는 pane 픽셀 크기를 우리가 모른다(tmux 가 레이아웃 주인).
+            // 종횡비 판정은 로컬 PTY 경로 전용이라 여기선 가로로 떨어진다 — 창이
+            // 대개 가로로 넓으니 옛 기본과 같은 결과다.
+            SplitDirection::Auto => "split-window -h",
         };
         let cmd = if focus { base.to_string() } else { format!("{base} -d") };
         self.tmux.send_cmd(&cmd)?;
@@ -895,8 +899,10 @@ impl Backend for PtyBackend {
         from: Option<&str>,
     ) -> Result<SurfaceInfo> {
         let dir = match direction {
-            SplitDirection::Right | SplitDirection::Left => kasa_pty::SplitDir::Horizontal,
-            SplitDirection::Up | SplitDirection::Down => kasa_pty::SplitDir::Vertical,
+            SplitDirection::Right | SplitDirection::Left => Some(kasa_pty::SplitDir::Horizontal),
+            SplitDirection::Up | SplitDirection::Down => Some(kasa_pty::SplitDir::Vertical),
+            // 여기선 못 정한다 — pane 픽셀 크기는 GUI 스레드만 안다.
+            SplitDirection::Auto => None,
         };
         // Split runs on the GUI thread; block on a reply channel so we can hand
         // the new pane's real id back to the caller. The teammate launcher uses

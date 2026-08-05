@@ -21,6 +21,9 @@ pub enum SplitDirection {
     Right,
     Up,
     Down,
+    /// 방향을 부른 쪽이 안 정한다 — 쪼갤 pane 의 종횡비를 보고 **긴 축**을 쪼갠다.
+    /// 결정은 GUI 스레드에서만 가능하다(pane 픽셀 크기를 거기서만 안다).
+    Auto,
 }
 
 /// A workspace as seen by the protocol — analogous to a tmux session

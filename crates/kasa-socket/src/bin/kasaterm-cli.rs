@@ -790,10 +790,14 @@ fn build_request(cmd: &str, args: &[String]) -> Result<Request> {
         "split" => {
             // 기본 no-focus(자동화: tell 처럼 포커스 안 뺏음). --focus 로 옵트인.
             let focus = args.iter().any(|a| a == "--focus");
+            // 방향은 **선택**이다 — 생략하면 `auto`, 즉 앱이 pane 의 종횡비를 보고 긴
+            // 축을 쪼갠다(거노 2026-08-05: "너무 가로로나 세로로 안 길게"). 사람이
+            // 방향을 정해 부를 때만 명시하면 된다.
             let dir = args
                 .iter()
                 .find(|a| !a.starts_with("--") && !a.starts_with('%'))
-                .ok_or_else(|| anyhow!("split needs a direction"))?;
+                .map(String::as_str)
+                .unwrap_or("auto");
             // 쪼갤 pane: 명시한 %id > 이 CLI 가 도는 pane. 둘 다 없을 때만(=pane 밖에서
             // 부른 경우) 포커스 기준으로 떨어진다. 예전엔 늘 포커스 기준이라, 에이전트가
             // 자기 pane 에서 학생을 띄워도 사람이 보고 있는 창이 쪼개졌다.
