@@ -7147,7 +7147,7 @@ fn prompt_box_rows(rows: &[Vec<GridCell>]) -> Option<std::ops::Range<usize>> {
 /// --agent-color 로 그린 명시색을 **무시하고** 학생 accent 로 강제 도색한다 —
 /// pane 정체성 색과 항상 일치. (본문 틴트가 있던 시절엔 사이 행의 입력 글자를
 /// 틴트에서 빼는 처리도 여기 있었는데, 본문이 테마 기본 fg 로 돌아가며 폐기.)
-fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
+pub(crate) fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
     let Some(range) = prompt_box_rows(rows) else { return };
     let (b1, b2) = (range.start - 1, range.end);
     let fg = kasa_bridge::screen::Color::Rgb(accent[0], accent[1], accent[2]);
@@ -7192,7 +7192,7 @@ fn style_prompt_box(rows: &mut [Vec<GridCell>], accent: [u8; 4]) {
 /// 예전엔 같은 일을 하는 사본(`strip_teammate_chip`)이 자체 폭 관문을 들고 따로
 /// 돌았고, 그 관문이 `row.len()` 을 봐서 넓은 pane 에서 칩이 영영 남았다(거노
 /// 스크린샷 2026-08-05). 사본을 지우고 한 벌로 합친 이유다.
-fn strip_agent_chip(rows: &mut [Vec<GridCell>]) {
+pub(crate) fn strip_agent_chip(rows: &mut [Vec<GridCell>]) {
     let Some(range) = prompt_box_rows(rows) else { return };
     let row = &mut rows[range.start - 1];
     let Some(at) = row.iter().position(|c| c.ch == '@') else { return };
