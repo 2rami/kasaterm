@@ -2435,14 +2435,31 @@ pub fn clear_account_cooldowns() {
     }
 }
 
-/// 지금 압박을 주는 한도 — `limits[]` 중 percent 가 가장 높은 것. 5시간 창만
-/// 보면 주간 한도에 먼저 부딪히는 요즘 패턴을 통째로 놓친다(pill 은 여전히
-/// five_hour 만 보여준다 — 그건 "이 세션이 얼마나 남았나"라는 다른 질문이다).
+/// 지금 압박을 주는 한도 — `limits[]` 중 percent 가 가장 높은 것.
+///
+/// **화면도 이걸 봐야 한다**(거노 2026-08-05: "info에는 다 0퍼로뜨는데"). 전에는
+/// pill·info 가 `five_hour.utilization` 만 봤는데, 실측 세 계정 모두 그 값이 `0.0`
+/// 이고 실제 압박은 전부 `weekly_all`(95%/25%)이었다 — 화면은 한도가 코앞인데도
+/// 0% 를 보여줬고, 자동 전환만 이 함수로 옳게 판정하고 있었다. 사용자에게 "이 세션이
+/// 얼마나 남았나"와 "언제 막히나"를 갈라 보여줄 이유가 없다: 먼저 닫히는 창이 답이다.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UsagePressure {
     pub pct: f32,
     /// 그 창이 풀리는 시각(epoch 초). 없으면 쿨다운 없이 즉시 후보로 돌아온다.
     pub resets_at: Option<u64>,
+    /// 어느 창인가 — 표시용 짧은 라벨. 숫자만 보여주면 5시간 창인지 주간인지 몰라
+    /// "0% 인데 왜 막히나"가 된다(그게 정확히 이번 신고였다).
+    pub label: &'static str,
+}
+
+/// `limits[].group`(`session`/`weekly`) → 화면 라벨. `kind` 가 아니라 `group` 을
+/// 보는 것은 `weekly_all`·`weekly_scoped` 가 같은 주간 창의 두 갈래라서다.
+fn usage_window_label(e: &serde_json::Value) -> &'static str {
+    match e.get("group").and_then(|g| g.as_str()) {
+        Some("session") => "5h",
+        Some("weekly") => "7d",
+        _ => "한도",
+    }
 }
 
 pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
@@ -2450,18 +2467,23 @@ pub fn usage_pressure(v: &serde_json::Value) -> Option<UsagePressure> {
         arr.iter()
             .filter_map(|e| {
                 let pct = e.get("percent").and_then(|p| p.as_f64())? as f32;
-                Some((pct, e.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch)))
+                Some((
+                    pct,
+                    e.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch),
+                    usage_window_label(e),
+                ))
             })
             .max_by(|a, b| a.0.total_cmp(&b.0))
     });
-    if let Some((pct, resets_at)) = top {
-        return Some(UsagePressure { pct, resets_at });
+    if let Some((pct, resets_at, label)) = top {
+        return Some(UsagePressure { pct, resets_at, label });
     }
     // limits[] 가 없는 옛/축약 응답 폴백 — pill 과 같은 소스.
     let five = v.get("five_hour")?;
     Some(UsagePressure {
         pct: five.get("utilization")?.as_f64()? as f32,
         resets_at: five.get("resets_at").and_then(|s| s.as_str()).and_then(rfc3339_epoch),
+        label: "5h",
     })
 }
 
@@ -3112,6 +3134,38 @@ mod account_autoswitch_tests {
         let p = usage_pressure(&v).expect("five_hour 만 있어도 판정된다");
         assert_eq!(p.pct, 91.0);
         assert_eq!(p.resets_at, None);
+        assert_eq!(p.label, "5h");
+    }
+
+    /// 거노 화면에서 그대로 뜬 응답(2026-08-05, 기본 슬롯 토큰으로 직접 조회).
+    /// `five_hour.utilization` 이 **0.0** 인데 주간이 95% 다 — 화면이 five_hour 만
+    /// 보던 탓에 한도가 코앞인데 「0%」 가 떴다. 라벨까지 재는 것은 숫자만 고치면
+    /// 「5h 95%」 가 되어 5시간 창 이야기로 읽히기 때문이다.
+    #[test]
+    fn real_world_zero_five_hour_with_critical_weekly() {
+        let v = serde_json::json!({
+            "five_hour": { "utilization": 0.0, "resets_at": null },
+            "limits": [
+                { "group": "session", "kind": "session", "percent": 0, "resets_at": null },
+                { "group": "weekly", "kind": "weekly_all", "percent": 95,
+                  "resets_at": "2026-08-05T10:00:00.423760+00:00" },
+                { "group": "weekly", "kind": "weekly_scoped", "percent": 11,
+                  "resets_at": "2026-08-05T10:00:00.424089+00:00" },
+            ]
+        });
+        let p = usage_pressure(&v).expect("limits 가 있으면 판정된다");
+        assert_eq!(p.pct, 95.0, "화면에 뜰 숫자는 주간 95% 여야 한다");
+        assert_eq!(p.label, "7d", "그게 어느 창인지도 말해야 한다");
+    }
+
+    /// `group` 이 없는(옛/축약) 항목은 창 종류를 단정하지 않는다 — `5h` 로 찍으면
+    /// 주간 압박을 5시간 이야기로 오독하게 만든다.
+    #[test]
+    fn unknown_group_gets_a_neutral_label() {
+        let v = serde_json::json!({ "limits": [{ "kind": "mystery", "percent": 42 }] });
+        let p = usage_pressure(&v).expect("percent 만 있어도 판정된다");
+        assert_eq!(p.pct, 42.0);
+        assert_eq!(p.label, "한도");
     }
 
     fn accts(ids: &[&str]) -> Vec<ClaudeAccount> {

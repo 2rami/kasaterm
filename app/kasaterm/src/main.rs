@@ -3468,6 +3468,23 @@ fn is_git_repo(p: &std::path::Path) -> bool {
     p.join(".git").exists()
 }
 
+/// 화면에 띄울 한도 한 줄 — 가장 먼저 닫히는 창의 사용률, 그게 어느 창인지,
+/// 그리고 그 숫자가 지금 값인지. 셋을 함께 들고 다니는 이유는 전에 percent 하나만
+/// 들고 다니다 (가) 어느 창인지 몰라 0% 를 이상하게 여기지 않았고 (나) upstream 이
+/// 막혀 며칠 묵은 값을 보여줘도 화면이 똑같아 보였기 때문이다(거노 2026-08-05).
+#[derive(Clone, PartialEq)]
+pub(crate) struct UsageBadge {
+    pub(crate) pct: f32,
+    /// `5h`/`7d` — `socket::usage_pressure` 가 `limits[].group` 에서 고른 라벨.
+    pub(crate) label: &'static str,
+    /// upstream 이 막혀 마지막 성공값을 재사용한 것. 흐리게 그려 "지금 값이 아님"을
+    /// 말한다 — 숨기지는 않는다(빈칸은 "한도 여유"로 오해된다).
+    pub(crate) stale: bool,
+    /// 이 숫자가 어느 계정 저장소의 것인가(`""` = 기본 로그인). 계정을 바꾼 직후
+    /// 옛 계정 값을 새 계정 것으로 그리지 않기 위한 표식.
+    pub(crate) account_dir: String,
+}
+
 /// Parsed `git status` snapshot for the right-hand git column. The background
 /// poller fills it from `kasa_mcp::git::git_status` (off the main thread);
 /// the render reads it. Kept as a flat, render-ready struct so the gpu block
@@ -4339,10 +4356,10 @@ struct App {
     /// --json --all` 폴러(handler.rs resumed)가 3초마다 갱신. 타이틀바 배지·학생 유지
     /// (부모 캐릭터 상속)가 읽는다. 백그라운드 세션이 아니면 키 없음.
     bg_agents: std::sync::Arc<std::sync::Mutex<HashMap<String, Option<String>>>>,
-    /// claude 5시간 사용량 창 사용률(%). handler.rs resumed 의 폴러가 로컬
-    /// `/claude-usage`(oauth/usage 프록시)를 60초마다 조회해 채운다. 타이틀바
-    /// 우상단 사용량 pill 이 읽는다. 토큰 없음/실패면 None → pill 숨김.
-    claude_usage: std::sync::Arc<std::sync::Mutex<Option<f32>>>,
+    /// 활성 계정의 **가장 먼저 닫히는 한도 창**. handler.rs resumed 의 폴러가 로컬
+    /// `/claude-usage`(oauth/usage 프록시)를 조회해 채운다. Info 탭 머리의 계정 행이
+    /// 읽는다. 토큰 없음/실패면 None → 숫자 숨김.
+    claude_usage: std::sync::Arc<std::sync::Mutex<Option<UsageBadge>>>,
     /// Per-pane controlling tty short name (pane id → "ttys004") from the
     /// daemon's StateView. Shown in the pane header; fixed per pane.
     pane_tty_cache: HashMap<String, String>,

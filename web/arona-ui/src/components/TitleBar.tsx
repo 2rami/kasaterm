@@ -1,5 +1,5 @@
 import { CSSProperties, useState } from 'react';
-import type { ClaudeUsage } from '@/lib/mcp';
+import { usagePressure, type ClaudeUsage } from '@/lib/mcp';
 
 // 슬림 아이콘 바 — 모든 버튼을 IconBtn 으로 통일(거노: 디자인 통일), 로고·기어 제거.
 // 좌측엔 방 하나, 나머지(업무·교실·집중)는 전부 우측에 모았다(거노: task 아이콘 우측으로).
@@ -111,19 +111,22 @@ function fmtReset(iso: string): string {
 }
 
 // claude 사용량 미니 게이지 — 5시간/주간 한도를 막대+%로. 70%↑ 호박, 90%↑ 산호.
-function UsagePill({ label, pct, resetsAt }: { label: string; pct: number; resetsAt: string }) {
+function UsagePill({ label, pct, resetsAt, stale }: { label: string; pct: number; resetsAt: string | null; stale?: boolean }) {
   const color = pct >= 90 ? 'var(--cth-coral)' : pct >= 70 ? '#FFB020' : 'var(--cth-sky)';
+  const reset = resetsAt ? ` · 리셋 ${fmtReset(resetsAt)}` : '';
   return (
     <div
-      title={`claude ${label} 한도 ${pct.toFixed(0)}% · 리셋 ${fmtReset(resetsAt)}`}
+      title={`claude ${label} 한도 ${pct.toFixed(0)}%${reset}${stale ? ' (지금 값이 아님 — 사용량 조회가 막혀 마지막 값)' : ''}`}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 5,
         padding: '3px 8px', borderRadius: 999, background: 'var(--cth-cream-50)',
         border: '1px solid var(--cth-cream-200)', marginRight: 4,
         fontFamily: 'var(--cth-font-ui)', fontSize: 10, fontWeight: 700, color: 'var(--cth-ink-500)',
+        // stale 은 흐리게만 — 숨기면 빈칸이 "한도 여유"로 읽힌다.
+        opacity: stale ? 0.55 : 1,
       }}
     >
-      <span>{label}</span>
+      <span>{stale ? `~${label}` : label}</span>
       <span style={{ width: 30, height: 4, borderRadius: 2, background: 'var(--cth-cream-200)', overflow: 'hidden' }}>
         <span style={{ display: 'block', width: `${Math.min(100, pct)}%`, height: '100%', background: color, borderRadius: 2 }} />
       </span>
@@ -133,8 +136,8 @@ function UsagePill({ label, pct, resetsAt }: { label: string; pct: number; reset
 }
 
 export interface TitleBarProps {
-  /** claude oauth usage — 5시간/주간 한도 게이지. */
-  usage?: ClaudeUsage | null;
+  /** claude oauth 한도 — 본문 + 그 값이 지금 것인지(stale) + 어느 계정 것인지. */
+  usage?: { usage: ClaudeUsage; stale: boolean; accountDir: string } | null;
   /** 현재 테마 — 태양/달 버튼 표시. */
   theme?: 'light' | 'dark';
   onToggleTheme?: () => void;
@@ -154,6 +157,7 @@ export interface TitleBarProps {
 
 export function TitleBar({ usage, theme = 'light', onToggleTheme, onToggleLeft, onToggleRight, leftOpen, rightOpen, leftBadge = 0, classroom, onToggleClassroom, onFocus }: TitleBarProps) {
   const divider = <div style={{ width: 1, height: 16, background: 'var(--cth-cream-200)', flexShrink: 0, margin: '0 2px' }} />;
+  const pressure = usagePressure(usage?.usage ?? null);
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 7,
@@ -169,8 +173,11 @@ export function TitleBar({ usage, theme = 'light', onToggleTheme, onToggleLeft, 
       <div style={{ flex: 1 }} />
 
       {/* 우측 — 사용량·테마·업무·교실·집중 */}
-      {usage?.five_hour && <UsagePill label="5h" pct={usage.five_hour.utilization} resetsAt={usage.five_hour.resets_at} />}
-      {usage?.seven_day && <UsagePill label="7d" pct={usage.seven_day.utilization} resetsAt={usage.seven_day.resets_at} />}
+      {/* 창을 하나만 — **가장 먼저 닫히는** 것. 전에는 five_hour·seven_day 를 각각
+          그렸는데 oauth/usage 는 seven_day 를 안 주고(limits[] 로 옮겨 갔다) five_hour
+          는 세 계정 모두 0 이라, 실제로는 주간 95% 인데 pill 이 「5h 0%」 하나만
+          떴다(거노 2026-08-05: "info에는 다 0퍼로뜨는데"). */}
+      {pressure && <UsagePill label={pressure.label} pct={pressure.pct} resetsAt={pressure.resetsAt} stale={usage?.stale} />}
       <IconBtn title={theme === 'dark' ? '라이트 모드로' : '다크 모드로'} onClick={onToggleTheme}>{theme === 'dark' ? <SunIcon /> : <MoonIcon />}</IconBtn>
       <IconBtn title="업무·소스 컨트롤·스케줄" active={rightOpen} onClick={onToggleRight}><TasksIcon /></IconBtn>
       <IconBtn title={classroom ? '대화 보기로' : '교실(캐릭터) 보기'} active={classroom} onClick={onToggleClassroom}><ClassroomIcon /></IconBtn>

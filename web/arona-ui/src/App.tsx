@@ -117,7 +117,8 @@ export function App() {
     const iv = setInterval(tick, 1500);
     return () => { stop = true; clearInterval(iv); };
   }, []);
-  const [usage, setUsage] = useState<ClaudeUsage | null>(null); // claude oauth 사용량(5h/주간)
+  // claude oauth 한도 — 본문 + 그 값이 지금 것인지(stale) + 어느 계정 것인지.
+  const [usage, setUsage] = useState<{ usage: ClaudeUsage; stale: boolean; accountDir: string } | null>(null);
   // 라이트/다크 테마 — 태양 버튼 토글, localStorage 영속(거노). data-theme 로 토큰 재매핑.
   const [theme, setTheme] = useState<'light' | 'dark'>(() => (localStorage.getItem('schale-theme') === 'dark' ? 'dark' : 'light'));
   useEffect(() => {

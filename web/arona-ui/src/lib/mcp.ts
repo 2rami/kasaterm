@@ -612,19 +612,50 @@ export async function fetchPeek(surfaceId: string, lines = 40, ansi = false): Pr
 }
 
 export interface ClaudeUsageWindow { utilization: number; resets_at: string; }
+/** oauth/usage 의 `limits[]` 한 항목 — 창별 사용률. `group` 은 session|weekly. */
+export interface ClaudeUsageLimit {
+  group?: string;
+  kind?: string;
+  percent?: number;
+  resets_at?: string | null;
+  is_active?: boolean;
+  severity?: string;
+}
 export interface ClaudeUsage {
   five_hour?: ClaudeUsageWindow | null;
   seven_day?: ClaudeUsageWindow | null;
   seven_day_opus?: ClaudeUsageWindow | null;
   seven_day_sonnet?: ClaudeUsageWindow | null;
+  limits?: ClaudeUsageLimit[] | null;
 }
-/** GET /claude-usage — claude oauth usage(5시간/주간 사용률·리셋). 토큰 없거나 실패면 null. */
-export async function fetchClaudeUsage(): Promise<ClaudeUsage | null> {
+/** 화면에 띄울 한 줄 — 가장 먼저 닫히는 창. `stale` 이면 upstream 이 막혀 재사용된 값. */
+export interface UsageBadge { pct: number; label: string; resetsAt: string | null; stale: boolean; accountDir: string; }
+
+/** `limits[]` 중 percent 가 가장 높은 창. `five_hour.utilization` 만 보면 안 되는
+ *  이유: 실측 세 계정 모두 그 값이 0 이고 실제 압박은 전부 weekly(95%/25%)였다 —
+ *  pill 이 "다 0퍼"로 보인 원인(거노 2026-08-05). limits 가 없는 옛 응답은 five_hour 로 폴백. */
+export function usagePressure(u: ClaudeUsage | null): { pct: number; label: string; resetsAt: string | null } | null {
+  if (!u) return null;
+  const top = (u.limits ?? [])
+    .filter((l) => typeof l.percent === 'number')
+    .sort((a, b) => (b.percent ?? 0) - (a.percent ?? 0))[0];
+  if (top) {
+    const label = top.group === 'session' ? '5h' : top.group === 'weekly' ? '7d' : '한도';
+    return { pct: top.percent ?? 0, label, resetsAt: top.resets_at ?? null };
+  }
+  if (u.five_hour) return { pct: u.five_hour.utilization, label: '5h', resetsAt: u.five_hour.resets_at ?? null };
+  return null;
+}
+
+/** GET /claude-usage — 활성 계정의 한도. 토큰 없거나 실패면 null. `stale`·`account_dir`
+ *  까지 실어 오므로 호출자가 "지금 값인지 / 어느 계정 값인지"를 구분할 수 있다. */
+export async function fetchClaudeUsage(): Promise<{ usage: ClaudeUsage; stale: boolean; accountDir: string } | null> {
   try {
     const r = await fetch(`${BASE}/claude-usage`);
     if (!r.ok) return null;
-    const d = (await r.json()) as { ok?: boolean; usage?: ClaudeUsage };
-    return d?.ok ? (d.usage ?? null) : null;
+    const d = (await r.json()) as { ok?: boolean; usage?: ClaudeUsage; stale?: boolean; account_dir?: string };
+    if (!d?.ok || !d.usage) return null;
+    return { usage: d.usage, stale: d.stale === true, accountDir: d.account_dir ?? '' };
   } catch {
     return null;
   }
