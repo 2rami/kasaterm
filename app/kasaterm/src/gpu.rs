@@ -321,6 +321,55 @@ pub fn stage_cell_text(s: &str) {
     }
 }
 
+/// `KASATERM_CELL_PROBE=<문자>` — 그 문자를 담은 행이 **글리프 패스에 도달할 때**
+/// 그 행의 셀 속성을 한 번 찍는다.
+///
+/// 왜 여기인가: "셀에 써넣었는데 화면에 없다"를 진단할 자리는 쓴 쪽이 아니라 **받는
+/// 쪽**이다. 쓴 쪽 로그는 데이터가 들어갔다는 것만 말하고, 그 뒤 어디서 떨어졌는지는
+/// 침묵한다(2026-08-05: 인레이가 자기 결과 문자열을 뱉는데도 픽셀엔 없었고, 그
+/// 사이 구간이 통째로 안 보였다). 이 프로브는 `hidden`(SGR 8 — 글리프만 생략하고
+/// 텍스트 추출엔 남아 하네스가 "그렸다"로 읽는다)·`bold`·`fg`·`bg`·`dim` 을 나란히
+/// 찍으므로, 안 보이는 셀과 보이는 이웃을 **같은 줄에서** 대조할 수 있다.
+///
+/// 행당 한 번만(프레임마다 반복하면 로그가 흐른다).
+fn probe_cell_row(r: usize, row: &[kasa_bridge::screen::Cell], dim: bool, font_scale: f32) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WANT: OnceLock<Option<String>> = OnceLock::new();
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let Some(want) = WANT.get_or_init(|| std::env::var("KASATERM_CELL_PROBE").ok()).as_deref()
+    else {
+        return;
+    };
+    if want.is_empty() || !row.iter().any(|c| want.contains(c.ch)) {
+        return;
+    }
+    let text: String = row.iter().map(|c| c.ch).collect();
+    // 호출 순번을 키와 출력에 함께 싣는다 — 한 프레임에 `draw_cells` 가 두 번
+    // 불리고 나중 것이 앞의 것을 덮으면, 순번 없이는 그 사실이 로그에서 안 보인다.
+    let pass = DRAW_CELLS_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+    let key = format!("{pass}:{r}:{}", text.trim_end());
+    if !SEEN.get_or_init(Default::default).lock().is_ok_and(|mut s| s.insert(key)) {
+        return;
+    }
+    eprintln!(
+        "[cell-probe] call#{pass} row {r} dim={dim} font_scale={font_scale} → {:?}",
+        text.trim_end()
+    );
+    for (col, c) in row.iter().enumerate() {
+        if matches!(c.ch, ' ' | '\0') {
+            continue;
+        }
+        eprintln!(
+            "  col {col:>3} {:?} bold={} hidden={} dim={} inverse={} fg={:?} bg={:?}",
+            c.ch, c.bold, c.hidden, c.dim, c.inverse, c.fg, c.bg
+        );
+    }
+}
+
+/// `draw_cells` 진입 횟수 — `probe_cell_row` 가 "몇 번째 호출의 그리드인가"를 찍는다.
+static DRAW_CELLS_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl GpuRenderer {
     pub fn new(window: Arc<Window>, font_size_logical: f32) -> Result<Self> {
         let scale = window.scale_factor() as f32;
@@ -3939,6 +3988,7 @@ impl GpuRenderer {
     /// pipeline draws everything in insertion order, so painting
     /// layers fall out naturally from the call sequence.
     pub fn draw_cells(&mut self, panes: &[PaneSlot<'_>]) {
+        DRAW_CELLS_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // The URL currently under the mouse renders in this blue — both its
         // glyphs (Pass 2) and its underline (Pass 3) — so a hovered link reads
         // like a hyperlink. `pane.links` holds the 0..1 hovered range.
@@ -3983,6 +4033,7 @@ impl GpuRenderer {
             let cell_h_px = self.cell_h * self.scale * pane.font_scale;
             let pane_size_px = ((self.font_size_px as f32 * pane.font_scale).round() as u32).max(8);
             for (r, row) in pane.rows.iter().enumerate() {
+                probe_cell_row(r, row, pane.dim, pane.font_scale);
                 // Right edge of the last glyph painted on this row. A blank
                 // cell an oversized neighbour already spilled into is not free
                 // room any more, so `fit_cell_glyph` is told about it.
