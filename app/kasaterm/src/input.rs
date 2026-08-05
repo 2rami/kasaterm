@@ -1776,6 +1776,11 @@ impl App {
         if event.state != ElementState::Pressed {
             return;
         }
+        // 방 이름 편집 중이면 키는 전부 그쪽 것이다 — 여기서 안 가로채면 타이핑이
+        // pane 의 셸로 새 나간다(이름을 고치다 셸에 명령이 찍힌다).
+        if self.room_rename_key(&event.logical_key) {
+            return;
+        }
         // Touch the input timer so the cursor stays solid for a beat and
         // the blink phase re-starts from "on" once it kicks in.
         self.last_input_at = Instant::now();

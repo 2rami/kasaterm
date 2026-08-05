@@ -996,9 +996,14 @@ impl App {
             // 손으로 붙인 이름은 파생을 항상 이긴다 — 지정 pane 이 대표 leaf 가
             // 아니어도, 방을 옮겨도 유지돼야 한다.
             let name = self
-                .window_name_override
-                .get(&i)
-                .cloned()
+                // 편집 중인 방은 버퍼를 그대로 보여준다(캐럿 포함) — 별도 입력칸을
+                // 띄우지 않고 라벨 자리를 그대로 쓴다. Finder 와 같은 자리 편집.
+                .room_rename
+                .editing
+                .as_ref()
+                .filter(|(idx, _)| *idx == i)
+                .map(|(_, buf)| format!("{buf}\u{258c}"))
+                .or_else(|| self.window_name_override.get(&i).cloned())
                 .or_else(|| {
                     home.as_ref()
                         .and_then(|p| p.file_name())

@@ -1126,6 +1126,19 @@ impl App {
                     return true;
                 }
             }
+            // 이미 열려 있는 방을 **천천히** 다시 누르면 이름 편집(Finder 규칙).
+            // 전환보다 먼저 본다 — 전환은 같은 방이면 어차피 무동작이다.
+            let now = std::time::Instant::now();
+            if starts_room_rename(self.room_rename.last_click, idx, self.active_window, now) {
+                let cur = self.window_name_override.get(&idx).cloned().unwrap_or_default();
+                self.room_rename.editing = Some((idx, cur));
+                self.room_rename.last_click = None;
+                self.chrome_dirty = true;
+                return true;
+            }
+            self.room_rename.last_click = Some((idx, now));
+            // 다른 방을 누르면 편집은 확정하고 넘어간다(바깥 클릭 = 확정).
+            self.commit_room_rename();
             self.switch_window(idx);
             // 전환은 누르는 즉시(브라우저 탭과 같다 — 방 전환은 트리 스왑이라
             // 싸다), 재배치는 여기서 장전만. 문턱을 못 넘으면 release 가 그냥
@@ -1264,6 +1277,47 @@ impl App {
     /// new usable width (every layout calc reads `effective_sidebar_w()`),
     /// so we just flip the flag, resize the PTYs to the new cols/rows, and
     /// repaint.
+    /// 편집 중이면 버퍼를 방 이름으로 확정한다. **빈 문자열이면 override 를 지워**
+    /// 기본 라벨(캐릭터 이름)로 되돌린다 — 빈 이름을 저장하면 방이 무명이 된다.
+    pub(crate) fn commit_room_rename(&mut self) {
+        let Some((idx, buf)) = self.room_rename.editing.take() else { return };
+        let name = buf.trim().to_string();
+        if name.is_empty() {
+            self.window_name_override.remove(&idx);
+        } else {
+            self.window_name_override.insert(idx, name);
+        }
+        self.chrome_dirty = true;
+    }
+
+    /// 편집을 버린다(Esc).
+    pub(crate) fn cancel_room_rename(&mut self) {
+        if self.room_rename.editing.take().is_some() {
+            self.chrome_dirty = true;
+        }
+    }
+
+    /// 편집 중인 방에 키를 넣는다. 처리했으면 true — 호출부가 그 키를 pane 으로
+    /// 흘리지 않게 한다(편집 중 타이핑이 셸에 새면 안 된다).
+    pub(crate) fn room_rename_key(&mut self, key: &winit::keyboard::Key) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let Some((_, buf)) = self.room_rename.editing.as_mut() else { return false };
+        match key {
+            Key::Named(NamedKey::Enter) => self.commit_room_rename(),
+            Key::Named(NamedKey::Escape) => self.cancel_room_rename(),
+            Key::Named(NamedKey::Backspace) => {
+                buf.pop();
+                self.chrome_dirty = true;
+            }
+            Key::Character(c) => {
+                buf.push_str(c);
+                self.chrome_dirty = true;
+            }
+            _ => return false,
+        }
+        true
+    }
+
     pub(crate) fn toggle_sidebar(&mut self) {
         self.sidebar_visible = !self.sidebar_visible;
         let (cols, rows) = self.window_cells();
@@ -2486,3 +2540,66 @@ mod toast_tests {
     }
 }
 
+
+/// 「느린 더블클릭」인가 — **이미 열려 있는 방**의 줄을, **더블클릭 문턱보다 늦게**
+/// 다시 누른 경우.
+///
+/// 셋을 다 봐야 한다: ①같은 줄 ②그 방이 지금 활성(=첫 클릭이 전환이 아니라 선택이었다)
+/// ③직전 클릭에서 문턱 초과. ③이 없으면 진짜 더블클릭이 편집을 열고, ②가 없으면
+/// 다른 방으로 전환하려던 두 번째 클릭이 편집을 연다.
+pub(crate) fn starts_room_rename(
+    last: Option<(usize, std::time::Instant)>,
+    idx: usize,
+    active: usize,
+    now: std::time::Instant,
+) -> bool {
+    const DOUBLE_CLICK_MS: u128 = 500;
+    // 너무 오래 지난 클릭은 "다시 누른 것"이 아니라 새 클릭이다 — 몇 분 전 클릭이
+    // 편집을 열면 사용자는 이유를 못 찾는다.
+    const STALE_MS: u128 = 5_000;
+    let Some((prev_idx, at)) = last else { return false };
+    let ms = now.duration_since(at).as_millis();
+    prev_idx == idx && idx == active && ms > DOUBLE_CLICK_MS && ms <= STALE_MS
+}
+
+#[cfg(test)]
+mod room_rename_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn at(ms: u64) -> (Option<(usize, Instant)>, Instant) {
+        let t0 = Instant::now();
+        (Some((1, t0)), t0 + Duration::from_millis(ms))
+    }
+
+    #[test]
+    fn 느리게_다시_누르면_편집이다() {
+        let (last, now) = at(700);
+        assert!(starts_room_rename(last, 1, 1, now));
+    }
+
+    #[test]
+    fn 진짜_더블클릭은_편집이_아니다() {
+        // 문턱 안(300ms) — 여기서 열면 더블클릭 동작과 겹쳐 둘 다 오작동한다.
+        let (last, now) = at(300);
+        assert!(!starts_room_rename(last, 1, 1, now));
+    }
+
+    #[test]
+    fn 다른_방으로_전환하는_두번째_클릭은_편집이_아니다() {
+        // 누른 줄(2)이 활성(1)이 아니다 = 첫 클릭이 선택이 아니라 전환이었다.
+        let (last, now) = at(700);
+        assert!(!starts_room_rename(last, 2, 1, now));
+    }
+
+    #[test]
+    fn 한참_뒤_클릭은_새_클릭이다() {
+        let (last, now) = at(9_000);
+        assert!(!starts_room_rename(last, 1, 1, now));
+    }
+
+    #[test]
+    fn 직전_클릭이_없으면_편집이_아니다() {
+        assert!(!starts_room_rename(None, 1, 1, Instant::now()));
+    }
+}
