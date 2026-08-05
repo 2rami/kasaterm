@@ -479,9 +479,7 @@ impl PtySession {
     /// 테이블은 300ms 공유 캐시라 `ps` 추가 호출이 없다.
     pub fn active_agent(&self) -> Option<AgentKind> {
         let pid = self.shell_pid?;
-        let table = process_table_shared();
-        let pid = effective_shell_pid(&table, pid);
-        agent_in_table(&table, pid)
+        agent_for_shell(&process_table_shared(), pid)
     }
 
     /// `claude agents`(에이전트 목록 뷰)로 도는 pane 인지 — argv 서브커맨드로 판정.
@@ -2211,6 +2209,15 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+    /// 저장·전송용 이름. `pane_record` 의 `was_agent`, board 의 `harness`, 소켓
+    /// 응답이 전부 이 하나를 쓴다 — match 를 사본으로 늘리면 한쪽만 고쳐져 갈린다.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
     /// 프로세스 comm 으로 판정. comm 은 경로가 붙어 올 수 있어(손자 행은
     /// `…/bin/codex`) 파일명만 떼어 본다.
     fn from_comm(comm: &str) -> Option<Self> {
@@ -2228,6 +2235,13 @@ impl AgentKind {
 ///
 /// 같은 부모의 자식 중 **가장 나중에 뜬 것**(pid 큰 쪽)을 고른다 — `active_process_name`
 /// 과 같은 규칙. 직속 자식이 런처류면 한 세대 더 내려간다.
+/// 셸 pid 하나로 하네스를 묻는다 — `PtySession` 을 못 쥐고 pid 만 아는 호출자
+/// (board 조립·소켓 백엔드)용. 프로세스 테이블은 이미 공유 캐시라 `ps` 가 추가로
+/// 안 돈다. 판정 본체는 `agent_in_table` 하나뿐이라 `active_agent` 와 결과가 같다.
+pub fn agent_for_shell(table: &[(u32, u32, String)], shell_pid: u32) -> Option<AgentKind> {
+    agent_in_table(table, effective_shell_pid(table, shell_pid))
+}
+
 fn agent_in_table(table: &[(u32, u32, String)], shell_pid: u32) -> Option<AgentKind> {
     let newest_child = |parent: u32| -> Option<(u32, &str)> {
         let mut best: Option<(u32, &str)> = None;
