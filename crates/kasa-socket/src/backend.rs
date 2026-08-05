@@ -123,6 +123,12 @@ pub struct PaneActivity {
     /// Coarse state for at-a-glance scanning: conventionally one of
     /// "working" | "building" | "blocked" | "idle", but free text is
     /// allowed so a pane can be specific ("running test suite").
+    ///
+    /// ⚠️ **"free text 허용"을 믿고 값을 늘리지 마라.** 실제 소비부는 **정확 일치**로
+    /// 비교한다(2026-08-05 실측 4곳): `auxwin.rs`(busy 바·펄스 둘), `chrome.rs`
+    /// (`== "waiting"`), `handler.rs`(창 단위 working 판정). "working 12s" 같은 값을
+    /// 넣는 순간 그 표시들이 통째로 죽는다 — 문서와 코드가 어긋난 자리다. 부가 정보는
+    /// 이 칸에 얹지 말고 전용 칸을 늘려라(`rate_used_pct` 가 그렇게 생겼다).
     pub status: String,
     /// Files this pane is currently touching. The conflict-detection
     /// signal: a sibling checks the board before editing and backs off

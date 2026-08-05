@@ -829,6 +829,10 @@ const BOARD_PANEL_HTML: &str = r#"<!DOCTYPE html>
   .badge.tok { color: #e3b341; }
   .badge.cost { color: #70AD47; }
   .badge.chg { color: #f0883e; }
+  /* 정액제 한도 — 비용(초록)과 다른 색이라야 "돈"과 "쿼터"가 안 섞인다. 90% 넘으면
+     경고색으로 바뀐다(ctx 90% 규칙과 같은 문턱). */
+  .badge.rate { color: #79c0ff; }
+  .badge.rate.hot { color: #f7768e; }
   .tools { margin-top: 4px; font-size: 10px; color: #5a5f6b; word-break: break-word; }
   .row1 { display: flex; align-items: center; gap: 8px; }
   .sid { font-weight: 600; color: #5a8ce6; }
@@ -908,9 +912,27 @@ function render(board) {
     const tot = (p.tokens_in || 0) + (p.tokens_out || 0);
     const changed = (p.changed_files || []).length;
     const cost = p.cost_usd || 0;
+    // 정액제(codex)는 비용이 없다 — 한도 지표가 있으면 그쪽이다. 비용 칸을 그냥
+    // 비우면 "아직 안 썼다"로 읽히니 `—` 를 박아 **해당 없음**을 표시한다(거노).
+    const metered = p.rate_used_pct == null;
     const bg = [];
     if (tot) bg.push(`<span class="badge tok">${fmtTok(tot)} tok</span>`);
-    if (cost) bg.push(`<span class="badge cost">$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}</span>`);
+    if (metered && cost) bg.push(`<span class="badge cost">$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}</span>`);
+    if (!metered) {
+      // 창 라벨은 **분**으로 온다(창이 늘어도 파서를 안 고치려고). 표시만 여기서 붙인다.
+      const wm = p.rate_window_minutes || 0;
+      const win = wm === 10080 ? "주간" : wm === 1440 ? "일간" : wm === 300 ? "5시간"
+                : wm ? `${wm}분` : "한도";
+      // resets_at 은 절대 시각(unix 초) — 읽는 사람이 뺄셈을 하지 않게 상대로 바꾼다.
+      const left = (p.rate_resets_at || 0) - Math.floor(Date.now() / 1000);
+      const rel = left <= 0 ? "" :
+        left < 3600 ? ` (${Math.round(left / 60)}m 뒤 리셋)` :
+        left < 86400 ? ` (${Math.round(left / 3600)}h 뒤 리셋)` :
+        ` (${Math.round(left / 86400)}d 뒤 리셋)`;
+      bg.push(`<span class="badge cost">—</span>`);
+      const hot = p.rate_used_pct >= 90 ? " hot" : "";
+      bg.push(`<span class="badge rate${hot}">${win} ${Math.round(p.rate_used_pct)}%${rel}</span>`);
+    }
     if (changed) bg.push(`<span class="badge chg">변경 ${changed}</span>`);
     const badges = bg.length ? `<div class="badges">${bg.join("")}</div>` : "";
     const tools = (p.tool_counts || []).map(t => `${esc(t[0])}×${t[1]}`).join(" · ");
