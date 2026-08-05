@@ -949,6 +949,42 @@ impl App {
                         // working/승인대기 중엔 스피너 walk·바운스 도트가 이미
                         // 학생을 그리므로(pet_busy) 세우지 않는다. 앵커 규칙은
                         // `find_standing_anchor` 에 — 별도창도 같은 자리에 세운다.
+                        // `KASATERM_STUDENT_DEBUG=1` — 왜 학생이 안 서는지 앱이
+                        // 직접 말한다. 이 자리는 조건 셋(스피너 감지·pet_busy·앵커)이
+                        // 겹쳐 있고 실패하면 **아무것도 안 그려** 밖에서 원인을 가릴
+                        // 수 없다. 정적 스프라이트(프사)만 뜨고 애니가 안 뜬다는
+                        // 신고를 받고도 코드 읽기로는 못 좁혔다(2026-08-05).
+                        if std::env::var_os("KASATERM_STUDENT_DEBUG").is_some() {
+                            use std::sync::{Mutex, OnceLock};
+                            static LAST: OnceLock<Mutex<std::time::Instant>> = OnceLock::new();
+                            let last = LAST.get_or_init(|| Mutex::new(std::time::Instant::now()));
+                            let mut g = last.lock().unwrap();
+                            if g.elapsed() >= std::time::Duration::from_millis(1000) {
+                                *g = std::time::Instant::now();
+                                let a = find_standing_anchor(&composed, sr, cols_now as usize);
+                                eprintln!(
+                                    "[student-debug] pane={id} slug={slug} face_row={sr} cols={cols_now} pet_busy={pet_busy} spinner={} anchor={a:?} rows={}",
+                                    find_claude_spinner(&composed).is_some(),
+                                    composed.len(),
+                                );
+                                if sr >= 4 {
+                                    let rule = |r: usize| {
+                                        let row = &composed[r];
+                                        let d = row.iter().filter(|c| c.ch == '─').count();
+                                        let l = row
+                                            .iter()
+                                            .filter(|c| !matches!(c.ch, '─' | ' ' | '\0'))
+                                            .count();
+                                        format!("dash={d}/{} label={l}", row.len())
+                                    };
+                                    eprintln!(
+                                        "[student-debug]   아래테두리 rows[{}] {}",
+                                        sr - 1,
+                                        rule(sr - 1)
+                                    );
+                                }
+                            }
+                        }
                         if !pet_busy {
                             if let Some((anchor, left_c)) =
                                 find_standing_anchor(&composed, sr, cols_now as usize)
@@ -9010,22 +9046,32 @@ pub(crate) fn find_standing_anchor(
     face_row: usize,
     cols: usize,
 ) -> Option<(usize, f32)> {
+    // 다수 판정을 **격자 전체 폭이 아니라 내용 폭**(마지막 non-blank 까지)으로 한다.
+    // 전체 폭으로 재면 pane 이 claude 의 입력박스보다 넓을 때 테두리가 소수가 되어
+    // `is_rule` 이 거짓이 되고, standing 이 통째로 사라진다 — 155칸 pane 에 60칸
+    // 테두리로 실측(dash=60/155 → anchor=None). 내용 폭 기준이면 박스가 pane 보다
+    // 좁아도 성립한다. 대신 짧은 구분선 조각을 테두리로 오인하지 않게 최소 길이를 둔다.
     let is_rule = |row: &[GridCell], max_label: usize| {
         let mut dashes = 0usize;
         let mut label = 0usize;
-        for c in row {
+        let mut content_w = 0usize;
+        for (i, c) in row.iter().enumerate() {
             match c.ch {
-                '─' => dashes += 1,
+                '─' => {
+                    dashes += 1;
+                    content_w = i + 1;
+                }
                 ' ' | '\0' => {}
                 _ => {
                     label += 1;
+                    content_w = i + 1;
                     if label > max_label {
                         return false;
                     }
                 }
             }
         }
-        dashes > row.len() / 2
+        dashes >= 8 && dashes > content_w / 2
     };
     if face_row < 4 || !is_rule(&rows[face_row - 1], 0) {
         return None;
