@@ -2623,9 +2623,22 @@ impl App {
                             .and_then(|id| ws.panes.get(id).and_then(|p| p.title.clone()))
                             .map(|t| crate::strip_activity_prefix(&t).to_string())
                             .filter(|s| !s.is_empty());
-                        match work {
-                            Some(w) => format!("{c}  ·  {w}"),
+                        // pane 아이디를 캐릭터 뒤에 (거노 2026-08-05: "칩 위치를 바꿔
+                        // pane아이디 이런데에, 거기는 /rename 들어갈 자리니까").
+                        //
+                        // 헤더 띠가 아니라 **타이틀바**에 붙이는 이유: 학생 헤더 띠는
+                        // 거노가 폐기했고(main.rs:2146) 학생 정체는 그때 타이틀바로
+                        // 옮겨졌다. 단일 탭 pane 은 `has_header()` 가 false 라 띠 쪽에만
+                        // 붙이면 **거노 화면엔 안 보인다** — 하네스만 통과하는 그 모양이
+                        // 오늘 두 번 물었다. 띠를 되살리면 거노가 회수한 세로 공간이
+                        // pane 마다 다시 나가므로 그건 그의 결정이다.
+                        let with_id = match active.as_deref() {
+                            Some(id) => format!("{c} {id}"),
                             None => c,
+                        };
+                        match work {
+                            Some(w) => format!("{with_id}  ·  {w}"),
+                            None => with_id,
                         }
                     } else {
                         let title = active

@@ -2474,15 +2474,12 @@ impl App {
             return;
         }
         self.boxlabel_seed(&pid);
-        // 헤더 띠를 강제로 켠다. 단일 탭 터미널은 `has_header()` 가 false 라(학생 헤더
-        // 띠는 거노가 폐기, main.rs:2146) 헤더 라벨 경로를 그냥은 못 태운다. ⋮ 로 켠
-        // pane 과 멀티탭에서는 그 띠가 뜨므로, 거기 실리는 정체 표시(`{캐릭터} %N`)를
-        // 여기서 검증한다.
-        if let Ok(mut ws) = self.ws.lock() {
-            if let Some(p) = ws.panes.get_mut(&pid) {
-                p.header_override = Some(true);
-            }
-        }
+        // 헤더 띠는 **일부러 켜지 않는다.** 켜면 `{캐릭터} %N` 이 띠에서도 그려져
+        // 판정이 통과하는데, 거노 화면의 학생 pane 은 대부분 단일 탭이라 띠가 없다
+        // (`has_header()` = 탭>1 ‖ 이미지 ‖ md ‖ ⋮강제; 학생 띠는 거노가 폐기,
+        // main.rs:2146). 그러면 "하네스는 보는데 화면엔 없다"가 된다 — 오늘 그 모양에
+        // 두 번 물렸다. 띠를 끈 채로 통과하면 그건 **타이틀바**가 실었다는 뜻이고,
+        // 그게 거노가 실제로 보는 자리다.
         // 여기서 한 번 그려 타이프라이터 시계를 출발시킨다. 판정은 2단계.
         self.chrome_dirty = true;
         self.render_frame();
@@ -2515,9 +2512,11 @@ impl App {
         };
         let (left, right, never) =
             (g.drew_text(SUMMARY), g.drew_text(RENAME), g.drew_text(NEVER));
-        // 헤더 정체 표시 — 보더 우측을 `/rename` 자리로 비웠으니 "이 pane 이 누구인가"는
-        // 헤더가 든다(거노 2026-08-05). 인레이와 달리 헤더는 크롬 텍스트 draw 라
-        // `text_log` 가 직접 잡는다 — 신고 통을 안 거친다.
+        // 정체 표시(`{캐릭터} %N`) — 보더 우측을 `/rename` 자리로 비웠으니 "이 pane 이
+        // 누구인가"는 **타이틀바**가 든다(거노 2026-08-05). 하네스가 헤더 띠를 안 켜니
+        // (그쪽 주석 참고) 이 판정이 통과하면 타이틀바가 실었다는 뜻이다 — 거노가
+        // 단일 탭에서 실제로 보는 자리. 인레이와 달리 크롬 텍스트 draw 라 `text_log` 가
+        // 직접 잡는다.
         let who = {
             let ws = self.ws.lock().unwrap();
             ws.active_pane
@@ -2527,10 +2526,10 @@ impl App {
         if let Some((name, pid)) = who.as_ref() {
             let want = format!("{name} {pid}");
             eprintln!(
-                "[autoboxlabel] 헤더 정체 {want:?} → {}",
+                "[autoboxlabel] 정체 표시 {want:?} → {}",
                 match g.drew_text(&want) {
                     Some(true) => "그림 PASS",
-                    Some(false) => "안 그림 FAIL — 헤더 라벨에 pane 아이디가 안 붙었다",
+                    Some(false) => "안 그림 FAIL — 타이틀바에 pane 아이디가 안 붙었다",
                     None => "미측정",
                 }
             );
