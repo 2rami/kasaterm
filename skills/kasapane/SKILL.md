@@ -326,6 +326,13 @@ kasaterm-cli send --surface "$S" $'cd /path/to/repo && claude --model \'claude-o
 ⚠️ **send 를 두 번 연달아 보내지 마라 — 둘째가 첫 명령줄 안으로 빨려 들어간다.** 부팅 커맨드를 보낸 직후 브리프를 또 보내면, 셸이 아직 `claude` 를 exec 하기 전이라 둘째 텍스트를 **같은 명령줄의 일부로** 읽는다(실측 2026-08-05: 모델명이 `claude-opus-5[1m]지금[1m]` 이 되어 부팅 실패, 프롬프트엔 「몇」 한 글자만 남음). 그래서 브리프는 **파일에 먼저 쓰고 경로를 claude 인자로** 한 번에 넘긴다. 이게 `sleep 9` 를 없애면서도 안전한 유일한 조합이다.
 
 - `--agent-name`은 **`--agent-id`·`--team-name`과 셋이 세트** — 하나라도 빠지면 "must all be provided together" 에러(실측). `--agent-color`는 8색(red/blue/green/yellow/purple/orange/pink/cyan). `--model`·`--effort`·`--session-id`·`--resume`은 공개 플래그.
+- **가벼운 작업은 GLM 학생으로**(사내 OpenGateway, 키 `~/.config/opengateway.key`) — 정찰·검색·스샷 촬영·기계적 반복처럼 판단보다 손이 많은 일. 부팅 커맨드만 바꾸면 된다:
+  ```bash
+  kasaterm-cli send --surface "$S" $'cd /path/to/repo && glm claude --dangerously-skip-permissions "/tmp/brief-'"$S"$'.md 읽고 수행"\n'
+  ```
+  실측(2026-08-05): 모델 `z-ai/glm-5.2-ultrafast`, 응답 6.0s, `agent_name`·캐릭터·페르소나 전부 정상 부착 → **SendMessage 로 닿는다**(board 확인: `hoshino-p17` / team `kt-tmp-5ee1`). `glm` 은 `command claude` 라 shim 을 그대로 타고, shim 이 앞에 붙이는 `--model claude-opus-5[1m]` 은 glm 이 뒤에 주는 `--model z-ai/...` 에 덮인다.
+  - ⚠️ **`--dangerously-skip-permissions` 를 직접 줘야 한다.** `glm` 이 `command claude` 로 호출해 zshrc 의 `claude()` 함수(그 플래그를 자동으로 붙여 주던)를 건너뛰기 때문. 빠뜨리면 학생이 첫 도구 호출에서 권한 프롬프트에 걸려 멈춘다.
+  - ⚠️ **컨텍스트 200k — Claude `[1m]` 의 1/5.** 긴 파일 통독·장시간 작업엔 부적합하다. 본작업은 Claude 로.
 - **학생 모델 = 반드시 풀네임 + `[1m]`(1M 컨텍스트) 변형**: 가벼운 잡·정찰=`'claude-sonnet-5[1m]'`, 구현·생성 본작업=`'claude-opus-5[1m]'`(유효 실측 2026-07-26). ⚠️ **`opus`·`sonnet` 짧은 alias 를 쓰지 마라** — alias 는 아직 이전 세대(`opus`→Opus 4.8)를 가리켜 오푸스 5 로 안 뜬다(거노 실사고 2026-07-26: 학생이 전부 4.8 로 소환됨). 세대가 바뀌면 alias 가 늦게 따라오므로 풀네임이 정본이다. 표준(200K) 변형으로 띄우거나 `/model opus`처럼 무접미 전환하면 컨텍스트 창이 줄어든다 — 실사고: sonnet[1m] 세션을 `/model opus`(200K)로 바꾸자 같은 대화가 87%로 점프. **미드세션 전환도 항상 `/model claude-opus-5[1m]` 꼴로.** 대괄호가 zsh glob이라 CLI에선 **따옴표 필수**(안 감싸면 "no matches found"). 거노가 모델을 지정하면 그 계열의 [1m] 변형으로 해석한다. 모델의 자기보고("200K 표준")는 훈련지식이라 믿지 말 것 — 하네스 statusline이 진실. **함정(실사고 07-19): tell로 주입한 슬래시 명령은 학생이 working 중이면 제출돼도 큐에만 걸리고 발화하지 않는다** — 코하루가 전환 미발화 상태로 200K를 100%까지 소진. 주입 후 반드시 peek로 statusline의 `1M` 표기를 확인하고, 큐에 걸려 있으면 `key escape`로 턴을 끊어 발화시켜라(파일 수정분은 보존됨).
 - **agent-name은 학생 캐릭터명이 아니라 목표 작업명으로**(거노 확정, 예: `native-wiring-backend`) — 캐릭터는 kasaterm이 pane에 자동 배정하니 이름 중복이 불필요하고, ASCII 작업명이면 inbox 슬러그 유일성도 자연 해결.
 - **표시 매핑(실제 팀모드 스크린샷 실측, 2026-07-13)**: `--agent-color`는 배지(`@이름`)뿐 아니라 teammate TUI 전체 톤을 그 색으로 테마한다. tmux pane 제목 = 에이전트 이름, TUI 상단 `✳ 헤더` = 역할(`--agent-type`, 예: Explore). → kasaterm 스폰도 `rename`을 agent-name(작업명)과 일치시키고, `--agent-color`는 배정 학생 accent에 가장 가까운 8색으로 골라 pane 테두리색과 TUI 색을 맞춘다.
