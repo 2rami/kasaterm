@@ -926,6 +926,10 @@ impl App {
                     // 스티커처럼 얹힌다.
                     // 스캔 방향과 앵커 규칙은 `find_statusline_face` 주석 참고 —
                     // 별도창(auxwin)이 같은 자리를 찍어야 해서 자유함수로 나가 있다.
+                    // 입력창 위 standing 앵커. claude 는 statusline 자리표시자에서
+                    // 출발하지만 codex 는 그게 없어(위 `find_filled_standing_anchor`
+                    // 주석) 입력행에서 바로 잡는다. 둘 다 못 잡으면 안 세운다.
+                    let mut stand_anchor: Option<(usize, f32)> = None;
                     if let Some((sr, sc, len)) = find_statusline_face(&composed) {
                         for cell in composed[sr].iter_mut().skip(sc).take(len) {
                             *cell = GridCell::blank();
@@ -984,10 +988,15 @@ impl App {
                                 }
                             }
                         }
+                        stand_anchor = find_standing_anchor(&composed, sr, cols_now as usize);
+                    }
+                    // statusline 자리표시자가 없는 하네스(codex) — 입력행에서 바로.
+                    if stand_anchor.is_none() {
+                        stand_anchor = find_filled_standing_anchor(&composed, cols_now as usize);
+                    }
+                    {
                         if !pet_busy {
-                            if let Some((anchor, left_c)) =
-                                find_standing_anchor(&composed, sr, cols_now as usize)
-                            {
+                            if let Some((anchor, left_c)) = stand_anchor {
                                 let h = INPUT_STANDING_ROWS as f32 * sch;
                                 {
                                     // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세
@@ -9308,13 +9317,39 @@ pub(crate) fn find_standing_anchor(
         .find(|&r| is_rule(&rows[r], 24))
         .filter(|&tr| tr >= 1)?;
     let anchor = tr - 1;
+    Some((anchor, stand_left_col(rows, anchor, cols)?))
+}
+
+/// 앵커 행이 정해진 뒤의 가로 자리 — 그 행에 이미 뭐가 떠 있으면(effort 칩·
+/// context 경고) 그 왼쪽으로 비켜선다. 하네스마다 세로 앵커를 찾는 법은 다르지만
+/// 가로 규칙은 같아서 여기 한 곳에만 둔다.
+fn stand_left_col(rows: &[Vec<GridCell>], anchor: usize, cols: usize) -> Option<f32> {
     let first = rows[anchor].iter().position(|c| !matches!(c.ch, ' ' | '\0'));
     let right_c = match first {
         Some(f) => f as f32 - 1.5,
         None => cols as f32 - 1.0,
     };
     let left_c = right_c - STAND_CELLS;
-    (left_c > 2.0).then_some((anchor, left_c))
+    (left_c > 2.0).then_some(left_c)
+}
+
+/// 테두리 없는 입력창(`PromptBox::Filled`, codex) 위 standing 앵커.
+///
+/// claude 는 statusline 자리표시자(U+FFFC)에서 아래 테두리를 짚고 위로 스캔하지만
+/// **codex 엔 자리표시자를 심을 데가 없다** — `[tui] status_line` 은 정해진 세그먼트
+/// 이름 배열이고 모르는 항목은 `⚠ Ignored invalid status line item` 으로 버려진다
+/// (0.146.0 실측). 커맨드 훅도 없다. 대신 입력행 자체는 `prompt_box` 가 배경 채움으로
+/// 이미 정확히 집어내므로 그 바로 윗행을 앵커로 쓴다 — 테두리 스캔이 통째로 없어
+/// claude 쪽이 밟았던 함정(dash 비율 오판)에서 자유롭다.
+pub(crate) fn find_filled_standing_anchor(
+    rows: &[Vec<GridCell>],
+    cols: usize,
+) -> Option<(usize, f32)> {
+    let PromptBox::Filled { rows: r } = prompt_box(rows)? else {
+        return None;
+    };
+    let anchor = r.start.checked_sub(1)?;
+    Some((anchor, stand_left_col(rows, anchor, cols)?))
 }
 
 /// standing 학생이 차지하는 가로 칸수 — 앵커 계산과 그리기가 같은 값을 써야 한다.
@@ -10589,6 +10624,38 @@ mod prompt_box_tests {
         // 같은 줄이라도 배경이 없으면 입력창이 아니다 — 인용문 오인 방지.
         let plain = vec![row_from("› quoted line, not an input box at all")];
         assert!(prompt_box(&plain).is_none());
+    }
+
+    /// codex 학생은 입력행 **바로 위**에 선다. claude 처럼 statusline 자리표시자
+    /// (U+FFFC)에서 출발할 수 없어서다 — `[tui] status_line` 은 정해진 세그먼트
+    /// 이름 배열이라 모르는 항목을 넣으면 `Ignored invalid status line item` 으로
+    /// 버려진다(0.146.0 실측). 앵커가 입력행에 직접 매이는지 못박는다.
+    #[test]
+    fn codex_student_stands_on_the_row_above_the_input() {
+        let filled = |s: &str| {
+            let mut r = row_from(s);
+            for c in r.iter_mut() {
+                c.bg = kasa_bridge::screen::Color::Rgb(63, 69, 77);
+            }
+            r
+        };
+        let rows = vec![
+            row_from("⚠ MCP startup incomplete"),
+            row_from(""),
+            filled("› Write tests for @filename"),
+            row_from("gpt-5.5 medium · tmuxify · main · Context 0% used"),
+        ];
+        let (anchor, left_c) = find_filled_standing_anchor(&rows, 80).expect("앵커");
+        assert_eq!(anchor, 1, "입력행(2) 바로 위");
+        // 앵커 행이 비어 있으면 오른쪽 끝에 선다.
+        assert!((left_c - (80.0 - 1.0 - STAND_CELLS)).abs() < f32::EPSILON);
+
+        // 입력창을 못 찾으면 아무 데도 안 세운다 — 빈 화면에 학생이 뜨는 회귀 방지.
+        assert!(find_filled_standing_anchor(&[row_from("just text")], 80).is_none());
+
+        // 입력행이 첫 줄이면(스크롤로 위가 잘림) 설 자리가 없다.
+        let top = vec![filled("› Write tests for @filename")];
+        assert!(find_filled_standing_anchor(&top, 80).is_none());
     }
 
     // diff·git·노트 TUI 의 대시 구분선 쌍은 사이에 ASCII '>'(인용·프롬프트)가

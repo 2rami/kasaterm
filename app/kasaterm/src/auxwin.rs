@@ -2302,6 +2302,7 @@ impl App {
                 }
             }
         }
+        let mut stand_anchor: Option<(usize, f32)> = None;
         if let Some((sr, sc, len)) = crate::render::find_statusline_face(cells) {
             for cell in cells[sr].iter_mut().skip(sc).take(len) {
                 *cell = GridCell::blank();
@@ -2315,10 +2316,16 @@ impl App {
             );
             out.profile.push((slug, face_rect));
             out.faces.push((name, slug, face_rect));
+            stand_anchor = crate::render::find_standing_anchor(cells, sr, cols);
+        }
+        // statusline 자리표시자가 없는 하네스(codex)는 입력행에서 바로 — 메인 창과
+        // 같은 규칙을 쓴다(`find_filled_standing_anchor`).
+        if stand_anchor.is_none() {
+            stand_anchor = crate::render::find_filled_standing_anchor(cells, cols);
+        }
+        {
             if !busy {
-                if let Some((anchor, left_c)) =
-                    crate::render::find_standing_anchor(cells, sr, cols)
-                {
+                if let Some((anchor, left_c)) = stand_anchor {
                     let h = crate::render::INPUT_STANDING_ROWS as f32 * ch;
                     // 턴이 끝났으면 손 흔들며 기다리는 wave, 아니면 idle. 완료
                     // 직후 cheer 는 메인 창의 notify_flash 타이머에 매인 연출이라
