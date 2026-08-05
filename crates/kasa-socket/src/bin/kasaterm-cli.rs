@@ -63,6 +63,74 @@ fn run() -> Result<Option<Response>> {
         run_board_watch(&socket_path, interval)?;
         return Ok(None);
     }
+    // `split --count N` 은 한 번의 호출로 pane N 개를 확보한다. 학생 여럿을 띄우는
+    // 게 기본 흐름인데, 예전엔 호출자가 split 을 N 번 부르고 **매번 성공했는지
+    // 직접 대조**해야 했다(응답이 실패를 성공으로 실어 보냈다 — 거노가 5명 중 1명만
+    // 띄운 사고). 여기서 실패하면 그 자리에서 멈추고 **몇 개까지 됐는지**를 준다.
+    // 새로 만든 pane 을 다음 대상으로 삼는 건 ⌘D 를 연달아 누른 것과 같은 모양이다.
+    if cmd == "split" {
+        let count = args
+            .iter()
+            .position(|a| a == "--count")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(1);
+        if count > 1 {
+            args.retain(|a| a != "--count");
+            let n = count.to_string();
+            args.retain(|a| *a != n);
+            let socket_path = resolve_socket_path()?;
+            let mut made: Vec<String> = Vec::new();
+            let mut failed: Option<String> = None;
+            for i in 0..count {
+                let mut a = args.clone();
+                // 2회차부터는 방금 만든 pane 을 쪼갠다 — 명시 대상이 있으면 그것을
+                // 첫 회차에만 쓰고, 그 뒤로는 체인.
+                if i > 0 {
+                    a.retain(|x| !x.starts_with('%'));
+                    a.push(made[i - 1].clone());
+                }
+                let req = build_request("split", &a)?;
+                match roundtrip(&socket_path, &req) {
+                    Ok(r) if r.ok => match r
+                        .result
+                        .as_ref()
+                        .and_then(|v| v.get("surface"))
+                        .and_then(|v| v.get("id"))
+                        .and_then(|v| v.as_str())
+                    {
+                        Some(id) => made.push(id.to_string()),
+                        None => {
+                            failed = Some("응답에 surface.id 가 없다".into());
+                            break;
+                        }
+                    },
+                    Ok(r) => {
+                        failed = Some(
+                            r.error
+                                .map(|e| e.message)
+                                .unwrap_or_else(|| "사유 없음".into()),
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        failed = Some(format!("{e:#}"));
+                        break;
+                    }
+                }
+            }
+            let ok = failed.is_none();
+            println!(
+                "{}",
+                json!({
+                    "ok": ok,
+                    "result": { "surfaces": made, "requested": count },
+                    "error": failed,
+                })
+            );
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+    }
     // `wake-watch <surface>` blocks until ONE teammate finishes a turn, then
     // exits — the inverse of board-watch (which streams forever). Meant to run
     // as a Claude Code background task: its exit auto-re-invokes the idle pane

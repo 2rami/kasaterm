@@ -911,11 +911,20 @@ impl Backend for PtyBackend {
             from.map(str::to_string),
             tx,
         ));
-        let id = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "pane-new".into());
+        // 타임아웃이 넉넉한 이유: GUI 스레드가 답하는 데 걸리는 시간은 머신 부하에
+        // 좌우된다. 로드 400 에서 5초를 넘겨 자리표시자로 떨어졌고, 그게 곧 "성공했다"로
+        // 읽혀 학생 스폰이 통째로 샜다(거노 실사고 2026-08-05). 한가할 때 실측 0.06초라
+        // 정상 경로에서 이 값이 체감되는 일은 없다.
+        let id = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(id)) if !id.is_empty() => id,
+            // **성공 봉투에 자리표시자를 싣지 않는다.** 못 만들었으면 못 만들었다고
+            // 답해야 호출자가 재시도·중단을 고를 수 있다.
+            Ok(Ok(_)) => anyhow::bail!("split 이 빈 pane id 를 돌려줬다"),
+            Ok(Err(why)) => anyhow::bail!("split 실패: {why}"),
+            Err(_) => anyhow::bail!(
+                "split 응답 없음(20초) — GUI 스레드가 막혀 있다. 머신 부하를 확인해라"
+            ),
+        };
         Ok(SurfaceInfo {
             id,
             workspace_id: FIXED_WORKSPACE_ID.into(),

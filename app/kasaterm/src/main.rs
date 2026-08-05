@@ -3272,11 +3272,14 @@ enum UserEvent {
     /// 세 번째 필드는 **쪼갤 pane**. None 이면 포커스된 pane 을 쪼갠다(GUI 와 같은
     /// 뜻). 에이전트가 자기 pane 에서 부를 때는 자기 id 를 실어 보낸다 — 안 그러면
     /// 사람이 보고 있는 창이 쪼개진다(거노: "자꾸 내가 포커스하는 윈도우에 띄우냐").
+    /// 네 번째 필드는 회신 채널 — `Ok(새 pane id)` 아니면 `Err(사유)`. 사유를
+    /// 실어야 소켓이 `ok:false` 로 답할 수 있다. 빈 문자열을 성공으로 실어 보내면
+    /// 호출자가 실패를 감지할 방법이 없다(거노 실사고 2026-08-05).
     SocketSplit(
         kasa_pty::SplitDir,
         bool,
         Option<String>,
-        std::sync::mpsc::Sender<String>,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
     SocketFocus(String),
     /// 활성 pane 의 shell OS pid 질의(socket 스레드 → GUI 동기 RPC,

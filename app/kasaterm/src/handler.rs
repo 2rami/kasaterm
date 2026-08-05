@@ -64,19 +64,33 @@ impl ApplicationHandler<UserEvent> for App {
                 // 잠깐 갈아끼웠다 아래에서 되돌리는 것으로 충분하다. 없는 pane 이면
                 // 무시하고 포커스 기준으로 — 죽은 id 로 갈아끼우면 split 이 통째로
                 // 실패한다.
-                if let Some(from) = from {
-                    let mut ws = self.ws.lock().unwrap();
-                    if ws.panes.contains_key(from) {
-                        ws.active_pane = Some(from.clone());
+                // 지정한 pane 이 없으면 **거절한다**. 예전엔 조용히 포커스 기준으로
+                // 떨어졌는데, 그러면 「%999 를 쪼개 달라」가 엉뚱한 창을 쪼개고도
+                // 성공으로 답한다 — 부른 쪽은 자기 대상이 무시된 걸 모른다.
+                // 존재 판정은 `ws.panes` 가 아니라 **레이아웃 트리**로 한다:
+                // split 직후 새 pane 은 `ws.panes` 에 PaneState 가 아직 없어서,
+                // 방금 만든 pane 을 다음 대상으로 넘기는 연속 split(`--count`)이
+                // 「없는 pane」으로 거절당한다. 트리는 `split_leaf` 가 동기로 갱신한다.
+                let missing = from.as_ref().and_then(|f| {
+                    self.window_of_pane(f).is_none().then(|| f.clone())
+                });
+                let outcome = if let Some(f) = missing {
+                    Err(format!("쪼갤 pane {f} 이 없다 — 종료·재시작으로 사라졌는지 확인해라"))
+                } else {
+                    if let Some(from) = from {
+                        self.ws.lock().unwrap().active_pane = Some(from.clone());
                     }
-                }
-                let new_id = self.split_active_pane(*dir).unwrap_or_default();
+                    self.split_active_pane(*dir).map_err(|e| format!("{e:#}"))
+                };
                 if !*focus {
                     if let Some(prev) = prev {
                         self.ws.lock().unwrap().active_pane = Some(prev);
                     }
                 }
-                let _ = reply.send(new_id);
+                if let Err(ref why) = outcome {
+                    eprintln!("[kasaterm] socket split 실패: {why}");
+                }
+                let _ = reply.send(outcome);
                 self.chrome_dirty = true;
                 self.render_frame();
                 return;

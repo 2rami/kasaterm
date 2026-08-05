@@ -479,22 +479,37 @@ impl App {
         Ok(new_id)
     }
 
+    /// 포커스된 pane 을 쪼갠다. 실패는 **전부 `Err` + 사유**다.
+    ///
+    /// 예전엔 실패 셋을 `Ok(String::new())` 로 돌려줬는데, 소켓 경로가 그 빈
+    /// 문자열을 `pane-new` 자리표시자로 바꿔 **`ok:true` 에 실어 보냈다** —
+    /// 호출자가 성공으로 읽고 그 id 로 send 를 쏘면 조용히 사라진다. 거노가 학생
+    /// 5명을 띄우려다 1명만 뜬 게 이것이다(2026-08-05). 사유 없는 실패는 호출자가
+    /// `list surfaces` 를 다시 대조해야만 알 수 있어, 스크립트가 감지할 방법이 없었다.
     pub(crate) fn split_active_pane(&mut self, dir: kasa_pty::SplitDir) -> Result<String> {
         if self.tmux.is_some() {
-            return Ok(String::new());
+            anyhow::bail!("tmux 백엔드에선 로컬 split 을 쓰지 않는다");
         }
         let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
-            return Ok(String::new());
+            anyhow::bail!("활성 pane 이 없다");
         };
         let new_id = self.spawn_split_session(&active)?;
         let (win_cols, win_rows) = self.window_cells();
         let layout = self.pty_layout.as_mut().expect("pty_layout set in start_pty");
         if !layout.split_leaf(&active, dir, new_id.clone()) {
-            // Active pane isn't in the tree — shouldn't happen, but
-            // bail without leaking the spawned session entry.
+            // 쪼갤 pane 이 **활성 window 트리에 없다** — 포커스가 다른 창으로
+            // 넘어가 있으면 실제로 일어난다. 샌 세션을 되감고 사유를 올린다.
             self.pty.remove(&new_id);
             self.next_pane_id -= 1;
-            return Ok(String::new());
+            let win = self.window_of_pane(&active);
+            anyhow::bail!(
+                "pane {active} 이 활성 window({}) 트리에 없다{}",
+                self.active_window,
+                match win {
+                    Some(w) => format!(" — window {w} 에 있다"),
+                    None => " — 어느 window 에도 없다".into(),
+                }
+            );
         }
         self.ws.lock().unwrap().active_pane = Some(new_id.clone());
         self.resize_backend(win_cols, win_rows);
