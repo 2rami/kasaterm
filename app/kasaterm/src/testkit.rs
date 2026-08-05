@@ -5,6 +5,18 @@ use super::*;
 /// 프레임을 펌프한다 — 자세한 사정은 `run_pending_automdscript` 참고.
 static MDSCRIPT_LEFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 학생이 든 별도창을 전제로 하는 하네스들(`autofacehover`·`autoroomsplit`)이
+/// 「창이 없다」로 끝났을 때 붙이는 안내. 둘 다 **내가 인자를 잘못 준 것인데
+/// 검사 대상이 틀린 것처럼 읽히는** 부류라, 메시지가 직접 짚어 준다.
+///
+/// 실제로 동료가 둘을 한꺼번에 밟았다(2026-08-05). 이전 문구는 "AUTOSTUDENT_ROOM
+/// 을 앞에 둬라"였는데, 그 변수는 이미 켜 있었고 문제는 **시각**이었다 — 조언이
+/// 오답이면 없는 것보다 나쁘다.
+const AUX_STUDENT_HINT: &str = "\n  ①AUTOSTUDENT 는 로스터의 **한글 이름**이다(theme.rs CHARACTER_SLUGS). \
+슬러그(midori)를 주면 「없는 학생명」에서 끝나 프사가 아예 안 심긴다 — 안 주면 기본값 미도리.\
+\n  ②AUTOSTUDENT_ROOM 이 방을 꺼내는 건 AUTOSTUDENT_MS **+4000ms** 다(3단계). \
+이 하네스의 _MS 를 그보다 뒤로 둬라. 터미널창은 AUTOUNDOCK_MS 로 따로 꺼낼 수도 있다.";
+
 /// `KASATERM_AUTOPANEMERGE` 예약 슬롯 — (발사 시각, 대상 leaf).
 static AUTO_MERGE: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, String)>>> =
     std::sync::OnceLock::new();
@@ -2462,7 +2474,11 @@ impl App {
         }
         let Some(idx) = self.aux_windows.iter().position(|a| a.room_window().is_some()) else {
             if step == 0 {
-                eprintln!("[autoroomsplit] FAIL — 방 별도창이 없다(AUTOSTUDENT_ROOM 을 앞에 둬라)");
+                eprintln!(
+                    "[autoroomsplit] FAIL — 방 별도창이 없다(별도창 {}개). {}",
+                    self.aux_windows.len(),
+                    AUX_STUDENT_HINT
+                );
             }
             STEP.store(2, Ordering::Relaxed);
             return;
@@ -2566,7 +2582,11 @@ impl App {
             }
         }
         let Some((idx, key)) = target else {
-            eprintln!("[autofacehover] FAIL — 프사를 그리는 별도창이 없다(AUTOSTUDENT_ROOM 을 앞에 둬라)");
+            eprintln!(
+                "[autofacehover] FAIL — 프사를 그리는 별도창이 없다(별도창 {}개). {}",
+                self.aux_windows.len(),
+                AUX_STUDENT_HINT
+            );
             return;
         };
         // 대조점을 프사 기준으로 잡으려면 자리를 먼저 알아야 한다. 이 프레임엔
