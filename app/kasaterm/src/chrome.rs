@@ -1765,19 +1765,28 @@ impl App {
     /// "빠른 파일" 고정 섹션 목록: (라벨, 경로, 아이콘 이름). ① 개인 CLAUDE.md
     /// (~/.claude/CLAUDE.md) 는 항상, ② 프로젝트 CLAUDE.md(트리 root/CLAUDE.md)·
     /// ③ 프로젝트 메모리(root/.memory/MEMORY.md, symlink 허용→exists) 는 있을 때만.
+    /// codex 짝(개인 ~/.codex/AGENTS.md · 프로젝트 root/AGENTS.md)도 있을 때만 넣는다 —
+    /// codex pane 도 claude 처럼 자기 지시 파일을 한 번에 열게.
+    /// ⚠️ 아이콘 "codex" 는 codex.svg 가 아직 없으면 gpu.rs match 에서 None 으로
+    /// 빠져 아이콘만 안 뜬다(빌드는 안 깨진다). svg 들어오면 gpu.rs 에 arm 추가 필요.
     pub(crate) fn quick_files(&self) -> Vec<(&'static str, std::path::PathBuf, &'static str)> {
         let mut out: Vec<(&'static str, std::path::PathBuf, &'static str)> = Vec::new();
         if let Ok(home) = std::env::var("HOME") {
-            out.push((
-                "개인 CLAUDE.md",
-                std::path::PathBuf::from(home).join(".claude/CLAUDE.md"),
-                "claude",
-            ));
+            let home = std::path::PathBuf::from(home);
+            out.push(("개인 CLAUDE.md", home.join(".claude/CLAUDE.md"), "claude"));
+            let agents = home.join(".codex/AGENTS.md");
+            if agents.exists() {
+                out.push(("개인 AGENTS.md", agents, "codex"));
+            }
         }
         if let Some(root) = self.file_tree.root.as_ref() {
             let proj = root.join("CLAUDE.md");
             if proj.exists() {
                 out.push(("프로젝트 CLAUDE.md", proj, "claude"));
+            }
+            let agents = root.join("AGENTS.md");
+            if agents.exists() {
+                out.push(("프로젝트 AGENTS.md", agents, "codex"));
             }
             let mem = root.join(".memory/MEMORY.md");
             if mem.exists() {
