@@ -2203,15 +2203,7 @@ impl App {
                 .iter()
                 .find(|(_, _, r)| fmx >= r.0 && fmx <= r.0 + r.2 && fmy >= r.1 && fmy <= r.1 + r.3)
             {
-                paint_face_popup(
-                    g,
-                    cname,
-                    slug,
-                    *r,
-                    8.0 * self.cell.h,
-                    win_px.0 / scale,
-                    TITLE_HEIGHT,
-                );
+                paint_face_popup(g, cname, slug, *r, self.cell.h, win_px.0 / scale, TITLE_HEIGHT);
             }
             // Markdown is laid out into chrome glyphs/rects here — after the
             // (empty) cell pass, before pane headers/borders so those land on
@@ -8931,10 +8923,23 @@ pub(crate) fn paint_student_overlays(
     }
 }
 
+/// 프사 팝업 한 변 = 셀 높이의 몇 배인가.
+///
+/// 프사 원본이 96×96 뿐이라(12명 전부, 더 큰 바스트업 원본은 레포에 없다) 이
+/// 배수가 곧 확대율을 정한다 — 8배면 344px 라 3.6배 확대가 되어 총열·머리카락
+/// 윤곽에 계단이 보였다. 6배(2.7배 확대)가 "얼굴 크기 vs 뭉갬"의 절충점으로
+/// 거노가 고른 값이다. 256 전신 프레임으로 갈아타면 선명해지지만 캐릭터가 원본
+/// 100×208 이라 같은 박스에서 반토막이 나고 바스트업→전신으로 성격이 바뀐다.
+const FACE_POPUP_CELLS: f32 = 6.0;
+
 /// statusline 프사 위에 커서가 있을 때 뜨는 큰 bust 팝업.
 ///
-/// `face` 는 그 프사 자리(논리 px), `pop` 은 팝업 한 변, `title_h` 는 팝업이
-/// 넘어가면 안 되는 위쪽 크롬 높이. statusline 은 늘 창 아래쪽이라 위로 띄운다.
+/// `face` 는 그 프사 자리(논리 px), `cell_h` 는 셀 높이(팝업 크기 산출용),
+/// `title_h` 는 팝업이 넘어가면 안 되는 위쪽 크롬 높이. statusline 은 늘 창
+/// 아래쪽이라 위로 띄운다.
+///
+/// 팝업 크기를 호출자가 넘기지 않고 여기서 정하는 건, 메인 창과 별도창 두 곳이
+/// 부르기 때문이다 — 상수를 밖에 두면 한쪽만 고쳐진다.
 ///
 /// bust 는 누끼(투명 배경)라 캐릭터만 뜨고 뒤가 비친다 — 배경 박스는 없다
 /// (거노: "배경색 아예 없애고"). 이름표만 얇은 pill 로 가독성을 확보한다.
@@ -8946,10 +8951,11 @@ pub(crate) fn paint_face_popup(
     cname: &str,
     slug: &str,
     face: (f32, f32, f32, f32),
-    pop: f32,
+    cell_h: f32,
     win_w: f32,
     title_h: f32,
 ) {
+    let pop = FACE_POPUP_CELLS * cell_h;
     let key = format!("student:{slug}:profile");
     if !g.has_image(&key) {
         if let Some((rgba, w, h)) = student_profile_rgba(slug) {
