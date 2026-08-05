@@ -2242,13 +2242,25 @@ impl App {
         });
         let Some((due, who)) = due else { return };
         let step = STEP.load(Ordering::Relaxed);
-        // 2초를 두는 이유: rustc 빌드 + 프로세스 표 캐시(300ms)와 pty 의 proc 캐시
-        // (500ms)가 겹쳐, 바로 물으면 아직 셸 이름이 돌아온다.
-        if step > 2 || Instant::now() < *due + std::time::Duration::from_millis(2000 * step as u64)
-        {
+        // 2초씩 두는 이유: rustc 빌드 + 프로세스 표 캐시(300ms)와 pty 의 proc 캐시
+        // (500ms)가 겹쳐, 바로 물으면 아직 셸 이름이 돌아온다. 마지막 칸만 4초인
+        // 건 별도창 캡처(+2500ms)가 끝난 **뒤에** 판정해야 해서다.
+        const AT_MS: [u64; 4] = [0, 2000, 4000, 8000];
+        let Some(&off) = AT_MS.get(step as usize) else { return };
+        if Instant::now() < *due + std::time::Duration::from_millis(off) {
             return;
         }
-        let Some(pid) = self.ws.lock().unwrap().active_pane.clone() else { return };
+        // 학생을 심은 pane 을 **기억**한다. 3단계에서 방을 새로 열면 활성 pane 이
+        // 그쪽으로 옮겨가므로, 그때 active_pane 을 다시 읽으면 엉뚱한 pane 을
+        // 학생으로 알고 판정한다(실측으로 한 번 속았다).
+        static PLANTED: OnceLock<String> = OnceLock::new();
+        let pid = match PLANTED.get() {
+            Some(p) => p.clone(),
+            None => {
+                let Some(p) = self.ws.lock().unwrap().active_pane.clone() else { return };
+                PLANTED.get_or_init(|| p).clone()
+            }
+        };
         if step == 0 {
             STEP.store(1, Ordering::Relaxed);
             if crate::theme::character_slug(who).is_none() {
@@ -2283,6 +2295,11 @@ impl App {
         if step == 2 {
             STEP.store(3, Ordering::Relaxed);
             self.autostudent_room(&pid, event_loop);
+            return;
+        }
+        if step == 3 {
+            STEP.store(4, Ordering::Relaxed);
+            self.autostudent_assert_aux(&pid);
             return;
         }
         STEP.store(2, Ordering::Relaxed);
@@ -2334,9 +2351,13 @@ impl App {
     /// 여럿이라 좌표를 `leaf_rects` 로 펼치고 **pane 마다** 스캔한다. 자리 계산이
     /// 한 겹 더 있는 쪽이 틀리기 쉽다.
     ///
-    /// 방을 하나 새로 여는 게 먼저인 이유: `undock_window_room` 은 방이 하나뿐이면
-    /// 거부한다(꺼내면 메인이 빈 채로 남는다). 새 방은 활성이 되므로, 꺼낼 방은
-    /// **학생을 심기 전에 기억해 둔 번호**여야 한다.
+    /// 방을 **둘** 새로 여는 이유가 둘이다. 하나는 `undock_window_room` 이 방이
+    /// 하나뿐이면 거부해서고(꺼내면 메인이 빈 채로 남는다), 다른 하나는 **음성
+    /// 대조군**이다 — 학생이 없는 빈 방도 같이 꺼내 둔다. 그래야 판정이 "항상
+    /// PASS 하는 판정"이 아니라는 게 같은 실행 안에서 증명된다.
+    ///
+    /// 새 방은 열자마자 활성이 되므로, 꺼낼 방은 **학생을 심기 전에 기억해 둔
+    /// 번호**여야 한다.
     fn autostudent_room(&mut self, pid: &str, event_loop: &ActiveEventLoop) {
         let Ok(cap) = std::env::var("KASATERM_AUTOSTUDENT_ROOM") else { return };
         let Some(win) = self.window_of_pane(pid) else {
@@ -2344,13 +2365,58 @@ impl App {
             return;
         };
         self.new_window();
+        let empty = self.active_window;
+        self.new_window();
         self.undock_window_room(win, event_loop, None);
+        self.undock_window_room(empty, event_loop, None);
         let Some(a) = self.aux_windows.iter_mut().find(|a| a.room_window() == Some(win)) else {
             eprintln!("[autostudent] FAIL — 방 {win} 별도창이 안 떴다(방 수={})", self.windows.len());
             return;
         };
         a.pending_capture = Some((Instant::now() + std::time::Duration::from_millis(2500), cap));
-        eprintln!("[autostudent] 방 {win} 을 별도창으로 — 학생 pane {pid} 이 그 안에 있다");
+        eprintln!(
+            "[autostudent] 방 {win}(학생 {pid})·방 {empty}(빈 방, 음성대조군) 을 별도창으로"
+        );
+    }
+    /// `autostudent` 마지막 단계: 떠 있는 별도창마다 **학생 스프라이트가 정말
+    /// 그려졌는지** 판정한다. 캡처만 남기면 사람이 봐야 하고, 안 보면 오버레이
+    /// 패스가 다시 끊겨도 조용히 통과한다.
+    ///
+    /// 스캐너를 여기서 다시 돌리지 않는다 — `aux_student_slots` 를 하네스가 직접
+    /// 부르면 **자리가 있는지**만 알 뿐 렌더 패스가 그걸 부르는지는 못 본다.
+    /// 그게 정확히 #48 이었다(자리는 멀쩡했고 부르는 쪽이 없었다). 그래서 한 프레임
+    /// 실제로 그린 뒤 GPU 에 올라간 이미지 키를 센다.
+    /// 기대값은 "그 창이 학생 pane 을 담고 있나"로 정한다 — 스캐너를 다시 돌려
+    /// 정하면 판정이 검사 대상과 같은 코드를 믿는 셈이 된다.
+    fn autostudent_assert_aux(&mut self, pid: &str) {
+        if self.aux_windows.is_empty() {
+            return;
+        }
+        let home = self.window_of_pane(pid);
+        for idx in 0..self.aux_windows.len() {
+            self.aux_render(idx);
+            let Some(a) = self.aux_windows.get(idx) else { continue };
+            let keys: Vec<&str> =
+                a.gpu.drawn_image_keys().filter(|k| k.starts_with("student:")).collect();
+            // 방창부터 봐야 한다 — `term_pane_id()` 는 방창에서도 포커스 pane 을
+            // 내주므로 터미널창을 먼저 물으면 방창이 그리로 빨려 들어간다.
+            let (what, want) = match (a.room_window(), a.term_pane_id()) {
+                (Some(w), _) => (format!("방창 {w}"), home == Some(w)),
+                (_, Some(p)) => (format!("터미널창 {p}"), p == pid),
+                _ => ("별도창".into(), false),
+            };
+            let got = !keys.is_empty();
+            eprintln!(
+                "[autostudent] {what} — 학생 스프라이트 {}개 {keys:?} 기대={} → {}",
+                keys.len(),
+                if want { "있음" } else { "없음(대조군)" },
+                match (want, got) {
+                    (true, true) | (false, false) => "PASS",
+                    (true, false) => "FAIL — 오버레이 패스를 안 탔다",
+                    (false, true) => "FAIL — 학생 없는 창에 스프라이트가 샜다",
+                }
+            );
+        }
     }
     /// Headless **방 탭** 드래그-tear repro: `KASATERM_AUTOTEARROOM_MS`. pane 탭
     /// (`autoteardrag`)과 별개 경로다 — 방 탭은 `win_tab_drag` 를 타고, 꺼내기 판정도
