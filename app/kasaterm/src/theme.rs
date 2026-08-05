@@ -1000,7 +1000,7 @@ pub fn character_accent_n(name: &str, ordinal: usize) -> Option<[u8; 4]> {
 
 /// 캐릭터명 ↔ 에셋 슬러그 대응표 (assets/students/<slug>.png, arona-ui
 /// 디렉토리명·shim 팀원 로마자 이름과 동일). 정/역방향이 같은 표를 읽는다.
-const CHARACTER_SLUGS: &[(&str, &str)] = &[
+pub(crate) const CHARACTER_SLUGS: &[(&str, &str)] = &[
     ("아로나", "arona"),
     ("프라나", "prana"),
     ("미도리", "midori"),
