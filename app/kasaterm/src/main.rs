@@ -3275,8 +3275,10 @@ enum UserEvent {
     /// 네 번째 필드는 회신 채널 — `Ok(새 pane id)` 아니면 `Err(사유)`. 사유를
     /// 실어야 소켓이 `ok:false` 로 답할 수 있다. 빈 문자열을 성공으로 실어 보내면
     /// 호출자가 실패를 감지할 방법이 없다(거노 실사고 2026-08-05).
+    /// 첫 번째 필드가 `None` 이면 **auto** — GUI 스레드가 쪼갤 pane 의 종횡비를 보고
+    /// 긴 축을 고른다. 소켓 스레드는 pane 픽셀 크기를 모르므로 거기서 못 정한다.
     SocketSplit(
-        kasa_pty::SplitDir,
+        Option<kasa_pty::SplitDir>,
         bool,
         Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,

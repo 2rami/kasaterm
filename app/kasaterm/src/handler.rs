@@ -80,7 +80,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(from) = from {
                         self.ws.lock().unwrap().active_pane = Some(from.clone());
                     }
-                    self.split_active_pane(*dir).map_err(|e| format!("{e:#}"))
+                    self.split_pane_auto(*dir).map_err(|e| format!("{e:#}"))
                 };
                 if !*focus {
                     if let Some(prev) = prev {
