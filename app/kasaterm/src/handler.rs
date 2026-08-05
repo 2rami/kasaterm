@@ -913,23 +913,34 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             });
         }
-        // claude 5시간 사용량 폴러 — 로컬 /claude-usage(oauth/usage 프록시)를 60초마다
-        // 조회해 5시간 창 사용률(%)을 채운다. 타이틀바 우상단 pill 의 소스(거노: 웹뷰
-        // TitleBar UsagePill 을 웹뷰 안 봐서 터미널에도). curl 로 로컬 엔드포인트만 쳐
-        // 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 값이 바뀔 때만 redraw.
+        // claude 한도 폴러 — 로컬 /claude-usage(oauth/usage 프록시)를 조회해 **가장 먼저
+        // 닫히는 창**의 사용률을 채운다. Info 탭 머리 계정 행의 소스. curl 로 로컬
+        // 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 값이 바뀔 때만
+        // redraw.
+        //
+        // 주기는 60초지만 **5초 단위로 쪼개 자며** 계정이 바뀌었는지 본다. 전에는 통째로
+        // 60초를 자서, 계정을 눌러도 숫자가 최대 1분(+서버 캐시 1분) 동안 옛 계정 것으로
+        // 남았다 — 거노: "누를때마다 바뀐다는 표시가 없고".
         {
             let usage_proxy = self.proxy.clone();
             let usage_cache = self.claude_usage.clone();
             std::thread::spawn(move || {
-                // 방금 전환했으면 잠시 판정을 쉰다. `/claude-usage` 는 60초 TTL 캐시라
-                // 전환 직후 한 번은 **떠나온 계정의 값**이 그대로 나올 수 있고, 그걸
-                // 새 계정의 사용률로 읽으면 계정을 연쇄로 건너뛴다.
+                // 방금 전환했으면 잠시 **자동 전환 판정만** 쉰다(표시는 계속 갱신).
                 let mut last_switch: Option<std::time::Instant> = None;
+                let mut seen_account = socket::read_claude_account();
                 loop {
-                    let usage = fetch_claude_usage(&crate::mcp_panel_port());
-                    let next = usage.as_ref().and_then(five_hour_pct);
-                    // 일시적 fetch 실패(None)면 마지막 유효값을 유지 — pill 깜빡임/사라짐 방지.
-                    // (git col 폴러와 동일 정책. 5시간 창은 항상 존재해 참 None 은 사실상 없음.)
+                    let fetched = fetch_claude_usage(&crate::mcp_panel_port());
+                    let usage = fetched.as_ref().map(|(u, _, _)| u);
+                    let next = fetched.as_ref().and_then(|(u, stale, dir)| {
+                        socket::usage_pressure(u).map(|p| crate::UsageBadge {
+                            pct: p.pct,
+                            label: p.label,
+                            stale: *stale,
+                            account_dir: dir.clone(),
+                        })
+                    });
+                    // 일시적 fetch 실패(None)면 마지막 유효값을 유지 — 깜빡임/사라짐 방지.
+                    // (git col 폴러와 동일 정책.)
                     if next.is_some() {
                         match usage_cache.lock() {
                             Ok(mut g) => {
@@ -946,8 +957,14 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     // 한도 자동 계정 전환. 판정은 여기(폴러)서 하고 실제 전환은 GUI
                     // 스레드가 한다 — 설정 저장이 shim 을 다시 까는 일이라 App 이 필요하다.
+                    //
+                    // **stale 값으로는 안 옮긴다**: upstream 이 막혀 재사용된 숫자로
+                    // 계정을 떠나면 멀쩡한 자리를 옛 기록 때문에 버리는 셈이다.
                     let rested = last_switch.is_none_or(|t| t.elapsed().as_secs() >= 300);
-                    if let (Some(u), true, true) = (usage.as_ref(), socket::read_account_autoswitch(), rested) {
+                    let fresh = fetched.as_ref().is_some_and(|(_, stale, _)| !*stale);
+                    if let (Some(u), true, true, true) =
+                        (usage, socket::read_account_autoswitch(), rested, fresh)
+                    {
                         if let Some(p) = socket::usage_pressure(u) {
                             if p.pct >= socket::read_account_autoswitch_pct() {
                                 let now = std::time::SystemTime::now()
@@ -973,7 +990,19 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                         }
                     }
-                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    // 60초를 5초씩 쪼개 자며 활성 계정이 바뀌었는지 본다. 바뀌면 즉시
+                    // 다시 조회한다 — 서버 캐시도 계정별로 갈렸으니 그 조회는 캐시
+                    // 미스라 새 계정 값을 곧바로 물어 온다. 설정 파일을 보는 것은
+                    // 폴러가 GUI 상태를 못 만지기 때문이고, `settings_save` 가 파일과
+                    // shim env 를 함께 갱신하므로 이 신호로 충분하다.
+                    for _ in 0..12 {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        let now = socket::read_claude_account();
+                        if now != seen_account {
+                            seen_account = now;
+                            break;
+                        }
+                    }
                 }
             });
         }
@@ -5204,10 +5233,14 @@ impl App {
 /// Returns `None` on a transient git failure so the caller keeps the last good
 /// snapshot. Shared by the 1.2s poller and the per-click stage/unstage refresh
 /// so a + / − press reflects immediately instead of waiting for the next tick.
-/// 로컬 `/claude-usage`(oauth/usage 프록시)의 `usage` 본문. curl 로 로컬
-/// 엔드포인트만 쳐 토큰은 서버(키체인)가 읽는다 — argv 유출 없음. 실패/토큰
-/// 없음/형식밖이면 None.
-fn fetch_claude_usage(port: &str) -> Option<serde_json::Value> {
+/// 로컬 `/claude-usage`(oauth/usage 프록시) 응답 — `usage` 본문에 `stale` 과
+/// `account_dir` 을 함께 돌려준다. curl 로 로컬 엔드포인트만 쳐 토큰은 서버(키체인)가
+/// 읽는다 — argv 유출 없음. 실패/토큰 없음/형식밖이면 None.
+///
+/// `stale`·`account_dir` 이 필요한 이유: 화면이 "지금 값인지"와 "어느 계정 값인지"를
+/// 말해야 한다. 전에는 `usage` 만 떠서, upstream 이 막힌 옛 숫자와 방금 조회한 숫자가
+/// 화면에서 똑같이 보였고 계정을 바꿔도 표시가 안 바뀌었다(거노 2026-08-05).
+fn fetch_claude_usage(port: &str) -> Option<(serde_json::Value, bool, String)> {
     let out = std::process::Command::new("curl")
         .args(["-s", "--max-time", "5", &format!("http://127.0.0.1:{port}/claude-usage")])
         .output()
@@ -5219,14 +5252,9 @@ fn fetch_claude_usage(port: &str) -> Option<serde_json::Value> {
     if v.get("ok").and_then(|b| b.as_bool()) != Some(true) {
         return None;
     }
-    v.get("usage").cloned()
-}
-
-/// 타이틀바 pill 이 쓰는 5시간 창 사용률(%). 자동 전환은 이걸 안 보고 주간까지
-/// 아우르는 `socket::usage_pressure` 를 본다 — pill 은 "이 세션이 얼마나
-/// 남았나"라는 다른 질문에 답한다. utilization 은 이미 0..100 퍼센트.
-fn five_hour_pct(usage: &serde_json::Value) -> Option<f32> {
-    usage.get("five_hour")?.get("utilization")?.as_f64().map(|x| x as f32)
+    let stale = v.get("stale").and_then(|b| b.as_bool()).unwrap_or(false);
+    let dir = v.get("account_dir").and_then(|s| s.as_str()).unwrap_or_default().to_string();
+    Some((v.get("usage")?.clone(), stale, dir))
 }
 
 fn fetch_git_col_view(cwd: &std::path::Path) -> Option<GitColView> {

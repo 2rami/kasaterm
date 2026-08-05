@@ -1654,9 +1654,9 @@ impl App {
         let toast_alpha = self.copy_toast_alpha();
         // Collab completion toast (top-right). Pre-read here like toast_alpha so
         // the render block below never re-borrows self while g is held.
-        // 5시간 사용량 값 — g 생성 전에 읽어 borrow 충돌을 피한다(다른 pre-read 와 동일).
+        // 한도 배지 — g 생성 전에 읽어 borrow 충돌을 피한다(다른 pre-read 와 동일).
         // 쓰는 곳은 Info 탭 머리의 계정 행(info::draw_info_actions).
-        let claude_usage_pct = self.claude_usage.lock().ok().and_then(|v| *v);
+        let claude_usage_pct = self.claude_usage.lock().ok().and_then(|v| v.clone());
         let collab_toast_alpha = self.collab_toast_alpha();
         let collab_toast_msg = self.collab.toast.as_ref().map(|(m, _)| m.clone());
         let collab_toast_action_on = self.collab.toast_action.is_some();
@@ -4529,7 +4529,7 @@ impl App {
                     self.cursor_px,
                     &mut self.info,
                     acct_label.as_deref(),
-                    claude_usage_pct,
+                    claude_usage_pct.as_ref(),
                     self.account_menu,
                     crate::socket::read_shim_inject(),
                     git_col_x,

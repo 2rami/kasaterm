@@ -2223,21 +2223,12 @@ fn claude_keychain_service(dir: Option<&str>) -> String {
     }
 }
 
-/// claude oauth usage API 토큰 — 활성 계정의 저장소에서 읽는다. macOS 는
-/// Keychain, 그 외는 저장소 dir 의 `.credentials.json`.
+/// claude oauth API 토큰 — 주어진 계정 저장소에서 읽는다. macOS 는 Keychain,
+/// 그 외는 저장소 dir 의 `.credentials.json`. 빈 값/None = 기본 로그인.
 ///
-/// 활성 계정은 `KASATERM_CLAUDE_ACCOUNT_DIR`(kasaterm 이 shim 을 깔 때마다 자기
-/// 프로세스 env 에 갱신)로 온다. 이게 없으면 기본 로그인이라 예전과 똑같이 동작한다.
-/// 이걸 안 따라가면 계정을 바꿔도 pill 이 기본 계정 사용량을 계속 보여준다 —
-/// 한도 분산이 목적인 기능에서 한도 표시가 거짓말을 하는 셈이라 같이 따라가야 한다.
-fn read_claude_token() -> Option<String> {
-    let account_dir = std::env::var("KASATERM_CLAUDE_ACCOUNT_DIR")
-        .ok()
-        .filter(|s| !s.is_empty());
-    read_claude_token_from(account_dir.as_deref())
-}
-
-/// 위와 같되 계정 저장소를 인자로 받는다 — env 를 안 건드려 테스트가 서로 안 밟는다.
+/// 활성 계정 경로는 `KASATERM_CLAUDE_ACCOUNT_DIR`(kasaterm 이 shim 을 깔 때마다
+/// 자기 프로세스 env 에 갱신)에서 오지만, env 를 읽는 것은 **호출자**다 — 그래야
+/// 캐시 키와 조회 대상이 같은 값에서 나오고, 테스트가 서로 env 를 안 밟는다.
 fn read_claude_token_from(account_dir: Option<&str>) -> Option<String> {
     let pick = |v: &serde_json::Value| {
         v.pointer("/claudeAiOauth/accessToken")
@@ -2405,33 +2396,67 @@ async fn claude_identity_handler(
     (cors, Json(out))
 }
 
-async fn claude_usage_handler() -> impl IntoResponse {
+async fn claude_usage_handler(
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    // (freshness, usage). freshness=Some(at) 면 그 시점 성공값, None 이면 디스크에서
-    // 로드한 재시작 이전 값(항상 만료 취급 → upstream 재시도, 실패 시 stale 폴백).
-    static CACHE: OnceLock<Mutex<Option<(Option<Instant>, serde_json::Value)>>> = OnceLock::new();
+    // 계정 저장소별 (freshness, usage). freshness=Some(at) 면 그 시점 성공값, None 이면
+    // 디스크에서 로드한 재시작 이전 값(항상 만료 취급 → upstream 재시도, 실패 시 stale).
+    //
+    // **캐시를 계정별로 가르는 이유**(거노 2026-08-05: "누를때마다 바뀐다는 표시가
+    // 없고 사용량도 제대로 표기안돼"): 전에는 프로세스 전역 한 벌이라, 계정을 바꿔도
+    // 60초 동안은 **떠나온 계정의 숫자**가 그대로 나왔고 upstream 이 막히면 stale
+    // 폴백이 그 값을 무한히 이어 줬다. 계정별로 가르면 전환 직후는 캐시 미스라 그
+    // 자리에서 새 계정을 조회한다. 실측 당시 세 슬롯의 weekly_all 이 95/25/? 로
+    // 제각각인데 화면엔 하나의 숫자만 떴다.
+    #[allow(clippy::type_complexity)]
+    static CACHE: OnceLock<Mutex<HashMap<String, (Option<Instant>, serde_json::Value)>>> =
+        OnceLock::new();
     const TTL: Duration = Duration::from_secs(60);
-    // 첫 접근 시 디스크 캐시를 로드 — kasaterm 재시작(서버도 함께 재시작)에도 마지막
-    // 성공값을 즉시 돌려줘 pill 이 안 꺼진다(거노: "사용량 또 안 뜸").
-    let cache = CACHE.get_or_init(|| Mutex::new(load_usage_disk().map(|v| (None, v))));
+    let cache = CACHE.get_or_init(Default::default);
+
+    // 조회 대상 슬롯: `?dir=` 이 있으면 그것, 없으면 활성 계정(kasaterm 이 shim 을
+    // 깔 때마다 `KASATERM_CLAUDE_ACCOUNT_DIR` 로 알려 준다). 빈 문자열 = 기본 로그인.
+    let dir = params
+        .get("dir")
+        .cloned()
+        .unwrap_or_else(|| std::env::var("KASATERM_CLAUDE_ACCOUNT_DIR").unwrap_or_default());
 
     let cors = [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")];
+    // `account_dir` 을 함께 돌려준다 — 어느 계정의 숫자인지 소비자가 알 수 있어야
+    // 전환 직후 옛 값을 새 계정 것으로 오인하지 않는다.
     let ok = |v: &serde_json::Value, stale: bool| {
-        serde_json::json!({ "ok": true, "usage": v, "stale": stale })
+        serde_json::json!({ "ok": true, "usage": v, "stale": stale, "account_dir": dir })
     };
 
     // 1) 신선한 캐시(60초 이내 성공)면 upstream 없이 그대로.
     if let Ok(g) = cache.lock() {
-        if let Some((Some(at), v)) = g.as_ref() {
+        if let Some((Some(at), v)) = g.get(&dir) {
             if at.elapsed() < TTL {
                 return (cors, Json(ok(v, false)));
             }
         }
     }
 
-    // 2) 신선 캐시가 없을 때만 upstream 시도.
-    let fresh: Option<serde_json::Value> = match read_claude_token() {
+    // 2) 신선 캐시가 없을 때만 upstream 시도. 첫 조회면 디스크 스냅샷을 먼저 실어
+    //    둔다 — 재시작 직후 upstream 이 429 면 3) 이 그걸 stale 로 돌려줘 pill 이
+    //    빈칸으로 떨어지지 않는다(거노: "사용량 또 안 뜸").
+    {
+        let mut seed = None;
+        if let Ok(g) = cache.lock() {
+            if !g.contains_key(&dir) {
+                seed = load_usage_disk(&dir);
+            }
+        }
+        if let Some(v) = seed {
+            if let Ok(mut g) = cache.lock() {
+                g.entry(dir.clone()).or_insert((None, v));
+            }
+        }
+    }
+    let fresh: Option<serde_json::Value> = match read_claude_token_from(Some(dir.as_str())) {
         Some(token) => {
             let resp = reqwest::Client::new()
                 .get("https://api.anthropic.com/api/oauth/usage")
@@ -2453,56 +2478,95 @@ async fn claude_usage_handler() -> impl IntoResponse {
 
     if let Some(v) = fresh {
         if let Ok(mut g) = cache.lock() {
-            *g = Some((Some(Instant::now()), v.clone()));
+            g.insert(dir.clone(), (Some(Instant::now()), v.clone()));
         }
-        save_usage_disk(&v);
+        save_usage_disk(&dir, &v);
         return (cors, Json(ok(&v, false)));
     }
 
-    // 3) upstream 실패 — 만료됐어도 마지막 성공값이 있으면 stale 로 폴백(pill 유지).
+    // 3) upstream 실패 — 만료됐어도 이 슬롯의 마지막 성공값이 있으면 stale 로
+    //    폴백(pill 유지). **다른 슬롯 값으로는 절대 폴백하지 않는다** — 그게 전에
+    //    한 계정의 숫자를 세 계정에 전부 붙여 보이던 경로다.
     if let Ok(g) = cache.lock() {
-        if let Some((_, v)) = g.as_ref() {
+        if let Some((_, v)) = g.get(&dir) {
             return (cors, Json(ok(v, true)));
         }
     }
     (
         cors,
-        Json(serde_json::json!({ "ok": false, "error": "usage api unavailable (rate-limited, no cache yet)" })),
+        Json(serde_json::json!({ "ok": false, "error": "usage api unavailable (rate-limited, no cache yet)", "account_dir": dir })),
     )
 }
 
-/// `~/.config/kasaterm/usage-cache.json` — claude 5시간 사용량 마지막 성공 스냅샷.
+/// `~/.config/kasaterm/usage-cache.json` — 계정 저장소별 마지막 성공 스냅샷 한 파일.
+/// 슬롯 경로를 키로 쓰므로 계정을 늘려도 파일이 안 늘고, 계정을 지워도 남은 항목이
+/// 다른 계정 숫자로 새지 않는다.
 fn usage_cache_path() -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
     Some(std::path::PathBuf::from(home).join(".config/kasaterm/usage-cache.json"))
 }
 
-/// 디스크 캐시 로드 — 6시간 이내 기록만(5시간 창이 만료됐으면 폐기). 반환은 usage 본문.
-fn load_usage_disk() -> Option<serde_json::Value> {
+/// 스냅샷 문서에서 `dir` 슬롯의 usage 본문을 꺼낸다 — 6시간 이내 기록만(5시간 창이
+/// 만료됐으면 폐기). 파일 IO 를 밖에 두는 이유는 이 판정이 **한 계정의 숫자를 다른
+/// 계정에 붙이지 않는가**를 결정하는 자리라, HOME 을 흔들지 않고 검증돼야 해서다.
+fn usage_from_snapshot(json: &str, dir: &str, now: u64) -> Option<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let fresh = |e: &serde_json::Value| -> Option<serde_json::Value> {
+        let ts = e.get("ts")?.as_u64()?;
+        (now.saturating_sub(ts) <= 6 * 3600).then(|| e.get("usage").cloned())?
+    };
+    // 새 형식: { slots: { "<dir>": {ts, usage} } }. 옛 형식({ts, usage})은 어느 계정
+    // 것인지 기록이 없으므로 **기본 슬롯(빈 dir)일 때만** 받아들인다 — 그러지 않으면
+    // 업그레이드 직후 한 번, 옛 계정 숫자가 새 계정 자리에 그대로 앉는다.
+    if let Some(slot) = v.pointer("/slots").and_then(|s| s.get(dir)) {
+        return fresh(slot);
+    }
+    if dir.is_empty() && v.get("ts").is_some() {
+        return fresh(&v);
+    }
+    None
+}
+
+/// 디스크 캐시 로드 — `dir` 슬롯 항목만 본다. 프로세스 전역 한 벌이던 옛 구조는
+/// 재시작 직후 활성 계정에 **떠나온 계정의** 스냅샷을 붙여 줬다.
+fn load_usage_disk(dir: &str) -> Option<serde_json::Value> {
     let s = std::fs::read_to_string(usage_cache_path()?).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
-    let ts = v.get("ts")?.as_u64()?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    if now.saturating_sub(ts) > 6 * 3600 {
-        return None;
-    }
-    v.get("usage").cloned()
+    usage_from_snapshot(&s, dir, now)
+}
+
+/// 기존 스냅샷 문서에 `dir` 슬롯을 갱신해 되쓸 문서를 만든다. 다른 슬롯 항목은
+/// 그대로 살려 둔다 — 계정을 옮겨 다녀도 각자의 마지막 값이 남는다.
+fn merge_usage_snapshot(
+    existing: Option<&str>,
+    dir: &str,
+    usage: &serde_json::Value,
+    now: u64,
+) -> String {
+    let mut slots = existing
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v.get("slots").cloned())
+        .and_then(|s| s.as_object().cloned())
+        .unwrap_or_default();
+    slots.insert(dir.to_string(), serde_json::json!({ "ts": now, "usage": usage }));
+    serde_json::json!({ "slots": slots }).to_string()
 }
 
 /// 성공 usage 본문을 ts 와 함께 디스크에 저장(재시작 폴백 소스).
-fn save_usage_disk(usage: &serde_json::Value) {
+fn save_usage_disk(dir: &str, usage: &serde_json::Value) {
     let Some(p) = usage_cache_path() else { return };
-    if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let _ = std::fs::write(p, serde_json::json!({ "ts": now, "usage": usage }).to_string());
+    let existing = std::fs::read_to_string(&p).ok();
+    let _ = std::fs::write(p, merge_usage_snapshot(existing.as_deref(), dir, usage, now));
 }
 
 /// `GET /messages?n=50` — messages.jsonl 을 캐릭터명 해석 포함 최근 N 개(ts 내림차순).
@@ -3342,6 +3406,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// 계정 저장소별로 스냅샷이 갈리는지 — 한 계정의 숫자가 다른 계정 자리에 앉으면
+    /// 한도 분산 기능에서 한도 표시가 거짓말을 한다(거노 2026-08-05: 세 계정의
+    /// weekly_all 이 95/25/? 인데 화면엔 하나의 숫자만 떴다).
+    #[test]
+    fn usage_snapshot_is_per_account_slot() {
+        let now = 1_785_000_000u64;
+        let a = serde_json::json!({ "limits": [{ "group": "weekly", "percent": 95 }] });
+        let b = serde_json::json!({ "limits": [{ "group": "weekly", "percent": 25 }] });
+        let doc = merge_usage_snapshot(None, "", &a, now);
+        let doc = merge_usage_snapshot(Some(&doc), "/slots/acct-1", &b, now);
+        // 각 슬롯이 자기 값을 돌려주고, 서로 섞이지 않는다.
+        assert_eq!(usage_from_snapshot(&doc, "", now), Some(a));
+        assert_eq!(usage_from_snapshot(&doc, "/slots/acct-1", now), Some(b));
+        // 기록이 없는 슬롯은 **다른 슬롯 값으로 폴백하지 않는다** — 빈 값이 틀린 값보다 낫다.
+        assert_eq!(usage_from_snapshot(&doc, "/slots/acct-2", now), None);
+    }
+
+    #[test]
+    fn usage_snapshot_expires_after_six_hours() {
+        let saved_at = 1_785_000_000u64;
+        let doc = merge_usage_snapshot(None, "", &serde_json::json!({ "x": 1 }), saved_at);
+        assert!(usage_from_snapshot(&doc, "", saved_at + 6 * 3600).is_some(), "6시간 경계는 유효");
+        assert!(usage_from_snapshot(&doc, "", saved_at + 6 * 3600 + 1).is_none(), "그 뒤는 폐기");
+    }
+
+    /// 업그레이드 경로 — 옛 형식(`{ts, usage}`)은 어느 계정 것인지 기록이 없다.
+    /// 기본 슬롯일 때만 받아들이고, 이름 붙은 슬롯에는 절대 붙이지 않는다.
+    #[test]
+    fn legacy_flat_snapshot_only_feeds_the_default_slot() {
+        let now = 1_785_000_000u64;
+        let legacy = serde_json::json!({ "ts": now, "usage": { "limits": [] } }).to_string();
+        assert!(usage_from_snapshot(&legacy, "", now).is_some());
+        assert!(usage_from_snapshot(&legacy, "/slots/acct-1", now).is_none());
     }
 
     /// Pins the naming to Claude Code's own scheme. Expected values come from

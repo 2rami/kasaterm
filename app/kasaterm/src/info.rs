@@ -1413,7 +1413,7 @@ pub(crate) fn draw_info_actions(
     cursor: (f32, f32),
     info: &mut state::InfoState,
     acct_label: Option<&str>,
-    usage_pct: Option<f32>,
+    usage: Option<&crate::UsageBadge>,
     menu_open: bool,
     arona_on: bool,
     x: f32,
@@ -1429,14 +1429,14 @@ pub(crate) fn draw_info_actions(
     // ── 계정 · 사용량 ──
     // 여기 보이는 한도가 **활성 계정의** 것이라 이름과 한 행에 둔다. 계정을 안 쓰면
     // 이름 없이 사용률만 — 안 쓰는 사람 행에 "기본" 을 얹는 건 잡음이다.
-    let acct_rect = (acct_label.is_some() || usage_pct.is_some()).then(|| {
+    let acct_rect = (acct_label.is_some() || usage.is_some()).then(|| {
         let h = 30.0_f32;
         let r = (x0, y, avail, h);
         let hov = menu_open || hit(cursor, &r);
         g.hover_pointer |= hov;
         // 한도가 코앞이면 행 전체가 물든다. 숫자 색만 바꾸면 11px 글자 하나가
         // 빨개질 뿐이라, 정작 알아야 할 때(작업 중 한도가 닫히는 것) 눈에 안 든다.
-        let danger = usage_pct.is_some_and(|p| p >= 90.0);
+        let danger = usage.is_some_and(|u| u.pct >= 90.0);
         round_rect(
             g, r.0, r.1, r.2, r.3, theme::radius_sm(),
             match (danger, hov) {
@@ -1463,18 +1463,29 @@ pub(crate) fn draw_info_actions(
                 gpu::DrawOpts { font_size: f, color: theme::text(), bold: true, italic: false });
             tx += lw + 8.0;
         }
-        if let Some(pct) = usage_pct {
+        if let Some(u) = usage {
             // 70%↑ 주의·90%↑ 위험(웹뷰 UsagePill 과 같은 임계). 세 색 다 테마
             // 토큰이다 — 하드코딩한 청록/산호는 팔레트를 갈아도 그대로 남아,
             // 호박색 화면에서 이 숫자 하나만 딴 데서 온 것처럼 떴다.
-            let col = if pct >= 90.0 {
+            let col = if u.pct >= 90.0 {
                 theme::danger()
-            } else if pct >= 70.0 {
+            } else if u.pct >= 70.0 {
                 theme::syn_number()
             } else {
                 theme::success()
             };
-            let l = format!("5h {pct:.0}%");
+            // 창 라벨을 숫자와 함께 — `5h 0%` 로 고정 표기하던 시절엔 실제 압박이
+            // 주간 창 95% 인데도 「5h 0%」 가 떠서 "다 0퍼로 뜬다"가 됐다(거노
+            // 2026-08-05). 이제 라벨은 그 숫자가 나온 창을 말한다.
+            //
+            // stale(upstream 막혀 재사용된 값)이면 흐리게 + `~` 를 앞에 붙인다.
+            // 숨기지 않는 것은 빈칸이 "한도 여유"로 읽히기 때문이다.
+            let l = if u.stale {
+                format!("~{} {:.0}%", u.label, u.pct)
+            } else {
+                format!("{} {:.0}%", u.label, u.pct)
+            };
+            let col = if u.stale { theme::with_alpha(col, 0x99) } else { col };
             g.draw_text(tx, ty, &l,
                 gpu::DrawOpts { font_size: f, color: col, bold: true, italic: false });
         }
