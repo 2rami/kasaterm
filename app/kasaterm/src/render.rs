@@ -925,20 +925,9 @@ impl App {
                     // 정렬·STATUSLINE_FACE_ROWS 행 키로 얹는다 — 1행짜리는
                     // 너무 작았다(거노). icon 패스라 아래 테두리 줄 위에
                     // 스티커처럼 얹힌다.
-                    // 아래→위 스캔: statusline 은 항상 화면 바닥 쪽이고, 대화
-                    // 출력에 U+FFFC 원문이 섞이면(statusline 디버그 출력 등)
-                    // 위쪽 행이 앵커를 가로채 얼굴이 엉뚱한 데 붙는다(실사고).
-                    if let Some((sr, sc, len)) =
-                        composed.iter().enumerate().rev().find_map(|(r, row)| {
-                            row.iter().position(|c| c.ch == '\u{fffc}').map(|c0| {
-                                let n = row[c0..]
-                                    .iter()
-                                    .take_while(|c| c.ch == '\u{fffc}')
-                                    .count();
-                                (r, c0, n)
-                            })
-                        })
-                    {
+                    // 스캔 방향과 앵커 규칙은 `find_statusline_face` 주석 참고 —
+                    // 별도창(auxwin)이 같은 자리를 찍어야 해서 자유함수로 나가 있다.
+                    if let Some((sr, sc, len)) = find_statusline_face(&composed) {
                         for cell in composed[sr].iter_mut().skip(sc).take(len) {
                             *cell = GridCell::blank();
                         }
@@ -958,47 +947,14 @@ impl App {
                         // 여러 줄로 자라도 스캔이라 따라간다. 발은 윗 테두리
                         // 줄에 닿고, 칩이 떠 있으면 그 왼쪽으로 비켜 선다.
                         // working/승인대기 중엔 스피너 walk·바운스 도트가 이미
-                        // 학생을 그리므로(pet_busy) 세우지 않는다.
-                        // max_label: 테두리 줄에 허용하는 비-대시 글자 수.
-                        // 아래 테두리는 항상 순수 '─'(0), 윗 테두리는 /rename
-                        // 세션명이 "── 학생 ──" 로 박힐 수 있어 짧은 텍스트
-                        // 섬을 인정한다 — 순수 rule 만 보면 이름 지은 세션에서
-                        // standing 도트가 통째로 사라진다(거노 실사고).
-                        let is_rule = |row: &[GridCell], max_label: usize| {
-                            let mut dashes = 0usize;
-                            let mut label = 0usize;
-                            for c in row {
-                                match c.ch {
-                                    '─' => dashes += 1,
-                                    ' ' | '\0' => {}
-                                    _ => {
-                                        label += 1;
-                                        if label > max_label {
-                                            return false;
-                                        }
-                                    }
-                                }
-                            }
-                            dashes > row.len() / 2
-                        };
-                        if !pet_busy && sr >= 4 && is_rule(&composed[sr - 1], 0) {
-                            if let Some(tr) = (sr.saturating_sub(16)..sr - 1)
-                                .rev()
-                                .find(|&r| is_rule(&composed[r], 24))
-                                .filter(|&tr| tr >= 1)
+                        // 학생을 그리므로(pet_busy) 세우지 않는다. 앵커 규칙은
+                        // `find_standing_anchor` 에 — 별도창도 같은 자리에 세운다.
+                        if !pet_busy {
+                            if let Some((anchor, left_c)) =
+                                find_standing_anchor(&composed, sr, cols_now as usize)
                             {
-                                let anchor = tr - 1;
-                                let first = composed[anchor]
-                                    .iter()
-                                    .position(|c| !matches!(c.ch, ' ' | '\0'));
-                                let right_c = match first {
-                                    Some(f) => f as f32 - 1.5,
-                                    None => cols_now as f32 - 1.0,
-                                };
-                                const STAND_CELLS: f32 = 4.0;
-                                let left_c = right_c - STAND_CELLS;
                                 let h = INPUT_STANDING_ROWS as f32 * sch;
-                                if left_c > 2.0 {
+                                {
                                     // 턴 완료 직후 ~1.8s(notify_flash)는 양팔 만세
                                     // cheer, 그 뒤로 계속 대기하면 손 흔들며 기다리는
                                     // wave("선생님, 다음 지시 기다려요"). 학생 pane 은
@@ -2187,24 +2143,17 @@ impl App {
             // 프레임만 queue한다(재렌더는 배너 애니 타이머가 깨워줌).
             // 디코딩 실패 시 queue_image가 조용히 skip.
             let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
-            let anim_idx = (anim_ms / STUDENT_ANIM_FRAME_MS) as usize % STUDENT_IDLE_FRAMES;
-            // 모션 프레임을 (캐릭터×모션당 1회) 업로드 — 배너·승인대기·standing
-            // 이 공유. idle 키는 "f"(기존 호환), 나머지는 모션 이름 그대로.
-            let ensure_anim = |g: &mut gpu::GpuRenderer, slug: &str, motion: &str| {
-                let pfx = sprite_key_prefix(motion);
-                if !g.has_image(&format!("student:{slug}:{pfx}0")) {
-                    if let Some(frames) = student_sprite_frames(slug, motion) {
-                        for (i, (rgba, w, h)) in frames.iter().enumerate() {
-                            g.upload_image(&format!("student:{slug}:{pfx}{i}"), rgba, *w, *h);
-                        }
-                    }
-                }
+            // 배너·스피너·승인대기·standing·프사는 별도창(auxwin)도 그린다 —
+            // 그리기와 이미지 키는 `paint_student_overlays` 한 곳에 있고, 여기선
+            // 이 창의 좌표로 모은 자리만 넘긴다.
+            let student_slots = StudentOverlays {
+                banner: std::mem::take(&mut banner_slots),
+                spinner: std::mem::take(&mut spinner_slots),
+                waiting: std::mem::take(&mut waiting_slots),
+                standing: std::mem::take(&mut standing_slots),
+                profile: std::mem::take(&mut profile_slots),
             };
-            for (slug, (bx, by, bw, bh), (clip_y0, clip_y1)) in &banner_slots {
-                ensure_anim(g, slug, "idle");
-                let key = format!("student:{slug}:f{anim_idx}");
-                g.queue_image_clipped(&key, *bx, *by, *bw, *bh, *clip_y0, *clip_y1);
-            }
+            paint_student_overlays(g, &student_slots, anim_ms);
             // Claude Code 스크롤 sticky prompt: 텍스트·흰 배경은 위 스캔에서 원본
             // 셀을 선명화(등폭 유지)해 이미 그려졌다. 여기선 클릭 rect(셀 영역)만
             // STICKY_PILLS 로 mouse handler·seek 에 넘긴다 — 클릭 = "그 프롬프트가
@@ -2244,54 +2193,6 @@ impl App {
                 g.rect(*x, *y + *h - t, *w, t, *col);
                 g.rect(*x, *y, t, *h, *col);
                 g.rect(*x + *w - t, *y, t, *h, *col);
-            }
-            // working 스피너 자리 — walk 프레임 제자리 걸음(분주하게 일하는 중).
-            // 셀 위 icon 패스라 blank 처리한 스피너 자리 위에 또렷하게 뜬다.
-            let walk_idx =
-                (anim_ms as f32 / STUDENT_WALK_FRAME_MS) as usize % STUDENT_WALK_FRAMES;
-            for (slug, (bx, by, bw, bh)) in &spinner_slots {
-                if !g.has_image(&format!("student:{slug}:walk0")) {
-                    if let Some(frames) = student_sprite_frames(slug, "walk") {
-                        for (i, (rgba, w, h)) in frames.iter().enumerate() {
-                            g.upload_image(&format!("student:{slug}:walk{i}"), rgba, *w, *h);
-                        }
-                    }
-                }
-                g.queue_image_above(
-                    &format!("student:{slug}:walk{walk_idx}"),
-                    *bx, *by, *bw, *bh,
-                );
-            }
-            // 승인 대기 — pane 우상단에서 학생이 한 팔 인사(wave, "봐주세요!").
-            // wave 는 발 고정·팔만 움직이는 모션이라 바운스는 얹지 않는다.
-            for (slug, (bx, by, bw, bh)) in &waiting_slots {
-                ensure_anim(g, slug, "wave");
-                g.queue_image_above(
-                    &format!("student:{slug}:wave{anim_idx}"),
-                    *bx, *by, *bw, *bh,
-                );
-            }
-            // 입력박스 위 standing — 전신 애니(완료 직후 cheer 만세 · 그 외 idle),
-            // 발이 윗 테두리 줄에 닿게 바닥 정렬. 꼬리 행 위라 icon 패스.
-            for (slug, motion, (bx, by, bw, bh)) in &standing_slots {
-                ensure_anim(g, slug, motion);
-                let pfx = sprite_key_prefix(motion);
-                g.queue_image_above(
-                    &format!("student:{slug}:{pfx}{anim_idx}"),
-                    *bx, *by, *bw, *bh,
-                );
-            }
-            // statusline 프사 — bust 96×96 정적 1프레임, 캐릭터당 1회 업로드.
-            // 박스가 아래 테두리 행을 침범하는 2행 키라 icon 패스(셀 위) —
-            // 이미지 패스(셀 아래)면 테두리 글리프가 얼굴을 가로지른다.
-            for (slug, (bx, by, bw, bh)) in &profile_slots {
-                let key = format!("student:{slug}:profile");
-                if !g.has_image(&key) {
-                    if let Some((rgba, w, h)) = student_profile_rgba(slug) {
-                        g.upload_image(&key, &rgba, w, h);
-                    }
-                }
-                g.queue_image_above(&key, *bx, *by, *bw, *bh);
             }
             // 프사 hover 확대 — 커서가 statusline 프사 위면 큰 bust 를 그 위쪽에
             // 팝업(창 경계 클램프). statusline 은 창 하단이라 위로 띄운다. 매
@@ -7091,8 +6992,8 @@ impl App {
 /// 둘이 각자 색을 들고 있으면 같은 뜻에 두 가지 빨강이 난다.
 const DIFF_RED: [u8; 4] = [229, 83, 75, 255];
 
-const CLAWD_COLS: usize = 9;
-const CLAWD_ROWS: usize = 3;
+pub(crate) const CLAWD_COLS: usize = 9;
+pub(crate) const CLAWD_ROWS: usize = 3;
 
 /// 학생 도트 애니메이션 — idle(배너)·walk(로딩바) 모션별 프레임 수·주기.
 const STUDENT_IDLE_FRAMES: usize = 4;
@@ -8629,7 +8530,7 @@ pub(crate) fn find_sticky_prompt(rows: &[Vec<GridCell>]) -> Option<StickyPrompt>
     None
 }
 
-fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
+pub(crate) fn find_clawd_banners(rows: &[Vec<GridCell>]) -> Vec<(isize, usize)> {
     const BODY: [char; 9] = ['▝', '▜', '█', '█', '█', '█', '█', '▛', '▘'];
     const HEAD: [char; 7] = ['▐', '▛', '█', '█', '█', '▜', '▌'];
     // 발 행: 배너 좌단 기준 2칸 들여쓰기 `▘▘ ▝▝`, 양옆은 공백(2.1.212 실측).
@@ -8959,11 +8860,170 @@ fn screen_is_ask_picker(rows: &[Vec<GridCell>]) -> bool {
         && (squashed.contains("Esc to cancel") || squashed.contains("Enter to select"))
 }
 
+/// 한 창이 이번 프레임에 얹을 학생 스프라이트 자리들.
+///
+/// 셀을 훑어 모으는 쪽(메인 그리드 / 별도창)과 그리는 쪽을 가르는 경계다 —
+/// 좌표계는 창마다 다르지만 **이미지 키와 업로드 규칙은 한 벌**이어야 한다.
+/// 두 벌이 되면 한쪽만 프레임을 올리거나 캐시 키가 갈려, 같은 학생이 창마다
+/// 다른 그림으로 뜬다.
+#[derive(Default)]
+pub(crate) struct StudentOverlays {
+    /// Clawd 배너 자리 — `(slug, rect, (클립 위, 클립 아래))`. 스크롤로 잘리게 클립.
+    pub(crate) banner: Vec<(&'static str, (f32, f32, f32, f32), (f32, f32))>,
+    /// working 스피너 자리 — 제자리 걸음(walk).
+    pub(crate) spinner: Vec<(&'static str, (f32, f32, f32, f32))>,
+    /// 승인 대기 — 한 팔 인사(wave).
+    pub(crate) waiting: Vec<(&'static str, (f32, f32, f32, f32))>,
+    /// 입력박스 위 standing — `(slug, motion, rect)`.
+    pub(crate) standing: Vec<(&'static str, &'static str, (f32, f32, f32, f32))>,
+    /// statusline 프사(bust) 자리.
+    pub(crate) profile: Vec<(&'static str, (f32, f32, f32, f32))>,
+}
+
+impl StudentOverlays {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.banner.is_empty()
+            && self.spinner.is_empty()
+            && self.waiting.is_empty()
+            && self.standing.is_empty()
+            && self.profile.is_empty()
+    }
+    /// 다음 프레임을 스스로 불러야 하나 — 움직이는 스프라이트가 하나라도 있으면.
+    /// 프사만 있는 창은 정적 1프레임이라 깨울 필요가 없다.
+    pub(crate) fn animating(&self) -> bool {
+        !self.banner.is_empty()
+            || !self.spinner.is_empty()
+            || !self.waiting.is_empty()
+            || !self.standing.is_empty()
+    }
+}
+
+/// 모은 자리에 스프라이트를 얹는다. `anim_ms` 는 창이 공유하는 애니 시계
+/// (`version_anim_start` 경과). 프레임 업로드는 캐릭터×모션당 1회고, 창마다
+/// GpuRenderer 가 달라 창별로 한 번씩 올라간다(같은 키, 같은 픽셀).
+///
+/// 전부 `queue_image_above` — 셀 **위** 패스다. 아래 패스로 내리면 statusline
+/// 테두리 글리프가 얼굴을 가로지르고 blank 처리한 자리에 셀 배경이 덮인다.
+pub(crate) fn paint_student_overlays(
+    g: &mut gpu::GpuRenderer,
+    slots: &StudentOverlays,
+    anim_ms: u64,
+) {
+    let anim_idx = (anim_ms / STUDENT_ANIM_FRAME_MS) as usize % STUDENT_IDLE_FRAMES;
+    let walk_idx = (anim_ms as f32 / STUDENT_WALK_FRAME_MS) as usize % STUDENT_WALK_FRAMES;
+    let ensure_anim = |g: &mut gpu::GpuRenderer, slug: &str, motion: &str| {
+        let pfx = sprite_key_prefix(motion);
+        if !g.has_image(&format!("student:{slug}:{pfx}0")) {
+            if let Some(frames) = student_sprite_frames(slug, motion) {
+                for (i, (rgba, w, h)) in frames.iter().enumerate() {
+                    g.upload_image(&format!("student:{slug}:{pfx}{i}"), rgba, *w, *h);
+                }
+            }
+        }
+    };
+    for (slug, (bx, by, bw, bh), (clip_y0, clip_y1)) in &slots.banner {
+        ensure_anim(g, slug, "idle");
+        g.queue_image_clipped(
+            &format!("student:{slug}:f{anim_idx}"),
+            *bx, *by, *bw, *bh, *clip_y0, *clip_y1,
+        );
+    }
+    for (slug, (bx, by, bw, bh)) in &slots.spinner {
+        ensure_anim(g, slug, "walk");
+        g.queue_image_above(&format!("student:{slug}:walk{walk_idx}"), *bx, *by, *bw, *bh);
+    }
+    for (slug, (bx, by, bw, bh)) in &slots.waiting {
+        ensure_anim(g, slug, "wave");
+        g.queue_image_above(&format!("student:{slug}:wave{anim_idx}"), *bx, *by, *bw, *bh);
+    }
+    for (slug, motion, (bx, by, bw, bh)) in &slots.standing {
+        ensure_anim(g, slug, motion);
+        let pfx = sprite_key_prefix(motion);
+        g.queue_image_above(&format!("student:{slug}:{pfx}{anim_idx}"), *bx, *by, *bw, *bh);
+    }
+    for (slug, (bx, by, bw, bh)) in &slots.profile {
+        let key = format!("student:{slug}:profile");
+        if !g.has_image(&key) {
+            if let Some((rgba, w, h)) = student_profile_rgba(slug) {
+                g.upload_image(&key, &rgba, w, h);
+            }
+        }
+        g.queue_image_above(&key, *bx, *by, *bw, *bh);
+    }
+}
+
+/// statusline 프사 자리표시자(U+FFFC 연속 셀) 위치 — `(행, 시작열, 칸수)`.
+///
+/// statusline.py 가 학생 이름 대신 이 문자를 내보낸다. **아래→위 스캔**인 것이
+/// 중요하다: statusline 은 늘 화면 바닥 쪽인데, 대화 출력에 U+FFFC 원문이 섞이면
+/// (statusline 디버그 출력 등) 위쪽 행이 앵커를 가로채 얼굴이 엉뚱한 데 붙는다
+/// (실사고). 메인 창과 별도창이 같은 자리를 찍도록 한 곳에 둔다.
+pub(crate) fn find_statusline_face(rows: &[Vec<GridCell>]) -> Option<(usize, usize, usize)> {
+    rows.iter().enumerate().rev().find_map(|(r, row)| {
+        row.iter().position(|c| c.ch == '\u{fffc}').map(|c0| {
+            let n = row[c0..].iter().take_while(|c| c.ch == '\u{fffc}').count();
+            (r, c0, n)
+        })
+    })
+}
+
+/// 입력박스 위 standing 학생의 앵커 — `(앵커 행, 학생 왼쪽 열)`.
+///
+/// `face_row` 는 statusline 행. 그 바로 위가 아래 테두리(순수 '─')면, 거기서
+/// 위로 첫 rule 행이 입력박스 윗 테두리다 — ❯ 영역이 여러 줄로 자라도 스캔이라
+/// 따라간다. 학생은 그 윗 테두리 줄에 발이 닿게 서고, 칩(effort·context 경고)이
+/// 떠 있으면 그 왼쪽으로 비켜선다.
+///
+/// 윗 테두리는 `/rename` 세션명이 "── 학생 ──" 로 박힐 수 있어 짧은 텍스트 섬을
+/// 인정한다(max_label 24) — 순수 rule 만 보면 이름 지은 세션에서 standing 이
+/// 통째로 사라진다(거노 실사고). 아래 테두리는 항상 순수 '─'(0).
+pub(crate) fn find_standing_anchor(
+    rows: &[Vec<GridCell>],
+    face_row: usize,
+    cols: usize,
+) -> Option<(usize, f32)> {
+    let is_rule = |row: &[GridCell], max_label: usize| {
+        let mut dashes = 0usize;
+        let mut label = 0usize;
+        for c in row {
+            match c.ch {
+                '─' => dashes += 1,
+                ' ' | '\0' => {}
+                _ => {
+                    label += 1;
+                    if label > max_label {
+                        return false;
+                    }
+                }
+            }
+        }
+        dashes > row.len() / 2
+    };
+    if face_row < 4 || !is_rule(&rows[face_row - 1], 0) {
+        return None;
+    }
+    let tr = (face_row.saturating_sub(16)..face_row - 1)
+        .rev()
+        .find(|&r| is_rule(&rows[r], 24))
+        .filter(|&tr| tr >= 1)?;
+    let anchor = tr - 1;
+    let first = rows[anchor].iter().position(|c| !matches!(c.ch, ' ' | '\0'));
+    let right_c = match first {
+        Some(f) => f as f32 - 1.5,
+        None => cols as f32 - 1.0,
+    };
+    let left_c = right_c - STAND_CELLS;
+    (left_c > 2.0).then_some((anchor, left_c))
+}
+
+/// standing 학생이 차지하는 가로 칸수 — 앵커 계산과 그리기가 같은 값을 써야 한다.
+pub(crate) const STAND_CELLS: f32 = 4.0;
+
 /// Claude Code 라이브 스피너("✻ Verbing…" 별 dingbat, 또는 braille) 위치 감지 —
 /// `rows_show_working`(input.rs)과 같은 신호를 행·열 좌표로 돌려준다. 마지막
 /// non-blank 30행, 행 앞머리(col<8)만 본다(본문 인용 별표 오탐 방지). 스피너
 /// 셀은 blank 처리하고 그 자리에 학생 working 도트를 얹는 용도.
-fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
+pub(crate) fn find_claude_spinner(rows: &[Vec<GridCell>]) -> Option<(usize, usize)> {
     let last = rows
         .iter()
         .rposition(|row| row.iter().any(|cell| !matches!(cell.ch, ' ' | '\0')))?;

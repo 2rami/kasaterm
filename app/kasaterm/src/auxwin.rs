@@ -1669,6 +1669,24 @@ impl App {
         } else {
             Vec::new()
         };
+        // 학생 스프라이트 자리 — 셀 사본을 훑으며 자리표시자를 지우므로 draw_cells
+        // 전에, 그리고 `aux_windows` 를 가변으로 잡기 전에 끝낸다.
+        let mut snap = snap;
+        let (sprites, anim_ms) = {
+            let (cl, cw, ch) = self
+                .aux_windows
+                .get(idx)
+                .map_or((PANE_INNER_X, 0.0, 0.0), |a| {
+                    (a.cell_left(), a.gpu.cell_w, a.gpu.cell_h)
+                });
+            let s = match snap.as_mut() {
+                Some((cells, ..)) if cw > 0.0 => {
+                    self.aux_student_slots(&pane_id, cells, cl, AUX_CELL_TOP, cw, ch)
+                }
+                _ => crate::render::StudentOverlays::default(),
+            };
+            (s, self.version_anim_start.elapsed().as_millis() as u64)
+        };
         let Some(a) = self.aux_windows.get_mut(idx) else { return };
         a.gpu.clear_chrome();
         a.gpu.rect(0.0, 0.0, w, h, crate::theme::bg());
@@ -1734,6 +1752,9 @@ impl App {
             default_fg: crate::cells::default_fg(),
         };
         a.gpu.draw_cells(&[slot]);
+        // 학생 스프라이트 — 메인 그리드와 같은 함수·같은 이미지 키. 셀 위 패스라
+        // 비워 둔 자리표시자 위에 얼굴이 또렷하게 얹힌다.
+        crate::render::paint_student_overlays(&mut a.gpu, &sprites, anim_ms);
         // 커서 자리(논리 px). 조합 중 한글이 있으면 그 프리에딧을, 없으면 blink 커서.
         let cw = a.gpu.cell_w;
         let ch = a.gpu.cell_h;
@@ -1766,7 +1787,7 @@ impl App {
         // 스윕바는 애니메이션이라 다음 프레임을 스스로 불러야 한다 — PTY 출력이
         // 없으면 아무도 이 창을 다시 그리지 않아 바가 한 자리에 얼어붙는다.
         // working 이 끝나면 이 요청도 끊긴다.
-        if working {
+        if working || sprites.animating() {
             a.dirty = true;
             a.window.request_redraw();
         }
@@ -1845,7 +1866,7 @@ impl App {
             .collect();
         let any_working = !working_panes.is_empty();
         // 셀은 draw 전에 복사해 둔다 — 그리는 동안 ws lock 을 쥐지 않기 위해서.
-        let snaps: Vec<_> = {
+        let mut snaps: Vec<_> = {
             let ws = self.ws.lock().unwrap();
             rects
                 .iter()
@@ -1866,6 +1887,28 @@ impl App {
                 })
                 .collect()
         };
+        // 학생 스프라이트 자리 — pane 마다 자기 셀을 훑는다. 사본을 훑으므로
+        // 자리표시자 지우기가 draw_cells 에 그대로 반영된다(아래 slots 가 같은
+        // 사본을 본다). `aux_windows` 를 가변 차용하기 전에 끝내야 self 를 읽을
+        // 수 있다.
+        let cell_left = self.aux_windows.get(idx).map_or(PANE_INNER_X, |a| a.cell_left());
+        let mut student = crate::render::StudentOverlays::default();
+        for (pid, cells, x, y, ..) in snaps.iter_mut() {
+            let s = self.aux_student_slots(
+                pid,
+                cells,
+                cell_left + *x as f32 * cw,
+                AUX_CELL_TOP + *y as f32 * ch,
+                cw,
+                ch,
+            );
+            student.banner.extend(s.banner);
+            student.spinner.extend(s.spinner);
+            student.waiting.extend(s.waiting);
+            student.standing.extend(s.standing);
+            student.profile.extend(s.profile);
+        }
+        let anim_ms = self.version_anim_start.elapsed().as_millis() as u64;
         // 터미널 창과 같은 이유로 `aux_windows` 가변 차용 전에 떠 둔다.
         let tree_rows = if self.aux_windows.get(idx).is_some_and(|a| a.tree_open) {
             self.aux_tree_rows()
@@ -1957,6 +2000,9 @@ impl App {
                 }
             }
         }
+        // 학생 스프라이트는 셀 위 패스 — statusline 테두리 글리프가 얼굴을
+        // 가로지르지 않게. 메인 그리드와 같은 함수·같은 이미지 키를 쓴다.
+        crate::render::paint_student_overlays(&mut a.gpu, &student, anim_ms);
         // 커서/프리에딧은 포커스 pane 자리에만.
         if let Some((_, _, x, y, cur_row, cur_col, cur_vis)) = snaps
             .iter()
@@ -1978,10 +2024,137 @@ impl App {
         let _ = a.gpu.render(&[], scale, 0.0, true);
         a.dirty = false;
         // 스윕바가 도는 동안은 다음 프레임을 스스로 부른다(터미널 창과 같은 이유).
-        if any_working {
+        // 움직이는 학생 스프라이트도 같은 이유로 — 정적 프사만 있으면 안 깨운다.
+        if any_working || student.animating() {
             a.dirty = true;
             a.window.request_redraw();
         }
+    }
+
+    /// 이 pane 의 셀을 훑어 학생 스프라이트 자리를 모은다(별도창 좌표계).
+    ///
+    /// 메인 그리드가 `render_frame` 에서 하는 일과 같다 — 다른 건 좌표뿐이다.
+    /// **찾는 규칙은 공유**한다(`find_statusline_face`·`find_standing_anchor`·
+    /// `find_clawd_banners`·`find_claude_spinner`): 같은 화면인데 창마다 학생이
+    /// 다른 자리에 서면 그게 곧 버그다. 그리는 것도 `paint_student_overlays`
+    /// 한 곳이라, 이미지 키와 프레임 규칙이 갈릴 데가 없다.
+    ///
+    /// `cells` 는 창이 들고 있는 **사본**이라 자리표시자를 지워도 원본 화면은
+    /// 안 상한다 — 지우지 않으면 U+FFFC 가 빈 네모로 얼굴 밑에 남는다.
+    ///
+    /// 메인과 같은 두 게이트를 지난다: claude 가 실제로 도는 pane 이어야 하고
+    /// (남의 TUI 를 claude 로 오인하지 않기 위해), 그 pane 에 학생이 배정돼
+    /// 있어야 한다.
+    fn aux_student_slots(
+        &self,
+        pane_id: &str,
+        cells: &mut [Vec<GridCell>],
+        ox: f32,
+        oy: f32,
+        cw: f32,
+        ch: f32,
+    ) -> crate::render::StudentOverlays {
+        let mut out = crate::render::StudentOverlays::default();
+        if !self
+            .pty
+            .get(pane_id)
+            .and_then(|p| p.active_process_name())
+            .is_some_and(|n| n.contains("claude"))
+        {
+            return out;
+        }
+        let Some(slug) = ({
+            let ws = self.ws.lock().unwrap();
+            self.display_pane_char(&ws, pane_id)
+                .and_then(|n| crate::theme::character_slug(&n))
+        }) else {
+            return out;
+        };
+        let cols = cells.first().map_or(0, |r| r.len());
+        let rows = cells.len();
+        // Clawd 배너 → 학생 도트. 스크롤로 위아래가 잘리면 셀과 함께 잘리도록
+        // pane 세로 범위로 클립한다.
+        for (br, bc) in crate::render::find_clawd_banners(cells) {
+            out.banner.push((
+                slug,
+                (
+                    ox + bc as f32 * cw,
+                    oy + br as f32 * ch,
+                    crate::render::CLAWD_COLS as f32 * cw,
+                    crate::render::CLAWD_ROWS as f32 * ch,
+                ),
+                (oy, oy + rows as f32 * ch),
+            ));
+            let r0 = br.max(0) as usize;
+            let r1 = (br + crate::render::CLAWD_ROWS as isize).clamp(0, rows as isize) as usize;
+            for row in cells[r0..r1].iter_mut() {
+                for cell in row.iter_mut().skip(bc).take(crate::render::CLAWD_COLS) {
+                    *cell = GridCell::blank();
+                }
+            }
+        }
+        // working 스피너 → 제자리 걸음. 스피너가 도는 동안은 standing 을 세우지
+        // 않는다 — 같은 학생이 화면에 둘이면 버그로 보인다(메인과 같은 규칙).
+        let mut busy = false;
+        if let Some((sr, sc)) = crate::render::find_claude_spinner(cells) {
+            busy = true;
+            let top_r = sr.saturating_sub(1);
+            out.spinner.push((
+                slug,
+                (
+                    ox + sc as f32 * cw,
+                    oy + top_r as f32 * ch,
+                    2.0 * cw,
+                    (sr - top_r + 1) as f32 * ch,
+                ),
+            ));
+            if let Some(row) = cells.get_mut(sr) {
+                if let Some(cell) = row.get_mut(sc) {
+                    *cell = GridCell::blank();
+                }
+            }
+        }
+        if let Some((sr, sc, len)) = crate::render::find_statusline_face(cells) {
+            for cell in cells[sr].iter_mut().skip(sc).take(len) {
+                *cell = GridCell::blank();
+            }
+            let face_h = crate::render::STATUSLINE_FACE_ROWS as f32 * ch;
+            out.profile.push((
+                slug,
+                (
+                    ox + sc as f32 * cw,
+                    (oy + (sr + 1) as f32 * ch - face_h).max(oy),
+                    len as f32 * cw,
+                    face_h,
+                ),
+            ));
+            if !busy {
+                if let Some((anchor, left_c)) =
+                    crate::render::find_standing_anchor(cells, sr, cols)
+                {
+                    let h = crate::render::INPUT_STANDING_ROWS as f32 * ch;
+                    // 턴이 끝났으면 손 흔들며 기다리는 wave, 아니면 idle. 완료
+                    // 직후 cheer 는 메인 창의 notify_flash 타이머에 매인 연출이라
+                    // 별도창에선 그 두 상태만 쓴다.
+                    let motion = if self.turn_done_panes.contains(pane_id) {
+                        "wave"
+                    } else {
+                        "idle"
+                    };
+                    out.standing.push((
+                        slug,
+                        motion,
+                        (
+                            ox + left_c * cw,
+                            (oy + (anchor + 1) as f32 * ch - h).max(oy),
+                            crate::render::STAND_CELLS * cw,
+                            h,
+                        ),
+                    ));
+                }
+            }
+        }
+        out
     }
 
     /// 이 창이 뷰하는 pane 의 PTY 로 바이트 전송(빈 입력 무시).
