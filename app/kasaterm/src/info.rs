@@ -28,6 +28,9 @@ pub(crate) enum ProcKind {
     Plain,
     /// CLI claude 세션 자신.
     Claude,
+    /// codex 세션 자신. claude 와 같은 대접(강조색·요약 행)을 받는다 —
+    /// 프로세스 트리에서 둘을 다르게 그리면 학생 pane 이 종류에 따라 딴판이 된다.
+    Codex,
     /// claude 가 stdio 로 띄운 MCP 서버.
     Mcp,
     /// claude 의 Bash 도구가 띄운 셸(과 그 자손).
@@ -616,6 +619,11 @@ fn classify(args: &str, parent: ProcKind) -> (String, String, ProcKind) {
             .fold(rest, |acc, f| strip_flag_pair(&acc, f));
         return ("claude".to_string(), rest, ProcKind::Claude);
     }
+    // codex 본체. npm shim(node …/bin/codex)과 진짜 바이너리 둘 다 여기로 접는다 —
+    // 트리에 `node` 로 뜨면 사람이 그게 codex 인 줄 모른다.
+    if name == "codex" || (name == "node" && rest.contains("/bin/codex")) {
+        return ("codex".to_string(), rest, ProcKind::Codex);
+    }
     // Bash 도구가 띄운 셸. 앞머리는 스냅샷 source + alias 정리 상수문이라 모든
     // 도구 셸이 똑같이 생겼고, 진짜 명령은 맨 끝 `eval '…'` 안에 있다.
     if args.contains("shell-snapshots/snapshot-") {
@@ -626,7 +634,7 @@ fn classify(args: &str, parent: ProcKind) -> (String, String, ProcKind) {
         let (n, r) = launcher_identity(&name, &rest);
         return (n, r, ProcKind::Tool);
     }
-    if matches!(parent, ProcKind::Claude | ProcKind::Mcp) {
+    if matches!(parent, ProcKind::Claude | ProcKind::Codex | ProcKind::Mcp) {
         if let Some(server) = mcp_name_in(args) {
             return (format!("mcp {server}"), mcp_detail(&rest), ProcKind::Mcp);
         }
@@ -2386,7 +2394,7 @@ fn draw_proc_row(
     // claude 본체는 로고를 앞에 단다. 이름만으로도 읽히지만 목록에서 계보의
     // 기점이라 — 그 아래 npm·node·Bash 가 전부 이 프로세스의 자손이다 — 눈이
     // 한 번에 찾아야 할 자리다. 색(accent)만으로는 흑백에 가까운 테마에서 약하다.
-    if matches!(p.kind, ProcKind::Claude) && avail > 40.0 {
+    if matches!(p.kind, ProcKind::Claude | ProcKind::Codex) && avail > 40.0 {
         g.queue_icon("claude", nx, y + 5.0, 12.0, theme::accent());
         nx += 16.0;
     }
@@ -2403,7 +2411,7 @@ fn draw_proc_row(
         }
     }
     let name_col = match p.kind {
-        ProcKind::Claude => theme::accent(),
+        ProcKind::Claude | ProcKind::Codex => theme::accent(),
         ProcKind::Tool => theme::text_dim(),
         _ => theme::text(),
     };

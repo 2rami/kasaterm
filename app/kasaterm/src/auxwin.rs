@@ -1790,8 +1790,8 @@ impl App {
             let runs_claude = self
                 .pty
                 .get(pane_id.as_str())
-                .and_then(|p| p.active_process_name())
-                .is_some_and(|n| n.contains("claude"));
+                .and_then(|p| p.active_agent())
+                .is_some();
             if runs_claude {
                 crate::render::strip_agent_chip(cells);
                 crate::render::style_prompt_box(cells, accent);
@@ -2053,8 +2053,8 @@ impl App {
             let runs_claude = self
                 .pty
                 .get(pid.as_str())
-                .and_then(|p| p.active_process_name())
-                .is_some_and(|n| n.contains("claude"));
+                .and_then(|p| p.active_agent())
+                .is_some();
             if !runs_claude {
                 continue;
             }
@@ -2246,8 +2246,8 @@ impl App {
         if !self
             .pty
             .get(pane_id)
-            .and_then(|p| p.active_process_name())
-            .is_some_and(|n| n.contains("claude"))
+            .and_then(|p| p.active_agent())
+                .is_some()
         {
             return out;
         }

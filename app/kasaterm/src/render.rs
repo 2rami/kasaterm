@@ -644,8 +644,8 @@ impl App {
                 let runs_claude = self
                     .pty
                     .get(id.as_str())
-                    .and_then(|p| p.active_process_name())
-                    .is_some_and(|n| n.contains("claude"));
+                    .and_then(|p| p.active_agent())
+                .is_some();
                 // teammate 칩(`──── @이름 ──`) 지우기. 누가 이 pane 인지는 헤더 제목·
                 // 프사·학생색이 이미 세 번 말하고 있고, 칩은 그 위에 네 번째로 얹히면서
                 // /rename 세션 이름이 쓰던 자리를 뺏는다(같은 슬롯을 두고 다투고 칩이
@@ -1280,8 +1280,8 @@ impl App {
                         .filter(|_| {
                             self.pty
                                 .get(id.as_str())
-                                .and_then(|p| p.active_process_name())
-                                .is_some_and(|n| n == "claude")
+                                .and_then(|p| p.active_agent())
+                                .is_some()
                         })
                 };
                 if let Some(accent) = prompt_accent {
@@ -2579,8 +2579,8 @@ impl App {
                         .filter(|id| {
                             self.pty
                                 .get(*id)
-                                .and_then(|p| p.active_process_name())
-                                .is_some_and(|n| n == "claude")
+                                .and_then(|p| p.active_agent())
+                                .is_some()
                         })
                         .and_then(|id| {
                             // 프사와 동일 규칙(display_pane_char 인라인 — gpu 가변 차용
@@ -5153,8 +5153,8 @@ impl App {
                 .filter(|(id, ..)| {
                     self.pty
                         .get(id.as_str())
-                        .and_then(|p| p.active_process_name())
-                        .is_some_and(|n| n == "claude")
+                        .and_then(|p| p.active_agent())
+                                .is_some()
                 })
                 .map(|(id, ..)| id.clone())
                 .collect();
