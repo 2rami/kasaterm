@@ -2238,7 +2238,9 @@ impl App {
     /// ③ 셀에 U+FFFC — 그 가짜 claude 가 statusline 을 흉내 낸 줄을 **PTY 로 실제
     ///    출력**한다. 셀 그리드에 손으로 써넣지 않는 이유: 다음 pump 가 덮어쓴다.
     ///
-    /// 위 행에 '─' rule 을 깔아 두는 건 standing(입력박스 위 전신) 앵커 때문이다.
+    /// ④ standing(입력박스 위 전신) — 위 셋이 다 열려도 **앵커**가 따로 걸린다.
+    ///    그래서 가짜 claude 가 입력박스를 테두리 두 줄까지 온전히 찍고,
+    ///    `autostudent_assert_standing` 이 전신이 정말 그려졌는지 따로 판정한다.
     pub(crate) fn run_pending_autostudent(&mut self, event_loop: &ActiveEventLoop) {
         use std::sync::atomic::{AtomicU8, Ordering};
         use std::sync::OnceLock;
@@ -2289,12 +2291,30 @@ impl App {
             // 이 끝날 때까지 프롬프트를 안 찍는다). exec 은 쓰지 않는다 — 셸을 갈아
             // 치우면 그게 pane 의 셸이 돼 버려 직속 자식이 사라진다.
             // U+FFFC 는 8진 이스케이프(EF BF BC)로 — 셸마다 \u 지원이 갈린다.
+            //
+            // 찍는 것은 claude 입력박스 **한 벌 전체**다. 오래도록 아래 테두리
+            // 한 줄만 찍었는데, 그러면 `find_standing_anchor` 의 위쪽 스캔이 걸릴
+            // rule 이 없어 앵커가 늘 None 이고 standing 이 통째로 안 그려진다 —
+            // 그 위 행은 셸이 되울린 명령줄이라 label>24 로 즉시 탈락한다. 프사만
+            // 뜨고 전신이 안 서는 층을 이 하네스가 못 태우고 있었다.
+            //
+            //   (빈 행)                  ← 앵커. 비어 있어야 한다(내용이 0열부터
+            //                              시작하면 left_c 가 음수가 되어 None)
+            //   ──── 대시보드 ────       ← 윗 테두리. 짧은 텍스트 섬을 일부러 넣어
+            //                              max_label 24 분기까지 태운다(세션명이
+            //                              박히면 standing 이 사라졌던 거노 실사고)
+            //   ❯                        ← 입력 영역
+            //   ──────────────           ← 아래 테두리(순수 '─')
+            //   FFFC×4 ctx 42%           ← statusline = face_row
             let script = concat!(
                 "d=\"$TMPDIR/kasaterm-student-probe\"; mkdir -p \"$d\"; ",
                 "[ -x \"$d/claude\" ] || { ",
                 "printf 'fn main(){std::thread::sleep(std::time::Duration::from_secs(600));}' > \"$d/c.rs\"; ",
                 "rustc -o \"$d/claude\" \"$d/c.rs\" >/dev/null 2>&1; }; ",
-                "printf \"\\342\\224\\200%.0s\" $(seq 1 60); echo; ",
+                "R(){ printf \"\\342\\224\\200%.0s\" $(seq 1 \"$1\"); }; ",
+                "echo; R 4; printf ' 대시보드 '; R 20; echo; ",
+                "printf \"\\342\\235\\257 \\n\"; ",
+                "R 60; echo; ",
                 "printf \"\\357\\277\\274\\357\\277\\274\\357\\277\\274\\357\\277\\274 ctx 42%% \\n\"; ",
                 "\"$d/claude\"\n",
             );
@@ -2355,6 +2375,110 @@ impl App {
             }
         }
         self.render_frame();
+        self.autostudent_assert_standing(&pid);
+    }
+    /// 프사와 별개로 **전신이 입력박스 위에 섰는지**.
+    ///
+    /// 프사(`:profile`)는 statusline 한 줄만 있으면 뜨는데 standing 은 앵커가 더
+    /// 걸린다(테두리 두 줄 + 앵커 행이 비어 있어야 함). 그래서 "프사는 뜨는데
+    /// 전신만 안 선다"가 실제로 나오고, 프사만 세던 판정은 그걸 통과시켰다.
+    ///
+    /// `find_standing_anchor` 를 다시 부르지 않는다 — 그러면 검사 대상과 같은
+    /// 코드를 믿는 셈이고, 자리는 멀쩡한데 부르는 쪽이 없던 #48 을 또 놓친다.
+    /// 한 프레임 그린 뒤 GPU 에 올라간 키와 사각형만 본다. 위치까지 재는 이유:
+    /// 키 존재만 보면 전신이 엉뚱한 자리(프사 아래·화면 밖)에 그려져도 PASS 다.
+    /// 발은 statusline 프사보다 **위**여야 한다.
+    fn autostudent_assert_standing(&mut self, pid: &str) {
+        let slug = {
+            let ws = self.ws.lock().unwrap();
+            match self
+                .display_pane_char(&ws, pid)
+                .and_then(|n| crate::theme::character_slug(&n))
+            {
+                Some(s) => s,
+                None => return,
+            }
+        };
+        // 그리드 진단을 먼저 찍는다 — 앵커가 안 잡혔을 때 거노 실화면의
+        // `KASATERM_STUDENT_DEBUG` 출력과 **같은 단위**로 견줄 수 있어야 한다.
+        // 여기 숫자와 실화면 숫자가 다른 지점이 곧 원인이다.
+        if let Some(rows) = self
+            .ws
+            .lock()
+            .unwrap()
+            .panes
+            .get(pid)
+            .and_then(|p| p.term())
+            .map(|t| t.cells.clone())
+        {
+            if let Some(sr) = rows
+                .iter()
+                .rposition(|row| row.iter().any(|c| c.ch == '\u{fffc}'))
+            {
+                for back in 1..=4usize {
+                    let Some(r) = sr.checked_sub(back) else { break };
+                    let (mut dash, mut label, mut cw) = (0usize, 0usize, 0usize);
+                    for (i, c) in rows[r].iter().enumerate() {
+                        match c.ch {
+                            '─' => {
+                                dash += 1;
+                                cw = i + 1;
+                            }
+                            ' ' | '\0' => {}
+                            _ => {
+                                label += 1;
+                                cw = i + 1;
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "[autostudent]   rows[{r}] (face_row-{back}) dash={dash} label={label} 내용폭={cw} → rule={}",
+                        dash >= 8 && dash > cw / 2
+                    );
+                }
+            }
+        }
+        let Some(g) = self.gpu.as_ref() else {
+            eprintln!("[autostudent] standing 미측정 — gpu 렌더러가 아니다");
+            return;
+        };
+        let pfx = format!("student:{slug}:");
+        let keys: Vec<String> =
+            g.drawn_image_keys().filter(|k| k.starts_with(&pfx)).map(str::to_string).collect();
+        let (mut stand, mut face) = (Vec::new(), Vec::new());
+        for k in &keys {
+            let dst = if k.ends_with(":profile") { &mut face } else { &mut stand };
+            dst.extend(g.drawn_image_rects(k));
+        }
+        let feet = stand.iter().map(|r: &(f32, f32, f32, f32)| r.1 + r.3).fold(f32::MIN, f32::max);
+        let face_top = face.iter().map(|r: &(f32, f32, f32, f32)| r.1).fold(f32::MAX, f32::min);
+        eprintln!(
+            "[autostudent] 전신 {}개 / 프사 {}개 {keys:?}",
+            stand.len(),
+            face.len()
+        );
+        if stand.is_empty() {
+            eprintln!(
+                "[autostudent] standing FAIL — 앵커가 안 잡혔다. 위 rule 표를 보라: \
+                 face_row-1 이 rule(label 0)이어야 아래 테두리로 인정되고, 그 위 \
+                 16행 안에 rule 이 하나 더(label≤24) 있어야 윗 테두리다. 앵커 행\
+                 (윗 테두리 바로 위)에 0열부터 시작하는 내용이 있으면 left_c 가 \
+                 음수가 되어 역시 None 이다."
+            );
+            return;
+        }
+        if face.is_empty() {
+            eprintln!("[autostudent] standing 판정 보류 — 프사가 없어 상대 위치를 못 잰다");
+            return;
+        }
+        eprintln!(
+            "[autostudent] 전신 발={feet:.0} 프사 위={face_top:.0} → {}",
+            if feet <= face_top + 1.0 {
+                "PASS — 입력박스 위에 섰다"
+            } else {
+                "FAIL — 그려졌지만 프사보다 아래다(앵커 행 계산이 틀렸다)"
+            }
+        );
     }
     /// `autostudent` 3단계: 학생이 선 pane 이 **든 방을 통째로** 별도창으로 꺼내
     /// 거기서도 학생이 뜨는지 본다(`KASATERM_AUTOSTUDENT_ROOM` = 캡처 경로).
