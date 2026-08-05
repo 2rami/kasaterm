@@ -22,17 +22,33 @@ export function sessionInfo() {
 // 한 방(20초 대기 스크립트 같은 것)이 자기가 처리되는 도중에 스스로 끊긴다 — 크롬은
 // "Detached while handling command" 로 답하고, 도구 타임아웃(45초)은 구경도 못 한다.
 // 그래서 명령 수를 세어, 하나라도 떠 있으면 짧은 유휴 시계를 쓰지 않는다(2026-08-05 실측).
-function send(tabId, method, params = {}) {
+// ⚠️응답이 영영 오지 않는 CDP 명령이 있다(특정 탭 상태에서 `watch` 가 30초 침묵한 실측 보고,
+// 2026-08-05 아로나. 확장 소켓은 멀쩡했으니 워커가 죽은 게 아니라 그 명령만 멈춘 것이다).
+// 무한정 기다리면 호출자는 도구 타임아웃까지 아무 정보도 못 받는다 — 어느 명령이 멈췄는지 이름을
+// 달아 빠르게 실패시켜야 재시도든 우회든 할 수 있다. 다만 기본값은 무제한이다: `Runtime.evaluate`
+// 처럼 **의도적으로** 오래 걸리는 명령을 시계로 죽이면 안 된다. 상한은 부르는 쪽이 정한다.
+function send(tabId, method, params = {}, { timeoutMs = 0 } = {}) {
   const s = sessions.get(tabId)
   if (s) s.inflight++
   touch(tabId)
   return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
-      const err = chrome.runtime.lastError
+    let settled = false
+    // 타임아웃 뒤 콜백이 늦게 오면 inflight 가 두 번 줄어 유휴 계산이 어긋난다. 한 번만 정산한다.
+    const finish = (fn, arg) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
       if (s) s.inflight--
       touch(tabId)
-      if (err) reject(new Error(`CDP ${method} 실패: ${err.message}`))
-      else resolve(result)
+      fn(arg)
+    }
+    const timer = timeoutMs
+      ? setTimeout(() => finish(reject, new Error(`CDP_TIMEOUT: ${method} 이 ${timeoutMs}ms 안에 응답하지 않았습니다.`)), timeoutMs)
+      : null
+    chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
+      const err = chrome.runtime.lastError
+      if (err) finish(reject, new Error(`CDP ${method} 실패: ${err.message}`))
+      else finish(resolve, result)
     })
   })
 }
@@ -77,25 +93,29 @@ function touch(tabId) {
   s.idleTimer = setTimeout(() => { detach(tabId).catch(() => {}) }, s.inflight > 0 ? BUSY_DETACH_MS : AUTO_DETACH_MS)
 }
 
+// `<도메인>.enable` 은 즉시 끝나야 하는 명령이라 상한을 둔다 — 이것이 멈추면 부른 도구가 통째로 침묵한다.
+const ENABLE_TIMEOUT_MS = 8000
+
 export async function ensureDomain(tabId, domain) {
   const s = await attach(tabId)
   if (s.domains.has(domain)) return s
-  await send(tabId, `${domain}.enable`)
+  await send(tabId, `${domain}.enable`, {}, { timeoutMs: ENABLE_TIMEOUT_MS })
   s.domains.add(domain)
   return s
 }
 
+// 실패한 도메인 이름을 돌려준다 — 부분 성공을 감추면 로그가 왜 비어 있는지 알 수 없다.
 export async function pin(tabId, what) {
   const s = await attach(tabId, what)
-  if (what === 'console') {
-    await ensureDomain(tabId, 'Runtime')
-    await ensureDomain(tabId, 'Log')
-  } else if (what === 'network') {
-    await ensureDomain(tabId, 'Network')
-  }
+  // ⚠️핀을 먼저 등록한다. 도메인 활성화가 늦어도 그 사이 세션이 유휴로 떨어지면 안 된다.
   s.pinned.add(what)
   clearTimeout(s.idleTimer)
-  return s
+
+  const domains = what === 'console' ? ['Runtime', 'Log'] : what === 'network' ? ['Network'] : []
+  // 순차로 기다리면 하나가 멈출 때 호출 전체가 막힌다. 병렬로 보내고 결과를 모은다.
+  const settled = await Promise.allSettled(domains.map((d) => ensureDomain(tabId, d)))
+  const failed = domains.filter((_, i) => settled[i].status === 'rejected')
+  return { session: s, failed }
 }
 
 export async function unpin(tabId, what) {

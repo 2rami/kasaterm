@@ -431,11 +431,16 @@ const handlers = {
     const id = await resolveTabId(tabId)
     const on = []
     const off = []
-    if (wantConsole === true) { await cdp.pin(id, 'console'); on.push('console') }
+    const failed = []
+    if (wantConsole === true) { failed.push(...(await cdp.pin(id, 'console')).failed); on.push('console') }
     if (wantConsole === false) { await cdp.unpin(id, 'console'); off.push('console') }
-    if (wantNetwork === true) { await cdp.pin(id, 'network'); on.push('network') }
+    if (wantNetwork === true) { failed.push(...(await cdp.pin(id, 'network')).failed); on.push('network') }
     if (wantNetwork === false) { await cdp.unpin(id, 'network'); off.push('network') }
-    return { tabId: id, enabled: on, disabled: off, note: on.length ? '수집이 켜진 동안 그 탭에 디버깅 배너가 유지됩니다.' : undefined }
+    // 켜지지 않은 도메인을 감추면 「로그가 왜 비어 있지」를 되짚을 수 없다. 핀 자체는 걸려 있다.
+    const note = failed.length
+      ? `${failed.join(', ')} 활성화가 실패했습니다 — 그 종류의 기록은 안 쌓입니다. 같은 탭에 다시 호출해 보세요.`
+      : on.length ? '수집이 켜진 동안 그 탭에 디버깅 배너가 유지됩니다.' : undefined
+    return { tabId: id, enabled: on, disabled: off, ...(failed.length ? { failedDomains: failed } : {}), note }
   },
 
   async console_logs({ tabId, pattern, onlyErrors = false, limit = 100, clear = false }) {
