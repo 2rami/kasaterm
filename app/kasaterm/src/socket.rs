@@ -938,6 +938,69 @@ impl Backend for PtyBackend {
         })
     }
 
+    fn new_window(&self) -> Result<()> {
+        // 창 생성은 회신할 게 없다(창 인덱스는 `windows` 로 읽는다) — 이벤트만 던진다.
+        let _ = self.proxy.send_event(UserEvent::SocketNewWindow);
+        Ok(())
+    }
+
+    /// 부른 pane **안에 새 탭**. 쪼개지 않으므로 화면이 안 줄어든다 — 학생을 하나 더
+    /// 띄울 때마다 split 하면 네 번째쯤에서 다 종잇장이 된다(거노 2026-08-05).
+    fn new_tab(&self, outer: Option<&str>) -> Result<SurfaceInfo> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketNewTab(
+            outer.map(str::to_string),
+            tx,
+        ));
+        // 타임아웃·자리표시자 정책은 split 과 같다 — 못 만들었으면 못 만들었다고
+        // 답해야 호출자가 재시도를 고를 수 있다.
+        let id = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(id)) if !id.is_empty() => id,
+            Ok(Ok(_)) => anyhow::bail!("new_tab 이 빈 pane id 를 돌려줬다"),
+            Ok(Err(why)) => anyhow::bail!("탭 생성 실패: {why}"),
+            Err(_) => anyhow::bail!(
+                "탭 생성 응답 없음(20초) — GUI 스레드가 막혀 있다. 머신 부하를 확인해라"
+            ),
+        };
+        Ok(SurfaceInfo {
+            id,
+            workspace_id: FIXED_WORKSPACE_ID.into(),
+            title: None,
+        })
+    }
+
+    /// pane 을 다른 pane 옆으로 — **대상이 다른 창이면 창을 건너뛴다.** PTY 는 안
+    /// 죽고 레이아웃 트리만 옮겨 붙는다(GUI 의 사이드바 드롭과 같은 경로).
+    fn move_surface(
+        &self,
+        surface_id: &str,
+        target: &str,
+        direction: SplitDirection,
+    ) -> Result<()> {
+        let zone = match direction {
+            SplitDirection::Left => crate::DropZone::Left,
+            SplitDirection::Right => crate::DropZone::Right,
+            SplitDirection::Up => crate::DropZone::Up,
+            SplitDirection::Down => crate::DropZone::Down,
+            // 놓을 방향을 안 정했으면 오른쪽 — 창이 대개 가로로 넓다. split 처럼
+            // 종횡비로 고르지 않는 이유: 여기선 "어디에 붙일지"가 사용자 의도라
+            // 자동으로 뒤집으면 놓인 자리가 예측이 안 된다.
+            SplitDirection::Auto => crate::DropZone::Right,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _ = self.proxy.send_event(UserEvent::SocketMovePane(
+            surface_id.to_string(),
+            target.to_string(),
+            zone,
+            tx,
+        ));
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(why)) => anyhow::bail!("이동 실패: {why}"),
+            Err(_) => anyhow::bail!("이동 응답 없음(20초) — GUI 스레드가 막혀 있다"),
+        }
+    }
+
     fn close_surface(&self, surface_id: &str) -> Result<()> {
         // 로컬 PTY 모드: close 도 split/focus 처럼 GUI 스레드에 위임(App.pty 는
         // 별도 스레드서 못 만짐). layout.rs close_pane 이 leaf 제거 + 다음 pane
@@ -953,7 +1016,14 @@ impl Backend for PtyBackend {
         // tell 이 검증 없이 ok 만 받고 조용히 사라지던 오발송을 막는다(거노). 보낸 쪽이 ok:false
         // 로 즉시 알아 떠맡기/--resume 을 결정한다. None(focused)은 항상 통과.
         if let Some(sid) = surface_id {
-            if !self.ws.lock().unwrap().panes.contains_key(sid) {
+            // pane 뿐 아니라 **탭 pid** 도 유효한 대상이다(`surface.new_tab` 이 주는 id).
+            // 탭은 `ws.panes` 가 아니라 `pid_to_pane` 에 등록되므로 panes 만 보면 방금
+            // 만든 탭이 "없는 pane" 으로 거절된다 — 만들어 놓고 아무것도 못 보내니
+            // 기능이 통째로 무의미했다. 배달 경로(`pty_for_pane`)는 원래 탭을 찾는다.
+            let ws = self.ws.lock().unwrap();
+            let known = ws.panes.contains_key(sid) || ws.pid_to_pane.contains_key(sid);
+            drop(ws);
+            if !known {
                 anyhow::bail!("surface {sid} 없음 — 재시작·종료로 사라진 pane (오발송 방지)");
             }
         }
@@ -1009,18 +1079,20 @@ impl Backend for PtyBackend {
 
     fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
         let ws = self.ws.lock().unwrap();
+        let key = outer_pane_of(&ws, surface_id);
         let pane = ws
             .panes
-            .get(surface_id)
+            .get(&key)
             .ok_or_else(|| anyhow::anyhow!("no such pane: {surface_id}"))?;
         Ok(pane.visible_text(lines))
     }
 
     fn peek_ansi(&self, surface_id: &str, lines: usize) -> Result<String> {
         let ws = self.ws.lock().unwrap();
+        let key = outer_pane_of(&ws, surface_id);
         let pane = ws
             .panes
-            .get(surface_id)
+            .get(&key)
             .ok_or_else(|| anyhow::anyhow!("no such pane: {surface_id}"))?;
         Ok(pane.visible_text_ansi(lines))
     }
@@ -3018,6 +3090,18 @@ pub(crate) fn project_slug(cwd: &std::path::Path) -> String {
 }
 
 /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
+/// 탭 pid 를 **그 탭이 사는 바깥 pane** 으로 접는다. 이미 바깥 pane 이면 그대로.
+///
+/// `surface.new_tab` 이 주는 id 는 탭 pid 라 `ws.panes` 에 없다 — 화면은 바깥 pane 이
+/// 들고 있다(활성 탭의 것). 이걸 안 접으면 "만들고 보낼 수는 있는데 읽을 수는 없는"
+/// 반쪽이 된다.
+fn outer_pane_of(ws: &crate::Workspace, id: &str) -> String {
+    if ws.panes.contains_key(id) {
+        return id.to_string();
+    }
+    ws.pid_to_pane.get(id).cloned().unwrap_or_else(|| id.to_string())
+}
+
 pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std::path::PathBuf> {
     Some(
         kasa_socket::home_dir()?

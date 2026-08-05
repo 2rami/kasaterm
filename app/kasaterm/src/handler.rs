@@ -52,6 +52,43 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render_frame();
                 return;
             }
+            UserEvent::SocketNewWindow => self.new_window(),
+            UserEvent::SocketNewTab(from, reply) => {
+                let outer = from
+                    .clone()
+                    .or_else(|| self.ws.lock().unwrap().active_pane.clone());
+                let outcome = match outer {
+                    // split 과 같은 규칙: 지정한 pane 이 없으면 **거절한다**. 조용히
+                    // 포커스로 떨어지면 엉뚱한 창에 탭이 생기고도 성공으로 답한다.
+                    Some(o) if self.window_of_pane(&o).is_none() => {
+                        Err(format!("탭을 열 pane {o} 이 없다"))
+                    }
+                    Some(o) => self.spawn_new_tab(&o).map_err(|e| format!("{e:#}")),
+                    None => Err("활성 pane 이 없다".to_string()),
+                };
+                let _ = reply.send(outcome);
+            }
+            UserEvent::SocketMovePane(moving, target, zone, reply) => {
+                let outcome = if self.window_of_pane(moving).is_none() {
+                    Err(format!("옮길 pane {moving} 이 없다"))
+                } else if self.window_of_pane(target).is_none() {
+                    Err(format!("놓을 자리 {target} 이 없다"))
+                } else if moving == target {
+                    Err("자기 자신 옆으로는 못 옮긴다".to_string())
+                } else {
+                    self.move_pane(moving, target, *zone);
+                    // `move_pane` 은 성공/실패를 안 돌려준다(드래그 경로라 실패해도
+                    // 화면이 그대로면 사용자가 안다). 소켓은 그럴 수 없으니 **옮겨진
+                    // 자리로 판정한다** — 대상과 같은 창에 있으면 붙은 것이다.
+                    match self.window_of_pane(moving) {
+                        Some(w) if Some(w) == self.window_of_pane(target) => Ok(moving.clone()),
+                        _ => Err(format!(
+                            "{moving} 이 {target} 옆으로 안 붙었다 — 트리에서 떨어졌는지 확인해라"
+                        )),
+                    }
+                };
+                let _ = reply.send(outcome);
+            }
             UserEvent::SocketSplit(dir, focus, from, reply) => {
                 // `split_active_pane` always sets the new pane active (correct
                 // for the GUI's keyboard split). The socket path defaults to

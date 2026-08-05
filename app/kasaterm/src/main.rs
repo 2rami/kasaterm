@@ -3283,6 +3283,26 @@ enum UserEvent {
         Option<String>,
         std::sync::mpsc::Sender<std::result::Result<String, String>>,
     ),
+    /// 부른 pane **안에 새 탭**을 연다(쪼개지 않는다). 첫 필드가 없으면 포커스된
+    /// pane. 회신은 새 탭의 pane id — 부른 쪽이 거기에 명령을 실어야 한다.
+    ///
+    /// split 과 나뉘는 이유: 학생을 하나 더 띄울 때마다 쪼개면 화면이 계속 줄어든다.
+    /// 탭은 자리를 안 뺏는다(거노 2026-08-05).
+    SocketNewTab(
+        Option<String>,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
+    /// pane 을 **다른 pane 옆으로** 옮긴다 — 그 대상이 다른 창에 있으면 창을 건너뛴다
+    /// (PTY 는 안 죽는다, 트리만 옮겨 붙는다). 셋째는 놓을 방향.
+    SocketMovePane(
+        String,
+        String,
+        crate::DropZone,
+        std::sync::mpsc::Sender<std::result::Result<String, String>>,
+    ),
+    /// 새 창(사이드바에 하나 더). 창 간 이동(`surface.move`)의 목적지를 만들 때 쓴다 —
+    /// 만들 수단이 없으면 그 기능 자체를 CLI 에서 못 쓴다.
+    SocketNewWindow,
     SocketFocus(String),
     /// 활성 pane 의 shell OS pid 질의(socket 스레드 → GUI 동기 RPC,
     /// SocketSplit 의 Sender 패턴). GET /mode 등 방 판정이 쓰는

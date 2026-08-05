@@ -602,7 +602,10 @@ impl App {
     /// (outer pane, tab) pair, and appends a `PaneTab` whose `pid` points at
     /// the new shell. The new tab becomes active. Outer pane id and layout
     /// don't change — adding a tab never reshapes the BSP tree.
-    pub(crate) fn spawn_new_tab(&mut self, outer: &str) -> Result<()> {
+    /// 새 탭의 pane id 를 돌려준다 — 부른 쪽이 거기에 명령을 실어야 하기 때문이다.
+    /// 예전엔 `()` 라 소켓으로 탭을 만들면 대상이 뭔지 알 방법이 없었다(split 이
+    /// 자리표시자를 돌려주던 것과 같은 함정).
+    pub(crate) fn spawn_new_tab(&mut self, outer: &str) -> Result<String> {
         if self.tmux.is_some() {
             anyhow::bail!("in-pane tabs not supported on tmux backend");
         }
@@ -639,7 +642,7 @@ impl App {
         if let Some(w) = &self.window {
             w.request_redraw();
         }
-        Ok(())
+        Ok(new_pid)
     }
     /// Cell extent of `outer` inside the current `pty_layout`. Used by
     /// `spawn_new_tab` to size a brand-new shell at the pane's real bounds.
