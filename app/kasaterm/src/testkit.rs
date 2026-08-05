@@ -2613,6 +2613,12 @@ impl App {
             return;
         };
         let cold_max = cold.iter().map(|r| r.3).fold(0.0f32, f32::max);
+        // 대조: 프사 **밖 → 밖**. 여기서도 재렌더가 걸리면 게이트가 「늘 그린다」로
+        // 풀린 것이고, 그러면 아래 PASS 는 경계 판정을 증명하지 못한다(그냥 매
+        // 픽셀 재렌더라도 통과하니까). 셀 위 이동은 조용해야 맞다.
+        self.aux_windows[idx].dirty = false;
+        hover(self, cold_x + 60.0, cold_y + 60.0);
+        let idle_redraw = self.aux_windows[idx].dirty;
         // `aux_render` 가 방금 내렸으니, 여기서 다시 서면 그건 이 이벤트가 세운 것.
         self.aux_windows[idx].dirty = false;
         hover(self, fx + fw / 2.0, fy + fh / 2.0);
@@ -2624,6 +2630,10 @@ impl App {
         self.aux_render(idx);
         let hot = self.aux_windows[idx].gpu.drawn_image_rects(&key);
         let hot_max = hot.iter().map(|r| r.3).fold(0.0f32, f32::max);
+        // 나가는 쪽도 재야 한다 — 들어올 때만 그리면 팝업이 뜬 채로 굳는다.
+        self.aux_windows[idx].dirty = false;
+        hover(self, cold_x, cold_y);
+        let leave_redraw = self.aux_windows[idx].dirty;
         let a = &self.aux_windows[idx];
         // 방창을 먼저 물어야 한다 — `term_pane_id()` 는 방창에서도 포커스 pane 을
         // 내주므로 순서를 바꾸면 방창이 터미널창으로 찍힌다.
@@ -2666,12 +2676,15 @@ impl App {
         // 방창은 PTY wake 재렌더 목록에서도 빠져 있어(handler.rs `about_to_wait`:
         // focused 이거나 Terminal 종류만) 요청이 없으면 정말로 안 뜬다.
         eprintln!(
-            "[autofacehover] 대조커서({cold_x:.0},{cold_y:.0})→프사 이동이 재렌더 요청 {} — {}",
+            "[autofacehover] 재렌더 요청: 밖→밖 {} / 밖→프사 {} / 프사→밖 {} → {}",
+            if idle_redraw { "함" } else { "안 함" },
             if asked_redraw { "함" } else { "안 함" },
-            if asked_redraw {
-                "커서만 옮겨도 화면에 뜬다"
-            } else {
-                "FAIL — 그림은 맞는데 프레임을 아무도 안 부른다(#48 계열)"
+            if leave_redraw { "함" } else { "안 함" },
+            match (idle_redraw, asked_redraw, leave_redraw) {
+                (false, true, true) => "PASS — 경계에서만 그린다",
+                (true, ..) => "FAIL — 셀 위 아무 이동에도 그린다(게이트가 풀렸다)",
+                (_, false, _) => "FAIL — 그림은 맞는데 프레임을 아무도 안 부른다(#48 계열)",
+                _ => "FAIL — 들어올 때만 그린다(팝업이 뜬 채로 굳는다)",
             }
         );
     }
