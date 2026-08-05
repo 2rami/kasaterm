@@ -2045,7 +2045,7 @@ impl App {
     /// 메인과 같은 두 게이트를 지난다: claude 가 실제로 도는 pane 이어야 하고
     /// (남의 TUI 를 claude 로 오인하지 않기 위해), 그 pane 에 학생이 배정돼
     /// 있어야 한다.
-    fn aux_student_slots(
+    pub(crate) fn aux_student_slots(
         &self,
         pane_id: &str,
         cells: &mut [Vec<GridCell>],
