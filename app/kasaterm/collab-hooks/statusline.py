@@ -112,11 +112,15 @@ def active_account_label():
     cur = (d.get("claude_account") or "").strip()
     if not cur:
         return None
+    # 이름을 안 붙인 슬롯은 그 슬롯의 **이메일**로 부른다 — `acct-1` 같은 내부 id 는
+    # 어느 계정인지 하나도 말해 주지 않는다(거노 2026-08-06). 이메일은 kasaterm 이
+    # 슬롯 신원을 조회할 때마다 설정에 흘려 둔 것이라 여기선 공짜로 읽는다.
+    email = (d.get("claude_account_emails") or {}).get(cur) or ""
     for a in d.get("claude_accounts") or []:
         if a.get("id") == cur:
-            return (a.get("label") or "").strip() or cur
+            return (a.get("label") or "").strip() or email.strip() or cur
     # 설정 목록에 없는 id(손으로 지운 계정 등)는 그대로 — 빈칸보다 낫다.
-    return cur
+    return email.strip() or cur
 
 
 def load_account():
