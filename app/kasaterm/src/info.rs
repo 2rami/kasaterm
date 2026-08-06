@@ -1488,10 +1488,15 @@ pub(crate) fn draw_info_actions(
             //
             // stale(upstream 막혀 재사용된 값)이면 흐리게 + `~` 를 앞에 붙인다.
             // 숨기지 않는 것은 빈칸이 "한도 여유"로 읽히기 때문이다.
+            // 퍼센트 뒤에 그 창이 풀리기까지 남은 시간 — 드롭다운과 같은 표기다.
             let l = if u.stale {
                 format!("~{} {:.0}%", u.label, u.pct)
             } else {
                 format!("{} {:.0}%", u.label, u.pct)
+            };
+            let l = match crate::resets_in_label(u.resets_at) {
+                Some(r) => format!("{l} · {r}"),
+                None => l,
             };
             let col = if u.stale { theme::with_alpha(col, 0x99) } else { col };
             g.draw_text(tx, ty, &l,

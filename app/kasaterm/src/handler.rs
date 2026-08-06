@@ -1042,6 +1042,7 @@ impl ApplicationHandler<UserEvent> for App {
                             label: p.label,
                             stale: *stale,
                             account_dir: dir.clone(),
+                            resets_at: p.resets_at,
                         })
                     });
                     // 아래 계정별 표에서 다시 쓴다 — 활성 계정을 두 번 조회하지 않게.
@@ -1075,6 +1076,24 @@ impl ApplicationHandler<UserEvent> for App {
                     // 비활성 슬롯은 **5분마다**만 친다. 매 사이클 치면 만료된 슬롯에
                     // 헛 curl 을 계속 띄우고, 살아 있는 슬롯은 upstream 레이트리밋을
                     // 활성 계정과 나눠 쓰게 된다. 6시간짜리 디스크 스냅샷이 사이를 메운다.
+                    // 지금 쓰는 계정 값은 **매 사이클** 표에도 넣는다. 표 전체를 5분마다만
+                    // 갱신하던 동안, 드롭다운·계정 행의 숫자는 활성 계정 것마저 5분 동안
+                    // 굳어 있었다 — 계정을 눌러 전환할 때만 움직이는 것처럼 보인 이유다
+                    // (거노 2026-08-07: "전환해야만 사용량 갱신되는데"). 비활성 슬롯은
+                    // 아래 5분 주기 그대로다(만료 토큰에 헛 curl, upstream 레이트리밋 공유).
+                    if others_due != 0 {
+                        if let Some(b) = active_badge.clone() {
+                            if let Ok(mut g) = usage_all.lock() {
+                                if g.get(&b.account_dir) != Some(&b) {
+                                    g.insert(b.account_dir.clone(), b);
+                                    drop(g);
+                                    if usage_proxy.send_event(UserEvent::Redraw).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     if others_due == 0 {
                         let mut all: HashMap<String, crate::UsageBadge> = HashMap::new();
                         if let Some(b) = active_badge {
@@ -1102,6 +1121,7 @@ impl ApplicationHandler<UserEvent> for App {
                                         label: p.label,
                                         stale,
                                         account_dir: dir,
+                                        resets_at: p.resets_at,
                                     },
                                 );
                             }
