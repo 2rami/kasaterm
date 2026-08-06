@@ -89,6 +89,49 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 let _ = reply.send(outcome);
             }
+            UserEvent::SocketClosedPanes(discard, reply) => {
+                // 지목이 있으면 **먼저** 끈다 — 그 뒤 남은 목록을 실어 보내므로 호출자는
+                // 한 왕복으로 "무엇을 껐고 무엇이 남았는지"를 같이 받는다.
+                let mut killed = serde_json::Value::Null;
+                if let Some(want) = discard {
+                    match self.closed_panes.iter().position(|c| &c.pane_id == want) {
+                        Some(i) => {
+                            let c = &self.closed_panes[i];
+                            killed = serde_json::json!({
+                                "pane": c.pane_id, "character": c.character,
+                                "folder": c.folder, "was_alive": c.alive,
+                            });
+                            self.discard_closed_pane_at(i);
+                        }
+                        None => {
+                            let _ = reply.send(Err(format!(
+                                "되살리기 목록에 {want} 이 없다 — 이미 끄거나 되살렸다"
+                            )));
+                            return;
+                        }
+                    }
+                }
+                let list: Vec<serde_json::Value> = self
+                    .closed_panes
+                    .iter()
+                    .rev() // 최근에 닫은 것이 위 — Info 패널·⌘⇧T 와 같은 순서
+                    .map(|c| {
+                        serde_json::json!({
+                            "pane": c.pane_id,
+                            "character": c.character,
+                            "folder": c.folder,
+                            // 살아 있는 항목이 진짜 비용이다 — 셸·claude 를 그대로 물고 있다.
+                            "alive": c.alive,
+                            "window": c.window,
+                        })
+                    })
+                    .collect();
+                let _ = reply.send(Ok(serde_json::json!({
+                    "closed": list, "killed": killed, "keep": crate::CLOSED_PANE_KEEP,
+                })));
+                self.render_frame();
+                return;
+            }
             UserEvent::SocketSplit(dir, focus, from, reply) => {
                 // `split_active_pane` always sets the new pane active (correct
                 // for the GUI's keyboard split). The socket path defaults to

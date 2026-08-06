@@ -177,6 +177,28 @@ fn run() -> Result<Option<Response>> {
         run_dismiss(&socket_path, &args)?;
         return Ok(None);
     }
+    // `closed [%pane]` — 되살리기 목록. pane 을 주면 그 항목을 **진짜 끈다**.
+    //
+    // 닫은 pane 은 죽지 않는다 — 프로세스를 물고 이 목록에 앉아 있다가 10개를 넘겨
+    // 밀려날 때 죽는다. 그래서 `dismiss` 로 정리한 학생 claude 들이 계속 살아 있는데,
+    // 그 사실이 GUI 밖에서는 보이지도 않았다(거노 2026-08-06).
+    if cmd == "closed" {
+        let want = args.iter().find(|a| a.starts_with('%')).cloned();
+        let socket_path = resolve_socket_path()?;
+        let resp = roundtrip(
+            &socket_path,
+            &Request {
+                id: "closed".into(),
+                method: "surface.closed".into(),
+                params: match want {
+                    Some(p) => json!({ "pane": p }),
+                    None => Value::Null,
+                },
+            },
+        )?;
+        println!("{}", serde_json::to_string(&resp)?);
+        return Ok(None);
+    }
     // `sessions`/`resume` — 터미널 안 세션 피커. claude 자체 /resume 은 teamName 이
     // 기록된 세션(=팀 트리플로 뜨는 kasaterm pane 세션 전부)을 무조건 숨기므로,
     // jsonl 직스캔으로 팀 세션까지 전부 보여주고 학생색·학생명으로 구분한다.
@@ -685,7 +707,8 @@ fn print_help() {
     eprintln!("  kasaterm-cli focus <surface_id>");
     eprintln!("  kasaterm-cli close <surface_id>");
     eprintln!(
-        "  kasaterm-cli dismiss <surface_id>… [--force]  # 일 끝난 학생 pane 닫기(커밋 안 된 변경이 있으면 안 닫고 보고)"
+        "  kasaterm-cli dismiss <surface_id>… [--force]  # 일 끝난 학생 pane 닫기(커밋 안 된 변경이 있으면 안 닫고 보고)
+  kasaterm-cli closed [%pane]                # 되살리기 목록(닫아도 안 죽은 pane 들). %pane 을 주면 그것만 진짜 끈다"
     );
     eprintln!("  kasaterm-cli rename <surface_id> <title>");
     eprintln!("  kasaterm-cli rename-window <title>          # 이 pane 의 세션 이름");

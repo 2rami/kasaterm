@@ -427,6 +427,14 @@ pub trait Backend: Send + Sync {
     fn pane_agent(&self, _surface_id: &str) -> Option<(String, String)> {
         None
     }
+    /// 되살리기 목록을 읽고, `discard` 가 있으면 그 pane 을 **진짜 끈다**.
+    ///
+    /// 닫은 pane 은 죽지 않는다 — 프로세스를 물고 이 목록에 앉아 있다가 밀려날 때
+    /// 비로소 죽는다. 오케스트레이터가 `dismiss` 로 정리한 학생들이 그래서 계속 살아
+    /// 있는데, GUI 밖에서는 그 사실을 볼 수도 끌 수도 없었다(거노 2026-08-06).
+    fn closed_panes(&self, _discard: Option<&str>) -> Result<serde_json::Value> {
+        anyhow::bail!("이 백엔드는 되살리기 목록을 모른다")
+    }
     fn send_text(&self, surface_id: Option<&str>, text: &str) -> Result<()>;
     fn send_key(&self, surface_id: Option<&str>, key: &str) -> Result<()>;
     /// Send raw bytes straight to a surface's PTY (no symbolic-key mapping).
