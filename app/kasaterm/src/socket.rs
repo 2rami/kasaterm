@@ -274,6 +274,16 @@ pub(crate) fn agents_name_sids_cached() -> HashMap<String, String> {
 }
 
 impl PtyBackend {
+    /// 살아 있는 surface 전부 — BSP leaf(`ws.panes`) **와 탭 pid**(`ws.pid_to_pane`).
+    ///
+    /// `panes` 만 모으면 탭으로 띄운 학생이 transcript 바인딩 후보에서부터 빠지고,
+    /// 그러면 board 의 `bound.filter(live.contains)` 에서도 탈락해 **아예 등재되지
+    /// 않는다** — 화면에도 board 에도 없는 유령이 된다(거노 2026-08-07).
+    fn live_surfaces(&self) -> std::collections::HashSet<String> {
+        let ws = self.ws.lock().unwrap();
+        ws.panes.keys().cloned().chain(ws.pid_to_pane.keys().cloned()).collect()
+    }
+
     /// `attention` is shared with the GUI (`App.collab.attention`): the CLI
     /// hook path (`kasaterm-cli attention`) and the GUI's grid-scan prompt
     /// detection both write it, so the board's `waiting` flag reflects either.
@@ -623,8 +633,7 @@ impl Backend for PtyBackend {
     /// normal claude 는 transcript==session 이라 task store dir(`session-<id 첫8hex>`)
     /// 매핑에 폴백으로 쓴다.
     fn pane_session_ids(&self) -> Result<Vec<(String, String)>> {
-        let live: std::collections::HashSet<String> =
-            self.ws.lock().unwrap().panes.keys().cloned().collect();
+        let live = self.live_surfaces();
         self.discover_unbound(&live);
         let bound = self.bound.lock().unwrap();
         let mut out: Vec<(String, String)> = Vec::new();
@@ -1178,22 +1187,22 @@ impl Backend for PtyBackend {
 
     fn peek(&self, surface_id: &str, lines: usize) -> Result<String> {
         let ws = self.ws.lock().unwrap();
-        let key = outer_pane_of(&ws, surface_id);
+        let key = ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string());
         let pane = ws
             .panes
             .get(&key)
             .ok_or_else(|| anyhow::anyhow!("no such pane: {surface_id}"))?;
-        Ok(pane.visible_text(lines))
+        Ok(pane.tab_for_pid(surface_id).visible_text(lines))
     }
 
     fn peek_ansi(&self, surface_id: &str, lines: usize) -> Result<String> {
         let ws = self.ws.lock().unwrap();
-        let key = outer_pane_of(&ws, surface_id);
+        let key = ws.outer_for_pty(surface_id).unwrap_or_else(|| surface_id.to_string());
         let pane = ws
             .panes
             .get(&key)
             .ok_or_else(|| anyhow::anyhow!("no such pane: {surface_id}"))?;
-        Ok(pane.visible_text_ansi(lines))
+        Ok(pane.tab_for_pid(surface_id).visible_text_ansi(lines))
     }
 
     fn pane_blocks(&self, surface_id: &str, limit: usize) -> Result<Vec<PaneBlock>> {
@@ -1348,7 +1357,7 @@ impl Backend for PtyBackend {
         // now and derive its row. No background watcher, no cache — the board
         // is exactly as fresh as the moment it's asked for. Panes with no hook
         // bind (no claude / not started) simply don't appear.
-        let live: HashSet<String> = self.ws.lock().unwrap().panes.keys().cloned().collect();
+        let live = self.live_surfaces();
         // hook-free 발견 — claude 훅(bind-transcript)이 안 걸린 pane 도 PTY 소유를
         // 이용해 직접 추적·bind(스로틀 2s). 훅은 빠른 보조 경로일 뿐, 이게 안전망.
         self.discover_unbound(&live);
@@ -3271,18 +3280,6 @@ pub(crate) fn project_slug(cwd: &std::path::Path) -> String {
 }
 
 /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl` 경로 구성.
-/// 탭 pid 를 **그 탭이 사는 바깥 pane** 으로 접는다. 이미 바깥 pane 이면 그대로.
-///
-/// `surface.new_tab` 이 주는 id 는 탭 pid 라 `ws.panes` 에 없다 — 화면은 바깥 pane 이
-/// 들고 있다(활성 탭의 것). 이걸 안 접으면 "만들고 보낼 수는 있는데 읽을 수는 없는"
-/// 반쪽이 된다.
-fn outer_pane_of(ws: &crate::Workspace, id: &str) -> String {
-    if ws.panes.contains_key(id) {
-        return id.to_string();
-    }
-    ws.pid_to_pane.get(id).cloned().unwrap_or_else(|| id.to_string())
-}
-
 pub(crate) fn project_jsonl(cwd: &std::path::Path, session: &str) -> Option<std::path::PathBuf> {
     Some(
         kasa_socket::home_dir()?

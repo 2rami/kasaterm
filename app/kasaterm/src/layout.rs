@@ -571,6 +571,14 @@ impl App {
         let Some(active) = self.ws.lock().unwrap().active_pane.clone() else {
             anyhow::bail!("활성 pane 이 없다");
         };
+        // 탭을 지목받았으면 **그 탭이 든 pane** 을 쪼갠다. 탭은 BSP leaf 가 아니라
+        // `split_leaf` 가 못 찾고, 그러면 셸만 새로 띄운 채 통째로 실패한다.
+        let active = self
+            .ws
+            .lock()
+            .unwrap()
+            .outer_for_pty(&active)
+            .unwrap_or(active);
         // **그 pane 을 가진 트리**에 꽂는다 — 활성 window 트리가 아니라.
         // 예전엔 `pty_layout` 만 봐서, 거노가 다른 방을 보고 있으면 pane 이 자기
         // 자리를 쪼개려다 통째로 실패했다("pane %5 이 활성 window(1) 트리에 없다").
@@ -627,12 +635,24 @@ impl App {
         let cwd = self.spawn_cwd_from(Some(outer));
         let new_pid = format!("%{}", self.next_pane_id);
         self.next_pane_id += 1;
+        // 탭도 split 과 **같은 대접**이다: 방은 상속하고 학생은 새로 배정한다.
+        // 이게 없던 동안 탭으로 띄운 학생은 캐릭터가 아예 없어서 보더색·프사·입력박스
+        // 도색은 물론 페르소나 env 와 board 등재까지 통째로 빠졌다(거노 2026-08-07:
+        // "탭안에서 생성하면 학생테마가안먹네"). split 이 깨져 학생들이 탭으로
+        // 우회하던 참이라 더 눈에 띄었다.
+        let room = self.ws.lock().unwrap().pane_room.get(outer).cloned();
+        let mut env = crate::proxy_env(&new_pid);
+        if let Some(ref r) = room {
+            env.push(("KASATERM_ROOM".to_string(), r.clone()));
+            self.ws.lock().unwrap().pane_room.insert(new_pid.clone(), r.clone());
+        }
+        env.extend(self.assign_character_env(&new_pid, cwd.as_deref(), room.as_deref()));
         let session = kasa_pty::PtySession::start(kasa_pty::PtyOptions {
             shell: resolve_default_shell(),
             cwd,
             cols,
             rows,
-            env: crate::proxy_env(&new_pid),
+            env,
             pane_id: new_pid.clone(),
             initial_scrollback: Vec::new(),
         })?;

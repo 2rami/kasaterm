@@ -561,13 +561,24 @@ impl App {
     /// lives in `pty_layout` (its `windows` slot is None); the rest carry their
     /// own layout. Mirrors the sidebar `sb_busy`/`sb_done` lookup.
     pub(crate) fn window_of_pane(&self, pane: &str) -> Option<usize> {
+        // 탭 pid 는 BSP leaf 가 아니다 — 화면을 든 건 그 탭이 사는 바깥 pane 이다.
+        // 접지 않으면 「그 surface 가 어느 창에 있나」가 탭에 대해 항상 None 이 되고,
+        // 그걸 존재 판정으로 쓰는 소켓 split 이 「없는 pane」이라며 거절했다. 그래서
+        // 학생들이 split 을 포기하고 탭으로 우회했다(거노 2026-08-07: "갑자기 애들
+        // 왜 탭안에 생성하지"). 접는 규칙은 `outer_for_pty` 한 곳에만 둔다.
+        let pane = self
+            .ws
+            .lock()
+            .ok()
+            .and_then(|w| w.outer_for_pty(pane))
+            .unwrap_or_else(|| pane.to_string());
         (0..self.windows.len()).find(|&i| {
             let layout = if i == self.active_window {
                 self.pty_layout.as_ref()
             } else {
                 self.windows[i].as_ref()
             };
-            layout.is_some_and(|l| l.leaves().contains(&pane))
+            layout.is_some_and(|l| l.leaves().contains(&pane.as_str()))
         })
     }
     /// PTY 세션을 App 에 넣으면서 전역 레지스트리에도 등록한다.

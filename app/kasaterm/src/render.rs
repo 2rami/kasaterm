@@ -641,11 +641,15 @@ impl App {
                 // active_process_name 은 셸의 **직속** 자식이라, claude 가 안에서
                 // cargo·vim 을 띄워도 여전히 claude 다(그것들의 부모는 claude).
                 // 500ms 캐시가 이미 붙어 있어 매 프레임 불러도 싸다.
+                // 학생 상태는 **탭 pid** 로 기록되고 이 루프가 든 `id` 는 BSP leaf 다.
+                // 접지 않으면 탭에서 도는 클로드가 안 잡혀, 프사·전신·배너 도트가
+                // 통째로 안 뜬다(거노 2026-08-07). 아래 ordinal 도 같은 키를 쓴다.
+                let tab_pid = ws.active_tab_pid(&id);
                 let runs_claude = self
                     .pty
-                    .get(id.as_str())
+                    .get(tab_pid.as_str())
                     .and_then(|p| p.active_agent())
-                .is_some();
+                    .is_some();
                 // teammate 칩(`──── @이름 ──`) 지우기. 누가 이 pane 인지는 헤더 제목·
                 // 프사·학생색이 이미 세 번 말하고 있고, 칩은 그 위에 네 번째로 얹히면서
                 // /rename 세션 이름이 쓰던 자리를 뺏는다(같은 슬롯을 두고 다투고 칩이
@@ -1045,12 +1049,18 @@ impl App {
                     let col = pane
                         .color
                         .or_else(|| {
-                            pane.character.as_deref().and_then(|n| {
-                                theme::character_accent_n(
-                                    n,
-                                    theme::character_ordinal(&ws.pane_character, &id),
-                                )
-                            })
+                            // `pane.character` 는 pane 단위 필드라 탭이 둘이면 **마지막에
+                            // 출력한 탭**이 이긴다. 접힌 `true_char` 를 앞에 세워 지금
+                            // 보이는 탭의 학생을 쓴다.
+                            true_char
+                                .as_deref()
+                                .or(pane.character.as_deref())
+                                .and_then(|n| {
+                                    theme::character_accent_n(
+                                        n,
+                                        theme::character_ordinal(&ws.pane_character, &tab_pid),
+                                    )
+                                })
                         })
                         .unwrap_or_else(theme::border);
                     title_outline_slots.push((
@@ -1278,17 +1288,18 @@ impl App {
                 let prompt_accent = if agents_view || resume_picker || ask_picker {
                     None
                 } else {
-                    pane.character
+                    true_char
                         .as_deref()
+                        .or(pane.character.as_deref())
                         .and_then(|n| {
                             theme::character_accent_n(
                                 n,
-                                theme::character_ordinal(&ws.pane_character, &id),
+                                theme::character_ordinal(&ws.pane_character, &tab_pid),
                             )
                         })
                         .filter(|_| {
                             self.pty
-                                .get(id.as_str())
+                                .get(tab_pid.as_str())
                                 .and_then(|p| p.active_agent())
                                 .is_some()
                         })
@@ -5119,7 +5130,7 @@ impl App {
             let mut border_inset: HashMap<String, f32> = HashMap::new();
             // active_pane + pane 별 캐릭터명을 한 lock 으로 스냅샷 — 아래 pane 테두리
             // 루프가 g(=&mut self.gpu) 안이라 self 재borrow 불가. character_accent 폴백용.
-            let (active_pane, pane_chars) = self
+            let (active_pane, pane_chars, tab_pids) = self
                 .ws
                 .lock()
                 .ok()
@@ -5131,27 +5142,36 @@ impl App {
                         .panes
                         .keys()
                         .filter_map(|id| {
+                            // **키는 outer, 값은 활성 탭**. 테두리는 바깥 박스에 그리니
+                            // 키는 leaf 여야 하고, 학생은 탭 pid 로 기록되니 값은 접어서
+                            // 가져온다. 안 접으면 탭으로 띄운 학생이 무색으로 남는다.
+                            let key = w.active_tab_pid(id);
                             self.pane_claude_sid
-                                .get(id)
+                                .get(&key)
                                 .and_then(|sid| {
                                     kasa_mcp::character::session_character(sid)
                                 })
                                 .or_else(|| {
                                     let view = self
                                         .pty
-                                        .get(id)
+                                        .get(&key)
                                         .map(|p| p.is_claude_agents())
                                         .unwrap_or(false);
                                     if view {
                                         None
                                     } else {
-                                        w.pane_character.get(id).cloned()
+                                        w.pane_character.get(&key).cloned()
                                     }
                                 })
                                 .map(|c| (id.clone(), c))
                         })
                         .collect();
-                    (w.active_pane.clone(), chars)
+                    // outer → 활성 탭 pid. 아래 루프는 `g(=&mut self.gpu)` 를 잡고 있어
+                    // `pty_for_pane` 같은 `&self` 메서드를 못 부른다 — 이 lock 한 번에
+                    // 같이 떠 두고 거기서 필드 접근만 한다.
+                    let tab_pids: HashMap<String, String> =
+                        w.panes.keys().map(|id| (id.clone(), w.active_tab_pid(id))).collect();
+                    (w.active_pane.clone(), chars, tab_pids)
                 })
                 .unwrap_or_default();
             // claude 가 foreground 인 pane 집합 — 테두리 게이트. 캐릭터는 pane spawn 시
@@ -5162,10 +5182,10 @@ impl App {
             let claude_panes: std::collections::HashSet<String> = footer_slots
                 .iter()
                 .filter(|(id, ..)| {
-                    self.pty
-                        .get(id.as_str())
-                        .and_then(|p| p.active_agent())
-                                .is_some()
+                    // outer 키가 아니라 활성 탭 pid — 탭에서 도는 클로드는 outer 로
+                    // 안 잡혀 테두리 게이트를 통째로 못 지났다.
+                    let key = tab_pids.get(id.as_str()).map_or(id.as_str(), String::as_str);
+                    self.pty.get(key).and_then(|p| p.active_agent()).is_some()
                 })
                 .map(|(id, ..)| id.clone())
                 .collect();

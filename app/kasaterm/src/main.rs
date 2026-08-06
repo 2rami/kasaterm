@@ -2192,6 +2192,18 @@ impl PaneState {
     fn header_px(&self) -> f32 {
         if self.has_header() { PANE_HEADER_HEIGHT } else { 0.0 }
     }
+    /// `pid` 를 가진 탭. 없으면 활성 탭(= `Deref` 가 주는 것).
+    ///
+    /// **탭을 지목한 조회가 지나야 하는 유일한 문이다.** `PaneState` 는 `Deref` 로
+    /// 활성 탭을 가리키므로, 탭 pid 를 outer pane 으로 접은 뒤 그냥 읽으면 **앞 탭
+    /// 화면이 돌아온다** — 실패가 아니라 조용히 틀린 답이라 부른 쪽이 알 수가 없다
+    /// (아루 실측 2026-08-07: `peek %뒤탭` 이 앞 탭 화면을 줬다).
+    pub(crate) fn tab_for_pid(&self, pid: &str) -> &PaneTab {
+        self.tabs
+            .iter()
+            .find(|t| t.pid.as_deref() == Some(pid))
+            .unwrap_or_else(|| &self.tabs[self.active_tab.min(self.tabs.len() - 1)])
+    }
 }
 
 impl std::ops::Deref for PaneState {
@@ -3268,6 +3280,23 @@ impl Workspace {
             return Some(pty_id.to_string());
         }
         None
+    }
+
+    /// `outer_for_pty` 의 반대 — 바깥 pane 이 **지금 보여 주는 탭**의 pid.
+    ///
+    /// 학생 관련 상태(`pane_character`·`pane_claude_sid`·`pane_cwd_cache`…)는 전부
+    /// **탭 pid** 로 기록된다(`assign_character_env` 가 spawn 하는 pane 마다 그 pid 로
+    /// 쓴다). 그런데 그리는 쪽은 BSP leaf(=outer)를 들고 있어, 접지 않으면 탭으로 띄운
+    /// 학생의 색·프사·이름이 **아무 데도 안 나온다**(거노 2026-08-07: "탭안에서
+    /// 생성하면 학생테마가안먹네"). PTY 조회의 `pty_for_pane` 과 짝이다.
+    ///
+    /// 탭이 아직 pid 를 못 받은 순간(첫 ScreenUpdate 전)엔 outer 를 그대로 돌려준다 —
+    /// 단일 탭 pane 은 그 둘이 같은 값이라 무해하다.
+    pub(crate) fn active_tab_pid(&self, outer: &str) -> String {
+        self.panes
+            .get(outer)
+            .and_then(|p| p.tabs.get(p.active_tab).and_then(|t| t.pid.clone()))
+            .unwrap_or_else(|| outer.to_string())
     }
 
     /// Locate `(outer_pane, tab_index)` for a backend pty id. Used by

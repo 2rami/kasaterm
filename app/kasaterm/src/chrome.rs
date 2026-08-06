@@ -22,7 +22,11 @@ impl App {
     /// (거노: 세션 진입 직후 다른 학생으로 보임 — 뷰 pane 의 로컬 배정은 무의미한 잔재
     /// 라 None 으로 두면 학생 시각 요소가 중립으로 남는다). 일반 pane 은 스폰 배정
     /// 폴백 유지(첫 프레임부터 학생 표시). render 의 프사·타이틀바·테두리가 공유한다.
+    ///
+    /// **탭 접기는 여기서 한다** — 부르는 쪽은 BSP leaf(outer)를 들고 있는데 학생 상태는
+    /// 탭 pid 로 기록된다. 접지 않으면 탭으로 띄운 학생이 화면에 아예 안 나온다.
     pub(crate) fn display_pane_char(&self, ws: &Workspace, id: &str) -> Option<String> {
+        let id = &ws.active_tab_pid(id);
         self.pane_claude_sid
             .get(id)
             .and_then(|sid| kasa_mcp::character::session_character(sid))
@@ -131,7 +135,8 @@ impl App {
     pub(crate) fn pane_character_if_known(&self, id: &str) -> Option<String> {
         let ws = self.ws.lock().unwrap();
         let known = ws.panes.contains_key(id) || self.pty.contains_key(id);
-        known.then(|| ws.pane_character.get(id).cloned()).flatten()
+        let key = ws.active_tab_pid(id);
+        known.then(|| ws.pane_character.get(&key).cloned()).flatten()
     }
 
     /// claude 가 떠 있는 pane 을 기억해 둔다 — 얼굴을 내보일 자격.
