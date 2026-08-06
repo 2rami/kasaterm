@@ -1184,7 +1184,16 @@ impl App {
             .filter_map(|(id, s)| {
                 let window = ws.pane_window.get(id).copied().unwrap_or(self.active_window);
                 Some(PaneTarget {
-                    label: self.display_pane_char(&ws, id).unwrap_or_default(),
+                    // 셸만 도는 pane 엔 학생 이름을 안 붙인다. 배정은 spawn 때 **모든**
+                    // pane 에 되지만(`assign_character_env`) 표시는 클로드가 실제로 돌
+                    // 때만이다 — 테두리·타이틀바가 쓰는 조건과 같아야 한 pane 이 자리마다
+                    // 다른 얼굴을 갖지 않는다. 안 걸었더니 `%1 유우카 zsh` 처럼 셸에
+                    // 학생이 붙었다(거노 2026-08-07: "일반pane은 실행전에 학생배정
+                    // 안되게하지않았나").
+                    label: s
+                        .active_agent()
+                        .and_then(|_| self.display_pane_char(&ws, id))
+                        .unwrap_or_default(),
                     // "pane 이 보는 경로"가 셸 cwd 보다 우선 — bg-attach 뷰 pane 은
                     // 셸이 spawn 디렉터리에 머물러 실제 프로젝트와 어긋난다.
                     cwd: self
